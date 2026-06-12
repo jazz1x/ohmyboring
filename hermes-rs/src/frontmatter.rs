@@ -116,8 +116,7 @@ mod tests {
 
     #[test]
     fn parse_with_frontmatter() {
-        let raw =
-            "---\norigin: company\nproject: demo\ntags:\n  - rust\n  - rop\n---\n본문 시작\n둘째 줄";
+        let raw = "---\norigin: company\nproject: demo\ntags:\n  - rust\n  - rop\n---\n본문 시작\n둘째 줄";
         let (fm, body) = parse(raw, "/x/y.md").unwrap();
         assert_eq!(fm.origin, "company");
         assert_eq!(fm.project, "demo");
