@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit 훅 — 현재 프롬프트와 관련된 *내 과거 작업 경험*을 hermes-rs 에서
+"""UserPromptSubmit 훅 — 현재 프롬프트와 관련된 *내 과거 작업 경험*을 drudge 에서
 회수(벡터+그래프)해 컨텍스트로 주입한다. 자가증강이 실제 작업을 자동 보강하는 고리.
 
 설계:
 - push(자동 주입) — 모델이 MCP 툴을 부를지 결정하는 pull 보다 ambient recall 에 적합.
 - /search(벡터, ~100ms) 사용 — /ask(gemma4, 느림) 아님. 회수만, 합성 X.
-- hermes-rs(:7700) 미가동/에러면 *조용히 no-op* (프롬프트를 절대 막지 않음).
+- drudge(:7700) 미가동/에러면 *조용히 no-op* (프롬프트를 절대 막지 않음).
 """
 import json
 import sys

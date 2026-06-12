@@ -5,8 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 [ -f .env ] || cp .env.example .env  # Slack 토큰만 — 코어는 .env 없이도 돈다
-LLM="${HERMES_LLM_MODEL:-gemma4:12b}"
-EMB="${HERMES_EMBED_MODEL:-bge-m3}"
+LLM="${DRUDGE_LLM_MODEL:-gemma4:12b}"
+EMB="${DRUDGE_EMBED_MODEL:-bge-m3}"
 OLLAMA_LOCAL="${OLLAMA_HOST:-http://host.docker.internal:11434}"
 OLLAMA_LOCAL="${OLLAMA_LOCAL/host.docker.internal/localhost}"
 
@@ -24,10 +24,10 @@ for m in "$LLM" "$EMB"; do
   fi
 done
 
-echo "▶ 빌드 + 기동 (postgres + hermes-rs) …"
+echo "▶ 빌드 + 기동 (postgres + drudge) …"
 docker compose up -d --build
 
-echo "▶ hermes-rs health 대기 …"
+echo "▶ drudge health 대기 …"
 for _ in $(seq 1 60); do curl -sf -m3 http://localhost:7700/health >/dev/null 2>&1 && break; sleep 3; done
 
 cat <<'EOF'

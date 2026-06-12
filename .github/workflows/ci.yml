@@ -24,7 +24,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: hermes-rs
+          workspaces: drudge
       # scripts/guard.sh = rustfmt --check + clippy -D warnings + test (스택-프리).
       - name: structural gate (guard.sh)
         run: ./scripts/guard.sh

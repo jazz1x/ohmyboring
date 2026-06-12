@@ -1,5 +1,5 @@
 //! Ingest 파이프 — 소스 walk → frontmatter parse → 청킹 → 임베딩 → upsert(멱등, prune).
-//!   - 툴출력 덤프(노이즈) + 격리 토큰(`HERMES_COMPANY_SUBSTR`) 경로는 제외.
+//!   - 툴출력 덤프(노이즈) + 격리 토큰(`DRUDGE_COMPANY_SUBSTR`) 경로는 제외.
 //!   - sha 추적으로 변경된 파일만 재임베딩. 사라진 파일은 청크 prune.
 use anyhow::Result;
 use sha2::{Digest, Sha256};

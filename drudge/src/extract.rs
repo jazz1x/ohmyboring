@@ -28,8 +28,8 @@ Rules:
   * outcome: EXACTLY one of "worked", "failed", or "abandoned"
 - claims: durable FACTS or DECISIONS stated as (subject, predicate, value) triples (may be []).
   * ONLY stable facts/decisions that could change over time, NOT transient events.
-    Good: {"subject":"olympus database","predicate":"is","value":"pgvector"}
-          {"subject":"olympus llm","predicate":"is","value":"gemma4:12b"}
+    Good: {"subject":"oh-my-boring database","predicate":"is","value":"pgvector"}
+          {"subject":"oh-my-boring llm","predicate":"is","value":"gemma4:12b"}
     Bad (transient): "fixed a bug", "ran tests"
   * subject = the thing the fact is about (short noun). predicate = relation (is/uses/decided).
   * value = current value. MAX 4 claims. Skip if none.

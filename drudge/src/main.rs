@@ -1,4 +1,4 @@
-//! Olympus 개인 RAG — Rust (pgvector: vector + node/edge graph + 재귀 CTE + audit).
+//! oh-my-boring 개인 RAG — Rust (pgvector: vector + node/edge graph + 재귀 CTE + audit).
 //! 1차 마일스톤: embed → store → vector search 왕복 증명(selftest).
 mod ask;
 mod audit;
@@ -18,8 +18,8 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "hermes",
-    about = "Olympus 개인 RAG (Rust, pgvector + 그래프 CTE)"
+    name = "drudge",
+    about = "oh-my-boring 개인 RAG (Rust, pgvector + 그래프 CTE)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -52,7 +52,7 @@ enum Cmd {
     Gc,
     /// 그래프 투영 — Postgres doc↔doc 관계를 wiki relates_to 위키링크로 기입(Obsidian)
     Link {
-        /// vault 루트 (기본: $HERMES_VAULT_DIR 또는 $HOME/oh-my-boring/vault)
+        /// vault 루트 (기본: $DRUDGE_VAULT_DIR 또는 $HOME/oh-my-boring/vault)
         #[arg(long)]
         vault: Option<String>,
     },
@@ -104,7 +104,7 @@ enum VaultCmd {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let dsn = std::env::var("PG_DSN")
-        .unwrap_or_else(|_| "postgresql://olympus:olympus@localhost:5432/olympus".to_owned());
+        .unwrap_or_else(|_| "postgresql://omb:omb@localhost:5432/omb".to_owned());
     let store = store::Store::open(&dsn).await?;
 
     match cli.cmd {
@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
                 let emb = ol.embed(text).await?;
                 let front = frontmatter::FrontMatter {
                     origin: "personal".to_owned(),
-                    project: "olympus".to_owned(),
+                    project: "oh-my-boring".to_owned(),
                     source_path: (*id).to_owned(),
                     ..Default::default()
                 };
@@ -173,7 +173,7 @@ async fn main() -> Result<()> {
         Cmd::Ingest => {
             let ol = ollama::Ollama::from_env();
             let home = std::env::var("HOME").unwrap_or_default();
-            let dirs = std::env::var("HERMES_SOURCE_DIRS").unwrap_or_else(|_| {
+            let dirs = std::env::var("DRUDGE_SOURCE_DIRS").unwrap_or_else(|_| {
                 format!(
                     "{home}/.claude/projects:{home}/oh-my-boring/data/notes:{home}/oh-my-boring/vault/wiki"
                 )
@@ -245,7 +245,7 @@ async fn main() -> Result<()> {
         Cmd::Sync => {
             let ol = ollama::Ollama::from_env();
             let home = std::env::var("HOME").unwrap_or_default();
-            let dirs = std::env::var("HERMES_SOURCE_DIRS").unwrap_or_else(|_| {
+            let dirs = std::env::var("DRUDGE_SOURCE_DIRS").unwrap_or_else(|_| {
                 format!(
                     "{home}/.claude/projects:{home}/oh-my-boring/data/notes:{home}/oh-my-boring/vault/wiki"
                 )
@@ -267,7 +267,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Link { vault } => {
             let vault_root = vault
-                .or_else(|| std::env::var("HERMES_VAULT_DIR").ok())
+                .or_else(|| std::env::var("DRUDGE_VAULT_DIR").ok())
                 .unwrap_or_else(|| {
                     format!(
                         "{}/oh-my-boring/vault",

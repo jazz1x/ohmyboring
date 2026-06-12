@@ -1,49 +1,49 @@
-# Olympus — 라이브 스택 (로컬 도커). 3컨테이너 + 호스트 Ollama.
-#   docker compose up -d   # postgres(pgvector) + hermes-rs(RAG 엔진) + hermes-agent(죠셉)
+# oh-my-boring — 라이브 스택 (로컬 도커). 3컨테이너 + 호스트 Ollama.
+#   docker compose up -d   # postgres(pgvector) + drudge(RAG 엔진) + hermes-agent(죠셉)
 #   Slack·자율·회수는 hermes-agent(Nous Hermes Agent)가 담당. 모델은 호스트 Ollama(gemma4).
-name: olympus
+name: oh-my-boring
 
 services:
   # ─────────────────────────── Postgres + pgvector (그래프=node/edge+CTE) ─────
   # 벡터(HNSW) + FTS + 그래프(node/edge 테이블, 재귀 CTE). AGE 없이 순수 pgvector.
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: olympus-postgres
+    container_name: omb-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: olympus
-      POSTGRES_PASSWORD: olympus
-      POSTGRES_DB: olympus
+      POSTGRES_USER: omb
+      POSTGRES_PASSWORD: omb
+      POSTGRES_DB: omb
     volumes:
       - ./data/pgdata:/var/lib/postgresql/data   # 영속(컨테이너 날려도 보존)
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U olympus -d olympus"]
+      test: ["CMD-SHELL", "pg_isready -U omb -d omb"]
       interval: 3s
       timeout: 3s
       retries: 30
     ports:
       - "127.0.0.1:5432:5432"             # DataGrip/직접 접속용
 
-  # ─────────────────────────── hermes-rs (Rust 엔진) ─────────────────────────
+  # ─────────────────────────── drudge (Rust 엔진) ─────────────────────────
   # 적재(ingest)·회수(ask/graph)·감사(audit)·vault compile 을 HTTP + 크론으로 수행.
-  hermes-rs:
+  drudge:
     build:
-      context: ./hermes-rs
-    image: olympus-hermes-rs
-    container_name: olympus-hermes-rs
+      context: ./drudge
+    image: omb-drudge
+    container_name: omb-drudge
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://host.docker.internal:11434
-      HERMES_LLM_MODEL: gemma4:12b        # think=false 로 추론모드 차단(ollama.rs)
-      HERMES_HTTP_ADDR: 0.0.0.0:7700
-      PG_DSN: postgresql://olympus:olympus@postgres:5432/olympus
+      DRUDGE_LLM_MODEL: gemma4:12b        # think=false 로 추론모드 차단(ollama.rs)
+      DRUDGE_HTTP_ADDR: 0.0.0.0:7700
+      PG_DSN: postgresql://omb:omb@postgres:5432/omb
       # 회수 소스: CC 메모리(.claude) + 큐레이션된 vault/wiki(자가증강 SSOT).
-      HERMES_SOURCE_DIRS: /host/.claude/projects:/vault/wiki
-      HERMES_VAULT_DIR: /vault             # vault compile(raw→wiki) 대상
-      HERMES_SYNC_HOURS: "4"
+      DRUDGE_SOURCE_DIRS: /host/.claude/projects:/vault/wiki
+      DRUDGE_VAULT_DIR: /vault             # vault compile(raw→wiki) 대상
+      DRUDGE_SYNC_HOURS: "4"
       TZ: Asia/Seoul
     volumes:
       - ${HOME}/.claude:/host/.claude:ro  # CC 자동메모리 소스
@@ -56,12 +56,12 @@ services:
   # ─────────────────────────── Hermes Agent (죠셉의 몸) ─────────────────────
   # Nous Hermes Agent — 자율 에이전트. ~/.hermes 볼륨에 config·메모리 영속 → 컨테이너 disposable.
   # Mac: 그들 compose 의 network_mode:host 는 Mac Docker 미지원 → bridge + host.docker.internal.
-  # hermes-rs(우리 RAG)는 MCP 기억백엔드로 별도 연결(같은 스택, 사이드카). 구 joseph 은 검증 후 은퇴.
+  # drudge(우리 RAG)는 MCP 기억백엔드로 별도 연결(같은 스택, 사이드카). 구 joseph 은 검증 후 은퇴.
   # 옵트인: 기본 `up` 에서 제외(서드파티 이미지·~/.hermes 의존). 켜려면 --profile agent.
   hermes-agent:
     profiles: ["agent"]
     image: hermes-agent                   # 외부 빌드 필요(레포 미포함, Nous Hermes Agent)
-    container_name: olympus-hermes-agent
+    container_name: omb-agent
     restart: unless-stopped
     environment:
       HERMES_UID: ${HERMES_UID:-501}      # 호스트 유저 uid (~/.hermes 파일권한)

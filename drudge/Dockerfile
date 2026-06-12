@@ -33,15 +33,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 임베디드 DB 저장 디렉터리 (볼륨 마운트 포인트)
 RUN mkdir -p /data
 
-COPY --from=builder /build/target/release/hermes /usr/local/bin/hermes
+COPY --from=builder /build/target/release/drudge /usr/local/bin/drudge
 
 # ── 환경 변수 기본값 ──────────────────────────────────────────────────────────
-ENV HERMES_SURREAL_PATH=/data/surrealdb
-ENV HERMES_HTTP_ADDR=0.0.0.0:7700
-# OLLAMA_HOST, HERMES_SOURCE_DIRS, HERMES_SYNC_HOURS: 런타임에 주입
+
+ENV DRUDGE_HTTP_ADDR=0.0.0.0:7700
+# OLLAMA_HOST, DRUDGE_SOURCE_DIRS, DRUDGE_SYNC_HOURS: 런타임에 주입
 
 EXPOSE 7700
 
 VOLUME ["/data"]
 
-CMD ["hermes", "serve"]
+CMD ["drudge", "serve"]

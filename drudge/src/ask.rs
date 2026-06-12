@@ -63,7 +63,7 @@ pub async fn answer(
     }
 
     // 권위 주입: 질의와 가까운 **현재** claim(superseded_at NULL) — 시간축 사실이 청크보다 우선.
-    // "DB 뭐?" → claim 'olympus database is pgvector' 가 옛 청크 노이즈를 이긴다.
+    // "DB 뭐?" → claim 'oh-my-boring database is pgvector' 가 옛 청크 노이즈를 이긴다.
     let q_emb = ollama.embed(question).await?;
     let mut claim_ctx = String::new();
     for (s, p, v) in store.current_claims(&q_emb, 5).await? {

@@ -1,12 +1,12 @@
 [package]
-name = "hermes-rs"
+name = "drudge"
 version = "0.1.0"
 edition = "2024"
 publish = false # 개인 프로젝트 — crates.io 배포 안 함
-description = "Olympus 개인 RAG (Rust) — pgvector + node/edge 그래프 + 재귀 CTE"
+description = "oh-my-boring 개인 RAG (Rust) — pgvector + node/edge 그래프 + 재귀 CTE"
 
 [[bin]]
-name = "hermes"
+name = "drudge"
 path = "src/main.rs"
 
 [dependencies]

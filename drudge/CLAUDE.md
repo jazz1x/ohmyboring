@@ -1,4 +1,4 @@
-# hermes-rs — Rust 가드레일
+# drudge — Rust 가드레일
 
 > **바인딩 바이블 (정합성의 설계자):**
 > - [`PHILOSOPHY.md`](./PHILOSOPHY.md) — *왜* (3겹: 인식론/미학/윤리, 우선순위 1>2>3겹)

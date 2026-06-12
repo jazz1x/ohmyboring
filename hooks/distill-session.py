@@ -2,7 +2,7 @@
 """Claude Code SessionEnd 훅용 스크립트 — 세션을 증류해 개인 메모리 노트로 저장.
 
 이 훅은 *호스트 전용* 일만 한다: 트랜스크립트 읽기·텍스트 추출·throttle·세션 mtime 보정.
-LLM 증류·KEEP/SKIP 게이트·시크릿 스크럽·raw 노트 포맷은 hermes-rs 엔진(/distill, SSOT)이
+LLM 증류·KEEP/SKIP 게이트·시크릿 스크럽·raw 노트 포맷은 drudge 엔진(/distill, SSOT)이
 담당한다 — 과거 이 스크립트가 ollama.generate/redact 를 재구현하던 중복을 제거(엔진 ollama.rs
 가 LLM 호출 SSOT). 추출한 텍스트만 엔진에 POST → 엔진이 ~/oh-my-boring/vault/raw 에 기록.
 실패·짧은 세션·엔진 다운이면 조용히 skip. 절대 세션 종료를 막지 않음(항상 exit 0).
@@ -22,14 +22,14 @@ import time
 import urllib.request
 
 RAW_DIR = os.path.expanduser("~/oh-my-boring/vault/raw")
-HERMES_RS = os.environ.get("HERMES_RS_URL", "http://localhost:7700")
+DRUDGE_URL = os.environ.get("DRUDGE_URL", "http://localhost:7700")
 # 진행중 세션(Stop 훅) 재증류 최소 간격(분). SessionEnd(final)는 throttle 무시.
 THROTTLE_MIN = int(os.environ.get("DISTILL_THROTTLE_MIN") or "25")
-MARK_DIR = os.path.expanduser("~/.cache/olympus-distill")  # 세션별 마지막 증류 시각
+MARK_DIR = os.path.expanduser("~/.cache/omb-distill")  # 세션별 마지막 증류 시각
 
 
 def _trigger_sync():
-    """증류 노트를 즉시 RAG에 반영 — hermes-rs /sync(compile→ingest→extract)를
+    """증류 노트를 즉시 RAG에 반영 — drudge /sync(compile→ingest→extract)를
     detached 로 호출. 훅을 블록하지 않는다(distill+sync 동기 체이닝은 130s 초과 위험).
     엔진 다운/실패는 무시 — 4h 스케줄러가 캐치한다(세션 종료를 절대 막지 않음).
     DISTILL_NO_SYNC 설정 시 skip(백필 수집기가 끝에 한 번만 sync 하려고)."""
@@ -37,7 +37,7 @@ def _trigger_sync():
         return
     try:
         subprocess.Popen(
-            ["curl", "-sS", "-m", "600", "-X", "POST", f"{HERMES_RS}/sync"],
+            ["curl", "-sS", "-m", "600", "-X", "POST", f"{DRUDGE_URL}/sync"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,  # 부모(훅) 종료해도 살아남아 적재 완주
@@ -143,7 +143,7 @@ def repo_slug(cwd):
 
 
 def post_distill(text, session_id, origin, phase, repo, cwd):
-    """추출 텍스트를 hermes-rs /distill 로 POST → 엔진이 증류·스크럽·raw 노트 기록(SSOT).
+    """추출 텍스트를 drudge /distill 로 POST → 엔진이 증류·스크럽·raw 노트 기록(SSOT).
     반환: {"written": bool, "filename": str|None} 또는 None(엔진 다운/에러 → no-op).
     엔진이 길이 클램프·KEEP/SKIP 게이트·시크릿 스크럽을 모두 수행한다."""
     body = json.dumps(
@@ -151,7 +151,7 @@ def post_distill(text, session_id, origin, phase, repo, cwd):
          "phase": phase, "repo": repo, "cwd": cwd}
     ).encode()
     req = urllib.request.Request(
-        f"{HERMES_RS}/distill", data=body, headers={"Content-Type": "application/json"}
+        f"{DRUDGE_URL}/distill", data=body, headers={"Content-Type": "application/json"}
     )
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
