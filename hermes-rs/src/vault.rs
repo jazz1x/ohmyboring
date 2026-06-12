@@ -1253,7 +1253,10 @@ pub async fn run_compile(
         };
 
         // origin 결정 — env `HERMES_COMPANY_SUBSTR` 토큰 매칭(미설정이면 항상 Personal)
-        let origin = if raw_path.to_str().is_some_and(crate::frontmatter::is_company_path) {
+        let origin = if raw_path
+            .to_str()
+            .is_some_and(crate::frontmatter::is_company_path)
+        {
             Origin::Company
         } else {
             Origin::Personal

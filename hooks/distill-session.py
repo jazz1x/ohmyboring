@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Claude Code SessionEnd 훅용 스크립트 — 세션을 증류해 개인 메모리 노트로 저장.
 
-로컬 Ollama(gemma4:12b, think=false)로 핵심 배움/결정/사실만 뽑아 vault raw 레이어
-(~/oh-my-boring/vault/raw)에 기록 → `hermes vault compile` 이 wiki 로 큐레이션 →
-ingest 가 흡수. raw 트랜스크립트 통째 적재 금지(증류만).
-실패·짧은 세션·저장가치 없음이면 조용히 skip. 절대 세션 종료를 막지 않음(항상 exit 0).
+이 훅은 *호스트 전용* 일만 한다: 트랜스크립트 읽기·텍스트 추출·throttle·세션 mtime 보정.
+LLM 증류·KEEP/SKIP 게이트·시크릿 스크럽·raw 노트 포맷은 hermes-rs 엔진(/distill, SSOT)이
+담당한다 — 과거 이 스크립트가 ollama.generate/redact 를 재구현하던 중복을 제거(엔진 ollama.rs
+가 LLM 호출 SSOT). 추출한 텍스트만 엔진에 POST → 엔진이 ~/oh-my-boring/vault/raw 에 기록.
+실패·짧은 세션·엔진 다운이면 조용히 skip. 절대 세션 종료를 막지 않음(항상 exit 0).
 
 설치(영속화)는 사용자가 직접: ~/.claude/settings.json 의 hooks.SessionEnd 에
   {"type":"command","command":"python3 ~/oh-my-boring/hooks/distill-session.py",
@@ -21,10 +22,7 @@ import time
 import urllib.request
 
 RAW_DIR = os.path.expanduser("~/oh-my-boring/vault/raw")
-OLLAMA = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 HERMES_RS = os.environ.get("HERMES_RS_URL", "http://localhost:7700")
-MODEL = "gemma4:12b"  # 엔진과 통일. think=false 로 추론모드 차단(비대상 모델은 무시)
-MAX_CHARS = 40000
 # 진행중 세션(Stop 훅) 재증류 최소 간격(분). SessionEnd(final)는 throttle 무시.
 THROTTLE_MIN = int(os.environ.get("DISTILL_THROTTLE_MIN") or "25")
 MARK_DIR = os.path.expanduser("~/.cache/olympus-distill")  # 세션별 마지막 증류 시각
@@ -124,56 +122,21 @@ def extract(path):
     return "\n".join(out)
 
 
-# ── 시크릿 스크럽 (가벼움) ──────────────────────────────────────────────────
-# 개인 로컬이라 빡센 redact 불필요. 단 vault/ 는 git 추적 → 공유 시 누수구.
-# 그 한 경계만 막는다: 알려진 토큰 패턴을 ‹REDACTED› 로 치환 후 파일에 쓴다.
-_SECRET_RE = re.compile(
-    "|".join(
-        f"(?:{p})"
-        for p in (
-            r"xox[baprs]-[0-9A-Za-z-]{10,}",          # Slack bot/user/...
-            r"xapp-[0-9A-Za-z-]{10,}",                # Slack app-level
-            r"sk-(?:ant-)?[A-Za-z0-9_-]{20,}",        # OpenAI/Anthropic
-            r"AKIA[0-9A-Z]{16}",                      # AWS access key
-            r"gh[pousr]_[A-Za-z0-9]{30,}",            # GitHub
-            r"AIza[0-9A-Za-z_-]{35}",                 # Google API
-            r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",  # JWT
-            r"-----BEGIN [A-Z ]*PRIVATE KEY-----",    # PEM
-            r"(?i:api[_-]?key|secret|token|password|passwd|bearer)[\"' ]*[:=][\"' ]*[A-Za-z0-9._/+-]{12,}",
-        )
-    )
-)
-
-
-def _redact(text):
-    """vault(git 추적) 진입 전 시크릿 스크럽 — 누수구(git/공유)만 막는 가벼운 게이트."""
-    return _SECRET_RE.sub("‹REDACTED›", text)
-
-
-def distill(text):
-    prompt = (
-        "아래는 내(사용자)가 Claude와 함께 작업한 세션 기록이다. "
-        "미래의 내가 '전에 이거 어떻게 했더라'를 다시 참고할 수 있게, "
-        "**문제해결 서사**를 기록해라. 다음 틀로 한국어 markdown 작성:\n"
-        "  🎯 **풀던 문제** — 무엇을 하려 했나 (1줄)\n"
-        "  🧪 **시도/실패** — 시도한 것들, 특히 안 됐던 것과 *왜* 안 됐는지\n"
-        "  🚧 **포기/우회** — 버린 길과 이유 (다음에 또 헛짚지 않게)\n"
-        "  ✅ **통한 해결** — 결국 뭐가 먹혔나 (구체적으로: 명령·설정·근본원인)\n"
-        "  🔄 **미완/다음** — 하다 만 것, 이어서 할 일\n"
-        "해당 없는 항목은 생략. 설정파일 덤프·문서 인용·스키마·일반 잡담은 무시하라 "
-        "(그건 '서사'가 아니다). "
-        "실제 시도-실패-해결 흐름이 전혀 없으면 첫 줄에 'SKIP'만.\n\n"
-        "출력 첫 줄은 반드시 'KEEP' 또는 'SKIP' 한 단어. KEEP이면 다음 줄부터 노트 본문.\n\n"
-        "=== 세션 ===\n" + text
-    )
+def post_distill(text, session_id, origin, phase, cwd):
+    """추출 텍스트를 hermes-rs /distill 로 POST → 엔진이 증류·스크럽·raw 노트 기록(SSOT).
+    반환: {"written": bool, "filename": str|None} 또는 None(엔진 다운/에러 → no-op).
+    엔진이 길이 클램프·KEEP/SKIP 게이트·시크릿 스크럽을 모두 수행한다."""
     body = json.dumps(
-        {"model": MODEL, "prompt": prompt, "stream": False, "think": False, "keep_alive": "5m"}
+        {"text": text, "session_id": session_id, "origin": origin, "phase": phase, "cwd": cwd}
     ).encode()
     req = urllib.request.Request(
-        f"{OLLAMA}/api/generate", data=body, headers={"Content-Type": "application/json"}
+        f"{HERMES_RS}/distill", data=body, headers={"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return json.loads(r.read()).get("response", "").strip()
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None  # 엔진 미가동/에러 — 4h 스케줄러가 캐치(세션 절대 미차단)
 
 
 def main():
@@ -197,38 +160,19 @@ def main():
     company_tokens = (os.environ.get("DISTILL_COMPANY_CWD") or "").split(":")
     is_company = any(tok and tok in cwd for tok in company_tokens)
     text = extract(tp)
-    if len(text) < 500:  # 너무 짧은 세션은 skip
+    if len(text) < 500:  # 너무 짧은 세션은 skip (값싼 호스트 선차단 — 헛 POST 방지)
         return
-    # 문제해결 서사는 세션 전체에 걸침 → 꼬리만 자르면 도입부(문제설정)를 잃음.
-    # 길면 앞 1/3 + 뒤 2/3 를 살려 '문제→해결' 양끝을 모두 보존.
-    if len(text) > MAX_CHARS:
-        head = text[: MAX_CHARS // 3]
-        tail = text[-(MAX_CHARS - MAX_CHARS // 3):]
-        text = head + "\n…(중략)…\n" + tail
-    note = distill(text)
-    # 첫 줄 게이트: KEEP/SKIP 한 단어로 모델이 명시 판단. SKIP 또는 비정상이면 저장 안 함.
-    lines = note.splitlines()
-    head_line = lines[0].strip().upper() if lines else ""
-    if not head_line.startswith("KEEP"):
-        return
-    body = "\n".join(lines[1:]).strip()
-    if len(body) < 40:  # KEEP인데 알맹이 없으면 버림
-        return
-    body = _redact(body)  # vault(git) 진입 전 시크릿 스크럽
     # 격리 없음 — 개인·회사 세션 경험 모두 같은 raw/ 에. 구분은 origin 태그로만.
-    out_dir = RAW_DIR
-    os.makedirs(out_dir, exist_ok=True)
-    # 파일명 = 세션ID 키 → 같은 세션을 주기적으로 재증류해도 덮어씀(중복 노트 방지).
-    key = re.sub(r"[^A-Za-z0-9_-]", "", session_id)[:16] or datetime.datetime.now().strftime(
-        "%Y%m%d-%H%M%S"
-    )
-    fp = os.path.join(out_dir, f"session-{key}.md")
     origin = "company" if is_company else "personal"
     phase = "종료" if is_final else "진행중"
-    with open(fp, "w", encoding="utf-8") as f:
-        f.write(f"# 세션 노트 — {datetime.date.today().isoformat()}\n")
-        f.write(f"> 자동 증류 (Claude Code · {phase}) · origin: {origin} · cwd: {cwd}\n\n")
-        f.write(body + "\n")
+    # 엔진(SSOT)이 길이 클램프·LLM 증류·KEEP/SKIP 게이트·시크릿 스크럽·raw 노트 기록을 수행.
+    resp = post_distill(text, session_id, origin, phase, cwd)
+    if not resp or not resp.get("written"):
+        return  # SKIP/짧음(엔진 판정) 또는 엔진 다운 → 마커도 안 남김(다음 Stop 에 재시도)
+    filename = resp.get("filename")
+    if not filename:
+        return
+    fp = os.path.join(RAW_DIR, filename)  # 엔진은 파일명만 반환 → 호스트 RAW_DIR 와 조인
     # 최근성 정렬키 교정: 노트 mtime = 세션 실제 시각(트랜스크립트 최신 timestamp).
     # 백필이 옛 세션을 지금 증류해도 mtime=세션시각이라 brief가 가짜최신으로 안 띄움.
     # (compile 이 이 mtime 을 wiki 로 보존 → ingest 가 updated_at 으로 사용.)
