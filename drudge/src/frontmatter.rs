@@ -17,11 +17,11 @@ pub struct FrontMatter {
     pub tags: Vec<String>,
 }
 
-/// origin=company 로 분류할 경로 토큰 — env `HERMES_COMPANY_SUBSTR`(':' 구분).
+/// origin=company 로 분류할 경로 토큰 — env `DRUDGE_COMPANY_SUBSTR`(':' 구분).
 /// 기본 빈값 = 토큰 없음 → 모든 문서 origin=personal (회사 개념 미사용).
 /// 다운스트림은 `.env` 에 토큰만 꽂으면 코드 수정 없이 회사 레이어가 켜진다(SSOT).
 pub fn company_substrs() -> Vec<String> {
-    std::env::var("HERMES_COMPANY_SUBSTR")
+    std::env::var("DRUDGE_COMPANY_SUBSTR")
         .unwrap_or_default()
         .split(':')
         .filter(|s| !s.is_empty())
@@ -128,15 +128,15 @@ mod tests {
     fn parse_without_frontmatter_infers_from_path() {
         let (fm, body) = parse(
             "그냥 본문",
-            "/Users/x/.claude/projects/olympus/data/notes/s.md",
+            "/Users/x/.claude/projects/oh-my-boring/data/notes/s.md",
         )
         .unwrap();
         assert_eq!(fm.origin, "personal"); // 회사 토큰 미설정 → personal
         assert_eq!(fm.kind, "note"); // /notes/ 경로
-        assert_eq!(fm.project, "olympus"); // projects/<proj>
+        assert_eq!(fm.project, "oh-my-boring"); // projects/<proj>
         assert_eq!(
             fm.source_path,
-            "/Users/x/.claude/projects/olympus/data/notes/s.md"
+            "/Users/x/.claude/projects/oh-my-boring/data/notes/s.md"
         );
         assert_eq!(body, "그냥 본문");
     }
@@ -145,7 +145,7 @@ mod tests {
     fn round_trip_render_then_parse() {
         let fm = FrontMatter {
             origin: "personal".to_owned(),
-            project: "olympus".to_owned(),
+            project: "oh-my-boring".to_owned(),
             kind: "note".to_owned(),
             tags: vec!["a".to_owned(), "b".to_owned()],
             ..Default::default()
@@ -153,7 +153,7 @@ mod tests {
         let md = render(&fm, "본문").unwrap();
         let (back, body) = parse(&md, "/p.md").unwrap();
         assert_eq!(back.origin, "personal");
-        assert_eq!(back.project, "olympus");
+        assert_eq!(back.project, "oh-my-boring");
         assert_eq!(back.tags, vec!["a", "b"]);
         assert_eq!(body, "본문");
     }

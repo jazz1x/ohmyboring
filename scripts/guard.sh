@@ -7,7 +7,7 @@
 # 우회(git commit --no-verify) 금지 — 실패 시 근본원인을 고친다(증상 무마 X).
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT/hermes-rs"
+cd "$ROOT/drudge"
 echo "1) rustfmt --check…"
 cargo fmt --check
 echo "2) clippy (-D warnings)…"

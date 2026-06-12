@@ -36,4 +36,4 @@
 
 ## 게이트
 - **pre-commit** = `scripts/guard.sh` (스택-프리): `cargo fmt --check` → `cargo clippy --all-targets -D warnings` → `cargo test`. 설치: `git config core.hooksPath .githooks`.
-- **pre-deploy** = `scripts/eval-gate.sh` (스택 필요): hermes-rs 가동 확인 → `run_eval --check` 바닥선. 미달 시 비0 → 배포 중단.
+- **pre-deploy** = `scripts/eval-gate.sh` (스택 필요): drudge 가동 확인 → `run_eval --check` 바닥선. 미달 시 비0 → 배포 중단.

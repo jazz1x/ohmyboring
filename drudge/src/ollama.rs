@@ -15,8 +15,8 @@ impl Ollama {
     pub fn from_env() -> Self {
         Self {
             host: std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".into()),
-            embed_model: std::env::var("HERMES_EMBED_MODEL").unwrap_or_else(|_| "bge-m3".into()),
-            llm_model: std::env::var("HERMES_LLM_MODEL").unwrap_or_else(|_| "gemma4:12b".into()),
+            embed_model: std::env::var("DRUDGE_EMBED_MODEL").unwrap_or_else(|_| "bge-m3".into()),
+            llm_model: std::env::var("DRUDGE_LLM_MODEL").unwrap_or_else(|_| "gemma4:12b".into()),
             client: reqwest::Client::new(),
         }
     }

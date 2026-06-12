@@ -3,7 +3,7 @@
 //! 아키텍처:
 //! - `Store` + `Ollama` 를 `Arc` 로 공유 (Postgres client 는 concurrent 사용 지원).
 //! - axum 라우터: /health · /ask · /search · /graph · /audit · /sync
-//! - 백그라운드 스케줄러: `HERMES_SYNC_HOURS`(기본 4h) 주기 + 기동 즉시 1회 실행.
+//! - 백그라운드 스케줄러: `DRUDGE_SYNC_HOURS`(기본 4h) 주기 + 기동 즉시 1회 실행.
 //! - 에러 전파: `AppError` (anyhow wrapper) → HTTP 500, JSON body.
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ pub struct AppState {
     store: Arc<Store>,
     ollama: Arc<Ollama>,
     source_dirs: Arc<Vec<String>>,
-    /// vault 루트(`HERMES_VAULT_DIR`). `Some`이면 sync 시 raw→wiki compile 수행.
+    /// vault 루트(`DRUDGE_VAULT_DIR`). `Some`이면 sync 시 raw→wiki compile 수행.
     vault_dir: Arc<Option<PathBuf>>,
 }
 
@@ -213,14 +213,14 @@ async fn handle_audit(State(s): State<AppState>) -> Result<Json<audit::AuditStat
 }
 
 /// 세션 증류 — 호스트 훅이 추출한 텍스트를 받아 LLM 증류 + 스크럽 + raw 노트 기록(SSOT).
-/// `HERMES_VAULT_DIR` 미설정이면 기록 대상 없음 → 에러(호스트가 no-op 흡수).
+/// `DRUDGE_VAULT_DIR` 미설정이면 기록 대상 없음 → 에러(호스트가 no-op 흡수).
 async fn handle_distill(
     State(s): State<AppState>,
     Json(req): Json<DistillReq>,
 ) -> Result<Json<DistillResp>, AppError> {
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
         return Err(AppError(anyhow::anyhow!(
-            "HERMES_VAULT_DIR 미설정 — distill 기록 대상 없음"
+            "DRUDGE_VAULT_DIR 미설정 — distill 기록 대상 없음"
         )));
     };
     let dreq = distill::DistillRequest {
@@ -279,7 +279,7 @@ fn mcp_initialize(req: &Value) -> Value {
     json!({
         "protocolVersion": pv,
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "hermes-rs", "version": env!("CARGO_PKG_VERSION")}
+        "serverInfo": {"name": "drudge", "version": env!("CARGO_PKG_VERSION")}
     })
 }
 
@@ -461,7 +461,7 @@ fn spawn_scheduler(
     source_dirs: Arc<Vec<String>>,
     vault_dir: Arc<Option<PathBuf>>,
 ) {
-    let sync_hours: u64 = std::env::var("HERMES_SYNC_HOURS")
+    let sync_hours: u64 = std::env::var("DRUDGE_SYNC_HOURS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(4);
@@ -486,14 +486,14 @@ fn spawn_scheduler(
 
 pub async fn run(store: Store, ollama: Ollama) -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let dirs_env = std::env::var("HERMES_SOURCE_DIRS")
+    let dirs_env = std::env::var("DRUDGE_SOURCE_DIRS")
         .unwrap_or_else(|_| format!("{home}/.claude/projects:{home}/oh-my-boring/data/notes"));
     let source_dirs: Vec<String> = dirs_env.split(':').map(str::to_owned).collect();
 
     // vault 루트 — 설정 시 sync 가 raw→wiki compile 단계를 포함한다.
-    let vault_dir: Option<PathBuf> = std::env::var("HERMES_VAULT_DIR").ok().map(PathBuf::from);
+    let vault_dir: Option<PathBuf> = std::env::var("DRUDGE_VAULT_DIR").ok().map(PathBuf::from);
 
-    let addr = std::env::var("HERMES_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:7700".to_owned());
+    let addr = std::env::var("DRUDGE_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:7700".to_owned());
 
     let state = AppState {
         store: Arc::new(store),

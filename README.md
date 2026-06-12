@@ -1,5 +1,7 @@
 # oh-my-boring
 
+**[한국어](README.md)** · [English](README.en.md) · [日本語](README.ja.md)
+
 [![CI](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Postgres](https://img.shields.io/badge/store-Postgres%2016%20%2B%20pgvector-336791?logo=postgresql&logoColor=white)
@@ -7,6 +9,8 @@
 ![cloud](https://img.shields.io/badge/cloud-none-success)
 
 **셀프호스팅 개인 메모리 RAG.** Claude Code(또는 아무 마크다운 노트)에서 일한 경험이 자동으로 로컬 벡터DB에 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클라우드 0 · 데이터 100% 로컬.**
+
+> 게을러서 안 하던 일 — 과거 작업을 기억하고 다시 찾아보는 그 지루한 일 — 을 **drudge**(막일꾼) 엔진이 대신 묵묵히 한다.
 
 ```text
 세션·노트 ──증류──▶ vault/raw ──compile──▶ vault/wiki ──ingest──▶ pgvector(+그래프) ──recall──▶ 답변
@@ -30,7 +34,7 @@
 | # | 레이어 | 역할 | 기술 | 노출 | `make up` 기본 |
 |---|---|---|---|---|:---:|
 | 1 | **Ollama** (호스트) | 임베딩 `bge-m3`(1024d) · 합성 `gemma4:12b`(think=false) | 호스트 프로세스 | `127.0.0.1:11434` | 필요[^ollama] |
-| 2 | **hermes-rs** (Rust) | ingest·retrieve·graph·compile·distill 엔진 (HTTP + 4h 스케줄러) | axum / tokio | `127.0.0.1:7700` | ✓ |
+| 2 | **drudge** (Rust 엔진) | ingest·retrieve·graph·compile·distill (HTTP + 4h 스케줄러) | axum / tokio | `127.0.0.1:7700` | ✓ |
 | 3 | **Postgres + pgvector** | `knowledge` = 벡터(HNSW) + BM25 + node/edge 재귀 CTE 그래프 | `pgvector/pgvector:pg16` | `127.0.0.1:5432` | ✓ |
 | 4 | **훅** (호스트, Python) | 세션 → 엔진 연결 접착제 (distill·recall·collect) | `python3` | — | 수동 설치[^hooks] |
 | 5 | **hermes-agent** (옵션) | Slack 비서 + 자율 크론 (Socket Mode) | 외부 이미지 | — | ✗ (`--profile agent`)[^agent] |
@@ -67,7 +71,7 @@ make smoke                    # end-to-end 한 번 확인
 make ask Q="내가 도커 빌드 캐시 문제 어떻게 풀었지?"
 ```
 
-`make up` = `start.sh`: Ollama 헬스체크 → 모델 pull → `docker compose up -d --build`(postgres+hermes-rs) → `/health` 대기. 첫 적재(startup sync)는 백그라운드로 수 분.
+`make up` = `start.sh`: Ollama 헬스체크 → 모델 pull → `docker compose up -d --build`(postgres + drudge) → `/health` 대기. 첫 적재(startup sync)는 백그라운드로 수 분.
 
 ---
 
@@ -86,7 +90,7 @@ make ask Q="내가 도커 빌드 캐시 문제 어떻게 풀었지?"
 
 | 훅 | Claude Code 이벤트 | 하는 일 |
 |---|---|---|
-| `hooks/distill-session.py` | `SessionEnd` / `Stop` | 세션 추출 → `/distill` POST → raw 노트 기록 + mtime 보정 |
+| `hooks/distill-session.py` | `SessionEnd` / `Stop` | 세션 추출 → `/distill` POST → raw 노트 기록 + mtime 보정. repo 슬러그(git remote)도 `repo/<slug>` 태그로 |
 | `hooks/recall.py` | `UserPromptSubmit` | 프롬프트 관련 과거 경험을 `/search` 로 회수해 컨텍스트 주입 |
 | `hooks/collect-sessions.py` | 크론 / `make collect` | SessionEnd 놓친 과거 세션 백필(1회 소량씩) |
 
@@ -105,13 +109,13 @@ make ask Q="내가 도커 빌드 캐시 문제 어떻게 풀었지?"
 }
 ```
 
-> 엔진(`hermes-rs`)이 떠 있어야 distill/recall 이 동작한다. 안 떠 있으면 조용히 no-op — **세션을 절대 막지 않음**.
+> 엔진(drudge)이 떠 있어야 distill/recall 이 동작한다. 안 떠 있으면 조용히 no-op — **세션을 절대 막지 않음**.
 
 ---
 
 ## 소스 & 회수
 
-- **흡수 대상**(`HERMES_SOURCE_DIRS`, compose 기본): `~/.claude/projects`(Claude Code 메모리) + `vault/wiki`(증류·큐레이션 노트).
+- **흡수 대상**(`DRUDGE_SOURCE_DIRS`, compose 기본): `~/.claude/projects`(Claude Code 메모리) + `vault/wiki`(증류·큐레이션 노트).
 - **즉시 기록**: `make remember M="bge-m3 임베딩은 1024차원"` → raw 기록 후 sync.
 - **회수**: `make ask Q="..."` (1회 질의) · `recall.py`(프롬프트마다 자동) · Slack(`hermes-agent` 켰을 때).
 
@@ -122,7 +126,7 @@ make ask Q="내가 도커 빌드 캐시 문제 어떻게 풀었지?"
 특정 경로 문서를 `origin=company` 로 태깅하고 ingest 에서 제외하려면 `.env` 에 토큰만:
 
 ```bash
-HERMES_COMPANY_SUBSTR=acme:acme-kb    # Rust ingest/origin/audit (경로 substring)
+DRUDGE_COMPANY_SUBSTR=acme:acme-kb    # Rust ingest/origin/audit (경로 substring)
 DISTILL_COMPANY_CWD=acme              # 세션 증류 훅 (cwd substring)
 ```
 
@@ -142,7 +146,7 @@ DISTILL_COMPANY_CWD=acme              # 세션 증류 훅 (cwd substring)
 | `make remember M="내용"` | 한 줄 메모 즉시 기록 + 적재 |
 | `make collect [N=3]` | 과거 세션 백필 (1회 N개) |
 | `make smoke` | end-to-end 스모크 테스트 |
-| `make logs` | hermes-rs 엔진 로그 |
+| `make logs` | drudge 엔진 로그 |
 | `make psql` | Postgres 직접 접속 (그래프 들여다보기) |
 | `make guard` | 구조 게이트 (fmt + clippy + test) — CI 와 동일 |
 | `make down` | 정지 (데이터 `./data` 유지) |
@@ -152,22 +156,22 @@ DISTILL_COMPANY_CWD=acme              # 세션 증류 훅 (cwd substring)
 
 ## 설정 (env)
 
-코어는 `.env` 없이 돈다. 기본값은 `docker-compose.yml` 의 `hermes-rs` 환경에 박혀 있다.
+코어는 `.env` 없이 돈다. 기본값은 `docker-compose.yml` 의 `drudge` 환경에 박혀 있다.
 
 | 변수 | 기본 | 용도 |
 |---|---|---|
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | — | `hermes-agent`(Slack) 켤 때만 |
-| `HERMES_LLM_MODEL` | `gemma4:12b` | 합성 모델 (think=false 고정) |
-| `HERMES_EMBED_MODEL` | `bge-m3` | 임베딩 (1024d) |
-| `HERMES_SOURCE_DIRS` | `~/.claude/projects:vault/wiki` | 흡수 소스(`:` 구분) |
-| `HERMES_SYNC_HOURS` | `4` | 백그라운드 sync 주기 |
-| `HERMES_COMPANY_SUBSTR` / `DISTILL_COMPANY_CWD` | — | 회사 태깅(위 참고) |
+| `DRUDGE_LLM_MODEL` | `gemma4:12b` | 합성 모델 (think=false 고정) |
+| `DRUDGE_EMBED_MODEL` | `bge-m3` | 임베딩 (1024d) |
+| `DRUDGE_SOURCE_DIRS` | `~/.claude/projects:vault/wiki` | 흡수 소스(`:` 구분) |
+| `DRUDGE_SYNC_HOURS` | `4` | 백그라운드 sync 주기 |
+| `DRUDGE_COMPANY_SUBSTR` / `DISTILL_COMPANY_CWD` | — | 회사 태깅(위 참고) |
 
 ---
 
 ## 개발 · 가드레일
 
-- **SSOT 문서**: `hermes-rs/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`.
+- **SSOT 문서**: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`.
 - **원칙**: ROP(Result 레일) · Parse-don't-validate · Clean Architecture · 단순함 우선.
 - **게이트**(로컬 `make guard` == CI): `rustfmt --check` + `clippy -D warnings`(`unsafe` forbid + `all`/`pedantic` deny) + `cargo test`. 테스트는 스택-프리(DB 불필요).
 - **CI**(`.github/workflows/ci.yml`): PR·main push 마다 `rust-gate`(guard.sh) + `gitleaks`(시크릿 스캔). main 브랜치 보호가 둘 다 필수 — admin도 우회 불가, 직접 push·force-push·삭제 금지.
@@ -178,13 +182,13 @@ DISTILL_COMPANY_CWD=acme              # 세션 증류 훅 (cwd substring)
 
 ```text
 oh-my-boring/
-├─ hermes-rs/          # Rust 엔진 (ingest·retrieve·graph·compile·distill·serve)
+├─ drudge/             # Rust 엔진 (ingest·retrieve·graph·compile·distill·serve)
 │  └─ src/{ingest,retrieve,extract,graph,vault,distill,serve,store,ollama,...}.rs
 ├─ hooks/              # 호스트 훅 (distill-session · recall · collect-sessions)
 ├─ scripts/            # guard.sh(게이트) · smoke.sh · eval-gate.sh
 ├─ vault/              # raw(증류) → compile → wiki(큐레이션). ingest 흡수 대상
 ├─ data/              # Postgres 영속(pgdata) — gitignore
-├─ docker-compose.yml  # postgres + hermes-rs (+ --profile agent: hermes-agent)
+├─ docker-compose.yml  # postgres + drudge (+ --profile agent: hermes-agent)
 ├─ start.sh            # make up 실체 (Ollama·모델·빌드·헬스)
 └─ Makefile            # 명령 진입점
 ```

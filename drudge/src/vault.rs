@@ -1225,7 +1225,7 @@ pub struct CompileStats {
     pub total_raw: usize,
 }
 
-/// `hermes vault compile` 진입점 (I/O 쉘 — 순수 로직 위임).
+/// `drudge vault compile` 진입점 (I/O 쉘 — 순수 로직 위임).
 #[allow(clippy::too_many_lines)]
 pub async fn run_compile(
     vault_root: &Path,
@@ -1292,7 +1292,7 @@ pub async fn run_compile(
             (format!("wiki-{max_id:04}"), true)
         };
 
-        // origin 결정 — env `HERMES_COMPANY_SUBSTR` 토큰 매칭(미설정이면 항상 Personal)
+        // origin 결정 — env `DRUDGE_COMPANY_SUBSTR` 토큰 매칭(미설정이면 항상 Personal)
         let origin = if raw_path
             .to_str()
             .is_some_and(crate::frontmatter::is_company_path)

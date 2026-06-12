@@ -8,8 +8,8 @@ data/*
 data/eval/*.db
 
 # ── 임베디드 surreal(이제 서버모드) + Rust 빌드 ──────────
-hermes-rs/target/
-hermes-rs/data/
+drudge/target/
+drudge/data/
 
 # ── Python ──────────────────────────────────────────────
 __pycache__/

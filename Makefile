@@ -12,8 +12,8 @@ down: ## 스택 정지 (데이터 ./data 유지)
 build: ## 이미지 빌드
 	docker compose build
 
-logs: ## hermes-rs 엔진 로그
-	docker compose logs -f hermes-rs
+logs: ## drudge 엔진 로그
+	docker compose logs -f drudge
 
 models: ## Ollama 모델 pull (gemma4:12b + bge-m3)
 	ollama pull gemma4:12b && ollama pull bge-m3
@@ -46,7 +46,7 @@ eval: ## 행동 회귀 게이트 (run_eval --check, 스택 필요)
 	./scripts/eval-gate.sh
 
 psql: ## Postgres 직접 접속 (그래프 node/edge 들여다보기)
-	docker compose exec postgres psql -U olympus -d olympus
+	docker compose exec postgres psql -U omb -d omb
 
 reset: ## ⚠️ Postgres 데이터까지 초기화 (소스에서 재적재됨)
 	docker compose down
