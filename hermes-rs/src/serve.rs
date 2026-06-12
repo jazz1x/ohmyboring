@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 
 use crate::ask;
 use crate::audit;
+use crate::distill;
 use crate::extract;
 use crate::graph;
 use crate::ingest;
@@ -106,6 +107,33 @@ struct GraphResp {
     semantic_neighbors: Vec<String>,
 }
 
+/// `personal` 기본값 — 호스트가 origin 미지정 시(회사 토큰 미설정) 사용.
+fn default_origin() -> String {
+    "personal".to_owned()
+}
+
+#[derive(Deserialize)]
+struct DistillReq {
+    /// 세션 트랜스크립트에서 호스트가 추출한 평문.
+    text: String,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default = "default_origin")]
+    origin: String,
+    #[serde(default)]
+    phase: String,
+    #[serde(default)]
+    cwd: String,
+}
+
+#[derive(Serialize)]
+struct DistillResp {
+    /// KEEP/SKIP 게이트 결과 — false 면 저장 가치 없어 폐기(에러 아님).
+    written: bool,
+    /// 기록된 raw 노트 파일명. 호스트가 RAW_DIR 와 조인해 mtime 보정 + sync 트리거.
+    filename: Option<String>,
+}
+
 #[derive(Serialize)]
 struct SyncResp {
     compile_total_raw: usize,
@@ -180,6 +208,31 @@ async fn handle_graph(
 async fn handle_audit(State(s): State<AppState>) -> Result<Json<audit::AuditStats>, AppError> {
     let stats = audit::stats(&s.store).await?;
     Ok(Json(stats))
+}
+
+/// 세션 증류 — 호스트 훅이 추출한 텍스트를 받아 LLM 증류 + 스크럽 + raw 노트 기록(SSOT).
+/// `HERMES_VAULT_DIR` 미설정이면 기록 대상 없음 → 에러(호스트가 no-op 흡수).
+async fn handle_distill(
+    State(s): State<AppState>,
+    Json(req): Json<DistillReq>,
+) -> Result<Json<DistillResp>, AppError> {
+    let Some(vault_root) = (*s.vault_dir).as_ref() else {
+        return Err(AppError(anyhow::anyhow!(
+            "HERMES_VAULT_DIR 미설정 — distill 기록 대상 없음"
+        )));
+    };
+    let dreq = distill::DistillRequest {
+        text: req.text,
+        session_id: req.session_id,
+        origin: req.origin,
+        phase: req.phase,
+        cwd: req.cwd,
+    };
+    let out = distill::run(&s.ollama, vault_root, &dreq).await?;
+    Ok(Json(DistillResp {
+        written: out.written,
+        filename: out.filename,
+    }))
 }
 
 // ── MCP-over-HTTP (Nous Hermes Agent 연결) ──────────────────────────────────
@@ -430,9 +483,8 @@ fn spawn_scheduler(
 
 pub async fn run(store: Store, ollama: Ollama) -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let dirs_env = std::env::var("HERMES_SOURCE_DIRS").unwrap_or_else(|_| {
-        format!("{home}/.claude/projects:{home}/oh-my-boring/data/notes")
-    });
+    let dirs_env = std::env::var("HERMES_SOURCE_DIRS")
+        .unwrap_or_else(|_| format!("{home}/.claude/projects:{home}/oh-my-boring/data/notes"));
     let source_dirs: Vec<String> = dirs_env.split(':').map(str::to_owned).collect();
 
     // vault 루트 — 설정 시 sync 가 raw→wiki compile 단계를 포함한다.
@@ -461,6 +513,7 @@ pub async fn run(store: Store, ollama: Ollama) -> Result<()> {
         .route("/search", post(handle_search))
         .route("/graph", post(handle_graph))
         .route("/audit", get(handle_audit))
+        .route("/distill", post(handle_distill)) // 세션 증류(호스트 훅 → raw 노트 SSOT)
         .route("/sync", post(handle_sync))
         .route("/mcp", post(handle_mcp)) // MCP-over-HTTP (Nous Hermes Agent 가 recall 툴로 호출)
         .with_state(state);

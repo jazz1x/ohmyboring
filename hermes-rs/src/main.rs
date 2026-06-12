@@ -2,6 +2,7 @@
 //! 1차 마일스톤: embed → store → vector search 왕복 증명(selftest).
 mod ask;
 mod audit;
+mod distill;
 mod extract;
 mod frontmatter;
 mod graph;
