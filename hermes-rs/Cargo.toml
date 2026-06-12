@@ -1,0 +1,49 @@
+[package]
+name = "hermes-rs"
+version = "0.1.0"
+edition = "2024"
+publish = false # 개인 프로젝트 — crates.io 배포 안 함
+description = "Olympus 개인 RAG (Rust) — pgvector + node/edge 그래프 + 재귀 CTE"
+
+[[bin]]
+name = "hermes"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+axum = "0.8"
+tokio-postgres = "0.7"                              # pgvector 베이스(로컬 단일 Postgres)
+pgvector = { version = "0.4", features = ["postgres"] }  # 벡터 타입 + HNSW
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+walkdir = "2"
+sha2 = "0.10"
+hex = "0.4"
+chrono = "0.4"
+thiserror = "2"
+regex = "1"
+
+# 철학 강제 (upstream 상속) — cargo clippy -D warnings 게이트
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# nursery 제외 — 불안정 lint라 toolchain bump 시 false 실패(시한폭탄). company-kb-bot/upstream 감사(2026-06-05 #3) 정렬.
+# 실용 allow (노이즈성 docs/naming) — upstream 상속 3개 + doc_markdown(제품명 프로즈 노이즈)
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+# §A 강제 — restriction lints (pedantic 미포함, 명시 필요)
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"

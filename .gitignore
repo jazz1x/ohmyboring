@@ -1,0 +1,25 @@
+# ── 시크릿 ──────────────────────────────────────────────
+.env
+.env.local
+
+# ── 런타임 데이터 (DB 블롭·캐시·개인노트) — eval 소스만 보존 ──
+data/*
+!data/eval/
+data/eval/*.db
+
+# ── 임베디드 surreal(이제 서버모드) + Rust 빌드 ──────────
+hermes-rs/target/
+hermes-rs/data/
+
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ── OS / 에디터 ─────────────────────────────────────────
+.DS_Store
+*.swp
+
+vault/.obsidian/
