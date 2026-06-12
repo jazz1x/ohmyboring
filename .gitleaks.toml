@@ -1,0 +1,17 @@
+# gitleaks 설정 — 기본 룰셋 + 이 repo 의 알려진 비-시크릿 allowlist.
+title = "oh-my-boring gitleaks"
+
+[extend]
+useDefault = true # gitleaks 내장 룰(AWS/GitHub/Slack/JWT/PEM 등) 전부 상속
+
+[allowlist]
+description = "플레이스홀더 + 로컬 전용 dev 기본값 (실제 시크릿 아님)"
+paths = [
+  '''\.env\.example$''',     # 토큰 플레이스홀더만 (<your-...-token>)
+  '''hermes-rs/src/distill\.rs''', # 시크릿 스크럽 정규식 *패턴* 보유(실 키 아님)
+  '''hooks/distill-session\.py''', # (구) 동일 패턴 — 히스토리 스캔 false-positive 방지
+]
+regexes = [
+  '''olympus:olympus''',          # docker-compose postgres 로컬 dev 기본값(127.0.0.1 바인딩)
+  '''<your-[a-z-]+-token>''',      # .env.example 플레이스홀더
+]
