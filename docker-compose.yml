@@ -57,8 +57,10 @@ services:
   # Nous Hermes Agent — 자율 에이전트. ~/.hermes 볼륨에 config·메모리 영속 → 컨테이너 disposable.
   # Mac: 그들 compose 의 network_mode:host 는 Mac Docker 미지원 → bridge + host.docker.internal.
   # hermes-rs(우리 RAG)는 MCP 기억백엔드로 별도 연결(같은 스택, 사이드카). 구 joseph 은 검증 후 은퇴.
+  # 옵트인: 기본 `up` 에서 제외(서드파티 이미지·~/.hermes 의존). 켜려면 --profile agent.
   hermes-agent:
-    image: hermes-agent                   # ~/.hermes/hermes-agent 에서 빌드(docker build -t hermes-agent)
+    profiles: ["agent"]
+    image: hermes-agent                   # 외부 빌드 필요(레포 미포함, Nous Hermes Agent)
     container_name: olympus-hermes-agent
     restart: unless-stopped
     environment:

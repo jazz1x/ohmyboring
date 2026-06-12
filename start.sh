@@ -24,7 +24,7 @@ for m in "$LLM" "$EMB"; do
   fi
 done
 
-echo "▶ 빌드 + 기동 (postgres + hermes-rs + joseph) …"
+echo "▶ 빌드 + 기동 (postgres + hermes-rs) …"
 docker compose up -d --build
 
 echo "▶ hermes-rs health 대기 …"
@@ -37,5 +37,5 @@ cat <<'EOF'
   make ask Q="..."   질의 1회
   make sync          수동 적재(compile→ingest→extract)
   make logs          엔진 로그
-  (Slack 쓰려면 .env 에 토큰 채우고 docker compose up -d joseph)
+  (Slack 비서는 옵션 — 외부 hermes-agent 이미지 필요: docker compose --profile agent up -d)
 EOF
