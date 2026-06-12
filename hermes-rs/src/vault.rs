@@ -959,6 +959,46 @@ fn filter_han(items: Vec<String>) -> Vec<String> {
     items.into_iter().filter(|s| !has_han(s)).collect()
 }
 
+/// Obsidian-안전 태그로 정규화 (순수). LLM 이 뱉는 공백 포함 태그(`claude code`)가
+/// Obsidian 에서 깨지는 걸 막는다 — 공백/허용외 문자 → `-`, 연속 대시 collapse,
+/// 앞뒤 `-`·`/` trim, 소문자. 허용 집합 = `[a-z0-9_/-]`(`/` = nested 태그).
+/// 빈 값·순수숫자(옵시 무효 태그)는 `None`.
+fn sanitize_tag(raw: &str) -> Option<String> {
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_dash = false;
+    for c in raw.trim().to_lowercase().chars() {
+        let mapped = if c.is_ascii_alphanumeric() || c == '_' || c == '/' {
+            c
+        } else {
+            '-' // 공백·하이픈·기타 문장부호 모두 하이픈으로 수렴
+        };
+        if mapped == '-' {
+            if prev_dash {
+                continue; // 연속 대시 collapse
+            }
+            prev_dash = true;
+        } else {
+            prev_dash = false;
+        }
+        out.push(mapped);
+    }
+    let trimmed = out.trim_matches(|c| c == '-' || c == '/').to_owned();
+    if trimmed.is_empty() || trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return None; // 빈 값·순수숫자 = 옵시 무효
+    }
+    Some(trimmed)
+}
+
+/// distill 노트 헤더의 `repo: <slug>` 마커 추출 (순수). distill-session.py → /distill 이
+/// 호스트 git remote(폴백 폴더명)에서 채워 render_note 가 blockquote 에 박은 결정형 값.
+/// 본문 오탐 방지로 앞부분(헤더 영역)만 스캔. 없으면 `None`.
+fn parse_repo_marker(raw: &str) -> Option<String> {
+    let head = raw.get(..raw.len().min(400)).unwrap_or(raw);
+    let idx = head.find("repo:")?;
+    let tok = head[idx + "repo:".len()..].split_whitespace().next()?;
+    (!tok.is_empty()).then(|| tok.to_owned())
+}
+
 /// JSON 펜스 제거 — extract.rs 의 strip_to_json 와 동일 로직.
 fn strip_json(raw: &str) -> &str {
     let Some(start) = raw.find('{') else {
@@ -1302,8 +1342,19 @@ pub async fn run_compile(
             }
         };
 
-        // Han-filter 적용
-        let tags = filter_han(curated.tags).into_iter().take(6).collect();
+        // Han-filter + Obsidian-안전 정규화(공백→-, 무효 drop). ≤6개.
+        let mut tags: Vec<String> = filter_han(curated.tags)
+            .into_iter()
+            .filter_map(|t| sanitize_tag(&t))
+            .take(6)
+            .collect();
+        // 새 카테고리 축: repo 슬러그(호스트 git, distill 마커) → 옵시 nested 태그 repo/<slug>.
+        if let Some(repo) = parse_repo_marker(&body_raw)
+            .as_deref()
+            .and_then(sanitize_tag)
+        {
+            tags.insert(0, format!("repo/{repo}"));
+        }
         let tools = filter_han(curated.tools).into_iter().take(6).collect();
         let concepts = filter_han(curated.concepts).into_iter().take(6).collect();
         let title = if has_han(&curated.title) {
@@ -1400,8 +1451,72 @@ mod tests {
     use super::{
         Kind, Origin, Page, PageIdSchema, Schema, Severity, SourcesSchema, audit_pages,
         extract_wikilinks, find_cross_layer_wikilinks, lint_page, parse_kind, parse_origin,
+        parse_repo_marker, sanitize_tag,
     };
     use serde_yaml::Value;
+
+    // ── sanitize_tag (Obsidian-안전 정규화) ──
+
+    #[test]
+    fn sanitize_tag_space_to_hyphen() {
+        // 옵시에서 깨지던 공백 태그 → 하이픈 (중간 하이픈은 유효하므로 유지)
+        assert_eq!(sanitize_tag("claude code").as_deref(), Some("claude-code"));
+        assert_eq!(
+            sanitize_tag("data management").as_deref(),
+            Some("data-management")
+        );
+        assert_eq!(
+            sanitize_tag("session hook").as_deref(),
+            Some("session-hook")
+        );
+    }
+
+    #[test]
+    fn sanitize_tag_keeps_valid() {
+        assert_eq!(sanitize_tag("rag").as_deref(), Some("rag"));
+        assert_eq!(sanitize_tag("pre-commit").as_deref(), Some("pre-commit"));
+        assert_eq!(
+            sanitize_tag("repo/oh-my-boring").as_deref(),
+            Some("repo/oh-my-boring")
+        );
+    }
+
+    #[test]
+    fn sanitize_tag_strips_and_collapses() {
+        assert_eq!(
+            sanitize_tag("  Rust!! Style  ").as_deref(),
+            Some("rust-style")
+        );
+        assert_eq!(
+            sanitize_tag("-leading-trailing-").as_deref(),
+            Some("leading-trailing")
+        );
+    }
+
+    #[test]
+    fn sanitize_tag_drops_invalid() {
+        assert!(sanitize_tag("2024").is_none()); // 순수숫자 = 옵시 무효
+        assert!(sanitize_tag("").is_none());
+        assert!(sanitize_tag("  ").is_none());
+        assert!(sanitize_tag("!!!").is_none());
+    }
+
+    // ── parse_repo_marker (distill 노트 헤더 마커) ──
+
+    #[test]
+    fn parse_repo_marker_extracts_slug() {
+        let note = "# 세션 노트 — 2026-06-12\n> 자동 증류 (Claude Code · 종료) · origin: personal · repo: jazz1x/oh-my-boring · cwd: /x\n\n본문";
+        assert_eq!(
+            parse_repo_marker(note).as_deref(),
+            Some("jazz1x/oh-my-boring")
+        );
+    }
+
+    #[test]
+    fn parse_repo_marker_absent_is_none() {
+        let note = "# 세션 노트\n> origin: personal · cwd: /x\n\n본문";
+        assert!(parse_repo_marker(note).is_none());
+    }
 
     fn test_schema() -> Schema {
         Schema {
