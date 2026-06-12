@@ -123,6 +123,8 @@ struct DistillReq {
     #[serde(default)]
     phase: String,
     #[serde(default)]
+    repo: String,
+    #[serde(default)]
     cwd: String,
 }
 
@@ -226,6 +228,7 @@ async fn handle_distill(
         session_id: req.session_id,
         origin: req.origin,
         phase: req.phase,
+        repo: req.repo,
         cwd: req.cwd,
     };
     let out = distill::run(&s.ollama, vault_root, &dreq).await?;

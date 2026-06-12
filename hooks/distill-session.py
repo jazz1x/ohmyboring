@@ -122,12 +122,33 @@ def extract(path):
     return "\n".join(out)
 
 
-def post_distill(text, session_id, origin, phase, cwd):
+def repo_slug(cwd):
+    """카테고리 축: cwd 의 git remote 에서 repo 슬러그(`org/name`). git/remote 없으면 폴더명 폴백.
+    호스트만 git·cwd 를 보므로 여기서 1회 계산해 엔진에 전달(엔진은 컨테이너라 원본 cwd git 못 봄)."""
+    if not cwd:
+        return ""
+    try:
+        url = subprocess.run(
+            ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+    except Exception:
+        url = ""
+    if url:
+        # git@host:org/name.git | https://host/org/name(.git) → org/name
+        slug = re.sub(r"^.*[:/]([^/]+/[^/]+?)(?:\.git)?$", r"\1", url)
+        if slug and slug != url:
+            return slug
+    return os.path.basename(cwd.rstrip("/")) or ""  # 폴백: 폴더명
+
+
+def post_distill(text, session_id, origin, phase, repo, cwd):
     """추출 텍스트를 hermes-rs /distill 로 POST → 엔진이 증류·스크럽·raw 노트 기록(SSOT).
     반환: {"written": bool, "filename": str|None} 또는 None(엔진 다운/에러 → no-op).
     엔진이 길이 클램프·KEEP/SKIP 게이트·시크릿 스크럽을 모두 수행한다."""
     body = json.dumps(
-        {"text": text, "session_id": session_id, "origin": origin, "phase": phase, "cwd": cwd}
+        {"text": text, "session_id": session_id, "origin": origin,
+         "phase": phase, "repo": repo, "cwd": cwd}
     ).encode()
     req = urllib.request.Request(
         f"{HERMES_RS}/distill", data=body, headers={"Content-Type": "application/json"}
@@ -165,8 +186,9 @@ def main():
     # 격리 없음 — 개인·회사 세션 경험 모두 같은 raw/ 에. 구분은 origin 태그로만.
     origin = "company" if is_company else "personal"
     phase = "종료" if is_final else "진행중"
+    repo = repo_slug(cwd)  # 카테고리 축 — git remote 슬러그(폴백 폴더명)
     # 엔진(SSOT)이 길이 클램프·LLM 증류·KEEP/SKIP 게이트·시크릿 스크럽·raw 노트 기록을 수행.
-    resp = post_distill(text, session_id, origin, phase, cwd)
+    resp = post_distill(text, session_id, origin, phase, repo, cwd)
     if not resp or not resp.get("written"):
         return  # SKIP/짧음(엔진 판정) 또는 엔진 다운 → 마커도 안 남김(다음 Stop 에 재시도)
     filename = resp.get("filename")

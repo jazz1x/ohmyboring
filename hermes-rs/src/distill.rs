@@ -66,6 +66,9 @@ pub struct DistillRequest {
     pub origin: String,
     /// `종료`(SessionEnd) | `진행중`(Stop) — 노트 헤더 표기용.
     pub phase: String,
+    /// repo 슬러그 — 호스트가 cwd git remote(폴백 폴더명)에서 채움. 빈값 가능.
+    /// 노트 헤더에 `repo:` 마커로 박혀 compile 이 `repo/<slug>` 태그로 카테고라이징.
+    pub repo: String,
     /// 세션 작업 디렉터리 — 노트 헤더 표기용.
     pub cwd: String,
 }
@@ -121,10 +124,16 @@ fn note_key(session_id: &str) -> String {
     }
 }
 
-/// raw 노트 .md 내용 렌더 — 파이썬 훅과 바이트 동일(H1 + 출처 blockquote + 본문). 순수.
+/// raw 노트 .md 내용 렌더 (순수). H1 + 출처 blockquote + 본문.
+/// repo 가 있으면 `repo:` 마커를 헤더에 박는다 → compile 이 `repo/<slug>` 태그로 카테고라이징.
 fn render_note(req: &DistillRequest, body: &str) -> String {
+    let repo_seg = if req.repo.is_empty() {
+        String::new()
+    } else {
+        format!("repo: {} · ", req.repo)
+    };
     format!(
-        "# 세션 노트 — {date}\n> 자동 증류 (Claude Code · {phase}) · origin: {origin} · cwd: {cwd}\n\n{body}\n",
+        "# 세션 노트 — {date}\n> 자동 증류 (Claude Code · {phase}) · origin: {origin} · {repo_seg}cwd: {cwd}\n\n{body}\n",
         date = today_utc(),
         phase = req.phase,
         origin = req.origin,
