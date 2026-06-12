@@ -1,0 +1,40 @@
+name: ci
+
+# PR + main push 게이트. 로컬 scripts/guard.sh 와 동일 게이트를 그대로 호출(SSOT) +
+# gitleaks 시크릿 스캔. 둘 다 통과해야 main 머지(브랜치 보호의 required check).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hermes-rs
+      # scripts/guard.sh = rustfmt --check + clippy -D warnings + test (스택-프리).
+      - name: structural gate (guard.sh)
+        run: ./scripts/guard.sh
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 전체 히스토리 스캔(과거 커밋 누수도 잡음)
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
