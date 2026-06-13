@@ -197,8 +197,9 @@ The core runs without `.env`. Defaults are baked into the `drudge` environment i
 
 - **SSOT docs**: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`.
 - **Principles**: ROP (Result rails) · Parse-don't-validate · Clean Architecture · simplest-thing-that-works.
-- **Gate** (local `make guard` == CI): `rustfmt --check` + `clippy -D warnings` (`unsafe` forbid + `all`/`pedantic` deny) + `cargo test`. Tests are stack-free (no DB needed).
-- **CI** (`.github/workflows/ci.yml`): on every PR and main push, `rust-gate` (guard.sh) + `gitleaks` (secret scan). Branch protection requires both — admins can't bypass; no direct push, force-push, or deletion.
+- **Gate** (local `make guard` == CI): `rustfmt --check` + `clippy -D warnings` (`unsafe` forbid + `all`/`pedantic` deny) + `cargo test`. Tests are stack-free (no DB needed). Supply chain: `make deny` (cargo-deny: vulns + licenses).
+- **pre-commit** (fast pre-commit gate): run `pre-commit install` once after cloning. Then every commit auto-runs file hygiene + `gitleaks` + fmt/clippy/test. (Requires `pip install pre-commit` or `brew install pre-commit`.)
+- **CI** (`.github/workflows/ci.yml`): on every PR and main push, `rust-gate` (guard.sh) + `gitleaks` (secrets) + `cargo-deny` (supply chain). Branch protection requires all three — admins can't bypass; no direct push, force-push, or deletion.
 
 ---
 

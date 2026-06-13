@@ -197,8 +197,9 @@ DISTILL_COMPANY_CWD=acme              # 세션 증류 훅 (cwd substring)
 
 - **SSOT 문서**: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`.
 - **원칙**: ROP(Result 레일) · Parse-don't-validate · Clean Architecture · 단순함 우선.
-- **게이트**(로컬 `make guard` == CI): `rustfmt --check` + `clippy -D warnings`(`unsafe` forbid + `all`/`pedantic` deny) + `cargo test`. 테스트는 스택-프리(DB 불필요).
-- **CI**(`.github/workflows/ci.yml`): PR·main push 마다 `rust-gate`(guard.sh) + `gitleaks`(시크릿 스캔). main 브랜치 보호가 둘 다 필수 — admin도 우회 불가, 직접 push·force-push·삭제 금지.
+- **게이트**(로컬 `make guard` == CI): `rustfmt --check` + `clippy -D warnings`(`unsafe` forbid + `all`/`pedantic` deny) + `cargo test`. 테스트는 스택-프리(DB 불필요). 공급망은 `make deny`(cargo-deny: 취약점·라이선스).
+- **pre-commit**(커밋 전 fast 게이트): 클론 후 1회 `pre-commit install`. 이후 커밋마다 파일위생 + `gitleaks` + fmt/clippy/test 자동 실행. (요건: `pip install pre-commit` 또는 `brew install pre-commit`)
+- **CI**(`.github/workflows/ci.yml`): PR·main push 마다 `rust-gate`(guard.sh) + `gitleaks`(시크릿) + `cargo-deny`(공급망). main 브랜치 보호가 셋 다 필수 — admin도 우회 불가, 직접 push·force-push·삭제 금지.
 
 ---
 
