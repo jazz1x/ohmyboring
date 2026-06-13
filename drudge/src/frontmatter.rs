@@ -1,25 +1,25 @@
-//! Frontmatter 엔티티 — raw `.md` 를 경계에서 1회 typed 로 parse (parse-don't-validate).
-//! YAML 프론트매터(`--- ... ---`)가 있으면 파싱, 없으면 경로에서 origin/kind/project 추론.
-//! 파싱 실패는 silent fallback 아니라 `Result` 레일로 흘림(ROP) — 호출부가 graceful boundary 결정.
+//! Frontmatter entity — parse raw `.md` into a typed form once at the boundary (parse-don't-validate).
+//! If YAML frontmatter (`--- ... ---`) is present, parse it; otherwise infer origin/kind/project from the path.
+//! Parse failure goes on the `Result` rail rather than a silent fallback (ROP) — the caller decides the graceful boundary.
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-/// 적재 문서의 구조화 메타 — audit·필터·graph 엣지의 근거(SSOT).
+/// Structured metadata for an ingested document — the basis (SSOT) for audit · filtering · graph edges.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FrontMatter {
     pub origin: String, // personal | company
     pub project: String,
     pub date: String,
-    pub kind: String, // note | memory | doc  (enrich 가 생성하는 값; "session" 은 예약어로만 존재)
+    pub kind: String, // note | memory | doc  (value produced by enrich; "session" exists only as a reserved word)
     pub source_path: String,
     pub title: Option<String>,
     pub tags: Vec<String>,
 }
 
-/// origin=company 로 분류할 경로 토큰 — env `DRUDGE_COMPANY_SUBSTR`(':' 구분).
-/// 기본 빈값 = 토큰 없음 → 모든 문서 origin=personal (회사 개념 미사용).
-/// 다운스트림은 `.env` 에 토큰만 꽂으면 코드 수정 없이 회사 레이어가 켜진다(SSOT).
+/// Path tokens that classify a document as origin=company — env `DRUDGE_COMPANY_SUBSTR` (':'-separated).
+/// Default empty = no tokens → every document is origin=personal (company concept unused).
+/// Downstream, just plugging tokens into `.env` turns on the company layer without code changes (SSOT).
 pub fn company_substrs() -> Vec<String> {
     std::env::var("DRUDGE_COMPANY_SUBSTR")
         .unwrap_or_default()
@@ -29,13 +29,13 @@ pub fn company_substrs() -> Vec<String> {
         .collect()
 }
 
-/// 경로가 설정된 회사 토큰 중 하나라도 포함하면 true. 토큰 미설정이면 항상 false.
+/// True if the path contains any of the configured company tokens. Always false if no tokens are set.
 pub fn is_company_path(path: &str) -> bool {
     company_substrs().iter().any(|s| path.contains(s))
 }
 
 impl FrontMatter {
-    /// 비어있는 필드를 경로 휴리스틱으로 채움(typed 값 구성의 일부).
+    /// Fill empty fields via path heuristics (part of constructing the typed value).
     fn enrich(&mut self, path: &str) {
         if self.source_path.is_empty() {
             self.source_path.push_str(path);
@@ -62,7 +62,7 @@ impl FrontMatter {
     }
 }
 
-/// `…/projects/<proj>/…` 의 `<proj>` 또는 부모 디렉터리명.
+/// The `<proj>` in `…/projects/<proj>/…`, or the parent directory name.
 fn derive_project(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if let Some(i) = parts.iter().position(|&p| p == "projects")
@@ -70,7 +70,7 @@ fn derive_project(path: &str) -> String {
     {
         return (*proj).to_owned();
     }
-    // fallback: 파일의 부모 디렉터리
+    // fallback: the file's parent directory
     parts
         .iter()
         .rev()
@@ -78,9 +78,9 @@ fn derive_project(path: &str) -> String {
         .map_or_else(|| "unknown".to_owned(), |s| (*s).to_owned())
 }
 
-/// raw `.md` → (frontmatter, body). 프론트매터 YAML 파싱 실패 시 Err.
+/// raw `.md` → (frontmatter, body). Err if frontmatter YAML parsing fails.
 pub fn parse(raw: &str, fallback_path: &str) -> Result<(FrontMatter, String)> {
-    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw); // BOM 제거
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw); // strip BOM
     let mut front = if let Some(rest) = raw.strip_prefix("---\n") {
         if let Some(end) = rest.find("\n---\n") {
             let yaml = &rest[..end];
@@ -102,8 +102,8 @@ fn front_enriched(mut fm: FrontMatter, path: &str, body: &str) -> (FrontMatter, 
     (fm, body.trim_start().to_owned())
 }
 
-/// FrontMatter + body → `.md` 텍스트(`--- yaml --- body`).
-#[allow(dead_code)] // S8: distill 훅 출력 frontmatter 화에서 사용
+/// FrontMatter + body → `.md` text (`--- yaml --- body`).
+#[allow(dead_code)] // S8: used when frontmatter-izing the distill hook output
 pub fn render(front: &FrontMatter, body: &str) -> Result<String> {
     let yaml = serde_yaml::to_string(front)?;
     Ok(format!("---\n{yaml}---\n{body}"))
@@ -131,8 +131,8 @@ mod tests {
             "/Users/x/.claude/projects/oh-my-boring/data/notes/s.md",
         )
         .unwrap();
-        assert_eq!(fm.origin, "personal"); // 회사 토큰 미설정 → personal
-        assert_eq!(fm.kind, "note"); // /notes/ 경로
+        assert_eq!(fm.origin, "personal"); // no company token set → personal
+        assert_eq!(fm.kind, "note"); // /notes/ path
         assert_eq!(fm.project, "oh-my-boring"); // projects/<proj>
         assert_eq!(
             fm.source_path,
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn malformed_yaml_is_error_not_silent() {
-        // ROP: 깨진 프론트매터는 Err 로 흐름(침묵 fallback 아님)
+        // ROP: broken frontmatter goes to Err (not a silent fallback)
         let raw = "---\norigin: [unclosed\n---\n본문";
         assert!(parse(raw, "/p.md").is_err());
     }

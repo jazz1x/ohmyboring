@@ -1,6 +1,6 @@
-//! Ingest 파이프 — 소스 walk → frontmatter parse → 청킹 → 임베딩 → upsert(멱등, prune).
-//!   - 툴출력 덤프(노이즈) + 격리 토큰(`DRUDGE_COMPANY_SUBSTR`) 경로는 제외.
-//!   - sha 추적으로 변경된 파일만 재임베딩. 사라진 파일은 청크 prune.
+//! Ingest pipeline — source walk → frontmatter parse → chunking → embedding → upsert (idempotent, prune).
+//!   - Excludes tool-output dump (noise) + isolation-token (`DRUDGE_COMPANY_SUBSTR`) paths.
+//!   - sha tracking re-embeds only changed files. Chunks of vanished files are pruned.
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -12,7 +12,7 @@ use crate::frontmatter;
 use crate::llm::Llm;
 use crate::store::{Doc, Store};
 
-const NOISE_SUBSTR: [&str; 1] = ["tool-results"]; // 일반 노이즈(툴출력 덤프) 제외
+const NOISE_SUBSTR: [&str; 1] = ["tool-results"]; // exclude general noise (tool-output dumps)
 const EXTS: [&str; 3] = ["md", "markdown", "txt"];
 const CHUNK_SIZE: usize = 1500;
 const CHUNK_OVERLAP: usize = 200;
@@ -32,11 +32,13 @@ fn sha256(data: &str) -> String {
     hex::encode(Sha256::digest(data.as_bytes()))
 }
 
-/// 문자 기준 청킹 (overlap 포함). 짧으면 1청크.
-/// NUL(0x00) 제거 — Postgres `text` 는 NUL 저장 불가(스펙). Claude Code 트랜스크립트에
-/// 드물게 섞이는 NUL 이 upsert 에서 `invalid byte sequence for encoding "UTF8": 0x00` 로
-/// sync 전체를 중단시킨다. IO 경계에서 1회 strip — 무손실(텍스트 의미 보존), 증상무마 아닌
-/// parse-don't-validate 입력 정규화(근본원인=소스 NUL, 우리 통제 밖 → 경계가 SSOT). 순수.
+/// Character-based chunking (with overlap). One chunk if short.
+/// Strip NUL (0x00) — Postgres `text` cannot store NUL (by spec). A NUL that
+/// rarely sneaks into a Claude Code transcript would abort the whole sync at
+/// upsert with `invalid byte sequence for encoding "UTF8": 0x00`. Strip once at
+/// the IO boundary — lossless (preserves text meaning), not symptom-masking but
+/// parse-don't-validate input normalization (root cause = source NUL, outside our
+/// control → the boundary is the SSOT). Pure.
 fn strip_nul(s: &str) -> String {
     if s.contains('\u{0}') {
         s.replace('\u{0}', "")
@@ -64,7 +66,7 @@ fn chunk(text: &str) -> Vec<String> {
     out
 }
 
-/// 흡수 대상 = 확장자 OK + 제외 토큰 미포함.
+/// Ingest target = extension OK + does not contain an exclude token.
 fn is_target(path: &Path, exclude: &[String]) -> bool {
     let ext_ok = path
         .extension()
@@ -78,7 +80,7 @@ pub async fn run(store: &Store, llm: &Llm, source_dirs: &[String]) -> Result<Sta
     let mut stats = Stats::default();
     let mut seen: HashSet<String> = HashSet::new();
 
-    // 제외 토큰 = 일반 노이즈 + (설정 시) 회사 격리 토큰. env 1회 평가.
+    // Exclude tokens = general noise + (if configured) company isolation token. env evaluated once.
     let exclude: Vec<String> = NOISE_SUBSTR
         .iter()
         .map(|s| (*s).to_owned())
@@ -93,16 +95,16 @@ pub async fn run(store: &Store, llm: &Llm, source_dirs: &[String]) -> Result<Sta
             let pstr = entry.path().to_string_lossy().into_owned();
             stats.scanned += 1;
 
-            // IO 경계: 비-UTF8 등은 graceful skip (도메인 fallback 아님).
+            // IO boundary: non-UTF8 etc. are gracefully skipped (not a domain fallback).
             let Ok(data) = std::fs::read_to_string(entry.path()) else {
                 stats.skipped += 1;
                 continue;
             };
-            // 같은 IO 경계에서 NUL 정규화 — PG text 가 0x00 저장 불가(아래 sha/parse/embed/upsert 보호).
+            // Normalize NUL at the same IO boundary — PG text cannot store 0x00 (protects sha/parse/embed/upsert below).
             let data = strip_nul(&data);
             seen.insert(pstr.clone());
 
-            // 최근성 신호 = 파일 mtime. IO 경계: 못 읽으면 now()(방금 본 것으로 간주, graceful).
+            // Recency signal = file mtime. IO boundary: if unreadable, now() (treated as just-seen, graceful).
             let mtime = entry
                 .metadata()
                 .ok()
@@ -112,7 +114,7 @@ pub async fn run(store: &Store, llm: &Llm, source_dirs: &[String]) -> Result<Sta
             let sha = sha256(&data);
             let prev = store.get_doc_sha(&pstr).await?;
             if prev.as_deref() == Some(sha.as_str()) {
-                // 내용 동일 — 재임베딩 없이 최근성만 backfill(기존 문서 정렬키 보강).
+                // Content identical — backfill only recency without re-embedding (refresh sort key of existing doc).
                 store.set_updated_at(&pstr, mtime).await?;
                 stats.unchanged += 1;
                 continue;
@@ -125,7 +127,7 @@ pub async fn run(store: &Store, llm: &Llm, source_dirs: &[String]) -> Result<Sta
                 continue;
             }
 
-            // 그래프 형태 적재: document 노드 + project/topic 엣지 → chunk 노드 + part_of
+            // Graph-shaped load: document node + project/topic edges → chunk nodes + part_of
             store.delete_doc_chunks(&pstr).await?;
             store.upsert_document(&front, &sha, mtime).await?;
             for (i, piece) in pieces.iter().enumerate() {
@@ -150,7 +152,7 @@ pub async fn run(store: &Store, llm: &Llm, source_dirs: &[String]) -> Result<Sta
         }
     }
 
-    // prune: 사라진 파일 → 문서 노드 + 엣지 + 청크 제거
+    // prune: vanished files → remove document node + edges + chunks
     for p in store.all_doc_paths().await? {
         if !seen.contains(&p) {
             store.delete_document(&p).await?;
@@ -167,7 +169,7 @@ mod tests {
 
     #[test]
     fn strip_nul_removes_null_bytes() {
-        // 가드레일: PG text 는 0x00 저장 불가 → 경계에서 제거되어야 sync 가 안 깨진다.
+        // Guardrail: PG text cannot store 0x00 → it must be stripped at the boundary so sync does not break.
         assert_eq!(strip_nul("a\u{0}b\u{0}c"), "abc");
         assert_eq!(strip_nul("\u{0}\u{0}"), "");
     }

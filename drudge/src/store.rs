@@ -1,16 +1,16 @@
-//! Store — pgvector(문서·청크·임베딩·FTS) + 그래프(node/edge 테이블 + 재귀 CTE).
+//! Store — pgvector (document/chunk/embedding/FTS) + graph (node/edge tables + recursive CTE).
 //!
-//! ## 레이어 (엔진 무관 그래프 모델)
-//! - **pgvector** (`document`, `chunk`): 벡터(HNSW) + FTS(tsvector) + frontmatter 컬럼.
-//! - **그래프** (`node`, `edge`): 시맨틱 온톨로지. 노드=엔티티, 엣지=타입드 관계.
-//!   - 노드 id 규약: `doc:<source_path>` · `project:<name>` · `topic:<tag>`
+//! ## Layers (engine-agnostic graph model)
+//! - **pgvector** (`document`, `chunk`): vector (HNSW) + FTS (tsvector) + frontmatter columns.
+//! - **graph** (`node`, `edge`): semantic ontology. node = entity, edge = typed relation.
+//!   - node id convention: `doc:<source_path>` · `project:<name>` · `topic:<tag>`
 //!     · `problem|solution|tool|concept:<slug>` · `attempt:<path>#<idx>`.
-//!   - 문서는 `document` 테이블이 SSOT, 그래프에선 `doc:<path>` id 로 참조(중복저장 X).
-//! - **순회**: 재귀 CTE(`neighbors_khop`) — 엔진이 그래프DB 아니어도 k-hop 가능.
-//!   CTE 가 모자라지면 AGE/서리얼로 lift-and-shift (스키마 동일).
+//!   - the `document` table is the SSOT for documents; the graph references them by `doc:<path>` id (no duplicate storage).
+//! - **traversal**: recursive CTE (`neighbors_khop`) — k-hop works even when the engine is not a graph DB.
+//!   If the CTE proves insufficient, lift-and-shift to AGE/SurrealDB (schema is identical).
 //!
-//! ## AGE 대비 이점
-//! 모든 값이 `tokio-postgres` 파라미터 바인딩($1,$2…) → cypher 문자열 이스케이프 footgun 제거.
+//! ## Advantage over AGE
+//! Every value goes through `tokio-postgres` parameter binding ($1,$2…) → eliminates the cypher string-escaping footgun.
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -22,7 +22,7 @@ use crate::frontmatter::FrontMatter;
 #[allow(dead_code)]
 pub const EMBED_DIM: usize = 1024; // bge-m3
 
-/// 적재 입력(청크 1개).
+/// Ingest input (one chunk).
 pub struct Doc {
     pub id: String, // "{source_path}#{idx}"
     pub content: String,
@@ -32,7 +32,7 @@ pub struct Doc {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // 일부 필드는 retrieve · 표시용
+#[allow(dead_code)] // some fields are for retrieve / display only
 pub struct Hit {
     pub id: String,
     pub content: String,
@@ -50,7 +50,7 @@ pub struct Meta {
     pub source_path: String,
 }
 
-/// 최신순 회수 1건 — 한 문서의 본문 전체(청크 결합). `updated_at` 내림차순으로 반환.
+/// One recency-ordered retrieval — the full body of a single document (chunks joined). Returned by `updated_at` descending.
 #[derive(Debug)]
 pub struct RecentDoc {
     pub source_path: String,
@@ -58,7 +58,7 @@ pub struct RecentDoc {
     pub content: String,
 }
 
-/// 그래프 규모 요약(audit 용).
+/// Graph size summary (for audit).
 #[derive(Debug, Default)]
 pub struct GraphStats {
     pub documents: usize,
@@ -68,7 +68,7 @@ pub struct GraphStats {
     pub edges: usize,
 }
 
-/// GC 삭제 통계.
+/// GC deletion stats.
 #[derive(Debug, Default)]
 pub struct GcStats {
     pub tool: usize,
@@ -84,7 +84,7 @@ impl GcStats {
     }
 }
 
-/// 시맨틱 그래프 통계(audit 용).
+/// Semantic graph stats (for audit).
 #[derive(Debug, Default)]
 pub struct SemanticStats {
     pub problems: usize,
@@ -103,7 +103,7 @@ pub struct Store {
     db: Client,
 }
 
-/// 시맨틱 엣지 종류(doc→entity) — clear/통계에서 공유하는 SSOT.
+/// Semantic edge kinds (doc→entity) — the SSOT shared by clear/stats.
 const SEMANTIC_EDGE_KINDS: [&str; 6] = [
     "addresses",
     "resolved_by",
@@ -113,7 +113,7 @@ const SEMANTIC_EDGE_KINDS: [&str; 6] = [
     "solves",
 ];
 
-/// 청크 id("path#idx") → 그래프 문서 노드 id("doc:path").
+/// chunk id ("path#idx") → graph document node id ("doc:path").
 fn doc_node_id(chunk_or_path: &str) -> String {
     let path = chunk_or_path
         .rsplit_once('#')
@@ -144,12 +144,12 @@ async fn count_edge_kind(db: &Client, kind: &str) -> Result<usize> {
 }
 
 impl Store {
-    // ── 접속 + 스키마 보장 ────────────────────────────────────────────────────
+    // ── connect + ensure schema ───────────────────────────────────────────────
 
-    /// PostgreSQL 접속 + pgvector + node/edge 그래프 스키마 초기화.
+    /// PostgreSQL connect + pgvector + node/edge graph schema initialization.
     pub async fn open(dsn: &str) -> Result<Self> {
-        // connect 재시도(IO 경계, graceful) — postgres 가 profile 로 별도 기동될 때
-        // drudge 가 먼저 떠도 최대 ~10초 기다린다(depends_on 제거 → 기동 race 흡수).
+        // connect retry (IO boundary, graceful) — when postgres is started separately via profile
+        // drudge waits up to ~10s even if it comes up first (depends_on removed → absorbs startup race).
         let (client, conn) = {
             let mut tries = 0_u32;
             loop {
@@ -166,7 +166,7 @@ impl Store {
                 }
             }
         };
-        // 백그라운드 커넥션 드라이버 spawn.
+        // spawn the background connection driver.
         tokio::spawn(async move {
             if let Err(e) = conn.await {
                 eprintln!("postgres connection error: {e}");
@@ -258,7 +258,7 @@ impl Store {
         Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
-    /// 문서 mtime — claim 의 `valid_from`(시간축 정렬키). 없으면 now()(graceful).
+    /// Document mtime — the `valid_from` of a claim (temporal sort key). Falls back to now() if absent (graceful).
     pub async fn doc_updated_at(&self, path: &str) -> Result<SystemTime> {
         let rows = self
             .db
@@ -272,8 +272,8 @@ impl Store {
             .map_or_else(SystemTime::now, |r| r.get::<_, SystemTime>(0)))
     }
 
-    /// 내용 변화 없는(sha 동일) 문서의 최근성만 갱신 — 재임베딩 없이 mtime backfill.
-    /// 최신우선 정렬키(`updated_at`)가 기존 문서에도 채워지게 한다.
+    /// Update only the recency of documents whose content is unchanged (same sha) — mtime backfill without re-embedding.
+    /// Ensures the recency-first sort key (`updated_at`) is also populated for existing documents.
     pub async fn set_updated_at(&self, path: &str, updated_at: SystemTime) -> Result<()> {
         self.db
             .execute(
@@ -286,8 +286,8 @@ impl Store {
         Ok(())
     }
 
-    /// 최신순 문서 top-N — 본문 전체(청크 결합). 최신우선/supersede 브리핑의 회수.
-    /// 의미유사도가 아니라 `updated_at` 내림차순 = "최근에 바뀐 지식이 위".
+    /// Top-N documents by recency — full body (chunks joined). Retrieval for the recency-first/supersede briefing.
+    /// Ordered by `updated_at` descending rather than semantic similarity = "most recently changed knowledge on top".
     pub async fn recent_docs(
         &self,
         limit: i64,
@@ -318,11 +318,11 @@ impl Store {
             .collect())
     }
 
-    /// 문서↔문서 관계 — **구체** 시맨틱 노드(concept·tool·problem·solution)를
-    /// 공유하는 다른 문서를 공유개수 내림차순으로. Obsidian relates_to 투영의 근거.
-    /// 그래프(edge)에서 2-hop: doc → (공유 dst) ← otherDoc.
-    /// `project:`/`topic:` 는 제외 — 같은 프로젝트/흔한 태그는 전부를 연결해 헤어볼이 됨.
-    /// 최소 2개 이상 공유해야 링크(우연한 1개 겹침 노이즈 컷).
+    /// Document↔document relations — other documents that share **concrete** semantic nodes
+    /// (concept·tool·problem·solution), ordered by shared count descending. The basis for the Obsidian relates_to projection.
+    /// 2-hop over the graph (edge): doc → (shared dst) ← otherDoc.
+    /// `project:`/`topic:` are excluded — the same project / common tags would link everything and create a hairball.
+    /// Requires at least 2 shared nodes to link (cuts the noise of an accidental single overlap).
     pub async fn related_docs(&self, source_path: &str, limit: i64) -> Result<Vec<String>> {
         let doc_id = doc_node_id(source_path);
         let rows = self
@@ -342,7 +342,7 @@ impl Store {
             )
             .await
             .context("related docs")?;
-        // 'doc:<source_path>' → source_path 복원
+        // 'doc:<source_path>' → restore source_path
         Ok(rows
             .iter()
             .map(|r| {
@@ -352,8 +352,8 @@ impl Store {
             .collect())
     }
 
-    /// GraphRAG 회수: 한 문서와 **구체 concept/tool 을 공유**하는 연결문서 top-N 의 본문.
-    /// 벡터가 노이즈에 묻은 정답을, 그래프(개념 연결)로 끌어올린다. project/topic 제외.
+    /// GraphRAG retrieval: the body of the top-N connected documents that **share a concrete concept/tool** with a document.
+    /// Surfaces, via the graph (concept links), the right answer that the vector buried in noise. project/topic excluded.
     pub async fn related_doc_content(
         &self,
         source_path: &str,
@@ -394,8 +394,8 @@ impl Store {
             .collect())
     }
 
-    /// 같은 프로젝트의 최신 다른 문서 — 고립 문서(concept 겹침 0)용 fallback 링크.
-    /// concept 기반 링크가 없을 때만 보충해 orphan 을 막되, mesh 가 되진 않게 소수만.
+    /// The most recent other documents in the same project — fallback links for isolated documents (0 concept overlap).
+    /// Supplements only when there are no concept-based links to prevent orphans, but only a few so it doesn't become a mesh.
     pub async fn recent_project_docs(&self, source_path: &str, limit: i64) -> Result<Vec<String>> {
         let rows = self
             .db
@@ -413,9 +413,9 @@ impl Store {
         Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
-    /// 시간축 사실 claim upsert + supersede. 같은 `(subject,predicate)`의 옛 value 는
-    /// `superseded_at` 봉인, 최신 `valid_from` 행만 현재(NULL). 멱등(같은 행 재적재 무해).
-    /// gemma 추가호출 0 — extract 가 이미 뽑은 claims 를 그대로 받는다.
+    /// Temporal fact claim upsert + supersede. For the same `(subject,predicate)`, old values are
+    /// sealed via `superseded_at`, and only the latest `valid_from` row is current (NULL). Idempotent (re-ingesting the same row is harmless).
+    /// 0 extra gemma calls — takes the claims that extract already produced as-is.
     pub async fn upsert_claim(
         &self,
         subject: &str,
@@ -444,7 +444,7 @@ impl Store {
             )
             .await
             .context("insert claim")?;
-        // 최신 valid_from 미만은 모두 봉인, 최신 1행만 현재로.
+        // seal everything below the latest valid_from, leaving only the single latest row as current.
         self.db
             .execute(
                 "UPDATE claim c SET superseded_at = m.mx
@@ -469,7 +469,7 @@ impl Store {
         Ok(())
     }
 
-    /// **현재** claim(superseded_at IS NULL)을 최신순(valid_from desc) top-k. 브리핑 권위 주입용.
+    /// Top-k **current** claims (superseded_at IS NULL) by recency (valid_from desc). For injecting authority into the briefing.
     pub async fn recent_claims(&self, k: i64) -> Result<Vec<(String, String, String)>> {
         let rows = self
             .db
@@ -494,7 +494,7 @@ impl Store {
             .collect())
     }
 
-    /// 질의 임베딩 → **현재** claim(superseded_at IS NULL) top-k. 권위 회수.
+    /// Query embedding → top-k **current** claims (superseded_at IS NULL). Authority retrieval.
     pub async fn current_claims(
         &self,
         query_emb: &[f32],
@@ -524,8 +524,8 @@ impl Store {
             .collect())
     }
 
-    /// document upsert + project/topic 노드 + in_project/tagged 엣지 재생성(멱등).
-    /// `updated_at` = 소스 파일 mtime(진짜 최근성 신호) — 최신우선 회수의 정렬키.
+    /// document upsert + project/topic nodes + in_project/tagged edge regeneration (idempotent).
+    /// `updated_at` = source file mtime (the true recency signal) — the sort key for recency-first retrieval.
     pub async fn upsert_document(
         &self,
         front: &FrontMatter,
@@ -558,7 +558,7 @@ impl Store {
 
         let doc_id = doc_node_id(path);
 
-        // project 노드 + in_project 엣지
+        // project node + in_project edge
         if !front.project.is_empty() {
             let pid = format!("project:{}", front.project);
             self.upsert_node(&pid, "project", &front.project, None)
@@ -566,7 +566,7 @@ impl Store {
             self.upsert_edge(&doc_id, &pid, "in_project").await?;
         }
 
-        // tagged: 기존 제거 후 재생성(멱등)
+        // tagged: remove existing then regenerate (idempotent)
         self.db
             .execute(
                 "DELETE FROM edge WHERE src = $1 AND kind = 'tagged';",
@@ -588,7 +588,7 @@ impl Store {
         Ok(())
     }
 
-    /// 문서 + 청크(CASCADE) + 그래프 엣지/attempt 노드 제거(prune).
+    /// Remove (prune) document + chunks (CASCADE) + graph edges / attempt nodes.
     pub async fn delete_document(&self, path: &str) -> Result<()> {
         self.db
             .execute("DELETE FROM document WHERE source_path = $1;", &[&path])
@@ -606,7 +606,7 @@ impl Store {
         Ok(())
     }
 
-    // ── chunk (임베딩) ───────────────────────────────────────────────────────
+    // ── chunk (embedding) ─────────────────────────────────────────────────────
 
     pub async fn upsert_chunk(&self, d: &Doc) -> Result<()> {
         let vec = Vector::from(d.embedding.clone());
@@ -628,7 +628,7 @@ impl Store {
         Ok(())
     }
 
-    // ── 회수 ──────────────────────────────────────────────────────────────────
+    // ── retrieval ─────────────────────────────────────────────────────────────
 
     pub async fn vector_search(&self, vec: &[f32], k: usize) -> Result<Vec<Hit>> {
         let qvec = Vector::from(vec.to_vec());
@@ -679,7 +679,7 @@ impl Store {
             .collect())
     }
 
-    /// 증분 extract — `extracted_sha` 가 현재 `sha` 와 다른 문서만(변경/신규). 본문 결합 반환.
+    /// Incremental extract — only documents whose `extracted_sha` differs from the current `sha` (changed/new). Returns the joined body.
     pub async fn docs_needing_extract(&self) -> Result<Vec<(String, String)>> {
         let rows = self
             .db
@@ -708,7 +708,7 @@ impl Store {
         Ok(out)
     }
 
-    /// 문서를 추출 완료로 표시(extracted_sha ← sha) — 다음 sync 부터 변경 전까지 skip.
+    /// Mark a document as extracted (extracted_sha ← sha) — skipped from the next sync onward until it changes.
     pub async fn mark_extracted(&self, doc_path: &str) -> Result<()> {
         self.db
             .execute(
@@ -719,7 +719,7 @@ impl Store {
         Ok(())
     }
 
-    // ── 그래프 헬퍼 (node/edge upsert) ─────────────────────────────────────────
+    // ── graph helpers (node/edge upsert) ───────────────────────────────────────
 
     async fn upsert_node(
         &self,
@@ -750,7 +750,7 @@ impl Store {
         Ok(())
     }
 
-    // ── 시맨틱 노드 ────────────────────────────────────────────────────────────
+    // ── semantic nodes ──────────────────────────────────────────────────────────
 
     pub async fn upsert_problem(&self, slug: &str, text: &str) -> Result<()> {
         self.upsert_node(&format!("problem:{slug}"), "problem", text, None)
@@ -780,18 +780,18 @@ impl Store {
         self.upsert_node(&id, "attempt", what, Some(outcome)).await
     }
 
-    /// 이 문서의 시맨틱 엣지 + attempt 노드 제거(extract 멱등화).
+    /// Remove this document's semantic edges + attempt nodes (makes extract idempotent).
     pub async fn clear_semantic_edges(&self, doc_path: &str) -> Result<()> {
         let doc_id = doc_node_id(doc_path);
         let kinds: Vec<&str> = SEMANTIC_EDGE_KINDS.to_vec();
-        // doc → entity 엣지
+        // doc → entity edges
         self.db
             .execute(
                 "DELETE FROM edge WHERE src = $1 AND kind = ANY($2);",
                 &[&doc_id, &kinds],
             )
             .await?;
-        // 이 문서의 attempt 노드에 닿는 엣지(leads_to 등) + attempt 노드
+        // edges touching this document's attempt nodes (leads_to, etc.) + the attempt nodes
         let attempt_like = format!("attempt:{doc_path}#%");
         self.db
             .execute(
@@ -805,7 +805,7 @@ impl Store {
         Ok(())
     }
 
-    // ── 시맨틱 엣지 (doc → entity) ─────────────────────────────────────────────
+    // ── semantic edges (doc → entity) ───────────────────────────────────────────
 
     pub async fn relate_doc_problem(&self, doc_path: &str, slug: &str) -> Result<()> {
         self.upsert_edge(
@@ -840,9 +840,9 @@ impl Store {
         .await
     }
 
-    // ── 그래프 회수 ────────────────────────────────────────────────────────────
+    // ── graph retrieval ───────────────────────────────────────────────────────
 
-    /// 구조 이웃(project/topic) — 청크의 문서에서 1-hop. 라벨 반환.
+    /// Structural neighbors (project/topic) — 1-hop from the chunk's document. Returns labels.
     pub async fn graph_neighbors(&self, chunk_id: &str) -> Result<Vec<String>> {
         let doc_id = doc_node_id(chunk_id);
         let rows = self
@@ -856,7 +856,7 @@ impl Store {
         Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
-    /// 시맨틱 이웃(problem/solution/tool/concept/attempt) — 문서에서 1-hop. 라벨 반환.
+    /// Semantic neighbors (problem/solution/tool/concept/attempt) — 1-hop from the document. Returns labels.
     pub async fn semantic_neighbors(&self, chunk_id: &str) -> Result<Vec<String>> {
         let doc_id = doc_node_id(chunk_id);
         let rows = self
@@ -870,7 +870,7 @@ impl Store {
         Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
-    /// lineage — 같은 문서 내 attempt[from] → attempt[to] (`leads_to`). 문제해결 서사 순서.
+    /// lineage — within the same document, attempt[from] → attempt[to] (`leads_to`). The order of the problem-solving narrative.
     pub async fn relate_leads_to(
         &self,
         doc_path: &str,
@@ -882,7 +882,7 @@ impl Store {
         self.upsert_edge(&src, &dst, "leads_to").await
     }
 
-    // ── 통계 / GC ─────────────────────────────────────────────────────────────
+    // ── stats / GC ──────────────────────────────────────────────────────────────
 
     pub async fn graph_stats(&self) -> Result<GraphStats> {
         Ok(GraphStats {
@@ -909,7 +909,7 @@ impl Store {
         })
     }
 
-    /// 고아 시맨틱 노드 제거 — 엣지에서 참조되지 않는 entity 노드.
+    /// Remove orphan semantic nodes — entity nodes not referenced by any edge.
     pub async fn gc_orphans(&self) -> Result<GcStats> {
         let mut gc = GcStats::default();
         for kind in ["tool", "concept", "problem", "solution", "attempt"] {

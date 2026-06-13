@@ -1,12 +1,12 @@
-# oh-my-boring — 라이브 스택 (로컬 도커). 3컨테이너 + 호스트 Ollama.
-#   docker compose up -d   # postgres(pgvector) + drudge(RAG 엔진) + hermes-agent(죠셉)
-#   Slack·자율·회수는 hermes-agent(Nous Hermes Agent)가 담당. 모델은 호스트 Ollama(gemma4).
+# oh-my-boring — live stack (local Docker). 3 containers + host Ollama.
+#   docker compose up -d   # postgres(pgvector) + drudge(RAG engine) + hermes-agent(Joseph)
+#   Slack, autonomy, and recall are handled by hermes-agent (Nous Hermes Agent). The model is host Ollama (gemma4).
 name: oh-my-boring
 
 services:
-  # ─────────────────────────── Postgres + pgvector (그래프=node/edge+CTE) ─────
-  # 벡터(HNSW) + FTS + 그래프(node/edge 테이블, 재귀 CTE). AGE 없이 순수 pgvector.
-  # 옵트인: wiki 1급이 기본이라 pgvector 는 `--profile vector` 일 때만 뜬다(graph+vector 맛볼 때).
+  # ─────────────────────────── Postgres + pgvector (graph = node/edge + CTE) ─────
+  # Vector (HNSW) + FTS + graph (node/edge tables, recursive CTE). Pure pgvector, no AGE.
+  # Opt-in: wiki-first is the default, so pgvector comes up only with `--profile vector` (to try graph+vector).
   postgres:
     profiles: ["vector"]
     image: pgvector/pgvector:pg16
@@ -17,61 +17,61 @@ services:
       POSTGRES_PASSWORD: boring
       POSTGRES_DB: boring
     volumes:
-      - ./data/pgdata:/var/lib/postgresql/data   # 영속(컨테이너 날려도 보존)
+      - ./data/pgdata:/var/lib/postgresql/data   # persistent (survives container teardown)
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U boring -d boring"]
       interval: 3s
       timeout: 3s
       retries: 30
     ports:
-      - "127.0.0.1:5432:5432"             # DataGrip/직접 접속용
+      - "127.0.0.1:5432:5432"             # for DataGrip / direct connection
 
-  # ─────────────────────────── drudge (Rust 엔진) ─────────────────────────
-  # 적재(ingest)·회수(ask/graph)·감사(audit)·vault compile 을 HTTP + 크론으로 수행.
+  # ─────────────────────────── drudge (Rust engine) ─────────────────────────
+  # Performs ingest, recall (ask/graph), audit, and vault compile over HTTP + cron.
   drudge:
     build:
       context: ./drudge
     image: boring-drudge
     container_name: boring-drudge
     restart: unless-stopped
-    # depends_on 없음 — wiki 기본 모드는 postgres 불필요. vector 모드는 `--profile vector` 로
-    # postgres 가 함께 뜨고, Store::open 의 connect 재시도(~10s)가 기동 race 를 흡수.
+    # No depends_on — the default wiki mode doesn't need postgres. In vector mode, `--profile vector`
+    # brings up postgres alongside, and Store::open's connect retry (~10s) absorbs the startup race.
     environment:
-      DRUDGE_LLM_BASE_URL: http://host.docker.internal:11434/v1  # OpenAI-호환. LM Studio 등으로 교체 가능
-      DRUDGE_LLM_MODEL: gemma4:12b        # 합성 모델 (think=false 는 llm.rs 가 Ollama 대상 부착)
+      DRUDGE_LLM_BASE_URL: http://host.docker.internal:11434/v1  # OpenAI-compatible. Swappable for LM Studio, etc.
+      DRUDGE_LLM_MODEL: gemma4:12b        # synthesis model (think=false is attached by llm.rs for Ollama targets)
       DRUDGE_HTTP_ADDR: 0.0.0.0:7700
       PG_DSN: postgresql://boring:boring@postgres:5432/boring
-      # 회수 소스: CC 메모리(.claude) + 큐레이션된 vault/wiki(자가증강 SSOT).
+      # Recall sources: CC memory (.claude) + curated vault/wiki (self-augmentation SSOT).
       DRUDGE_SOURCE_DIRS: /host/.claude/projects:/vault/wiki
-      DRUDGE_VAULT_DIR: /vault             # vault compile(raw→wiki) 대상
-      DRUDGE_VECTOR: ${DRUDGE_VECTOR:-off} # 기본 off=wiki 1급 직독. on=벡터+그래프(--profile vector 로 postgres 동반)
+      DRUDGE_VAULT_DIR: /vault             # target of vault compile (raw→wiki)
+      DRUDGE_VECTOR: ${DRUDGE_VECTOR:-off} # default off = wiki-first direct read. on = vector+graph (postgres alongside via --profile vector)
       DRUDGE_SYNC_HOURS: "4"
       TZ: Asia/Seoul
     volumes:
-      - ${HOME}/.claude:/host/.claude:ro  # CC 자동메모리 소스
-      - ./vault:/vault                    # 자가증강 vault (raw→compile→wiki)
+      - ${HOME}/.claude:/host/.claude:ro  # CC auto-memory source
+      - ./vault:/vault                    # self-augmentation vault (raw→compile→wiki)
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "127.0.0.1:7700:7700"             # 호스트 디버그/직접 curl 용
+      - "127.0.0.1:7700:7700"             # for host debugging / direct curl
 
-  # ─────────────────────────── Hermes Agent (죠셉의 몸) ─────────────────────
-  # Nous Hermes Agent — 자율 에이전트. ~/.hermes 볼륨에 config·메모리 영속 → 컨테이너 disposable.
-  # Mac: 그들 compose 의 network_mode:host 는 Mac Docker 미지원 → bridge + host.docker.internal.
-  # drudge(우리 RAG)는 MCP 기억백엔드로 별도 연결(같은 스택, 사이드카). 구 joseph 은 검증 후 은퇴.
-  # 기본 코어 — 에이전트가 적재를 *모는* 뇌. 단 이미지는 레포 미포함(외부 빌드) + ~/.hermes 의존:
-  # start.sh 가 이미지 유무를 선확인해 없으면 빌드안내 후 멈춘다(cryptic compose 실패 대신).
+  # ─────────────────────────── Hermes Agent (Joseph's body) ─────────────────────
+  # Nous Hermes Agent — autonomous agent. Persists config/memory in the ~/.hermes volume → the container is disposable.
+  # Mac: their compose's network_mode:host isn't supported by Mac Docker → bridge + host.docker.internal.
+  # drudge (our RAG) is connected separately as the MCP memory backend (same stack, sidecar). The old joseph retires after validation.
+  # Default core — the agent is the brain that *drives* ingestion. But the image isn't in the repo (external build) + depends on ~/.hermes:
+  # start.sh checks for the image first and, if absent, prints build guidance and stops (instead of a cryptic compose failure).
   hermes-agent:
-    image: hermes-agent                   # 외부 빌드 필요(레포 미포함, Nous Hermes Agent)
+    image: hermes-agent                   # requires external build (not in repo, Nous Hermes Agent)
     container_name: boring-agent
     restart: unless-stopped
     environment:
-      HERMES_UID: ${HERMES_UID:-501}      # 호스트 유저 uid (~/.hermes 파일권한)
+      HERMES_UID: ${HERMES_UID:-501}      # host user uid (~/.hermes file permissions)
       HERMES_GID: ${HERMES_GID:-20}
       TZ: Asia/Seoul
     volumes:
-      - ${HOME}/.hermes:/opt/data         # config·자격증명·세션메모리 영속(자율증강 레이어)
-      - ${HOME}/.claude:/host/.claude:ro  # 쓰기 정문(DISTILL_VIA_AGENT): 세션 트랜스크립트 읽기용
+      - ${HOME}/.hermes:/opt/data         # persists config / credentials / session memory (autonomy-augmentation layer)
+      - ${HOME}/.claude:/host/.claude:ro  # write front door (DISTILL_VIA_AGENT): for reading session transcripts
     extra_hosts:
-      - "host.docker.internal:host-gateway"   # Mac: 호스트 Ollama(gemma4) 도달
+      - "host.docker.internal:host-gateway"   # Mac: reach host Ollama (gemma4)
     command: ["gateway", "run"]

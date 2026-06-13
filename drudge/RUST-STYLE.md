@@ -1,116 +1,116 @@
-# 러스트 작성법
+# How to Write Rust
 
-> "왜"는 → `PHILOSOPHY.md`. 이 문서는 **"어떻게"**.
-> 예제는 일부러 안 둔다 — 예제는 한 형태를 복붙하게 만들어 사고를 멈춘다.
-> 규칙은 사고를 강제한다. 막히면 → E의 공식 출처를 본다.
-> 무엇을 *기계가* 잡고 무엇을 *리뷰가* 잡는지는 → `ENFORCEMENT.md`.
+> The "why" → `PHILOSOPHY.md`. This document is the **"how."**
+> Examples are deliberately omitted — an example makes you copy-paste one shape and stops your thinking.
+> Rules force thinking. When stuck → look at the official source in E.
+> For what the *machine* catches versus what *review* catches → `ENFORCEMENT.md`.
 
-세 영역으로 나뉜다. **겹치지 않는 건 짧게, 겹치는 게 알맹이다.**
+It splits into three areas. **What doesn't overlap is short; what overlaps is the meat.**
 
-- **러스트만** (도구가 강제) → 0번. 외울 필요 없음.
-- **나만** (러스트가 안 미는 함수형 어휘) → C. 내 정체성.
-- **교차** (러스트도 나도 미는 것) → A·B. **문서의 핵심.**
-
----
-
-## 0. 러스트 공식 (도구가 강제 — 적을수록 좋다)
-
-내 철학과 무관. `cargo fmt` + `clippy`가 기계적으로 잡으니 외우지 않는다.
-
-- [ ] `cargo fmt` 통과 전제. 포매팅 논쟁 금지.
-- [ ] `cargo clippy` 경고는 **읽고 판단**. 무시할 땐 `#[allow(...)]`로 이유와 함께 명시 (맹목적 0개 강박 금지).
-- [ ] 명명·변환 메서드(`as_`/`to_`/`into_`)·트레잇 구현은 공식을 따른다 → E.
+- **Rust only** (enforced by tools) → Section 0. No need to memorize.
+- **Me only** (the functional vocabulary Rust doesn't push) → C. My identity.
+- **The intersection** (what both Rust and I push) → A·B. **The core of this document.**
 
 ---
 
-## A. 교차 구간 — 러스트도 나도 미는 것 [문서의 핵심]
+## 0. The Rust Official Stuff (enforced by tools — the less the better)
 
-여기가 "내 철학 = 러스트 주류"가 만나는 곳. 가장 신뢰도 높고, 가장 먼저 본다.
+Unrelated to my philosophy. `cargo fmt` + `clippy` catch it mechanically, so I don't memorize it.
 
-### ADT — 불가능한 상태를 표현 불가능하게 [1겹]
-- [ ] 상태를 bool 플래그 조합으로 두지 말 것. `enum`으로 불가능 조합을 타입에서 닫는다.
-- [ ] 러스트 공식 패턴명: **type-driven design / make illegal states unrepresentable.**
-- [ ] `match`는 exhaustive. `_ =>`로 뭉개지 말 것 — 새 variant가 컴파일 에러로 잡혀야 한다.
-
-### 에러는 ADT다 [1겹]
-- [ ] 에러 타입 선택은 **"누가 이 에러를 분기하느냐"**로 갈린다 (통념 "라이브러리=thiserror/바이너리=anyhow"는 부정확):
-  - *코드가* `match`로 실패 모드를 나눈다 → `thiserror` enum (타입이 증거)
-  - *사람이* 읽고 끝 (최외곽 `main` 합류점, 더 분기 안 함) → `anyhow` 허용 (1겹 비적용 구간)
-  - 도메인/내부로 `anyhow`가 새면 → **1겹 위반.** 애매하면 thiserror.
-- [ ] 에러 변환은 `From` 구현 → `?`가 자동 변환. (이게 없으면 `?`가 컴파일 안 됨 — 가장 흔한 막힘)
-
-### Parse, Don't Validate [1겹]
-- [ ] 외부 입력은 **경계에서 1회** newtype으로 파싱. 생성자 private, `parse()`만 public.
-- [ ] 검증된 타입(`Email`, `NonEmpty`)을 내부로 흘린다. 안에서 재검사 금지 — 타입이 이미 증거.
-- [ ] 같은 값을 두 번 검사하는 `validate()`가 보이면 설계 실패.
+- [ ] `cargo fmt` passing is a precondition. No formatting debates.
+- [ ] `cargo clippy` warnings are to be **read and judged**. When ignoring one, state the reason explicitly via `#[allow(...)]` (no blind zero-warning obsession).
+- [ ] Naming, conversion methods (`as_`/`to_`/`into_`), and trait implementations follow the official guidelines → E.
 
 ---
 
-## B. 교차 구간 — 흐름과 절제 [러스트의 결을 탄다]
+## A. The Intersection — What Both Rust and I Push [the core of this document]
 
-### 흐름은 한 방향 [2겹]
-- [ ] 데이터는 위→아래 한 방향. 콜백 지옥·순환 의존 금지.
-- [ ] 소유권 move 자체가 선형 — 한 번 쓴 값 재사용 막힘을 활용.
-- [ ] `unwrap`/`expect`/`panic!` 금지(프로토타입·테스트 제외). 실패는 `Result`+`?`로 흐른다.
-  - 손에 `Option`인데 함수가 `Result`면 → `.ok_or(err)?`. (반대는 `.ok()`)
-  - 실패가 "에러"가 아니라 "기본값/분기"면 `?` 말고 `.unwrap_or`/`match`.
+This is where "my philosophy = Rust mainstream" meets. Highest confidence, look here first.
 
-### 의존성 역전 — 단, 절제가 과용을 막는다 [2겹 × 3겹]
-- [ ] 도메인이 구체 구현(DB·HTTP)에 의존하지 않게. trait에 의존, 구현은 주입.
-- [ ] **trait은 공짜가 아니다.** 판단 기준: "다른 구현이 실제로(테스트 mock 포함) 존재하는가?"
-  - 예(I/O 경계: DB·HTTP·시계·파일 — 테스트 격리 필요) → trait
-  - 아니오(순수 로직, 구현 1개) → enum / 직접 호출. trait-object 만들지 말 것.
+### ADT — Make Impossible States Unrepresentable [Layer 1]
+- [ ] Don't represent state as a combination of bool flags. Close impossible combinations off in the type with an `enum`.
+- [ ] Official Rust pattern names: **type-driven design / make illegal states unrepresentable.**
+- [ ] `match` must be exhaustive. Don't paper over with `_ =>` — a new variant should be caught as a compile error.
 
-### 절제 [3겹]
-- [ ] 추상화 전에 묻는다: "더 단순한 표현이 같은 불변식을 보장하나?"
-- [ ] trait 한 겹으로 될 걸 제네릭 3중첩으로 만들지 말 것.
-- [ ] DRY 광신 경계. 추상화는 **세 번째 중복**에서 고민 시작 (rule of three).
-- [ ] SRP: I/O와 순수 로직 분리. 순수 함수는 인자→값(테스트 쉬움), 부수효과는 바깥 얇은 껍질로.
+### Errors Are ADTs [Layer 1]
+- [ ] Choosing the error type comes down to **"who branches on this error"** (the common wisdom "library = thiserror / binary = anyhow" is imprecise):
+  - *Code* splits failure modes with `match` → `thiserror` enum (the type is the proof)
+  - *A human* reads it and that's the end (the outermost `main` confluence point, no further branching) → `anyhow` allowed (a region where Layer 1 doesn't apply)
+  - If `anyhow` leaks into the domain/internals → **Layer 1 violation.** When in doubt, thiserror.
+- [ ] Error conversion is a `From` impl → `?` converts automatically. (Without this, `?` won't compile — the most common sticking point.)
 
----
-
-## C. 나만의 어휘 — 러스트가 안 미는 것 [내 정체성]
-
-개념은 러스트 주류와 같지만 *이름*은 함수형 진영에서 내가 가져왔다 (King·Wlaschin).
-"공식인가?" 헷갈리지 말 것 — 이건 내 재명명이다.
-
-- **fail-fast** = PDV의 실행 방식. `?`가 그 문법적 구현체. 기본값.
-  - 예외: UX 경계(폼 입력)는 에러 누적(`Validated`). 첫 실패에 튕기면 사용자가 짜증 → 여기만 `?` 못 씀.
-- **ROP** = `Result` 두 트랙 사고. 성공/실패 철도.
-- **관용적 흡수** = 공통 `Monad` trait·HKT 흉내(`higher`)·트랜스포머 이식 **하지 않는다.**
-  HKT가 없어 다 PoC에 그친다. 개별 모나드 API(`map`/`and_then`/`?`/`flat_map`)를 쓴다.
-  → **값 수준에서 충분히 함수형, 타입/모듈 수준 일반화는 포기.**
+### Parse, Don't Validate [Layer 1]
+- [ ] External input is parsed into a newtype **once at the boundary**. Constructor private, only `parse()` public.
+- [ ] Flow validated types (`Email`, `NonEmpty`) inward. No re-checking inside — the type is already the proof.
+- [ ] If you see a `validate()` that checks the same value twice, the design has failed.
 
 ---
 
-## D. 자주 막히는 곳 — 빠른 답
+## B. The Intersection — Flow and Restraint [riding Rust's grain]
 
-- `|>` 파이프 없음 → 메서드 체이닝이 곧 파이프. 자유 함수는 `let` 단계(억지 아님, 기본 관용구). 자주 쓰는 변환은 확장 trait으로 메서드화.
-- 여러 `Result`를 한 번에 → `iter.collect::<Result<Vec<_>,E>>()`. 첫 에러에서 멈춤(= `traverse`).
-- bind = `.and_then`(Option/Result) / `.flat_map`(Iterator). map = `.map`. 실패 변환 = `.map_err`(Result).
-- 불변 영속 자료구조가 진짜 필요하면 `im`. (대부분 불필요)
-- **async**(I/O 경계): `?` 전파는 동일. 멀티스레드 런타임(tokio 기본)에서 await를 넘는 에러는 `Send` 필요 — 필드가 다 `Send`면 `thiserror` derive가 따라온다(자동 보장 아님, 필드에 달림). trait의 async 메서드는 `async-trait` 또는 RPITIT. 세부는 공식 확인 → E.
+### Flow Goes One Way [Layer 2]
+- [ ] Data goes one direction, top → bottom. No callback hell, no cyclic dependencies.
+- [ ] An ownership move is itself linear — exploit the fact that a value used once can't be reused.
+- [ ] No `unwrap`/`expect`/`panic!` (except prototypes and tests). Failure flows via `Result`+`?`.
+  - You have an `Option` but the function returns `Result` → `.ok_or(err)?`. (The reverse is `.ok()`)
+  - If a failure is not an "error" but a "default/branch," use `.unwrap_or`/`match` instead of `?`.
+
+### Dependency Inversion — but Restraint Prevents Overuse [Layer 2 × Layer 3]
+- [ ] Keep the domain from depending on concrete implementations (DB·HTTP). Depend on a trait; inject the implementation.
+- [ ] **A trait is not free.** Criterion: "Does another implementation actually exist (including a test mock)?"
+  - Yes (I/O boundary: DB·HTTP·clock·file — needs test isolation) → trait
+  - No (pure logic, a single implementation) → enum / direct call. Don't make a trait object.
+
+### Restraint [Layer 3]
+- [ ] Before abstracting, ask: "Does a simpler representation guarantee the same invariant?"
+- [ ] Don't build with triple-nested generics what a single trait layer would do.
+- [ ] Beware DRY zealotry. Abstraction starts being considered at the **third duplication** (rule of three).
+- [ ] SRP: separate I/O from pure logic. Pure functions go args→value (easy to test); side effects live in a thin outer shell.
 
 ---
 
-## E. 헷갈리면 공식을 본다 (추측 금지)
+## C. My Own Vocabulary — What Rust Doesn't Push [my identity]
 
-충돌 시 규칙: **명명·스타일·API 설계는 공식이 이긴다. 설계 철학(C)은 내 선택이라 이 문서가 이긴다.**
+The concepts are the same as Rust mainstream, but the *names* I brought over from the functional camp (King·Wlaschin).
+Don't get confused about "is this official?" — this is my renaming.
 
-| 헷갈릴 때 | 출처 |
+- **fail-fast** = the way PDV executes. `?` is its syntactic implementation. The default.
+  - Exception: UX boundaries (form input) accumulate errors (`Validated`). Bouncing on the first failure annoys the user → this is the only place `?` can't be used.
+- **ROP** = the two-track `Result` mindset. The success/failure railway.
+- **Idiomatic absorption** = a shared `Monad` trait · HKT mimicry (`higher`) · transformer transplant — **none of these.**
+  Without HKT they all stay PoC. Use the individual monad APIs (`map`/`and_then`/`?`/`flat_map`).
+  → **Functional enough at the value level; give up generalization at the type/module level.**
+
+---
+
+## D. Common Sticking Points — Quick Answers
+
+- No `|>` pipe → method chaining is the pipe. For free functions, `let` steps (not a hack, the default idiom). For frequently used conversions, methodize via an extension trait.
+- Several `Result`s at once → `iter.collect::<Result<Vec<_>,E>>()`. Stops at the first error (= `traverse`).
+- bind = `.and_then` (Option/Result) / `.flat_map` (Iterator). map = `.map`. failure conversion = `.map_err` (Result).
+- If you genuinely need an immutable persistent data structure, `im`. (Mostly unnecessary.)
+- **async** (I/O boundary): `?` propagation is the same. On a multithreaded runtime (tokio by default), an error crossing an await needs `Send` — if all fields are `Send`, the `thiserror` derive follows along (not an automatic guarantee; it hangs on the fields). For async methods in a trait, `async-trait` or RPITIT. Check the official docs for details → E.
+
+---
+
+## E. When Unsure, Look at the Official Source (no guessing)
+
+Rule on conflict: **for naming/style/API design, the official source wins. For design philosophy (C), it's my choice, so this document wins.**
+
+| When unsure | Source |
 |---|---|
-| 명명·casing·변환 메서드·트레잇 구현 | https://rust-lang.github.io/api-guidelines/ (체크리스트: /checklist.html) |
-| 관용 패턴·안티패턴 | `cargo clippy` + https://rust-lang.github.io/rust-clippy/ |
-| 에러·Result·Option·match·이터레이터 | The Book — https://doc.rust-lang.org/book/ |
-| 설계 패턴(함수형·관용구) | https://rust-unofficial.github.io/patterns/ |
-| 표준 라이브러리 정확한 시그니처 | https://doc.rust-lang.org/std/ |
+| naming · casing · conversion methods · trait implementations | https://rust-lang.github.io/api-guidelines/ (checklist: /checklist.html) |
+| idiomatic patterns · anti-patterns | `cargo clippy` + https://rust-lang.github.io/rust-clippy/ |
+| errors · Result · Option · match · iterators | The Book — https://doc.rust-lang.org/book/ |
+| design patterns (functional · idioms) | https://rust-unofficial.github.io/patterns/ |
+| exact standard-library signatures | https://doc.rust-lang.org/std/ |
 
-**기억에 의존해 명명·API를 추측하지 말 것.** 확인하거나, 못 하면 그렇다고 밝히고 보수적으로.
+**Don't guess naming/APIs from memory.** Verify, or if you can't, say so and stay conservative.
 
 ---
 
-## 막히면
+## When Stuck
 
-> 1겹 **"이 코드가 거짓말을 하는가?"** > 2겹 **"흐름이 한 방향인가?"** > 3겹 **"이 구조 없으면 누가 아쉬운가?"**
+> Layer 1 **"Does this code lie?"** > Layer 2 **"Is the flow one-directional?"** > Layer 3 **"Who would miss this structure if it weren't there?"**
 
-우선순위 1 > 2 > 3. 상위가 하위를 이긴다.
+Priority 1 > 2 > 3. The higher beats the lower.

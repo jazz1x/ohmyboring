@@ -1,16 +1,16 @@
-//! wiki_recall — `vault/wiki/*.md` 를 직접 읽어 회수한다 (pgvector·임베딩 불필요).
+//! wiki_recall — retrieve by reading `vault/wiki/*.md` directly (no pgvector·embeddings needed).
 //!
-//! Karpathy-wiki 1급 경로: 개인·소규모 코퍼스(수백 문서)에선 마크다운 직독이 RAG 보다 단순·신뢰·
-//! 디버그 쉬움(2026 트렌드 + repo `CLAUDE.md` "simplest thing that works"). pgvector(vector+graph)는
-//! 규모/정확도 trigger 넘을 때 켜는 옵셔널 가속기.
+//! Karpathy-wiki first-class path: for a personal, small corpus (hundreds of documents), reading markdown directly is simpler, more
+//! trustworthy, and easier to debug than RAG (2026 trend + repo `CLAUDE.md` "simplest thing that works"). pgvector (vector+graph) is
+//! an optional accelerator turned on when the scale/accuracy trigger is crossed.
 //!
-//! 스코어링: 토큰 *동등*이 아니라 **부분일치 빈도**. 한국어 가산어미(임베딩→"임베딩은")·영어 부분어를
-//! 포용한다(형태소 분석 없이 무난). title 일치는 가중. 순수 로직(`score_doc`)과 I/O(`recall`) 분리(SRP).
+//! Scoring: not token *equality* but **substring-match frequency**. Tolerates Korean attached endings (임베딩→"임베딩은") and English
+//! partial words (decent without morphological analysis). Title matches are weighted. Separates pure logic (`score_doc`) from I/O (`recall`) (SRP).
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
-/// 회수 결과 1건 (벡터 경로의 hit 와 호환되는 최소 필드).
+/// A single retrieval result (minimal fields compatible with the vector path's hit).
 #[derive(Debug, Clone)]
 pub struct WikiHit {
     pub id: String,
@@ -20,7 +20,7 @@ pub struct WikiHit {
     pub score: f32,
 }
 
-/// 쿼리를 검색어로 쪼갬 — 공백 분리 + 2자 이상 + 소문자. 순수.
+/// Split the query into search terms — whitespace split + 2+ chars + lowercase. Pure.
 fn query_terms(query: &str) -> Vec<String> {
     query
         .split_whitespace()
@@ -32,7 +32,7 @@ fn query_terms(query: &str) -> Vec<String> {
         .collect()
 }
 
-/// `haystack` 안의 `needle` 비중첩 출현 횟수. 순수.
+/// Non-overlapping occurrence count of `needle` within `haystack`. Pure.
 fn count_occurrences(haystack: &str, needle: &str) -> usize {
     if needle.is_empty() {
         return 0;
@@ -46,8 +46,8 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
     n
 }
 
-/// title+body 점수 + 스니펫. 매칭 0이면 None. 순수.
-/// 점수 = Σ(body 출현) + 3·Σ(title 출현) + 커버리지(맞은 distinct 검색어 수).
+/// title+body score + snippet. None if zero matches. Pure.
+/// score = Σ(body occurrences) + 3·Σ(title occurrences) + coverage (count of distinct matched terms).
 fn score_doc(title: &str, body: &str, terms: &[String]) -> Option<(f32, String)> {
     let tl = title.to_lowercase();
     let bl = body.to_lowercase();
@@ -70,23 +70,23 @@ fn score_doc(title: &str, body: &str, terms: &[String]) -> Option<(f32, String)>
     if score == 0 {
         return None;
     }
-    score += coverage; // 여러 검색어를 두루 맞춘 문서를 가산
+    score += coverage; // bonus for documents that match a broader set of search terms
     Some((
         precise_cast(score),
         snippet_around(body, first_hit.unwrap_or(0)),
     ))
 }
 
-/// usize → f32 (점수 규모상 무손실 범위). clippy cast 게이트 회피용 헬퍼.
+/// usize → f32 (lossless range at score magnitudes). Helper to avoid the clippy cast gate.
 #[allow(clippy::cast_precision_loss)]
 fn precise_cast(n: usize) -> f32 {
     n as f32
 }
 
-/// `pos`(소문자 인덱스) 주변 ~200자 스니펫. 원문 body 에서 잘라냄(문자 경계 안전). 순수.
+/// ~200-char snippet around `pos` (lowercase index). Sliced from the original body (char-boundary safe). Pure.
 fn snippet_around(body: &str, pos: usize) -> String {
     let chars: Vec<char> = body.chars().collect();
-    // pos 는 바이트 인덱스(소문자 기준) — 대략 문자 인덱스로 환산(ASCII 가정 깨질 수 있어 clamp).
+    // pos is a byte index (lowercase basis) — approximately convert to a char index (the ASCII assumption may break, so clamp).
     let approx = body.get(..pos).map_or(0, |s| s.chars().count());
     let start = approx.saturating_sub(40);
     let end = (start + 200).min(chars.len());
@@ -99,7 +99,7 @@ fn snippet_around(body: &str, pos: usize) -> String {
     }
 }
 
-/// `--- yaml ---\nbody` 분리 + frontmatter 의 title 추출. 없으면 첫 `# ` 헤딩, 그것도 없으면 stem. 순수.
+/// Split `--- yaml ---\nbody` + extract the title from frontmatter. If absent, the first `# ` heading, and failing that the stem. Pure.
 fn extract_title_body<'a>(content: &'a str, stem: &str) -> (String, &'a str) {
     let (yaml, body) = content
         .strip_prefix("---\n")
@@ -121,8 +121,8 @@ fn extract_title_body<'a>(content: &'a str, stem: &str) -> (String, &'a str) {
     (stem.to_owned(), body)
 }
 
-/// `vault/wiki/*.md` 를 직접 읽어 query 와 가장 가까운 top-K (I/O 쉘 — 순수 `score_doc` 위임).
-/// wiki 디렉터리 부재·읽기 실패는 graceful: 빈 결과/스킵(회수는 절대 패닉 안 함).
+/// Read `vault/wiki/*.md` directly for the top-K closest to query (I/O shell — delegates to pure `score_doc`).
+/// Missing wiki directory · read failure are graceful: empty result/skip (recall never panics).
 pub fn recall(wiki_dir: &Path, query: &str, k: usize) -> Result<Vec<WikiHit>> {
     let terms = query_terms(query);
     if terms.is_empty() {
@@ -130,7 +130,7 @@ pub fn recall(wiki_dir: &Path, query: &str, k: usize) -> Result<Vec<WikiHit>> {
     }
     let mut hits: Vec<WikiHit> = Vec::new();
     let Ok(read_dir) = std::fs::read_dir(wiki_dir) else {
-        return Ok(Vec::new()); // wiki 아직 없음 — 정상(빈 회수)
+        return Ok(Vec::new()); // wiki doesn't exist yet — normal (empty recall)
     };
     for entry in read_dir {
         let path = entry.context("wiki 디렉터리 항목 읽기")?.path();
@@ -143,7 +143,7 @@ pub fn recall(wiki_dir: &Path, query: &str, k: usize) -> Result<Vec<WikiHit>> {
             .unwrap_or("")
             .to_owned();
         let Ok(content) = std::fs::read_to_string(&path) else {
-            continue; // 읽기 실패 스킵(graceful)
+            continue; // skip on read failure (graceful)
         };
         let (title, body) = extract_title_body(&content, &stem);
         if let Some((score, snippet)) = score_doc(&title, body, &terms) {
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn query_terms_splits_and_filters() {
-        assert_eq!(query_terms("bge-m3 임베딩 a"), vec!["bge-m3", "임베딩"]); // 1자 'a' 제외
+        assert_eq!(query_terms("bge-m3 임베딩 a"), vec!["bge-m3", "임베딩"]); // 1-char 'a' excluded
     }
 
     #[test]
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn score_doc_substring_handles_korean_josa() {
-        // 검색어 "임베딩" 이 body "임베딩은"(조사 붙음) 을 부분일치로 잡아야 함
+        // the term "임베딩" must catch the body "임베딩은" (with attached particle) via substring match
         let terms = query_terms("임베딩 차원");
         let (score, snip) = score_doc("벡터 노트", "bge-m3 임베딩은 1024차원이다", &terms)
             .expect("부분일치로 점수 나야 함");

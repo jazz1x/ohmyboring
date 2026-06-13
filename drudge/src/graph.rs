@@ -1,7 +1,7 @@
-//! Graph — project/topic edge + 벡터히트→그래프 1-hop 확장회수.
-//! "벡터로 찾고 → 그래프로 한 홉": pgvector 진입 + node/edge 재귀 CTE 확장.
+//! Graph — project/topic edge + vector-hit → graph 1-hop expansion recall.
+//! "find by vector → one hop by graph": pgvector entry + node/edge recursive CTE expansion.
 //!
-//! SRP: `query()` 는 순수 로직(데이터 반환), `run()` 은 CLI I/O 껍질.
+//! SRP: `query()` is pure logic (returns data), `run()` is the CLI I/O shell.
 use std::collections::HashSet;
 
 use anyhow::Result;
@@ -9,15 +9,15 @@ use anyhow::Result;
 use crate::llm::Llm;
 use crate::store::Store;
 
-/// `query()` 반환값 — HTTP 핸들러와 CLI 모두 사용.
+/// `query()` return value — used by both the HTTP handler and the CLI.
 pub struct GraphOut {
     pub hit: String,
     pub graph_neighbors: Vec<String>,
     pub semantic_neighbors: Vec<String>,
 }
 
-/// 순수 로직: 그래프 회수 → `GraphOut` 반환. I/O 없음.
-/// 벡터 히트가 없으면 `hit` 이 빈 문자열인 `GraphOut` 반환.
+/// Pure logic: graph recall → returns `GraphOut`. No I/O.
+/// If there is no vector hit, returns a `GraphOut` whose `hit` is an empty string.
 pub async fn query(store: &Store, llm: &Llm, q: &str) -> Result<GraphOut> {
     let qe = llm.embed(q).await?;
     let hits = store.vector_search(&qe, 1).await?;
@@ -52,7 +52,7 @@ pub async fn query(store: &Store, llm: &Llm, q: &str) -> Result<GraphOut> {
     })
 }
 
-/// CLI 껍질: `query()` 호출 후 stdout 출력.
+/// CLI shell: call `query()` then print to stdout.
 pub async fn run(store: &Store, llm: &Llm, q: &str) -> Result<()> {
     let gs = store.graph_stats().await?;
     println!(

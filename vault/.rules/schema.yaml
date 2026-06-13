@@ -1,31 +1,31 @@
-# Schema — oh-my-boring 개인 vault 의 페이지 ID / sources / frontmatter 스키마
+# Schema — the page ID / sources / frontmatter schema for the oh-my-boring personal vault
 #
-# 이 파일 = 봇/도구 기계 파싱용 SSOT (drudge `vault lint`/`vault audit` 가 읽음).
-# 사람용 자연어 설명은 .rules/frontmatter.md. 두 파일 정합 유지 필수.
+# This file = the SSOT for machine parsing by bots/tools (read by drudge `vault lint`/`vault audit`).
+# The human-facing natural-language description is .rules/frontmatter.md. The two files must stay consistent.
 
 page_id:
-  # 페이지 ID 정규식. wiki/<id>.md 파일명 + frontmatter id 가 모두 만족해야 함.
+  # Page ID regex. Both the wiki/<id>.md filename and the frontmatter id must satisfy it.
   pattern: "^wiki-\\d{4,5}$"
 
 sources:
-  # sources 필드의 경로가 가질 수 있는 prefix.
-  # raw/   = 불변 증거 스냅샷 (distill 노트, 세션 서사 등).
-  # meta/  = 메타 정보 (통합·계약 인용 시).
-  # .rules/ = governance 페이지가 가드 자체를 출처로 가질 때 (메타-페이지 예외).
+  # Allowed prefixes for paths in the sources field.
+  # raw/   = immutable evidence snapshots (distill notes, session narratives, etc.).
+  # meta/  = meta information (when citing integrations/contracts).
+  # .rules/ = when a governance page cites the guard itself as a source (meta-page exception).
   allowed_prefixes:
     - "raw/"
     - "meta/"
     - ".rules/"
 
 required_frontmatter:
-  # 페이지 frontmatter 의 필수 필드. 키 자체가 존재해야 함.
+  # Required fields in the page frontmatter. The keys themselves must exist.
   - id
   - title
   - kind
   - origin
   - date
 
-# kind / origin 허용값 (parse-don't-validate: 경계 1회 파싱)
+# Allowed values for kind / origin (parse-don't-validate: parse once at the boundary)
 kind:
   allowed_values:
     - note

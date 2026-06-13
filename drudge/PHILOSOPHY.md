@@ -1,107 +1,107 @@
-# 나의 철학 — 정합성의 설계자
+# My Philosophy — The Designer of Integrity
 
-> 내가 추구하는 것은 언어가 아니라 **정합성(integrity)** 이다.
-> *온전함*(부분이 전체와 모순 없음) + *정직함*(겉과 속이 같음).
-> 러스트는 이를 컴파일러가 강제해주는 현재 최고의 도구일 뿐, 도구라서가 아니라
-> 내 뼈와 도구의 뼈가 같아서 쓴다.
-
----
-
-## 한 문장
-
-> **상태가 거짓말하는 걸 못 견딘다. 그래서 거짓말이 불가능하도록 구조를 짠다.**
-
-ADT, Parse Don't Validate, fail-fast, ROP, SRP, 선형성, 의존성 역전, 경계,
-"타입이 증거", thin 설계 — 전부 이 한 문장의 변주다. 세 겹으로 나뉜다.
+> What I pursue is not a language but **integrity**.
+> *Wholeness* (parts not contradicting the whole) + *honesty* (the surface matching the inside).
+> Rust is merely the best tool currently available for having the compiler enforce this; I use it
+> not because it is a tool, but because its bones and mine are the same.
 
 ---
 
-## 1겹. 인식론 — 표현은 진실이어야 한다
+## In One Sentence
 
-코드가 세계를 정직하게 표현해야 한다. 표현과 실재의 간극을 0으로.
+> **I can't stand state that lies. So I structure things so that lying becomes impossible.**
 
-- `String`이 이메일을 담으면 거짓말 — 이메일 아닌 것도 담을 수 있으므로.
-- `Email` 타입은 진실 — 이메일만 담을 수 있으므로.
-- **좋은 설계는 틀릴 수 있는 길을 닫는다** (반증가능성의 코드판).
-
-### 판단 기준
-- 이 타입이 담을 수 **없어야** 할 값을 담을 수 있는가? → 있으면 타입이 거짓말 중.
-- bool 플래그 조합으로 "불가능한 상태"가 만들어지는가? → enum으로 닫는다.
-- 시그니처만 보고 무엇이 보장되는지 알 수 있는가? → 없으면 타입이 약하다.
-
-→ **ADT · Parse Don't Validate · "타입이 증거"** 가 여기서 나온다.
+ADT, Parse Don't Validate, fail-fast, ROP, SRP, linearity, dependency inversion, boundaries,
+"the type is the proof," thin design — all of these are variations on that one sentence. It splits into three layers.
 
 ---
 
-## 2겹. 미학 — 흐름은 한 방향이어야 한다
+## Layer 1. Epistemology — The Representation Must Be True
 
-데이터는 경계에서 들어와 한 방향으로 흐르고, 실패는 즉시 옆 트랙으로 빠지고,
-다시 돌아오지 않는다. 시간이 거꾸로 안 흐르듯 데이터도 거꾸로 안 흐르게.
+Code must represent the world honestly. Drive the gap between representation and reality to zero.
 
-엔트로피에 대한 저항이다. 방치하면 의존성이 얽히고 상태가 사방에서 변한다.
-강물에 둑이 아니라 **수로**를 판다.
+- A `String` holding an email is a lie — because it can also hold things that aren't emails.
+- An `Email` type is the truth — because it can only hold emails.
+- **Good design closes off the paths that can be wrong** (the code-level counterpart of falsifiability).
 
-### 판단 기준
-- 데이터가 위→아래 한 방향으로 흐르는가? 거꾸로/옆으로 새는 곳은 없는가?
-- 실패가 본 흐름을 더럽히지 않고 옆 트랙(`Err`)으로 빠지는가?
-- 잘못된 입력이 경계를 넘어 안쪽까지 들어오는가? → fail-fast로 문 앞에서 거부.
-- 순환 의존이 있는가? → 의존성 역전(trait)으로 방향을 한쪽으로.
+### Criteria
+- Can this type hold a value it **should not** be able to hold? → If so, the type is lying.
+- Do combinations of bool flags create "impossible states"? → Close them off with an enum.
+- Can you tell what is guaranteed just by looking at the signature? → If not, the type is weak.
 
-→ **선형성 · ROP · fail-fast · 의존성 역전** 이 여기서 나온다.
-
----
-
-## 3겹. 윤리 — 최소한의 개입으로 최대한을 보장한다
-
-더 많이 쌓는 게 아니라, **가장 적은 구조로 가장 많은 거짓말을 막는 것.**
-
-타입 광신자는 모든 걸 타입으로 덮는다(핵벙커).
-정합성의 설계자는 **어디에 한 겹만 두면 나머지가 다 보장되는가**를 찾는다.
-경계 한 곳에서 파싱하면 안쪽 전체가 안전해지는, 레버리지 큰 최소 개입점.
-이것이 우아함의 정의 — "더 뺄 게 없는 상태".
-
-### 판단 기준
-- 이 추상화가 정말 필요한가? 더 단순한 표현이 같은 불변식을 보장하나? (제1원칙)
-- 지금 안 만들면 누가 아쉬워하는가? 아무도 없으면 핵벙커다. 미뤄라.
-- trait 한 겹으로 될 걸 제네릭 3중첩으로 만들고 있지 않은가?
-- 중복이 무서워 성급히 추상화하는가? → rule of three. 세 번째에 고민 시작.
-
-→ **thin 설계 · SRP · 절제 · 핵벙커 경계** 가 여기서 나온다.
+→ **ADT · Parse Don't Validate · "the type is the proof"** come from here.
 
 ---
 
-## 충돌 시 우선순위
+## Layer 2. Aesthetics — The Flow Must Go One Way
 
-원칙은 반드시 충돌한다. 충돌하면 이 순서로 판단한다:
+Data enters at the boundary, flows in a single direction, and on failure immediately drops onto the side track,
+never to return. Just as time doesn't flow backward, data should not flow backward either.
 
-1. **정직함이 먼저 (1겹).** 빠르거나 우아해도 거짓말하는 타입은 탈락.
-2. **그 다음 흐름 (2겹).** 정직하다면, 단방향으로 흐르는 쪽.
-3. **마지막이 절제 (3겹).** 정직하고 단방향이면, 더 적은 구조.
+This is resistance to entropy. Left unattended, dependencies tangle and state mutates from all directions.
+You dig a **channel** in the river, not a dam.
 
-**상위 겹이 하위 겹을 이긴다.**
+### Criteria
+- Does data flow in one direction, top → bottom? Is there anywhere it leaks backward or sideways?
+- Does failure drop onto the side track (`Err`) without polluting the main flow?
+- Does invalid input cross the boundary and make it all the way inside? → Reject it at the door with fail-fast.
+- Is there a cyclic dependency? → Point the direction one way with dependency inversion (a trait).
 
-> 예: 에러 누적(Validated)은 fail-fast(2겹)를 어긴다.
-> 하지만 UX 경계에서 "사용자에게 모든 실패를 정직하게 보여주는 것"(1겹)이 우선이라
-> 정당하다. 1겹 > 2겹.
-
----
-
-## 언어를 넘어서
-
-이 세 겹은 러스트가 사라져도 작동한다.
-
-- 글을 써도 주장과 근거가 어긋나는 걸 못 견딘다 (1겹).
-- 팀을 짜도 책임이 사방으로 흐르는 걸 못 견딘다 (2겹).
-- 무얼 하든 과한 절차로 덮는 걸 부끄러워한다 (3겹).
-
-**"러스트 개발자"는 옅어질 수 있어도 "정합성의 설계자"는 안 옅어진다.**
-전자는 직무, 후자는 시선. 시선은 도구가 못 가져간다.
+→ **Linearity · ROP · fail-fast · dependency inversion** come from here.
 
 ---
 
-## 막히면
+## Layer 3. Ethics — Guarantee the Most with the Least Intervention
 
-> **"이 코드가 거짓말을 하는가?"**
+Not piling on more, but **blocking the most lies with the least structure.**
 
-이 한 질문으로 돌아온다. 아니오면 통과. 의심되면 더 단순하게.
-구체적 작성법은 → `RUST-STYLE.md`
+A type zealot covers everything in types (a nuclear bunker).
+The designer of integrity looks for **where placing a single layer guarantees all the rest**.
+Parsing at one boundary makes the entire inside safe — the high-leverage, minimal point of intervention.
+This is the definition of elegance — "the state where there is nothing more to remove."
+
+### Criteria
+- Is this abstraction really needed? Does a simpler representation guarantee the same invariant? (First principles)
+- If I don't build it now, who will miss it? If nobody, it's a nuclear bunker. Defer it.
+- Am I building with triple-nested generics what a single trait layer would do?
+- Am I abstracting prematurely out of fear of duplication? → rule of three. Start worrying at the third one.
+
+→ **Thin design · SRP · restraint · the nuclear-bunker boundary** come from here.
+
+---
+
+## Priority When They Conflict
+
+Principles will inevitably conflict. When they do, judge in this order:
+
+1. **Honesty comes first (Layer 1).** A type that lies is out, however fast or elegant.
+2. **Then flow (Layer 2).** If it's honest, prefer the side that flows in one direction.
+3. **Restraint is last (Layer 3).** If it's honest and one-directional, prefer less structure.
+
+**The higher layer beats the lower layer.**
+
+> Example: error accumulation (Validated) violates fail-fast (Layer 2).
+> But at a UX boundary, "honestly showing the user every failure" (Layer 1) takes priority,
+> so it is justified. Layer 1 > Layer 2.
+
+---
+
+## Beyond the Language
+
+These three layers keep working even if Rust disappears.
+
+- When I write prose, I can't stand a claim and its evidence not lining up (Layer 1).
+- When I build a team, I can't stand responsibility flowing in all directions (Layer 2).
+- Whatever I do, I'm ashamed to paper it over with excessive procedure (Layer 3).
+
+**"Rust developer" can fade, but "designer of integrity" does not.**
+The former is a job; the latter is a way of seeing. A way of seeing is something no tool can take away.
+
+---
+
+## When Stuck
+
+> **"Does this code lie?"**
+
+Come back to this one question. If no, it passes. If in doubt, make it simpler.
+For the concrete how-to → `RUST-STYLE.md`

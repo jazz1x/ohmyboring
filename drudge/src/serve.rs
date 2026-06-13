@@ -1,10 +1,10 @@
 //! Serve — HTTP resident daemon (axum) + background sync scheduler.
 //!
-//! 아키텍처:
-//! - `Store` + `Llm` 를 `Arc` 로 공유 (Postgres client 는 concurrent 사용 지원).
-//! - axum 라우터: /health · /ask · /search · /graph · /audit · /sync
-//! - 백그라운드 스케줄러: `DRUDGE_SYNC_HOURS`(기본 4h) 주기 + 기동 즉시 1회 실행.
-//! - 에러 전파: `AppError` (anyhow wrapper) → HTTP 500, JSON body.
+//! Architecture:
+//! - Shares `Store` + `Llm` via `Arc` (the Postgres client supports concurrent use).
+//! - axum router: /health · /ask · /search · /graph · /audit · /sync
+//! - Background scheduler: `DRUDGE_SYNC_HOURS` (default 4h) interval + one immediate run at startup.
+//! - Error propagation: `AppError` (anyhow wrapper) → HTTP 500, JSON body.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,27 +30,27 @@ use crate::store::Store;
 use crate::vault;
 use crate::wiki_recall;
 
-// ── 공유 상태 ─────────────────────────────────────────────────────────────────
+// ── shared state ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct AppState {
-    /// pgvector 백엔드. `None`이면 `DRUDGE_VECTOR=off` — 회수는 vault/wiki 직독(wiki_recall),
-    /// sync 는 compile(raw→wiki)만. 벡터/그래프 의존 엔드포인트는 명확히 거부.
+    /// pgvector backend. If `None`, `DRUDGE_VECTOR=off` — retrieval is direct vault/wiki reads (wiki_recall),
+    /// and sync does compile (raw→wiki) only. Vector/graph-dependent endpoints reject explicitly.
     store: Option<Arc<Store>>,
     llm: Arc<Llm>,
     source_dirs: Arc<Vec<String>>,
-    /// vault 루트(`DRUDGE_VAULT_DIR`). `Some`이면 sync 시 raw→wiki compile 수행.
+    /// vault root (`DRUDGE_VAULT_DIR`). If `Some`, sync performs the raw→wiki compile.
     vault_dir: Arc<Option<PathBuf>>,
 }
 
 impl AppState {
-    /// vault/wiki 디렉터리(`DRUDGE_VECTOR=off` 회수 대상). vault 미설정이면 None.
+    /// vault/wiki directory (the retrieval target for `DRUDGE_VECTOR=off`). None if vault is unset.
     fn wiki_dir(&self) -> Option<PathBuf> {
         (*self.vault_dir).as_ref().map(|v| v.join("wiki"))
     }
 }
 
-// ── 에러 타입 (ROP: AppError → HTTP 500) ────────────────────────────────────
+// ── error type (ROP: AppError → HTTP 500) ───────────────────────────────────
 
 struct AppError(anyhow::Error);
 
@@ -73,7 +73,7 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
     }
 }
 
-// ── 요청/응답 타입 ───────────────────────────────────────────────────────────
+// ── request/response types ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct AskReq {
@@ -117,14 +117,14 @@ struct GraphResp {
     semantic_neighbors: Vec<String>,
 }
 
-/// `personal` 기본값 — 호스트가 origin 미지정 시(회사 토큰 미설정) 사용.
+/// `personal` default — used when the host leaves origin unspecified (company token unset).
 fn default_origin() -> String {
     "personal".to_owned()
 }
 
 #[derive(Deserialize)]
 struct DistillReq {
-    /// 세션 트랜스크립트에서 호스트가 추출한 평문.
+    /// Plain text the host extracted from the session transcript.
     text: String,
     #[serde(default)]
     session_id: String,
@@ -140,9 +140,9 @@ struct DistillReq {
 
 #[derive(Serialize)]
 struct DistillResp {
-    /// KEEP/SKIP 게이트 결과 — false 면 저장 가치 없어 폐기(에러 아님).
+    /// KEEP/SKIP gate result — false means not worth storing, so discarded (not an error).
     written: bool,
-    /// 기록된 raw 노트 파일명. 호스트가 RAW_DIR 와 조인해 mtime 보정 + sync 트리거.
+    /// The recorded raw note's filename. The host joins it with RAW_DIR to fix the mtime + trigger sync.
     filename: Option<String>,
 }
 
@@ -161,7 +161,7 @@ struct SyncResp {
     extract_edges: usize,
 }
 
-// ── 핸들러 ───────────────────────────────────────────────────────────────────
+// ── handlers ──────────────────────────────────────────────────────────────────
 
 async fn health() -> &'static str {
     "ok"
@@ -171,7 +171,7 @@ async fn handle_ask(
     State(s): State<AppState>,
     Json(req): Json<AskReq>,
 ) -> Result<Json<AskResp>, AppError> {
-    // vector on → 벡터+그래프 회수 합성. off → vault/wiki 직독 회수 합성.
+    // vector on → synthesize from vector+graph retrieval. off → synthesize from direct vault/wiki reads.
     let out = if let Some(store) = s.store.as_ref() {
         ask::answer(store, &s.llm, &req.question, &[]).await?
     } else {
@@ -183,8 +183,8 @@ async fn handle_ask(
     }))
 }
 
-/// 최신우선 브리핑 — 질문 없음(최근성 회수). cron 아침 브리핑이 호출.
-/// 최근성(updated_at) 정렬은 pgvector 의존 → `DRUDGE_VECTOR=off` 면 거부.
+/// Recency-first briefing — no question (recency retrieval). Called by the cron morning briefing.
+/// Recency (updated_at) ordering depends on pgvector → rejected if `DRUDGE_VECTOR=off`.
 async fn handle_brief(State(s): State<AppState>) -> Result<Json<AskResp>, AppError> {
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
     let out = ask::brief(store, &s.llm, &[]).await?;
@@ -194,7 +194,7 @@ async fn handle_brief(State(s): State<AppState>) -> Result<Json<AskResp>, AppErr
     }))
 }
 
-/// `DRUDGE_VECTOR=off` 에서 벡터/그래프 의존 엔드포인트가 반환하는 명확한 거부(침묵 아님).
+/// The explicit rejection (not silence) that vector/graph-dependent endpoints return under `DRUDGE_VECTOR=off`.
 fn vector_disabled() -> AppError {
     AppError(anyhow::anyhow!(
         "DRUDGE_VECTOR=off — 이 기능은 벡터 백엔드(pgvector)가 필요합니다. DRUDGE_VECTOR=on 으로 켜고 Postgres 를 띄우세요."
@@ -218,7 +218,7 @@ async fn handle_search(
             })
             .collect()
     } else {
-        // wiki 직독 — origin/project 는 wiki 경로엔 없으므로 빈값(스키마 호환).
+        // direct wiki read — origin/project don't exist in the wiki path, so empty (schema-compatible).
         wiki_recall_hits(s.wiki_dir().as_deref(), &req.query)?
             .into_iter()
             .map(|h| SearchHit {
@@ -233,7 +233,7 @@ async fn handle_search(
     Ok(Json(SearchResp { hits: mapped }))
 }
 
-/// wiki_recall 호출 래퍼 — wiki_dir 미설정이면 빈 결과(graceful).
+/// wiki_recall call wrapper — empty result if wiki_dir is unset (graceful).
 fn wiki_recall_hits(
     wiki_dir: Option<&Path>,
     query: &str,
@@ -248,7 +248,7 @@ async fn handle_graph(
     State(s): State<AppState>,
     Json(req): Json<GraphReq>,
 ) -> Result<Json<GraphResp>, AppError> {
-    let store = s.store.as_ref().ok_or_else(vector_disabled)?; // 그래프는 pgvector 전용
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?; // graph is pgvector-only
     let out = graph::query(store, &s.llm, &req.query).await?;
     Ok(Json(GraphResp {
         hit: out.hit,
@@ -258,13 +258,13 @@ async fn handle_graph(
 }
 
 async fn handle_audit(State(s): State<AppState>) -> Result<Json<audit::AuditStats>, AppError> {
-    let store = s.store.as_ref().ok_or_else(vector_disabled)?; // 적재 통계는 pgvector 전용
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?; // ingest stats are pgvector-only
     let stats = audit::stats(store).await?;
     Ok(Json(stats))
 }
 
-/// 세션 증류 — 호스트 훅이 추출한 텍스트를 받아 LLM 증류 + 스크럽 + raw 노트 기록(SSOT).
-/// `DRUDGE_VAULT_DIR` 미설정이면 기록 대상 없음 → 에러(호스트가 no-op 흡수).
+/// Session distillation — takes text the host hook extracted, runs LLM distillation + scrub + raw note recording (SSOT).
+/// If `DRUDGE_VAULT_DIR` is unset there is no recording target → error (the host absorbs it as a no-op).
 async fn handle_distill(
     State(s): State<AppState>,
     Json(req): Json<DistillReq>,
@@ -289,9 +289,9 @@ async fn handle_distill(
     }))
 }
 
-// ── MCP-over-HTTP (Nous Hermes Agent 연결) ──────────────────────────────────
-// JSON-RPC 2.0: initialize · tools/list · tools/call(recall). 알림은 202(응답 없음).
-// `recall` 툴 = retrieve(벡터+그래프) → 텍스트 → 에이전트가 우리 자가증강 KB를 회수.
+// ── MCP-over-HTTP (Nous Hermes Agent connection) ────────────────────────────
+// JSON-RPC 2.0: initialize · tools/list · tools/call(recall). Notifications get 202 (no response).
+// The `recall` tool = retrieve (vector+graph) → text → the agent retrieves from our self-augmenting KB.
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -301,7 +301,7 @@ async fn handle_mcp(State(s): State<AppState>, Json(req): Json<Value>) -> Respon
         .and_then(Value::as_str)
         .unwrap_or_default();
     if method.starts_with("notifications/") {
-        return StatusCode::ACCEPTED.into_response(); // 알림은 응답 없음
+        return StatusCode::ACCEPTED.into_response(); // notifications get no response
     }
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let outcome = match method {
@@ -320,7 +320,7 @@ async fn handle_mcp(State(s): State<AppState>, Json(req): Json<Value>) -> Respon
     Json(body).into_response()
 }
 
-/// 클라이언트가 보낸 protocolVersion 을 echo(호환), 없으면 기본값.
+/// Echo the protocolVersion the client sent (compatibility), or the default if absent.
 fn mcp_initialize(req: &Value) -> Value {
     let pv = req
         .get("params")
@@ -335,8 +335,8 @@ fn mcp_initialize(req: &Value) -> Value {
 }
 
 fn mcp_tools_list() -> Value {
-    // 에이전트(Nous Hermes Agent)가 엔진을 *모는* 도구들. 엔진은 기계작업(lint·compile·
-    // ingest·임베딩·그래프)을 시스템화해 두고, *언제 무엇을* 적재/회수할지는 에이전트가 결정.
+    // Tools the agent (Nous Hermes Agent) uses to *drive* the engine. The engine systematizes the mechanical work
+    // (lint·compile·ingest·embedding·graph), while the agent decides *when and what* to ingest/retrieve.
     json!({"tools": [
         {
             "name": "recall",
@@ -370,7 +370,7 @@ fn mcp_tools_list() -> Value {
     ]})
 }
 
-/// tools/call 디스패처 — 툴 이름으로 라우팅. 에이전트가 엔진을 모는 진입점.
+/// tools/call dispatcher — routes by tool name. The entry point through which the agent drives the engine.
 async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
     let params = req.get("params");
     let name = params
@@ -387,7 +387,7 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
     Ok(json!({"content": [{"type": "text", "text": text}], "isError": false}))
 }
 
-/// `recall` — 벡터+그래프 회수. 풀 청크 반환(스니펫 금지) → 에이전트가 '왜/어떻게'까지 합성.
+/// `recall` — vector+graph retrieval. Returns full chunks (no snippets) so the agent can synthesize the "why/how".
 async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let query = args
         .and_then(|a| a.get("query"))
@@ -397,7 +397,7 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     if query.is_empty() {
         return Err((-32602, "missing argument: query".to_owned()));
     }
-    // vector on → 벡터+그래프 청크. off → vault/wiki 직독 스니펫.
+    // vector on → vector+graph chunks. off → direct vault/wiki read snippets.
     let lines: Vec<(String, String)> = if let Some(store) = s.store.as_ref() {
         retrieve::retrieve(store, &s.llm, query, 5, &[])
             .await
@@ -429,8 +429,8 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         .join("\n\n"))
 }
 
-/// `remember` — 에이전트가 배운 것을 vault/raw 노트로 적재(쓰기). 다음 `sync` 때 흡수.
-/// 파일명 = 내용 sha8 → 같은 내용 재기록 시 멱등(중복 노트 방지). 동기 IO(파일 쓰기)뿐.
+/// `remember` — writes what the agent learned as a vault/raw note. Absorbed on the next `sync`.
+/// Filename = content sha8 → idempotent on re-recording the same content (prevents duplicate notes). Synchronous IO (file write) only.
 fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
         return Err((
@@ -472,7 +472,7 @@ fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, Stri
     ))
 }
 
-/// `sync` — 적재 파이프라인 1회(compile→ingest→extract). 에이전트가 *언제* 흡수할지 결정.
+/// `sync` — one run of the ingest pipeline (compile→ingest→extract). The agent decides *when* to absorb.
 async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
     let o = do_sync(
         s.store.as_deref(),
@@ -525,7 +525,7 @@ async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncResp>, AppErr
     }))
 }
 
-// ── 동기화 1사이클 (compile → ingest → extract) ──────────────────────────────
+// ── one sync cycle (compile → ingest → extract) ─────────────────────────────
 
 struct SyncOutcome {
     compile: Option<vault::CompileStats>,
@@ -533,13 +533,13 @@ struct SyncOutcome {
     extract: extract::ExtractStats,
 }
 
-/// vault compile(raw→wiki). `vault_dir` 미설정이거나 raw 디렉터리 부재 시 graceful skip(None).
-/// compile 실패는 stderr 로깅 후 None — ingest/extract(기존 wiki 흡수)는 계속 진행(독립 단계).
+/// vault compile (raw→wiki). Graceful skip (None) when `vault_dir` is unset or the raw directory is absent.
+/// A compile failure logs to stderr then returns None — ingest/extract (absorbing the existing wiki) still proceed (independent stages).
 async fn run_compile_step(llm: &Llm, vault_dir: Option<&PathBuf>) -> Option<vault::CompileStats> {
     let vault_root = vault_dir?;
     let raw_dir = vault_root.join("raw");
     if !raw_dir.is_dir() {
-        return None; // 증류된 raw 노트 아직 없음 — 컴파일 대상 없음(정상)
+        return None; // no distilled raw notes yet — nothing to compile (normal)
     }
     let today = vault::today_utc();
     match vault::run_compile(vault_root, &raw_dir, &today, llm).await {
@@ -557,9 +557,9 @@ async fn run_compile_step(llm: &Llm, vault_dir: Option<&PathBuf>) -> Option<vaul
     }
 }
 
-/// 자가증강 사이클: raw→wiki compile → (벡터 켜졌을 때만) 소스→DB ingest → 그래프 extract.
-/// `store=None`(DRUDGE_VECTOR=off) 이면 **compile 까지만** — wiki 가 1급 메모리라 그것만으로 회수 가능.
-/// HTTP `/sync` 와 백그라운드 스케줄러 공용(SSOT).
+/// Self-augmenting cycle: raw→wiki compile → (only when vector is on) source→DB ingest → graph extract.
+/// When `store=None` (DRUDGE_VECTOR=off), **compile only** — the wiki is first-class memory, so it alone supports recall.
+/// Shared by HTTP `/sync` and the background scheduler (SSOT).
 async fn do_sync(
     store: Option<&Store>,
     llm: &Llm,
@@ -568,7 +568,7 @@ async fn do_sync(
 ) -> Result<SyncOutcome> {
     let compile = run_compile_step(llm, vault_dir).await;
     let Some(store) = store else {
-        // 벡터 off — wiki compile 만으로 충분(임베딩/그래프 없음).
+        // vector off — wiki compile alone is enough (no embedding/graph).
         return Ok(SyncOutcome {
             compile,
             ingest: ingest::Stats::default(),
@@ -577,14 +577,14 @@ async fn do_sync(
     };
     let ingest = ingest::run(store, llm, source_dirs).await?;
     let extract = extract::run(store, llm).await?;
-    // 재추출은 옛 엣지만 지우고 노드는 고아로 남긴다(매 sync 누적 → 노드 폭발).
-    // 매 sync 끝에 고아 시맨틱 노드 GC — 그래프를 마른 상태로 유지(SSOT 위생).
+    // Re-extraction deletes only old edges and leaves nodes orphaned (accumulates every sync → node explosion).
+    // GC orphan semantic nodes at the end of every sync — keeps the graph lean (SSOT hygiene).
     match store.gc_orphans().await {
         Ok(g) => eprintln!("[scheduler] gc orphans: {}", g.total()),
         Err(e) => eprintln!("[scheduler] gc 경고(무시): {e:#}"),
     }
-    // 그래프 → Obsidian 투영: doc↔doc 관계를 wiki relates_to 위키링크로(vault 있을 때만).
-    // 보조 시각화 단계 — 실패해도 핵심 sync(ingest/extract)는 깨지 않고 로그만.
+    // graph → Obsidian projection: doc↔doc relations as wiki relates_to wikilinks (only when vault exists).
+    // Auxiliary visualization stage — on failure it does not break the core sync (ingest/extract), just logs.
     if let Some(vd) = vault_dir {
         match vault::project_links(store, vd, 6).await {
             Ok(n) => eprintln!("[scheduler] graph→obsidian: {n} wiki relates_to 갱신"),
@@ -598,7 +598,7 @@ async fn do_sync(
     })
 }
 
-// ── 백그라운드 스케줄러 ───────────────────────────────────────────────────────
+// ── background scheduler ────────────────────────────────────────────────────
 
 async fn run_sync(
     store: Option<&Store>,
@@ -638,7 +638,7 @@ fn spawn_scheduler(
 
     tokio::spawn(async move {
         let store_ref = store.as_deref();
-        // 기동 즉시 1회 실행 (벡터 off 면 compile 만 — wiki 갱신).
+        // run once immediately at startup (compile only if vector off — refreshes wiki).
         eprintln!(
             "[scheduler] startup sync (interval={sync_hours}h, vector={})",
             store.is_some()
@@ -646,7 +646,7 @@ fn spawn_scheduler(
         run_sync(store_ref, &llm, &source_dirs, (*vault_dir).as_ref()).await;
 
         let mut ticker = tokio::time::interval(interval);
-        ticker.tick().await; // 첫 tick 은 즉시 — 버림 (위에서 이미 실행)
+        ticker.tick().await; // the first tick is immediate — discard it (already ran above)
         loop {
             ticker.tick().await;
             eprintln!("[scheduler] periodic sync");
@@ -655,7 +655,7 @@ fn spawn_scheduler(
     });
 }
 
-// ── 진입점 ──────────────────────────────────────────────────────────────────
+// ── entry point ─────────────────────────────────────────────────────────────
 
 pub async fn run(store: Option<Store>, llm: Llm) -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -663,7 +663,7 @@ pub async fn run(store: Option<Store>, llm: Llm) -> Result<()> {
         .unwrap_or_else(|_| format!("{home}/.claude/projects:{home}/oh-my-boring/data/notes"));
     let source_dirs: Vec<String> = dirs_env.split(':').map(str::to_owned).collect();
 
-    // vault 루트 — 설정 시 sync 가 raw→wiki compile 단계를 포함한다.
+    // vault root — when set, sync includes the raw→wiki compile stage.
     let vault_dir: Option<PathBuf> = std::env::var("DRUDGE_VAULT_DIR").ok().map(PathBuf::from);
 
     let addr = std::env::var("DRUDGE_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:7700".to_owned());
@@ -689,9 +689,9 @@ pub async fn run(store: Option<Store>, llm: Llm) -> Result<()> {
         .route("/search", post(handle_search))
         .route("/graph", post(handle_graph))
         .route("/audit", get(handle_audit))
-        .route("/distill", post(handle_distill)) // 세션 증류(호스트 훅 → raw 노트 SSOT)
+        .route("/distill", post(handle_distill)) // session distillation (host hook → raw note SSOT)
         .route("/sync", post(handle_sync))
-        .route("/mcp", post(handle_mcp)) // MCP-over-HTTP (Nous Hermes Agent 가 recall 툴로 호출)
+        .route("/mcp", post(handle_mcp)) // MCP-over-HTTP (Nous Hermes Agent calls via the recall tool)
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr)

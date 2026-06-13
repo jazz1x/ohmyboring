@@ -1,5 +1,5 @@
-//! 회수 파이프 — 벡터 + BM25 full-text → RRF 병합 → top-k. origin 필터.
-//!   - 재작성/리랭커는 없음(개인 스케일 = simplest thing that works).
+//! Retrieval pipeline — vector + BM25 full-text → RRF merge → top-k. origin filter.
+//!   - No rewriting/reranker (personal scale = simplest thing that works).
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
@@ -7,16 +7,16 @@ use anyhow::{Context, Result};
 use crate::llm::Llm;
 use crate::store::{Hit, Store};
 
-const RRF_K: f64 = 60.0; // RRF 분모 상수(사실상 표준)
+const RRF_K: f64 = 60.0; // RRF denominator constant (de facto standard)
 
-/// RRF 항 계산. rank 는 1-based(0 불가). usize → f64 변환 실패 시 Err.
+/// Compute an RRF term. rank is 1-based (0 not allowed). Err if usize → f64 conversion fails.
 fn rrf_term(rank: usize) -> Result<f64> {
-    // pool 은 최대 수백 수준 — u32 범위 초과는 실질적으로 없지만 타입이 증거여야 한다.
+    // pool is at most a few hundred — exceeding u32 range is practically impossible, but the type must be the evidence.
     let r = f64::from(u32::try_from(rank).context("rrf rank to u32")?);
     Ok(1.0 / (RRF_K + r))
 }
 
-/// 벡터 top-N + BM25 top-N → RRF 위치기반 병합 → origin 제외 → top-k.
+/// Vector top-N + BM25 top-N → RRF position-based merge → exclude origin → top-k.
 pub async fn retrieve(
     store: &Store,
     llm: &Llm,
