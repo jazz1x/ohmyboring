@@ -1,4 +1,4 @@
-//! Ask — 회수 → 컨텍스트 → Llm 합성 → 답변 + 출처. (v1 generate_answer 패리티)
+//! Ask — 회수 → 컨텍스트 → Llm 합성 → 답변 + 출처.
 //!
 //! SRP: `answer()` 는 순수 로직(데이터 반환), `run()` 은 CLI I/O 껍질.
 use std::collections::HashSet;
