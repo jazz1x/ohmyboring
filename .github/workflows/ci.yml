@@ -62,4 +62,5 @@ jobs:
           scanners: vuln,secret,misconfig
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          trivyignores: .trivyignore.yaml # redactor-test fake tokens (parallels gitleaks allowlist)
           exit-code: "1" # fail the job on CRITICAL/HIGH findings
