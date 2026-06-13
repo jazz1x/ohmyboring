@@ -15,11 +15,11 @@
 - `Store::open` = 모든 명령 startup DB 연결 (main.rs). retrieve = 100% Postgres(`vector_search`+`text_search`). wiki 직독 경로 0.
 - → "wiki 1급"은 신규 wiki-recall 경로 + Store 옵션화 필요.
 
-## 단계
-1. **wiki-recall 모듈** (`wiki_recall.rs`) — vault/wiki 마크다운 직독, 키워드 스코어링, top-K. Postgres 불필요. 순수+테스트. (additive, 무중단) ← **이번 PR**
-2. **`DRUDGE_VECTOR` 토글 + Store 옵션화** — off면 wiki-recall, on이면 현 vector 경로. 엔진이 Postgres 없이 기동.
-3. **기본값 wiki-primary 로 flip** — vector opt-in. compose pgvector 조건부.
-4. **쓰기 게이트 → 에이전트 정문** (두 문: SessionEnd 훅 `hermes` 경유, 읽기 옆문 직통). distill/compile 게이트는 엔진 폴백 유지.
+## 단계 (전부 완료 2026-06-13)
+1. ✅ **wiki-recall 모듈** (`wiki_recall.rs`) — vault/wiki 직독, 부분일치 스코어링. (PR #16)
+2. ✅ **`DRUDGE_VECTOR` 토글 + Store 옵션화** — 엔진 Postgres 없이 기동, 핸들러 wiki/vector 분기. (PR #17)
+3. ✅ **기본값 wiki-primary flip** — DRUDGE_VECTOR 기본 off, postgres `--profile vector` opt-in, Store::open connect 재시도. (PR #18)
+4. ✅ **쓰기 게이트 → 에이전트 정문** (opt-in `DISTILL_VIA_AGENT`, 엔진 distill 폴백 유지). (PR #19)
 
 ## 두 문 (확정)
 - 쓰기(적재+게이트): 에이전트 정문 (SessionEnd→hermes, session_id 전달, agent 게이트). 직통 뒷문 없음.
