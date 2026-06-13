@@ -257,7 +257,7 @@ async fn handle_mcp(State(s): State<AppState>, Json(req): Json<Value>) -> Respon
         "initialize" => Ok(mcp_initialize(&req)),
         "tools/list" => Ok(mcp_tools_list()),
         "ping" => Ok(json!({})),
-        "tools/call" => mcp_recall(&s, &req).await,
+        "tools/call" => mcp_call(&s, &req).await,
         other => Err((-32601_i32, format!("method not found: {other}"))),
     };
     let body = match outcome {
@@ -284,29 +284,61 @@ fn mcp_initialize(req: &Value) -> Value {
 }
 
 fn mcp_tools_list() -> Value {
-    json!({"tools": [{
-        "name": "recall",
-        "description": "사용자의 과거 작업 경험·결정·메모리를 자가증강 RAG(벡터+그래프)에서 회수한다. \
-                        '전에 이거 어떻게 했지/결정했지' 류 기억이 필요할 때 사용.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "회수할 주제 또는 질문"}},
-            "required": ["query"]
+    // 에이전트(Nous Hermes Agent)가 엔진을 *모는* 도구들. 엔진은 기계작업(lint·compile·
+    // ingest·임베딩·그래프)을 시스템화해 두고, *언제 무엇을* 적재/회수할지는 에이전트가 결정.
+    json!({"tools": [
+        {
+            "name": "recall",
+            "description": "사용자의 과거 작업 경험·결정·메모리를 자가증강 RAG(벡터+그래프)에서 회수한다. \
+                            '전에 이거 어떻게 했지/결정했지' 류 기억이 필요할 때 사용.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "회수할 주제 또는 질문"}},
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "remember",
+            "description": "지금 배운 것·결정·사실을 영속 메모리에 적재한다. vault/raw 에 노트로 기록되어 \
+                            다음 sync 때 compile→임베딩→그래프로 흡수된다. 기록 후 회수(recall) 가능.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "기억할 내용(문제해결 서사·결정·사실)"},
+                    "title": {"type": "string", "description": "선택. 노트 제목 한 줄"}
+                },
+                "required": ["text"]
+            }
+        },
+        {
+            "name": "sync",
+            "description": "적재 파이프라인을 1회 돌린다: compile(raw→wiki 큐레이션) → 임베딩 → \
+                            pgvector upsert → 그래프 추출. remember 로 쌓은 노트를 즉시 회수 가능하게 만든다.",
+            "inputSchema": {"type": "object", "properties": {}}
         }
-    }]})
+    ]})
 }
 
-async fn mcp_recall(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
+/// tools/call 디스패처 — 툴 이름으로 라우팅. 에이전트가 엔진을 모는 진입점.
+async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
     let params = req.get("params");
     let name = params
         .and_then(|p| p.get("name"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if name != "recall" {
-        return Err((-32602, format!("unknown tool: {name}")));
-    }
-    let query = params
-        .and_then(|p| p.get("arguments"))
+    let args = params.and_then(|p| p.get("arguments"));
+    let text = match name {
+        "recall" => mcp_recall(s, args).await?,
+        "remember" => mcp_remember(s, args)?,
+        "sync" => mcp_sync(s).await?,
+        other => return Err((-32602, format!("unknown tool: {other}"))),
+    };
+    Ok(json!({"content": [{"type": "text", "text": text}], "isError": false}))
+}
+
+/// `recall` — 벡터+그래프 회수. 풀 청크 반환(스니펫 금지) → 에이전트가 '왜/어떻게'까지 합성.
+async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
+    let query = args
         .and_then(|a| a.get("query"))
         .and_then(Value::as_str)
         .unwrap_or_default()
@@ -317,24 +349,81 @@ async fn mcp_recall(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
     let hits = retrieve::retrieve(&s.store, &s.ollama, query, 5, &[])
         .await
         .map_err(|e| (-32603_i32, format!("retrieve: {e:#}")))?;
-    let text = if hits.is_empty() {
-        "(회수된 경험 없음)".to_owned()
-    } else {
-        // 풀 청크 반환(스니펫 금지) — 에이전트가 '왜/어떻게'까지 보고 합성해야
-        // 일반지식으로 때우지 않는다. 청크는 이미 ≤1500자라 5개도 컨텍스트에 충분.
-        hits.iter()
-            .map(|h| {
-                let src = h
-                    .source_path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(h.source_path.as_str());
-                format!("- [{src}] {}", h.content)
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n")
+    if hits.is_empty() {
+        return Ok("(회수된 경험 없음)".to_owned());
+    }
+    Ok(hits
+        .iter()
+        .map(|h| {
+            let src = h
+                .source_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(h.source_path.as_str());
+            format!("- [{src}] {}", h.content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n"))
+}
+
+/// `remember` — 에이전트가 배운 것을 vault/raw 노트로 적재(쓰기). 다음 `sync` 때 흡수.
+/// 파일명 = 내용 sha8 → 같은 내용 재기록 시 멱등(중복 노트 방지). 동기 IO(파일 쓰기)뿐.
+fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
+    let Some(vault_root) = (*s.vault_dir).as_ref() else {
+        return Err((
+            -32603,
+            "HERMES_VAULT_DIR 미설정 — remember 기록 대상 없음".to_owned(),
+        ));
     };
-    Ok(json!({"content": [{"type": "text", "text": text}], "isError": false}))
+    let text = args
+        .and_then(|a| a.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if text.is_empty() {
+        return Err((-32602, "missing argument: text".to_owned()));
+    }
+    let title = args
+        .and_then(|a| a.get("title"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+
+    let sha = {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(text.as_bytes());
+        hex::encode(&digest[..4]) // 8 hex chars
+    };
+    let raw_dir = vault_root.join("raw");
+    std::fs::create_dir_all(&raw_dir).map_err(|e| (-32603_i32, format!("raw dir: {e}")))?;
+    let path = raw_dir.join(format!("memo-{sha}.md"));
+    let heading = if title.is_empty() {
+        format!("# 메모 — {}", vault::today_utc())
+    } else {
+        format!("# {title}")
+    };
+    let body = format!("{heading}\n> origin: personal · via: agent(remember)\n\n{text}\n");
+    std::fs::write(&path, body).map_err(|e| (-32603_i32, format!("raw note write: {e}")))?;
+    Ok(format!(
+        "기억함 → raw/memo-{sha}.md. sync 를 호출하면 compile→임베딩→회수가능 상태가 된다."
+    ))
+}
+
+/// `sync` — 적재 파이프라인 1회(compile→ingest→extract). 에이전트가 *언제* 흡수할지 결정.
+async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
+    let o = do_sync(&s.store, &s.ollama, &s.source_dirs, (*s.vault_dir).as_ref())
+        .await
+        .map_err(|e| (-32603_i32, format!("sync: {e:#}")))?;
+    let compiled = o.compile.as_ref().map_or(0, |c| c.compiled + c.recompiled);
+    let nodes = o.extract.problems
+        + o.extract.solutions
+        + o.extract.tools
+        + o.extract.concepts
+        + o.extract.attempts;
+    Ok(format!(
+        "sync 완료 — compile {compiled} · ingest(new {} updated {} chunks {}) · graph(nodes {nodes} edges {})",
+        o.ingest.new, o.ingest.updated, o.ingest.chunks, o.extract.edges
+    ))
 }
 
 async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncResp>, AppError> {
