@@ -107,11 +107,10 @@ async fn main() -> Result<()> {
     const VEC_OFF: &str = "DRUDGE_VECTOR=off — 이 명령은 벡터 백엔드(pgvector)가 필요합니다. 데몬(serve)은 off 면 wiki 회수로 동작합니다.";
 
     let cli = Cli::parse();
-    // DRUDGE_VECTOR: on(기본) = pgvector 적재·회수. off = wiki 1급(Postgres 미연결).
-    // off 면 Store 를 안 연다 → Postgres 없이도 엔진/CLI 기동.
-    let vector_on = std::env::var("DRUDGE_VECTOR").map_or(true, |v| {
-        !matches!(v.to_lowercase().as_str(), "off" | "0" | "false" | "no")
-    });
+    // DRUDGE_VECTOR: 기본 off = wiki 1급(Postgres 미연결, 단순). on 으로 켜면 pgvector(vector+graph).
+    // 미설정/off → Store 안 엶 → Postgres 없이 엔진/CLI 기동. (wiki-primary 트렌드 정렬)
+    let vector_on = std::env::var("DRUDGE_VECTOR")
+        .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "on" | "1" | "true" | "yes"));
     let store: Option<store::Store> = if vector_on {
         let dsn = std::env::var("PG_DSN")
             .unwrap_or_else(|_| "postgresql://boring:boring@localhost:5432/boring".to_owned());

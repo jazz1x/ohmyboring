@@ -6,7 +6,9 @@ name: oh-my-boring
 services:
   # ─────────────────────────── Postgres + pgvector (그래프=node/edge+CTE) ─────
   # 벡터(HNSW) + FTS + 그래프(node/edge 테이블, 재귀 CTE). AGE 없이 순수 pgvector.
+  # 옵트인: wiki 1급이 기본이라 pgvector 는 `--profile vector` 일 때만 뜬다(graph+vector 맛볼 때).
   postgres:
+    profiles: ["vector"]
     image: pgvector/pgvector:pg16
     container_name: boring-postgres
     restart: unless-stopped
@@ -32,9 +34,8 @@ services:
     image: boring-drudge
     container_name: boring-drudge
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
+    # depends_on 없음 — wiki 기본 모드는 postgres 불필요. vector 모드는 `--profile vector` 로
+    # postgres 가 함께 뜨고, Store::open 의 connect 재시도(~10s)가 기동 race 를 흡수.
     environment:
       DRUDGE_LLM_BASE_URL: http://host.docker.internal:11434/v1  # OpenAI-호환. LM Studio 등으로 교체 가능
       DRUDGE_LLM_MODEL: gemma4:12b        # 합성 모델 (think=false 는 llm.rs 가 Ollama 대상 부착)
@@ -43,7 +44,7 @@ services:
       # 회수 소스: CC 메모리(.claude) + 큐레이션된 vault/wiki(자가증강 SSOT).
       DRUDGE_SOURCE_DIRS: /host/.claude/projects:/vault/wiki
       DRUDGE_VAULT_DIR: /vault             # vault compile(raw→wiki) 대상
-      DRUDGE_VECTOR: "on"                  # on=벡터+그래프 RAG. off=wiki 1급 직독(pgvector 미사용)
+      DRUDGE_VECTOR: ${DRUDGE_VECTOR:-off} # 기본 off=wiki 1급 직독. on=벡터+그래프(--profile vector 로 postgres 동반)
       DRUDGE_SYNC_HOURS: "4"
       TZ: Asia/Seoul
     volumes:

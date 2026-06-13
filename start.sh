@@ -35,8 +35,15 @@ MSG
   exit 1
 fi
 
-echo "▶ 빌드 + 기동 (postgres + drudge + hermes-agent) …"
-docker compose up -d --build
+# DRUDGE_VECTOR=on 이면 pgvector(vector+graph) 프로필 동반 기동. 기본(off)은 wiki 1급 — postgres 미기동.
+PROFILES=""
+case "$(printf '%s' "${DRUDGE_VECTOR:-off}" | tr '[:upper:]' '[:lower:]')" in
+  on | 1 | true | yes) PROFILES="--profile vector"; echo "▶ vector 모드 (pgvector 동반)";;
+  *) echo "▶ wiki 1급 모드 (pgvector 미기동 — graph+vector 쓰려면 DRUDGE_VECTOR=on)";;
+esac
+
+echo "▶ 빌드 + 기동 (drudge + hermes-agent${PROFILES:+ + postgres}) …"
+docker compose $PROFILES up -d --build
 
 echo "▶ drudge health 대기 …"
 for _ in $(seq 1 60); do curl -sf -m3 http://localhost:7700/health >/dev/null 2>&1 && break; sleep 3; done
