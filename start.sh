@@ -24,7 +24,18 @@ for m in "$LLM" "$EMB"; do
   fi
 done
 
-echo "▶ 빌드 + 기동 (postgres + drudge) …"
+# hermes-agent(뇌) = 기본 코어. 단 이미지는 레포 미포함(외부 빌드) → 선확인해 cryptic 실패 방지.
+if ! docker image inspect hermes-agent >/dev/null 2>&1; then
+  cat <<'MSG'
+  ✗ hermes-agent 이미지 없음 — 이 스택의 에이전트(적재를 모는 뇌)는 외부 Nous Hermes Agent 이미지가 필요하다.
+    1) Nous Hermes Agent 를 받아 `docker build -t hermes-agent .` 로 빌드
+    2) ~/.hermes 에 config(자격증명·메모리) 준비
+    그 뒤 다시 `make up`. (코어 RAG만 먼저 보려면: docker compose up -d postgres drudge)
+MSG
+  exit 1
+fi
+
+echo "▶ 빌드 + 기동 (postgres + drudge + hermes-agent) …"
 docker compose up -d --build
 
 echo "▶ drudge health 대기 …"
@@ -37,5 +48,6 @@ cat <<'EOF'
   make ask Q="..."   질의 1회
   make sync          수동 적재(compile→ingest→extract)
   make logs          엔진 로그
-  (Slack 비서는 옵션 — 외부 hermes-agent 이미지 필요: docker compose --profile agent up -d)
+  에이전트(hermes-agent)가 MCP(:7700/mcp)로 drudge 를 물어 적재·회수·스킬생성을 몬다.
+  (Slack 쓰려면 .env 에 토큰 채우고 docker compose up -d hermes-agent)
 EOF

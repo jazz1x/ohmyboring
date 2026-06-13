@@ -37,13 +37,13 @@ sessions·notes ──distill──▶ vault/raw ──compile──▶ vault/wi
 | 2 | **drudge** (Rust engine) | ingest·retrieve·graph·compile·distill (HTTP + 4h scheduler) | axum / tokio | `127.0.0.1:7700` | ✓ |
 | 3 | **Postgres + pgvector** | `knowledge` = vector (HNSW) + BM25 + node/edge recursive-CTE graph | `pgvector/pgvector:pg16` | `127.0.0.1:5432` | ✓ |
 | 4 | **hooks** (host, Python) | glue wiring sessions → engine (distill·recall·collect) | `python3` | — | manual install[^hooks] |
-| 5 | **hermes-agent** (optional) | Slack assistant + autonomous cron (Socket Mode) | external image | — | ✗ (`--profile agent`)[^agent] |
+| 5 | **hermes-agent** (the brain) | autonomous agent that *drives* ingest/recall/skill-building (drives drudge over MCP + Slack/cron) | external image | — | ✓[^agent] |
 
 [^ollama]: `ollama serve` must be running on the host. Containers reach it via `host.docker.internal`.
 [^hooks]: Register them yourself in `~/.claude/settings.json` — see [Self-augmentation loop](#self-augmentation-loop).
-[^agent]: `hermes-agent` is a third-party image not bundled here (Nous Hermes Agent). Build it separately, then `docker compose --profile agent up -d`.
+[^agent]: `hermes-agent` is a third-party image not bundled here (Nous Hermes Agent) + depends on `~/.hermes` config. It's a default part of `make up`, but you must build the image first (see [Prerequisites](#prerequisites)). If it's missing, `start.sh` stops with a build hint.
 
-> The core is **#2 + #3 + host #1**. Add #4 (hooks) and auto-accumulation runs; #5 is purely optional.
+> The brain (#5) *drives* ingest/recall; the hands (#2 + #3 + host #1) do the mechanics. #4 (hooks) auto-captures Claude Code sessions. To bring up only the RAG core: `docker compose up -d postgres drudge`.
 
 ---
 
@@ -54,6 +54,7 @@ sessions·notes ──distill──▶ vault/raw ──compile──▶ vault/wi
 | **Docker** (Compose v2) | container stack | `docker compose version` |
 | **Ollama** | local embedding/synthesis | `ollama --version` · [ollama.com](https://ollama.com) or `brew install ollama` |
 | **Python 3** | run host hooks | `python3 --version` (ships with macOS) |
+| **hermes-agent image** | the brain that drives ingest (default core) | `docker image inspect hermes-agent` · if missing, get [Nous Hermes Agent](https://github.com/NousResearch), `docker build -t hermes-agent .`, and prepare `~/.hermes` config |
 | ~10GB disk | two models | `gemma4:12b` (~8GB) + `bge-m3` (~1.2GB) — `make up`/`make models` pulls them |
 
 > **Clone location**: `~/oh-my-boring` is recommended. Hook, `start.sh`, and vault paths assume this location. Put it elsewhere and you must adjust the [hook paths](#self-augmentation-loop).
@@ -117,7 +118,7 @@ It accumulates on its own when a session ends — the core value. Three host hoo
 
 drudge can serve as the **MCP memory backend** for the external [Nous Hermes Agent](https://github.com/NousResearch). The agent is the brain (it decides what/when to ingest and recall, and builds its own skills); drudge is the hands — the systematized mechanics (compile, embedding, graph).
 
-1. Start the agent: `docker compose --profile agent up -d` (needs the external `hermes-agent` image — not bundled, build separately).
+1. The agent comes up as a default part of `make up` (image must be prebuilt — see [Prerequisites](#prerequisites)). Restart it alone with `docker compose up -d hermes-agent`.
 2. Register drudge as an MCP server in the agent config (`~/.hermes/config.yaml`):
    ```yaml
    mcp_servers:

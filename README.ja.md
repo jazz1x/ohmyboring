@@ -37,13 +37,13 @@
 | 2 | **drudge**（Rustエンジン） | ingest·retrieve·graph·compile·distill（HTTP + 4hスケジューラ） | axum / tokio | `127.0.0.1:7700` | ✓ |
 | 3 | **Postgres + pgvector** | `knowledge` = ベクトル（HNSW）+ BM25 + node/edge 再帰CTEグラフ | `pgvector/pgvector:pg16` | `127.0.0.1:5432` | ✓ |
 | 4 | **フック**（ホスト・Python） | セッション → エンジンを繋ぐ糊（distill·recall·collect） | `python3` | — | 手動インストール[^hooks] |
-| 5 | **hermes-agent**（任意） | Slackアシスタント + 自律cron（Socket Mode） | 外部イメージ | — | ✗（`--profile agent`）[^agent] |
+| 5 | **hermes-agent**（脳） | 取り込み·回収·スキル生成を*駆動*する自律エージェント（MCP で drudge を駆動 + Slack/cron） | 外部イメージ | — | ✓[^agent] |
 
 [^ollama]: ホストで `ollama serve` が起動している必要がある。コンテナは `host.docker.internal` 経由で到達。
 [^hooks]: `~/.claude/settings.json` に自分で登録する — 下記 [自己拡張ループ](#自己拡張ループ) を参照。
-[^agent]: `hermes-agent` は本リポジトリに含まれないサードパーティ製イメージ（Nous Hermes Agent）。別途ビルドして `docker compose --profile agent up -d`。
+[^agent]: `hermes-agent` は本リポジトリ非同梱のサードパーティ製イメージ（Nous Hermes Agent）+ `~/.hermes` 設定に依存。`make up` の既定コアだが、先にイメージをビルドする必要がある（[事前準備](#事前準備)参照）。無い場合は `start.sh` がビルド案内を出して停止。
 
-> コアは **#2 + #3 + ホストの#1**。#4（フック）を足すと自動蓄積が回り、#5 は完全に任意。
+> 脳（#5）が取り込み·回収を*駆動*し、手（#2 + #3 + ホストの#1）が機械作業を行う。#4（フック）は Claude Code セッションを自動捕捉。RAG コアだけ起動するなら `docker compose up -d postgres drudge`。
 
 ---
 
@@ -54,6 +54,7 @@
 | **Docker**（Compose v2） | コンテナスタック | `docker compose version` |
 | **Ollama** | ローカルの埋め込み・合成 | `ollama --version` · [ollama.com](https://ollama.com) または `brew install ollama` |
 | **Python 3** | ホストフックの実行 | `python3 --version`（macOSに標準搭載） |
+| **hermes-agent イメージ** | 取り込みを駆動する脳（既定コア） | `docker image inspect hermes-agent` · 無ければ [Nous Hermes Agent](https://github.com/NousResearch) を入手し `docker build -t hermes-agent .` + `~/.hermes` 設定を準備 |
 | ディスク ~10GB | モデル2つ | `gemma4:12b`（~8GB）+ `bge-m3`（~1.2GB） — `make up`/`make models` が自動pull |
 
 > **クローン先**: `~/oh-my-boring` を推奨。フック・`start.sh`・vault のパスがこの場所を前提とする。別の場所に置く場合は [フックのパス](#自己拡張ループ) を合わせる必要がある。
