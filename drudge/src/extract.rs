@@ -4,7 +4,7 @@
 use anyhow::Result;
 use serde::Deserialize;
 
-use crate::ollama::Ollama;
+use crate::llm::Llm;
 use crate::store::Store;
 
 const SYSTEM: &str = "You are a precise JSON extractor. Output ONLY a single JSON object — no prose, no markdown fences. /no_think";
@@ -166,7 +166,7 @@ pub struct ExtractStats {
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn run(store: &Store, ollama: &Ollama) -> Result<ExtractStats> {
+pub async fn run(store: &Store, llm: &Llm) -> Result<ExtractStats> {
     // 증분: sha 가 바뀐(또는 신규) 문서만 — gemma4 추출 비용 절감(타입 온톨로지는 보존).
     let docs = store.docs_needing_extract().await?;
     let mut stats = ExtractStats {
@@ -183,7 +183,7 @@ pub async fn run(store: &Store, ollama: &Ollama) -> Result<ExtractStats> {
     for (path, body) in &docs {
         let body_snip: String = body.chars().take(3000).collect();
         let prompt = PROMPT_TMPL.replace("{BODY}", &body_snip);
-        let raw = match ollama.generate(SYSTEM, &prompt).await {
+        let raw = match llm.generate(SYSTEM, &prompt).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("⚠ extract LLM error [{path}]: {e}");
@@ -312,9 +312,7 @@ pub async fn run(store: &Store, ollama: &Ollama) -> Result<ExtractStats> {
                 {
                     continue;
                 }
-                let emb = ollama
-                    .embed(&format!("{subject} {predicate} {value}"))
-                    .await?;
+                let emb = llm.embed(&format!("{subject} {predicate} {value}")).await?;
                 store
                     .upsert_claim(&subject, &predicate, value, path, valid_from, &emb)
                     .await?;

@@ -7,7 +7,7 @@ mod extract;
 mod frontmatter;
 mod graph;
 mod ingest;
-mod ollama;
+mod llm;
 mod retrieve;
 mod serve;
 mod store;
@@ -28,7 +28,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 스택 자가테스트: Ollama 임베딩 → pgvector 저장 → 벡터 검색 왕복
+    /// 스택 자가테스트: Llm 임베딩 → pgvector 저장 → 벡터 검색 왕복
     Selftest,
     /// 보유 문서 수
     Stats,
@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Selftest => {
-            let ol = ollama::Ollama::from_env();
+            let ol = llm::Llm::from_env();
             let docs = [
                 (
                     "doc:rust",
@@ -171,7 +171,7 @@ async fn main() -> Result<()> {
             println!("knowledge docs: {}", store.count().await?);
         }
         Cmd::Ingest => {
-            let ol = ollama::Ollama::from_env();
+            let ol = llm::Llm::from_env();
             let home = std::env::var("HOME").unwrap_or_default();
             let dirs = std::env::var("DRUDGE_SOURCE_DIRS").unwrap_or_else(|_| {
                 format!(
@@ -190,7 +190,7 @@ async fn main() -> Result<()> {
             audit::run(&store).await?;
         }
         Cmd::Search { query } => {
-            let ol = ollama::Ollama::from_env();
+            let ol = llm::Llm::from_env();
             let hits = retrieve::retrieve(&store, &ol, &query, 5, &[]).await?;
             println!("'{query}' → {} hits", hits.len());
             for h in &hits {
@@ -199,11 +199,11 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Ask { question } => {
-            let ol = ollama::Ollama::from_env();
+            let ol = llm::Llm::from_env();
             ask::run(&store, &ol, &question, &[]).await?;
         }
         Cmd::Brief => {
-            let ol = ollama::Ollama::from_env();
+            let ol = llm::Llm::from_env();
             let out = ask::brief(&store, &ol, &[]).await?;
             println!("{}\n", out.answer);
             if !out.sources.is_empty() {
@@ -214,11 +214,11 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Graph { query } => {
-            let ol = ollama::Ollama::from_env();
+            let ol = llm::Llm::from_env();
             graph::run(&store, &ol, &query).await?;
         }
         Cmd::Extract => {
-            let ol = ollama::Ollama::from_env();
+            let ol = llm::Llm::from_env();
             let s = extract::run(&store, &ol).await?;
             println!(
                 "extract: processed={} skipped={} problems={} solutions={} tools={} concepts={} attempts={} edges={}",
@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
             );
         }
         Cmd::Sync => {
-            let ol = ollama::Ollama::from_env();
+            let ol = llm::Llm::from_env();
             let home = std::env::var("HOME").unwrap_or_default();
             let dirs = std::env::var("DRUDGE_SOURCE_DIRS").unwrap_or_else(|_| {
                 format!(
@@ -290,7 +290,7 @@ async fn main() -> Result<()> {
             );
         }
         Cmd::Serve => {
-            let ol = ollama::Ollama::from_env();
+            let ol = llm::Llm::from_env();
             // store 소유권을 serve::run 으로 이동 — 단일 프로세스 DB 소유자 패턴.
             serve::run(store, ol).await?;
         }
@@ -313,7 +313,7 @@ async fn main() -> Result<()> {
                     std::process::exit(code);
                 }
                 VaultCmd::Compile { vault, raw, date } => {
-                    let ol = ollama::Ollama::from_env();
+                    let ol = llm::Llm::from_env();
                     let vault_root =
                         std::path::PathBuf::from(vault.unwrap_or_else(|| default_vault.clone()));
                     let raw_dir =

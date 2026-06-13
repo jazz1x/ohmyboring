@@ -9,7 +9,7 @@ use std::time::SystemTime;
 use walkdir::WalkDir;
 
 use crate::frontmatter;
-use crate::ollama::Ollama;
+use crate::llm::Llm;
 use crate::store::{Doc, Store};
 
 const NOISE_SUBSTR: [&str; 1] = ["tool-results"]; // 일반 노이즈(툴출력 덤프) 제외
@@ -74,7 +74,7 @@ fn is_target(path: &Path, exclude: &[String]) -> bool {
     ext_ok && !exclude.iter().any(|s| pstr.contains(s))
 }
 
-pub async fn run(store: &Store, ollama: &Ollama, source_dirs: &[String]) -> Result<Stats> {
+pub async fn run(store: &Store, llm: &Llm, source_dirs: &[String]) -> Result<Stats> {
     let mut stats = Stats::default();
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -129,7 +129,7 @@ pub async fn run(store: &Store, ollama: &Ollama, source_dirs: &[String]) -> Resu
             store.delete_doc_chunks(&pstr).await?;
             store.upsert_document(&front, &sha, mtime).await?;
             for (i, piece) in pieces.iter().enumerate() {
-                let embedding = ollama.embed(piece).await?;
+                let embedding = llm.embed(piece).await?;
                 let id = format!("{pstr}#{i}");
                 store
                     .upsert_chunk(&Doc {

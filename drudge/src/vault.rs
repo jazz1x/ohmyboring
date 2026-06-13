@@ -1231,7 +1231,7 @@ pub async fn run_compile(
     vault_root: &Path,
     raw_dir: &Path,
     today: &str,
-    ollama: &crate::ollama::Ollama,
+    llm: &crate::llm::Llm,
 ) -> Result<CompileStats> {
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir)
@@ -1323,7 +1323,7 @@ pub async fn run_compile(
         let body_snip: String = body_raw.chars().take(4000).collect();
         let prompt = COMPILE_PROMPT_TMPL.replace("{BODY}", &body_snip);
 
-        let llm_raw = match ollama.generate(COMPILE_SYSTEM, &prompt).await {
+        let llm_raw = match llm.generate(COMPILE_SYSTEM, &prompt).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("⚠ compile LLM error [{filename}]: {e} — skipping");
