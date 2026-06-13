@@ -39,7 +39,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # 공급망 게이트 — 의존성 취약점(RUSTSEC)·라이선스·중복버전. drudge/deny.toml 이 정책.
+  # supply-chain gate — dependency vulns (RUSTSEC), licenses, duplicate versions. drudge/deny.toml is the policy.
   cargo-deny:
     runs-on: ubuntu-latest
     steps:
@@ -48,3 +48,18 @@ jobs:
         with:
           manifest-path: drudge/Cargo.toml
           arguments: --all-features
+
+  # broad security scan — filesystem vulns + IaC/Dockerfile misconfig + secrets.
+  # Complements gitleaks (secrets) and cargo-deny (Rust deps) with OS/IaC coverage.
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@0.29.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1" # fail the job on CRITICAL/HIGH findings
