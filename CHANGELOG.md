@@ -3,9 +3,9 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [SemVer](https://semver.org/).
 
-## [0.1.0] — 2026-06-13
+## [0.0.1] — 2026-06-13
 
-First public cut of **oh-my-boring** — a self-hosted personal memory RAG. Your
+Initial cut of **oh-my-boring** — a self-hosted personal memory RAG. Your
 Claude Code work (or any markdown notes) is distilled into a local, human-readable
 wiki and recalled on demand. Zero cloud, 100% local.
 
@@ -49,4 +49,4 @@ wiki and recalled on demand. Zero cloud, 100% local.
   (`omb` was rejected to avoid clashing with the marketboro `omb` CLI).
 - READMEs in English (default), Korean, Japanese.
 
-[0.1.0]: https://github.com/jazz1x/oh-my-boring/releases/tag/v0.1.0
+[0.0.1]: https://github.com/jazz1x/oh-my-boring/releases/tag/v0.0.1
