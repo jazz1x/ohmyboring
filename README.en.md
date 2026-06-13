@@ -5,7 +5,7 @@
 [![CI](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Postgres](https://img.shields.io/badge/store-Postgres%2016%20%2B%20pgvector-336791?logo=postgresql&logoColor=white)
-![Ollama](https://img.shields.io/badge/LLM-Ollama%20(local)-000)
+![LLM](https://img.shields.io/badge/LLM-OpenAI--compatible%20(Ollama%2FLM%20Studio%2F…)-000)
 ![cloud](https://img.shields.io/badge/cloud-none-success)
 
 **Self-hosted personal memory RAG.** Your work in Claude Code (or any markdown notes) is automatically distilled into a local vector DB, so you can pull *"how did I do this last time?"* back up on demand. **Zero cloud · 100% local data.**
@@ -23,7 +23,7 @@ sessions·notes ──distill──▶ vault/raw ──compile──▶ vault/wi
 ## Why
 
 - **Auto-accumulation** — when a session ends, a hook distills it into a "problem-solving narrative" and ingests it. No manual upkeep.
-- **Local-only** — embedding and synthesis both run on host Ollama. Zero external APIs/tokens. Notes never leave your disk.
+- **Local-only** — embedding and synthesis both run on a local LLM server (Ollama by default). Zero external APIs/tokens. Notes never leave your disk.
 - **Vector + graph** — not just similarity search; it extracts problem/solution/tool/concept nodes and edges (GraphRAG).
 - **Optional work/personal split** — one env token tags a path as `origin=company` and isolates it. Everything is `personal` by default.
 
@@ -33,13 +33,13 @@ sessions·notes ──distill──▶ vault/raw ──compile──▶ vault/wi
 
 | # | Layer | Role | Tech | Exposure | Default in `make up` |
 |---|---|---|---|---|:---:|
-| 1 | **Ollama** (host) | embedding `bge-m3` (1024d) · synthesis `gemma4:12b` (think=false) | host process | `127.0.0.1:11434` | required[^ollama] |
+| 1 | **LLM server** (host, OpenAI-compatible) | embedding `bge-m3` (1024d) · synthesis `gemma4:12b` — Ollama by default, swappable for LM Studio/vLLM/etc | host process | `127.0.0.1:11434/v1` | required[^ollama] |
 | 2 | **drudge** (Rust engine) | ingest·retrieve·graph·compile·distill (HTTP + 4h scheduler) | axum / tokio | `127.0.0.1:7700` | ✓ |
 | 3 | **Postgres + pgvector** | `knowledge` = vector (HNSW) + BM25 + node/edge recursive-CTE graph | `pgvector/pgvector:pg16` | `127.0.0.1:5432` | ✓ |
 | 4 | **hooks** (host, Python) | glue wiring sessions → engine (distill·recall·collect) | `python3` | — | manual install[^hooks] |
 | 5 | **hermes-agent** (the brain) | autonomous agent that *drives* ingest/recall/skill-building (drives drudge over MCP + Slack/cron) | external image | — | ✓[^agent] |
 
-[^ollama]: `ollama serve` must be running on the host. Containers reach it via `host.docker.internal`.
+[^ollama]: An OpenAI-compatible `/v1` server must be running on the host (default: `ollama serve`). Containers reach it via `host.docker.internal`. Point at another runtime with `DRUDGE_LLM_BASE_URL` (e.g. LM Studio `:1234/v1`).
 [^hooks]: Register them yourself in `~/.claude/settings.json` — see [Self-augmentation loop](#self-augmentation-loop).
 [^agent]: `hermes-agent` is a third-party image not bundled here (Nous Hermes Agent) + depends on `~/.hermes` config. It's a default part of `make up`, but you must build the image first (see [Prerequisites](#prerequisites)). If it's missing, `start.sh` stops with a build hint.
 
@@ -52,7 +52,7 @@ sessions·notes ──distill──▶ vault/raw ──compile──▶ vault/wi
 | Install | Purpose | Check |
 |---|---|---|
 | **Docker** (Compose v2) | container stack | `docker compose version` |
-| **Ollama** | local embedding/synthesis | `ollama --version` · [ollama.com](https://ollama.com) or `brew install ollama` |
+| **LLM runtime** (OpenAI-compatible) | local embedding/synthesis | default **Ollama** (`ollama --version` · [ollama.com](https://ollama.com)). LM Studio/vLLM/etc also work — set `DRUDGE_LLM_BASE_URL` |
 | **Python 3** | run host hooks | `python3 --version` (ships with macOS) |
 | **hermes-agent image** | the brain that drives ingest (default core) | `docker image inspect hermes-agent` · if missing, get [Nous Hermes Agent](https://github.com/NousResearch), `docker build -t hermes-agent .`, and prepare `~/.hermes` config |
 | ~10GB disk | two models | `gemma4:12b` (~8GB) + `bge-m3` (~1.2GB) — `make up`/`make models` pulls them |
@@ -73,6 +73,17 @@ make ask Q="how did I fix the docker build cache problem?"
 ```
 
 `make up` = `start.sh`: Ollama health check → model pull → `docker compose up -d --build` (postgres + drudge) → wait for `/health`. The first ingest (startup sync) runs in the background for a few minutes.
+
+---
+
+## Deployment: Docker / native
+
+| Mode | How | When |
+|---|---|---|
+| **Docker** (default) | `make up` — postgres + drudge (+agent) containers | simplest. recommended |
+| **Native** | host Postgres (pgvector) directly + `cd drudge && cargo run --release -- serve` | no containers, or for debugging/dev |
+
+Native just needs the env to line up — `PG_DSN` (host pg) · `DRUDGE_LLM_BASE_URL` (LLM server) · `DRUDGE_VAULT_DIR` · `DRUDGE_SOURCE_DIRS`. drudge is a single static binary, runs anywhere. CLI directly: `cargo run -- ask "..."` · `cargo run -- sync`, etc.
 
 ---
 
@@ -186,7 +197,9 @@ The core runs without `.env`. Defaults are baked into the `drudge` environment i
 | Variable | Default | Purpose |
 |---|---|---|
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | — | only when enabling `hermes-agent` (Slack) |
-| `DRUDGE_LLM_MODEL` | `gemma4:12b` | synthesis model (think=false fixed) |
+| `DRUDGE_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible LLM server (Ollama default · LM Studio `:1234/v1` · etc) |
+| `DRUDGE_LLM_API_KEY` | — | only for providers that require auth (Ollama/LM Studio don't) |
+| `DRUDGE_LLM_MODEL` | `gemma4:12b` | synthesis model (anything) |
 | `DRUDGE_EMBED_MODEL` | `bge-m3` | embedding (1024d) |
 | `DRUDGE_SOURCE_DIRS` | `~/.claude/projects:vault/wiki` | ingest sources (`:`-separated) |
 | `DRUDGE_SYNC_HOURS` | `4` | background sync interval |
