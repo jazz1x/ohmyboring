@@ -113,6 +113,30 @@ make ask Q="내가 도커 빌드 캐시 문제 어떻게 풀었지?"
 
 ---
 
+## Nous Hermes Agent 연결 (옵션)
+
+drudge 는 외부 [Nous Hermes Agent](https://github.com/NousResearch) 의 **MCP 메모리 백엔드**가 될 수 있다. 에이전트가 뇌(무엇을·언제 적재·회수할지 결정 + 자체 스킬생성)고, drudge 는 그 기계작업(compile·임베딩·그래프)을 시스템화한 손이다.
+
+1. 에이전트 기동: `docker compose --profile agent up -d` (외부 `hermes-agent` 이미지 필요 — 레포 미포함, 별도 빌드).
+2. 에이전트 config(`~/.hermes/config.yaml`)에 drudge 를 MCP 서버로 등록:
+   ```yaml
+   mcp_servers:
+     drudge:
+       url: http://drudge:7700/mcp   # compose 같은 네트워크: 서비스명으로 도달
+       transport: http               # 호스트에서 직접이면 http://localhost:7700/mcp
+   ```
+3. 에이전트가 쓰는 MCP 툴 3종 (drudge `/mcp`):
+
+| 툴 | 방향 | 하는 일 |
+|---|---|---|
+| `recall{query}` | 읽기 | 벡터+그래프로 과거 경험 회수 |
+| `remember{text,title?}` | 쓰기 | vault/raw 에 노트 적재 (다음 sync 때 흡수) |
+| `sync{}` | 구동 | compile → ingest → extract 1회 |
+
+> **적재 트리거 3계층 공존**: ① drudge 4h 스케줄러(바닥, `DRUDGE_SYNC_HOURS`) · ② SessionEnd 훅(세션 포착) · ③ 에이전트 MCP(능동). 에이전트가 `remember`/`sync` 로 능동 적재하고, 스케줄러·훅이 안전망. 에이전트 없이 ①②만으로도 코어는 완결.
+
+---
+
 ## 소스 & 회수
 
 - **흡수 대상**(`DRUDGE_SOURCE_DIRS`, compose 기본): `~/.claude/projects`(Claude Code 메모리) + `vault/wiki`(증류·큐레이션 노트).
