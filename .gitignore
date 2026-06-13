@@ -22,4 +22,11 @@ venv/
 .DS_Store
 *.swp
 
+# ── vault: 개인 증류물(raw)·컴파일 산출물(wiki)은 추적 제외 ───────────────
+# 구조(.gitkeep)·거버넌스(.rules)·예시(example.md) 템플릿만 보존. 개인 노트는 누수 방지.
+vault/raw/*
+vault/wiki/*
+!vault/raw/.gitkeep
+!vault/raw/example.md
+!vault/wiki/.gitkeep
 vault/.obsidian/
