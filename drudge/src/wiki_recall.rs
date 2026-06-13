@@ -6,7 +6,6 @@
 //!
 //! 스코어링: 토큰 *동등*이 아니라 **부분일치 빈도**. 한국어 가산어미(임베딩→"임베딩은")·영어 부분어를
 //! 포용한다(형태소 분석 없이 무난). title 일치는 가중. 순수 로직(`score_doc`)과 I/O(`recall`) 분리(SRP).
-#![allow(dead_code)] // Stage 2(DRUDGE_VECTOR off 경로)에서 retrieve 에 배선 — 그 전까지 미사용
 use std::path::Path;
 
 use anyhow::{Context, Result};

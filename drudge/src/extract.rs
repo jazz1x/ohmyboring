@@ -154,6 +154,7 @@ fn strip_to_json(raw: &str) -> &str {
     &raw[start..end]
 }
 
+#[derive(Default)]
 pub struct ExtractStats {
     pub processed: usize,
     pub skipped: usize,

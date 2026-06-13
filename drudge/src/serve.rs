@@ -5,7 +5,7 @@
 //! - axum 라우터: /health · /ask · /search · /graph · /audit · /sync
 //! - 백그라운드 스케줄러: `DRUDGE_SYNC_HOURS`(기본 4h) 주기 + 기동 즉시 1회 실행.
 //! - 에러 전파: `AppError` (anyhow wrapper) → HTTP 500, JSON body.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,16 +28,26 @@ use crate::llm::Llm;
 use crate::retrieve;
 use crate::store::Store;
 use crate::vault;
+use crate::wiki_recall;
 
 // ── 공유 상태 ─────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct AppState {
-    store: Arc<Store>,
+    /// pgvector 백엔드. `None`이면 `DRUDGE_VECTOR=off` — 회수는 vault/wiki 직독(wiki_recall),
+    /// sync 는 compile(raw→wiki)만. 벡터/그래프 의존 엔드포인트는 명확히 거부.
+    store: Option<Arc<Store>>,
     llm: Arc<Llm>,
     source_dirs: Arc<Vec<String>>,
     /// vault 루트(`DRUDGE_VAULT_DIR`). `Some`이면 sync 시 raw→wiki compile 수행.
     vault_dir: Arc<Option<PathBuf>>,
+}
+
+impl AppState {
+    /// vault/wiki 디렉터리(`DRUDGE_VECTOR=off` 회수 대상). vault 미설정이면 None.
+    fn wiki_dir(&self) -> Option<PathBuf> {
+        (*self.vault_dir).as_ref().map(|v| v.join("wiki"))
+    }
 }
 
 // ── 에러 타입 (ROP: AppError → HTTP 500) ────────────────────────────────────
@@ -161,7 +171,12 @@ async fn handle_ask(
     State(s): State<AppState>,
     Json(req): Json<AskReq>,
 ) -> Result<Json<AskResp>, AppError> {
-    let out = ask::answer(&s.store, &s.llm, &req.question, &[]).await?;
+    // vector on → 벡터+그래프 회수 합성. off → vault/wiki 직독 회수 합성.
+    let out = if let Some(store) = s.store.as_ref() {
+        ask::answer(store, &s.llm, &req.question, &[]).await?
+    } else {
+        ask::answer_wiki(&s.llm, s.wiki_dir().as_deref(), &req.question).await?
+    };
     Ok(Json(AskResp {
         answer: out.answer,
         sources: out.sources,
@@ -169,37 +184,72 @@ async fn handle_ask(
 }
 
 /// 최신우선 브리핑 — 질문 없음(최근성 회수). cron 아침 브리핑이 호출.
+/// 최근성(updated_at) 정렬은 pgvector 의존 → `DRUDGE_VECTOR=off` 면 거부.
 async fn handle_brief(State(s): State<AppState>) -> Result<Json<AskResp>, AppError> {
-    let out = ask::brief(&s.store, &s.llm, &[]).await?;
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let out = ask::brief(store, &s.llm, &[]).await?;
     Ok(Json(AskResp {
         answer: out.answer,
         sources: out.sources,
     }))
 }
 
+/// `DRUDGE_VECTOR=off` 에서 벡터/그래프 의존 엔드포인트가 반환하는 명확한 거부(침묵 아님).
+fn vector_disabled() -> AppError {
+    AppError(anyhow::anyhow!(
+        "DRUDGE_VECTOR=off — 이 기능은 벡터 백엔드(pgvector)가 필요합니다. DRUDGE_VECTOR=on 으로 켜고 Postgres 를 띄우세요."
+    ))
+}
+
 async fn handle_search(
     State(s): State<AppState>,
     Json(req): Json<SearchReq>,
 ) -> Result<Json<SearchResp>, AppError> {
-    let hits = retrieve::retrieve(&s.store, &s.llm, &req.query, 5, &[]).await?;
-    let mapped: Vec<SearchHit> = hits
-        .into_iter()
-        .map(|h| SearchHit {
-            id: h.id,
-            origin: h.origin,
-            project: h.project,
-            source_path: h.source_path,
-            snippet: h.content.chars().take(200).collect(),
-        })
-        .collect();
+    let mapped: Vec<SearchHit> = if let Some(store) = s.store.as_ref() {
+        retrieve::retrieve(store, &s.llm, &req.query, 5, &[])
+            .await?
+            .into_iter()
+            .map(|h| SearchHit {
+                id: h.id,
+                origin: h.origin,
+                project: h.project,
+                source_path: h.source_path,
+                snippet: h.content.chars().take(200).collect(),
+            })
+            .collect()
+    } else {
+        // wiki 직독 — origin/project 는 wiki 경로엔 없으므로 빈값(스키마 호환).
+        wiki_recall_hits(s.wiki_dir().as_deref(), &req.query)?
+            .into_iter()
+            .map(|h| SearchHit {
+                id: h.id,
+                origin: String::new(),
+                project: String::new(),
+                source_path: h.source_path,
+                snippet: h.snippet,
+            })
+            .collect()
+    };
     Ok(Json(SearchResp { hits: mapped }))
+}
+
+/// wiki_recall 호출 래퍼 — wiki_dir 미설정이면 빈 결과(graceful).
+fn wiki_recall_hits(
+    wiki_dir: Option<&Path>,
+    query: &str,
+) -> Result<Vec<wiki_recall::WikiHit>, AppError> {
+    match wiki_dir {
+        Some(dir) => Ok(wiki_recall::recall(dir, query, 5)?),
+        None => Ok(Vec::new()),
+    }
 }
 
 async fn handle_graph(
     State(s): State<AppState>,
     Json(req): Json<GraphReq>,
 ) -> Result<Json<GraphResp>, AppError> {
-    let out = graph::query(&s.store, &s.llm, &req.query).await?;
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?; // 그래프는 pgvector 전용
+    let out = graph::query(store, &s.llm, &req.query).await?;
     Ok(Json(GraphResp {
         hit: out.hit,
         graph_neighbors: out.graph_neighbors,
@@ -208,7 +258,8 @@ async fn handle_graph(
 }
 
 async fn handle_audit(State(s): State<AppState>) -> Result<Json<audit::AuditStats>, AppError> {
-    let stats = audit::stats(&s.store).await?;
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?; // 적재 통계는 pgvector 전용
+    let stats = audit::stats(store).await?;
     Ok(Json(stats))
 }
 
@@ -346,21 +397,33 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     if query.is_empty() {
         return Err((-32602, "missing argument: query".to_owned()));
     }
-    let hits = retrieve::retrieve(&s.store, &s.llm, query, 5, &[])
-        .await
-        .map_err(|e| (-32603_i32, format!("retrieve: {e:#}")))?;
-    if hits.is_empty() {
+    // vector on → 벡터+그래프 청크. off → vault/wiki 직독 스니펫.
+    let lines: Vec<(String, String)> = if let Some(store) = s.store.as_ref() {
+        retrieve::retrieve(store, &s.llm, query, 5, &[])
+            .await
+            .map_err(|e| (-32603_i32, format!("retrieve: {e:#}")))?
+            .into_iter()
+            .map(|h| (h.source_path, h.content))
+            .collect()
+    } else {
+        let dir = s.wiki_dir();
+        let Some(dir) = dir.as_deref() else {
+            return Ok("(vault 미설정 — 회수 대상 없음)".to_owned());
+        };
+        wiki_recall::recall(dir, query, 5)
+            .map_err(|e| (-32603_i32, format!("wiki recall: {e:#}")))?
+            .into_iter()
+            .map(|h| (h.source_path, h.snippet))
+            .collect()
+    };
+    if lines.is_empty() {
         return Ok("(회수된 경험 없음)".to_owned());
     }
-    Ok(hits
+    Ok(lines
         .iter()
-        .map(|h| {
-            let src = h
-                .source_path
-                .rsplit('/')
-                .next()
-                .unwrap_or(h.source_path.as_str());
-            format!("- [{src}] {}", h.content)
+        .map(|(path, body)| {
+            let src = path.rsplit('/').next().unwrap_or(path.as_str());
+            format!("- [{src}] {body}")
         })
         .collect::<Vec<_>>()
         .join("\n\n"))
@@ -411,9 +474,14 @@ fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, Stri
 
 /// `sync` — 적재 파이프라인 1회(compile→ingest→extract). 에이전트가 *언제* 흡수할지 결정.
 async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
-    let o = do_sync(&s.store, &s.llm, &s.source_dirs, (*s.vault_dir).as_ref())
-        .await
-        .map_err(|e| (-32603_i32, format!("sync: {e:#}")))?;
+    let o = do_sync(
+        s.store.as_deref(),
+        &s.llm,
+        &s.source_dirs,
+        (*s.vault_dir).as_ref(),
+    )
+    .await
+    .map_err(|e| (-32603_i32, format!("sync: {e:#}")))?;
     let compiled = o.compile.as_ref().map_or(0, |c| c.compiled + c.recompiled);
     let nodes = o.extract.problems
         + o.extract.solutions
@@ -427,7 +495,13 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
 }
 
 async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncResp>, AppError> {
-    let o = do_sync(&s.store, &s.llm, &s.source_dirs, (*s.vault_dir).as_ref()).await?;
+    let o = do_sync(
+        s.store.as_deref(),
+        &s.llm,
+        &s.source_dirs,
+        (*s.vault_dir).as_ref(),
+    )
+    .await?;
     let (c_raw, c_compiled, c_recompiled) = o
         .compile
         .as_ref()
@@ -483,15 +557,24 @@ async fn run_compile_step(llm: &Llm, vault_dir: Option<&PathBuf>) -> Option<vaul
     }
 }
 
-/// 자가증강 사이클: raw→wiki compile → 소스→DB ingest → 시맨틱 그래프 extract.
+/// 자가증강 사이클: raw→wiki compile → (벡터 켜졌을 때만) 소스→DB ingest → 그래프 extract.
+/// `store=None`(DRUDGE_VECTOR=off) 이면 **compile 까지만** — wiki 가 1급 메모리라 그것만으로 회수 가능.
 /// HTTP `/sync` 와 백그라운드 스케줄러 공용(SSOT).
 async fn do_sync(
-    store: &Store,
+    store: Option<&Store>,
     llm: &Llm,
     source_dirs: &[String],
     vault_dir: Option<&PathBuf>,
 ) -> Result<SyncOutcome> {
     let compile = run_compile_step(llm, vault_dir).await;
+    let Some(store) = store else {
+        // 벡터 off — wiki compile 만으로 충분(임베딩/그래프 없음).
+        return Ok(SyncOutcome {
+            compile,
+            ingest: ingest::Stats::default(),
+            extract: extract::ExtractStats::default(),
+        });
+    };
     let ingest = ingest::run(store, llm, source_dirs).await?;
     let extract = extract::run(store, llm).await?;
     // 재추출은 옛 엣지만 지우고 노드는 고아로 남긴다(매 sync 누적 → 노드 폭발).
@@ -517,7 +600,12 @@ async fn do_sync(
 
 // ── 백그라운드 스케줄러 ───────────────────────────────────────────────────────
 
-async fn run_sync(store: &Store, llm: &Llm, source_dirs: &[String], vault_dir: Option<&PathBuf>) {
+async fn run_sync(
+    store: Option<&Store>,
+    llm: &Llm,
+    source_dirs: &[String],
+    vault_dir: Option<&PathBuf>,
+) {
     match do_sync(store, llm, source_dirs, vault_dir).await {
         Ok(o) => eprintln!(
             "[scheduler] sync done — ingest(new={} updated={} deleted={} chunks={}) extract(nodes={} edges={})",
@@ -537,7 +625,7 @@ async fn run_sync(store: &Store, llm: &Llm, source_dirs: &[String], vault_dir: O
 }
 
 fn spawn_scheduler(
-    store: Arc<Store>,
+    store: Option<Arc<Store>>,
     llm: Arc<Llm>,
     source_dirs: Arc<Vec<String>>,
     vault_dir: Arc<Option<PathBuf>>,
@@ -549,23 +637,27 @@ fn spawn_scheduler(
     let interval = Duration::from_secs(sync_hours * 3600);
 
     tokio::spawn(async move {
-        // 기동 즉시 1회 실행
-        eprintln!("[scheduler] startup sync (interval={sync_hours}h)");
-        run_sync(&store, &llm, &source_dirs, (*vault_dir).as_ref()).await;
+        let store_ref = store.as_deref();
+        // 기동 즉시 1회 실행 (벡터 off 면 compile 만 — wiki 갱신).
+        eprintln!(
+            "[scheduler] startup sync (interval={sync_hours}h, vector={})",
+            store.is_some()
+        );
+        run_sync(store_ref, &llm, &source_dirs, (*vault_dir).as_ref()).await;
 
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await; // 첫 tick 은 즉시 — 버림 (위에서 이미 실행)
         loop {
             ticker.tick().await;
             eprintln!("[scheduler] periodic sync");
-            run_sync(&store, &llm, &source_dirs, (*vault_dir).as_ref()).await;
+            run_sync(store_ref, &llm, &source_dirs, (*vault_dir).as_ref()).await;
         }
     });
 }
 
 // ── 진입점 ──────────────────────────────────────────────────────────────────
 
-pub async fn run(store: Store, llm: Llm) -> Result<()> {
+pub async fn run(store: Option<Store>, llm: Llm) -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_default();
     let dirs_env = std::env::var("DRUDGE_SOURCE_DIRS")
         .unwrap_or_else(|_| format!("{home}/.claude/projects:{home}/oh-my-boring/data/notes"));
@@ -577,14 +669,14 @@ pub async fn run(store: Store, llm: Llm) -> Result<()> {
     let addr = std::env::var("DRUDGE_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:7700".to_owned());
 
     let state = AppState {
-        store: Arc::new(store),
+        store: store.map(Arc::new),
         llm: Arc::new(llm),
         source_dirs: Arc::new(source_dirs),
         vault_dir: Arc::new(vault_dir),
     };
 
     spawn_scheduler(
-        Arc::clone(&state.store),
+        state.store.clone(),
         Arc::clone(&state.llm),
         Arc::clone(&state.source_dirs),
         Arc::clone(&state.vault_dir),
