@@ -13,22 +13,25 @@
 > 面倒で後回しにしがちな作業 — 過去の仕事を覚えて掘り起こす退屈な仕事 — を **drudge**（下働き）エンジンが黙々と肩代わりする。
 
 ```mermaid
-flowchart TB
-  CC(["Claude Code セッション"]) --> D
-  NT(["Markdown ノート"]) --> D
+flowchart LR
+  subgraph SRC ["ソース"]
+    direction TB
+    CC(["Claude Code セッション"])
+    NT(["Markdown ノート"])
+  end
   subgraph WRITE ["書き込み · ゲート — エンジン、または opt-in でエージェント"]
     direction LR
     D["蒸留 distill"] --> RAW["vault/raw"] --> CP["compile · キュレーション"]
   end
-  CP --> WIKI[("vault/wiki<br/>★ 1級メモリ")]
-  WIKI --> RD
+  WIKI[("vault/wiki<br/>★ 1級メモリ")]
   subgraph RD ["読み出し · オープン·高速"]
-    direction LR
+    direction TB
     ASK(["make ask"])
     REC(["recall.py"])
     SLK(["Slack"])
     MCP(["MCP recall"])
   end
+  SRC --> WRITE --> WIKI --> RD
   WIKI -. "DRUDGE_VECTOR=on" .-> PG[("pgvector<br/>vector + graph RAG")]
   PG -. 加速 .-> RD
   classDef hub fill:#ffe9a8,stroke:#c79a00,stroke-width:2px;

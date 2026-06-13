@@ -13,22 +13,25 @@
 > The boring chore you keep skipping — remembering past work and digging it back up — is what the **drudge** engine quietly does for you.
 
 ```mermaid
-flowchart TB
-  CC(["Claude Code session"]) --> D
-  NT(["markdown notes"]) --> D
+flowchart LR
+  subgraph SRC ["sources"]
+    direction TB
+    CC(["Claude Code session"])
+    NT(["markdown notes"])
+  end
   subgraph WRITE ["WRITE · gated — engine, or agent (opt-in)"]
     direction LR
     D["distill"] --> RAW["vault/raw"] --> CP["compile · curate"]
   end
-  CP --> WIKI[("vault/wiki<br/>★ primary memory")]
-  WIKI --> RD
+  WIKI[("vault/wiki<br/>★ primary memory")]
   subgraph RD ["READ · open · fast"]
-    direction LR
+    direction TB
     ASK(["make ask"])
     REC(["recall.py"])
     SLK(["Slack"])
     MCP(["MCP recall"])
   end
+  SRC --> WRITE --> WIKI --> RD
   WIKI -. "DRUDGE_VECTOR=on" .-> PG[("pgvector<br/>vector + graph RAG")]
   PG -. accelerate .-> RD
   classDef hub fill:#ffe9a8,stroke:#c79a00,stroke-width:2px;

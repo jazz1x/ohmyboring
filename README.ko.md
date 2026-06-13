@@ -13,22 +13,25 @@
 > 게을러서 안 하던 일 — 과거 작업을 기억하고 다시 찾아보는 그 지루한 일 — 을 **drudge**(막일꾼) 엔진이 대신 묵묵히 한다.
 
 ```mermaid
-flowchart TB
-  CC(["Claude Code 세션"]) --> D
-  NT(["마크다운 노트"]) --> D
+flowchart LR
+  subgraph SRC ["소스"]
+    direction TB
+    CC(["Claude Code 세션"])
+    NT(["마크다운 노트"])
+  end
   subgraph WRITE ["쓰기 · 게이트 — 엔진, 또는 에이전트(opt-in)"]
     direction LR
     D["증류 distill"] --> RAW["vault/raw"] --> CP["compile · 큐레이션"]
   end
-  CP --> WIKI[("vault/wiki<br/>★ 1급 메모리")]
-  WIKI --> RD
+  WIKI[("vault/wiki<br/>★ 1급 메모리")]
   subgraph RD ["읽기 · 열림·빠름"]
-    direction LR
+    direction TB
     ASK(["make ask"])
     REC(["recall.py"])
     SLK(["Slack"])
     MCP(["MCP recall"])
   end
+  SRC --> WRITE --> WIKI --> RD
   WIKI -. "DRUDGE_VECTOR=on" .-> PG[("pgvector<br/>vector + graph RAG")]
   PG -. 가속 .-> RD
   classDef hub fill:#ffe9a8,stroke:#c79a00,stroke-width:2px;
