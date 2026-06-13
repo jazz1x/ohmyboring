@@ -1,8 +1,8 @@
 #!/bin/sh
-# 행동 회귀 게이트 (풀 스택) — 큰 변경·배포 전. drudge 가 :7700 에 떠 있어야 함.
-# company-kb-bot scripts/eval-gate.sh 의 2계층 패턴 정렬:
-#   구조 게이트(guard.sh) = 스택 불필요 / 행동 게이트(여기) = 스택 필요(벡터+그래프 회수 회귀).
-# run_eval --check: recall@1/MRR/답변키워드 바닥선 미달 시 비0 종료 → 진행 중단.
+# Behavioral regression gate (full stack) — before big changes/deploys. drudge must be up on :7700.
+# Aligned with the two-tier pattern of company-kb-bot scripts/eval-gate.sh:
+#   structural gate (guard.sh) = no stack needed / behavioral gate (here) = stack needed (vector+graph recall regression).
+# run_eval --check: exits non-zero if recall@1/MRR/answer-keyword floors aren't met → halts progress.
 set -eu
 cd "$(dirname "$0")/.."
 if ! curl -s -m3 http://localhost:7700/health >/dev/null 2>&1; then

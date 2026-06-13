@@ -1,7 +1,7 @@
 #!/bin/sh
-# 스모크 테스트 — 엔진이 실제로 end-to-end 도는지 *적대적으로* 확인 (happy path 가정 금지).
-#   make smoke  또는  ./scripts/smoke.sh
-# 주의: /bin/sh(dash)는 pipefail 미지원 → 각 단계 결과를 명시적으로 검증한다.
+# Smoke test — *adversarially* verify the engine actually runs end-to-end (don't assume the happy path).
+#   make smoke  or  ./scripts/smoke.sh
+# Note: /bin/sh (dash) doesn't support pipefail → verify each step's result explicitly.
 set -eu
 URL="${DRUDGE_URL:-http://localhost:7700}"
 fail() { echo "❌ $1"; exit 1; }

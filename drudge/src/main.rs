@@ -1,5 +1,5 @@
-//! oh-my-boring 개인 RAG — Rust (pgvector: vector + node/edge graph + 재귀 CTE + audit).
-//! 1차 마일스톤: embed → store → vector search 왕복 증명(selftest).
+//! oh-my-boring personal RAG — Rust (pgvector: vector + node/edge graph + recursive CTE + audit).
+//! First milestone: embed → store → vector search round-trip proof (selftest).
 mod ask;
 mod audit;
 mod distill;
@@ -29,37 +29,37 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 스택 자가테스트: Llm 임베딩 → pgvector 저장 → 벡터 검색 왕복
+    /// Stack self-test: Llm embed → pgvector store → vector search round-trip
     Selftest,
-    /// 보유 문서 수
+    /// Number of stored documents
     Stats,
-    /// 소스 → frontmatter → 청킹 → 임베딩 → 적재 (멱등, example-company 제외)
+    /// source → frontmatter → chunking → embedding → ingest (idempotent, excludes example-company)
     Ingest,
-    /// 적재 감사 — origin/kind/project 분포 + 품질 경고
+    /// Ingestion audit — origin/kind/project distribution + quality warnings
     Audit,
-    /// 회수 테스트 (vector + BM25 RRF)
+    /// Retrieval test (vector + BM25 RRF)
     Search { query: String },
-    /// 질의 1회 — 회수 + LLM 합성 + 출처
+    /// Single query — retrieval + LLM synthesis + sources
     Ask { question: String },
-    /// 최신우선 브리핑 — 최근성(updated_at) 회수 + supersede 합성 (아침 브리핑)
+    /// Recency-first briefing — recency (updated_at) retrieval + supersede synthesis (morning briefing)
     Brief,
-    /// 그래프 확장회수 — 벡터히트 → 그래프(edge) 1-hop 이웃
+    /// Graph-expanded retrieval — vector hits → graph (edge) 1-hop neighbors
     Graph { query: String },
-    /// LLM 추출 — 문서별 problem/solution/tool/concept 노드 + 엣지 생성
+    /// LLM extraction — generate per-document problem/solution/tool/concept nodes + edges
     Extract,
-    /// 자가증강 루프: ingest → extract 순차 실행 (크론 호출용)
+    /// Self-augmentation loop: run ingest → extract sequentially (for cron invocation)
     Sync,
-    /// 고아 시맨틱 노드 삭제 (엣지 미참조 legacy 잔재 제거)
+    /// Delete orphan semantic nodes (remove edge-unreferenced legacy remnants)
     Gc,
-    /// 그래프 투영 — Postgres doc↔doc 관계를 wiki relates_to 위키링크로 기입(Obsidian)
+    /// Graph projection — write Postgres doc↔doc relations as wiki relates_to wikilinks (Obsidian)
     Link {
-        /// vault 루트 (기본: $DRUDGE_VAULT_DIR 또는 $HOME/oh-my-boring/vault)
+        /// vault root (default: $DRUDGE_VAULT_DIR or $HOME/oh-my-boring/vault)
         #[arg(long)]
         vault: Option<String>,
     },
-    /// HTTP 상주 데몬 — ingest/ask/graph/audit API + 백그라운드 스케줄러
+    /// HTTP resident daemon — ingest/ask/graph/audit API + background scheduler
     Serve,
-    /// 개인 vault lint/audit
+    /// Personal vault lint/audit
     Vault {
         #[command(subcommand)]
         sub: VaultCmd,
@@ -68,33 +68,33 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum VaultCmd {
-    /// vault/wiki/*.md 정합성 검사 (schema · frontmatter · wikilink · sources)
+    /// vault/wiki/*.md consistency check (schema · frontmatter · wikilink · sources)
     Lint {
-        /// vault 루트 경로 (기본: $PWD/vault)
+        /// vault root path (default: $PWD/vault)
         #[arg(long)]
         vault: Option<String>,
-        /// 경고도 오류로 처리 (exit 2)
+        /// Treat warnings as errors too (exit 2)
         #[arg(long)]
         strict: bool,
     },
-    /// vault 그래프 감사 (orphan · 연결성분 · superseded)
+    /// vault graph audit (orphan · connected components · superseded)
     Audit {
-        /// vault 루트 경로 (기본: $PWD/vault)
+        /// vault root path (default: $PWD/vault)
         #[arg(long)]
         vault: Option<String>,
-        /// 경고도 오류로 처리 (exit 2)
+        /// Treat warnings as errors too (exit 2)
         #[arg(long)]
         strict: bool,
     },
-    /// raw/*.md → curated wiki-NNNN.md 컴파일 (LLM 큐레이션, 멱등)
+    /// Compile raw/*.md → curated wiki-NNNN.md (LLM curation, idempotent)
     Compile {
-        /// vault 루트 경로 (기본: $PWD/vault)
+        /// vault root path (default: $PWD/vault)
         #[arg(long)]
         vault: Option<String>,
-        /// raw 노트 디렉터리 (기본: <vault>/raw)
+        /// raw note directory (default: <vault>/raw)
         #[arg(long)]
         raw: Option<String>,
-        /// 날짜 오버라이드 (YYYY-MM-DD, 기본: 오늘)
+        /// Date override (YYYY-MM-DD, default: today)
         #[arg(long)]
         date: Option<String>,
     },
@@ -103,12 +103,12 @@ enum VaultCmd {
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
-    // 벡터 전용 CLI 명령이 off 에서 받는 거부 메시지(침묵 아님, ROP). 데몬(serve)은 off 면 wiki 모드.
+    // Rejection message vector-only CLI commands return when off (not silent, ROP). The daemon (serve) runs in wiki mode when off.
     const VEC_OFF: &str = "DRUDGE_VECTOR=off — 이 명령은 벡터 백엔드(pgvector)가 필요합니다. 데몬(serve)은 off 면 wiki 회수로 동작합니다.";
 
     let cli = Cli::parse();
-    // DRUDGE_VECTOR: 기본 off = wiki 1급(Postgres 미연결, 단순). on 으로 켜면 pgvector(vector+graph).
-    // 미설정/off → Store 안 엶 → Postgres 없이 엔진/CLI 기동. (wiki-primary 트렌드 정렬)
+    // DRUDGE_VECTOR: default off = wiki first-class (no Postgres connection, simple). Turn on to enable pgvector (vector+graph).
+    // unset/off → don't open Store → start engine/CLI without Postgres. (aligned with the wiki-primary trend)
     let vector_on = std::env::var("DRUDGE_VECTOR")
         .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "on" | "1" | "true" | "yes"));
     let store: Option<store::Store> = if vector_on {
@@ -146,8 +146,8 @@ async fn main() -> Result<()> {
                     source_path: (*id).to_owned(),
                     ..Default::default()
                 };
-                // chunk.source_path REFERENCES document(source_path) — FK 충족을 위해
-                // upsert_document 를 먼저 호출해 부모 레코드를 보장한다.
+                // chunk.source_path REFERENCES document(source_path) — call upsert_document
+                // first to guarantee the parent record so the FK is satisfied.
                 store
                     .upsert_document(&front, "selftest", std::time::SystemTime::now())
                     .await?;
@@ -171,7 +171,7 @@ async fn main() -> Result<()> {
                 let snip: String = h.content.chars().take(34).collect();
                 println!("   [dist={:.4}] {} ({}) — {}", h.dist, h.id, h.origin, snip);
             }
-            // GOAL 검증: 'db' 문서가 1위여야 (쿼리와 의미상 최근접)
+            // GOAL check: the 'db' document must rank first (semantically closest to the query)
             match hits.first() {
                 Some(h) if h.id == "doc:db" => {
                     println!("✅ 랭킹 정확 (doc:db 1위) — 벡터검색 정상");
@@ -252,8 +252,8 @@ async fn main() -> Result<()> {
                 s.attempts,
                 s.edges
             );
-            // 시맨틱 통계 감사 출력 (멱등 검증용)
-            let ss = store.semantic_stats().await?; // store: &Store (가드 통과)
+            // Semantic stats audit output (for idempotency verification)
+            let ss = store.semantic_stats().await?; // store: &Store (passed the guard)
             println!(
                 "semantic audit: problem {} · solution {} · tool {} · concept {} · attempt {}",
                 ss.problems, ss.solutions, ss.tools, ss.concepts, ss.attempts
@@ -315,11 +315,11 @@ async fn main() -> Result<()> {
         }
         Cmd::Serve => {
             let ol = llm::Llm::from_env();
-            // store 소유권을 serve::run 으로 이동 — 단일 프로세스 DB 소유자 패턴.
+            // Move store ownership into serve::run — single-process DB owner pattern.
             serve::run(store, ol).await?;
         }
         Cmd::Vault { sub } => {
-            // vault 명령은 store(Postgres) 불필요 — drop 해 커넥션 해제.
+            // vault commands don't need store (Postgres) — drop it to release the connection.
             drop(store);
             let default_vault = format!(
                 "{}/oh-my-boring/vault",
@@ -342,7 +342,7 @@ async fn main() -> Result<()> {
                         std::path::PathBuf::from(vault.unwrap_or_else(|| default_vault.clone()));
                     let raw_dir =
                         raw.map_or_else(|| vault_root.join("raw"), std::path::PathBuf::from);
-                    // today: --date 인자, 없으면 시스템 날짜(I/O 경계는 vault::today_utc 1곳)
+                    // today: the --date argument, or the system date if absent (the I/O boundary is the single vault::today_utc)
                     let today = date.unwrap_or_else(vault::today_utc);
                     let s = vault::run_compile(&vault_root, &raw_dir, &today, &ol).await?;
                     println!(

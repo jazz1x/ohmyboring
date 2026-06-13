@@ -1,7 +1,7 @@
-//! Audit — 적재 상태 점검: origin/kind/project 분포 + 품질 경고.
-//! "적재가 엉망인지"를 추측 아니라 DB 실제 집계로 답한다. 집계는 Rust 에서(SQL GROUP 회피).
+//! Audit — check ingestion state: origin/kind/project distribution + quality warnings.
+//! Answers "is the ingestion a mess?" with actual DB aggregation rather than guesswork. Aggregation is done in Rust (avoiding SQL GROUP).
 //!
-//! SRP: `stats()` 는 데이터 반환(HTTP·CLI 공용), `run()` 은 CLI stdout 껍질.
+//! SRP: `stats()` returns data (shared by HTTP·CLI), `run()` is the CLI stdout shell.
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
@@ -27,7 +27,7 @@ fn print_group(label: &str, rows: &[(&str, usize)]) {
     }
 }
 
-/// `stats()` 반환값 — HTTP 핸들러와 CLI 모두 사용.
+/// `stats()` return value — used by both the HTTP handler and the CLI.
 #[derive(Serialize)]
 pub struct AuditStats {
     pub total_chunks: usize,
@@ -56,7 +56,7 @@ pub struct AuditStats {
     pub semantic_tried: usize,
 }
 
-/// 순수 로직: DB 집계 → `AuditStats` 반환. I/O 없음.
+/// Pure logic: DB aggregation → returns `AuditStats`. No I/O.
 pub async fn stats(store: &Store) -> Result<AuditStats> {
     let metas = store.all_meta().await?;
     let total_chunks = metas.len();
@@ -115,7 +115,7 @@ pub async fn stats(store: &Store) -> Result<AuditStats> {
     })
 }
 
-/// CLI 껍질: `stats()` 호출 후 stdout 출력.
+/// CLI shell: call `stats()` then print to stdout.
 pub async fn run(store: &Store) -> Result<()> {
     let metas = store.all_meta().await?;
     let total = metas.len();

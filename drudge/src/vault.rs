@@ -1,12 +1,12 @@
-//! Vault lint / audit — personal Obsidian markdown KB 정합성 검사.
+//! Vault lint / audit — integrity checks for the personal Obsidian markdown KB.
 //!
-//! # 설계 원칙 (PRINCIPLES.md)
-//! - **PDV**: `schema.yaml` 과 `.md` frontmatter 를 경계에서 1회 typed 파싱.
-//! - **ROP**: `?` 전파 + anyhow Context. unwrap/expect/panic 없음.
-//! - **ADT**: `Kind`, `Origin`, `Severity` 를 enum 으로. 불가능 상태 표현 불가능하게.
-//! - **SRP**: 순수 로직(parse/graph) 과 I/O(파일 읽기) 분리.
-//!   - `split_frontmatter`, `parse_*`, `lint_*`, `audit_*`: 순수 — &str/슬라이스 입력 → 값
-//!   - `run_lint` / `run_audit`: I/O 쉘 — 파일 수집 후 순수 함수 위임
+//! # Design principles (PRINCIPLES.md)
+//! - **PDV**: parse `schema.yaml` and `.md` frontmatter into a typed form once at the boundary.
+//! - **ROP**: `?` propagation + anyhow Context. No unwrap/expect/panic.
+//! - **ADT**: `Kind`, `Origin`, `Severity` as enums. Make impossible states unrepresentable.
+//! - **SRP**: separate pure logic (parse/graph) from I/O (file reading).
+//!   - `split_frontmatter`, `parse_*`, `lint_*`, `audit_*`: pure — &str/slice input → value
+//!   - `run_lint` / `run_audit`: I/O shell — collect files then delegate to pure functions
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -18,10 +18,10 @@ use serde::Serialize;
 use crate::store::Store;
 
 // ─────────────────────────────────────────────────────────────
-// ADT — 불가능 상태를 표현 불가능하게
+// ADT — make impossible states unrepresentable
 // ─────────────────────────────────────────────────────────────
 
-/// 페이지 kind 허용값.
+/// Allowed values for page kind.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
@@ -31,7 +31,7 @@ pub enum Kind {
     Decision,
 }
 
-/// 페이지 origin 허용값.
+/// Allowed values for page origin.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Origin {
@@ -39,7 +39,7 @@ pub enum Origin {
     Company,
 }
 
-/// 이슈 심각도.
+/// Issue severity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Error,
@@ -47,10 +47,10 @@ pub enum Severity {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 도메인 타입 (typed 증거 — PDV)
+// Domain types (typed evidence — PDV)
 // ─────────────────────────────────────────────────────────────
 
-/// lint/audit 결과 이슈. I/O 와 분리된 순수 값.
+/// A lint/audit result issue. A pure value decoupled from I/O.
 #[derive(Debug, Clone)]
 pub struct Issue {
     pub rule: &'static str,
@@ -80,10 +80,10 @@ impl Issue {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Schema 파싱 (PDV: 경계 1회 typed 파싱)
+// Schema parsing (PDV: typed parse once at the boundary)
 // ─────────────────────────────────────────────────────────────
 
-/// `.rules/schema.yaml` 의 typed 표현.
+/// Typed representation of `.rules/schema.yaml`.
 #[derive(Debug, Deserialize)]
 pub struct Schema {
     pub page_id: PageIdSchema,
@@ -101,7 +101,7 @@ pub struct SourcesSchema {
     pub allowed_prefixes: Vec<String>,
 }
 
-/// 파일에서 schema 를 읽어 typed 값으로 파싱. (I/O 경계)
+/// Read the schema from a file and parse it into a typed value. (I/O boundary)
 pub fn load_schema(schema_path: &Path) -> Result<Schema> {
     let raw = std::fs::read_to_string(schema_path)
         .with_context(|| format!("schema 파일 읽기 실패: {}", schema_path.display()))?;
@@ -110,10 +110,10 @@ pub fn load_schema(schema_path: &Path) -> Result<Schema> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Frontmatter 파싱 (PDV: 경계 1회)
+// Frontmatter parsing (PDV: once at the boundary)
 // ─────────────────────────────────────────────────────────────
 
-/// wiki 페이지 frontmatter (raw serde_yaml 으로 선택 필드 통합).
+/// wiki page frontmatter (optional fields consolidated via raw serde_yaml).
 #[derive(Debug, Deserialize)]
 pub struct RawFrontMatter {
     pub id: Option<String>,
@@ -128,11 +128,11 @@ pub struct RawFrontMatter {
     #[serde(default)]
     pub tags: Vec<String>,
     pub superseded_by: Option<String>,
-    #[allow(dead_code)] // 선택 필드 — audit/출력 확장 시 사용
+    #[allow(dead_code)] // optional field — used when extending audit/output
     pub summary: Option<String>,
 }
 
-/// 경계에서 typed 로 파싱된 wiki 페이지 (PDV 완성 상태 — 이후 재검증 불필요).
+/// A wiki page parsed into typed form at the boundary (PDV-complete state — no re-validation needed afterward).
 #[derive(Debug, Clone)]
 pub struct Page {
     pub id: String,
@@ -155,8 +155,8 @@ pub struct Page {
     pub path: PathBuf,
 }
 
-/// `--- yaml ---\nbody` 형태의 .md 파일을 (raw frontmatter YAML, body) 로 분리.
-/// 순수 함수 — &str 입력, no I/O.
+/// Split a `--- yaml ---\nbody` style .md file into (raw frontmatter YAML, body).
+/// Pure function — &str input, no I/O.
 fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     let rest = content.strip_prefix("---\n")?;
     let end = rest.find("\n---\n")?;
@@ -165,20 +165,20 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     Some((yaml, body))
 }
 
-/// raw frontmatter YAML 문자열 → `RawFrontMatter`. 순수 함수.
+/// raw frontmatter YAML string → `RawFrontMatter`. Pure function.
 fn parse_raw_frontmatter(yaml: &str) -> Result<RawFrontMatter> {
     serde_yaml::from_str(yaml).context("frontmatter YAML 파싱 실패")
 }
 
-/// `/…/wiki-0002.md` → `Some("wiki-0002")`. wiki 노트가 아니면 None. 순수.
+/// `/…/wiki-0002.md` → `Some("wiki-0002")`. None if not a wiki note. Pure.
 fn wiki_stem(source_path: &str) -> Option<String> {
     let name = source_path.rsplit('/').next()?;
     let stem = name.strip_suffix(".md")?;
     stem.starts_with("wiki-").then(|| stem.to_owned())
 }
 
-/// frontmatter YAML 의 `relates_to:` 블록만 새 링크 리스트로 교체(다른 키 보존). 순수.
-/// 키가 없으면 끝에 추가. 빈 링크는 `relates_to: []`.
+/// Replace only the `relates_to:` block of the frontmatter YAML with a new link list (other keys preserved). Pure.
+/// If the key is absent, append at the end. Empty links → `relates_to: []`.
 fn set_relates_to(yaml: &str, links: &[String]) -> String {
     let render = |out: &mut Vec<String>| {
         if links.is_empty() {
@@ -196,7 +196,7 @@ fn set_relates_to(yaml: &str, links: &[String]) -> String {
     for line in yaml.lines() {
         if skip_list {
             if line.trim_start().starts_with('-') {
-                continue; // 옛 relates_to 리스트 항목 건너뜀
+                continue; // skip old relates_to list items
             }
             skip_list = false;
         }
@@ -214,9 +214,9 @@ fn set_relates_to(yaml: &str, links: &[String]) -> String {
     out.join("\n")
 }
 
-/// Postgres 그래프(`related_docs`)를 각 wiki 노트의 `relates_to` 위키링크로 투영.
-/// Obsidian 그래프뷰가 GraphRAG 연결을 그대로 그리게 한다. 멱등(매번 재계산·재기록).
-/// 관련 문서 중 같은 vault 의 wiki 노트만 `[[wiki-NNNN]]` 로(Obsidian 이 해석 가능).
+/// Project the Postgres graph (`related_docs`) into each wiki note's `relates_to` wikilinks.
+/// Makes the Obsidian graph view draw the GraphRAG connections directly. Idempotent (recomputed and rewritten every time).
+/// Among related documents, only wiki notes in the same vault become `[[wiki-NNNN]]` (so Obsidian can resolve them).
 pub async fn project_links(store: &Store, vault_root: &Path, limit: i64) -> Result<usize> {
     let wiki_dir = vault_root.join("wiki");
     let mut updated = 0;
@@ -246,7 +246,7 @@ pub async fn project_links(store: &Store, vault_root: &Path, limit: i64) -> Resu
             .iter()
             .filter_map(|p| wiki_stem(p))
             .collect();
-        // 고립 방지: concept 겹침 링크가 2개 미만이면 같은 프로젝트 최신 문서로 보충(소수).
+        // isolation prevention: if there are fewer than 2 concept-overlap links, supplement with the same project's latest documents (a few).
         if stems.len() < 2 {
             for p in store.recent_project_docs(&src_path, 2).await? {
                 if let Some(s) = wiki_stem(&p)
@@ -266,7 +266,7 @@ pub async fn project_links(store: &Store, vault_root: &Path, limit: i64) -> Resu
     Ok(updated)
 }
 
-/// `kind` YAML 값 → `Kind` enum. 순수 함수.
+/// `kind` YAML value → `Kind` enum. Pure function.
 fn parse_kind(val: &serde_yaml::Value) -> Option<Kind> {
     match val.as_str()? {
         "note" => Some(Kind::Note),
@@ -277,7 +277,7 @@ fn parse_kind(val: &serde_yaml::Value) -> Option<Kind> {
     }
 }
 
-/// `origin` YAML 값 → `Origin` enum. 순수 함수.
+/// `origin` YAML value → `Origin` enum. Pure function.
 fn parse_origin(val: &serde_yaml::Value) -> Option<Origin> {
     match val.as_str()? {
         "personal" => Some(Origin::Personal),
@@ -287,11 +287,11 @@ fn parse_origin(val: &serde_yaml::Value) -> Option<Origin> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Wikilink 추출 (순수)
+// Wikilink extraction (pure)
 // ─────────────────────────────────────────────────────────────
 
-/// 본문에서 `[[wiki-NNNN]]` / `[[wiki-NNNN|alias]]` 형태의 wikilink target ID 들을 추출.
-/// 순수 함수.
+/// Extract `[[wiki-NNNN]]` / `[[wiki-NNNN|alias]]` style wikilink target IDs from the body.
+/// Pure function.
 fn extract_wikilinks(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = body;
@@ -301,7 +301,7 @@ fn extract_wikilinks(body: &str) -> Vec<String> {
             break;
         };
         let inner = &after_open[..close];
-        // alias 제거: [[id|alias]] → id
+        // strip alias: [[id|alias]] → id
         let target = inner.split('|').next().unwrap_or(inner).trim();
         out.push(target.to_owned());
         rest = &after_open[close + 2..];
@@ -309,8 +309,8 @@ fn extract_wikilinks(body: &str) -> Vec<String> {
     out
 }
 
-/// 본문에 `[[raw/...]]` / `[[meta/...]]` / `[[.rules/...]]` 형태의 cross-layer 링크가 있는지 검사.
-/// 순수 함수.
+/// Check whether the body contains cross-layer links of the form `[[raw/...]]` / `[[meta/...]]` / `[[.rules/...]]`.
+/// Pure function.
 fn find_cross_layer_wikilinks(body: &str) -> Vec<String> {
     extract_wikilinks(body)
         .into_iter()
@@ -319,10 +319,10 @@ fn find_cross_layer_wikilinks(body: &str) -> Vec<String> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Lint — 순수 서브 함수 (SRP: 각 검사를 별도 함수로)
+// Lint — pure sub-functions (SRP: each check as a separate function)
 // ─────────────────────────────────────────────────────────────
 
-/// required_frontmatter 키 존재 검사. 순수.
+/// Check existence of required_frontmatter keys. Pure.
 fn check_required_fields(
     raw_fm: &RawFrontMatter,
     required_keys: &[String],
@@ -355,7 +355,7 @@ fn check_required_fields(
     }
 }
 
-/// id 값 정합성 검사. 순수.
+/// Check id value integrity. Pure.
 fn check_id_value(
     raw_fm: &RawFrontMatter,
     id_re: &regex::Regex,
@@ -380,7 +380,7 @@ fn check_id_value(
     }
 }
 
-/// sources 검사 (prefix + 파일 실재). 순수 — vault_root 파일시스템 접근 포함.
+/// Check sources (prefix + file existence). Pure — includes vault_root filesystem access.
 fn check_sources(
     raw_fm: &RawFrontMatter,
     allowed_prefixes: &[String],
@@ -410,7 +410,7 @@ fn check_sources(
     }
 }
 
-/// wikilink 검사 (cross-layer + dangling). 순수.
+/// Check wikilinks (cross-layer + dangling). Pure.
 fn check_wikilinks(body: &str, stem: &str, known_ids: &HashSet<String>, issues: &mut Vec<Issue>) {
     for bad_link in find_cross_layer_wikilinks(body) {
         issues.push(Issue::error(
@@ -431,18 +431,18 @@ fn check_wikilinks(body: &str, stem: &str, known_ids: &HashSet<String>, issues: 
 }
 
 // ─────────────────────────────────────────────────────────────
-// Lint — 공개 진입점 (순수)
+// Lint — public entry point (pure)
 // ─────────────────────────────────────────────────────────────
 
-/// 한 파일의 내용 + 경로를 받아 이슈 목록을 반환. 순수 함수(I/O는 sources 실재 확인만).
+/// Take one file's content + path and return the list of issues. Pure function (the only I/O is checking sources existence).
 ///
-/// # 인자
-/// - `abs_path`: 파일 절대 경로
-/// - `content`: 파일 전체 내용
+/// # Arguments
+/// - `abs_path`: absolute file path
+/// - `content`: full file content
 /// - `schema`: typed schema
-/// - `vault_root`: vault 루트 절대 경로 (소스 파일 실재 확인)
-/// - `known_ids`: vault/wiki 에 존재하는 모든 페이지 ID 집합
-#[allow(clippy::too_many_lines)] // 페이지당 다수 정합성 검사 — 한 책임(lint) 안에서 절차 나열
+/// - `vault_root`: vault root absolute path (for source file existence checks)
+/// - `known_ids`: set of all page IDs that exist in vault/wiki
+#[allow(clippy::too_many_lines)] // many integrity checks per page — a procedural list within a single responsibility (lint)
 pub fn lint_page(
     abs_path: &Path,
     content: &str,
@@ -457,7 +457,7 @@ pub fn lint_page(
         .to_owned();
     let mut issues = Vec::new();
 
-    // ── id-format: 파일명 패턴 검사 ──
+    // ── id-format: filename pattern check ──
     let id_re = match regex::Regex::new(&schema.page_id.pattern) {
         Ok(r) => r,
         Err(e) => {
@@ -481,7 +481,7 @@ pub fn lint_page(
         return (None, issues);
     }
 
-    // ── frontmatter 분리 ──
+    // ── frontmatter split ──
     let Some((yaml, body)) = split_frontmatter(content) else {
         issues.push(Issue::error(
             "fm-parse",
@@ -491,7 +491,7 @@ pub fn lint_page(
         return (None, issues);
     };
 
-    // ── frontmatter YAML 파싱 ──
+    // ── frontmatter YAML parsing ──
     let raw_fm = match parse_raw_frontmatter(yaml) {
         Ok(fm) => fm,
         Err(e) => {
@@ -504,11 +504,11 @@ pub fn lint_page(
         }
     };
 
-    // ── 검사들 (UX 경계 — 누적) ──
+    // ── checks (UX boundary — accumulated) ──
     check_required_fields(&raw_fm, &schema.required_frontmatter, &stem, &mut issues);
     check_id_value(&raw_fm, &id_re, &stem, &mut issues);
 
-    // ── kind 파싱 ──
+    // ── kind parsing ──
     let kind = raw_fm.kind.as_ref().and_then(parse_kind);
     if raw_fm.kind.is_some() && kind.is_none() {
         let raw_str = raw_fm.kind.as_ref().and_then(|v| v.as_str()).unwrap_or("?");
@@ -519,7 +519,7 @@ pub fn lint_page(
         ));
     }
 
-    // ── origin 파싱 ──
+    // ── origin parsing ──
     let origin = raw_fm.origin.as_ref().and_then(parse_origin);
     if raw_fm.origin.is_some() && origin.is_none() {
         let raw_str = raw_fm
@@ -543,7 +543,7 @@ pub fn lint_page(
         &mut issues,
     );
 
-    // ── Page 구성 ──
+    // ── Page construction ──
     let page = if let (Some(id), Some(title), Some(kind), Some(origin), Some(date)) = (
         raw_fm.id.clone(),
         raw_fm.title.clone(),
@@ -572,10 +572,10 @@ pub fn lint_page(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Audit — 순수 그래프 서브 함수 (SRP)
+// Audit — pure graph sub-functions (SRP)
 // ─────────────────────────────────────────────────────────────
 
-/// superseded_by dangling + superseded-referenced 검사. 순수.
+/// Check superseded_by dangling + superseded-referenced. Pure.
 fn check_superseded(pages: &[Page], page_ids: &HashSet<&str>, issues: &mut Vec<Issue>) {
     let superseded_page_ids: HashSet<&str> = pages
         .iter()
@@ -594,7 +594,7 @@ fn check_superseded(pages: &[Page], page_ids: &HashSet<&str>, issues: &mut Vec<I
             ));
         }
 
-        // 살아있는 페이지의 relates_to 가 superseded 페이지를 가리키면 warn
+        // warn if a live page's relates_to points to a superseded page
         if page.superseded_by.is_none() {
             for rel in &page.relates_to {
                 if superseded_page_ids.contains(rel.as_str()) {
@@ -609,7 +609,7 @@ fn check_superseded(pages: &[Page], page_ids: &HashSet<&str>, issues: &mut Vec<I
     }
 }
 
-/// 무방향 인접 목록 + edge_count 구축. 순수 (owned String 사용 — 수명 복잡성 회피).
+/// Build an undirected adjacency list + edge_count. Pure (uses owned String — avoids lifetime complexity).
 fn build_adjacency(
     pages: &[Page],
     page_ids: &HashSet<&str>,
@@ -634,7 +634,7 @@ fn build_adjacency(
             .collect();
 
         for nbr in &all_neighbors {
-            // 무방향 — 정규화: (min, max)
+            // undirected — normalize: (min, max)
             let (a, b) = if pid <= nbr {
                 (pid.clone(), nbr.clone())
             } else {
@@ -651,7 +651,7 @@ fn build_adjacency(
     (adj, edge_set.len())
 }
 
-/// BFS 로 연결 성분 크기 목록을 반환. 순수.
+/// Return the list of connected-component sizes via BFS. Pure.
 fn connected_components(nodes: &[&str], adj: &HashMap<String, HashSet<String>>) -> Vec<usize> {
     let mut visited: HashSet<&str> = HashSet::new();
     let mut sizes: Vec<usize> = Vec::new();
@@ -682,10 +682,10 @@ fn connected_components(nodes: &[&str], adj: &HashMap<String, HashSet<String>>) 
 }
 
 // ─────────────────────────────────────────────────────────────
-// Audit — 공개 진입점 (순수)
+// Audit — public entry point (pure)
 // ─────────────────────────────────────────────────────────────
 
-/// 그래프 감사 결과 요약.
+/// Summary of the graph audit result.
 #[derive(Debug)]
 pub struct AuditSummary {
     pub page_count: usize,
@@ -697,7 +697,7 @@ pub struct AuditSummary {
     pub issues: Vec<Issue>,
 }
 
-/// pages 목록으로 그래프를 구축하고 감사 결과를 반환. 순수 함수(I/O 없음).
+/// Build the graph from the pages list and return the audit result. Pure function (no I/O).
 pub fn audit_pages(pages: &[Page]) -> AuditSummary {
     let mut issues = Vec::new();
 
@@ -708,7 +708,7 @@ pub fn audit_pages(pages: &[Page]) -> AuditSummary {
 
     let (adj, edge_count) = build_adjacency(pages, &page_ids);
 
-    // ── orphan 검사 ──
+    // ── orphan check ──
     let mut orphan_count = 0_usize;
     for page in pages {
         let has_edges = adj.get(&page.id).is_some_and(|s| !s.is_empty());
@@ -722,7 +722,7 @@ pub fn audit_pages(pages: &[Page]) -> AuditSummary {
         }
     }
 
-    // ── 연결 성분(BFS) ──
+    // ── connected components (BFS) ──
     let all_nodes: Vec<&str> = pages.iter().map(|p| p.id.as_str()).collect();
     let component_sizes = connected_components(&all_nodes, &adj);
     let component_count = component_sizes.len();
@@ -749,10 +749,10 @@ pub fn audit_pages(pages: &[Page]) -> AuditSummary {
 }
 
 // ─────────────────────────────────────────────────────────────
-// I/O 쉘 — run_lint / run_audit
+// I/O shell — run_lint / run_audit
 // ─────────────────────────────────────────────────────────────
 
-/// vault wiki 페이지 목록을 파일시스템에서 수집. (I/O)
+/// Collect the list of vault wiki pages from the filesystem. (I/O)
 fn collect_wiki_pages(wiki_dir: &Path) -> Result<(HashSet<String>, Vec<PathBuf>)> {
     let mut known_ids: HashSet<String> = HashSet::new();
     let mut entries: Vec<PathBuf> = Vec::new();
@@ -774,12 +774,12 @@ fn collect_wiki_pages(wiki_dir: &Path) -> Result<(HashSet<String>, Vec<PathBuf>)
     Ok((known_ids, entries))
 }
 
-/// vault 루트를 받아 lint 를 실행하고 종료코드를 반환.
+/// Take the vault root, run lint, and return the exit code.
 ///
 /// # Exit code semantics
-/// - `0`: 오류 없음 (경고는 있을 수 있음)
-/// - `1`: 오류(error) 있음
-/// - `2`: strict 모드에서 경고만 있음
+/// - `0`: no errors (warnings may exist)
+/// - `1`: errors present
+/// - `2`: only warnings, in strict mode
 pub fn run_lint(vault_root: &Path, strict: bool) -> Result<i32> {
     let schema = load_schema(&vault_root.join(".rules/schema.yaml"))?;
 
@@ -802,7 +802,7 @@ pub fn run_lint(vault_root: &Path, strict: bool) -> Result<i32> {
     Ok(exit_code(&all_issues, strict))
 }
 
-/// vault 루트를 받아 audit 를 실행하고 종료코드를 반환.
+/// Take the vault root, run audit, and return the exit code.
 pub fn run_audit(vault_root: &Path, strict: bool) -> Result<i32> {
     let schema = load_schema(&vault_root.join(".rules/schema.yaml"))?;
 
@@ -845,7 +845,7 @@ pub fn run_audit(vault_root: &Path, strict: bool) -> Result<i32> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 출력 헬퍼 (I/O)
+// Output helpers (I/O)
 // ─────────────────────────────────────────────────────────────
 
 fn print_issues(issues: &[Issue]) {
@@ -896,10 +896,10 @@ fn exit_code(issues: &[Issue], strict: bool) -> i32 {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Compile — raw → wiki 큐레이션 (순수 로직 + I/O 쉘)
+// Compile — raw → wiki curation (pure logic + I/O shell)
 // ─────────────────────────────────────────────────────────────
 
-/// LLM 큐레이션 결과 (parse-don't-validate — 1회 typed 파싱).
+/// LLM curation result (parse-don't-validate — typed parse once).
 #[derive(Debug, Deserialize)]
 struct CuratedLlm {
     title: String,
@@ -912,7 +912,7 @@ struct CuratedLlm {
     concepts: Vec<String>,
 }
 
-/// 컴파일된 페이지의 in-memory 표현 (관계 링크 계산 전).
+/// In-memory representation of a compiled page (before relation links are computed).
 #[derive(Debug, Clone)]
 pub struct CompiledDraft {
     pub wiki_id: String,
@@ -929,7 +929,7 @@ pub struct CompiledDraft {
     pub relates_to: Vec<String>, // filled after relation pass
 }
 
-/// 기존 wiki 페이지에서 추출한 컴파일 출처 정보 (idempotency 키).
+/// Compile-source info extracted from an existing wiki page (idempotency key).
 #[derive(Debug, Clone)]
 struct WikiMeta {
     wiki_id: String,
@@ -938,7 +938,7 @@ struct WikiMeta {
     raw_sha: String,
 }
 
-/// wiki frontmatter 의 extended 필드 (compile 전용).
+/// Extended fields of wiki frontmatter (compile-only).
 #[derive(Debug, Deserialize)]
 struct WikiFrontMatterExt {
     #[serde(default)]
@@ -949,20 +949,20 @@ struct WikiFrontMatterExt {
     id: Option<String>,
 }
 
-/// CJK 통합 한자(U+4E00..=U+9FFF) 포함 여부 (extract.rs와 동일 로직).
+/// Whether it contains CJK Unified Ideographs (U+4E00..=U+9FFF) (same logic as extract.rs).
 fn has_han(s: &str) -> bool {
     s.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c))
 }
 
-/// Han-filter 적용 후 유효 항목만 남김.
+/// Apply the Han filter and keep only valid items.
 fn filter_han(items: Vec<String>) -> Vec<String> {
     items.into_iter().filter(|s| !has_han(s)).collect()
 }
 
-/// Obsidian-안전 태그로 정규화 (순수). LLM 이 뱉는 공백 포함 태그(`claude code`)가
-/// Obsidian 에서 깨지는 걸 막는다 — 공백/허용외 문자 → `-`, 연속 대시 collapse,
-/// 앞뒤 `-`·`/` trim, 소문자. 허용 집합 = `[a-z0-9_/-]`(`/` = nested 태그).
-/// 빈 값·순수숫자(옵시 무효 태그)는 `None`.
+/// Normalize into an Obsidian-safe tag (pure). Prevents tags containing spaces that the LLM emits (`claude code`)
+/// from breaking in Obsidian — space/disallowed chars → `-`, collapse consecutive dashes,
+/// trim leading/trailing `-`·`/`, lowercase. Allowed set = `[a-z0-9_/-]` (`/` = nested tag).
+/// Empty value · pure-number (Obsidian-invalid tags) → `None`.
 fn sanitize_tag(raw: &str) -> Option<String> {
     let mut out = String::with_capacity(raw.len());
     let mut prev_dash = false;
@@ -970,11 +970,11 @@ fn sanitize_tag(raw: &str) -> Option<String> {
         let mapped = if c.is_ascii_alphanumeric() || c == '_' || c == '/' {
             c
         } else {
-            '-' // 공백·하이픈·기타 문장부호 모두 하이픈으로 수렴
+            '-' // spaces, hyphens, and other punctuation all converge to a hyphen
         };
         if mapped == '-' {
             if prev_dash {
-                continue; // 연속 대시 collapse
+                continue; // collapse consecutive dashes
             }
             prev_dash = true;
         } else {
@@ -984,14 +984,14 @@ fn sanitize_tag(raw: &str) -> Option<String> {
     }
     let trimmed = out.trim_matches(|c| c == '-' || c == '/').to_owned();
     if trimmed.is_empty() || trimmed.chars().all(|c| c.is_ascii_digit()) {
-        return None; // 빈 값·순수숫자 = 옵시 무효
+        return None; // empty value · pure-number = Obsidian-invalid
     }
     Some(trimmed)
 }
 
-/// distill 노트 헤더의 `repo: <slug>` 마커 추출 (순수). distill-session.py → /distill 이
-/// 호스트 git remote(폴백 폴더명)에서 채워 render_note 가 blockquote 에 박은 결정형 값.
-/// 본문 오탐 방지로 앞부분(헤더 영역)만 스캔. 없으면 `None`.
+/// Extract the `repo: <slug>` marker from a distill note header (pure). A deterministic value that
+/// distill-session.py → /distill fills from the host git remote (falling back to the folder name) and render_note embeds in a blockquote.
+/// Scans only the front portion (header area) to avoid body false positives. `None` if absent.
 fn parse_repo_marker(raw: &str) -> Option<String> {
     let head = raw.get(..raw.len().min(400)).unwrap_or(raw);
     let idx = head.find("repo:")?;
@@ -999,7 +999,7 @@ fn parse_repo_marker(raw: &str) -> Option<String> {
     (!tok.is_empty()).then(|| tok.to_owned())
 }
 
-/// JSON 펜스 제거 — extract.rs 의 strip_to_json 와 동일 로직.
+/// Strip JSON fences — same logic as extract.rs's strip_to_json.
 fn strip_json(raw: &str) -> &str {
     let Some(start) = raw.find('{') else {
         return "";
@@ -1015,8 +1015,8 @@ fn strip_json(raw: &str) -> &str {
     &raw[start..end]
 }
 
-/// 현재 wiki 디렉터리에서 (compiled_from → WikiMeta) 맵 + 최대 숫자 id 를 스캔.
-/// 순수 파일 파싱 로직 (I/O 포함이나 SRP 분리: 읽기 전용 스캔).
+/// Scan the current wiki directory for the (compiled_from → WikiMeta) map + the maximum numeric id.
+/// Pure file-parsing logic (includes I/O but SRP-separated: read-only scan).
 fn scan_existing_wiki(wiki_dir: &Path) -> Result<(HashMap<String, WikiMeta>, u32)> {
     let mut map: HashMap<String, WikiMeta> = HashMap::new();
     let mut max_id: u32 = 0;
@@ -1040,7 +1040,7 @@ fn scan_existing_wiki(wiki_dir: &Path) -> Result<(HashMap<String, WikiMeta>, u32
             .unwrap_or("")
             .to_owned();
 
-        // 숫자 id 추출: wiki-NNNN → NNNN
+        // extract numeric id: wiki-NNNN → NNNN
         if let Some(n) = stem
             .strip_prefix("wiki-")
             .and_then(|s| s.parse::<u32>().ok())
@@ -1084,10 +1084,10 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hash))
 }
 
-/// LLM 큐레이션 시스템 프롬프트.
+/// LLM curation system prompt.
 const COMPILE_SYSTEM: &str = "You are a precise JSON-only curator. Output ONLY a single JSON object — no prose, no markdown fences. /no_think";
 
-/// LLM 큐레이션 프롬프트 템플릿.
+/// LLM curation prompt template.
 const COMPILE_PROMPT_TMPL: &str = r#"Curate the raw note below into a wiki page. Return EXACTLY this JSON shape (no extra keys):
 {"title":"<short title, ≤60 chars>","body":"<curated markdown body in Korean, with WHY context>","tags":["tag1"],"tools":["tool1"],"concepts":["concept1"]}
 
@@ -1106,10 +1106,10 @@ Raw note:
 ---
 /no_think"#;
 
-/// 공유 tool/concept 기반 관계 맵 계산 (순수 함수).
-/// 반환: wiki_id → Vec<related_wiki_id> (자기 자신 제외, 중복 없음).
+/// Compute the relation map based on shared tools/concepts (pure function).
+/// Returns: wiki_id → Vec<related_wiki_id> (self excluded, no duplicates).
 fn compute_relations(drafts: &[CompiledDraft]) -> HashMap<String, Vec<String>> {
-    // tool/concept slug → wiki_id 역색인
+    // tool/concept slug → wiki_id inverted index
     let mut tool_idx: HashMap<String, Vec<String>> = HashMap::new();
     let mut concept_idx: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -1156,7 +1156,7 @@ fn compute_relations(drafts: &[CompiledDraft]) -> HashMap<String, Vec<String>> {
         .collect()
 }
 
-/// CompiledDraft → wiki .md 파일 내용 렌더링 (순수 함수).
+/// CompiledDraft → render wiki .md file content (pure function).
 #[allow(clippy::items_after_statements)]
 fn render_wiki_page(draft: &CompiledDraft) -> Result<String> {
     let kind_str = match draft.kind {
@@ -1170,7 +1170,7 @@ fn render_wiki_page(draft: &CompiledDraft) -> Result<String> {
         Origin::Company => "company",
     };
 
-    // frontmatter 를 serde_yaml 로 직렬화 (SSOT)
+    // serialize frontmatter via serde_yaml (SSOT)
     #[derive(Serialize)]
     struct Fm<'a> {
         id: &'a str,
@@ -1200,7 +1200,7 @@ fn render_wiki_page(draft: &CompiledDraft) -> Result<String> {
 
     let yaml = serde_yaml::to_string(&fm).context("frontmatter YAML 직렬화 실패")?;
 
-    // ## 관련 섹션 + [[wiki-NNNN]] wikilinks
+    // ## Related section + [[wiki-NNNN]] wikilinks
     let related_section = if draft.relates_to.is_empty() {
         String::new()
     } else {
@@ -1216,7 +1216,7 @@ fn render_wiki_page(draft: &CompiledDraft) -> Result<String> {
     Ok(format!("---\n{yaml}---\n{}{related_section}\n", draft.body))
 }
 
-/// 컴파일 통계.
+/// Compile stats.
 #[derive(Debug, Default)]
 pub struct CompileStats {
     pub compiled: usize,
@@ -1225,7 +1225,7 @@ pub struct CompileStats {
     pub total_raw: usize,
 }
 
-/// `drudge vault compile` 진입점 (I/O 쉘 — 순수 로직 위임).
+/// `drudge vault compile` entry point (I/O shell — delegates to pure logic).
 #[allow(clippy::too_many_lines)]
 pub async fn run_compile(
     vault_root: &Path,
@@ -1237,10 +1237,10 @@ pub async fn run_compile(
     std::fs::create_dir_all(&wiki_dir)
         .with_context(|| format!("wiki 디렉터리 생성 실패: {}", wiki_dir.display()))?;
 
-    // 1. 기존 wiki 스캔 — idempotency 키 맵 + 최대 id
+    // 1. scan existing wiki — idempotency key map + max id
     let (existing_map, mut max_id) = scan_existing_wiki(&wiki_dir)?;
 
-    // 2. raw 디렉터리 수집 (*.md 만)
+    // 2. collect raw directory (*.md only)
     let mut raw_entries: Vec<PathBuf> = {
         let rd = std::fs::read_dir(raw_dir)
             .with_context(|| format!("raw 디렉터리 읽기 실패: {}", raw_dir.display()))?;
@@ -1262,9 +1262,9 @@ pub async fn run_compile(
         ..Default::default()
     };
 
-    // 3. 각 raw 파일 처리
+    // 3. process each raw file
     let mut drafts: Vec<CompiledDraft> = Vec::new();
-    // wiki_id → path (recompile 시 덮어쓰기용)
+    // wiki_id → path (for overwriting on recompile)
     let mut wiki_path_map: HashMap<String, PathBuf> = HashMap::new();
 
     for raw_path in &raw_entries {
@@ -1277,22 +1277,22 @@ pub async fn run_compile(
 
         let sha = sha256_file(raw_path)?;
 
-        // idempotency 검사
+        // idempotency check
         let (wiki_id, is_new) = if let Some(meta) = existing_map.get(&raw_rel) {
             if meta.raw_sha == sha {
                 eprintln!("↷ skip (unchanged): {filename}");
                 stats.skipped += 1;
                 continue;
             }
-            // sha 변경 → 같은 id 로 recompile
+            // sha changed → recompile with the same id
             (meta.wiki_id.clone(), false)
         } else {
-            // 신규 → 다음 id
+            // new → next id
             max_id += 1;
             (format!("wiki-{max_id:04}"), true)
         };
 
-        // origin 결정 — env `DRUDGE_COMPANY_SUBSTR` 토큰 매칭(미설정이면 항상 Personal)
+        // determine origin — env `DRUDGE_COMPANY_SUBSTR` token match (always Personal if unset)
         let origin = if raw_path
             .to_str()
             .is_some_and(crate::frontmatter::is_company_path)
@@ -1302,7 +1302,7 @@ pub async fn run_compile(
             Origin::Personal
         };
 
-        // mtime → date (I/O 경계에서 1회)
+        // mtime → date (once at the I/O boundary)
         let date = raw_path
             .metadata()
             .ok()
@@ -1311,13 +1311,13 @@ pub async fn run_compile(
                 use std::time::UNIX_EPOCH;
                 let secs = t.duration_since(UNIX_EPOCH).ok()?.as_secs();
                 let days = (secs / 86400).cast_signed();
-                // 단순 날짜 계산 (chrono 없이 — 결정론적)
+                // simple date computation (without chrono — deterministic)
                 // epoch = 1970-01-01. days_since_epoch → gregorian date
                 Some(days_to_date(days))
             })
             .unwrap_or_else(|| today.to_owned());
 
-        // LLM 큐레이션
+        // LLM curation
         let body_raw = std::fs::read_to_string(raw_path)
             .with_context(|| format!("raw 파일 읽기 실패: {}", raw_path.display()))?;
         let body_snip: String = body_raw.chars().take(4000).collect();
@@ -1342,13 +1342,13 @@ pub async fn run_compile(
             }
         };
 
-        // Han-filter + Obsidian-안전 정규화(공백→-, 무효 drop). ≤6개.
+        // Han filter + Obsidian-safe normalization (space→-, drop invalid). ≤6 items.
         let mut tags: Vec<String> = filter_han(curated.tags)
             .into_iter()
             .filter_map(|t| sanitize_tag(&t))
             .take(6)
             .collect();
-        // 새 카테고리 축: repo 슬러그(호스트 git, distill 마커) → 옵시 nested 태그 repo/<slug>.
+        // new category axis: repo slug (host git, distill marker) → Obsidian nested tag repo/<slug>.
         if let Some(repo) = parse_repo_marker(&body_raw)
             .as_deref()
             .and_then(sanitize_tag)
@@ -1389,10 +1389,10 @@ pub async fn run_compile(
         }
     }
 
-    // 4. 관계 계산 (순수 함수)
+    // 4. compute relations (pure function)
     let relations = compute_relations(&drafts);
 
-    // 5. relates_to 주입 + 파일 쓰기
+    // 5. inject relates_to + write files
     for draft in &mut drafts {
         draft.relates_to = relations.get(&draft.wiki_id).cloned().unwrap_or_default();
     }
@@ -1410,8 +1410,8 @@ pub async fn run_compile(
     Ok(stats)
 }
 
-/// 오늘 날짜 "YYYY-MM-DD" — compile 의 `--date` 미지정 기본값 SSOT.
-/// I/O 경계: `SystemTime::now()` 를 여기 1곳에 격리(main·serve 공용) → 변환은 순수 `days_to_date`.
+/// Today's date "YYYY-MM-DD" — the SSOT default when compile's `--date` is unspecified.
+/// I/O boundary: `SystemTime::now()` is isolated to this single spot (shared by main·serve) → conversion is the pure `days_to_date`.
 #[must_use]
 pub fn today_utc() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1422,9 +1422,9 @@ pub fn today_utc() -> String {
     days_to_date(days)
 }
 
-/// days since Unix epoch (1970-01-01) → "YYYY-MM-DD" 문자열 (순수 함수, no SystemTime).
+/// days since Unix epoch (1970-01-01) → "YYYY-MM-DD" string (pure function, no SystemTime).
 fn days_to_date(days: i64) -> String {
-    // Proleptic Gregorian calendar 변환 (Richards 알고리즘 기반).
+    // Proleptic Gregorian calendar conversion (based on the Richards algorithm).
     // 1970-01-01 = JDN 2440588
     let jdn = days + 2_440_588_i64;
     let f = jdn + 1_401 + (((4 * jdn + 274_277) / 146_097) * 3) / 4 - 38;
@@ -1438,7 +1438,7 @@ fn days_to_date(days: i64) -> String {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 단위 테스트 (순수 함수 테스트 — I/O 없음)
+// Unit tests (pure-function tests — no I/O)
 // ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1455,11 +1455,11 @@ mod tests {
     };
     use serde_yaml::Value;
 
-    // ── sanitize_tag (Obsidian-안전 정규화) ──
+    // ── sanitize_tag (Obsidian-safe normalization) ──
 
     #[test]
     fn sanitize_tag_space_to_hyphen() {
-        // 옵시에서 깨지던 공백 태그 → 하이픈 (중간 하이픈은 유효하므로 유지)
+        // space tags that broke in Obsidian → hyphen (interior hyphens are valid, so kept)
         assert_eq!(sanitize_tag("claude code").as_deref(), Some("claude-code"));
         assert_eq!(
             sanitize_tag("data management").as_deref(),
@@ -1495,13 +1495,13 @@ mod tests {
 
     #[test]
     fn sanitize_tag_drops_invalid() {
-        assert!(sanitize_tag("2024").is_none()); // 순수숫자 = 옵시 무효
+        assert!(sanitize_tag("2024").is_none()); // pure-number = Obsidian-invalid
         assert!(sanitize_tag("").is_none());
         assert!(sanitize_tag("  ").is_none());
         assert!(sanitize_tag("!!!").is_none());
     }
 
-    // ── parse_repo_marker (distill 노트 헤더 마커) ──
+    // ── parse_repo_marker (distill note header marker) ──
 
     #[test]
     fn parse_repo_marker_extracts_slug() {
@@ -1602,7 +1602,7 @@ mod tests {
         );
     }
 
-    // ── lint_page: dangling wikilink 검사 ──
+    // ── lint_page: dangling wikilink check ──
 
     #[test]
     fn dangling_wikilink_detected() {
@@ -1635,7 +1635,7 @@ mod tests {
         );
     }
 
-    // ── lint_page: schema frontmatter 파싱 ──
+    // ── lint_page: schema frontmatter parsing ──
 
     #[test]
     fn valid_frontmatter_no_errors() {
@@ -1655,7 +1655,7 @@ mod tests {
     #[test]
     fn missing_required_field_is_error() {
         let schema = test_schema();
-        // title 누락
+        // title missing
         let content =
             "---\nid: wiki-0001\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\n본문";
         let ids = known_ids(&["wiki-0001"]);
@@ -1733,7 +1733,7 @@ mod tests {
         let mut old = make_page("wiki-0001", vec![], "");
         old.superseded_by = Some("wiki-0002".to_owned());
         let new_page = make_page("wiki-0002", vec![], "");
-        // 살아있는 wiki-0003 이 superseded 된 wiki-0001 을 relates_to 로 참조
+        // live wiki-0003 references the superseded wiki-0001 via relates_to
         let live = make_page("wiki-0003", vec!["wiki-0001"], "");
         let pages = vec![old, new_page, live];
         let summary = audit_pages(&pages);

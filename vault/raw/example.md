@@ -1,18 +1,19 @@
-# 세션 노트 — 2026-01-01
-> 자동 증류 (Claude Code · 종료) · origin: personal · repo: jazz1x/oh-my-boring · cwd: ~/oh-my-boring
+# Session note — 2026-01-01
+> Auto-distilled (Claude Code · ended) · origin: personal · repo: jazz1x/oh-my-boring · cwd: ~/oh-my-boring
 
-> **이건 예시 노트다.** `vault/raw/` 에 쌓이는 증류 노트의 포맷을 보여주고, fresh clone 에서
-> `make ask` 가 답할 거리를 1개 시드한다. 실제 노트는 SessionEnd 훅이 자동으로 만든다.
-> 지워도 무방 — 다음 sync 때 wiki 에서 함께 사라진다.
+> **This is an example note.** It shows the format of the distill notes that accumulate in
+> `vault/raw/`, and seeds one thing for `make ask` to answer on a fresh clone. Real notes are
+> created automatically by the SessionEnd hook.
+> Safe to delete — it disappears from the wiki on the next sync.
 
-🎯 **풀던 문제** — oh-my-boring 를 처음 띄우고 동작을 확인하려 했다.
+🎯 **Problem worked on** — tried to spin up oh-my-boring for the first time and verify it works.
 
-🧪 **시도/실패** — `docker compose up` 만 했더니 hermes-agent(Slack 비서)까지 떠서 실패.
-그 이미지는 레포에 없다(외부 Nous Hermes Agent).
+🧪 **Attempts/failures** — running just `docker compose up` brought up hermes-agent (the Slack
+assistant) too and failed. That image isn't in the repo (external Nous Hermes Agent).
 
-✅ **통한 해결** — 코어는 `make up` 으로만 띄운다(postgres + drudge). Slack 비서는 옵션이라
-`docker compose --profile agent up -d` 로 따로 켠다. 호스트 Ollama(`ollama serve`)가 먼저 떠 있어야
-컨테이너가 `host.docker.internal` 로 임베딩·합성을 호출한다.
+✅ **What worked** — bring up the core with `make up` only (postgres + drudge). The Slack assistant
+is optional, so start it separately with `docker compose --profile agent up -d`. The host Ollama
+(`ollama serve`) must be up first so the container can call embeddings/synthesis via `host.docker.internal`.
 
-🔄 **미완/다음** — 세션을 더 쌓아 `make ask` 회수 품질을 본다. `~/.claude/settings.json` 에
-SessionEnd/UserPromptSubmit 훅을 등록하면 이후로는 자동 축적된다.
+🔄 **Unfinished/next** — accumulate more sessions to see `make ask` recall quality. Once you register
+the SessionEnd/UserPromptSubmit hooks in `~/.claude/settings.json`, it accumulates automatically from then on.

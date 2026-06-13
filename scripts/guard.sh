@@ -1,10 +1,10 @@
 #!/bin/sh
-# 구조 게이트 (스택-프리) — pre-commit + 로컬. PHILOSOPHY.md/RUST-STYLE.md 의
-# *기계적으로 강제 가능한* 부분을 여기서 막는다. 스택(pg/ollama) 불필요.
-#   1) rustfmt   — 형식(선형성 가독)
-#   2) clippy -D — §A no-unwrap/expect/panic·todo·unreachable + ADT(wildcard)·pedantic
-#   3) test      — 가드레일 테스트
-# 우회(git commit --no-verify) 금지 — 실패 시 근본원인을 고친다(증상 무마 X).
+# Structural gate (stack-free) — pre-commit + local. Enforces here the
+# *mechanically enforceable* parts of PHILOSOPHY.md/RUST-STYLE.md. No stack (pg/ollama) needed.
+#   1) rustfmt   — formatting (linear readability)
+#   2) clippy -D — §A no-unwrap/expect/panic, todo, unreachable + ADT (wildcard), pedantic
+#   3) test      — guardrail tests
+# No bypassing (git commit --no-verify) — on failure, fix the root cause (don't paper over the symptom).
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT/drudge"

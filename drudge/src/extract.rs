@@ -1,6 +1,6 @@
-//! Extract — 문서별 LLM 추출: problem/solution/tool/concept/attempt 노드 + 엣지 생성.
-//! LLM(qwen2.5:7b)에서 strict JSON 한 번 파싱 후 그대로 신뢰(parse-don't-validate).
-//! 문서 파싱 실패 → Err 로그 + skipped 카운트 + 계속(graceful boundary, ROP).
+//! Extract — per-document LLM extraction: creates problem/solution/tool/concept/attempt nodes + edges.
+//! Parse strict JSON once from the LLM (qwen2.5:7b) and trust it as-is (parse-don't-validate).
+//! Document parse failure → Err log + skipped count + continue (graceful boundary, ROP).
 use anyhow::Result;
 use serde::Deserialize;
 
@@ -45,7 +45,7 @@ Document:
 ---
 /no_think"#;
 
-/// LLM 추출 결과 (타입 파싱 1회 — parse-don't-validate).
+/// LLM extraction result (typed parse once — parse-don't-validate).
 #[derive(Debug, Deserialize)]
 struct Extracted {
     problems: Vec<String>,
@@ -58,7 +58,7 @@ struct Extracted {
     claims: Vec<ClaimRaw>,
 }
 
-/// 시간축 사실 1개 — (subject, predicate, value). 새 value 가 옛 value 를 supersede.
+/// One temporal fact — (subject, predicate, value). A new value supersedes the old value.
 #[derive(Debug, Deserialize)]
 struct ClaimRaw {
     subject: String,
@@ -66,7 +66,7 @@ struct ClaimRaw {
     value: String,
 }
 
-/// claim subject/predicate 정규화 키 — 소문자·trim·공백단일화(매칭 일관성 + 가독성).
+/// claim subject/predicate normalization key — lowercase, trim, collapse whitespace (matching consistency + readability).
 fn canon(s: &str) -> String {
     s.to_lowercase()
         .split_whitespace()
@@ -74,14 +74,14 @@ fn canon(s: &str) -> String {
         .join(" ")
 }
 
-/// LLM이 뱉은 attempt 원본 — outcome은 경계에서 Outcome 으로 변환된다.
+/// Raw attempt emitted by the LLM — outcome is converted to Outcome at the boundary.
 #[derive(Debug, Deserialize)]
 struct AttemptRaw {
     what: String,
     outcome: String,
 }
 
-/// LLM outcome 의 허용 값 집합 (ADT — 불가능한 상태를 표현 불가능하게).
+/// Set of allowed values for the LLM outcome (ADT — make impossible states unrepresentable).
 #[derive(Debug, Clone, Copy)]
 enum Outcome {
     Worked,
@@ -90,7 +90,7 @@ enum Outcome {
 }
 
 impl Outcome {
-    /// 경계 파싱 — 대소문자·공백 허용. 알 수 없는 값 → `None`(호출측이 skip).
+    /// Boundary parse — case-insensitive, whitespace-tolerant. Unknown value → `None` (caller skips).
     fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "worked" => Some(Self::Worked),
@@ -100,7 +100,7 @@ impl Outcome {
         }
     }
 
-    /// DB 저장 시 canonical lowercase str.
+    /// Canonical lowercase str for DB storage.
     const fn as_str(self) -> &'static str {
         match self {
             Self::Worked => "worked",
@@ -110,44 +110,45 @@ impl Outcome {
     }
 }
 
-/// CJK 통합 한자(U+4E00..=U+9FFF) 포함 여부 판별.
-/// 주의: 한국어 한자 표기(음차)를 극히 드물게 사용할 수도 있으나,
-/// qwen 모델이 중국어로 drift 한 토큰을 걸러내는 게 목적이므로 이 범위를 차단한다.
+/// Detect whether the string contains CJK Unified Ideographs (U+4E00..=U+9FFF).
+/// Note: Korean text may very rarely use Han characters (phonetic borrowing),
+/// but the purpose is to filter out tokens where the qwen model drifted into Chinese,
+/// so this range is blocked.
 fn has_han(s: &str) -> bool {
     s.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c))
 }
 
-/// 슬러그: 소문자 + `[a-z0-9]` 만 유지(구분자 완전 제거) → 변형 표기 충돌 방지.
-/// 예: `macos keychain` / `macos_keychain` / `macoskeychain` → 모두 `macoskeychain`.
-/// 별칭 맵: `c++`→`cpp`, `c#`→`csharp` (그대로 두면 `c`로 축약돼 충돌).
+/// Slug: lowercase + keep only `[a-z0-9]` (remove all separators) → prevents variant-spelling collisions.
+/// e.g. `macos keychain` / `macos_keychain` / `macoskeychain` → all become `macoskeychain`.
+/// Alias map: `c++`→`cpp`, `c#`→`csharp` (left as-is they would collapse to `c` and collide).
 fn slugify(s: &str) -> String {
-    // 별칭 정규화 (소문자 이후 적용)
+    // Alias normalization (applied after lowercasing)
     let lower = s.to_lowercase();
     let normalized = lower
         .replace("c++", "cpp")
         .replace("c#", "csharp")
         .replace(".net", "dotnet");
-    // [a-z0-9] 만 남김 — 구분자(공백·언더스코어·하이픈 등) 완전 제거
+    // Keep only [a-z0-9] — remove all separators (spaces, underscores, hyphens, etc.)
     normalized
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .collect()
 }
 
-/// JSON 펜스 및 앞선 산문 제거.
-/// `{` 첫 위치를 찾고, 그 이후 범위에서만 `}` 를 역탐색한다.
-/// `}` 가 `{` 앞에만 있거나 `{` 가 없으면 `""` 반환 (호출측: parse 실패 → skip).
+/// Strip JSON fences and any leading prose.
+/// Find the first `{`, then reverse-search for `}` only within the range after it.
+/// If `}` exists only before `{`, or there is no `{`, return `""` (caller: parse failure → skip).
 fn strip_to_json(raw: &str) -> &str {
     let Some(start) = raw.find('{') else {
         return "";
     };
-    // start 이후 부분에서 마지막 `}` 탐색
+    // Search for the last `}` in the part after start
     let suffix = &raw[start..];
     let Some(rel_end) = suffix.rfind('}') else {
         return "";
     };
     let end = start + rel_end + 1;
-    // 방어: start >= end 이면 빈 슬라이스 → parse 실패로 처리
+    // Defensive: if start >= end, empty slice → treated as parse failure
     if start >= end {
         return "";
     }
@@ -168,7 +169,7 @@ pub struct ExtractStats {
 
 #[allow(clippy::too_many_lines)]
 pub async fn run(store: &Store, llm: &Llm) -> Result<ExtractStats> {
-    // 증분: sha 가 바뀐(또는 신규) 문서만 — gemma4 추출 비용 절감(타입 온톨로지는 보존).
+    // Incremental: only documents whose sha changed (or are new) — saves gemma4 extraction cost (type ontology is preserved).
     let docs = store.docs_needing_extract().await?;
     let mut stats = ExtractStats {
         processed: 0,
@@ -203,10 +204,10 @@ pub async fn run(store: &Store, llm: &Llm) -> Result<ExtractStats> {
             }
         };
 
-        // 멱등화: 이 문서의 기존 시맨틱 엣지 + attempt 노드를 먼저 삭제
+        // Idempotency: first delete this document's existing semantic edges + attempt nodes
         store.clear_semantic_edges(path).await?;
 
-        // problem 노드 + addresses 엣지 (Han drift 필터)
+        // problem nodes + addresses edges (Han drift filter)
         for text in &extracted.problems {
             let t = text.trim();
             if t.is_empty() || has_han(t) {
@@ -222,7 +223,7 @@ pub async fn run(store: &Store, llm: &Llm) -> Result<ExtractStats> {
             stats.edges += 1;
         }
 
-        // solution 노드 + resolved_by 엣지 (Han drift 필터)
+        // solution node + resolved_by edge (Han drift filter)
         {
             let t = extracted.solution.trim();
             if !t.is_empty() && !has_han(t) {
@@ -236,7 +237,7 @@ pub async fn run(store: &Store, llm: &Llm) -> Result<ExtractStats> {
             }
         }
 
-        // tool 노드 + uses 엣지 (Han drift 필터 + doc-level slug dedup)
+        // tool nodes + uses edges (Han drift filter + doc-level slug dedup)
         let mut seen_tool_slugs = std::collections::HashSet::new();
         for text in &extracted.tools {
             let t = text.trim();
@@ -253,7 +254,7 @@ pub async fn run(store: &Store, llm: &Llm) -> Result<ExtractStats> {
             stats.edges += 1;
         }
 
-        // concept 노드 + about 엣지 (Han drift 필터 + doc-level slug dedup)
+        // concept nodes + about edges (Han drift filter + doc-level slug dedup)
         let mut seen_concept_slugs = std::collections::HashSet::new();
         for text in &extracted.concepts {
             let t = text.trim();
@@ -270,14 +271,14 @@ pub async fn run(store: &Store, llm: &Llm) -> Result<ExtractStats> {
             stats.edges += 1;
         }
 
-        // attempt 노드 + tried 엣지 (per-doc, Han drift 필터)
+        // attempt nodes + tried edges (per-doc, Han drift filter)
         let mut created_idxs: Vec<usize> = Vec::new();
         for (idx, attempt) in extracted.attempts.iter().enumerate() {
             let what = attempt.what.trim();
             if what.is_empty() || has_han(what) {
                 continue;
             }
-            // 경계 파싱: LLM outcome → Outcome enum. 알 수 없는 값은 skip (불법 상태 저장 금지).
+            // Boundary parse: LLM outcome → Outcome enum. Unknown values are skipped (do not store illegal state).
             let Some(outcome) = Outcome::parse(&attempt.outcome) else {
                 continue;
             };
@@ -289,7 +290,7 @@ pub async fn run(store: &Store, llm: &Llm) -> Result<ExtractStats> {
             stats.attempts += 1;
             stats.edges += 1;
         }
-        // lineage: 연속 시도를 leads_to 로 연결 (문제해결 서사 순서 = entity↔entity 엣지)
+        // lineage: connect consecutive attempts with leads_to (problem-solving narrative order = entity↔entity edge)
         for pair in created_idxs.windows(2) {
             if let [from, to] = pair {
                 store.relate_leads_to(path, *from, *to).await?;
@@ -297,8 +298,8 @@ pub async fn run(store: &Store, llm: &Llm) -> Result<ExtractStats> {
             }
         }
 
-        // claim: 시간축 사실 권위 — (subject,predicate)→value, 새 value 가 옛것 supersede.
-        // valid_from = 문서 mtime(시간순 정렬). value 임베딩(bge-m3, gemma 추가호출 아님).
+        // claim: temporal-fact authority — (subject,predicate)→value, a new value supersedes the old.
+        // valid_from = document mtime (chronological ordering). value embedding (bge-m3, not an extra gemma call).
         if !extracted.claims.is_empty() {
             let valid_from = store.doc_updated_at(path).await?;
             for cl in &extracted.claims {
@@ -320,7 +321,7 @@ pub async fn run(store: &Store, llm: &Llm) -> Result<ExtractStats> {
             }
         }
 
-        store.mark_extracted(path).await?; // 증분: 이 sha 는 추출 완료 표시
+        store.mark_extracted(path).await?; // incremental: mark this sha as extraction-complete
         stats.processed += 1;
     }
 
@@ -348,7 +349,7 @@ mod tests {
 
     #[test]
     fn outcome_parse_invalid_is_none() {
-        // 불법 값은 None → 호출측이 skip (불법 상태 저장 금지)
+        // Illegal values are None → caller skips (do not store illegal state)
         assert!(Outcome::parse("").is_none());
         assert!(Outcome::parse("partial").is_none());
         assert!(Outcome::parse("success").is_none());

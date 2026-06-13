@@ -1,89 +1,89 @@
 # Rust Agent Principles
 
-> 코드를 쓸 때 따를 규칙. 격언이 아니라 위반을 컴파일러/리뷰로 잡을 수 있는 것만.
-> 판단 기준이 명확할수록 잘 따른다. 애매하면 더 단순한 쪽으로.
+> Rules to follow when writing code. Not maxims — only what can have its violation caught by compiler/review.
+> The clearer the criterion, the better it's followed. When ambiguous, lean toward the simpler side.
 
 ---
 
-## A. 러스트 관용구 (자주 어기는 것)
+## A. Rust Idioms (the ones often violated)
 
-- [ ] `unwrap()` / `expect()` / `panic!` 금지 (프로토타입·테스트 제외). 에러는 `Result` + `?`로 전파.
-- [ ] `clone()` 남발 금지. 빌림(`&`, `&mut`)으로 되는지 먼저. clone은 의도적일 때만.
-- [ ] 명령형 루프 + `mut` 누적 대신 이터레이터 체인(`map`/`filter`/`fold`/`collect`).
-- [ ] `match`는 exhaustive하게. `_ =>` 와일드카드로 케이스 뭉개지 말 것 — 새 variant 추가 시 컴파일 에러로 잡혀야 한다.
-- [ ] 에러 타입: 라이브러리 → `thiserror`, 바이너리 → `anyhow`.
-- [ ] 인자는 빌린 슬라이스로: `&str`(not `String`), `&[T]`(not `Vec<T>`).
-- [ ] trait은 얇게. 한 trait = 한 능력.
+- [ ] No `unwrap()` / `expect()` / `panic!` (except prototypes and tests). Propagate errors via `Result` + `?`.
+- [ ] No `clone()` overuse. First see whether borrowing (`&`, `&mut`) works. Clone only when intentional.
+- [ ] Instead of imperative loops + `mut` accumulation, use iterator chains (`map`/`filter`/`fold`/`collect`).
+- [ ] `match` exhaustively. Don't paper over cases with the `_ =>` wildcard — adding a new variant should be caught as a compile error.
+- [ ] Error types: library → `thiserror`, binary → `anyhow`.
+- [ ] Arguments as borrowed slices: `&str` (not `String`), `&[T]` (not `Vec<T>`).
+- [ ] Keep traits thin. One trait = one capability.
 
 ---
 
-## B. 핵심 설계 철학 (러스트 기계장치로 번역)
+## B. Core Design Philosophy (translated into Rust machinery)
 
-### ADT — 불가능한 상태를 표현 불가능하게
-- [ ] 상태를 bool 플래그 여러 개로 표현하지 말 것. `enum`으로.
-- [ ] "make illegal states unrepresentable" — 잘못된 조합이 아예 타입으로 안 만들어지게.
+### ADT — Make Impossible States Unrepresentable
+- [ ] Don't represent state with multiple bool flags. Use an `enum`.
+- [ ] "make illegal states unrepresentable" — invalid combinations can't even be constructed as a type.
 
 ### Parse, Don't Validate
-- [ ] 외부 입력은 **경계에서 1회** newtype으로 파싱. (= fail-fast: 잘못된 입력은 들어오는 순간 거부)
-- [ ] 검증된 타입(`Email`, `NonEmptyVec`, `Positive`)을 내부로 흘린다.
-- [ ] 생성자는 private, `parse()`만 public.
-- [ ] 같은 값을 두 번 검사하는 `validate()`가 보이면 설계 실패.
-- [ ] **목적은 "타입이 증거"**: 검증된 타입을 받은 함수는 안에서 재검사하지 않는다. 타입이 이미 보장하므로.
-- [ ] **실행 방식 = fail-fast(`?`), 목적 = 타입이 증거(newtype).** 둘 다 있어야 PDV 완성.
+- [ ] External input is parsed into a newtype **once at the boundary**. (= fail-fast: invalid input is rejected the moment it enters.)
+- [ ] Flow validated types (`Email`, `NonEmptyVec`, `Positive`) inward.
+- [ ] Constructor private, only `parse()` public.
+- [ ] If you see a `validate()` that checks the same value twice, the design has failed.
+- [ ] **The purpose is "the type is the proof"**: a function that receives a validated type does not re-check inside. The type already guarantees it.
+- [ ] **The execution method = fail-fast (`?`), the purpose = the type is the proof (newtype).** Both are needed to complete PDV.
 
 ### ROP (Railway Oriented)
-- [ ] 함수는 `Result<T, E>` 반환. 성공/실패 두 트랙.
-- [ ] `?`로 연결. `From`으로 에러 변환 자동. → `?`가 fail-fast의 문법적 구현체.
-- [ ] **fail-fast가 기본값.** 잘못된 상태를 끌고 가지 않는다.
-- [ ] **예외: UX 경계(폼 입력 등)에서는 에러 누적.** 첫 실패에 튕기면 사용자가 짜증. 여러 실패를 한 번에 모아 보여줘야 하므로 `Validated` 패턴 (여기만 `?` 못 씀).
-- [ ] 실패가 "에러"가 아니라 "기본값/분기"면 `?`가 아니라 `.unwrap_or` / `match`.
+- [ ] Functions return `Result<T, E>`. Two tracks: success/failure.
+- [ ] Connect with `?`. Automatic error conversion via `From`. → `?` is the syntactic implementation of fail-fast.
+- [ ] **fail-fast is the default.** Don't drag an invalid state along.
+- [ ] **Exception: at UX boundaries (form input, etc.), accumulate errors.** Bouncing on the first failure annoys the user. Since multiple failures must be shown at once, use the `Validated` pattern (this is the only place `?` can't be used).
+- [ ] If a failure is not an "error" but a "default/branch," use `.unwrap_or` / `match` instead of `?`.
 
-### SRP — 단일 책임
-- [ ] 한 함수 = 한 책임.
-- [ ] I/O와 순수 로직 분리. 순수 함수는 인자 받아 값 반환(테스트 쉬움), 부수효과는 바깥 얇은 껍질로.
+### SRP — Single Responsibility
+- [ ] One function = one responsibility.
+- [ ] Separate I/O from pure logic. Pure functions take args and return values (easy to test); side effects live in a thin outer shell.
 
-### 선형성 — 한 방향 흐름
-- [ ] 데이터 흐름은 위→아래 한 방향. 콜백 지옥/순환 의존 금지.
-- [ ] `let` 단계 또는 메서드 체인으로 직선.
-- [ ] 소유권 move 자체가 선형 타입의 일종 — 한 번 쓴 값 재사용 막힘을 활용.
-
----
-
-## C. 보편 원칙 (러스트에 어떻게 떨어지는가)
-
-### 의존성 역전 (클린아키텍처 핵심)
-- [ ] 도메인 로직이 구체 구현(DB, HTTP)에 의존하지 않게. trait에 의존, 구현은 바깥에서 주입.
-- [ ] → Smith Hub가 이미 이 구조.
-
-### 경계 (Boundary)
-- [ ] 외부 세계(파일·네트워크·입력)와 도메인 사이에 파싱 경계.
-- [ ] 안쪽은 항상 검증된 타입만 돈다.
-
-### 제1원칙
-- [ ] "이 추상화가 정말 필요한가? 더 단순한 표현이 같은 불변식을 보장하나?"
-- [ ] 과잉 추상화 경계 — trait 한 겹으로 충분한 걸 제네릭 3중첩으로 만들지 말 것.
-
-### 클린코드 — 단, 광신 금지
-- [ ] 함수 짧게·이름 명확히: 좋다.
-- [ ] DRY 광신: 경고. 성급한 추상화보다 중복이 나을 때가 있다 (라이프타임 얽히면 추상화 비용이 큼).
-- [ ] 추상화는 **세 번째 중복**에서 고민 시작 (rule of three).
+### Linearity — One-Way Flow
+- [ ] Data flow goes one direction, top → bottom. No callback hell / cyclic dependencies.
+- [ ] Straight-line it with `let` steps or method chains.
+- [ ] An ownership move is itself a kind of linear type — exploit the fact that a value used once can't be reused.
 
 ---
 
-## 한 줄 기준
+## C. Universal Principles (how they land in Rust)
 
-> 이 코드가 거짓말을 하는가? 이 추상화가 정직한가? 이 경계가 새는가?
-> 셋 다 아니오면 통과. 의심되면 더 단순하게.
+### Dependency Inversion (the heart of Clean Architecture)
+- [ ] Keep domain logic from depending on concrete implementations (DB, HTTP). Depend on a trait; inject the implementation from outside.
+- [ ] → Smith Hub already has this structure.
+
+### Boundary
+- [ ] A parsing boundary between the outside world (file · network · input) and the domain.
+- [ ] Inside, only validated types ever circulate.
+
+### First Principles
+- [ ] "Is this abstraction really needed? Does a simpler representation guarantee the same invariant?"
+- [ ] Beware over-abstraction — don't build with triple-nested generics what a single trait layer suffices for.
+
+### Clean Code — but No Zealotry
+- [ ] Short functions, clear names: good.
+- [ ] DRY zealotry: warning. Sometimes duplication beats premature abstraction (when lifetimes tangle, the abstraction cost is high).
+- [ ] Abstraction starts being considered at the **third duplication** (rule of three).
 
 ---
 
-## 강제(enforcement) 매핑 — 어떻게 잡히나
-| 원칙 | 잡는 법 |
+## One-Line Criterion
+
+> Does this code lie? Is this abstraction honest? Does this boundary leak?
+> If all three are no, it passes. If in doubt, make it simpler.
+
+---
+
+## Enforcement Mapping — How It Gets Caught
+| Principle | How it's caught |
 |---|---|
-| no unwrap/expect/panic | clippy `unwrap_used`/`expect_used`/`panic` = deny (test는 allow) |
-| match 와일드카드 금지 | clippy `wildcard_enum_match_arm` / 신규 variant → 컴파일 에러 |
-| clone 남발 | clippy `clippy::clone_on_*`, 리뷰 |
-| iterator 체인 / `&str`·`&[T]` 인자 | clippy pedantic (`needless_collect`, `ptr_arg` 등) |
-| ADT·PDV·SRP·선형성·DIP | 리뷰(adversarial) — 타입 시그니처로 증거 확인 |
+| no unwrap/expect/panic | clippy `unwrap_used`/`expect_used`/`panic` = deny (allow in tests) |
+| match wildcard forbidden | clippy `wildcard_enum_match_arm` / new variant → compile error |
+| clone overuse | clippy `clippy::clone_on_*`, review |
+| iterator chain / `&str`·`&[T]` args | clippy pedantic (`needless_collect`, `ptr_arg`, etc.) |
+| ADT · PDV · SRP · linearity · DIP | review (adversarial) — verify the proof via the type signature |
 
-게이트: `cargo clippy --all-targets -- -D warnings` (unsafe forbid + all/pedantic/nursery deny + 위 restriction).
+Gate: `cargo clippy --all-targets -- -D warnings` (unsafe forbid + all/pedantic/nursery deny + the restrictions above).

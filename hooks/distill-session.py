@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Claude Code SessionEnd 훅용 스크립트 — 세션을 증류해 개인 메모리 노트로 저장.
+"""Claude Code SessionEnd hook script — distills a session into a personal memory note.
 
-이 훅은 *호스트 전용* 일만 한다: 트랜스크립트 읽기·텍스트 추출·throttle·세션 mtime 보정.
-LLM 증류·KEEP/SKIP 게이트·시크릿 스크럽·raw 노트 포맷은 drudge 엔진(/distill, SSOT)이
-담당한다 — 과거 이 스크립트가 ollama.generate/redact 를 재구현하던 중복을 제거(엔진 ollama.rs
-가 LLM 호출 SSOT). 추출한 텍스트만 엔진에 POST → 엔진이 ~/oh-my-boring/vault/raw 에 기록.
-실패·짧은 세션·엔진 다운이면 조용히 skip. 절대 세션 종료를 막지 않음(항상 exit 0).
+This hook does *host-only* work: reading the transcript, extracting text, throttling,
+and correcting the session mtime. LLM distillation, the KEEP/SKIP gate, secret scrubbing,
+and raw-note formatting are handled by the drudge engine (/distill, SSOT) — this removes
+the past duplication where this script reimplemented ollama.generate/redact (engine
+ollama.rs is the SSOT for LLM calls). Only the extracted text is POSTed to the engine →
+the engine writes to ~/oh-my-boring/vault/raw. On failure, short sessions, or engine
+downtime it silently skips. It never blocks session termination (always exits 0).
 
-설치(영속화)는 사용자가 직접: ~/.claude/settings.json 의 hooks.SessionEnd 에
+Installation (persistence) is up to the user: add to hooks.SessionEnd in
+~/.claude/settings.json:
   {"type":"command","command":"python3 ~/oh-my-boring/hooks/distill-session.py",
    "timeout":130,"async":true}
-를 추가.
 """
 import datetime
 import json
@@ -23,16 +25,18 @@ import urllib.request
 
 RAW_DIR = os.path.expanduser("~/oh-my-boring/vault/raw")
 DRUDGE_URL = os.environ.get("DRUDGE_URL", "http://localhost:7700")
-# 진행중 세션(Stop 훅) 재증류 최소 간격(분). SessionEnd(final)는 throttle 무시.
+# Minimum interval (minutes) before re-distilling an in-progress session (Stop hook).
+# SessionEnd (final) ignores the throttle.
 THROTTLE_MIN = int(os.environ.get("DISTILL_THROTTLE_MIN") or "25")
-MARK_DIR = os.path.expanduser("~/.cache/boring-distill")  # 세션별 마지막 증류 시각
+MARK_DIR = os.path.expanduser("~/.cache/boring-distill")  # last distill time per session
 
 
 def _trigger_sync():
-    """증류 노트를 즉시 RAG에 반영 — drudge /sync(compile→ingest→extract)를
-    detached 로 호출. 훅을 블록하지 않는다(distill+sync 동기 체이닝은 130s 초과 위험).
-    엔진 다운/실패는 무시 — 4h 스케줄러가 캐치한다(세션 종료를 절대 막지 않음).
-    DISTILL_NO_SYNC 설정 시 skip(백필 수집기가 끝에 한 번만 sync 하려고)."""
+    """Reflect the distilled note into the RAG immediately — call drudge /sync
+    (compile→ingest→extract) detached. Does not block the hook (synchronously chaining
+    distill+sync risks exceeding 130s). Engine downtime/failure is ignored — the 4h
+    scheduler catches it (never blocks session termination).
+    Skipped when DISTILL_NO_SYNC is set (so the backfill collector syncs only once at the end)."""
     if os.environ.get("DISTILL_NO_SYNC"):
         return
     try:
@@ -40,7 +44,7 @@ def _trigger_sync():
             ["curl", "-sS", "-m", "600", "-X", "POST", f"{DRUDGE_URL}/sync"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,  # 부모(훅) 종료해도 살아남아 적재 완주
+            start_new_session=True,  # survives parent (hook) exit to finish ingestion
         )
     except Exception:
         pass
@@ -52,14 +56,14 @@ def _mark_path(session_id):
 
 
 def _throttled(session_id):
-    """이 세션을 최근 THROTTLE_MIN 분 내에 이미 증류했으면 True(skip). 값싼 검사."""
+    """True (skip) if this session was already distilled within the last THROTTLE_MIN minutes. Cheap check."""
     if not session_id:
         return False
     try:
         age = time.time() - os.path.getmtime(_mark_path(session_id))
         return age < THROTTLE_MIN * 60
     except OSError:
-        return False  # 마커 없음 = 첫 증류
+        return False  # no marker = first distillation
 
 
 def _mark(session_id):
@@ -74,8 +78,8 @@ def _mark(session_id):
 
 
 def _session_mtime(path):
-    """트랜스크립트 최신 메시지 timestamp → epoch(float). 세션 실제 시각.
-    없으면 None(호출측: 파일 mtime 그대로 = 증류 시각)."""
+    """Latest message timestamp in the transcript → epoch (float). The session's actual time.
+    None if absent (caller keeps the file mtime as-is = distill time)."""
     latest = None
     try:
         with open(path, encoding="utf-8") as f:
@@ -123,8 +127,9 @@ def extract(path):
 
 
 def repo_slug(cwd):
-    """카테고리 축: cwd 의 git remote 에서 repo 슬러그(`org/name`). git/remote 없으면 폴더명 폴백.
-    호스트만 git·cwd 를 보므로 여기서 1회 계산해 엔진에 전달(엔진은 컨테이너라 원본 cwd git 못 봄)."""
+    """Category axis: the repo slug (`org/name`) from the git remote of cwd. Falls back to
+    the folder name if there's no git/remote. Only the host sees git/cwd, so compute it once
+    here and pass it to the engine (the engine is in a container and can't see the original cwd's git)."""
     if not cwd:
         return ""
     try:
@@ -139,13 +144,13 @@ def repo_slug(cwd):
         slug = re.sub(r"^.*[:/]([^/]+/[^/]+?)(?:\.git)?$", r"\1", url)
         if slug and slug != url:
             return slug
-    return os.path.basename(cwd.rstrip("/")) or ""  # 폴백: 폴더명
+    return os.path.basename(cwd.rstrip("/")) or ""  # fallback: folder name
 
 
 def post_distill(text, session_id, origin, phase, repo, cwd):
-    """추출 텍스트를 drudge /distill 로 POST → 엔진이 증류·스크럽·raw 노트 기록(SSOT).
-    반환: {"written": bool, "filename": str|None} 또는 None(엔진 다운/에러 → no-op).
-    엔진이 길이 클램프·KEEP/SKIP 게이트·시크릿 스크럽을 모두 수행한다."""
+    """POST the extracted text to drudge /distill → the engine distills, scrubs, and writes
+    the raw note (SSOT). Returns {"written": bool, "filename": str|None}, or None (engine
+    down/error → no-op). The engine performs length clamping, the KEEP/SKIP gate, and secret scrubbing."""
     body = json.dumps(
         {"text": text, "session_id": session_id, "origin": origin,
          "phase": phase, "repo": repo, "cwd": cwd}
@@ -157,18 +162,19 @@ def post_distill(text, session_id, origin, phase, repo, cwd):
         with urllib.request.urlopen(req, timeout=120) as r:
             return json.loads(r.read())
     except Exception:
-        return None  # 엔진 미가동/에러 — 4h 스케줄러가 캐치(세션 절대 미차단)
+        return None  # engine down/error — the 4h scheduler catches it (never blocks the session)
 
 
 def via_agent(transcript_path):
-    """쓰기 정문(opt-in, DISTILL_VIA_AGENT): 이미 떠있는 hermes-agent 에게 '판단해서 적재'를 맡긴다.
-    에이전트가 게이트(KEEP/SKIP·큐레이션)를 머리로 수행하고 drudge MCP(remember/sync)로 저장.
-    트랜스크립트는 agent 컨테이너에 마운트된 /host/.claude 경로로 읽힌다(compose 볼륨).
-    성공 시 True. docker/agent 미가동·매핑실패면 False → 호출측이 엔진 폴백."""
+    """Write front door (opt-in, DISTILL_VIA_AGENT): delegate 'judge and ingest' to the
+    already-running hermes-agent. The agent performs the gate (KEEP/SKIP, curation) with its
+    own reasoning and saves via the drudge MCP (remember/sync). The transcript is read through
+    the /host/.claude path mounted into the agent container (compose volume).
+    Returns True on success. If docker/agent is down or mapping fails, returns False → the caller falls back to the engine."""
     home = os.path.expanduser("~")
     claude_root = os.path.join(home, ".claude")
     if not transcript_path.startswith(claude_root):
-        return False  # ~/.claude 밖 → 컨테이너 경로 매핑 불가 → 폴백
+        return False  # outside ~/.claude → can't map to container path → fall back
     container_path = "/host/.claude" + transcript_path[len(claude_root):]
     container = os.environ.get("DISTILL_AGENT_CONTAINER", "boring-agent")
     prompt = (
@@ -183,7 +189,7 @@ def via_agent(transcript_path):
         )
         return r.returncode == 0
     except Exception:
-        return False  # docker 없음/타임아웃/에이전트 다운 → 폴백
+        return False  # no docker / timeout / agent down → fall back
 
 
 def main():
@@ -195,53 +201,53 @@ def main():
     if not tp or not os.path.exists(tp):
         return
     session_id = data.get("session_id") or ""
-    # SessionEnd=최종 1회(throttle 무시). Stop=진행중 주기 적재(THROTTLE_MIN 간격).
-    # 진행중인데 최근 이미 증류했으면 transcript 도 안 읽고 값싸게 빠진다.
+    # SessionEnd = final, once (ignores throttle). Stop = periodic in-progress ingest (THROTTLE_MIN interval).
+    # If in-progress but already distilled recently, bail cheaply without even reading the transcript.
     is_final = (data.get("hook_event_name") or "") == "SessionEnd"
     if not is_final and _throttled(session_id):
         return
-    # 세션 '경험'은 격리하지 않고 같은 raw/ 에 쌓는다. origin 은 회수 토글용 태그일 뿐.
-    #   DISTILL_COMPANY_CWD(':' 구분) 에 cwd 토큰을 넣으면 그 세션을 origin=company 로 태깅.
-    #   기본 빈값 = 회사 개념 미사용(전부 personal). (배제 아님 — 태그만.)
+    # Session 'experiences' are not isolated — they all accumulate in the same raw/. origin is just a tag for recall toggling.
+    #   Putting a cwd token in DISTILL_COMPANY_CWD (':'-separated) tags that session as origin=company.
+    #   Default empty = the company concept is unused (everything is personal). (Not exclusion — just a tag.)
     cwd = data.get("cwd") or ""
     company_tokens = (os.environ.get("DISTILL_COMPANY_CWD") or "").split(":")
     is_company = any(tok and tok in cwd for tok in company_tokens)
     text = extract(tp)
-    if len(text) < 500:  # 너무 짧은 세션은 skip (값싼 호스트 선차단 — 헛 POST 방지)
+    if len(text) < 500:  # skip too-short sessions (cheap host-side pre-filter — avoids wasted POSTs)
         return
-    # 쓰기 정문(opt-in): DISTILL_VIA_AGENT 면 에이전트가 게이트+적재. 성공하면 끝, 실패면 엔진 폴백.
-    # (두 문 설계: 자동 포착의 판단을 에이전트 머리에 맡김. 엔진 distill 은 폴백으로 항상 살아있음.)
+    # Write front door (opt-in): if DISTILL_VIA_AGENT, the agent gates + ingests. Done on success, fall back to engine on failure.
+    # (Two-door design: delegate the judgment of auto-capture to the agent's reasoning. The engine distill is always alive as a fallback.)
     if os.environ.get("DISTILL_VIA_AGENT") and via_agent(tp):
         _mark(session_id)
         return
-    # 격리 없음 — 개인·회사 세션 경험 모두 같은 raw/ 에. 구분은 origin 태그로만.
+    # No isolation — both personal and company session experiences go to the same raw/. Distinction is via the origin tag only.
     origin = "company" if is_company else "personal"
     phase = "종료" if is_final else "진행중"
-    repo = repo_slug(cwd)  # 카테고리 축 — git remote 슬러그(폴백 폴더명)
-    # 엔진(SSOT)이 길이 클램프·LLM 증류·KEEP/SKIP 게이트·시크릿 스크럽·raw 노트 기록을 수행.
+    repo = repo_slug(cwd)  # category axis — git remote slug (fallback folder name)
+    # The engine (SSOT) performs length clamping, LLM distillation, the KEEP/SKIP gate, secret scrubbing, and raw-note writing.
     resp = post_distill(text, session_id, origin, phase, repo, cwd)
     if not resp or not resp.get("written"):
-        return  # SKIP/짧음(엔진 판정) 또는 엔진 다운 → 마커도 안 남김(다음 Stop 에 재시도)
+        return  # SKIP/too-short (engine's verdict) or engine down → leave no marker either (retry on next Stop)
     filename = resp.get("filename")
     if not filename:
         return
-    fp = os.path.join(RAW_DIR, filename)  # 엔진은 파일명만 반환 → 호스트 RAW_DIR 와 조인
-    # 최근성 정렬키 교정: 노트 mtime = 세션 실제 시각(트랜스크립트 최신 timestamp).
-    # 백필이 옛 세션을 지금 증류해도 mtime=세션시각이라 brief가 가짜최신으로 안 띄움.
-    # (compile 이 이 mtime 을 wiki 로 보존 → ingest 가 updated_at 으로 사용.)
+    fp = os.path.join(RAW_DIR, filename)  # the engine returns only the filename → join with host RAW_DIR
+    # Recency sort-key correction: note mtime = the session's actual time (latest transcript timestamp).
+    # Even if a backfill distills an old session now, mtime=session-time so the brief won't surface it as fake-recent.
+    # (compile preserves this mtime into the wiki → ingest uses it as updated_at.)
     st = _session_mtime(tp)
     if st:
         try:
             os.utime(fp, (st, st))
         except OSError:
             pass
-    _mark(session_id)  # throttle 마커 갱신
-    _trigger_sync()  # 노트 즉시 적재(detached) — 4h 스케줄러 안 기다림
+    _mark(session_id)  # refresh the throttle marker
+    _trigger_sync()  # ingest the note immediately (detached) — don't wait for the 4h scheduler
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception:
-        pass  # 절대 세션을 막지 않음
+        pass  # never block the session
     sys.exit(0)
