@@ -1,6 +1,7 @@
-# oh-my-boring — live stack (local Docker). 3 containers + host Ollama.
-#   docker compose up -d   # postgres(pgvector) + drudge(RAG engine) + hermes-agent(Joseph)
-#   Slack, autonomy, and recall are handled by hermes-agent (Nous Hermes Agent). The model is host Ollama (gemma4).
+# oh-my-boring — live stack (local Docker). host Ollama + drudge + hermes-agent (+ Postgres via --profile vector).
+#   make up              # wiki-first: drudge + hermes-agent
+#   DRUDGE_VECTOR=on …   # also brings up Postgres (pgvector) via --profile vector
+#   Slack, autonomy, and recall are driven by hermes-agent (Nous Hermes Agent). Models run on host Ollama (gemma4).
 name: oh-my-boring
 
 services:
@@ -55,10 +56,10 @@ services:
     ports:
       - "127.0.0.1:7700:7700"             # for host debugging / direct curl
 
-  # ─────────────────────────── Hermes Agent (Joseph's body) ─────────────────────
+  # ─────────────────────────── Hermes Agent (the brain) ─────────────────────────
   # Nous Hermes Agent — autonomous agent. Persists config/memory in the ~/.hermes volume → the container is disposable.
   # Mac: their compose's network_mode:host isn't supported by Mac Docker → bridge + host.docker.internal.
-  # drudge (our RAG) is connected separately as the MCP memory backend (same stack, sidecar). The old joseph retires after validation.
+  # drudge (our RAG) is connected as the agent's MCP memory backend (same stack, sidecar).
   # Default core — the agent is the brain that *drives* ingestion. But the image isn't in the repo (external build) + depends on ~/.hermes:
   # start.sh checks for the image first and, if absent, prints build guidance and stops (instead of a cryptic compose failure).
   hermes-agent:
