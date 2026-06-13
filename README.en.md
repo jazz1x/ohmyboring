@@ -113,6 +113,30 @@ It accumulates on its own when a session ends — the core value. Three host hoo
 
 ---
 
+## Connecting Nous Hermes Agent (optional)
+
+drudge can serve as the **MCP memory backend** for the external [Nous Hermes Agent](https://github.com/NousResearch). The agent is the brain (it decides what/when to ingest and recall, and builds its own skills); drudge is the hands — the systematized mechanics (compile, embedding, graph).
+
+1. Start the agent: `docker compose --profile agent up -d` (needs the external `hermes-agent` image — not bundled, build separately).
+2. Register drudge as an MCP server in the agent config (`~/.hermes/config.yaml`):
+   ```yaml
+   mcp_servers:
+     drudge:
+       url: http://drudge:7700/mcp   # same compose network: reach by service name
+       transport: http               # from the host directly: http://localhost:7700/mcp
+   ```
+3. The three MCP tools the agent uses (drudge `/mcp`):
+
+| Tool | Direction | What it does |
+|---|---|---|
+| `recall{query}` | read | recall past experience via vector + graph |
+| `remember{text,title?}` | write | write a note to vault/raw (absorbed on next sync) |
+| `sync{}` | drive | run compile → ingest → extract once |
+
+> **Three ingest-trigger layers coexist**: ① drudge's 4h scheduler (the floor, `DRUDGE_SYNC_HOURS`) · ② SessionEnd hook (per-session capture) · ③ agent MCP (active). The agent actively ingests via `remember`/`sync`; the scheduler and hook are the safety net. The core is complete with ①② alone, no agent required.
+
+---
+
 ## Sources & recall
 
 - **Ingest targets** (`DRUDGE_SOURCE_DIRS`, compose default): `~/.claude/projects` (Claude Code memory) + `vault/wiki` (distilled/curated notes).
