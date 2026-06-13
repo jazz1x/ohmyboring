@@ -197,8 +197,9 @@ DISTILL_COMPANY_CWD=acme              # セッション蒸留フック（cwdのs
 
 - **SSOT ドキュメント**: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`。
 - **原則**: ROP（Result レール）· Parse-don't-validate · Clean Architecture · 最も単純で動くもの。
-- **ゲート**（ローカル `make guard` == CI）: `rustfmt --check` + `clippy -D warnings`（`unsafe` forbid + `all`/`pedantic` deny）+ `cargo test`。テストはスタック非依存（DB不要）。
-- **CI**（`.github/workflows/ci.yml`）: PR と main push のたびに `rust-gate`（guard.sh）+ `gitleaks`（機密スキャン）。ブランチ保護が両方を必須化 — admin も回避不可、直接 push・force-push・削除も禁止。
+- **ゲート**（ローカル `make guard` == CI）: `rustfmt --check` + `clippy -D warnings`（`unsafe` forbid + `all`/`pedantic` deny）+ `cargo test`。テストはスタック非依存（DB不要）。サプライチェーンは `make deny`（cargo-deny: 脆弱性・ライセンス）。
+- **pre-commit**（コミット前の fast ゲート）: クローン後に一度 `pre-commit install`。以降コミットごとにファイル衛生 + `gitleaks` + fmt/clippy/test を自動実行。（要 `pip install pre-commit` または `brew install pre-commit`）
+- **CI**（`.github/workflows/ci.yml`）: PR と main push のたびに `rust-gate`（guard.sh）+ `gitleaks`（機密）+ `cargo-deny`（サプライチェーン）。ブランチ保護が 3 つすべてを必須化 — admin も回避不可、直接 push・force-push・削除も禁止。
 
 ---
 
