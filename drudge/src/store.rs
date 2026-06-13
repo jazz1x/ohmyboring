@@ -148,9 +148,24 @@ impl Store {
 
     /// PostgreSQL 접속 + pgvector + node/edge 그래프 스키마 초기화.
     pub async fn open(dsn: &str) -> Result<Self> {
-        let (client, conn) = tokio_postgres::connect(dsn, NoTls)
-            .await
-            .context("postgres connect")?;
+        // connect 재시도(IO 경계, graceful) — postgres 가 profile 로 별도 기동될 때
+        // drudge 가 먼저 떠도 최대 ~10초 기다린다(depends_on 제거 → 기동 race 흡수).
+        let (client, conn) = {
+            let mut tries = 0_u32;
+            loop {
+                match tokio_postgres::connect(dsn, NoTls).await {
+                    Ok(pair) => break pair,
+                    Err(e) if tries < 9 => {
+                        tries += 1;
+                        eprintln!("[store] postgres 연결 재시도 {tries}/10 … ({e})");
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                    Err(e) => {
+                        return Err(anyhow::Error::new(e).context("postgres connect (재시도 소진)"));
+                    }
+                }
+            }
+        };
         // 백그라운드 커넥션 드라이버 spawn.
         tokio::spawn(async move {
             if let Err(e) = conn.await {
