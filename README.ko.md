@@ -12,16 +12,20 @@
 
 > 게을러서 안 하던 일 — 과거 작업을 기억하고 다시 찾아보는 그 지루한 일 — 을 **drudge**(막일꾼) 엔진이 대신 묵묵히 한다.
 
-```text
-            쓰기 (게이트)                                읽기 (열림·빠름)
-  ┌────────────────────────────────┐          ┌──────────────────────────────┐
-  세션 ──증류──▶ vault/raw          │          │  "이거 뭐였지?"               │
-  (Claude Code,   ──compile──▶ vault/wiki ◀────────  make ask · recall.py      │
-   SessionEnd 훅) (큐레이션)        │  *.md    │         · Slack · MCP recall   │
-  └────────────────────────────────┘  (1급)   └──────────────────────────────┘
-                                         │
-                          (옵션) ────────┴──── DRUDGE_VECTOR=on
-                                   pgvector: 임베딩 + 그래프 RAG
+```mermaid
+flowchart LR
+  CC["Claude Code 세션"] -->|SessionEnd 훅| D["증류 distill"]
+  NT["마크다운 노트"] --> D
+  subgraph WRITE ["쓰기 · 게이트"]
+    D --> RAW["vault/raw"]
+    RAW -->|"compile · 큐레이션"| WK["vault/wiki<br/>★ 1급 메모리"]
+  end
+  subgraph READ ["읽기 · 열림·빠름"]
+    CONS["make ask · recall.py<br/>Slack · MCP recall"]
+  end
+  WK --> CONS
+  WK -. "DRUDGE_VECTOR=on" .-> PG[("pgvector<br/>vector + graph RAG")]
+  PG -. 가속 .-> CONS
 ```
 
 **vault/wiki 마크다운이 1급 메모리** — 에이전트·엔진이 직접 읽는다(임베딩 불필요). pgvector(vector + graph RAG)는 **켜고 싶을 때 켜는 옵션 가속기**.
@@ -98,13 +102,12 @@ make ask Q="도커 빌드 캐시 문제 전에 어떻게 풀었지?"
 
 세션이 끝나면 알아서 쌓인다 — 핵심 가치.
 
-```text
-① 종료/중단  →  distill-session.py (SessionEnd/Stop 훅)
-                세션 증류 → vault/raw  (엔진; 또는 에이전트, opt-in)
-② compile    →  raw → vault/wiki  (LLM 큐레이션: 제목·태그·repo/<slug>)
-                [스케줄러 · make sync · 세션 직후]
-③ 회수       →  make ask / recall.py / Slack / MCP  →  vault/wiki 직독
-                (+ DRUDGE_VECTOR=on 이면 pgvector 유사도 & 그래프)
+```mermaid
+flowchart TD
+  S["세션 종료"] -->|"① 증류 — 엔진, 또는 에이전트(opt-in)"| RAW["vault/raw"]
+  RAW -->|"② compile · 큐레이션 (제목·태그·repo/&lt;slug&gt;)"| WK["vault/wiki"]
+  WK -->|"③ 회수 — wiki 직독"| ANS["make ask · recall.py · Slack · MCP"]
+  WK -. "DRUDGE_VECTOR=on: + pgvector 유사도 &amp; 그래프" .-> ANS
 ```
 
 | 훅 | Claude Code 이벤트 | 하는 일 |

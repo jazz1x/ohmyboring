@@ -12,16 +12,20 @@
 
 > The boring chore you keep skipping — remembering past work and digging it back up — is what the **drudge** engine quietly does for you.
 
-```text
-            WRITE (gated)                                READ (open, fast)
-  ┌────────────────────────────────┐          ┌──────────────────────────────┐
-  session ──distill──▶ vault/raw    │          │  "what was X?"                │
-  (Claude Code,        ──compile──▶ vault/wiki ◀──────  make ask · recall.py    │
-   SessionEnd hook)    (curate)     │  *.md    │         · Slack · MCP recall   │
-  └────────────────────────────────┘  (1급)   └──────────────────────────────┘
-                                         │
-                          (optional) ────┴──── DRUDGE_VECTOR=on
-                                    pgvector: embeddings + graph RAG
+```mermaid
+flowchart LR
+  CC["Claude Code session"] -->|SessionEnd hook| D["distill"]
+  NT["markdown notes"] --> D
+  subgraph WRITE ["WRITE · gated"]
+    D --> RAW["vault/raw"]
+    RAW -->|"compile · curate"| WK["vault/wiki<br/>★ primary memory"]
+  end
+  subgraph READ ["READ · open · fast"]
+    CONS["make ask · recall.py<br/>Slack · MCP recall"]
+  end
+  WK --> CONS
+  WK -. "DRUDGE_VECTOR=on" .-> PG[("pgvector<br/>vector + graph RAG")]
+  PG -. accelerate .-> CONS
 ```
 
 **vault/wiki markdown is the primary memory** — the agent and engine read it directly (no embeddings needed). pgvector (vector + graph RAG) is an **optional accelerator** you switch on when you want it.
@@ -98,13 +102,12 @@ make ask Q="how did I fix the docker build cache problem?"
 
 When a session ends it accumulates on its own — the core value.
 
-```text
-① end/stop  →  distill-session.py (SessionEnd/Stop hook)
-                distill the session → vault/raw  (engine; or the agent, opt-in)
-② compile   →  raw → vault/wiki  (LLM curation: title, tags, repo/<slug>)
-                [scheduler · make sync · right after a session]
-③ recall    →  make ask / recall.py / Slack / MCP  →  reads vault/wiki directly
-                (+ pgvector similarity & graph when DRUDGE_VECTOR=on)
+```mermaid
+flowchart TD
+  S["session ends"] -->|"① distill — engine, or agent (opt-in)"| RAW["vault/raw"]
+  RAW -->|"② compile · curate (title, tags, repo/&lt;slug&gt;)"| WK["vault/wiki"]
+  WK -->|"③ recall — reads wiki directly"| ANS["make ask · recall.py · Slack · MCP"]
+  WK -. "DRUDGE_VECTOR=on: + pgvector similarity &amp; graph" .-> ANS
 ```
 
 | Hook | Claude Code event | What it does |
