@@ -30,15 +30,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# 임베디드 DB 저장 디렉터리 (볼륨 마운트 포인트)
+# Data dir (volume mount point) — owned by the non-root user below.
 RUN mkdir -p /data
 
 COPY --from=builder /build/target/release/drudge /usr/local/bin/drudge
 
-# ── 환경 변수 기본값 ──────────────────────────────────────────────────────────
+# Run as a non-root user (defense-in-depth; satisfies trivy DS-0002).
+# Bind mounts (vault, ~/.claude) are uid-remapped by Docker Desktop on macOS;
+# on Linux, pass a matching uid if host-file ownership matters.
+RUN useradd --system --uid 10001 --no-create-home drudge \
+    && chown -R drudge /data
+USER drudge
 
+# ── Default env ───────────────────────────────────────────────────────────────
 ENV DRUDGE_HTTP_ADDR=0.0.0.0:7700
-# OLLAMA_HOST, DRUDGE_SOURCE_DIRS, DRUDGE_SYNC_HOURS: 런타임에 주입
+# DRUDGE_LLM_BASE_URL, DRUDGE_SOURCE_DIRS, DRUDGE_SYNC_HOURS: injected at runtime
 
 EXPOSE 7700
 
