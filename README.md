@@ -13,19 +13,28 @@
 > The boring chore you keep skipping — remembering past work and digging it back up — is what the **drudge** engine quietly does for you.
 
 ```mermaid
-flowchart LR
-  CC["Claude Code session"] -->|SessionEnd hook| D["distill"]
-  NT["markdown notes"] --> D
-  subgraph WRITE ["WRITE · gated"]
-    D --> RAW["vault/raw"]
-    RAW -->|"compile · curate"| WK["vault/wiki<br/>★ primary memory"]
+flowchart TB
+  CC(["Claude Code session"]) --> D
+  NT(["markdown notes"]) --> D
+  subgraph WRITE ["WRITE · gated — engine, or agent (opt-in)"]
+    direction LR
+    D["distill"] --> RAW["vault/raw"] --> CP["compile · curate"]
   end
-  subgraph READ ["READ · open · fast"]
-    CONS["make ask · recall.py<br/>Slack · MCP recall"]
+  CP --> WIKI[("vault/wiki<br/>★ primary memory")]
+  WIKI --> RD
+  subgraph RD ["READ · open · fast"]
+    direction LR
+    ASK(["make ask"])
+    REC(["recall.py"])
+    SLK(["Slack"])
+    MCP(["MCP recall"])
   end
-  WK --> CONS
-  WK -. "DRUDGE_VECTOR=on" .-> PG[("pgvector<br/>vector + graph RAG")]
-  PG -. accelerate .-> CONS
+  WIKI -. "DRUDGE_VECTOR=on" .-> PG[("pgvector<br/>vector + graph RAG")]
+  PG -. accelerate .-> RD
+  classDef hub fill:#ffe9a8,stroke:#c79a00,stroke-width:2px;
+  classDef opt fill:#eaf0ff,stroke:#5a78c0,stroke-dasharray:5 3;
+  class WIKI hub;
+  class PG opt;
 ```
 
 **vault/wiki markdown is the primary memory** — the agent and engine read it directly (no embeddings needed). pgvector (vector + graph RAG) is an **optional accelerator** you switch on when you want it.

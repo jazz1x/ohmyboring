@@ -13,19 +13,28 @@
 > 面倒で後回しにしがちな作業 — 過去の仕事を覚えて掘り起こす退屈な仕事 — を **drudge**（下働き）エンジンが黙々と肩代わりする。
 
 ```mermaid
-flowchart LR
-  CC["Claude Code セッション"] -->|SessionEnd フック| D["蒸留 distill"]
-  NT["Markdown ノート"] --> D
-  subgraph WRITE ["書き込み · ゲート"]
-    D --> RAW["vault/raw"]
-    RAW -->|"compile · キュレーション"| WK["vault/wiki<br/>★ 1級メモリ"]
+flowchart TB
+  CC(["Claude Code セッション"]) --> D
+  NT(["Markdown ノート"]) --> D
+  subgraph WRITE ["書き込み · ゲート — エンジン、または opt-in でエージェント"]
+    direction LR
+    D["蒸留 distill"] --> RAW["vault/raw"] --> CP["compile · キュレーション"]
   end
-  subgraph READ ["読み出し · オープン·高速"]
-    CONS["make ask · recall.py<br/>Slack · MCP recall"]
+  CP --> WIKI[("vault/wiki<br/>★ 1級メモリ")]
+  WIKI --> RD
+  subgraph RD ["読み出し · オープン·高速"]
+    direction LR
+    ASK(["make ask"])
+    REC(["recall.py"])
+    SLK(["Slack"])
+    MCP(["MCP recall"])
   end
-  WK --> CONS
-  WK -. "DRUDGE_VECTOR=on" .-> PG[("pgvector<br/>vector + graph RAG")]
-  PG -. 加速 .-> CONS
+  WIKI -. "DRUDGE_VECTOR=on" .-> PG[("pgvector<br/>vector + graph RAG")]
+  PG -. 加速 .-> RD
+  classDef hub fill:#ffe9a8,stroke:#c79a00,stroke-width:2px;
+  classDef opt fill:#eaf0ff,stroke:#5a78c0,stroke-dasharray:5 3;
+  class WIKI hub;
+  class PG opt;
 ```
 
 **vault/wiki の Markdown が1級メモリ** — エージェント・エンジンが直接読む（埋め込み不要）。pgvector（vector + graph RAG）は **使いたいときに点ける任意のアクセラレータ**。
