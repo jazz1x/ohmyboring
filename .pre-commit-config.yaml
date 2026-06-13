@@ -1,0 +1,51 @@
+# oh-my-boring pre-commit — 커밋 전 fast 게이트(~수초). CI 의 앞단 방어.
+# 설치: pre-commit install   (요건: pre-commit, cargo+clippy+rustfmt)
+# clippy/fmt/test = 구조 게이트(== scripts/guard.sh == CI rust-gate). cargo-deny(공급망)는 무거워 CI 전용.
+default_install_hook_types: [pre-commit]
+default_stages: [pre-commit]
+fail_fast: true
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-toml
+      - id: check-yaml
+      - id: check-merge-conflict
+
+  # 시크릿 스캔 — staged 에서 토큰/키 차단 (CI gitleaks 가 전체 히스토리 재검).
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: no-meaningless-filenames
+        name: "의미 없는 파일명 금지 (mod/util/misc/helper/common)"
+        entry: "의미 없는 파일명 — 모듈 의도를 드러내는 이름(src/<name>.rs)을 쓰세요. mod.rs 는 edition 2024 폐기, util/misc 등은 junk-drawer."
+        language: fail
+        files: (^|/)(mod|utils?|misc|helpers?|common)\.rs$
+
+      - id: cargo-fmt
+        name: cargo fmt --check (drudge)
+        entry: cargo fmt --manifest-path drudge/Cargo.toml --check
+        language: system
+        pass_filenames: false
+        files: \.rs$
+
+      - id: cargo-clippy
+        name: "cargo clippy -D warnings (drudge, 철학 게이트)"
+        entry: cargo clippy --manifest-path drudge/Cargo.toml --all-targets -- -D warnings
+        language: system
+        pass_filenames: false
+        files: \.(rs|toml)$
+
+      - id: cargo-test
+        name: cargo test (drudge, 스택-프리)
+        entry: cargo test --manifest-path drudge/Cargo.toml
+        language: system
+        pass_filenames: false
+        files: \.rs$
