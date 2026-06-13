@@ -71,6 +71,7 @@ services:
       TZ: Asia/Seoul
     volumes:
       - ${HOME}/.hermes:/opt/data         # config·자격증명·세션메모리 영속(자율증강 레이어)
+      - ${HOME}/.claude:/host/.claude:ro  # 쓰기 정문(DISTILL_VIA_AGENT): 세션 트랜스크립트 읽기용
     extra_hosts:
       - "host.docker.internal:host-gateway"   # Mac: 호스트 Ollama(gemma4) 도달
     command: ["gateway", "run"]
