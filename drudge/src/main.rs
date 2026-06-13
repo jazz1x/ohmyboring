@@ -14,7 +14,7 @@ mod store;
 mod vault;
 mod wiki_recall;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -103,13 +103,26 @@ enum VaultCmd {
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
+    // 벡터 전용 CLI 명령이 off 에서 받는 거부 메시지(침묵 아님, ROP). 데몬(serve)은 off 면 wiki 모드.
+    const VEC_OFF: &str = "DRUDGE_VECTOR=off — 이 명령은 벡터 백엔드(pgvector)가 필요합니다. 데몬(serve)은 off 면 wiki 회수로 동작합니다.";
+
     let cli = Cli::parse();
-    let dsn = std::env::var("PG_DSN")
-        .unwrap_or_else(|_| "postgresql://boring:boring@localhost:5432/boring".to_owned());
-    let store = store::Store::open(&dsn).await?;
+    // DRUDGE_VECTOR: on(기본) = pgvector 적재·회수. off = wiki 1급(Postgres 미연결).
+    // off 면 Store 를 안 연다 → Postgres 없이도 엔진/CLI 기동.
+    let vector_on = std::env::var("DRUDGE_VECTOR").map_or(true, |v| {
+        !matches!(v.to_lowercase().as_str(), "off" | "0" | "false" | "no")
+    });
+    let store: Option<store::Store> = if vector_on {
+        let dsn = std::env::var("PG_DSN")
+            .unwrap_or_else(|_| "postgresql://boring:boring@localhost:5432/boring".to_owned());
+        Some(store::Store::open(&dsn).await?)
+    } else {
+        None
+    };
 
     match cli.cmd {
         Cmd::Selftest => {
+            let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_env();
             let docs = [
                 (
@@ -169,9 +182,11 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Stats => {
+            let store = store.as_ref().context(VEC_OFF)?;
             println!("knowledge docs: {}", store.count().await?);
         }
         Cmd::Ingest => {
+            let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_env();
             let home = std::env::var("HOME").unwrap_or_default();
             let dirs = std::env::var("DRUDGE_SOURCE_DIRS").unwrap_or_else(|_| {
@@ -181,18 +196,20 @@ async fn main() -> Result<()> {
             });
             let source_dirs: Vec<String> = dirs.split(':').map(str::to_owned).collect();
             println!("sources: {source_dirs:?}");
-            let s = ingest::run(&store, &ol, &source_dirs).await?;
+            let s = ingest::run(store, &ol, &source_dirs).await?;
             println!(
                 "scanned={} new={} updated={} unchanged={} deleted={} skipped={} chunks={}",
                 s.scanned, s.new, s.updated, s.unchanged, s.deleted, s.skipped, s.chunks
             );
         }
         Cmd::Audit => {
-            audit::run(&store).await?;
+            let store = store.as_ref().context(VEC_OFF)?;
+            audit::run(store).await?;
         }
         Cmd::Search { query } => {
+            let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_env();
-            let hits = retrieve::retrieve(&store, &ol, &query, 5, &[]).await?;
+            let hits = retrieve::retrieve(store, &ol, &query, 5, &[]).await?;
             println!("'{query}' → {} hits", hits.len());
             for h in &hits {
                 let snip: String = h.content.chars().take(50).collect();
@@ -200,12 +217,14 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Ask { question } => {
+            let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_env();
-            ask::run(&store, &ol, &question, &[]).await?;
+            ask::run(store, &ol, &question, &[]).await?;
         }
         Cmd::Brief => {
+            let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_env();
-            let out = ask::brief(&store, &ol, &[]).await?;
+            let out = ask::brief(store, &ol, &[]).await?;
             println!("{}\n", out.answer);
             if !out.sources.is_empty() {
                 println!("출처:");
@@ -215,12 +234,14 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Graph { query } => {
+            let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_env();
-            graph::run(&store, &ol, &query).await?;
+            graph::run(store, &ol, &query).await?;
         }
         Cmd::Extract => {
+            let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_env();
-            let s = extract::run(&store, &ol).await?;
+            let s = extract::run(store, &ol).await?;
             println!(
                 "extract: processed={} skipped={} problems={} solutions={} tools={} concepts={} attempts={} edges={}",
                 s.processed,
@@ -233,7 +254,7 @@ async fn main() -> Result<()> {
                 s.edges
             );
             // 시맨틱 통계 감사 출력 (멱등 검증용)
-            let ss = store.semantic_stats().await?;
+            let ss = store.semantic_stats().await?; // store: &Store (가드 통과)
             println!(
                 "semantic audit: problem {} · solution {} · tool {} · concept {} · attempt {}",
                 ss.problems, ss.solutions, ss.tools, ss.concepts, ss.attempts
@@ -244,6 +265,7 @@ async fn main() -> Result<()> {
             );
         }
         Cmd::Sync => {
+            let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_env();
             let home = std::env::var("HOME").unwrap_or_default();
             let dirs = std::env::var("DRUDGE_SOURCE_DIRS").unwrap_or_else(|_| {
@@ -252,8 +274,8 @@ async fn main() -> Result<()> {
                 )
             });
             let source_dirs: Vec<String> = dirs.split(':').map(str::to_owned).collect();
-            let is = ingest::run(&store, &ol, &source_dirs).await?;
-            let es = extract::run(&store, &ol).await?;
+            let is = ingest::run(store, &ol, &source_dirs).await?;
+            let es = extract::run(store, &ol).await?;
             println!(
                 "sync: ingest(new={} updated={} deleted={} chunks={}) + extract(processed={} skipped={} nodes={} edges={})",
                 is.new,
@@ -267,6 +289,7 @@ async fn main() -> Result<()> {
             );
         }
         Cmd::Link { vault } => {
+            let store = store.as_ref().context(VEC_OFF)?;
             let vault_root = vault
                 .or_else(|| std::env::var("DRUDGE_VAULT_DIR").ok())
                 .unwrap_or_else(|| {
@@ -275,10 +298,11 @@ async fn main() -> Result<()> {
                         std::env::var("HOME").unwrap_or_default()
                     )
                 });
-            let n = vault::project_links(&store, std::path::Path::new(&vault_root), 6).await?;
+            let n = vault::project_links(store, std::path::Path::new(&vault_root), 6).await?;
             println!("graph→obsidian: {n} wiki 노트의 relates_to 갱신");
         }
         Cmd::Gc => {
+            let store = store.as_ref().context(VEC_OFF)?;
             let gc = store.gc_orphans().await?;
             println!(
                 "gc orphans — tool: {} · concept: {} · problem: {} · solution: {} · attempt: {} · total: {}",

@@ -6,9 +6,12 @@ use std::fmt::Write as _;
 
 use anyhow::Result;
 
+use std::path::Path;
+
 use crate::llm::Llm;
 use crate::retrieve;
 use crate::store::Store;
+use crate::wiki_recall;
 
 const SYSTEM: &str = "너는 사용자의 개인 비서다. 한국어로 답한다.\n\
 [간결] 서론·반복·군더더기 금지. 핵심만. 목록은 한 줄짜리 불릿, 질문이 작으면 1~2문장으로 끝낸다.\n\
@@ -91,6 +94,39 @@ pub async fn answer(
         .map(|h| h.source_path.clone())
         .collect();
 
+    Ok(AnswerOut {
+        answer: answer_text.trim().to_owned(),
+        sources,
+    })
+}
+
+/// wiki-1급 회수(`DRUDGE_VECTOR=off`): vault/wiki 직독 → LLM 합성. 그래프/claim 권위 없음(벡터 전용).
+/// `wiki_dir` 미설정이면 빈 메모리 안내. SRP: 순수 로직(IO는 wiki_recall 한 곳).
+pub async fn answer_wiki(llm: &Llm, wiki_dir: Option<&Path>, question: &str) -> Result<AnswerOut> {
+    let Some(dir) = wiki_dir else {
+        return Ok(AnswerOut {
+            answer: "vault 가 설정되지 않았어요. (DRUDGE_VAULT_DIR)".to_owned(),
+            sources: vec![],
+        });
+    };
+    let hits = wiki_recall::recall(dir, question, 5)?;
+    if hits.is_empty() {
+        return Ok(AnswerOut {
+            answer: "관련 메모리를 못 찾았어요. (vault/wiki 비었거나 sync 전?)".to_owned(),
+            sources: vec![],
+        });
+    }
+    let mut context = String::new();
+    for (i, h) in hits.iter().enumerate() {
+        let _ = write!(
+            context,
+            "## [{i}] {} ({})\n{}\n\n",
+            h.title, h.source_path, h.snippet
+        );
+    }
+    let prompt = format!("# 회수된 메모리(vault/wiki)\n{context}\n# 질문\n{question}");
+    let answer_text = llm.generate(SYSTEM, &prompt).await?;
+    let sources: Vec<String> = hits.into_iter().map(|h| h.source_path).collect();
     Ok(AnswerOut {
         answer: answer_text.trim().to_owned(),
         sources,

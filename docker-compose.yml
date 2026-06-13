@@ -43,6 +43,7 @@ services:
       # 회수 소스: CC 메모리(.claude) + 큐레이션된 vault/wiki(자가증강 SSOT).
       DRUDGE_SOURCE_DIRS: /host/.claude/projects:/vault/wiki
       DRUDGE_VAULT_DIR: /vault             # vault compile(raw→wiki) 대상
+      DRUDGE_VECTOR: "on"                  # on=벡터+그래프 RAG. off=wiki 1급 직독(pgvector 미사용)
       DRUDGE_SYNC_HOURS: "4"
       TZ: Asia/Seoul
     volumes:
