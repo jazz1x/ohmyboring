@@ -1,7 +1,7 @@
 //! Serve — HTTP resident daemon (axum) + background sync scheduler.
 //!
 //! 아키텍처:
-//! - `Store` + `Ollama` 를 `Arc` 로 공유 (Postgres client 는 concurrent 사용 지원).
+//! - `Store` + `Llm` 를 `Arc` 로 공유 (Postgres client 는 concurrent 사용 지원).
 //! - axum 라우터: /health · /ask · /search · /graph · /audit · /sync
 //! - 백그라운드 스케줄러: `DRUDGE_SYNC_HOURS`(기본 4h) 주기 + 기동 즉시 1회 실행.
 //! - 에러 전파: `AppError` (anyhow wrapper) → HTTP 500, JSON body.
@@ -24,7 +24,7 @@ use crate::distill;
 use crate::extract;
 use crate::graph;
 use crate::ingest;
-use crate::ollama::Ollama;
+use crate::llm::Llm;
 use crate::retrieve;
 use crate::store::Store;
 use crate::vault;
@@ -34,7 +34,7 @@ use crate::vault;
 #[derive(Clone)]
 pub struct AppState {
     store: Arc<Store>,
-    ollama: Arc<Ollama>,
+    llm: Arc<Llm>,
     source_dirs: Arc<Vec<String>>,
     /// vault 루트(`DRUDGE_VAULT_DIR`). `Some`이면 sync 시 raw→wiki compile 수행.
     vault_dir: Arc<Option<PathBuf>>,
@@ -161,7 +161,7 @@ async fn handle_ask(
     State(s): State<AppState>,
     Json(req): Json<AskReq>,
 ) -> Result<Json<AskResp>, AppError> {
-    let out = ask::answer(&s.store, &s.ollama, &req.question, &[]).await?;
+    let out = ask::answer(&s.store, &s.llm, &req.question, &[]).await?;
     Ok(Json(AskResp {
         answer: out.answer,
         sources: out.sources,
@@ -170,7 +170,7 @@ async fn handle_ask(
 
 /// 최신우선 브리핑 — 질문 없음(최근성 회수). cron 아침 브리핑이 호출.
 async fn handle_brief(State(s): State<AppState>) -> Result<Json<AskResp>, AppError> {
-    let out = ask::brief(&s.store, &s.ollama, &[]).await?;
+    let out = ask::brief(&s.store, &s.llm, &[]).await?;
     Ok(Json(AskResp {
         answer: out.answer,
         sources: out.sources,
@@ -181,7 +181,7 @@ async fn handle_search(
     State(s): State<AppState>,
     Json(req): Json<SearchReq>,
 ) -> Result<Json<SearchResp>, AppError> {
-    let hits = retrieve::retrieve(&s.store, &s.ollama, &req.query, 5, &[]).await?;
+    let hits = retrieve::retrieve(&s.store, &s.llm, &req.query, 5, &[]).await?;
     let mapped: Vec<SearchHit> = hits
         .into_iter()
         .map(|h| SearchHit {
@@ -199,7 +199,7 @@ async fn handle_graph(
     State(s): State<AppState>,
     Json(req): Json<GraphReq>,
 ) -> Result<Json<GraphResp>, AppError> {
-    let out = graph::query(&s.store, &s.ollama, &req.query).await?;
+    let out = graph::query(&s.store, &s.llm, &req.query).await?;
     Ok(Json(GraphResp {
         hit: out.hit,
         graph_neighbors: out.graph_neighbors,
@@ -231,7 +231,7 @@ async fn handle_distill(
         repo: req.repo,
         cwd: req.cwd,
     };
-    let out = distill::run(&s.ollama, vault_root, &dreq).await?;
+    let out = distill::run(&s.llm, vault_root, &dreq).await?;
     Ok(Json(DistillResp {
         written: out.written,
         filename: out.filename,
@@ -346,7 +346,7 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     if query.is_empty() {
         return Err((-32602, "missing argument: query".to_owned()));
     }
-    let hits = retrieve::retrieve(&s.store, &s.ollama, query, 5, &[])
+    let hits = retrieve::retrieve(&s.store, &s.llm, query, 5, &[])
         .await
         .map_err(|e| (-32603_i32, format!("retrieve: {e:#}")))?;
     if hits.is_empty() {
@@ -411,7 +411,7 @@ fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, Stri
 
 /// `sync` — 적재 파이프라인 1회(compile→ingest→extract). 에이전트가 *언제* 흡수할지 결정.
 async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
-    let o = do_sync(&s.store, &s.ollama, &s.source_dirs, (*s.vault_dir).as_ref())
+    let o = do_sync(&s.store, &s.llm, &s.source_dirs, (*s.vault_dir).as_ref())
         .await
         .map_err(|e| (-32603_i32, format!("sync: {e:#}")))?;
     let compiled = o.compile.as_ref().map_or(0, |c| c.compiled + c.recompiled);
@@ -427,7 +427,7 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
 }
 
 async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncResp>, AppError> {
-    let o = do_sync(&s.store, &s.ollama, &s.source_dirs, (*s.vault_dir).as_ref()).await?;
+    let o = do_sync(&s.store, &s.llm, &s.source_dirs, (*s.vault_dir).as_ref()).await?;
     let (c_raw, c_compiled, c_recompiled) = o
         .compile
         .as_ref()
@@ -461,17 +461,14 @@ struct SyncOutcome {
 
 /// vault compile(raw→wiki). `vault_dir` 미설정이거나 raw 디렉터리 부재 시 graceful skip(None).
 /// compile 실패는 stderr 로깅 후 None — ingest/extract(기존 wiki 흡수)는 계속 진행(독립 단계).
-async fn run_compile_step(
-    ollama: &Ollama,
-    vault_dir: Option<&PathBuf>,
-) -> Option<vault::CompileStats> {
+async fn run_compile_step(llm: &Llm, vault_dir: Option<&PathBuf>) -> Option<vault::CompileStats> {
     let vault_root = vault_dir?;
     let raw_dir = vault_root.join("raw");
     if !raw_dir.is_dir() {
         return None; // 증류된 raw 노트 아직 없음 — 컴파일 대상 없음(정상)
     }
     let today = vault::today_utc();
-    match vault::run_compile(vault_root, &raw_dir, &today, ollama).await {
+    match vault::run_compile(vault_root, &raw_dir, &today, llm).await {
         Ok(s) => {
             eprintln!(
                 "[scheduler] compile: total_raw={} compiled={} recompiled={} skipped={}",
@@ -490,13 +487,13 @@ async fn run_compile_step(
 /// HTTP `/sync` 와 백그라운드 스케줄러 공용(SSOT).
 async fn do_sync(
     store: &Store,
-    ollama: &Ollama,
+    llm: &Llm,
     source_dirs: &[String],
     vault_dir: Option<&PathBuf>,
 ) -> Result<SyncOutcome> {
-    let compile = run_compile_step(ollama, vault_dir).await;
-    let ingest = ingest::run(store, ollama, source_dirs).await?;
-    let extract = extract::run(store, ollama).await?;
+    let compile = run_compile_step(llm, vault_dir).await;
+    let ingest = ingest::run(store, llm, source_dirs).await?;
+    let extract = extract::run(store, llm).await?;
     // 재추출은 옛 엣지만 지우고 노드는 고아로 남긴다(매 sync 누적 → 노드 폭발).
     // 매 sync 끝에 고아 시맨틱 노드 GC — 그래프를 마른 상태로 유지(SSOT 위생).
     match store.gc_orphans().await {
@@ -520,13 +517,8 @@ async fn do_sync(
 
 // ── 백그라운드 스케줄러 ───────────────────────────────────────────────────────
 
-async fn run_sync(
-    store: &Store,
-    ollama: &Ollama,
-    source_dirs: &[String],
-    vault_dir: Option<&PathBuf>,
-) {
-    match do_sync(store, ollama, source_dirs, vault_dir).await {
+async fn run_sync(store: &Store, llm: &Llm, source_dirs: &[String], vault_dir: Option<&PathBuf>) {
+    match do_sync(store, llm, source_dirs, vault_dir).await {
         Ok(o) => eprintln!(
             "[scheduler] sync done — ingest(new={} updated={} deleted={} chunks={}) extract(nodes={} edges={})",
             o.ingest.new,
@@ -546,7 +538,7 @@ async fn run_sync(
 
 fn spawn_scheduler(
     store: Arc<Store>,
-    ollama: Arc<Ollama>,
+    llm: Arc<Llm>,
     source_dirs: Arc<Vec<String>>,
     vault_dir: Arc<Option<PathBuf>>,
 ) {
@@ -559,21 +551,21 @@ fn spawn_scheduler(
     tokio::spawn(async move {
         // 기동 즉시 1회 실행
         eprintln!("[scheduler] startup sync (interval={sync_hours}h)");
-        run_sync(&store, &ollama, &source_dirs, (*vault_dir).as_ref()).await;
+        run_sync(&store, &llm, &source_dirs, (*vault_dir).as_ref()).await;
 
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await; // 첫 tick 은 즉시 — 버림 (위에서 이미 실행)
         loop {
             ticker.tick().await;
             eprintln!("[scheduler] periodic sync");
-            run_sync(&store, &ollama, &source_dirs, (*vault_dir).as_ref()).await;
+            run_sync(&store, &llm, &source_dirs, (*vault_dir).as_ref()).await;
         }
     });
 }
 
 // ── 진입점 ──────────────────────────────────────────────────────────────────
 
-pub async fn run(store: Store, ollama: Ollama) -> Result<()> {
+pub async fn run(store: Store, llm: Llm) -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_default();
     let dirs_env = std::env::var("DRUDGE_SOURCE_DIRS")
         .unwrap_or_else(|_| format!("{home}/.claude/projects:{home}/oh-my-boring/data/notes"));
@@ -586,14 +578,14 @@ pub async fn run(store: Store, ollama: Ollama) -> Result<()> {
 
     let state = AppState {
         store: Arc::new(store),
-        ollama: Arc::new(ollama),
+        llm: Arc::new(llm),
         source_dirs: Arc::new(source_dirs),
         vault_dir: Arc::new(vault_dir),
     };
 
     spawn_scheduler(
         Arc::clone(&state.store),
-        Arc::clone(&state.ollama),
+        Arc::clone(&state.llm),
         Arc::clone(&state.source_dirs),
         Arc::clone(&state.vault_dir),
     );

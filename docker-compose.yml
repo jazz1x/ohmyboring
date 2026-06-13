@@ -36,8 +36,8 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      OLLAMA_HOST: http://host.docker.internal:11434
-      DRUDGE_LLM_MODEL: gemma4:12b        # think=false 로 추론모드 차단(ollama.rs)
+      DRUDGE_LLM_BASE_URL: http://host.docker.internal:11434/v1  # OpenAI-호환. LM Studio 등으로 교체 가능
+      DRUDGE_LLM_MODEL: gemma4:12b        # 합성 모델 (think=false 는 llm.rs 가 Ollama 대상 부착)
       DRUDGE_HTTP_ADDR: 0.0.0.0:7700
       PG_DSN: postgresql://boring:boring@postgres:5432/boring
       # 회수 소스: CC 메모리(.claude) + 큐레이션된 vault/wiki(자가증강 SSOT).

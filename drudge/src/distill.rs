@@ -3,8 +3,8 @@
 //! # 경계 분리 (SSOT)
 //! 호스트 훅(`hooks/distill-session.py`)은 *호스트 전용* 일만 한다: 트랜스크립트 읽기·텍스트
 //! 추출·throttle 마커·세션 mtime 보정. LLM 증류·KEEP/SKIP 게이트·시크릿 스크럽·raw 노트
-//! 포맷은 모두 이 엔진 모듈로 통합한다(과거 파이썬이 `ollama.generate`/redact 를 재구현하던
-//! 중복을 제거 — `ollama.rs` 가 LLM 호출 SSOT).
+//! 포맷은 모두 이 엔진 모듈로 통합한다(과거 파이썬이 `llm.generate`/redact 를 재구현하던
+//! 중복을 제거 — `llm.rs` 가 LLM 호출 SSOT).
 //!
 //! # 설계 원칙
 //! - **SRP**: 순수 로직(`redact`/`gate`/`clamp`/`render_note`)과 I/O 쉘(`run`) 분리.
@@ -15,7 +15,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use regex::Regex;
 
-use crate::ollama::Ollama;
+use crate::llm::Llm;
 use crate::vault::today_utc;
 
 /// 입력 세션 텍스트 상한(문자수). 초과 시 head 1/3 + tail 2/3 로 양끝 보존.
@@ -24,7 +24,7 @@ const MAX_CHARS: usize = 40_000;
 const MIN_BODY: usize = 40;
 
 /// 증류 시스템 프롬프트 — 첫 줄 KEEP/SKIP 게이트 + 문제해결 서사 틀.
-/// (think=false 는 `ollama.rs` 가 고정.)
+/// (think=false 는 `llm.rs` 가 고정.)
 const SYSTEM: &str = "아래는 사용자가 Claude와 함께 작업한 세션 기록이다. \
 미래의 사용자가 '전에 이거 어떻게 했더라'를 다시 참고할 수 있게, \
 **문제해결 서사**를 기록해라. 다음 틀로 한국어 markdown 작성:\n\
@@ -143,13 +143,9 @@ fn render_note(req: &DistillRequest, body: &str) -> String {
 
 /// 증류 1회 (I/O 쉘) — 클램프 → LLM 증류 → KEEP/SKIP 게이트 → 스크럽 → raw 노트 기록.
 /// LLM/파일 실패는 `?` 로 전파(ROP). SKIP/짧음은 에러 아닌 `written=false`.
-pub async fn run(
-    ollama: &Ollama,
-    vault_root: &Path,
-    req: &DistillRequest,
-) -> Result<DistillOutcome> {
+pub async fn run(llm: &Llm, vault_root: &Path, req: &DistillRequest) -> Result<DistillOutcome> {
     let text = clamp(&req.text);
-    let note = ollama
+    let note = llm
         .generate(SYSTEM, &format!("=== 세션 ===\n{text}"))
         .await
         .context("distill LLM 생성 실패")?;

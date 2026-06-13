@@ -1,4 +1,4 @@
-//! Ask — 회수 → 컨텍스트 → Ollama 합성 → 답변 + 출처. (v1 generate_answer 패리티)
+//! Ask — 회수 → 컨텍스트 → Llm 합성 → 답변 + 출처. (v1 generate_answer 패리티)
 //!
 //! SRP: `answer()` 는 순수 로직(데이터 반환), `run()` 은 CLI I/O 껍질.
 use std::collections::HashSet;
@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use anyhow::Result;
 
-use crate::ollama::Ollama;
+use crate::llm::Llm;
 use crate::retrieve;
 use crate::store::Store;
 
@@ -27,11 +27,11 @@ pub struct AnswerOut {
 /// 순수 로직: 회수 + LLM 합성 → `AnswerOut` 반환. I/O 없음.
 pub async fn answer(
     store: &Store,
-    ollama: &Ollama,
+    llm: &Llm,
     question: &str,
     exclude_origins: &[String],
 ) -> Result<AnswerOut> {
-    let hits = retrieve::retrieve(store, ollama, question, 5, exclude_origins).await?;
+    let hits = retrieve::retrieve(store, llm, question, 5, exclude_origins).await?;
     if hits.is_empty() {
         return Ok(AnswerOut {
             answer: "관련 메모리를 못 찾았어요. (ingest 먼저?)".to_owned(),
@@ -64,7 +64,7 @@ pub async fn answer(
 
     // 권위 주입: 질의와 가까운 **현재** claim(superseded_at NULL) — 시간축 사실이 청크보다 우선.
     // "DB 뭐?" → claim 'oh-my-boring database is pgvector' 가 옛 청크 노이즈를 이긴다.
-    let q_emb = ollama.embed(question).await?;
+    let q_emb = llm.embed(question).await?;
     let mut claim_ctx = String::new();
     for (s, p, v) in store.current_claims(&q_emb, 5).await? {
         let _ = writeln!(claim_ctx, "- {s} {p} {v}");
@@ -82,7 +82,7 @@ pub async fn answer(
         let _ = write!(prompt, "# 그래프로 연결된 문서\n{graph_ctx}\n");
     }
     let _ = write!(prompt, "# 질문\n{question}");
-    let answer_text = ollama.generate(SYSTEM, &prompt).await?;
+    let answer_text = llm.generate(SYSTEM, &prompt).await?;
 
     let mut seen = HashSet::new();
     let sources: Vec<String> = hits
@@ -108,11 +108,7 @@ const BRIEF_SYSTEM: &str = "너는 사용자의 개인 비서다. 한국어로 '
 
 /// 최신우선/supersede 브리핑: 의미유사도가 아니라 `updated_at` 내림차순 회수 →
 /// 최신이 옛것을 이기게 합성. cron 아침 브리핑(`/brief`)이 호출. SRP: `answer()`와 분리.
-pub async fn brief(
-    store: &Store,
-    ollama: &Ollama,
-    exclude_origins: &[String],
-) -> Result<AnswerOut> {
+pub async fn brief(store: &Store, llm: &Llm, exclude_origins: &[String]) -> Result<AnswerOut> {
     let docs = store.recent_docs(12, exclude_origins).await?;
     if docs.is_empty() {
         return Ok(AnswerOut {
@@ -147,7 +143,7 @@ pub async fn brief(
             "# 현재 사실(권위 — 충돌 시 이게 최신, 따른다)\n{claim_ctx}\n# 최근 작업 기록 (최신순, 위가 최신)\n{context}"
         )
     };
-    let answer_text = ollama.generate(BRIEF_SYSTEM, &prompt).await?;
+    let answer_text = llm.generate(BRIEF_SYSTEM, &prompt).await?;
 
     let sources: Vec<String> = docs.iter().map(|d| d.source_path.clone()).collect();
     Ok(AnswerOut {
@@ -159,11 +155,11 @@ pub async fn brief(
 /// CLI 껍질: `answer()` 호출 후 stdout 출력.
 pub async fn run(
     store: &Store,
-    ollama: &Ollama,
+    llm: &Llm,
     question: &str,
     exclude_origins: &[String],
 ) -> Result<()> {
-    let out = answer(store, ollama, question, exclude_origins).await?;
+    let out = answer(store, llm, question, exclude_origins).await?;
     println!("{}\n", out.answer);
     if !out.sources.is_empty() {
         println!("출처:");

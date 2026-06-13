@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 
-use crate::ollama::Ollama;
+use crate::llm::Llm;
 use crate::store::{Hit, Store};
 
 const RRF_K: f64 = 60.0; // RRF 분모 상수(사실상 표준)
@@ -19,13 +19,13 @@ fn rrf_term(rank: usize) -> Result<f64> {
 /// 벡터 top-N + BM25 top-N → RRF 위치기반 병합 → origin 제외 → top-k.
 pub async fn retrieve(
     store: &Store,
-    ollama: &Ollama,
+    llm: &Llm,
     query: &str,
     top_k: usize,
     exclude_origins: &[String],
 ) -> Result<Vec<Hit>> {
     let pool = (top_k * 4).max(20);
-    let qe = ollama.embed(query).await?;
+    let qe = llm.embed(query).await?;
     let vec_hits = store.vector_search(&qe, pool).await?;
     let txt_hits = store.text_search(query, pool).await?;
 
