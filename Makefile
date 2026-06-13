@@ -1,4 +1,4 @@
-.PHONY: help up down build logs ask sync smoke models guard eval psql reset
+.PHONY: help up down build logs ask sync smoke models guard deny eval psql reset
 
 help: ## 명령 목록
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## / — /' | sort
@@ -41,6 +41,9 @@ smoke: ## end-to-end 스모크 테스트
 
 guard: ## 구조 게이트 (fmt+clippy+test)
 	./scripts/guard.sh
+
+deny: ## 공급망 게이트 (cargo-deny: 취약점·라이선스·중복버전)
+	cd drudge && cargo deny check
 
 eval: ## 행동 회귀 게이트 (run_eval --check, 스택 필요)
 	./scripts/eval-gate.sh

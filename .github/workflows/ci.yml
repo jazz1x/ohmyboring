@@ -38,3 +38,13 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 공급망 게이트 — 의존성 취약점(RUSTSEC)·라이선스·중복버전. drudge/deny.toml 이 정책.
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: drudge/Cargo.toml
+          arguments: --all-features
