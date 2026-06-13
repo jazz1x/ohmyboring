@@ -160,6 +160,32 @@ def post_distill(text, session_id, origin, phase, repo, cwd):
         return None  # 엔진 미가동/에러 — 4h 스케줄러가 캐치(세션 절대 미차단)
 
 
+def via_agent(transcript_path):
+    """쓰기 정문(opt-in, DISTILL_VIA_AGENT): 이미 떠있는 hermes-agent 에게 '판단해서 적재'를 맡긴다.
+    에이전트가 게이트(KEEP/SKIP·큐레이션)를 머리로 수행하고 drudge MCP(remember/sync)로 저장.
+    트랜스크립트는 agent 컨테이너에 마운트된 /host/.claude 경로로 읽힌다(compose 볼륨).
+    성공 시 True. docker/agent 미가동·매핑실패면 False → 호출측이 엔진 폴백."""
+    home = os.path.expanduser("~")
+    claude_root = os.path.join(home, ".claude")
+    if not transcript_path.startswith(claude_root):
+        return False  # ~/.claude 밖 → 컨테이너 경로 매핑 불가 → 폴백
+    container_path = "/host/.claude" + transcript_path[len(claude_root):]
+    container = os.environ.get("DISTILL_AGENT_CONTAINER", "boring-agent")
+    prompt = (
+        f"세션 트랜스크립트 {container_path} 를 읽어라. 기억할 가치가 있으면(실제 문제해결·결정·사실) "
+        "핵심을 '문제해결 서사'로 추려 drudge 의 remember 툴로 적재한 뒤 sync 툴을 호출해라. "
+        "단순 잡담·설정덤프뿐이면 아무것도 하지 마라."
+    )
+    try:
+        r = subprocess.run(
+            ["docker", "exec", container, "hermes", "-z", prompt],
+            capture_output=True, timeout=120,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False  # docker 없음/타임아웃/에이전트 다운 → 폴백
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -182,6 +208,11 @@ def main():
     is_company = any(tok and tok in cwd for tok in company_tokens)
     text = extract(tp)
     if len(text) < 500:  # 너무 짧은 세션은 skip (값싼 호스트 선차단 — 헛 POST 방지)
+        return
+    # 쓰기 정문(opt-in): DISTILL_VIA_AGENT 면 에이전트가 게이트+적재. 성공하면 끝, 실패면 엔진 폴백.
+    # (두 문 설계: 자동 포착의 판단을 에이전트 머리에 맡김. 엔진 distill 은 폴백으로 항상 살아있음.)
+    if os.environ.get("DISTILL_VIA_AGENT") and via_agent(tp):
+        _mark(session_id)
         return
     # 격리 없음 — 개인·회사 세션 경험 모두 같은 raw/ 에. 구분은 origin 태그로만.
     origin = "company" if is_company else "personal"
