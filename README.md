@@ -5,7 +5,7 @@
 [![CI](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Postgres](https://img.shields.io/badge/store-Postgres%2016%20%2B%20pgvector-336791?logo=postgresql&logoColor=white)
-![Ollama](https://img.shields.io/badge/LLM-Ollama%20(local)-000)
+![LLM](https://img.shields.io/badge/LLM-OpenAI--compatible%20(Ollama%2FLM%20Studio%2F…)-000)
 ![cloud](https://img.shields.io/badge/cloud-none-success)
 
 **셀프호스팅 개인 메모리 RAG.** Claude Code(또는 아무 마크다운 노트)에서 일한 경험이 자동으로 로컬 벡터DB에 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클라우드 0 · 데이터 100% 로컬.**
@@ -23,7 +23,7 @@
 ## 왜 쓰나
 
 - **자동 축적** — 세션 끝나면 훅이 알아서 '문제해결 서사'로 증류해 적재. 수동 정리 불필요.
-- **로컬 전용** — 임베딩·합성 모두 호스트 Ollama. 외부 API·토큰 0. 노트는 네 디스크 밖으로 안 나감.
+- **로컬 전용** — 임베딩·합성 모두 로컬 LLM 서버(기본 Ollama). 외부 API·토큰 0. 노트는 네 디스크 밖으로 안 나감.
 - **벡터 + 그래프** — 단순 유사도 검색이 아니라 problem/solution/tool/concept 노드·엣지까지 추출(GraphRAG).
 - **회사/개인 분리 옵션** — env 토큰 하나로 특정 경로를 `origin=company` 태깅·격리. 기본은 전부 personal.
 
@@ -33,13 +33,13 @@
 
 | # | 레이어 | 역할 | 기술 | 노출 | `make up` 기본 |
 |---|---|---|---|---|:---:|
-| 1 | **Ollama** (호스트) | 임베딩 `bge-m3`(1024d) · 합성 `gemma4:12b`(think=false) | 호스트 프로세스 | `127.0.0.1:11434` | 필요[^ollama] |
+| 1 | **LLM 서버** (호스트, OpenAI-호환) | 임베딩 `bge-m3`(1024d) · 합성 `gemma4:12b` — Ollama 기본, LM Studio·vLLM 등 교체 가능 | 호스트 프로세스 | `127.0.0.1:11434/v1` | 필요[^ollama] |
 | 2 | **drudge** (Rust 엔진) | ingest·retrieve·graph·compile·distill (HTTP + 4h 스케줄러) | axum / tokio | `127.0.0.1:7700` | ✓ |
 | 3 | **Postgres + pgvector** | `knowledge` = 벡터(HNSW) + BM25 + node/edge 재귀 CTE 그래프 | `pgvector/pgvector:pg16` | `127.0.0.1:5432` | ✓ |
 | 4 | **훅** (호스트, Python) | 세션 → 엔진 연결 접착제 (distill·recall·collect) | `python3` | — | 수동 설치[^hooks] |
 | 5 | **hermes-agent** (뇌) | 적재·회수·스킬생성을 *모는* 자율 에이전트 (MCP로 drudge 구동 + Slack/크론) | 외부 이미지 | — | ✓[^agent] |
 
-[^ollama]: 호스트에서 `ollama serve` 가 떠 있어야 함. 컨테이너는 `host.docker.internal` 로 도달.
+[^ollama]: OpenAI-호환 `/v1` 서버가 호스트에 떠 있어야 함(기본 `ollama serve`). 컨테이너는 `host.docker.internal` 로 도달. 다른 런타임은 `DRUDGE_LLM_BASE_URL` 로 지정(예 LM Studio `:1234/v1`).
 [^hooks]: `~/.claude/settings.json` 에 직접 등록 — 아래 [자가증강 루프](#자가증강-루프) 참고.
 [^agent]: `hermes-agent` 는 레포 미포함 서드파티 이미지(Nous Hermes Agent) + `~/.hermes` config 의존. `make up` 의 기본 코어지만 이미지를 먼저 빌드해야 한다(아래 [사전 준비](#사전-준비)). 없으면 `start.sh` 가 빌드안내 후 멈춤.
 
@@ -52,7 +52,7 @@
 | 깔 것 | 용도 | 확인 |
 |---|---|---|
 | **Docker** (Compose v2) | 컨테이너 스택 | `docker compose version` |
-| **Ollama** | 로컬 임베딩·합성 | `ollama --version` · [ollama.com](https://ollama.com) 또는 `brew install ollama` |
+| **LLM 런타임** (OpenAI-호환) | 로컬 임베딩·합성 | 기본 **Ollama** (`ollama --version` · [ollama.com](https://ollama.com)). LM Studio·vLLM 등도 가능 — `DRUDGE_LLM_BASE_URL` 로 지정 |
 | **Python 3** | 호스트 훅 실행 | `python3 --version` (macOS 기본 탑재) |
 | **hermes-agent 이미지** | 적재를 모는 뇌(기본 코어) | `docker image inspect hermes-agent` · 없으면 [Nous Hermes Agent](https://github.com/NousResearch) 받아 `docker build -t hermes-agent .` + `~/.hermes` config 준비 |
 | 디스크 ~10GB | 모델 2개 | `gemma4:12b`(~8GB) + `bge-m3`(~1.2GB) — `make up`/`make models` 가 자동 pull |
@@ -73,6 +73,17 @@ make ask Q="내가 도커 빌드 캐시 문제 어떻게 풀었지?"
 ```
 
 `make up` = `start.sh`: Ollama 헬스체크 → 모델 pull → `docker compose up -d --build`(postgres + drudge) → `/health` 대기. 첫 적재(startup sync)는 백그라운드로 수 분.
+
+---
+
+## 배포: Docker / 네이티브
+
+| 방식 | 어떻게 | 언제 |
+|---|---|---|
+| **Docker** (기본) | `make up` — postgres + drudge(+agent) 컨테이너 | 가장 간단. 권장 |
+| **네이티브** | 호스트에 Postgres(pgvector) 직접 + `cd drudge && cargo run --release -- serve` | 컨테이너 싫거나 디버깅·개발 시 |
+
+네이티브는 env 만 맞추면 됨 — `PG_DSN`(호스트 pg) · `DRUDGE_LLM_BASE_URL`(LLM 서버) · `DRUDGE_VAULT_DIR` · `DRUDGE_SOURCE_DIRS`. drudge 는 단일 정적 바이너리라 어디서든 돈다. CLI 직접: `cargo run -- ask "..."` · `cargo run -- sync` 등.
 
 ---
 
@@ -186,7 +197,9 @@ DISTILL_COMPANY_CWD=acme              # 세션 증류 훅 (cwd substring)
 | 변수 | 기본 | 용도 |
 |---|---|---|
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | — | `hermes-agent`(Slack) 켤 때만 |
-| `DRUDGE_LLM_MODEL` | `gemma4:12b` | 합성 모델 (think=false 고정) |
+| `DRUDGE_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-호환 LLM 서버 (Ollama 기본 · LM Studio `:1234/v1` 등) |
+| `DRUDGE_LLM_API_KEY` | — | 인증 필요한 provider 만 (Ollama/LM Studio 불필요) |
+| `DRUDGE_LLM_MODEL` | `gemma4:12b` | 합성 모델 (아무거나) |
 | `DRUDGE_EMBED_MODEL` | `bge-m3` | 임베딩 (1024d) |
 | `DRUDGE_SOURCE_DIRS` | `~/.claude/projects:vault/wiki` | 흡수 소스(`:` 구분) |
 | `DRUDGE_SYNC_HOURS` | `4` | 백그라운드 sync 주기 |
