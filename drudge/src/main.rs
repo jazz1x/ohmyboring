@@ -104,7 +104,7 @@ enum VaultCmd {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let dsn = std::env::var("PG_DSN")
-        .unwrap_or_else(|_| "postgresql://omb:omb@localhost:5432/omb".to_owned());
+        .unwrap_or_else(|_| "postgresql://boring:boring@localhost:5432/boring".to_owned());
     let store = store::Store::open(&dsn).await?;
 
     match cli.cmd {

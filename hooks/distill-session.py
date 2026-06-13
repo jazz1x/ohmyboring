@@ -25,7 +25,7 @@ RAW_DIR = os.path.expanduser("~/oh-my-boring/vault/raw")
 DRUDGE_URL = os.environ.get("DRUDGE_URL", "http://localhost:7700")
 # 진행중 세션(Stop 훅) 재증류 최소 간격(분). SessionEnd(final)는 throttle 무시.
 THROTTLE_MIN = int(os.environ.get("DISTILL_THROTTLE_MIN") or "25")
-MARK_DIR = os.path.expanduser("~/.cache/omb-distill")  # 세션별 마지막 증류 시각
+MARK_DIR = os.path.expanduser("~/.cache/boring-distill")  # 세션별 마지막 증류 시각
 
 
 def _trigger_sync():
