@@ -37,13 +37,13 @@
 | 2 | **drudge** (Rust 엔진) | ingest·retrieve·graph·compile·distill (HTTP + 4h 스케줄러) | axum / tokio | `127.0.0.1:7700` | ✓ |
 | 3 | **Postgres + pgvector** | `knowledge` = 벡터(HNSW) + BM25 + node/edge 재귀 CTE 그래프 | `pgvector/pgvector:pg16` | `127.0.0.1:5432` | ✓ |
 | 4 | **훅** (호스트, Python) | 세션 → 엔진 연결 접착제 (distill·recall·collect) | `python3` | — | 수동 설치[^hooks] |
-| 5 | **hermes-agent** (옵션) | Slack 비서 + 자율 크론 (Socket Mode) | 외부 이미지 | — | ✗ (`--profile agent`)[^agent] |
+| 5 | **hermes-agent** (뇌) | 적재·회수·스킬생성을 *모는* 자율 에이전트 (MCP로 drudge 구동 + Slack/크론) | 외부 이미지 | — | ✓[^agent] |
 
 [^ollama]: 호스트에서 `ollama serve` 가 떠 있어야 함. 컨테이너는 `host.docker.internal` 로 도달.
 [^hooks]: `~/.claude/settings.json` 에 직접 등록 — 아래 [자가증강 루프](#자가증강-루프) 참고.
-[^agent]: `hermes-agent` 는 레포 미포함 서드파티 이미지(Nous Hermes Agent). 별도 빌드 후 `docker compose --profile agent up -d`.
+[^agent]: `hermes-agent` 는 레포 미포함 서드파티 이미지(Nous Hermes Agent) + `~/.hermes` config 의존. `make up` 의 기본 코어지만 이미지를 먼저 빌드해야 한다(아래 [사전 준비](#사전-준비)). 없으면 `start.sh` 가 빌드안내 후 멈춤.
 
-> 코어는 **2·3번 + 호스트 1번**. 4번(훅)을 붙이면 자동 축적이 돌고, 5번은 순수 옵션.
+> 뇌(5)가 적재·회수를 *몰고*, 손(2·3 + 호스트 1)이 기계작업을 한다. 4(훅)는 Claude Code 세션 자동 포착. RAG 코어만 먼저 보려면 `docker compose up -d postgres drudge`.
 
 ---
 
@@ -54,6 +54,7 @@
 | **Docker** (Compose v2) | 컨테이너 스택 | `docker compose version` |
 | **Ollama** | 로컬 임베딩·합성 | `ollama --version` · [ollama.com](https://ollama.com) 또는 `brew install ollama` |
 | **Python 3** | 호스트 훅 실행 | `python3 --version` (macOS 기본 탑재) |
+| **hermes-agent 이미지** | 적재를 모는 뇌(기본 코어) | `docker image inspect hermes-agent` · 없으면 [Nous Hermes Agent](https://github.com/NousResearch) 받아 `docker build -t hermes-agent .` + `~/.hermes` config 준비 |
 | 디스크 ~10GB | 모델 2개 | `gemma4:12b`(~8GB) + `bge-m3`(~1.2GB) — `make up`/`make models` 가 자동 pull |
 
 > **클론 위치**: `~/oh-my-boring` 권장. 훅·`start.sh`·vault 경로가 이 위치를 기준으로 한다. 다른 곳에 두면 [훅 경로](#자가증강-루프)를 맞춰줘야 함.
@@ -117,7 +118,7 @@ make ask Q="내가 도커 빌드 캐시 문제 어떻게 풀었지?"
 
 drudge 는 외부 [Nous Hermes Agent](https://github.com/NousResearch) 의 **MCP 메모리 백엔드**가 될 수 있다. 에이전트가 뇌(무엇을·언제 적재·회수할지 결정 + 자체 스킬생성)고, drudge 는 그 기계작업(compile·임베딩·그래프)을 시스템화한 손이다.
 
-1. 에이전트 기동: `docker compose --profile agent up -d` (외부 `hermes-agent` 이미지 필요 — 레포 미포함, 별도 빌드).
+1. 에이전트는 `make up` 기본 코어로 함께 뜬다(이미지 선빌드 필요 — [사전 준비](#사전-준비)). 단독 재기동: `docker compose up -d hermes-agent`.
 2. 에이전트 config(`~/.hermes/config.yaml`)에 drudge 를 MCP 서버로 등록:
    ```yaml
    mcp_servers:
