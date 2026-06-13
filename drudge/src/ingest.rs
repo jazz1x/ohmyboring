@@ -33,6 +33,18 @@ fn sha256(data: &str) -> String {
 }
 
 /// 문자 기준 청킹 (overlap 포함). 짧으면 1청크.
+/// NUL(0x00) 제거 — Postgres `text` 는 NUL 저장 불가(스펙). Claude Code 트랜스크립트에
+/// 드물게 섞이는 NUL 이 upsert 에서 `invalid byte sequence for encoding "UTF8": 0x00` 로
+/// sync 전체를 중단시킨다. IO 경계에서 1회 strip — 무손실(텍스트 의미 보존), 증상무마 아닌
+/// parse-don't-validate 입력 정규화(근본원인=소스 NUL, 우리 통제 밖 → 경계가 SSOT). 순수.
+fn strip_nul(s: &str) -> String {
+    if s.contains('\u{0}') {
+        s.replace('\u{0}', "")
+    } else {
+        s.to_owned()
+    }
+}
+
 fn chunk(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= CHUNK_SIZE {
@@ -86,6 +98,8 @@ pub async fn run(store: &Store, ollama: &Ollama, source_dirs: &[String]) -> Resu
                 stats.skipped += 1;
                 continue;
             };
+            // 같은 IO 경계에서 NUL 정규화 — PG text 가 0x00 저장 불가(아래 sha/parse/embed/upsert 보호).
+            let data = strip_nul(&data);
             seen.insert(pstr.clone());
 
             // 최근성 신호 = 파일 mtime. IO 경계: 못 읽으면 now()(방금 본 것으로 간주, graceful).
@@ -144,4 +158,22 @@ pub async fn run(store: &Store, ollama: &Ollama, source_dirs: &[String]) -> Resu
         }
     }
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::strip_nul;
+
+    #[test]
+    fn strip_nul_removes_null_bytes() {
+        // 가드레일: PG text 는 0x00 저장 불가 → 경계에서 제거되어야 sync 가 안 깨진다.
+        assert_eq!(strip_nul("a\u{0}b\u{0}c"), "abc");
+        assert_eq!(strip_nul("\u{0}\u{0}"), "");
+    }
+
+    #[test]
+    fn strip_nul_preserves_clean_text() {
+        assert_eq!(strip_nul("정상 텍스트\n탭\t유지"), "정상 텍스트\n탭\t유지");
+    }
 }
