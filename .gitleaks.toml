@@ -12,6 +12,6 @@ paths = [
   '''hooks/distill-session\.py''', # (구) 동일 패턴 — 히스토리 스캔 false-positive 방지
 ]
 regexes = [
-  '''omb:omb''',          # docker-compose postgres 로컬 dev 기본값(127.0.0.1 바인딩)
+  '''boring:boring''',          # docker-compose postgres 로컬 dev 기본값(127.0.0.1 바인딩)
   '''<your-[a-z-]+-token>''',      # .env.example 플레이스홀더
 ]

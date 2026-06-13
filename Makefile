@@ -46,7 +46,7 @@ eval: ## 행동 회귀 게이트 (run_eval --check, 스택 필요)
 	./scripts/eval-gate.sh
 
 psql: ## Postgres 직접 접속 (그래프 node/edge 들여다보기)
-	docker compose exec postgres psql -U omb -d omb
+	docker compose exec postgres psql -U boring -d boring
 
 reset: ## ⚠️ Postgres 데이터까지 초기화 (소스에서 재적재됨)
 	docker compose down

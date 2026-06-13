@@ -5,7 +5,7 @@ SessionEnd 훅은 세션 *종료* 때만 발동 → 긴/열린/과거 세션은 
 ~/.claude/projects 의 top-level 세션 .jsonl(서브에이전트/워크플로 제외)을 훑어
 **아직 안 한 것만**(마커 없음) 1회당 LIMIT개 증류한다. 한꺼번에 안 돌려 CPU 안 태움.
 
-- 마커: distill-session.py 와 같은 ~/.cache/omb-distill/<sid>.ts. 있으면 skip(이미 함).
+- 마커: distill-session.py 와 같은 ~/.cache/boring-distill/<sid>.ts. 있으면 skip(이미 함).
 - LIMIT(기본 1, COLLECT_LIMIT): 1회 호출당 처리 수. launchd/cron 으로 주기 호출 → 천천히 소진.
 - WINDOW(기본 720h=30d, COLLECT_WINDOW_HOURS): 너무 오래된 건 무시.
 - 각 세션 → distill-session.py (DISTILL_NO_SYNC=1), 끝에 /sync 한 번.
@@ -26,7 +26,7 @@ LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")  # 작은 세션 skip(distill이 어차피 SKIP)
 HOOK = os.path.expanduser("~/oh-my-boring/hooks/distill-session.py")
 PROJECTS = os.path.expanduser("~/.claude/projects")
-MARK_DIR = os.path.expanduser("~/.cache/omb-distill")
+MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
 
 
 def _marked(session_id):
