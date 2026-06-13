@@ -12,6 +12,7 @@ mod retrieve;
 mod serve;
 mod store;
 mod vault;
+mod wiki_recall;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
