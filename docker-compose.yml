@@ -39,13 +39,14 @@ services:
     # brings up postgres alongside, and Store::open's connect retry (~10s) absorbs the startup race.
     environment:
       DRUDGE_LLM_BASE_URL: http://host.docker.internal:11434/v1  # OpenAI-compatible. Swappable for LM Studio, etc.
-      DRUDGE_LLM_MODEL: gemma4:12b        # synthesis model (think=false is attached by llm.rs for Ollama targets)
+      DRUDGE_LLM_MODEL: gemma4:12b        # synthesis model (llm.rs sends reasoning_effort:"none" to disable thinking latency)
       DRUDGE_HTTP_ADDR: 0.0.0.0:7700
       PG_DSN: postgresql://boring:boring@postgres:5432/boring
       # Recall sources: CC memory (.claude) + curated vault/wiki (self-augmentation SSOT).
       DRUDGE_SOURCE_DIRS: /host/.claude/projects:/vault/wiki
       DRUDGE_VAULT_DIR: /vault             # target of vault compile (raw→wiki)
       DRUDGE_VECTOR: ${DRUDGE_VECTOR:-off} # default off = wiki-first direct read. on = vector+graph (postgres alongside via --profile vector)
+      DRUDGE_COMPANY_SUBSTR: ${DRUDGE_COMPANY_SUBSTR:-} # empty = all personal. set via .env → path substring → origin=company + ingest exclude
       DRUDGE_SYNC_HOURS: "4"
       TZ: Asia/Seoul
     volumes:

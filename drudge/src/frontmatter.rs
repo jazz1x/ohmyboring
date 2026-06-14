@@ -5,6 +5,15 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// Structured metadata for an ingested document — the basis (SSOT) for audit · filtering · graph edges.
+///
+/// Honest disclosure: `origin`/`kind` are `String`, not enums — unlike `vault::{Origin,Kind}`,
+/// which ARE enums. This is deliberate, not an oversight. These are ingest *boundary* fields parsed
+/// from arbitrary markdown (Claude Code transcripts, freeform notes); their only consumers are
+/// audit tally (distribution counts) and a Postgres `text` column bind — nothing re-derives domain
+/// meaning from them, so there is no parse-don't-validate smell to close. vault's enums cover a
+/// different, curated value set (note/memory/session/decision) where exhaustive matching matters.
+/// Forcing an enum here would mean code changes for any new ingest kind and a second near-duplicate
+/// enum — escalation the rule-of-three doesn't justify (§C "simplest thing that works").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FrontMatter {
