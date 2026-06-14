@@ -52,6 +52,8 @@ psql: ## Connect directly to Postgres (inspect graph node/edge)
 	docker compose exec postgres psql -U boring -d boring
 
 reset: ## ⚠️ Reset including Postgres data (re-ingested from source)
+	@printf '⚠️  This deletes ./data/pgdata (the vector DB). vault/ markdown is kept. Continue? [y/N] '; \
+	  read ans; [ "$$ans" = y ] || [ "$$ans" = Y ] || { echo "aborted."; exit 1; }
 	docker compose down
 	rm -rf ./data/pgdata
 	@echo "DB reset — startup sync re-ingests after make up"
