@@ -71,9 +71,11 @@ fn score_doc(title: &str, body: &str, terms: &[String]) -> Option<(f32, String)>
         return None;
     }
     score += coverage; // bonus for documents that match a broader set of search terms
+    // Snippet is taken from the same lowercased body `bl` that `first_hit` indexes into,
+    // so the byte offset and the slicing share one coordinate system (no case-fold drift).
     Some((
         precise_cast(score),
-        snippet_around(body, first_hit.unwrap_or(0)),
+        snippet_around(&bl, first_hit.unwrap_or(0)),
     ))
 }
 
@@ -83,12 +85,14 @@ fn precise_cast(n: usize) -> f32 {
     n as f32
 }
 
-/// ~200-char snippet around `pos` (lowercase index). Sliced from the original body (char-boundary safe). Pure.
-fn snippet_around(body: &str, pos: usize) -> String {
-    let chars: Vec<char> = body.chars().collect();
-    // pos is a byte index (lowercase basis) — approximately convert to a char index (the ASCII assumption may break, so clamp).
-    let approx = body.get(..pos).map_or(0, |s| s.chars().count());
-    let start = approx.saturating_sub(40);
+/// ~200-char snippet around `pos`, a byte offset INTO `text`. Caller must pass the same
+/// string `pos` was found in (we pass the lowercased body) so byte→char conversion is exact.
+/// Char-boundary safe. Pure.
+fn snippet_around(text: &str, pos: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    // pos indexes `text` itself → char count of the prefix is exact (no cross-string drift).
+    let char_pos = text.get(..pos).map_or(0, |s| s.chars().count());
+    let start = char_pos.saturating_sub(40);
     let end = (start + 200).min(chars.len());
     let s: String = chars[start..end].iter().collect();
     let s = s.replace('\n', " ");

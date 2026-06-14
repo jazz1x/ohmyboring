@@ -226,8 +226,13 @@ def main():
     repo = repo_slug(cwd)  # category axis — git remote slug (fallback folder name)
     # The engine (SSOT) performs length clamping, LLM distillation, the KEEP/SKIP gate, secret scrubbing, and raw-note writing.
     resp = post_distill(text, session_id, origin, phase, repo, cwd)
-    if not resp or not resp.get("written"):
-        return  # SKIP/too-short (engine's verdict) or engine down → leave no marker either (retry on next Stop)
+    if resp is None:
+        return  # engine unreachable → leave no marker so it's retried later
+    if not resp.get("written"):
+        # Engine was reached but its KEEP/SKIP gate rejected this session → terminal.
+        # Mark it so the backfill collector doesn't re-pick the same SKIP'd session forever.
+        _mark(session_id)
+        return
     filename = resp.get("filename")
     if not filename:
         return

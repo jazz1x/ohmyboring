@@ -70,7 +70,9 @@ impl Llm {
     pub async fn generate(&self, system: &str, prompt: &str) -> Result<String> {
         #[derive(Deserialize)]
         struct Message {
-            content: String,
+            // Optional: OpenAI-compatible servers may return `content: null`
+            // (tool-call / reasoning-only finishes) — tolerate it as empty.
+            content: Option<String>,
         }
         #[derive(Deserialize)]
         struct Choice {
@@ -99,7 +101,7 @@ impl Llm {
         r.choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|c| c.message.content.unwrap_or_default())
             .context("chat 응답에 choices[0] 없음")
     }
 }
