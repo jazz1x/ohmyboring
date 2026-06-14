@@ -27,7 +27,7 @@
 | borrow-first / `&str`·`&[T]` · clone restraint | clippy `ptr_arg` in part + **review** | partly mechanical |
 | pedantic idioms (semicolon · needless, etc.) | **clippy pedantic (deny)** | nursery excluded (time bomb) |
 | formatting | **`cargo fmt --check`** (pre-commit) | — |
-| behavioral non-regression (recall/answer quality) | **eval-gate.sh** (`run_eval --check`) | recall@1≥.80 · MRR≥.85 · kw≥.90 |
+| behavioral non-regression (recall/answer quality) | **eval-gate.sh** (`run_eval --check`) — *planned; harness not committed yet, gate currently skips* | recall@1≥.80 · MRR≥.85 · kw≥.90 (targets) |
 | `--no-verify` bypass | **forbidden (policy)** | on failure, fix the root cause |
 
 **Honest disclosure**: §0 (official) + §B's no-panic + formatting + behavioral regression are blocked by the *machine*. **The design-level §A·§B·§C (ADT · error-ADT · PDV · DIP · restraint · ROP) are blocked by review** — that the machine can't catch them is not a defect but *design*. The three when-stuck questions (Layer 1 > Layer 2 > Layer 3) are the review checklist.
@@ -36,4 +36,4 @@
 
 ## Gates
 - **pre-commit** = `scripts/guard.sh` (stack-free): `cargo fmt --check` → `cargo clippy --all-targets -D warnings` → `cargo test`. Install: `git config core.hooksPath .githooks`.
-- **pre-deploy** = `scripts/eval-gate.sh` (needs the stack): confirm drudge is up → `run_eval --check` floor. On failure, non-zero → deploy halted.
+- **pre-deploy** = `scripts/eval-gate.sh` (needs the stack): confirm drudge is up → `run_eval --check` floor. *The eval harness (`data/eval/run_eval.py`) is not committed yet, so the gate currently skips with a notice rather than enforcing the floor.* On failure (once present), non-zero → deploy halted.
