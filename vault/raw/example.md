@@ -8,12 +8,14 @@
 
 🎯 **Problem worked on** — tried to spin up oh-my-boring for the first time and verify it works.
 
-🧪 **Attempts/failures** — running just `docker compose up` brought up hermes-agent (the Slack
-assistant) too and failed. That image isn't in the repo (external Nous Hermes Agent).
+🧪 **Attempts/failures** — expected `make up` to need the external hermes-agent image (Nous Hermes
+Agent, not in the repo). It doesn't hard-fail: when that image is missing, start.sh falls back to
+core-only.
 
-✅ **What worked** — bring up the core with `make up` only (postgres + drudge). The Slack assistant
-is optional, so start it separately with `docker compose --profile agent up -d`. The host Ollama
-(`ollama serve`) must be up first so the container can call embeddings/synthesis via `host.docker.internal`.
+✅ **What worked** — `make up` runs the core wiki-first (drudge RAG engine; hermes-agent joins
+automatically if its image exists, else core-only). pgvector (vector + graph RAG) is opt-in:
+`DRUDGE_VECTOR=on make up` brings up Postgres via `--profile vector`. The host Ollama
+(`ollama serve`) must be up first so the container reaches embeddings/synthesis via `host.docker.internal`.
 
 🔄 **Unfinished/next** — accumulate more sessions to see `make ask` recall quality. Once you register
 the SessionEnd/UserPromptSubmit hooks in `~/.claude/settings.json`, it accumulates automatically from then on.

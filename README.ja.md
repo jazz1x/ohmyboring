@@ -89,6 +89,7 @@ flowchart LR
 | **Docker**（Compose v2） | コンテナスタック | `docker compose version` |
 | **LLM ランタイム**（OpenAI互換） | ローカルの埋め込み・合成 | 既定 **Ollama**（[ollama.com](https://ollama.com) / `brew install ollama`）。LM Studio/vLLM も可 |
 | **Python 3** | ホストフック | `python3 --version`（macOS標準） |
+| **jq** | `make ask`/`sync`/`smoke` の JSON パース | `jq --version` · `brew install jq` |
 | **hermes-agent イメージ** | 脳（既定コア） | `docker image inspect hermes-agent` · 無ければ [Nous Hermes Agent](https://github.com/NousResearch) をビルド + `~/.hermes` 準備 |
 | ディスク ~10GB | モデル2つ | `gemma4:12b`（~8GB）+ `bge-m3`（~1.2GB）— `make up`/`make models` が自動pull |
 

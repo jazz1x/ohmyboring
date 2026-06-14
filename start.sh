@@ -27,15 +27,20 @@ for m in "$LLM" "$EMB"; do
   fi
 done
 
-# hermes-agent (the brain) = default core. But the image isn't in the repo (external build) → check first to avoid cryptic failures.
-if ! docker image inspect hermes-agent >/dev/null 2>&1; then
-  cat <<'MSG'
-  ✗ hermes-agent image missing — this stack's agent (the brain that drives ingestion) needs the external Nous Hermes Agent image.
-    1) Get Nous Hermes Agent and build it with `docker build -t hermes-agent .`
-    2) Prepare config (credentials · memory) in ~/.hermes
-    Then run `make up` again. (To see the core RAG first: docker compose up -d postgres drudge)
+# hermes-agent (the brain) is part of the default stack, but its image isn't in this repo
+# (external Nous Hermes Agent build). If it's missing we fall back to CORE-ONLY (drudge,
+# the RAG engine) so a first-timer can try `make ask` immediately — set OMB_CORE_ONLY=1 to
+# skip the agent on purpose.
+AGENT="hermes-agent"
+if [ -n "${OMB_CORE_ONLY:-}" ] || ! docker image inspect hermes-agent >/dev/null 2>&1; then
+  AGENT=""
+  if [ -z "${OMB_CORE_ONLY:-}" ]; then
+    cat <<'MSG'
+  ⓘ hermes-agent image not found — starting CORE ONLY (drudge RAG engine). `make ask` works.
+    To enable the autonomous agent later: build the external Nous Hermes Agent
+    (`docker build -t hermes-agent .`), prepare ~/.hermes config, then `make up` again.
 MSG
-  exit 1
+  fi
 fi
 
 # If DRUDGE_VECTOR=on, also start the pgvector (vector+graph) profile. Default (off) is wiki-first — postgres not started.
@@ -45,8 +50,8 @@ case "$(printf '%s' "${DRUDGE_VECTOR:-off}" | tr '[:upper:]' '[:lower:]')" in
   *) echo "▶ wiki-first mode (pgvector not started — set DRUDGE_VECTOR=on to use graph+vector)";;
 esac
 
-echo "▶ Building + starting (drudge + hermes-agent${PROFILES:+ + postgres}) …"
-docker compose $PROFILES up -d --build
+echo "▶ Building + starting (drudge${AGENT:+ + hermes-agent}${PROFILES:+ + postgres}) …"
+docker compose $PROFILES up -d --build drudge $AGENT
 
 echo "▶ Waiting for drudge health …"
 for _ in $(seq 1 60); do curl -sf -m3 http://localhost:7700/health >/dev/null 2>&1 && break; sleep 3; done
