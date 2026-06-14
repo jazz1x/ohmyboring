@@ -25,17 +25,17 @@ const MIN_BODY: usize = 40;
 
 /// Distillation system prompt — first-line KEEP/SKIP gate + problem-solving narrative frame.
 /// (think=false is fixed by `llm.rs`.)
-const SYSTEM: &str = "아래는 사용자가 Claude와 함께 작업한 세션 기록이다. \
-미래의 사용자가 '전에 이거 어떻게 했더라'를 다시 참고할 수 있게, \
-**문제해결 서사**를 기록해라. 다음 틀로 한국어 markdown 작성:\n\
-  🎯 **풀던 문제** — 무엇을 하려 했나 (1줄)\n\
-  🧪 **시도/실패** — 시도한 것들, 특히 안 됐던 것과 *왜* 안 됐는지\n\
-  🚧 **포기/우회** — 버린 길과 이유 (다음에 또 헛짚지 않게)\n\
-  ✅ **통한 해결** — 결국 뭐가 먹혔나 (구체적으로: 명령·설정·근본원인)\n\
-  🔄 **미완/다음** — 하다 만 것, 이어서 할 일\n\
-해당 없는 항목은 생략. 설정파일 덤프·문서 인용·스키마·일반 잡담은 무시하라 \
-(그건 '서사'가 아니다). 실제 시도-실패-해결 흐름이 전혀 없으면 첫 줄에 'SKIP'만.\n\n\
-출력 첫 줄은 반드시 'KEEP' 또는 'SKIP' 한 단어. KEEP이면 다음 줄부터 노트 본문.";
+const SYSTEM: &str = "Below is a record of a session the user worked through with Claude. \
+So that the future user can look back at 'how did I do this before', \
+record a **problem-solving narrative**. Write markdown in the same language as the session, using this frame:\n\
+  🎯 **Problem** — what were they trying to do (1 line)\n\
+  🧪 **Attempts/failures** — what was tried, especially what did NOT work and *why*\n\
+  🚧 **Abandoned/worked around** — paths dropped and why (so the next attempt doesn't repeat the dead end)\n\
+  ✅ **Working solution** — what ultimately worked (concretely: commands, config, root cause)\n\
+  🔄 **Unfinished/next** — what was left half-done, what to do next\n\
+Omit any item that does not apply. Ignore config-file dumps, doc quotes, schemas, and general chit-chat \
+(those are not a 'narrative'). If there is no real attempt-failure-solution flow at all, output only 'SKIP' on the first line.\n\n\
+The first output line MUST be the single word 'KEEP' or 'SKIP'. If KEEP, the note body follows from the next line.";
 
 /// Secret-scrub regex pattern — matches only known token formats. Closes the leak path before entering the vault (git-tracked).
 /// Being personal/local, heavy redaction isn't needed — a lightweight gate guarding just the single git/sharing boundary.
@@ -53,7 +53,7 @@ const SECRET_PATTERN: &str = concat!(
 
 /// Compile the secret regex — once at the boundary (ROP: on failure propagate `Err`, no silent fallback).
 fn build_secret_re() -> Result<Regex> {
-    Regex::new(SECRET_PATTERN).context("시크릿 정규식 컴파일 실패")
+    Regex::new(SECRET_PATTERN).context("failed to compile secret regex")
 }
 
 /// Distillation request extracted and sent by the host hook (origin·phase are determined by the host from cwd — the engine trusts them as-is).
@@ -64,7 +64,7 @@ pub struct DistillRequest {
     pub session_id: String,
     /// `personal` | `company` — determined by the host via `DISTILL_COMPANY_CWD`.
     pub origin: String,
-    /// `종료`(SessionEnd) | `진행중`(Stop) — for the note header label.
+    /// `final`(SessionEnd) | `in-progress`(Stop) — for the note header label.
     pub phase: String,
     /// repo slug — filled by the host from the cwd git remote (fallback: folder name). May be empty.
     /// Embedded in the note header as a `repo:` marker so compile categorizes it under the `repo/<slug>` tag.
@@ -107,7 +107,7 @@ fn clamp(text: &str) -> String {
     let tail_len = MAX_CHARS - head_len;
     let head: String = chars[..head_len].iter().collect();
     let tail: String = chars[chars.len() - tail_len..].iter().collect();
-    format!("{head}\n…(중략)…\n{tail}")
+    format!("{head}\n…(snip)…\n{tail}")
 }
 
 /// Session ID → filename key (alphanumeric/`_`/`-`, 16 chars). On empty ID, falls back to a date key. Pure.
@@ -133,7 +133,7 @@ fn render_note(req: &DistillRequest, body: &str) -> String {
         format!("repo: {} · ", req.repo)
     };
     format!(
-        "# 세션 노트 — {date}\n> 자동 증류 (Claude Code · {phase}) · origin: {origin} · {repo_seg}cwd: {cwd}\n\n{body}\n",
+        "# Session Note — {date}\n> auto-distilled (Claude Code · {phase}) · origin: {origin} · {repo_seg}cwd: {cwd}\n\n{body}\n",
         date = today_utc(),
         phase = req.phase,
         origin = req.origin,
@@ -146,9 +146,9 @@ fn render_note(req: &DistillRequest, body: &str) -> String {
 pub async fn run(llm: &Llm, vault_root: &Path, req: &DistillRequest) -> Result<DistillOutcome> {
     let text = clamp(&req.text);
     let note = llm
-        .generate(SYSTEM, &format!("=== 세션 ===\n{text}"))
+        .generate(SYSTEM, &format!("=== session ===\n{text}"))
         .await
-        .context("distill LLM 생성 실패")?;
+        .context("distill LLM generation failed")?;
     let Some(body) = gate(&note) else {
         return Ok(DistillOutcome {
             written: false,
@@ -159,11 +159,11 @@ pub async fn run(llm: &Llm, vault_root: &Path, req: &DistillRequest) -> Result<D
 
     let raw_dir = vault_root.join("raw");
     std::fs::create_dir_all(&raw_dir)
-        .with_context(|| format!("raw 디렉터리 생성 실패: {}", raw_dir.display()))?;
+        .with_context(|| format!("failed to create raw directory: {}", raw_dir.display()))?;
     let filename = format!("session-{}.md", note_key(&req.session_id));
     let path = raw_dir.join(&filename);
     std::fs::write(&path, render_note(req, &body))
-        .with_context(|| format!("raw 노트 기록 실패: {}", path.display()))?;
+        .with_context(|| format!("failed to write raw note: {}", path.display()))?;
 
     Ok(DistillOutcome {
         written: true,
@@ -178,58 +178,64 @@ mod tests {
 
     #[test]
     fn gate_keep_returns_body() {
-        let note = "KEEP\n🎯 풀던 문제: 도커 빌드가 캐시 때문에 깨짐\n\
-            ✅ 통한 해결: 캐시 레이어 무효화 후 --no-cache 로 재빌드하니 성공함";
-        let body = gate(note).expect("KEEP 이면 본문 반환");
-        assert!(body.starts_with("🎯 풀던 문제"));
+        let note = "KEEP\n🎯 Problem: docker build kept breaking due to cache\n\
+            ✅ Working solution: invalidated the cache layer and rebuilt with --no-cache, which succeeded";
+        let body = gate(note).expect("KEEP should return the body");
+        assert!(body.starts_with("🎯 Problem"));
     }
 
     #[test]
     fn gate_skip_returns_none() {
         assert!(gate("SKIP").is_none());
-        assert!(gate("SKIP\n아무 내용").is_none());
+        assert!(gate("SKIP\nsome content").is_none());
     }
 
     #[test]
     fn gate_keep_but_too_short_is_none() {
         // KEEP but body < MIN_BODY → discard
-        assert!(gate("KEEP\n짧음").is_none());
+        assert!(gate("KEEP\nshort").is_none());
     }
 
     #[test]
     fn redact_scrubs_known_tokens() {
         let re = build_secret_re().unwrap();
-        let dirty = "토큰: xoxb-1234567890abcdef 그리고 sk-ant-abcdefghij1234567890XYZ 끝";
+        let dirty = "token: xoxb-1234567890abcdef and sk-ant-abcdefghij1234567890XYZ end";
         let clean = redact(&re, dirty);
         assert!(
             !clean.contains("xoxb-1234567890abcdef"),
-            "Slack 토큰 미스크럽: {clean}"
+            "Slack token not scrubbed: {clean}"
         );
-        assert!(!clean.contains("sk-ant-"), "Anthropic 키 미스크럽: {clean}");
+        assert!(
+            !clean.contains("sk-ant-"),
+            "Anthropic key not scrubbed: {clean}"
+        );
         assert!(clean.contains("‹REDACTED›"));
     }
 
     #[test]
     fn redact_leaves_clean_text() {
         let re = build_secret_re().unwrap();
-        let clean = "그냥 평범한 한국어 문장입니다.";
+        let clean = "Just an ordinary plain sentence.";
         assert_eq!(redact(&re, clean), clean);
     }
 
     #[test]
     fn clamp_preserves_short_text() {
-        let s = "짧은 텍스트";
+        let s = "short text";
         assert_eq!(clamp(s), s);
     }
 
     #[test]
     fn clamp_keeps_head_and_tail_when_long() {
-        let head = "시작".repeat(MAX_CHARS); // > MAX_CHARS chars
-        let text = format!("{head}끝부분마커");
+        let head = "start".repeat(MAX_CHARS); // > MAX_CHARS chars
+        let text = format!("{head}END-MARKER");
         let out = clamp(&text);
-        assert!(out.chars().count() <= MAX_CHARS + 16, "클램프 후 길이 초과");
-        assert!(out.contains("…(중략)…"), "중략 마커 없음");
-        assert!(out.ends_with("끝부분마커"), "tail(해결부) 유실");
+        assert!(
+            out.chars().count() <= MAX_CHARS + 16,
+            "length exceeded after clamp"
+        );
+        assert!(out.contains("…(snip)…"), "snip marker missing");
+        assert!(out.ends_with("END-MARKER"), "tail (solution part) lost");
     }
 
     #[test]

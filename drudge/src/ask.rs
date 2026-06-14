@@ -13,13 +13,13 @@ use crate::retrieve;
 use crate::store::Store;
 use crate::wiki_recall;
 
-const SYSTEM: &str = "너는 사용자의 개인 비서다. 한국어로 답한다.\n\
-[간결] 서론·반복·군더더기 금지. 핵심만. 목록은 한 줄짜리 불릿, 질문이 작으면 1~2문장으로 끝낸다.\n\
-[근거] '회수된 메모리'에 관련 내용이 있으면 그것만 근거로 쓰고 끝에 출처 파일명을 적는다.\n\
-[날조 금지] 메모리에 없는 '사실·미해결 할 일·리마인더·계획·일정'은 절대 지어내지 마라. \
-해당 항목이 메모리에 없으면 '메모리에 없음'이라 적거나 생략한다(그럴듯한 이름·계획을 만들어내면 안 된다).\n\
-[일반지식] 순수 상식 질문은 도와주되 일반지식임을 한 줄로 밝힌다. \
-단 사용자의 프로젝트·할 일·결정·사실을 일반지식으로 추측해 채우지 마라.";
+const SYSTEM: &str = "You are the user's personal assistant. Reply in the same language as the user's question.\n\
+[Concise] No preamble, repetition, or filler. Just the point. Lists are one-line bullets; for small questions, finish in 1-2 sentences.\n\
+[Grounding] If 'Recalled memory' has relevant content, use only that as the basis and cite the source filename(s) at the end.\n\
+[No fabrication] Never invent facts, open to-dos, reminders, plans, or schedules that aren't in memory. \
+If an item isn't in memory, say so or omit it (do not make up plausible names/plans).\n\
+[General knowledge] Help with pure general-knowledge questions, but note in one line that it's general knowledge. \
+Do not guess-fill the user's projects, to-dos, decisions, or facts from general knowledge.";
 
 /// `answer()` return value — used by both the HTTP handler and the CLI.
 pub struct AnswerOut {
@@ -37,7 +37,7 @@ pub async fn answer(
     let hits = retrieve::retrieve(store, llm, question, 5, exclude_origins).await?;
     if hits.is_empty() {
         return Ok(AnswerOut {
-            answer: "관련 메모리를 못 찾았어요. (ingest 먼저?)".to_owned(),
+            answer: "No related memory found. (ingest first?)".to_owned(),
             sources: vec![],
         });
     }
@@ -77,14 +77,14 @@ pub async fn answer(
     if !claim_ctx.is_empty() {
         let _ = write!(
             prompt,
-            "# 현재 사실(권위 — 같은 주제 충돌 시 이게 최신, 따른다)\n{claim_ctx}\n"
+            "# Current facts (authoritative — on same-topic conflict this is the latest, follow it)\n{claim_ctx}\n"
         );
     }
-    let _ = write!(prompt, "# 회수된 메모리\n{context}\n");
+    let _ = write!(prompt, "# Recalled memory\n{context}\n");
     if !graph_ctx.is_empty() {
-        let _ = write!(prompt, "# 그래프로 연결된 문서\n{graph_ctx}\n");
+        let _ = write!(prompt, "# Graph-linked documents\n{graph_ctx}\n");
     }
-    let _ = write!(prompt, "# 질문\n{question}");
+    let _ = write!(prompt, "# Question\n{question}");
     let answer_text = llm.generate(SYSTEM, &prompt).await?;
 
     let mut seen = HashSet::new();
@@ -105,14 +105,14 @@ pub async fn answer(
 pub async fn answer_wiki(llm: &Llm, wiki_dir: Option<&Path>, question: &str) -> Result<AnswerOut> {
     let Some(dir) = wiki_dir else {
         return Ok(AnswerOut {
-            answer: "vault 가 설정되지 않았어요. (DRUDGE_VAULT_DIR)".to_owned(),
+            answer: "vault is not configured. (DRUDGE_VAULT_DIR)".to_owned(),
             sources: vec![],
         });
     };
     let hits = wiki_recall::recall(dir, question, 5)?;
     if hits.is_empty() {
         return Ok(AnswerOut {
-            answer: "관련 메모리를 못 찾았어요. (vault/wiki 비었거나 sync 전?)".to_owned(),
+            answer: "No related memory found. (vault/wiki empty, or not synced yet?)".to_owned(),
             sources: vec![],
         });
     }
@@ -124,7 +124,7 @@ pub async fn answer_wiki(llm: &Llm, wiki_dir: Option<&Path>, question: &str) -> 
             h.title, h.source_path, h.snippet
         );
     }
-    let prompt = format!("# 회수된 메모리(vault/wiki)\n{context}\n# 질문\n{question}");
+    let prompt = format!("# Recalled memory (vault/wiki)\n{context}\n# Question\n{question}");
     let answer_text = llm.generate(SYSTEM, &prompt).await?;
     let sources: Vec<String> = hits.into_iter().map(|h| h.source_path).collect();
     Ok(AnswerOut {
@@ -133,14 +133,14 @@ pub async fn answer_wiki(llm: &Llm, wiki_dir: Option<&Path>, question: &str) -> 
     })
 }
 
-const BRIEF_SYSTEM: &str = "너는 사용자의 개인 비서다. 한국어로 '최근 작업 브리핑'을 만든다.\n\
-[최신우선] 아래 기록은 최신순으로 정렬돼 있다(위가 가장 최근). \
-같은 주제에 옛 기록과 최신 기록이 충돌하면 무조건 위(최신)를 따른다 — 옛 사실로 최신을 덮지 마라. \
-예: 위에 'pgvector'면 아래 'SurrealDB'는 이미 폐기된 과거다, 최신만 말한다.\n\
-[구체] 어떤 프로젝트에서 무슨 결정·구현·이전 작업을 했고 무엇이 남았는지, \
-고유명사(프로젝트·도구·모델·파일)를 그대로 써서 짧은 불릿으로. 추상적 취향·일반론 금지.\n\
-[날조 금지] 기록에 없는 사실·할 일·일정은 지어내지 마라. 없으면 생략한다.\n\
-[형식] 프로젝트별로 묶어 3~6줄. 서론·인사 없이 바로 본문.";
+const BRIEF_SYSTEM: &str = "You are the user's personal assistant. Produce a 'recent work briefing' in the same language as the records below.\n\
+[Latest-first] The records below are sorted newest-first (top = most recent). \
+On same-topic conflict between old and new records, always follow the top (latest) — never let an old fact override a newer one. \
+e.g. if 'pgvector' is above and 'SurrealDB' below, the latter is already retired; state only the latest.\n\
+[Specific] What decision/implementation/prior work was done in which project and what's left, \
+using proper nouns (project·tool·model·file) verbatim, as short bullets. No abstract preferences or generalities.\n\
+[No fabrication] Don't invent facts/to-dos/schedules not in the records. Omit if absent.\n\
+[Format] Grouped by project, 3-6 lines. No preamble or greeting — straight to the body.";
 
 /// Recency-first/supersede briefing: retrieve by `updated_at` descending rather than semantic similarity →
 /// synthesize so the latest beats the old. Called by the cron morning briefing (`/brief`). SRP: separate from `answer()`.
@@ -148,7 +148,7 @@ pub async fn brief(store: &Store, llm: &Llm, exclude_origins: &[String]) -> Resu
     let docs = store.recent_docs(12, exclude_origins).await?;
     if docs.is_empty() {
         return Ok(AnswerOut {
-            answer: "최근 적재된 작업 기록이 없어요. (ingest 먼저?)".to_owned(),
+            answer: "No recent work records ingested. (ingest first?)".to_owned(),
             sources: vec![],
         });
     }
@@ -158,7 +158,7 @@ pub async fn brief(store: &Store, llm: &Llm, exclude_origins: &[String]) -> Resu
         // i=0 is the most recent. Embed the rank in the label so the LLM keeps recency-first.
         let _ = write!(
             context,
-            "## [{i}] (최신순 {}위) {} · {}\n{}\n\n",
+            "## [{i}] (recency #{}) {} · {}\n{}\n\n",
             i + 1,
             d.project,
             d.source_path,
@@ -173,10 +173,10 @@ pub async fn brief(store: &Store, llm: &Llm, exclude_origins: &[String]) -> Resu
         let _ = writeln!(claim_ctx, "- {s} {p} {v}");
     }
     let prompt = if claim_ctx.is_empty() {
-        format!("# 최근 작업 기록 (최신순, 위가 최신)\n{context}")
+        format!("# Recent work records (newest-first, top is latest)\n{context}")
     } else {
         format!(
-            "# 현재 사실(권위 — 충돌 시 이게 최신, 따른다)\n{claim_ctx}\n# 최근 작업 기록 (최신순, 위가 최신)\n{context}"
+            "# Current facts (authoritative — on conflict this is the latest, follow it)\n{claim_ctx}\n# Recent work records (newest-first, top is latest)\n{context}"
         )
     };
     let answer_text = llm.generate(BRIEF_SYSTEM, &prompt).await?;
@@ -198,7 +198,7 @@ pub async fn run(
     let out = answer(store, llm, question, exclude_origins).await?;
     println!("{}\n", out.answer);
     if !out.sources.is_empty() {
-        println!("출처:");
+        println!("Sources:");
         for src in &out.sources {
             println!("  - {src}");
         }

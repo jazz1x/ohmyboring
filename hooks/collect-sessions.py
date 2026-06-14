@@ -68,9 +68,9 @@ def main():
     ]
     todo.sort(key=os.path.getmtime, reverse=True)
     batch = todo[:LIMIT]
-    print(f"[collect] 미수집={len(todo)} 이번배치={len(batch)} (LIMIT={LIMIT})", flush=True)
+    print(f"[collect] pending={len(todo)} this_batch={len(batch)} (LIMIT={LIMIT})", flush=True)
     if not batch:
-        print("[collect] 다 했음 — 할 일 없음", flush=True)
+        print("[collect] all done — nothing to do", flush=True)
         return
 
     env = dict(os.environ, DISTILL_NO_SYNC="1")
@@ -98,8 +98,8 @@ def main():
         with urllib.request.urlopen(req, timeout=900) as resp:
             print("[collect] sync ok", flush=True)
     except Exception as e:
-        print(f"[collect] sync 실패(무시): {e}", flush=True)
-    print(f"[collect] done={done}/{len(batch)}  남은={len(todo) - done}", flush=True)
+        print(f"[collect] sync failed (ignored): {e}", flush=True)
+    print(f"[collect] done={done}/{len(batch)}  remaining={len(todo) - done}", flush=True)
 
 
 if __name__ == "__main__":

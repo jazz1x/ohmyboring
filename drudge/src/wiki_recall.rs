@@ -137,7 +137,7 @@ pub fn recall(wiki_dir: &Path, query: &str, k: usize) -> Result<Vec<WikiHit>> {
         return Ok(Vec::new()); // wiki doesn't exist yet — normal (empty recall)
     };
     for entry in read_dir {
-        let path = entry.context("wiki 디렉터리 항목 읽기")?.path();
+        let path = entry.context("reading wiki dir entry")?.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }

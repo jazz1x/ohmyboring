@@ -104,9 +104,9 @@ pub struct SourcesSchema {
 /// Read the schema from a file and parse it into a typed value. (I/O boundary)
 pub fn load_schema(schema_path: &Path) -> Result<Schema> {
     let raw = std::fs::read_to_string(schema_path)
-        .with_context(|| format!("schema 파일 읽기 실패: {}", schema_path.display()))?;
+        .with_context(|| format!("failed to read schema file: {}", schema_path.display()))?;
     serde_yaml::from_str(&raw)
-        .with_context(|| format!("schema YAML 파싱 실패: {}", schema_path.display()))
+        .with_context(|| format!("failed to parse schema YAML: {}", schema_path.display()))
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -167,7 +167,7 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
 
 /// raw frontmatter YAML string → `RawFrontMatter`. Pure function.
 fn parse_raw_frontmatter(yaml: &str) -> Result<RawFrontMatter> {
-    serde_yaml::from_str(yaml).context("frontmatter YAML 파싱 실패")
+    serde_yaml::from_str(yaml).context("failed to parse frontmatter YAML")
 }
 
 /// `/…/wiki-0002.md` → `Some("wiki-0002")`. None if not a wiki note. Pure.
@@ -221,7 +221,7 @@ pub async fn project_links(store: &Store, vault_root: &Path, limit: i64) -> Resu
     let wiki_dir = vault_root.join("wiki");
     let mut updated = 0;
     for entry in std::fs::read_dir(&wiki_dir)
-        .with_context(|| format!("wiki dir 읽기: {}", wiki_dir.display()))?
+        .with_context(|| format!("failed to read wiki dir: {}", wiki_dir.display()))?
     {
         let path = entry?.path();
         let stem_ok = path
@@ -351,7 +351,7 @@ fn check_required_fields(
                 issues.push(Issue::warn(
                     "schema-unknown-required",
                     stem,
-                    format!("schema required_frontmatter 에 알 수 없는 키: '{other}'"),
+                    format!("unknown key in schema required_frontmatter: '{other}'"),
                 ));
                 true
             }
@@ -360,7 +360,7 @@ fn check_required_fields(
             issues.push(Issue::error(
                 "required-fm-missing",
                 stem,
-                format!("필수 frontmatter 키 누락: '{key}'"),
+                format!("required frontmatter key missing: '{key}'"),
             ));
         }
     }
@@ -378,14 +378,14 @@ fn check_id_value(
             issues.push(Issue::error(
                 "id-pattern",
                 stem,
-                format!("frontmatter id '{fm_id}' 이 schema 패턴 불일치"),
+                format!("frontmatter id '{fm_id}' does not match schema pattern"),
             ));
         }
         if fm_id != stem {
             issues.push(Issue::error(
                 "id-mismatch",
                 stem,
-                format!("frontmatter id '{fm_id}' ≠ 파일명 stem '{stem}'"),
+                format!("frontmatter id '{fm_id}' ≠ filename stem '{stem}'"),
             ));
         }
     }
@@ -408,14 +408,16 @@ fn check_sources(
                 issues.push(Issue::warn(
                     "source-missing",
                     stem,
-                    format!("sources 파일 미존재: {src}"),
+                    format!("sources file does not exist: {src}"),
                 ));
             }
         } else {
             issues.push(Issue::error(
                 "source-prefix-violation",
                 stem,
-                format!("sources 경로 '{src}' 의 prefix 불허 (허용: {allowed_prefixes:?})"),
+                format!(
+                    "sources path '{src}' has a disallowed prefix (allowed: {allowed_prefixes:?})"
+                ),
             ));
         }
     }
@@ -427,7 +429,7 @@ fn check_wikilinks(body: &str, stem: &str, known_ids: &HashSet<String>, issues: 
         issues.push(Issue::error(
             "cross-layer-wikilink",
             stem,
-            format!("교차 레이어 wikilink [[{bad_link}]] — sources: 필드로 참조할 것"),
+            format!("cross-layer wikilink [[{bad_link}]] — reference it via the sources: field"),
         ));
     }
     for link in extract_wikilinks(body) {
@@ -435,7 +437,7 @@ fn check_wikilinks(body: &str, stem: &str, known_ids: &HashSet<String>, issues: 
             issues.push(Issue::error(
                 "wikilink-dangling",
                 stem,
-                format!("본문 [[{link}]] 대상 페이지가 존재하지 않음"),
+                format!("body [[{link}]] target page does not exist"),
             ));
         }
     }
@@ -475,7 +477,7 @@ pub fn lint_page(
             issues.push(Issue::error(
                 "schema-invalid",
                 &stem,
-                format!("page_id.pattern 컴파일 실패: {e}"),
+                format!("failed to compile page_id.pattern: {e}"),
             ));
             return (None, issues);
         }
@@ -485,7 +487,7 @@ pub fn lint_page(
             "id-format",
             &stem,
             format!(
-                "파일명 stem '{stem}' 이 schema 패턴({}) 불일치",
+                "filename stem '{stem}' does not match schema pattern ({})",
                 schema.page_id.pattern
             ),
         ));
@@ -497,7 +499,7 @@ pub fn lint_page(
         issues.push(Issue::error(
             "fm-parse",
             &stem,
-            "YAML frontmatter(--- ... ---) 없음",
+            "no YAML frontmatter (--- ... ---)",
         ));
         return (None, issues);
     };
@@ -509,7 +511,7 @@ pub fn lint_page(
             issues.push(Issue::error(
                 "fm-parse",
                 &stem,
-                format!("YAML 파싱 실패: {e}"),
+                format!("failed to parse YAML: {e}"),
             ));
             return (None, issues);
         }
@@ -526,7 +528,7 @@ pub fn lint_page(
         issues.push(Issue::error(
             "kind-invalid",
             &stem,
-            format!("kind '{raw_str}' 은 허용값(note/memory/session/decision) 외"),
+            format!("kind '{raw_str}' is not an allowed value (note/memory/session/decision)"),
         ));
     }
 
@@ -541,7 +543,7 @@ pub fn lint_page(
         issues.push(Issue::error(
             "origin-invalid",
             &stem,
-            format!("origin '{raw_str}' 은 허용값(personal/company) 외"),
+            format!("origin '{raw_str}' is not an allowed value (personal/company)"),
         ));
     }
 
@@ -607,7 +609,7 @@ fn check_superseded(pages: &[Page], page_ids: &HashSet<&str>, issues: &mut Vec<I
             issues.push(Issue::error(
                 "superseded-dangling",
                 &page.id,
-                format!("superseded_by '{sup}' 대상 페이지가 존재하지 않음"),
+                format!("superseded_by '{sup}' target page does not exist"),
             ));
         }
 
@@ -618,7 +620,7 @@ fn check_superseded(pages: &[Page], page_ids: &HashSet<&str>, issues: &mut Vec<I
                     issues.push(Issue::warn(
                         "superseded-referenced",
                         &page.id,
-                        format!("relates_to '{rel}' 는 이미 superseded 된 페이지 — 후계 페이지로 업데이트 권장"),
+                        format!("relates_to '{rel}' points to an already-superseded page — update to the successor page"),
                     ));
                 }
             }
@@ -733,7 +735,7 @@ pub fn audit_pages(pages: &[Page]) -> AuditSummary {
             issues.push(Issue::warn(
                 "orphan",
                 &page.id,
-                "inbound·outbound 엣지 모두 0 — 고립 페이지",
+                "inbound·outbound edges both 0 — orphan page",
             ));
             orphan_count += 1;
         }
@@ -749,7 +751,7 @@ pub fn audit_pages(pages: &[Page]) -> AuditSummary {
             "graph-fragmented",
             "graph",
             format!(
-                "연결 성분 {component_count}개 (크기: {component_sizes:?}) — 성분 간 [[wiki-NNNN]] 다리 연결 권장"
+                "{component_count} connected components (sizes: {component_sizes:?}) — add [[wiki-NNNN]] bridges between components"
             ),
         ));
     }
@@ -775,10 +777,10 @@ fn collect_wiki_pages(wiki_dir: &Path) -> Result<(HashSet<String>, Vec<PathBuf>)
     let mut entries: Vec<PathBuf> = Vec::new();
 
     let read_dir = std::fs::read_dir(wiki_dir)
-        .with_context(|| format!("wiki 디렉터리 읽기 실패: {}", wiki_dir.display()))?;
+        .with_context(|| format!("failed to read wiki directory: {}", wiki_dir.display()))?;
 
     for entry in read_dir {
-        let entry = entry.context("wiki 디렉터리 항목 읽기 실패")?;
+        let entry = entry.context("failed to read wiki directory entry")?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("md") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -802,7 +804,10 @@ pub fn run_lint(vault_root: &Path, strict: bool) -> Result<i32> {
 
     let wiki_dir = vault_root.join("wiki");
     if !wiki_dir.exists() {
-        anyhow::bail!("vault/wiki 디렉터리가 없음: {}", wiki_dir.display());
+        anyhow::bail!(
+            "vault/wiki directory does not exist: {}",
+            wiki_dir.display()
+        );
     }
 
     let (known_ids, entries) = collect_wiki_pages(&wiki_dir)?;
@@ -810,7 +815,7 @@ pub fn run_lint(vault_root: &Path, strict: bool) -> Result<i32> {
 
     for path in &entries {
         let content = std::fs::read_to_string(path)
-            .with_context(|| format!("파일 읽기 실패: {}", path.display()))?;
+            .with_context(|| format!("failed to read file: {}", path.display()))?;
         let (_page, issues) = lint_page(path, &content, &schema, vault_root, &known_ids);
         all_issues.extend(issues);
     }
@@ -825,7 +830,10 @@ pub fn run_audit(vault_root: &Path, strict: bool) -> Result<i32> {
 
     let wiki_dir = vault_root.join("wiki");
     if !wiki_dir.exists() {
-        anyhow::bail!("vault/wiki 디렉터리가 없음: {}", wiki_dir.display());
+        anyhow::bail!(
+            "vault/wiki directory does not exist: {}",
+            wiki_dir.display()
+        );
     }
 
     let (known_ids, entries) = collect_wiki_pages(&wiki_dir)?;
@@ -834,7 +842,7 @@ pub fn run_audit(vault_root: &Path, strict: bool) -> Result<i32> {
 
     for path in &entries {
         let content = std::fs::read_to_string(path)
-            .with_context(|| format!("파일 읽기 실패: {}", path.display()))?;
+            .with_context(|| format!("failed to read file: {}", path.display()))?;
         let (page, issues) = lint_page(path, &content, &schema, vault_root, &known_ids);
         parse_issues.extend(issues);
         if let Some(p) = page {
@@ -1052,10 +1060,10 @@ fn scan_existing_wiki(wiki_dir: &Path) -> Result<(HashMap<String, WikiMeta>, u32
     }
 
     let read_dir = std::fs::read_dir(wiki_dir)
-        .with_context(|| format!("wiki 디렉터리 읽기 실패: {}", wiki_dir.display()))?;
+        .with_context(|| format!("failed to read wiki directory: {}", wiki_dir.display()))?;
 
     for entry in read_dir {
-        let entry = entry.context("wiki 항목 읽기 실패")?;
+        let entry = entry.context("failed to read wiki entry")?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
@@ -1076,7 +1084,7 @@ fn scan_existing_wiki(wiki_dir: &Path) -> Result<(HashMap<String, WikiMeta>, u32
         }
 
         let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("wiki 파일 읽기 실패: {}", path.display()))?;
+            .with_context(|| format!("failed to read wiki file: {}", path.display()))?;
         let Some((yaml, _body)) = split_frontmatter(&content) else {
             continue;
         };
@@ -1104,8 +1112,8 @@ fn scan_existing_wiki(wiki_dir: &Path) -> Result<(HashMap<String, WikiMeta>, u32
 /// sha256 of file bytes (hex string).
 fn sha256_file(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
-    let bytes =
-        std::fs::read(path).with_context(|| format!("raw 파일 읽기 실패: {}", path.display()))?;
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read raw file: {}", path.display()))?;
     let hash = Sha256::digest(&bytes);
     Ok(hex::encode(hash))
 }
@@ -1115,15 +1123,15 @@ const COMPILE_SYSTEM: &str = "You are a precise JSON-only curator. Output ONLY a
 
 /// LLM curation prompt template.
 const COMPILE_PROMPT_TMPL: &str = r#"Curate the raw note below into a wiki page. Return EXACTLY this JSON shape (no extra keys):
-{"title":"<short title, ≤60 chars>","body":"<curated markdown body in Korean, with WHY context>","tags":["tag1"],"tools":["tool1"],"concepts":["concept1"]}
+{"title":"<short title, ≤60 chars>","body":"<curated markdown body in the same language as the source note (English by default), with WHY context>","tags":["tag1"],"tools":["tool1"],"concepts":["concept1"]}
 
 Rules:
 - title: short, descriptive, ≤60 chars
-- body: curated markdown. Keep all important insights. Add WHY context. Korean preferred.
+- body: curated markdown. Keep all important insights. Add WHY context. Use the same language as the source note (English by default).
 - tags: ≤6 topical tags, lowercase, no Han/CJK characters
 - tools: ≤6 software tools/libraries used, short canonical names, no Han/CJK
 - concepts: ≤6 key technical concepts or patterns, no Han/CJK
-- ALL string values: Korean or English ONLY — NO Chinese/Japanese characters (漢字/汉字/CJK)
+- ALL string values: match the source note's language — NO Chinese/Japanese characters (漢字/汉字/CJK)
 - Use empty arrays [] if not applicable
 
 Raw note:
@@ -1224,7 +1232,7 @@ fn render_wiki_page(draft: &CompiledDraft) -> Result<String> {
         tags: &draft.tags,
     };
 
-    let yaml = serde_yaml::to_string(&fm).context("frontmatter YAML 직렬화 실패")?;
+    let yaml = serde_yaml::to_string(&fm).context("failed to serialize frontmatter YAML")?;
 
     // ## Related section + [[wiki-NNNN]] wikilinks
     let related_section = if draft.relates_to.is_empty() {
@@ -1236,7 +1244,7 @@ fn render_wiki_page(draft: &CompiledDraft) -> Result<String> {
             .map(|id| format!("- [[{id}]]"))
             .collect::<Vec<_>>()
             .join("\n");
-        format!("\n\n## 관련\n\n{links}")
+        format!("\n\n## Related\n\n{links}")
     };
 
     Ok(format!("---\n{yaml}---\n{}{related_section}\n", draft.body))
@@ -1261,7 +1269,7 @@ pub async fn run_compile(
 ) -> Result<CompileStats> {
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir)
-        .with_context(|| format!("wiki 디렉터리 생성 실패: {}", wiki_dir.display()))?;
+        .with_context(|| format!("failed to create wiki directory: {}", wiki_dir.display()))?;
 
     // 1. scan existing wiki — idempotency key map + max id
     let (existing_map, mut max_id) = scan_existing_wiki(&wiki_dir)?;
@@ -1269,7 +1277,7 @@ pub async fn run_compile(
     // 2. collect raw directory (*.md only)
     let mut raw_entries: Vec<PathBuf> = {
         let rd = std::fs::read_dir(raw_dir)
-            .with_context(|| format!("raw 디렉터리 읽기 실패: {}", raw_dir.display()))?;
+            .with_context(|| format!("failed to read raw directory: {}", raw_dir.display()))?;
         rd.filter_map(|e| {
             let e = e.ok()?;
             let p = e.path();
@@ -1345,7 +1353,7 @@ pub async fn run_compile(
 
         // LLM curation
         let body_raw = std::fs::read_to_string(raw_path)
-            .with_context(|| format!("raw 파일 읽기 실패: {}", raw_path.display()))?;
+            .with_context(|| format!("failed to read raw file: {}", raw_path.display()))?;
         let body_snip: String = body_raw.chars().take(4000).collect();
         let prompt = COMPILE_PROMPT_TMPL.replace("{BODY}", &body_snip);
 
@@ -1427,9 +1435,9 @@ pub async fn run_compile(
         let content = render_wiki_page(draft)?;
         let path = wiki_path_map
             .get(&draft.wiki_id)
-            .with_context(|| format!("wiki path 없음: {}", draft.wiki_id))?;
+            .with_context(|| format!("wiki path not found: {}", draft.wiki_id))?;
         std::fs::write(path, content)
-            .with_context(|| format!("wiki 파일 쓰기 실패: {}", path.display()))?;
+            .with_context(|| format!("failed to write wiki file: {}", path.display()))?;
         println!("✓ {}: {}", draft.wiki_id, draft.title);
     }
 
@@ -1531,7 +1539,7 @@ mod tests {
 
     #[test]
     fn parse_repo_marker_extracts_slug() {
-        let note = "# 세션 노트 — 2026-06-12\n> 자동 증류 (Claude Code · 종료) · origin: personal · repo: jazz1x/oh-my-boring · cwd: /x\n\n본문";
+        let note = "# Session Note — 2026-06-12\n> auto-distilled (Claude Code · final) · origin: personal · repo: jazz1x/oh-my-boring · cwd: /x\n\nbody";
         assert_eq!(
             parse_repo_marker(note).as_deref(),
             Some("jazz1x/oh-my-boring")
@@ -1549,13 +1557,13 @@ mod tests {
     #[test]
     fn parse_repo_marker_keeps_spaced_folder_slug() {
         // folder-name fallback with a space must not be truncated at the first whitespace
-        let note = "# x\n> 자동 증류 · origin: personal · repo: my project · cwd: /x\n\n본문";
+        let note = "# x\n> auto-distilled · origin: personal · repo: my project · cwd: /x\n\nbody";
         assert_eq!(parse_repo_marker(note).as_deref(), Some("my project"));
     }
 
     #[test]
     fn parse_repo_marker_absent_is_none() {
-        let note = "# 세션 노트\n> origin: personal · cwd: /x\n\n본문";
+        let note = "# Session Note\n> origin: personal · cwd: /x\n\nbody";
         assert!(parse_repo_marker(note).is_none());
     }
 
@@ -1585,21 +1593,21 @@ mod tests {
 
     #[test]
     fn wikilinks_extracted_correctly() {
-        let body = "참고: [[wiki-0001]] 과 [[wiki-0002|두 번째]] 를 보라.";
+        let body = "see: [[wiki-0001]] and [[wiki-0002|second]].";
         let links = extract_wikilinks(body);
         assert_eq!(links, vec!["wiki-0001", "wiki-0002"]);
     }
 
     #[test]
     fn no_wikilinks_returns_empty() {
-        assert!(extract_wikilinks("본문에 링크 없음").is_empty());
+        assert!(extract_wikilinks("body with no links").is_empty());
     }
 
     // ── cross-layer wikilinks ──
 
     #[test]
     fn cross_layer_detected() {
-        let body = "[[raw/seed.md]] 와 [[wiki-0001]]";
+        let body = "[[raw/seed.md]] and [[wiki-0001]]";
         let bad = find_cross_layer_wikilinks(body);
         assert_eq!(bad, vec!["raw/seed.md"]);
     }
@@ -1654,7 +1662,7 @@ mod tests {
         let (_page, issues) = lint_page(path, content, &schema, Path::new("/vault"), &ids);
         assert!(
             issues.iter().any(|i| i.rule == "wikilink-dangling"),
-            "dangling wikilink 이슈 없음: {issues:?}"
+            "no dangling wikilink issue: {issues:?}"
         );
         assert!(
             issues
@@ -1672,7 +1680,7 @@ mod tests {
         let (_page, issues) = lint_page(path, content, &schema, Path::new("/vault"), &ids);
         assert!(
             !issues.iter().any(|i| i.rule == "wikilink-dangling"),
-            "valid wikilink 에 dangling 이슈: {issues:?}"
+            "dangling issue on a valid wikilink: {issues:?}"
         );
     }
 
@@ -1681,7 +1689,7 @@ mod tests {
     #[test]
     fn valid_frontmatter_no_errors() {
         let schema = test_schema();
-        let content = "---\nid: wiki-0001\ntitle: Test\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\n본문";
+        let content = "---\nid: wiki-0001\ntitle: Test\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\nbody";
         let ids = known_ids(&["wiki-0001"]);
         let path = Path::new("/vault/wiki/wiki-0001.md");
         let (page, issues) = lint_page(path, content, &schema, Path::new("/vault"), &ids);
@@ -1689,8 +1697,8 @@ mod tests {
             .iter()
             .filter(|i| i.severity == Severity::Error)
             .collect();
-        assert!(errors.is_empty(), "오류가 있어선 안 됨: {errors:?}");
-        assert!(page.is_some(), "Page 파싱 실패");
+        assert!(errors.is_empty(), "there should be no errors: {errors:?}");
+        assert!(page.is_some(), "Page parse failed");
     }
 
     #[test]
@@ -1698,7 +1706,7 @@ mod tests {
         let schema = test_schema();
         // title missing
         let content =
-            "---\nid: wiki-0001\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\n본문";
+            "---\nid: wiki-0001\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\nbody";
         let ids = known_ids(&["wiki-0001"]);
         let path = Path::new("/vault/wiki/wiki-0001.md");
         let (_page, issues) = lint_page(path, content, &schema, Path::new("/vault"), &ids);
@@ -1706,7 +1714,7 @@ mod tests {
             issues
                 .iter()
                 .any(|i| i.rule == "required-fm-missing" && i.message.contains("title")),
-            "title 누락 이슈 없음: {issues:?}"
+            "no title-missing issue: {issues:?}"
         );
     }
 
@@ -1783,7 +1791,7 @@ mod tests {
                 .issues
                 .iter()
                 .any(|i| i.rule == "superseded-referenced" && i.severity == Severity::Warn),
-            "superseded-referenced warn 없음: {:?}",
+            "no superseded-referenced warn: {:?}",
             summary.issues
         );
     }
@@ -1950,9 +1958,9 @@ mod tests {
 
     #[test]
     fn curated_llm_parse_valid() {
-        let json = r#"{"title":"테스트 제목","body":"본문 내용","tags":["rust","rag"],"tools":["surrealdb"],"concepts":["rop"]}"#;
+        let json = r#"{"title":"Test Title","body":"body content","tags":["rust","rag"],"tools":["surrealdb"],"concepts":["rop"]}"#;
         let c: super::CuratedLlm = serde_json::from_str(json).unwrap();
-        assert_eq!(c.title, "테스트 제목");
+        assert_eq!(c.title, "Test Title");
         assert_eq!(c.tags, vec!["rust", "rag"]);
         assert_eq!(c.tools, vec!["surrealdb"]);
     }
