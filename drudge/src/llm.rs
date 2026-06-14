@@ -62,7 +62,7 @@ impl Llm {
             .into_iter()
             .next()
             .map(|e| e.embedding)
-            .context("embeddings 응답에 data[0] 없음")
+            .context("embeddings response has no data[0]")
     }
 
     /// Non-streaming generation. OpenAI `/v1/chat/completions` (system+user messages).
@@ -102,6 +102,6 @@ impl Llm {
             .into_iter()
             .next()
             .map(|c| c.message.content.unwrap_or_default())
-            .context("chat 응답에 choices[0] 없음")
+            .context("chat response has no choices[0]")
     }
 }
