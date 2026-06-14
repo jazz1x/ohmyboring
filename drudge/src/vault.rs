@@ -309,6 +309,17 @@ fn extract_wikilinks(body: &str) -> Vec<String> {
     out
 }
 
+/// Normalize a `relates_to` entry to a bare page id. `project_links` writes Obsidian-style
+/// `"[[wiki-NNNN]]"` (quotes + brackets, optional `|alias`) so the graph view renders links, but
+/// audit/lint compare against bare ids — strip the wrapper so both writers agree. Pure.
+fn normalize_link_id(raw: &str) -> String {
+    let s = raw.trim().trim_matches('"').trim();
+    let s = s
+        .strip_prefix("[[")
+        .map_or(s, |r| r.strip_suffix("]]").unwrap_or(r));
+    s.split('|').next().unwrap_or(s).trim().to_owned()
+}
+
 /// Check whether the body contains cross-layer links of the form `[[raw/...]]` / `[[meta/...]]` / `[[.rules/...]]`.
 /// Pure function.
 fn find_cross_layer_wikilinks(body: &str) -> Vec<String> {
@@ -558,7 +569,13 @@ pub fn lint_page(
             origin,
             date,
             sources: raw_fm.sources.clone(),
-            relates_to: raw_fm.relates_to.clone(),
+            // Normalize Obsidian-style "[[wiki-NNNN]]" (from project_links) to bare ids so audit's
+            // superseded/adjacency checks recognize them.
+            relates_to: raw_fm
+                .relates_to
+                .iter()
+                .map(|r| normalize_link_id(r))
+                .collect(),
             tags: raw_fm.tags.clone(),
             superseded_by: raw_fm.superseded_by,
             body: body.to_owned(),
@@ -1519,6 +1536,14 @@ mod tests {
             parse_repo_marker(note).as_deref(),
             Some("jazz1x/oh-my-boring")
         );
+    }
+
+    #[test]
+    fn normalize_link_id_strips_obsidian_wrapper() {
+        use super::normalize_link_id;
+        assert_eq!(normalize_link_id("\"[[wiki-0002]]\""), "wiki-0002"); // project_links form
+        assert_eq!(normalize_link_id("[[wiki-0003|alias]]"), "wiki-0003"); // alias
+        assert_eq!(normalize_link_id("wiki-0004"), "wiki-0004"); // already bare
     }
 
     #[test]
