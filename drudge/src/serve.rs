@@ -197,7 +197,7 @@ async fn handle_brief(State(s): State<AppState>) -> Result<Json<AskResp>, AppErr
 /// The explicit rejection (not silence) that vector/graph-dependent endpoints return under `DRUDGE_VECTOR=off`.
 fn vector_disabled() -> AppError {
     AppError(anyhow::anyhow!(
-        "DRUDGE_VECTOR=off — 이 기능은 벡터 백엔드(pgvector)가 필요합니다. DRUDGE_VECTOR=on 으로 켜고 Postgres 를 띄우세요."
+        "DRUDGE_VECTOR=off — this feature requires the vector backend (pgvector). Set DRUDGE_VECTOR=on and start Postgres."
     ))
 }
 
@@ -271,7 +271,7 @@ async fn handle_distill(
 ) -> Result<Json<DistillResp>, AppError> {
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
         return Err(AppError(anyhow::anyhow!(
-            "DRUDGE_VAULT_DIR 미설정 — distill 기록 대상 없음"
+            "DRUDGE_VAULT_DIR not set — no target to write distill notes to"
         )));
     };
     let dreq = distill::DistillRequest {
@@ -340,31 +340,31 @@ fn mcp_tools_list() -> Value {
     json!({"tools": [
         {
             "name": "recall",
-            "description": "사용자의 과거 작업 경험·결정·메모리를 자가증강 RAG(벡터+그래프)에서 회수한다. \
-                            '전에 이거 어떻게 했지/결정했지' 류 기억이 필요할 때 사용.",
+            "description": "Recall the user's past work experience, decisions, and memories from the self-augmenting RAG (vector+graph). \
+                            Use when you need 'how did I do/decide this before' type memory.",
             "inputSchema": {
                 "type": "object",
-                "properties": {"query": {"type": "string", "description": "회수할 주제 또는 질문"}},
+                "properties": {"query": {"type": "string", "description": "topic or question to recall"}},
                 "required": ["query"]
             }
         },
         {
             "name": "remember",
-            "description": "지금 배운 것·결정·사실을 영속 메모리에 적재한다. vault/raw 에 노트로 기록되어 \
-                            다음 sync 때 compile→임베딩→그래프로 흡수된다. 기록 후 회수(recall) 가능.",
+            "description": "Store what was just learned, decided, or established into persistent memory. It is written as a note in vault/raw \
+                            and absorbed via compile→embedding→graph on the next sync. Recallable after it is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "기억할 내용(문제해결 서사·결정·사실)"},
-                    "title": {"type": "string", "description": "선택. 노트 제목 한 줄"}
+                    "text": {"type": "string", "description": "content to remember (problem-solving narrative, decision, fact)"},
+                    "title": {"type": "string", "description": "optional. one-line note title"}
                 },
                 "required": ["text"]
             }
         },
         {
             "name": "sync",
-            "description": "적재 파이프라인을 1회 돌린다: compile(raw→wiki 큐레이션) → 임베딩 → \
-                            pgvector upsert → 그래프 추출. remember 로 쌓은 노트를 즉시 회수 가능하게 만든다.",
+            "description": "Run the ingest pipeline once: compile (raw→wiki curation) → embedding → \
+                            pgvector upsert → graph extraction. Makes notes accumulated via remember immediately recallable.",
             "inputSchema": {"type": "object", "properties": {}}
         }
     ]})
@@ -408,7 +408,7 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     } else {
         let dir = s.wiki_dir();
         let Some(dir) = dir.as_deref() else {
-            return Ok("(vault 미설정 — 회수 대상 없음)".to_owned());
+            return Ok("(vault not set — nothing to recall)".to_owned());
         };
         wiki_recall::recall(dir, query, 5)
             .map_err(|e| (-32603_i32, format!("wiki recall: {e:#}")))?
@@ -417,7 +417,7 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             .collect()
     };
     if lines.is_empty() {
-        return Ok("(회수된 경험 없음)".to_owned());
+        return Ok("(no experience recalled)".to_owned());
     }
     Ok(lines
         .iter()
@@ -435,7 +435,7 @@ fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, Stri
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
         return Err((
             -32603,
-            "DRUDGE_VAULT_DIR 미설정 — remember 기록 대상 없음".to_owned(),
+            "DRUDGE_VAULT_DIR not set — no target to write remember notes to".to_owned(),
         ));
     };
     let text = args
@@ -461,14 +461,14 @@ fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, Stri
     std::fs::create_dir_all(&raw_dir).map_err(|e| (-32603_i32, format!("raw dir: {e}")))?;
     let path = raw_dir.join(format!("memo-{sha}.md"));
     let heading = if title.is_empty() {
-        format!("# 메모 — {}", vault::today_utc())
+        format!("# Memo — {}", vault::today_utc())
     } else {
         format!("# {title}")
     };
     let body = format!("{heading}\n> origin: personal · via: agent(remember)\n\n{text}\n");
     std::fs::write(&path, body).map_err(|e| (-32603_i32, format!("raw note write: {e}")))?;
     Ok(format!(
-        "기억함 → raw/memo-{sha}.md. sync 를 호출하면 compile→임베딩→회수가능 상태가 된다."
+        "remembered → raw/memo-{sha}.md. Call sync to run compile→embedding→recallable."
     ))
 }
 
@@ -489,7 +489,7 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
         + o.extract.concepts
         + o.extract.attempts;
     Ok(format!(
-        "sync 완료 — compile {compiled} · ingest(new {} updated {} chunks {}) · graph(nodes {nodes} edges {})",
+        "sync complete — compile {compiled} · ingest(new {} updated {} chunks {}) · graph(nodes {nodes} edges {})",
         o.ingest.new, o.ingest.updated, o.ingest.chunks, o.extract.edges
     ))
 }
@@ -581,14 +581,14 @@ async fn do_sync(
     // GC orphan semantic nodes at the end of every sync — keeps the graph lean (SSOT hygiene).
     match store.gc_orphans().await {
         Ok(g) => eprintln!("[scheduler] gc orphans: {}", g.total()),
-        Err(e) => eprintln!("[scheduler] gc 경고(무시): {e:#}"),
+        Err(e) => eprintln!("[scheduler] gc warning (ignored): {e:#}"),
     }
     // graph → Obsidian projection: doc↔doc relations as wiki relates_to wikilinks (only when vault exists).
     // Auxiliary visualization stage — on failure it does not break the core sync (ingest/extract), just logs.
     if let Some(vd) = vault_dir {
         match vault::project_links(store, vd, 6).await {
-            Ok(n) => eprintln!("[scheduler] graph→obsidian: {n} wiki relates_to 갱신"),
-            Err(e) => eprintln!("[scheduler] project_links 경고(무시): {e:#}"),
+            Ok(n) => eprintln!("[scheduler] graph→obsidian: updated {n} wiki relates_to"),
+            Err(e) => eprintln!("[scheduler] project_links warning (ignored): {e:#}"),
         }
     }
     Ok(SyncOutcome {

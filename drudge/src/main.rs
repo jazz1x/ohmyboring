@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "drudge",
-    about = "oh-my-boring 개인 RAG (Rust, pgvector + 그래프 CTE)"
+    about = "oh-my-boring personal RAG (Rust, pgvector + graph CTE)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -104,7 +104,7 @@ enum VaultCmd {
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     // Rejection message vector-only CLI commands return when off (not silent, ROP). The daemon (serve) runs in wiki mode when off.
-    const VEC_OFF: &str = "DRUDGE_VECTOR=off — 이 명령은 벡터 백엔드(pgvector)가 필요합니다. 데몬(serve)은 off 면 wiki 회수로 동작합니다.";
+    const VEC_OFF: &str = "DRUDGE_VECTOR=off — this command requires the vector backend (pgvector). The daemon (serve) runs in wiki-recall mode when off.";
 
     let cli = Cli::parse();
     // DRUDGE_VECTOR: default off = wiki first-class (no Postgres connection, simple). Turn on to enable pgvector (vector+graph).
@@ -126,18 +126,18 @@ async fn main() -> Result<()> {
             let docs = [
                 (
                     "doc:rust",
-                    "Rust는 메모리 안전성과 성능을 동시에 주는 시스템 프로그래밍 언어다.",
+                    "Rust is a systems programming language that delivers memory safety and performance at once.",
                 ),
                 (
                     "doc:coffee",
-                    "에스프레소는 곱게 간 원두에 뜨거운 물을 높은 압력으로 통과시켜 추출한다.",
+                    "Espresso is extracted by forcing hot water through finely ground beans at high pressure.",
                 ),
                 (
                     "doc:db",
-                    "Postgres는 pgvector로 벡터검색을, node/edge 테이블과 재귀 CTE로 그래프를 제공한다.",
+                    "Postgres provides vector search via pgvector and graphs via node/edge tables with recursive CTEs.",
                 ),
             ];
-            println!("1) 임베딩 + 저장 ({}개 문서)", docs.len());
+            println!("1) embed + store ({} docs)", docs.len());
             for (id, text) in docs {
                 let emb = ol.embed(text).await?;
                 let front = frontmatter::FrontMatter {
@@ -162,11 +162,11 @@ async fn main() -> Result<()> {
                     .await?;
             }
 
-            let query = "데이터베이스에서 벡터와 그래프를 쓰는 법";
-            println!("2) 쿼리: {query:?}");
+            let query = "how to use vectors and graphs in a database";
+            println!("2) query: {query:?}");
             let qe = ol.embed(query).await?;
             let hits = store.vector_search(&qe, 3).await?;
-            println!("3) 벡터 검색 결과 (top-{}):", hits.len());
+            println!("3) vector search results (top-{}):", hits.len());
             for h in &hits {
                 let snip: String = h.content.chars().take(34).collect();
                 println!("   [dist={:.4}] {} ({}) — {}", h.dist, h.id, h.origin, snip);
@@ -174,10 +174,10 @@ async fn main() -> Result<()> {
             // GOAL check: the 'db' document must rank first (semantically closest to the query)
             match hits.first() {
                 Some(h) if h.id == "doc:db" => {
-                    println!("✅ 랭킹 정확 (doc:db 1위) — 벡터검색 정상");
+                    println!("✅ ranking correct (doc:db #1) — vector search OK");
                 }
-                Some(h) => println!("⚠️ 1위가 doc:db 아님: {} — 임베딩/거리 점검 필요", h.id),
-                None => println!("❌ 0건 — 벡터검색 여전히 실패"),
+                Some(h) => println!("⚠️ #1 is not doc:db: {} — check embedding/distance", h.id),
+                None => println!("❌ 0 hits — vector search still failing"),
             }
         }
         Cmd::Stats => {
@@ -226,7 +226,7 @@ async fn main() -> Result<()> {
             let out = ask::brief(store, &ol, &[]).await?;
             println!("{}\n", out.answer);
             if !out.sources.is_empty() {
-                println!("출처:");
+                println!("sources:");
                 for src in &out.sources {
                     println!("  - {src}");
                 }
@@ -298,7 +298,7 @@ async fn main() -> Result<()> {
                     )
                 });
             let n = vault::project_links(store, std::path::Path::new(&vault_root), 6).await?;
-            println!("graph→obsidian: {n} wiki 노트의 relates_to 갱신");
+            println!("graph→obsidian: updated relates_to of {n} wiki notes");
         }
         Cmd::Gc => {
             let store = store.as_ref().context(VEC_OFF)?;

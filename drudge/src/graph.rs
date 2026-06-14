@@ -56,29 +56,29 @@ pub async fn query(store: &Store, llm: &Llm, q: &str) -> Result<GraphOut> {
 pub async fn run(store: &Store, llm: &Llm, q: &str) -> Result<()> {
     let gs = store.graph_stats().await?;
     println!(
-        "그래프: 문서 {} · 청크 {} · project {} · topic {} · 엣지 {}\n",
+        "graph: documents {} · chunks {} · project {} · topic {} · edges {}\n",
         gs.documents, gs.chunks, gs.projects, gs.topics, gs.edges
     );
 
     let out = query(store, llm, q).await?;
     if out.hit.is_empty() {
-        println!("벡터 히트 없음");
+        println!("no vector hit");
         return Ok(());
     }
-    println!("벡터 top-1: {}", out.hit);
+    println!("vector top-1: {}", out.hit);
 
-    println!("\n그래프 1-hop 이웃 (같은 project, 한 쿼리 traversal):");
+    println!("\ngraph 1-hop neighbors (same project, single-query traversal):");
     if out.graph_neighbors.is_empty() {
-        println!("  (이웃 없음)");
+        println!("  (no neighbors)");
     } else {
         for n in &out.graph_neighbors {
             println!("  → {n}");
         }
     }
 
-    println!("\n시맨틱 이웃 (공유 tool/concept, edge-table traversal):");
+    println!("\nsemantic neighbors (shared tool/concept, edge-table traversal):");
     if out.semantic_neighbors.is_empty() {
-        println!("  (시맨틱 이웃 없음 — extract 실행 전이거나 공유 tool/concept 없음)");
+        println!("  (no semantic neighbors — extract not yet run, or no shared tool/concept)");
     } else {
         for n in &out.semantic_neighbors {
             println!("  ~ {n}");

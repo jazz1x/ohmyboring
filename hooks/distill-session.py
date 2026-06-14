@@ -178,9 +178,10 @@ def via_agent(transcript_path):
     container_path = "/host/.claude" + transcript_path[len(claude_root):]
     container = os.environ.get("DISTILL_AGENT_CONTAINER", "boring-agent")
     prompt = (
-        f"세션 트랜스크립트 {container_path} 를 읽어라. 기억할 가치가 있으면(실제 문제해결·결정·사실) "
-        "핵심을 '문제해결 서사'로 추려 drudge 의 remember 툴로 적재한 뒤 sync 툴을 호출해라. "
-        "단순 잡담·설정덤프뿐이면 아무것도 하지 마라."
+        f"Read the session transcript at {container_path}. If it's worth remembering "
+        "(real problem-solving / decisions / facts), distill the essence into a "
+        "'problem-solving narrative', store it via drudge's remember tool, then call the sync tool. "
+        "If it's just chit-chat or config dumps, do nothing."
     )
     try:
         r = subprocess.run(
@@ -222,7 +223,7 @@ def main():
         return
     # No isolation — both personal and company session experiences go to the same raw/. Distinction is via the origin tag only.
     origin = "company" if is_company else "personal"
-    phase = "종료" if is_final else "진행중"
+    phase = "final" if is_final else "in-progress"
     repo = repo_slug(cwd)  # category axis — git remote slug (fallback folder name)
     # The engine (SSOT) performs length clamping, LLM distillation, the KEEP/SKIP gate, secret scrubbing, and raw-note writing.
     resp = post_distill(text, session_id, origin, phase, repo, cwd)

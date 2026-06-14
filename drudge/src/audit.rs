@@ -120,7 +120,10 @@ pub async fn run(store: &Store) -> Result<()> {
     let metas = store.all_meta().await?;
     let total = metas.len();
     let files: HashSet<&str> = metas.iter().map(|m| m.source_path.as_str()).collect();
-    println!("📊 적재 감사 — 청크 {total} · 소스파일 {}\n", files.len());
+    println!(
+        "📊 Ingest audit — chunks {total} · source files {}\n",
+        files.len()
+    );
 
     print_group("origin", &tally(metas.iter().map(|m| m.origin.as_str())));
     print_group("kind", &tally(metas.iter().map(|m| m.kind.as_str())));
@@ -132,23 +135,23 @@ pub async fn run(store: &Store) -> Result<()> {
         .count();
     let no_origin = metas.iter().filter(|m| m.origin.is_empty()).count();
     let no_project = metas.iter().filter(|m| m.project.is_empty()).count();
-    println!("\n  ⚠️ 품질 점검");
-    println!("    회사 오염       : {company}  (기대 0)");
-    println!("    origin 누락     : {no_origin}");
-    println!("    project 누락    : {no_project}");
+    println!("\n  ⚠️ Quality check");
+    println!("    company pollution : {company}  (expected 0)");
+    println!("    origin missing    : {no_origin}");
+    println!("    project missing   : {no_project}");
     let clean = company == 0 && no_origin == 0;
     println!(
         "    → {}",
         if clean {
-            "✅ 깨끗"
+            "✅ clean"
         } else {
-            "❌ 점검 필요"
+            "❌ needs review"
         }
     );
 
     let gs = store.graph_stats().await?;
     println!(
-        "\n  [graph] 문서 {} · 청크 {} · project {} · topic {} · 엣지 {}",
+        "\n  [graph] documents {} · chunks {} · project {} · topic {} · edges {}",
         gs.documents, gs.chunks, gs.projects, gs.topics, gs.edges
     );
 

@@ -40,7 +40,7 @@ def main() -> None:
             lines.append(f"- [{src}] {snip}")
     if not lines:
         return
-    ctx = "📚 내 과거 작업 경험 (자가증강 RAG 회수 — 관련될 때만 참고):\n" + "\n".join(lines)
+    ctx = "📚 My past work experience (self-augmenting RAG recall — refer only when relevant):\n" + "\n".join(lines)
     print(json.dumps({
         "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}
     }))
