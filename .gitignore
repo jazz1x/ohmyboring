@@ -29,4 +29,5 @@ vault/wiki/*
 !vault/raw/.gitkeep
 !vault/raw/example.md
 !vault/wiki/.gitkeep
+!vault/wiki/wiki-0001.md
 vault/.obsidian/

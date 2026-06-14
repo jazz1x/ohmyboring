@@ -213,9 +213,9 @@ Core runs without `.env`; defaults live in `docker-compose.yml`.
 
 - **SSOT docs**: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`.
 - **Principles**: ROP (Result rails) · Parse-don't-validate · Clean Architecture · simplest-thing-that-works.
-- **Gate** (local `make guard` == CI): `rustfmt --check` + `clippy -D warnings` (`unsafe` forbid + pedantic) + `cargo test` (stack-free). Supply chain: `make deny`.
-- **pre-commit**: run `pre-commit install` once (file hygiene + gitleaks + fmt/clippy/test).
-- **CI** (`.github/workflows/ci.yml`): every PR/main push runs `rust-gate` + `gitleaks` + `cargo-deny`; branch protection requires all three (admins can't bypass).
+- **Gate** (local `make guard` = CI's `rust-gate`): `rustfmt --check` + `clippy -D warnings` (`unsafe` forbid + pedantic) + `cargo test` (stack-free). Supply chain: `make deny`. (Green `make guard` ≠ green CI — CI also runs gitleaks + cargo-deny + trivy.)
+- **pre-commit**: run `pre-commit install` once (file hygiene + gitleaks + fmt/clippy/test + py-compile).
+- **CI** (`.github/workflows/ci.yml`): every PR/main push runs `rust-gate` + `gitleaks` + `cargo-deny` + `trivy`; branch protection requires all four (admins can't bypass).
 
 ---
 

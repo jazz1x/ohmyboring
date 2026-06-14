@@ -1,8 +1,11 @@
 //! LLM client — OpenAI-compatible `/v1` (embeddings + chat/completions).
 //! Works with any OpenAI-compatible server: Ollama (`/v1`) · LM Studio · vLLM · llama.cpp server, etc.
 //! Runtime/model are swappable via env (`DRUDGE_LLM_BASE_URL`/`DRUDGE_LLM_MODEL`/`DRUDGE_EMBED_MODEL`).
-//! `think:false` = an extension field that turns off Ollama gemma's reasoning mode (avoids latency). OpenAI-compatible servers
-//! ignore unknown body fields (per spec) → doesn't break compatibility with other runtimes.
+//! `reasoning_effort:"none"` = OpenAI-standard knob that turns off reasoning/thinking mode (avoids latency).
+//! Verified on Ollama `/v1`: `think:false` is dropped there (only works on native `/api/chat`), but
+//! `reasoning_effort:"none"` is honored (0.6s vs 8s on gemma4). Servers that don't reason ignore it gracefully.
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -32,8 +35,17 @@ impl Llm {
     }
 
     /// POST request builder to `{base}{path}`. Attaches Bearer auth if api_key is present.
+    /// IO-boundary timeout: caps a hung/slow LLM (network boundary) so callers fail fast
+    /// instead of blocking forever — e.g. `/brief` synthesis on a reasoning model.
     fn post(&self, path: &str) -> reqwest::RequestBuilder {
-        let r = self.client.post(format!("{}{path}", self.base_url));
+        // 3-min cap. clippy wants a larger unit, but std Duration has no from_mins (unstable),
+        // so seconds is the readable stable form here.
+        #[allow(clippy::unreadable_literal)]
+        const LLM_TIMEOUT_SECS: u64 = 180;
+        let r = self
+            .client
+            .post(format!("{}{path}", self.base_url))
+            .timeout(Duration::from_secs(LLM_TIMEOUT_SECS));
         match &self.api_key {
             Some(k) => r.bearer_auth(k),
             None => r,
@@ -66,7 +78,7 @@ impl Llm {
     }
 
     /// Non-streaming generation. OpenAI `/v1/chat/completions` (system+user messages).
-    /// Blocks thinking mode via `think:false` (targets Ollama; non-target servers ignore it).
+    /// Disables reasoning via `reasoning_effort:"none"` (OpenAI-standard; honored by Ollama /v1).
     pub async fn generate(&self, system: &str, prompt: &str) -> Result<String> {
         #[derive(Deserialize)]
         struct Message {
@@ -91,7 +103,7 @@ impl Llm {
                     {"role": "user", "content": prompt}
                 ],
                 "stream": false,
-                "think": false
+                "reasoning_effort": "none"
             }))
             .send()
             .await?

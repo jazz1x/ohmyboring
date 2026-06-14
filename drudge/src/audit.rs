@@ -19,10 +19,10 @@ fn tally<'a>(it: impl Iterator<Item = &'a str>) -> Vec<(&'a str, usize)> {
     v
 }
 
-fn print_group(label: &str, rows: &[(&str, usize)]) {
+fn print_group(label: &str, rows: &[(String, usize)]) {
     println!("  [{label}]");
     for (k, c) in rows {
-        let key = if k.is_empty() { "(empty)" } else { k };
+        let key = if k.is_empty() { "(empty)" } else { k.as_str() };
         println!("    {key:<28} {c}");
     }
 }
@@ -115,54 +115,53 @@ pub async fn stats(store: &Store) -> Result<AuditStats> {
     })
 }
 
-/// CLI shell: call `stats()` then print to stdout.
+/// CLI shell: consume `stats()` and print to stdout. No re-aggregation (composition over duplication).
 pub async fn run(store: &Store) -> Result<()> {
-    let metas = store.all_meta().await?;
-    let total = metas.len();
-    let files: HashSet<&str> = metas.iter().map(|m| m.source_path.as_str()).collect();
+    let s = stats(store).await?;
     println!(
-        "📊 Ingest audit — chunks {total} · source files {}\n",
-        files.len()
+        "📊 Ingest audit — chunks {} · source files {}\n",
+        s.total_chunks, s.total_files
     );
 
-    print_group("origin", &tally(metas.iter().map(|m| m.origin.as_str())));
-    print_group("kind", &tally(metas.iter().map(|m| m.kind.as_str())));
-    print_group("project", &tally(metas.iter().map(|m| m.project.as_str())));
+    print_group("origin", &s.by_origin);
+    print_group("kind", &s.by_kind);
+    print_group("project", &s.by_project);
 
-    let company = metas
-        .iter()
-        .filter(|m| crate::frontmatter::is_company_path(&m.source_path))
-        .count();
-    let no_origin = metas.iter().filter(|m| m.origin.is_empty()).count();
-    let no_project = metas.iter().filter(|m| m.project.is_empty()).count();
     println!("\n  ⚠️ Quality check");
-    println!("    company pollution : {company}  (expected 0)");
-    println!("    origin missing    : {no_origin}");
-    println!("    project missing   : {no_project}");
-    let clean = company == 0 && no_origin == 0;
+    println!(
+        "    company pollution : {}  (expected 0)",
+        s.company_contamination
+    );
+    println!("    origin missing    : {}", s.missing_origin);
+    println!("    project missing   : {}", s.missing_project);
     println!(
         "    → {}",
-        if clean {
+        if s.clean {
             "✅ clean"
         } else {
             "❌ needs review"
         }
     );
 
-    let gs = store.graph_stats().await?;
     println!(
         "\n  [graph] documents {} · chunks {} · project {} · topic {} · edges {}",
-        gs.documents, gs.chunks, gs.projects, gs.topics, gs.edges
+        s.graph_documents, s.graph_chunks, s.graph_projects, s.graph_topics, s.graph_edges
     );
-
-    let ss = store.semantic_stats().await?;
     println!(
         "  [semantic] problem {} · solution {} · tool {} · concept {} · attempt {}",
-        ss.problems, ss.solutions, ss.tools, ss.concepts, ss.attempts
+        s.semantic_problems,
+        s.semantic_solutions,
+        s.semantic_tools,
+        s.semantic_concepts,
+        s.semantic_attempts
     );
     println!(
         "  [semantic edges] addresses {} · resolved_by {} · uses {} · about {} · tried {}",
-        ss.addresses, ss.resolved_by, ss.uses, ss.about, ss.tried
+        s.semantic_addresses,
+        s.semantic_resolved_by,
+        s.semantic_uses,
+        s.semantic_about,
+        s.semantic_tried
     );
     Ok(())
 }
