@@ -19,9 +19,9 @@ use tokio_postgres::{Client, NoTls};
 
 use crate::frontmatter::FrontMatter;
 
-/// Embedding dimension (bge-m3 = 1024). Enforced at the upsert boundary and used to build the
-/// `chunk.embedding vector(N)` DDL so the column and the guard can't drift. If you change the
-/// embed model to a different dim, change this one value (and `make reset` to rebuild the column).
+/// Embedding dimension (bge-m3 = 1024). Enforced at every embedding-upsert boundary via
+/// `checked_vector` (chunk + claim) and mirrored by the `vector(1024)` DDL columns. If you change
+/// the embed model to a different dim, change this value, the DDL literals, and `make reset`.
 pub const EMBED_DIM: usize = 1024;
 
 /// Ingest input (one chunk).
@@ -114,6 +114,22 @@ const SEMANTIC_EDGE_KINDS: [&str; 6] = [
     "tried",
     "solves",
 ];
+
+/// Build a pgvector `Vector` after checking the dimension matches the `vector(EMBED_DIM)` columns.
+/// Single boundary guard shared by every embedding insert (chunk + claim) — parse-don't-validate:
+/// a non-EMBED_DIM model (wrong DRUDGE_EMBED_MODEL) fails loud here with an actionable message,
+/// not with a cryptic Postgres error deep in the fire-and-forget scheduler.
+fn checked_vector(embedding: &[f32]) -> Result<Vector> {
+    if embedding.len() != EMBED_DIM {
+        anyhow::bail!(
+            "embedding dim mismatch: got {}, expected {EMBED_DIM}. \
+             DRUDGE_EMBED_MODEL must be a {EMBED_DIM}-dim model (default bge-m3), \
+             or the schema's vector({EMBED_DIM}) needs to change.",
+            embedding.len()
+        );
+    }
+    Ok(Vector::from(embedding.to_vec()))
+}
 
 /// chunk id ("path#idx") → graph document node id ("doc:path").
 fn doc_node_id(chunk_or_path: &str) -> String {
@@ -432,7 +448,7 @@ impl Store {
         valid_from: SystemTime,
         embedding: &[f32],
     ) -> Result<()> {
-        let vec = Vector::from(embedding.to_vec());
+        let vec = checked_vector(embedding)?; // dim guard (shared with upsert_chunk)
         self.db
             .execute(
                 "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding)
@@ -616,19 +632,7 @@ impl Store {
     // ── chunk (embedding) ─────────────────────────────────────────────────────
 
     pub async fn upsert_chunk(&self, d: &Doc) -> Result<()> {
-        // Parse-don't-validate at the DB boundary: the chunk column is vector(EMBED_DIM), so a
-        // mismatched embedding (user set DRUDGE_EMBED_MODEL to a non-1024-dim model) would be
-        // rejected by Postgres deep in the scheduler with a cryptic error. Catch it here with an
-        // actionable message naming the expected/actual dim.
-        if d.embedding.len() != EMBED_DIM {
-            anyhow::bail!(
-                "embedding dim mismatch: got {}, expected {EMBED_DIM}. \
-                 DRUDGE_EMBED_MODEL must be a {EMBED_DIM}-dim model (default bge-m3), \
-                 or the schema's vector({EMBED_DIM}) needs to change.",
-                d.embedding.len()
-            );
-        }
-        let vec = Vector::from(d.embedding.clone());
+        let vec = checked_vector(&d.embedding)?; // dim guard (shared with upsert_claim)
         let idx = i32::try_from(d.chunk_idx).unwrap_or(i32::MAX);
         self.db
             .execute(

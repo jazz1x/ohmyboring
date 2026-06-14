@@ -213,9 +213,9 @@ drudge 는 에이전트의 **MCP 메모리 백엔드**. 에이전트(뇌)가 몰
 
 - **SSOT 문서**: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`.
 - **원칙**: ROP(Result 레일) · Parse-don't-validate · Clean Architecture · 단순함 우선.
-- **게이트**(로컬 `make guard` == CI): `rustfmt --check` + `clippy -D warnings`(`unsafe` forbid + pedantic) + `cargo test`(스택-프리). 공급망: `make deny`.
-- **pre-commit**: 1회 `pre-commit install` (파일위생 + gitleaks + fmt/clippy/test).
-- **CI**: PR·main push 마다 `rust-gate` + `gitleaks` + `cargo-deny`, 셋 다 필수(admin 우회 불가).
+- **게이트**(로컬 `make guard` = CI의 `rust-gate`): `rustfmt --check` + `clippy -D warnings`(`unsafe` forbid + pedantic) + `cargo test`(스택-프리). 공급망: `make deny`. (`make guard` 통과 ≠ CI 통과 — CI는 gitleaks + cargo-deny + trivy도 돈다.)
+- **pre-commit**: 1회 `pre-commit install` (파일위생 + gitleaks + fmt/clippy/test + py-compile).
+- **CI**: PR·main push 마다 `rust-gate` + `gitleaks` + `cargo-deny` + `trivy`, 넷 다 필수(admin 우회 불가).
 
 ---
 

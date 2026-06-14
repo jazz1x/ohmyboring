@@ -44,8 +44,14 @@ repos:
         files: \.(rs|toml)$
 
       - id: cargo-test
-        name: cargo test (drudge, 스택-프리)
+        name: cargo test (drudge, stack-free)
         entry: cargo test --manifest-path drudge/Cargo.toml
         language: system
         pass_filenames: false
         files: \.rs$
+
+      - id: py-compile
+        name: "python compile (hooks — syntax gate)"
+        entry: python3 -m py_compile
+        language: system
+        files: ^hooks/.*\.py$
