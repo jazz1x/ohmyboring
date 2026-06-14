@@ -35,6 +35,26 @@ def _marked(session_id):
     return os.path.exists(os.path.join(MARK_DIR, f"{safe}.ts"))
 
 
+def transcript_cwd(tp):
+    """The real working dir from the transcript (Claude Code records `cwd` per line).
+    Returns '' if none found — better empty than the mangled project-dir name."""
+    try:
+        with open(tp, encoding="utf-8") as f:
+            for _ in range(50):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    c = json.loads(line).get("cwd")
+                except Exception:
+                    continue
+                if c:
+                    return c
+    except OSError:
+        pass
+    return ""
+
+
 def main():
     cutoff = time.time() - WINDOW_H * 3600
     paths = glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))  # top-level only
@@ -56,10 +76,13 @@ def main():
     env = dict(os.environ, DISTILL_NO_SYNC="1")
     done = 0
     for tp in batch:
-        proj = os.path.basename(os.path.dirname(tp))
+        proj = os.path.basename(os.path.dirname(tp))  # encoded dir name — for the log label only
         sid = os.path.splitext(os.path.basename(tp))[0]
+        # Real cwd from the transcript, not the mangled project-dir name — so backfilled notes
+        # get a correct repo/<slug> + company-origin tag (matching live-hook notes).
+        cwd = transcript_cwd(tp)
         payload = json.dumps(
-            {"transcript_path": tp, "cwd": proj, "session_id": sid, "hook_event_name": "SessionEnd"}
+            {"transcript_path": tp, "cwd": cwd, "session_id": sid, "hook_event_name": "SessionEnd"}
         )
         try:
             r = subprocess.run(

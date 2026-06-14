@@ -336,6 +336,7 @@ impl Store {
                  FROM edge e JOIN self_nodes sn ON e.dst = sn.dst
                  WHERE e.src <> $1 AND e.src LIKE 'doc:%'
                  GROUP BY e.src
+                 HAVING count(*) >= 2
                  ORDER BY shared DESC, e.src ASC
                  LIMIT $2;",
                 &[&doc_id, &limit],
@@ -371,7 +372,7 @@ impl Store {
                      SELECT e.src AS doc_node, count(*) AS shared
                      FROM edge e JOIN self_nodes sn ON e.dst = sn.dst
                      WHERE e.src <> $1 AND e.src LIKE 'doc:%'
-                     GROUP BY e.src ORDER BY shared DESC LIMIT $2
+                     GROUP BY e.src HAVING count(*) >= 2 ORDER BY shared DESC LIMIT $2
                  )
                  SELECT d.source_path, d.project,
                         string_agg(c.content, E'\n' ORDER BY c.chunk_idx) AS content

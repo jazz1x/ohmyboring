@@ -19,7 +19,10 @@ fi
 echo "  ✓ Ollama OK"
 
 for m in "$LLM" "$EMB"; do
-  if ! curl -sf "${OLLAMA_LOCAL}/api/tags" | grep -q "\"${m%%:*}"; then
+  # Match the exact tag (Ollama implies :latest for a bare name). Matching only the family
+  # prefix would wrongly skip the pull when a different tag of the same family is present.
+  case "$m" in *:*) want="$m" ;; *) want="$m:latest" ;; esac
+  if ! curl -sf "${OLLAMA_LOCAL}/api/tags" | grep -q "\"${want}\""; then
     echo "▶ Pulling model: $m (several GB)"; ollama pull "$m"
   fi
 done

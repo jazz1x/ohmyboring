@@ -435,7 +435,7 @@ fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, Stri
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
         return Err((
             -32603,
-            "HERMES_VAULT_DIR 미설정 — remember 기록 대상 없음".to_owned(),
+            "DRUDGE_VAULT_DIR 미설정 — remember 기록 대상 없음".to_owned(),
         ));
     };
     let text = args
@@ -630,10 +630,13 @@ fn spawn_scheduler(
     source_dirs: Arc<Vec<String>>,
     vault_dir: Arc<Option<PathBuf>>,
 ) {
+    // `.max(1)` — `DRUDGE_SYNC_HOURS=0` would make a zero Duration, and
+    // tokio::time::interval panics on a zero period. Clamp to ≥1h.
     let sync_hours: u64 = std::env::var("DRUDGE_SYNC_HOURS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(4);
+        .unwrap_or(4)
+        .max(1);
     let interval = Duration::from_secs(sync_hours * 3600);
 
     tokio::spawn(async move {
