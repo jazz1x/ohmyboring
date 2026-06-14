@@ -995,7 +995,16 @@ fn sanitize_tag(raw: &str) -> Option<String> {
 fn parse_repo_marker(raw: &str) -> Option<String> {
     let head = raw.get(..raw.len().min(400)).unwrap_or(raw);
     let idx = head.find("repo:")?;
-    let tok = head[idx + "repo:".len()..].split_whitespace().next()?;
+    // The writer (render_note) delimits header fields with " · ", so split on that — not on
+    // whitespace, which would truncate a folder-name fallback slug that contains spaces.
+    let tok = head[idx + "repo:".len()..]
+        .split(" · ")
+        .next()
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim();
     (!tok.is_empty()).then(|| tok.to_owned())
 }
 
@@ -1510,6 +1519,13 @@ mod tests {
             parse_repo_marker(note).as_deref(),
             Some("jazz1x/oh-my-boring")
         );
+    }
+
+    #[test]
+    fn parse_repo_marker_keeps_spaced_folder_slug() {
+        // folder-name fallback with a space must not be truncated at the first whitespace
+        let note = "# x\n> 자동 증류 · origin: personal · repo: my project · cwd: /x\n\n본문";
+        assert_eq!(parse_repo_marker(note).as_deref(), Some("my project"));
     }
 
     #[test]
