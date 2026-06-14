@@ -19,8 +19,10 @@ use tokio_postgres::{Client, NoTls};
 
 use crate::frontmatter::FrontMatter;
 
-#[allow(dead_code)]
-pub const EMBED_DIM: usize = 1024; // bge-m3
+/// Embedding dimension (bge-m3 = 1024). Enforced at the upsert boundary and used to build the
+/// `chunk.embedding vector(N)` DDL so the column and the guard can't drift. If you change the
+/// embed model to a different dim, change this one value (and `make reset` to rebuild the column).
+pub const EMBED_DIM: usize = 1024;
 
 /// Ingest input (one chunk).
 pub struct Doc {
@@ -157,11 +159,15 @@ impl Store {
                     Ok(pair) => break pair,
                     Err(e) if tries < 9 => {
                         tries += 1;
-                        eprintln!("[store] postgres 연결 재시도 {tries}/10 … ({e})");
+                        eprintln!("[store] postgres connect retry {tries}/10 … ({e})");
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                     Err(e) => {
-                        return Err(anyhow::Error::new(e).context("postgres connect (재시도 소진)"));
+                        return Err(anyhow::Error::new(e).context(
+                            "postgres connect (retries exhausted) — is Postgres up? \
+                             vector mode needs `DRUDGE_VECTOR=on make up` (starts pgvector); \
+                             or run wiki-first with DRUDGE_VECTOR unset",
+                        ));
                     }
                 }
             }
@@ -191,7 +197,7 @@ impl Store {
                      id          text PRIMARY KEY,
                      source_path text NOT NULL REFERENCES document(source_path) ON DELETE CASCADE,
                      content     text NOT NULL DEFAULT '',
-                     embedding   vector(1024),
+                     embedding   vector(1024), -- must equal store::EMBED_DIM (guarded in upsert_chunk)
                      origin      text NOT NULL DEFAULT '',
                      project     text NOT NULL DEFAULT '',
                      kind        text NOT NULL DEFAULT '',
@@ -217,8 +223,8 @@ impl Store {
                  ALTER TABLE document ADD COLUMN IF NOT EXISTS extracted_sha text NOT NULL DEFAULT '';
                  ALTER TABLE document ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
                  CREATE INDEX IF NOT EXISTS document_updated ON document(updated_at DESC);
-                 -- claim: 시간축 사실 권위(Graphiti 무효화 + external-kb-bot claims, 개인 규모 축소).
-                 --   (subject,predicate) 의 현재값 = superseded_at IS NULL. 새 value 오면 옛것 봉인.
+                 -- claim: temporal fact authority (Graphiti-style invalidation, scaled down for personal use).
+                 --   current value of (subject,predicate) = superseded_at IS NULL. A new value seals the old.
                  CREATE TABLE IF NOT EXISTS claim (
                      subject       text NOT NULL,
                      predicate     text NOT NULL,
@@ -226,7 +232,7 @@ impl Store {
                      source_path   text NOT NULL,
                      valid_from    timestamptz NOT NULL,
                      superseded_at timestamptz,
-                     embedding     vector(1024),
+                     embedding     vector(1024), -- must equal store::EMBED_DIM
                      PRIMARY KEY (subject, predicate, valid_from)
                  );
                  CREATE INDEX IF NOT EXISTS claim_current ON claim(subject, predicate)
@@ -610,6 +616,18 @@ impl Store {
     // ── chunk (embedding) ─────────────────────────────────────────────────────
 
     pub async fn upsert_chunk(&self, d: &Doc) -> Result<()> {
+        // Parse-don't-validate at the DB boundary: the chunk column is vector(EMBED_DIM), so a
+        // mismatched embedding (user set DRUDGE_EMBED_MODEL to a non-1024-dim model) would be
+        // rejected by Postgres deep in the scheduler with a cryptic error. Catch it here with an
+        // actionable message naming the expected/actual dim.
+        if d.embedding.len() != EMBED_DIM {
+            anyhow::bail!(
+                "embedding dim mismatch: got {}, expected {EMBED_DIM}. \
+                 DRUDGE_EMBED_MODEL must be a {EMBED_DIM}-dim model (default bge-m3), \
+                 or the schema's vector({EMBED_DIM}) needs to change.",
+                d.embedding.len()
+            );
+        }
         let vec = Vector::from(d.embedding.clone());
         let idx = i32::try_from(d.chunk_idx).unwrap_or(i32::MAX);
         self.db
