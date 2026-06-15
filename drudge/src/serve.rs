@@ -432,7 +432,8 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
     // 1. allocate id + path, then write the wiki note (deterministic file IO — the SSOT artifact).
     let wiki_dir = vault_root.join("wiki");
     std::fs::create_dir_all(&wiki_dir).map_err(|e| (-32603_i32, format!("wiki dir: {e}")))?;
-    let wiki_id = vault::next_wiki_id(&wiki_dir).map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
+    let wiki_id =
+        vault::next_wiki_id(&wiki_dir).map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
     let path = wiki_dir.join(format!("{wiki_id}.md"));
     let mut front = note.front;
     front.source_path = path.to_string_lossy().into_owned();

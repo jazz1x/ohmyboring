@@ -1112,7 +1112,7 @@ mod tests {
         );
     }
 
-fn test_schema() -> Schema {
+    fn test_schema() -> Schema {
         Schema {
             page_id: PageIdSchema {
                 pattern: r"^wiki-\d{4,5}$".to_owned(),

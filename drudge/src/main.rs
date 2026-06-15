@@ -237,7 +237,14 @@ async fn main() -> Result<()> {
             let is = ingest::run(store, &ol, &cfg, &[vault_wiki]).await?;
             println!(
                 "sync: ingest(new={} updated={} deleted={} chunks={}) graph(tools={} concepts={} claims={} edges={})",
-                is.new, is.updated, is.deleted, is.chunks, is.tools, is.concepts, is.claims, is.edges,
+                is.new,
+                is.updated,
+                is.deleted,
+                is.chunks,
+                is.tools,
+                is.concepts,
+                is.claims,
+                is.edges,
             );
             let ss = store.semantic_stats().await?;
             println!(
