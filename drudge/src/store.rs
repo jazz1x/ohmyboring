@@ -75,30 +75,21 @@ pub struct GraphStats {
 pub struct GcStats {
     pub tool: usize,
     pub concept: usize,
-    pub problem: usize,
-    pub solution: usize,
-    pub attempt: usize,
 }
 
 impl GcStats {
     pub const fn total(&self) -> usize {
-        self.tool + self.concept + self.problem + self.solution + self.attempt
+        self.tool + self.concept
     }
 }
 
 /// Semantic graph stats (for audit).
 #[derive(Debug, Default)]
 pub struct SemanticStats {
-    pub problems: usize,
-    pub solutions: usize,
     pub tools: usize,
     pub concepts: usize,
-    pub attempts: usize,
-    pub addresses: usize,
-    pub resolved_by: usize,
     pub uses: usize,
     pub about: usize,
-    pub tried: usize,
 }
 
 pub struct Store {
@@ -106,14 +97,9 @@ pub struct Store {
 }
 
 /// Semantic edge kinds (doc→entity) — the SSOT shared by clear/stats.
-const SEMANTIC_EDGE_KINDS: [&str; 6] = [
-    "addresses",
-    "resolved_by",
-    "uses",
-    "about",
-    "tried",
-    "solves",
-];
+/// Kernel A: graph is tool/concept only (`uses`/`about`). Narrative (problem/attempt/solution) lives in
+/// the note body markdown, not as graph nodes — so those edge kinds are gone.
+const SEMANTIC_EDGE_KINDS: [&str; 2] = ["uses", "about"];
 
 /// Build a pgvector `Vector` after checking the dimension matches the `vector(EMBED_DIM)` columns.
 /// Single boundary guard shared by every embedding insert (chunk + claim) — parse-don't-validate:
@@ -611,7 +597,7 @@ impl Store {
         Ok(())
     }
 
-    /// Remove (prune) document + chunks (CASCADE) + graph edges / attempt nodes.
+    /// Remove (prune) document + chunks (CASCADE) + graph edges.
     pub async fn delete_document(&self, path: &str) -> Result<()> {
         self.db
             .execute("DELETE FROM document WHERE source_path = $1;", &[&path])
@@ -619,12 +605,6 @@ impl Store {
         let doc_id = doc_node_id(path);
         self.db
             .execute("DELETE FROM edge WHERE src = $1 OR dst = $1;", &[&doc_id])
-            .await?;
-        self.db
-            .execute(
-                "DELETE FROM node WHERE id LIKE $1;",
-                &[&format!("attempt:{path}#%")],
-            )
             .await?;
         Ok(())
     }
@@ -702,46 +682,6 @@ impl Store {
             .collect())
     }
 
-    /// Incremental extract — only documents whose `extracted_sha` differs from the current `sha` (changed/new). Returns the joined body.
-    pub async fn docs_needing_extract(&self) -> Result<Vec<(String, String)>> {
-        let rows = self
-            .db
-            .query(
-                "SELECT source_path FROM document WHERE extracted_sha IS DISTINCT FROM sha;",
-                &[],
-            )
-            .await?;
-        let paths: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
-        let mut out = Vec::with_capacity(paths.len());
-        for path in paths {
-            let crows = self
-                .db
-                .query(
-                    "SELECT content FROM chunk WHERE source_path = $1 ORDER BY chunk_idx ASC;",
-                    &[&path],
-                )
-                .await?;
-            let body = crows
-                .into_iter()
-                .map(|r| r.get::<_, String>(0))
-                .collect::<Vec<_>>()
-                .join("\n");
-            out.push((path, body));
-        }
-        Ok(out)
-    }
-
-    /// Mark a document as extracted (extracted_sha ← sha) — skipped from the next sync onward until it changes.
-    pub async fn mark_extracted(&self, doc_path: &str) -> Result<()> {
-        self.db
-            .execute(
-                "UPDATE document SET extracted_sha = sha WHERE source_path = $1;",
-                &[&doc_path],
-            )
-            .await?;
-        Ok(())
-    }
-
     // ── graph helpers (node/edge upsert) ───────────────────────────────────────
 
     async fn upsert_node(
@@ -775,14 +715,6 @@ impl Store {
 
     // ── semantic nodes ──────────────────────────────────────────────────────────
 
-    pub async fn upsert_problem(&self, slug: &str, text: &str) -> Result<()> {
-        self.upsert_node(&format!("problem:{slug}"), "problem", text, None)
-            .await
-    }
-    pub async fn upsert_solution(&self, slug: &str, text: &str) -> Result<()> {
-        self.upsert_node(&format!("solution:{slug}"), "solution", text, None)
-            .await
-    }
     pub async fn upsert_tool(&self, slug: &str, text: &str) -> Result<()> {
         self.upsert_node(&format!("tool:{slug}"), "tool", text, None)
             .await
@@ -792,60 +724,21 @@ impl Store {
             .await
     }
 
-    pub async fn upsert_attempt(
-        &self,
-        doc_path: &str,
-        idx: usize,
-        what: &str,
-        outcome: &str,
-    ) -> Result<()> {
-        let id = format!("attempt:{doc_path}#{idx}");
-        self.upsert_node(&id, "attempt", what, Some(outcome)).await
-    }
-
-    /// Remove this document's semantic edges + attempt nodes (makes extract idempotent).
+    /// Remove this document's semantic edges (uses/about) — makes the deterministic graph rebuild idempotent.
     pub async fn clear_semantic_edges(&self, doc_path: &str) -> Result<()> {
         let doc_id = doc_node_id(doc_path);
         let kinds: Vec<&str> = SEMANTIC_EDGE_KINDS.to_vec();
-        // doc → entity edges
         self.db
             .execute(
                 "DELETE FROM edge WHERE src = $1 AND kind = ANY($2);",
                 &[&doc_id, &kinds],
             )
             .await?;
-        // edges touching this document's attempt nodes (leads_to, etc.) + the attempt nodes
-        let attempt_like = format!("attempt:{doc_path}#%");
-        self.db
-            .execute(
-                "DELETE FROM edge WHERE src LIKE $1 OR dst LIKE $1;",
-                &[&attempt_like],
-            )
-            .await?;
-        self.db
-            .execute("DELETE FROM node WHERE id LIKE $1;", &[&attempt_like])
-            .await?;
         Ok(())
     }
 
     // ── semantic edges (doc → entity) ───────────────────────────────────────────
 
-    pub async fn relate_doc_problem(&self, doc_path: &str, slug: &str) -> Result<()> {
-        self.upsert_edge(
-            &doc_node_id(doc_path),
-            &format!("problem:{slug}"),
-            "addresses",
-        )
-        .await
-    }
-    pub async fn relate_doc_solution(&self, doc_path: &str, slug: &str) -> Result<()> {
-        self.upsert_edge(
-            &doc_node_id(doc_path),
-            &format!("solution:{slug}"),
-            "resolved_by",
-        )
-        .await
-    }
     pub async fn relate_doc_tool(&self, doc_path: &str, slug: &str) -> Result<()> {
         self.upsert_edge(&doc_node_id(doc_path), &format!("tool:{slug}"), "uses")
             .await
@@ -853,14 +746,6 @@ impl Store {
     pub async fn relate_doc_concept(&self, doc_path: &str, slug: &str) -> Result<()> {
         self.upsert_edge(&doc_node_id(doc_path), &format!("concept:{slug}"), "about")
             .await
-    }
-    pub async fn relate_doc_attempt(&self, doc_path: &str, idx: usize) -> Result<()> {
-        self.upsert_edge(
-            &doc_node_id(doc_path),
-            &format!("attempt:{doc_path}#{idx}"),
-            "tried",
-        )
-        .await
     }
 
     // ── graph retrieval ───────────────────────────────────────────────────────
@@ -893,18 +778,6 @@ impl Store {
         Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
-    /// lineage — within the same document, attempt[from] → attempt[to] (`leads_to`). The order of the problem-solving narrative.
-    pub async fn relate_leads_to(
-        &self,
-        doc_path: &str,
-        from_idx: usize,
-        to_idx: usize,
-    ) -> Result<()> {
-        let src = format!("attempt:{doc_path}#{from_idx}");
-        let dst = format!("attempt:{doc_path}#{to_idx}");
-        self.upsert_edge(&src, &dst, "leads_to").await
-    }
-
     // ── stats / GC ──────────────────────────────────────────────────────────────
 
     pub async fn graph_stats(&self) -> Result<GraphStats> {
@@ -919,23 +792,17 @@ impl Store {
 
     pub async fn semantic_stats(&self) -> Result<SemanticStats> {
         Ok(SemanticStats {
-            problems: count_node_kind(&self.db, "problem").await?,
-            solutions: count_node_kind(&self.db, "solution").await?,
             tools: count_node_kind(&self.db, "tool").await?,
             concepts: count_node_kind(&self.db, "concept").await?,
-            attempts: count_node_kind(&self.db, "attempt").await?,
-            addresses: count_edge_kind(&self.db, "addresses").await?,
-            resolved_by: count_edge_kind(&self.db, "resolved_by").await?,
             uses: count_edge_kind(&self.db, "uses").await?,
             about: count_edge_kind(&self.db, "about").await?,
-            tried: count_edge_kind(&self.db, "tried").await?,
         })
     }
 
     /// Remove orphan semantic nodes — entity nodes not referenced by any edge.
     pub async fn gc_orphans(&self) -> Result<GcStats> {
         let mut gc = GcStats::default();
-        for kind in ["tool", "concept", "problem", "solution", "attempt"] {
+        for kind in ["tool", "concept"] {
             let n = self
                 .db
                 .execute(
@@ -947,10 +814,7 @@ impl Store {
             let c = usize::try_from(n).unwrap_or(0);
             match kind {
                 "tool" => gc.tool = c,
-                "concept" => gc.concept = c,
-                "problem" => gc.problem = c,
-                "solution" => gc.solution = c,
-                _ => gc.attempt = c,
+                _ => gc.concept = c,
             }
         }
         Ok(gc)

@@ -20,11 +20,12 @@ use serde_json::{Value, json};
 
 use crate::ask;
 use crate::audit;
-use crate::distill;
-use crate::extract;
+use crate::config;
+use crate::frontmatter::{Claim, FrontMatter};
 use crate::graph;
 use crate::ingest;
 use crate::llm::Llm;
+use crate::redact;
 use crate::retrieve;
 use crate::store::Store;
 use crate::vault;
@@ -35,12 +36,13 @@ use crate::wiki_recall;
 #[derive(Clone)]
 pub struct AppState {
     /// pgvector backend. If `None`, `DRUDGE_VECTOR=off` — retrieval is direct vault/wiki reads (wiki_recall),
-    /// and sync does compile (raw→wiki) only. Vector/graph-dependent endpoints reject explicitly.
+    /// and remember writes the wiki note as first-class memory (no embed/graph). Vector/graph-dependent endpoints reject explicitly.
     store: Option<Arc<Store>>,
     llm: Arc<Llm>,
-    source_dirs: Arc<Vec<String>>,
-    /// vault root (`DRUDGE_VAULT_DIR`). If `Some`, sync performs the raw→wiki compile.
+    /// vault root (`DRUDGE_VAULT_DIR`). The remember target (`<vault>/wiki/wiki-NNNN.md`) + the relates_to projection root.
     vault_dir: Arc<Option<PathBuf>>,
+    /// Policy config (`boring.json`).
+    cfg: Arc<config::BoringConfig>,
 }
 
 impl AppState {
@@ -117,48 +119,16 @@ struct GraphResp {
     semantic_neighbors: Vec<String>,
 }
 
-/// `personal` default — used when the host leaves origin unspecified (company token unset).
-fn default_origin() -> String {
-    "personal".to_owned()
-}
-
-#[derive(Deserialize)]
-struct DistillReq {
-    /// Plain text the host extracted from the session transcript.
-    text: String,
-    #[serde(default)]
-    session_id: String,
-    #[serde(default = "default_origin")]
-    origin: String,
-    #[serde(default)]
-    phase: String,
-    #[serde(default)]
-    repo: String,
-    #[serde(default)]
-    cwd: String,
-}
-
-#[derive(Serialize)]
-struct DistillResp {
-    /// KEEP/SKIP gate result — false means not worth storing, so discarded (not an error).
-    written: bool,
-    /// The recorded raw note's filename. The host joins it with RAW_DIR to fix the mtime + trigger sync.
-    filename: Option<String>,
-}
-
 #[derive(Serialize)]
 struct SyncResp {
-    compile_total_raw: usize,
-    compile_compiled: usize,
-    compile_recompiled: usize,
     ingest_new: usize,
     ingest_updated: usize,
     ingest_deleted: usize,
     ingest_chunks: usize,
-    extract_processed: usize,
-    extract_skipped: usize,
-    extract_nodes: usize,
-    extract_edges: usize,
+    graph_tools: usize,
+    graph_concepts: usize,
+    graph_claims: usize,
+    graph_edges: usize,
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
@@ -263,32 +233,6 @@ async fn handle_audit(State(s): State<AppState>) -> Result<Json<audit::AuditStat
     Ok(Json(stats))
 }
 
-/// Session distillation — takes text the host hook extracted, runs LLM distillation + scrub + raw note recording (SSOT).
-/// If `DRUDGE_VAULT_DIR` is unset there is no recording target → error (the host absorbs it as a no-op).
-async fn handle_distill(
-    State(s): State<AppState>,
-    Json(req): Json<DistillReq>,
-) -> Result<Json<DistillResp>, AppError> {
-    let Some(vault_root) = (*s.vault_dir).as_ref() else {
-        return Err(AppError(anyhow::anyhow!(
-            "DRUDGE_VAULT_DIR not set — no target to write distill notes to"
-        )));
-    };
-    let dreq = distill::DistillRequest {
-        text: req.text,
-        session_id: req.session_id,
-        origin: req.origin,
-        phase: req.phase,
-        repo: req.repo,
-        cwd: req.cwd,
-    };
-    let out = distill::run(&s.llm, vault_root, &dreq).await?;
-    Ok(Json(DistillResp {
-        written: out.written,
-        filename: out.filename,
-    }))
-}
-
 // ── MCP-over-HTTP (Nous Hermes Agent connection) ────────────────────────────
 // JSON-RPC 2.0: initialize · tools/list · tools/call(recall). Notifications get 202 (no response).
 // The `recall` tool = retrieve (vector+graph) → text → the agent retrieves from our self-augmenting KB.
@@ -350,22 +294,62 @@ fn mcp_tools_list() -> Value {
         },
         {
             "name": "remember",
-            "description": "Store what was just learned, decided, or established into persistent memory. It is written as a note in vault/raw \
-                            and absorbed via compile→embedding→graph on the next sync. Recallable after it is written.",
+            "description": "Store a COMPLETE, already-curated note into persistent memory. YOU (the agent) do the reasoning — \
+                            distill the narrative, write the body, and extract the semantic fields (tags/tools/concepts/claims). \
+                            drudge is the deterministic kernel: it embeds (bge-m3), upserts to pgvector, builds the graph from your \
+                            fields, computes relations, and writes the wiki note. No LLM runs inside drudge. Recallable immediately.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "content to remember (problem-solving narrative, decision, fact)"},
-                    "title": {"type": "string", "description": "optional. one-line note title"}
+                    "title": {"type": "string", "description": "one-line note title"},
+                    "body": {"type": "string", "description": "the curated note body (markdown problem-solving narrative)"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "topical tags (≤6), lowercase, no CJK"},
+                    "tools": {"type": "array", "items": {"type": "string"}, "description": "software tools/libraries used (≤6), short canonical names"},
+                    "concepts": {"type": "array", "items": {"type": "string"}, "description": "key technical concepts/patterns (≤6)"},
+                    "origin": {"type": "string", "enum": ["personal", "company", "mirror", "community"], "description": "default personal"},
+                    "repo": {"type": "string", "description": "optional repo slug → becomes the project + a repo/<slug> tag"},
+                    "claims": {
+                        "type": "array",
+                        "description": "durable facts/decisions as (subject,predicate,value) triples (a new value supersedes the old)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "subject": {"type": "string"},
+                                "predicate": {"type": "string"},
+                                "value": {"type": "string"}
+                            },
+                            "required": ["subject", "predicate", "value"]
+                        }
+                    }
                 },
-                "required": ["text"]
+                "required": ["title", "body"]
             }
         },
         {
             "name": "sync",
-            "description": "Run the ingest pipeline once: compile (raw→wiki curation) → embedding → \
-                            pgvector upsert → graph extraction. Makes notes accumulated via remember immediately recallable.",
+            "description": "Re-ingest the vault deterministically: walk notes → embed → pgvector upsert → graph (from frontmatter) → \
+                            recompute relations. No LLM curation. Use to rebuild/refresh after bulk changes; single remember calls are \
+                            absorbed immediately and do not need a sync.",
             "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "config_get",
+            "description": "Return the current policy configuration from boring.json (note language, repo rules, source directories).",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "classify_repo",
+            "description": "Upsert a repo origin rule into boring.json: classify a path/slug substring as personal/company/mirror/community. \
+                            Persists to the host file (takes effect on the next sync/restart). The agent uses this to self-maintain repo classification.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "match": {"type": "string", "description": "case-insensitive substring matched against cwd or git remote URL (e.g. an org/repo slug)"},
+                    "origin": {"type": "string", "enum": ["personal", "company", "mirror", "community"]},
+                    "name": {"type": "string", "description": "optional repo slug override"}
+                },
+                "required": ["match", "origin"]
+            }
         }
     ]})
 }
@@ -380,8 +364,12 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
     let args = params.and_then(|p| p.get("arguments"));
     let text = match name {
         "recall" => mcp_recall(s, args).await?,
-        "remember" => mcp_remember(s, args)?,
+        "remember" => mcp_remember(s, args).await?,
         "sync" => mcp_sync(s).await?,
+        "config_get" => {
+            serde_json::to_string(&*s.cfg).map_err(|e| (-32603, format!("config: {e}")))?
+        }
+        "classify_repo" => mcp_classify_repo(s, args)?,
         other => return Err((-32602, format!("unknown tool: {other}"))),
     };
     Ok(json!({"content": [{"type": "text", "text": text}], "isError": false}))
@@ -429,188 +417,242 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         .join("\n\n"))
 }
 
-/// `remember` — writes what the agent learned as a vault/raw note. Absorbed on the next `sync`.
-/// Filename = content sha8 → idempotent on re-recording the same content (prevents duplicate notes). Synchronous IO (file write) only.
-fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
+/// `remember` — the kernel ingest entry. The agent hands a COMPLETE curated note; drudge deterministically
+/// writes it as a wiki page, embeds + upserts it, builds the graph from the supplied fields, and recomputes
+/// relations. No generation in the kernel — embed (bge-m3) is the only model call. Recallable immediately.
+async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
         return Err((
             -32603,
             "DRUDGE_VAULT_DIR not set — no target to write remember notes to".to_owned(),
         ));
     };
-    let text = args
-        .and_then(|a| a.get("text"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    if text.is_empty() {
-        return Err((-32602, "missing argument: text".to_owned()));
-    }
-    let title = args
-        .and_then(|a| a.get("title"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
+    let note = parse_remember_note(args)?;
 
-    let sha = {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(text.as_bytes());
-        hex::encode(&digest[..4]) // 8 hex chars
+    // 1. allocate id + path, then write the wiki note (deterministic file IO — the SSOT artifact).
+    let wiki_dir = vault_root.join("wiki");
+    std::fs::create_dir_all(&wiki_dir).map_err(|e| (-32603_i32, format!("wiki dir: {e}")))?;
+    let wiki_id = vault::next_wiki_id(&wiki_dir).map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
+    let path = wiki_dir.join(format!("{wiki_id}.md"));
+    let mut front = note.front;
+    front.source_path = path.to_string_lossy().into_owned();
+    let content = vault::render_wiki_note(&wiki_id, &front, &note.body)
+        .map_err(|e| (-32603_i32, format!("render wiki note: {e:#}")))?;
+    std::fs::write(&path, content).map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
+
+    // 2. vector off → the wiki file is first-class memory (wiki_recall reads it). Nothing to embed.
+    let Some(store) = s.store.as_ref() else {
+        return Ok(format!(
+            "remembered → wiki/{wiki_id}.md (vector off — wiki is first-class memory; recallable now)"
+        ));
     };
-    let raw_dir = vault_root.join("raw");
-    std::fs::create_dir_all(&raw_dir).map_err(|e| (-32603_i32, format!("raw dir: {e}")))?;
-    let path = raw_dir.join(format!("memo-{sha}.md"));
-    let heading = if title.is_empty() {
-        format!("# Memo — {}", vault::today_utc())
-    } else {
-        format!("# {title}")
-    };
-    let body = format!("{heading}\n> origin: personal · via: agent(remember)\n\n{text}\n");
-    std::fs::write(&path, body).map_err(|e| (-32603_i32, format!("raw note write: {e}")))?;
+
+    // 3. deterministic ingest of this one note (chunk→embed→upsert→graph) + relation recompute.
+    let mut stats = ingest::Stats::default();
+    ingest::ingest_file(store, &s.llm, &s.cfg, &front.source_path, &mut stats)
+        .await
+        .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
+    if let Err(e) = vault::project_links(store, vault_root, 6).await {
+        eprintln!("[remember] project_links warning (ignored): {e:#}");
+    }
     Ok(format!(
-        "remembered → raw/memo-{sha}.md. Call sync to run compile→embedding→recallable."
+        "remembered → wiki/{wiki_id}.md · chunks {} · graph(tools {} concepts {} claims {}) — recallable now",
+        stats.chunks, stats.tools, stats.concepts, stats.claims
     ))
 }
 
-/// `sync` — one run of the ingest pipeline (compile→ingest→extract). The agent decides *when* to absorb.
+/// A parsed remember note — the typed boundary value (parse-don't-validate).
+struct RememberNote {
+    front: FrontMatter,
+    body: String,
+}
+
+/// Parse + normalize the `remember` arguments into a typed note. The deterministic boundary: sanitize tags,
+/// fold the repo slug into project + a `repo/<slug>` tag, scrub secrets from the body (git leak boundary).
+fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, String)> {
+    let get_str = |k: &str| {
+        args.and_then(|a| a.get(k))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+    let get_arr = |k: &str| {
+        args.and_then(|a| a.get(k))
+            .and_then(Value::as_array)
+            .map(|v| {
+                v.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    let title = get_str("title");
+    let body = get_str("body");
+    if title.is_empty() {
+        return Err((-32602, "missing argument: title".to_owned()));
+    }
+    if body.is_empty() {
+        return Err((-32602, "missing argument: body".to_owned()));
+    }
+
+    // origin: validated enum, default personal (parse-don't-validate at the boundary).
+    let origin = match get_str("origin").as_str() {
+        "company" => "company",
+        "mirror" => "mirror",
+        "community" => "community",
+        _ => "personal",
+    }
+    .to_owned();
+    let repo = get_str("repo");
+
+    // tags: Obsidian-safe, ≤6; prepend repo/<slug> as the category axis.
+    let mut tags: Vec<String> = get_arr("tags")
+        .iter()
+        .filter_map(|t| vault::sanitize_tag(t))
+        .take(6)
+        .collect();
+    if !repo.is_empty()
+        && let Some(r) = vault::sanitize_tag(&repo)
+    {
+        tags.insert(0, format!("repo/{r}"));
+    }
+
+    // claims: (subject,predicate,value) triples.
+    let claims: Vec<Claim> = args
+        .and_then(|a| a.get("claims"))
+        .and_then(Value::as_array)
+        .map(|v| v.iter().filter_map(parse_claim).collect())
+        .unwrap_or_default();
+
+    // secret scrub at the git boundary (the one leak boundary into the tracked vault).
+    let re = redact::build_secret_re().map_err(|e| (-32603_i32, format!("secret regex: {e:#}")))?;
+    let body = redact::redact(&re, &body);
+
+    let front = FrontMatter {
+        origin,
+        project: repo, // repo slug as project (may be empty)
+        date: vault::today_utc(),
+        kind: "note".to_owned(),
+        source_path: String::new(), // filled by caller after id allocation
+        title: Some(title),
+        tags,
+        tools: get_arr("tools"),
+        concepts: get_arr("concepts"),
+        claims,
+    };
+    Ok(RememberNote { front, body })
+}
+
+/// One claim JSON object → typed `Claim`. None if any field is missing/empty (skipped at the boundary).
+fn parse_claim(v: &Value) -> Option<Claim> {
+    let f = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().trim();
+    let (subject, predicate, value) = (f("subject"), f("predicate"), f("value"));
+    (!subject.is_empty() && !predicate.is_empty() && !value.is_empty()).then(|| Claim {
+        subject: subject.to_owned(),
+        predicate: predicate.to_owned(),
+        value: value.to_owned(),
+    })
+}
+
+/// `classify_repo` — upsert a repo origin rule into boring.json (agent self-maintains classification).
+fn mcp_classify_repo(_s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
+    let g = |k: &str| args.and_then(|a| a.get(k)).and_then(Value::as_str);
+    let match_ = g("match")
+        .filter(|v| !v.is_empty())
+        .ok_or((-32602, "missing argument: match".to_owned()))?;
+    let origin = g("origin")
+        .filter(|v| !v.is_empty())
+        .ok_or((-32602, "missing argument: origin".to_owned()))?;
+    let name = g("name").filter(|v| !v.is_empty());
+    let path = config::upsert_repo_rule(match_, origin, name)
+        .map_err(|e| (-32603, format!("write boring.json: {e:#}")))?;
+    serde_json::to_string_pretty(&json!({
+        "saved": true,
+        "path": path.display().to_string(),
+        "match": match_,
+        "origin": origin,
+        "note": "takes effect on the next sync/restart",
+    }))
+    .map_err(|e| (-32603, format!("json: {e}")))
+}
+
+/// `sync` — one deterministic re-ingest pass (walk→embed→upsert→graph→relations). No LLM curation.
 async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
-    let o = do_sync(
-        s.store.as_deref(),
-        &s.llm,
-        &s.source_dirs,
-        (*s.vault_dir).as_ref(),
-    )
-    .await
-    .map_err(|e| (-32603_i32, format!("sync: {e:#}")))?;
-    let compiled = o.compile.as_ref().map_or(0, |c| c.compiled + c.recompiled);
-    let nodes = o.extract.problems
-        + o.extract.solutions
-        + o.extract.tools
-        + o.extract.concepts
-        + o.extract.attempts;
+    let o = do_sync(s.store.as_deref(), &s.llm, (*s.vault_dir).as_ref(), &s.cfg)
+        .await
+        .map_err(|e| (-32603_i32, format!("sync: {e:#}")))?;
     Ok(format!(
-        "sync complete — compile {compiled} · ingest(new {} updated {} chunks {}) · graph(nodes {nodes} edges {})",
-        o.ingest.new, o.ingest.updated, o.ingest.chunks, o.extract.edges
+        "sync complete — ingest(new {} updated {} deleted {} chunks {}) · graph(tools {} concepts {} claims {} edges {})",
+        o.ingest.new,
+        o.ingest.updated,
+        o.ingest.deleted,
+        o.ingest.chunks,
+        o.ingest.tools,
+        o.ingest.concepts,
+        o.ingest.claims,
+        o.ingest.edges
     ))
 }
 
 async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncResp>, AppError> {
-    let o = do_sync(
-        s.store.as_deref(),
-        &s.llm,
-        &s.source_dirs,
-        (*s.vault_dir).as_ref(),
-    )
-    .await?;
-    let (c_raw, c_compiled, c_recompiled) = o
-        .compile
-        .as_ref()
-        .map_or((0, 0, 0), |c| (c.total_raw, c.compiled, c.recompiled));
+    let o = do_sync(s.store.as_deref(), &s.llm, (*s.vault_dir).as_ref(), &s.cfg).await?;
     Ok(Json(SyncResp {
-        compile_total_raw: c_raw,
-        compile_compiled: c_compiled,
-        compile_recompiled: c_recompiled,
         ingest_new: o.ingest.new,
         ingest_updated: o.ingest.updated,
         ingest_deleted: o.ingest.deleted,
         ingest_chunks: o.ingest.chunks,
-        extract_processed: o.extract.processed,
-        extract_skipped: o.extract.skipped,
-        extract_nodes: o.extract.problems
-            + o.extract.solutions
-            + o.extract.tools
-            + o.extract.concepts
-            + o.extract.attempts,
-        extract_edges: o.extract.edges,
+        graph_tools: o.ingest.tools,
+        graph_concepts: o.ingest.concepts,
+        graph_claims: o.ingest.claims,
+        graph_edges: o.ingest.edges,
     }))
 }
 
-// ── one sync cycle (compile → ingest → extract) ─────────────────────────────
+// ── one sync cycle (deterministic re-ingest) ────────────────────────────────
 
 struct SyncOutcome {
-    compile: Option<vault::CompileStats>,
     ingest: ingest::Stats,
-    extract: extract::ExtractStats,
 }
 
-/// vault compile (raw→wiki). Graceful skip (None) when `vault_dir` is unset or the raw directory is absent.
-/// A compile failure logs to stderr then returns None — ingest/extract (absorbing the existing wiki) still proceed (independent stages).
-async fn run_compile_step(llm: &Llm, vault_dir: Option<&PathBuf>) -> Option<vault::CompileStats> {
-    // Bound compile per sync so a slow/stuck stage never starves ingest. Incremental wiki writes
-    // persist partial progress; the next sync resumes via sha-skip. Generous budget — a normal
-    // first pass over many notes still fits; only a genuine hang trips it.
-    const COMPILE_BUDGET_SECS: u64 = 900;
-    let vault_root = vault_dir?;
-    let raw_dir = vault_root.join("raw");
-    if !raw_dir.is_dir() {
-        return None; // no distilled raw notes yet — nothing to compile (normal)
-    }
-    let today = vault::today_utc();
-    match tokio::time::timeout(
-        Duration::from_secs(COMPILE_BUDGET_SECS),
-        vault::run_compile(vault_root, &raw_dir, &today, llm),
-    )
-    .await
-    {
-        Ok(Ok(s)) => {
-            eprintln!(
-                "[scheduler] compile: total_raw={} compiled={} recompiled={} skipped={}",
-                s.total_raw, s.compiled, s.recompiled, s.skipped
-            );
-            Some(s)
-        }
-        Ok(Err(e)) => {
-            eprintln!("[scheduler] compile error: {e:#}");
-            None
-        }
-        Err(_) => {
-            eprintln!(
-                "[scheduler] compile budget {COMPILE_BUDGET_SECS}s exceeded — partial progress persisted (incremental write), ingest proceeds, next sync resumes"
-            );
-            None
-        }
-    }
-}
-
-/// Self-augmenting cycle: raw→wiki compile → (only when vector is on) source→DB ingest → graph extract.
-/// When `store=None` (DRUDGE_VECTOR=off), **compile only** — the wiki is first-class memory, so it alone supports recall.
-/// Shared by HTTP `/sync` and the background scheduler (SSOT).
+/// Deterministic re-ingest: walk notes → embed → pgvector upsert → graph (from frontmatter) → GC →
+/// recompute relations. When `store=None` (DRUDGE_VECTOR=off), the wiki files are first-class memory
+/// (wiki_recall reads them directly) — nothing to embed/graph. Shared by HTTP `/sync` + the scheduler (SSOT).
 async fn do_sync(
     store: Option<&Store>,
     llm: &Llm,
-    source_dirs: &[String],
     vault_dir: Option<&PathBuf>,
+    cfg: &config::BoringConfig,
 ) -> Result<SyncOutcome> {
-    let compile = run_compile_step(llm, vault_dir).await;
     let Some(store) = store else {
-        // vector off — wiki compile alone is enough (no embedding/graph).
         return Ok(SyncOutcome {
-            compile,
             ingest: ingest::Stats::default(),
-            extract: extract::ExtractStats::default(),
         });
     };
-    let ingest = ingest::run(store, llm, source_dirs).await?;
-    let extract = extract::run(store, llm).await?;
-    // Re-extraction deletes only old edges and leaves nodes orphaned (accumulates every sync → node explosion).
-    // GC orphan semantic nodes at the end of every sync — keeps the graph lean (SSOT hygiene).
+    // Kernel A corpus = the vault's wiki dir (where remember writes). No vault → nothing to re-ingest
+    // (remember ingests each note live; this walk only catches manual edits/deletes).
+    let dirs: Vec<String> = vault_dir
+        .map(|v| vec![v.join("wiki").to_string_lossy().into_owned()])
+        .unwrap_or_default();
+    let ingest = ingest::run(store, llm, cfg, &dirs).await?;
+    // GC orphan semantic nodes (edges are rebuilt per-doc on re-ingest) — keeps the graph lean.
     match store.gc_orphans().await {
         Ok(g) => eprintln!("[scheduler] gc orphans: {}", g.total()),
         Err(e) => eprintln!("[scheduler] gc warning (ignored): {e:#}"),
     }
     // graph → Obsidian projection: doc↔doc relations as wiki relates_to wikilinks (only when vault exists).
-    // Auxiliary visualization stage — on failure it does not break the core sync (ingest/extract), just logs.
+    // Auxiliary stage — on failure it does not break the core ingest, just logs.
     if let Some(vd) = vault_dir {
         match vault::project_links(store, vd, 6).await {
             Ok(n) => eprintln!("[scheduler] graph→obsidian: updated {n} wiki relates_to"),
             Err(e) => eprintln!("[scheduler] project_links warning (ignored): {e:#}"),
         }
     }
-    Ok(SyncOutcome {
-        compile,
-        ingest,
-        extract,
-    })
+    Ok(SyncOutcome { ingest })
 }
 
 // ── background scheduler ────────────────────────────────────────────────────
@@ -618,22 +660,20 @@ async fn do_sync(
 async fn run_sync(
     store: Option<&Store>,
     llm: &Llm,
-    source_dirs: &[String],
     vault_dir: Option<&PathBuf>,
+    cfg: &config::BoringConfig,
 ) {
-    match do_sync(store, llm, source_dirs, vault_dir).await {
+    match do_sync(store, llm, vault_dir, cfg).await {
         Ok(o) => eprintln!(
-            "[scheduler] sync done — ingest(new={} updated={} deleted={} chunks={}) extract(nodes={} edges={})",
+            "[scheduler] sync done — ingest(new={} updated={} deleted={} chunks={}) graph(tools={} concepts={} claims={} edges={})",
             o.ingest.new,
             o.ingest.updated,
             o.ingest.deleted,
             o.ingest.chunks,
-            o.extract.problems
-                + o.extract.solutions
-                + o.extract.tools
-                + o.extract.concepts
-                + o.extract.attempts,
-            o.extract.edges
+            o.ingest.tools,
+            o.ingest.concepts,
+            o.ingest.claims,
+            o.ingest.edges
         ),
         Err(e) => eprintln!("[scheduler] sync error: {e:#}"),
     }
@@ -642,8 +682,8 @@ async fn run_sync(
 fn spawn_scheduler(
     store: Option<Arc<Store>>,
     llm: Arc<Llm>,
-    source_dirs: Arc<Vec<String>>,
     vault_dir: Arc<Option<PathBuf>>,
+    cfg: Arc<config::BoringConfig>,
 ) {
     // `.max(1)` — `DRUDGE_SYNC_HOURS=0` would make a zero Duration, and
     // tokio::time::interval panics on a zero period. Clamp to ≥1h.
@@ -661,26 +701,21 @@ fn spawn_scheduler(
             "[scheduler] startup sync (interval={sync_hours}h, vector={})",
             store.is_some()
         );
-        run_sync(store_ref, &llm, &source_dirs, (*vault_dir).as_ref()).await;
+        run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
 
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await; // the first tick is immediate — discard it (already ran above)
         loop {
             ticker.tick().await;
             eprintln!("[scheduler] periodic sync");
-            run_sync(store_ref, &llm, &source_dirs, (*vault_dir).as_ref()).await;
+            run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
         }
     });
 }
 
 // ── entry point ─────────────────────────────────────────────────────────────
 
-pub async fn run(store: Option<Store>, llm: Llm) -> Result<()> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let dirs_env = std::env::var("DRUDGE_SOURCE_DIRS")
-        .unwrap_or_else(|_| format!("{home}/.claude/projects:{home}/oh-my-boring/data/notes"));
-    let source_dirs: Vec<String> = dirs_env.split(':').map(str::to_owned).collect();
-
+pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> Result<()> {
     // vault root — when set, sync includes the raw→wiki compile stage.
     let vault_dir: Option<PathBuf> = std::env::var("DRUDGE_VAULT_DIR").ok().map(PathBuf::from);
 
@@ -689,15 +724,15 @@ pub async fn run(store: Option<Store>, llm: Llm) -> Result<()> {
     let state = AppState {
         store: store.map(Arc::new),
         llm: Arc::new(llm),
-        source_dirs: Arc::new(source_dirs),
         vault_dir: Arc::new(vault_dir),
+        cfg: Arc::new(cfg),
     };
 
     spawn_scheduler(
         state.store.clone(),
         Arc::clone(&state.llm),
-        Arc::clone(&state.source_dirs),
         Arc::clone(&state.vault_dir),
+        Arc::clone(&state.cfg),
     );
 
     let router = axum::Router::new()
@@ -707,7 +742,6 @@ pub async fn run(store: Option<Store>, llm: Llm) -> Result<()> {
         .route("/search", post(handle_search))
         .route("/graph", post(handle_graph))
         .route("/audit", get(handle_audit))
-        .route("/distill", post(handle_distill)) // session distillation (host hook → raw note SSOT)
         .route("/sync", post(handle_sync))
         .route("/mcp", post(handle_mcp)) // MCP-over-HTTP (Nous Hermes Agent calls via the recall tool)
         .with_state(state);
