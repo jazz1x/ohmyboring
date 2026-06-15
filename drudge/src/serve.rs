@@ -536,22 +536,37 @@ struct SyncOutcome {
 /// vault compile (raw→wiki). Graceful skip (None) when `vault_dir` is unset or the raw directory is absent.
 /// A compile failure logs to stderr then returns None — ingest/extract (absorbing the existing wiki) still proceed (independent stages).
 async fn run_compile_step(llm: &Llm, vault_dir: Option<&PathBuf>) -> Option<vault::CompileStats> {
+    // Bound compile per sync so a slow/stuck stage never starves ingest. Incremental wiki writes
+    // persist partial progress; the next sync resumes via sha-skip. Generous budget — a normal
+    // first pass over many notes still fits; only a genuine hang trips it.
+    const COMPILE_BUDGET_SECS: u64 = 900;
     let vault_root = vault_dir?;
     let raw_dir = vault_root.join("raw");
     if !raw_dir.is_dir() {
         return None; // no distilled raw notes yet — nothing to compile (normal)
     }
     let today = vault::today_utc();
-    match vault::run_compile(vault_root, &raw_dir, &today, llm).await {
-        Ok(s) => {
+    match tokio::time::timeout(
+        Duration::from_secs(COMPILE_BUDGET_SECS),
+        vault::run_compile(vault_root, &raw_dir, &today, llm),
+    )
+    .await
+    {
+        Ok(Ok(s)) => {
             eprintln!(
                 "[scheduler] compile: total_raw={} compiled={} recompiled={} skipped={}",
                 s.total_raw, s.compiled, s.recompiled, s.skipped
             );
             Some(s)
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             eprintln!("[scheduler] compile error: {e:#}");
+            None
+        }
+        Err(_) => {
+            eprintln!(
+                "[scheduler] compile budget {COMPILE_BUDGET_SECS}s exceeded — partial progress persisted (incremental write), ingest proceeds, next sync resumes"
+            );
             None
         }
     }

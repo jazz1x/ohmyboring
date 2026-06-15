@@ -927,8 +927,9 @@ fn exit_code(issues: &[Issue], strict: bool) -> i32 {
 /// LLM curation result (parse-don't-validate — typed parse once).
 #[derive(Debug, Deserialize)]
 struct CuratedLlm {
+    // NOTE: no `body` field — the curated body is taken from the post-`<<<BODY>>>` markdown split,
+    // never from JSON (avoids escape-fragility of large markdown inside a JSON string).
     title: String,
-    body: String,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
@@ -1033,22 +1034,6 @@ fn parse_repo_marker(raw: &str) -> Option<String> {
     (!tok.is_empty()).then(|| tok.to_owned())
 }
 
-/// Strip JSON fences — same logic as extract.rs's strip_to_json.
-fn strip_json(raw: &str) -> &str {
-    let Some(start) = raw.find('{') else {
-        return "";
-    };
-    let suffix = &raw[start..];
-    let Some(rel_end) = suffix.rfind('}') else {
-        return "";
-    };
-    let end = start + rel_end + 1;
-    if start >= end {
-        return "";
-    }
-    &raw[start..end]
-}
-
 /// Scan the current wiki directory for the (compiled_from → WikiMeta) map + the maximum numeric id.
 /// Pure file-parsing logic (includes I/O but SRP-separated: read-only scan).
 fn scan_existing_wiki(wiki_dir: &Path) -> Result<(HashMap<String, WikiMeta>, u32)> {
@@ -1119,20 +1104,28 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 /// LLM curation system prompt.
-const COMPILE_SYSTEM: &str = "You are a precise JSON-only curator. Output ONLY a single JSON object — no prose, no markdown fences. /no_think";
+const COMPILE_SYSTEM: &str = "You are a precise curator. Output one line of JSON metadata, then a line with exactly <<<BODY>>>, then the curated markdown body as plain text (do NOT JSON-encode or escape the body). No fences, no prose. /no_think";
 
-/// LLM curation prompt template.
-const COMPILE_PROMPT_TMPL: &str = r#"Curate the raw note below into a wiki page. Return EXACTLY this JSON shape (no extra keys):
-{"title":"<short title, ≤60 chars>","body":"<curated markdown body in the same language as the source note (English by default), with WHY context>","tags":["tag1"],"tools":["tool1"],"concepts":["concept1"]}
+/// LLM curation prompt template. Two-part output: a small JSON header (escapable) + a raw
+/// markdown body after a `<<<BODY>>>` delimiter — the body is never JSON-encoded, which avoids
+/// the escape-fragility of stuffing large markdown into a JSON string field.
+const COMPILE_PROMPT_TMPL: &str = r#"Curate the raw note below into a wiki page. Output in TWO parts:
+
+PART 1 — one line of JSON metadata (NO body key, no extra keys):
+{"title":"<short title, ≤60 chars>","tags":["tag1"],"tools":["tool1"],"concepts":["concept1"]}
+
+PART 2 — a line containing exactly:
+<<<BODY>>>
+then the curated markdown body. Write it as plain markdown — do NOT escape or JSON-encode it. Keep all important insights, add WHY context.
+Do NOT add a "Related" / "See also" / "관련" section or any [[wikilinks]] — cross-links are managed separately.
 
 Rules:
 - title: short, descriptive, ≤60 chars
-- body: curated markdown. Keep all important insights. Add WHY context. Use the same language as the source note (English by default).
 - tags: ≤6 topical tags, lowercase, no Han/CJK characters
 - tools: ≤6 software tools/libraries used, short canonical names, no Han/CJK
 - concepts: ≤6 key technical concepts or patterns, no Han/CJK
-- ALL string values: match the source note's language — NO Chinese/Japanese characters (漢字/汉字/CJK)
-- Use empty arrays [] if not applicable
+- title/tags/tools/concepts: NO Chinese/Japanese characters (漢字/汉字/CJK). Use empty arrays [] if not applicable
+- body: follow the LANGUAGE instruction appended below
 
 Raw note:
 ---
@@ -1261,6 +1254,63 @@ pub struct CompileStats {
 
 /// `drudge vault compile` entry point (I/O shell — delegates to pure logic).
 #[allow(clippy::too_many_lines)]
+/// Strip inline `[[wikilinks]]` from a string (manual scan — no regex dep).
+fn strip_wikilinks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("[[") {
+        out.push_str(&rest[..i]);
+        rest = rest[i + 2..]
+            .find("]]")
+            .map_or(&rest[i + 2..], |j| &rest[i + 2..][j + 2..]);
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Sanitize a curated body: drop a trailing "Related"/"관련"/"See also" section and any inline
+/// `[[wikilinks]]`. Relations are SSOT in frontmatter `relates_to` (computed from the graph) — gemma
+/// otherwise hallucinates long bogus `[[wiki-NNNN]]` lists that pollute the body + Obsidian graph.
+fn sanitize_body(body: &str) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let cut = lines.iter().position(|l| {
+        let t = l.trim_start_matches('#').trim();
+        t.eq_ignore_ascii_case("related") || t == "관련" || t.eq_ignore_ascii_case("see also")
+    });
+    let kept = match cut {
+        Some(i) => lines[..i].join("\n"),
+        None => body.to_owned(),
+    };
+    strip_wikilinks(&kept).trim_end().to_owned()
+}
+
+/// Parse a compile LLM response: leading JSON metadata object + trailing markdown body.
+/// The `<<<BODY>>>` delimiter is stripped if present but not required (key off the JSON object's end).
+/// Returns None on any malformation (no header / bad JSON / empty body) — caller retries or skips.
+fn parse_compiled(llm_raw: &str) -> Option<(CuratedLlm, String)> {
+    let start = llm_raw.find('{')?;
+    let after = &llm_raw[start..];
+    let mut stream = serde_json::Deserializer::from_str(after).into_iter::<CuratedLlm>();
+    let curated = stream.next()?.ok()?;
+    let rest = after[stream.byte_offset()..].trim_start();
+    // Take everything after the LAST `<<<BODY>>>` marker if present (not just a prefix) — a model
+    // may emit a stray fence/preamble between the JSON and the marker, which must not leak into the
+    // wiki body (→ corpus). Fall back to the post-JSON remainder when the marker is absent.
+    let body = rest
+        .rsplit_once("<<<BODY>>>")
+        .map_or(rest, |(_, b)| b)
+        .trim()
+        .to_owned();
+    if body.is_empty() {
+        return None;
+    }
+    Some((curated, body))
+}
+
+// Legit long orchestration: scan existing wiki → per-note compile+incremental-write loop →
+// relation pass. Splitting the linear pipeline into sub-fns with shared mutable state (max_id,
+// stats, maps) would obscure, not clarify.
+#[allow(clippy::too_many_lines)]
 pub async fn run_compile(
     vault_root: &Path,
     raw_dir: &Path,
@@ -1356,25 +1406,37 @@ pub async fn run_compile(
             .with_context(|| format!("failed to read raw file: {}", raw_path.display()))?;
         let body_snip: String = body_raw.chars().take(4000).collect();
         let prompt = COMPILE_PROMPT_TMPL.replace("{BODY}", &body_snip);
+        // Language directive goes in the SYSTEM message (same as distill), not appended after the
+        // user prompt's `/no_think` sentinel where some models weakly honor it.
+        let system = format!("{COMPILE_SYSTEM}\n{}", crate::distill::lang_directive());
 
-        let llm_raw = match llm.generate(COMPILE_SYSTEM, &prompt).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("⚠ compile LLM error [{filename}]: {e} — skipping");
-                stats.skipped += 1;
-                continue;
+        // LLM curation with one retry — covers BOTH a transient LLM error and a 12B model emitting a
+        // malformed JSON header (non-deterministic); a second attempt usually succeeds. parse_compiled()
+        // splits the leading JSON metadata object from the trailing markdown body (delimiter optional).
+        let mut parsed: Option<(CuratedLlm, String)> = None;
+        for attempt in 1..=2u8 {
+            match llm.generate(&system, &prompt).await {
+                Ok(raw) => {
+                    if let Some(v) = parse_compiled(&raw) {
+                        parsed = Some(v);
+                        break;
+                    }
+                    eprintln!("⚠ compile parse retry {attempt} [{filename}] — raw: {raw:.120}");
+                }
+                Err(e) if attempt < 2 => {
+                    eprintln!("⚠ compile LLM error [{filename}] attempt {attempt}: {e} — retrying");
+                }
+                Err(e) => {
+                    eprintln!("⚠ compile LLM error [{filename}]: {e} — skipping");
+                }
             }
+        }
+        let Some((curated, body)) = parsed else {
+            stats.skipped += 1;
+            continue;
         };
-
-        let json_str = strip_json(llm_raw.trim());
-        let curated: CuratedLlm = match serde_json::from_str(json_str) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("⚠ compile JSON parse error [{filename}]: {e} — raw: {json_str:.120}");
-                stats.skipped += 1;
-                continue;
-            }
-        };
+        // Relations live in frontmatter relates_to (SSOT) — strip any LLM-invented body wikilinks/Related section.
+        let body = sanitize_body(&body);
 
         // Han filter + Obsidian-safe normalization (space→-, drop invalid). ≤6 items.
         let mut tags: Vec<String> = filter_han(curated.tags)
@@ -1405,7 +1467,7 @@ pub async fn run_compile(
             date,
             raw_rel_path: raw_rel,
             raw_sha: sha,
-            body: curated.body,
+            body,
             tags,
             tools,
             concepts,
@@ -1413,6 +1475,13 @@ pub async fn run_compile(
         };
 
         let wiki_path = wiki_dir.join(format!("{wiki_id}.md"));
+        // Incremental write: persist each wiki the moment it compiles (relates_to filled in the
+        // post-loop pass). Interruption-safe — a killed compile leaves finished wiki on disk, and the
+        // sha-skip above resumes the rest next run (no 60-min all-or-nothing batch that loses all on kill).
+        let content = render_wiki_page(&draft)?;
+        std::fs::write(&wiki_path, content)
+            .with_context(|| format!("failed to write wiki file: {}", wiki_path.display()))?;
+        println!("✓ {}: {}", draft.wiki_id, draft.title);
         wiki_path_map.insert(wiki_id.clone(), wiki_path);
         drafts.push(draft);
 
@@ -1423,22 +1492,22 @@ pub async fn run_compile(
         }
     }
 
-    // 4. compute relations (pure function)
+    // 4. compute relations, then rewrite ONLY the wiki that gained relates_to (every wiki was already
+    //    written incrementally in the loop with empty relates_to). Preserves the relation graph while
+    //    keeping the whole compile interruption-safe + resumable.
     let relations = compute_relations(&drafts);
-
-    // 5. inject relates_to + write files
     for draft in &mut drafts {
-        draft.relates_to = relations.get(&draft.wiki_id).cloned().unwrap_or_default();
-    }
-
-    for draft in &drafts {
+        let links = relations.get(&draft.wiki_id).cloned().unwrap_or_default();
+        if links.is_empty() {
+            continue; // already on disk with relates_to: [] — nothing to update
+        }
+        draft.relates_to = links;
         let content = render_wiki_page(draft)?;
         let path = wiki_path_map
             .get(&draft.wiki_id)
             .with_context(|| format!("wiki path not found: {}", draft.wiki_id))?;
         std::fs::write(path, content)
-            .with_context(|| format!("failed to write wiki file: {}", path.display()))?;
-        println!("✓ {}: {}", draft.wiki_id, draft.title);
+            .with_context(|| format!("failed to rewrite wiki file: {}", path.display()))?;
     }
 
     Ok(stats)
@@ -1958,7 +2027,7 @@ mod tests {
 
     #[test]
     fn curated_llm_parse_valid() {
-        let json = r#"{"title":"Test Title","body":"body content","tags":["rust","rag"],"tools":["surrealdb"],"concepts":["rop"]}"#;
+        let json = r#"{"title":"Test Title","tags":["rust","rag"],"tools":["surrealdb"],"concepts":["rop"]}"#;
         let c: super::CuratedLlm = serde_json::from_str(json).unwrap();
         assert_eq!(c.title, "Test Title");
         assert_eq!(c.tags, vec!["rust", "rag"]);
@@ -1967,7 +2036,7 @@ mod tests {
 
     #[test]
     fn curated_llm_parse_missing_arrays_defaults_empty() {
-        let json = r#"{"title":"T","body":"B"}"#;
+        let json = r#"{"title":"T"}"#;
         let c: super::CuratedLlm = serde_json::from_str(json).unwrap();
         assert!(c.tags.is_empty());
         assert!(c.tools.is_empty());

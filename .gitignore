@@ -31,3 +31,4 @@ vault/wiki/*
 !vault/wiki/.gitkeep
 !vault/wiki/wiki-0001.md
 vault/.obsidian/
+.obsidian/
