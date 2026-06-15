@@ -90,7 +90,7 @@ flowchart LR
 | **LLM ランタイム**（OpenAI互換） | ローカルの埋め込み・合成 | 既定 **Ollama**（[ollama.com](https://ollama.com) / `brew install ollama`）。LM Studio/vLLM も可 |
 | **Python 3** | ホストフック | `python3 --version`（macOS標準） |
 | **jq** | `make ask`/`sync`/`smoke` の JSON パース | `jq --version` · `brew install jq` |
-| **hermes-agent イメージ** | 脳（既定コア） | `docker image inspect hermes-agent` · 無ければ [Nous Hermes Agent](https://github.com/NousResearch) をビルド + `~/.hermes` 準備 |
+| _(任意)_ **hermes-agent イメージ** | 自律エージェント — **必須ではない**；無くても `make up` はコアのみで動作 | [Nous Hermes Agent 連携](#nous-hermes-agent-連携) 参照 |
 | ディスク ~10GB | モデル2つ | `gemma4:12b`（~8GB）+ `bge-m3`（~1.2GB）— `make up`/`make models` が自動pull |
 
 > **クローン先**: `~/oh-my-boring` 推奨（フック・`start.sh`・vault のパス前提）。
