@@ -47,6 +47,7 @@ services:
       DRUDGE_VAULT_DIR: /vault             # target of vault compile (raw→wiki)
       DRUDGE_VECTOR: ${DRUDGE_VECTOR:-off} # default off = wiki-first direct read. on = vector+graph (postgres alongside via --profile vector)
       DRUDGE_COMPANY_SUBSTR: ${DRUDGE_COMPANY_SUBSTR:-} # empty = all personal. set via .env → path substring → origin=company + ingest exclude
+      DRUDGE_NOTE_LANG: ${DRUDGE_NOTE_LANG:-} # distill/compile output language: ko | en | empty=auto (follow source)
       DRUDGE_SYNC_HOURS: "4"
       TZ: Asia/Seoul
     volumes:

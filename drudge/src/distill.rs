@@ -37,6 +37,21 @@ Omit any item that does not apply. Ignore config-file dumps, doc quotes, schemas
 (those are not a 'narrative'). If there is no real attempt-failure-solution flow at all, output only 'SKIP' on the first line.\n\n\
 The first output line MUST be the single word 'KEEP' or 'SKIP'. If KEEP, the note body follows from the next line.";
 
+/// Output-language directive from env `DRUDGE_NOTE_LANG` (`ko` | `en` | `auto`). Default `auto` =
+/// follow the source language. Force `ko`/`en` when you want a fixed corpus language — e.g. Korean
+/// users want Korean notes so Korean queries embed-match. Injected into distill + compile prompts (SSOT).
+pub fn lang_directive() -> String {
+    match std::env::var("DRUDGE_NOTE_LANG")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "ko" => "LANGUAGE: write the narrative body in Korean (한국어), regardless of the session language.".to_owned(),
+        "en" => "LANGUAGE: write the narrative body in English, regardless of the session language.".to_owned(),
+        _ => "LANGUAGE: write the narrative body in the same language as the source.".to_owned(),
+    }
+}
+
 /// Secret-scrub regex pattern — matches only known token formats. Closes the leak path before entering the vault (git-tracked).
 /// Being personal/local, heavy redaction isn't needed — a lightweight gate guarding just the single git/sharing boundary.
 const SECRET_PATTERN: &str = concat!(
@@ -146,7 +161,10 @@ fn render_note(req: &DistillRequest, body: &str) -> String {
 pub async fn run(llm: &Llm, vault_root: &Path, req: &DistillRequest) -> Result<DistillOutcome> {
     let text = clamp(&req.text);
     let note = llm
-        .generate(SYSTEM, &format!("=== session ===\n{text}"))
+        .generate(
+            &format!("{SYSTEM}\n{}", lang_directive()),
+            &format!("=== session ===\n{text}"),
+        )
         .await
         .context("distill LLM generation failed")?;
     let Some(body) = gate(&note) else {
