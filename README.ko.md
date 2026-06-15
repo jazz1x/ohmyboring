@@ -90,7 +90,7 @@ flowchart LR
 | **LLM 런타임** (OpenAI-호환) | 로컬 임베딩·합성 | 기본 **Ollama** ([ollama.com](https://ollama.com) / `brew install ollama`). LM Studio/vLLM 도 가능 |
 | **Python 3** | 호스트 훅 | `python3 --version` (macOS 기본) |
 | **jq** | `make ask`/`sync`/`smoke` JSON 파싱 | `jq --version` · `brew install jq` |
-| **hermes-agent 이미지** | 뇌(기본 코어) | `docker image inspect hermes-agent` · 없으면 [Nous Hermes Agent](https://github.com/NousResearch) 빌드 + `~/.hermes` 준비 |
+| _(선택)_ **hermes-agent 이미지** | 자율 에이전트 — **필수 아님**; 없어도 `make up`은 코어만으로 동작 | [Nous Hermes Agent 연결](#nous-hermes-agent-연결) 참고 |
 | 디스크 ~10GB | 모델 2개 | `gemma4:12b`(~8GB) + `bge-m3`(~1.2GB) — `make up`/`make models` 자동 pull |
 
 > **클론 위치**: `~/oh-my-boring` 권장(훅·`start.sh`·vault 경로 기준).

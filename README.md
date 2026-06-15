@@ -90,7 +90,7 @@ Reads and writes are asymmetric, so they use different doors:
 | **LLM runtime** (OpenAI-compatible) | local embedding/synthesis | default **Ollama** ([ollama.com](https://ollama.com) / `brew install ollama`). LM Studio/vLLM also work |
 | **Python 3** | host hooks | `python3 --version` (ships with macOS) |
 | **jq** | `make ask`/`sync`/`smoke` parse JSON | `jq --version` · `brew install jq` |
-| **hermes-agent image** | the brain (default core) | `docker image inspect hermes-agent` · else build [Nous Hermes Agent](https://github.com/NousResearch) + prepare `~/.hermes` |
+| _(optional)_ **hermes-agent image** | the autonomous agent — **not required**; `make up` runs core-only without it | see [Connecting Nous Hermes Agent](#connecting-nous-hermes-agent) |
 | ~10GB disk | two models | `gemma4:12b` (~8GB) + `bge-m3` (~1.2GB) — `make up`/`make models` pulls them |
 
 > **Clone location**: `~/oh-my-boring` recommended (hook/`start.sh`/vault paths assume it).

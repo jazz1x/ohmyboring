@@ -25,7 +25,10 @@ DRUDGE_URL = os.environ.get("DRUDGE_URL", "http://localhost:7700")
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")  # skip small sessions (distill would SKIP anyway)
-HOOK = os.path.expanduser("~/oh-my-boring/hooks/distill-session.py")
+# OMB_HOME: repo clone location (default ~/oh-my-boring). Lets a forker clone elsewhere
+# without editing this file.
+OMB_HOME = os.environ.get("OMB_HOME") or os.path.expanduser("~/oh-my-boring")
+HOOK = os.path.join(OMB_HOME, "hooks/distill-session.py")
 PROJECTS = os.path.expanduser("~/.claude/projects")
 MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
 

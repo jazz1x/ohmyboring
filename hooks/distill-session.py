@@ -23,7 +23,9 @@ import sys
 import time
 import urllib.request
 
-RAW_DIR = os.path.expanduser("~/oh-my-boring/vault/raw")
+# OMB_HOME: repo clone location (default ~/oh-my-boring) — forkers can clone elsewhere.
+OMB_HOME = os.environ.get("OMB_HOME") or os.path.expanduser("~/oh-my-boring")
+RAW_DIR = os.path.join(OMB_HOME, "vault/raw")
 DRUDGE_URL = os.environ.get("DRUDGE_URL", "http://localhost:7700")
 # Minimum interval (minutes) before re-distilling an in-progress session (Stop hook).
 # SessionEnd (final) ignores the throttle.
