@@ -9,8 +9,9 @@ captured. This collector scans the top-level session .jsonl files under ~/.claud
 - Marker: ~/.cache/boring-distill/<sid>.ts, same as distill-session.py. If present, skip (already done).
 - LIMIT (default 1, COLLECT_LIMIT): number processed per invocation. Called periodically via launchd/cron → drains slowly.
 - WINDOW (default 720h=30d, COLLECT_WINDOW_HOURS): ignore anything too old.
-- Each session → distill-session.py (DISTILL_NO_SYNC=1), with one /sync at the end.
-- cwd = the encoded project directory name → distill-session determines origin via the DISTILL_COMPANY_CWD token.
+- Each session → distill-session.py (wakes the agent → remember). One /sync at the end re-scans the
+  vault (idempotent safety net; remember already ingests each note live).
+- cwd = the real working dir from the transcript → distill-session determines origin via boring.json.
 """
 import glob
 import json
@@ -76,7 +77,7 @@ def main():
         print("[collect] all done — nothing to do", flush=True)
         return
 
-    env = dict(os.environ, DISTILL_NO_SYNC="1")
+    env = dict(os.environ)
     done = 0
     for tp in batch:
         proj = os.path.basename(os.path.dirname(tp))  # encoded dir name — for the log label only

@@ -1,55 +1,34 @@
 #!/usr/bin/env python3
-"""Claude Code SessionEnd hook script — distills a session into a personal memory note.
+"""Claude Code SessionEnd/Stop hook — wake the agent to distill a session into memory.
 
-This hook does *host-only* work: reading the transcript, extracting text, throttling,
-and correcting the session mtime. LLM distillation, the KEEP/SKIP gate, secret scrubbing,
-and raw-note formatting are handled by the drudge engine (/distill, SSOT) — this removes
-the past duplication where this script reimplemented ollama.generate/redact (engine
-ollama.rs is the SSOT for LLM calls). Only the extracted text is POSTed to the engine →
-the engine writes to ~/oh-my-boring/vault/raw. On failure, short sessions, or engine
-downtime it silently skips. It never blocks session termination (always exits 0).
+Kernel A: distillation is *reasoning*, so it belongs to the agent, not the engine. This hook does
+host-only glue: read the transcript, a cheap length pre-filter, throttle, and compute the
+deterministic host facts (origin via boring.json, repo slug via git). It then wakes the
+already-running hermes-agent, which distills the essence and stores a COMPLETE note via drudge's
+`remember` MCP tool (drudge embeds + builds the graph deterministically — no LLM in the engine).
 
-Installation (persistence) is up to the user: add to hooks.SessionEnd in
-~/.claude/settings.json:
+The engine no longer distills (the old /distill endpoint is gone). If the agent is down, the session
+is left un-marked so the backfill collector retries it later. Never blocks session termination (exits 0).
+
+Installation (persistence) is up to the user: add to hooks.SessionEnd in ~/.claude/settings.json:
   {"type":"command","command":"python3 ~/oh-my-boring/hooks/distill-session.py",
    "timeout":130,"async":true}
 """
-import datetime
 import json
 import os
 import re
 import subprocess
 import sys
 import time
-import urllib.request
+
+import boring_config
 
 # OMB_HOME: repo clone location (default ~/oh-my-boring) — forkers can clone elsewhere.
 OMB_HOME = os.environ.get("OMB_HOME") or os.path.expanduser("~/oh-my-boring")
-RAW_DIR = os.path.join(OMB_HOME, "vault/raw")
-DRUDGE_URL = os.environ.get("DRUDGE_URL", "http://localhost:7700")
 # Minimum interval (minutes) before re-distilling an in-progress session (Stop hook).
 # SessionEnd (final) ignores the throttle.
 THROTTLE_MIN = int(os.environ.get("DISTILL_THROTTLE_MIN") or "25")
 MARK_DIR = os.path.expanduser("~/.cache/boring-distill")  # last distill time per session
-
-
-def _trigger_sync():
-    """Reflect the distilled note into the RAG immediately — call drudge /sync
-    (compile→ingest→extract) detached. Does not block the hook (synchronously chaining
-    distill+sync risks exceeding 130s). Engine downtime/failure is ignored — the 4h
-    scheduler catches it (never blocks session termination).
-    Skipped when DISTILL_NO_SYNC is set (so the backfill collector syncs only once at the end)."""
-    if os.environ.get("DISTILL_NO_SYNC"):
-        return
-    try:
-        subprocess.Popen(
-            ["curl", "-sS", "-m", "600", "-X", "POST", f"{DRUDGE_URL}/sync"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,  # survives parent (hook) exit to finish ingestion
-        )
-    except Exception:
-        pass
 
 
 def _mark_path(session_id):
@@ -79,30 +58,6 @@ def _mark(session_id):
         pass
 
 
-def _session_mtime(path):
-    """Latest message timestamp in the transcript → epoch (float). The session's actual time.
-    None if absent (caller keeps the file mtime as-is = distill time)."""
-    latest = None
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    ts = json.loads(line).get("timestamp")
-                except Exception:
-                    continue
-                if not ts:
-                    continue
-                try:
-                    e = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
-                except (ValueError, TypeError):
-                    continue
-                if latest is None or e > latest:
-                    latest = e
-    except OSError:
-        return None
-    return latest
-
-
 def extract(path):
     out = []
     with open(path, encoding="utf-8") as f:
@@ -128,62 +83,54 @@ def extract(path):
     return "\n".join(out)
 
 
-def repo_slug(cwd):
-    """Category axis: the repo slug (`org/name`) from the git remote of cwd. Falls back to
-    the folder name if there's no git/remote. Only the host sees git/cwd, so compute it once
-    here and pass it to the engine (the engine is in a container and can't see the original cwd's git)."""
+def git_remote_url(cwd):
+    """Return the git remote.origin.url of cwd, or ''."""
     if not cwd:
         return ""
     try:
-        url = subprocess.run(
+        return subprocess.run(
             ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
             capture_output=True, text=True, timeout=5,
         ).stdout.strip()
     except Exception:
-        url = ""
+        return ""
+
+
+def repo_slug(cwd):
+    """Category axis: the repo slug (`org/name`) from the git remote of cwd. Falls back to the folder
+    name if there's no git/remote. Only the host sees git/cwd, so compute it here and hand it to the
+    agent (which reads the transcript inside its container and can't see the original cwd's git)."""
+    url = git_remote_url(cwd)
     if url:
-        # git@host:org/name.git | https://host/org/name(.git) → org/name
         slug = re.sub(r"^.*[:/]([^/]+/[^/]+?)(?:\.git)?$", r"\1", url)
         if slug and slug != url:
             return slug
-    return os.path.basename(cwd.rstrip("/")) or ""  # fallback: folder name
+    if cwd:
+        return os.path.basename(cwd.rstrip("/")) or ""  # fallback: folder name
+    return ""
 
 
-def post_distill(text, session_id, origin, phase, repo, cwd):
-    """POST the extracted text to drudge /distill → the engine distills, scrubs, and writes
-    the raw note (SSOT). Returns {"written": bool, "filename": str|None}, or None (engine
-    down/error → no-op). The engine performs length clamping, the KEEP/SKIP gate, and secret scrubbing."""
-    body = json.dumps(
-        {"text": text, "session_id": session_id, "origin": origin,
-         "phase": phase, "repo": repo, "cwd": cwd}
-    ).encode()
-    req = urllib.request.Request(
-        f"{DRUDGE_URL}/distill", data=body, headers={"Content-Type": "application/json"}
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            return json.loads(r.read())
-    except Exception:
-        return None  # engine down/error — the 4h scheduler catches it (never blocks the session)
-
-
-def via_agent(transcript_path):
-    """Write front door (opt-in, DISTILL_VIA_AGENT): delegate 'judge and ingest' to the
-    already-running hermes-agent. The agent performs the gate (KEEP/SKIP, curation) with its
-    own reasoning and saves via the drudge MCP (remember/sync). The transcript is read through
-    the /host/.claude path mounted into the agent container (compose volume).
-    Returns True on success. If docker/agent is down or mapping fails, returns False → the caller falls back to the engine."""
+def via_agent(transcript_path, origin, repo):
+    """Wake the already-running hermes-agent to distill + store the session (the sole write door).
+    The agent gates (KEEP/SKIP), curates the narrative, and extracts the semantic fields, then stores
+    a COMPLETE note via drudge's `remember` MCP tool — which embeds + builds the graph deterministically.
+    The transcript is read through the /host/.claude path mounted into the agent container (compose volume).
+    Returns True on success; False if the transcript is unmappable or docker/agent is down (→ retry later)."""
     home = os.path.expanduser("~")
     claude_root = os.path.join(home, ".claude")
     if not transcript_path.startswith(claude_root):
-        return False  # outside ~/.claude → can't map to container path → fall back
+        return False  # outside ~/.claude → can't map to container path → retry later
     container_path = "/host/.claude" + transcript_path[len(claude_root):]
     container = os.environ.get("DISTILL_AGENT_CONTAINER", "boring-agent")
+    repo_hint = f" The repo is '{repo}'." if repo else ""
     prompt = (
-        f"Read the session transcript at {container_path}. If it's worth remembering "
-        "(real problem-solving / decisions / facts), distill the essence into a "
-        "'problem-solving narrative', store it via drudge's remember tool, then call the sync tool. "
-        "If it's just chit-chat or config dumps, do nothing."
+        f"Read the session transcript at {container_path}. If it is worth remembering "
+        "(real problem-solving, decisions, or durable facts), distill it into a problem-solving "
+        "narrative and store ONE complete note via drudge's `remember` tool: set title, body "
+        "(the narrative), and the semantic fields tags/tools/concepts, plus any durable facts as "
+        f"claims (subject/predicate/value). Use origin='{origin}'.{repo_hint} "
+        "If it is just chit-chat or config dumps, do nothing. remember ingests the note immediately — "
+        "you do not need to call sync."
     )
     try:
         r = subprocess.run(
@@ -192,7 +139,7 @@ def via_agent(transcript_path):
         )
         return r.returncode == 0
     except Exception:
-        return False  # no docker / timeout / agent down → fall back
+        return False  # no docker / timeout / agent down → retry later
 
 
 def main():
@@ -205,52 +152,20 @@ def main():
         return
     session_id = data.get("session_id") or ""
     # SessionEnd = final, once (ignores throttle). Stop = periodic in-progress ingest (THROTTLE_MIN interval).
-    # If in-progress but already distilled recently, bail cheaply without even reading the transcript.
     is_final = (data.get("hook_event_name") or "") == "SessionEnd"
     if not is_final and _throttled(session_id):
         return
-    # Session 'experiences' are not isolated — they all accumulate in the same raw/. origin is just a tag for recall toggling.
-    #   Putting a cwd token in DISTILL_COMPANY_CWD (':'-separated) tags that session as origin=company.
-    #   Default empty = the company concept is unused (everything is personal). (Not exclusion — just a tag.)
     cwd = data.get("cwd") or ""
-    company_tokens = (os.environ.get("DISTILL_COMPANY_CWD") or "").split(":")
-    is_company = any(tok and tok in cwd for tok in company_tokens)
+    remote_url = git_remote_url(cwd)
+    origin, _rule = boring_config.classify(cwd, remote_url or None)
     text = extract(tp)
-    if len(text) < 500:  # skip too-short sessions (cheap host-side pre-filter — avoids wasted POSTs)
+    if len(text) < 500:  # skip too-short sessions (cheap host-side pre-filter)
         return
-    # Write front door (opt-in): if DISTILL_VIA_AGENT, the agent gates + ingests. Done on success, fall back to engine on failure.
-    # (Two-door design: delegate the judgment of auto-capture to the agent's reasoning. The engine distill is always alive as a fallback.)
-    if os.environ.get("DISTILL_VIA_AGENT") and via_agent(tp):
-        _mark(session_id)
-        return
-    # No isolation — both personal and company session experiences go to the same raw/. Distinction is via the origin tag only.
-    origin = "company" if is_company else "personal"
-    phase = "final" if is_final else "in-progress"
     repo = repo_slug(cwd)  # category axis — git remote slug (fallback folder name)
-    # The engine (SSOT) performs length clamping, LLM distillation, the KEEP/SKIP gate, secret scrubbing, and raw-note writing.
-    resp = post_distill(text, session_id, origin, phase, repo, cwd)
-    if resp is None:
-        return  # engine unreachable → leave no marker so it's retried later
-    if not resp.get("written"):
-        # Engine was reached but its KEEP/SKIP gate rejected this session → terminal.
-        # Mark it so the backfill collector doesn't re-pick the same SKIP'd session forever.
+    # The agent is the sole write door: it reasons (gate + curate + extract) and stores via remember.
+    # On success mark the throttle; on failure leave it un-marked so the backfill collector retries.
+    if via_agent(tp, origin, repo):
         _mark(session_id)
-        return
-    filename = resp.get("filename")
-    if not filename:
-        return
-    fp = os.path.join(RAW_DIR, filename)  # the engine returns only the filename → join with host RAW_DIR
-    # Recency sort-key correction: note mtime = the session's actual time (latest transcript timestamp).
-    # Even if a backfill distills an old session now, mtime=session-time so the brief won't surface it as fake-recent.
-    # (compile preserves this mtime into the wiki → ingest uses it as updated_at.)
-    st = _session_mtime(tp)
-    if st:
-        try:
-            os.utime(fp, (st, st))
-        except OSError:
-            pass
-    _mark(session_id)  # refresh the throttle marker
-    _trigger_sync()  # ingest the note immediately (detached) — don't wait for the 4h scheduler
 
 
 if __name__ == "__main__":
