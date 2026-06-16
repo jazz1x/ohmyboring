@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Claude Code SessionEnd/Stop hook — wake the agent to distill a session into memory.
+"""Claude Code SessionEnd/Stop hook — distill a session into memory via the local LLM.
 
-Kernel A: distillation is *reasoning*, so it belongs to the agent, not the engine. This hook does
-host-only glue: read the transcript, a cheap length pre-filter, throttle, and compute the
-deterministic host facts (origin via boring.json, repo slug via git). It then wakes the
-already-running hermes-agent, which distills the essence and stores a COMPLETE note via drudge's
-`remember` MCP tool (drudge embeds + builds the graph deterministically — no LLM in the engine).
+Kernel: distillation now happens on the host, directly against the OpenAI-compatible
+LLM endpoint (Ollama/LM Studio/…). The engine (drudge) remains the deterministic write
+gate: this hook only generates the curated note and calls the `remember` MCP tool.
 
-The engine no longer distills (the old /distill endpoint is gone). If the agent is down, the session
-is left un-marked so the backfill collector retries it later. Never blocks session termination (exits 0).
+This removes the hermes-agent dependency for the write door and makes the core
+self-augmentation loop work in `OMB_CORE_ONLY=1` mode.
 
-Installation (persistence) is up to the user: add to hooks.SessionEnd in ~/.claude/settings.json:
+Install (persistence) — ~/.claude/settings.json:
   {"type":"command","command":"python3 ~/oh-my-boring/hooks/distill-session.py",
    "timeout":130,"async":true}
 """
@@ -24,13 +22,17 @@ import urllib.request
 
 import boring_config
 
-# OMB_HOME: repo clone location (default ~/oh-my-boring) — forkers can clone elsewhere.
+# OMB_HOME: repo clone location (default ~/oh-my-boring).
 OMB_HOME = os.environ.get("OMB_HOME") or os.path.expanduser("~/oh-my-boring")
-DRUDGE_URL = os.environ.get("DRUDGE_URL", "http://localhost:7700")  # engine MCP/HTTP endpoint
+DRUDGE_URL = os.environ.get("DRUDGE_URL", "http://localhost:7700")
+LLM_BASE_URL = os.environ.get("DRUDGE_LLM_BASE_URL", "http://localhost:11434/v1")
+LLM_MODEL = os.environ.get("DRUDGE_LLM_MODEL", "gemma4:12b")
+LLM_API_KEY = os.environ.get("DRUDGE_LLM_API_KEY") or ""
+NOTE_LANG = boring_config.note_lang()
 # Minimum interval (minutes) before re-distilling an in-progress session (Stop hook).
 # SessionEnd (final) ignores the throttle.
 THROTTLE_MIN = int(os.environ.get("DISTILL_THROTTLE_MIN") or "25")
-MARK_DIR = os.path.expanduser("~/.cache/boring-distill")  # last distill time per session
+MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
 
 
 def _mark_path(session_id):
@@ -39,14 +41,14 @@ def _mark_path(session_id):
 
 
 def _throttled(session_id):
-    """True (skip) if this session was already distilled within the last THROTTLE_MIN minutes. Cheap check."""
+    """True (skip) if this session was already distilled within the last THROTTLE_MIN minutes."""
     if not session_id:
         return False
     try:
         age = time.time() - os.path.getmtime(_mark_path(session_id))
         return age < THROTTLE_MIN * 60
     except OSError:
-        return False  # no marker = first distillation
+        return False
 
 
 def _mark(session_id):
@@ -61,6 +63,7 @@ def _mark(session_id):
 
 
 def extract(path):
+    """Extract user/assistant text from a Claude Code JSONL transcript."""
     out = []
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -76,7 +79,11 @@ def extract(path):
             if isinstance(c, str):
                 t = c
             elif isinstance(c, list):
-                t = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+                t = " ".join(
+                    b.get("text", "")
+                    for b in c
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
             else:
                 t = ""
             t = t.strip()
@@ -92,64 +99,201 @@ def git_remote_url(cwd):
     try:
         return subprocess.run(
             ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         ).stdout.strip()
     except Exception:
         return ""
 
 
 def repo_slug(cwd):
-    """Category axis: the repo slug (`org/name`) from the git remote of cwd. Falls back to the folder
-    name if there's no git/remote. Only the host sees git/cwd, so compute it here and hand it to the
-    agent (which reads the transcript inside its container and can't see the original cwd's git)."""
+    """Category axis: repo slug (`org/name`) from the git remote, falling back to folder name."""
     url = git_remote_url(cwd)
     if url:
         slug = re.sub(r"^.*[:/]([^/]+/[^/]+?)(?:\.git)?$", r"\1", url)
         if slug and slug != url:
             return slug
     if cwd:
-        return os.path.basename(cwd.rstrip("/")) or ""  # fallback: folder name
+        return os.path.basename(cwd.rstrip("/")) or ""
     return ""
 
 
-def _chunk_count():
-    """Current chunk count from drudge /audit — ground truth that the agent's remember actually landed
-    (the agent's own text report can hallucinate success; the DB delta cannot)."""
+def _extract_json(text):
+    """Best-effort JSON extraction from an LLM response that may wrap it in markdown."""
+    text = text.strip()
+    # Remove markdown code fences if present.
+    if text.startswith("```"):
+        text = text[text.find("\n") + 1 :]
+    if text.endswith("```"):
+        text = text[: text.rfind("```")]
+    text = text.strip()
+    # Find the outermost JSON object.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
     try:
-        with urllib.request.urlopen(f"{DRUDGE_URL}/audit", timeout=15) as r:
-            return int(json.loads(r.read()).get("total_chunks", -1))
-    except Exception:
-        return -1
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
 
 
-def via_agent(transcript_path, origin, repo):
-    """The agent is the SOLE write door: IT distills the session AND calls the drudge `remember` tool
-    itself (the memory-ingest skill enforces 'you MUST call remember'). The host only extracts the text
-    and passes it INLINE — letting the agent read multi-MB transcript files overflows its read limit and
-    makes it wander into the session's own commands. Success = a real DB chunk delta (not the agent's
-    word), so a SKIP / miss / engine-down leaves the session un-marked for retry."""
-    container = os.environ.get("DISTILL_AGENT_CONTAINER", "boring-agent")
-    text = extract(transcript_path)
-    if len(text) > 12000:  # the agent stalls/wanders on big inputs; keep problem (head) + solution (tail)
-        text = text[:5000] + "\n…(truncated)…\n" + text[-7000:]
+def _build_prompt(text, origin, repo):
+    """Build the distillation prompt, honouring note_lang and repo metadata."""
+    lang_instruction = {
+        "ko": "Write the note in Korean.",
+        "en": "Write the note in English.",
+    }.get(NOTE_LANG, "Write the note in the same language as the source transcript.")
+
     repo_hint = f" repo='{repo}'." if repo else ""
-    prompt = (
-        "Use the memory-ingest skill. Below is an ALREADY-EXTRACTED session transcript. "
-        "Do NOT read any file and do NOT explore — just distill THIS text into one note and call the "
-        f"remember tool ONCE. origin='{origin}'.{repo_hint} "
-        "If it is pure chit-chat with no real work, reply SKIP and do nothing. "
-        "Report the wiki id remember returns.\n\n=== SESSION ===\n" + text
+    origin_hint = f" origin='{origin}'."
+
+    return (
+        "You are a distillation engine. Summarize the following session transcript into ONE "
+        "curated markdown note. "
+        f"{lang_instruction}{origin_hint}{repo_hint}\n\n"
+        "Output ONLY a single JSON object with no markdown commentary:\n"
+        "{\n"
+        '  "title": "concise, specific title",\n'
+        '  "body": "markdown body with problem / attempted solution / result sections",\n'
+        '  "tags": ["tag1", "tag2", ...],\n'
+        '  "claims": [{"subject":"...", "predicate":"...", "value":"..."}, ...]\n'
+        "}\n\n"
+        "Rules:\n"
+        "- title and body are required.\n"
+        "- tags: up to 5 strings, no hashtags.\n"
+        "- claims: optional triples; skip if none are clear.\n"
+        "- If the transcript is pure chit-chat with no real work, output only: {\"skip\": true}\n"
+        "- Do NOT include any text outside the JSON object.\n\n"
+        "=== SESSION TRANSCRIPT ===\n" + text
     )
-    before = _chunk_count()
+
+
+def _call_llm(prompt):
+    """Call the local OpenAI-compatible chat endpoint and return the parsed JSON, or None."""
+    headers = {"content-type": "application/json"}
+    if LLM_API_KEY:
+        headers["authorization"] = f"Bearer {LLM_API_KEY}"
+    payload = json.dumps(
+        {
+            "model": LLM_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You emit only compact, valid JSON. No prose outside JSON.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+            "stream": False,
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"{LLM_BASE_URL.rstrip('/')}/chat/completions",
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
     try:
-        subprocess.run(
-            ["docker", "exec", container, "hermes", "-z", prompt],
-            capture_output=True, text=True, timeout=240,
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        print(f"[distill-session] LLM call failed: {e}", file=sys.stderr)
+        return None
+
+    try:
+        message = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        print(f"[distill-session] unexpected LLM response shape: {data}", file=sys.stderr)
+        return None
+
+    parsed = _extract_json(message)
+    if parsed is None:
+        print(
+            f"[distill-session] failed to parse LLM output as JSON:\n{message[:500]}",
+            file=sys.stderr,
         )
-    except Exception:
-        return False  # agent down / timeout → retry later
-    after = _chunk_count()
-    return before >= 0 and after > before  # the agent's remember actually added chunks
+    return parsed
+
+
+def _call_remember(title, body, origin, repo, tags, claims):
+    """Call drudge's remember MCP tool. Return True if the note was written."""
+    arguments = {
+        "title": title,
+        "body": body,
+        "origin": origin,
+        "repo": repo,
+        "tags": tags,
+        "claims": claims,
+    }
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "remember", "arguments": arguments},
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"{DRUDGE_URL.rstrip('/')}/mcp",
+        data=payload,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        print(f"[distill-session] remember call failed: {e}", file=sys.stderr)
+        return False
+
+    if data.get("error"):
+        print(f"[distill-session] remember error: {data['error']}", file=sys.stderr)
+        return False
+
+    result = data.get("result", {})
+    content = result.get("content", [])
+    text = ""
+    for item in content if isinstance(content, list) else []:
+        if isinstance(item, dict) and item.get("type") == "text":
+            text += item.get("text", "")
+    print(f"[distill-session] {text}", file=sys.stderr)
+    return "remembered" in text
+
+
+def distill_and_remember(transcript_path, origin, repo):
+    """Distill the transcript via local LLM and write it through drudge's remember tool."""
+    text = extract(transcript_path)
+    if len(text) > 12000:
+        text = text[:5000] + "\n…(truncated)…\n" + text[-7000:]
+
+    parsed = _call_llm(_build_prompt(text, origin, repo))
+    if parsed is None:
+        return False
+    if parsed.get("skip"):
+        print("[distill-session] LLM decided SKIP", file=sys.stderr)
+        return True  # intentional skip → mark as done so we don't retry forever
+
+    title = parsed.get("title", "").strip()
+    body = parsed.get("body", "").strip()
+    if not title or not body:
+        print("[distill-session] missing title/body in LLM output", file=sys.stderr)
+        return False
+
+    tags = [t.strip() for t in parsed.get("tags", []) if isinstance(t, str) and t.strip()][:6]
+    claims = []
+    for c in parsed.get("claims", []):
+        if isinstance(c, dict) and c.get("subject") and c.get("predicate") and c.get("value"):
+            claims.append(
+                {
+                    "subject": str(c["subject"]).strip(),
+                    "predicate": str(c["predicate"]).strip(),
+                    "value": str(c["value"]).strip(),
+                }
+            )
+
+    return _call_remember(title, body, origin, repo, tags, claims)
 
 
 def main():
@@ -157,24 +301,25 @@ def main():
         data = json.load(sys.stdin)
     except Exception:
         return
-    tp = data.get("transcript_path") or ""
-    if not tp or not os.path.exists(tp):
+
+    transcript_path = data.get("transcript_path") or ""
+    if not transcript_path or not os.path.exists(transcript_path):
         return
+
     session_id = data.get("session_id") or ""
-    # SessionEnd = final, once (ignores throttle). Stop = periodic in-progress ingest (THROTTLE_MIN interval).
     is_final = (data.get("hook_event_name") or "") == "SessionEnd"
     if not is_final and _throttled(session_id):
         return
+
     cwd = data.get("cwd") or ""
     remote_url = git_remote_url(cwd)
     origin, _rule = boring_config.classify(cwd, remote_url or None)
-    text = extract(tp)
-    if len(text) < 500:  # skip too-short sessions (cheap host-side pre-filter)
+    text = extract(transcript_path)
+    if len(text) < 500:
         return
-    repo = repo_slug(cwd)  # category axis — git remote slug (fallback folder name)
-    # The agent is the sole write door: it reasons (gate + curate + extract) and stores via remember.
-    # On success mark the throttle; on failure leave it un-marked so the backfill collector retries.
-    if via_agent(tp, origin, repo):
+
+    repo = repo_slug(cwd)
+    if distill_and_remember(transcript_path, origin, repo):
         _mark(session_id)
 
 
