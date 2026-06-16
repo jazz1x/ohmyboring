@@ -57,11 +57,12 @@ services:
       - "127.0.0.1:7700:7700"             # for host debugging / direct curl
 
   # ─────────────────────────── Hermes Agent (the brain) ─────────────────────────
-  # Nous Hermes Agent — autonomous agent. Persists config/memory in the ~/.hermes volume → the container is disposable.
+  # Nous Hermes Agent — optional autonomous supervisor. Persists config/memory in the ~/.hermes volume → the container is disposable.
   # Mac: their compose's network_mode:host isn't supported by Mac Docker → bridge + host.docker.internal.
   # drudge (our RAG) is connected as the agent's MCP memory backend (same stack, sidecar).
-  # Default core — the agent is the brain that *drives* ingestion. But the image isn't in the repo (external build) + depends on ~/.hermes:
-  # start.sh checks for the image first and, if absent, prints build guidance and stops (instead of a cryptic compose failure).
+  # Optional — the agent can drive advanced orchestration, Slack, and cron-based backfill. The image isn't
+  # in the repo (external build) + depends on ~/.hermes: start.sh checks for the image and skips the agent
+  # if absent, so the core loop works without it.
   hermes-agent:
     image: hermes-agent                   # requires external build (not in repo, Nous Hermes Agent)
     container_name: boring-agent
@@ -72,7 +73,8 @@ services:
       TZ: Asia/Seoul
     volumes:
       - ${HOME}/.hermes:/opt/data         # persists config / credentials / session memory (autonomy-augmentation layer)
-      - ${HOME}/.claude:/host/.claude:ro  # write front door (DISTILL_VIA_AGENT): for reading session transcripts
+      - ${HOME}/.claude:/host/.claude:ro  # session transcript source for recall / cron ingestion
+      - ./boring.json:/host/boring.json:ro  # policy config for ingest-worker.py (note_lang, repo rules)
     extra_hosts:
       - "host.docker.internal:host-gateway"   # Mac: reach host Ollama (gemma4)
     command: ["gateway", "run"]

@@ -13,7 +13,7 @@
       "type": "string",
       "enum": ["auto", "ko", "en"],
       "default": "auto",
-      "description": "Output language the agent should write notes in (ko/en/auto)."
+      "description": "Output language for distilled notes (ko/en/auto)."
     },
     "embed_model": {
       "type": "string",

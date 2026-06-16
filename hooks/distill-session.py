@@ -277,6 +277,10 @@ def distill_and_remember(transcript_path, origin, repo):
 
     title = parsed.get("title", "").strip()
     body = parsed.get("body", "").strip()
+    # gemma sometimes double-escapes newlines (emits "\\n" in the JSON), so json.loads yields a literal
+    # backslash-n in the body instead of a real line break → markdown renders as one run-on line. Undo it.
+    if "\\n" in body and "\n" not in body:
+        body = body.replace("\\n", "\n").replace("\\t", "\t")
     if not title or not body:
         print("[distill-session] missing title/body in LLM output", file=sys.stderr)
         return False
