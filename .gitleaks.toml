@@ -10,6 +10,7 @@ paths = [
   '''\.env\.example$''',     # 토큰 플레이스홀더만 (<your-...-token>)
   '''boring\.example\.json$''', # repo/경로 메타데이터 예시 (실 시크릿 아님)
   '''drudge/src/distill\.rs''', # 시크릿 스크럽 정규식 *패턴* 보유(실 키 아님)
+  '''drudge/src/redact\.rs''', # 스크럽 테스트 픽스처(가짜 xoxb-/sk-ant- — 실 키 아님)
   '''hooks/distill-session\.py''', # (구) 동일 패턴 — 히스토리 스캔 false-positive 방지
 ]
 regexes = [
