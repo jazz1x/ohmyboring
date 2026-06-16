@@ -78,7 +78,7 @@ flowchart LR
 Reads and writes are asymmetric, so they use different doors:
 
 - **Read door (open, fast)** — recall reads `vault/wiki` directly (~ms, no LLM loop, safe to expose widely). Used by `recall.py`, `make ask`, MCP `recall`, Slack. Reads never need the agent.
-- **Write door (gated)** — accumulation is judged: is this worth keeping, how to curate? By default the **engine** distills + gates (deterministic, reliable). Opt into `DRUDGE_VECTOR=on` for vector storage, and `DISTILL_VIA_AGENT=1` to route the gate through the agent's own judgment.
+- **Write door (gated)** — accumulation is judged: is this worth keeping, how to curate? The **engine** distills + gates (deterministic, reliable). Opt into `DRUDGE_VECTOR=on` for vector storage; the agent is an optional supervisor, not a required write door.
 
 ---
 
@@ -110,7 +110,7 @@ make ask Q="how did I fix the docker build cache problem?"
 >
 > If you clone to a directory other than `~/oh-my-boring`, set `export OMB_HOME=/your/path` so hooks and scripts resolve vault paths correctly.
 
-`make up` (wiki default) starts **drudge + hermes-agent** — no Postgres. To use vector + graph RAG: `DRUDGE_VECTOR=on make up` (adds Postgres via `--profile vector`).
+`make up` (wiki default) starts **drudge** — hermes-agent joins automatically if its image exists, otherwise startup falls back to core-only (so `make ask` works without the agent). Postgres is only started when vector mode is enabled.
 
 ---
 
@@ -120,7 +120,7 @@ When a session ends it accumulates on its own — the core value.
 
 ```mermaid
 flowchart TD
-  S["session ends"] -->|"① distill — engine, or agent (opt-in)"| RAW["vault/raw"]
+  S["session ends"] -->|"① distill — engine"| RAW["vault/raw"]
   RAW -->|"② compile · curate (title, tags, repo/&lt;slug&gt;)"| WK["vault/wiki"]
   WK -->|"③ recall — reads wiki directly"| ANS["make ask · recall.py · Slack · MCP"]
   WK -. "DRUDGE_VECTOR=on: + pgvector similarity &amp; graph" .-> ANS
@@ -128,7 +128,7 @@ flowchart TD
 
 | Hook | Claude Code event | What it does |
 |---|---|---|
-| `hooks/distill-session.py` | `SessionEnd` / `Stop` | distill session → vault/raw (engine, or agent if `DISTILL_VIA_AGENT=1`) |
+| `hooks/distill-session.py` | `SessionEnd` / `Stop` | distill session → vault/raw via the local LLM (engine) |
 | `hooks/recall.py` | `UserPromptSubmit` | recall relevant past work and inject it as context |
 | `hooks/collect-sessions.py` | cron / `make collect` | backfill sessions missed by SessionEnd |
 
@@ -271,7 +271,6 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 | `DRUDGE_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible LLM server (Ollama · LM Studio · …) |
 | `DRUDGE_LLM_API_KEY` | — | only for providers needing auth |
 | `DRUDGE_LLM_MODEL` / `DRUDGE_EMBED_MODEL` | `gemma4:12b` / `bge-m3` | synthesis / embedding models |
-| `DISTILL_VIA_AGENT` | — | route the write gate through hermes-agent (else engine distill) |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | — | only for the Slack assistant |
 
 > **Deprecated env**: `DRUDGE_COMPANY_SUBSTR`, `DISTILL_COMPANY_CWD`, `DRUDGE_SOURCE_DIRS`, and `DRUDGE_NOTE_LANG` are still read as a fallback when `boring.json` is missing, but they print a deprecation warning. Migrate with `scripts/migrate-config.sh`.

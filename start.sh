@@ -82,6 +82,7 @@ cat <<'EOF'
   make ask Q="..."   single query
   make sync          deterministic re-ingest of the vault (embed→graph→relates_to)
   make logs          engine logs
-  The agent (hermes-agent) drives drudge over MCP (:7700/mcp) for ingestion, recall, and skill creation.
+  The core self-augmentation loop runs without hermes-agent. If built, hermes-agent can drive
+  drudge over MCP (:7700/mcp) for advanced orchestration, recall, and skill creation.
   (To use Slack, fill in tokens in .env and run docker compose up -d hermes-agent)
 EOF
