@@ -3,9 +3,11 @@
 [English](README.md) · **한국어** · [日本語](README.ja.md)
 
 [![CI](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml)
+![version](https://img.shields.io/badge/version-0.1.0-blue)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![memory](https://img.shields.io/badge/memory-vault%2Fwiki%20(markdown)-success)
 ![LLM](https://img.shields.io/badge/LLM-OpenAI--compatible%20(Ollama%2FLM%20Studio%2F…)-000)
+![agent](https://img.shields.io/badge/agent-optional-yellow)
 ![cloud](https://img.shields.io/badge/cloud-none-success)
 
 **셀프호스팅 개인 메모리 RAG.** Claude Code(또는 아무 마크다운 노트) 작업이 로컬의 사람이 읽는 위키로 증류돼 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클라우드 0 · 100% 로컬.**
