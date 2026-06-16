@@ -1,5 +1,5 @@
 {
-  "$schema": "./boring.schema.json",
+  "$schema": "https://raw.githubusercontent.com/jazz1x/oh-my-boring/main/boring.schema.json",
   "schema_version": 1,
   "note_lang": "auto",
   "embed_model": "bge-m3",
