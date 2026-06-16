@@ -5,10 +5,9 @@
 [![CI](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml)
 ![version](https://img.shields.io/badge/version-0.1.0-blue)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
-![memory](https://img.shields.io/badge/memory-vault%2Fwiki%20(markdown)-success)
-![LLM](https://img.shields.io/badge/LLM-OpenAI--compatible%20(Ollama%2FLM%20Studio%2F…)-000)
-![agent](https://img.shields.io/badge/agent-optional-yellow)
-![cloud](https://img.shields.io/badge/cloud-none-success)
+![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
+![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
+![gemma4](https://img.shields.io/badge/LLM-gemma4:12b-000?logo=ollama)
 
 **セルフホスト型の個人メモリRAG。** Claude Code（あるいは任意のMarkdownノート）での作業がローカルの人間が読めるwikiに蒸留され、*「前にこれどうやったっけ？」* を後から引き出せる。**クラウド0・100%ローカル。**
 
