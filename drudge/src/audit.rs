@@ -44,16 +44,10 @@ pub struct AuditStats {
     pub graph_projects: usize,
     pub graph_topics: usize,
     pub graph_edges: usize,
-    pub semantic_problems: usize,
-    pub semantic_solutions: usize,
     pub semantic_tools: usize,
     pub semantic_concepts: usize,
-    pub semantic_attempts: usize,
-    pub semantic_addresses: usize,
-    pub semantic_resolved_by: usize,
     pub semantic_uses: usize,
     pub semantic_about: usize,
-    pub semantic_tried: usize,
 }
 
 /// Pure logic: DB aggregation → returns `AuditStats`. No I/O.
@@ -76,10 +70,7 @@ pub async fn stats(store: &Store) -> Result<AuditStats> {
         .map(|(k, v)| (k.to_owned(), v))
         .collect();
 
-    let company_contamination = metas
-        .iter()
-        .filter(|m| crate::frontmatter::is_company_path(&m.source_path))
-        .count();
+    let company_contamination = metas.iter().filter(|m| m.origin == "company").count();
     let missing_origin = metas.iter().filter(|m| m.origin.is_empty()).count();
     let missing_project = metas.iter().filter(|m| m.project.is_empty()).count();
     let clean = company_contamination == 0 && missing_origin == 0;
@@ -102,16 +93,10 @@ pub async fn stats(store: &Store) -> Result<AuditStats> {
         graph_projects: gs.projects,
         graph_topics: gs.topics,
         graph_edges: gs.edges,
-        semantic_problems: ss.problems,
-        semantic_solutions: ss.solutions,
         semantic_tools: ss.tools,
         semantic_concepts: ss.concepts,
-        semantic_attempts: ss.attempts,
-        semantic_addresses: ss.addresses,
-        semantic_resolved_by: ss.resolved_by,
         semantic_uses: ss.uses,
         semantic_about: ss.about,
-        semantic_tried: ss.tried,
     })
 }
 
@@ -148,20 +133,12 @@ pub async fn run(store: &Store) -> Result<()> {
         s.graph_documents, s.graph_chunks, s.graph_projects, s.graph_topics, s.graph_edges
     );
     println!(
-        "  [semantic] problem {} · solution {} · tool {} · concept {} · attempt {}",
-        s.semantic_problems,
-        s.semantic_solutions,
-        s.semantic_tools,
-        s.semantic_concepts,
-        s.semantic_attempts
+        "  [semantic] tool {} · concept {}",
+        s.semantic_tools, s.semantic_concepts
     );
     println!(
-        "  [semantic edges] addresses {} · resolved_by {} · uses {} · about {} · tried {}",
-        s.semantic_addresses,
-        s.semantic_resolved_by,
-        s.semantic_uses,
-        s.semantic_about,
-        s.semantic_tried
+        "  [semantic edges] uses {} · about {}",
+        s.semantic_uses, s.semantic_about
     );
     Ok(())
 }

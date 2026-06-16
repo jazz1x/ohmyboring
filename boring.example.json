@@ -1,0 +1,16 @@
+{
+  "$schema": "./boring.schema.json",
+  "schema_version": 1,
+  "note_lang": "auto",
+  "embed_model": "bge-m3",
+  "embed_dim": 1024,
+  "repos": [],
+  "agents": [
+    {
+      "id": "claude-code",
+      "enabled": true,
+      "format": "claude-json",
+      "paths": ["~/.claude/projects"]
+    }
+  ]
+}

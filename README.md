@@ -100,12 +100,15 @@ Reads and writes are asymmetric, so they use different doors:
 ## Quick start
 
 ```bash
-git clone git@github.com:jazz1x/oh-my-boring.git ~/oh-my-boring
+git clone https://github.com/jazz1x/oh-my-boring.git ~/oh-my-boring
 cd ~/oh-my-boring
-cp .env.example .env          # optional (core runs without it)
-make up                       # check Ollama → pull models → build → start (wiki mode)
+make up                       # creates .env if needed, checks Ollama, pulls models, builds, starts
 make ask Q="how did I fix the docker build cache problem?"
 ```
+
+> `make up` creates `.env` from `.env.example` and `boring.json` from `boring.example.json` automatically if absent. Edit `.env` only for Slack tokens or a non-default LLM endpoint. Edit `boring.json` for note language, repo rules, and source directories. If you have GitHub SSH keys set up, the SSH URL `git@github.com:jazz1x/oh-my-boring.git` also works.
+>
+> If you clone to a directory other than `~/oh-my-boring`, set `export OMB_HOME=/your/path` so hooks and scripts resolve vault paths correctly.
 
 `make up` (wiki default) starts **drudge + hermes-agent** — no Postgres. To use vector + graph RAG: `DRUDGE_VECTOR=on make up` (adds Postgres via `--profile vector`).
 
@@ -150,17 +153,49 @@ flowchart TD
 
 ## Connecting Nous Hermes Agent
 
+> ⚠️ `~/.hermes` may contain credentials and session memory. Only build/run the hermes-agent image from a source you trust, and keep `~/.hermes` restrictive (`chmod 700 ~/.hermes`).
+
 drudge is the agent's **MCP memory backend**. The agent (brain) drives; drudge (hands) does the mechanics.
 
-1. The agent comes up with `make up` (image must be prebuilt — see [Prerequisites](#prerequisites)).
-2. Register drudge as an MCP server in `~/.hermes/config.yaml`:
+1. **Build the image from the upstream source** (the image is not in this repo):
+   ```bash
+   git clone https://github.com/NousResearch/hermes-agent.git ~/hermes-agent-src
+   cd ~/hermes-agent-src
+   docker build -t hermes-agent .
+   ```
+   If the upstream repo/tag differs, adjust the clone URL and ensure the final image tag is `hermes-agent` (matching `docker-compose.yml`).
+2. **Create the agent data directory** with the right ownership:
+   ```bash
+   mkdir -p ~/.hermes
+   chmod 700 ~/.hermes
+   export HERMES_UID=$(id -u) HERMES_GID=$(id -g)
+   # Persist for compose:
+   echo "HERMES_UID=$HERMES_UID" >> .env
+   echo "HERMES_GID=$HERMES_GID" >> .env
+   ```
+3. **Register drudge as an MCP server** in `~/.hermes/config.yaml`:
    ```yaml
    mcp_servers:
      drudge:
-       url: http://drudge:7700/mcp   # same compose network
+       # This address is resolved inside the compose network by the agent container.
+       # To test from the host, use http://127.0.0.1:7700/mcp instead.
+       url: http://drudge:7700/mcp
        transport: http
    ```
-3. MCP tools (drudge `/mcp`): `recall{query}` (read), `remember{text,title?}` (write a note), `sync{}` (compile → ingest).
+4. Run `make up` again. The agent now starts alongside drudge.
+5. **Verify the connection**:
+   ```bash
+   # drudge MCP surface
+   curl -s -X POST http://127.0.0.1:7700/mcp \
+     -H 'content-type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq .
+   # agent logs
+   make agent-logs
+   ```
+
+MCP tools exposed by drudge (`/mcp`): `recall{query}` (read), `remember{text,title?}` (write a note), `sync{}` (compile → ingest), `config_get{}` (read policy), `classify_repo{cwd,remote_url?}` (propose repo origin).
+
+If the agent image is missing, `make up` falls back to core-only and prints a build hint. Set `OMB_CORE_ONLY=1` to skip the agent intentionally.
 
 ---
 
@@ -169,7 +204,7 @@ drudge is the agent's **MCP memory backend**. The agent (brain) drives; drudge (
 | Mode | How | When |
 |---|---|---|
 | **Docker** (default) | `make up` — drudge + hermes-agent (+ Postgres with `DRUDGE_VECTOR=on`) | simplest |
-| **Native** | `cd drudge && cargo run --release -- serve` | no containers / dev. Set env: `DRUDGE_LLM_BASE_URL`, `DRUDGE_VAULT_DIR`, `DRUDGE_SOURCE_DIRS` (+ `PG_DSN` if vector). drudge is a single static binary |
+| **Native** | `cd drudge && cargo run --release -- serve` | no containers / dev. Set env: `DRUDGE_LLM_BASE_URL`, `DRUDGE_VAULT_DIR` (+ `PG_DSN` if vector), and create `boring.json` for policy. drudge is a single static binary |
 
 ---
 
@@ -189,12 +224,46 @@ drudge is the agent's **MCP memory backend**. The agent (brain) drives; drudge (
 | `make deny` | supply-chain gate (cargo-deny) |
 | `make down` | stop (keeps `./data`) |
 | `make reset` | ⚠️ wipe Postgres data (re-ingested from sources) |
+| `make agent-logs` | hermes-agent logs (MCP connection diagnostics) |
 
 ---
 
-## Configuration (env)
+## Troubleshooting
 
-Core runs without `.env`; defaults live in `docker-compose.yml`.
+### `make up` fails
+1. Check Ollama: `curl -sf http://127.0.0.1:11434/api/tags`
+2. Check ports: `lsof -i :7700 ; lsof -i :5432 ; lsof -i :11434`
+3. View logs: `make logs`, `make agent-logs`, `tail -f /tmp/ollama.log`
+4. Run core-only to isolate the agent: `OMB_CORE_ONLY=1 make up`
+
+### Ollama / model pull issues
+- Ensure `OLLAMA_HOST` in `.env` matches the host bind (default `http://127.0.0.1:11434`).
+- Pull manually: `ollama pull gemma4:12b && ollama pull bge-m3`.
+- Models need ~10 GB free disk; first pull can take several minutes.
+
+### Permission / port conflicts
+- If you ran with `sudo`, fix ownership: `sudo chown -R $(id -u):$(id -g) .env vault data`.
+- If Postgres port `5432` conflicts, edit `docker-compose.yml` `postgres.ports` to `127.0.0.1:15432:5432`.
+
+### Agent connection fails
+1. `docker compose ps` — `boring-agent` must be `Up`.
+2. `make agent-logs` — look for MCP registration errors.
+3. Test MCP from the host: `curl -s -X POST http://127.0.0.1:7700/mcp -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq .`
+4. Verify `~/.hermes/config.yaml` path and indentation.
+
+---
+
+## Configuration
+
+Policy lives in **`boring.json`** (created from `boring.example.json` by `make up`).
+
+| Key | Default | Purpose |
+|---|---|---|
+| `note_lang` | `auto` | output language for distill/compile: `ko`, `en`, or `auto` (follow source) |
+| `repos[]` | `[]` | path/remote rules that tag content `origin=personal/company/mirror/community` |
+| `agents[]` | `[{enabled:true, paths:["~/.claude/projects", "vault/wiki"]}]` | ingest sources (vector mode) |
+
+`.env` is only for secrets and runtime switches (Slack tokens, LLM endpoint/model, `DRUDGE_VECTOR`, `HERMES_UID/GID`).
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -202,10 +271,12 @@ Core runs without `.env`; defaults live in `docker-compose.yml`.
 | `DRUDGE_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible LLM server (Ollama · LM Studio · …) |
 | `DRUDGE_LLM_API_KEY` | — | only for providers needing auth |
 | `DRUDGE_LLM_MODEL` / `DRUDGE_EMBED_MODEL` | `gemma4:12b` / `bge-m3` | synthesis / embedding models |
-| `DRUDGE_SOURCE_DIRS` | `~/.claude/projects:vault/wiki` | ingest sources (vector mode) |
 | `DISTILL_VIA_AGENT` | — | route the write gate through hermes-agent (else engine distill) |
-| `DRUDGE_COMPANY_SUBSTR` / `DISTILL_COMPANY_CWD` | — | tag a path `origin=company` (off by default) |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | — | only for the Slack assistant |
+
+> **Deprecated env**: `DRUDGE_COMPANY_SUBSTR`, `DISTILL_COMPANY_CWD`, `DRUDGE_SOURCE_DIRS`, and `DRUDGE_NOTE_LANG` are still read as a fallback when `boring.json` is missing, but they print a deprecation warning. Migrate with `scripts/migrate-config.sh`.
+>
+> **Rollback**: `migrate-config.sh` backs up any existing `boring.json` to `boring.json.bak.<timestamp>`. To revert, restore the backup and re-add the deprecated env variables to `.env` (then delete or rename `boring.json`).
 
 ---
 
@@ -230,5 +301,6 @@ oh-my-boring/
 ├─ data/               # Postgres persistence (vector mode) — gitignored
 ├─ docker-compose.yml  # drudge + hermes-agent (+ Postgres via --profile vector)
 ├─ start.sh            # what make up runs
+├─ boring.json         # policy config (language, repo rules, source dirs)
 └─ Makefile            # command entrypoint
 ```

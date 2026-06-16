@@ -28,7 +28,7 @@ services:
       - "127.0.0.1:5432:5432"             # for DataGrip / direct connection
 
   # ─────────────────────────── drudge (Rust engine) ─────────────────────────
-  # Performs ingest, recall (ask/graph), audit, and vault compile over HTTP + cron.
+  # Deterministic kernel: embed + ingest, recall (ask/graph), audit, and the remember MCP tool over HTTP + cron.
   drudge:
     build:
       context: ./drudge
@@ -42,17 +42,15 @@ services:
       DRUDGE_LLM_MODEL: gemma4:12b        # synthesis model (llm.rs sends reasoning_effort:"none" to disable thinking latency)
       DRUDGE_HTTP_ADDR: 0.0.0.0:7700
       PG_DSN: postgresql://boring:boring@postgres:5432/boring
-      # Recall sources: CC memory (.claude) + curated vault/wiki (self-augmentation SSOT).
-      DRUDGE_SOURCE_DIRS: /host/.claude/projects:/vault/wiki
-      DRUDGE_VAULT_DIR: /vault             # target of vault compile (raw→wiki)
+      BORING_CONFIG: /app/boring.json     # policy: note language, repo rules, source dirs
+      DRUDGE_VAULT_DIR: /vault             # remember target + sync corpus (/vault/wiki)
       DRUDGE_VECTOR: ${DRUDGE_VECTOR:-off} # default off = wiki-first direct read. on = vector+graph (postgres alongside via --profile vector)
-      DRUDGE_COMPANY_SUBSTR: ${DRUDGE_COMPANY_SUBSTR:-} # empty = all personal. set via .env → path substring → origin=company + ingest exclude
-      DRUDGE_NOTE_LANG: ${DRUDGE_NOTE_LANG:-} # distill/compile output language: ko | en | empty=auto (follow source)
       DRUDGE_SYNC_HOURS: "4"
       TZ: Asia/Seoul
     volumes:
       - ${HOME}/.claude:/host/.claude:ro  # CC auto-memory source
-      - ./vault:/vault                    # self-augmentation vault (raw→compile→wiki)
+      - ./vault:/vault                    # self-augmentation vault (agent → remember → wiki)
+      - ./boring.json:/app/boring.json:rw # policy config (language, repo rules, source dirs) — rw so the agent's classify_repo can persist rules
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

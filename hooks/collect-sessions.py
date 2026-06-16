@@ -9,8 +9,9 @@ captured. This collector scans the top-level session .jsonl files under ~/.claud
 - Marker: ~/.cache/boring-distill/<sid>.ts, same as distill-session.py. If present, skip (already done).
 - LIMIT (default 1, COLLECT_LIMIT): number processed per invocation. Called periodically via launchd/cron → drains slowly.
 - WINDOW (default 720h=30d, COLLECT_WINDOW_HOURS): ignore anything too old.
-- Each session → distill-session.py (DISTILL_NO_SYNC=1), with one /sync at the end.
-- cwd = the encoded project directory name → distill-session determines origin via the DISTILL_COMPANY_CWD token.
+- Each session → distill-session.py (wakes the agent → remember). One /sync at the end re-scans the
+  vault (idempotent safety net; remember already ingests each note live).
+- cwd = the real working dir from the transcript → distill-session determines origin via boring.json.
 """
 import glob
 import json
@@ -58,6 +59,23 @@ def transcript_cwd(tp):
     return ""
 
 
+def _warm_llm():
+    """Pre-load + pin the chat model so a per-run cold start (~70s after idle unload) doesn't make the
+    first agent call exceed its timeout → silent SKIP. Best-effort: any failure is ignored (the agent's
+    own call still works, just slower). Uses Ollama's native /api/generate keep_alive (no-op elsewhere)."""
+    base = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    model = os.environ.get("DRUDGE_LLM_MODEL", "gemma4:12b")
+    body = json.dumps({"model": model, "prompt": "ok", "stream": False, "keep_alive": 1800}).encode()
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(f"{base}/api/generate", data=body,
+                                   headers={"Content-Type": "application/json"}),
+            timeout=120,
+        ).read()
+    except Exception:
+        pass
+
+
 def main():
     cutoff = time.time() - WINDOW_H * 3600
     paths = glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))  # top-level only
@@ -76,7 +94,9 @@ def main():
         print("[collect] all done — nothing to do", flush=True)
         return
 
-    env = dict(os.environ, DISTILL_NO_SYNC="1")
+    _warm_llm()  # pre-warm gemma so the first session isn't a ~70s cold start (→ agent timeout → SKIP)
+
+    env = dict(os.environ)
     done = 0
     for tp in batch:
         proj = os.path.basename(os.path.dirname(tp))  # encoded dir name — for the log label only

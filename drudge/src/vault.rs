@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::frontmatter::{Claim, FrontMatter};
 use crate::store::Store;
 
 // ─────────────────────────────────────────────────────────────
@@ -37,6 +38,8 @@ pub enum Kind {
 pub enum Origin {
     Personal,
     Company,
+    Mirror,
+    Community,
 }
 
 /// Issue severity.
@@ -257,6 +260,11 @@ pub async fn project_links(store: &Store, vault_root: &Path, limit: i64) -> Resu
             }
         }
         let links: Vec<String> = stems.iter().map(|s| format!("\"[[{s}]]\"")).collect();
+        // Don't wipe: if the graph projection found nothing, preserve whatever relates_to the compile
+        // relation-pass (shared tools/concepts) already set — an empty graph must not clobber it to [].
+        if links.is_empty() {
+            continue;
+        }
         let new_content = format!("---\n{}\n---\n{body}", set_relates_to(yaml, &links));
         if new_content != content {
             std::fs::write(&path, new_content)?;
@@ -282,6 +290,8 @@ fn parse_origin(val: &serde_yaml::Value) -> Option<Origin> {
     match val.as_str()? {
         "personal" => Some(Origin::Personal),
         "company" => Some(Origin::Company),
+        "mirror" => Some(Origin::Mirror),
+        "community" => Some(Origin::Community),
         _ => None,
     }
 }
@@ -921,86 +931,24 @@ fn exit_code(issues: &[Issue], strict: bool) -> i32 {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Compile — raw → wiki curation (pure logic + I/O shell)
+// Remember note rendering (kernel A) — the agent hands drudge a complete note; drudge writes it as a
+// wiki page (deterministic file IO) so Obsidian + wiki_recall + disk re-ingest all see one SSOT artifact.
 // ─────────────────────────────────────────────────────────────
 
-/// LLM curation result (parse-don't-validate — typed parse once).
-#[derive(Debug, Deserialize)]
-struct CuratedLlm {
-    // NOTE: no `body` field — the curated body is taken from the post-`<<<BODY>>>` markdown split,
-    // never from JSON (avoids escape-fragility of large markdown inside a JSON string).
-    title: String,
-    #[serde(default)]
-    tags: Vec<String>,
-    #[serde(default)]
-    tools: Vec<String>,
-    #[serde(default)]
-    concepts: Vec<String>,
-}
-
-/// In-memory representation of a compiled page (before relation links are computed).
-#[derive(Debug, Clone)]
-pub struct CompiledDraft {
-    pub wiki_id: String,
-    pub title: String,
-    pub kind: Kind,
-    pub origin: Origin,
-    pub date: String,
-    pub raw_rel_path: String, // raw/<filename>
-    pub raw_sha: String,
-    pub body: String,
-    pub tags: Vec<String>,
-    pub tools: Vec<String>,
-    pub concepts: Vec<String>,
-    pub relates_to: Vec<String>, // filled after relation pass
-}
-
-/// Compile-source info extracted from an existing wiki page (idempotency key).
-#[derive(Debug, Clone)]
-struct WikiMeta {
-    wiki_id: String,
-    #[allow(dead_code)] // used as HashMap key; kept for debug clarity
-    compiled_from: String, // raw/<filename>
-    raw_sha: String,
-}
-
-/// Extended fields of wiki frontmatter (compile-only).
-#[derive(Debug, Deserialize)]
-struct WikiFrontMatterExt {
-    #[serde(default)]
-    compiled_from: Option<String>,
-    #[serde(default)]
-    raw_sha: Option<String>,
-    #[serde(default)]
-    id: Option<String>,
-}
-
-/// Whether it contains CJK Unified Ideographs (U+4E00..=U+9FFF) (same logic as extract.rs).
-fn has_han(s: &str) -> bool {
-    s.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c))
-}
-
-/// Apply the Han filter and keep only valid items.
-fn filter_han(items: Vec<String>) -> Vec<String> {
-    items.into_iter().filter(|s| !has_han(s)).collect()
-}
-
-/// Normalize into an Obsidian-safe tag (pure). Prevents tags containing spaces that the LLM emits (`claude code`)
-/// from breaking in Obsidian — space/disallowed chars → `-`, collapse consecutive dashes,
-/// trim leading/trailing `-`·`/`, lowercase. Allowed set = `[a-z0-9_/-]` (`/` = nested tag).
-/// Empty value · pure-number (Obsidian-invalid tags) → `None`.
-fn sanitize_tag(raw: &str) -> Option<String> {
+/// Normalize into an Obsidian-safe tag (pure). Space/disallowed chars → `-`, collapse dashes, trim,
+/// lowercase. Allowed set = `[a-z0-9_/-]` (`/` = nested tag). Empty · pure-number → `None`.
+pub fn sanitize_tag(raw: &str) -> Option<String> {
     let mut out = String::with_capacity(raw.len());
     let mut prev_dash = false;
     for c in raw.trim().to_lowercase().chars() {
         let mapped = if c.is_ascii_alphanumeric() || c == '_' || c == '/' {
             c
         } else {
-            '-' // spaces, hyphens, and other punctuation all converge to a hyphen
+            '-'
         };
         if mapped == '-' {
             if prev_dash {
-                continue; // collapse consecutive dashes
+                continue;
             }
             prev_dash = true;
         } else {
@@ -1010,510 +958,78 @@ fn sanitize_tag(raw: &str) -> Option<String> {
     }
     let trimmed = out.trim_matches(|c| c == '-' || c == '/').to_owned();
     if trimmed.is_empty() || trimmed.chars().all(|c| c.is_ascii_digit()) {
-        return None; // empty value · pure-number = Obsidian-invalid
+        return None;
     }
     Some(trimmed)
 }
 
-/// Extract the `repo: <slug>` marker from a distill note header (pure). A deterministic value that
-/// distill-session.py → /distill fills from the host git remote (falling back to the folder name) and render_note embeds in a blockquote.
-/// Scans only the front portion (header area) to avoid body false positives. `None` if absent.
-fn parse_repo_marker(raw: &str) -> Option<String> {
-    let head = raw.get(..raw.len().min(400)).unwrap_or(raw);
-    let idx = head.find("repo:")?;
-    // The writer (render_note) delimits header fields with " · ", so split on that — not on
-    // whitespace, which would truncate a folder-name fallback slug that contains spaces.
-    let tok = head[idx + "repo:".len()..]
-        .split(" · ")
-        .next()
-        .unwrap_or("")
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim();
-    (!tok.is_empty()).then(|| tok.to_owned())
-}
-
-/// Scan the current wiki directory for the (compiled_from → WikiMeta) map + the maximum numeric id.
-/// Pure file-parsing logic (includes I/O but SRP-separated: read-only scan).
-fn scan_existing_wiki(wiki_dir: &Path) -> Result<(HashMap<String, WikiMeta>, u32)> {
-    let mut map: HashMap<String, WikiMeta> = HashMap::new();
+/// Scan vault/wiki for the highest `wiki-NNNN` id and return the next one (`wiki-{:04}`). Read-only IO.
+pub fn next_wiki_id(wiki_dir: &Path) -> Result<String> {
     let mut max_id: u32 = 0;
-
-    if !wiki_dir.exists() {
-        return Ok((map, max_id));
-    }
-
-    let read_dir = std::fs::read_dir(wiki_dir)
-        .with_context(|| format!("failed to read wiki directory: {}", wiki_dir.display()))?;
-
-    for entry in read_dir {
-        let entry = entry.context("failed to read wiki entry")?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_owned();
-
-        // extract numeric id: wiki-NNNN → NNNN
-        if let Some(n) = stem
-            .strip_prefix("wiki-")
-            .and_then(|s| s.parse::<u32>().ok())
-            && n > max_id
+    if wiki_dir.exists() {
+        for entry in std::fs::read_dir(wiki_dir)
+            .with_context(|| format!("failed to read wiki dir: {}", wiki_dir.display()))?
         {
-            max_id = n;
-        }
-
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read wiki file: {}", path.display()))?;
-        let Some((yaml, _body)) = split_frontmatter(&content) else {
-            continue;
-        };
-        let ext: WikiFrontMatterExt = match serde_yaml::from_str(yaml) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if let (Some(wiki_id), Some(compiled_from), Some(raw_sha)) =
-            (ext.id, ext.compiled_from, ext.raw_sha)
-        {
-            map.insert(
-                compiled_from.clone(),
-                WikiMeta {
-                    wiki_id,
-                    compiled_from,
-                    raw_sha,
-                },
-            );
-        }
-    }
-
-    Ok((map, max_id))
-}
-
-/// sha256 of file bytes (hex string).
-fn sha256_file(path: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("failed to read raw file: {}", path.display()))?;
-    let hash = Sha256::digest(&bytes);
-    Ok(hex::encode(hash))
-}
-
-/// LLM curation system prompt.
-const COMPILE_SYSTEM: &str = "You are a precise curator. Output one line of JSON metadata, then a line with exactly <<<BODY>>>, then the curated markdown body as plain text (do NOT JSON-encode or escape the body). No fences, no prose. /no_think";
-
-/// LLM curation prompt template. Two-part output: a small JSON header (escapable) + a raw
-/// markdown body after a `<<<BODY>>>` delimiter — the body is never JSON-encoded, which avoids
-/// the escape-fragility of stuffing large markdown into a JSON string field.
-const COMPILE_PROMPT_TMPL: &str = r#"Curate the raw note below into a wiki page. Output in TWO parts:
-
-PART 1 — one line of JSON metadata (NO body key, no extra keys):
-{"title":"<short title, ≤60 chars>","tags":["tag1"],"tools":["tool1"],"concepts":["concept1"]}
-
-PART 2 — a line containing exactly:
-<<<BODY>>>
-then the curated markdown body. Write it as plain markdown — do NOT escape or JSON-encode it. Keep all important insights, add WHY context.
-Do NOT add a "Related" / "See also" / "관련" section or any [[wikilinks]] — cross-links are managed separately.
-
-Rules:
-- title: short, descriptive, ≤60 chars
-- tags: ≤6 topical tags, lowercase, no Han/CJK characters
-- tools: ≤6 software tools/libraries used, short canonical names, no Han/CJK
-- concepts: ≤6 key technical concepts or patterns, no Han/CJK
-- title/tags/tools/concepts: NO Chinese/Japanese characters (漢字/汉字/CJK). Use empty arrays [] if not applicable
-- body: follow the LANGUAGE instruction appended below
-
-Raw note:
----
-{BODY}
----
-/no_think"#;
-
-/// Compute the relation map based on shared tools/concepts (pure function).
-/// Returns: wiki_id → Vec<related_wiki_id> (self excluded, no duplicates).
-fn compute_relations(drafts: &[CompiledDraft]) -> HashMap<String, Vec<String>> {
-    // tool/concept slug → wiki_id inverted index
-    let mut tool_idx: HashMap<String, Vec<String>> = HashMap::new();
-    let mut concept_idx: HashMap<String, Vec<String>> = HashMap::new();
-
-    for d in drafts {
-        for t in &d.tools {
-            tool_idx
-                .entry(t.clone())
-                .or_default()
-                .push(d.wiki_id.clone());
-        }
-        for c in &d.concepts {
-            concept_idx
-                .entry(c.clone())
-                .or_default()
-                .push(d.wiki_id.clone());
-        }
-    }
-
-    // wiki_id → set of related ids
-    let mut rel: HashMap<String, HashSet<String>> = HashMap::new();
-
-    let add_relations = |idx: &HashMap<String, Vec<String>>,
-                         rel: &mut HashMap<String, HashSet<String>>| {
-        for ids in idx.values() {
-            for i in ids {
-                for j in ids {
-                    if i != j {
-                        rel.entry(i.clone()).or_default().insert(j.clone());
-                    }
-                }
+            let path = entry?.path();
+            if let Some(n) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("wiki-"))
+                .and_then(|s| s.parse::<u32>().ok())
+                && n > max_id
+            {
+                max_id = n;
             }
         }
-    };
-
-    add_relations(&tool_idx, &mut rel);
-    add_relations(&concept_idx, &mut rel);
-
-    rel.into_iter()
-        .map(|(k, v)| {
-            let mut sorted: Vec<String> = v.into_iter().collect();
-            sorted.sort();
-            (k, sorted)
-        })
-        .collect()
+    }
+    Ok(format!("wiki-{:04}", max_id + 1))
 }
 
-/// CompiledDraft → render wiki .md file content (pure function).
-#[allow(clippy::items_after_statements)]
-fn render_wiki_page(draft: &CompiledDraft) -> Result<String> {
-    let kind_str = match draft.kind {
-        Kind::Note => "note",
-        Kind::Memory => "memory",
-        Kind::Session => "session",
-        Kind::Decision => "decision",
-    };
-    let origin_str = match draft.origin {
-        Origin::Personal => "personal",
-        Origin::Company => "company",
-    };
-
-    // serialize frontmatter via serde_yaml (SSOT)
+/// Render a remember-note into wiki `.md` content (pure). Frontmatter satisfies the lint schema
+/// (id·title·kind·origin·date) AND carries the agent-curated semantic fields (tags·tools·concepts·claims)
+/// so a disk re-ingest rebuilds the same graph deterministically. `relates_to` starts `[]` and is filled
+/// by `project_links` from the graph (SSOT for relations).
+pub fn render_wiki_note(wiki_id: &str, front: &FrontMatter, body: &str) -> Result<String> {
     #[derive(Serialize)]
     struct Fm<'a> {
         id: &'a str,
         title: &'a str,
         kind: &'a str,
         origin: &'a str,
+        project: &'a str,
         date: &'a str,
-        sources: Vec<&'a str>,
-        compiled_from: &'a str,
-        raw_sha: &'a str,
-        relates_to: &'a [String],
         tags: &'a [String],
+        tools: &'a [String],
+        concepts: &'a [String],
+        claims: &'a [Claim],
+        relates_to: Vec<String>,
+        sources: Vec<String>,
     }
-
-    let fm = Fm {
-        id: &draft.wiki_id,
-        title: &draft.title,
-        kind: kind_str,
-        origin: origin_str,
-        date: &draft.date,
-        sources: vec![draft.raw_rel_path.as_str()],
-        compiled_from: &draft.raw_rel_path,
-        raw_sha: &draft.raw_sha,
-        relates_to: &draft.relates_to,
-        tags: &draft.tags,
-    };
-
-    let yaml = serde_yaml::to_string(&fm).context("failed to serialize frontmatter YAML")?;
-
-    // ## Related section + [[wiki-NNNN]] wikilinks
-    let related_section = if draft.relates_to.is_empty() {
-        String::new()
+    let title = front.title.as_deref().unwrap_or(wiki_id);
+    let kind = if front.kind.is_empty() {
+        "note"
     } else {
-        let links: String = draft
-            .relates_to
-            .iter()
-            .map(|id| format!("- [[{id}]]"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("\n\n## Related\n\n{links}")
+        front.kind.as_str()
     };
-
-    Ok(format!("---\n{yaml}---\n{}{related_section}\n", draft.body))
-}
-
-/// Compile stats.
-#[derive(Debug, Default)]
-pub struct CompileStats {
-    pub compiled: usize,
-    pub recompiled: usize,
-    pub skipped: usize,
-    pub total_raw: usize,
-}
-
-/// `drudge vault compile` entry point (I/O shell — delegates to pure logic).
-#[allow(clippy::too_many_lines)]
-/// Strip inline `[[wikilinks]]` from a string (manual scan — no regex dep).
-fn strip_wikilinks(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(i) = rest.find("[[") {
-        out.push_str(&rest[..i]);
-        rest = rest[i + 2..]
-            .find("]]")
-            .map_or(&rest[i + 2..], |j| &rest[i + 2..][j + 2..]);
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Sanitize a curated body: drop a trailing "Related"/"관련"/"See also" section and any inline
-/// `[[wikilinks]]`. Relations are SSOT in frontmatter `relates_to` (computed from the graph) — gemma
-/// otherwise hallucinates long bogus `[[wiki-NNNN]]` lists that pollute the body + Obsidian graph.
-fn sanitize_body(body: &str) -> String {
-    let lines: Vec<&str> = body.lines().collect();
-    let cut = lines.iter().position(|l| {
-        let t = l.trim_start_matches('#').trim();
-        t.eq_ignore_ascii_case("related") || t == "관련" || t.eq_ignore_ascii_case("see also")
-    });
-    let kept = match cut {
-        Some(i) => lines[..i].join("\n"),
-        None => body.to_owned(),
+    let fm = Fm {
+        id: wiki_id,
+        title,
+        kind,
+        origin: &front.origin,
+        project: &front.project,
+        date: &front.date,
+        tags: &front.tags,
+        tools: &front.tools,
+        concepts: &front.concepts,
+        claims: &front.claims,
+        relates_to: Vec::new(),
+        sources: Vec::new(),
     };
-    strip_wikilinks(&kept).trim_end().to_owned()
+    let yaml = serde_yaml::to_string(&fm).context("failed to serialize wiki frontmatter YAML")?;
+    Ok(format!("---\n{yaml}---\n{}\n", body.trim_end()))
 }
 
-/// Parse a compile LLM response: leading JSON metadata object + trailing markdown body.
-/// The `<<<BODY>>>` delimiter is stripped if present but not required (key off the JSON object's end).
-/// Returns None on any malformation (no header / bad JSON / empty body) — caller retries or skips.
-fn parse_compiled(llm_raw: &str) -> Option<(CuratedLlm, String)> {
-    let start = llm_raw.find('{')?;
-    let after = &llm_raw[start..];
-    let mut stream = serde_json::Deserializer::from_str(after).into_iter::<CuratedLlm>();
-    let curated = stream.next()?.ok()?;
-    let rest = after[stream.byte_offset()..].trim_start();
-    // Take everything after the LAST `<<<BODY>>>` marker if present (not just a prefix) — a model
-    // may emit a stray fence/preamble between the JSON and the marker, which must not leak into the
-    // wiki body (→ corpus). Fall back to the post-JSON remainder when the marker is absent.
-    let body = rest
-        .rsplit_once("<<<BODY>>>")
-        .map_or(rest, |(_, b)| b)
-        .trim()
-        .to_owned();
-    if body.is_empty() {
-        return None;
-    }
-    Some((curated, body))
-}
-
-// Legit long orchestration: scan existing wiki → per-note compile+incremental-write loop →
-// relation pass. Splitting the linear pipeline into sub-fns with shared mutable state (max_id,
-// stats, maps) would obscure, not clarify.
-#[allow(clippy::too_many_lines)]
-pub async fn run_compile(
-    vault_root: &Path,
-    raw_dir: &Path,
-    today: &str,
-    llm: &crate::llm::Llm,
-) -> Result<CompileStats> {
-    let wiki_dir = vault_root.join("wiki");
-    std::fs::create_dir_all(&wiki_dir)
-        .with_context(|| format!("failed to create wiki directory: {}", wiki_dir.display()))?;
-
-    // 1. scan existing wiki — idempotency key map + max id
-    let (existing_map, mut max_id) = scan_existing_wiki(&wiki_dir)?;
-
-    // 2. collect raw directory (*.md only)
-    let mut raw_entries: Vec<PathBuf> = {
-        let rd = std::fs::read_dir(raw_dir)
-            .with_context(|| format!("failed to read raw directory: {}", raw_dir.display()))?;
-        rd.filter_map(|e| {
-            let e = e.ok()?;
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("md") {
-                Some(p)
-            } else {
-                None
-            }
-        })
-        .collect()
-    };
-    raw_entries.sort();
-
-    let mut stats = CompileStats {
-        total_raw: raw_entries.len(),
-        ..Default::default()
-    };
-
-    // 3. process each raw file
-    let mut drafts: Vec<CompiledDraft> = Vec::new();
-    // wiki_id → path (for overwriting on recompile)
-    let mut wiki_path_map: HashMap<String, PathBuf> = HashMap::new();
-
-    for raw_path in &raw_entries {
-        let filename = raw_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_owned();
-        let raw_rel = format!("raw/{filename}");
-
-        let sha = sha256_file(raw_path)?;
-
-        // idempotency check
-        let (wiki_id, is_new) = if let Some(meta) = existing_map.get(&raw_rel) {
-            if meta.raw_sha == sha {
-                eprintln!("↷ skip (unchanged): {filename}");
-                stats.skipped += 1;
-                continue;
-            }
-            // sha changed → recompile with the same id
-            (meta.wiki_id.clone(), false)
-        } else {
-            // new → next id
-            max_id += 1;
-            (format!("wiki-{max_id:04}"), true)
-        };
-
-        // determine origin — env `DRUDGE_COMPANY_SUBSTR` token match (always Personal if unset)
-        let origin = if raw_path
-            .to_str()
-            .is_some_and(crate::frontmatter::is_company_path)
-        {
-            Origin::Company
-        } else {
-            Origin::Personal
-        };
-
-        // mtime → date (once at the I/O boundary)
-        let date = raw_path
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| {
-                use std::time::UNIX_EPOCH;
-                let secs = t.duration_since(UNIX_EPOCH).ok()?.as_secs();
-                let days = (secs / 86400).cast_signed();
-                // simple date computation (without chrono — deterministic)
-                // epoch = 1970-01-01. days_since_epoch → gregorian date
-                Some(days_to_date(days))
-            })
-            .unwrap_or_else(|| today.to_owned());
-
-        // LLM curation
-        let body_raw = std::fs::read_to_string(raw_path)
-            .with_context(|| format!("failed to read raw file: {}", raw_path.display()))?;
-        let body_snip: String = body_raw.chars().take(4000).collect();
-        let prompt = COMPILE_PROMPT_TMPL.replace("{BODY}", &body_snip);
-        // Language directive goes in the SYSTEM message (same as distill), not appended after the
-        // user prompt's `/no_think` sentinel where some models weakly honor it.
-        let system = format!("{COMPILE_SYSTEM}\n{}", crate::distill::lang_directive());
-
-        // LLM curation with one retry — covers BOTH a transient LLM error and a 12B model emitting a
-        // malformed JSON header (non-deterministic); a second attempt usually succeeds. parse_compiled()
-        // splits the leading JSON metadata object from the trailing markdown body (delimiter optional).
-        let mut parsed: Option<(CuratedLlm, String)> = None;
-        for attempt in 1..=2u8 {
-            match llm.generate(&system, &prompt).await {
-                Ok(raw) => {
-                    if let Some(v) = parse_compiled(&raw) {
-                        parsed = Some(v);
-                        break;
-                    }
-                    eprintln!("⚠ compile parse retry {attempt} [{filename}] — raw: {raw:.120}");
-                }
-                Err(e) if attempt < 2 => {
-                    eprintln!("⚠ compile LLM error [{filename}] attempt {attempt}: {e} — retrying");
-                }
-                Err(e) => {
-                    eprintln!("⚠ compile LLM error [{filename}]: {e} — skipping");
-                }
-            }
-        }
-        let Some((curated, body)) = parsed else {
-            stats.skipped += 1;
-            continue;
-        };
-        // Relations live in frontmatter relates_to (SSOT) — strip any LLM-invented body wikilinks/Related section.
-        let body = sanitize_body(&body);
-
-        // Han filter + Obsidian-safe normalization (space→-, drop invalid). ≤6 items.
-        let mut tags: Vec<String> = filter_han(curated.tags)
-            .into_iter()
-            .filter_map(|t| sanitize_tag(&t))
-            .take(6)
-            .collect();
-        // new category axis: repo slug (host git, distill marker) → Obsidian nested tag repo/<slug>.
-        if let Some(repo) = parse_repo_marker(&body_raw)
-            .as_deref()
-            .and_then(sanitize_tag)
-        {
-            tags.insert(0, format!("repo/{repo}"));
-        }
-        let tools = filter_han(curated.tools).into_iter().take(6).collect();
-        let concepts = filter_han(curated.concepts).into_iter().take(6).collect();
-        let title = if has_han(&curated.title) {
-            filename.trim_end_matches(".md").to_owned()
-        } else {
-            curated.title
-        };
-
-        let draft = CompiledDraft {
-            wiki_id: wiki_id.clone(),
-            title,
-            kind: Kind::Note,
-            origin,
-            date,
-            raw_rel_path: raw_rel,
-            raw_sha: sha,
-            body,
-            tags,
-            tools,
-            concepts,
-            relates_to: Vec::new(), // filled after relation pass
-        };
-
-        let wiki_path = wiki_dir.join(format!("{wiki_id}.md"));
-        // Incremental write: persist each wiki the moment it compiles (relates_to filled in the
-        // post-loop pass). Interruption-safe — a killed compile leaves finished wiki on disk, and the
-        // sha-skip above resumes the rest next run (no 60-min all-or-nothing batch that loses all on kill).
-        let content = render_wiki_page(&draft)?;
-        std::fs::write(&wiki_path, content)
-            .with_context(|| format!("failed to write wiki file: {}", wiki_path.display()))?;
-        println!("✓ {}: {}", draft.wiki_id, draft.title);
-        wiki_path_map.insert(wiki_id.clone(), wiki_path);
-        drafts.push(draft);
-
-        if is_new {
-            stats.compiled += 1;
-        } else {
-            stats.recompiled += 1;
-        }
-    }
-
-    // 4. compute relations, then rewrite ONLY the wiki that gained relates_to (every wiki was already
-    //    written incrementally in the loop with empty relates_to). Preserves the relation graph while
-    //    keeping the whole compile interruption-safe + resumable.
-    let relations = compute_relations(&drafts);
-    for draft in &mut drafts {
-        let links = relations.get(&draft.wiki_id).cloned().unwrap_or_default();
-        if links.is_empty() {
-            continue; // already on disk with relates_to: [] — nothing to update
-        }
-        draft.relates_to = links;
-        let content = render_wiki_page(draft)?;
-        let path = wiki_path_map
-            .get(&draft.wiki_id)
-            .with_context(|| format!("wiki path not found: {}", draft.wiki_id))?;
-        std::fs::write(path, content)
-            .with_context(|| format!("failed to rewrite wiki file: {}", path.display()))?;
-    }
-
-    Ok(stats)
-}
-
-/// Today's date "YYYY-MM-DD" — the SSOT default when compile's `--date` is unspecified.
+/// Today's date "YYYY-MM-DD" — the SSOT default for a remember note's `date`.
 /// I/O boundary: `SystemTime::now()` is isolated to this single spot (shared by main·serve) → conversion is the pure `days_to_date`.
 #[must_use]
 pub fn today_utc() -> String {
@@ -1554,7 +1070,7 @@ mod tests {
     use super::{
         Kind, Origin, Page, PageIdSchema, Schema, Severity, SourcesSchema, audit_pages,
         extract_wikilinks, find_cross_layer_wikilinks, lint_page, parse_kind, parse_origin,
-        parse_repo_marker, sanitize_tag,
+        sanitize_tag,
     };
     use serde_yaml::Value;
 
@@ -1594,46 +1110,6 @@ mod tests {
             sanitize_tag("-leading-trailing-").as_deref(),
             Some("leading-trailing")
         );
-    }
-
-    #[test]
-    fn sanitize_tag_drops_invalid() {
-        assert!(sanitize_tag("2024").is_none()); // pure-number = Obsidian-invalid
-        assert!(sanitize_tag("").is_none());
-        assert!(sanitize_tag("  ").is_none());
-        assert!(sanitize_tag("!!!").is_none());
-    }
-
-    // ── parse_repo_marker (distill note header marker) ──
-
-    #[test]
-    fn parse_repo_marker_extracts_slug() {
-        let note = "# Session Note — 2026-06-12\n> auto-distilled (Claude Code · final) · origin: personal · repo: jazz1x/oh-my-boring · cwd: /x\n\nbody";
-        assert_eq!(
-            parse_repo_marker(note).as_deref(),
-            Some("jazz1x/oh-my-boring")
-        );
-    }
-
-    #[test]
-    fn normalize_link_id_strips_obsidian_wrapper() {
-        use super::normalize_link_id;
-        assert_eq!(normalize_link_id("\"[[wiki-0002]]\""), "wiki-0002"); // project_links form
-        assert_eq!(normalize_link_id("[[wiki-0003|alias]]"), "wiki-0003"); // alias
-        assert_eq!(normalize_link_id("wiki-0004"), "wiki-0004"); // already bare
-    }
-
-    #[test]
-    fn parse_repo_marker_keeps_spaced_folder_slug() {
-        // folder-name fallback with a space must not be truncated at the first whitespace
-        let note = "# x\n> auto-distilled · origin: personal · repo: my project · cwd: /x\n\nbody";
-        assert_eq!(parse_repo_marker(note).as_deref(), Some("my project"));
-    }
-
-    #[test]
-    fn parse_repo_marker_absent_is_none() {
-        let note = "# Session Note\n> origin: personal · cwd: /x\n\nbody";
-        assert!(parse_repo_marker(note).is_none());
     }
 
     fn test_schema() -> Schema {
@@ -1865,185 +1341,7 @@ mod tests {
         );
     }
 
-    // ── compile: monotonic id ──
-
-    #[test]
-    fn monotonic_id_next_from_zero() {
-        // max_id=0 → next = wiki-0001
-        let max_id: u32 = 0;
-        let next = format!("wiki-{:04}", max_id + 1);
-        assert_eq!(next, "wiki-0001");
-    }
-
-    #[test]
-    fn monotonic_id_next_increments() {
-        let max_id: u32 = 42;
-        let next = format!("wiki-{:04}", max_id + 1);
-        assert_eq!(next, "wiki-0043");
-    }
-
-    #[test]
-    fn monotonic_id_pads_to_four_digits() {
-        let next = format!("wiki-{:04}", 9_u32 + 1);
-        assert_eq!(next, "wiki-0010");
-    }
-
-    // ── compile: idempotency — same sha → skip ──
-
-    #[test]
-    fn idempotency_same_sha_means_skip() {
-        use super::WikiFrontMatterExt;
-        // simulate: existing map has raw/foo.md → sha abc123
-        let mut existing: std::collections::HashMap<String, super::WikiMeta> =
-            std::collections::HashMap::new();
-        existing.insert(
-            "raw/foo.md".to_owned(),
-            super::WikiMeta {
-                wiki_id: "wiki-0001".to_owned(),
-                compiled_from: "raw/foo.md".to_owned(),
-                raw_sha: "abc123".to_owned(),
-            },
-        );
-        let current_sha = "abc123";
-        let should_skip = existing
-            .get("raw/foo.md")
-            .is_some_and(|m| m.raw_sha == current_sha);
-        assert!(should_skip, "same sha should be skipped");
-
-        // WikiFrontMatterExt can parse yaml with compiled_from + raw_sha
-        let yaml = "id: wiki-0001\ncompiled_from: raw/foo.md\nraw_sha: abc123\n";
-        let ext: WikiFrontMatterExt = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(ext.compiled_from.as_deref(), Some("raw/foo.md"));
-        assert_eq!(ext.raw_sha.as_deref(), Some("abc123"));
-    }
-
-    #[test]
-    fn idempotency_changed_sha_reuses_id() {
-        let mut existing: std::collections::HashMap<String, super::WikiMeta> =
-            std::collections::HashMap::new();
-        existing.insert(
-            "raw/foo.md".to_owned(),
-            super::WikiMeta {
-                wiki_id: "wiki-0005".to_owned(),
-                compiled_from: "raw/foo.md".to_owned(),
-                raw_sha: "old_sha".to_owned(),
-            },
-        );
-        let current_sha = "new_sha";
-        let meta = existing.get("raw/foo.md").unwrap();
-        let should_skip = meta.raw_sha == current_sha;
-        assert!(!should_skip);
-        // reuse same wiki id
-        assert_eq!(meta.wiki_id, "wiki-0005");
-    }
-
-    // ── compile: relation linking ──
-
-    #[test]
-    fn relation_linking_shared_tool() {
-        let drafts = vec![
-            super::CompiledDraft {
-                wiki_id: "wiki-0001".to_owned(),
-                title: "A".to_owned(),
-                kind: Kind::Note,
-                origin: Origin::Personal,
-                date: "2026-01-01".to_owned(),
-                raw_rel_path: "raw/a.md".to_owned(),
-                raw_sha: "sha1".to_owned(),
-                body: String::new(),
-                tags: vec![],
-                tools: vec!["rust".to_owned()],
-                concepts: vec![],
-                relates_to: vec![],
-            },
-            super::CompiledDraft {
-                wiki_id: "wiki-0002".to_owned(),
-                title: "B".to_owned(),
-                kind: Kind::Note,
-                origin: Origin::Personal,
-                date: "2026-01-01".to_owned(),
-                raw_rel_path: "raw/b.md".to_owned(),
-                raw_sha: "sha2".to_owned(),
-                body: String::new(),
-                tags: vec![],
-                tools: vec!["rust".to_owned()],
-                concepts: vec![],
-                relates_to: vec![],
-            },
-        ];
-        let rels = super::compute_relations(&drafts);
-        assert!(
-            rels.get("wiki-0001")
-                .is_some_and(|v| v.contains(&"wiki-0002".to_owned())),
-            "wiki-0001 should relate to wiki-0002 via shared tool 'rust'"
-        );
-        assert!(
-            rels.get("wiki-0002")
-                .is_some_and(|v| v.contains(&"wiki-0001".to_owned())),
-            "wiki-0002 should relate to wiki-0001 via shared tool 'rust'"
-        );
-    }
-
-    #[test]
-    fn relation_linking_no_shared_entity_no_link() {
-        let drafts = vec![
-            super::CompiledDraft {
-                wiki_id: "wiki-0001".to_owned(),
-                title: "A".to_owned(),
-                kind: Kind::Note,
-                origin: Origin::Personal,
-                date: "2026-01-01".to_owned(),
-                raw_rel_path: "raw/a.md".to_owned(),
-                raw_sha: "sha1".to_owned(),
-                body: String::new(),
-                tags: vec![],
-                tools: vec!["rust".to_owned()],
-                concepts: vec![],
-                relates_to: vec![],
-            },
-            super::CompiledDraft {
-                wiki_id: "wiki-0002".to_owned(),
-                title: "B".to_owned(),
-                kind: Kind::Note,
-                origin: Origin::Personal,
-                date: "2026-01-01".to_owned(),
-                raw_rel_path: "raw/b.md".to_owned(),
-                raw_sha: "sha2".to_owned(),
-                body: String::new(),
-                tags: vec![],
-                tools: vec!["python".to_owned()],
-                concepts: vec![],
-                relates_to: vec![],
-            },
-        ];
-        let rels = super::compute_relations(&drafts);
-        assert!(
-            rels.get("wiki-0001").is_none_or(Vec::is_empty),
-            "no shared entity → no link"
-        );
-    }
-
-    // ── compile: JSON parse (typed parsing) ──
-
-    #[test]
-    fn curated_llm_parse_valid() {
-        let json = r#"{"title":"Test Title","tags":["rust","rag"],"tools":["surrealdb"],"concepts":["rop"]}"#;
-        let c: super::CuratedLlm = serde_json::from_str(json).unwrap();
-        assert_eq!(c.title, "Test Title");
-        assert_eq!(c.tags, vec!["rust", "rag"]);
-        assert_eq!(c.tools, vec!["surrealdb"]);
-    }
-
-    #[test]
-    fn curated_llm_parse_missing_arrays_defaults_empty() {
-        let json = r#"{"title":"T"}"#;
-        let c: super::CuratedLlm = serde_json::from_str(json).unwrap();
-        assert!(c.tags.is_empty());
-        assert!(c.tools.is_empty());
-        assert!(c.concepts.is_empty());
-    }
-
-    // ── compile: days_to_date ──
+    // ── days_to_date ──
 
     #[test]
     fn days_to_date_epoch() {
@@ -2059,14 +1357,5 @@ mod tests {
         // 2026-01-01 from epoch: 2026 years * 365 + leaps
         // We'll test a known value: 2000-01-01 = 10957
         assert_eq!(super::days_to_date(10_957), "2000-01-01");
-    }
-
-    // ── han filter ──
-
-    #[test]
-    fn han_filter_removes_cjk() {
-        let items = vec!["rust".to_owned(), "漢字".to_owned(), "rag".to_owned()];
-        let filtered = super::filter_han(items);
-        assert_eq!(filtered, vec!["rust", "rag"]);
     }
 }

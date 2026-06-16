@@ -2,12 +2,12 @@
 //! First milestone: embed → store → vector search round-trip proof (selftest).
 mod ask;
 mod audit;
-mod distill;
-mod extract;
+mod config;
 mod frontmatter;
 mod graph;
 mod ingest;
 mod llm;
+mod redact;
 mod retrieve;
 mod serve;
 mod store;
@@ -45,12 +45,12 @@ enum Cmd {
     Brief,
     /// Graph-expanded retrieval — vector hits → graph (edge) 1-hop neighbors
     Graph { query: String },
-    /// LLM extraction — generate per-document problem/solution/tool/concept nodes + edges
-    Extract,
-    /// Self-augmentation loop: run ingest → extract sequentially (for cron invocation)
+    /// Deterministic re-ingest: walk → embed → upsert → graph (from frontmatter) → relations
     Sync,
     /// Delete orphan semantic nodes (remove edge-unreferenced legacy remnants)
     Gc,
+    /// Show loaded boring.json config (for debugging / migration verification)
+    Config,
     /// Graph projection — write Postgres doc↔doc relations as wiki relates_to wikilinks (Obsidian)
     Link {
         /// vault root (default: $DRUDGE_VAULT_DIR or $HOME/oh-my-boring/vault)
@@ -86,18 +86,6 @@ enum VaultCmd {
         #[arg(long)]
         strict: bool,
     },
-    /// Compile raw/*.md → curated wiki-NNNN.md (LLM curation, idempotent)
-    Compile {
-        /// vault root path (default: $PWD/vault)
-        #[arg(long)]
-        vault: Option<String>,
-        /// raw note directory (default: <vault>/raw)
-        #[arg(long)]
-        raw: Option<String>,
-        /// Date override (YYYY-MM-DD, default: today)
-        #[arg(long)]
-        date: Option<String>,
-    },
 }
 
 #[tokio::main]
@@ -109,12 +97,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     // DRUDGE_VECTOR: default off = wiki first-class (no Postgres connection, simple). Turn on to enable pgvector (vector+graph).
     // unset/off → don't open Store → start engine/CLI without Postgres. (aligned with the wiki-primary trend)
+    let cfg = config::BoringConfig::load(None)?;
+
     let vector_on = std::env::var("DRUDGE_VECTOR")
         .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "on" | "1" | "true" | "yes"));
     let store: Option<store::Store> = if vector_on {
         let dsn = std::env::var("PG_DSN")
             .unwrap_or_else(|_| "postgresql://boring:boring@localhost:5432/boring".to_owned());
-        Some(store::Store::open(&dsn).await?)
+        // embed_dim (boring.json) sizes the vector columns — the kernel's only model knob.
+        Some(store::Store::open(&dsn, cfg.embed_dim as usize).await?)
     } else {
         None
     };
@@ -122,7 +113,7 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Selftest => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             let docs = [
                 (
                     "doc:rust",
@@ -186,16 +177,10 @@ async fn main() -> Result<()> {
         }
         Cmd::Ingest => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
-            let home = std::env::var("HOME").unwrap_or_default();
-            let dirs = std::env::var("DRUDGE_SOURCE_DIRS").unwrap_or_else(|_| {
-                format!(
-                    "{home}/.claude/projects:{home}/oh-my-boring/data/notes:{home}/oh-my-boring/vault/wiki"
-                )
-            });
-            let source_dirs: Vec<String> = dirs.split(':').map(str::to_owned).collect();
+            let ol = llm::Llm::from_config(&cfg);
+            let source_dirs = cfg.source_dirs();
             println!("sources: {source_dirs:?}");
-            let s = ingest::run(store, &ol, &source_dirs).await?;
+            let s = ingest::run(store, &ol, &cfg, &source_dirs).await?;
             println!(
                 "scanned={} new={} updated={} unchanged={} deleted={} skipped={} chunks={}",
                 s.scanned, s.new, s.updated, s.unchanged, s.deleted, s.skipped, s.chunks
@@ -207,7 +192,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Search { query } => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             let hits = retrieve::retrieve(store, &ol, &query, 5, &[]).await?;
             println!("'{query}' → {} hits", hits.len());
             for h in &hits {
@@ -217,12 +202,12 @@ async fn main() -> Result<()> {
         }
         Cmd::Ask { question } => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             ask::run(store, &ol, &question, &[]).await?;
         }
         Cmd::Brief => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             let out = ask::brief(store, &ol, &[]).await?;
             println!("{}\n", out.answer);
             if !out.sources.is_empty() {
@@ -234,57 +219,38 @@ async fn main() -> Result<()> {
         }
         Cmd::Graph { query } => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             graph::run(store, &ol, &query).await?;
-        }
-        Cmd::Extract => {
-            let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
-            let s = extract::run(store, &ol).await?;
-            println!(
-                "extract: processed={} skipped={} problems={} solutions={} tools={} concepts={} attempts={} edges={}",
-                s.processed,
-                s.skipped,
-                s.problems,
-                s.solutions,
-                s.tools,
-                s.concepts,
-                s.attempts,
-                s.edges
-            );
-            // Semantic stats audit output (for idempotency verification)
-            let ss = store.semantic_stats().await?; // store: &Store (passed the guard)
-            println!(
-                "semantic audit: problem {} · solution {} · tool {} · concept {} · attempt {}",
-                ss.problems, ss.solutions, ss.tools, ss.concepts, ss.attempts
-            );
-            println!(
-                "semantic edges: addresses {} · resolved_by {} · uses {} · about {} · tried {}",
-                ss.addresses, ss.resolved_by, ss.uses, ss.about, ss.tried
-            );
         }
         Cmd::Sync => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
-            let home = std::env::var("HOME").unwrap_or_default();
-            let dirs = std::env::var("DRUDGE_SOURCE_DIRS").unwrap_or_else(|_| {
-                format!(
-                    "{home}/.claude/projects:{home}/oh-my-boring/data/notes:{home}/oh-my-boring/vault/wiki"
-                )
-            });
-            let source_dirs: Vec<String> = dirs.split(':').map(str::to_owned).collect();
-            let is = ingest::run(store, &ol, &source_dirs).await?;
-            let es = extract::run(store, &ol).await?;
+            let ol = llm::Llm::from_config(&cfg);
+            // Kernel A corpus = the vault's wiki dir (agent-written notes), not raw transcripts.
+            let vault_wiki = std::env::var("DRUDGE_VAULT_DIR").map_or_else(
+                |_| {
+                    format!(
+                        "{}/oh-my-boring/vault/wiki",
+                        std::env::var("HOME").unwrap_or_default()
+                    )
+                },
+                |v| format!("{v}/wiki"),
+            );
+            let is = ingest::run(store, &ol, &cfg, &[vault_wiki]).await?;
             println!(
-                "sync: ingest(new={} updated={} deleted={} chunks={}) + extract(processed={} skipped={} nodes={} edges={})",
+                "sync: ingest(new={} updated={} deleted={} chunks={}) graph(tools={} concepts={} claims={} edges={})",
                 is.new,
                 is.updated,
                 is.deleted,
                 is.chunks,
-                es.processed,
-                es.skipped,
-                es.problems + es.solutions + es.tools + es.concepts + es.attempts,
-                es.edges,
+                is.tools,
+                is.concepts,
+                is.claims,
+                is.edges,
+            );
+            let ss = store.semantic_stats().await?;
+            println!(
+                "semantic audit: tool {} · concept {} · uses {} · about {}",
+                ss.tools, ss.concepts, ss.uses, ss.about
             );
         }
         Cmd::Link { vault } => {
@@ -304,19 +270,19 @@ async fn main() -> Result<()> {
             let store = store.as_ref().context(VEC_OFF)?;
             let gc = store.gc_orphans().await?;
             println!(
-                "gc orphans — tool: {} · concept: {} · problem: {} · solution: {} · attempt: {} · total: {}",
+                "gc orphans — tool: {} · concept: {} · total: {}",
                 gc.tool,
                 gc.concept,
-                gc.problem,
-                gc.solution,
-                gc.attempt,
                 gc.total()
             );
         }
+        Cmd::Config => {
+            println!("{}", serde_json::to_string_pretty(&cfg)?);
+        }
         Cmd::Serve => {
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             // Move store ownership into serve::run — single-process DB owner pattern.
-            serve::run(store, ol).await?;
+            serve::run(store, ol, cfg).await?;
         }
         Cmd::Vault { sub } => {
             // vault commands don't need store (Postgres) — drop it to release the connection.
@@ -335,20 +301,6 @@ async fn main() -> Result<()> {
                     let vault_root = std::path::PathBuf::from(vault.unwrap_or(default_vault));
                     let code = vault::run_audit(&vault_root, strict)?;
                     std::process::exit(code);
-                }
-                VaultCmd::Compile { vault, raw, date } => {
-                    let ol = llm::Llm::from_env();
-                    let vault_root =
-                        std::path::PathBuf::from(vault.unwrap_or_else(|| default_vault.clone()));
-                    let raw_dir =
-                        raw.map_or_else(|| vault_root.join("raw"), std::path::PathBuf::from);
-                    // today: the --date argument, or the system date if absent (the I/O boundary is the single vault::today_utc)
-                    let today = date.unwrap_or_else(vault::today_utc);
-                    let s = vault::run_compile(&vault_root, &raw_dir, &today, &ol).await?;
-                    println!(
-                        "compile: total_raw={} compiled={} recompiled={} skipped={}",
-                        s.total_raw, s.compiled, s.recompiled, s.skipped
-                    );
                 }
             }
         }

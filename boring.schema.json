@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "boring.json",
+  "type": "object",
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Schema version. Higher versions are loaded with a warning."
+    },
+    "note_lang": {
+      "type": "string",
+      "enum": ["auto", "ko", "en"],
+      "default": "auto",
+      "description": "Output language the agent should write notes in (ko/en/auto)."
+    },
+    "embed_model": {
+      "type": "string",
+      "default": "bge-m3",
+      "description": "Embedding model — the only model drudge itself calls. Served via DRUDGE_LLM_BASE_URL (env)."
+    },
+    "embed_dim": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1024,
+      "description": "Embedding dimension. MUST match embed_model's output. Changing it needs `make reset` (vectors are reshaped)."
+    },
+    "repos": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["match", "origin"],
+        "properties": {
+          "match": {
+            "type": "string",
+            "description": "Case-insensitive substring matched against cwd or git remote URL."
+          },
+          "origin": {
+            "type": "string",
+            "enum": ["personal", "company", "mirror", "community"]
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional repo slug override."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "agents": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["id", "enabled", "format", "paths"],
+        "properties": {
+          "id": { "type": "string" },
+          "enabled": { "type": "boolean", "default": true },
+          "format": { "type": "string" },
+          "paths": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

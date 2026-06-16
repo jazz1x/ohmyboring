@@ -5,6 +5,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 [ -f .env ] || cp .env.example .env  # Slack tokens only — the core runs without .env
+chmod 600 .env 2>/dev/null || true
+# Create policy config from example if missing. User edits it to set language, repo rules, source dirs.
+[ -f boring.json ] || cp boring.example.json boring.json
+chmod 644 boring.json 2>/dev/null || true
+# Source .env so that variables like DRUDGE_VECTOR are visible to this script.
+set -a; . .env; set +a
 LLM="${DRUDGE_LLM_MODEL:-gemma4:12b}"
 EMB="${DRUDGE_EMBED_MODEL:-bge-m3}"
 OLLAMA_LOCAL="${OLLAMA_HOST:-http://host.docker.internal:11434}"
@@ -37,8 +43,12 @@ if [ -n "${OMB_CORE_ONLY:-}" ] || ! docker image inspect hermes-agent >/dev/null
   if [ -z "${OMB_CORE_ONLY:-}" ]; then
     cat <<'MSG'
   ⓘ hermes-agent image not found — starting CORE ONLY (drudge RAG engine). `make ask` works.
-    To enable the autonomous agent later: build the external Nous Hermes Agent
-    (`docker build -t hermes-agent .`), prepare ~/.hermes config, then `make up` again.
+    To enable the autonomous agent later:
+      1. Clone/build the Nous Hermes Agent image from its upstream source and tag it `hermes-agent`.
+      2. mkdir -p ~/.hermes && chmod 700 ~/.hermes
+      3. export HERMES_UID=$(id -u) HERMES_GID=$(id -g)
+      4. Write ~/.hermes/config.yaml with drudge as an MCP server, then run `make up` again.
+    Set OMB_CORE_ONLY=1 to skip this message intentionally.
 MSG
   fi
 fi
@@ -50,18 +60,27 @@ case "$(printf '%s' "${DRUDGE_VECTOR:-off}" | tr '[:upper:]' '[:lower:]')" in
   *) echo "▶ wiki-first mode (pgvector not started — set DRUDGE_VECTOR=on to use graph+vector)";;
 esac
 
+# Ensure sensitive directories are not world-readable before Docker creates them.
+mkdir -p vault/raw vault/wiki data/pgdata
+chmod 700 vault vault/raw vault/wiki data data/pgdata 2>/dev/null || true
+
 echo "▶ Building + starting (drudge${AGENT:+ + hermes-agent}${PROFILES:+ + postgres}) …"
 docker compose $PROFILES up -d --build drudge $AGENT
 
 echo "▶ Waiting for drudge health …"
-for _ in $(seq 1 60); do curl -sf -m3 http://localhost:7700/health >/dev/null 2>&1 && break; sleep 3; done
+for _ in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:7700/health >/dev/null 2>&1 && break; sleep 3; done
+if ! curl -sf -m3 http://127.0.0.1:7700/health >/dev/null 2>&1; then
+  echo "  ✗ drudge did not become healthy within 3 minutes."
+  echo "    Run: docker compose logs drudge"
+  exit 1
+fi
 
 cat <<'EOF'
 
 ✓ Setup complete. The first ingest (startup sync) runs in the background (a few minutes).
   make smoke         end-to-end check
   make ask Q="..."   single query
-  make sync          manual ingest (compile→ingest→extract)
+  make sync          deterministic re-ingest of the vault (embed→graph→relates_to)
   make logs          engine logs
   The agent (hermes-agent) drives drudge over MCP (:7700/mcp) for ingestion, recall, and skill creation.
   (To use Slack, fill in tokens in .env and run docker compose up -d hermes-agent)

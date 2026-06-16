@@ -18,7 +18,10 @@ pub struct Llm {
 }
 
 impl Llm {
-    pub fn from_env() -> Self {
+    /// Build from config + env. The embed model = `boring.json` `embed_model` (policy SSOT, kernel A's
+    /// sole model). base_url/api_key/chat_model stay in env (.env = runtime/secret SSOT). The chat model
+    /// is used only by `ask` synthesis (the one allowed generation path).
+    pub fn from_config(cfg: &crate::config::BoringConfig) -> Self {
         // If DRUDGE_LLM_BASE_URL is unset, fall back to Ollama local /v1 (the default runtime).
         let base_url = std::env::var("DRUDGE_LLM_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:11434/v1".into());
@@ -28,7 +31,7 @@ impl Llm {
             api_key: std::env::var("DRUDGE_LLM_API_KEY")
                 .ok()
                 .filter(|s| !s.is_empty()),
-            embed_model: std::env::var("DRUDGE_EMBED_MODEL").unwrap_or_else(|_| "bge-m3".into()),
+            embed_model: cfg.embed_model.clone(),
             chat_model: std::env::var("DRUDGE_LLM_MODEL").unwrap_or_else(|_| "gemma4:12b".into()),
             client: reqwest::Client::new(),
         }
