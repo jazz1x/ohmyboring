@@ -11,7 +11,17 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
-const KNOWN_TOP_LEVEL: &[&str] = &["schema_version", "note_lang", "repos", "agents"];
+const KNOWN_TOP_LEVEL: &[&str] = &[
+    "schema_version",
+    "note_lang",
+    "repos",
+    "agents",
+    "embed_model",
+    "embed_dim",
+];
+/// Default embedder (bge-m3 = 1024-dim) — the kernel's sole model dependency.
+const DEFAULT_EMBED_MODEL: &str = "bge-m3";
+const DEFAULT_EMBED_DIM: u32 = 1024;
 
 /// Personal memory policy configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +31,11 @@ pub struct BoringConfig {
     pub note_lang: NoteLang,
     pub repos: Vec<RepoRule>,
     pub agents: Vec<AgentSource>,
+    /// Embedding model — the only model drudge itself calls (kernel A). `embed_dim` MUST match its
+    /// output dimension (guarded at every upsert). Changing the dim needs a `make reset` (existing
+    /// vectors are a different shape). base_url/api_key stay in env (.env = runtime/secret SSOT).
+    pub embed_model: String,
+    pub embed_dim: u32,
 }
 
 impl Default for BoringConfig {
@@ -30,6 +45,8 @@ impl Default for BoringConfig {
             note_lang: NoteLang::default(),
             repos: Vec::new(),
             agents: Vec::new(),
+            embed_model: DEFAULT_EMBED_MODEL.to_owned(),
+            embed_dim: DEFAULT_EMBED_DIM,
         }
     }
 }
@@ -124,6 +141,13 @@ impl BoringConfig {
                 "en" => NoteLang::En,
                 _ => NoteLang::Auto,
             };
+        }
+
+        if let Some(model) = vars.get("DRUDGE_EMBED_MODEL").filter(|s| !s.is_empty()) {
+            eprintln!(
+                "[config] deprecated: DRUDGE_EMBED_MODEL is set; move it to boring.json embed_model"
+            );
+            cfg.embed_model.clone_from(model);
         }
 
         let mut company_tokens: Vec<String> = Vec::new();
@@ -341,6 +365,21 @@ mod tests {
         assert_eq!(cfg.note_lang, NoteLang::Auto);
         assert!(cfg.repos.is_empty());
         assert!(cfg.agents.is_empty());
+    }
+
+    #[test]
+    fn embed_defaults_and_override() {
+        // missing → bge-m3 / 1024 (kernel default)
+        let def = BoringConfig::from_str(r#"{"schema_version": 1}"#).unwrap();
+        assert_eq!(def.embed_model, "bge-m3");
+        assert_eq!(def.embed_dim, 1024);
+        // explicit override
+        let cfg = BoringConfig::from_str(
+            r#"{"schema_version": 1, "embed_model": "nomic-embed-text", "embed_dim": 768}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.embed_model, "nomic-embed-text");
+        assert_eq!(cfg.embed_dim, 768);
     }
 
     #[test]

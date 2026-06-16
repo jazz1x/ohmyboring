@@ -19,11 +19,6 @@ use tokio_postgres::{Client, NoTls};
 
 use crate::frontmatter::FrontMatter;
 
-/// Embedding dimension (bge-m3 = 1024). Enforced at every embedding-upsert boundary via
-/// `checked_vector` (chunk + claim) and mirrored by the `vector(1024)` DDL columns. If you change
-/// the embed model to a different dim, change this value, the DDL literals, and `make reset`.
-pub const EMBED_DIM: usize = 1024;
-
 /// Ingest input (one chunk).
 pub struct Doc {
     pub id: String, // "{source_path}#{idx}"
@@ -94,28 +89,15 @@ pub struct SemanticStats {
 
 pub struct Store {
     db: Client,
+    /// Embedding dimension (= `boring.json` `embed_dim`; bge-m3 = 1024). Enforced at every embedding
+    /// upsert via `checked_vector` and mirrored by the `vector(dim)` DDL columns created in `open`.
+    dim: usize,
 }
 
 /// Semantic edge kinds (doc→entity) — the SSOT shared by clear/stats.
 /// Kernel A: graph is tool/concept only (`uses`/`about`). Narrative (problem/attempt/solution) lives in
 /// the note body markdown, not as graph nodes — so those edge kinds are gone.
 const SEMANTIC_EDGE_KINDS: [&str; 2] = ["uses", "about"];
-
-/// Build a pgvector `Vector` after checking the dimension matches the `vector(EMBED_DIM)` columns.
-/// Single boundary guard shared by every embedding insert (chunk + claim) — parse-don't-validate:
-/// a non-EMBED_DIM model (wrong DRUDGE_EMBED_MODEL) fails loud here with an actionable message,
-/// not with a cryptic Postgres error deep in the fire-and-forget scheduler.
-fn checked_vector(embedding: &[f32]) -> Result<Vector> {
-    if embedding.len() != EMBED_DIM {
-        anyhow::bail!(
-            "embedding dim mismatch: got {}, expected {EMBED_DIM}. \
-             DRUDGE_EMBED_MODEL must be a {EMBED_DIM}-dim model (default bge-m3), \
-             or the schema's vector({EMBED_DIM}) needs to change.",
-            embedding.len()
-        );
-    }
-    Ok(Vector::from(embedding.to_vec()))
-}
 
 /// chunk id ("path#idx") → graph document node id ("doc:path").
 fn doc_node_id(chunk_or_path: &str) -> String {
@@ -151,7 +133,8 @@ impl Store {
     // ── connect + ensure schema ───────────────────────────────────────────────
 
     /// PostgreSQL connect + pgvector + node/edge graph schema initialization.
-    pub async fn open(dsn: &str) -> Result<Self> {
+    /// `dim` = the embedding dimension (`boring.json` `embed_dim`) → the `vector(dim)` columns.
+    pub async fn open(dsn: &str, dim: usize) -> Result<Self> {
         // connect retry (IO boundary, graceful) — when postgres is started separately via profile
         // drudge waits up to ~10s even if it comes up first (depends_on removed → absorbs startup race).
         let (client, conn) = {
@@ -181,8 +164,10 @@ impl Store {
             }
         });
 
+        // DDL parameterized by the embedding dim (`embed_dim`). `vector({dim})` is the only interpolation;
+        // dim is a parsed integer (no injection surface). `'{{}}'` escapes the literal empty-array default.
         client
-            .batch_execute(
+            .batch_execute(&format!(
                 "CREATE EXTENSION IF NOT EXISTS vector;
                  CREATE TABLE IF NOT EXISTS document (
                      source_path text PRIMARY KEY,
@@ -190,7 +175,7 @@ impl Store {
                      project     text NOT NULL DEFAULT '',
                      kind        text NOT NULL DEFAULT '',
                      title       text,
-                     tags        text[] NOT NULL DEFAULT '{}',
+                     tags        text[] NOT NULL DEFAULT '{{}}',
                      sha         text NOT NULL DEFAULT '',
                      extracted_sha text NOT NULL DEFAULT '',
                      updated_at  timestamptz NOT NULL DEFAULT now()
@@ -199,7 +184,7 @@ impl Store {
                      id          text PRIMARY KEY,
                      source_path text NOT NULL REFERENCES document(source_path) ON DELETE CASCADE,
                      content     text NOT NULL DEFAULT '',
-                     embedding   vector(1024), -- must equal store::EMBED_DIM (guarded in upsert_chunk)
+                     embedding   vector({dim}), -- = boring.json embed_dim (guarded in upsert_chunk)
                      origin      text NOT NULL DEFAULT '',
                      project     text NOT NULL DEFAULT '',
                      kind        text NOT NULL DEFAULT '',
@@ -234,18 +219,35 @@ impl Store {
                      source_path   text NOT NULL,
                      valid_from    timestamptz NOT NULL,
                      superseded_at timestamptz,
-                     embedding     vector(1024), -- must equal store::EMBED_DIM
+                     embedding     vector({dim}), -- = boring.json embed_dim
                      PRIMARY KEY (subject, predicate, valid_from)
                  );
                  CREATE INDEX IF NOT EXISTS claim_current ON claim(subject, predicate)
                      WHERE superseded_at IS NULL;
                  CREATE INDEX IF NOT EXISTS claim_hnsw ON claim USING hnsw (embedding vector_cosine_ops)
-                     WHERE superseded_at IS NULL;",
-            )
+                     WHERE superseded_at IS NULL;"
+            ))
             .await
             .context("pgvector + graph schema")?;
 
-        Ok(Self { db: client })
+        Ok(Self { db: client, dim })
+    }
+
+    /// Build a pgvector `Vector` after checking the dimension matches the `vector(dim)` columns.
+    /// Single boundary guard shared by every embedding insert (chunk + claim) — parse-don't-validate:
+    /// a model whose output dim ≠ `embed_dim` fails loud here with an actionable message, not with a
+    /// cryptic Postgres error deep in the fire-and-forget scheduler.
+    fn checked_vector(&self, embedding: &[f32]) -> Result<Vector> {
+        if embedding.len() != self.dim {
+            anyhow::bail!(
+                "embedding dim mismatch: got {}, expected {}. boring.json embed_model must output \
+                 {}-dim vectors (embed_dim), or change embed_dim + `make reset`.",
+                embedding.len(),
+                self.dim,
+                self.dim
+            );
+        }
+        Ok(Vector::from(embedding.to_vec()))
     }
 
     // ── document ─────────────────────────────────────────────────────────────
@@ -434,7 +436,7 @@ impl Store {
         valid_from: SystemTime,
         embedding: &[f32],
     ) -> Result<()> {
-        let vec = checked_vector(embedding)?; // dim guard (shared with upsert_chunk)
+        let vec = self.checked_vector(embedding)?; // dim guard (shared with upsert_chunk)
         self.db
             .execute(
                 "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding)
@@ -612,7 +614,7 @@ impl Store {
     // ── chunk (embedding) ─────────────────────────────────────────────────────
 
     pub async fn upsert_chunk(&self, d: &Doc) -> Result<()> {
-        let vec = checked_vector(&d.embedding)?; // dim guard (shared with upsert_claim)
+        let vec = self.checked_vector(&d.embedding)?; // dim guard (shared with upsert_claim)
         let idx = i32::try_from(d.chunk_idx).unwrap_or(i32::MAX);
         self.db
             .execute(

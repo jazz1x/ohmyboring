@@ -97,22 +97,23 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     // DRUDGE_VECTOR: default off = wiki first-class (no Postgres connection, simple). Turn on to enable pgvector (vector+graph).
     // unset/off → don't open Store → start engine/CLI without Postgres. (aligned with the wiki-primary trend)
+    let cfg = config::BoringConfig::load(None)?;
+
     let vector_on = std::env::var("DRUDGE_VECTOR")
         .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "on" | "1" | "true" | "yes"));
     let store: Option<store::Store> = if vector_on {
         let dsn = std::env::var("PG_DSN")
             .unwrap_or_else(|_| "postgresql://boring:boring@localhost:5432/boring".to_owned());
-        Some(store::Store::open(&dsn).await?)
+        // embed_dim (boring.json) sizes the vector columns — the kernel's only model knob.
+        Some(store::Store::open(&dsn, cfg.embed_dim as usize).await?)
     } else {
         None
     };
 
-    let cfg = config::BoringConfig::load(None)?;
-
     match cli.cmd {
         Cmd::Selftest => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             let docs = [
                 (
                     "doc:rust",
@@ -176,7 +177,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Ingest => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             let source_dirs = cfg.source_dirs();
             println!("sources: {source_dirs:?}");
             let s = ingest::run(store, &ol, &cfg, &source_dirs).await?;
@@ -191,7 +192,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Search { query } => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             let hits = retrieve::retrieve(store, &ol, &query, 5, &[]).await?;
             println!("'{query}' → {} hits", hits.len());
             for h in &hits {
@@ -201,12 +202,12 @@ async fn main() -> Result<()> {
         }
         Cmd::Ask { question } => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             ask::run(store, &ol, &question, &[]).await?;
         }
         Cmd::Brief => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             let out = ask::brief(store, &ol, &[]).await?;
             println!("{}\n", out.answer);
             if !out.sources.is_empty() {
@@ -218,12 +219,12 @@ async fn main() -> Result<()> {
         }
         Cmd::Graph { query } => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             graph::run(store, &ol, &query).await?;
         }
         Cmd::Sync => {
             let store = store.as_ref().context(VEC_OFF)?;
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             // Kernel A corpus = the vault's wiki dir (agent-written notes), not raw transcripts.
             let vault_wiki = std::env::var("DRUDGE_VAULT_DIR").map_or_else(
                 |_| {
@@ -279,7 +280,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg)?);
         }
         Cmd::Serve => {
-            let ol = llm::Llm::from_env();
+            let ol = llm::Llm::from_config(&cfg);
             // Move store ownership into serve::run — single-process DB owner pattern.
             serve::run(store, ol, cfg).await?;
         }
