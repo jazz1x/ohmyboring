@@ -7,3 +7,4 @@ secrets:
   - id: slack-access-token
     paths:
       - "drudge/src/distill.rs"
+      - "drudge/src/redact.rs"
