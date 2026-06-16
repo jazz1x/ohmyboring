@@ -20,11 +20,13 @@ import re
 import subprocess
 import sys
 import time
+import urllib.request
 
 import boring_config
 
 # OMB_HOME: repo clone location (default ~/oh-my-boring) — forkers can clone elsewhere.
 OMB_HOME = os.environ.get("OMB_HOME") or os.path.expanduser("~/oh-my-boring")
+DRUDGE_URL = os.environ.get("DRUDGE_URL", "http://localhost:7700")  # engine MCP/HTTP endpoint
 # Minimum interval (minutes) before re-distilling an in-progress session (Stop hook).
 # SessionEnd (final) ignores the throttle.
 THROTTLE_MIN = int(os.environ.get("DISTILL_THROTTLE_MIN") or "25")
@@ -110,36 +112,44 @@ def repo_slug(cwd):
     return ""
 
 
-def via_agent(transcript_path, origin, repo):
-    """Wake the already-running hermes-agent to distill + store the session (the sole write door).
-    The agent gates (KEEP/SKIP), curates the narrative, and extracts the semantic fields, then stores
-    a COMPLETE note via drudge's `remember` MCP tool — which embeds + builds the graph deterministically.
-    The transcript is read through the /host/.claude path mounted into the agent container (compose volume).
-    Returns True on success; False if the transcript is unmappable or docker/agent is down (→ retry later)."""
-    home = os.path.expanduser("~")
-    claude_root = os.path.join(home, ".claude")
-    if not transcript_path.startswith(claude_root):
-        return False  # outside ~/.claude → can't map to container path → retry later
-    container_path = "/host/.claude" + transcript_path[len(claude_root):]
-    container = os.environ.get("DISTILL_AGENT_CONTAINER", "boring-agent")
-    repo_hint = f" The repo is '{repo}'." if repo else ""
-    prompt = (
-        f"Read the session transcript at {container_path}. If it is worth remembering "
-        "(real problem-solving, decisions, or durable facts), distill it into a problem-solving "
-        "narrative and store ONE complete note via drudge's `remember` tool: set title, body "
-        "(the narrative), and the semantic fields tags/tools/concepts, plus any durable facts as "
-        f"claims (subject/predicate/value). Use origin='{origin}'.{repo_hint} "
-        "If it is just chit-chat or config dumps, do nothing. remember ingests the note immediately — "
-        "you do not need to call sync."
-    )
+def _chunk_count():
+    """Current chunk count from drudge /audit — ground truth that the agent's remember actually landed
+    (the agent's own text report can hallucinate success; the DB delta cannot)."""
     try:
-        r = subprocess.run(
-            ["docker", "exec", container, "hermes", "-z", prompt],
-            capture_output=True, timeout=120,
-        )
-        return r.returncode == 0
+        with urllib.request.urlopen(f"{DRUDGE_URL}/audit", timeout=15) as r:
+            return int(json.loads(r.read()).get("total_chunks", -1))
     except Exception:
-        return False  # no docker / timeout / agent down → retry later
+        return -1
+
+
+def via_agent(transcript_path, origin, repo):
+    """The agent is the SOLE write door: IT distills the session AND calls the drudge `remember` tool
+    itself (the memory-ingest skill enforces 'you MUST call remember'). The host only extracts the text
+    and passes it INLINE — letting the agent read multi-MB transcript files overflows its read limit and
+    makes it wander into the session's own commands. Success = a real DB chunk delta (not the agent's
+    word), so a SKIP / miss / engine-down leaves the session un-marked for retry."""
+    container = os.environ.get("DISTILL_AGENT_CONTAINER", "boring-agent")
+    text = extract(transcript_path)
+    if len(text) > 12000:  # the agent stalls/wanders on big inputs; keep problem (head) + solution (tail)
+        text = text[:5000] + "\n…(truncated)…\n" + text[-7000:]
+    repo_hint = f" repo='{repo}'." if repo else ""
+    prompt = (
+        "Use the memory-ingest skill. Below is an ALREADY-EXTRACTED session transcript. "
+        "Do NOT read any file and do NOT explore — just distill THIS text into one note and call the "
+        f"remember tool ONCE. origin='{origin}'.{repo_hint} "
+        "If it is pure chit-chat with no real work, reply SKIP and do nothing. "
+        "Report the wiki id remember returns.\n\n=== SESSION ===\n" + text
+    )
+    before = _chunk_count()
+    try:
+        subprocess.run(
+            ["docker", "exec", container, "hermes", "-z", prompt],
+            capture_output=True, text=True, timeout=240,
+        )
+    except Exception:
+        return False  # agent down / timeout → retry later
+    after = _chunk_count()
+    return before >= 0 and after > before  # the agent's remember actually added chunks
 
 
 def main():

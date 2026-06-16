@@ -100,12 +100,15 @@ flowchart LR
 ## 빠른 시작
 
 ```bash
-git clone git@github.com:jazz1x/oh-my-boring.git ~/oh-my-boring
+git clone https://github.com/jazz1x/oh-my-boring.git ~/oh-my-boring
 cd ~/oh-my-boring
-cp .env.example .env          # 선택(코어는 .env 없이도 동작)
-make up                       # Ollama 확인 → 모델 pull → 빌드 → 기동 (wiki 모드)
+make up                       # .env 자동 생성, Ollama 확인, 모델 pull, 빌드, 기동
 make ask Q="도커 빌드 캐시 문제 전에 어떻게 풀었지?"
 ```
+
+> `make up`이 `.env.example`에서 `.env`를 자동으로 만들고 권한을 `600`으로 제한합니다. Slack 토큰이나 다른 LLM 엔드포인트가 필요할 때만 `.env`를 편집하세요. GitHub SSH 키가 등록돼 있다면 SSH URL `git@github.com:jazz1x/oh-my-boring.git`도 사용 가능합니다.
+>
+> `~/oh-my-boring` 외 다른 경로에 클론했다면 `export OMB_HOME=/your/path`를 설정해 훅과 스크립트가 vault 경로를 정확히 찾도록 하세요.
 
 `make up`(wiki 기본)은 **drudge + hermes-agent** 만 띄움 — Postgres 없음. vector + graph RAG 쓰려면: `DRUDGE_VECTOR=on make up`(`--profile vector` 로 Postgres 동반).
 
@@ -150,17 +153,49 @@ flowchart TD
 
 ## Nous Hermes Agent 연결
 
+> ⚠️ `~/.hermes`에는 자격 증명과 세션 메모리가 들어갈 수 있습니다. 신뢰할 수 있는 소스에서 빌드한 hermes-agent 이미지만 실행하고, `~/.hermes` 권한을 제한하세요(`chmod 700 ~/.hermes`).
+
 drudge 는 에이전트의 **MCP 메모리 백엔드**. 에이전트(뇌)가 몰고, drudge(손)가 기계작업.
 
-1. 에이전트는 `make up` 으로 함께 뜸(이미지 선빌드 — [사전 준비](#사전-준비)).
-2. `~/.hermes/config.yaml` 에 drudge MCP 등록:
+1. **이미지를 업스트림 소스에서 빌드**합니다(이 리포에는 이미지가 없음):
+   ```bash
+   git clone https://github.com/NousResearch/hermes-agent.git ~/hermes-agent-src
+   cd ~/hermes-agent-src
+   docker build -t hermes-agent .
+   ```
+   업스트림 저장소/태그가 다르다면 clone URL을 조정하고, 최종 이미지 태그가 `hermes-agent`(`docker-compose.yml`과 일치)가 되도록 하세요.
+2. **에이전트 데이터 디렉터리**를 적절한 소유권으로 만듭니다:
+   ```bash
+   mkdir -p ~/.hermes
+   chmod 700 ~/.hermes
+   export HERMES_UID=$(id -u) HERMES_GID=$(id -g)
+   # compose에도 전달:
+   echo "HERMES_UID=$HERMES_UID" >> .env
+   echo "HERMES_GID=$HERMES_GID" >> .env
+   ```
+3. `~/.hermes/config.yaml` 에 drudge를 MCP 서버로 등록합니다:
    ```yaml
    mcp_servers:
      drudge:
-       url: http://drudge:7700/mcp   # 같은 compose 네트워크
+       # 이 주소는 compose 네트워크 내에서 에이전트 컨테이너가 해석합니다.
+       # 호스트에서 직접 테스트할 땐 http://127.0.0.1:7700/mcp 를 사용하세요.
+       url: http://drudge:7700/mcp
        transport: http
    ```
-3. MCP 툴(drudge `/mcp`): `recall{query}`(읽기), `remember{text,title?}`(노트 쓰기), `sync{}`(compile→ingest).
+4. `make up` 을 다시 실행하면 에이전트가 drudge와 함께 뜹니다.
+5. **연결을 검증**합니다:
+   ```bash
+   # drudge MCP 표면 확인
+   curl -s -X POST http://127.0.0.1:7700/mcp \
+     -H 'content-type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq .
+   # 에이전트 로그
+   make agent-logs
+   ```
+
+drudge가 노출하는 MCP 툴(`/mcp`): `recall{query}`(읽기), `remember{text,title?}`(노트 쓰기), `sync{}`(compile→ingest).
+
+에이전트 이미지가 없으면 `make up`은 코어 모드로 돌아가고 빌드 안내를 출력합니다. 의도적으로 에이전트를 넘어가려면 `OMB_CORE_ONLY=1`을 설정하세요.
 
 ---
 
@@ -189,6 +224,32 @@ drudge 는 에이전트의 **MCP 메모리 백엔드**. 에이전트(뇌)가 몰
 | `make deny` | 공급망 게이트(cargo-deny) |
 | `make down` | 정지(`./data` 유지) |
 | `make reset` | ⚠️ Postgres 데이터 초기화(소스 재적재) |
+| `make agent-logs` | hermes-agent 로그 (MCP 연결 진단) |
+
+---
+
+## 문제 해결
+
+### `make up` 실패
+1. Ollama 확인: `curl -sf http://127.0.0.1:11434/api/tags`
+2. 포트 확인: `lsof -i :7700 ; lsof -i :5432 ; lsof -i :11434`
+3. 로그 확인: `make logs`, `make agent-logs`, `tail -f /tmp/ollama.log`
+4. 에이전트 제외하고 코어만 실행: `OMB_CORE_ONLY=1 make up`
+
+### Ollama / 모델 pull 문제
+- `.env`의 `OLLAMA_HOST`가 호스트 바인드와 일치하는지 확인(기본 `http://127.0.0.1:11434`).
+- 수동 pull: `ollama pull gemma4:12b && ollama pull bge-m3`.
+- 모델은 디스크 약 10GB 필요; 첫 pull은 수 분 걸릴 수 있음.
+
+### 권한 / 포트 충돌
+- `sudo`로 실행했다면 소유권 복구: `sudo chown -R $(id -u):$(id -g) .env vault data`.
+- Postgres 포트 `5432` 충돌 시 `docker-compose.yml`의 `postgres.ports`를 `127.0.0.1:15432:5432`로 변경.
+
+### 에이전트 연결 실패
+1. `docker compose ps` — `boring-agent`가 `Up`인지 확인.
+2. `make agent-logs` — MCP 등록 오류 확인.
+3. 호스트에서 MCP 테스트: `curl -s -X POST http://127.0.0.1:7700/mcp -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq .`
+4. `~/.hermes/config.yaml` 경로와 들여쓰기 확인.
 
 ---
 

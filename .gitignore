@@ -32,3 +32,9 @@ vault/wiki/*
 !vault/wiki/wiki-0001.md
 vault/.obsidian/
 .obsidian/
+
+# 개인 작업 핸드오프(회사명 등 포함) — 공개 제외
+docs/reports/
+
+# 개인 정책 설정 — 예시 파일(boring.example.json)만 추적
+boring.json

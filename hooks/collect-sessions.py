@@ -59,6 +59,23 @@ def transcript_cwd(tp):
     return ""
 
 
+def _warm_llm():
+    """Pre-load + pin the chat model so a per-run cold start (~70s after idle unload) doesn't make the
+    first agent call exceed its timeout → silent SKIP. Best-effort: any failure is ignored (the agent's
+    own call still works, just slower). Uses Ollama's native /api/generate keep_alive (no-op elsewhere)."""
+    base = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    model = os.environ.get("DRUDGE_LLM_MODEL", "gemma4:12b")
+    body = json.dumps({"model": model, "prompt": "ok", "stream": False, "keep_alive": 1800}).encode()
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(f"{base}/api/generate", data=body,
+                                   headers={"Content-Type": "application/json"}),
+            timeout=120,
+        ).read()
+    except Exception:
+        pass
+
+
 def main():
     cutoff = time.time() - WINDOW_H * 3600
     paths = glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))  # top-level only
@@ -76,6 +93,8 @@ def main():
     if not batch:
         print("[collect] all done — nothing to do", flush=True)
         return
+
+    _warm_llm()  # pre-warm gemma so the first session isn't a ~70s cold start (→ agent timeout → SKIP)
 
     env = dict(os.environ)
     done = 0
