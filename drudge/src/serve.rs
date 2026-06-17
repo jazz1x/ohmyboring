@@ -91,6 +91,18 @@ struct AskResp {
 #[derive(Deserialize)]
 struct SearchReq {
     query: String,
+    #[serde(default = "default_max_results")]
+    max_results: usize,
+    #[serde(default = "default_max_tokens")]
+    max_tokens: usize,
+}
+
+fn default_max_results() -> usize {
+    5
+}
+
+fn default_max_tokens() -> usize {
+    2000
 }
 
 #[derive(Serialize)]
@@ -157,7 +169,7 @@ async fn handle_ask(
 /// Recency (updated_at) ordering depends on pgvector → rejected if `DRUDGE_VECTOR=off`.
 async fn handle_brief(State(s): State<AppState>) -> Result<Json<AskResp>, AppError> {
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
-    let out = ask::brief(store, &s.llm, &[]).await?;
+    let out = ask::brief(store, &s.llm, &[], s.cfg.note_lang.as_str()).await?;
     Ok(Json(AskResp {
         answer: out.answer,
         sources: out.sources,
@@ -175,8 +187,10 @@ async fn handle_search(
     State(s): State<AppState>,
     Json(req): Json<SearchReq>,
 ) -> Result<Json<SearchResp>, AppError> {
+    let max_results = req.max_results.max(1);
+    let max_chars = req.max_tokens.saturating_mul(4);
     let mapped: Vec<SearchHit> = if let Some(store) = s.store.as_ref() {
-        retrieve::retrieve(store, &s.llm, &req.query, 5, &[])
+        retrieve::retrieve_budget(store, &s.llm, &req.query, max_results, max_chars, &[])
             .await?
             .into_iter()
             .map(|h| SearchHit {
@@ -184,12 +198,13 @@ async fn handle_search(
                 origin: h.origin,
                 project: h.project,
                 source_path: h.source_path,
-                snippet: h.content.chars().take(200).collect(),
+                snippet: h.content,
             })
             .collect()
     } else {
         // direct wiki read — origin/project don't exist in the wiki path, so empty (schema-compatible).
-        wiki_recall_hits(s.wiki_dir().as_deref(), &req.query)?
+        // wiki-first mode is not budget-aware; it returns the top-N snippets.
+        wiki_recall_hits(s.wiki_dir().as_deref(), &req.query, max_results)?
             .into_iter()
             .map(|h| SearchHit {
                 id: h.id,
@@ -207,9 +222,10 @@ async fn handle_search(
 fn wiki_recall_hits(
     wiki_dir: Option<&Path>,
     query: &str,
+    top_n: usize,
 ) -> Result<Vec<wiki_recall::WikiHit>, AppError> {
     match wiki_dir {
-        Some(dir) => Ok(wiki_recall::recall(dir, query, 5)?),
+        Some(dir) => Ok(wiki_recall::recall(dir, query, top_n)?),
         None => Ok(Vec::new()),
     }
 }
@@ -375,7 +391,14 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
     Ok(json!({"content": [{"type": "text", "text": text}], "isError": false}))
 }
 
-/// `recall` — vector+graph retrieval. Returns full chunks (no snippets) so the agent can synthesize the "why/how".
+/// `recall` — vector+graph retrieval. Returns relevant excerpts within an agent-supplied token budget.
+///
+/// Args:
+///   - `query` (required)
+///   - `max_results` (optional, default 5) — max number of hits.
+///   - `max_tokens`  (optional, default 2000) — approximate token ceiling for the returned text.
+///
+/// The budget prevents token explosions when agents pull context automatically.
 async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let query = args
         .and_then(|a| a.get("query"))
@@ -385,9 +408,23 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     if query.is_empty() {
         return Err((-32602, "missing argument: query".to_owned()));
     }
-    // vector on → vector+graph chunks. off → direct vault/wiki read snippets.
+    let max_results = args
+        .and_then(|a| a.get("max_results"))
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(5)
+        .max(1);
+    let max_tokens = args
+        .and_then(|a| a.get("max_tokens"))
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(2000)
+        .max(1);
+    let max_chars = max_tokens.saturating_mul(4);
+
+    // vector on → budget-aware vector+graph chunks. off → direct vault/wiki read snippets.
     let lines: Vec<(String, String)> = if let Some(store) = s.store.as_ref() {
-        retrieve::retrieve(store, &s.llm, query, 5, &[])
+        retrieve::retrieve_budget(store, &s.llm, query, max_results, max_chars, &[])
             .await
             .map_err(|e| (-32603_i32, format!("retrieve: {e:#}")))?
             .into_iter()
@@ -398,7 +435,7 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         let Some(dir) = dir.as_deref() else {
             return Ok("(vault not set — nothing to recall)".to_owned());
         };
-        wiki_recall::recall(dir, query, 5)
+        wiki_recall::recall(dir, query, max_results)
             .map_err(|e| (-32603_i32, format!("wiki recall: {e:#}")))?
             .into_iter()
             .map(|h| (h.source_path, h.snippet))

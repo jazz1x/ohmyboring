@@ -60,6 +60,17 @@ pub enum NoteLang {
     En,
 }
 
+impl NoteLang {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Ko => "ko",
+            Self::En => "en",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RepoRule {
     /// Substring matched against cwd or git remote URL (case-insensitive).

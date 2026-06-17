@@ -94,16 +94,43 @@ flowchart LR
 
 ---
 
-## 선택사항: hermes-agent
+## 에이전트 어댑터
 
-hermes-agent(Nous Hermes Agent)는 **선택적** supervisor입니다. Slack, 고급 오케스트레이션, cron 기반 백필을 drudge의 MCP 백엔드로 구동할 수 있습니다. 핵심 루프는 없이도 작동합니다.
+`hooks/`는 외부 에이전트를 drudge 엔진에 연결하는 **호스트측 어댑터**입니다. 모든 어댑터는 동일한 MCP/HTTP 표면을 통해 drudge와 통신하며, 모두 선택 사항입니다.
 
-```bash
-git clone https://github.com/NousResearch/hermes-agent.git ~/hermes-agent-src
-cd ~/hermes-agent-src && docker build -t hermes-agent .
-mkdir -p ~/.hermes && chmod 700 ~/.hermes
-# ~/.hermes/config.yaml에 drudge를 MCP server로 등록한 뒤 `make up`
+| 어댑터 | 소비 주체 | 진입점 | 역할 |
+|---|---|---|---|
+| Claude Code | `distill-session.py` | `SessionEnd` / `Stop` hook | 세션을 요약해 `remember` 호출 |
+| Claude Code | `recall.py` | `UserPromptSubmit` hook | 관련 snippet을 가져와 프롬프트 context 주입 |
+| hermes-agent | `ingest-worker.py` | `hermes cron --script` | cron tick마다 한 세션씩 백필 |
+| scheduler | `collect-sessions.py` | cron / launchd / 수동 | 오래된 세션 lazy 백필 |
+| shared | `boring_config.py` | 어댑터 import | `boring.json` 정책 로더 |
+
+### 토큰 예산
+
+자동 검색은 에이전트의 context window를 폭발시킬 수 있으므로, 검색 표면은 예산을 인식합니다.
+
+- MCP `recall`은 `max_tokens`, `max_results`를 받습니다.
+- HTTP `/search`는 `max_tokens`, `max_results`를 받습니다.
+- `recall.py`는 `RECALL_MAX_TOKENS` / `RECALL_MAX_RESULTS`로 주입 context를 제한합니다.
+- `ask`/`brief` 합성은 검색된 context를 고정 문자 한도 아래로 유지합니다.
+
+### 다른 에이전트
+
+MCP를 지원하는 어떤 에이전트도 drudge를 사용할 수 있습니다. MCP server 등록:
+
+```yaml
+mcp_servers:
+  drudge:
+    url: http://drudge:7700/mcp
+    transport: http
 ```
+
+사용 가능한 tools: `recall` · `remember` · `sync` · `config_get` · `classify_repo`.
+
+### 선택사항: hermes-agent
+
+[hermes-agent](https://hermes-agent.org)는 서드파티 자율 supervisor입니다. Slack, 오케스트레이션, cron 기반 백필을 drudge의 MCP 백엔드로 구동할 수 있습니다. 이미지를 별도로 빌드하면 `make up`이 자동으로 감지합니다.
 
 ---
 
