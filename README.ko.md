@@ -62,6 +62,18 @@ flowchart LR
 
 정책은 **`boring.json`**(`make up` 시 `boring.example.json`에서 생성)에:
 
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/jazz1x/oh-my-boring/main/boring.schema.json",
+  "note_lang": "auto",
+  "repos": [
+    {"match": "marketboro", "origin": "company", "name": "marketboro"},
+    {"match": "jongyun/Development/mine", "origin": "personal", "name": "mine"}
+  ],
+  "agents": ["claude-code"]
+}
+```
+
 | Key | 용도 |
 |---|---|
 | `note_lang` | `auto` · `ko` · `en` |
@@ -130,6 +142,26 @@ mcp_servers:
 
 사용 가능한 tools: `recall` · `remember` · `sync` · `config_get` · `classify_repo`.
 
+MCP 호출 예시 (HTTP 위의 raw JSON-RPC):
+
+```bash
+curl -s -X POST http://localhost:7700/mcp \
+  -H 'content-type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "recall",
+      "arguments": {
+        "query": "docker build cache fix",
+        "max_tokens": 1500,
+        "max_results": 3
+      }
+    }
+  }' | jq .
+```
+
 ### 선택사항: hermes-agent
 
 [hermes-agent](https://hermes-agent.org)는 서드파티 자율 supervisor입니다. Slack, 오케스트레이션, cron 기반 백필을 drudge의 MCP 백엔드로 구동할 수 있습니다. 이미지를 별도로 빌드하면 `make up`이 자동으로 감지합니다.
@@ -183,3 +215,5 @@ oh-my-boring/
 ├─ boring.json              # 정책 (make up 시 생성)
 └─ Makefile
 ```
+
+> **vault/wiki ID 안내:** `wiki-0000.md`는 repo에 포함된 샘플 노트입니다. 개인 노트는 `wiki-0001.md`부터 시작하며 gitignore 처리되어 private 내용이 git에 섞이지 않습니다.

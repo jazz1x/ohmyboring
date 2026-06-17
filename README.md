@@ -62,6 +62,18 @@ flowchart LR
 
 Policy lives in **`boring.json`** (created from `boring.example.json` by `make up`):
 
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/jazz1x/oh-my-boring/main/boring.schema.json",
+  "note_lang": "auto",
+  "repos": [
+    {"match": "marketboro", "origin": "company", "name": "marketboro"},
+    {"match": "jongyun/Development/mine", "origin": "personal", "name": "mine"}
+  ],
+  "agents": ["claude-code"]
+}
+```
+
 | Key | Purpose |
 |---|---|
 | `note_lang` | `auto` · `ko` · `en` |
@@ -130,6 +142,26 @@ mcp_servers:
 
 Available tools: `recall` · `remember` · `sync` · `config_get` · `classify_repo`.
 
+Example MCP call (raw JSON-RPC over HTTP):
+
+```bash
+curl -s -X POST http://localhost:7700/mcp \
+  -H 'content-type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "recall",
+      "arguments": {
+        "query": "docker build cache fix",
+        "max_tokens": 1500,
+        "max_results": 3
+      }
+    }
+  }' | jq .
+```
+
 ### Optional: hermes-agent
 
 [hermes-agent](https://hermes-agent.org) is a third-party autonomous supervisor. It can drive Slack, orchestration, and cron-based backfill through drudge's MCP backend. Build the image separately; `make up` picks it up automatically if it exists.
@@ -183,3 +215,5 @@ oh-my-boring/
 ├─ boring.json              # policy (created by make up)
 └─ Makefile
 ```
+
+> **Note on vault/wiki IDs:** `wiki-0000.md` is the tracked sample note (shipped with the repo). Personal notes start at `wiki-0001.md` and are gitignored, so your private content never leaks into git.
