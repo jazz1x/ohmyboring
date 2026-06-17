@@ -121,6 +121,34 @@ def repo_slug(cwd):
     return ""
 
 
+def _strip_trailing_metadata(body):
+    """Remove tags/tools/concepts blocks that some LLMs append at the end of the body.
+
+    Even with strict prompts, gemma occasionally emits a trailing block like:
+
+        tags: [...]
+        tools: [...]
+        concepts: [...]
+
+    This sanitizes the body so metadata lives only in the frontmatter.
+    """
+    lines = body.splitlines(keepends=True)
+    i = len(lines)
+    saw_metadata = False
+    while i > 0:
+        line = lines[i - 1]
+        stripped = line.strip()
+        if stripped.startswith(("tags:", "tools:", "concepts:")):
+            saw_metadata = True
+            i -= 1
+            continue
+        if stripped == "" and saw_metadata:
+            i -= 1
+            continue
+        break
+    return "".join(lines[:i]).rstrip()
+
+
 def _extract_json(text):
     """Best-effort JSON extraction from an LLM response that may wrap it in markdown or append prose.
 
@@ -299,6 +327,7 @@ def distill_and_remember(transcript_path, origin, repo):
     # backslash-n in the body instead of a real line break → markdown renders as one run-on line. Undo it.
     if "\\n" in body and "\n" not in body:
         body = body.replace("\\n", "\n").replace("\\t", "\t")
+    body = _strip_trailing_metadata(body)
     if not title or not body:
         print("[distill-session] missing title/body in LLM output", file=sys.stderr)
         return False
