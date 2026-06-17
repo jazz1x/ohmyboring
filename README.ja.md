@@ -96,15 +96,17 @@ flowchart LR
 
 ## エージェントアダプター
 
-`hooks/` は外部エージェントを drudge エンジンに接続する **ホスト側アダプター** です。すべてのアダプターは同じ MCP/HTTP インターフェースを通じて drudge と通信し、いずれも必須ではありません。
+`agents/` は外部エージェントを drudge エンジンに接続する **ホスト側アダプター** です。すべてのアダプターは同じ MCP/HTTP インターフェースを通じて drudge と通信し、いずれも必須ではありません。
 
-| アダプター | 消費主体 | エントリポイント | 役割 |
-|---|---|---|---|
-| Claude Code | `distill-session.py` | `SessionEnd` / `Stop` hook | セッションを要約し `remember` を呼び出す |
-| Claude Code | `recall.py` | `UserPromptSubmit` hook | 関連 snippet を取得しプロンプト context に注入 |
-| hermes-agent | `ingest-worker.py` | `hermes cron --script` | cron tick ごとに 1 セッションずつバックフィル |
-| scheduler | `collect-sessions.py` | cron / launchd / 手動 | 古いセッションの lazy バックフィル |
-| shared | `boring_config.py` | アダプター import | `boring.json` ポリシーローダー |
+旧 `hooks/` パスは backward-compatible な symlink セットとして残っているため、既存の Claude Code `settings.json` エントリや cron job は壊れません。
+
+| アダプター | パス | 消費主体 | エントリポイント | 役割 |
+|---|---|---|---|---|
+| Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | セッションを要約し `remember` を呼び出す |
+| Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | 関連 snippet を取得しプロンプト context に注入 |
+| hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | cron tick ごとに 1 セッションずつバックフィル |
+| scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 手動 | 古いセッションの lazy バックフィル |
+| shared | `agents/shared/boring_config.py` | アダプター import | `boring.json` ポリシーローダー |
 
 ### トークン予算
 
@@ -166,13 +168,18 @@ mcp_servers:
 
 ```text
 oh-my-boring/
-├─ drudge/      # Rust エンジン
-├─ hooks/       # ホストフック
-├─ scripts/     # guard.sh · smoke.sh
-├─ vault/       # raw → wiki メモリ
-├─ data/        # Postgres データ (gitignored)
+├─ drudge/                  # Rust エンジン
+├─ agents/                  # ホスト側エージェントアダプター
+│  ├─ claude-code/          # Claude Code hooks
+│  ├─ hermes/               # hermes-agent cron
+│  ├─ schedulers/           # cron/launchd バックフィル
+│  └─ shared/               # ポリシー/設定ライブラリ
+├─ hooks/                   # backward-compatible symlink → agents/
+├─ scripts/                 # guard.sh · smoke.sh
+├─ vault/                   # raw → wiki メモリ
+├─ data/                    # Postgres データ (gitignored)
 ├─ docker-compose.yml
 ├─ start.sh
-├─ boring.json  # ポリシー (make up 時に生成)
+├─ boring.json              # ポリシー (make up 時に生成)
 └─ Makefile
 ```

@@ -96,15 +96,17 @@ Secrets and runtime switches live in **`.env`**:
 
 ## Agent adapters
 
-`hooks/` contains the **host-side adapters** that connect external agents to the drudge engine. Every adapter talks to drudge through the same MCP/HTTP surface; none are required.
+`agents/` contains the **host-side adapters** that connect external agents to the drudge engine. Every adapter talks to drudge through the same MCP/HTTP surface; none are required.
 
-| Adapter | Consumer | Entry point | What it does |
-|---|---|---|---|
-| Claude Code | `distill-session.py` | `SessionEnd` / `Stop` hook | Distills a session and calls `remember` |
-| Claude Code | `recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
-| hermes-agent | `ingest-worker.py` | `hermes cron --script` | Serial backfill, one session per cron tick |
-| scheduler | `collect-sessions.py` | cron / launchd / manual | Lazy backfill of older sessions |
-| shared | `boring_config.py` | imported by adapters | `boring.json` policy loader |
+The old `hooks/` path still works as a set of backward-compatible symlinks, so existing Claude Code `settings.json` entries and cron jobs don't break.
+
+| Adapter | Path | Consumer | Entry point | What it does |
+|---|---|---|---|---|
+| Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | Distills a session and calls `remember` |
+| Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
+| hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Serial backfill, one session per cron tick |
+| scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older sessions |
+| shared | `agents/shared/boring_config.py` | imported by adapters | `boring.json` policy loader |
 
 ### Token budget
 
@@ -166,13 +168,18 @@ Available tools: `recall` · `remember` · `sync` · `config_get` · `classify_r
 
 ```text
 oh-my-boring/
-├─ drudge/      # Rust engine
-├─ hooks/       # host hooks
-├─ scripts/     # guard.sh · smoke.sh
-├─ vault/       # raw → wiki memory
-├─ data/        # Postgres persistence (gitignored)
+├─ drudge/                  # Rust engine
+├─ agents/                  # host-side agent adapters
+│  ├─ claude-code/          # Claude Code hooks
+│  ├─ hermes/               # hermes-agent cron
+│  ├─ schedulers/           # cron/launchd backfill
+│  └─ shared/               # policy/config library
+├─ hooks/                   # backward-compatible symlinks → agents/
+├─ scripts/                 # guard.sh · smoke.sh
+├─ vault/                   # raw → wiki memory
+├─ data/                    # Postgres persistence (gitignored)
 ├─ docker-compose.yml
 ├─ start.sh
-├─ boring.json  # policy (created by make up)
+├─ boring.json              # policy (created by make up)
 └─ Makefile
 ```
