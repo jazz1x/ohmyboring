@@ -96,12 +96,15 @@ flowchart LR
 | Command | 説明 |
 |---|---|
 | `make up` | drudge 起動（hermes-agent イメージがある場合のみ一緒に起動） |
+| `make ollama` | Ollama 実行確認（必要ならバックグラウンド起動） |
 | `make ask Q="..."` | recall + 要約を一度に実行 |
 | `make sync` | vault の再取り込み |
 | `make remember M="text"` | 1 行ノートを書き込み |
+| `make collect [N=3]` | 過去セッションの lazy バックフィル |
+| `make hermes-build` | オプション hermes-agent イメージの clone/build |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | drudge ログ |
-| `make guard` | fmt + clippy + test |
+| `make guard` | fmt + clippy + test + Python py-compile |
 | `make down` | コンテナ停止 |
 
 ---
