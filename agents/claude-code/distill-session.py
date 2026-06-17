@@ -159,17 +159,18 @@ def _build_prompt(text, origin, repo):
     return (
         "You are a distillation engine. Summarize the session transcript into ONE curated note as a "
         f"problem-solving narrative. {lang_instruction}{origin_hint}{repo_hint}\n\n"
-        "Output ONLY a single JSON object, no text around it:\n"
-        '{"title": "...", "body": "...", "tags": ["..."], '
+        "Output ONLY a single JSON object, no text before or after it:\n"
+        '{"title": "...", "body": "...", "tags": ["..."], "tools": ["..."], "concepts": ["..."], '
         '"claims": [{"subject":"...","predicate":"...","value":"..."}]}\n\n'
         "BODY FORMAT — the body is a markdown string with these sections (omit a section if it does not apply):\n"
         "  ## 배경 / 문제   — what was being solved (1-2 lines)\n"
         "  ## 시도 / 결정    — what was tried, key decisions and WHY\n"
         "  ## 결과 / 해결    — what worked: concrete commands, config, root cause\n"
         "  ## 남은 일        — unfinished or next steps (omit if none)\n\n"
-        "CRITICAL — body newlines: use REAL line breaks inside the JSON string (a literal newline), "
-        r'NOT the two characters backslash-n. Correct: "## 배경\n내용" must contain an actual newline, '
-        "never the text \\n. Bad output breaks markdown rendering.\n\n"
+        "CRITICAL — body content rules (format-breaking bugs happen when you ignore these):\n"
+        "- The body MUST contain ONLY markdown prose. NEVER put tags, tools, concepts, claims, or any metadata inside the body.\n"
+        "- All metadata MUST go in the JSON fields above, not in the body. A trailing 'tags:' or 'tools:' block in the body is a bug.\n"
+        "- Use REAL line breaks inside the JSON string, never the two characters backslash-n.\n\n"
         "WRITING (proven principles — apply, don't just summarize):\n"
         "- 두괄식(BLUF): each section's first sentence is the conclusion; details follow.\n"
         "- 삭제(omit needless words): no filler/repetition, no '·'-joined noun piles, cut hedging.\n"
@@ -177,6 +178,8 @@ def _build_prompt(text, origin, repo):
         "Rules:\n"
         "- title: concise, specific, in the target language.\n"
         "- tags: up to 6, lowercase, no hashtags.\n"
+        "- tools: concrete tools/commands used (e.g., git, bun, terraform). [] if none.\n"
+        "- concepts: recurring ideas/axes (e.g., code_parity, version_upgrade). [] if none.\n"
         "- claims: durable facts as triples; [] if none.\n"
         '- Pure chit-chat with no real work → output only: {"skip": true}\n\n'
         "=== SESSION TRANSCRIPT ===\n" + text
@@ -230,7 +233,7 @@ def _call_llm(prompt):
     return parsed
 
 
-def _call_remember(title, body, origin, repo, tags, claims):
+def _call_remember(title, body, origin, repo, tags, tools, concepts, claims):
     """Call drudge's remember MCP tool. Return True if the note was written."""
     arguments = {
         "title": title,
@@ -238,6 +241,8 @@ def _call_remember(title, body, origin, repo, tags, claims):
         "origin": origin,
         "repo": repo,
         "tags": tags,
+        "tools": tools,
+        "concepts": concepts,
         "claims": claims,
     }
     payload = json.dumps(
@@ -299,6 +304,8 @@ def distill_and_remember(transcript_path, origin, repo):
         return False
 
     tags = [t.strip() for t in parsed.get("tags", []) if isinstance(t, str) and t.strip()][:6]
+    tools = [t.strip() for t in parsed.get("tools", []) if isinstance(t, str) and t.strip()][:8]
+    concepts = [t.strip() for t in parsed.get("concepts", []) if isinstance(t, str) and t.strip()][:8]
     claims = []
     for c in parsed.get("claims", []):
         if isinstance(c, dict) and c.get("subject") and c.get("predicate") and c.get("value"):
@@ -310,7 +317,7 @@ def distill_and_remember(transcript_path, origin, repo):
                 }
             )
 
-    return _call_remember(title, body, origin, repo, tags, claims)
+    return _call_remember(title, body, origin, repo, tags, tools, concepts, claims)
 
 
 def main():
