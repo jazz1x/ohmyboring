@@ -196,6 +196,34 @@ curl -s -X POST http://localhost:7700/mcp \
 
 ---
 
+## Ollama を常時起動しておく
+
+`make up` は Ollama が起動していない場合は起動しますが、後から停止すると次のセッション取り込みが失敗します。
+
+- 確認/起動: `make ollama`
+- 再起動後も維持 (macOS):
+  ```bash
+  brew services start ollama
+  ```
+- または永続ターミナルで: `ollama serve`
+
+## 定期的な sync
+
+drudge は 4 時間ごとに deterministic sync をスケジュールしますが、`vault/wiki/` を手動で編集したり、vector/graph データをより頻繁に最新化したい場合は:
+
+```bash
+make sync
+```
+
+自動 sync には cron を追加:
+
+```bash
+# 毎時
+0 * * * * cd ~/oh-my-boring && make sync >/tmp/omb-sync.log 2>&1
+```
+
+---
+
 ## ディレクトリ
 
 ```text
@@ -217,3 +245,5 @@ oh-my-boring/
 ```
 
 > **vault/wiki ID について:** `wiki-0000.md` は repo に含まれるサンプルノートです。個人ノートは `wiki-0001.md` から始まり gitignore されているため、private な内容が git に混ざることはありません。
+>
+> **プラットフォームについて:** macOS と Linux でテストされています。`hooks/` が backward-compatible な symlink を使用しているため、Windows はまだ公式にサポートされていません。
