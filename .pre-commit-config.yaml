@@ -51,7 +51,7 @@ repos:
         files: \.rs$
 
       - id: py-compile
-        name: "python compile (hooks — syntax gate)"
+        name: "python compile (agent adapters — syntax gate)"
         entry: python3 -m py_compile
         language: system
-        files: ^hooks/.*\.py$
+        files: ^(agents|hooks)/.*\.py$

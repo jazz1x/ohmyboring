@@ -4,7 +4,10 @@
   "note_lang": "auto",
   "embed_model": "bge-m3",
   "embed_dim": 1024,
-  "repos": [],
+  "repos": [
+    {"match": "marketboro", "origin": "company", "name": "marketboro"},
+    {"match": "jongyun/Development/mine", "origin": "personal", "name": "mine"}
+  ],
   "agents": [
     {
       "id": "claude-code",

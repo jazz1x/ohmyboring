@@ -16,12 +16,8 @@ EMB="${DRUDGE_EMBED_MODEL:-bge-m3}"
 OLLAMA_LOCAL="${OLLAMA_HOST:-http://host.docker.internal:11434}"
 OLLAMA_LOCAL="${OLLAMA_LOCAL/host.docker.internal/localhost}"
 
-echo "▶ Checking Ollama (${OLLAMA_LOCAL}) …"
-if ! curl -sf "${OLLAMA_LOCAL}/api/tags" >/dev/null; then
-  command -v ollama >/dev/null || { echo "  ✗ ollama not installed → https://ollama.com (or brew install ollama)"; exit 1; }
-  echo "  Starting Ollama …"; ollama serve >/tmp/ollama.log 2>&1 &
-  until curl -sf "${OLLAMA_LOCAL}/api/tags" >/dev/null; do sleep 1; done
-fi
+echo "▶ Ensuring Ollama is running …"
+./scripts/ensure-ollama.sh
 echo "  ✓ Ollama OK"
 
 for m in "$LLM" "$EMB"; do

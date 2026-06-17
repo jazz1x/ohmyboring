@@ -96,12 +96,15 @@ Secrets and runtime switches live in **`.env`**:
 | Command | Description |
 |---|---|
 | `make up` | set up + start drudge (hermes-agent joins only if its image exists) |
+| `make ollama` | ensure Ollama is running (start in background if needed) |
 | `make ask Q="..."` | one-shot recall + synthesis |
 | `make sync` | deterministic re-ingest of the vault |
 | `make remember M="text"` | write a one-line note |
+| `make collect [N=3]` | lazy backfill of past sessions |
+| `make hermes-build` | clone/build the optional hermes-agent image |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | drudge logs |
-| `make guard` | fmt + clippy + test |
+| `make guard` | fmt + clippy + test + Python py-compile |
 | `make down` | stop containers |
 
 ---
