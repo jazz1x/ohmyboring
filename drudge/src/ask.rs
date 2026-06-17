@@ -27,6 +27,10 @@ pub struct AnswerOut {
     pub sources: Vec<String>,
 }
 
+/// Approximate context ceiling for synthesis prompts. Keeps automatic retrieval from
+/// exploding the prompt/token cost while leaving room for system + question.
+const MAX_CONTEXT_CHARS: usize = 6000;
+
 /// Pure logic: retrieval + LLM synthesis → returns `AnswerOut`. No I/O.
 pub async fn answer(
     store: &Store,
@@ -44,7 +48,11 @@ pub async fn answer(
 
     let mut context = String::new();
     for (i, h) in hits.iter().enumerate() {
-        let _ = write!(context, "## [{i}] {}\n{}\n\n", h.source_path, h.content);
+        let entry = format!("## [{i}] {}\n{}\n\n", h.source_path, h.content);
+        if context.len() + entry.len() > MAX_CONTEXT_CHARS {
+            break;
+        }
+        let _ = write!(context, "{entry}");
     }
 
     // local GraphRAG: pull in the **concept-linked documents** (sharing concept/tool) of the top hits, full body included.
@@ -59,7 +67,12 @@ pub async fn answer(
                 break;
             }
             if seen_g.insert(rd.source_path.clone()) {
-                let snip: String = rd.content.chars().take(1200).collect();
+                let room = MAX_CONTEXT_CHARS.saturating_sub(context.len() + graph_ctx.len());
+                let take = room.min(1200);
+                if take == 0 {
+                    break;
+                }
+                let snip: String = rd.content.chars().take(take).collect();
                 let _ = write!(graph_ctx, "## {}\n{snip}\n\n", rd.source_path);
             }
         }
@@ -118,11 +131,14 @@ pub async fn answer_wiki(llm: &Llm, wiki_dir: Option<&Path>, question: &str) -> 
     }
     let mut context = String::new();
     for (i, h) in hits.iter().enumerate() {
-        let _ = write!(
-            context,
+        let entry = format!(
             "## [{i}] {} ({})\n{}\n\n",
             h.title, h.source_path, h.snippet
         );
+        if context.len() + entry.len() > MAX_CONTEXT_CHARS {
+            break;
+        }
+        let _ = write!(context, "{entry}");
     }
     let prompt = format!("# Recalled memory (vault/wiki)\n{context}\n# Question\n{question}");
     let answer_text = llm.generate(SYSTEM, &prompt).await?;
@@ -144,7 +160,12 @@ using proper nouns (project·tool·model·file) verbatim, as short bullets. No a
 
 /// Recency-first/supersede briefing: retrieve by `updated_at` descending rather than semantic similarity →
 /// synthesize so the latest beats the old. Called by the cron morning briefing (`/brief`). SRP: separate from `answer()`.
-pub async fn brief(store: &Store, llm: &Llm, exclude_origins: &[String]) -> Result<AnswerOut> {
+pub async fn brief(
+    store: &Store,
+    llm: &Llm,
+    exclude_origins: &[String],
+    lang: &str,
+) -> Result<AnswerOut> {
     let docs = store.recent_docs(12, exclude_origins).await?;
     if docs.is_empty() {
         return Ok(AnswerOut {
@@ -179,7 +200,16 @@ pub async fn brief(store: &Store, llm: &Llm, exclude_origins: &[String]) -> Resu
             "# Current facts (authoritative — on conflict this is the latest, follow it)\n{claim_ctx}\n# Recent work records (newest-first, top is latest)\n{context}"
         )
     };
-    let answer_text = llm.generate(BRIEF_SYSTEM, &prompt).await?;
+    // note_lang policy wins over "match the records": ko → always Korean, en → English, auto → records' language.
+    let lang_rule = match lang {
+        "ko" => {
+            " ALWAYS write the briefing in Korean (한국어), regardless of the records' language."
+        }
+        "en" => " ALWAYS write the briefing in English.",
+        _ => "",
+    };
+    let system = format!("{BRIEF_SYSTEM}{lang_rule}");
+    let answer_text = llm.generate(&system, &prompt).await?;
 
     let sources: Vec<String> = docs.iter().map(|d| d.source_path.clone()).collect();
     Ok(AnswerOut {

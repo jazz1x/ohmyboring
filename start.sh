@@ -43,11 +43,9 @@ if [ -n "${OMB_CORE_ONLY:-}" ] || ! docker image inspect hermes-agent >/dev/null
   if [ -z "${OMB_CORE_ONLY:-}" ]; then
     cat <<'MSG'
   ⓘ hermes-agent image not found — starting CORE ONLY (drudge RAG engine). `make ask` works.
-    To enable the autonomous agent later:
-      1. Clone/build the Nous Hermes Agent image from its upstream source and tag it `hermes-agent`.
-      2. mkdir -p ~/.hermes && chmod 700 ~/.hermes
-      3. export HERMES_UID=$(id -u) HERMES_GID=$(id -g)
-      4. Write ~/.hermes/config.yaml with drudge as an MCP server, then run `make up` again.
+    The optional Slack/agent layer is third-party — build the `hermes-agent` image per its
+    official docs (https://hermes-agent.org), point its ~/.hermes/config.yaml at drudge's MCP
+    (http://drudge:7700/mcp), then re-run `make up`. See README "Optional: hermes-agent".
     Set OMB_CORE_ONLY=1 to skip this message intentionally.
 MSG
   fi

@@ -9,10 +9,15 @@ Design:
 - if drudge (:7700) is down/errors, it's a *silent no-op* (never blocks the prompt).
 """
 import json
+import os
 import sys
 import urllib.request
 
 URL = "http://localhost:7700/search"
+# Hard ceiling for automatic prompt injection. Keeps Claude Code's context window from
+# being flooded by recalled memory on every prompt.
+MAX_RESULTS = int(os.environ.get("RECALL_MAX_RESULTS") or "3")
+MAX_TOKENS = int(os.environ.get("RECALL_MAX_TOKENS") or "1500")
 
 
 def main() -> None:
@@ -24,7 +29,11 @@ def main() -> None:
     if len(prompt) < 8:  # too short → recall is meaningless
         return
     try:
-        body = json.dumps({"query": prompt}).encode()
+        body = json.dumps({
+            "query": prompt,
+            "max_results": MAX_RESULTS,
+            "max_tokens": MAX_TOKENS,
+        }).encode()
         req = urllib.request.Request(URL, data=body, headers={"content-type": "application/json"})
         with urllib.request.urlopen(req, timeout=3) as r:
             hits = json.loads(r.read()).get("hits", [])
@@ -33,7 +42,7 @@ def main() -> None:
     if not hits:
         return
     lines = []
-    for h in hits[:3]:
+    for h in hits[:MAX_RESULTS]:
         src = (h.get("source_path") or "").rsplit("/", 1)[-1]
         snip = " ".join((h.get("snippet") or "").split())[:280]
         if snip:

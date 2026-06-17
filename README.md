@@ -94,16 +94,43 @@ Secrets and runtime switches live in **`.env`**:
 
 ---
 
-## Optional: hermes-agent
+## Agent adapters
 
-hermes-agent (Nous Hermes Agent) is an **optional** supervisor. It can drive Slack, advanced orchestration, and cron-based backfill via drudge's MCP backend. The core loop works without it.
+`hooks/` contains the **host-side adapters** that connect external agents to the drudge engine. Every adapter talks to drudge through the same MCP/HTTP surface; none are required.
 
-```bash
-git clone https://github.com/NousResearch/hermes-agent.git ~/hermes-agent-src
-cd ~/hermes-agent-src && docker build -t hermes-agent .
-mkdir -p ~/.hermes && chmod 700 ~/.hermes
-# register drudge as MCP server in ~/.hermes/config.yaml, then `make up`
+| Adapter | Consumer | Entry point | What it does |
+|---|---|---|---|
+| Claude Code | `distill-session.py` | `SessionEnd` / `Stop` hook | Distills a session and calls `remember` |
+| Claude Code | `recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
+| hermes-agent | `ingest-worker.py` | `hermes cron --script` | Serial backfill, one session per cron tick |
+| scheduler | `collect-sessions.py` | cron / launchd / manual | Lazy backfill of older sessions |
+| shared | `boring_config.py` | imported by adapters | `boring.json` policy loader |
+
+### Token budget
+
+Automatic retrieval can explode an agent's context window, so the retrieval surface is budget-aware:
+
+- MCP `recall` accepts `max_tokens` and `max_results`.
+- HTTP `/search` accepts `max_tokens` and `max_results`.
+- `recall.py` caps its prompt-injection context via `RECALL_MAX_TOKENS` / `RECALL_MAX_RESULTS`.
+- `ask`/`brief` synthesis keeps retrieved context under a fixed character ceiling.
+
+### Other agents
+
+Any MCP-capable agent can use drudge. Register the MCP server:
+
+```yaml
+mcp_servers:
+  drudge:
+    url: http://drudge:7700/mcp
+    transport: http
 ```
+
+Available tools: `recall` · `remember` · `sync` · `config_get` · `classify_repo`.
+
+### Optional: hermes-agent
+
+[hermes-agent](https://hermes-agent.org) is a third-party autonomous supervisor. It can drive Slack, orchestration, and cron-based backfill through drudge's MCP backend. Build the image separately; `make up` picks it up automatically if it exists.
 
 ---
 

@@ -208,7 +208,7 @@ async fn main() -> Result<()> {
         Cmd::Brief => {
             let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_config(&cfg);
-            let out = ask::brief(store, &ol, &[]).await?;
+            let out = ask::brief(store, &ol, &[], cfg.note_lang.as_str()).await?;
             println!("{}\n", out.answer);
             if !out.sources.is_empty() {
                 println!("sources:");

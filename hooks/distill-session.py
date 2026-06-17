@@ -142,30 +142,37 @@ def _extract_json(text):
 def _build_prompt(text, origin, repo):
     """Build the distillation prompt, honouring note_lang and repo metadata."""
     lang_instruction = {
-        "ko": "Write the note in Korean.",
-        "en": "Write the note in English.",
-    }.get(NOTE_LANG, "Write the note in the same language as the source transcript.")
+        "ko": "ALL fields (title, body, every section heading and sentence) MUST be in Korean (한국어), "
+              "regardless of the transcript's language. Keep proper nouns/code/commands verbatim.",
+        "en": "Write every field in English.",
+    }.get(NOTE_LANG, "Write in the same language as the transcript.")
 
     repo_hint = f" repo='{repo}'." if repo else ""
     origin_hint = f" origin='{origin}'."
 
     return (
-        "You are a distillation engine. Summarize the following session transcript into ONE "
-        "curated markdown note. "
-        f"{lang_instruction}{origin_hint}{repo_hint}\n\n"
-        "Output ONLY a single JSON object with no markdown commentary:\n"
-        "{\n"
-        '  "title": "concise, specific title",\n'
-        '  "body": "markdown body with problem / attempted solution / result sections",\n'
-        '  "tags": ["tag1", "tag2", ...],\n'
-        '  "claims": [{"subject":"...", "predicate":"...", "value":"..."}, ...]\n'
-        "}\n\n"
+        "You are a distillation engine. Summarize the session transcript into ONE curated note as a "
+        f"problem-solving narrative. {lang_instruction}{origin_hint}{repo_hint}\n\n"
+        "Output ONLY a single JSON object, no text around it:\n"
+        '{"title": "...", "body": "...", "tags": ["..."], '
+        '"claims": [{"subject":"...","predicate":"...","value":"..."}]}\n\n'
+        "BODY FORMAT — the body is a markdown string with these sections (omit a section if it does not apply):\n"
+        "  ## 배경 / 문제   — what was being solved (1-2 lines)\n"
+        "  ## 시도 / 결정    — what was tried, key decisions and WHY\n"
+        "  ## 결과 / 해결    — what worked: concrete commands, config, root cause\n"
+        "  ## 남은 일        — unfinished or next steps (omit if none)\n\n"
+        "CRITICAL — body newlines: use REAL line breaks inside the JSON string (a literal newline), "
+        r'NOT the two characters backslash-n. Correct: "## 배경\n내용" must contain an actual newline, '
+        "never the text \\n. Bad output breaks markdown rendering.\n\n"
+        "WRITING (proven principles — apply, don't just summarize):\n"
+        "- 두괄식(BLUF): each section's first sentence is the conclusion; details follow.\n"
+        "- 삭제(omit needless words): no filler/repetition, no '·'-joined noun piles, cut hedging.\n"
+        "- 일상어·능동: plain words over jargon, active voice; spell out an acronym on first use.\n\n"
         "Rules:\n"
-        "- title and body are required.\n"
-        "- tags: up to 5 strings, no hashtags.\n"
-        "- claims: optional triples; skip if none are clear.\n"
-        "- If the transcript is pure chit-chat with no real work, output only: {\"skip\": true}\n"
-        "- Do NOT include any text outside the JSON object.\n\n"
+        "- title: concise, specific, in the target language.\n"
+        "- tags: up to 6, lowercase, no hashtags.\n"
+        "- claims: durable facts as triples; [] if none.\n"
+        '- Pure chit-chat with no real work → output only: {"skip": true}\n\n'
         "=== SESSION TRANSCRIPT ===\n" + text
     )
 

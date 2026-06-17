@@ -94,16 +94,43 @@ flowchart LR
 
 ---
 
-## オプション: hermes-agent
+## エージェントアダプター
 
-hermes-agent（Nous Hermes Agent）は **オプション** な supervisor です。Slack、高度なオーケストレーション、cron ベースのバックフィルを drudge の MCP バックエンド経由で動かせます。コアループは hermes-agent なしでも動作します。
+`hooks/` は外部エージェントを drudge エンジンに接続する **ホスト側アダプター** です。すべてのアダプターは同じ MCP/HTTP インターフェースを通じて drudge と通信し、いずれも必須ではありません。
 
-```bash
-git clone https://github.com/NousResearch/hermes-agent.git ~/hermes-agent-src
-cd ~/hermes-agent-src && docker build -t hermes-agent .
-mkdir -p ~/.hermes && chmod 700 ~/.hermes
-# ~/.hermes/config.yaml に drudge を MCP server として登録してから `make up`
+| アダプター | 消費主体 | エントリポイント | 役割 |
+|---|---|---|---|
+| Claude Code | `distill-session.py` | `SessionEnd` / `Stop` hook | セッションを要約し `remember` を呼び出す |
+| Claude Code | `recall.py` | `UserPromptSubmit` hook | 関連 snippet を取得しプロンプト context に注入 |
+| hermes-agent | `ingest-worker.py` | `hermes cron --script` | cron tick ごとに 1 セッションずつバックフィル |
+| scheduler | `collect-sessions.py` | cron / launchd / 手動 | 古いセッションの lazy バックフィル |
+| shared | `boring_config.py` | アダプター import | `boring.json` ポリシーローダー |
+
+### トークン予算
+
+自動検索はエージェントの context window を爆発させる可能性があるため、検索面は予算を意識しています。
+
+- MCP `recall` は `max_tokens`、`max_results` を受け取ります。
+- HTTP `/search` は `max_tokens`、`max_results` を受け取ります。
+- `recall.py` は `RECALL_MAX_TOKENS` / `RECALL_MAX_RESULTS` で注入 context を制限します。
+- `ask`/`brief` 合成は取得した context を固定文字数上限以下に保ちます。
+
+### その他のエージェント
+
+MCP に対応したエージェントならどれも drudge を利用できます。MCP server 登録:
+
+```yaml
+mcp_servers:
+  drudge:
+    url: http://drudge:7700/mcp
+    transport: http
 ```
+
+利用可能な tools: `recall` · `remember` · `sync` · `config_get` · `classify_repo`。
+
+### オプション: hermes-agent
+
+[hermes-agent](https://hermes-agent.org) はサードパーティの自律 supervisor です。Slack、オーケストレーション、cron ベースのバックフィルを drudge の MCP バックエンド経由で動かせます。イメージを別途ビルドすれば `make up` が自動的に検出します。
 
 ---
 
