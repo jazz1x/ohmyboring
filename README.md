@@ -196,6 +196,34 @@ curl -s -X POST http://localhost:7700/mcp \
 
 ---
 
+## Keeping Ollama alive
+
+`make up` starts Ollama if it isn't running, but if it stops later, the next session ingest will fail.
+
+- Quick check/start: `make ollama`
+- Keep it alive across reboots (macOS):
+  ```bash
+  brew services start ollama
+  ```
+- Or run it in a persistent terminal: `ollama serve`
+
+## Periodic sync
+
+`drudge` schedules a deterministic sync every 4 hours, but if you edit `vault/wiki/` by hand or want fresher vector/graph data, run:
+
+```bash
+make sync
+```
+
+For automatic periodic sync, add a cron job:
+
+```bash
+# Every hour
+0 * * * * cd ~/oh-my-boring && make sync >/tmp/omb-sync.log 2>&1
+```
+
+---
+
 ## Directory
 
 ```text
@@ -217,3 +245,5 @@ oh-my-boring/
 ```
 
 > **Note on vault/wiki IDs:** `wiki-0000.md` is the tracked sample note (shipped with the repo). Personal notes start at `wiki-0001.md` and are gitignored, so your private content never leaks into git.
+>
+> **Platform note:** Tested on macOS and Linux. Windows is not officially supported yet because `hooks/` uses symlinks for backward compatibility.

@@ -1,10 +1,21 @@
-.PHONY: help up down build logs agent-logs ask sync smoke models guard deny eval psql reset
+.PHONY: help up down build logs agent-logs ask sync smoke models ollama hermes-build guard deny eval psql reset
 
 help: ## List commands
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## / — /' | sort
 
 up: ## Setup + start (check Ollama, pull models, build, start everything)
 	./start.sh
+
+ollama: ## Ensure Ollama is running (start it in the background if possible)
+	./scripts/ensure-ollama.sh
+
+hermes-build: ## Clone/build the optional hermes-agent image
+	@if [ -d "$(HOME)/hermes-agent-src" ]; then \
+		echo "ⓘ hermes-agent source already exists at $(HOME)/hermes-agent-src"; \
+	else \
+		git clone https://github.com/NousResearch/hermes-agent.git "$(HOME)/hermes-agent-src"; \
+	fi
+	cd "$(HOME)/hermes-agent-src" && docker build -t hermes-agent .
 
 down: ## Stop the whole stack, including Postgres when vector mode was used (keeps ./data)
 	@case "$$(printf '%s' "$${DRUDGE_VECTOR:-off}" | tr '[:upper:]' '[:lower:]')" in \
@@ -40,7 +51,7 @@ remember: ## Save + ingest a note immediately   make remember M="content" [T="ti
 	  | jq -r '.result.content[0].text // .error.message'
 
 collect: ## Lazily collect past sessions (one at a time)   make collect [N=3]
-	@COLLECT_LIMIT=$${N:-1} python3 hooks/collect-sessions.py
+	@COLLECT_LIMIT=$${N:-1} python3 agents/schedulers/collect-sessions.py
 
 smoke: ## end-to-end smoke test
 	./scripts/smoke.sh
