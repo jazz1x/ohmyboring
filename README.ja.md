@@ -62,6 +62,18 @@ flowchart LR
 
 ポリシーは **`boring.json`**（`make up` で `boring.example.json` から生成）に記述します：
 
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/jazz1x/oh-my-boring/main/boring.schema.json",
+  "note_lang": "auto",
+  "repos": [
+    {"match": "marketboro", "origin": "company", "name": "marketboro"},
+    {"match": "jongyun/Development/mine", "origin": "personal", "name": "mine"}
+  ],
+  "agents": ["claude-code"]
+}
+```
+
 | Key | 用途 |
 |---|---|
 | `note_lang` | `auto` · `ko` · `en` |
@@ -130,6 +142,26 @@ mcp_servers:
 
 利用可能な tools: `recall` · `remember` · `sync` · `config_get` · `classify_repo`。
 
+MCP 呼び出し例（HTTP 上の raw JSON-RPC）:
+
+```bash
+curl -s -X POST http://localhost:7700/mcp \
+  -H 'content-type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "recall",
+      "arguments": {
+        "query": "docker build cache fix",
+        "max_tokens": 1500,
+        "max_results": 3
+      }
+    }
+  }' | jq .
+```
+
 ### オプション: hermes-agent
 
 [hermes-agent](https://hermes-agent.org) はサードパーティの自律 supervisor です。Slack、オーケストレーション、cron ベースのバックフィルを drudge の MCP バックエンド経由で動かせます。イメージを別途ビルドすれば `make up` が自動的に検出します。
@@ -183,3 +215,5 @@ oh-my-boring/
 ├─ boring.json              # ポリシー (make up 時に生成)
 └─ Makefile
 ```
+
+> **vault/wiki ID について:** `wiki-0000.md` は repo に含まれるサンプルノートです。個人ノートは `wiki-0001.md` から始まり gitignore されているため、private な内容が git に混ざることはありません。

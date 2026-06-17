@@ -122,7 +122,10 @@ def repo_slug(cwd):
 
 
 def _extract_json(text):
-    """Best-effort JSON extraction from an LLM response that may wrap it in markdown."""
+    """Best-effort JSON extraction from an LLM response that may wrap it in markdown or append prose.
+
+    Uses json.JSONDecoder.raw_decode so trailing garbage after the first valid JSON object is ignored.
+    """
     text = text.strip()
     # Remove markdown code fences if present.
     if text.startswith("```"):
@@ -130,13 +133,14 @@ def _extract_json(text):
     if text.endswith("```"):
         text = text[: text.rfind("```")]
     text = text.strip()
-    # Find the outermost JSON object.
+    # Find the first JSON object start; raw_decode will find its matching end.
     start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
+    if start == -1:
         return None
+    decoder = json.JSONDecoder()
     try:
-        return json.loads(text[start : end + 1])
+        obj, _end = decoder.raw_decode(text, start)
+        return obj
     except json.JSONDecodeError:
         return None
 

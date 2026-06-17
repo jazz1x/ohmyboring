@@ -18,6 +18,8 @@ URL = "http://localhost:7700/search"
 # being flooded by recalled memory on every prompt.
 MAX_RESULTS = int(os.environ.get("RECALL_MAX_RESULTS") or "3")
 MAX_TOKENS = int(os.environ.get("RECALL_MAX_TOKENS") or "1500")
+TIMEOUT = float(os.environ.get("RECALL_TIMEOUT") or "5")
+RETRIES = int(os.environ.get("RECALL_RETRIES") or "1")
 
 
 def main() -> None:
@@ -28,17 +30,24 @@ def main() -> None:
     prompt = (data.get("prompt") or "").strip()
     if len(prompt) < 8:  # too short → recall is meaningless
         return
-    try:
+    def _search():
         body = json.dumps({
             "query": prompt,
             "max_results": MAX_RESULTS,
             "max_tokens": MAX_TOKENS,
         }).encode()
         req = urllib.request.Request(URL, data=body, headers={"content-type": "application/json"})
-        with urllib.request.urlopen(req, timeout=3) as r:
-            hits = json.loads(r.read()).get("hits", [])
-    except Exception:
-        return  # engine down → no-op (graceful)
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            return json.loads(r.read()).get("hits", [])
+
+    hits = []
+    for attempt in range(RETRIES + 1):
+        try:
+            hits = _search()
+            break
+        except Exception:
+            if attempt == RETRIES:
+                return  # engine down → no-op (graceful)
     if not hits:
         return
     lines = []

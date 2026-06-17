@@ -14,4 +14,7 @@ echo "2) clippy (-D warnings)…"
 cargo clippy --quiet --all-targets -- -D warnings
 echo "3) test…"
 cargo test --quiet
-echo "✅ 구조 게이트 통과 — 컴파일러/clippy/test 무위반."
+cd "$ROOT"
+echo "4) python adapters py-compile…"
+find agents hooks -name '*.py' -type f -print0 | xargs -0 -n1 python3 -m py_compile
+echo "✅ 구조 게이트 통과 — 컴파일러/clippy/test + Python adapters 무위반."
