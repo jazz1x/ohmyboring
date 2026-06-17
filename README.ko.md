@@ -96,15 +96,17 @@ flowchart LR
 
 ## 에이전트 어댑터
 
-`hooks/`는 외부 에이전트를 drudge 엔진에 연결하는 **호스트측 어댑터**입니다. 모든 어댑터는 동일한 MCP/HTTP 표면을 통해 drudge와 통신하며, 모두 선택 사항입니다.
+`agents/`는 외부 에이전트를 drudge 엔진에 연결하는 **호스트측 어댑터**입니다. 모든 어댑터는 동일한 MCP/HTTP 표면을 통해 drudge와 통신하며, 모두 선택 사항입니다.
 
-| 어댑터 | 소비 주체 | 진입점 | 역할 |
-|---|---|---|---|
-| Claude Code | `distill-session.py` | `SessionEnd` / `Stop` hook | 세션을 요약해 `remember` 호출 |
-| Claude Code | `recall.py` | `UserPromptSubmit` hook | 관련 snippet을 가져와 프롬프트 context 주입 |
-| hermes-agent | `ingest-worker.py` | `hermes cron --script` | cron tick마다 한 세션씩 백필 |
-| scheduler | `collect-sessions.py` | cron / launchd / 수동 | 오래된 세션 lazy 백필 |
-| shared | `boring_config.py` | 어댑터 import | `boring.json` 정책 로더 |
+기존 `hooks/` 경로는 backward-compatible symlink 세트로 남아 있어, 기존 Claude Code `settings.json` 항목과 cron job이 깨지지 않습니다.
+
+| 어댑터 | 경로 | 소비 주체 | 진입점 | 역할 |
+|---|---|---|---|---|
+| Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | 세션을 요약해 `remember` 호출 |
+| Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | 관련 snippet을 가져와 프롬프트 context 주입 |
+| hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | cron tick마다 한 세션씩 백필 |
+| scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 수동 | 오래된 세션 lazy 백필 |
+| shared | `agents/shared/boring_config.py` | 어댑터 import | `boring.json` 정책 로더 |
 
 ### 토큰 예산
 
@@ -166,13 +168,18 @@ mcp_servers:
 
 ```text
 oh-my-boring/
-├─ drudge/      # Rust 엔진
-├─ hooks/       # 호스트 훅
-├─ scripts/     # guard.sh · smoke.sh
-├─ vault/       # raw → wiki 메모리
-├─ data/        # Postgres 데이터 (gitignored)
+├─ drudge/                  # Rust 엔진
+├─ agents/                  # 호스트측 에이전트 어댑터
+│  ├─ claude-code/          # Claude Code hooks
+│  ├─ hermes/               # hermes-agent cron
+│  ├─ schedulers/           # cron/launchd 백필
+│  └─ shared/               # 정책/설정 라이브러리
+├─ hooks/                   # backward-compatible symlink → agents/
+├─ scripts/                 # guard.sh · smoke.sh
+├─ vault/                   # raw → wiki 메모리
+├─ data/                    # Postgres 데이터 (gitignored)
 ├─ docker-compose.yml
 ├─ start.sh
-├─ boring.json  # 정책 (make up 시 생성)
+├─ boring.json              # 정책 (make up 시 생성)
 └─ Makefile
 ```
