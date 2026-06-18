@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "drudge": {
+      "type": "http",
+      "url": "http://localhost:7700/mcp"
+    }
+  }
+}
