@@ -18,7 +18,7 @@ make up
 make ask Q="how did I fix the docker build cache problem?"
 ```
 
-> Requires **Docker**, **Ollama** (or any OpenAI-compatible server), **Python 3**, and **jq**.
+> Requires **Docker**, **Ollama** (or any OpenAI-compatible server), **Python 3**, **jq**, and **curl**.
 
 ---
 
@@ -65,12 +65,15 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/jazz1x/oh-my-boring/main/boring.schema.json",
+  "schema_version": 1,
   "note_lang": "auto",
   "repos": [
-    {"match": "marketboro", "origin": "company", "name": "marketboro"},
-    {"match": "jongyun/Development/mine", "origin": "personal", "name": "mine"}
+    {"match": "your-company", "origin": "company", "name": "your-company"},
+    {"match": "~/code", "origin": "personal", "name": "mine"}
   ],
-  "agents": ["claude-code"]
+  "agents": [
+    {"id": "claude-code", "enabled": true, "format": "claude-json", "paths": ["~/.claude/projects"]}
+  ]
 }
 ```
 
@@ -100,7 +103,7 @@ Secrets and runtime switches live in **`.env`**:
 | `make ask Q="..."` | one-shot recall + synthesis |
 | `make sync` | deterministic re-ingest of the vault |
 | `make remember M="text"` | write a one-line note |
-| `make collect [N=3]` | lazy backfill of past sessions |
+| `make collect [N=1]` | lazy backfill of past sessions |
 | `make hermes-build` | clone/build the optional hermes-agent image |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | drudge logs |
@@ -142,12 +145,14 @@ Any MCP-capable agent can use drudge. The repo ships a standard **`.mcp.json`** 
 
 (VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project drudge http://localhost:7700/mcp`. Compose siblings reach it at `http://drudge:7700/mcp`.)
 
-Available tools: `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief` (generative — run the LLM) · `corpus_status`, `config_get` (introspection) · `remember`, `classify_repo`, `sync` (write / maintain).
+Available tools (10): `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief` (generative — run the LLM) · `corpus_status`, `config_get` (introspection) · `remember`, `classify_repo`, `sync` (write / maintain).
 
-- `neighbors` — graph traversal from a topic: vector top-1 → 1-hop graph + semantic neighbors (`{hit, graph_neighbors, semantic_neighbors}` JSON).
-- `claims` — top-k current (non-superseded) `{subject, predicate, value}` decisions near a query.
-- `corpus_status` — KB health snapshot (file/chunk counts, by origin/kind/project, contamination, graph/semantic nodes+edges).
-- `ask` / `brief` — the only LLM-running tools: `ask` answers a question with cited sources; `brief` is a recency-first work briefing.
+In the default wiki-first mode (`DRUDGE_VECTOR=off`), four tools require the pgvector backend and return JSON-RPC `-32603` until you set `DRUDGE_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `brief`. The other six (`recall`, `ask`, `remember`, `sync`, `config_get`, `classify_repo`) work against `vault/wiki` directly.
+
+- `neighbors` *(requires `DRUDGE_VECTOR=on`)* — graph traversal from a topic: vector top-1 → 1-hop graph + semantic neighbors (`{hit, graph_neighbors, semantic_neighbors}` JSON).
+- `claims` *(requires `DRUDGE_VECTOR=on`)* — top-k current (non-superseded) `{subject, predicate, value}` decisions near a query.
+- `corpus_status` *(requires `DRUDGE_VECTOR=on`)* — KB health snapshot (file/chunk counts, by origin/kind/project, contamination, graph/semantic nodes+edges).
+- `ask` / `brief` — the only LLM-running tools: `ask` answers a question with cited sources (works in wiki-first mode); `brief` *(requires `DRUDGE_VECTOR=on`)* is a recency-first work briefing.
 
 Structured tools (`neighbors`, `claims`, `corpus_status`, `config_get`, `ask`, `brief`) return native `structuredContent` (JSON) alongside the text block; prose/ack tools (`recall`, `remember`, `sync`, `classify_repo`) return text.
 
@@ -182,7 +187,9 @@ curl -s -X POST http://localhost:7700/mcp \
 | Mode | How |
 |---|---|
 | **Docker** (default) | `make up` |
-| **Native** | `cd drudge && cargo run --release -- serve` |
+| **Native** | `cd drudge && DRUDGE_VAULT_DIR="$PWD/../vault" DRUDGE_HTTP_ADDR=127.0.0.1:7700 cargo run --release -- serve` |
+
+> Native `serve` needs `DRUDGE_VAULT_DIR` — without it `remember` fails with `DRUDGE_VAULT_DIR not set`. It also binds `0.0.0.0:7700` by default; set `DRUDGE_HTTP_ADDR=127.0.0.1:7700` to keep it loopback-only.
 
 ---
 
@@ -200,7 +207,8 @@ curl -s -X POST http://localhost:7700/mcp \
 | Symptom | Fix |
 |---|---|
 | `make up` fails | Check Ollama: `curl -sf http://127.0.0.1:11434/api/tags` |
-| Port conflict | `lsof -i :7700 :5432 :11434` |
+| Port conflict | `lsof -i :7700 -i :5432 -i :11434` |
+| Second `make up` / re-clone fails | Run `make down` first — the containers use fixed names and bind `127.0.0.1:7700` / `:5432`, so a second stack collides with the running one |
 | Agent not starting | `OMB_CORE_ONLY=1 make up` runs core-only; hermes image must be built separately |
 
 ---

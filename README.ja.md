@@ -18,7 +18,7 @@ make up
 make ask Q="docker build cache の問題、どう直したっけ？"
 ```
 
-> **Docker**、**Ollama**（または OpenAI-compatible サーバー）、**Python 3**、**jq** が必要です。
+> **Docker**、**Ollama**（または OpenAI-compatible サーバー）、**Python 3**、**jq**、**curl** が必要です。
 
 ---
 
@@ -65,12 +65,15 @@ flowchart LR
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/jazz1x/oh-my-boring/main/boring.schema.json",
+  "schema_version": 1,
   "note_lang": "auto",
   "repos": [
-    {"match": "marketboro", "origin": "company", "name": "marketboro"},
-    {"match": "jongyun/Development/mine", "origin": "personal", "name": "mine"}
+    {"match": "your-company", "origin": "company", "name": "your-company"},
+    {"match": "~/code", "origin": "personal", "name": "mine"}
   ],
-  "agents": ["claude-code"]
+  "agents": [
+    {"id": "claude-code", "enabled": true, "format": "claude-json", "paths": ["~/.claude/projects"]}
+  ]
 }
 ```
 
@@ -100,7 +103,7 @@ flowchart LR
 | `make ask Q="..."` | recall + 要約を一度に実行 |
 | `make sync` | vault の再取り込み |
 | `make remember M="text"` | 1 行ノートを書き込み |
-| `make collect [N=3]` | 過去セッションの lazy バックフィル |
+| `make collect [N=1]` | 過去セッションの lazy バックフィル |
 | `make hermes-build` | オプション hermes-agent イメージの clone/build |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | drudge ログ |
@@ -134,16 +137,17 @@ flowchart LR
 
 ### その他のエージェント
 
-MCP に対応したエージェントならどれも drudge を利用できます。MCP server 登録:
+MCP に対応したエージェントならどれも drudge を利用できます。この repo は Claude Code、Cursor、Windsurf、Claude Desktop がすべて読み込む標準の **`.mcp.json`**（root key `mcpServers`）を同梱しています:
 
-```yaml
-mcp_servers:
-  drudge:
-    url: http://drudge:7700/mcp
-    transport: http
+```json
+{ "mcpServers": { "drudge": { "type": "http", "url": "http://localhost:7700/mcp" } } }
 ```
 
-利用可能な tools: `recall` · `remember` · `sync` · `config_get` · `classify_repo`。
+（VS Code Copilot は root key `servers` を使う `.vscode/mcp.json` を使用します。CLI 代替: `claude mcp add --transport http --scope project drudge http://localhost:7700/mcp`。compose の sibling コンテナは `http://drudge:7700/mcp` でアクセスします。）
+
+利用可能な tools（10個）: `recall` · `neighbors` · `claims`（検索）· `ask` · `brief`（生成 — LLM 実行）· `corpus_status` · `config_get`（introspection）· `remember` · `classify_repo` · `sync`（書き込み / メンテナンス）。
+
+デフォルトの wiki-first モード（`DRUDGE_VECTOR=off`）では、4 つの tool が pgvector バックエンドを必要とし、`DRUDGE_VECTOR=on` を設定するまで JSON-RPC `-32603` を返します: `neighbors`、`claims`、`corpus_status`、`brief`。残りの 6 つ（`recall`、`ask`、`remember`、`sync`、`config_get`、`classify_repo`）は `vault/wiki` を直接使用します。
 
 MCP 呼び出し例（HTTP 上の raw JSON-RPC）:
 
@@ -176,7 +180,9 @@ curl -s -X POST http://localhost:7700/mcp \
 | Mode | 方法 |
 |---|---|
 | **Docker**（デフォルト） | `make up` |
-| **Native** | `cd drudge && cargo run --release -- serve` |
+| **Native** | `cd drudge && DRUDGE_VAULT_DIR="$PWD/../vault" DRUDGE_HTTP_ADDR=127.0.0.1:7700 cargo run --release -- serve` |
+
+> Native `serve` は `DRUDGE_VAULT_DIR` が必要です — 設定しないと `remember` が `DRUDGE_VAULT_DIR not set` で失敗します。またデフォルトで `0.0.0.0:7700` にバインドするため、loopback のみに限定するには `DRUDGE_HTTP_ADDR=127.0.0.1:7700` を設定してください。
 
 ---
 
@@ -194,7 +200,8 @@ curl -s -X POST http://localhost:7700/mcp \
 | 症状 | 解決 |
 |---|---|
 | `make up` 失敗 | Ollama を確認: `curl -sf http://127.0.0.1:11434/api/tags` |
-| ポート競合 | `lsof -i :7700 :5432 :11434` |
+| ポート競合 | `lsof -i :7700 -i :5432 -i :11434` |
+| 2 回目の `make up` / 再クローン失敗 | まず `make down` を実行してください — コンテナ名が固定で `127.0.0.1:7700` / `:5432` にバインドするため、2 つ目のスタックが実行中のスタックと競合します |
 | agent が起動しない | `OMB_CORE_ONLY=1 make up` で core-only 実行。hermes イメージは別途ビルドが必要 |
 
 ---

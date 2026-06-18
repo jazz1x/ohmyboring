@@ -19,8 +19,14 @@ DEFAULT_NOTE_LANG = "auto"
 
 
 def _repo_root() -> Path:
-    """Directory containing this script → project root."""
-    return Path(__file__).resolve().parent.parent
+    """Repo root = the dir holding boring.json / boring.example.json.
+
+    This file lives at <repo>/agents/shared/boring_config.py, so the root is two
+    levels up (shared → agents → repo). The installed hooks are symlinks that
+    sys.path-insert this dir and import it, but `resolve()` follows the symlink to
+    the real file location here, so parents[2] is the repo root either way.
+    """
+    return Path(__file__).resolve().parents[2]
 
 
 def discover_path() -> Path | None:
