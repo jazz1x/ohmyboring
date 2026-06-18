@@ -88,7 +88,7 @@ Secrets and runtime switches live in **`.env`**:
 | Variable | Purpose |
 |---|---|
 | `DRUDGE_VECTOR` | `on` enables pgvector (optional) |
-| `DRUDGE_LLM_BASE_URL` | OpenAI-compatible endpoint, default `http://localhost:11434/v1` |
+| `DRUDGE_LLM_BASE_URL` | OpenAI-compatible endpoint. Docker default `http://host.docker.internal:11434/v1`; use `http://localhost:11434/v1` for Native mode |
 | `DRUDGE_LLM_MODEL` / `DRUDGE_EMBED_MODEL` | default `gemma4:12b` / `bge-m3` |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant |
 

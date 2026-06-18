@@ -88,7 +88,7 @@ flowchart LR
 | Variable | 用途 |
 |---|---|
 | `DRUDGE_VECTOR` | `on` で pgvector 有効化（オプション） |
-| `DRUDGE_LLM_BASE_URL` | OpenAI-compatible endpoint、デフォルト `http://localhost:11434/v1` |
+| `DRUDGE_LLM_BASE_URL` | OpenAI-compatible endpoint、Docker のデフォルト `http://host.docker.internal:11434/v1`・Native モードは `http://localhost:11434/v1` |
 | `DRUDGE_LLM_MODEL` / `DRUDGE_EMBED_MODEL` | デフォルト `gemma4:12b` / `bge-m3` |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプション Slack assistant |
 

@@ -88,7 +88,7 @@ flowchart LR
 | Variable | 용도 |
 |---|---|
 | `DRUDGE_VECTOR` | `on` 시 pgvector 활성화(선택) |
-| `DRUDGE_LLM_BASE_URL` | OpenAI-compatible endpoint, 기본 `http://localhost:11434/v1` |
+| `DRUDGE_LLM_BASE_URL` | OpenAI-compatible endpoint, Docker 기본값 `http://host.docker.internal:11434/v1` · Native 모드는 `http://localhost:11434/v1` |
 | `DRUDGE_LLM_MODEL` / `DRUDGE_EMBED_MODEL` | 기본 `gemma4:12b` / `bge-m3` |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack assistant |
 
