@@ -21,7 +21,9 @@ import time
 import urllib.request
 
 # Allow import of shared agent policy library regardless of how this script is invoked.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
+# realpath resolves symlinks (e.g. hooks/distill-session.py → agents/claude-code/…) so the
+# sibling agents/shared dir is found from the real file location, not the symlink's dir.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config
 
 # OMB_HOME: repo clone location (default ~/oh-my-boring).
@@ -176,8 +178,11 @@ def _extract_json(text):
 def _build_prompt(text, origin, repo):
     """Build the distillation prompt, honouring note_lang and repo metadata."""
     lang_instruction = {
-        "ko": "ALL fields (title, body, every section heading and sentence) MUST be in Korean (한국어), "
-              "regardless of the transcript's language. Keep proper nouns/code/commands verbatim.",
+        "ko": "ALL fields MUST be in Korean (한국어), regardless of the transcript's language. "
+              "The TITLE especially must be a Korean sentence — even if the session is full of English "
+              "ticket IDs (e.g. [FEDEV-97]) or English error names, write the title in Korean and keep "
+              "only the proper nouns/IDs/code verbatim. e.g. title → '[FEDEV-97] 하이드레이션 에러 및 "
+              "Relay 동기화 해결'. Never copy an all-English title from the transcript.",
         "en": "Write every field in English.",
     }.get(NOTE_LANG, "Write in the same language as the transcript.")
 
@@ -324,10 +329,30 @@ def distill_and_remember(transcript_path, origin, repo):
     title = parsed.get("title", "").strip()
     body = parsed.get("body", "").strip()
     # gemma sometimes double-escapes newlines (emits "\\n" in the JSON), so json.loads yields a literal
-    # backslash-n in the body instead of a real line break → markdown renders as one run-on line. Undo it.
-    if "\\n" in body and "\n" not in body:
+    # backslash-n in the body instead of a real line break → markdown renders as one run-on line. It often
+    # MIXES literal "\\n" with a few real breaks, so normalize whenever any literal "\\n" is present.
+    n_lit = body.count("\\n")
+    if "\\n" in body:
         body = body.replace("\\n", "\n").replace("\\t", "\t")
-    body = _strip_trailing_metadata(body)
+    # Instrumentation (not a cleanup cycle): a rising count here = the prompt is regressing into
+    # double-escaped output. Steady 0 means distillation is healthy; investigate if it grows.
+    body_meta = _strip_trailing_metadata(body)
+    n_meta = body != body_meta  # True if a trailing tags/tools/concepts block had to be stripped
+    body = body_meta
+    if n_lit or n_meta:
+        print(
+            f"[distill-session] body normalized: {n_lit} literal newlines"
+            f"{', trailing-metadata stripped' if n_meta else ''} — watch for prompt regression",
+            file=sys.stderr,
+        )
+    # Language regression signal: note_lang=ko but the title came back with no Korean at all → the
+    # model copied an all-English title (usually triggered by [TICKET-ID] prefixes). Logged, not
+    # auto-fixed — a rising rate means the title prompt needs another nudge.
+    if NOTE_LANG == "ko" and title and not re.search(r"[가-힣]", title):
+        print(
+            f"[distill-session] title not Korean despite note_lang=ko: {title!r} — watch for prompt regression",
+            file=sys.stderr,
+        )
     if not title or not body:
         print("[distill-session] missing title/body in LLM output", file=sys.stderr)
         return False
