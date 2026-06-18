@@ -134,16 +134,22 @@ Automatic retrieval can explode an agent's context window, so the retrieval surf
 
 ### Other agents
 
-Any MCP-capable agent can use drudge. Register the MCP server:
+Any MCP-capable agent can use drudge. The repo ships a standard **`.mcp.json`** (root key `mcpServers`) that Claude Code, Cursor, Windsurf, and Claude Desktop all read:
 
-```yaml
-mcp_servers:
-  drudge:
-    url: http://drudge:7700/mcp
-    transport: http
+```json
+{ "mcpServers": { "drudge": { "type": "http", "url": "http://localhost:7700/mcp" } } }
 ```
 
-Available tools: `recall` · `remember` · `sync` · `config_get` · `classify_repo`.
+(VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project drudge http://localhost:7700/mcp`. Compose siblings reach it at `http://drudge:7700/mcp`.)
+
+Available tools: `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief` (generative — run the LLM) · `corpus_status`, `config_get` (introspection) · `remember`, `classify_repo`, `sync` (write / maintain).
+
+- `neighbors` — graph traversal from a topic: vector top-1 → 1-hop graph + semantic neighbors (`{hit, graph_neighbors, semantic_neighbors}` JSON).
+- `claims` — top-k current (non-superseded) `{subject, predicate, value}` decisions near a query.
+- `corpus_status` — KB health snapshot (file/chunk counts, by origin/kind/project, contamination, graph/semantic nodes+edges).
+- `ask` / `brief` — the only LLM-running tools: `ask` answers a question with cited sources; `brief` is a recency-first work briefing.
+
+Structured tools (`neighbors`, `claims`, `corpus_status`, `config_get`, `ask`, `brief`) return native `structuredContent` (JSON) alongside the text block; prose/ack tools (`recall`, `remember`, `sync`, `classify_repo`) return text.
 
 Example MCP call (raw JSON-RPC over HTTP):
 

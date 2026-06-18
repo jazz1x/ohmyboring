@@ -91,6 +91,36 @@ pub enum Origin {
     Community,
 }
 
+impl Origin {
+    /// Render back to the lowercase string the DB / frontmatter expect (mirrors `NoteLang::as_str`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Personal => "personal",
+            Self::Company => "company",
+            Self::Mirror => "mirror",
+            Self::Community => "community",
+        }
+    }
+}
+
+/// The single SSOT `str -> Origin` boundary parse (parse-don't-validate). Reused by `remember` +
+/// `classify_repo` so a typo'd origin is rejected once, not silently coerced to personal anywhere.
+/// `config::Origin` is the SSOT — `vault.rs` has a duplicate enum; the parse lives only here.
+impl std::str::FromStr for Origin {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "personal" => Ok(Self::Personal),
+            "company" => Ok(Self::Company),
+            "mirror" => Ok(Self::Mirror),
+            "community" => Ok(Self::Community),
+            other => Err(format!("invalid origin: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSource {
     pub id: String,
@@ -367,6 +397,21 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::{AgentSource, BoringConfig, NoteLang, Origin, RepoRule};
+
+    #[test]
+    fn origin_parse_roundtrips_and_rejects_unknown() {
+        use std::str::FromStr;
+        // every valid variant parses and renders back to its lowercase string (the SSOT round-trip
+        // that remember + classify_repo share).
+        for s in ["personal", "company", "mirror", "community"] {
+            assert_eq!(Origin::from_str(s).unwrap().as_str(), s);
+        }
+        // whitespace is trimmed at the boundary.
+        assert_eq!(Origin::from_str("  company  ").unwrap(), Origin::Company);
+        // present-but-invalid is REJECTED (parse-don't-validate) — never silently coerced to personal.
+        assert!(Origin::from_str("evil").is_err());
+        assert!(Origin::from_str("").is_err());
+    }
 
     #[test]
     fn defaults_when_file_missing() {
