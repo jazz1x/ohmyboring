@@ -599,7 +599,7 @@ impl Store {
         Ok(())
     }
 
-    /// Remove (prune) document + chunks (CASCADE) + graph edges.
+    /// Remove (prune) document + chunks (CASCADE) + graph edges + claims (explicit; claim has no FK).
     pub async fn delete_document(&self, path: &str) -> Result<()> {
         self.db
             .execute("DELETE FROM document WHERE source_path = $1;", &[&path])
@@ -607,6 +607,16 @@ impl Store {
         let doc_id = doc_node_id(path);
         self.db
             .execute("DELETE FROM edge WHERE src = $1 OR dst = $1;", &[&doc_id])
+            .await?;
+        // claim has NO FK to document (unlike chunk's ON DELETE CASCADE) so the document delete does not
+        // cascade here — mirror the explicit edge delete above. Provenance is single-valued (source_path
+        // is overwritten last-writer-wins on conflict and is not part of the PK), so every claim row
+        // carrying this path is owned by THIS document → remove it (current + its own sealed history).
+        // Caveat: if this doc owned the latest value of a (subject,predicate) while an OLDER row from
+        // another doc stays sealed, that pair loses its current pointer (a MISSING claim, never an
+        // orphaned/WRONG one) — inherent to single-valued provenance; the remedy is a re-seal pass.
+        self.db
+            .execute("DELETE FROM claim WHERE source_path = $1;", &[&path])
             .await?;
         Ok(())
     }
