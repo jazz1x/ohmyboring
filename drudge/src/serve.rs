@@ -726,7 +726,10 @@ fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, Strin
     };
 
     let title = get_str("title");
-    let body = get_str("body");
+    // Decode LLM JSON-string escapes (literal \n, stray \`/\#/\") at the deterministic boundary,
+    // so every writer (hook, hermes cron, direct MCP) yields real markdown — not just the one adapter
+    // that happened to patch it. SSOT for note-body normalization lives in vault::normalize_body.
+    let body = vault::normalize_body(&get_str("body"));
     if title.is_empty() {
         return Err((-32602, "missing argument: title".to_owned()));
     }
