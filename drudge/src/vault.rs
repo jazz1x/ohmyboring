@@ -249,7 +249,17 @@ pub async fn project_links(store: &Store, vault_root: &Path, limit: i64) -> Resu
             .iter()
             .filter_map(|p| wiki_stem(p))
             .collect();
-        // isolation prevention: if there are fewer than 2 concept-overlap links, supplement with the same project's latest documents (a few).
+        // Semantic blend: the graph above only links docs sharing >=2 EXACT concept/tool slugs, so it
+        // misses notes about the same thing in DIFFERENT words (and older / cross-project notes). Add the
+        // meaning-nearest docs by chunk-embedding cosine (>=~0.6 → distance <= 0.40), deduped with the above.
+        for p in store.semantic_related_docs(&src_path, 4, 0.40).await? {
+            if let Some(s) = wiki_stem(&p)
+                && !stems.contains(&s)
+            {
+                stems.push(s);
+            }
+        }
+        // isolation prevention: STILL fewer than 2 links → supplement with the same project's latest docs.
         if stems.len() < 2 {
             for p in store.recent_project_docs(&src_path, 2).await? {
                 if let Some(s) = wiki_stem(&p)
@@ -259,6 +269,7 @@ pub async fn project_links(store: &Store, vault_root: &Path, limit: i64) -> Resu
                 }
             }
         }
+        stems.truncate(8); // cap relates_to (graph + semantic) so a hub note doesn't explode into a mesh
         let links: Vec<String> = stems.iter().map(|s| format!("\"[[{s}]]\"")).collect();
         // Don't wipe: if the graph projection found nothing, preserve whatever relates_to the compile
         // relation-pass (shared tools/concepts) already set — an empty graph must not clobber it to [].
