@@ -739,13 +739,16 @@ fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, Strin
         return Err((-32602, "missing argument: body".to_owned()));
     }
 
-    // Secret scrub at the git boundary (the one leak boundary into the tracked vault). Compile the regex
-    // ONCE and apply it to every field render_wiki_note writes verbatim — not just the body. `‹REDACTED›`
-    // is non-empty, so scrubbing never re-introduces an empty value (the title/body checks above hold).
+    // Deterministic boundary cleanup for EVERY field render_wiki_note writes verbatim into the tracked
+    // vault — not just the body. `clean` = decode LLM JSON-escapes (literal \n, stray \`/\#/\" via
+    // normalize_body) THEN scrub secrets (the one git-leak boundary). Applying it to title/tools/concepts/
+    // claims too closes the gap where escapes leaked through the structured fields (e.g. a claim value
+    // `16 items\n`, wiki-0148). `‹REDACTED›` is non-empty, so scrubbing never reintroduces an empty value.
     let re = redact::build_secret_re().map_err(|e| (-32603_i32, format!("secret regex: {e:#}")))?;
     let scrub = |s: &str| redact::redact(&re, s);
-    let title = scrub(&title);
-    let body = scrub(&body);
+    let clean = |s: &str| scrub(&vault::normalize_body(s));
+    let title = clean(&title);
+    let body = scrub(&body); // body already normalized above (needed for the empty-check) — just scrub
 
     // origin: parsed at the boundary — absent → default personal, present-but-invalid → reject
     // (parse-don't-validate; shared `config::Origin` parse, no silent coercion to personal on a typo).
@@ -781,9 +784,9 @@ fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, Strin
             v.iter()
                 .filter_map(parse_claim)
                 .map(|c| Claim {
-                    subject: scrub(&c.subject),
-                    predicate: scrub(&c.predicate),
-                    value: scrub(&c.value),
+                    subject: clean(&c.subject),
+                    predicate: clean(&c.predicate),
+                    value: clean(&c.value),
                 })
                 .collect()
         })
@@ -797,8 +800,8 @@ fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, Strin
         source_path: String::new(), // filled by caller after id allocation
         title: Some(title),
         tags,
-        tools: get_arr("tools").iter().map(|t| scrub(t)).collect(),
-        concepts: get_arr("concepts").iter().map(|c| scrub(c)).collect(),
+        tools: get_arr("tools").iter().map(|t| clean(t)).collect(),
+        concepts: get_arr("concepts").iter().map(|c| clean(c)).collect(),
         claims,
     };
     Ok(RememberNote { front, body })
@@ -1060,5 +1063,48 @@ mod tests {
             claim_value.contains("‹REDACTED›"),
             "claim value not scrubbed: {claim_value}"
         );
+    }
+
+    // Literal JSON-escapes (the two chars backslash-n, stray markdown escapes) must be DECODED — not just
+    // scrubbed — in the structured fields too, or a claim/title/tool carries `parity\n` into the vault
+    // (the wiki-0148 class). Body decoding alone is not enough.
+    #[test]
+    fn parse_remember_normalizes_escapes_in_all_fields() {
+        let args = json!({
+            "title": "rollout\\n",
+            "body": "## Context\\nreal body",
+            "tools": ["ommc\\n"],
+            "concepts": ["Schema Validation\\n"],
+            "claims": [
+                {"subject": "ommc threshold parity\\n", "predicate": "is_verified", "value": "16 items\\n"}
+            ]
+        });
+        let note = parse_remember_note(Some(&args)).unwrap();
+        assert_eq!(
+            note.front.title.as_deref(),
+            Some("rollout"),
+            "title not decoded"
+        );
+        assert!(
+            note.body.contains('\n') && !note.body.contains("\\n"),
+            "body not decoded: {}",
+            note.body
+        );
+        assert_eq!(
+            note.front.tools,
+            vec!["ommc".to_owned()],
+            "tool not decoded"
+        );
+        assert_eq!(
+            note.front.concepts,
+            vec!["Schema Validation".to_owned()],
+            "concept not decoded"
+        );
+        let c = &note.front.claims[0];
+        assert_eq!(
+            c.subject, "ommc threshold parity",
+            "claim subject not decoded"
+        );
+        assert_eq!(c.value, "16 items", "claim value not decoded");
     }
 }
