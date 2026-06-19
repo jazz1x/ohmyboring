@@ -168,6 +168,44 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     Some((yaml, body))
 }
 
+/// Quote unsafe scalar frontmatter values so a note YAML can't parse becomes valid. The classic case:
+/// an unquoted `title: [FEDEV-97] …` — YAML reads the leading `[` as a flow sequence and the whole sync
+/// aborts. Touches ONLY the known scalar keys, only when the value is unquoted AND looks unsafe;
+/// everything else (lists, body, already-quoted) is preserved verbatim. Pure.
+fn quote_unsafe_scalars(yaml: &str) -> String {
+    const SCALAR_KEYS: [&str; 6] = ["id", "title", "kind", "origin", "project", "date"];
+    // A YAML plain scalar may not start with these indicators; `: ` / ` #` mid-value are also ambiguous.
+    const LEAD: &[char] = &[
+        '[', ']', '{', '}', ',', '&', '*', '#', '?', '|', '-', '<', '>', '=', '!', '%', '@', '`',
+    ];
+    let mut out: Vec<String> = Vec::with_capacity(yaml.lines().count());
+    for line in yaml.lines() {
+        let fixed = SCALAR_KEYS.iter().find_map(|k| {
+            let v = line.strip_prefix(&format!("{k}: "))?.trim();
+            let unsafe_scalar = !v.is_empty()
+                && !v.starts_with('"')
+                && !v.starts_with('\'')
+                && (v.starts_with(LEAD) || v.contains(": ") || v.contains(" #"));
+            unsafe_scalar.then(|| {
+                let esc = v.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("{k}: \"{esc}\"")
+            })
+        });
+        out.push(fixed.unwrap_or_else(|| line.to_owned()));
+    }
+    out.join("\n")
+}
+
+/// Best-effort autonomous repair of a malformed wiki note: quote unsafe scalar frontmatter so a note
+/// YAML refuses to parse (the one bad note that would otherwise abort the whole sync) becomes valid.
+/// Returns the repaired content if anything changed, else None. The caller MUST re-parse before writing
+/// — this is a no-op on valid notes and never guarantees the result parses, only that it tried.
+pub fn repair_note_frontmatter(content: &str) -> Option<String> {
+    let (yaml, body) = split_frontmatter(content)?;
+    let fixed = quote_unsafe_scalars(yaml);
+    (fixed != yaml).then(|| format!("---\n{fixed}\n---\n{body}"))
+}
+
 /// raw frontmatter YAML string → `RawFrontMatter`. Pure function.
 fn parse_raw_frontmatter(yaml: &str) -> Result<RawFrontMatter> {
     serde_yaml::from_str(yaml).context("failed to parse frontmatter YAML")
@@ -1113,7 +1151,7 @@ mod tests {
     use super::{
         Kind, Origin, Page, PageIdSchema, Schema, Severity, SourcesSchema, audit_pages,
         extract_wikilinks, find_cross_layer_wikilinks, lint_page, normalize_body, parse_kind,
-        parse_origin, sanitize_tag,
+        parse_origin, repair_note_frontmatter, sanitize_tag,
     };
     use serde_yaml::Value;
 
@@ -1154,6 +1192,35 @@ mod tests {
     fn normalize_body_leaves_clean_markdown_unchanged() {
         let clean = "## 배경\n결정함.\n\n## 결과\n- 끝";
         assert_eq!(normalize_body(clean), clean);
+    }
+
+    // ── repair_note_frontmatter (autonomous post-correction of malformed scalars) ──
+
+    #[test]
+    fn repair_quotes_unsafe_scalar_title() {
+        // an unquoted title starting with '[' — YAML reads it as a flow sequence and the whole sync
+        // aborts; the autonomous repair must quote it (wiki-0124 class).
+        let bad = "---\nid: wiki-0124\ntitle: [FEDEV-97] Hydration 해결\nkind: note\n---\n# body\n";
+        let fixed = repair_note_frontmatter(bad).expect("should repair the unsafe title");
+        assert!(
+            fixed.contains("title: \"[FEDEV-97] Hydration 해결\""),
+            "title not quoted: {fixed}"
+        );
+        assert!(
+            fixed.contains("id: wiki-0124"),
+            "other lines must be preserved"
+        );
+        assert!(fixed.contains("# body"), "body must be preserved");
+    }
+
+    #[test]
+    fn repair_is_noop_on_clean_note() {
+        let good =
+            "---\nid: wiki-1\ntitle: A normal title\nkind: note\norigin: personal\n---\n# body\n";
+        assert!(
+            repair_note_frontmatter(good).is_none(),
+            "a well-formed note must not be rewritten"
+        );
     }
 
     // ── sanitize_tag (Obsidian-safe normalization) ──
