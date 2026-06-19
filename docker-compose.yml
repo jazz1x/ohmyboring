@@ -2,7 +2,10 @@
 #   make up              # wiki-first: drudge + hermes-agent
 #   DRUDGE_VECTOR=on …   # also brings up Postgres (pgvector) via --profile vector
 #   Slack, autonomy, and recall are driven by hermes-agent (Nous Hermes Agent). Models run on host Ollama (gemma4).
-name: ohmyboring
+# Compose project name = the working/install dir (oh-my-boring), NOT the ohmyboring brand.
+# Renaming this orphans an already-running stack: container_name is the fixed boring-*, so a
+# project rename makes compose try to recreate boring-drudge/agent/postgres and collide.
+name: oh-my-boring
 
 services:
   # ─────────────────────────── Postgres + pgvector (graph = node/edge + CTE) ─────
