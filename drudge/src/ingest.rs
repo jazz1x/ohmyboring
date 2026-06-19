@@ -32,6 +32,7 @@ pub struct Stats {
     pub deleted: usize,
     pub skipped: usize,
     pub failed: usize, // notes that errored on parse/ingest and were skipped (resilient sync, not aborted)
+    pub repaired: usize, // notes auto-repaired (unsafe frontmatter re-quoted) then re-ingested
     pub chunks: usize,
     // deterministic graph (from frontmatter)
     pub tools: usize,
@@ -283,12 +284,26 @@ pub async fn run(
             let pstr = entry.path().to_string_lossy().into_owned();
             stats.scanned += 1;
             seen.insert(pstr.clone());
-            // Resilient-by-default: one malformed note (e.g. an unquoted YAML-special title that parses as
-            // a sequence) must NOT abort the whole re-ingest. Skip + log it so the rest of the corpus still
-            // syncs; the bad note keeps its last-good state on disk for a later repair pass.
+            // Resilient-by-default: a malformed note must NEVER abort the whole re-ingest. First try an
+            // autonomous repair (quote unsafe scalar frontmatter, e.g. an unquoted `title: [FEDEV-97] …`
+            // that YAML reads as a sequence) and re-ingest; only if THAT still fails do we skip + log.
+            // Either way the rest of the corpus keeps syncing.
             if let Err(e) = ingest_file(store, llm, cfg, &pstr, &mut stats).await {
-                eprintln!("[ingest] skipped malformed note {pstr}: {e:#}");
-                stats.failed += 1;
+                if let Some(fixed) = std::fs::read_to_string(&pstr)
+                    .ok()
+                    .and_then(|c| crate::vault::repair_note_frontmatter(&c))
+                    && frontmatter::parse(&fixed, &pstr, cfg).is_ok()
+                    && std::fs::write(&pstr, &fixed).is_ok()
+                    && ingest_file(store, llm, cfg, &pstr, &mut stats)
+                        .await
+                        .is_ok()
+                {
+                    eprintln!("[ingest] auto-repaired malformed frontmatter + re-ingested {pstr}");
+                    stats.repaired += 1;
+                } else {
+                    eprintln!("[ingest] skipped malformed note {pstr}: {e:#}");
+                    stats.failed += 1;
+                }
             }
         }
     }
