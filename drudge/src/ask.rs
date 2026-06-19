@@ -80,7 +80,7 @@ pub async fn answer(
     }
 
     // Authority injection: **current** claims close to the query (superseded_at NULL) — time-axis facts take priority over chunks.
-    // "What's the DB?" → the claim 'oh-my-boring database is pgvector' beats old chunk noise.
+    // "What's the DB?" → the claim 'ohmyboring database is pgvector' beats old chunk noise.
     let q_emb = llm.embed(question).await?;
     let mut claim_ctx = String::new();
     for (s, p, v) in store.current_claims(&q_emb, 5).await? {

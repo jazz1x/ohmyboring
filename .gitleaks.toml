@@ -1,5 +1,5 @@
 # gitleaks 설정 — 기본 룰셋 + 이 repo 의 알려진 비-시크릿 allowlist.
-title = "oh-my-boring gitleaks"
+title = "ohmyboring gitleaks"
 
 [extend]
 useDefault = true # gitleaks 내장 룰(AWS/GitHub/Slack/JWT/PEM 등) 전부 상속

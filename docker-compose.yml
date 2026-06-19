@@ -1,8 +1,8 @@
-# oh-my-boring — live stack (local Docker). host Ollama + drudge + hermes-agent (+ Postgres via --profile vector).
+# ohmyboring — live stack (local Docker). host Ollama + drudge + hermes-agent (+ Postgres via --profile vector).
 #   make up              # wiki-first: drudge + hermes-agent
 #   DRUDGE_VECTOR=on …   # also brings up Postgres (pgvector) via --profile vector
 #   Slack, autonomy, and recall are driven by hermes-agent (Nous Hermes Agent). Models run on host Ollama (gemma4).
-name: oh-my-boring
+name: ohmyboring
 
 services:
   # ─────────────────────────── Postgres + pgvector (graph = node/edge + CTE) ─────

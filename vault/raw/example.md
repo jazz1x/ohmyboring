@@ -1,12 +1,12 @@
 # Session note — 2026-01-01
-> Auto-distilled (Claude Code · ended) · origin: personal · repo: jazz1x/oh-my-boring · cwd: ~/oh-my-boring
+> Auto-distilled (Claude Code · ended) · origin: personal · repo: jazz1x/ohmyboring · cwd: ~/oh-my-boring
 
 > **This is an example note.** It shows the format of the distill notes that accumulate in
 > `vault/raw/`, and seeds one thing for `make ask` to answer on a fresh clone. Real notes are
 > created automatically by the SessionEnd hook.
 > Safe to delete — it disappears from the wiki on the next sync.
 
-🎯 **Problem worked on** — tried to spin up oh-my-boring for the first time and verify it works.
+🎯 **Problem worked on** — tried to spin up ohmyboring for the first time and verify it works.
 
 🧪 **Attempts/failures** — expected `make up` to need the external hermes-agent image (Nous Hermes
 Agent, not in the repo). It doesn't hard-fail: when that image is missing, start.sh falls back to
