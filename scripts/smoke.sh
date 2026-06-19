@@ -35,7 +35,7 @@ fi
 printf '%s\n' "$ps" | grep -qi 'restarting' && fail "crash-looping container: $(printf '%s' "$ps" | grep -i restarting)"
 printf '%s\n' "$ps" | grep -E 'postgres|drudge|agent' || true
 
-echo "2) drudge /health…"
+echo "2) engine /health…"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$URL/health")" = "200" ] || fail "/health != 200"
 
 echo "3) /ask (real answer expected; fallback/error fails)…"

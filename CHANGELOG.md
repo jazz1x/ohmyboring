@@ -3,6 +3,14 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **MCP server name**: the project-scoped `.mcp.json` key and all user-facing docs now use
+  `ohmyboring-memory` instead of `drudge`. The internal binary/container (`drudge`, `boring-drudge`)
+  and `DRUDGE_*` environment variables are intentionally kept unchanged in this release to keep
+  the blast radius small; they will be migrated incrementally.
+
 ## [0.1.0] — 2026-06-16
 
 First public cut of **ohmyboring** — a self-hosted personal memory RAG. Your
@@ -16,7 +24,7 @@ wiki and recalled on demand. Zero cloud, 100% local.
 - **pgvector (vector + graph RAG) is optional** — `DRUDGE_VECTOR=on` +
   `docker compose --profile vector`. The engine runs without Postgres by default.
 - **Engine-direct distillation** — the SessionEnd/Stop hook (`distill-session.py`)
-  calls the local LLM directly and writes through drudge's `remember` MCP tool.
+  calls the local LLM directly and writes through ohmyboring-memory's `remember` MCP tool.
 - **hermes-agent is optional** — it can drive advanced orchestration, Slack, and
   cron-based backfill via `ingest-worker.py`, but the core loop works without it.
 
@@ -35,7 +43,7 @@ wiki and recalled on demand. Zero cloud, 100% local.
 
 ### Host hooks (Python)
 - `distill-session.py` (SessionEnd/Stop): extract transcript → local LLM →
-  `remember` via drudge MCP. Respects `boring.json` `note_lang` and `repos`
+  `remember` via ohmyboring-memory MCP. Respects `boring.json` `note_lang` and `repos`
   (company/personal/mirror/community).
 - `recall.py` (UserPromptSubmit): inject relevant past work as context.
 - `collect-sessions.py`: backfill sessions missed by SessionEnd.
@@ -44,7 +52,7 @@ wiki and recalled on demand. Zero cloud, 100% local.
 
 ### Agent
 - **hermes-agent** (Nous Hermes Agent) as an optional supervisor — drives
-  recall/ingest/skills via drudge's MCP memory backend when built separately.
+  recall/ingest/skills via ohmyboring-memory's MCP memory backend when built separately.
 
 ### Tooling & CI
 - `make` entrypoints (`up`/`ask`/`sync`/`remember`/`smoke`/`guard`/`deny`/…).

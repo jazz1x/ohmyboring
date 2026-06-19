@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """UserPromptSubmit hook — recalls *my past work experiences* relevant to the current
-prompt from drudge (vector+graph) and injects them as context. The loop where
+prompt from ohmyboring-memory (vector+graph) and injects them as context. The loop where
 self-augmentation automatically enriches actual work.
 
 Design:
 - push (auto-injection) — better suited to ambient recall than pull, where the model decides whether to call an MCP tool.
 - uses /search (vector, ~100ms) — not /ask (gemma4, slow). Recall only, no synthesis.
-- if drudge (:7700) is down/errors, it's a *silent no-op* (never blocks the prompt).
+- if ohmyboring-memory (:7700) is down/errors, it's a *silent no-op* (never blocks the prompt).
 """
 import json
 import os

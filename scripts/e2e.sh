@@ -2,7 +2,7 @@
 # e2e.sh — wiki-mode (DRUDGE_VECTOR=off) end-to-end against a RUNNING stack.
 #   make e2e   or   ./scripts/e2e.sh
 #
-# Exercises the live MCP surface (drudge /mcp, JSON-RPC 2.0) the way an agent does:
+# Exercises the live MCP surface (ohmyboring-memory /mcp, JSON-RPC 2.0) the way an agent does:
 #   1. remember  — write a throwaway, clearly-namespaced note via the `remember` tool
 #   2. recall    — read it back via the `recall` tool; assert the body round-trips
 #   3. neighbors — assert a vector-only tool errors with code -32603 when vector is off
@@ -26,9 +26,9 @@ command -v jq   >/dev/null 2>&1 || skip "jq not found — install: brew install 
 
 # --- stack-up check (friendly skip when down, like smoke.sh step 2) -----------------
 # grounded: serve.rs:1004  .route("/health", get(health))  → 200 when the engine is up.
-echo "0) stack up? (drudge /health)…"
+echo "0) stack up? (engine /health)…"
 if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$URL/health" 2>/dev/null)" != "200" ]; then
-  skip "drudge not up at $URL (run: make up) — e2e needs a live stack"
+  skip "engine not up at $URL (run: make up) — e2e needs a live stack"
 fi
 
 # --- mode check: this e2e asserts the wiki-mode (DRUDGE_VECTOR=off) contract ---------

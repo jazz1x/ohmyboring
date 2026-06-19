@@ -26,7 +26,7 @@ down: ## Stop the whole stack, including Postgres when vector mode was used (kee
 build: ## Build images
 	docker compose build
 
-logs: ## drudge engine logs
+logs: ## engine logs
 	docker compose logs -f drudge
 
 agent-logs: ## hermes-agent logs (MCP connection diagnostics)

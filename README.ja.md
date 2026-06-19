@@ -54,7 +54,7 @@ flowchart LR
     CC([Claude Code session])
   end
   subgraph WRITE [WRITE · gated]
-    D["distill-session.py"] --> REM["drudge remember"]
+    D["distill-session.py"] --> REM["ohmyboring-memory remember"]
   end
   WIKI[("vault/wiki<br/>primary memory")]
   subgraph RD [READ · open]
@@ -68,7 +68,7 @@ flowchart LR
 ```
 
 - **Read door** — 高速、LLM 不要。`make ask`、`recall.py`、MCP `recall` が `vault/wiki` を直接読みます。
-- **Write door** — gated。`distill-session.py` がローカル LLM を呼び出し、drudge の `remember` MCP tool で書き込みます。
+- **Write door** — gated。`distill-session.py` がローカル LLM を呼び出し、ohmyboring-memory の `remember` MCP tool で書き込みます。
 
 ---
 
@@ -114,7 +114,7 @@ flowchart LR
 
 | Command | 説明 |
 |---|---|
-| `make up` | drudge 起動（hermes-agent イメージがある場合のみ一緒に起動） |
+| `make up` | ohmyboring-memory エンジン起動（hermes-agent イメージがある場合のみ一緒に起動） |
 | `make ollama` | Ollama 実行確認（必要ならバックグラウンド起動） |
 | `make ask Q="..."` | recall + 要約を一度に実行 |
 | `make sync` | vault の再取り込み |
@@ -122,7 +122,7 @@ flowchart LR
 | `make collect [N=1]` | 過去セッションの lazy バックフィル |
 | `make hermes-build` | オプション hermes-agent イメージの clone/build |
 | `make smoke` | end-to-end smoke test |
-| `make logs` | drudge ログ |
+| `make logs` | エンジンログ |
 | `make guard` | fmt + clippy + test + Python py-compile |
 | `make down` | コンテナ停止 |
 
@@ -130,7 +130,7 @@ flowchart LR
 
 ## エージェントアダプター
 
-`agents/` は外部エージェントを drudge エンジンに接続する **ホスト側アダプター** です。すべてのアダプターは同じ MCP/HTTP インターフェースを通じて drudge と通信し、いずれも必須ではありません。
+`agents/` は外部エージントを ohmyboring-memory エンジンに接続する **ホスト側アダプター** です。すべてのアダプターは同じ MCP/HTTP インターフェースを通じて ohmyboring-memory と通信し、いずれも必須ではありません。
 
 旧 `hooks/` パスは backward-compatible な symlink セットとして残っているため、既存の Claude Code `settings.json` エントリや cron job は壊れません。
 
@@ -153,13 +153,13 @@ flowchart LR
 
 ### その他のエージェント
 
-MCP に対応したエージェントならどれも drudge を利用できます。この repo は Claude Code、Cursor、Windsurf、Claude Desktop がすべて読み込む標準の **`.mcp.json`**（root key `mcpServers`）を同梱しています:
+MCP に対応したエージェントならどれも ohmyboring-memory を利用できます。この repo は Claude Code、Cursor、Windsurf、Claude Desktop がすべて読み込む標準の **`.mcp.json`**（root key `mcpServers`）を同梱しています:
 
 ```json
-{ "mcpServers": { "drudge": { "type": "http", "url": "http://localhost:7700/mcp" } } }
+{ "mcpServers": { "ohmyboring-memory": { "type": "http", "url": "http://localhost:7700/mcp" } } }
 ```
 
-（VS Code Copilot は root key `servers` を使う `.vscode/mcp.json` を使用します。CLI 代替: `claude mcp add --transport http --scope project drudge http://localhost:7700/mcp`。compose の sibling コンテナは `http://drudge:7700/mcp` でアクセスします。）
+（VS Code Copilot は root key `servers` を使う `.vscode/mcp.json` を使用します。CLI 代替: `claude mcp add --transport http --scope project ohmyboring-memory http://localhost:7700/mcp`。compose の sibling コンテナは `http://drudge:7700/mcp` でアクセスします。）
 
 利用可能な tools（10個）: `recall` · `neighbors` · `claims`（検索）· `ask` · `brief`（生成 — LLM 実行）· `corpus_status` · `config_get`（introspection）· `remember` · `classify_repo` · `sync`（書き込み / メンテナンス）。
 
@@ -194,9 +194,9 @@ curl -s -X POST http://localhost:7700/mcp \
 
 ### オプション: hermes-agent
 
-[hermes-agent](https://hermes-agent.org) はサードパーティの自律 supervisor です。Slack、オーケストレーション、cron ベースのバックフィルを drudge の MCP バックエンド経由で動かせます。イメージを別途ビルドすれば `make up` が自動的に検出します。
+[hermes-agent](https://hermes-agent.org) はサードパーティの自律 supervisor です。Slack、オーケストレーション、cron ベースのバックフィルを ohmyboring-memory の MCP バックエンド経由で動かせます。イメージを別途ビルドすれば `make up` が自動的に検出します。
 
-設定は hermes-agent プロジェクト**自身のドキュメント**に従います（ここでは対象外）— `~/.hermes/config.yaml` を drudge の MCP（`http://drudge:7700/mcp`）に向けてください。ohmyboring が同梱するのはこれを Slack assistant として配線するところまでで、それ以上に使うにはイメージを自分でビルドまたは改変してください。
+設定は hermes-agent プロジェクト**自身のドキュメント**に従います（ここでは対象外）— `~/.hermes/config.yaml` を ohmyboring-memory の MCP（`http://drudge:7700/mcp`）に向けてください。ohmyboring が同梱するのはこれを Slack assistant として配線するところまでで、それ以上に使うにはイメージを自分でビルドまたは改変してください。
 
 ---
 
@@ -246,7 +246,7 @@ curl -s -X POST http://localhost:7700/mcp \
 
 ## 定期的な sync
 
-drudge は 4 時間ごとに deterministic sync をスケジュールしますが、`vault/wiki/` を手動で編集したり、vector/graph データをより頻繁に最新化したい場合は:
+エンジンは 4 時間ごとに deterministic sync をスケジュールしますが、`vault/wiki/` を手動で編集したり、vector/graph データをより頻繁に最新化したい場合は:
 
 ```bash
 make sync
