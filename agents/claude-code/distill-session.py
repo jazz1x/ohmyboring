@@ -25,12 +25,13 @@ import urllib.request
 # sibling agents/shared dir is found from the real file location, not the symlink's dir.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config
+import omb_env
 
 # OMB_HOME: repo clone location (default ~/oh-my-boring).
-OMB_HOME = os.environ.get("OMB_HOME") or os.path.expanduser("~/oh-my-boring")
-DRUDGE_URL = os.environ.get("DRUDGE_URL", "http://localhost:7700")
-LLM_BASE_URL = os.environ.get("DRUDGE_LLM_BASE_URL", "http://localhost:11434/v1")
-LLM_MODEL = os.environ.get("DRUDGE_LLM_MODEL", "gemma4:12b")
+OMB_HOME = os.environ.get("OMB_HOME") or omb_env.omb_home()
+DRUDGE_URL = os.environ.get("DRUDGE_URL") or omb_env.drudge_url()
+LLM_BASE_URL = os.environ.get("DRUDGE_LLM_BASE_URL") or omb_env.llm_base_url()
+LLM_MODEL = os.environ.get("DRUDGE_LLM_MODEL") or omb_env.llm_model()
 LLM_API_KEY = os.environ.get("DRUDGE_LLM_API_KEY") or ""
 NOTE_LANG = boring_config.note_lang()
 # Minimum interval (minutes) before re-distilling an in-progress session (Stop hook).
