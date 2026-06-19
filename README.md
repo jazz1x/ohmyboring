@@ -149,7 +149,7 @@ Available tools (10): `recall`, `neighbors`, `claims` (retrieval) · `ask`, `bri
 
 In the default wiki-first mode (`DRUDGE_VECTOR=off`), four tools require the pgvector backend and return JSON-RPC `-32603` until you set `DRUDGE_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `brief`. The other six (`recall`, `ask`, `remember`, `sync`, `config_get`, `classify_repo`) work against `vault/wiki` directly.
 
-- `neighbors` *(requires `DRUDGE_VECTOR=on`)* — graph traversal from a topic: vector top-1 → 1-hop graph + semantic neighbors (`{hit, graph_neighbors, semantic_neighbors}` JSON).
+- `neighbors` *(requires `DRUDGE_VECTOR=on`)* — graph traversal from a topic: embeds the query, takes the single closest note, then returns its 1-hop labels (`{hit, graph_neighbors, semantic_neighbors}` JSON). `hit` is the matched note's path; `graph_neighbors` are its project/topic labels and `semantic_neighbors` its shared tool/concept labels — flat strings, not note paths.
 - `claims` *(requires `DRUDGE_VECTOR=on`)* — top-k current (non-superseded) `{subject, predicate, value}` decisions near a query.
 - `corpus_status` *(requires `DRUDGE_VECTOR=on`)* — KB health snapshot (file/chunk counts, by origin/kind/project, contamination, graph/semantic nodes+edges).
 - `ask` / `brief` — the only LLM-running tools: `ask` answers a question with cited sources (works in wiki-first mode); `brief` *(requires `DRUDGE_VECTOR=on`)* is a recency-first work briefing.
