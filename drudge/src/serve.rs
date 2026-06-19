@@ -145,8 +145,17 @@ struct SyncResp {
 
 // ── handlers ──────────────────────────────────────────────────────────────────
 
-async fn health() -> &'static str {
-    "ok"
+#[derive(Serialize)]
+struct HealthResp {
+    status: &'static str,
+    vector: bool,
+}
+
+async fn health(State(state): State<AppState>) -> Json<HealthResp> {
+    Json(HealthResp {
+        status: "ok",
+        vector: state.store.is_some(),
+    })
 }
 
 async fn handle_ask(

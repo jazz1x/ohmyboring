@@ -173,6 +173,16 @@ def transcript_cwd(path):
     return ""
 
 
+def _is_vector_mode():
+    """Return True only if the engine reports vector mode (pgvector backend is on)."""
+    try:
+        with urllib.request.urlopen(f"{DRUDGE_URL}/health", timeout=15) as r:
+            return json.loads(r.read()).get("vector", False)
+    except Exception:
+        # Engine down or pre-change /health shape → safest fallback is wiki-first.
+        return False
+
+
 def _chunk_count():
     try:
         with urllib.request.urlopen(f"{DRUDGE_URL}/audit", timeout=15) as r:
@@ -182,19 +192,31 @@ def _chunk_count():
 
 
 def _reconcile():
-    """At the start of a tick, settle the PREVIOUS tick's session: if its pending marker exists and the
-    DB grew since it was offered, promote pending→done (pop from queue). Otherwise drop the pending
-    marker so it's retried. State is carried in the pending marker's contents (sid + chunk count at offer)."""
+    """At the start of a tick, settle the PREVIOUS tick's session.
+
+    In vector mode we confirm success by observing a chunk-count increase.
+    In wiki-first mode there is no chunk counter, so a pending marker is
+    promoted to done immediately — otherwise it would retry forever because
+    /audit rejects the request with HTTP 500 when DRUDGE_VECTOR=off.
+    """
+    vector = _is_vector_mode()
     for pend in glob.glob(os.path.join(MARK_DIR, "*.pending")):
         try:
-            sid, before = open(pend).read().split("\n", 1)[0:2]
+            with open(pend) as f:
+                sid, before = f.read().split("\n", 1)[0:2]
             before = int(before.strip())
         except Exception:
             os.remove(pend)
             continue
-        if _chunk_count() > before:
-            # success → done marker, remove pending
-            open(_done_marker(sid), "w").write(str(time.time()))
+        if not vector:
+            # wiki-first: no observable chunk delta → mark done to break the retry loop
+            with open(_done_marker(sid), "w") as f:
+                f.write(str(time.time()))
+            os.remove(pend)
+        elif _chunk_count() > before:
+            # vector mode success → done marker, remove pending
+            with open(_done_marker(sid), "w") as f:
+                f.write(str(time.time()))
             os.remove(pend)
         elif (time.time() - os.path.getmtime(pend)) >= PENDING_TTL:
             os.remove(pend)  # stale failure → retry next time
