@@ -138,9 +138,12 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 |---|---|---|---|---|
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | Distills a session and calls `remember` |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
+| Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring-memory` as an MCP server |
+| Codex | `agents/codex/README.md` | MCP only | `~/.codex/mcp.json` | Exposes `ohmyboring-memory` as an MCP server |
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Serial backfill, one session per cron tick |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older sessions |
 | shared | `agents/shared/boring_config.py` | imported by adapters | `boring.json` policy loader |
+| shared | `agents/shared/agent_wiring.py` | `install.sh` | Idempotently configures hooks/MCP for enabled agents |
 
 ### Token budget
 
@@ -158,6 +161,8 @@ Any MCP-capable agent can use ohmyboring-memory. The repo ships a standard **`.m
 ```json
 { "mcpServers": { "ohmyboring-memory": { "type": "http", "url": "http://localhost:7700/mcp" } } }
 ```
+
+`install.sh` also writes Cursor's `~/.cursor/mcp.json` and Codex's `~/.codex/mcp.json` automatically when those agents are enabled in `boring.json`.
 
 (VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring-memory http://localhost:7700/mcp`. Compose siblings reach it at `http://drudge:7700/mcp`.)
 

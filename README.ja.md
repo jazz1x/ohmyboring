@@ -138,9 +138,12 @@ flowchart LR
 |---|---|---|---|---|
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | セッションを要約し `remember` を呼び出す |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | 関連 snippet を取得しプロンプト context に注入 |
+| Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring-memory` を MCP サーバーとして公開 |
+| Codex | `agents/codex/README.md` | MCP only | `~/.codex/mcp.json` | `ohmyboring-memory` を MCP サーバーとして公開 |
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | cron tick ごとに 1 セッションずつバックフィル |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 手動 | 古いセッションの lazy バックフィル |
 | shared | `agents/shared/boring_config.py` | アダプター import | `boring.json` ポリシーローダー |
+| shared | `agents/shared/agent_wiring.py` | `install.sh` | 有効なエージェントの hook/MCP 設定を idempotent に構成 |
 
 ### トークン予算
 
@@ -158,6 +161,8 @@ MCP に対応したエージェントならどれも ohmyboring-memory を利用
 ```json
 { "mcpServers": { "ohmyboring-memory": { "type": "http", "url": "http://localhost:7700/mcp" } } }
 ```
+
+`install.sh` は `boring.json` で Cursor と Codex が有効になっている場合、Cursor の `~/.cursor/mcp.json` と Codex の `~/.codex/mcp.json` も自動的に書き込みます。
 
 （VS Code Copilot は root key `servers` を使う `.vscode/mcp.json` を使用します。CLI 代替: `claude mcp add --transport http --scope project ohmyboring-memory http://localhost:7700/mcp`。compose の sibling コンテナは `http://drudge:7700/mcp` でアクセスします。）
 
