@@ -106,6 +106,8 @@ flowchart LR
 | `DRUDGE_LLM_MODEL` / `DRUDGE_EMBED_MODEL` | デフォルト `gemma4:12b` / `bge-m3` |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプション Slack assistant |
 
+> **埋め込みモデルを変えるとベクトルの次元が変わります。** 合成モデル（`DRUDGE_LLM_MODEL`）は自由に差し替えられますが、`DRUDGE_EMBED_MODEL` を変えるとサイズの異なるベクトルが出力されるため、`boring.json` の `embed_dim` を一致させ、**かつ** `make reset` を実行する必要があります — そうしないと旧形状のベクトルへの upsert が失敗します。よくある次元: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768。
+
 ---
 
 ## コマンド
@@ -226,6 +228,8 @@ curl -s -X POST http://localhost:7700/mcp \
 | ポート競合 | `lsof -i :7700 -i :5432 -i :11434` |
 | 2 回目の `make up` / 再クローン失敗 | まず `make down` を実行してください — コンテナ名が固定で `127.0.0.1:7700` / `:5432` にバインドするため、2 つ目のスタックが実行中のスタックと競合します |
 | agent が起動しない | `OMB_CORE_ONLY=1 make up` で core-only 実行。hermes イメージは別途ビルドが必要 |
+| Linux: コンテナがホストの Ollama に到達できない | Linux では Ollama がデフォルトで `127.0.0.1` にバインドするため、`host.docker.internal` が解決できてもコンテナは閉じたポートに当たります。Ollama を全インターフェースにバインドし（`OLLAMA_HOST=0.0.0.0:11434` の後に再起動）、かつ/または ホストのファイアウォールで docker ブリッジを許可してください |
+| 正常か？ / 最後の distill は通ったか？ | `make doctor` — ヘルス + 最終取り込みの簡易チェック |
 
 ---
 

@@ -19,8 +19,11 @@ die()  { printf '\033[1;31m✗ %s\033[0m\n' "$1" >&2; exit 1; }
 # 1) Prerequisites — fail fast with an actionable message (start.sh re-checks in depth).
 say "Checking prerequisites…"
 for c in git docker jq python3 curl; do
-  command -v "$c" >/dev/null 2>&1 || die "$c not found. Need: docker, jq, python3, git, curl (+ ollama or any OpenAI-compatible server)."
+  command -v "$c" >/dev/null 2>&1 || die "$c not found. Need: docker, jq, python3, git, curl, make (+ ollama or any OpenAI-compatible server)."
 done
+# `make up` (below) is this installer's entrypoint into the stack — catch a missing make here,
+# not with a cryptic 'make: command not found' right after this friendly check passes.
+command -v make >/dev/null 2>&1 || die "make not found — install it: macOS 'xcode-select --install' (or 'brew install make') · Debian/Ubuntu 'sudo apt-get install make' · Fedora 'sudo dnf install make'."
 docker info >/dev/null 2>&1 || die "Docker daemon not running — start Docker Desktop / dockerd, then re-run."
 command -v ollama >/dev/null 2>&1 || warn "ollama not on PATH — install from https://ollama.com, or set DRUDGE_LLM_BASE_URL to your own OpenAI-compatible endpoint in .env."
 

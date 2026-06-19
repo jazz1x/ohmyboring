@@ -255,9 +255,19 @@ fn set_relates_to(yaml: &str, links: &[String]) -> String {
     out.join("\n")
 }
 
+/// The shipped seed note. Its `relates_to` is tracked-as-empty so a public clone carries no ids;
+/// `project_links` must leave it alone (a graph projection would fill it with the user's PRIVATE note ids).
+const SEED_NOTE_STEM: &str = "wiki-0000";
+
+/// Whether a wiki note stem is the tracked seed note that `project_links` must skip. Pure.
+fn is_seed_note(stem: &str) -> bool {
+    stem == SEED_NOTE_STEM
+}
+
 /// Project the Postgres graph (`related_docs`) into each wiki note's `relates_to` wikilinks.
 /// Makes the Obsidian graph view draw the GraphRAG connections directly. Idempotent (recomputed and rewritten every time).
 /// Among related documents, only wiki notes in the same vault become `[[wiki-NNNN]]` (so Obsidian can resolve them).
+/// The shipped seed note (`wiki-0000`) is skipped so private note ids never leak into the public sample.
 pub async fn project_links(store: &Store, vault_root: &Path, limit: i64) -> Result<usize> {
     let wiki_dir = vault_root.join("wiki");
     let mut updated = 0;
@@ -265,15 +275,18 @@ pub async fn project_links(store: &Store, vault_root: &Path, limit: i64) -> Resu
         .with_context(|| format!("failed to read wiki dir: {}", wiki_dir.display()))?
     {
         let path = entry?.path();
-        let stem_ok = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("wiki-"));
+        let stem = path.file_stem().and_then(|s| s.to_str());
+        let stem_ok = stem.is_some_and(|n| n.starts_with("wiki-"));
         let ext_ok = path
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("md"));
         if !(stem_ok && ext_ok) {
+            continue;
+        }
+        // Never rewrite the tracked seed note: a graph projection would fill its
+        // shipped-empty relates_to with the user's PRIVATE note ids (id leak).
+        if stem.is_some_and(is_seed_note) {
             continue;
         }
         let content = std::fs::read_to_string(&path)?;
@@ -1181,8 +1194,8 @@ mod tests {
 
     use super::{
         Kind, Origin, Page, PageIdSchema, Schema, Severity, SourcesSchema, audit_pages,
-        extract_wikilinks, find_cross_layer_wikilinks, lint_page, normalize_body, parse_kind,
-        parse_origin, repair_note_frontmatter, sanitize_tag,
+        extract_wikilinks, find_cross_layer_wikilinks, is_seed_note, lint_page, normalize_body,
+        parse_kind, parse_origin, repair_note_frontmatter, sanitize_tag,
     };
     use serde_yaml::Value;
 
@@ -1336,6 +1349,18 @@ mod tests {
             sanitize_tag("-leading-trailing-").as_deref(),
             Some("leading-trailing")
         );
+    }
+
+    // ── is_seed_note (project_links must skip the tracked seed so private ids don't leak) ──
+
+    #[test]
+    fn seed_note_is_skipped_by_link_projection() {
+        // wiki-0000 ships with an empty relates_to; project_links must leave it untouched.
+        assert!(is_seed_note("wiki-0000"));
+        // every real note id is fair game for the graph projection
+        assert!(!is_seed_note("wiki-0042"));
+        assert!(!is_seed_note("wiki-00000"));
+        assert!(!is_seed_note("wiki-0000-draft"));
     }
 
     fn test_schema() -> Schema {

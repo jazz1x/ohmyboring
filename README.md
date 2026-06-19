@@ -106,6 +106,8 @@ Secrets and runtime switches live in **`.env`**:
 | `DRUDGE_LLM_MODEL` / `DRUDGE_EMBED_MODEL` | default `gemma4:12b` / `bge-m3` |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant |
 
+> **Swapping the embedding model changes the vector dimension.** The synthesis model (`DRUDGE_LLM_MODEL`) is free to swap, but a new `DRUDGE_EMBED_MODEL` emits vectors of a different size, so you must update `embed_dim` in `boring.json` to match **and** run `make reset` — otherwise upserts fail against the old-shaped vectors. Common dims: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
+
 ---
 
 ## Commands
@@ -226,6 +228,8 @@ It is configured per the hermes-agent project's **own docs** (out of scope here)
 | Port conflict | `lsof -i :7700 -i :5432 -i :11434` |
 | Second `make up` / re-clone fails | Run `make down` first — the containers use fixed names and bind `127.0.0.1:7700` / `:5432`, so a second stack collides with the running one |
 | Agent not starting | `OMB_CORE_ONLY=1 make up` runs core-only; hermes image must be built separately |
+| Linux: container can't reach host Ollama | On Linux, Ollama binds `127.0.0.1` by default, so the container hits a closed port even though `host.docker.internal` resolves. Bind Ollama to all interfaces (`OLLAMA_HOST=0.0.0.0:11434`, then restart it) and/or allow the docker bridge in the host firewall |
+| Healthy? / did the last distill land? | `make doctor` — quick health + last-ingest check |
 
 ---
 
