@@ -12,6 +12,13 @@
 **セルフホスティング型パーソナルメモリ RAG。** Claude Code のセッションがローカルで人が読める wiki に蒸留され、*"前これどうやったっけ？"* を呼び出して使います。**クラウド 0 · 100% ローカル。**
 
 ```bash
+# 最速 — ワンライナー: ~/oh-my-boring にクローン、ビルド、Claude Code フックまで連携。
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/install.sh)"
+```
+
+または手動で:
+
+```bash
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
