@@ -240,6 +240,12 @@ def _call_llm(prompt):
             # the object in prose/markdown fences or emit unparseable JSON. Body newlines then come back
             # as proper \n escapes that json.loads decodes to real line breaks (not literal backslash-n).
             "response_format": {"type": "json_object"},
+            # Disable the model's reasoning/thinking trace. gemma4:12b is a thinking variant — WITH it a
+            # full distill takes ~188-262s, which blows past the 120s urlopen timeout below → the call
+            # returns None and the session is SILENTLY dropped (no note). `reasoning_effort:"none"` is the
+            # OpenAI-standard knob Ollama /v1 honors (≈0.6s vs 8s; same knob drudge/src/llm.rs uses).
+            # Quality is unaffected — the reasoning lives in a separate field, never in the note body.
+            "reasoning_effort": "none",
         }
     ).encode("utf-8")
     req = urllib.request.Request(
