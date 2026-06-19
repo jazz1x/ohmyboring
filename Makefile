@@ -63,13 +63,13 @@ collect: ## Lazily collect past sessions (one at a time)   make collect [N=1]
 smoke: ## end-to-end smoke test
 	./scripts/smoke.sh
 
-guard: ## Structural gate (fmt+clippy+test)
+guard: ## Structural gate (fmt+clippy+test+py-compile)
 	./scripts/guard.sh
 
 deny: ## Supply-chain gate (cargo-deny: vulnerabilities, licenses, duplicate versions)
 	cd drudge && cargo deny check
 
-eval: ## Behavioral regression gate (run_eval --check, stack needed)
+eval: ## Behavioral regression gate (stack needed; no-op until the eval harness lands)
 	./scripts/eval-gate.sh
 
 psql: ## Connect directly to Postgres (inspect graph node/edge)

@@ -21,9 +21,10 @@ wiki and recalled on demand. Zero cloud, 100% local.
   cron-based backfill via `ingest-worker.py`, but the core loop works without it.
 
 ### Engine — `drudge` (Rust, edition 2024)
-- `serve`: HTTP daemon (`/health` `/ask` `/search` `/graph` `/audit` `/sync`)
-  + MCP-over-HTTP (`/mcp`: `recall` · `remember` · `sync` · `config_get` ·
-  `classify_repo`) + background scheduler.
+- `serve`: HTTP daemon (`/health` `/ask` `/brief` `/search` `/graph` `/audit` `/sync`)
+  + MCP-over-HTTP (`/mcp`, 10 tools: `recall` · `remember` · `sync` · `config_get` ·
+  `classify_repo` · `neighbors` · `corpus_status` · `claims` · `ask` · `brief`) +
+  background scheduler.
 - `remember`: agent/hook supplies a curated note; drudge deterministically writes
   it to `vault/wiki`, embeds, builds graph, recomputes relations.
 - `wiki_recall`: direct markdown recall (substring scoring; Korean-josa friendly),
