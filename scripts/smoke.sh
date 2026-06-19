@@ -1,15 +1,29 @@
 #!/bin/sh
 # Smoke test — adversarially verify the engine runs end-to-end (don't assume the happy path).
 #   make smoke   or   ./scripts/smoke.sh
-# Mode-aware: wiki-first is the default; vector/graph checks run only when DRUDGE_VECTOR=on.
+# Mode-aware: wiki-first is the default; vector/graph checks run only on a vector-mode stack.
+# Mode is detected from the RUNNING engine (not a possibly-unsourced env): /audit is
+# pgvector-only — it returns total_chunks on a vector backend and HTTP 500 in wiki mode.
+# An explicit DRUDGE_VECTOR (if exported) still forces the mode.
 # Note: /bin/sh (dash) has no pipefail → check each step's result explicitly.
 set -eu
 URL="${DRUDGE_URL:-http://localhost:7700}"
 fail() { echo "FAIL: $1"; exit 1; }
 
-case "$(printf '%s' "${DRUDGE_VECTOR:-off}" | tr '[:upper:]' '[:lower:]')" in
+# Resolve mode: honor an explicit DRUDGE_VECTOR, else ask the live engine.
+case "$(printf '%s' "${DRUDGE_VECTOR:-}" | tr '[:upper:]' '[:lower:]')" in
   on | 1 | true | yes) VEC=1 ;;
-  *) VEC=0 ;;
+  off | 0 | false | no) VEC=0 ;;
+  *)
+    # Unset/unknown → detect from reality: /audit returns total_chunks only on the
+    # vector backend (HTTP 500 in wiki mode). curl -f makes the 500 a non-zero exit.
+    if probe=$(curl -sf -m5 "$URL/audit" 2>/dev/null) \
+       && [ "$(printf '%s' "$probe" | jq -r 'has("total_chunks")')" = "true" ]; then
+      VEC=1
+    else
+      VEC=0
+    fi
+    ;;
 esac
 
 echo "1) containers…"
@@ -45,7 +59,7 @@ if [ "$VEC" = 1 ]; then
   [ "${n:-0}" -gt 0 ] || fail "0 graph neighbors (graph recall not working)"
   echo "   graph_neighbors=$n"
 else
-  echo "4) wiki mode — vector/graph checks skipped (set DRUDGE_VECTOR=on to test them)"
+  echo "4) wiki mode detected (/audit has no vector corpus) — vector/graph checks skipped"
 fi
 
 echo "OK: smoke passed — engine works end-to-end (adversarially verified)."
