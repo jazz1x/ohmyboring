@@ -236,6 +236,10 @@ def _call_llm(prompt):
             ],
             "temperature": 0.3,
             "stream": False,
+            # Force valid JSON (Ollama / OpenAI-compatible structured output) so the model can't wrap
+            # the object in prose/markdown fences or emit unparseable JSON. Body newlines then come back
+            # as proper \n escapes that json.loads decodes to real line breaks (not literal backslash-n).
+            "response_format": {"type": "json_object"},
         }
     ).encode("utf-8")
     req = urllib.request.Request(
@@ -319,12 +323,29 @@ def distill_and_remember(transcript_path, origin, repo):
     if len(text) > 12000:
         text = text[:5000] + "\n…(truncated)…\n" + text[-7000:]
 
-    parsed = _call_llm(_build_prompt(text, origin, repo))
+    prompt = _build_prompt(text, origin, repo)
+    parsed = _call_llm(prompt)
     if parsed is None:
         return False
     if parsed.get("skip"):
         print("[distill-session] LLM decided SKIP", file=sys.stderr)
         return True  # intentional skip → mark as done so we don't retry forever
+
+    # Language retry: note_lang=ko but the title came back with no Korean → the model ignored the
+    # language instruction (gemma is weak at language control). Re-ask ONCE with a corrective nudge;
+    # keep the retry only if it actually came back in Korean, else fall back to the original.
+    if NOTE_LANG == "ko" and parsed.get("title", "") and not re.search(r"[가-힣]", parsed["title"]):
+        retry = _call_llm(
+            prompt
+            + "\n\n=== CORRECTION ===\nYour previous output was in English — that is WRONG. Re-emit the "
+            "SAME JSON object but with title, body, tags, and concepts ALL in Korean (한국어). Keep code, "
+            "IDs, and proper nouns verbatim."
+        )
+        if retry and re.search(r"[가-힣]", retry.get("title", "")):
+            parsed = retry
+            print("[distill-session] language retry → Korean OK", file=sys.stderr)
+        else:
+            print("[distill-session] language retry failed — keeping original", file=sys.stderr)
 
     title = parsed.get("title", "").strip()
     body = parsed.get("body", "").strip()
