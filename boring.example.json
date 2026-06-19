@@ -6,7 +6,7 @@
   "embed_dim": 1024,
   "repos": [
     {"match": "your-company", "origin": "company", "name": "work"},
-    {"match": "jongyun/Development/mine", "origin": "personal", "name": "mine"}
+    {"match": "your-name/code", "origin": "personal", "name": "personal"}
   ],
   "agents": [
     {

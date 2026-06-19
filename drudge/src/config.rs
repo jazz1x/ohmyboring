@@ -444,7 +444,7 @@ mod tests {
             "schema_version": 1,
             "note_lang": "ko",
             "repos": [
-                {"match": "marketboro", "origin": "company", "name": "marketboro"}
+                {"match": "acme", "origin": "company", "name": "acme"}
             ],
             "agents": [
                 {"id": "claude-code", "enabled": true, "format": "claude-json", "paths": ["~/.claude/projects"]}
@@ -453,9 +453,9 @@ mod tests {
         let cfg = BoringConfig::from_str(raw).unwrap();
         assert_eq!(cfg.note_lang, NoteLang::Ko);
         assert_eq!(cfg.repos.len(), 1);
-        assert_eq!(cfg.repos[0].matcher, "marketboro");
+        assert_eq!(cfg.repos[0].matcher, "acme");
         assert_eq!(cfg.repos[0].origin, Origin::Company);
-        assert_eq!(cfg.repos[0].name, "marketboro");
+        assert_eq!(cfg.repos[0].name, "acme");
         assert_eq!(cfg.agents.len(), 1);
         assert!(cfg.agents[0].enabled);
     }
@@ -513,9 +513,9 @@ mod tests {
         let cfg = BoringConfig {
             repos: vec![
                 RepoRule {
-                    matcher: "marketboro".into(),
+                    matcher: "acme".into(),
                     origin: Origin::Company,
-                    name: "marketboro".into(),
+                    name: "acme".into(),
                 },
                 RepoRule {
                     matcher: "oh-my-boring".into(),
@@ -525,9 +525,9 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (origin, name) = cfg.classify("/Users/x/marketboro/oh-my-boring", None);
+        let (origin, name) = cfg.classify("/Users/x/acme/oh-my-boring", None);
         assert_eq!(origin, Origin::Company);
-        assert_eq!(name, Some("marketboro".to_owned()));
+        assert_eq!(name, Some("acme".to_owned()));
     }
 
     #[test]
