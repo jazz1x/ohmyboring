@@ -55,7 +55,7 @@ wiki and recalled on demand. Zero cloud, 100% local.
 
 ### Notes
 - Naming: engine = `drudge`, project/containers = `ohmyboring`/`boring-*`
-  (`omb` was rejected to avoid clashing with the marketboro `omb` CLI).
+  (`omb` was rejected to avoid clashing with an existing internal `omb` CLI).
 - READMEs in English (default), Korean, Japanese.
 
 [0.1.0]: https://github.com/jazz1x/ohmyboring/releases/tag/v0.1.0
