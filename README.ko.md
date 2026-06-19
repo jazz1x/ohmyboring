@@ -1,8 +1,8 @@
-# oh-my-boring
+# ohmyboring
 
 [English](README.md) · **한국어** · [日本語](README.ja.md)
 
-[![CI](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml)
+[![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
 ![version](https://img.shields.io/badge/version-0.1.0-blue)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
@@ -12,7 +12,7 @@
 **셀프호스팅 개인 메모리 RAG.** Claude Code 세션이 로컬의 사람이 읽는 위키로 증류돼 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클우드 0 · 100% 로컬.**
 
 ```bash
-git clone https://github.com/jazz1x/oh-my-boring.git ~/oh-my-boring
+git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
 make ask Q="docker build cache 문제 어떻게 고쳤더라?"
@@ -64,7 +64,7 @@ flowchart LR
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/jazz1x/oh-my-boring/main/boring.schema.json",
+  "$schema": "https://raw.githubusercontent.com/jazz1x/ohmyboring/main/boring.schema.json",
   "schema_version": 1,
   "note_lang": "auto",
   "repos": [

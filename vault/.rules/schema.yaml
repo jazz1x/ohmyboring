@@ -1,4 +1,4 @@
-# Schema — the page ID / sources / frontmatter schema for the oh-my-boring personal vault
+# Schema — the page ID / sources / frontmatter schema for the ohmyboring personal vault
 #
 # This file = the SSOT for machine parsing by bots/tools (read by drudge `vault lint`/`vault audit`).
 # The human-facing natural-language description is .rules/frontmatter.md. The two files must stay consistent.

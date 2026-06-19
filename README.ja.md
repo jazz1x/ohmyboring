@@ -1,8 +1,8 @@
-# oh-my-boring
+# ohmyboring
 
 [English](README.md) · [한국어](README.ko.md) · **日本語**
 
-[![CI](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/oh-my-boring/actions/workflows/ci.yml)
+[![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
 ![version](https://img.shields.io/badge/version-0.1.0-blue)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
@@ -12,7 +12,7 @@
 **セルフホスティング型パーソナルメモリ RAG。** Claude Code のセッションがローカルで人が読める wiki に蒸留され、*"前これどうやったっけ？"* を呼び出して使います。**クラウド 0 · 100% ローカル。**
 
 ```bash
-git clone https://github.com/jazz1x/oh-my-boring.git ~/oh-my-boring
+git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
 make ask Q="docker build cache の問題、どう直したっけ？"
@@ -64,7 +64,7 @@ flowchart LR
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/jazz1x/oh-my-boring/main/boring.schema.json",
+  "$schema": "https://raw.githubusercontent.com/jazz1x/ohmyboring/main/boring.schema.json",
   "schema_version": 1,
   "note_lang": "auto",
   "repos": [

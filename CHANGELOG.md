@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ## [0.1.0] — 2026-06-16
 
-First public cut of **oh-my-boring** — a self-hosted personal memory RAG. Your
+First public cut of **ohmyboring** — a self-hosted personal memory RAG. Your
 Claude Code work (or any markdown notes) is distilled into a local, human-readable
 wiki and recalled on demand. Zero cloud, 100% local.
 
@@ -54,8 +54,8 @@ wiki and recalled on demand. Zero cloud, 100% local.
 - Vault templates shipped (`boring.schema.json`, example note, sample `wiki-0000.md`).
 
 ### Notes
-- Naming: engine = `drudge`, project/containers = `oh-my-boring`/`boring-*`
+- Naming: engine = `drudge`, project/containers = `ohmyboring`/`boring-*`
   (`omb` was rejected to avoid clashing with the marketboro `omb` CLI).
 - READMEs in English (default), Korean, Japanese.
 
-[0.1.0]: https://github.com/jazz1x/oh-my-boring/releases/tag/v0.1.0
+[0.1.0]: https://github.com/jazz1x/ohmyboring/releases/tag/v0.1.0

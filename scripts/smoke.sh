@@ -40,7 +40,7 @@ echo "2) drudge /health…"
 
 echo "3) /ask (real answer expected; fallback/error fails)…"
 ans=$(curl -sf -m120 "$URL/ask" -H 'content-type: application/json' \
-  -d '{"question":"what is oh-my-boring?"}' | jq -r '.answer') || fail "/ask call failed"
+  -d '{"question":"what is ohmyboring?"}' | jq -r '.answer') || fail "/ask call failed"
 [ -n "$ans" ] && [ "$ans" != "null" ] || fail "empty ask response"
 echo "   → $(printf '%s' "$ans" | head -c 90)…"
 
@@ -55,7 +55,7 @@ if [ "$VEC" = 1 ]; then
 
   echo "5) /graph (CTE neighbors > 0)…"
   n=$(curl -sf -m90 "$URL/graph" -H 'content-type: application/json' \
-    -d '{"query":"oh-my-boring"}' | jq -r '.graph_neighbors | length') || fail "/graph call failed"
+    -d '{"query":"ohmyboring"}' | jq -r '.graph_neighbors | length') || fail "/graph call failed"
   [ "${n:-0}" -gt 0 ] || fail "0 graph neighbors (graph recall not working)"
   echo "   graph_neighbors=$n"
 else

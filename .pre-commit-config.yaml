@@ -1,4 +1,4 @@
-# oh-my-boring pre-commit — 커밋 전 fast 게이트(~수초). CI 의 앞단 방어.
+# ohmyboring pre-commit — 커밋 전 fast 게이트(~수초). CI 의 앞단 방어.
 # 설치: pre-commit install   (요건: pre-commit, cargo+clippy+rustfmt)
 # clippy/fmt/test = 구조 게이트(== scripts/guard.sh == CI rust-gate). cargo-deny(공급망)는 무거워 CI 전용.
 default_install_hook_types: [pre-commit]

@@ -1,4 +1,4 @@
-//! oh-my-boring personal RAG — Rust (pgvector: vector + node/edge graph + recursive CTE + audit).
+//! ohmyboring personal RAG — Rust (pgvector: vector + node/edge graph + recursive CTE + audit).
 //! First milestone: embed → store → vector search round-trip proof (selftest).
 mod ask;
 mod audit;
@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "drudge",
-    about = "oh-my-boring personal RAG (Rust, pgvector + graph CTE)"
+    about = "ohmyboring personal RAG (Rust, pgvector + graph CTE)"
 )]
 struct Cli {
     #[command(subcommand)]
