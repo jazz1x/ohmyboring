@@ -31,6 +31,7 @@ pub struct Stats {
     pub unchanged: usize,
     pub deleted: usize,
     pub skipped: usize,
+    pub failed: usize, // notes that errored on parse/ingest and were skipped (resilient sync, not aborted)
     pub chunks: usize,
     // deterministic graph (from frontmatter)
     pub tools: usize,
@@ -282,7 +283,13 @@ pub async fn run(
             let pstr = entry.path().to_string_lossy().into_owned();
             stats.scanned += 1;
             seen.insert(pstr.clone());
-            ingest_file(store, llm, cfg, &pstr, &mut stats).await?;
+            // Resilient-by-default: one malformed note (e.g. an unquoted YAML-special title that parses as
+            // a sequence) must NOT abort the whole re-ingest. Skip + log it so the rest of the corpus still
+            // syncs; the bad note keeps its last-good state on disk for a later repair pass.
+            if let Err(e) = ingest_file(store, llm, cfg, &pstr, &mut stats).await {
+                eprintln!("[ingest] skipped malformed note {pstr}: {e:#}");
+                stats.failed += 1;
+            }
         }
     }
 
