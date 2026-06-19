@@ -363,6 +363,37 @@ impl Store {
             .collect())
     }
 
+    /// Documents semantically nearest to `source_path` by chunk-embedding cosine — the MEANING-based
+    /// complement to `related_docs`. `related_docs` only links docs sharing >=2 EXACT concept/tool slugs,
+    /// so it misses notes about the same thing in DIFFERENT words (and older / cross-project notes). For
+    /// each other doc this takes its single closest chunk to any of this doc's chunks, keeps docs within
+    /// `max_dist` (pgvector cosine DISTANCE = 1 - cosine_sim), and returns the nearest `limit`, first.
+    pub async fn semantic_related_docs(
+        &self,
+        source_path: &str,
+        limit: i64,
+        max_dist: f64,
+    ) -> Result<Vec<String>> {
+        let rows = self
+            .db
+            .query(
+                "WITH src AS (
+                     SELECT embedding FROM chunk WHERE source_path = $1 AND embedding IS NOT NULL
+                 )
+                 SELECT c.source_path, MIN(c.embedding <=> s.embedding)::float8 AS dist
+                 FROM chunk c, src s
+                 WHERE c.source_path <> $1 AND c.embedding IS NOT NULL
+                 GROUP BY c.source_path
+                 HAVING MIN(c.embedding <=> s.embedding) <= $2
+                 ORDER BY dist ASC
+                 LIMIT $3;",
+                &[&source_path, &max_dist, &limit],
+            )
+            .await
+            .context("semantic related docs")?;
+        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+    }
+
     /// GraphRAG retrieval: the body of the top-N connected documents that **share a concrete concept/tool** with a document.
     /// Surfaces, via the graph (concept links), the right answer that the vector buried in noise. project/topic excluded.
     pub async fn related_doc_content(
