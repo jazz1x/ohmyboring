@@ -12,6 +12,13 @@
 **Self-hosted personal memory RAG.** Your Claude Code sessions are distilled into a local, human-readable wiki and recalled on demand — *"how did I do this last time?"* **Zero cloud · 100% local.**
 
 ```bash
+# Fastest — one-liner: clones to ~/oh-my-boring, builds, wires the Claude Code hooks.
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/install.sh)"
+```
+
+Or step by step:
+
+```bash
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up

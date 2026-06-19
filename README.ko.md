@@ -9,7 +9,14 @@
 ![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
 ![gemma4](https://img.shields.io/badge/LLM-gemma4:12b-000?logo=ollama)
 
-**셀프호스팅 개인 메모리 RAG.** Claude Code 세션이 로컬의 사람이 읽는 위키로 증류돼 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클우드 0 · 100% 로컬.**
+**셀프호스팅 개인 메모리 RAG.** Claude Code 세션이 로컬의 사람이 읽는 위키로 증류돼 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클라우드 0 · 100% 로컬.**
+
+```bash
+# 가장 빠름 — 원라이너: ~/oh-my-boring에 클론, 빌드, Claude Code 훅까지 연결.
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/install.sh)"
+```
+
+또는 단계별로:
 
 ```bash
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
