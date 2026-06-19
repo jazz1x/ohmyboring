@@ -5,7 +5,7 @@
   "embed_model": "bge-m3",
   "embed_dim": 1024,
   "repos": [
-    {"match": "marketboro", "origin": "company", "name": "marketboro"},
+    {"match": "your-company", "origin": "company", "name": "work"},
     {"match": "jongyun/Development/mine", "origin": "personal", "name": "mine"}
   ],
   "agents": [

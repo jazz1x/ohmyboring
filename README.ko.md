@@ -18,7 +18,7 @@ make up
 make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 ```
 
-> **Docker**, **Ollama**(또는 OpenAI-compatible 서버), **Python 3**, **jq**가 필요합니다.
+> **Docker**, **Ollama**(또는 OpenAI-compatible 서버), **Python 3**, **jq**, **curl**가 필요합니다.
 
 ---
 
@@ -65,12 +65,15 @@ flowchart LR
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/jazz1x/oh-my-boring/main/boring.schema.json",
+  "schema_version": 1,
   "note_lang": "auto",
   "repos": [
-    {"match": "marketboro", "origin": "company", "name": "marketboro"},
-    {"match": "jongyun/Development/mine", "origin": "personal", "name": "mine"}
+    {"match": "your-company", "origin": "company", "name": "your-company"},
+    {"match": "~/code", "origin": "personal", "name": "mine"}
   ],
-  "agents": ["claude-code"]
+  "agents": [
+    {"id": "claude-code", "enabled": true, "format": "claude-json", "paths": ["~/.claude/projects"]}
+  ]
 }
 ```
 
@@ -85,7 +88,7 @@ flowchart LR
 | Variable | 용도 |
 |---|---|
 | `DRUDGE_VECTOR` | `on` 시 pgvector 활성화(선택) |
-| `DRUDGE_LLM_BASE_URL` | OpenAI-compatible endpoint, 기본 `http://localhost:11434/v1` |
+| `DRUDGE_LLM_BASE_URL` | OpenAI-compatible endpoint, Docker 기본값 `http://host.docker.internal:11434/v1` · Native 모드는 `http://localhost:11434/v1` |
 | `DRUDGE_LLM_MODEL` / `DRUDGE_EMBED_MODEL` | 기본 `gemma4:12b` / `bge-m3` |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack assistant |
 
@@ -100,7 +103,7 @@ flowchart LR
 | `make ask Q="..."` | recall + 요약 한 번에 |
 | `make sync` | vault 재적재 |
 | `make remember M="text"` | 한 줄 노트 작성 |
-| `make collect [N=3]` | 과거 세션 lazy 백필 |
+| `make collect [N=1]` | 과거 세션 lazy 백필 |
 | `make hermes-build` | 선택적 hermes-agent 이미지 클론/빌드 |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | drudge 로그 |
@@ -134,16 +137,17 @@ flowchart LR
 
 ### 다른 에이전트
 
-MCP를 지원하는 어떤 에이전트도 drudge를 사용할 수 있습니다. MCP server 등록:
+MCP를 지원하는 어떤 에이전트도 drudge를 사용할 수 있습니다. 이 repo는 Claude Code, Cursor, Windsurf, Claude Desktop이 모두 읽는 표준 **`.mcp.json`**(root key `mcpServers`)을 제공합니다:
 
-```yaml
-mcp_servers:
-  drudge:
-    url: http://drudge:7700/mcp
-    transport: http
+```json
+{ "mcpServers": { "drudge": { "type": "http", "url": "http://localhost:7700/mcp" } } }
 ```
 
-사용 가능한 tools: `recall` · `remember` · `sync` · `config_get` · `classify_repo`.
+(VS Code Copilot은 root key `servers`를 쓰는 `.vscode/mcp.json`을 사용합니다. CLI 대안: `claude mcp add --transport http --scope project drudge http://localhost:7700/mcp`. compose sibling 컨테이너는 `http://drudge:7700/mcp`로 접근합니다.)
+
+사용 가능한 tools (10개): `recall` · `neighbors` · `claims`(검색) · `ask` · `brief`(생성 — LLM 실행) · `corpus_status` · `config_get`(introspection) · `remember` · `classify_repo` · `sync`(쓰기 / 유지보수).
+
+기본 wiki-first 모드(`DRUDGE_VECTOR=off`)에서는 네 개 tool이 pgvector 백엔드를 필요로 하며, `DRUDGE_VECTOR=on`을 설정하기 전까지 JSON-RPC `-32603`을 반환합니다: `neighbors`, `claims`, `corpus_status`, `brief`. 나머지 여섯 개(`recall`, `ask`, `remember`, `sync`, `config_get`, `classify_repo`)는 `vault/wiki`를 직접 사용합니다.
 
 MCP 호출 예시 (HTTP 위의 raw JSON-RPC):
 
@@ -176,7 +180,9 @@ curl -s -X POST http://localhost:7700/mcp \
 | Mode | 방법 |
 |---|---|
 | **Docker** (기본) | `make up` |
-| **Native** | `cd drudge && cargo run --release -- serve` |
+| **Native** | `cd drudge && DRUDGE_VAULT_DIR="$PWD/../vault" DRUDGE_HTTP_ADDR=127.0.0.1:7700 cargo run --release -- serve` |
+
+> Native `serve`는 `DRUDGE_VAULT_DIR`가 필요합니다 — 없으면 `remember`가 `DRUDGE_VAULT_DIR not set`으로 실패합니다. 또한 기본값으로 `0.0.0.0:7700`에 바인딩하므로, loopback으로만 열려면 `DRUDGE_HTTP_ADDR=127.0.0.1:7700`을 설정하세요.
 
 ---
 
@@ -194,7 +200,8 @@ curl -s -X POST http://localhost:7700/mcp \
 | 증상 | 해결 |
 |---|---|
 | `make up` 실패 | Ollama 확인: `curl -sf http://127.0.0.1:11434/api/tags` |
-| 포트 충돌 | `lsof -i :7700 :5432 :11434` |
+| 포트 충돌 | `lsof -i :7700 -i :5432 -i :11434` |
+| 두 번째 `make up` / 재클론 실패 | 먼저 `make down`을 실행하세요 — 컨테이너 이름이 고정이고 `127.0.0.1:7700` / `:5432`에 바인딩하므로, 두 번째 스택이 실행 중인 스택과 충돌합니다 |
 | agent 시작 안 됨 | `OMB_CORE_ONLY=1 make up`로 core-only 실행. hermes 이미지는 별도 빌드 필요 |
 
 ---

@@ -36,9 +36,9 @@ add_rule() {
 }
 
 IFS=':' read -ra COMPANY_TOKENS <<< "${DRUDGE_COMPANY_SUBSTR:-}"
-for tok in "${COMPANY_TOKENS[@]}"; do add_rule "$tok"; done
+for tok in "${COMPANY_TOKENS[@]:-}"; do add_rule "$tok"; done
 IFS=':' read -ra DISTILL_TOKENS <<< "${DISTILL_COMPANY_CWD:-}"
-for tok in "${DISTILL_TOKENS[@]}"; do add_rule "$tok"; done
+for tok in "${DISTILL_TOKENS[@]:-}"; do add_rule "$tok"; done
 
 # Build agent source dirs from deprecated DRUDGE_SOURCE_DIRS.
 SRC_DIRS=()

@@ -6,6 +6,10 @@
 set -eu
 
 HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
+# host.docker.internal resolves only inside containers; from the host it must be
+# localhost, or this host-side reachability check fails even when Ollama is healthy.
+# POSIX sh (dash) has no ${HOST/a/b} substitution, so rewrite via sed.
+HOST=$(printf '%s' "$HOST" | sed 's#host\.docker\.internal#localhost#')
 
 is_running() {
     curl -sf "${HOST}/api/tags" >/dev/null 2>&1

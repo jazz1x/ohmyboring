@@ -702,7 +702,9 @@ struct RememberNote {
 }
 
 /// Parse + normalize the `remember` arguments into a typed note. The deterministic boundary: sanitize tags,
-/// fold the repo slug into project + a `repo/<slug>` tag, scrub secrets from the body (git leak boundary).
+/// fold the repo slug into project + a `repo/<slug>` tag, scrub secrets from EVERY field rendered into the
+/// tracked vault note (the git leak boundary): the body, the title, each tool/concept, and every claim
+/// field — not just the body, since `render_wiki_note` writes them all verbatim.
 fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, String)> {
     let get_str = |k: &str| {
         args.and_then(|a| a.get(k))
@@ -726,13 +728,24 @@ fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, Strin
     };
 
     let title = get_str("title");
-    let body = get_str("body");
+    // Decode LLM JSON-string escapes (literal \n, stray \`/\#/\") at the deterministic boundary,
+    // so every writer (hook, hermes cron, direct MCP) yields real markdown — not just the one adapter
+    // that happened to patch it. SSOT for note-body normalization lives in vault::normalize_body.
+    let body = vault::normalize_body(&get_str("body"));
     if title.is_empty() {
         return Err((-32602, "missing argument: title".to_owned()));
     }
     if body.is_empty() {
         return Err((-32602, "missing argument: body".to_owned()));
     }
+
+    // Secret scrub at the git boundary (the one leak boundary into the tracked vault). Compile the regex
+    // ONCE and apply it to every field render_wiki_note writes verbatim — not just the body. `‹REDACTED›`
+    // is non-empty, so scrubbing never re-introduces an empty value (the title/body checks above hold).
+    let re = redact::build_secret_re().map_err(|e| (-32603_i32, format!("secret regex: {e:#}")))?;
+    let scrub = |s: &str| redact::redact(&re, s);
+    let title = scrub(&title);
+    let body = scrub(&body);
 
     // origin: parsed at the boundary — absent → default personal, present-but-invalid → reject
     // (parse-don't-validate; shared `config::Origin` parse, no silent coercion to personal on a typo).
@@ -760,16 +773,21 @@ fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, Strin
         tags.insert(0, format!("repo/{r}"));
     }
 
-    // claims: (subject,predicate,value) triples.
+    // claims: (subject,predicate,value) triples — scrub each field (all three land in the vault note).
     let claims: Vec<Claim> = args
         .and_then(|a| a.get("claims"))
         .and_then(Value::as_array)
-        .map(|v| v.iter().filter_map(parse_claim).collect())
+        .map(|v| {
+            v.iter()
+                .filter_map(parse_claim)
+                .map(|c| Claim {
+                    subject: scrub(&c.subject),
+                    predicate: scrub(&c.predicate),
+                    value: scrub(&c.value),
+                })
+                .collect()
+        })
         .unwrap_or_default();
-
-    // secret scrub at the git boundary (the one leak boundary into the tracked vault).
-    let re = redact::build_secret_re().map_err(|e| (-32603_i32, format!("secret regex: {e:#}")))?;
-    let body = redact::redact(&re, &body);
 
     let front = FrontMatter {
         origin,
@@ -779,8 +797,8 @@ fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, Strin
         source_path: String::new(), // filled by caller after id allocation
         title: Some(title),
         tags,
-        tools: get_arr("tools"),
-        concepts: get_arr("concepts"),
+        tools: get_arr("tools").iter().map(|t| scrub(t)).collect(),
+        concepts: get_arr("concepts").iter().map(|c| scrub(c)).collect(),
         claims,
     };
     Ok(RememberNote { front, body })
@@ -998,4 +1016,49 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
     axum::serve(listener, router)
         .await
         .map_err(|e| anyhow::anyhow!("axum serve: {e}"))
+}
+
+// ─────────────────────────────────────────────────────────────
+// Unit tests (pure parse-boundary tests — no I/O, no network)
+// ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::parse_remember_note;
+    use serde_json::json;
+
+    // The secret scrub must cover EVERY field render_wiki_note writes verbatim into the tracked vault —
+    // a token pasted into the title or a claim value would otherwise leak into git just like one in the body.
+    #[test]
+    fn parse_remember_scrubs_secrets_in_title_and_claim_value() {
+        let slack = "xoxb-1234567890abcdef"; // matches the xoxb- token format
+        let anthropic = "sk-ant-abcdefghij1234567890XYZ"; // matches the sk-ant- key format
+        let args = json!({
+            "title": format!("leaked {slack} in the title"),
+            "body": "an ordinary problem-solving note body",
+            "claims": [
+                {"subject": "deploy key", "predicate": "is", "value": format!("secret {anthropic} value")}
+            ]
+        });
+        let note = parse_remember_note(Some(&args)).unwrap();
+
+        let title = note.front.title.as_deref().unwrap();
+        assert!(
+            !title.contains(slack),
+            "secret leaked through the title: {title}"
+        );
+        assert!(title.contains("‹REDACTED›"), "title not scrubbed: {title}");
+
+        let claim_value = &note.front.claims[0].value;
+        assert!(
+            !claim_value.contains(anthropic),
+            "secret leaked through a claim value: {claim_value}"
+        );
+        assert!(
+            claim_value.contains("‹REDACTED›"),
+            "claim value not scrubbed: {claim_value}"
+        );
+    }
 }

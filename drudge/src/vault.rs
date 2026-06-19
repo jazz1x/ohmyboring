@@ -963,6 +963,38 @@ pub fn sanitize_tag(raw: &str) -> Option<String> {
     Some(trimmed)
 }
 
+/// Decode an LLM-produced note body into clean markdown — the SSOT normalization at the write gate.
+/// Local models (e.g. gemma) sometimes emit JSON-string-escaped text: the two characters backslash-n
+/// instead of a real line break, and stray backslash-escapes before markdown punctuation (`` \` ``,
+/// `\#`, `\"`). Decoding HERE means every writer — the SessionEnd hook, the hermes cron agent, a direct
+/// MCP `remember`, `make remember` — stores real markdown, instead of relying on one adapter's
+/// best-effort patch (the duplication that kept regressing). Unknown escapes are kept verbatim so a
+/// genuine backslash (a path, a regex) is never harmed.
+pub fn normalize_body(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            // stray markdown-punctuation escapes the model over-emits → restore the literal char
+            Some(p @ ('`' | '#' | '"' | '*' | '_' | '[' | ']' | '(' | ')' | '\\')) => out.push(p),
+            // unknown escape → keep both chars verbatim (don't harm real backslashes)
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out.trim().to_owned()
+}
+
 /// Scan vault/wiki for the highest `wiki-NNNN` id and return the next one (`wiki-{:04}`). Read-only IO.
 pub fn next_wiki_id(wiki_dir: &Path) -> Result<String> {
     let mut max_id: u32 = 0;
@@ -1069,10 +1101,49 @@ mod tests {
 
     use super::{
         Kind, Origin, Page, PageIdSchema, Schema, Severity, SourcesSchema, audit_pages,
-        extract_wikilinks, find_cross_layer_wikilinks, lint_page, parse_kind, parse_origin,
-        sanitize_tag,
+        extract_wikilinks, find_cross_layer_wikilinks, lint_page, normalize_body, parse_kind,
+        parse_origin, sanitize_tag,
     };
     use serde_yaml::Value;
+
+    // ── normalize_body (LLM JSON-escape decode at the write gate) ──
+
+    #[test]
+    fn normalize_body_decodes_literal_newline() {
+        // gemma emits the two characters backslash-n instead of a real break → run-on blob (wiki-0142)
+        assert_eq!(
+            normalize_body("### A\\n1. x\\n\\n### B"),
+            "### A\n1. x\n\n### B"
+        );
+    }
+
+    #[test]
+    fn normalize_body_unescapes_stray_markdown_punctuation() {
+        // over-escaped backtick/hash/quote the model adds inside its JSON string (wiki-0142)
+        assert_eq!(
+            normalize_body("use \\`corpus_status\\`"),
+            "use `corpus_status`"
+        );
+        assert_eq!(
+            normalize_body("fix \\#59 \\\"claim\\\""),
+            "fix #59 \"claim\""
+        );
+    }
+
+    #[test]
+    fn normalize_body_keeps_genuine_backslashes() {
+        // unknown escapes (a Windows path, a regex) must pass through untouched
+        assert_eq!(
+            normalize_body("path C:\\Users and re \\d+"),
+            "path C:\\Users and re \\d+"
+        );
+    }
+
+    #[test]
+    fn normalize_body_leaves_clean_markdown_unchanged() {
+        let clean = "## 배경\n결정함.\n\n## 결과\n- 끝";
+        assert_eq!(normalize_body(clean), clean);
+    }
 
     // ── sanitize_tag (Obsidian-safe normalization) ──
 

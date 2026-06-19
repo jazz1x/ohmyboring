@@ -11,6 +11,11 @@ chmod 600 .env 2>/dev/null || true
 chmod 644 boring.json 2>/dev/null || true
 # Source .env so that variables like DRUDGE_VECTOR are visible to this script.
 set -a; . .env; set +a
+
+# Fail fast if a required host tool is missing — BEFORE pulling GBs of models or
+# starting docker compose, so the user gets a clear hint instead of a cryptic exit 127.
+./scripts/preflight-deps.sh
+
 LLM="${DRUDGE_LLM_MODEL:-gemma4:12b}"
 EMB="${DRUDGE_EMBED_MODEL:-bge-m3}"
 OLLAMA_LOCAL="${OLLAMA_HOST:-http://host.docker.internal:11434}"
