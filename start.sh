@@ -21,18 +21,36 @@ EMB="${DRUDGE_EMBED_MODEL:-bge-m3}"
 OLLAMA_LOCAL="${OLLAMA_HOST:-http://host.docker.internal:11434}"
 OLLAMA_LOCAL="${OLLAMA_LOCAL/host.docker.internal/localhost}"
 
-echo "▶ Ensuring Ollama is running …"
-./scripts/ensure-ollama.sh
-echo "  ✓ Ollama OK"
+# The Ollama bootstrap (host check + `ollama pull`) only makes sense when the LLM endpoint
+# IS a local Ollama. README/.env advertise any OpenAI-compatible server, so when
+# DRUDGE_LLM_BASE_URL points elsewhere (a remote/other provider) we skip it. Mirror the
+# docker-compose default so an unset value stays local (host.docker.internal = the host's Ollama).
+LLM_URL="${DRUDGE_LLM_BASE_URL:-http://host.docker.internal:11434/v1}"
+LLM_HOST="${LLM_URL#*://}"   # strip scheme
+LLM_HOST="${LLM_HOST#*@}"    # strip any user:pass@
+LLM_HOST="${LLM_HOST%%/*}"   # strip path
+LLM_HOST="${LLM_HOST%%:*}"   # strip port
+case "$LLM_HOST" in
+  localhost | 127.0.0.1 | host.docker.internal) LLM_IS_LOCAL=1 ;;
+  *) LLM_IS_LOCAL="" ;;
+esac
 
-for m in "$LLM" "$EMB"; do
-  # Match the exact tag (Ollama implies :latest for a bare name). Matching only the family
-  # prefix would wrongly skip the pull when a different tag of the same family is present.
-  case "$m" in *:*) want="$m" ;; *) want="$m:latest" ;; esac
-  if ! curl -sf "${OLLAMA_LOCAL}/api/tags" | grep -q "\"${want}\""; then
-    echo "▶ Pulling model: $m (several GB)"; ollama pull "$m"
-  fi
-done
+if [ -n "$LLM_IS_LOCAL" ]; then
+  echo "▶ Ensuring Ollama is running …"
+  ./scripts/ensure-ollama.sh
+  echo "  ✓ Ollama OK"
+
+  for m in "$LLM" "$EMB"; do
+    # Match the exact tag (Ollama implies :latest for a bare name). Matching only the family
+    # prefix would wrongly skip the pull when a different tag of the same family is present.
+    case "$m" in *:*) want="$m" ;; *) want="$m:latest" ;; esac
+    if ! curl -sf "${OLLAMA_LOCAL}/api/tags" | grep -q "\"${want}\""; then
+      echo "▶ Pulling model: $m (several GB)"; ollama pull "$m"
+    fi
+  done
+else
+  echo "ⓘ DRUDGE_LLM_BASE_URL points to a remote endpoint (${LLM_HOST}) — skipping Ollama bootstrap and model pulls."
+fi
 
 # hermes-agent (the brain) is part of the default stack, but its image isn't in this repo
 # (external Nous Hermes Agent build). If it's missing we fall back to CORE-ONLY (drudge,

@@ -30,4 +30,9 @@ command -v curl >/dev/null 2>&1 || missing "curl" \
 command -v python3 >/dev/null 2>&1 || missing "python3" \
     "Install Python 3: macOS 'brew install python3' · Debian/Ubuntu 'sudo apt-get install python3' · Fedora 'sudo dnf install python3' · https://www.python.org/downloads/"
 
-echo "✓ Dependencies OK (docker + daemon, jq, curl, python3)"
+# `make` drives the whole stack (make up → start.sh → this script); a fresh box without it
+# otherwise dies with a cryptic 'make: command not found' before any of these checks run.
+command -v make >/dev/null 2>&1 || missing "make" \
+    "Install make: macOS 'xcode-select --install' (or 'brew install make') · Debian/Ubuntu 'sudo apt-get install make' · Fedora 'sudo dnf install make'"
+
+echo "✓ Dependencies OK (docker + daemon, jq, curl, python3, make)"
