@@ -39,6 +39,12 @@ Optional **pgvector** accelerator (`DRUDGE_VECTOR=on`) adds similarity search + 
 
 ---
 
+## Viewing your memory
+
+The notes are just markdown, so **open the `vault/` folder as an [Obsidian](https://obsidian.md) vault** — graph view, backlinks, tags, and full-text search come for free. The compiled notes already carry Obsidian-safe `tags` and `[[wiki-NNNN]]` `relates_to` links, so the graph view draws your memory's connections directly (richest with `DRUDGE_VECTOR=on`, which projects the GraphRAG graph into those links). No custom UI to build. Obsidian's own `.obsidian/` workspace folder is gitignored, so your layout stays local and never leaks into git.
+
+---
+
 ## Architecture
 
 ```mermaid
@@ -186,6 +192,8 @@ curl -s -X POST http://localhost:7700/mcp \
 ### Optional: hermes-agent
 
 [hermes-agent](https://hermes-agent.org) is a third-party autonomous supervisor. It can drive Slack, orchestration, and cron-based backfill through drudge's MCP backend. Build the image separately; `make up` picks it up automatically if it exists.
+
+It is configured per the hermes-agent project's **own docs** (out of scope here) — point its `~/.hermes/config.yaml` at drudge's MCP (`http://drudge:7700/mcp`). What ohmyboring ships wires it up as the Slack assistant; to use it for anything beyond that, build or modify the image yourself.
 
 ---
 

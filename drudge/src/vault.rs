@@ -1012,13 +1012,44 @@ pub fn sanitize_tag(raw: &str) -> Option<String> {
     Some(trimmed)
 }
 
+/// True if `line` is an ATX markdown heading (`#`..`######` then a space, e.g. `## 남은 일`). Pure.
+/// Requires the space so a `#tag` / `#59` reference (which is body content, not a section header) is
+/// never mistaken for a heading.
+fn is_atx_heading(line: &str) -> bool {
+    let hashes = line.chars().take_while(|&c| c == '#').count();
+    (1..=6).contains(&hashes) && line[hashes..].starts_with(' ')
+}
+
+/// Drop a trailing heading that has no content beneath it (pure). The remember prompt says omit a
+/// section when it has nothing, but gemma sometimes still emits the bare header (e.g. a final
+/// `## 남은 일` with no body under it, wiki-class). Strip from the end: while the last non-blank line
+/// is an ATX heading, remove it (and the blank lines that follow). Loops so two stacked empty sections
+/// (`## A` then an empty `## B`) both go. A heading WITH content beneath it is kept untouched.
+fn strip_trailing_empty_heading(body: &str) -> String {
+    let mut lines: Vec<&str> = body.lines().collect();
+    loop {
+        // peel trailing blank lines so the empty section's own blank padding doesn't count as "content"
+        while lines.last().is_some_and(|l| l.trim().is_empty()) {
+            lines.pop();
+        }
+        match lines.last() {
+            Some(last) if is_atx_heading(last.trim_start()) => {
+                lines.pop();
+            }
+            _ => break,
+        }
+    }
+    lines.join("\n")
+}
+
 /// Decode an LLM-produced note body into clean markdown — the SSOT normalization at the write gate.
 /// Local models (e.g. gemma) sometimes emit JSON-string-escaped text: the two characters backslash-n
 /// instead of a real line break, and stray backslash-escapes before markdown punctuation (`` \` ``,
 /// `\#`, `\"`). Decoding HERE means every writer — the SessionEnd hook, the hermes cron agent, a direct
 /// MCP `remember`, `make remember` — stores real markdown, instead of relying on one adapter's
 /// best-effort patch (the duplication that kept regressing). Unknown escapes are kept verbatim so a
-/// genuine backslash (a path, a regex) is never harmed.
+/// genuine backslash (a path, a regex) is never harmed. Finally, a trailing empty section header the
+/// model left behind (the omit-if-none case gemma misses) is stripped — same SSOT, every writer.
 pub fn normalize_body(body: &str) -> String {
     let mut out = String::with_capacity(body.len());
     let mut chars = body.chars();
@@ -1041,7 +1072,7 @@ pub fn normalize_body(body: &str) -> String {
             None => out.push('\\'),
         }
     }
-    out.trim().to_owned()
+    strip_trailing_empty_heading(out.trim()).trim().to_owned()
 }
 
 /// Scan vault/wiki for the highest `wiki-NNNN` id and return the next one (`wiki-{:04}`). Read-only IO.
@@ -1159,10 +1190,11 @@ mod tests {
 
     #[test]
     fn normalize_body_decodes_literal_newline() {
-        // gemma emits the two characters backslash-n instead of a real break → run-on blob (wiki-0142)
+        // gemma emits the two characters backslash-n instead of a real break → run-on blob (wiki-0142).
+        // (`### B` carries a content line so the trailing-empty-heading strip leaves the structure intact.)
         assert_eq!(
-            normalize_body("### A\\n1. x\\n\\n### B"),
-            "### A\n1. x\n\n### B"
+            normalize_body("### A\\n1. x\\n\\n### B\\n2. y"),
+            "### A\n1. x\n\n### B\n2. y"
         );
     }
 
@@ -1192,6 +1224,51 @@ mod tests {
     fn normalize_body_leaves_clean_markdown_unchanged() {
         let clean = "## 배경\n결정함.\n\n## 결과\n- 끝";
         assert_eq!(normalize_body(clean), clean);
+    }
+
+    // ── strip_trailing_empty_heading (the omit-if-none section gemma still emits) ──
+
+    #[test]
+    fn normalize_body_strips_bare_trailing_heading() {
+        // gemma left a final `## 남은 일` with nothing under it (prompt says omit if none)
+        assert_eq!(
+            normalize_body("## 배경\n결정함.\n\n## 남은 일\n"),
+            "## 배경\n결정함."
+        );
+    }
+
+    #[test]
+    fn normalize_body_strips_stacked_empty_trailing_headings() {
+        // two stacked empty sections at the end → both go; the section WITH content stays
+        assert_eq!(
+            normalize_body("## 결과\n- 끝\n\n## 남은 일\n\n## 다음 단계\n"),
+            "## 결과\n- 끝"
+        );
+    }
+
+    #[test]
+    fn normalize_body_keeps_heading_with_content() {
+        // a trailing heading that DOES have a body line must be preserved
+        let kept = "## 배경\n결정함.\n\n## 남은 일\n- 후속 PR";
+        assert_eq!(normalize_body(kept), kept);
+    }
+
+    #[test]
+    fn normalize_body_keeps_hashtag_reference() {
+        // `#59` / `#tag` (no space after #) is body content, not a section header — never stripped
+        assert_eq!(
+            normalize_body("작업 요약.\n\n관련 #59"),
+            "작업 요약.\n\n관련 #59"
+        );
+    }
+
+    #[test]
+    fn normalize_body_strips_trailing_heading_after_escape_decode() {
+        // the literal-\n decode runs first, THEN the trailing empty header is stripped (one SSOT pass)
+        assert_eq!(
+            normalize_body("## 배경\\n결정함.\\n\\n## 남은 일"),
+            "## 배경\n결정함."
+        );
     }
 
     // ── repair_note_frontmatter (autonomous post-correction of malformed scalars) ──
