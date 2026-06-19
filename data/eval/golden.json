@@ -1,0 +1,29 @@
+{
+  "description": "Golden retrieval set for the ohmyboring eval gate. Each query names the fixture id(s) (frontmatter id of files under data/eval/fixtures/) that should rank at the top of recall. Queries are paraphrases — they deliberately avoid copying the fixture title verbatim so they test real retrieval, not string match. The local fixture ids here are resolved to the wiki-NNNN ids that drudge allocates at ingest time by data/eval/run_eval.py.",
+  "queries": [
+    {
+      "query": "database keeps throwing too many clients errors under load",
+      "expect": ["eval-pg-pool"]
+    },
+    {
+      "query": "users randomly logged out, token used before issued auth errors",
+      "expect": ["eval-jwt-clock-skew"]
+    },
+    {
+      "query": "docker build reinstalls all dependencies on every code change",
+      "expect": ["eval-docker-layer-cache"]
+    },
+    {
+      "query": "list lags and re-renders every row while typing in the search box",
+      "expect": ["eval-react-rerender"]
+    },
+    {
+      "query": "pod restarts with OOMKilled because memory limit too low",
+      "expect": ["eval-k8s-oomkill"]
+    },
+    {
+      "query": "find which commit introduced a flaky intermittently failing test",
+      "expect": ["eval-git-bisect-flaky"]
+    }
+  ]
+}

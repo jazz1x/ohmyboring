@@ -1,7 +1,7 @@
-.PHONY: help up down build logs agent-logs ask sync remember collect smoke doctor models ollama hermes-build guard deny eval psql reset
+.PHONY: help up down build logs agent-logs ask sync remember collect smoke e2e doctor models ollama hermes-build guard deny eval psql reset
 
 help: ## List commands
-	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## / — /' | sort
+	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## / — /' | sort
 
 up: ## Setup + start (check Ollama, pull models, build, start everything)
 	./start.sh
@@ -62,6 +62,9 @@ collect: ## Lazily collect past sessions (one at a time)   make collect [N=1]
 
 smoke: ## end-to-end smoke test
 	./scripts/smoke.sh
+
+e2e: ## wiki-mode end-to-end (remember→recall round-trip + vector-off reject); skips if stack down
+	./scripts/e2e.sh
 
 doctor: ## Diagnose the distill write-door (drudge/Ollama/containers + newest note & hook marker)
 	./scripts/doctor.sh
