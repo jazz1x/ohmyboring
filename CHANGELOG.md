@@ -13,6 +13,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
   `DRUDGE_*` environment variables and the Rust binary/package name (`drudge`) are kept unchanged
   for now to limit the blast radius.
 
+### Added
+- **MCP tool `forget`**: delete a note by wiki id or exact title. Removes the wiki file and,
+  in vector mode, purges its embeddings, graph edges, and claims.
+
 ## [0.1.0] — 2026-06-16
 
 First public cut of **ohmyboring** — a self-hosted personal memory RAG. Your

@@ -96,14 +96,41 @@ printf '%s' "$text" | grep -q "$NONCE" \
   || fail "round-trip failed — nonce '$NONCE' not found in recall result: $text"
 echo "   → round-trip OK (nonce recalled)"
 
-# --- 3) neighbors rejected when vector is off ---------------------------------------
+# --- 3) forget ----------------------------------------------------------------------
+# grounded: serve.rs routes name "forget" → mcp_forget; it accepts either arguments.id
+# or arguments.title and deletes the wiki file (and vector store rows when vector is on).
+echo "3) forget (MCP tools/call forget — clean up the throwaway note)…"
+req=$(jq -nc --arg t "$TITLE" \
+  '{jsonrpc:"2.0",id:3,method:"tools/call",params:{name:"forget",arguments:{title:$t}}}')
+resp=$(curl -sf -m30 "$MCP" -H 'content-type: application/json' -d "$req") \
+  || fail "forget call failed (curl)"
+err=$(printf '%s' "$resp" | jq -r '.error.message // empty')
+[ -z "$err" ] || fail "forget returned JSON-RPC error: $err"
+ack=$(printf '%s' "$resp" | jq -r '.result.content[0].text // empty')
+printf '%s' "$ack" | grep -q "forgot" || fail "forget ack missing 'forgot': $ack"
+echo "   → $ack"
+
+# --- 4) recall after forget (assert deletion) ---------------------------------------
+echo "4) recall after forget (assert the throwaway note is gone)…"
+req=$(jq -nc --arg q "$NONCE" \
+  '{jsonrpc:"2.0",id:4,method:"tools/call",params:{name:"recall",arguments:{query:$q}}}')
+resp=$(curl -sf -m120 "$MCP" -H 'content-type: application/json' -d "$req") \
+  || fail "recall call failed (curl)"
+err=$(printf '%s' "$resp" | jq -r '.error.message // empty')
+[ -z "$err" ] || fail "recall returned JSON-RPC error: $err"
+text=$(printf '%s' "$resp" | jq -r '.result.content[0].text // empty')
+printf '%s' "$text" | grep -q "$NONCE" \
+  && fail "forget failed — nonce '$NONCE' still found after recall: $text" \
+  || echo "   → note no longer recalled"
+
+# --- 5) neighbors rejected when vector is off ---------------------------------------
 # grounded: serve.rs:480 routes name "neighbors" → mcp_neighbors; serve.rs:564
 #           s.store.ok_or_else(vec_off_rpc) when vector is off; vec_off_rpc returns
 #           (-32603, …) (serve.rs:188-190); handle_mcp wraps it as
 #           {error:{code:-32603,message:…}} (serve.rs:283).
-echo "3) neighbors (MCP tools/call neighbors — assert vector-off error -32603)…"
+echo "5) neighbors (MCP tools/call neighbors — assert vector-off error -32603)…"
 req=$(jq -nc --arg q "$NONCE" \
-  '{jsonrpc:"2.0",id:3,method:"tools/call",params:{name:"neighbors",arguments:{query:$q}}}')
+  '{jsonrpc:"2.0",id:5,method:"tools/call",params:{name:"neighbors",arguments:{query:$q}}}')
 resp=$(curl -sf -m30 "$MCP" -H 'content-type: application/json' -d "$req") \
   || fail "neighbors call failed (curl)"
 code=$(printf '%s' "$resp" | jq -r '.error.code // empty')
@@ -111,5 +138,5 @@ code=$(printf '%s' "$resp" | jq -r '.error.code // empty')
   || fail "expected JSON-RPC error code -32603 for neighbors in wiki mode, got: $resp"
 echo "   → neighbors correctly rejected with -32603"
 
-echo "OK: e2e passed — wiki-mode remember→recall round-trips, vector-only neighbors rejected."
-echo "NOTE: a throwaway note (title '$TITLE') was written to the live vault/wiki — namespaced 'e2e' for easy cleanup."
+echo "OK: e2e passed — wiki-mode remember→recall→forget round-trips, vector-only neighbors rejected."
+echo "NOTE: the throwaway note (title '$TITLE') was removed by the forget step."

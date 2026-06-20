@@ -166,16 +166,17 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 
 (VS Code Copilot은 root key `servers`를 쓰는 `.vscode/mcp.json`을 사용합니다. CLI 대안: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. compose sibling 컨테이너는 `http://boring-drudge:7700/mcp`로 접근합니다.)
 
-사용 가능한 tools (10개): `recall` · `neighbors` · `claims`(검색) · `ask` · `brief`(생성 — LLM 실행) · `corpus_status` · `config_get`(introspection) · `remember` · `classify_repo` · `sync`(쓰기 / 유지보수).
+사용 가능한 tools (11개): `recall` · `neighbors` · `claims`(검색) · `ask` · `brief`(생성 — LLM 실행) · `corpus_status` · `config_get`(introspection) · `remember` · `forget` · `classify_repo` · `sync`(쓰기 / 유지보수).
 
-기본 wiki-first 모드(`DRUDGE_VECTOR=off`)에서는 네 개 tool이 pgvector 백엔드를 필요로 하며, `DRUDGE_VECTOR=on`을 설정하기 전까지 JSON-RPC `-32603`을 반환합니다: `neighbors`, `claims`, `corpus_status`, `brief`. 나머지 여섯 개(`recall`, `ask`, `remember`, `sync`, `config_get`, `classify_repo`)는 `vault/wiki`를 직접 사용합니다.
+기본 wiki-first 모드(`DRUDGE_VECTOR=off`)에서는 네 개 tool이 pgvector 백엔드를 필요로 하며, `DRUDGE_VECTOR=on`을 설정하기 전까지 JSON-RPC `-32603`을 반환합니다: `neighbors`, `claims`, `corpus_status`, `brief`. 나머지 일곱 개(`recall`, `ask`, `remember`, `forget`, `sync`, `config_get`, `classify_repo`)는 `vault/wiki`를 직접 사용합니다.
 
 - `neighbors` *(`DRUDGE_VECTOR=on` 필요)* — 토픽에서 출발하는 그래프 순회: 쿼리를 임베딩해 가장 가까운 노트 하나를 잡고, 그 노트의 1-hop 라벨을 반환합니다(`{hit, graph_neighbors, semantic_neighbors}` JSON). `hit`은 매칭된 노트 경로, `graph_neighbors`는 그 노트의 project/topic 라벨, `semantic_neighbors`는 공유 tool/concept 라벨이며 — 노트 경로가 아니라 평탄한 문자열입니다.
 - `claims` *(`DRUDGE_VECTOR=on` 필요)* — 쿼리 근처의 현재(미대체) `{subject, predicate, value}` 결정 top-k.
 - `corpus_status` *(`DRUDGE_VECTOR=on` 필요)* — KB 상태 스냅샷(파일/청크 수, origin/kind/project별, 오염도, graph/semantic 노드+엣지).
 - `ask` / `brief` — 유일하게 LLM을 돌리는 tool: `ask`는 출처를 인용해 질문에 답하고(wiki-first 모드에서 동작), `brief` *(`DRUDGE_VECTOR=on` 필요)* 는 최신순 우선 업무 브리핑입니다.
+- `forget` — wiki id나 정확한 제목으로 노트를 삭제합니다. wiki 파일을 제거하고, vector 모드에서는 임베딩·그래프 엣지·claim도 함께 정리합니다.
 
-구조화 tool(`neighbors`, `claims`, `corpus_status`, `config_get`, `ask`, `brief`)은 텍스트 블록과 함께 네이티브 `structuredContent`(JSON)를 반환하고, 산문/ack tool(`recall`, `remember`, `sync`, `classify_repo`)은 텍스트를 반환합니다.
+구조화 tool(`neighbors`, `claims`, `corpus_status`, `config_get`, `ask`, `brief`)은 텍스트 블록과 함께 네이티브 `structuredContent`(JSON)를 반환하고, 산문/ack tool(`recall`, `remember`, `forget`, `sync`, `classify_repo`)은 텍스트를 반환합니다.
 
 MCP 호출 예시 (HTTP 위의 raw JSON-RPC):
 

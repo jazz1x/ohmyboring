@@ -360,6 +360,18 @@ fn mcp_tools_list() -> Value {
             }
         },
         {
+            "name": "forget",
+            "description": "Remove a note from memory by wiki id or exact title. Deletes the wiki file and, when vector mode is on, \
+                            also removes its embeddings, graph edges, and claims. Use when a note is wrong, duplicated, or no longer wanted.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "wiki id of the note to delete (e.g. wiki-0042). Either id or title is required."},
+                    "title": {"type": "string", "description": "exact title of the note to delete. Use id when multiple notes share a title."}
+                }
+            }
+        },
+        {
             "name": "sync",
             "description": "Re-ingest the vault deterministically: walk notes → embed → pgvector upsert → graph (from frontmatter) → \
                             recompute relations. No LLM curation. Use to rebuild/refresh after bulk changes; single remember calls are \
@@ -481,6 +493,7 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
     let out = match name {
         "recall" => ToolOut::Text(mcp_recall(s, args).await?),
         "remember" => ToolOut::Text(mcp_remember(s, args).await?),
+        "forget" => ToolOut::Text(mcp_forget(s, args).await?),
         "sync" => ToolOut::Text(mcp_sync(s).await?),
         "classify_repo" => ToolOut::Text(mcp_classify_repo(s, args)?),
         "config_get" => ToolOut::Structured(
@@ -657,6 +670,84 @@ async fn mcp_brief(s: &AppState) -> Result<Value, (i32, String)> {
         .await
         .map_err(|e| (-32603_i32, format!("brief: {e:#}")))?;
     Ok(json!({"answer": out.answer, "sources": out.sources}))
+}
+
+/// `forget` — remove a note by wiki id or exact title. Deletes the vault file and, in vector mode, purges
+/// embeddings, graph edges, and claims. Idempotent: forgetting a non-existent note returns a clear error.
+async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
+    let Some(vault_root) = (*s.vault_dir).as_ref() else {
+        return Err((-32603, "DRUDGE_VAULT_DIR not set".to_owned()));
+    };
+    let wiki_dir = vault_root.join("wiki");
+
+    let get_str = |k: &str| {
+        args.and_then(|a| a.get(k))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+
+    let id = get_str("id");
+    let title = get_str("title");
+
+    if id.is_none() && title.is_none() {
+        return Err((-32602, "forget requires either 'id' or 'title'".to_owned()));
+    }
+
+    let path = if let Some(id) = id {
+        let p = wiki_dir.join(format!("{id}.md"));
+        if !p.exists() {
+            return Err((-32602, format!("note {id} not found")));
+        }
+        p
+    } else if let Some(title) = title {
+        let mut matches = Vec::new();
+        for entry in
+            std::fs::read_dir(&wiki_dir).map_err(|e| (-32603_i32, format!("wiki dir: {e}")))?
+        {
+            let entry = entry.map_err(|e| (-32603_i32, format!("wiki entry: {e}")))?;
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let content =
+                std::fs::read_to_string(&p).map_err(|e| (-32603_i32, format!("read note: {e}")))?;
+            let (front, _) =
+                crate::frontmatter::parse(&content, p.to_string_lossy().as_ref(), &s.cfg)
+                    .map_err(|e| (-32603_i32, format!("parse frontmatter: {e:#}")))?;
+            if front.title.as_deref().unwrap_or("") == title {
+                matches.push(p);
+            }
+        }
+        match matches.len() {
+            0 => return Err((-32602, format!("note with title {title:?} not found"))),
+            1 => matches.remove(0),
+            _ => {
+                return Err((
+                    -32602,
+                    format!("multiple notes match title {title:?}; use id"),
+                ));
+            }
+        }
+    } else {
+        return Err((-32602, "forget requires either 'id' or 'title'".to_owned()));
+    };
+
+    let source_path = path.to_string_lossy().into_owned();
+    std::fs::remove_file(&path).map_err(|e| (-32603_i32, format!("delete note: {e}")))?;
+
+    if let Some(store) = s.store.as_ref() {
+        store
+            .delete_document(&source_path)
+            .await
+            .map_err(|e| (-32603_i32, format!("delete from vector store: {e:#}")))?;
+        if let Err(e) = vault::project_links(store, vault_root, 6).await {
+            eprintln!("[forget] project_links warning (ignored): {e:#}");
+        }
+    }
+
+    Ok(format!("forgot → {source_path}"))
 }
 
 /// `remember` — the kernel ingest entry. The agent hands a COMPLETE curated note; drudge deterministically
