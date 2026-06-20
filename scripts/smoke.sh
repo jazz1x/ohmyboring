@@ -33,12 +33,12 @@ else
   COMPOSE="docker-compose"
 fi
 ps=$($COMPOSE ps --format '{{.Name}} {{.Status}}' 2>/dev/null) || fail "compose ps failed"
-printf '%s\n' "$ps" | grep -qE 'ohmyboring.*Up' || fail "ohmyboring not running"
+printf '%s\n' "$ps" | grep -qE 'boring-drudge.*Up' || fail "boring-drudge not running"
 if [ "$VEC" = 1 ]; then
   printf '%s\n' "$ps" | grep -qE 'postgres.*(healthy|Up)' || fail "postgres not running (vector mode)"
 fi
 printf '%s\n' "$ps" | grep -qi 'restarting' && fail "crash-looping container: $(printf '%s' "$ps" | grep -i restarting)"
-printf '%s\n' "$ps" | grep -E 'postgres|ohmyboring|agent' || true
+printf '%s\n' "$ps" | grep -E 'postgres|boring-drudge|agent' || true
 
 echo "2) engine /health…"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$URL/health")" = "200" ] || fail "/health != 200"

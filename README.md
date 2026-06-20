@@ -164,7 +164,7 @@ Any MCP-capable agent can use ohmyboring-memory. The repo ships a standard **`.m
 
 `install.sh` also writes Cursor's `~/.cursor/mcp.json` and Codex's `~/.codex/mcp.json` automatically when those agents are enabled in `boring.json`.
 
-(VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring-memory http://localhost:7700/mcp`. Compose siblings reach it at `http://ohmyboring:7700/mcp`.)
+(VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring-memory http://localhost:7700/mcp`. Compose siblings reach it at `http://boring-drudge:7700/mcp`.)
 
 Available tools (10): `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief` (generative — run the LLM) · `corpus_status`, `config_get` (introspection) · `remember`, `classify_repo`, `sync` (write / maintain).
 
@@ -201,7 +201,7 @@ curl -s -X POST http://localhost:7700/mcp \
 
 [hermes-agent](https://hermes-agent.org) is a third-party autonomous supervisor. It can drive Slack, orchestration, and cron-based backfill through ohmyboring-memory's MCP backend. Build the image separately; `make up` picks it up automatically if it exists.
 
-It is configured per the hermes-agent project's **own docs** (out of scope here) — point its `~/.hermes/config.yaml` at ohmyboring-memory's MCP (`http://ohmyboring:7700/mcp`). What ohmyboring ships wires it up as the Slack assistant; to use it for anything beyond that, build or modify the image yourself.
+It is configured per the hermes-agent project's **own docs** (out of scope here) — point its `~/.hermes/config.yaml` at ohmyboring-memory's MCP (`http://boring-drudge:7700/mcp`). What ohmyboring ships wires it up as the Slack assistant; to use it for anything beyond that, build or modify the image yourself.
 
 ---
 
