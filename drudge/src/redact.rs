@@ -5,7 +5,9 @@
 //! boundary (not symptom-masking: the root cause is "arbitrary text may carry a token", outside our
 //! control → the write boundary is the SSOT to normalize it). Being personal/local, heavy redaction
 //! isn't needed.
-use anyhow::{Context, Result};
+use std::sync::LazyLock;
+
+use anyhow::Result;
 use regex::Regex;
 
 /// Secret-scrub regex pattern — matches only known token formats.
@@ -21,9 +23,19 @@ const SECRET_PATTERN: &str = concat!(
     r#"|(?:(?i:api[_-]?key|secret|token|password|passwd|bearer)["' ]*[:=]["' ]*[A-Za-z0-9._/+-]{12,})"#,
 );
 
-/// Compile the secret regex — once at the boundary (ROP: on failure propagate `Err`, no silent fallback).
-pub fn build_secret_re() -> Result<Regex> {
-    Regex::new(SECRET_PATTERN).context("failed to compile secret regex")
+static SECRET_RE: LazyLock<Result<Regex, regex::Error>> =
+    LazyLock::new(|| Regex::new(SECRET_PATTERN));
+
+/// Return the compiled secret regex, compiling it once at process startup.
+///
+/// The pattern is a static constant; compilation can only fail if the pattern itself is malformed.
+/// Caching the compiled `Regex` with `LazyLock` means every `remember` call reuses the same matcher
+/// instead of re-parsing the regex — a high-leverage single boundary (Layer 3: block the waste with
+/// the least structure).
+pub fn build_secret_re() -> Result<&'static Regex> {
+    SECRET_RE
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("failed to compile secret regex: {e}"))
 }
 
 /// Secret scrub — replace known token formats with `‹REDACTED›`. Pure.
@@ -40,7 +52,7 @@ mod tests {
     fn redact_scrubs_known_tokens() {
         let re = build_secret_re().unwrap();
         let dirty = "token: xoxb-1234567890abcdef and sk-ant-abcdefghij1234567890XYZ end";
-        let clean = redact(&re, dirty);
+        let clean = redact(re, dirty);
         assert!(
             !clean.contains("xoxb-1234567890abcdef"),
             "Slack token not scrubbed: {clean}"
@@ -56,6 +68,14 @@ mod tests {
     fn redact_leaves_clean_text() {
         let re = build_secret_re().unwrap();
         let clean = "Just an ordinary plain sentence.";
-        assert_eq!(redact(&re, clean), clean);
+        assert_eq!(redact(re, clean), clean);
+    }
+
+    #[test]
+    fn build_secret_re_is_cached() {
+        let r1 = build_secret_re().unwrap();
+        let r2 = build_secret_re().unwrap();
+        // Both calls return the same static allocation.
+        assert!(std::ptr::eq(r1, r2));
     }
 }
