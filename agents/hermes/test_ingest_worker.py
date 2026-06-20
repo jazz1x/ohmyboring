@@ -18,10 +18,6 @@ sys.modules["ingest_worker"] = ingest_worker
 spec.loader.exec_module(ingest_worker)
 
 
-def _session_marker(sid):
-    return f"{ingest_worker.SESSION_MARKER_PREFIX}{sid} -->"
-
-
 class _FakeEngine(server.BaseHTTPRequestHandler):
     """Tiny HTTP server that mimics the ohmyboring engine for tests."""
 
@@ -75,9 +71,9 @@ class ReconcileTest(unittest.TestCase):
         else:
             os.environ["DRUDGE_VAULT_DIR"] = self._orig_vault_dir
 
-    def _pending(self, sid, before, attempts=0, mtime=0.0):
+    def _pending(self, sid, before, attempts=0):
         path = Path(self.tmp.name) / f"{sid}.pending"
-        path.write_text(f"{sid}\n{before}\n{attempts}\n{mtime}\n")
+        path.write_text(f"{sid}\n{before}\n{attempts}\n")
 
     def _read_attempts(self, sid):
         path = Path(self.tmp.name) / f"{sid}.pending"
@@ -92,7 +88,14 @@ class ReconcileTest(unittest.TestCase):
     def _write_note(self, sid, wiki_id="wiki-9999"):
         note = self.wiki_dir / f"{wiki_id}.md"
         note.write_text(
-            "---\ntitle: test\n---\nbody\n\n" + _session_marker(sid) + "\n"
+            f"---\ntitle: test\nomb_session_id: {sid}\n---\nbody\n"
+        )
+
+    def test_frontmatter_session_id_parsing(self):
+        self._write_note("s-parse", "wiki-0001")
+        self.assertEqual(
+            ingest_worker._frontmatter_session_id(self.wiki_dir / "wiki-0001.md"),
+            "s-parse",
         )
 
     def test_find_session_note_finds_marker(self):

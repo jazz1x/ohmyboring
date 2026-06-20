@@ -58,7 +58,7 @@ def _throttled(session_id):
         return False
 
 
-def _mark(session_id, pending=False):
+def _mark(session_id, retry=False):
     """Write a done marker (.ts) or a retry marker (.retry).
 
     A .retry marker tells collect-sessions.py (the backfill scheduler) that this
@@ -68,12 +68,12 @@ def _mark(session_id, pending=False):
     if not session_id:
         return
     safe = re.sub(r"[^A-Za-z0-9_-]", "", session_id) or "nosession"
-    suffix = ".retry" if pending else ".ts"
+    suffix = ".retry" if retry else ".ts"
     path = os.path.join(MARK_DIR, f"{safe}{suffix}")
     try:
         os.makedirs(MARK_DIR, exist_ok=True)
         # A done marker supersedes a retry marker and vice versa.
-        other = os.path.join(MARK_DIR, f"{safe}.ts" if pending else f"{safe}.retry")
+        other = os.path.join(MARK_DIR, f"{safe}.ts" if retry else f"{safe}.retry")
         if os.path.exists(other):
             os.remove(other)
         with open(path, "w", encoding="utf-8") as f:
@@ -292,7 +292,7 @@ def _call_llm(prompt):
     return parsed
 
 
-def _call_remember(title, body, origin, repo, tags, tools, concepts, claims):
+def _call_remember(title, body, origin, repo, tags, tools, concepts, claims, session_id=""):
     """Call ohmyboring's remember MCP tool.
 
     Retries transient failures (5xx, connection errors, timeouts) a bounded number of times
@@ -309,6 +309,8 @@ def _call_remember(title, body, origin, repo, tags, tools, concepts, claims):
         "concepts": concepts,
         "claims": claims,
     }
+    if session_id:
+        arguments["omb_session_id"] = session_id
     payload = json.dumps(
         {
             "jsonrpc": "2.0",
@@ -374,7 +376,7 @@ def _call_remember(title, body, origin, repo, tags, tools, concepts, claims):
     return False
 
 
-def distill_and_remember(transcript_path, origin, repo):
+def distill_and_remember(transcript_path, origin, repo, session_id=""):
     """Distill the transcript via local LLM and write it through ohmyboring's remember tool."""
     text = extract(transcript_path)
     if len(text) > 12000:
@@ -449,7 +451,7 @@ def distill_and_remember(transcript_path, origin, repo):
                 }
             )
 
-    return _call_remember(title, body, origin, repo, tags, tools, concepts, claims)
+    return _call_remember(title, body, origin, repo, tags, tools, concepts, claims, session_id)
 
 
 def main():
@@ -475,10 +477,10 @@ def main():
         return
 
     repo = repo_slug(cwd)
-    if distill_and_remember(transcript_path, origin, repo):
+    if distill_and_remember(transcript_path, origin, repo, session_id):
         _mark(session_id)
     else:
-        _mark(session_id, pending=True)
+        _mark(session_id, retry=True)
 
 
 if __name__ == "__main__":
