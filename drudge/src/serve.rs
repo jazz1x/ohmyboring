@@ -43,6 +43,8 @@ pub struct AppState {
     vault_dir: Arc<Option<PathBuf>>,
     /// Policy config (`boring.json`).
     cfg: Arc<config::BoringConfig>,
+    /// Resolved path to the loaded config, so `classify_repo` writes back to the same file.
+    cfg_path: Arc<Option<PathBuf>>,
 }
 
 impl AppState {
@@ -202,8 +204,9 @@ async fn handle_search(
     State(s): State<AppState>,
     Json(req): Json<SearchReq>,
 ) -> Result<Json<SearchResp>, AppError> {
-    let max_results = req.max_results.max(1);
-    let max_chars = req.max_tokens.saturating_mul(4);
+    let max_results = req.max_results.clamp(1, MCP_MAX_RESULTS);
+    let max_tokens = req.max_tokens.clamp(1, MCP_MAX_TOKENS);
+    let max_chars = max_tokens.saturating_mul(4);
     let mapped: Vec<SearchHit> = if let Some(store) = s.store.as_ref() {
         retrieve::retrieve_budget(store, &s.llm, &req.query, max_results, max_chars, &[])
             .await?
@@ -269,8 +272,16 @@ async fn handle_audit(State(s): State<AppState>) -> Result<Json<audit::AuditStat
 // The `recall` tool = retrieve (vector+graph) → text → the agent retrieves from our self-augmenting KB.
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+/// Hard ceiling on agent-supplied recall budget to prevent token/DoS explosions.
+const MCP_MAX_RESULTS: usize = 50;
+const MCP_MAX_TOKENS: usize = 16_384;
 
 async fn handle_mcp(State(s): State<AppState>, Json(req): Json<Value>) -> Response {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    if req.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        let body = json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32600, "message": "Invalid Request — jsonrpc must be \"2.0\""}});
+        return Json(body).into_response();
+    }
     let method = req
         .get("method")
         .and_then(Value::as_str)
@@ -278,7 +289,6 @@ async fn handle_mcp(State(s): State<AppState>, Json(req): Json<Value>) -> Respon
     if method.starts_with("notifications/") {
         return StatusCode::ACCEPTED.into_response(); // notifications get no response
     }
-    let id = req.get("id").cloned().unwrap_or(Value::Null);
     let outcome = match method {
         "initialize" => Ok(mcp_initialize(&req)),
         "tools/list" => Ok(mcp_tools_list()),
@@ -368,7 +378,11 @@ fn mcp_tools_list() -> Value {
                 "properties": {
                     "id": {"type": "string", "description": "wiki id of the note to delete (e.g. wiki-0042). Either id or title is required."},
                     "title": {"type": "string", "description": "exact title of the note to delete. Use id when multiple notes share a title."}
-                }
+                },
+                "oneOf": [
+                    {"required": ["id"]},
+                    {"required": ["title"]}
+                ]
             }
         },
         {
@@ -531,13 +545,13 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         .and_then(Value::as_u64)
         .and_then(|n| usize::try_from(n).ok())
         .unwrap_or(5)
-        .max(1);
+        .clamp(1, MCP_MAX_RESULTS);
     let max_tokens = args
         .and_then(|a| a.get("max_tokens"))
         .and_then(Value::as_u64)
         .and_then(|n| usize::try_from(n).ok())
         .unwrap_or(2000)
-        .max(1);
+        .clamp(1, MCP_MAX_TOKENS);
     let max_chars = max_tokens.saturating_mul(4);
 
     // vector on → budget-aware vector+graph chunks. off → direct vault/wiki read snippets.
@@ -620,7 +634,7 @@ async fn mcp_claims(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, S
         .and_then(Value::as_u64)
         .and_then(|n| i64::try_from(n).ok())
         .unwrap_or(5)
-        .max(1);
+        .clamp(1, i64::try_from(MCP_MAX_RESULTS).unwrap_or(50));
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
     let q_emb = s
         .llm
@@ -762,12 +776,10 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
     };
     let note = parse_remember_note(args)?;
 
-    // 1. allocate id + path, then write the wiki note (deterministic file IO — the SSOT artifact).
+    // 1. atomically allocate id + path, then write the wiki note (deterministic file IO — the SSOT artifact).
     let wiki_dir = vault_root.join("wiki");
-    std::fs::create_dir_all(&wiki_dir).map_err(|e| (-32603_i32, format!("wiki dir: {e}")))?;
-    let wiki_id =
-        vault::next_wiki_id(&wiki_dir).map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
-    let path = wiki_dir.join(format!("{wiki_id}.md"));
+    let (wiki_id, path) = vault::allocate_wiki_path(&wiki_dir)
+        .map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
     let mut front = note.front;
     front.source_path = path.to_string_lossy().into_owned();
     let content = vault::render_wiki_note(&wiki_id, &front, &note.body)
@@ -919,7 +931,7 @@ fn parse_claim(v: &Value) -> Option<Claim> {
 }
 
 /// `classify_repo` — upsert a repo origin rule into boring.json (agent self-maintains classification).
-fn mcp_classify_repo(_s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
+fn mcp_classify_repo(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let g = |k: &str| args.and_then(|a| a.get(k)).and_then(Value::as_str);
     let match_ = g("match")
         .filter(|v| !v.is_empty())
@@ -934,7 +946,17 @@ fn mcp_classify_repo(_s: &AppState, args: Option<&Value>) -> Result<String, (i32
         .map_err(|e| (-32602_i32, e))?
         .as_str();
     let name = g("name").filter(|v| !v.is_empty());
-    let path = config::upsert_repo_rule(match_, origin, name)
+
+    // Write back to the same file we loaded from (respects BORING_CONFIG / OMB_HOME), instead of
+    // rediscovering and possibly picking a different path.
+    let path = (*s.cfg_path)
+        .clone()
+        .or_else(config::discover_path)
+        .ok_or((
+            -32603,
+            "boring.json not found (set BORING_CONFIG / OMB_HOME)".to_owned(),
+        ))?;
+    let path = config::upsert_repo_rule_at(match_, origin, name, &path)
         .map_err(|e| (-32603, format!("write boring.json: {e:#}")))?;
     serde_json::to_string_pretty(&json!({
         "saved": true,
@@ -1084,6 +1106,9 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
     // vault root — when set, sync includes the raw→wiki compile stage.
     let vault_dir: Option<PathBuf> = std::env::var("DRUDGE_VAULT_DIR").ok().map(PathBuf::from);
 
+    // Remember which config file we loaded so `classify_repo` writes back to the same file.
+    let cfg_path = config::discover_path();
+
     let addr = std::env::var("DRUDGE_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:7700".to_owned());
 
     let state = AppState {
@@ -1091,6 +1116,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         llm: Arc::new(llm),
         vault_dir: Arc::new(vault_dir),
         cfg: Arc::new(cfg),
+        cfg_path: Arc::new(cfg_path),
     };
 
     spawn_scheduler(
@@ -1099,6 +1125,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         Arc::clone(&state.vault_dir),
         Arc::clone(&state.cfg),
     );
+    // cfg_path is only used by the HTTP/MCP handlers; the scheduler does not need it.
 
     let router = axum::Router::new()
         .route("/health", get(health))
