@@ -31,10 +31,32 @@ import sys
 import time
 import urllib.request
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+import boring_config
+
 # Runs in TWO contexts: inside the hermes-agent container (via `hermes cron --script`) or on the host
 # (manual/launchd). Auto-detect by the container's bind mount so paths + the engine URL resolve in both.
 _IN_CONTAINER = os.path.isdir("/host/.claude")
-PROJECTS = "/host/.claude/projects" if _IN_CONTAINER else os.path.expanduser("~/.claude/projects")
+
+
+def _source_dirs():
+    """Configured session source dirs, translated for the container filesystem when needed."""
+    dirs = boring_config.source_dirs(adapter="session-end")
+    if not dirs:
+        # Graceful fallback to the Claude Code default so a fresh clone without config still works.
+        dirs = [os.path.expanduser("~/.claude/projects")]
+    if not _IN_CONTAINER:
+        return dirs
+    home = os.path.expanduser("~")
+    mapped = []
+    for d in dirs:
+        if d.startswith(home + "/"):
+            mapped.append("/host" + d[len(home):])
+        elif d == home:
+            mapped.append("/host")
+        else:
+            mapped.append(d)
+    return mapped
 # Shared marker directory: host ~/.cache/boring-distill is mounted at /host/.cache/boring-distill
 # inside the hermes-agent container so host SessionEnd hook markers are visible here too.
 DISTILL_MARK_DIR = "/host/.cache/boring-distill" if _IN_CONTAINER else os.path.expanduser(
@@ -54,52 +76,9 @@ PENDING_TTL = float(os.environ.get("INGEST_PENDING_TTL") or "1800")
 # wiki-first mode has no chunk counter, so we retry a bounded number of times before giving up.
 MAX_WIKI_ATTEMPTS = int(os.environ.get("INGEST_WIKI_ATTEMPTS") or "3")
 
-# OMB_HOME is only meaningful on the host; inside the container we rely on /host/boring.json.
-OMB_HOME = os.environ.get("OMB_HOME") or os.path.expanduser("~/oh-my-boring")
-
-
-def _boring_path():
-    """Resolve boring.json: env override → container mount → host repo root."""
-    if env := os.environ.get("BORING_CONFIG"):
-        return env
-    if _IN_CONTAINER:
-        return "/host/boring.json"
-    return os.path.join(OMB_HOME, "boring.json")
-
-
-def _load_boring():
-    """Load boring.json if available; degrade gracefully."""
-    try:
-        with open(_boring_path(), encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _note_lang():
-    """Return configured output language (auto/ko/en)."""
-    return _load_boring().get("note_lang") or "auto"
-
-
-def _classify(cwd):
-    """Return (origin, matched_name) for a repo path using boring.json repos rules."""
-    if not cwd:
-        return "personal", None
-    cfg = _load_boring()
-    for rule in cfg.get("repos") or []:
-        matcher = (rule.get("match") or "").lower()
-        if not matcher:
-            continue
-        if matcher in cwd.lower():
-            origin = (rule.get("origin") or "personal").lower()
-            name = rule.get("name") or matcher
-            return origin, name
-    return "personal", None
-
-
 def _repo_slug(cwd):
     """Category axis: boring.json name if matched, else folder name."""
-    _origin, name = _classify(cwd)
+    _origin, name = boring_config.classify(cwd)
     if name:
         return name
     if cwd:
@@ -308,17 +287,19 @@ def main():
     _reconcile()  # settle the previous tick before offering a new one
 
     cutoff = time.time() - WINDOW_H * 3600
-    paths = [
-        p
-        for p in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))
-        if os.path.getmtime(p) >= cutoff and os.path.getsize(p) >= MIN_KB * 1024 and _eligible(p)
-    ]
+    paths = []
+    for d in _source_dirs():
+        paths.extend(
+            p
+            for p in glob.glob(os.path.join(d, "*", "*.jsonl"))
+            if os.path.getmtime(p) >= cutoff and os.path.getsize(p) >= MIN_KB * 1024 and _eligible(p)
+        )
     paths.sort(key=os.path.getmtime)  # oldest first (FIFO drain)
 
     lang_instruction = {
         "ko": "Write the note in Korean.",
         "en": "Write the note in English.",
-    }.get(_note_lang(), "Write in the same language as the source transcript.")
+    }.get(boring_config.note_lang(), "Write in the same language as the source transcript.")
 
     for p in paths:
         sid = os.path.splitext(os.path.basename(p))[0]
@@ -330,7 +311,7 @@ def main():
             head = CLAMP * 2 // 5
             text = text[:head] + "\n…(truncated)…\n" + text[-(CLAMP - head) :]
         cwd = transcript_cwd(p)
-        origin, _name = _classify(cwd)
+        origin, _name = boring_config.classify(cwd)
         repo = _repo_slug(cwd)
         repo_hint = f" repo='{repo}'." if repo else ""
         # mark pending with the pre-offer chunk count and attempt counter → next tick's _reconcile confirms success

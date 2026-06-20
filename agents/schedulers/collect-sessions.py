@@ -23,6 +23,7 @@ import time
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+import boring_config
 import omb_env
 
 DRUDGE_URL = os.environ.get("DRUDGE_URL") or omb_env.drudge_url()
@@ -33,7 +34,6 @@ MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")  # skip small sessions 
 # without editing this file.
 OMB_HOME = os.environ.get("OMB_HOME") or os.path.expanduser("~/oh-my-boring")
 HOOK = os.path.join(OMB_HOME, "agents/claude-code/distill-session.py")
-PROJECTS = os.path.expanduser("~/.claude/projects")
 MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
 
 
@@ -94,7 +94,9 @@ def _warm_llm():
 
 def main():
     cutoff = time.time() - WINDOW_H * 3600
-    paths = glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))  # top-level only
+    paths = []
+    for d in boring_config.source_dirs(adapter="session-end") or [os.path.expanduser("~/.claude/projects")]:
+        paths.extend(glob.glob(os.path.join(d, "*", "*.jsonl")))  # top-level only
     # not-yet-done (no marker) + within window → newest first
     todo = [
         p

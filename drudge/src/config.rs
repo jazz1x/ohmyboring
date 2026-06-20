@@ -81,6 +81,21 @@ pub struct RepoRule {
     pub name: String,
 }
 
+/// How an agent adapter is wired into the host/IDE. Mirrors the `adapter` field in boring.json.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Adapter {
+    /// Claude Code style — session-end (and optionally prompt-submit) hooks.
+    #[default]
+    SessionEnd,
+    /// Prompt-submit hook only.
+    PromptSubmit,
+    /// MCP-only agent (Cursor, Codex, Windsurf, Claude Desktop, …).
+    McpOnly,
+    /// Background cron ingestion (hermes-agent).
+    Cron,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Origin {
@@ -127,6 +142,8 @@ pub struct AgentSource {
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
+    pub adapter: Adapter,
+    #[serde(default)]
     pub format: String,
     #[serde(default)]
     pub paths: Vec<String>,
@@ -137,6 +154,7 @@ impl Default for AgentSource {
         Self {
             id: String::new(),
             enabled: true,
+            adapter: Adapter::default(),
             format: String::new(),
             paths: Vec::new(),
         }
@@ -217,6 +235,7 @@ impl BoringConfig {
                 cfg.agents.push(AgentSource {
                     id: "legacy-source-dirs".to_owned(),
                     enabled: true,
+                    adapter: Adapter::SessionEnd,
                     format: "claude-json".to_owned(),
                     paths,
                 });
@@ -403,7 +422,7 @@ fn derive_name_from_match(matcher: &str, cwd: &str, remote_url: Option<&str>) ->
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{AgentSource, BoringConfig, NoteLang, Origin, RepoRule};
+    use super::{Adapter, AgentSource, BoringConfig, NoteLang, Origin, RepoRule};
 
     #[test]
     fn origin_parse_roundtrips_and_rejects_unknown() {
@@ -454,7 +473,7 @@ mod tests {
                 {"match": "acme", "origin": "company", "name": "acme"}
             ],
             "agents": [
-                {"id": "claude-code", "enabled": true, "format": "claude-json", "paths": ["~/.claude/projects"]}
+                {"id": "claude-code", "enabled": true, "adapter": "session-end", "format": "claude-json", "paths": ["~/.claude/projects"]}
             ]
         }"#;
         let cfg = BoringConfig::from_str(raw).unwrap();
@@ -465,6 +484,27 @@ mod tests {
         assert_eq!(cfg.repos[0].name, "acme");
         assert_eq!(cfg.agents.len(), 1);
         assert!(cfg.agents[0].enabled);
+        assert_eq!(cfg.agents[0].adapter, Adapter::SessionEnd);
+    }
+
+    #[test]
+    fn adapter_roundtrips_and_defaults_to_session_end() {
+        for (s, expected) in [
+            ("session-end", Adapter::SessionEnd),
+            ("prompt-submit", Adapter::PromptSubmit),
+            ("mcp-only", Adapter::McpOnly),
+            ("cron", Adapter::Cron),
+        ] {
+            let cfg = BoringConfig::from_str(&format!(
+                r#"{{"schema_version": 1, "agents": [{{"id": "x", "adapter": "{s}"}}]}}"#
+            ))
+            .unwrap();
+            assert_eq!(cfg.agents[0].adapter, expected);
+        }
+        // omitted → default
+        let cfg =
+            BoringConfig::from_str(r#"{"schema_version": 1, "agents": [{"id": "x"}]}"#).unwrap();
+        assert_eq!(cfg.agents[0].adapter, Adapter::SessionEnd);
     }
 
     #[test]
@@ -496,12 +536,14 @@ mod tests {
                 AgentSource {
                     id: "a".into(),
                     enabled: true,
+                    adapter: Adapter::SessionEnd,
                     format: "claude-json".into(),
                     paths: vec!["~/.claude/projects".into()],
                 },
                 AgentSource {
                     id: "b".into(),
                     enabled: false,
+                    adapter: Adapter::SessionEnd,
                     format: "claude-json".into(),
                     paths: vec!["~/other".into()],
                 },
