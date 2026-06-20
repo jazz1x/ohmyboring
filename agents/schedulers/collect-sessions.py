@@ -39,7 +39,9 @@ MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
 
 def _marked(session_id):
     safe = re.sub(r"[^A-Za-z0-9_-]", "", session_id) or "nosession"
-    return os.path.exists(os.path.join(MARK_DIR, f"{safe}.ts"))
+    base = os.path.join(MARK_DIR, safe)
+    # Both done markers (.ts) and hermes pending markers (.pending) mean "already queued/handled".
+    return os.path.exists(f"{base}.ts") or os.path.exists(f"{base}.pending")
 
 
 def transcript_cwd(tp):
