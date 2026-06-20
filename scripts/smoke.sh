@@ -43,14 +43,19 @@ printf '%s\n' "$ps" | grep -E 'postgres|boring-drudge|agent' || true
 echo "2) engine /health…"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$URL/health")" = "200" ] || fail "/health != 200"
 
-echo "3) /ask (real answer expected; fallback/error fails)…"
+echo "3) engine /sync (deterministic baseline; waits for startup sync to finish)…"
+sync=$(curl -sf -m600 -X POST "$URL/sync" 2>/dev/null) || fail "/sync failed"
+[ -n "$sync" ] || fail "/sync returned empty"
+echo "   sync completed: chunks=$(printf '%s' "$sync" | jq -r '.ingest_chunks // 0'), edges=$(printf '%s' "$sync" | jq -r '.graph_edges // 0')"
+
+echo "4) /ask (real answer expected; fallback/error fails)…"
 ans=$(curl -sf -m120 "$URL/ask" -H 'content-type: application/json' \
   -d '{"question":"what is ohmyboring?"}' | jq -r '.answer') || fail "/ask call failed"
 [ -n "$ans" ] && [ "$ans" != "null" ] || fail "empty ask response"
 echo "   → $(printf '%s' "$ans" | head -c 90)…"
 
 if [ "$VEC" = 1 ]; then
-  echo "4) /audit (vector: corpus + graph measured)…"
+  echo "5) /audit (vector: corpus + graph measured)…"
   audit=$(curl -sf -m5 "$URL/audit") || fail "/audit failed"
   chunks=$(printf '%s' "$audit" | jq -r '.total_chunks // 0')
   edges=$(printf '%s' "$audit" | jq -r '.graph_edges // 0')
@@ -58,13 +63,13 @@ if [ "$VEC" = 1 ]; then
   [ "${edges:-0}" -gt 0 ] || fail "no graph edges (structural graph not built)"
   echo "   chunks=$chunks edges=$edges"
 
-  echo "5) /graph (CTE neighbors > 0)…"
+  echo "6) /graph (CTE neighbors > 0)…"
   n=$(curl -sf -m90 "$URL/graph" -H 'content-type: application/json' \
     -d '{"query":"ohmyboring"}' | jq -r '.graph_neighbors | length') || fail "/graph call failed"
   [ "${n:-0}" -gt 0 ] || fail "0 graph neighbors (graph recall not working)"
   echo "   graph_neighbors=$n"
 else
-  echo "4) wiki mode detected (/audit has no vector corpus) — vector/graph checks skipped"
+  echo "5) wiki mode detected (/audit has no vector corpus) — vector/graph checks skipped"
 fi
 
 echo "OK: smoke passed — engine works end-to-end (adversarially verified)."
