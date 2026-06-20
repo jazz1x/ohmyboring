@@ -54,9 +54,35 @@ def test_unsupported_agent_is_skipped_without_failure():
     assert results == []
 
 
+def test_settings_path_override():
+    """boring.json settings_path wins over the hardcoded default."""
+    custom = Path(os.path.expanduser("~/custom-claude-settings.json"))
+    cfg = {
+        "agents": [
+            {
+                "id": "claude-code",
+                "enabled": True,
+                "settings_path": str(custom),
+            }
+        ]
+    }
+    with mock.patch.object(agent_wiring.boring_config, "load", return_value=cfg):
+        assert agent_wiring._agent_path("claude-code") == custom
+
+
+def test_default_path_when_no_override():
+    """When settings_path is absent, the per-agent default is used."""
+    with mock.patch.object(agent_wiring.boring_config, "load", return_value={}):
+        assert agent_wiring._agent_path("claude-code") == Path(
+            os.path.expanduser("~/.claude/settings.json")
+        )
+
+
 if __name__ == "__main__":
     test_install_reports_failure()
     test_install_returns_success_when_ok()
     test_hermes_agent_is_not_unsupported()
     test_unsupported_agent_is_skipped_without_failure()
-    print("ok - agent_wiring failure propagation + hermes skip")
+    test_settings_path_override()
+    test_default_path_when_no_override()
+    print("ok - agent_wiring failure propagation + hermes skip + settings_path")

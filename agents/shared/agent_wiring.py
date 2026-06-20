@@ -57,6 +57,14 @@ def _expand(path_template: str) -> Path:
     return Path(path_template.format(HOME=os.path.expanduser("~")))
 
 
+def _agent_path(agent_id: str) -> Path:
+    """Resolve the agent settings file path: config override > per-agent default."""
+    cfg = boring_config.agent_config(agent_id)
+    if cfg.get("settings_path"):
+        return Path(os.path.expanduser(cfg["settings_path"]))
+    return _expand(AGENTS[agent_id]["path"])
+
+
 def _load_json(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -93,9 +101,9 @@ def _already_wired(settings: dict, command: str) -> bool:
     return False
 
 
-def wire_claude_code() -> dict:
+def wire_claude_code(path: Path | None = None) -> dict:
     """Idempotently wire Claude Code SessionEnd/UserPromptSubmit hooks."""
-    path = _expand(AGENTS["claude-code"]["path"])
+    path = path if path is not None else _agent_path("claude-code")
     _backup(path)
 
     settings = _load_json(path)
@@ -136,13 +144,13 @@ def wire_claude_code() -> dict:
     return {"agent": "claude-code", "path": str(path), "changed": changed}
 
 
-def wire_mcp_agent(agent_id: str, server_name: str, server_config: dict) -> dict:
+def wire_mcp_agent(agent_id: str, server_name: str, server_config: dict, path: Path | None = None) -> dict:
     """Idempotently add/update an MCP server entry for a generic MCP-capable agent."""
     info = AGENTS[agent_id]
     if info["kind"] != "mcp":
         raise ValueError(f"agent {agent_id} is not an MCP agent")
 
-    path = _expand(info["path"])
+    path = path if path is not None else _agent_path(agent_id)
     _backup(path)
 
     data = _load_json(path)

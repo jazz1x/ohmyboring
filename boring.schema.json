@@ -73,6 +73,10 @@
             "type": "array",
             "items": { "type": "string" }
           },
+          "settings_path": {
+            "type": "string",
+            "description": "Optional agent settings file path override (e.g. MCP config or Claude Code settings.json). ~ expansion supported."
+          },
           "adapter": {
             "type": "string",
             "enum": ["session-end", "prompt-submit", "mcp-only", "cron"],
