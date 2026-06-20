@@ -54,7 +54,7 @@ flowchart LR
     CC([Claude Code session])
   end
   subgraph WRITE [WRITE · gated]
-    D["distill-session.py"] --> REM["remember via ohmyboring-memory"]
+    D["distill-session.py"] --> REM["remember via ohmyboring"]
   end
   WIKI[("vault/wiki<br/>primary memory")]
   subgraph RD [READ · open]
@@ -68,7 +68,7 @@ flowchart LR
 ```
 
 - **Read door** — fast, no LLM. `make ask`, `recall.py`, MCP `recall` read `vault/wiki` directly.
-- **Write door** — gated. `distill-session.py` calls the local LLM and writes through ohmyboring-memory's deterministic `remember` MCP tool.
+- **Write door** — gated. `distill-session.py` calls the local LLM and writes through ohmyboring's deterministic `remember` MCP tool.
 
 ---
 
@@ -114,7 +114,7 @@ Secrets and runtime switches live in **`.env`**:
 
 | Command | Description |
 |---|---|
-| `make up` | set up + start the ohmyboring-memory engine (hermes-agent joins only if its image exists) |
+| `make up` | set up + start the ohmyboring engine (hermes-agent joins only if its image exists) |
 | `make ollama` | ensure Ollama is running (start in background if needed) |
 | `make ask Q="..."` | one-shot recall + synthesis |
 | `make sync` | deterministic re-ingest of the vault |
@@ -130,7 +130,7 @@ Secrets and runtime switches live in **`.env`**:
 
 ## Agent adapters
 
-`agents/` contains the **host-side adapters** that connect external agents to the ohmyboring-memory engine. Every adapter talks to ohmyboring-memory through the same MCP/HTTP surface; none are required.
+`agents/` contains the **host-side adapters** that connect external agents to the ohmyboring engine. Every adapter talks to ohmyboring through the same MCP/HTTP surface; none are required.
 
 The old `hooks/` path still works as a set of backward-compatible symlinks, so existing Claude Code `settings.json` entries and cron jobs don't break.
 
@@ -138,8 +138,8 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 |---|---|---|---|---|
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | Distills a session and calls `remember` |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
-| Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring-memory` as an MCP server |
-| Codex | `agents/codex/README.md` | MCP only | `~/.codex/mcp.json` | Exposes `ohmyboring-memory` as an MCP server |
+| Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring` as an MCP server |
+| Codex | `agents/codex/README.md` | MCP only | `~/.codex/mcp.json` | Exposes `ohmyboring` as an MCP server |
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Serial backfill, one session per cron tick |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older sessions |
 | shared | `agents/shared/boring_config.py` | imported by adapters | `boring.json` policy loader |
@@ -156,15 +156,15 @@ Automatic retrieval can explode an agent's context window, so the retrieval surf
 
 ### Other agents
 
-Any MCP-capable agent can use ohmyboring-memory. The repo ships a standard **`.mcp.json`** (root key `mcpServers`) that Claude Code, Cursor, Windsurf, and Claude Desktop all read:
+Any MCP-capable agent can use ohmyboring. The repo ships a standard **`.mcp.json`** (root key `mcpServers`) that Claude Code, Cursor, Windsurf, and Claude Desktop all read:
 
 ```json
-{ "mcpServers": { "ohmyboring-memory": { "type": "http", "url": "http://localhost:7700/mcp" } } }
+{ "mcpServers": { "ohmyboring": { "type": "http", "url": "http://localhost:7700/mcp" } } }
 ```
 
 `install.sh` also writes Cursor's `~/.cursor/mcp.json` and Codex's `~/.codex/mcp.json` automatically when those agents are enabled in `boring.json`.
 
-(VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring-memory http://localhost:7700/mcp`. Compose siblings reach it at `http://boring-drudge:7700/mcp`.)
+(VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. Compose siblings reach it at `http://boring-drudge:7700/mcp`.)
 
 Available tools (10): `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief` (generative — run the LLM) · `corpus_status`, `config_get` (introspection) · `remember`, `classify_repo`, `sync` (write / maintain).
 
@@ -199,9 +199,9 @@ curl -s -X POST http://localhost:7700/mcp \
 
 ### Optional: hermes-agent
 
-[hermes-agent](https://hermes-agent.org) is a third-party autonomous supervisor. It can drive Slack, orchestration, and cron-based backfill through ohmyboring-memory's MCP backend. Build the image separately; `make up` picks it up automatically if it exists.
+[hermes-agent](https://hermes-agent.org) is a third-party autonomous supervisor. It can drive Slack, orchestration, and cron-based backfill through ohmyboring's MCP backend. Build the image separately; `make up` picks it up automatically if it exists.
 
-It is configured per the hermes-agent project's **own docs** (out of scope here) — point its `~/.hermes/config.yaml` at ohmyboring-memory's MCP (`http://boring-drudge:7700/mcp`). What ohmyboring ships wires it up as the Slack assistant; to use it for anything beyond that, build or modify the image yourself.
+It is configured per the hermes-agent project's **own docs** (out of scope here) — point its `~/.hermes/config.yaml` at ohmyboring's MCP (`http://boring-drudge:7700/mcp`). What ohmyboring ships wires it up as the Slack assistant; to use it for anything beyond that, build or modify the image yourself.
 
 ---
 

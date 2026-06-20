@@ -54,7 +54,7 @@ flowchart LR
     CC([Claude Code session])
   end
   subgraph WRITE [WRITE · gated]
-    D["distill-session.py"] --> REM["ohmyboring-memory remember"]
+    D["distill-session.py"] --> REM["ohmyboring remember"]
   end
   WIKI[("vault/wiki<br/>primary memory")]
   subgraph RD [READ · open]
@@ -68,7 +68,7 @@ flowchart LR
 ```
 
 - **Read door** — 빠르고 LLM 불필요. `make ask`, `recall.py`, MCP `recall`이 `vault/wiki`를 직접 읽습니다.
-- **Write door** — gated. `distill-session.py`가 로컬 LLM을 호출하고 ohmyboring-memory의 `remember` MCP tool로 기록합니다.
+- **Write door** — gated. `distill-session.py`가 로컬 LLM을 호출하고 ohmyboring의 `remember` MCP tool로 기록합니다.
 
 ---
 
@@ -114,7 +114,7 @@ flowchart LR
 
 | Command | 설명 |
 |---|---|
-| `make up` | ohmyboring-memory 엔진 실행(hermes-agent 이미지가 있을 때만 함께 실행) |
+| `make up` | ohmyboring 엔진 실행(hermes-agent 이미지가 있을 때만 함께 실행) |
 | `make ollama` | Ollama 실행 확인(필요시 백그라운드 시작) |
 | `make ask Q="..."` | recall + 요약 한 번에 |
 | `make sync` | vault 재적재 |
@@ -130,7 +130,7 @@ flowchart LR
 
 ## 에이전트 어댑터
 
-`agents/`는 외부 에이전트를 ohmyboring-memory 엔진에 연결하는 **호스트측 어댑터**입니다. 모든 어댑터는 동일한 MCP/HTTP 표면을 통해 ohmyboring-memory와 통신하며, 모두 선택 사항입니다.
+`agents/`는 외부 에이전트를 ohmyboring 엔진에 연결하는 **호스트측 어댑터**입니다. 모든 어댑터는 동일한 MCP/HTTP 표면을 통해 ohmyboring와 통신하며, 모두 선택 사항입니다.
 
 기존 `hooks/` 경로는 backward-compatible symlink 세트로 남아 있어, 기존 Claude Code `settings.json` 항목과 cron job이 깨지지 않습니다.
 
@@ -138,8 +138,8 @@ flowchart LR
 |---|---|---|---|---|
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | 세션을 요약해 `remember` 호출 |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | 관련 snippet을 가져와 프롬프트 context 주입 |
-| Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring-memory`를 MCP 서버로 노출 |
-| Codex | `agents/codex/README.md` | MCP only | `~/.codex/mcp.json` | `ohmyboring-memory`를 MCP 서버로 노출 |
+| Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring`를 MCP 서버로 노출 |
+| Codex | `agents/codex/README.md` | MCP only | `~/.codex/mcp.json` | `ohmyboring`를 MCP 서버로 노출 |
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | cron tick마다 한 세션씩 백필 |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 수동 | 오래된 세션 lazy 백필 |
 | shared | `agents/shared/boring_config.py` | 어댑터 import | `boring.json` 정책 로더 |
@@ -156,15 +156,15 @@ flowchart LR
 
 ### 다른 에이전트
 
-MCP를 지원하는 어떤 에이전트도 ohmyboring-memory를 사용할 수 있습니다. 이 repo는 Claude Code, Cursor, Windsurf, Claude Desktop이 모두 읽는 표준 **`.mcp.json`**(root key `mcpServers`)을 제공합니다:
+MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니다. 이 repo는 Claude Code, Cursor, Windsurf, Claude Desktop이 모두 읽는 표준 **`.mcp.json`**(root key `mcpServers`)을 제공합니다:
 
 ```json
-{ "mcpServers": { "ohmyboring-memory": { "type": "http", "url": "http://localhost:7700/mcp" } } }
+{ "mcpServers": { "ohmyboring": { "type": "http", "url": "http://localhost:7700/mcp" } } }
 ```
 
 `install.sh`는 `boring.json`에서 Cursor와 Codex가 활성화되어 있을 때 Cursor의 `~/.cursor/mcp.json`과 Codex의 `~/.codex/mcp.json`도 자동으로 작성합니다.
 
-(VS Code Copilot은 root key `servers`를 쓰는 `.vscode/mcp.json`을 사용합니다. CLI 대안: `claude mcp add --transport http --scope project ohmyboring-memory http://localhost:7700/mcp`. compose sibling 컨테이너는 `http://boring-drudge:7700/mcp`로 접근합니다.)
+(VS Code Copilot은 root key `servers`를 쓰는 `.vscode/mcp.json`을 사용합니다. CLI 대안: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. compose sibling 컨테이너는 `http://boring-drudge:7700/mcp`로 접근합니다.)
 
 사용 가능한 tools (10개): `recall` · `neighbors` · `claims`(검색) · `ask` · `brief`(생성 — LLM 실행) · `corpus_status` · `config_get`(introspection) · `remember` · `classify_repo` · `sync`(쓰기 / 유지보수).
 
@@ -199,9 +199,9 @@ curl -s -X POST http://localhost:7700/mcp \
 
 ### 선택사항: hermes-agent
 
-[hermes-agent](https://hermes-agent.org)는 서드파티 자율 supervisor입니다. Slack, 오케스트레이션, cron 기반 백필을 ohmyboring-memory의 MCP 백엔드로 구동할 수 있습니다. 이미지를 별도로 빌드하면 `make up`이 자동으로 감지합니다.
+[hermes-agent](https://hermes-agent.org)는 서드파티 자율 supervisor입니다. Slack, 오케스트레이션, cron 기반 백필을 ohmyboring의 MCP 백엔드로 구동할 수 있습니다. 이미지를 별도로 빌드하면 `make up`이 자동으로 감지합니다.
 
-설정은 hermes-agent 프로젝트의 **자체 문서** 기준입니다(여기서는 범위 밖) — `~/.hermes/config.yaml`을 ohmyboring-memory의 MCP(`http://boring-drudge:7700/mcp`)로 향하게 하면 됩니다. ohmyboring이 제공하는 구성은 이를 Slack assistant로 연결하는 것까지이며, 그 이상으로 쓰려면 이미지를 직접 빌드하거나 수정하세요.
+설정은 hermes-agent 프로젝트의 **자체 문서** 기준입니다(여기서는 범위 밖) — `~/.hermes/config.yaml`을 ohmyboring의 MCP(`http://boring-drudge:7700/mcp`)로 향하게 하면 됩니다. ohmyboring이 제공하는 구성은 이를 Slack assistant로 연결하는 것까지이며, 그 이상으로 쓰려면 이미지를 직접 빌드하거나 수정하세요.
 
 ---
 

@@ -12,7 +12,7 @@
 Agent, not in the repo). It doesn't hard-fail: when that image is missing, start.sh falls back to
 core-only.
 
-✅ **What worked** — `make up` runs the core wiki-first (ohmyboring-memory RAG engine; hermes-agent joins
+✅ **What worked** — `make up` runs the core wiki-first (ohmyboring RAG engine; hermes-agent joins
 automatically if its image exists, else core-only). pgvector (vector + graph RAG) is opt-in:
 `DRUDGE_VECTOR=on make up` brings up Postgres via `--profile vector`. The host Ollama
 (`ollama serve`) must be up first so the container reaches embeddings/synthesis via `host.docker.internal`.

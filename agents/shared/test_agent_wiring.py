@@ -26,12 +26,12 @@ class WireMcpAgentTest(unittest.TestCase):
             self._patch_cursor(home)
             try:
                 result = agent_wiring.wire_mcp_agent(
-                    "cursor", "ohmyboring-memory", {"type": "http", "url": "http://x/mcp"}
+                    "cursor", "ohmyboring", {"type": "http", "url": "http://x/mcp"}
                 )
                 self.assertTrue(result["changed"])
                 data = json.loads((home / ".cursor/mcp.json").read_text())
                 self.assertEqual(
-                    data["mcpServers"]["ohmyboring-memory"]["url"], "http://x/mcp"
+                    data["mcpServers"]["ohmyboring"]["url"], "http://x/mcp"
                 )
             finally:
                 self._restore_cursor()
@@ -42,9 +42,9 @@ class WireMcpAgentTest(unittest.TestCase):
             self._patch_cursor(home)
             try:
                 server = {"type": "http", "url": "http://x/mcp"}
-                agent_wiring.wire_mcp_agent("cursor", "ohmyboring-memory", server)
+                agent_wiring.wire_mcp_agent("cursor", "ohmyboring", server)
                 result = agent_wiring.wire_mcp_agent(
-                    "cursor", "ohmyboring-memory", server
+                    "cursor", "ohmyboring", server
                 )
                 self.assertFalse(result["changed"])
             finally:
@@ -56,15 +56,15 @@ class WireMcpAgentTest(unittest.TestCase):
             self._patch_cursor(home)
             try:
                 agent_wiring.wire_mcp_agent(
-                    "cursor", "ohmyboring-memory", {"type": "http", "url": "http://old/mcp"}
+                    "cursor", "ohmyboring", {"type": "http", "url": "http://old/mcp"}
                 )
                 result = agent_wiring.wire_mcp_agent(
-                    "cursor", "ohmyboring-memory", {"type": "http", "url": "http://new/mcp"}
+                    "cursor", "ohmyboring", {"type": "http", "url": "http://new/mcp"}
                 )
                 self.assertTrue(result["changed"])
                 data = json.loads((home / ".cursor/mcp.json").read_text())
                 self.assertEqual(
-                    data["mcpServers"]["ohmyboring-memory"]["url"], "http://new/mcp"
+                    data["mcpServers"]["ohmyboring"]["url"], "http://new/mcp"
                 )
             finally:
                 self._restore_cursor()
@@ -78,7 +78,7 @@ class WireMcpAgentTest(unittest.TestCase):
             self._patch_cursor(home)
             try:
                 agent_wiring.wire_mcp_agent(
-                    "cursor", "ohmyboring-memory", {"type": "http", "url": "http://x/mcp"}
+                    "cursor", "ohmyboring", {"type": "http", "url": "http://x/mcp"}
                 )
                 self.assertTrue((home / ".cursor/mcp.json.omb-bak").exists())
                 backup = json.loads((home / ".cursor/mcp.json.omb-bak").read_text())
@@ -95,11 +95,11 @@ class WireMcpAgentTest(unittest.TestCase):
             self._patch_cursor(home)
             try:
                 agent_wiring.wire_mcp_agent(
-                    "cursor", "ohmyboring-memory", {"type": "http", "url": "http://a/mcp"}
+                    "cursor", "ohmyboring", {"type": "http", "url": "http://a/mcp"}
                 )
                 (home / ".cursor/mcp.json.omb-bak").write_text('{"stale": true}')
                 agent_wiring.wire_mcp_agent(
-                    "cursor", "ohmyboring-memory", {"type": "http", "url": "http://b/mcp"}
+                    "cursor", "ohmyboring", {"type": "http", "url": "http://b/mcp"}
                 )
                 backup = json.loads((home / ".cursor/mcp.json.omb-bak").read_text())
                 self.assertTrue(backup["stale"])

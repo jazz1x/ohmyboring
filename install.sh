@@ -48,7 +48,7 @@ if [ "${OMB_WIRE:-1}" = 1 ]; then
   if python3 "$OMB_HOME/agents/shared/agent_wiring.py" \
        --install \
        --omb-home "$OMB_HOME" \
-       --server-name ohmyboring-memory \
+       --server-name ohmyboring \
        --server-url "http://localhost:7700/mcp"; then
     say "Adapters wired. Check .omb-bak files next to any updated agent settings."
   else
