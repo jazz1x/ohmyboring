@@ -13,7 +13,10 @@ import os
 import sys
 import urllib.request
 
-URL = "http://localhost:7700/search"
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+import omb_env
+
+URL = os.environ.get("RECALL_URL") or (omb_env.drudge_url() + "/search")
 # Hard ceiling for automatic prompt injection. Keeps Claude Code's context window from
 # being flooded by recalled memory on every prompt.
 MAX_RESULTS = int(os.environ.get("RECALL_MAX_RESULTS") or "3")

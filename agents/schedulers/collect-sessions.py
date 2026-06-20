@@ -22,7 +22,10 @@ import sys
 import time
 import urllib.request
 
-DRUDGE_URL = os.environ.get("DRUDGE_URL", "http://localhost:7700")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+import omb_env
+
+DRUDGE_URL = os.environ.get("DRUDGE_URL") or omb_env.drudge_url()
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")  # skip small sessions (distill would SKIP anyway)
@@ -64,7 +67,7 @@ def _warm_llm():
     first agent call exceed its timeout → silent SKIP. Best-effort: any failure is ignored (the agent's
     own call still works, just slower). Uses Ollama's native /api/generate keep_alive (no-op elsewhere)."""
     base = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-    model = os.environ.get("DRUDGE_LLM_MODEL", "gemma4:12b")
+    model = os.environ.get("DRUDGE_LLM_MODEL") or omb_env.llm_model()
     body = json.dumps({"model": model, "prompt": "ok", "stream": False, "keep_alive": 1800}).encode()
     try:
         urllib.request.urlopen(

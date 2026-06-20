@@ -43,7 +43,28 @@ newest() {
 
 drudge_down=0
 
-# (a) engine /health — the deterministic write gate the hook POSTs `remember` to.
+# (a0) .env permissions — secrets live here.
+if [ -f "$OMB_HOME/.env" ]; then
+    perms=$(stat -c '%a' "$OMB_HOME/.env" 2>/dev/null || stat -f '%Lp' "$OMB_HOME/.env" 2>/dev/null)
+    case "$perms" in
+      600) ok ".env permissions are $perms" ;;
+      *) bad ".env permissions are $perms — should be 600 (run: chmod 600 $OMB_HOME/.env)" ;;
+    esac
+fi
+
+# (a1) Claude Code hooks — the async write-door into ~/.claude/settings.json.
+settings="$HOME/.claude/settings.json"
+if [ -f "$settings" ]; then
+    if grep -q "$OMB_HOME/hooks/distill-session.py" "$settings" && grep -q "$OMB_HOME/hooks/recall.py" "$settings"; then
+        ok "Claude Code hooks wired in $settings"
+    else
+        bad "Claude Code hooks missing in $settings — run install.sh"
+    fi
+else
+    bad "Claude Code settings not found at $settings — run install.sh"
+fi
+
+# (a2) engine /health — the deterministic write gate the hook POSTs `remember` to.
 if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$DRUDGE_URL/health" 2>/dev/null)" = "200" ]; then
     ok "engine /health 200 ($DRUDGE_URL) — write door reachable"
 else
