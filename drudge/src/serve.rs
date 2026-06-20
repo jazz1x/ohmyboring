@@ -858,7 +858,7 @@ fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, Strin
     // claims too closes the gap where escapes leaked through the structured fields (e.g. a claim value
     // `16 items\n`, wiki-0148). `‹REDACTED›` is non-empty, so scrubbing never reintroduces an empty value.
     let re = redact::build_secret_re().map_err(|e| (-32603_i32, format!("secret regex: {e:#}")))?;
-    let scrub = |s: &str| redact::redact(&re, s);
+    let scrub = |s: &str| redact::redact(re, s);
     let clean = |s: &str| scrub(&vault::normalize_body(s));
     let title = clean(&title);
     let body = scrub(&body); // body already normalized above (needed for the empty-check) — just scrub
