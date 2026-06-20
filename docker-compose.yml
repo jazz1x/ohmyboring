@@ -3,8 +3,8 @@
 #   DRUDGE_VECTOR=on …   # also brings up Postgres (pgvector) via --profile vector
 #   Slack, autonomy, and recall are driven by hermes-agent (Nous Hermes Agent). Models run on host Ollama (gemma4).
 # Compose project name = the working/install dir (oh-my-boring), NOT the ohmyboring brand.
-# Renaming this orphans an already-running stack: container_name is the fixed ohmyboring-*/boring-*, so a
-# project rename makes compose try to recreate ohmyboring/agent/postgres and collide.
+# Renaming this orphans an already-running stack: container_name is the fixed boring-*, so a
+# project rename makes compose try to recreate boring-drudge/agent/postgres and collide.
 name: oh-my-boring
 
 services:
@@ -32,11 +32,11 @@ services:
 
   # ─────────────────────────── ohmyboring (Rust engine) ─────────────────────────
   # Deterministic kernel: embed + ingest, recall (ask/graph), audit, and the remember MCP tool over HTTP + cron.
-  ohmyboring:
+  boring-drudge:
     build:
       context: ./drudge
-    image: ohmyboring
-    container_name: ohmyboring
+    image: boring-drudge
+    container_name: boring-drudge
     restart: unless-stopped
     # Run with an explicit uid:gid so native-Linux bind mounts (host-owned vault) aren't EACCES.
     # Default 10001 = the Dockerfile's drudge uid → macOS (Docker Desktop uid-remaps) is unaffected.

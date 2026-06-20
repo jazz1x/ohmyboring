@@ -34,7 +34,7 @@ _IN_CONTAINER = os.path.isdir("/host/.claude")
 PROJECTS = "/host/.claude/projects" if _IN_CONTAINER else os.path.expanduser("~/.claude/projects")
 # Markers live on a persistent, BOTH-SIDES-visible path: host ~/.hermes ↔ container /opt/data (compose mount).
 MARK_DIR = "/opt/data/ingest-markers" if _IN_CONTAINER else os.path.expanduser("~/.hermes/ingest-markers")
-DRUDGE_URL = os.environ.get("DRUDGE_URL") or ("http://ohmyboring:7700" if _IN_CONTAINER else "http://localhost:7700")
+DRUDGE_URL = os.environ.get("DRUDGE_URL") or ("http://boring-drudge:7700" if _IN_CONTAINER else "http://localhost:7700")
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
 CLAMP = int(os.environ.get("INGEST_CLAMP") or "4000")  # 12B digest ceiling — above this the agent derails
