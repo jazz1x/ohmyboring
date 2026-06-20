@@ -64,7 +64,7 @@ if [ -n "${OMB_CORE_ONLY:-}" ] || ! docker image inspect hermes-agent >/dev/null
   ⓘ hermes-agent image not found — starting CORE ONLY (ohmyboring-memory RAG engine). `make ask` works.
     The optional Slack/agent layer is third-party — build the `hermes-agent` image per its
     official docs (https://hermes-agent.org), point its ~/.hermes/config.yaml at ohmyboring-memory's MCP
-    (http://drudge:7700/mcp), then re-run `make up`. See README "Optional: hermes-agent".
+    (http://ohmyboring:7700/mcp), then re-run `make up`. See README "Optional: hermes-agent".
     Set OMB_CORE_ONLY=1 to skip this message intentionally.
 MSG
   fi
@@ -81,10 +81,17 @@ esac
 mkdir -p vault/raw vault/wiki data/pgdata
 chmod 700 vault vault/raw vault/wiki data data/pgdata 2>/dev/null || true
 
-echo "▶ Building + starting (drudge${AGENT:+ + hermes-agent}${PROFILES:+ + postgres}) …"
-docker compose $PROFILES up -d --build drudge $AGENT
+echo "▶ Building + starting (ohmyboring${AGENT:+ + hermes-agent}${PROFILES:+ + postgres}) …"
+# Some Docker Desktop installs have a broken `docker compose` plugin while the
+# standalone `docker-compose` binary works. Fall back transparently.
+if docker compose version 2>&1 | grep -q "Docker Compose"; then
+  COMPOSE="docker compose"
+else
+  COMPOSE="docker-compose"
+fi
+$COMPOSE $PROFILES up -d --build ohmyboring $AGENT
 
-echo "▶ Waiting for drudge health …"
+echo "▶ Waiting for ohmyboring health …"
 for _ in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:7700/health >/dev/null 2>&1 && break; sleep 3; done
 if ! curl -sf -m3 http://127.0.0.1:7700/health >/dev/null 2>&1; then
   echo "  ✗ drudge did not become healthy within 3 minutes."

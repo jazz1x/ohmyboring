@@ -19,7 +19,7 @@ def omb_home() -> str:
 
 def drudge_url() -> str:
     return os.environ.get("DRUDGE_URL") or (
-        "http://drudge:7700" if _in_container() else "http://localhost:7700"
+        "http://ohmyboring:7700" if _in_container() else "http://localhost:7700"
     )
 
 

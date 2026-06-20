@@ -81,9 +81,14 @@ fi
 
 # (c) Container status — surface crash-loops the HTTP probes alone would miss.
 if command -v docker >/dev/null 2>&1; then
-    ps=$(cd "$OMB_HOME" 2>/dev/null && docker compose ps --format '{{.Name}} {{.Status}}' 2>/dev/null)
+    if docker compose version 2>&1 | grep -q "Docker Compose"; then
+      COMPOSE="docker compose"
+    else
+      COMPOSE="docker-compose"
+    fi
+    ps=$(cd "$OMB_HOME" 2>/dev/null && $COMPOSE ps --format '{{.Name}} {{.Status}}' 2>/dev/null)
     if [ -n "$ps" ]; then
-        ok "containers (docker compose ps in $OMB_HOME):"
+        ok "containers ($COMPOSE ps in $OMB_HOME):"
         printf '%s\n' "$ps" | sed 's/^/    /'
         printf '%s\n' "$ps" | grep -qi 'restarting' \
             && bad "a container is RESTARTING (crash-loop) — check 'make logs'"
