@@ -41,33 +41,21 @@ cd "$OMB_HOME"
 say "Starting the stack (make up) — first run pulls models + builds (a few minutes)…"
 make up
 
-# 4) Wire Claude Code hooks + MCP — the fiddly part this installer exists to automate.
-#    Idempotent + backs up settings.json. OMB_WIRE=0 to skip.
+# 4) Wire enabled agent adapters — the fiddly part this installer exists to automate.
+#    Idempotent + backs up settings files. OMB_WIRE=0 to skip.
 if [ "${OMB_WIRE:-1}" = 1 ]; then
-  say "Wiring Claude Code hooks into $SETTINGS"
-  mkdir -p "$HOME/.claude"
-  [ -f "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
-  if grep -q "$OMB_HOME/hooks/distill-session.py" "$SETTINGS" 2>/dev/null; then
-    warn "hooks already wired — skipping"
+  say "Wiring oh-my-boring adapters for enabled agents (Claude Code hooks + Cursor/Codex MCP)…"
+  if python3 "$OMB_HOME/agents/shared/agent_wiring.py" \
+       --install \
+       --omb-home "$OMB_HOME" \
+       --server-name ohmyboring-memory \
+       --server-url "http://localhost:7700/mcp"; then
+    say "Adapters wired. Check .omb-bak files next to any updated agent settings."
   else
-    cp "$SETTINGS" "$SETTINGS.omb-bak" && warn "backed up settings → $SETTINGS.omb-bak"
-    tmp=$(mktemp)
-    if jq \
-        --arg distill "python3 $OMB_HOME/hooks/distill-session.py" \
-        --arg recall  "python3 $OMB_HOME/hooks/recall.py" '
-        .hooks //= {}
-        | .hooks.SessionEnd = ((.hooks.SessionEnd // []) + [{matcher:"", hooks:[{type:"command", command:$distill, timeout:130, async:true}]}])
-        | .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{matcher:"", hooks:[{type:"command", command:$recall, timeout:10}]}])
-      ' "$SETTINGS" > "$tmp" 2>/dev/null && mv "$tmp" "$SETTINGS"; then
-      say "Hooks wired: SessionEnd → distill, UserPromptSubmit → recall."
-    else
-      rm -f "$tmp"
-      warn "Could not edit settings.json automatically — add the SessionEnd/UserPromptSubmit hooks manually (see README 'Agent adapters')."
-    fi
+    warn "Could not wire some adapters automatically — add hooks/MCP settings manually (see README 'Agent adapters')."
   fi
-  warn "MCP: the repo ships .mcp.json (ohmyboring-memory @ http://localhost:7700/mcp) for project scope. Global: claude mcp add --transport http --scope user ohmyboring-memory http://localhost:7700/mcp"
 else
-  warn "OMB_WIRE=0 — skipped Claude Code wiring. See README 'Agent adapters' to add hooks + .mcp.json yourself."
+  warn "OMB_WIRE=0 — skipped agent wiring. See README 'Agent adapters' to add hooks + .mcp.json yourself."
 fi
 
 printf '\n'

@@ -56,12 +56,27 @@
         "type": "object",
         "required": ["id", "enabled", "format", "paths"],
         "properties": {
-          "id": { "type": "string" },
+          "id": {
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "cursor",
+              "codex",
+              "windsurf",
+              "claude-desktop",
+              "hermes-agent"
+            ]
+          },
           "enabled": { "type": "boolean", "default": true },
           "format": { "type": "string" },
           "paths": {
             "type": "array",
             "items": { "type": "string" }
+          },
+          "adapter": {
+            "type": "string",
+            "enum": ["session-end", "prompt-submit", "mcp-only", "cron"],
+            "description": "How this agent is wired. Inferred when omitted."
           }
         },
         "additionalProperties": false

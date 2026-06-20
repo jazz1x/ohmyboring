@@ -12,8 +12,19 @@
     {
       "id": "claude-code",
       "enabled": true,
+      "adapter": "session-end",
       "format": "claude-json",
       "paths": ["~/.claude/projects"]
+    },
+    {
+      "id": "cursor",
+      "enabled": true,
+      "adapter": "mcp-only"
+    },
+    {
+      "id": "codex",
+      "enabled": true,
+      "adapter": "mcp-only"
     }
   ]
 }
