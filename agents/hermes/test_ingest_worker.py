@@ -26,9 +26,7 @@ class _FakeEngine(server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            body = json.dumps(
-                {"status": "ok", "vector": self.vector}
-            ).encode()
+            body = json.dumps({"status": "ok", "vector": self.vector}).encode()
         elif self.path == "/audit":
             body = json.dumps({"total_chunks": self.total_chunks}).encode()
         else:
@@ -60,17 +58,33 @@ class ReconcileTest(unittest.TestCase):
         self.url = f"http://127.0.0.1:{port}"
         ingest_worker.DRUDGE_URL = self.url
 
-    def _pending(self, sid, before):
+    def _pending(self, sid, before, attempts=0):
         path = Path(self.tmp.name) / f"{sid}.pending"
-        path.write_text(f"{sid}\n{before}\n")
+        path.write_text(f"{sid}\n{before}\n{attempts}\n")
+
+    def _read_attempts(self, sid):
+        path = Path(self.tmp.name) / f"{sid}.pending"
+        if not path.exists():
+            return None
+        parts = path.read_text().strip().split("\n")
+        return int(parts[2]) if len(parts) > 2 else 0
 
     def _done_exists(self, sid):
         return (Path(self.tmp.name) / f"{sid}.ts").exists()
 
-    def test_wiki_mode_promotes_pending_to_done(self):
+    def test_wiki_mode_increments_attempts(self):
         _FakeEngine.vector = False
         _FakeEngine.total_chunks = 0
-        self._pending("s1", 0)
+        self._pending("s1", 0, attempts=0)
+        ingest_worker._reconcile()
+        self.assertFalse(self._done_exists("s1"))
+        self.assertEqual(self._read_attempts("s1"), 1)
+
+    def test_wiki_mode_promotes_pending_to_done_after_max_attempts(self):
+        _FakeEngine.vector = False
+        _FakeEngine.total_chunks = 0
+        # attempts == MAX means "this is the last allowed try" → reconcile marks done.
+        self._pending("s1", 0, attempts=ingest_worker.MAX_WIKI_ATTEMPTS)
         ingest_worker._reconcile()
         self.assertTrue(self._done_exists("s1"))
 
@@ -88,11 +102,13 @@ class ReconcileTest(unittest.TestCase):
         ingest_worker._reconcile()
         self.assertTrue(self._done_exists("s3"))
 
-    def test_health_failure_treated_as_wiki(self):
+    def test_health_failure_treated_as_wiki_and_retries(self):
         ingest_worker.DRUDGE_URL = "http://127.0.0.1:1"  # unreachable
         self._pending("s4", 0)
         ingest_worker._reconcile()
-        self.assertTrue(self._done_exists("s4"))
+        # Unreachable engine falls back to wiki-first → attempts incremented, not done yet.
+        self.assertFalse(self._done_exists("s4"))
+        self.assertEqual(self._read_attempts("s4"), 1)
 
 
 if __name__ == "__main__":
