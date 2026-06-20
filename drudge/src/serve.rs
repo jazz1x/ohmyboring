@@ -352,6 +352,7 @@ fn mcp_tools_list() -> Value {
                     "concepts": {"type": "array", "items": {"type": "string"}, "description": "key technical concepts/patterns (≤6)"},
                     "origin": {"type": "string", "enum": ["personal", "company", "mirror", "community"], "description": "default personal"},
                     "repo": {"type": "string", "description": "optional repo slug → becomes the project + a repo/<slug> tag"},
+                    "omb_session_id": {"type": "string", "description": "optional ephemeral ingestion marker — include only when requested by the ingestion worker"},
                     "claims": {
                         "type": "array",
                         "description": "durable facts/decisions as (subject,predicate,value) triples (a new value supersedes the old)",
@@ -876,6 +877,15 @@ fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, Strin
     .to_owned();
     let repo = get_str("repo");
 
+    // Ephemeral ingestion queue marker (not part of the semantic graph). Carried transparently in
+    // frontmatter so the hermes/cron worker can confirm per-session idempotency.
+    let omb_session_id = args
+        .and_then(|a| a.get("omb_session_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
     // tags: Obsidian-safe, ≤6; prepend repo/<slug> as the category axis.
     let mut tags: Vec<String> = get_arr("tags")
         .iter()
@@ -915,6 +925,7 @@ fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, Strin
         tools: get_arr("tools").iter().map(|t| clean(t)).collect(),
         concepts: get_arr("concepts").iter().map(|c| clean(c)).collect(),
         claims,
+        omb_session_id,
     };
     Ok(RememberNote { front, body })
 }

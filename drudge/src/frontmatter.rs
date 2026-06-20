@@ -32,6 +32,9 @@ pub struct FrontMatter {
     pub tools: Vec<String>,
     pub concepts: Vec<String>,
     pub claims: Vec<Claim>,
+    /// Ephemeral ingestion queue marker. Not part of the semantic graph; carried only so the
+    /// hermes/cron worker can confirm that a specific session was remembered. May be absent.
+    pub omb_session_id: Option<String>,
 }
 
 /// One temporal fact — `(subject, predicate, value)`. A new value supersedes the old (see `store::upsert_claim`).
