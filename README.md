@@ -26,7 +26,7 @@ make up
 make ask Q="how did I fix the docker build cache problem?"
 ```
 
-> Requires **Docker**, **Ollama** (or any OpenAI-compatible server), **Python 3**, **jq**, and **curl**.
+> Requires **Docker**, **Ollama** (or any OpenAI-compatible server), **Python 3**, **jq**, **curl**, **git**, and **make**.
 
 ---
 
