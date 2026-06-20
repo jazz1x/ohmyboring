@@ -65,7 +65,7 @@ if [ "${OMB_WIRE:-1}" = 1 ]; then
       warn "Could not edit settings.json automatically — add the SessionEnd/UserPromptSubmit hooks manually (see README 'Agent adapters')."
     fi
   fi
-  warn "MCP: the repo ships .mcp.json (drudge @ http://localhost:7700/mcp) for project scope. Global: claude mcp add --transport http --scope user drudge http://localhost:7700/mcp"
+  warn "MCP: the repo ships .mcp.json (ohmyboring-memory @ http://localhost:7700/mcp) for project scope. Global: claude mcp add --transport http --scope user ohmyboring-memory http://localhost:7700/mcp"
 else
   warn "OMB_WIRE=0 — skipped Claude Code wiring. See README 'Agent adapters' to add hooks + .mcp.json yourself."
 fi

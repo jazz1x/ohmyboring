@@ -296,7 +296,7 @@ fn mcp_initialize(req: &Value) -> Value {
     json!({
         "protocolVersion": pv,
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "drudge", "version": env!("CARGO_PKG_VERSION")}
+        "serverInfo": {"name": "ohmyboring-memory", "version": env!("CARGO_PKG_VERSION")}
     })
 }
 

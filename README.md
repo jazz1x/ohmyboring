@@ -54,7 +54,7 @@ flowchart LR
     CC([Claude Code session])
   end
   subgraph WRITE [WRITE · gated]
-    D["distill-session.py"] --> REM["remember via drudge"]
+    D["distill-session.py"] --> REM["remember via ohmyboring-memory"]
   end
   WIKI[("vault/wiki<br/>primary memory")]
   subgraph RD [READ · open]
@@ -68,7 +68,7 @@ flowchart LR
 ```
 
 - **Read door** — fast, no LLM. `make ask`, `recall.py`, MCP `recall` read `vault/wiki` directly.
-- **Write door** — gated. `distill-session.py` calls the local LLM and writes through drudge's deterministic `remember` MCP tool.
+- **Write door** — gated. `distill-session.py` calls the local LLM and writes through ohmyboring-memory's deterministic `remember` MCP tool.
 
 ---
 
@@ -114,7 +114,7 @@ Secrets and runtime switches live in **`.env`**:
 
 | Command | Description |
 |---|---|
-| `make up` | set up + start drudge (hermes-agent joins only if its image exists) |
+| `make up` | set up + start the ohmyboring-memory engine (hermes-agent joins only if its image exists) |
 | `make ollama` | ensure Ollama is running (start in background if needed) |
 | `make ask Q="..."` | one-shot recall + synthesis |
 | `make sync` | deterministic re-ingest of the vault |
@@ -122,7 +122,7 @@ Secrets and runtime switches live in **`.env`**:
 | `make collect [N=1]` | lazy backfill of past sessions |
 | `make hermes-build` | clone/build the optional hermes-agent image |
 | `make smoke` | end-to-end smoke test |
-| `make logs` | drudge logs |
+| `make logs` | engine logs |
 | `make guard` | fmt + clippy + test + Python py-compile |
 | `make down` | stop containers |
 
@@ -130,7 +130,7 @@ Secrets and runtime switches live in **`.env`**:
 
 ## Agent adapters
 
-`agents/` contains the **host-side adapters** that connect external agents to the drudge engine. Every adapter talks to drudge through the same MCP/HTTP surface; none are required.
+`agents/` contains the **host-side adapters** that connect external agents to the ohmyboring-memory engine. Every adapter talks to ohmyboring-memory through the same MCP/HTTP surface; none are required.
 
 The old `hooks/` path still works as a set of backward-compatible symlinks, so existing Claude Code `settings.json` entries and cron jobs don't break.
 
@@ -153,13 +153,13 @@ Automatic retrieval can explode an agent's context window, so the retrieval surf
 
 ### Other agents
 
-Any MCP-capable agent can use drudge. The repo ships a standard **`.mcp.json`** (root key `mcpServers`) that Claude Code, Cursor, Windsurf, and Claude Desktop all read:
+Any MCP-capable agent can use ohmyboring-memory. The repo ships a standard **`.mcp.json`** (root key `mcpServers`) that Claude Code, Cursor, Windsurf, and Claude Desktop all read:
 
 ```json
-{ "mcpServers": { "drudge": { "type": "http", "url": "http://localhost:7700/mcp" } } }
+{ "mcpServers": { "ohmyboring-memory": { "type": "http", "url": "http://localhost:7700/mcp" } } }
 ```
 
-(VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project drudge http://localhost:7700/mcp`. Compose siblings reach it at `http://drudge:7700/mcp`.)
+(VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring-memory http://localhost:7700/mcp`. Compose siblings reach it at `http://drudge:7700/mcp`.)
 
 Available tools (10): `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief` (generative — run the LLM) · `corpus_status`, `config_get` (introspection) · `remember`, `classify_repo`, `sync` (write / maintain).
 
@@ -194,9 +194,9 @@ curl -s -X POST http://localhost:7700/mcp \
 
 ### Optional: hermes-agent
 
-[hermes-agent](https://hermes-agent.org) is a third-party autonomous supervisor. It can drive Slack, orchestration, and cron-based backfill through drudge's MCP backend. Build the image separately; `make up` picks it up automatically if it exists.
+[hermes-agent](https://hermes-agent.org) is a third-party autonomous supervisor. It can drive Slack, orchestration, and cron-based backfill through ohmyboring-memory's MCP backend. Build the image separately; `make up` picks it up automatically if it exists.
 
-It is configured per the hermes-agent project's **own docs** (out of scope here) — point its `~/.hermes/config.yaml` at drudge's MCP (`http://drudge:7700/mcp`). What ohmyboring ships wires it up as the Slack assistant; to use it for anything beyond that, build or modify the image yourself.
+It is configured per the hermes-agent project's **own docs** (out of scope here) — point its `~/.hermes/config.yaml` at ohmyboring-memory's MCP (`http://drudge:7700/mcp`). What ohmyboring ships wires it up as the Slack assistant; to use it for anything beyond that, build or modify the image yourself.
 
 ---
 
@@ -246,7 +246,7 @@ It is configured per the hermes-agent project's **own docs** (out of scope here)
 
 ## Periodic sync
 
-`drudge` schedules a deterministic sync every 4 hours, but if you edit `vault/wiki/` by hand or want fresher vector/graph data, run:
+The engine schedules a deterministic sync every 4 hours, but if you edit `vault/wiki/` by hand or want fresher vector/graph data, run:
 
 ```bash
 make sync

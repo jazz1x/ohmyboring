@@ -2,7 +2,7 @@
 """Claude Code SessionEnd/Stop hook — distill a session into memory via the local LLM.
 
 Kernel: distillation now happens on the host, directly against the OpenAI-compatible
-LLM endpoint (Ollama/LM Studio/…). The engine (drudge) remains the deterministic write
+LLM endpoint (Ollama/LM Studio/…). The ohmyboring-memory engine remains the deterministic write
 gate: this hook only generates the curated note and calls the `remember` MCP tool.
 
 This removes the hermes-agent dependency for the write door and makes the core
@@ -277,7 +277,7 @@ def _call_llm(prompt):
 
 
 def _call_remember(title, body, origin, repo, tags, tools, concepts, claims):
-    """Call drudge's remember MCP tool. Return True if the note was written."""
+    """Call ohmyboring-memory's remember MCP tool. Return True if the note was written."""
     arguments = {
         "title": title,
         "body": body,
@@ -324,7 +324,7 @@ def _call_remember(title, body, origin, repo, tags, tools, concepts, claims):
 
 
 def distill_and_remember(transcript_path, origin, repo):
-    """Distill the transcript via local LLM and write it through drudge's remember tool."""
+    """Distill the transcript via local LLM and write it through ohmyboring-memory's remember tool."""
     text = extract(transcript_path)
     if len(text) > 12000:
         text = text[:5000] + "\n…(truncated)…\n" + text[-7000:]

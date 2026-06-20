@@ -43,11 +43,11 @@ newest() {
 
 drudge_down=0
 
-# (a) drudge /health — the deterministic write gate the hook POSTs `remember` to.
+# (a) engine /health — the deterministic write gate the hook POSTs `remember` to.
 if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$DRUDGE_URL/health" 2>/dev/null)" = "200" ]; then
-    ok "drudge /health 200 ($DRUDGE_URL) — write door reachable"
+    ok "engine /health 200 ($DRUDGE_URL) — write door reachable"
 else
-    bad "drudge /health unreachable ($DRUDGE_URL) — distilled sessions are being DROPPED"
+    bad "engine /health unreachable ($DRUDGE_URL) — distilled sessions are being DROPPED"
     drudge_down=1
 fi
 
