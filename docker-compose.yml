@@ -84,6 +84,7 @@ services:
       - ${HOME}/.hermes:/opt/data         # persists config / credentials / session memory (autonomy-augmentation layer)
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: ingest-worker.py only globs /host/.claude/projects)
       - ${HOME}/.cache/boring-distill:/host/.cache/boring-distill  # shared SessionEnd hook markers (visible to host and container)
+      - ./vault:/vault:ro                   # read-only vault so ingest-worker can verify session-id markers in wiki notes
       - ./boring.json:/host/boring.json:ro  # policy config for ingest-worker.py (note_lang, repo rules)
     extra_hosts:
       - "host.docker.internal:host-gateway"   # Mac: reach host Ollama (gemma4)
