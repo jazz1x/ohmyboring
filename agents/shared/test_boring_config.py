@@ -70,11 +70,51 @@ def test_discover_path_targets_repo_root():
         )
 
 
+def test_source_dirs_filter_by_adapter_and_agent():
+    cfg = {
+        "agents": [
+            {"id": "claude-code", "enabled": True, "adapter": "session-end", "paths": ["~/a"]},
+            {"id": "codex", "enabled": True, "adapter": "mcp-only"},
+            {"id": "cursor", "enabled": False, "adapter": "session-end", "paths": ["~/skip"]},
+        ]
+    }
+    # Monkey-patch load() for the duration of the test.
+    old_load = boring_config.load
+    try:
+        boring_config.load = lambda: cfg
+        assert boring_config.source_dirs() == [os.path.expanduser("~/a")]
+        assert boring_config.source_dirs(adapter="session-end") == [os.path.expanduser("~/a")]
+        assert boring_config.source_dirs(adapter="mcp-only") == []
+        assert boring_config.source_dirs(agent_id="codex") == []
+        assert boring_config.source_dirs(agent_id="claude-code") == [os.path.expanduser("~/a")]
+    finally:
+        boring_config.load = old_load
+
+
+def test_agent_config_lookup():
+    cfg = {
+        "agents": [
+            {"id": "claude-code", "enabled": True, "adapter": "session-end", "format": "claude-json"},
+            {"id": "cursor", "enabled": False, "adapter": "mcp-only"},
+        ]
+    }
+    old_load = boring_config.load
+    try:
+        boring_config.load = lambda: cfg
+        assert boring_config.agent_config("claude-code").get("format") == "claude-json"
+        assert boring_config.agent_config("cursor") == {}  # disabled
+        assert boring_config.agent_config("nonexistent") == {}
+    finally:
+        boring_config.load = old_load
+
+
 def main():
     tests = [
         test_repo_root_is_dir_with_example,
         test_repo_root_is_not_the_agents_dir,
         test_discover_path_targets_repo_root,
+        test_source_dirs_filter_by_adapter_and_agent,
+        test_agent_config_lookup,
     ]
     for t in tests:
         t()
