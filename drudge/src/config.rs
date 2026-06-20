@@ -126,7 +126,9 @@ pub struct AgentSource {
     pub id: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
     pub format: String,
+    #[serde(default)]
     pub paths: Vec<String>,
 }
 

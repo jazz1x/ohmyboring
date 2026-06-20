@@ -54,7 +54,7 @@
       "default": [],
       "items": {
         "type": "object",
-        "required": ["id", "enabled", "format", "paths"],
+        "required": ["id", "enabled"],
         "properties": {
           "id": {
             "type": "string",
