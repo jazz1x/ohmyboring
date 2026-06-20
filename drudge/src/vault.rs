@@ -1088,8 +1088,8 @@ pub fn normalize_body(body: &str) -> String {
     strip_trailing_empty_heading(out.trim()).trim().to_owned()
 }
 
-/// Scan vault/wiki for the highest `wiki-NNNN` id and return the next one (`wiki-{:04}`). Read-only IO.
-pub fn next_wiki_id(wiki_dir: &Path) -> Result<String> {
+/// Scan vault/wiki for the highest `wiki-NNNN` id and return the next candidate.
+fn next_wiki_id(wiki_dir: &Path) -> Result<u32> {
     let mut max_id: u32 = 0;
     if wiki_dir.exists() {
         for entry in std::fs::read_dir(wiki_dir)
@@ -1107,7 +1107,38 @@ pub fn next_wiki_id(wiki_dir: &Path) -> Result<String> {
             }
         }
     }
-    Ok(format!("wiki-{:04}", max_id + 1))
+    Ok(max_id + 1)
+}
+
+/// Atomically allocate the next `wiki-NNNN.md` path in `wiki_dir`.
+///
+/// Uses `O_CREAT | O_EXCL` so concurrent `remember` calls cannot allocate the
+/// same id. On collision (another caller won the race) we retry with the next
+/// integer until we successfully create a fresh file. The returned path points
+/// to an empty file that the caller can write into.
+pub fn allocate_wiki_path(wiki_dir: &Path) -> Result<(String, PathBuf)> {
+    std::fs::create_dir_all(wiki_dir)
+        .with_context(|| format!("failed to create wiki dir: {}", wiki_dir.display()))?;
+    let mut n = next_wiki_id(wiki_dir)?;
+    loop {
+        let id = format!("wiki-{n:04}");
+        let path = wiki_dir.join(format!("{id}.md"));
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                drop(file);
+                return Ok((id, path));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("failed to allocate wiki path: {}", path.display())));
+            }
+        }
+    }
 }
 
 /// Render a remember-note into wiki `.md` content (pure). Frontmatter satisfies the lint schema

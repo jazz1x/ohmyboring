@@ -313,13 +313,17 @@ fn split_tokens(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Agent-control write path: upsert a repo classification rule into boring.json on disk (matched by
-/// the `match` field). Takes effect on the next config load (sync/restart). Loud (`Err`) on missing
-/// file / parse failure / write failure — never a silent swallow (ROP). Edits via `serde_json::Value`
-/// so unknown fields (agents, schema, future keys) are preserved verbatim.
-pub fn upsert_repo_rule(match_: &str, origin: &str, name: Option<&str>) -> Result<PathBuf> {
-    let path = discover_path().context("boring.json not found (set BORING_CONFIG / OMB_HOME)")?;
-    let txt = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+/// Agent-control write path: upsert a repo classification rule into a specific `boring.json`
+/// path (matched by the `match` field). Takes effect on the next config load (sync/restart).
+/// Loud (`Err`) on missing file / parse failure / write failure — never a silent swallow (ROP).
+/// Edits via `serde_json::Value` so unknown fields (agents, schema, future keys) are preserved verbatim.
+pub fn upsert_repo_rule_at(
+    match_: &str,
+    origin: &str,
+    name: Option<&str>,
+    path: &Path,
+) -> Result<PathBuf> {
+    let txt = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut v: serde_json::Value =
         serde_json::from_str(&txt).with_context(|| format!("parse {}", path.display()))?;
     let repos = v
@@ -341,11 +345,12 @@ pub fn upsert_repo_rule(match_: &str, origin: &str, name: Option<&str>) -> Resul
         "{}\n",
         serde_json::to_string_pretty(&v).context("serialize boring.json")?
     );
-    std::fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
-    Ok(path)
+    std::fs::write(path, out).with_context(|| format!("write {}", path.display()))?;
+    Ok(path.to_path_buf())
 }
 
-fn discover_path() -> Option<PathBuf> {
+/// Discover the path to `boring.json` from the canonical env overrides.
+pub fn discover_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("BORING_CONFIG") {
         return Some(PathBuf::from(p));
     }
