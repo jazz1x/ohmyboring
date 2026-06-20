@@ -4,6 +4,8 @@
 #   1) rustfmt   — formatting (linear readability)
 #   2) clippy -D — §A no-unwrap/expect/panic, todo, unreachable + ADT (wildcard), pedantic
 #   3) test      — guardrail tests
+#   4) py-compile — syntax gate for all Python touched by pre-commit
+#   5) py-unit   — network-free Python regression tests
 # No bypassing (git commit --no-verify) — on failure, fix the root cause (don't paper over the symptom).
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,6 +17,10 @@ cargo clippy --quiet --all-targets -- -D warnings
 echo "3) test…"
 cargo test --quiet
 cd "$ROOT"
-echo "4) python adapters py-compile…"
-find agents hooks -name '*.py' -type f -print0 | xargs -0 -n1 python3 -m py_compile
+echo "4) python py-compile (agents + hooks + scripts + data/eval)…"
+find agents hooks scripts data/eval -name '*.py' -type f -print0 | xargs -0 -n1 python3 -m py_compile
+echo "5) python unit tests…"
+python3 agents/shared/test_boring_config.py
+python3 agents/claude-code/test_hooks.py
+python3 agents/hermes/test_ingest_worker.py
 echo "✅ 구조 게이트 통과 — 컴파일러/clippy/test + Python adapters 무위반."
