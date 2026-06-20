@@ -147,6 +147,10 @@ pub struct AgentSource {
     pub format: String,
     #[serde(default)]
     pub paths: Vec<String>,
+    /// Optional override for the agent's settings file path (e.g. MCP config or Claude Code
+    /// settings.json). When absent, the wiring script uses per-agent defaults.
+    #[serde(default)]
+    pub settings_path: Option<String>,
 }
 
 impl Default for AgentSource {
@@ -157,6 +161,7 @@ impl Default for AgentSource {
             adapter: Adapter::default(),
             format: String::new(),
             paths: Vec::new(),
+            settings_path: None,
         }
     }
 }
@@ -238,6 +243,7 @@ impl BoringConfig {
                     adapter: Adapter::SessionEnd,
                     format: "claude-json".to_owned(),
                     paths,
+                    settings_path: None,
                 });
             }
         }
@@ -539,6 +545,7 @@ mod tests {
                     adapter: Adapter::SessionEnd,
                     format: "claude-json".into(),
                     paths: vec!["~/.claude/projects".into()],
+                    settings_path: None,
                 },
                 AgentSource {
                     id: "b".into(),
@@ -546,6 +553,7 @@ mod tests {
                     adapter: Adapter::SessionEnd,
                     format: "claude-json".into(),
                     paths: vec!["~/other".into()],
+                    settings_path: None,
                 },
             ],
             ..Default::default()
