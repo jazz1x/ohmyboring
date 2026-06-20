@@ -2,7 +2,7 @@
 # e2e.sh — wiki-mode (DRUDGE_VECTOR=off) end-to-end against a RUNNING stack.
 #   make e2e   or   ./scripts/e2e.sh
 #
-# Exercises the live MCP surface (ohmyboring-memory /mcp, JSON-RPC 2.0) the way an agent does:
+# Exercises the live MCP surface (ohmyboring /mcp, JSON-RPC 2.0) the way an agent does:
 #   1. remember  — write a throwaway, clearly-namespaced note via the `remember` tool
 #   2. recall    — read it back via the `recall` tool; assert the body round-trips
 #   3. neighbors — assert a vector-only tool errors with code -32603 when vector is off

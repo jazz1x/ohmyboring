@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "ohmyboring-memory": {
+    "ohmyboring": {
       "type": "http",
       "url": "http://localhost:7700/mcp"
     }

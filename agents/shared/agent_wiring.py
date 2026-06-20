@@ -185,7 +185,7 @@ def main():
     parser.add_argument(
         "--install", action="store_true", help="Install/update settings for enabled agents"
     )
-    parser.add_argument("--server-name", default="ohmyboring-memory")
+    parser.add_argument("--server-name", default="ohmyboring")
     parser.add_argument("--server-url", default="http://localhost:7700/mcp")
     parser.add_argument("--omb-home", default=OMB_HOME)
     args = parser.parse_args()
