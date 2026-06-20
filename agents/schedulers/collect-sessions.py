@@ -40,7 +40,8 @@ MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
 def _marked(session_id):
     safe = re.sub(r"[^A-Za-z0-9_-]", "", session_id) or "nosession"
     base = os.path.join(MARK_DIR, safe)
-    # Both done markers (.ts) and hermes pending markers (.pending) mean "already queued/handled".
+    # Done markers (.ts) and hermes pending markers (.pending) mean "already queued/handled".
+    # .retry markers are left by a failed SessionEnd/Stop hook and MUST be backfilled.
     return os.path.exists(f"{base}.ts") or os.path.exists(f"{base}.pending")
 
 

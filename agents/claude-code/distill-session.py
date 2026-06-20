@@ -15,9 +15,11 @@ Install (persistence) — ~/.claude/settings.json:
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 # Allow import of shared agent policy library regardless of how this script is invoked.
@@ -56,12 +58,25 @@ def _throttled(session_id):
         return False
 
 
-def _mark(session_id):
+def _mark(session_id, pending=False):
+    """Write a done marker (.ts) or a retry marker (.retry).
+
+    A .retry marker tells collect-sessions.py (the backfill scheduler) that this
+    SessionEnd/Stop hook failed transiently and the session should be retried later.
+    It is distinct from hermes-agent's .pending markers so the two queues don't collide.
+    """
     if not session_id:
         return
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", session_id) or "nosession"
+    suffix = ".retry" if pending else ".ts"
+    path = os.path.join(MARK_DIR, f"{safe}{suffix}")
     try:
         os.makedirs(MARK_DIR, exist_ok=True)
-        with open(_mark_path(session_id), "w", encoding="utf-8") as f:
+        # A done marker supersedes a retry marker and vice versa.
+        other = os.path.join(MARK_DIR, f"{safe}.ts" if pending else f"{safe}.retry")
+        if os.path.exists(other):
+            os.remove(other)
+        with open(path, "w", encoding="utf-8") as f:
             f.write(str(time.time()))
     except OSError:
         pass
@@ -278,7 +293,12 @@ def _call_llm(prompt):
 
 
 def _call_remember(title, body, origin, repo, tags, tools, concepts, claims):
-    """Call ohmyboring's remember MCP tool. Return True if the note was written."""
+    """Call ohmyboring's remember MCP tool.
+
+    Retries transient failures (5xx, connection errors, timeouts) a bounded number of times
+    so a momentary engine hiccup does not drop the session. Permanent failures (4xx, MCP
+    error, missing "remembered" ack) are not retried.
+    """
     arguments = {
         "title": title,
         "body": body,
@@ -303,25 +323,55 @@ def _call_remember(title, body, origin, repo, tags, tools, concepts, claims):
         headers={"content-type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            data = json.loads(r.read().decode("utf-8"))
-    except Exception as e:
-        print(f"[distill-session] remember call failed: {e}", file=sys.stderr)
-        return False
 
-    if data.get("error"):
-        print(f"[distill-session] remember error: {data['error']}", file=sys.stderr)
-        return False
+    max_retries = int(os.environ.get("DISTILL_REMEMBER_RETRIES") or "2")
+    timeout = int(os.environ.get("DISTILL_REMEMBER_TIMEOUT") or "45")
 
-    result = data.get("result", {})
-    content = result.get("content", [])
-    text = ""
-    for item in content if isinstance(content, list) else []:
-        if isinstance(item, dict) and item.get("type") == "text":
-            text += item.get("text", "")
-    print(f"[distill-session] {text}", file=sys.stderr)
-    return "remembered" in text
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if 500 <= e.code < 600 and attempt < max_retries:
+                print(
+                    f"[distill-session] remember attempt {attempt + 1} got HTTP {e.code}, retrying...",
+                    file=sys.stderr,
+                )
+                time.sleep(1 << attempt)
+                continue
+            print(f"[distill-session] remember call failed: {e}", file=sys.stderr)
+            return False
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+            if attempt < max_retries:
+                print(
+                    f"[distill-session] remember attempt {attempt + 1} failed transiently ({e}), retrying...",
+                    file=sys.stderr,
+                )
+                time.sleep(1 << attempt)
+                continue
+            print(
+                f"[distill-session] remember call failed after {max_retries + 1} attempts: {e}",
+                file=sys.stderr,
+            )
+            return False
+        except Exception as e:
+            print(f"[distill-session] remember call failed: {e}", file=sys.stderr)
+            return False
+
+        if data.get("error"):
+            print(f"[distill-session] remember error: {data['error']}", file=sys.stderr)
+            return False
+
+        result = data.get("result", {})
+        content = result.get("content", [])
+        text = ""
+        for item in content if isinstance(content, list) else []:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text += item.get("text", "")
+        print(f"[distill-session] {text}", file=sys.stderr)
+        return "remembered" in text
+
+    return False
 
 
 def distill_and_remember(transcript_path, origin, repo):
@@ -427,6 +477,8 @@ def main():
     repo = repo_slug(cwd)
     if distill_and_remember(transcript_path, origin, repo):
         _mark(session_id)
+    else:
+        _mark(session_id, pending=True)
 
 
 if __name__ == "__main__":
