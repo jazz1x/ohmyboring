@@ -160,12 +160,20 @@ def wire_mcp_agent(agent_id: str, server_name: str, server_config: dict) -> dict
 
 def install(enabled_agents, server_name, server_config):
     results = []
+    failed = False
     for agent_id in enabled_agents:
         if agent_id not in AGENTS:
-            print(
-                f"[omb-wire] unsupported agent '{agent_id}' — skipping",
-                file=sys.stderr,
-            )
+            # hermes-agent is a containerized supervisor, not a host-side setting file.
+            if agent_id == "hermes-agent":
+                print(
+                    f"[omb-wire] '{agent_id}' does not need host-side wiring — skipping",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[omb-wire] unsupported agent '{agent_id}' — skipping",
+                    file=sys.stderr,
+                )
             continue
         try:
             if agent_id == "claude-code":
@@ -174,7 +182,8 @@ def install(enabled_agents, server_name, server_config):
                 results.append(wire_mcp_agent(agent_id, server_name, server_config))
         except Exception as e:
             print(f"[omb-wire] failed to wire {agent_id}: {e}", file=sys.stderr)
-    return results
+            failed = True
+    return results, failed
 
 
 def main():
@@ -198,10 +207,12 @@ def main():
 
     if args.install:
         server = {"type": "http", "url": args.server_url}
-        results = install(enabled, args.server_name, server)
+        results, failed = install(enabled, args.server_name, server)
         for r in results:
             status = "updated" if r["changed"] else "already wired"
             print(f"[omb-wire] {r['agent']}: {status} ({r['path']})")
+        if failed:
+            sys.exit(1)
     else:
         print("enabled agents:", ", ".join(enabled) or "(none)")
 

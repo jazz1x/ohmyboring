@@ -156,13 +156,17 @@ Automatic retrieval can explode an agent's context window, so the retrieval surf
 
 ### Other agents
 
-Any MCP-capable agent can use ohmyboring. The repo ships a standard **`.mcp.json`** (root key `mcpServers`) that Claude Code, Cursor, Windsurf, and Claude Desktop all read:
+Any MCP-capable agent can use ohmyboring. The repo ships a standard **`.mcp.json`** (root key `mcpServers`) that Claude Code, Cursor, Windsurf, and Claude Desktop read when it is placed in a project directory or user config path:
 
 ```json
 { "mcpServers": { "ohmyboring": { "type": "http", "url": "http://localhost:7700/mcp" } } }
 ```
 
-`install.sh` also writes Cursor's `~/.cursor/mcp.json` and Codex's `~/.codex/mcp.json` automatically when those agents are enabled in `boring.json`.
+`install.sh` automatically wires:
+- Claude Code hooks in `~/.claude/settings.json`
+- Cursor's `~/.cursor/mcp.json` and Codex's `~/.codex/mcp.json` when those agents are enabled in `boring.json`
+
+For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~/.claude/mcp.json` for Claude Desktop) or use the agent's CLI to add the HTTP MCP server.
 
 (VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. Compose siblings reach it at `http://boring-drudge:7700/mcp`.)
 

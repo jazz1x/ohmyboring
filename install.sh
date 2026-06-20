@@ -10,7 +10,6 @@ set -eu
 
 OMB_HOME="${OMB_HOME:-$HOME/oh-my-boring}"
 REPO="${OMB_REPO:-https://github.com/jazz1x/ohmyboring.git}"
-SETTINGS="$HOME/.claude/settings.json"
 
 say()  { printf '\033[1;36m▶ %s\033[0m\n' "$1"; }
 warn() { printf '\033[1;33mⓘ %s\033[0m\n' "$1"; }
@@ -30,7 +29,7 @@ command -v ollama >/dev/null 2>&1 || warn "ollama not on PATH — install from h
 # 2) Clone or update (idempotent).
 if [ -d "$OMB_HOME/.git" ]; then
   say "Updating existing install at $OMB_HOME"
-  git -C "$OMB_HOME" pull --ff-only 2>/dev/null || warn "pull skipped (local changes present) — keeping your working tree"
+  git -C "$OMB_HOME" pull --ff-only 2>/dev/null || warn "pull skipped — could not fast-forward (network/auth/diverged branch or local changes). Keeping your working tree."
 else
   say "Cloning ohmyboring → $OMB_HOME"
   git clone "$REPO" "$OMB_HOME"

@@ -21,6 +21,7 @@ echo "4) python py-compile (agents + hooks + scripts + data/eval)…"
 find agents hooks scripts data/eval -name '*.py' -type f -print0 | xargs -0 -n1 python3 -m py_compile
 echo "5) python unit tests…"
 python3 agents/shared/test_boring_config.py
+python3 agents/shared/test_agent_wiring.py
 python3 agents/claude-code/test_hooks.py
 python3 agents/hermes/test_ingest_worker.py
 echo "✅ 구조 게이트 통과 — 컴파일러/clippy/test + Python adapters 무위반."
