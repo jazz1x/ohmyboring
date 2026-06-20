@@ -164,7 +164,7 @@ MCP に対応したエージェントならどれも ohmyboring-memory を利用
 
 `install.sh` は `boring.json` で Cursor と Codex が有効になっている場合、Cursor の `~/.cursor/mcp.json` と Codex の `~/.codex/mcp.json` も自動的に書き込みます。
 
-（VS Code Copilot は root key `servers` を使う `.vscode/mcp.json` を使用します。CLI 代替: `claude mcp add --transport http --scope project ohmyboring-memory http://localhost:7700/mcp`。compose の sibling コンテナは `http://drudge:7700/mcp` でアクセスします。）
+（VS Code Copilot は root key `servers` を使う `.vscode/mcp.json` を使用します。CLI 代替: `claude mcp add --transport http --scope project ohmyboring-memory http://localhost:7700/mcp`。compose の sibling コンテナは `http://ohmyboring:7700/mcp` でアクセスします。）
 
 利用可能な tools（10個）: `recall` · `neighbors` · `claims`（検索）· `ask` · `brief`（生成 — LLM 実行）· `corpus_status` · `config_get`（introspection）· `remember` · `classify_repo` · `sync`（書き込み / メンテナンス）。
 
@@ -201,7 +201,7 @@ curl -s -X POST http://localhost:7700/mcp \
 
 [hermes-agent](https://hermes-agent.org) はサードパーティの自律 supervisor です。Slack、オーケストレーション、cron ベースのバックフィルを ohmyboring-memory の MCP バックエンド経由で動かせます。イメージを別途ビルドすれば `make up` が自動的に検出します。
 
-設定は hermes-agent プロジェクト**自身のドキュメント**に従います（ここでは対象外）— `~/.hermes/config.yaml` を ohmyboring-memory の MCP（`http://drudge:7700/mcp`）に向けてください。ohmyboring が同梱するのはこれを Slack assistant として配線するところまでで、それ以上に使うにはイメージを自分でビルドまたは改変してください。
+設定は hermes-agent プロジェクト**自身のドキュメント**に従います（ここでは対象外）— `~/.hermes/config.yaml` を ohmyboring-memory の MCP（`http://ohmyboring:7700/mcp`）に向けてください。ohmyboring が同梱するのはこれを Slack assistant として配線するところまでで、それ以上に使うにはイメージを自分でビルドまたは改変してください。
 
 ---
 

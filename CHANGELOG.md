@@ -7,9 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ### Changed
 - **MCP server name**: the project-scoped `.mcp.json` key and all user-facing docs now use
-  `ohmyboring-memory` instead of `drudge`. The internal binary/container (`drudge`, `boring-drudge`)
-  and `DRUDGE_*` environment variables are intentionally kept unchanged in this release to keep
-  the blast radius small; they will be migrated incrementally.
+  `ohmyboring-memory` instead of `drudge`.
+- **Docker service/image/container name**: renamed from `drudge`/`boring-drudge` to `ohmyboring`.
+  `DRUDGE_*` environment variables and the Rust binary/package name (`drudge`) are kept unchanged
+  for now to limit the blast radius.
 
 ## [0.1.0] — 2026-06-16
 
