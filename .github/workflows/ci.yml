@@ -64,3 +64,12 @@ jobs:
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml # redactor-test fake tokens (parallels gitleaks allowlist)
           exit-code: "1" # fail the job on CRITICAL/HIGH findings
+
+  # Validate compose file syntax without pulling models / starting the stack.
+  # Catches docker-compose.yml drift (e.g. service name changes that break Makefile COMPOSE fallback).
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: validate docker-compose config
+        run: docker compose config >/dev/null || docker-compose config >/dev/null

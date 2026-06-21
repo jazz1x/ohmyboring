@@ -27,7 +27,7 @@
 | borrow-first / `&str`·`&[T]` · clone restraint | clippy `ptr_arg` in part + **review** | partly mechanical |
 | pedantic idioms (semicolon · needless, etc.) | **clippy pedantic (deny)** | nursery excluded (time bomb) |
 | formatting | **`cargo fmt --check`** (pre-commit) | — |
-| behavioral non-regression (recall/answer quality) | **eval-gate.sh** (`run_eval --check`) — *planned; harness not committed yet, gate currently skips* | recall@1≥.80 · MRR≥.85 · kw≥.90 (targets) |
+| behavioral non-regression (recall/answer quality) | **eval-gate.sh** (`data/eval/run_eval.py`) — requires a live stack (`make up`) | Recall@3 target = 1.00 on `data/eval/golden.json` |
 | `--no-verify` bypass | **forbidden (policy)** | on failure, fix the root cause |
 
 **Honest disclosure**: §0 (official) + §B's no-panic + formatting + behavioral regression are blocked by the *machine*. **The design-level §A·§B·§C (ADT · error-ADT · PDV · DIP · restraint · ROP) are blocked by review** — that the machine can't catch them is not a defect but *design*. The three when-stuck questions (Layer 1 > Layer 2 > Layer 3) are the review checklist.
