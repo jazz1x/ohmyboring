@@ -73,3 +73,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: validate docker-compose config
         run: docker compose config >/dev/null || docker-compose config >/dev/null
+
+  # Ensure the Rust engine image still builds from a clean checkout.
+  # Catches Dockerfile / Cargo drift that guard.sh (stack-free) cannot detect.
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: build drudge image
+        run: make build
