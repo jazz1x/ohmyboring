@@ -10,7 +10,18 @@ from urllib.parse import urlparse
 
 
 def _in_container() -> bool:
-    return os.path.isdir("/host/.claude")
+    """Detect whether we are running inside a container with host bind mounts.
+
+    The canonical signal is the env var OMB_IN_CONTAINER=1. The fallback
+    checks for the /host mount used by the hermes-agent and drudge containers
+    so existing stacks keep working without the env var.
+    """
+    env = os.environ.get("OMB_IN_CONTAINER", "").lower()
+    if env in ("1", "true", "yes"):
+        return True
+    if env in ("0", "false", "no"):
+        return False
+    return os.path.isdir("/host") and os.path.isfile("/host/boring.json")
 
 
 def omb_home() -> str:

@@ -33,10 +33,12 @@ import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config
+import omb_env
+import transcript
 
 # Runs in TWO contexts: inside the hermes-agent container (via `hermes cron --script`) or on the host
 # (manual/launchd). Auto-detect by the container's bind mount so paths + the engine URL resolve in both.
-_IN_CONTAINER = os.path.isdir("/host/.claude")
+_IN_CONTAINER = omb_env._in_container()
 
 
 def _source_dirs():
@@ -66,6 +68,9 @@ MARK_DIR = DISTILL_MARK_DIR
 DRUDGE_URL = os.environ.get("DRUDGE_URL") or (
     "http://boring-drudge:7700" if _IN_CONTAINER else "http://localhost:7700"
 )
+# OMB_HOME is only meaningful on the host; inside the container we rely on /host/boring.json.
+OMB_HOME = os.environ.get("OMB_HOME") or omb_env.omb_home()
+TRANSCRIPT_FORMAT = boring_config.agent_config("claude-code").get("format") or "claude-json"
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
 CLAMP = int(os.environ.get("INGEST_CLAMP") or "4000")  # 12B digest ceiling — above this the agent derails
@@ -159,32 +164,8 @@ def _distill_session_marker(sid):
 
 
 def extract(path):
-    out = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            msg = obj.get("message") or {}
-            role = msg.get("role") or obj.get("type") or ""
-            if role not in ("user", "assistant"):
-                continue
-            c = msg.get("content")
-            if isinstance(c, str):
-                t = c
-            elif isinstance(c, list):
-                t = " ".join(
-                    b.get("text", "")
-                    for b in c
-                    if isinstance(b, dict) and b.get("type") == "text"
-                )
-            else:
-                t = ""
-            t = t.strip()
-            if t:
-                out.append(f"[{role}] {t}")
-    return "\n".join(out)
+    """Extract user/assistant text using the configured transcript format."""
+    return transcript.extract(path, TRANSCRIPT_FORMAT)
 
 
 def transcript_cwd(path):

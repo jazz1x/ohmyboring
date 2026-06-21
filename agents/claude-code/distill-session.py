@@ -28,6 +28,7 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config
 import omb_env
+import transcript
 
 # OMB_HOME: repo clone location (default ~/oh-my-boring).
 OMB_HOME = os.environ.get("OMB_HOME") or omb_env.omb_home()
@@ -36,6 +37,7 @@ LLM_BASE_URL = os.environ.get("DRUDGE_LLM_BASE_URL") or omb_env.llm_base_url()
 LLM_MODEL = os.environ.get("DRUDGE_LLM_MODEL") or omb_env.llm_model()
 LLM_API_KEY = os.environ.get("DRUDGE_LLM_API_KEY") or ""
 NOTE_LANG = boring_config.note_lang()
+TRANSCRIPT_FORMAT = boring_config.agent_config("claude-code").get("format") or "claude-json"
 # Minimum interval (minutes) before re-distilling an in-progress session (Stop hook).
 # SessionEnd (final) ignores the throttle.
 THROTTLE_MIN = int(os.environ.get("DISTILL_THROTTLE_MIN") or "25")
@@ -83,33 +85,8 @@ def _mark(session_id, retry=False):
 
 
 def extract(path):
-    """Extract user/assistant text from a Claude Code JSONL transcript."""
-    out = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            msg = obj.get("message") or {}
-            role = msg.get("role") or obj.get("type") or ""
-            if role not in ("user", "assistant"):
-                continue
-            c = msg.get("content")
-            if isinstance(c, str):
-                t = c
-            elif isinstance(c, list):
-                t = " ".join(
-                    b.get("text", "")
-                    for b in c
-                    if isinstance(b, dict) and b.get("type") == "text"
-                )
-            else:
-                t = ""
-            t = t.strip()
-            if t:
-                out.append(f"[{role}] {t}")
-    return "\n".join(out)
+    """Extract user/assistant text from a session transcript using the configured format."""
+    return transcript.extract(path, TRANSCRIPT_FORMAT)
 
 
 def git_remote_url(cwd):
