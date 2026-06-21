@@ -38,3 +38,7 @@ docs/*
 
 # 개인 정책 설정 — 예시 파일(boring.example.json)만 추적
 boring.json
+
+# 에이전트 로컬 설정 (Codex 등)
+.codex/
+
