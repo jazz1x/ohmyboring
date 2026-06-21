@@ -108,6 +108,23 @@ def test_agent_config_lookup():
         boring_config.load = old_load
 
 
+def test_load_warns_on_parse_error():
+    """A corrupt boring.json must not silently look like an empty policy."""
+    import tempfile
+
+    old_path = boring_config.discover_path()
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        f.write('{"schema_version": 1, "note_lang": "ko",}')  # trailing comma
+        tmp = f.name
+    try:
+        os.environ["BORING_CONFIG"] = tmp
+        cfg = boring_config.load()
+        assert cfg == {}, "parse error must fall back to empty default"
+    finally:
+        os.environ.pop("BORING_CONFIG", None)
+        os.unlink(tmp)
+
+
 def main():
     tests = [
         test_repo_root_is_dir_with_example,
@@ -115,6 +132,7 @@ def main():
         test_discover_path_targets_repo_root,
         test_source_dirs_filter_by_adapter_and_agent,
         test_agent_config_lookup,
+        test_load_warns_on_parse_error,
     ]
     for t in tests:
         t()

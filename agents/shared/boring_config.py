@@ -11,6 +11,7 @@ Missing file is not an error — hooks degrade gracefully to an empty policy
 """
 import json
 import os
+import sys
 from pathlib import Path
 
 
@@ -56,14 +57,26 @@ def discover_path() -> Path | None:
 
 
 def load() -> dict:
-    """Load boring.json as a dict. Returns an empty default dict if no file exists."""
+    """Load boring.json as a dict.
+
+    Missing file → empty default (hooks degrade gracefully). Parse failure → loud
+    stderr warning + empty default. A corrupt config must not silently look like
+    "no policy set" (Layer 1: the representation must not lie).
+    """
     p = discover_path()
     if not p:
         return {}
     try:
         with open(p, encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except OSError as e:
+        print(f"[boring_config] cannot read {p}: {e} — using empty policy", file=sys.stderr)
+        return {}
+    except json.JSONDecodeError as e:
+        print(
+            f"[boring_config] {p} is not valid JSON ({e.lineno}:{e.colno}) — using empty policy",
+            file=sys.stderr,
+        )
         return {}
 
 
