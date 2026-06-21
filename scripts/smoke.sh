@@ -49,9 +49,17 @@ sync=$(curl -sf -m600 -X POST "$URL/sync" 2>/dev/null) || fail "/sync failed"
 echo "   sync completed: delta_chunks=$(printf '%s' "$sync" | jq -r '.ingest_chunks // 0'), delta_edges=$(printf '%s' "$sync" | jq -r '.graph_edges // 0'), total_chunks=$(printf '%s' "$sync" | jq -r '.total_chunks // 0'), total_edges=$(printf '%s' "$sync" | jq -r '.total_edges // 0')"
 
 echo "4) /ask (real answer expected; fallback/error fails)…"
-ans=$(curl -sf -m120 "$URL/ask" -H 'content-type: application/json' \
-  -d '{"question":"what is ohmyboring?"}' | jq -r '.answer') || fail "/ask call failed"
-[ -n "$ans" ] && [ "$ans" != "null" ] || fail "empty ask response"
+# Retry once: local Ollama may return empty content on cold-start even though the HTTP call succeeds.
+for attempt in 1 2; do
+  ans=$(curl -sf -m120 "$URL/ask" -H 'content-type: application/json' \
+    -d '{"question":"what is ohmyboring?"}' | jq -r '.answer') || fail "/ask call failed"
+  [ -n "$ans" ] && [ "$ans" != "null" ] && break
+  if [ "$attempt" = 1 ]; then
+    echo "   empty ask response, retrying in 3s…"
+    sleep 3
+  fi
+done
+[ -n "$ans" ] && [ "$ans" != "null" ] || fail "empty ask response after retry"
 echo "   → $(printf '%s' "$ans" | head -c 90)…"
 
 if [ "$VEC" = 1 ]; then
