@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::Mutex;
+
 use anyhow::Result;
 use axum::Json;
 use axum::extract::State;
@@ -45,6 +47,9 @@ pub struct AppState {
     cfg: Arc<config::BoringConfig>,
     /// Resolved path to the loaded config, so `classify_repo` writes back to the same file.
     cfg_path: Arc<Option<PathBuf>>,
+    /// Serializes startup, periodic, and HTTP-triggered syncs so they never overlap.
+    /// `/sync` waits for an in-flight startup sync and returns its actual outcome.
+    sync_lock: Arc<Mutex<()>>,
 }
 
 impl AppState {
@@ -143,6 +148,9 @@ struct SyncResp {
     graph_concepts: usize,
     graph_claims: usize,
     graph_edges: usize,
+    /// Total corpus size after sync (independent of whether this run produced deltas).
+    total_chunks: usize,
+    total_edges: usize,
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
@@ -981,11 +989,12 @@ fn mcp_classify_repo(s: &AppState, args: Option<&Value>) -> Result<String, (i32,
 
 /// `sync` — one deterministic re-ingest pass (walk→embed→upsert→graph→relations). No LLM curation.
 async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
+    let _guard = s.sync_lock.lock().await;
     let o = do_sync(s.store.as_deref(), &s.llm, (*s.vault_dir).as_ref(), &s.cfg)
         .await
         .map_err(|e| (-32603_i32, format!("sync: {e:#}")))?;
     Ok(format!(
-        "sync complete — ingest(new {} updated {} deleted {} chunks {}) · graph(tools {} concepts {} claims {} edges {})",
+        "sync complete — ingest(new {} updated {} deleted {} chunks {}) · graph(tools {} concepts {} claims {} edges {}) · total(chunks {} edges {})",
         o.ingest.new,
         o.ingest.updated,
         o.ingest.deleted,
@@ -993,11 +1002,14 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
         o.ingest.tools,
         o.ingest.concepts,
         o.ingest.claims,
-        o.ingest.edges
+        o.ingest.edges,
+        o.total_chunks,
+        o.total_edges,
     ))
 }
 
 async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncResp>, AppError> {
+    let _guard = s.sync_lock.lock().await;
     let o = do_sync(s.store.as_deref(), &s.llm, (*s.vault_dir).as_ref(), &s.cfg).await?;
     Ok(Json(SyncResp {
         ingest_new: o.ingest.new,
@@ -1008,6 +1020,8 @@ async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncResp>, AppErr
         graph_concepts: o.ingest.concepts,
         graph_claims: o.ingest.claims,
         graph_edges: o.ingest.edges,
+        total_chunks: o.total_chunks,
+        total_edges: o.total_edges,
     }))
 }
 
@@ -1015,6 +1029,8 @@ async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncResp>, AppErr
 
 struct SyncOutcome {
     ingest: ingest::Stats,
+    total_chunks: usize,
+    total_edges: usize,
 }
 
 /// Deterministic re-ingest: walk notes → embed → pgvector upsert → graph (from frontmatter) → GC →
@@ -1029,6 +1045,8 @@ async fn do_sync(
     let Some(store) = store else {
         return Ok(SyncOutcome {
             ingest: ingest::Stats::default(),
+            total_chunks: 0,
+            total_edges: 0,
         });
     };
     // Kernel A corpus = the vault's wiki dir (where remember writes). No vault → nothing to re-ingest
@@ -1050,7 +1068,34 @@ async fn do_sync(
             Err(e) => eprintln!("[scheduler] project_links warning (ignored): {e:#}"),
         }
     }
-    Ok(SyncOutcome { ingest })
+    let audit = audit::stats(store).await.unwrap_or_else(|e| {
+        eprintln!("[sync] audit::stats failed: {e:#}; falling back to ingest delta");
+        audit::AuditStats {
+            total_chunks: ingest.chunks,
+            total_files: 0,
+            by_origin: Vec::new(),
+            by_kind: Vec::new(),
+            by_project: Vec::new(),
+            company_contamination: 0,
+            missing_origin: 0,
+            missing_project: 0,
+            clean: true,
+            graph_documents: 0,
+            graph_chunks: 0,
+            graph_projects: 0,
+            graph_topics: 0,
+            graph_edges: ingest.edges,
+            semantic_tools: 0,
+            semantic_concepts: 0,
+            semantic_uses: 0,
+            semantic_about: 0,
+        }
+    });
+    Ok(SyncOutcome {
+        ingest,
+        total_chunks: audit.total_chunks,
+        total_edges: audit.graph_edges,
+    })
 }
 
 // ── background scheduler ────────────────────────────────────────────────────
@@ -1082,6 +1127,7 @@ fn spawn_scheduler(
     llm: Arc<Llm>,
     vault_dir: Arc<Option<PathBuf>>,
     cfg: Arc<config::BoringConfig>,
+    sync_lock: Arc<Mutex<()>>,
 ) {
     // `.max(1)` — `DRUDGE_SYNC_HOURS=0` would make a zero Duration, and
     // tokio::time::interval panics on a zero period. Clamp to ≥1h.
@@ -1095,17 +1141,22 @@ fn spawn_scheduler(
     tokio::spawn(async move {
         let store_ref = store.as_deref();
         // run once immediately at startup (compile only if vector off — refreshes wiki).
+        // Lock serializes with HTTP /sync so callers wait for the startup baseline.
         eprintln!(
             "[scheduler] startup sync (interval={sync_hours}h, vector={})",
             store.is_some()
         );
-        run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
+        {
+            let _guard = sync_lock.lock().await;
+            run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
+        }
 
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await; // the first tick is immediate — discard it (already ran above)
         loop {
             ticker.tick().await;
             eprintln!("[scheduler] periodic sync");
+            let _guard = sync_lock.lock().await;
             run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
         }
     });
@@ -1128,6 +1179,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         vault_dir: Arc::new(vault_dir),
         cfg: Arc::new(cfg),
         cfg_path: Arc::new(cfg_path),
+        sync_lock: Arc::new(Mutex::new(())),
     };
 
     spawn_scheduler(
@@ -1135,6 +1187,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         Arc::clone(&state.llm),
         Arc::clone(&state.vault_dir),
         Arc::clone(&state.cfg),
+        Arc::clone(&state.sync_lock),
     );
     // cfg_path is only used by the HTTP/MCP handlers; the scheduler does not need it.
 

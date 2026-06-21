@@ -46,7 +46,7 @@ echo "2) engine /health…"
 echo "3) engine /sync (deterministic baseline; waits for startup sync to finish)…"
 sync=$(curl -sf -m600 -X POST "$URL/sync" 2>/dev/null) || fail "/sync failed"
 [ -n "$sync" ] || fail "/sync returned empty"
-echo "   sync completed: chunks=$(printf '%s' "$sync" | jq -r '.ingest_chunks // 0'), edges=$(printf '%s' "$sync" | jq -r '.graph_edges // 0')"
+echo "   sync completed: delta_chunks=$(printf '%s' "$sync" | jq -r '.ingest_chunks // 0'), delta_edges=$(printf '%s' "$sync" | jq -r '.graph_edges // 0'), total_chunks=$(printf '%s' "$sync" | jq -r '.total_chunks // 0'), total_edges=$(printf '%s' "$sync" | jq -r '.total_edges // 0')"
 
 echo "4) /ask (real answer expected; fallback/error fails)…"
 ans=$(curl -sf -m120 "$URL/ask" -H 'content-type: application/json' \
