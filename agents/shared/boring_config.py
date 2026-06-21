@@ -14,6 +14,8 @@ import os
 import sys
 from pathlib import Path
 
+from omb_env import _in_container
+
 
 DEFAULT_ORIGIN = "personal"
 DEFAULT_NOTE_LANG = "auto"
@@ -28,11 +30,6 @@ def _repo_root() -> Path:
     the real file location here, so parents[2] is the repo root either way.
     """
     return Path(__file__).resolve().parents[2]
-
-
-def _in_container() -> bool:
-    """True when running inside the hermes-agent container (host paths are bind-mounted under /host)."""
-    return os.path.isdir("/host/.claude") or os.path.isfile("/host/boring.json")
 
 
 def discover_path() -> Path | None:
