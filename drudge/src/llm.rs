@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use tokio::time::sleep;
 
 pub struct Llm {
     base_url: String, // OpenAI-compatible base — e.g. http://localhost:11434/v1
@@ -82,7 +83,39 @@ impl Llm {
 
     /// Non-streaming generation. OpenAI `/v1/chat/completions` (system+user messages).
     /// Disables reasoning via `reasoning_effort:"none"` (OpenAI-standard; honored by Ollama /v1).
+    ///
+    /// Local models (Ollama) occasionally return an empty `content` on cold-start/unload. Retry
+    /// once after a short backoff so user-facing endpoints don't fail transiently.
     pub async fn generate(&self, system: &str, prompt: &str) -> Result<String> {
+        const MAX_RETRIES: usize = 1;
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..=MAX_RETRIES {
+            match self.generate_once(system, prompt).await {
+                Ok(text) if !text.is_empty() => return Ok(text),
+                Ok(_) => {
+                    eprintln!(
+                        "[llm] generate returned empty content (attempt {}), retrying…",
+                        attempt + 1
+                    );
+                    if attempt < MAX_RETRIES {
+                        sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                    return Ok(String::new());
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < MAX_RETRIES {
+                        sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        }
+        Err(last_err
+            .unwrap_or_else(|| anyhow::anyhow!("llm generate failed without producing an error")))
+    }
+
+    async fn generate_once(&self, system: &str, prompt: &str) -> Result<String> {
         #[derive(Deserialize)]
         struct Message {
             // Optional: OpenAI-compatible servers may return `content: null`
