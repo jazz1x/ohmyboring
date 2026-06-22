@@ -108,6 +108,25 @@ def test_agent_config_lookup():
         boring_config.load = old_load
 
 
+def test_canonical_repo_normalizes_variants():
+    cfg = {
+        "repos": [
+            {"match": "marketboro", "origin": "company"},
+            {"match": "jazz1x/oh-my-boring", "name": "oh-my-boring", "origin": "personal"},
+        ]
+    }
+    old_load = boring_config.load
+    try:
+        boring_config.load = lambda: cfg
+        assert boring_config.canonical_repo("marketboro/foodspring-front") == "foodspring-front"
+        assert boring_config.canonical_repo("foodspring-front") == "foodspring-front"
+        assert boring_config.canonical_repo("jazz1x/oh-my-boring") == "oh-my-boring"
+        assert boring_config.canonical_repo("git@github.com:acme/widget.git") == "widget"
+        assert boring_config.canonical_repo("") == ""
+    finally:
+        boring_config.load = old_load
+
+
 def test_load_warns_on_parse_error():
     """A corrupt boring.json must not silently look like an empty policy."""
     import tempfile
@@ -132,6 +151,7 @@ def main():
         test_discover_path_targets_repo_root,
         test_source_dirs_filter_by_adapter_and_agent,
         test_agent_config_lookup,
+        test_canonical_repo_normalizes_variants,
         test_load_warns_on_parse_error,
     ]
     for t in tests:

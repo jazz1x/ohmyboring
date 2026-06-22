@@ -162,7 +162,7 @@ class ExtractTranscriptTests(unittest.TestCase):
 class RecallFormattingTests(unittest.TestCase):
     """recall.main reads stdin + posts to /search; we mock urlopen so NO network happens."""
 
-    def _run_main(self, prompt, hits):
+    def _run_main(self, prompt, hits, urlopen_side_effect=None):
         class _Resp:
             def __init__(self, payload):
                 self._payload = payload
@@ -174,19 +174,26 @@ class RecallFormattingTests(unittest.TestCase):
                 return False
 
         captured = io.StringIO()
+        stderr = io.StringIO()
+        if urlopen_side_effect is None:
+            urlopen = mock.MagicMock(return_value=_Resp({"hits": hits}))
+        else:
+            urlopen = mock.MagicMock(side_effect=urlopen_side_effect)
         with mock.patch.object(recall.sys, "stdin", io.StringIO(json.dumps({"prompt": prompt}))), \
-             mock.patch.object(recall.urllib.request, "urlopen",
-                               return_value=_Resp({"hits": hits})), \
-             mock.patch.object(recall.sys, "stdout", captured):
+             mock.patch.object(recall.urllib.request, "urlopen", urlopen), \
+             mock.patch.object(recall.sys, "stdout", captured), \
+             mock.patch.object(recall.sys, "stderr", stderr):
             recall.main()
-        return captured.getvalue()
+        return captured.getvalue(), stderr.getvalue()
 
     def test_short_prompt_is_noop(self):
         # < 8 chars → recall is meaningless → no output, urlopen never reached.
-        self.assertEqual(self._run_main("hi", [{"source_path": "x", "snippet": "y"}]), "")
+        out, err = self._run_main("hi", [{"source_path": "x", "snippet": "y"}])
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
 
     def test_formats_context_block(self):
-        out = self._run_main(
+        out, _err = self._run_main(
             "how did I fix the docker cache issue",
             [{"source_path": "vault/wiki/wiki-0007.md", "snippet": "fixed   the\ncache"}],
         )
@@ -197,7 +204,44 @@ class RecallFormattingTests(unittest.TestCase):
         self.assertIn("self-augmenting RAG recall", ctx)        # the injection fence is present
 
     def test_empty_hits_noop(self):
-        self.assertEqual(self._run_main("a sufficiently long prompt", []), "")
+        out, _err = self._run_main("a sufficiently long prompt", [])
+        self.assertEqual(out, "")
+
+    def test_failed_search_logs_to_stderr(self):
+        # urlopen keeps raising → after retries main logs the failure to stderr and exits gracefully.
+        recall.RETRIES = 0  # one attempt only for deterministic test
+        try:
+            out, err = self._run_main("a sufficiently long prompt", [], urlopen_side_effect=OSError("down"))
+            self.assertEqual(out, "")
+            self.assertIn("[omb-recall] search failed", err)
+        finally:
+            recall.RETRIES = 1
+
+
+class DistillMainLoggingTests(unittest.TestCase):
+    """distill-session.main failure paths must log to stderr instead of staying silent."""
+
+    def _run_main(self, stdin_text, **patches):
+        captured = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(distill.sys, "stdin", io.StringIO(stdin_text)), \
+             mock.patch.object(distill.sys, "stdout", captured), \
+             mock.patch.object(distill.sys, "stderr", stderr), \
+             mock.patch.object(distill, "_throttled", return_value=False):
+            for key, val in patches.items():
+                patcher = mock.patch.object(distill, key, val)
+                patcher.start()
+                self.addCleanup(patcher.stop)
+            distill.main()
+        return captured.getvalue(), stderr.getvalue()
+
+    def test_invalid_stdin_logs_error(self):
+        _out, err = self._run_main("not json")
+        self.assertIn("[omb-distill] invalid stdin JSON", err)
+
+    def test_missing_transcript_logs_error(self):
+        _out, err = self._run_main(json.dumps({"session_id": "s1", "cwd": "/tmp", "hook_event_name": "SessionEnd"}))
+        self.assertIn("[omb-distill] transcript not found", err)
 
 
 if __name__ == "__main__":

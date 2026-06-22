@@ -39,6 +39,64 @@ def _extract_claude_jsonl(path: str) -> str:
     return "\n".join(out)
 
 
+def _extract_kimi_wire(path: str) -> str:
+    """Extract user/assistant text from a Kimi Code CLI wire.jsonl transcript.
+
+    Mirrors the parser in agents/kimi/distill-session.py so the scheduler and
+    hook can share the same transcript representation.
+    """
+    out = []
+
+    def _text(content):
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            if content.get("type") == "text":
+                return content.get("text", "")
+            if content.get("type") == "tool_use" and content.get("name"):
+                return f"<tool:{content['name']}>"
+            return ""
+        if isinstance(content, list):
+            return " ".join(_text(part) for part in content if _text(part))
+        return ""
+
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = obj.get("type")
+            if t == "turn.prompt":
+                inp = obj.get("input") or []
+                text = " ".join(_text(part) for part in inp).strip()
+                if text:
+                    out.append(f"[user] {text}")
+            elif t == "context.append_message":
+                msg = obj.get("message") or {}
+                role = msg.get("role")
+                if role == "user":
+                    origin = msg.get("origin") or {}
+                    if isinstance(origin, dict) and origin.get("kind") != "user":
+                        continue
+                    text = _text(msg.get("content"))
+                    if text:
+                        out.append(f"[user] {text}")
+                elif role == "assistant":
+                    text = _text(msg.get("content"))
+                    if text:
+                        out.append(f"[assistant] {text}")
+            elif t == "context.append_loop_event":
+                ev = obj.get("event") or {}
+                if ev.get("type") == "content.part":
+                    part = ev.get("part") or {}
+                    if part.get("type") == "text":
+                        text = part.get("text", "").strip()
+                        if text:
+                            out.append(f"[assistant] {text}")
+    return "\n".join(out)
+
+
 def extract(path: str, fmt: str = "claude-json") -> str:
     """Parse a session transcript at `path` using format `fmt`.
 
@@ -55,5 +113,7 @@ def extract(path: str, fmt: str = "claude-json") -> str:
     """
     if fmt == "claude-json":
         return _extract_claude_jsonl(path)
+    if fmt == "kimi-wire":
+        return _extract_kimi_wire(path)
     print(f"[transcript] unsupported format '{fmt}' for {path} — skipping", file=sys.stderr)
     raise ValueError(f"unsupported transcript format: {fmt}")
