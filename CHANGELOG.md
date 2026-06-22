@@ -16,6 +16,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ### Added
 - **MCP tool `forget`**: delete a note by wiki id or exact title. Removes the wiki file and,
   in vector mode, purges its embeddings, graph edges, and claims.
+- **Kimi Code CLI support**: `agents/kimi/distill-session.py` (SessionEnd hook),
+  `agents/kimi/recall.py` (UserPromptSubmit hook), and `agents/schedulers/collect-kimi-sessions.py`
+  (lazy backfill). Wiring is handled by `agent_wiring.py` into `~/.kimi-code/config.toml`.
+
+### Fixed
+- **Storage Layer compact contract**: `VACUUM` and `REINDEX TABLE CONCURRENTLY` must each run as
+  autocommit single statements. Split the multi-statement `batch_execute` in `store.rs::compact()`
+  into per-table statements so PostgreSQL no longer wraps them in an implicit transaction block.
+  `make smoke` `/compact` now passes (`total_ms=184`).
+- **Wiki hygiene — seed note leak**: `vault/wiki/wiki-0000.md` had its `relates_to` filled with
+  private note ids; restored to `relates_to: []`. `scripts/data-steward.py` now skips the seed note
+  so it is never flagged as data rot, and `scripts/e2e.sh` asserts the throwaway file is actually
+  deleted from disk after `forget`.
+
+### Added
+- **Rust integration tests**: `drudge/src/lib.rs` + `drudge/tests/store_integration.rs` exercise the
+  Storage Layer against a live Postgres backend (`DRUDGE_TEST_DATABASE_URL`). Covers `compact()`
+  autocommit behavior and `delete_document` claim cleanup.
+- **Vector-mode e2e arm**: `scripts/e2e.sh` now runs a full `remember→search→recall→neighbors→forget`
+  round-trip in vector mode (wiki mode still asserts `-32603` rejection for vector-only tools).
+- **GET `/mcp` SSE handler**: Streamable HTTP spec compliance — returns an `endpoint` event and
+  keep-alive comments for strict MCP clients.
+
+### Changed
+- **Hook failure visibility**: Claude/Kimi `distill-session.py` and `recall.py` no longer swallow
+  errors silently; they log `[omb-distill]`/`[omb-recall]` diagnostics to stderr while still
+  returning exit code 0 so the agent session is never blocked.
+- **MCP protocol version**: bumped the default echo version from `2025-06-18` to `2025-11-25`.
+- **Documentation**: `.env.example` and README Troubleshooting explain the `embed_dim` ↔ embedding
+  model coupling and the `make reset` requirement when swapping embedders.
+
+### Fixed
+- **Docker build cache**: `drudge/Dockerfile` now creates a dummy `src/lib.rs` alongside the dummy
+  `src/main.rs` and touches both before the final release build, fixing dependency-layer caching
+  after the crate gained a `[lib]` target.
 
 ## [0.1.0] — 2026-06-16
 
