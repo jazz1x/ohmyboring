@@ -24,5 +24,7 @@ python3 agents/shared/test_boring_config.py
 python3 agents/shared/test_agent_wiring.py
 python3 agents/shared/test_transcript.py
 python3 agents/claude-code/test_hooks.py
+python3 agents/kimi/test_kimi.py
 python3 agents/hermes/test_ingest_worker.py
+python3 scripts/test_data_steward.py
 echo "✅ 구조 게이트 통과 — 컴파일러/clippy/test + Python adapters 무위반."

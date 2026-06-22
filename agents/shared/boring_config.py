@@ -110,6 +110,35 @@ def classify(cwd: str, remote_url: str | None = None) -> tuple[str, str | None]:
     return DEFAULT_ORIGIN, None
 
 
+def canonical_repo(raw_repo: str) -> str:
+    """Return a canonical project/repo slug.
+
+    Rules (in order):
+      1. If a repo rule has an explicit `name` and its `match` is a substring of
+         `raw_repo` (case-insensitive), use that name.
+      2. Strip an org prefix (`org/repo` → `repo`).
+      3. Strip a trailing `.git`.
+      4. Otherwise return as-is.
+
+    This collapses variants like `marketboro/foodspring-front` and
+    `foodspring-front` into one project axis.
+    """
+    repo = (raw_repo or "").strip()
+    if not repo:
+        return repo
+    repo = repo.removesuffix(".git")
+    cfg = load()
+    lowered = repo.lower()
+    for rule in cfg.get("repos") or []:
+        matcher = (rule.get("match") or "").strip()
+        name = (rule.get("name") or "").strip()
+        if matcher and name and matcher.lower() in lowered:
+            return name
+    if "/" in repo:
+        return repo.split("/")[-1].strip() or repo
+    return repo
+
+
 def source_dirs(agent_id: str | None = None, adapter: str | None = None) -> list[str]:
     """Return enabled agent source directories with ~ expanded.
 

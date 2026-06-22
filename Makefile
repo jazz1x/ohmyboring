@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs ask sync remember collect smoke e2e doctor models ollama hermes-build guard deny eval psql reset
+.PHONY: help up down build logs agent-logs ask sync remember collect collect-kimi smoke e2e doctor steward steward-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard deny eval psql reset
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -61,8 +61,11 @@ remember: ## Save + ingest a note immediately   make remember M="content" [T="ti
 	    '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"remember",arguments:{title:$$t,body:$$b}}}')" \
 	  | jq -r '.result.content[0].text // .error.message'
 
-collect: ## Lazily collect past sessions (one at a time)   make collect [N=1]
+collect: ## Lazily collect past Claude Code sessions (one at a time)   make collect [N=1]
 	@COLLECT_LIMIT=$${N:-1} python3 agents/schedulers/collect-sessions.py
+
+collect-kimi: ## Lazily collect past Kimi Code sessions (one at a time)   make collect-kimi [N=1]
+	@COLLECT_LIMIT=$${N:-1} python3 agents/schedulers/collect-kimi-sessions.py
 
 smoke: ## end-to-end smoke test
 	./scripts/smoke.sh
@@ -72,6 +75,18 @@ e2e: ## wiki-mode end-to-end (remember→recall round-trip + vector-off reject);
 
 doctor: ## Diagnose the distill write-door (drudge/Ollama/containers + newest note & hook marker)
 	./scripts/doctor.sh
+
+steward: ## Inspect vault data hygiene (project variants, placeholder tags, missing sources)
+	@python3 scripts/data-steward.py
+
+steward-fix: ## Apply data-steward repairs (review with git diff; vault/wiki is gitignored)
+	@python3 scripts/data-steward.py --fix --yes
+
+retention: ## Show raw session retention plan (dry-run)
+	@python3 scripts/retention.py
+
+retention-apply: ## Apply raw session retention (archive old transcripts, delete ancient archives)
+	@python3 scripts/retention.py --apply
 
 guard: ## Structural gate (fmt+clippy+test+py-compile+py-unit-tests)
 	./scripts/guard.sh
@@ -84,6 +99,16 @@ eval: ## Behavioral regression gate (stack needed; runs data/eval/run_eval.py wh
 
 psql: ## Connect directly to Postgres (requires vector mode / --profile vector)
 	$(COMPOSE) exec postgres psql -U boring -d boring
+
+backup-db: ## Backup pgvector DB to data/backups/ (custom format; keeps latest 7)
+	@mkdir -p data/backups
+	@./scripts/backup-db.sh
+
+restore-db: ## Restore pgvector DB from latest backup (interactive; stop drudge, drop/recreate DB)
+	@./scripts/restore-db.sh
+
+compact: ## Run VACUUM/REINDEX/prune/orphan-GC against the pgvector DB
+	cd drudge && DRUDGE_VECTOR=on cargo run -- compact
 
 reset: ## ⚠️ Reset including Postgres data (re-ingested from source)
 	@printf '⚠️  This deletes ./data/pgdata (the vector DB). vault/ markdown is kept. Continue? [y/N] '; \

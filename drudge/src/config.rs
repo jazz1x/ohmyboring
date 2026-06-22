@@ -18,6 +18,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "agents",
     "embed_model",
     "embed_dim",
+    "allow_company_origin",
 ];
 /// Default embedder (bge-m3 = 1024-dim) — the kernel's sole model dependency.
 const DEFAULT_EMBED_MODEL: &str = "bge-m3";
@@ -36,6 +37,11 @@ pub struct BoringConfig {
     /// vectors are a different shape). base_url/api_key stay in env (.env = runtime/secret SSOT).
     pub embed_model: String,
     pub embed_dim: u32,
+    /// When true, `origin: company` notes are an accepted part of the corpus (session experience from
+    /// company work) rather than contamination — the audit `clean` flag stops penalizing them. Default
+    /// false keeps the strict boundary (company notes flagged for review). See `allow_company_origin`
+    /// in boring.json. Note: this governs *session experience*, not company KB originals (still off-policy).
+    pub allow_company_origin: bool,
 }
 
 impl Default for BoringConfig {
@@ -47,6 +53,7 @@ impl Default for BoringConfig {
             agents: Vec::new(),
             embed_model: DEFAULT_EMBED_MODEL.to_owned(),
             embed_dim: DEFAULT_EMBED_DIM,
+            allow_company_origin: false,
         }
     }
 }
@@ -309,6 +316,34 @@ impl BoringConfig {
         dirs
     }
 
+    /// Return a canonical project/repo slug.
+    ///
+    /// 1. If a repo rule has a non-empty `name` and its `match` is a substring of
+    ///    `raw_repo` (case-insensitive), use that name.
+    /// 2. Strip an org prefix (`org/repo` → `repo`).
+    /// 3. Strip a trailing `.git`.
+    /// 4. Otherwise return as-is.
+    pub fn canonical_repo(&self, raw_repo: &str) -> String {
+        let repo = raw_repo.trim();
+        if repo.is_empty() {
+            return String::new();
+        }
+        let repo = repo.strip_suffix(".git").unwrap_or(repo);
+        let lowered = repo.to_lowercase();
+        for rule in &self.repos {
+            let matcher = rule.matcher.trim();
+            let name = rule.name.trim();
+            if !matcher.is_empty() && !name.is_empty() && lowered.contains(&matcher.to_lowercase())
+            {
+                return name.to_owned();
+            }
+        }
+        if let Some(idx) = repo.rfind('/') {
+            return repo[idx + 1..].trim().to_owned();
+        }
+        repo.to_owned()
+    }
+
     /// Classify a session/working dir into (origin, optional repo name).
     pub fn classify(&self, cwd: &str, remote_url: Option<&str>) -> (Origin, Option<String>) {
         let haystack = match remote_url {
@@ -443,6 +478,35 @@ mod tests {
         // present-but-invalid is REJECTED (parse-don't-validate) — never silently coerced to personal.
         assert!(Origin::from_str("evil").is_err());
         assert!(Origin::from_str("").is_err());
+    }
+
+    #[test]
+    fn canonical_repo_collapses_org_prefix_and_honors_rule_name() {
+        let cfg = BoringConfig::from_str(
+            r#"{
+                "schema_version": 1,
+                "repos": [
+                    {"match": "marketboro", "origin": "company"},
+                    {"match": "jazz1x/oh-my-boring", "name": "oh-my-boring", "origin": "personal"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        // org prefix stripped when no explicit name
+        assert_eq!(
+            cfg.canonical_repo("marketboro/foodspring-front"),
+            "foodspring-front"
+        );
+        assert_eq!(cfg.canonical_repo("foodspring-front"), "foodspring-front");
+        // explicit rule name wins
+        assert_eq!(cfg.canonical_repo("jazz1x/oh-my-boring"), "oh-my-boring");
+        // .git suffix removed
+        assert_eq!(
+            cfg.canonical_repo("git@github.com:acme/widget.git"),
+            "widget"
+        );
+        // empty stays empty
+        assert_eq!(cfg.canonical_repo(""), "");
     }
 
     #[test]

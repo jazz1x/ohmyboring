@@ -1,21 +1,10 @@
 //! ohmyboring personal RAG — Rust (pgvector: vector + node/edge graph + recursive CTE + audit).
 //! First milestone: embed → store → vector search round-trip proof (selftest).
-mod ask;
-mod audit;
-mod config;
-mod frontmatter;
-mod graph;
-mod ingest;
-mod llm;
-mod redact;
-mod retrieve;
-mod serve;
-mod store;
-mod vault;
-mod wiki_recall;
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use drudge::{
+    ask, audit, config, frontmatter, graph, ingest, llm, renumber, retrieve, serve, store, vault,
+};
 
 #[derive(Parser)]
 #[command(
@@ -59,7 +48,14 @@ enum Cmd {
     },
     /// HTTP resident daemon — ingest/ask/graph/audit API + background scheduler
     Serve,
-    /// Personal vault lint/audit
+    /// Maintenance compact — VACUUM/ANALYZE + REINDEX + prune old query_log + GC orphans
+    Compact,
+    /// Recent query/retrieval log (memory usage analytics)
+    QueryLog {
+        #[arg(short, long, default_value = "50")]
+        limit: i64,
+    },
+    /// Personal vault lint/audit/maintenance
     Vault {
         #[command(subcommand)]
         sub: VaultCmd,
@@ -85,6 +81,18 @@ enum VaultCmd {
         /// Treat warnings as errors too (exit 2)
         #[arg(long)]
         strict: bool,
+    },
+    /// Compact wiki ids — renumber vault/wiki files to remove gaps (dry-run by default)
+    Renumber {
+        /// vault root path (default: $PWD/vault)
+        #[arg(long)]
+        vault: Option<String>,
+        /// Actually apply the plan (default is dry-run)
+        #[arg(long)]
+        apply: bool,
+        /// After applying, run a vector-mode sync to rebuild the DB
+        #[arg(long)]
+        sync: bool,
     },
 }
 
@@ -188,7 +196,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Audit => {
             let store = store.as_ref().context(VEC_OFF)?;
-            audit::run(store).await?;
+            audit::run(store, cfg.allow_company_origin).await?;
         }
         Cmd::Search { query } => {
             let store = store.as_ref().context(VEC_OFF)?;
@@ -284,23 +292,103 @@ async fn main() -> Result<()> {
             // Move store ownership into serve::run — single-process DB owner pattern.
             serve::run(store, ol, cfg).await?;
         }
+        Cmd::Compact => {
+            let store = store.as_ref().context(VEC_OFF)?;
+            let summary = store.compact().await?;
+            println!(
+                "compact done — vacuum {}ms, reindex {}ms, prune_query_log {}, gc(tool {} concept {}), total {}ms",
+                summary.report.vacuum_ms,
+                summary.report.reindex_ms,
+                summary.report.prune_query_log,
+                summary.report.gc_tool,
+                summary.report.gc_concept,
+                summary.total_ms,
+            );
+        }
+        Cmd::QueryLog { limit } => {
+            let store = store.as_ref().context(VEC_OFF)?;
+            let rows = store.recent_queries(limit.clamp(1, 1000)).await?;
+            for r in rows {
+                let ts = format!("{:?}", r.created_at);
+                println!(
+                    "[{}] {:<10} {:>5}ms  q={:?}  hits={:?}",
+                    ts,
+                    r.endpoint,
+                    r.latency_ms
+                        .map_or_else(|| "?".to_string(), |n| n.to_string()),
+                    r.query,
+                    if r.hit_paths.is_empty() {
+                        r.sources
+                    } else {
+                        r.hit_paths
+                    }
+                );
+            }
+        }
         Cmd::Vault { sub } => {
-            // vault commands don't need store (Postgres) — drop it to release the connection.
-            drop(store);
             let default_vault = format!(
                 "{}/oh-my-boring/vault",
                 std::env::var("HOME").unwrap_or_default()
             );
             match sub {
                 VaultCmd::Lint { vault, strict } => {
+                    // Lint does not need Postgres — release the connection.
+                    drop(store);
                     let vault_root = std::path::PathBuf::from(vault.unwrap_or(default_vault));
                     let code = vault::run_lint(&vault_root, strict)?;
                     std::process::exit(code);
                 }
                 VaultCmd::Audit { vault, strict } => {
+                    // Audit does not need Postgres either.
+                    drop(store);
                     let vault_root = std::path::PathBuf::from(vault.unwrap_or(default_vault));
                     let code = vault::run_audit(&vault_root, strict)?;
                     std::process::exit(code);
+                }
+                VaultCmd::Renumber { vault, apply, sync } => {
+                    let vault_root = std::path::PathBuf::from(vault.unwrap_or_else(|| {
+                        std::env::var("DRUDGE_VAULT_DIR").unwrap_or(default_vault)
+                    }));
+                    let wiki_dir = vault_root.join("wiki");
+                    let plan = renumber::plan(&wiki_dir)?;
+                    if plan.is_noop() {
+                        println!("vault renumber: no gaps — nothing to do");
+                        return Ok(());
+                    }
+                    println!("vault renumber plan ({} moves):", plan.moves.len());
+                    for m in &plan.moves {
+                        let action = if m.old_id == m.new_id {
+                            format!("{}  (content references rewritten)", m.old_path.display())
+                        } else {
+                            format!(
+                                "{} → {}",
+                                m.old_path.file_name().unwrap_or_default().to_string_lossy(),
+                                m.new_path.file_name().unwrap_or_default().to_string_lossy()
+                            )
+                        };
+                        println!("  {action}");
+                    }
+                    if !apply {
+                        println!("\nThis was a dry-run. Pass --apply to execute.");
+                        return Ok(());
+                    }
+                    renumber::apply(&plan)?;
+                    println!("renumber applied — {} files rewritten", plan.moves.len());
+                    if sync {
+                        let store = store.as_ref().context(VEC_OFF)?;
+                        let ol = llm::Llm::from_config(&cfg);
+                        let stats = ingest::run(
+                            store,
+                            &ol,
+                            &cfg,
+                            &[wiki_dir.to_string_lossy().into_owned()],
+                        )
+                        .await?;
+                        println!(
+                            "sync: new={} updated={} deleted={} chunks={}",
+                            stats.new, stats.updated, stats.deleted, stats.chunks
+                        );
+                    }
                 }
             }
         }

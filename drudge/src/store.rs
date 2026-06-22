@@ -78,6 +78,36 @@ impl GcStats {
     }
 }
 
+/// One query/retrieval event — used for memory utility analytics.
+#[derive(Debug)]
+pub struct QueryLogRow {
+    pub id: i32,
+    pub created_at: SystemTime,
+    pub endpoint: String,
+    pub query: String,
+    pub hit_paths: Vec<String>,
+    pub sources: Vec<String>,
+    pub answer_snippet: String,
+    pub latency_ms: Option<i32>,
+}
+
+/// Result of a maintenance compact pass.
+#[derive(Debug, Default)]
+pub struct CompactReport {
+    pub vacuum_ms: u128,
+    pub reindex_ms: u128,
+    pub prune_query_log: usize,
+    pub gc_tool: usize,
+    pub gc_concept: usize,
+}
+
+/// Compact report with an overall elapsed time.
+#[derive(Debug, Default)]
+pub struct CompactSummary {
+    pub report: CompactReport,
+    pub total_ms: u128,
+}
+
 /// Semantic graph stats (for audit).
 #[derive(Debug, Default)]
 pub struct SemanticStats {
@@ -134,6 +164,7 @@ impl Store {
 
     /// PostgreSQL connect + pgvector + node/edge graph schema initialization.
     /// `dim` = the embedding dimension (`boring.json` `embed_dim`) → the `vector(dim)` columns.
+    #[allow(clippy::too_many_lines)] // schema DDL grows with features; splitting only obscures the one migration block.
     pub async fn open(dsn: &str, dim: usize) -> Result<Self> {
         // connect retry (IO boundary, graceful) — when postgres is started separately via profile
         // drudge waits up to ~10s even if it comes up first (depends_on removed → absorbs startup race).
@@ -225,7 +256,18 @@ impl Store {
                  CREATE INDEX IF NOT EXISTS claim_current ON claim(subject, predicate)
                      WHERE superseded_at IS NULL;
                  CREATE INDEX IF NOT EXISTS claim_hnsw ON claim USING hnsw (embedding vector_cosine_ops)
-                     WHERE superseded_at IS NULL;"
+                     WHERE superseded_at IS NULL;
+                 CREATE TABLE IF NOT EXISTS query_log (
+                     id            serial PRIMARY KEY,
+                     created_at    timestamptz NOT NULL DEFAULT now(),
+                     endpoint      text NOT NULL,
+                     query         text NOT NULL DEFAULT '',
+                     hit_paths     text[] NOT NULL DEFAULT '{{}}',
+                     sources       text[] NOT NULL DEFAULT '{{}}',
+                     answer_snippet text NOT NULL DEFAULT '',
+                     latency_ms    int
+                 );
+                 CREATE INDEX IF NOT EXISTS query_log_created ON query_log(created_at DESC);"
             ))
             .await
             .context("pgvector + graph schema")?;
@@ -723,6 +765,109 @@ impl Store {
                 source_path: r.get(3),
             })
             .collect())
+    }
+
+    // ── query log (memory usage analytics) ────────────────────────────────────
+
+    #[allow(clippy::needless_borrow)] // tokio-postgres params need &&str to coerce to &dyn ToSql.
+    pub async fn log_query(
+        &self,
+        endpoint: &str,
+        query: &str,
+        hit_paths: &[String],
+        sources: &[String],
+        answer_snippet: &str,
+        latency_ms: Option<i32>,
+    ) -> Result<()> {
+        self.db
+            .execute(
+                "INSERT INTO query_log (endpoint, query, hit_paths, sources, answer_snippet, latency_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6);",
+                &[
+                    &endpoint,
+                    &query,
+                    &hit_paths,
+                    &sources,
+                    &answer_snippet,
+                    &latency_ms,
+                ],
+            )
+            .await
+            .context("log query")?;
+        Ok(())
+    }
+
+    pub async fn recent_queries(&self, limit: i64) -> Result<Vec<QueryLogRow>> {
+        let rows = self
+            .db
+            .query(
+                "SELECT id, created_at, endpoint, query, hit_paths, sources, answer_snippet, latency_ms
+                 FROM query_log ORDER BY created_at DESC LIMIT $1;",
+                &[&limit],
+            )
+            .await
+            .context("recent queries")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| QueryLogRow {
+                id: r.get(0),
+                created_at: r.get(1),
+                endpoint: r.get(2),
+                query: r.get(3),
+                hit_paths: r.get(4),
+                sources: r.get(5),
+                answer_snippet: r.get(6),
+                latency_ms: r.get(7),
+            })
+            .collect())
+    }
+
+    /// Maintenance compact: VACUUM ANALYZE + REINDEX TABLE CONCURRENTLY + old query_log
+    /// pruning + orphan semantic-node GC. Returns a report of what happened.
+    ///
+    /// VACUUM and REINDEX CONCURRENTLY cannot run inside a transaction block. We send each
+    /// statement through its own `batch_execute` call so the simple-query protocol keeps them
+    /// in autocommit mode rather than wrapping multiple statements in an implicit transaction.
+    pub async fn compact(&self) -> Result<CompactSummary> {
+        let mut report = CompactReport::default();
+        let started = std::time::Instant::now();
+
+        let t0 = std::time::Instant::now();
+        for table in ["document", "chunk", "node", "edge", "claim", "query_log"] {
+            self.db
+                .batch_execute(&format!("VACUUM ANALYZE {table};"))
+                .await
+                .with_context(|| format!("vacuum analyze {table}"))?;
+        }
+        report.vacuum_ms = t0.elapsed().as_millis();
+
+        let t0 = std::time::Instant::now();
+        for table in ["document", "chunk", "node", "edge", "claim", "query_log"] {
+            self.db
+                .batch_execute(&format!("REINDEX TABLE CONCURRENTLY {table};"))
+                .await
+                .with_context(|| format!("reindex table {table}"))?;
+        }
+        report.reindex_ms = t0.elapsed().as_millis();
+
+        let pruned = self
+            .db
+            .execute(
+                "DELETE FROM query_log WHERE created_at < now() - interval '90 days';",
+                &[],
+            )
+            .await
+            .context("prune query_log")?;
+        report.prune_query_log = usize::try_from(pruned).unwrap_or(0);
+
+        let gc = self.gc_orphans().await.context("gc orphans")?;
+        report.gc_tool = gc.tool;
+        report.gc_concept = gc.concept;
+
+        Ok(CompactSummary {
+            report,
+            total_ms: started.elapsed().as_millis(),
+        })
     }
 
     // ── graph helpers (node/edge upsert) ───────────────────────────────────────

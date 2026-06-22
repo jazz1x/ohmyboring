@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Network-free regression tests for scripts/data-steward.py.
+
+Guardrail owned: `--fix` must NEVER produce unparseable frontmatter. The original
+line-splice preserved an inline `tags: []` line and appended block entries after
+it, yielding YAML that fails to parse (silent vault data loss on re-ingest).
+"""
+import importlib.util
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import yaml
+
+# data-steward.py has a hyphen → load it by path.
+_HERE = os.path.dirname(os.path.realpath(__file__))
+_spec = importlib.util.spec_from_file_location("data_steward", os.path.join(_HERE, "data-steward.py"))
+ds = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ds)
+
+
+def _roundtrip_fix(frontmatter: str, body: str = "body.\n", target: str = "omb") -> str:
+    """Write a note, run _fix_note, return the rewritten frontmatter block."""
+    d = tempfile.mkdtemp()
+    wiki = Path(d) / "wiki"
+    wiki.mkdir()
+    p = wiki / "wiki-0042.md"
+    p.write_text(f"---\n{frontmatter}\n---\n{body}", encoding="utf-8")
+    note = ds._collect_notes(wiki)[0]
+    ds._fix_note(note, target)
+    out = p.read_text(encoding="utf-8")
+    return out[4 : out.find("\n---\n")]
+
+
+def _assert_parses(fm: str, label: str):
+    try:
+        yaml.safe_load(fm)
+    except Exception as e:  # noqa: BLE001
+        raise AssertionError(f"{label}: rewritten frontmatter is unparseable YAML: {e}\n---\n{fm}\n---")
+
+
+def test_inline_empty_tags_stays_parseable():
+    # The exact red-team repro: empty inline tags + org-prefixed project.
+    fm = _roundtrip_fix(
+        "id: wiki-0042\ntitle: t\nkind: note\norigin: personal\n"
+        "project: marketboro/omb\ntags: []\nsources: []"
+    )
+    _assert_parses(fm, "inline-empty-tags")
+    loaded = yaml.safe_load(fm)
+    assert loaded["project"] == "omb", loaded
+    # repo/omb tag is added for the canonicalized project.
+    assert "repo/omb" in (loaded.get("tags") or []), loaded
+
+
+def test_inline_nonempty_tags_stays_parseable():
+    fm = _roundtrip_fix(
+        "id: wiki-0042\ntitle: t\nproject: marketboro/omb\n"
+        "tags: [repo/marketboro/omb, effect]\nsources: []"
+    )
+    _assert_parses(fm, "inline-nonempty-tags")
+    loaded = yaml.safe_load(fm)
+    assert "effect" in loaded["tags"], loaded
+
+
+def test_block_tags_stays_parseable():
+    fm = _roundtrip_fix(
+        "id: wiki-0042\ntitle: t\nproject: marketboro/omb\n"
+        "tags:\n- repo/marketboro/omb\n- effect\nsources: []"
+    )
+    _assert_parses(fm, "block-tags")
+    loaded = yaml.safe_load(fm)
+    assert "effect" in loaded["tags"], loaded
+
+
+def test_placeholder_tags_removed_cleanly():
+    fm = _roundtrip_fix(
+        "id: wiki-0042\ntitle: t\nproject: omb\ntags:\n- _\n- pr_\n- real\nsources: []"
+    )
+    _assert_parses(fm, "placeholder-tags")
+    loaded = yaml.safe_load(fm)
+    tags = loaded.get("tags") or []
+    assert "_" not in tags and "pr_" not in tags, tags
+    assert "real" in tags, tags
+
+
+def main():
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    for fn in fns:
+        fn()
+        print(f"ok - {fn.__name__}")
+    print(f"\n✅ data-steward: {len(fns)} tests passed.")
+
+
+if __name__ == "__main__":
+    main()

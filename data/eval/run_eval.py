@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Behavioral eval harness for oh-my-boring recall.
+"""Black-box service-contract eval for oh-my-boring retrieval.
 
-Loads data/eval/golden.json, runs each query against /search, and reports
-Recall@k and MRR@k. The expected fixture ids are matched by source_path
-basename.
+This script does NOT test drudge internals (those live in Rust #[cfg(test)]).
+It loads data/eval/golden.json and calls the live /search endpoint the same
+way an external agent would, then reports Recall@k and MRR@k against the
+golden fixture ids.
 
 Run via `make eval` (requires a live stack on :7700).
 """

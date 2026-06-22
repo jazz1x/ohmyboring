@@ -25,6 +25,10 @@ AGENTS = {
         "kind": "hooks",
         "path": "{HOME}/.claude/settings.json",
     },
+    "kimi": {
+        "kind": "kimi-hooks",
+        "path": "{HOME}/.kimi-code/config.toml",
+    },
     "cursor": {
         "kind": "mcp",
         "path": "{HOME}/.cursor/mcp.json",
@@ -144,6 +148,41 @@ def wire_claude_code(path: Path | None = None) -> dict:
     return {"agent": "claude-code", "path": str(path), "changed": changed}
 
 
+def wire_kimi(path: Path | None = None) -> dict:
+    """Idempotently wire Kimi Code SessionEnd/UserPromptSubmit hooks in config.toml.
+
+    Kimi uses TOML [[hooks]] tables rather than JSON, so we append simple blocks
+    instead of round-tripping the full document. A .omb-bak copy is preserved.
+    """
+    path = path if path is not None else _agent_path("kimi")
+    _backup(path)
+
+    distill = f"python3 {OMB_HOME}/hooks/kimi-distill-session.py"
+    recall = f"python3 {OMB_HOME}/hooks/kimi-recall.py"
+
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    changed = False
+    if distill not in existing or recall not in existing:
+        snippet = (
+            "\n[[hooks]]\n"
+            'event = "SessionEnd"\n'
+            f'command = "{distill}"\n'
+            "timeout = 130\n"
+            "\n[[hooks]]\n"
+            'event = "UserPromptSubmit"\n'
+            f'command = "{recall}"\n'
+            "timeout = 10\n"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write(snippet)
+        changed = True
+
+    return {"agent": "kimi", "path": str(path), "changed": changed}
+
+
 def wire_mcp_agent(agent_id: str, server_name: str, server_config: dict, path: Path | None = None) -> dict:
     """Idempotently add/update an MCP server entry for a generic MCP-capable agent."""
     info = AGENTS[agent_id]
@@ -186,6 +225,8 @@ def install(enabled_agents, server_name, server_config):
         try:
             if agent_id == "claude-code":
                 results.append(wire_claude_code())
+            elif agent_id == "kimi":
+                results.append(wire_kimi())
             else:
                 results.append(wire_mcp_agent(agent_id, server_name, server_config))
         except Exception as e:

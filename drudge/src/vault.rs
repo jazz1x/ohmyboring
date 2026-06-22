@@ -1088,9 +1088,10 @@ pub fn normalize_body(body: &str) -> String {
     strip_trailing_empty_heading(out.trim()).trim().to_owned()
 }
 
-/// Scan vault/wiki for the highest `wiki-NNNN` id and return the next candidate.
+/// Scan vault/wiki for the lowest unused `wiki-NNNN` id.
+/// Fills gaps caused by forget/deletion; `wiki-0000` is reserved for the seed note.
 fn next_wiki_id(wiki_dir: &Path) -> Result<u32> {
-    let mut max_id: u32 = 0;
+    let mut used: HashSet<u32> = HashSet::new();
     if wiki_dir.exists() {
         for entry in std::fs::read_dir(wiki_dir)
             .with_context(|| format!("failed to read wiki dir: {}", wiki_dir.display()))?
@@ -1101,13 +1102,16 @@ fn next_wiki_id(wiki_dir: &Path) -> Result<u32> {
                 .and_then(|s| s.to_str())
                 .and_then(|s| s.strip_prefix("wiki-"))
                 .and_then(|s| s.parse::<u32>().ok())
-                && n > max_id
             {
-                max_id = n;
+                used.insert(n);
             }
         }
     }
-    Ok(max_id + 1)
+    let mut n: u32 = 1;
+    while used.contains(&n) {
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// Atomically allocate the next `wiki-NNNN.md` path in `wiki_dir`.
@@ -1160,6 +1164,11 @@ pub fn render_wiki_note(wiki_id: &str, front: &FrontMatter, body: &str) -> Resul
         claims: &'a [Claim],
         relates_to: Vec<String>,
         sources: Vec<String>,
+        /// Session provenance: which session produced this note. Persisted when present so a note
+        /// can be traced back to (and deduped against) its originating session. Absent on legacy
+        /// notes and manual remembers → skipped, keeping their frontmatter unchanged.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        omb_session_id: Option<&'a str>,
     }
     let title = front.title.as_deref().unwrap_or(wiki_id);
     let kind = if front.kind.is_empty() {
@@ -1180,6 +1189,7 @@ pub fn render_wiki_note(wiki_id: &str, front: &FrontMatter, body: &str) -> Resul
         claims: &front.claims,
         relates_to: Vec::new(),
         sources: Vec::new(),
+        omb_session_id: front.omb_session_id.as_deref(),
     };
     let yaml = serde_yaml::to_string(&fm).context("failed to serialize wiki frontmatter YAML")?;
     Ok(format!("---\n{yaml}---\n{}\n", body.trim_end()))
@@ -1224,9 +1234,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Kind, Origin, Page, PageIdSchema, Schema, Severity, SourcesSchema, audit_pages,
-        extract_wikilinks, find_cross_layer_wikilinks, is_seed_note, lint_page, normalize_body,
-        parse_kind, parse_origin, repair_note_frontmatter, sanitize_tag,
+        FrontMatter, Kind, Origin, Page, PageIdSchema, Schema, Severity, SourcesSchema,
+        audit_pages, extract_wikilinks, find_cross_layer_wikilinks, is_seed_note, lint_page,
+        normalize_body, parse_kind, parse_origin, render_wiki_note, repair_note_frontmatter,
+        sanitize_tag, split_frontmatter,
     };
     use serde_yaml::Value;
 
@@ -1379,6 +1390,34 @@ mod tests {
         assert_eq!(
             sanitize_tag("-leading-trailing-").as_deref(),
             Some("leading-trailing")
+        );
+    }
+
+    // ── render_wiki_note: session provenance persistence ──
+
+    #[test]
+    fn render_persists_session_id_when_present_and_omits_when_absent() {
+        let mut front = FrontMatter {
+            origin: "personal".to_owned(),
+            project: "olympus".to_owned(),
+            date: "2026-06-22".to_owned(),
+            kind: "note".to_owned(),
+            ..Default::default()
+        };
+
+        // absent → field must not appear (legacy/manual notes stay clean)
+        let out = render_wiki_note("wiki-0042", &front, "body").unwrap();
+        assert!(!out.contains("omb_session_id"), "{out}");
+
+        // present → persisted as provenance, and the note round-trips through YAML parse
+        front.omb_session_id = Some("sess-abc123".to_owned());
+        let out = render_wiki_note("wiki-0042", &front, "body").unwrap();
+        assert!(out.contains("omb_session_id: sess-abc123"), "{out}");
+        let (yaml, _) = split_frontmatter(&out).expect("frontmatter splits");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).expect("valid YAML");
+        assert_eq!(
+            parsed["omb_session_id"],
+            serde_yaml::Value::from("sess-abc123")
         );
     }
 
@@ -1639,5 +1678,20 @@ mod tests {
         // 2026-01-01 from epoch: 2026 years * 365 + leaps
         // We'll test a known value: 2000-01-01 = 10957
         assert_eq!(super::days_to_date(10_957), "2000-01-01");
+    }
+
+    // ── next_wiki_id ──
+
+    #[test]
+    fn next_wiki_id_fills_lowest_gap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir(&wiki).unwrap();
+        std::fs::File::create(wiki.join("wiki-0000.md")).unwrap();
+        std::fs::File::create(wiki.join("wiki-0002.md")).unwrap();
+        std::fs::File::create(wiki.join("wiki-0005.md")).unwrap();
+        assert_eq!(super::next_wiki_id(&wiki).unwrap(), 1);
+        std::fs::File::create(wiki.join("wiki-0001.md")).unwrap();
+        assert_eq!(super::next_wiki_id(&wiki).unwrap(), 3);
     }
 }

@@ -50,6 +50,45 @@ def test_extract_claude_jsonl_ignores_malformed_lines():
         os.unlink(path)
 
 
+def test_extract_kimi_wire_user_and_assistant():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        _write(
+            f.name,
+            [
+                {"type": "metadata", "protocol_version": "1.4"},
+                {"type": "turn.prompt", "input": [{"type": "text", "text": "fix the build"}]},
+                {
+                    "type": "context.append_message",
+                    "message": {
+                        "role": "user",
+                        "origin": {"kind": "user"},
+                        "content": [{"type": "text", "text": "fix the build"}],
+                    },
+                },
+                {
+                    "type": "context.append_loop_event",
+                    "event": {"type": "content.part", "part": {"type": "text", "text": "done"}},
+                },
+                {
+                    "type": "context.append_message",
+                    "message": {
+                        "role": "user",
+                        "origin": {"kind": "injection"},
+                        "content": [{"type": "text", "text": "system reminder"}],
+                    },
+                },
+            ],
+        )
+        path = f.name
+    try:
+        out = transcript.extract(path, "kimi-wire")
+        assert "[user] fix the build" in out
+        assert "[assistant] done" in out
+        assert "system reminder" not in out
+    finally:
+        os.unlink(path)
+
+
 def test_extract_unknown_format_raises():
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         f.write("x")
@@ -68,5 +107,6 @@ def test_extract_unknown_format_raises():
 if __name__ == "__main__":
     test_extract_claude_jsonl_text_and_list_content()
     test_extract_claude_jsonl_ignores_malformed_lines()
+    test_extract_kimi_wire_user_and_assistant()
     test_extract_unknown_format_raises()
     print("ok - transcript parser")

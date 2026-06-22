@@ -43,7 +43,7 @@ make up
 # 4) Wire enabled agent adapters — the fiddly part this installer exists to automate.
 #    Idempotent + backs up settings files. OMB_WIRE=0 to skip.
 if [ "${OMB_WIRE:-1}" = 1 ]; then
-  say "Wiring oh-my-boring adapters for enabled agents (Claude Code hooks + Cursor/Codex MCP)…"
+  say "Wiring oh-my-boring adapters for enabled agents (Claude Code / Kimi Code hooks + Cursor/Codex MCP)…"
   if python3 "$OMB_HOME/agents/shared/agent_wiring.py" \
        --install \
        --omb-home "$OMB_HOME" \

@@ -7,13 +7,15 @@
 //! - Error propagation: `AppError` (anyhow wrapper) → HTTP 500, JSON body.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use axum::body::{Body, Bytes};
 use tokio::sync::Mutex;
+use tokio_stream::StreamExt;
 
 use anyhow::Result;
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -29,7 +31,7 @@ use crate::ingest;
 use crate::llm::Llm;
 use crate::redact;
 use crate::retrieve;
-use crate::store::Store;
+use crate::store::{CompactSummary, Store};
 use crate::vault;
 use crate::wiki_recall;
 
@@ -50,6 +52,8 @@ pub struct AppState {
     /// Serializes startup, periodic, and HTTP-triggered syncs so they never overlap.
     /// `/sync` waits for an in-flight startup sync and returns its actual outcome.
     sync_lock: Arc<Mutex<()>>,
+    /// Last successful compact time, shared with scheduler so manual `/compact` resets the window.
+    last_compact: Arc<Mutex<Option<Instant>>>,
 }
 
 impl AppState {
@@ -57,6 +61,39 @@ impl AppState {
     fn wiki_dir(&self) -> Option<PathBuf> {
         (*self.vault_dir).as_ref().map(|v| v.join("wiki"))
     }
+}
+
+/// Fire-and-forget query logging. Latency and result context are recorded for
+/// memory-utility analytics; failures are logged to stderr and never fail the request.
+#[allow(clippy::needless_borrow)] // tokio-postgres needs &&str to coerce to &dyn ToSql.
+fn spawn_query_log(
+    store: Option<Arc<Store>>,
+    endpoint: &'static str,
+    query: String,
+    hit_paths: Vec<String>,
+    sources: Vec<String>,
+    answer_snippet: String,
+    elapsed: Duration,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    tokio::spawn(async move {
+        let latency_ms = i32::try_from(elapsed.as_millis()).ok();
+        if let Err(e) = store
+            .log_query(
+                &endpoint,
+                &query,
+                &hit_paths,
+                &sources,
+                &answer_snippet,
+                latency_ms,
+            )
+            .await
+        {
+            eprintln!("[query_log] {e:#}");
+        }
+    });
 }
 
 // ── error type (ROP: AppError → HTTP 500) ───────────────────────────────────
@@ -153,6 +190,43 @@ struct SyncResp {
     total_edges: usize,
 }
 
+#[derive(Serialize)]
+struct CompactResp {
+    vacuum_ms: u128,
+    reindex_ms: u128,
+    prune_query_log: usize,
+    gc_tool: usize,
+    gc_concept: usize,
+    total_ms: u128,
+}
+
+#[derive(Deserialize)]
+struct QueryLogReq {
+    #[serde(default = "default_query_log_limit")]
+    limit: i64,
+}
+
+fn default_query_log_limit() -> i64 {
+    50
+}
+
+#[derive(Serialize)]
+struct QueryLogResp {
+    entries: Vec<QueryLogEntry>,
+}
+
+#[derive(Serialize)]
+struct QueryLogEntry {
+    id: i32,
+    created_at: String,
+    endpoint: String,
+    query: String,
+    hit_paths: Vec<String>,
+    sources: Vec<String>,
+    answer_snippet: String,
+    latency_ms: Option<i32>,
+}
+
 // ── handlers ──────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -172,12 +246,22 @@ async fn handle_ask(
     State(s): State<AppState>,
     Json(req): Json<AskReq>,
 ) -> Result<Json<AskResp>, AppError> {
+    let started = Instant::now();
     // vector on → synthesize from vector+graph retrieval. off → synthesize from direct vault/wiki reads.
     let out = if let Some(store) = s.store.as_ref() {
         ask::answer(store, &s.llm, &req.question, &[]).await?
     } else {
         ask::answer_wiki(&s.llm, s.wiki_dir().as_deref(), &req.question).await?
     };
+    spawn_query_log(
+        s.store.clone(),
+        "ask",
+        req.question,
+        out.sources.clone(),
+        out.sources.clone(),
+        out.answer.chars().take(280).collect(),
+        started.elapsed(),
+    );
     Ok(Json(AskResp {
         answer: out.answer,
         sources: out.sources,
@@ -187,8 +271,18 @@ async fn handle_ask(
 /// Recency-first briefing — no question (recency retrieval). Called by the cron morning briefing.
 /// Recency (updated_at) ordering depends on pgvector → rejected if `DRUDGE_VECTOR=off`.
 async fn handle_brief(State(s): State<AppState>) -> Result<Json<AskResp>, AppError> {
+    let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
     let out = ask::brief(store, &s.llm, &[], s.cfg.note_lang.as_str()).await?;
+    spawn_query_log(
+        s.store.clone(),
+        "brief",
+        String::new(),
+        out.sources.clone(),
+        out.sources.clone(),
+        out.answer.chars().take(280).collect(),
+        started.elapsed(),
+    );
     Ok(Json(AskResp {
         answer: out.answer,
         sources: out.sources,
@@ -212,6 +306,7 @@ async fn handle_search(
     State(s): State<AppState>,
     Json(req): Json<SearchReq>,
 ) -> Result<Json<SearchResp>, AppError> {
+    let started = Instant::now();
     let max_results = req.max_results.clamp(1, MCP_MAX_RESULTS);
     let max_tokens = req.max_tokens.clamp(1, MCP_MAX_TOKENS);
     let max_chars = max_tokens.saturating_mul(4);
@@ -241,6 +336,19 @@ async fn handle_search(
             })
             .collect()
     };
+    let hit_paths: Vec<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
+    spawn_query_log(
+        s.store.clone(),
+        "search",
+        req.query.clone(),
+        hit_paths,
+        vec![],
+        mapped
+            .first()
+            .map(|h| h.snippet.chars().take(200).collect())
+            .unwrap_or_default(),
+        started.elapsed(),
+    );
     Ok(Json(SearchResp { hits: mapped }))
 }
 
@@ -260,8 +368,23 @@ async fn handle_graph(
     State(s): State<AppState>,
     Json(req): Json<GraphReq>,
 ) -> Result<Json<GraphResp>, AppError> {
+    let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?; // graph is pgvector-only
     let out = graph::query(store, &s.llm, &req.query).await?;
+    let hit = if out.hit.is_empty() {
+        vec![]
+    } else {
+        vec![out.hit.clone()]
+    };
+    spawn_query_log(
+        s.store.clone(),
+        "graph",
+        req.query.clone(),
+        hit,
+        vec![],
+        out.hit.chars().take(200).collect(),
+        started.elapsed(),
+    );
     Ok(Json(GraphResp {
         hit: out.hit,
         graph_neighbors: out.graph_neighbors,
@@ -271,18 +394,63 @@ async fn handle_graph(
 
 async fn handle_audit(State(s): State<AppState>) -> Result<Json<audit::AuditStats>, AppError> {
     let store = s.store.as_ref().ok_or_else(vector_disabled)?; // ingest stats are pgvector-only
-    let stats = audit::stats(store).await?;
+    let stats = audit::stats(store, s.cfg.allow_company_origin).await?;
     Ok(Json(stats))
+}
+
+/// Recent query/retrieval log — for memory-utility analytics.
+async fn handle_query_log(
+    State(s): State<AppState>,
+    Query(params): Query<QueryLogReq>,
+) -> Result<Json<QueryLogResp>, AppError> {
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let limit = params.limit.clamp(1, 1000);
+    let rows = store.recent_queries(limit).await?;
+    let entries = rows
+        .into_iter()
+        .map(|r| QueryLogEntry {
+            id: r.id,
+            created_at: format!("{:?}", r.created_at),
+            endpoint: r.endpoint,
+            query: r.query,
+            hit_paths: r.hit_paths,
+            sources: r.sources,
+            answer_snippet: r.answer_snippet,
+            latency_ms: r.latency_ms,
+        })
+        .collect();
+    Ok(Json(QueryLogResp { entries }))
 }
 
 // ── MCP-over-HTTP (Nous Hermes Agent connection) ────────────────────────────
 // JSON-RPC 2.0: initialize · tools/list · tools/call(recall). Notifications get 202 (no response).
 // The `recall` tool = retrieve (vector+graph) → text → the agent retrieves from our self-augmenting KB.
 
-const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 /// Hard ceiling on agent-supplied recall budget to prevent token/DoS explosions.
 const MCP_MAX_RESULTS: usize = 50;
 const MCP_MAX_TOKENS: usize = 16_384;
+
+/// GET /mcp — Streamable HTTP SSE endpoint. MCP spec requires servers to expose a
+/// server-to-client stream; drudge has no async notifications, so we send the initial
+/// `endpoint` event and keep the connection alive with periodic comments. This keeps
+/// strict clients from seeing a 405 while remaining stateless.
+async fn handle_mcp_get() -> Result<Response, AppError> {
+    let endpoint = tokio_stream::once(Ok::<_, std::convert::Infallible>(Bytes::from_static(
+        b"event: endpoint\ndata: /mcp\n\n",
+    )));
+    let keepalive =
+        tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(Duration::from_secs(15)))
+            .map(|_| Ok::<_, std::convert::Infallible>(Bytes::from_static(b":keep-alive\n\n")));
+    let stream = endpoint.chain(keepalive);
+    let resp = Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(Body::from_stream(stream))
+        .map_err(|e| anyhow::anyhow!("build SSE response: {e}"))?;
+    Ok(resp.into_response())
+}
 
 async fn handle_mcp(State(s): State<AppState>, Json(req): Json<Value>) -> Response {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
@@ -621,7 +789,7 @@ async fn mcp_neighbors(s: &AppState, args: Option<&Value>) -> Result<Value, (i32
 /// (so no untrusted-data fence needed). Vector-only.
 async fn mcp_corpus_status(s: &AppState) -> Result<Value, (i32, String)> {
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let stats = audit::stats(store)
+    let stats = audit::stats(store, s.cfg.allow_company_origin)
         .await
         .map_err(|e| (-32603_i32, format!("audit: {e:#}")))?;
     serde_json::to_value(&stats).map_err(|e| (-32603_i32, format!("json: {e}")))
@@ -719,6 +887,11 @@ async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     }
 
     let path = if let Some(id) = id {
+        // `id` is untrusted (MCP arg). Parse it into a bare filename: any path
+        // navigation would let `forget` delete files outside the vault.
+        if id.contains('/') || id.contains('\\') || id.contains("..") {
+            return Err((-32602, format!("invalid note id {id:?}")));
+        }
         let p = wiki_dir.join(format!("{id}.md"));
         if !p.exists() {
             return Err((-32602, format!("note {id} not found")));
@@ -761,6 +934,9 @@ async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     std::fs::remove_file(&path).map_err(|e| (-32603_i32, format!("delete note: {e}")))?;
 
     if let Some(store) = s.store.as_ref() {
+        // Serialize against sync: project_links rewrites wiki relates_to in place, and a concurrent
+        // sync does the same — without the lock the two interleave into torn/partial wiki writes.
+        let _guard = s.sync_lock.lock().await;
         store
             .delete_document(&source_path)
             .await
@@ -783,7 +959,7 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
             "DRUDGE_VAULT_DIR not set — no target to write remember notes to".to_owned(),
         ));
     };
-    let note = parse_remember_note(args)?;
+    let note = parse_remember_note(args, &s.cfg)?;
 
     // 1. atomically allocate id + path, then write the wiki note (deterministic file IO — the SSOT artifact).
     let wiki_dir = vault_root.join("wiki");
@@ -803,6 +979,9 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
     };
 
     // 3. deterministic ingest of this one note (chunk→embed→upsert→graph) + relation recompute.
+    //    Serialize against sync: project_links rewrites wiki relates_to in place, so it must not
+    //    interleave with a concurrent sync doing the same (torn/partial wiki writes otherwise).
+    let _guard = s.sync_lock.lock().await;
     let mut stats = ingest::Stats::default();
     ingest::ingest_file(store, &s.llm, &s.cfg, &front.source_path, &mut stats)
         .await
@@ -826,7 +1005,10 @@ struct RememberNote {
 /// fold the repo slug into project + a `repo/<slug>` tag, scrub secrets from EVERY field rendered into the
 /// tracked vault note (the git leak boundary): the body, the title, each tool/concept, and every claim
 /// field — not just the body, since `render_wiki_note` writes them all verbatim.
-fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, String)> {
+fn parse_remember_note(
+    args: Option<&Value>,
+    cfg: &config::BoringConfig,
+) -> Result<RememberNote, (i32, String)> {
     let get_str = |k: &str| {
         args.and_then(|a| a.get(k))
             .and_then(Value::as_str)
@@ -883,7 +1065,7 @@ fn parse_remember_note(args: Option<&Value>) -> Result<RememberNote, (i32, Strin
     }
     .as_str()
     .to_owned();
-    let repo = get_str("repo");
+    let repo = cfg.canonical_repo(&get_str("repo"));
 
     // Ephemeral ingestion queue marker (not part of the semantic graph). Carried transparently in
     // frontmatter so the hermes/cron worker can confirm per-session idempotency.
@@ -1025,6 +1207,21 @@ async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncResp>, AppErr
     }))
 }
 
+/// Maintenance compact: VACUUM/ANALYZE + REINDEX + query_log pruning + orphan GC.
+async fn handle_compact(State(s): State<AppState>) -> Result<Json<CompactResp>, AppError> {
+    let _guard = s.sync_lock.lock().await;
+    let summary = do_compact(s.store.as_deref()).await?;
+    *s.last_compact.lock().await = Some(Instant::now());
+    Ok(Json(CompactResp {
+        vacuum_ms: summary.report.vacuum_ms,
+        reindex_ms: summary.report.reindex_ms,
+        prune_query_log: summary.report.prune_query_log,
+        gc_tool: summary.report.gc_tool,
+        gc_concept: summary.report.gc_concept,
+        total_ms: summary.total_ms,
+    }))
+}
+
 // ── one sync cycle (deterministic re-ingest) ────────────────────────────────
 
 struct SyncOutcome {
@@ -1068,34 +1265,81 @@ async fn do_sync(
             Err(e) => eprintln!("[scheduler] project_links warning (ignored): {e:#}"),
         }
     }
-    let audit = audit::stats(store).await.unwrap_or_else(|e| {
-        eprintln!("[sync] audit::stats failed: {e:#}; falling back to ingest delta");
-        audit::AuditStats {
-            total_chunks: ingest.chunks,
-            total_files: 0,
-            by_origin: Vec::new(),
-            by_kind: Vec::new(),
-            by_project: Vec::new(),
-            company_contamination: 0,
-            missing_origin: 0,
-            missing_project: 0,
-            clean: true,
-            graph_documents: 0,
-            graph_chunks: 0,
-            graph_projects: 0,
-            graph_topics: 0,
-            graph_edges: ingest.edges,
-            semantic_tools: 0,
-            semantic_concepts: 0,
-            semantic_uses: 0,
-            semantic_about: 0,
-        }
-    });
+    let audit = audit::stats(store, cfg.allow_company_origin)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("[sync] audit::stats failed: {e:#}; falling back to ingest delta");
+            audit::AuditStats {
+                total_chunks: ingest.chunks,
+                total_files: 0,
+                by_origin: Vec::new(),
+                by_kind: Vec::new(),
+                by_project: Vec::new(),
+                company_contamination: 0,
+                company_allowed: cfg.allow_company_origin,
+                missing_origin: 0,
+                missing_project: 0,
+                clean: true,
+                graph_documents: 0,
+                graph_chunks: 0,
+                graph_projects: 0,
+                graph_topics: 0,
+                graph_edges: ingest.edges,
+                semantic_tools: 0,
+                semantic_concepts: 0,
+                semantic_uses: 0,
+                semantic_about: 0,
+            }
+        });
+
+    // Periodic hygiene sweep (report-only): every sync, surface corpus rot in the logs so it is
+    // visible without a manual `make steward`. Detection only — never mutates the vault. Covers the
+    // cheap meta-level checks drudge already has; the deep checks (placeholder tags, project
+    // variants/typos) stay in `scripts/data-steward.py`, which this line points operators to.
+    let generic_projects: usize = audit
+        .by_project
+        .iter()
+        .filter(|(p, _)| matches!(p.as_str(), "Development" | "wiki" | ""))
+        .map(|(_, n)| n)
+        .sum();
+    if audit.clean && generic_projects == 0 {
+        eprintln!(
+            "[hygiene] ✅ clean — {} notes, origin/project complete{}",
+            audit.total_files,
+            if audit.company_allowed && audit.company_contamination > 0 {
+                format!(" ({} company-origin, allowed)", audit.company_contamination)
+            } else {
+                String::new()
+            }
+        );
+    } else {
+        eprintln!(
+            "[hygiene] ⚠️ needs review — missing_origin {} · missing_project {} · generic_project {} · company {}{} — run `make steward` to inspect",
+            audit.missing_origin,
+            audit.missing_project,
+            generic_projects,
+            audit.company_contamination,
+            if audit.company_allowed {
+                " (allowed)"
+            } else {
+                ""
+            }
+        );
+    }
+
     Ok(SyncOutcome {
         ingest,
         total_chunks: audit.total_chunks,
         total_edges: audit.graph_edges,
     })
+}
+
+/// One compact cycle. Vector-off is a no-op.
+async fn do_compact(store: Option<&Store>) -> Result<CompactSummary> {
+    match store {
+        Some(store) => store.compact().await,
+        None => Ok(CompactSummary::default()),
+    }
 }
 
 // ── background scheduler ────────────────────────────────────────────────────
@@ -1122,12 +1366,28 @@ async fn run_sync(
     }
 }
 
+async fn run_compact(store: Option<&Store>) {
+    match do_compact(store).await {
+        Ok(s) => eprintln!(
+            "[scheduler] compact done — vacuum {}ms reindex {}ms prune_query_log {} gc(tool {} concept {}) total {}ms",
+            s.report.vacuum_ms,
+            s.report.reindex_ms,
+            s.report.prune_query_log,
+            s.report.gc_tool,
+            s.report.gc_concept,
+            s.total_ms
+        ),
+        Err(e) => eprintln!("[scheduler] compact error: {e:#}"),
+    }
+}
+
 fn spawn_scheduler(
     store: Option<Arc<Store>>,
     llm: Arc<Llm>,
     vault_dir: Arc<Option<PathBuf>>,
     cfg: Arc<config::BoringConfig>,
     sync_lock: Arc<Mutex<()>>,
+    last_compact: Arc<Mutex<Option<Instant>>>,
 ) {
     // `.max(1)` — `DRUDGE_SYNC_HOURS=0` would make a zero Duration, and
     // tokio::time::interval panics on a zero period. Clamp to ≥1h.
@@ -1136,14 +1396,21 @@ fn spawn_scheduler(
         .and_then(|v| v.parse().ok())
         .unwrap_or(4)
         .max(1);
-    let interval = Duration::from_secs(sync_hours * 3600);
+    let sync_interval = Duration::from_secs(sync_hours * 3600);
+
+    let compact_hours: u64 = std::env::var("DRUDGE_COMPACT_HOURS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24)
+        .max(1);
+    let compact_interval = Duration::from_secs(compact_hours * 3600);
 
     tokio::spawn(async move {
         let store_ref = store.as_deref();
         // run once immediately at startup (compile only if vector off — refreshes wiki).
         // Lock serializes with HTTP /sync so callers wait for the startup baseline.
         eprintln!(
-            "[scheduler] startup sync (interval={sync_hours}h, vector={})",
+            "[scheduler] startup sync (interval={sync_hours}h, compact={compact_hours}h, vector={})",
             store.is_some()
         );
         {
@@ -1151,13 +1418,23 @@ fn spawn_scheduler(
             run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
         }
 
-        let mut ticker = tokio::time::interval(interval);
-        ticker.tick().await; // the first tick is immediate — discard it (already ran above)
+        let mut sync_ticker = tokio::time::interval(sync_interval);
+        sync_ticker.tick().await; // the first tick is immediate — discard it (already ran above)
         loop {
-            ticker.tick().await;
+            sync_ticker.tick().await;
             eprintln!("[scheduler] periodic sync");
-            let _guard = sync_lock.lock().await;
-            run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
+            {
+                let _guard = sync_lock.lock().await;
+                run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
+
+                // Auto-compact at the next sync after the compact interval has passed.
+                // This keeps maintenance aligned with write load rather than running on a fixed clock.
+                let mut last = last_compact.lock().await;
+                if last.is_none_or(|t| t.elapsed() >= compact_interval) {
+                    run_compact(store_ref).await;
+                    *last = Some(Instant::now());
+                }
+            }
         }
     });
 }
@@ -1173,6 +1450,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
 
     let addr = std::env::var("DRUDGE_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:7700".to_owned());
 
+    let last_compact = Arc::new(Mutex::new(None));
     let state = AppState {
         store: store.map(Arc::new),
         llm: Arc::new(llm),
@@ -1180,6 +1458,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         cfg: Arc::new(cfg),
         cfg_path: Arc::new(cfg_path),
         sync_lock: Arc::new(Mutex::new(())),
+        last_compact: Arc::clone(&last_compact),
     };
 
     spawn_scheduler(
@@ -1188,6 +1467,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         Arc::clone(&state.vault_dir),
         Arc::clone(&state.cfg),
         Arc::clone(&state.sync_lock),
+        Arc::clone(&last_compact),
     );
     // cfg_path is only used by the HTTP/MCP handlers; the scheduler does not need it.
 
@@ -1198,8 +1478,10 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .route("/search", post(handle_search))
         .route("/graph", post(handle_graph))
         .route("/audit", get(handle_audit))
+        .route("/query-log", get(handle_query_log))
         .route("/sync", post(handle_sync))
-        .route("/mcp", post(handle_mcp)) // MCP-over-HTTP (Nous Hermes Agent calls via the recall tool)
+        .route("/compact", post(handle_compact))
+        .route("/mcp", get(handle_mcp_get).post(handle_mcp)) // MCP-over-HTTP (Streamable HTTP: GET SSE + POST JSON-RPC)
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -1221,6 +1503,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::parse_remember_note;
+    use crate::config::BoringConfig;
     use serde_json::json;
 
     // The secret scrub must cover EVERY field render_wiki_note writes verbatim into the tracked vault —
@@ -1236,7 +1519,7 @@ mod tests {
                 {"subject": "deploy key", "predicate": "is", "value": format!("secret {anthropic} value")}
             ]
         });
-        let note = parse_remember_note(Some(&args)).unwrap();
+        let note = parse_remember_note(Some(&args), &BoringConfig::default()).unwrap();
 
         let title = note.front.title.as_deref().unwrap();
         assert!(
@@ -1270,7 +1553,7 @@ mod tests {
                 {"subject": "ommc threshold parity\\n", "predicate": "is_verified", "value": "16 items\\n"}
             ]
         });
-        let note = parse_remember_note(Some(&args)).unwrap();
+        let note = parse_remember_note(Some(&args), &BoringConfig::default()).unwrap();
         assert_eq!(
             note.front.title.as_deref(),
             Some("rollout"),

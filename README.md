@@ -10,7 +10,7 @@
 ![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
 ![gemma4](https://img.shields.io/badge/LLM-gemma4:12b-000?logo=ollama)
 
-**Self-hosted personal memory RAG.** Your Claude Code sessions are distilled into a local, human-readable wiki and recalled on demand — *"how did I do this last time?"* **Zero cloud · 100% local.**
+**Self-hosted personal memory RAG.** Your Claude Code / Kimi Code sessions are distilled into a local, human-readable wiki and recalled on demand — *"how did I do this last time?"* **Zero cloud · 100% local.**
 
 ```bash
 # Fastest — one-liner: clones to ~/oh-my-boring, builds, wires the Claude Code hooks.
@@ -119,7 +119,8 @@ Secrets and runtime switches live in **`.env`**:
 | `make ask Q="..."` | one-shot recall + synthesis |
 | `make sync` | deterministic re-ingest of the vault |
 | `make remember M="text"` | write a one-line note |
-| `make collect [N=1]` | lazy backfill of past sessions |
+| `make collect [N=1]` | lazy backfill of past Claude Code sessions |
+| `make collect-kimi [N=1]` | lazy backfill of past Kimi Code sessions |
 | `make hermes-build` | clone/build the optional hermes-agent image |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | engine logs |
@@ -138,10 +139,13 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 |---|---|---|---|---|
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | Distills a session and calls `remember` |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
+| Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Distills a Kimi session and calls `remember` |
+| Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring` as an MCP server |
 | Codex | `agents/codex/README.md` | MCP only | `~/.codex/mcp.json` | Exposes `ohmyboring` as an MCP server |
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Serial backfill, one session per cron tick |
-| scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older sessions |
+| scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older Claude Code sessions |
+| scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / manual | Lazy backfill of older Kimi Code sessions |
 | shared | `agents/shared/boring_config.py` | imported by adapters | `boring.json` policy loader |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | Idempotently configures hooks/MCP for enabled agents |
 
@@ -164,9 +168,10 @@ Any MCP-capable agent can use ohmyboring. The repo ships a standard **`.mcp.json
 
 `install.sh` automatically wires:
 - Claude Code hooks in `~/.claude/settings.json`
+- Kimi Code hooks in `~/.kimi-code/config.toml`
 - Cursor's `~/.cursor/mcp.json` and Codex's `~/.codex/mcp.json` when those agents are enabled in `boring.json`
 
-For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~/.claude/mcp.json` for Claude Desktop) or use the agent's CLI to add the HTTP MCP server.
+For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~/.claude/mcp.json` for Claude Desktop or `~/.kimi-code/mcp.json` for Kimi Code MCP) or use the agent's CLI to add the HTTP MCP server.
 
 (VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. Compose siblings reach it at `http://boring-drudge:7700/mcp`.)
 
@@ -239,6 +244,7 @@ It is configured per the hermes-agent project's **own docs** (out of scope here)
 | Second `make up` / re-clone fails | Run `make down` first — the containers use fixed names and bind `127.0.0.1:7700` / `:5432`, so a second stack collides with the running one |
 | Agent not starting | `OMB_CORE_ONLY=1 make up` runs core-only; hermes image must be built separately |
 | Linux: container can't reach host Ollama | On Linux, Ollama binds `127.0.0.1` by default, so the container hits a closed port even though `host.docker.internal` resolves. Bind Ollama to all interfaces (`OLLAMA_HOST=0.0.0.0:11434`, then restart it) and/or allow the docker bridge in the host firewall |
+| `embedding dim mismatch` errors | Your `DRUDGE_EMBED_MODEL` output size ≠ `embed_dim` in `boring.json`. Update `embed_dim` to match the new model and run `make reset` |
 | Healthy? / did the last distill land? | `make doctor` — quick health + last-ingest check |
 
 ---
@@ -279,6 +285,7 @@ oh-my-boring/
 ├─ agents/                  # host-side agent adapters
 │  ├─ claude-code/          # Claude Code hooks
 │  ├─ hermes/               # hermes-agent cron
+│  ├─ kimi/                 # Kimi Code hooks
 │  ├─ schedulers/           # cron/launchd backfill
 │  └─ shared/               # policy/config library
 ├─ hooks/                   # backward-compatible symlinks → agents/

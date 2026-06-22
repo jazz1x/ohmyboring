@@ -82,12 +82,9 @@ PENDING_TTL = float(os.environ.get("INGEST_PENDING_TTL") or "1800")
 MAX_WIKI_ATTEMPTS = int(os.environ.get("INGEST_WIKI_ATTEMPTS") or "3")
 
 def _repo_slug(cwd):
-    """Category axis: boring.json name if matched, else folder name."""
-    _origin, name = boring_config.classify(cwd)
-    if name:
-        return name
+    """Category axis: canonical repo slug from cwd basename."""
     if cwd:
-        return os.path.basename(cwd.rstrip("/")) or ""
+        return boring_config.canonical_repo(os.path.basename(cwd.rstrip("/")))
     return ""
 
 

@@ -26,6 +26,11 @@
       "default": 1024,
       "description": "Embedding dimension. MUST match embed_model's output. Changing it needs `make reset` (vectors are reshaped)."
     },
+    "allow_company_origin": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, origin:company notes (session experience from company work) are accepted corpus and do not flip the audit 'clean' flag. Default false flags them for review. Governs session experience only — company KB originals stay off-policy."
+    },
     "repos": {
       "type": "array",
       "default": [],
@@ -64,7 +69,8 @@
               "codex",
               "windsurf",
               "claude-desktop",
-              "hermes-agent"
+              "hermes-agent",
+              "kimi"
             ]
           },
           "enabled": { "type": "boolean", "default": true },
