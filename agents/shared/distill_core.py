@@ -62,6 +62,10 @@ def _mark(session_id, retry=False):
     SessionEnd/Stop hook failed transiently and the session should be retried later.
     It is distinct from hermes-agent's .pending markers so the two queues don't collide.
     """
+    # `make distill-now` sets this so an on-demand mid-session distill leaves no done-marker:
+    # the session stays eligible for the normal SessionEnd capture and is re-distillable on demand.
+    if os.environ.get("OMB_DISTILL_NO_MARK"):
+        return
     if not session_id:
         return
     safe = re.sub(r"[^A-Za-z0-9_-]", "", session_id) or "nosession"

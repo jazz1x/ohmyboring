@@ -13,6 +13,7 @@ captured. This collector scans the top-level session .jsonl files under ~/.claud
   vault (idempotent safety net; remember already ingests each note live).
 - cwd = the real working dir from the transcript → distill-session determines origin via boring.json.
 """
+import argparse
 import glob
 import json
 import os
@@ -93,28 +94,41 @@ def _warm_llm():
 
 
 def main():
+    ap = argparse.ArgumentParser(description="Backfill past Claude Code sessions into ohmyboring.")
+    ap.add_argument(
+        "--now",
+        action="store_true",
+        help="distill the MOST RECENT session immediately, ignoring done-markers and WITHOUT marking "
+        "it done — so it is re-distillable on demand and the normal SessionEnd capture still runs.",
+    )
+    args = ap.parse_args()
+
     cutoff = time.time() - WINDOW_H * 3600
     paths = []
     for d in boring_config.source_dirs(adapter="session-end") or [os.path.expanduser("~/.claude/projects")]:
         paths.extend(glob.glob(os.path.join(d, "*", "*.jsonl")))  # top-level only
-    # not-yet-done (no marker) + within window → newest first
+    # within window + big enough; backfill also skips already-done (marker), --now ignores the marker.
     todo = [
         p
         for p in paths
         if os.path.getmtime(p) >= cutoff
         and os.path.getsize(p) >= MIN_KB * 1024
-        and not _marked(os.path.splitext(os.path.basename(p))[0])
+        and (args.now or not _marked(os.path.splitext(os.path.basename(p))[0]))
     ]
     todo.sort(key=os.path.getmtime, reverse=True)
-    batch = todo[:LIMIT]
-    print(f"[collect] pending={len(todo)} this_batch={len(batch)} (LIMIT={LIMIT})", flush=True)
+    # --now is an on-demand single-shot on the current (newest) session, not a batch drain.
+    batch = todo[:1] if args.now else todo[:LIMIT]
+    label = "distill-now" if args.now else "collect"
+    print(f"[{label}] pending={len(todo)} this_batch={len(batch)} (LIMIT={1 if args.now else LIMIT})", flush=True)
     if not batch:
-        print("[collect] all done — nothing to do", flush=True)
+        print(f"[{label}] nothing to do", flush=True)
         return
 
     _warm_llm()  # pre-warm gemma so the first session isn't a ~70s cold start (→ agent timeout → SKIP)
 
     env = dict(os.environ)
+    if args.now:
+        env["OMB_DISTILL_NO_MARK"] = "1"  # leave the session un-marked → re-distillable + SessionEnd still fires
     done = 0
     for tp in batch:
         proj = os.path.basename(os.path.dirname(tp))  # encoded dir name — for the log label only
@@ -130,17 +144,17 @@ def main():
                 [sys.executable, HOOK], input=payload, text=True, env=env, timeout=180
             )
             done += 1 if r.returncode == 0 else 0
-            print(f"[collect] {'ok' if r.returncode == 0 else 'fail'}  {proj}", flush=True)
+            print(f"[{label}] {'ok' if r.returncode == 0 else 'fail'}  {proj}", flush=True)
         except subprocess.TimeoutExpired:
-            print(f"[collect] timeout  {proj}", flush=True)
+            print(f"[{label}] timeout  {proj}", flush=True)
 
     try:
         req = urllib.request.Request(f"{DRUDGE_URL}/sync", data=b"", method="POST")
         with urllib.request.urlopen(req, timeout=900) as resp:
-            print("[collect] sync ok", flush=True)
+            print(f"[{label}] sync ok", flush=True)
     except Exception as e:
-        print(f"[collect] sync failed (ignored): {e}", flush=True)
-    print(f"[collect] done={done}/{len(batch)}  remaining={len(todo) - done}", flush=True)
+        print(f"[{label}] sync failed (ignored): {e}", flush=True)
+    print(f"[{label}] done={done}/{len(batch)}  remaining={len(todo) - done}", flush=True)
 
 
 if __name__ == "__main__":
