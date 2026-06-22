@@ -101,7 +101,13 @@ impl Llm {
                         sleep(Duration::from_millis(500)).await;
                         continue;
                     }
-                    return Ok(String::new());
+                    // ROP: an empty generation (model cold/unloaded) is a failure, not a success.
+                    // Returning Ok("") would launder it into a 200 answer:"" citing sources — callers
+                    // (ask/brief, smoke, MCP agents) could not tell "model down" from "answered nothing".
+                    return Err(anyhow::anyhow!(
+                        "llm returned empty content after {} attempt(s)",
+                        MAX_RETRIES + 1
+                    ));
                 }
                 Err(e) => {
                     last_err = Some(e);

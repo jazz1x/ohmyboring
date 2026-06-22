@@ -779,6 +779,16 @@ impl Store {
         answer_snippet: &str,
         latency_ms: Option<i32>,
     ) -> Result<()> {
+        // Scrub secrets a user may have pasted into a question/answer BEFORE they persist — the same
+        // leak-boundary the remember path applies. query_log is exported by backup-db and served by
+        // /query-log, so storing raw Q&A would leak tokens outside the redaction guarantee.
+        let (query, answer_snippet) = match crate::redact::build_secret_re() {
+            Ok(re) => (
+                crate::redact::redact(re, query),
+                crate::redact::redact(re, answer_snippet),
+            ),
+            Err(_) => (query.to_owned(), answer_snippet.to_owned()),
+        };
         self.db
             .execute(
                 "INSERT INTO query_log (endpoint, query, hit_paths, sources, answer_snippet, latency_ms)
