@@ -665,9 +665,16 @@ impl Store {
         Ok(())
     }
 
-    pub async fn delete_doc_chunks(&self, path: &str) -> Result<()> {
+    /// Prune chunks at or beyond `from_idx` for a document — the stale tail left when a re-ingested
+    /// note has FEWER chunks than before. Used by the upsert-then-prune re-ingest so a reader never
+    /// sees an empty/half-deleted chunk set (no delete-first window). `from_idx == new chunk count`.
+    pub async fn prune_chunks_from(&self, path: &str, from_idx: usize) -> Result<()> {
+        let from = i32::try_from(from_idx).unwrap_or(i32::MAX);
         self.db
-            .execute("DELETE FROM chunk WHERE source_path = $1;", &[&path])
+            .execute(
+                "DELETE FROM chunk WHERE source_path = $1 AND chunk_idx >= $2;",
+                &[&path, &from],
+            )
             .await?;
         Ok(())
     }
