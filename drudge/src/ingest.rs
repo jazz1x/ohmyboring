@@ -233,21 +233,30 @@ pub async fn ingest_file(
         return Ok(FileOutcome::Skipped);
     }
 
-    // Graph-shaped load: document node + project/topic edges → chunk nodes + part_of.
-    store.delete_doc_chunks(path).await?;
+    // Pre-compute embeddings BEFORE any DB write — keep the slow Ollama round-trips out of the
+    // update window so the upsert/prune below is a tight back-to-back sequence.
+    let mut embedded = Vec::with_capacity(pieces.len());
+    for piece in &pieces {
+        embedded.push((piece.clone(), llm.embed(piece).await?));
+    }
+
+    // Upsert-then-prune (NOT delete-then-insert): chunks are keyed by `path#idx` with ON CONFLICT
+    // DO UPDATE, so overwriting them in place keeps the document with a full chunk set throughout —
+    // a concurrent ask/recall never sees an empty/half-deleted window during a re-ingest. The stale
+    // tail (when the new version has fewer chunks) is pruned only AFTER the new chunks are in place.
     store.upsert_document(&front, &sha, mtime).await?;
-    for (i, piece) in pieces.iter().enumerate() {
-        let embedding = llm.embed(piece).await?;
+    for (i, (content, embedding)) in embedded.into_iter().enumerate() {
         store
             .upsert_chunk(&Doc {
                 id: format!("{path}#{i}"),
-                content: piece.clone(),
+                content,
                 embedding,
                 front: front.clone(),
                 chunk_idx: i,
             })
             .await?;
     }
+    store.prune_chunks_from(path, pieces.len()).await?;
     stats.chunks += pieces.len();
 
     // deterministic semantic graph from frontmatter (no LLM extraction).
