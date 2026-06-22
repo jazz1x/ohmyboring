@@ -64,6 +64,9 @@ remember: ## Save + ingest a note immediately   make remember M="content" [T="ti
 collect: ## Lazily collect past Claude Code sessions (one at a time)   make collect [N=1]
 	@COLLECT_LIMIT=$${N:-1} python3 agents/schedulers/collect-sessions.py
 
+distill-now: ## Distill the CURRENT session right now (no need to end it; re-runnable)   make distill-now
+	@python3 agents/schedulers/collect-sessions.py --now
+
 collect-kimi: ## Lazily collect past Kimi Code sessions (one at a time)   make collect-kimi [N=1]
 	@COLLECT_LIMIT=$${N:-1} python3 agents/schedulers/collect-kimi-sessions.py
 

@@ -23,8 +23,11 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/ins
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
+make collect N=20   # 過去の Claude Code セッションで vault を埋める（新規クローンは空）
 make ask Q="docker build cache の問題、どう直したっけ？"
 ```
+
+> 新規クローンは **vault が空** なので、初日の `make ask` は何も見つけられません。`make collect` で過去の記録を埋めれば、以降は各セッションが自動で蓄積されます（[取り込み](#取り込み-ingestion)参照）。
 
 > **Docker**、**Ollama**（または OpenAI-compatible サーバー）、**Python 3**、**jq**、**curl** が必要です。
 
@@ -37,6 +40,30 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 3. **ローカル専用** — 埋め込みと要約が Ollama などローカル LLM で実行。外部 API やトークン不要。
 
 オプションの **pgvector** アクセラレータ（`DRUDGE_VECTOR=on`）を有効にすると、類似度検索 + GraphRAG が追加されます。
+
+---
+
+## 取り込み (ingestion)
+
+メモリの入り口は 3 つ — セットアップ後、最初の 2 つはほとんど触りません：
+
+| 方法 | コマンド | タイミング |
+| --- | --- | --- |
+| **自動（セッション終了時）** | SessionEnd フック（`install.sh` が設定） | すべての Claude Code / Kimi セッション — `hooks/distill-session.py` がトランスクリプトを蒸留し `remember` します。対になる `UserPromptSubmit` フック（`recall.py`）が関連する過去のメモリを新しいプロンプトへ自動注入します。 |
+| **過去セッションのバックフィル** | `make collect [N=20]` | インストール直後、空の vault を `~/.claude/projects` の履歴で埋めるとき。新しい順・冪等（セッションごとのマーカーで蒸留済みはスキップ）、1 回に `N` 件だけ処理し CPU を占有しません。 |
+| **今すぐ（セッションを終えずに）** | `make distill-now` · `make remember M="…"` | セッションを終了せずに即座に取り込みたいとき。`distill-now` は**現在の**トランスクリプトをその都度再蒸留し、マーカーを残さないため、セッション終了時の通常の取り込みもそのまま動作します（初期ノート + 最終ノートの両方ができる場合あり）。`remember` は自分で書いたノートを保存します。 |
+
+### フックを手動で設定
+
+`install.sh` が自動で行います。やり直す場合（または `OMB_WIRE=0` で実行した場合）：
+
+```bash
+python3 agents/shared/agent_wiring.py --install \
+  --omb-home ~/oh-my-boring --server-name ohmyboring \
+  --server-url http://localhost:7700/mcp
+```
+
+または `~/.claude/settings.json` を手で編集：`python3 ~/oh-my-boring/hooks/distill-session.py` を実行する `SessionEnd` フックと、`recall.py` を実行する `UserPromptSubmit` フックを追加します。
 
 ---
 

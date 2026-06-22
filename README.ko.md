@@ -23,8 +23,11 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/ins
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
+make collect N=20   # 과거 Claude Code 세션으로 vault 채우기 (새 클론은 비어 있음)
 make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 ```
+
+> 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 과거 기록을 채우고 나면, 이후 모든 세션이 자동으로 축적됩니다([적재하기](#적재하기-ingestion) 참고).
 
 > **Docker**, **Ollama**(또는 OpenAI-compatible 서버), **Python 3**, **jq**, **curl**가 필요합니다.
 
@@ -37,6 +40,30 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 3. **로컬 전용** — 임베딩과 요약이 Ollama 등 로컬 LLM에서 실행됩니다. 외부 API나 토큰 없음.
 
 선택적으로 **pgvector** 가속기(`DRUDGE_VECTOR=on`)를 켜면 유사도 검색 + GraphRAG이 추가됩니다.
+
+---
+
+## 적재하기 (ingestion)
+
+메모리가 들어오는 경로는 세 가지입니다 — 설정 후 앞 두 가지는 거의 손댈 일이 없습니다:
+
+| 방법 | 명령 | 언제 |
+| --- | --- | --- |
+| **자동 (세션 종료 시)** | SessionEnd 훅 (`install.sh`가 설치) | 모든 Claude Code / Kimi 세션 — `hooks/distill-session.py`가 트랜스크립트를 증류해 `remember`합니다. 짝이 되는 `UserPromptSubmit` 훅(`recall.py`)이 관련 과거 메모리를 새 프롬프트에 자동 주입합니다. |
+| **과거 세션 백필** | `make collect [N=20]` | 설치 직후, 비어 있는 vault를 `~/.claude/projects` 기록으로 채울 때. 최신순, 멱등(세션별 마커로 이미 증류한 건 건너뜀), 한 번에 `N`개만 처리해 CPU를 독점하지 않음. |
+| **지금 바로 (세션 안 끝내고)** | `make distill-now` · `make remember M="…"` | 세션을 끝내지 않고 즉시 적재할 때. `distill-now`는 **현재** 트랜스크립트를 그때그때 다시 증류하고 마커를 남기지 않으므로, 세션 종료 시의 정상 적재도 그대로 동작합니다(초기 노트 + 최종 노트가 함께 생길 수 있음). `remember`는 직접 작성한 노트를 저장합니다. |
+
+### 훅 수동 연결
+
+`install.sh`가 자동으로 해줍니다. 다시 하려면(또는 `OMB_WIRE=0`로 실행했다면):
+
+```bash
+python3 agents/shared/agent_wiring.py --install \
+  --omb-home ~/oh-my-boring --server-name ohmyboring \
+  --server-url http://localhost:7700/mcp
+```
+
+또는 `~/.claude/settings.json`을 직접 편집: `python3 ~/oh-my-boring/hooks/distill-session.py`를 실행하는 `SessionEnd` 훅과 `recall.py`를 실행하는 `UserPromptSubmit` 훅을 추가합니다.
 
 ---
 

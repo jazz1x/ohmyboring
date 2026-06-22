@@ -23,8 +23,11 @@ Or step by step:
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
+make collect N=20   # seed the vault from your past Claude Code sessions (fresh clone starts empty)
 make ask Q="how did I fix the docker build cache problem?"
 ```
+
+> A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your history; after that, every new session auto-accumulates (see [Feeding it](#feeding-it-ingestion)).
 
 > Requires **Docker**, **Ollama** (or any OpenAI-compatible server), **Python 3**, **jq**, **curl**, **git**, and **make**.
 
@@ -37,6 +40,30 @@ make ask Q="how did I fix the docker build cache problem?"
 3. **Local-only** — embedding and synthesis run on your machine via Ollama. No external APIs or tokens.
 
 Optional **pgvector** accelerator (`DRUDGE_VECTOR=on`) adds similarity search + GraphRAG when scale calls for it.
+
+---
+
+## Feeding it (ingestion)
+
+Memory gets in three ways — after setup you rarely touch the first two:
+
+| How | Command | When |
+| --- | --- | --- |
+| **Automatic, on session end** | SessionEnd hook (wired by `install.sh`) | every Claude Code / Kimi session — `hooks/distill-session.py` distills the transcript and `remember`s it. The paired `UserPromptSubmit` hook (`recall.py`) auto-injects relevant past memory into new prompts. |
+| **Backfill past sessions** | `make collect [N=20]` | once after install, to seed an otherwise-empty vault from your `~/.claude/projects` history. Newest-first, idempotent (a per-session marker skips already-distilled ones), `N` per run so it never hogs CPU. |
+| **Right now, mid-session** | `make distill-now` · `make remember M="…"` | capture something immediately *without* ending the session. `distill-now` re-distills the **current** transcript on demand and leaves no marker, so the normal end-of-session capture still runs (you may get an early note plus the final one). `remember` saves an explicit note you write yourself. |
+
+### Wiring the hooks manually
+
+`install.sh` does this for you. To redo it (or if you ran with `OMB_WIRE=0`):
+
+```bash
+python3 agents/shared/agent_wiring.py --install \
+  --omb-home ~/oh-my-boring --server-name ohmyboring \
+  --server-url http://localhost:7700/mcp
+```
+
+Or edit `~/.claude/settings.json` by hand: a `SessionEnd` hook running `python3 ~/oh-my-boring/hooks/distill-session.py`, plus a `UserPromptSubmit` hook running `recall.py`.
 
 ---
 
