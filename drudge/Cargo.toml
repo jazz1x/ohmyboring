@@ -6,12 +6,17 @@ publish = false # 개인 프로젝트 — crates.io 배포 안 함
 license = "MIT"
 description = "ohmyboring 개인 RAG (Rust) — pgvector + node/edge 그래프 + 재귀 CTE"
 
+[lib]
+name = "drudge"
+path = "src/lib.rs"
+
 [[bin]]
 name = "drudge"
 path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio-stream = { version = "0.1", features = ["time"] }
 axum = "0.8"
 tokio-postgres = "0.7"                              # pgvector 베이스(로컬 단일 Postgres)
 pgvector = { version = "0.4", features = ["postgres"] }  # 벡터 타입 + HNSW
@@ -28,6 +33,9 @@ chrono = "0.4"
 thiserror = "2"
 regex = "1"
 
+[dev-dependencies]
+tempfile = "3"
+
 # 철학 강제 (upstream 상속) — cargo clippy -D warnings 게이트
 [lints.rust]
 unsafe_code = "forbid"
@@ -41,6 +49,10 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 doc_markdown = "allow"
+# Adding a lib target exposes more API surface; these lints are noisy for a personal project.
+must_use_candidate = "allow"
+should_implement_trait = "allow"
+implicit_hasher = "allow"
 # §A 강제 — restriction lints (pedantic 미포함, 명시 필요)
 unwrap_used = "deny"
 expect_used = "deny"

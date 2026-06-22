@@ -36,6 +36,9 @@ pub struct AuditStats {
     pub by_kind: Vec<(String, usize)>,
     pub by_project: Vec<(String, usize)>,
     pub company_contamination: usize,
+    /// Whether company-origin notes are accepted by policy (`allow_company_origin`). When true,
+    /// `company_contamination` is reported for visibility but does not flip `clean`.
+    pub company_allowed: bool,
     pub missing_origin: usize,
     pub missing_project: usize,
     pub clean: bool,
@@ -51,7 +54,9 @@ pub struct AuditStats {
 }
 
 /// Pure logic: DB aggregation → returns `AuditStats`. No I/O.
-pub async fn stats(store: &Store) -> Result<AuditStats> {
+/// `allow_company` reflects the `allow_company_origin` policy: when true, company-origin notes do not
+/// flip the `clean` flag (they are accepted session experience, not contamination).
+pub async fn stats(store: &Store, allow_company: bool) -> Result<AuditStats> {
     let metas = store.all_meta().await?;
     let total_chunks = metas.len();
     let files: HashSet<&str> = metas.iter().map(|m| m.source_path.as_str()).collect();
@@ -73,7 +78,7 @@ pub async fn stats(store: &Store) -> Result<AuditStats> {
     let company_contamination = metas.iter().filter(|m| m.origin == "company").count();
     let missing_origin = metas.iter().filter(|m| m.origin.is_empty()).count();
     let missing_project = metas.iter().filter(|m| m.project.is_empty()).count();
-    let clean = company_contamination == 0 && missing_origin == 0;
+    let clean = (allow_company || company_contamination == 0) && missing_origin == 0;
 
     let gs = store.graph_stats().await?;
     let ss = store.semantic_stats().await?;
@@ -85,6 +90,7 @@ pub async fn stats(store: &Store) -> Result<AuditStats> {
         by_kind,
         by_project,
         company_contamination,
+        company_allowed: allow_company,
         missing_origin,
         missing_project,
         clean,
@@ -101,8 +107,8 @@ pub async fn stats(store: &Store) -> Result<AuditStats> {
 }
 
 /// CLI shell: consume `stats()` and print to stdout. No re-aggregation (composition over duplication).
-pub async fn run(store: &Store) -> Result<()> {
-    let s = stats(store).await?;
+pub async fn run(store: &Store, allow_company: bool) -> Result<()> {
+    let s = stats(store, allow_company).await?;
     println!(
         "📊 Ingest audit — chunks {} · source files {}\n",
         s.total_chunks, s.total_files
@@ -114,8 +120,13 @@ pub async fn run(store: &Store) -> Result<()> {
 
     println!("\n  ⚠️ Quality check");
     println!(
-        "    company pollution : {}  (expected 0)",
-        s.company_contamination
+        "    company origin    : {}  ({})",
+        s.company_contamination,
+        if s.company_allowed {
+            "allowed by policy"
+        } else {
+            "expected 0"
+        }
     );
     println!("    origin missing    : {}", s.missing_origin);
     println!("    project missing   : {}", s.missing_project);
