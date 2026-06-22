@@ -18,6 +18,10 @@ else
 fi
 
 mkdir -p "$BACKUP_DIR"
+# The dump is the full corpus + raw query_log — owner-only. Restrict the dir, and write the dump
+# under a tight umask so it lands 0600 even if OMB_BACKUP_DIR points outside the 700 data/ tree.
+chmod 700 "$BACKUP_DIR" 2>/dev/null || true
+umask 077
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 FILE="$BACKUP_DIR/ohmyboring_$TIMESTAMP.dump"
@@ -43,6 +47,7 @@ if ! $COMPOSE --profile vector exec -T postgres pg_restore -l >/dev/null 2>&1 < 
   exit 1
 fi
 mv "$TMP" "$FILE"
+chmod 600 "$FILE" 2>/dev/null || true
 
 # retention: keep only the latest $KEEP dumps
 ls -t "$BACKUP_DIR"/ohmyboring_*.dump 2>/dev/null | tail -n +"$((KEEP + 1))" | while IFS= read -r old; do

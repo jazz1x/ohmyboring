@@ -84,6 +84,24 @@ def test_placeholder_tags_removed_cleanly():
     assert "real" in tags, tags
 
 
+def test_no_case_duplicate_repo_tag_and_keeps_real_tags():
+    # wiki-0001 shape: TitleCase project + lowercase repo tag + a placeholder to trigger the fix.
+    fm = _roundtrip_fix(
+        "id: wiki-0001\ntitle: t\nproject: Development\n"
+        "tags:\n- repo/development\n- git\n- ssh\n- github\n- bitbucket\n- _\nsources: []",
+        target="Development",
+    )
+    _assert_parses(fm, "case-dup-repo")
+    loaded = yaml.safe_load(fm)
+    tags = loaded.get("tags") or []
+    repo_tags = [t for t in tags if t.lower() == "repo/development"]
+    assert len(repo_tags) == 1, f"case-duplicate repo tag added: {tags}"
+    assert "_" not in tags, f"placeholder not removed: {tags}"
+    # all real tags survive — none silently dropped under the 6-cap to make room for a derived tag
+    for real in ("git", "ssh", "github", "bitbucket"):
+        assert real in tags, f"real tag {real!r} dropped: {tags}"
+
+
 def main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

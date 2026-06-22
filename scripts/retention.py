@@ -145,7 +145,10 @@ def main():
         if age_days < threshold:
             continue
 
-        if delete_only:
+        # An UNPROCESSED session (no .ts) was never distilled into the vault, so its raw transcript
+        # is the ONLY source it can ever be distilled from. Never hard-delete it — always archive
+        # (recoverable gzip), even under delete_only. Only PROCESSED sessions honor delete_only.
+        if delete_only and state == "processed":
             to_delete.append(p)
             bytes_to_archive += p.stat().st_size
         else:
@@ -153,12 +156,14 @@ def main():
             to_archive.append((p, archive, state))
             bytes_to_archive += p.stat().st_size
 
-    # ancient archives
+    # ancient archives — but only delete archives of PROCESSED sessions (already in the vault).
+    # An undistilled session's archive is its sole re-distill source; never auto-delete it.
     ancient_archives: list[Path] = []
     if archive_dir.exists():
         for p in archive_dir.glob("*.jsonl.gz"):
             age_days = (now - p.stat().st_mtime) / 86400
-            if age_days >= archive_days:
+            sid = p.name[: -len(".jsonl.gz")]
+            if age_days >= archive_days and _classify(sid) == "processed":
                 ancient_archives.append(p)
 
     # stale markers

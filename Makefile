@@ -82,7 +82,7 @@ doctor: ## Diagnose the distill write-door (drudge/Ollama/containers + newest no
 steward: ## Inspect vault data hygiene (project variants, placeholder tags, missing sources)
 	@python3 scripts/data-steward.py
 
-steward-fix: ## Apply data-steward repairs (review with git diff; vault/wiki is gitignored)
+steward-fix: ## Apply data-steward repairs (backs up each note to *.md.bak — vault/wiki is gitignored)
 	@python3 scripts/data-steward.py --fix --yes
 
 retention: ## Show raw session retention plan (dry-run)
