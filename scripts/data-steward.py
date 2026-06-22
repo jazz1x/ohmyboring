@@ -10,7 +10,8 @@ Focuses on data-management hygiene that automated sync cannot fix by itself:
 Run dry-run (safe):
     python3 scripts/data-steward.py
 
-Apply fixes (rewrites vault/wiki/*.md — review with git diff):
+Apply fixes (rewrites vault/wiki/*.md — backs up each touched note to <note>.md.bak;
+vault/wiki is gitignored so `git diff` shows nothing — review the .bak files):
     python3 scripts/data-steward.py --fix
 """
 import argparse
@@ -18,6 +19,7 @@ import difflib
 import json
 import os
 import re
+import shutil
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -143,29 +145,35 @@ def _fix_note(n, target_project: str):
     fm = n["fm"]
     old_project = fm.get("project") or ""
     old_tags = list(fm.get("tags") or [])
+    target_repo = f"repo/{target_project}" if target_project else None
 
     new_tags = []
-    repo_tag_updated = False
+    seen_lower = set()
     for t in old_tags:
         if t in PLACEHOLDER_TAGS:
             continue
-        # update repo/<old_project> if old project had an org prefix
-        if old_project and t.startswith("repo/"):
+        # rewrite the old repo/<old_project> tag to the canonical target (in place, not as an addition)
+        if target_repo and t.startswith("repo/"):
             suffix = t[len("repo/") :]
-            if suffix == old_project or suffix == old_project.split("/")[-1]:
-                if target_project:
-                    new_tags.append(f"repo/{target_project}")
-                    repo_tag_updated = True
-                    continue
+            if suffix.lower() in (old_project.lower(), old_project.split("/")[-1].lower()):
+                t = target_repo
+        # dedup case-insensitively so e.g. repo/Development and repo/development don't both survive
+        if t.lower() in seen_lower:
+            continue
+        seen_lower.add(t.lower())
         new_tags.append(t)
 
-    # ensure repo/<target_project> exists if not already
-    if target_project and f"repo/{target_project}" not in new_tags:
-        new_tags.insert(0, f"repo/{target_project}")
+    # ensure the canonical repo tag exists (case-insensitive check — avoid a duplicate case-variant)
+    if target_repo and target_repo.lower() not in seen_lower:
+        new_tags.insert(0, target_repo)
 
-    # cap to 6 tags to respect remember boundary
+    # cap to 6 (remember boundary) AFTER dedup — the case-insensitive dedup above means a rewritten
+    # repo tag no longer inflates the count, so a real tag is no longer silently dropped to make room.
     new_tags = new_tags[:6]
 
+    # .bak recovery: vault/wiki is gitignored, so `git diff` shows nothing — back up before rewriting.
+    bak = n["path"].with_name(n["path"].name + ".bak")
+    shutil.copy2(n["path"], bak)
     new_yaml = _rewrite_yaml_block(n["yaml_text"], target_project, new_tags)
     n["path"].write_text("---\n" + new_yaml + "\n---\n" + n["body"], encoding="utf-8")
 
@@ -292,7 +300,10 @@ def main():
             _fix_note(n, target)
             fixed += 1
 
-    print(f"\n✅ Fixed {fixed} note(s). Run `git diff vault/wiki` to review.")
+    print(
+        f"\n✅ Fixed {fixed} note(s). vault/wiki is gitignored, so `git diff` won't show changes — "
+        "review the `*.md.bak` files written next to each fixed note, then delete them once satisfied."
+    )
 
 
 if __name__ == "__main__":
