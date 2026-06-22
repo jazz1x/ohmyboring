@@ -76,6 +76,12 @@ if [ "$VEC" = 1 ]; then
     -d '{"query":"ohmyboring"}' | jq -r '.graph_neighbors | length') || fail "/graph call failed"
   [ "${n:-0}" -gt 0 ] || fail "0 graph neighbors (graph recall not working)"
   echo "   graph_neighbors=$n"
+
+  echo "7) /compact (maintenance: VACUUM/REINDEX/prune/orphan GC)…"
+  compact=$(curl -sf -m600 -X POST "$URL/compact" 2>/dev/null) || fail "/compact failed"
+  total_ms=$(printf '%s' "$compact" | jq -r '.total_ms // empty')
+  [ -n "$total_ms" ] || fail "/compact missing total_ms"
+  echo "   compact total_ms=$total_ms"
 else
   echo "5) wiki mode detected (/audit has no vector corpus) — vector/graph checks skipped"
 fi

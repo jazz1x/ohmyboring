@@ -1,8 +1,8 @@
 #!/bin/sh
-# Diagnose the self-augmentation write-door — the distill SessionEnd hook runs async
-# and ends in `except: pass`, so a down stack or bad DRUDGE_URL silently drops sessions
-# with no signal. This surfaces that signal: a clear OK/✗ per dependency plus proof the
-# write-door is actually firing (newest distilled note + newest SessionEnd hook marker).
+# Diagnose the self-augmentation write-door. The distill SessionEnd hook runs async
+# and logs failures to stderr, but a down stack or bad DRUDGE_URL can still drop sessions.
+# This surfaces that signal: a clear OK/✗ per dependency plus proof the write-door is
+# actually firing (newest distilled note + newest SessionEnd hook marker).
 #   make doctor   or   ./scripts/doctor.sh
 #
 # Read-only: GET /health, GET /api/tags, `docker compose ps`, and mtime reads. No mutation.
