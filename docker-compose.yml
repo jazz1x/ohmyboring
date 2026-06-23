@@ -80,6 +80,7 @@ services:
       HERMES_UID: ${HERMES_UID:-501}      # host user uid (~/.hermes file permissions)
       HERMES_GID: ${HERMES_GID:-20}
       TZ: Asia/Seoul
+      DRUDGE_URL: http://boring-drudge:7700  # morning-briefing (briefing.py) RAG endpoint; service is boring-drudge, not the script's "drudge" default
     volumes:
       - ${HOME}/.hermes:/opt/data         # persists config / credentials / session memory (autonomy-augmentation layer)
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: ingest-worker.py only globs /host/.claude/projects)
