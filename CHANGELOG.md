@@ -26,6 +26,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 - **`/sync` corpus totals are honest** — when the post-sync audit is unavailable, `total_chunks` /
   `total_edges` are reported as `null` (not a fabricated `0`). `remember`/`forget` report
   partial-success when the `relates_to` projection defers to the next sync.
+- **Claims honor the recall origin boundary** — `current_claims` now JOINs each claim to its parent
+  document and applies the same `exclude_origins` filter the recalled chunks use, so a claim can no
+  longer surface an origin the rest of the answer excluded. No schema change (origin is derived via
+  the document FK); no behavior change at the default empty exclusion. Covered by a new
+  `store_integration` test (verified against live pgvector).
 - **Ingest embeds chunks with bounded concurrency** (`StreamExt::buffered`) instead of one blocking
   await per chunk — large notes ingest much faster, ordering preserved.
 - **`remember` projects only the new note's `relates_to`** (~3 queries) instead of recomputing the
