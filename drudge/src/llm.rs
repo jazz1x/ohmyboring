@@ -10,6 +10,23 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tokio::time::sleep;
 
+/// Read an env var by its canonical name, falling back to a deprecated alias (warns once on the alias).
+/// Empty values are treated as unset so an `OMB_X=` placeholder does not mask the alias/default.
+fn env_alias(canonical: &str, deprecated: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(canonical)
+        && !v.is_empty()
+    {
+        return Some(v);
+    }
+    match std::env::var(deprecated) {
+        Ok(v) if !v.is_empty() => {
+            eprintln!("[config] deprecated: {deprecated} is set; rename it to {canonical}");
+            Some(v)
+        }
+        _ => None,
+    }
+}
+
 pub struct Llm {
     base_url: String, // OpenAI-compatible base — e.g. http://localhost:11434/v1
     api_key: Option<String>,
@@ -19,21 +36,26 @@ pub struct Llm {
 }
 
 impl Llm {
-    /// Build from config + env. The embed model = `boring.json` `embed_model` (policy SSOT, kernel A's
-    /// sole model). base_url/api_key/chat_model stay in env (.env = runtime/secret SSOT). The chat model
-    /// is used only by `ask` synthesis (the one allowed generation path).
+    /// Build from config + env. `boring.json`'s `llm` block is the declarative SSOT for the connection
+    /// (base_url/model) and the embed model (policy SSOT, kernel A's sole model). Runtime env still
+    /// overrides — `OMB_LLM_*` is the canonical prefix, `DRUDGE_LLM_*` a deprecated alias (one cycle).
+    /// The chat model is used only by `ask`/`brief` synthesis (the one allowed generation path).
     pub fn from_config(cfg: &crate::config::BoringConfig) -> Self {
-        // If DRUDGE_LLM_BASE_URL is unset, fall back to Ollama local /v1 (the default runtime).
-        let base_url = std::env::var("DRUDGE_LLM_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:11434/v1".into());
+        let base_url = env_alias("OMB_LLM_BASE_URL", "DRUDGE_LLM_BASE_URL")
+            .unwrap_or_else(|| cfg.llm.base_url.clone());
+        let chat_model =
+            env_alias("OMB_LLM_MODEL", "DRUDGE_LLM_MODEL").unwrap_or_else(|| cfg.llm.model.clone());
+        // API key: read the env var NAMED by boring.json (api_key_env) so the secret never lands in
+        // the config file. Legacy DRUDGE_LLM_API_KEY stays as a fallback. Ollama/LM Studio omit it.
+        let api_key = std::env::var(&cfg.llm.api_key_env)
+            .ok()
+            .or_else(|| std::env::var("DRUDGE_LLM_API_KEY").ok())
+            .filter(|s| !s.is_empty());
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
-            // For providers that require auth (OpenAI, etc.). Ollama/LM Studio don't need it → omit the header if unset.
-            api_key: std::env::var("DRUDGE_LLM_API_KEY")
-                .ok()
-                .filter(|s| !s.is_empty()),
+            api_key,
             embed_model: cfg.embed_model.clone(),
-            chat_model: std::env::var("DRUDGE_LLM_MODEL").unwrap_or_else(|_| "gemma4:12b".into()),
+            chat_model,
             client: reqwest::Client::new(),
         }
     }

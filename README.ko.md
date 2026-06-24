@@ -106,8 +106,17 @@ flowchart LR
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/jazz1x/ohmyboring/main/boring.schema.json",
-  "schema_version": 1,
+  "schema_version": 2,
   "note_lang": "auto",
+  "llm": {
+    "provider": "ollama",
+    "base_url": "http://host.docker.internal:11434/v1",
+    "model": "gemma4:12b",
+    "embed_model": "bge-m3",
+    "embed_dim": 1024,
+    "api_key_env": "OMB_LLM_API_KEY",
+    "bootstrap": "auto"
+  },
   "repos": [
     {"match": "your-company", "origin": "company", "name": "your-company"},
     {"match": "~/code", "origin": "personal", "name": "mine"}
@@ -121,19 +130,25 @@ flowchart LR
 | Key | 용도 |
 |---|---|
 | `note_lang` | `auto` · `ko` · `en` |
+| `llm.provider` | `ollama`(모델 pull) · `lmstudio`(앱에서 로드, pull 없음) · `openai-compatible`(vLLM / llama.cpp / 원격) |
+| `llm.base_url` / `llm.model` | OpenAI-compatible `/v1` 엔드포인트 + 합성 모델 |
+| `llm.embed_model` / `llm.embed_dim` | 임베딩 모델 + 그 벡터 차원(커널의 유일한 모델) |
+| `llm.bootstrap` | `auto` = 부트스트랩이 기동/pull 가능 · `manual` = 헬스체크만(서버는 사용자 소유) |
 | `repos[]` | 경로/remote 규칙 → `origin=personal/company/mirror/community` |
 | `agents[]` | vector mode ingest source |
 
-시크릿/런타임 스위치는 **`.env`**:
+**LLM 백엔드 전환**은 config 블록 하나로 끝납니다. LM Studio: `"provider": "lmstudio"`, `"base_url": "http://host.docker.internal:1234/v1"`, `"bootstrap": "manual"` 로 두고 LM Studio 앱에서 모델을 로드한 뒤 `make up`. `make up`은 `scripts/llm-providers/<provider>.sh` 로 디스패치해 알맞은 부트스트랩(Ollama pull vs LM Studio 헬스체크)을 합니다.
+
+`.env`는 이제 시크릿 + 런타임 오버라이드 전용:
 
 | Variable | 용도 |
 |---|---|
 | `DRUDGE_VECTOR` | `on` 시 pgvector 활성화(선택) |
-| `DRUDGE_LLM_BASE_URL` | OpenAI-compatible endpoint, Docker 기본값 `http://host.docker.internal:11434/v1` · Native 모드는 `http://localhost:11434/v1` |
-| `DRUDGE_LLM_MODEL` / `DRUDGE_EMBED_MODEL` | 기본 `gemma4:12b` / `bge-m3` |
+| `OMB_LLM_BASE_URL` / `OMB_LLM_MODEL` | `llm.base_url` / `llm.model` 런타임 오버라이드(선택, `DRUDGE_LLM_*` = deprecated alias). `drudge` 바이너리를 호스트에서 직접 실행한다면 `OMB_LLM_BASE_URL=http://localhost:11434/v1` 설정 |
+| `OMB_LLM_API_KEY` | `llm.api_key_env`가 여기를 가리킬 때의 API 키(인증 provider) |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack assistant |
 
-> **임베딩 모델을 바꾸면 벡터 차원이 바뀝니다.** 합성 모델(`DRUDGE_LLM_MODEL`)은 자유롭게 교체해도 되지만, `DRUDGE_EMBED_MODEL`을 바꾸면 크기가 다른 벡터가 나오므로, `boring.json`의 `embed_dim`을 맞게 수정하고 **그리고** `make reset`을 실행해야 합니다 — 그러지 않으면 기존 형태의 벡터에 대한 upsert가 실패합니다. 흔한 차원: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
+> **임베딩 모델을 바꾸면 벡터 차원이 바뀝니다.** 합성 모델(`llm.model`)은 자유롭게 교체해도 되지만, `llm.embed_model`을 바꾸면 크기가 다른 벡터가 나오므로, `llm.embed_dim`을 맞게 수정하고 **그리고** `make reset`을 실행해야 합니다 — 그러지 않으면 기존 형태의 벡터에 대한 upsert가 실패합니다. 흔한 차원: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
 
 ---
 

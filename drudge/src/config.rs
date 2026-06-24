@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-const CURRENT_SCHEMA_VERSION: u32 = 1;
+// v2: added the `llm` block (provider/base_url/model/api_key_env/bootstrap + optional embed model).
+// v1 configs still load (top-level embed_model/embed_dim + .env DRUDGE_LLM_* honored as fallback).
+const CURRENT_SCHEMA_VERSION: u32 = 2;
 const KNOWN_TOP_LEVEL: &[&str] = &[
     "schema_version",
     "note_lang",
@@ -19,10 +21,22 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "embed_model",
     "embed_dim",
     "allow_company_origin",
+    "llm",
 ];
 /// Default embedder (bge-m3 = 1024-dim) — the kernel's sole model dependency.
 const DEFAULT_EMBED_MODEL: &str = "bge-m3";
 const DEFAULT_EMBED_DIM: u32 = 1024;
+/// Default OpenAI-compatible endpoint = host Ollama `/v1` as seen from inside the container
+/// (`host.docker.internal` resolves to the host). boring.json (bind-mounted) is the SSOT; compose no
+/// longer injects a base_url default that would shadow it. Overridable at runtime via env (see
+/// `Llm::from_config`). NOTE: running the `drudge` binary directly on the host (e.g. `selftest`) needs
+/// `OMB_LLM_BASE_URL=http://localhost:11434/v1`, since `host.docker.internal` resolves only in-container.
+const DEFAULT_LLM_BASE_URL: &str = "http://host.docker.internal:11434/v1";
+/// Default synthesis (chat) model — used only by the `ask`/`brief` generation path.
+const DEFAULT_CHAT_MODEL: &str = "gemma4:12b";
+/// Default env var name holding the LLM API key (providers that need auth — OpenAI etc.).
+/// Named (not the key itself) so the secret never lands in boring.json.
+const DEFAULT_API_KEY_ENV: &str = "OMB_LLM_API_KEY";
 
 /// Personal memory policy configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +56,12 @@ pub struct BoringConfig {
     /// false keeps the strict boundary (company notes flagged for review). See `allow_company_origin`
     /// in boring.json. Note: this governs *session experience*, not company KB originals (still off-policy).
     pub allow_company_origin: bool,
+    /// LLM connection + bootstrap policy (v2). The OpenAI-compatible engine is backend-agnostic; this
+    /// block tells the *bootstrap scripts* which provider to prepare (Ollama pull vs LM Studio health
+    /// vs nothing) and supplies declarative connection defaults. Runtime env still overrides (see
+    /// `Llm::from_config`). embed_model/embed_dim here are authoritative when set (v2 SSOT); they are
+    /// resolved into the top-level fields at parse time so the rest of the kernel reads one place.
+    pub llm: LlmConfig,
 }
 
 impl Default for BoringConfig {
@@ -54,6 +74,77 @@ impl Default for BoringConfig {
             embed_model: DEFAULT_EMBED_MODEL.to_owned(),
             embed_dim: DEFAULT_EMBED_DIM,
             allow_company_origin: false,
+            llm: LlmConfig::default(),
+        }
+    }
+}
+
+/// OpenAI-compatible LLM provider. The engine talks `/v1` to all of them identically; the value only
+/// steers the host-side bootstrap (model pull / daemon ensure / health probe shape).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Provider {
+    /// Local Ollama — bootstrap ensures `ollama serve` and `ollama pull`s the models (`/api/tags`).
+    #[default]
+    Ollama,
+    /// LM Studio — OpenAI-compatible `/v1`; models are loaded via its UI/`lms` CLI (no pull), health = `/v1/models`.
+    Lmstudio,
+    /// Any other OpenAI-compatible server (vLLM, llama.cpp, remote OpenAI) — health = `/v1/models`, no pull.
+    OpenaiCompatible,
+}
+
+impl Provider {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::Lmstudio => "lmstudio",
+            Self::OpenaiCompatible => "openai-compatible",
+        }
+    }
+}
+
+/// Whether the bootstrap scripts may start a daemon / pull models (`auto`) or must leave the server to
+/// the user (`manual` — only health-checks, never `ollama serve`/`pull`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Bootstrap {
+    #[default]
+    Auto,
+    Manual,
+}
+
+/// LLM connection + bootstrap config (the `llm` block of boring.json).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LlmConfig {
+    pub provider: Provider,
+    /// OpenAI-compatible base URL (e.g. `http://localhost:11434/v1`, LM Studio `http://localhost:1234/v1`).
+    pub base_url: String,
+    /// Chat/synthesis model (used only by the `ask`/`brief` generation path).
+    pub model: String,
+    /// Embedding model — authoritative when set (resolves into the top-level `embed_model`). None = use
+    /// the (legacy) top-level field / default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_model: Option<String>,
+    /// Embedding dimension — authoritative when set (resolves into top-level `embed_dim`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_dim: Option<u32>,
+    /// Name of the env var holding the API key (the key itself never lives in boring.json).
+    pub api_key_env: String,
+    pub bootstrap: Bootstrap,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: Provider::default(),
+            base_url: DEFAULT_LLM_BASE_URL.to_owned(),
+            model: DEFAULT_CHAT_MODEL.to_owned(),
+            embed_model: None,
+            embed_dim: None,
+            api_key_env: DEFAULT_API_KEY_ENV.to_owned(),
+            bootstrap: Bootstrap::default(),
         }
     }
 }
@@ -293,9 +384,27 @@ impl BoringConfig {
             }
         }
 
-        let config: BoringConfig =
+        let mut config: BoringConfig =
             serde_json::from_value(value).context("deserialize boring.json")?;
+        config.resolve_embed();
         Ok(config)
+    }
+
+    /// Resolve the embedding model/dim SSOT. The `llm` block (v2) is authoritative when it sets either
+    /// field; otherwise the (legacy v1) top-level field stays. After this, the rest of the kernel reads
+    /// `embed_model`/`embed_dim` as the single source — and the `llm` block is backfilled so `drudge
+    /// config` output is internally consistent.
+    fn resolve_embed(&mut self) {
+        if let Some(m) = self.llm.embed_model.clone() {
+            self.embed_model = m;
+        } else {
+            self.llm.embed_model = Some(self.embed_model.clone());
+        }
+        if let Some(d) = self.llm.embed_dim {
+            self.embed_dim = d;
+        } else {
+            self.llm.embed_dim = Some(self.embed_dim);
+        }
     }
 
     /// Expand enabled agent paths and apply `~` → `$HOME` expansion.
@@ -463,7 +572,9 @@ fn derive_name_from_match(matcher: &str, cwd: &str, remote_url: Option<&str>) ->
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{Adapter, AgentSource, BoringConfig, NoteLang, Origin, RepoRule};
+    use super::{
+        Adapter, AgentSource, Bootstrap, BoringConfig, NoteLang, Origin, Provider, RepoRule,
+    };
 
     #[test]
     fn origin_parse_roundtrips_and_rejects_unknown() {
@@ -513,10 +624,74 @@ mod tests {
     fn defaults_when_file_missing() {
         let cfg = BoringConfig::load(Some(std::path::Path::new("/nonexistent/boring.json")))
             .expect("missing file should return defaults");
-        assert_eq!(cfg.schema_version, 1);
+        assert_eq!(cfg.schema_version, 2);
         assert_eq!(cfg.note_lang, NoteLang::Auto);
         assert!(cfg.repos.is_empty());
         assert!(cfg.agents.is_empty());
+    }
+
+    #[test]
+    fn llm_block_defaults_when_absent() {
+        // v1-style config (no llm block) → default provider/connection, embed resolves from top-level.
+        let cfg = BoringConfig::from_str(
+            r#"{"schema_version": 1, "embed_model": "nomic-embed-text", "embed_dim": 768}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.llm.provider, Provider::Ollama);
+        assert_eq!(cfg.llm.base_url, "http://host.docker.internal:11434/v1");
+        assert_eq!(cfg.llm.model, "gemma4:12b");
+        assert_eq!(cfg.llm.api_key_env, "OMB_LLM_API_KEY");
+        assert_eq!(cfg.llm.bootstrap, Bootstrap::Auto);
+        // top-level embed is backfilled into the llm block so `drudge config` is consistent.
+        assert_eq!(cfg.embed_model, "nomic-embed-text");
+        assert_eq!(cfg.embed_dim, 768);
+        assert_eq!(cfg.llm.embed_model.as_deref(), Some("nomic-embed-text"));
+        assert_eq!(cfg.llm.embed_dim, Some(768));
+    }
+
+    #[test]
+    fn llm_block_parses_and_is_authoritative_for_embed() {
+        let cfg = BoringConfig::from_str(
+            r#"{
+                "schema_version": 2,
+                "embed_model": "bge-m3",
+                "embed_dim": 1024,
+                "llm": {
+                    "provider": "lmstudio",
+                    "base_url": "http://localhost:1234/v1",
+                    "model": "qwen2.5-coder",
+                    "embed_model": "text-embedding-3-small",
+                    "embed_dim": 1536,
+                    "api_key_env": "MY_KEY",
+                    "bootstrap": "manual"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.llm.provider, Provider::Lmstudio);
+        assert_eq!(cfg.llm.base_url, "http://localhost:1234/v1");
+        assert_eq!(cfg.llm.model, "qwen2.5-coder");
+        assert_eq!(cfg.llm.api_key_env, "MY_KEY");
+        assert_eq!(cfg.llm.bootstrap, Bootstrap::Manual);
+        // llm block wins over the top-level embed fields (v2 SSOT).
+        assert_eq!(cfg.embed_model, "text-embedding-3-small");
+        assert_eq!(cfg.embed_dim, 1536);
+    }
+
+    #[test]
+    fn provider_roundtrips_kebab_case() {
+        for (s, expected) in [
+            ("ollama", Provider::Ollama),
+            ("lmstudio", Provider::Lmstudio),
+            ("openai-compatible", Provider::OpenaiCompatible),
+        ] {
+            let cfg = BoringConfig::from_str(&format!(
+                r#"{{"schema_version": 2, "llm": {{"provider": "{s}"}}}}"#
+            ))
+            .unwrap();
+            assert_eq!(cfg.llm.provider, expected);
+            assert_eq!(cfg.llm.provider.as_str(), s);
+        }
     }
 
     #[test]

@@ -16,40 +16,28 @@ set -a; . .env; set +a
 # starting docker compose, so the user gets a clear hint instead of a cryptic exit 127.
 ./scripts/preflight-deps.sh
 
-LLM="${DRUDGE_LLM_MODEL:-gemma4:12b}"
-EMB="${DRUDGE_EMBED_MODEL:-bge-m3}"
-OLLAMA_LOCAL="${OLLAMA_HOST:-http://host.docker.internal:11434}"
-OLLAMA_LOCAL="${OLLAMA_LOCAL/host.docker.internal/localhost}"
+# --- LLM provider bootstrap (provider-dispatch; SSOT = boring.json `llm` block) ---
+# The engine is OpenAI-compatible & backend-agnostic, so only the *bootstrap* differs per provider:
+# Ollama pulls models, LM Studio expects them loaded in-app, a remote endpoint needs nothing. We read
+# the connection from boring.json (jq = a verified hard dep) and let runtime env override it
+# (OMB_LLM_* canonical, DRUDGE_LLM_* deprecated alias — same precedence as the engine). embed_model is
+# the engine's policy SSOT (boring.json only, never env), so the pull always targets the configured one.
+PROVIDER=$(jq -r '.llm.provider // "ollama"' boring.json 2>/dev/null || echo ollama)
+BOOTSTRAP=$(jq -r '.llm.bootstrap // "auto"' boring.json 2>/dev/null || echo auto)
+CFG_BASE=$(jq -r '.llm.base_url // "http://host.docker.internal:11434/v1"' boring.json 2>/dev/null || echo "http://host.docker.internal:11434/v1")
+CFG_CHAT=$(jq -r '.llm.model // "gemma4:12b"' boring.json 2>/dev/null || echo gemma4:12b)
+CFG_EMB=$(jq -r '.llm.embed_model // .embed_model // "bge-m3"' boring.json 2>/dev/null || echo bge-m3)
 
-# The Ollama bootstrap (host check + `ollama pull`) only makes sense when the LLM endpoint
-# IS a local Ollama. README/.env advertise any OpenAI-compatible server, so when
-# DRUDGE_LLM_BASE_URL points elsewhere (a remote/other provider) we skip it. Mirror the
-# docker-compose default so an unset value stays local (host.docker.internal = the host's Ollama).
-LLM_URL="${DRUDGE_LLM_BASE_URL:-http://host.docker.internal:11434/v1}"
-LLM_HOST="${LLM_URL#*://}"   # strip scheme
-LLM_HOST="${LLM_HOST#*@}"    # strip any user:pass@
-LLM_HOST="${LLM_HOST%%/*}"   # strip path
-LLM_HOST="${LLM_HOST%%:*}"   # strip port
-case "$LLM_HOST" in
-  localhost | 127.0.0.1 | host.docker.internal) LLM_IS_LOCAL=1 ;;
-  *) LLM_IS_LOCAL="" ;;
-esac
+LLM_URL="${OMB_LLM_BASE_URL:-${DRUDGE_LLM_BASE_URL:-$CFG_BASE}}"
+LLM="${OMB_LLM_MODEL:-${DRUDGE_LLM_MODEL:-$CFG_CHAT}}"
+EMB="$CFG_EMB"
 
-if [ -n "$LLM_IS_LOCAL" ]; then
-  echo "▶ Ensuring Ollama is running …"
-  ./scripts/ensure-ollama.sh
-  echo "  ✓ Ollama OK"
-
-  for m in "$LLM" "$EMB"; do
-    # Match the exact tag (Ollama implies :latest for a bare name). Matching only the family
-    # prefix would wrongly skip the pull when a different tag of the same family is present.
-    case "$m" in *:*) want="$m" ;; *) want="$m:latest" ;; esac
-    if ! curl -sf "${OLLAMA_LOCAL}/api/tags" | grep -q "\"${want}\""; then
-      echo "▶ Pulling model: $m (several GB)"; ollama pull "$m"
-    fi
-  done
+PROVIDER_SCRIPT="./scripts/llm-providers/${PROVIDER}.sh"
+if [ -x "$PROVIDER_SCRIPT" ]; then
+  echo "▶ LLM provider: ${PROVIDER} (bootstrap=${BOOTSTRAP}) → ${LLM_URL}"
+  "$PROVIDER_SCRIPT" "$LLM_URL" "$LLM" "$EMB" "$BOOTSTRAP"
 else
-  echo "ⓘ DRUDGE_LLM_BASE_URL points to a remote endpoint (${LLM_HOST}) — skipping Ollama bootstrap and model pulls."
+  echo "ⓘ Unknown LLM provider '${PROVIDER}' (no ${PROVIDER_SCRIPT}) — skipping bootstrap. Ensure ${LLM_URL} is reachable."
 fi
 
 # hermes-agent (the brain) is part of the default stack, but its image isn't in this repo

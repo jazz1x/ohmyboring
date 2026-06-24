@@ -29,9 +29,11 @@ import omb_env  # noqa: E402
 # OMB_HOME: repo clone location (default ~/oh-my-boring).
 OMB_HOME = os.environ.get("OMB_HOME") or omb_env.omb_home()
 DRUDGE_URL = os.environ.get("DRUDGE_URL") or omb_env.drudge_url()
-LLM_BASE_URL = os.environ.get("DRUDGE_LLM_BASE_URL") or omb_env.llm_base_url()
-LLM_MODEL = os.environ.get("DRUDGE_LLM_MODEL") or omb_env.llm_model()
-LLM_API_KEY = os.environ.get("DRUDGE_LLM_API_KEY") or ""
+# LLM connection resolves through omb_env (SSOT): env override (OMB_/DRUDGE_ alias) → boring.json
+# llm block → default, with host.docker.internal → localhost rewrite on the host.
+LLM_BASE_URL = omb_env.llm_base_url()
+LLM_MODEL = omb_env.llm_model()
+LLM_API_KEY = omb_env.llm_api_key()
 NOTE_LANG = boring_config.note_lang()
 # Minimum interval (minutes) before re-distilling an in-progress session (Stop hook).
 # SessionEnd (final) ignores the throttle.

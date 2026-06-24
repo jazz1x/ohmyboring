@@ -72,11 +72,26 @@ else
     drudge_down=1
 fi
 
-# (b) Ollama — the local LLM that generates the curated note before remember is called.
-if curl -sf -m5 "$OLLAMA_HOST/api/tags" >/dev/null 2>&1; then
-    ok "Ollama reachable ($OLLAMA_HOST)"
+# (b) LLM endpoint — the model that generates the curated note before remember is called.
+# Provider-aware (boring.json `llm` block): Ollama exposes /api/tags, OpenAI-compatible servers
+# (LM Studio, vLLM, remote OpenAI) expose /v1/models. Env overrides boring.json (OMB_ then DRUDGE_).
+BORING="${BORING_CONFIG:-$OMB_HOME/boring.json}"
+PROVIDER=$(jq -r '.llm.provider // "ollama"' "$BORING" 2>/dev/null || echo ollama)
+LLM_BASE=$(jq -r '.llm.base_url // "http://host.docker.internal:11434/v1"' "$BORING" 2>/dev/null || echo "http://host.docker.internal:11434/v1")
+LLM_BASE="${OMB_LLM_BASE_URL:-${DRUDGE_LLM_BASE_URL:-$LLM_BASE}}"
+LLM_BASE=$(printf '%s' "$LLM_BASE" | sed 's#host\.docker\.internal#localhost#')
+if [ "$PROVIDER" = ollama ]; then
+    NATIVE="${LLM_BASE%/v1}"; NATIVE="${NATIVE%/}"
+    NATIVE="${OLLAMA_HOST:-$NATIVE}"  # explicit OLLAMA_HOST still wins
+    if curl -sf -m5 "$NATIVE/api/tags" >/dev/null 2>&1; then
+        ok "Ollama reachable ($NATIVE)"
+    else
+        bad "Ollama unreachable ($NATIVE) — distillation can't generate notes (start: ollama serve)"
+    fi
+elif curl -sf -m5 "$LLM_BASE/models" >/dev/null 2>&1; then
+    ok "$PROVIDER reachable ($LLM_BASE)"
 else
-    bad "Ollama unreachable ($OLLAMA_HOST) — distillation can't generate notes (set OLLAMA_HOST?)"
+    bad "$PROVIDER endpoint unreachable ($LLM_BASE) — distillation can't generate notes (server up? needs auth?)"
 fi
 
 # (c) Container status — surface crash-loops the HTTP probes alone would miss.

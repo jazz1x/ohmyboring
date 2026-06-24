@@ -45,10 +45,18 @@ services:
     # No depends_on — the default wiki mode doesn't need postgres. In vector mode, `--profile vector`
     # brings up postgres alongside, and Store::open's connect retry (~10s) absorbs the startup race.
     environment:
-      DRUDGE_LLM_BASE_URL: ${DRUDGE_LLM_BASE_URL:-http://host.docker.internal:11434/v1}  # OpenAI-compatible. Swappable for LM Studio, etc. (override in .env)
-      DRUDGE_LLM_MODEL: ${DRUDGE_LLM_MODEL:-gemma4:12b}        # synthesis model (llm.rs sends reasoning_effort:"none" to disable thinking latency)
-      DRUDGE_LLM_API_KEY: ${DRUDGE_LLM_API_KEY:-}  # empty for local Ollama; set for hosted OpenAI-compatible endpoints
-      DRUDGE_EMBED_MODEL: ${DRUDGE_EMBED_MODEL:-bge-m3}  # embedding model (must match boring.json embed_model/embed_dim)
+      # LLM connection is the `llm` block of the bind-mounted boring.json (the SSOT). These are
+      # pass-through OVERRIDES only — no baked default, so an unset value stays empty and the engine
+      # reads boring.json. (A hardcoded default here would shadow boring.json, breaking e.g. an
+      # LM Studio base_url set in the config.) OMB_LLM_* is canonical; DRUDGE_LLM_* the deprecated
+      # alias. Both forwarded so either .env style works; the engine prefers OMB_. embed_model is the
+      # engine's policy SSOT (boring.json only) — no env knob.
+      OMB_LLM_BASE_URL: ${OMB_LLM_BASE_URL:-}
+      DRUDGE_LLM_BASE_URL: ${DRUDGE_LLM_BASE_URL:-}
+      OMB_LLM_MODEL: ${OMB_LLM_MODEL:-}
+      DRUDGE_LLM_MODEL: ${DRUDGE_LLM_MODEL:-}
+      OMB_LLM_API_KEY: ${OMB_LLM_API_KEY:-}
+      DRUDGE_LLM_API_KEY: ${DRUDGE_LLM_API_KEY:-}
       DRUDGE_HTTP_ADDR: 0.0.0.0:7700
       PG_DSN: postgresql://boring:boring@postgres:5432/boring
       BORING_CONFIG: /app/boring.json     # policy: note language, repo rules, source dirs
