@@ -42,7 +42,7 @@ enum Cmd {
     Config,
     /// Graph projection — write Postgres doc↔doc relations as wiki relates_to wikilinks (Obsidian)
     Link {
-        /// vault root (default: $DRUDGE_VAULT_DIR or $HOME/oh-my-boring/vault)
+        /// vault root (default: $OMB_VAULT_DIR or $HOME/oh-my-boring/vault)
         #[arg(long)]
         vault: Option<String>,
     },
@@ -100,15 +100,15 @@ enum VaultCmd {
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     // Rejection message vector-only CLI commands return when off (not silent, ROP). The daemon (serve) runs in wiki mode when off.
-    const VEC_OFF: &str = "DRUDGE_VECTOR=off — this command requires the vector backend (pgvector). The daemon (serve) runs in wiki-recall mode when off.";
+    const VEC_OFF: &str = "OMB_VECTOR=off — this command requires the vector backend (pgvector). The daemon (serve) runs in wiki-recall mode when off.";
 
     let cli = Cli::parse();
     // DRUDGE_VECTOR: default off = wiki first-class (no Postgres connection, simple). Turn on to enable pgvector (vector+graph).
     // unset/off → don't open Store → start engine/CLI without Postgres. (aligned with the wiki-primary trend)
     let cfg = config::BoringConfig::load(None)?;
 
-    let vector_on = std::env::var("DRUDGE_VECTOR")
-        .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "on" | "1" | "true" | "yes"));
+    let vector_on = config::env_alias("OMB_VECTOR", "DRUDGE_VECTOR")
+        .is_some_and(|v| matches!(v.to_lowercase().as_str(), "on" | "1" | "true" | "yes"));
     let store: Option<store::Store> = if vector_on {
         let dsn = std::env::var("PG_DSN")
             .unwrap_or_else(|_| "postgresql://boring:boring@localhost:5432/boring".to_owned());
@@ -234,8 +234,8 @@ async fn main() -> Result<()> {
             let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_config(&cfg);
             // Kernel A corpus = the vault's wiki dir (agent-written notes), not raw transcripts.
-            let vault_wiki = std::env::var("DRUDGE_VAULT_DIR").map_or_else(
-                |_| {
+            let vault_wiki = config::env_alias("OMB_VAULT_DIR", "DRUDGE_VAULT_DIR").map_or_else(
+                || {
                     format!(
                         "{}/oh-my-boring/vault/wiki",
                         std::env::var("HOME").unwrap_or_default()
@@ -264,7 +264,7 @@ async fn main() -> Result<()> {
         Cmd::Link { vault } => {
             let store = store.as_ref().context(VEC_OFF)?;
             let vault_root = vault
-                .or_else(|| std::env::var("DRUDGE_VAULT_DIR").ok())
+                .or_else(|| config::env_alias("OMB_VAULT_DIR", "DRUDGE_VAULT_DIR"))
                 .unwrap_or_else(|| {
                     format!(
                         "{}/oh-my-boring/vault",
@@ -347,7 +347,8 @@ async fn main() -> Result<()> {
                 }
                 VaultCmd::Renumber { vault, apply, sync } => {
                     let vault_root = std::path::PathBuf::from(vault.unwrap_or_else(|| {
-                        std::env::var("DRUDGE_VAULT_DIR").unwrap_or(default_vault)
+                        config::env_alias("OMB_VAULT_DIR", "DRUDGE_VAULT_DIR")
+                            .unwrap_or(default_vault)
                     }));
                     let wiki_dir = vault_root.join("wiki");
                     let plan = renumber::plan(&wiki_dir)?;

@@ -111,7 +111,7 @@ jobs:
           mkdir -p vault/raw vault/wiki "$HOME/.claude/projects"
       - name: start stack (vector mode)
         env:
-          DRUDGE_VECTOR: "on"
+          OMB_VECTOR: "on"
         run: |
           # Run the container as the runner user so it can write the bind-mounted vault (Linux EACCES guard).
           export DRUDGE_UID="$(id -u)" DRUDGE_GID="$(id -g)"
@@ -120,7 +120,7 @@ jobs:
           curl -sf -m3 http://127.0.0.1:7700/health
       - name: behavioral gate (eval-gate.sh)
         env:
-          DRUDGE_URL: http://127.0.0.1:7700
+          OMB_URL: http://127.0.0.1:7700
         run: ./scripts/eval-gate.sh
       - name: engine logs on failure
         if: failure()

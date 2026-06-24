@@ -181,8 +181,8 @@ impl Store {
                     Err(e) => {
                         return Err(anyhow::Error::new(e).context(
                             "postgres connect (retries exhausted) — is Postgres up? \
-                             vector mode needs `DRUDGE_VECTOR=on make up` (starts pgvector); \
-                             or run wiki-first with DRUDGE_VECTOR unset",
+                             vector mode needs `OMB_VECTOR=on make up` (starts pgvector); \
+                             or run wiki-first with OMB_VECTOR unset",
                         ));
                     }
                 }

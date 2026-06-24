@@ -11,7 +11,7 @@ services:
   # ─────────────────────────── Postgres + pgvector (graph = node/edge + CTE) ─────
   # Vector (HNSW) + FTS + graph (node/edge tables, recursive CTE). Pure pgvector, no AGE.
   # Opt-in: wiki-first is the default, so pgvector comes up only with `--profile vector` (to try graph+vector).
-  postgres:
+  boring-postgres:
     profiles: ["vector"]
     image: pgvector/pgvector:pg16
     container_name: boring-postgres
@@ -57,12 +57,14 @@ services:
       DRUDGE_LLM_MODEL: ${DRUDGE_LLM_MODEL:-}
       OMB_LLM_API_KEY: ${OMB_LLM_API_KEY:-}
       DRUDGE_LLM_API_KEY: ${DRUDGE_LLM_API_KEY:-}
-      DRUDGE_HTTP_ADDR: 0.0.0.0:7700
-      PG_DSN: postgresql://boring:boring@postgres:5432/boring
+      OMB_HTTP_ADDR: 0.0.0.0:7700
+      PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring  # host = the boring-postgres service (compose DNS)
       BORING_CONFIG: /app/boring.json     # policy: note language, repo rules, source dirs
-      DRUDGE_VAULT_DIR: /vault             # remember target + sync corpus (/vault/wiki)
-      DRUDGE_VECTOR: ${DRUDGE_VECTOR:-off} # default off = wiki-first direct read. on = vector+graph (postgres alongside via --profile vector)
-      DRUDGE_SYNC_HOURS: "4"
+      OMB_VAULT_DIR: /vault                # remember target + sync corpus (/vault/wiki)
+      # OMB_VECTOR canonical; DRUDGE_VECTOR deprecated alias (both forwarded, engine prefers OMB_).
+      OMB_VECTOR: ${OMB_VECTOR:-}
+      DRUDGE_VECTOR: ${DRUDGE_VECTOR:-off} # default off = wiki-first direct read. on = vector+graph (boring-postgres alongside via --profile vector)
+      OMB_SYNC_HOURS: "4"
       TZ: Asia/Seoul
     volumes:
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: drudge's source_dirs only reads ~/.claude/projects)
@@ -80,7 +82,7 @@ services:
   # Optional — the agent can drive advanced orchestration, Slack, and cron-based backfill. The image isn't
   # in the repo (external build) + depends on ~/.hermes: start.sh checks for the image and skips the agent
   # if absent, so the core loop works without it.
-  hermes-agent:
+  boring-agent:
     image: hermes-agent                   # requires external build (not in repo, Nous Hermes Agent)
     container_name: boring-agent
     restart: unless-stopped
@@ -88,7 +90,9 @@ services:
       HERMES_UID: ${HERMES_UID:-501}      # host user uid (~/.hermes file permissions)
       HERMES_GID: ${HERMES_GID:-20}
       TZ: Asia/Seoul
-      DRUDGE_URL: http://boring-drudge:7700  # morning-briefing (briefing.py) RAG endpoint; service is boring-drudge, not the script's "drudge" default
+      # RAG endpoint for morning-briefing (briefing.py) + ingest-worker. OMB_URL canonical, DRUDGE_URL alias.
+      OMB_URL: http://boring-drudge:7700
+      DRUDGE_URL: http://boring-drudge:7700
     volumes:
       - ${HOME}/.hermes:/opt/data         # persists config / credentials / session memory (autonomy-augmentation layer)
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: ingest-worker.py only globs /host/.claude/projects)

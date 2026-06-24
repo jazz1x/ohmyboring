@@ -30,7 +30,8 @@ def omb_home() -> str:
 
 
 def drudge_url() -> str:
-    return os.environ.get("DRUDGE_URL") or (
+    # OMB_URL canonical, DRUDGE_URL deprecated alias (defined below; safe — module-level call order).
+    return _env_alias("OMB_URL", "DRUDGE_URL") or (
         "http://boring-drudge:7700" if _in_container() else "http://localhost:7700"
     )
 

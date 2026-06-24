@@ -65,9 +65,7 @@ DISTILL_MARK_DIR = "/host/.cache/boring-distill" if _IN_CONTAINER else os.path.e
     "~/.cache/boring-distill"
 )
 MARK_DIR = DISTILL_MARK_DIR
-DRUDGE_URL = os.environ.get("DRUDGE_URL") or (
-    "http://boring-drudge:7700" if _IN_CONTAINER else "http://localhost:7700"
-)
+DRUDGE_URL = omb_env.drudge_url()  # OMB_URL canonical, DRUDGE_URL deprecated alias; container-aware default
 # OMB_HOME is only meaningful on the host; inside the container we rely on /host/boring.json.
 OMB_HOME = os.environ.get("OMB_HOME") or omb_env.omb_home()
 TRANSCRIPT_FORMAT = boring_config.agent_config("claude-code").get("format") or "claude-json"
@@ -94,7 +92,7 @@ def _safe(sid):
 
 def _wiki_dir():
     """Resolved vault root: env override → container mount → host repo vault."""
-    return os.environ.get("DRUDGE_VAULT_DIR") or (
+    return os.environ.get("OMB_VAULT_DIR") or os.environ.get("DRUDGE_VAULT_DIR") or (
         "/vault" if _IN_CONTAINER else os.path.join(OMB_HOME, "vault")
     )
 

@@ -5,7 +5,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-URL="${DRUDGE_URL:-http://localhost:7700}"
+URL="${OMB_URL:-${DRUDGE_URL:-http://localhost:7700}}"
 
 if ! curl -s -m3 "$URL/health" >/dev/null 2>&1; then
   echo "engine not running ($URL). Run 'make up' first."

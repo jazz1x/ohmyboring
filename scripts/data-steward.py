@@ -40,6 +40,7 @@ SEED_NOTE = "wiki-0000.md"
 def _wiki_dir(args) -> Path:
     vault = (
         args.vault
+        or os.environ.get("OMB_VAULT_DIR")  # canonical; DRUDGE_VAULT_DIR = deprecated alias
         or os.environ.get("DRUDGE_VAULT_DIR")
         or os.path.join(os.environ.get("OMB_HOME") or os.path.expanduser("~/oh-my-boring"), "vault")
     )
@@ -180,7 +181,7 @@ def _fix_note(n, target_project: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Inspect/repair oh-my-boring vault data hygiene")
-    parser.add_argument("--vault", help="vault root directory (default: DRUDGE_VAULT_DIR or ~/oh-my-boring/vault)")
+    parser.add_argument("--vault", help="vault root directory (default: OMB_VAULT_DIR or ~/oh-my-boring/vault)")
     parser.add_argument("--fix", action="store_true", help="rewrite notes in place (review with git diff)")
     parser.add_argument("--yes", action="store_true", help="skip confirmation prompt")
     parser.add_argument("--json", action="store_true", help="output structured JSON report")
