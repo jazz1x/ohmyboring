@@ -24,6 +24,26 @@
     {
       "query": "find which commit introduced a flaky intermittently failing test",
       "expect": ["eval-git-bisect-flaky"]
+    },
+    {
+      "query": "async task hangs forever when a lock stays held over an await point",
+      "expect": ["eval-rust-mutex-await"]
+    },
+    {
+      "query": "browser blocks my cross-site request with cookies on the OPTIONS check",
+      "expect": ["eval-cors-preflight"]
+    },
+    {
+      "query": "endpoint slow because it issues one extra query per row in a loop",
+      "expect": ["eval-orm-nplus1"]
+    },
+    {
+      "query": "memory grows and goroutines pile up stuck sending on a channel nobody reads",
+      "expect": ["eval-goroutine-leak"]
+    },
+    {
+      "query": "consumer group keeps reassigning partitions and handling the same events twice",
+      "expect": ["eval-kafka-rebalance"]
     }
   ]
 }
