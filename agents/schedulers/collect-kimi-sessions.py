@@ -16,7 +16,7 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import omb_env
 
-DRUDGE_URL = os.environ.get("DRUDGE_URL") or omb_env.drudge_url()
+DRUDGE_URL = omb_env.drudge_url()  # OMB_URL canonical, DRUDGE_URL deprecated alias
 KIMI_HOME = os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code")
 OMB_HOME = os.environ.get("OMB_HOME") or omb_env.omb_home()
 HOOK = os.path.join(OMB_HOME, "agents", "kimi", "distill-session.py")

@@ -10,22 +10,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tokio::time::sleep;
 
-/// Read an env var by its canonical name, falling back to a deprecated alias (warns once on the alias).
-/// Empty values are treated as unset so an `OMB_X=` placeholder does not mask the alias/default.
-fn env_alias(canonical: &str, deprecated: &str) -> Option<String> {
-    if let Ok(v) = std::env::var(canonical)
-        && !v.is_empty()
-    {
-        return Some(v);
-    }
-    match std::env::var(deprecated) {
-        Ok(v) if !v.is_empty() => {
-            eprintln!("[config] deprecated: {deprecated} is set; rename it to {canonical}");
-            Some(v)
-        }
-        _ => None,
-    }
-}
+use crate::config::env_alias;
 
 pub struct Llm {
     base_url: String, // OpenAI-compatible base — e.g. http://localhost:11434/v1

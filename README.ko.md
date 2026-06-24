@@ -39,7 +39,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 2. **마크다운 중심 메모리** — 일반 텍스트, 사람이 읽기 쉬움, git diff 가능. 검색도 마크다운을 직접 읽습니다.
 3. **로컬 전용** — 임베딩과 요약이 Ollama 등 로컬 LLM에서 실행됩니다. 외부 API나 토큰 없음.
 
-선택적으로 **pgvector** 가속기(`DRUDGE_VECTOR=on`)를 켜면 유사도 검색 + GraphRAG이 추가됩니다.
+선택적으로 **pgvector** 가속기(`OMB_VECTOR=on`)를 켜면 유사도 검색 + GraphRAG이 추가됩니다.
 
 ---
 
@@ -69,7 +69,7 @@ python3 agents/shared/agent_wiring.py --install \
 
 ## 내 메모리 보기
 
-노트는 그냥 마크다운이므로, **`vault/` 폴더를 [Obsidian](https://obsidian.md) 보관함(vault)으로 열면** 그래프 뷰, 백링크, 태그, 전문 검색을 그대로 쓸 수 있습니다. 컴파일된 노트에는 이미 Obsidian-safe `tags`와 `[[wiki-NNNN]]` `relates_to` 링크가 들어 있어, 그래프 뷰가 메모리의 연결 관계를 바로 그려 줍니다(`DRUDGE_VECTOR=on`일 때 GraphRAG 그래프가 이 링크로 투영되어 가장 풍부합니다). 별도 UI를 만들 필요가 없습니다. Obsidian이 만드는 `.obsidian/` 작업 폴더는 gitignore 처리되어, 내 레이아웃이 로컬에만 남고 git에 새지 않습니다.
+노트는 그냥 마크다운이므로, **`vault/` 폴더를 [Obsidian](https://obsidian.md) 보관함(vault)으로 열면** 그래프 뷰, 백링크, 태그, 전문 검색을 그대로 쓸 수 있습니다. 컴파일된 노트에는 이미 Obsidian-safe `tags`와 `[[wiki-NNNN]]` `relates_to` 링크가 들어 있어, 그래프 뷰가 메모리의 연결 관계를 바로 그려 줍니다(`OMB_VECTOR=on`일 때 GraphRAG 그래프가 이 링크로 투영되어 가장 풍부합니다). 별도 UI를 만들 필요가 없습니다. Obsidian이 만드는 `.obsidian/` 작업 폴더는 gitignore 처리되어, 내 레이아웃이 로컬에만 남고 git에 새지 않습니다.
 
 ---
 
@@ -90,7 +90,7 @@ flowchart LR
     MCP([MCP recall])
   end
   SRC --> WRITE --> WIKI --> RD
-  WIKI -. "DRUDGE_VECTOR=on" .-> PG[("pgvector")]
+  WIKI -. "OMB_VECTOR=on" .-> PG[("pgvector")]
   PG -. accelerate .-> RD
 ```
 
@@ -143,12 +143,24 @@ flowchart LR
 
 | Variable | 용도 |
 |---|---|
-| `DRUDGE_VECTOR` | `on` 시 pgvector 활성화(선택) |
+| `OMB_VECTOR` | `on` 시 pgvector 활성화(선택) |
 | `OMB_LLM_BASE_URL` / `OMB_LLM_MODEL` | `llm.base_url` / `llm.model` 런타임 오버라이드(선택, `DRUDGE_LLM_*` = deprecated alias). `drudge` 바이너리를 호스트에서 직접 실행한다면 `OMB_LLM_BASE_URL=http://localhost:11434/v1` 설정 |
 | `OMB_LLM_API_KEY` | `llm.api_key_env`가 여기를 가리킬 때의 API 키(인증 provider) |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack assistant |
 
 > **임베딩 모델을 바꾸면 벡터 차원이 바뀝니다.** 합성 모델(`llm.model`)은 자유롭게 교체해도 되지만, `llm.embed_model`을 바꾸면 크기가 다른 벡터가 나오므로, `llm.embed_dim`을 맞게 수정하고 **그리고** `make reset`을 실행해야 합니다 — 그러지 않으면 기존 형태의 벡터에 대한 upsert가 실패합니다. 흔한 차원: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
+
+### 네이밍 계층
+
+계층마다 이름 하나 — `ohmyzsh` ↔ `~/.oh-my-zsh` 패턴. 대상이 바뀌는 게 아니라 계층이 바뀝니다:
+
+| 계층 | 이름 | 등장 위치 |
+|---|---|---|
+| 브랜드 / repo / MCP 서버 | `ohmyboring` | repo URL, `.mcp.json`, `--server-name` |
+| 설치 디렉토리 / compose 프로젝트 | `~/oh-my-boring` | clone 경로, `OMB_HOME`, compose 프로젝트명 |
+| 엔진 패키지 / 바이너리 | `drudge` | `Cargo.toml`, 소스, `drudge` CLI |
+| 컨테이너 | `boring-*` | `boring-drudge` · `boring-postgres` · `boring-agent` |
+| 환경변수 prefix | `OMB_*` | `OMB_VECTOR` · `OMB_URL` · `OMB_LLM_*` · `OMB_VAULT_DIR` (`DRUDGE_*` = deprecated alias, 한 사이클 동안 계속 인식) |
 
 ---
 
@@ -210,12 +222,12 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 
 사용 가능한 tools (11개): `recall` · `neighbors` · `claims`(검색) · `ask` · `brief`(생성 — LLM 실행) · `corpus_status` · `config_get`(introspection) · `remember` · `forget` · `classify_repo` · `sync`(쓰기 / 유지보수).
 
-기본 wiki-first 모드(`DRUDGE_VECTOR=off`)에서는 네 개 tool이 pgvector 백엔드를 필요로 하며, `DRUDGE_VECTOR=on`을 설정하기 전까지 JSON-RPC `-32603`을 반환합니다: `neighbors`, `claims`, `corpus_status`, `brief`. 나머지 일곱 개(`recall`, `ask`, `remember`, `forget`, `sync`, `config_get`, `classify_repo`)는 `vault/wiki`를 직접 사용합니다.
+기본 wiki-first 모드(`OMB_VECTOR=off`)에서는 네 개 tool이 pgvector 백엔드를 필요로 하며, `OMB_VECTOR=on`을 설정하기 전까지 JSON-RPC `-32603`을 반환합니다: `neighbors`, `claims`, `corpus_status`, `brief`. 나머지 일곱 개(`recall`, `ask`, `remember`, `forget`, `sync`, `config_get`, `classify_repo`)는 `vault/wiki`를 직접 사용합니다.
 
-- `neighbors` *(`DRUDGE_VECTOR=on` 필요)* — 토픽에서 출발하는 그래프 순회: 쿼리를 임베딩해 가장 가까운 노트 하나를 잡고, 그 노트의 1-hop 라벨을 반환합니다(`{hit, graph_neighbors, semantic_neighbors}` JSON). `hit`은 매칭된 노트 경로, `graph_neighbors`는 그 노트의 project/topic 라벨, `semantic_neighbors`는 공유 tool/concept 라벨이며 — 노트 경로가 아니라 평탄한 문자열입니다.
-- `claims` *(`DRUDGE_VECTOR=on` 필요)* — 쿼리 근처의 현재(미대체) `{subject, predicate, value}` 결정 top-k.
-- `corpus_status` *(`DRUDGE_VECTOR=on` 필요)* — KB 상태 스냅샷(파일/청크 수, origin/kind/project별, 오염도, graph/semantic 노드+엣지).
-- `ask` / `brief` — 유일하게 LLM을 돌리는 tool: `ask`는 출처를 인용해 질문에 답하고(wiki-first 모드에서 동작), `brief` *(`DRUDGE_VECTOR=on` 필요)* 는 최신순 우선 업무 브리핑입니다.
+- `neighbors` *(`OMB_VECTOR=on` 필요)* — 토픽에서 출발하는 그래프 순회: 쿼리를 임베딩해 가장 가까운 노트 하나를 잡고, 그 노트의 1-hop 라벨을 반환합니다(`{hit, graph_neighbors, semantic_neighbors}` JSON). `hit`은 매칭된 노트 경로, `graph_neighbors`는 그 노트의 project/topic 라벨, `semantic_neighbors`는 공유 tool/concept 라벨이며 — 노트 경로가 아니라 평탄한 문자열입니다.
+- `claims` *(`OMB_VECTOR=on` 필요)* — 쿼리 근처의 현재(미대체) `{subject, predicate, value}` 결정 top-k.
+- `corpus_status` *(`OMB_VECTOR=on` 필요)* — KB 상태 스냅샷(파일/청크 수, origin/kind/project별, 오염도, graph/semantic 노드+엣지).
+- `ask` / `brief` — 유일하게 LLM을 돌리는 tool: `ask`는 출처를 인용해 질문에 답하고(wiki-first 모드에서 동작), `brief` *(`OMB_VECTOR=on` 필요)* 는 최신순 우선 업무 브리핑입니다.
 - `forget` — wiki id나 정확한 제목으로 노트를 삭제합니다. wiki 파일을 제거하고, vector 모드에서는 임베딩·그래프 엣지·claim도 함께 정리합니다.
 
 구조화 tool(`neighbors`, `claims`, `corpus_status`, `config_get`, `ask`, `brief`)은 텍스트 블록과 함께 네이티브 `structuredContent`(JSON)를 반환하고, 산문/ack tool(`recall`, `remember`, `forget`, `sync`, `classify_repo`)은 텍스트를 반환합니다.

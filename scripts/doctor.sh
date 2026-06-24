@@ -13,7 +13,7 @@ set -u
 
 # Defaults mirror the hook (distill-session.py): DRUDGE_URL + OMB_HOME + the marker dir,
 # so the diagnostic inspects exactly what the hook writes to.
-DRUDGE_URL="${DRUDGE_URL:-http://127.0.0.1:7700}"
+DRUDGE_URL="${OMB_URL:-${DRUDGE_URL:-http://127.0.0.1:7700}}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
 OMB_HOME="${OMB_HOME:-$HOME/oh-my-boring}"
 MARK_DIR="${HOME}/.cache/boring-distill"

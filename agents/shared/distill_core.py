@@ -28,7 +28,7 @@ import omb_env  # noqa: E402
 
 # OMB_HOME: repo clone location (default ~/oh-my-boring).
 OMB_HOME = os.environ.get("OMB_HOME") or omb_env.omb_home()
-DRUDGE_URL = os.environ.get("DRUDGE_URL") or omb_env.drudge_url()
+DRUDGE_URL = omb_env.drudge_url()  # OMB_URL canonical, DRUDGE_URL deprecated alias
 # LLM connection resolves through omb_env (SSOT): env override (OMB_/DRUDGE_ alias) → boring.json
 # llm block → default, with host.docker.internal → localhost rewrite on the host.
 LLM_BASE_URL = omb_env.llm_base_url()

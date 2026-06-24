@@ -16,7 +16,7 @@
 # anything. If the stack is down it SKIPS (exit 0), never failing CI on a missing
 # engine.
 set -eu
-URL="${DRUDGE_URL:-http://localhost:7700}"
+URL="${OMB_URL:-${DRUDGE_URL:-http://localhost:7700}}"
 
 fail() { echo "FAIL: $1"; exit 1; }
 skip() { echo "SKIP: $1"; exit 0; }
@@ -31,9 +31,9 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$URL/health" 2>/dev/null)" !
 fi
 
 # --- mode check ----------------------------------------------------------------
-# Resolve mode: honor explicit DRUDGE_VECTOR, else ask /audit (vector backend
-# returns total_chunks; wiki mode returns 500).
-case "$(printf '%s' "${DRUDGE_VECTOR:-}" | tr '[:upper:]' '[:lower:]')" in
+# Resolve mode: honor explicit OMB_VECTOR (DRUDGE_VECTOR = deprecated alias), else ask /audit
+# (vector backend returns total_chunks; wiki mode returns 500).
+case "$(printf '%s' "${OMB_VECTOR:-${DRUDGE_VECTOR:-}}" | tr '[:upper:]' '[:lower:]')" in
   on | 1 | true | yes) VEC=1 ;;
   off | 0 | false | no) VEC=0 ;;
   *)
@@ -46,9 +46,9 @@ case "$(printf '%s' "${DRUDGE_VECTOR:-}" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 if [ "$VEC" = 1 ]; then
-  echo "   vector mode (DRUDGE_VECTOR=on) confirmed"
+  echo "   vector mode (OMB_VECTOR=on) confirmed"
 else
-  echo "   wiki mode (DRUDGE_VECTOR=off) confirmed"
+  echo "   wiki mode (OMB_VECTOR=off) confirmed"
 fi
 
 MCP="$URL/mcp"

@@ -9,7 +9,7 @@ chmod 600 .env 2>/dev/null || true
 # Create policy config from example if missing. User edits it to set language, repo rules, source dirs.
 [ -f boring.json ] || cp boring.example.json boring.json
 chmod 644 boring.json 2>/dev/null || true
-# Source .env so that variables like DRUDGE_VECTOR are visible to this script.
+# Source .env so that variables like OMB_VECTOR (or its DRUDGE_VECTOR alias) are visible to this script.
 set -a; . .env; set +a
 
 # Fail fast if a required host tool is missing — BEFORE pulling GBs of models or
@@ -44,7 +44,8 @@ fi
 # (external Nous Hermes Agent build). If it's missing we fall back to CORE-ONLY (ohmyboring,
 # the RAG engine) so a first-timer can try `make ask` immediately — set OMB_CORE_ONLY=1 to
 # skip the agent on purpose.
-AGENT="hermes-agent"
+# Compose SERVICE name = boring-agent; the IMAGE it runs is the external `hermes-agent` build.
+AGENT="boring-agent"
 if [ -n "${OMB_CORE_ONLY:-}" ] || ! docker image inspect hermes-agent >/dev/null 2>&1; then
   AGENT=""
   if [ -z "${OMB_CORE_ONLY:-}" ]; then
@@ -58,18 +59,19 @@ MSG
   fi
 fi
 
-# If DRUDGE_VECTOR=on, also start the pgvector (vector+graph) profile. Default (off) is wiki-first — postgres not started.
+# If OMB_VECTOR=on (DRUDGE_VECTOR = deprecated alias), also start the pgvector (vector+graph) profile.
+# Default (off) is wiki-first — postgres not started.
 PROFILES=""
-case "$(printf '%s' "${DRUDGE_VECTOR:-off}" | tr '[:upper:]' '[:lower:]')" in
+case "$(printf '%s' "${OMB_VECTOR:-${DRUDGE_VECTOR:-off}}" | tr '[:upper:]' '[:lower:]')" in
   on | 1 | true | yes) PROFILES="--profile vector"; echo "▶ vector mode (with pgvector)";;
-  *) echo "▶ wiki-first mode (pgvector not started — set DRUDGE_VECTOR=on to use graph+vector)";;
+  *) echo "▶ wiki-first mode (pgvector not started — set OMB_VECTOR=on to use graph+vector)";;
 esac
 
 # Ensure sensitive directories are not world-readable before Docker creates them.
 mkdir -p vault/raw vault/wiki data/pgdata
 chmod 700 vault vault/raw vault/wiki data data/pgdata 2>/dev/null || true
 
-echo "▶ Building + starting (boring-drudge${AGENT:+ + hermes-agent}${PROFILES:+ + postgres}) …"
+echo "▶ Building + starting (boring-drudge${AGENT:+ + boring-agent}${PROFILES:+ + boring-postgres}) …"
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
 if docker compose version 2>&1 | grep -q "Docker Compose"; then

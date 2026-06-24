@@ -38,6 +38,25 @@ const DEFAULT_CHAT_MODEL: &str = "gemma4:12b";
 /// Named (not the key itself) so the secret never lands in boring.json.
 const DEFAULT_API_KEY_ENV: &str = "OMB_LLM_API_KEY";
 
+/// Read env `canonical`, falling back to a deprecated alias (warns once on the alias). Empty = unset,
+/// so an `OMB_X=` placeholder doesn't mask the alias/default. SSOT for the OMB_* (canonical) /
+/// DRUDGE_* (deprecated) env-prefix migration — shared by config/llm/main/serve.
+#[must_use]
+pub fn env_alias(canonical: &str, deprecated: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(canonical)
+        && !v.is_empty()
+    {
+        return Some(v);
+    }
+    match std::env::var(deprecated) {
+        Ok(v) if !v.is_empty() => {
+            eprintln!("[config] deprecated: {deprecated} is set; rename it to {canonical}");
+            Some(v)
+        }
+        _ => None,
+    }
+}
+
 /// Personal memory policy configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

@@ -30,7 +30,7 @@ FILE="$BACKUP_DIR/ohmyboring_$TIMESTAMP.dump"
 TMP="$FILE.partial"
 
 echo "[backup] dumping boring database ..."
-if ! $COMPOSE --profile vector exec -T postgres pg_dump -U boring -d boring -Fc > "$TMP"; then
+if ! $COMPOSE --profile vector exec -T boring-postgres pg_dump -U boring -d boring -Fc > "$TMP"; then
   rm -f "$TMP"
   echo "[backup] ABORT: pg_dump failed; no backup written." >&2
   exit 1
@@ -41,7 +41,7 @@ if [ ! -s "$TMP" ]; then
   exit 1
 fi
 # Validate it is a readable custom-format archive before publishing it as a restore point.
-if ! $COMPOSE --profile vector exec -T postgres pg_restore -l >/dev/null 2>&1 < "$TMP"; then
+if ! $COMPOSE --profile vector exec -T boring-postgres pg_restore -l >/dev/null 2>&1 < "$TMP"; then
   rm -f "$TMP"
   echo "[backup] ABORT: dump is not a valid pg_restore archive; no backup written." >&2
   exit 1

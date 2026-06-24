@@ -38,7 +38,7 @@ if [ ! -s "$BACKUP" ]; then
   exit 1
 fi
 echo "[restore] validating backup archive ..."
-if ! $COMPOSE --profile vector exec -T postgres pg_restore -l >/dev/null 2>&1 < "$BACKUP"; then
+if ! $COMPOSE --profile vector exec -T boring-postgres pg_restore -l >/dev/null 2>&1 < "$BACKUP"; then
   echo "[restore] ABORT: '$BACKUP' is not a readable pg_restore custom-format archive — live DB left untouched."
   exit 1
 fi
@@ -51,11 +51,11 @@ echo "[restore] stopping boring-drudge ..."
 $COMPOSE --profile vector stop boring-drudge || true
 
 echo "[restore] recreating database ..."
-$COMPOSE --profile vector exec -T postgres dropdb -U boring --if-exists boring
-$COMPOSE --profile vector exec -T postgres createdb -U boring boring
+$COMPOSE --profile vector exec -T boring-postgres dropdb -U boring --if-exists boring
+$COMPOSE --profile vector exec -T boring-postgres createdb -U boring boring
 
 echo "[restore] restoring from $BACKUP ..."
-$COMPOSE --profile vector exec -T postgres pg_restore -U boring -d boring -Fc < "$BACKUP"
+$COMPOSE --profile vector exec -T boring-postgres pg_restore -U boring -d boring -Fc < "$BACKUP"
 
 echo "[restore] starting boring-drudge ..."
 $COMPOSE --profile vector start boring-drudge

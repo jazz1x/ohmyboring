@@ -7,11 +7,11 @@
 # An explicit DRUDGE_VECTOR (if exported) still forces the mode.
 # Note: /bin/sh (dash) has no pipefail → check each step's result explicitly.
 set -eu
-URL="${DRUDGE_URL:-http://localhost:7700}"
+URL="${OMB_URL:-${DRUDGE_URL:-http://localhost:7700}}"
 fail() { echo "FAIL: $1"; exit 1; }
 
-# Resolve mode: honor an explicit DRUDGE_VECTOR, else ask the live engine.
-case "$(printf '%s' "${DRUDGE_VECTOR:-}" | tr '[:upper:]' '[:lower:]')" in
+# Resolve mode: honor an explicit OMB_VECTOR (DRUDGE_VECTOR = deprecated alias), else ask the live engine.
+case "$(printf '%s' "${OMB_VECTOR:-${DRUDGE_VECTOR:-}}" | tr '[:upper:]' '[:lower:]')" in
   on | 1 | true | yes) VEC=1 ;;
   off | 0 | false | no) VEC=0 ;;
   *)

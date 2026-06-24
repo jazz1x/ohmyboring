@@ -145,7 +145,7 @@ pub async fn answer(
 pub async fn answer_wiki(llm: &Llm, wiki_dir: Option<&Path>, question: &str) -> Result<AnswerOut> {
     let Some(dir) = wiki_dir else {
         return Ok(AnswerOut {
-            answer: "vault is not configured. (DRUDGE_VAULT_DIR)".to_owned(),
+            answer: "vault is not configured. (OMB_VAULT_DIR)".to_owned(),
             sources: vec![],
         });
     };
