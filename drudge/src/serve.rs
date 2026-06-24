@@ -52,6 +52,11 @@ pub struct AppState {
     /// Serializes startup, periodic, and HTTP-triggered syncs so they never overlap.
     /// `/sync` waits for an in-flight startup sync and returns its actual outcome.
     sync_lock: Arc<Mutex<()>>,
+    /// Resident wiki recall index (DRUDGE_VECTOR=off path). Persists parsed/lowercased notes across
+    /// requests; `refresh()` re-reads only mtime-changed files, so repeated `/search` (the recall hook
+    /// fires per prompt) scores in memory instead of re-reading the whole corpus. std Mutex — the
+    /// critical section is sync (refresh+score) and never held across an await.
+    wiki_index: Arc<std::sync::Mutex<wiki_recall::WikiIndex>>,
     /// Last successful compact time, shared with scheduler so manual `/compact` resets the window.
     last_compact: Arc<Mutex<Option<Instant>>>,
 }
@@ -60,6 +65,21 @@ impl AppState {
     /// vault/wiki directory (the retrieval target for `DRUDGE_VECTOR=off`). None if vault is unset.
     fn wiki_dir(&self) -> Option<PathBuf> {
         (*self.vault_dir).as_ref().map(|v| v.join("wiki"))
+    }
+
+    /// Cached wiki recall: refresh the resident index (mtime-incremental — only changed files are
+    /// re-read, so this stays honest, not stale) then score in memory. Empty when the vault is unset.
+    fn wiki_recall(&self, query: &str, k: usize) -> Result<Vec<wiki_recall::WikiHit>> {
+        let Some(dir) = self.wiki_dir() else {
+            return Ok(Vec::new());
+        };
+        // Recover a poisoned lock instead of unwrapping (a prior panic must not wedge recall).
+        let mut idx = self
+            .wiki_index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        idx.refresh(&dir)?;
+        Ok(idx.search(query, k))
     }
 }
 
@@ -363,7 +383,7 @@ async fn handle_search(
     } else {
         // direct wiki read — origin/project don't exist in the wiki path, so empty (schema-compatible).
         // wiki-first mode is not budget-aware; it returns the top-N snippets.
-        wiki_recall_hits(s.wiki_dir().as_deref(), &req.query, max_results)?
+        s.wiki_recall(&req.query, max_results)?
             .into_iter()
             .map(|h| SearchHit {
                 id: h.id,
@@ -388,18 +408,6 @@ async fn handle_search(
         started.elapsed(),
     );
     Ok(Json(SearchResp { hits: mapped }))
-}
-
-/// wiki_recall call wrapper — empty result if wiki_dir is unset (graceful).
-fn wiki_recall_hits(
-    wiki_dir: Option<&Path>,
-    query: &str,
-    top_n: usize,
-) -> Result<Vec<wiki_recall::WikiHit>, AppError> {
-    match wiki_dir {
-        Some(dir) => Ok(wiki_recall::recall(dir, query, top_n)?),
-        None => Ok(Vec::new()),
-    }
 }
 
 async fn handle_graph(
@@ -778,11 +786,10 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             .map(|h| (h.source_path, h.content))
             .collect()
     } else {
-        let dir = s.wiki_dir();
-        let Some(dir) = dir.as_deref() else {
+        if s.wiki_dir().is_none() {
             return Ok("(vault not set — nothing to recall)".to_owned());
-        };
-        wiki_recall::recall(dir, query, max_results)
+        }
+        s.wiki_recall(query, max_results)
             .map_err(|e| (-32603_i32, format!("wiki recall: {e:#}")))?
             .into_iter()
             .map(|h| (h.source_path, h.snippet))
@@ -1505,6 +1512,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         cfg_path: Arc::new(cfg_path),
         sync_lock: Arc::new(Mutex::new(())),
         last_compact: Arc::clone(&last_compact),
+        wiki_index: Arc::new(std::sync::Mutex::new(wiki_recall::WikiIndex::default())),
     };
 
     spawn_scheduler(
