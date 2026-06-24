@@ -230,17 +230,54 @@ struct QueryLogEntry {
 
 // ── handlers ──────────────────────────────────────────────────────────────────
 
+/// Whether a sync/remember/forget is mid-flight (holds the sync lock). An enum, not a string —
+/// the two states are closed at the type so an impossible third value can't exist (Layer 1: ADT).
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum SyncState {
+    Running,
+    Idle,
+}
+
 #[derive(Serialize)]
 struct HealthResp {
     status: &'static str,
     vector: bool,
+    /// "running" while a sync/remember/forget holds the sync lock, else "idle". Lets `make up` callers
+    /// tell a still-warming corpus (empty results are expected) from a genuinely empty one.
+    sync: SyncState,
+    /// Wiki note count (vault/wiki/*.md) — the corpus size in both modes. `null` when the vault is
+    /// unset/unreadable (kept best-effort so /health stays a liveness probe).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corpus_count: Option<usize>,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResp> {
+    // Non-blocking: try_lock reveals whether a sync is mid-flight without ever waiting on it. The
+    // momentary guard is dropped at the end of the expression, so this never blocks a real sync.
+    let sync = if state.sync_lock.try_lock().is_ok() {
+        SyncState::Idle
+    } else {
+        SyncState::Running
+    };
     Json(HealthResp {
         status: "ok",
         vector: state.store.is_some(),
+        sync,
+        corpus_count: state.wiki_dir().as_deref().and_then(count_wiki_notes),
     })
+}
+
+/// Best-effort count of wiki notes (`vault/wiki/*.md`). `None` on any IO error — `/health` must stay a
+/// liveness signal, so an unreadable/absent vault reports "unknown" (null), never fails the probe.
+fn count_wiki_notes(wiki_dir: &Path) -> Option<usize> {
+    let entries = std::fs::read_dir(wiki_dir).ok()?;
+    Some(
+        entries
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+            .count(),
+    )
 }
 
 async fn handle_ask(

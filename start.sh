@@ -91,7 +91,9 @@ fi
 
 cat <<'EOF'
 
-✓ Setup complete. The first ingest (startup sync) runs in the background (a few minutes).
+✓ Setup complete. The first ingest (startup sync) runs in the BACKGROUND (a few minutes) — early
+  queries may return little until it finishes. Watch it complete:
+    curl -s localhost:7700/health   # sync:"running"→"idle", corpus_count climbs
   make smoke         end-to-end check
   make ask Q="..."   single query
   make sync          deterministic re-ingest of the vault (embed→graph→relates_to)
