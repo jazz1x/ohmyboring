@@ -8,12 +8,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ### Changed
 - **MCP server name**: the project-scoped `.mcp.json` key and all user-facing docs now use
   `ohmyboring` instead of `drudge`.
-- **Docker service/image/container name**: renamed from `drudge` to `boring-drudge` to keep the
-  `boring-*` container prefix consistent with `boring-agent`/`boring-postgres`.
-  `DRUDGE_*` environment variables and the Rust binary/package name (`drudge`) are kept unchanged
-  for now to limit the blast radius.
+- **Naming unified on `boring`** — Docker compose **service keys, images, and container names** are
+  all `boring-*` (`boring-drudge` / `boring-postgres` / `boring-agent`; `PG_DSN` host follows), and
+  **every environment variable now uses the single `BORING_*` prefix** (`BORING_VECTOR`, `BORING_URL`,
+  `BORING_LLM_BASE_URL`/`_MODEL`/`_API_KEY`, `BORING_VAULT_DIR`, `BORING_HTTP_ADDR`, `BORING_HOME`,
+  `BORING_UID`/`_GID`, `BORING_RETENTION_*`, …). The legacy `DRUDGE_*` and the interim `OMB_*`
+  prefixes were **removed outright** (personal tool, no release cycle to deprecate across) — setting
+  them now has no effect. The Rust binary/package name stays `drudge` (internal engine identity), and
+  the `from_env` legacy config-migration vars (`DRUDGE_NOTE_LANG`/`DRUDGE_COMPANY_SUBSTR`/… → read
+  only when `boring.json` is absent) are unaffected.
+- **LLM connection is a first-class `llm` block in `boring.json` (schema v2)** —
+  `{ provider, base_url, model, embed_model, embed_dim, api_key_env, bootstrap }`. `provider`
+  (`ollama` | `lmstudio` | `openai-compatible`) steers the host-side bootstrap only; the engine speaks
+  one OpenAI `/v1` to all. Bootstrap is provider-dispatch (`scripts/llm-providers/<provider>.sh`), so
+  LM Studio is a one-line config (no more Ollama-pull failure). v1 configs still load (top-level
+  `embed_model`/`embed_dim` resolved into the block at parse).
+- **`/sync` corpus totals are honest** — when the post-sync audit is unavailable, `total_chunks` /
+  `total_edges` are reported as `null` (not a fabricated `0`). `remember`/`forget` report
+  partial-success when the `relates_to` projection defers to the next sync.
+- **Ingest embeds chunks with bounded concurrency** (`StreamExt::buffered`) instead of one blocking
+  await per chunk — large notes ingest much faster, ordering preserved.
+- **`remember` projects only the new note's `relates_to`** (~3 queries) instead of recomputing the
+  whole corpus; backlinks reconcile on the next periodic full sync (invisible to recall).
+- **README locale lockstep** — `README.ko.md` / `README.ja.md` restored to parity with `README.md`
+  (prerequisites, full Kimi Code content, naming-layer table).
 
 ### Added
+- **eval gate in CI** — recall@k regression on `data/eval/golden.json` now runs on every PR. CI has
+  no GPU, so `data/eval/stub_embedder.py` replays real bge-m3 vectors recorded into
+  `recorded_embeddings.json` (CI recall == real recall). Previously `make eval`-only.
+- **`/health` observability** — adds `sync` (`running`|`idle`, via a non-blocking lock probe) and
+  `corpus_count` (wiki note count) so callers can tell a still-warming corpus from an empty one.
+- **Resident wiki recall index** — wiki-first `/search` (the per-prompt recall path) now scores an
+  in-memory, mtime-incremental index instead of re-reading every `vault/wiki/*.md` per query.
+  Honest, not stale: changed/removed files are re-read/dropped on the next query.
+- **Destructive-script guardrail tests** — `scripts/test_retention.py` (an unprocessed session is
+  never hard-deleted; dry-run mutates nothing) and `scripts/test_restore_db.sh` (a bad/empty/missing
+  backup never reaches `dropdb`); wired into `guard.sh`.
 - **MCP tool `forget`**: delete a note by wiki id or exact title. Removes the wiki file and,
   in vector mode, purges its embeddings, graph edges, and claims.
 - **Kimi Code CLI support**: `agents/kimi/distill-session.py` (SessionEnd hook),
