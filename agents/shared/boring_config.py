@@ -42,7 +42,7 @@ def discover_path() -> Path | None:
         p = Path("/host/boring.json")
         if p.is_file():
             return p
-    omb_home = (os.environ.get("BORING_HOME") or os.environ.get("OMB_HOME"))
+    omb_home = os.environ.get("BORING_HOME")
     if omb_home:
         p = Path(omb_home).expanduser() / "boring.json"
         if p.is_file():

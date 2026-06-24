@@ -103,11 +103,11 @@ async fn main() -> Result<()> {
     const VEC_OFF: &str = "BORING_VECTOR=off — this command requires the vector backend (pgvector). The daemon (serve) runs in wiki-recall mode when off.";
 
     let cli = Cli::parse();
-    // DRUDGE_VECTOR: default off = wiki first-class (no Postgres connection, simple). Turn on to enable pgvector (vector+graph).
+    // BORING_VECTOR: default off = wiki first-class (no Postgres connection, simple). Turn on to enable pgvector (vector+graph).
     // unset/off → don't open Store → start engine/CLI without Postgres. (aligned with the wiki-primary trend)
     let cfg = config::BoringConfig::load(None)?;
 
-    let vector_on = config::env_alias("BORING_VECTOR", "DRUDGE_VECTOR")
+    let vector_on = config::env_set("BORING_VECTOR")
         .is_some_and(|v| matches!(v.to_lowercase().as_str(), "on" | "1" | "true" | "yes"));
     let store: Option<store::Store> = if vector_on {
         let dsn = std::env::var("PG_DSN")
@@ -234,7 +234,7 @@ async fn main() -> Result<()> {
             let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_config(&cfg);
             // Kernel A corpus = the vault's wiki dir (agent-written notes), not raw transcripts.
-            let vault_wiki = config::env_alias("BORING_VAULT_DIR", "DRUDGE_VAULT_DIR").map_or_else(
+            let vault_wiki = config::env_set("BORING_VAULT_DIR").map_or_else(
                 || {
                     format!(
                         "{}/oh-my-boring/vault/wiki",
@@ -264,7 +264,7 @@ async fn main() -> Result<()> {
         Cmd::Link { vault } => {
             let store = store.as_ref().context(VEC_OFF)?;
             let vault_root = vault
-                .or_else(|| config::env_alias("BORING_VAULT_DIR", "DRUDGE_VAULT_DIR"))
+                .or_else(|| config::env_set("BORING_VAULT_DIR"))
                 .unwrap_or_else(|| {
                     format!(
                         "{}/oh-my-boring/vault",
@@ -347,8 +347,7 @@ async fn main() -> Result<()> {
                 }
                 VaultCmd::Renumber { vault, apply, sync } => {
                     let vault_root = std::path::PathBuf::from(vault.unwrap_or_else(|| {
-                        config::env_alias("BORING_VAULT_DIR", "DRUDGE_VAULT_DIR")
-                            .unwrap_or(default_vault)
+                        config::env_set("BORING_VAULT_DIR").unwrap_or(default_vault)
                     }));
                     let wiki_dir = vault_root.join("wiki");
                     let plan = renumber::plan(&wiki_dir)?;

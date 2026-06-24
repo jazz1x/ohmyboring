@@ -14,8 +14,8 @@ SHARED_DIR = HERE.parent / "shared"
 sys.path.insert(0, str(SHARED_DIR))
 
 # Neutralize ambient env so module-load + assertions are deterministic.
-for _var in ("BORING_CONFIG", "BORING_HOME", "DRUDGE_URL", "DRUDGE_LLM_BASE_URL",
-             "DRUDGE_LLM_MODEL", "KIMI_CODE_HOME"):
+for _var in ("BORING_CONFIG", "BORING_HOME", "BORING_URL", "BORING_LLM_BASE_URL",
+             "BORING_LLM_MODEL", "KIMI_CODE_HOME"):
     os.environ.pop(_var, None)
 
 

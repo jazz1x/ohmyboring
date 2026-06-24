@@ -27,13 +27,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 import boring_config
 import omb_env
 
-DRUDGE_URL = omb_env.drudge_url()  # BORING_URL canonical, DRUDGE_URL deprecated alias
+BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")  # skip small sessions (distill would SKIP anyway)
 # BORING_HOME: repo clone location (default ~/oh-my-boring). Lets a forker clone elsewhere
 # without editing this file.
-BORING_HOME = (os.environ.get("BORING_HOME") or os.environ.get("OMB_HOME")) or os.path.expanduser("~/oh-my-boring")
+BORING_HOME = os.environ.get("BORING_HOME") or os.path.expanduser("~/oh-my-boring")
 HOOK = os.path.join(BORING_HOME, "agents/claude-code/distill-session.py")
 MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
 
@@ -81,7 +81,7 @@ def _warm_llm():
     first agent call exceed its timeout → silent SKIP. Best-effort: any failure is ignored (the agent's
     own call still works, just slower). Uses Ollama's native /api/generate keep_alive (no-op elsewhere)."""
     base = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-    model = omb_env.llm_model()  # BORING_LLM_MODEL canonical, DRUDGE_LLM_MODEL deprecated alias
+    model = omb_env.llm_model()
     body = json.dumps({"model": model, "prompt": "ok", "stream": False, "keep_alive": 1800}).encode()
     try:
         urllib.request.urlopen(
@@ -149,7 +149,7 @@ def main():
             print(f"[{label}] timeout  {proj}", flush=True)
 
     try:
-        req = urllib.request.Request(f"{DRUDGE_URL}/sync", data=b"", method="POST")
+        req = urllib.request.Request(f"{BORING_URL}/sync", data=b"", method="POST")
         with urllib.request.urlopen(req, timeout=900) as resp:
             print(f"[{label}] sync ok", flush=True)
     except Exception as e:

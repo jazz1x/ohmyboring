@@ -144,7 +144,7 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 | Variable | Purpose |
 |---|---|
 | `BORING_VECTOR` | `on` enables pgvector (optional) |
-| `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | optional runtime override of `llm.base_url` / `llm.model` (`DRUDGE_LLM_*` = deprecated alias). Running the `drudge` binary directly on the host? Set `BORING_LLM_BASE_URL=http://localhost:11434/v1` |
+| `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | optional runtime override of `llm.base_url` / `llm.model`. Running the `drudge` binary directly on the host? Set `BORING_LLM_BASE_URL=http://localhost:11434/v1` |
 | `BORING_LLM_API_KEY` | API key when `llm.api_key_env` points here (auth providers) |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant |
 
@@ -160,7 +160,7 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 | Install dir / compose project | `~/oh-my-boring` | clone path, `BORING_HOME`, compose project name |
 | Engine package / binary | `drudge` | `Cargo.toml`, source, the `drudge` CLI |
 | Containers | `boring-*` | `boring-drudge` · `boring-postgres` · `boring-agent` |
-| Env-var prefix | `BORING_*` | `BORING_VECTOR` · `BORING_URL` · `BORING_LLM_*` · `BORING_VAULT_DIR` · `BORING_HOME` (`DRUDGE_*` and the former `OMB_*` = deprecated aliases, still honored one cycle) |
+| Env-var prefix | `BORING_*` | `BORING_VECTOR` · `BORING_URL` · `BORING_LLM_*` · `BORING_VAULT_DIR` · `BORING_HOME` |
 
 ---
 
@@ -274,9 +274,9 @@ It is configured per the hermes-agent project's **own docs** (out of scope here)
 | Mode | How |
 |---|---|
 | **Docker** (default) | `make up` |
-| **Native** | `cd drudge && DRUDGE_VAULT_DIR="$PWD/../vault" DRUDGE_HTTP_ADDR=127.0.0.1:7700 cargo run --release -- serve` |
+| **Native** | `cd drudge && BORING_VAULT_DIR="$PWD/../vault" BORING_HTTP_ADDR=127.0.0.1:7700 cargo run --release -- serve` |
 
-> Native `serve` needs `DRUDGE_VAULT_DIR` — without it `remember` fails with `DRUDGE_VAULT_DIR not set`. It also binds `0.0.0.0:7700` by default; set `DRUDGE_HTTP_ADDR=127.0.0.1:7700` to keep it loopback-only.
+> Native `serve` needs `BORING_VAULT_DIR` — without it `remember` fails with `BORING_VAULT_DIR not set`. It also binds `0.0.0.0:7700` by default; set `BORING_HTTP_ADDR=127.0.0.1:7700` to keep it loopback-only.
 
 ---
 

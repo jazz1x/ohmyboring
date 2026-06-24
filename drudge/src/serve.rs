@@ -3,7 +3,7 @@
 //! Architecture:
 //! - Shares `Store` + `Llm` via `Arc` (the Postgres client supports concurrent use).
 //! - axum router: /health · /ask · /search · /graph · /audit · /sync
-//! - Background scheduler: `DRUDGE_SYNC_HOURS` (default 4h) interval + one immediate run at startup.
+//! - Background scheduler: `BORING_SYNC_HOURS` (default 4h) interval + one immediate run at startup.
 //! - Error propagation: `AppError` (anyhow wrapper) → HTTP 500, JSON body.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,11 +39,11 @@ use crate::wiki_recall;
 
 #[derive(Clone)]
 pub struct AppState {
-    /// pgvector backend. If `None`, `DRUDGE_VECTOR=off` — retrieval is direct vault/wiki reads (wiki_recall),
+    /// pgvector backend. If `None`, `BORING_VECTOR=off` — retrieval is direct vault/wiki reads (wiki_recall),
     /// and remember writes the wiki note as first-class memory (no embed/graph). Vector/graph-dependent endpoints reject explicitly.
     store: Option<Arc<Store>>,
     llm: Arc<Llm>,
-    /// vault root (`DRUDGE_VAULT_DIR`). The remember target (`<vault>/wiki/wiki-NNNN.md`) + the relates_to projection root.
+    /// vault root (`BORING_VAULT_DIR`). The remember target (`<vault>/wiki/wiki-NNNN.md`) + the relates_to projection root.
     vault_dir: Arc<Option<PathBuf>>,
     /// Policy config (`boring.json`).
     cfg: Arc<config::BoringConfig>,
@@ -52,7 +52,7 @@ pub struct AppState {
     /// Serializes startup, periodic, and HTTP-triggered syncs so they never overlap.
     /// `/sync` waits for an in-flight startup sync and returns its actual outcome.
     sync_lock: Arc<Mutex<()>>,
-    /// Resident wiki recall index (DRUDGE_VECTOR=off path). Persists parsed/lowercased notes across
+    /// Resident wiki recall index (BORING_VECTOR=off path). Persists parsed/lowercased notes across
     /// requests; `refresh()` re-reads only mtime-changed files, so repeated `/search` (the recall hook
     /// fires per prompt) scores in memory instead of re-reading the whole corpus. std Mutex — the
     /// critical section is sync (refresh+score) and never held across an await.
@@ -62,7 +62,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// vault/wiki directory (the retrieval target for `DRUDGE_VECTOR=off`). None if vault is unset.
+    /// vault/wiki directory (the retrieval target for `BORING_VECTOR=off`). None if vault is unset.
     fn wiki_dir(&self) -> Option<PathBuf> {
         (*self.vault_dir).as_ref().map(|v| v.join("wiki"))
     }
@@ -327,7 +327,7 @@ async fn handle_ask(
 }
 
 /// Recency-first briefing — no question (recency retrieval). Called by the cron morning briefing.
-/// Recency (updated_at) ordering depends on pgvector → rejected if `DRUDGE_VECTOR=off`.
+/// Recency (updated_at) ordering depends on pgvector → rejected if `BORING_VECTOR=off`.
 async fn handle_brief(State(s): State<AppState>) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -1297,7 +1297,7 @@ struct SyncOutcome {
 }
 
 /// Deterministic re-ingest: walk notes → embed → pgvector upsert → graph (from frontmatter) → GC →
-/// recompute relations. When `store=None` (DRUDGE_VECTOR=off), the wiki files are first-class memory
+/// recompute relations. When `store=None` (BORING_VECTOR=off), the wiki files are first-class memory
 /// (wiki_recall reads them directly) — nothing to embed/graph. Shared by HTTP `/sync` + the scheduler (SSOT).
 async fn do_sync(
     store: Option<&Store>,
@@ -1446,13 +1446,13 @@ fn spawn_scheduler(
 ) {
     // `.max(1)` — `BORING_SYNC_HOURS=0` would make a zero Duration, and
     // tokio::time::interval panics on a zero period. Clamp to ≥1h.
-    let sync_hours: u64 = config::env_alias("BORING_SYNC_HOURS", "DRUDGE_SYNC_HOURS")
+    let sync_hours: u64 = config::env_set("BORING_SYNC_HOURS")
         .and_then(|v| v.parse().ok())
         .unwrap_or(4)
         .max(1);
     let sync_interval = Duration::from_secs(sync_hours * 3600);
 
-    let compact_hours: u64 = config::env_alias("BORING_COMPACT_HOURS", "DRUDGE_COMPACT_HOURS")
+    let compact_hours: u64 = config::env_set("BORING_COMPACT_HOURS")
         .and_then(|v| v.parse().ok())
         .unwrap_or(24)
         .max(1);
@@ -1496,14 +1496,12 @@ fn spawn_scheduler(
 
 pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> Result<()> {
     // vault root — when set, sync includes the raw→wiki compile stage.
-    let vault_dir: Option<PathBuf> =
-        config::env_alias("BORING_VAULT_DIR", "DRUDGE_VAULT_DIR").map(PathBuf::from);
+    let vault_dir: Option<PathBuf> = config::env_set("BORING_VAULT_DIR").map(PathBuf::from);
 
     // Remember which config file we loaded so `classify_repo` writes back to the same file.
     let cfg_path = config::discover_path();
 
-    let addr = config::env_alias("BORING_HTTP_ADDR", "DRUDGE_HTTP_ADDR")
-        .unwrap_or_else(|| "0.0.0.0:7700".to_owned());
+    let addr = config::env_set("BORING_HTTP_ADDR").unwrap_or_else(|| "0.0.0.0:7700".to_owned());
 
     let last_compact = Arc::new(Mutex::new(None));
     let state = AppState {

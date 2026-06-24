@@ -140,7 +140,7 @@ pub async fn answer(
     })
 }
 
-/// wiki-first-class retrieval (`DRUDGE_VECTOR=off`): direct read of vault/wiki → LLM synthesis. No graph/claim authority (vector-only).
+/// wiki-first-class retrieval (`BORING_VECTOR=off`): direct read of vault/wiki → LLM synthesis. No graph/claim authority (vector-only).
 /// If `wiki_dir` is unset, returns an empty-memory notice. SRP: pure logic (IO lives only in wiki_recall).
 pub async fn answer_wiki(llm: &Llm, wiki_dir: Option<&Path>, question: &str) -> Result<AnswerOut> {
     let Some(dir) = wiki_dir else {

@@ -144,7 +144,7 @@ flowchart LR
 | Variable | 용도 |
 |---|---|
 | `BORING_VECTOR` | `on` 시 pgvector 활성화(선택) |
-| `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | `llm.base_url` / `llm.model` 런타임 오버라이드(선택, `DRUDGE_LLM_*` = deprecated alias). `drudge` 바이너리를 호스트에서 직접 실행한다면 `BORING_LLM_BASE_URL=http://localhost:11434/v1` 설정 |
+| `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | `llm.base_url` / `llm.model` 런타임 오버라이드(선택). `drudge` 바이너리를 호스트에서 직접 실행한다면 `BORING_LLM_BASE_URL=http://localhost:11434/v1` 설정 |
 | `BORING_LLM_API_KEY` | `llm.api_key_env`가 여기를 가리킬 때의 API 키(인증 provider) |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack assistant |
 
@@ -160,7 +160,7 @@ flowchart LR
 | 설치 디렉토리 / compose 프로젝트 | `~/oh-my-boring` | clone 경로, `BORING_HOME`, compose 프로젝트명 |
 | 엔진 패키지 / 바이너리 | `drudge` | `Cargo.toml`, 소스, `drudge` CLI |
 | 컨테이너 | `boring-*` | `boring-drudge` · `boring-postgres` · `boring-agent` |
-| 환경변수 prefix | `BORING_*` | `BORING_VECTOR` · `BORING_URL` · `BORING_LLM_*` · `BORING_VAULT_DIR` · `BORING_HOME` (`DRUDGE_*` 및 구 `OMB_*` = deprecated alias, 한 사이클 동안 계속 인식) |
+| 환경변수 prefix | `BORING_*` | `BORING_VECTOR` · `BORING_URL` · `BORING_LLM_*` · `BORING_VAULT_DIR` · `BORING_HOME` |
 
 ---
 
@@ -274,9 +274,9 @@ curl -s -X POST http://localhost:7700/mcp \
 | Mode | 방법 |
 |---|---|
 | **Docker** (기본) | `make up` |
-| **Native** | `cd drudge && DRUDGE_VAULT_DIR="$PWD/../vault" DRUDGE_HTTP_ADDR=127.0.0.1:7700 cargo run --release -- serve` |
+| **Native** | `cd drudge && BORING_VAULT_DIR="$PWD/../vault" BORING_HTTP_ADDR=127.0.0.1:7700 cargo run --release -- serve` |
 
-> Native `serve`는 `DRUDGE_VAULT_DIR`가 필요합니다 — 없으면 `remember`가 `DRUDGE_VAULT_DIR not set`으로 실패합니다. 또한 기본값으로 `0.0.0.0:7700`에 바인딩하므로, loopback으로만 열려면 `DRUDGE_HTTP_ADDR=127.0.0.1:7700`을 설정하세요.
+> Native `serve`는 `BORING_VAULT_DIR`가 필요합니다 — 없으면 `remember`가 `BORING_VAULT_DIR not set`으로 실패합니다. 또한 기본값으로 `0.0.0.0:7700`에 바인딩하므로, loopback으로만 열려면 `BORING_HTTP_ADDR=127.0.0.1:7700`을 설정하세요.
 
 ---
 

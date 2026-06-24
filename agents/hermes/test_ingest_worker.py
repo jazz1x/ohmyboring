@@ -51,8 +51,8 @@ class ReconcileTest(unittest.TestCase):
         # Wiki dir for per-session marker tests.
         self.wiki_dir = Path(self.tmp.name) / "wiki"
         self.wiki_dir.mkdir()
-        self._orig_vault_dir = os.environ.get("DRUDGE_VAULT_DIR")
-        os.environ["DRUDGE_VAULT_DIR"] = str(self.wiki_dir)
+        self._orig_vault_dir = os.environ.get("BORING_VAULT_DIR")
+        os.environ["BORING_VAULT_DIR"] = str(self.wiki_dir)
 
         self.engine = server.HTTPServer(("127.0.0.1", 0), _FakeEngine)
         self.thread = threading.Thread(target=self.engine.serve_forever, daemon=True)
@@ -63,13 +63,13 @@ class ReconcileTest(unittest.TestCase):
 
         port = self.engine.server_address[1]
         self.url = f"http://127.0.0.1:{port}"
-        ingest_worker.DRUDGE_URL = self.url
+        ingest_worker.BORING_URL = self.url
 
     def _restore_vault_dir(self):
         if self._orig_vault_dir is None:
-            os.environ.pop("DRUDGE_VAULT_DIR", None)
+            os.environ.pop("BORING_VAULT_DIR", None)
         else:
-            os.environ["DRUDGE_VAULT_DIR"] = self._orig_vault_dir
+            os.environ["BORING_VAULT_DIR"] = self._orig_vault_dir
 
     def _pending(self, sid, before, attempts=0):
         path = Path(self.tmp.name) / f"{sid}.pending"
@@ -147,7 +147,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertTrue(self._done_exists("s5"))
 
     def test_health_failure_treated_as_wiki_and_retries(self):
-        ingest_worker.DRUDGE_URL = "http://127.0.0.1:1"  # unreachable
+        ingest_worker.BORING_URL = "http://127.0.0.1:1"  # unreachable
         self._pending("s6", 0)
         ingest_worker._reconcile()
         # Unreachable engine falls back to wiki-first → attempts incremented, not done yet.

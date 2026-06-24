@@ -13,7 +13,7 @@ import os
 import sys
 import urllib.request
 
-DRUDGE_URL = os.environ.get("DRUDGE_URL") or "http://localhost:7700"
+BORING_URL = os.environ.get("BORING_URL") or "http://localhost:7700"
 GOLDEN = os.path.join(os.path.dirname(__file__), "golden.json")
 K = 3
 
@@ -26,7 +26,7 @@ def load_golden():
 def search(query, k=K):
     body = json.dumps({"query": query, "max_results": k, "max_tokens": 2000}).encode()
     req = urllib.request.Request(
-        f"{DRUDGE_URL}/search",
+        f"{BORING_URL}/search",
         data=body,
         headers={"content-type": "application/json"},
     )

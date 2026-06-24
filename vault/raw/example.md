@@ -14,7 +14,7 @@ core-only.
 
 ✅ **What worked** — `make up` runs the core wiki-first (ohmyboring RAG engine; hermes-agent joins
 automatically if its image exists, else core-only). pgvector (vector + graph RAG) is opt-in:
-`DRUDGE_VECTOR=on make up` brings up Postgres via `--profile vector`. The host Ollama
+`BORING_VECTOR=on make up` brings up Postgres via `--profile vector`. The host Ollama
 (`ollama serve`) must be up first so the container reaches embeddings/synthesis via `host.docker.internal`.
 
 🔄 **Unfinished/next** — accumulate more sessions to see `make ask` recall quality. Once you register

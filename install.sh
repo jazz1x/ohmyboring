@@ -8,7 +8,7 @@
 # Claude Code hook/MCP wiring. POSIX sh.
 set -eu
 
-BORING_HOME="${BORING_HOME:-${OMB_HOME:-$HOME/oh-my-boring}}"  # OMB_HOME = deprecated alias
+BORING_HOME="${BORING_HOME:-$HOME/oh-my-boring}"
 REPO="${BORING_REPO:-https://github.com/jazz1x/ohmyboring.git}"
 
 say()  { printf '\033[1;36m▶ %s\033[0m\n' "$1"; }
@@ -24,7 +24,7 @@ done
 # not with a cryptic 'make: command not found' right after this friendly check passes.
 command -v make >/dev/null 2>&1 || die "make not found — install it: macOS 'xcode-select --install' (or 'brew install make') · Debian/Ubuntu 'sudo apt-get install make' · Fedora 'sudo dnf install make'."
 docker info >/dev/null 2>&1 || die "Docker daemon not running — start Docker Desktop / dockerd, then re-run."
-command -v ollama >/dev/null 2>&1 || warn "ollama not on PATH — install from https://ollama.com, or set DRUDGE_LLM_BASE_URL to your own OpenAI-compatible endpoint in .env."
+command -v ollama >/dev/null 2>&1 || warn "ollama not on PATH — install from https://ollama.com, or set BORING_LLM_BASE_URL to your own OpenAI-compatible endpoint in .env."
 
 # 2) Clone or update (idempotent).
 if [ -d "$BORING_HOME/.git" ]; then

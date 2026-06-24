@@ -16,7 +16,7 @@
 # anything. If the stack is down it SKIPS (exit 0), never failing CI on a missing
 # engine.
 set -eu
-URL="${BORING_URL:-${DRUDGE_URL:-http://localhost:7700}}"
+URL="${BORING_URL:-http://localhost:7700}"
 
 fail() { echo "FAIL: $1"; exit 1; }
 skip() { echo "SKIP: $1"; exit 0; }
@@ -31,9 +31,9 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$URL/health" 2>/dev/null)" !
 fi
 
 # --- mode check ----------------------------------------------------------------
-# Resolve mode: honor explicit BORING_VECTOR (DRUDGE_VECTOR = deprecated alias), else ask /audit
+# Resolve mode: honor explicit BORING_VECTOR, else ask /audit
 # (vector backend returns total_chunks; wiki mode returns 500).
-case "$(printf '%s' "${BORING_VECTOR:-${DRUDGE_VECTOR:-}}" | tr '[:upper:]' '[:lower:]')" in
+case "$(printf '%s' "${BORING_VECTOR:-}" | tr '[:upper:]' '[:lower:]')" in
   on | 1 | true | yes) VEC=1 ;;
   off | 0 | false | no) VEC=0 ;;
   *)

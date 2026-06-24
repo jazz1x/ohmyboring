@@ -35,7 +35,7 @@ SHARED_DIR = HERE.parent / "shared"
 sys.path.insert(0, str(SHARED_DIR))
 
 # Neutralize ambient policy/endpoint env so module-load + assertions are deterministic.
-for _var in ("BORING_CONFIG", "BORING_HOME", "DRUDGE_URL", "RECALL_MAX_RESULTS",
+for _var in ("BORING_CONFIG", "BORING_HOME", "BORING_URL", "RECALL_MAX_RESULTS",
              "RECALL_MAX_TOKENS", "RECALL_TIMEOUT", "RECALL_RETRIES"):
     os.environ.pop(_var, None)
 

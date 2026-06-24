@@ -2,10 +2,10 @@
 //!
 //! These tests exercise the live PostgreSQL backend, NOT the HTTP/MCP surface
 //! (that belongs in `scripts/e2e.sh` and `data/eval/run_eval.py`). They need a
-//! Postgres instance reachable via `DRUDGE_TEST_DATABASE_URL`. If the variable is
+//! Postgres instance reachable via `BORING_TEST_DATABASE_URL`. If the variable is
 //! unset, the tests are skipped with a clear message.
 //!
-//! Run via: `DRUDGE_TEST_DATABASE_URL=postgresql://boring:boring@localhost:5432/boring_test cargo test -p drudge --test store_integration`
+//! Run via: `BORING_TEST_DATABASE_URL=postgresql://boring:boring@localhost:5432/boring_test cargo test -p drudge --test store_integration`
 #![allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail fast on setup errors
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,7 +15,7 @@ use drudge::store::Store;
 use tokio_postgres::{Client, NoTls};
 
 fn test_dsn() -> Option<String> {
-    std::env::var("DRUDGE_TEST_DATABASE_URL").ok()
+    std::env::var("BORING_TEST_DATABASE_URL").ok()
 }
 
 async fn connect(dsn: &str) -> Client {
@@ -60,7 +60,7 @@ async fn count_claims(db: &Client, path: &str) -> i64 {
 #[tokio::test]
 async fn compact_succeeds_in_autocommit_mode() {
     let Some(dsn) = test_dsn() else {
-        eprintln!("SKIP: DRUDGE_TEST_DATABASE_URL not set");
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
         return;
     };
     let store = Store::open(&dsn, 1024).await.expect("open store");
@@ -73,7 +73,7 @@ async fn compact_succeeds_in_autocommit_mode() {
 #[tokio::test]
 async fn delete_document_removes_claims() {
     let Some(dsn) = test_dsn() else {
-        eprintln!("SKIP: DRUDGE_TEST_DATABASE_URL not set");
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
         return;
     };
     let db = connect(&dsn).await;
