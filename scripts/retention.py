@@ -112,18 +112,11 @@ def _archive(src: Path, archive: Path) -> None:
     os.replace(tmp, archive)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Manage raw session transcript retention")
-    parser.add_argument("--apply", action="store_true", help="actually archive/delete instead of dry-run")
-    parser.add_argument("--yes", action="store_true", help="skip confirmation prompt")
-    args = parser.parse_args()
-
-    processed_days = _env_days("OMB_RETENTION_PROCESSED_DAYS", DEFAULT_PROCESSED_DAYS)
-    unprocessed_days = _env_days("OMB_RETENTION_UNPROCESSED_DAYS", DEFAULT_UNPROCESSED_DAYS)
-    archive_days = _env_days("OMB_RETENTION_ARCHIVE_DAYS", DEFAULT_ARCHIVE_DAYS)
-    delete_only = os.environ.get("OMB_RETENTION_DELETE_ONLY", "0").strip() in ("1", "true", "yes")
-    now = time.time()
-
+def plan(now, processed_days, unprocessed_days, archive_days, delete_only) -> dict:
+    """Pure planning pass — scans the filesystem (read-only) and decides what WOULD be archived /
+    deleted, without mutating anything. Extracted from main() so the data-loss guardrails (an
+    unprocessed session is never hard-deleted; thresholds; processed-only archive deletion) are unit-
+    testable. main() prints + applies the returned plan; --apply alone touches the disk."""
     source_dirs = _source_dirs()
     sessions = _collect_sessions(source_dirs)
     mark_dir = _mark_dir()
@@ -131,7 +124,7 @@ def main():
 
     to_archive: list[tuple[Path, Path, str]] = []
     to_delete: list[Path] = []
-    bytes_to_archive = 0
+    bytes_total = 0
 
     for p in sessions:
         sid = p.stem
@@ -150,11 +143,11 @@ def main():
         # (recoverable gzip), even under delete_only. Only PROCESSED sessions honor delete_only.
         if delete_only and state == "processed":
             to_delete.append(p)
-            bytes_to_archive += p.stat().st_size
+            bytes_total += p.stat().st_size
         else:
             archive = archive_dir / f"{p.stem}.jsonl.gz"
             to_archive.append((p, archive, state))
-            bytes_to_archive += p.stat().st_size
+            bytes_total += p.stat().st_size
 
     # ancient archives — but only delete archives of PROCESSED sessions (already in the vault).
     # An undistilled session's archive is its sole re-distill source; never auto-delete it.
@@ -178,6 +171,44 @@ def main():
             age_days = (now - p.stat().st_mtime) / 86400
             if age_days >= DEFAULT_RETRY_STALE_DAYS:
                 stale_retry.append(p)
+
+    return {
+        "source_dirs": source_dirs,
+        "mark_dir": mark_dir,
+        "archive_dir": archive_dir,
+        "sessions": sessions,
+        "to_archive": to_archive,
+        "to_delete": to_delete,
+        "ancient_archives": ancient_archives,
+        "stale_pending": stale_pending,
+        "stale_retry": stale_retry,
+        "bytes": bytes_total,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Manage raw session transcript retention")
+    parser.add_argument("--apply", action="store_true", help="actually archive/delete instead of dry-run")
+    parser.add_argument("--yes", action="store_true", help="skip confirmation prompt")
+    args = parser.parse_args()
+
+    processed_days = _env_days("OMB_RETENTION_PROCESSED_DAYS", DEFAULT_PROCESSED_DAYS)
+    unprocessed_days = _env_days("OMB_RETENTION_UNPROCESSED_DAYS", DEFAULT_UNPROCESSED_DAYS)
+    archive_days = _env_days("OMB_RETENTION_ARCHIVE_DAYS", DEFAULT_ARCHIVE_DAYS)
+    delete_only = os.environ.get("OMB_RETENTION_DELETE_ONLY", "0").strip() in ("1", "true", "yes")
+    now = time.time()
+
+    p = plan(now, processed_days, unprocessed_days, archive_days, delete_only)
+    source_dirs = p["source_dirs"]
+    mark_dir = p["mark_dir"]
+    archive_dir = p["archive_dir"]
+    sessions = p["sessions"]
+    to_archive = p["to_archive"]
+    to_delete = p["to_delete"]
+    ancient_archives = p["ancient_archives"]
+    stale_pending = p["stale_pending"]
+    stale_retry = p["stale_retry"]
+    bytes_to_archive = p["bytes"]
 
     total_actions = len(to_archive) + len(to_delete) + len(ancient_archives) + len(stale_pending) + len(stale_retry)
 
