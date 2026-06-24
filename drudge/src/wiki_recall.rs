@@ -6,7 +6,9 @@
 //!
 //! Scoring: not token *equality* but **substring-match frequency**. Tolerates Korean attached endings (임베딩→"임베딩은") and English
 //! partial words (decent without morphological analysis). Title matches are weighted. Separates pure logic (`score_doc`) from I/O (`recall`) (SRP).
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 
@@ -46,17 +48,23 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
     n
 }
 
-/// title+body score + snippet. None if zero matches. Pure.
+/// title+body score + snippet. None if zero matches. Lowercases then delegates to `score_lower`.
+/// Test-only convenience now — the production path caches lowercased forms and calls `score_lower`.
 /// score = Σ(body occurrences) + 3·Σ(title occurrences) + coverage (count of distinct matched terms).
+#[cfg(test)]
 fn score_doc(title: &str, body: &str, terms: &[String]) -> Option<(f32, String)> {
-    let tl = title.to_lowercase();
-    let bl = body.to_lowercase();
+    score_lower(&title.to_lowercase(), &body.to_lowercase(), terms)
+}
+
+/// Same scoring on already-lowercased title/body — the `WikiIndex` caches the lowercased forms so the
+/// hot recall path skips re-lowercasing every document on every query. Pure.
+fn score_lower(tl: &str, bl: &str, terms: &[String]) -> Option<(f32, String)> {
     let mut score = 0_usize;
     let mut coverage = 0_usize;
     let mut first_hit: Option<usize> = None;
     for t in terms {
-        let bc = count_occurrences(&bl, t);
-        let tc = count_occurrences(&tl, t);
+        let bc = count_occurrences(bl, t);
+        let tc = count_occurrences(tl, t);
         if bc + tc > 0 {
             coverage += 1;
         }
@@ -75,7 +83,7 @@ fn score_doc(title: &str, body: &str, terms: &[String]) -> Option<(f32, String)>
     // so the byte offset and the slicing share one coordinate system (no case-fold drift).
     Some((
         precise_cast(score),
-        snippet_around(&bl, first_hit.unwrap_or(0)),
+        snippet_around(bl, first_hit.unwrap_or(0)),
     ))
 }
 
@@ -125,48 +133,110 @@ fn extract_title_body<'a>(content: &'a str, stem: &str) -> (String, &'a str) {
     (stem.to_owned(), body)
 }
 
-/// Read `vault/wiki/*.md` directly for the top-K closest to query (I/O shell — delegates to pure `score_doc`).
+/// One parsed wiki note, cached in lowercased form for scoring. `mtime` keys incremental refresh.
+struct CachedDoc {
+    id: String,
+    title: String, // raw (for display); lowercased forms below are what scoring reads
+    source_path: String,
+    title_lower: String,
+    body_lower: String,
+    mtime: SystemTime,
+}
+
+/// In-memory wiki index — parses `vault/wiki/*.md` once and keeps the lowercased title/body cached so
+/// the per-query recall path scores in memory instead of re-reading + re-lowercasing every file. The
+/// index is **honest, not stale**: `refresh()` re-stats the dir each call and re-reads only files whose
+/// mtime changed (catching out-of-band edits, e.g. Obsidian), and drops vanished files. Reading bodies
+/// — the expensive part — happens only on first sight or change. (Layer 1 honesty kept; Layer 3 cost cut.)
+#[derive(Default)]
+pub struct WikiIndex {
+    docs: HashMap<PathBuf, CachedDoc>,
+}
+
+impl WikiIndex {
+    /// Reconcile the cache with `vault/wiki/`: re-read changed/new `.md` (by mtime), drop removed ones.
+    /// Missing wiki dir is graceful (cache cleared → empty recall). I/O shell; scoring stays pure.
+    pub fn refresh(&mut self, wiki_dir: &Path) -> Result<()> {
+        let Ok(read_dir) = std::fs::read_dir(wiki_dir) else {
+            self.docs.clear(); // wiki doesn't exist yet — normal (empty recall), not a stale lie
+            return Ok(());
+        };
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        for entry in read_dir {
+            let path = entry.context("reading wiki dir entry")?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            seen.insert(path.clone());
+            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            // Up-to-date cache entry → skip the expensive read+parse.
+            if let Some(mt) = mtime
+                && self.docs.get(&path).is_some_and(|c| c.mtime == mt)
+            {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue; // skip on read failure (graceful)
+            };
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_owned();
+            let (title, body) = extract_title_body(&content, &stem);
+            self.docs.insert(
+                path.clone(),
+                CachedDoc {
+                    id: stem,
+                    title_lower: title.to_lowercase(),
+                    body_lower: body.to_lowercase(),
+                    title,
+                    source_path: path.to_string_lossy().into_owned(),
+                    mtime: mtime.unwrap_or_else(SystemTime::now),
+                },
+            );
+        }
+        self.docs.retain(|p, _| seen.contains(p)); // drop vanished notes
+        Ok(())
+    }
+
+    /// Top-K notes closest to `query`, scored over the cached (lowercased) corpus. Pure — no I/O.
+    #[must_use]
+    pub fn search(&self, query: &str, k: usize) -> Vec<WikiHit> {
+        let terms = query_terms(query);
+        if terms.is_empty() {
+            return Vec::new();
+        }
+        let mut hits: Vec<WikiHit> = self
+            .docs
+            .values()
+            .filter_map(|d| {
+                score_lower(&d.title_lower, &d.body_lower, &terms).map(|(score, snippet)| WikiHit {
+                    id: d.id.clone(),
+                    title: d.title.clone(),
+                    source_path: d.source_path.clone(),
+                    snippet,
+                    score,
+                })
+            })
+            .collect();
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits.truncate(k);
+        hits
+    }
+}
+
+/// One-shot recall (CLI / non-cached callers): build a fresh index, refresh, search. The resident
+/// daemon instead holds a persistent `WikiIndex` (in `AppState`) so repeated `/search` skips re-reads.
 /// Missing wiki directory · read failure are graceful: empty result/skip (recall never panics).
 pub fn recall(wiki_dir: &Path, query: &str, k: usize) -> Result<Vec<WikiHit>> {
-    let terms = query_terms(query);
-    if terms.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut hits: Vec<WikiHit> = Vec::new();
-    let Ok(read_dir) = std::fs::read_dir(wiki_dir) else {
-        return Ok(Vec::new()); // wiki doesn't exist yet — normal (empty recall)
-    };
-    for entry in read_dir {
-        let path = entry.context("reading wiki dir entry")?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_owned();
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue; // skip on read failure (graceful)
-        };
-        let (title, body) = extract_title_body(&content, &stem);
-        if let Some((score, snippet)) = score_doc(&title, body, &terms) {
-            hits.push(WikiHit {
-                id: stem,
-                title,
-                source_path: path.to_string_lossy().into_owned(),
-                snippet,
-                score,
-            });
-        }
-    }
-    hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    hits.truncate(k);
-    Ok(hits)
+    let mut index = WikiIndex::default();
+    index.refresh(wiki_dir)?;
+    Ok(index.search(query, k))
 }
 
 #[cfg(test)]
@@ -177,7 +247,65 @@ mod tests {
         clippy::panic,
         clippy::float_cmp
     )]
-    use super::{count_occurrences, extract_title_body, query_terms, score_doc};
+    use super::{WikiIndex, count_occurrences, extract_title_body, query_terms, score_doc};
+
+    #[test]
+    fn wiki_index_refresh_is_incremental_and_honest() {
+        use std::time::{Duration, SystemTime};
+        let dir = tempfile::tempdir().unwrap();
+        let p = |name: &str| dir.path().join(name);
+        std::fs::write(
+            p("wiki-0001.md"),
+            "---\ntitle: docker cache\n---\nlayer caching tips",
+        )
+        .unwrap();
+        std::fs::write(
+            p("wiki-0002.md"),
+            "---\ntitle: pg pool\n---\ntoo many clients fix",
+        )
+        .unwrap();
+
+        let mut idx = WikiIndex::default();
+        idx.refresh(dir.path()).unwrap();
+        // search hits the right note by content
+        let hits = idx.search("docker layer", 5);
+        assert_eq!(hits.first().map(|h| h.id.as_str()), Some("wiki-0001"));
+        assert!(idx.search("clients", 5).iter().any(|h| h.id == "wiki-0002"));
+
+        // OUT-OF-BAND edit: rewrite 0001's body + push mtime forward → refresh must pick it up (honest, not stale).
+        let future = SystemTime::now() + Duration::from_secs(5);
+        std::fs::write(
+            p("wiki-0001.md"),
+            "---\ntitle: docker cache\n---\nkubernetes oomkilled memory",
+        )
+        .unwrap();
+        filetime_set(&p("wiki-0001.md"), future);
+        idx.refresh(dir.path()).unwrap();
+        assert!(
+            idx.search("kubernetes oomkilled", 5)
+                .iter()
+                .any(|h| h.id == "wiki-0001")
+        );
+        assert!(
+            idx.search("layer caching", 5).is_empty(),
+            "stale body must be gone"
+        );
+
+        // VANISHED file drops out of the index.
+        std::fs::remove_file(p("wiki-0002.md")).unwrap();
+        idx.refresh(dir.path()).unwrap();
+        assert!(
+            idx.search("clients", 5).is_empty(),
+            "removed note must not be recalled"
+        );
+    }
+
+    // Set mtime without an extra dep: write via std then bump using a second write is unreliable, so
+    // we just touch through OpenOptions + set_modified (stable since 1.75).
+    fn filetime_set(path: &std::path::Path, t: std::time::SystemTime) {
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(t).unwrap();
+    }
 
     #[test]
     fn query_terms_splits_and_filters() {
