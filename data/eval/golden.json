@@ -44,6 +44,22 @@
     {
       "query": "consumer group keeps reassigning partitions and handling the same events twice",
       "expect": ["eval-kafka-rebalance"]
+    },
+    {
+      "query": "a pattern match pins the cpu and hangs on certain crafted strings",
+      "expect": ["eval-redos"]
+    },
+    {
+      "query": "two simultaneous saves overwrite each other and a change silently disappears",
+      "expect": ["eval-lost-update"]
+    },
+    {
+      "query": "after failover the app keeps connecting to the dead host address",
+      "expect": ["eval-dns-ttl"]
+    },
+    {
+      "query": "when a popular cached entry expires every request recomputes against the db at once",
+      "expect": ["eval-cache-stampede"]
     }
   ]
 }
