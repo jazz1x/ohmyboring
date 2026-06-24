@@ -99,7 +99,7 @@ pub async fn answer(
     // "What's the DB?" → the claim 'ohmyboring database is pgvector' beats old chunk noise.
     let q_emb = llm.embed(question).await?;
     let mut claim_ctx = String::new();
-    for (s, p, v) in store.current_claims(&q_emb, 5).await? {
+    for (s, p, v) in store.current_claims(&q_emb, 5, exclude_origins).await? {
         // Claim values are note-derived (possibly attacker-influenced) — defang before interpolation.
         let _ = writeln!(
             claim_ctx,

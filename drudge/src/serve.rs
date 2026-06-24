@@ -864,7 +864,7 @@ async fn mcp_claims(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, S
         .await
         .map_err(|e| (-32603_i32, format!("embed: {e:#}")))?;
     let claims = store
-        .current_claims(&q_emb, max_results)
+        .current_claims(&q_emb, max_results, &[])
         .await
         .map_err(|e| (-32603_i32, format!("claims: {e:#}")))?;
     let arr: Vec<Value> = claims

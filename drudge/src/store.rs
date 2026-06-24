@@ -583,16 +583,24 @@ impl Store {
         &self,
         query_emb: &[f32],
         k: i64,
+        exclude_origins: &[String],
     ) -> Result<Vec<(String, String, String)>> {
         let vec = Vector::from(query_emb.to_vec());
+        // Honor the SAME origin boundary the recall path applies (retrieve::merge_hits filters by
+        // exclude_origins). Claims carry no origin column, but their parent document does — JOIN and
+        // filter on it so an injected/cross-origin claim cannot bypass an exclusion that the recalled
+        // chunks in the same answer respect (Layer 1: one answer, one consistent origin boundary).
+        // `origin = ANY('{}')` is false, so an empty exclusion passes every claim (no behavior change).
         let rows = self
             .db
             .query(
-                "SELECT subject, predicate, value FROM claim
-                 WHERE superseded_at IS NULL AND embedding IS NOT NULL
-                 ORDER BY embedding <=> $1
+                "SELECT c.subject, c.predicate, c.value FROM claim c
+                 JOIN document d ON d.source_path = c.source_path
+                 WHERE c.superseded_at IS NULL AND c.embedding IS NOT NULL
+                   AND NOT (d.origin = ANY($3))
+                 ORDER BY c.embedding <=> $1
                  LIMIT $2;",
-                &[&vec, &k],
+                &[&vec, &k, &exclude_origins],
             )
             .await
             .context("current claims")?;
