@@ -34,6 +34,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
   (prerequisites, full Kimi Code content, naming-layer table).
 
 ### Added
+- **Golden eval set expanded** — `data/eval/golden.json` grows from 6 → 11 query→fixture pairs with
+  5 new fixtures (Rust mutex-across-await, CORS preflight, ORM N+1, Go goroutine leak, Kafka rebalance)
+  across distinct domains; recorded bge-m3 vectors regenerated. Recall@3 stays 1.00 against the larger
+  distractor pool. Broadens the recall gate's coverage.
 - **eval gate in CI** — recall@k regression on `data/eval/golden.json` now runs on every PR. CI has
   no GPU, so `data/eval/stub_embedder.py` replays real bge-m3 vectors recorded into
   `recorded_embeddings.json` (CI recall == real recall). Previously `make eval`-only.
