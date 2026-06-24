@@ -84,3 +84,44 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: build drudge image
         run: make build
+
+  # Behavioral RAG gate — recall@k regression on the golden set (data/eval/golden.json).
+  # Embeddings are replayed OFFLINE from recorded real bge-m3 vectors (data/eval/stub_embedder.py),
+  # so no GPU/model pull is needed and CI recall == real recall. The stack runs in vector mode via
+  # docker compose; the stub serves on the runner host, reached from the container at
+  # host.docker.internal (the engine's configured base_url). This is the eval-gate.sh path that was
+  # previously manual-only (`make eval`).
+  eval-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: start offline stub embedder (recorded bge-m3 replay)
+        run: |
+          python3 data/eval/stub_embedder.py &
+          for _ in $(seq 1 20); do curl -sf http://localhost:11434/v1/models >/dev/null && break; sleep 0.5; done
+          curl -sf http://localhost:11434/v1/models
+      - name: prepare config + mounts
+        run: |
+          # boring.example.json already points llm.base_url at host.docker.internal:11434/v1 (the stub),
+          # embed_dim=1024 matches the recording. provider/bootstrap are host-side only (unused here).
+          cp boring.example.json boring.json
+          mkdir -p vault/raw vault/wiki "$HOME/.claude/projects"
+      - name: start stack (vector mode)
+        env:
+          DRUDGE_VECTOR: "on"
+        run: |
+          # Run the container as the runner user so it can write the bind-mounted vault (Linux EACCES guard).
+          export DRUDGE_UID="$(id -u)" DRUDGE_GID="$(id -g)"
+          docker compose --profile vector up -d --build boring-drudge postgres
+          for _ in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:7700/health >/dev/null 2>&1 && break; sleep 3; done
+          curl -sf -m3 http://127.0.0.1:7700/health
+      - name: behavioral gate (eval-gate.sh)
+        env:
+          DRUDGE_URL: http://127.0.0.1:7700
+        run: ./scripts/eval-gate.sh
+      - name: engine logs on failure
+        if: failure()
+        run: docker compose --profile vector logs boring-drudge postgres

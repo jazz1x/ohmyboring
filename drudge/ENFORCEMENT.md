@@ -27,7 +27,7 @@
 | borrow-first / `&str`·`&[T]` · clone restraint | clippy `ptr_arg` in part + **review** | partly mechanical |
 | pedantic idioms (semicolon · needless, etc.) | **clippy pedantic (deny)** | nursery excluded (time bomb) |
 | formatting | **`cargo fmt --check`** (pre-commit) | — |
-| behavioral non-regression (recall/answer quality) | **eval-gate.sh** (`data/eval/run_eval.py`) — requires a live stack (`make up`) | Recall@3 target = 1.00 on `data/eval/golden.json` |
+| behavioral non-regression (recall/answer quality) | **eval-gate.sh** (`data/eval/run_eval.py`) — **CI-enforced** (`eval-gate` job, offline recorded-embedding replay) + local `make eval` on a live stack | Recall@3 target = 1.00 on `data/eval/golden.json` |
 | `--no-verify` bypass | **forbidden (policy)** | on failure, fix the root cause |
 
 **Honest disclosure**: §0 (official) + §B's no-panic + formatting + behavioral regression are blocked by the *machine*. **The design-level §A·§B·§C (ADT · error-ADT · PDV · DIP · restraint · ROP) are blocked by review** — that the machine can't catch them is not a defect but *design*. The three when-stuck questions (Layer 1 > Layer 2 > Layer 3) are the review checklist.
@@ -36,4 +36,4 @@
 
 ## Gates
 - **pre-commit** = `scripts/guard.sh` (stack-free): `cargo fmt --check` → `cargo clippy --all-targets -D warnings` → `cargo test`. Install: `git config core.hooksPath .githooks`.
-- **pre-deploy** = `scripts/eval-gate.sh` (needs the stack): confirm drudge is up → `run_eval --check` floor. *The eval harness (`data/eval/run_eval.py`) is not committed yet, so the gate currently skips with a notice rather than enforcing the floor.* On failure (once present), non-zero → deploy halted.
+- **pre-deploy / CI** = `scripts/eval-gate.sh`: confirm drudge is up → copy `data/eval/fixtures/` into the vault → `/sync` → `run_eval.py` recall floor. The harness is committed (`data/eval/run_eval.py` + `golden.json` + 7 fixtures). CI runs it without a GPU via `data/eval/stub_embedder.py` (replays real bge-m3 vectors recorded by `record_embeddings.py` into `recorded_embeddings.json`) — so CI recall == real recall. Recall@3 < 1.00 → non-zero → merge/deploy halted. Locally, `make eval` runs the same gate against a live LLM.
