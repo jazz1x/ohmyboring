@@ -15,16 +15,61 @@
       "default": "auto",
       "description": "Output language for distilled notes (ko/en/auto)."
     },
+    "llm": {
+      "type": "object",
+      "description": "LLM connection + bootstrap policy (v2). The engine is OpenAI-compatible and backend-agnostic; `provider` steers only the host-side bootstrap (model pull / daemon ensure / health probe). Runtime env (OMB_LLM_*; DRUDGE_LLM_* deprecated alias) still overrides.",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["ollama", "lmstudio", "openai-compatible"],
+          "default": "ollama",
+          "description": "ollama = ensure serve + pull models. lmstudio = OpenAI /v1, models loaded via its UI/`lms` (no pull). openai-compatible = vLLM/llama.cpp/remote OpenAI (no pull)."
+        },
+        "base_url": {
+          "type": "string",
+          "default": "http://host.docker.internal:11434/v1",
+          "description": "OpenAI-compatible base URL. LM Studio is usually http://localhost:1234/v1."
+        },
+        "model": {
+          "type": "string",
+          "default": "gemma4:12b",
+          "description": "Chat/synthesis model — used only by the ask/brief generation path."
+        },
+        "embed_model": {
+          "type": "string",
+          "default": "bge-m3",
+          "description": "Embedding model — the only model drudge itself calls (kernel A). Authoritative when set."
+        },
+        "embed_dim": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1024,
+          "description": "Embedding dimension. MUST match embed_model's output (bge-m3=1024, nomic-embed-text=768, OpenAI 3-small=1536). Changing it needs `make reset` (vectors are reshaped)."
+        },
+        "api_key_env": {
+          "type": "string",
+          "default": "OMB_LLM_API_KEY",
+          "description": "Name of the env var holding the API key (providers that need auth). The key itself never lives in boring.json."
+        },
+        "bootstrap": {
+          "type": "string",
+          "enum": ["auto", "manual"],
+          "default": "auto",
+          "description": "auto = bootstrap may start a daemon / pull models. manual = health-check only, never serve/pull (user owns the server, e.g. LM Studio)."
+        }
+      },
+      "additionalProperties": false
+    },
     "embed_model": {
       "type": "string",
       "default": "bge-m3",
-      "description": "Embedding model — the only model drudge itself calls. Served via DRUDGE_LLM_BASE_URL (env)."
+      "description": "DEPRECATED (v1) — use llm.embed_model. Still honored as a fallback when llm.embed_model is unset."
     },
     "embed_dim": {
       "type": "integer",
       "minimum": 1,
       "default": 1024,
-      "description": "Embedding dimension. MUST match embed_model's output. Changing it needs `make reset` (vectors are reshaped)."
+      "description": "DEPRECATED (v1) — use llm.embed_dim. Still honored as a fallback when llm.embed_dim is unset."
     },
     "allow_company_origin": {
       "type": "boolean",

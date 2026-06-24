@@ -106,8 +106,17 @@ flowchart LR
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/jazz1x/ohmyboring/main/boring.schema.json",
-  "schema_version": 1,
+  "schema_version": 2,
   "note_lang": "auto",
+  "llm": {
+    "provider": "ollama",
+    "base_url": "http://host.docker.internal:11434/v1",
+    "model": "gemma4:12b",
+    "embed_model": "bge-m3",
+    "embed_dim": 1024,
+    "api_key_env": "OMB_LLM_API_KEY",
+    "bootstrap": "auto"
+  },
   "repos": [
     {"match": "your-company", "origin": "company", "name": "your-company"},
     {"match": "~/code", "origin": "personal", "name": "mine"}
@@ -121,19 +130,25 @@ flowchart LR
 | Key | 用途 |
 |---|---|
 | `note_lang` | `auto` · `ko` · `en` |
+| `llm.provider` | `ollama`（モデル pull）· `lmstudio`（アプリでロード、pull なし）· `openai-compatible`（vLLM / llama.cpp / リモート） |
+| `llm.base_url` / `llm.model` | OpenAI-compatible `/v1` エンドポイント + 合成モデル |
+| `llm.embed_model` / `llm.embed_dim` | 埋め込みモデル + そのベクトル次元（カーネル唯一のモデル） |
+| `llm.bootstrap` | `auto` = ブートストラップが起動/pull 可能 · `manual` = ヘルスチェックのみ（サーバーはユーザー所有） |
 | `repos[]` | パス/remote ルール → `origin=personal/company/mirror/community` |
 | `agents[]` | vector mode の ingest source |
 
-シークレット/ランタイムスイッチは **`.env`**：
+**LLM バックエンドの切り替え**は config ブロック 1 つで完結します。LM Studio: `"provider": "lmstudio"`、`"base_url": "http://host.docker.internal:1234/v1"`、`"bootstrap": "manual"` とし、LM Studio アプリでモデルをロードしてから `make up`。`make up` は `scripts/llm-providers/<provider>.sh` にディスパッチして適切なブートストラップ（Ollama pull か LM Studio ヘルスチェック）を行います。
+
+`.env` はシークレット + ランタイムオーバーライド専用になりました：
 
 | Variable | 用途 |
 |---|---|
 | `DRUDGE_VECTOR` | `on` で pgvector 有効化（オプション） |
-| `DRUDGE_LLM_BASE_URL` | OpenAI-compatible endpoint、Docker のデフォルト `http://host.docker.internal:11434/v1`・Native モードは `http://localhost:11434/v1` |
-| `DRUDGE_LLM_MODEL` / `DRUDGE_EMBED_MODEL` | デフォルト `gemma4:12b` / `bge-m3` |
+| `OMB_LLM_BASE_URL` / `OMB_LLM_MODEL` | `llm.base_url` / `llm.model` のランタイムオーバーライド（オプション、`DRUDGE_LLM_*` = 非推奨エイリアス）。`drudge` バイナリをホストで直接実行する場合は `OMB_LLM_BASE_URL=http://localhost:11434/v1` を設定 |
+| `OMB_LLM_API_KEY` | `llm.api_key_env` がここを指す場合の API キー（認証 provider） |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプション Slack assistant |
 
-> **埋め込みモデルを変えるとベクトルの次元が変わります。** 合成モデル（`DRUDGE_LLM_MODEL`）は自由に差し替えられますが、`DRUDGE_EMBED_MODEL` を変えるとサイズの異なるベクトルが出力されるため、`boring.json` の `embed_dim` を一致させ、**かつ** `make reset` を実行する必要があります — そうしないと旧形状のベクトルへの upsert が失敗します。よくある次元: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768。
+> **埋め込みモデルを変えるとベクトルの次元が変わります。** 合成モデル（`llm.model`）は自由に差し替えられますが、`llm.embed_model` を変えるとサイズの異なるベクトルが出力されるため、`llm.embed_dim` を一致させ、**かつ** `make reset` を実行する必要があります — そうしないと旧形状のベクトルへの upsert が失敗します。よくある次元: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768。
 
 ---
 

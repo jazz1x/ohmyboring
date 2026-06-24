@@ -1,9 +1,16 @@
 {
   "$schema": "https://raw.githubusercontent.com/jazz1x/ohmyboring/main/boring.schema.json",
-  "schema_version": 1,
+  "schema_version": 2,
   "note_lang": "auto",
-  "embed_model": "bge-m3",
-  "embed_dim": 1024,
+  "llm": {
+    "provider": "ollama",
+    "base_url": "http://host.docker.internal:11434/v1",
+    "model": "gemma4:12b",
+    "embed_model": "bge-m3",
+    "embed_dim": 1024,
+    "api_key_env": "OMB_LLM_API_KEY",
+    "bootstrap": "auto"
+  },
   "repos": [
     {"match": "your-company", "origin": "company", "name": "work"},
     {"match": "your-name/code", "origin": "personal", "name": "personal"}

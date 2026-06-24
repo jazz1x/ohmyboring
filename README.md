@@ -106,8 +106,17 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/jazz1x/ohmyboring/main/boring.schema.json",
-  "schema_version": 1,
+  "schema_version": 2,
   "note_lang": "auto",
+  "llm": {
+    "provider": "ollama",
+    "base_url": "http://host.docker.internal:11434/v1",
+    "model": "gemma4:12b",
+    "embed_model": "bge-m3",
+    "embed_dim": 1024,
+    "api_key_env": "OMB_LLM_API_KEY",
+    "bootstrap": "auto"
+  },
   "repos": [
     {"match": "your-company", "origin": "company", "name": "your-company"},
     {"match": "~/code", "origin": "personal", "name": "mine"}
@@ -121,19 +130,25 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 | Key | Purpose |
 |---|---|
 | `note_lang` | `auto` · `ko` · `en` |
+| `llm.provider` | `ollama` (pulls models) · `lmstudio` (load in-app, no pull) · `openai-compatible` (vLLM / llama.cpp / remote) |
+| `llm.base_url` / `llm.model` | OpenAI-compatible `/v1` endpoint + synthesis model |
+| `llm.embed_model` / `llm.embed_dim` | embedding model + its vector dimension (kernel's only model) |
+| `llm.bootstrap` | `auto` = bootstrap may start/pull · `manual` = health-check only (you own the server) |
 | `repos[]` | path/remote rules → `origin=personal/company/mirror/community` |
 | `agents[]` | ingest sources for vector mode |
 
-Secrets and runtime switches live in **`.env`**:
+**Switching LLM backend** is one config block. LM Studio: set `"provider": "lmstudio"`, `"base_url": "http://host.docker.internal:1234/v1"`, `"bootstrap": "manual"`, load your models in the LM Studio app, then `make up`. `make up` dispatches to `scripts/llm-providers/<provider>.sh` for the right bootstrap (Ollama pull vs LM Studio health-check).
+
+`.env` is now only secrets + runtime overrides:
 
 | Variable | Purpose |
 |---|---|
 | `DRUDGE_VECTOR` | `on` enables pgvector (optional) |
-| `DRUDGE_LLM_BASE_URL` | OpenAI-compatible endpoint. Docker default `http://host.docker.internal:11434/v1`; use `http://localhost:11434/v1` for Native mode |
-| `DRUDGE_LLM_MODEL` / `DRUDGE_EMBED_MODEL` | default `gemma4:12b` / `bge-m3` |
+| `OMB_LLM_BASE_URL` / `OMB_LLM_MODEL` | optional runtime override of `llm.base_url` / `llm.model` (`DRUDGE_LLM_*` = deprecated alias). Running the `drudge` binary directly on the host? Set `OMB_LLM_BASE_URL=http://localhost:11434/v1` |
+| `OMB_LLM_API_KEY` | API key when `llm.api_key_env` points here (auth providers) |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant |
 
-> **Swapping the embedding model changes the vector dimension.** The synthesis model (`DRUDGE_LLM_MODEL`) is free to swap, but a new `DRUDGE_EMBED_MODEL` emits vectors of a different size, so you must update `embed_dim` in `boring.json` to match **and** run `make reset` — otherwise upserts fail against the old-shaped vectors. Common dims: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
+> **Swapping the embedding model changes the vector dimension.** The synthesis model (`llm.model`) is free to swap, but a new `llm.embed_model` emits vectors of a different size, so you must update `llm.embed_dim` to match **and** run `make reset` — otherwise upserts fail against the old-shaped vectors. Common dims: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
 
 ---
 
@@ -271,7 +286,7 @@ It is configured per the hermes-agent project's **own docs** (out of scope here)
 | Second `make up` / re-clone fails | Run `make down` first — the containers use fixed names and bind `127.0.0.1:7700` / `:5432`, so a second stack collides with the running one |
 | Agent not starting | `OMB_CORE_ONLY=1 make up` runs core-only; hermes image must be built separately |
 | Linux: container can't reach host Ollama | On Linux, Ollama binds `127.0.0.1` by default, so the container hits a closed port even though `host.docker.internal` resolves. Bind Ollama to all interfaces (`OLLAMA_HOST=0.0.0.0:11434`, then restart it) and/or allow the docker bridge in the host firewall |
-| `embedding dim mismatch` errors | Your `DRUDGE_EMBED_MODEL` output size ≠ `embed_dim` in `boring.json`. Update `embed_dim` to match the new model and run `make reset` |
+| `embedding dim mismatch` errors | Your `llm.embed_model` output size ≠ `llm.embed_dim` in `boring.json`. Update `embed_dim` to match the new model and run `make reset` |
 | Healthy? / did the last distill land? | `make doctor` — quick health + last-ingest check |
 
 ---
