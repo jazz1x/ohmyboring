@@ -185,9 +185,10 @@ struct SyncResp {
     graph_concepts: usize,
     graph_claims: usize,
     graph_edges: usize,
-    /// Total corpus size after sync (independent of whether this run produced deltas).
-    total_chunks: usize,
-    total_edges: usize,
+    /// Total corpus size after sync (independent of whether this run produced deltas). `null` when the
+    /// post-sync audit was unavailable — reported honestly as "not measured", never fabricated as 0.
+    total_chunks: Option<usize>,
+    total_edges: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -933,6 +934,10 @@ async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     let source_path = path.to_string_lossy().into_owned();
     std::fs::remove_file(&path).map_err(|e| (-32603_i32, format!("delete note: {e}")))?;
 
+    // The note IS deleted once we reach here; the relates_to projection is an auxiliary refresh.
+    // If it fails we surface partial-success in the reply (not a silent swallow) — the next sync
+    // recomputes relations, so it's degraded-but-not-lost, ROP-honest about which part deferred.
+    let mut partial = "";
     if let Some(store) = s.store.as_ref() {
         // Serialize against sync: project_links rewrites wiki relates_to in place, and a concurrent
         // sync does the same — without the lock the two interleave into torn/partial wiki writes.
@@ -943,10 +948,11 @@ async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             .map_err(|e| (-32603_i32, format!("delete from vector store: {e:#}")))?;
         if let Err(e) = vault::project_links(store, vault_root, 6).await {
             eprintln!("[forget] project_links warning (ignored): {e:#}");
+            partial = " (partial: relates_to projection deferred — refreshes on next sync)";
         }
     }
 
-    Ok(format!("forgot → {source_path}"))
+    Ok(format!("forgot → {source_path}{partial}"))
 }
 
 /// `remember` — the kernel ingest entry. The agent hands a COMPLETE curated note; drudge deterministically
@@ -986,11 +992,17 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
     ingest::ingest_file(store, &s.llm, &s.cfg, &front.source_path, &mut stats)
         .await
         .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
-    if let Err(e) = vault::project_links(store, vault_root, 6).await {
-        eprintln!("[remember] project_links warning (ignored): {e:#}");
-    }
+    // The note is written + ingested + recallable by now; relates_to projection is the auxiliary
+    // refresh. On failure report partial-success (next sync recomputes) rather than implying it ran.
+    let relates = match vault::project_links(store, vault_root, 6).await {
+        Ok(_) => "",
+        Err(e) => {
+            eprintln!("[remember] project_links warning (ignored): {e:#}");
+            " · relates_to deferred to next sync"
+        }
+    };
     Ok(format!(
-        "remembered → wiki/{wiki_id}.md · chunks {} · graph(tools {} concepts {} claims {}) — recallable now",
+        "remembered → wiki/{wiki_id}.md · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
         stats.chunks, stats.tools, stats.concepts, stats.claims
     ))
 }
@@ -1175,8 +1187,16 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
     let o = do_sync(s.store.as_deref(), &s.llm, (*s.vault_dir).as_ref(), &s.cfg)
         .await
         .map_err(|e| (-32603_i32, format!("sync: {e:#}")))?;
+    // Corpus totals are `None` when the post-sync audit was unavailable — render "unavailable",
+    // never a fabricated 0 (the delta fields above still report what this run actually did).
+    let total_chunks = o
+        .total_chunks
+        .map_or_else(|| "unavailable".to_owned(), |n| n.to_string());
+    let total_edges = o
+        .total_edges
+        .map_or_else(|| "unavailable".to_owned(), |n| n.to_string());
     Ok(format!(
-        "sync complete — ingest(new {} updated {} deleted {} chunks {}) · graph(tools {} concepts {} claims {} edges {}) · total(chunks {} edges {})",
+        "sync complete — ingest(new {} updated {} deleted {} chunks {}) · graph(tools {} concepts {} claims {} edges {}) · total(chunks {total_chunks} edges {total_edges})",
         o.ingest.new,
         o.ingest.updated,
         o.ingest.deleted,
@@ -1185,8 +1205,6 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
         o.ingest.concepts,
         o.ingest.claims,
         o.ingest.edges,
-        o.total_chunks,
-        o.total_edges,
     ))
 }
 
@@ -1226,8 +1244,10 @@ async fn handle_compact(State(s): State<AppState>) -> Result<Json<CompactResp>, 
 
 struct SyncOutcome {
     ingest: ingest::Stats,
-    total_chunks: usize,
-    total_edges: usize,
+    /// Full-corpus totals from the post-sync audit. `None` when audit::stats was unavailable (we do
+    /// not synthesize a zero-filled AuditStats — that would report "0 files / clean" as if measured).
+    total_chunks: Option<usize>,
+    total_edges: Option<usize>,
 }
 
 /// Deterministic re-ingest: walk notes → embed → pgvector upsert → graph (from frontmatter) → GC →
@@ -1240,10 +1260,12 @@ async fn do_sync(
     cfg: &config::BoringConfig,
 ) -> Result<SyncOutcome> {
     let Some(store) = store else {
+        // vector off → no pgvector store exists, so the totals are a true, measured 0 (not an
+        // error fallback): there are no chunks/edges because the backend is intentionally absent.
         return Ok(SyncOutcome {
             ingest: ingest::Stats::default(),
-            total_chunks: 0,
-            total_edges: 0,
+            total_chunks: Some(0),
+            total_edges: Some(0),
         });
     };
     // Kernel A corpus = the vault's wiki dir (where remember writes). No vault → nothing to re-ingest
@@ -1265,72 +1287,59 @@ async fn do_sync(
             Err(e) => eprintln!("[scheduler] project_links warning (ignored): {e:#}"),
         }
     }
-    let audit = audit::stats(store, cfg.allow_company_origin)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("[sync] audit::stats failed: {e:#}; falling back to ingest delta");
-            audit::AuditStats {
-                total_chunks: ingest.chunks,
-                total_files: 0,
-                by_origin: Vec::new(),
-                by_kind: Vec::new(),
-                by_project: Vec::new(),
-                company_contamination: 0,
-                company_allowed: cfg.allow_company_origin,
-                missing_origin: 0,
-                missing_project: 0,
-                clean: true,
-                graph_documents: 0,
-                graph_chunks: 0,
-                graph_projects: 0,
-                graph_topics: 0,
-                graph_edges: ingest.edges,
-                semantic_tools: 0,
-                semantic_concepts: 0,
-                semantic_uses: 0,
-                semantic_about: 0,
-            }
-        });
-
-    // Periodic hygiene sweep (report-only): every sync, surface corpus rot in the logs so it is
-    // visible without a manual `make steward`. Detection only — never mutates the vault. Covers the
-    // cheap meta-level checks drudge already has; the deep checks (placeholder tags, project
-    // variants/typos) stay in `scripts/data-steward.py`, which this line points operators to.
-    let generic_projects: usize = audit
-        .by_project
-        .iter()
-        .filter(|(p, _)| matches!(p.as_str(), "Development" | "wiki" | ""))
-        .map(|(_, n)| n)
-        .sum();
-    if audit.clean && generic_projects == 0 {
-        eprintln!(
-            "[hygiene] ✅ clean — {} notes, origin/project complete{}",
-            audit.total_files,
-            if audit.company_allowed && audit.company_contamination > 0 {
-                format!(" ({} company-origin, allowed)", audit.company_contamination)
+    // Post-sync corpus audit + report-only hygiene sweep (every sync surfaces corpus rot in the logs
+    // without a manual `make steward`; detection only, never mutates the vault). If audit::stats
+    // fails we do NOT fabricate a zero-filled AuditStats — reporting "0 files / clean" as a measured
+    // fact would be a lie (Layer 1). Instead we report the corpus totals as unavailable (None) and
+    // log the failure with the real this-sync delta for context. Deep checks (placeholder tags,
+    // project variants/typos) stay in `scripts/data-steward.py`, which the verdict points operators to.
+    let (total_chunks, total_edges) = match audit::stats(store, cfg.allow_company_origin).await {
+        Ok(audit) => {
+            let generic_projects: usize = audit
+                .by_project
+                .iter()
+                .filter(|(p, _)| matches!(p.as_str(), "Development" | "wiki" | ""))
+                .map(|(_, n)| n)
+                .sum();
+            if audit.clean && generic_projects == 0 {
+                eprintln!(
+                    "[hygiene] ✅ clean — {} notes, origin/project complete{}",
+                    audit.total_files,
+                    if audit.company_allowed && audit.company_contamination > 0 {
+                        format!(" ({} company-origin, allowed)", audit.company_contamination)
+                    } else {
+                        String::new()
+                    }
+                );
             } else {
-                String::new()
+                eprintln!(
+                    "[hygiene] ⚠️ needs review — missing_origin {} · missing_project {} · generic_project {} · company {}{} — run `make steward` to inspect",
+                    audit.missing_origin,
+                    audit.missing_project,
+                    generic_projects,
+                    audit.company_contamination,
+                    if audit.company_allowed {
+                        " (allowed)"
+                    } else {
+                        ""
+                    }
+                );
             }
-        );
-    } else {
-        eprintln!(
-            "[hygiene] ⚠️ needs review — missing_origin {} · missing_project {} · generic_project {} · company {}{} — run `make steward` to inspect",
-            audit.missing_origin,
-            audit.missing_project,
-            generic_projects,
-            audit.company_contamination,
-            if audit.company_allowed {
-                " (allowed)"
-            } else {
-                ""
-            }
-        );
-    }
+            (Some(audit.total_chunks), Some(audit.graph_edges))
+        }
+        Err(e) => {
+            eprintln!(
+                "[hygiene] unavailable — audit::stats failed: {e:#}; this sync added +{} chunks / +{} edges (corpus totals not measured)",
+                ingest.chunks, ingest.edges
+            );
+            (None, None)
+        }
+    };
 
     Ok(SyncOutcome {
         ingest,
-        total_chunks: audit.total_chunks,
-        total_edges: audit.graph_edges,
+        total_chunks,
+        total_edges,
     })
 }
 
