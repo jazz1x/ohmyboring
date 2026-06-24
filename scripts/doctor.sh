@@ -1,6 +1,6 @@
 #!/bin/sh
 # Diagnose the self-augmentation write-door. The distill SessionEnd hook runs async
-# and logs failures to stderr, but a down stack or bad DRUDGE_URL can still drop sessions.
+# and logs failures to stderr, but a down stack or bad BORING_URL can still drop sessions.
 # This surfaces that signal: a clear OK/✗ per dependency plus proof the write-door is
 # actually firing (newest distilled note + newest SessionEnd hook marker).
 #   make doctor   or   ./scripts/doctor.sh
@@ -11,11 +11,11 @@
 # failure. POSIX sh (dash) has no pipefail → every check reports its own result explicitly.
 set -u
 
-# Defaults mirror the hook (distill-session.py): DRUDGE_URL + BORING_HOME + the marker dir,
+# Defaults mirror the hook (distill-session.py): BORING_URL + BORING_HOME + the marker dir,
 # so the diagnostic inspects exactly what the hook writes to.
-DRUDGE_URL="${BORING_URL:-${DRUDGE_URL:-http://127.0.0.1:7700}}"
+BORING_URL="${BORING_URL:-http://127.0.0.1:7700}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-BORING_HOME="${BORING_HOME:-${OMB_HOME:-$HOME/oh-my-boring}}"  # OMB_HOME = deprecated alias
+BORING_HOME="${BORING_HOME:-$HOME/oh-my-boring}"
 MARK_DIR="${HOME}/.cache/boring-distill"
 
 # host.docker.internal resolves only inside containers; from the host it must be localhost,
@@ -65,20 +65,20 @@ else
 fi
 
 # (a2) engine /health — the deterministic write gate the hook POSTs `remember` to.
-if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$DRUDGE_URL/health" 2>/dev/null)" = "200" ]; then
-    ok "engine /health 200 ($DRUDGE_URL) — write door reachable"
+if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$BORING_URL/health" 2>/dev/null)" = "200" ]; then
+    ok "engine /health 200 ($BORING_URL) — write door reachable"
 else
-    bad "engine /health unreachable ($DRUDGE_URL) — distilled sessions are being DROPPED"
+    bad "engine /health unreachable ($BORING_URL) — distilled sessions are being DROPPED"
     drudge_down=1
 fi
 
 # (b) LLM endpoint — the model that generates the curated note before remember is called.
 # Provider-aware (boring.json `llm` block): Ollama exposes /api/tags, OpenAI-compatible servers
-# (LM Studio, vLLM, remote OpenAI) expose /v1/models. Env overrides boring.json (BORING_ then DRUDGE_).
+# (LM Studio, vLLM, remote OpenAI) expose /v1/models. Env overrides boring.json (BORING_LLM_BASE_URL).
 BORING="${BORING_CONFIG:-$BORING_HOME/boring.json}"
 PROVIDER=$(jq -r '.llm.provider // "ollama"' "$BORING" 2>/dev/null || echo ollama)
 LLM_BASE=$(jq -r '.llm.base_url // "http://host.docker.internal:11434/v1"' "$BORING" 2>/dev/null || echo "http://host.docker.internal:11434/v1")
-LLM_BASE="${BORING_LLM_BASE_URL:-${DRUDGE_LLM_BASE_URL:-$LLM_BASE}}"
+LLM_BASE="${BORING_LLM_BASE_URL:-$LLM_BASE}"
 LLM_BASE=$(printf '%s' "$LLM_BASE" | sed 's#host\.docker\.internal#localhost#')
 if [ "$PROVIDER" = ollama ]; then
     NATIVE="${LLM_BASE%/v1}"; NATIVE="${NATIVE%/}"

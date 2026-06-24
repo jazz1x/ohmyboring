@@ -28,8 +28,8 @@ import omb_env  # noqa: E402
 
 # BORING_HOME: repo clone location (default ~/oh-my-boring).
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
-DRUDGE_URL = omb_env.drudge_url()  # BORING_URL canonical, DRUDGE_URL deprecated alias
-# LLM connection resolves through omb_env (SSOT): env override (BORING_/DRUDGE_ alias) → boring.json
+BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias
+# LLM connection resolves through omb_env (SSOT): env override (BORING_LLM_*) → boring.json
 # llm block → default, with host.docker.internal → localhost rewrite on the host.
 LLM_BASE_URL = omb_env.llm_base_url()
 LLM_MODEL = omb_env.llm_model()
@@ -293,7 +293,7 @@ def _call_remember(title, body, origin, repo, tags, tools, concepts, claims, ses
         }
     ).encode("utf-8")
     req = urllib.request.Request(
-        f"{DRUDGE_URL.rstrip('/')}/mcp",
+        f"{BORING_URL.rstrip('/')}/mcp",
         data=payload,
         headers={"content-type": "application/json"},
         method="POST",

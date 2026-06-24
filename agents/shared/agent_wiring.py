@@ -17,7 +17,7 @@ sys.path.insert(
 )
 import boring_config
 
-BORING_HOME = (os.environ.get("BORING_HOME") or os.environ.get("OMB_HOME")) or os.path.expanduser("~/oh-my-boring")
+BORING_HOME = os.environ.get("BORING_HOME") or os.path.expanduser("~/oh-my-boring")
 
 # Agent-specific configuration targets.
 AGENTS = {

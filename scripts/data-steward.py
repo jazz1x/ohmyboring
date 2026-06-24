@@ -40,9 +40,8 @@ SEED_NOTE = "wiki-0000.md"
 def _wiki_dir(args) -> Path:
     vault = (
         args.vault
-        or os.environ.get("BORING_VAULT_DIR")  # canonical; DRUDGE_VAULT_DIR = deprecated alias
-        or os.environ.get("DRUDGE_VAULT_DIR")
-        or os.path.join((os.environ.get("BORING_HOME") or os.environ.get("OMB_HOME")) or os.path.expanduser("~/oh-my-boring"), "vault")
+        or os.environ.get("BORING_VAULT_DIR")
+        or os.path.join(os.environ.get("BORING_HOME") or os.path.expanduser("~/oh-my-boring"), "vault")
     )
     return Path(vault).expanduser() / "wiki"
 

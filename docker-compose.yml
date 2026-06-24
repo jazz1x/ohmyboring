@@ -1,6 +1,6 @@
 # ohmyboring — live stack (local Docker). host Ollama + ohmyboring engine + hermes-agent (+ Postgres via --profile vector).
 #   make up              # wiki-first: ohmyboring engine + hermes-agent
-#   DRUDGE_VECTOR=on …   # also brings up Postgres (pgvector) via --profile vector
+#   BORING_VECTOR=on …   # also brings up Postgres (pgvector) via --profile vector
 #   Slack, autonomy, and recall are driven by hermes-agent (Nous Hermes Agent). Models run on host Ollama (gemma4).
 # Compose project name = the working/install dir (oh-my-boring), NOT the ohmyboring brand.
 # Renaming this orphans an already-running stack: container_name is the fixed boring-*, so a
@@ -40,30 +40,24 @@ services:
     restart: unless-stopped
     # Run with an explicit uid:gid so native-Linux bind mounts (host-owned vault) aren't EACCES.
     # Default 10001 = the Dockerfile's drudge uid → macOS (Docker Desktop uid-remaps) is unaffected.
-    # Native Linux: set DRUDGE_UID/DRUDGE_GID in .env to your host user (id -u / id -g).
-    user: "${DRUDGE_UID:-10001}:${DRUDGE_GID:-10001}"
+    # Native Linux: set BORING_UID/BORING_GID in .env to your host user (id -u / id -g).
+    user: "${BORING_UID:-10001}:${BORING_GID:-10001}"
     # No depends_on — the default wiki mode doesn't need postgres. In vector mode, `--profile vector`
     # brings up postgres alongside, and Store::open's connect retry (~10s) absorbs the startup race.
     environment:
       # LLM connection is the `llm` block of the bind-mounted boring.json (the SSOT). These are
       # pass-through OVERRIDES only — no baked default, so an unset value stays empty and the engine
       # reads boring.json. (A hardcoded default here would shadow boring.json, breaking e.g. an
-      # LM Studio base_url set in the config.) BORING_LLM_* is canonical; DRUDGE_LLM_* the deprecated
-      # alias. Both forwarded so either .env style works; the engine prefers BORING_. embed_model is the
-      # engine's policy SSOT (boring.json only) — no env knob.
+      # LM Studio base_url set in the config.) embed_model is the engine's policy SSOT (boring.json
+      # only) — no env knob.
       BORING_LLM_BASE_URL: ${BORING_LLM_BASE_URL:-}
-      DRUDGE_LLM_BASE_URL: ${DRUDGE_LLM_BASE_URL:-}
       BORING_LLM_MODEL: ${BORING_LLM_MODEL:-}
-      DRUDGE_LLM_MODEL: ${DRUDGE_LLM_MODEL:-}
       BORING_LLM_API_KEY: ${BORING_LLM_API_KEY:-}
-      DRUDGE_LLM_API_KEY: ${DRUDGE_LLM_API_KEY:-}
       BORING_HTTP_ADDR: 0.0.0.0:7700
       PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring  # host = the boring-postgres service (compose DNS)
       BORING_CONFIG: /app/boring.json     # policy: note language, repo rules, source dirs
       BORING_VAULT_DIR: /vault                # remember target + sync corpus (/vault/wiki)
-      # BORING_VECTOR canonical; DRUDGE_VECTOR deprecated alias (both forwarded, engine prefers BORING_).
-      BORING_VECTOR: ${BORING_VECTOR:-}
-      DRUDGE_VECTOR: ${DRUDGE_VECTOR:-off} # default off = wiki-first direct read. on = vector+graph (boring-postgres alongside via --profile vector)
+      BORING_VECTOR: ${BORING_VECTOR:-off} # off = wiki-first direct read. on = vector+graph (boring-postgres alongside via --profile vector)
       BORING_SYNC_HOURS: "4"
       TZ: Asia/Seoul
     volumes:
@@ -90,9 +84,8 @@ services:
       HERMES_UID: ${HERMES_UID:-501}      # host user uid (~/.hermes file permissions)
       HERMES_GID: ${HERMES_GID:-20}
       TZ: Asia/Seoul
-      # RAG endpoint for morning-briefing (briefing.py) + ingest-worker. BORING_URL canonical, DRUDGE_URL alias.
+      # RAG endpoint for morning-briefing (briefing.py) + ingest-worker.
       BORING_URL: http://boring-drudge:7700
-      DRUDGE_URL: http://boring-drudge:7700
     volumes:
       - ${HOME}/.hermes:/opt/data         # persists config / credentials / session memory (autonomy-augmentation layer)
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: ingest-worker.py only globs /host/.claude/projects)

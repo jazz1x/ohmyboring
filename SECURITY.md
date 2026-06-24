@@ -30,7 +30,7 @@ A couple of properties are worth knowing when assessing risk:
 - **It runs a localhost HTTP server.** The `drudge` engine serves an HTTP API
   (default port `7700`). In Docker it is published to `127.0.0.1:7700`
   (loopback only). In Native mode it binds `0.0.0.0:7700` by default — set
-  `DRUDGE_HTTP_ADDR=127.0.0.1:7700` to keep it loopback-only. The API is
+  `BORING_HTTP_ADDR=127.0.0.1:7700` to keep it loopback-only. The API is
   unauthenticated, so do **not** expose the port to an untrusted network.
 - **It scrubs secrets at the ingest boundary.** Before any text is written to
   the vault, every rendered field is passed through a secret redactor

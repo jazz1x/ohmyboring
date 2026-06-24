@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 // v2: added the `llm` block (provider/base_url/model/api_key_env/bootstrap + optional embed model).
-// v1 configs still load (top-level embed_model/embed_dim + .env DRUDGE_LLM_* honored as fallback).
+// v1 configs still load (top-level embed_model/embed_dim resolved into the llm block at parse time).
 const CURRENT_SCHEMA_VERSION: u32 = 2;
 const KNOWN_TOP_LEVEL: &[&str] = &[
     "schema_version",
@@ -38,23 +38,11 @@ const DEFAULT_CHAT_MODEL: &str = "gemma4:12b";
 /// Named (not the key itself) so the secret never lands in boring.json.
 const DEFAULT_API_KEY_ENV: &str = "BORING_LLM_API_KEY";
 
-/// Read env `canonical`, falling back to a deprecated alias (warns once on the alias). Empty = unset,
-/// so an `BORING_X=` placeholder doesn't mask the alias/default. SSOT for the BORING_* (canonical) /
-/// DRUDGE_* (deprecated) env-prefix migration — shared by config/llm/main/serve.
+/// Read a `BORING_*` env var. Empty = unset (so a `BORING_X=` placeholder doesn't mask the
+/// boring.json value / default). The single env-var prefix — no legacy aliases.
 #[must_use]
-pub fn env_alias(canonical: &str, deprecated: &str) -> Option<String> {
-    if let Ok(v) = std::env::var(canonical)
-        && !v.is_empty()
-    {
-        return Some(v);
-    }
-    match std::env::var(deprecated) {
-        Ok(v) if !v.is_empty() => {
-            eprintln!("[config] deprecated: {deprecated} is set; rename it to {canonical}");
-            Some(v)
-        }
-        _ => None,
-    }
+pub fn env_set(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
 /// Personal memory policy configuration.
@@ -542,7 +530,7 @@ pub fn discover_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("BORING_CONFIG") {
         return Some(PathBuf::from(p));
     }
-    if let Some(home) = env_alias("BORING_HOME", "OMB_HOME") {
+    if let Some(home) = env_set("BORING_HOME") {
         let p = PathBuf::from(home).join("boring.json");
         if p.exists() {
             return Some(p);

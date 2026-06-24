@@ -144,7 +144,7 @@ flowchart LR
 | Variable | 用途 |
 |---|---|
 | `BORING_VECTOR` | `on` で pgvector 有効化（オプション） |
-| `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | `llm.base_url` / `llm.model` のランタイムオーバーライド（オプション、`DRUDGE_LLM_*` = 非推奨エイリアス）。`drudge` バイナリをホストで直接実行する場合は `BORING_LLM_BASE_URL=http://localhost:11434/v1` を設定 |
+| `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | `llm.base_url` / `llm.model` のランタイムオーバーライド（オプション）。`drudge` バイナリをホストで直接実行する場合は `BORING_LLM_BASE_URL=http://localhost:11434/v1` を設定 |
 | `BORING_LLM_API_KEY` | `llm.api_key_env` がここを指す場合の API キー（認証 provider） |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプション Slack assistant |
 
@@ -160,7 +160,7 @@ flowchart LR
 | インストールディレクトリ / compose プロジェクト | `~/oh-my-boring` | clone パス, `BORING_HOME`, compose プロジェクト名 |
 | エンジンパッケージ / バイナリ | `drudge` | `Cargo.toml`, ソース, `drudge` CLI |
 | コンテナ | `boring-*` | `boring-drudge` · `boring-postgres` · `boring-agent` |
-| 環境変数 prefix | `BORING_*` | `BORING_VECTOR` · `BORING_URL` · `BORING_LLM_*` · `BORING_VAULT_DIR` · `BORING_HOME`（`DRUDGE_*` および旧 `OMB_*` = 非推奨エイリアス、1 サイクルは引き続き認識） |
+| 環境変数 prefix | `BORING_*` | `BORING_VECTOR` · `BORING_URL` · `BORING_LLM_*` · `BORING_VAULT_DIR` · `BORING_HOME` |
 
 ---
 
@@ -274,9 +274,9 @@ curl -s -X POST http://localhost:7700/mcp \
 | Mode | 方法 |
 |---|---|
 | **Docker**（デフォルト） | `make up` |
-| **Native** | `cd drudge && DRUDGE_VAULT_DIR="$PWD/../vault" DRUDGE_HTTP_ADDR=127.0.0.1:7700 cargo run --release -- serve` |
+| **Native** | `cd drudge && BORING_VAULT_DIR="$PWD/../vault" BORING_HTTP_ADDR=127.0.0.1:7700 cargo run --release -- serve` |
 
-> Native `serve` は `DRUDGE_VAULT_DIR` が必要です — 設定しないと `remember` が `DRUDGE_VAULT_DIR not set` で失敗します。またデフォルトで `0.0.0.0:7700` にバインドするため、loopback のみに限定するには `DRUDGE_HTTP_ADDR=127.0.0.1:7700` を設定してください。
+> Native `serve` は `BORING_VAULT_DIR` が必要です — 設定しないと `remember` が `BORING_VAULT_DIR not set` で失敗します。またデフォルトで `0.0.0.0:7700` にバインドするため、loopback のみに限定するには `BORING_HTTP_ADDR=127.0.0.1:7700` を設定してください。
 
 ---
 

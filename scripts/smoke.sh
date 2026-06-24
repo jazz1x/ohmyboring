@@ -4,14 +4,14 @@
 # Mode-aware: wiki-first is the default; vector/graph checks run only on a vector-mode stack.
 # Mode is detected from the RUNNING engine (not a possibly-unsourced env): /audit is
 # pgvector-only — it returns total_chunks on a vector backend and HTTP 500 in wiki mode.
-# An explicit DRUDGE_VECTOR (if exported) still forces the mode.
+# An explicit BORING_VECTOR (if exported) still forces the mode.
 # Note: /bin/sh (dash) has no pipefail → check each step's result explicitly.
 set -eu
-URL="${BORING_URL:-${DRUDGE_URL:-http://localhost:7700}}"
+URL="${BORING_URL:-http://localhost:7700}"
 fail() { echo "FAIL: $1"; exit 1; }
 
-# Resolve mode: honor an explicit BORING_VECTOR (DRUDGE_VECTOR = deprecated alias), else ask the live engine.
-case "$(printf '%s' "${BORING_VECTOR:-${DRUDGE_VECTOR:-}}" | tr '[:upper:]' '[:lower:]')" in
+# Resolve mode: honor an explicit BORING_VECTOR, else ask the live engine.
+case "$(printf '%s' "${BORING_VECTOR:-}" | tr '[:upper:]' '[:lower:]')" in
   on | 1 | true | yes) VEC=1 ;;
   off | 0 | false | no) VEC=0 ;;
   *)

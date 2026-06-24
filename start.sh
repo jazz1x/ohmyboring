@@ -9,7 +9,7 @@ chmod 600 .env 2>/dev/null || true
 # Create policy config from example if missing. User edits it to set language, repo rules, source dirs.
 [ -f boring.json ] || cp boring.example.json boring.json
 chmod 644 boring.json 2>/dev/null || true
-# Source .env so that variables like BORING_VECTOR (or its DRUDGE_VECTOR alias) are visible to this script.
+# Source .env so that variables like BORING_VECTOR are visible to this script.
 set -a; . .env; set +a
 
 # Fail fast if a required host tool is missing — BEFORE pulling GBs of models or
@@ -20,7 +20,7 @@ set -a; . .env; set +a
 # The engine is OpenAI-compatible & backend-agnostic, so only the *bootstrap* differs per provider:
 # Ollama pulls models, LM Studio expects them loaded in-app, a remote endpoint needs nothing. We read
 # the connection from boring.json (jq = a verified hard dep) and let runtime env override it
-# (BORING_LLM_* canonical, DRUDGE_LLM_* deprecated alias — same precedence as the engine). embed_model is
+# (BORING_LLM_* env override). embed_model is
 # the engine's policy SSOT (boring.json only, never env), so the pull always targets the configured one.
 PROVIDER=$(jq -r '.llm.provider // "ollama"' boring.json 2>/dev/null || echo ollama)
 BOOTSTRAP=$(jq -r '.llm.bootstrap // "auto"' boring.json 2>/dev/null || echo auto)
@@ -28,8 +28,8 @@ CFG_BASE=$(jq -r '.llm.base_url // "http://host.docker.internal:11434/v1"' borin
 CFG_CHAT=$(jq -r '.llm.model // "gemma4:12b"' boring.json 2>/dev/null || echo gemma4:12b)
 CFG_EMB=$(jq -r '.llm.embed_model // .embed_model // "bge-m3"' boring.json 2>/dev/null || echo bge-m3)
 
-LLM_URL="${BORING_LLM_BASE_URL:-${DRUDGE_LLM_BASE_URL:-$CFG_BASE}}"
-LLM="${BORING_LLM_MODEL:-${DRUDGE_LLM_MODEL:-$CFG_CHAT}}"
+LLM_URL="${BORING_LLM_BASE_URL:-$CFG_BASE}"
+LLM="${BORING_LLM_MODEL:-$CFG_CHAT}"
 EMB="$CFG_EMB"
 
 PROVIDER_SCRIPT="./scripts/llm-providers/${PROVIDER}.sh"
@@ -59,10 +59,10 @@ MSG
   fi
 fi
 
-# If BORING_VECTOR=on (DRUDGE_VECTOR = deprecated alias), also start the pgvector (vector+graph) profile.
+# If BORING_VECTOR=on, also start the pgvector (vector+graph) profile.
 # Default (off) is wiki-first — postgres not started.
 PROFILES=""
-case "$(printf '%s' "${BORING_VECTOR:-${DRUDGE_VECTOR:-off}}" | tr '[:upper:]' '[:lower:]')" in
+case "$(printf '%s' "${BORING_VECTOR:-off}" | tr '[:upper:]' '[:lower:]')" in
   on | 1 | true | yes) PROFILES="--profile vector"; echo "▶ vector mode (with pgvector)";;
   *) echo "▶ wiki-first mode (pgvector not started — set BORING_VECTOR=on to use graph+vector)";;
 esac

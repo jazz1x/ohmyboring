@@ -43,7 +43,7 @@ RUN useradd --system --uid 10001 --no-create-home drudge \
 USER drudge
 
 # ── Default env ───────────────────────────────────────────────────────────────
-ENV DRUDGE_HTTP_ADDR=0.0.0.0:7700
+ENV BORING_HTTP_ADDR=0.0.0.0:7700
 # DRUDGE_LLM_BASE_URL, DRUDGE_SOURCE_DIRS, DRUDGE_SYNC_HOURS: injected at runtime
 
 EXPOSE 7700

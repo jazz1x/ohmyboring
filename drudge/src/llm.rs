@@ -1,6 +1,6 @@
 //! LLM client — OpenAI-compatible `/v1` (embeddings + chat/completions).
 //! Works with any OpenAI-compatible server: Ollama (`/v1`) · LM Studio · vLLM · llama.cpp server, etc.
-//! Runtime/model are swappable via env (`DRUDGE_LLM_BASE_URL`/`DRUDGE_LLM_MODEL`/`DRUDGE_EMBED_MODEL`).
+//! Runtime/model are swappable via boring.json (`llm` block) + env override (`BORING_LLM_BASE_URL`/`BORING_LLM_MODEL`).
 //! `reasoning_effort:"none"` = OpenAI-standard knob that turns off reasoning/thinking mode (avoids latency).
 //! Verified on Ollama `/v1`: `think:false` is dropped there (only works on native `/api/chat`), but
 //! `reasoning_effort:"none"` is honored (0.6s vs 8s on gemma4). Servers that don't reason ignore it gracefully.
@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tokio::time::sleep;
 
-use crate::config::env_alias;
+use crate::config::env_set;
 
 pub struct Llm {
     base_url: String, // OpenAI-compatible base — e.g. http://localhost:11434/v1
@@ -22,20 +22,15 @@ pub struct Llm {
 
 impl Llm {
     /// Build from config + env. `boring.json`'s `llm` block is the declarative SSOT for the connection
-    /// (base_url/model) and the embed model (policy SSOT, kernel A's sole model). Runtime env still
-    /// overrides — `BORING_LLM_*` is the canonical prefix, `DRUDGE_LLM_*` a deprecated alias (one cycle).
+    /// (base_url/model) and the embed model (policy SSOT, kernel A's sole model). Runtime env
+    /// (`BORING_LLM_BASE_URL`/`BORING_LLM_MODEL`) overrides it.
     /// The chat model is used only by `ask`/`brief` synthesis (the one allowed generation path).
     pub fn from_config(cfg: &crate::config::BoringConfig) -> Self {
-        let base_url = env_alias("BORING_LLM_BASE_URL", "DRUDGE_LLM_BASE_URL")
-            .unwrap_or_else(|| cfg.llm.base_url.clone());
-        let chat_model = env_alias("BORING_LLM_MODEL", "DRUDGE_LLM_MODEL")
-            .unwrap_or_else(|| cfg.llm.model.clone());
+        let base_url = env_set("BORING_LLM_BASE_URL").unwrap_or_else(|| cfg.llm.base_url.clone());
+        let chat_model = env_set("BORING_LLM_MODEL").unwrap_or_else(|| cfg.llm.model.clone());
         // API key: read the env var NAMED by boring.json (api_key_env) so the secret never lands in
-        // the config file. Legacy DRUDGE_LLM_API_KEY stays as a fallback. Ollama/LM Studio omit it.
-        let api_key = std::env::var(&cfg.llm.api_key_env)
-            .ok()
-            .or_else(|| std::env::var("DRUDGE_LLM_API_KEY").ok())
-            .filter(|s| !s.is_empty());
+        // the config file. Ollama/LM Studio omit it.
+        let api_key = env_set(&cfg.llm.api_key_env);
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             api_key,

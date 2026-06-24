@@ -6,7 +6,6 @@ scripts and Python hooks. All functions honor the corresponding environment
 variables and fall back to sensible defaults.
 """
 import os
-import sys
 from urllib.parse import urlparse
 
 
@@ -26,29 +25,13 @@ def _in_container() -> bool:
 
 
 def omb_home() -> str:
-    return (os.environ.get("BORING_HOME") or os.environ.get("OMB_HOME")) or os.path.expanduser("~/oh-my-boring")
+    return os.environ.get("BORING_HOME") or os.path.expanduser("~/oh-my-boring")
 
 
 def drudge_url() -> str:
-    # BORING_URL canonical, DRUDGE_URL deprecated alias (defined below; safe — module-level call order).
-    return _env_alias("BORING_URL", "DRUDGE_URL") or (
+    return os.environ.get("BORING_URL") or (
         "http://boring-drudge:7700" if _in_container() else "http://localhost:7700"
     )
-
-
-def _env_alias(canonical: str, deprecated: str) -> str | None:
-    """Read the canonical env var, falling back to a deprecated alias (warns once on the alias).
-
-    Mirrors the engine's `env_alias` (llm.rs): BORING_* is canonical, DRUDGE_* the deprecated alias.
-    """
-    v = os.environ.get(canonical)
-    if v:
-        return v
-    v = os.environ.get(deprecated)
-    if v:
-        print(f"[config] deprecated: {deprecated} is set; rename it to {canonical}", file=sys.stderr)
-        return v
-    return None
 
 
 def _boring_llm() -> dict:
@@ -63,12 +46,12 @@ def _boring_llm() -> dict:
 
 
 def llm_base_url() -> str:
-    """Resolve the LLM base URL: env override (BORING_ then DRUDGE_) → boring.json llm.base_url → default.
+    """Resolve the LLM base URL: env override (BORING_LLM_BASE_URL) → boring.json llm.base_url → default.
 
     On the host (not in a container) rewrite host.docker.internal → localhost, mirroring the shell
     scripts — the configured in-container default must still work for host-side distillation."""
     url = (
-        _env_alias("BORING_LLM_BASE_URL", "DRUDGE_LLM_BASE_URL")
+        os.environ.get("BORING_LLM_BASE_URL")
         or _boring_llm().get("base_url")
         or "http://localhost:11434/v1"
     )
@@ -78,18 +61,14 @@ def llm_base_url() -> str:
 
 
 def llm_model() -> str:
-    return (
-        _env_alias("BORING_LLM_MODEL", "DRUDGE_LLM_MODEL")
-        or _boring_llm().get("model")
-        or "gemma4:12b"
-    )
+    return os.environ.get("BORING_LLM_MODEL") or _boring_llm().get("model") or "gemma4:12b"
 
 
 def llm_api_key() -> str:
     """API key for auth providers. boring.json names the env var holding it (api_key_env, default
-    BORING_LLM_API_KEY); DRUDGE_LLM_API_KEY stays as a legacy fallback. Empty when unset (Ollama/LM Studio)."""
+    BORING_LLM_API_KEY). Empty when unset (Ollama/LM Studio need none)."""
     key_env = _boring_llm().get("api_key_env") or "BORING_LLM_API_KEY"
-    return os.environ.get(key_env) or os.environ.get("DRUDGE_LLM_API_KEY") or ""
+    return os.environ.get(key_env) or ""
 
 
 def embed_model() -> str:
