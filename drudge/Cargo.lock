@@ -396,6 +396,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "futures-util",
  "hex",
  "pgvector",
  "regex",
