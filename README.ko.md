@@ -10,7 +10,7 @@
 ![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
 ![gemma4](https://img.shields.io/badge/LLM-gemma4:12b-000?logo=ollama)
 
-**셀프호스팅 개인 메모리 RAG.** Claude Code 세션이 로컬의 사람이 읽는 위키로 증류돼 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클라우드 0 · 100% 로컬.**
+**셀프호스팅 개인 메모리 RAG.** Claude Code / Kimi Code 세션이 로컬의 사람이 읽는 위키로 증류돼 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클라우드 0 · 100% 로컬.**
 
 ```bash
 # 가장 빠름 — 원라이너: ~/oh-my-boring에 클론, 빌드, Claude Code 훅까지 연결.
@@ -29,7 +29,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 
 > 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 과거 기록을 채우고 나면, 이후 모든 세션이 자동으로 축적됩니다([적재하기](#적재하기-ingestion) 참고).
 
-> **Docker**, **Ollama**(또는 OpenAI-compatible 서버), **Python 3**, **jq**, **curl**가 필요합니다.
+> **Docker**, **Ollama**(또는 OpenAI-compatible 서버), **Python 3**, **jq**, **curl**, **git**, **make**가 필요합니다.
 
 ---
 
@@ -173,7 +173,8 @@ flowchart LR
 | `make ask Q="..."` | recall + 요약 한 번에 |
 | `make sync` | vault 재적재 |
 | `make remember M="text"` | 한 줄 노트 작성 |
-| `make collect [N=1]` | 과거 세션 lazy 백필 |
+| `make collect [N=1]` | 과거 Claude Code 세션 lazy 백필 |
+| `make collect-kimi [N=1]` | 과거 Kimi Code 세션 lazy 백필 |
 | `make hermes-build` | 선택적 hermes-agent 이미지 클론/빌드 |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | 엔진 로그 |
@@ -192,10 +193,13 @@ flowchart LR
 |---|---|---|---|---|
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | 세션을 요약해 `remember` 호출 |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | 관련 snippet을 가져와 프롬프트 context 주입 |
+| Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Kimi 세션을 요약해 `remember` 호출 |
+| Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | 관련 snippet을 가져와 프롬프트 context 주입 |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring`를 MCP 서버로 노출 |
 | Codex | `agents/codex/README.md` | MCP only | `~/.codex/mcp.json` | `ohmyboring`를 MCP 서버로 노출 |
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | cron tick마다 한 세션씩 백필 |
-| scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 수동 | 오래된 세션 lazy 백필 |
+| scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 수동 | 오래된 Claude Code 세션 lazy 백필 |
+| scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 수동 | 오래된 Kimi Code 세션 lazy 백필 |
 | shared | `agents/shared/boring_config.py` | 어댑터 import | `boring.json` 정책 로더 |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | 활성화된 에이전트의 hook/MCP 설정을 idempotent하게 구성 |
 
@@ -216,7 +220,12 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 { "mcpServers": { "ohmyboring": { "type": "http", "url": "http://localhost:7700/mcp" } } }
 ```
 
-`install.sh`는 `boring.json`에서 Cursor와 Codex가 활성화되어 있을 때 Cursor의 `~/.cursor/mcp.json`과 Codex의 `~/.codex/mcp.json`도 자동으로 작성합니다.
+`install.sh`가 자동으로 배선하는 것:
+- Claude Code 훅 → `~/.claude/settings.json`
+- Kimi Code 훅 → `~/.kimi-code/config.toml`
+- `boring.json`에서 Cursor·Codex가 활성화되어 있으면 Cursor의 `~/.cursor/mcp.json`과 Codex의 `~/.codex/mcp.json`
+
+그 외 에이전트는 루트 `.mcp.json`을 알맞은 위치로 복사하거나(예: Claude Desktop은 `~/.claude/mcp.json`, Kimi Code MCP는 `~/.kimi-code/mcp.json`) 에이전트 CLI로 HTTP MCP 서버를 추가하면 됩니다.
 
 (VS Code Copilot은 root key `servers`를 쓰는 `.vscode/mcp.json`을 사용합니다. CLI 대안: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. compose sibling 컨테이너는 `http://boring-drudge:7700/mcp`로 접근합니다.)
 
@@ -329,6 +338,7 @@ oh-my-boring/
 ├─ agents/                  # 호스트측 에이전트 어댑터
 │  ├─ claude-code/          # Claude Code hooks
 │  ├─ hermes/               # hermes-agent cron
+│  ├─ kimi/                 # Kimi Code hooks
 │  ├─ schedulers/           # cron/launchd 백필
 │  └─ shared/               # 정책/설정 라이브러리
 ├─ hooks/                   # backward-compatible symlink → agents/
