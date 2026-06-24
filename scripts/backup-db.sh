@@ -2,14 +2,14 @@
 # Backup the oh-my-boring pgvector database to data/backups/ (custom format).
 # Keeps the latest N backups (default 7); older ones are deleted automatically.
 #   make backup-db
-#   OMB_BACKUP_DIR=/path OMB_BACKUP_KEEP=10 make backup-db
+#   BORING_BACKUP_DIR=/path BORING_BACKUP_KEEP=10 make backup-db
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-BACKUP_DIR="${OMB_BACKUP_DIR:-$ROOT/data/backups}"
-KEEP="${OMB_BACKUP_KEEP:-7}"
+BACKUP_DIR="${BORING_BACKUP_DIR:-$ROOT/data/backups}"
+KEEP="${BORING_BACKUP_KEEP:-7}"
 
 if docker compose version 2>&1 | grep -q "Docker Compose"; then
   COMPOSE="docker compose"
@@ -19,7 +19,7 @@ fi
 
 mkdir -p "$BACKUP_DIR"
 # The dump is the full corpus + raw query_log — owner-only. Restrict the dir, and write the dump
-# under a tight umask so it lands 0600 even if OMB_BACKUP_DIR points outside the 700 data/ tree.
+# under a tight umask so it lands 0600 even if BORING_BACKUP_DIR points outside the 700 data/ tree.
 chmod 700 "$BACKUP_DIR" 2>/dev/null || true
 umask 077
 

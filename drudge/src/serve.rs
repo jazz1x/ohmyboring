@@ -347,10 +347,10 @@ async fn handle_brief(State(s): State<AppState>) -> Result<Json<AskResp>, AppErr
     }))
 }
 
-/// The explicit rejection (not silence) that vector/graph-dependent endpoints return under `OMB_VECTOR=off`.
+/// The explicit rejection (not silence) that vector/graph-dependent endpoints return under `BORING_VECTOR=off`.
 fn vector_disabled() -> AppError {
     AppError(anyhow::anyhow!(
-        "OMB_VECTOR=off — this feature requires the vector backend (pgvector). Set OMB_VECTOR=on and start Postgres."
+        "BORING_VECTOR=off — this feature requires the vector backend (pgvector). Set BORING_VECTOR=on and start Postgres."
     ))
 }
 
@@ -912,7 +912,7 @@ async fn mcp_brief(s: &AppState) -> Result<Value, (i32, String)> {
 /// embeddings, graph edges, and claims. Idempotent: forgetting a non-existent note returns a clear error.
 async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
-        return Err((-32603, "OMB_VAULT_DIR not set".to_owned()));
+        return Err((-32603, "BORING_VAULT_DIR not set".to_owned()));
     };
     let wiki_dir = vault_root.join("wiki");
 
@@ -1006,7 +1006,7 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
         return Err((
             -32603,
-            "OMB_VAULT_DIR not set — no target to write remember notes to".to_owned(),
+            "BORING_VAULT_DIR not set — no target to write remember notes to".to_owned(),
         ));
     };
     let note = parse_remember_note(args, &s.cfg)?;
@@ -1206,14 +1206,14 @@ fn mcp_classify_repo(s: &AppState, args: Option<&Value>) -> Result<String, (i32,
         .as_str();
     let name = g("name").filter(|v| !v.is_empty());
 
-    // Write back to the same file we loaded from (respects BORING_CONFIG / OMB_HOME), instead of
+    // Write back to the same file we loaded from (respects BORING_CONFIG / BORING_HOME), instead of
     // rediscovering and possibly picking a different path.
     let path = (*s.cfg_path)
         .clone()
         .or_else(config::discover_path)
         .ok_or((
             -32603,
-            "boring.json not found (set BORING_CONFIG / OMB_HOME)".to_owned(),
+            "boring.json not found (set BORING_CONFIG / BORING_HOME)".to_owned(),
         ))?;
     let path = config::upsert_repo_rule_at(match_, origin, name, &path)
         .map_err(|e| (-32603, format!("write boring.json: {e:#}")))?;
@@ -1444,15 +1444,15 @@ fn spawn_scheduler(
     sync_lock: Arc<Mutex<()>>,
     last_compact: Arc<Mutex<Option<Instant>>>,
 ) {
-    // `.max(1)` — `OMB_SYNC_HOURS=0` would make a zero Duration, and
+    // `.max(1)` — `BORING_SYNC_HOURS=0` would make a zero Duration, and
     // tokio::time::interval panics on a zero period. Clamp to ≥1h.
-    let sync_hours: u64 = config::env_alias("OMB_SYNC_HOURS", "DRUDGE_SYNC_HOURS")
+    let sync_hours: u64 = config::env_alias("BORING_SYNC_HOURS", "DRUDGE_SYNC_HOURS")
         .and_then(|v| v.parse().ok())
         .unwrap_or(4)
         .max(1);
     let sync_interval = Duration::from_secs(sync_hours * 3600);
 
-    let compact_hours: u64 = config::env_alias("OMB_COMPACT_HOURS", "DRUDGE_COMPACT_HOURS")
+    let compact_hours: u64 = config::env_alias("BORING_COMPACT_HOURS", "DRUDGE_COMPACT_HOURS")
         .and_then(|v| v.parse().ok())
         .unwrap_or(24)
         .max(1);
@@ -1497,12 +1497,12 @@ fn spawn_scheduler(
 pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> Result<()> {
     // vault root — when set, sync includes the raw→wiki compile stage.
     let vault_dir: Option<PathBuf> =
-        config::env_alias("OMB_VAULT_DIR", "DRUDGE_VAULT_DIR").map(PathBuf::from);
+        config::env_alias("BORING_VAULT_DIR", "DRUDGE_VAULT_DIR").map(PathBuf::from);
 
     // Remember which config file we loaded so `classify_repo` writes back to the same file.
     let cfg_path = config::discover_path();
 
-    let addr = config::env_alias("OMB_HTTP_ADDR", "DRUDGE_HTTP_ADDR")
+    let addr = config::env_alias("BORING_HTTP_ADDR", "DRUDGE_HTTP_ADDR")
         .unwrap_or_else(|| "0.0.0.0:7700".to_owned());
 
     let last_compact = Arc::new(Mutex::new(None));

@@ -9,7 +9,7 @@ chmod 600 .env 2>/dev/null || true
 # Create policy config from example if missing. User edits it to set language, repo rules, source dirs.
 [ -f boring.json ] || cp boring.example.json boring.json
 chmod 644 boring.json 2>/dev/null || true
-# Source .env so that variables like OMB_VECTOR (or its DRUDGE_VECTOR alias) are visible to this script.
+# Source .env so that variables like BORING_VECTOR (or its DRUDGE_VECTOR alias) are visible to this script.
 set -a; . .env; set +a
 
 # Fail fast if a required host tool is missing — BEFORE pulling GBs of models or
@@ -20,7 +20,7 @@ set -a; . .env; set +a
 # The engine is OpenAI-compatible & backend-agnostic, so only the *bootstrap* differs per provider:
 # Ollama pulls models, LM Studio expects them loaded in-app, a remote endpoint needs nothing. We read
 # the connection from boring.json (jq = a verified hard dep) and let runtime env override it
-# (OMB_LLM_* canonical, DRUDGE_LLM_* deprecated alias — same precedence as the engine). embed_model is
+# (BORING_LLM_* canonical, DRUDGE_LLM_* deprecated alias — same precedence as the engine). embed_model is
 # the engine's policy SSOT (boring.json only, never env), so the pull always targets the configured one.
 PROVIDER=$(jq -r '.llm.provider // "ollama"' boring.json 2>/dev/null || echo ollama)
 BOOTSTRAP=$(jq -r '.llm.bootstrap // "auto"' boring.json 2>/dev/null || echo auto)
@@ -28,8 +28,8 @@ CFG_BASE=$(jq -r '.llm.base_url // "http://host.docker.internal:11434/v1"' borin
 CFG_CHAT=$(jq -r '.llm.model // "gemma4:12b"' boring.json 2>/dev/null || echo gemma4:12b)
 CFG_EMB=$(jq -r '.llm.embed_model // .embed_model // "bge-m3"' boring.json 2>/dev/null || echo bge-m3)
 
-LLM_URL="${OMB_LLM_BASE_URL:-${DRUDGE_LLM_BASE_URL:-$CFG_BASE}}"
-LLM="${OMB_LLM_MODEL:-${DRUDGE_LLM_MODEL:-$CFG_CHAT}}"
+LLM_URL="${BORING_LLM_BASE_URL:-${DRUDGE_LLM_BASE_URL:-$CFG_BASE}}"
+LLM="${BORING_LLM_MODEL:-${DRUDGE_LLM_MODEL:-$CFG_CHAT}}"
 EMB="$CFG_EMB"
 
 PROVIDER_SCRIPT="./scripts/llm-providers/${PROVIDER}.sh"
@@ -42,29 +42,29 @@ fi
 
 # hermes-agent (the brain) is part of the default stack, but its image isn't in this repo
 # (external Nous Hermes Agent build). If it's missing we fall back to CORE-ONLY (ohmyboring,
-# the RAG engine) so a first-timer can try `make ask` immediately — set OMB_CORE_ONLY=1 to
+# the RAG engine) so a first-timer can try `make ask` immediately — set BORING_CORE_ONLY=1 to
 # skip the agent on purpose.
 # Compose SERVICE name = boring-agent; the IMAGE it runs is the external `hermes-agent` build.
 AGENT="boring-agent"
-if [ -n "${OMB_CORE_ONLY:-}" ] || ! docker image inspect hermes-agent >/dev/null 2>&1; then
+if [ -n "${BORING_CORE_ONLY:-}" ] || ! docker image inspect hermes-agent >/dev/null 2>&1; then
   AGENT=""
-  if [ -z "${OMB_CORE_ONLY:-}" ]; then
+  if [ -z "${BORING_CORE_ONLY:-}" ]; then
     cat <<'MSG'
   ⓘ hermes-agent image not found — starting CORE ONLY (ohmyboring RAG engine). `make ask` works.
     The optional Slack/agent layer is third-party — build the `hermes-agent` image per its
     official docs (https://hermes-agent.org), point its ~/.hermes/config.yaml at ohmyboring's MCP
     (http://boring-drudge:7700/mcp), then re-run `make up`. See README "Optional: hermes-agent".
-    Set OMB_CORE_ONLY=1 to skip this message intentionally.
+    Set BORING_CORE_ONLY=1 to skip this message intentionally.
 MSG
   fi
 fi
 
-# If OMB_VECTOR=on (DRUDGE_VECTOR = deprecated alias), also start the pgvector (vector+graph) profile.
+# If BORING_VECTOR=on (DRUDGE_VECTOR = deprecated alias), also start the pgvector (vector+graph) profile.
 # Default (off) is wiki-first — postgres not started.
 PROFILES=""
-case "$(printf '%s' "${OMB_VECTOR:-${DRUDGE_VECTOR:-off}}" | tr '[:upper:]' '[:lower:]')" in
+case "$(printf '%s' "${BORING_VECTOR:-${DRUDGE_VECTOR:-off}}" | tr '[:upper:]' '[:lower:]')" in
   on | 1 | true | yes) PROFILES="--profile vector"; echo "▶ vector mode (with pgvector)";;
-  *) echo "▶ wiki-first mode (pgvector not started — set OMB_VECTOR=on to use graph+vector)";;
+  *) echo "▶ wiki-first mode (pgvector not started — set BORING_VECTOR=on to use graph+vector)";;
 esac
 
 # Ensure sensitive directories are not world-readable before Docker creates them.

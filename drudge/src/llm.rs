@@ -23,13 +23,13 @@ pub struct Llm {
 impl Llm {
     /// Build from config + env. `boring.json`'s `llm` block is the declarative SSOT for the connection
     /// (base_url/model) and the embed model (policy SSOT, kernel A's sole model). Runtime env still
-    /// overrides — `OMB_LLM_*` is the canonical prefix, `DRUDGE_LLM_*` a deprecated alias (one cycle).
+    /// overrides — `BORING_LLM_*` is the canonical prefix, `DRUDGE_LLM_*` a deprecated alias (one cycle).
     /// The chat model is used only by `ask`/`brief` synthesis (the one allowed generation path).
     pub fn from_config(cfg: &crate::config::BoringConfig) -> Self {
-        let base_url = env_alias("OMB_LLM_BASE_URL", "DRUDGE_LLM_BASE_URL")
+        let base_url = env_alias("BORING_LLM_BASE_URL", "DRUDGE_LLM_BASE_URL")
             .unwrap_or_else(|| cfg.llm.base_url.clone());
-        let chat_model =
-            env_alias("OMB_LLM_MODEL", "DRUDGE_LLM_MODEL").unwrap_or_else(|| cfg.llm.model.clone());
+        let chat_model = env_alias("BORING_LLM_MODEL", "DRUDGE_LLM_MODEL")
+            .unwrap_or_else(|| cfg.llm.model.clone());
         // API key: read the env var NAMED by boring.json (api_key_env) so the secret never lands in
         // the config file. Legacy DRUDGE_LLM_API_KEY stays as a fallback. Ollama/LM Studio omit it.
         let api_key = std::env::var(&cfg.llm.api_key_env)

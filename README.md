@@ -39,7 +39,7 @@ make ask Q="how did I fix the docker build cache problem?"
 2. **Markdown-first memory** — plain, human-readable, git-diffable notes. Recall reads them directly.
 3. **Local-only** — embedding and synthesis run on your machine via Ollama. No external APIs or tokens.
 
-Optional **pgvector** accelerator (`OMB_VECTOR=on`) adds similarity search + GraphRAG when scale calls for it.
+Optional **pgvector** accelerator (`BORING_VECTOR=on`) adds similarity search + GraphRAG when scale calls for it.
 
 ---
 
@@ -55,7 +55,7 @@ Memory gets in three ways — after setup you rarely touch the first two:
 
 ### Wiring the hooks manually
 
-`install.sh` does this for you. To redo it (or if you ran with `OMB_WIRE=0`):
+`install.sh` does this for you. To redo it (or if you ran with `BORING_WIRE=0`):
 
 ```bash
 python3 agents/shared/agent_wiring.py --install \
@@ -69,7 +69,7 @@ Or edit `~/.claude/settings.json` by hand: a `SessionEnd` hook running `python3 
 
 ## Viewing your memory
 
-The notes are just markdown, so **open the `vault/` folder as an [Obsidian](https://obsidian.md) vault** — graph view, backlinks, tags, and full-text search come for free. The compiled notes already carry Obsidian-safe `tags` and `[[wiki-NNNN]]` `relates_to` links, so the graph view draws your memory's connections directly (richest with `OMB_VECTOR=on`, which projects the GraphRAG graph into those links). No custom UI to build. Obsidian's own `.obsidian/` workspace folder is gitignored, so your layout stays local and never leaks into git.
+The notes are just markdown, so **open the `vault/` folder as an [Obsidian](https://obsidian.md) vault** — graph view, backlinks, tags, and full-text search come for free. The compiled notes already carry Obsidian-safe `tags` and `[[wiki-NNNN]]` `relates_to` links, so the graph view draws your memory's connections directly (richest with `BORING_VECTOR=on`, which projects the GraphRAG graph into those links). No custom UI to build. Obsidian's own `.obsidian/` workspace folder is gitignored, so your layout stays local and never leaks into git.
 
 ---
 
@@ -90,7 +90,7 @@ flowchart LR
     MCP([MCP recall])
   end
   SRC --> WRITE --> WIKI --> RD
-  WIKI -. "OMB_VECTOR=on" .-> PG[("pgvector")]
+  WIKI -. "BORING_VECTOR=on" .-> PG[("pgvector")]
   PG -. accelerate .-> RD
 ```
 
@@ -114,7 +114,7 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
     "model": "gemma4:12b",
     "embed_model": "bge-m3",
     "embed_dim": 1024,
-    "api_key_env": "OMB_LLM_API_KEY",
+    "api_key_env": "BORING_LLM_API_KEY",
     "bootstrap": "auto"
   },
   "repos": [
@@ -143,9 +143,9 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 
 | Variable | Purpose |
 |---|---|
-| `OMB_VECTOR` | `on` enables pgvector (optional) |
-| `OMB_LLM_BASE_URL` / `OMB_LLM_MODEL` | optional runtime override of `llm.base_url` / `llm.model` (`DRUDGE_LLM_*` = deprecated alias). Running the `drudge` binary directly on the host? Set `OMB_LLM_BASE_URL=http://localhost:11434/v1` |
-| `OMB_LLM_API_KEY` | API key when `llm.api_key_env` points here (auth providers) |
+| `BORING_VECTOR` | `on` enables pgvector (optional) |
+| `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | optional runtime override of `llm.base_url` / `llm.model` (`DRUDGE_LLM_*` = deprecated alias). Running the `drudge` binary directly on the host? Set `BORING_LLM_BASE_URL=http://localhost:11434/v1` |
+| `BORING_LLM_API_KEY` | API key when `llm.api_key_env` points here (auth providers) |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant |
 
 > **Swapping the embedding model changes the vector dimension.** The synthesis model (`llm.model`) is free to swap, but a new `llm.embed_model` emits vectors of a different size, so you must update `llm.embed_dim` to match **and** run `make reset` — otherwise upserts fail against the old-shaped vectors. Common dims: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
@@ -157,10 +157,10 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 | Layer | Name | Appears in |
 |---|---|---|
 | Brand / repo / MCP server | `ohmyboring` | repo URL, `.mcp.json`, `--server-name` |
-| Install dir / compose project | `~/oh-my-boring` | clone path, `OMB_HOME`, compose project name |
+| Install dir / compose project | `~/oh-my-boring` | clone path, `BORING_HOME`, compose project name |
 | Engine package / binary | `drudge` | `Cargo.toml`, source, the `drudge` CLI |
 | Containers | `boring-*` | `boring-drudge` · `boring-postgres` · `boring-agent` |
-| Env-var prefix | `OMB_*` | `OMB_VECTOR` · `OMB_URL` · `OMB_LLM_*` · `OMB_VAULT_DIR` (`DRUDGE_*` = deprecated alias, still honored one cycle) |
+| Env-var prefix | `BORING_*` | `BORING_VECTOR` · `BORING_URL` · `BORING_LLM_*` · `BORING_VAULT_DIR` · `BORING_HOME` (`DRUDGE_*` and the former `OMB_*` = deprecated aliases, still honored one cycle) |
 
 ---
 
@@ -231,12 +231,12 @@ For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~
 
 Available tools (11): `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief` (generative — run the LLM) · `corpus_status`, `config_get` (introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain).
 
-In the default wiki-first mode (`OMB_VECTOR=off`), four tools require the pgvector backend and return JSON-RPC `-32603` until you set `OMB_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `brief`. The other seven (`recall`, `ask`, `remember`, `forget`, `sync`, `config_get`, `classify_repo`) work against `vault/wiki` directly.
+In the default wiki-first mode (`BORING_VECTOR=off`), four tools require the pgvector backend and return JSON-RPC `-32603` until you set `BORING_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `brief`. The other seven (`recall`, `ask`, `remember`, `forget`, `sync`, `config_get`, `classify_repo`) work against `vault/wiki` directly.
 
-- `neighbors` *(requires `OMB_VECTOR=on`)* — graph traversal from a topic: embeds the query, takes the single closest note, then returns its 1-hop labels (`{hit, graph_neighbors, semantic_neighbors}` JSON). `hit` is the matched note's path; `graph_neighbors` are its project/topic labels and `semantic_neighbors` its shared tool/concept labels — flat strings, not note paths.
-- `claims` *(requires `OMB_VECTOR=on`)* — top-k current (non-superseded) `{subject, predicate, value}` decisions near a query.
-- `corpus_status` *(requires `OMB_VECTOR=on`)* — KB health snapshot (file/chunk counts, by origin/kind/project, contamination, graph/semantic nodes+edges).
-- `ask` / `brief` — the only LLM-running tools: `ask` answers a question with cited sources (works in wiki-first mode); `brief` *(requires `OMB_VECTOR=on`)* is a recency-first work briefing.
+- `neighbors` *(requires `BORING_VECTOR=on`)* — graph traversal from a topic: embeds the query, takes the single closest note, then returns its 1-hop labels (`{hit, graph_neighbors, semantic_neighbors}` JSON). `hit` is the matched note's path; `graph_neighbors` are its project/topic labels and `semantic_neighbors` its shared tool/concept labels — flat strings, not note paths.
+- `claims` *(requires `BORING_VECTOR=on`)* — top-k current (non-superseded) `{subject, predicate, value}` decisions near a query.
+- `corpus_status` *(requires `BORING_VECTOR=on`)* — KB health snapshot (file/chunk counts, by origin/kind/project, contamination, graph/semantic nodes+edges).
+- `ask` / `brief` — the only LLM-running tools: `ask` answers a question with cited sources (works in wiki-first mode); `brief` *(requires `BORING_VECTOR=on`)* is a recency-first work briefing.
 - `forget` — delete a note by wiki id or exact title. Removes the wiki file and, in vector mode, also purges embeddings, graph edges, and claims.
 
 Structured tools (`neighbors`, `claims`, `corpus_status`, `config_get`, `ask`, `brief`) return native `structuredContent` (JSON) alongside the text block; prose/ack tools (`recall`, `remember`, `forget`, `sync`, `classify_repo`) return text.
@@ -296,7 +296,7 @@ It is configured per the hermes-agent project's **own docs** (out of scope here)
 | `make up` fails | Check Ollama: `curl -sf http://127.0.0.1:11434/api/tags` |
 | Port conflict | `lsof -i :7700 -i :5432 -i :11434` |
 | Second `make up` / re-clone fails | Run `make down` first — the containers use fixed names and bind `127.0.0.1:7700` / `:5432`, so a second stack collides with the running one |
-| Agent not starting | `OMB_CORE_ONLY=1 make up` runs core-only; hermes image must be built separately |
+| Agent not starting | `BORING_CORE_ONLY=1 make up` runs core-only; hermes image must be built separately |
 | Linux: container can't reach host Ollama | On Linux, Ollama binds `127.0.0.1` by default, so the container hits a closed port even though `host.docker.internal` resolves. Bind Ollama to all interfaces (`OLLAMA_HOST=0.0.0.0:11434`, then restart it) and/or allow the docker bridge in the host firewall |
 | `embedding dim mismatch` errors | Your `llm.embed_model` output size ≠ `llm.embed_dim` in `boring.json`. Update `embed_dim` to match the new model and run `make reset` |
 | Healthy? / did the last distill land? | `make doctor` — quick health + last-ingest check |

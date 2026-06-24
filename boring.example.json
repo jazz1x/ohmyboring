@@ -8,7 +8,7 @@
     "model": "gemma4:12b",
     "embed_model": "bge-m3",
     "embed_dim": 1024,
-    "api_key_env": "OMB_LLM_API_KEY",
+    "api_key_env": "BORING_LLM_API_KEY",
     "bootstrap": "auto"
   },
   "repos": [

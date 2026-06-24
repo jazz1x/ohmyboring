@@ -30,16 +30,16 @@ const DEFAULT_EMBED_DIM: u32 = 1024;
 /// (`host.docker.internal` resolves to the host). boring.json (bind-mounted) is the SSOT; compose no
 /// longer injects a base_url default that would shadow it. Overridable at runtime via env (see
 /// `Llm::from_config`). NOTE: running the `drudge` binary directly on the host (e.g. `selftest`) needs
-/// `OMB_LLM_BASE_URL=http://localhost:11434/v1`, since `host.docker.internal` resolves only in-container.
+/// `BORING_LLM_BASE_URL=http://localhost:11434/v1`, since `host.docker.internal` resolves only in-container.
 const DEFAULT_LLM_BASE_URL: &str = "http://host.docker.internal:11434/v1";
 /// Default synthesis (chat) model — used only by the `ask`/`brief` generation path.
 const DEFAULT_CHAT_MODEL: &str = "gemma4:12b";
 /// Default env var name holding the LLM API key (providers that need auth — OpenAI etc.).
 /// Named (not the key itself) so the secret never lands in boring.json.
-const DEFAULT_API_KEY_ENV: &str = "OMB_LLM_API_KEY";
+const DEFAULT_API_KEY_ENV: &str = "BORING_LLM_API_KEY";
 
 /// Read env `canonical`, falling back to a deprecated alias (warns once on the alias). Empty = unset,
-/// so an `OMB_X=` placeholder doesn't mask the alias/default. SSOT for the OMB_* (canonical) /
+/// so an `BORING_X=` placeholder doesn't mask the alias/default. SSOT for the BORING_* (canonical) /
 /// DRUDGE_* (deprecated) env-prefix migration — shared by config/llm/main/serve.
 #[must_use]
 pub fn env_alias(canonical: &str, deprecated: &str) -> Option<String> {
@@ -288,7 +288,7 @@ const fn default_true() -> bool {
 }
 
 impl BoringConfig {
-    /// Load config from `path`, or discover it via `BORING_CONFIG` / `OMB_HOME` / cwd.
+    /// Load config from `path`, or discover it via `BORING_CONFIG` / `BORING_HOME` / cwd.
     /// Missing file falls back to legacy env vars (with deprecation warnings).
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let path = match path {
@@ -542,7 +542,7 @@ pub fn discover_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("BORING_CONFIG") {
         return Some(PathBuf::from(p));
     }
-    if let Ok(home) = std::env::var("OMB_HOME") {
+    if let Some(home) = env_alias("BORING_HOME", "OMB_HOME") {
         let p = PathBuf::from(home).join("boring.json");
         if p.exists() {
             return Some(p);
@@ -659,7 +659,7 @@ mod tests {
         assert_eq!(cfg.llm.provider, Provider::Ollama);
         assert_eq!(cfg.llm.base_url, "http://host.docker.internal:11434/v1");
         assert_eq!(cfg.llm.model, "gemma4:12b");
-        assert_eq!(cfg.llm.api_key_env, "OMB_LLM_API_KEY");
+        assert_eq!(cfg.llm.api_key_env, "BORING_LLM_API_KEY");
         assert_eq!(cfg.llm.bootstrap, Bootstrap::Auto);
         // top-level embed is backfilled into the llm block so `drudge config` is consistent.
         assert_eq!(cfg.embed_model, "nomic-embed-text");

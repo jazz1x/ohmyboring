@@ -23,7 +23,7 @@ sys.path.insert(0, str(SHARED_DIR))
 
 # Neutralize ambient policy env so the test exercises the <repo-root>/boring.json
 # branch deterministically from a fresh clone, regardless of the dev's shell.
-for _var in ("BORING_CONFIG", "OMB_HOME"):
+for _var in ("BORING_CONFIG", "BORING_HOME"):
     os.environ.pop(_var, None)
 
 import boring_config  # noqa: E402  (import after sys.path/env setup, on purpose)

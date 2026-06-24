@@ -8,10 +8,10 @@ to save disk and reduce secret/exposure surface, then deletes archives that are 
 old to be useful.
 
 Policy knobs (env):
-  OMB_RETENTION_PROCESSED_DAYS   default 30   → archive processed sessions older than this
-  OMB_RETENTION_UNPROCESSED_DAYS default 90   → archive unprocessed sessions older than this
-  OMB_RETENTION_ARCHIVE_DAYS     default 180  → delete archived .gz files older than this
-  OMB_RETENTION_DELETE_ONLY      default 0    → if 1, delete sessions instead of archiving
+  BORING_RETENTION_PROCESSED_DAYS   default 30   → archive processed sessions older than this
+  BORING_RETENTION_UNPROCESSED_DAYS default 90   → archive unprocessed sessions older than this
+  BORING_RETENTION_ARCHIVE_DAYS     default 180  → delete archived .gz files older than this
+  BORING_RETENTION_DELETE_ONLY      default 0    → if 1, delete sessions instead of archiving
 
 Dry-run by default; pass --apply to execute.
 """
@@ -192,10 +192,10 @@ def main():
     parser.add_argument("--yes", action="store_true", help="skip confirmation prompt")
     args = parser.parse_args()
 
-    processed_days = _env_days("OMB_RETENTION_PROCESSED_DAYS", DEFAULT_PROCESSED_DAYS)
-    unprocessed_days = _env_days("OMB_RETENTION_UNPROCESSED_DAYS", DEFAULT_UNPROCESSED_DAYS)
-    archive_days = _env_days("OMB_RETENTION_ARCHIVE_DAYS", DEFAULT_ARCHIVE_DAYS)
-    delete_only = os.environ.get("OMB_RETENTION_DELETE_ONLY", "0").strip() in ("1", "true", "yes")
+    processed_days = _env_days("BORING_RETENTION_PROCESSED_DAYS", DEFAULT_PROCESSED_DAYS)
+    unprocessed_days = _env_days("BORING_RETENTION_UNPROCESSED_DAYS", DEFAULT_UNPROCESSED_DAYS)
+    archive_days = _env_days("BORING_RETENTION_ARCHIVE_DAYS", DEFAULT_ARCHIVE_DAYS)
+    delete_only = os.environ.get("BORING_RETENTION_DELETE_ONLY", "0").strip() in ("1", "true", "yes")
     now = time.time()
 
     p = plan(now, processed_days, unprocessed_days, archive_days, delete_only)

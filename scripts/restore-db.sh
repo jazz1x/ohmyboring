@@ -8,7 +8,7 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-BACKUP_DIR="${OMB_BACKUP_DIR:-$ROOT/data/backups}"
+BACKUP_DIR="${BORING_BACKUP_DIR:-$ROOT/data/backups}"
 
 if docker compose version 2>&1 | grep -q "Docker Compose"; then
   COMPOSE="docker compose"
