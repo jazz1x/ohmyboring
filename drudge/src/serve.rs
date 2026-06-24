@@ -1037,11 +1037,13 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
         .await
         .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
     // The note is written + ingested + recallable by now; relates_to projection is the auxiliary
-    // refresh. On failure report partial-success (next sync recomputes) rather than implying it ran.
-    let relates = match vault::project_links(store, vault_root, 6).await {
+    // refresh. Project ONLY this new note (bounded: ~3 queries + 1 write) instead of recomputing the
+    // whole corpus — its neighbors' backlinks are reconciled by the next periodic full project_links
+    // (invisible to recall, which is embedding-based). On failure report partial-success.
+    let relates = match vault::project_note(store, &path, 6).await {
         Ok(_) => "",
         Err(e) => {
-            eprintln!("[remember] project_links warning (ignored): {e:#}");
+            eprintln!("[remember] project_note warning (ignored): {e:#}");
             " · relates_to deferred to next sync"
         }
     };
