@@ -17,7 +17,7 @@ sys.path.insert(
 )
 import boring_config
 
-OMB_HOME = os.environ.get("OMB_HOME") or os.path.expanduser("~/oh-my-boring")
+BORING_HOME = (os.environ.get("BORING_HOME") or os.environ.get("OMB_HOME")) or os.path.expanduser("~/oh-my-boring")
 
 # Agent-specific configuration targets.
 AGENTS = {
@@ -113,8 +113,8 @@ def wire_claude_code(path: Path | None = None) -> dict:
     settings = _load_json(path)
     settings.setdefault("hooks", {})
 
-    distill = f"python3 {OMB_HOME}/hooks/distill-session.py"
-    recall = f"python3 {OMB_HOME}/hooks/recall.py"
+    distill = f"python3 {BORING_HOME}/hooks/distill-session.py"
+    recall = f"python3 {BORING_HOME}/hooks/recall.py"
 
     changed = False
     if not _already_wired(settings, distill):
@@ -157,8 +157,8 @@ def wire_kimi(path: Path | None = None) -> dict:
     path = path if path is not None else _agent_path("kimi")
     _backup(path)
 
-    distill = f"python3 {OMB_HOME}/hooks/kimi-distill-session.py"
-    recall = f"python3 {OMB_HOME}/hooks/kimi-recall.py"
+    distill = f"python3 {BORING_HOME}/hooks/kimi-distill-session.py"
+    recall = f"python3 {BORING_HOME}/hooks/kimi-recall.py"
 
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     changed = False
@@ -236,7 +236,7 @@ def install(enabled_agents, server_name, server_config):
 
 
 def main():
-    global OMB_HOME
+    global BORING_HOME
     parser = argparse.ArgumentParser(
         description="Wire oh-my-boring adapters for enabled agents"
     )
@@ -245,11 +245,11 @@ def main():
     )
     parser.add_argument("--server-name", default="ohmyboring")
     parser.add_argument("--server-url", default="http://localhost:7700/mcp")
-    parser.add_argument("--omb-home", default=OMB_HOME)
+    parser.add_argument("--boring-home", default=BORING_HOME)
     args = parser.parse_args()
 
-    OMB_HOME = args.omb_home
-    os.environ["OMB_HOME"] = OMB_HOME
+    BORING_HOME = args.boring_home
+    os.environ["BORING_HOME"] = BORING_HOME
 
     cfg = boring_config.load()
     enabled = [a["id"] for a in cfg.get("agents", []) if a.get("enabled", True)]

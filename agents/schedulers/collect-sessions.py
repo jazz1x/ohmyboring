@@ -27,14 +27,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 import boring_config
 import omb_env
 
-DRUDGE_URL = omb_env.drudge_url()  # OMB_URL canonical, DRUDGE_URL deprecated alias
+DRUDGE_URL = omb_env.drudge_url()  # BORING_URL canonical, DRUDGE_URL deprecated alias
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")  # skip small sessions (distill would SKIP anyway)
-# OMB_HOME: repo clone location (default ~/oh-my-boring). Lets a forker clone elsewhere
+# BORING_HOME: repo clone location (default ~/oh-my-boring). Lets a forker clone elsewhere
 # without editing this file.
-OMB_HOME = os.environ.get("OMB_HOME") or os.path.expanduser("~/oh-my-boring")
-HOOK = os.path.join(OMB_HOME, "agents/claude-code/distill-session.py")
+BORING_HOME = (os.environ.get("BORING_HOME") or os.environ.get("OMB_HOME")) or os.path.expanduser("~/oh-my-boring")
+HOOK = os.path.join(BORING_HOME, "agents/claude-code/distill-session.py")
 MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
 
 
@@ -81,7 +81,7 @@ def _warm_llm():
     first agent call exceed its timeout → silent SKIP. Best-effort: any failure is ignored (the agent's
     own call still works, just slower). Uses Ollama's native /api/generate keep_alive (no-op elsewhere)."""
     base = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-    model = omb_env.llm_model()  # OMB_LLM_MODEL canonical, DRUDGE_LLM_MODEL deprecated alias
+    model = omb_env.llm_model()  # BORING_LLM_MODEL canonical, DRUDGE_LLM_MODEL deprecated alias
     body = json.dumps({"model": model, "prompt": "ok", "stream": False, "keep_alive": 1800}).encode()
     try:
         urllib.request.urlopen(
@@ -128,7 +128,7 @@ def main():
 
     env = dict(os.environ)
     if args.now:
-        env["OMB_DISTILL_NO_MARK"] = "1"  # leave the session un-marked → re-distillable + SessionEnd still fires
+        env["BORING_DISTILL_NO_MARK"] = "1"  # leave the session un-marked → re-distillable + SessionEnd still fires
     done = 0
     for tp in batch:
         proj = os.path.basename(os.path.dirname(tp))  # encoded dir name — for the log label only

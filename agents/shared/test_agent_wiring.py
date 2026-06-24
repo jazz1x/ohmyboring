@@ -16,7 +16,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 os.environ.pop("BORING_CONFIG", None)
-os.environ.pop("OMB_HOME", None)
+os.environ.pop("BORING_HOME", None)
 
 import agent_wiring
 

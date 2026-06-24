@@ -43,7 +43,7 @@ teardown() { rm -rf "$WORK"; }
 
 run() { # stdin_answer ; runs restore with stub docker on PATH; sets RC
   printf '%s\n' "$1" | PATH="$STUB_BIN:$PATH" STUB_PGRESTORE_L_RC="${STUB_PGRESTORE_L_RC:-0}" \
-    FILE="${FILE:-}" OMB_BACKUP_DIR="$WORK/backups" sh "$SCRIPT" >"$WORK/out" 2>&1 || RC=$?
+    FILE="${FILE:-}" BORING_BACKUP_DIR="$WORK/backups" sh "$SCRIPT" >"$WORK/out" 2>&1 || RC=$?
   RC="${RC:-0}"
 }
 

@@ -48,23 +48,23 @@ services:
       # LLM connection is the `llm` block of the bind-mounted boring.json (the SSOT). These are
       # pass-through OVERRIDES only — no baked default, so an unset value stays empty and the engine
       # reads boring.json. (A hardcoded default here would shadow boring.json, breaking e.g. an
-      # LM Studio base_url set in the config.) OMB_LLM_* is canonical; DRUDGE_LLM_* the deprecated
-      # alias. Both forwarded so either .env style works; the engine prefers OMB_. embed_model is the
+      # LM Studio base_url set in the config.) BORING_LLM_* is canonical; DRUDGE_LLM_* the deprecated
+      # alias. Both forwarded so either .env style works; the engine prefers BORING_. embed_model is the
       # engine's policy SSOT (boring.json only) — no env knob.
-      OMB_LLM_BASE_URL: ${OMB_LLM_BASE_URL:-}
+      BORING_LLM_BASE_URL: ${BORING_LLM_BASE_URL:-}
       DRUDGE_LLM_BASE_URL: ${DRUDGE_LLM_BASE_URL:-}
-      OMB_LLM_MODEL: ${OMB_LLM_MODEL:-}
+      BORING_LLM_MODEL: ${BORING_LLM_MODEL:-}
       DRUDGE_LLM_MODEL: ${DRUDGE_LLM_MODEL:-}
-      OMB_LLM_API_KEY: ${OMB_LLM_API_KEY:-}
+      BORING_LLM_API_KEY: ${BORING_LLM_API_KEY:-}
       DRUDGE_LLM_API_KEY: ${DRUDGE_LLM_API_KEY:-}
-      OMB_HTTP_ADDR: 0.0.0.0:7700
+      BORING_HTTP_ADDR: 0.0.0.0:7700
       PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring  # host = the boring-postgres service (compose DNS)
       BORING_CONFIG: /app/boring.json     # policy: note language, repo rules, source dirs
-      OMB_VAULT_DIR: /vault                # remember target + sync corpus (/vault/wiki)
-      # OMB_VECTOR canonical; DRUDGE_VECTOR deprecated alias (both forwarded, engine prefers OMB_).
-      OMB_VECTOR: ${OMB_VECTOR:-}
+      BORING_VAULT_DIR: /vault                # remember target + sync corpus (/vault/wiki)
+      # BORING_VECTOR canonical; DRUDGE_VECTOR deprecated alias (both forwarded, engine prefers BORING_).
+      BORING_VECTOR: ${BORING_VECTOR:-}
       DRUDGE_VECTOR: ${DRUDGE_VECTOR:-off} # default off = wiki-first direct read. on = vector+graph (boring-postgres alongside via --profile vector)
-      OMB_SYNC_HOURS: "4"
+      BORING_SYNC_HOURS: "4"
       TZ: Asia/Seoul
     volumes:
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: drudge's source_dirs only reads ~/.claude/projects)
@@ -90,8 +90,8 @@ services:
       HERMES_UID: ${HERMES_UID:-501}      # host user uid (~/.hermes file permissions)
       HERMES_GID: ${HERMES_GID:-20}
       TZ: Asia/Seoul
-      # RAG endpoint for morning-briefing (briefing.py) + ingest-worker. OMB_URL canonical, DRUDGE_URL alias.
-      OMB_URL: http://boring-drudge:7700
+      # RAG endpoint for morning-briefing (briefing.py) + ingest-worker. BORING_URL canonical, DRUDGE_URL alias.
+      BORING_URL: http://boring-drudge:7700
       DRUDGE_URL: http://boring-drudge:7700
     volumes:
       - ${HOME}/.hermes:/opt/data         # persists config / credentials / session memory (autonomy-augmentation layer)

@@ -11,7 +11,7 @@ chunk text drudge sends at ingest (`chunk(body.trim())`, single chunk since fixt
 each query string both resolve to their recorded vector.
 
 Run locally against your embedder, then commit recorded_embeddings.json:
-    OMB_LLM_BASE_URL=http://localhost:11434/v1 python3 data/eval/record_embeddings.py
+    BORING_LLM_BASE_URL=http://localhost:11434/v1 python3 data/eval/record_embeddings.py
 """
 import hashlib
 import json
@@ -24,8 +24,8 @@ HERE = Path(__file__).resolve().parent
 FIXTURES = HERE / "fixtures"
 GOLDEN = HERE / "golden.json"
 OUT = HERE / "recorded_embeddings.json"
-BASE = (os.environ.get("OMB_LLM_BASE_URL") or "http://localhost:11434/v1").rstrip("/")
-MODEL = os.environ.get("OMB_EMBED_MODEL") or "bge-m3"
+BASE = (os.environ.get("BORING_LLM_BASE_URL") or "http://localhost:11434/v1").rstrip("/")
+MODEL = os.environ.get("BORING_EMBED_MODEL") or "bge-m3"
 
 
 def key(text: str) -> str:

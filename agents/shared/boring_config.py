@@ -3,7 +3,7 @@
 
 Discovery order (first wins):
   1. $BORING_CONFIG
-  2. $OMB_HOME/boring.json
+  2. $BORING_HOME/boring.json
   3. <repo-root>/boring.json
 
 Missing file is not an error — hooks degrade gracefully to an empty policy
@@ -42,7 +42,7 @@ def discover_path() -> Path | None:
         p = Path("/host/boring.json")
         if p.is_file():
             return p
-    omb_home = os.environ.get("OMB_HOME")
+    omb_home = (os.environ.get("BORING_HOME") or os.environ.get("OMB_HOME"))
     if omb_home:
         p = Path(omb_home).expanduser() / "boring.json"
         if p.is_file():

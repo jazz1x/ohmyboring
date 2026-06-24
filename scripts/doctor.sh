@@ -11,11 +11,11 @@
 # failure. POSIX sh (dash) has no pipefail → every check reports its own result explicitly.
 set -u
 
-# Defaults mirror the hook (distill-session.py): DRUDGE_URL + OMB_HOME + the marker dir,
+# Defaults mirror the hook (distill-session.py): DRUDGE_URL + BORING_HOME + the marker dir,
 # so the diagnostic inspects exactly what the hook writes to.
-DRUDGE_URL="${OMB_URL:-${DRUDGE_URL:-http://127.0.0.1:7700}}"
+DRUDGE_URL="${BORING_URL:-${DRUDGE_URL:-http://127.0.0.1:7700}}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-OMB_HOME="${OMB_HOME:-$HOME/oh-my-boring}"
+BORING_HOME="${BORING_HOME:-${OMB_HOME:-$HOME/oh-my-boring}}"  # OMB_HOME = deprecated alias
 MARK_DIR="${HOME}/.cache/boring-distill"
 
 # host.docker.internal resolves only inside containers; from the host it must be localhost,
@@ -44,18 +44,18 @@ newest() {
 drudge_down=0
 
 # (a0) .env permissions — secrets live here.
-if [ -f "$OMB_HOME/.env" ]; then
-    perms=$(stat -c '%a' "$OMB_HOME/.env" 2>/dev/null || stat -f '%Lp' "$OMB_HOME/.env" 2>/dev/null)
+if [ -f "$BORING_HOME/.env" ]; then
+    perms=$(stat -c '%a' "$BORING_HOME/.env" 2>/dev/null || stat -f '%Lp' "$BORING_HOME/.env" 2>/dev/null)
     case "$perms" in
       600) ok ".env permissions are $perms" ;;
-      *) bad ".env permissions are $perms — should be 600 (run: chmod 600 $OMB_HOME/.env)" ;;
+      *) bad ".env permissions are $perms — should be 600 (run: chmod 600 $BORING_HOME/.env)" ;;
     esac
 fi
 
 # (a1) Claude Code hooks — the async write-door into ~/.claude/settings.json.
 settings="$HOME/.claude/settings.json"
 if [ -f "$settings" ]; then
-    if grep -q "$OMB_HOME/hooks/distill-session.py" "$settings" && grep -q "$OMB_HOME/hooks/recall.py" "$settings"; then
+    if grep -q "$BORING_HOME/hooks/distill-session.py" "$settings" && grep -q "$BORING_HOME/hooks/recall.py" "$settings"; then
         ok "Claude Code hooks wired in $settings"
     else
         bad "Claude Code hooks missing in $settings — run install.sh"
@@ -74,11 +74,11 @@ fi
 
 # (b) LLM endpoint — the model that generates the curated note before remember is called.
 # Provider-aware (boring.json `llm` block): Ollama exposes /api/tags, OpenAI-compatible servers
-# (LM Studio, vLLM, remote OpenAI) expose /v1/models. Env overrides boring.json (OMB_ then DRUDGE_).
-BORING="${BORING_CONFIG:-$OMB_HOME/boring.json}"
+# (LM Studio, vLLM, remote OpenAI) expose /v1/models. Env overrides boring.json (BORING_ then DRUDGE_).
+BORING="${BORING_CONFIG:-$BORING_HOME/boring.json}"
 PROVIDER=$(jq -r '.llm.provider // "ollama"' "$BORING" 2>/dev/null || echo ollama)
 LLM_BASE=$(jq -r '.llm.base_url // "http://host.docker.internal:11434/v1"' "$BORING" 2>/dev/null || echo "http://host.docker.internal:11434/v1")
-LLM_BASE="${OMB_LLM_BASE_URL:-${DRUDGE_LLM_BASE_URL:-$LLM_BASE}}"
+LLM_BASE="${BORING_LLM_BASE_URL:-${DRUDGE_LLM_BASE_URL:-$LLM_BASE}}"
 LLM_BASE=$(printf '%s' "$LLM_BASE" | sed 's#host\.docker\.internal#localhost#')
 if [ "$PROVIDER" = ollama ]; then
     NATIVE="${LLM_BASE%/v1}"; NATIVE="${NATIVE%/}"
@@ -101,14 +101,14 @@ if command -v docker >/dev/null 2>&1; then
     else
       COMPOSE="docker-compose"
     fi
-    ps=$(cd "$OMB_HOME" 2>/dev/null && $COMPOSE ps --format '{{.Name}} {{.Status}}' 2>/dev/null)
+    ps=$(cd "$BORING_HOME" 2>/dev/null && $COMPOSE ps --format '{{.Name}} {{.Status}}' 2>/dev/null)
     if [ -n "$ps" ]; then
-        ok "containers ($COMPOSE ps in $OMB_HOME):"
+        ok "containers ($COMPOSE ps in $BORING_HOME):"
         printf '%s\n' "$ps" | sed 's/^/    /'
         printf '%s\n' "$ps" | grep -qi 'restarting' \
             && bad "a container is RESTARTING (crash-loop) — check 'make logs'"
     else
-        bad "no compose containers found in $OMB_HOME (stack not started? set OMB_HOME?)"
+        bad "no compose containers found in $BORING_HOME (stack not started? set BORING_HOME?)"
     fi
 else
     bad "docker not on PATH — can't inspect container status"
@@ -116,12 +116,12 @@ fi
 
 # (d1) Newest distilled note — proof the write door produced output. The hook writes notes
 # as vault/wiki/wiki-*.md, so the newest mtime is the last successful distillation.
-note=$(newest "$OMB_HOME/vault/wiki/wiki-*.md")
+note=$(newest "$BORING_HOME/vault/wiki/wiki-*.md")
 if [ -n "$note" ]; then
     ok "newest distilled note: $(mtime_human "$note")"
     echo "    $note"
 else
-    bad "no distilled notes in $OMB_HOME/vault/wiki/ — nothing written yet"
+    bad "no distilled notes in $BORING_HOME/vault/wiki/ — nothing written yet"
 fi
 
 # (d2) Newest SessionEnd hook marker — proof the hook itself fired (it stamps MARK_DIR after

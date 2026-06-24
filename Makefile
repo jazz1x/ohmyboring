@@ -22,7 +22,7 @@ hermes-build: ## Clone/build the optional hermes-agent image
 	cd "$(HOME)/hermes-agent-src" && docker build -t hermes-agent .
 
 down: ## Stop the whole stack, including Postgres when vector mode was used (keeps ./data)
-	@case "$$(printf '%s' "$${OMB_VECTOR:-$${DRUDGE_VECTOR:-off}}" | tr '[:upper:]' '[:lower:]')" in \
+	@case "$$(printf '%s' "$${BORING_VECTOR:-$${DRUDGE_VECTOR:-off}}" | tr '[:upper:]' '[:lower:]')" in \
 	  on|1|true|yes) $(COMPOSE) --profile vector down ;; \
 	  *) $(COMPOSE) down ;; \
 	esac
@@ -42,7 +42,7 @@ models: ## Pull Ollama models (DRUDGE_LLM_MODEL + DRUDGE_EMBED_MODEL, defaults g
 ask: ## Single query   make ask Q="question"
 	@command -v jq >/dev/null 2>&1 || { echo 'jq not found — install: brew install jq / apt-get install jq'; exit 1; }
 	@[ -n "$(Q)" ] || { echo 'usage: make ask Q="question"'; exit 1; }
-	@code=$$(curl -s -m120 -o /tmp/omb-ask.$$$$ -w '%{http_code}' "$${OMB_URL:-$${DRUDGE_URL:-http://127.0.0.1:7700}}/ask" \
+	@code=$$(curl -s -m120 -o /tmp/omb-ask.$$$$ -w '%{http_code}' "$${BORING_URL:-$${DRUDGE_URL:-http://127.0.0.1:7700}}/ask" \
 	  -H 'content-type: application/json' \
 	  -d "$$(jq -nc --arg q "$(Q)" '{question:$$q}')"); \
 	  body=$$(cat /tmp/omb-ask.$$$$ 2>/dev/null); rm -f /tmp/omb-ask.$$$$; \
@@ -51,12 +51,12 @@ ask: ## Single query   make ask Q="question"
 
 sync: ## Deterministic re-ingest of the vault (vault/wiki → embed → graph → relates_to)
 	@command -v jq >/dev/null 2>&1 || { echo 'jq not found — install: brew install jq / apt-get install jq'; exit 1; }
-	@curl -s -m600 -X POST "$${OMB_URL:-$${DRUDGE_URL:-http://127.0.0.1:7700}}/sync" | jq .
+	@curl -s -m600 -X POST "$${BORING_URL:-$${DRUDGE_URL:-http://127.0.0.1:7700}}/sync" | jq .
 
 remember: ## Save + ingest a note immediately   make remember M="content" [T="title"]
 	@command -v jq >/dev/null 2>&1 || { echo 'jq not found — install: brew install jq / apt-get install jq'; exit 1; }
 	@[ -n "$(M)" ] || { echo 'usage: make remember M="content" [T="title"]'; exit 1; }
-	@curl -s -m600 -X POST "$${OMB_URL:-$${DRUDGE_URL:-http://127.0.0.1:7700}}/mcp" -H 'content-type: application/json' \
+	@curl -s -m600 -X POST "$${BORING_URL:-$${DRUDGE_URL:-http://127.0.0.1:7700}}/mcp" -H 'content-type: application/json' \
 	  -d "$$(jq -nc --arg t "$${T:-$(M)}" --arg b "$(M)" \
 	    '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"remember",arguments:{title:$$t,body:$$b}}}')" \
 	  | jq -r '.result.content[0].text // .error.message'
@@ -111,12 +111,12 @@ restore-db: ## Restore pgvector DB from latest backup (interactive; stop drudge,
 	@./scripts/restore-db.sh
 
 compact: ## Run VACUUM/REINDEX/prune/orphan-GC against the pgvector DB
-	cd drudge && OMB_VECTOR=on cargo run -- compact
+	cd drudge && BORING_VECTOR=on cargo run -- compact
 
 reset: ## ⚠️ Reset including Postgres data (re-ingested from source)
 	@printf '⚠️  This deletes ./data/pgdata (the vector DB). vault/ markdown is kept. Continue? [y/N] '; \
 	  read ans; [ "$$ans" = y ] || [ "$$ans" = Y ] || { echo "aborted."; exit 1; }
-	@case "$$(printf '%s' "$${OMB_VECTOR:-$${DRUDGE_VECTOR:-off}}" | tr '[:upper:]' '[:lower:]')" in \
+	@case "$$(printf '%s' "$${BORING_VECTOR:-$${DRUDGE_VECTOR:-off}}" | tr '[:upper:]' '[:lower:]')" in \
 	  on|1|true|yes) $(COMPOSE) --profile vector down ;; \
 	  *) $(COMPOSE) down ;; \
 	esac

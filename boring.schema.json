@@ -17,7 +17,7 @@
     },
     "llm": {
       "type": "object",
-      "description": "LLM connection + bootstrap policy (v2). The engine is OpenAI-compatible and backend-agnostic; `provider` steers only the host-side bootstrap (model pull / daemon ensure / health probe). Runtime env (OMB_LLM_*; DRUDGE_LLM_* deprecated alias) still overrides.",
+      "description": "LLM connection + bootstrap policy (v2). The engine is OpenAI-compatible and backend-agnostic; `provider` steers only the host-side bootstrap (model pull / daemon ensure / health probe). Runtime env (BORING_LLM_*; DRUDGE_LLM_* deprecated alias) still overrides.",
       "properties": {
         "provider": {
           "type": "string",
@@ -48,7 +48,7 @@
         },
         "api_key_env": {
           "type": "string",
-          "default": "OMB_LLM_API_KEY",
+          "default": "BORING_LLM_API_KEY",
           "description": "Name of the env var holding the API key (providers that need auth). The key itself never lives in boring.json."
         },
         "bootstrap": {
