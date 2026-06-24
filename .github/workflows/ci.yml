@@ -115,7 +115,7 @@ jobs:
         run: |
           # Run the container as the runner user so it can write the bind-mounted vault (Linux EACCES guard).
           export DRUDGE_UID="$(id -u)" DRUDGE_GID="$(id -g)"
-          docker compose --profile vector up -d --build boring-drudge postgres
+          docker compose --profile vector up -d --build boring-drudge boring-postgres
           for _ in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:7700/health >/dev/null 2>&1 && break; sleep 3; done
           curl -sf -m3 http://127.0.0.1:7700/health
       - name: behavioral gate (eval-gate.sh)
@@ -124,4 +124,4 @@ jobs:
         run: ./scripts/eval-gate.sh
       - name: engine logs on failure
         if: failure()
-        run: docker compose --profile vector logs boring-drudge postgres
+        run: docker compose --profile vector logs boring-drudge boring-postgres
