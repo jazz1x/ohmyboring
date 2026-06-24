@@ -5,6 +5,7 @@
 //!     note's frontmatter — agent-curated — NOT from an LLM extraction pass. drudge only embeds (bge-m3)
 //!     and links. `ingest_file` is the SSOT per-file pipeline shared by `run` (walk) and `remember` (one file).
 use anyhow::Result;
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::Path;
@@ -16,6 +17,10 @@ use crate::frontmatter::{self, FrontMatter};
 use crate::llm::Llm;
 use crate::store::{Doc, Store};
 
+/// Max embedding requests in flight per file. Caps load on a local single-GPU LLM server
+/// (Ollama/LM Studio) — going wider stops helping once the server serializes internally, and
+/// risks OOM/queueing. Small constant > env knob (Karpathy: simplest thing that works).
+const EMBED_CONCURRENCY: usize = 8;
 const NOISE_SUBSTR: [&str; 1] = ["tool-results"]; // exclude general noise (tool-output dumps)
 const EXTS: [&str; 3] = ["md", "markdown", "txt"];
 const CHUNK_SIZE: usize = 1500;
@@ -233,12 +238,18 @@ pub async fn ingest_file(
         return Ok(FileOutcome::Skipped);
     }
 
-    // Pre-compute embeddings BEFORE any DB write — keep the slow Ollama round-trips out of the
-    // update window so the upsert/prune below is a tight back-to-back sequence.
-    let mut embedded = Vec::with_capacity(pieces.len());
-    for piece in &pieces {
-        embedded.push((piece.clone(), llm.embed(piece).await?));
-    }
+    // Pre-compute embeddings BEFORE any DB write — keep the slow LLM round-trips out of the
+    // update window so the upsert/prune below is a tight back-to-back sequence. Chunks embed
+    // independently, so they run with bounded concurrency (`buffered` preserves order, keeping
+    // chunk_idx aligned) instead of one blocking await per chunk. First error short-circuits (ROP).
+    let embedded: Vec<(String, Vec<f32>)> = stream::iter(pieces.clone())
+        .map(|piece| async move {
+            let embedding = llm.embed(&piece).await?;
+            Ok::<_, anyhow::Error>((piece, embedding))
+        })
+        .buffered(EMBED_CONCURRENCY)
+        .try_collect()
+        .await?;
 
     // Upsert-then-prune (NOT delete-then-insert): chunks are keyed by `path#idx` with ON CONFLICT
     // DO UPDATE, so overwriting them in place keeps the document with a full chunk set throughout —
