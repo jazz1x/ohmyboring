@@ -176,9 +176,9 @@ make bench-llm-tier TIER=32gb
 make bench-embed
 ```
 
-Measured on a MacBook Pro (M5 Pro, 48 GB RAM) with local Ollama: the 16 GB tier pair (`gemma4:12b` vs `qwen3:14b`) both hit 100% valid JSON, Korean title, 2+ body sections, and clean body. Average latency was **15.76 s** for `gemma4:12b` and **18.42 s** for `qwen3:14b`. `qwen3:8b` is faster at **8.11 s** with the same quality on the tested samples. `bge-m3` embedding averaged **0.105 s** per text and passed the cosine sanity check.
+Measured on a MacBook Pro (M5 Pro, 48 GB RAM) with local Ollama. The 16 GB tier pair (`gemma4:12b` vs `qwen3:14b`) hits 100% valid JSON, target-language title, 2+ body sections, and clean body in Korean and English; in Japanese `qwen3:14b` occasionally reverts to Korean titles (67% Japanese-title rate on 3 samples) while `gemma4:12b` and `qwen3:8b` stay at 100%. Average latency: `gemma4:12b` ~13–16 s, `qwen3:14b` ~12–18 s, `qwen3:8b` ~6–8 s. `bge-m3` embedding averaged **0.105 s** per text and passed the cosine sanity check.
 
-See [`docs/reports/llm-pair-matrix.md`](docs/reports/llm-pair-matrix.md) for the full matrix, tag sizes, methodology, and LM Studio notes.
+See [`docs/reports/llm-pair-matrix.md`](docs/reports/llm-pair-matrix.md) for per-language tables, tag sizes, methodology, and LM Studio notes.
 
 ### Naming layers
 

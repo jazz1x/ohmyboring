@@ -149,16 +149,34 @@ def _extract_json(text):
         return None
 
 
-def _build_prompt(text, origin, repo):
+def _build_prompt(text, origin, repo, note_lang=None):
     """Build the distillation prompt, honouring note_lang and repo metadata."""
+    lang = note_lang or NOTE_LANG
     lang_instruction = {
         "ko": "ALL fields MUST be in Korean (한국어), regardless of the transcript's language. "
               "The TITLE especially must be a Korean sentence — even if the session is full of English "
               "ticket IDs (e.g. [FEDEV-97]) or English error names, write the title in Korean and keep "
               "only the proper nouns/IDs/code verbatim. e.g. title → '[FEDEV-97] 하이드레이션 에러 및 "
               "Relay 동기화 해결'. Never copy an all-English title from the transcript.",
-        "en": "Write every field in English.",
-    }.get(NOTE_LANG, "Write in the same language as the transcript.")
+        "ja": "ALL fields MUST be in Japanese (日本語), regardless of the transcript's language. "
+              "The TITLE especially must be a Japanese sentence — even if the session is full of English "
+              "ticket IDs (e.g. [FEDEV-97]) or English error names, write the title in Japanese and keep "
+              "only the proper nouns/IDs/code verbatim. e.g. title → '[FEDEV-97] ハイドレーションエラーと "
+              "Relay同期の解決'. Never copy an all-English title from the transcript.",
+        "en": "ALL fields MUST be in English, regardless of the transcript's language. "
+              "The TITLE especially must be an English sentence — even if the session is full of Korean "
+              "or Japanese text, write the title in English and keep only proper nouns/IDs/code verbatim. "
+              "e.g. title → '[FEDEV-97] Fixing hydration error and Relay sync'. Never copy a non-English "
+              "title from the transcript.",
+    }.get(lang, "Write in the same language as the transcript.")
+
+    # Section headers are emitted in the target language so the body is consistent end-to-end.
+    section_headers = {
+        "ko": ("배경 / 문제", "시도 / 결정", "결과 / 해결", "남은 일"),
+        "ja": ("背景 / 問題", "試行 / 決定", "結果 / 解決", "残件"),
+        "en": ("Background / Problem", "Attempt / Decision", "Result / Fix", "Remaining work"),
+    }.get(lang, ("Background / Problem", "Attempt / Decision", "Result / Fix", "Remaining work"))
+    h_bg, h_at, h_rs, h_rm = section_headers
 
     repo_hint = f" repo='{repo}'." if repo else ""
     origin_hint = f" origin='{origin}'." if origin else ""
@@ -169,19 +187,19 @@ def _build_prompt(text, origin, repo):
         "Output ONLY a single JSON object, no text before or after it:\n"
         '{"title": "...", "body": "...", "tags": ["..."], "tools": ["..."], "concepts": ["..."], '
         "\"claims\": [{\"subject\":\"...\",\"predicate\":\"...\",\"value\":\"...\"}]}\\n\\n"
-        "BODY FORMAT — the body is a markdown string with these sections (omit a section if it does not apply):\n"
-        "  ## 배경 / 문제   — what was being solved (1-2 lines)\n"
-        "  ## 시도 / 결정    — what was tried, key decisions and WHY\n"
-        "  ## 결과 / 해결    — what worked: concrete commands, config, root cause\n"
-        "  ## 남은 일        — unfinished or next steps (omit if none)\n\n"
+        f"BODY FORMAT — the body is a markdown string with these sections (omit a section if it does not apply):\n"
+        f"  ## {h_bg}   — what was being solved (1-2 lines)\n"
+        f"  ## {h_at}    — what was tried, key decisions and WHY\n"
+        f"  ## {h_rs}    — what worked: concrete commands, config, root cause\n"
+        f"  ## {h_rm}        — unfinished or next steps (omit if none)\n\n"
         "CRITICAL — body content rules (format-breaking bugs happen when you ignore these):\n"
         "- The body MUST contain ONLY markdown prose. NEVER put tags, tools, concepts, claims, or any metadata inside the body.\n"
         "- All metadata MUST go in the JSON fields above, not in the body. A trailing 'tags:' or 'tools:' block in the body is a bug.\n"
         "- Use REAL line breaks inside the JSON string, never the two characters backslash-n.\n\n"
         "WRITING (proven principles — apply, don't just summarize):\n"
-        "- 두괄식(BLUF): each section's first sentence is the conclusion; details follow.\n"
-        "- 삭제(omit needless words): no filler/repetition, no '·'-joined noun piles, cut hedging.\n"
-        "- 일상어·능동: plain words over jargon, active voice; spell out an acronym on first use.\n\n"
+        "- BLUF / 要約先出し: each section's first sentence is the conclusion; details follow.\n"
+        "- Omit needless words: no filler/repetition, no '·'-joined noun piles, cut hedging.\n"
+        "- Plain words, active voice; spell out an acronym on first use.\n\n"
         "Rules:\n"
         "- title: concise, specific, in the target language.\n"
         "- tags: up to 6, lowercase, no hashtags.\n"

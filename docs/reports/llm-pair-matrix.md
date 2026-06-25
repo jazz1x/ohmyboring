@@ -38,26 +38,35 @@ python3 scripts/bench-llm.py --tier 16gb --pull
 
 ## Measured results
 
-Run on a **MacBook Pro (Apple M5 Pro, 48 GB RAM, macOS 26.5.1)** with local Ollama and default quantizations. Samples = 3 synthetic 3-turn transcripts; metrics come from `scripts/bench-llm.py`.
+Run on a **MacBook Pro (Apple M5 Pro, 48 GB RAM, macOS 26.5.1)** with local Ollama and default quantizations. Samples = 3 synthetic 3-turn transcripts; metrics come from `scripts/bench-llm.py --lang <ko|ja|en>`.
 
-### 16 GB tier pair: `gemma4:12b` vs `qwen3:14b`
+The prompt now emits section headers in the requested language, and the benchmark checks that the title matches the target script (Hangul / Hiragana·Katakana·CJK / ASCII without CJK).
 
-| model        | valid JSON | title Korean | 2+ sections | clean body | avg latency |
-|--------------|-----------:|-------------:|------------:|-----------:|------------:|
-| `gemma4:12b` | 100%       | 100%         | 100%        | 100%       | 15.76 s     |
-| `qwen3:14b`  | 100%       | 100%         | 100%        | 100%       | 18.42 s     |
-
-Both models pass the mechanical quality gate. `gemma4:12b` is slightly faster; `qwen3:14b` consistently emits an extra `## 남은 일` section, which is useful if you want the model to surface follow-ups automatically.
-
-### Same-tier comparison: `qwen3:8b`
-
-`qwen3:8b` also fits in 16 GB and runs faster, but it is a smaller model than `gemma4:12b`:
+### Korean (`ko`)
 
 | model        | valid JSON | title Korean | 2+ sections | clean body | avg latency |
 |--------------|-----------:|-------------:|------------:|-----------:|------------:|
-| `qwen3:8b`   | 100%       | 100%         | 100%        | 100%       | 8.11 s      |
+| `gemma4:12b` | 100%       | 100%         | 100%        | 100%       | 15.64 s     |
+| `qwen3:14b`  | 100%       | 100%         | 100%        | 100%       | 17.52 s     |
+| `qwen3:8b`   | 100%       | 100%         | 100%        | 100%       | 7.93 s      |
 
-For pure note-taking quality the measured samples are equivalent, so pick `qwen3:8b` if you prioritize speed and `qwen3:14b`/`gemma4:12b` if you want larger capacity.
+### Japanese (`ja`)
+
+| model        | valid JSON | title Japanese | 2+ sections | clean body | avg latency |
+|--------------|-----------:|---------------:|------------:|-----------:|------------:|
+| `gemma4:12b` | 100%       | 100%           | 100%        | 100%       | 15.92 s     |
+| `qwen3:14b`  | 100%       | 67%            | 100%        | 100%       | 18.98 s     |
+| `qwen3:8b`   | 100%       | 100%           | 100%        | 100%       | 8.21 s      |
+
+`qwen3:14b` sometimes falls back to Korean in the title on the tested Japanese prompts (e.g. `Docker 빌드 캐시 문제와 Relay 동기화 해결`). If you need reliable Japanese output, `gemma4:12b` or `qwen3:8b` is currently safer on this small sample set.
+
+### English (`en`)
+
+| model        | valid JSON | title English | 2+ sections | clean body | avg latency |
+|--------------|-----------:|--------------:|------------:|-----------:|------------:|
+| `gemma4:12b` | 100%       | 100%          | 100%        | 100%       | 13.82 s     |
+| `qwen3:14b`  | 100%       | 100%          | 100%        | 100%       | 12.59 s     |
+| `qwen3:8b`   | 100%       | 100%          | 100%        | 100%       | 6.00 s      |
 
 ### Local embedding: `bge-m3`
 
@@ -75,8 +84,8 @@ The related pair is closer, so the embedding sanity check passes.
 `scripts/bench-llm.py` reuses the production distillation prompt (`agents/shared/distill_core.py::_build_prompt`) and JSON extractor (`_extract_json`). It evaluates:
 
 - valid JSON rate
-- title language compliance (`note_lang`)
-- body section coverage (`배경`, `시도`, `결과`, optionally `남은 일`)
+- title language compliance (`--lang ko|ja|en`)
+- body section coverage (language-specific headers: `배경/시도/결과/남은 일`, `背景/試行/結果/残件`, or `Background/Attempt/Result/Remaining work`)
 - metadata leakage into the body (trailing `tags`/`tools`/`concepts`/`claims`)
 - end-to-end latency
 
