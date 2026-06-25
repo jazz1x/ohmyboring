@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 
 use anyhow::Result;
 
+use crate::ask;
 use crate::audit;
 use crate::config;
 use crate::ingest;
@@ -162,6 +163,61 @@ async fn run_compact(store: Option<&Store>) {
     }
 }
 
+async fn run_brief(
+    store: Option<&Store>,
+    llm: &Llm,
+    vault_dir: Option<&PathBuf>,
+    cfg: &config::BoringConfig,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let Some(vd) = vault_dir else {
+        return;
+    };
+    let brief_dir = vd.join("wiki");
+    if let Err(e) = std::fs::create_dir_all(&brief_dir) {
+        eprintln!("[scheduler] brief: cannot create wiki dir: {e:#}");
+        return;
+    }
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let path = brief_dir.join(format!("daily-brief-{today}.md"));
+    if path.exists() {
+        eprintln!("[scheduler] daily brief already exists: {}", path.display());
+        return;
+    }
+    let out = match ask::brief(store, llm, &[], cfg.note_lang.as_str()).await {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("[scheduler] brief generation error: {e:#}");
+            return;
+        }
+    };
+    let frontmatter = format!(
+        "---\ntitle: \"Daily Brief — {today}\"\norigin: personal\ndate: {today}\nkind: note\ntags: [daily-brief]\n---\n\n"
+    );
+    let content = format!("{frontmatter}{}\n", out.answer);
+    match std::fs::write(&path, content) {
+        Ok(()) => eprintln!("[scheduler] daily brief written: {}", path.display()),
+        Err(e) => eprintln!("[scheduler] brief write error: {e:#}"),
+    }
+}
+
+fn sleep_until_next_local_hour(hour: u32) -> tokio::time::Sleep {
+    let now = chrono::Local::now();
+    let mut target = now
+        .date_naive()
+        .and_hms_opt(hour, 0, 0)
+        .unwrap_or_else(|| now.naive_local());
+    if target <= now.naive_local() {
+        target += chrono::Duration::days(1);
+    }
+    let dur = (target - now.naive_local())
+        .to_std()
+        .unwrap_or_else(|_| Duration::from_mins(1));
+    tokio::time::sleep(dur)
+}
+
 pub(crate) fn spawn_scheduler(
     store: Option<Arc<Store>>,
     llm: Arc<Llm>,
@@ -195,6 +251,26 @@ pub(crate) fn spawn_scheduler(
         {
             let _guard = sync_lock.lock().await;
             run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
+        }
+
+        // Daily briefing scheduler: runs once at BORING_BRIEF_HOUR local time.
+        // The generated note is tagged `daily-brief` so future briefs do not ingest themselves.
+        if let Ok(hour) = config::env_set("BORING_BRIEF_HOUR")
+            .unwrap_or_else(|| "8".to_owned())
+            .parse::<u32>()
+            && (0..=23).contains(&hour)
+        {
+            let store2 = store.clone();
+            let llm2 = Arc::clone(&llm);
+            let vault_dir2 = Arc::clone(&vault_dir);
+            let cfg2 = Arc::clone(&cfg);
+            tokio::spawn(async move {
+                loop {
+                    sleep_until_next_local_hour(hour).await;
+                    eprintln!("[scheduler] generating daily brief");
+                    run_brief(store2.as_deref(), &llm2, (*vault_dir2).as_ref(), &cfg2).await;
+                }
+            });
         }
 
         let mut sync_ticker = tokio::time::interval(sync_interval);

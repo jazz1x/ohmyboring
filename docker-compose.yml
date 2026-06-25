@@ -59,6 +59,7 @@ services:
       BORING_VAULT_DIR: /vault                # remember target + sync corpus (/vault/wiki)
       BORING_VECTOR: ${BORING_VECTOR:-off} # off = wiki-first direct read. on = vector+graph (boring-postgres alongside via --profile vector)
       BORING_SYNC_HOURS: "4"
+      BORING_BRIEF_HOUR: "8"               # local time (TZ) when the engine writes vault/wiki/daily-brief-YYYY-MM-DD.md
       TZ: Asia/Seoul
     volumes:
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: drudge's source_dirs only reads ~/.claude/projects)

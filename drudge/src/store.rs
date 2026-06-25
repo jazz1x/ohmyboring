@@ -55,6 +55,7 @@ pub struct RecentDoc {
     pub source_path: String,
     pub project: String,
     pub content: String,
+    pub tags: Vec<String>,
 }
 
 /// Graph size summary (for audit).
@@ -350,12 +351,12 @@ impl Store {
         let rows = self
             .db
             .query(
-                "SELECT d.source_path, d.project,
+                "SELECT d.source_path, d.project, d.tags,
                         string_agg(c.content, E'\n' ORDER BY c.chunk_idx) AS content
                  FROM document d
                  JOIN chunk c ON c.source_path = d.source_path
                  WHERE NOT (d.origin = ANY($2))
-                 GROUP BY d.source_path, d.project, d.updated_at
+                 GROUP BY d.source_path, d.project, d.tags, d.updated_at
                  ORDER BY d.updated_at DESC
                  LIMIT $1;",
                 &[&limit, &exclude_origins],
@@ -367,7 +368,8 @@ impl Store {
             .map(|r| RecentDoc {
                 source_path: r.get(0),
                 project: r.get(1),
-                content: r.get(2),
+                tags: r.get(2),
+                content: r.get(3),
             })
             .collect())
     }
@@ -459,12 +461,12 @@ impl Store {
                      WHERE e.src <> $1 AND e.src LIKE 'doc:%'
                      GROUP BY e.src HAVING count(*) >= 2 ORDER BY shared DESC, e.src ASC LIMIT $2
                  )
-                 SELECT d.source_path, d.project,
+                 SELECT d.source_path, d.project, d.tags,
                         string_agg(c.content, E'\n' ORDER BY c.chunk_idx) AS content
                  FROM ranked r
                  JOIN document d ON ('doc:' || d.source_path) = r.doc_node
                  JOIN chunk c ON c.source_path = d.source_path
-                 GROUP BY d.source_path, d.project, r.shared
+                 GROUP BY d.source_path, d.project, d.tags, r.shared
                  ORDER BY r.shared DESC;",
                 &[&doc_id, &limit],
             )
@@ -475,7 +477,8 @@ impl Store {
             .map(|r| RecentDoc {
                 source_path: r.get(0),
                 project: r.get(1),
-                content: r.get(2),
+                tags: r.get(2),
+                content: r.get(3),
             })
             .collect())
     }
