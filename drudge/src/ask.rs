@@ -233,7 +233,12 @@ pub async fn brief(
     exclude_origins: &[String],
     lang: &str,
 ) -> Result<AnswerOut> {
-    let docs = store.recent_docs(12, exclude_origins).await?;
+    let docs: Vec<_> = store
+        .recent_docs(12, exclude_origins)
+        .await?
+        .into_iter()
+        .filter(|d| !d.tags.iter().any(|t| t == "daily-brief"))
+        .collect();
     if docs.is_empty() {
         return Ok(AnswerOut {
             answer: "No recent work records ingested. (ingest first?)".to_owned(),
