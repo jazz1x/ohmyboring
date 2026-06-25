@@ -36,10 +36,17 @@ pub trait Chunker: Send + Sync + Default {
 }
 
 /// Character-based chunking (with overlap). One chunk if short.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct DefaultChunker {
     size: usize,
     overlap: usize,
+}
+
+impl Default for DefaultChunker {
+    /// Default chunker used by the pipeline. `DefaultChunker::new()` is the SSOT for the values.
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DefaultChunker {
@@ -61,6 +68,11 @@ impl DefaultChunker {
 
 impl Chunker for DefaultChunker {
     fn chunk(&self, text: &str) -> Vec<String> {
+        // Defensive guard: a degenerate config (size == 0 or overlap >= size) would make step 0
+        // and loop forever. Treat the whole text as one chunk rather than OOM.
+        if self.size == 0 || self.overlap >= self.size {
+            return vec![text.to_owned()];
+        }
         let chars: Vec<char> = text.chars().collect();
         if chars.len() <= self.size {
             return vec![text.to_owned()];
@@ -100,10 +112,17 @@ pub trait GraphExtractor: Send + Sync + Default {
 ///
 /// tool/concept nodes + edges, and temporal-fact claims. Idempotent: clears the doc's prior semantic
 /// edges first. Embedding (bge-m3) is the ONLY LLM call — no generation.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct FrontmatterGraphExtractor {
     /// Cap on graph items per note (matches the agent-curation guidance: short canonical lists, no hairball).
     cap: usize,
+}
+
+impl Default for FrontmatterGraphExtractor {
+    /// Default extractor used by the pipeline. `FrontmatterGraphExtractor::new()` is the SSOT.
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FrontmatterGraphExtractor {
