@@ -1,12 +1,11 @@
 # Trivy ignore — false positives only (parallels the .gitleaks.toml allowlist).
 #
-# drudge/src/{distill,redact,serve}.rs hold FAKE tokens in redactor unit tests
-# (redact_scrubs_known_tokens / parse_remember_scrubs_secrets_in_title_and_claim_value)
+# drudge/src/redact.rs and drudge/src/serve/mcp.rs hold FAKE tokens in redactor
+# unit tests (redact_scrubs_known_tokens / parse_remember_scrubs_secrets_in_title_and_claim_value)
 # to prove the secret scrubber works — not real secrets. Scoped to those paths/rule
 # so the rest of each file is still scanned.
 secrets:
   - id: slack-access-token
     paths:
-      - "drudge/src/distill.rs"
       - "drudge/src/redact.rs"
-      - "drudge/src/serve.rs"
+      - "drudge/src/serve/mcp.rs"
