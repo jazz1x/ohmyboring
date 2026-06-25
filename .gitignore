@@ -43,5 +43,9 @@ boring.json
 .codex/
 .agents/
 
-# 프로젝트 보고서는 추적 (docs/* 개인 문서 제외 예외)
-!docs/reports/*.md
+# 프로젝트 보고서 중 공개 매트릭스만 추적 (docs/* 개인 문서 제외 예외)
+!docs/reports/
+docs/reports/*.md
+docs/reports/*.txt
+docs/reports/*.html
+!docs/reports/llm-pair-matrix.md
