@@ -186,11 +186,49 @@ def _call_model(base_url: str, api_key: str, model: str, prompt: str) -> tuple[s
     return content, latency
 
 
-def _evaluate(parsed: Optional[dict[str, Any]]) -> dict[str, Any]:
+SUPPORTED_LANGS = ("ko", "en", "ja")
+
+
+def _title_matches_lang(title: str, note_lang: str) -> bool:
+    """Best-effort check that the title is written in the requested language."""
+    if not title:
+        return False
+    has_hangul = bool(re.search(r"[가-힣]", title))
+    has_hiragana = bool(re.search(r"[ぁ-ん]", title))
+    has_katakana = bool(re.search(r"[ァ-ン]", title))
+    has_cjk = bool(re.search(r"[\u4e00-\u9fff]", title))
+    # Heuristic: if the requested script is present and the title is not dominated by a wrong CJK script.
+    if note_lang == "ko":
+        return has_hangul
+    if note_lang == "ja":
+        return has_hiragana or has_katakana or has_cjk
+    if note_lang == "en":
+        # English titles may contain numbers/proper nouns; just make sure they are not Korean/Japanese.
+        return not has_hangul and not has_hiragana and not has_katakana
+    return True
+
+
+def _section_patterns(note_lang: str) -> list[tuple[str, str]]:
+    """Return (regex_pattern, short_name) for body section detection by language."""
+    headers = {
+        "ko": ("배경", "시도", "결과", "남은 일"),
+        "ja": ("背景", "試行", "結果", "残件"),
+        "en": ("Background", "Attempt", "Result", "Remaining work"),
+    }.get(note_lang, ("배경", "시도", "결과", "남은 일"))
+    return [
+        (rf"##\s*{re.escape(headers[0])}", headers[0]),
+        (rf"##\s*{re.escape(headers[1])}", headers[1]),
+        (rf"##\s*{re.escape(headers[2])}", headers[2]),
+        (rf"##\s*{re.escape(headers[3])}", headers[3]),
+    ]
+
+
+def _evaluate(parsed: Optional[dict[str, Any]], note_lang: str) -> dict[str, Any]:
     metrics: dict[str, Any] = {
         "valid_json": parsed is not None,
         "has_title": False,
         "has_body": False,
+        "title_lang_ok": False,
         "title_has_korean": False,
         "body_has_sections": False,
         "body_sections": [],
@@ -207,10 +245,11 @@ def _evaluate(parsed: Optional[dict[str, Any]]) -> dict[str, Any]:
     metrics["has_title"] = bool(title)
     metrics["has_body"] = bool(body)
     metrics["title_has_korean"] = bool(re.search(r"[가-힣]", title))
+    metrics["title_lang_ok"] = _title_matches_lang(title, note_lang)
     sections = []
-    for pat in (r"##\s*배경", r"##\s*시도", r"##\s*결과", r"##\s*남은 일"):
+    for pat, name in _section_patterns(note_lang):
         if re.search(pat, body):
-            sections.append(pat.replace(r"##\s*", ""))
+            sections.append(name)
     metrics["body_sections"] = sections
     metrics["body_has_sections"] = len(sections) >= 2
     # trailing metadata leak detection
@@ -221,13 +260,14 @@ def _evaluate(parsed: Optional[dict[str, Any]]) -> dict[str, Any]:
     return metrics
 
 
-def _run_one(model: str, base_url: str, api_key: str, sample: dict[str, str]) -> dict[str, Any]:
-    note_lang = boring_config.note_lang()
+def _run_one(
+    model: str, base_url: str, api_key: str, sample: dict[str, str], note_lang: str
+) -> dict[str, Any]:
     origin, _rule = boring_config.classify(cwd="", remote_url=None)
-    prompt = _build_prompt(sample["text"], origin, "bench")
+    prompt = _build_prompt(sample["text"], origin, "bench", note_lang=note_lang)
     raw, latency = _call_model(base_url, api_key, model, prompt)
     parsed = _extract_json(raw)
-    metrics = _evaluate(parsed)
+    metrics = _evaluate(parsed, note_lang)
     metrics["latency_sec"] = round(latency, 2)
     metrics["raw_chars"] = len(raw)
     return metrics
@@ -251,6 +291,12 @@ def main() -> None:
     ap.add_argument("--pull", action="store_true", help="ollama pull missing models before benchmarking")
     ap.add_argument("--base-url", default=omb_env.llm_base_url(), help="OpenAI-compatible base URL")
     ap.add_argument("--api-key", default=omb_env.llm_api_key(), help="API key (optional)")
+    ap.add_argument(
+        "--lang",
+        default=boring_config.note_lang(),
+        choices=SUPPORTED_LANGS,
+        help="target note language for the distillation prompt (default: boring.json note_lang)",
+    )
     args = ap.parse_args()
 
     if args.list_tiers:
@@ -284,7 +330,7 @@ def main() -> None:
             print("run with --pull to fetch them, or pass --base-url for a remote/LM Studio endpoint")
             sys.exit(1)
 
-    note_lang = boring_config.note_lang()
+    note_lang = args.lang
     print(f"note_lang={note_lang}  samples={len(SAMPLES)}  base_url={args.base_url}")
     print()
 
@@ -293,14 +339,14 @@ def main() -> None:
         print(f"=== {model} ===")
         run_results: list[dict[str, Any]] = []
         for sample in SAMPLES:
-            metrics = _run_one(model, args.base_url, args.api_key, sample)
+            metrics = _run_one(model, args.base_url, args.api_key, sample, note_lang)
             run_results.append(metrics)
             status = "ok" if metrics["valid_json"] and not metrics["trailing_metadata"] else "fail"
             print(
                 f"  {sample['name']:12} {status:4} "
                 f"latency={metrics['latency_sec']:6.2f}s "
                 f"sections={metrics['body_sections']} "
-                f"title_ko={metrics['title_has_korean']} "
+                f"title_{note_lang}={metrics['title_lang_ok']} "
                 f"trailing_meta={metrics['trailing_metadata']}"
             )
         results[model] = run_results
@@ -308,15 +354,19 @@ def main() -> None:
 
     # summary table
     print("=== summary ===")
-    print(f"{'model':<20} {'valid':>6} {'title_ko':>9} {'2+sections':>11} {'clean_body':>11} {'avg_lat':>10}")
+    print(
+        f"{'model':<20} {'valid':>6} {'title_{note_lang}':>11} "
+        f"{'2+sections':>11} {'clean_body':>11} {'avg_lat':>10}"
+    )
     for model, runs in results.items():
         valid = sum(1 for r in runs if r["valid_json"]) / len(runs)
-        title_ko = sum(1 for r in runs if r["title_has_korean"]) / len(runs)
+        title_ok = sum(1 for r in runs if r["title_lang_ok"]) / len(runs)
         sections = sum(1 for r in runs if r["body_has_sections"]) / len(runs)
         clean = sum(1 for r in runs if not r["trailing_metadata"]) / len(runs)
         avg_lat = sum(r["latency_sec"] for r in runs) / len(runs)
         print(
-            f"{model:<20} {valid:>6.0%} {title_ko:>9.0%} {sections:>11.0%} {clean:>11.0%} {avg_lat:>9.2f}s"
+            f"{model:<20} {valid:>6.0%} {title_ok:>11.0%} "
+            f"{sections:>11.0%} {clean:>11.0%} {avg_lat:>9.2f}s"
         )
 
 
