@@ -59,7 +59,7 @@ Memory gets in three ways — after setup you rarely touch the first two:
 
 ```bash
 python3 agents/shared/agent_wiring.py --install \
-  --omb-home ~/oh-my-boring --server-name ohmyboring \
+  --boring-home ~/oh-my-boring --server-name ohmyboring \
   --server-url http://localhost:7700/mcp
 ```
 

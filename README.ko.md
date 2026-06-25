@@ -59,7 +59,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 
 ```bash
 python3 agents/shared/agent_wiring.py --install \
-  --omb-home ~/oh-my-boring --server-name ohmyboring \
+  --boring-home ~/oh-my-boring --server-name ohmyboring \
   --server-url http://localhost:7700/mcp
 ```
 

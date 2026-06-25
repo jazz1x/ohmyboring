@@ -1,7 +1,7 @@
 # GitHub Codex adapter
 
 GitHub Codex (and the Copilot CLI) reads MCP servers from `~/.codex/mcp.json`.
-oh-my-boring wires the `ohmyboring` MCP server automatically when
+ohmyboring wires the `ohmyboring` MCP server automatically when
 `codex` is enabled in `boring.json` and you run `install.sh`.
 
 No hooks are needed — Codex calls MCP tools on demand.

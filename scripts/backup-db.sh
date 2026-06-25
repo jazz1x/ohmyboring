@@ -1,5 +1,5 @@
 #!/bin/sh
-# Backup the oh-my-boring pgvector database to data/backups/ (custom format).
+# Backup the ohmyboring pgvector database to data/backups/ (custom format).
 # Keeps the latest N backups (default 7); older ones are deleted automatically.
 #   make backup-db
 #   BORING_BACKUP_DIR=/path BORING_BACKUP_KEEP=10 make backup-db

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Data steward — inspect and optionally repair the oh-my-boring vault.
+"""Data steward — inspect and optionally repair the ohmyboring vault.
 
 Focuses on data-management hygiene that automated sync cannot fix by itself:
   - project/repo slug variants (`org/repo` vs `repo`)
@@ -179,7 +179,7 @@ def _fix_note(n, target_project: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Inspect/repair oh-my-boring vault data hygiene")
+    parser = argparse.ArgumentParser(description="Inspect/repair ohmyboring vault data hygiene")
     parser.add_argument("--vault", help="vault root directory (default: BORING_VAULT_DIR or ~/oh-my-boring/vault)")
     parser.add_argument("--fix", action="store_true", help="rewrite notes in place (review with git diff)")
     parser.add_argument("--yes", action="store_true", help="skip confirmation prompt")

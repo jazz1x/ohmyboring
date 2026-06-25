@@ -1,6 +1,6 @@
 # Cursor adapter
 
-Cursor reads MCP servers from `~/.cursor/mcp.json`. oh-my-boring wires the
+Cursor reads MCP servers from `~/.cursor/mcp.json`. ohmyboring wires the
 `ohmyboring` MCP server automatically when `cursor` is enabled in
 `boring.json` and you run `install.sh`.
 
