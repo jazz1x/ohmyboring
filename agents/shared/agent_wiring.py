@@ -238,7 +238,7 @@ def install(enabled_agents, server_name, server_config):
 def main():
     global BORING_HOME
     parser = argparse.ArgumentParser(
-        description="Wire oh-my-boring adapters for enabled agents"
+        description="Wire ohmyboring adapters for enabled agents"
     )
     parser.add_argument(
         "--install", action="store_true", help="Install/update settings for enabled agents"

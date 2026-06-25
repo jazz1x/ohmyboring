@@ -1,5 +1,5 @@
 #!/bin/sh
-# Restore the oh-my-boring pgvector database from a backup dump.
+# Restore the ohmyboring pgvector database from a backup dump.
 # Interactive by default. Stops drudge, drops/recreates the DB, restores, then starts drudge.
 #   make restore-db                    # use latest backup
 #   make restore-db FILE=path/to.dump  # use specific backup
@@ -43,7 +43,7 @@ if ! $COMPOSE --profile vector exec -T boring-postgres pg_restore -l >/dev/null 
   exit 1
 fi
 
-printf '⚠️  This will DESTROY the current oh-my-boring database and replace it with the backup. Continue? [y/N] '
+printf '⚠️  This will DESTROY the current ohmyboring database and replace it with the backup. Continue? [y/N] '
 read ans
 [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "aborted."; exit 0; }
 
