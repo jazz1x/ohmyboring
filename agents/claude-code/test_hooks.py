@@ -8,7 +8,7 @@ Covers the PURE, no-network helpers in distill-session.py and recall.py:
   - distill-session._extract_json         — LLM-JSON extraction (fences + trailing prose)
   - distill-session._strip_trailing_metadata — drop trailing tags/tools/concepts blocks
   - distill-session._build_prompt         — prompt assembly (JSON skeleton + transcript)
-  - distill-session._mark_path            — throttle-marker path/id sanitization
+  - markers.safe_id                       — throttle-marker id sanitization
   - distill-session.repo_slug             — folder-name fallback (no git remote needed)
   - distill-session.extract               — JSONL transcript → "[role] text" (file I/O only)
   - recall.main                           — context-injection formatting (urlopen mocked)
@@ -50,6 +50,8 @@ def _load(name, filename):
 
 distill = _load("distill_session_hook", "distill-session.py")
 recall = _load("recall_hook", "recall.py")
+import recall_core  # noqa: E402
+import markers  # noqa: E402
 
 
 class ExtractJsonTests(unittest.TestCase):
@@ -114,14 +116,14 @@ class BuildPromptTests(unittest.TestCase):
 
 class MarkPathTests(unittest.TestCase):
     def test_sanitizes_unsafe_chars(self):
-        p = distill._mark_path("../../etc/passwd")
-        self.assertEqual(Path(p).name, "etcpasswd.ts")  # slashes/dots stripped, no traversal
+        sid = markers.safe_id("../../etc/passwd")
+        self.assertEqual(sid, "etcpasswd")  # slashes/dots stripped, no traversal
 
     def test_empty_session_fallback(self):
-        self.assertEqual(Path(distill._mark_path("")).name, "nosession.ts")
+        self.assertEqual(markers.safe_id(""), "nosession")
 
     def test_preserves_safe_chars(self):
-        self.assertEqual(Path(distill._mark_path("abc-123_XY")).name, "abc-123_XY.ts")
+        self.assertEqual(markers.safe_id("abc-123_XY"), "abc-123_XY")
 
 
 class RepoSlugTests(unittest.TestCase):
@@ -162,25 +164,15 @@ class ExtractTranscriptTests(unittest.TestCase):
 class RecallFormattingTests(unittest.TestCase):
     """recall.main reads stdin + posts to /search; we mock urlopen so NO network happens."""
 
-    def _run_main(self, prompt, hits, urlopen_side_effect=None):
-        class _Resp:
-            def __init__(self, payload):
-                self._payload = payload
-            def read(self):
-                return json.dumps(self._payload).encode()
-            def __enter__(self):
-                return self
-            def __exit__(self, *a):
-                return False
-
+    def _run_main(self, prompt, hits, search_side_effect=None):
         captured = io.StringIO()
         stderr = io.StringIO()
-        if urlopen_side_effect is None:
-            urlopen = mock.MagicMock(return_value=_Resp({"hits": hits}))
+        if search_side_effect is None:
+            search_mock = mock.MagicMock(return_value=hits)
         else:
-            urlopen = mock.MagicMock(side_effect=urlopen_side_effect)
+            search_mock = mock.MagicMock(side_effect=search_side_effect)
         with mock.patch.object(recall.sys, "stdin", io.StringIO(json.dumps({"prompt": prompt}))), \
-             mock.patch.object(recall.urllib.request, "urlopen", urlopen), \
+             mock.patch.object(recall_core.DrudgeClient, "search", search_mock), \
              mock.patch.object(recall.sys, "stdout", captured), \
              mock.patch.object(recall.sys, "stderr", stderr):
             recall.main()
@@ -208,14 +200,14 @@ class RecallFormattingTests(unittest.TestCase):
         self.assertEqual(out, "")
 
     def test_failed_search_logs_to_stderr(self):
-        # urlopen keeps raising → after retries main logs the failure to stderr and exits gracefully.
-        recall.RETRIES = 0  # one attempt only for deterministic test
+        # search keeps raising → after retries main logs the failure to stderr and exits gracefully.
+        recall_core.RETRIES = 0  # one attempt only for deterministic test
         try:
-            out, err = self._run_main("a sufficiently long prompt", [], urlopen_side_effect=OSError("down"))
+            out, err = self._run_main("a sufficiently long prompt", [], search_side_effect=OSError("down"))
             self.assertEqual(out, "")
             self.assertIn("[omb-recall] search failed", err)
         finally:
-            recall.RETRIES = 1
+            recall_core.RETRIES = 1
 
 
 class DistillMainLoggingTests(unittest.TestCase):

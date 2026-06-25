@@ -1,5 +1,7 @@
 //! Store — pgvector (document/chunk/embedding/FTS) + graph (node/edge tables + recursive CTE).
 //!
+//! Cross-reference: ENFORCEMENT.md §A (error ADTs) · design decision D5 (claim temporal authority).
+//!
 //! ## Layers (engine-agnostic graph model)
 //! - **pgvector** (`document`, `chunk`): vector (HNSW) + FTS (tsvector) + frontmatter columns.
 //! - **graph** (`node`, `edge`): semantic ontology. node = entity, edge = typed relation.

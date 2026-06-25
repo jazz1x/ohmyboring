@@ -1,5 +1,7 @@
 //! BoringConfig — personal memory policy SSOT (`boring.json`).
 //!
+//! Cross-reference: ENFORCEMENT.md §A (ADT) · PHILOSOPHY.md Layer 1 (parse-don't-validate at the boundary).
+//!
 //! Design:
 //! - `.env` keeps secrets/runtime switches; `boring.json` keeps policy/metadata.
 //! - Forward-compatible: newer `schema_version` loads with a warning, unknown fields are ignored.

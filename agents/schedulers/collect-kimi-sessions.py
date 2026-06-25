@@ -14,22 +14,20 @@ import time
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+import markers
 import omb_env
+from drudge_client import DrudgeClient
 
 BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias
 KIMI_HOME = os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code")
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 HOOK = os.path.join(BORING_HOME, "agents", "kimi", "distill-session.py")
-MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 
 
 def _marked(session_id: str) -> bool:
-    safe = "".join(c for c in session_id if c.isalnum() or c in "_-") or "nosession"
-    return os.path.exists(os.path.join(MARK_DIR, f"{safe}.ts")) or os.path.exists(
-        os.path.join(MARK_DIR, f"{safe}.pending")
-    )
+    return markers.is_done(session_id) or markers.is_pending(session_id)
 
 
 def _session_age_hours(session_dir: str) -> float:
@@ -77,13 +75,7 @@ def _distill(session_id: str, cwd: str) -> bool:
 
 def _sync():
     try:
-        req = urllib.request.Request(
-            f"{BORING_URL.rstrip('/')}/sync",
-            data=b"",
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=600) as r:
-            r.read()
+        DrudgeClient().sync()
     except Exception as e:
         print(f"[collect-kimi] sync call failed: {e}", file=sys.stderr)
 

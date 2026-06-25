@@ -41,4 +41,7 @@ boring.json
 
 # 에이전트 로컬 설정 (Codex 등)
 .codex/
+.agents/
 
+# 프로젝트 보고서는 추적 (docs/* 개인 문서 제외 예외)
+!docs/reports/*.md

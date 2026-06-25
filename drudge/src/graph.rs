@@ -1,6 +1,8 @@
 //! Graph — project/topic edge + vector-hit → graph 1-hop expansion recall.
 //! "find by vector → one hop by graph": pgvector entry + node/edge recursive CTE expansion.
 //!
+//! Cross-reference: design decision D2 (deterministic graph) · ENFORCEMENT.md §B (one-way flow).
+//!
 //! SRP: `query()` is pure logic (returns data), `run()` is the CLI I/O shell.
 use std::collections::HashSet;
 

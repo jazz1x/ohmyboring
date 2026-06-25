@@ -47,6 +47,7 @@ class ReconcileTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         ingest_worker.MARK_DIR = self.tmp.name
+        ingest_worker.markers.set_mark_dir(self.tmp.name)
 
         # Wiki dir for per-session marker tests.
         self.wiki_dir = Path(self.tmp.name) / "wiki"

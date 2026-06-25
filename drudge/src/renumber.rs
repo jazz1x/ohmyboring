@@ -1,5 +1,7 @@
 //! Wiki id renumbering — compact `vault/wiki/wiki-NNNN.md` ids after deletions.
 //!
+//! Cross-reference: design decision D7 (vault/wiki SSOT, DB rebuildable).
+//!
 //! The vault is the SSOT; the Postgres store is rebuilt from it by `sync`.  This module therefore
 //! only rewrites the markdown files.  After applying a renumber plan the caller should run a
 //! vector-mode `sync` so the DB source_paths/chunks/claims/edges catch up.
