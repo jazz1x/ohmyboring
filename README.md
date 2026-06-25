@@ -150,6 +150,34 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 
 > **Swapping the embedding model changes the vector dimension.** The synthesis model (`llm.model`) is free to swap, but a new `llm.embed_model` emits vectors of a different size, so you must update `llm.embed_dim` to match **and** run `make reset` — otherwise upserts fail against the old-shaped vectors. Common dims: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
 
+### Local model selection
+
+ohmyboring runs two local models: a **synthesis model** for distillation/ask, and an **embedding model** for vector search. The synthesis model can be changed freely; the embedding model can too, but it requires updating `llm.embed_dim` and running `make reset`.
+
+Below is a same-scale pairing guide by MacBook RAM. If a tier has no viable model in one family, the cell is left empty.
+
+| MacBook RAM | gemma4 (Google) | qwen3 (Alibaba) | Notes |
+|------------:|-----------------|-----------------|-------|
+| 8 GB | — | `qwen3:4b` | Gemma4 has no practical 8 GB option. |
+| 16 GB | `gemma4:12b` | `qwen3:14b` | Closest same-scale dense pair (12B vs 14B). |
+| 24 GB | `gemma4:26b-a4b` | `qwen3:30b-a3b` | Same-scale MoE pair. |
+| 32 GB | `gemma4:31b` | `qwen3:32b` | Dense flagship pair. |
+| 48 GB | `gemma4:31b` | `qwen3:32b` | Same models, with headroom for context/apps. |
+| 64 GB+ | — | — | No practical new local pair; `qwen3:235b-a22b` needs ~142 GB disk. |
+
+Benchmark commands:
+
+```bash
+# LLM distillation benchmark by RAM tier
+make bench-llm                  # default 16 GB tier
+make bench-llm-tier TIER=32gb
+
+# Embedding model benchmark (dim / latency / sanity)
+make bench-embed
+```
+
+See [`docs/reports/llm-pair-matrix.md`](docs/reports/llm-pair-matrix.md) for the full matrix, tag sizes, and LM Studio notes.
+
 ### Naming layers
 
 One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer changes, not the thing:

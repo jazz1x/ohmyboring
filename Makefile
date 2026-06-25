@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs ask sync remember collect collect-kimi smoke e2e doctor steward steward-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard deny eval psql reset
+.PHONY: help up down build logs agent-logs ask sync remember collect collect-kimi smoke e2e doctor heal verify-llm maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard deny eval bench-llm psql reset
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -38,6 +38,9 @@ agent-logs: ## boring-agent (hermes) logs (MCP connection diagnostics)
 
 models: ## Pull Ollama models (DRUDGE_LLM_MODEL + DRUDGE_EMBED_MODEL, defaults gemma4:12b + bge-m3)
 	ollama pull "${DRUDGE_LLM_MODEL:-gemma4:12b}" && ollama pull "${DRUDGE_EMBED_MODEL:-bge-m3}"
+
+verify-llm: ## Verify boring.json LLM config (reachability, model presence, embed_dim)
+	./scripts/verify-llm.sh
 
 ask: ## Single query   make ask Q="question"
 	@command -v jq >/dev/null 2>&1 || { echo 'jq not found — install: brew install jq / apt-get install jq'; exit 1; }
@@ -79,6 +82,21 @@ e2e: ## wiki-mode end-to-end (remember→recall round-trip + vector-off reject);
 doctor: ## Diagnose the distill write-door (drudge/Ollama/containers + newest note & hook marker)
 	./scripts/doctor.sh
 
+heal: ## Auto-fix common doctor findings (env perms, hooks, engine, Ollama, containers)
+	./scripts/doctor.sh --fix
+
+maintenance: ## Run unattended housekeeping now (data-steward + retention)
+	./scripts/schedule-maintenance.sh run
+
+maintenance-install: ## Register daily housekeeping (macOS launchd / Linux cron)
+	./scripts/schedule-maintenance.sh install
+
+maintenance-uninstall: ## Remove daily housekeeping registration
+	./scripts/schedule-maintenance.sh uninstall
+
+maintenance-status: ## Show daily housekeeping registration state
+	./scripts/schedule-maintenance.sh status
+
 steward: ## Inspect vault data hygiene (project variants, placeholder tags, missing sources)
 	@python3 scripts/data-steward.py
 
@@ -99,6 +117,15 @@ deny: ## Supply-chain gate (cargo-deny: vulnerabilities, licenses, duplicate ver
 
 eval: ## Behavioral regression gate (stack needed; runs data/eval/run_eval.py when present)
 	./scripts/eval-gate.sh
+
+bench-llm: ## Compare LLM distillation quality (default tier: 16gb)
+	@python3 scripts/bench-llm.py --tier 16gb
+
+bench-llm-tier: ## Compare LLM distillation quality by RAM tier: make bench-llm-tier TIER=32gb
+	@python3 scripts/bench-llm.py --tier "${TIER:-16gb}"
+
+bench-embed: ## Benchmark local embedding model (dim, latency, sanity)
+	@python3 scripts/bench-embed.py
 
 psql: ## Connect directly to Postgres (requires vector mode / --profile vector)
 	$(COMPOSE) exec boring-postgres psql -U boring -d boring

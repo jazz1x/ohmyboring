@@ -1,4 +1,7 @@
 //! LLM client — OpenAI-compatible `/v1` (embeddings + chat/completions).
+//!
+//! Cross-reference: ENFORCEMENT.md §B (DIP / I/O boundary) · PHILOSOPHY.md Layer 3 (restraint).
+//!
 //! Works with any OpenAI-compatible server: Ollama (`/v1`) · LM Studio · vLLM · llama.cpp server, etc.
 //! Runtime/model are swappable via boring.json (`llm` block) + env override (`BORING_LLM_BASE_URL`/`BORING_LLM_MODEL`).
 //! `reasoning_effort:"none"` = OpenAI-standard knob that turns off reasoning/thinking mode (avoids latency).

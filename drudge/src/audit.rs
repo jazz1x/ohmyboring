@@ -1,4 +1,7 @@
 //! Audit — check ingestion state: origin/kind/project distribution + quality warnings.
+//!
+//! Cross-reference: ENFORCEMENT.md §A (ADT) · design decision D7 (vault/wiki SSOT).
+//!
 //! Answers "is the ingestion a mess?" with actual DB aggregation rather than guesswork. Aggregation is done in Rust (avoiding SQL GROUP).
 //!
 //! SRP: `stats()` returns data (shared by HTTP·CLI), `run()` is the CLI stdout shell.

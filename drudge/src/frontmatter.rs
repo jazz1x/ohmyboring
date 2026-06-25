@@ -1,4 +1,6 @@
 //! Frontmatter entity — parse raw `.md` into a typed form once at the boundary (parse-don't-validate).
+//!
+//! Cross-reference: ENFORCEMENT.md §A (PDV/boundary) · PHILOSOPHY.md Layer 1.
 //! If YAML frontmatter (`--- ... ---`) is present, parse it; otherwise infer origin/kind/project from the path.
 //! Parse failure goes on the `Result` rail rather than a silent fallback (ROP) — the caller decides the graceful boundary.
 use anyhow::Result;

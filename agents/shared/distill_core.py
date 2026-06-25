@@ -24,6 +24,7 @@ import urllib.request
 # sibling agents/shared dir is found from the real file location, not the symlink's dir.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config  # noqa: E402
+import markers  # noqa: E402
 import omb_env  # noqa: E402
 
 # BORING_HOME: repo clone location (default ~/oh-my-boring).
@@ -38,23 +39,16 @@ NOTE_LANG = boring_config.note_lang()
 # Minimum interval (minutes) before re-distilling an in-progress session (Stop hook).
 # SessionEnd (final) ignores the throttle.
 THROTTLE_MIN = int(os.environ.get("DISTILL_THROTTLE_MIN") or "25")
-MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
-
-
-def _mark_path(session_id):
-    safe = re.sub(r"[^A-Za-z0-9_-]", "", session_id) or "nosession"
-    return os.path.join(MARK_DIR, f"{safe}.ts")
 
 
 def _throttled(session_id):
     """True (skip) if this session was already distilled within the last THROTTLE_MIN minutes."""
     if not session_id:
         return False
-    try:
-        age = time.time() - os.path.getmtime(_mark_path(session_id))
-        return age < THROTTLE_MIN * 60
-    except OSError:
+    done_time = markers.done_time(session_id)
+    if done_time is None:
         return False
+    return (time.time() - done_time) < THROTTLE_MIN * 60
 
 
 def _mark(session_id, retry=False):
@@ -70,19 +64,10 @@ def _mark(session_id, retry=False):
         return
     if not session_id:
         return
-    safe = re.sub(r"[^A-Za-z0-9_-]", "", session_id) or "nosession"
-    suffix = ".retry" if retry else ".ts"
-    path = os.path.join(MARK_DIR, f"{safe}{suffix}")
-    try:
-        os.makedirs(MARK_DIR, exist_ok=True)
-        # A done marker supersedes a retry marker and vice versa.
-        other = os.path.join(MARK_DIR, f"{safe}.ts" if retry else f"{safe}.retry")
-        if os.path.exists(other):
-            os.remove(other)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(str(time.time()))
-    except OSError:
-        pass
+    if retry:
+        markers.mark_retry(session_id)
+    else:
+        markers.mark_done(session_id)
 
 
 def git_remote_url(cwd):

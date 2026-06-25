@@ -16,7 +16,6 @@ import transcript
 from distill_core import (  # noqa: F401
     _extract_json,
     _mark,
-    _mark_path,
     _strip_trailing_metadata,
     _build_prompt,
     _call_llm,
@@ -30,7 +29,7 @@ from distill_core import (  # noqa: F401
 # Re-export generic helpers at module top level so existing tests can keep using them.
 # fmt: off
 __all__ = [
-    "_extract_json", "_mark", "_mark_path", "_strip_trailing_metadata",
+    "_extract_json", "_mark", "_strip_trailing_metadata",
     "_build_prompt", "_call_llm", "_call_remember", "_throttled",
     "distill_and_remember", "git_remote_url", "repo_slug", "extract", "main",
 ]

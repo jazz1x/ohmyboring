@@ -1,5 +1,7 @@
 //! wiki_recall — retrieve by reading `vault/wiki/*.md` directly (no pgvector·embeddings needed).
 //!
+//! Cross-reference: design decision D1 (wiki-first, pgvector optional).
+//!
 //! Karpathy-wiki first-class path: for a personal, small corpus (hundreds of documents), reading markdown directly is simpler, more
 //! trustworthy, and easier to debug than RAG (2026 trend + repo `CLAUDE.md` "simplest thing that works"). pgvector (vector+graph) is
 //! an optional accelerator turned on when the scale/accuracy trigger is crossed.

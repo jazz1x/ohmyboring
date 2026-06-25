@@ -23,8 +23,49 @@ MARK_DIR="${HOME}/.cache/boring-distill"
 # ${VAR/a/b} substitution, so rewrite via sed (same approach as scripts/ensure-ollama.sh).
 OLLAMA_HOST=$(printf '%s' "$OLLAMA_HOST" | sed 's#host\.docker\.internal#localhost#')
 
+# --fix mode: attempt safe auto-repair for mechanical problems, then re-run read-only.
+FIX=0
+for arg in "$@"; do
+    case "$arg" in
+        --fix) FIX=1 ;;
+    esac
+done
+
+# Track which checks failed so --fix knows what to repair.
+failed_env=0
+failed_hooks=0
+failed_engine=0
+failed_ollama=0
+failed_containers=0
+
 ok()   { echo "✓ $1"; }
 bad()  { echo "✗ $1"; }
+
+# Safe auto-repair helpers. Dangerous ops (reset/restore) are intentionally absent.
+fix_env() {
+    echo "  → fixing .env permissions: chmod 600 $BORING_HOME/.env"
+    chmod 600 "$BORING_HOME/.env"
+}
+
+fix_hooks() {
+    echo "  → fixing agent hooks: python3 $BORING_HOME/agents/shared/agent_wiring.py --install --boring-home $BORING_HOME"
+    python3 "$BORING_HOME/agents/shared/agent_wiring.py" --install --boring-home "$BORING_HOME"
+}
+
+fix_engine() {
+    echo "  → fixing engine: make up in $BORING_HOME"
+    (cd "$BORING_HOME" && make up >/tmp/omb-doctor-fix-engine.log 2>&1)
+}
+
+fix_ollama() {
+    echo "  → fixing Ollama: $BORING_HOME/scripts/ensure-ollama.sh"
+    "$BORING_HOME/scripts/ensure-ollama.sh"
+}
+
+fix_containers() {
+    echo "  → fixing containers: make down && make up in $BORING_HOME"
+    (cd "$BORING_HOME" && make down >/tmp/omb-doctor-fix-containers.log 2>&1 && make up >>/tmp/omb-doctor-fix-containers.log 2>&1)
+}
 
 # Human-readable mtime of a file, portable across GNU coreutils and BSD/macOS stat.
 # Display only (no epoch math), so neither `date -d @` (GNU) nor `date -r` (BSD) is needed.
@@ -48,7 +89,7 @@ if [ -f "$BORING_HOME/.env" ]; then
     perms=$(stat -c '%a' "$BORING_HOME/.env" 2>/dev/null || stat -f '%Lp' "$BORING_HOME/.env" 2>/dev/null)
     case "$perms" in
       600) ok ".env permissions are $perms" ;;
-      *) bad ".env permissions are $perms — should be 600 (run: chmod 600 $BORING_HOME/.env)" ;;
+      *) bad ".env permissions are $perms — should be 600 (run: chmod 600 $BORING_HOME/.env)"; failed_env=1 ;;
     esac
 fi
 
@@ -58,17 +99,17 @@ if [ -f "$settings" ]; then
     if grep -q "$BORING_HOME/hooks/distill-session.py" "$settings" && grep -q "$BORING_HOME/hooks/recall.py" "$settings"; then
         ok "Claude Code hooks wired in $settings"
     else
-        bad "Claude Code hooks missing in $settings — run install.sh"
+        bad "Claude Code hooks missing in $settings — run install.sh"; failed_hooks=1
     fi
 else
-    bad "Claude Code settings not found at $settings — run install.sh"
+    bad "Claude Code settings not found at $settings — run install.sh"; failed_hooks=1
 fi
 
 # (a2) engine /health — the deterministic write gate the hook POSTs `remember` to.
 if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$BORING_URL/health" 2>/dev/null)" = "200" ]; then
     ok "engine /health 200 ($BORING_URL) — write door reachable"
 else
-    bad "engine /health unreachable ($BORING_URL) — distilled sessions are being DROPPED"
+    bad "engine /health unreachable ($BORING_URL) — distilled sessions are being DROPPED"; failed_engine=1
     drudge_down=1
 fi
 
@@ -86,12 +127,12 @@ if [ "$PROVIDER" = ollama ]; then
     if curl -sf -m5 "$NATIVE/api/tags" >/dev/null 2>&1; then
         ok "Ollama reachable ($NATIVE)"
     else
-        bad "Ollama unreachable ($NATIVE) — distillation can't generate notes (start: ollama serve)"
+        bad "Ollama unreachable ($NATIVE) — distillation can't generate notes (start: ollama serve)"; failed_ollama=1
     fi
 elif curl -sf -m5 "$LLM_BASE/models" >/dev/null 2>&1; then
     ok "$PROVIDER reachable ($LLM_BASE)"
 else
-    bad "$PROVIDER endpoint unreachable ($LLM_BASE) — distillation can't generate notes (server up? needs auth?)"
+    bad "$PROVIDER endpoint unreachable ($LLM_BASE) — distillation can't generate notes (server up? needs auth?)"; failed_ollama=1
 fi
 
 # (c) Container status — surface crash-loops the HTTP probes alone would miss.
@@ -105,10 +146,11 @@ if command -v docker >/dev/null 2>&1; then
     if [ -n "$ps" ]; then
         ok "containers ($COMPOSE ps in $BORING_HOME):"
         printf '%s\n' "$ps" | sed 's/^/    /'
-        printf '%s\n' "$ps" | grep -qi 'restarting' \
-            && bad "a container is RESTARTING (crash-loop) — check 'make logs'"
+        if printf '%s\n' "$ps" | grep -qi 'restarting'; then
+            bad "a container is RESTARTING (crash-loop) — check 'make logs'"; failed_containers=1
+        fi
     else
-        bad "no compose containers found in $BORING_HOME (stack not started? set BORING_HOME?)"
+        bad "no compose containers found in $BORING_HOME (stack not started? set BORING_HOME?)"; failed_containers=1
     fi
 else
     bad "docker not on PATH — can't inspect container status"
@@ -132,6 +174,19 @@ if [ -n "$mark" ]; then
     echo "    $mark"
 else
     bad "no hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"
+fi
+
+if [ "$FIX" -eq 1 ]; then
+    echo
+    echo "Applying fixes..."
+    [ "$failed_env" -eq 1 ] && fix_env
+    [ "$failed_hooks" -eq 1 ] && fix_hooks
+    [ "$failed_engine" -eq 1 ] && fix_engine
+    [ "$failed_ollama" -eq 1 ] && fix_ollama
+    [ "$failed_containers" -eq 1 ] && fix_containers
+    echo
+    echo "Re-running doctor to verify..."
+    exec "$0"
 fi
 
 echo

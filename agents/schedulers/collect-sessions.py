@@ -25,7 +25,9 @@ import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config
+import markers
 import omb_env
+from drudge_client import DrudgeClient
 
 BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
@@ -35,25 +37,12 @@ MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")  # skip small sessions 
 # without editing this file.
 BORING_HOME = os.environ.get("BORING_HOME") or os.path.expanduser("~/oh-my-boring")
 HOOK = os.path.join(BORING_HOME, "agents/claude-code/distill-session.py")
-MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
 
 
 def _marked(session_id):
-    safe = re.sub(r"[^A-Za-z0-9_-]", "", session_id) or "nosession"
-    base = os.path.join(MARK_DIR, safe)
-    ts = f"{base}.ts"
-    pending = f"{base}.pending"
-    retry = f"{base}.retry"
-    # Done marker means fully handled; clean up any stale retry marker left by an earlier failure.
-    if os.path.exists(ts):
-        if os.path.exists(retry):
-            try:
-                os.remove(retry)
-            except OSError:
-                pass
-        return True
-    # Hermes pending markers mean "already queued" — don't backfill.
-    return os.path.exists(pending)
+    # Done marker means fully handled; hermes pending markers mean "already queued" — don't backfill.
+    # Retry markers are intentionally eligible for backfill (that's what backfill is for).
+    return markers.is_done(session_id) or markers.is_pending(session_id)
 
 
 def transcript_cwd(tp):
@@ -149,9 +138,8 @@ def main():
             print(f"[{label}] timeout  {proj}", flush=True)
 
     try:
-        req = urllib.request.Request(f"{BORING_URL}/sync", data=b"", method="POST")
-        with urllib.request.urlopen(req, timeout=900) as resp:
-            print(f"[{label}] sync ok", flush=True)
+        DrudgeClient().sync()
+        print(f"[{label}] sync ok", flush=True)
     except Exception as e:
         print(f"[{label}] sync failed (ignored): {e}", flush=True)
     print(f"[{label}] done={done}/{len(batch)}  remaining={len(todo) - done}", flush=True)

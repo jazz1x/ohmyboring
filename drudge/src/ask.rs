@@ -1,5 +1,7 @@
 //! Ask — retrieval → context → Llm synthesis → answer + sources.
 //!
+//! Cross-reference: design decision D5 (claim temporal authority) · ENFORCEMENT.md §B (SRP).
+//!
 //! SRP: `answer()` is pure logic (returns data), `run()` is the CLI I/O shell.
 use std::collections::HashSet;
 use std::fmt::Write as _;

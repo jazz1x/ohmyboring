@@ -1,5 +1,7 @@
 //! Secret scrub — the single leak-boundary guard before content enters the git-tracked vault.
 //!
+//! Cross-reference: ENFORCEMENT.md §D4 (secret scrub boundary) · PHILOSOPHY.md Layer 1.
+//!
 //! The agent (reasoner) curates notes and is the first line of defense, but `remember` writes into a
 //! git-tracked vault — a real leak boundary. A lightweight regex scrub here closes the one sharing/git
 //! boundary (not symptom-masking: the root cause is "arbitrary text may carry a token", outside our

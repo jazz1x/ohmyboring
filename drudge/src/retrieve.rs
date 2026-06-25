@@ -1,4 +1,6 @@
 //! Retrieval pipeline — vector + BM25 full-text → RRF merge → top-k / budget-aware. origin filter.
+//!
+//! Cross-reference: design decision D3 (read door open) · ENFORCEMENT.md §B (one-way flow).
 //!   - No rewriting/reranker (personal scale = simplest thing that works).
 use std::collections::HashMap;
 

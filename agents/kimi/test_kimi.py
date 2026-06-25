@@ -28,6 +28,7 @@ def _load(name, filename):
 
 distill = _load("kimi_distill_session", "distill-session.py")
 recall = _load("kimi_recall", "recall.py")
+import recall_core  # noqa: E402
 
 
 def test_work_dir_key_format():
@@ -91,27 +92,13 @@ def test_recall_skips_short_and_injection():
 
 
 def test_recall_formats_context():
-    class _Resp:
-        def __init__(self, payload):
-            self._payload = payload
-
-        def read(self):
-            return json.dumps(self._payload).encode()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
     captured = io.StringIO()
+    hits = [{"source_path": "vault/wiki/wiki-0007.md", "snippet": "fixed   the\ncache"}]
     with mock.patch.object(recall.sys, "stdin", io.StringIO(json.dumps({
         "prompt": "how did I fix the docker cache issue",
         "origin": {"kind": "user"},
     }))), \
-         mock.patch.object(recall.urllib.request, "urlopen",
-                           return_value=_Resp({"hits": [{"source_path": "vault/wiki/wiki-0007.md",
-                                                           "snippet": "fixed   the\ncache"}]})), \
+         mock.patch.object(recall_core.DrudgeClient, "search", return_value=hits), \
          mock.patch.object(recall.sys, "stdout", captured):
         recall.main()
     payload = json.loads(captured.getvalue())
@@ -121,7 +108,7 @@ def test_recall_formats_context():
 
 
 def test_recall_failed_search_logs_to_stderr():
-    recall.RETRIES = 0
+    recall_core.RETRIES = 0
     try:
         captured = io.StringIO()
         stderr = io.StringIO()
@@ -129,14 +116,14 @@ def test_recall_failed_search_logs_to_stderr():
             "prompt": "how did I fix the docker cache issue",
             "origin": {"kind": "user"},
         }))), \
-             mock.patch.object(recall.urllib.request, "urlopen", side_effect=OSError("down")), \
+             mock.patch.object(recall_core.DrudgeClient, "search", side_effect=OSError("down")), \
              mock.patch.object(recall.sys, "stdout", captured), \
              mock.patch.object(recall.sys, "stderr", stderr):
             recall.main()
         assert captured.getvalue() == ""
         assert "[omb-recall] search failed" in stderr.getvalue()
     finally:
-        recall.RETRIES = 1
+        recall_core.RETRIES = 1
 
 
 def test_distill_invalid_stdin_logs_error():
