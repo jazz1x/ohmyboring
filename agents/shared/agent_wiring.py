@@ -49,6 +49,10 @@ AGENTS = {
         "path": "{HOME}/.claude/mcp.json",
         "root_key": "mcpServers",
     },
+    "hermes-agent": {
+        "kind": "hermes",
+        "path": "{HOME}/.hermes/config.yaml",
+    },
 }
 
 DEFAULT_MCP_SERVER = {
@@ -205,28 +209,125 @@ def wire_mcp_agent(agent_id: str, server_name: str, server_config: dict, path: P
     return {"agent": agent_id, "path": str(path), "changed": True}
 
 
+def _write_text_atomic(path: Path, text: str) -> None:
+    """Atomic text write: temp file + rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _upsert_mcp_block(lines: list[str], mcp_idx: int, server_name: str, url: str, transport: str) -> tuple[list[str], bool]:
+    """Replace only the mcp_servers block in a YAML text, preserving the rest of the file.
+
+    Parses existing servers with 2-space YAML indentation and rebuilds the block
+    with ohmyboring present/updated. Comments inside the block are lost; everything
+    outside is preserved.
+    """
+    end_idx = len(lines)
+    for i in range(mcp_idx + 1, len(lines)):
+        line = lines[i]
+        if line and not line.startswith(" ") and not line.startswith("#"):
+            end_idx = i
+            break
+
+    existing: dict[str, dict[str, str]] = {}
+    current_server: str | None = None
+    for line in lines[mcp_idx + 1 : end_idx]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if line.startswith("  ") and not line.startswith("    "):
+            current_server = stripped.rstrip(":")
+            existing[current_server] = {}
+        elif line.startswith("    ") and current_server is not None:
+            if ":" in stripped:
+                key, val = stripped.split(":", 1)
+                existing[current_server][key.strip()] = val.strip()
+
+    existing[server_name] = {"url": url, "transport": transport}
+
+    new_block = ["mcp_servers:"]
+    for name, cfg in existing.items():
+        new_block.append(f"  {name}:")
+        for key, val in cfg.items():
+            new_block.append(f"    {key}: {val}")
+
+    return lines[:mcp_idx] + new_block + lines[end_idx:], True
+
+
+def _install_hermes_briefing() -> None:
+    """Install the canonical briefing.py template into ~/.hermes/scripts/."""
+    src = Path(BORING_HOME) / "agents" / "hermes" / "briefing.py"
+    if not src.exists():
+        raise FileNotFoundError(f"briefing template not found: {src}")
+    dst_dir = Path(os.path.expanduser("~/.hermes/scripts"))
+    dst = dst_dir / "briefing.py"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    _backup(dst)
+    shutil.copy2(src, dst)
+
+
+def wire_hermes(path: Path | None = None) -> dict:
+    """Idempotently wire ohmyboring into hermes-agent.
+
+    - Adds/updates mcp_servers.ohmyboring in ~/.hermes/config.yaml
+    - Installs the canonical briefing.py into ~/.hermes/scripts/briefing.py
+    """
+    path = path if path is not None else _agent_path("hermes-agent")
+    _backup(path)
+
+    server_name = "ohmyboring"
+    url = "http://boring-drudge:7700/mcp"
+    transport = "http"
+
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    if not text.strip():
+        body = f"mcp_servers:\n  {server_name}:\n    url: {url}\n    transport: {transport}\n"
+        _write_text_atomic(path, body)
+        _install_hermes_briefing()
+        return {"agent": "hermes-agent", "path": str(path), "changed": True}
+
+    lines = text.splitlines()
+    mcp_idx = None
+    for i, line in enumerate(lines):
+        if line.rstrip() == "mcp_servers:":
+            mcp_idx = i
+            break
+
+    if mcp_idx is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(f"mcp_servers:")
+        lines.append(f"  {server_name}:")
+        lines.append(f"    url: {url}")
+        lines.append(f"    transport: {transport}")
+        changed = True
+    else:
+        lines, changed = _upsert_mcp_block(lines, mcp_idx, server_name, url, transport)
+
+    _write_text_atomic(path, "\n".join(lines) + "\n")
+    _install_hermes_briefing()
+    return {"agent": "hermes-agent", "path": str(path), "changed": changed}
+
+
 def install(enabled_agents, server_name, server_config):
     results = []
     failed = False
     for agent_id in enabled_agents:
         if agent_id not in AGENTS:
-            # hermes-agent is a containerized supervisor, not a host-side setting file.
-            if agent_id == "hermes-agent":
-                print(
-                    f"[omb-wire] '{agent_id}' does not need host-side wiring — skipping",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"[omb-wire] unsupported agent '{agent_id}' — skipping",
-                    file=sys.stderr,
-                )
+            print(
+                f"[omb-wire] unsupported agent '{agent_id}' — skipping",
+                file=sys.stderr,
+            )
             continue
         try:
             if agent_id == "claude-code":
                 results.append(wire_claude_code())
             elif agent_id == "kimi":
                 results.append(wire_kimi())
+            elif agent_id == "hermes-agent":
+                results.append(wire_hermes())
             else:
                 results.append(wire_mcp_agent(agent_id, server_name, server_config))
         except Exception as e:
