@@ -98,20 +98,9 @@ pub(crate) async fn handle_search(
     let max_chars = max_tokens.saturating_mul(4);
     let project = req.project.as_deref();
     let since_hours = req.since_hours;
-    // wiki-first: try direct markdown search before vector retrieval.
-    let wiki_hits = s.wiki_recall(&req.query, max_results, project, since_hours)?;
-    let mapped: Vec<SearchHit> = if !wiki_hits.is_empty() {
-        wiki_hits
-            .into_iter()
-            .map(|h| SearchHit {
-                id: h.id,
-                origin: String::new(),
-                project: String::new(),
-                source_path: h.source_path,
-                snippet: h.snippet,
-            })
-            .collect()
-    } else if let Some(store) = s.store.as_ref() {
+    // vector-first: /search is the external accuracy contract (eval gate). Use the strongest
+    // retriever when available; fall back to direct wiki reads only when vector is off.
+    let mapped: Vec<SearchHit> = if let Some(store) = s.store.as_ref() {
         retrieve::retrieve_budget(
             store,
             &s.llm,
@@ -133,7 +122,16 @@ pub(crate) async fn handle_search(
         })
         .collect()
     } else {
-        Vec::new()
+        s.wiki_recall(&req.query, max_results, project, since_hours)?
+            .into_iter()
+            .map(|h| SearchHit {
+                id: h.id,
+                origin: String::new(),
+                project: String::new(),
+                source_path: h.source_path,
+                snippet: h.snippet,
+            })
+            .collect()
     };
     let hit_paths: Vec<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
     spawn_query_log(
