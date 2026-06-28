@@ -103,20 +103,28 @@ async fn current_claims_honors_exclude_origins() {
             .await
             .expect("upsert document");
         store
-            .upsert_claim(subj, "is", "x", &front.source_path, SystemTime::now(), emb)
+            .upsert_claim(
+                subj,
+                "is",
+                "x",
+                &front.source_path,
+                SystemTime::now(),
+                emb,
+                "fact",
+                "certain",
+            )
             .await
             .expect("upsert claim");
     }
 
     let query = [0.5_f32; 1024]; // near both
-    let subjects = |rows: Vec<(String, String, String)>| -> Vec<String> {
-        rows.into_iter().map(|(s, _, _)| s).collect()
-    };
+    let subjects =
+        |rows: Vec<Claim>| -> Vec<String> { rows.into_iter().map(|c| c.subject).collect() };
 
     // No exclusion → both visible.
     let all = subjects(
         store
-            .current_claims(&query, 20, &[], None)
+            .current_claims(&query, 20, &[], None, None)
             .await
             .expect("claims all"),
     );
@@ -128,7 +136,7 @@ async fn current_claims_honors_exclude_origins() {
     // Exclude company → company claim must be filtered out, personal kept.
     let filtered = subjects(
         store
-            .current_claims(&query, 20, &["company".to_string()], None)
+            .current_claims(&query, 20, &["company".to_string()], None, None)
             .await
             .expect("claims filtered"),
     );
@@ -167,6 +175,8 @@ async fn delete_document_removes_claims() {
         subject: "test-subject".to_string(),
         predicate: "has".to_string(),
         value: "value".to_string(),
+        kind: "fact".to_string(),
+        confidence: "certain".to_string(),
     });
 
     store
@@ -181,6 +191,8 @@ async fn delete_document_removes_claims() {
             &path,
             SystemTime::now(),
             &[0.0_f32; 1024],
+            &front.claims[0].kind,
+            &front.claims[0].confidence,
         )
         .await
         .expect("upsert claim");
@@ -268,4 +280,75 @@ async fn nearest_document_respects_threshold() {
 
     store.delete_document(&a_path).await.expect("cleanup a");
     store.delete_document(&b_path).await.expect("cleanup b");
+}
+
+/// Claims can carry kind/confidence and be filtered by kind.
+#[tokio::test]
+async fn claim_kind_and_confidence_round_trip() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let path = unique_path("claim-kind");
+    let mut front = dummy_frontmatter(&path);
+    front.project = "omb".to_owned();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let emb = [0.1_f32; 1024];
+    store
+        .upsert_claim(
+            "omb",
+            "release-version",
+            "0.2.0",
+            &path,
+            SystemTime::now(),
+            &emb,
+            "decision",
+            "certain",
+        )
+        .await
+        .expect("upsert decision claim");
+    store
+        .upsert_claim(
+            "omb",
+            "auth-flow",
+            "unverified",
+            &path,
+            SystemTime::now(),
+            &emb,
+            "risk",
+            "likely",
+        )
+        .await
+        .expect("upsert risk claim");
+
+    let decisions = store
+        .recent_claims(10, Some("omb"), Some(&["decision".to_owned()]))
+        .await
+        .expect("recent decisions");
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].kind(), "decision");
+    assert_eq!(decisions[0].confidence(), "certain");
+
+    let risks = store
+        .recent_claims(
+            10,
+            Some("omb"),
+            Some(&[
+                "risk".to_owned(),
+                "assumption".to_owned(),
+                "blocked".to_owned(),
+            ]),
+        )
+        .await
+        .expect("recent risks");
+    assert_eq!(risks.len(), 1);
+    assert_eq!(risks[0].kind(), "risk");
+
+    store.delete_document(&path).await.expect("cleanup");
 }

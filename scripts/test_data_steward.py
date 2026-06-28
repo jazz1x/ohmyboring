@@ -144,6 +144,38 @@ def test_weak_claims_detected():
     assert "weak-claims" in weak_kinds, issues
 
 
+def test_unknown_claim_kind_is_flagged():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\n"
+        "claims:\n"
+        "- {subject: omb, predicate: status, value: ok, kind: myth}\n"
+        "- {subject: omb, predicate: version, value: 0.2.0}\n"
+        "sources: []"
+    )
+    issues = ds._claim_issues([note])
+    weak = [i for i in issues if i["kind"] == "weak-claims"]
+    assert len(weak) == 1, issues
+    reasons = [w["reason"] for w in weak[0]["claims"]]
+    assert any("unknown claim kind" in r for r in reasons), reasons
+
+
+def test_unknown_claim_confidence_is_flagged():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\n"
+        "claims:\n"
+        "- {subject: omb, predicate: status, value: ok, confidence: definitely}\n"
+        "- {subject: omb, predicate: version, value: 0.2.0}\n"
+        "sources: []"
+    )
+    issues = ds._claim_issues([note])
+    weak = [i for i in issues if i["kind"] == "weak-claims"]
+    assert len(weak) == 1, issues
+    reasons = [w["reason"] for w in weak[0]["claims"]]
+    assert any("unknown claim confidence" in r for r in reasons), reasons
+
+
 def main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

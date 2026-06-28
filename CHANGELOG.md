@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **Decision / Risk / Assumption register (Phase 4A)** — claims now carry `kind` and `confidence`:
+  - Claim kinds: `fact`, `decision`, `assumption`, `risk`, `blocked`, `goal`.
+  - Confidence levels: `certain`, `likely`, `assumption`, `outdated`.
+  - New MCP tools: `decisions` and `risks` (project filter optional).
+  - New HTTP endpoints: `POST /decisions` and `POST /risks`.
+  - Claims are wired into the graph as `claim:{subject}:{predicate}` nodes, with typed nodes
+    (`decision:...`, `risk:...`) and edges for graph recall.
+  - `weekly_brief` and `project_status` now surface decisions/risks in dedicated subsections.
 - **Consumption interfaces (Phase 3)** — memory is now reachable on demand and at session start:
   - New MCP tools: `weekly_brief` (last 7 days by project) and `project_status` (last 30 days for one project).
   - New HTTP endpoints: `POST /weekly` and `POST /status`.

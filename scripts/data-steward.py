@@ -39,6 +39,8 @@ MIN_CLAIMS_PER_SESSION = 2
 MIN_CLAIM_VALUE_LEN = 4
 # Words that make a claim sound like a next-step rather than a fact.
 WEAK_CLAIM_WORDS = {"검토", "확인", "고민", "예정", "계획", "review", "consider", "plan", "todo"}
+ALLOWED_CLAIM_KINDS = {"fact", "decision", "assumption", "risk", "blocked", "goal"}
+ALLOWED_CLAIM_CONFIDENCES = {"certain", "likely", "assumption", "outdated"}
 # The shipped sample note is allowed to be generic/empty; do not flag it as data rot.
 SEED_NOTE = "wiki-0000.md"
 
@@ -139,6 +141,12 @@ def _claim_issues(notes):
                 weak.append({"claim": c, "reason": "value too short"})
             elif any(w in val.lower() for w in WEAK_CLAIM_WORDS):
                 weak.append({"claim": c, "reason": "value sounds like a plan, not a fact"})
+            kind = str(c.get("kind", "") or "fact").strip().lower()
+            if kind not in ALLOWED_CLAIM_KINDS:
+                weak.append({"claim": c, "reason": f"unknown claim kind '{kind}'"})
+            conf = str(c.get("confidence", "") or "certain").strip().lower()
+            if conf not in ALLOWED_CLAIM_CONFIDENCES:
+                weak.append({"claim": c, "reason": f"unknown claim confidence '{conf}'"})
         if weak:
             issues.append({"path": n["path"].name, "kind": "weak-claims", "claims": weak})
     return issues
