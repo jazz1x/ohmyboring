@@ -7,6 +7,7 @@ only supply their injection-filter, if any, and then delegate here.
 import json
 import os
 import sys
+import time
 from typing import Callable, Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
@@ -16,11 +17,54 @@ MAX_RESULTS = int(os.environ.get("RECALL_MAX_RESULTS") or "3")
 MAX_TOKENS = int(os.environ.get("RECALL_MAX_TOKENS") or "1500")
 TIMEOUT = float(os.environ.get("RECALL_TIMEOUT") or "5")
 RETRIES = int(os.environ.get("RECALL_RETRIES") or "1")
+SESSION_THROTTLE_SECONDS = int(os.environ.get("RECALL_SESSION_THROTTLE_SECONDS") or "3600")
+
+
+def _throttle_path() -> str:
+    cache = os.path.join(os.path.expanduser("~"), ".cache", "oh-my-boring")
+    os.makedirs(cache, exist_ok=True)
+    return os.path.join(cache, "recall_throttle.json")
+
+
+def _load_throttle() -> dict[str, float]:
+    path = _throttle_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_throttle(state: dict[str, float]) -> None:
+    path = _throttle_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    os.replace(tmp, path)
+
+
+def _session_throttled(session_id: str | None) -> bool:
+    """Return True if this session was recalled recently (default 1h)."""
+    if not session_id:
+        return False
+    now = time.time()
+    state = _load_throttle()
+    last = state.get(session_id)
+    if last is not None and now - last < SESSION_THROTTLE_SECONDS:
+        return True
+    state[session_id] = now
+    # prune entries older than 7 days to keep the file small
+    cutoff = now - 7 * 24 * 3600
+    state = {sid: ts for sid, ts in state.items() if ts > cutoff}
+    _save_throttle(state)
+    return False
 
 
 def run_recall(
     data: dict,
     is_injection: Optional[Callable[[dict], bool]] = None,
+    throttle_session: bool = False,
 ) -> None:
     """Recall relevant notes via drudge /search and print the hook output.
 
@@ -29,6 +73,9 @@ def run_recall(
     blocks the prompt.
     """
     if is_injection is not None and is_injection(data):
+        return
+
+    if throttle_session and _session_throttled(data.get("session_id")):
         return
 
     prompt = (data.get("prompt") or "").strip()

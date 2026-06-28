@@ -116,7 +116,7 @@ async fn current_claims_honors_exclude_origins() {
     // No exclusion → both visible.
     let all = subjects(
         store
-            .current_claims(&query, 20, &[])
+            .current_claims(&query, 20, &[], None)
             .await
             .expect("claims all"),
     );
@@ -128,7 +128,7 @@ async fn current_claims_honors_exclude_origins() {
     // Exclude company → company claim must be filtered out, personal kept.
     let filtered = subjects(
         store
-            .current_claims(&query, 20, &["company".to_string()])
+            .current_claims(&query, 20, &["company".to_string()], None)
             .await
             .expect("claims filtered"),
     );

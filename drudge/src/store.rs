@@ -349,6 +349,7 @@ impl Store {
         limit: i64,
         exclude_origins: &[String],
         since_hours: Option<i32>,
+        project: Option<&str>,
     ) -> Result<Vec<RecentDoc>> {
         let rows = match since_hours {
             Some(hours) => self
@@ -360,10 +361,11 @@ impl Store {
                          JOIN chunk c ON c.source_path = d.source_path
                          WHERE NOT (d.origin = ANY($2))
                            AND d.updated_at >= now() - make_interval(hours => $3)
+                           AND ($4::text IS NULL OR d.project = $4)
                          GROUP BY d.source_path, d.project, d.tags, d.updated_at
                          ORDER BY d.updated_at DESC
                          LIMIT $1;",
-                    &[&limit, &exclude_origins, &hours],
+                    &[&limit, &exclude_origins, &hours, &project],
                 )
                 .await
                 .context("recent docs with time window")?,
@@ -375,10 +377,11 @@ impl Store {
                          FROM document d
                          JOIN chunk c ON c.source_path = d.source_path
                          WHERE NOT (d.origin = ANY($2))
+                           AND ($3::text IS NULL OR d.project = $3)
                          GROUP BY d.source_path, d.project, d.tags, d.updated_at
                          ORDER BY d.updated_at DESC
                          LIMIT $1;",
-                    &[&limit, &exclude_origins],
+                    &[&limit, &exclude_origins, &project],
                 )
                 .await
                 .context("recent docs")?,
@@ -579,15 +582,21 @@ impl Store {
     }
 
     /// Top-k **current** claims (superseded_at IS NULL) by recency (valid_from desc). For injecting authority into the briefing.
-    pub async fn recent_claims(&self, k: i64) -> Result<Vec<(String, String, String)>> {
+    pub async fn recent_claims(
+        &self,
+        k: i64,
+        project: Option<&str>,
+    ) -> Result<Vec<(String, String, String)>> {
         let rows = self
             .db
             .query(
-                "SELECT subject, predicate, value FROM claim
-                 WHERE superseded_at IS NULL
-                 ORDER BY valid_from DESC
+                "SELECT c.subject, c.predicate, c.value FROM claim c
+                 JOIN document d ON d.source_path = c.source_path
+                 WHERE c.superseded_at IS NULL
+                   AND ($2::text IS NULL OR d.project = $2)
+                 ORDER BY c.valid_from DESC
                  LIMIT $1;",
-                &[&k],
+                &[&k, &project],
             )
             .await
             .context("recent claims")?;
@@ -609,6 +618,7 @@ impl Store {
         query_emb: &[f32],
         k: i64,
         exclude_origins: &[String],
+        project: Option<&str>,
     ) -> Result<Vec<(String, String, String)>> {
         let vec = Vector::from(query_emb.to_vec());
         // Honor the SAME origin boundary the recall path applies (retrieve::merge_hits filters by
@@ -623,9 +633,10 @@ impl Store {
                  JOIN document d ON d.source_path = c.source_path
                  WHERE c.superseded_at IS NULL AND c.embedding IS NOT NULL
                    AND NOT (d.origin = ANY($3))
+                   AND ($4::text IS NULL OR d.project = $4)
                  ORDER BY c.embedding <=> $1
                  LIMIT $2;",
-                &[&vec, &k, &exclude_origins],
+                &[&vec, &k, &exclude_origins, &project],
             )
             .await
             .context("current claims")?;

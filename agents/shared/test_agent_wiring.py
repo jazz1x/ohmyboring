@@ -7,8 +7,10 @@ Guards the installer surface that is otherwise only exercised at install time:
   - install() must report failures instead of swallowing them.
   - hermes-agent must not be reported as "unsupported".
 """
+import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -80,6 +82,40 @@ def test_default_path_when_no_override():
         )
 
 
+def test_wire_claude_code_adds_session_start():
+    """Claude Code wiring adds a SessionStart recall hook alongside existing hooks."""
+    with tempfile.TemporaryDirectory() as d:
+        settings = Path(d) / "settings.json"
+        result = agent_wiring.wire_claude_code(settings)
+        assert result["changed"] is True
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        hooks = data.get("hooks", {})
+        assert "SessionStart" in hooks
+        commands = [
+            h.get("command")
+            for group in hooks["SessionStart"]
+            for h in group.get("hooks", [])
+        ]
+        assert any("session-start-recall.py" in c for c in commands)
+
+
+def test_wire_hermes_adds_hint_and_weekly():
+    """hermes wiring installs hint + weekly script and updates config.yaml."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d) / "omb"
+        scripts = home / "agents" / "hermes"
+        scripts.mkdir(parents=True)
+        (scripts / "briefing.py").write_text("# stub", encoding="utf-8")
+        (scripts / "weekly-briefing.py").write_text("# stub", encoding="utf-8")
+        cfg = Path(d) / "config.yaml"
+        result = agent_wiring.wire_hermes(cfg, boring_home=str(home))
+        assert result["changed"] is True
+        text = cfg.read_text(encoding="utf-8")
+        assert "environment_hint:" in text
+        assert "ohmyboring/recall" in text
+        assert (Path(os.path.expanduser("~/.hermes/scripts")) / "weekly-briefing.py").exists()
+
+
 if __name__ == "__main__":
     test_install_reports_failure()
     test_install_returns_success_when_ok()
@@ -87,4 +123,6 @@ if __name__ == "__main__":
     test_unsupported_agent_is_skipped_without_failure()
     test_settings_path_override()
     test_default_path_when_no_override()
+    test_wire_claude_code_adds_session_start()
+    test_wire_hermes_adds_hint_and_weekly()
     print("ok - agent_wiring failure propagation + hermes wiring + settings_path")

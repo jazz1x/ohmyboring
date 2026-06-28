@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ## [Unreleased]
 
+### Added
+- **Consumption interfaces (Phase 3)** — memory is now reachable on demand and at session start:
+  - New MCP tools: `weekly_brief` (last 7 days by project) and `project_status` (last 30 days for one project).
+  - New HTTP endpoints: `POST /weekly` and `POST /status`.
+  - Claude Code `SessionStart` hook injects project context automatically.
+  - Kimi `UserPromptSubmit` recall is throttled to once per session (1-hour window).
+  - hermes-agent gets an `environment_hint` reminding it to recall ohmyboring context, plus a
+    `weekly-briefing.py` cron script.
+- **`project` filter on recency retrieval** — `recent_docs`, `recent_claims`, and `current_claims` now
+  accept an optional project slug, enabling the new project-scoped consumption tools.
+
 ## [0.1.0] — 2026-06-25
 
 First public cut of **ohmyboring** — a self-hosted personal memory RAG (re-cut to fold all

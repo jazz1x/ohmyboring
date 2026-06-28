@@ -247,6 +247,24 @@ fn mcp_tools_list() -> Value {
             "description": "Recency-first briefing of recent work (no query): the latest notes synthesized newest-first with \
                             current-claim authority — not reproducible via semantic recall. Generative (runs the LLM). Requires the vector backend.",
             "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "weekly_brief",
+            "description": "Weekly recency-first briefing: last 7 days of work synthesized by project with Done/Next/Blocked bullets. \
+                            Excludes daily-brief notes to avoid repetition. Generative (runs the LLM). Requires the vector backend.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "project_status",
+            "description": "Status summary for a single project over the last 30 days: Done/Next/Blocked bullets grounded in notes and current claims. \
+                            Generative (runs the LLM). Requires the vector backend.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "project slug to summarize"}
+                },
+                "required": ["project"]
+            }
         }
     ]})
 }
@@ -302,6 +320,8 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
         "claims" => ToolOut::Structured(mcp_claims(s, args).await?),
         "ask" => ToolOut::Structured(mcp_ask(s, args).await?),
         "brief" => ToolOut::Structured(mcp_brief(s).await?),
+        "weekly_brief" => ToolOut::Structured(mcp_weekly_brief(s).await?),
+        "project_status" => ToolOut::Structured(mcp_project_status(s, args).await?),
         other => return Err((-32602, format!("unknown tool: {other}"))),
     };
     Ok(out.into_result())
@@ -445,7 +465,7 @@ async fn mcp_claims(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, S
         .await
         .map_err(|e| (-32603_i32, format!("embed: {e:#}")))?;
     let claims = store
-        .current_claims(&q_emb, max_results, &[])
+        .current_claims(&q_emb, max_results, &[], None)
         .await
         .map_err(|e| (-32603_i32, format!("claims: {e:#}")))?;
     let arr: Vec<Value> = claims
@@ -502,6 +522,32 @@ async fn mcp_brief(s: &AppState) -> Result<Value, (i32, String)> {
     let out = ask::brief(store, &s.llm, &[], s.cfg.note_lang.as_str())
         .await
         .map_err(|e| (-32603_i32, format!("brief: {e:#}")))?;
+    Ok(json!({"answer": out.answer, "sources": out.sources}))
+}
+
+/// `weekly_brief` — last 7 days by project. Returns `{answer, sources}`.
+async fn mcp_weekly_brief(s: &AppState) -> Result<Value, (i32, String)> {
+    let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    let out = ask::weekly_brief(store, &s.llm, &[], s.cfg.note_lang.as_str())
+        .await
+        .map_err(|e| (-32603_i32, format!("weekly_brief: {e:#}")))?;
+    Ok(json!({"answer": out.answer, "sources": out.sources}))
+}
+
+/// `project_status` — 30-day status for a single project. Returns `{answer, sources}`.
+async fn mcp_project_status(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
+    let project = args
+        .and_then(|a| a.get("project"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if project.is_empty() {
+        return Err((-32602, "missing argument: project".to_owned()));
+    }
+    let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    let out = ask::project_status(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
+        .await
+        .map_err(|e| (-32603_i32, format!("project_status: {e:#}")))?;
     Ok(json!({"answer": out.answer, "sources": out.sources}))
 }
 
