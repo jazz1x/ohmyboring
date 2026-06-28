@@ -343,26 +343,46 @@ impl Store {
 
     /// Top-N documents by recency — full body (chunks joined). Retrieval for the recency-first/supersede briefing.
     /// Ordered by `updated_at` descending rather than semantic similarity = "most recently changed knowledge on top".
+    /// If `since_hours` is Some, only documents updated within that window are returned.
     pub async fn recent_docs(
         &self,
         limit: i64,
         exclude_origins: &[String],
+        since_hours: Option<i32>,
     ) -> Result<Vec<RecentDoc>> {
-        let rows = self
-            .db
-            .query(
-                "SELECT d.source_path, d.project, d.tags,
-                        string_agg(c.content, E'\n' ORDER BY c.chunk_idx) AS content
-                 FROM document d
-                 JOIN chunk c ON c.source_path = d.source_path
-                 WHERE NOT (d.origin = ANY($2))
-                 GROUP BY d.source_path, d.project, d.tags, d.updated_at
-                 ORDER BY d.updated_at DESC
-                 LIMIT $1;",
-                &[&limit, &exclude_origins],
-            )
-            .await
-            .context("recent docs")?;
+        let rows = match since_hours {
+            Some(hours) => self
+                .db
+                .query(
+                    "SELECT d.source_path, d.project, d.tags,
+                                string_agg(c.content, E'\n' ORDER BY c.chunk_idx) AS content
+                         FROM document d
+                         JOIN chunk c ON c.source_path = d.source_path
+                         WHERE NOT (d.origin = ANY($2))
+                           AND d.updated_at >= now() - make_interval(hours => $3)
+                         GROUP BY d.source_path, d.project, d.tags, d.updated_at
+                         ORDER BY d.updated_at DESC
+                         LIMIT $1;",
+                    &[&limit, &exclude_origins, &hours],
+                )
+                .await
+                .context("recent docs with time window")?,
+            None => self
+                .db
+                .query(
+                    "SELECT d.source_path, d.project, d.tags,
+                                string_agg(c.content, E'\n' ORDER BY c.chunk_idx) AS content
+                         FROM document d
+                         JOIN chunk c ON c.source_path = d.source_path
+                         WHERE NOT (d.origin = ANY($2))
+                         GROUP BY d.source_path, d.project, d.tags, d.updated_at
+                         ORDER BY d.updated_at DESC
+                         LIMIT $1;",
+                    &[&limit, &exclude_origins],
+                )
+                .await
+                .context("recent docs")?,
+        };
         Ok(rows
             .iter()
             .map(|r| RecentDoc {

@@ -79,6 +79,14 @@ if docker compose version 2>&1 | grep -q "Docker Compose"; then
 else
   COMPOSE="docker-compose"
 fi
+
+# Wire hermes-agent config/scripts before the container starts so the cron
+# scripts find the engine and use the canonical MCP server name.
+if [ -n "$AGENT" ]; then
+  echo "▶ Wiring hermes-agent settings …"
+  python3 agents/shared/agent_wiring.py --install --boring-home "$PWD" || true
+fi
+
 $COMPOSE $PROFILES up -d --build boring-drudge $AGENT
 
 echo "▶ Waiting for boring-drudge health …"

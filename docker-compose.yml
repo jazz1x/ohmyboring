@@ -87,6 +87,9 @@ services:
       TZ: Asia/Seoul
       # RAG endpoint for morning-briefing (briefing.py) + ingest-worker.
       BORING_URL: http://boring-drudge:7700
+      # Legacy alias: some hermes-agent cron scripts (e.g. ~/.hermes/scripts/briefing.py)
+      # still read DRUDGE_URL. Keep both names populated so existing scripts keep working.
+      DRUDGE_URL: http://boring-drudge:7700
     volumes:
       - ${HOME}/.hermes:/opt/data         # persists config / credentials / session memory (autonomy-augmentation layer)
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: ingest-worker.py only globs /host/.claude/projects)

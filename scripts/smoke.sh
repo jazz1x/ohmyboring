@@ -86,4 +86,24 @@ else
   echo "5) wiki mode detected (/audit has no vector corpus) — vector/graph checks skipped"
 fi
 
+echo "8) hermes-agent wiring (if running)…"
+if printf '%s\n' "$ps" | grep -qE 'boring-agent.*Up'; then
+  if ! docker compose exec -T boring-agent sh -c 'printf "%s\n" "$BORING_URL"' | grep -q 'boring-drudge:7700'; then
+    fail "BORING_URL not set to boring-drudge:7700 in boring-agent"
+  fi
+  if ! docker compose exec -T boring-agent sh -c 'printf "%s\n" "$DRUDGE_URL"' | grep -q 'boring-drudge:7700'; then
+    fail "DRUDGE_URL not set to boring-drudge:7700 in boring-agent"
+  fi
+  if ! docker compose exec -T boring-agent curl -sf -m5 http://boring-drudge:7700/health >/dev/null 2>&1; then
+    fail "boring-agent cannot reach boring-drudge:7700/health"
+  fi
+  if [ -f "$HOME/.hermes/config.yaml" ]; then
+    grep -q 'mcp_servers:' "$HOME/.hermes/config.yaml" || fail "~/.hermes/config.yaml missing mcp_servers"
+    grep -q 'ohmyboring:' "$HOME/.hermes/config.yaml" || fail "~/.hermes/config.yaml missing mcp_servers.ohmyboring"
+  fi
+  echo "   hermes-agent wired correctly"
+else
+  echo "   boring-agent not running — hermes-agent checks skipped"
+fi
+
 echo "OK: smoke passed — engine works end-to-end (adversarially verified)."

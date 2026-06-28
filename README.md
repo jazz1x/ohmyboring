@@ -227,7 +227,7 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 | Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring` as an MCP server |
 | Codex | `agents/codex/README.md` | MCP only | `~/.codex/mcp.json` | Exposes `ohmyboring` as an MCP server |
-| hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Serial backfill, one session per cron tick |
+| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Serial backfill (`ingest-worker.py`) + morning briefing (`briefing.py`) |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older Claude Code sessions |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / manual | Lazy backfill of older Kimi Code sessions |
 | shared | `agents/shared/boring_config.py` | imported by adapters | `boring.json` policy loader |
@@ -295,7 +295,23 @@ curl -s -X POST http://localhost:7700/mcp \
 
 [hermes-agent](https://hermes-agent.org) is a third-party autonomous supervisor. It can drive Slack, orchestration, and cron-based backfill through ohmyboring's MCP backend. Build the image separately; `make up` picks it up automatically if it exists.
 
-It is configured per the hermes-agent project's **own docs** (out of scope here) — point its `~/.hermes/config.yaml` at ohmyboring's MCP (`http://boring-drudge:7700/mcp`). What ohmyboring ships wires it up as the Slack assistant; to use it for anything beyond that, build or modify the image yourself.
+When hermes-agent is enabled in `boring.json`, `make up` wires it automatically:
+
+- Adds `mcp_servers.ohmyboring` to `~/.hermes/config.yaml`
+- Installs the canonical `~/.hermes/scripts/briefing.py` (uses `BORING_URL`, with `DRUDGE_URL` as a legacy fallback)
+- Validates the connection in `make smoke`
+
+Enable it in `boring.json`:
+
+```json
+{
+  "id": "hermes-agent",
+  "enabled": true,
+  "adapter": "cron"
+}
+```
+
+If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, back them up first; `make up` preserves a `.omb-bak` copy before overwriting.
 
 ---
 
