@@ -201,7 +201,7 @@ async fn main() -> Result<()> {
         Cmd::Search { query } => {
             let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_config(&cfg);
-            let hits = retrieve::retrieve(store, &ol, &query, 5, &[]).await?;
+            let hits = retrieve::retrieve(store, &ol, &query, 5, &[], None, None).await?;
             println!("'{query}' → {} hits", hits.len());
             for h in &hits {
                 let snip: String = h.content.chars().take(50).collect();
@@ -211,7 +211,7 @@ async fn main() -> Result<()> {
         Cmd::Ask { question } => {
             let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_config(&cfg);
-            ask::run(store, &ol, &question, &[]).await?;
+            ask::run(store, &ol, &question, &[], None, None).await?;
         }
         Cmd::Brief => {
             let store = store.as_ref().context(VEC_OFF)?;

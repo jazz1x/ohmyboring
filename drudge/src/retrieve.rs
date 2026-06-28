@@ -48,17 +48,24 @@ fn merge_hits(
 }
 
 /// Vector top-N + BM25 top-N → RRF position-based merge → exclude origin → top-k.
+/// Optional `project`/`since_hours` narrow the pool before ranking.
 pub async fn retrieve(
     store: &Store,
     llm: &Llm,
     query: &str,
     top_k: usize,
     exclude_origins: &[String],
+    project: Option<&str>,
+    since_hours: Option<i32>,
 ) -> Result<Vec<Hit>> {
     let pool = (top_k * 4).max(20);
     let qe = llm.embed(query).await?;
-    let vec_hits = store.vector_search(&qe, pool).await?;
-    let txt_hits = store.text_search(query, pool).await?;
+    let vec_hits = store
+        .vector_search_filtered(&qe, pool, project, since_hours)
+        .await?;
+    let txt_hits = store
+        .text_search_filtered(query, pool, project, since_hours)
+        .await?;
     let mut merged = merge_hits(vec_hits, txt_hits, exclude_origins)?;
     merged.truncate(top_k);
     Ok(merged)
@@ -69,6 +76,7 @@ pub async fn retrieve(
 /// Returns up to `max_results` hits whose total `content` length does not exceed `max_chars`.
 /// Each hit is individually capped to `max_chars / max_results` so a single huge chunk cannot
 /// consume the whole budget. This lets agents call `recall` with a safe token ceiling.
+#[allow(clippy::too_many_arguments)] // filtering flags grow the surface; a struct is overkill at 2 flags.
 pub async fn retrieve_budget(
     store: &Store,
     llm: &Llm,
@@ -76,14 +84,20 @@ pub async fn retrieve_budget(
     max_results: usize,
     max_chars: usize,
     exclude_origins: &[String],
+    project: Option<&str>,
+    since_hours: Option<i32>,
 ) -> Result<Vec<Hit>> {
     if max_results == 0 || max_chars == 0 {
         return Ok(Vec::new());
     }
     let pool = (max_results * 4).max(20);
     let qe = llm.embed(query).await?;
-    let vec_hits = store.vector_search(&qe, pool).await?;
-    let txt_hits = store.text_search(query, pool).await?;
+    let vec_hits = store
+        .vector_search_filtered(&qe, pool, project, since_hours)
+        .await?;
+    let txt_hits = store
+        .text_search_filtered(query, pool, project, since_hours)
+        .await?;
     let merged = merge_hits(vec_hits, txt_hits, exclude_origins)?;
 
     let per_hit_cap = max_chars / max_results;

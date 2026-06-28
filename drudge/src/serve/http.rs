@@ -38,10 +38,19 @@ pub(crate) async fn handle_ask(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     // vector on → synthesize from vector+graph retrieval. off → synthesize from direct vault/wiki reads.
+    let project = req.project.as_deref();
+    let since_hours = req.since_hours;
     let out = if let Some(store) = s.store.as_ref() {
-        ask::answer(store, &s.llm, &req.question, &[]).await?
+        ask::answer(store, &s.llm, &req.question, &[], project, since_hours).await?
     } else {
-        ask::answer_wiki(&s.llm, s.wiki_dir().as_deref(), &req.question).await?
+        ask::answer_wiki(
+            &s.llm,
+            s.wiki_dir().as_deref(),
+            &req.question,
+            project,
+            since_hours,
+        )
+        .await?
     };
     spawn_query_log(
         s.store.clone(),
@@ -87,22 +96,33 @@ pub(crate) async fn handle_search(
     let max_results = req.max_results.clamp(1, MCP_MAX_RESULTS);
     let max_tokens = req.max_tokens.clamp(1, MCP_MAX_TOKENS);
     let max_chars = max_tokens.saturating_mul(4);
+    let project = req.project.as_deref();
+    let since_hours = req.since_hours;
+    // vector-first: /search is the external accuracy contract (eval gate). Use the strongest
+    // retriever when available; fall back to direct wiki reads only when vector is off.
     let mapped: Vec<SearchHit> = if let Some(store) = s.store.as_ref() {
-        retrieve::retrieve_budget(store, &s.llm, &req.query, max_results, max_chars, &[])
-            .await?
-            .into_iter()
-            .map(|h| SearchHit {
-                id: h.id,
-                origin: h.origin,
-                project: h.project,
-                source_path: h.source_path,
-                snippet: h.content,
-            })
-            .collect()
+        retrieve::retrieve_budget(
+            store,
+            &s.llm,
+            &req.query,
+            max_results,
+            max_chars,
+            &[],
+            project,
+            since_hours,
+        )
+        .await?
+        .into_iter()
+        .map(|h| SearchHit {
+            id: h.id,
+            origin: h.origin,
+            project: h.project,
+            source_path: h.source_path,
+            snippet: h.content,
+        })
+        .collect()
     } else {
-        // direct wiki read — origin/project don't exist in the wiki path, so empty (schema-compatible).
-        // wiki-first mode is not budget-aware; it returns the top-N snippets.
-        s.wiki_recall(&req.query, max_results)?
+        s.wiki_recall(&req.query, max_results, project, since_hours)?
             .into_iter()
             .map(|h| SearchHit {
                 id: h.id,
