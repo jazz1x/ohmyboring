@@ -39,13 +39,15 @@ def test_install_returns_success_when_ok():
     assert len(results) == 1
 
 
-def test_hermes_agent_is_not_unsupported():
-    """hermes-agent lives in a container and does not need host-side wiring."""
-    with mock.patch.object(agent_wiring, "wire_claude_code") as mock_wire:
+def test_hermes_agent_calls_wire_hermes():
+    """hermes-agent is wired via wire_hermes() (config.yaml + briefing template)."""
+    with mock.patch.object(
+        agent_wiring, "wire_hermes", return_value={"agent": "hermes-agent", "changed": False}
+    ) as mock_wire:
         results, failed = agent_wiring.install(["hermes-agent"], "ohmyboring", {})
     assert failed is False
-    assert results == []
-    assert mock_wire.called is False
+    assert len(results) == 1
+    assert mock_wire.called is True
 
 
 def test_unsupported_agent_is_skipped_without_failure():
@@ -81,8 +83,8 @@ def test_default_path_when_no_override():
 if __name__ == "__main__":
     test_install_reports_failure()
     test_install_returns_success_when_ok()
-    test_hermes_agent_is_not_unsupported()
+    test_hermes_agent_calls_wire_hermes()
     test_unsupported_agent_is_skipped_without_failure()
     test_settings_path_override()
     test_default_path_when_no_override()
-    print("ok - agent_wiring failure propagation + hermes skip + settings_path")
+    print("ok - agent_wiring failure propagation + hermes wiring + settings_path")

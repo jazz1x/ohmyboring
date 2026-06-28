@@ -256,9 +256,10 @@ def _upsert_mcp_block(lines: list[str], mcp_idx: int, server_name: str, url: str
     return lines[:mcp_idx] + new_block + lines[end_idx:], True
 
 
-def _install_hermes_briefing() -> None:
+def _install_hermes_briefing(boring_home: str | None = None) -> None:
     """Install the canonical briefing.py template into ~/.hermes/scripts/."""
-    src = Path(BORING_HOME) / "agents" / "hermes" / "briefing.py"
+    home = boring_home if boring_home is not None else BORING_HOME
+    src = Path(home) / "agents" / "hermes" / "briefing.py"
     if not src.exists():
         raise FileNotFoundError(f"briefing template not found: {src}")
     dst_dir = Path(os.path.expanduser("~/.hermes/scripts"))
@@ -268,7 +269,7 @@ def _install_hermes_briefing() -> None:
     shutil.copy2(src, dst)
 
 
-def wire_hermes(path: Path | None = None) -> dict:
+def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dict:
     """Idempotently wire ohmyboring into hermes-agent.
 
     - Adds/updates mcp_servers.ohmyboring in ~/.hermes/config.yaml
@@ -285,7 +286,7 @@ def wire_hermes(path: Path | None = None) -> dict:
     if not text.strip():
         body = f"mcp_servers:\n  {server_name}:\n    url: {url}\n    transport: {transport}\n"
         _write_text_atomic(path, body)
-        _install_hermes_briefing()
+        _install_hermes_briefing(boring_home)
         return {"agent": "hermes-agent", "path": str(path), "changed": True}
 
     lines = text.splitlines()
@@ -298,7 +299,7 @@ def wire_hermes(path: Path | None = None) -> dict:
     if mcp_idx is None:
         if lines and lines[-1].strip():
             lines.append("")
-        lines.append(f"mcp_servers:")
+        lines.append("mcp_servers:")
         lines.append(f"  {server_name}:")
         lines.append(f"    url: {url}")
         lines.append(f"    transport: {transport}")
@@ -307,11 +308,11 @@ def wire_hermes(path: Path | None = None) -> dict:
         lines, changed = _upsert_mcp_block(lines, mcp_idx, server_name, url, transport)
 
     _write_text_atomic(path, "\n".join(lines) + "\n")
-    _install_hermes_briefing()
+    _install_hermes_briefing(boring_home)
     return {"agent": "hermes-agent", "path": str(path), "changed": changed}
 
 
-def install(enabled_agents, server_name, server_config):
+def install(enabled_agents, server_name, server_config, boring_home: str | None = None):
     results = []
     failed = False
     for agent_id in enabled_agents:
@@ -327,7 +328,7 @@ def install(enabled_agents, server_name, server_config):
             elif agent_id == "kimi":
                 results.append(wire_kimi())
             elif agent_id == "hermes-agent":
-                results.append(wire_hermes())
+                results.append(wire_hermes(boring_home=boring_home))
             else:
                 results.append(wire_mcp_agent(agent_id, server_name, server_config))
         except Exception as e:
@@ -357,7 +358,7 @@ def main():
 
     if args.install:
         server = {"type": "http", "url": args.server_url}
-        results, failed = install(enabled, args.server_name, server)
+        results, failed = install(enabled, args.server_name, server, boring_home=BORING_HOME)
         for r in results:
             status = "updated" if r["changed"] else "already wired"
             print(f"[omb-wire] {r['agent']}: {status} ({r['path']})")
