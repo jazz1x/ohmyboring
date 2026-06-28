@@ -109,8 +109,10 @@ retention: ## Show raw session retention plan (dry-run)
 retention-apply: ## Apply raw session retention (archive old transcripts, delete ancient archives)
 	@python3 scripts/retention.py --apply
 
-guard: ## Structural gate (fmt+clippy+test+py-compile+py-unit-tests)
+guard: ## Structural gate (fmt+clippy+test+py-compile+py-unit-tests) + vault data hygiene dry-run
 	./scripts/guard.sh
+	@echo "7) data-steward dry-run …"
+	@python3 scripts/data-steward.py --vault "$(PWD)/vault"
 
 deny: ## Supply-chain gate (cargo-deny: vulnerabilities, licenses, duplicate versions)
 	cd drudge && cargo deny check
