@@ -641,6 +641,7 @@ impl Store {
         k: i64,
         project: Option<&str>,
         kinds: Option<&[String]>,
+        exclude_origins: &[String],
     ) -> Result<Vec<Claim>> {
         let rows = self
             .db
@@ -650,9 +651,10 @@ impl Store {
                  WHERE c.superseded_at IS NULL
                    AND ($2::text IS NULL OR d.project = $2)
                    AND ($3::text[] IS NULL OR c.kind = ANY($3))
+                   AND NOT (d.origin = ANY($4))
                  ORDER BY c.valid_from DESC
                  LIMIT $1;",
-                &[&k, &project, &kinds],
+                &[&k, &project, &kinds, &exclude_origins],
             )
             .await
             .context("recent claims")?;

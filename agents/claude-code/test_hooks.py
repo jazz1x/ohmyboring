@@ -162,17 +162,24 @@ class ExtractTranscriptTests(unittest.TestCase):
 
 
 class SessionStartRecallTests(unittest.TestCase):
-        """session-start-recall.py reads stdin + posts to /status or /brief; NO network."""
+        """session-start-recall.py reads stdin + calls /context; NO network."""
 
-        def _run_main(self, payload, status_resp=None, brief_resp=None, side_effect=None):
+        def _run_main(self, payload, context_resp=None, side_effect=None):
             captured = io.StringIO()
             stderr = io.StringIO()
-            responses = {"/status": status_resp, "/brief": brief_resp}
+            if context_resp is None:
+                context_resp = {
+                    "decisions": [],
+                    "risks": [],
+                    "facts": [],
+                    "glossary": [],
+                    "language": "ko",
+                }
 
-            def fake_retry(_self, method, path, payload=None, timeout=None):
+            def fake_context(_self, project=None, max_items=5):
                 if side_effect is not None:
                     raise side_effect
-                return responses.get(path, {"answer": "", "sources": []})
+                return context_resp
 
             module = _load("session_start_recall", "session-start-recall.py")
             with mock.patch.object(
@@ -180,41 +187,62 @@ class SessionStartRecallTests(unittest.TestCase):
             ), mock.patch.object(module.sys, "stdout", captured), mock.patch.object(
                 module.sys, "stderr", stderr
             ), mock.patch.object(
-                module.DrudgeClient, "_retry", fake_retry
+                module.DrudgeClient, "context", fake_context
             ):
                 module.main()
             return captured.getvalue(), stderr.getvalue()
 
-        def test_session_start_with_project_calls_status(self):
+        def test_session_start_with_project_formats_context_card(self):
             out, _err = self._run_main(
                 {"hook_event_name": "SessionStart", "cwd": "/tmp/my-project"},
-                status_resp={"answer": "Done: x\nNext: y", "sources": ["wiki/a.md"]},
+                context_resp={
+                    "decisions": [
+                        {"subject": "omb", "predicate": "use", "value": "context cards", "kind": "decision", "confidence": "certain"}
+                    ],
+                    "risks": [
+                        {"subject": "omb", "predicate": "risk", "value": "token noise", "kind": "risk", "confidence": "likely"}
+                    ],
+                    "facts": [],
+                    "glossary": [],
+                    "language": "ko",
+                },
             )
             payload = json.loads(out)
             ctx = payload["hookSpecificOutput"]["additionalContext"]
-            self.assertIn("Done: x", ctx)
-            self.assertIn("wiki/a.md", ctx)
+            self.assertIn("Decisions", ctx)
+            self.assertIn("[decision|certain] omb use: context cards", ctx)
+            self.assertIn("Risks", ctx)
             self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
 
-        def test_session_start_without_project_calls_brief(self):
+        def test_session_start_without_project_uses_recent_work(self):
             out, _err = self._run_main(
                 {"hook_event_name": "SessionStart", "cwd": ""},
-                brief_resp={"answer": "recent work", "sources": []},
+                context_resp={
+                    "decisions": [],
+                    "risks": [],
+                    "facts": [
+                        {"subject": "x", "predicate": "is", "value": "y", "kind": "fact", "confidence": "certain"}
+                    ],
+                    "glossary": [],
+                    "language": "ko",
+                },
             )
             payload = json.loads(out)
-            self.assertIn("recent work", payload["hookSpecificOutput"]["additionalContext"])
+            ctx = payload["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("recent work", ctx)
+            self.assertIn("Facts", ctx)
 
         def test_non_sessionstart_is_noop(self):
             out, _err = self._run_main({"hook_event_name": "UserPromptSubmit", "cwd": "/x"})
             self.assertEqual(out, "")
 
-        def test_failed_recall_is_silent(self):
+        def test_failed_context_is_silent(self):
             out, _err = self._run_main(
                 {"hook_event_name": "SessionStart", "cwd": "/x"},
                 side_effect=OSError("down"),
             )
             self.assertEqual(out, "")
-            self.assertIn("recall failed", _err)
+            self.assertIn("context failed", _err)
 
 
 class RecallFormattingTests(unittest.TestCase):

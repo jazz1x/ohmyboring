@@ -195,6 +195,35 @@ pub(crate) async fn handle_risks(
     }))
 }
 
+/// Structured context card for agent session start — decisions/risks/facts/glossary as claim lists.
+/// Uses recency ordering (no vector search), so it works when BORING_VECTOR=off.
+pub(crate) async fn handle_context(
+    State(s): State<AppState>,
+    Json(req): Json<crate::serve::ContextReq>,
+) -> Result<Json<ask::ContextCard>, AppError> {
+    // Context can be served from the vault even when the vector backend is off, because it only
+    // needs current claims by recency. Fall back to an empty card if no store is available.
+    let card = if let Some(store) = s.store.as_ref() {
+        ask::context_card(
+            store,
+            req.project.as_deref(),
+            &req.exclude_origins,
+            req.max_items.clamp(1, 20),
+            s.cfg.note_lang.as_str(),
+        )
+        .await?
+    } else {
+        ask::ContextCard {
+            decisions: vec![],
+            risks: vec![],
+            facts: vec![],
+            glossary: vec![],
+            language: s.cfg.note_lang.as_str().to_owned(),
+        }
+    };
+    Ok(Json(card))
+}
+
 pub(crate) async fn handle_search(
     State(s): State<AppState>,
     Json(req): Json<crate::serve::SearchReq>,

@@ -328,7 +328,7 @@ async fn claim_kind_and_confidence_round_trip() {
         .expect("upsert risk claim");
 
     let decisions = store
-        .recent_claims(10, Some("omb"), Some(&["decision".to_owned()]))
+        .recent_claims(10, Some("omb"), Some(&["decision".to_owned()]), &[])
         .await
         .expect("recent decisions");
     assert_eq!(decisions.len(), 1);
@@ -344,6 +344,7 @@ async fn claim_kind_and_confidence_round_trip() {
                 "assumption".to_owned(),
                 "blocked".to_owned(),
             ]),
+            &[],
         )
         .await
         .expect("recent risks");

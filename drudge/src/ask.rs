@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use anyhow::Result;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use std::path::Path;
@@ -297,7 +298,7 @@ pub async fn brief(
     // Authority injection: current claims (recency order) — even if old exploration notes (e.g. discarded Neo4j/SurrealDB)
     // look recent by mtime, claim authority nails down the true current fact.
     let mut claim_ctx = String::new();
-    for cl in store.recent_claims(12, None, None).await? {
+    for cl in store.recent_claims(12, None, None, &[]).await? {
         let _ = writeln!(
             claim_ctx,
             "- [{}|{}] {} {} {}",
@@ -377,7 +378,7 @@ pub async fn weekly_brief(
     }
 
     let mut claim_ctx = String::new();
-    for cl in store.recent_claims(12, None, None).await? {
+    for cl in store.recent_claims(12, None, None, &[]).await? {
         let _ = writeln!(
             claim_ctx,
             "- [{}|{}] {} {} {}",
@@ -501,7 +502,7 @@ pub async fn decision_register(
     lang: &str,
 ) -> Result<AnswerOut> {
     let kinds = ["decision".to_owned()];
-    let claims = store.recent_claims(50, project, Some(&kinds)).await?;
+    let claims = store.recent_claims(50, project, Some(&kinds), &[]).await?;
     if claims.is_empty() {
         return Ok(AnswerOut {
             answer: "No decisions recorded yet.".to_owned(),
@@ -541,7 +542,7 @@ pub async fn risk_register(
         "assumption".to_owned(),
         "blocked".to_owned(),
     ];
-    let claims = store.recent_claims(50, project, Some(&kinds)).await?;
+    let claims = store.recent_claims(50, project, Some(&kinds), &[]).await?;
     if claims.is_empty() {
         return Ok(AnswerOut {
             answer: "No risks, assumptions, or blockers recorded yet.".to_owned(),
@@ -565,6 +566,80 @@ pub async fn risk_register(
     Ok(AnswerOut {
         answer: answer.trim().to_owned(),
         sources,
+    })
+}
+
+/// One item in the structured context card returned by `/context`.
+#[derive(Debug, Serialize)]
+pub struct ContextItem {
+    pub subject: String,
+    pub predicate: String,
+    pub value: String,
+    pub kind: String,
+    pub confidence: String,
+}
+
+impl From<&crate::frontmatter::Claim> for ContextItem {
+    fn from(c: &crate::frontmatter::Claim) -> Self {
+        Self {
+            subject: c.subject.clone(),
+            predicate: c.predicate.clone(),
+            value: c.value.clone(),
+            kind: c.kind().to_owned(),
+            confidence: c.confidence().to_owned(),
+        }
+    }
+}
+
+/// Structured context card for agent session start — compact, claim-first, no LLM synthesis.
+/// Uses recency ordering (not vector search) so it works even when BORING_VECTOR=off.
+#[derive(Debug, Serialize)]
+pub struct ContextCard {
+    pub decisions: Vec<ContextItem>,
+    pub risks: Vec<ContextItem>,
+    pub facts: Vec<ContextItem>,
+    pub glossary: Vec<ContextItem>,
+    pub language: String,
+}
+
+/// Build a context card for a project (or all projects if `project` is None).
+/// Each section is capped at `max_items` to keep the injected context small and token-cheap.
+pub async fn context_card(
+    store: &Store,
+    project: Option<&str>,
+    exclude_origins: &[String],
+    max_items: usize,
+    lang: &str,
+) -> Result<ContextCard> {
+    let k = i64::try_from(max_items).unwrap_or(5);
+    let decisions = store
+        .recent_claims(k, project, Some(&["decision".to_owned()]), exclude_origins)
+        .await?;
+    let risks = store
+        .recent_claims(
+            k,
+            project,
+            Some(&[
+                "risk".to_owned(),
+                "assumption".to_owned(),
+                "blocked".to_owned(),
+            ]),
+            exclude_origins,
+        )
+        .await?;
+    let facts = store
+        .recent_claims(k, project, Some(&["fact".to_owned()]), exclude_origins)
+        .await?;
+    let glossary = store
+        .recent_claims(k, project, Some(&["term".to_owned()]), exclude_origins)
+        .await?;
+
+    Ok(ContextCard {
+        decisions: decisions.iter().map(ContextItem::from).collect(),
+        risks: risks.iter().map(ContextItem::from).collect(),
+        facts: facts.iter().map(ContextItem::from).collect(),
+        glossary: glossary.iter().map(ContextItem::from).collect(),
+        language: lang.to_owned(),
     })
 }
 
