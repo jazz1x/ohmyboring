@@ -88,6 +88,53 @@ pub(crate) async fn handle_brief(State(s): State<AppState>) -> Result<Json<AskRe
     }))
 }
 
+/// Weekly briefing — last 7 days, grouped by project.
+pub(crate) async fn handle_weekly(
+    State(s): State<AppState>,
+    Json(_req): Json<crate::serve::WeeklyReq>,
+) -> Result<Json<AskResp>, AppError> {
+    let started = Instant::now();
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let out = ask::weekly_brief(store, &s.llm, &[], s.cfg.note_lang.as_str()).await?;
+    spawn_query_log(
+        s.store.clone(),
+        "weekly",
+        String::new(),
+        out.sources.clone(),
+        out.sources.clone(),
+        out.answer.chars().take(280).collect(),
+        started.elapsed(),
+    );
+    Ok(Json(AskResp {
+        answer: out.answer,
+        sources: out.sources,
+    }))
+}
+
+/// Project status — last 30 days for a single project.
+pub(crate) async fn handle_project_status(
+    State(s): State<AppState>,
+    Json(req): Json<crate::serve::StatusReq>,
+) -> Result<Json<AskResp>, AppError> {
+    let started = Instant::now();
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let out =
+        ask::project_status(store, &s.llm, &req.project, &[], s.cfg.note_lang.as_str()).await?;
+    spawn_query_log(
+        s.store.clone(),
+        "status",
+        req.project.clone(),
+        out.sources.clone(),
+        out.sources.clone(),
+        out.answer.chars().take(280).collect(),
+        started.elapsed(),
+    );
+    Ok(Json(AskResp {
+        answer: out.answer,
+        sources: out.sources,
+    }))
+}
+
 pub(crate) async fn handle_search(
     State(s): State<AppState>,
     Json(req): Json<crate::serve::SearchReq>,

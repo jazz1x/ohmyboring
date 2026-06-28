@@ -21,6 +21,7 @@
 
 | Field | Type | Description |
 |------|------|------|
+| `project` | string | Project slug. Powers `project_status`, per-project recall filters, and `repo/<slug>` tag inference. Prefer the repo/org slug (e.g., `ohmyboring`, `kb-rag-bot`). |
 | `sources` | list[string] | Source file paths (prefix: `raw/`, `meta/`, `.rules/`) |
 | `relates_to` | list[string] | List of related page IDs (`wiki-NNNN`) |
 | `tags` | list[string] | Classification tags (Obsidian-safe: spaces/special chars → `-`. Includes `repo/<slug>` nested tags) |

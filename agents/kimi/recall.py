@@ -27,7 +27,7 @@ def main() -> None:
     except Exception as e:
         print(f"[omb-recall] invalid stdin JSON: {e}", file=sys.stderr)
         return
-    recall_core.run_recall(data, is_injection=_is_injection)
+    recall_core.run_recall(data, is_injection=_is_injection, throttle_session=True)
 
 
 if __name__ == "__main__":

@@ -161,6 +161,62 @@ class ExtractTranscriptTests(unittest.TestCase):
         self.assertEqual(out, "[user] hi there\n[assistant] hello")
 
 
+class SessionStartRecallTests(unittest.TestCase):
+        """session-start-recall.py reads stdin + posts to /status or /brief; NO network."""
+
+        def _run_main(self, payload, status_resp=None, brief_resp=None, side_effect=None):
+            captured = io.StringIO()
+            stderr = io.StringIO()
+            responses = {"/status": status_resp, "/brief": brief_resp}
+
+            def fake_retry(_self, method, path, payload=None, timeout=None):
+                if side_effect is not None:
+                    raise side_effect
+                return responses.get(path, {"answer": "", "sources": []})
+
+            module = _load("session_start_recall", "session-start-recall.py")
+            with mock.patch.object(
+                module.sys, "stdin", io.StringIO(json.dumps(payload))
+            ), mock.patch.object(module.sys, "stdout", captured), mock.patch.object(
+                module.sys, "stderr", stderr
+            ), mock.patch.object(
+                module.DrudgeClient, "_retry", fake_retry
+            ):
+                module.main()
+            return captured.getvalue(), stderr.getvalue()
+
+        def test_session_start_with_project_calls_status(self):
+            out, _err = self._run_main(
+                {"hook_event_name": "SessionStart", "cwd": "/tmp/my-project"},
+                status_resp={"answer": "Done: x\nNext: y", "sources": ["wiki/a.md"]},
+            )
+            payload = json.loads(out)
+            ctx = payload["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("Done: x", ctx)
+            self.assertIn("wiki/a.md", ctx)
+            self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
+
+        def test_session_start_without_project_calls_brief(self):
+            out, _err = self._run_main(
+                {"hook_event_name": "SessionStart", "cwd": ""},
+                brief_resp={"answer": "recent work", "sources": []},
+            )
+            payload = json.loads(out)
+            self.assertIn("recent work", payload["hookSpecificOutput"]["additionalContext"])
+
+        def test_non_sessionstart_is_noop(self):
+            out, _err = self._run_main({"hook_event_name": "UserPromptSubmit", "cwd": "/x"})
+            self.assertEqual(out, "")
+
+        def test_failed_recall_is_silent(self):
+            out, _err = self._run_main(
+                {"hook_event_name": "SessionStart", "cwd": "/x"},
+                side_effect=OSError("down"),
+            )
+            self.assertEqual(out, "")
+            self.assertIn("recall failed", _err)
+
+
 class RecallFormattingTests(unittest.TestCase):
     """recall.main reads stdin + posts to /search; we mock urlopen so NO network happens."""
 
