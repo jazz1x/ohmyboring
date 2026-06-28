@@ -267,6 +267,19 @@ fn mcp_tools_list() -> Value {
             }
         },
         {
+            "name": "context",
+            "description": "Structured context card for a project: active decisions, risks, facts, and glossary terms as compact claim lists. \
+                            Use at the start of a task to load the most important memory without prose synthesis. \
+                            Does NOT require the vector backend (uses recency ordering).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "optional project slug filter"},
+                    "max_items": {"type": "integer", "description": "max items per section (default 5, max 20)"}
+                }
+            }
+        },
+        {
             "name": "decisions",
             "description": "Decision register: recent decision claims (kind=decision). Optionally filter by project. \
                             Generative (runs the LLM). Requires the vector backend.",
@@ -344,6 +357,7 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
         "brief" => ToolOut::Structured(mcp_brief(s).await?),
         "weekly_brief" => ToolOut::Structured(mcp_weekly_brief(s).await?),
         "project_status" => ToolOut::Structured(mcp_project_status(s, args).await?),
+        "context" => ToolOut::Structured(mcp_context(s, args).await?),
         "decisions" => ToolOut::Structured(mcp_decisions(s, args).await?),
         "risks" => ToolOut::Structured(mcp_risks(s, args).await?),
         other => return Err((-32602, format!("unknown tool: {other}"))),
@@ -579,6 +593,36 @@ async fn mcp_project_status(s: &AppState, args: Option<&Value>) -> Result<Value,
         .await
         .map_err(|e| (-32603_i32, format!("project_status: {e:#}")))?;
     Ok(json!({"answer": out.answer, "sources": out.sources}))
+}
+
+/// `context` — structured context card. Returns `{decisions, risks, facts, glossary, language}`.
+/// Works even when BORING_VECTOR=off (returns an empty card if the DB store is unavailable).
+async fn mcp_context(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
+    let project = args
+        .and_then(|a| a.get("project"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    let max_items = args
+        .and_then(|a| a.get("max_items"))
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(5)
+        .clamp(1, MCP_MAX_RESULTS);
+    let card = if let Some(store) = s.store.as_ref() {
+        ask::context_card(store, project, &[], max_items, s.cfg.note_lang.as_str())
+            .await
+            .map_err(|e| (-32603_i32, format!("context: {e:#}")))?
+    } else {
+        ask::ContextCard {
+            decisions: vec![],
+            risks: vec![],
+            facts: vec![],
+            glossary: vec![],
+            language: s.cfg.note_lang.as_str().to_owned(),
+        }
+    };
+    serde_json::to_value(card).map_err(|e| (-32603_i32, format!("context serialize: {e}")))
 }
 
 /// `decisions` — recent decision claims. Returns `{answer, sources}`.

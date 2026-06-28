@@ -97,3 +97,10 @@ class DrudgeClient:
             "params": {"name": name, "arguments": arguments},
         }
         return self._retry("POST", "/mcp", payload, timeout=timeout)
+
+    def context(self, project: str | None = None, max_items: int = 5) -> dict[str, Any]:
+        """POST /context and return the structured context card."""
+        payload: dict[str, Any] = {"max_items": max_items}
+        if project:
+            payload["project"] = project
+        return self._retry("POST", "/context", payload)

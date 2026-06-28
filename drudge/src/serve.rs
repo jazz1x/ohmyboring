@@ -213,6 +213,19 @@ pub(crate) struct RisksReq {
     pub(crate) project: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct ContextReq {
+    pub(crate) project: Option<String>,
+    #[serde(default)]
+    pub(crate) exclude_origins: Vec<String>,
+    #[serde(default = "default_context_max_items")]
+    pub(crate) max_items: usize,
+}
+
+fn default_context_max_items() -> usize {
+    5
+}
+
 #[derive(Serialize)]
 pub(crate) struct GraphResp {
     pub(crate) hit: String,
@@ -367,6 +380,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .route("/status", post(http::handle_project_status))
         .route("/decisions", post(http::handle_decisions))
         .route("/risks", post(http::handle_risks))
+        .route("/context", post(http::handle_context))
         .route("/search", post(http::handle_search))
         .route("/graph", post(http::handle_graph))
         .route("/audit", get(http::handle_audit))

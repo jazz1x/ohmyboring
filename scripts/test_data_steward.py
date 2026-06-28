@@ -160,6 +160,20 @@ def test_unknown_claim_kind_is_flagged():
     assert any("unknown claim kind" in r for r in reasons), reasons
 
 
+def test_term_claim_kind_is_allowed():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\n"
+        "claims:\n"
+        "- {subject: claim, predicate: is, value: a temporal fact, kind: term}\n"
+        "sources: []"
+    )
+    issues = ds._claim_issues([note])
+    weak = [i for i in issues if i["kind"] == "weak-claims"]
+    reasons = [w["reason"] for w in weak[0]["claims"]] if weak else []
+    assert not any("unknown claim kind" in r for r in reasons), reasons
+
+
 def test_unknown_claim_confidence_is_flagged():
     note = _make_note(
         "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
