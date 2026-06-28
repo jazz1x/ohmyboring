@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use pgvector::Vector;
 use tokio_postgres::{Client, NoTls};
 
-use crate::frontmatter::FrontMatter;
+use crate::frontmatter::{Claim, FrontMatter};
 
 /// Ingest input (one chunk).
 pub struct Doc {
@@ -65,6 +65,9 @@ pub struct GraphStats {
     pub chunks: usize,
     pub projects: usize,
     pub topics: usize,
+    pub claims: usize,
+    pub decisions: usize,
+    pub risks: usize,
     pub edges: usize,
 }
 
@@ -130,7 +133,7 @@ pub struct Store {
 /// Semantic edge kinds (doc→entity) — the SSOT shared by clear/stats.
 /// Kernel A: graph is tool/concept only (`uses`/`about`). Narrative (problem/attempt/solution) lives in
 /// the note body markdown, not as graph nodes — so those edge kinds are gone.
-const SEMANTIC_EDGE_KINDS: [&str; 2] = ["uses", "about"];
+const SEMANTIC_EDGE_KINDS: [&str; 3] = ["uses", "about", "claims"];
 
 /// chunk id ("path#idx") → graph document node id ("doc:path").
 fn doc_node_id(chunk_or_path: &str) -> String {
@@ -254,9 +257,15 @@ impl Store {
                      valid_from    timestamptz NOT NULL,
                      superseded_at timestamptz,
                      embedding     vector({dim}), -- = boring.json embed_dim
+                     kind          text NOT NULL DEFAULT 'fact',
+                     confidence    text NOT NULL DEFAULT 'certain',
                      PRIMARY KEY (subject, predicate, valid_from)
                  );
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'fact';
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS confidence text NOT NULL DEFAULT 'certain';
                  CREATE INDEX IF NOT EXISTS claim_current ON claim(subject, predicate)
+                     WHERE superseded_at IS NULL;
+                 CREATE INDEX IF NOT EXISTS claim_kind ON claim(kind)
                      WHERE superseded_at IS NULL;
                  CREATE INDEX IF NOT EXISTS claim_hnsw ON claim USING hnsw (embedding vector_cosine_ops)
                      WHERE superseded_at IS NULL;
@@ -528,6 +537,7 @@ impl Store {
     /// Temporal fact claim upsert + supersede. For the same `(subject,predicate)`, old values are
     /// sealed via `superseded_at`, and only the latest `valid_from` row is current (NULL). Idempotent (re-ingesting the same row is harmless).
     /// 0 extra gemma calls — takes the claims that extract already produced as-is.
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_claim(
         &self,
         subject: &str,
@@ -536,15 +546,17 @@ impl Store {
         source_path: &str,
         valid_from: SystemTime,
         embedding: &[f32],
+        kind: &str,
+        confidence: &str,
     ) -> Result<()> {
         let vec = self.checked_vector(embedding)?; // dim guard (shared with upsert_chunk)
         self.db
             .execute(
-                "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding)
-                 VALUES ($1, $2, $3, $4, $5, $6)
+                "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                  ON CONFLICT (subject, predicate, valid_from) DO UPDATE SET
                      value = EXCLUDED.value, source_path = EXCLUDED.source_path,
-                     embedding = EXCLUDED.embedding;",
+                     embedding = EXCLUDED.embedding, kind = EXCLUDED.kind, confidence = EXCLUDED.confidence;",
                 &[
                     &subject,
                     &predicate,
@@ -552,6 +564,8 @@ impl Store {
                     &source_path,
                     &valid_from,
                     &vec,
+                    &kind,
+                    &confidence,
                 ],
             )
             .await
@@ -581,33 +595,75 @@ impl Store {
         Ok(())
     }
 
+    /// Upsert graph nodes/edges for a claim: `doc —claims→ claim:{subject}:{predicate}` and,
+    /// for non-fact claims, a typed node (`decision:|risk:...`) plus an `is_a` edge.
+    /// Also links the claim node to `project:{project}` when a project is present.
+    pub async fn upsert_claim_node(
+        &self,
+        path: &str,
+        project: &str,
+        claim: &crate::frontmatter::Claim,
+    ) -> Result<()> {
+        let claim_id = format!("claim:{}:{}", claim.subject, claim.predicate);
+        let label = format!("{}: {}", claim.predicate, claim.value);
+        let kind = claim.kind();
+        let confidence = claim.confidence();
+
+        // claim node
+        self.upsert_node(&claim_id, "claim", &label, Some(kind))
+            .await?;
+
+        // typed node for decisions/risks/etc.
+        if kind != "fact" {
+            let typed_id = format!("{}:{}:{}", kind, claim.subject, claim.predicate);
+            let typed_label = format!("{} — {}", claim.subject, claim.value);
+            self.upsert_node(&typed_id, kind, &typed_label, Some(confidence))
+                .await?;
+            self.upsert_edge(&claim_id, &typed_id, "is_a").await?;
+        }
+
+        // doc -> claim edge
+        let doc_id = doc_node_id(path);
+        self.upsert_edge(&doc_id, &claim_id, "claims").await?;
+
+        // claim -> project edge
+        if !project.is_empty() {
+            let project_id = format!("project:{project}");
+            self.upsert_edge(&claim_id, &project_id, "about").await?;
+        }
+
+        Ok(())
+    }
+
     /// Top-k **current** claims (superseded_at IS NULL) by recency (valid_from desc). For injecting authority into the briefing.
     pub async fn recent_claims(
         &self,
         k: i64,
         project: Option<&str>,
-    ) -> Result<Vec<(String, String, String)>> {
+        kinds: Option<&[String]>,
+    ) -> Result<Vec<Claim>> {
         let rows = self
             .db
             .query(
-                "SELECT c.subject, c.predicate, c.value FROM claim c
+                "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence FROM claim c
                  JOIN document d ON d.source_path = c.source_path
                  WHERE c.superseded_at IS NULL
                    AND ($2::text IS NULL OR d.project = $2)
+                   AND ($3::text[] IS NULL OR c.kind = ANY($3))
                  ORDER BY c.valid_from DESC
                  LIMIT $1;",
-                &[&k, &project],
+                &[&k, &project, &kinds],
             )
             .await
             .context("recent claims")?;
         Ok(rows
             .iter()
-            .map(|r| {
-                (
-                    r.get::<_, String>(0),
-                    r.get::<_, String>(1),
-                    r.get::<_, String>(2),
-                )
+            .map(|r| Claim {
+                subject: r.get(0),
+                predicate: r.get(1),
+                value: r.get(2),
+                kind: r.get(3),
+                confidence: r.get(4),
             })
             .collect())
     }
@@ -619,7 +675,8 @@ impl Store {
         k: i64,
         exclude_origins: &[String],
         project: Option<&str>,
-    ) -> Result<Vec<(String, String, String)>> {
+        kinds: Option<&[String]>,
+    ) -> Result<Vec<Claim>> {
         let vec = Vector::from(query_emb.to_vec());
         // Honor the SAME origin boundary the recall path applies (retrieve::merge_hits filters by
         // exclude_origins). Claims carry no origin column, but their parent document does — JOIN and
@@ -629,25 +686,26 @@ impl Store {
         let rows = self
             .db
             .query(
-                "SELECT c.subject, c.predicate, c.value FROM claim c
+                "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence FROM claim c
                  JOIN document d ON d.source_path = c.source_path
                  WHERE c.superseded_at IS NULL AND c.embedding IS NOT NULL
                    AND NOT (d.origin = ANY($3))
                    AND ($4::text IS NULL OR d.project = $4)
+                   AND ($5::text[] IS NULL OR c.kind = ANY($5))
                  ORDER BY c.embedding <=> $1
                  LIMIT $2;",
-                &[&vec, &k, &exclude_origins, &project],
+                &[&vec, &k, &exclude_origins, &project, &kinds],
             )
             .await
             .context("current claims")?;
         Ok(rows
             .iter()
-            .map(|r| {
-                (
-                    r.get::<_, String>(0),
-                    r.get::<_, String>(1),
-                    r.get::<_, String>(2),
-                )
+            .map(|r| Claim {
+                subject: r.get(0),
+                predicate: r.get(1),
+                value: r.get(2),
+                kind: r.get(3),
+                confidence: r.get(4),
             })
             .collect())
     }
@@ -1087,7 +1145,7 @@ impl Store {
             .db
             .query(
                 "SELECT n.label FROM edge e JOIN node n ON n.id = e.dst
-                 WHERE e.src = $1 AND e.kind IN ('in_project', 'tagged');",
+                 WHERE e.src = $1 AND e.kind IN ('in_project', 'tagged', 'claims');",
                 &[&doc_id],
             )
             .await?;
@@ -1116,6 +1174,9 @@ impl Store {
             chunks: pg_count(&self.db, "SELECT count(*) FROM chunk;").await?,
             projects: count_node_kind(&self.db, "project").await?,
             topics: count_node_kind(&self.db, "topic").await?,
+            claims: count_node_kind(&self.db, "claim").await?,
+            decisions: count_node_kind(&self.db, "decision").await?,
+            risks: count_node_kind(&self.db, "risk").await?,
             edges: pg_count(&self.db, "SELECT count(*) FROM edge;").await?,
         })
     }

@@ -203,9 +203,23 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                 }
                 let emb = llm.embed(&format!("{subject} {predicate} {value}")).await?;
                 store
-                    .upsert_claim(&subject, &predicate, value, path, valid_from, &emb)
+                    .upsert_claim(
+                        &subject,
+                        &predicate,
+                        value,
+                        path,
+                        valid_from,
+                        &emb,
+                        cl.kind(),
+                        cl.confidence(),
+                    )
                     .await?;
+                store.upsert_claim_node(path, &front.project, cl).await?;
                 stats.claims += 1;
+                stats.edges += if front.project.is_empty() { 1 } else { 2 };
+                if cl.kind() != "fact" {
+                    stats.edges += 1;
+                }
             }
         }
         Ok(())

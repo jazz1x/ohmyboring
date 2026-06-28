@@ -135,6 +135,66 @@ pub(crate) async fn handle_project_status(
     }))
 }
 
+/// Decision register — recent decision claims.
+pub(crate) async fn handle_decisions(
+    State(s): State<AppState>,
+    Json(req): Json<crate::serve::DecisionsReq>,
+) -> Result<Json<AskResp>, AppError> {
+    let started = Instant::now();
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let out = ask::decision_register(
+        store,
+        &s.llm,
+        req.project.as_deref(),
+        &[],
+        s.cfg.note_lang.as_str(),
+    )
+    .await?;
+    spawn_query_log(
+        s.store.clone(),
+        "decisions",
+        req.project.clone().unwrap_or_default(),
+        out.sources.clone(),
+        out.sources.clone(),
+        out.answer.chars().take(280).collect(),
+        started.elapsed(),
+    );
+    Ok(Json(AskResp {
+        answer: out.answer,
+        sources: out.sources,
+    }))
+}
+
+/// Risk register — recent risk/assumption/blocked claims.
+pub(crate) async fn handle_risks(
+    State(s): State<AppState>,
+    Json(req): Json<crate::serve::RisksReq>,
+) -> Result<Json<AskResp>, AppError> {
+    let started = Instant::now();
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let out = ask::risk_register(
+        store,
+        &s.llm,
+        req.project.as_deref(),
+        &[],
+        s.cfg.note_lang.as_str(),
+    )
+    .await?;
+    spawn_query_log(
+        s.store.clone(),
+        "risks",
+        req.project.clone().unwrap_or_default(),
+        out.sources.clone(),
+        out.sources.clone(),
+        out.answer.chars().take(280).collect(),
+        started.elapsed(),
+    );
+    Ok(Json(AskResp {
+        answer: out.answer,
+        sources: out.sources,
+    }))
+}
+
 pub(crate) async fn handle_search(
     State(s): State<AppState>,
     Json(req): Json<crate::serve::SearchReq>,

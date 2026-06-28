@@ -203,6 +203,16 @@ pub(crate) struct StatusReq {
     pub(crate) project: String,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct DecisionsReq {
+    pub(crate) project: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RisksReq {
+    pub(crate) project: Option<String>,
+}
+
 #[derive(Serialize)]
 pub(crate) struct GraphResp {
     pub(crate) hit: String,
@@ -355,6 +365,8 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .route("/brief", post(http::handle_brief))
         .route("/weekly", post(http::handle_weekly))
         .route("/status", post(http::handle_project_status))
+        .route("/decisions", post(http::handle_decisions))
+        .route("/risks", post(http::handle_risks))
         .route("/search", post(http::handle_search))
         .route("/graph", post(http::handle_graph))
         .route("/audit", get(http::handle_audit))

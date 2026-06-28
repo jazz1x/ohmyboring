@@ -49,6 +49,9 @@ pub struct AuditStats {
     pub graph_chunks: usize,
     pub graph_projects: usize,
     pub graph_topics: usize,
+    pub graph_claims: usize,
+    pub graph_decisions: usize,
+    pub graph_risks: usize,
     pub graph_edges: usize,
     pub semantic_tools: usize,
     pub semantic_concepts: usize,
@@ -101,6 +104,9 @@ pub async fn stats(store: &Store, allow_company: bool) -> Result<AuditStats> {
         graph_chunks: gs.chunks,
         graph_projects: gs.projects,
         graph_topics: gs.topics,
+        graph_claims: gs.claims,
+        graph_decisions: gs.decisions,
+        graph_risks: gs.risks,
         graph_edges: gs.edges,
         semantic_tools: ss.tools,
         semantic_concepts: ss.concepts,
@@ -143,8 +149,15 @@ pub async fn run(store: &Store, allow_company: bool) -> Result<()> {
     );
 
     println!(
-        "\n  [graph] documents {} · chunks {} · project {} · topic {} · edges {}",
-        s.graph_documents, s.graph_chunks, s.graph_projects, s.graph_topics, s.graph_edges
+        "\n  [graph] documents {} · chunks {} · project {} · topic {} · claim {} · decision {} · risk {} · edges {}",
+        s.graph_documents,
+        s.graph_chunks,
+        s.graph_projects,
+        s.graph_topics,
+        s.graph_claims,
+        s.graph_decisions,
+        s.graph_risks,
+        s.graph_edges
     );
     println!(
         "  [semantic] tool {} · concept {}",

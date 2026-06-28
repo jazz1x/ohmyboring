@@ -186,7 +186,7 @@ def _build_prompt(text, origin, repo, note_lang=None):
         f"problem-solving narrative. {lang_instruction}{origin_hint}{repo_hint}\n\n"
         "Output ONLY a single JSON object, no text before or after it:\n"
         '{"title": "...", "body": "...", "tags": ["..."], "tools": ["..."], "concepts": ["..."], '
-        "\"claims\": [{\"subject\":\"...\",\"predicate\":\"...\",\"value\":\"...\"}]}\\n\\n"
+        "\"claims\": [{\"subject\":\"...\",\"predicate\":\"...\",\"value\":\"...\",\"kind\":\"...\",\"confidence\":\"...\"}]}\\n\\n"
         f"BODY FORMAT — the body is a markdown string with these sections (omit a section if it does not apply):\n"
         f"  ## {h_bg}   — what was being solved (1-2 lines)\n"
         f"  ## {h_at}    — what was tried, key decisions and WHY\n"
@@ -207,12 +207,15 @@ def _build_prompt(text, origin, repo, note_lang=None):
         "- tags: up to 6, lowercase, no hashtags.\n"
         "- tools: concrete tools/commands used (e.g., git, bun, terraform). [] if none.\n"
         "- concepts: recurring ideas/axes (e.g., code_parity, version_upgrade). [] if none.\n"
-        "- claims: 3-5 durable facts as (subject, predicate, value) triples. [] only if none exist.\n"
-        "  Extract concrete decisions, status changes, and version selections — not opinions or next steps.\n"
+        "- claims: 3-5 durable facts/decisions/risks as (subject, predicate, value, kind, confidence). [] only if none exist.\n"
+        "  kind: one of fact, decision, assumption, risk, blocked, goal.\n"
+        "  confidence: one of certain, likely, assumption, outdated.\n"
+        "  Extract concrete decisions, status changes, version selections, and open risks — not opinions or next steps.\n"
         "  Prefer project-scoped subjects. Examples:\n"
-        '  {\"subject\":\"kb-rag-bot\",\"predicate\":\"model-interface\",\"value\":\"bedrock-converse\"}\n'
-        '  {\"subject\":\"qa-tests\",\"predicate\":\"rtk-status\",\"value\":\"removed\"}\n'
-        '  {\"subject\":\"omb\",\"predicate\":\"release-version\",\"value\":\"0.1.3\"}\n'
+        '  {\"subject\":\"kb-rag-bot\",\"predicate\":\"model-interface\",\"value\":\"bedrock-converse\",\"kind\":\"decision\",\"confidence\":\"certain\"}\n'
+        '  {\"subject\":\"qa-tests\",\"predicate\":\"rtk-status\",\"value\":\"removed\",\"kind\":\"fact\",\"confidence\":\"certain\"}\n'
+        '  {\"subject\":\"omb\",\"predicate\":\"release-version\",\"value\":\"0.1.3\",\"kind\":\"fact\",\"confidence\":\"certain\"}\n'
+        '  {\\"subject\\":\\"kb-rag-bot\\",\\"predicate\\":\\"auth-flow\\",\\"value\\":\\"oauth-redirect-unverified\\",\\"kind\\":\\"risk\\",\\"confidence\\":\\"likely\\"}\\n'
         '- Pure chit-chat with no real work → output only: {"skip": true}\n\n'
         "=== SESSION TRANSCRIPT ===\n" + text
     )

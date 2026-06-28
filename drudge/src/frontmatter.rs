@@ -39,13 +39,32 @@ pub struct FrontMatter {
     pub omb_session_id: Option<String>,
 }
 
-/// One temporal fact — `(subject, predicate, value)`. A new value supersedes the old (see `store::upsert_claim`).
+/// One temporal fact — `(subject, predicate, value)` plus `kind` and `confidence`.
+/// A new value supersedes the old (see `store::upsert_claim`).
 /// Agent-provided in note frontmatter; drudge embeds the value (bge-m3) and stores it. No LLM extraction in the kernel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Claim {
     pub subject: String,
     pub predicate: String,
     pub value: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub confidence: String,
+}
+
+impl Claim {
+    /// Normalized kind, or `"fact"` when absent/unknown.
+    pub fn kind(&self) -> &str {
+        let k = self.kind.trim();
+        if k.is_empty() { "fact" } else { k }
+    }
+
+    /// Normalized confidence, or `"certain"` when absent/unknown.
+    pub fn confidence(&self) -> &str {
+        let c = self.confidence.trim();
+        if c.is_empty() { "certain" } else { c }
+    }
 }
 
 impl FrontMatter {

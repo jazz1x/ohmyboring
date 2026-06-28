@@ -34,17 +34,21 @@
 |------|------|------|
 | `tools` | list[string] | Concrete tools/commands used in this note |
 | `concepts` | list[string] | Recurring ideas/axes |
-| `claims` | list[{subject, predicate, value}] | Durable facts/decisions. Curated by the distillation agent; drudge stores them as temporal authority. |
+| `claims` | list[{subject, predicate, value, kind, confidence}] | Durable facts/decisions/risks. Curated by the distillation agent; drudge stores them as temporal authority and graph nodes. |
 
 ### Claims
 
-Claims are the most important field for later recall. Each claim is a `(subject, predicate, value)` triple.
+Claims are the most important field for later recall. Each claim is a `(subject, predicate, value, kind, confidence)` record.
 
 - `subject`: project or component name (e.g., `kb-rag-bot`)
 - `predicate`: property/decision axis (e.g., `model-interface`, `status`, `release-version`)
 - `value`: concrete fact (e.g., `bedrock-converse`, `removed`, `0.1.3`)
+- `kind`: one of `fact` (default), `decision`, `assumption`, `risk`, `blocked`, `goal`
+- `confidence`: one of `certain` (default), `likely`, `assumption`, `outdated`
 
 Aim for 3–5 claims per session-distilled note. Avoid vague values like "검토" or "확인" — they sound like next-steps, not facts.
+
+Use `decision` for concrete choices, `risk` for open uncertainties, `blocked` for active obstacles, and `goal` for committed targets.
 
 ---
 

@@ -265,6 +265,28 @@ fn mcp_tools_list() -> Value {
                 },
                 "required": ["project"]
             }
+        },
+        {
+            "name": "decisions",
+            "description": "Decision register: recent decision claims (kind=decision). Optionally filter by project. \
+                            Generative (runs the LLM). Requires the vector backend.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "optional project slug filter"}
+                }
+            }
+        },
+        {
+            "name": "risks",
+            "description": "Risk register: recent risk, assumption, and blocked claims. Optionally filter by project. \
+                            Generative (runs the LLM). Requires the vector backend.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "optional project slug filter"}
+                }
+            }
         }
     ]})
 }
@@ -322,6 +344,8 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
         "brief" => ToolOut::Structured(mcp_brief(s).await?),
         "weekly_brief" => ToolOut::Structured(mcp_weekly_brief(s).await?),
         "project_status" => ToolOut::Structured(mcp_project_status(s, args).await?),
+        "decisions" => ToolOut::Structured(mcp_decisions(s, args).await?),
+        "risks" => ToolOut::Structured(mcp_risks(s, args).await?),
         other => return Err((-32602, format!("unknown tool: {other}"))),
     };
     Ok(out.into_result())
@@ -465,13 +489,19 @@ async fn mcp_claims(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, S
         .await
         .map_err(|e| (-32603_i32, format!("embed: {e:#}")))?;
     let claims = store
-        .current_claims(&q_emb, max_results, &[], None)
+        .current_claims(&q_emb, max_results, &[], None, None)
         .await
         .map_err(|e| (-32603_i32, format!("claims: {e:#}")))?;
     let arr: Vec<Value> = claims
         .into_iter()
-        .map(|(subject, predicate, value)| {
-            json!({"subject": subject, "predicate": predicate, "value": value})
+        .map(|c| {
+            json!({
+                "subject": c.subject,
+                "predicate": c.predicate,
+                "value": c.value,
+                "kind": c.kind(),
+                "confidence": c.confidence()
+            })
         })
         .collect();
     // structuredContent must be a JSON object → wrap the array (MCP forbids a top-level array result).
@@ -548,6 +578,32 @@ async fn mcp_project_status(s: &AppState, args: Option<&Value>) -> Result<Value,
     let out = ask::project_status(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
         .await
         .map_err(|e| (-32603_i32, format!("project_status: {e:#}")))?;
+    Ok(json!({"answer": out.answer, "sources": out.sources}))
+}
+
+/// `decisions` — recent decision claims. Returns `{answer, sources}`.
+async fn mcp_decisions(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
+    let project = args
+        .and_then(|a| a.get("project"))
+        .and_then(Value::as_str)
+        .map(str::trim);
+    let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    let out = ask::decision_register(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
+        .await
+        .map_err(|e| (-32603_i32, format!("decisions: {e:#}")))?;
+    Ok(json!({"answer": out.answer, "sources": out.sources}))
+}
+
+/// `risks` — recent risk/assumption/blocked claims. Returns `{answer, sources}`.
+async fn mcp_risks(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
+    let project = args
+        .and_then(|a| a.get("project"))
+        .and_then(Value::as_str)
+        .map(str::trim);
+    let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    let out = ask::risk_register(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
+        .await
+        .map_err(|e| (-32603_i32, format!("risks: {e:#}")))?;
     Ok(json!({"answer": out.answer, "sources": out.sources}))
 }
 
@@ -864,6 +920,8 @@ fn parse_remember_note(
                     subject: clean(&c.subject),
                     predicate: clean(&c.predicate),
                     value: clean(&c.value),
+                    kind: clean(&c.kind),
+                    confidence: clean(&c.confidence),
                 })
                 .collect()
         })
@@ -893,6 +951,8 @@ fn parse_claim(v: &Value) -> Option<Claim> {
         subject: subject.to_owned(),
         predicate: predicate.to_owned(),
         value: value.to_owned(),
+        kind: f("kind").to_owned(),
+        confidence: f("confidence").to_owned(),
     })
 }
 
