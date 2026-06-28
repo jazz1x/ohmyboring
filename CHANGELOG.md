@@ -15,6 +15,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
     `weekly-briefing.py` cron script.
 - **`project` filter on recency retrieval** — `recent_docs`, `recent_claims`, and `current_claims` now
   accept an optional project slug, enabling the new project-scoped consumption tools.
+- **Remember deduplication gate** — `mcp_remember` now skips a note when:
+  - the same `omb_session_id` is already stored,
+  - an exact title match exists, or
+  - the title+body embedding is within cosine distance 0.07 (similarity ≥ 0.93) of an existing document.
+- **`scripts/dedup-wiki.py`** — one-time cleanup tool that clusters existing wiki notes by embedding
+  similarity, archives the older duplicates, and calls `ohmyboring/forget`. Used locally to remove
+  51 duplicate notes (10 clusters) caused by repeated SessionEnd distillation of the same work.
+- **More specific distillation titles** — the session-distillation prompt now requires
+  `project + concrete action + scope/date` titles and forbids generic titles like "기능 개선".
 
 ## [0.1.0] — 2026-06-25
 

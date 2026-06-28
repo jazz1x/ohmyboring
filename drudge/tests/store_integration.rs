@@ -14,7 +14,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use drudge::frontmatter::{Claim, FrontMatter};
-use drudge::store::Store;
+use drudge::store::{Doc, Store};
 use tokio_postgres::{Client, NoTls};
 
 fn test_dsn() -> Option<String> {
@@ -198,4 +198,74 @@ async fn delete_document_removes_claims() {
         0,
         "claim should be removed with document"
     );
+}
+
+/// nearest_document returns the closest document only when within the distance threshold.
+#[tokio::test]
+async fn nearest_document_respects_threshold() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let a_path = unique_path("nearest-a");
+    let b_path = unique_path("nearest-b");
+    let a_front = dummy_frontmatter(&a_path);
+    let b_front = dummy_frontmatter(&b_path);
+    store
+        .upsert_document(&a_front, "sha-a", SystemTime::now())
+        .await
+        .expect("upsert a");
+    store
+        .upsert_document(&b_front, "sha-b", SystemTime::now())
+        .await
+        .expect("upsert b");
+
+    let mut emb_a = [0.0_f32; 1024];
+    emb_a[0] = 1.0;
+    let mut emb_b = [0.0_f32; 1024];
+    emb_b[1] = 1.0;
+
+    store
+        .upsert_chunk(&Doc {
+            id: format!("{a_path}#0"),
+            content: "A note".to_string(),
+            embedding: emb_a.to_vec(),
+            front: a_front.clone(),
+            chunk_idx: 0,
+        })
+        .await
+        .expect("chunk a");
+    store
+        .upsert_chunk(&Doc {
+            id: format!("{b_path}#0"),
+            content: "B note".to_string(),
+            embedding: emb_b.to_vec(),
+            front: b_front.clone(),
+            chunk_idx: 0,
+        })
+        .await
+        .expect("chunk b");
+
+    // Query close to A → should return A.
+    let mut query_near_a = [0.0_f32; 1024];
+    query_near_a[0] = 0.9;
+    query_near_a[1] = 0.1;
+    let near = store
+        .nearest_document(&query_near_a, 0.2)
+        .await
+        .expect("nearest")
+        .map(|(p, _)| p);
+    assert_eq!(near, Some(a_path.clone()), "query near A should return A");
+
+    // Distant query with tight threshold → none.
+    let far = store
+        .nearest_document(&[0.5_f32; 1024], 0.01)
+        .await
+        .expect("nearest far");
+    assert!(far.is_none(), "distant query below threshold returns none");
+
+    store.delete_document(&a_path).await.expect("cleanup a");
+    store.delete_document(&b_path).await.expect("cleanup b");
 }

@@ -654,8 +654,16 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
     };
     let note = parse_remember_note(args, &s.cfg)?;
 
-    // 1. atomically allocate id + path, then write the wiki note (deterministic file IO — the SSOT artifact).
+    // Deduplication gate — prevent near-duplicate session notes from accumulating.
     let wiki_dir = vault_root.join("wiki");
+    if let Some(existing) = check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir)
+        .await
+        .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
+    {
+        return Ok(format!("skipped — duplicate of {existing}"));
+    }
+
+    // 1. atomically allocate id + path, then write the wiki note (deterministic file IO — the SSOT artifact).
     let (wiki_id, path) = vault::allocate_wiki_path(&wiki_dir)
         .map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
     let mut front = note.front;
@@ -700,6 +708,62 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
 struct RememberNote {
     front: FrontMatter,
     body: String,
+}
+
+/// Maximum cosine distance for a duplicate (1.0 - cosine_similarity). 0.07 ≈ similarity 0.93.
+const DUPLICATE_MAX_DIST: f64 = 0.07;
+
+/// Deduplication gate for `remember`. Checks, in order:
+///   1. Same `omb_session_id` already stored (same session distilled twice).
+///   2. Case-insensitive exact title match.
+///   3. Embedding similarity within `DUPLICATE_MAX_DIST` (when pgvector is on).
+async fn check_duplicate(
+    store: Option<&crate::store::Store>,
+    llm: &crate::llm::Llm,
+    note: &RememberNote,
+    wiki_dir: &std::path::Path,
+) -> anyhow::Result<Option<String>> {
+    let target_session = note.front.omb_session_id.as_deref();
+    let target_title = note
+        .front
+        .title
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+
+    for entry in std::fs::read_dir(wiki_dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let (yaml, _) = crate::vault::split_frontmatter(&content).unwrap_or(("", ""));
+        // YAML parse is cheap for one note; reuse FrontMatter deserialization.
+        let fm: crate::frontmatter::FrontMatter = serde_yaml::from_str(yaml).unwrap_or_default();
+        if let Some(sid) = target_session
+            && fm.omb_session_id.as_deref() == Some(sid)
+        {
+            return Ok(Some(path.to_string_lossy().into_owned()));
+        }
+        if !target_title.is_empty()
+            && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title
+        {
+            return Ok(Some(path.to_string_lossy().into_owned()));
+        }
+    }
+
+    if let Some(store) = store {
+        let title = note.front.title.as_deref().unwrap_or("");
+        let text = format!("{}\n\n{}", title, note.body);
+        let emb = llm.embed(&text).await?;
+        if let Some((source_path, _dist)) = store.nearest_document(&emb, DUPLICATE_MAX_DIST).await?
+        {
+            return Ok(Some(source_path));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Parse + normalize the `remember` arguments into a typed note. The deterministic boundary: sanitize tags,

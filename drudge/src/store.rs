@@ -826,6 +826,32 @@ impl Store {
         Ok(rows.iter().map(row_to_hit).collect())
     }
 
+    /// Find the single nearest document by mean chunk distance. Used at the remember write gate
+    /// to skip near-duplicate session notes. Returns `(source_path, distance)` if within `max_dist`.
+    pub async fn nearest_document(
+        &self,
+        vec: &[f32],
+        max_dist: f64,
+    ) -> Result<Option<(String, f64)>> {
+        let qvec = Vector::from(vec.to_vec());
+        let rows = self
+            .db
+            .query(
+                "SELECT d.source_path, MIN(c.embedding <=> $1)::float8 AS dist
+                 FROM document d
+                 JOIN chunk c ON c.source_path = d.source_path
+                 WHERE c.embedding IS NOT NULL
+                 GROUP BY d.source_path
+                 HAVING MIN(c.embedding <=> $1) <= $2
+                 ORDER BY dist ASC
+                 LIMIT 1;",
+                &[&qvec, &max_dist],
+            )
+            .await
+            .context("nearest document")?;
+        Ok(rows.first().map(|r| (r.get(0), r.get(1))))
+    }
+
     /// Full-text search with optional project and recency filters.
     pub async fn text_search_filtered(
         &self,
