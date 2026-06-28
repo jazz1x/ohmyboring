@@ -100,21 +100,19 @@ def test_wire_claude_code_adds_session_start():
 
 
 def test_wire_hermes_adds_hint_and_weekly():
-    """hermes wiring installs hint + scripts + cron and updates config.yaml."""
+    """hermes wiring installs hint + weekly script and updates config.yaml."""
     with tempfile.TemporaryDirectory() as d:
         home = Path(d) / "omb"
         scripts = home / "agents" / "hermes"
         scripts.mkdir(parents=True)
-        for name in agent_wiring._HERMES_SCRIPTS:
-            (scripts / name).write_text("# stub", encoding="utf-8")
+        (scripts / "briefing.py").write_text("# stub", encoding="utf-8")
+        (scripts / "weekly-briefing.py").write_text("# stub", encoding="utf-8")
         cfg = Path(d) / "config.yaml"
         result = agent_wiring.wire_hermes(cfg, boring_home=str(home))
         assert result["changed"] is True
         text = cfg.read_text(encoding="utf-8")
         assert "environment_hint:" in text
         assert "ohmyboring/recall" in text
-        assert "cron:" in text
-        assert "github-ingest" in text
         assert (Path(os.path.expanduser("~/.hermes/scripts")) / "weekly-briefing.py").exists()
 
 
