@@ -102,6 +102,48 @@ def test_no_case_duplicate_repo_tag_and_keeps_real_tags():
         assert real in tags, f"real tag {real!r} dropped: {tags}"
 
 
+def _make_note(frontmatter: str, body: str = "body.\n"):
+    d = tempfile.mkdtemp()
+    wiki = Path(d) / "wiki"
+    wiki.mkdir()
+    p = wiki / "wiki-0042.md"
+    p.write_text(f"---\n{frontmatter}\n---\n{body}", encoding="utf-8")
+    return ds._collect_notes(wiki)[0]
+
+
+def test_missing_claims_flags_session_notes():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\nclaims: []\nsources: []"
+    )
+    issues = ds._claim_issues([note])
+    assert len(issues) == 1, issues
+    assert issues[0]["kind"] == "missing-claims", issues[0]
+
+
+def test_non_session_note_without_claims_is_ok():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: note\norigin: personal\n"
+        "claims: []\nsources: []"
+    )
+    issues = ds._claim_issues([note])
+    assert len(issues) == 0, issues
+
+
+def test_weak_claims_detected():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\n"
+        "claims:\n"
+        "- {subject: omb, predicate: status, value: ok}\n"
+        "- {subject: omb, predicate: plan, value: 검토 예정}\n"
+        "sources: []"
+    )
+    issues = ds._claim_issues([note])
+    weak_kinds = [i["kind"] for i in issues]
+    assert "weak-claims" in weak_kinds, issues
+
+
 def main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

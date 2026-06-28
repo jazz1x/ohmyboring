@@ -205,7 +205,12 @@ def _build_prompt(text, origin, repo, note_lang=None):
         "- tags: up to 6, lowercase, no hashtags.\n"
         "- tools: concrete tools/commands used (e.g., git, bun, terraform). [] if none.\n"
         "- concepts: recurring ideas/axes (e.g., code_parity, version_upgrade). [] if none.\n"
-        "- claims: durable facts as triples; [] if none.\n"
+        "- claims: 3-5 durable facts as (subject, predicate, value) triples. [] only if none exist.\n"
+        "  Extract concrete decisions, status changes, and version selections — not opinions or next steps.\n"
+        "  Prefer project-scoped subjects. Examples:\n"
+        '  {\"subject\":\"kb-rag-bot\",\"predicate\":\"model-interface\",\"value\":\"bedrock-converse\"}\n'
+        '  {\"subject\":\"qa-tests\",\"predicate\":\"rtk-status\",\"value\":\"removed\"}\n'
+        '  {\"subject\":\"omb\",\"predicate\":\"release-version\",\"value\":\"0.1.3\"}\n'
         '- Pure chit-chat with no real work → output only: {"skip": true}\n\n'
         "=== SESSION TRANSCRIPT ===\n" + text
     )

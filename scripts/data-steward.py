@@ -33,6 +33,12 @@ import boring_config  # noqa: E402
 PLACEHOLDER_TAGS = {"_", "pr_", "slack_", ""}
 GENERIC_PROJECTS = {"Development", "wiki", ""}
 TYPO_THRESHOLD = 0.85
+# Session-distilled notes should carry enough claims to be recallable as decisions.
+MIN_CLAIMS_PER_SESSION = 2
+# A claim value shorter than this is too vague to be authoritative.
+MIN_CLAIM_VALUE_LEN = 4
+# Words that make a claim sound like a next-step rather than a fact.
+WEAK_CLAIM_WORDS = {"검토", "확인", "고민", "예정", "계획", "review", "consider", "plan", "todo"}
 # The shipped sample note is allowed to be generic/empty; do not flag it as data rot.
 SEED_NOTE = "wiki-0000.md"
 
@@ -99,6 +105,43 @@ def _likely_typos(projects):
             seen.add(key)
             out.append((a, b, r))
     return out
+
+
+def _claim_issues(notes):
+    """Find session-distilled notes with missing or weak claims.
+
+    Claims are agent-curated facts (subject, predicate, value). They are the
+    authoritative signal for later recall. We only flag session-distilled notes
+    (omb_session_id present) because freeform notes may legitimately have no claims.
+    """
+    issues = []
+    for n in notes:
+        fm = n["fm"]
+        if not fm.get("omb_session_id"):
+            continue
+        claims = fm.get("claims") or []
+        if len(claims) < MIN_CLAIMS_PER_SESSION:
+            issues.append(
+                {
+                    "path": n["path"].name,
+                    "kind": "missing-claims",
+                    "count": len(claims),
+                    "min": MIN_CLAIMS_PER_SESSION,
+                }
+            )
+            continue
+        weak = []
+        for c in claims:
+            if not isinstance(c, dict):
+                continue
+            val = str(c.get("value", "")).strip()
+            if len(val) < MIN_CLAIM_VALUE_LEN:
+                weak.append({"claim": c, "reason": "value too short"})
+            elif any(w in val.lower() for w in WEAK_CLAIM_WORDS):
+                weak.append({"claim": c, "reason": "value sounds like a plan, not a fact"})
+        if weak:
+            issues.append({"path": n["path"].name, "kind": "weak-claims", "claims": weak})
+    return issues
 
 
 def _issue_target_project(project: str) -> str:
@@ -195,6 +238,7 @@ def main():
     projects = [n["fm"].get("project") or "" for n in notes]
     variants = _project_variants(notes)
     typos = _likely_typos(projects)
+    claim_issues = _claim_issues(notes)
 
     # build per-note issues
     note_issues = defaultdict(list)
@@ -235,6 +279,7 @@ def main():
                         {"bad": a, "good": b, "similarity": round(r, 3)} for a, b, r in typos
                     ],
                     "note_issues": dict(note_issues),
+                    "claim_issues": claim_issues,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -273,6 +318,22 @@ def main():
                 elif issue["kind"] == "missing-source":
                     print(f"    - missing sources for session {issue['omb_session_id']}")
     else:
+        print("✅ No structural hygiene issues found.")
+
+    if claim_issues:
+        print(f"\n🧭 Session notes with weak claims: {len(claim_issues)}")
+        for issue in sorted(claim_issues, key=lambda x: x["path"]):
+            if issue["kind"] == "missing-claims":
+                print(
+                    f"  {issue['path']}: only {issue['count']} claim(s) "
+                    f"(aim for ≥{issue['min']})"
+                )
+            elif issue["kind"] == "weak-claims":
+                print(f"  {issue['path']}:")
+                for w in issue["claims"]:
+                    c = w["claim"]
+                    print(f"    - weak claim ({w['reason']}): {c}")
+    elif not note_issues:
         print("✅ No data hygiene issues found.")
         return
 
