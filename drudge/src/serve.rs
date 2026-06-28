@@ -62,7 +62,13 @@ impl AppState {
 
     /// Cached wiki recall: refresh the resident index (mtime-incremental — only changed files are
     /// re-read, so this stays honest, not stale) then score in memory. Empty when the vault is unset.
-    pub(crate) fn wiki_recall(&self, query: &str, k: usize) -> Result<Vec<wiki_recall::WikiHit>> {
+    pub(crate) fn wiki_recall(
+        &self,
+        query: &str,
+        k: usize,
+        project: Option<&str>,
+        since_hours: Option<i32>,
+    ) -> Result<Vec<wiki_recall::WikiHit>> {
         let Some(dir) = self.wiki_dir() else {
             return Ok(Vec::new());
         };
@@ -72,7 +78,7 @@ impl AppState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         idx.refresh(&dir)?;
-        Ok(idx.search(query, k))
+        Ok(idx.search(query, k, project, since_hours))
     }
 }
 
@@ -137,6 +143,10 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
 #[derive(Deserialize)]
 pub(crate) struct AskReq {
     pub(crate) question: String,
+    #[serde(default)]
+    pub(crate) project: Option<String>,
+    #[serde(default)]
+    pub(crate) since_hours: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -152,6 +162,10 @@ pub(crate) struct SearchReq {
     pub(crate) max_results: usize,
     #[serde(default = "default_max_tokens")]
     pub(crate) max_tokens: usize,
+    #[serde(default)]
+    pub(crate) project: Option<String>,
+    #[serde(default)]
+    pub(crate) since_hours: Option<i32>,
 }
 
 fn default_max_results() -> usize {

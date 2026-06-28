@@ -787,6 +787,61 @@ impl Store {
         Ok(rows.iter().map(row_to_hit).collect())
     }
 
+    /// Vector search with optional project and recency filters.
+    /// `since_hours` restricts to chunks whose parent document was updated within the window.
+    pub async fn vector_search_filtered(
+        &self,
+        vec: &[f32],
+        k: usize,
+        project: Option<&str>,
+        since_hours: Option<i32>,
+    ) -> Result<Vec<Hit>> {
+        let qvec = Vector::from(vec.to_vec());
+        let k_i64 = i64::try_from(k).unwrap_or(i64::MAX);
+        let rows = self
+            .db
+            .query(
+                "SELECT c.id, c.content, c.origin, c.project, c.source_path,
+                        (c.embedding <=> $1)::float4 AS dist
+                 FROM chunk c
+                 JOIN document d ON d.source_path = c.source_path
+                 WHERE ($3::text IS NULL OR c.project = $3)
+                   AND ($4::int IS NULL OR d.updated_at >= now() - make_interval(hours => $4))
+                 ORDER BY c.embedding <=> $1
+                 LIMIT $2;",
+                &[&qvec, &k_i64, &project, &since_hours],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_hit).collect())
+    }
+
+    /// Full-text search with optional project and recency filters.
+    pub async fn text_search_filtered(
+        &self,
+        query: &str,
+        k: usize,
+        project: Option<&str>,
+        since_hours: Option<i32>,
+    ) -> Result<Vec<Hit>> {
+        let k_i64 = i64::try_from(k).unwrap_or(i64::MAX);
+        let rows = self
+            .db
+            .query(
+                "SELECT c.id, c.content, c.origin, c.project, c.source_path,
+                        ts_rank(c.tsv, plainto_tsquery('simple', $1))::float4 AS dist
+                 FROM chunk c
+                 JOIN document d ON d.source_path = c.source_path
+                 WHERE c.tsv @@ plainto_tsquery('simple', $1)
+                   AND ($3::text IS NULL OR c.project = $3)
+                   AND ($4::int IS NULL OR d.updated_at >= now() - make_interval(hours => $4))
+                 ORDER BY dist DESC
+                 LIMIT $2;",
+                &[&query, &k_i64, &project, &since_hours],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_hit).collect())
+    }
+
     pub async fn count(&self) -> Result<usize> {
         pg_count(&self.db, "SELECT count(*) FROM chunk;").await
     }

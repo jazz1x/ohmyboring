@@ -135,11 +135,26 @@ fn extract_title_body<'a>(content: &'a str, stem: &str) -> (String, &'a str) {
     (stem.to_owned(), body)
 }
 
+/// Extract `project:` from the YAML frontmatter, if present. Pure.
+fn extract_project(content: &str) -> String {
+    content
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.find("\n---\n").map(|e| &rest[..e]))
+        .and_then(|yaml| {
+            yaml.lines()
+                .find(|l| l.trim_start().starts_with("project:"))
+                .and_then(|l| l.split_once(':'))
+                .map(|(_, v)| v.trim().trim_matches('"').to_owned())
+        })
+        .unwrap_or_default()
+}
+
 /// One parsed wiki note, cached in lowercased form for scoring. `mtime` keys incremental refresh.
 struct CachedDoc {
     id: String,
     title: String, // raw (for display); lowercased forms below are what scoring reads
     source_path: String,
+    project: String,
     title_lower: String,
     body_lower: String,
     mtime: SystemTime,
@@ -186,6 +201,7 @@ impl WikiIndex {
                 .unwrap_or("")
                 .to_owned();
             let (title, body) = extract_title_body(&content, &stem);
+            let project = extract_project(&content);
             self.docs.insert(
                 path.clone(),
                 CachedDoc {
@@ -194,6 +210,7 @@ impl WikiIndex {
                     body_lower: body.to_lowercase(),
                     title,
                     source_path: path.to_string_lossy().into_owned(),
+                    project,
                     mtime: mtime.unwrap_or_else(SystemTime::now),
                 },
             );
@@ -203,15 +220,36 @@ impl WikiIndex {
     }
 
     /// Top-K notes closest to `query`, scored over the cached (lowercased) corpus. Pure — no I/O.
+    /// Optional `project`/`since_hours` filters are applied before scoring.
     #[must_use]
-    pub fn search(&self, query: &str, k: usize) -> Vec<WikiHit> {
+    pub fn search(
+        &self,
+        query: &str,
+        k: usize,
+        project: Option<&str>,
+        since_hours: Option<i32>,
+    ) -> Vec<WikiHit> {
         let terms = query_terms(query);
         if terms.is_empty() {
             return Vec::new();
         }
+        let cutoff = since_hours.map(|h| {
+            let hours = i64::from(h).max(0);
+            let secs = u64::try_from(hours.saturating_mul(3600)).unwrap_or(0);
+            SystemTime::now() - std::time::Duration::from_secs(secs)
+        });
         let mut hits: Vec<WikiHit> = self
             .docs
             .values()
+            .filter(|d| {
+                if let Some(p) = project {
+                    return d.project == p;
+                }
+                if let Some(cutoff) = cutoff {
+                    return d.mtime >= cutoff;
+                }
+                true
+            })
             .filter_map(|d| {
                 score_lower(&d.title_lower, &d.body_lower, &terms).map(|(score, snippet)| WikiHit {
                     id: d.id.clone(),
@@ -235,10 +273,16 @@ impl WikiIndex {
 /// One-shot recall (CLI / non-cached callers): build a fresh index, refresh, search. The resident
 /// daemon instead holds a persistent `WikiIndex` (in `AppState`) so repeated `/search` skips re-reads.
 /// Missing wiki directory · read failure are graceful: empty result/skip (recall never panics).
-pub fn recall(wiki_dir: &Path, query: &str, k: usize) -> Result<Vec<WikiHit>> {
+pub fn recall(
+    wiki_dir: &Path,
+    query: &str,
+    k: usize,
+    project: Option<&str>,
+    since_hours: Option<i32>,
+) -> Result<Vec<WikiHit>> {
     let mut index = WikiIndex::default();
     index.refresh(wiki_dir)?;
-    Ok(index.search(query, k))
+    Ok(index.search(query, k, project, since_hours))
 }
 
 #[cfg(test)]
@@ -270,9 +314,13 @@ mod tests {
         let mut idx = WikiIndex::default();
         idx.refresh(dir.path()).unwrap();
         // search hits the right note by content
-        let hits = idx.search("docker layer", 5);
+        let hits = idx.search("docker layer", 5, None, None);
         assert_eq!(hits.first().map(|h| h.id.as_str()), Some("wiki-0001"));
-        assert!(idx.search("clients", 5).iter().any(|h| h.id == "wiki-0002"));
+        assert!(
+            idx.search("clients", 5, None, None)
+                .iter()
+                .any(|h| h.id == "wiki-0002")
+        );
 
         // OUT-OF-BAND edit: rewrite 0001's body + push mtime forward → refresh must pick it up (honest, not stale).
         let future = SystemTime::now() + Duration::from_secs(5);
@@ -284,12 +332,12 @@ mod tests {
         filetime_set(&p("wiki-0001.md"), future);
         idx.refresh(dir.path()).unwrap();
         assert!(
-            idx.search("kubernetes oomkilled", 5)
+            idx.search("kubernetes oomkilled", 5, None, None)
                 .iter()
                 .any(|h| h.id == "wiki-0001")
         );
         assert!(
-            idx.search("layer caching", 5).is_empty(),
+            idx.search("layer caching", 5, None, None).is_empty(),
             "stale body must be gone"
         );
 
@@ -297,7 +345,7 @@ mod tests {
         std::fs::remove_file(p("wiki-0002.md")).unwrap();
         idx.refresh(dir.path()).unwrap();
         assert!(
-            idx.search("clients", 5).is_empty(),
+            idx.search("clients", 5, None, None).is_empty(),
             "removed note must not be recalled"
         );
     }
@@ -307,6 +355,56 @@ mod tests {
     fn filetime_set(path: &std::path::Path, t: std::time::SystemTime) {
         let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         f.set_modified(t).unwrap();
+    }
+
+    #[test]
+    fn search_filters_by_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |name: &str| dir.path().join(name);
+        std::fs::write(
+            p("wiki-0001.md"),
+            "---\ntitle: docker cache\nproject: omb\n---\nlayer caching tips",
+        )
+        .unwrap();
+        std::fs::write(
+            p("wiki-0002.md"),
+            "---\ntitle: pg pool\nproject: kb-rag-bot\n---\ntoo many clients fix",
+        )
+        .unwrap();
+
+        let mut idx = WikiIndex::default();
+        idx.refresh(dir.path()).unwrap();
+        let hits = idx.search("tips", 5, Some("omb"), None);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "wiki-0001");
+        assert!(idx.search("tips", 5, Some("kb-rag-bot"), None).is_empty());
+    }
+
+    #[test]
+    fn search_filters_by_since_hours() {
+        use std::time::{Duration, SystemTime};
+        let dir = tempfile::tempdir().unwrap();
+        let p = |name: &str| dir.path().join(name);
+        std::fs::write(
+            p("wiki-0001.md"),
+            "---\ntitle: recent\nproject: omb\n---\nrecent content",
+        )
+        .unwrap();
+        std::fs::write(
+            p("wiki-0002.md"),
+            "---\ntitle: old\nproject: omb\n---\nold content",
+        )
+        .unwrap();
+
+        // Make the second file 2 days old so a 24-hour window excludes it.
+        let old = SystemTime::now() - Duration::from_hours(48);
+        filetime_set(&p("wiki-0002.md"), old);
+
+        let mut idx = WikiIndex::default();
+        idx.refresh(dir.path()).unwrap();
+        let hits = idx.search("content", 5, None, Some(24));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "wiki-0001");
     }
 
     #[test]

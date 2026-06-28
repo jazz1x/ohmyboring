@@ -84,8 +84,19 @@ pub async fn answer(
     llm: &Llm,
     question: &str,
     exclude_origins: &[String],
+    project: Option<&str>,
+    since_hours: Option<i32>,
 ) -> Result<AnswerOut> {
-    let hits = retrieve::retrieve(store, llm, question, 5, exclude_origins).await?;
+    let hits = retrieve::retrieve(
+        store,
+        llm,
+        question,
+        5,
+        exclude_origins,
+        project,
+        since_hours,
+    )
+    .await?;
     if hits.is_empty() {
         return Ok(AnswerOut {
             answer: "No related memory found. (ingest first?)".to_owned(),
@@ -175,14 +186,20 @@ pub async fn answer(
 
 /// wiki-first-class retrieval (`BORING_VECTOR=off`): direct read of vault/wiki → LLM synthesis. No graph/claim authority (vector-only).
 /// If `wiki_dir` is unset, returns an empty-memory notice. SRP: pure logic (IO lives only in wiki_recall).
-pub async fn answer_wiki(llm: &Llm, wiki_dir: Option<&Path>, question: &str) -> Result<AnswerOut> {
+pub async fn answer_wiki(
+    llm: &Llm,
+    wiki_dir: Option<&Path>,
+    question: &str,
+    project: Option<&str>,
+    since_hours: Option<i32>,
+) -> Result<AnswerOut> {
     let Some(dir) = wiki_dir else {
         return Ok(AnswerOut {
             answer: "vault is not configured. (BORING_VAULT_DIR)".to_owned(),
             sources: vec![],
         });
     };
-    let hits = wiki_recall::recall(dir, question, 5)?;
+    let hits = wiki_recall::recall(dir, question, 5, project, since_hours)?;
     if hits.is_empty() {
         return Ok(AnswerOut {
             answer: "No related memory found. (vault/wiki empty, or not synced yet?)".to_owned(),
@@ -316,8 +333,10 @@ pub async fn run(
     llm: &Llm,
     question: &str,
     exclude_origins: &[String],
+    project: Option<&str>,
+    since_hours: Option<i32>,
 ) -> Result<()> {
-    let out = answer(store, llm, question, exclude_origins).await?;
+    let out = answer(store, llm, question, exclude_origins, project, since_hours).await?;
     println!("{}\n", out.answer);
     if !out.sources.is_empty() {
         println!("Sources:");

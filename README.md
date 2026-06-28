@@ -237,8 +237,9 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 
 Automatic retrieval can explode an agent's context window, so the retrieval surface is budget-aware:
 
-- MCP `recall` accepts `max_tokens` and `max_results`.
-- HTTP `/search` accepts `max_tokens` and `max_results`.
+- MCP `recall` accepts `max_tokens`, `max_results`, `project`, and `since_hours`.
+- HTTP `/search` accepts `max_tokens`, `max_results`, `project`, and `since_hours`.
+- MCP `ask` and HTTP `/ask` accept `project` and `since_hours` to narrow retrieval.
 - `recall.py` caps its prompt-injection context via `RECALL_MAX_TOKENS` / `RECALL_MAX_RESULTS`.
 - `ask`/`brief` synthesis keeps retrieved context under a fixed character ceiling.
 
@@ -285,7 +286,9 @@ curl -s -X POST http://localhost:7700/mcp \
       "arguments": {
         "query": "docker build cache fix",
         "max_tokens": 1500,
-        "max_results": 3
+        "max_results": 3,
+        "project": "omb",
+        "since_hours": 168
       }
     }
   }' | jq .
