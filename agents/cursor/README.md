@@ -20,3 +20,8 @@ If you prefer to wire it yourself, create or edit `~/.cursor/mcp.json`:
   }
 }
 ```
+
+Restart Cursor after editing the file. The `ohmyboring` tools (`context`,
+`recall`, `ask`, `remember`, `project_status`, `weekly_brief`, `decisions`,
+`risks`, ...) will appear in Composer/agent mode and are invoked automatically
+when you ask memory-related questions.

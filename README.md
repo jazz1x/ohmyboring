@@ -222,24 +222,40 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 | Adapter | Path | Consumer | Entry point | What it does |
 |---|---|---|---|---|
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | Distills a session and calls `remember` |
+| Claude Code | `agents/claude-code/session-start-recall.py` | `SessionStart` hook | Loads structured context (`/context`) before the first turn |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
 | Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Distills a Kimi session and calls `remember` |
 | Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring` as an MCP server |
 | Codex | `agents/codex/README.md` | MCP only | `~/.codex/mcp.json` | Exposes `ohmyboring` as an MCP server |
-| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Serial backfill (`ingest-worker.py`) + morning briefing (`briefing.py`) |
+| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`weekly-briefing`, `briefing`) + serial backfill (`ingest-worker.py`) |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older Claude Code sessions |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / manual | Lazy backfill of older Kimi Code sessions |
 | shared | `agents/shared/boring_config.py` | imported by adapters | `boring.json` policy loader |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | Idempotently configures hooks/MCP for enabled agents |
 
+### Consumption endpoints
+
+Memory can be reached through HTTP endpoints or the MCP server (`http://localhost:7700/mcp`):
+
+| Endpoint / MCP tool | Purpose | Vector backend |
+|---|---|---|
+| `POST /context` / `context` | Structured context card: decisions, risks, facts, glossary | not required |
+| `POST /status` / `project_status` | 30-day project status (Done/Next/Blocked/Decisions/Risks) | required |
+| `POST /weekly` / `weekly_brief` | Last 7 days across projects | required |
+| `POST /decisions` / `decisions` | Decision claims for a project | required |
+| `POST /risks` / `risks` | Risk/assumption/blocked claims for a project | required |
+| `POST /ask` / `ask` | Direct question answered from memory | required |
+| `POST /search` / `recall` | Raw memory excerpts | required for semantic search |
+| `/remember` / `remember` | Store a curated note | — |
+
 ### Token budget
 
 Automatic retrieval can explode an agent's context window, so the retrieval surface is budget-aware:
 
-- MCP `recall` accepts `max_tokens`, `max_results`, `project`, and `since_hours`.
-- HTTP `/search` accepts `max_tokens`, `max_results`, `project`, and `since_hours`.
+- MCP `recall` and HTTP `/search` accept `max_tokens`, `max_results`, `project`, and `since_hours`.
 - MCP `ask` and HTTP `/ask` accept `project` and `since_hours` to narrow retrieval.
+- `/context` caps each section at `max_items` (default 5) and needs no vector search.
 - `recall.py` caps its prompt-injection context via `RECALL_MAX_TOKENS` / `RECALL_MAX_RESULTS`.
 - `ask`/`brief` synthesis keeps retrieved context under a fixed character ceiling.
 
