@@ -217,6 +217,17 @@ pub(crate) struct RisksReq {
 }
 
 #[derive(Deserialize)]
+pub(crate) struct NextActionsReq {
+    pub(crate) project: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct StalledReq {
+    pub(crate) project: Option<String>,
+    pub(crate) older_than_days: Option<u32>,
+}
+
+#[derive(Deserialize)]
 pub(crate) struct ContextReq {
     pub(crate) project: Option<String>,
     #[serde(default)]
@@ -389,6 +400,8 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .route("/status", post(http::handle_project_status))
         .route("/decisions", post(http::handle_decisions))
         .route("/risks", post(http::handle_risks))
+        .route("/next_actions", post(http::handle_next_actions))
+        .route("/stalled", post(http::handle_stalled))
         .route("/context", post(http::handle_context))
         .route("/search", post(http::handle_search))
         .route("/graph", post(http::handle_graph))

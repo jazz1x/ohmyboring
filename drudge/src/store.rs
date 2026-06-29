@@ -670,6 +670,44 @@ impl Store {
             .collect())
     }
 
+    /// Stalled claims: current claims whose valid_from is older than `older_than_days`.
+    /// Ordered oldest-first so the longest-frozen items surface first.
+    pub async fn stalled_claims(
+        &self,
+        k: i64,
+        project: Option<&str>,
+        kinds: Option<&[String]>,
+        exclude_origins: &[String],
+        older_than_days: i64,
+    ) -> Result<Vec<Claim>> {
+        let rows = self
+            .db
+            .query(
+                "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence FROM claim c
+                 JOIN document d ON d.source_path = c.source_path
+                 WHERE c.superseded_at IS NULL
+                   AND c.valid_from < (NOW() - INTERVAL '1 day' * ($5::int))
+                   AND ($2::text IS NULL OR d.project = $2)
+                   AND ($3::text[] IS NULL OR c.kind = ANY($3))
+                   AND NOT (d.origin = ANY($4))
+                 ORDER BY c.valid_from ASC
+                 LIMIT $1;",
+                &[&k, &project, &kinds, &exclude_origins, &older_than_days],
+            )
+            .await
+            .context("stalled claims")?;
+        Ok(rows
+            .iter()
+            .map(|r| Claim {
+                subject: r.get(0),
+                predicate: r.get(1),
+                value: r.get(2),
+                kind: r.get(3),
+                confidence: r.get(4),
+            })
+            .collect())
+    }
+
     /// Query embedding → top-k **current** claims (superseded_at IS NULL). Authority retrieval.
     pub async fn current_claims(
         &self,

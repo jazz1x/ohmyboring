@@ -11,7 +11,7 @@
 //!   `  cargo test -p drudge --test store_integration -- --test-threads=1`
 #![allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail fast on setup errors
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drudge::frontmatter::{Claim, FrontMatter};
 use drudge::store::{Doc, Store};
@@ -350,6 +350,126 @@ async fn claim_kind_and_confidence_round_trip() {
         .expect("recent risks");
     assert_eq!(risks.len(), 1);
     assert_eq!(risks[0].kind(), "risk");
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
+/// `next` claims are stored and filterable alongside blockers.
+#[tokio::test]
+async fn next_claim_is_recallable() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let path = unique_path("claim-next");
+    let mut front = dummy_frontmatter(&path);
+    front.project = "omb".to_owned();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let emb = [0.1_f32; 1024];
+    store
+        .upsert_claim(
+            "omb",
+            "follow-up",
+            "add next_actions endpoint",
+            &path,
+            SystemTime::now(),
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("upsert next claim");
+
+    let nexts = store
+        .recent_claims(
+            10,
+            Some("omb"),
+            Some(&["next".to_owned(), "blocked".to_owned()]),
+            &[],
+        )
+        .await
+        .expect("recent next actions");
+    assert_eq!(nexts.len(), 1);
+    assert_eq!(nexts[0].kind(), "next");
+    assert_eq!(nexts[0].predicate, "follow-up");
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
+/// Stalled backlog should respect the requested action kinds; old decisions stay in the decision register.
+#[tokio::test]
+async fn stalled_claims_honor_requested_kinds() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let path = unique_path("claim-stalled");
+    let project = format!(
+        "stalled-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let mut front = dummy_frontmatter(&path);
+    front.project = project.clone();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let older = SystemTime::now()
+        .checked_sub(Duration::from_hours(192))
+        .expect("valid older timestamp");
+    let emb = [0.1_f32; 1024];
+    store
+        .upsert_claim(
+            &project,
+            "follow-up",
+            "ship release checklist",
+            &path,
+            older,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("upsert next claim");
+    store
+        .upsert_claim(
+            &project,
+            "release-decision",
+            "keep stable wiki ids",
+            &path,
+            older,
+            &emb,
+            "decision",
+            "certain",
+        )
+        .await
+        .expect("upsert decision claim");
+
+    let stalled = store
+        .stalled_claims(
+            10,
+            Some(&project),
+            Some(&["next".to_owned(), "blocked".to_owned()]),
+            &[],
+            7,
+        )
+        .await
+        .expect("stalled claims");
+    assert_eq!(stalled.len(), 1);
+    assert_eq!(stalled[0].kind(), "next");
+    assert_eq!(stalled[0].predicate, "follow-up");
 
     store.delete_document(&path).await.expect("cleanup");
 }

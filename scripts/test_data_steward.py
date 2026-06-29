@@ -7,6 +7,7 @@ it, yielding YAML that fails to parse (silent vault data loss on re-ingest).
 """
 import importlib.util
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -174,6 +175,20 @@ def test_term_claim_kind_is_allowed():
     assert not any("unknown claim kind" in r for r in reasons), reasons
 
 
+def test_next_claim_kind_is_allowed():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\n"
+        "claims:\n"
+        "- {subject: omb, predicate: follow-up, value: add next_actions endpoint, kind: next}\n"
+        "sources: []"
+    )
+    issues = ds._claim_issues([note])
+    weak = [i for i in issues if i["kind"] == "weak-claims"]
+    reasons = [w["reason"] for w in weak[0]["claims"]] if weak else []
+    assert not any("unknown claim kind" in r for r in reasons), reasons
+
+
 def test_unknown_claim_confidence_is_flagged():
     note = _make_note(
         "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
@@ -188,6 +203,26 @@ def test_unknown_claim_confidence_is_flagged():
     assert len(weak) == 1, issues
     reasons = [w["reason"] for w in weak[0]["claims"]]
     assert any("unknown claim confidence" in r for r in reasons), reasons
+
+
+def test_allowed_claim_kinds_match_frontmatter_documentation():
+    """The machine-parsing SSOT (.rules/schema.yaml) has a human-facing sibling
+    (.rules/frontmatter.md). data-steward's ALLOWED_CLAIM_KINDS must stay in sync
+    with the documented claim kinds so linting does not drift from docs.
+    """
+    repo_root = Path(_HERE).parent
+    fm_path = repo_root / "vault" / ".rules" / "frontmatter.md"
+    text = fm_path.read_text(encoding="utf-8")
+    # Find the claim kind bullet, e.g.:
+    # - `kind`: one of `fact` (default), `decision`, `assumption`, `risk`, `blocked`, `goal`, `term`, `next`
+    match = re.search(r"^\s*- `kind`: one of (.+)$", text, re.MULTILINE)
+    assert match, "claim kind bullet not found in frontmatter.md"
+    documented = set(re.findall(r"`([a-z]+)`", match.group(1)))
+    assert documented == ds.ALLOWED_CLAIM_KINDS, (
+        f"ALLOWED_CLAIM_KINDS mismatch:\n"
+        f"  frontmatter.md: {sorted(documented)}\n"
+        f"  data-steward.py: {sorted(ds.ALLOWED_CLAIM_KINDS)}"
+    )
 
 
 def main():
