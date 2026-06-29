@@ -99,6 +99,38 @@
         "additionalProperties": false
       }
     },
+    "hermes_cron_jobs": {
+      "type": "object",
+      "default": {
+        "weekly-briefing": {
+          "enabled": true,
+          "schedule": "0 9 * * 1",
+          "script": "weekly-briefing.py"
+        }
+      },
+      "description": "Managed hermes-agent cron jobs keyed by job name. Jobs not listed here are left untouched. An empty object disables managed jobs.",
+      "patternProperties": {
+        "^[a-z0-9-]+$": {
+          "type": "object",
+          "required": ["enabled", "schedule", "script"],
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "schedule": {
+              "type": "string",
+              "default": "0 9 * * 1",
+              "description": "Cron expression (minute hour dom mon dow). Currently only '* *' dom/mon and specific dow are fully supported."
+            },
+            "script": {
+              "type": "string",
+              "default": "weekly-briefing.py",
+              "description": "Script name under ~/.hermes/scripts/."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "agents": {
       "type": "array",
       "default": [],

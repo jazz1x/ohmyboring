@@ -102,7 +102,7 @@ def test_wire_claude_code_adds_session_start():
 def test_wire_hermes_adds_hint_and_weekly():
     """hermes wiring installs hint + weekly script and updates config.yaml."""
     with tempfile.TemporaryDirectory() as d, mock.patch.object(
-        agent_wiring, "_ensure_hermes_cron_job", return_value=False
+        agent_wiring, "_sync_hermes_cron_jobs", return_value={"changed": False, "jobs_count": 3}
     ) as mock_cron:
         home = Path(d) / "omb"
         scripts = home / "agents" / "hermes"
@@ -119,6 +119,38 @@ def test_wire_hermes_adds_hint_and_weekly():
         assert mock_cron.called is True
 
 
+def test_next_cron_run_finds_next_monday():
+    tz = agent_wiring.datetime.timezone(agent_wiring.datetime.timedelta(hours=9))
+    now = agent_wiring.datetime.datetime(2026, 6, 29, 10, 0, 0, tzinfo=tz)  # Monday 10:00
+    nxt = agent_wiring._next_cron_run("0 9 * * 1", tz, now)
+    assert nxt.weekday() == 0  # Monday
+    assert nxt.hour == 9
+    assert nxt > now
+
+
+def test_sync_hermes_cron_jobs_adds_managed_job():
+    """_sync_hermes_cron_jobs creates missing managed jobs without touching others."""
+    with tempfile.TemporaryDirectory() as d, mock.patch.object(
+        agent_wiring.boring_config, "hermes_cron_jobs", return_value={
+            "weekly-briefing": {"enabled": True, "schedule": "0 9 * * 1", "script": "weekly-briefing.py"}
+        }
+    ), mock.patch.object(
+        agent_wiring, "_load_json", return_value={
+            "jobs": [{"name": "morning-briefing", "deliver": "slack:test"}]
+        }
+    ), mock.patch.object(agent_wiring, "_save_json") as mock_save:
+        jobs_path = Path(d) / "jobs.json"
+        with mock.patch.object(Path, "expanduser", return_value=jobs_path):
+            result = agent_wiring._sync_hermes_cron_jobs()
+        assert result["changed"] is True
+        saved = mock_save.call_args[0][1]
+        assert len(saved["jobs"]) == 2
+        weekly = next(j for j in saved["jobs"] if j["name"] == "weekly-briefing")
+        assert weekly["script"] == "weekly-briefing.py"
+        assert weekly["enabled"] is True
+        assert weekly["deliver"] == "slack:test"
+
+
 if __name__ == "__main__":
     test_install_reports_failure()
     test_install_returns_success_when_ok()
@@ -127,5 +159,8 @@ if __name__ == "__main__":
     test_settings_path_override()
     test_default_path_when_no_override()
     test_wire_claude_code_adds_session_start()
+    test_wire_hermes_adds_hint_and_weekly()
+    test_next_cron_run_finds_next_monday()
+    test_sync_hermes_cron_jobs_adds_managed_job()
     test_wire_hermes_adds_hint_and_weekly()
     print("ok - agent_wiring failure propagation + hermes wiring + settings_path")

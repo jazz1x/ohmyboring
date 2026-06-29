@@ -301,65 +301,147 @@ def _install_hermes_weekly_briefing(boring_home: str | None = None) -> None:
     shutil.copy2(src, dst)
 
 
-def _ensure_hermes_cron_job(name: str, script: str, schedule_expr: str) -> bool:
-    """Idempotently add a hermes-agent cron job in ~/.hermes/cron/jobs.json.
+def _parse_cron_dow(dow_expr: str) -> set[int]:
+    """Parse the day-of-week part of a cron expression.
 
-    Matches existing jobs by name. Preserves all other jobs and their state.
-    Returns True if the file was modified.
+    Supports '*' and comma-separated integers using cron convention
+    (0=Sunday, 1=Monday, ..., 6=Saturday). Returns Python weekday values
+    (Monday=0, ..., Sunday=6).
+    """
+    dow_expr = dow_expr.strip()
+    if dow_expr == "*":
+        return set(range(7))
+    result: set[int] = set()
+    for part in dow_expr.split(","):
+        part = part.strip()
+        if part:
+            cron_dow = int(part)
+            # cron 0=Sunday -> Python 6; cron 1=Monday -> Python 0; ...
+            result.add((cron_dow + 6) % 7)
+    return result
+
+
+def _next_cron_run(expr: str, tz: datetime.timezone, now: datetime.datetime) -> datetime.datetime:
+    """Compute the next run time for simple cron expressions used by oh-my-boring.
+
+    Supported forms: '<min> <hour> * * *' and '<min> <hour> * * <dow>'.
+    """
+    parts = expr.split()
+    if len(parts) != 5:
+        raise ValueError(f"unsupported cron expression: {expr}")
+    minute, hour, _, _, dow_expr = parts
+    minute = int(minute)
+    hour = int(hour)
+    allowed_dow = _parse_cron_dow(dow_expr)
+
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    # Search up to 366 days ahead to cover year-boundary edge cases.
+    for _ in range(366):
+        if candidate.weekday() in allowed_dow and candidate > now:
+            return candidate
+        candidate += datetime.timedelta(days=1)
+    return candidate
+
+
+def _default_hermes_deliver(jobs: list[dict]) -> str:
+    """Reuse morning-briefing's delivery target, if any, for new jobs."""
+    for j in jobs:
+        if j.get("name") == "morning-briefing":
+            return j.get("deliver", "local")
+    return "local"
+
+
+def _sync_hermes_cron_jobs() -> dict:
+    """Sync ~/.hermes/cron/jobs.json with boring.json hermes_cron_jobs config.
+
+    Jobs not listed in config are left untouched. Managed jobs are added or
+    updated by name. Setting enabled=false pauses the job.
     """
     jobs_path = Path(os.path.expanduser("~/.hermes/cron/jobs.json"))
     jobs_path.parent.mkdir(parents=True, exist_ok=True)
     data = _load_json(jobs_path)
     jobs = data.get("jobs", [])
 
-    if any(j.get("name") == name for j in jobs):
-        return False
-
-    # Reuse delivery target from morning-briefing if it exists, otherwise local.
-    deliver = "local"
-    for j in jobs:
-        if j.get("name") == "morning-briefing":
-            deliver = j.get("deliver", "local")
-            break
-
+    desired = boring_config.hermes_cron_jobs()
     tz = datetime.timezone(datetime.timedelta(hours=9))
     now = datetime.datetime.now(tz)
-    job = {
-        "id": secrets.token_hex(8),
-        "name": name,
-        "prompt": "",
-        "skills": [],
-        "skill": None,
-        "model": None,
-        "provider": None,
-        "base_url": None,
-        "script": script,
-        "no_agent": True,
-        "context_from": None,
-        "schedule": {"kind": "cron", "expr": schedule_expr, "display": schedule_expr},
-        "schedule_display": schedule_expr,
-        "repeat": {"times": None, "completed": 0},
-        "enabled": True,
-        "state": "scheduled",
-        "paused_at": None,
-        "paused_reason": None,
-        "created_at": now.isoformat(),
-        "next_run_at": now.isoformat(),
-        "last_run_at": None,
-        "last_status": None,
-        "last_error": None,
-        "last_delivery_error": None,
-        "deliver": deliver,
-        "origin": None,
-        "enabled_toolsets": None,
-        "workdir": None,
-        "profile": None,
-    }
-    jobs.append(job)
+    changed = False
+
+    for name, spec in desired.items():
+        if not isinstance(spec, dict):
+            continue
+        enabled = bool(spec.get("enabled", True))
+        schedule = spec.get("schedule") or "0 9 * * 1"
+        script = spec.get("script") or "weekly-briefing.py"
+        state = "scheduled" if enabled else "paused"
+
+        existing = next((j for j in jobs if j.get("name") == name), None)
+        if existing:
+            needs_update = (
+                existing.get("script") != script
+                or existing.get("schedule", {}).get("expr") != schedule
+                or bool(existing.get("enabled", True)) != enabled
+                or existing.get("state") != state
+            )
+            if needs_update:
+                existing["script"] = script
+                existing["schedule"] = {
+                    "kind": "cron",
+                    "expr": schedule,
+                    "display": schedule,
+                }
+                existing["schedule_display"] = schedule
+                existing["enabled"] = enabled
+                existing["state"] = state
+                if enabled:
+                    existing["next_run_at"] = _next_cron_run(schedule, tz, now).isoformat()
+                    existing["paused_at"] = None
+                    existing["paused_reason"] = None
+                changed = True
+        else:
+            job = {
+                "id": secrets.token_hex(8),
+                "name": name,
+                "prompt": "",
+                "skills": [],
+                "skill": None,
+                "model": None,
+                "provider": None,
+                "base_url": None,
+                "script": script,
+                "no_agent": True,
+                "context_from": None,
+                "schedule": {
+                    "kind": "cron",
+                    "expr": schedule,
+                    "display": schedule,
+                },
+                "schedule_display": schedule,
+                "repeat": {"times": None, "completed": 0},
+                "enabled": enabled,
+                "state": state,
+                "paused_at": None,
+                "paused_reason": None,
+                "created_at": now.isoformat(),
+                "next_run_at": _next_cron_run(schedule, tz, now).isoformat() if enabled else None,
+                "last_run_at": None,
+                "last_status": None,
+                "last_error": None,
+                "last_delivery_error": None,
+                "deliver": _default_hermes_deliver(jobs),
+                "origin": None,
+                "enabled_toolsets": None,
+                "workdir": None,
+                "profile": None,
+            }
+            jobs.append(job)
+            changed = True
+
     data["jobs"] = jobs
     data["updated_at"] = now.isoformat()
-    _save_json(jobs_path, data)
-    return True
+    if changed:
+        _save_json(jobs_path, data)
+    return {"changed": changed, "jobs_count": len(jobs)}
 
 
 _HERMES_HINT = (
@@ -422,14 +504,13 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
         _write_text_atomic(path, body)
         _install_hermes_briefing(boring_home)
         _install_hermes_weekly_briefing(boring_home)
-        cron_changed = _ensure_hermes_cron_job(
-            "weekly-briefing", "weekly-briefing.py", "0 9 * * 1"
-        )
+        cron_result = _sync_hermes_cron_jobs()
         return {
             "agent": "hermes-agent",
             "path": str(path),
             "changed": True,
-            "cron_changed": cron_changed,
+            "cron_changed": cron_result["changed"],
+            "cron_jobs": cron_result["jobs_count"],
         }
 
     lines = text.splitlines()
@@ -458,15 +539,14 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
     _write_text_atomic(path, "\n".join(lines) + "\n")
     _install_hermes_briefing(boring_home)
     _install_hermes_weekly_briefing(boring_home)
-    cron_changed = _ensure_hermes_cron_job(
-        "weekly-briefing", "weekly-briefing.py", "0 9 * * 1"
-    )
-    changed = changed or cron_changed
+    cron_result = _sync_hermes_cron_jobs()
+    changed = changed or cron_result["changed"]
     return {
         "agent": "hermes-agent",
         "path": str(path),
         "changed": changed,
-        "cron_changed": cron_changed,
+        "cron_changed": cron_result["changed"],
+        "cron_jobs": cron_result["jobs_count"],
     }
 
 
