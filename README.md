@@ -209,6 +209,7 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 | `make smoke` | end-to-end smoke test |
 | `make logs` | engine logs |
 | `make guard` | fmt + clippy + test + Python py-compile |
+| `make quality` | release acceptance drift gate |
 | `make down` | stop containers |
 
 ---
@@ -443,7 +444,8 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 
 - SSOT docs: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
 - `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test`
-- CI: `rust-gate` · `gitleaks` · `cargo-deny` · `trivy`
+- `make quality` = release acceptance drift gate for MCP tools, vector-mode docs, and removed dangerous surfaces
+- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy`
 - `unsafe_code = "forbid"`
 
 ---

@@ -209,6 +209,7 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 | `make smoke` | end-to-end smoke test |
 | `make logs` | 엔진 로그 |
 | `make guard` | fmt + clippy + test + Python py-compile |
+| `make quality` | 릴리즈 수용성 drift 게이트 |
 | `make down` | 컨테이너 중지 |
 
 ---
@@ -406,7 +407,8 @@ curl -s -X POST http://localhost:7700/mcp \
 
 - SSOT 문서: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
 - `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test`
-- CI: `rust-gate` · `gitleaks` · `cargo-deny` · `trivy`
+- `make quality` = MCP tool, vector 모드 문서, 제거된 위험 surface의 릴리즈 수용성 drift 게이트
+- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy`
 - `unsafe_code = "forbid"`
 
 ---

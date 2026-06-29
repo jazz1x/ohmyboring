@@ -6,6 +6,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **Release quality gate** — `make quality` / CI `quality-gate` now blocks release-acceptance drift:
+  - MCP tool inventory must match README en/ko/ja and Codex adapter docs.
+  - Vector-mode support docs must keep vector-required and wiki-first tools explicit.
+  - The removed `renumber` CLI/module surface must not return.
 - **PII / sensitive-data gate** — shape-based policy enforcement at the single write choke-point:
   - Rules live in `vault/rules/pii.yaml` (committed defaults: RRN, phone, email, IP, names, credentials, ticket IDs) plus an optional gitignored `vault/rules/pii.local.yaml` overlay for company-specific values.
   - Actions per rule: `block` (reject the note), `redact` (mask in-place), `flag` (persist with `pii-flag` tag), `allow` (carve-out).
