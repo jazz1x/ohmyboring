@@ -4,6 +4,7 @@
 //! The `recall` tool = retrieve (vector+graph) → text → the agent retrieves from our self-augmenting KB.
 //!
 //! Cross-reference: design decision D3 (write door gated / read door open).
+use std::collections::HashSet;
 use std::time::Duration;
 
 use axum::Json;
@@ -764,7 +765,26 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
     }
 
     // 1. atomically allocate id + path, then write the wiki note (deterministic file IO — the SSOT artifact).
-    let (wiki_id, path) = vault::allocate_wiki_path(&wiki_dir)
+    //    Include existing vector-store ids so we never reuse a source_path that still lives in Postgres
+    //    even if its wiki file is temporarily gone (sync will reconcile, but remember should not collide).
+    let mut db_ids: HashSet<u32> = HashSet::new();
+    if let Some(store) = s.store.as_ref() {
+        for p in store.all_doc_paths().await.map_err(|e| {
+            (
+                -32603_i32,
+                format!("wiki id: cannot read existing document paths: {e:#}"),
+            )
+        })? {
+            if let Some(stem) = crate::vault::wiki_stem(&p)
+                && let Some(n) = stem
+                    .strip_prefix("wiki-")
+                    .and_then(|s| s.parse::<u32>().ok())
+            {
+                db_ids.insert(n);
+            }
+        }
+    }
+    let (wiki_id, path) = vault::allocate_wiki_path(&wiki_dir, Some(&db_ids))
         .map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
     let mut front = note.front;
     front.source_path = path.to_string_lossy().into_owned();

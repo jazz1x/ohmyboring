@@ -11,7 +11,6 @@ pub mod graph;
 pub mod ingest;
 pub mod llm;
 pub mod redact;
-pub mod renumber;
 pub mod retrieve;
 pub mod serve;
 pub mod store;
