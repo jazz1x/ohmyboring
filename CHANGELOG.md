@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **Structured context card (`/context`)** — a compact, claim-first alternative to prose summaries for agent session start:
+  - New HTTP endpoint `POST /context` returns `{decisions, risks, facts, glossary, language}`.
+  - New MCP tool `context` returns the same structured data.
+  - Uses recency ordering (no vector backend required), so it works even when `BORING_VECTOR=off`.
+  - Claude Code `SessionStart` hook now injects `/context` instead of `/status`.
+- **Glossary claims** — new claim kind `term` for project-specific definitions (subject=term, value=definition).
+- **Config-driven hermes-agent cron jobs** — `boring.json` gains `hermes_cron_jobs`:
+  - Manage job schedule, script, and enabled state from config.
+  - Default: `weekly-briefing` on Monday 09:00 KST.
+  - `agent_wiring.py` syncs config into `~/.hermes/cron/jobs.json` on install.
+- **Managed hermes-agent skills** — `agents/hermes/skills/` is copied to `~/.hermes/skills/` on install.
 - **Decision / Risk / Assumption register (Phase 4A)** — claims now carry `kind` and `confidence`:
   - Claim kinds: `fact`, `decision`, `assumption`, `risk`, `blocked`, `goal`.
   - Confidence levels: `certain`, `likely`, `assumption`, `outdated`.
@@ -32,6 +43,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
   51 duplicate notes (10 clusters) caused by repeated SessionEnd distillation of the same work.
 - **More specific distillation titles** — the session-distillation prompt now requires
   `project + concrete action + scope/date` titles and forbids generic titles like "기능 개선".
+- **Adversarial regression tests** — prompt-injection header spoofing, redaction fuzz
+  (GitHub PAT, AWS session token, JWT, generic keys), origin-boundary filtering, and data-integrity
+  idempotency tests.
+
+### Fixed
+- **hermes `memory-ingest` skill** — rewritten to reference the correct `ohmyboring/remember` MCP tool
+  and its required `title` parameter; sessions were failing to store with `missing argument: title`.
+
+### Removed
+- **Over-broad external adapters (Phase 5 rollback)** — GitHub/Jira/Confluence/Calendar ingest scripts
+  were removed after review showed they were too heavy for the current stage. The useful security
+  fallout (redact pattern extensions and adversarial tests) was kept.
 
 ## [0.1.0] — 2026-06-25
 
