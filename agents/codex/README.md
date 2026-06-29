@@ -4,20 +4,22 @@ GitHub Codex CLI reads MCP servers from `~/.codex/mcp.json`.
 ohmyboring wires the `ohmyboring` MCP server automatically when
 `codex` is enabled in `boring.json` and you run `install.sh`.
 
-No Codex hook is needed — Codex calls MCP tools on demand, and the managed Hermes worker backfills eligible session transcripts.
+No Codex hook is needed — Codex calls MCP tools on demand, and a host launchd/cron worker backfills eligible session transcripts.
 
 ## Session ingestion
 
-Codex does not expose a SessionEnd hook, so sessions are ingested by a cron
+Codex does not expose a SessionEnd hook, so sessions are ingested by a periodic
 worker instead:
 
 - `agents/codex/collect-sessions.py` scans `~/.codex/sessions/**/*.jsonl`.
 - It skips Codex Desktop `rollout-*` copies and subagent/guardian roll-outs by
   default, then processes one un-ingested eligible session per tick.
-- When `hermes-agent` is enabled, `install.sh` adds a `codex-memory-ingest-worker`
-  job that runs every 20 minutes.
-- Use `make doctor` to check queue, skipped rollout copies, marker counts, worker
-  state, and newest Codex note.
+- `install.sh` registers a host launchd/cron worker that runs every 20 minutes
+  when the `codex` adapter is enabled.
+- When `hermes-agent` is enabled, `install.sh` also adds a
+  `codex-memory-ingest-worker` job inside Hermes.
+- Use `make doctor` to check queue, skipped rollout copies, marker counts, host
+  worker state, Hermes worker state, and newest Codex note.
 - On the host you can backfill manually when needed:
 
 ```bash
@@ -26,9 +28,9 @@ COLLECT_LIMIT=10 python3 agents/codex/collect-sessions.py
 ```
 
 `make doctor` is read-only and includes Codex queued sessions, skipped rollout
-copies, non-rollout marker counts, the hermes worker state, and the newest Codex
-note. Rollout markers may remain on disk from older runs, but status output does
-not count them as successful user-session ingestion.
+copies, non-rollout marker counts, the host worker state, the Hermes worker
+state, and the newest Codex note. Rollout markers may remain on disk from older
+runs, but status output does not count them as successful user-session ingestion.
 
 Session markers live in `~/.cache/boring-distill/codex-<sid>.*` and are shared
 with the rest of the pipeline.

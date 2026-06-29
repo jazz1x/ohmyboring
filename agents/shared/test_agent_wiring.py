@@ -52,6 +52,26 @@ def test_hermes_agent_calls_wire_hermes():
     assert mock_wire.called is True
 
 
+def test_codex_calls_wire_codex():
+    """codex wiring includes MCP config plus the host collector worker."""
+    with mock.patch.object(
+        agent_wiring,
+        "wire_codex",
+        return_value={
+            "agent": "codex",
+            "path": "~/.codex/mcp.json",
+            "changed": False,
+            "worker_kind": "launchd",
+            "worker_path": "~/Library/LaunchAgents/com.ohmyboring.codex-ingest.plist",
+            "worker_loaded": True,
+        },
+    ) as mock_wire:
+        results, failed = agent_wiring.install(["codex"], "ohmyboring", {})
+    assert failed is False
+    assert len(results) == 1
+    assert mock_wire.called is True
+
+
 def test_unsupported_agent_is_skipped_without_failure():
     results, failed = agent_wiring.install(["nonexistent-agent"], "ohmyboring", {})
     assert failed is False
@@ -159,6 +179,36 @@ def test_install_hermes_skills_removes_legacy_nested_duplicate():
         assert not nested.exists()
 
 
+def test_install_codex_host_worker_macos_writes_launch_agent():
+    """The default codex adapter creates a visible host-side collector schedule."""
+    with tempfile.TemporaryDirectory() as d:
+        fake_home = Path(d) / "home"
+        omb = Path(d) / "omb"
+        collector = omb / "agents" / "codex" / "collect-sessions.py"
+        collector.parent.mkdir(parents=True)
+        collector.write_text("# stub", encoding="utf-8")
+
+        def fake_expanduser(value):
+            if value == "~":
+                return str(fake_home)
+            if value.startswith("~/"):
+                return str(fake_home / value[2:])
+            return value
+
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser), mock.patch.object(
+            agent_wiring.subprocess, "run", return_value=completed
+        ):
+            result = agent_wiring._install_codex_host_worker_macos(str(omb))
+
+        plist = fake_home / "Library" / "LaunchAgents" / "com.ohmyboring.codex-ingest.plist"
+        text = plist.read_text(encoding="utf-8")
+        assert result["kind"] == "launchd"
+        assert result["loaded"] is True
+        assert str(collector) in text
+        assert "<integer>1200</integer>" in text
+
+
 def test_next_cron_run_finds_next_monday():
     tz = agent_wiring.datetime.timezone(agent_wiring.datetime.timedelta(hours=9))
     now = agent_wiring.datetime.datetime(2026, 6, 29, 10, 0, 0, tzinfo=tz)  # Monday 10:00
@@ -206,12 +256,14 @@ if __name__ == "__main__":
     test_install_reports_failure()
     test_install_returns_success_when_ok()
     test_hermes_agent_calls_wire_hermes()
+    test_codex_calls_wire_codex()
     test_unsupported_agent_is_skipped_without_failure()
     test_settings_path_override()
     test_default_path_when_no_override()
     test_wire_claude_code_adds_session_start()
     test_wire_hermes_adds_hint_and_weekly()
     test_install_hermes_skills_removes_legacy_nested_duplicate()
+    test_install_codex_host_worker_macos_writes_launch_agent()
     test_next_cron_run_finds_next_monday()
     test_sync_hermes_cron_jobs_adds_managed_job()
     test_wire_hermes_adds_hint_and_weekly()

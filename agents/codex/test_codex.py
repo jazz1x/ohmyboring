@@ -244,6 +244,16 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
             with (
                 mock.patch.object(collect, "_source_dir", return_value=str(source)),
                 mock.patch.object(collect, "_hermes_jobs_path", return_value=str(jobs)),
+                mock.patch.object(
+                    collect,
+                    "_host_worker_status",
+                    return_value={
+                        "kind": "launchd",
+                        "found": True,
+                        "loaded": True,
+                        "path": "/tmp/com.ohmyboring.codex-ingest.plist",
+                    },
+                ),
                 mock.patch.dict(os.environ, {"BORING_VAULT_DIR": str(vault)}),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.subprocess, "run") as run,
@@ -260,6 +270,7 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
             assert "markers done=1 pending=0 retry=0" in out
             assert "codex-rollout-" not in out
             assert "worker found=true enabled=true state=scheduled last_status=success" in out
+            assert "host_worker found=true loaded=true kind=launchd" in out
             assert "newest_note session_id=codex-note" in out
     finally:
         collect.markers.set_mark_dir(old_mark_dir)
