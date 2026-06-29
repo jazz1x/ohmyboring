@@ -10,6 +10,12 @@ BORING="${BORING_CONFIG:-$BORING_HOME/boring.json}"
 ok()   { echo "✓ $1"; }
 bad()  { echo "✗ $1"; }
 info() { echo "ⓘ $1"; }
+ollama_tag() {
+    case "$1" in
+        *:*) printf '%s' "$1" ;;
+        *) printf '%s:latest' "$1" ;;
+    esac
+}
 
 if ! command -v jq >/dev/null 2>&1; then
     bad "jq not found — install: brew install jq / apt-get install jq"
@@ -56,13 +62,15 @@ case "$PROVIDER" in
         tags=$(curl -sf -m5 "$NATIVE/api/tags" 2>/dev/null)
         if [ -n "$tags" ]; then
             ok "Ollama reachable at $NATIVE"
-            if printf '%s' "$tags" | jq -e '.models[]? | select(.name == "'"$MODEL"'")' >/dev/null 2>&1; then
+            MODEL_TAG=$(ollama_tag "$MODEL")
+            EMBED_MODEL_TAG=$(ollama_tag "$EMBED_MODEL")
+            if printf '%s' "$tags" | jq -e '.models[]? | select(.name == "'"$MODEL_TAG"'")' >/dev/null 2>&1; then
                 ok "chat model '$MODEL' is available"
             else
                 bad "chat model '$MODEL' not found — run: ollama pull $MODEL"
                 errors=$((errors + 1))
             fi
-            if printf '%s' "$tags" | jq -e '.models[]? | select(.name == "'"$EMBED_MODEL"'")' >/dev/null 2>&1; then
+            if printf '%s' "$tags" | jq -e '.models[]? | select(.name == "'"$EMBED_MODEL_TAG"'")' >/dev/null 2>&1; then
                 ok "embed model '$EMBED_MODEL' is available"
             else
                 bad "embed model '$EMBED_MODEL' not found — run: ollama pull $EMBED_MODEL"

@@ -40,7 +40,7 @@ models: ## Pull Ollama models (DRUDGE_LLM_MODEL + DRUDGE_EMBED_MODEL, defaults g
 	ollama pull "${DRUDGE_LLM_MODEL:-gemma4:12b}" && ollama pull "${DRUDGE_EMBED_MODEL:-bge-m3}"
 
 verify-llm: ## Verify boring.json LLM config (reachability, model presence, embed_dim)
-	./scripts/verify-llm.sh
+	@BORING_HOME="$(PWD)" ./scripts/verify-llm.sh
 
 ask: ## Single query   make ask Q="question"
 	@command -v jq >/dev/null 2>&1 || { echo 'jq not found — install: brew install jq / apt-get install jq'; exit 1; }

@@ -345,7 +345,9 @@ pub async fn brief(
     // note_lang policy wins over "match the records": ko → always Korean, en → English, auto → records' language.
     let lang_rule = match lang {
         "ko" => {
-            " ALWAYS write the briefing in Korean (한국어), regardless of the records' language."
+            " ALWAYS write the briefing in Korean (한국어), regardless of the records' language. \
+Use Korean section labels: '완료', '다음', '막힘', '결정', '리스크', '지연'. \
+Do not use English labels like Done, Next, Blocked, Decisions, Risks, or Stalled unless they appear inside source text or proper nouns."
         }
         "en" => " ALWAYS write the briefing in English.",
         _ => "",
@@ -447,7 +449,11 @@ pub async fn weekly_brief(
         )
     };
     let lang_rule = match lang {
-        "ko" => " ALWAYS write the status in Korean (한국어), regardless of the records' language.",
+        "ko" => {
+            " ALWAYS write the status in Korean (한국어), regardless of the records' language. \
+Use Korean section labels: '완료', '다음', '막힘', '결정', '리스크', '지연'. \
+Do not use English labels like Done, Next, Blocked, Decisions, Risks, or Stalled unless they appear inside source text or proper nouns."
+        }
         "en" => " ALWAYS write the status in English.",
         _ => "",
     };
@@ -516,7 +522,11 @@ pub async fn project_status(
         )
     };
     let lang_rule = match lang {
-        "ko" => " ALWAYS write the status in Korean (한국어), regardless of the records' language.",
+        "ko" => {
+            " ALWAYS write the status in Korean (한국어), regardless of the records' language. \
+Use Korean section labels: '완료', '다음', '막힘', '결정', '리스크', '지연'. \
+Do not use English labels like Done, Next, Blocked, Decisions, Risks, or Stalled unless they appear inside source text or proper nouns."
+        }
         "en" => " ALWAYS write the status in English.",
         _ => "",
     };
