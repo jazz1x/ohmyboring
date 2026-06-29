@@ -142,7 +142,7 @@ pub async fn answer(
     let q_emb = llm.embed(question).await?;
     let mut claim_ctx = String::new();
     for cl in store
-        .current_claims(&q_emb, 5, exclude_origins, project, None)
+        .current_claims(&q_emb, 5, exclude_origins, project, None, None)
         .await?
     {
         // Claim values are note-derived (possibly attacker-influenced) — defang before interpolation.
@@ -265,6 +265,7 @@ pub async fn brief(
     // there is activity, but gracefully falls back when the user was away.
     let windows: &[(i32, usize)] = &[(24, 3), (48, 3), (168, 3), (720, 1)];
     let mut docs: Vec<_> = Vec::new();
+    let mut selected_hours = i64::from(windows.last().map_or(720, |w| w.0));
     for (hours, min_docs) in windows {
         docs = store
             .recent_docs(12, exclude_origins, Some(*hours), None)
@@ -273,6 +274,7 @@ pub async fn brief(
             .filter(|d| !d.tags.iter().any(|t| t == "daily-brief"))
             .collect();
         if docs.len() >= *min_docs {
+            selected_hours = i64::from(*hours);
             break;
         }
     }
@@ -299,7 +301,10 @@ pub async fn brief(
     // Authority injection: current claims (recency order) — even if old exploration notes (e.g. discarded Neo4j/SurrealDB)
     // look recent by mtime, claim authority nails down the true current fact.
     let mut claim_ctx = String::new();
-    for cl in store.recent_claims(12, None, None, &[]).await? {
+    for cl in store
+        .recent_claims(12, None, None, &[], Some(selected_hours))
+        .await?
+    {
         let _ = writeln!(
             claim_ctx,
             "- [{}|{}] {} {} {}",
@@ -403,7 +408,7 @@ pub async fn weekly_brief(
     }
 
     let mut claim_ctx = String::new();
-    for cl in store.recent_claims(12, None, None, &[]).await? {
+    for cl in store.recent_claims(12, None, None, &[], Some(168)).await? {
         let _ = writeln!(
             claim_ctx,
             "- [{}|{}] {} {} {}",
@@ -473,7 +478,7 @@ pub async fn project_status(
         .await?;
     let q_emb = llm.embed(project).await?;
     let claims = store
-        .current_claims(&q_emb, 10, exclude_origins, Some(project), None)
+        .current_claims(&q_emb, 10, exclude_origins, Some(project), None, Some(720))
         .await?;
 
     if docs.is_empty() && claims.is_empty() {
@@ -564,7 +569,9 @@ pub async fn decision_register(
     lang: &str,
 ) -> Result<AnswerOut> {
     let kinds = ["decision".to_owned()];
-    let claims = store.recent_claims(50, project, Some(&kinds), &[]).await?;
+    let claims = store
+        .recent_claims(50, project, Some(&kinds), &[], None)
+        .await?;
     if claims.is_empty() {
         return Ok(AnswerOut {
             answer: "No decisions recorded yet.".to_owned(),
@@ -604,7 +611,9 @@ pub async fn risk_register(
         "assumption".to_owned(),
         "blocked".to_owned(),
     ];
-    let claims = store.recent_claims(50, project, Some(&kinds), &[]).await?;
+    let claims = store
+        .recent_claims(50, project, Some(&kinds), &[], None)
+        .await?;
     if claims.is_empty() {
         return Ok(AnswerOut {
             answer: "No risks, assumptions, or blockers recorded yet.".to_owned(),
@@ -641,7 +650,9 @@ pub async fn next_action_register(
     lang: &str,
 ) -> Result<AnswerOut> {
     let kinds = ["next".to_owned(), "blocked".to_owned()];
-    let claims = store.recent_claims(50, project, Some(&kinds), &[]).await?;
+    let claims = store
+        .recent_claims(50, project, Some(&kinds), &[], None)
+        .await?;
     if claims.is_empty() {
         return Ok(AnswerOut {
             answer: "No next actions or blockers recorded yet.".to_owned(),
@@ -753,7 +764,13 @@ pub async fn context_card(
 ) -> Result<ContextCard> {
     let k = i64::try_from(max_items).unwrap_or(5);
     let decisions = store
-        .recent_claims(k, project, Some(&["decision".to_owned()]), exclude_origins)
+        .recent_claims(
+            k,
+            project,
+            Some(&["decision".to_owned()]),
+            exclude_origins,
+            None,
+        )
         .await?;
     let risks = store
         .recent_claims(
@@ -765,13 +782,26 @@ pub async fn context_card(
                 "blocked".to_owned(),
             ]),
             exclude_origins,
+            None,
         )
         .await?;
     let facts = store
-        .recent_claims(k, project, Some(&["fact".to_owned()]), exclude_origins)
+        .recent_claims(
+            k,
+            project,
+            Some(&["fact".to_owned()]),
+            exclude_origins,
+            None,
+        )
         .await?;
     let glossary = store
-        .recent_claims(k, project, Some(&["term".to_owned()]), exclude_origins)
+        .recent_claims(
+            k,
+            project,
+            Some(&["term".to_owned()]),
+            exclude_origins,
+            None,
+        )
         .await?;
     let next_actions = store
         .recent_claims(
@@ -779,6 +809,7 @@ pub async fn context_card(
             project,
             Some(&["next".to_owned(), "blocked".to_owned()]),
             exclude_origins,
+            None,
         )
         .await?;
 

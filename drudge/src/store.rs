@@ -658,6 +658,7 @@ impl Store {
         project: Option<&str>,
         kinds: Option<&[String]>,
         exclude_origins: &[String],
+        since_hours: Option<i64>,
     ) -> Result<Vec<Claim>> {
         let rows = self
             .db
@@ -669,14 +670,16 @@ impl Store {
                    AND ($3::text[] IS NULL OR c.kind = ANY($3))
                    AND NOT (d.origin = ANY($4))
                    AND d.source_path !~ $5
-                 ORDER BY c.valid_from DESC
-                 LIMIT $1;",
+                   AND ($6::bigint IS NULL OR c.valid_from >= (NOW() - INTERVAL '1 hour' * ($6::bigint)))
+                  ORDER BY c.valid_from DESC
+                  LIMIT $1;",
                 &[
                     &k,
                     &project,
                     &kinds,
                     &exclude_origins,
                     &INTERNAL_EVAL_FIXTURE_RE,
+                    &since_hours,
                 ],
             )
             .await
@@ -747,6 +750,7 @@ impl Store {
         exclude_origins: &[String],
         project: Option<&str>,
         kinds: Option<&[String]>,
+        since_hours: Option<i64>,
     ) -> Result<Vec<Claim>> {
         let vec = Vector::from(query_emb.to_vec());
         // Honor the SAME origin boundary the recall path applies (retrieve::merge_hits filters by
@@ -764,8 +768,9 @@ impl Store {
                    AND ($4::text IS NULL OR d.project = $4)
                    AND ($5::text[] IS NULL OR c.kind = ANY($5))
                    AND d.source_path !~ $6
-                 ORDER BY c.embedding <=> $1
-                 LIMIT $2;",
+                   AND ($7::bigint IS NULL OR c.valid_from >= (NOW() - INTERVAL '1 hour' * ($7::bigint)))
+                  ORDER BY c.embedding <=> $1
+                  LIMIT $2;",
                 &[
                     &vec,
                     &k,
@@ -773,6 +778,7 @@ impl Store {
                     &project,
                     &kinds,
                     &INTERNAL_EVAL_FIXTURE_RE,
+                    &since_hours,
                 ],
             )
             .await

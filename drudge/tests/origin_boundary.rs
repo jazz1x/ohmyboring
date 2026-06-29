@@ -91,13 +91,13 @@ async fn current_claims_respects_exclude_origins() {
 
     let q = [0.5_f32; 1024];
     let all = store
-        .current_claims(&q, 10, &[], Some(&project), None)
+        .current_claims(&q, 10, &[], Some(&project), None, None)
         .await
         .expect("all claims");
     assert_eq!(all.len(), 2, "expected both claims without exclusion");
 
     let personal_only = store
-        .current_claims(&q, 10, &["company".to_owned()], Some(&project), None)
+        .current_claims(&q, 10, &["company".to_owned()], Some(&project), None, None)
         .await
         .expect("personal only");
     assert_eq!(personal_only.len(), 1, "company claim should be excluded");
