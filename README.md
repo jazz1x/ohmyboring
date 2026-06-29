@@ -213,6 +213,94 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 
 ---
 
+## Usage examples
+
+### Backfill all supported agents
+
+```bash
+# Claude Code (default make collect)
+make collect N=20
+
+# Kimi Code
+make collect-kimi N=20
+
+# GitHub Codex
+COLLECT_LIMIT=20 python3 agents/codex/collect-sessions.py
+```
+
+### Daily/weekly consumption
+
+```bash
+# Structured context card for the start of a session (works with BORING_VECTOR=off)
+curl -s -X POST http://localhost:7700/context \
+  -H 'content-type: application/json' \
+  -d '{"project":"omb","max_items":5}' | jq .
+
+# Weekly brief (requires BORING_VECTOR=on)
+curl -s -X POST http://localhost:7700/weekly \
+  -H 'content-type: application/json' \
+  -d '{"project":"omb"}' | jq .
+
+# Stalled register — things that have not moved in 7+ days (requires BORING_VECTOR=on)
+curl -s -X POST http://localhost:7700/stalled \
+  -H 'content-type: application/json' \
+  -d '{"project":"omb","older_than_days":7}' | jq .
+```
+
+### PII / sensitive-data gate
+
+Policy lives in `vault/rules/pii.yaml` and an optional gitignored `vault/rules/pii.local.yaml`:
+
+```yaml
+# vault/rules/pii.local.yaml — company-specific shapes, never commit
+version: "1.0"
+policy:
+  default_action: flag
+  exemption_marker: "<!-- pii-allow:"
+rules:
+  - name: internal-ticket
+    regex: '\bPROJ-\d{4,}\b'
+    action: flag
+    severity: warning
+    reason: "Internal ticket id"
+  - name: staging-password
+    regex: '\bstaging[_-]?pass\s*=\s*[^\s]+'
+    action: redact
+    replacement: "[STAGING-PASS]"
+    severity: critical
+    reason: "Staging credential"
+```
+
+A `block` rule rejects the note at `remember` time; a `redact` rule masks matches before saving; a `flag` rule saves the note and adds a `pii-flag` tag. To let a flagged shape through on one line, add the exemption marker on that line:
+
+```markdown
+The Jira ticket PROJ-1234 <!-- pii-allow: internal-ticket --> is public.
+```
+
+### MCP tool call (raw JSON-RPC)
+
+```bash
+curl -s -X POST http://localhost:7700/mcp \
+  -H 'content-type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "recall",
+      "arguments": {
+        "query": "docker build cache fix",
+        "max_tokens": 1500,
+        "max_results": 3,
+        "project": "omb",
+        "since_hours": 168
+      }
+    }
+  }' | jq .
+```
+
+---
+
 ## Agent adapters
 
 `agents/` contains the **host-side adapters** that connect external agents to the ohmyboring engine. Every adapter talks to ohmyboring through the same MCP/HTTP surface; none are required.
@@ -227,7 +315,7 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 | Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Distills a Kimi session and calls `remember` |
 | Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring` as an MCP server |
-| Codex | `agents/codex/README.md` | MCP only | `~/.codex/mcp.json` | Exposes `ohmyboring` as an MCP server |
+| Codex | `agents/codex/README.md` | MCP + cron backfill | `~/.codex/mcp.json` / `collect-sessions.py` | Exposes `ohmyboring` as an MCP server and backfills Codex sessions |
 | hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`weekly-briefing`, `briefing`) + serial backfill (`ingest-worker.py`) |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older Claude Code sessions |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / manual | Lazy backfill of older Kimi Code sessions |
@@ -240,13 +328,15 @@ Memory can be reached through HTTP endpoints or the MCP server (`http://localhos
 
 | Endpoint / MCP tool | Purpose | Vector backend |
 |---|---|---|
-| `POST /context` / `context` | Structured context card: decisions, risks, facts, glossary | not required |
+| `POST /context` / `context` | Structured context card: decisions, risks, facts, glossary, next_actions | not required |
+| `POST /next_actions` / `next_actions` | Next-action register: explicit next steps + active blockers | required |
+| `POST /stalled` / `stalled` | Stalled register: old next steps and blockers | required |
 | `POST /status` / `project_status` | 30-day project status (Done/Next/Blocked/Decisions/Risks) | required |
 | `POST /weekly` / `weekly_brief` | Last 7 days across projects | required |
 | `POST /decisions` / `decisions` | Decision claims for a project | required |
 | `POST /risks` / `risks` | Risk/assumption/blocked claims for a project | required |
-| `POST /ask` / `ask` | Direct question answered from memory | required |
-| `POST /search` / `recall` | Raw memory excerpts | required for semantic search |
+| `POST /ask` / `ask` | Direct question answered from memory | not required |
+| `POST /search` / `recall` | Raw memory excerpts | not required; semantic search uses vector when enabled |
 | `/remember` / `remember` | Store a curated note | — |
 
 ### Token budget
@@ -276,17 +366,21 @@ For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~
 
 (VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. Compose siblings reach it at `http://boring-drudge:7700/mcp`.)
 
-Available tools (11): `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief` (generative — run the LLM) · `corpus_status`, `config_get` (introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain).
+Available tools (18): `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled` (generative — run the LLM) · `context`, `corpus_status`, `config_get` (structured / introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain).
 
-In the default wiki-first mode (`BORING_VECTOR=off`), four tools require the pgvector backend and return JSON-RPC `-32603` until you set `BORING_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `brief`. The other seven (`recall`, `ask`, `remember`, `forget`, `sync`, `config_get`, `classify_repo`) work against `vault/wiki` directly.
+In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency/vector ordering or the graph return JSON-RPC `-32603` until you set `BORING_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`. `recall` and `ask` read `vault/wiki` directly; `context` is callable but returns an empty claim card without the store; `remember`, `forget`, `sync`, `config_get`, and `classify_repo` do not require vector mode.
 
+- `next_actions` *(requires `BORING_VECTOR=on`)* — next-action register: recent `next` claims and active `blocked` claims synthesized into a short todo/blocker list. Optionally filter by project.
+- `stalled` *(requires `BORING_VECTOR=on`)* — stalled register: `next` and `blocked` claims older than `older_than_days` (default 7).
+- `decisions` *(requires `BORING_VECTOR=on`)* — decision register: recent `decision` claims for a project.
+- `risks` *(requires `BORING_VECTOR=on`)* — risk register: recent `risk`, `assumption`, and `blocked` claims for a project.
 - `neighbors` *(requires `BORING_VECTOR=on`)* — graph traversal from a topic: embeds the query, takes the single closest note, then returns its 1-hop labels (`{hit, graph_neighbors, semantic_neighbors}` JSON). `hit` is the matched note's path; `graph_neighbors` are its project/topic labels and `semantic_neighbors` its shared tool/concept labels — flat strings, not note paths.
 - `claims` *(requires `BORING_VECTOR=on`)* — top-k current (non-superseded) `{subject, predicate, value}` decisions near a query.
 - `corpus_status` *(requires `BORING_VECTOR=on`)* — KB health snapshot (file/chunk counts, by origin/kind/project, contamination, graph/semantic nodes+edges).
-- `ask` / `brief` — the only LLM-running tools: `ask` answers a question with cited sources (works in wiki-first mode); `brief` *(requires `BORING_VECTOR=on`)* is a recency-first work briefing.
+- `ask` / `brief` / `weekly_brief` / `project_status` / `decisions` / `risks` / `next_actions` / `stalled` — LLM-running tools: `ask` answers a question with cited sources (works in wiki-first mode); the rest are recency/claim registers that require `BORING_VECTOR=on`.
 - `forget` — delete a note by wiki id or exact title. Removes the wiki file and, in vector mode, also purges embeddings, graph edges, and claims.
 
-Structured tools (`neighbors`, `claims`, `corpus_status`, `config_get`, `ask`, `brief`) return native `structuredContent` (JSON) alongside the text block; prose/ack tools (`recall`, `remember`, `forget`, `sync`, `classify_repo`) return text.
+Structured tools (`neighbors`, `claims`, `corpus_status`, `config_get`, `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `context`) return native `structuredContent` (JSON) alongside the text block; prose/ack tools (`recall`, `remember`, `forget`, `sync`, `classify_repo`) return text.
 
 Example MCP call (raw JSON-RPC over HTTP):
 
