@@ -11,6 +11,17 @@ ok()   { echo "✓ $1"; }
 bad()  { echo "✗ $1"; }
 info() { echo "ⓘ $1"; }
 
+is_env_name() {
+    case "$1" in
+        ''|[0-9]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
 if ! command -v jq >/dev/null 2>&1; then
     bad "jq not found — install: brew install jq / apt-get install jq"
     exit 1
@@ -106,7 +117,10 @@ case "$PROVIDER" in
                 ;;
         esac
         if [ -n "$API_KEY_ENV" ]; then
-            if eval "[ -n \"\$$API_KEY_ENV\" ]"; then
+            if ! is_env_name "$API_KEY_ENV"; then
+                bad "api key env '$API_KEY_ENV' is not a portable environment variable name"
+                errors=$((errors + 1))
+            elif API_KEY_VALUE=$(printenv "$API_KEY_ENV") && [ -n "$API_KEY_VALUE" ]; then
                 ok "api key env '$API_KEY_ENV' is set"
             else
                 bad "api key env '$API_KEY_ENV' is not set — export $API_KEY_ENV=..."
