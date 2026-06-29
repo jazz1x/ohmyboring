@@ -22,6 +22,22 @@ is_env_name() {
     esac
 }
 
+curl_models_status() {
+    if [ -n "${API_KEY_VALUE:-}" ]; then
+        curl -s -o /dev/null -w '%{http_code}' -m5 -H "Authorization: Bearer $API_KEY_VALUE" "$HOST_URL/models" 2>/dev/null
+    else
+        curl -s -o /dev/null -w '%{http_code}' -m5 "$HOST_URL/models" 2>/dev/null
+    fi
+}
+
+curl_models_body() {
+    if [ -n "${API_KEY_VALUE:-}" ]; then
+        curl -sf -m5 -H "Authorization: Bearer $API_KEY_VALUE" "$HOST_URL/models" 2>/dev/null
+    else
+        curl -sf -m5 "$HOST_URL/models" 2>/dev/null
+    fi
+}
+
 if ! command -v jq >/dev/null 2>&1; then
     bad "jq not found — install: brew install jq / apt-get install jq"
     exit 1
@@ -85,11 +101,23 @@ case "$PROVIDER" in
         fi
         ;;
     lmstudio|openai-compatible)
-        code=$(curl -s -o /dev/null -w '%{http_code}' -m5 "$HOST_URL/models" 2>/dev/null)
+        API_KEY_VALUE=""
+        if [ -n "$API_KEY_ENV" ]; then
+            if ! is_env_name "$API_KEY_ENV"; then
+                bad "api key env '$API_KEY_ENV' is not a portable environment variable name"
+                errors=$((errors + 1))
+            elif API_KEY_VALUE=$(printenv "$API_KEY_ENV") && [ -n "$API_KEY_VALUE" ]; then
+                ok "api key env '$API_KEY_ENV' is set"
+            else
+                bad "api key env '$API_KEY_ENV' is not set — export $API_KEY_ENV=..."
+                errors=$((errors + 1))
+            fi
+        fi
+        code=$(curl_models_status)
         case "$code" in
             200)
                 ok "endpoint reachable at $HOST_URL/models"
-                models=$(curl -sf -m5 "$HOST_URL/models" 2>/dev/null)
+                models=$(curl_models_body)
                 if printf '%s' "$models" | jq -e '.data[]? | select(.id == "'"$MODEL"'")' >/dev/null 2>&1; then
                     ok "chat model '$MODEL' is available"
                 else
@@ -104,8 +132,8 @@ case "$PROVIDER" in
                 fi
                 ;;
             401)
-                ok "endpoint reachable at $HOST_URL/models (auth required)"
-                info "model listing skipped because endpoint requires authentication"
+                bad "endpoint requires authentication or rejected api key at $HOST_URL/models — cannot verify loaded models"
+                errors=$((errors + 1))
                 ;;
             000)
                 bad "endpoint unreachable at $HOST_URL/models — is the server running?"
@@ -116,20 +144,10 @@ case "$PROVIDER" in
                 errors=$((errors + 1))
                 ;;
         esac
-        if [ -n "$API_KEY_ENV" ]; then
-            if ! is_env_name "$API_KEY_ENV"; then
-                bad "api key env '$API_KEY_ENV' is not a portable environment variable name"
-                errors=$((errors + 1))
-            elif API_KEY_VALUE=$(printenv "$API_KEY_ENV") && [ -n "$API_KEY_VALUE" ]; then
-                ok "api key env '$API_KEY_ENV' is set"
-            else
-                bad "api key env '$API_KEY_ENV' is not set — export $API_KEY_ENV=..."
-                errors=$((errors + 1))
-            fi
-        fi
         ;;
     *)
-        info "unknown provider '$PROVIDER' — skipping reachability/model checks"
+        bad "unknown provider '$PROVIDER' — add scripts/llm-providers/${PROVIDER}.sh or choose a supported provider"
+        errors=$((errors + 1))
         ;;
 esac
 
