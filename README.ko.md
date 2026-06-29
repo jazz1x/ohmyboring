@@ -139,11 +139,13 @@ flowchart LR
 | `repos[]` | 경로/remote 규칙 → `origin=personal/company/mirror/community` |
 | `agents[]` | vector mode ingest source |
 
-**LLM 백엔드 전환**은 config 블록 하나로 끝납니다. `make up`은 `scripts/llm-providers/<provider>.sh` 로 디스패치합니다. Ollama는 서버 시작과 모델 pull을 할 수 있고, LM Studio는 앱에서 모델을 이미 로드했다고 보고 서버 상태만 확인합니다.
+**LLM 백엔드 전환**은 config 블록 하나로 끝납니다. `make up`은 `scripts/llm-providers/<provider>.sh` 로 디스패치합니다. Ollama는 서버 시작과 모델 pull을 할 수 있고, LM Studio는 로컬 서버와 설정된 두 모델 id를 확인한 뒤 모델 로드는 앱이 계속 소유합니다.
 
 ### LM Studio 백엔드
 
 LM Studio는 OpenAI-compatible `/v1` 서버로 붙습니다. Docker 컨테이너가 호스트의 LM Studio에 접근해야 하므로 `boring.json`에는 `host.docker.internal`을 쓰고, 호스트에서 직접 확인하거나 벤치마크할 때만 `localhost`를 씁니다.
+
+새로 받은 저장소에서는 검증 전에 `boring.json`을 만들거나, 첫 `make up` 때 `BORING_LLM_PROVIDER=lmstudio`와 `.env.example`의 `BORING_LLM_*` 값을 넣어 초기 설정을 만들 수 있습니다. `boring.json`이 생긴 뒤에는 그 파일을 직접 수정합니다.
 
 ```json
 {
@@ -162,6 +164,7 @@ LM Studio는 OpenAI-compatible `/v1` 서버로 붙습니다. Docker 컨테이너
 LM Studio 로컬 서버를 켜고 chat 모델과 embedding 모델을 하나씩 로드한 뒤, `make up` 전에 확인합니다:
 
 ```bash
+cp boring.example.json boring.json
 curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
 make verify-llm
 make up
@@ -176,6 +179,7 @@ make doctor
 |---|---|
 | `BORING_VECTOR` | `on` 시 pgvector 활성화(선택) |
 | `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | `llm.base_url` / `llm.model` 런타임 오버라이드(선택). `drudge` 바이너리를 호스트에서 직접 실행한다면 `BORING_LLM_BASE_URL=http://localhost:11434/v1` 설정 |
+| `BORING_LLM_PROVIDER` / `BORING_LLM_BOOTSTRAP` / `BORING_LLM_EMBED_MODEL` / `BORING_LLM_EMBED_DIM` | `boring.json`이 아직 없을 때만 쓰는 첫 실행 초기값 |
 | `BORING_LLM_API_KEY` | `llm.api_key_env`가 여기를 가리킬 때의 API 키(인증 provider) |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack assistant |
 

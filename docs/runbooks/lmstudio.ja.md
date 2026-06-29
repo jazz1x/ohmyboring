@@ -29,6 +29,26 @@ LM Studio を ohmyboring のローカル OpenAI-compatible バックエンドと
 }
 ```
 
+新しく取得したリポジトリでは、検証前に設定ファイルを作ります:
+
+```bash
+cp boring.example.json boring.json
+```
+
+最初の実行を 1 コマンドで行う場合、まだ存在しない `boring.json` を環境変数の値で初期生成できます:
+
+```bash
+BORING_LLM_PROVIDER=lmstudio \
+BORING_LLM_BOOTSTRAP=manual \
+BORING_LLM_BASE_URL=http://host.docker.internal:1234/v1 \
+BORING_LLM_MODEL=<正確な-chat-model-id> \
+BORING_LLM_EMBED_MODEL=<正確な-embedding-model-id> \
+BORING_LLM_EMBED_DIM=768 \
+make up
+```
+
+`boring.json` ができた後は、初期化用の環境変数に依存せず、そのファイルを直接編集します。
+
 LM Studio が返す id をそのまま使います:
 
 ```bash

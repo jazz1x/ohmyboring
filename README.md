@@ -139,11 +139,13 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 | `repos[]` | path/remote rules → `origin=personal/company/mirror/community` |
 | `agents[]` | ingest sources for vector mode |
 
-**Switching LLM backend** is one config block. `make up` dispatches to `scripts/llm-providers/<provider>.sh` for the right bootstrap: Ollama can start/pull models; LM Studio only health-checks the server and expects models to be loaded in the app.
+**Switching LLM backend** is one config block. `make up` dispatches to `scripts/llm-providers/<provider>.sh` for the right bootstrap: Ollama can start/pull models; LM Studio verifies the local server and both configured model ids, then expects model loading to stay owned by the app.
 
 ### LM Studio backend
 
 LM Studio works through its OpenAI-compatible `/v1` server. Use `host.docker.internal` in `boring.json` because the Docker container calls back to the host; use `localhost` only for host-side checks and benchmarks.
+
+Fresh checkout path: create `boring.json` before verifying, or seed it on the first `make up` with `BORING_LLM_PROVIDER=lmstudio` plus the `BORING_LLM_*` values shown in `.env.example`. After `boring.json` exists, edit that file directly.
 
 ```json
 {
@@ -162,6 +164,7 @@ LM Studio works through its OpenAI-compatible `/v1` server. Use `host.docker.int
 Start the LM Studio local server, load one chat model and one embedding model, then verify before `make up`:
 
 ```bash
+cp boring.example.json boring.json
 curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
 make verify-llm
 make up
@@ -176,6 +179,7 @@ The model ids must match what LM Studio reports. If the embedding model is not `
 |---|---|
 | `BORING_VECTOR` | `on` enables pgvector (optional) |
 | `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | optional runtime override of `llm.base_url` / `llm.model`. Running the `drudge` binary directly on the host? Set `BORING_LLM_BASE_URL=http://localhost:11434/v1` |
+| `BORING_LLM_PROVIDER` / `BORING_LLM_BOOTSTRAP` / `BORING_LLM_EMBED_MODEL` / `BORING_LLM_EMBED_DIM` | first-run seeds only, written into `boring.json` when it does not exist yet |
 | `BORING_LLM_API_KEY` | API key when `llm.api_key_env` points here (auth providers) |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant |
 
