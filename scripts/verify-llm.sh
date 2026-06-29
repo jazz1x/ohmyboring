@@ -56,13 +56,13 @@ case "$PROVIDER" in
         tags=$(curl -sf -m5 "$NATIVE/api/tags" 2>/dev/null)
         if [ -n "$tags" ]; then
             ok "Ollama reachable at $NATIVE"
-            if printf '%s' "$tags" | jq -e '.models[]? | select(.name == "'"$MODEL"'")' >/dev/null 2>&1; then
+            if printf '%s' "$tags" | jq -e --arg m "$MODEL" '.models[]? | select(.name == $m or .name == ($m + ":latest"))' >/dev/null 2>&1; then
                 ok "chat model '$MODEL' is available"
             else
                 bad "chat model '$MODEL' not found — run: ollama pull $MODEL"
                 errors=$((errors + 1))
             fi
-            if printf '%s' "$tags" | jq -e '.models[]? | select(.name == "'"$EMBED_MODEL"'")' >/dev/null 2>&1; then
+            if printf '%s' "$tags" | jq -e --arg m "$EMBED_MODEL" '.models[]? | select(.name == $m or .name == ($m + ":latest"))' >/dev/null 2>&1; then
                 ok "embed model '$EMBED_MODEL' is available"
             else
                 bad "embed model '$EMBED_MODEL' not found — run: ollama pull $EMBED_MODEL"

@@ -9,7 +9,7 @@ hermes-agent connects to oh-my-boring over MCP and runs cron-driven automation.
 | `briefing.py` | `hermes_cron_jobs.morning-briefing` (optional) | Daily morning digest via `/brief`. |
 | `weekly-briefing.py` | `hermes_cron_jobs.weekly-briefing` (default) | Monday 09:00 KST weekly digest via `/weekly`. |
 | `ingest-worker.py` | `memory-ingest-worker` job (not config-driven) | Pops one un-ingested Claude Code session per tick and asks the `memory-ingest` skill to store it. |
-| `../codex/collect-sessions.py` | `codex-memory-ingest-worker` job (not config-driven) | Pops one un-ingested Codex session per tick and stores it through the same remember path. |
+| `codex-collect-sessions.py` | `codex-memory-ingest-worker` job (not config-driven) | Hermes-safe wrapper that runs the repo collector, pops one eligible Codex session per tick, skips rollout/subagent copies, and stores it through the same remember path. |
 
 ## Config-driven cron
 
@@ -35,6 +35,7 @@ hermes-agent connects to oh-my-boring over MCP and runs cron-driven automation.
 - Jobs are synced into `~/.hermes/cron/jobs.json` when `agent_wiring.py` runs.
 - Jobs not listed in `hermes_cron_jobs` are left untouched.
 - `enabled: false` pauses the job.
+- `memory-ingest-worker` and `codex-memory-ingest-worker` are managed infrastructure jobs, not `hermes_cron_jobs` entries. `make doctor` reports their health and Codex queue status.
 
 ## Managed skills
 

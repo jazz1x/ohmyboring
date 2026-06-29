@@ -301,6 +301,19 @@ def _install_hermes_weekly_briefing(boring_home: str | None = None) -> None:
     shutil.copy2(src, dst)
 
 
+def _install_hermes_codex_collector(boring_home: str | None = None) -> None:
+    """Install the Codex collector wrapper into ~/.hermes/scripts/."""
+    home = boring_home if boring_home is not None else BORING_HOME
+    src = Path(home) / "agents" / "hermes" / "codex-collect-sessions.py"
+    if not src.exists():
+        raise FileNotFoundError(f"codex collector wrapper not found: {src}")
+    dst_dir = Path(os.path.expanduser("~/.hermes/scripts"))
+    dst = dst_dir / "codex-collect-sessions.py"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    _backup(dst)
+    shutil.copy2(src, dst)
+
+
 def _parse_cron_dow(dow_expr: str) -> set[int]:
     """Parse the day-of-week part of a cron expression.
 
@@ -364,6 +377,9 @@ def _install_hermes_skills(boring_home: str | None = None) -> None:
             continue
         dst = dst_root / skill_dir.name
         dst.mkdir(parents=True, exist_ok=True)
+        legacy_nested = dst / skill_dir.name
+        if legacy_nested.is_dir():
+            shutil.rmtree(legacy_nested)
         for src_file in skill_dir.iterdir():
             if src_file.is_file():
                 shutil.copy2(src_file, dst / src_file.name)
@@ -549,9 +565,11 @@ def _ensure_codex_memory_ingest_worker(
 ) -> bool:
     """Ensure the autonomous 20-minute Codex session-ingestion worker exists.
 
-    Mirrors the Claude memory-ingest-worker but targets Codex JSONL transcripts.
+    Unlike the Claude memory-ingest-worker, this script distills and remembers on
+    its own. Run it as a no-agent cron script so Hermes does not try to resolve
+    the memory-ingest skill before executing it.
     """
-    script = "/host/oh-my-boring/agents/codex/collect-sessions.py"
+    script = "codex-collect-sessions.py"
     desired_schedule = {"kind": "interval", "minutes": 20, "display": "every 20m"}
     existing = next((j for j in jobs if j.get("name") == "codex-memory-ingest-worker"), None)
     if existing:
@@ -559,8 +577,9 @@ def _ensure_codex_memory_ingest_worker(
             existing.get("script") != script
             or existing.get("schedule") != desired_schedule
             or not existing.get("enabled", True)
-            or existing.get("skill") != "memory-ingest"
-            or existing.get("no_agent", True) is not False
+            or existing.get("skill") is not None
+            or existing.get("skills") != []
+            or existing.get("no_agent", False) is not True
         )
         if not needs_update:
             return False
@@ -569,9 +588,9 @@ def _ensure_codex_memory_ingest_worker(
         existing["schedule_display"] = "every 20m"
         existing["enabled"] = True
         existing["state"] = "scheduled"
-        existing["skills"] = ["memory-ingest"]
-        existing["skill"] = "memory-ingest"
-        existing["no_agent"] = False
+        existing["skills"] = []
+        existing["skill"] = None
+        existing["no_agent"] = True
         existing["next_run_at"] = (now + datetime.timedelta(minutes=1)).isoformat()
         existing["paused_at"] = None
         existing["paused_reason"] = None
@@ -582,13 +601,13 @@ def _ensure_codex_memory_ingest_worker(
             "id": secrets.token_hex(8),
             "name": "codex-memory-ingest-worker",
             "prompt": "",
-            "skills": ["memory-ingest"],
-            "skill": "memory-ingest",
+            "skills": [],
+            "skill": None,
             "model": None,
             "provider": None,
             "base_url": None,
             "script": script,
-            "no_agent": False,
+            "no_agent": True,
             "context_from": None,
             "schedule": desired_schedule,
             "schedule_display": "every 20m",
@@ -673,6 +692,7 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
         _write_text_atomic(path, body)
         _install_hermes_briefing(boring_home)
         _install_hermes_weekly_briefing(boring_home)
+        _install_hermes_codex_collector(boring_home)
         _install_hermes_skills(boring_home)
         cron_result = _sync_hermes_cron_jobs()
         return {
@@ -709,6 +729,7 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
     _write_text_atomic(path, "\n".join(lines) + "\n")
     _install_hermes_briefing(boring_home)
     _install_hermes_weekly_briefing(boring_home)
+    _install_hermes_codex_collector(boring_home)
     _install_hermes_skills(boring_home)
     cron_result = _sync_hermes_cron_jobs()
     changed = changed or cron_result["changed"]

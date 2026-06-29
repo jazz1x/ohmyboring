@@ -118,6 +118,7 @@ def test_wire_hermes_adds_hint_and_weekly():
         scripts.mkdir(parents=True)
         (scripts / "briefing.py").write_text("# stub", encoding="utf-8")
         (scripts / "weekly-briefing.py").write_text("# stub", encoding="utf-8")
+        (scripts / "codex-collect-sessions.py").write_text("# stub", encoding="utf-8")
         cfg = Path(d) / "config.yaml"
         with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser):
             result = agent_wiring.wire_hermes(cfg, boring_home=str(home))
@@ -126,7 +127,36 @@ def test_wire_hermes_adds_hint_and_weekly():
         assert "environment_hint:" in text
         assert "ohmyboring/context" in text
         assert (fake_home / ".hermes" / "scripts" / "weekly-briefing.py").exists()
+        assert (fake_home / ".hermes" / "scripts" / "codex-collect-sessions.py").exists()
         assert mock_cron.called is True
+
+
+def test_install_hermes_skills_removes_legacy_nested_duplicate():
+    """Old installs could leave memory-ingest/memory-ingest/SKILL.md and confuse Hermes."""
+    with tempfile.TemporaryDirectory() as d:
+        fake_home = Path(d) / "home"
+        omb = Path(d) / "omb"
+        src = omb / "agents" / "hermes" / "skills" / "memory-ingest"
+        src.mkdir(parents=True)
+        (src / "SKILL.md").write_text("name: memory-ingest\n", encoding="utf-8")
+
+        dst = fake_home / ".hermes" / "skills" / "memory-ingest"
+        nested = dst / "memory-ingest"
+        nested.mkdir(parents=True)
+        (nested / "SKILL.md").write_text("stale duplicate\n", encoding="utf-8")
+
+        def fake_expanduser(value):
+            if value == "~":
+                return str(fake_home)
+            if value.startswith("~/"):
+                return str(fake_home / value[2:])
+            return value
+
+        with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser):
+            agent_wiring._install_hermes_skills(str(omb))
+
+        assert (dst / "SKILL.md").exists()
+        assert not nested.exists()
 
 
 def test_next_cron_run_finds_next_monday():
@@ -165,9 +195,11 @@ def test_sync_hermes_cron_jobs_adds_managed_job():
         assert worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
         assert worker["skill"] == "memory-ingest"
         codex_worker = next(j for j in saved["jobs"] if j["name"] == "codex-memory-ingest-worker")
-        assert codex_worker["script"] == "/host/oh-my-boring/agents/codex/collect-sessions.py"
+        assert codex_worker["script"] == "codex-collect-sessions.py"
         assert codex_worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
-        assert codex_worker["skill"] == "memory-ingest"
+        assert codex_worker["skill"] is None
+        assert codex_worker["skills"] == []
+        assert codex_worker["no_agent"] is True
 
 
 if __name__ == "__main__":
@@ -179,6 +211,7 @@ if __name__ == "__main__":
     test_default_path_when_no_override()
     test_wire_claude_code_adds_session_start()
     test_wire_hermes_adds_hint_and_weekly()
+    test_install_hermes_skills_removes_legacy_nested_duplicate()
     test_next_cron_run_finds_next_monday()
     test_sync_hermes_cron_jobs_adds_managed_job()
     test_wire_hermes_adds_hint_and_weekly()

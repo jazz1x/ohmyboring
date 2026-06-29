@@ -34,6 +34,9 @@ BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 HOOK = os.path.join(BORING_HOME, "agents/codex/distill-session.py")
 INCLUDE_SUBAGENTS = os.environ.get("CODEX_INCLUDE_SUBAGENTS", "").lower() in ("1", "true", "yes")
 
+if omb_env._in_container():
+    markers.set_mark_dir("/host/.cache/boring-distill")
+
 
 def _source_dir():
     """Resolve the Codex sessions directory, including inside the hermes container."""
@@ -209,6 +212,7 @@ def _hermes_worker_status(path: str | None = None) -> dict:
                 "enabled": bool(job.get("enabled", True)),
                 "state": job.get("state") or "",
                 "last_status": job.get("last_status") or "",
+                "last_error": job.get("last_error") or "",
                 "last_run_at": job.get("last_run_at") or "",
                 "next_run_at": job.get("next_run_at") or "",
                 "script": job.get("script") or "",
@@ -217,6 +221,8 @@ def _hermes_worker_status(path: str | None = None) -> dict:
 
 
 def _hermes_jobs_path() -> str:
+    if omb_env._in_container():
+        return "/opt/data/cron/jobs.json"
     return os.path.expanduser("~/.hermes/cron/jobs.json")
 
 
@@ -264,8 +270,9 @@ def _print_status(source_dir: str, scan: dict) -> None:
         f"found={str(worker.get('found', False)).lower()} "
         f"enabled={str(worker.get('enabled', False)).lower()} "
         f"state={worker.get('state', '')} last_status={worker.get('last_status', '')} "
+        f"last_error={worker.get('last_error', '')} "
         f"last_run_at={worker.get('last_run_at', '')} next_run_at={worker.get('next_run_at', '')} "
-        f"path={worker.get('path', '')}"
+        f"script={worker.get('script', '')} path={worker.get('path', '')}"
     )
     if latest_note:
         print(

@@ -10,10 +10,10 @@
 ![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
 ![gemma4](https://img.shields.io/badge/LLM-gemma4:12b-000?logo=ollama)
 
-**Self-hosted personal memory RAG.** Your Claude Code / Kimi Code sessions are distilled into a local, human-readable wiki and recalled on demand — *"how did I do this last time?"* **Zero cloud · 100% local.**
+**Self-hosted personal memory RAG.** Your Claude Code / Kimi Code sessions and eligible Codex transcripts are distilled into a local, human-readable wiki and recalled on demand — *"how did I do this last time?"* **Zero cloud · 100% local.**
 
 ```bash
-# Fastest — one-liner: clones to ~/oh-my-boring, builds, wires the Claude Code hooks.
+# Fastest — one-liner: clones to ~/oh-my-boring, builds, wires hooks/MCP/workers.
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/install.sh)"
 ```
 
@@ -23,11 +23,12 @@ Or step by step:
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
+make doctor         # verify stack, hooks, Codex worker/queue, and latest ingest
 make collect N=20   # seed the vault from your past Claude Code sessions (fresh clone starts empty)
 make ask Q="how did I fix the docker build cache problem?"
 ```
 
-> A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your history; after that, every new session auto-accumulates (see [Feeding it](#feeding-it-ingestion)).
+> A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your Claude history; after that, Claude/Kimi sessions auto-accumulate and Codex is picked up by its worker when eligible (see [Feeding it](#feeding-it-ingestion)).
 
 > Requires **Docker**, **Ollama** (or any OpenAI-compatible server), **Python 3**, **jq**, **curl**, **git**, and **make**.
 
@@ -35,7 +36,7 @@ make ask Q="how did I fix the docker build cache problem?"
 
 ## What it does
 
-1. **Auto-accumulate** — when a session ends, it becomes a curated markdown note in `vault/wiki`. No manual upkeep.
+1. **Auto-accumulate** — when a session ends, or when the Codex worker finds an eligible transcript, it becomes a curated markdown note in `vault/wiki`. No manual upkeep.
 2. **Markdown-first memory** — plain, human-readable, git-diffable notes. Recall reads them directly.
 3. **Local-only** — embedding and synthesis run on your machine via Ollama. No external APIs or tokens.
 
@@ -45,11 +46,12 @@ Optional **pgvector** accelerator (`BORING_VECTOR=on`) adds similarity search + 
 
 ## Feeding it (ingestion)
 
-Memory gets in three ways — after setup you rarely touch the first two:
+Memory gets in four ways — after setup you rarely touch the automatic paths:
 
 | How | Command | When |
 | --- | --- | --- |
 | **Automatic, on session end** | SessionEnd hook (wired by `install.sh`) | every Claude Code / Kimi session — `hooks/distill-session.py` distills the transcript and `remember`s it. The paired `UserPromptSubmit` hook (`recall.py`) auto-injects relevant past memory into new prompts. |
+| **Automatic, Codex worker** | `codex-memory-ingest-worker` (wired by `install.sh`) | Codex has no SessionEnd hook. Hermes scans `~/.codex/sessions/**/*.jsonl` every 20 minutes, skips Codex Desktop `rollout-*` copies by default, and stores eligible transcripts through the same `remember` path. Check it with `make doctor`. |
 | **Backfill past sessions** | `make collect [N=20]` | once after install, to seed an otherwise-empty vault from your `~/.claude/projects` history. Newest-first, idempotent (a per-session marker skips already-distilled ones), `N` per run so it never hogs CPU. |
 | **Right now, mid-session** | `make distill-now` · `make remember M="…"` | capture something immediately *without* ending the session. `distill-now` re-distills the **current** transcript on demand and leaves no marker, so the normal end-of-session capture still runs (you may get an early note plus the final one). `remember` saves an explicit note you write yourself. |
 
@@ -63,7 +65,7 @@ python3 agents/shared/agent_wiring.py --install \
   --server-url http://localhost:7700/mcp
 ```
 
-Or edit `~/.claude/settings.json` by hand: a `SessionEnd` hook running `python3 ~/oh-my-boring/hooks/distill-session.py`, plus a `UserPromptSubmit` hook running `recall.py`.
+This installs Claude/Kimi hooks, Cursor/Codex MCP entries, and Hermes cron workers. Or edit `~/.claude/settings.json` by hand for Claude only: a `SessionEnd` hook running `python3 ~/oh-my-boring/hooks/distill-session.py`, plus a `UserPromptSubmit` hook running `recall.py`.
 
 ---
 
@@ -200,6 +202,7 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 |---|---|
 | `make up` | set up + start the ohmyboring engine (hermes-agent joins only if its image exists) |
 | `make ollama` | ensure Ollama is running (start in background if needed) |
+| `make doctor` | diagnose stack, hooks, latest ingest, and Codex worker/queue status |
 | `make ask Q="..."` | one-shot recall + synthesis |
 | `make sync` | deterministic re-ingest of the vault |
 | `make remember M="text"` | write a one-line note |
@@ -225,7 +228,8 @@ make collect N=20
 # Kimi Code
 make collect-kimi N=20
 
-# GitHub Codex
+# GitHub Codex (normally handled by the Hermes worker)
+make doctor
 COLLECT_LIMIT=20 python3 agents/codex/collect-sessions.py
 ```
 
@@ -316,8 +320,8 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 | Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Distills a Kimi session and calls `remember` |
 | Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring` as an MCP server |
-| Codex | `agents/codex/README.md` | MCP + cron backfill | `~/.codex/mcp.json` / `collect-sessions.py` | Exposes `ohmyboring` as an MCP server and backfills Codex sessions |
-| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`weekly-briefing`, `briefing`) + serial backfill (`ingest-worker.py`) |
+| Codex | `agents/codex/README.md` | MCP + cron backfill | `~/.codex/mcp.json` / `collect-sessions.py` | Exposes `ohmyboring` as an MCP server and backfills eligible Codex sessions; rollout copies are skipped |
+| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`weekly-briefing`, `briefing`) + serial backfill workers (`ingest-worker.py`, Codex collector) |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older Claude Code sessions |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / manual | Lazy backfill of older Kimi Code sessions |
 | shared | `agents/shared/boring_config.py` | imported by adapters | `boring.json` policy loader |
