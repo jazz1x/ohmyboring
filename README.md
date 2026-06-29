@@ -3,7 +3,7 @@
 **English** · [한국어](README.ko.md) · [日本語](README.ja.md)
 
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
-![version](https://img.shields.io/badge/version-0.1.0-blue)
+![release](https://img.shields.io/badge/release-0.1.0%20candidate-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
@@ -30,7 +30,7 @@ make ask Q="how did I fix the docker build cache problem?"
 
 > A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your Claude history; after that, Claude/Kimi sessions auto-accumulate and Codex is picked up by its worker when eligible (see [Feeding it](#feeding-it-ingestion)).
 
-> Requires **Docker**, **Ollama** (or any OpenAI-compatible server), **Python 3**, **jq**, **curl**, **git**, and **make**.
+> Requires **Docker**, **Ollama** or another OpenAI-compatible local server such as **LM Studio**, **Python 3**, **jq**, **curl**, **git**, and **make**.
 
 ---
 
@@ -38,7 +38,7 @@ make ask Q="how did I fix the docker build cache problem?"
 
 1. **Auto-accumulate** — when a session ends, or when the Codex worker finds an eligible transcript, it becomes a curated markdown note in `vault/wiki`. No manual upkeep.
 2. **Markdown-first memory** — plain, human-readable, git-diffable notes. Recall reads them directly.
-3. **Local-only** — embedding and synthesis run on your machine via Ollama. No external APIs or tokens.
+3. **Local-only** — embedding and synthesis run on your machine via Ollama, LM Studio, or another OpenAI-compatible endpoint. No external APIs or tokens.
 
 Optional **pgvector** accelerator (`BORING_VECTOR=on`) adds similarity search + GraphRAG when scale calls for it.
 
@@ -139,7 +139,36 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 | `repos[]` | path/remote rules → `origin=personal/company/mirror/community` |
 | `agents[]` | ingest sources for vector mode |
 
-**Switching LLM backend** is one config block. LM Studio: set `"provider": "lmstudio"`, `"base_url": "http://host.docker.internal:1234/v1"`, `"bootstrap": "manual"`, load your models in the LM Studio app, then `make up`. `make up` dispatches to `scripts/llm-providers/<provider>.sh` for the right bootstrap (Ollama pull vs LM Studio health-check).
+**Switching LLM backend** is one config block. `make up` dispatches to `scripts/llm-providers/<provider>.sh` for the right bootstrap: Ollama can start/pull models; LM Studio only health-checks the server and expects models to be loaded in the app.
+
+### LM Studio backend
+
+LM Studio works through its OpenAI-compatible `/v1` server. Use `host.docker.internal` in `boring.json` because the Docker container calls back to the host; use `localhost` only for host-side checks and benchmarks.
+
+```json
+{
+  "llm": {
+    "provider": "lmstudio",
+    "base_url": "http://host.docker.internal:1234/v1",
+    "model": "<exact chat model id from /v1/models>",
+    "embed_model": "<exact embedding model id from /v1/models>",
+    "embed_dim": 768,
+    "api_key_env": "BORING_LLM_API_KEY",
+    "bootstrap": "manual"
+  }
+}
+```
+
+Start the LM Studio local server, load one chat model and one embedding model, then verify before `make up`:
+
+```bash
+curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
+make verify-llm
+make up
+make doctor
+```
+
+The model ids must match what LM Studio reports. If the embedding model is not `bge-m3`, update `llm.embed_dim` to the model's dimension and run `make reset` before relying on vector mode. See the [LM Studio runbook](docs/runbooks/lmstudio.md) for the full checklist.
 
 `.env` is now only secrets + runtime overrides:
 
@@ -202,6 +231,7 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 |---|---|
 | `make up` | set up + start the ohmyboring engine (hermes-agent joins only if its image exists) |
 | `make ollama` | ensure Ollama is running (start in background if needed) |
+| `make verify-llm` | verify provider reachability, loaded model ids, and embedding dimension |
 | `make doctor` | diagnose stack, hooks, latest ingest, and Codex worker/queue status |
 | `make ask Q="..."` | one-shot recall + synthesis |
 | `make sync` | deterministic re-ingest of the vault |
@@ -459,6 +489,7 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 | Symptom | Fix |
 |---|---|
 | `make up` fails | Check Ollama: `curl -sf http://127.0.0.1:11434/api/tags` |
+| LM Studio selected but `make up` fails | Start LM Studio's local server, load the exact chat and embedding model ids from `boring.json`, then run `make verify-llm` |
 | Port conflict | `lsof -i :7700 -i :5432 -i :11434` |
 | Second `make up` / re-clone fails | Run `make down` first — the containers use fixed names and bind `127.0.0.1:7700` / `:5432`, so a second stack collides with the running one |
 | Agent not starting | `BORING_CORE_ONLY=1 make up` runs core-only; hermes image must be built separately |

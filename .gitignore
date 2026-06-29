@@ -53,3 +53,7 @@ docs/reports/*.md
 docs/reports/*.txt
 docs/reports/*.html
 !docs/reports/llm-pair-matrix.md
+
+# 공개 런북은 README에서 링크하므로 추적
+!docs/runbooks/
+!docs/runbooks/*.md

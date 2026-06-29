@@ -3,7 +3,7 @@
 [English](README.md) · [한국어](README.ko.md) · **日本語**
 
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
-![version](https://img.shields.io/badge/version-0.1.0-blue)
+![release](https://img.shields.io/badge/release-0.1.0%20candidate-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
@@ -30,7 +30,7 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 
 > 新規クローンは **vault が空** なので、初日の `make ask` は何も見つけられません。`make collect` で Claude の過去記録を埋めれば、以降の Claude/Kimi セッションは自動蓄積され、Codex は取り込み可能なトランスクリプトをワーカーが処理します（[取り込み](#取り込み-ingestion)参照）。
 
-> **Docker**、**Ollama**（または OpenAI-compatible サーバー）、**Python 3**、**jq**、**curl**、**git**、**make** が必要です。
+> **Docker**、**Ollama** または **LM Studio** のような OpenAI-compatible ローカルサーバー、**Python 3**、**jq**、**curl**、**git**、**make** が必要です。
 
 ---
 
@@ -38,7 +38,7 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 
 1. **自動蓄積** — セッション終了時、または Codex ワーカーが取り込み可能なトランスクリプトを見つけたときに `vault/wiki` へ整理されたマークダウンノートとして保存。手動管理不要。
 2. **マークダウン中心のメモリ** — プレーンテキストで人に優しく、git diff 可能。検索もマークダウンを直接読みます。
-3. **ローカル専用** — 埋め込みと要約が Ollama などローカル LLM で実行。外部 API やトークン不要。
+3. **ローカル専用** — 埋め込みと要約が Ollama、LM Studio、または別の OpenAI-compatible エンドポイントで実行されます。外部 API やトークン不要。
 
 オプションの **pgvector** アクセラレータ（`BORING_VECTOR=on`）を有効にすると、類似度検索 + GraphRAG が追加されます。
 
@@ -139,7 +139,36 @@ flowchart LR
 | `repos[]` | パス/remote ルール → `origin=personal/company/mirror/community` |
 | `agents[]` | vector mode の ingest source |
 
-**LLM バックエンドの切り替え**は config ブロック 1 つで完結します。LM Studio: `"provider": "lmstudio"`、`"base_url": "http://host.docker.internal:1234/v1"`、`"bootstrap": "manual"` とし、LM Studio アプリでモデルをロードしてから `make up`。`make up` は `scripts/llm-providers/<provider>.sh` にディスパッチして適切なブートストラップ（Ollama pull か LM Studio ヘルスチェック）を行います。
+**LLM バックエンドの切り替え**は config ブロック 1 つで完結します。`make up` は `scripts/llm-providers/<provider>.sh` にディスパッチします。Ollama はサーバー起動とモデル pull ができ、LM Studio はアプリ側でモデルがロード済みである前提でサーバー状態だけを確認します。
+
+### LM Studio バックエンド
+
+LM Studio には OpenAI-compatible `/v1` サーバー経由で接続します。Docker コンテナがホスト上の LM Studio に戻るため、`boring.json` では `host.docker.internal` を使い、ホスト上の確認やベンチマークだけ `localhost` を使います。
+
+```json
+{
+  "llm": {
+    "provider": "lmstudio",
+    "base_url": "http://host.docker.internal:1234/v1",
+    "model": "<v1/models が返す正確な chat model id>",
+    "embed_model": "<v1/models が返す正確な embedding model id>",
+    "embed_dim": 768,
+    "api_key_env": "BORING_LLM_API_KEY",
+    "bootstrap": "manual"
+  }
+}
+```
+
+LM Studio のローカルサーバーを起動し、chat モデルと embedding モデルを 1 つずつロードしてから、`make up` 前に確認します:
+
+```bash
+curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
+make verify-llm
+make up
+make doctor
+```
+
+モデル id は LM Studio が返す値と完全に一致している必要があります。embedding モデルが `bge-m3` でない場合は、そのモデルの次元に合わせて `llm.embed_dim` を変更し、vector モードを信頼する前に `make reset` を実行します。全体の手順は [LM Studio ランブック](docs/runbooks/lmstudio.ja.md) を参照してください。
 
 `.env` はシークレット + ランタイムオーバーライド専用になりました：
 
@@ -172,6 +201,7 @@ flowchart LR
 |---|---|
 | `make up` | ohmyboring エンジン起動（hermes-agent イメージがある場合のみ一緒に起動） |
 | `make ollama` | Ollama 実行確認（必要ならバックグラウンド起動） |
+| `make verify-llm` | provider 到達性、ロード済みモデル id、embedding 次元を確認 |
 | `make doctor` | スタック、フック、最終取り込み、Codex ワーカー/キュー状態を診断 |
 | `make ask Q="..."` | recall + 要約を一度に実行 |
 | `make sync` | vault の再取り込み |
@@ -392,6 +422,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | 症状 | 解決 |
 |---|---|
 | `make up` 失敗 | Ollama を確認: `curl -sf http://127.0.0.1:11434/api/tags` |
+| LM Studio 選択後に `make up` 失敗 | LM Studio ローカルサーバーを起動し、`boring.json` の chat/embedding モデル id を正確にロードしてから `make verify-llm` を実行 |
 | ポート競合 | `lsof -i :7700 -i :5432 -i :11434` |
 | 2 回目の `make up` / 再クローン失敗 | まず `make down` を実行してください — コンテナ名が固定で `127.0.0.1:7700` / `:5432` にバインドするため、2 つ目のスタックが実行中のスタックと競合します |
 | agent が起動しない | `BORING_CORE_ONLY=1 make up` で core-only 実行。hermes イメージは別途ビルドが必要 |

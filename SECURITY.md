@@ -2,7 +2,9 @@
 
 ## Supported versions
 
-ohmyboring is at `0.1.0`. Security fixes target the latest release and `main`.
+ohmyboring has no final stable release yet. Security fixes target `main`, active
+release-candidate branches, and any published release candidate tags until the
+first official release is cut.
 
 ## Reporting a vulnerability
 

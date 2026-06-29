@@ -40,6 +40,8 @@ pip install pre-commit && pre-commit install
 
 Two heavier gates run in CI (and are available locally):
 
+- `make verify-llm` — provider reachability, configured model ids, and
+  embedding dimension check. Run this after changing `boring.json` or LLM docs.
 - `make quality` — release acceptance drift gate (MCP tool contract, docs,
   removed dangerous surfaces).
 - `make deny` — supply-chain gate (`cargo-deny`: vulnerabilities, licenses,

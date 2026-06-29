@@ -3,7 +3,7 @@
 [English](README.md) · **한국어** · [日本語](README.ja.md)
 
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
-![version](https://img.shields.io/badge/version-0.1.0-blue)
+![release](https://img.shields.io/badge/release-0.1.0%20candidate-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
@@ -30,7 +30,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 
 > 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 Claude 과거 기록을 채우고 나면, 이후 Claude/Kimi 세션은 자동 축적되고 Codex는 적재 가능한 트랜스크립트를 워커가 처리합니다([적재하기](#적재하기-ingestion) 참고).
 
-> **Docker**, **Ollama**(또는 OpenAI-compatible 서버), **Python 3**, **jq**, **curl**, **git**, **make**가 필요합니다.
+> **Docker**, **Ollama** 또는 **LM Studio** 같은 OpenAI-compatible 로컬 서버, **Python 3**, **jq**, **curl**, **git**, **make**가 필요합니다.
 
 ---
 
@@ -38,7 +38,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 
 1. **자동 축적** — 세션이 끝나거나 Codex 워커가 적재 가능한 트랜스크립트를 찾으면 `vault/wiki`에 정리된 마크다운 노트로 변환됩니다. 수동 관리 불필요.
 2. **마크다운 중심 메모리** — 일반 텍스트, 사람이 읽기 쉬움, git diff 가능. 검색도 마크다운을 직접 읽습니다.
-3. **로컬 전용** — 임베딩과 요약이 Ollama 등 로컬 LLM에서 실행됩니다. 외부 API나 토큰 없음.
+3. **로컬 전용** — 임베딩과 요약이 Ollama, LM Studio 또는 다른 OpenAI-compatible 엔드포인트에서 실행됩니다. 외부 API나 토큰 없음.
 
 선택적으로 **pgvector** 가속기(`BORING_VECTOR=on`)를 켜면 유사도 검색 + GraphRAG이 추가됩니다.
 
@@ -139,7 +139,36 @@ flowchart LR
 | `repos[]` | 경로/remote 규칙 → `origin=personal/company/mirror/community` |
 | `agents[]` | vector mode ingest source |
 
-**LLM 백엔드 전환**은 config 블록 하나로 끝납니다. LM Studio: `"provider": "lmstudio"`, `"base_url": "http://host.docker.internal:1234/v1"`, `"bootstrap": "manual"` 로 두고 LM Studio 앱에서 모델을 로드한 뒤 `make up`. `make up`은 `scripts/llm-providers/<provider>.sh` 로 디스패치해 알맞은 부트스트랩(Ollama pull vs LM Studio 헬스체크)을 합니다.
+**LLM 백엔드 전환**은 config 블록 하나로 끝납니다. `make up`은 `scripts/llm-providers/<provider>.sh` 로 디스패치합니다. Ollama는 서버 시작과 모델 pull을 할 수 있고, LM Studio는 앱에서 모델을 이미 로드했다고 보고 서버 상태만 확인합니다.
+
+### LM Studio 백엔드
+
+LM Studio는 OpenAI-compatible `/v1` 서버로 붙습니다. Docker 컨테이너가 호스트의 LM Studio에 접근해야 하므로 `boring.json`에는 `host.docker.internal`을 쓰고, 호스트에서 직접 확인하거나 벤치마크할 때만 `localhost`를 씁니다.
+
+```json
+{
+  "llm": {
+    "provider": "lmstudio",
+    "base_url": "http://host.docker.internal:1234/v1",
+    "model": "<v1/models에 나온 정확한 chat model id>",
+    "embed_model": "<v1/models에 나온 정확한 embedding model id>",
+    "embed_dim": 768,
+    "api_key_env": "BORING_LLM_API_KEY",
+    "bootstrap": "manual"
+  }
+}
+```
+
+LM Studio 로컬 서버를 켜고 chat 모델과 embedding 모델을 하나씩 로드한 뒤, `make up` 전에 확인합니다:
+
+```bash
+curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
+make verify-llm
+make up
+make doctor
+```
+
+모델 id는 LM Studio가 반환한 값과 정확히 같아야 합니다. embedding 모델이 `bge-m3`가 아니라면 해당 모델 차원에 맞게 `llm.embed_dim`을 바꾸고, vector 모드를 믿기 전에 `make reset`을 실행해야 합니다. 전체 체크리스트는 [LM Studio 런북](docs/runbooks/lmstudio.ko.md)을 참고하세요.
 
 `.env`는 이제 시크릿 + 런타임 오버라이드 전용:
 
@@ -202,6 +231,7 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 |---|---|
 | `make up` | ohmyboring 엔진 실행(hermes-agent 이미지가 있을 때만 함께 실행) |
 | `make ollama` | Ollama 실행 확인(필요시 백그라운드 시작) |
+| `make verify-llm` | provider 접근성, 로드된 모델 id, embedding 차원 확인 |
 | `make doctor` | 스택, 훅, 마지막 적재, Codex 워커/큐 상태 진단 |
 | `make ask Q="..."` | recall + 요약 한 번에 |
 | `make sync` | vault 재적재 |
@@ -422,6 +452,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | 증상 | 해결 |
 |---|---|
 | `make up` 실패 | Ollama 확인: `curl -sf http://127.0.0.1:11434/api/tags` |
+| LM Studio 선택 후 `make up` 실패 | LM Studio 로컬 서버를 켜고 `boring.json`의 chat/embedding 모델 id를 정확히 로드한 뒤 `make verify-llm` 실행 |
 | 포트 충돌 | `lsof -i :7700 -i :5432 -i :11434` |
 | 두 번째 `make up` / 재클론 실패 | 먼저 `make down`을 실행하세요 — 컨테이너 이름이 고정이고 `127.0.0.1:7700` / `:5432`에 바인딩하므로, 두 번째 스택이 실행 중인 스택과 충돌합니다 |
 | agent 시작 안 됨 | `BORING_CORE_ONLY=1 make up`로 core-only 실행. hermes 이미지는 별도 빌드 필요 |

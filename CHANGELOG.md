@@ -6,6 +6,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **LM Studio runbook** — README en/ko/ja now document the LM Studio backend path, and
+  `docs/runbooks/lmstudio*.md` captures the full local-server/model-id/embed-dim checklist.
 - **Release quality gate** — `make quality` / CI `quality-gate` now blocks release-acceptance drift:
   - MCP tool inventory must match README en/ko/ja and Codex adapter docs.
   - Vector-mode support docs must keep vector-required and wiki-first tools explicit.
@@ -90,10 +92,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
   were removed after review showed they were too heavy for the current stage. The useful security
   fallout (redact pattern extensions and adversarial tests) was kept.
 
-## [0.1.0] — 2026-06-25
+## 0.1.0 candidate — pending official release
 
-First public cut of **ohmyboring** — a self-hosted personal memory RAG (re-cut to fold all
-post-bootstrap work into the single 0.1.0). Closes the 2026-06-24 gap report end to end and the
+Release-candidate cut of **ohmyboring** — a self-hosted personal memory RAG (re-cut to fold all
+post-bootstrap work into the first 0.1.0 line). Closes the 2026-06-24 gap report end to end and the
 2026-06-21 red-team in full, then unifies naming. The environment prefix is `BORING_*` (matching
 `boring.json` / the `boring-*` containers / `BORING_CONFIG`); `boring.json` is `schema_version` 2
 with a first-class `llm` block.
@@ -246,5 +248,3 @@ wiki and recalled on demand. Zero cloud, 100% local.
 - Naming: engine = `drudge`, project/containers = `ohmyboring`/`boring-*`
   (`omb` was rejected to avoid clashing with an existing internal `omb` CLI).
 - READMEs in English (default), Korean, Japanese.
-
-[0.1.0]: https://github.com/jazz1x/ohmyboring/releases/tag/v0.1.0
