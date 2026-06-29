@@ -5,7 +5,8 @@
 # actually firing (newest distilled note + newest SessionEnd hook marker).
 #   make doctor   or   ./scripts/doctor.sh
 #
-# Read-only: GET /health, GET /api/tags, `docker compose ps`, and mtime reads. No mutation.
+# Read-only: GET /health, GET /api/tags, `docker compose ps`, mtime reads,
+# and Codex queue/worker status scans. No mutation.
 # Exit non-zero only when drudge is down (the one hard dependency for the write door); the
 # other lines are advisory so the user sees the WHOLE picture in one run, not just the first
 # failure. POSIX sh (dash) has no pipefail → every check reports its own result explicitly.
@@ -174,6 +175,18 @@ if [ -n "$mark" ]; then
     echo "    $mark"
 else
     bad "no hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"
+fi
+
+# (d3) Codex worker/queue status — Codex has no SessionEnd hook, so the write-door
+# is a hermes cron worker scanning ~/.codex/sessions. Keep the collector status as
+# an internal read-only probe and expose it here with the rest of doctor.
+codex_status="$BORING_HOME/agents/codex/collect-sessions.py"
+if [ -f "$codex_status" ]; then
+    ok "Codex session ingestion status:"
+    BORING_HOME="$BORING_HOME" BORING_VAULT_DIR="${BORING_VAULT_DIR:-$BORING_HOME/vault}" python3 "$codex_status" --status \
+        || bad "Codex session ingestion status failed"
+else
+    bad "Codex collector not found at $codex_status"
 fi
 
 if [ "$FIX" -eq 1 ]; then
