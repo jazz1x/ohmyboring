@@ -24,10 +24,11 @@ BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 HOOK = os.path.join(BORING_HOME, "agents", "kimi", "distill-session.py")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
+PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("INGEST_PENDING_TTL") or "1800")
 
 
 def _marked(session_id: str) -> bool:
-    return markers.is_done(session_id) or markers.is_pending(session_id)
+    return markers.is_done(session_id) or markers.is_pending(session_id, ttl=PENDING_TTL)
 
 
 def _session_age_hours(session_dir: str) -> float:

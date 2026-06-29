@@ -245,6 +245,54 @@ class SessionStartRecallTests(unittest.TestCase):
             self.assertIn("context failed", _err)
 
 
+class DistillExitCodeTests(unittest.TestCase):
+    def test_invalid_stdin_returns_input_error(self):
+        stderr = io.StringIO()
+        with mock.patch.object(distill.sys, "stdin", io.StringIO("not json")), \
+             mock.patch.object(distill.sys, "stderr", stderr):
+            rc = distill.main()
+
+        self.assertEqual(rc, 2)
+        self.assertIn("[omb-distill] invalid stdin JSON", stderr.getvalue())
+
+    def test_remember_failure_returns_nonzero_and_marks_retry(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write("{}\n")
+            path = f.name
+        try:
+            stderr = io.StringIO()
+            payload = {
+                "transcript_path": path,
+                "session_id": "abc",
+                "cwd": "/work/oh-my-boring",
+                "hook_event_name": "SessionEnd",
+            }
+            with mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))), \
+                 mock.patch.object(distill.sys, "stderr", stderr), \
+                 mock.patch.object(distill, "extract", return_value="x" * 600), \
+                 mock.patch.object(distill, "git_remote_url", return_value=""), \
+                 mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"), \
+                 mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)), \
+                 mock.patch.object(distill, "distill_and_remember", return_value=False), \
+                 mock.patch.object(distill, "_mark") as mark:
+                rc = distill.main()
+
+            self.assertEqual(rc, 1)
+            mark.assert_called_once_with("abc", retry=True)
+            self.assertIn("remember failed", stderr.getvalue())
+        finally:
+            os.unlink(path)
+
+    def test_run_returns_nonzero_on_crash(self):
+        stderr = io.StringIO()
+        with mock.patch.object(distill, "main", side_effect=RuntimeError("boom")), \
+             mock.patch.object(distill.sys, "stderr", stderr):
+            rc = distill.run()
+
+        self.assertEqual(rc, 1)
+        self.assertIn("[omb-distill] crashed: boom", stderr.getvalue())
+
+
 class RecallFormattingTests(unittest.TestCase):
     """recall.main reads stdin + posts to /search; we mock urlopen so NO network happens."""
 
