@@ -33,6 +33,7 @@ BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")  # skip small sessions (distill would SKIP anyway)
+PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("INGEST_PENDING_TTL") or "1800")
 # BORING_HOME: repo clone location (default ~/oh-my-boring). Lets a forker clone elsewhere
 # without editing this file.
 BORING_HOME = os.environ.get("BORING_HOME") or os.path.expanduser("~/oh-my-boring")
@@ -42,7 +43,7 @@ HOOK = os.path.join(BORING_HOME, "agents/claude-code/distill-session.py")
 def _marked(session_id):
     # Done marker means fully handled; hermes pending markers mean "already queued" — don't backfill.
     # Retry markers are intentionally eligible for backfill (that's what backfill is for).
-    return markers.is_done(session_id) or markers.is_pending(session_id)
+    return markers.is_done(session_id) or markers.is_pending(session_id, ttl=PENDING_TTL)
 
 
 def transcript_cwd(tp):

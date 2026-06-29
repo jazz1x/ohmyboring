@@ -133,9 +133,42 @@ def test_distill_invalid_stdin_logs_error():
          mock.patch.object(distill.sys, "stdout", captured), \
          mock.patch.object(distill.sys, "stderr", stderr), \
          mock.patch.object(distill, "_throttled", return_value=False):
-        distill.main()
+        rc = distill.main()
     assert captured.getvalue() == ""
+    assert rc == 2
     assert "[omb-distill] invalid stdin JSON" in stderr.getvalue()
+
+
+def test_distill_remember_failure_returns_nonzero_and_marks_retry():
+    with tempfile.TemporaryDirectory() as session_dir:
+        captured = io.StringIO()
+        stderr = io.StringIO()
+        payload = {"session_id": "session_abc", "cwd": "/x", "hook_event_name": "SessionEnd"}
+        with mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             mock.patch.object(distill.sys, "stdout", captured), \
+             mock.patch.object(distill.sys, "stderr", stderr), \
+             mock.patch.object(distill, "_find_session_dir", return_value=session_dir), \
+             mock.patch.object(distill, "extract_session", return_value="x" * 600), \
+             mock.patch.object(distill, "git_remote_url", return_value=""), \
+             mock.patch.object(distill, "repo_slug", return_value="repo"), \
+             mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)), \
+             mock.patch.object(distill, "distill_and_remember", return_value=False), \
+             mock.patch.object(distill, "_mark") as mark:
+            rc = distill.main()
+
+    assert captured.getvalue() == ""
+    assert rc == 1
+    mark.assert_called_once_with("session_abc", retry=True)
+    assert "remember failed" in stderr.getvalue()
+
+
+def test_distill_run_returns_nonzero_on_crash():
+    stderr = io.StringIO()
+    with mock.patch.object(distill, "main", side_effect=RuntimeError("boom")), \
+         mock.patch.object(distill.sys, "stderr", stderr):
+        rc = distill.run()
+    assert rc == 1
+    assert "[omb-distill] crashed: boom" in stderr.getvalue()
 
 
 if __name__ == "__main__":
@@ -146,4 +179,6 @@ if __name__ == "__main__":
     test_recall_formats_context()
     test_recall_failed_search_logs_to_stderr()
     test_distill_invalid_stdin_logs_error()
+    test_distill_remember_failure_returns_nonzero_and_marks_retry()
+    test_distill_run_returns_nonzero_on_crash()
     print("ok - kimi agent adapters")

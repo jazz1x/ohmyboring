@@ -30,6 +30,7 @@ BORING_URL = omb_env.drudge_url()
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
+PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("INGEST_PENDING_TTL") or "1800")
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 HOOK = os.path.join(BORING_HOME, "agents/codex/distill-session.py")
 INCLUDE_SUBAGENTS = os.environ.get("CODEX_INCLUDE_SUBAGENTS", "").lower() in ("1", "true", "yes")
@@ -52,7 +53,7 @@ def _codex_session_id(path: str) -> str:
 
 def _marked(session_id: str) -> bool:
     prefixed = f"codex-{session_id}"
-    return markers.is_done(prefixed) or markers.is_pending(prefixed)
+    return markers.is_done(prefixed) or markers.is_pending(prefixed, ttl=PENDING_TTL)
 
 
 def _scan_sessions(source_dir: str, cutoff: float) -> dict:

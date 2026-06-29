@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -163,6 +164,38 @@ def test_collect_scan_classifies_queue_marked_rollout_and_subagent():
         collect.INCLUDE_SUBAGENTS = old_include
 
 
+def test_collect_scan_reoffers_stale_pending_but_skips_fresh_pending():
+    old_mark_dir = collect.markers.MARK_DIR
+    old_min_kb = collect.MIN_KB
+    old_pending_ttl = collect.PENDING_TTL
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "sessions"
+            source.mkdir()
+            mark_dir = root / "markers"
+            collect.markers.set_mark_dir(str(mark_dir))
+            collect.MIN_KB = 0
+            collect.PENDING_TTL = 60
+
+            _write_codex_session(source / "fresh.jsonl")
+            _write_codex_session(source / "stale.jsonl")
+            collect.markers.mark_pending("codex-fresh")
+            collect.markers.mark_pending("codex-stale")
+            stale_path = mark_dir / "codex-stale.pending"
+            old = time.time() - 3600
+            os.utime(stale_path, (old, old))
+
+            scan = collect._scan_sessions(str(source), cutoff=0)
+
+            assert scan["already_marked"] == 1
+            assert [Path(p).name for p in scan["todo"]] == ["stale.jsonl"]
+    finally:
+        collect.markers.set_mark_dir(old_mark_dir)
+        collect.MIN_KB = old_min_kb
+        collect.PENDING_TTL = old_pending_ttl
+
+
 def test_status_mode_reports_queue_worker_and_note_without_mutation():
     old_mark_dir = collect.markers.MARK_DIR
     old_min_kb = collect.MIN_KB
@@ -239,5 +272,6 @@ if __name__ == "__main__":
     test_small_raw_parse_short_marks_done()
     test_success_passes_session_id_to_shared_core()
     test_collect_scan_classifies_queue_marked_rollout_and_subagent()
+    test_collect_scan_reoffers_stale_pending_but_skips_fresh_pending()
     test_status_mode_reports_queue_worker_and_note_without_mutation()
     print("ok - codex adapter")

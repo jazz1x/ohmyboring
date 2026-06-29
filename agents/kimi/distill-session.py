@@ -150,28 +150,28 @@ def extract_session(session_dir: str) -> str:
     return "\n".join(out)
 
 
-def main():
+def main() -> int:
     try:
         data = json.load(sys.stdin)
     except Exception as e:
         print(f"[omb-distill] invalid stdin JSON: {e}", file=sys.stderr)
-        return
+        return 2
 
     session_id = data.get("session_id") or data.get("sessionId") or ""
     cwd = data.get("cwd") or ""
     is_final = (data.get("hook_event_name") or "") == "SessionEnd"
     if not is_final and _throttled(session_id):
-        return
+        return 0
 
     session_dir = _find_session_dir(session_id, cwd)
     if not session_dir:
         print(f"[omb-distill] session dir not found for {session_id}", file=sys.stderr)
-        return
+        return 2
 
     text = extract_session(session_dir)
     if len(text) < 500:
         print("[omb-distill] transcript too short; skipping", file=sys.stderr)
-        return
+        return 0
 
     remote_url = git_remote_url(cwd)
     origin, _rule = boring_config.classify(cwd, remote_url or None)
@@ -180,14 +180,20 @@ def main():
     if distill_and_remember(text, origin, repo, session_id):
         _mark(session_id)
         print("[omb-distill] remembered", file=sys.stderr)
+        return 0
     else:
         _mark(session_id, retry=True)
         print("[omb-distill] remember failed; marked for retry", file=sys.stderr)
+        return 1
+
+
+def run() -> int:
+    try:
+        return main()
+    except Exception as e:
+        print(f"[omb-distill] crashed: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"[omb-distill] crashed: {e}", file=sys.stderr)
-    sys.exit(0)
+    sys.exit(run())
