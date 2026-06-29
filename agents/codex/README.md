@@ -26,7 +26,9 @@ COLLECT_LIMIT=10 python3 agents/codex/collect-sessions.py
 ```
 
 `make doctor` is read-only and includes Codex queued sessions, skipped rollout
-copies, marker counts, the hermes worker state, and the newest Codex note.
+copies, non-rollout marker counts, the hermes worker state, and the newest Codex
+note. Rollout markers may remain on disk from older runs, but status output does
+not count them as successful user-session ingestion.
 
 Session markers live in `~/.cache/boring-distill/codex-<sid>.*` and are shared
 with the rest of the pipeline.

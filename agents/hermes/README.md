@@ -37,6 +37,23 @@ hermes-agent connects to oh-my-boring over MCP and runs cron-driven automation.
 - `enabled: false` pauses the job.
 - `memory-ingest-worker` and `codex-memory-ingest-worker` are managed infrastructure jobs, not `hermes_cron_jobs` entries. `make doctor` reports their health and Codex queue status.
 
+## Slack delivery format
+
+Hermes delivers cron script stdout through Slack `chat.postMessage` as plain `text` with `mrkdwn` enabled. Keep `briefing.py` and `weekly-briefing.py` output as Slack mrkdwn text, not Block Kit JSON, unless the Hermes Slack adapter grows a `blocks` path. Reference: Slack's [formatting message text](https://docs.slack.dev/messaging/formatting-message-text/) and [`chat.postMessage`](https://docs.slack.dev/reference/methods/chat.postMessage) docs.
+
+The briefing scripts use:
+
+- JSON request body `{}` for `/brief` and `/weekly`.
+- Slack-safe headings, bullets, and compact source basenames.
+- No eval fixture entries: `make eval` uses `eval-*.md` during the gate, then re-syncs after cleanup; the engine also excludes that internal namespace from recency/claim briefing surfaces.
+
+Preview the exact Slack-bound message before a live briefing:
+
+```bash
+BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
+BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/weekly-briefing.py
+```
+
 ## Managed skills
 
 `agents/hermes/skills/memory-ingest/` is copied to `~/.hermes/skills/memory-ingest/` on install. The skill tells hermes how to distill a session and call `ohmyboring/remember`, including extracting `next` and `blocked` claims for the `next_actions` register.

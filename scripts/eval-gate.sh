@@ -25,6 +25,11 @@ cp data/eval/fixtures/eval-*.md vault/wiki/
 cleanup() {
   rm -f vault/wiki/eval-*.md
   echo "▶ Cleaned up eval fixtures from vault/wiki"
+  if curl -s -m600 -X POST "$URL/sync" >/dev/null 2>&1; then
+    echo "▶ Re-synced vault after eval cleanup"
+  else
+    echo "⚠ eval cleanup sync failed; run 'make sync' before relying on briefings" >&2
+  fi
 }
 trap cleanup EXIT
 

@@ -276,11 +276,16 @@ curl -s -X POST http://localhost:7700/weekly \
   -H 'content-type: application/json' \
   -d '{"project":"omb"}' | jq .
 
+# Slack으로 나갈 아침 브리핑 텍스트 미리보기
+BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
+
 # Stalled register — 7일 이상 멈춘 항목 (BORING_VECTOR=on 필요)
 curl -s -X POST http://localhost:7700/stalled \
   -H 'content-type: application/json' \
   -d '{"project":"omb","older_than_days":7}' | jq .
 ```
+
+Hermes cron은 브리핑 스크립트의 stdout을 Slack `mrkdwn` 텍스트로 보냅니다. `make eval` fixture 노트는 게이트 실행 중 검색에는 쓰이지만, 종료 후 prune되며 recency/claim 브리핑 surface에서도 제외되어 일간/주간 브리핑에 섞이지 않습니다.
 
 ### PII / 민감 데이터 게이트
 

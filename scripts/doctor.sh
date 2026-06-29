@@ -83,6 +83,17 @@ newest() {
     ls -t $1 2>/dev/null | head -n 1
 }
 
+newest_session_marker() {
+    # shellcheck disable=SC2086
+    for f in $(ls -t $1 2>/dev/null); do
+        case "$(basename "$f")" in
+            codex-*) continue ;;
+        esac
+        printf '%s\n' "$f"
+        return 0
+    done
+}
+
 drudge_down=0
 
 # (a0) .env permissions — secrets live here.
@@ -169,12 +180,12 @@ fi
 
 # (d2) Newest SessionEnd hook marker — proof the hook itself fired (it stamps MARK_DIR after
 # a successful remember). A fresh note but a stale marker (or vice-versa) localizes the break.
-mark=$(newest "$MARK_DIR/*.ts")
+mark=$(newest_session_marker "$MARK_DIR/*.ts")
 if [ -n "$mark" ]; then
-    ok "newest SessionEnd hook marker: $(mtime_human "$mark")"
+    ok "newest Claude/Kimi SessionEnd hook marker: $(mtime_human "$mark")"
     echo "    $mark"
 else
-    bad "no hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"
+    bad "no Claude/Kimi hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"
 fi
 
 # (d3) Codex worker/queue status — Codex has no SessionEnd hook, so the write-door

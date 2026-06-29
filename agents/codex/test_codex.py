@@ -183,6 +183,7 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
             collect.INCLUDE_SUBAGENTS = False
             _write_codex_session(source / "todo.jsonl")
             collect.markers.mark_done("codex-done")
+            collect.markers.mark_done("codex-rollout-2026-06-29T19-29-28-demo")
             jobs.write_text(
                 json.dumps(
                     {
@@ -224,6 +225,7 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
             assert "queue_pending=1" in out
             assert "skipped_rollout=0 skipped_marked=0 skipped_subagent=0" in out
             assert "markers done=1 pending=0 retry=0" in out
+            assert "codex-rollout-" not in out
             assert "worker found=true enabled=true state=scheduled last_status=success" in out
             assert "newest_note session_id=codex-note" in out
     finally:

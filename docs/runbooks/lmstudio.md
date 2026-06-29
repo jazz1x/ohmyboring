@@ -35,6 +35,15 @@ Use the exact ids reported by LM Studio:
 curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
 ```
 
+If the LM Studio CLI is installed, the same check is visible from the host:
+
+```bash
+~/.lmstudio/bin/lms ls
+~/.lmstudio/bin/lms ps
+```
+
+Seeing only an embedding model, for example `text-embedding-nomic-embed-text-v1.5`, is not enough. ohmyboring needs one chat model for `/v1/chat/completions` and one embedding model for `/v1/embeddings`; `make verify-llm` must fail when the configured chat model is missing.
+
 ## Verification
 
 ```bash
@@ -66,6 +75,7 @@ When changing `llm.embed_model`, update `llm.embed_dim` and run `make reset` bef
 | Symptom | Check |
 | --- | --- |
 | `/v1/models` returns nothing | Start the LM Studio local server and load models in the app. |
+| `/v1/models` shows only an embedding model | Download and load a chat model, then set `llm.model` to that exact id. |
 | `make verify-llm` cannot find the model | Copy the exact id from `/v1/models`; display names are not enough. |
 | Docker cannot reach LM Studio | Use `http://host.docker.internal:1234/v1` in `boring.json`, not `localhost`. |
 | Host benchmark cannot reach LM Studio | Use `http://localhost:1234/v1` with `scripts/bench-llm.py --base-url`. |

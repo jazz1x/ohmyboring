@@ -276,11 +276,16 @@ curl -s -X POST http://localhost:7700/weekly \
   -H 'content-type: application/json' \
   -d '{"project":"omb"}' | jq .
 
+# Preview the exact Slack-bound morning brief text
+BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
+
 # Stalled register — things that have not moved in 7+ days (requires BORING_VECTOR=on)
 curl -s -X POST http://localhost:7700/stalled \
   -H 'content-type: application/json' \
   -d '{"project":"omb","older_than_days":7}' | jq .
 ```
+
+Hermes cron sends briefing script stdout as Slack `mrkdwn` text. `make eval` fixture notes are searchable during the gate but are pruned afterward and excluded from recency/claim briefing surfaces so test corpus entries do not appear in daily or weekly digests.
 
 ### PII / sensitive-data gate
 

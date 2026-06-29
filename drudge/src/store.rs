@@ -134,6 +134,9 @@ pub struct Store {
 /// Kernel A: graph is tool/concept only (`uses`/`about`). Narrative (problem/attempt/solution) lives in
 /// the note body markdown, not as graph nodes — so those edge kinds are gone.
 const SEMANTIC_EDGE_KINDS: [&str; 3] = ["uses", "about", "claims"];
+/// Internal eval fixtures must remain searchable while `make eval` is running, but they are not
+/// user memory. Recency and claim surfaces feed briefings/status, so exclude that fixture namespace.
+const INTERNAL_EVAL_FIXTURE_RE: &str = r"(^|/)eval-[^/]*\.md$";
 
 /// chunk id ("path#idx") → graph document node id ("doc:path").
 fn doc_node_id(chunk_or_path: &str) -> String {
@@ -371,10 +374,17 @@ impl Store {
                          WHERE NOT (d.origin = ANY($2))
                            AND d.updated_at >= now() - make_interval(hours => $3)
                            AND ($4::text IS NULL OR d.project = $4)
+                           AND d.source_path !~ $5
                          GROUP BY d.source_path, d.project, d.tags, d.updated_at
                          ORDER BY d.updated_at DESC
                          LIMIT $1;",
-                    &[&limit, &exclude_origins, &hours, &project],
+                    &[
+                        &limit,
+                        &exclude_origins,
+                        &hours,
+                        &project,
+                        &INTERNAL_EVAL_FIXTURE_RE,
+                    ],
                 )
                 .await
                 .context("recent docs with time window")?,
@@ -387,10 +397,16 @@ impl Store {
                          JOIN chunk c ON c.source_path = d.source_path
                          WHERE NOT (d.origin = ANY($2))
                            AND ($3::text IS NULL OR d.project = $3)
+                           AND d.source_path !~ $4
                          GROUP BY d.source_path, d.project, d.tags, d.updated_at
                          ORDER BY d.updated_at DESC
                          LIMIT $1;",
-                    &[&limit, &exclude_origins, &project],
+                    &[
+                        &limit,
+                        &exclude_origins,
+                        &project,
+                        &INTERNAL_EVAL_FIXTURE_RE,
+                    ],
                 )
                 .await
                 .context("recent docs")?,
@@ -652,9 +668,16 @@ impl Store {
                    AND ($2::text IS NULL OR d.project = $2)
                    AND ($3::text[] IS NULL OR c.kind = ANY($3))
                    AND NOT (d.origin = ANY($4))
+                   AND d.source_path !~ $5
                  ORDER BY c.valid_from DESC
                  LIMIT $1;",
-                &[&k, &project, &kinds, &exclude_origins],
+                &[
+                    &k,
+                    &project,
+                    &kinds,
+                    &exclude_origins,
+                    &INTERNAL_EVAL_FIXTURE_RE,
+                ],
             )
             .await
             .context("recent claims")?;
@@ -690,9 +713,17 @@ impl Store {
                    AND ($2::text IS NULL OR d.project = $2)
                    AND ($3::text[] IS NULL OR c.kind = ANY($3))
                    AND NOT (d.origin = ANY($4))
+                   AND d.source_path !~ $6
                  ORDER BY c.valid_from ASC
                  LIMIT $1;",
-                &[&k, &project, &kinds, &exclude_origins, &older_than_days],
+                &[
+                    &k,
+                    &project,
+                    &kinds,
+                    &exclude_origins,
+                    &older_than_days,
+                    &INTERNAL_EVAL_FIXTURE_RE,
+                ],
             )
             .await
             .context("stalled claims")?;
@@ -732,9 +763,17 @@ impl Store {
                    AND NOT (d.origin = ANY($3))
                    AND ($4::text IS NULL OR d.project = $4)
                    AND ($5::text[] IS NULL OR c.kind = ANY($5))
+                   AND d.source_path !~ $6
                  ORDER BY c.embedding <=> $1
                  LIMIT $2;",
-                &[&vec, &k, &exclude_origins, &project, &kinds],
+                &[
+                    &vec,
+                    &k,
+                    &exclude_origins,
+                    &project,
+                    &kinds,
+                    &INTERNAL_EVAL_FIXTURE_RE,
+                ],
             )
             .await
             .context("current claims")?;

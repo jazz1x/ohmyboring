@@ -246,11 +246,16 @@ curl -s -X POST http://localhost:7700/weekly \
   -H 'content-type: application/json' \
   -d '{"project":"omb"}' | jq .
 
+# Slack に送られる朝のブリーフィング本文をプレビュー
+BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
+
 # Stalled register — 7日以上動いていない項目（BORING_VECTOR=on が必要）
 curl -s -X POST http://localhost:7700/stalled \
   -H 'content-type: application/json' \
   -d '{"project":"omb","older_than_days":7}' | jq .
 ```
+
+Hermes cron はブリーフィングスクリプトの stdout を Slack `mrkdwn` テキストとして送信します。`make eval` の fixture ノートはゲート実行中は検索に使われますが、終了後に prune され、recency/claim ブリーフィング surface からも除外されるため、日次/週次ブリーフィングには混ざりません。
 
 ### PII / 機密データゲート
 

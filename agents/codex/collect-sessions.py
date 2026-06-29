@@ -144,10 +144,18 @@ def _newest(paths: list[str]) -> str:
     return max(paths, key=os.path.getmtime)
 
 
+def _is_rollout_marker(path: str) -> bool:
+    return os.path.basename(path).startswith("codex-rollout-")
+
+
 def _marker_status() -> dict:
     status = {}
     for label, suffix in (("done", "ts"), ("pending", "pending"), ("retry", "retry")):
-        paths = glob.glob(os.path.join(markers.MARK_DIR, f"codex-*.{suffix}"))
+        paths = [
+            p
+            for p in glob.glob(os.path.join(markers.MARK_DIR, f"codex-*.{suffix}"))
+            if not _is_rollout_marker(p)
+        ]
         newest = _newest(paths)
         status[label] = {
             "count": len(paths),
