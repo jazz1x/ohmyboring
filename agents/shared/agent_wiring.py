@@ -351,6 +351,24 @@ def _default_hermes_deliver(jobs: list[dict]) -> str:
     return "local"
 
 
+def _install_hermes_skills(boring_home: str | None = None) -> None:
+    """Install oh-my-boring managed hermes-agent skills into ~/.hermes/skills/."""
+    home = boring_home if boring_home is not None else BORING_HOME
+    src_dir = Path(home) / "agents" / "hermes" / "skills"
+    if not src_dir.exists():
+        return
+    dst_root = Path(os.path.expanduser("~/.hermes/skills"))
+    dst_root.mkdir(parents=True, exist_ok=True)
+    for skill_dir in src_dir.iterdir():
+        if not skill_dir.is_dir():
+            continue
+        dst = dst_root / skill_dir.name
+        dst.mkdir(parents=True, exist_ok=True)
+        for src_file in skill_dir.iterdir():
+            if src_file.is_file():
+                shutil.copy2(src_file, dst / src_file.name)
+
+
 def _sync_hermes_cron_jobs() -> dict:
     """Sync ~/.hermes/cron/jobs.json with boring.json hermes_cron_jobs config.
 
@@ -504,6 +522,7 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
         _write_text_atomic(path, body)
         _install_hermes_briefing(boring_home)
         _install_hermes_weekly_briefing(boring_home)
+        _install_hermes_skills(boring_home)
         cron_result = _sync_hermes_cron_jobs()
         return {
             "agent": "hermes-agent",
@@ -539,6 +558,7 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
     _write_text_atomic(path, "\n".join(lines) + "\n")
     _install_hermes_briefing(boring_home)
     _install_hermes_weekly_briefing(boring_home)
+    _install_hermes_skills(boring_home)
     cron_result = _sync_hermes_cron_jobs()
     changed = changed or cron_result["changed"]
     return {
