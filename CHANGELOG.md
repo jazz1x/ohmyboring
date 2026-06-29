@@ -6,10 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **PII / sensitive-data gate** — shape-based policy enforcement at the single write choke-point:
+  - Rules live in `vault/rules/pii.yaml` (committed defaults: RRN, phone, email, IP, names, credentials, ticket IDs) plus an optional gitignored `vault/rules/pii.local.yaml` overlay for company-specific values.
+  - Actions per rule: `block` (reject the note), `redact` (mask in-place), `flag` (persist with `pii-flag` tag), `allow` (carve-out).
+  - Exemption markers let a flag rule skip a line that contains `<!-- pii-allow: ... -->`.
+  - Implemented in Rust (`drudge/src/pii.rs`) and wired into `mcp_remember`; runs for every adapter (Claude, Kimi, Codex, hermes, direct MCP).
+- **Codex session ingestion** — GitHub Codex sessions are now distilled and remembered automatically:
+  - New transcript parser format `codex-jsonl` extracts user/assistant turns while dropping injected system context.
+  - `agents/codex/distill-session.py` and `agents/codex/collect-sessions.py` handle one session per tick.
+  - `agent_wiring.py` adds a `codex-memory-ingest-worker` cron job (every 20m) when hermes-agent is enabled.
+  - `docker-compose.yml` mounts `~/.codex` into the hermes-agent container.
+  - Host-side backfill: `COLLECT_LIMIT=N python3 agents/codex/collect-sessions.py`.
+- **Stalled register (`/stalled`)** — surfaces next steps and blockers that have not moved:
+  - New HTTP endpoint `POST /stalled` and MCP tool `stalled`, with optional `project` and `older_than_days` (default 7).
+  - `brief` and `weekly_brief` now include a "Stalled" subsection when claims are older than 7 days.
+
+### Changed
+- **Wiki id allocation is now monotonic** (`vault::allocate_wiki_path`):
+  - New notes use `max(existing file ids, existing DB ids) + 1` instead of filling gaps.
+  - Postgres document paths are also checked, so a deleted wiki file that is still in the vector store cannot silently reuse its id before the next sync.
+- **Next-action register (`/next_actions`)** — makes "what should I do next" a first-class consumption surface:
+  - New claim kind `next` for concrete follow-up actions still pending after a session.
+  - New HTTP endpoint `POST /next_actions` and MCP tool `next_actions` return synthesized next steps + active blockers.
+  - `/context` now includes a `next_actions` section, so agent session start loads decisions, risks, facts, glossary, and next actions together.
+  - Distillation prompts (Claude Code hook + hermes `memory-ingest` skill) now extract `next` and `blocked` claims.
 - **Structured context card (`/context`)** — a compact, claim-first alternative to prose summaries for agent session start:
-  - New HTTP endpoint `POST /context` returns `{decisions, risks, facts, glossary, language}`.
+  - New HTTP endpoint `POST /context` returns `{decisions, risks, facts, glossary, next_actions, language}`.
   - New MCP tool `context` returns the same structured data.
-  - Uses recency ordering (no vector backend required), so it works even when `BORING_VECTOR=off`.
+  - Callable without the vector backend; returns recency-ordered claims when the store is available and an empty card otherwise.
   - Claude Code `SessionStart` hook now injects `/context` instead of `/status`.
 - **Glossary claims** — new claim kind `term` for project-specific definitions (subject=term, value=definition).
 - **Config-driven hermes-agent cron jobs** — `boring.json` gains `hermes_cron_jobs`:
@@ -48,6 +72,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
   idempotency tests.
 
 ### Fixed
+- **hermes autonomous ingestion cycle (20m)** — `memory-ingest-worker` was using a stale copy of
+  `ingest-worker.py` in `~/.hermes/scripts/` and could not find sessions inside the hermes-agent
+  container. The repo root is now mounted at `/host/oh-my-boring`, `BORING_IN_CONTAINER=1` +
+  `BORING_HOME=/host/oh-my-boring` are set, and `agent_wiring.py` keeps the cron job pointing to the
+  canonical repo script. Container source dirs are rewritten from `/root` to `/host` so transcripts
+  are found.
 - **hermes `memory-ingest` skill** — rewritten to reference the correct `ohmyboring/remember` MCP tool
   and its required `title` parameter; sessions were failing to store with `missing argument: title`.
 

@@ -4,7 +4,7 @@ GitHub Codex CLI reads MCP servers from `~/.codex/mcp.json`.
 ohmyboring wires the `ohmyboring` MCP server automatically when
 `codex` is enabled in `boring.json` and you run `install.sh`.
 
-No hooks are needed — Codex calls MCP tools on demand.
+No Codex hook is needed — Codex calls MCP tools on demand, and the optional worker backfills session transcripts.
 
 ## Session ingestion
 
@@ -66,4 +66,4 @@ Codex will automatically invoke the right ohmyboring tool:
 
 ## Available tools
 
-`context`, `recall`, `ask`, `remember`, `forget`, `project_status`, `weekly_brief`, `decisions`, `risks`, `corpus_status`, `neighbors`.
+`context`, `recall`, `ask`, `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `project_status`, `weekly_brief`, `decisions`, `risks`, `next_actions`, `stalled`, `brief`, `claims`, `corpus_status`, `neighbors`.
