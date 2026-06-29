@@ -74,6 +74,7 @@ case "$PROVIDER" in
         fi
         ;;
     lmstudio|openai-compatible)
+        auth_required=0
         code=$(curl -s -o /dev/null -w '%{http_code}' -m5 "$HOST_URL/models" 2>/dev/null)
         case "$code" in
             200)
@@ -95,6 +96,7 @@ case "$PROVIDER" in
             401)
                 ok "endpoint reachable at $HOST_URL/models (auth required)"
                 info "model listing skipped because endpoint requires authentication"
+                auth_required=1
                 ;;
             000)
                 bad "endpoint unreachable at $HOST_URL/models — is the server running?"
@@ -105,8 +107,8 @@ case "$PROVIDER" in
                 errors=$((errors + 1))
                 ;;
         esac
-        if [ -n "$API_KEY_ENV" ]; then
-            if eval "[ -n \"\$$API_KEY_ENV\" ]"; then
+        if [ "$auth_required" -eq 1 ] && [ -n "$API_KEY_ENV" ]; then
+            if [ -n "$(printenv "$API_KEY_ENV" 2>/dev/null)" ]; then
                 ok "api key env '$API_KEY_ENV' is set"
             else
                 bad "api key env '$API_KEY_ENV' is not set — export $API_KEY_ENV=..."
