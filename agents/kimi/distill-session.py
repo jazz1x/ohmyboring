@@ -177,7 +177,8 @@ def main():
     origin, _rule = boring_config.classify(cwd, remote_url or None)
     repo = repo_slug(cwd)
 
-    if distill_and_remember(text, origin, repo, session_id):
+    session_source = {"adapter": "kimi", "transcript_path": session_dir, "cwd": cwd}
+    if distill_and_remember(text, origin, repo, session_id, session_source):
         _mark(session_id)
         print("[omb-distill] remembered", file=sys.stderr)
     else:

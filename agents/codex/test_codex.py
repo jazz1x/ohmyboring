@@ -87,7 +87,46 @@ def test_small_raw_parse_short_marks_done():
         os.unlink(path)
 
 
+def test_success_passes_session_source_to_shared_core():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        f.write("{}\n")
+        path = f.name
+    try:
+        payload = {
+            "transcript_path": path,
+            "session_id": "abc",
+            "hook_event_name": "SessionEnd",
+            "cwd": "/work/oh-my-boring",
+        }
+        stderr = io.StringIO()
+        extracted = "x" * 600
+        with (
+            mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
+            mock.patch.object(distill.sys, "stderr", stderr),
+            mock.patch.object(distill, "extract", return_value=extracted),
+            mock.patch.object(distill, "git_remote_url", return_value=""),
+            mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
+            mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
+            mock.patch.object(distill, "_mark") as mark,
+            mock.patch.object(distill, "distill_and_remember", return_value=True) as remember,
+        ):
+            rc = distill.main()
+
+        assert rc == 0
+        remember.assert_called_once_with(
+            extracted,
+            "personal",
+            "oh-my-boring",
+            "codex-abc",
+            {"adapter": "codex", "transcript_path": path, "cwd": "/work/oh-my-boring"},
+        )
+        mark.assert_called_once_with("codex-abc")
+    finally:
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     test_large_raw_parse_short_marks_retry()
     test_small_raw_parse_short_marks_done()
+    test_success_passes_session_source_to_shared_core()
     print("ok - codex adapter")

@@ -83,7 +83,8 @@ def main() -> int:
         return 0
 
     repo = repo_slug(cwd)
-    if distill_and_remember(text, origin, repo, session_id):
+    session_source = {"adapter": "codex", "transcript_path": transcript_path, "cwd": cwd}
+    if distill_and_remember(text, origin, repo, session_id, session_source):
         _mark(session_id)
         print("[omb-distill-codex] remembered", file=sys.stderr)
         return 0

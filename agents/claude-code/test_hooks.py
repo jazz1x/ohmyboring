@@ -50,6 +50,7 @@ def _load(name, filename):
 
 distill = _load("distill_session_hook", "distill-session.py")
 recall = _load("recall_hook", "recall.py")
+import distill_core  # noqa: E402
 import recall_core  # noqa: E402
 import markers  # noqa: E402
 
@@ -112,6 +113,27 @@ class BuildPromptTests(unittest.TestCase):
     def test_skip_contract_present(self):
         # The prompt must teach the {"skip": true} escape hatch that distill_and_remember honors.
         self.assertIn('"skip": true', distill._build_prompt("t", "personal", ""))
+
+
+class SourceManifestTests(unittest.TestCase):
+    def test_write_session_manifest_returns_vault_relative_source(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(distill_core, "BORING_HOME", d):
+                rel = distill_core._write_session_manifest(
+                    {"adapter": "codex", "transcript_path": "/tmp/session.jsonl", "cwd": "/repo"},
+                    "extracted session text",
+                    "personal",
+                    "oh-my-boring",
+                    "codex-abc123",
+                )
+            path = os.path.join(d, "vault", rel)
+            self.assertEqual(rel, "raw/session-manifests/codex-abc123.md")
+            self.assertTrue(os.path.exists(path))
+            with open(path, encoding="utf-8") as f:
+                body = f.read()
+            self.assertIn("adapter: codex", body)
+            self.assertIn("transcript_path: /tmp/session.jsonl", body)
+            self.assertIn("extracted_sha256:", body)
 
 
 class MarkPathTests(unittest.TestCase):

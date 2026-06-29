@@ -131,6 +131,7 @@ fn mcp_tools_list() -> Value {
                     "concepts": {"type": "array", "items": {"type": "string"}, "description": "key technical concepts/patterns (≤6)"},
                     "origin": {"type": "string", "enum": ["personal", "company", "mirror", "community"], "description": "default personal"},
                     "repo": {"type": "string", "description": "optional repo slug → becomes the project + a repo/<slug> tag"},
+                    "sources": {"type": "array", "items": {"type": "string"}, "description": "vault-local evidence paths for this note, e.g. raw/session-manifests/<id>.md"},
                     "omb_session_id": {"type": "string", "description": "optional ephemeral ingestion marker — include only when requested by the ingestion worker"},
                     "claims": {
                         "type": "array",
@@ -894,7 +895,7 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
     ))
 }
 
-/// Apply the PII scanner to a parsed note. Mutates title/body/claim values in place.
+/// Apply the PII scanner to a parsed note. Mutates rendered fields in place.
 /// Returns an error (block) if a critical rule matched.
 fn apply_pii_gate(
     scanner: Option<&crate::pii::PiiScanner>,
@@ -925,6 +926,9 @@ fn apply_pii_gate(
         }
         for concept in &mut note.front.concepts {
             apply_pii_to_field(scanner, concept, &mut any_flag)?;
+        }
+        for source in &mut note.front.sources {
+            apply_pii_to_field(scanner, source, &mut any_flag)?;
         }
 
         for claim in &mut note.front.claims {
@@ -1028,8 +1032,8 @@ async fn check_duplicate(
 
 /// Parse + normalize the `remember` arguments into a typed note. The deterministic boundary: sanitize tags,
 /// fold the repo slug into project + a `repo/<slug>` tag, scrub secrets from EVERY field rendered into the
-/// tracked vault note (the git leak boundary): the body, the title, each tool/concept, and every claim
-/// field — not just the body, since `render_wiki_note` writes them all verbatim.
+/// tracked vault note (the git leak boundary): the body, the title, each tool/concept/source, and every
+/// claim field — not just the body, since `render_wiki_note` writes them all verbatim.
 fn parse_remember_note(
     args: Option<&Value>,
     cfg: &config::BoringConfig,
@@ -1072,6 +1076,8 @@ fn parse_remember_note(
     // normalize_body) THEN scrub secrets (the one git-leak boundary). Applying it to title/tools/concepts/
     // claims too closes the gap where escapes leaked through the structured fields (e.g. a claim value
     // `16 items\n`, wiki-0148). `‹REDACTED›` is non-empty, so scrubbing never reintroduces an empty value.
+    // `sources` is path-like rather than prose-like, so it is trimmed and scrubbed without body newline
+    // decoding; otherwise a literal "\n" in a bad path would become a physical YAML line break.
     let re = redact::build_secret_re().map_err(|e| (-32603_i32, format!("secret regex: {e:#}")))?;
     let scrub = |s: &str| redact::redact(re, s);
     let clean = |s: &str| scrub(&vault::normalize_body(s));
@@ -1141,6 +1147,7 @@ fn parse_remember_note(
         tags,
         tools: get_arr("tools").iter().map(|t| clean(t)).collect(),
         concepts: get_arr("concepts").iter().map(|c| clean(c)).collect(),
+        sources: get_arr("sources").iter().map(|s| scrub(s.trim())).collect(),
         claims,
         omb_session_id,
     };
@@ -1468,6 +1475,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_remember_preserves_sources() {
+        let args = json!({
+            "title": "session note",
+            "body": "## Context\nreal body",
+            "sources": [" raw/session-manifests/codex-abc.md "]
+        });
+        let note = parse_remember_note(Some(&args), &BoringConfig::default()).unwrap();
+        assert_eq!(
+            note.front.sources,
+            vec!["raw/session-manifests/codex-abc.md".to_owned()]
+        );
+    }
+
+    #[test]
     fn pii_block_error_does_not_echo_sensitive_match() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().join("pii.yaml");
@@ -1537,6 +1558,7 @@ rules:
                 tags: vec!["ops".to_owned()],
                 tools: vec!["owner@example.com".to_owned()],
                 concepts: vec!["ABC-123".to_owned()],
+                sources: vec!["raw/session-manifests/owner@example.com.md".to_owned()],
                 claims: vec![crate::frontmatter::Claim {
                     subject: "admin@example.com".to_owned(),
                     predicate: "tracks".to_owned(),
@@ -1551,6 +1573,10 @@ rules:
 
         apply_pii_gate(Some(&scanner), &mut note).unwrap();
         assert_eq!(note.front.tools, vec!["[EMAIL]".to_owned()]);
+        assert_eq!(
+            note.front.sources,
+            vec!["raw/session-manifests/[EMAIL]".to_owned()]
+        );
         assert_eq!(note.front.claims[0].subject, "[EMAIL]");
         assert_eq!(note.front.claims[0].value, "ABC-123");
         assert!(note.front.tags.contains(&"pii-flag".to_owned()));

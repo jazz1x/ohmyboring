@@ -187,7 +187,7 @@ pub fn render_wiki_note(wiki_id: &str, front: &FrontMatter, body: &str) -> Resul
         concepts: &'a [String],
         claims: &'a [crate::frontmatter::Claim],
         relates_to: Vec<String>,
-        sources: Vec<String>,
+        sources: &'a [String],
         /// Session provenance: which session produced this note. Persisted when present so a note
         /// can be traced back to (and deduped against) its originating session. Absent on legacy
         /// notes and manual remembers → skipped, keeping their frontmatter unchanged.
@@ -212,7 +212,7 @@ pub fn render_wiki_note(wiki_id: &str, front: &FrontMatter, body: &str) -> Resul
         concepts: &front.concepts,
         claims: &front.claims,
         relates_to: Vec::new(),
-        sources: Vec::new(),
+        sources: &front.sources,
         omb_session_id: front.omb_session_id.as_deref(),
     };
     let yaml = serde_yaml::to_string(&fm).context("failed to serialize wiki frontmatter YAML")?;
@@ -368,6 +368,7 @@ mod tests {
 
         // present → persisted as provenance, and the note round-trips through YAML parse
         front.omb_session_id = Some("sess-abc123".to_owned());
+        front.sources = vec!["raw/session-manifests/sess-abc123.md".to_owned()];
         let out = render_wiki_note("wiki-0042", &front, "body").unwrap();
         assert!(out.contains("omb_session_id: sess-abc123"), "{out}");
         let (yaml, _) = split_frontmatter(&out).expect("frontmatter splits");
@@ -375,6 +376,10 @@ mod tests {
         assert_eq!(
             parsed["omb_session_id"],
             serde_yaml::Value::from("sess-abc123")
+        );
+        assert_eq!(
+            parsed["sources"][0],
+            serde_yaml::Value::from("raw/session-manifests/sess-abc123.md")
         );
     }
 
