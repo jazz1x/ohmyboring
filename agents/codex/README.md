@@ -19,8 +19,12 @@ worker instead:
 - On the host you can backfill manually:
 
 ```bash
+make codex-status
 COLLECT_LIMIT=10 python3 agents/codex/collect-sessions.py
 ```
+
+`make codex-status` is read-only and surfaces queued sessions, skipped rollout
+copies, marker counts, the hermes worker state, and the newest Codex note.
 
 Session markers live in `~/.cache/boring-distill/codex-<sid>.*` and are shared
 with the rest of the pipeline.

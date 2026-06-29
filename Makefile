@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs ask sync remember collect collect-kimi smoke e2e doctor heal verify-llm maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality deny eval bench-llm psql reset
+.PHONY: help up down build logs agent-logs ask sync remember collect distill-now codex-status collect-kimi smoke e2e doctor heal verify-llm maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality deny eval bench-llm psql reset
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -69,6 +69,9 @@ collect: ## Lazily collect past Claude Code sessions (one at a time)   make coll
 
 distill-now: ## Distill the CURRENT session right now (no need to end it; re-runnable)   make distill-now
 	@python3 agents/schedulers/collect-sessions.py --now
+
+codex-status: ## Show Codex session queue + autonomous worker status (read-only)
+	@python3 agents/codex/collect-sessions.py --status
 
 collect-kimi: ## Lazily collect past Kimi Code sessions (one at a time)   make collect-kimi [N=1]
 	@COLLECT_LIMIT=$${N:-1} python3 agents/schedulers/collect-kimi-sessions.py
