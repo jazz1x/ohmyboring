@@ -34,6 +34,9 @@ pub struct FrontMatter {
     pub tools: Vec<String>,
     pub concepts: Vec<String>,
     pub claims: Vec<Claim>,
+    /// Source artifacts this distilled note is grounded in. Wiki lint requires these to point at
+    /// vault-local evidence paths such as `raw/...`, not transient host paths.
+    pub sources: Vec<String>,
     /// Ephemeral ingestion queue marker. Not part of the semantic graph; carried only so the
     /// hermes/cron worker can confirm that a specific session was remembered. May be absent.
     pub omb_session_id: Option<String>,

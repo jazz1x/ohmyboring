@@ -280,7 +280,7 @@ def _call_llm(prompt):
     return parsed
 
 
-def _call_remember(title, body, origin, repo, tags, tools, concepts, claims, session_id=""):
+def _call_remember(title, body, origin, repo, tags, tools, concepts, claims, session_id="", sources=None):
     """Call ohmyboring's remember MCP tool.
 
     Retries transient failures (5xx, connection errors, timeouts) a bounded number of times
@@ -297,6 +297,8 @@ def _call_remember(title, body, origin, repo, tags, tools, concepts, claims, ses
         "concepts": concepts,
         "claims": claims,
     }
+    if sources:
+        arguments["sources"] = sources
     if session_id:
         arguments["omb_session_id"] = session_id
     payload = json.dumps(

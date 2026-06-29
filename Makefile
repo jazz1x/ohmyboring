@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs ask sync remember collect collect-kimi smoke e2e doctor heal verify-llm maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality deny eval bench-llm psql reset
+.PHONY: help up down build logs agent-logs ask sync remember collect distill-now collect-kimi smoke e2e doctor heal verify-llm maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality deny eval bench-llm psql reset
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -79,7 +79,7 @@ smoke: ## end-to-end smoke test
 e2e: ## wiki-mode end-to-end (remember→recall round-trip + vector-off reject); skips if stack down
 	./scripts/e2e.sh
 
-doctor: ## Diagnose the distill write-door (drudge/Ollama/containers + newest note & hook marker)
+doctor: ## Diagnose the write-door (stack, hooks, newest note, Codex worker/queue)
 	./scripts/doctor.sh
 
 heal: ## Auto-fix common doctor findings (env perms, hooks, engine, Ollama, containers)

@@ -19,16 +19,62 @@ HERMES_URL = os.environ.get("BORING_URL") or os.environ.get(
 )
 KST = timezone(timedelta(hours=9))
 DATE = datetime.now(KST).strftime("%Y-%m-%d %a")
+SECTION_LABELS = {
+    "Done",
+    "Next",
+    "Blocked",
+    "Decisions",
+    "Risks",
+    "Stalled",
+    "완료",
+    "다음",
+    "막힘",
+    "결정",
+    "리스크",
+    "정체",
+}
 
 
 def header(body: str) -> str:
-    return f"☀️ *아침 브리핑* — {DATE}\n\n{body}"
+    return f"☀️ *아침 브리핑*\n`{DATE}`\n\n{body}"
+
+
+def slack_mrkdwn(answer: str) -> str:
+    """Keep output as Slack mrkdwn text; Hermes sends stdout via chat.postMessage text."""
+    out = []
+    previous_blank = False
+    for raw in answer.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            if not previous_blank:
+                out.append("")
+            previous_blank = True
+            continue
+        previous_blank = False
+        if stripped.startswith(("- ", "* ")):
+            out.append(f"• {stripped[2:].strip()}")
+        elif stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip()
+            if heading:
+                out.append(f"*{heading}*")
+        elif stripped in SECTION_LABELS:
+            out.append(f"*{stripped}*")
+        elif len(stripped) <= 80 and not stripped.endswith((".", "요", "다", ":")):
+            out.append(f"*{stripped}*")
+        else:
+            out.append(stripped)
+    return "\n".join(out).strip()
+
+
+def source_label(source: object) -> str:
+    return os.path.basename(str(source)) or str(source)
 
 
 def main() -> None:
     req = urllib.request.Request(
         f"{HERMES_URL}/brief",
-        data=b"",
+        data=b"{}",
         headers={"content-type": "application/json"},
         method="POST",
     )
@@ -47,9 +93,9 @@ def main() -> None:
     if not answer:
         print(header("오늘은 새로 짚을 진행/막힘 항목이 회수되지 않았어요."))
         return
-    out = header(answer)
+    out = header(slack_mrkdwn(answer))
     if sources:
-        out += "\n\n_근거: " + ", ".join(sources[:5]) + "_"
+        out += "\n\n_근거: " + " · ".join(source_label(s) for s in sources[:5]) + "_"
     print(out)
 
 

@@ -105,3 +105,5 @@ python3 scripts/bench-llm.py --tier 16gb --base-url http://localhost:1234/v1
 ```
 
 `--pull` only makes sense for local Ollama and is ignored/skipped for remote endpoints because the script cannot inspect their model registry.
+
+For LM Studio runtime configuration, the ids in `boring.json` must match `/v1/models` exactly. Docker uses `http://host.docker.internal:1234/v1`, while host-side benchmarks use `http://localhost:1234/v1`. See [`docs/runbooks/lmstudio.md`](../runbooks/lmstudio.md) for the full setup and verification checklist.

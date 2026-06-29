@@ -3,17 +3,17 @@
 [English](README.md) · **한국어** · [日本語](README.ja.md)
 
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
-![version](https://img.shields.io/badge/version-0.1.0-blue)
+![release](https://img.shields.io/badge/release-0.1.0%20candidate-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
 ![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
 ![gemma4](https://img.shields.io/badge/LLM-gemma4:12b-000?logo=ollama)
 
-**셀프호스팅 개인 메모리 RAG.** Claude Code / Kimi Code 세션이 로컬의 사람이 읽는 위키로 증류돼 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클라우드 0 · 100% 로컬.**
+**셀프호스팅 개인 메모리 RAG.** Claude Code / Kimi Code 세션과 적재 가능한 Codex 트랜스크립트가 로컬의 사람이 읽는 위키로 증류돼 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클라우드 0 · 100% 로컬.**
 
 ```bash
-# 가장 빠름 — 원라이너: ~/oh-my-boring에 클론, 빌드, Claude Code 훅까지 연결.
+# 가장 빠름 — 원라이너: ~/oh-my-boring에 클론, 빌드, 훅/MCP/워커까지 연결.
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/install.sh)"
 ```
 
@@ -23,21 +23,22 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/ins
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
+make doctor         # 스택, 훅, Codex 워커/큐, 마지막 적재 확인
 make collect N=20   # 과거 Claude Code 세션으로 vault 채우기 (새 클론은 비어 있음)
 make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 ```
 
-> 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 과거 기록을 채우고 나면, 이후 모든 세션이 자동으로 축적됩니다([적재하기](#적재하기-ingestion) 참고).
+> 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 Claude 과거 기록을 채우고 나면, 이후 Claude/Kimi 세션은 자동 축적되고 Codex는 적재 가능한 트랜스크립트를 워커가 처리합니다([적재하기](#적재하기-ingestion) 참고).
 
-> **Docker**, **Ollama**(또는 OpenAI-compatible 서버), **Python 3**, **jq**, **curl**, **git**, **make**가 필요합니다.
+> **Docker**, **Ollama** 또는 **LM Studio** 같은 OpenAI-compatible 로컬 서버, **Python 3**, **jq**, **curl**, **git**, **make**가 필요합니다.
 
 ---
 
 ## 기능
 
-1. **자동 축적** — 세션이 끝나면 `vault/wiki`에 정리된 마크다운 노트로 변환됩니다. 수동 관리 불필요.
+1. **자동 축적** — 세션이 끝나거나 Codex 워커가 적재 가능한 트랜스크립트를 찾으면 `vault/wiki`에 정리된 마크다운 노트로 변환됩니다. 수동 관리 불필요.
 2. **마크다운 중심 메모리** — 일반 텍스트, 사람이 읽기 쉬움, git diff 가능. 검색도 마크다운을 직접 읽습니다.
-3. **로컬 전용** — 임베딩과 요약이 Ollama 등 로컬 LLM에서 실행됩니다. 외부 API나 토큰 없음.
+3. **로컬 전용** — 임베딩과 요약이 Ollama, LM Studio 또는 다른 OpenAI-compatible 엔드포인트에서 실행됩니다. 외부 API나 토큰 없음.
 
 선택적으로 **pgvector** 가속기(`BORING_VECTOR=on`)를 켜면 유사도 검색 + GraphRAG이 추가됩니다.
 
@@ -45,11 +46,12 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 
 ## 적재하기 (ingestion)
 
-메모리가 들어오는 경로는 세 가지입니다 — 설정 후 앞 두 가지는 거의 손댈 일이 없습니다:
+메모리가 들어오는 경로는 네 가지입니다 — 설정 후 자동 경로들은 거의 손댈 일이 없습니다:
 
 | 방법 | 명령 | 언제 |
 | --- | --- | --- |
 | **자동 (세션 종료 시)** | SessionEnd 훅 (`install.sh`가 설치) | 모든 Claude Code / Kimi 세션 — `hooks/distill-session.py`가 트랜스크립트를 증류해 `remember`합니다. 짝이 되는 `UserPromptSubmit` 훅(`recall.py`)이 관련 과거 메모리를 새 프롬프트에 자동 주입합니다. |
+| **자동 (Codex 워커)** | `codex-memory-ingest-worker` (`install.sh`가 설치) | Codex에는 SessionEnd 훅이 없습니다. Hermes가 20분마다 `~/.codex/sessions/**/*.jsonl`을 스캔하고, Codex Desktop `rollout-*` 복제본은 기본으로 건너뛰며, 적재 가능한 트랜스크립트만 같은 `remember` 경로로 저장합니다. `make doctor`로 확인합니다. |
 | **과거 세션 백필** | `make collect [N=20]` | 설치 직후, 비어 있는 vault를 `~/.claude/projects` 기록으로 채울 때. 최신순, 멱등(세션별 마커로 이미 증류한 건 건너뜀), 한 번에 `N`개만 처리해 CPU를 독점하지 않음. |
 | **지금 바로 (세션 안 끝내고)** | `make distill-now` · `make remember M="…"` | 세션을 끝내지 않고 즉시 적재할 때. `distill-now`는 **현재** 트랜스크립트를 그때그때 다시 증류하고 마커를 남기지 않으므로, 세션 종료 시의 정상 적재도 그대로 동작합니다(초기 노트 + 최종 노트가 함께 생길 수 있음). `remember`는 직접 작성한 노트를 저장합니다. |
 
@@ -63,7 +65,7 @@ python3 agents/shared/agent_wiring.py --install \
   --server-url http://localhost:7700/mcp
 ```
 
-또는 `~/.claude/settings.json`을 직접 편집: `python3 ~/oh-my-boring/hooks/distill-session.py`를 실행하는 `SessionEnd` 훅과 `recall.py`를 실행하는 `UserPromptSubmit` 훅을 추가합니다.
+이 명령은 Claude/Kimi 훅, Cursor/Codex MCP 항목, Hermes cron 워커를 설정합니다. Claude만 직접 편집하려면 `~/.claude/settings.json`에 `python3 ~/oh-my-boring/hooks/distill-session.py`를 실행하는 `SessionEnd` 훅과 `recall.py`를 실행하는 `UserPromptSubmit` 훅을 추가합니다.
 
 ---
 
@@ -137,7 +139,36 @@ flowchart LR
 | `repos[]` | 경로/remote 규칙 → `origin=personal/company/mirror/community` |
 | `agents[]` | vector mode ingest source |
 
-**LLM 백엔드 전환**은 config 블록 하나로 끝납니다. LM Studio: `"provider": "lmstudio"`, `"base_url": "http://host.docker.internal:1234/v1"`, `"bootstrap": "manual"` 로 두고 LM Studio 앱에서 모델을 로드한 뒤 `make up`. `make up`은 `scripts/llm-providers/<provider>.sh` 로 디스패치해 알맞은 부트스트랩(Ollama pull vs LM Studio 헬스체크)을 합니다.
+**LLM 백엔드 전환**은 config 블록 하나로 끝납니다. `make up`은 `scripts/llm-providers/<provider>.sh` 로 디스패치합니다. Ollama는 서버 시작과 모델 pull을 할 수 있고, LM Studio는 앱에서 모델을 이미 로드했다고 보고 서버 상태만 확인합니다.
+
+### LM Studio 백엔드
+
+LM Studio는 OpenAI-compatible `/v1` 서버로 붙습니다. Docker 컨테이너가 호스트의 LM Studio에 접근해야 하므로 `boring.json`에는 `host.docker.internal`을 쓰고, 호스트에서 직접 확인하거나 벤치마크할 때만 `localhost`를 씁니다.
+
+```json
+{
+  "llm": {
+    "provider": "lmstudio",
+    "base_url": "http://host.docker.internal:1234/v1",
+    "model": "<v1/models에 나온 정확한 chat model id>",
+    "embed_model": "<v1/models에 나온 정확한 embedding model id>",
+    "embed_dim": 768,
+    "api_key_env": "BORING_LLM_API_KEY",
+    "bootstrap": "manual"
+  }
+}
+```
+
+LM Studio 로컬 서버를 켜고 chat 모델과 embedding 모델을 하나씩 로드한 뒤, `make up` 전에 확인합니다:
+
+```bash
+curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
+make verify-llm
+make up
+make doctor
+```
+
+모델 id는 LM Studio가 반환한 값과 정확히 같아야 합니다. embedding 모델이 `bge-m3`가 아니라면 해당 모델 차원에 맞게 `llm.embed_dim`을 바꾸고, vector 모드를 믿기 전에 `make reset`을 실행해야 합니다. 전체 체크리스트는 [LM Studio 런북](docs/runbooks/lmstudio.ko.md)을 참고하세요.
 
 `.env`는 이제 시크릿 + 런타임 오버라이드 전용:
 
@@ -200,6 +231,8 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 |---|---|
 | `make up` | ohmyboring 엔진 실행(hermes-agent 이미지가 있을 때만 함께 실행) |
 | `make ollama` | Ollama 실행 확인(필요시 백그라운드 시작) |
+| `make verify-llm` | provider 접근성, 로드된 모델 id, embedding 차원 확인 |
+| `make doctor` | 스택, 훅, 마지막 적재, Codex 워커/큐 상태 진단 |
 | `make ask Q="..."` | recall + 요약 한 번에 |
 | `make sync` | vault 재적재 |
 | `make remember M="text"` | 한 줄 노트 작성 |
@@ -225,7 +258,8 @@ make collect N=20
 # Kimi Code
 make collect-kimi N=20
 
-# GitHub Codex
+# GitHub Codex (평소에는 Hermes 워커가 처리)
+make doctor
 COLLECT_LIMIT=20 python3 agents/codex/collect-sessions.py
 ```
 
@@ -242,11 +276,16 @@ curl -s -X POST http://localhost:7700/weekly \
   -H 'content-type: application/json' \
   -d '{"project":"omb"}' | jq .
 
+# Slack으로 나갈 아침 브리핑 텍스트 미리보기
+BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
+
 # Stalled register — 7일 이상 멈춘 항목 (BORING_VECTOR=on 필요)
 curl -s -X POST http://localhost:7700/stalled \
   -H 'content-type: application/json' \
   -d '{"project":"omb","older_than_days":7}' | jq .
 ```
+
+Hermes cron은 브리핑 스크립트의 stdout을 Slack `mrkdwn` 텍스트로 보냅니다. `make eval` fixture 노트는 게이트 실행 중 검색에는 쓰이지만, 종료 후 prune되며 recency/claim 브리핑 surface에서도 제외되어 일간/주간 브리핑에 섞이지 않습니다.
 
 ### PII / 민감 데이터 게이트
 
@@ -315,8 +354,8 @@ curl -s -X POST http://localhost:7700/mcp \
 | Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Kimi 세션을 요약해 `remember` 호출 |
 | Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | 관련 snippet을 가져와 프롬프트 context 주입 |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring`를 MCP 서버로 노출 |
-| Codex | `agents/codex/README.md` | MCP + cron 백필 | `~/.codex/mcp.json` / `collect-sessions.py` | `ohmyboring`를 MCP 서버로 노출하고 Codex 세션을 백필 |
-| hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | cron tick마다 한 세션씩 백필 |
+| Codex | `agents/codex/README.md` | MCP + cron 백필 | `~/.codex/mcp.json` / `collect-sessions.py` | `ohmyboring`를 MCP 서버로 노출하고 적재 가능한 Codex 세션을 백필. rollout 복제본은 건너뜀 |
+| hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 적재 워커와 정기 브리핑 실행 |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 수동 | 오래된 Claude Code 세션 lazy 백필 |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 수동 | 오래된 Kimi Code 세션 lazy 백필 |
 | shared | `agents/shared/boring_config.py` | 어댑터 import | `boring.json` 정책 로더 |
@@ -418,11 +457,12 @@ curl -s -X POST http://localhost:7700/mcp \
 | 증상 | 해결 |
 |---|---|
 | `make up` 실패 | Ollama 확인: `curl -sf http://127.0.0.1:11434/api/tags` |
+| LM Studio 선택 후 `make up` 실패 | LM Studio 로컬 서버를 켜고 `boring.json`의 chat/embedding 모델 id를 정확히 로드한 뒤 `make verify-llm` 실행 |
 | 포트 충돌 | `lsof -i :7700 -i :5432 -i :11434` |
 | 두 번째 `make up` / 재클론 실패 | 먼저 `make down`을 실행하세요 — 컨테이너 이름이 고정이고 `127.0.0.1:7700` / `:5432`에 바인딩하므로, 두 번째 스택이 실행 중인 스택과 충돌합니다 |
 | agent 시작 안 됨 | `BORING_CORE_ONLY=1 make up`로 core-only 실행. hermes 이미지는 별도 빌드 필요 |
 | Linux: 컨테이너가 호스트 Ollama에 접근 못 함 | Linux에서는 Ollama가 기본적으로 `127.0.0.1`에 바인딩하므로, `host.docker.internal`이 해석되더라도 컨테이너는 닫힌 포트에 부딪힙니다. Ollama를 모든 인터페이스에 바인딩하고(`OLLAMA_HOST=0.0.0.0:11434` 후 재시작) 그리고/또는 호스트 방화벽에서 docker 브리지를 허용하세요 |
-| 정상인가? / 마지막 distill이 됐나? | `make doctor` — 빠른 상태 + 마지막 적재 점검 |
+| 정상인가? / 마지막 distill이 됐나? | `make doctor` — 빠른 상태 + 마지막 적재 + Codex 워커/큐 점검 |
 
 ---
 
