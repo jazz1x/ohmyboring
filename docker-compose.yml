@@ -90,12 +90,17 @@ services:
       # Legacy alias: some hermes-agent cron scripts (e.g. ~/.hermes/scripts/briefing.py)
       # still read DRUDGE_URL. Keep both names populated so existing scripts keep working.
       DRUDGE_URL: http://boring-drudge:7700
+      # Tell host-side adapters they are running inside the hermes container and where the repo is.
+      BORING_IN_CONTAINER: "1"
+      BORING_HOME: /host/oh-my-boring
     volumes:
       - ${HOME}/.hermes:/opt/data         # persists config / credentials / session memory (autonomy-augmentation layer)
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: ingest-worker.py only globs /host/.claude/projects)
+      - ${HOME}/.codex:/host/.codex:ro      # Codex session transcripts for codex-memory-ingest-worker
       - ${HOME}/.cache/boring-distill:/host/.cache/boring-distill  # shared SessionEnd hook markers (visible to host and container)
       - ./vault:/vault:ro                   # read-only vault so ingest-worker can verify session-id markers in wiki notes
       - ./boring.json:/host/boring.json:ro  # policy config for ingest-worker.py (note_lang, repo rules)
+      - .:/host/oh-my-boring:ro             # repo root so hermes cron can run the canonical ingest-worker.py
     extra_hosts:
       - "host.docker.internal:host-gateway"   # Mac: reach host Ollama (gemma4)
     command: ["gateway", "run"]

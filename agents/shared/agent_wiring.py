@@ -455,11 +455,162 @@ def _sync_hermes_cron_jobs() -> dict:
             jobs.append(job)
             changed = True
 
+    if _ensure_memory_ingest_worker(jobs, tz, now, BORING_HOME):
+        changed = True
+
+    if _ensure_codex_memory_ingest_worker(jobs, tz, now, BORING_HOME):
+        changed = True
+
     data["jobs"] = jobs
     data["updated_at"] = now.isoformat()
     if changed:
         _save_json(jobs_path, data)
     return {"changed": changed, "jobs_count": len(jobs)}
+
+
+def _ensure_memory_ingest_worker(
+    jobs: list[dict],
+    tz: datetime.timezone,
+    now: datetime.datetime,
+    boring_home: str,
+) -> bool:
+    """Ensure the autonomous 20-minute session-ingestion worker job exists and points to the
+    canonical repo script. This job is intentionally not exposed in boring.json hermes_cron_jobs
+    because it is infrastructure, not user scheduling.
+    """
+    # The hermes-agent container always mounts the repo root at /host/oh-my-boring.
+    script = "/host/oh-my-boring/agents/hermes/ingest-worker.py"
+    desired_schedule = {"kind": "interval", "minutes": 20, "display": "every 20m"}
+    existing = next((j for j in jobs if j.get("name") == "memory-ingest-worker"), None)
+    if existing:
+        needs_update = (
+            existing.get("script") != script
+            or existing.get("schedule") != desired_schedule
+            or not existing.get("enabled", True)
+            or existing.get("skill") != "memory-ingest"
+            or existing.get("no_agent", True) is not False
+        )
+        if not needs_update:
+            return False
+        existing["script"] = script
+        existing["schedule"] = desired_schedule
+        existing["schedule_display"] = "every 20m"
+        existing["enabled"] = True
+        existing["state"] = "scheduled"
+        existing["skills"] = ["memory-ingest"]
+        existing["skill"] = "memory-ingest"
+        existing["no_agent"] = False
+        existing["next_run_at"] = (now + datetime.timedelta(minutes=1)).isoformat()
+        existing["paused_at"] = None
+        existing["paused_reason"] = None
+        return True
+
+    jobs.append(
+        {
+            "id": secrets.token_hex(8),
+            "name": "memory-ingest-worker",
+            "prompt": "",
+            "skills": ["memory-ingest"],
+            "skill": "memory-ingest",
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "script": script,
+            "no_agent": False,
+            "context_from": None,
+            "schedule": desired_schedule,
+            "schedule_display": "every 20m",
+            "repeat": {"times": None, "completed": 0},
+            "enabled": True,
+            "state": "scheduled",
+            "paused_at": None,
+            "paused_reason": None,
+            "created_at": now.isoformat(),
+            "next_run_at": (now + datetime.timedelta(minutes=1)).isoformat(),
+            "last_run_at": None,
+            "last_status": None,
+            "last_error": None,
+            "last_delivery_error": None,
+            "deliver": "local",
+            "origin": None,
+            "enabled_toolsets": None,
+            "workdir": None,
+            "profile": None,
+        }
+    )
+    return True
+
+
+def _ensure_codex_memory_ingest_worker(
+    jobs: list[dict],
+    tz: datetime.timezone,
+    now: datetime.datetime,
+    boring_home: str,
+) -> bool:
+    """Ensure the autonomous 20-minute Codex session-ingestion worker exists.
+
+    Mirrors the Claude memory-ingest-worker but targets Codex JSONL transcripts.
+    """
+    script = "/host/oh-my-boring/agents/codex/collect-sessions.py"
+    desired_schedule = {"kind": "interval", "minutes": 20, "display": "every 20m"}
+    existing = next((j for j in jobs if j.get("name") == "codex-memory-ingest-worker"), None)
+    if existing:
+        needs_update = (
+            existing.get("script") != script
+            or existing.get("schedule") != desired_schedule
+            or not existing.get("enabled", True)
+            or existing.get("skill") != "memory-ingest"
+            or existing.get("no_agent", True) is not False
+        )
+        if not needs_update:
+            return False
+        existing["script"] = script
+        existing["schedule"] = desired_schedule
+        existing["schedule_display"] = "every 20m"
+        existing["enabled"] = True
+        existing["state"] = "scheduled"
+        existing["skills"] = ["memory-ingest"]
+        existing["skill"] = "memory-ingest"
+        existing["no_agent"] = False
+        existing["next_run_at"] = (now + datetime.timedelta(minutes=1)).isoformat()
+        existing["paused_at"] = None
+        existing["paused_reason"] = None
+        return True
+
+    jobs.append(
+        {
+            "id": secrets.token_hex(8),
+            "name": "codex-memory-ingest-worker",
+            "prompt": "",
+            "skills": ["memory-ingest"],
+            "skill": "memory-ingest",
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "script": script,
+            "no_agent": False,
+            "context_from": None,
+            "schedule": desired_schedule,
+            "schedule_display": "every 20m",
+            "repeat": {"times": None, "completed": 0},
+            "enabled": True,
+            "state": "scheduled",
+            "paused_at": None,
+            "paused_reason": None,
+            "created_at": now.isoformat(),
+            "next_run_at": (now + datetime.timedelta(minutes=1)).isoformat(),
+            "last_run_at": None,
+            "last_status": None,
+            "last_error": None,
+            "last_delivery_error": None,
+            "deliver": "local",
+            "origin": None,
+            "enabled_toolsets": None,
+            "workdir": None,
+            "profile": None,
+        }
+    )
+    return True
 
 
 _HERMES_HINT = (

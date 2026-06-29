@@ -51,6 +51,8 @@ def _source_dirs():
         dirs = [os.path.expanduser("~/.claude/projects")]
     if not _IN_CONTAINER:
         return dirs
+    # Inside the hermes-agent container, host home is bind-mounted under /host, but config paths
+    # expand to the container's own home (e.g. /root). Rewrite them to the /host mirror.
     home = os.path.expanduser("~")
     mapped = []
     for d in dirs:
