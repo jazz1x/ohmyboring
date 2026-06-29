@@ -5,8 +5,10 @@ Reads boring.json to decide which agents are enabled, then idempotently
 configures each agent's settings file. Backups are created as `.omb-bak`.
 """
 import argparse
+import datetime
 import json
 import os
+import secrets
 import shutil
 import sys
 from pathlib import Path
@@ -299,6 +301,67 @@ def _install_hermes_weekly_briefing(boring_home: str | None = None) -> None:
     shutil.copy2(src, dst)
 
 
+def _ensure_hermes_cron_job(name: str, script: str, schedule_expr: str) -> bool:
+    """Idempotently add a hermes-agent cron job in ~/.hermes/cron/jobs.json.
+
+    Matches existing jobs by name. Preserves all other jobs and their state.
+    Returns True if the file was modified.
+    """
+    jobs_path = Path(os.path.expanduser("~/.hermes/cron/jobs.json"))
+    jobs_path.parent.mkdir(parents=True, exist_ok=True)
+    data = _load_json(jobs_path)
+    jobs = data.get("jobs", [])
+
+    if any(j.get("name") == name for j in jobs):
+        return False
+
+    # Reuse delivery target from morning-briefing if it exists, otherwise local.
+    deliver = "local"
+    for j in jobs:
+        if j.get("name") == "morning-briefing":
+            deliver = j.get("deliver", "local")
+            break
+
+    tz = datetime.timezone(datetime.timedelta(hours=9))
+    now = datetime.datetime.now(tz)
+    job = {
+        "id": secrets.token_hex(8),
+        "name": name,
+        "prompt": "",
+        "skills": [],
+        "skill": None,
+        "model": None,
+        "provider": None,
+        "base_url": None,
+        "script": script,
+        "no_agent": True,
+        "context_from": None,
+        "schedule": {"kind": "cron", "expr": schedule_expr, "display": schedule_expr},
+        "schedule_display": schedule_expr,
+        "repeat": {"times": None, "completed": 0},
+        "enabled": True,
+        "state": "scheduled",
+        "paused_at": None,
+        "paused_reason": None,
+        "created_at": now.isoformat(),
+        "next_run_at": now.isoformat(),
+        "last_run_at": None,
+        "last_status": None,
+        "last_error": None,
+        "last_delivery_error": None,
+        "deliver": deliver,
+        "origin": None,
+        "enabled_toolsets": None,
+        "workdir": None,
+        "profile": None,
+    }
+    jobs.append(job)
+    data["jobs"] = jobs
+    data["updated_at"] = now.isoformat()
+    _save_json(jobs_path, data)
+    return True
+
+
 _HERMES_HINT = (
     "At the start of each task, call ohmyboring/context with the current project/repo slug "
     "to load the most important memory first (decisions, risks, facts, glossary). "
@@ -359,7 +422,15 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
         _write_text_atomic(path, body)
         _install_hermes_briefing(boring_home)
         _install_hermes_weekly_briefing(boring_home)
-        return {"agent": "hermes-agent", "path": str(path), "changed": True}
+        cron_changed = _ensure_hermes_cron_job(
+            "weekly-briefing", "weekly-briefing.py", "0 9 * * 1"
+        )
+        return {
+            "agent": "hermes-agent",
+            "path": str(path),
+            "changed": True,
+            "cron_changed": cron_changed,
+        }
 
     lines = text.splitlines()
     mcp_idx = None
@@ -387,7 +458,16 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
     _write_text_atomic(path, "\n".join(lines) + "\n")
     _install_hermes_briefing(boring_home)
     _install_hermes_weekly_briefing(boring_home)
-    return {"agent": "hermes-agent", "path": str(path), "changed": changed}
+    cron_changed = _ensure_hermes_cron_job(
+        "weekly-briefing", "weekly-briefing.py", "0 9 * * 1"
+    )
+    changed = changed or cron_changed
+    return {
+        "agent": "hermes-agent",
+        "path": str(path),
+        "changed": changed,
+        "cron_changed": cron_changed,
+    }
 
 
 def install(enabled_agents, server_name, server_config, boring_home: str | None = None):
