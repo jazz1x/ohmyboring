@@ -7,6 +7,7 @@
 #   4) py-compile — syntax gate for all Python touched by pre-commit
 #   5) py-unit   — network-free Python regression tests (incl. destructive-path planners)
 #   6) sh-unit   — destructive shell-path guardrails (restore-db drop ordering)
+#   7) sh-unit   — readiness gate guardrails (doctor --strict exit semantics)
 # No bypassing (git commit --no-verify) — on failure, fix the root cause (don't paper over the symptom).
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,4 +33,6 @@ python3 scripts/test_data_steward.py
 python3 scripts/test_retention.py
 echo "6) shell destructive-path guardrails (restore-db)…"
 sh scripts/test_restore_db.sh
+echo "7) shell readiness gate guardrails (doctor --strict)…"
+sh scripts/test_doctor.sh
 echo "✅ 구조 게이트 통과 — 컴파일러/clippy/test + Python adapters 무위반."

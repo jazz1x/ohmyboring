@@ -278,6 +278,43 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
         collect.INCLUDE_SUBAGENTS = old_include
 
 
+def test_status_strict_fails_when_host_worker_missing():
+    old_min_kb = collect.MIN_KB
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "sessions"
+            source.mkdir()
+            collect.MIN_KB = 0
+            _write_codex_session(source / "todo.jsonl")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(collect, "_source_dir", return_value=str(source)),
+                mock.patch.object(collect, "_hermes_worker_status", return_value={"found": False}),
+                mock.patch.object(
+                    collect,
+                    "_host_worker_status",
+                    return_value={
+                        "kind": "launchd",
+                        "found": False,
+                        "loaded": False,
+                        "path": "/tmp/com.ohmyboring.codex-ingest.plist",
+                    },
+                ),
+                mock.patch.object(collect.sys, "stdout", stdout),
+                mock.patch.object(collect.sys, "stderr", stderr),
+            ):
+                rc = collect.main(["--status", "--strict"])
+
+            assert rc == 1
+            assert "host_worker found=false loaded=false kind=launchd" in stdout.getvalue()
+            assert "readiness failed: host worker is not installed/loaded" in stderr.getvalue()
+    finally:
+        collect.MIN_KB = old_min_kb
+
+
 if __name__ == "__main__":
     test_large_raw_parse_short_marks_retry()
     test_small_raw_parse_short_marks_done()
@@ -285,4 +322,5 @@ if __name__ == "__main__":
     test_collect_scan_classifies_queue_marked_rollout_and_subagent()
     test_collect_scan_reoffers_stale_pending_but_skips_fresh_pending()
     test_status_mode_reports_queue_worker_and_note_without_mutation()
+    test_status_strict_fails_when_host_worker_missing()
     print("ok - codex adapter")

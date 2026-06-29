@@ -7,9 +7,10 @@
 #
 # Read-only: GET /health, GET /api/tags, `docker compose ps`, mtime reads,
 # and Codex queue/worker status scans. No mutation.
-# Exit non-zero only when drudge is down (the one hard dependency for the write door); the
-# other lines are advisory so the user sees the WHOLE picture in one run, not just the first
-# failure. POSIX sh (dash) has no pipefail → every check reports its own result explicitly.
+# Default mode exits non-zero only when drudge is down; the other lines are advisory so the
+# user sees the WHOLE picture in one run, not just the first failure. Use --strict for the
+# release/briefing readiness gate: every failed dependency/check makes the command fail.
+# POSIX sh (dash) has no pipefail → every check reports its own result explicitly.
 set -u
 
 # Defaults mirror the hook (distill-session.py): BORING_URL + BORING_HOME + the marker dir,
@@ -26,9 +27,11 @@ OLLAMA_HOST=$(printf '%s' "$OLLAMA_HOST" | sed 's#host\.docker\.internal#localho
 
 # --fix mode: attempt safe auto-repair for mechanical problems, then re-run read-only.
 FIX=0
+STRICT=0
 for arg in "$@"; do
     case "$arg" in
         --fix) FIX=1 ;;
+        --strict) STRICT=1 ;;
     esac
 done
 
@@ -38,6 +41,9 @@ failed_hooks=0
 failed_engine=0
 failed_ollama=0
 failed_containers=0
+failed_note=0
+failed_marker=0
+failed_codex=0
 
 ok()   { echo "✓ $1"; }
 bad()  { echo "✗ $1"; }
@@ -165,7 +171,7 @@ if command -v docker >/dev/null 2>&1; then
         bad "no compose containers found in $BORING_HOME (stack not started? set BORING_HOME?)"; failed_containers=1
     fi
 else
-    bad "docker not on PATH — can't inspect container status"
+    bad "docker not on PATH — can't inspect container status"; failed_containers=1
 fi
 
 # (d1) Newest distilled note — proof the write door produced output. The hook writes notes
@@ -175,7 +181,7 @@ if [ -n "$note" ]; then
     ok "newest distilled note: $(mtime_human "$note")"
     echo "    $note"
 else
-    bad "no distilled notes in $BORING_HOME/vault/wiki/ — nothing written yet"
+    bad "no distilled notes in $BORING_HOME/vault/wiki/ — nothing written yet"; failed_note=1
 fi
 
 # (d2) Newest SessionEnd hook marker — proof the hook itself fired (it stamps MARK_DIR after
@@ -185,7 +191,7 @@ if [ -n "$mark" ]; then
     ok "newest Claude/Kimi SessionEnd hook marker: $(mtime_human "$mark")"
     echo "    $mark"
 else
-    bad "no Claude/Kimi hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"
+    bad "no Claude/Kimi hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"; failed_marker=1
 fi
 
 # (d3) Codex worker/queue status — Codex has no SessionEnd hook, so the write-door
@@ -194,10 +200,15 @@ fi
 codex_status="$BORING_HOME/agents/codex/collect-sessions.py"
 if [ -f "$codex_status" ]; then
     ok "Codex session ingestion status:"
-    BORING_HOME="$BORING_HOME" BORING_VAULT_DIR="${BORING_VAULT_DIR:-$BORING_HOME/vault}" python3 "$codex_status" --status \
-        || bad "Codex session ingestion status failed"
+    codex_args="--status"
+    [ "$STRICT" -eq 1 ] && codex_args="--status --strict"
+    if BORING_HOME="$BORING_HOME" BORING_VAULT_DIR="${BORING_VAULT_DIR:-$BORING_HOME/vault}" python3 "$codex_status" $codex_args; then
+        :
+    else
+        bad "Codex session ingestion status failed"; failed_codex=1
+    fi
 else
-    bad "Codex collector not found at $codex_status"
+    bad "Codex collector not found at $codex_status"; failed_codex=1
 fi
 
 if [ "$FIX" -eq 1 ]; then
@@ -210,10 +221,23 @@ if [ "$FIX" -eq 1 ]; then
     [ "$failed_containers" -eq 1 ] && fix_containers
     echo
     echo "Re-running doctor to verify..."
+    if [ "$STRICT" -eq 1 ]; then
+        exec "$0" --strict
+    fi
     exec "$0"
 fi
 
 echo
+if [ "$STRICT" -eq 1 ]; then
+    failures="${failed_env}${failed_hooks}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}"
+    if [ "$failures" = "00000000" ]; then
+        ok "readiness: all doctor checks passed — briefing/write-door dependencies are ready."
+        exit 0
+    fi
+    bad "readiness: one or more doctor checks failed — do not rely on tomorrow's briefing until fixed."
+    exit 1
+fi
+
 if [ "$drudge_down" -eq 0 ]; then
     ok "doctor: drudge is up — the write door is open."
     exit 0

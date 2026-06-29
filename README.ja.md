@@ -24,6 +24,7 @@ git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
 make doctor         # スタック、フック、Codex ワーカー/キュー、最終取り込みを確認
+make readiness      # 朝ブリーフィングに頼る前の strict ゲート
 make collect N=20   # 過去の Claude Code セッションで vault を埋める（新規クローンは空）
 make ask Q="docker build cache の問題、どう直したっけ？"
 ```
@@ -166,6 +167,7 @@ curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
 make verify-llm
 make up
 make doctor
+make readiness
 ```
 
 モデル id は LM Studio が返す値と完全に一致している必要があります。embedding モデルが `bge-m3` でない場合は、そのモデルの次元に合わせて `llm.embed_dim` を変更し、vector モードを信頼する前に `make reset` を実行します。全体の手順は [LM Studio ランブック](docs/runbooks/lmstudio.ja.md) を参照してください。
@@ -203,6 +205,7 @@ make doctor
 | `make ollama` | Ollama 実行確認（必要ならバックグラウンド起動） |
 | `make verify-llm` | provider 到達性、ロード済みモデル id、embedding 次元を確認 |
 | `make doctor` | スタック、フック、最終取り込み、Codex ワーカー/キュー状態を診断 |
+| `make readiness` | ブリーフィング前の strict ゲート。doctor finding が 1 つでもあれば失敗 |
 | `make ask Q="..."` | recall + 要約を一度に実行 |
 | `make sync` | vault の再取り込み |
 | `make remember M="text"` | 1 行ノートを書き込み |
@@ -433,6 +436,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | agent が起動しない | `BORING_CORE_ONLY=1 make up` で core-only 実行。hermes イメージは別途ビルドが必要 |
 | Linux: コンテナがホストの Ollama に到達できない | Linux では Ollama がデフォルトで `127.0.0.1` にバインドするため、`host.docker.internal` が解決できてもコンテナは閉じたポートに当たります。Ollama を全インターフェースにバインドし（`OLLAMA_HOST=0.0.0.0:11434` の後に再起動）、かつ/または ホストのファイアウォールで docker ブリッジを許可してください |
 | 正常か？ / 最後の distill は通ったか？ | `make doctor` — ヘルス + 最終取り込み + Codex ワーカー/キューの簡易チェック |
+| 明日の朝ブリーフィングを信頼できる？ | `make readiness` — strict ゲート。フック/モデル/コンテナ/取り込み finding がすべて通る必要があります |
 
 ---
 

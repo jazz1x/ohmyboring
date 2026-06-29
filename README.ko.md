@@ -24,6 +24,7 @@ git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
 make doctor         # 스택, 훅, Codex 워커/큐, 마지막 적재 확인
+make readiness      # 아침 브리핑 의존 전 strict 게이트
 make collect N=20   # 과거 Claude Code 세션으로 vault 채우기 (새 클론은 비어 있음)
 make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 ```
@@ -166,6 +167,7 @@ curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
 make verify-llm
 make up
 make doctor
+make readiness
 ```
 
 모델 id는 LM Studio가 반환한 값과 정확히 같아야 합니다. embedding 모델이 `bge-m3`가 아니라면 해당 모델 차원에 맞게 `llm.embed_dim`을 바꾸고, vector 모드를 믿기 전에 `make reset`을 실행해야 합니다. 전체 체크리스트는 [LM Studio 런북](docs/runbooks/lmstudio.ko.md)을 참고하세요.
@@ -233,6 +235,7 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 | `make ollama` | Ollama 실행 확인(필요시 백그라운드 시작) |
 | `make verify-llm` | provider 접근성, 로드된 모델 id, embedding 차원 확인 |
 | `make doctor` | 스택, 훅, 마지막 적재, Codex 워커/큐 상태 진단 |
+| `make readiness` | 브리핑 전 strict 게이트; doctor finding이 하나라도 있으면 실패 |
 | `make ask Q="..."` | recall + 요약 한 번에 |
 | `make sync` | vault 재적재 |
 | `make remember M="text"` | 한 줄 노트 작성 |
@@ -463,6 +466,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | agent 시작 안 됨 | `BORING_CORE_ONLY=1 make up`로 core-only 실행. hermes 이미지는 별도 빌드 필요 |
 | Linux: 컨테이너가 호스트 Ollama에 접근 못 함 | Linux에서는 Ollama가 기본적으로 `127.0.0.1`에 바인딩하므로, `host.docker.internal`이 해석되더라도 컨테이너는 닫힌 포트에 부딪힙니다. Ollama를 모든 인터페이스에 바인딩하고(`OLLAMA_HOST=0.0.0.0:11434` 후 재시작) 그리고/또는 호스트 방화벽에서 docker 브리지를 허용하세요 |
 | 정상인가? / 마지막 distill이 됐나? | `make doctor` — 빠른 상태 + 마지막 적재 + Codex 워커/큐 점검 |
+| 내일 아침 브리핑을 믿어도 되나? | `make readiness` — strict 게이트; 훅/모델/컨테이너/적재 finding이 모두 통과해야 함 |
 
 ---
 
