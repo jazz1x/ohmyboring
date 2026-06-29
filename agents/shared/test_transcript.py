@@ -89,6 +89,53 @@ def test_extract_kimi_wire_user_and_assistant():
         os.unlink(path)
 
 
+def test_extract_codex_jsonl_user_and_assistant():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        _write(
+            f.name,
+            [
+                {
+                    "type": "session_meta",
+                    "payload": {"cwd": "/tmp/project", "id": "session-123"},
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "# AGENTS.md instructions\nbe brief"},
+                            {"type": "input_text", "text": "what is the migration plan?"},
+                        ],
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "use the new schema."},
+                            {"type": "reasoning", "text": "internal thought"},
+                        ],
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "last_agent_message": "done"},
+                },
+            ],
+        )
+        path = f.name
+    try:
+        out = transcript.extract(path, "codex-jsonl")
+        assert "what is the migration plan?" in out
+        assert "use the new schema" in out
+        assert "done" in out
+        assert "AGENTS.md" not in out
+        assert "internal thought" not in out
+    finally:
+        os.unlink(path)
+
+
 def test_extract_unknown_format_raises():
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         f.write("x")
@@ -108,5 +155,6 @@ if __name__ == "__main__":
     test_extract_claude_jsonl_text_and_list_content()
     test_extract_claude_jsonl_ignores_malformed_lines()
     test_extract_kimi_wire_user_and_assistant()
+    test_extract_codex_jsonl_user_and_assistant()
     test_extract_unknown_format_raises()
     print("ok - transcript parser")

@@ -6,6 +6,25 @@ ohmyboring wires the `ohmyboring` MCP server automatically when
 
 No hooks are needed — Codex calls MCP tools on demand.
 
+## Session ingestion
+
+Codex does not expose a SessionEnd hook, so sessions are ingested by a cron
+worker instead:
+
+- `agents/codex/collect-sessions.py` scans `~/.codex/sessions/**/*.jsonl`
+- It skips subagent/guardian roll-outs by default and processes one un-ingested
+  session per tick.
+- When `hermes-agent` is enabled, `install.sh` adds a `codex-memory-ingest-worker`
+  job that runs every 20 minutes.
+- On the host you can backfill manually:
+
+```bash
+COLLECT_LIMIT=10 python3 agents/codex/collect-sessions.py
+```
+
+Session markers live in `~/.cache/boring-distill/codex-<sid>.*` and are shared
+with the rest of the pipeline.
+
 ## Manual setup
 
 If you prefer to wire it yourself, create or edit `~/.codex/mcp.json`:

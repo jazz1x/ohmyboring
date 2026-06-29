@@ -104,18 +104,28 @@ def test_wire_hermes_adds_hint_and_weekly():
     with tempfile.TemporaryDirectory() as d, mock.patch.object(
         agent_wiring, "_sync_hermes_cron_jobs", return_value={"changed": False, "jobs_count": 3}
     ) as mock_cron:
+        fake_home = Path(d) / "home"
+
+        def fake_expanduser(value):
+            if value == "~":
+                return str(fake_home)
+            if value.startswith("~/"):
+                return str(fake_home / value[2:])
+            return value
+
         home = Path(d) / "omb"
         scripts = home / "agents" / "hermes"
         scripts.mkdir(parents=True)
         (scripts / "briefing.py").write_text("# stub", encoding="utf-8")
         (scripts / "weekly-briefing.py").write_text("# stub", encoding="utf-8")
         cfg = Path(d) / "config.yaml"
-        result = agent_wiring.wire_hermes(cfg, boring_home=str(home))
+        with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser):
+            result = agent_wiring.wire_hermes(cfg, boring_home=str(home))
         assert result["changed"] is True
         text = cfg.read_text(encoding="utf-8")
         assert "environment_hint:" in text
         assert "ohmyboring/context" in text
-        assert (Path(os.path.expanduser("~/.hermes/scripts")) / "weekly-briefing.py").exists()
+        assert (fake_home / ".hermes" / "scripts" / "weekly-briefing.py").exists()
         assert mock_cron.called is True
 
 
@@ -144,11 +154,20 @@ def test_sync_hermes_cron_jobs_adds_managed_job():
             result = agent_wiring._sync_hermes_cron_jobs()
         assert result["changed"] is True
         saved = mock_save.call_args[0][1]
-        assert len(saved["jobs"]) == 2
+        # weekly-briefing (managed from config) + morning-briefing (preserved) + memory-ingest-worker + codex-memory-ingest-worker
+        assert len(saved["jobs"]) == 4
         weekly = next(j for j in saved["jobs"] if j["name"] == "weekly-briefing")
         assert weekly["script"] == "weekly-briefing.py"
         assert weekly["enabled"] is True
         assert weekly["deliver"] == "slack:test"
+        worker = next(j for j in saved["jobs"] if j["name"] == "memory-ingest-worker")
+        assert worker["script"] == "/host/oh-my-boring/agents/hermes/ingest-worker.py"
+        assert worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
+        assert worker["skill"] == "memory-ingest"
+        codex_worker = next(j for j in saved["jobs"] if j["name"] == "codex-memory-ingest-worker")
+        assert codex_worker["script"] == "/host/oh-my-boring/agents/codex/collect-sessions.py"
+        assert codex_worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
+        assert codex_worker["skill"] == "memory-ingest"
 
 
 if __name__ == "__main__":
