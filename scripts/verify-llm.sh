@@ -130,7 +130,7 @@ esac
 # (3) embed_dim sanity check against known models.
 if [ "$EMBED_MODEL" = "bge-m3" ]; then
     KNOWN_DIM=1024
-elif [ "$EMBED_MODEL" = "nomic-embed-text" ]; then
+elif [ "$EMBED_MODEL" = "nomic-embed-text" ] || [ "$EMBED_MODEL" = "text-embedding-nomic-embed-text-v1.5" ]; then
     KNOWN_DIM=768
 elif [ "$EMBED_MODEL" = "text-embedding-3-small" ]; then
     KNOWN_DIM=1536
