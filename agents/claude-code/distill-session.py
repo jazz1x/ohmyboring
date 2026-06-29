@@ -69,8 +69,7 @@ def main():
         return
 
     repo = repo_slug(cwd)
-    session_source = {"adapter": "claude-code", "transcript_path": transcript_path, "cwd": cwd}
-    if distill_and_remember(text, origin, repo, session_id, session_source):
+    if distill_and_remember(text, origin, repo, session_id):
         _mark(session_id)
         print("[omb-distill] remembered", file=sys.stderr)
     else:

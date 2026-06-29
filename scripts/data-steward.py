@@ -4,7 +4,7 @@
 Focuses on data-management hygiene that automated sync cannot fix by itself:
   - project/repo slug variants (`org/repo` vs `repo`)
   - placeholder tags (`_`, `pr_`, `slack_`)
-  - missing lineage (`sources: []` on session-distilled notes)
+  - weak session claims and likely zombie rollout notes
   - generic or likely-typo project names
 
 Run dry-run (safe):
@@ -152,6 +152,14 @@ def _claim_issues(notes):
     return issues
 
 
+def _session_lineage_issues(note):
+    """Find invalid session provenance without requiring duplicated source artifacts."""
+    sid = note["fm"].get("omb_session_id")
+    if isinstance(sid, str) and sid.startswith("codex-rollout-"):
+        return [{"kind": "zombie-rollout", "omb_session_id": sid}]
+    return []
+
+
 def _issue_target_project(project: str) -> str:
     """Decide what the project should be after fixing.
 
@@ -253,8 +261,6 @@ def main():
     for n in notes:
         proj = n["fm"].get("project") or ""
         tags = n["fm"].get("tags") or []
-        sources = n["fm"].get("sources") or []
-        sid = n["fm"].get("omb_session_id")
 
         canonical = boring_config.canonical_repo(proj)
         if proj and canonical != proj:
@@ -273,8 +279,9 @@ def main():
         bad_tags = [t for t in tags if t in PLACEHOLDER_TAGS]
         if bad_tags:
             note_issues[n["path"].name].append({"kind": "placeholder-tags", "tags": bad_tags})
-        if sid and not sources:
-            note_issues[n["path"].name].append({"kind": "missing-source", "omb_session_id": sid})
+        lineage_issues = _session_lineage_issues(n)
+        if lineage_issues:
+            note_issues[n["path"].name].extend(lineage_issues)
 
     if args.json:
         print(
@@ -323,8 +330,8 @@ def main():
                     print(f"    - generic project: {issue['value']!r}")
                 elif issue["kind"] == "placeholder-tags":
                     print(f"    - placeholder tags: {issue['tags']}")
-                elif issue["kind"] == "missing-source":
-                    print(f"    - missing sources for session {issue['omb_session_id']}")
+                elif issue["kind"] == "zombie-rollout":
+                    print(f"    - zombie rollout session {issue['omb_session_id']}")
     else:
         print("✅ No structural hygiene issues found.")
 

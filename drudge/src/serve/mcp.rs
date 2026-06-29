@@ -131,7 +131,7 @@ fn mcp_tools_list() -> Value {
                     "concepts": {"type": "array", "items": {"type": "string"}, "description": "key technical concepts/patterns (≤6)"},
                     "origin": {"type": "string", "enum": ["personal", "company", "mirror", "community"], "description": "default personal"},
                     "repo": {"type": "string", "description": "optional repo slug → becomes the project + a repo/<slug> tag"},
-                    "sources": {"type": "array", "items": {"type": "string"}, "description": "vault-local evidence paths for this note, e.g. raw/session-manifests/<id>.md"},
+                    "sources": {"type": "array", "items": {"type": "string"}, "description": "optional vault-local evidence paths for this note, e.g. raw/<file>.md"},
                     "omb_session_id": {"type": "string", "description": "optional ephemeral ingestion marker — include only when requested by the ingestion worker"},
                     "claims": {
                         "type": "array",
@@ -977,10 +977,15 @@ struct RememberNote {
 /// Maximum cosine distance for a duplicate (1.0 - cosine_similarity). 0.07 ≈ similarity 0.93.
 const DUPLICATE_MAX_DIST: f64 = 0.07;
 
+const SESSION_DUP_TITLE_MIN: (usize, usize) = (1, 5);
+const SESSION_DUP_BODY_MIN: (usize, usize) = (1, 5);
+const SESSION_DUP_SEMANTIC_MIN: (usize, usize) = (9, 20);
+
 /// Deduplication gate for `remember`. Checks, in order:
 ///   1. Same `omb_session_id` already stored (same session distilled twice).
 ///   2. Case-insensitive exact title match.
-///   3. Embedding similarity within `DUPLICATE_MAX_DIST` (when pgvector is on).
+///   3. Stack-free session-note similarity (different rollout ids, same distilled event).
+///   4. Embedding similarity within `DUPLICATE_MAX_DIST` (when pgvector is on).
 async fn check_duplicate(
     store: Option<&crate::store::Store>,
     llm: &crate::llm::Llm,
@@ -1002,7 +1007,7 @@ async fn check_duplicate(
             continue;
         }
         let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let (yaml, _) = crate::vault::split_frontmatter(&content).unwrap_or(("", ""));
+        let (yaml, existing_body) = crate::vault::split_frontmatter(&content).unwrap_or(("", ""));
         // YAML parse is cheap for one note; reuse FrontMatter deserialization.
         let fm: crate::frontmatter::FrontMatter = serde_yaml::from_str(yaml).unwrap_or_default();
         if let Some(sid) = target_session
@@ -1013,6 +1018,9 @@ async fn check_duplicate(
         if !target_title.is_empty()
             && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title
         {
+            return Ok(Some(path.to_string_lossy().into_owned()));
+        }
+        if probable_session_duplicate(note, &fm, existing_body) {
             return Ok(Some(path.to_string_lossy().into_owned()));
         }
     }
@@ -1028,6 +1036,98 @@ async fn check_duplicate(
     }
 
     Ok(None)
+}
+
+fn probable_session_duplicate(
+    note: &RememberNote,
+    existing_fm: &crate::frontmatter::FrontMatter,
+    existing_body: &str,
+) -> bool {
+    if note.front.omb_session_id.is_none() || existing_fm.omb_session_id.is_none() {
+        return false;
+    }
+    let title_match = token_jaccard_at_least(
+        note.front.title.as_deref().unwrap_or(""),
+        existing_fm.title.as_deref().unwrap_or(""),
+        SESSION_DUP_TITLE_MIN,
+    );
+    let body_match = token_jaccard_at_least(&note.body, existing_body, SESSION_DUP_BODY_MIN);
+    let semantic_match = token_overlap_min_at_least(
+        &frontmatter_semantic_text(&note.front),
+        &frontmatter_semantic_text(existing_fm),
+        SESSION_DUP_SEMANTIC_MIN,
+    );
+
+    semantic_match && (title_match || body_match)
+}
+
+fn frontmatter_semantic_text(fm: &crate::frontmatter::FrontMatter) -> String {
+    let mut parts = Vec::new();
+    parts.extend(fm.tools.iter().map(String::as_str));
+    parts.extend(fm.concepts.iter().map(String::as_str));
+    parts.extend(
+        fm.tags
+            .iter()
+            .filter(|tag| !tag.starts_with("repo/"))
+            .map(String::as_str),
+    );
+    for claim in &fm.claims {
+        parts.push(claim.subject.as_str());
+        parts.push(claim.predicate.as_str());
+        parts.push(claim.value.as_str());
+    }
+    parts.join(" ")
+}
+
+fn token_jaccard_at_least(a: &str, b: &str, min: (usize, usize)) -> bool {
+    let a = token_set(a);
+    let b = token_set(b);
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let intersection = a.intersection(&b).count();
+    let union = a.union(&b).count();
+    ratio_at_least(intersection, union, min)
+}
+
+fn token_overlap_min_at_least(a: &str, b: &str, min: (usize, usize)) -> bool {
+    let a = token_set(a);
+    let b = token_set(b);
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let intersection = a.intersection(&b).count();
+    let min_len = a.len().min(b.len());
+    ratio_at_least(intersection, min_len, min)
+}
+
+fn ratio_at_least(numerator: usize, denominator: usize, min: (usize, usize)) -> bool {
+    if denominator == 0 {
+        return false;
+    }
+    numerator.saturating_mul(min.1) >= denominator.saturating_mul(min.0)
+}
+
+fn token_set(text: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut buf = String::new();
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            for lower in ch.to_lowercase() {
+                buf.push(lower);
+            }
+        } else if !buf.is_empty() {
+            if buf.chars().count() > 1 {
+                out.insert(std::mem::take(&mut buf));
+            } else {
+                buf.clear();
+            }
+        }
+    }
+    if buf.chars().count() > 1 {
+        out.insert(buf);
+    }
+    out
 }
 
 /// Parse + normalize the `remember` arguments into a typed note. The deterministic boundary: sanitize tags,
@@ -1238,7 +1338,10 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use super::{RememberNote, apply_pii_gate, mcp_tools_list, parse_remember_note};
+    use super::{
+        RememberNote, apply_pii_gate, mcp_tools_list, parse_remember_note,
+        probable_session_duplicate,
+    };
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
     use serde_json::json;
@@ -1479,13 +1582,102 @@ mod tests {
         let args = json!({
             "title": "session note",
             "body": "## Context\nreal body",
-            "sources": [" raw/session-manifests/codex-abc.md "]
+            "sources": [" raw/evidence/codex-abc.md "]
         });
         let note = parse_remember_note(Some(&args), &BoringConfig::default()).unwrap();
         assert_eq!(
             note.front.sources,
-            vec!["raw/session-manifests/codex-abc.md".to_owned()]
+            vec!["raw/evidence/codex-abc.md".to_owned()]
         );
+    }
+
+    #[test]
+    fn session_duplicate_gate_catches_rollout_copy() {
+        let note = RememberNote {
+            front: FrontMatter {
+                title: Some("gitleaks — PR 내 secret 자동 탐지 설정".to_owned()),
+                tags: vec!["security".to_owned(), "gitleaks".to_owned()],
+                tools: vec!["gitleaks".to_owned(), "github-actions".to_owned(), "confluence".to_owned()],
+                concepts: vec!["secret_detection".to_owned(), "ci_cd_security".to_owned()],
+                claims: vec![
+                    crate::frontmatter::Claim {
+                        subject: "gitleaks".to_owned(),
+                        predicate: "detects".to_owned(),
+                        value: "secrets in PR via static analysis".to_owned(),
+                        kind: "fact".to_owned(),
+                        confidence: "certain".to_owned(),
+                    },
+                    crate::frontmatter::Claim {
+                        subject: "confluence_page".to_owned(),
+                        predicate: "created_with_format".to_owned(),
+                        value: "tech-share".to_owned(),
+                        kind: "decision".to_owned(),
+                        confidence: "certain".to_owned(),
+                    },
+                ],
+                omb_session_id: Some("codex-rollout-a".to_owned()),
+                ..Default::default()
+            },
+            body: "PR 단계에서 API 키나 토큰 같은 secret 노출을 막기 위해 gitleaks를 GitHub Actions와 연동하고 Confluence 안내 문서를 작성했다.".to_owned(),
+        };
+        let existing = FrontMatter {
+            title: Some("gitleaks: PR 내 secret 자동 탐지 가이드 작성".to_owned()),
+            tags: vec![
+                "security".to_owned(),
+                "gitleaks".to_owned(),
+                "automation".to_owned(),
+            ],
+            tools: vec!["github-actions".to_owned(), "confluence".to_owned()],
+            concepts: vec!["secret_detection".to_owned(), "static_analysis".to_owned()],
+            claims: vec![
+                crate::frontmatter::Claim {
+                    subject: "gitleaks".to_owned(),
+                    predicate: "detects".to_owned(),
+                    value: "API keys, tokens, and passwords via regex patterns".to_owned(),
+                    kind: "fact".to_owned(),
+                    confidence: "certain".to_owned(),
+                },
+                crate::frontmatter::Claim {
+                    subject: "github_action_step".to_owned(),
+                    predicate: "implementation".to_owned(),
+                    value: "gitleaks/gitleaks-action".to_owned(),
+                    kind: "fact".to_owned(),
+                    confidence: "certain".to_owned(),
+                },
+            ],
+            omb_session_id: Some("codex-rollout-b".to_owned()),
+            ..Default::default()
+        };
+        let existing_body = "PR 과정에서 비밀번호나 API 키 등 secret 노출을 방지하기 위해 gitleaks 도구 도입과 Confluence 기술 공유 가이드를 작성했다.";
+
+        assert!(probable_session_duplicate(&note, &existing, existing_body));
+    }
+
+    #[test]
+    fn session_duplicate_gate_ignores_unrelated_sessions() {
+        let note = RememberNote {
+            front: FrontMatter {
+                title: Some("gitleaks secret detection".to_owned()),
+                tools: vec!["gitleaks".to_owned()],
+                concepts: vec!["secret_detection".to_owned()],
+                omb_session_id: Some("s1".to_owned()),
+                ..Default::default()
+            },
+            body: "Added CI secret scanning for pull requests.".to_owned(),
+        };
+        let existing = FrontMatter {
+            title: Some("LM Studio model verification".to_owned()),
+            tools: vec!["lmstudio".to_owned(), "ollama".to_owned()],
+            concepts: vec!["llm_provider".to_owned(), "embedding_dim".to_owned()],
+            omb_session_id: Some("s2".to_owned()),
+            ..Default::default()
+        };
+
+        assert!(!probable_session_duplicate(
+            &note,
+            &existing,
+            "Verified chat and embedding model configuration."
+        ));
     }
 
     #[test]
@@ -1558,7 +1750,7 @@ rules:
                 tags: vec!["ops".to_owned()],
                 tools: vec!["owner@example.com".to_owned()],
                 concepts: vec!["ABC-123".to_owned()],
-                sources: vec!["raw/session-manifests/owner@example.com.md".to_owned()],
+                sources: vec!["raw/evidence/owner@example.com.md".to_owned()],
                 claims: vec![crate::frontmatter::Claim {
                     subject: "admin@example.com".to_owned(),
                     predicate: "tracks".to_owned(),
@@ -1573,10 +1765,7 @@ rules:
 
         apply_pii_gate(Some(&scanner), &mut note).unwrap();
         assert_eq!(note.front.tools, vec!["[EMAIL]".to_owned()]);
-        assert_eq!(
-            note.front.sources,
-            vec!["raw/session-manifests/[EMAIL]".to_owned()]
-        );
+        assert_eq!(note.front.sources, vec!["raw/evidence/[EMAIL]".to_owned()]);
         assert_eq!(note.front.claims[0].subject, "[EMAIL]");
         assert_eq!(note.front.claims[0].value, "ABC-123");
         assert!(note.front.tags.contains(&"pii-flag".to_owned()));

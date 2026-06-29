@@ -87,7 +87,7 @@ def test_small_raw_parse_short_marks_done():
         os.unlink(path)
 
 
-def test_success_passes_session_source_to_shared_core():
+def test_success_passes_session_id_to_shared_core():
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         f.write("{}\n")
         path = f.name
@@ -118,7 +118,6 @@ def test_success_passes_session_source_to_shared_core():
             "personal",
             "oh-my-boring",
             "codex-abc",
-            {"adapter": "codex", "transcript_path": path, "cwd": "/work/oh-my-boring"},
         )
         mark.assert_called_once_with("codex-abc")
     finally:
@@ -128,5 +127,5 @@ def test_success_passes_session_source_to_shared_core():
 if __name__ == "__main__":
     test_large_raw_parse_short_marks_retry()
     test_small_raw_parse_short_marks_done()
-    test_success_passes_session_source_to_shared_core()
+    test_success_passes_session_id_to_shared_core()
     print("ok - codex adapter")

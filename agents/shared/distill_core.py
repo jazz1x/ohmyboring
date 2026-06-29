@@ -12,7 +12,6 @@ Agent-specific transcript extraction and hook I/O live in the per-agent modules.
 import json
 import os
 import re
-import hashlib
 import socket
 import subprocess
 import sys
@@ -281,36 +280,6 @@ def _call_llm(prompt):
     return parsed
 
 
-def _write_session_manifest(session_source, text, origin, repo, session_id):
-    """Write a vault-local source manifest and return its `raw/...` path."""
-    if not session_source or not session_id:
-        return None
-
-    safe_id = markers.safe_id(session_id)
-    rel = f"raw/session-manifests/{safe_id}.md"
-    path = os.path.join(BORING_HOME, "vault", rel)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    body = "\n".join(
-        [
-            f"# Session manifest: {safe_id}",
-            "",
-            f"- adapter: {session_source.get('adapter', '')}",
-            f"- session_id: {session_id}",
-            f"- transcript_path: {session_source.get('transcript_path', '')}",
-            f"- cwd: {session_source.get('cwd', '')}",
-            f"- origin: {origin}",
-            f"- repo: {repo}",
-            f"- extracted_sha256: {digest}",
-            f"- extracted_bytes: {len(text.encode('utf-8'))}",
-            "",
-        ]
-    )
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(body)
-    return rel
-
-
 def _call_remember(title, body, origin, repo, tags, tools, concepts, claims, session_id="", sources=None):
     """Call ohmyboring's remember MCP tool.
 
@@ -400,7 +369,7 @@ def _call_remember(title, body, origin, repo, tags, tools, concepts, claims, ses
     return False
 
 
-def distill_and_remember(text, origin, repo, session_id="", session_source=None):
+def distill_and_remember(text, origin, repo, session_id=""):
     """Distill the transcript text via local LLM and write it through ohmyboring's remember tool."""
     if len(text) > 12000:
         text = text[:5000] + "\n…(truncated)…\n" + text[-7000:]
@@ -460,18 +429,6 @@ def distill_and_remember(text, origin, repo, session_id="", session_source=None)
         print("[distill-session] missing title/body in LLM output", file=sys.stderr)
         return False
 
-    sources = []
-    if session_id:
-        try:
-            source = _write_session_manifest(session_source, text, origin, repo, session_id)
-        except OSError as e:
-            print(f"[distill-session] failed to write session source manifest: {e}", file=sys.stderr)
-            return False
-        if not source:
-            print("[distill-session] missing session source manifest input", file=sys.stderr)
-            return False
-        sources.append(source)
-
     tags = [t.strip() for t in parsed.get("tags", []) if isinstance(t, str) and t.strip()][:6]
     tools = [t.strip() for t in parsed.get("tools", []) if isinstance(t, str) and t.strip()][:8]
     concepts = [t.strip() for t in parsed.get("concepts", []) if isinstance(t, str) and t.strip()][:8]
@@ -488,4 +445,4 @@ def distill_and_remember(text, origin, repo, session_id="", session_source=None)
                 }
             )
 
-    return _call_remember(title, body, origin, repo, tags, tools, concepts, claims, session_id, sources)
+    return _call_remember(title, body, origin, repo, tags, tools, concepts, claims, session_id)
