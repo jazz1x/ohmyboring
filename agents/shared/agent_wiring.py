@@ -8,8 +8,10 @@ import argparse
 import datetime
 import json
 import os
+import platform
 import secrets
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,6 +63,10 @@ DEFAULT_MCP_SERVER = {
     "type": "http",
     "url": "http://localhost:7700/mcp",
 }
+
+CODEX_HOST_WORKER_LABEL = "com.ohmyboring.codex-ingest"
+CODEX_HOST_WORKER_INTERVAL_SEC = 20 * 60
+CODEX_HOST_WORKER_LOG = f"/tmp/{CODEX_HOST_WORKER_LABEL}.log"
 
 
 def _expand(path_template: str) -> Path:
@@ -226,6 +232,125 @@ def wire_mcp_agent(agent_id: str, server_name: str, server_config: dict, path: P
     data[root_key][server_name] = server_config
     _save_json(path, data)
     return {"agent": agent_id, "path": str(path), "changed": True}
+
+
+def _xml_escape(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _sh_quote(value: str) -> str:
+    if "'" in value:
+        raise ValueError("single quotes are not supported in scheduled paths")
+    return f"'{value}'"
+
+
+def _codex_collector_path(boring_home: str | None = None) -> Path:
+    home = boring_home if boring_home is not None else BORING_HOME
+    path = Path(home) / "agents" / "codex" / "collect-sessions.py"
+    if not path.exists():
+        raise FileNotFoundError(f"codex collector not found: {path}")
+    return path
+
+
+def _install_codex_host_worker_macos(boring_home: str | None = None) -> dict:
+    home = boring_home if boring_home is not None else BORING_HOME
+    collector = _codex_collector_path(home)
+    plist = Path(os.path.expanduser(f"~/Library/LaunchAgents/{CODEX_HOST_WORKER_LABEL}.plist"))
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{CODEX_HOST_WORKER_LABEL}</string>
+  <key>WorkingDirectory</key>
+  <string>{_xml_escape(str(home))}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>BORING_HOME={_xml_escape(str(home))}</string>
+    <string>COLLECT_LIMIT=1</string>
+    <string>python3</string>
+    <string>{_xml_escape(str(collector))}</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>{CODEX_HOST_WORKER_INTERVAL_SEC}</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>{CODEX_HOST_WORKER_LOG}</string>
+  <key>StandardErrorPath</key>
+  <string>{CODEX_HOST_WORKER_LOG}</string>
+</dict>
+</plist>
+"""
+    changed = not plist.exists() or plist.read_text(encoding="utf-8") != body
+    _write_text_atomic(plist, body)
+    domain = f"gui/{os.getuid()}"
+    subprocess.run(
+        ["launchctl", "bootout", f"{domain}/{CODEX_HOST_WORKER_LABEL}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    loaded = subprocess.run(
+        ["launchctl", "bootstrap", domain, str(plist)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if loaded.returncode != 0:
+        fallback = subprocess.run(
+            ["launchctl", "load", str(plist)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if fallback.returncode != 0:
+            raise RuntimeError(f"could not load {plist}")
+    return {"kind": "launchd", "path": str(plist), "changed": changed, "loaded": True}
+
+
+def _install_codex_host_worker_linux(boring_home: str | None = None) -> dict:
+    home = boring_home if boring_home is not None else BORING_HOME
+    collector = _codex_collector_path(home)
+    job = (
+        f"*/20 * * * * cd {_sh_quote(str(home))} && "
+        f"BORING_HOME={_sh_quote(str(home))} COLLECT_LIMIT=1 "
+        f"python3 {_sh_quote(str(collector))} >>{_sh_quote(CODEX_HOST_WORKER_LOG)} 2>&1 "
+        f"# {CODEX_HOST_WORKER_LABEL}"
+    )
+    current = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    lines = current.stdout.splitlines() if current.returncode == 0 else []
+    next_lines = [line for line in lines if CODEX_HOST_WORKER_LABEL not in line]
+    next_lines.extend([f"# {CODEX_HOST_WORKER_LABEL}", job])
+    next_text = "\n".join(next_lines) + "\n"
+    changed = "\n".join(lines).strip() != "\n".join(next_lines).strip()
+    subprocess.run(["crontab", "-"], input=next_text, text=True, check=True)
+    return {"kind": "cron", "path": "user crontab", "changed": changed, "loaded": True}
+
+
+def install_codex_host_worker(boring_home: str | None = None) -> dict:
+    system = platform.system()
+    if system == "Darwin":
+        return _install_codex_host_worker_macos(boring_home)
+    if system == "Linux":
+        return _install_codex_host_worker_linux(boring_home)
+    raise RuntimeError(f"unsupported OS for Codex host worker: {system}")
+
+
+def wire_codex(server_name: str, server_config: dict, path: Path | None = None, boring_home: str | None = None) -> dict:
+    mcp = wire_mcp_agent("codex", server_name, server_config, path)
+    worker = install_codex_host_worker(boring_home)
+    return {
+        "agent": "codex",
+        "path": mcp["path"],
+        "changed": bool(mcp["changed"] or worker["changed"]),
+        "worker_kind": worker["kind"],
+        "worker_path": worker["path"],
+        "worker_loaded": worker["loaded"],
+    }
 
 
 def _write_text_atomic(path: Path, text: str) -> None:
@@ -759,6 +884,8 @@ def install(enabled_agents, server_name, server_config, boring_home: str | None 
                 results.append(wire_kimi())
             elif agent_id == "hermes-agent":
                 results.append(wire_hermes(boring_home=boring_home))
+            elif agent_id == "codex":
+                results.append(wire_codex(server_name, server_config, boring_home=boring_home))
             else:
                 results.append(wire_mcp_agent(agent_id, server_name, server_config))
         except Exception as e:

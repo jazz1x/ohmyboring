@@ -16,6 +16,7 @@ import argparse
 import glob
 import json
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -34,6 +35,7 @@ PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("ING
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 HOOK = os.path.join(BORING_HOME, "agents/codex/distill-session.py")
 INCLUDE_SUBAGENTS = os.environ.get("CODEX_INCLUDE_SUBAGENTS", "").lower() in ("1", "true", "yes")
+HOST_WORKER_LABEL = "com.ohmyboring.codex-ingest"
 
 if omb_env._in_container():
     markers.set_mark_dir("/host/.cache/boring-distill")
@@ -235,10 +237,41 @@ def _hermes_jobs_path() -> str:
     return os.path.expanduser("~/.hermes/cron/jobs.json")
 
 
+def _host_worker_status() -> dict:
+    system = platform.system()
+    if system == "Darwin":
+        path = os.path.expanduser(f"~/Library/LaunchAgents/{HOST_WORKER_LABEL}.plist")
+        loaded = (
+            subprocess.run(
+                ["launchctl", "print", f"gui/{os.getuid()}/{HOST_WORKER_LABEL}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            == 0
+        )
+        return {
+            "kind": "launchd",
+            "found": os.path.exists(path),
+            "loaded": loaded,
+            "path": path,
+        }
+    if system == "Linux":
+        crontab = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        text = crontab.stdout if crontab.returncode == 0 else ""
+        return {
+            "kind": "cron",
+            "found": HOST_WORKER_LABEL in text,
+            "loaded": HOST_WORKER_LABEL in text,
+            "path": "user crontab",
+        }
+    return {"kind": system or "unknown", "found": False, "loaded": False, "path": ""}
+
+
 def _print_status(source_dir: str, scan: dict) -> None:
     todo = scan["todo"]
     marker = _marker_status()
     worker = _hermes_worker_status()
+    host_worker = _host_worker_status()
     latest_note = _newest_codex_note()
 
     print(f"[codex-status] source_dir={source_dir}")
@@ -282,6 +315,12 @@ def _print_status(source_dir: str, scan: dict) -> None:
         f"last_error={worker.get('last_error', '')} "
         f"last_run_at={worker.get('last_run_at', '')} next_run_at={worker.get('next_run_at', '')} "
         f"script={worker.get('script', '')} path={worker.get('path', '')}"
+    )
+    print(
+        "[codex-status] host_worker "
+        f"found={str(host_worker.get('found', False)).lower()} "
+        f"loaded={str(host_worker.get('loaded', False)).lower()} "
+        f"kind={host_worker.get('kind', '')} path={host_worker.get('path', '')}"
     )
     if latest_note:
         print(
