@@ -20,6 +20,14 @@ from omb_env import _in_container
 DEFAULT_ORIGIN = "personal"
 DEFAULT_NOTE_LANG = "auto"
 
+DEFAULT_HERMES_CRON_JOBS = {
+    "weekly-briefing": {
+        "enabled": True,
+        "schedule": "0 9 * * 1",
+        "script": "weekly-briefing.py",
+    }
+}
+
 
 def _repo_root() -> Path:
     """Repo root = the dir holding boring.json / boring.example.json.
@@ -81,6 +89,22 @@ def note_lang() -> str:
     """Return the configured note language (auto/ko/en)."""
     cfg = load()
     return cfg.get("note_lang") or DEFAULT_NOTE_LANG
+
+
+def hermes_cron_jobs() -> dict:
+    """Return the configured hermes-agent cron jobs.
+
+    If the user has not set `hermes_cron_jobs` in boring.json, default to a
+    weekly briefing on Monday 09:00 KST. An explicit empty dict means "no
+    managed jobs".
+    """
+    cfg = load()
+    jobs = cfg.get("hermes_cron_jobs")
+    if jobs is None:
+        return dict(DEFAULT_HERMES_CRON_JOBS)
+    if not isinstance(jobs, dict):
+        return {}
+    return jobs
 
 
 def _matches(cwd: str, remote_url: str | None, matcher: str) -> bool:
