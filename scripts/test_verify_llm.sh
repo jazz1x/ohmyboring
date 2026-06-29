@@ -1,5 +1,5 @@
 #!/bin/sh
-# Guardrail tests for verify-llm.sh config-boundary handling.
+# Guardrail tests for verify-llm.sh config-boundary and readiness handling.
 # `api_key_env` is data: the name of an environment variable. It must never be
 # evaluated as shell code while checking whether the key is available.
 set -eu
@@ -26,8 +26,13 @@ setup() {
   cat > "$STUB_BIN/curl" <<'STUB'
 #!/bin/sh
 case " $* " in
-  *" -w "*) printf '401'; exit 0 ;;
-  *) exit 1 ;;
+  *" -w "*) printf '%s' "${CURL_STATUS:-200}"; exit 0 ;;
+  *)
+    if [ "${CURL_STATUS:-200}" = 200 ]; then
+      printf '{"data":[{"id":"chat-model"},{"id":"bge-m3"}]}'
+    fi
+    exit 0
+    ;;
 esac
 STUB
   chmod +x "$STUB_BIN/curl"
@@ -52,7 +57,7 @@ write_config() {
 
 run_verify() {
   RC=0
-  PATH="$STUB_BIN:$PATH" BORING_HOME="$ROOT" BORING_CONFIG="$WORK/boring.json" "$SCRIPT" > "$WORK/out" 2>&1 || RC=$?
+  CURL_STATUS="${CURL_STATUS:-200}" PATH="$STUB_BIN:$PATH" BORING_HOME="$ROOT" BORING_CONFIG="$WORK/boring.json" "$SCRIPT" > "$WORK/out" 2>&1 || RC=$?
 }
 
 # --- 1. malicious env-name payload is rejected, not executed ------------------
@@ -78,6 +83,14 @@ write_config "OMB_VERIFY_LLM_MISSING_KEY"
 run_verify
 { [ "$RC" = 1 ]; }
 check "missing configured api key env fails" $?
+teardown
+
+# --- 4. auth-only /models response is not enough to verify readiness ----------
+setup
+write_config ""
+CURL_STATUS=401 run_verify
+{ [ "$RC" = 1 ]; }
+check "auth-only model listing fails readiness" $?
 teardown
 
 echo

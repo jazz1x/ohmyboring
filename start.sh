@@ -37,7 +37,9 @@ if [ -x "$PROVIDER_SCRIPT" ]; then
   echo "▶ LLM provider: ${PROVIDER} (bootstrap=${BOOTSTRAP}) → ${LLM_URL}"
   "$PROVIDER_SCRIPT" "$LLM_URL" "$LLM" "$EMB" "$BOOTSTRAP"
 else
-  echo "ⓘ Unknown LLM provider '${PROVIDER}' (no ${PROVIDER_SCRIPT}) — skipping bootstrap. Ensure ${LLM_URL} is reachable."
+  echo "✗ Unknown LLM provider '${PROVIDER}' (no ${PROVIDER_SCRIPT})."
+  echo "  Set llm.provider to ollama, lmstudio, or openai-compatible; or add the provider script."
+  exit 1
 fi
 
 # hermes-agent (the brain) is part of the default stack, but its image isn't in this repo
