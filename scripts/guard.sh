@@ -6,7 +6,7 @@
 #   3) test      — guardrail tests
 #   4) py-compile — syntax gate for all Python touched by pre-commit
 #   5) py-unit   — network-free Python regression tests (incl. destructive-path planners)
-#   6) sh-unit   — destructive shell-path guardrails (restore-db drop ordering)
+#   6) sh-unit   — shell guardrails (verify-llm config boundary + restore-db drop ordering)
 # No bypassing (git commit --no-verify) — on failure, fix the root cause (don't paper over the symptom).
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,6 +30,8 @@ python3 agents/kimi/test_kimi.py
 python3 agents/hermes/test_ingest_worker.py
 python3 scripts/test_data_steward.py
 python3 scripts/test_retention.py
-echo "6) shell destructive-path guardrails (restore-db)…"
+echo "6) shell config-boundary guardrails (verify-llm)…"
+sh scripts/test_verify_llm.sh
+echo "7) shell destructive-path guardrails (restore-db)…"
 sh scripts/test_restore_db.sh
 echo "✅ 구조 게이트 통과 — 컴파일러/clippy/test + Python adapters 무위반."

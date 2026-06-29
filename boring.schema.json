@@ -48,6 +48,7 @@
         },
         "api_key_env": {
           "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
           "default": "BORING_LLM_API_KEY",
           "description": "Name of the env var holding the API key (providers that need auth). The key itself never lives in boring.json."
         },
