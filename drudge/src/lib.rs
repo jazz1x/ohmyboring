@@ -10,6 +10,7 @@ pub mod frontmatter;
 pub mod graph;
 pub mod ingest;
 pub mod llm;
+pub mod pii;
 pub mod redact;
 pub mod retrieve;
 pub mod serve;

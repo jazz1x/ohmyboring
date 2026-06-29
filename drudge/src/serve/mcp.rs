@@ -753,7 +753,11 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
             "BORING_VAULT_DIR not set — no target to write remember notes to".to_owned(),
         ));
     };
-    let note = parse_remember_note(args, &s.cfg)?;
+    let mut note = parse_remember_note(args, &s.cfg)?;
+
+    // PII / sensitive-data gate: block rules reject the note, redact rules mask
+    // in-place, and flag rules add `pii-flag` for review.
+    apply_pii_gate(s.pii.as_ref().as_ref(), &mut note)?;
 
     // Deduplication gate — prevent near-duplicate session notes from accumulating.
     let wiki_dir = vault_root.join("wiki");
@@ -822,6 +826,76 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
         "remembered → wiki/{wiki_id}.md · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
         stats.chunks, stats.tools, stats.concepts, stats.claims
     ))
+}
+
+/// Apply the PII scanner to a parsed note. Mutates title/body/claim values in place.
+/// Returns an error (block) if a critical rule matched.
+fn apply_pii_gate(
+    scanner: Option<&crate::pii::PiiScanner>,
+    note: &mut RememberNote,
+) -> Result<(), (i32, String)> {
+    if let Some(scanner) = scanner {
+        let mut any_flag = false;
+
+        if let Some(title) = note.front.title.as_mut() {
+            apply_pii_to_field(scanner, title, &mut any_flag)?;
+        }
+
+        apply_pii_to_field(scanner, &mut note.body, &mut any_flag)?;
+
+        let mut tags = Vec::with_capacity(note.front.tags.len());
+        for tag in &mut note.front.tags {
+            apply_pii_to_field(scanner, tag, &mut any_flag)?;
+            if let Some(clean) = vault::sanitize_tag(tag)
+                && !tags.contains(&clean)
+            {
+                tags.push(clean);
+            }
+        }
+        note.front.tags = tags;
+
+        for tool in &mut note.front.tools {
+            apply_pii_to_field(scanner, tool, &mut any_flag)?;
+        }
+        for concept in &mut note.front.concepts {
+            apply_pii_to_field(scanner, concept, &mut any_flag)?;
+        }
+
+        for claim in &mut note.front.claims {
+            apply_pii_to_field(scanner, &mut claim.subject, &mut any_flag)?;
+            apply_pii_to_field(scanner, &mut claim.predicate, &mut any_flag)?;
+            apply_pii_to_field(scanner, &mut claim.value, &mut any_flag)?;
+            apply_pii_to_field(scanner, &mut claim.kind, &mut any_flag)?;
+            apply_pii_to_field(scanner, &mut claim.confidence, &mut any_flag)?;
+        }
+
+        if any_flag && !note.front.tags.iter().any(|t| t == "pii-flag") {
+            note.front.tags.push("pii-flag".to_owned());
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_pii_to_field(
+    scanner: &crate::pii::PiiScanner,
+    field: &mut String,
+    any_flag: &mut bool,
+) -> Result<(), (i32, String)> {
+    let out = scanner.scan(field);
+    if let Some(m) = &out.block {
+        Err((
+            -32603_i32,
+            format!(
+                "PII gate blocked by rule '{}' ({}): {} — matched sensitive text omitted",
+                m.rule, m.severity, m.reason
+            ),
+        ))
+    } else {
+        *field = out.redacted;
+        *any_flag |= !out.flags.is_empty();
+        Ok(())
+    }
 }
 
 /// A parsed remember note — the typed boundary value (parse-don't-validate).
@@ -1089,8 +1163,9 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::parse_remember_note;
+    use super::{RememberNote, apply_pii_gate, parse_remember_note};
     use crate::config::BoringConfig;
+    use crate::frontmatter::FrontMatter;
     use serde_json::json;
 
     // The secret scrub must cover EVERY field render_wiki_note writes verbatim into the tracked vault —
@@ -1167,5 +1242,94 @@ mod tests {
             "claim subject not decoded"
         );
         assert_eq!(c.value, "16 items", "claim value not decoded");
+    }
+
+    #[test]
+    fn pii_block_error_does_not_echo_sensitive_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("pii.yaml");
+        std::fs::write(
+            &base,
+            r#"
+version: "1.0"
+rules:
+  - name: rrn
+    regex: '\b\d{6}-[1-4]\d{6}\b'
+    action: block
+    severity: critical
+    reason: resident registration number
+"#,
+        )
+        .unwrap();
+        let scanner = crate::pii::PiiScanner::load(Some(&base), None)
+            .unwrap()
+            .unwrap();
+        let sensitive = "900101-1234567";
+        let mut note = RememberNote {
+            front: FrontMatter {
+                title: Some("blocked note".to_owned()),
+                ..Default::default()
+            },
+            body: format!("contains {sensitive}"),
+        };
+
+        let err = apply_pii_gate(Some(&scanner), &mut note).unwrap_err();
+        assert_eq!(err.0, -32603);
+        assert!(err.1.contains("rrn"));
+        assert!(
+            !err.1.contains(sensitive),
+            "PII block error leaked the matched text: {}",
+            err.1
+        );
+    }
+
+    #[test]
+    fn pii_gate_scans_every_rendered_frontmatter_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("pii.yaml");
+        std::fs::write(
+            &base,
+            r#"
+version: "1.0"
+rules:
+  - name: email
+    regex: '(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b'
+    action: redact
+    severity: warning
+    replacement: "[EMAIL]"
+  - name: ticket
+    regex: '\b[A-Z]{2,5}-\d+\b'
+    action: flag
+    severity: warning
+    reason: ticket id
+"#,
+        )
+        .unwrap();
+        let scanner = crate::pii::PiiScanner::load(Some(&base), None)
+            .unwrap()
+            .unwrap();
+        let mut note = RememberNote {
+            front: FrontMatter {
+                title: Some("safe title".to_owned()),
+                tags: vec!["ops".to_owned()],
+                tools: vec!["owner@example.com".to_owned()],
+                concepts: vec!["ABC-123".to_owned()],
+                claims: vec![crate::frontmatter::Claim {
+                    subject: "admin@example.com".to_owned(),
+                    predicate: "tracks".to_owned(),
+                    value: "ABC-123".to_owned(),
+                    kind: "fact".to_owned(),
+                    confidence: "certain".to_owned(),
+                }],
+                ..Default::default()
+            },
+            body: "safe body".to_owned(),
+        };
+
+        apply_pii_gate(Some(&scanner), &mut note).unwrap();
+        assert_eq!(note.front.tools, vec!["[EMAIL]".to_owned()]);
+        assert_eq!(note.front.claims[0].subject, "[EMAIL]");
+        assert_eq!(note.front.claims[0].value, "ABC-123");
+        assert!(note.front.tags.contains(&"pii-flag".to_owned()));
     }
 }

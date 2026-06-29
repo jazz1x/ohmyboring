@@ -39,6 +39,10 @@ docs/*
 # 개인 정책 설정 — 예시 파일(boring.example.json)만 추적
 boring.json
 
+# PII 로컬 오버레이 (회사 실명·낸부 호스트·회사 IP 등 값 포함)
+vault/rules/pii.local.yaml
+vault/rules/pii.local.yml
+
 # 에이전트 로컬 설정 (Codex 등)
 .codex/
 .agents/
