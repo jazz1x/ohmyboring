@@ -50,12 +50,14 @@ Seeing only an embedding model, for example `text-embedding-nomic-embed-text-v1.
 make verify-llm
 make up
 make doctor
+make readiness
 ```
 
 Expected result:
 
 - `make verify-llm` finds the provider script, reaches `/v1/models`, and sees both configured model ids.
 - `make doctor` reports the engine healthy and the write door open.
+- `make readiness` is green before you rely on a scheduled morning briefing.
 - If Hermes/Codex ingestion is enabled, `make doctor` also reports the Codex worker state.
 
 ## Embedding Dimension

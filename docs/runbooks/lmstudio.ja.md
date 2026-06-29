@@ -50,12 +50,14 @@ LM Studio CLI がインストールされていれば、ホストでも同じ状
 make verify-llm
 make up
 make doctor
+make readiness
 ```
 
 期待結果:
 
 - `make verify-llm` が provider スクリプトを見つけ、`/v1/models` に到達し、設定した 2 つのモデル id を確認します。
 - `make doctor` がエンジン正常と write door open を報告します。
+- 予約済みの朝ブリーフィングに頼る前に `make readiness` が green であることを確認します。
 - Hermes/Codex 取り込みが有効なら、`make doctor` が Codex ワーカー状態も表示します。
 
 ## Embedding 次元

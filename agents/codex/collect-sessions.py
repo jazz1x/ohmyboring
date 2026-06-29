@@ -267,7 +267,7 @@ def _host_worker_status() -> dict:
     return {"kind": system or "unknown", "found": False, "loaded": False, "path": ""}
 
 
-def _print_status(source_dir: str, scan: dict) -> None:
+def _print_status(source_dir: str, scan: dict) -> bool:
     todo = scan["todo"]
     marker = _marker_status()
     worker = _hermes_worker_status()
@@ -330,6 +330,7 @@ def _print_status(source_dir: str, scan: dict) -> None:
         )
     else:
         print("[codex-status] newest_note none")
+    return bool(host_worker.get("found") and host_worker.get("loaded"))
 
 
 def main(argv: list[str] | None = None):
@@ -345,7 +346,14 @@ def main(argv: list[str] | None = None):
         action="store_true",
         help="show Codex session queue, marker, and worker status without distilling or syncing",
     )
+    ap.add_argument(
+        "--strict",
+        action="store_true",
+        help="with --status, exit non-zero unless the host Codex ingestion worker is active",
+    )
     args = ap.parse_args(argv)
+    if args.strict and not args.status:
+        ap.error("--strict requires --status")
 
     cutoff = time.time() - WINDOW_H * 3600
     source_dir = _source_dir()
@@ -353,7 +361,7 @@ def main(argv: list[str] | None = None):
         label = "codex-status" if args.status else "codex-collect"
         print(f"[{label}] source dir not found: {source_dir}", file=sys.stderr)
         if args.status:
-            _print_status(
+            ready = _print_status(
                 source_dir,
                 {
                     "total": 0,
@@ -365,6 +373,9 @@ def main(argv: list[str] | None = None):
                     "todo": [],
                 },
             )
+            if args.strict and not ready:
+                print("[codex-status] readiness failed: host worker is not installed/loaded", file=sys.stderr)
+                return 1
         return 0
 
     if args.now:
@@ -381,7 +392,10 @@ def main(argv: list[str] | None = None):
     else:
         scan = _scan_sessions(source_dir, cutoff)
         if args.status:
-            _print_status(source_dir, scan)
+            ready = _print_status(source_dir, scan)
+            if args.strict and not ready:
+                print("[codex-status] readiness failed: host worker is not installed/loaded", file=sys.stderr)
+                return 1
             return 0
         todo = scan["todo"]
 

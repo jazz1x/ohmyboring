@@ -24,6 +24,7 @@ git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
 make doctor         # verify stack, hooks, Codex worker/queue, and latest ingest
+make readiness      # strict gate before relying on morning briefs
 make collect N=20   # seed the vault from your past Claude Code sessions (fresh clone starts empty)
 make ask Q="how did I fix the docker build cache problem?"
 ```
@@ -166,6 +167,7 @@ curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
 make verify-llm
 make up
 make doctor
+make readiness
 ```
 
 The model ids must match what LM Studio reports. If the embedding model is not `bge-m3`, update `llm.embed_dim` to the model's dimension and run `make reset` before relying on vector mode. See the [LM Studio runbook](docs/runbooks/lmstudio.md) for the full checklist.
@@ -233,6 +235,7 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 | `make ollama` | ensure Ollama is running (start in background if needed) |
 | `make verify-llm` | verify provider reachability, loaded model ids, and embedding dimension |
 | `make doctor` | diagnose stack, hooks, latest ingest, and Codex worker/queue status |
+| `make readiness` | strict pre-briefing gate; fails on any doctor finding |
 | `make ask Q="..."` | one-shot recall + synthesis |
 | `make sync` | deterministic re-ingest of the vault |
 | `make remember M="text"` | write a one-line note |
@@ -501,6 +504,7 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 | Linux: container can't reach host Ollama | On Linux, Ollama binds `127.0.0.1` by default, so the container hits a closed port even though `host.docker.internal` resolves. Bind Ollama to all interfaces (`OLLAMA_HOST=0.0.0.0:11434`, then restart it) and/or allow the docker bridge in the host firewall |
 | `embedding dim mismatch` errors | Your `llm.embed_model` output size ≠ `llm.embed_dim` in `boring.json`. Update `embed_dim` to match the new model and run `make reset` |
 | Healthy? / did the last distill land? | `make doctor` — quick health + last-ingest and Codex worker/queue check |
+| Can I rely on tomorrow morning's briefing? | `make readiness` — strict gate; every hook/model/container/ingest finding must pass |
 
 ---
 
