@@ -1229,10 +1229,167 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{RememberNote, apply_pii_gate, parse_remember_note};
+    use std::path::PathBuf;
+
+    use super::{RememberNote, apply_pii_gate, mcp_tools_list, parse_remember_note};
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
     use serde_json::json;
+
+    const MCP_TOOL_NAMES: [&str; 18] = [
+        "ask",
+        "brief",
+        "claims",
+        "classify_repo",
+        "config_get",
+        "context",
+        "corpus_status",
+        "decisions",
+        "forget",
+        "neighbors",
+        "next_actions",
+        "project_status",
+        "recall",
+        "remember",
+        "risks",
+        "stalled",
+        "sync",
+        "weekly_brief",
+    ];
+
+    const VECTOR_REQUIRED_TOOLS: [&str; 10] = [
+        "neighbors",
+        "claims",
+        "corpus_status",
+        "brief",
+        "weekly_brief",
+        "project_status",
+        "decisions",
+        "risks",
+        "next_actions",
+        "stalled",
+    ];
+
+    const VECTOR_FREE_TOOLS: [&str; 8] = [
+        "recall",
+        "ask",
+        "context",
+        "remember",
+        "forget",
+        "sync",
+        "config_get",
+        "classify_repo",
+    ];
+
+    fn repo_file(relative: &str) -> String {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::read_to_string(root.join(relative)).unwrap()
+    }
+
+    fn actual_tool_names() -> Vec<String> {
+        let mut names: Vec<String> = mcp_tools_list()["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn expected_tool_names() -> Vec<String> {
+        let mut names = MCP_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn quality_gate_mcp_tool_contract_is_explicit() {
+        assert_eq!(actual_tool_names(), expected_tool_names());
+    }
+
+    #[test]
+    fn quality_gate_readmes_match_mcp_tool_inventory() {
+        let docs = [
+            (
+                "README.md",
+                format!("Available tools ({}):", MCP_TOOL_NAMES.len()),
+            ),
+            (
+                "README.ko.md",
+                format!("사용 가능한 tools ({}개):", MCP_TOOL_NAMES.len()),
+            ),
+            (
+                "README.ja.md",
+                format!("利用可能な tools（{}個）:", MCP_TOOL_NAMES.len()),
+            ),
+            ("agents/codex/README.md", "## Available tools".to_owned()),
+        ];
+
+        for (path, inventory_marker) in docs {
+            let text = repo_file(path);
+            assert!(
+                text.contains(&inventory_marker),
+                "{path}: missing inventory marker {inventory_marker:?}"
+            );
+            for tool in MCP_TOOL_NAMES {
+                let needle = format!("`{tool}`");
+                assert!(text.contains(&needle), "{path}: missing tool {needle}");
+            }
+        }
+    }
+
+    #[test]
+    fn quality_gate_vector_mode_docs_match_tool_contract() {
+        let docs = ["README.md", "README.ko.md", "README.ja.md"];
+        for path in docs {
+            let text = repo_file(path);
+            let paragraph = text
+                .split("\n\n")
+                .find(|section| section.contains("BORING_VECTOR=off") && section.contains("-32603"))
+                .unwrap_or_else(|| panic!("{path}: vector-off contract paragraph not found"));
+            for tool in VECTOR_REQUIRED_TOOLS {
+                let needle = format!("`{tool}`");
+                assert!(
+                    paragraph.contains(&needle),
+                    "{path}: vector-required tool missing from -32603 paragraph: {needle}"
+                );
+            }
+            for tool in VECTOR_FREE_TOOLS {
+                let needle = format!("`{tool}`");
+                assert!(
+                    paragraph.contains(&needle),
+                    "{path}: vector-free tool missing from wiki-first paragraph: {needle}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quality_gate_renumber_cli_stays_removed() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(
+            !root.join("drudge/src/renumber.rs").exists(),
+            "renumber.rs must not return; stable wiki ids are monotonic"
+        );
+
+        for path in ["drudge/src/lib.rs", "drudge/src/main.rs"] {
+            let text = std::fs::read_to_string(root.join(path)).unwrap();
+            assert!(
+                !text.contains("renumber") && !text.contains("Renumber"),
+                "{path}: renumber CLI/module reference returned"
+            );
+        }
+    }
 
     // The secret scrub must cover EVERY field render_wiki_note writes verbatim into the tracked vault —
     // a token pasted into the title or a claim value would otherwise leak into git just like one in the body.

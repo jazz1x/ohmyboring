@@ -179,6 +179,7 @@ flowchart LR
 | `make smoke` | end-to-end smoke test |
 | `make logs` | エンジンログ |
 | `make guard` | fmt + clippy + test + Python py-compile |
+| `make quality` | リリース受け入れ drift ゲート |
 | `make down` | コンテナ停止 |
 
 ---
@@ -376,7 +377,8 @@ curl -s -X POST http://localhost:7700/mcp \
 
 - SSOT ドキュメント: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
 - `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test`
-- CI: `rust-gate` · `gitleaks` · `cargo-deny` · `trivy`
+- `make quality` = MCP tool、vector モード文書、削除済み危険 surface のリリース受け入れ drift ゲート
+- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy`
 - `unsafe_code = "forbid"`
 
 ---

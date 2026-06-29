@@ -29,6 +29,19 @@ jobs:
       - name: structural gate (guard.sh)
         run: ./scripts/guard.sh
 
+  # Release acceptance gate — catches contract/doc drift that compiles but would lie to users.
+  # Stack-free: MCP tool inventory, vector-mode support docs, and removed dangerous CLI surfaces.
+  quality-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: drudge
+      - name: release quality gate
+        run: make quality
+
   gitleaks:
     runs-on: ubuntu-latest
     steps:

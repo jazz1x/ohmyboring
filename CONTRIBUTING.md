@@ -40,6 +40,8 @@ pip install pre-commit && pre-commit install
 
 Two heavier gates run in CI (and are available locally):
 
+- `make quality` — release acceptance drift gate (MCP tool contract, docs,
+  removed dangerous surfaces).
 - `make deny` — supply-chain gate (`cargo-deny`: vulnerabilities, licenses,
   duplicate versions).
 - `make eval` — behavioral regression gate (needs the stack running).
@@ -56,8 +58,9 @@ root cause rather than papering over the symptom.
   `type(scope): summary` (e.g. `fix(distill): …`, `feat(ingest): …`,
   `chore: …`). PRs are squash-merged, so the PR title becomes the commit.
 - Fill in the PR template (background / changes / result / review points).
-- A PR must be green on CI before it can merge: the structural gate, secret
-  scan (gitleaks), supply-chain gate (cargo-deny), and security scan (trivy).
+- A PR must be green on CI before it can merge: the structural gate, release
+  quality gate, secret scan (gitleaks), supply-chain gate (cargo-deny), and
+  security scan (trivy).
 
 ## Design philosophy
 
