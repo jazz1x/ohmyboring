@@ -124,7 +124,7 @@ async fn current_claims_honors_exclude_origins() {
     // No exclusion → both visible.
     let all = subjects(
         store
-            .current_claims(&query, 20, &[], None, None)
+            .current_claims(&query, 20, &[], None, None, None)
             .await
             .expect("claims all"),
     );
@@ -136,7 +136,7 @@ async fn current_claims_honors_exclude_origins() {
     // Exclude company → company claim must be filtered out, personal kept.
     let filtered = subjects(
         store
-            .current_claims(&query, 20, &["company".to_string()], None, None)
+            .current_claims(&query, 20, &["company".to_string()], None, None, None)
             .await
             .expect("claims filtered"),
     );
@@ -328,7 +328,7 @@ async fn claim_kind_and_confidence_round_trip() {
         .expect("upsert risk claim");
 
     let decisions = store
-        .recent_claims(10, Some("omb"), Some(&["decision".to_owned()]), &[])
+        .recent_claims(10, Some("omb"), Some(&["decision".to_owned()]), &[], None)
         .await
         .expect("recent decisions");
     assert_eq!(decisions.len(), 1);
@@ -345,6 +345,7 @@ async fn claim_kind_and_confidence_round_trip() {
                 "blocked".to_owned(),
             ]),
             &[],
+            None,
         )
         .await
         .expect("recent risks");
@@ -392,6 +393,7 @@ async fn next_claim_is_recallable() {
             Some("omb"),
             Some(&["next".to_owned(), "blocked".to_owned()]),
             &[],
+            None,
         )
         .await
         .expect("recent next actions");

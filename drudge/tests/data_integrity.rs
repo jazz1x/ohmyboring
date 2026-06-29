@@ -71,7 +71,7 @@ async fn sync_is_idempotent() {
     }
 
     let claims = store
-        .recent_claims(10, Some("omb"), Some(&["fact".to_owned()]), &[])
+        .recent_claims(10, Some("omb"), Some(&["fact".to_owned()]), &[], None)
         .await
         .expect("claims")
         .into_iter()
@@ -117,7 +117,7 @@ async fn oversized_claim_list_is_ingested_without_panic() {
     }
 
     let count = store
-        .recent_claims(200, Some("omb"), Some(&["fact".to_owned()]), &[])
+        .recent_claims(200, Some("omb"), Some(&["fact".to_owned()]), &[], None)
         .await
         .expect("claims")
         .into_iter()
