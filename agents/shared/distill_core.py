@@ -207,15 +207,17 @@ def _build_prompt(text, origin, repo, note_lang=None):
         "- tags: up to 6, lowercase, no hashtags.\n"
         "- tools: concrete tools/commands used (e.g., git, bun, terraform). [] if none.\n"
         "- concepts: recurring ideas/axes (e.g., code_parity, version_upgrade). [] if none.\n"
-        "- claims: 3-5 durable facts/decisions/risks as (subject, predicate, value, kind, confidence). [] only if none exist.\n"
-        "  kind: one of fact, decision, assumption, risk, blocked, goal.\n"
+        "- claims: 3-5 durable facts/decisions/risks/next-steps as (subject, predicate, value, kind, confidence). [] only if none exist.\n"
+        "  kind: one of fact, decision, assumption, risk, blocked, goal, next.\n"
         "  confidence: one of certain, likely, assumption, outdated.\n"
-        "  Extract concrete decisions, status changes, version selections, and open risks — not opinions or next steps.\n"
+        "  Extract concrete decisions, status changes, version selections, open risks, and any explicit next action still pending.\n"
+        "  Use kind='next' for concrete follow-up actions left undone at session end. Use kind='blocked' only when an active obstacle prevents progress.\n"
         "  Prefer project-scoped subjects. Examples:\n"
         '  {\"subject\":\"kb-rag-bot\",\"predicate\":\"model-interface\",\"value\":\"bedrock-converse\",\"kind\":\"decision\",\"confidence\":\"certain\"}\n'
         '  {\"subject\":\"qa-tests\",\"predicate\":\"rtk-status\",\"value\":\"removed\",\"kind\":\"fact\",\"confidence\":\"certain\"}\n'
         '  {\"subject\":\"omb\",\"predicate\":\"release-version\",\"value\":\"0.1.3\",\"kind\":\"fact\",\"confidence\":\"certain\"}\n'
-        '  {\\"subject\\":\\"kb-rag-bot\\",\\"predicate\\":\\"auth-flow\\",\\"value\\":\\"oauth-redirect-unverified\\",\\"kind\\":\\"risk\\",\\"confidence\\":\\"likely\\"}\\n'
+        '  {\"subject\":\"kb-rag-bot\",\"predicate\":\"auth-flow\",\"value\":\"oauth-redirect-unverified\",\"kind\":\"risk\",\"confidence\":\"likely\"}\n'
+        '  {\"subject\":\"omb\",\"predicate\":\"next-step\",\"value\":\"add /next_actions endpoint\",\"kind\":\"next\",\"confidence\":\"certain\"}\n'
         '- Pure chit-chat with no real work → output only: {"skip": true}\n\n'
         "=== SESSION TRANSCRIPT ===\n" + text
     )
@@ -357,6 +359,9 @@ def _call_remember(title, body, origin, repo, tags, tools, concepts, claims, ses
             if isinstance(item, dict) and item.get("type") == "text":
                 text += item.get("text", "")
         print(f"[distill-session] {text}", file=sys.stderr)
+        # A duplicate skip is a successful deterministic outcome, not a transient failure.
+        if "skipped — duplicate" in text:
+            return True
         return "remembered" in text
 
     return False
@@ -433,6 +438,8 @@ def distill_and_remember(text, origin, repo, session_id=""):
                     "subject": str(c["subject"]).strip(),
                     "predicate": str(c["predicate"]).strip(),
                     "value": str(c["value"]).strip(),
+                    "kind": str(c.get("kind", "fact")).strip() or "fact",
+                    "confidence": str(c.get("confidence", "certain")).strip() or "certain",
                 }
             )
 

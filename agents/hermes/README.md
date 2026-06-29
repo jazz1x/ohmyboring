@@ -37,7 +37,7 @@ hermes-agent connects to oh-my-boring over MCP and runs cron-driven automation.
 
 ## Managed skills
 
-`agents/hermes/skills/memory-ingest/` is copied to `~/.hermes/skills/memory-ingest/` on install. The skill tells hermes how to distill a session and call `ohmyboring/remember`.
+`agents/hermes/skills/memory-ingest/` is copied to `~/.hermes/skills/memory-ingest/` on install. The skill tells hermes how to distill a session and call `ohmyboring/remember`, including extracting `next` and `blocked` claims for the `next_actions` register.
 
 ## Installation
 

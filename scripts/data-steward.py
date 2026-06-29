@@ -39,7 +39,7 @@ MIN_CLAIMS_PER_SESSION = 2
 MIN_CLAIM_VALUE_LEN = 4
 # Words that make a claim sound like a next-step rather than a fact.
 WEAK_CLAIM_WORDS = {"검토", "확인", "고민", "예정", "계획", "review", "consider", "plan", "todo"}
-ALLOWED_CLAIM_KINDS = {"fact", "decision", "assumption", "risk", "blocked", "goal", "term"}
+ALLOWED_CLAIM_KINDS = {"fact", "decision", "assumption", "risk", "blocked", "goal", "term", "next"}
 ALLOWED_CLAIM_CONFIDENCES = {"certain", "likely", "assumption", "outdated"}
 # The shipped sample note is allowed to be generic/empty; do not flag it as data rot.
 SEED_NOTE = "wiki-0000.md"

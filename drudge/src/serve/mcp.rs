@@ -301,6 +301,29 @@ fn mcp_tools_list() -> Value {
                     "project": {"type": "string", "description": "optional project slug filter"}
                 }
             }
+        },
+        {
+            "name": "next_actions",
+            "description": "Next-action register: recent explicit next steps (kind=next) and active blockers (kind=blocked). \
+                            Optionally filter by project. Generative (runs the LLM). Requires the vector backend.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "optional project slug filter"}
+                }
+            }
+        },
+        {
+            "name": "stalled",
+            "description": "Stalled register: next steps or blockers that have not moved in N days (default 7). \
+                            Optionally filter by project or change the threshold. Generative (runs the LLM). Requires the vector backend.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "optional project slug filter"},
+                    "older_than_days": {"type": "integer", "description": "threshold in days (default 7)"}
+                }
+            }
         }
     ]})
 }
@@ -361,6 +384,8 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
         "context" => ToolOut::Structured(mcp_context(s, args).await?),
         "decisions" => ToolOut::Structured(mcp_decisions(s, args).await?),
         "risks" => ToolOut::Structured(mcp_risks(s, args).await?),
+        "next_actions" => ToolOut::Structured(mcp_next_actions(s, args).await?),
+        "stalled" => ToolOut::Structured(mcp_stalled(s, args).await?),
         other => return Err((-32602, format!("unknown tool: {other}"))),
     };
     Ok(out.into_result())
@@ -620,6 +645,7 @@ async fn mcp_context(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
             risks: vec![],
             facts: vec![],
             glossary: vec![],
+            next_actions: vec![],
             language: s.cfg.note_lang.as_str().to_owned(),
         }
     };
@@ -649,6 +675,46 @@ async fn mcp_risks(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, St
     let out = ask::risk_register(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
         .await
         .map_err(|e| (-32603_i32, format!("risks: {e:#}")))?;
+    Ok(json!({"answer": out.answer, "sources": out.sources}))
+}
+
+/// `next_actions` — recent explicit next steps and active blockers. Returns `{answer, sources}`.
+async fn mcp_next_actions(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
+    let project = args
+        .and_then(|a| a.get("project"))
+        .and_then(Value::as_str)
+        .map(str::trim);
+    let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    let out = ask::next_action_register(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
+        .await
+        .map_err(|e| (-32603_i32, format!("next_actions: {e:#}")))?;
+    Ok(json!({"answer": out.answer, "sources": out.sources}))
+}
+
+/// `stalled` — next/blocker claims that have not moved in N days. Returns `{answer, sources}`.
+async fn mcp_stalled(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
+    let project = args
+        .and_then(|a| a.get("project"))
+        .and_then(Value::as_str)
+        .map(str::trim);
+    let older_than_days = args
+        .and_then(|a| a.get("older_than_days"))
+        .and_then(Value::as_u64)
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| (-32602_i32, "older_than_days is too large".to_owned()))?
+        .unwrap_or(7);
+    let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    let out = ask::stalled_register(
+        store,
+        &s.llm,
+        project,
+        &[],
+        s.cfg.note_lang.as_str(),
+        older_than_days,
+    )
+    .await
+    .map_err(|e| (-32603_i32, format!("stalled: {e:#}")))?;
     Ok(json!({"answer": out.answer, "sources": out.sources}))
 }
 

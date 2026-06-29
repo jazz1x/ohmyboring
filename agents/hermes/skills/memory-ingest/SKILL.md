@@ -36,7 +36,11 @@ You are given (in the prompt):
    - `tags` — array of ≤6 lowercase topical tags.
    - `tools` — array of ≤6 tool/library names.
    - `concepts` — array of ≤6 patterns/concepts.
-   - `claims` — optional array of `{subject, predicate, value, kind, confidence}` facts/decisions/risk.
+   - `claims` — optional array of `{subject, predicate, value, kind, confidence}` facts/decisions/risks/next-steps.
+     - `kind`: `fact`, `decision`, `assumption`, `risk`, `blocked`, `goal`, or `next`.
+     - Use `next` for concrete follow-up actions still pending at the end of the session.
+     - Use `blocked` only for active obstacles that prevent progress.
+     - Example: `{"subject":"omb","predicate":"next-step","value":"add /next_actions endpoint","kind":"next","confidence":"certain"}`
 4. **STORE.** Call the `remember` tool ONCE with `{title, body, tags, tools, concepts, origin, repo, omb_session_id, claims}`.
    - `tags`, `tools`, `concepts` must be JSON arrays of strings, not a single comma-separated string.
    - `repo` is optional; include it only when a repo slug is provided.
