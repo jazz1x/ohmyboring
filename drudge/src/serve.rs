@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config;
 use crate::llm::Llm;
+use crate::pii;
 use crate::store::Store;
 use crate::wiki_recall;
 
@@ -38,6 +39,8 @@ pub struct AppState {
     pub(crate) llm: Arc<Llm>,
     /// vault root (`BORING_VAULT_DIR`). The remember target (`<vault>/wiki/wiki-NNNN.md`) + the relates_to projection root.
     pub(crate) vault_dir: Arc<Option<PathBuf>>,
+    /// PII / sensitive-data gate. None when no rule files are present.
+    pub(crate) pii: Arc<Option<pii::PiiScanner>>,
     /// Policy config (`boring.json`).
     pub(crate) cfg: Arc<config::BoringConfig>,
     /// Resolved path to the loaded config, so `classify_repo` writes back to the same file.
@@ -351,10 +354,16 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
     let addr = config::env_set("BORING_HTTP_ADDR").unwrap_or_else(|| "0.0.0.0:7700".to_owned());
 
     let last_compact = Arc::new(Mutex::new(None));
+    let pii = vault_dir
+        .as_ref()
+        .map(|vd| crate::pii::PiiScanner::load_from_vault(vd))
+        .transpose()?
+        .flatten();
     let state = AppState {
         store: store.map(Arc::new),
         llm: Arc::new(llm),
         vault_dir: Arc::new(vault_dir),
+        pii: Arc::new(pii),
         cfg: Arc::new(cfg),
         cfg_path: Arc::new(cfg_path),
         sync_lock: Arc::new(Mutex::new(())),
