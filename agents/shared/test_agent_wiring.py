@@ -101,7 +101,9 @@ def test_wire_claude_code_adds_session_start():
 
 def test_wire_hermes_adds_hint_and_weekly():
     """hermes wiring installs hint + weekly script and updates config.yaml."""
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, mock.patch.object(
+        agent_wiring, "_ensure_hermes_cron_job", return_value=False
+    ) as mock_cron:
         home = Path(d) / "omb"
         scripts = home / "agents" / "hermes"
         scripts.mkdir(parents=True)
@@ -112,8 +114,9 @@ def test_wire_hermes_adds_hint_and_weekly():
         assert result["changed"] is True
         text = cfg.read_text(encoding="utf-8")
         assert "environment_hint:" in text
-        assert "ohmyboring/recall" in text
+        assert "ohmyboring/context" in text
         assert (Path(os.path.expanduser("~/.hermes/scripts")) / "weekly-briefing.py").exists()
+        assert mock_cron.called is True
 
 
 if __name__ == "__main__":
