@@ -24,7 +24,7 @@ done
 # not with a cryptic 'make: command not found' right after this friendly check passes.
 command -v make >/dev/null 2>&1 || die "make not found — install it: macOS 'xcode-select --install' (or 'brew install make') · Debian/Ubuntu 'sudo apt-get install make' · Fedora 'sudo dnf install make'."
 docker info >/dev/null 2>&1 || die "Docker daemon not running — start Docker Desktop / dockerd, then re-run."
-command -v ollama >/dev/null 2>&1 || warn "ollama not on PATH — install from https://ollama.com, or set BORING_LLM_BASE_URL to your own OpenAI-compatible endpoint in .env."
+command -v ollama >/dev/null 2>&1 || warn "ollama not on PATH — install from https://ollama.com, or seed another backend before first run (e.g. BORING_LLM_PROVIDER=lmstudio BORING_LLM_BASE_URL=http://host.docker.internal:1234/v1)."
 
 # 2) Clone or update (idempotent).
 if [ -d "$BORING_HOME/.git" ]; then

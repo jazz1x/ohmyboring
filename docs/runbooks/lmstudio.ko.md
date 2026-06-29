@@ -29,6 +29,26 @@ LM Studio를 ohmyboring의 로컬 OpenAI-compatible 백엔드로 사용합니다
 }
 ```
 
+새로 받은 저장소에서는 검증 전에 설정 파일을 만듭니다:
+
+```bash
+cp boring.example.json boring.json
+```
+
+한 번에 첫 실행하려면 아직 없는 `boring.json`을 환경 변수 값으로 초기 생성할 수 있습니다:
+
+```bash
+BORING_LLM_PROVIDER=lmstudio \
+BORING_LLM_BOOTSTRAP=manual \
+BORING_LLM_BASE_URL=http://host.docker.internal:1234/v1 \
+BORING_LLM_MODEL=<정확한-chat-model-id> \
+BORING_LLM_EMBED_MODEL=<정확한-embedding-model-id> \
+BORING_LLM_EMBED_DIM=768 \
+make up
+```
+
+`boring.json`이 생긴 뒤에는 초기화 환경 변수에 의존하지 말고 그 파일을 직접 수정합니다.
+
 LM Studio가 반환하는 id를 그대로 사용합니다:
 
 ```bash

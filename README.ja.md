@@ -139,11 +139,13 @@ flowchart LR
 | `repos[]` | パス/remote ルール → `origin=personal/company/mirror/community` |
 | `agents[]` | vector mode の ingest source |
 
-**LLM バックエンドの切り替え**は config ブロック 1 つで完結します。`make up` は `scripts/llm-providers/<provider>.sh` にディスパッチします。Ollama はサーバー起動とモデル pull ができ、LM Studio はアプリ側でモデルがロード済みである前提でサーバー状態だけを確認します。
+**LLM バックエンドの切り替え**は config ブロック 1 つで完結します。`make up` は `scripts/llm-providers/<provider>.sh` にディスパッチします。Ollama はサーバー起動とモデル pull ができ、LM Studio はローカルサーバーと設定済みの 2 つのモデル id を確認し、モデルロード自体はアプリ側が所有します。
 
 ### LM Studio バックエンド
 
 LM Studio には OpenAI-compatible `/v1` サーバー経由で接続します。Docker コンテナがホスト上の LM Studio に戻るため、`boring.json` では `host.docker.internal` を使い、ホスト上の確認やベンチマークだけ `localhost` を使います。
+
+新しく取得したリポジトリでは、検証前に `boring.json` を作るか、最初の `make up` で `BORING_LLM_PROVIDER=lmstudio` と `.env.example` の `BORING_LLM_*` 値を使って初期設定を生成できます。`boring.json` ができた後は、そのファイルを直接編集します。
 
 ```json
 {
@@ -162,6 +164,7 @@ LM Studio には OpenAI-compatible `/v1` サーバー経由で接続します。
 LM Studio のローカルサーバーを起動し、chat モデルと embedding モデルを 1 つずつロードしてから、`make up` 前に確認します:
 
 ```bash
+cp boring.example.json boring.json
 curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
 make verify-llm
 make up
@@ -176,6 +179,7 @@ make doctor
 |---|---|
 | `BORING_VECTOR` | `on` で pgvector 有効化（オプション） |
 | `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | `llm.base_url` / `llm.model` のランタイムオーバーライド（オプション）。`drudge` バイナリをホストで直接実行する場合は `BORING_LLM_BASE_URL=http://localhost:11434/v1` を設定 |
+| `BORING_LLM_PROVIDER` / `BORING_LLM_BOOTSTRAP` / `BORING_LLM_EMBED_MODEL` / `BORING_LLM_EMBED_DIM` | `boring.json` がまだ存在しない場合だけ使う初回起動の初期値 |
 | `BORING_LLM_API_KEY` | `llm.api_key_env` がここを指す場合の API キー（認証 provider） |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプション Slack assistant |
 

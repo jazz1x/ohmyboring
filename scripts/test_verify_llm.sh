@@ -77,17 +77,17 @@ OMB_VERIFY_LLM_KEY="secret" run_verify
 check "valid api_key_env with value passes" $?
 teardown
 
-# --- 3. valid env var name + missing value fails ------------------------------
+# --- 3. valid env var name + missing value is OK when models are public -------
 setup
 write_config "OMB_VERIFY_LLM_MISSING_KEY"
 run_verify
-{ [ "$RC" = 1 ]; }
-check "missing configured api key env fails" $?
+{ [ "$RC" = 0 ]; }
+check "missing configured api key env is advisory when models are visible" $?
 teardown
 
 # --- 4. auth-only /models response is not enough to verify readiness ----------
 setup
-write_config ""
+write_config "OMB_VERIFY_LLM_MISSING_KEY"
 CURL_STATUS=401 run_verify
 { [ "$RC" = 1 ]; }
 check "auth-only model listing fails readiness" $?

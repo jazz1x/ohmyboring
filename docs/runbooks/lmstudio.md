@@ -29,6 +29,26 @@ Set `boring.json` to `lmstudio` and use `host.docker.internal` for the Docker ru
 }
 ```
 
+On a fresh checkout, create the config before verification:
+
+```bash
+cp boring.example.json boring.json
+```
+
+For a one-command first run, seed the missing `boring.json` with env vars:
+
+```bash
+BORING_LLM_PROVIDER=lmstudio \
+BORING_LLM_BOOTSTRAP=manual \
+BORING_LLM_BASE_URL=http://host.docker.internal:1234/v1 \
+BORING_LLM_MODEL=<exact-chat-model-id> \
+BORING_LLM_EMBED_MODEL=<exact-embedding-model-id> \
+BORING_LLM_EMBED_DIM=768 \
+make up
+```
+
+After `boring.json` exists, edit that file instead of relying on seed env.
+
 Use the exact ids reported by LM Studio:
 
 ```bash

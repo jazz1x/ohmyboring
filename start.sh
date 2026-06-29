@@ -7,7 +7,11 @@ cd "$(dirname "$0")"
 [ -f .env ] || cp .env.example .env  # Slack tokens only — the core runs without .env
 chmod 600 .env 2>/dev/null || true
 # Create policy config from example if missing. User edits it to set language, repo rules, source dirs.
-[ -f boring.json ] || cp boring.example.json boring.json
+CREATED_CONFIG=0
+if [ ! -f boring.json ]; then
+  cp boring.example.json boring.json
+  CREATED_CONFIG=1
+fi
 chmod 644 boring.json 2>/dev/null || true
 # Source .env so that variables like BORING_VECTOR are visible to this script.
 set -a; . .env; set +a
@@ -15,6 +19,29 @@ set -a; . .env; set +a
 # Fail fast if a required host tool is missing — BEFORE pulling GBs of models or
 # starting docker compose, so the user gets a clear hint instead of a cryptic exit 127.
 ./scripts/preflight-deps.sh
+
+if [ "$CREATED_CONFIG" -eq 1 ]; then
+  tmp="$(mktemp)"
+  jq \
+    --arg provider "${BORING_LLM_PROVIDER:-}" \
+    --arg bootstrap "${BORING_LLM_BOOTSTRAP:-}" \
+    --arg base_url "${BORING_LLM_BASE_URL:-}" \
+    --arg model "${BORING_LLM_MODEL:-}" \
+    --arg embed_model "${BORING_LLM_EMBED_MODEL:-}" \
+    --arg embed_dim "${BORING_LLM_EMBED_DIM:-}" \
+    '
+      .llm = (.llm // {})
+      | if $provider != "" then .llm.provider = $provider else . end
+      | if $bootstrap != "" then .llm.bootstrap = $bootstrap
+        elif ($provider == "lmstudio" or $provider == "openai-compatible") then .llm.bootstrap = "manual"
+        else . end
+      | if $base_url != "" then .llm.base_url = $base_url else . end
+      | if $model != "" then .llm.model = $model else . end
+      | if $embed_model != "" then .llm.embed_model = $embed_model else . end
+      | if $embed_dim != "" then .llm.embed_dim = ($embed_dim | tonumber) else . end
+    ' boring.json > "$tmp"
+  mv "$tmp" boring.json
+fi
 
 # --- LLM provider bootstrap (provider-dispatch; SSOT = boring.json `llm` block) ---
 # The engine is OpenAI-compatible & backend-agnostic, so only the *bootstrap* differs per provider:
@@ -76,10 +103,13 @@ chmod 700 vault vault/raw vault/wiki data data/pgdata 2>/dev/null || true
 echo "▶ Building + starting (boring-drudge${AGENT:+ + boring-agent}${PROFILES:+ + boring-postgres}) …"
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
-if docker compose version 2>&1 | grep -q "Docker Compose"; then
+if docker compose version >/dev/null 2>&1; then
   COMPOSE="docker compose"
-else
+elif command -v docker-compose >/dev/null 2>&1; then
   COMPOSE="docker-compose"
+else
+  echo "✗ Docker Compose not found. Install the Docker Compose plugin or docker-compose."
+  exit 1
 fi
 
 # Wire hermes-agent config/scripts before the container starts so the cron
@@ -95,7 +125,7 @@ echo "▶ Waiting for boring-drudge health …"
 for _ in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:7700/health >/dev/null 2>&1 && break; sleep 3; done
 if ! curl -sf -m3 http://127.0.0.1:7700/health >/dev/null 2>&1; then
   echo "  ✗ drudge did not become healthy within 3 minutes."
-  echo "    Run: docker compose logs drudge"
+  echo "    Run: docker compose logs boring-drudge"
   exit 1
 fi
 
@@ -110,5 +140,5 @@ cat <<'EOF'
   make logs          engine logs
   The core self-augmentation loop runs without hermes-agent. If built, hermes-agent can drive
   ohmyboring over MCP (:7700/mcp) for advanced orchestration, recall, and skill creation.
-  (To use Slack, fill in tokens in .env and run docker compose up -d hermes-agent)
+  (To use Slack, fill in tokens in .env and run docker compose up -d boring-agent)
 EOF

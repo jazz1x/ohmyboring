@@ -21,6 +21,15 @@ command -v docker >/dev/null 2>&1 || missing "docker" \
 docker info >/dev/null 2>&1 || missing "docker daemon" \
     "Docker is installed but the daemon is not responding. Start Docker Desktop, or run: sudo systemctl start docker"
 
+if docker compose version >/dev/null 2>&1; then
+    :
+elif command -v docker-compose >/dev/null 2>&1; then
+    :
+else
+    missing "docker compose" \
+        "Install the Docker Compose plugin or standalone docker-compose: https://docs.docker.com/compose/install/"
+fi
+
 command -v jq >/dev/null 2>&1 || missing "jq" \
     "Install jq: macOS 'brew install jq' · Debian/Ubuntu 'sudo apt-get install jq' · Fedora 'sudo dnf install jq' · https://jqlang.github.io/jq/download/"
 
@@ -35,4 +44,4 @@ command -v python3 >/dev/null 2>&1 || missing "python3" \
 command -v make >/dev/null 2>&1 || missing "make" \
     "Install make: macOS 'xcode-select --install' (or 'brew install make') · Debian/Ubuntu 'sudo apt-get install make' · Fedora 'sudo dnf install make'"
 
-echo "✓ Dependencies OK (docker + daemon, jq, curl, python3, make)"
+echo "✓ Dependencies OK (docker + daemon + compose, jq, curl, python3, make)"

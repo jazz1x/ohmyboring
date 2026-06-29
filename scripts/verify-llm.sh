@@ -45,6 +45,9 @@ fi
 
 if [ ! -f "$BORING" ]; then
     bad "config not found: $BORING"
+    info "From a fresh clone, create it first: cp boring.example.json boring.json"
+    info "Or point BORING_HOME/BORING_CONFIG at the repo that contains boring.json."
+    info "For LM Studio first-run seeding, set BORING_LLM_PROVIDER=lmstudio plus the needed BORING_LLM_* model/url vars, then run make up."
     exit 1
 fi
 
@@ -109,8 +112,7 @@ case "$PROVIDER" in
             elif API_KEY_VALUE=$(printenv "$API_KEY_ENV") && [ -n "$API_KEY_VALUE" ]; then
                 ok "api key env '$API_KEY_ENV' is set"
             else
-                bad "api key env '$API_KEY_ENV' is not set — export $API_KEY_ENV=..."
-                errors=$((errors + 1))
+                info "api key env '$API_KEY_ENV' is not set; continuing unless the endpoint requires auth"
             fi
         fi
         code=$(curl_models_status)
@@ -132,7 +134,11 @@ case "$PROVIDER" in
                 fi
                 ;;
             401)
-                bad "endpoint requires authentication or rejected api key at $HOST_URL/models — cannot verify loaded models"
+                if [ -n "$API_KEY_ENV" ]; then
+                    bad "endpoint requires authentication or rejected api key at $HOST_URL/models — export $API_KEY_ENV=..."
+                else
+                    bad "endpoint requires authentication at $HOST_URL/models — set llm.api_key_env and export that key"
+                fi
                 errors=$((errors + 1))
                 ;;
             000)
