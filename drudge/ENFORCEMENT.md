@@ -41,7 +41,7 @@
 | **D4** Secret scrub = single leak boundary | `drudge/src/redact.rs` · `drudge/src/store.rs:787-823` |
 | **D5** Claim temporal authority (supersede) | `drudge/src/store.rs:500-617` · `drudge/src/ask.rs:126-153` |
 | **D6** No-panic / ROP / Layer 1>2>3 | `drudge/PHILOSOPHY.md` · `drudge/Cargo.toml:41-63` |
-| **D7** Vault/wiki SSOT, DB rebuildable | `drudge/src/vault.rs` · `drudge/src/renumber.rs` · `drudge/src/ingest.rs:285-287` |
+| **D7** Vault/wiki SSOT, stable wiki IDs, DB rebuildable | `drudge/src/vault.rs` · `drudge/src/vault/remember.rs` · `drudge/src/ingest.rs:285-287` |
 
 **Honest disclosure**: §0 (official) + §B's no-panic + formatting + behavioral regression are blocked by the *machine*. **The design-level §A·§B·§C (ADT · error-ADT · PDV · DIP · restraint · ROP) are blocked by review** — that the machine can't catch them is not a defect but *design*. The three when-stuck questions (Layer 1 > Layer 2 > Layer 3) are the review checklist.
 
