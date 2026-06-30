@@ -6,7 +6,7 @@ Run: python3 agents/shared/test_resolution_quality.py
 import unittest
 from typing import Optional, get_type_hints
 
-from resolution_quality import normalize_resolution, verify_note_resolution
+from resolution_quality import normalize_resolution, resolution_prompt_contract, verify_note_resolution
 import resolution_quality
 
 
@@ -219,6 +219,13 @@ class ResolutionQualityTests(unittest.TestCase):
 
         self.assertFalse(report.ok)
         self.assertIn("claim-kind-invalid:verdict", report.missing)
+
+    def test_prompt_contract_spells_out_required_claim_kinds(self):
+        contract = resolution_prompt_contract("evidence")
+
+        self.assertIn("Required claim kinds: decision, fact", contract)
+        self.assertIn("Required claim kinds are hard gates", contract)
+        self.assertIn('"kind":"decision"', contract)
 
 
 if __name__ == "__main__":
