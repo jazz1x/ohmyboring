@@ -52,7 +52,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 | 방법 | 명령 | 언제 |
 | --- | --- | --- |
 | **자동 (세션 종료 시)** | SessionEnd 훅 (`install.sh`가 설치) | 모든 Claude Code / Kimi 세션 — `hooks/distill-session.py`가 트랜스크립트를 증류해 `remember`합니다. 짝이 되는 `UserPromptSubmit` 훅(`recall.py`)이 관련 과거 메모리를 새 프롬프트에 자동 주입합니다. |
-| **자동 (Codex 워커)** | 호스트 launchd/cron 워커 (`install.sh`가 설치) | Codex에는 SessionEnd 훅이 없습니다. 호스트 워커가 20분마다 `~/.codex/sessions/**/*.jsonl`을 스캔하고, Codex Desktop `rollout-*` 복제본은 기본으로 건너뛰며, 적재 가능한 트랜스크립트만 같은 `remember` 경로로 저장합니다. `hermes-agent`가 켜져 있으면 `codex-memory-ingest-worker`도 함께 설치됩니다. 둘 다 `make doctor`로 확인합니다. |
+| **자동 (Codex 워커)** | 호스트 launchd/cron 워커 (`install.sh`가 설치) | Codex에는 SessionEnd 훅이 없습니다. 호스트 워커가 20분마다 `~/.codex/sessions/**/*.jsonl`을 스캔하고, 아직 쓰이는 중인 transcript와 실제 subagent rollout은 건너뛰며, 적재 가능한 transcript를 같은 `remember` 경로로 저장합니다. `hermes-agent`가 켜져 있으면 `codex-memory-ingest-worker`도 함께 설치됩니다. 둘 다 `make doctor`로 확인합니다. |
 | **과거 세션 백필** | `make collect [N=20]` | 설치 직후, 비어 있는 vault를 `~/.claude/projects` 기록으로 채울 때. 최신순, 멱등(세션별 마커로 이미 증류한 건 건너뜀), 한 번에 `N`개만 처리해 CPU를 독점하지 않음. |
 | **지금 바로 (세션 안 끝내고)** | `make distill-now` · `make remember M="…"` | 세션을 끝내지 않고 즉시 적재할 때. `distill-now`는 **현재** 트랜스크립트를 그때그때 다시 증류하고 마커를 남기지 않으므로, 세션 종료 시의 정상 적재도 그대로 동작합니다(초기 노트 + 최종 노트가 함께 생길 수 있음). `remember`는 직접 작성한 노트를 저장합니다. |
 
@@ -372,7 +372,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Kimi 세션을 요약해 `remember` 호출 |
 | Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | 관련 snippet을 가져와 프롬프트 context 주입 |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring`를 MCP 서버로 노출 |
-| Codex | `agents/codex/README.md` | MCP + 호스트 워커 백필 | `~/.codex/mcp.json` / launchd 또는 cron / `collect-sessions.py` | `ohmyboring`를 MCP 서버로 노출하고 적재 가능한 Codex 세션을 백필. rollout 복제본은 건너뜀 |
+| Codex | `agents/codex/README.md` | MCP + 호스트 워커 백필 | `~/.codex/mcp.json` / launchd 또는 cron / `collect-sessions.py` | `ohmyboring`를 MCP 서버로 노출하고 적재 가능한 Codex 세션을 백필. 설치된 워커는 안정화된 rollout transcript를 수확하고 실제 subagent는 건너뜀 |
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 적재 워커와 정기 브리핑 실행 |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 수동 | 오래된 Claude Code 세션 lazy 백필 |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 수동 | 오래된 Kimi Code 세션 lazy 백필 |
