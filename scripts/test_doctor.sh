@@ -43,6 +43,12 @@ SH
 #!/bin/sh
 case "${1:-}" in
   */event_log.py)
+    if [ "${2:-}" = --record ]; then
+        if [ -n "${DOCTOR_EVENT_CALLS:-}" ]; then
+            printf '%s %s %s\n' "${3:-}" "${4:-}" "${5:-}" >>"$DOCTOR_EVENT_CALLS"
+        fi
+        exit 0
+    fi
     echo "resolution_quality recent_failures=0 log=/tmp/events.ndjson"
     exit 0
     ;;
@@ -84,6 +90,7 @@ run_strict() {
     HOME="$case_dir/home" \
     BORING_HOME="$case_dir/boring" \
     BORING_URL="http://127.0.0.1:7700" \
+    DOCTOR_EVENT_CALLS="$case_dir/events.calls" \
     PATH="$TMP/fakebin:$PATH" \
     sh "$ROOT/scripts/doctor.sh" --strict >"$out" 2>&1
 }
@@ -96,6 +103,14 @@ if ! run_strict "$TMP/pass" "$TMP/pass.out"; then
     echo "FAIL: strict doctor should pass when every readiness proof exists" >&2
     exit 1
 fi
+case "$(cat "$TMP/pass/events.calls")" in
+  *"doctor readiness ok"*) ;;
+  *)
+    cat "$TMP/pass/events.calls"
+    echo "FAIL: strict doctor pass event was not recorded" >&2
+    exit 1
+    ;;
+esac
 
 make_case "$TMP/fail" no
 if run_strict "$TMP/fail" "$TMP/fail.out"; then
@@ -108,6 +123,14 @@ case "$(cat "$TMP/fail.out")" in
   *)
     cat "$TMP/fail.out"
     echo "FAIL: strict doctor failure message missing" >&2
+    exit 1
+    ;;
+esac
+case "$(cat "$TMP/fail/events.calls")" in
+  *"doctor readiness failed"*) ;;
+  *)
+    cat "$TMP/fail/events.calls"
+    echo "FAIL: strict doctor failure event was not recorded" >&2
     exit 1
     ;;
 esac

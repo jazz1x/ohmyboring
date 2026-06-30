@@ -34,6 +34,9 @@ for arg in "$@"; do
         --strict) STRICT=1 ;;
     esac
 done
+EVENT_LOG="$BORING_HOME/agents/shared/event_log.py"
+doctor_run_id="doctor-$(date +%Y%m%dT%H%M%S)-$$"
+doctor_started_at="$(date +%s)"
 
 # Track which checks failed so --fix knows what to repair.
 failed_env=0
@@ -48,6 +51,31 @@ failed_resolution=0
 
 ok()   { echo "✓ $1"; }
 bad()  { echo "✗ $1"; }
+
+log_doctor_event() {
+    status="$1"
+    event_name="doctor"
+    [ "$STRICT" -eq 1 ] && event_name="readiness"
+    duration_s="$(($(date +%s) - doctor_started_at))"
+    if [ -f "$EVENT_LOG" ]; then
+        if ! python3 "$EVENT_LOG" --record doctor "$event_name" "$status" \
+            --field "run_id=$doctor_run_id" \
+            --field "strict=$STRICT" \
+            --field "duration_s=$duration_s" \
+            --field "failed_env=$failed_env" \
+            --field "failed_hooks=$failed_hooks" \
+            --field "failed_engine=$failed_engine" \
+            --field "failed_ollama=$failed_ollama" \
+            --field "failed_containers=$failed_containers" \
+            --field "failed_note=$failed_note" \
+            --field "failed_marker=$failed_marker" \
+            --field "failed_codex=$failed_codex" \
+            --field "failed_resolution=$failed_resolution" \
+            --field "drudge_down=$drudge_down"; then
+            echo "⚠ doctor event log write failed" >&2
+        fi
+    fi
+}
 
 # Safe auto-repair helpers. Dangerous ops (reset/restore) are intentionally absent.
 fix_env() {
@@ -246,15 +274,19 @@ if [ "$STRICT" -eq 1 ]; then
     failures="${failed_env}${failed_hooks}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}"
     if [ "$failures" = "000000000" ]; then
         ok "readiness: all doctor checks passed — briefing/write-door dependencies are ready."
+        log_doctor_event ok
         exit 0
     fi
     bad "readiness: one or more doctor checks failed — do not rely on tomorrow's briefing until fixed."
+    log_doctor_event failed
     exit 1
 fi
 
 if [ "$drudge_down" -eq 0 ]; then
     ok "doctor: drudge is up — the write door is open."
+    log_doctor_event ok
     exit 0
 fi
 bad "doctor: drudge is DOWN — sessions are silently dropped until it's back up."
+log_doctor_event failed
 exit 1

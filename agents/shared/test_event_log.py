@@ -4,10 +4,12 @@
 Run: python3 agents/shared/test_event_log.py
 """
 import json
+import io
 import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 import event_log
 
@@ -41,7 +43,44 @@ class EventLogTests(unittest.TestCase):
         self.assertEqual(event["event"], "distill_resolution")
         self.assertEqual(event["status"], "ok")
         self.assertEqual(event["session_id"], "s1")
+        self.assertEqual(event["run_id"], "s1")
         self.assertIn("ts", event)
+
+    def test_record_cli_coerces_fields_and_tail_filters(self):
+        with mock.patch.object(
+            event_log.sys,
+            "argv",
+            [
+                "event_log.py",
+                "--record",
+                "guard",
+                "guard",
+                "ok",
+                "--field",
+                "duration_s=12",
+                "--field",
+                "strict=true",
+            ],
+        ):
+            self.assertEqual(event_log.main(), 0)
+
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(event_log.sys, "argv", ["event_log.py", "--tail", "--component", "guard", "--json"]),
+            mock.patch.object(event_log.sys, "stdout", stdout),
+        ):
+            self.assertEqual(event_log.main(), 0)
+
+        lines = stdout.getvalue().strip().splitlines()
+        self.assertEqual(len(lines), 1)
+        event = json.loads(lines[0])
+        self.assertEqual(event["component"], "guard")
+        self.assertEqual(event["duration_s"], 12)
+        self.assertEqual(event["strict"], True)
+
+    def test_try_append_event_returns_false_on_write_failure(self):
+        with mock.patch.object(event_log, "append_event", side_effect=OSError("denied")):
+            self.assertFalse(event_log.try_append_event("guard", "guard", "failed"))
 
     def test_recent_resolution_failures_filters_resolution_failures(self):
         event_log.append_event("distill-session", "distill_resolution", "ok", session_id="pass")

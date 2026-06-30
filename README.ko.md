@@ -184,6 +184,8 @@ make readiness
 | `BORING_EVENT_RECENT_HOURS` | `make readiness`가 보는 최근 이벤트 범위; 기본값 `24` |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack assistant |
 
+구조화 이벤트는 distill, collector/worker, `doctor`/`readiness`, `guard`, `eval`에서 기록됩니다. 최근 로컬 타임라인은 `make events`로 확인합니다.
+
 > **임베딩 모델을 바꾸면 벡터 차원이 바뀝니다.** 합성 모델(`llm.model`)은 자유롭게 교체해도 되지만, `llm.embed_model`을 바꾸면 크기가 다른 벡터가 나오므로, `llm.embed_dim`을 맞게 수정하고 **그리고** `make reset`을 실행해야 합니다 — 그러지 않으면 기존 형태의 벡터에 대한 upsert가 실패합니다. 흔한 차원: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
 
 ### 로컬 모델 선택
@@ -247,6 +249,7 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 | `make hermes-build` | 선택적 hermes-agent 이미지 클론/빌드 |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | 엔진 로그 |
+| `make events [N=20]` | 최근 로컬 구조화 작업 흐름 이벤트 보기 |
 | `make guard` | fmt + clippy + test + Python py-compile |
 | `make quality` | 릴리즈 수용성 drift 게이트 |
 | `make down` | 컨테이너 중지 |
@@ -470,6 +473,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | Linux: 컨테이너가 호스트 Ollama에 접근 못 함 | Linux에서는 Ollama가 기본적으로 `127.0.0.1`에 바인딩하므로, `host.docker.internal`이 해석되더라도 컨테이너는 닫힌 포트에 부딪힙니다. Ollama를 모든 인터페이스에 바인딩하고(`OLLAMA_HOST=0.0.0.0:11434` 후 재시작) 그리고/또는 호스트 방화벽에서 docker 브리지를 허용하세요 |
 | 정상인가? / 마지막 distill이 됐나? | `make doctor` — 빠른 상태 + 마지막 적재 + Codex 워커/큐 점검 |
 | 내일 아침 브리핑을 믿어도 되나? | `make readiness` — strict 게이트; 훅/모델/컨테이너/적재 finding이 모두 통과해야 함 |
+| 가장 최근에 뭐가 실패했나? | `make events` — raw transcript 없이 최근 로컬 작업 흐름 타임라인 확인 |
 
 ---
 

@@ -55,7 +55,9 @@ class ReconcileTest(unittest.TestCase):
         self.wiki_dir = self.vault_root / "wiki"
         self.wiki_dir.mkdir(parents=True)
         self._orig_vault_dir = os.environ.get("BORING_VAULT_DIR")
+        self._orig_event_log = os.environ.get("BORING_EVENT_LOG")
         os.environ["BORING_VAULT_DIR"] = str(self.vault_root)
+        os.environ["BORING_EVENT_LOG"] = str(Path(self.tmp.name) / "events.ndjson")
 
         self.engine = server.HTTPServer(("127.0.0.1", 0), _FakeEngine)
         self.thread = threading.Thread(target=self.engine.serve_forever, daemon=True)
@@ -73,6 +75,10 @@ class ReconcileTest(unittest.TestCase):
             os.environ.pop("BORING_VAULT_DIR", None)
         else:
             os.environ["BORING_VAULT_DIR"] = self._orig_vault_dir
+        if self._orig_event_log is None:
+            os.environ.pop("BORING_EVENT_LOG", None)
+        else:
+            os.environ["BORING_EVENT_LOG"] = self._orig_event_log
 
     def _pending(self, sid, before, attempts=0):
         path = Path(self.tmp.name) / f"{sid}.pending"
