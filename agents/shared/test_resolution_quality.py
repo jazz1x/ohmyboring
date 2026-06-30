@@ -119,6 +119,42 @@ class ResolutionQualityTests(unittest.TestCase):
         self.assertEqual(report.evidence_tokens_seen, ())
         self.assertIn("evidence-tokens:min:2", report.missing)
 
+    def test_evidence_requirement_is_capped_by_seen_tokens(self):
+        transcript = "Only PR #165 is concrete evidence in this short session."
+        note = {
+            "title": "short evidence session",
+            "body": "\n".join(
+                [
+                    "## Problem",
+                    "A short session still needs a structured note.",
+                    "## As-Is",
+                    "The transcript has only one concrete token.",
+                    "## To-Be",
+                    "The verifier should require that token, not invented extras.",
+                    "## Decision",
+                    "Keep the evidence note if the single token is preserved.",
+                    "## Evidence",
+                    "PR #165 is the only concrete token in the transcript.",
+                    "## Result",
+                    "The note remains specific without fabricating a second token.",
+                    "## Next",
+                    "No follow-up.",
+                ]
+            ),
+            "claims": [
+                claim("evidence-gate", "policy", "preserve available tokens", "decision"),
+                claim("short-session", "evidence", "PR #165", "fact"),
+                claim("verifier", "required-token-count", "1", "fact"),
+                claim("follow-up", "next-step", "none", "next"),
+            ],
+        }
+
+        report = verify_note_resolution(note, transcript, "evidence")
+
+        self.assertTrue(report.ok, report.missing)
+        self.assertEqual(report.evidence_tokens_seen, ("pr#165",))
+        self.assertEqual(report.evidence_tokens_kept, ("pr#165",))
+
     def test_public_annotations_are_python39_type_hint_safe(self):
         hints = get_type_hints(resolution_quality.normalize_resolution)
 

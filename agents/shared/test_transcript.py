@@ -151,10 +151,32 @@ def test_extract_unknown_format_raises():
         os.unlink(path)
 
 
+def test_clamp_text_preserves_head_and_tail():
+    text = "0123456789" * 10
+
+    clamped, changed = transcript.clamp_text(text, 25)
+
+    assert changed is True
+    assert clamped.startswith("0123456789")
+    assert clamped.endswith("567890123456789")
+    assert "truncated" in clamped
+
+
+def test_clamp_text_keeps_short_input():
+    text = "short transcript"
+
+    clamped, changed = transcript.clamp_text(text, 100)
+
+    assert changed is False
+    assert clamped == text
+
+
 if __name__ == "__main__":
     test_extract_claude_jsonl_text_and_list_content()
     test_extract_claude_jsonl_ignores_malformed_lines()
     test_extract_kimi_wire_user_and_assistant()
     test_extract_codex_jsonl_user_and_assistant()
     test_extract_unknown_format_raises()
+    test_clamp_text_preserves_head_and_tail()
+    test_clamp_text_keeps_short_input()
     print("ok - transcript parser")

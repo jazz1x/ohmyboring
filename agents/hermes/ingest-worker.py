@@ -294,10 +294,7 @@ def main():
                 source_chars=original_text_chars,
             )
             continue
-        was_clamped = len(text) > CLAMP
-        if len(text) > CLAMP:
-            head = CLAMP * 2 // 5
-            text = text[:head] + "\n…(truncated)…\n" + text[-(CLAMP - head) :]
+        text, was_clamped = transcript.clamp_text(text, CLAMP)
         cwd = transcript_cwd(p)
         origin, _name = boring_config.classify(cwd)
         repo = _repo_slug(cwd)

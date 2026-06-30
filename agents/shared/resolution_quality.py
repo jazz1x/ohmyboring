@@ -149,7 +149,7 @@ def verify_note_resolution(
 
     seen = _evidence_tokens(transcript)
     kept = tuple(t for t in seen if t in _evidence_tokens(body_and_claims))
-    required_tokens = int(rule["min_evidence_tokens"])
+    required_tokens = _required_evidence_tokens(int(rule["min_evidence_tokens"]), seen)
     if len(kept) < required_tokens:
         missing.append(f"evidence-tokens:min:{required_tokens}")
 
@@ -196,6 +196,12 @@ def _search_text(title: str, body: str, claims: list[dict[str, Any]]) -> str:
     for claim in claims:
         parts.extend(str(claim.get(field) or "") for field in ("subject", "predicate", "value"))
     return "\n".join(parts)
+
+
+def _required_evidence_tokens(configured_min: int, seen: tuple[str, ...]) -> int:
+    if not seen:
+        return configured_min
+    return min(configured_min, len(seen))
 
 
 def _evidence_tokens(text: str) -> tuple[str, ...]:
