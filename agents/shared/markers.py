@@ -12,6 +12,7 @@ Markers:
 import os
 import re
 import time
+from pathlib import Path
 from typing import Optional
 
 MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
@@ -34,61 +35,43 @@ def _paths(session_id: str) -> tuple[str, str, str]:
 
 
 def _ensure_dir() -> None:
-    try:
-        os.makedirs(MARK_DIR, exist_ok=True)
-    except OSError:
-        pass
+    os.makedirs(MARK_DIR, exist_ok=True)
+
+
+def _remove_marker(path: str) -> None:
+    Path(path).unlink(missing_ok=True)
+
+
+def _write_marker(path: str, text: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def _transition_marker(target: str, cleanup: tuple[str, ...], text: str) -> None:
+    _write_marker(target, text)
+    for p in cleanup:
+        _remove_marker(p)
 
 
 def mark_done(session_id: str) -> None:
     """Write a done marker and clean up any pending/retry markers."""
     ts, pending, retry = _paths(session_id)
     _ensure_dir()
-    for p in (pending, retry):
-        try:
-            if os.path.exists(p):
-                os.remove(p)
-        except OSError:
-            pass
-    try:
-        with open(ts, "w", encoding="utf-8") as f:
-            f.write(str(time.time()))
-    except OSError:
-        pass
+    _transition_marker(ts, (pending, retry), str(time.time()))
 
 
 def mark_retry(session_id: str) -> None:
     """Write a retry marker and remove the done/pending markers if present."""
     ts, pending, retry = _paths(session_id)
     _ensure_dir()
-    for p in (ts, pending):
-        try:
-            if os.path.exists(p):
-                os.remove(p)
-        except OSError:
-            pass
-    try:
-        with open(retry, "w", encoding="utf-8") as f:
-            f.write(str(time.time()))
-    except OSError:
-        pass
+    _transition_marker(retry, (ts, pending), str(time.time()))
 
 
 def mark_pending(session_id: str) -> None:
     """Write a plain pending marker and remove done/retry markers."""
     ts, pending, retry = _paths(session_id)
     _ensure_dir()
-    for p in (ts, retry):
-        try:
-            if os.path.exists(p):
-                os.remove(p)
-        except OSError:
-            pass
-    try:
-        with open(pending, "w", encoding="utf-8") as f:
-            f.write(str(time.time()))
-    except OSError:
-        pass
+    _transition_marker(pending, (ts, retry), str(time.time()))
 
 
 def is_done(session_id: str) -> bool:
@@ -109,9 +92,17 @@ def is_pending(session_id: str, ttl: Optional[float] = None) -> bool:
         return False
 
 
-def is_retry(session_id: str) -> bool:
-    """Return True if a retry marker exists."""
-    return os.path.exists(_paths(session_id)[2])
+def is_retry(session_id: str, ttl: Optional[float] = None) -> bool:
+    """Return True if a retry marker exists and (when ttl is given) is not expired."""
+    path = _paths(session_id)[2]
+    if not os.path.exists(path):
+        return False
+    if ttl is None:
+        return True
+    try:
+        return (time.time() - os.path.getmtime(path)) < ttl
+    except OSError:
+        return False
 
 
 def done_time(session_id: str) -> Optional[float]:
@@ -134,13 +125,9 @@ def ingest_pending_path(session_id: str) -> str:
 
 def write_ingest_pending(session_id: str, before: int, attempts: int) -> None:
     """Write the ingest-worker's pending marker with ``(sid, before, attempts)``."""
-    _, path, _ = _paths(session_id)
+    ts, path, retry = _paths(session_id)
     _ensure_dir()
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(f"{session_id}\n{before}\n{attempts}")
-    except OSError:
-        pass
+    _transition_marker(path, (ts, retry), f"{session_id}\n{before}\n{attempts}")
 
 
 def read_ingest_pending(session_id: str) -> Optional[tuple[str, int, int]]:
@@ -160,8 +147,4 @@ def read_ingest_pending(session_id: str) -> Optional[tuple[str, int, int]]:
 def remove_pending(session_id: str) -> None:
     """Remove any pending marker for ``session_id``."""
     _, path, _ = _paths(session_id)
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-    except OSError:
-        pass
+    _remove_marker(path)

@@ -24,6 +24,7 @@ find agents hooks scripts data/eval -name '*.py' -type f -print0 | xargs -0 -n1 
 echo "5) python unit tests…"
 python3 agents/shared/test_boring_config.py
 python3 agents/shared/test_agent_wiring.py
+python3 agents/shared/test_markers.py
 python3 agents/shared/test_transcript.py
 python3 agents/shared/test_recall_core.py
 python3 agents/claude-code/test_hooks.py

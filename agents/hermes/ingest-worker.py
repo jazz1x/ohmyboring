@@ -17,7 +17,8 @@ Flow per cron tick:
 Markers double as both the queue (absent = pending) and the done-log. A session is marked done only
 after the agent's note is actually observed in vault/wiki (per-session idempotency), falling back to
 a chunk-count increase in vector mode. A derailed/empty agent run therefore leaves it pending for
-retry.
+retry, then moves to retry marker state for later requeue when bounded confirmation attempts are
+exhausted.
 
 This script shares the SessionEnd hook's marker directory (~/.cache/boring-distill) so hermes cron
 and the engine-direct path do not duplicate sessions. The directory is bind-mounted into the
@@ -82,7 +83,10 @@ MIN_TEXT = 500  # below this = no real content → skip (host-side pre-filter)
 # A pending-marker prevents the same session being re-offered every tick while the agent is still
 # working on it (or just failed). It expires so a crashed tick doesn't pin a session forever.
 PENDING_TTL = float(os.environ.get("INGEST_PENDING_TTL") or "1800")
-# wiki-first mode has no chunk counter, so we retry a bounded number of times before giving up.
+# A retry-marker is a backoff signal, not a terminal state. Once it is stale, Hermes may re-offer it.
+RETRY_TTL = float(os.environ.get("INGEST_RETRY_TTL") or str(PENDING_TTL))
+# wiki-first mode has no chunk counter, so we retry a bounded number of confirmation attempts before
+# surfacing a visible retry marker. We do not mark unconfirmed sessions done.
 MAX_WIKI_ATTEMPTS = int(os.environ.get("INGEST_WIKI_ATTEMPTS") or "3")
 
 def _repo_slug(cwd):
@@ -92,11 +96,16 @@ def _repo_slug(cwd):
     return ""
 
 
-def _wiki_dir():
+def _vault_root():
     """Resolved vault root: env override → container mount → host repo vault."""
     return os.environ.get("BORING_VAULT_DIR") or (
         "/vault" if _IN_CONTAINER else os.path.join(BORING_HOME, "vault")
     )
+
+
+def _wiki_dir():
+    """Resolved wiki note directory under the vault root."""
+    return os.path.join(_vault_root(), "wiki")
 
 
 def _frontmatter_session_id(path):
@@ -129,11 +138,13 @@ def _find_session_note(sid):
 
 def _eligible(p):
     """A session is queue-eligible if: within window, big enough, not yet done, not pending,
-    and not already handled by the engine-direct SessionEnd hook."""
+    not in fresh retry state, and not already handled by the engine-direct SessionEnd hook."""
     sid = os.path.splitext(os.path.basename(p))[0]
     if markers.is_done(sid):
         return False
     if markers.is_pending(sid, ttl=PENDING_TTL):
+        return False
+    if markers.is_retry(sid, ttl=RETRY_TTL):
         return False
     return True
 
@@ -182,7 +193,7 @@ def _reconcile():
 
     Primary success signal: the agent left a note whose frontmatter contains omb_session_id.
     Secondary fallback (vector mode): a chunk-count increase.
-    If neither confirms success, retry up to MAX_WIKI_ATTEMPTS windows, then give up.
+    If neither confirms success, retry up to MAX_WIKI_ATTEMPTS windows, then surface retry state.
     """
     vector = _is_vector_mode()
     for pend in glob.glob(os.path.join(MARK_DIR, "*.pending")):
@@ -218,11 +229,10 @@ def _reconcile():
         else:
             print(
                 f"[ingest-worker] wiki-first: session {sid} exceeded {MAX_WIKI_ATTEMPTS} "
-                "attempts without observable confirmation — marking done to avoid infinite retry. "
-                "If the agent never called remember, this session was lost.",
+                "attempts without observable confirmation — leaving retry marker; not marking done.",
                 file=sys.stderr,
             )
-            markers.mark_done(sid)
+            markers.mark_retry(sid)
             markers.remove_pending(sid)
 
 
