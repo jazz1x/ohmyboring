@@ -10,6 +10,10 @@
 #   7) sh-unit   — readiness gate guardrails (doctor --strict exit semantics)
 # No bypassing (git commit --no-verify) — on failure, fix the root cause (don't paper over the symptom).
 set -eu
+PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/oh-my-boring-pyc}"
+export PYTHONPYCACHEPREFIX
+mkdir -p "$PYTHONPYCACHEPREFIX"
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT/drudge"
 echo "1) rustfmt --check…"
@@ -25,6 +29,7 @@ echo "5) python unit tests…"
 python3 agents/shared/test_boring_config.py
 python3 agents/shared/test_agent_wiring.py
 python3 agents/shared/test_distill_core.py
+python3 agents/shared/test_event_log.py
 python3 agents/shared/test_markers.py
 python3 agents/shared/test_resolution_quality.py
 python3 agents/shared/test_transcript.py

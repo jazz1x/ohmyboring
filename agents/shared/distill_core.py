@@ -24,6 +24,7 @@ import urllib.request
 # sibling agents/shared dir is found from the real file location, not the symlink's dir.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config  # noqa: E402
+import event_log  # noqa: E402
 import markers  # noqa: E402
 import omb_env  # noqa: E402
 from resolution_quality import (  # noqa: E402
@@ -47,6 +48,12 @@ NOTE_LANG = boring_config.note_lang()
 THROTTLE_MIN = int(os.environ.get("DISTILL_THROTTLE_MIN") or "25")
 
 
+class RememberOutcome:
+    def __init__(self, ok, status):
+        self.ok = ok
+        self.status = status
+
+
 def _distill_resolution():
     raw = os.environ.get("BORING_DISTILL_RESOLUTION")
     level = normalize_resolution(raw or "evidence", default="evidence")
@@ -56,12 +63,6 @@ def _distill_resolution():
             file=sys.stderr,
         )
     return level
-
-
-def _distill_resolution_strict():
-    value = (os.environ.get("BORING_DISTILL_RESOLUTION_STRICT") or "").strip().lower()
-    return value in {"1", "true", "yes", "on"}
-
 
 def _throttled(session_id):
     """True (skip) if this session was already distilled within the last THROTTLE_MIN minutes."""
@@ -248,6 +249,27 @@ def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
     )
 
 
+def _build_repair_prompt(text, origin, repo, note, report, resolution):
+    """Ask for one repaired JSON note, using only evidence already present in transcript."""
+    return (
+        "Your previous distillation JSON failed the resolution verifier. "
+        "Re-emit ONE complete JSON object with the same schema. No prose outside JSON.\n"
+        f"Origin={origin!r}. Repo={repo!r}. Resolution={report.resolution!r}.\n"
+        "The previous JSON is a draft, not evidence. The transcript is the only evidence source.\n"
+        "Use ONLY evidence present in the transcript. Do not invent commands, numbers, PRs, "
+        "models, statuses, root causes, or next actions. If evidence is absent, say it is absent "
+        "as a claim or body sentence instead of fabricating it.\n\n"
+        f"{resolution_prompt_contract(resolution)}\n"
+        f"Missing verifier fields: {', '.join(report.missing)}\n"
+        f"Evidence tokens seen: {', '.join(report.evidence_tokens_seen) or '(none)'}\n"
+        f"Evidence tokens kept: {', '.join(report.evidence_tokens_kept) or '(none)'}\n\n"
+        "Previous JSON note:\n"
+        + json.dumps(note, ensure_ascii=False)
+        + "\n\n=== SESSION TRANSCRIPT ===\n"
+        + text
+    )
+
+
 def _call_llm(prompt):
     """Call the local OpenAI-compatible chat endpoint and return the parsed JSON, or None."""
     headers = {"content-type": "application/json"}
@@ -357,7 +379,7 @@ def _call_remember(title, body, origin, repo, tags, tools, concepts, claims, ses
                 time.sleep(1 << attempt)
                 continue
             print(f"[distill-session] remember call failed: {e}", file=sys.stderr)
-            return False
+            return RememberOutcome(False, "failed")
         except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
             if attempt < max_retries:
                 print(
@@ -370,14 +392,14 @@ def _call_remember(title, body, origin, repo, tags, tools, concepts, claims, ses
                 f"[distill-session] remember call failed after {max_retries + 1} attempts: {e}",
                 file=sys.stderr,
             )
-            return False
+            return RememberOutcome(False, "failed")
         except Exception as e:
             print(f"[distill-session] remember call failed: {e}", file=sys.stderr)
-            return False
+            return RememberOutcome(False, "failed")
 
         if data.get("error"):
             print(f"[distill-session] remember error: {data['error']}", file=sys.stderr)
-            return False
+            return RememberOutcome(False, "failed")
 
         result = data.get("result", {})
         content = result.get("content", [])
@@ -388,10 +410,91 @@ def _call_remember(title, body, origin, repo, tags, tools, concepts, claims, ses
         print(f"[distill-session] {text}", file=sys.stderr)
         # A duplicate skip is a successful deterministic outcome, not a transient failure.
         if "skipped — duplicate" in text:
-            return True
-        return "remembered" in text
+            return RememberOutcome(True, "duplicate")
+        if "remembered" in text:
+            return RememberOutcome(True, "remembered")
+        return RememberOutcome(False, "failed")
 
-    return False
+    return RememberOutcome(False, "failed")
+
+
+def _prepare_note(parsed):
+    title = parsed.get("title", "").strip()
+    body = parsed.get("body", "").strip()
+    # gemma sometimes double-escapes newlines (emits "\\n" in the JSON), so json.loads yields a literal
+    # backslash-n in the body instead of a real line break → markdown renders as one run-on line. It often
+    # MIXES literal "\\n" with a few real breaks, so normalize whenever any literal "\\n" is present.
+    n_lit = body.count("\\n")
+    if "\\n" in body:
+        body = body.replace("\\n", "\n").replace("\\t", "\t")
+    # Instrumentation (not a cleanup cycle): a rising count here = the prompt is regressing into
+    # double-escaped output. Steady 0 means distillation is healthy; investigate if it grows.
+    body_meta = _strip_trailing_metadata(body)
+    n_meta = body != body_meta  # True if a trailing tags/tools/concepts block had to be stripped
+    body = body_meta
+    if n_lit or n_meta:
+        print(
+            f"[distill-session] body normalized: {n_lit} literal newlines"
+            f"{', trailing-metadata stripped' if n_meta else ''} — watch for prompt regression",
+            file=sys.stderr,
+        )
+    # Language regression signal: note_lang=ko but the title came back with no Korean at all → the
+    # model copied an all-English title (usually triggered by [TICKET-ID] prefixes). Logged, not
+    # auto-fixed — a rising rate means the title prompt needs another nudge.
+    if NOTE_LANG == "ko" and title and not re.search(r"[가-힣]", title):
+        print(
+            f"[distill-session] title not Korean despite note_lang=ko: {title!r} — watch for prompt regression",
+            file=sys.stderr,
+        )
+    if not title or not body:
+        print("[distill-session] missing title/body in LLM output", file=sys.stderr)
+        return None
+
+    tags = [t.strip() for t in parsed.get("tags", []) if isinstance(t, str) and t.strip()][:6]
+    tools = [t.strip() for t in parsed.get("tools", []) if isinstance(t, str) and t.strip()][:8]
+    concepts = [t.strip() for t in parsed.get("concepts", []) if isinstance(t, str) and t.strip()][:8]
+    claims = []
+    for c in parsed.get("claims", []):
+        if isinstance(c, dict) and c.get("subject") and c.get("predicate") and c.get("value"):
+            claims.append(
+                {
+                    "subject": str(c["subject"]).strip(),
+                    "predicate": str(c["predicate"]).strip(),
+                    "value": str(c["value"]).strip(),
+                    "kind": str(c.get("kind", "fact")).strip() or "fact",
+                    "confidence": str(c.get("confidence", "certain")).strip() or "certain",
+                }
+            )
+    return {
+        "title": title,
+        "body": body,
+        "tags": tags,
+        "tools": tools,
+        "concepts": concepts,
+        "claims": claims,
+    }
+
+
+def _log_resolution_event(session_id, origin, repo, report, verifier_status, remember_status):
+    ok = verifier_status in {"pass", "repaired"} and remember_status in {"remembered", "duplicate"}
+    try:
+        event_log.append_event(
+            "distill-session",
+            "distill_resolution",
+            "ok" if ok else "failed",
+            session_id=session_id,
+            origin=origin,
+            repo=repo,
+            resolution=report.resolution,
+            verifier_status=verifier_status,
+            missing_fields=list(report.missing),
+            claim_count=report.claim_count,
+            numbers_seen=len(report.evidence_tokens_seen),
+            numbers_kept=len(report.evidence_tokens_kept),
+            remember_status=remember_status,
+        )
+    except OSError as e:
+        print(f"[distill-session] event log write failed: {e}", file=sys.stderr)
 
 
 def distill_and_remember(text, origin, repo, session_id=""):
@@ -424,58 +527,16 @@ def distill_and_remember(text, origin, repo, session_id=""):
         else:
             print("[distill-session] language retry failed — keeping original", file=sys.stderr)
 
-    title = parsed.get("title", "").strip()
-    body = parsed.get("body", "").strip()
-    # gemma sometimes double-escapes newlines (emits "\\n" in the JSON), so json.loads yields a literal
-    # backslash-n in the body instead of a real line break → markdown renders as one run-on line. It often
-    # MIXES literal "\\n" with a few real breaks, so normalize whenever any literal "\\n" is present.
-    n_lit = body.count("\\n")
-    if "\\n" in body:
-        body = body.replace("\\n", "\n").replace("\\t", "\t")
-    # Instrumentation (not a cleanup cycle): a rising count here = the prompt is regressing into
-    # double-escaped output. Steady 0 means distillation is healthy; investigate if it grows.
-    body_meta = _strip_trailing_metadata(body)
-    n_meta = body != body_meta  # True if a trailing tags/tools/concepts block had to be stripped
-    body = body_meta
-    if n_lit or n_meta:
-        print(
-            f"[distill-session] body normalized: {n_lit} literal newlines"
-            f"{', trailing-metadata stripped' if n_meta else ''} — watch for prompt regression",
-            file=sys.stderr,
-        )
-    # Language regression signal: note_lang=ko but the title came back with no Korean at all → the
-    # model copied an all-English title (usually triggered by [TICKET-ID] prefixes). Logged, not
-    # auto-fixed — a rising rate means the title prompt needs another nudge.
-    if NOTE_LANG == "ko" and title and not re.search(r"[가-힣]", title):
-        print(
-            f"[distill-session] title not Korean despite note_lang=ko: {title!r} — watch for prompt regression",
-            file=sys.stderr,
-        )
-    if not title or not body:
-        print("[distill-session] missing title/body in LLM output", file=sys.stderr)
+    note = _prepare_note(parsed)
+    if note is None:
         return False
 
-    tags = [t.strip() for t in parsed.get("tags", []) if isinstance(t, str) and t.strip()][:6]
-    tools = [t.strip() for t in parsed.get("tools", []) if isinstance(t, str) and t.strip()][:8]
-    concepts = [t.strip() for t in parsed.get("concepts", []) if isinstance(t, str) and t.strip()][:8]
-    claims = []
-    for c in parsed.get("claims", []):
-        if isinstance(c, dict) and c.get("subject") and c.get("predicate") and c.get("value"):
-            claims.append(
-                {
-                    "subject": str(c["subject"]).strip(),
-                    "predicate": str(c["predicate"]).strip(),
-                    "value": str(c["value"]).strip(),
-                    "kind": str(c.get("kind", "fact")).strip() or "fact",
-                    "confidence": str(c.get("confidence", "certain")).strip() or "certain",
-                }
-            )
-
     report = verify_note_resolution(
-        {"title": title, "body": body, "claims": claims},
+        {"title": note["title"], "body": note["body"], "claims": note["claims"]},
         transcript=text,
         resolution=resolution,
     )
+    verifier_status = "pass"
     if not report.ok:
         print(
             "[distill-session] resolution gate failed "
@@ -484,7 +545,44 @@ def distill_and_remember(text, origin, repo, session_id=""):
             f"evidence={len(report.evidence_tokens_kept)}/{len(report.evidence_tokens_seen)}",
             file=sys.stderr,
         )
-        if _distill_resolution_strict():
+        repaired = _call_llm(_build_repair_prompt(text, origin, repo, note, report, resolution))
+        if repaired is None or repaired.get("skip"):
+            _log_resolution_event(session_id, origin, repo, report, "failed", "not_called")
             return False
+        repaired_note = _prepare_note(repaired)
+        if repaired_note is None:
+            _log_resolution_event(session_id, origin, repo, report, "failed", "not_called")
+            return False
+        repaired_report = verify_note_resolution(
+            {"title": repaired_note["title"], "body": repaired_note["body"], "claims": repaired_note["claims"]},
+            transcript=text,
+            resolution=resolution,
+        )
+        if not repaired_report.ok:
+            print(
+                "[distill-session] resolution repair failed "
+                f"({repaired_report.resolution}): {', '.join(repaired_report.missing)}; "
+                f"claims={repaired_report.claim_count}; "
+                f"evidence={len(repaired_report.evidence_tokens_kept)}/{len(repaired_report.evidence_tokens_seen)}",
+                file=sys.stderr,
+            )
+            _log_resolution_event(session_id, origin, repo, repaired_report, "failed", "not_called")
+            return False
+        note = repaired_note
+        report = repaired_report
+        verifier_status = "repaired"
+        print("[distill-session] resolution repair passed", file=sys.stderr)
 
-    return _call_remember(title, body, origin, repo, tags, tools, concepts, claims, session_id)
+    remember = _call_remember(
+        note["title"],
+        note["body"],
+        origin,
+        repo,
+        note["tags"],
+        note["tools"],
+        note["concepts"],
+        note["claims"],
+        session_id,
+    )
+    _log_resolution_event(session_id, origin, repo, report, verifier_status, remember.status)
+    return remember.ok

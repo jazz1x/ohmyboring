@@ -44,6 +44,7 @@ failed_containers=0
 failed_note=0
 failed_marker=0
 failed_codex=0
+failed_resolution=0
 
 ok()   { echo "✓ $1"; }
 bad()  { echo "✗ $1"; }
@@ -211,6 +212,19 @@ else
     bad "Codex collector not found at $codex_status"; failed_codex=1
 fi
 
+# (d4) Recent resolution quality failures — these mean the write-door is reachable but
+# the distilled note was too shallow even after the one repair attempt.
+event_log_probe="$BORING_HOME/agents/shared/event_log.py"
+if [ -f "$event_log_probe" ]; then
+    if BORING_EVENT_LOG="${BORING_EVENT_LOG:-$HOME/.cache/oh-my-boring/events.ndjson}" python3 "$event_log_probe" --recent-resolution-failures --max 3; then
+        ok "no recent resolution quality failures"
+    else
+        bad "recent resolution quality failures found — inspect BORING_EVENT_LOG before briefing"; failed_resolution=1
+    fi
+else
+    bad "event log probe not found at $event_log_probe"; failed_resolution=1
+fi
+
 if [ "$FIX" -eq 1 ]; then
     echo
     echo "Applying fixes..."
@@ -229,8 +243,8 @@ fi
 
 echo
 if [ "$STRICT" -eq 1 ]; then
-    failures="${failed_env}${failed_hooks}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}"
-    if [ "$failures" = "00000000" ]; then
+    failures="${failed_env}${failed_hooks}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}"
+    if [ "$failures" = "000000000" ]; then
         ok "readiness: all doctor checks passed — briefing/write-door dependencies are ready."
         exit 0
     fi

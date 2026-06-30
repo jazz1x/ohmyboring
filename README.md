@@ -179,8 +179,9 @@ The model ids must match what LM Studio reports. If the embedding model is not `
 | `BORING_VECTOR` | `on` enables pgvector (optional) |
 | `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | optional runtime override of `llm.base_url` / `llm.model`. Running the `drudge` binary directly on the host? Set `BORING_LLM_BASE_URL=http://localhost:11434/v1` |
 | `BORING_LLM_API_KEY` | API key when `llm.api_key_env` points here (auth providers) |
-| `BORING_DISTILL_RESOLUTION` | distillation detail contract: `compact`, `standard`, `evidence` (default), or `forensic` |
-| `BORING_DISTILL_RESOLUTION_STRICT` | set `1` to block `remember` when the resolution verifier fails; unset logs report-only warnings |
+| `BORING_DISTILL_RESOLUTION` | distillation detail contract: `compact`, `standard`, `evidence` (default), or `forensic`; verifier failures repair once, then block `remember` |
+| `BORING_EVENT_LOG` | local NDJSON workflow events; defaults to `~/.cache/oh-my-boring/events.ndjson` |
+| `BORING_EVENT_RECENT_HOURS` | recent event window used by `make readiness`; defaults to `24` |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant |
 
 > **Swapping the embedding model changes the vector dimension.** The synthesis model (`llm.model`) is free to swap, but a new `llm.embed_model` emits vectors of a different size, so you must update `llm.embed_dim` to match **and** run `make reset` — otherwise upserts fail against the old-shaped vectors. Common dims: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
