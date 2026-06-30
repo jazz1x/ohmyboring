@@ -181,6 +181,7 @@ make readiness
 | `BORING_LLM_API_KEY` | `llm.api_key_env` がここを指す場合の API キー（認証 provider） |
 | `DOCKER_BIN` | GUI/launchd 環境の `PATH` に Docker がない場合に使う任意の Docker CLI パス |
 | `BORING_DISTILL_RESOLUTION` | 取り込み解像度の契約: `compact`, `standard`, `evidence`（デフォルト）, `forensic`; 検証失敗時は 1 回だけ補強し、それでも失敗したら `remember` をブロック |
+| `DISTILL_CLAMP` | 直接 SessionEnd hook がローカル LLM に送る最大文字数。ローカルモデルの timeout を避けるためデフォルトは `2000`。Hermes worker offer は引き続き `INGEST_CLAMP`（`4000`）を使用 |
 | `BORING_EVENT_LOG` | ローカル NDJSON ワークフローイベント。デフォルトは `~/.cache/oh-my-boring/events.ndjson` |
 | `BORING_EVENT_RECENT_HOURS` | `make readiness` が見る最近イベントの範囲。デフォルトは `24` |
 | `BORING_READINESS_NOTE_MAX_HOURS` | ブリーフィング readiness が許容する最新ノート freshness 範囲。デフォルトは `48` |

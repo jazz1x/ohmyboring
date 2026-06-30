@@ -99,6 +99,62 @@ class EventLogTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertEqual(failures[0]["session_id"], "bad")
 
+    def test_recent_resolution_failures_ignores_resolved_session(self):
+        event_log.append_event(
+            "distill-session",
+            "distill_resolution",
+            "failed",
+            session_id="resolved",
+            resolution="evidence",
+            verifier_status="failed",
+            missing_fields=["claim-kind:decision"],
+        )
+        event_log.append_event(
+            "distill-session",
+            "distill_resolution",
+            "ok",
+            session_id="resolved",
+            resolution="evidence",
+            verifier_status="pass",
+            remember_status="duplicate",
+        )
+        event_log.append_event(
+            "distill-session",
+            "distill_resolution",
+            "failed",
+            session_id="bad",
+            resolution="evidence",
+            verifier_status="failed",
+        )
+
+        failures = event_log.recent_resolution_failures()
+
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["session_id"], "bad")
+
+    def test_recent_resolution_failures_keeps_latest_failure_after_success(self):
+        event_log.append_event(
+            "distill-session",
+            "distill_resolution",
+            "ok",
+            session_id="regressed",
+            resolution="evidence",
+            verifier_status="pass",
+        )
+        event_log.append_event(
+            "distill-session",
+            "distill_resolution",
+            "failed",
+            session_id="regressed",
+            resolution="evidence",
+            verifier_status="failed",
+        )
+
+        failures = event_log.recent_resolution_failures()
+
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["session_id"], "regressed")
+
     def test_recent_resolution_failures_ignores_malformed_lines(self):
         with open(os.environ["BORING_EVENT_LOG"], "w", encoding="utf-8") as f:
             f.write("{bad json\n")

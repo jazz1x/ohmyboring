@@ -36,6 +36,9 @@ __all__ = [
 # fmt: on
 
 TRANSCRIPT_FORMAT = boring_config.agent_config("claude-code").get("format") or "claude-json"
+# Direct SessionEnd distill calls the local LLM synchronously; keep the default tighter than
+# the Hermes offer path, and let operators raise it explicitly when the local model can handle it.
+CLAMP = int(os.environ.get("DISTILL_CLAMP") or "2000")
 
 
 def extract(path):
@@ -67,6 +70,9 @@ def main() -> int:
     if len(text) < 500:
         print("[omb-distill] transcript too short; skipping", file=sys.stderr)
         return 0
+    text, was_clamped = transcript.clamp_text(text, CLAMP)
+    if was_clamped:
+        print(f"[omb-distill] transcript clamped to {len(text)} chars", file=sys.stderr)
 
     repo = repo_slug(cwd)
     if distill_and_remember(text, origin, repo, session_id):

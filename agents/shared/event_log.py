@@ -92,16 +92,38 @@ def recent_resolution_failures(limit: int = 3, hours: Optional[int] = None) -> l
         raw_hours = os.environ.get("BORING_EVENT_RECENT_HOURS") or str(DEFAULT_RECENT_HOURS)
         hours = int(raw_hours)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    failures: list[dict[str, Any]] = []
-    for event in iter_events():
+    latest_by_key: dict[tuple[str, str], tuple[int, dict[str, Any]]] = {}
+    anonymous_failures: list[tuple[int, dict[str, Any]]] = []
+    for idx, event in enumerate(iter_events()):
         if event.get("event") != "distill_resolution":
             continue
         ts = _parse_ts(str(event.get("ts") or ""))
         if ts is not None and ts < cutoff:
             continue
-        if event.get("verifier_status") == "failed" or event.get("status") == "failed":
-            failures.append(event)
-    return failures[-limit:]
+        key = _resolution_event_key(event)
+        if key is None:
+            if _is_resolution_failure(event):
+                anonymous_failures.append((idx, event))
+            continue
+        latest_by_key[key] = (idx, event)
+    failures = anonymous_failures + [
+        (idx, event)
+        for idx, event in latest_by_key.values()
+        if _is_resolution_failure(event)
+    ]
+    failures.sort(key=lambda item: item[0])
+    return [event for _, event in failures[-limit:]]
+
+
+def _resolution_event_key(event: dict[str, Any]) -> Optional[tuple[str, str]]:
+    session = event.get("session_id") or event.get("run_id")
+    if not session:
+        return None
+    return (str(session), str(event.get("resolution") or ""))
+
+
+def _is_resolution_failure(event: dict[str, Any]) -> bool:
+    return event.get("verifier_status") == "failed" or event.get("status") == "failed"
 
 
 def _parse_ts(value: str) -> Optional[datetime]:

@@ -159,6 +159,7 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertIn("previous JSON is a draft, not evidence", prompt)
         self.assertIn("transcript is the only evidence source", prompt)
         self.assertIn("Do not rename required headings", prompt)
+        self.assertIn("copy the required number of exact tokens", prompt)
 
     def test_resolution_failure_repairs_once_then_remembers(self):
         stderr = io.StringIO()
@@ -289,6 +290,47 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
 
         self.assertTrue(report.ok, report.missing)
         self.assertIn("decision", {claim["kind"] for claim in fixed["claims"]})
+
+    def test_required_evidence_tokens_are_derived_from_transcript_excerpts(self):
+        transcript = "PR #165 fixed the readiness gate and 42 checks stayed green."
+        note = {
+            "title": "readiness gate",
+            "body": "\n".join(
+                [
+                    "## Problem",
+                    "The readiness gate could stay red after a resolved failure.",
+                    "## As-Is",
+                    "The note omitted exact transcript evidence.",
+                    "## To-Be",
+                    "The note preserves concrete evidence from the transcript.",
+                    "## Decision",
+                    "Use transcript excerpts only when exact evidence tokens are missing.",
+                    "## Evidence",
+                    "The verifier saw the shape but no exact token.",
+                    "## Result",
+                    "Evidence can be checked before remember.",
+                    "## Next",
+                    "No follow-up.",
+                ]
+            ),
+            "claims": [
+                {"subject": "evidence", "predicate": "policy", "value": "derive excerpt", "kind": "decision", "confidence": "certain"},
+                {"subject": "verifier", "predicate": "state", "value": "strict", "kind": "fact", "confidence": "certain"},
+                {"subject": "readiness", "predicate": "status", "value": "checked", "kind": "fact", "confidence": "certain"},
+                {"subject": "follow-up", "predicate": "next-step", "value": "none", "kind": "next", "confidence": "certain"},
+            ],
+        }
+
+        fixed = distill_core._ensure_required_evidence_tokens(note, transcript, "evidence")
+        report = distill_core.verify_note_resolution(
+            {"title": fixed["title"], "body": fixed["body"], "claims": fixed["claims"]},
+            transcript,
+            "evidence",
+        )
+
+        self.assertTrue(report.ok, report.missing)
+        self.assertIn("PR #165", fixed["body"])
+        self.assertIn("42", fixed["body"])
 
     def test_remember_failure_logs_failed_status(self):
         with mock.patch.object(distill_core, "_call_llm", return_value=RICH_NOTE), \

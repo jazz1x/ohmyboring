@@ -9,6 +9,14 @@ import json
 import sys
 
 
+def clamp_text(text, limit):
+    """Return a head/tail-clamped transcript and whether it was shortened."""
+    if limit <= 0 or len(text) <= limit:
+        return text, False
+    head = limit * 2 // 5
+    return text[:head] + "\n…(truncated)…\n" + text[-(limit - head) :], True
+
+
 def _extract_claude_jsonl(path: str) -> str:
     """Extract user/assistant text from a Claude Code JSONL transcript."""
     out = []
