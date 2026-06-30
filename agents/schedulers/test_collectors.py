@@ -62,6 +62,9 @@ def test_claude_collector_fails_when_sync_fails():
             assert event["component"] == "claude-collector"
             assert event["status"] == "failed"
             assert event["sync_status"] == "failed"
+            assert event["workflow"] == "memory_ingest"
+            assert event["workflow_node"] == "retry_marked"
+            assert event["workflow_outcome"] == "fail"
     finally:
         claude_collect.markers.set_mark_dir(old_mark_dir)
         claude_collect.MIN_KB = old_min_kb
@@ -108,6 +111,9 @@ def test_kimi_collector_fails_when_distill_fails():
             assert event["status"] == "failed"
             assert event["attempted"] == 1
             assert event["failed"] == 1
+            assert event["workflow"] == "memory_ingest"
+            assert event["workflow_node"] == "retry_marked"
+            assert event["workflow_outcome"] == "fail"
     finally:
         kimi_collect.KIMI_HOME = old_home
         kimi_collect.HOOK = old_hook

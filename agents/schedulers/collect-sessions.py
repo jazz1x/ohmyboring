@@ -28,6 +28,7 @@ import boring_config
 import event_log
 import markers
 import omb_env
+import workflow_contract
 from drudge_client import DrudgeClient
 
 BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias
@@ -126,6 +127,7 @@ def main():
             failed=0,
             remaining=len(todo),
             mode=label,
+            **workflow_contract.collector_run_fields("ok", 0),
         )
         return 0
 
@@ -181,6 +183,7 @@ def main():
         remaining=len(todo) - done,
         sync_status=sync_status,
         mode=label,
+        **workflow_contract.collector_run_fields(status, len(batch)),
     )
     return 0 if status == "ok" else 1
 

@@ -20,9 +20,11 @@ from distill_core import (  # noqa: F401
     _build_prompt,
     _call_llm,
     _call_remember,
+    _distill_resolution,
     _throttled,
     distill_and_remember,
     git_remote_url,
+    log_skip_event,
     repo_slug,
 )
 
@@ -67,6 +69,7 @@ def main() -> int:
     cwd = data.get("cwd") or ""
     remote_url = git_remote_url(cwd)
     origin, _rule = boring_config.classify(cwd, remote_url or None)
+    repo = repo_slug(cwd)
     text = extract(transcript_path)
     if len(text) < 500:
         if should_retry_short_extract(data, transcript_path):
@@ -78,11 +81,11 @@ def main() -> int:
                 _mark(session_id, retry=True)
             return 1
         print("[omb-distill-codex] transcript too short; skipping", file=sys.stderr)
+        log_skip_event(session_id, origin, repo, _distill_resolution(), "too_short")
         if session_id:
             _mark(session_id)
         return 0
 
-    repo = repo_slug(cwd)
     if distill_and_remember(text, origin, repo, session_id):
         _mark(session_id)
         print("[omb-distill-codex] remembered", file=sys.stderr)

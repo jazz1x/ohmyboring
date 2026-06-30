@@ -74,17 +74,24 @@ def test_small_raw_parse_short_marks_done():
         f.write("{}\n")
         path = f.name
     try:
-        payload = {
-            "transcript_path": path,
-            "session_id": "abc",
-            "hook_event_name": "SessionEnd",
-            "raw_bytes": 5,
-            "min_raw_bytes_for_retry": 10,
-        }
-        rc, err, mark = _run_main(payload, "too short")
-        assert rc == 0
-        assert "transcript too short" in err
-        mark.assert_called_once_with("codex-abc")
+        with tempfile.TemporaryDirectory() as d:
+            event_path = Path(d) / "events.ndjson"
+            payload = {
+                "transcript_path": path,
+                "session_id": "abc",
+                "hook_event_name": "SessionEnd",
+                "raw_bytes": 5,
+                "min_raw_bytes_for_retry": 10,
+            }
+            with mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}):
+                rc, err, mark = _run_main(payload, "too short")
+            assert rc == 0
+            assert "transcript too short" in err
+            mark.assert_called_once_with("codex-abc")
+            event = _read_last_event(event_path)
+            assert event["reason"] == "too_short"
+            assert event["workflow_node"] == "skipped"
+            assert event["workflow_outcome"] == "skip"
     finally:
         os.unlink(path)
 

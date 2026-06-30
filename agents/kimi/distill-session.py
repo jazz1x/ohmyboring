@@ -23,9 +23,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 import boring_config
 from distill_core import (  # noqa: F401
     _mark,
+    _distill_resolution,
     _throttled,
     distill_and_remember,
     git_remote_url,
+    log_skip_event,
     repo_slug,
 )
 
@@ -171,13 +173,15 @@ def main() -> int:
         return 2
 
     text = extract_session(session_dir)
-    if len(text) < 500:
-        print("[omb-distill] transcript too short; skipping", file=sys.stderr)
-        return 0
-
     remote_url = git_remote_url(cwd)
     origin, _rule = boring_config.classify(cwd, remote_url or None)
     repo = repo_slug(cwd)
+    if len(text) < 500:
+        print("[omb-distill] transcript too short; skipping", file=sys.stderr)
+        log_skip_event(session_id, origin, repo, _distill_resolution(), "too_short")
+        if session_id:
+            _mark(session_id)
+        return 0
 
     if distill_and_remember(text, origin, repo, session_id):
         _mark(session_id)

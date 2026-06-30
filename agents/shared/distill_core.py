@@ -737,7 +737,7 @@ def _log_resolution_event(session_id, origin, repo, report, verifier_status, rem
         print(f"[distill-session] event log write failed: {e}", file=sys.stderr)
 
 
-def _log_skip_event(session_id, origin, repo, resolution):
+def log_skip_event(session_id, origin, repo, resolution, reason):
     event_log.try_append_event(
         "distill-session",
         "distill_resolution",
@@ -752,8 +752,13 @@ def _log_skip_event(session_id, origin, repo, resolution):
         numbers_seen=0,
         numbers_kept=0,
         remember_status="skipped",
+        reason=reason,
         **workflow_contract.skip_fields(),
     )
+
+
+def _log_skip_event(session_id, origin, repo, resolution):
+    log_skip_event(session_id, origin, repo, resolution, "llm_skip")
 
 
 def distill_and_remember(text, origin, repo, session_id=""):
