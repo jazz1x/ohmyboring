@@ -99,6 +99,7 @@ flowchart LR
 
 - **Read door** — 빠르고 LLM 불필요. `make ask`, `recall.py`, MCP `recall`이 `vault/wiki`를 직접 읽습니다.
 - **Write door** — gated. `distill-session.py`가 로컬 LLM을 호출하고 ohmyboring의 `remember` MCP tool로 기록합니다.
+- **Duplicate gate** — 중복 노트는 기본적으로 건너뜁니다. 같은 세션이나 강한 rollout 복제에서 더 충실한 노트가 들어오면 `remember`가 같은 `wiki-NNNN.md`를 다시 쓰고 재적재합니다.
 
 ### 작업 흐름 그래프 계약
 
