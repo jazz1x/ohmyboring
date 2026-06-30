@@ -25,6 +25,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config
+import event_log
 import markers
 import omb_env
 from drudge_client import DrudgeClient
@@ -92,6 +93,7 @@ def main():
         "it done — so it is re-distillable on demand and the normal SessionEnd capture still runs.",
     )
     args = ap.parse_args()
+    run_id = event_log.new_run_id("claude-collector")
 
     cutoff = time.time() - WINDOW_H * 3600
     paths = []
@@ -112,7 +114,20 @@ def main():
     print(f"[{label}] pending={len(todo)} this_batch={len(batch)} (LIMIT={1 if args.now else LIMIT})", flush=True)
     if not batch:
         print(f"[{label}] nothing to do", flush=True)
-        return
+        event_log.try_append_event(
+            "claude-collector",
+            "collector_run",
+            "ok",
+            run_id=run_id,
+            agent="claude-code",
+            pending=len(todo),
+            batch=0,
+            processed=0,
+            failed=0,
+            remaining=len(todo),
+            mode=label,
+        )
+        return 0
 
     _warm_llm()  # pre-warm gemma so the first session isn't a ~70s cold start (→ agent timeout → SKIP)
 
@@ -120,6 +135,8 @@ def main():
     if args.now:
         env["BORING_DISTILL_NO_MARK"] = "1"  # leave the session un-marked → re-distillable + SessionEnd still fires
     done = 0
+    failed = 0
+    timed_out = 0
     for tp in batch:
         proj = os.path.basename(os.path.dirname(tp))  # encoded dir name — for the log label only
         sid = os.path.splitext(os.path.basename(tp))[0]
@@ -134,18 +151,39 @@ def main():
                 [sys.executable, HOOK], input=payload, text=True, env=env, timeout=180
             )
             done += 1 if r.returncode == 0 else 0
+            failed += 1 if r.returncode != 0 else 0
             print(f"[{label}] {'ok' if r.returncode == 0 else 'fail'}  {proj}", flush=True)
         except subprocess.TimeoutExpired:
+            failed += 1
+            timed_out += 1
             print(f"[{label}] timeout  {proj}", flush=True)
 
+    sync_status = "ok"
     try:
         DrudgeClient().sync()
         print(f"[{label}] sync ok", flush=True)
     except Exception as e:
-        print(f"[{label}] sync failed (ignored): {e}", flush=True)
+        sync_status = "failed"
+        print(f"[{label}] sync failed: {e}", file=sys.stderr, flush=True)
     print(f"[{label}] done={done}/{len(batch)}  remaining={len(todo) - done}", flush=True)
+    status = "ok" if done == len(batch) and sync_status == "ok" else "failed"
+    event_log.try_append_event(
+        "claude-collector",
+        "collector_run",
+        status,
+        run_id=run_id,
+        agent="claude-code",
+        pending=len(todo),
+        batch=len(batch),
+        processed=done,
+        failed=failed,
+        timed_out=timed_out,
+        remaining=len(todo) - done,
+        sync_status=sync_status,
+        mode=label,
+    )
+    return 0 if status == "ok" else 1
 
 
 if __name__ == "__main__":
-    main()
-    sys.exit(0)
+    sys.exit(main())

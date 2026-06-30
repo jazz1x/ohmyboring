@@ -15,6 +15,34 @@ export PYTHONPYCACHEPREFIX
 mkdir -p "$PYTHONPYCACHEPREFIX"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+EVENT_LOG="$ROOT/agents/shared/event_log.py"
+guard_run_id="guard-$(date +%Y%m%dT%H%M%S)-$$"
+guard_started_at="$(date +%s)"
+
+log_guard_event() {
+  status="$1"
+  shift
+  if [ -f "$EVENT_LOG" ]; then
+    if ! python3 "$EVENT_LOG" --record guard structural_guard "$status" \
+      --field "run_id=$guard_run_id" "$@"; then
+      echo "⚠ guard event log write failed" >&2
+    fi
+  fi
+}
+
+finish_guard_event() {
+  rc=$?
+  duration_s="$(($(date +%s) - guard_started_at))"
+  if [ "$rc" -eq 0 ]; then
+    log_guard_event ok --field "duration_s=$duration_s"
+  else
+    log_guard_event failed --field "duration_s=$duration_s" --field "exit_code=$rc"
+  fi
+  exit "$rc"
+}
+
+trap finish_guard_event EXIT
+
 cd "$ROOT/drudge"
 echo "1) rustfmt --check…"
 cargo fmt --check
@@ -36,6 +64,7 @@ python3 agents/shared/test_transcript.py
 python3 agents/shared/test_recall_core.py
 python3 agents/claude-code/test_hooks.py
 python3 agents/kimi/test_kimi.py
+python3 agents/schedulers/test_collectors.py
 python3 agents/hermes/test_ingest_worker.py
 python3 scripts/test_data_steward.py
 python3 scripts/test_retention.py

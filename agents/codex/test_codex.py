@@ -254,7 +254,13 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
                         "path": "/tmp/com.ohmyboring.codex-ingest.plist",
                     },
                 ),
-                mock.patch.dict(os.environ, {"BORING_VAULT_DIR": str(vault)}),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "BORING_VAULT_DIR": str(vault),
+                        "BORING_EVENT_LOG": str(root / "events.ndjson"),
+                    },
+                ),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.subprocess, "run") as run,
                 mock.patch.object(collect, "DrudgeClient") as client,
@@ -303,6 +309,7 @@ def test_status_strict_fails_when_host_worker_missing():
                         "path": "/tmp/com.ohmyboring.codex-ingest.plist",
                     },
                 ),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(root / "events.ndjson")}),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.sys, "stderr", stderr),
             ):

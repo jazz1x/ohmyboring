@@ -184,6 +184,8 @@ The model ids must match what LM Studio reports. If the embedding model is not `
 | `BORING_EVENT_RECENT_HOURS` | recent event window used by `make readiness`; defaults to `24` |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant |
 
+Structured events are emitted by distill, collectors/workers, `doctor`/`readiness`, `guard`, and `eval`. Use `make events` to inspect the recent local timeline.
+
 > **Swapping the embedding model changes the vector dimension.** The synthesis model (`llm.model`) is free to swap, but a new `llm.embed_model` emits vectors of a different size, so you must update `llm.embed_dim` to match **and** run `make reset` — otherwise upserts fail against the old-shaped vectors. Common dims: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
 
 ### Local model selection
@@ -247,6 +249,7 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 | `make hermes-build` | clone/build the optional hermes-agent image |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | engine logs |
+| `make events [N=20]` | tail recent local structured workflow events |
 | `make guard` | fmt + clippy + test + Python py-compile |
 | `make quality` | release acceptance drift gate |
 | `make down` | stop containers |
@@ -508,6 +511,7 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 | `embedding dim mismatch` errors | Your `llm.embed_model` output size ≠ `llm.embed_dim` in `boring.json`. Update `embed_dim` to match the new model and run `make reset` |
 | Healthy? / did the last distill land? | `make doctor` — quick health + last-ingest and Codex worker/queue check |
 | Can I rely on tomorrow morning's briefing? | `make readiness` — strict gate; every hook/model/container/ingest finding must pass |
+| What failed most recently? | `make events` — recent local workflow timeline without raw transcripts |
 
 ---
 

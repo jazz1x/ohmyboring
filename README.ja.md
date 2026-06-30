@@ -184,6 +184,8 @@ make readiness
 | `BORING_EVENT_RECENT_HOURS` | `make readiness` が見る最近イベントの範囲。デフォルトは `24` |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプション Slack assistant |
 
+構造化イベントは distill、collector/worker、`doctor`/`readiness`、`guard`、`eval` から記録されます。最近のローカルタイムラインは `make events` で確認します。
+
 > **埋め込みモデルを変えるとベクトルの次元が変わります。** 合成モデル（`llm.model`）は自由に差し替えられますが、`llm.embed_model` を変えるとサイズの異なるベクトルが出力されるため、`llm.embed_dim` を一致させ、**かつ** `make reset` を実行する必要があります — そうしないと旧形状のベクトルへの upsert が失敗します。よくある次元: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768。
 
 ### ネーミング階層
@@ -217,6 +219,7 @@ make readiness
 | `make hermes-build` | オプション hermes-agent イメージの clone/build |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | エンジンログ |
+| `make events [N=20]` | 最近のローカル構造化ワークフローイベントを表示 |
 | `make guard` | fmt + clippy + test + Python py-compile |
 | `make quality` | リリース受け入れ drift ゲート |
 | `make down` | コンテナ停止 |
@@ -440,6 +443,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | Linux: コンテナがホストの Ollama に到達できない | Linux では Ollama がデフォルトで `127.0.0.1` にバインドするため、`host.docker.internal` が解決できてもコンテナは閉じたポートに当たります。Ollama を全インターフェースにバインドし（`OLLAMA_HOST=0.0.0.0:11434` の後に再起動）、かつ/または ホストのファイアウォールで docker ブリッジを許可してください |
 | 正常か？ / 最後の distill は通ったか？ | `make doctor` — ヘルス + 最終取り込み + Codex ワーカー/キューの簡易チェック |
 | 明日の朝ブリーフィングを信頼できる？ | `make readiness` — strict ゲート。フック/モデル/コンテナ/取り込み finding がすべて通る必要があります |
+| 直近で何が失敗した？ | `make events` — raw transcript なしで最近のローカルワークフロータイムラインを確認 |
 
 ---
 

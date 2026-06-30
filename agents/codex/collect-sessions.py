@@ -25,6 +25,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config
+import event_log
 import markers
 import omb_env
 from drudge_client import DrudgeClient
@@ -356,6 +357,7 @@ def main(argv: list[str] | None = None):
     args = ap.parse_args(argv)
     if args.strict and not args.status:
         ap.error("--strict requires --status")
+    run_id = event_log.new_run_id("codex-collector")
 
     cutoff = time.time() - WINDOW_H * 3600
     source_dir = _source_dir()
@@ -375,9 +377,40 @@ def main(argv: list[str] | None = None):
                     "todo": [],
                 },
             )
+            status = "ok"
             if args.strict and not ready:
                 print("[codex-status] readiness failed: host worker is not installed/loaded", file=sys.stderr)
+                status = "failed"
+            event_log.try_append_event(
+                "codex-collector",
+                "collector_status",
+                status,
+                run_id=run_id,
+                agent="codex",
+                source_present=False,
+                ready=ready,
+                strict=args.strict,
+                total=0,
+                queue_pending=0,
+                marker_pending=0,
+                marker_retry=0,
+            )
+            if status == "failed":
                 return 1
+        else:
+            event_log.try_append_event(
+                "codex-collector",
+                "collector_run",
+                "ok",
+                run_id=run_id,
+                agent="codex",
+                source_present=False,
+                pending=0,
+                batch=0,
+                processed=0,
+                failed=0,
+                mode="collect",
+            )
         return 0
 
     if args.now:
@@ -395,6 +428,28 @@ def main(argv: list[str] | None = None):
         scan = _scan_sessions(source_dir, cutoff)
         if args.status:
             ready = _print_status(source_dir, scan)
+            status = "ok" if ready or not args.strict else "failed"
+            marker = _marker_status()
+            event_log.try_append_event(
+                "codex-collector",
+                "collector_status",
+                status,
+                run_id=run_id,
+                agent="codex",
+                source_present=True,
+                ready=ready,
+                strict=args.strict,
+                total=scan["total"],
+                queue_pending=len(scan["todo"]),
+                skipped_old=scan["too_old"],
+                skipped_small=scan["too_small"],
+                skipped_rollout=scan["rollout"],
+                skipped_marked=scan["already_marked"],
+                skipped_subagent=scan["subagent"],
+                marker_done=marker["done"]["count"],
+                marker_pending=marker["pending"]["count"],
+                marker_retry=marker["retry"]["count"],
+            )
             if args.strict and not ready:
                 print("[codex-status] readiness failed: host worker is not installed/loaded", file=sys.stderr)
                 return 1
@@ -406,12 +461,26 @@ def main(argv: list[str] | None = None):
     print(f"[{label}] pending={len(todo)} this_batch={len(batch)} (LIMIT={1 if args.now else LIMIT})", flush=True)
     if not batch:
         print(f"[{label}] nothing to do", flush=True)
+        event_log.try_append_event(
+            "codex-collector",
+            "collector_run",
+            "ok",
+            run_id=run_id,
+            agent="codex",
+            pending=len(todo),
+            batch=0,
+            processed=0,
+            failed=0,
+            remaining=len(todo),
+            mode=label,
+        )
         return 0
 
     env = dict(os.environ)
     if args.now:
         env["BORING_DISTILL_NO_MARK"] = "1"
     done = 0
+    failed = 0
     for tp in batch:
         sid = _codex_session_id(tp)
         cwd = _transcript_cwd(tp)
@@ -427,16 +496,48 @@ def main(argv: list[str] | None = None):
         )
         r = subprocess.run([sys.executable, HOOK], input=payload, text=True, env=env)
         done += 1 if r.returncode == 0 else 0
+        failed += 1 if r.returncode != 0 else 0
         print(f"[{label}] {'ok' if r.returncode == 0 else 'fail'}  {sid}", flush=True)
 
+    sync_status = "ok"
     try:
         DrudgeClient().sync()
         print(f"[{label}] sync ok", flush=True)
     except Exception as e:
+        sync_status = "failed"
         print(f"[{label}] sync failed: {e}", file=sys.stderr, flush=True)
+        event_log.try_append_event(
+            "codex-collector",
+            "collector_run",
+            "failed",
+            run_id=run_id,
+            agent="codex",
+            pending=len(todo),
+            batch=len(batch),
+            processed=done,
+            failed=failed,
+            remaining=len(todo) - done,
+            sync_status=sync_status,
+            mode=label,
+        )
         return 1
     print(f"[{label}] done={done}/{len(batch)}  remaining={len(todo) - done}", flush=True)
-    return 0 if done == len(batch) else 1
+    status = "ok" if done == len(batch) else "failed"
+    event_log.try_append_event(
+        "codex-collector",
+        "collector_run",
+        status,
+        run_id=run_id,
+        agent="codex",
+        pending=len(todo),
+        batch=len(batch),
+        processed=done,
+        failed=failed,
+        remaining=len(todo) - done,
+        sync_status=sync_status,
+        mode=label,
+    )
+    return 0 if status == "ok" else 1
 
 
 if __name__ == "__main__":
