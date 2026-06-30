@@ -146,6 +146,8 @@ def test_collect_scan_classifies_queue_marked_rollout_and_subagent():
     old_mark_dir = collect.markers.MARK_DIR
     old_min_kb = collect.MIN_KB
     old_include = collect.INCLUDE_SUBAGENTS
+    old_include_rollouts = collect.INCLUDE_ROLLOUTS
+    old_stable_age = collect.STABLE_AGE_S
     try:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -155,6 +157,8 @@ def test_collect_scan_classifies_queue_marked_rollout_and_subagent():
             collect.markers.set_mark_dir(str(mark_dir))
             collect.MIN_KB = 0
             collect.INCLUDE_SUBAGENTS = False
+            collect.INCLUDE_ROLLOUTS = False
+            collect.STABLE_AGE_S = 0
 
             _write_codex_session(source / "todo.jsonl")
             _write_codex_session(source / "done.jsonl")
@@ -173,12 +177,78 @@ def test_collect_scan_classifies_queue_marked_rollout_and_subagent():
         collect.markers.set_mark_dir(old_mark_dir)
         collect.MIN_KB = old_min_kb
         collect.INCLUDE_SUBAGENTS = old_include
+        collect.INCLUDE_ROLLOUTS = old_include_rollouts
+        collect.STABLE_AGE_S = old_stable_age
+
+
+def test_collect_scan_can_include_rollouts_without_subagents():
+    old_mark_dir = collect.markers.MARK_DIR
+    old_min_kb = collect.MIN_KB
+    old_include = collect.INCLUDE_SUBAGENTS
+    old_include_rollouts = collect.INCLUDE_ROLLOUTS
+    old_stable_age = collect.STABLE_AGE_S
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "sessions"
+            source.mkdir()
+            mark_dir = root / "markers"
+            collect.markers.set_mark_dir(str(mark_dir))
+            collect.MIN_KB = 0
+            collect.INCLUDE_SUBAGENTS = False
+            collect.INCLUDE_ROLLOUTS = True
+            collect.STABLE_AGE_S = 0
+
+            _write_codex_session(source / "rollout-2026-06-29T19-29-28-demo.jsonl")
+            _write_codex_session(source / "subagent.jsonl", subagent=True)
+
+            scan = collect._scan_sessions(str(source), cutoff=0)
+
+            assert scan["rollout"] == 0
+            assert scan["subagent"] == 1
+            assert [Path(p).name for p in scan["todo"]] == ["rollout-2026-06-29T19-29-28-demo.jsonl"]
+    finally:
+        collect.markers.set_mark_dir(old_mark_dir)
+        collect.MIN_KB = old_min_kb
+        collect.INCLUDE_SUBAGENTS = old_include
+        collect.INCLUDE_ROLLOUTS = old_include_rollouts
+        collect.STABLE_AGE_S = old_stable_age
+
+
+def test_collect_scan_skips_unstable_recent_sessions():
+    old_mark_dir = collect.markers.MARK_DIR
+    old_min_kb = collect.MIN_KB
+    old_stable_age = collect.STABLE_AGE_S
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "sessions"
+            source.mkdir()
+            mark_dir = root / "markers"
+            collect.markers.set_mark_dir(str(mark_dir))
+            collect.MIN_KB = 0
+            collect.STABLE_AGE_S = 60
+
+            _write_codex_session(source / "recent.jsonl")
+            _write_codex_session(source / "stable.jsonl")
+            old = time.time() - 120
+            os.utime(source / "stable.jsonl", (old, old))
+
+            scan = collect._scan_sessions(str(source), cutoff=0)
+
+            assert scan["too_new"] == 1
+            assert [Path(p).name for p in scan["todo"]] == ["stable.jsonl"]
+    finally:
+        collect.markers.set_mark_dir(old_mark_dir)
+        collect.MIN_KB = old_min_kb
+        collect.STABLE_AGE_S = old_stable_age
 
 
 def test_collect_scan_reoffers_stale_pending_but_skips_fresh_pending():
     old_mark_dir = collect.markers.MARK_DIR
     old_min_kb = collect.MIN_KB
     old_pending_ttl = collect.PENDING_TTL
+    old_stable_age = collect.STABLE_AGE_S
     try:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -188,6 +258,7 @@ def test_collect_scan_reoffers_stale_pending_but_skips_fresh_pending():
             collect.markers.set_mark_dir(str(mark_dir))
             collect.MIN_KB = 0
             collect.PENDING_TTL = 60
+            collect.STABLE_AGE_S = 0
 
             _write_codex_session(source / "fresh.jsonl")
             _write_codex_session(source / "stale.jsonl")
@@ -205,6 +276,7 @@ def test_collect_scan_reoffers_stale_pending_but_skips_fresh_pending():
         collect.markers.set_mark_dir(old_mark_dir)
         collect.MIN_KB = old_min_kb
         collect.PENDING_TTL = old_pending_ttl
+        collect.STABLE_AGE_S = old_stable_age
 
 
 def test_collect_noop_run_logs_workflow_fields():
@@ -239,10 +311,61 @@ def test_collect_noop_run_logs_workflow_fields():
         collect.MIN_KB = old_min_kb
 
 
+def test_collect_success_with_sync_failure_is_degraded_success():
+    old_mark_dir = collect.markers.MARK_DIR
+    old_min_kb = collect.MIN_KB
+    old_stable_age = collect.STABLE_AGE_S
+    old_limit = collect.LIMIT
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "sessions"
+            source.mkdir()
+            mark_dir = root / "markers"
+            event_path = root / "events.ndjson"
+            collect.markers.set_mark_dir(str(mark_dir))
+            collect.MIN_KB = 0
+            collect.STABLE_AGE_S = 0
+            collect.LIMIT = 1
+            _write_codex_session(source / "todo.jsonl")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(collect, "_source_dir", return_value=str(source)),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
+                mock.patch.object(collect.sys, "stdout", stdout),
+                mock.patch.object(collect.sys, "stderr", stderr),
+                mock.patch.object(collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
+                mock.patch.object(collect, "DrudgeClient") as client,
+            ):
+                client.return_value.sync.side_effect = TimeoutError("timed out")
+                rc = collect.main([])
+
+            assert rc == 0
+            assert "sync failed: timed out" in stderr.getvalue()
+            assert "sync=failed" in stdout.getvalue()
+            event = _read_last_event(event_path)
+            assert event["status"] == "ok"
+            assert event["processed"] == 1
+            assert event["failed"] == 0
+            assert event["sync_status"] == "failed"
+            assert event["sync_degraded"] is True
+            assert event["workflow_node"] == "done_marked"
+            assert event["workflow_outcome"] == "continue"
+    finally:
+        collect.markers.set_mark_dir(old_mark_dir)
+        collect.MIN_KB = old_min_kb
+        collect.STABLE_AGE_S = old_stable_age
+        collect.LIMIT = old_limit
+
+
 def test_status_mode_reports_queue_worker_and_note_without_mutation():
     old_mark_dir = collect.markers.MARK_DIR
     old_min_kb = collect.MIN_KB
     old_include = collect.INCLUDE_SUBAGENTS
+    old_include_rollouts = collect.INCLUDE_ROLLOUTS
+    old_stable_age = collect.STABLE_AGE_S
     try:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -258,6 +381,8 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
             collect.markers.set_mark_dir(str(mark_dir))
             collect.MIN_KB = 0
             collect.INCLUDE_SUBAGENTS = False
+            collect.INCLUDE_ROLLOUTS = False
+            collect.STABLE_AGE_S = 0
             _write_codex_session(source / "todo.jsonl")
             collect.markers.mark_done("codex-done")
             collect.markers.mark_done("codex-rollout-2026-06-29T19-29-28-demo")
@@ -316,7 +441,7 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
             client.assert_not_called()
             out = stdout.getvalue()
             assert "queue_pending=1" in out
-            assert "skipped_rollout=0 skipped_marked=0 skipped_subagent=0" in out
+            assert "skipped_new=0 skipped_small=0 skipped_rollout=0 skipped_marked=0 skipped_subagent=0" in out
             assert "markers done=1 pending=0 retry=0 dead_letter=0 stale_pending=0 stale_retry=0" in out
             assert "codex-rollout-" not in out
             assert "worker found=true enabled=true state=scheduled last_status=success" in out
@@ -330,6 +455,33 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
         collect.markers.set_mark_dir(old_mark_dir)
         collect.MIN_KB = old_min_kb
         collect.INCLUDE_SUBAGENTS = old_include
+        collect.INCLUDE_ROLLOUTS = old_include_rollouts
+        collect.STABLE_AGE_S = old_stable_age
+
+
+def test_newest_codex_note_includes_harvested_rollout():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        vault = root / "vault"
+        wiki = vault / "wiki"
+        wiki.mkdir(parents=True)
+        normal = wiki / "wiki-0001.md"
+        rollout = wiki / "wiki-0002.md"
+        normal.write_text("---\ntitle: codex\nomb_session_id: codex-note\n---\nbody\n", encoding="utf-8")
+        rollout.write_text(
+            "---\ntitle: rollout\nomb_session_id: codex-rollout-note\n---\nbody\n",
+            encoding="utf-8",
+        )
+        old = time.time() - 60
+        new = time.time()
+        os.utime(normal, (old, old))
+        os.utime(rollout, (new, new))
+
+        with mock.patch.dict(os.environ, {"BORING_VAULT_DIR": str(vault)}):
+            note = collect._newest_codex_note()
+
+        assert note["session_id"] == "codex-rollout-note"
+        assert note["path"] == str(rollout)
 
 
 def test_status_strict_fails_when_host_worker_missing():
@@ -447,9 +599,11 @@ def test_status_strict_fails_on_stale_codex_markers():
             _write_codex_session(source / "todo.jsonl")
             collect.markers.mark_pending("codex-pending")
             collect.markers.mark_retry("codex-retry")
+            collect.markers.mark_retry("codex-rollout-retry")
             old = time.time() - 3600
             os.utime(mark_dir / "codex-pending.pending", (old, old))
             os.utime(mark_dir / "codex-retry.retry", (old, old))
+            os.utime(mark_dir / "codex-rollout-retry.retry", (old, old))
             (mark_dir / "codex-dead.dead").write_text("dead", encoding="utf-8")
             (mark_dir / "codex-dead-letter.dead-letter").write_text("dead", encoding="utf-8")
 
@@ -490,9 +644,9 @@ def test_status_strict_fails_on_stale_codex_markers():
 
             assert rc == 1
             out = stdout.getvalue()
-            assert "dead_letter=2 stale_pending=1 stale_retry=1" in out
+            assert "dead_letter=2 stale_pending=1 stale_retry=2" in out
             assert "readiness_issue stale codex pending markers=1" in out
-            assert "readiness_issue stale codex retry markers=1" in out
+            assert "readiness_issue stale codex retry markers=2" in out
             assert "readiness_issue codex dead-letter markers=2" in out
     finally:
         collect.markers.set_mark_dir(old_mark_dir)
@@ -506,9 +660,12 @@ if __name__ == "__main__":
     test_small_raw_parse_short_marks_done()
     test_success_passes_session_id_to_shared_core()
     test_collect_scan_classifies_queue_marked_rollout_and_subagent()
+    test_collect_scan_can_include_rollouts_without_subagents()
+    test_collect_scan_skips_unstable_recent_sessions()
     test_collect_scan_reoffers_stale_pending_but_skips_fresh_pending()
     test_collect_noop_run_logs_workflow_fields()
     test_status_mode_reports_queue_worker_and_note_without_mutation()
+    test_newest_codex_note_includes_harvested_rollout()
     test_status_strict_fails_when_host_worker_missing()
     test_status_strict_fails_when_hermes_worker_failed()
     test_status_strict_fails_on_stale_codex_markers()

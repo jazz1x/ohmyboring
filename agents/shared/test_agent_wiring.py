@@ -207,6 +207,8 @@ def test_install_codex_host_worker_macos_writes_launch_agent():
         assert result["loaded"] is True
         assert str(collector) in text
         assert "<integer>1200</integer>" in text
+        assert "CODEX_INCLUDE_ROLLOUTS=1" in text
+        assert "COLLECT_STABLE_AGE_SECONDS=1800" in text
 
 
 def test_next_cron_run_finds_next_monday():

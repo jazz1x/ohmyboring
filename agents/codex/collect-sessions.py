@@ -36,12 +36,23 @@ BORING_URL = omb_env.drudge_url()
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
+STABLE_AGE_S = float(os.environ.get("COLLECT_STABLE_AGE_SECONDS") or "1800")
 PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("INGEST_PENDING_TTL") or "1800")
 RETRY_TTL = float(os.environ.get("COLLECT_RETRY_TTL") or os.environ.get("INGEST_RETRY_TTL") or str(PENDING_TTL))
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 HOOK = os.path.join(BORING_HOME, "agents/codex/distill-session.py")
-INCLUDE_SUBAGENTS = os.environ.get("CODEX_INCLUDE_SUBAGENTS", "").lower() in ("1", "true", "yes")
 HOST_WORKER_LABEL = "com.ohmyboring.codex-ingest"
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.lower() in ("1", "true", "yes")
+
+
+INCLUDE_SUBAGENTS = _env_bool("CODEX_INCLUDE_SUBAGENTS")
+INCLUDE_ROLLOUTS = _env_bool("CODEX_INCLUDE_ROLLOUTS", default=True) or INCLUDE_SUBAGENTS
 
 if omb_env._in_container():
     markers.set_mark_dir("/host/.cache/boring-distill")
@@ -66,9 +77,11 @@ def _marked(session_id: str) -> bool:
 
 def _scan_sessions(source_dir: str, cutoff: float) -> dict:
     paths = glob.glob(os.path.join(source_dir, "**", "*.jsonl"), recursive=True)
+    now = time.time()
     scan = {
         "total": len(paths),
         "too_old": 0,
+        "too_new": 0,
         "too_small": 0,
         "rollout": 0,
         "already_marked": 0,
@@ -76,14 +89,18 @@ def _scan_sessions(source_dir: str, cutoff: float) -> dict:
         "todo": [],
     }
     for p in paths:
-        if os.path.getmtime(p) < cutoff:
+        mtime = os.path.getmtime(p)
+        if mtime < cutoff:
             scan["too_old"] += 1
+            continue
+        if STABLE_AGE_S > 0 and mtime > now - STABLE_AGE_S:
+            scan["too_new"] += 1
             continue
         if os.path.getsize(p) < MIN_KB * 1024:
             scan["too_small"] += 1
             continue
         sid = _codex_session_id(p)
-        if not INCLUDE_SUBAGENTS and _is_rollout_session(sid):
+        if not INCLUDE_ROLLOUTS and _is_rollout_session(sid):
             scan["rollout"] += 1
             continue
         if not INCLUDE_SUBAGENTS and _is_subagent(p):
@@ -157,6 +174,10 @@ def _is_rollout_marker(path: str) -> bool:
     return os.path.basename(path).startswith("codex-rollout-")
 
 
+def _ignore_marker(label: str, path: str) -> bool:
+    return label == "done" and _is_rollout_marker(path)
+
+
 def _marker_status() -> dict:
     status = {}
     now = time.time()
@@ -170,7 +191,7 @@ def _marker_status() -> dict:
             p
             for suffix in suffixes
             for p in glob.glob(os.path.join(markers.MARK_DIR, f"codex-*.{suffix}"))
-            if not _is_rollout_marker(p)
+            if not _ignore_marker(label, p)
         ]
         newest = _newest(paths)
         stale_count = 0
@@ -217,7 +238,7 @@ def _newest_codex_note() -> dict:
     latest_sid = ""
     for p in glob.glob(os.path.join(wiki_dir, "wiki-*.md")):
         sid = _frontmatter_session_id(p)
-        if not sid.startswith("codex-") or sid.startswith("codex-rollout-"):
+        if not sid.startswith("codex-"):
             continue
         if not latest_path or os.path.getmtime(p) > os.path.getmtime(latest_path):
             latest_path = p
@@ -343,12 +364,13 @@ def _print_status(source_dir: str, scan: dict) -> bool:
     print(
         "[codex-status] config "
         f"window_h={WINDOW_H:g} min_kb={MIN_KB:g} limit={LIMIT} "
+        f"stable_age_s={STABLE_AGE_S:g} include_rollouts={str(INCLUDE_ROLLOUTS).lower()} "
         f"include_subagents={str(INCLUDE_SUBAGENTS).lower()}"
     )
     print(
         "[codex-status] sessions "
         f"total={scan['total']} queue_pending={len(todo)} "
-        f"skipped_old={scan['too_old']} skipped_small={scan['too_small']} "
+        f"skipped_old={scan['too_old']} skipped_new={scan['too_new']} skipped_small={scan['too_small']} "
         f"skipped_rollout={scan['rollout']} "
         f"skipped_marked={scan['already_marked']} skipped_subagent={scan['subagent']}"
     )
@@ -440,6 +462,7 @@ def main(argv: list[str] | None = None):
                 {
                     "total": 0,
                     "too_old": 0,
+                    "too_new": 0,
                     "too_small": 0,
                     "rollout": 0,
                     "already_marked": 0,
@@ -462,6 +485,7 @@ def main(argv: list[str] | None = None):
                 strict=args.strict,
                 total=0,
                 queue_pending=0,
+                skipped_new=0,
                 marker_pending=0,
                 marker_retry=0,
                 marker_dead_letter=0,
@@ -493,7 +517,7 @@ def main(argv: list[str] | None = None):
             for p in todo
             if os.path.getmtime(p) >= cutoff
             and os.path.getsize(p) >= MIN_KB * 1024
-            and (INCLUDE_SUBAGENTS or not _is_rollout_session(_codex_session_id(p)))
+            and (INCLUDE_ROLLOUTS or not _is_rollout_session(_codex_session_id(p)))
             and (INCLUDE_SUBAGENTS or not _is_subagent(p))
         ]
         todo.sort(key=os.path.getmtime, reverse=True)
@@ -515,6 +539,7 @@ def main(argv: list[str] | None = None):
                 total=scan["total"],
                 queue_pending=len(scan["todo"]),
                 skipped_old=scan["too_old"],
+                skipped_new=scan["too_new"],
                 skipped_small=scan["too_small"],
                 skipped_rollout=scan["rollout"],
                 skipped_marked=scan["already_marked"],
@@ -584,23 +609,11 @@ def main(argv: list[str] | None = None):
     except Exception as e:
         sync_status = "failed"
         print(f"[{label}] sync failed: {e}", file=sys.stderr, flush=True)
-        event_log.try_append_event(
-            "codex-collector",
-            "collector_run",
-            "failed",
-            run_id=run_id,
-            agent="codex",
-            pending=len(todo),
-            batch=len(batch),
-            processed=done,
-            failed=failed,
-            remaining=len(todo) - done,
-            sync_status=sync_status,
-            mode=label,
-            **workflow_contract.collector_run_fields("failed", len(batch)),
-        )
-        return 1
-    print(f"[{label}] done={done}/{len(batch)}  remaining={len(todo) - done}", flush=True)
+
+    print(
+        f"[{label}] done={done}/{len(batch)}  remaining={len(todo) - done} sync={sync_status}",
+        flush=True,
+    )
     status = "ok" if done == len(batch) else "failed"
     event_log.try_append_event(
         "codex-collector",
@@ -614,6 +627,7 @@ def main(argv: list[str] | None = None):
         failed=failed,
         remaining=len(todo) - done,
         sync_status=sync_status,
+        sync_degraded=(sync_status == "failed" and status == "ok"),
         mode=label,
         **workflow_contract.collector_run_fields(status, len(batch)),
     )

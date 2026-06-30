@@ -16,7 +16,7 @@ You turn ONE Claude Code session transcript into ONE durable memory note and **s
 ## CRITICAL: You MUST call the `remember` tool
 
 This skill is NOT done until you have actually **invoked the `remember` tool**.
-Reasoning about the note, describing it, or printing JSON is NOT enough — the note only exists once `remember` returns success (a message containing "remembered → wiki/..." or a wiki id).
+Reasoning about the note, describing it, or printing JSON is NOT enough — the note only exists once `remember` returns success (a message containing "remembered → wiki/..." or a wiki id; a richer duplicate may update an existing wiki id).
 **Call `remember` exactly once, then report the wiki id it returns.**
 
 ## Inputs

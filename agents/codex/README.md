@@ -12,8 +12,11 @@ Codex does not expose a SessionEnd hook, so sessions are ingested by a periodic
 worker instead:
 
 - `agents/codex/collect-sessions.py` scans `~/.codex/sessions/**/*.jsonl`.
-- It skips Codex Desktop `rollout-*` copies and subagent/guardian roll-outs by
-  default, then processes one un-ingested eligible session per tick.
+- Installed workers set `CODEX_INCLUDE_ROLLOUTS=1` and
+  `COLLECT_STABLE_AGE_SECONDS=1800`, so stable Codex Desktop rollout transcripts
+  are harvested while files still being written are skipped.
+- True subagent/guardian roll-outs are skipped unless `CODEX_INCLUDE_SUBAGENTS=1`
+  is set explicitly.
 - `install.sh` registers a host launchd/cron worker that runs every 20 minutes
   when the `codex` adapter is enabled.
 - When `hermes-agent` is enabled, `install.sh` also adds a
@@ -24,21 +27,23 @@ worker instead:
 
 ```bash
 make doctor
-COLLECT_LIMIT=10 python3 agents/codex/collect-sessions.py
+CODEX_INCLUDE_ROLLOUTS=1 COLLECT_STABLE_AGE_SECONDS=1800 COLLECT_LIMIT=10 python3 agents/codex/collect-sessions.py
 ```
 
 `make doctor` is mostly read-only and includes Codex queued sessions, skipped
-rollout copies, non-rollout marker counts, stale pending/retry markers,
-dead-letter markers, the host worker state, the Hermes worker state, and the
-newest Codex note. It writes and removes one owner-only sentinel marker to prove
-the queue directory is writable. Rollout markers may remain on disk from older
-runs, but status output does not count them as successful user-session ingestion.
+rollout copies, marker counts, stale pending/retry markers, dead-letter markers,
+the host worker state, the Hermes worker state, and the newest Codex note. It
+writes and removes one owner-only sentinel marker to prove the queue directory is
+writable. Completed rollout markers may remain on disk from older runs, but
+status output does not count them as successful user-session ingestion. Pending,
+retry, and dead-letter rollout markers are still surfaced because they represent
+failed or incomplete harvest attempts.
 
 `make readiness` runs the same checks in strict mode. It fails when the host
 worker is missing/unloaded, the Hermes `codex-memory-ingest-worker` is missing,
-disabled, failed, stale-scheduled, or reports `last_error`, non-rollout pending
-or retry markers exceed their TTL, any dead-letter marker exists, or the newest
-Codex note is older than the configured freshness window.
+disabled, failed, stale-scheduled, or reports `last_error`, pending or retry
+markers exceed their TTL, any dead-letter marker exists, or the newest Codex note
+is older than the configured freshness window.
 
 Session markers live in `~/.cache/boring-distill/codex-<sid>.*` and are shared
 with the rest of the pipeline.

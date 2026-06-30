@@ -52,7 +52,7 @@ Memory gets in four ways — after setup you rarely touch the automatic paths:
 | How | Command | When |
 | --- | --- | --- |
 | **Automatic, on session end** | SessionEnd hook (wired by `install.sh`) | every Claude Code / Kimi session — `hooks/distill-session.py` distills the transcript and `remember`s it. The paired `UserPromptSubmit` hook (`recall.py`) auto-injects relevant past memory into new prompts. |
-| **Automatic, Codex worker** | host launchd/cron worker (wired by `install.sh`) | Codex has no SessionEnd hook. A host worker scans `~/.codex/sessions/**/*.jsonl` every 20 minutes, skips Codex Desktop `rollout-*` copies by default, and stores eligible transcripts through the same `remember` path. If `hermes-agent` is enabled, it also gets a `codex-memory-ingest-worker`. Check both with `make doctor`. |
+| **Automatic, Codex worker** | host launchd/cron worker (wired by `install.sh`) | Codex has no SessionEnd hook. A host worker scans `~/.codex/sessions/**/*.jsonl` every 20 minutes, skips transcripts still being written, keeps true subagent rollouts out, and stores eligible transcripts through the same `remember` path. If `hermes-agent` is enabled, it also gets a `codex-memory-ingest-worker`. Check both with `make doctor`. |
 | **Backfill past sessions** | `make collect [N=20]` | once after install, to seed an otherwise-empty vault from your `~/.claude/projects` history. Newest-first, idempotent (a per-session marker skips already-distilled ones), `N` per run so it never hogs CPU. |
 | **Right now, mid-session** | `make distill-now` · `make remember M="…"` | capture something immediately *without* ending the session. `distill-now` re-distills the **current** transcript on demand and leaves no marker, so the normal end-of-session capture still runs (you may get an early note plus the final one). `remember` saves an explicit note you write yourself. |
 
@@ -99,6 +99,7 @@ flowchart LR
 
 - **Read door** — fast, no LLM. `make ask`, `recall.py`, MCP `recall` read `vault/wiki` directly.
 - **Write door** — gated. `distill-session.py` calls the local LLM and writes through ohmyboring's deterministic `remember` MCP tool.
+- **Duplicate gate** — duplicate notes are normally skipped; if the same session or a strong rollout copy produces a richer note, `remember` rewrites the same `wiki-NNNN.md` and re-ingests it.
 
 ### Workflow graph contract
 
@@ -373,7 +374,7 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 | Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Distills a Kimi session and calls `remember` |
 | Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring` as an MCP server |
-| Codex | `agents/codex/README.md` | MCP + host worker backfill | `~/.codex/mcp.json` / launchd or cron / `collect-sessions.py` | Exposes `ohmyboring` as an MCP server and backfills eligible Codex sessions; rollout copies are skipped |
+| Codex | `agents/codex/README.md` | MCP + host worker backfill | `~/.codex/mcp.json` / launchd or cron / `collect-sessions.py` | Exposes `ohmyboring` as an MCP server and backfills eligible Codex sessions; installed workers harvest stable rollout transcripts but skip true subagents |
 | hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`weekly-briefing`, `briefing`) + serial backfill workers (`ingest-worker.py`, Codex collector) |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older Claude Code sessions |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / manual | Lazy backfill of older Kimi Code sessions |

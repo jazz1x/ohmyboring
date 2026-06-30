@@ -145,7 +145,7 @@ def test_weak_claims_detected():
     assert "weak-claims" in weak_kinds, issues
 
 
-def test_zombie_rollout_session_is_reported_without_requiring_sources():
+def test_rollout_session_without_sources_is_not_lineage_issue():
     note = _make_note(
         "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
         "omb_session_id: codex-rollout-2026-06-21T06-59-02-demo\n"
@@ -154,13 +154,7 @@ def test_zombie_rollout_session_is_reported_without_requiring_sources():
         "- {subject: omb, predicate: mode, value: rollout, kind: fact, confidence: certain}\n"
         "sources: []"
     )
-    issues = ds._session_lineage_issues(note)
-    assert issues == [
-        {
-            "kind": "zombie-rollout",
-            "omb_session_id": "codex-rollout-2026-06-21T06-59-02-demo",
-        }
-    ]
+    assert ds._session_lineage_issues(note) == []
 
 
 def test_normal_session_without_sources_is_not_lineage_issue():

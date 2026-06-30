@@ -4,7 +4,7 @@
 Focuses on data-management hygiene that automated sync cannot fix by itself:
   - project/repo slug variants (`org/repo` vs `repo`)
   - placeholder tags (`_`, `pr_`, `slack_`)
-  - weak session claims and likely zombie rollout notes
+  - weak session claims
   - generic or likely-typo project names
 
 Run dry-run (safe):
@@ -156,9 +156,6 @@ def _claim_issues(notes):
 
 def _session_lineage_issues(note):
     """Find invalid session provenance without requiring duplicated source artifacts."""
-    sid = note["fm"].get("omb_session_id")
-    if isinstance(sid, str) and sid.startswith("codex-rollout-"):
-        return [{"kind": "zombie-rollout", "omb_session_id": sid}]
     return []
 
 
