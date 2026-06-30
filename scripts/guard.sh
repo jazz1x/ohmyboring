@@ -8,6 +8,7 @@
 #   5) py-unit   — network-free Python regression tests (incl. destructive-path planners)
 #   6) sh-unit   — destructive shell-path guardrails (restore-db drop ordering)
 #   7) sh-unit   — readiness gate guardrails (doctor --strict exit semantics)
+#   8) sh-unit   — provider/model guardrails (verify-llm embedding shape)
 # No bypassing (git commit --no-verify) — on failure, fix the root cause (don't paper over the symptom).
 set -eu
 PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/oh-my-boring-pyc}"
@@ -72,4 +73,6 @@ echo "6) shell destructive-path guardrails (restore-db)…"
 sh scripts/test_restore_db.sh
 echo "7) shell readiness gate guardrails (doctor --strict)…"
 sh scripts/test_doctor.sh
+echo "8) shell LLM/provider guardrails (verify-llm)…"
+sh scripts/test_verify_llm.sh
 echo "✅ 구조 게이트 통과 — 컴파일러/clippy/test + Python adapters 무위반."

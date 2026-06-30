@@ -8,7 +8,7 @@
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
 ![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
-![gemma4](https://img.shields.io/badge/LLM-gemma4:12b-000?logo=ollama)
+![qwen3](https://img.shields.io/badge/LLM-qwen3:14b-000?logo=ollama)
 
 **Self-hosted personal memory RAG.** Your Claude Code / Kimi Code sessions and eligible Codex transcripts are distilled into a local, human-readable wiki and recalled on demand — *"how did I do this last time?"* **Zero cloud · 100% local.**
 
@@ -114,7 +114,7 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
   "llm": {
     "provider": "ollama",
     "base_url": "http://host.docker.internal:11434/v1",
-    "model": "gemma4:12b",
+    "model": "qwen3:14b",
     "embed_model": "bge-m3",
     "embed_dim": 1024,
     "api_key_env": "BORING_LLM_API_KEY",
@@ -170,7 +170,7 @@ make doctor
 make readiness
 ```
 
-The model ids must match what LM Studio reports. If the embedding model is not `bge-m3`, update `llm.embed_dim` to the model's dimension and run `make reset` before relying on vector mode. See the [LM Studio runbook](docs/runbooks/lmstudio.md) for the full checklist.
+The model ids must match what LM Studio reports. `make verify-llm` also calls `/v1/embeddings` and checks that the returned vector length matches `llm.embed_dim`. For the current 1024d release path, LM Studio is vector-ready only when it can serve `bge-m3`; `text-embedding-nomic-embed-text-v1.5` is a separate 768d reset/re-index path. See the [LM Studio runbook](docs/runbooks/lmstudio.md) for the full checklist.
 
 `.env` is now only secrets + runtime overrides:
 
@@ -238,7 +238,7 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 |---|---|
 | `make up` | set up + start the ohmyboring engine (hermes-agent joins only if its image exists) |
 | `make ollama` | ensure Ollama is running (start in background if needed) |
-| `make verify-llm` | verify provider reachability, loaded model ids, and embedding dimension |
+| `make verify-llm` | verify provider reachability, loaded model ids, and actual embedding dimension |
 | `make doctor` | diagnose stack, hooks, latest ingest, and Codex worker/queue status |
 | `make readiness` | strict pre-briefing gate; fails on any doctor finding |
 | `make ask Q="..."` | one-shot recall + synthesis |
@@ -508,7 +508,7 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 | Second `make up` / re-clone fails | Run `make down` first — the containers use fixed names and bind `127.0.0.1:7700` / `:5432`, so a second stack collides with the running one |
 | Agent not starting | `BORING_CORE_ONLY=1 make up` runs core-only; hermes image must be built separately |
 | Linux: container can't reach host Ollama | On Linux, Ollama binds `127.0.0.1` by default, so the container hits a closed port even though `host.docker.internal` resolves. Bind Ollama to all interfaces (`OLLAMA_HOST=0.0.0.0:11434`, then restart it) and/or allow the docker bridge in the host firewall |
-| `embedding dim mismatch` errors | Your `llm.embed_model` output size ≠ `llm.embed_dim` in `boring.json`. Update `embed_dim` to match the new model and run `make reset` |
+| `embedding dim mismatch` errors | Your `/v1/embeddings` output size does not match `llm.embed_dim` in `boring.json`. Update `embed_dim` to match the new model and run `make reset` |
 | Healthy? / did the last distill land? | `make doctor` — quick health + last-ingest and Codex worker/queue check |
 | Can I rely on tomorrow morning's briefing? | `make readiness` — strict gate; every hook/model/container/ingest finding must pass |
 | What failed most recently? | `make events` — recent local workflow timeline without raw transcripts |

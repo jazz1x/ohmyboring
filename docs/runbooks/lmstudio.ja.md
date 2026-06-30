@@ -56,6 +56,7 @@ make readiness
 期待結果:
 
 - `make verify-llm` が provider スクリプトを見つけ、`/v1/models` に到達し、設定した 2 つのモデル id を確認します。
+- `make verify-llm` が `/v1/embeddings` に直接リクエストし、実際のベクトル長が `llm.embed_dim` と一致することを確認します。
 - `make doctor` がエンジン正常と write door open を報告します。
 - 予約済みの朝ブリーフィングに頼る前に `make readiness` が green であることを確認します。
 - Hermes/Codex 取り込みが有効なら、`make doctor` が Codex ワーカー状態も表示します。
@@ -72,6 +73,8 @@ Embedding モデルの次元は保存形式の契約です。よく使う値:
 
 `llm.embed_model` を変えるときは `llm.embed_dim` も合わせ、vector モードを信頼する前に `make reset` を実行します。wiki-first recall は Markdown を直接読みますが、vector search、claims、graph、status、brief は vector store の形に依存します。
 
+現在の 1024d リリース経路では、`/v1/models` に `bge-m3` があり、`make verify-llm` が実際の embedding 次元 1024 を報告する場合だけ LM Studio を vector-ready と呼びます。`text-embedding-nomic-embed-text-v1.5` は 768d なので、これは `bge-m3` の静かな代替ではなく、意図的な reset/re-index 判断です。
+
 ## トラブルシュート
 
 | 症状 | 確認 |
@@ -79,6 +82,7 @@ Embedding モデルの次元は保存形式の契約です。よく使う値:
 | `/v1/models` が空 | LM Studio ローカルサーバーを起動し、アプリでモデルをロードします。 |
 | `/v1/models` に embedding モデルだけが出る | chat モデルをダウンロードしてロードし、`llm.model` に正確な id を設定します。 |
 | `make verify-llm` がモデルを見つけない | `/v1/models` の正確な id をコピーします。表示名だけでは足りません。 |
+| `make verify-llm` が実際の次元不一致を報告する | サーバーが `llm.embed_dim` と異なる embedding 形状を返しています。意図したモデルをロードするか、`embed_dim` を変更して `make reset` を実行します。 |
 | Docker が LM Studio に届かない | `boring.json` では `localhost` ではなく `http://host.docker.internal:1234/v1` を使います。 |
 | ホスト上のベンチマークが LM Studio に届かない | `scripts/bench-llm.py --base-url` では `http://localhost:1234/v1` を使います。 |
 | embedding upsert が失敗 | `llm.embed_dim` が embedding モデルと合っていません。次元を修正し、vector DB を resetします。 |

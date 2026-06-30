@@ -8,7 +8,7 @@
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
 ![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
-![gemma4](https://img.shields.io/badge/LLM-gemma4:12b-000?logo=ollama)
+![qwen3](https://img.shields.io/badge/LLM-qwen3:14b-000?logo=ollama)
 
 **셀프호스팅 개인 메모리 RAG.** Claude Code / Kimi Code 세션과 적재 가능한 Codex 트랜스크립트가 로컬의 사람이 읽는 위키로 증류돼 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클라우드 0 · 100% 로컬.**
 
@@ -114,7 +114,7 @@ flowchart LR
   "llm": {
     "provider": "ollama",
     "base_url": "http://host.docker.internal:11434/v1",
-    "model": "gemma4:12b",
+    "model": "qwen3:14b",
     "embed_model": "bge-m3",
     "embed_dim": 1024,
     "api_key_env": "BORING_LLM_API_KEY",
@@ -170,7 +170,7 @@ make doctor
 make readiness
 ```
 
-모델 id는 LM Studio가 반환한 값과 정확히 같아야 합니다. embedding 모델이 `bge-m3`가 아니라면 해당 모델 차원에 맞게 `llm.embed_dim`을 바꾸고, vector 모드를 믿기 전에 `make reset`을 실행해야 합니다. 전체 체크리스트는 [LM Studio 런북](docs/runbooks/lmstudio.ko.md)을 참고하세요.
+모델 id는 LM Studio가 반환한 값과 정확히 같아야 합니다. `make verify-llm`은 `/v1/embeddings`도 직접 호출해 실제 벡터 길이가 `llm.embed_dim`과 같은지 확인합니다. 현재 1024d 릴리즈 경로에서는 LM Studio가 `bge-m3`를 서빙할 때만 vector-ready이고, `text-embedding-nomic-embed-text-v1.5`는 별도의 768d reset/re-index 경로입니다. 전체 체크리스트는 [LM Studio 런북](docs/runbooks/lmstudio.ko.md)을 참고하세요.
 
 `.env`는 이제 시크릿 + 런타임 오버라이드 전용:
 
@@ -238,7 +238,7 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 |---|---|
 | `make up` | ohmyboring 엔진 실행(hermes-agent 이미지가 있을 때만 함께 실행) |
 | `make ollama` | Ollama 실행 확인(필요시 백그라운드 시작) |
-| `make verify-llm` | provider 접근성, 로드된 모델 id, embedding 차원 확인 |
+| `make verify-llm` | provider 접근성, 로드된 모델 id, 실제 embedding 차원 확인 |
 | `make doctor` | 스택, 훅, 마지막 적재, Codex 워커/큐 상태 진단 |
 | `make readiness` | 브리핑 전 strict 게이트; doctor finding이 하나라도 있으면 실패 |
 | `make ask Q="..."` | recall + 요약 한 번에 |
@@ -467,6 +467,7 @@ curl -s -X POST http://localhost:7700/mcp \
 |---|---|
 | `make up` 실패 | Ollama 확인: `curl -sf http://127.0.0.1:11434/api/tags` |
 | LM Studio 선택 후 `make up` 실패 | LM Studio 로컬 서버를 켜고 `boring.json`의 chat/embedding 모델 id를 정확히 로드한 뒤 `make verify-llm` 실행 |
+| `embedding dim mismatch` 오류 | `/v1/embeddings`의 실제 출력 길이가 `boring.json`의 `llm.embed_dim`과 다릅니다. 새 모델 차원에 맞게 수정하고 `make reset`을 실행하세요 |
 | 포트 충돌 | `lsof -i :7700 -i :5432 -i :11434` |
 | 두 번째 `make up` / 재클론 실패 | 먼저 `make down`을 실행하세요 — 컨테이너 이름이 고정이고 `127.0.0.1:7700` / `:5432`에 바인딩하므로, 두 번째 스택이 실행 중인 스택과 충돌합니다 |
 | agent 시작 안 됨 | `BORING_CORE_ONLY=1 make up`로 core-only 실행. hermes 이미지는 별도 빌드 필요 |
