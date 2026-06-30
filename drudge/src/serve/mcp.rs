@@ -832,7 +832,27 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
         .await
         .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
     {
-        return Ok(format!("skipped — duplicate of {existing}"));
+        if should_replace_duplicate(&note, &existing) {
+            let Some(wiki_id) = crate::vault::wiki_stem(&existing.source_path) else {
+                return Err((
+                    -32603,
+                    format!(
+                        "dedup replacement target is not a wiki note: {}",
+                        existing.source_path
+                    ),
+                ));
+            };
+            let source_path = existing.source_path.clone();
+            let path = std::path::PathBuf::from(&source_path);
+            let RememberNote { mut front, body } = note;
+            front.source_path = source_path;
+            let content = vault::render_wiki_note(&wiki_id, &front, &body)
+                .map_err(|e| (-32603_i32, format!("render wiki note: {e:#}")))?;
+            std::fs::write(&path, content)
+                .map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
+            return finish_remembered_note(s, &path, &wiki_id, &front, true).await;
+        }
+        return Ok(format!("skipped — duplicate of {}", existing.source_path));
     }
 
     // 1. atomically allocate id + path, then write the wiki note (deterministic file IO — the SSOT artifact).
@@ -863,16 +883,32 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
         .map_err(|e| (-32603_i32, format!("render wiki note: {e:#}")))?;
     std::fs::write(&path, content).map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
 
-    // 2. vector off → the wiki file is first-class memory (wiki_recall reads it). Nothing to embed.
+    finish_remembered_note(s, &path, &wiki_id, &front, false).await
+}
+
+async fn finish_remembered_note(
+    s: &AppState,
+    path: &std::path::Path,
+    wiki_id: &str,
+    front: &FrontMatter,
+    updated_duplicate: bool,
+) -> Result<String, (i32, String)> {
+    let duplicate_suffix = if updated_duplicate {
+        " (updated duplicate)"
+    } else {
+        ""
+    };
+
+    // vector off → the wiki file is first-class memory (wiki_recall reads it). Nothing to embed.
     let Some(store) = s.store.as_ref() else {
         return Ok(format!(
-            "remembered → wiki/{wiki_id}.md (vector off — wiki is first-class memory; recallable now)"
+            "remembered → wiki/{wiki_id}.md{duplicate_suffix} (vector off — wiki is first-class memory; recallable now)"
         ));
     };
 
-    // 3. deterministic ingest of this one note (chunk→embed→upsert→graph) + relation recompute.
-    //    Serialize against sync: project_links rewrites wiki relates_to in place, so it must not
-    //    interleave with a concurrent sync doing the same (torn/partial wiki writes otherwise).
+    // deterministic ingest of this one note (chunk→embed→upsert→graph) + relation recompute.
+    // Serialize against sync: project_links rewrites wiki relates_to in place, so it must not
+    // interleave with a concurrent sync doing the same (torn/partial wiki writes otherwise).
     let _guard = s.sync_lock.lock().await;
     let mut stats = ingest::Stats::default();
     ingest::ingest_file(store, &s.llm, &s.cfg, &front.source_path, &mut stats)
@@ -882,7 +918,7 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
     // refresh. Project ONLY this new note (bounded: ~3 queries + 1 write) instead of recomputing the
     // whole corpus — its neighbors' backlinks are reconciled by the next periodic full project_links
     // (invisible to recall, which is embedding-based). On failure report partial-success.
-    let relates = match vault::project_note(store, &path, 6).await {
+    let relates = match vault::project_note(store, path, 6).await {
         Ok(_) => "",
         Err(e) => {
             eprintln!("[remember] project_note warning (ignored): {e:#}");
@@ -890,7 +926,7 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
         }
     };
     Ok(format!(
-        "remembered → wiki/{wiki_id}.md · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
+        "remembered → wiki/{wiki_id}.md{duplicate_suffix} · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
         stats.chunks, stats.tools, stats.concepts, stats.claims
     ))
 }
@@ -980,18 +1016,41 @@ const DUPLICATE_MAX_DIST: f64 = 0.07;
 const SESSION_DUP_TITLE_MIN: (usize, usize) = (1, 5);
 const SESSION_DUP_BODY_MIN: (usize, usize) = (1, 5);
 const SESSION_DUP_SEMANTIC_MIN: (usize, usize) = (9, 20);
+const DUPLICATE_REPLACE_MIN_DELTA: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DuplicateReason {
+    SameSession,
+    ProbableSession,
+    ExactTitle,
+    Embedding,
+}
+
+#[derive(Debug)]
+struct DuplicateMatch {
+    source_path: String,
+    reason: DuplicateReason,
+    front: FrontMatter,
+    body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NoteQuality {
+    score: usize,
+    evidence_signal: bool,
+}
 
 /// Deduplication gate for `remember`. Checks, in order:
 ///   1. Same `omb_session_id` already stored (same session distilled twice).
-///   2. Case-insensitive exact title match.
-///   3. Stack-free session-note similarity (different rollout ids, same distilled event).
+///   2. Stack-free session-note similarity (different rollout ids, same distilled event).
+///   3. Case-insensitive exact title match.
 ///   4. Embedding similarity within `DUPLICATE_MAX_DIST` (when pgvector is on).
 async fn check_duplicate(
     store: Option<&crate::store::Store>,
     llm: &crate::llm::Llm,
     note: &RememberNote,
     wiki_dir: &std::path::Path,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<DuplicateMatch>> {
     let target_session = note.front.omb_session_id.as_deref();
     let target_title = note
         .front
@@ -1013,15 +1072,30 @@ async fn check_duplicate(
         if let Some(sid) = target_session
             && fm.omb_session_id.as_deref() == Some(sid)
         {
-            return Ok(Some(path.to_string_lossy().into_owned()));
+            return Ok(Some(duplicate_match(
+                &path,
+                DuplicateReason::SameSession,
+                fm,
+                existing_body,
+            )));
+        }
+        if probable_session_duplicate(note, &fm, existing_body) {
+            return Ok(Some(duplicate_match(
+                &path,
+                DuplicateReason::ProbableSession,
+                fm,
+                existing_body,
+            )));
         }
         if !target_title.is_empty()
             && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title
         {
-            return Ok(Some(path.to_string_lossy().into_owned()));
-        }
-        if probable_session_duplicate(note, &fm, existing_body) {
-            return Ok(Some(path.to_string_lossy().into_owned()));
+            return Ok(Some(duplicate_match(
+                &path,
+                DuplicateReason::ExactTitle,
+                fm,
+                existing_body,
+            )));
         }
     }
 
@@ -1031,11 +1105,98 @@ async fn check_duplicate(
         let emb = llm.embed(&text).await?;
         if let Some((source_path, _dist)) = store.nearest_document(&emb, DUPLICATE_MAX_DIST).await?
         {
-            return Ok(Some(source_path));
+            return Ok(Some(DuplicateMatch {
+                source_path,
+                reason: DuplicateReason::Embedding,
+                front: FrontMatter::default(),
+                body: String::new(),
+            }));
         }
     }
 
     Ok(None)
+}
+
+fn duplicate_match(
+    path: &std::path::Path,
+    reason: DuplicateReason,
+    front: FrontMatter,
+    body: &str,
+) -> DuplicateMatch {
+    DuplicateMatch {
+        source_path: path.to_string_lossy().into_owned(),
+        reason,
+        front,
+        body: body.to_owned(),
+    }
+}
+
+fn should_replace_duplicate(note: &RememberNote, existing: &DuplicateMatch) -> bool {
+    if !matches!(
+        existing.reason,
+        DuplicateReason::SameSession | DuplicateReason::ProbableSession
+    ) {
+        return false;
+    }
+
+    let incoming = note_quality(&note.front, &note.body);
+    let current = note_quality(&existing.front, &existing.body);
+    incoming.score >= current.score.saturating_add(DUPLICATE_REPLACE_MIN_DELTA)
+        || (incoming.score > current.score && incoming.evidence_signal && !current.evidence_signal)
+}
+
+fn note_quality(front: &FrontMatter, body: &str) -> NoteQuality {
+    let evidence_signal = has_evidence_signal(body);
+    let heading_count = body
+        .lines()
+        .filter(|line| line.trim_start().starts_with('#'))
+        .count()
+        .min(8);
+    let repo_tag_count = front
+        .tags
+        .iter()
+        .filter(|tag| !tag.starts_with("repo/"))
+        .count()
+        .min(6);
+    let score = token_set(body).len().min(120) / 4
+        + token_set(front.title.as_deref().unwrap_or("")).len().min(8)
+        + front.claims.len().min(8) * 8
+        + front.tools.len().min(8) * 3
+        + front.concepts.len().min(8) * 3
+        + repo_tag_count * 2
+        + front.sources.len().min(4) * 4
+        + heading_count * 4
+        + usize::from(evidence_signal) * 8;
+    NoteQuality {
+        score,
+        evidence_signal,
+    }
+}
+
+fn has_evidence_signal(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    [
+        "## evidence",
+        "## verification",
+        "## result",
+        "## decision",
+        "## 검증",
+        "## 결과",
+        "## 결정",
+        "as-is",
+        "to-be",
+        "asis",
+        "tobe",
+        "실제",
+        "수치",
+        "명령",
+        "command",
+        "commit",
+        "pr #",
+        "wiki-",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn probable_session_duplicate(
@@ -1339,8 +1500,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        RememberNote, apply_pii_gate, mcp_tools_list, parse_remember_note,
-        probable_session_duplicate,
+        DuplicateMatch, DuplicateReason, RememberNote, apply_pii_gate, mcp_tools_list,
+        parse_remember_note, probable_session_duplicate, should_replace_duplicate,
     };
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
@@ -1678,6 +1839,109 @@ mod tests {
             &existing,
             "Verified chat and embedding model configuration."
         ));
+    }
+
+    #[test]
+    fn duplicate_replacement_prefers_richer_same_session_note() {
+        let note = RememberNote {
+            front: FrontMatter {
+                title: Some("MCP ingestion hardening".to_owned()),
+                tags: vec!["mcp".to_owned(), "ingest".to_owned()],
+                tools: vec!["cargo".to_owned(), "make".to_owned()],
+                concepts: vec!["deduplication".to_owned(), "quality_gate".to_owned()],
+                claims: vec![
+                    crate::frontmatter::Claim {
+                        subject: "remember".to_owned(),
+                        predicate: "updates".to_owned(),
+                        value: "weak duplicate notes when the new note is richer".to_owned(),
+                        kind: "decision".to_owned(),
+                        confidence: "certain".to_owned(),
+                    },
+                    crate::frontmatter::Claim {
+                        subject: "quality_score".to_owned(),
+                        predicate: "uses".to_owned(),
+                        value: "claims, tools, concepts, body tokens, and evidence markers".to_owned(),
+                        kind: "fact".to_owned(),
+                        confidence: "certain".to_owned(),
+                    },
+                ],
+                omb_session_id: Some("session-a".to_owned()),
+                ..Default::default()
+            },
+            body: "## Evidence\nImplemented deterministic duplicate replacement. command: cargo test -p drudge duplicate_replacement".to_owned(),
+        };
+        let existing = DuplicateMatch {
+            source_path: "/tmp/vault/wiki/wiki-0001.md".to_owned(),
+            reason: DuplicateReason::SameSession,
+            front: FrontMatter {
+                title: Some("MCP ingestion".to_owned()),
+                omb_session_id: Some("session-a".to_owned()),
+                ..Default::default()
+            },
+            body: "Short summary.".to_owned(),
+        };
+
+        assert!(should_replace_duplicate(&note, &existing));
+    }
+
+    #[test]
+    fn duplicate_replacement_rejects_embedding_only_match() {
+        let note = RememberNote {
+            front: FrontMatter {
+                title: Some("MCP ingestion hardening".to_owned()),
+                claims: vec![crate::frontmatter::Claim {
+                    subject: "remember".to_owned(),
+                    predicate: "updates".to_owned(),
+                    value: "weak duplicate notes".to_owned(),
+                    kind: "decision".to_owned(),
+                    confidence: "certain".to_owned(),
+                }],
+                omb_session_id: Some("session-a".to_owned()),
+                ..Default::default()
+            },
+            body: "## Evidence\ncommand: cargo test".to_owned(),
+        };
+        let existing = DuplicateMatch {
+            source_path: "/tmp/vault/wiki/wiki-0001.md".to_owned(),
+            reason: DuplicateReason::Embedding,
+            front: FrontMatter::default(),
+            body: String::new(),
+        };
+
+        assert!(!should_replace_duplicate(&note, &existing));
+    }
+
+    #[test]
+    fn duplicate_replacement_keeps_richer_existing_note() {
+        let note = RememberNote {
+            front: FrontMatter {
+                title: Some("MCP ingestion".to_owned()),
+                omb_session_id: Some("session-a".to_owned()),
+                ..Default::default()
+            },
+            body: "Short summary.".to_owned(),
+        };
+        let existing = DuplicateMatch {
+            source_path: "/tmp/vault/wiki/wiki-0001.md".to_owned(),
+            reason: DuplicateReason::SameSession,
+            front: FrontMatter {
+                title: Some("MCP ingestion hardening".to_owned()),
+                tools: vec!["cargo".to_owned(), "make".to_owned()],
+                concepts: vec!["deduplication".to_owned(), "quality_gate".to_owned()],
+                claims: vec![crate::frontmatter::Claim {
+                    subject: "remember".to_owned(),
+                    predicate: "updates".to_owned(),
+                    value: "weak duplicate notes only when incoming quality is higher".to_owned(),
+                    kind: "decision".to_owned(),
+                    confidence: "certain".to_owned(),
+                }],
+                omb_session_id: Some("session-a".to_owned()),
+                ..Default::default()
+            },
+            body: "## Evidence\nVerified replacement gate with targeted tests.".to_owned(),
+        };
+
+        assert!(!should_replace_duplicate(&note, &existing));
     }
 
     #[test]

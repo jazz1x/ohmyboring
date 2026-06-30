@@ -99,6 +99,7 @@ flowchart LR
 
 - **Read door** — fast, no LLM. `make ask`, `recall.py`, MCP `recall` read `vault/wiki` directly.
 - **Write door** — gated. `distill-session.py` calls the local LLM and writes through ohmyboring's deterministic `remember` MCP tool.
+- **Duplicate gate** — duplicate notes are normally skipped; if the same session or a strong rollout copy produces a richer note, `remember` rewrites the same `wiki-NNNN.md` and re-ingests it.
 
 ### Workflow graph contract
 
