@@ -282,6 +282,14 @@ mod tests {
     }
 
     #[test]
+    fn memory_ingest_graph_counts_are_intentional() {
+        let graph = memory_ingest_graph();
+        assert_eq!(graph.nodes.len(), 11);
+        assert_eq!(graph.edges.len(), 16);
+        assert_eq!(graph.terminals.len(), 1);
+    }
+
+    #[test]
     fn resolution_failure_routes_to_repair_then_retry() {
         let graph = memory_ingest_graph();
         assert_eq!(

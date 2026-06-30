@@ -70,6 +70,7 @@ python3 agents/schedulers/test_collectors.py
 python3 agents/hermes/test_ingest_worker.py
 python3 scripts/test_data_steward.py
 python3 scripts/test_retention.py
+python3 scripts/test_self_verify_contract.py
 echo "6) shell destructive-path guardrails (restore-db)…"
 sh scripts/test_restore_db.sh
 echo "7) shell readiness gate guardrails (doctor --strict)…"
