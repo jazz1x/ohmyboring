@@ -311,6 +311,55 @@ def test_collect_noop_run_logs_workflow_fields():
         collect.MIN_KB = old_min_kb
 
 
+def test_collect_success_with_sync_failure_is_degraded_success():
+    old_mark_dir = collect.markers.MARK_DIR
+    old_min_kb = collect.MIN_KB
+    old_stable_age = collect.STABLE_AGE_S
+    old_limit = collect.LIMIT
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "sessions"
+            source.mkdir()
+            mark_dir = root / "markers"
+            event_path = root / "events.ndjson"
+            collect.markers.set_mark_dir(str(mark_dir))
+            collect.MIN_KB = 0
+            collect.STABLE_AGE_S = 0
+            collect.LIMIT = 1
+            _write_codex_session(source / "todo.jsonl")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(collect, "_source_dir", return_value=str(source)),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
+                mock.patch.object(collect.sys, "stdout", stdout),
+                mock.patch.object(collect.sys, "stderr", stderr),
+                mock.patch.object(collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
+                mock.patch.object(collect, "DrudgeClient") as client,
+            ):
+                client.return_value.sync.side_effect = TimeoutError("timed out")
+                rc = collect.main([])
+
+            assert rc == 0
+            assert "sync failed: timed out" in stderr.getvalue()
+            assert "sync=failed" in stdout.getvalue()
+            event = _read_last_event(event_path)
+            assert event["status"] == "ok"
+            assert event["processed"] == 1
+            assert event["failed"] == 0
+            assert event["sync_status"] == "failed"
+            assert event["sync_degraded"] is True
+            assert event["workflow_node"] == "done_marked"
+            assert event["workflow_outcome"] == "continue"
+    finally:
+        collect.markers.set_mark_dir(old_mark_dir)
+        collect.MIN_KB = old_min_kb
+        collect.STABLE_AGE_S = old_stable_age
+        collect.LIMIT = old_limit
+
+
 def test_status_mode_reports_queue_worker_and_note_without_mutation():
     old_mark_dir = collect.markers.MARK_DIR
     old_min_kb = collect.MIN_KB
