@@ -232,6 +232,8 @@ make readiness
 | `make self-verify-check` | ライブ自己検証サマリーを現在の段階契約で評価 |
 | `make ask Q="..."` | recall + 要約を一度に実行 |
 | `make sync` | vault の再取り込み |
+| `make vault-cleanup-check` | ノートを書き換えずに vault cleanup 契約を検証 |
+| `make vault-cleanup-fix` | `vault/wiki` をバックアップし、安全な steward 修正を適用して再検証 |
 | `make remember M="text"` | 1 行ノートを書き込み |
 | `make collect [N=1]` | 過去 Claude Code セッションの lazy バックフィル |
 | `make collect-kimi [N=1]` | 過去 Kimi Code セッションの lazy バックフィル |

@@ -69,6 +69,7 @@ python3 agents/kimi/test_kimi.py
 python3 agents/schedulers/test_collectors.py
 python3 agents/hermes/test_ingest_worker.py
 python3 scripts/test_data_steward.py
+python3 scripts/test_vault_cleanup_gate.py
 python3 scripts/test_retention.py
 python3 scripts/test_self_verify_contract.py
 echo "6) shell destructive-path guardrails (restore-db)…"

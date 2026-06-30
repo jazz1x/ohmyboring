@@ -262,6 +262,8 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 | `make self-verify-check` | evaluate the live self-verification summary against the current stage contract |
 | `make ask Q="..."` | one-shot recall + synthesis |
 | `make sync` | deterministic re-ingest of the vault |
+| `make vault-cleanup-check` | verify vault cleanup contract without rewriting notes |
+| `make vault-cleanup-fix` | backup `vault/wiki`, apply safe steward repairs, then verify |
 | `make remember M="text"` | write a one-line note |
 | `make collect [N=1]` | lazy backfill of past Claude Code sessions |
 | `make collect-kimi [N=1]` | lazy backfill of past Kimi Code sessions |

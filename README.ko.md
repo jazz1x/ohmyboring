@@ -262,6 +262,8 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 | `make self-verify-check` | 라이브 자가검증 요약을 현재 단계 계약으로 평가 |
 | `make ask Q="..."` | recall + 요약 한 번에 |
 | `make sync` | vault 재적재 |
+| `make vault-cleanup-check` | 노트를 고치지 않고 vault 정리 계약 검증 |
+| `make vault-cleanup-fix` | `vault/wiki` 백업 후 안전한 steward 수정 적용 및 재검증 |
 | `make remember M="text"` | 한 줄 노트 작성 |
 | `make collect [N=1]` | 과거 Claude Code 세션 lazy 백필 |
 | `make collect-kimi [N=1]` | 과거 Kimi Code 세션 lazy 백필 |
