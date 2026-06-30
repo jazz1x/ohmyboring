@@ -3,7 +3,7 @@
 [English](README.md) · **한국어** · [日本語](README.ja.md)
 
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
-![release](https://img.shields.io/badge/release-0.1.0%20candidate-blue)
+![release](https://img.shields.io/badge/release-v0.1.0-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
@@ -23,6 +23,7 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/ins
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
+make verify-llm     # 제공자, chat 모델, embedding 모델, 벡터 차원 확인
 make doctor         # 스택, 훅, Codex 워커/큐, 마지막 적재 확인
 make readiness      # 아침 브리핑 의존 전 strict 게이트
 make collect N=20   # 과거 Claude Code 세션으로 vault 채우기 (새 클론은 비어 있음)
@@ -32,6 +33,13 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 > 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 Claude 과거 기록을 채우고 나면, 이후 Claude/Kimi 세션은 자동 축적되고 Codex는 적재 가능한 트랜스크립트를 워커가 처리합니다([적재하기](#적재하기-ingestion) 참고).
 
 > **Docker**, **Ollama** 또는 **LM Studio** 같은 OpenAI-compatible 로컬 서버, **Python 3**, **jq**, **curl**, **git**, **make**가 필요합니다.
+
+첫 실행 성공 기준:
+
+- `make up`이 0으로 끝나고 `http://127.0.0.1:7700/health`가 200을 반환합니다.
+- `make verify-llm`이 설정된 두 모델 id를 찾고 실제 embedding 차원이 `llm.embed_dim`과 같습니다.
+- `make doctor`가 스택, 훅/MCP, 워커/큐, 최신 적재 상태를 숨은 실패 없이 보여줍니다.
+- 예약 아침 브리핑을 믿기 전 `make readiness`가 초록불이어야 합니다.
 
 ---
 
@@ -251,6 +259,7 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 | `make verify-llm` | provider 접근성, 로드된 모델 id, 실제 embedding 차원 확인 |
 | `make doctor` | 스택, 훅, 마지막 적재, Codex 워커/큐 상태 진단 |
 | `make readiness` | 브리핑 전 strict 게이트; 모델/임베딩, 훅, 컨테이너, 워커, stale marker, freshness finding이 있으면 실패 |
+| `make self-verify-check` | 라이브 자가검증 요약을 현재 단계 계약으로 평가 |
 | `make ask Q="..."` | recall + 요약 한 번에 |
 | `make sync` | vault 재적재 |
 | `make remember M="text"` | 한 줄 노트 작성 |
