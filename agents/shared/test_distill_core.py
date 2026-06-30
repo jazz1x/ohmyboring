@@ -4,7 +4,9 @@
 Run: python3 agents/shared/test_distill_core.py
 """
 import io
+import json
 import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -88,13 +90,15 @@ RICH_NOTE = {
 class DistillCoreResolutionGateTests(unittest.TestCase):
     def setUp(self):
         self.old_resolution = os.environ.get("BORING_DISTILL_RESOLUTION")
-        self.old_strict = os.environ.get("BORING_DISTILL_RESOLUTION_STRICT")
+        self.old_event_log = os.environ.get("BORING_EVENT_LOG")
+        self.tmp = tempfile.TemporaryDirectory()
         os.environ["BORING_DISTILL_RESOLUTION"] = "evidence"
-        os.environ.pop("BORING_DISTILL_RESOLUTION_STRICT", None)
+        os.environ["BORING_EVENT_LOG"] = os.path.join(self.tmp.name, "events.ndjson")
 
     def tearDown(self):
         _restore_env("BORING_DISTILL_RESOLUTION", self.old_resolution)
-        _restore_env("BORING_DISTILL_RESOLUTION_STRICT", self.old_strict)
+        _restore_env("BORING_EVENT_LOG", self.old_event_log)
+        self.tmp.cleanup()
 
     def test_prompt_contains_resolution_contract(self):
         prompt = distill_core._build_prompt("transcript", "personal", "repo", resolution="forensic")
@@ -113,10 +117,29 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertEqual(level, "evidence")
         self.assertIn("invalid BORING_DISTILL_RESOLUTION", stderr.getvalue())
 
-    def test_report_only_resolution_failure_still_remembers(self):
+    def test_repair_prompt_treats_previous_json_as_non_evidence(self):
+        report = distill_core.verify_note_resolution(SHALLOW_NOTE, "PR #159 took 2m10s", "evidence")
+
+        prompt = distill_core._build_repair_prompt(
+            "PR #159 took 2m10s",
+            "personal",
+            "oh-my-boring",
+            SHALLOW_NOTE,
+            report,
+            "evidence",
+        )
+
+        self.assertIn("previous JSON is a draft, not evidence", prompt)
+        self.assertIn("transcript is the only evidence source", prompt)
+
+    def test_resolution_failure_repairs_once_then_remembers(self):
         stderr = io.StringIO()
-        with mock.patch.object(distill_core, "_call_llm", return_value=SHALLOW_NOTE), \
-             mock.patch.object(distill_core, "_call_remember", return_value=True) as remember, \
+        with mock.patch.object(distill_core, "_call_llm", side_effect=[SHALLOW_NOTE, RICH_NOTE]) as llm, \
+             mock.patch.object(
+                 distill_core,
+                 "_call_remember",
+                 return_value=distill_core.RememberOutcome(True, "remembered"),
+             ) as remember, \
              mock.patch.object(distill_core.sys, "stderr", stderr):
             ok = distill_core.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
@@ -126,14 +149,22 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
+        self.assertEqual(llm.call_count, 2)
         remember.assert_called_once()
         self.assertIn("resolution gate failed (evidence)", stderr.getvalue())
+        self.assertIn("resolution repair passed", stderr.getvalue())
+        event = _read_last_event()
+        self.assertEqual(event["verifier_status"], "repaired")
+        self.assertEqual(event["remember_status"], "remembered")
 
-    def test_strict_resolution_failure_blocks_remember(self):
-        os.environ["BORING_DISTILL_RESOLUTION_STRICT"] = "1"
+    def test_resolution_repair_failure_blocks_remember(self):
         stderr = io.StringIO()
-        with mock.patch.object(distill_core, "_call_llm", return_value=SHALLOW_NOTE), \
-             mock.patch.object(distill_core, "_call_remember", return_value=True) as remember, \
+        with mock.patch.object(distill_core, "_call_llm", side_effect=[SHALLOW_NOTE, SHALLOW_NOTE]), \
+             mock.patch.object(
+                 distill_core,
+                 "_call_remember",
+                 return_value=distill_core.RememberOutcome(True, "remembered"),
+             ) as remember, \
              mock.patch.object(distill_core.sys, "stderr", stderr):
             ok = distill_core.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
@@ -145,11 +176,19 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertFalse(ok)
         remember.assert_not_called()
         self.assertIn("resolution gate failed (evidence)", stderr.getvalue())
+        self.assertIn("resolution repair failed", stderr.getvalue())
+        event = _read_last_event()
+        self.assertEqual(event["verifier_status"], "failed")
+        self.assertEqual(event["remember_status"], "not_called")
 
-    def test_resolution_pass_calls_remember_without_warning(self):
+    def test_resolution_pass_calls_remember_and_logs_event(self):
         stderr = io.StringIO()
         with mock.patch.object(distill_core, "_call_llm", return_value=RICH_NOTE), \
-             mock.patch.object(distill_core, "_call_remember", return_value=True) as remember, \
+             mock.patch.object(
+                 distill_core,
+                 "_call_remember",
+                 return_value=distill_core.RememberOutcome(True, "duplicate"),
+             ) as remember, \
              mock.patch.object(distill_core.sys, "stderr", stderr):
             ok = distill_core.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
@@ -161,6 +200,48 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertTrue(ok)
         remember.assert_called_once()
         self.assertNotIn("resolution gate failed", stderr.getvalue())
+        event = _read_last_event()
+        self.assertEqual(event["verifier_status"], "pass")
+        self.assertEqual(event["remember_status"], "duplicate")
+
+    def test_remember_failure_logs_failed_status(self):
+        with mock.patch.object(distill_core, "_call_llm", return_value=RICH_NOTE), \
+             mock.patch.object(
+                 distill_core,
+                 "_call_remember",
+                 return_value=distill_core.RememberOutcome(False, "failed"),
+             ):
+            ok = distill_core.distill_and_remember(
+                "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
+                "personal",
+                "oh-my-boring",
+                "s4",
+            )
+
+        self.assertFalse(ok)
+        event = _read_last_event()
+        self.assertEqual(event["status"], "failed")
+        self.assertEqual(event["remember_status"], "failed")
+
+    def test_event_log_write_failure_does_not_override_remember_success(self):
+        stderr = io.StringIO()
+        with mock.patch.object(distill_core, "_call_llm", return_value=RICH_NOTE), \
+             mock.patch.object(
+                 distill_core,
+                 "_call_remember",
+                 return_value=distill_core.RememberOutcome(True, "remembered"),
+             ), \
+             mock.patch.object(distill_core.event_log, "append_event", side_effect=OSError("denied")), \
+             mock.patch.object(distill_core.sys, "stderr", stderr):
+            ok = distill_core.distill_and_remember(
+                "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
+                "personal",
+                "oh-my-boring",
+                "s5",
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("event log write failed", stderr.getvalue())
 
 
 def _restore_env(name, value):
@@ -168,6 +249,11 @@ def _restore_env(name, value):
         os.environ.pop(name, None)
     else:
         os.environ[name] = value
+
+
+def _read_last_event():
+    with open(os.environ["BORING_EVENT_LOG"], encoding="utf-8") as f:
+        return json.loads(f.readlines()[-1])
 
 
 if __name__ == "__main__":

@@ -41,6 +41,12 @@ SH
 
     cat >"$fakebin/python3" <<'SH'
 #!/bin/sh
+case "${1:-}" in
+  */event_log.py)
+    echo "resolution_quality recent_failures=0 log=/tmp/events.ndjson"
+    exit 0
+    ;;
+esac
 if [ "${2:-}" = --status ]; then
     echo "[codex-status] host_worker found=true loaded=true kind=launchd path=/tmp/fake.plist"
     exit 0
@@ -57,8 +63,9 @@ make_case() {
     home="$case_dir/home"
     boring="$case_dir/boring"
 
-    mkdir -p "$home/.claude" "$home/.cache/boring-distill" "$boring/vault/wiki" "$boring/agents/codex"
+    mkdir -p "$home/.claude" "$home/.cache/boring-distill" "$boring/vault/wiki" "$boring/agents/codex" "$boring/agents/shared"
     touch "$boring/agents/codex/collect-sessions.py"
+    touch "$boring/agents/shared/event_log.py"
     touch "$home/.cache/boring-distill/session.ts"
     [ "$with_note" = yes ] && touch "$boring/vault/wiki/wiki-0001.md"
     printf 'DRUDGE_TOKEN=local\n' >"$boring/.env"

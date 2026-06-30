@@ -96,7 +96,7 @@ class ResolutionQualityTests(unittest.TestCase):
                     "## To-Be",
                     "The note should preserve concrete evidence.",
                     "## Decision",
-                    "Use a report-only verifier by default.",
+                    "Use a repair-once verifier before remember.",
                     "## Evidence",
                     "No concrete token was preserved.",
                     "## Result",
@@ -106,7 +106,7 @@ class ResolutionQualityTests(unittest.TestCase):
                 ]
             ),
             "claims": [
-                claim("resolution-gate", "mode", "report-only", "decision"),
+                claim("resolution-gate", "mode", "repair-once", "decision"),
                 claim("distillation", "quality", "specific", "fact"),
                 claim("strict-mode", "default", "off", "fact"),
                 claim("readiness", "next-step", "surface gap", "next"),
