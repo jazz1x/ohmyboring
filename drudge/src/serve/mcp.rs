@@ -4,6 +4,7 @@
 //! The `recall` tool = retrieve (vector+graph) → text → the agent retrieves from our self-augmenting KB.
 //!
 //! Cross-reference: design decision D3 (write door gated / read door open).
+use std::collections::HashSet;
 use std::time::Duration;
 
 use axum::Json;
@@ -22,6 +23,7 @@ use crate::graph;
 use crate::ingest;
 use crate::redact;
 use crate::serve::{AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, vec_off_rpc};
+use crate::store::EventLogFilter;
 use crate::vault;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -130,6 +132,7 @@ fn mcp_tools_list() -> Value {
                     "concepts": {"type": "array", "items": {"type": "string"}, "description": "key technical concepts/patterns (≤6)"},
                     "origin": {"type": "string", "enum": ["personal", "company", "mirror", "community"], "description": "default personal"},
                     "repo": {"type": "string", "description": "optional repo slug → becomes the project + a repo/<slug> tag"},
+                    "sources": {"type": "array", "items": {"type": "string"}, "description": "optional vault-local evidence paths for this note, e.g. raw/<file>.md"},
                     "omb_session_id": {"type": "string", "description": "optional ephemeral ingestion marker — include only when requested by the ingestion worker"},
                     "claims": {
                         "type": "array",
@@ -209,6 +212,24 @@ fn mcp_tools_list() -> Value {
                             a clean flag, and graph/semantic node+edge counts. Use after a remember to confirm the note landed and to check for \
                             company contamination. Counts reflect the last ingest snapshot. Returns aggregate-count JSON (no vault prose). Requires the vector backend.",
             "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "events",
+            "description": "Read recent local workflow/adapter events mirrored into the DB as OpenTelemetry-shaped log records. \
+                            Use to inspect ingestion, collector, readiness, guard, and resolution-quality timelines without raw transcripts. \
+                            Filter by component, event, status, run_id, workflow, or since_hours. Requires the local DB/vector backend.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "max events (default 50, cap 1000)"},
+                    "component": {"type": "string", "description": "optional component filter, e.g. guard or distill-session"},
+                    "event": {"type": "string", "description": "optional event name filter, e.g. distill_resolution"},
+                    "status": {"type": "string", "description": "optional status filter, e.g. ok or failed"},
+                    "run_id": {"type": "string", "description": "optional run/session id filter"},
+                    "workflow": {"type": "string", "description": "optional workflow filter, e.g. memory_ingest"},
+                    "since_hours": {"type": "integer", "description": "optional recent window in hours"}
+                }
+            }
         },
         {
             "name": "claims",
@@ -300,6 +321,29 @@ fn mcp_tools_list() -> Value {
                     "project": {"type": "string", "description": "optional project slug filter"}
                 }
             }
+        },
+        {
+            "name": "next_actions",
+            "description": "Next-action register: recent explicit next steps (kind=next) and active blockers (kind=blocked). \
+                            Optionally filter by project. Generative (runs the LLM). Requires the vector backend.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "optional project slug filter"}
+                }
+            }
+        },
+        {
+            "name": "stalled",
+            "description": "Stalled register: next steps or blockers that have not moved in N days (default 7). \
+                            Optionally filter by project or change the threshold. Generative (runs the LLM). Requires the vector backend.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "optional project slug filter"},
+                    "older_than_days": {"type": "integer", "description": "threshold in days (default 7)"}
+                }
+            }
         }
     ]})
 }
@@ -352,6 +396,7 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
         ),
         "neighbors" => ToolOut::Structured(mcp_neighbors(s, args).await?),
         "corpus_status" => ToolOut::Structured(mcp_corpus_status(s).await?),
+        "events" => ToolOut::Structured(mcp_events(s, args).await?),
         "claims" => ToolOut::Structured(mcp_claims(s, args).await?),
         "ask" => ToolOut::Structured(mcp_ask(s, args).await?),
         "brief" => ToolOut::Structured(mcp_brief(s).await?),
@@ -360,6 +405,8 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
         "context" => ToolOut::Structured(mcp_context(s, args).await?),
         "decisions" => ToolOut::Structured(mcp_decisions(s, args).await?),
         "risks" => ToolOut::Structured(mcp_risks(s, args).await?),
+        "next_actions" => ToolOut::Structured(mcp_next_actions(s, args).await?),
+        "stalled" => ToolOut::Structured(mcp_stalled(s, args).await?),
         other => return Err((-32602, format!("unknown tool: {other}"))),
     };
     Ok(out.into_result())
@@ -477,6 +524,105 @@ async fn mcp_corpus_status(s: &AppState) -> Result<Value, (i32, String)> {
         .await
         .map_err(|e| (-32603_i32, format!("audit: {e:#}")))?;
     serde_json::to_value(&stats).map_err(|e| (-32603_i32, format!("json: {e}")))
+}
+
+/// `events` — recent workflow/adapter events in OpenTelemetry log shape. Vector-only because the
+/// current local DB is the pgvector Store; the NDJSON journal remains the source journal outside DB.
+async fn mcp_events(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
+    let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    let limit = args
+        .and_then(|a| a.get("limit"))
+        .and_then(Value::as_i64)
+        .unwrap_or(50)
+        .clamp(1, 1000);
+    let component = args
+        .and_then(|a| a.get("component"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let event_name = args
+        .and_then(|a| a.get("event"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let status = args
+        .and_then(|a| a.get("status"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let run_id = args
+        .and_then(|a| a.get("run_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let workflow = args
+        .and_then(|a| a.get("workflow"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let since_hours = args
+        .and_then(|a| a.get("since_hours"))
+        .and_then(Value::as_i64)
+        .and_then(|n| i32::try_from(n).ok());
+    let entries = store
+        .recent_events(EventLogFilter {
+            limit,
+            component,
+            event_name,
+            status,
+            run_id,
+            workflow,
+            since_hours,
+        })
+        .await
+        .map_err(|e| (-32603_i32, format!("events: {e:#}")))?
+        .into_iter()
+        .map(|r| {
+            let observed_at = system_time_rfc3339(r.observed_at);
+            let severity_text = r.severity_text;
+            let event_name = r.event_name;
+            let trace_id = r.trace_id;
+            let span_id = r.span_id;
+            let body = r.body;
+            let attributes = r.attributes;
+            let resource = r.resource;
+            let otel = json!({
+                "observed_timestamp": observed_at.clone(),
+                "time_unix_nano": r.time_unix_nano,
+                "severity_text": severity_text.clone(),
+                "severity_number": r.severity_number,
+                "body": body.clone(),
+                "attributes": attributes.clone(),
+                "resource": resource.clone(),
+                "trace_id": trace_id.clone(),
+                "span_id": span_id.clone(),
+                "event_name": event_name.clone()
+            });
+            json!({
+                "id": r.id,
+                "observed_at": observed_at,
+                "time_unix_nano": r.time_unix_nano,
+                "severity_text": severity_text,
+                "severity_number": r.severity_number,
+                "service_name": r.service_name,
+                "component": r.component,
+                "event": event_name,
+                "status": r.status,
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "run_id": r.run_id,
+                "session_id": r.session_id,
+                "workflow": r.workflow,
+                "workflow_node": r.workflow_node,
+                "workflow_outcome": r.workflow_outcome,
+                "body": body,
+                "attributes": attributes,
+                "resource": resource,
+                "otel": otel
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "entries": entries }))
 }
 
 /// `claims` — current (non-superseded) claims nearest the query. Pure DATA (embed only). Returns a JSON
@@ -619,6 +765,7 @@ async fn mcp_context(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
             risks: vec![],
             facts: vec![],
             glossary: vec![],
+            next_actions: vec![],
             language: s.cfg.note_lang.as_str().to_owned(),
         }
     };
@@ -649,6 +796,51 @@ async fn mcp_risks(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, St
         .await
         .map_err(|e| (-32603_i32, format!("risks: {e:#}")))?;
     Ok(json!({"answer": out.answer, "sources": out.sources}))
+}
+
+/// `next_actions` — recent explicit next steps and active blockers. Returns `{answer, sources}`.
+async fn mcp_next_actions(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
+    let project = args
+        .and_then(|a| a.get("project"))
+        .and_then(Value::as_str)
+        .map(str::trim);
+    let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    let out = ask::next_action_register(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
+        .await
+        .map_err(|e| (-32603_i32, format!("next_actions: {e:#}")))?;
+    Ok(json!({"answer": out.answer, "sources": out.sources}))
+}
+
+/// `stalled` — next/blocker claims that have not moved in N days. Returns `{answer, sources}`.
+async fn mcp_stalled(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
+    let project = args
+        .and_then(|a| a.get("project"))
+        .and_then(Value::as_str)
+        .map(str::trim);
+    let older_than_days = args
+        .and_then(|a| a.get("older_than_days"))
+        .and_then(Value::as_u64)
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| (-32602_i32, "older_than_days is too large".to_owned()))?
+        .unwrap_or(7);
+    let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    let out = ask::stalled_register(
+        store,
+        &s.llm,
+        project,
+        &[],
+        s.cfg.note_lang.as_str(),
+        older_than_days,
+    )
+    .await
+    .map_err(|e| (-32603_i32, format!("stalled: {e:#}")))?;
+    Ok(json!({"answer": out.answer, "sources": out.sources}))
+}
+
+fn system_time_rfc3339(value: std::time::SystemTime) -> String {
+    let datetime: chrono::DateTime<chrono::Utc> = value.into();
+    datetime.to_rfc3339()
 }
 
 /// `forget` — remove a note by wiki id or exact title. Deletes the vault file and, in vector mode, purges
@@ -752,7 +944,11 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
             "BORING_VAULT_DIR not set — no target to write remember notes to".to_owned(),
         ));
     };
-    let note = parse_remember_note(args, &s.cfg)?;
+    let mut note = parse_remember_note(args, &s.cfg)?;
+
+    // PII / sensitive-data gate: block rules reject the note, redact rules mask
+    // in-place, and flag rules add `pii-flag` for review.
+    apply_pii_gate(s.pii.as_ref().as_ref(), &mut note)?;
 
     // Deduplication gate — prevent near-duplicate session notes from accumulating.
     let wiki_dir = vault_root.join("wiki");
@@ -760,11 +956,50 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
         .await
         .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
     {
-        return Ok(format!("skipped — duplicate of {existing}"));
+        if should_replace_duplicate(&note, &existing) {
+            let Some(wiki_id) = crate::vault::wiki_stem(&existing.source_path) else {
+                return Err((
+                    -32603,
+                    format!(
+                        "dedup replacement target is not a wiki note: {}",
+                        existing.source_path
+                    ),
+                ));
+            };
+            let source_path = existing.source_path.clone();
+            let path = std::path::PathBuf::from(&source_path);
+            let RememberNote { mut front, body } = note;
+            front.source_path = source_path;
+            let content = vault::render_wiki_note(&wiki_id, &front, &body)
+                .map_err(|e| (-32603_i32, format!("render wiki note: {e:#}")))?;
+            std::fs::write(&path, content)
+                .map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
+            return finish_remembered_note(s, &path, &wiki_id, &front, true).await;
+        }
+        return Ok(format!("skipped — duplicate of {}", existing.source_path));
     }
 
     // 1. atomically allocate id + path, then write the wiki note (deterministic file IO — the SSOT artifact).
-    let (wiki_id, path) = vault::allocate_wiki_path(&wiki_dir)
+    //    Include existing vector-store ids so we never reuse a source_path that still lives in Postgres
+    //    even if its wiki file is temporarily gone (sync will reconcile, but remember should not collide).
+    let mut db_ids: HashSet<u32> = HashSet::new();
+    if let Some(store) = s.store.as_ref() {
+        for p in store.all_doc_paths().await.map_err(|e| {
+            (
+                -32603_i32,
+                format!("wiki id: cannot read existing document paths: {e:#}"),
+            )
+        })? {
+            if let Some(stem) = crate::vault::wiki_stem(&p)
+                && let Some(n) = stem
+                    .strip_prefix("wiki-")
+                    .and_then(|s| s.parse::<u32>().ok())
+            {
+                db_ids.insert(n);
+            }
+        }
+    }
+    let (wiki_id, path) = vault::allocate_wiki_path(&wiki_dir, Some(&db_ids))
         .map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
     let mut front = note.front;
     front.source_path = path.to_string_lossy().into_owned();
@@ -772,16 +1007,32 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
         .map_err(|e| (-32603_i32, format!("render wiki note: {e:#}")))?;
     std::fs::write(&path, content).map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
 
-    // 2. vector off → the wiki file is first-class memory (wiki_recall reads it). Nothing to embed.
+    finish_remembered_note(s, &path, &wiki_id, &front, false).await
+}
+
+async fn finish_remembered_note(
+    s: &AppState,
+    path: &std::path::Path,
+    wiki_id: &str,
+    front: &FrontMatter,
+    updated_duplicate: bool,
+) -> Result<String, (i32, String)> {
+    let duplicate_suffix = if updated_duplicate {
+        " (updated duplicate)"
+    } else {
+        ""
+    };
+
+    // vector off → the wiki file is first-class memory (wiki_recall reads it). Nothing to embed.
     let Some(store) = s.store.as_ref() else {
         return Ok(format!(
-            "remembered → wiki/{wiki_id}.md (vector off — wiki is first-class memory; recallable now)"
+            "remembered → wiki/{wiki_id}.md{duplicate_suffix} (vector off — wiki is first-class memory; recallable now)"
         ));
     };
 
-    // 3. deterministic ingest of this one note (chunk→embed→upsert→graph) + relation recompute.
-    //    Serialize against sync: project_links rewrites wiki relates_to in place, so it must not
-    //    interleave with a concurrent sync doing the same (torn/partial wiki writes otherwise).
+    // deterministic ingest of this one note (chunk→embed→upsert→graph) + relation recompute.
+    // Serialize against sync: project_links rewrites wiki relates_to in place, so it must not
+    // interleave with a concurrent sync doing the same (torn/partial wiki writes otherwise).
     let _guard = s.sync_lock.lock().await;
     let mut stats = ingest::Stats::default();
     ingest::ingest_file(store, &s.llm, &s.cfg, &front.source_path, &mut stats)
@@ -791,7 +1042,7 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
     // refresh. Project ONLY this new note (bounded: ~3 queries + 1 write) instead of recomputing the
     // whole corpus — its neighbors' backlinks are reconciled by the next periodic full project_links
     // (invisible to recall, which is embedding-based). On failure report partial-success.
-    let relates = match vault::project_note(store, &path, 6).await {
+    let relates = match vault::project_note(store, path, 6).await {
         Ok(_) => "",
         Err(e) => {
             eprintln!("[remember] project_note warning (ignored): {e:#}");
@@ -799,9 +1050,82 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
         }
     };
     Ok(format!(
-        "remembered → wiki/{wiki_id}.md · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
+        "remembered → wiki/{wiki_id}.md{duplicate_suffix} · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
         stats.chunks, stats.tools, stats.concepts, stats.claims
     ))
+}
+
+/// Apply the PII scanner to a parsed note. Mutates rendered fields in place.
+/// Returns an error (block) if a critical rule matched.
+fn apply_pii_gate(
+    scanner: Option<&crate::pii::PiiScanner>,
+    note: &mut RememberNote,
+) -> Result<(), (i32, String)> {
+    if let Some(scanner) = scanner {
+        let mut any_flag = false;
+
+        if let Some(title) = note.front.title.as_mut() {
+            apply_pii_to_field(scanner, title, &mut any_flag)?;
+        }
+
+        apply_pii_to_field(scanner, &mut note.body, &mut any_flag)?;
+
+        let mut tags = Vec::with_capacity(note.front.tags.len());
+        for tag in &mut note.front.tags {
+            apply_pii_to_field(scanner, tag, &mut any_flag)?;
+            if let Some(clean) = vault::sanitize_tag(tag)
+                && !tags.contains(&clean)
+            {
+                tags.push(clean);
+            }
+        }
+        note.front.tags = tags;
+
+        for tool in &mut note.front.tools {
+            apply_pii_to_field(scanner, tool, &mut any_flag)?;
+        }
+        for concept in &mut note.front.concepts {
+            apply_pii_to_field(scanner, concept, &mut any_flag)?;
+        }
+        for source in &mut note.front.sources {
+            apply_pii_to_field(scanner, source, &mut any_flag)?;
+        }
+
+        for claim in &mut note.front.claims {
+            apply_pii_to_field(scanner, &mut claim.subject, &mut any_flag)?;
+            apply_pii_to_field(scanner, &mut claim.predicate, &mut any_flag)?;
+            apply_pii_to_field(scanner, &mut claim.value, &mut any_flag)?;
+            apply_pii_to_field(scanner, &mut claim.kind, &mut any_flag)?;
+            apply_pii_to_field(scanner, &mut claim.confidence, &mut any_flag)?;
+        }
+
+        if any_flag && !note.front.tags.iter().any(|t| t == "pii-flag") {
+            note.front.tags.push("pii-flag".to_owned());
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_pii_to_field(
+    scanner: &crate::pii::PiiScanner,
+    field: &mut String,
+    any_flag: &mut bool,
+) -> Result<(), (i32, String)> {
+    let out = scanner.scan(field);
+    if let Some(m) = &out.block {
+        Err((
+            -32603_i32,
+            format!(
+                "PII gate blocked by rule '{}' ({}): {} — matched sensitive text omitted",
+                m.rule, m.severity, m.reason
+            ),
+        ))
+    } else {
+        *field = out.redacted;
+        *any_flag |= !out.flags.is_empty();
+        Ok(())
+    }
 }
 
 /// A parsed remember note — the typed boundary value (parse-don't-validate).
@@ -813,16 +1137,44 @@ struct RememberNote {
 /// Maximum cosine distance for a duplicate (1.0 - cosine_similarity). 0.07 ≈ similarity 0.93.
 const DUPLICATE_MAX_DIST: f64 = 0.07;
 
+const SESSION_DUP_TITLE_MIN: (usize, usize) = (1, 5);
+const SESSION_DUP_BODY_MIN: (usize, usize) = (1, 5);
+const SESSION_DUP_SEMANTIC_MIN: (usize, usize) = (9, 20);
+const DUPLICATE_REPLACE_MIN_DELTA: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DuplicateReason {
+    SameSession,
+    ProbableSession,
+    ExactTitle,
+    Embedding,
+}
+
+#[derive(Debug)]
+struct DuplicateMatch {
+    source_path: String,
+    reason: DuplicateReason,
+    front: FrontMatter,
+    body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NoteQuality {
+    score: usize,
+    evidence_signal: bool,
+}
+
 /// Deduplication gate for `remember`. Checks, in order:
 ///   1. Same `omb_session_id` already stored (same session distilled twice).
-///   2. Case-insensitive exact title match.
-///   3. Embedding similarity within `DUPLICATE_MAX_DIST` (when pgvector is on).
+///   2. Stack-free session-note similarity (different rollout ids, same distilled event).
+///   3. Case-insensitive exact title match.
+///   4. Embedding similarity within `DUPLICATE_MAX_DIST` (when pgvector is on).
 async fn check_duplicate(
     store: Option<&crate::store::Store>,
     llm: &crate::llm::Llm,
     note: &RememberNote,
     wiki_dir: &std::path::Path,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<DuplicateMatch>> {
     let target_session = note.front.omb_session_id.as_deref();
     let target_title = note
         .front
@@ -838,18 +1190,36 @@ async fn check_duplicate(
             continue;
         }
         let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let (yaml, _) = crate::vault::split_frontmatter(&content).unwrap_or(("", ""));
+        let (yaml, existing_body) = crate::vault::split_frontmatter(&content).unwrap_or(("", ""));
         // YAML parse is cheap for one note; reuse FrontMatter deserialization.
         let fm: crate::frontmatter::FrontMatter = serde_yaml::from_str(yaml).unwrap_or_default();
         if let Some(sid) = target_session
             && fm.omb_session_id.as_deref() == Some(sid)
         {
-            return Ok(Some(path.to_string_lossy().into_owned()));
+            return Ok(Some(duplicate_match(
+                &path,
+                DuplicateReason::SameSession,
+                fm,
+                existing_body,
+            )));
+        }
+        if probable_session_duplicate(note, &fm, existing_body) {
+            return Ok(Some(duplicate_match(
+                &path,
+                DuplicateReason::ProbableSession,
+                fm,
+                existing_body,
+            )));
         }
         if !target_title.is_empty()
             && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title
         {
-            return Ok(Some(path.to_string_lossy().into_owned()));
+            return Ok(Some(duplicate_match(
+                &path,
+                DuplicateReason::ExactTitle,
+                fm,
+                existing_body,
+            )));
         }
     }
 
@@ -859,17 +1229,196 @@ async fn check_duplicate(
         let emb = llm.embed(&text).await?;
         if let Some((source_path, _dist)) = store.nearest_document(&emb, DUPLICATE_MAX_DIST).await?
         {
-            return Ok(Some(source_path));
+            return Ok(Some(DuplicateMatch {
+                source_path,
+                reason: DuplicateReason::Embedding,
+                front: FrontMatter::default(),
+                body: String::new(),
+            }));
         }
     }
 
     Ok(None)
 }
 
+fn duplicate_match(
+    path: &std::path::Path,
+    reason: DuplicateReason,
+    front: FrontMatter,
+    body: &str,
+) -> DuplicateMatch {
+    DuplicateMatch {
+        source_path: path.to_string_lossy().into_owned(),
+        reason,
+        front,
+        body: body.to_owned(),
+    }
+}
+
+fn should_replace_duplicate(note: &RememberNote, existing: &DuplicateMatch) -> bool {
+    if !matches!(
+        existing.reason,
+        DuplicateReason::SameSession | DuplicateReason::ProbableSession
+    ) {
+        return false;
+    }
+
+    let incoming = note_quality(&note.front, &note.body);
+    let current = note_quality(&existing.front, &existing.body);
+    incoming.score >= current.score.saturating_add(DUPLICATE_REPLACE_MIN_DELTA)
+        || (incoming.score > current.score && incoming.evidence_signal && !current.evidence_signal)
+}
+
+fn note_quality(front: &FrontMatter, body: &str) -> NoteQuality {
+    let evidence_signal = has_evidence_signal(body);
+    let heading_count = body
+        .lines()
+        .filter(|line| line.trim_start().starts_with('#'))
+        .count()
+        .min(8);
+    let repo_tag_count = front
+        .tags
+        .iter()
+        .filter(|tag| !tag.starts_with("repo/"))
+        .count()
+        .min(6);
+    let score = token_set(body).len().min(120) / 4
+        + token_set(front.title.as_deref().unwrap_or("")).len().min(8)
+        + front.claims.len().min(8) * 8
+        + front.tools.len().min(8) * 3
+        + front.concepts.len().min(8) * 3
+        + repo_tag_count * 2
+        + front.sources.len().min(4) * 4
+        + heading_count * 4
+        + usize::from(evidence_signal) * 8;
+    NoteQuality {
+        score,
+        evidence_signal,
+    }
+}
+
+fn has_evidence_signal(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    [
+        "## evidence",
+        "## verification",
+        "## result",
+        "## decision",
+        "## 검증",
+        "## 결과",
+        "## 결정",
+        "as-is",
+        "to-be",
+        "asis",
+        "tobe",
+        "실제",
+        "수치",
+        "명령",
+        "command",
+        "commit",
+        "pr #",
+        "wiki-",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn probable_session_duplicate(
+    note: &RememberNote,
+    existing_fm: &crate::frontmatter::FrontMatter,
+    existing_body: &str,
+) -> bool {
+    if note.front.omb_session_id.is_none() || existing_fm.omb_session_id.is_none() {
+        return false;
+    }
+    let title_match = token_jaccard_at_least(
+        note.front.title.as_deref().unwrap_or(""),
+        existing_fm.title.as_deref().unwrap_or(""),
+        SESSION_DUP_TITLE_MIN,
+    );
+    let body_match = token_jaccard_at_least(&note.body, existing_body, SESSION_DUP_BODY_MIN);
+    let semantic_match = token_overlap_min_at_least(
+        &frontmatter_semantic_text(&note.front),
+        &frontmatter_semantic_text(existing_fm),
+        SESSION_DUP_SEMANTIC_MIN,
+    );
+
+    semantic_match && (title_match || body_match)
+}
+
+fn frontmatter_semantic_text(fm: &crate::frontmatter::FrontMatter) -> String {
+    let mut parts = Vec::new();
+    parts.extend(fm.tools.iter().map(String::as_str));
+    parts.extend(fm.concepts.iter().map(String::as_str));
+    parts.extend(
+        fm.tags
+            .iter()
+            .filter(|tag| !tag.starts_with("repo/"))
+            .map(String::as_str),
+    );
+    for claim in &fm.claims {
+        parts.push(claim.subject.as_str());
+        parts.push(claim.predicate.as_str());
+        parts.push(claim.value.as_str());
+    }
+    parts.join(" ")
+}
+
+fn token_jaccard_at_least(a: &str, b: &str, min: (usize, usize)) -> bool {
+    let a = token_set(a);
+    let b = token_set(b);
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let intersection = a.intersection(&b).count();
+    let union = a.union(&b).count();
+    ratio_at_least(intersection, union, min)
+}
+
+fn token_overlap_min_at_least(a: &str, b: &str, min: (usize, usize)) -> bool {
+    let a = token_set(a);
+    let b = token_set(b);
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let intersection = a.intersection(&b).count();
+    let min_len = a.len().min(b.len());
+    ratio_at_least(intersection, min_len, min)
+}
+
+fn ratio_at_least(numerator: usize, denominator: usize, min: (usize, usize)) -> bool {
+    if denominator == 0 {
+        return false;
+    }
+    numerator.saturating_mul(min.1) >= denominator.saturating_mul(min.0)
+}
+
+fn token_set(text: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut buf = String::new();
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            for lower in ch.to_lowercase() {
+                buf.push(lower);
+            }
+        } else if !buf.is_empty() {
+            if buf.chars().count() > 1 {
+                out.insert(std::mem::take(&mut buf));
+            } else {
+                buf.clear();
+            }
+        }
+    }
+    if buf.chars().count() > 1 {
+        out.insert(buf);
+    }
+    out
+}
+
 /// Parse + normalize the `remember` arguments into a typed note. The deterministic boundary: sanitize tags,
 /// fold the repo slug into project + a `repo/<slug>` tag, scrub secrets from EVERY field rendered into the
-/// tracked vault note (the git leak boundary): the body, the title, each tool/concept, and every claim
-/// field — not just the body, since `render_wiki_note` writes them all verbatim.
+/// tracked vault note (the git leak boundary): the body, the title, each tool/concept/source, and every
+/// claim field — not just the body, since `render_wiki_note` writes them all verbatim.
 fn parse_remember_note(
     args: Option<&Value>,
     cfg: &config::BoringConfig,
@@ -912,6 +1461,8 @@ fn parse_remember_note(
     // normalize_body) THEN scrub secrets (the one git-leak boundary). Applying it to title/tools/concepts/
     // claims too closes the gap where escapes leaked through the structured fields (e.g. a claim value
     // `16 items\n`, wiki-0148). `‹REDACTED›` is non-empty, so scrubbing never reintroduces an empty value.
+    // `sources` is path-like rather than prose-like, so it is trimmed and scrubbed without body newline
+    // decoding; otherwise a literal "\n" in a bad path would become a physical YAML line break.
     let re = redact::build_secret_re().map_err(|e| (-32603_i32, format!("secret regex: {e:#}")))?;
     let scrub = |s: &str| redact::redact(re, s);
     let clean = |s: &str| scrub(&vault::normalize_body(s));
@@ -981,6 +1532,7 @@ fn parse_remember_note(
         tags,
         tools: get_arr("tools").iter().map(|t| clean(t)).collect(),
         concepts: get_arr("concepts").iter().map(|c| clean(c)).collect(),
+        sources: get_arr("sources").iter().map(|s| scrub(s.trim())).collect(),
         claims,
         omb_session_id,
     };
@@ -1069,9 +1621,172 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::parse_remember_note;
+    use std::path::PathBuf;
+
+    use super::{
+        DuplicateMatch, DuplicateReason, RememberNote, apply_pii_gate, mcp_tools_list,
+        parse_remember_note, probable_session_duplicate, should_replace_duplicate,
+    };
     use crate::config::BoringConfig;
+    use crate::frontmatter::FrontMatter;
     use serde_json::json;
+
+    const MCP_TOOL_NAMES: [&str; 19] = [
+        "ask",
+        "brief",
+        "claims",
+        "classify_repo",
+        "config_get",
+        "context",
+        "corpus_status",
+        "decisions",
+        "events",
+        "forget",
+        "neighbors",
+        "next_actions",
+        "project_status",
+        "recall",
+        "remember",
+        "risks",
+        "stalled",
+        "sync",
+        "weekly_brief",
+    ];
+
+    const VECTOR_REQUIRED_TOOLS: [&str; 11] = [
+        "neighbors",
+        "claims",
+        "corpus_status",
+        "events",
+        "brief",
+        "weekly_brief",
+        "project_status",
+        "decisions",
+        "risks",
+        "next_actions",
+        "stalled",
+    ];
+
+    const VECTOR_FREE_TOOLS: [&str; 8] = [
+        "recall",
+        "ask",
+        "context",
+        "remember",
+        "forget",
+        "sync",
+        "config_get",
+        "classify_repo",
+    ];
+
+    fn repo_file(relative: &str) -> String {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::read_to_string(root.join(relative)).unwrap()
+    }
+
+    fn actual_tool_names() -> Vec<String> {
+        let mut names: Vec<String> = mcp_tools_list()["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn expected_tool_names() -> Vec<String> {
+        let mut names = MCP_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn quality_gate_mcp_tool_contract_is_explicit() {
+        assert_eq!(actual_tool_names(), expected_tool_names());
+    }
+
+    #[test]
+    fn quality_gate_readmes_match_mcp_tool_inventory() {
+        let docs = [
+            (
+                "README.md",
+                format!("Available tools ({}):", MCP_TOOL_NAMES.len()),
+            ),
+            (
+                "README.ko.md",
+                format!("사용 가능한 tools ({}개):", MCP_TOOL_NAMES.len()),
+            ),
+            (
+                "README.ja.md",
+                format!("利用可能な tools（{}個）:", MCP_TOOL_NAMES.len()),
+            ),
+            ("agents/codex/README.md", "## Available tools".to_owned()),
+        ];
+
+        for (path, inventory_marker) in docs {
+            let text = repo_file(path);
+            assert!(
+                text.contains(&inventory_marker),
+                "{path}: missing inventory marker {inventory_marker:?}"
+            );
+            for tool in MCP_TOOL_NAMES {
+                let needle = format!("`{tool}`");
+                assert!(text.contains(&needle), "{path}: missing tool {needle}");
+            }
+        }
+    }
+
+    #[test]
+    fn quality_gate_vector_mode_docs_match_tool_contract() {
+        let docs = ["README.md", "README.ko.md", "README.ja.md"];
+        for path in docs {
+            let text = repo_file(path);
+            let paragraph = text
+                .split("\n\n")
+                .find(|section| section.contains("BORING_VECTOR=off") && section.contains("-32603"))
+                .unwrap_or_else(|| panic!("{path}: vector-off contract paragraph not found"));
+            for tool in VECTOR_REQUIRED_TOOLS {
+                let needle = format!("`{tool}`");
+                assert!(
+                    paragraph.contains(&needle),
+                    "{path}: vector-required tool missing from -32603 paragraph: {needle}"
+                );
+            }
+            for tool in VECTOR_FREE_TOOLS {
+                let needle = format!("`{tool}`");
+                assert!(
+                    paragraph.contains(&needle),
+                    "{path}: vector-free tool missing from wiki-first paragraph: {needle}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quality_gate_renumber_cli_stays_removed() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(
+            !root.join("drudge/src/renumber.rs").exists(),
+            "renumber.rs must not return; stable wiki ids are monotonic"
+        );
+
+        for path in ["drudge/src/lib.rs", "drudge/src/main.rs"] {
+            let text = std::fs::read_to_string(root.join(path)).unwrap();
+            assert!(
+                !text.contains("renumber") && !text.contains("Renumber"),
+                "{path}: renumber CLI/module reference returned"
+            );
+        }
+    }
 
     // The secret scrub must cover EVERY field render_wiki_note writes verbatim into the tracked vault —
     // a token pasted into the title or a claim value would otherwise leak into git just like one in the body.
@@ -1147,5 +1862,302 @@ mod tests {
             "claim subject not decoded"
         );
         assert_eq!(c.value, "16 items", "claim value not decoded");
+    }
+
+    #[test]
+    fn parse_remember_preserves_sources() {
+        let args = json!({
+            "title": "session note",
+            "body": "## Context\nreal body",
+            "sources": [" raw/evidence/codex-abc.md "]
+        });
+        let note = parse_remember_note(Some(&args), &BoringConfig::default()).unwrap();
+        assert_eq!(
+            note.front.sources,
+            vec!["raw/evidence/codex-abc.md".to_owned()]
+        );
+    }
+
+    #[test]
+    fn session_duplicate_gate_catches_rollout_copy() {
+        let note = RememberNote {
+            front: FrontMatter {
+                title: Some("gitleaks — PR 내 secret 자동 탐지 설정".to_owned()),
+                tags: vec!["security".to_owned(), "gitleaks".to_owned()],
+                tools: vec!["gitleaks".to_owned(), "github-actions".to_owned(), "confluence".to_owned()],
+                concepts: vec!["secret_detection".to_owned(), "ci_cd_security".to_owned()],
+                claims: vec![
+                    crate::frontmatter::Claim {
+                        subject: "gitleaks".to_owned(),
+                        predicate: "detects".to_owned(),
+                        value: "secrets in PR via static analysis".to_owned(),
+                        kind: "fact".to_owned(),
+                        confidence: "certain".to_owned(),
+                    },
+                    crate::frontmatter::Claim {
+                        subject: "confluence_page".to_owned(),
+                        predicate: "created_with_format".to_owned(),
+                        value: "tech-share".to_owned(),
+                        kind: "decision".to_owned(),
+                        confidence: "certain".to_owned(),
+                    },
+                ],
+                omb_session_id: Some("codex-rollout-a".to_owned()),
+                ..Default::default()
+            },
+            body: "PR 단계에서 API 키나 토큰 같은 secret 노출을 막기 위해 gitleaks를 GitHub Actions와 연동하고 Confluence 안내 문서를 작성했다.".to_owned(),
+        };
+        let existing = FrontMatter {
+            title: Some("gitleaks: PR 내 secret 자동 탐지 가이드 작성".to_owned()),
+            tags: vec![
+                "security".to_owned(),
+                "gitleaks".to_owned(),
+                "automation".to_owned(),
+            ],
+            tools: vec!["github-actions".to_owned(), "confluence".to_owned()],
+            concepts: vec!["secret_detection".to_owned(), "static_analysis".to_owned()],
+            claims: vec![
+                crate::frontmatter::Claim {
+                    subject: "gitleaks".to_owned(),
+                    predicate: "detects".to_owned(),
+                    value: "API keys, tokens, and passwords via regex patterns".to_owned(),
+                    kind: "fact".to_owned(),
+                    confidence: "certain".to_owned(),
+                },
+                crate::frontmatter::Claim {
+                    subject: "github_action_step".to_owned(),
+                    predicate: "implementation".to_owned(),
+                    value: "gitleaks/gitleaks-action".to_owned(),
+                    kind: "fact".to_owned(),
+                    confidence: "certain".to_owned(),
+                },
+            ],
+            omb_session_id: Some("codex-rollout-b".to_owned()),
+            ..Default::default()
+        };
+        let existing_body = "PR 과정에서 비밀번호나 API 키 등 secret 노출을 방지하기 위해 gitleaks 도구 도입과 Confluence 기술 공유 가이드를 작성했다.";
+
+        assert!(probable_session_duplicate(&note, &existing, existing_body));
+    }
+
+    #[test]
+    fn session_duplicate_gate_ignores_unrelated_sessions() {
+        let note = RememberNote {
+            front: FrontMatter {
+                title: Some("gitleaks secret detection".to_owned()),
+                tools: vec!["gitleaks".to_owned()],
+                concepts: vec!["secret_detection".to_owned()],
+                omb_session_id: Some("s1".to_owned()),
+                ..Default::default()
+            },
+            body: "Added CI secret scanning for pull requests.".to_owned(),
+        };
+        let existing = FrontMatter {
+            title: Some("LM Studio model verification".to_owned()),
+            tools: vec!["lmstudio".to_owned(), "ollama".to_owned()],
+            concepts: vec!["llm_provider".to_owned(), "embedding_dim".to_owned()],
+            omb_session_id: Some("s2".to_owned()),
+            ..Default::default()
+        };
+
+        assert!(!probable_session_duplicate(
+            &note,
+            &existing,
+            "Verified chat and embedding model configuration."
+        ));
+    }
+
+    #[test]
+    fn duplicate_replacement_prefers_richer_same_session_note() {
+        let note = RememberNote {
+            front: FrontMatter {
+                title: Some("MCP ingestion hardening".to_owned()),
+                tags: vec!["mcp".to_owned(), "ingest".to_owned()],
+                tools: vec!["cargo".to_owned(), "make".to_owned()],
+                concepts: vec!["deduplication".to_owned(), "quality_gate".to_owned()],
+                claims: vec![
+                    crate::frontmatter::Claim {
+                        subject: "remember".to_owned(),
+                        predicate: "updates".to_owned(),
+                        value: "weak duplicate notes when the new note is richer".to_owned(),
+                        kind: "decision".to_owned(),
+                        confidence: "certain".to_owned(),
+                    },
+                    crate::frontmatter::Claim {
+                        subject: "quality_score".to_owned(),
+                        predicate: "uses".to_owned(),
+                        value: "claims, tools, concepts, body tokens, and evidence markers".to_owned(),
+                        kind: "fact".to_owned(),
+                        confidence: "certain".to_owned(),
+                    },
+                ],
+                omb_session_id: Some("session-a".to_owned()),
+                ..Default::default()
+            },
+            body: "## Evidence\nImplemented deterministic duplicate replacement. command: cargo test -p drudge duplicate_replacement".to_owned(),
+        };
+        let existing = DuplicateMatch {
+            source_path: "/tmp/vault/wiki/wiki-0001.md".to_owned(),
+            reason: DuplicateReason::SameSession,
+            front: FrontMatter {
+                title: Some("MCP ingestion".to_owned()),
+                omb_session_id: Some("session-a".to_owned()),
+                ..Default::default()
+            },
+            body: "Short summary.".to_owned(),
+        };
+
+        assert!(should_replace_duplicate(&note, &existing));
+    }
+
+    #[test]
+    fn duplicate_replacement_rejects_embedding_only_match() {
+        let note = RememberNote {
+            front: FrontMatter {
+                title: Some("MCP ingestion hardening".to_owned()),
+                claims: vec![crate::frontmatter::Claim {
+                    subject: "remember".to_owned(),
+                    predicate: "updates".to_owned(),
+                    value: "weak duplicate notes".to_owned(),
+                    kind: "decision".to_owned(),
+                    confidence: "certain".to_owned(),
+                }],
+                omb_session_id: Some("session-a".to_owned()),
+                ..Default::default()
+            },
+            body: "## Evidence\ncommand: cargo test".to_owned(),
+        };
+        let existing = DuplicateMatch {
+            source_path: "/tmp/vault/wiki/wiki-0001.md".to_owned(),
+            reason: DuplicateReason::Embedding,
+            front: FrontMatter::default(),
+            body: String::new(),
+        };
+
+        assert!(!should_replace_duplicate(&note, &existing));
+    }
+
+    #[test]
+    fn duplicate_replacement_keeps_richer_existing_note() {
+        let note = RememberNote {
+            front: FrontMatter {
+                title: Some("MCP ingestion".to_owned()),
+                omb_session_id: Some("session-a".to_owned()),
+                ..Default::default()
+            },
+            body: "Short summary.".to_owned(),
+        };
+        let existing = DuplicateMatch {
+            source_path: "/tmp/vault/wiki/wiki-0001.md".to_owned(),
+            reason: DuplicateReason::SameSession,
+            front: FrontMatter {
+                title: Some("MCP ingestion hardening".to_owned()),
+                tools: vec!["cargo".to_owned(), "make".to_owned()],
+                concepts: vec!["deduplication".to_owned(), "quality_gate".to_owned()],
+                claims: vec![crate::frontmatter::Claim {
+                    subject: "remember".to_owned(),
+                    predicate: "updates".to_owned(),
+                    value: "weak duplicate notes only when incoming quality is higher".to_owned(),
+                    kind: "decision".to_owned(),
+                    confidence: "certain".to_owned(),
+                }],
+                omb_session_id: Some("session-a".to_owned()),
+                ..Default::default()
+            },
+            body: "## Evidence\nVerified replacement gate with targeted tests.".to_owned(),
+        };
+
+        assert!(!should_replace_duplicate(&note, &existing));
+    }
+
+    #[test]
+    fn pii_block_error_does_not_echo_sensitive_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("pii.yaml");
+        std::fs::write(
+            &base,
+            r#"
+version: "1.0"
+rules:
+  - name: rrn
+    regex: '\b\d{6}-[1-4]\d{6}\b'
+    action: block
+    severity: critical
+    reason: resident registration number
+"#,
+        )
+        .unwrap();
+        let scanner = crate::pii::PiiScanner::load(Some(&base), None)
+            .unwrap()
+            .unwrap();
+        let sensitive = "900101-1234567";
+        let mut note = RememberNote {
+            front: FrontMatter {
+                title: Some("blocked note".to_owned()),
+                ..Default::default()
+            },
+            body: format!("contains {sensitive}"),
+        };
+
+        let err = apply_pii_gate(Some(&scanner), &mut note).unwrap_err();
+        assert_eq!(err.0, -32603);
+        assert!(err.1.contains("rrn"));
+        assert!(
+            !err.1.contains(sensitive),
+            "PII block error leaked the matched text: {}",
+            err.1
+        );
+    }
+
+    #[test]
+    fn pii_gate_scans_every_rendered_frontmatter_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("pii.yaml");
+        std::fs::write(
+            &base,
+            r#"
+version: "1.0"
+rules:
+  - name: email
+    regex: '(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b'
+    action: redact
+    severity: warning
+    replacement: "[EMAIL]"
+  - name: ticket
+    regex: '\b[A-Z]{2,5}-\d+\b'
+    action: flag
+    severity: warning
+    reason: ticket id
+"#,
+        )
+        .unwrap();
+        let scanner = crate::pii::PiiScanner::load(Some(&base), None)
+            .unwrap()
+            .unwrap();
+        let mut note = RememberNote {
+            front: FrontMatter {
+                title: Some("safe title".to_owned()),
+                tags: vec!["ops".to_owned()],
+                tools: vec!["owner@example.com".to_owned()],
+                concepts: vec!["ABC-123".to_owned()],
+                sources: vec!["raw/evidence/owner@example.com.md".to_owned()],
+                claims: vec![crate::frontmatter::Claim {
+                    subject: "admin@example.com".to_owned(),
+                    predicate: "tracks".to_owned(),
+                    value: "ABC-123".to_owned(),
+                    kind: "fact".to_owned(),
+                    confidence: "certain".to_owned(),
+                }],
+                ..Default::default()
+            },
+            body: "safe body".to_owned(),
+        };
+
+        apply_pii_gate(Some(&scanner), &mut note).unwrap();
+        assert_eq!(note.front.tools, vec!["[EMAIL]".to_owned()]);
+        assert_eq!(note.front.sources, vec!["raw/evidence/[EMAIL]".to_owned()]);
+        assert_eq!(note.front.claims[0].subject, "[EMAIL]");
+        assert_eq!(note.front.claims[0].value, "ABC-123");
+        assert!(note.front.tags.contains(&"pii-flag".to_owned()));
     }
 }

@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http import server
 from pathlib import Path
@@ -49,11 +50,14 @@ class ReconcileTest(unittest.TestCase):
         ingest_worker.MARK_DIR = self.tmp.name
         ingest_worker.markers.set_mark_dir(self.tmp.name)
 
-        # Wiki dir for per-session marker tests.
-        self.wiki_dir = Path(self.tmp.name) / "wiki"
-        self.wiki_dir.mkdir()
+        # BORING_VAULT_DIR is the vault root; notes live under vault/wiki.
+        self.vault_root = Path(self.tmp.name) / "vault"
+        self.wiki_dir = self.vault_root / "wiki"
+        self.wiki_dir.mkdir(parents=True)
         self._orig_vault_dir = os.environ.get("BORING_VAULT_DIR")
-        os.environ["BORING_VAULT_DIR"] = str(self.wiki_dir)
+        self._orig_event_log = os.environ.get("BORING_EVENT_LOG")
+        os.environ["BORING_VAULT_DIR"] = str(self.vault_root)
+        os.environ["BORING_EVENT_LOG"] = str(Path(self.tmp.name) / "events.ndjson")
 
         self.engine = server.HTTPServer(("127.0.0.1", 0), _FakeEngine)
         self.thread = threading.Thread(target=self.engine.serve_forever, daemon=True)
@@ -71,6 +75,10 @@ class ReconcileTest(unittest.TestCase):
             os.environ.pop("BORING_VAULT_DIR", None)
         else:
             os.environ["BORING_VAULT_DIR"] = self._orig_vault_dir
+        if self._orig_event_log is None:
+            os.environ.pop("BORING_EVENT_LOG", None)
+        else:
+            os.environ["BORING_EVENT_LOG"] = self._orig_event_log
 
     def _pending(self, sid, before, attempts=0):
         path = Path(self.tmp.name) / f"{sid}.pending"
@@ -83,8 +91,15 @@ class ReconcileTest(unittest.TestCase):
         parts = path.read_text().strip().split("\n")
         return int(parts[2]) if len(parts) > 2 else 0
 
+    def _last_event(self):
+        event_path = Path(os.environ["BORING_EVENT_LOG"])
+        return json.loads(event_path.read_text(encoding="utf-8").splitlines()[-1])
+
     def _done_exists(self, sid):
         return (Path(self.tmp.name) / f"{sid}.ts").exists()
+
+    def _retry_exists(self, sid):
+        return (Path(self.tmp.name) / f"{sid}.retry").exists()
 
     def _write_note(self, sid, wiki_id="wiki-9999"):
         note = self.wiki_dir / f"{wiki_id}.md"
@@ -104,6 +119,17 @@ class ReconcileTest(unittest.TestCase):
         found = ingest_worker._find_session_note("s-marker")
         self.assertEqual(Path(found), self.wiki_dir / "wiki-9999.md")
 
+    def test_find_session_note_uses_vault_wiki_not_vault_root(self):
+        root_note = self.vault_root / "wiki-0001.md"
+        root_note.write_text(
+            "---\ntitle: wrong\nomb_session_id: s-root\n---\nbody\n"
+        )
+        self._write_note("s-root", "wiki-0002")
+
+        found = ingest_worker._find_session_note("s-root")
+
+        self.assertEqual(Path(found), self.wiki_dir / "wiki-0002.md")
+
     def test_find_session_note_none_without_marker(self):
         note = self.wiki_dir / "wiki-0001.md"
         note.write_text("---\ntitle: other\n---\nbody\n")
@@ -116,6 +142,10 @@ class ReconcileTest(unittest.TestCase):
         self._write_note("s1")
         ingest_worker._reconcile()
         self.assertTrue(self._done_exists("s1"))
+        event = self._last_event()
+        self.assertEqual(event["event"], "ingest_reconcile")
+        self.assertEqual(event["workflow_node"], "done_marked")
+        self.assertEqual(event["workflow_outcome"], "continue")
 
     def test_vector_mode_falls_back_to_chunk_count(self):
         _FakeEngine.vector = True
@@ -140,12 +170,40 @@ class ReconcileTest(unittest.TestCase):
         self.assertFalse(self._done_exists("s4"))
         self.assertEqual(self._read_attempts("s4"), 1)
 
-    def test_wiki_mode_promotes_pending_to_done_after_max_attempts(self):
+    def test_wiki_mode_moves_pending_to_retry_after_max_attempts(self):
         _FakeEngine.vector = False
         _FakeEngine.total_chunks = 0
         self._pending("s5", 0, attempts=ingest_worker.MAX_WIKI_ATTEMPTS)
         ingest_worker._reconcile()
-        self.assertTrue(self._done_exists("s5"))
+        self.assertFalse(self._done_exists("s5"))
+        self.assertTrue(self._retry_exists("s5"))
+        self.assertIsNone(self._read_attempts("s5"))
+        event = self._last_event()
+        self.assertEqual(event["event"], "ingest_reconcile")
+        self.assertEqual(event["workflow_node"], "retry_marked")
+        self.assertEqual(event["workflow_outcome"], "fail")
+
+    def test_unknown_worker_projection_raises(self):
+        with self.assertRaises(ValueError):
+            ingest_worker._log_worker_event("unknown", "ok")
+
+    def test_fresh_retry_marker_is_not_reoffered(self):
+        retry = Path(self.tmp.name) / "s-retry.retry"
+        retry.write_text("0")
+        session = Path(self.tmp.name) / "s-retry.jsonl"
+        session.write_text("{}\n")
+
+        self.assertFalse(ingest_worker._eligible(str(session)))
+
+    def test_stale_retry_marker_is_reoffered(self):
+        retry = Path(self.tmp.name) / "s-retry.retry"
+        retry.write_text("0")
+        stale = time.time() - ingest_worker.RETRY_TTL - 1
+        os.utime(retry, (stale, stale))
+        session = Path(self.tmp.name) / "s-retry.jsonl"
+        session.write_text("{}\n")
+
+        self.assertTrue(ingest_worker._eligible(str(session)))
 
     def test_health_failure_treated_as_wiki_and_retries(self):
         ingest_worker.BORING_URL = "http://127.0.0.1:1"  # unreachable

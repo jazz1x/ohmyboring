@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs ask sync remember collect collect-kimi smoke e2e doctor heal verify-llm maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard deny eval bench-llm psql reset
+.PHONY: help up down build logs agent-logs events ask sync remember collect distill-now collect-kimi smoke e2e doctor readiness heal verify-llm maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality self-verify-check deny eval bench-llm psql reset
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -35,6 +35,9 @@ logs: ## engine logs
 
 agent-logs: ## boring-agent (hermes) logs (MCP connection diagnostics)
 	$(COMPOSE) logs -f boring-agent
+
+events: ## Tail recent local structured workflow events
+	@python3 agents/shared/event_log.py --tail --max "$${N:-20}"
 
 models: ## Pull Ollama models (DRUDGE_LLM_MODEL + DRUDGE_EMBED_MODEL, defaults gemma4:12b + bge-m3)
 	ollama pull "${DRUDGE_LLM_MODEL:-gemma4:12b}" && ollama pull "${DRUDGE_EMBED_MODEL:-bge-m3}"
@@ -79,8 +82,11 @@ smoke: ## end-to-end smoke test
 e2e: ## wiki-mode end-to-end (remember→recall round-trip + vector-off reject); skips if stack down
 	./scripts/e2e.sh
 
-doctor: ## Diagnose the distill write-door (drudge/Ollama/containers + newest note & hook marker)
+doctor: ## Diagnose the write-door (stack, hooks, newest note, Codex worker/queue)
 	./scripts/doctor.sh
+
+readiness: ## Strict briefing/readiness gate (fails on any doctor finding)
+	./scripts/doctor.sh --strict
 
 heal: ## Auto-fix common doctor findings (env perms, hooks, engine, Ollama, containers)
 	./scripts/doctor.sh --fix
@@ -100,8 +106,14 @@ maintenance-status: ## Show daily housekeeping registration state
 steward: ## Inspect vault data hygiene (project variants, placeholder tags, missing sources)
 	@python3 scripts/data-steward.py
 
-steward-fix: ## Apply data-steward repairs (backs up each note to *.md.bak — vault/wiki is gitignored)
-	@python3 scripts/data-steward.py --fix --yes
+steward-fix: ## Apply safe data-steward repairs through the backup-first cleanup gate
+	@python3 scripts/vault-cleanup-gate.py --fix --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
+
+vault-cleanup-check: ## Verify vault cleanup contract without rewriting notes
+	@python3 scripts/vault-cleanup-gate.py --check --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
+
+vault-cleanup-fix: ## Backup vault/wiki, apply safe steward repairs, then verify
+	@python3 scripts/vault-cleanup-gate.py --fix --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
 
 retention: ## Show raw session retention plan (dry-run)
 	@python3 scripts/retention.py
@@ -113,6 +125,12 @@ guard: ## Structural gate (fmt+clippy+test+py-compile+py-unit-tests) + vault dat
 	./scripts/guard.sh
 	@echo "7) data-steward dry-run …"
 	@python3 scripts/data-steward.py --vault "$(PWD)/vault"
+
+quality: ## Release acceptance gate (MCP contract + docs drift + removed dangerous surface)
+	cd drudge && cargo test --quiet quality_gate
+
+self-verify-check: ## Check self-verification stage contract: make self-verify-check [STAGE=bootstrap] [SUMMARY=/path/summary.tsv]
+	@python3 scripts/self-verify-contract.py --stage "$${STAGE:-bootstrap}" $${SUMMARY:+--summary "$$SUMMARY"}
 
 deny: ## Supply-chain gate (cargo-deny: vulnerabilities, licenses, duplicate versions)
 	cd drudge && cargo deny check

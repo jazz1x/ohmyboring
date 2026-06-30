@@ -5,6 +5,8 @@ Avoids duplicating `localhost:7700` / `host.docker.internal` logic across shell
 scripts and Python hooks. All functions honor the corresponding environment
 variables and fall back to sensible defaults.
 """
+from __future__ import annotations
+
 import os
 from urllib.parse import urlparse
 

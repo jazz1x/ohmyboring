@@ -43,7 +43,7 @@ make up
 # 4) Wire enabled agent adapters — the fiddly part this installer exists to automate.
 #    Idempotent + backs up settings files. BORING_WIRE=0 to skip.
 if [ "${BORING_WIRE:-1}" = 1 ]; then
-  say "Wiring ohmyboring adapters for enabled agents (Claude Code / Kimi Code hooks + Cursor/Codex MCP)…"
+  say "Wiring ohmyboring adapters for enabled agents (Claude/Kimi hooks + Cursor/Codex MCP + Codex worker)…"
   if python3 "$BORING_HOME/agents/shared/agent_wiring.py" \
        --install \
        --boring-home "$BORING_HOME" \
@@ -58,5 +58,8 @@ else
 fi
 
 printf '\n'
-say "Done. ohmyboring is up. Try:"
-printf '    cd %s && make ask Q="how did I fix X last time?"\n\n' "$BORING_HOME"
+say "Done. ohmyboring is up. Verify, seed, then ask:"
+printf '    cd %s\n' "$BORING_HOME"
+printf '    make verify-llm && make doctor && make readiness\n'
+printf '    make collect N=20   # optional: seed an empty vault from past Claude Code sessions\n'
+printf '    make ask Q="how did I fix X last time?"\n\n'

@@ -2,7 +2,9 @@
 
 ## Supported versions
 
-ohmyboring is at `0.1.0`. Security fixes target the latest release and `main`.
+Security fixes target `main` and the latest published `v0.1.x` tag. Older
+pre-release tags are not supported; upgrade to the latest `v0.1.x` release
+before reporting version-specific issues.
 
 ## Reporting a vulnerability
 
@@ -32,13 +34,16 @@ A couple of properties are worth knowing when assessing risk:
   (loopback only). In Native mode it binds `0.0.0.0:7700` by default — set
   `BORING_HTTP_ADDR=127.0.0.1:7700` to keep it loopback-only. The API is
   unauthenticated, so do **not** expose the port to an untrusted network.
-- **It scrubs secrets at the ingest boundary.** Before any text is written to
+- **It scrubs secrets and PII at the ingest boundary.** Before any text is written to
   the vault, every rendered field is passed through a secret redactor
-  (`drudge/src/redact.rs`), replacing matches with `‹REDACTED›`. CI layers
-  defence in depth on top: `gitleaks` (secret scan) and `trivy` (filesystem /
-  secret / misconfig scan). Redaction is best-effort pattern matching, not a
-  guarantee — review notes before sharing your vault, and treat the vault as
-  potentially sensitive personal data.
+  (`drudge/src/redact.rs`) and a shape-based PII gate (`drudge/src/pii.rs`).
+  The secret redactor replaces matches with `‹REDACTED›`; the PII gate can block,
+  redact, or flag sensitive shapes based on `vault/rules/pii.yaml` plus an optional
+  gitignored `vault/rules/pii.local.yaml` overlay. CI layers defence in depth on top:
+  `gitleaks` (secret scan) and `trivy` (filesystem / secret / misconfig scan).
+  Redaction and PII matching are best-effort pattern matching, not a guarantee —
+  review notes before sharing your vault, and treat the vault as potentially
+  sensitive personal data.
 
 Because the vault and the vector DB live entirely on your machine, securing the
 host (disk encryption, file permissions, not exposing ports) is part of the

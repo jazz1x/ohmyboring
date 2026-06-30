@@ -2,9 +2,7 @@
 //! First milestone: embed → store → vector search round-trip proof (selftest).
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use drudge::{
-    ask, audit, config, frontmatter, graph, ingest, llm, renumber, retrieve, serve, store, vault,
-};
+use drudge::{ask, audit, config, frontmatter, graph, ingest, llm, retrieve, serve, store, vault};
 
 #[derive(Parser)]
 #[command(
@@ -81,18 +79,6 @@ enum VaultCmd {
         /// Treat warnings as errors too (exit 2)
         #[arg(long)]
         strict: bool,
-    },
-    /// Compact wiki ids — renumber vault/wiki files to remove gaps (dry-run by default)
-    Renumber {
-        /// vault root path (default: $PWD/vault)
-        #[arg(long)]
-        vault: Option<String>,
-        /// Actually apply the plan (default is dry-run)
-        #[arg(long)]
-        apply: bool,
-        /// After applying, run a vector-mode sync to rebuild the DB
-        #[arg(long)]
-        sync: bool,
     },
 }
 
@@ -344,51 +330,6 @@ async fn main() -> Result<()> {
                     let vault_root = std::path::PathBuf::from(vault.unwrap_or(default_vault));
                     let code = vault::run_audit(&vault_root, strict)?;
                     std::process::exit(code);
-                }
-                VaultCmd::Renumber { vault, apply, sync } => {
-                    let vault_root = std::path::PathBuf::from(vault.unwrap_or_else(|| {
-                        config::env_set("BORING_VAULT_DIR").unwrap_or(default_vault)
-                    }));
-                    let wiki_dir = vault_root.join("wiki");
-                    let plan = renumber::plan(&wiki_dir)?;
-                    if plan.is_noop() {
-                        println!("vault renumber: no gaps — nothing to do");
-                        return Ok(());
-                    }
-                    println!("vault renumber plan ({} moves):", plan.moves.len());
-                    for m in &plan.moves {
-                        let action = if m.old_id == m.new_id {
-                            format!("{}  (content references rewritten)", m.old_path.display())
-                        } else {
-                            format!(
-                                "{} → {}",
-                                m.old_path.file_name().unwrap_or_default().to_string_lossy(),
-                                m.new_path.file_name().unwrap_or_default().to_string_lossy()
-                            )
-                        };
-                        println!("  {action}");
-                    }
-                    if !apply {
-                        println!("\nThis was a dry-run. Pass --apply to execute.");
-                        return Ok(());
-                    }
-                    renumber::apply(&plan)?;
-                    println!("renumber applied — {} files rewritten", plan.moves.len());
-                    if sync {
-                        let store = store.as_ref().context(VEC_OFF)?;
-                        let ol = llm::Llm::from_config(&cfg);
-                        let stats = ingest::run(
-                            store,
-                            &ol,
-                            &cfg,
-                            &[wiki_dir.to_string_lossy().into_owned()],
-                        )
-                        .await?;
-                        println!(
-                            "sync: new={} updated={} deleted={} chunks={}",
-                            stats.new, stats.updated, stats.deleted, stats.chunks
-                        );
-                    }
                 }
             }
         }

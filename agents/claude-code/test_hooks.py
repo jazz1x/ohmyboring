@@ -245,6 +245,88 @@ class SessionStartRecallTests(unittest.TestCase):
             self.assertIn("context failed", _err)
 
 
+class DistillExitCodeTests(unittest.TestCase):
+    def test_invalid_stdin_returns_input_error(self):
+        stderr = io.StringIO()
+        with mock.patch.object(distill.sys, "stdin", io.StringIO("not json")), \
+             mock.patch.object(distill.sys, "stderr", stderr):
+            rc = distill.main()
+
+        self.assertEqual(rc, 2)
+        self.assertIn("[omb-distill] invalid stdin JSON", stderr.getvalue())
+
+    def test_short_transcript_logs_skip_and_marks_done(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write("{}\n")
+            path = f.name
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                event_path = os.path.join(d, "events.ndjson")
+                stderr = io.StringIO()
+                payload = {
+                    "transcript_path": path,
+                    "session_id": "abc",
+                    "cwd": "/work/oh-my-boring",
+                    "hook_event_name": "SessionEnd",
+                }
+                with mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))), \
+                     mock.patch.object(distill.sys, "stderr", stderr), \
+                     mock.patch.object(distill, "extract", return_value="too short"), \
+                     mock.patch.object(distill, "git_remote_url", return_value=""), \
+                     mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"), \
+                     mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)), \
+                     mock.patch.object(distill, "_mark") as mark, \
+                     mock.patch.dict(os.environ, {"BORING_EVENT_LOG": event_path}):
+                    rc = distill.main()
+
+                self.assertEqual(rc, 0)
+                mark.assert_called_once_with("abc")
+                self.assertIn("transcript too short", stderr.getvalue())
+                event = _read_last_event(event_path)
+                self.assertEqual(event["reason"], "too_short")
+                self.assertEqual(event["workflow_node"], "skipped")
+                self.assertEqual(event["workflow_outcome"], "skip")
+        finally:
+            os.unlink(path)
+
+    def test_remember_failure_returns_nonzero_and_marks_retry(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write("{}\n")
+            path = f.name
+        try:
+            stderr = io.StringIO()
+            payload = {
+                "transcript_path": path,
+                "session_id": "abc",
+                "cwd": "/work/oh-my-boring",
+                "hook_event_name": "SessionEnd",
+            }
+            with mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))), \
+                 mock.patch.object(distill.sys, "stderr", stderr), \
+                 mock.patch.object(distill, "extract", return_value="x" * 600), \
+                 mock.patch.object(distill, "git_remote_url", return_value=""), \
+                 mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"), \
+                 mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)), \
+                 mock.patch.object(distill, "distill_and_remember", return_value=False), \
+                 mock.patch.object(distill, "_mark") as mark:
+                rc = distill.main()
+
+            self.assertEqual(rc, 1)
+            mark.assert_called_once_with("abc", retry=True)
+            self.assertIn("remember failed", stderr.getvalue())
+        finally:
+            os.unlink(path)
+
+    def test_run_returns_nonzero_on_crash(self):
+        stderr = io.StringIO()
+        with mock.patch.object(distill, "main", side_effect=RuntimeError("boom")), \
+             mock.patch.object(distill.sys, "stderr", stderr):
+            rc = distill.run()
+
+        self.assertEqual(rc, 1)
+        self.assertIn("[omb-distill] crashed: boom", stderr.getvalue())
+
+
 class RecallFormattingTests(unittest.TestCase):
     """recall.main reads stdin + posts to /search; we mock urlopen so NO network happens."""
 
@@ -318,6 +400,11 @@ class DistillMainLoggingTests(unittest.TestCase):
     def test_missing_transcript_logs_error(self):
         _out, err = self._run_main(json.dumps({"session_id": "s1", "cwd": "/tmp", "hook_event_name": "SessionEnd"}))
         self.assertIn("[omb-distill] transcript not found", err)
+
+
+def _read_last_event(path):
+    with open(path, encoding="utf-8") as f:
+        return json.loads(f.readlines()[-1])
 
 
 if __name__ == "__main__":

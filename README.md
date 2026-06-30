@@ -5,15 +5,12 @@
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
 ![version](https://img.shields.io/badge/version-0.1.0-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
-![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
-![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
-![gemma4](https://img.shields.io/badge/LLM-gemma4:12b-000?logo=ollama)
+![local LLM](https://img.shields.io/badge/local%20LLM-Ollama%20%7C%20LM%20Studio-000)
 
-**Self-hosted personal memory RAG.** Your Claude Code / Kimi Code sessions are distilled into a local, human-readable wiki and recalled on demand — *"how did I do this last time?"* **Zero cloud · 100% local.**
+**ohmyboring remembers how you solved things.** It turns Claude Code / Kimi Code sessions and eligible Codex transcripts into a local, human-readable wiki, then recalls the useful parts when you ask *"how did I do this last time?"* **Zero cloud · local LLM friendly.**
 
 ```bash
-# Fastest — one-liner: clones to ~/oh-my-boring, builds, wires the Claude Code hooks.
+# Fastest — one-liner: clones to ~/oh-my-boring, builds, wires hooks/MCP/workers.
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/install.sh)"
 ```
 
@@ -23,21 +20,33 @@ Or step by step:
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
+make verify-llm     # verify provider, chat model, embedding model, and vector dimension
+make doctor         # verify stack, hooks, Codex worker/queue, and latest ingest
+make readiness      # strict gate before relying on morning briefs
 make collect N=20   # seed the vault from your past Claude Code sessions (fresh clone starts empty)
 make ask Q="how did I fix the docker build cache problem?"
 ```
 
-> A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your history; after that, every new session auto-accumulates (see [Feeding it](#feeding-it-ingestion)).
+> A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your Claude history; after that, Claude/Kimi sessions auto-accumulate and Codex is picked up by its worker when eligible (see [Feeding it](#feeding-it-ingestion)).
 
-> Requires **Docker**, **Ollama** (or any OpenAI-compatible server), **Python 3**, **jq**, **curl**, **git**, and **make**.
+> Requires **Docker**, **Ollama** or another OpenAI-compatible local server such as **LM Studio**, **Python 3**, **jq**, **curl**, **git**, and **make**.
+
+Prefer LM Studio? Start its local server, load one chat model and one embedding model, set `llm.provider` to `lmstudio`, and run `make verify-llm`. ohmyboring checks the exact model ids and embedding dimension before it trusts the setup.
+
+First-run success means:
+
+- `make up` exits 0 and `http://127.0.0.1:7700/health` returns 200.
+- `make verify-llm` sees both configured model ids and the actual embedding dimension matches `llm.embed_dim`.
+- `make doctor` shows stack, hooks/MCP, worker/queue, and latest ingest state without hidden failures.
+- `make readiness` is green before you trust a scheduled morning brief.
 
 ---
 
 ## What it does
 
-1. **Auto-accumulate** — when a session ends, it becomes a curated markdown note in `vault/wiki`. No manual upkeep.
+1. **Auto-accumulate** — when a session ends, or when the Codex worker finds an eligible transcript, it becomes a curated markdown note in `vault/wiki`. No manual upkeep.
 2. **Markdown-first memory** — plain, human-readable, git-diffable notes. Recall reads them directly.
-3. **Local-only** — embedding and synthesis run on your machine via Ollama. No external APIs or tokens.
+3. **Local-only** — embedding and synthesis run on your machine via Ollama, LM Studio, or another OpenAI-compatible endpoint. No external APIs or tokens.
 
 Optional **pgvector** accelerator (`BORING_VECTOR=on`) adds similarity search + GraphRAG when scale calls for it.
 
@@ -45,11 +54,12 @@ Optional **pgvector** accelerator (`BORING_VECTOR=on`) adds similarity search + 
 
 ## Feeding it (ingestion)
 
-Memory gets in three ways — after setup you rarely touch the first two:
+Memory gets in four ways — after setup you rarely touch the automatic paths:
 
 | How | Command | When |
 | --- | --- | --- |
 | **Automatic, on session end** | SessionEnd hook (wired by `install.sh`) | every Claude Code / Kimi session — `hooks/distill-session.py` distills the transcript and `remember`s it. The paired `UserPromptSubmit` hook (`recall.py`) auto-injects relevant past memory into new prompts. |
+| **Automatic, Codex worker** | host launchd/cron worker (wired by `install.sh`) | Codex has no SessionEnd hook. A host worker scans `~/.codex/sessions/**/*.jsonl` every 20 minutes, skips transcripts still being written, keeps true subagent rollouts out, and stores eligible transcripts through the same `remember` path. If `hermes-agent` is enabled, it also gets a `codex-memory-ingest-worker`. Check both with `make doctor`. |
 | **Backfill past sessions** | `make collect [N=20]` | once after install, to seed an otherwise-empty vault from your `~/.claude/projects` history. Newest-first, idempotent (a per-session marker skips already-distilled ones), `N` per run so it never hogs CPU. |
 | **Right now, mid-session** | `make distill-now` · `make remember M="…"` | capture something immediately *without* ending the session. `distill-now` re-distills the **current** transcript on demand and leaves no marker, so the normal end-of-session capture still runs (you may get an early note plus the final one). `remember` saves an explicit note you write yourself. |
 
@@ -63,7 +73,7 @@ python3 agents/shared/agent_wiring.py --install \
   --server-url http://localhost:7700/mcp
 ```
 
-Or edit `~/.claude/settings.json` by hand: a `SessionEnd` hook running `python3 ~/oh-my-boring/hooks/distill-session.py`, plus a `UserPromptSubmit` hook running `recall.py`.
+This installs Claude/Kimi hooks, Cursor/Codex MCP entries, the Codex host worker, and Hermes cron workers when `hermes-agent` is enabled. Or edit `~/.claude/settings.json` by hand for Claude only: a `SessionEnd` hook running `python3 ~/oh-my-boring/hooks/distill-session.py`, plus a `UserPromptSubmit` hook running `recall.py`.
 
 ---
 
@@ -96,6 +106,11 @@ flowchart LR
 
 - **Read door** — fast, no LLM. `make ask`, `recall.py`, MCP `recall` read `vault/wiki` directly.
 - **Write door** — gated. `distill-session.py` calls the local LLM and writes through ohmyboring's deterministic `remember` MCP tool.
+- **Duplicate gate** — duplicate notes are normally skipped; if the same session or a strong rollout copy produces a richer note, `remember` rewrites the same `wiki-NNNN.md` and re-ingests it.
+
+### Workflow graph contract
+
+The ingest loop also has a Rust-side workflow graph contract in `drudge/src/workflow.rs`, documented in `drudge/WORKFLOW.md`. It is a LangGraph-style typed state graph for session discovery, distillation, resolution verification, repair, `remember`, marker update, event logging, and readiness projection. It is not a second runtime orchestrator: Python hooks/workers still perform host I/O, while Rust owns the closed node/edge vocabulary and graph-shape tests.
 
 ---
 
@@ -111,7 +126,7 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
   "llm": {
     "provider": "ollama",
     "base_url": "http://host.docker.internal:11434/v1",
-    "model": "gemma4:12b",
+    "model": "qwen3:14b",
     "embed_model": "bge-m3",
     "embed_dim": 1024,
     "api_key_env": "BORING_LLM_API_KEY",
@@ -137,7 +152,37 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 | `repos[]` | path/remote rules → `origin=personal/company/mirror/community` |
 | `agents[]` | ingest sources for vector mode |
 
-**Switching LLM backend** is one config block. LM Studio: set `"provider": "lmstudio"`, `"base_url": "http://host.docker.internal:1234/v1"`, `"bootstrap": "manual"`, load your models in the LM Studio app, then `make up`. `make up` dispatches to `scripts/llm-providers/<provider>.sh` for the right bootstrap (Ollama pull vs LM Studio health-check).
+**Switching LLM backend** is one config block. `make up` dispatches to `scripts/llm-providers/<provider>.sh` for the right bootstrap: Ollama can start/pull models; LM Studio only health-checks the server and expects models to be loaded in the app.
+
+### LM Studio backend
+
+LM Studio works through its OpenAI-compatible `/v1` server. Use `host.docker.internal` in `boring.json` because the Docker container calls back to the host; use `localhost` only for host-side checks and benchmarks.
+
+```json
+{
+  "llm": {
+    "provider": "lmstudio",
+    "base_url": "http://host.docker.internal:1234/v1",
+    "model": "<exact chat model id from /v1/models>",
+    "embed_model": "<exact embedding model id from /v1/models>",
+    "embed_dim": 768,
+    "api_key_env": "BORING_LLM_API_KEY",
+    "bootstrap": "manual"
+  }
+}
+```
+
+Start the LM Studio local server, load one chat model and one embedding model, then verify before `make up`:
+
+```bash
+curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
+make verify-llm
+make up
+make doctor
+make readiness
+```
+
+The model ids must match what LM Studio reports. `make verify-llm` also calls `/v1/embeddings` and checks that the returned vector length matches `llm.embed_dim`. For the current 1024d release path, LM Studio is vector-ready only when it can serve `bge-m3`; `text-embedding-nomic-embed-text-v1.5` is a separate 768d reset/re-index path. See the [LM Studio runbook](docs/runbooks/lmstudio.md) for the full checklist.
 
 `.env` is now only secrets + runtime overrides:
 
@@ -146,7 +191,20 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 | `BORING_VECTOR` | `on` enables pgvector (optional) |
 | `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | optional runtime override of `llm.base_url` / `llm.model`. Running the `drudge` binary directly on the host? Set `BORING_LLM_BASE_URL=http://localhost:11434/v1` |
 | `BORING_LLM_API_KEY` | API key when `llm.api_key_env` points here (auth providers) |
+| `DOCKER_BIN` | optional Docker CLI path when GUI/launchd environments do not include Docker in `PATH` |
+| `BORING_DISTILL_RESOLUTION` | distillation detail contract: `compact`, `standard`, `evidence` (default), or `forensic`; verifier failures repair once, then block `remember` |
+| `DISTILL_CLAMP` | max characters sent by the direct SessionEnd hook to the local LLM; defaults to `2000` to avoid local-model timeouts. Hermes worker offers still use `INGEST_CLAMP` (`4000`) |
+| `CODEX_DISTILL_CLAMP` | max extracted Codex session characters sent to the distill LLM; defaults to `INGEST_CLAMP`, then `4000`. This keeps large rollout transcripts inside the Hermes worker budget while preserving head/tail evidence |
+| `BORING_EVENT_LOG` | local NDJSON workflow-event spool; defaults to `~/.cache/oh-my-boring/events.ndjson` |
+| `BORING_EVENT_DB_MIRROR` | DB mirror mode; enabled by default, set `0`/`false`/`off`/`no` for NDJSON-only local runs |
+| `BORING_EVENT_SINK_URL` | optional explicit DB mirror endpoint; defaults to `$BORING_URL/events` |
+| `BORING_EVENT_RECENT_HOURS` | recent event window used by `make readiness`; defaults to `24` |
+| `BORING_READINESS_NOTE_MAX_HOURS` | newest-note freshness window for briefing readiness; defaults to `48` |
+| `BORING_READINESS_PENDING_TTL` | stale `.pending` marker threshold for readiness; falls back to `INGEST_PENDING_TTL`, then `1800` seconds |
+| `BORING_READINESS_RETRY_TTL` | stale `.retry` marker threshold for readiness; falls back to `INGEST_RETRY_TTL`, then the pending threshold |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant |
+
+Structured events are emitted by distill, collectors/workers, `doctor`/`readiness`, `guard`, and `eval`. Memory-ingest events carry `workflow=memory_ingest`, `workflow_node`, and `workflow_outcome` fields that mirror the Rust workflow graph contract. Events are written to the local NDJSON spool first and, unless `BORING_EVENT_DB_MIRROR=0`, mirrored into the local DB as OpenTelemetry-shaped log records. Use HTTP `/events` or MCP `events` for the DB view; use `make events` when you want the file spool, including engine-down cases.
 
 > **Swapping the embedding model changes the vector dimension.** The synthesis model (`llm.model`) is free to swap, but a new `llm.embed_model` emits vectors of a different size, so you must update `llm.embed_dim` to match **and** run `make reset` — otherwise upserts fail against the old-shaped vectors. Common dims: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
 
@@ -200,16 +258,118 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 |---|---|
 | `make up` | set up + start the ohmyboring engine (hermes-agent joins only if its image exists) |
 | `make ollama` | ensure Ollama is running (start in background if needed) |
+| `make verify-llm` | verify provider reachability, loaded model ids, and actual embedding dimension |
+| `make doctor` | diagnose stack, hooks, latest ingest, and Codex worker/queue status |
+| `make readiness` | strict pre-briefing gate; fails on model/embed, hook, container, worker, stale-marker, or freshness findings |
+| `make self-verify-check` | evaluate the live self-verification summary against the current stage contract |
 | `make ask Q="..."` | one-shot recall + synthesis |
 | `make sync` | deterministic re-ingest of the vault |
+| `make vault-cleanup-check` | verify vault cleanup contract without rewriting notes |
+| `make vault-cleanup-fix` | backup `vault/wiki`, apply safe steward repairs, then verify |
 | `make remember M="text"` | write a one-line note |
 | `make collect [N=1]` | lazy backfill of past Claude Code sessions |
 | `make collect-kimi [N=1]` | lazy backfill of past Kimi Code sessions |
 | `make hermes-build` | clone/build the optional hermes-agent image |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | engine logs |
+| `make events [N=20]` | tail recent local structured workflow events |
 | `make guard` | fmt + clippy + test + Python py-compile |
+| `make quality` | release acceptance drift gate |
 | `make down` | stop containers |
+
+---
+
+## Usage examples
+
+### Backfill all supported agents
+
+```bash
+# Claude Code (default make collect)
+make collect N=20
+
+# Kimi Code
+make collect-kimi N=20
+
+# GitHub Codex (normally handled by the Hermes worker)
+make doctor
+COLLECT_LIMIT=20 python3 agents/codex/collect-sessions.py
+```
+
+### Daily/weekly consumption
+
+```bash
+# Structured context card for the start of a session (works with BORING_VECTOR=off)
+curl -s -X POST http://localhost:7700/context \
+  -H 'content-type: application/json' \
+  -d '{"project":"omb","max_items":5}' | jq .
+
+# Weekly brief (requires BORING_VECTOR=on)
+curl -s -X POST http://localhost:7700/weekly \
+  -H 'content-type: application/json' \
+  -d '{"project":"omb"}' | jq .
+
+# Preview the exact Slack-bound morning brief text
+BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
+
+# Stalled register — things that have not moved in 7+ days (requires BORING_VECTOR=on)
+curl -s -X POST http://localhost:7700/stalled \
+  -H 'content-type: application/json' \
+  -d '{"project":"omb","older_than_days":7}' | jq .
+```
+
+Hermes cron sends briefing script stdout as Slack `mrkdwn` text. `make eval` fixture notes are searchable during the gate but are pruned afterward and excluded from recency/claim briefing surfaces so test corpus entries do not appear in daily or weekly digests.
+
+### PII / sensitive-data gate
+
+Policy lives in `vault/rules/pii.yaml` and an optional gitignored `vault/rules/pii.local.yaml`:
+
+```yaml
+# vault/rules/pii.local.yaml — company-specific shapes, never commit
+version: "1.0"
+policy:
+  default_action: flag
+  exemption_marker: "<!-- pii-allow:"
+rules:
+  - name: internal-ticket
+    regex: '\bPROJ-\d{4,}\b'
+    action: flag
+    severity: warning
+    reason: "Internal ticket id"
+  - name: staging-password
+    regex: '\bstaging[_-]?pass\s*=\s*[^\s]+'
+    action: redact
+    replacement: "[STAGING-PASS]"
+    severity: critical
+    reason: "Staging credential"
+```
+
+A `block` rule rejects the note at `remember` time; a `redact` rule masks matches before saving; a `flag` rule saves the note and adds a `pii-flag` tag. To let a flagged shape through on one line, add the exemption marker on that line:
+
+```markdown
+The Jira ticket PROJ-1234 <!-- pii-allow: internal-ticket --> is public.
+```
+
+### MCP tool call (raw JSON-RPC)
+
+```bash
+curl -s -X POST http://localhost:7700/mcp \
+  -H 'content-type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "recall",
+      "arguments": {
+        "query": "docker build cache fix",
+        "max_tokens": 1500,
+        "max_results": 3,
+        "project": "omb",
+        "since_hours": 168
+      }
+    }
+  }' | jq .
+```
 
 ---
 
@@ -227,8 +387,8 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 | Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Distills a Kimi session and calls `remember` |
 | Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring` as an MCP server |
-| Codex | `agents/codex/README.md` | MCP only | `~/.codex/mcp.json` | Exposes `ohmyboring` as an MCP server |
-| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`weekly-briefing`, `briefing`) + serial backfill (`ingest-worker.py`) |
+| Codex | `agents/codex/README.md` | MCP + host worker backfill | `~/.codex/mcp.json` / launchd or cron / `collect-sessions.py` | Exposes `ohmyboring` as an MCP server and backfills eligible Codex sessions; installed workers harvest stable rollout transcripts but skip true subagents |
+| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`weekly-briefing`, `briefing`) + serial backfill workers (`ingest-worker.py`, Codex collector) |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older Claude Code sessions |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / manual | Lazy backfill of older Kimi Code sessions |
 | shared | `agents/shared/boring_config.py` | imported by adapters | `boring.json` policy loader |
@@ -240,13 +400,15 @@ Memory can be reached through HTTP endpoints or the MCP server (`http://localhos
 
 | Endpoint / MCP tool | Purpose | Vector backend |
 |---|---|---|
-| `POST /context` / `context` | Structured context card: decisions, risks, facts, glossary | not required |
+| `POST /context` / `context` | Structured context card: decisions, risks, facts, glossary, next_actions | not required |
+| `POST /next_actions` / `next_actions` | Next-action register: explicit next steps + active blockers | required |
+| `POST /stalled` / `stalled` | Stalled register: old next steps and blockers | required |
 | `POST /status` / `project_status` | 30-day project status (Done/Next/Blocked/Decisions/Risks) | required |
 | `POST /weekly` / `weekly_brief` | Last 7 days across projects | required |
 | `POST /decisions` / `decisions` | Decision claims for a project | required |
 | `POST /risks` / `risks` | Risk/assumption/blocked claims for a project | required |
-| `POST /ask` / `ask` | Direct question answered from memory | required |
-| `POST /search` / `recall` | Raw memory excerpts | required for semantic search |
+| `POST /ask` / `ask` | Direct question answered from memory | not required |
+| `POST /search` / `recall` | Raw memory excerpts | not required; semantic search uses vector when enabled |
 | `/remember` / `remember` | Store a curated note | — |
 
 ### Token budget
@@ -276,17 +438,22 @@ For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~
 
 (VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. Compose siblings reach it at `http://boring-drudge:7700/mcp`.)
 
-Available tools (11): `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief` (generative — run the LLM) · `corpus_status`, `config_get` (introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain).
+Available tools (19): `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled` (generative — run the LLM) · `context`, `corpus_status`, `events`, `config_get` (structured / introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain).
 
-In the default wiki-first mode (`BORING_VECTOR=off`), four tools require the pgvector backend and return JSON-RPC `-32603` until you set `BORING_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `brief`. The other seven (`recall`, `ask`, `remember`, `forget`, `sync`, `config_get`, `classify_repo`) work against `vault/wiki` directly.
+In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency/vector ordering, the graph, or the local DB projection return JSON-RPC `-32603` until you set `BORING_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `events`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`. `recall` and `ask` read `vault/wiki` directly; `context` is callable but returns an empty claim card without the store; `remember`, `forget`, `sync`, `config_get`, and `classify_repo` do not require vector mode.
 
+- `next_actions` *(requires `BORING_VECTOR=on`)* — next-action register: recent `next` claims and active `blocked` claims synthesized into a short todo/blocker list. Optionally filter by project.
+- `stalled` *(requires `BORING_VECTOR=on`)* — stalled register: `next` and `blocked` claims older than `older_than_days` (default 7).
+- `decisions` *(requires `BORING_VECTOR=on`)* — decision register: recent `decision` claims for a project.
+- `risks` *(requires `BORING_VECTOR=on`)* — risk register: recent `risk`, `assumption`, and `blocked` claims for a project.
 - `neighbors` *(requires `BORING_VECTOR=on`)* — graph traversal from a topic: embeds the query, takes the single closest note, then returns its 1-hop labels (`{hit, graph_neighbors, semantic_neighbors}` JSON). `hit` is the matched note's path; `graph_neighbors` are its project/topic labels and `semantic_neighbors` its shared tool/concept labels — flat strings, not note paths.
 - `claims` *(requires `BORING_VECTOR=on`)* — top-k current (non-superseded) `{subject, predicate, value}` decisions near a query.
 - `corpus_status` *(requires `BORING_VECTOR=on`)* — KB health snapshot (file/chunk counts, by origin/kind/project, contamination, graph/semantic nodes+edges).
-- `ask` / `brief` — the only LLM-running tools: `ask` answers a question with cited sources (works in wiki-first mode); `brief` *(requires `BORING_VECTOR=on`)* is a recency-first work briefing.
+- `events` *(requires `BORING_VECTOR=on`)* — recent workflow/adapter events mirrored into the DB as OpenTelemetry-shaped records. Filter by component, event, status, run_id, workflow, or since_hours.
+- `ask` / `brief` / `weekly_brief` / `project_status` / `decisions` / `risks` / `next_actions` / `stalled` — LLM-running tools: `ask` answers a question with cited sources (works in wiki-first mode); the rest are recency/claim registers that require `BORING_VECTOR=on`.
 - `forget` — delete a note by wiki id or exact title. Removes the wiki file and, in vector mode, also purges embeddings, graph edges, and claims.
 
-Structured tools (`neighbors`, `claims`, `corpus_status`, `config_get`, `ask`, `brief`) return native `structuredContent` (JSON) alongside the text block; prose/ack tools (`recall`, `remember`, `forget`, `sync`, `classify_repo`) return text.
+Structured tools (`neighbors`, `claims`, `corpus_status`, `events`, `config_get`, `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `context`) return native `structuredContent` (JSON) alongside the text block; prose/ack tools (`recall`, `remember`, `forget`, `sync`, `classify_repo`) return text.
 
 Example MCP call (raw JSON-RPC over HTTP):
 
@@ -349,7 +516,8 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 
 - SSOT docs: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
 - `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test`
-- CI: `rust-gate` · `gitleaks` · `cargo-deny` · `trivy`
+- `make quality` = release acceptance drift gate for MCP tools, vector-mode docs, and removed dangerous surfaces
+- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy`
 - `unsafe_code = "forbid"`
 
 ---
@@ -359,12 +527,17 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 | Symptom | Fix |
 |---|---|
 | `make up` fails | Check Ollama: `curl -sf http://127.0.0.1:11434/api/tags` |
+| LM Studio selected but `make up` fails | Start LM Studio's local server, load the exact chat and embedding model ids from `boring.json`, then run `make verify-llm` |
 | Port conflict | `lsof -i :7700 -i :5432 -i :11434` |
 | Second `make up` / re-clone fails | Run `make down` first — the containers use fixed names and bind `127.0.0.1:7700` / `:5432`, so a second stack collides with the running one |
 | Agent not starting | `BORING_CORE_ONLY=1 make up` runs core-only; hermes image must be built separately |
 | Linux: container can't reach host Ollama | On Linux, Ollama binds `127.0.0.1` by default, so the container hits a closed port even though `host.docker.internal` resolves. Bind Ollama to all interfaces (`OLLAMA_HOST=0.0.0.0:11434`, then restart it) and/or allow the docker bridge in the host firewall |
-| `embedding dim mismatch` errors | Your `llm.embed_model` output size ≠ `llm.embed_dim` in `boring.json`. Update `embed_dim` to match the new model and run `make reset` |
-| Healthy? / did the last distill land? | `make doctor` — quick health + last-ingest check |
+| `embedding dim mismatch` errors | Your `/v1/embeddings` output size does not match `llm.embed_dim` in `boring.json`. Update `embed_dim` to match the new model and run `make reset` |
+| Healthy? / did the last distill land? | `make doctor` — quick health + last-ingest and Codex worker/queue check |
+| Can I rely on tomorrow morning's briefing? | `make readiness` — strict gate; every hook/model/container/ingest finding must pass |
+| `make readiness` reports stale markers | Inspect `~/.cache/boring-distill`; stale `.pending`, `.retry`, or `.dead` markers mean autonomous ingest stopped or needs reconciliation before a scheduled briefing is trusted |
+| `make readiness` reports a stale newest note | Run or verify ingestion before relying on briefing output; only widen `BORING_READINESS_NOTE_MAX_HOURS` when the briefing window is intentionally longer |
+| What failed most recently? | `make events` — recent local workflow timeline without raw transcripts |
 
 ---
 

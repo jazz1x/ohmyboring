@@ -18,9 +18,11 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::config;
 use crate::llm::Llm;
+use crate::pii;
 use crate::store::Store;
 use crate::wiki_recall;
 
@@ -38,6 +40,8 @@ pub struct AppState {
     pub(crate) llm: Arc<Llm>,
     /// vault root (`BORING_VAULT_DIR`). The remember target (`<vault>/wiki/wiki-NNNN.md`) + the relates_to projection root.
     pub(crate) vault_dir: Arc<Option<PathBuf>>,
+    /// PII / sensitive-data gate. None when no rule files are present.
+    pub(crate) pii: Arc<Option<pii::PiiScanner>>,
     /// Policy config (`boring.json`).
     pub(crate) cfg: Arc<config::BoringConfig>,
     /// Resolved path to the loaded config, so `classify_repo` writes back to the same file.
@@ -214,6 +218,17 @@ pub(crate) struct RisksReq {
 }
 
 #[derive(Deserialize)]
+pub(crate) struct NextActionsReq {
+    pub(crate) project: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct StalledReq {
+    pub(crate) project: Option<String>,
+    pub(crate) older_than_days: Option<u32>,
+}
+
+#[derive(Deserialize)]
 pub(crate) struct ContextReq {
     pub(crate) project: Option<String>,
     #[serde(default)]
@@ -286,6 +301,63 @@ pub(crate) struct QueryLogEntry {
     pub(crate) latency_ms: Option<i32>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct EventLogReq {
+    #[serde(default = "default_event_log_limit")]
+    pub(crate) limit: i64,
+    #[serde(default)]
+    pub(crate) component: Option<String>,
+    #[serde(default, rename = "event")]
+    pub(crate) event_name: Option<String>,
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+    #[serde(default)]
+    pub(crate) run_id: Option<String>,
+    #[serde(default)]
+    pub(crate) workflow: Option<String>,
+    #[serde(default)]
+    pub(crate) since_hours: Option<i32>,
+}
+
+fn default_event_log_limit() -> i64 {
+    50
+}
+
+#[derive(Serialize)]
+pub(crate) struct EventLogResp {
+    pub(crate) entries: Vec<EventLogEntry>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct EventLogEntry {
+    pub(crate) id: i64,
+    pub(crate) observed_at: String,
+    pub(crate) time_unix_nano: Option<i64>,
+    pub(crate) severity_text: String,
+    pub(crate) severity_number: i32,
+    pub(crate) service_name: String,
+    pub(crate) component: String,
+    #[serde(rename = "event")]
+    pub(crate) event_name: String,
+    pub(crate) status: String,
+    pub(crate) trace_id: Option<String>,
+    pub(crate) span_id: Option<String>,
+    pub(crate) run_id: Option<String>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) workflow: Option<String>,
+    pub(crate) workflow_node: Option<String>,
+    pub(crate) workflow_outcome: Option<String>,
+    pub(crate) body: Value,
+    pub(crate) attributes: Value,
+    pub(crate) resource: Value,
+    pub(crate) otel: Value,
+}
+
+#[derive(Serialize)]
+pub(crate) struct EventIngestResp {
+    pub(crate) accepted: usize,
+}
+
 // ── shared handler helpers ──────────────────────────────────────────────────
 
 /// Whether a sync/remember/forget is mid-flight (holds the sync lock). An enum, not a string —
@@ -351,10 +423,16 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
     let addr = config::env_set("BORING_HTTP_ADDR").unwrap_or_else(|| "0.0.0.0:7700".to_owned());
 
     let last_compact = Arc::new(Mutex::new(None));
+    let pii = vault_dir
+        .as_ref()
+        .map(|vd| crate::pii::PiiScanner::load_from_vault(vd))
+        .transpose()?
+        .flatten();
     let state = AppState {
         store: store.map(Arc::new),
         llm: Arc::new(llm),
         vault_dir: Arc::new(vault_dir),
+        pii: Arc::new(pii),
         cfg: Arc::new(cfg),
         cfg_path: Arc::new(cfg_path),
         sync_lock: Arc::new(Mutex::new(())),
@@ -380,11 +458,21 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .route("/status", post(http::handle_project_status))
         .route("/decisions", post(http::handle_decisions))
         .route("/risks", post(http::handle_risks))
+        .route("/next_actions", post(http::handle_next_actions))
+        .route("/stalled", post(http::handle_stalled))
         .route("/context", post(http::handle_context))
         .route("/search", post(http::handle_search))
         .route("/graph", post(http::handle_graph))
         .route("/audit", get(http::handle_audit))
         .route("/query-log", get(http::handle_query_log))
+        .route(
+            "/events",
+            get(http::handle_events).post(http::handle_event_ingest),
+        )
+        .route(
+            "/otel-events",
+            get(http::handle_events).post(http::handle_event_ingest),
+        )
         .route("/sync", post(http::handle_sync))
         .route("/compact", post(http::handle_compact))
         .route("/mcp", get(mcp::handle_mcp_get).post(mcp::handle_mcp)) // MCP-over-HTTP (Streamable HTTP: GET SSE + POST JSON-RPC)

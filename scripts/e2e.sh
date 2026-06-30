@@ -57,11 +57,12 @@ MCP="$URL/mcp"
 NONCE="e2e$(date +%s)$$"
 TITLE="e2e throwaway $NONCE"
 BODY="e2e end to end probe note $NONCE for a service contract round trip do not keep"
+CLAIMS='[{"subject":"e2e-throwaway","predicate":"follow-up","value":"verify next_actions endpoint","kind":"next","confidence":"certain"}]'
 
 # --- 1) remember ----------------------------------------------------------------
 echo "1) remember (MCP tools/call remember)…"
-req=$(jq -nc --arg t "$TITLE" --arg b "$BODY" \
-  '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"remember",arguments:{title:$t,body:$b,origin:"personal",repo:"e2e-throwaway"}}}')
+req=$(jq -nc --arg t "$TITLE" --arg b "$BODY" --argjson claims "$CLAIMS" \
+  '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"remember",arguments:{title:$t,body:$b,origin:"personal",repo:"e2e-throwaway",claims:$claims}}}')
 resp=$(curl -sf -m120 "$MCP" -H 'content-type: application/json' -d "$req") \
   || fail "remember call failed (curl)"
 err=$(printf '%s' "$resp" | jq -r '.error.message // empty')
@@ -123,8 +124,38 @@ else
   echo "   → neighbors returned results in vector mode"
 fi
 
-# --- 5) forget ------------------------------------------------------------------
-echo "5) forget (MCP tools/call forget — clean up)…"
+# --- 5) next_actions (mode-specific contract) -----------------------------------
+if [ "$VEC" = 0 ]; then
+  echo "5) next_actions (HTTP /next_actions — assert vector-off error)…"
+  resp=$(curl -sf -m30 "$URL/next_actions" -H 'content-type: application/json' -d '{"project":"e2e-throwaway"}') \
+    || fail "next_actions call failed (curl)"
+  code=$(printf '%s' "$resp" | jq -r '.error.code // empty')
+  [ "$code" = "-32603" ] \
+    || fail "expected JSON-RPC-style error -32603 for next_actions in wiki mode, got: $resp"
+  echo "   → next_actions correctly rejected with -32603"
+else
+  echo "5) next_actions (HTTP /next_actions + MCP — assert claim round-trip)…"
+  resp=$(curl -sf -m30 "$URL/next_actions" -H 'content-type: application/json' -d '{"project":"e2e-throwaway"}') \
+    || fail "next_actions HTTP call failed (curl)"
+  ans=$(printf '%s' "$resp" | jq -r '.answer // empty')
+  printf '%s' "$ans" | grep -q "verify next_actions endpoint" \
+    || fail "next_actions HTTP answer missing the planted claim: $ans"
+  echo "   → HTTP /next_actions returned the planted next-action claim"
+
+  req=$(jq -nc \
+    '{jsonrpc:"2.0",id:5,method:"tools/call",params:{name:"next_actions",arguments:{project:"e2e-throwaway"}}}')
+  resp=$(curl -sf -m30 "$MCP" -H 'content-type: application/json' -d "$req") \
+    || fail "next_actions MCP call failed (curl)"
+  err=$(printf '%s' "$resp" | jq -r '.error.message // empty')
+  [ -z "$err" ] || fail "next_actions returned JSON-RPC error in vector mode: $err"
+  ans=$(printf '%s' "$resp" | jq -r '.result.structuredContent.answer // empty')
+  printf '%s' "$ans" | grep -q "verify next_actions endpoint" \
+    || fail "next_actions MCP structuredContent missing the planted claim: $ans"
+  echo "   → MCP next_actions returned the planted next-action claim"
+fi
+
+# --- 6) forget ------------------------------------------------------------------
+echo "6) forget (MCP tools/call forget — clean up)…"
 req=$(jq -nc --arg t "$TITLE" \
   '{jsonrpc:"2.0",id:5,method:"tools/call",params:{name:"forget",arguments:{title:$t}}}')
 resp=$(curl -sf -m30 "$MCP" -H 'content-type: application/json' -d "$req") \
@@ -135,10 +166,10 @@ ack=$(printf '%s' "$resp" | jq -r '.result.content[0].text // empty')
 printf '%s' "$ack" | grep -q "forgot" || fail "forget ack missing 'forgot': $ack"
 echo "   → $ack"
 
-# --- 6) recall after forget -----------------------------------------------------
-echo "6) recall after forget (assert the throwaway note is gone)…"
+# --- 7) recall after forget -----------------------------------------------------
+echo "7) recall after forget (assert the throwaway note is gone)…"
 req=$(jq -nc --arg q "$NONCE" \
-  '{jsonrpc:"2.0",id:6,method:"tools/call",params:{name:"recall",arguments:{query:$q}}}')
+  '{jsonrpc:"2.0",id:7,method:"tools/call",params:{name:"recall",arguments:{query:$q}}}')
 resp=$(curl -sf -m120 "$MCP" -H 'content-type: application/json' -d "$req") \
   || fail "recall call failed (curl)"
 err=$(printf '%s' "$resp" | jq -r '.error.message // empty')
@@ -148,17 +179,17 @@ printf '%s' "$text" | grep -q "$NONCE" \
   && fail "forget failed — nonce '$NONCE' still found after recall: $text" \
   || echo "   → note no longer recalled"
 
-# --- 7) assert the throwaway file was actually deleted from disk -----------------
-echo "7) assert throwaway file removed from vault/wiki …"
+# --- 8) assert the throwaway file was actually deleted from disk -----------------
+echo "8) assert throwaway file removed from vault/wiki …"
 if [ -f "$note_path" ]; then
   fail "forget did not remove the file: $note_path"
 fi
 echo "   → file removed"
 
 if [ "$VEC" = 0 ]; then
-  echo "OK: e2e passed — wiki-mode remember→recall→forget round-trips, vector-only neighbors rejected."
+  echo "OK: e2e passed — wiki-mode remember→recall→forget round-trips, vector-only neighbors/next_actions rejected."
 else
-  echo "OK: e2e passed — vector-mode remember→search→recall→neighbors→forget round-trips."
+  echo "OK: e2e passed — vector-mode remember→search→recall→neighbors→next_actions→forget round-trips."
 fi
 
 echo "NOTE: the throwaway note (title '$TITLE' / $note_path) was removed by the forget step."

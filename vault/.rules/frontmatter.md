@@ -43,12 +43,12 @@ Claims are the most important field for later recall. Each claim is a `(subject,
 - `subject`: project or component name (e.g., `kb-rag-bot`)
 - `predicate`: property/decision axis (e.g., `model-interface`, `status`, `release-version`)
 - `value`: concrete fact (e.g., `bedrock-converse`, `removed`, `0.1.3`)
-- `kind`: one of `fact` (default), `decision`, `assumption`, `risk`, `blocked`, `goal`, `term`
+- `kind`: one of `fact` (default), `decision`, `assumption`, `risk`, `blocked`, `goal`, `term`, `next`
 - `confidence`: one of `certain` (default), `likely`, `assumption`, `outdated`
 
 Aim for 3–5 claims per session-distilled note. Avoid vague values like "검토" or "확인" — they sound like next-steps, not facts.
 
-Use `decision` for concrete choices, `risk` for open uncertainties, `blocked` for active obstacles, `goal` for committed targets, and `term` for project-specific glossary entries (subject=term, value=definition).
+Use `decision` for concrete choices, `risk` for open uncertainties, `blocked` for active obstacles, `goal` for committed targets, `term` for project-specific glossary entries (subject=term, value=definition), and `next` for concrete follow-up actions still pending after the session.
 
 ---
 

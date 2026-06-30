@@ -52,6 +52,26 @@ def test_hermes_agent_calls_wire_hermes():
     assert mock_wire.called is True
 
 
+def test_codex_calls_wire_codex():
+    """codex wiring includes MCP config plus the host collector worker."""
+    with mock.patch.object(
+        agent_wiring,
+        "wire_codex",
+        return_value={
+            "agent": "codex",
+            "path": "~/.codex/mcp.json",
+            "changed": False,
+            "worker_kind": "launchd",
+            "worker_path": "~/Library/LaunchAgents/com.ohmyboring.codex-ingest.plist",
+            "worker_loaded": True,
+        },
+    ) as mock_wire:
+        results, failed = agent_wiring.install(["codex"], "ohmyboring", {})
+    assert failed is False
+    assert len(results) == 1
+    assert mock_wire.called is True
+
+
 def test_unsupported_agent_is_skipped_without_failure():
     results, failed = agent_wiring.install(["nonexistent-agent"], "ohmyboring", {})
     assert failed is False
@@ -104,19 +124,91 @@ def test_wire_hermes_adds_hint_and_weekly():
     with tempfile.TemporaryDirectory() as d, mock.patch.object(
         agent_wiring, "_sync_hermes_cron_jobs", return_value={"changed": False, "jobs_count": 3}
     ) as mock_cron:
+        fake_home = Path(d) / "home"
+
+        def fake_expanduser(value):
+            if value == "~":
+                return str(fake_home)
+            if value.startswith("~/"):
+                return str(fake_home / value[2:])
+            return value
+
         home = Path(d) / "omb"
         scripts = home / "agents" / "hermes"
         scripts.mkdir(parents=True)
         (scripts / "briefing.py").write_text("# stub", encoding="utf-8")
         (scripts / "weekly-briefing.py").write_text("# stub", encoding="utf-8")
+        (scripts / "codex-collect-sessions.py").write_text("# stub", encoding="utf-8")
         cfg = Path(d) / "config.yaml"
-        result = agent_wiring.wire_hermes(cfg, boring_home=str(home))
+        with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser):
+            result = agent_wiring.wire_hermes(cfg, boring_home=str(home))
         assert result["changed"] is True
         text = cfg.read_text(encoding="utf-8")
         assert "environment_hint:" in text
         assert "ohmyboring/context" in text
-        assert (Path(os.path.expanduser("~/.hermes/scripts")) / "weekly-briefing.py").exists()
+        assert (fake_home / ".hermes" / "scripts" / "weekly-briefing.py").exists()
+        assert (fake_home / ".hermes" / "scripts" / "codex-collect-sessions.py").exists()
         assert mock_cron.called is True
+
+
+def test_install_hermes_skills_removes_legacy_nested_duplicate():
+    """Old installs could leave memory-ingest/memory-ingest/SKILL.md and confuse Hermes."""
+    with tempfile.TemporaryDirectory() as d:
+        fake_home = Path(d) / "home"
+        omb = Path(d) / "omb"
+        src = omb / "agents" / "hermes" / "skills" / "memory-ingest"
+        src.mkdir(parents=True)
+        (src / "SKILL.md").write_text("name: memory-ingest\n", encoding="utf-8")
+
+        dst = fake_home / ".hermes" / "skills" / "memory-ingest"
+        nested = dst / "memory-ingest"
+        nested.mkdir(parents=True)
+        (nested / "SKILL.md").write_text("stale duplicate\n", encoding="utf-8")
+
+        def fake_expanduser(value):
+            if value == "~":
+                return str(fake_home)
+            if value.startswith("~/"):
+                return str(fake_home / value[2:])
+            return value
+
+        with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser):
+            agent_wiring._install_hermes_skills(str(omb))
+
+        assert (dst / "SKILL.md").exists()
+        assert not nested.exists()
+
+
+def test_install_codex_host_worker_macos_writes_launch_agent():
+    """The default codex adapter creates a visible host-side collector schedule."""
+    with tempfile.TemporaryDirectory() as d:
+        fake_home = Path(d) / "home"
+        omb = Path(d) / "omb"
+        collector = omb / "agents" / "codex" / "collect-sessions.py"
+        collector.parent.mkdir(parents=True)
+        collector.write_text("# stub", encoding="utf-8")
+
+        def fake_expanduser(value):
+            if value == "~":
+                return str(fake_home)
+            if value.startswith("~/"):
+                return str(fake_home / value[2:])
+            return value
+
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser), mock.patch.object(
+            agent_wiring.subprocess, "run", return_value=completed
+        ):
+            result = agent_wiring._install_codex_host_worker_macos(str(omb))
+
+        plist = fake_home / "Library" / "LaunchAgents" / "com.ohmyboring.codex-ingest.plist"
+        text = plist.read_text(encoding="utf-8")
+        assert result["kind"] == "launchd"
+        assert result["loaded"] is True
+        assert str(collector) in text
+        assert "<integer>1200</integer>" in text
+        assert "CODEX_INCLUDE_ROLLOUTS=1" in text
+        assert "COLLECT_STABLE_AGE_SECONDS=1800" in text
 
 
 def test_next_cron_run_finds_next_monday():
@@ -144,22 +236,36 @@ def test_sync_hermes_cron_jobs_adds_managed_job():
             result = agent_wiring._sync_hermes_cron_jobs()
         assert result["changed"] is True
         saved = mock_save.call_args[0][1]
-        assert len(saved["jobs"]) == 2
+        # weekly-briefing (managed from config) + morning-briefing (preserved) + memory-ingest-worker + codex-memory-ingest-worker
+        assert len(saved["jobs"]) == 4
         weekly = next(j for j in saved["jobs"] if j["name"] == "weekly-briefing")
         assert weekly["script"] == "weekly-briefing.py"
         assert weekly["enabled"] is True
         assert weekly["deliver"] == "slack:test"
+        worker = next(j for j in saved["jobs"] if j["name"] == "memory-ingest-worker")
+        assert worker["script"] == "/host/oh-my-boring/agents/hermes/ingest-worker.py"
+        assert worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
+        assert worker["skill"] == "memory-ingest"
+        codex_worker = next(j for j in saved["jobs"] if j["name"] == "codex-memory-ingest-worker")
+        assert codex_worker["script"] == "codex-collect-sessions.py"
+        assert codex_worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
+        assert codex_worker["skill"] is None
+        assert codex_worker["skills"] == []
+        assert codex_worker["no_agent"] is True
 
 
 if __name__ == "__main__":
     test_install_reports_failure()
     test_install_returns_success_when_ok()
     test_hermes_agent_calls_wire_hermes()
+    test_codex_calls_wire_codex()
     test_unsupported_agent_is_skipped_without_failure()
     test_settings_path_override()
     test_default_path_when_no_override()
     test_wire_claude_code_adds_session_start()
     test_wire_hermes_adds_hint_and_weekly()
+    test_install_hermes_skills_removes_legacy_nested_duplicate()
+    test_install_codex_host_worker_macos_writes_launch_agent()
     test_next_cron_run_finds_next_monday()
     test_sync_hermes_cron_jobs_adds_managed_job()
     test_wire_hermes_adds_hint_and_weekly()

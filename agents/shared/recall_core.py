@@ -4,6 +4,8 @@
 Agent-specific entry points (Claude Code, Kimi, etc.) become thin wrappers that
 only supply their injection-filter, if any, and then delegate here.
 """
+from __future__ import annotations
+
 import json
 import os
 import sys

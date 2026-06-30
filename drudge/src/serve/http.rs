@@ -2,19 +2,26 @@
 //!
 //! Cross-reference: design decision D3 (write door gated / read door open).
 use std::time::Instant;
+use std::time::SystemTime;
 
 use axum::Json;
 use axum::extract::{Query, State};
+use serde_json::{Value, json};
 
 use crate::ask;
 use crate::audit;
 use crate::graph;
 use crate::retrieve;
 use crate::serve::{
-    AppError, AppState, AskReq, AskResp, CompactResp, GraphReq, GraphResp, HealthResp,
-    MCP_MAX_RESULTS, MCP_MAX_TOKENS, QueryLogEntry, QueryLogReq, QueryLogResp, SearchHit,
-    SearchResp, SyncResp, SyncState, count_wiki_notes, spawn_query_log, vector_disabled,
+    AppError, AppState, AskReq, AskResp, CompactResp, EventIngestResp, EventLogEntry, EventLogReq,
+    EventLogResp, GraphReq, GraphResp, HealthResp, MCP_MAX_RESULTS, MCP_MAX_TOKENS, QueryLogEntry,
+    QueryLogReq, QueryLogResp, SearchHit, SearchResp, StalledReq, SyncResp, SyncState,
+    count_wiki_notes, spawn_query_log, vector_disabled,
 };
+use crate::store::EventLogFilter;
+
+const EVENT_LOG_MAX_LIMIT: i64 = 1000;
+const EVENT_INGEST_MAX_BATCH: usize = 100;
 
 pub(crate) async fn health(State(state): State<AppState>) -> Json<HealthResp> {
     // Non-blocking: try_lock reveals whether a sync is mid-flight without ever waiting on it. The
@@ -195,7 +202,68 @@ pub(crate) async fn handle_risks(
     }))
 }
 
-/// Structured context card for agent session start — decisions/risks/facts/glossary as claim lists.
+/// Next-action register — recent `next` claims plus active `blocked` claims.
+pub(crate) async fn handle_next_actions(
+    State(s): State<AppState>,
+    Json(req): Json<crate::serve::NextActionsReq>,
+) -> Result<Json<AskResp>, AppError> {
+    let started = Instant::now();
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let out = ask::next_action_register(
+        store,
+        &s.llm,
+        req.project.as_deref(),
+        &[],
+        s.cfg.note_lang.as_str(),
+    )
+    .await?;
+    spawn_query_log(
+        s.store.clone(),
+        "next_actions",
+        req.project.clone().unwrap_or_default(),
+        out.sources.clone(),
+        out.sources.clone(),
+        out.answer.chars().take(280).collect(),
+        started.elapsed(),
+    );
+    Ok(Json(AskResp {
+        answer: out.answer,
+        sources: out.sources,
+    }))
+}
+
+/// Stalled register — `next`/`blocked` claims older than N days (default 7).
+pub(crate) async fn handle_stalled(
+    State(s): State<AppState>,
+    Json(req): Json<StalledReq>,
+) -> Result<Json<AskResp>, AppError> {
+    let started = Instant::now();
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let out = ask::stalled_register(
+        store,
+        &s.llm,
+        req.project.as_deref(),
+        &[],
+        s.cfg.note_lang.as_str(),
+        req.older_than_days.unwrap_or(7),
+    )
+    .await?;
+    spawn_query_log(
+        s.store.clone(),
+        "stalled",
+        req.project.clone().unwrap_or_default(),
+        out.sources.clone(),
+        out.sources.clone(),
+        out.answer.chars().take(280).collect(),
+        started.elapsed(),
+    );
+    Ok(Json(AskResp {
+        answer: out.answer,
+        sources: out.sources,
+    }))
+}
+
+/// Structured context card for agent session start — decisions/risks/facts/glossary/next_actions as claim lists.
 /// Uses recency ordering (no vector search), so it works when BORING_VECTOR=off.
 pub(crate) async fn handle_context(
     State(s): State<AppState>,
@@ -218,6 +286,7 @@ pub(crate) async fn handle_context(
             risks: vec![],
             facts: vec![],
             glossary: vec![],
+            next_actions: vec![],
             language: s.cfg.note_lang.as_str().to_owned(),
         }
     };
@@ -345,6 +414,98 @@ pub(crate) async fn handle_query_log(
     Ok(Json(QueryLogResp { entries }))
 }
 
+/// Recent adapter/workflow events mirrored into Postgres. The payload is OpenTelemetry-shaped
+/// (`otel`) while keeping legacy top-level keys for filtering and readability.
+pub(crate) async fn handle_events(
+    State(s): State<AppState>,
+    Query(params): Query<EventLogReq>,
+) -> Result<Json<EventLogResp>, AppError> {
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let limit = params.limit.clamp(1, EVENT_LOG_MAX_LIMIT);
+    let rows = store
+        .recent_events(EventLogFilter {
+            limit,
+            component: params.component.as_deref(),
+            event_name: params.event_name.as_deref(),
+            status: params.status.as_deref(),
+            run_id: params.run_id.as_deref(),
+            workflow: params.workflow.as_deref(),
+            since_hours: params.since_hours,
+        })
+        .await?;
+    let entries = rows
+        .into_iter()
+        .map(|r| {
+            let observed_at = system_time_rfc3339(r.observed_at);
+            let severity_text = r.severity_text;
+            let event_name = r.event_name;
+            let trace_id = r.trace_id;
+            let span_id = r.span_id;
+            let body = r.body;
+            let attributes = r.attributes;
+            let resource = r.resource;
+            let otel = json!({
+                "observed_timestamp": observed_at.clone(),
+                "time_unix_nano": r.time_unix_nano,
+                "severity_text": severity_text.clone(),
+                "severity_number": r.severity_number,
+                "body": body.clone(),
+                "attributes": attributes.clone(),
+                "resource": resource.clone(),
+                "trace_id": trace_id.clone(),
+                "span_id": span_id.clone(),
+                "event_name": event_name.clone(),
+            });
+            EventLogEntry {
+                id: r.id,
+                observed_at,
+                time_unix_nano: r.time_unix_nano,
+                severity_text,
+                severity_number: r.severity_number,
+                service_name: r.service_name,
+                component: r.component,
+                event_name,
+                status: r.status,
+                trace_id,
+                span_id,
+                run_id: r.run_id,
+                session_id: r.session_id,
+                workflow: r.workflow,
+                workflow_node: r.workflow_node,
+                workflow_outcome: r.workflow_outcome,
+                body,
+                attributes,
+                resource,
+                otel,
+            }
+        })
+        .collect();
+    Ok(Json(EventLogResp { entries }))
+}
+
+/// Store one event or an `{events: [...]}` batch. The original file journal remains owned by
+/// `agents/shared/event_log.py`; this endpoint is the queryable DB projection.
+pub(crate) async fn handle_event_ingest(
+    State(s): State<AppState>,
+    Json(req): Json<Value>,
+) -> Result<Json<EventIngestResp>, AppError> {
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let events = if let Some(items) = req.get("events").and_then(Value::as_array) {
+        items
+            .iter()
+            .take(EVENT_INGEST_MAX_BATCH)
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        vec![req]
+    };
+    let accepted = events.len();
+    for event in events {
+        store.log_event(&event).await?;
+    }
+    Ok(Json(EventIngestResp { accepted }))
+}
+
 pub(crate) async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncResp>, AppError> {
     let _guard = s.sync_lock.lock().await;
     let o = super::scheduler::do_sync(s.store.as_deref(), &s.llm, (*s.vault_dir).as_ref(), &s.cfg)
@@ -361,6 +522,11 @@ pub(crate) async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncRe
         total_chunks: o.total_chunks,
         total_edges: o.total_edges,
     }))
+}
+
+fn system_time_rfc3339(value: SystemTime) -> String {
+    let datetime: chrono::DateTime<chrono::Utc> = value.into();
+    datetime.to_rfc3339()
 }
 
 /// Maintenance compact: VACUUM/ANALYZE + REINDEX + query_log pruning + orphan GC.

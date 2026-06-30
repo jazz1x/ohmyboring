@@ -4,12 +4,16 @@
 Reads boring.json to decide which agents are enabled, then idempotently
 configures each agent's settings file. Backups are created as `.omb-bak`.
 """
+from __future__ import annotations
+
 import argparse
 import datetime
 import json
 import os
+import platform
 import secrets
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,6 +65,10 @@ DEFAULT_MCP_SERVER = {
     "type": "http",
     "url": "http://localhost:7700/mcp",
 }
+
+CODEX_HOST_WORKER_LABEL = "com.ohmyboring.codex-ingest"
+CODEX_HOST_WORKER_INTERVAL_SEC = 20 * 60
+CODEX_HOST_WORKER_LOG = f"/tmp/{CODEX_HOST_WORKER_LABEL}.log"
 
 
 def _expand(path_template: str) -> Path:
@@ -228,6 +236,128 @@ def wire_mcp_agent(agent_id: str, server_name: str, server_config: dict, path: P
     return {"agent": agent_id, "path": str(path), "changed": True}
 
 
+def _xml_escape(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _sh_quote(value: str) -> str:
+    if "'" in value:
+        raise ValueError("single quotes are not supported in scheduled paths")
+    return f"'{value}'"
+
+
+def _codex_collector_path(boring_home: str | None = None) -> Path:
+    home = boring_home if boring_home is not None else BORING_HOME
+    path = Path(home) / "agents" / "codex" / "collect-sessions.py"
+    if not path.exists():
+        raise FileNotFoundError(f"codex collector not found: {path}")
+    return path
+
+
+def _install_codex_host_worker_macos(boring_home: str | None = None) -> dict:
+    home = boring_home if boring_home is not None else BORING_HOME
+    collector = _codex_collector_path(home)
+    plist = Path(os.path.expanduser(f"~/Library/LaunchAgents/{CODEX_HOST_WORKER_LABEL}.plist"))
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{CODEX_HOST_WORKER_LABEL}</string>
+  <key>WorkingDirectory</key>
+  <string>{_xml_escape(str(home))}</string>
+  <key>ProgramArguments</key>
+  <array>
+	    <string>/usr/bin/env</string>
+	    <string>BORING_HOME={_xml_escape(str(home))}</string>
+	    <string>COLLECT_LIMIT=1</string>
+	    <string>CODEX_INCLUDE_ROLLOUTS=1</string>
+	    <string>COLLECT_STABLE_AGE_SECONDS=1800</string>
+	    <string>python3</string>
+	    <string>{_xml_escape(str(collector))}</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>{CODEX_HOST_WORKER_INTERVAL_SEC}</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>{CODEX_HOST_WORKER_LOG}</string>
+  <key>StandardErrorPath</key>
+  <string>{CODEX_HOST_WORKER_LOG}</string>
+</dict>
+</plist>
+"""
+    changed = not plist.exists() or plist.read_text(encoding="utf-8") != body
+    _write_text_atomic(plist, body)
+    domain = f"gui/{os.getuid()}"
+    subprocess.run(
+        ["launchctl", "bootout", f"{domain}/{CODEX_HOST_WORKER_LABEL}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    loaded = subprocess.run(
+        ["launchctl", "bootstrap", domain, str(plist)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if loaded.returncode != 0:
+        fallback = subprocess.run(
+            ["launchctl", "load", str(plist)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if fallback.returncode != 0:
+            raise RuntimeError(f"could not load {plist}")
+    return {"kind": "launchd", "path": str(plist), "changed": changed, "loaded": True}
+
+
+def _install_codex_host_worker_linux(boring_home: str | None = None) -> dict:
+    home = boring_home if boring_home is not None else BORING_HOME
+    collector = _codex_collector_path(home)
+    job = (
+        f"*/20 * * * * cd {_sh_quote(str(home))} && "
+        f"BORING_HOME={_sh_quote(str(home))} COLLECT_LIMIT=1 CODEX_INCLUDE_ROLLOUTS=1 "
+        f"COLLECT_STABLE_AGE_SECONDS=1800 "
+        f"python3 {_sh_quote(str(collector))} >>{_sh_quote(CODEX_HOST_WORKER_LOG)} 2>&1 "
+        f"# {CODEX_HOST_WORKER_LABEL}"
+    )
+    current = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    lines = current.stdout.splitlines() if current.returncode == 0 else []
+    next_lines = [line for line in lines if CODEX_HOST_WORKER_LABEL not in line]
+    next_lines.extend([f"# {CODEX_HOST_WORKER_LABEL}", job])
+    next_text = "\n".join(next_lines) + "\n"
+    changed = "\n".join(lines).strip() != "\n".join(next_lines).strip()
+    subprocess.run(["crontab", "-"], input=next_text, text=True, check=True)
+    return {"kind": "cron", "path": "user crontab", "changed": changed, "loaded": True}
+
+
+def install_codex_host_worker(boring_home: str | None = None) -> dict:
+    system = platform.system()
+    if system == "Darwin":
+        return _install_codex_host_worker_macos(boring_home)
+    if system == "Linux":
+        return _install_codex_host_worker_linux(boring_home)
+    raise RuntimeError(f"unsupported OS for Codex host worker: {system}")
+
+
+def wire_codex(server_name: str, server_config: dict, path: Path | None = None, boring_home: str | None = None) -> dict:
+    mcp = wire_mcp_agent("codex", server_name, server_config, path)
+    worker = install_codex_host_worker(boring_home)
+    return {
+        "agent": "codex",
+        "path": mcp["path"],
+        "changed": bool(mcp["changed"] or worker["changed"]),
+        "worker_kind": worker["kind"],
+        "worker_path": worker["path"],
+        "worker_loaded": worker["loaded"],
+    }
+
+
 def _write_text_atomic(path: Path, text: str) -> None:
     """Atomic text write: temp file + rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -301,6 +431,19 @@ def _install_hermes_weekly_briefing(boring_home: str | None = None) -> None:
     shutil.copy2(src, dst)
 
 
+def _install_hermes_codex_collector(boring_home: str | None = None) -> None:
+    """Install the Codex collector wrapper into ~/.hermes/scripts/."""
+    home = boring_home if boring_home is not None else BORING_HOME
+    src = Path(home) / "agents" / "hermes" / "codex-collect-sessions.py"
+    if not src.exists():
+        raise FileNotFoundError(f"codex collector wrapper not found: {src}")
+    dst_dir = Path(os.path.expanduser("~/.hermes/scripts"))
+    dst = dst_dir / "codex-collect-sessions.py"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    _backup(dst)
+    shutil.copy2(src, dst)
+
+
 def _parse_cron_dow(dow_expr: str) -> set[int]:
     """Parse the day-of-week part of a cron expression.
 
@@ -364,6 +507,9 @@ def _install_hermes_skills(boring_home: str | None = None) -> None:
             continue
         dst = dst_root / skill_dir.name
         dst.mkdir(parents=True, exist_ok=True)
+        legacy_nested = dst / skill_dir.name
+        if legacy_nested.is_dir():
+            shutil.rmtree(legacy_nested)
         for src_file in skill_dir.iterdir():
             if src_file.is_file():
                 shutil.copy2(src_file, dst / src_file.name)
@@ -455,11 +601,165 @@ def _sync_hermes_cron_jobs() -> dict:
             jobs.append(job)
             changed = True
 
+    if _ensure_memory_ingest_worker(jobs, tz, now, BORING_HOME):
+        changed = True
+
+    if _ensure_codex_memory_ingest_worker(jobs, tz, now, BORING_HOME):
+        changed = True
+
     data["jobs"] = jobs
     data["updated_at"] = now.isoformat()
     if changed:
         _save_json(jobs_path, data)
     return {"changed": changed, "jobs_count": len(jobs)}
+
+
+def _ensure_memory_ingest_worker(
+    jobs: list[dict],
+    tz: datetime.timezone,
+    now: datetime.datetime,
+    boring_home: str,
+) -> bool:
+    """Ensure the autonomous 20-minute session-ingestion worker job exists and points to the
+    canonical repo script. This job is intentionally not exposed in boring.json hermes_cron_jobs
+    because it is infrastructure, not user scheduling.
+    """
+    # The hermes-agent container always mounts the repo root at /host/oh-my-boring.
+    script = "/host/oh-my-boring/agents/hermes/ingest-worker.py"
+    desired_schedule = {"kind": "interval", "minutes": 20, "display": "every 20m"}
+    existing = next((j for j in jobs if j.get("name") == "memory-ingest-worker"), None)
+    if existing:
+        needs_update = (
+            existing.get("script") != script
+            or existing.get("schedule") != desired_schedule
+            or not existing.get("enabled", True)
+            or existing.get("skill") != "memory-ingest"
+            or existing.get("no_agent", True) is not False
+        )
+        if not needs_update:
+            return False
+        existing["script"] = script
+        existing["schedule"] = desired_schedule
+        existing["schedule_display"] = "every 20m"
+        existing["enabled"] = True
+        existing["state"] = "scheduled"
+        existing["skills"] = ["memory-ingest"]
+        existing["skill"] = "memory-ingest"
+        existing["no_agent"] = False
+        existing["next_run_at"] = (now + datetime.timedelta(minutes=1)).isoformat()
+        existing["paused_at"] = None
+        existing["paused_reason"] = None
+        return True
+
+    jobs.append(
+        {
+            "id": secrets.token_hex(8),
+            "name": "memory-ingest-worker",
+            "prompt": "",
+            "skills": ["memory-ingest"],
+            "skill": "memory-ingest",
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "script": script,
+            "no_agent": False,
+            "context_from": None,
+            "schedule": desired_schedule,
+            "schedule_display": "every 20m",
+            "repeat": {"times": None, "completed": 0},
+            "enabled": True,
+            "state": "scheduled",
+            "paused_at": None,
+            "paused_reason": None,
+            "created_at": now.isoformat(),
+            "next_run_at": (now + datetime.timedelta(minutes=1)).isoformat(),
+            "last_run_at": None,
+            "last_status": None,
+            "last_error": None,
+            "last_delivery_error": None,
+            "deliver": "local",
+            "origin": None,
+            "enabled_toolsets": None,
+            "workdir": None,
+            "profile": None,
+        }
+    )
+    return True
+
+
+def _ensure_codex_memory_ingest_worker(
+    jobs: list[dict],
+    tz: datetime.timezone,
+    now: datetime.datetime,
+    boring_home: str,
+) -> bool:
+    """Ensure the autonomous 20-minute Codex session-ingestion worker exists.
+
+    Unlike the Claude memory-ingest-worker, this script distills and remembers on
+    its own. Run it as a no-agent cron script so Hermes does not try to resolve
+    the memory-ingest skill before executing it.
+    """
+    script = "codex-collect-sessions.py"
+    desired_schedule = {"kind": "interval", "minutes": 20, "display": "every 20m"}
+    existing = next((j for j in jobs if j.get("name") == "codex-memory-ingest-worker"), None)
+    if existing:
+        needs_update = (
+            existing.get("script") != script
+            or existing.get("schedule") != desired_schedule
+            or not existing.get("enabled", True)
+            or existing.get("skill") is not None
+            or existing.get("skills") != []
+            or existing.get("no_agent", False) is not True
+        )
+        if not needs_update:
+            return False
+        existing["script"] = script
+        existing["schedule"] = desired_schedule
+        existing["schedule_display"] = "every 20m"
+        existing["enabled"] = True
+        existing["state"] = "scheduled"
+        existing["skills"] = []
+        existing["skill"] = None
+        existing["no_agent"] = True
+        existing["next_run_at"] = (now + datetime.timedelta(minutes=1)).isoformat()
+        existing["paused_at"] = None
+        existing["paused_reason"] = None
+        return True
+
+    jobs.append(
+        {
+            "id": secrets.token_hex(8),
+            "name": "codex-memory-ingest-worker",
+            "prompt": "",
+            "skills": [],
+            "skill": None,
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "script": script,
+            "no_agent": True,
+            "context_from": None,
+            "schedule": desired_schedule,
+            "schedule_display": "every 20m",
+            "repeat": {"times": None, "completed": 0},
+            "enabled": True,
+            "state": "scheduled",
+            "paused_at": None,
+            "paused_reason": None,
+            "created_at": now.isoformat(),
+            "next_run_at": (now + datetime.timedelta(minutes=1)).isoformat(),
+            "last_run_at": None,
+            "last_status": None,
+            "last_error": None,
+            "last_delivery_error": None,
+            "deliver": "local",
+            "origin": None,
+            "enabled_toolsets": None,
+            "workdir": None,
+            "profile": None,
+        }
+    )
+    return True
 
 
 _HERMES_HINT = (
@@ -522,6 +822,7 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
         _write_text_atomic(path, body)
         _install_hermes_briefing(boring_home)
         _install_hermes_weekly_briefing(boring_home)
+        _install_hermes_codex_collector(boring_home)
         _install_hermes_skills(boring_home)
         cron_result = _sync_hermes_cron_jobs()
         return {
@@ -558,6 +859,7 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
     _write_text_atomic(path, "\n".join(lines) + "\n")
     _install_hermes_briefing(boring_home)
     _install_hermes_weekly_briefing(boring_home)
+    _install_hermes_codex_collector(boring_home)
     _install_hermes_skills(boring_home)
     cron_result = _sync_hermes_cron_jobs()
     changed = changed or cron_result["changed"]
@@ -587,6 +889,8 @@ def install(enabled_agents, server_name, server_config, boring_home: str | None 
                 results.append(wire_kimi())
             elif agent_id == "hermes-agent":
                 results.append(wire_hermes(boring_home=boring_home))
+            elif agent_id == "codex":
+                results.append(wire_codex(server_name, server_config, boring_home=boring_home))
             else:
                 results.append(wire_mcp_agent(agent_id, server_name, server_config))
         except Exception as e:

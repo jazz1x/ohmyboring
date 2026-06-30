@@ -4,6 +4,7 @@
 //! normalization, body formatting, and the optional frontmatter repair pass.
 //! Cross-reference: design decision D3 (gated write), D7 (vault SSOT).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -101,10 +102,11 @@ pub fn normalize_body(body: &str) -> String {
     strip_trailing_empty_heading(out.trim()).trim().to_owned()
 }
 
-/// Scan vault/wiki for the lowest unused `wiki-NNNN` id.
-/// Fills gaps caused by forget/deletion; `wiki-0000` is reserved for the seed note.
-fn next_wiki_id(wiki_dir: &Path) -> Result<u32> {
-    let mut used: std::collections::HashSet<u32> = std::collections::HashSet::new();
+/// Scan vault/wiki (and optional DB-derived ids) for the next `wiki-NNNN` id.
+/// Does NOT fill gaps: ids are monotonically increasing so a number, once used,
+/// never refers to a different note later. `wiki-0000` is reserved for the seed note.
+fn next_wiki_id(wiki_dir: &Path, db_ids: Option<&HashSet<u32>>) -> Result<u32> {
+    let mut used: HashSet<u32> = HashSet::new();
     if wiki_dir.exists() {
         for entry in std::fs::read_dir(wiki_dir)
             .with_context(|| format!("failed to read wiki dir: {}", wiki_dir.display()))?
@@ -120,11 +122,11 @@ fn next_wiki_id(wiki_dir: &Path) -> Result<u32> {
             }
         }
     }
-    let mut n: u32 = 1;
-    while used.contains(&n) {
-        n += 1;
+    if let Some(db) = db_ids {
+        used.extend(db);
     }
-    Ok(n)
+    let max = used.iter().copied().max().unwrap_or(0);
+    Ok(max + 1)
 }
 
 /// Atomically allocate the next `wiki-NNNN.md` path in `wiki_dir`.
@@ -133,10 +135,17 @@ fn next_wiki_id(wiki_dir: &Path) -> Result<u32> {
 /// same id. On collision (another caller won the race) we retry with the next
 /// integer until we successfully create a fresh file. The returned path points
 /// to an empty file that the caller can write into.
-pub fn allocate_wiki_path(wiki_dir: &Path) -> Result<(String, PathBuf)> {
+///
+/// `db_ids` optionally contains ids already persisted in the vector store, so
+/// a new note never reuses a source_path that still exists in Postgres even if
+/// its wiki file is temporarily missing.
+pub fn allocate_wiki_path(
+    wiki_dir: &Path,
+    db_ids: Option<&HashSet<u32>>,
+) -> Result<(String, PathBuf)> {
     std::fs::create_dir_all(wiki_dir)
         .with_context(|| format!("failed to create wiki dir: {}", wiki_dir.display()))?;
-    let mut n = next_wiki_id(wiki_dir)?;
+    let mut n = next_wiki_id(wiki_dir, db_ids)?;
     loop {
         let id = format!("wiki-{n:04}");
         let path = wiki_dir.join(format!("{id}.md"));
@@ -178,7 +187,7 @@ pub fn render_wiki_note(wiki_id: &str, front: &FrontMatter, body: &str) -> Resul
         concepts: &'a [String],
         claims: &'a [crate::frontmatter::Claim],
         relates_to: Vec<String>,
-        sources: Vec<String>,
+        sources: &'a [String],
         /// Session provenance: which session produced this note. Persisted when present so a note
         /// can be traced back to (and deduped against) its originating session. Absent on legacy
         /// notes and manual remembers → skipped, keeping their frontmatter unchanged.
@@ -203,7 +212,7 @@ pub fn render_wiki_note(wiki_id: &str, front: &FrontMatter, body: &str) -> Resul
         concepts: &front.concepts,
         claims: &front.claims,
         relates_to: Vec::new(),
-        sources: Vec::new(),
+        sources: &front.sources,
         omb_session_id: front.omb_session_id.as_deref(),
     };
     let yaml = serde_yaml::to_string(&fm).context("failed to serialize wiki frontmatter YAML")?;
@@ -359,6 +368,7 @@ mod tests {
 
         // present → persisted as provenance, and the note round-trips through YAML parse
         front.omb_session_id = Some("sess-abc123".to_owned());
+        front.sources = vec!["raw/session-manifests/sess-abc123.md".to_owned()];
         let out = render_wiki_note("wiki-0042", &front, "body").unwrap();
         assert!(out.contains("omb_session_id: sess-abc123"), "{out}");
         let (yaml, _) = split_frontmatter(&out).expect("frontmatter splits");
@@ -367,20 +377,37 @@ mod tests {
             parsed["omb_session_id"],
             serde_yaml::Value::from("sess-abc123")
         );
+        assert_eq!(
+            parsed["sources"][0],
+            serde_yaml::Value::from("raw/session-manifests/sess-abc123.md")
+        );
     }
 
     // ── next_wiki_id ──
 
     #[test]
-    fn next_wiki_id_fills_lowest_gap() {
+    fn next_wiki_id_uses_max_plus_one() {
         let tmp = tempfile::tempdir().unwrap();
         let wiki = tmp.path().join("wiki");
         std::fs::create_dir(&wiki).unwrap();
         std::fs::File::create(wiki.join("wiki-0000.md")).unwrap();
         std::fs::File::create(wiki.join("wiki-0002.md")).unwrap();
         std::fs::File::create(wiki.join("wiki-0005.md")).unwrap();
-        assert_eq!(super::next_wiki_id(&wiki).unwrap(), 1);
+        // monotonic: do not reuse the gaps at 1, 3, 4.
+        assert_eq!(super::next_wiki_id(&wiki, None).unwrap(), 6);
+        std::fs::File::create(wiki.join("wiki-0006.md")).unwrap();
+        assert_eq!(super::next_wiki_id(&wiki, None).unwrap(), 7);
+    }
+
+    #[test]
+    fn next_wiki_id_considers_db_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir(&wiki).unwrap();
         std::fs::File::create(wiki.join("wiki-0001.md")).unwrap();
-        assert_eq!(super::next_wiki_id(&wiki).unwrap(), 3);
+        std::fs::File::create(wiki.join("wiki-0002.md")).unwrap();
+        let db_ids: std::collections::HashSet<u32> = [5, 7].into_iter().collect();
+        // max is 7 (from DB), so next is 8 even though files only go up to 2.
+        assert_eq!(super::next_wiki_id(&wiki, Some(&db_ids)).unwrap(), 8);
     }
 }

@@ -11,10 +11,11 @@
 //!   `  cargo test -p drudge --test store_integration -- --test-threads=1`
 #![allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail fast on setup errors
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drudge::frontmatter::{Claim, FrontMatter};
-use drudge::store::{Doc, Store};
+use drudge::store::{Doc, EventLogFilter, Store};
+use serde_json::json;
 use tokio_postgres::{Client, NoTls};
 
 fn test_dsn() -> Option<String> {
@@ -69,6 +70,79 @@ async fn compact_succeeds_in_autocommit_mode() {
     let store = Store::open(&dsn, 1024).await.expect("open store");
     let summary = store.compact().await.expect("compact should not fail");
     assert!(summary.total_ms > 0, "compact should report elapsed time");
+}
+
+/// Workflow events are mirrored into Postgres as OpenTelemetry-shaped rows while keeping legacy
+/// filter keys (`component`, `event`, `status`, `run_id`) queryable.
+#[tokio::test]
+async fn event_log_round_trips_otel_projection() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let run_id = format!(
+        "event-roundtrip-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let fake_key = ["sk", "-ant", "-abcdefghij1234567890XYZ"].join("");
+
+    store
+        .log_event(&json!({
+            "ts": "2026-07-01T00:00:00Z",
+            "component": "guard",
+            "event": "structural_guard",
+            "status": "failed",
+            "run_id": run_id,
+            "credential": fake_key,
+            "workflow": "memory_ingest",
+            "workflow_node": "remember",
+            "workflow_outcome": "failed",
+            "otel": {
+                "time_unix_nano": 1_782_864_000_000_000_000_i64,
+                "severity_text": "ERROR",
+                "severity_number": 17,
+                "event_name": "structural_guard"
+            }
+        }))
+        .await
+        .expect("log event");
+
+    let rows = store
+        .recent_events(EventLogFilter {
+            limit: 10,
+            component: Some("guard"),
+            event_name: Some("structural_guard"),
+            status: Some("failed"),
+            run_id: Some(&run_id),
+            workflow: Some("memory_ingest"),
+            since_hours: None,
+        })
+        .await
+        .expect("recent events");
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.severity_text, "ERROR");
+    assert_eq!(row.severity_number, 17);
+    assert_eq!(row.workflow_node.as_deref(), Some("remember"));
+    assert_eq!(row.time_unix_nano, Some(1_782_864_000_000_000_000));
+    let attrs = row.attributes.to_string();
+    assert!(
+        !attrs.contains("sk-ant-"),
+        "event attributes must be redacted"
+    );
+    assert!(
+        attrs.contains("REDACTED"),
+        "redacted marker should remain visible"
+    );
+
+    let db = connect(&dsn).await;
+    db.execute("DELETE FROM event_log WHERE run_id = $1;", &[&run_id])
+        .await
+        .expect("cleanup event");
 }
 
 /// Ensure current_claims honors exclude_origins (a claim's origin comes from its parent document via
@@ -350,6 +424,126 @@ async fn claim_kind_and_confidence_round_trip() {
         .expect("recent risks");
     assert_eq!(risks.len(), 1);
     assert_eq!(risks[0].kind(), "risk");
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
+/// `next` claims are stored and filterable alongside blockers.
+#[tokio::test]
+async fn next_claim_is_recallable() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let path = unique_path("claim-next");
+    let mut front = dummy_frontmatter(&path);
+    front.project = "omb".to_owned();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let emb = [0.1_f32; 1024];
+    store
+        .upsert_claim(
+            "omb",
+            "follow-up",
+            "add next_actions endpoint",
+            &path,
+            SystemTime::now(),
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("upsert next claim");
+
+    let nexts = store
+        .recent_claims(
+            10,
+            Some("omb"),
+            Some(&["next".to_owned(), "blocked".to_owned()]),
+            &[],
+        )
+        .await
+        .expect("recent next actions");
+    assert_eq!(nexts.len(), 1);
+    assert_eq!(nexts[0].kind(), "next");
+    assert_eq!(nexts[0].predicate, "follow-up");
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
+/// Stalled backlog should respect the requested action kinds; old decisions stay in the decision register.
+#[tokio::test]
+async fn stalled_claims_honor_requested_kinds() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let path = unique_path("claim-stalled");
+    let project = format!(
+        "stalled-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let mut front = dummy_frontmatter(&path);
+    front.project = project.clone();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let older = SystemTime::now()
+        .checked_sub(Duration::from_hours(192))
+        .expect("valid older timestamp");
+    let emb = [0.1_f32; 1024];
+    store
+        .upsert_claim(
+            &project,
+            "follow-up",
+            "ship release checklist",
+            &path,
+            older,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("upsert next claim");
+    store
+        .upsert_claim(
+            &project,
+            "release-decision",
+            "keep stable wiki ids",
+            &path,
+            older,
+            &emb,
+            "decision",
+            "certain",
+        )
+        .await
+        .expect("upsert decision claim");
+
+    let stalled = store
+        .stalled_claims(
+            10,
+            Some(&project),
+            Some(&["next".to_owned(), "blocked".to_owned()]),
+            &[],
+            7,
+        )
+        .await
+        .expect("stalled claims");
+    assert_eq!(stalled.len(), 1);
+    assert_eq!(stalled[0].kind(), "next");
+    assert_eq!(stalled[0].predicate, "follow-up");
 
     store.delete_document(&path).await.expect("cleanup");
 }

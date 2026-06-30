@@ -11,6 +11,8 @@ The hook receives a JSON payload on stdin. Unlike Claude Code, Kimi does not pas
 `transcript_path`; we resolve the session directory from `session_id` + `cwd` using
 `~/.kimi-code/session_index.jsonl` (or the documented `wd_<slug>_<hash>` bucket layout).
 """
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -21,9 +23,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 import boring_config
 from distill_core import (  # noqa: F401
     _mark,
+    _distill_resolution,
     _throttled,
     distill_and_remember,
     git_remote_url,
+    log_skip_event,
     repo_slug,
 )
 
@@ -150,44 +154,52 @@ def extract_session(session_dir: str) -> str:
     return "\n".join(out)
 
 
-def main():
+def main() -> int:
     try:
         data = json.load(sys.stdin)
     except Exception as e:
         print(f"[omb-distill] invalid stdin JSON: {e}", file=sys.stderr)
-        return
+        return 2
 
     session_id = data.get("session_id") or data.get("sessionId") or ""
     cwd = data.get("cwd") or ""
     is_final = (data.get("hook_event_name") or "") == "SessionEnd"
     if not is_final and _throttled(session_id):
-        return
+        return 0
 
     session_dir = _find_session_dir(session_id, cwd)
     if not session_dir:
         print(f"[omb-distill] session dir not found for {session_id}", file=sys.stderr)
-        return
+        return 2
 
     text = extract_session(session_dir)
-    if len(text) < 500:
-        print("[omb-distill] transcript too short; skipping", file=sys.stderr)
-        return
-
     remote_url = git_remote_url(cwd)
     origin, _rule = boring_config.classify(cwd, remote_url or None)
     repo = repo_slug(cwd)
+    if len(text) < 500:
+        print("[omb-distill] transcript too short; skipping", file=sys.stderr)
+        log_skip_event(session_id, origin, repo, _distill_resolution(), "too_short")
+        if session_id:
+            _mark(session_id)
+        return 0
 
     if distill_and_remember(text, origin, repo, session_id):
         _mark(session_id)
         print("[omb-distill] remembered", file=sys.stderr)
+        return 0
     else:
         _mark(session_id, retry=True)
         print("[omb-distill] remember failed; marked for retry", file=sys.stderr)
+        return 1
+
+
+def run() -> int:
+    try:
+        return main()
+    except Exception as e:
+        print(f"[omb-distill] crashed: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"[omb-distill] crashed: {e}", file=sys.stderr)
-    sys.exit(0)
+    sys.exit(run())

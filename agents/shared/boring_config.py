@@ -9,6 +9,8 @@ Discovery order (first wins):
 Missing file is not an error — hooks degrade gracefully to an empty policy
 (personal origin, no source dirs, note_lang=auto).
 """
+from __future__ import annotations
+
 import json
 import os
 import sys
