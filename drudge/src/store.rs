@@ -17,6 +17,8 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use pgvector::Vector;
+use serde_json::{Value, json};
+use tokio_postgres::types::Json as PgJson;
 use tokio_postgres::{Client, NoTls};
 
 use crate::frontmatter::{Claim, FrontMatter};
@@ -95,6 +97,42 @@ pub struct QueryLogRow {
     pub sources: Vec<String>,
     pub answer_snippet: String,
     pub latency_ms: Option<i32>,
+}
+
+/// One structured workflow event mirrored into Postgres. Shape follows the OpenTelemetry log model
+/// while preserving the legacy adapter keys used by readiness (`component`, `event`, `status`, etc.).
+#[derive(Debug)]
+pub struct EventLogRow {
+    pub id: i64,
+    pub observed_at: SystemTime,
+    pub time_unix_nano: Option<i64>,
+    pub severity_text: String,
+    pub severity_number: i32,
+    pub service_name: String,
+    pub component: String,
+    pub event_name: String,
+    pub status: String,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
+    pub run_id: Option<String>,
+    pub session_id: Option<String>,
+    pub workflow: Option<String>,
+    pub workflow_node: Option<String>,
+    pub workflow_outcome: Option<String>,
+    pub body: Value,
+    pub attributes: Value,
+    pub resource: Value,
+}
+
+/// Read filter for the queryable event-log projection.
+pub struct EventLogFilter<'a> {
+    pub limit: i64,
+    pub component: Option<&'a str>,
+    pub event_name: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub run_id: Option<&'a str>,
+    pub workflow: Option<&'a str>,
+    pub since_hours: Option<i32>,
 }
 
 /// Result of a maintenance compact pass.
@@ -282,7 +320,33 @@ impl Store {
                      answer_snippet text NOT NULL DEFAULT '',
                      latency_ms    int
                  );
-                 CREATE INDEX IF NOT EXISTS query_log_created ON query_log(created_at DESC);"
+                 CREATE INDEX IF NOT EXISTS query_log_created ON query_log(created_at DESC);
+                 CREATE TABLE IF NOT EXISTS event_log (
+                     id               bigserial PRIMARY KEY,
+                     observed_at      timestamptz NOT NULL DEFAULT now(),
+                     time_unix_nano   bigint,
+                     severity_text    text NOT NULL DEFAULT 'INFO',
+                     severity_number  int NOT NULL DEFAULT 9,
+                     service_name     text NOT NULL DEFAULT '',
+                     component        text NOT NULL DEFAULT '',
+                     event_name       text NOT NULL DEFAULT '',
+                     status           text NOT NULL DEFAULT '',
+                     trace_id         text,
+                     span_id          text,
+                     run_id           text,
+                     session_id       text,
+                     workflow         text,
+                     workflow_node    text,
+                     workflow_outcome text,
+                     body             jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                     attributes       jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                     resource         jsonb NOT NULL DEFAULT '{{}}'::jsonb
+                 );
+                 CREATE INDEX IF NOT EXISTS event_log_observed ON event_log(observed_at DESC, id DESC);
+                 CREATE INDEX IF NOT EXISTS event_log_component ON event_log(component, observed_at DESC);
+                 CREATE INDEX IF NOT EXISTS event_log_event ON event_log(event_name, observed_at DESC);
+                 CREATE INDEX IF NOT EXISTS event_log_status ON event_log(status, observed_at DESC);
+                 CREATE INDEX IF NOT EXISTS event_log_run_id ON event_log(run_id, observed_at DESC);"
             ))
             .await
             .context("pgvector + graph schema")?;
@@ -1101,6 +1165,158 @@ impl Store {
             .collect())
     }
 
+    /// Mirror adapter/workflow events into the local DB using an OpenTelemetry-shaped log row.
+    ///
+    /// The original NDJSON file remains the append-only journal. This DB row is the queryable projection
+    /// for ops dashboards, HTTP, and MCP.
+    pub async fn log_event(&self, event: &Value) -> Result<()> {
+        let event = redact_json_value(event);
+        let otel = event.get("otel").and_then(Value::as_object);
+        let component = text_field(&event, "component").unwrap_or_default();
+        let event_name = otel
+            .and_then(|o| o.get("event_name"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| text_field(&event, "event"))
+            .unwrap_or_default();
+        let status = text_field(&event, "status").unwrap_or_default();
+        let severity_text = otel
+            .and_then(|o| o.get("severity_text"))
+            .and_then(Value::as_str)
+            .map_or_else(|| severity_text_for_status(&status), str::to_owned);
+        let severity_number = otel
+            .and_then(|o| o.get("severity_number"))
+            .and_then(Value::as_i64)
+            .and_then(|n| i32::try_from(n).ok())
+            .unwrap_or_else(|| severity_number_for_text(&severity_text));
+        let time_unix_nano = otel
+            .and_then(|o| o.get("time_unix_nano"))
+            .and_then(Value::as_i64);
+        let trace_id = otel
+            .and_then(|o| o.get("trace_id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let span_id = otel
+            .and_then(|o| o.get("span_id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let body = otel
+            .and_then(|o| o.get("body"))
+            .cloned()
+            .unwrap_or_else(|| json!({"event.name": event_name, "status": status}));
+        let attributes = otel
+            .and_then(|o| o.get("attributes"))
+            .cloned()
+            .unwrap_or_else(|| event.clone());
+        let resource = otel
+            .and_then(|o| o.get("resource"))
+            .cloned()
+            .unwrap_or_else(|| {
+                json!({"attributes": {
+                    "service.name": component,
+                    "service.namespace": "oh-my-boring"
+                }})
+            });
+        let service_name = resource
+            .get("attributes")
+            .and_then(|a| a.get("service.name"))
+            .and_then(Value::as_str)
+            .map_or_else(|| component.clone(), str::to_owned);
+
+        let run_id = text_field(&event, "run_id");
+        let session_id = text_field(&event, "session_id");
+        let workflow = text_field(&event, "workflow");
+        let workflow_node = text_field(&event, "workflow_node");
+        let workflow_outcome = text_field(&event, "workflow_outcome");
+
+        self.db
+            .execute(
+                "INSERT INTO event_log (
+                     time_unix_nano, severity_text, severity_number, service_name,
+                     component, event_name, status, trace_id, span_id, run_id, session_id,
+                     workflow, workflow_node, workflow_outcome, body, attributes, resource
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17);",
+                &[
+                    &time_unix_nano,
+                    &severity_text,
+                    &severity_number,
+                    &service_name,
+                    &component,
+                    &event_name,
+                    &status,
+                    &trace_id,
+                    &span_id,
+                    &run_id,
+                    &session_id,
+                    &workflow,
+                    &workflow_node,
+                    &workflow_outcome,
+                    &PgJson(&body),
+                    &PgJson(&attributes),
+                    &PgJson(&resource),
+                ],
+            )
+            .await
+            .context("log event")?;
+        Ok(())
+    }
+
+    pub async fn recent_events(&self, filter: EventLogFilter<'_>) -> Result<Vec<EventLogRow>> {
+        let rows = self
+            .db
+            .query(
+                "SELECT id, observed_at, time_unix_nano, severity_text, severity_number,
+                        service_name, component, event_name, status, trace_id, span_id,
+                        run_id, session_id, workflow, workflow_node, workflow_outcome,
+                        body, attributes, resource
+                 FROM event_log
+                 WHERE ($2::text IS NULL OR component = $2)
+                   AND ($3::text IS NULL OR event_name = $3)
+                   AND ($4::text IS NULL OR status = $4)
+                   AND ($5::text IS NULL OR run_id = $5)
+                   AND ($6::text IS NULL OR workflow = $6)
+                   AND ($7::int IS NULL OR observed_at >= now() - make_interval(hours => $7))
+                 ORDER BY observed_at DESC, id DESC
+                 LIMIT $1;",
+                &[
+                    &filter.limit,
+                    &filter.component,
+                    &filter.event_name,
+                    &filter.status,
+                    &filter.run_id,
+                    &filter.workflow,
+                    &filter.since_hours,
+                ],
+            )
+            .await
+            .context("recent events")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| EventLogRow {
+                id: r.get(0),
+                observed_at: r.get(1),
+                time_unix_nano: r.get(2),
+                severity_text: r.get(3),
+                severity_number: r.get(4),
+                service_name: r.get(5),
+                component: r.get(6),
+                event_name: r.get(7),
+                status: r.get(8),
+                trace_id: r.get(9),
+                span_id: r.get(10),
+                run_id: r.get(11),
+                session_id: r.get(12),
+                workflow: r.get(13),
+                workflow_node: r.get(14),
+                workflow_outcome: r.get(15),
+                body: r.get::<_, PgJson<Value>>(16).0,
+                attributes: r.get::<_, PgJson<Value>>(17).0,
+                resource: r.get::<_, PgJson<Value>>(18).0,
+            })
+            .collect())
+    }
+
     /// Maintenance compact: VACUUM ANALYZE + REINDEX TABLE CONCURRENTLY + old query_log
     /// pruning + orphan semantic-node GC. Returns a report of what happened.
     ///
@@ -1112,7 +1328,15 @@ impl Store {
         let started = std::time::Instant::now();
 
         let t0 = std::time::Instant::now();
-        for table in ["document", "chunk", "node", "edge", "claim", "query_log"] {
+        for table in [
+            "document",
+            "chunk",
+            "node",
+            "edge",
+            "claim",
+            "query_log",
+            "event_log",
+        ] {
             self.db
                 .batch_execute(&format!("VACUUM ANALYZE {table};"))
                 .await
@@ -1121,7 +1345,15 @@ impl Store {
         report.vacuum_ms = t0.elapsed().as_millis();
 
         let t0 = std::time::Instant::now();
-        for table in ["document", "chunk", "node", "edge", "claim", "query_log"] {
+        for table in [
+            "document",
+            "chunk",
+            "node",
+            "edge",
+            "claim",
+            "query_log",
+            "event_log",
+        ] {
             self.db
                 .batch_execute(&format!("REINDEX TABLE CONCURRENTLY {table};"))
                 .await
@@ -1288,6 +1520,52 @@ impl Store {
             }
         }
         Ok(gc)
+    }
+}
+
+fn text_field(event: &Value, key: &str) -> Option<String> {
+    event
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn severity_text_for_status(status: &str) -> String {
+    match status.to_ascii_lowercase().as_str() {
+        "failed" | "failure" | "error" => "ERROR".to_owned(),
+        "warn" | "warning" => "WARN".to_owned(),
+        "debug" => "DEBUG".to_owned(),
+        "trace" => "TRACE".to_owned(),
+        _ => "INFO".to_owned(),
+    }
+}
+
+fn severity_number_for_text(severity_text: &str) -> i32 {
+    match severity_text.to_ascii_uppercase().as_str() {
+        "TRACE" => 1,
+        "DEBUG" => 5,
+        "WARN" => 13,
+        "ERROR" => 17,
+        "FATAL" => 21,
+        _ => 9,
+    }
+}
+
+fn redact_json_value(value: &Value) -> Value {
+    let Ok(re) = crate::redact::build_secret_re() else {
+        return value.clone();
+    };
+    match value {
+        Value::String(s) => Value::String(crate::redact::redact(re, s)),
+        Value::Array(items) => Value::Array(items.iter().map(redact_json_value).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), redact_json_value(v)))
+                .collect(),
+        ),
+        _ => value.clone(),
     }
 }
 

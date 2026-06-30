@@ -17,14 +17,26 @@ import event_log
 class EventLogTests(unittest.TestCase):
     def setUp(self):
         self.old_event_log = os.environ.get("BORING_EVENT_LOG")
+        self.old_event_sink_url = os.environ.get("BORING_EVENT_SINK_URL")
+        self.old_event_db_mirror = os.environ.get("BORING_EVENT_DB_MIRROR")
         self.tmp = tempfile.TemporaryDirectory()
         os.environ["BORING_EVENT_LOG"] = os.path.join(self.tmp.name, "events.ndjson")
+        os.environ.pop("BORING_EVENT_SINK_URL", None)
+        os.environ["BORING_EVENT_DB_MIRROR"] = "0"
 
     def tearDown(self):
         if self.old_event_log is None:
             os.environ.pop("BORING_EVENT_LOG", None)
         else:
             os.environ["BORING_EVENT_LOG"] = self.old_event_log
+        if self.old_event_sink_url is None:
+            os.environ.pop("BORING_EVENT_SINK_URL", None)
+        else:
+            os.environ["BORING_EVENT_SINK_URL"] = self.old_event_sink_url
+        if self.old_event_db_mirror is None:
+            os.environ.pop("BORING_EVENT_DB_MIRROR", None)
+        else:
+            os.environ["BORING_EVENT_DB_MIRROR"] = self.old_event_db_mirror
         self.tmp.cleanup()
 
     def test_append_event_writes_one_ndjson_line(self):
@@ -45,6 +57,13 @@ class EventLogTests(unittest.TestCase):
         self.assertEqual(event["session_id"], "s1")
         self.assertEqual(event["run_id"], "s1")
         self.assertIn("ts", event)
+        self.assertEqual(event["otel"]["event_name"], "distill_resolution")
+        self.assertEqual(event["otel"]["severity_text"], "INFO")
+        self.assertEqual(event["otel"]["severity_number"], 9)
+        self.assertEqual(event["otel"]["resource"]["attributes"]["service.name"], "distill-session")
+        self.assertEqual(event["otel"]["attributes"]["session_id"], "s1")
+        self.assertRegex(event["otel"]["trace_id"], r"^[0-9a-f]{32}$")
+        self.assertRegex(event["otel"]["span_id"], r"^[0-9a-f]{16}$")
 
     def test_record_cli_coerces_fields_and_tail_filters(self):
         with mock.patch.object(
@@ -81,6 +100,36 @@ class EventLogTests(unittest.TestCase):
     def test_try_append_event_returns_false_on_write_failure(self):
         with mock.patch.object(event_log, "append_event", side_effect=OSError("denied")):
             self.assertFalse(event_log.try_append_event("guard", "guard", "failed"))
+
+    def test_append_event_mirrors_to_engine_by_default(self):
+        os.environ.pop("BORING_EVENT_DB_MIRROR", None)
+        seen = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_urlopen(req, timeout):
+            seen["url"] = req.full_url
+            seen["timeout"] = timeout
+            seen["body"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse()
+
+        with mock.patch.object(event_log.urllib.request, "urlopen", fake_urlopen):
+            event_log.append_event("guard", "structural_guard", "failed", run_id="r1")
+
+        self.assertEqual(seen["url"], "http://127.0.0.1:7700/events")
+        self.assertEqual(seen["body"]["event"], "structural_guard")
+        self.assertEqual(seen["body"]["otel"]["severity_text"], "ERROR")
+
+    def test_append_event_can_disable_engine_mirror(self):
+        os.environ["BORING_EVENT_DB_MIRROR"] = "off"
+
+        with mock.patch.object(event_log.urllib.request, "urlopen", side_effect=AssertionError("network")):
+            event_log.append_event("guard", "structural_guard", "ok", run_id="r1")
 
     def test_recent_resolution_failures_filters_resolution_failures(self):
         event_log.append_event("distill-session", "distill_resolution", "ok", session_id="pass")

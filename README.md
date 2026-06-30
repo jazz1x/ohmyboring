@@ -195,14 +195,16 @@ The model ids must match what LM Studio reports. `make verify-llm` also calls `/
 | `BORING_DISTILL_RESOLUTION` | distillation detail contract: `compact`, `standard`, `evidence` (default), or `forensic`; verifier failures repair once, then block `remember` |
 | `DISTILL_CLAMP` | max characters sent by the direct SessionEnd hook to the local LLM; defaults to `2000` to avoid local-model timeouts. Hermes worker offers still use `INGEST_CLAMP` (`4000`) |
 | `CODEX_DISTILL_CLAMP` | max extracted Codex session characters sent to the distill LLM; defaults to `INGEST_CLAMP`, then `4000`. This keeps large rollout transcripts inside the Hermes worker budget while preserving head/tail evidence |
-| `BORING_EVENT_LOG` | local NDJSON workflow events; defaults to `~/.cache/oh-my-boring/events.ndjson` |
+| `BORING_EVENT_LOG` | local NDJSON workflow-event spool; defaults to `~/.cache/oh-my-boring/events.ndjson` |
+| `BORING_EVENT_DB_MIRROR` | DB mirror mode; enabled by default, set `0`/`false`/`off`/`no` for NDJSON-only local runs |
+| `BORING_EVENT_SINK_URL` | optional explicit DB mirror endpoint; defaults to `$BORING_URL/events` |
 | `BORING_EVENT_RECENT_HOURS` | recent event window used by `make readiness`; defaults to `24` |
 | `BORING_READINESS_NOTE_MAX_HOURS` | newest-note freshness window for briefing readiness; defaults to `48` |
 | `BORING_READINESS_PENDING_TTL` | stale `.pending` marker threshold for readiness; falls back to `INGEST_PENDING_TTL`, then `1800` seconds |
 | `BORING_READINESS_RETRY_TTL` | stale `.retry` marker threshold for readiness; falls back to `INGEST_RETRY_TTL`, then the pending threshold |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant |
 
-Structured events are emitted by distill, collectors/workers, `doctor`/`readiness`, `guard`, and `eval`. Memory-ingest events carry `workflow=memory_ingest`, `workflow_node`, and `workflow_outcome` fields that mirror the Rust workflow graph contract. Use `make events` to inspect the recent local timeline.
+Structured events are emitted by distill, collectors/workers, `doctor`/`readiness`, `guard`, and `eval`. Memory-ingest events carry `workflow=memory_ingest`, `workflow_node`, and `workflow_outcome` fields that mirror the Rust workflow graph contract. Events are written to the local NDJSON spool first and, unless `BORING_EVENT_DB_MIRROR=0`, mirrored into the local DB as OpenTelemetry-shaped log records. Use HTTP `/events` or MCP `events` for the DB view; use `make events` when you want the file spool, including engine-down cases.
 
 > **Swapping the embedding model changes the vector dimension.** The synthesis model (`llm.model`) is free to swap, but a new `llm.embed_model` emits vectors of a different size, so you must update `llm.embed_dim` to match **and** run `make reset` — otherwise upserts fail against the old-shaped vectors. Common dims: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
 
@@ -436,9 +438,9 @@ For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~
 
 (VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. Compose siblings reach it at `http://boring-drudge:7700/mcp`.)
 
-Available tools (18): `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled` (generative — run the LLM) · `context`, `corpus_status`, `config_get` (structured / introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain).
+Available tools (19): `recall`, `neighbors`, `claims` (retrieval) · `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled` (generative — run the LLM) · `context`, `corpus_status`, `events`, `config_get` (structured / introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain).
 
-In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency/vector ordering or the graph return JSON-RPC `-32603` until you set `BORING_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`. `recall` and `ask` read `vault/wiki` directly; `context` is callable but returns an empty claim card without the store; `remember`, `forget`, `sync`, `config_get`, and `classify_repo` do not require vector mode.
+In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency/vector ordering, the graph, or the local DB projection return JSON-RPC `-32603` until you set `BORING_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `events`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`. `recall` and `ask` read `vault/wiki` directly; `context` is callable but returns an empty claim card without the store; `remember`, `forget`, `sync`, `config_get`, and `classify_repo` do not require vector mode.
 
 - `next_actions` *(requires `BORING_VECTOR=on`)* — next-action register: recent `next` claims and active `blocked` claims synthesized into a short todo/blocker list. Optionally filter by project.
 - `stalled` *(requires `BORING_VECTOR=on`)* — stalled register: `next` and `blocked` claims older than `older_than_days` (default 7).
@@ -447,10 +449,11 @@ In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency
 - `neighbors` *(requires `BORING_VECTOR=on`)* — graph traversal from a topic: embeds the query, takes the single closest note, then returns its 1-hop labels (`{hit, graph_neighbors, semantic_neighbors}` JSON). `hit` is the matched note's path; `graph_neighbors` are its project/topic labels and `semantic_neighbors` its shared tool/concept labels — flat strings, not note paths.
 - `claims` *(requires `BORING_VECTOR=on`)* — top-k current (non-superseded) `{subject, predicate, value}` decisions near a query.
 - `corpus_status` *(requires `BORING_VECTOR=on`)* — KB health snapshot (file/chunk counts, by origin/kind/project, contamination, graph/semantic nodes+edges).
+- `events` *(requires `BORING_VECTOR=on`)* — recent workflow/adapter events mirrored into the DB as OpenTelemetry-shaped records. Filter by component, event, status, run_id, workflow, or since_hours.
 - `ask` / `brief` / `weekly_brief` / `project_status` / `decisions` / `risks` / `next_actions` / `stalled` — LLM-running tools: `ask` answers a question with cited sources (works in wiki-first mode); the rest are recency/claim registers that require `BORING_VECTOR=on`.
 - `forget` — delete a note by wiki id or exact title. Removes the wiki file and, in vector mode, also purges embeddings, graph edges, and claims.
 
-Structured tools (`neighbors`, `claims`, `corpus_status`, `config_get`, `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `context`) return native `structuredContent` (JSON) alongside the text block; prose/ack tools (`recall`, `remember`, `forget`, `sync`, `classify_repo`) return text.
+Structured tools (`neighbors`, `claims`, `corpus_status`, `events`, `config_get`, `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `context`) return native `structuredContent` (JSON) alongside the text block; prose/ack tools (`recall`, `remember`, `forget`, `sync`, `classify_repo`) return text.
 
 Example MCP call (raw JSON-RPC over HTTP):
 

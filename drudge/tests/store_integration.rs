@@ -14,7 +14,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drudge::frontmatter::{Claim, FrontMatter};
-use drudge::store::{Doc, Store};
+use drudge::store::{Doc, EventLogFilter, Store};
+use serde_json::json;
 use tokio_postgres::{Client, NoTls};
 
 fn test_dsn() -> Option<String> {
@@ -69,6 +70,79 @@ async fn compact_succeeds_in_autocommit_mode() {
     let store = Store::open(&dsn, 1024).await.expect("open store");
     let summary = store.compact().await.expect("compact should not fail");
     assert!(summary.total_ms > 0, "compact should report elapsed time");
+}
+
+/// Workflow events are mirrored into Postgres as OpenTelemetry-shaped rows while keeping legacy
+/// filter keys (`component`, `event`, `status`, `run_id`) queryable.
+#[tokio::test]
+async fn event_log_round_trips_otel_projection() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let run_id = format!(
+        "event-roundtrip-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let fake_key = ["sk", "-ant", "-abcdefghij1234567890XYZ"].join("");
+
+    store
+        .log_event(&json!({
+            "ts": "2026-07-01T00:00:00Z",
+            "component": "guard",
+            "event": "structural_guard",
+            "status": "failed",
+            "run_id": run_id,
+            "credential": fake_key,
+            "workflow": "memory_ingest",
+            "workflow_node": "remember",
+            "workflow_outcome": "failed",
+            "otel": {
+                "time_unix_nano": 1_782_864_000_000_000_000_i64,
+                "severity_text": "ERROR",
+                "severity_number": 17,
+                "event_name": "structural_guard"
+            }
+        }))
+        .await
+        .expect("log event");
+
+    let rows = store
+        .recent_events(EventLogFilter {
+            limit: 10,
+            component: Some("guard"),
+            event_name: Some("structural_guard"),
+            status: Some("failed"),
+            run_id: Some(&run_id),
+            workflow: Some("memory_ingest"),
+            since_hours: None,
+        })
+        .await
+        .expect("recent events");
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.severity_text, "ERROR");
+    assert_eq!(row.severity_number, 17);
+    assert_eq!(row.workflow_node.as_deref(), Some("remember"));
+    assert_eq!(row.time_unix_nano, Some(1_782_864_000_000_000_000));
+    let attrs = row.attributes.to_string();
+    assert!(
+        !attrs.contains("sk-ant-"),
+        "event attributes must be redacted"
+    );
+    assert!(
+        attrs.contains("REDACTED"),
+        "redacted marker should remain visible"
+    );
+
+    let db = connect(&dsn).await;
+    db.execute("DELETE FROM event_log WHERE run_id = $1;", &[&run_id])
+        .await
+        .expect("cleanup event");
 }
 
 /// Ensure current_claims honors exclude_origins (a claim's origin comes from its parent document via

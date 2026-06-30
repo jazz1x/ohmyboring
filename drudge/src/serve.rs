@@ -18,6 +18,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::config;
 use crate::llm::Llm;
@@ -300,6 +301,63 @@ pub(crate) struct QueryLogEntry {
     pub(crate) latency_ms: Option<i32>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct EventLogReq {
+    #[serde(default = "default_event_log_limit")]
+    pub(crate) limit: i64,
+    #[serde(default)]
+    pub(crate) component: Option<String>,
+    #[serde(default, rename = "event")]
+    pub(crate) event_name: Option<String>,
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+    #[serde(default)]
+    pub(crate) run_id: Option<String>,
+    #[serde(default)]
+    pub(crate) workflow: Option<String>,
+    #[serde(default)]
+    pub(crate) since_hours: Option<i32>,
+}
+
+fn default_event_log_limit() -> i64 {
+    50
+}
+
+#[derive(Serialize)]
+pub(crate) struct EventLogResp {
+    pub(crate) entries: Vec<EventLogEntry>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct EventLogEntry {
+    pub(crate) id: i64,
+    pub(crate) observed_at: String,
+    pub(crate) time_unix_nano: Option<i64>,
+    pub(crate) severity_text: String,
+    pub(crate) severity_number: i32,
+    pub(crate) service_name: String,
+    pub(crate) component: String,
+    #[serde(rename = "event")]
+    pub(crate) event_name: String,
+    pub(crate) status: String,
+    pub(crate) trace_id: Option<String>,
+    pub(crate) span_id: Option<String>,
+    pub(crate) run_id: Option<String>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) workflow: Option<String>,
+    pub(crate) workflow_node: Option<String>,
+    pub(crate) workflow_outcome: Option<String>,
+    pub(crate) body: Value,
+    pub(crate) attributes: Value,
+    pub(crate) resource: Value,
+    pub(crate) otel: Value,
+}
+
+#[derive(Serialize)]
+pub(crate) struct EventIngestResp {
+    pub(crate) accepted: usize,
+}
+
 // ── shared handler helpers ──────────────────────────────────────────────────
 
 /// Whether a sync/remember/forget is mid-flight (holds the sync lock). An enum, not a string —
@@ -407,6 +465,14 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .route("/graph", post(http::handle_graph))
         .route("/audit", get(http::handle_audit))
         .route("/query-log", get(http::handle_query_log))
+        .route(
+            "/events",
+            get(http::handle_events).post(http::handle_event_ingest),
+        )
+        .route(
+            "/otel-events",
+            get(http::handle_events).post(http::handle_event_ingest),
+        )
         .route("/sync", post(http::handle_sync))
         .route("/compact", post(http::handle_compact))
         .route("/mcp", get(mcp::handle_mcp_get).post(mcp::handle_mcp)) // MCP-over-HTTP (Streamable HTTP: GET SSE + POST JSON-RPC)

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Append-only local NDJSON events for adapter/workflow observability."""
+"""Append local workflow events and mirror them into the local engine DB."""
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import uuid
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -14,6 +17,7 @@ from typing import Any, Optional
 
 DEFAULT_EVENT_LOG = "~/.cache/oh-my-boring/events.ndjson"
 DEFAULT_RECENT_HOURS = 24
+DEFAULT_SERVICE_NAMESPACE = "oh-my-boring"
 
 
 def event_log_path() -> Path:
@@ -27,16 +31,19 @@ def append_event(component: str, event: str, status: str, **fields: Any) -> None
     normalized = {k: v for k, v in fields.items() if v is not None}
     if "run_id" not in normalized and normalized.get("session_id"):
         normalized["run_id"] = normalized["session_id"]
+    now = datetime.now(timezone.utc)
     payload = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": now.isoformat(),
         "component": component,
         "event": event,
         "status": status,
     }
     payload.update(normalized)
+    payload["otel"] = _otel_envelope(payload, now)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         f.write("\n")
+    _try_mirror_to_engine(payload)
 
 
 def try_append_event(component: str, event: str, status: str, **fields: Any) -> bool:
@@ -50,6 +57,93 @@ def try_append_event(component: str, event: str, status: str, **fields: Any) -> 
 
 def new_run_id(component: str) -> str:
     return f"{component}-{uuid.uuid4()}"
+
+
+def _otel_envelope(payload: dict[str, Any], observed_at: datetime) -> dict[str, Any]:
+    status = str(payload.get("status") or "")
+    severity_text, severity_number = _severity(status)
+    run_key = str(payload.get("run_id") or payload.get("session_id") or "")
+    trace_id, span_id = _trace_span_ids(run_key, payload)
+    return {
+        "observed_timestamp": observed_at.isoformat(),
+        "time_unix_nano": int(observed_at.timestamp() * 1_000_000_000),
+        "severity_text": severity_text,
+        "severity_number": severity_number,
+        "body": {
+            "event.name": payload.get("event", ""),
+            "status": status,
+        },
+        "attributes": dict(payload),
+        "resource": {
+            "attributes": {
+                "service.name": payload.get("component", ""),
+                "service.namespace": DEFAULT_SERVICE_NAMESPACE,
+            }
+        },
+        "trace_id": trace_id,
+        "span_id": span_id,
+        "event_name": payload.get("event", ""),
+    }
+
+
+def _severity(status: str) -> tuple[str, int]:
+    normalized = status.strip().lower()
+    if normalized in {"failed", "failure", "error"}:
+        return ("ERROR", 17)
+    if normalized in {"warn", "warning"}:
+        return ("WARN", 13)
+    if normalized == "debug":
+        return ("DEBUG", 5)
+    if normalized == "trace":
+        return ("TRACE", 1)
+    return ("INFO", 9)
+
+
+def _trace_span_ids(run_key: str, payload: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    if not run_key:
+        return (None, None)
+    seed = json.dumps(
+        {
+            "run_id": run_key,
+            "component": payload.get("component"),
+            "event": payload.get("event"),
+            "status": payload.get("status"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return (digest[:32], digest[32:48])
+
+
+def _try_mirror_to_engine(payload: dict[str, Any]) -> None:
+    url = _event_sink_url()
+    if not url:
+        return
+    timeout = float(os.environ.get("BORING_EVENT_SINK_TIMEOUT") or "0.5")
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout):
+            return
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError) as e:
+        print(f"[event-log] DB mirror failed: {e}", file=sys.stderr)
+
+
+def _event_sink_url() -> Optional[str]:
+    mirror_mode = os.environ.get("BORING_EVENT_DB_MIRROR", "").strip().lower()
+    if mirror_mode in {"0", "false", "no", "off"}:
+        return None
+    explicit = os.environ.get("BORING_EVENT_SINK_URL")
+    if explicit:
+        return explicit
+    base = os.environ.get("BORING_URL") or "http://127.0.0.1:7700"
+    return f"{base.rstrip('/')}/events"
 
 
 def iter_events() -> list[dict[str, Any]]:

@@ -53,8 +53,9 @@ Session markers live in `~/.cache/boring-distill/codex-<sid>.*` and are shared
 with the rest of the pipeline.
 
 Collector status/run events include `workflow=memory_ingest`, `workflow_node`,
-and `workflow_outcome` so `make events` can show the Rust workflow projection
-for queued, skipped, completed, and retry-visible Codex ingestion states.
+and `workflow_outcome`. They are appended to the local NDJSON spool and,
+by default, mirrored into the engine DB so HTTP `/events` and MCP `events`
+can show queued, skipped, completed, and retry-visible Codex ingestion states.
 
 ## Manual setup
 
@@ -97,4 +98,4 @@ Codex will automatically invoke the right ohmyboring tool:
 
 ## Available tools
 
-`context`, `recall`, `ask`, `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `project_status`, `weekly_brief`, `decisions`, `risks`, `next_actions`, `stalled`, `brief`, `claims`, `corpus_status`, `neighbors`.
+`context`, `recall`, `ask`, `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `project_status`, `weekly_brief`, `decisions`, `risks`, `next_actions`, `stalled`, `brief`, `claims`, `corpus_status`, `events`, `neighbors`.

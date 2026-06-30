@@ -23,6 +23,7 @@ use crate::graph;
 use crate::ingest;
 use crate::redact;
 use crate::serve::{AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, vec_off_rpc};
+use crate::store::EventLogFilter;
 use crate::vault;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -213,6 +214,24 @@ fn mcp_tools_list() -> Value {
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
+            "name": "events",
+            "description": "Read recent local workflow/adapter events mirrored into the DB as OpenTelemetry-shaped log records. \
+                            Use to inspect ingestion, collector, readiness, guard, and resolution-quality timelines without raw transcripts. \
+                            Filter by component, event, status, run_id, workflow, or since_hours. Requires the local DB/vector backend.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "max events (default 50, cap 1000)"},
+                    "component": {"type": "string", "description": "optional component filter, e.g. guard or distill-session"},
+                    "event": {"type": "string", "description": "optional event name filter, e.g. distill_resolution"},
+                    "status": {"type": "string", "description": "optional status filter, e.g. ok or failed"},
+                    "run_id": {"type": "string", "description": "optional run/session id filter"},
+                    "workflow": {"type": "string", "description": "optional workflow filter, e.g. memory_ingest"},
+                    "since_hours": {"type": "integer", "description": "optional recent window in hours"}
+                }
+            }
+        },
+        {
             "name": "claims",
             "description": "Retrieve durable decisions/facts (not chunk prose): embed the query and return the top-k CURRENT claims \
                             (subject, predicate, value) whose value has not been superseded. Use for 'what did I decide/settle about X'. Returns a \
@@ -377,6 +396,7 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
         ),
         "neighbors" => ToolOut::Structured(mcp_neighbors(s, args).await?),
         "corpus_status" => ToolOut::Structured(mcp_corpus_status(s).await?),
+        "events" => ToolOut::Structured(mcp_events(s, args).await?),
         "claims" => ToolOut::Structured(mcp_claims(s, args).await?),
         "ask" => ToolOut::Structured(mcp_ask(s, args).await?),
         "brief" => ToolOut::Structured(mcp_brief(s).await?),
@@ -504,6 +524,105 @@ async fn mcp_corpus_status(s: &AppState) -> Result<Value, (i32, String)> {
         .await
         .map_err(|e| (-32603_i32, format!("audit: {e:#}")))?;
     serde_json::to_value(&stats).map_err(|e| (-32603_i32, format!("json: {e}")))
+}
+
+/// `events` — recent workflow/adapter events in OpenTelemetry log shape. Vector-only because the
+/// current local DB is the pgvector Store; the NDJSON journal remains the source journal outside DB.
+async fn mcp_events(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
+    let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    let limit = args
+        .and_then(|a| a.get("limit"))
+        .and_then(Value::as_i64)
+        .unwrap_or(50)
+        .clamp(1, 1000);
+    let component = args
+        .and_then(|a| a.get("component"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let event_name = args
+        .and_then(|a| a.get("event"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let status = args
+        .and_then(|a| a.get("status"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let run_id = args
+        .and_then(|a| a.get("run_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let workflow = args
+        .and_then(|a| a.get("workflow"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let since_hours = args
+        .and_then(|a| a.get("since_hours"))
+        .and_then(Value::as_i64)
+        .and_then(|n| i32::try_from(n).ok());
+    let entries = store
+        .recent_events(EventLogFilter {
+            limit,
+            component,
+            event_name,
+            status,
+            run_id,
+            workflow,
+            since_hours,
+        })
+        .await
+        .map_err(|e| (-32603_i32, format!("events: {e:#}")))?
+        .into_iter()
+        .map(|r| {
+            let observed_at = system_time_rfc3339(r.observed_at);
+            let severity_text = r.severity_text;
+            let event_name = r.event_name;
+            let trace_id = r.trace_id;
+            let span_id = r.span_id;
+            let body = r.body;
+            let attributes = r.attributes;
+            let resource = r.resource;
+            let otel = json!({
+                "observed_timestamp": observed_at.clone(),
+                "time_unix_nano": r.time_unix_nano,
+                "severity_text": severity_text.clone(),
+                "severity_number": r.severity_number,
+                "body": body.clone(),
+                "attributes": attributes.clone(),
+                "resource": resource.clone(),
+                "trace_id": trace_id.clone(),
+                "span_id": span_id.clone(),
+                "event_name": event_name.clone()
+            });
+            json!({
+                "id": r.id,
+                "observed_at": observed_at,
+                "time_unix_nano": r.time_unix_nano,
+                "severity_text": severity_text,
+                "severity_number": r.severity_number,
+                "service_name": r.service_name,
+                "component": r.component,
+                "event": event_name,
+                "status": r.status,
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "run_id": r.run_id,
+                "session_id": r.session_id,
+                "workflow": r.workflow,
+                "workflow_node": r.workflow_node,
+                "workflow_outcome": r.workflow_outcome,
+                "body": body,
+                "attributes": attributes,
+                "resource": resource,
+                "otel": otel
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "entries": entries }))
 }
 
 /// `claims` — current (non-superseded) claims nearest the query. Pure DATA (embed only). Returns a JSON
@@ -717,6 +836,11 @@ async fn mcp_stalled(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
     .await
     .map_err(|e| (-32603_i32, format!("stalled: {e:#}")))?;
     Ok(json!({"answer": out.answer, "sources": out.sources}))
+}
+
+fn system_time_rfc3339(value: std::time::SystemTime) -> String {
+    let datetime: chrono::DateTime<chrono::Utc> = value.into();
+    datetime.to_rfc3339()
 }
 
 /// `forget` — remove a note by wiki id or exact title. Deletes the vault file and, in vector mode, purges
@@ -1507,7 +1631,7 @@ mod tests {
     use crate::frontmatter::FrontMatter;
     use serde_json::json;
 
-    const MCP_TOOL_NAMES: [&str; 18] = [
+    const MCP_TOOL_NAMES: [&str; 19] = [
         "ask",
         "brief",
         "claims",
@@ -1516,6 +1640,7 @@ mod tests {
         "context",
         "corpus_status",
         "decisions",
+        "events",
         "forget",
         "neighbors",
         "next_actions",
@@ -1528,10 +1653,11 @@ mod tests {
         "weekly_brief",
     ];
 
-    const VECTOR_REQUIRED_TOOLS: [&str; 10] = [
+    const VECTOR_REQUIRED_TOOLS: [&str; 11] = [
         "neighbors",
         "claims",
         "corpus_status",
+        "events",
         "brief",
         "weekly_brief",
         "project_status",

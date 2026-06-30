@@ -18,7 +18,7 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tokio-stream = { version = "0.1", features = ["time"] }
 axum = "0.8"
-tokio-postgres = "0.7"                              # pgvector 베이스(로컬 단일 Postgres)
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] } # pgvector 베이스(로컬 단일 Postgres)
 pgvector = { version = "0.4", features = ["postgres"] }  # 벡터 타입 + HNSW
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
