@@ -607,7 +607,9 @@ mod tests {
                 "schema_version": 1,
                 "repos": [
                     {"match": "marketboro", "origin": "company"},
-                    {"match": "jazz1x/oh-my-boring", "name": "oh-my-boring", "origin": "personal"}
+                    {"match": "jazz1x/ohmyboring", "name": "ohmyboring", "origin": "personal"},
+                    {"match": "jazz1x/oh-my-boring", "name": "ohmyboring", "origin": "personal"},
+                    {"match": "oh-my-boring", "name": "ohmyboring", "origin": "personal"}
                 ]
             }"#,
         )
@@ -619,7 +621,9 @@ mod tests {
         );
         assert_eq!(cfg.canonical_repo("foodspring-front"), "foodspring-front");
         // explicit rule name wins
-        assert_eq!(cfg.canonical_repo("jazz1x/oh-my-boring"), "oh-my-boring");
+        assert_eq!(cfg.canonical_repo("jazz1x/ohmyboring"), "ohmyboring");
+        assert_eq!(cfg.canonical_repo("jazz1x/oh-my-boring"), "ohmyboring");
+        assert_eq!(cfg.canonical_repo("oh-my-boring"), "ohmyboring");
         // .git suffix removed
         assert_eq!(
             cfg.canonical_repo("git@github.com:acme/widget.git"),

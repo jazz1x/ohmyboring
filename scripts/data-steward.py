@@ -39,8 +39,10 @@ TYPO_THRESHOLD = 0.85
 MIN_CLAIMS_PER_SESSION = 2
 # A claim value shorter than this is too vague to be authoritative.
 MIN_CLAIM_VALUE_LEN = 4
-# Words that make a claim sound like a next-step rather than a fact.
-WEAK_CLAIM_WORDS = {"검토", "확인", "고민", "예정", "계획", "review", "consider", "plan", "todo"}
+# Markers that make a fact/decision claim sound like a next-step rather than completed work.
+WEAK_CLAIM_KO_PATTERNS = {"검토 필요", "검토 예정", "확인 필요", "확인 예정", "확인해야", "고민", "예정", "계획"}
+WEAK_CLAIM_EN_PATTERN = re.compile(r"\b(review|consider|plan|todo)\b", re.IGNORECASE)
+PLAN_LIKE_CLAIM_KINDS = {"fact", "decision", "assumption", "term"}
 ALLOWED_CLAIM_KINDS = {"fact", "decision", "assumption", "risk", "blocked", "goal", "term", "next"}
 ALLOWED_CLAIM_CONFIDENCES = {"certain", "likely", "assumption", "outdated"}
 FIXABLE_ISSUE_KINDS = {"project-variant", "placeholder-tags"}
@@ -98,6 +100,8 @@ def _likely_typos(projects):
         for b in names:
             if a == b:
                 continue
+            if boring_config.canonical_repo(a) == boring_config.canonical_repo(b):
+                continue
             ratio = difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
             if ratio >= TYPO_THRESHOLD:
                 typos.append((a, b, ratio))
@@ -110,6 +114,13 @@ def _likely_typos(projects):
             seen.add(key)
             out.append((a, b, r))
     return out
+
+
+def _claim_value_sounds_like_plan(value: str) -> bool:
+    lowered = value.lower()
+    return any(w in value for w in WEAK_CLAIM_KO_PATTERNS) or bool(
+        WEAK_CLAIM_EN_PATTERN.search(lowered)
+    )
 
 
 def _claim_issues(notes):
@@ -140,14 +151,14 @@ def _claim_issues(notes):
             if not isinstance(c, dict):
                 continue
             val = str(c.get("value", "")).strip()
+            kind = str(c.get("kind", "") or "fact").strip().lower()
+            conf = str(c.get("confidence", "") or "certain").strip().lower()
             if len(val) < MIN_CLAIM_VALUE_LEN:
                 weak.append({"claim": c, "reason": "value too short"})
-            elif any(w in val.lower() for w in WEAK_CLAIM_WORDS):
+            elif kind in PLAN_LIKE_CLAIM_KINDS and _claim_value_sounds_like_plan(val):
                 weak.append({"claim": c, "reason": "value sounds like a plan, not a fact"})
-            kind = str(c.get("kind", "") or "fact").strip().lower()
             if kind not in ALLOWED_CLAIM_KINDS:
                 weak.append({"claim": c, "reason": f"unknown claim kind '{kind}'"})
-            conf = str(c.get("confidence", "") or "certain").strip().lower()
             if conf not in ALLOWED_CLAIM_CONFIDENCES:
                 weak.append({"claim": c, "reason": f"unknown claim confidence '{conf}'"})
         if weak:
