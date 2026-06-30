@@ -36,6 +36,7 @@ BORING_URL = omb_env.drudge_url()
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
+DISTILL_CLAMP = int(os.environ.get("CODEX_DISTILL_CLAMP") or os.environ.get("INGEST_CLAMP") or "4000")
 STABLE_AGE_S = float(os.environ.get("COLLECT_STABLE_AGE_SECONDS") or "1800")
 PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("INGEST_PENDING_TTL") or "1800")
 RETRY_TTL = float(os.environ.get("COLLECT_RETRY_TTL") or os.environ.get("INGEST_RETRY_TTL") or str(PENDING_TTL))
@@ -364,6 +365,7 @@ def _print_status(source_dir: str, scan: dict) -> bool:
     print(
         "[codex-status] config "
         f"window_h={WINDOW_H:g} min_kb={MIN_KB:g} limit={LIMIT} "
+        f"distill_clamp={DISTILL_CLAMP} "
         f"stable_age_s={STABLE_AGE_S:g} include_rollouts={str(INCLUDE_ROLLOUTS).lower()} "
         f"include_subagents={str(INCLUDE_SUBAGENTS).lower()}"
     )
@@ -595,6 +597,7 @@ def main(argv: list[str] | None = None):
                 "hook_event_name": "SessionEnd",
                 "raw_bytes": os.path.getsize(tp),
                 "min_raw_bytes_for_retry": int(MIN_KB * 1024),
+                "distill_clamp": DISTILL_CLAMP,
             }
         )
         r = subprocess.run([sys.executable, HOOK], input=payload, text=True, env=env)

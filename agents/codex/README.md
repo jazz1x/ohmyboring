@@ -15,6 +15,10 @@ worker instead:
 - Installed workers set `CODEX_INCLUDE_ROLLOUTS=1` and
   `COLLECT_STABLE_AGE_SECONDS=1800`, so stable Codex Desktop rollout transcripts
   are harvested while files still being written are skipped.
+- Large transcripts are extracted into a bounded distill budget:
+  `CODEX_DISTILL_CLAMP`, then `INGEST_CLAMP`, then `4000` characters. Status
+  output reports `distill_clamp`, and the distill hook emits an `input_budget`
+  event with raw/extracted/emitted character counts.
 - True subagent/guardian roll-outs are skipped unless `CODEX_INCLUDE_SUBAGENTS=1`
   is set explicitly.
 - `install.sh` registers a host launchd/cron worker that runs every 20 minutes
