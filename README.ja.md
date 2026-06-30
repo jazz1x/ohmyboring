@@ -8,7 +8,7 @@
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
 ![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
-![gemma4](https://img.shields.io/badge/LLM-gemma4:12b-000?logo=ollama)
+![qwen3](https://img.shields.io/badge/LLM-qwen3:14b-000?logo=ollama)
 
 **セルフホスティング型パーソナルメモリ RAG。** Claude Code / Kimi Code のセッションと、取り込み可能な Codex トランスクリプトがローカルで人が読める wiki に蒸留され、*"前これどうやったっけ？"* を呼び出して使います。**クラウド 0 · 100% ローカル。**
 
@@ -114,7 +114,7 @@ flowchart LR
   "llm": {
     "provider": "ollama",
     "base_url": "http://host.docker.internal:11434/v1",
-    "model": "gemma4:12b",
+    "model": "qwen3:14b",
     "embed_model": "bge-m3",
     "embed_dim": 1024,
     "api_key_env": "BORING_LLM_API_KEY",
@@ -170,7 +170,7 @@ make doctor
 make readiness
 ```
 
-モデル id は LM Studio が返す値と完全に一致している必要があります。embedding モデルが `bge-m3` でない場合は、そのモデルの次元に合わせて `llm.embed_dim` を変更し、vector モードを信頼する前に `make reset` を実行します。全体の手順は [LM Studio ランブック](docs/runbooks/lmstudio.ja.md) を参照してください。
+モデル id は LM Studio が返す値と完全に一致している必要があります。`make verify-llm` は `/v1/embeddings` も直接呼び、実際のベクトル長が `llm.embed_dim` と一致するか確認します。現在の 1024d リリース経路では、LM Studio が `bge-m3` を提供できる場合だけ vector-ready です。`text-embedding-nomic-embed-text-v1.5` は別の 768d reset/re-index 経路です。全体の手順は [LM Studio ランブック](docs/runbooks/lmstudio.ja.md) を参照してください。
 
 `.env` はシークレット + ランタイムオーバーライド専用になりました：
 
@@ -208,7 +208,7 @@ make readiness
 |---|---|
 | `make up` | ohmyboring エンジン起動（hermes-agent イメージがある場合のみ一緒に起動） |
 | `make ollama` | Ollama 実行確認（必要ならバックグラウンド起動） |
-| `make verify-llm` | provider 到達性、ロード済みモデル id、embedding 次元を確認 |
+| `make verify-llm` | provider 到達性、ロード済みモデル id、実際の embedding 次元を確認 |
 | `make doctor` | スタック、フック、最終取り込み、Codex ワーカー/キュー状態を診断 |
 | `make readiness` | ブリーフィング前の strict ゲート。doctor finding が 1 つでもあれば失敗 |
 | `make ask Q="..."` | recall + 要約を一度に実行 |
@@ -437,6 +437,7 @@ curl -s -X POST http://localhost:7700/mcp \
 |---|---|
 | `make up` 失敗 | Ollama を確認: `curl -sf http://127.0.0.1:11434/api/tags` |
 | LM Studio 選択後に `make up` 失敗 | LM Studio ローカルサーバーを起動し、`boring.json` の chat/embedding モデル id を正確にロードしてから `make verify-llm` を実行 |
+| `embedding dim mismatch` エラー | `/v1/embeddings` の実際の出力長が `boring.json` の `llm.embed_dim` と一致していません。新しいモデル次元に合わせて修正し、`make reset` を実行してください |
 | ポート競合 | `lsof -i :7700 -i :5432 -i :11434` |
 | 2 回目の `make up` / 再クローン失敗 | まず `make down` を実行してください — コンテナ名が固定で `127.0.0.1:7700` / `:5432` にバインドするため、2 つ目のスタックが実行中のスタックと競合します |
 | agent が起動しない | `BORING_CORE_ONLY=1 make up` で core-only 実行。hermes イメージは別途ビルドが必要 |

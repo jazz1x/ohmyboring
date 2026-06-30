@@ -56,6 +56,7 @@ make readiness
 기대 결과:
 
 - `make verify-llm`이 provider 스크립트를 찾고, `/v1/models`에 접근하며, 설정된 두 모델 id를 모두 확인합니다.
+- `make verify-llm`이 `/v1/embeddings`에 직접 요청하고, 실제 벡터 길이가 `llm.embed_dim`과 같은지 확인합니다.
 - `make doctor`가 엔진 정상과 write door open을 보고합니다.
 - 예약된 아침 브리핑에 의존하기 전에 `make readiness`가 초록불이어야 합니다.
 - Hermes/Codex 적재가 켜져 있으면 `make doctor`가 Codex 워커 상태도 함께 보여줍니다.
@@ -72,6 +73,8 @@ Embedding 모델 차원은 저장소 계약입니다. 흔한 값:
 
 `llm.embed_model`을 바꿀 때는 `llm.embed_dim`도 맞게 바꾸고, vector 모드를 믿기 전에 `make reset`을 실행합니다. wiki-first recall은 마크다운을 직접 읽지만, vector search, claims, graph, status, brief는 vector store 형태에 의존합니다.
 
+현재 1024d 릴리즈 경로에서는 `/v1/models`에 `bge-m3`가 있고 `make verify-llm`이 실제 embedding 차원 1024를 보고할 때만 LM Studio를 vector-ready라고 부릅니다. `text-embedding-nomic-embed-text-v1.5`는 768d이므로, 이것을 쓰는 것은 `bge-m3`의 조용한 대체가 아니라 의도적인 reset/re-index 결정입니다.
+
 ## 문제 해결
 
 | 증상 | 확인 |
@@ -79,6 +82,7 @@ Embedding 모델 차원은 저장소 계약입니다. 흔한 값:
 | `/v1/models`가 비어 있음 | LM Studio 로컬 서버를 켜고 앱에서 모델을 로드합니다. |
 | `/v1/models`에 embedding 모델만 보임 | chat 모델을 다운로드하고 로드한 뒤 `llm.model`에 정확한 id를 설정합니다. |
 | `make verify-llm`이 모델을 못 찾음 | `/v1/models`의 정확한 id를 복사합니다. 표시 이름만으로는 부족합니다. |
+| `make verify-llm`이 실제 차원 불일치를 보고함 | 서버가 `llm.embed_dim`과 다른 embedding 형태를 반환합니다. 의도한 모델을 로드하거나 `embed_dim`을 바꾸고 `make reset`을 실행합니다. |
 | Docker가 LM Studio에 접근 못 함 | `boring.json`에는 `localhost`가 아니라 `http://host.docker.internal:1234/v1`을 씁니다. |
 | 호스트 벤치마크가 LM Studio에 접근 못 함 | `scripts/bench-llm.py --base-url`에는 `http://localhost:1234/v1`을 씁니다. |
 | embedding upsert 실패 | `llm.embed_dim`이 embedding 모델과 맞지 않습니다. 차원을 수정하고 vector DB를 reset합니다. |
