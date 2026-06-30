@@ -194,6 +194,7 @@ The model ids must match what LM Studio reports. `make verify-llm` also calls `/
 | `DOCKER_BIN` | optional Docker CLI path when GUI/launchd environments do not include Docker in `PATH` |
 | `BORING_DISTILL_RESOLUTION` | distillation detail contract: `compact`, `standard`, `evidence` (default), or `forensic`; verifier failures repair once, then block `remember` |
 | `DISTILL_CLAMP` | max characters sent by the direct SessionEnd hook to the local LLM; defaults to `2000` to avoid local-model timeouts. Hermes worker offers still use `INGEST_CLAMP` (`4000`) |
+| `CODEX_DISTILL_CLAMP` | max extracted Codex session characters sent to the distill LLM; defaults to `INGEST_CLAMP`, then `4000`. This keeps large rollout transcripts inside the Hermes worker budget while preserving head/tail evidence |
 | `BORING_EVENT_LOG` | local NDJSON workflow events; defaults to `~/.cache/oh-my-boring/events.ndjson` |
 | `BORING_EVENT_RECENT_HOURS` | recent event window used by `make readiness`; defaults to `24` |
 | `BORING_READINESS_NOTE_MAX_HOURS` | newest-note freshness window for briefing readiness; defaults to `48` |

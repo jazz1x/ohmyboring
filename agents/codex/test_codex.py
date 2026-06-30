@@ -133,6 +133,105 @@ def test_success_passes_session_id_to_shared_core():
         os.unlink(path)
 
 
+def test_codex_distill_clamps_with_ingest_budget():
+    old_clamp = distill.CLAMP
+    try:
+        distill.CLAMP = 80
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write("{}\n")
+            path = f.name
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                payload = {
+                    "transcript_path": path,
+                    "session_id": "abc",
+                    "hook_event_name": "SessionEnd",
+                    "cwd": "/work/oh-my-boring",
+                    "raw_bytes": 9000,
+                    "distill_clamp": 80,
+                }
+                event_path = Path(d) / "events.ndjson"
+                extracted = "START-" + ("x" * 700) + "-END"
+                stderr = io.StringIO()
+                with (
+                    mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
+                    mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(distill.sys, "stderr", stderr),
+                    mock.patch.object(distill, "extract", return_value=extracted),
+                    mock.patch.object(distill, "git_remote_url", return_value=""),
+                    mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
+                    mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
+                    mock.patch.object(distill, "_mark") as mark,
+                    mock.patch.object(distill, "distill_and_remember", return_value=True) as remember,
+                ):
+                    rc = distill.main()
+
+                assert rc == 0
+                remembered_text = remember.call_args.args[0]
+                assert remembered_text.startswith("START-")
+                assert remembered_text.endswith("-END")
+                assert len(remembered_text) < len(extracted)
+                assert "transcript clamped" in stderr.getvalue()
+                event = _read_last_event(event_path)
+                assert event["event"] == "input_budget"
+                assert event["raw_bytes"] == 9000
+                assert event["source_chars"] == len(extracted)
+                assert event["emitted_chars"] == len(remembered_text)
+                assert event["distill_clamp"] == 80
+                assert event["clamped"] is True
+                mark.assert_called_once_with("codex-abc")
+        finally:
+            os.unlink(path)
+    finally:
+        distill.CLAMP = old_clamp
+
+
+def test_codex_distill_respects_zero_payload_clamp_override():
+    old_clamp = distill.CLAMP
+    try:
+        distill.CLAMP = 80
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write("{}\n")
+            path = f.name
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                payload = {
+                    "transcript_path": path,
+                    "session_id": "abc",
+                    "hook_event_name": "SessionEnd",
+                    "cwd": "/work/oh-my-boring",
+                    "raw_bytes": 9000,
+                    "distill_clamp": 0,
+                }
+                event_path = Path(d) / "events.ndjson"
+                extracted = "START-" + ("x" * 700) + "-END"
+                stderr = io.StringIO()
+                with (
+                    mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
+                    mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(distill.sys, "stderr", stderr),
+                    mock.patch.object(distill, "extract", return_value=extracted),
+                    mock.patch.object(distill, "git_remote_url", return_value=""),
+                    mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
+                    mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
+                    mock.patch.object(distill, "_mark"),
+                    mock.patch.object(distill, "distill_and_remember", return_value=True) as remember,
+                ):
+                    rc = distill.main()
+
+                assert rc == 0
+                assert remember.call_args.args[0] == extracted
+                assert "transcript clamped" not in stderr.getvalue()
+                event = _read_last_event(event_path)
+                assert event["distill_clamp"] == 0
+                assert event["emitted_chars"] == len(extracted)
+                assert event["clamped"] is False
+        finally:
+            os.unlink(path)
+    finally:
+        distill.CLAMP = old_clamp
+
+
 def _write_codex_session(path: Path, subagent: bool = False) -> None:
     payload = {"thread_source": "subagent"} if subagent else {}
     path.write_text(json.dumps({"payload": payload}) + "\nbody\n", encoding="utf-8")
@@ -316,6 +415,7 @@ def test_collect_success_with_sync_failure_is_degraded_success():
     old_min_kb = collect.MIN_KB
     old_stable_age = collect.STABLE_AGE_S
     old_limit = collect.LIMIT
+    old_distill_clamp = collect.DISTILL_CLAMP
     try:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -327,6 +427,7 @@ def test_collect_success_with_sync_failure_is_degraded_success():
             collect.MIN_KB = 0
             collect.STABLE_AGE_S = 0
             collect.LIMIT = 1
+            collect.DISTILL_CLAMP = 123
             _write_codex_session(source / "todo.jsonl")
 
             stdout = io.StringIO()
@@ -343,6 +444,8 @@ def test_collect_success_with_sync_failure_is_degraded_success():
                 rc = collect.main([])
 
             assert rc == 0
+            payload = json.loads(run.call_args.kwargs["input"])
+            assert payload["distill_clamp"] == 123
             assert "sync failed: timed out" in stderr.getvalue()
             assert "sync=failed" in stdout.getvalue()
             event = _read_last_event(event_path)
@@ -358,6 +461,7 @@ def test_collect_success_with_sync_failure_is_degraded_success():
         collect.MIN_KB = old_min_kb
         collect.STABLE_AGE_S = old_stable_age
         collect.LIMIT = old_limit
+        collect.DISTILL_CLAMP = old_distill_clamp
 
 
 def test_status_mode_reports_queue_worker_and_note_without_mutation():
@@ -441,6 +545,7 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
             client.assert_not_called()
             out = stdout.getvalue()
             assert "queue_pending=1" in out
+            assert "distill_clamp=" in out
             assert "skipped_new=0 skipped_small=0 skipped_rollout=0 skipped_marked=0 skipped_subagent=0" in out
             assert "markers done=1 pending=0 retry=0 dead_letter=0 stale_pending=0 stale_retry=0" in out
             assert "codex-rollout-" not in out
@@ -659,6 +764,8 @@ if __name__ == "__main__":
     test_large_raw_parse_short_marks_retry()
     test_small_raw_parse_short_marks_done()
     test_success_passes_session_id_to_shared_core()
+    test_codex_distill_clamps_with_ingest_budget()
+    test_codex_distill_respects_zero_payload_clamp_override()
     test_collect_scan_classifies_queue_marked_rollout_and_subagent()
     test_collect_scan_can_include_rollouts_without_subagents()
     test_collect_scan_skips_unstable_recent_sessions()

@@ -12,6 +12,7 @@ import sys
 # Allow import of shared agent policy library regardless of how this script is invoked.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config
+import event_log
 import transcript
 from distill_core import (  # noqa: F401
     _extract_json,
@@ -29,6 +30,7 @@ from distill_core import (  # noqa: F401
 )
 
 TRANSCRIPT_FORMAT = "codex-jsonl"
+CLAMP = int(os.environ.get("CODEX_DISTILL_CLAMP") or os.environ.get("INGEST_CLAMP") or "4000")
 
 
 def extract(path):
@@ -45,6 +47,19 @@ def should_retry_short_extract(data: dict, transcript_path: str) -> bool:
     if raw_bytes is None:
         raw_bytes = os.path.getsize(transcript_path)
     return int(raw_bytes) >= int(min_raw)
+
+
+def _clamp_limit(data: dict) -> int:
+    if "distill_clamp" in data and data["distill_clamp"] is not None:
+        return int(data["distill_clamp"])
+    return CLAMP
+
+
+def _raw_bytes(data: dict, transcript_path: str) -> int:
+    raw = data.get("raw_bytes")
+    if raw is None:
+        return os.path.getsize(transcript_path)
+    return int(raw)
 
 
 def main() -> int:
@@ -85,6 +100,22 @@ def main() -> int:
         if session_id:
             _mark(session_id)
         return 0
+    source_chars = len(text)
+    clamp_limit = _clamp_limit(data)
+    text, was_clamped = transcript.clamp_text(text, clamp_limit)
+    if was_clamped:
+        print(f"[omb-distill-codex] transcript clamped to {len(text)} chars", file=sys.stderr)
+    event_log.try_append_event(
+        "codex-distill",
+        "input_budget",
+        "ok",
+        session_id=session_id,
+        raw_bytes=_raw_bytes(data, transcript_path),
+        source_chars=source_chars,
+        emitted_chars=len(text),
+        distill_clamp=clamp_limit,
+        clamped=was_clamped,
+    )
 
     if distill_and_remember(text, origin, repo, session_id):
         _mark(session_id)
