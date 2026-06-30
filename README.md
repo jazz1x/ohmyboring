@@ -179,9 +179,13 @@ The model ids must match what LM Studio reports. `make verify-llm` also calls `/
 | `BORING_VECTOR` | `on` enables pgvector (optional) |
 | `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | optional runtime override of `llm.base_url` / `llm.model`. Running the `drudge` binary directly on the host? Set `BORING_LLM_BASE_URL=http://localhost:11434/v1` |
 | `BORING_LLM_API_KEY` | API key when `llm.api_key_env` points here (auth providers) |
+| `DOCKER_BIN` | optional Docker CLI path when GUI/launchd environments do not include Docker in `PATH` |
 | `BORING_DISTILL_RESOLUTION` | distillation detail contract: `compact`, `standard`, `evidence` (default), or `forensic`; verifier failures repair once, then block `remember` |
 | `BORING_EVENT_LOG` | local NDJSON workflow events; defaults to `~/.cache/oh-my-boring/events.ndjson` |
 | `BORING_EVENT_RECENT_HOURS` | recent event window used by `make readiness`; defaults to `24` |
+| `BORING_READINESS_NOTE_MAX_HOURS` | newest-note freshness window for briefing readiness; defaults to `48` |
+| `BORING_READINESS_PENDING_TTL` | stale `.pending` marker threshold for readiness; falls back to `INGEST_PENDING_TTL`, then `1800` seconds |
+| `BORING_READINESS_RETRY_TTL` | stale `.retry` marker threshold for readiness; falls back to `INGEST_RETRY_TTL`, then the pending threshold |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant |
 
 Structured events are emitted by distill, collectors/workers, `doctor`/`readiness`, `guard`, and `eval`. Use `make events` to inspect the recent local timeline.
@@ -240,7 +244,7 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 | `make ollama` | ensure Ollama is running (start in background if needed) |
 | `make verify-llm` | verify provider reachability, loaded model ids, and actual embedding dimension |
 | `make doctor` | diagnose stack, hooks, latest ingest, and Codex worker/queue status |
-| `make readiness` | strict pre-briefing gate; fails on any doctor finding |
+| `make readiness` | strict pre-briefing gate; fails on model/embed, hook, container, worker, stale-marker, or freshness findings |
 | `make ask Q="..."` | one-shot recall + synthesis |
 | `make sync` | deterministic re-ingest of the vault |
 | `make remember M="text"` | write a one-line note |
@@ -511,6 +515,8 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 | `embedding dim mismatch` errors | Your `/v1/embeddings` output size does not match `llm.embed_dim` in `boring.json`. Update `embed_dim` to match the new model and run `make reset` |
 | Healthy? / did the last distill land? | `make doctor` — quick health + last-ingest and Codex worker/queue check |
 | Can I rely on tomorrow morning's briefing? | `make readiness` — strict gate; every hook/model/container/ingest finding must pass |
+| `make readiness` reports stale markers | Inspect `~/.cache/boring-distill`; stale `.pending`, `.retry`, or `.dead` markers mean autonomous ingest stopped or needs reconciliation before a scheduled briefing is trusted |
+| `make readiness` reports a stale newest note | Run or verify ingestion before relying on briefing output; only widen `BORING_READINESS_NOTE_MAX_HOURS` when the briefing window is intentionally longer |
 | What failed most recently? | `make events` — recent local workflow timeline without raw transcripts |
 
 ---

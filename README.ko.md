@@ -179,9 +179,13 @@ make readiness
 | `BORING_VECTOR` | `on` 시 pgvector 활성화(선택) |
 | `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | `llm.base_url` / `llm.model` 런타임 오버라이드(선택). `drudge` 바이너리를 호스트에서 직접 실행한다면 `BORING_LLM_BASE_URL=http://localhost:11434/v1` 설정 |
 | `BORING_LLM_API_KEY` | `llm.api_key_env`가 여기를 가리킬 때의 API 키(인증 provider) |
+| `DOCKER_BIN` | GUI/launchd 환경의 `PATH`에 Docker가 없을 때 사용할 선택적 Docker CLI 경로 |
 | `BORING_DISTILL_RESOLUTION` | 적재 해상도 계약: `compact`, `standard`, `evidence`(기본), `forensic`; 검증 실패 시 한 번 보강하고 그래도 실패하면 `remember` 차단 |
 | `BORING_EVENT_LOG` | 로컬 NDJSON 작업 흐름 이벤트; 기본값 `~/.cache/oh-my-boring/events.ndjson` |
 | `BORING_EVENT_RECENT_HOURS` | `make readiness`가 보는 최근 이벤트 범위; 기본값 `24` |
+| `BORING_READINESS_NOTE_MAX_HOURS` | 브리핑 readiness가 허용하는 최신 노트 freshness 범위; 기본값 `48` |
+| `BORING_READINESS_PENDING_TTL` | readiness에서 stale `.pending`으로 보는 임계값; `INGEST_PENDING_TTL`, 그다음 `1800`초를 기본으로 사용 |
+| `BORING_READINESS_RETRY_TTL` | readiness에서 stale `.retry`로 보는 임계값; `INGEST_RETRY_TTL`, 그다음 pending 임계값을 기본으로 사용 |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack assistant |
 
 구조화 이벤트는 distill, collector/worker, `doctor`/`readiness`, `guard`, `eval`에서 기록됩니다. 최근 로컬 타임라인은 `make events`로 확인합니다.
@@ -240,7 +244,7 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 | `make ollama` | Ollama 실행 확인(필요시 백그라운드 시작) |
 | `make verify-llm` | provider 접근성, 로드된 모델 id, 실제 embedding 차원 확인 |
 | `make doctor` | 스택, 훅, 마지막 적재, Codex 워커/큐 상태 진단 |
-| `make readiness` | 브리핑 전 strict 게이트; doctor finding이 하나라도 있으면 실패 |
+| `make readiness` | 브리핑 전 strict 게이트; 모델/임베딩, 훅, 컨테이너, 워커, stale marker, freshness finding이 있으면 실패 |
 | `make ask Q="..."` | recall + 요약 한 번에 |
 | `make sync` | vault 재적재 |
 | `make remember M="text"` | 한 줄 노트 작성 |
@@ -474,6 +478,8 @@ curl -s -X POST http://localhost:7700/mcp \
 | Linux: 컨테이너가 호스트 Ollama에 접근 못 함 | Linux에서는 Ollama가 기본적으로 `127.0.0.1`에 바인딩하므로, `host.docker.internal`이 해석되더라도 컨테이너는 닫힌 포트에 부딪힙니다. Ollama를 모든 인터페이스에 바인딩하고(`OLLAMA_HOST=0.0.0.0:11434` 후 재시작) 그리고/또는 호스트 방화벽에서 docker 브리지를 허용하세요 |
 | 정상인가? / 마지막 distill이 됐나? | `make doctor` — 빠른 상태 + 마지막 적재 + Codex 워커/큐 점검 |
 | 내일 아침 브리핑을 믿어도 되나? | `make readiness` — strict 게이트; 훅/모델/컨테이너/적재 finding이 모두 통과해야 함 |
+| `make readiness`가 stale marker를 보고함 | `~/.cache/boring-distill`을 확인하세요. 오래된 `.pending`, `.retry`, `.dead` marker는 자율 적재가 멈췄거나 조정이 필요하다는 뜻이므로 예약 브리핑을 믿기 전에 처리해야 합니다 |
+| `make readiness`가 최신 노트 stale을 보고함 | 브리핑 결과에 의존하기 전에 적재를 실행하거나 확인하세요. 브리핑 윈도우를 의도적으로 길게 잡을 때만 `BORING_READINESS_NOTE_MAX_HOURS`를 늘립니다 |
 | 가장 최근에 뭐가 실패했나? | `make events` — raw transcript 없이 최근 로컬 작업 흐름 타임라인 확인 |
 
 ---

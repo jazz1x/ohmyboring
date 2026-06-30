@@ -227,7 +227,7 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
                                 "state": "scheduled",
                                 "last_status": "success",
                                 "last_run_at": "2026-06-29T09:00:00+09:00",
-                                "next_run_at": "2026-06-29T09:20:00+09:00",
+                                "next_run_at": "2999-06-29T09:20:00+09:00",
                                 "script": "/host/oh-my-boring/agents/codex/collect-sessions.py",
                             }
                         ]
@@ -273,7 +273,7 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
             out = stdout.getvalue()
             assert "queue_pending=1" in out
             assert "skipped_rollout=0 skipped_marked=0 skipped_subagent=0" in out
-            assert "markers done=1 pending=0 retry=0" in out
+            assert "markers done=1 pending=0 retry=0 dead_letter=0 stale_pending=0 stale_retry=0" in out
             assert "codex-rollout-" not in out
             assert "worker found=true enabled=true state=scheduled last_status=success" in out
             assert "host_worker found=true loaded=true kind=launchd" in out
@@ -317,9 +317,135 @@ def test_status_strict_fails_when_host_worker_missing():
 
             assert rc == 1
             assert "host_worker found=false loaded=false kind=launchd" in stdout.getvalue()
-            assert "readiness failed: host worker is not installed/loaded" in stderr.getvalue()
+            assert "readiness failed: worker/marker state is not ready" in stderr.getvalue()
     finally:
         collect.MIN_KB = old_min_kb
+
+
+def test_status_strict_fails_when_hermes_worker_failed():
+    old_min_kb = collect.MIN_KB
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "sessions"
+            source.mkdir()
+            collect.MIN_KB = 0
+            _write_codex_session(source / "todo.jsonl")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(collect, "_source_dir", return_value=str(source)),
+                mock.patch.object(
+                    collect,
+                    "_hermes_worker_status",
+                    return_value={
+                        "found": True,
+                        "enabled": True,
+                        "state": "scheduled",
+                        "last_status": "failed",
+                        "last_error": "boom",
+                        "last_run_at": "2026-06-29T09:00:00+09:00",
+                        "next_run_at": "2999-06-29T09:20:00+09:00",
+                        "script": "codex-collect-sessions.py",
+                        "path": "/tmp/jobs.json",
+                    },
+                ),
+                mock.patch.object(
+                    collect,
+                    "_host_worker_status",
+                    return_value={
+                        "kind": "launchd",
+                        "found": True,
+                        "loaded": True,
+                        "path": "/tmp/com.ohmyboring.codex-ingest.plist",
+                    },
+                ),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(root / "events.ndjson")}),
+                mock.patch.object(collect.sys, "stdout", stdout),
+                mock.patch.object(collect.sys, "stderr", stderr),
+            ):
+                rc = collect.main(["--status", "--strict"])
+
+            assert rc == 1
+            out = stdout.getvalue()
+            assert "readiness_issue hermes codex worker last_status=failed" in out
+            assert "readiness_issue hermes codex worker last_error set" in out
+            assert "readiness failed: worker/marker state is not ready" in stderr.getvalue()
+    finally:
+        collect.MIN_KB = old_min_kb
+
+
+def test_status_strict_fails_on_stale_codex_markers():
+    old_mark_dir = collect.markers.MARK_DIR
+    old_min_kb = collect.MIN_KB
+    old_pending_ttl = collect.PENDING_TTL
+    old_retry_ttl = collect.RETRY_TTL
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "sessions"
+            source.mkdir()
+            mark_dir = root / "markers"
+            collect.markers.set_mark_dir(str(mark_dir))
+            collect.MIN_KB = 0
+            collect.PENDING_TTL = 60
+            collect.RETRY_TTL = 60
+            _write_codex_session(source / "todo.jsonl")
+            collect.markers.mark_pending("codex-pending")
+            collect.markers.mark_retry("codex-retry")
+            old = time.time() - 3600
+            os.utime(mark_dir / "codex-pending.pending", (old, old))
+            os.utime(mark_dir / "codex-retry.retry", (old, old))
+            (mark_dir / "codex-dead.dead").write_text("dead", encoding="utf-8")
+            (mark_dir / "codex-dead-letter.dead-letter").write_text("dead", encoding="utf-8")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(collect, "_source_dir", return_value=str(source)),
+                mock.patch.object(
+                    collect,
+                    "_hermes_worker_status",
+                    return_value={
+                        "found": True,
+                        "enabled": True,
+                        "state": "scheduled",
+                        "last_status": "success",
+                        "last_error": "",
+                        "last_run_at": "2026-06-29T09:00:00+09:00",
+                        "next_run_at": "2999-06-29T09:20:00+09:00",
+                        "script": "codex-collect-sessions.py",
+                        "path": "/tmp/jobs.json",
+                    },
+                ),
+                mock.patch.object(
+                    collect,
+                    "_host_worker_status",
+                    return_value={
+                        "kind": "launchd",
+                        "found": True,
+                        "loaded": True,
+                        "path": "/tmp/com.ohmyboring.codex-ingest.plist",
+                    },
+                ),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(root / "events.ndjson")}),
+                mock.patch.object(collect.sys, "stdout", stdout),
+                mock.patch.object(collect.sys, "stderr", stderr),
+            ):
+                rc = collect.main(["--status", "--strict"])
+
+            assert rc == 1
+            out = stdout.getvalue()
+            assert "dead_letter=2 stale_pending=1 stale_retry=1" in out
+            assert "readiness_issue stale codex pending markers=1" in out
+            assert "readiness_issue stale codex retry markers=1" in out
+            assert "readiness_issue codex dead-letter markers=2" in out
+    finally:
+        collect.markers.set_mark_dir(old_mark_dir)
+        collect.MIN_KB = old_min_kb
+        collect.PENDING_TTL = old_pending_ttl
+        collect.RETRY_TTL = old_retry_ttl
 
 
 if __name__ == "__main__":
@@ -330,4 +456,6 @@ if __name__ == "__main__":
     test_collect_scan_reoffers_stale_pending_but_skips_fresh_pending()
     test_status_mode_reports_queue_worker_and_note_without_mutation()
     test_status_strict_fails_when_host_worker_missing()
+    test_status_strict_fails_when_hermes_worker_failed()
+    test_status_strict_fails_on_stale_codex_markers()
     print("ok - codex adapter")

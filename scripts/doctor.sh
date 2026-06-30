@@ -5,8 +5,9 @@
 # actually firing (newest distilled note + newest SessionEnd hook marker).
 #   make doctor   or   ./scripts/doctor.sh
 #
-# Read-only: GET /health, GET /api/tags, `docker compose ps`, mtime reads,
-# and Codex queue/worker status scans. No mutation.
+# Mostly read-only: probes /health, provider/model shape, compose status, mtimes,
+# and Codex queue/worker status. The marker-dir check writes and removes one
+# owner-only sentinel file so strict readiness can prove queue state is writable.
 # Default mode exits non-zero only when drudge is down; the other lines are advisory so the
 # user sees the WHOLE picture in one run, not just the first failure. Use --strict for the
 # release/briefing readiness gate: every failed dependency/check makes the command fail.
@@ -48,6 +49,7 @@ failed_note=0
 failed_marker=0
 failed_codex=0
 failed_resolution=0
+failed_freshness=0
 
 ok()   { echo "✓ $1"; }
 bad()  { echo "✗ $1"; }
@@ -71,6 +73,7 @@ log_doctor_event() {
             --field "failed_marker=$failed_marker" \
             --field "failed_codex=$failed_codex" \
             --field "failed_resolution=$failed_resolution" \
+            --field "failed_freshness=$failed_freshness" \
             --field "drudge_down=$drudge_down"; then
             echo "⚠ doctor event log write failed" >&2
         fi
@@ -129,6 +132,52 @@ newest_session_marker() {
     done
 }
 
+mtime_epoch() {
+    stat -c '%Y' "$1" 2>/dev/null && return 0   # GNU coreutils
+    stat -f '%m' "$1" 2>/dev/null && return 0   # BSD / macOS
+    echo 0
+}
+
+int_seconds() {
+    raw="$1"
+    case "$raw" in
+      ''|*[!0-9]*)
+        return 1
+        ;;
+    esac
+    if [ "$raw" -gt 0 ] 2>/dev/null; then
+        printf '%s\n' "$raw"
+        return 0
+    fi
+    return 1
+}
+
+is_ignored_marker() {
+    marker_name="${1##*/}"
+    case "$marker_name" in
+      codex-rollout-*) return 0 ;;
+    esac
+    return 1
+}
+
+resolve_docker() {
+    if [ -n "${DOCKER_BIN:-}" ] && [ -x "$DOCKER_BIN" ]; then
+        printf '%s\n' "$DOCKER_BIN"
+        return 0
+    fi
+    if command -v docker >/dev/null 2>&1; then
+        command -v docker
+        return 0
+    fi
+    for candidate in /opt/homebrew/bin/docker /usr/local/bin/docker /Applications/Docker.app/Contents/Resources/bin/docker; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 drudge_down=0
 
 # (a0) .env permissions — secrets live here.
@@ -160,38 +209,41 @@ else
     drudge_down=1
 fi
 
-# (b) LLM endpoint — the model that generates the curated note before remember is called.
-# Provider-aware (boring.json `llm` block): Ollama exposes /api/tags, OpenAI-compatible servers
-# (LM Studio, vLLM, remote OpenAI) expose /v1/models. Env overrides boring.json (BORING_LLM_BASE_URL).
+# (b) LLM/provider contract — the model that generates notes and the embedding shape
+# used by vector mode. This delegates to the SSOT verifier so readiness cannot drift
+# into a weaker endpoint-only check.
 BORING="${BORING_CONFIG:-$BORING_HOME/boring.json}"
-PROVIDER=$(jq -r '.llm.provider // "ollama"' "$BORING" 2>/dev/null || echo ollama)
-LLM_BASE=$(jq -r '.llm.base_url // "http://host.docker.internal:11434/v1"' "$BORING" 2>/dev/null || echo "http://host.docker.internal:11434/v1")
-LLM_BASE="${BORING_LLM_BASE_URL:-$LLM_BASE}"
-LLM_BASE=$(printf '%s' "$LLM_BASE" | sed 's#host\.docker\.internal#localhost#')
-if [ "$PROVIDER" = ollama ]; then
-    NATIVE="${LLM_BASE%/v1}"; NATIVE="${NATIVE%/}"
-    NATIVE="${OLLAMA_HOST:-$NATIVE}"  # explicit OLLAMA_HOST still wins
-    if curl -sf -m5 "$NATIVE/api/tags" >/dev/null 2>&1; then
-        ok "Ollama reachable ($NATIVE)"
+VERIFY_LLM="$BORING_HOME/scripts/verify-llm.sh"
+if [ -x "$VERIFY_LLM" ]; then
+    verify_out=$(BORING_HOME="$BORING_HOME" BORING_CONFIG="$BORING" "$VERIFY_LLM" 2>&1)
+    verify_rc=$?
+    if [ "$verify_rc" -eq 0 ]; then
+        ok "LLM provider/model/embed contract verified"
     else
-        bad "Ollama unreachable ($NATIVE) — distillation can't generate notes (start: ollama serve)"; failed_ollama=1
+        bad "LLM provider/model/embed contract failed — run: make verify-llm"
+        failed_ollama=1
     fi
-elif curl -sf -m5 "$LLM_BASE/models" >/dev/null 2>&1; then
-    ok "$PROVIDER reachable ($LLM_BASE)"
+    printf '%s\n' "$verify_out" | while IFS= read -r line; do
+        [ -n "$line" ] && echo "    $line"
+    done
 else
-    bad "$PROVIDER endpoint unreachable ($LLM_BASE) — distillation can't generate notes (server up? needs auth?)"; failed_ollama=1
+    bad "verify-llm not found/executable at $VERIFY_LLM"; failed_ollama=1
 fi
 
 # (c) Container status — surface crash-loops the HTTP probes alone would miss.
-if command -v docker >/dev/null 2>&1; then
-    if docker compose version 2>&1 | grep -q "Docker Compose"; then
-      COMPOSE="docker compose"
+if docker_bin="$(resolve_docker)"; then
+    compose_label="$docker_bin compose"
+    if "$docker_bin" compose version >/dev/null 2>&1; then
+        ps=$(cd "$BORING_HOME" 2>/dev/null && "$docker_bin" compose ps --format '{{.Name}} {{.Status}}' 2>/dev/null)
+    elif command -v docker-compose >/dev/null 2>&1; then
+        compose_label="docker-compose"
+        ps=$(cd "$BORING_HOME" 2>/dev/null && docker-compose ps --format '{{.Name}} {{.Status}}' 2>/dev/null)
     else
-      COMPOSE="docker-compose"
+        ps=""
+        bad "docker found at $docker_bin but Docker Compose is unavailable"; failed_containers=1
     fi
-    ps=$(cd "$BORING_HOME" 2>/dev/null && $COMPOSE ps --format '{{.Name}} {{.Status}}' 2>/dev/null)
     if [ -n "$ps" ]; then
-        ok "containers ($COMPOSE ps in $BORING_HOME):"
+        ok "containers ($compose_label ps in $BORING_HOME):"
         printf '%s\n' "$ps" | sed 's/^/    /'
         if printf '%s\n' "$ps" | grep -qi 'restarting'; then
             bad "a container is RESTARTING (crash-loop) — check 'make logs'"; failed_containers=1
@@ -200,7 +252,7 @@ if command -v docker >/dev/null 2>&1; then
         bad "no compose containers found in $BORING_HOME (stack not started? set BORING_HOME?)"; failed_containers=1
     fi
 else
-    bad "docker not on PATH — can't inspect container status"; failed_containers=1
+    bad "docker not found — can't inspect container status (set DOCKER_BIN or install Docker CLI)"; failed_containers=1
 fi
 
 # (d1) Newest distilled note — proof the write door produced output. The hook writes notes
@@ -221,6 +273,72 @@ if [ -n "$mark" ]; then
     echo "    $mark"
 else
     bad "no Claude/Kimi hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"; failed_marker=1
+fi
+
+# (d2b) Marker dir and stale marker health — proof the queue can still progress.
+if mkdir -p "$MARK_DIR" 2>/dev/null; then
+    marker_probe="$MARK_DIR/.doctor-write-test.$$"
+    if (umask 077; : > "$marker_probe") 2>/dev/null; then
+        rm -f "$marker_probe"
+        marker_writable=1
+    else
+        marker_writable=0
+    fi
+else
+    marker_writable=0
+fi
+
+pending_ttl_raw="${BORING_READINESS_PENDING_TTL:-${INGEST_PENDING_TTL:-1800}}"
+if pending_ttl="$(int_seconds "$pending_ttl_raw")"; then
+    :
+else
+    pending_ttl=0
+    bad "invalid pending marker TTL '$pending_ttl_raw' — set BORING_READINESS_PENDING_TTL or INGEST_PENDING_TTL to a positive integer second count"
+    failed_marker=1
+fi
+retry_ttl_raw="${BORING_READINESS_RETRY_TTL:-${INGEST_RETRY_TTL:-$pending_ttl_raw}}"
+if retry_ttl="$(int_seconds "$retry_ttl_raw")"; then
+    :
+else
+    retry_ttl=0
+    bad "invalid retry marker TTL '$retry_ttl_raw' — set BORING_READINESS_RETRY_TTL or INGEST_RETRY_TTL to a positive integer second count"
+    failed_marker=1
+fi
+now_s="$(date +%s)"
+stale_pending=0
+stale_retry=0
+dead_letter=0
+
+for marker_file in "$MARK_DIR"/*.pending; do
+    [ -e "$marker_file" ] || continue
+    is_ignored_marker "$marker_file" && continue
+    marker_age=$((now_s - $(mtime_epoch "$marker_file")))
+    [ "$marker_age" -lt 0 ] && marker_age=0
+    if [ "$pending_ttl" -gt 0 ] && [ "$marker_age" -gt "$pending_ttl" ]; then
+        stale_pending=$((stale_pending + 1))
+    fi
+done
+for marker_file in "$MARK_DIR"/*.retry; do
+    [ -e "$marker_file" ] || continue
+    is_ignored_marker "$marker_file" && continue
+    marker_age=$((now_s - $(mtime_epoch "$marker_file")))
+    [ "$marker_age" -lt 0 ] && marker_age=0
+    if [ "$retry_ttl" -gt 0 ] && [ "$marker_age" -gt "$retry_ttl" ]; then
+        stale_retry=$((stale_retry + 1))
+    fi
+done
+for marker_file in "$MARK_DIR"/*.dead "$MARK_DIR"/*.dead-letter; do
+    [ -e "$marker_file" ] || continue
+    is_ignored_marker "$marker_file" && continue
+    dead_letter=$((dead_letter + 1))
+done
+
+echo "marker_health writable=$marker_writable stale_pending=$stale_pending stale_retry=$stale_retry dead_letter=$dead_letter pending_ttl_s=$pending_ttl retry_ttl_s=$retry_ttl dir=$MARK_DIR"
+if [ "$marker_writable" -ne 1 ]; then
+    bad "marker dir is not writable — autonomous ingest cannot persist queue state"; failed_marker=1
+fi
+if [ "$stale_pending" -gt 0 ] || [ "$stale_retry" -gt 0 ] || [ "$dead_letter" -gt 0 ]; then
+    bad "marker health failed — stale pending/retry or dead-letter markers need attention"; failed_marker=1
 fi
 
 # (d3) Codex worker/queue status — Codex has no SessionEnd hook, so the write-door
@@ -253,6 +371,26 @@ else
     bad "event log probe not found at $event_log_probe"; failed_resolution=1
 fi
 
+# (d5) Freshness window for briefing content. Existence alone is too weak: a green
+# stack with stale notes still cannot answer "can I trust tomorrow morning's briefing?"
+note_max_hours_raw="${BORING_READINESS_NOTE_MAX_HOURS:-48}"
+if note_max_hours="$(int_seconds "$note_max_hours_raw")"; then
+    note_max_s=$((note_max_hours * 3600))
+else
+    note_max_s=0
+    bad "invalid note freshness window '$note_max_hours_raw' — set BORING_READINESS_NOTE_MAX_HOURS to a positive integer hour count"
+    failed_freshness=1
+fi
+if [ -n "$note" ] && [ "$note_max_s" -gt 0 ]; then
+    note_age=$((now_s - $(mtime_epoch "$note")))
+    [ "$note_age" -lt 0 ] && note_age=0
+    echo "note_freshness age_s=$note_age max_s=$note_max_s path=$note"
+    if [ "$note_age" -gt "$note_max_s" ]; then
+        bad "newest note is stale for briefing freshness — run/verify ingestion before relying on briefing"
+        failed_freshness=1
+    fi
+fi
+
 if [ "$FIX" -eq 1 ]; then
     echo
     echo "Applying fixes..."
@@ -271,8 +409,8 @@ fi
 
 echo
 if [ "$STRICT" -eq 1 ]; then
-    failures="${failed_env}${failed_hooks}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}"
-    if [ "$failures" = "000000000" ]; then
+    failures="${failed_env}${failed_hooks}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}"
+    if [ "$failures" = "0000000000" ]; then
         ok "readiness: all doctor checks passed — briefing/write-door dependencies are ready."
         log_doctor_event ok
         exit 0

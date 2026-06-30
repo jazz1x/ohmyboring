@@ -6,7 +6,7 @@ Codex session directory (`~/.codex/sessions`) and distills a small batch of
 un-ingested sessions per run. It shares marker state with the rest of the
 oh-my-boring ingestion pipeline via `~/.cache/boring-distill`.
 
-- Marker: ~/.cache/boring-distill/codex-<sid>.ts (done) / .pending / .retry
+- Marker: ~/.cache/boring-distill/codex-<sid>.ts (done) / .pending / .retry / .dead
 - LIMIT (default 1, COLLECT_LIMIT): number processed per invocation.
 - WINDOW (default 720h=30d, COLLECT_WINDOW_HOURS): ignore anything too old.
 - Subagent/rollout sessions (guardian, etc.) are skipped by default; set
@@ -15,6 +15,7 @@ oh-my-boring ingestion pipeline via `~/.cache/boring-distill`.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import glob
 import json
 import os
@@ -35,6 +36,7 @@ WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
 PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("INGEST_PENDING_TTL") or "1800")
+RETRY_TTL = float(os.environ.get("COLLECT_RETRY_TTL") or os.environ.get("INGEST_RETRY_TTL") or str(PENDING_TTL))
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 HOOK = os.path.join(BORING_HOME, "agents/codex/distill-session.py")
 INCLUDE_SUBAGENTS = os.environ.get("CODEX_INCLUDE_SUBAGENTS", "").lower() in ("1", "true", "yes")
@@ -156,17 +158,33 @@ def _is_rollout_marker(path: str) -> bool:
 
 def _marker_status() -> dict:
     status = {}
-    for label, suffix in (("done", "ts"), ("pending", "pending"), ("retry", "retry")):
+    now = time.time()
+    for label, suffixes, ttl in (
+        ("done", ("ts",), None),
+        ("pending", ("pending",), PENDING_TTL),
+        ("retry", ("retry",), RETRY_TTL),
+        ("dead_letter", ("dead", "dead-letter"), 0),
+    ):
         paths = [
             p
+            for suffix in suffixes
             for p in glob.glob(os.path.join(markers.MARK_DIR, f"codex-*.{suffix}"))
             if not _is_rollout_marker(p)
         ]
         newest = _newest(paths)
+        stale_count = 0
+        oldest_age_s = 0
+        for p in paths:
+            age_s = max(0, int(now - os.path.getmtime(p)))
+            oldest_age_s = max(oldest_age_s, age_s)
+            if ttl is not None and ttl >= 0 and age_s > ttl:
+                stale_count += 1
         status[label] = {
             "count": len(paths),
             "newest": newest,
             "newest_mtime": _format_mtime(newest) if newest else "",
+            "oldest_age_s": oldest_age_s,
+            "stale_count": stale_count,
         }
     return status
 
@@ -232,6 +250,48 @@ def _hermes_worker_status(path: str | None = None) -> dict:
                 "script": job.get("script") or "",
             }
     return {"path": jobs_path, "found": False}
+
+
+def _parse_worker_time(raw: str) -> dt.datetime | None:
+    if not raw:
+        return None
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        return dt.datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def _worker_readiness_issues(worker: dict) -> list[str]:
+    issues = []
+    if not worker.get("found"):
+        return ["hermes codex worker missing"]
+    if not worker.get("enabled"):
+        issues.append("hermes codex worker disabled")
+    last_status = str(worker.get("last_status") or "").lower()
+    if last_status not in ("ok", "success"):
+        issues.append(f"hermes codex worker last_status={last_status or 'missing'}")
+    if worker.get("last_error"):
+        issues.append("hermes codex worker last_error set")
+    next_run = _parse_worker_time(str(worker.get("next_run_at") or ""))
+    if next_run is None:
+        issues.append("hermes codex worker next_run_at missing_or_invalid")
+    else:
+        now = dt.datetime.now(next_run.tzinfo) if next_run.tzinfo else dt.datetime.now()
+        if next_run < now:
+            issues.append("hermes codex worker schedule stale")
+    return issues
+
+
+def _marker_readiness_issues(marker: dict) -> list[str]:
+    issues = []
+    if marker["pending"]["stale_count"] > 0:
+        issues.append(f"stale codex pending markers={marker['pending']['stale_count']}")
+    if marker["retry"]["stale_count"] > 0:
+        issues.append(f"stale codex retry markers={marker['retry']['stale_count']}")
+    if marker["dead_letter"]["count"] > 0:
+        issues.append(f"codex dead-letter markers={marker['dead_letter']['count']}")
+    return issues
 
 
 def _hermes_jobs_path() -> str:
@@ -302,9 +362,11 @@ def _print_status(source_dir: str, scan: dict) -> bool:
         print("[codex-status] next_session none")
     print(
         "[codex-status] markers "
-        f"done={marker['done']['count']} pending={marker['pending']['count']} retry={marker['retry']['count']}"
+        f"done={marker['done']['count']} pending={marker['pending']['count']} "
+        f"retry={marker['retry']['count']} dead_letter={marker['dead_letter']['count']} "
+        f"stale_pending={marker['pending']['stale_count']} stale_retry={marker['retry']['stale_count']}"
     )
-    for label in ("done", "pending", "retry"):
+    for label in ("done", "pending", "retry", "dead_letter"):
         if marker[label]["newest"]:
             print(
                 f"[codex-status] newest_{label} "
@@ -325,6 +387,13 @@ def _print_status(source_dir: str, scan: dict) -> bool:
         f"loaded={str(host_worker.get('loaded', False)).lower()} "
         f"kind={host_worker.get('kind', '')} path={host_worker.get('path', '')}"
     )
+    issues = []
+    if not (host_worker.get("found") and host_worker.get("loaded")):
+        issues.append("host worker is not installed/loaded")
+    issues.extend(_worker_readiness_issues(worker))
+    issues.extend(_marker_readiness_issues(marker))
+    for issue in issues:
+        print(f"[codex-status] readiness_issue {issue}")
     if latest_note:
         print(
             "[codex-status] newest_note "
@@ -333,7 +402,7 @@ def _print_status(source_dir: str, scan: dict) -> bool:
         )
     else:
         print("[codex-status] newest_note none")
-    return bool(host_worker.get("found") and host_worker.get("loaded"))
+    return not issues
 
 
 def main(argv: list[str] | None = None):
@@ -379,7 +448,7 @@ def main(argv: list[str] | None = None):
             )
             status = "ok"
             if args.strict and not ready:
-                print("[codex-status] readiness failed: host worker is not installed/loaded", file=sys.stderr)
+                print("[codex-status] readiness failed: worker/marker state is not ready", file=sys.stderr)
                 status = "failed"
             event_log.try_append_event(
                 "codex-collector",
@@ -394,6 +463,7 @@ def main(argv: list[str] | None = None):
                 queue_pending=0,
                 marker_pending=0,
                 marker_retry=0,
+                marker_dead_letter=0,
             )
             if status == "failed":
                 return 1
@@ -449,9 +519,12 @@ def main(argv: list[str] | None = None):
                 marker_done=marker["done"]["count"],
                 marker_pending=marker["pending"]["count"],
                 marker_retry=marker["retry"]["count"],
+                marker_dead_letter=marker["dead_letter"]["count"],
+                marker_stale_pending=marker["pending"]["stale_count"],
+                marker_stale_retry=marker["retry"]["stale_count"],
             )
             if args.strict and not ready:
-                print("[codex-status] readiness failed: host worker is not installed/loaded", file=sys.stderr)
+                print("[codex-status] readiness failed: worker/marker state is not ready", file=sys.stderr)
                 return 1
             return 0
         todo = scan["todo"]

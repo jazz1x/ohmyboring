@@ -18,7 +18,7 @@ worker instead:
   when the `codex` adapter is enabled.
 - When `hermes-agent` is enabled, `install.sh` also adds a
   `codex-memory-ingest-worker` job inside Hermes.
-- Use `make doctor` to check queue, skipped rollout copies, marker counts, host
+- Use `make doctor` to check queue, skipped rollout copies, marker health, host
   worker state, Hermes worker state, and newest Codex note.
 - On the host you can backfill manually when needed:
 
@@ -27,10 +27,18 @@ make doctor
 COLLECT_LIMIT=10 python3 agents/codex/collect-sessions.py
 ```
 
-`make doctor` is read-only and includes Codex queued sessions, skipped rollout
-copies, non-rollout marker counts, the host worker state, the Hermes worker
-state, and the newest Codex note. Rollout markers may remain on disk from older
+`make doctor` is mostly read-only and includes Codex queued sessions, skipped
+rollout copies, non-rollout marker counts, stale pending/retry markers,
+dead-letter markers, the host worker state, the Hermes worker state, and the
+newest Codex note. It writes and removes one owner-only sentinel marker to prove
+the queue directory is writable. Rollout markers may remain on disk from older
 runs, but status output does not count them as successful user-session ingestion.
+
+`make readiness` runs the same checks in strict mode. It fails when the host
+worker is missing/unloaded, the Hermes `codex-memory-ingest-worker` is missing,
+disabled, failed, stale-scheduled, or reports `last_error`, non-rollout pending
+or retry markers exceed their TTL, any dead-letter marker exists, or the newest
+Codex note is older than the configured freshness window.
 
 Session markers live in `~/.cache/boring-distill/codex-<sid>.*` and are shared
 with the rest of the pipeline.

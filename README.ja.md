@@ -179,9 +179,13 @@ make readiness
 | `BORING_VECTOR` | `on` で pgvector 有効化（オプション） |
 | `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | `llm.base_url` / `llm.model` のランタイムオーバーライド（オプション）。`drudge` バイナリをホストで直接実行する場合は `BORING_LLM_BASE_URL=http://localhost:11434/v1` を設定 |
 | `BORING_LLM_API_KEY` | `llm.api_key_env` がここを指す場合の API キー（認証 provider） |
+| `DOCKER_BIN` | GUI/launchd 環境の `PATH` に Docker がない場合に使う任意の Docker CLI パス |
 | `BORING_DISTILL_RESOLUTION` | 取り込み解像度の契約: `compact`, `standard`, `evidence`（デフォルト）, `forensic`; 検証失敗時は 1 回だけ補強し、それでも失敗したら `remember` をブロック |
 | `BORING_EVENT_LOG` | ローカル NDJSON ワークフローイベント。デフォルトは `~/.cache/oh-my-boring/events.ndjson` |
 | `BORING_EVENT_RECENT_HOURS` | `make readiness` が見る最近イベントの範囲。デフォルトは `24` |
+| `BORING_READINESS_NOTE_MAX_HOURS` | ブリーフィング readiness が許容する最新ノート freshness 範囲。デフォルトは `48` |
+| `BORING_READINESS_PENDING_TTL` | readiness で stale `.pending` とみなす閾値。`INGEST_PENDING_TTL`、次に `1800` 秒へフォールバック |
+| `BORING_READINESS_RETRY_TTL` | readiness で stale `.retry` とみなす閾値。`INGEST_RETRY_TTL`、次に pending 閾値へフォールバック |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプション Slack assistant |
 
 構造化イベントは distill、collector/worker、`doctor`/`readiness`、`guard`、`eval` から記録されます。最近のローカルタイムラインは `make events` で確認します。
@@ -210,7 +214,7 @@ make readiness
 | `make ollama` | Ollama 実行確認（必要ならバックグラウンド起動） |
 | `make verify-llm` | provider 到達性、ロード済みモデル id、実際の embedding 次元を確認 |
 | `make doctor` | スタック、フック、最終取り込み、Codex ワーカー/キュー状態を診断 |
-| `make readiness` | ブリーフィング前の strict ゲート。doctor finding が 1 つでもあれば失敗 |
+| `make readiness` | ブリーフィング前の strict ゲート。モデル/埋め込み、hook、container、worker、stale marker、freshness finding があれば失敗 |
 | `make ask Q="..."` | recall + 要約を一度に実行 |
 | `make sync` | vault の再取り込み |
 | `make remember M="text"` | 1 行ノートを書き込み |
@@ -444,6 +448,8 @@ curl -s -X POST http://localhost:7700/mcp \
 | Linux: コンテナがホストの Ollama に到達できない | Linux では Ollama がデフォルトで `127.0.0.1` にバインドするため、`host.docker.internal` が解決できてもコンテナは閉じたポートに当たります。Ollama を全インターフェースにバインドし（`OLLAMA_HOST=0.0.0.0:11434` の後に再起動）、かつ/または ホストのファイアウォールで docker ブリッジを許可してください |
 | 正常か？ / 最後の distill は通ったか？ | `make doctor` — ヘルス + 最終取り込み + Codex ワーカー/キューの簡易チェック |
 | 明日の朝ブリーフィングを信頼できる？ | `make readiness` — strict ゲート。フック/モデル/コンテナ/取り込み finding がすべて通る必要があります |
+| `make readiness` が stale marker を報告する | `~/.cache/boring-distill` を確認してください。古い `.pending`、`.retry`、`.dead` marker は自律取り込みが止まった、または調整が必要という意味です。予約ブリーフィングを信頼する前に処理してください |
+| `make readiness` が最新ノート stale を報告する | ブリーフィング出力に頼る前に取り込みを実行または確認してください。`BORING_READINESS_NOTE_MAX_HOURS` はブリーフィング window を意図的に長くする場合だけ広げます |
 | 直近で何が失敗した？ | `make events` — raw transcript なしで最近のローカルワークフロータイムラインを確認 |
 
 ---
