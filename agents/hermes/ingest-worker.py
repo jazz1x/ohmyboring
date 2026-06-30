@@ -38,6 +38,7 @@ import event_log
 import markers
 import omb_env
 import transcript
+import workflow_contract
 from drudge_client import DrudgeClient
 
 # Runs in TWO contexts: inside the hermes-agent container (via `hermes cron --script`) or on the host
@@ -138,7 +139,14 @@ def _find_session_note(sid):
 
 
 def _log_worker_event(event, status, **fields):
-    event_log.try_append_event("hermes-ingest-worker", event, status, agent="claude-code", **fields)
+    event_log.try_append_event(
+        "hermes-ingest-worker",
+        event,
+        status,
+        agent="claude-code",
+        **workflow_contract.worker_fields(event, status),
+        **fields,
+    )
 
 
 def _eligible(p):

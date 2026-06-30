@@ -273,11 +273,13 @@ def _install_codex_host_worker_macos(boring_home: str | None = None) -> dict:
   <string>{_xml_escape(str(home))}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/env</string>
-    <string>BORING_HOME={_xml_escape(str(home))}</string>
-    <string>COLLECT_LIMIT=1</string>
-    <string>python3</string>
-    <string>{_xml_escape(str(collector))}</string>
+	    <string>/usr/bin/env</string>
+	    <string>BORING_HOME={_xml_escape(str(home))}</string>
+	    <string>COLLECT_LIMIT=1</string>
+	    <string>CODEX_INCLUDE_ROLLOUTS=1</string>
+	    <string>COLLECT_STABLE_AGE_SECONDS=1800</string>
+	    <string>python3</string>
+	    <string>{_xml_escape(str(collector))}</string>
   </array>
   <key>StartInterval</key>
   <integer>{CODEX_HOST_WORKER_INTERVAL_SEC}</integer>
@@ -319,7 +321,8 @@ def _install_codex_host_worker_linux(boring_home: str | None = None) -> dict:
     collector = _codex_collector_path(home)
     job = (
         f"*/20 * * * * cd {_sh_quote(str(home))} && "
-        f"BORING_HOME={_sh_quote(str(home))} COLLECT_LIMIT=1 "
+        f"BORING_HOME={_sh_quote(str(home))} COLLECT_LIMIT=1 CODEX_INCLUDE_ROLLOUTS=1 "
+        f"COLLECT_STABLE_AGE_SECONDS=1800 "
         f"python3 {_sh_quote(str(collector))} >>{_sh_quote(CODEX_HOST_WORKER_LOG)} 2>&1 "
         f"# {CODEX_HOST_WORKER_LABEL}"
     )

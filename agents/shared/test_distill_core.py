@@ -161,6 +161,29 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertIn("Do not rename required headings", prompt)
         self.assertIn("copy the required number of exact tokens", prompt)
 
+    def test_distill_skip_logs_workflow_event(self):
+        stderr = io.StringIO()
+        with mock.patch.object(distill_core, "_call_llm", return_value={"skip": True}), \
+             mock.patch.object(distill_core, "_call_remember") as remember, \
+             mock.patch.object(distill_core.sys, "stderr", stderr):
+            ok = distill_core.distill_and_remember(
+                "pure chit-chat",
+                "personal",
+                "oh-my-boring",
+                "s-skip",
+            )
+
+        self.assertTrue(ok)
+        remember.assert_not_called()
+        self.assertIn("LLM decided SKIP", stderr.getvalue())
+        event = _read_last_event()
+        self.assertEqual(event["status"], "ok")
+        self.assertEqual(event["verifier_status"], "skipped")
+        self.assertEqual(event["remember_status"], "skipped")
+        self.assertEqual(event["workflow"], "memory_ingest")
+        self.assertEqual(event["workflow_node"], "skipped")
+        self.assertEqual(event["workflow_outcome"], "skip")
+
     def test_resolution_failure_repairs_once_then_remembers(self):
         stderr = io.StringIO()
         with mock.patch.object(distill_core, "_call_llm", side_effect=[SHALLOW_NOTE, RICH_NOTE]) as llm, \
@@ -185,6 +208,9 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         event = _read_last_event()
         self.assertEqual(event["verifier_status"], "repaired")
         self.assertEqual(event["remember_status"], "remembered")
+        self.assertEqual(event["workflow"], "memory_ingest")
+        self.assertEqual(event["workflow_node"], "remember_requested")
+        self.assertEqual(event["workflow_outcome"], "pass")
 
     def test_resolution_repair_failure_blocks_remember(self):
         stderr = io.StringIO()
@@ -209,6 +235,8 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         event = _read_last_event()
         self.assertEqual(event["verifier_status"], "failed")
         self.assertEqual(event["remember_status"], "not_called")
+        self.assertEqual(event["workflow_node"], "resolution_repaired")
+        self.assertEqual(event["workflow_outcome"], "fail")
 
     def test_resolution_pass_calls_remember_and_logs_event(self):
         stderr = io.StringIO()
@@ -232,6 +260,8 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         event = _read_last_event()
         self.assertEqual(event["verifier_status"], "pass")
         self.assertEqual(event["remember_status"], "duplicate")
+        self.assertEqual(event["workflow_node"], "remember_requested")
+        self.assertEqual(event["workflow_outcome"], "duplicate")
 
     def test_prepare_note_promotes_semantic_decision_claim_kind(self):
         parsed = {
@@ -350,6 +380,8 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         event = _read_last_event()
         self.assertEqual(event["status"], "failed")
         self.assertEqual(event["remember_status"], "failed")
+        self.assertEqual(event["workflow_node"], "remember_requested")
+        self.assertEqual(event["workflow_outcome"], "fail")
 
     def test_event_log_write_failure_does_not_override_remember_success(self):
         stderr = io.StringIO()

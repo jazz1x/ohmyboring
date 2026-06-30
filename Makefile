@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs events ask sync remember collect distill-now collect-kimi smoke e2e doctor readiness heal verify-llm maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality deny eval bench-llm psql reset
+.PHONY: help up down build logs agent-logs events ask sync remember collect distill-now collect-kimi smoke e2e doctor readiness heal verify-llm maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality self-verify-check deny eval bench-llm psql reset
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -106,8 +106,14 @@ maintenance-status: ## Show daily housekeeping registration state
 steward: ## Inspect vault data hygiene (project variants, placeholder tags, missing sources)
 	@python3 scripts/data-steward.py
 
-steward-fix: ## Apply data-steward repairs (backs up each note to *.md.bak — vault/wiki is gitignored)
-	@python3 scripts/data-steward.py --fix --yes
+steward-fix: ## Apply safe data-steward repairs through the backup-first cleanup gate
+	@python3 scripts/vault-cleanup-gate.py --fix --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
+
+vault-cleanup-check: ## Verify vault cleanup contract without rewriting notes
+	@python3 scripts/vault-cleanup-gate.py --check --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
+
+vault-cleanup-fix: ## Backup vault/wiki, apply safe steward repairs, then verify
+	@python3 scripts/vault-cleanup-gate.py --fix --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
 
 retention: ## Show raw session retention plan (dry-run)
 	@python3 scripts/retention.py
@@ -122,6 +128,9 @@ guard: ## Structural gate (fmt+clippy+test+py-compile+py-unit-tests) + vault dat
 
 quality: ## Release acceptance gate (MCP contract + docs drift + removed dangerous surface)
 	cd drudge && cargo test --quiet quality_gate
+
+self-verify-check: ## Check self-verification stage contract: make self-verify-check [STAGE=bootstrap] [SUMMARY=/path/summary.tsv]
+	@python3 scripts/self-verify-contract.py --stage "$${STAGE:-bootstrap}" $${SUMMARY:+--summary "$$SUMMARY"}
 
 deny: ## Supply-chain gate (cargo-deny: vulnerabilities, licenses, duplicate versions)
 	cd drudge && cargo deny check

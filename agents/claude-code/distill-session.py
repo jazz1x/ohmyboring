@@ -20,9 +20,11 @@ from distill_core import (  # noqa: F401
     _build_prompt,
     _call_llm,
     _call_remember,
+    _distill_resolution,
     _throttled,
     distill_and_remember,
     git_remote_url,
+    log_skip_event,
     repo_slug,
 )
 
@@ -31,7 +33,7 @@ from distill_core import (  # noqa: F401
 __all__ = [
     "_extract_json", "_mark", "_strip_trailing_metadata",
     "_build_prompt", "_call_llm", "_call_remember", "_throttled",
-    "distill_and_remember", "git_remote_url", "repo_slug", "extract", "main", "run",
+    "distill_and_remember", "git_remote_url", "log_skip_event", "repo_slug", "extract", "main", "run",
 ]
 # fmt: on
 
@@ -66,15 +68,18 @@ def main() -> int:
     cwd = data.get("cwd") or ""
     remote_url = git_remote_url(cwd)
     origin, _rule = boring_config.classify(cwd, remote_url or None)
+    repo = repo_slug(cwd)
     text = extract(transcript_path)
     if len(text) < 500:
         print("[omb-distill] transcript too short; skipping", file=sys.stderr)
+        log_skip_event(session_id, origin, repo, _distill_resolution(), "too_short")
+        if session_id:
+            _mark(session_id)
         return 0
     text, was_clamped = transcript.clamp_text(text, CLAMP)
     if was_clamped:
         print(f"[omb-distill] transcript clamped to {len(text)} chars", file=sys.stderr)
 
-    repo = repo_slug(cwd)
     if distill_and_remember(text, origin, repo, session_id):
         _mark(session_id)
         print("[omb-distill] remembered", file=sys.stderr)

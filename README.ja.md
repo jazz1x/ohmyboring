@@ -3,14 +3,11 @@
 [English](README.md) · [한국어](README.ko.md) · **日本語**
 
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
-![release](https://img.shields.io/badge/release-0.1.0%20candidate-blue)
+![version](https://img.shields.io/badge/version-0.1.0-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
-![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
-![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
-![qwen3](https://img.shields.io/badge/LLM-qwen3:14b-000?logo=ollama)
+![local LLM](https://img.shields.io/badge/local%20LLM-Ollama%20%7C%20LM%20Studio-000)
 
-**セルフホスティング型パーソナルメモリ RAG。** Claude Code / Kimi Code のセッションと、取り込み可能な Codex トランスクリプトがローカルで人が読める wiki に蒸留され、*"前これどうやったっけ？"* を呼び出して使います。**クラウド 0 · 100% ローカル。**
+**ohmyboring は、自分がどう解いたかを覚えておくための道具です。** Claude Code / Kimi Code のセッションと、取り込み可能な Codex トランスクリプトをローカルの読める wiki に変換し、*"前これどうやったっけ？"* と思ったときに必要な部分を呼び出します。**クラウド 0 · ローカル LLM に優しい設計。**
 
 ```bash
 # 最速 — ワンライナー: ~/oh-my-boring にクローン、ビルド、フック/MCP/ワーカーまで連携。
@@ -23,6 +20,7 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/ins
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
+make verify-llm     # 提供元、chat モデル、embedding モデル、ベクトル次元を確認
 make doctor         # スタック、フック、Codex ワーカー/キュー、最終取り込みを確認
 make readiness      # 朝ブリーフィングに頼る前の strict ゲート
 make collect N=20   # 過去の Claude Code セッションで vault を埋める（新規クローンは空）
@@ -32,6 +30,15 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 > 新規クローンは **vault が空** なので、初日の `make ask` は何も見つけられません。`make collect` で Claude の過去記録を埋めれば、以降の Claude/Kimi セッションは自動蓄積され、Codex は取り込み可能なトランスクリプトをワーカーが処理します（[取り込み](#取り込み-ingestion)参照）。
 
 > **Docker**、**Ollama** または **LM Studio** のような OpenAI-compatible ローカルサーバー、**Python 3**、**jq**、**curl**、**git**、**make** が必要です。
+
+LM Studio を使う場合は、ローカルサーバーを起動し、チャットモデル 1 つと埋め込みモデル 1 つをロードしてから、`llm.provider` を `lmstudio` に変更し `make verify-llm` を実行してください。ohmyboring は正確なモデル id と埋め込み次元を確認してから、その設定を信頼します。
+
+初回実行の成功条件:
+
+- `make up` が 0 で終了し、`http://127.0.0.1:7700/health` が 200 を返します。
+- `make verify-llm` が設定済みの 2 つの model id を検出し、実際の embedding 次元が `llm.embed_dim` と一致します。
+- `make doctor` がスタック、フック/MCP、ワーカー/キュー、最新取り込み状態を隠れた失敗なく表示します。
+- 予約された朝ブリーフィングを信頼する前に `make readiness` が green である必要があります。
 
 ---
 
@@ -52,7 +59,7 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 | 方法 | コマンド | タイミング |
 | --- | --- | --- |
 | **自動（セッション終了時）** | SessionEnd フック（`install.sh` が設定） | すべての Claude Code / Kimi セッション — `hooks/distill-session.py` がトランスクリプトを蒸留し `remember` します。対になる `UserPromptSubmit` フック（`recall.py`）が関連する過去のメモリを新しいプロンプトへ自動注入します。 |
-| **自動（Codex ワーカー）** | ホスト launchd/cron ワーカー（`install.sh` が設定） | Codex には SessionEnd フックがありません。ホストワーカーが 20 分ごとに `~/.codex/sessions/**/*.jsonl` をスキャンし、Codex Desktop の `rollout-*` コピーは既定でスキップし、取り込み可能なトランスクリプトだけを同じ `remember` 経路で保存します。`hermes-agent` が有効なら `codex-memory-ingest-worker` も設定されます。どちらも `make doctor` で確認します。 |
+| **自動（Codex ワーカー）** | ホスト launchd/cron ワーカー（`install.sh` が設定） | Codex には SessionEnd フックがありません。ホストワーカーが 20 分ごとに `~/.codex/sessions/**/*.jsonl` をスキャンし、まだ書き込み中のトランスクリプトと実際の subagent rollout はスキップし、取り込み可能なトランスクリプトを同じ `remember` 経路で保存します。`hermes-agent` が有効なら `codex-memory-ingest-worker` も設定されます。どちらも `make doctor` で確認します。 |
 | **過去セッションのバックフィル** | `make collect [N=20]` | インストール直後、空の vault を `~/.claude/projects` の履歴で埋めるとき。新しい順・冪等（セッションごとのマーカーで蒸留済みはスキップ）、1 回に `N` 件だけ処理し CPU を占有しません。 |
 | **今すぐ（セッションを終えずに）** | `make distill-now` · `make remember M="…"` | セッションを終了せずに即座に取り込みたいとき。`distill-now` は**現在の**トランスクリプトをその都度再蒸留し、マーカーを残さないため、セッション終了時の通常の取り込みもそのまま動作します（初期ノート + 最終ノートの両方ができる場合あり）。`remember` は自分で書いたノートを保存します。 |
 
@@ -99,6 +106,7 @@ flowchart LR
 
 - **Read door** — 高速、LLM 不要。`make ask`、`recall.py`、MCP `recall` が `vault/wiki` を直接読みます。
 - **Write door** — gated。`distill-session.py` がローカル LLM を呼び出し、ohmyboring の `remember` MCP tool で書き込みます。
+- **Duplicate gate** — 重複ノートは通常スキップします。同じセッションまたは強い rollout コピーから、より内容の濃いノートが来た場合は、`remember` が同じ `wiki-NNNN.md` を書き換えて再取り込みします。
 
 ### ワークフローグラフ契約
 
@@ -186,6 +194,7 @@ make readiness
 | `DOCKER_BIN` | GUI/launchd 環境の `PATH` に Docker がない場合に使う任意の Docker CLI パス |
 | `BORING_DISTILL_RESOLUTION` | 取り込み解像度の契約: `compact`, `standard`, `evidence`（デフォルト）, `forensic`; 検証失敗時は 1 回だけ補強し、それでも失敗したら `remember` をブロック |
 | `DISTILL_CLAMP` | 直接 SessionEnd hook がローカル LLM に送る最大文字数。ローカルモデルの timeout を避けるためデフォルトは `2000`。Hermes worker offer は引き続き `INGEST_CLAMP`（`4000`）を使用 |
+| `CODEX_DISTILL_CLAMP` | Codex セッションから抽出して distill LLM に送る最大文字数。デフォルトは `INGEST_CLAMP`、次に `4000`。大きい rollout transcript も Hermes worker の予算内で処理しつつ、前後の根拠を残します |
 | `BORING_EVENT_LOG` | ローカル NDJSON ワークフローイベント。デフォルトは `~/.cache/oh-my-boring/events.ndjson` |
 | `BORING_EVENT_RECENT_HOURS` | `make readiness` が見る最近イベントの範囲。デフォルトは `24` |
 | `BORING_READINESS_NOTE_MAX_HOURS` | ブリーフィング readiness が許容する最新ノート freshness 範囲。デフォルトは `48` |
@@ -193,7 +202,7 @@ make readiness
 | `BORING_READINESS_RETRY_TTL` | readiness で stale `.retry` とみなす閾値。`INGEST_RETRY_TTL`、次に pending 閾値へフォールバック |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプション Slack assistant |
 
-構造化イベントは distill、collector/worker、`doctor`/`readiness`、`guard`、`eval` から記録されます。最近のローカルタイムラインは `make events` で確認します。
+構造化イベントは distill、collector/worker、`doctor`/`readiness`、`guard`、`eval` から記録されます。memory-ingest イベントには Rust ワークフローグラフ契約に沿った `workflow=memory_ingest`、`workflow_node`、`workflow_outcome` フィールドが付きます。最近のローカルタイムラインは `make events` で確認します。
 
 > **埋め込みモデルを変えるとベクトルの次元が変わります。** 合成モデル（`llm.model`）は自由に差し替えられますが、`llm.embed_model` を変えるとサイズの異なるベクトルが出力されるため、`llm.embed_dim` を一致させ、**かつ** `make reset` を実行する必要があります — そうしないと旧形状のベクトルへの upsert が失敗します。よくある次元: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768。
 
@@ -220,8 +229,11 @@ make readiness
 | `make verify-llm` | provider 到達性、ロード済みモデル id、実際の embedding 次元を確認 |
 | `make doctor` | スタック、フック、最終取り込み、Codex ワーカー/キュー状態を診断 |
 | `make readiness` | ブリーフィング前の strict ゲート。モデル/埋め込み、hook、container、worker、stale marker、freshness finding があれば失敗 |
+| `make self-verify-check` | ライブ自己検証サマリーを現在の段階契約で評価 |
 | `make ask Q="..."` | recall + 要約を一度に実行 |
 | `make sync` | vault の再取り込み |
+| `make vault-cleanup-check` | ノートを書き換えずに vault cleanup 契約を検証 |
+| `make vault-cleanup-fix` | `vault/wiki` をバックアップし、安全な steward 修正を適用して再検証 |
 | `make remember M="text"` | 1 行ノートを書き込み |
 | `make collect [N=1]` | 過去 Claude Code セッションの lazy バックフィル |
 | `make collect-kimi [N=1]` | 過去 Kimi Code セッションの lazy バックフィル |
@@ -342,7 +354,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Kimi セッションを要約し `remember` を呼び出す |
 | Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | 関連 snippet を取得しプロンプト context に注入 |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring` を MCP サーバーとして公開 |
-| Codex | `agents/codex/README.md` | MCP + ホストワーカーのバックフィル | `~/.codex/mcp.json` / launchd または cron / `collect-sessions.py` | `ohmyboring` を MCP サーバーとして公開し、取り込み可能な Codex セッションをバックフィル。rollout コピーはスキップ |
+| Codex | `agents/codex/README.md` | MCP + ホストワーカーのバックフィル | `~/.codex/mcp.json` / launchd または cron / `collect-sessions.py` | `ohmyboring` を MCP サーバーとして公開し、取り込み可能な Codex セッションをバックフィル。設定済みワーカーは安定した rollout トランスクリプトを取り込み、実際の subagent はスキップ |
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 取り込みワーカーと定期ブリーフィングを実行 |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 手動 | 古い Claude Code セッションの lazy バックフィル |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 手動 | 古い Kimi Code セッションの lazy バックフィル |

@@ -27,6 +27,7 @@ import boring_config  # noqa: E402
 import event_log  # noqa: E402
 import markers  # noqa: E402
 import omb_env  # noqa: E402
+import workflow_contract  # noqa: E402
 from resolution_quality import (  # noqa: E402
     ALLOWED_CLAIM_KINDS,
     ALLOWED_RESOLUTIONS,
@@ -730,9 +731,34 @@ def _log_resolution_event(session_id, origin, repo, report, verifier_status, rem
             numbers_seen=len(report.evidence_tokens_seen),
             numbers_kept=len(report.evidence_tokens_kept),
             remember_status=remember_status,
+            **workflow_contract.resolution_fields(verifier_status, remember_status),
         )
     except OSError as e:
         print(f"[distill-session] event log write failed: {e}", file=sys.stderr)
+
+
+def log_skip_event(session_id, origin, repo, resolution, reason):
+    event_log.try_append_event(
+        "distill-session",
+        "distill_resolution",
+        "ok",
+        session_id=session_id,
+        origin=origin,
+        repo=repo,
+        resolution=resolution,
+        verifier_status="skipped",
+        missing_fields=[],
+        claim_count=0,
+        numbers_seen=0,
+        numbers_kept=0,
+        remember_status="skipped",
+        reason=reason,
+        **workflow_contract.skip_fields(),
+    )
+
+
+def _log_skip_event(session_id, origin, repo, resolution):
+    log_skip_event(session_id, origin, repo, resolution, "llm_skip")
 
 
 def distill_and_remember(text, origin, repo, session_id=""):
@@ -747,6 +773,7 @@ def distill_and_remember(text, origin, repo, session_id=""):
         return False
     if parsed.get("skip"):
         print("[distill-session] LLM decided SKIP", file=sys.stderr)
+        _log_skip_event(session_id, origin, repo, resolution)
         return True  # intentional skip → mark as done so we don't retry forever
 
     # Language retry: note_lang=ko but the title came back with no Korean → the model ignored the

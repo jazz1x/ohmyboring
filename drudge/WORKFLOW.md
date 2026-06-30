@@ -52,6 +52,10 @@ Key paths:
 This graph is acceptable only while these stay true:
 
 - `memory_ingest_graph().validate()` has no issues.
+- graph shape stays at 11 nodes, 16 edges, and 1 terminal unless `GOALS.md`
+  and the adapter projection tests are updated in the same change.
 - Existing hook, worker, `doctor`, and `readiness` behavior is unchanged.
 - Any future adapter integration maps to these nodes instead of inventing local
   state names.
+- Adapter events carry `workflow=memory_ingest`, `workflow_node`, and
+  `workflow_outcome` when they project this graph into the local event log.

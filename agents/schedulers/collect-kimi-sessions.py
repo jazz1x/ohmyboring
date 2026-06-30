@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 import event_log
 import markers
 import omb_env
+import workflow_contract
 from drudge_client import DrudgeClient
 
 BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias
@@ -96,6 +97,7 @@ def main():
             agent="kimi",
             failed=1,
             reason="hook_missing",
+            **workflow_contract.collector_run_fields("failed", 1),
         )
         return 1
 
@@ -141,6 +143,7 @@ def main():
         processed=processed,
         failed=failed,
         sync_status=sync_status,
+        **workflow_contract.collector_run_fields(status, attempted),
     )
     return 0 if status == "ok" else 1
 

@@ -3,14 +3,11 @@
 [English](README.md) · **한국어** · [日本語](README.ja.md)
 
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
-![release](https://img.shields.io/badge/release-0.1.0%20candidate-blue)
+![version](https://img.shields.io/badge/version-0.1.0-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
-![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
-![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
-![qwen3](https://img.shields.io/badge/LLM-qwen3:14b-000?logo=ollama)
+![local LLM](https://img.shields.io/badge/local%20LLM-Ollama%20%7C%20LM%20Studio-000)
 
-**셀프호스팅 개인 메모리 RAG.** Claude Code / Kimi Code 세션과 적재 가능한 Codex 트랜스크립트가 로컬의 사람이 읽는 위키로 증류돼 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클라우드 0 · 100% 로컬.**
+**ohmyboring은 내가 어떻게 풀었는지를 기억합니다.** Claude Code / Kimi Code 세션과 적재 가능한 Codex 트랜스크립트를 로컬의 사람이 읽는 위키로 바꾸고, *"전에 이거 어떻게 했더라"* 싶을 때 필요한 부분을 다시 꺼내줍니다. **클라우드 0 · 로컬 LLM 친화.**
 
 ```bash
 # 가장 빠름 — 원라이너: ~/oh-my-boring에 클론, 빌드, 훅/MCP/워커까지 연결.
@@ -23,6 +20,7 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/ins
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
+make verify-llm     # 제공자, chat 모델, embedding 모델, 벡터 차원 확인
 make doctor         # 스택, 훅, Codex 워커/큐, 마지막 적재 확인
 make readiness      # 아침 브리핑 의존 전 strict 게이트
 make collect N=20   # 과거 Claude Code 세션으로 vault 채우기 (새 클론은 비어 있음)
@@ -32,6 +30,15 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 > 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 Claude 과거 기록을 채우고 나면, 이후 Claude/Kimi 세션은 자동 축적되고 Codex는 적재 가능한 트랜스크립트를 워커가 처리합니다([적재하기](#적재하기-ingestion) 참고).
 
 > **Docker**, **Ollama** 또는 **LM Studio** 같은 OpenAI-compatible 로컬 서버, **Python 3**, **jq**, **curl**, **git**, **make**가 필요합니다.
+
+LM Studio를 쓰고 싶다면 로컬 서버를 켜고, 채팅 모델 1개와 임베딩 모델 1개를 로드한 뒤 `llm.provider`를 `lmstudio`로 바꾸고 `make verify-llm`을 실행하세요. ohmyboring은 정확한 모델 id와 임베딩 차원을 확인한 뒤에만 설정을 믿습니다.
+
+첫 실행 성공 기준:
+
+- `make up`이 0으로 끝나고 `http://127.0.0.1:7700/health`가 200을 반환합니다.
+- `make verify-llm`이 설정된 두 모델 id를 찾고 실제 embedding 차원이 `llm.embed_dim`과 같습니다.
+- `make doctor`가 스택, 훅/MCP, 워커/큐, 최신 적재 상태를 숨은 실패 없이 보여줍니다.
+- 예약 아침 브리핑을 믿기 전 `make readiness`가 초록불이어야 합니다.
 
 ---
 
@@ -52,7 +59,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 | 방법 | 명령 | 언제 |
 | --- | --- | --- |
 | **자동 (세션 종료 시)** | SessionEnd 훅 (`install.sh`가 설치) | 모든 Claude Code / Kimi 세션 — `hooks/distill-session.py`가 트랜스크립트를 증류해 `remember`합니다. 짝이 되는 `UserPromptSubmit` 훅(`recall.py`)이 관련 과거 메모리를 새 프롬프트에 자동 주입합니다. |
-| **자동 (Codex 워커)** | 호스트 launchd/cron 워커 (`install.sh`가 설치) | Codex에는 SessionEnd 훅이 없습니다. 호스트 워커가 20분마다 `~/.codex/sessions/**/*.jsonl`을 스캔하고, Codex Desktop `rollout-*` 복제본은 기본으로 건너뛰며, 적재 가능한 트랜스크립트만 같은 `remember` 경로로 저장합니다. `hermes-agent`가 켜져 있으면 `codex-memory-ingest-worker`도 함께 설치됩니다. 둘 다 `make doctor`로 확인합니다. |
+| **자동 (Codex 워커)** | 호스트 launchd/cron 워커 (`install.sh`가 설치) | Codex에는 SessionEnd 훅이 없습니다. 호스트 워커가 20분마다 `~/.codex/sessions/**/*.jsonl`을 스캔하고, 아직 쓰이는 중인 transcript와 실제 subagent rollout은 건너뛰며, 적재 가능한 transcript를 같은 `remember` 경로로 저장합니다. `hermes-agent`가 켜져 있으면 `codex-memory-ingest-worker`도 함께 설치됩니다. 둘 다 `make doctor`로 확인합니다. |
 | **과거 세션 백필** | `make collect [N=20]` | 설치 직후, 비어 있는 vault를 `~/.claude/projects` 기록으로 채울 때. 최신순, 멱등(세션별 마커로 이미 증류한 건 건너뜀), 한 번에 `N`개만 처리해 CPU를 독점하지 않음. |
 | **지금 바로 (세션 안 끝내고)** | `make distill-now` · `make remember M="…"` | 세션을 끝내지 않고 즉시 적재할 때. `distill-now`는 **현재** 트랜스크립트를 그때그때 다시 증류하고 마커를 남기지 않으므로, 세션 종료 시의 정상 적재도 그대로 동작합니다(초기 노트 + 최종 노트가 함께 생길 수 있음). `remember`는 직접 작성한 노트를 저장합니다. |
 
@@ -99,6 +106,7 @@ flowchart LR
 
 - **Read door** — 빠르고 LLM 불필요. `make ask`, `recall.py`, MCP `recall`이 `vault/wiki`를 직접 읽습니다.
 - **Write door** — gated. `distill-session.py`가 로컬 LLM을 호출하고 ohmyboring의 `remember` MCP tool로 기록합니다.
+- **Duplicate gate** — 중복 노트는 기본적으로 건너뜁니다. 같은 세션이나 강한 rollout 복제에서 더 충실한 노트가 들어오면 `remember`가 같은 `wiki-NNNN.md`를 다시 쓰고 재적재합니다.
 
 ### 작업 흐름 그래프 계약
 
@@ -186,6 +194,7 @@ make readiness
 | `DOCKER_BIN` | GUI/launchd 환경의 `PATH`에 Docker가 없을 때 사용할 선택적 Docker CLI 경로 |
 | `BORING_DISTILL_RESOLUTION` | 적재 해상도 계약: `compact`, `standard`, `evidence`(기본), `forensic`; 검증 실패 시 한 번 보강하고 그래도 실패하면 `remember` 차단 |
 | `DISTILL_CLAMP` | 직접 SessionEnd hook이 로컬 LLM에 보내는 최대 문자 수; 로컬 모델 timeout을 피하기 위해 기본값은 `2000`. Hermes worker offer는 계속 `INGEST_CLAMP`(`4000`)를 사용 |
+| `CODEX_DISTILL_CLAMP` | Codex 세션에서 추출해 distill LLM에 보내는 최대 문자 수; 기본값은 `INGEST_CLAMP`, 그다음 `4000`. 큰 rollout transcript도 Hermes worker 예산 안에서 처리하되 앞/뒤 근거는 보존합니다 |
 | `BORING_EVENT_LOG` | 로컬 NDJSON 작업 흐름 이벤트; 기본값 `~/.cache/oh-my-boring/events.ndjson` |
 | `BORING_EVENT_RECENT_HOURS` | `make readiness`가 보는 최근 이벤트 범위; 기본값 `24` |
 | `BORING_READINESS_NOTE_MAX_HOURS` | 브리핑 readiness가 허용하는 최신 노트 freshness 범위; 기본값 `48` |
@@ -193,7 +202,7 @@ make readiness
 | `BORING_READINESS_RETRY_TTL` | readiness에서 stale `.retry`로 보는 임계값; `INGEST_RETRY_TTL`, 그다음 pending 임계값을 기본으로 사용 |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack assistant |
 
-구조화 이벤트는 distill, collector/worker, `doctor`/`readiness`, `guard`, `eval`에서 기록됩니다. 최근 로컬 타임라인은 `make events`로 확인합니다.
+구조화 이벤트는 distill, collector/worker, `doctor`/`readiness`, `guard`, `eval`에서 기록됩니다. memory-ingest 이벤트에는 Rust 작업 흐름 그래프 계약을 따르는 `workflow=memory_ingest`, `workflow_node`, `workflow_outcome` 필드가 붙습니다. 최근 로컬 타임라인은 `make events`로 확인합니다.
 
 > **임베딩 모델을 바꾸면 벡터 차원이 바뀝니다.** 합성 모델(`llm.model`)은 자유롭게 교체해도 되지만, `llm.embed_model`을 바꾸면 크기가 다른 벡터가 나오므로, `llm.embed_dim`을 맞게 수정하고 **그리고** `make reset`을 실행해야 합니다 — 그러지 않으면 기존 형태의 벡터에 대한 upsert가 실패합니다. 흔한 차원: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
 
@@ -250,8 +259,11 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 | `make verify-llm` | provider 접근성, 로드된 모델 id, 실제 embedding 차원 확인 |
 | `make doctor` | 스택, 훅, 마지막 적재, Codex 워커/큐 상태 진단 |
 | `make readiness` | 브리핑 전 strict 게이트; 모델/임베딩, 훅, 컨테이너, 워커, stale marker, freshness finding이 있으면 실패 |
+| `make self-verify-check` | 라이브 자가검증 요약을 현재 단계 계약으로 평가 |
 | `make ask Q="..."` | recall + 요약 한 번에 |
 | `make sync` | vault 재적재 |
+| `make vault-cleanup-check` | 노트를 고치지 않고 vault 정리 계약 검증 |
+| `make vault-cleanup-fix` | `vault/wiki` 백업 후 안전한 steward 수정 적용 및 재검증 |
 | `make remember M="text"` | 한 줄 노트 작성 |
 | `make collect [N=1]` | 과거 Claude Code 세션 lazy 백필 |
 | `make collect-kimi [N=1]` | 과거 Kimi Code 세션 lazy 백필 |
@@ -372,7 +384,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Kimi 세션을 요약해 `remember` 호출 |
 | Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | 관련 snippet을 가져와 프롬프트 context 주입 |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring`를 MCP 서버로 노출 |
-| Codex | `agents/codex/README.md` | MCP + 호스트 워커 백필 | `~/.codex/mcp.json` / launchd 또는 cron / `collect-sessions.py` | `ohmyboring`를 MCP 서버로 노출하고 적재 가능한 Codex 세션을 백필. rollout 복제본은 건너뜀 |
+| Codex | `agents/codex/README.md` | MCP + 호스트 워커 백필 | `~/.codex/mcp.json` / launchd 또는 cron / `collect-sessions.py` | `ohmyboring`를 MCP 서버로 노출하고 적재 가능한 Codex 세션을 백필. 설치된 워커는 안정화된 rollout transcript를 수확하고 실제 subagent는 건너뜀 |
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 적재 워커와 정기 브리핑 실행 |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 수동 | 오래된 Claude Code 세션 lazy 백필 |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 수동 | 오래된 Kimi Code 세션 lazy 백필 |

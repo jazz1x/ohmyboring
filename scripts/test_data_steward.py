@@ -145,7 +145,132 @@ def test_weak_claims_detected():
     assert "weak-claims" in weak_kinds, issues
 
 
-def test_zombie_rollout_session_is_reported_without_requiring_sources():
+def test_short_specific_claim_values_are_allowed():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\n"
+        "claims:\n"
+        "- {subject: ds-logic-separation, predicate: actual_count, value: '1', kind: fact}\n"
+        "- {subject: legacyCategoryRedirectMap.ts, predicate: file-type, value: .ts, kind: fact}\n"
+        "- {subject: FEDEV-139, predicate: issue-type, value: 작업, kind: fact}\n"
+        "- {subject: maintainability, predicate: team-ownership, value: jvm, kind: fact}\n"
+        "- {subject: adversarial-hunt.md, predicate: 존재 여부, value: 없음, kind: fact}\n"
+        "sources: []"
+    )
+    assert ds._claim_issues([note]) == []
+
+
+def test_literal_status_mark_is_not_plan_like():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\n"
+        "claims:\n"
+        "- {subject: FEDEV-40 하위 티켓, predicate: has_status_mark, value: (재활용예정)}\n"
+        "- {subject: FEDEV-52~55, predicate: is_out_of_scope, value: Wave 0 범위 밖}\n"
+        "sources: []"
+    )
+    assert ds._claim_issues([note]) == []
+
+
+def test_plan_like_fact_claim_is_still_flagged():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\n"
+        "claims:\n"
+        "- {subject: slack badge, predicate: technical-check, value: 검토 필요, kind: fact}\n"
+        "- {subject: slack badge, predicate: current-state, value: markdown block fallback, kind: fact}\n"
+        "sources: []"
+    )
+    issues = ds._claim_issues([note])
+    assert len(issues) == 1, issues
+    assert issues[0]["kind"] == "weak-claims", issues
+
+
+def test_slug_with_plan_substring_is_not_weak_claim():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\n"
+        "claims:\n"
+        "- {subject: vigil-command, predicate: repo-role, value: control-plane, kind: fact}\n"
+        "- {subject: vigil-command, predicate: state, value: pipeline green, kind: fact}\n"
+        "sources: []"
+    )
+    issues = ds._claim_issues([note])
+    assert not issues, issues
+
+
+def test_next_claim_allows_review_word():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\n"
+        "claims:\n"
+        "- {subject: 'PR #198', predicate: next-step, value: review/approval, kind: next}\n"
+        "- {subject: 'PR #198', predicate: ci, value: pipeline green, kind: fact}\n"
+        "sources: []"
+    )
+    issues = ds._claim_issues([note])
+    assert not issues, issues
+
+
+def test_configured_project_alias_is_variant_not_typo():
+    cfg = {
+        "repos": [
+            {"match": "oh-my-boring", "name": "ohmyboring", "origin": "personal"},
+        ]
+    }
+    old_load = ds.boring_config.load
+    try:
+        ds.boring_config.load = lambda: cfg
+        notes = [
+            {"path": Path("wiki-0001.md"), "fm": {"project": "oh-my-boring", "tags": []}},
+            {"path": Path("wiki-0002.md"), "fm": {"project": "ohmyboring", "tags": []}},
+        ]
+        report = ds._build_report(Path("/tmp/wiki"), notes)
+        first = report["note_issues"]["wiki-0001.md"]
+        assert {"kind": "project-variant", "old": "oh-my-boring", "suggested": "ohmyboring"} in first
+        assert not any(i["kind"] == "project-typo" for i in first), first
+    finally:
+        ds.boring_config.load = old_load
+
+
+def test_likely_typo_direction_uses_project_frequency():
+    old_load = ds.boring_config.load
+    try:
+        ds.boring_config.load = lambda: {"repos": []}
+        typos = ds._likely_typos(["kb-rag-bot", "kb-rag-bot", "kb-rag-bot", "kb-rag_bot"])
+        assert len(typos) == 1, typos
+        bad, good, _similarity, bad_count, good_count = typos[0]
+        assert (bad, good, bad_count, good_count) == ("kb-rag_bot", "kb-rag-bot", 1, 3), typos
+    finally:
+        ds.boring_config.load = old_load
+
+
+def test_likely_typo_tie_is_not_reported_without_evidence():
+    old_load = ds.boring_config.load
+    try:
+        ds.boring_config.load = lambda: {"repos": []}
+        assert ds._likely_typos(["alpha-service", "alpha_service"]) == []
+    finally:
+        ds.boring_config.load = old_load
+
+
+def test_configured_distinct_projects_are_not_typos():
+    cfg = {
+        "repos": [
+            {"match": "foodspring-admin-front", "name": "foodspring-admin-front", "origin": "company"},
+            {"match": "foodspring-harmony-front", "name": "foodspring-harmony-front", "origin": "company"},
+        ]
+    }
+    old_load = ds.boring_config.load
+    try:
+        ds.boring_config.load = lambda: cfg
+        projects = ["foodspring-admin-front"] * 7 + ["foodspring-harmony-front"]
+        assert ds._likely_typos(projects) == []
+    finally:
+        ds.boring_config.load = old_load
+
+
+def test_rollout_session_without_sources_is_not_lineage_issue():
     note = _make_note(
         "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
         "omb_session_id: codex-rollout-2026-06-21T06-59-02-demo\n"
@@ -154,13 +279,7 @@ def test_zombie_rollout_session_is_reported_without_requiring_sources():
         "- {subject: omb, predicate: mode, value: rollout, kind: fact, confidence: certain}\n"
         "sources: []"
     )
-    issues = ds._session_lineage_issues(note)
-    assert issues == [
-        {
-            "kind": "zombie-rollout",
-            "omb_session_id": "codex-rollout-2026-06-21T06-59-02-demo",
-        }
-    ]
+    assert ds._session_lineage_issues(note) == []
 
 
 def test_normal_session_without_sources_is_not_lineage_issue():

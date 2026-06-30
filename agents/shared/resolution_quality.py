@@ -76,12 +76,14 @@ RESOLUTION_DESCRIPTIONS = {
 EVIDENCE_TOKEN_RE = re.compile(
     r"""
     (?:
-      \bPR\s*\#?\d+\b
-      |\B\#\d+\b
-      |\b[A-Z]{2,}-\d+\b
-      |\b[a-z][a-z0-9._/-]*:[0-9][a-z0-9._/-]*\b
-      |\b\d+(?:h|m|s)(?:\d+(?:h|m|s))*\b
-      |\b\d+(?:\.\d+)?(?:ms|s|m|h|d|kb|mb|gb|%|개|건|회|초|분|시간)?\b
+	      \bPR\s*\#?\d+\b
+	      |\B\#\d+\b
+	      |\b[A-Z]{2,}-\d+\b
+	      |\b(?:make|cargo|python3?|pytest|ruff|mypy|uv|npm|pnpm|bun|node|swift-format|swiftlint|swift|xcodebuild|git|gh|docker|ollama|pre-commit)\b
+	      |\b[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+){1,}\b
+	      |\b[a-z][a-z0-9._/-]*:[0-9][a-z0-9._/-]*\b
+	      |\b\d+(?:h|m|s)(?:\d+(?:h|m|s))*\b
+	      |\b\d+(?:\.\d+)?(?:ms|s|m|h|d|kb|mb|gb|%|개|건|회|초|분|시간)?\b
     )
     """,
     re.IGNORECASE | re.VERBOSE,

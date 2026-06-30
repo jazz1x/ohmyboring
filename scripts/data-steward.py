@@ -4,7 +4,7 @@
 Focuses on data-management hygiene that automated sync cannot fix by itself:
   - project/repo slug variants (`org/repo` vs `repo`)
   - placeholder tags (`_`, `pr_`, `slack_`)
-  - weak session claims and likely zombie rollout notes
+  - weak session claims
   - generic or likely-typo project names
 
 Run dry-run (safe):
@@ -23,7 +23,7 @@ import os
 import re
 import shutil
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 # shared policy library lives next to the hooks
@@ -39,10 +39,25 @@ TYPO_THRESHOLD = 0.85
 MIN_CLAIMS_PER_SESSION = 2
 # A claim value shorter than this is too vague to be authoritative.
 MIN_CLAIM_VALUE_LEN = 4
-# Words that make a claim sound like a next-step rather than a fact.
-WEAK_CLAIM_WORDS = {"검토", "확인", "고민", "예정", "계획", "review", "consider", "plan", "todo"}
+# Markers that make a fact/decision claim sound like a next-step rather than completed work.
+WEAK_CLAIM_KO_PATTERNS = {"검토 필요", "검토 예정", "확인 필요", "확인 예정", "확인해야", "고민", "예정", "계획"}
+WEAK_CLAIM_EN_PATTERN = re.compile(r"\b(review|consider|plan|todo)\b", re.IGNORECASE)
+PLAN_LIKE_CLAIM_KINDS = {"fact", "decision", "assumption", "term"}
+SHORT_VALUE_PREDICATE_HINTS = {
+    "actual_count",
+    "count",
+    "groups",
+    "bugs",
+    "merge",
+    "issue-type",
+    "file-type",
+    "team",
+    "ownership",
+    "존재 여부",
+}
 ALLOWED_CLAIM_KINDS = {"fact", "decision", "assumption", "risk", "blocked", "goal", "term", "next"}
 ALLOWED_CLAIM_CONFIDENCES = {"certain", "likely", "assumption", "outdated"}
+FIXABLE_ISSUE_KINDS = {"project-variant", "placeholder-tags"}
 # The shipped sample note is allowed to be generic/empty; do not flag it as data rot.
 SEED_NOTE = "wiki-0000.md"
 
@@ -89,26 +104,68 @@ def _project_variants(notes):
     return {c: sorted(v) for c, v in canonical.items() if len(v) > 1}
 
 
+def _configured_project_names() -> set[str]:
+    """Project names explicitly declared in boring.json are trusted as real axes."""
+    names = set()
+    for rule in boring_config.load().get("repos") or []:
+        name = str(rule.get("name") or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
 def _likely_typos(projects):
     """Find project names that look like typos of another canonical project."""
-    names = sorted({p for p in projects if p})
+    counts = Counter(p for p in projects if p)
+    names = sorted(counts)
+    configured = _configured_project_names()
     typos = []
     for a in names:
         for b in names:
             if a == b:
                 continue
+            if boring_config.canonical_repo(a) == boring_config.canonical_repo(b):
+                continue
+            if a in configured and b in configured:
+                continue
             ratio = difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
             if ratio >= TYPO_THRESHOLD:
-                typos.append((a, b, ratio))
+                if counts[a] == counts[b]:
+                    continue
+                bad, good = (a, b) if counts[a] < counts[b] else (b, a)
+                typos.append((bad, good, ratio, counts[bad], counts[good]))
     # dedupe symmetric pairs
     seen = set()
     out = []
-    for a, b, r in typos:
+    for a, b, r, bad_count, good_count in typos:
         key = tuple(sorted((a, b)))
         if key not in seen:
             seen.add(key)
-            out.append((a, b, r))
+            out.append((a, b, r, bad_count, good_count))
     return out
+
+
+def _short_claim_value_is_specific(claim: dict) -> bool:
+    val = str(claim.get("value", "")).strip()
+    pred = str(claim.get("predicate", "")).strip().lower()
+    if re.fullmatch(r"\d+(\.\d+)?", val):
+        return True
+    if re.fullmatch(r"\.[A-Za-z0-9]+", val):
+        return True
+    if any(hint in pred for hint in SHORT_VALUE_PREDICATE_HINTS) and len(val) >= 2:
+        return True
+    return False
+
+
+def _claim_value_sounds_like_plan(claim: dict) -> bool:
+    value = str(claim.get("value", "")).strip()
+    predicate = str(claim.get("predicate", "")).strip().lower()
+    if "status_mark" in predicate and value.startswith("(") and value.endswith(")"):
+        return False
+    lowered = value.lower()
+    return any(w in value for w in WEAK_CLAIM_KO_PATTERNS) or bool(
+        WEAK_CLAIM_EN_PATTERN.search(lowered)
+    )
 
 
 def _claim_issues(notes):
@@ -139,14 +196,14 @@ def _claim_issues(notes):
             if not isinstance(c, dict):
                 continue
             val = str(c.get("value", "")).strip()
-            if len(val) < MIN_CLAIM_VALUE_LEN:
-                weak.append({"claim": c, "reason": "value too short"})
-            elif any(w in val.lower() for w in WEAK_CLAIM_WORDS):
-                weak.append({"claim": c, "reason": "value sounds like a plan, not a fact"})
             kind = str(c.get("kind", "") or "fact").strip().lower()
+            conf = str(c.get("confidence", "") or "certain").strip().lower()
+            if len(val) < MIN_CLAIM_VALUE_LEN and not _short_claim_value_is_specific(c):
+                weak.append({"claim": c, "reason": "value too short"})
+            elif kind in PLAN_LIKE_CLAIM_KINDS and _claim_value_sounds_like_plan(c):
+                weak.append({"claim": c, "reason": "value sounds like a plan, not a fact"})
             if kind not in ALLOWED_CLAIM_KINDS:
                 weak.append({"claim": c, "reason": f"unknown claim kind '{kind}'"})
-            conf = str(c.get("confidence", "") or "certain").strip().lower()
             if conf not in ALLOWED_CLAIM_CONFIDENCES:
                 weak.append({"claim": c, "reason": f"unknown claim confidence '{conf}'"})
         if weak:
@@ -156,9 +213,6 @@ def _claim_issues(notes):
 
 def _session_lineage_issues(note):
     """Find invalid session provenance without requiring duplicated source artifacts."""
-    sid = note["fm"].get("omb_session_id")
-    if isinstance(sid, str) and sid.startswith("codex-rollout-"):
-        return [{"kind": "zombie-rollout", "omb_session_id": sid}]
     return []
 
 
@@ -239,26 +293,12 @@ def _fix_note(n, target_project: str):
     n["path"].write_text("---\n" + new_yaml + "\n---\n" + n["body"], encoding="utf-8")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Inspect/repair ohmyboring vault data hygiene")
-    parser.add_argument("--vault", help="vault root directory (default: BORING_VAULT_DIR or ~/oh-my-boring/vault)")
-    parser.add_argument("--fix", action="store_true", help="rewrite notes in place (review with git diff)")
-    parser.add_argument("--yes", action="store_true", help="skip confirmation prompt")
-    parser.add_argument("--json", action="store_true", help="output structured JSON report")
-    args = parser.parse_args()
-
-    wiki_dir = _wiki_dir(args)
-    if not wiki_dir.exists():
-        print(f"[error] wiki directory not found: {wiki_dir}", file=sys.stderr)
-        sys.exit(1)
-
-    notes = _collect_notes(wiki_dir)
+def _build_report(wiki_dir: Path, notes: list[dict]) -> dict:
     projects = [n["fm"].get("project") or "" for n in notes]
     variants = _project_variants(notes)
     typos = _likely_typos(projects)
     claim_issues = _claim_issues(notes)
 
-    # build per-note issues
     note_issues = defaultdict(list)
     for n in notes:
         proj = n["fm"].get("project") or ""
@@ -285,23 +325,62 @@ def main():
         if lineage_issues:
             note_issues[n["path"].name].extend(lineage_issues)
 
+    return {
+        "wiki_dir": str(wiki_dir),
+        "note_count": len(notes),
+        "project_variants": variants,
+        "likely_typos": [
+            {
+                "bad": a,
+                "good": b,
+                "similarity": round(r, 3),
+                "bad_count": bad_count,
+                "good_count": good_count,
+            }
+            for a, b, r, bad_count, good_count in typos
+        ],
+        "note_issues": dict(note_issues),
+        "claim_issues": claim_issues,
+    }
+
+
+def analyze_vault(wiki_dir: Path) -> tuple[list[dict], dict]:
+    notes = _collect_notes(wiki_dir)
+    return notes, _build_report(wiki_dir, notes)
+
+
+def fixable_note_names(report: dict) -> list[str]:
+    names = []
+    for name, issues in report.get("note_issues", {}).items():
+        if any(issue.get("kind") in FIXABLE_ISSUE_KINDS for issue in issues):
+            names.append(name)
+    return sorted(names)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Inspect/repair ohmyboring vault data hygiene")
+    parser.add_argument("--vault", help="vault root directory (default: BORING_VAULT_DIR or ~/oh-my-boring/vault)")
+    parser.add_argument("--fix", action="store_true", help="rewrite notes in place (review with git diff)")
+    parser.add_argument("--yes", action="store_true", help="skip confirmation prompt")
+    parser.add_argument("--json", action="store_true", help="output structured JSON report")
+    args = parser.parse_args()
+
+    wiki_dir = _wiki_dir(args)
+    if not wiki_dir.exists():
+        print(f"[error] wiki directory not found: {wiki_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    notes, report = analyze_vault(wiki_dir)
+    variants = report["project_variants"]
+    typos = [
+        (t["bad"], t["good"], t["similarity"], t["bad_count"], t["good_count"])
+        for t in report["likely_typos"]
+    ]
+    claim_issues = report["claim_issues"]
+    note_issues = report["note_issues"]
+
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "wiki_dir": str(wiki_dir),
-                    "note_count": len(notes),
-                    "project_variants": variants,
-                    "likely_typos": [
-                        {"bad": a, "good": b, "similarity": round(r, 3)} for a, b, r in typos
-                    ],
-                    "note_issues": dict(note_issues),
-                    "claim_issues": claim_issues,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return
 
     print(f"📂 vault/wiki: {wiki_dir}")
@@ -315,8 +394,11 @@ def main():
 
     if typos:
         print("🔤 Likely project typos:")
-        for bad, good, r in typos:
-            print(f"   {bad!r} → {good!r} (similarity {r:.2f})")
+        for bad, good, r, bad_count, good_count in typos:
+            print(
+                f"   {bad!r} ({bad_count}) → {good!r} ({good_count}) "
+                f"(similarity {r:.2f})"
+            )
         print()
 
     if note_issues:
@@ -355,8 +437,13 @@ def main():
         return
 
     if not args.fix:
-        print("\n💡 Run with --fix to apply project canonicalization (org-prefix stripping) and")
-        print("   remove placeholder tags. Typos and generic project names are left for manual review.")
+        fixable = fixable_note_names(report)
+        if fixable:
+            print("\n💡 Run with --fix to apply project canonicalization (org-prefix stripping) and")
+            print("   remove placeholder tags. Typos and generic project names are left for manual review.")
+        else:
+            print("\n💡 No automatic fixes remain. Typos, generic project names, and weak claims")
+            print("   require explicit mapping or note-level review.")
         return
 
     if not args.yes:

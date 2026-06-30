@@ -58,5 +58,8 @@ else
 fi
 
 printf '\n'
-say "Done. ohmyboring is up. Try:"
-printf '    cd %s && make ask Q="how did I fix X last time?"\n\n' "$BORING_HOME"
+say "Done. ohmyboring is up. Verify, seed, then ask:"
+printf '    cd %s\n' "$BORING_HOME"
+printf '    make verify-llm && make doctor && make readiness\n'
+printf '    make collect N=20   # optional: seed an empty vault from past Claude Code sessions\n'
+printf '    make ask Q="how did I fix X last time?"\n\n'

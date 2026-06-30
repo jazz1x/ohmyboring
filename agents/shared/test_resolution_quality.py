@@ -155,6 +155,47 @@ class ResolutionQualityTests(unittest.TestCase):
         self.assertEqual(report.evidence_tokens_seen, ("pr#165",))
         self.assertEqual(report.evidence_tokens_kept, ("pr#165",))
 
+    def test_evidence_accepts_commands_and_paths_without_numbers(self):
+        transcript = (
+            "Ran swift-format lint --recursive --strict "
+            "Apps/KeydexApp/Sources/KeydexApp/KeydexApp.swift. "
+            "Ran swift build --product KeydexApp."
+        )
+        note = {
+            "title": "Keydex search filter surface",
+            "body": "\n".join(
+                [
+                    "## Problem",
+                    "The SwiftUI shell needed a native search/filter surface.",
+                    "## As-Is",
+                    "Credential rows could only be narrowed by sidebar filters.",
+                    "## To-Be",
+                    "Search should filter graph-derived CredentialProjection rows.",
+                    "## Decision",
+                    "Keep one graph-derived source of truth and add searchable filtering.",
+                    "## Evidence",
+                    "Validated with swift-format on Apps/KeydexApp/Sources/KeydexApp/KeydexApp.swift "
+                    "and swift build --product KeydexApp.",
+                    "## Result",
+                    "The app build path stayed green.",
+                    "## Next",
+                    "No follow-up.",
+                ]
+            ),
+            "claims": [
+                claim("search", "source-of-truth", "CredentialProjection", "decision"),
+                claim("format", "command", "swift-format", "fact"),
+                claim("build", "command", "swift build", "fact"),
+                claim("follow-up", "next-step", "none", "next"),
+            ],
+        }
+
+        report = verify_note_resolution(note, transcript, "evidence")
+
+        self.assertTrue(report.ok, report.missing)
+        self.assertIn("swift-format", report.evidence_tokens_kept)
+        self.assertIn("apps/keydexapp/sources/keydexapp/keydexapp.swift", report.evidence_tokens_kept)
+
     def test_public_annotations_are_python39_type_hint_safe(self):
         hints = get_type_hints(resolution_quality.normalize_resolution)
 
