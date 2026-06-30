@@ -51,7 +51,18 @@ def _run_main(payload: dict, extracted: str):
 
 def test_large_raw_parse_short_marks_retry():
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-        f.write("{}\n")
+        f.write(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message",
+                        "last_agent_message": "short assistant result",
+                    },
+                }
+            )
+            + "\n"
+        )
         path = f.name
     try:
         payload = {
@@ -65,6 +76,46 @@ def test_large_raw_parse_short_marks_retry():
         assert rc == 1
         assert "marked for retry" in err
         mark.assert_called_once_with("codex-abc", retry=True)
+    finally:
+        os.unlink(path)
+
+
+def test_large_raw_import_only_parse_short_marks_done():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        f.write(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"base_instructions": {"text": "x" * 9000}},
+                }
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message",
+                        "message": distill.EXTERNAL_IMPORT_MESSAGE,
+                    },
+                }
+            )
+            + "\n"
+        )
+        path = f.name
+    try:
+        payload = {
+            "transcript_path": path,
+            "session_id": "abc",
+            "hook_event_name": "SessionEnd",
+            "raw_bytes": 9000,
+            "min_raw_bytes_for_retry": 10,
+        }
+        rc, err, mark = _run_main(payload, "too short")
+        assert rc == 0
+        assert "transcript too short; skipping" in err
+        mark.assert_called_once_with("codex-abc")
     finally:
         os.unlink(path)
 
@@ -762,6 +813,7 @@ def test_status_strict_fails_on_stale_codex_markers():
 
 if __name__ == "__main__":
     test_large_raw_parse_short_marks_retry()
+    test_large_raw_import_only_parse_short_marks_done()
     test_small_raw_parse_short_marks_done()
     test_success_passes_session_id_to_shared_core()
     test_codex_distill_clamps_with_ingest_budget()

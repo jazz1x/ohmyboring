@@ -31,11 +31,39 @@ from distill_core import (  # noqa: F401
 
 TRANSCRIPT_FORMAT = "codex-jsonl"
 CLAMP = int(os.environ.get("CODEX_DISTILL_CLAMP") or os.environ.get("INGEST_CLAMP") or "4000")
+EXTERNAL_IMPORT_MESSAGE = "<EXTERNAL SESSION IMPORTED>"
 
 
 def extract(path):
     """Extract user/assistant text from a Codex JSONL session transcript."""
     return transcript.extract(path, TRANSCRIPT_FORMAT)
+
+
+def _has_substantive_assistant_turn(transcript_path: str) -> bool:
+    with open(transcript_path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            payload = obj.get("payload") or {}
+            text = ""
+            if obj.get("type") == "response_item" and payload.get("role") == "assistant":
+                content = payload.get("content")
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    text = " ".join(
+                        part.get("text", "")
+                        for part in content
+                        if isinstance(part, dict) and part.get("type") == "output_text"
+                    )
+            elif obj.get("type") == "event_msg" and payload.get("type") == "agent_message":
+                text = payload.get("last_agent_message") or payload.get("message") or ""
+            text = text.strip()
+            if text and text != EXTERNAL_IMPORT_MESSAGE:
+                return True
+    return False
 
 
 def should_retry_short_extract(data: dict, transcript_path: str) -> bool:
@@ -46,7 +74,7 @@ def should_retry_short_extract(data: dict, transcript_path: str) -> bool:
     raw_bytes = data.get("raw_bytes")
     if raw_bytes is None:
         raw_bytes = os.path.getsize(transcript_path)
-    return int(raw_bytes) >= int(min_raw)
+    return int(raw_bytes) >= int(min_raw) and _has_substantive_assistant_turn(transcript_path)
 
 
 def _clamp_limit(data: dict) -> int:
