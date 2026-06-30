@@ -3,14 +3,11 @@
 [English](README.md) · [한국어](README.ko.md) · **日本語**
 
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
-![release](https://img.shields.io/badge/release-v0.1.0-blue)
+![version](https://img.shields.io/badge/version-0.1.0-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
-![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
-![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
-![qwen3](https://img.shields.io/badge/LLM-qwen3:14b-000?logo=ollama)
+![local LLM](https://img.shields.io/badge/local%20LLM-Ollama%20%7C%20LM%20Studio-000)
 
-**セルフホスティング型パーソナルメモリ RAG。** Claude Code / Kimi Code のセッションと、取り込み可能な Codex トランスクリプトがローカルで人が読める wiki に蒸留され、*"前これどうやったっけ？"* を呼び出して使います。**クラウド 0 · 100% ローカル。**
+**ohmyboring は、自分がどう解いたかを覚えておくための道具です。** Claude Code / Kimi Code のセッションと、取り込み可能な Codex トランスクリプトをローカルの読める wiki に変換し、*"前これどうやったっけ？"* と思ったときに必要な部分を呼び出します。**クラウド 0 · ローカル LLM に優しい設計。**
 
 ```bash
 # 最速 — ワンライナー: ~/oh-my-boring にクローン、ビルド、フック/MCP/ワーカーまで連携。
@@ -33,6 +30,8 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 > 新規クローンは **vault が空** なので、初日の `make ask` は何も見つけられません。`make collect` で Claude の過去記録を埋めれば、以降の Claude/Kimi セッションは自動蓄積され、Codex は取り込み可能なトランスクリプトをワーカーが処理します（[取り込み](#取り込み-ingestion)参照）。
 
 > **Docker**、**Ollama** または **LM Studio** のような OpenAI-compatible ローカルサーバー、**Python 3**、**jq**、**curl**、**git**、**make** が必要です。
+
+LM Studio を使う場合は、ローカルサーバーを起動し、チャットモデル 1 つと埋め込みモデル 1 つをロードしてから、`llm.provider` を `lmstudio` に変更し `make verify-llm` を実行してください。ohmyboring は正確なモデル id と埋め込み次元を確認してから、その設定を信頼します。
 
 初回実行の成功条件:
 
