@@ -17,3 +17,4 @@ pub mod serve;
 pub mod store;
 pub mod vault;
 pub mod wiki_recall;
+pub mod workflow;

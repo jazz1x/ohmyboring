@@ -100,6 +100,10 @@ flowchart LR
 - **Read door** — 高速、LLM 不要。`make ask`、`recall.py`、MCP `recall` が `vault/wiki` を直接読みます。
 - **Write door** — gated。`distill-session.py` がローカル LLM を呼び出し、ohmyboring の `remember` MCP tool で書き込みます。
 
+### ワークフローグラフ契約
+
+取り込みループには `drudge/src/workflow.rs` に Rust 側のワークフローグラフ契約があり、`drudge/WORKFLOW.md` に文書化されています。セッション検出、蒸留、解像度検証、補強、`remember`、マーカー更新、イベント記録、readiness 投影を、閉じた型の LangGraph スタイル状態グラフとして表します。これは 2 つ目のランタイムオーケストレーターではありません。Python のフック/ワーカーは引き続きホスト I/O を担当し、Rust はノード/エッジ語彙とグラフ形状テストを所有します。
+
 ---
 
 ## 設定
