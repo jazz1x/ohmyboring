@@ -145,6 +145,53 @@ def test_weak_claims_detected():
     assert "weak-claims" in weak_kinds, issues
 
 
+def test_slug_with_plan_substring_is_not_weak_claim():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\n"
+        "claims:\n"
+        "- {subject: vigil-command, predicate: repo-role, value: control-plane, kind: fact}\n"
+        "- {subject: vigil-command, predicate: state, value: pipeline green, kind: fact}\n"
+        "sources: []"
+    )
+    issues = ds._claim_issues([note])
+    assert not issues, issues
+
+
+def test_next_claim_allows_review_word():
+    note = _make_note(
+        "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"
+        "omb_session_id: s-123\n"
+        "claims:\n"
+        "- {subject: 'PR #198', predicate: next-step, value: review/approval, kind: next}\n"
+        "- {subject: 'PR #198', predicate: ci, value: pipeline green, kind: fact}\n"
+        "sources: []"
+    )
+    issues = ds._claim_issues([note])
+    assert not issues, issues
+
+
+def test_configured_project_alias_is_variant_not_typo():
+    cfg = {
+        "repos": [
+            {"match": "oh-my-boring", "name": "ohmyboring", "origin": "personal"},
+        ]
+    }
+    old_load = ds.boring_config.load
+    try:
+        ds.boring_config.load = lambda: cfg
+        notes = [
+            {"path": Path("wiki-0001.md"), "fm": {"project": "oh-my-boring", "tags": []}},
+            {"path": Path("wiki-0002.md"), "fm": {"project": "ohmyboring", "tags": []}},
+        ]
+        report = ds._build_report(Path("/tmp/wiki"), notes)
+        first = report["note_issues"]["wiki-0001.md"]
+        assert {"kind": "project-variant", "old": "oh-my-boring", "suggested": "ohmyboring"} in first
+        assert not any(i["kind"] == "project-typo" for i in first), first
+    finally:
+        ds.boring_config.load = old_load
+
+
 def test_rollout_session_without_sources_is_not_lineage_issue():
     note = _make_note(
         "id: wiki-0042\ntitle: t\nkind: session\norigin: personal\n"

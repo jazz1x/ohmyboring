@@ -112,7 +112,9 @@ def test_canonical_repo_normalizes_variants():
     cfg = {
         "repos": [
             {"match": "marketboro", "origin": "company"},
-            {"match": "jazz1x/oh-my-boring", "name": "oh-my-boring", "origin": "personal"},
+            {"match": "jazz1x/ohmyboring", "name": "ohmyboring", "origin": "personal"},
+            {"match": "jazz1x/oh-my-boring", "name": "ohmyboring", "origin": "personal"},
+            {"match": "oh-my-boring", "name": "ohmyboring", "origin": "personal"},
         ]
     }
     old_load = boring_config.load
@@ -120,7 +122,9 @@ def test_canonical_repo_normalizes_variants():
         boring_config.load = lambda: cfg
         assert boring_config.canonical_repo("marketboro/foodspring-front") == "foodspring-front"
         assert boring_config.canonical_repo("foodspring-front") == "foodspring-front"
-        assert boring_config.canonical_repo("jazz1x/oh-my-boring") == "oh-my-boring"
+        assert boring_config.canonical_repo("jazz1x/ohmyboring") == "ohmyboring"
+        assert boring_config.canonical_repo("jazz1x/oh-my-boring") == "ohmyboring"
+        assert boring_config.canonical_repo("oh-my-boring") == "ohmyboring"
         assert boring_config.canonical_repo("git@github.com:acme/widget.git") == "widget"
         assert boring_config.canonical_repo("") == ""
     finally:
