@@ -26,6 +26,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 import boring_config  # noqa: E402
 import markers  # noqa: E402
 import omb_env  # noqa: E402
+from resolution_quality import (  # noqa: E402
+    ALLOWED_RESOLUTIONS,
+    normalize_resolution,
+    resolution_prompt_contract,
+    verify_note_resolution,
+)
 
 # BORING_HOME: repo clone location (default ~/oh-my-boring).
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
@@ -39,6 +45,22 @@ NOTE_LANG = boring_config.note_lang()
 # Minimum interval (minutes) before re-distilling an in-progress session (Stop hook).
 # SessionEnd (final) ignores the throttle.
 THROTTLE_MIN = int(os.environ.get("DISTILL_THROTTLE_MIN") or "25")
+
+
+def _distill_resolution():
+    raw = os.environ.get("BORING_DISTILL_RESOLUTION")
+    level = normalize_resolution(raw or "evidence", default="evidence")
+    if raw and raw.strip().lower() not in ALLOWED_RESOLUTIONS:
+        print(
+            f"[distill-session] invalid BORING_DISTILL_RESOLUTION={raw!r}; using 'evidence'",
+            file=sys.stderr,
+        )
+    return level
+
+
+def _distill_resolution_strict():
+    value = (os.environ.get("BORING_DISTILL_RESOLUTION_STRICT") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _throttled(session_id):
@@ -149,9 +171,10 @@ def _extract_json(text):
         return None
 
 
-def _build_prompt(text, origin, repo, note_lang=None):
+def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
     """Build the distillation prompt, honouring note_lang and repo metadata."""
     lang = note_lang or NOTE_LANG
+    resolution = normalize_resolution(resolution or _distill_resolution())
     lang_instruction = {
         "ko": "ALL fields MUST be in Korean (한국어), regardless of the transcript's language. "
               "The TITLE especially must be a Korean sentence — even if the session is full of English "
@@ -180,6 +203,7 @@ def _build_prompt(text, origin, repo, note_lang=None):
 
     repo_hint = f" repo='{repo}'." if repo else ""
     origin_hint = f" origin='{origin}'." if origin else ""
+    resolution_contract = resolution_prompt_contract(resolution)
 
     return (
         "You are a distillation engine. Summarize the session transcript into ONE curated note as a "
@@ -196,6 +220,7 @@ def _build_prompt(text, origin, repo, note_lang=None):
         "- The body MUST contain ONLY markdown prose. NEVER put tags, tools, concepts, claims, or any metadata inside the body.\n"
         "- All metadata MUST go in the JSON fields above, not in the body. A trailing 'tags:' or 'tools:' block in the body is a bug.\n"
         "- Use REAL line breaks inside the JSON string, never the two characters backslash-n.\n\n"
+        f"{resolution_contract}\n"
         "WRITING (proven principles — apply, don't just summarize):\n"
         "- BLUF / 要約先出し: each section's first sentence is the conclusion; details follow.\n"
         "- Omit needless words: no filler/repetition, no '·'-joined noun piles, cut hedging.\n"
@@ -374,7 +399,8 @@ def distill_and_remember(text, origin, repo, session_id=""):
     if len(text) > 12000:
         text = text[:5000] + "\n…(truncated)…\n" + text[-7000:]
 
-    prompt = _build_prompt(text, origin, repo)
+    resolution = _distill_resolution()
+    prompt = _build_prompt(text, origin, repo, resolution=resolution)
     parsed = _call_llm(prompt)
     if parsed is None:
         return False
@@ -444,5 +470,21 @@ def distill_and_remember(text, origin, repo, session_id=""):
                     "confidence": str(c.get("confidence", "certain")).strip() or "certain",
                 }
             )
+
+    report = verify_note_resolution(
+        {"title": title, "body": body, "claims": claims},
+        transcript=text,
+        resolution=resolution,
+    )
+    if not report.ok:
+        print(
+            "[distill-session] resolution gate failed "
+            f"({report.resolution}): {', '.join(report.missing)}; "
+            f"claims={report.claim_count}; "
+            f"evidence={len(report.evidence_tokens_kept)}/{len(report.evidence_tokens_seen)}",
+            file=sys.stderr,
+        )
+        if _distill_resolution_strict():
+            return False
 
     return _call_remember(title, body, origin, repo, tags, tools, concepts, claims, session_id)

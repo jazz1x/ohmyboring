@@ -11,6 +11,8 @@ The hook receives a JSON payload on stdin. Unlike Claude Code, Kimi does not pas
 `transcript_path`; we resolve the session directory from `session_id` + `cwd` using
 `~/.kimi-code/session_index.jsonl` (or the documented `wd_<slug>_<hash>` bucket layout).
 """
+from __future__ import annotations
+
 import hashlib
 import json
 import os

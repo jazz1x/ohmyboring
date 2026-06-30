@@ -12,6 +12,8 @@ oh-my-boring ingestion pipeline via `~/.cache/boring-distill`.
 - Subagent/rollout sessions (guardian, etc.) are skipped by default; set
   CODEX_INCLUDE_SUBAGENTS=1 to ingest them too.
 """
+from __future__ import annotations
+
 import argparse
 import glob
 import json

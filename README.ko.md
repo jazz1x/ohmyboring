@@ -179,6 +179,8 @@ make readiness
 | `BORING_VECTOR` | `on` 시 pgvector 활성화(선택) |
 | `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | `llm.base_url` / `llm.model` 런타임 오버라이드(선택). `drudge` 바이너리를 호스트에서 직접 실행한다면 `BORING_LLM_BASE_URL=http://localhost:11434/v1` 설정 |
 | `BORING_LLM_API_KEY` | `llm.api_key_env`가 여기를 가리킬 때의 API 키(인증 provider) |
+| `BORING_DISTILL_RESOLUTION` | 적재 해상도 계약: `compact`, `standard`, `evidence`(기본), `forensic` |
+| `BORING_DISTILL_RESOLUTION_STRICT` | `1`이면 해상도 검증 실패 시 `remember`를 차단하고, 미설정이면 경고 로그만 남김 |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack assistant |
 
 > **임베딩 모델을 바꾸면 벡터 차원이 바뀝니다.** 합성 모델(`llm.model`)은 자유롭게 교체해도 되지만, `llm.embed_model`을 바꾸면 크기가 다른 벡터가 나오므로, `llm.embed_dim`을 맞게 수정하고 **그리고** `make reset`을 실행해야 합니다 — 그러지 않으면 기존 형태의 벡터에 대한 upsert가 실패합니다. 흔한 차원: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.

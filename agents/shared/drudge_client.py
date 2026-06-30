@@ -4,6 +4,8 @@
 Centralizes retries, timeouts, and JSON parsing so Python adapters (recall,
 distillation, schedulers, diagnostics) stop duplicating urllib boilerplate.
 """
+from __future__ import annotations
+
 import json
 import os
 import socket

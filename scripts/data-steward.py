@@ -14,6 +14,8 @@ Apply fixes (rewrites vault/wiki/*.md — backs up each touched note to <note>.m
 vault/wiki is gitignored so `git diff` shows nothing — review the .bak files):
     python3 scripts/data-steward.py --fix
 """
+from __future__ import annotations
+
 import argparse
 import difflib
 import json
