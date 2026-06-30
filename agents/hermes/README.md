@@ -36,6 +36,8 @@ hermes-agent connects to oh-my-boring over MCP and runs cron-driven automation.
 - Jobs not listed in `hermes_cron_jobs` are left untouched.
 - `enabled: false` pauses the job.
 - `memory-ingest-worker` and `codex-memory-ingest-worker` are managed infrastructure jobs, not `hermes_cron_jobs` entries. `make doctor` reports their health and Codex queue status.
+- Ingest worker events carry `workflow=memory_ingest`, `workflow_node`, and
+  `workflow_outcome` fields that mirror the Rust workflow graph contract.
 
 ## Slack delivery format
 

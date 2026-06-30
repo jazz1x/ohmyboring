@@ -55,3 +55,5 @@ This graph is acceptable only while these stay true:
 - Existing hook, worker, `doctor`, and `readiness` behavior is unchanged.
 - Any future adapter integration maps to these nodes instead of inventing local
   state names.
+- Adapter events carry `workflow=memory_ingest`, `workflow_node`, and
+  `workflow_outcome` when they project this graph into the local event log.

@@ -131,6 +131,10 @@ def _write_codex_session(path: Path, subagent: bool = False) -> None:
     path.write_text(json.dumps({"payload": payload}) + "\nbody\n", encoding="utf-8")
 
 
+def _read_last_event(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+
+
 def test_collect_scan_classifies_queue_marked_rollout_and_subagent():
     old_mark_dir = collect.markers.MARK_DIR
     old_min_kb = collect.MIN_KB
@@ -196,6 +200,38 @@ def test_collect_scan_reoffers_stale_pending_but_skips_fresh_pending():
         collect.PENDING_TTL = old_pending_ttl
 
 
+def test_collect_noop_run_logs_workflow_fields():
+    old_min_kb = collect.MIN_KB
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "sessions"
+            source.mkdir()
+            event_path = root / "events.ndjson"
+            collect.MIN_KB = 0
+
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(collect, "_source_dir", return_value=str(source)),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
+                mock.patch.object(collect.sys, "stdout", stdout),
+                mock.patch.object(collect.subprocess, "run") as run,
+                mock.patch.object(collect, "DrudgeClient") as client,
+            ):
+                rc = collect.main([])
+
+            assert rc == 0
+            run.assert_not_called()
+            client.assert_not_called()
+            event = _read_last_event(event_path)
+            assert event["event"] == "collector_run"
+            assert event["workflow"] == "memory_ingest"
+            assert event["workflow_node"] == "readiness_projected"
+            assert event["workflow_outcome"] == "pass"
+    finally:
+        collect.MIN_KB = old_min_kb
+
+
 def test_status_mode_reports_queue_worker_and_note_without_mutation():
     old_mark_dir = collect.markers.MARK_DIR
     old_min_kb = collect.MIN_KB
@@ -210,6 +246,7 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
             wiki = vault / "wiki"
             wiki.mkdir(parents=True)
             jobs = root / "jobs.json"
+            event_path = root / "events.ndjson"
 
             collect.markers.set_mark_dir(str(mark_dir))
             collect.MIN_KB = 0
@@ -258,7 +295,7 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
                     os.environ,
                     {
                         "BORING_VAULT_DIR": str(vault),
-                        "BORING_EVENT_LOG": str(root / "events.ndjson"),
+                        "BORING_EVENT_LOG": str(event_path),
                     },
                 ),
                 mock.patch.object(collect.sys, "stdout", stdout),
@@ -278,6 +315,10 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
             assert "worker found=true enabled=true state=scheduled last_status=success" in out
             assert "host_worker found=true loaded=true kind=launchd" in out
             assert "newest_note session_id=codex-note" in out
+            event = _read_last_event(event_path)
+            assert event["event"] == "collector_status"
+            assert event["workflow_node"] == "readiness_projected"
+            assert event["workflow_outcome"] == "pass"
     finally:
         collect.markers.set_mark_dir(old_mark_dir)
         collect.MIN_KB = old_min_kb
@@ -291,6 +332,7 @@ def test_status_strict_fails_when_host_worker_missing():
             root = Path(d)
             source = root / "sessions"
             source.mkdir()
+            event_path = root / "events.ndjson"
             collect.MIN_KB = 0
             _write_codex_session(source / "todo.jsonl")
 
@@ -309,7 +351,7 @@ def test_status_strict_fails_when_host_worker_missing():
                         "path": "/tmp/com.ohmyboring.codex-ingest.plist",
                     },
                 ),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(root / "events.ndjson")}),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.sys, "stderr", stderr),
             ):
@@ -318,6 +360,10 @@ def test_status_strict_fails_when_host_worker_missing():
             assert rc == 1
             assert "host_worker found=false loaded=false kind=launchd" in stdout.getvalue()
             assert "readiness failed: worker/marker state is not ready" in stderr.getvalue()
+            event = _read_last_event(event_path)
+            assert event["event"] == "collector_status"
+            assert event["workflow_node"] == "readiness_projected"
+            assert event["workflow_outcome"] == "fail"
     finally:
         collect.MIN_KB = old_min_kb
 
@@ -454,6 +500,7 @@ if __name__ == "__main__":
     test_success_passes_session_id_to_shared_core()
     test_collect_scan_classifies_queue_marked_rollout_and_subagent()
     test_collect_scan_reoffers_stale_pending_but_skips_fresh_pending()
+    test_collect_noop_run_logs_workflow_fields()
     test_status_mode_reports_queue_worker_and_note_without_mutation()
     test_status_strict_fails_when_host_worker_missing()
     test_status_strict_fails_when_hermes_worker_failed()

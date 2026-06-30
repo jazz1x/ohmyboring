@@ -91,6 +91,10 @@ class ReconcileTest(unittest.TestCase):
         parts = path.read_text().strip().split("\n")
         return int(parts[2]) if len(parts) > 2 else 0
 
+    def _last_event(self):
+        event_path = Path(os.environ["BORING_EVENT_LOG"])
+        return json.loads(event_path.read_text(encoding="utf-8").splitlines()[-1])
+
     def _done_exists(self, sid):
         return (Path(self.tmp.name) / f"{sid}.ts").exists()
 
@@ -138,6 +142,10 @@ class ReconcileTest(unittest.TestCase):
         self._write_note("s1")
         ingest_worker._reconcile()
         self.assertTrue(self._done_exists("s1"))
+        event = self._last_event()
+        self.assertEqual(event["event"], "ingest_reconcile")
+        self.assertEqual(event["workflow_node"], "done_marked")
+        self.assertEqual(event["workflow_outcome"], "continue")
 
     def test_vector_mode_falls_back_to_chunk_count(self):
         _FakeEngine.vector = True
@@ -170,6 +178,14 @@ class ReconcileTest(unittest.TestCase):
         self.assertFalse(self._done_exists("s5"))
         self.assertTrue(self._retry_exists("s5"))
         self.assertIsNone(self._read_attempts("s5"))
+        event = self._last_event()
+        self.assertEqual(event["event"], "ingest_reconcile")
+        self.assertEqual(event["workflow_node"], "retry_marked")
+        self.assertEqual(event["workflow_outcome"], "fail")
+
+    def test_unknown_worker_projection_raises(self):
+        with self.assertRaises(ValueError):
+            ingest_worker._log_worker_event("unknown", "ok")
 
     def test_fresh_retry_marker_is_not_reoffered(self):
         retry = Path(self.tmp.name) / "s-retry.retry"

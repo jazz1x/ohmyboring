@@ -43,6 +43,10 @@ Codex note is older than the configured freshness window.
 Session markers live in `~/.cache/boring-distill/codex-<sid>.*` and are shared
 with the rest of the pipeline.
 
+Collector status/run events include `workflow=memory_ingest`, `workflow_node`,
+and `workflow_outcome` so `make events` can show the Rust workflow projection
+for queued, skipped, completed, and retry-visible Codex ingestion states.
+
 ## Manual setup
 
 If you prefer to wire it yourself, create or edit `~/.codex/mcp.json`:

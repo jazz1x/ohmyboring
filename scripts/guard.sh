@@ -59,6 +59,7 @@ python3 agents/shared/test_boring_config.py
 python3 agents/shared/test_agent_wiring.py
 python3 agents/shared/test_distill_core.py
 python3 agents/shared/test_event_log.py
+python3 agents/shared/test_workflow_contract.py
 python3 agents/shared/test_markers.py
 python3 agents/shared/test_resolution_quality.py
 python3 agents/shared/test_transcript.py

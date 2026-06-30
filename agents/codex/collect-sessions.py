@@ -29,6 +29,7 @@ import boring_config
 import event_log
 import markers
 import omb_env
+import workflow_contract
 from drudge_client import DrudgeClient
 
 BORING_URL = omb_env.drudge_url()
@@ -464,6 +465,7 @@ def main(argv: list[str] | None = None):
                 marker_pending=0,
                 marker_retry=0,
                 marker_dead_letter=0,
+                **workflow_contract.readiness_fields(ready),
             )
             if status == "failed":
                 return 1
@@ -480,6 +482,7 @@ def main(argv: list[str] | None = None):
                 processed=0,
                 failed=0,
                 mode="collect",
+                **workflow_contract.collector_run_fields("ok", 0),
             )
         return 0
 
@@ -522,6 +525,7 @@ def main(argv: list[str] | None = None):
                 marker_dead_letter=marker["dead_letter"]["count"],
                 marker_stale_pending=marker["pending"]["stale_count"],
                 marker_stale_retry=marker["retry"]["stale_count"],
+                **workflow_contract.readiness_fields(ready),
             )
             if args.strict and not ready:
                 print("[codex-status] readiness failed: worker/marker state is not ready", file=sys.stderr)
@@ -546,6 +550,7 @@ def main(argv: list[str] | None = None):
             failed=0,
             remaining=len(todo),
             mode=label,
+            **workflow_contract.collector_run_fields("ok", 0),
         )
         return 0
 
@@ -592,6 +597,7 @@ def main(argv: list[str] | None = None):
             remaining=len(todo) - done,
             sync_status=sync_status,
             mode=label,
+            **workflow_contract.collector_run_fields("failed", len(batch)),
         )
         return 1
     print(f"[{label}] done={done}/{len(batch)}  remaining={len(todo) - done}", flush=True)
@@ -609,6 +615,7 @@ def main(argv: list[str] | None = None):
         remaining=len(todo) - done,
         sync_status=sync_status,
         mode=label,
+        **workflow_contract.collector_run_fields(status, len(batch)),
     )
     return 0 if status == "ok" else 1
 

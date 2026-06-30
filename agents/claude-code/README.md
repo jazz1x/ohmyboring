@@ -10,6 +10,11 @@ This adapter wires oh-my-boring into Claude Code via hooks.
 | `UserPromptSubmit` | `recall.py` | Pulls relevant memory excerpts on demand and prepends them to the user prompt (throttled to once per session). |
 | `SessionEnd` / `Stop` | `distill-session.py` | Distills the session into a durable note and stores it via `ohmyboring/remember`. |
 
+`distill-session.py` emits `distill_resolution` events with
+`workflow=memory_ingest`, `workflow_node`, and `workflow_outcome`, including
+intentional `skipped` outcomes when the model decides a session has no durable
+work to store.
+
 ## Installation
 
 Run `install.sh` (or `python3 agents/shared/agent_wiring.py --install`) with `claude-code` enabled in `boring.json`:

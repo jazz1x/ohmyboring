@@ -44,3 +44,11 @@ Rust LangGraph 도입은 "외부 Rust LangGraph 런타임 추가"가 아니라 `
 - readiness event projection에 workflow node/outcome 필드를 붙인다.
 - Graph view용 Mermaid/NDJSON export를 추가할지 평가한다.
 - host I/O까지 Rust로 옮기는 것은 launchd/cron/Docker/model readiness drift를 먼저 줄인 뒤 판단한다.
+
+## 2026-06-30 follow-up
+
+- Python adapter 이벤트에 `workflow=memory_ingest`, `workflow_node`, `workflow_outcome` 필드를 붙이는 슬라이스를 진행한다.
+- 이 슬라이스도 런타임 오케스트레이션을 바꾸지 않는다. 기존 이벤트에 graph projection metadata만 추가한다.
+- Codex collector, Hermes ingest worker, Claude/Codex shared distill events가 Rust workflow vocabulary를 투영한다.
+- Python mapper는 unknown event/status 조합을 조용히 generic node로 보내지 않고 실패시킨다.
+- Guard는 Python vocabulary가 `drudge/src/workflow.rs`의 `as_str()` 값과 드리프트하지 않는지 확인한다.
