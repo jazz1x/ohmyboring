@@ -609,23 +609,11 @@ def main(argv: list[str] | None = None):
     except Exception as e:
         sync_status = "failed"
         print(f"[{label}] sync failed: {e}", file=sys.stderr, flush=True)
-        event_log.try_append_event(
-            "codex-collector",
-            "collector_run",
-            "failed",
-            run_id=run_id,
-            agent="codex",
-            pending=len(todo),
-            batch=len(batch),
-            processed=done,
-            failed=failed,
-            remaining=len(todo) - done,
-            sync_status=sync_status,
-            mode=label,
-            **workflow_contract.collector_run_fields("failed", len(batch)),
-        )
-        return 1
-    print(f"[{label}] done={done}/{len(batch)}  remaining={len(todo) - done}", flush=True)
+
+    print(
+        f"[{label}] done={done}/{len(batch)}  remaining={len(todo) - done} sync={sync_status}",
+        flush=True,
+    )
     status = "ok" if done == len(batch) else "failed"
     event_log.try_append_event(
         "codex-collector",
@@ -639,6 +627,7 @@ def main(argv: list[str] | None = None):
         failed=failed,
         remaining=len(todo) - done,
         sync_status=sync_status,
+        sync_degraded=(sync_status == "failed" and status == "ok"),
         mode=label,
         **workflow_contract.collector_run_fields(status, len(batch)),
     )
