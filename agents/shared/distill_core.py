@@ -28,7 +28,9 @@ import event_log  # noqa: E402
 import markers  # noqa: E402
 import omb_env  # noqa: E402
 from resolution_quality import (  # noqa: E402
+    ALLOWED_CLAIM_KINDS,
     ALLOWED_RESOLUTIONS,
+    RESOLUTION_RULES,
     normalize_resolution,
     resolution_prompt_contract,
     verify_note_resolution,
@@ -194,17 +196,10 @@ def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
               "title from the transcript.",
     }.get(lang, "Write in the same language as the transcript.")
 
-    # Section headers are emitted in the target language so the body is consistent end-to-end.
-    section_headers = {
-        "ko": ("배경 / 문제", "시도 / 결정", "결과 / 해결", "남은 일"),
-        "ja": ("背景 / 問題", "試行 / 決定", "結果 / 解決", "残件"),
-        "en": ("Background / Problem", "Attempt / Decision", "Result / Fix", "Remaining work"),
-    }.get(lang, ("Background / Problem", "Attempt / Decision", "Result / Fix", "Remaining work"))
-    h_bg, h_at, h_rs, h_rm = section_headers
-
     repo_hint = f" repo='{repo}'." if repo else ""
     origin_hint = f" origin='{origin}'." if origin else ""
     resolution_contract = resolution_prompt_contract(resolution)
+    body_format = _body_format_contract(lang, resolution)
 
     return (
         "You are a distillation engine. Summarize the session transcript into ONE curated note as a "
@@ -212,11 +207,7 @@ def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
         "Output ONLY a single JSON object, no text before or after it:\n"
         '{"title": "...", "body": "...", "tags": ["..."], "tools": ["..."], "concepts": ["..."], '
         "\"claims\": [{\"subject\":\"...\",\"predicate\":\"...\",\"value\":\"...\",\"kind\":\"...\",\"confidence\":\"...\"}]}\\n\\n"
-        f"BODY FORMAT — the body is a markdown string with these sections (omit a section if it does not apply):\n"
-        f"  ## {h_bg}   — what was being solved (1-2 lines)\n"
-        f"  ## {h_at}    — what was tried, key decisions and WHY\n"
-        f"  ## {h_rs}    — what worked: concrete commands, config, root cause\n"
-        f"  ## {h_rm}        — unfinished or next steps (omit if none)\n\n"
+        f"{body_format}\n\n"
         "CRITICAL — body content rules (format-breaking bugs happen when you ignore these):\n"
         "- The body MUST contain ONLY markdown prose. NEVER put tags, tools, concepts, claims, or any metadata inside the body.\n"
         "- All metadata MUST go in the JSON fields above, not in the body. A trailing 'tags:' or 'tools:' block in the body is a bug.\n"
@@ -249,6 +240,90 @@ def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
     )
 
 
+def _body_format_contract(lang, resolution):
+    """Return the markdown section skeleton that matches the resolution verifier."""
+    level = normalize_resolution(resolution)
+    headers = _localized_section_headers(lang)
+    sections_by_level = {
+        "compact": ("problem", "result"),
+        "standard": ("problem", "decision", "result"),
+        "evidence": ("problem", "as_is", "to_be", "decision", "evidence", "result", "next"),
+        "forensic": (
+            "problem",
+            "as_is",
+            "to_be",
+            "timeline",
+            "root_cause",
+            "decision",
+            "evidence",
+            "result",
+            "regression",
+            "next",
+        ),
+    }
+    descriptions = {
+        "problem": "what was being solved and why it mattered",
+        "as_is": "the previous or current state before the change",
+        "to_be": "the intended target state after the change",
+        "timeline": "ordered events, commands, or attempts",
+        "root_cause": "the verified cause, or say evidence is absent",
+        "decision": "what was decided, with the reason",
+        "evidence": "commands, PRs, ids, counts, timings, model names, and status evidence",
+        "result": "what changed and what was verified",
+        "regression": "repro, fixture, or guard that prevents recurrence",
+        "next": "unfinished work or next action; write '없음'/'none' if truly none",
+    }
+    lines = [
+        "BODY FORMAT — the body is a markdown string with these exact section headings.",
+        "Do not rename required headings; the readiness verifier searches for these signals.",
+    ]
+    for section in sections_by_level[level]:
+        lines.append(f"  ## {headers[section]} — {descriptions[section]}")
+    return "\n".join(lines)
+
+
+def _localized_section_headers(lang):
+    localized = {
+        "ko": {
+            "problem": "배경 / 문제",
+            "as_is": "현재 상태",
+            "to_be": "목표 상태",
+            "timeline": "타임라인",
+            "root_cause": "근본원인",
+            "decision": "결정",
+            "evidence": "근거 / 검증",
+            "result": "결과",
+            "regression": "회귀 / 재현",
+            "next": "남은 일",
+        },
+        "ja": {
+            "problem": "背景 / 問題",
+            "as_is": "現状",
+            "to_be": "あるべき姿",
+            "timeline": "タイムライン",
+            "root_cause": "根本原因",
+            "decision": "決定",
+            "evidence": "根拠 / 検証",
+            "result": "結果",
+            "regression": "回帰 / 再現",
+            "next": "残件",
+        },
+        "en": {
+            "problem": "Background / Problem",
+            "as_is": "As-Is",
+            "to_be": "To-Be",
+            "timeline": "Timeline",
+            "root_cause": "Root Cause",
+            "decision": "Decision",
+            "evidence": "Evidence",
+            "result": "Result",
+            "regression": "Regression / Repro",
+            "next": "Next",
+        },
+    }
+    return localized.get(lang, localized["en"])
+
+
 def _build_repair_prompt(text, origin, repo, note, report, resolution):
     """Ask for one repaired JSON note, using only evidence already present in transcript."""
     return (
@@ -260,6 +335,7 @@ def _build_repair_prompt(text, origin, repo, note, report, resolution):
         "models, statuses, root causes, or next actions. If evidence is absent, say it is absent "
         "as a claim or body sentence instead of fabricating it.\n\n"
         f"{resolution_prompt_contract(resolution)}\n"
+        f"{_body_format_contract(NOTE_LANG, resolution)}\n"
         f"Missing verifier fields: {', '.join(report.missing)}\n"
         f"Evidence tokens seen: {', '.join(report.evidence_tokens_seen) or '(none)'}\n"
         f"Evidence tokens kept: {', '.join(report.evidence_tokens_kept) or '(none)'}\n\n"
@@ -456,12 +532,15 @@ def _prepare_note(parsed):
     claims = []
     for c in parsed.get("claims", []):
         if isinstance(c, dict) and c.get("subject") and c.get("predicate") and c.get("value"):
+            subject = str(c["subject"]).strip()
+            predicate = str(c["predicate"]).strip()
+            value = str(c["value"]).strip()
             claims.append(
                 {
-                    "subject": str(c["subject"]).strip(),
-                    "predicate": str(c["predicate"]).strip(),
-                    "value": str(c["value"]).strip(),
-                    "kind": str(c.get("kind", "fact")).strip() or "fact",
+                    "subject": subject,
+                    "predicate": predicate,
+                    "value": value,
+                    "kind": _normalize_claim_kind(str(c.get("kind", "fact")).strip(), subject, predicate, value),
                     "confidence": str(c.get("confidence", "certain")).strip() or "certain",
                 }
             )
@@ -473,6 +552,78 @@ def _prepare_note(parsed):
         "concepts": concepts,
         "claims": claims,
     }
+
+
+def _normalize_claim_kind(kind, subject, predicate, value):
+    """Normalize obvious semantic kind labels before the verifier checks required kinds."""
+    raw = (kind or "fact").strip().lower()
+    if raw not in ALLOWED_CLAIM_KINDS:
+        raw = "fact"
+    haystack = " ".join((subject, predicate, value)).lower()
+    if raw == "fact":
+        semantic_kinds = {
+            "decision": ("decision", "decided", "choose", "chosen", "결정", "선택", "판단", "採用", "決定"),
+            "next": ("next-step", "next step", "follow-up", "todo", "다음", "남은", "후속", "残件", "次"),
+            "risk": ("risk", "리스크", "위험", "懸念", "リスク"),
+            "blocked": ("blocked", "blocker", "blocked-by", "막힘", "차단", "ブロック"),
+        }
+        for semantic_kind, signals in semantic_kinds.items():
+            if any(signal in haystack for signal in signals):
+                return semantic_kind
+    return raw
+
+
+def _ensure_required_claim_kinds(note, resolution, repo):
+    """Derive required claim kinds from already-generated body sections when the LLM omitted them."""
+    level = normalize_resolution(resolution)
+    required = RESOLUTION_RULES[level]["claim_kinds"]
+    claims = note["claims"]
+    kinds = {claim["kind"] for claim in claims}
+    subject = repo or note["title"] or "distilled-note"
+    if "decision" in required and "decision" not in kinds:
+        decision = _section_excerpt(note["body"], ("decision", "결정", "선택", "決定", "判断"))
+        if decision:
+            claims.append(
+                {
+                    "subject": subject,
+                    "predicate": "decision",
+                    "value": decision,
+                    "kind": "decision",
+                    "confidence": "likely",
+                }
+            )
+            kinds.add("decision")
+    if "fact" in required and "fact" not in kinds:
+        fact = _section_excerpt(note["body"], ("evidence", "근거", "검증", "根拠", "検証", "result", "결과", "結果"))
+        if fact:
+            claims.append(
+                {
+                    "subject": subject,
+                    "predicate": "fact",
+                    "value": fact,
+                    "kind": "fact",
+                    "confidence": "likely",
+                }
+            )
+    return note
+
+
+def _section_excerpt(body, section_signals):
+    current = None
+    chunks = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            heading = stripped[3:].lower()
+            if current is not None:
+                break
+            if any(signal.lower() in heading for signal in section_signals):
+                current = heading
+            continue
+        if current is not None and stripped:
+            chunks.append(stripped)
+    excerpt = " ".join(chunks)
+    return excerpt[:240].strip()
 
 
 def _log_resolution_event(session_id, origin, repo, report, verifier_status, remember_status):
@@ -530,6 +681,7 @@ def distill_and_remember(text, origin, repo, session_id=""):
     note = _prepare_note(parsed)
     if note is None:
         return False
+    note = _ensure_required_claim_kinds(note, resolution, repo)
 
     report = verify_note_resolution(
         {"title": note["title"], "body": note["body"], "claims": note["claims"]},
@@ -553,6 +705,7 @@ def distill_and_remember(text, origin, repo, session_id=""):
         if repaired_note is None:
             _log_resolution_event(session_id, origin, repo, report, "failed", "not_called")
             return False
+        repaired_note = _ensure_required_claim_kinds(repaired_note, resolution, repo)
         repaired_report = verify_note_resolution(
             {"title": repaired_note["title"], "body": repaired_note["body"], "claims": repaired_note["claims"]},
             transcript=text,

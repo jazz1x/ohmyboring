@@ -173,6 +173,8 @@ def resolution_prompt_contract(resolution: Optional[str]) -> str:
         f"- Required body signals: {sections}.\n"
         f"- Minimum claims: {rule['min_claims']}.\n"
         f"- Required claim kinds: {kinds}.\n"
+        f"- Required claim kinds are hard gates: emit at least one claim for each kind in [{kinds}], "
+        "using the exact JSON value (for example \"kind\":\"decision\"), never a synonym.\n"
         f"- Minimum preserved evidence tokens: {rule['min_evidence_tokens']}.\n"
         "- Preserve concrete evidence from the transcript: PR numbers, ticket ids, model names, "
         "commands, durations, counts, statuses, before/after values. Do not invent missing evidence.\n"

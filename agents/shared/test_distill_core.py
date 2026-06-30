@@ -107,6 +107,33 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertIn("timeline", prompt)
         self.assertIn("root_cause", prompt)
 
+    def test_evidence_prompt_uses_verifier_section_headings(self):
+        prompt = distill_core._build_prompt(
+            "transcript",
+            "personal",
+            "repo",
+            note_lang="en",
+            resolution="evidence",
+        )
+
+        self.assertIn("## As-Is", prompt)
+        self.assertIn("## To-Be", prompt)
+        self.assertIn("## Evidence", prompt)
+        self.assertIn("Do not rename required headings", prompt)
+
+    def test_forensic_prompt_includes_forensic_section_headings(self):
+        prompt = distill_core._build_prompt(
+            "transcript",
+            "personal",
+            "repo",
+            note_lang="en",
+            resolution="forensic",
+        )
+
+        self.assertIn("## Timeline", prompt)
+        self.assertIn("## Root Cause", prompt)
+        self.assertIn("## Regression / Repro", prompt)
+
     def test_invalid_env_resolution_falls_back_to_evidence(self):
         os.environ["BORING_DISTILL_RESOLUTION"] = "typo"
         stderr = io.StringIO()
@@ -131,6 +158,7 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
 
         self.assertIn("previous JSON is a draft, not evidence", prompt)
         self.assertIn("transcript is the only evidence source", prompt)
+        self.assertIn("Do not rename required headings", prompt)
 
     def test_resolution_failure_repairs_once_then_remembers(self):
         stderr = io.StringIO()
@@ -203,6 +231,64 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         event = _read_last_event()
         self.assertEqual(event["verifier_status"], "pass")
         self.assertEqual(event["remember_status"], "duplicate")
+
+    def test_prepare_note_promotes_semantic_decision_claim_kind(self):
+        parsed = {
+            "title": "의미 기반 claim kind 정규화",
+            "body": "## Result\nVerifier can see the decision claim.",
+            "claims": [
+                {
+                    "subject": "distill-prompt",
+                    "predicate": "decision",
+                    "value": "use verifier-matched section headings",
+                    "kind": "fact",
+                    "confidence": "certain",
+                }
+            ],
+        }
+
+        note = distill_core._prepare_note(parsed)
+
+        self.assertEqual(note["claims"][0]["kind"], "decision")
+
+    def test_required_decision_claim_is_derived_from_decision_section(self):
+        note = {
+            "title": "olympus: MCP 분석",
+            "body": "\n".join(
+                [
+                    "## 배경 / 문제",
+                    "MCP 분석이 필요했다.",
+                    "## 현재 상태",
+                    "보고서가 0개였다.",
+                    "## 목표 상태",
+                    "분석 결과를 남긴다.",
+                    "## 결정",
+                    "hermes-rs MCP 기능을 먼저 분석하기로 했다.",
+                    "## 근거 / 검증",
+                    "2026-06-18 기준 보고서 0개를 확인했다.",
+                    "## 결과",
+                    "다음 분석 대상이 정해졌다.",
+                    "## 남은 일",
+                    "추가 분석이 필요하다.",
+                ]
+            ),
+            "claims": [
+                {"subject": "olympus", "predicate": "report-count", "value": "0개", "kind": "fact", "confidence": "certain"},
+                {"subject": "olympus", "predicate": "date", "value": "2026-06-18", "kind": "fact", "confidence": "certain"},
+                {"subject": "olympus", "predicate": "target", "value": "hermes-rs", "kind": "fact", "confidence": "certain"},
+                {"subject": "olympus", "predicate": "next-step", "value": "추가 분석", "kind": "next", "confidence": "certain"},
+            ],
+        }
+
+        fixed = distill_core._ensure_required_claim_kinds(note, "evidence", "olympus")
+        report = distill_core.verify_note_resolution(
+            {"title": fixed["title"], "body": fixed["body"], "claims": fixed["claims"]},
+            "2026-06-18 보고서 0개",
+            "evidence",
+        )
+
+        self.assertTrue(report.ok, report.missing)
+        self.assertIn("decision", {claim["kind"] for claim in fixed["claims"]})
 
     def test_remember_failure_logs_failed_status(self):
         with mock.patch.object(distill_core, "_call_llm", return_value=RICH_NOTE), \
