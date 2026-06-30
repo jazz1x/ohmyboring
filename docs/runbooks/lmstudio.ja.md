@@ -57,8 +57,8 @@ make readiness
 
 - `make verify-llm` が provider スクリプトを見つけ、`/v1/models` に到達し、設定した 2 つのモデル id を確認します。
 - `make verify-llm` が `/v1/embeddings` に直接リクエストし、実際のベクトル長が `llm.embed_dim` と一致することを確認します。
-- `make doctor` がエンジン正常と write door open を報告します。
-- 予約済みの朝ブリーフィングに頼る前に `make readiness` が green であることを確認します。
+- `make doctor` がエンジン正常、write door open、現在の worker/marker 状態を報告します。
+- 予約済みの朝ブリーフィングに頼る前に `make readiness` が green であることを確認します。provider/embed 不一致、worker 失敗、stale marker、stale 最新ノートがあれば失敗します。
 - Hermes/Codex 取り込みが有効なら、`make doctor` が Codex ワーカー状態も表示します。
 
 ## Embedding 次元
@@ -86,3 +86,4 @@ Embedding モデルの次元は保存形式の契約です。よく使う値:
 | Docker が LM Studio に届かない | `boring.json` では `localhost` ではなく `http://host.docker.internal:1234/v1` を使います。 |
 | ホスト上のベンチマークが LM Studio に届かない | `scripts/bench-llm.py --base-url` では `http://localhost:1234/v1` を使います。 |
 | embedding upsert が失敗 | `llm.embed_dim` が embedding モデルと合っていません。次元を修正し、vector DB を resetします。 |
+| `make readiness` が stale marker や stale 最新ノートを報告する | 予約ブリーフィングは準備未完了と見なします。`~/.cache/boring-distill` を確認し、Codex/Hermes worker を検証して、stale marker または取り込み空白を調整してください。 |

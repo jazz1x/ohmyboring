@@ -57,8 +57,8 @@ make readiness
 
 - `make verify-llm`이 provider 스크립트를 찾고, `/v1/models`에 접근하며, 설정된 두 모델 id를 모두 확인합니다.
 - `make verify-llm`이 `/v1/embeddings`에 직접 요청하고, 실제 벡터 길이가 `llm.embed_dim`과 같은지 확인합니다.
-- `make doctor`가 엔진 정상과 write door open을 보고합니다.
-- 예약된 아침 브리핑에 의존하기 전에 `make readiness`가 초록불이어야 합니다.
+- `make doctor`가 엔진 정상, write door open, 현재 워커/marker 상태를 보고합니다.
+- 예약된 아침 브리핑에 의존하기 전에 `make readiness`가 초록불이어야 합니다. provider/embed 불일치, 워커 실패, stale marker, stale 최신 노트가 있으면 실패합니다.
 - Hermes/Codex 적재가 켜져 있으면 `make doctor`가 Codex 워커 상태도 함께 보여줍니다.
 
 ## Embedding 차원
@@ -86,3 +86,4 @@ Embedding 모델 차원은 저장소 계약입니다. 흔한 값:
 | Docker가 LM Studio에 접근 못 함 | `boring.json`에는 `localhost`가 아니라 `http://host.docker.internal:1234/v1`을 씁니다. |
 | 호스트 벤치마크가 LM Studio에 접근 못 함 | `scripts/bench-llm.py --base-url`에는 `http://localhost:1234/v1`을 씁니다. |
 | embedding upsert 실패 | `llm.embed_dim`이 embedding 모델과 맞지 않습니다. 차원을 수정하고 vector DB를 reset합니다. |
+| `make readiness`가 stale marker나 stale 최신 노트를 보고함 | 예약 브리핑은 준비되지 않은 상태로 봅니다. `~/.cache/boring-distill`을 확인하고 Codex/Hermes 워커를 검증한 뒤 stale marker 또는 적재 공백을 조정하세요. |

@@ -57,8 +57,8 @@ Expected result:
 
 - `make verify-llm` finds the provider script, reaches `/v1/models`, and sees both configured model ids.
 - `make verify-llm` posts to `/v1/embeddings` and confirms the actual vector length equals `llm.embed_dim`.
-- `make doctor` reports the engine healthy and the write door open.
-- `make readiness` is green before you rely on a scheduled morning briefing.
+- `make doctor` reports the engine healthy, the write door open, and current worker/marker state.
+- `make readiness` is green before you rely on a scheduled morning briefing; it fails on provider/embed mismatch, worker failure, stale markers, or stale newest notes.
 - If Hermes/Codex ingestion is enabled, `make doctor` also reports the Codex worker state.
 
 ## Embedding Dimension
@@ -86,3 +86,4 @@ For the current 1024d release path, do not call LM Studio vector-ready unless `/
 | Docker cannot reach LM Studio | Use `http://host.docker.internal:1234/v1` in `boring.json`, not `localhost`. |
 | Host benchmark cannot reach LM Studio | Use `http://localhost:1234/v1` with `scripts/bench-llm.py --base-url`. |
 | Embedding upsert fails | `llm.embed_dim` does not match the embedding model; update it and reset the vector DB. |
+| `make readiness` reports stale markers or stale newest note | Treat the scheduled briefing as not ready. Inspect `~/.cache/boring-distill`, verify the Codex/Hermes workers, and reconcile the stale marker or ingestion gap before relying on the brief. |
