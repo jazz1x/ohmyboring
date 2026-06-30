@@ -3,7 +3,7 @@
 **English** · [한국어](README.ko.md) · [日本語](README.ja.md)
 
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
-![release](https://img.shields.io/badge/release-0.1.0%20candidate-blue)
+![release](https://img.shields.io/badge/release-v0.1.0-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
@@ -23,6 +23,7 @@ Or step by step:
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
+make verify-llm     # verify provider, chat model, embedding model, and vector dimension
 make doctor         # verify stack, hooks, Codex worker/queue, and latest ingest
 make readiness      # strict gate before relying on morning briefs
 make collect N=20   # seed the vault from your past Claude Code sessions (fresh clone starts empty)
@@ -32,6 +33,13 @@ make ask Q="how did I fix the docker build cache problem?"
 > A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your Claude history; after that, Claude/Kimi sessions auto-accumulate and Codex is picked up by its worker when eligible (see [Feeding it](#feeding-it-ingestion)).
 
 > Requires **Docker**, **Ollama** or another OpenAI-compatible local server such as **LM Studio**, **Python 3**, **jq**, **curl**, **git**, and **make**.
+
+First-run success means:
+
+- `make up` exits 0 and `http://127.0.0.1:7700/health` returns 200.
+- `make verify-llm` sees both configured model ids and the actual embedding dimension matches `llm.embed_dim`.
+- `make doctor` shows stack, hooks/MCP, worker/queue, and latest ingest state without hidden failures.
+- `make readiness` is green before you trust a scheduled morning brief.
 
 ---
 
@@ -251,6 +259,7 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 | `make verify-llm` | verify provider reachability, loaded model ids, and actual embedding dimension |
 | `make doctor` | diagnose stack, hooks, latest ingest, and Codex worker/queue status |
 | `make readiness` | strict pre-briefing gate; fails on model/embed, hook, container, worker, stale-marker, or freshness findings |
+| `make self-verify-check` | evaluate the live self-verification summary against the current stage contract |
 | `make ask Q="..."` | one-shot recall + synthesis |
 | `make sync` | deterministic re-ingest of the vault |
 | `make remember M="text"` | write a one-line note |

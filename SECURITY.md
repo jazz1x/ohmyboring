@@ -2,9 +2,9 @@
 
 ## Supported versions
 
-ohmyboring has no final stable release yet. Security fixes target `main`, active
-release-candidate branches, and any published release candidate tags until the
-first official release is cut.
+Security fixes target `main` and the latest published `v0.1.x` tag. Older
+pre-release tags are not supported; upgrade to the latest `v0.1.x` release
+before reporting version-specific issues.
 
 ## Reporting a vulnerability
 

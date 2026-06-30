@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ## [Unreleased]
 
+- No user-facing changes yet.
+
+## [0.1.0] - 2026-06-30
+
+First official release of **ohmyboring**: local-first personal memory RAG with
+gated session ingestion, wiki-first recall, optional vector/graph acceleration,
+multi-agent adapters, local LLM provider checks, and release/readiness gates.
+
 ### Added
 - **LM Studio runbook** — README en/ko/ja now document the LM Studio backend path, and
   `docs/runbooks/lmstudio*.md` captures the full local-server/model-id/embed-dim checklist.
@@ -92,13 +100,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
   were removed after review showed they were too heavy for the current stage. The useful security
   fallout (redact pattern extensions and adversarial tests) was kept.
 
-## 0.1.0 candidate — pending official release
+### Foundation and release base
 
-Release-candidate cut of **ohmyboring** — a self-hosted personal memory RAG (re-cut to fold all
-post-bootstrap work into the first 0.1.0 line). Closes the 2026-06-24 gap report end to end and the
-2026-06-21 red-team in full, then unifies naming. The environment prefix is `BORING_*` (matching
-`boring.json` / the `boring-*` containers / `BORING_CONFIG`); `boring.json` is `schema_version` 2
-with a first-class `llm` block.
+Release base of **ohmyboring** — a self-hosted personal memory RAG cut to fold
+all post-bootstrap work into the first `0.1.0` line. Closes the 2026-06-24 gap
+report end to end and the 2026-06-21 red-team in full, then unifies naming. The
+environment prefix is `BORING_*` (matching `boring.json`, the `boring-*`
+containers, and `BORING_CONFIG`); `boring.json` is `schema_version` 2 with a
+first-class `llm` block.
 
 ### Changed
 - **MCP server name**: the project-scoped `.mcp.json` key and all user-facing docs now use

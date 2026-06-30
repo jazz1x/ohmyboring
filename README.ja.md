@@ -3,7 +3,7 @@
 [English](README.md) · [한국어](README.ko.md) · **日本語**
 
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
-![release](https://img.shields.io/badge/release-0.1.0%20candidate-blue)
+![release](https://img.shields.io/badge/release-v0.1.0-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
 ![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
@@ -23,6 +23,7 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/jazz1x/ohmyboring/main/ins
 git clone https://github.com/jazz1x/ohmyboring.git ~/oh-my-boring
 cd ~/oh-my-boring
 make up
+make verify-llm     # 提供元、chat モデル、embedding モデル、ベクトル次元を確認
 make doctor         # スタック、フック、Codex ワーカー/キュー、最終取り込みを確認
 make readiness      # 朝ブリーフィングに頼る前の strict ゲート
 make collect N=20   # 過去の Claude Code セッションで vault を埋める（新規クローンは空）
@@ -32,6 +33,13 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 > 新規クローンは **vault が空** なので、初日の `make ask` は何も見つけられません。`make collect` で Claude の過去記録を埋めれば、以降の Claude/Kimi セッションは自動蓄積され、Codex は取り込み可能なトランスクリプトをワーカーが処理します（[取り込み](#取り込み-ingestion)参照）。
 
 > **Docker**、**Ollama** または **LM Studio** のような OpenAI-compatible ローカルサーバー、**Python 3**、**jq**、**curl**、**git**、**make** が必要です。
+
+初回実行の成功条件:
+
+- `make up` が 0 で終了し、`http://127.0.0.1:7700/health` が 200 を返します。
+- `make verify-llm` が設定済みの 2 つの model id を検出し、実際の embedding 次元が `llm.embed_dim` と一致します。
+- `make doctor` がスタック、フック/MCP、ワーカー/キュー、最新取り込み状態を隠れた失敗なく表示します。
+- 予約された朝ブリーフィングを信頼する前に `make readiness` が green である必要があります。
 
 ---
 
@@ -221,6 +229,7 @@ make readiness
 | `make verify-llm` | provider 到達性、ロード済みモデル id、実際の embedding 次元を確認 |
 | `make doctor` | スタック、フック、最終取り込み、Codex ワーカー/キュー状態を診断 |
 | `make readiness` | ブリーフィング前の strict ゲート。モデル/埋め込み、hook、container、worker、stale marker、freshness finding があれば失敗 |
+| `make self-verify-check` | ライブ自己検証サマリーを現在の段階契約で評価 |
 | `make ask Q="..."` | recall + 要約を一度に実行 |
 | `make sync` | vault の再取り込み |
 | `make remember M="text"` | 1 行ノートを書き込み |
