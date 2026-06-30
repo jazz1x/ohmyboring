@@ -4,6 +4,8 @@
 Reads boring.json to decide which agents are enabled, then idempotently
 configures each agent's settings file. Backups are created as `.omb-bak`.
 """
+from __future__ import annotations
+
 import argparse
 import datetime
 import json

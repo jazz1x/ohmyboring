@@ -179,6 +179,8 @@ make readiness
 | `BORING_VECTOR` | `on` で pgvector 有効化（オプション） |
 | `BORING_LLM_BASE_URL` / `BORING_LLM_MODEL` | `llm.base_url` / `llm.model` のランタイムオーバーライド（オプション）。`drudge` バイナリをホストで直接実行する場合は `BORING_LLM_BASE_URL=http://localhost:11434/v1` を設定 |
 | `BORING_LLM_API_KEY` | `llm.api_key_env` がここを指す場合の API キー（認証 provider） |
+| `BORING_DISTILL_RESOLUTION` | 取り込み解像度の契約: `compact`, `standard`, `evidence`（デフォルト）, `forensic` |
+| `BORING_DISTILL_RESOLUTION_STRICT` | `1` にすると解像度検証の失敗時に `remember` をブロックし、未設定なら警告ログのみ |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプション Slack assistant |
 
 > **埋め込みモデルを変えるとベクトルの次元が変わります。** 合成モデル（`llm.model`）は自由に差し替えられますが、`llm.embed_model` を変えるとサイズの異なるベクトルが出力されるため、`llm.embed_dim` を一致させ、**かつ** `make reset` を実行する必要があります — そうしないと旧形状のベクトルへの upsert が失敗します。よくある次元: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768。
