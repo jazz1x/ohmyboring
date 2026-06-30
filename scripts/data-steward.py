@@ -23,7 +23,7 @@ import os
 import re
 import shutil
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 # shared policy library lives next to the hooks
@@ -43,6 +43,18 @@ MIN_CLAIM_VALUE_LEN = 4
 WEAK_CLAIM_KO_PATTERNS = {"검토 필요", "검토 예정", "확인 필요", "확인 예정", "확인해야", "고민", "예정", "계획"}
 WEAK_CLAIM_EN_PATTERN = re.compile(r"\b(review|consider|plan|todo)\b", re.IGNORECASE)
 PLAN_LIKE_CLAIM_KINDS = {"fact", "decision", "assumption", "term"}
+SHORT_VALUE_PREDICATE_HINTS = {
+    "actual_count",
+    "count",
+    "groups",
+    "bugs",
+    "merge",
+    "issue-type",
+    "file-type",
+    "team",
+    "ownership",
+    "존재 여부",
+}
 ALLOWED_CLAIM_KINDS = {"fact", "decision", "assumption", "risk", "blocked", "goal", "term", "next"}
 ALLOWED_CLAIM_CONFIDENCES = {"certain", "likely", "assumption", "outdated"}
 FIXABLE_ISSUE_KINDS = {"project-variant", "placeholder-tags"}
@@ -92,9 +104,21 @@ def _project_variants(notes):
     return {c: sorted(v) for c, v in canonical.items() if len(v) > 1}
 
 
+def _configured_project_names() -> set[str]:
+    """Project names explicitly declared in boring.json are trusted as real axes."""
+    names = set()
+    for rule in boring_config.load().get("repos") or []:
+        name = str(rule.get("name") or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
 def _likely_typos(projects):
     """Find project names that look like typos of another canonical project."""
-    names = sorted({p for p in projects if p})
+    counts = Counter(p for p in projects if p)
+    names = sorted(counts)
+    configured = _configured_project_names()
     typos = []
     for a in names:
         for b in names:
@@ -102,21 +126,42 @@ def _likely_typos(projects):
                 continue
             if boring_config.canonical_repo(a) == boring_config.canonical_repo(b):
                 continue
+            if a in configured and b in configured:
+                continue
             ratio = difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
             if ratio >= TYPO_THRESHOLD:
-                typos.append((a, b, ratio))
+                if counts[a] == counts[b]:
+                    continue
+                bad, good = (a, b) if counts[a] < counts[b] else (b, a)
+                typos.append((bad, good, ratio, counts[bad], counts[good]))
     # dedupe symmetric pairs
     seen = set()
     out = []
-    for a, b, r in typos:
+    for a, b, r, bad_count, good_count in typos:
         key = tuple(sorted((a, b)))
         if key not in seen:
             seen.add(key)
-            out.append((a, b, r))
+            out.append((a, b, r, bad_count, good_count))
     return out
 
 
-def _claim_value_sounds_like_plan(value: str) -> bool:
+def _short_claim_value_is_specific(claim: dict) -> bool:
+    val = str(claim.get("value", "")).strip()
+    pred = str(claim.get("predicate", "")).strip().lower()
+    if re.fullmatch(r"\d+(\.\d+)?", val):
+        return True
+    if re.fullmatch(r"\.[A-Za-z0-9]+", val):
+        return True
+    if any(hint in pred for hint in SHORT_VALUE_PREDICATE_HINTS) and len(val) >= 2:
+        return True
+    return False
+
+
+def _claim_value_sounds_like_plan(claim: dict) -> bool:
+    value = str(claim.get("value", "")).strip()
+    predicate = str(claim.get("predicate", "")).strip().lower()
+    if "status_mark" in predicate and value.startswith("(") and value.endswith(")"):
+        return False
     lowered = value.lower()
     return any(w in value for w in WEAK_CLAIM_KO_PATTERNS) or bool(
         WEAK_CLAIM_EN_PATTERN.search(lowered)
@@ -153,9 +198,9 @@ def _claim_issues(notes):
             val = str(c.get("value", "")).strip()
             kind = str(c.get("kind", "") or "fact").strip().lower()
             conf = str(c.get("confidence", "") or "certain").strip().lower()
-            if len(val) < MIN_CLAIM_VALUE_LEN:
+            if len(val) < MIN_CLAIM_VALUE_LEN and not _short_claim_value_is_specific(c):
                 weak.append({"claim": c, "reason": "value too short"})
-            elif kind in PLAN_LIKE_CLAIM_KINDS and _claim_value_sounds_like_plan(val):
+            elif kind in PLAN_LIKE_CLAIM_KINDS and _claim_value_sounds_like_plan(c):
                 weak.append({"claim": c, "reason": "value sounds like a plan, not a fact"})
             if kind not in ALLOWED_CLAIM_KINDS:
                 weak.append({"claim": c, "reason": f"unknown claim kind '{kind}'"})
@@ -285,7 +330,14 @@ def _build_report(wiki_dir: Path, notes: list[dict]) -> dict:
         "note_count": len(notes),
         "project_variants": variants,
         "likely_typos": [
-            {"bad": a, "good": b, "similarity": round(r, 3)} for a, b, r in typos
+            {
+                "bad": a,
+                "good": b,
+                "similarity": round(r, 3),
+                "bad_count": bad_count,
+                "good_count": good_count,
+            }
+            for a, b, r, bad_count, good_count in typos
         ],
         "note_issues": dict(note_issues),
         "claim_issues": claim_issues,
@@ -320,7 +372,10 @@ def main():
 
     notes, report = analyze_vault(wiki_dir)
     variants = report["project_variants"]
-    typos = [(t["bad"], t["good"], t["similarity"]) for t in report["likely_typos"]]
+    typos = [
+        (t["bad"], t["good"], t["similarity"], t["bad_count"], t["good_count"])
+        for t in report["likely_typos"]
+    ]
     claim_issues = report["claim_issues"]
     note_issues = report["note_issues"]
 
@@ -339,8 +394,11 @@ def main():
 
     if typos:
         print("🔤 Likely project typos:")
-        for bad, good, r in typos:
-            print(f"   {bad!r} → {good!r} (similarity {r:.2f})")
+        for bad, good, r, bad_count, good_count in typos:
+            print(
+                f"   {bad!r} ({bad_count}) → {good!r} ({good_count}) "
+                f"(similarity {r:.2f})"
+            )
         print()
 
     if note_issues:
