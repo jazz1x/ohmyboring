@@ -3,14 +3,11 @@
 [English](README.md) · **한국어** · [日本語](README.ja.md)
 
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
-![release](https://img.shields.io/badge/release-v0.1.0-blue)
+![version](https://img.shields.io/badge/version-0.1.0-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
-![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
-![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
-![qwen3](https://img.shields.io/badge/LLM-qwen3:14b-000?logo=ollama)
+![local LLM](https://img.shields.io/badge/local%20LLM-Ollama%20%7C%20LM%20Studio-000)
 
-**셀프호스팅 개인 메모리 RAG.** Claude Code / Kimi Code 세션과 적재 가능한 Codex 트랜스크립트가 로컬의 사람이 읽는 위키로 증류돼 쌓이고, *"전에 이거 어떻게 했더라"* 를 다시 꺼내 쓴다. **클라우드 0 · 100% 로컬.**
+**ohmyboring은 내가 어떻게 풀었는지를 기억합니다.** Claude Code / Kimi Code 세션과 적재 가능한 Codex 트랜스크립트를 로컬의 사람이 읽는 위키로 바꾸고, *"전에 이거 어떻게 했더라"* 싶을 때 필요한 부분을 다시 꺼내줍니다. **클라우드 0 · 로컬 LLM 친화.**
 
 ```bash
 # 가장 빠름 — 원라이너: ~/oh-my-boring에 클론, 빌드, 훅/MCP/워커까지 연결.
@@ -33,6 +30,8 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 > 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 Claude 과거 기록을 채우고 나면, 이후 Claude/Kimi 세션은 자동 축적되고 Codex는 적재 가능한 트랜스크립트를 워커가 처리합니다([적재하기](#적재하기-ingestion) 참고).
 
 > **Docker**, **Ollama** 또는 **LM Studio** 같은 OpenAI-compatible 로컬 서버, **Python 3**, **jq**, **curl**, **git**, **make**가 필요합니다.
+
+LM Studio를 쓰고 싶다면 로컬 서버를 켜고, 채팅 모델 1개와 임베딩 모델 1개를 로드한 뒤 `llm.provider`를 `lmstudio`로 바꾸고 `make verify-llm`을 실행하세요. ohmyboring은 정확한 모델 id와 임베딩 차원을 확인한 뒤에만 설정을 믿습니다.
 
 첫 실행 성공 기준:
 

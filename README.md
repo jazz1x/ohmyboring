@@ -3,14 +3,11 @@
 **English** · [한국어](README.ko.md) · [日本語](README.ja.md)
 
 [![CI](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml/badge.svg)](https://github.com/jazz1x/ohmyboring/actions/workflows/ci.yml)
-![release](https://img.shields.io/badge/release-v0.1.0-blue)
+![version](https://img.shields.io/badge/version-0.1.0-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-![Rust](https://img.shields.io/badge/engine-Rust%20edition%202024-000?logo=rust)
-![Python](https://img.shields.io/badge/hooks-Python%203-3776AB?logo=python)
-![Docker](https://img.shields.io/badge/deploy-Docker-2496ED?logo=docker)
-![qwen3](https://img.shields.io/badge/LLM-qwen3:14b-000?logo=ollama)
+![local LLM](https://img.shields.io/badge/local%20LLM-Ollama%20%7C%20LM%20Studio-000)
 
-**Self-hosted personal memory RAG.** Your Claude Code / Kimi Code sessions and eligible Codex transcripts are distilled into a local, human-readable wiki and recalled on demand — *"how did I do this last time?"* **Zero cloud · 100% local.**
+**ohmyboring remembers how you solved things.** It turns Claude Code / Kimi Code sessions and eligible Codex transcripts into a local, human-readable wiki, then recalls the useful parts when you ask *"how did I do this last time?"* **Zero cloud · local LLM friendly.**
 
 ```bash
 # Fastest — one-liner: clones to ~/oh-my-boring, builds, wires hooks/MCP/workers.
@@ -33,6 +30,8 @@ make ask Q="how did I fix the docker build cache problem?"
 > A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your Claude history; after that, Claude/Kimi sessions auto-accumulate and Codex is picked up by its worker when eligible (see [Feeding it](#feeding-it-ingestion)).
 
 > Requires **Docker**, **Ollama** or another OpenAI-compatible local server such as **LM Studio**, **Python 3**, **jq**, **curl**, **git**, and **make**.
+
+Prefer LM Studio? Start its local server, load one chat model and one embedding model, set `llm.provider` to `lmstudio`, and run `make verify-llm`. ohmyboring checks the exact model ids and embedding dimension before it trusts the setup.
 
 First-run success means:
 
