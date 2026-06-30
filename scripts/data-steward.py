@@ -43,6 +43,7 @@ MIN_CLAIM_VALUE_LEN = 4
 WEAK_CLAIM_WORDS = {"검토", "확인", "고민", "예정", "계획", "review", "consider", "plan", "todo"}
 ALLOWED_CLAIM_KINDS = {"fact", "decision", "assumption", "risk", "blocked", "goal", "term", "next"}
 ALLOWED_CLAIM_CONFIDENCES = {"certain", "likely", "assumption", "outdated"}
+FIXABLE_ISSUE_KINDS = {"project-variant", "placeholder-tags"}
 # The shipped sample note is allowed to be generic/empty; do not flag it as data rot.
 SEED_NOTE = "wiki-0000.md"
 
@@ -236,26 +237,12 @@ def _fix_note(n, target_project: str):
     n["path"].write_text("---\n" + new_yaml + "\n---\n" + n["body"], encoding="utf-8")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Inspect/repair ohmyboring vault data hygiene")
-    parser.add_argument("--vault", help="vault root directory (default: BORING_VAULT_DIR or ~/oh-my-boring/vault)")
-    parser.add_argument("--fix", action="store_true", help="rewrite notes in place (review with git diff)")
-    parser.add_argument("--yes", action="store_true", help="skip confirmation prompt")
-    parser.add_argument("--json", action="store_true", help="output structured JSON report")
-    args = parser.parse_args()
-
-    wiki_dir = _wiki_dir(args)
-    if not wiki_dir.exists():
-        print(f"[error] wiki directory not found: {wiki_dir}", file=sys.stderr)
-        sys.exit(1)
-
-    notes = _collect_notes(wiki_dir)
+def _build_report(wiki_dir: Path, notes: list[dict]) -> dict:
     projects = [n["fm"].get("project") or "" for n in notes]
     variants = _project_variants(notes)
     typos = _likely_typos(projects)
     claim_issues = _claim_issues(notes)
 
-    # build per-note issues
     note_issues = defaultdict(list)
     for n in notes:
         proj = n["fm"].get("project") or ""
@@ -282,23 +269,52 @@ def main():
         if lineage_issues:
             note_issues[n["path"].name].extend(lineage_issues)
 
+    return {
+        "wiki_dir": str(wiki_dir),
+        "note_count": len(notes),
+        "project_variants": variants,
+        "likely_typos": [
+            {"bad": a, "good": b, "similarity": round(r, 3)} for a, b, r in typos
+        ],
+        "note_issues": dict(note_issues),
+        "claim_issues": claim_issues,
+    }
+
+
+def analyze_vault(wiki_dir: Path) -> tuple[list[dict], dict]:
+    notes = _collect_notes(wiki_dir)
+    return notes, _build_report(wiki_dir, notes)
+
+
+def fixable_note_names(report: dict) -> list[str]:
+    names = []
+    for name, issues in report.get("note_issues", {}).items():
+        if any(issue.get("kind") in FIXABLE_ISSUE_KINDS for issue in issues):
+            names.append(name)
+    return sorted(names)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Inspect/repair ohmyboring vault data hygiene")
+    parser.add_argument("--vault", help="vault root directory (default: BORING_VAULT_DIR or ~/oh-my-boring/vault)")
+    parser.add_argument("--fix", action="store_true", help="rewrite notes in place (review with git diff)")
+    parser.add_argument("--yes", action="store_true", help="skip confirmation prompt")
+    parser.add_argument("--json", action="store_true", help="output structured JSON report")
+    args = parser.parse_args()
+
+    wiki_dir = _wiki_dir(args)
+    if not wiki_dir.exists():
+        print(f"[error] wiki directory not found: {wiki_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    notes, report = analyze_vault(wiki_dir)
+    variants = report["project_variants"]
+    typos = [(t["bad"], t["good"], t["similarity"]) for t in report["likely_typos"]]
+    claim_issues = report["claim_issues"]
+    note_issues = report["note_issues"]
+
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "wiki_dir": str(wiki_dir),
-                    "note_count": len(notes),
-                    "project_variants": variants,
-                    "likely_typos": [
-                        {"bad": a, "good": b, "similarity": round(r, 3)} for a, b, r in typos
-                    ],
-                    "note_issues": dict(note_issues),
-                    "claim_issues": claim_issues,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return
 
     print(f"📂 vault/wiki: {wiki_dir}")
@@ -352,8 +368,13 @@ def main():
         return
 
     if not args.fix:
-        print("\n💡 Run with --fix to apply project canonicalization (org-prefix stripping) and")
-        print("   remove placeholder tags. Typos and generic project names are left for manual review.")
+        fixable = fixable_note_names(report)
+        if fixable:
+            print("\n💡 Run with --fix to apply project canonicalization (org-prefix stripping) and")
+            print("   remove placeholder tags. Typos and generic project names are left for manual review.")
+        else:
+            print("\n💡 No automatic fixes remain. Typos, generic project names, and weak claims")
+            print("   require explicit mapping or note-level review.")
         return
 
     if not args.yes:
