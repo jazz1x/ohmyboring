@@ -41,12 +41,13 @@ hermes-agent connects to oh-my-boring over MCP and runs cron-driven automation.
 
 ## Slack delivery format
 
-Hermes delivers cron script stdout through Slack `chat.postMessage` as plain `text` with `mrkdwn` enabled. Keep `briefing.py` and `weekly-briefing.py` output as Slack mrkdwn text, not Block Kit JSON, unless the Hermes Slack adapter grows a `blocks` path. Reference: Slack's [formatting message text](https://docs.slack.dev/messaging/formatting-message-text/) and [`chat.postMessage`](https://docs.slack.dev/reference/methods/chat.postMessage) docs.
+Hermes delivers cron script stdout through Slack `chat.postMessage` as plain `text` with `mrkdwn` enabled. Keep `briefing.py` and `weekly-briefing.py` output as Slack mrkdwn text, not Block Kit JSON, unless the Hermes Slack adapter grows a `blocks` path. Reference: Slack's [formatting message text](https://docs.slack.dev/messaging/formatting-message-text/), [Block Kit](https://docs.slack.dev/block-kit/), and [`chat.postMessage`](https://docs.slack.dev/reference/methods/chat.postMessage) docs.
 
 The briefing scripts use:
 
 - JSON request body `{}` for `/brief` and `/weekly`.
 - Slack-safe headings, flat labelled bullets, compact source basenames, and no empty `Blocked: -` placeholders.
+- A shared `slack_briefing.py` renderer that can emit either current Hermes-safe mrkdwn text or a Block Kit-style JSON payload.
 - No eval fixture entries: `make eval` uses `eval-*.md` during the gate, then re-syncs after cleanup; the engine also excludes that internal namespace from recency/claim briefing surfaces.
 
 Preview the exact Slack-bound message before a live briefing:
@@ -54,6 +55,12 @@ Preview the exact Slack-bound message before a live briefing:
 ```bash
 BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
 BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/weekly-briefing.py
+```
+
+Preview the future Block Kit payload for Slack's Block Kit Builder or a `blocks`-aware adapter:
+
+```bash
+BORING_BRIEFING_FORMAT=blocks BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
 ```
 
 ## Managed skills

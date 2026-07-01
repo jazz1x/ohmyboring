@@ -12,6 +12,12 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
 
+from slack_briefing import (
+    maybe_print_blocks_json,
+    render_body_mrkdwn,
+    render_message_mrkdwn,
+)
+
 # BORING_URL is the canonical env var used throughout oh-my-boring.
 # DRUDGE_URL is kept as a fallback for legacy scripts only.
 HERMES_URL = os.environ.get("BORING_URL") or os.environ.get(
@@ -19,109 +25,16 @@ HERMES_URL = os.environ.get("BORING_URL") or os.environ.get(
 )
 KST = timezone(timedelta(hours=9))
 DATE = datetime.now(KST).strftime("%Y-%m-%d %a")
-SECTION_LABELS = {
-    "Done",
-    "Next",
-    "Blocked",
-    "Decisions",
-    "Risks",
-    "Stalled",
-    "완료",
-    "다음",
-    "막힘",
-    "결정",
-    "리스크",
-    "정체",
-}
-INLINE_LABELS = {
-    "Done",
-    "Next",
-    "Blocked",
-    "Decisions",
-    "Risks",
-    "Stalled",
-    "완료",
-    "다음",
-    "막힘",
-    "결정",
-    "리스크",
-    "정체",
-}
+TITLE = "☀️ 아침 브리핑"
+EMPTY_MESSAGE = "오늘은 새로 짚을 진행/막힘 항목이 회수되지 않았어요."
 
 
 def header(body: str) -> str:
-    return f"☀️ *아침 브리핑*\n`{DATE}`\n\n{body}"
+    return f"*{TITLE}*\n`{DATE}`\n\n{body}"
 
 
 def slack_mrkdwn(answer: str) -> str:
-    """Keep output as Slack mrkdwn text; Hermes sends stdout via chat.postMessage text."""
-    out = []
-    previous_blank = False
-    previous_heading = ""
-    for raw in answer.splitlines():
-        line = raw.rstrip()
-        stripped = line.strip()
-        if not stripped:
-            if not previous_blank:
-                out.append("")
-            previous_blank = True
-            continue
-        previous_blank = False
-        bullet = _strip_bullet(stripped)
-        if bullet is not None:
-            formatted = _format_inline_label(bullet)
-            if formatted:
-                out.append(f"• {formatted}")
-        elif stripped.startswith("#"):
-            heading = stripped.lstrip("#").strip()
-            if heading:
-                if heading == previous_heading:
-                    continue
-                previous_heading = heading
-                if out and out[-1] != "":
-                    out.append("")
-                out.append(f"*{heading}*")
-                out.append("")
-                previous_blank = True
-        elif _plain_label(stripped) in SECTION_LABELS:
-            out.append(f"*{_plain_label(stripped)}*")
-        else:
-            out.append(_slack_inline(stripped))
-    return "\n".join(out).strip()
-
-
-def _strip_bullet(line: str) -> str | None:
-    if line.startswith(("- ", "* ", "• ")):
-        return line[2:].strip()
-    head, sep, tail = line.partition(". ")
-    if sep and head.isdigit():
-        return tail.strip()
-    return None
-
-
-def _plain_label(line: str) -> str:
-    return line.strip().strip("*").strip().rstrip(":：")
-
-
-def _format_inline_label(text: str) -> str:
-    normalized = _slack_inline(text)
-    for label in INLINE_LABELS:
-        for sep in (":", "：", " - ", " — "):
-            prefix = f"{label}{sep}"
-            if normalized.startswith(prefix):
-                rest = normalized[len(prefix) :].strip()
-                if rest in {"", "-", "없음", "없습니다", "none", "None", "N/A", "n/a"}:
-                    return ""
-                return f"*{label}* — {rest}" if rest else f"*{label}*"
-    return normalized
-
-
-def _slack_inline(text: str) -> str:
-    return text.replace("**", "*").strip()
-
-
-def source_label(source: object) -> str:
-    return os.path.basename(str(source)) or str(source)
+    return render_body_mrkdwn(answer)
 
 
 def main() -> None:
@@ -144,12 +57,11 @@ def main() -> None:
     answer = (data.get("answer") or "").strip()
     sources = data.get("sources") or []
     if not answer:
-        print(header("오늘은 새로 짚을 진행/막힘 항목이 회수되지 않았어요."))
+        print(header(EMPTY_MESSAGE))
         return
-    out = header(slack_mrkdwn(answer))
-    if sources:
-        out += "\n\n_근거: " + " · ".join(source_label(s) for s in sources[:5]) + "_"
-    print(out)
+    if maybe_print_blocks_json(TITLE, DATE, answer, sources, EMPTY_MESSAGE):
+        return
+    print(render_message_mrkdwn(f"*{TITLE}*", DATE, answer, sources, EMPTY_MESSAGE))
 
 
 if __name__ == "__main__":
