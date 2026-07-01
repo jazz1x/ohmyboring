@@ -222,7 +222,8 @@ def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
         "CRITICAL — body content rules (format-breaking bugs happen when you ignore these):\n"
         "- The body MUST contain ONLY markdown prose. NEVER put tags, tools, concepts, claims, or any metadata inside the body.\n"
         "- All metadata MUST go in the JSON fields above, not in the body. A trailing 'tags:' or 'tools:' block in the body is a bug.\n"
-        "- Use REAL line breaks inside the JSON string, never the two characters backslash-n.\n\n"
+        "- Use REAL line breaks inside the JSON string, never the two characters backslash-n.\n"
+        "- In the Evidence section, if the transcript contains a table, code snippet, or symbol-heavy excerpt that is hard to summarize, preserve it verbatim inside a markdown code block instead of paraphrasing. Never truncate code mid-token; include the full line or mark it omitted.\n\n"
         f"{resolution_contract}\n"
         "WRITING (proven principles — apply, don't just summarize):\n"
         "- BLUF / 要約先出し: each section's first sentence is the conclusion; details follow.\n"
@@ -279,7 +280,7 @@ def _body_format_contract(lang, resolution):
         "timeline": "ordered events, commands, or attempts",
         "root_cause": "the verified cause, or say evidence is absent",
         "decision": "what was decided, with the reason",
-        "evidence": "commands, PRs, ids, counts, timings, model names, and status evidence",
+        "evidence": "commands, PRs, ids, counts, timings, model names, and status evidence; quote symbol-heavy or code excerpts verbatim in a code block rather than mangling them",
         "result": "what changed and what was verified",
         "regression": "repro, fixture, or guard that prevents recurrence",
         "next": "unfinished work or next action; write '없음'/'none' if truly none",

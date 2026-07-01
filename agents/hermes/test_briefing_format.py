@@ -125,7 +125,30 @@ Blocked:
     assert "&amp;" in block_blob
 
 
+def test_slack_mrkdwn_dedups_duplicate_bullets_across_project_sections():
+    slack_briefing = load_module("slack_briefing_test3", ROOT / "slack_briefing.py")
+
+    answer = """## kb-rag-bot
+- Done: README 최신화
+- Next: 컨플루언스 문서 업데이트
+## qa-tests
+- Done: PoC 일정 전환
+## kb-rag-bot
+- Done: README 최신화
+- Blocked: 토큰 문제
+"""
+    body = slack_briefing.render_body_mrkdwn(answer)
+    # README 최신화는 exact duplicate → 1회만.
+    assert body.count("README 최신화") == 1
+    # Blocked from the second kb-rag-bot section is preserved.
+    assert body.count("토큰 문제") == 1
+    # Summary counts reflect dedup.
+    assert "✅ 2" in body  # README 최신화 + PoC 일정 전환
+    assert "🚨 1" in body
+
+
 if __name__ == "__main__":
     test_slack_mrkdwn_uses_flat_readable_bullets()
     test_slack_mrkdwn_handles_adversarial_inputs()
+    test_slack_mrkdwn_dedups_duplicate_bullets_across_project_sections()
     print("ok - hermes briefing Slack formatting")

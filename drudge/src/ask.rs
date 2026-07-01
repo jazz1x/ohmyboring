@@ -3,7 +3,7 @@
 //! Cross-reference: design decision D5 (claim temporal authority) · ENFORCEMENT.md §B (SRP).
 //!
 //! SRP: `answer()` is pure logic (returns data), `run()` is the CLI I/O shell.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use anyhow::Result;
@@ -253,7 +253,111 @@ If decision or risk claims are present, add labelled Decisions / Risks bullets u
 If stalled claims are present, add labelled Stalled bullets for items that have not moved in over 7 days. \
 Each bullet must be one sentence and under 140 characters when possible; split rich updates into multiple bullets instead of a paragraph. \
 Omit empty sections; never write placeholders such as 'Blocked: -', 'None', or '없음'. \
-Put the most important recent project first. Each project appears once. Straight to the body.";
+Put the most important recent project first. Each project must appear only once; merge all updates for the same project under one heading. \
+Do not repeat the same bullet text. Straight to the body.";
+
+/// Post-process a briefing answer so each project appears once and duplicate
+/// bullets are collapsed. The LLM sometimes emits the same project in multiple
+/// chunks; this makes the downstream renderer's job deterministic.
+fn coalesce_brief_answer(answer: &str) -> String {
+    let mut projects: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut current_project: Option<String> = None;
+
+    for raw in answer.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(heading) = line.strip_prefix("##") {
+            let name = heading.trim().to_owned();
+            if !name.is_empty() {
+                current_project = Some(name.clone());
+                projects.entry(name).or_default();
+            }
+            continue;
+        }
+        if let Some(proj) = current_project.as_ref()
+            && let Some(body) = line.strip_prefix("- ")
+        {
+            let (label, text) = if let Some(pos) = body.find([':', '：', '-', '—']) {
+                let (l, rest) = body.split_at(pos);
+                let l = l.trim();
+                let t = rest[1..].trim();
+                if is_brief_label(l) && !t.is_empty() {
+                    (l.to_owned(), t.to_owned())
+                } else {
+                    (String::new(), body.to_owned())
+                }
+            } else {
+                (String::new(), body.to_owned())
+            };
+            if let Some(list) = projects.get_mut(proj) {
+                list.push((label, text));
+            }
+        }
+    }
+
+    let label_order = ["Done", "Next", "Blocked", "Decisions", "Risks", "Stalled"];
+    let mut out = String::new();
+    // Preserve original project order on first appearance.
+    let mut seen_order: Vec<String> = Vec::new();
+    for raw in answer.lines() {
+        if let Some(heading) = raw.trim().strip_prefix("##") {
+            let name = heading.trim().to_owned();
+            if !name.is_empty() && !seen_order.contains(&name) {
+                seen_order.push(name);
+            }
+        }
+    }
+
+    for proj in seen_order {
+        let Some(bullets) = projects.get(&proj) else {
+            continue;
+        };
+        if bullets.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "## {proj}");
+        // Deduplicate exact text, keeping first label/order occurrence.
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut by_label: HashMap<String, Vec<String>> = HashMap::new();
+        for (label, text) in bullets {
+            let key = text.to_lowercase();
+            if seen.insert(key) {
+                by_label
+                    .entry(label.clone())
+                    .or_default()
+                    .push(text.clone());
+            }
+        }
+        for label in label_order {
+            if let Some(items) = by_label.get(label) {
+                for text in items {
+                    if label.is_empty() {
+                        let _ = writeln!(out, "- {text}");
+                    } else {
+                        let _ = writeln!(out, "- {label}: {text}");
+                    }
+                }
+            }
+        }
+        // Any bullets without a recognised label go last.
+        if let Some(items) = by_label.get("") {
+            for text in items {
+                let _ = writeln!(out, "- {text}");
+            }
+        }
+        let _ = writeln!(out);
+    }
+    out.trim().to_owned()
+}
+
+fn is_brief_label(label: &str) -> bool {
+    matches!(
+        label,
+        "Done" | "Next" | "Blocked" | "Decisions" | "Risks" | "Stalled"
+    )
+}
 
 /// Recency-first/supersede briefing: retrieve by `updated_at` descending rather than semantic similarity →
 /// synthesize so the latest beats the old. Called by the cron morning briefing (`/brief`). SRP: separate from `answer()`.
@@ -358,7 +462,7 @@ pub async fn brief(
 
     let sources: Vec<String> = docs.iter().map(|d| d.source_path.clone()).collect();
     Ok(AnswerOut {
-        answer: answer_text.trim().to_owned(),
+        answer: coalesce_brief_answer(&answer_text),
         sources,
     })
 }
@@ -458,7 +562,7 @@ pub async fn weekly_brief(
     let answer_text = llm.generate(&system, &prompt).await?;
     let sources: Vec<String> = docs.iter().map(|d| d.source_path.clone()).collect();
     Ok(AnswerOut {
-        answer: answer_text.trim().to_owned(),
+        answer: coalesce_brief_answer(&answer_text),
         sources,
     })
 }
@@ -884,5 +988,17 @@ mod tests {
         assert_ne!(a_close, b_close);
         assert!(a_open.starts_with("«UNTRUSTED-DATA "));
         assert!(b_open.starts_with("«UNTRUSTED-DATA "));
+    }
+
+    #[test]
+    fn coalesce_brief_merges_duplicate_projects_and_dedups_bullets() {
+        use super::coalesce_brief_answer;
+        let raw = "## kb-rag-bot\n- Done: PR #12 merged\n- Next: verify PR #12\n## qa-tests\n- Done: PoC scheduled\n## kb-rag-bot\n- Done: PR #12 merged\n- Blocked: token issue";
+        let out = coalesce_brief_answer(raw);
+        // kb-rag-bot should appear once, duplicate "PR #12 merged" collapsed.
+        assert_eq!(out.matches("## kb-rag-bot").count(), 1);
+        assert_eq!(out.matches("PR #12 merged").count(), 1);
+        assert!(out.contains("- Blocked: token issue"));
+        assert!(out.contains("## qa-tests"));
     }
 }
