@@ -52,7 +52,7 @@ def test_claude_collector_fails_when_sync_fails():
                 mock.patch.object(claude_collect, "_warm_llm"),
                 mock.patch.object(claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
                 mock.patch.object(claude_collect, "DrudgeClient") as client,
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
             ):
                 client.return_value.sync.side_effect = OSError("sync down")
                 rc = claude_collect.main()
@@ -100,7 +100,7 @@ def test_kimi_collector_fails_when_distill_fails():
 
             with (
                 mock.patch.object(kimi_collect, "_distill", return_value=False) as distill,
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
             ):
                 rc = kimi_collect.main()
 

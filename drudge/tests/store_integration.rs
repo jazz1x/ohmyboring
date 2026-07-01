@@ -72,7 +72,7 @@ async fn compact_succeeds_in_autocommit_mode() {
     assert!(summary.total_ms > 0, "compact should report elapsed time");
 }
 
-/// Workflow events are mirrored into Postgres as OpenTelemetry-shaped rows while keeping legacy
+/// Workflow events are stored in Postgres as OpenTelemetry-shaped rows while keeping legacy
 /// filter keys (`component`, `event`, `status`, `run_id`) queryable.
 #[tokio::test]
 async fn event_log_round_trips_otel_projection() {

@@ -35,7 +35,8 @@ SHARED_DIR = HERE.parent / "shared"
 sys.path.insert(0, str(SHARED_DIR))
 
 # Neutralize ambient policy/endpoint env so module-load + assertions are deterministic.
-for _var in ("BORING_CONFIG", "BORING_HOME", "BORING_URL", "RECALL_MAX_RESULTS",
+for _var in ("BORING_CONFIG", "BORING_HOME", "BORING_URL", "BORING_EVENT_SINK",
+             "BORING_EVENT_SPOOL", "BORING_EVENT_DB_MIRROR", "RECALL_MAX_RESULTS",
              "RECALL_MAX_TOKENS", "RECALL_TIMEOUT", "RECALL_RETRIES"):
     os.environ.pop(_var, None)
 
@@ -276,7 +277,7 @@ class DistillExitCodeTests(unittest.TestCase):
                      mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"), \
                      mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)), \
                      mock.patch.object(distill, "_mark") as mark, \
-                     mock.patch.dict(os.environ, {"BORING_EVENT_LOG": event_path}):
+                     mock.patch.dict(os.environ, {"BORING_EVENT_LOG": event_path, "BORING_EVENT_SINK": "spool"}):
                     rc = distill.main()
 
                 self.assertEqual(rc, 0)

@@ -14,7 +14,8 @@ SHARED_DIR = HERE.parent / "shared"
 sys.path.insert(0, str(SHARED_DIR))
 
 # Neutralize ambient env so module-load + assertions are deterministic.
-for _var in ("BORING_CONFIG", "BORING_HOME", "BORING_URL", "BORING_LLM_BASE_URL",
+for _var in ("BORING_CONFIG", "BORING_HOME", "BORING_URL", "BORING_EVENT_SINK",
+             "BORING_EVENT_SPOOL", "BORING_EVENT_DB_MIRROR", "BORING_LLM_BASE_URL",
              "BORING_LLM_MODEL", "KIMI_CODE_HOME"):
     os.environ.pop(_var, None)
 
@@ -155,7 +156,7 @@ def test_distill_short_transcript_logs_skip_and_marks_done():
              mock.patch.object(distill, "repo_slug", return_value="repo"), \
              mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)), \
              mock.patch.object(distill, "_mark") as mark, \
-             mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}):
+             mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}):
             rc = distill.main()
 
         assert captured.getvalue() == ""

@@ -6,7 +6,7 @@
 //! - Shares `Store` + `Llm` via `Arc` (the Postgres client supports concurrent use).
 //! - axum router: /health · /ask · /brief · /search · /graph · /audit · /sync
 //! - Background scheduler: `BORING_SYNC_HOURS` (default 4h) interval + one immediate run at startup.
-//! - Error propagation: `AppError` (anyhow wrapper) → HTTP 500, JSON body.
+//! - Error propagation: `AppError` → explicit HTTP status + JSON body.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -119,9 +119,21 @@ pub(crate) fn spawn_query_log(
     });
 }
 
-// ── error type (ROP: AppError → HTTP 500) ───────────────────────────────────
+// ── error type (ROP: AppError → HTTP status) ────────────────────────────────
 
-pub(crate) struct AppError(anyhow::Error);
+pub(crate) struct AppError {
+    status: StatusCode,
+    error: anyhow::Error,
+}
+
+impl AppError {
+    pub(crate) fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error: anyhow::anyhow!(message.into()),
+        }
+    }
+}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
@@ -130,15 +142,18 @@ impl IntoResponse for AppError {
             error: String,
         }
         let body = ErrBody {
-            error: format!("{:#}", self.0),
+            error: format!("{:#}", self.error),
         };
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+        (self.status, Json(body)).into_response()
     }
 }
 
 impl<E: Into<anyhow::Error>> From<E> for AppError {
     fn from(e: E) -> Self {
-        Self(e.into())
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: e.into(),
+        }
     }
 }
 
@@ -396,15 +411,16 @@ pub(crate) fn count_wiki_notes(wiki_dir: &Path) -> Option<usize> {
 
 /// The explicit rejection (not silence) that vector/graph-dependent endpoints return under `BORING_VECTOR=off`.
 pub(crate) fn vector_disabled() -> AppError {
-    AppError(anyhow::anyhow!(
+    anyhow::anyhow!(
         "BORING_VECTOR=off — this feature requires the vector backend (pgvector). Set BORING_VECTOR=on and start Postgres."
-    ))
+    )
+    .into()
 }
 
 /// The same rejection mapped into the MCP `(code, message)` tuple — for vector-only tools
 /// (neighbors/claims/corpus_status). SSOT with `vector_disabled`; never `unwrap` the store (ROP).
 pub(crate) fn vec_off_rpc() -> (i32, String) {
-    (-32603, format!("{:#}", vector_disabled().0))
+    (-32603, format!("{:#}", vector_disabled().error))
 }
 
 /// Hard ceiling on agent-supplied recall budget to prevent token/DoS explosions.
