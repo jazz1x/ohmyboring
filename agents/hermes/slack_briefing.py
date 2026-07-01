@@ -113,11 +113,20 @@ def render_body_mrkdwn(answer: str) -> str:
     items_by_label: dict[str, list[tuple[str, BriefItem]]] = {
         label: [] for label in SECTION_ORDER
     }
+    seen: dict[str, tuple[str, BriefItem]] = {}
     for project in doc.projects:
         for item in project.items:
             label = item.label or ""
             if label not in items_by_label:
                 label = ""
+            key = _dedup_key(item.text)
+            if key in seen:
+                prev_project, prev_item = seen[key]
+                # Merge project names if the text is identical.
+                if project.name not in prev_project.split(" / "):
+                    seen[key] = (f"{prev_project} / {project.name}", prev_item)
+                continue
+            seen[key] = (project.name, item)
             items_by_label[label].append((project.name, item))
 
     if not any(items_by_label.values()):
@@ -172,11 +181,19 @@ def render_blocks_payload(
     items_by_label: dict[str, list[tuple[str, BriefItem]]] = {
         label: [] for label in SECTION_ORDER
     }
+    seen: dict[str, tuple[str, BriefItem]] = {}
     for project in doc.projects:
         for item in project.items:
             label = item.label or ""
             if label not in items_by_label:
                 label = ""
+            key = _dedup_key(item.text)
+            if key in seen:
+                prev_project, prev_item = seen[key]
+                if project.name not in prev_project.split(" / "):
+                    seen[key] = (f"{prev_project} / {project.name}", prev_item)
+                continue
+            seen[key] = (project.name, item)
             items_by_label[label].append((project.name, item))
 
     if not any(items_by_label.values()):
@@ -317,6 +334,11 @@ def _slack_inline(text: str) -> str:
 def _compact_text(text: str) -> str:
     lines = [_slack_inline(line.strip()) for line in text.splitlines() if line.strip()]
     return "\n".join(lines).strip()
+
+
+def _dedup_key(text: str) -> str:
+    """Normalize item text so near-duplicate bullets collapse to one entry."""
+    return " ".join(text.lower().split())
 
 
 def _section(text: str) -> dict[str, Any]:
