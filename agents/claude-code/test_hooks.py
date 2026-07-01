@@ -22,6 +22,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -51,6 +52,7 @@ def _load(name, filename):
 
 distill = _load("distill_session_hook", "distill-session.py")
 recall = _load("recall_hook", "recall.py")
+import distill_core  # noqa: E402
 import recall_core  # noqa: E402
 import markers  # noqa: E402
 
@@ -138,6 +140,36 @@ class RepoSlugTests(unittest.TestCase):
             sub = os.path.join(d, "my-project")
             os.makedirs(sub)
             self.assertEqual(distill.repo_slug(sub), "my-project")
+
+    def test_git_remote_from_subdirectory(self):
+        # Working from a subdir should still resolve to the repo's remote slug.
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", d], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-C", d, "remote", "add", "origin", "https://github.com/acme/widget.git"],
+                check=True,
+                capture_output=True,
+            )
+            sub = os.path.join(d, "src", "components")
+            os.makedirs(sub)
+            self.assertEqual(distill.repo_slug(sub), "widget")
+
+    def test_repo_slug_various_remote_url_formats(self):
+        cases = [
+            ("https://github.com/acme/widget.git", "widget"),
+            ("https://github.com/acme/widget", "widget"),
+            ("git@github.com:acme/widget.git", "widget"),
+            ("git@github.com:acme/widget", "widget"),
+            ("ssh://git@github.com/acme/widget.git", "widget"),
+        ]
+        for url, expected in cases:
+            with mock.patch.object(distill_core, "git_remote_url", return_value=url):
+                self.assertEqual(distill.repo_slug("/tmp/foo"), expected)
+
+    def test_repo_slug_no_remote_falls_back_to_basename(self):
+        with mock.patch.object(distill_core, "git_remote_url", return_value=""):
+            self.assertEqual(distill.repo_slug("/tmp/my-project"), "my-project")
+            self.assertEqual(distill.repo_slug(""), "")
 
 
 class ExtractTranscriptTests(unittest.TestCase):

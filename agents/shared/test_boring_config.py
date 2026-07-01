@@ -148,6 +148,53 @@ def test_load_warns_on_parse_error():
         os.unlink(tmp)
 
 
+def test_classify_prefers_remote_url_over_cwd():
+    """Git remote identity wins over local working-tree path matching."""
+    cfg = {
+        "repos": [
+            {"match": "your-company", "origin": "company", "name": "your-company"},
+            {"match": "~/mine", "origin": "personal", "name": "mine"},
+        ]
+    }
+    old_load = boring_config.load
+    try:
+        boring_config.load = lambda: cfg
+        # cwd happens to match a personal path, but remote URL says company.
+        origin, rule = boring_config.classify(
+            "/Users/jongyun/your-company", "https://github.com/your-company/repo.git"
+        )
+        assert origin == "company", f"expected company from remote URL, got {origin}"
+        assert rule == "your-company", f"expected your-company rule, got {rule}"
+        # No remote URL → falls back to cwd matching.
+        origin, rule = boring_config.classify("/Users/jongyun/your-company", None)
+        assert origin == "company", f"expected company from cwd fallback, got {origin}"
+    finally:
+        boring_config.load = old_load
+
+
+def test_classify_adversarial_inputs():
+    cfg = {
+        "repos": [
+            {"match": "acme", "origin": "company", "name": "acme"},
+            {"match": " ~/work ", "origin": "personal", "name": "work"},  # spaces should still match via strip? no, matcher is used as-is in _matches
+        ]
+    }
+    old_load = boring_config.load
+    try:
+        boring_config.load = lambda: cfg
+        # Empty inputs → default origin.
+        assert boring_config.classify("", "") == ("personal", None)
+        assert boring_config.classify("", None) == ("personal", None)
+        # No rule matches.
+        assert boring_config.classify("/tmp/orphan", "https://github.com/orphan/repo.git") == ("personal", None)
+        # Case-insensitive remote match; .git suffix ignored by matcher.
+        assert boring_config.classify("/tmp/foo", "https://github.com/ACME/Widget.git") == ("company", "acme")
+        # SSH remote format.
+        assert boring_config.classify("/tmp/foo", "git@github.com:acme/widget.git") == ("company", "acme")
+    finally:
+        boring_config.load = old_load
+
+
 def main():
     tests = [
         test_repo_root_is_dir_with_example,
@@ -157,6 +204,8 @@ def main():
         test_agent_config_lookup,
         test_canonical_repo_normalizes_variants,
         test_load_warns_on_parse_error,
+        test_classify_prefers_remote_url_over_cwd,
+        test_classify_adversarial_inputs,
     ]
     for t in tests:
         t()

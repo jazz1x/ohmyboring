@@ -85,7 +85,7 @@
         "properties": {
           "match": {
             "type": "string",
-            "description": "Case-insensitive substring matched against cwd or git remote URL."
+            "description": "Case-insensitive substring matched against git remote URL first, then cwd."
           },
           "origin": {
             "type": "string",

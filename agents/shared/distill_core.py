@@ -97,12 +97,22 @@ def _mark(session_id, retry=False):
 
 
 def git_remote_url(cwd):
-    """Return the git remote.origin.url of cwd, or ''."""
+    """Return the git remote.origin.url of cwd (or its nearest git ancestor), or ''."""
     if not cwd:
         return ""
     try:
+        # Walk up to the git root first so subdirectories resolve to the same
+        # project name as the repository root.
+        root = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        if not root:
+            return ""
         return subprocess.run(
-            ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
+            ["git", "-C", root, "config", "--get", "remote.origin.url"],
             capture_output=True,
             text=True,
             timeout=5,

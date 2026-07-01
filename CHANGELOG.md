@@ -5,7 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ## [Unreleased]
 
-- No user-facing changes yet.
+### Changed
+- **Project name resolution is now git-first** — distillation and ingestion derive the canonical repo slug from `git remote.origin.url` (walking up to the git root first), falling back to the working-directory folder name only when no remote exists. `boring.json` repo rules also match remote URL before cwd, so a checkout folder name never overrides the repository's configured origin.
+- **Briefing readability** — daily/weekly Slack digests are now grouped by priority (Blocked → Next → Stalled → Risks → Decisions → Done) with a short summary count, and Block Kit payloads no longer double-escape section text.
+
+### Fixed
+- `agents/hermes/ingest-worker.py` now reuses the same git-first repo-slug logic as the session hooks instead of reading only the cwd basename.
 
 ## [0.1.0] - 2026-06-30
 

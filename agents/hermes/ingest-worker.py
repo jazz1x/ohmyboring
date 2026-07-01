@@ -34,6 +34,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config
+import distill_core
 import event_log
 import markers
 import omb_env
@@ -92,10 +93,8 @@ RETRY_TTL = float(os.environ.get("INGEST_RETRY_TTL") or str(PENDING_TTL))
 MAX_WIKI_ATTEMPTS = int(os.environ.get("INGEST_WIKI_ATTEMPTS") or "3")
 
 def _repo_slug(cwd):
-    """Category axis: canonical repo slug from cwd basename."""
-    if cwd:
-        return boring_config.canonical_repo(os.path.basename(cwd.rstrip("/")))
-    return ""
+    """Category axis: canonical repo slug from git remote or cwd basename."""
+    return distill_core.repo_slug(cwd)
 
 
 def _vault_root():
@@ -304,7 +303,8 @@ def main():
             continue
         text, was_clamped = transcript.clamp_text(text, CLAMP)
         cwd = transcript_cwd(p)
-        origin, _name = boring_config.classify(cwd)
+        remote_url = distill_core.git_remote_url(cwd)
+        origin, _name = boring_config.classify(cwd, remote_url)
         repo = _repo_slug(cwd)
         repo_hint = f" repo='{repo}'." if repo else ""
         # mark pending with the pre-offer chunk count and attempt counter → next tick's _reconcile confirms success

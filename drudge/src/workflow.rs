@@ -1,6 +1,6 @@
 //! Workflow graph specs for host-side memory ingestion.
 //!
-//! This module is the Rust-side "LangGraph-style" contract: explicit nodes,
+//! This module is the Rust-side "LangGraph" contract: explicit nodes,
 //! labelled edges, and graph validation. It does not execute hooks, call LLMs,
 //! or replace the deterministic semantic graph in `graph.rs`.
 

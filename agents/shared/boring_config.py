@@ -110,11 +110,15 @@ def hermes_cron_jobs() -> dict:
 
 
 def _matches(cwd: str, remote_url: str | None, matcher: str) -> bool:
-    """Case-insensitive substring match against cwd or remote URL."""
+    """Case-insensitive substring match against remote URL first, then cwd.
+
+    Git identity (remote URL) is more stable than the local working-tree path,
+    so prefer it when available. Fall back to cwd only when there is no remote.
+    """
     needle = matcher.lower()
-    if needle in cwd.lower():
-        return True
     if remote_url and needle in remote_url.lower():
+        return True
+    if needle in cwd.lower():
         return True
     return False
 
