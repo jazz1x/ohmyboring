@@ -67,6 +67,7 @@ python3 agents/shared/test_recall_core.py
 python3 agents/claude-code/test_hooks.py
 python3 agents/kimi/test_kimi.py
 python3 agents/schedulers/test_collectors.py
+python3 agents/hermes/test_briefing_format.py
 python3 agents/hermes/test_ingest_worker.py
 python3 scripts/test_data_steward.py
 python3 scripts/test_vault_cleanup_gate.py

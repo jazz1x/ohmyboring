@@ -773,7 +773,7 @@ impl Store {
                 "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence FROM claim c
                  JOIN document d ON d.source_path = c.source_path
                  WHERE c.superseded_at IS NULL
-                   AND c.valid_from < (NOW() - INTERVAL '1 day' * ($5::int))
+                   AND c.valid_from < (NOW() - INTERVAL '1 day' * ($5::bigint))
                    AND ($2::text IS NULL OR d.project = $2)
                    AND ($3::text[] IS NULL OR c.kind = ANY($3))
                    AND NOT (d.origin = ANY($4))

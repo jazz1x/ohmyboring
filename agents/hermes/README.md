@@ -46,7 +46,7 @@ Hermes delivers cron script stdout through Slack `chat.postMessage` as plain `te
 The briefing scripts use:
 
 - JSON request body `{}` for `/brief` and `/weekly`.
-- Slack-safe headings, bullets, and compact source basenames.
+- Slack-safe headings, flat labelled bullets, compact source basenames, and no empty `Blocked: -` placeholders.
 - No eval fixture entries: `make eval` uses `eval-*.md` during the gate, then re-syncs after cleanup; the engine also excludes that internal namespace from recency/claim briefing surfaces.
 
 Preview the exact Slack-bound message before a live briefing:
