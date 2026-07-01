@@ -35,13 +35,28 @@ LABEL_ALIASES = {
     "정체": "Stalled",
 }
 LABELS = set(LABEL_ALIASES)
-LABEL_DISPLAY = {
-    "Done": "Done",
-    "Next": "Next",
-    "Blocked": "Blocked",
-    "Decisions": "Decision",
-    "Risks": "Risk",
-    "Stalled": "Stalled",
+
+# Briefing is read, not searched. Group by status priority so the reader
+# sees "what blocks me" first, "what to do next" second, and "what finished"
+# last. Keep sections short; mobile Slack rewards vertical scannability.
+SECTION_ORDER = ["Blocked", "Next", "Stalled", "Risks", "Decisions", "Done", ""]
+SECTION_EMOJI = {
+    "Blocked": "🚨",
+    "Next": "▶️",
+    "Stalled": "⏸️",
+    "Risks": "⚠️",
+    "Decisions": "💡",
+    "Done": "✅",
+    "": "•",
+}
+SECTION_TITLE = {
+    "Blocked": "막힘",
+    "Next": "다음 행동",
+    "Stalled": "정체 중",
+    "Risks": "리스크",
+    "Decisions": "결정",
+    "Done": "완료",
+    "": "기타",
 }
 
 
@@ -84,29 +99,49 @@ def render_message_mrkdwn(
 
 
 def render_body_mrkdwn(answer: str) -> str:
+    """Render a priority-first briefing body.
+
+    The reader should grasp the day in one glance:
+    1) summary counts, 2) blockers, 3) next actions, 4) context/decisions,
+    5) recently done. Project names stay attached to each item so context
+    is never lost.
+    """
     doc = parse_brief(answer)
     if not doc.projects:
         return _compact_text(answer)
 
-    out: list[str] = []
-    omitted_projects = max(0, len(doc.projects) - PROJECT_LIMIT)
-    for project in doc.projects[:PROJECT_LIMIT]:
-        if not project.items:
+    items_by_label: dict[str, list[tuple[str, BriefItem]]] = {
+        label: [] for label in SECTION_ORDER
+    }
+    for project in doc.projects:
+        for item in project.items:
+            label = item.label or ""
+            if label not in items_by_label:
+                label = ""
+            items_by_label[label].append((project.name, item))
+
+    if not any(items_by_label.values()):
+        return _compact_text(answer)
+
+    counts: list[str] = []
+    lines: list[str] = []
+    for label in SECTION_ORDER:
+        entries = items_by_label[label]
+        if not entries:
             continue
-        if out and out[-1] != "":
-            out.append("")
-        out.append(f"*{_slack_inline(project.name)}*")
-        items = project.items[:ITEM_LIMIT]
-        for item in items:
-            out.append(f"• {format_item_mrkdwn(item)}")
-        omitted_items = max(0, len(project.items) - len(items))
-        if omitted_items:
-            out.append(f"• _외 {omitted_items}개 항목_")
-    if omitted_projects:
-        if out and out[-1] != "":
-            out.append("")
-        out.append(f"_외 {omitted_projects}개 프로젝트 생략_")
-    return "\n".join(out).strip()
+        emoji = SECTION_EMOJI[label]
+        title = SECTION_TITLE[label]
+        counts.append(f"{emoji} {len(entries)}")
+        lines.append(f"{emoji} *{title}*")
+        for project_name, item in entries[:ITEM_LIMIT]:
+            text = _slack_inline(item.text)
+            lines.append(f"• {_slack_inline(project_name)} — {text}")
+        omitted = max(0, len(entries) - ITEM_LIMIT)
+        if omitted:
+            lines.append(f"• _외 {omitted}개 항목_")
+        lines.append("")
+
+    return f"{' · '.join(counts)}\n\n" + "\n".join(lines).strip()
 
 
 def render_blocks_payload(
@@ -116,6 +151,11 @@ def render_blocks_payload(
     sources: list[object],
     empty_message: str,
 ) -> dict[str, Any]:
+    """Block Kit version of the priority-first briefing.
+
+    Uses single-column sections instead of two-column fields: each status
+    group is a clear visual chunk on mobile.
+    """
     doc = parse_brief(answer)
     fallback = render_message_mrkdwn(title, stamp, answer, sources, empty_message)
     blocks: list[dict[str, Any]] = [
@@ -129,27 +169,38 @@ def render_blocks_payload(
         },
     ]
 
-    projects = [project for project in doc.projects if project.items]
-    if not projects:
+    items_by_label: dict[str, list[tuple[str, BriefItem]]] = {
+        label: [] for label in SECTION_ORDER
+    }
+    for project in doc.projects:
+        for item in project.items:
+            label = item.label or ""
+            if label not in items_by_label:
+                label = ""
+            items_by_label[label].append((project.name, item))
+
+    if not any(items_by_label.values()):
         blocks.append(_section(empty_message))
-    for project in projects[:BLOCK_PROJECT_LIMIT]:
-        blocks.append({"type": "divider"})
-        blocks.append(_section(f"*{_escape_mrkdwn(project.name)}*"))
-        fields = [
-            {
-                "type": "mrkdwn",
-                "text": _mrkdwn_text(f"*{display_label(item.label)}*\n{item.text}", 2000),
-            }
-            for item in project.items[:BLOCK_ITEM_LIMIT]
-        ]
-        if fields:
-            blocks.append({"type": "section", "fields": fields})
-        omitted_items = max(0, len(project.items) - BLOCK_ITEM_LIMIT)
-        if omitted_items:
-            blocks.append(_context(f"_외 {omitted_items}개 항목_"))
-    omitted_projects = max(0, len(projects) - BLOCK_PROJECT_LIMIT)
-    if omitted_projects:
-        blocks.append(_context(f"_외 {omitted_projects}개 프로젝트 생략_"))
+    else:
+        counts: list[str] = []
+        for label in SECTION_ORDER:
+            entries = items_by_label[label]
+            if not entries:
+                continue
+            emoji = SECTION_EMOJI[label]
+            title_text = SECTION_TITLE[label]
+            counts.append(f"{emoji} {len(entries)}")
+            blocks.append({"type": "divider"})
+            blocks.append(_section(f"{emoji} *{title_text}*"))
+            item_lines: list[str] = []
+            for project_name, item in entries[:BLOCK_ITEM_LIMIT]:
+                item_lines.append(f"• {project_name} — {item.text}")
+            omitted = max(0, len(entries) - BLOCK_ITEM_LIMIT)
+            if omitted:
+                item_lines.append(f"• _외 {omitted}개 항목_")
+            if item_lines:
+                blocks.append(_section("\n".join(item_lines)))
+        blocks.insert(2, _context(" · ".join(counts)))
 
     source_text = render_sources(sources)
     if source_text:
@@ -194,7 +245,10 @@ def parse_brief(answer: str) -> BriefDocument:
 
         bullet = _strip_bullet(stripped)
         item = parse_item(bullet if bullet is not None else stripped, pending_label)
-        pending_label = ""
+        # A plain (non-bullet) line consumes the pending label; a bullet line keeps
+        # it so multiple bullets under one label heading share the same label.
+        if bullet is None:
+            pending_label = ""
         if item is None:
             continue
         if current is None:
@@ -223,17 +277,6 @@ def parse_item(text: str, pending_label: str = "") -> BriefItem | None:
     if normalized in EMPTY_VALUES:
         return None
     return BriefItem("", normalized)
-
-
-def format_item_mrkdwn(item: BriefItem) -> str:
-    text = _slack_inline(item.text)
-    if item.label:
-        return f"*{display_label(item.label)}* — {text}"
-    return text
-
-
-def display_label(label: str) -> str:
-    return LABEL_DISPLAY.get(label, label)
 
 
 def canonical_label(label: str) -> str:

@@ -29,9 +29,12 @@ make ask Q="how did I fix the docker build cache problem?"
 
 > A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your Claude history; after that, Claude/Kimi sessions auto-accumulate and Codex is picked up by its worker when eligible (see [Feeding it](#feeding-it-ingestion)).
 
-> Requires **Docker**, **Ollama** or another OpenAI-compatible local server such as **LM Studio**, **Python 3**, **jq**, **curl**, **git**, and **make**.
+> Requires **Docker**, **Python 3**, **jq**, **curl**, **git**, **make**, and a local LLM server — **Ollama** or **LM Studio** (or another OpenAI-compatible endpoint).
 
-Prefer LM Studio? Start its local server, load one chat model and one embedding model, set `llm.provider` to `lmstudio`, and run `make verify-llm`. ohmyboring checks the exact model ids and embedding dimension before it trusts the setup.
+**Pick a local LLM backend:**
+
+- **Ollama** — `make up` starts and pulls models automatically when `llm.provider` is `ollama`. Use `make ollama` to check or start it manually.
+- **LM Studio** — start its local server, load one chat model and one embedding model, set `llm.provider` to `lmstudio`, and run `make verify-llm`. ohmyboring checks the exact model ids and embedding dimension before it trusts the setup.
 
 First-run success means:
 
@@ -110,7 +113,7 @@ flowchart LR
 
 ### Workflow graph contract
 
-The ingest loop also has a Rust-side workflow graph contract in `drudge/src/workflow.rs`, documented in `drudge/WORKFLOW.md`. It is a LangGraph-style typed state graph for session discovery, distillation, resolution verification, repair, `remember`, marker update, event logging, and readiness projection. It is not a second runtime orchestrator: Python hooks/workers still perform host I/O, while Rust owns the closed node/edge vocabulary and graph-shape tests.
+The ingest loop also has a Rust-side workflow graph contract in `drudge/src/workflow.rs`, documented in `drudge/WORKFLOW.md`. It is a 랭그래프 typed state graph for session discovery, distillation, resolution verification, repair, `remember`, marker update, event logging, and readiness projection. It is not a second runtime orchestrator: Python hooks/workers still perform host I/O, while Rust owns the closed node/edge vocabulary and graph-shape tests.
 
 ---
 
@@ -152,9 +155,25 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 | `repos[]` | path/remote rules → `origin=personal/company/mirror/community` |
 | `agents[]` | ingest sources for vector mode |
 
-**Switching LLM backend** is one config block. `make up` dispatches to `scripts/llm-providers/<provider>.sh` for the right bootstrap: Ollama can start/pull models; LM Studio only health-checks the server and expects models to be loaded in the app.
+**Switching LLM backend** is one config block. `make up` dispatches to `scripts/llm-providers/<provider>.sh` for the right bootstrap.
 
-### LM Studio backend
+### Local LLM backends
+
+ohmyboring can connect to any OpenAI-compatible `/v1` server. The two officially supported backends are **Ollama** and **LM Studio**.
+
+#### Ollama
+
+Default in `boring.example.json`. `make up` dispatches to `scripts/llm-providers/ollama.sh`, which ensures Ollama is running and pulls `llm.model` / `llm.embed_model` if needed. Inside the Docker container, use `host.docker.internal` to reach the host Ollama; the default `boring.json` already does this.
+
+Quick check/start:
+
+```bash
+make ollama
+curl -s http://localhost:11434/api/tags
+make verify-llm
+```
+
+#### LM Studio
 
 LM Studio works through its OpenAI-compatible `/v1` server. Use `host.docker.internal` in `boring.json` because the Docker container calls back to the host; use `localhost` only for host-side checks and benchmarks.
 

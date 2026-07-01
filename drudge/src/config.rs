@@ -180,7 +180,7 @@ impl NoteLang {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RepoRule {
-    /// Substring matched against cwd or git remote URL (case-insensitive).
+    /// Substring matched against git remote URL first, then cwd (case-insensitive).
     #[serde(rename = "match")]
     pub matcher: String,
     pub origin: Origin,
@@ -463,15 +463,34 @@ impl BoringConfig {
     }
 
     /// Classify a session/working dir into (origin, optional repo name).
+    /// Git remote URL is matched before cwd so a checkout folder name never
+    /// overrides the repository's canonical origin rule.
     pub fn classify(&self, cwd: &str, remote_url: Option<&str>) -> (Origin, Option<String>) {
-        let haystack = match remote_url {
-            Some(url) => format!("{cwd}\n{url}"),
-            None => cwd.to_owned(),
-        };
-        let lowered = haystack.to_lowercase();
+        let matchers: Vec<String> = self
+            .repos
+            .iter()
+            .map(|r| r.matcher.to_lowercase())
+            .collect();
 
-        for rule in &self.repos {
-            if lowered.contains(&rule.matcher.to_lowercase()) {
+        // Remote first: a rule like "acme/" should win even if cwd is just "~/src/acme".
+        if let Some(url) = remote_url {
+            let lowered = url.to_lowercase();
+            for (i, rule) in self.repos.iter().enumerate() {
+                if lowered.contains(&matchers[i]) {
+                    let name = if rule.name.is_empty() {
+                        derive_name_from_match(&rule.matcher, cwd, remote_url)
+                    } else {
+                        Some(rule.name.clone())
+                    };
+                    return (rule.origin, name);
+                }
+            }
+        }
+
+        // Fallback to cwd.
+        let lowered = cwd.to_lowercase();
+        for (i, rule) in self.repos.iter().enumerate() {
+            if lowered.contains(&matchers[i]) {
                 let name = if rule.name.is_empty() {
                     derive_name_from_match(&rule.matcher, cwd, remote_url)
                 } else {
@@ -837,6 +856,32 @@ mod tests {
         let (origin, name) = cfg.classify("/Users/x/acme/oh-my-boring", None);
         assert_eq!(origin, Origin::Company);
         assert_eq!(name, Some("acme".to_owned()));
+    }
+
+    #[test]
+    fn classify_prefers_remote_url_over_cwd() {
+        let cfg = BoringConfig {
+            repos: vec![
+                RepoRule {
+                    matcher: "acme-corp".into(),
+                    origin: Origin::Company,
+                    name: "acme-corp".into(),
+                },
+                RepoRule {
+                    matcher: "personal".into(),
+                    origin: Origin::Personal,
+                    name: "personal".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        // cwd says "personal" but remote says "acme-corp" → remote wins.
+        let (origin, name) = cfg.classify(
+            "/Users/x/personal",
+            Some("https://github.com/acme-corp/secret-project.git"),
+        );
+        assert_eq!(origin, Origin::Company);
+        assert_eq!(name, Some("acme-corp".to_owned()));
     }
 
     #[test]

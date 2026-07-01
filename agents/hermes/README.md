@@ -46,7 +46,7 @@ Hermes delivers cron script stdout through Slack `chat.postMessage` as plain `te
 The briefing scripts use:
 
 - JSON request body `{}` for `/brief` and `/weekly`.
-- Slack-safe headings, flat labelled bullets, compact source basenames, and no empty `Blocked: -` placeholders.
+- Slack-safe headings, priority-first grouped bullets (Blocked → Next → Stalled → Risks → Decisions → Done), compact source basenames, and no empty placeholders.
 - A shared `slack_briefing.py` renderer that can emit either current Hermes-safe mrkdwn text or a Block Kit-style JSON payload.
 - No eval fixture entries: `make eval` uses `eval-*.md` during the gate, then re-syncs after cleanup; the engine also excludes that internal namespace from recency/claim briefing surfaces.
 

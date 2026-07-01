@@ -29,9 +29,12 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 
 > 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 Claude 과거 기록을 채우고 나면, 이후 Claude/Kimi 세션은 자동 축적되고 Codex는 적재 가능한 트랜스크립트를 워커가 처리합니다([적재하기](#적재하기-ingestion) 참고).
 
-> **Docker**, **Ollama** 또는 **LM Studio** 같은 OpenAI-compatible 로컬 서버, **Python 3**, **jq**, **curl**, **git**, **make**가 필요합니다.
+> **Docker**, **Python 3**, **jq**, **curl**, **git**, **make**, 그리고 로컬 LLM 서버 — **Ollama** 또는 **LM Studio** (또는 다른 OpenAI-compatible 엔드포인트)가 필요합니다.
 
-LM Studio를 쓰고 싶다면 로컬 서버를 켜고, 채팅 모델 1개와 임베딩 모델 1개를 로드한 뒤 `llm.provider`를 `lmstudio`로 바꾸고 `make verify-llm`을 실행하세요. ohmyboring은 정확한 모델 id와 임베딩 차원을 확인한 뒤에만 설정을 믿습니다.
+**로컬 LLM 백엔드 선택:**
+
+- **Ollama** — `llm.provider`가 `ollama`면 `make up`이 자동으로 서버를 시작하고 모델을 pull합니다. 수동으로 확인/시작하려면 `make ollama`를 실행하세요.
+- **LM Studio** — 로컬 서버를 시작하고, 채팅 모델과 임베딩 모델을 각각 하나씩 로드한 뒤 `llm.provider`를 `lmstudio`로 바꾸고 `make verify-llm`을 실행하세요. ohmyboring은 정확한 모델 id와 임베딩 차원을 확인한 뒤에만 설정을 신뢰합니다.
 
 첫 실행 성공 기준:
 
@@ -110,7 +113,7 @@ flowchart LR
 
 ### 작업 흐름 그래프 계약
 
-적재 루프에는 `drudge/src/workflow.rs`에 Rust 쪽 작업 흐름 그래프 계약이 있고, `drudge/WORKFLOW.md`에 문서화되어 있습니다. 세션 발견, 증류, 해상도 검증, 보강, `remember`, 마커 갱신, 이벤트 기록, readiness 투영을 닫힌 타입의 LangGraph 스타일 상태 그래프로 표현합니다. 두 번째 런타임 오케스트레이터는 아닙니다. Python 훅/워커는 계속 호스트 I/O를 맡고, Rust는 노드/엣지 어휘와 그래프 형태 테스트를 소유합니다.
+적재 루프에는 `drudge/src/workflow.rs`에 Rust 쪽 작업 흐름 그래프 계약이 있고, `drudge/WORKFLOW.md`에 문서화되어 있습니다. 세션 발견, 증류, 해상도 검증, 보강, `remember`, 마커 갱신, 이벤트 기록, readiness 투영을 닫힌 타입의 랭그래프 상태 그래프로 표현합니다. 두 번째 런타임 오케스트레이터는 아닙니다. Python 훅/워커는 계속 호스트 I/O를 맡고, Rust는 노드/엣지 어휘와 그래프 형태 테스트를 소유합니다.
 
 ---
 
@@ -152,9 +155,25 @@ flowchart LR
 | `repos[]` | 경로/remote 규칙 → `origin=personal/company/mirror/community` |
 | `agents[]` | vector mode ingest source |
 
-**LLM 백엔드 전환**은 config 블록 하나로 끝납니다. `make up`은 `scripts/llm-providers/<provider>.sh` 로 디스패치합니다. Ollama는 서버 시작과 모델 pull을 할 수 있고, LM Studio는 앱에서 모델을 이미 로드했다고 보고 서버 상태만 확인합니다.
+**LLM 백엔드 전환**은 config 블록 하나로 끝납니다. `make up`은 `scripts/llm-providers/<provider>.sh` 로 디스패치합니다.
 
-### LM Studio 백엔드
+### 로컬 LLM 백엔드
+
+ohmyboring은 OpenAI-compatible `/v1` 서버라면 어디에나 연결할 수 있습니다. 공식 지원하는 백엔드는 **Ollama**와 **LM Studio** 두 가지입니다.
+
+#### Ollama
+
+`boring.example.json`의 기본값입니다. `make up`은 `scripts/llm-providers/ollama.sh`로 디스패치하여 Ollama가 실행 중인지 확인하고 필요하면 `llm.model` / `llm.embed_model`을 pull합니다. Docker 컨테이너 안에서는 호스트 Ollama에 `host.docker.internal`로 접근하며, 기본 `boring.json`도 이미 그렇게 설정되어 있습니다.
+
+빠른 확인/시작:
+
+```bash
+make ollama
+curl -s http://localhost:11434/api/tags
+make verify-llm
+```
+
+#### LM Studio
 
 LM Studio는 OpenAI-compatible `/v1` 서버로 붙습니다. Docker 컨테이너가 호스트의 LM Studio에 접근해야 하므로 `boring.json`에는 `host.docker.internal`을 쓰고, 호스트에서 직접 확인하거나 벤치마크할 때만 `localhost`를 씁니다.
 
@@ -163,8 +182,8 @@ LM Studio는 OpenAI-compatible `/v1` 서버로 붙습니다. Docker 컨테이너
   "llm": {
     "provider": "lmstudio",
     "base_url": "http://host.docker.internal:1234/v1",
-    "model": "<v1/models에 나온 정확한 chat model id>",
-    "embed_model": "<v1/models에 나온 정확한 embedding model id>",
+    "model": "<`/v1/models`가 반환하는 정확한 chat model id>",
+    "embed_model": "<`/v1/models`가 반환하는 정확한 embedding model id>",
     "embed_dim": 768,
     "api_key_env": "BORING_LLM_API_KEY",
     "bootstrap": "manual"
@@ -172,7 +191,7 @@ LM Studio는 OpenAI-compatible `/v1` 서버로 붙습니다. Docker 컨테이너
 }
 ```
 
-LM Studio 로컬 서버를 켜고 chat 모델과 embedding 모델을 하나씩 로드한 뒤, `make up` 전에 확인합니다:
+LM Studio 로컬 서버를 시작하고 chat 모델과 embedding 모델을 각각 하나씩 로드한 뒤, `make up` 전에 확인합니다:
 
 ```bash
 curl -s http://localhost:1234/v1/models | jq -r '.data[].id'

@@ -186,7 +186,7 @@ fn mcp_tools_list() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "match": {"type": "string", "description": "case-insensitive substring matched against cwd or git remote URL (e.g. an org/repo slug)"},
+                    "match": {"type": "string", "description": "case-insensitive substring matched against git remote URL first, then cwd (e.g. an org/repo slug)"},
                     "origin": {"type": "string", "enum": ["personal", "company", "mirror", "community"]},
                     "name": {"type": "string", "description": "optional repo slug override"}
                 },
