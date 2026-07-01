@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Network-free tests for append-only local event logs.
+"""Network-free tests for local workflow event sinks.
 
 Run: python3 agents/shared/test_event_log.py
 """
@@ -17,18 +17,26 @@ import event_log
 class EventLogTests(unittest.TestCase):
     def setUp(self):
         self.old_event_log = os.environ.get("BORING_EVENT_LOG")
+        self.old_event_sink = os.environ.get("BORING_EVENT_SINK")
         self.old_event_sink_url = os.environ.get("BORING_EVENT_SINK_URL")
         self.old_event_db_mirror = os.environ.get("BORING_EVENT_DB_MIRROR")
+        self.old_event_spool = os.environ.get("BORING_EVENT_SPOOL")
         self.tmp = tempfile.TemporaryDirectory()
         os.environ["BORING_EVENT_LOG"] = os.path.join(self.tmp.name, "events.ndjson")
+        os.environ.pop("BORING_EVENT_SINK", None)
         os.environ.pop("BORING_EVENT_SINK_URL", None)
         os.environ["BORING_EVENT_DB_MIRROR"] = "0"
+        os.environ.pop("BORING_EVENT_SPOOL", None)
 
     def tearDown(self):
         if self.old_event_log is None:
             os.environ.pop("BORING_EVENT_LOG", None)
         else:
             os.environ["BORING_EVENT_LOG"] = self.old_event_log
+        if self.old_event_sink is None:
+            os.environ.pop("BORING_EVENT_SINK", None)
+        else:
+            os.environ["BORING_EVENT_SINK"] = self.old_event_sink
         if self.old_event_sink_url is None:
             os.environ.pop("BORING_EVENT_SINK_URL", None)
         else:
@@ -37,6 +45,10 @@ class EventLogTests(unittest.TestCase):
             os.environ.pop("BORING_EVENT_DB_MIRROR", None)
         else:
             os.environ["BORING_EVENT_DB_MIRROR"] = self.old_event_db_mirror
+        if self.old_event_spool is None:
+            os.environ.pop("BORING_EVENT_SPOOL", None)
+        else:
+            os.environ["BORING_EVENT_SPOOL"] = self.old_event_spool
         self.tmp.cleanup()
 
     def test_append_event_writes_one_ndjson_line(self):
@@ -101,7 +113,7 @@ class EventLogTests(unittest.TestCase):
         with mock.patch.object(event_log, "append_event", side_effect=OSError("denied")):
             self.assertFalse(event_log.try_append_event("guard", "guard", "failed"))
 
-    def test_append_event_mirrors_to_engine_by_default(self):
+    def test_append_event_stores_in_engine_by_default_without_spool(self):
         os.environ.pop("BORING_EVENT_DB_MIRROR", None)
         seen = {}
 
@@ -111,6 +123,9 @@ class EventLogTests(unittest.TestCase):
 
             def __exit__(self, exc_type, exc, tb):
                 return False
+
+            def read(self):
+                return b'{"entries":[]}'
 
         def fake_urlopen(req, timeout):
             seen["url"] = req.full_url
@@ -124,12 +139,94 @@ class EventLogTests(unittest.TestCase):
         self.assertEqual(seen["url"], "http://127.0.0.1:7700/events")
         self.assertEqual(seen["body"]["event"], "structural_guard")
         self.assertEqual(seen["body"]["otel"]["severity_text"], "ERROR")
+        self.assertFalse(os.path.exists(os.environ["BORING_EVENT_LOG"]))
 
-    def test_append_event_can_disable_engine_mirror(self):
-        os.environ["BORING_EVENT_DB_MIRROR"] = "off"
+    def test_append_event_spools_when_engine_store_fails(self):
+        os.environ.pop("BORING_EVENT_DB_MIRROR", None)
+
+        with mock.patch.object(event_log.urllib.request, "urlopen", side_effect=event_log.urllib.error.URLError("down")):
+            event_log.append_event("guard", "structural_guard", "failed", run_id="r1")
+
+        with open(os.environ["BORING_EVENT_LOG"], encoding="utf-8") as f:
+            event = json.loads(f.readline())
+        self.assertEqual(event["run_id"], "r1")
+        self.assertEqual(event["event"], "structural_guard")
+
+    def test_append_event_can_use_spool_only_sink(self):
+        os.environ["BORING_EVENT_SINK"] = "spool"
 
         with mock.patch.object(event_log.urllib.request, "urlopen", side_effect=AssertionError("network")):
             event_log.append_event("guard", "structural_guard", "ok", run_id="r1")
+
+    def test_recent_events_prefers_engine_over_spool(self):
+        os.environ.pop("BORING_EVENT_DB_MIRROR", None)
+        with open(os.environ["BORING_EVENT_LOG"], "w", encoding="utf-8") as f:
+            f.write(json.dumps({"component": "guard", "event": "spooled", "status": "ok"}))
+            f.write("\n")
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "entries": [
+                            {
+                                "observed_at": "2026-07-01T00:00:00+00:00",
+                                "component": "guard",
+                                "event": "from_db",
+                                "status": "failed",
+                                "attributes": {"session_id": "db-session"},
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+
+        with mock.patch.object(event_log.urllib.request, "urlopen", return_value=FakeResponse()):
+            events = event_log.recent_events()
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "from_db")
+        self.assertEqual(events[0]["session_id"], "db-session")
+
+    def test_recent_resolution_failures_reads_engine(self):
+        os.environ.pop("BORING_EVENT_DB_MIRROR", None)
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "entries": [
+                            {
+                                "observed_at": datetime.now(timezone.utc).isoformat(),
+                                "component": "distill-session",
+                                "event": "distill_resolution",
+                                "status": "failed",
+                                "attributes": {
+                                    "session_id": "db-bad",
+                                    "verifier_status": "failed",
+                                    "missing_fields": ["section:evidence"],
+                                },
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+
+        with mock.patch.object(event_log.urllib.request, "urlopen", return_value=FakeResponse()):
+            failures = event_log.recent_resolution_failures()
+
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["session_id"], "db-bad")
 
     def test_recent_resolution_failures_filters_resolution_failures(self):
         event_log.append_event("distill-session", "distill_resolution", "ok", session_id="pass")

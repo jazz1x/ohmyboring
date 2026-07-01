@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Append local workflow events and mirror them into the local engine DB."""
+"""Record local workflow events into the engine DB, with a file spool fallback."""
 from __future__ import annotations
 
 import argparse
@@ -9,6 +9,7 @@ import os
 import sys
 import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Any, Optional
 DEFAULT_EVENT_LOG = "~/.cache/oh-my-boring/events.ndjson"
 DEFAULT_RECENT_HOURS = 24
 DEFAULT_SERVICE_NAMESPACE = "oh-my-boring"
+DEFAULT_ENGINE_URL = "http://127.0.0.1:7700"
 
 
 def event_log_path() -> Path:
@@ -26,8 +28,15 @@ def event_log_path() -> Path:
 
 
 def append_event(component: str, event: str, status: str, **fields: Any) -> None:
-    path = event_log_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _event_payload(component, event, status, **fields)
+    db_enabled = _event_sink_url() is not None
+    stored_in_db = _try_store_in_engine(payload)
+    spool_mode = _event_spool_mode(db_enabled)
+    if spool_mode == "always" or (spool_mode == "on_failure" and not stored_in_db):
+        _append_to_spool(payload)
+
+
+def _event_payload(component: str, event: str, status: str, **fields: Any) -> dict[str, Any]:
     normalized = {k: v for k, v in fields.items() if v is not None}
     if "run_id" not in normalized and normalized.get("session_id"):
         normalized["run_id"] = normalized["session_id"]
@@ -40,10 +49,15 @@ def append_event(component: str, event: str, status: str, **fields: Any) -> None
     }
     payload.update(normalized)
     payload["otel"] = _otel_envelope(payload, now)
+    return payload
+
+
+def _append_to_spool(payload: dict[str, Any]) -> None:
+    path = event_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         f.write("\n")
-    _try_mirror_to_engine(payload)
 
 
 def try_append_event(component: str, event: str, status: str, **fields: Any) -> bool:
@@ -116,10 +130,10 @@ def _trace_span_ids(run_key: str, payload: dict[str, Any]) -> tuple[Optional[str
     return (digest[:32], digest[32:48])
 
 
-def _try_mirror_to_engine(payload: dict[str, Any]) -> None:
+def _try_store_in_engine(payload: dict[str, Any]) -> bool:
     url = _event_sink_url()
     if not url:
-        return
+        return False
     timeout = float(os.environ.get("BORING_EVENT_SINK_TIMEOUT") or "0.5")
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -130,20 +144,85 @@ def _try_mirror_to_engine(payload: dict[str, Any]) -> None:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout):
-            return
+            return True
     except (OSError, urllib.error.URLError, urllib.error.HTTPError) as e:
-        print(f"[event-log] DB mirror failed: {e}", file=sys.stderr)
+        print(f"[event-log] DB sink failed: {e}", file=sys.stderr)
+        return False
 
 
 def _event_sink_url() -> Optional[str]:
-    mirror_mode = os.environ.get("BORING_EVENT_DB_MIRROR", "").strip().lower()
-    if mirror_mode in {"0", "false", "no", "off"}:
+    if _event_sink_mode() == "spool":
         return None
     explicit = os.environ.get("BORING_EVENT_SINK_URL")
     if explicit:
         return explicit
-    base = os.environ.get("BORING_URL") or "http://127.0.0.1:7700"
+    base = os.environ.get("BORING_URL") or DEFAULT_ENGINE_URL
     return f"{base.rstrip('/')}/events"
+
+
+def _event_sink_mode() -> str:
+    raw = os.environ.get("BORING_EVENT_SINK", "").strip().lower()
+    if raw in {"db", "spool", "both"}:
+        return raw
+    legacy = os.environ.get("BORING_EVENT_DB_MIRROR", "").strip().lower()
+    if legacy in {"0", "false", "no", "off"}:
+        return "spool"
+    if legacy in {"1", "true", "yes", "on"}:
+        return "both"
+    return "db"
+
+
+def _event_spool_mode(db_enabled: bool) -> str:
+    raw = os.environ.get("BORING_EVENT_SPOOL", "").strip().lower()
+    if raw in {"always", "on_failure", "off"}:
+        return raw
+    if _event_sink_mode() == "both":
+        return "always"
+    if not db_enabled:
+        return "always"
+    return "on_failure"
+
+
+def _fetch_engine_events(
+    limit: int,
+    component: Optional[str] = None,
+    event_name: Optional[str] = None,
+    status: Optional[str] = None,
+) -> Optional[list[dict[str, Any]]]:
+    url = _event_sink_url()
+    if not url:
+        return None
+    params = {
+        "limit": str(limit),
+        "component": component,
+        "event": event_name,
+        "status": status,
+    }
+    query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+    timeout = float(os.environ.get("BORING_EVENT_SINK_TIMEOUT") or "0.5")
+    try:
+        with urllib.request.urlopen(f"{url}?{query}", timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as e:
+        print(f"[event-log] DB read failed: {e}", file=sys.stderr)
+        return None
+    entries = body.get("entries") if isinstance(body, dict) else None
+    if not isinstance(entries, list):
+        return None
+    return [_normalize_engine_event(entry) for entry in reversed(entries) if isinstance(entry, dict)]
+
+
+def _normalize_engine_event(entry: dict[str, Any]) -> dict[str, Any]:
+    event = {}
+    attributes = entry.get("attributes")
+    if isinstance(attributes, dict):
+        event.update(attributes)
+    event.update(entry)
+    if "event_name" in event and "event" not in event:
+        event["event"] = event["event_name"]
+    if "observed_at" in event and "ts" not in event:
+        event["ts"] = event["observed_at"]
+    return event
 
 
 def iter_events() -> list[dict[str, Any]]:
@@ -169,6 +248,9 @@ def recent_events(
     event_name: Optional[str] = None,
     status: Optional[str] = None,
 ) -> list[dict[str, Any]]:
+    engine_events = _fetch_engine_events(limit, component, event_name, status)
+    if engine_events is not None:
+        return engine_events
     events = []
     for item in iter_events():
         if component and item.get("component") != component:
@@ -188,7 +270,10 @@ def recent_resolution_failures(limit: int = 3, hours: Optional[int] = None) -> l
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     latest_by_key: dict[tuple[str, str], tuple[int, dict[str, Any]]] = {}
     anonymous_failures: list[tuple[int, dict[str, Any]]] = []
-    for idx, event in enumerate(iter_events()):
+    events = _fetch_engine_events(1000, event_name="distill_resolution")
+    if events is None:
+        events = iter_events()
+    for idx, event in enumerate(events):
         if event.get("event") != "distill_resolution":
             continue
         ts = _parse_ts(str(event.get("ts") or ""))
@@ -273,7 +358,7 @@ def _format_event(event: dict[str, Any]) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Inspect oh-my-boring local event log")
+    parser = argparse.ArgumentParser(description="Inspect oh-my-boring workflow events")
     parser.add_argument("--recent-resolution-failures", action="store_true")
     parser.add_argument("--record", nargs=3, metavar=("COMPONENT", "EVENT", "STATUS"))
     parser.add_argument("--field", action="append", default=[], type=_parse_field)

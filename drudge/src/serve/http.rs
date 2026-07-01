@@ -414,12 +414,13 @@ pub(crate) async fn handle_query_log(
     Ok(Json(QueryLogResp { entries }))
 }
 
-/// Recent adapter/workflow events mirrored into Postgres. The payload is OpenTelemetry-shaped
+/// Recent adapter/workflow events stored in Postgres. The payload is OpenTelemetry-shaped
 /// (`otel`) while keeping legacy top-level keys for filtering and readability.
 pub(crate) async fn handle_events(
     State(s): State<AppState>,
     Query(params): Query<EventLogReq>,
 ) -> Result<Json<EventLogResp>, AppError> {
+    validate_event_since_hours(params.since_hours)?;
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
     let limit = params.limit.clamp(1, EVENT_LOG_MAX_LIMIT);
     let rows = store
@@ -483,22 +484,13 @@ pub(crate) async fn handle_events(
     Ok(Json(EventLogResp { entries }))
 }
 
-/// Store one event or an `{events: [...]}` batch. The original file journal remains owned by
-/// `agents/shared/event_log.py`; this endpoint is the queryable DB projection.
+/// Store one event or an `{events: [...]}` batch in the local event DB.
 pub(crate) async fn handle_event_ingest(
     State(s): State<AppState>,
     Json(req): Json<Value>,
 ) -> Result<Json<EventIngestResp>, AppError> {
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
-    let events = if let Some(items) = req.get("events").and_then(Value::as_array) {
-        items
-            .iter()
-            .take(EVENT_INGEST_MAX_BATCH)
-            .cloned()
-            .collect::<Vec<_>>()
-    } else {
-        vec![req]
-    };
+    let events = event_batch(req)?;
     let accepted = events.len();
     for event in events {
         store.log_event(&event).await?;
@@ -529,6 +521,26 @@ fn system_time_rfc3339(value: SystemTime) -> String {
     datetime.to_rfc3339()
 }
 
+fn validate_event_since_hours(since_hours: Option<i32>) -> Result<(), AppError> {
+    if since_hours.is_some_and(|hours| hours < 0) {
+        return Err(AppError::bad_request("since_hours must be >= 0"));
+    }
+    Ok(())
+}
+
+fn event_batch(req: Value) -> Result<Vec<Value>, AppError> {
+    if let Some(items) = req.get("events").and_then(Value::as_array) {
+        if items.len() > EVENT_INGEST_MAX_BATCH {
+            return Err(AppError::bad_request(format!(
+                "events batch too large: max {EVENT_INGEST_MAX_BATCH}"
+            )));
+        }
+        Ok(items.clone())
+    } else {
+        Ok(vec![req])
+    }
+}
+
 /// Maintenance compact: VACUUM/ANALYZE + REINDEX + query_log pruning + orphan GC.
 pub(crate) async fn handle_compact(
     State(s): State<AppState>,
@@ -544,4 +556,34 @@ pub(crate) async fn handle_compact(
         gc_concept: summary.report.gc_concept,
         total_ms: summary.total_ms,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use serde_json::json;
+
+    use super::{EVENT_INGEST_MAX_BATCH, event_batch, validate_event_since_hours};
+
+    #[test]
+    fn event_since_hours_rejects_negative_window() {
+        let Err(err) = validate_event_since_hours(Some(-1)) else {
+            panic!("negative since_hours should fail");
+        };
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn event_batch_rejects_oversized_batch_without_truncating() {
+        let events: Vec<_> = (0..=EVENT_INGEST_MAX_BATCH)
+            .map(|i| json!({"event": "x", "i": i}))
+            .collect();
+        let Err(err) = event_batch(json!({"events": events})) else {
+            panic!("oversized batch should fail");
+        };
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
 }

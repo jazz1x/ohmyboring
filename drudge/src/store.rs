@@ -99,7 +99,7 @@ pub struct QueryLogRow {
     pub latency_ms: Option<i32>,
 }
 
-/// One structured workflow event mirrored into Postgres. Shape follows the OpenTelemetry log model
+/// One structured workflow event stored in Postgres. Shape follows the OpenTelemetry log model
 /// while preserving the legacy adapter keys used by readiness (`component`, `event`, `status`, etc.).
 #[derive(Debug)]
 pub struct EventLogRow {
@@ -124,7 +124,7 @@ pub struct EventLogRow {
     pub resource: Value,
 }
 
-/// Read filter for the queryable event-log projection.
+/// Read filter for the queryable event log.
 pub struct EventLogFilter<'a> {
     pub limit: i64,
     pub component: Option<&'a str>,
@@ -1165,10 +1165,10 @@ impl Store {
             .collect())
     }
 
-    /// Mirror adapter/workflow events into the local DB using an OpenTelemetry-shaped log row.
+    /// Store adapter/workflow events in the local DB using an OpenTelemetry-shaped log row.
     ///
-    /// The original NDJSON file remains the append-only journal. This DB row is the queryable projection
-    /// for ops dashboards, HTTP, and MCP.
+    /// The local event DB is the queryable primary sink for ops dashboards, HTTP, and MCP.
+    /// Host adapters may keep an NDJSON fallback spool when the engine is unavailable.
     pub async fn log_event(&self, event: &Value) -> Result<()> {
         let event = redact_json_value(event);
         let otel = event.get("otel").and_then(Value::as_object);

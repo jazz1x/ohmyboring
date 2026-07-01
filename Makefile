@@ -36,7 +36,7 @@ logs: ## engine logs
 agent-logs: ## boring-agent (hermes) logs (MCP connection diagnostics)
 	$(COMPOSE) logs -f boring-agent
 
-events: ## Tail recent local structured workflow events
+events: ## Show recent workflow events (engine DB first, file fallback)
 	@python3 agents/shared/event_log.py --tail --max "$${N:-20}"
 
 models: ## Pull Ollama models (DRUDGE_LLM_MODEL + DRUDGE_EMBED_MODEL, defaults gemma4:12b + bge-m3)

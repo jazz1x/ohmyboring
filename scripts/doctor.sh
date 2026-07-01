@@ -365,7 +365,7 @@ if [ -f "$event_log_probe" ]; then
     if BORING_EVENT_LOG="${BORING_EVENT_LOG:-$HOME/.cache/oh-my-boring/events.ndjson}" python3 "$event_log_probe" --recent-resolution-failures --max 3; then
         ok "no recent resolution quality failures"
     else
-        bad "recent resolution quality failures found — inspect BORING_EVENT_LOG before briefing"; failed_resolution=1
+        bad "recent resolution quality failures found — inspect make events or the BORING_EVENT_LOG fallback before briefing"; failed_resolution=1
     fi
 else
     bad "event log probe not found at $event_log_probe"; failed_resolution=1

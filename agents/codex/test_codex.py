@@ -18,6 +18,9 @@ for _var in (
     "BORING_CONFIG",
     "BORING_HOME",
     "BORING_URL",
+    "BORING_EVENT_SINK",
+    "BORING_EVENT_SPOOL",
+    "BORING_EVENT_DB_MIRROR",
     "BORING_LLM_BASE_URL",
     "BORING_LLM_MODEL",
 ):
@@ -134,7 +137,7 @@ def test_small_raw_parse_short_marks_done():
                 "raw_bytes": 5,
                 "min_raw_bytes_for_retry": 10,
             }
-            with mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}):
+            with mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}):
                 rc, err, mark = _run_main(payload, "too short")
             assert rc == 0
             assert "transcript too short" in err
@@ -205,7 +208,7 @@ def test_codex_distill_clamps_with_ingest_budget():
                 extracted = "START-" + ("x" * 700) + "-END"
                 stderr = io.StringIO()
                 with (
-                    mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
+                    mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
                     mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
                     mock.patch.object(distill.sys, "stderr", stderr),
                     mock.patch.object(distill, "extract", return_value=extracted),
@@ -258,7 +261,7 @@ def test_codex_distill_respects_zero_payload_clamp_override():
                 extracted = "START-" + ("x" * 700) + "-END"
                 stderr = io.StringIO()
                 with (
-                    mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
+                    mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
                     mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
                     mock.patch.object(distill.sys, "stderr", stderr),
                     mock.patch.object(distill, "extract", return_value=extracted),
@@ -442,7 +445,7 @@ def test_collect_noop_run_logs_workflow_fields():
             stdout = io.StringIO()
             with (
                 mock.patch.object(collect, "_source_dir", return_value=str(source)),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.subprocess, "run") as run,
                 mock.patch.object(collect, "DrudgeClient") as client,
@@ -485,7 +488,7 @@ def test_collect_success_with_sync_failure_is_degraded_success():
             stderr = io.StringIO()
             with (
                 mock.patch.object(collect, "_source_dir", return_value=str(source)),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.sys, "stderr", stderr),
                 mock.patch.object(collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
@@ -583,6 +586,7 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
                     {
                         "BORING_VAULT_DIR": str(vault),
                         "BORING_EVENT_LOG": str(event_path),
+                        "BORING_EVENT_SINK": "spool",
                     },
                 ),
                 mock.patch.object(collect.sys, "stdout", stdout),
@@ -666,7 +670,7 @@ def test_status_strict_fails_when_host_worker_missing():
                         "path": "/tmp/com.ohmyboring.codex-ingest.plist",
                     },
                 ),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path)}),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.sys, "stderr", stderr),
             ):
@@ -722,7 +726,7 @@ def test_status_strict_fails_when_hermes_worker_failed():
                         "path": "/tmp/com.ohmyboring.codex-ingest.plist",
                     },
                 ),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(root / "events.ndjson")}),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(root / "events.ndjson"), "BORING_EVENT_SINK": "spool"}),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.sys, "stderr", stderr),
             ):
@@ -792,7 +796,7 @@ def test_status_strict_fails_on_stale_codex_markers():
                         "path": "/tmp/com.ohmyboring.codex-ingest.plist",
                     },
                 ),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(root / "events.ndjson")}),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(root / "events.ndjson"), "BORING_EVENT_SINK": "spool"}),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.sys, "stderr", stderr),
             ):

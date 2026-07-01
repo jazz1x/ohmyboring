@@ -215,7 +215,7 @@ fn mcp_tools_list() -> Value {
         },
         {
             "name": "events",
-            "description": "Read recent local workflow/adapter events mirrored into the DB as OpenTelemetry-shaped log records. \
+            "description": "Read recent local workflow/adapter events stored in the DB as OpenTelemetry-shaped log records. \
                             Use to inspect ingestion, collector, readiness, guard, and resolution-quality timelines without raw transcripts. \
                             Filter by component, event, status, run_id, workflow, or since_hours. Requires the local DB/vector backend.",
             "inputSchema": {
@@ -527,7 +527,7 @@ async fn mcp_corpus_status(s: &AppState) -> Result<Value, (i32, String)> {
 }
 
 /// `events` — recent workflow/adapter events in OpenTelemetry log shape. Vector-only because the
-/// current local DB is the pgvector Store; the NDJSON journal remains the source journal outside DB.
+/// current local event sink is the pgvector Store.
 async fn mcp_events(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
     let limit = args
@@ -560,10 +560,7 @@ async fn mcp_events(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, S
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let since_hours = args
-        .and_then(|a| a.get("since_hours"))
-        .and_then(Value::as_i64)
-        .and_then(|n| i32::try_from(n).ok());
+    let since_hours = mcp_nonnegative_i32(args, "since_hours")?;
     let entries = store
         .recent_events(EventLogFilter {
             limit,
@@ -623,6 +620,19 @@ async fn mcp_events(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, S
         })
         .collect::<Vec<_>>();
     Ok(json!({ "entries": entries }))
+}
+
+fn mcp_nonnegative_i32(args: Option<&Value>, key: &str) -> Result<Option<i32>, (i32, String)> {
+    args.and_then(|a| a.get(key))
+        .and_then(Value::as_i64)
+        .map(|n| {
+            if n < 0 {
+                Err((-32602_i32, format!("{key} must be >= 0")))
+            } else {
+                i32::try_from(n).map_err(|_| (-32602_i32, format!("{key} is too large")))
+            }
+        })
+        .transpose()
 }
 
 /// `claims` — current (non-superseded) claims nearest the query. Pure DATA (embed only). Returns a JSON

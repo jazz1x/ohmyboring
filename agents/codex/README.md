@@ -53,9 +53,10 @@ Session markers live in `~/.cache/boring-distill/codex-<sid>.*` and are shared
 with the rest of the pipeline.
 
 Collector status/run events include `workflow=memory_ingest`, `workflow_node`,
-and `workflow_outcome`. They are appended to the local NDJSON spool and,
-by default, mirrored into the engine DB so HTTP `/events` and MCP `events`
-can show queued, skipped, completed, and retry-visible Codex ingestion states.
+and `workflow_outcome`. They are stored in the engine DB first so HTTP
+`/events` and MCP `events` can show queued, skipped, completed, and
+retry-visible Codex ingestion states. The local NDJSON file is only the
+fallback spool unless `BORING_EVENT_SINK=spool` or `both` is selected.
 
 ## Manual setup
 

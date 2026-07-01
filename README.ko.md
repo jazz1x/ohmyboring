@@ -195,16 +195,18 @@ make readiness
 | `BORING_DISTILL_RESOLUTION` | 적재 해상도 계약: `compact`, `standard`, `evidence`(기본), `forensic`; 검증 실패 시 한 번 보강하고 그래도 실패하면 `remember` 차단 |
 | `DISTILL_CLAMP` | 직접 SessionEnd hook이 로컬 LLM에 보내는 최대 문자 수; 로컬 모델 timeout을 피하기 위해 기본값은 `2000`. Hermes worker offer는 계속 `INGEST_CLAMP`(`4000`)를 사용 |
 | `CODEX_DISTILL_CLAMP` | Codex 세션에서 추출해 distill LLM에 보내는 최대 문자 수; 기본값은 `INGEST_CLAMP`, 그다음 `4000`. 큰 rollout transcript도 Hermes worker 예산 안에서 처리하되 앞/뒤 근거는 보존합니다 |
-| `BORING_EVENT_LOG` | 로컬 NDJSON 작업 흐름 이벤트 스풀; 기본값 `~/.cache/oh-my-boring/events.ndjson` |
-| `BORING_EVENT_DB_MIRROR` | DB 미러링 모드; 기본값은 켜짐이며, NDJSON만 남기려면 `0`/`false`/`off`/`no` |
-| `BORING_EVENT_SINK_URL` | 선택적 DB 미러링 엔드포인트; 기본값은 `$BORING_URL/events` |
+| `BORING_EVENT_LOG` | 로컬 NDJSON fallback 스풀; 기본값 `~/.cache/oh-my-boring/events.ndjson` |
+| `BORING_EVENT_SINK` | 이벤트 sink 모드: `db`(기본), `spool`, `both`. `db`는 엔진 DB에 먼저 쓰고 실패 시에만 스풀 |
+| `BORING_EVENT_SPOOL` | fallback 스풀 정책: `on_failure`(DB 사용 시 기본), `always`, `off` |
+| `BORING_EVENT_SINK_URL` | 선택적 DB 이벤트 엔드포인트; 기본값은 `$BORING_URL/events` |
+| `BORING_EVENT_DB_MIRROR` | 레거시 호환 alias; `0`/`false`/`off`는 `BORING_EVENT_SINK=spool`, `1`/`true`/`on`은 `both` |
 | `BORING_EVENT_RECENT_HOURS` | `make readiness`가 보는 최근 이벤트 범위; 기본값 `24` |
 | `BORING_READINESS_NOTE_MAX_HOURS` | 브리핑 readiness가 허용하는 최신 노트 freshness 범위; 기본값 `48` |
 | `BORING_READINESS_PENDING_TTL` | readiness에서 stale `.pending`으로 보는 임계값; `INGEST_PENDING_TTL`, 그다음 `1800`초를 기본으로 사용 |
 | `BORING_READINESS_RETRY_TTL` | readiness에서 stale `.retry`로 보는 임계값; `INGEST_RETRY_TTL`, 그다음 pending 임계값을 기본으로 사용 |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack assistant |
 
-구조화 이벤트는 distill, collector/worker, `doctor`/`readiness`, `guard`, `eval`에서 기록됩니다. memory-ingest 이벤트에는 Rust 작업 흐름 그래프 계약을 따르는 `workflow=memory_ingest`, `workflow_node`, `workflow_outcome` 필드가 붙습니다. 이벤트는 먼저 로컬 NDJSON 스풀에 append되고, `BORING_EVENT_DB_MIRROR=0`으로 끄지 않는 한 OpenTelemetry 형태의 로그 레코드로 로컬 DB에 미러링됩니다. DB 관점은 HTTP `/events` 또는 MCP `events`로 보고, 엔진이 꺼진 상황까지 포함한 파일 스풀은 `make events`로 봅니다.
+구조화 이벤트는 distill, collector/worker, `doctor`/`readiness`, `guard`, `eval`에서 기록됩니다. memory-ingest 이벤트에는 Rust 작업 흐름 그래프 계약을 따르는 `workflow=memory_ingest`, `workflow_node`, `workflow_outcome` 필드가 붙습니다. 이벤트는 OpenTelemetry 형태의 로그 레코드로 로컬 엔진 DB에 먼저 저장됩니다. NDJSON 파일은 엔진이 내려간 경우의 fallback 스풀이고, `BORING_EVENT_SINK=spool` 또는 `both`를 선택한 경우에만 의도적으로 파일 중심/동시 기록이 됩니다. DB 관점은 HTTP `/events`(`/otel-events` alias도 동일) 또는 MCP `events`로 보고, `make events`는 DB를 먼저 조회하되 실패하면 파일 스풀을 봅니다.
 
 > **임베딩 모델을 바꾸면 벡터 차원이 바뀝니다.** 합성 모델(`llm.model`)은 자유롭게 교체해도 되지만, `llm.embed_model`을 바꾸면 크기가 다른 벡터가 나오므로, `llm.embed_dim`을 맞게 수정하고 **그리고** `make reset`을 실행해야 합니다 — 그러지 않으면 기존 형태의 벡터에 대한 upsert가 실패합니다. 흔한 차원: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
 
@@ -272,7 +274,7 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 | `make hermes-build` | 선택적 hermes-agent 이미지 클론/빌드 |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | 엔진 로그 |
-| `make events [N=20]` | 최근 로컬 구조화 작업 흐름 이벤트 보기 |
+| `make events [N=20]` | 엔진 DB의 최근 작업 흐름 이벤트 보기; 실패 시 로컬 스풀 fallback |
 | `make guard` | fmt + clippy + test + Python py-compile |
 | `make quality` | 릴리즈 수용성 drift 게이트 |
 | `make down` | 컨테이너 중지 |
@@ -421,7 +423,7 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 
 사용 가능한 tools (19개): `recall` · `neighbors` · `claims`(검색) · `ask` · `brief` · `weekly_brief` · `project_status` · `decisions` · `risks` · `next_actions` · `stalled`(생성 — LLM 실행) · `context` · `corpus_status` · `events` · `config_get`(구조화 / introspection) · `remember` · `forget` · `classify_repo` · `sync`(쓰기 / 유지보수).
 
-기본 wiki-first 모드(`BORING_VECTOR=off`)에서는 recency/vector 순서, 그래프, 로컬 DB projection에 의존하는 tool이 pgvector 백엔드를 필요로 하며, `BORING_VECTOR=on`을 설정하기 전까지 JSON-RPC `-32603`을 반환합니다: `neighbors`, `claims`, `corpus_status`, `events`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`. `recall`과 `ask`는 `vault/wiki`를 직접 읽고, `context`는 호출 가능하지만 store가 없으면 빈 claim 카드를 반환합니다. `remember`, `forget`, `sync`, `config_get`, `classify_repo`는 vector 모드가 필요 없습니다.
+기본 wiki-first 모드(`BORING_VECTOR=off`)에서는 recency/vector 순서, 그래프, 로컬 이벤트 DB에 의존하는 tool이 pgvector 백엔드를 필요로 하며, `BORING_VECTOR=on`을 설정하기 전까지 JSON-RPC `-32603`을 반환합니다: `neighbors`, `claims`, `corpus_status`, `events`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`. `recall`과 `ask`는 `vault/wiki`를 직접 읽고, `context`는 호출 가능하지만 store가 없으면 빈 claim 카드를 반환합니다. `remember`, `forget`, `sync`, `config_get`, `classify_repo`는 vector 모드가 필요 없습니다.
 
 - `next_actions` *(`BORING_VECTOR=on` 필요)* — 다음 행동 레지스터: 최근 `next` claim과 활성 `blocked` claim을 짧은 할 일/차단 목록으로 요약합니다. 프로젝트 필터 optional.
 - `stalled` *(`BORING_VECTOR=on` 필요)* — 정체 레지스터: `older_than_days`(기본 7)보다 오래된 `next`, `blocked` claim을 보여줍니다.
@@ -430,7 +432,7 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 - `neighbors` *(`BORING_VECTOR=on` 필요)* — 토픽에서 출발하는 그래프 순회: 쿼리를 임베딩해 가장 가까운 노트 하나를 잡고, 그 노트의 1-hop 라벨을 반환합니다(`{hit, graph_neighbors, semantic_neighbors}` JSON). `hit`은 매칭된 노트 경로, `graph_neighbors`는 그 노트의 project/topic 라벨, `semantic_neighbors`는 공유 tool/concept 라벨이며 — 노트 경로가 아니라 평탄한 문자열입니다.
 - `claims` *(`BORING_VECTOR=on` 필요)* — 쿼리 근처의 현재(미대체) `{subject, predicate, value}` 결정 top-k.
 - `corpus_status` *(`BORING_VECTOR=on` 필요)* — KB 상태 스냅샷(파일/청크 수, origin/kind/project별, 오염도, graph/semantic 노드+엣지).
-- `events` *(`BORING_VECTOR=on` 필요)* — DB에 OpenTelemetry 형태로 미러링된 최근 workflow/adapter 이벤트를 반환합니다. component, event, status, run_id, workflow, since_hours로 필터링할 수 있습니다.
+- `events` *(`BORING_VECTOR=on` 필요)* — DB에 OpenTelemetry 형태로 저장된 최근 workflow/adapter 이벤트를 반환합니다. component, event, status, run_id, workflow, since_hours로 필터링할 수 있습니다.
 - `ask` / `brief` / `weekly_brief` / `project_status` / `decisions` / `risks` / `next_actions` / `stalled` — LLM을 실행하는 tool: `ask`는 출처를 인용해 질문에 답하고(wiki-first 모드에서 동작), 나머지는 recency/claim 레지스터이며 `BORING_VECTOR=on`이 필요합니다.
 - `forget` — wiki id나 정확한 제목으로 노트를 삭제합니다. wiki 파일을 제거하고, vector 모드에서는 임베딩·그래프 엣지·claim도 함께 정리합니다.
 
@@ -500,7 +502,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | 내일 아침 브리핑을 믿어도 되나? | `make readiness` — strict 게이트; 훅/모델/컨테이너/적재 finding이 모두 통과해야 함 |
 | `make readiness`가 stale marker를 보고함 | `~/.cache/boring-distill`을 확인하세요. 오래된 `.pending`, `.retry`, `.dead` marker는 자율 적재가 멈췄거나 조정이 필요하다는 뜻이므로 예약 브리핑을 믿기 전에 처리해야 합니다 |
 | `make readiness`가 최신 노트 stale을 보고함 | 브리핑 결과에 의존하기 전에 적재를 실행하거나 확인하세요. 브리핑 윈도우를 의도적으로 길게 잡을 때만 `BORING_READINESS_NOTE_MAX_HOURS`를 늘립니다 |
-| 가장 최근에 뭐가 실패했나? | `make events` — raw transcript 없이 최근 로컬 작업 흐름 타임라인 확인 |
+| 가장 최근에 뭐가 실패했나? | `make events` — raw transcript 없이 최근 DB 작업 흐름 타임라인 확인 |
 
 ---
 

@@ -91,13 +91,16 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
     def setUp(self):
         self.old_resolution = os.environ.get("BORING_DISTILL_RESOLUTION")
         self.old_event_log = os.environ.get("BORING_EVENT_LOG")
+        self.old_event_sink = os.environ.get("BORING_EVENT_SINK")
         self.tmp = tempfile.TemporaryDirectory()
         os.environ["BORING_DISTILL_RESOLUTION"] = "evidence"
         os.environ["BORING_EVENT_LOG"] = os.path.join(self.tmp.name, "events.ndjson")
+        os.environ["BORING_EVENT_SINK"] = "spool"
 
     def tearDown(self):
         _restore_env("BORING_DISTILL_RESOLUTION", self.old_resolution)
         _restore_env("BORING_EVENT_LOG", self.old_event_log)
+        _restore_env("BORING_EVENT_SINK", self.old_event_sink)
         self.tmp.cleanup()
 
     def test_prompt_contains_resolution_contract(self):
