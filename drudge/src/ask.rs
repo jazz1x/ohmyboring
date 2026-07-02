@@ -252,8 +252,10 @@ For each project, use short bullets labelled Done / Next / Blocked. \
 If decision or risk claims are present, add labelled Decisions / Risks bullets under that project. \
 If stalled claims are present, add labelled Stalled bullets for items that have not moved in over 7 days. \
 Each bullet must be one sentence and under 140 characters when possible; split rich updates into multiple bullets instead of a paragraph. \
-Omit empty sections; never write placeholders such as 'Blocked: -', 'None', or '없음'. \
+Omit empty sections; never write placeholders such as 'Blocked: -', 'Next: -', 'None', or '없음'. \
 Put the most important recent project first. Each project must appear only once; merge all updates for the same project under one heading. \
+If a project has clearly distinct workstreams, split them into sub-project headings like '## kb-rag-bot/otel'; keep each sub-project focused on one topic. \
+Focus the briefing on Next / Blocked / Risks / Decisions; keep Done bullets concise and few. \
 Do not repeat the same bullet text. Straight to the body.";
 
 /// Post-process a briefing answer so each project appears once and duplicate
@@ -262,6 +264,7 @@ Do not repeat the same bullet text. Straight to the body.";
 fn coalesce_brief_answer(answer: &str) -> String {
     let mut projects: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut current_project: Option<String> = None;
+    let mut pending_label = String::new();
 
     for raw in answer.lines() {
         let line = raw.trim();
@@ -274,7 +277,16 @@ fn coalesce_brief_answer(answer: &str) -> String {
                 current_project = Some(name.clone());
                 projects.entry(name).or_default();
             }
+            pending_label.clear();
             continue;
+        }
+        // Sub-heading like "### Done" sets the pending label.
+        if line.starts_with('#') {
+            let h = line.trim_start_matches('#').trim();
+            if is_brief_label(h) {
+                h.clone_into(&mut pending_label);
+                continue;
+            }
         }
         if let Some(proj) = current_project.as_ref()
             && let Some(body) = line.strip_prefix("- ")
@@ -291,8 +303,15 @@ fn coalesce_brief_answer(answer: &str) -> String {
             } else {
                 (String::new(), body.to_owned())
             };
-            if let Some(list) = projects.get_mut(proj) {
-                list.push((label, text));
+            let effective_label = if label.is_empty() {
+                pending_label.clone()
+            } else {
+                label
+            };
+            if let Some(list) = projects.get_mut(proj)
+                && !is_placeholder_bullet(&effective_label, &text)
+            {
+                list.push((effective_label, text));
             }
         }
     }
@@ -356,6 +375,17 @@ fn is_brief_label(label: &str) -> bool {
     matches!(
         label,
         "Done" | "Next" | "Blocked" | "Decisions" | "Risks" | "Stalled"
+    )
+}
+
+fn is_placeholder_bullet(label: &str, text: &str) -> bool {
+    if label.is_empty() {
+        return false;
+    }
+    let t = text.trim();
+    matches!(
+        t,
+        "-" | "—" | "~" | "..." | "…" | "none" | "None" | "N/A" | "n/a" | "없음" | "해당 없음"
     )
 }
 
@@ -1000,5 +1030,17 @@ mod tests {
         assert_eq!(out.matches("PR #12 merged").count(), 1);
         assert!(out.contains("- Blocked: token issue"));
         assert!(out.contains("## qa-tests"));
+    }
+
+    #[test]
+    fn coalesce_brief_drops_placeholder_bullets() {
+        use super::coalesce_brief_answer;
+        let raw =
+            "## kb-rag-bot\n- Done: gate implemented\n- Blocked: -\n- Next: none\n- Risks: 없음";
+        let out = coalesce_brief_answer(raw);
+        assert!(out.contains("gate implemented"));
+        assert!(!out.contains("Blocked: -"));
+        assert!(!out.contains("Next: none"));
+        assert!(!out.contains("Risks: 없음"));
     }
 }

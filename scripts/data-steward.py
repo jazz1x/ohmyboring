@@ -309,7 +309,7 @@ def _build_report(wiki_dir: Path, notes: list[dict]) -> dict:
             note_issues[n["path"].name].append(
                 {"kind": "project-variant", "old": proj, "suggested": canonical}
             )
-        for bad, good, _ in typos:
+        for bad, good, *_ in typos:
             if proj == bad:
                 note_issues[n["path"].name].append(
                     {"kind": "project-typo", "old": proj, "suggested": good}
