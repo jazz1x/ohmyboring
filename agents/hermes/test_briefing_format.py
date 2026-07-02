@@ -147,8 +147,42 @@ def test_slack_mrkdwn_dedups_duplicate_bullets_across_project_sections():
     assert "🚨 1" in body
 
 
+def test_slack_mrkdwn_filters_placeholders_and_noise():
+    slack_briefing = load_module("slack_briefing_test4", ROOT / "slack_briefing.py")
+
+    answer = """## kb-rag-bot
+- Done: 게이트 4단계 구현
+- Next: 다음 지시 기다림
+- Blocked: -
+- Risks: 없음
+- Decisions: 출처 강등 처리
+"""
+    body = slack_briefing.render_body_mrkdwn(answer)
+    # Vacuous bullets dropped.
+    assert "다음 지시 기다림" not in body
+    assert "Blocked: -" not in body
+    assert "없음" not in body
+    # Real bullets preserved.
+    assert "게이트 4단계 구현" in body
+    assert "출처 강등 처리" in body
+
+
+def test_slack_mrkdwn_caps_done_items():
+    slack_briefing = load_module("slack_briefing_test5", ROOT / "slack_briefing.py")
+
+    answer = "## kb-rag-bot\n" + "\n".join(
+        f"- Done: task {i}" for i in range(10)
+    )
+    body = slack_briefing.render_body_mrkdwn(answer)
+    # Only first 3 Done items shown; rest collapsed.
+    assert body.count("task") == 3
+    assert "외 7개 항목" in body
+
+
 if __name__ == "__main__":
     test_slack_mrkdwn_uses_flat_readable_bullets()
     test_slack_mrkdwn_handles_adversarial_inputs()
     test_slack_mrkdwn_dedups_duplicate_bullets_across_project_sections()
+    test_slack_mrkdwn_filters_placeholders_and_noise()
+    test_slack_mrkdwn_caps_done_items()
     print("ok - hermes briefing Slack formatting")

@@ -9,14 +9,64 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 
-EMPTY_VALUES = {"", "-", "없음", "없습니다", "none", "None", "N/A", "n/a"}
+EMPTY_VALUES = {
+    "",
+    "-",
+    "—",
+    "~",
+    "...",
+    "…",
+    "없음",
+    "없습니다",
+    "해당 없음",
+    "해당없음",
+    "none",
+    "None",
+    "N/A",
+    "n/a",
+    "na",
+    "null",
+    "nil",
+    "tbd",
+    "to be determined",
+    "to be decided",
+    "to be continued",
+    "추후 진행 예정",
+    "추후 예정",
+    "추후 결정",
+    "추후 협의",
+    "추후",
+    "later",
+    "pending",
+    "보류",
+    "待定",
+    "待ち",
+}
+# Phrases that add zero signal to a briefing and should be dropped entirely.
+TEMPLATE_BLACKLIST = [
+    "다음 지시 기다림",
+    "다음 지시를 기다림",
+    "다음 지시를 기다리는 중",
+    "추후 지시 기다림",
+    "추후 지시를 기다림",
+    "지시 기다림",
+    "지시를 기다림",
+    "waiting for instructions",
+    "awaiting instructions",
+    "wait for next instruction",
+    "waiting for next steps",
+    "to be continued",
+]
 SOURCE_LIMIT = 5
 PROJECT_LIMIT = 6
 ITEM_LIMIT = 5
+DONE_ITEM_LIMIT = 3  # Done is historical context; keep it short.
 BLOCK_PROJECT_LIMIT = 5
 BLOCK_ITEM_LIMIT = 4
 
@@ -77,8 +127,26 @@ class BriefDocument:
     projects: list[BriefProject] = field(default_factory=list)
 
 
+_VAULT_DIR = Path(
+    os.environ.get("OMB_VAULT") or Path(__file__).resolve().parents[2] / "vault"
+)
+
+
 def source_label(source: object) -> str:
-    return os.path.basename(str(source)) or str(source)
+    name = os.path.basename(str(source)) or str(source)
+    if not name.endswith(".md"):
+        return name
+    wiki_path = _VAULT_DIR / "wiki" / name
+    try:
+        head = wiki_path.read_text(encoding="utf-8", errors="ignore")[:2048]
+        m = re.search(r"^title:\s*(.+)$", head, re.MULTILINE)
+        if m:
+            title = m.group(1).strip().strip('"').strip("'")
+            if title:
+                return f"{title} ({name})"
+    except Exception:
+        pass
+    return name
 
 
 def render_message_mrkdwn(
@@ -142,10 +210,11 @@ def render_body_mrkdwn(answer: str) -> str:
         title = SECTION_TITLE[label]
         counts.append(f"{emoji} {len(entries)}")
         lines.append(f"{emoji} *{title}*")
-        for project_name, item in entries[:ITEM_LIMIT]:
+        limit = DONE_ITEM_LIMIT if label == "Done" else ITEM_LIMIT
+        for project_name, item in entries[:limit]:
             text = _slack_inline(item.text)
             lines.append(f"• {_slack_inline(project_name)} — {text}")
-        omitted = max(0, len(entries) - ITEM_LIMIT)
+        omitted = max(0, len(entries) - limit)
         if omitted:
             lines.append(f"• _외 {omitted}개 항목_")
         lines.append("")
@@ -210,9 +279,10 @@ def render_blocks_payload(
             blocks.append({"type": "divider"})
             blocks.append(_section(f"{emoji} *{title_text}*"))
             item_lines: list[str] = []
-            for project_name, item in entries[:BLOCK_ITEM_LIMIT]:
+            block_limit = DONE_ITEM_LIMIT if label == "Done" else BLOCK_ITEM_LIMIT
+            for project_name, item in entries[:block_limit]:
                 item_lines.append(f"• {project_name} — {item.text}")
-            omitted = max(0, len(entries) - BLOCK_ITEM_LIMIT)
+            omitted = max(0, len(entries) - block_limit)
             if omitted:
                 item_lines.append(f"• _외 {omitted}개 항목_")
             if item_lines:
@@ -248,11 +318,16 @@ def parse_brief(answer: str) -> BriefDocument:
             continue
         if stripped.startswith("#"):
             heading = stripped.lstrip("#").strip()
-            if heading and heading != previous_heading:
-                current = BriefProject(heading)
-                doc.projects.append(current)
-                previous_heading = heading
-            pending_label = ""
+            plain_heading = _plain_label(heading)
+            if plain_heading in LABELS:
+                # Sub-heading like "### Done" sets the pending label.
+                pending_label = canonical_label(plain_heading)
+            else:
+                if heading and heading != previous_heading:
+                    current = BriefProject(heading)
+                    doc.projects.append(current)
+                    previous_heading = heading
+                pending_label = ""
             continue
 
         plain = _plain_label(stripped)
@@ -284,14 +359,14 @@ def parse_item(text: str, pending_label: str = "") -> BriefItem | None:
             prefix = f"{label}{sep}"
             if normalized.startswith(prefix):
                 rest = normalized[len(prefix) :].strip()
-                if rest in EMPTY_VALUES:
+                if rest in EMPTY_VALUES or _is_template_noise(rest):
                     return None
                 return BriefItem(canonical_label(label), rest)
     if pending_label:
-        if normalized in EMPTY_VALUES:
+        if normalized in EMPTY_VALUES or _is_template_noise(normalized):
             return None
         return BriefItem(pending_label, normalized)
-    if normalized in EMPTY_VALUES:
+    if normalized in EMPTY_VALUES or _is_template_noise(normalized):
         return None
     return BriefItem("", normalized)
 
@@ -339,6 +414,12 @@ def _compact_text(text: str) -> str:
 def _dedup_key(text: str) -> str:
     """Normalize item text so near-duplicate bullets collapse to one entry."""
     return " ".join(text.lower().split())
+
+
+def _is_template_noise(text: str) -> bool:
+    """Return True for vacuous 'waiting for instructions' style bullets."""
+    lowered = text.lower().strip(" .·")
+    return any(noise.lower() in lowered for noise in TEMPLATE_BLACKLIST)
 
 
 def _section(text: str) -> dict[str, Any]:
