@@ -27,7 +27,7 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agents", "shared"))
 
 import verdict_core  # noqa: E402
-from verdict_core import collect, partition_at_repair, unreported  # noqa: E402
+from verdict_core import collect, coverage, partition_at_repair, unreported  # noqa: E402
 
 DEFAULT_URL = os.environ.get("BORING_URL") or "http://127.0.0.1:7700"
 
@@ -40,6 +40,32 @@ def fetch_events(base_url, limit):
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         print(f"[uptake-verdict] engine unreachable at {url}: {exc}", file=sys.stderr)
         return None
+
+
+def session_counts(rows, since, until):
+    """Sessions distilled and sessions scored inside the window, for §2's coverage clause.
+
+    Reads the same `/events` feed the verdict already fetches. The automated share is not counted
+    here: this file cannot see a transcript, and guessing from an event would be inventing the
+    number that decides whether a verdict is allowed. The caller that can classify passes it in;
+    a caller that cannot gets the raw ratio and the contract's stricter reading of it.
+    """
+    distilled, scored = set(), set()
+    for row in rows or []:
+        observed = (row.get("observed_at") or "")[:10]
+        if since and observed < since:
+            continue
+        if until and observed > until:
+            continue
+        sid = row.get("session_id") or (row.get("attributes") or {}).get("session_id")
+        if not sid:
+            continue
+        name = row.get("event")
+        if name == "distill_resolution":
+            distilled.add(sid)
+        elif name == "injection_uptake":
+            scored.add(sid)
+    return len(distilled), len(scored)
 
 
 #: Exit codes for `--midpoint`. Distinct on purpose: four different absences read as "0 sessions"
@@ -95,6 +121,25 @@ def _midpoint(per_agent, skipped_old, today=None):
         )
         return MIDPOINT_SHORT
     return MIDPOINT_OK
+
+
+def _coverage_payload(rows, since, until):
+    """The coverage clause as data: the ratio, its denominator, and whether §2 allows a verdict."""
+    distilled, scored = session_counts(rows, since, until)
+    ratio, eligible, ok = coverage(distilled, scored)
+    return {
+        "distilled_sessions": distilled,
+        "scored_sessions": scored,
+        "eligible": eligible,
+        "ratio": None if ratio is None else round(ratio, 4),
+        "clears_floor": ok,
+        # What the denominator is, said out loud. This script reads events, not transcripts, so it
+        # cannot tell a person's session from a tool reviewing a diff -- and on 2026-09-07 that
+        # distinction moved the ratio from 14% to 83% (§8 D8). A reader who does not know which
+        # population a coverage number describes cannot use it, and a field named
+        # `automated_excluded: 0` would have read as "we checked, there were none".
+        "denominator": "all_distilled_sessions",
+    }
 
 
 def main(argv=None):
@@ -233,6 +278,11 @@ def main(argv=None):
             # it "3 sessions" reads as what we sent rather than what we saw.
             "unreported": {"sessions": lost_sessions, "prompts": lost_rows},
             "skipped_pre_counter": skipped_old,
+            # §2 requires coverage beside the rate: below half, the number stops being a verdict
+            # and becomes an instrument investigation. Reported raw here because this script
+            # cannot read transcripts — the automated share that made the raw ratio read 14%
+            # against 83% for people (§8 D8) has to come from a caller that can classify.
+            "coverage": _coverage_payload(rows, args.since, verdict_core.WINDOW_UNTIL),
         }
         print(json.dumps(payload, ensure_ascii=False))
         return 0
