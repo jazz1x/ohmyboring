@@ -246,6 +246,58 @@ def field(row, key):
         return 0
 
 
+#: §2 requires the verdict to report coverage beside it: scored sessions over sessions distilled
+#: in the window. Below this the contract says the number stops being a verdict and becomes an
+#: instrument investigation, because "x% of what we measured" and "x% of what we sent" are
+#: different sentences.
+COVERAGE_FLOOR = 0.5
+
+
+def coverage(distilled_sessions, scored_sessions, automated_sessions=0, unclassified_sessions=0):
+    """Scored share of the sessions this channel could have reached, and whether it clears §2.
+
+    `automated_sessions` comes out of the denominator. A tool that opens a session to review a
+    diff receives injections it has no occasion to use, and on 2026-09-07 those were 215 of the
+    257 sessions distilled inside the window — counting them made coverage read 14% when against
+    people it was 90%. The instrument was not leaking; the denominator was not people. Passing 0
+    keeps the raw ratio, which is what a caller that cannot classify should report.
+
+    `unclassified_sessions` stays in. A session whose transcript could not be read might be a
+    person's, and dropping it would let the denominator shrink every time the classifier fails --
+    which is the direction that flatters coverage. Only sessions positively identified as
+    automated come out.
+
+    Returns `(ratio, eligible, ok)`. `ratio` is None when nothing was eligible: no sessions is not
+    zero coverage, and dividing anyway would report the emptiest possible sample as the worst
+    possible result.
+    """
+    _ = unclassified_sessions  # named to make the choice explicit; deliberately not subtracted
+    eligible = max(0, int(distilled_sessions) - int(automated_sessions))
+    if eligible <= 0:
+        return None, 0, False
+    ratio = int(scored_sessions) / eligible
+    return ratio, eligible, ratio >= COVERAGE_FLOOR
+
+
+#: §2's instrument self-check: score each transcript against *another* session's ledger hits. The
+#: rate that comes back is what coincidence alone produces on this corpus, and if it reaches the
+#: treatment rate the instrument is measuring topic overlap rather than use. Measured 0.2% against
+#: a per-hit treatment rate of 3.8% on 2026-09-07.
+SELF_CHECK_MAX_RATIO = 0.5
+
+
+def self_check_verdict(cross_rate, treatment_rate):
+    """Whether the cross-session rate leaves room for the treatment rate to mean anything.
+
+    Expressed as a fraction of the treatment rate rather than an absolute: a corpus whose notes
+    share more vocabulary raises both numbers together, and the question §2 asks is about the
+    distance between them.
+    """
+    if treatment_rate is None or treatment_rate <= 0:
+        return None
+    return (cross_rate / treatment_rate) <= SELF_CHECK_MAX_RATIO
+
+
 def collect(rows, since=None, agent=None):
     """Fold uptake events into per-agent totals, skipping rows the instrument predates.
 

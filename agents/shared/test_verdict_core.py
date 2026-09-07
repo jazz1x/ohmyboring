@@ -226,6 +226,53 @@ def test_the_boundary_is_the_repair_commit_not_a_chosen_date():
     assert V._instant(V.LEDGER_REPAIR_AT) is not None
 
 
+def test_coverage_takes_automated_runs_out_but_keeps_what_it_could_not_read():
+    """§2 turns the verdict into an instrument investigation below half coverage.
+
+    Measured 2026-09-07: 257 sessions distilled inside the window, 215 of them the security-review
+    tool running itself. Counting those made coverage read 14% -- under the floor, so the contract
+    would have refused a verdict -- when against people it was 83%. The instrument was not
+    leaking; the denominator was not people.
+    """
+    raw, eligible, ok = V.coverage(257, 36)
+    assert eligible == 257 and not ok, (raw, eligible, ok)
+    assert 0.13 < raw < 0.15, raw
+
+    ratio, eligible, ok = V.coverage(257, 35, automated_sessions=215)
+    assert eligible == 42, eligible
+    assert ok and 0.82 < ratio < 0.84, (ratio, ok)
+
+    # A transcript that could not be read might be a person's. Subtracting it would let the
+    # denominator shrink whenever the classifier fails, which is the direction that flatters
+    # coverage -- so it stays in.
+    with_unknown = V.coverage(257, 35, automated_sessions=215, unclassified_sessions=3)
+    assert with_unknown == (ratio, eligible, ok), with_unknown
+
+
+def test_coverage_reports_no_sample_rather_than_zero():
+    """An empty window is not the worst possible coverage; it is no measurement at all."""
+    ratio, eligible, ok = V.coverage(0, 0)
+    assert ratio is None and eligible == 0 and not ok
+    # Every session automated is the same case: nothing eligible, so nothing to divide.
+    assert V.coverage(10, 0, automated_sessions=10)[0] is None
+
+
+def test_the_self_check_is_measured_against_the_treatment_rate_not_a_constant():
+    """§2's cross-session check asks how far chance sits from the treatment rate.
+
+    A corpus whose notes share more vocabulary raises both numbers together, so an absolute
+    ceiling would fail on wording rather than on validity. Live on 2026-09-07: 0.2% cross-session
+    against 3.8% per-hit treatment.
+    """
+    assert V.self_check_verdict(0.002, 0.038) is True
+    # Chance at three quarters of the treatment rate leaves nothing for the treatment to mean.
+    assert V.self_check_verdict(0.03, 0.038) is False
+    # No treatment rate is not a passing self-check; it is no answer.
+    assert V.self_check_verdict(0.002, 0) is None
+    assert V.self_check_verdict(0.002, None) is None
+
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
