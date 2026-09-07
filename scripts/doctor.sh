@@ -235,6 +235,15 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$BORING_URL/health" 2>/dev/n
             warn "cannot read HEAD at $BORING_HOME — drift not checked (engine is running ${running_sha%%????????*}…)"
         elif [ "$running_sha" = "$head_sha" ]; then
             ok "engine runs the checked-out commit ($(printf '%.8s' "$running_sha"))"
+        elif [ -z "$(git -C "$BORING_HOME" diff --name-only "$running_sha" HEAD -- drudge/ 2>/dev/null)" ] \
+             && git -C "$BORING_HOME" cat-file -e "$running_sha^{commit}" 2>/dev/null; then
+            # The image is built from `drudge/`. Commits that touch only Python, hooks or docs
+            # cannot make it stale, and calling them drift is how a failing line stops being read
+            # — the same way the warning this check replaced stopped being read. Seven such
+            # commits on 2026-09-07 had this reporting a stale engine with no Rust changed.
+            # The guard is `cat-file -e`: an unknown sha means the comparison could not be made,
+            # and "could not check" must fall through to the failure below, never to an ok.
+            ok "engine matches the checkout for drudge/ (image $(printf '%.8s' "$running_sha"), HEAD $(printf '%.8s' "$head_sha"); later commits touch no Rust)"
         else
             # Was a warning until 2026-08-25, and the warning did not work: #221 shipped the
             # only instrument that can measure injection precision, sat merged-but-not-running,
