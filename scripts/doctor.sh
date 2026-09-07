@@ -267,8 +267,19 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$BORING_URL/health" 2>/dev/n
                 "$head_sha") ok "host CLI built from the checked-out commit ($(printf '%.8s' "$host_sha"))" ;;
                 unstamped|"") warn "host CLI reports no build stamp — rebuild with 'cargo build --release' to make its drift detectable" ;;
                 *)
-                    bad "HOST CLI DRIFT — $host_cli was built from $(printf '%.8s' "$host_sha"), checkout is at $(printf '%.8s' "$head_sha"). Daily code-sync runs that older binary."
-                    failed_engine=1
+                    # Same blind spot the engine check had until #290: this binary is built from
+                    # `drudge/`, so a commit touching only Python, hooks or docs cannot age it.
+                    # Fixing one of the two and not the other is how one value in two places
+                    # goes wrong again — the very pattern §8 D8 names. `cat-file -e` guards the
+                    # comparison: an unknown sha means it could not be made, and that falls
+                    # through to the failure rather than to an ok.
+                    if [ -z "$(git -C "$BORING_HOME" diff --name-only "$host_sha" HEAD -- drudge/ 2>/dev/null)" ] \
+                       && git -C "$BORING_HOME" cat-file -e "$host_sha^{commit}" 2>/dev/null; then
+                        ok "host CLI matches the checkout for drudge/ (binary $(printf '%.8s' "$host_sha"), HEAD $(printf '%.8s' "$head_sha"); later commits touch no Rust)"
+                    else
+                        bad "HOST CLI DRIFT — $host_cli was built from $(printf '%.8s' "$host_sha"), checkout is at $(printf '%.8s' "$head_sha"). Daily code-sync runs that older binary."
+                        failed_engine=1
+                    fi
                     ;;
             esac
         fi
