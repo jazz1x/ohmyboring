@@ -328,20 +328,52 @@ def self_check_verdict(cross_rate, treatment_rate):
     return (cross_rate / treatment_rate) <= SELF_CHECK_MAX_RATIO
 
 
-def collect(rows, since=None, agent=None):
+def window_day(observed_at):
+    """The window day an event falls on, on the owner's calendar.
+
+    `observed_at` is RFC3339 UTC, and slicing its first ten characters buckets by UTC day. The
+    window's dates are the owner's (`WINDOW_TZ`, UTC+09:00) — §2 registered them that way — so the
+    two disagree for nine hours out of every twenty-four. Measured 2026-09-08: five uptake events
+    sit on different days under the two readings, four of them at the window's opening boundary,
+    where the disagreement decides whether they are in the sample at all.
+
+    Returns the raw ten-character prefix when the stamp cannot be parsed. That keeps an
+    unparseable row in whatever bucket it was already in rather than silently dropping it — a
+    row that vanishes because its clock is odd is worse than one filed a day off.
+    """
+    stamp = (observed_at or "").strip()
+    if not stamp:
+        return ""
+    try:
+        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return stamp[:10]
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(WINDOW_TZ).date().isoformat()
+
+
+def collect(rows, since=None, agent=None, until=None):
     """Fold uptake events into per-agent totals, skipping rows the instrument predates.
 
     A session logged before `used_control_prompts` existed reports 0 for it, which would read as
     a zero chance rate rather than as a missing measurement — so those rows are dropped, and the
     count of what was dropped is returned rather than hidden.
+
+    `until` closes the window. Without it this had a floor and no ceiling, so `peek` (which filters
+    to the window itself) and `uptake-verdict` (which did not) would read the same ledger and count
+    different samples the moment the window closes — the pre-registered dates would stop meaning
+    anything on one of the two surfaces on 09-15.
     """
     per_agent = defaultdict(lambda: defaultdict(int))
     skipped_old = 0
     for row in rows:
         if row.get("event") != "injection_uptake":
             continue
-        observed = row.get("observed_at") or ""
-        if since and observed[:10] < since:
+        observed = window_day(row.get("observed_at"))
+        if since and observed < since:
+            continue
+        if until and observed > until:
             continue
         who = row.get("agent") or (row.get("attributes") or {}).get("agent") or "unknown"
         if agent and who != agent:
