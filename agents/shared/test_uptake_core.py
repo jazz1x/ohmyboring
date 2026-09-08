@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for uptake_core.py — above all, that an injection cannot count as its own uptake."""
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -369,6 +370,58 @@ def test_the_cutoff_outlives_the_longest_session_and_still_expires():
         assert uptake_core.load_records("abandoned", path) == [], (
             "expiry must still happen — an unbounded ledger is the other failure"
         )
+
+
+def test_cross_session_scoring_pairs_every_session_with_one_it_never_saw():
+    """§2's self-check: hits a session never received must not turn up in its answer.
+
+    The sensitivity probe asks whether the detector can see a use; this asks whether it sees uses
+    that are not there. Both pairs come out of one pass over the same sessions, because the bar is
+    the cross rate *relative to* the treatment rate and a treatment rate from a different set of
+    sessions would not be that comparison.
+    """
+    import tempfile
+
+    ledger = os.path.join(tempfile.mkdtemp(), "inj.jsonl")
+    phrase_a = "판정 원장에 테스트가 쓸 수 없다 라는 조항이"
+    phrase_b = "관측창이 대상보다 짧다는 것은 결측이 아니라"
+    with open(ledger, "w", encoding="utf-8") as handle:
+        for sid, phrase in (("a-session", phrase_a), ("b-session", phrase_b)):
+            handle.write(json.dumps({
+                "session_id": sid, "ts": 1,
+                "prompt_words": ["질문"],
+                "hits": [{"src": f"{sid}.md", "phrases": [phrase]}],
+                "controls": [],
+            }, ensure_ascii=False) + "\n")
+
+    # Each transcript echoes its OWN phrase and nothing else.
+    def transcript_for(sid):
+        own = phrase_a if sid == "a-session" else phrase_b
+        return f"[user] 질문\n[assistant] {own}"
+
+    (cross_used, cross_total), (own_used, own_total) = uptake_core.cross_session_rate(
+        transcript_for, ledger
+    )
+    assert cross_total == 2 and own_total == 2, (cross_total, own_total)
+    assert cross_used == 0, "a phrase the session never received was counted as used"
+    assert own_used == 2, "the same scorer must find the phrase each session did receive"
+
+
+def test_the_self_check_cannot_be_run_on_a_ledger_with_nothing_to_pair():
+    """One session has no other session to be scored against, and that is not a clean result."""
+    import tempfile
+
+    ledger = os.path.join(tempfile.mkdtemp(), "inj.jsonl")
+    with open(ledger, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "session_id": "only", "ts": 1, "prompt_words": [],
+            "hits": [{"src": "x.md", "phrases": ["아무 문구"]}], "controls": [],
+        }, ensure_ascii=False) + "\n")
+
+    assert uptake_core.cross_session_rate(lambda _s: "x", ledger) == ((0, 0), (0, 0))
+    # A path that cannot be read is the same answer, not a pass.
+    assert uptake_core.cross_session_rate(lambda _s: "x", "/nonexistent") == ((0, 0), (0, 0))
+
 
 
 if __name__ == "__main__":

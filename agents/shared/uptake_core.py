@@ -500,6 +500,70 @@ def _probe_main(rest):
     return 1 if ok is False else 0
 
 
+def cross_session_rate(transcript_for, path=None, limit=12):
+    """Per-hit uptake when each transcript is scored against *another* session's ledger hits.
+
+    §2's instrument self-check. The sensitivity probe answers "can this detector see a use at
+    all"; this answers the opposite question — "does it see uses that are not there". A phrase
+    from a note that was never injected into this session should not turn up in its answer, so
+    whatever rate comes back is what coincidence alone produces on this corpus. If it reaches the
+    treatment rate, the measure is reading topic overlap rather than use.
+
+    `transcript_for(session_id)` is passed in rather than read here: this module knows the ledger,
+    not where transcripts live, and wiring the two together in one place is how the ledger reader
+    ends up depending on an agent's directory layout.
+
+    Returns `((cross_used, cross_total), (own_used, own_total))`. The second pair is the same
+    scoring against each session's *own* hits, computed in the same pass over the same sessions:
+    §2's bar is the cross rate relative to the treatment rate, and a treatment rate taken from a
+    different set of sessions would not be the comparison the contract asks for.
+
+    Zero total means the check could not be run — too few sessions to pair, or no transcript
+    readable — which is not the same as a clean result and the caller has to tell them apart.
+    """
+    by_session = {}
+    try:
+        with open(path or ledger_path(), encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                sid = record.get("session_id")
+                if sid:
+                    by_session.setdefault(sid, []).append(record)
+    except OSError:
+        return (0, 0), (0, 0)
+    sessions = sorted(by_session)[:limit]
+    if len(sessions) < 2:
+        return (0, 0), (0, 0)
+    used = total = own_used = own_total = 0
+    for index, sid in enumerate(sessions):
+        # Pair each session with the next one round the ring: every session is scored exactly
+        # once, against hits it never received, with no session paired to itself.
+        other = sessions[(index + 1) % len(sessions)]
+        text = transcript_for(sid)
+        if not text:
+            continue
+        blob = " ".join(_words(assistant_text(text)))
+        for record in by_session[other]:
+            prompt_words = record.get("prompt_words") or []
+            for hit in record.get("hits") or []:
+                total += 1
+                if hit_was_used(hit, blob, prompt_words):
+                    used += 1
+        for record in by_session[sid]:
+            prompt_words = record.get("prompt_words") or []
+            for hit in record.get("hits") or []:
+                own_total += 1
+                if hit_was_used(hit, blob, prompt_words):
+                    own_used += 1
+    return (used, total), (own_used, own_total)
+
+
 def detector_is_sensitive(path=None):
     """Whether the detector can see a use handed to it, for the verdict to gate on.
 
@@ -536,13 +600,65 @@ def detector_is_sensitive(path=None):
     return ok
 
 
+def _self_check_main(rest):
+    """§2's instrument self-check, as a daily line rather than a verdict-day ritual.
+
+    Prints `uptake_self_check=<state> cross=<u>/<t> …`. Exit 1 only when the check ran and the
+    cross-session rate reached the treatment rate — a check that could not run is `unknown`, and
+    an unrunnable check must not read as a passing one.
+
+    Transcripts are found the way `distill-session` finds them, and that lookup lives here rather
+    than in the scorer: the ledger reader must not learn an agent's directory layout.
+    """
+    import glob
+
+    import verdict_core  # local: keeps the scorer importable without the verdict thresholds
+
+    roots = [
+        os.path.expanduser("~/.claude/projects"),
+        os.path.expanduser("~/.codex/sessions"),
+    ]
+    index = {}
+    for root in roots:
+        for path in glob.iglob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+            index.setdefault(os.path.splitext(os.path.basename(path))[0], path)
+
+    def transcript_for(session_id):
+        path = index.get(session_id)
+        if not path:
+            return ""
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                return handle.read()
+        except OSError:
+            return ""
+
+    (used, total), (t_used, t_total) = cross_session_rate(
+        transcript_for, rest[0] if rest else None
+    )
+    if not total:
+        print("uptake_self_check=unknown cross=0/0 reason=too_few_sessions_or_transcripts")
+        return 0
+    rate = used / total
+    treatment_rate = (t_used / t_total) if t_total else None
+    ok = verdict_core.self_check_verdict(rate, treatment_rate)
+    state = {True: "ok", False: "contaminated", None: "unknown"}[ok]
+    print(
+        f"uptake_self_check={state} cross={used}/{total} rate={rate:.4f}"
+        f" treatment={t_used}/{t_total}"
+    )
+    return 1 if ok is False else 0
+
+
 def _main(argv):
     rest = [a for a in argv if not a.startswith("--")]
     if "--sensitivity-probe" in argv:
         return _probe_main(rest)
+    if "--self-check" in argv:
+        return _self_check_main(rest)
     if "--duplicate-injections" not in argv:
         print(
-            "usage: uptake_core.py [--duplicate-injections|--sensitivity-probe] [ledger-path]",
+            "usage: uptake_core.py [--duplicate-injections|--sensitivity-probe|--self-check] [ledger-path]",
             file=sys.stderr,
         )
         return 2
