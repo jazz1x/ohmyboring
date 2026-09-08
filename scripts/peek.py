@@ -44,6 +44,7 @@ import re
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -279,6 +280,30 @@ def window_block(rows, notes):
     pre_rows, post_rows = verdict_core.partition_at_repair(windowed)
     pre_agent, _ = verdict_core.collect(pre_rows, since=WINDOW_SINCE)
     per_agent, skipped_old = verdict_core.collect(post_rows, since=WINDOW_SINCE)
+    # §2's coverage clause, which this page did not read until 2026-09-08: below half, the number
+    # stops being a verdict and becomes an instrumentation investigation. The CLI knew
+    # (`clears_floor: false`) and the page printed 비작동 anyway — the clause lived in one of the
+    # two surfaces that render the same window.
+    scored_sessions, distilled_sessions = set(), set()
+    for row in windowed:
+        sid = row.get("session_id") or (row.get("attributes") or {}).get("session_id")
+        if not sid:
+            continue
+        if row.get("event") == UPTAKE_EVENT:
+            scored_sessions.add(sid)
+        elif row.get("event") == SESSION_END_EVENT:
+            distilled_sessions.add(sid)
+    cov_ratio, cov_eligible, cov_ok = verdict_core.coverage(
+        len(distilled_sessions), len(scored_sessions)
+    )
+    if not cov_ok:
+        notes.append(
+            f"커버리지 {len(scored_sessions)}/{cov_eligible}"
+            f" = {'—' if cov_ratio is None else f'{cov_ratio:.0%}'}"
+            f" < {verdict_core.COVERAGE_FLOOR:.0%} — PRD §2 에 따라 판정이 아니라 계측 조사다."
+            " 위 판정 줄은 우리가 **본 것**에 대한 진술이지 우리가 **보낸 것**에 대한 진술이 아니다."
+        )
+
     if pre_agent:
         pre_sessions = sum(c["sessions"] for c in pre_agent.values())
         pre_prompts = sum(c["total_prompts"] for c in pre_agent.values())
@@ -311,6 +336,7 @@ def window_block(rows, notes):
             counts["total_prompts"],
             counts["used_control_prompts"],
             detector_sensitive=uptake_core.detector_is_sensitive(),
+            coverage_ok=cov_ok,
         )
     else:
         notes.append(
@@ -320,7 +346,7 @@ def window_block(rows, notes):
             else "창 안에 집계할 injection_uptake 이벤트가 없다 — 아래 판정 줄은 표본 0 에 대한"
             " 판정 거부이며, 비율이 0 이라는 뜻이 아니다."
         )
-        verdict = verdict_core.verdict(0, 0, 0, 0)
+        verdict = verdict_core.verdict(0, 0, 0, 0, coverage_ok=cov_ok)
 
     lost_sessions, lost_rows = verdict_core.unreported(windowed)
     if skipped_old:
@@ -328,30 +354,6 @@ def window_block(rows, notes):
             f"per-prompt 대조 카운터보다 오래된 이벤트 {skipped_old}건은 집계에서 빠졌다."
             " 0 으로 세면 우연율이 0 인 것처럼 읽힌다 — 계측 결함이 아니라 카운터가 더 어린 것이다."
         )
-    # §2's coverage clause, which this page did not read until 2026-09-08: below half, the number
-    # stops being a verdict and becomes an instrumentation investigation. The CLI knew
-    # (`clears_floor: false`) and the page printed 비작동 anyway — the clause lived in one of the
-    # two surfaces that render the same window.
-    scored_sessions, distilled_sessions = set(), set()
-    for row in windowed:
-        sid = row.get("session_id") or (row.get("attributes") or {}).get("session_id")
-        if not sid:
-            continue
-        if row.get("event") == UPTAKE_EVENT:
-            scored_sessions.add(sid)
-        elif row.get("event") == SESSION_END_EVENT:
-            distilled_sessions.add(sid)
-    cov_ratio, cov_eligible, cov_ok = verdict_core.coverage(
-        len(distilled_sessions), len(scored_sessions)
-    )
-    if not cov_ok:
-        notes.append(
-            f"커버리지 {len(scored_sessions)}/{cov_eligible}"
-            f" = {'—' if cov_ratio is None else f'{cov_ratio:.0%}'}"
-            f" < {verdict_core.COVERAGE_FLOOR:.0%} — PRD §2 에 따라 판정이 아니라 계측 조사다."
-            " 위 판정 줄은 우리가 **본 것**에 대한 진술이지 우리가 **보낸 것**에 대한 진술이 아니다."
-        )
-
     return {
         "line": list(verdict_core.format_verdict(verdict)),
         "label": verdict.label,
@@ -506,19 +508,29 @@ def _echo_map(rows):
     return out
 
 
-def prompt_rows(ledger, echoes, notes, page=None):
+def prompt_rows(ledger, echoes, notes, page=None, offset=0):
     """The sanctioned question, newest first: which sources went in, and was anything echoed.
 
     `page` is filled in with what was kept and what the ledger actually held. The prose note stays
     too, but a caveat at the bottom of a page is not a number a reader can see beside the list —
     "200 prompts" and "200 of 974 prompts" are different claims about the same screen.
+
+    `offset` walks back through the older rows. Saying "200 of 2871" honestly and offering no way
+    to see the other 2671 is a dead end dressed as candour: the number told the reader the page was
+    hiding something and then kept hiding it.
     """
     rows = sorted(ledger or [], key=lambda r: r.get("ts") or 0, reverse=True)
+    total = len(rows)
+    offset = max(0, min(int(offset or 0), total))
     if page is not None:
-        page["total"] = len(rows)
+        page["total"] = total
         page["limit"] = MAX_PROMPT_ROWS
-        page["returned"] = min(len(rows), MAX_PROMPT_ROWS)
-        page["truncated"] = len(rows) > MAX_PROMPT_ROWS
+        page["offset"] = offset
+        page["returned"] = max(0, min(total - offset, MAX_PROMPT_ROWS))
+        page["truncated"] = total > MAX_PROMPT_ROWS
+        page["has_older"] = offset + MAX_PROMPT_ROWS < total
+        page["has_newer"] = offset > 0
+    rows = rows[offset:]
     if len(rows) > MAX_PROMPT_ROWS:
         notes.append(
             f"원장 {len(rows)}행 중 최신 {MAX_PROMPT_ROWS}행만 실었다 — 목록이 짧은 것이 아니라"
@@ -615,7 +627,9 @@ def scoring_block(prompt_rows_out):
     echoed = sum(1 for r in prompt_rows_out if r.get("echoed") is True)
     return {
         # `of` names the population on every read, so the number cannot travel without it.
-        "of": "화면의 원장 행 (최근 3일, 판정 모집단 아님)",
+        # Rendered inline beside the figure, so it reads as a phrase and not as a parenthetical
+        # inside another parenthetical.
+        "of": "최근 3일 화면 행 기준 · 판정 모집단 아님",
         "rows": total,
         "determined": determined,
         "echoed": echoed,
@@ -730,8 +744,13 @@ def why_block(entries):
 # --------------------------------------------------------------------------- state
 
 
-def build_state():
-    """Assemble the whole response. Every source is optional; every absence is distinguishable."""
+def build_state(offset=0):
+    """Assemble the whole response. Every source is optional; every absence is distinguishable.
+
+    `offset` only moves the prompt table. Everything else — the verdict, coverage, the fault check
+    — is computed over the whole window regardless, because a page of rows is a view and the
+    verdict is not a view of anything.
+    """
     notes = []
     health = _get_json("/health")
     events = _get_json(f"/events?limit={EVENT_LIMIT}")
@@ -792,7 +811,7 @@ def build_state():
                 " 그대로지만 표본 하한(주입 프롬프트 수)이 부풀어 보인다."
             )
 
-    prompts_out = prompt_rows(ledger, echoes, notes, page)
+    prompts_out = prompt_rows(ledger, echoes, notes, page, offset=offset)
     # The engine's own record of the same retrievals. Read as its own view, never joined onto a
     # prompt row — the ledger holds no query_log id and matching by basename would assert an
     # identity the data cannot support.
@@ -874,8 +893,16 @@ class PeekHandler(BaseHTTPRequestHandler):
             self._send(200, page, "text/html; charset=utf-8")
             return
         if route == "/api/state":
+            # `?offset=` walks the prompt table back through older rows. Parsed here rather than
+            # trusted: a bad value reads as 0 and shows the newest page, which is the answer the
+            # caller would have got by not asking.
+            query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             try:
-                body = json.dumps(build_state(), ensure_ascii=False, indent=2)
+                offset = max(0, int((query.get("offset") or ["0"])[0]))
+            except ValueError:
+                offset = 0
+            try:
+                body = json.dumps(build_state(offset), ensure_ascii=False, indent=2)
             except Exception as exc:  # noqa: BLE001 — an observability page must not 500 silently
                 body = json.dumps(
                     {"error": f"state assembly failed: {type(exc).__name__}"}, ensure_ascii=False

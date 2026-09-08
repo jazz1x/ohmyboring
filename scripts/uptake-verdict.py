@@ -311,6 +311,9 @@ def main(argv=None):
 
     # Probed once, not per adapter: the detector is one instrument and the ledger is one file.
     sensitive = uptake_core.detector_is_sensitive()
+    # §2 puts coverage before the thresholds: a rate over a seventh of the channel is not a
+    # smaller version of the right answer, it is an answer about a different population.
+    cov = _coverage_payload(rows, args.since, verdict_core.WINDOW_UNTIL)
     for who, c in sorted(per_agent.items()):
         v = verdict_core.verdict(
             c["sessions"],
@@ -318,6 +321,7 @@ def main(argv=None):
             c["total_prompts"],
             c["used_control_prompts"],
             detector_sensitive=sensitive,
+            coverage_ok=cov["clears_floor"],
         )
         print(f"\n[{who} · 수리 이후]")
         for line in verdict_core.format_verdict(v):

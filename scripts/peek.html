@@ -220,6 +220,16 @@
     flex: 0 1 200px; width: 200px; min-width: 72px;
   }
   #filter:focus { outline: none; border-color: var(--accent); }
+  /* A note name that filters. Styled as the text it replaced, not as a control: it is the same
+     word in the same place, and a button chrome here would read as an action with consequences. */
+  .srcbtn { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer;
+            text-align: left; text-decoration: underline; text-decoration-style: dotted;
+            text-underline-offset: 2px; }
+  .srcbtn:hover, .srcbtn:focus { color: var(--accent); outline: none; }
+  .pager button { font: inherit; color: var(--dim); background: none; border: 1px solid var(--line);
+                  border-radius: 4px; padding: 0 6px; cursor: pointer; margin-left: 4px; }
+  .pager button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+  .pager button:disabled { opacity: .35; cursor: default; }
   #filter::placeholder { color: var(--fg-faint); }
 
   /* ── 3. prompt stream ───────────────────────────────────────────────── */
@@ -369,6 +379,10 @@
   <div class="sec" id="sec-stream">
     <span class="label">prompt stream</span>
     <span class="count" id="stream-count"></span>
+    <span class="pager" id="pager" hidden>
+      <button type="button" id="page-newer" title="더 새 행">←</button>
+      <button type="button" id="page-older" title="더 오래된 행">→</button>
+    </span>
     <span class="spark" id="stream-spark"></span>
     <span class="modes" id="modes">
       <button type="button" data-mode="prompts" class="on">prompts</button
@@ -503,8 +517,13 @@ function renderVerdict(w, scoring, pace) {
   sub.textContent = "";
   const det = scoring ? scoring.determined : 0;
   const ech = scoring ? scoring.echoed : 0;
+  // What the denominator is, on the line rather than in the payload. `scoring.of` says these rows
+  // are the last three days on screen and not the verdict's population, and a reader who does not
+  // know which population a figure describes cannot use it — the same distinction that moved
+  // coverage from 14% to 83% on 2026-09-07 (§8 D8).
+  const ofText = scoring && scoring.of ? " (" + scoring.of + ")" : "";
   sub.appendChild(txt(
-    "채점된 범위에서 에코 " + ech + "/" + det + " — 무신호이지 무효과 판정이 아니다. "
+    "에코 " + ech + "/" + det + ofText + " — 무신호이지 무효과 판정이 아니다. "
   ));
   // Why the verdict above reads the way it does — taken from the payload, not asserted here. This
   // line used to say "표본 하한 미달로 판정 보류" unconditionally, so on 2026-09-08 the page
@@ -662,7 +681,25 @@ function buildDetail(p, colspan) {
     hits.forEach((h) => {
       const box = el("div", "hit");
       const src = el("div", "src");
-      src.appendChild((h && h.src) ? txt(String(h.src)) : unknown("this hit carries no source basename"));
+      if (h && h.src) {
+        // Clicking a note name types it into the filter that already exists rather than adding a
+        // second filtering path. One mechanism, two ways to reach it: the box still shows what is
+        // filtering, so the state is visible and clearing it is the same gesture as before.
+        const name = String(h.src);
+        const link = el("button", "srcbtn");
+        link.type = "button";
+        link.title = "이 노트로 거른다 — 다시 누르면 해제";
+        link.appendChild(txt(name));
+        link.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          const box = $("filter");
+          box.value = box.value.trim().toLowerCase() === name.toLowerCase() ? "" : name;
+          applyFilter();
+        });
+        src.appendChild(link);
+      } else {
+        src.appendChild(unknown("this hit carries no source basename"));
+      }
       box.appendChild(src);
       const phrases = (h && Array.isArray(h.phrases)) ? h.phrases : [];
       if (h && h.origin_withheld) {
@@ -809,9 +846,20 @@ function renderGrouped(prompts, mode) {
   // "321 notes" without that is a claim about the corpus; it is a claim about 200 prompts.
   const unit = mode === "sessions" ? "session" : "note";
   const n = rows.length;
+  // Which slice, not just how many. "the newest 200 of 2871" stopped being true the moment the
+  // table could move, and a count that silently means something else on page two is worse than
+  // the truncation it was written to disclose.
+  const from = (PAGE && PAGE.offset || 0) + 1;
+  const to = (PAGE && PAGE.offset || 0) + (PAGE ? PAGE.returned : n);
   $("stream-count").textContent =
     n + " " + unit + (n === 1 ? "" : "s") +
-    (PAGE && PAGE.truncated ? "  over the newest " + PAGE.returned + " of " + PAGE.total + " prompts" : "");
+    (PAGE && PAGE.truncated ? "  " + from + "–" + to + " of " + PAGE.total + " prompts" : "");
+  const pager = $("pager");
+  if (pager) {
+    pager.hidden = !(PAGE && PAGE.truncated);
+    $("page-older").disabled = !(PAGE && PAGE.has_older);
+    $("page-newer").disabled = !(PAGE && PAGE.has_newer);
+  }
   const helpers = {
     span: (g) => {
       const clock = (ms) => stamp(new Date(ms).toISOString()).clock;
@@ -1126,10 +1174,28 @@ function fail(msg) {
   renderNotes([]);
 }
 
-fetch("/api/state", { cache: "no-store", credentials: "same-origin" })
-  .then((r) => r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)))
-  .then((s) => renderAll(s && typeof s === "object" ? s : {}))
-  .catch((e) => fail(String(e && e.message ? e.message : e)));
+// The prompt table pages; nothing else does. The verdict, coverage and fault check are computed
+// over the whole window on every request, so moving through rows cannot change what the page
+// concludes — only which rows are under it.
+let OFFSET = 0;
+
+function load(offset) {
+  OFFSET = Math.max(0, offset | 0);
+  return fetch("/api/state?offset=" + OFFSET, { cache: "no-store", credentials: "same-origin" })
+    .then((r) => r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)))
+    .then((s) => renderAll(s && typeof s === "object" ? s : {}))
+    .catch((e) => fail(String(e && e.message ? e.message : e)));
+}
+
+document.addEventListener("click", (ev) => {
+  const older = ev.target.closest && ev.target.closest("#page-older");
+  const newer = ev.target.closest && ev.target.closest("#page-newer");
+  if (!older && !newer) return;
+  const step = (PAGE && PAGE.limit) || 200;
+  load(older ? OFFSET + step : OFFSET - step);
+});
+
+load(0);
 
 /* ── keyboard: navigation only, nothing that mutates ─────────────────── */
 document.addEventListener("keydown", (ev) => {

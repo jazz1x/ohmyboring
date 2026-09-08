@@ -372,6 +372,28 @@ def test_collect_closes_the_window_at_both_ends():
 
 
 
+def test_coverage_decides_whether_a_verdict_is_allowed_at_all():
+    """§2 puts coverage before the thresholds, not beside them.
+
+    A rate computed over a seventh of the channel is not a smaller version of the right answer; it
+    is an answer about a different population. Live on 2026-09-08 the coverage was 29/208 = 14%
+    and both surfaces printed 비작동 — the largest type on the page asserting the thing the
+    contract says cannot be asserted.
+    """
+    short = V.verdict(29, 0, 515, 0, detector_sensitive=True, coverage_ok=False)
+    assert short.label == V.REFUSED, short
+    assert "커버리지" in short.reason, short.reason
+
+    # Cleared coverage restores the ordinary reading.
+    assert V.verdict(29, 0, 515, 0, detector_sensitive=True, coverage_ok=True).label == V.BROKEN
+
+    # It gates 작동 too. A working channel measured over a seventh of itself is not a working
+    # channel that was measured — the clause is about the population, not about the direction.
+    assert V.verdict(29, 40, 515, 10, coverage_ok=False).label == V.REFUSED
+    assert V.verdict(29, 40, 515, 10, coverage_ok=True).label == V.WORKS
+
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
