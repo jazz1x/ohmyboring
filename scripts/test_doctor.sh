@@ -93,6 +93,22 @@ case "${1:-}" in
         echo "uptake_sensitivity=ok rows=12 reason=phrase from wiki-0001.md was detected"
         exit 0
     fi
+    # The other half of §2's instrument check: each transcript scored against a session's hits it
+    # never received. A rate that reaches the treatment rate means the scorer is reading topic
+    # overlap, so doctor has to be able to fail on it — and to tell "could not run" apart from
+    # "ran clean", which is why the unknown case is modelled too.
+    if [ "${2:-}" = --self-check ]; then
+        if [ "${DOCTOR_UPTAKE_CONTAMINATED:-0}" = 1 ]; then
+            echo "uptake_self_check=contaminated cross=40/100 rate=0.4000 treatment=45/100"
+            exit 1
+        fi
+        if [ "${DOCTOR_UPTAKE_SELF_UNKNOWN:-0}" = 1 ]; then
+            echo "uptake_self_check=unknown cross=0/0 reason=too_few_sessions_or_transcripts"
+            exit 0
+        fi
+        echo "uptake_self_check=ok cross=0/2145 rate=0.0000 treatment=180/2145"
+        exit 0
+    fi
     echo "fake python3: unmodelled uptake_core call: $*" >&2
     exit 7
     ;;
@@ -624,6 +640,35 @@ esac
       exit 1
   }
   echo "ok - a blind uptake detector fails readiness"
+)
+
+# A contaminated self-check has to fail readiness for the same reason a blind one does, from the
+# other side: hits a session never received being counted as used means the treatment rate is
+# measuring topic overlap, and a verdict read off that is a verdict about the corpus's vocabulary.
+( make_case "$TMP/uptake-cross" yes
+  if DOCTOR_UPTAKE_CONTAMINATED=1 run_strict "$TMP/uptake-cross" "$TMP/uptake-cross.out"; then
+      cat "$TMP/uptake-cross.out"
+      echo "FAIL: a contaminated uptake self-check must fail strict doctor" >&2
+      exit 1
+  fi
+  grep -q "UPTAKE SELF-CHECK FAILED" "$TMP/uptake-cross.out" || {
+      cat "$TMP/uptake-cross.out"
+      echo "FAIL: the contaminated self-check must be named, not merely counted" >&2
+      exit 1
+  }
+  echo "ok - a contaminated uptake self-check fails readiness"
+)
+
+# "Could not run" is not "ran clean". Too few sessions to pair is a warning, because failing on it
+# would make an empty ledger indistinguishable from a broken scorer — the confusion this whole
+# check exists to prevent.
+( make_case "$TMP/uptake-cross-unknown" yes
+  if ! DOCTOR_UPTAKE_SELF_UNKNOWN=1 run_strict "$TMP/uptake-cross-unknown" "$TMP/uptake-cross-unknown.out"; then
+      cat "$TMP/uptake-cross-unknown.out"
+      echo "FAIL: an unrunnable self-check must warn, not fail" >&2
+      exit 1
+  fi
+  echo "ok - an unrunnable uptake self-check warns instead of failing"
 )
 
 ( make_case "$TMP/ledger-clean" yes
