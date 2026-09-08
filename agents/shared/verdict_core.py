@@ -68,11 +68,19 @@ def verdict(
     total_prompts,
     used_control_prompts,
     detector_sensitive=None,
+    coverage_ok=None,
 ):
     """Judge the window, or refuse to.
 
     Refusal comes first and is not overridable: the sample floors were registered before the data
     existed precisely so that a short sample could not be argued into a verdict afterwards.
+
+    `coverage_ok` carries §2's coverage clause: False when the scored share of the sessions this
+    channel could have reached is under the floor, in which case the contract says the number is an
+    instrumentation investigation and not a verdict at all. It is checked before the thresholds,
+    because a rate computed over a seventh of the channel is not a smaller version of the right
+    answer — it is an answer about a different population. None means nobody measured it, which is
+    the state every caller was in before 2026-09-08 and is not a pass.
 
     `detector_sensitive` carries §2's sensitivity clause: True when the probe found a phrase it was
     handed on a plate, False when it could not, None when nobody asked. Only False blocks, and only
@@ -85,6 +93,13 @@ def verdict(
     control = _pp(used_control_prompts, total_prompts)
     gap = treatment - control
     ratio = (treatment / control) if control else None
+
+    if coverage_ok is False:
+        return Verdict(
+            REFUSED,
+            "커버리지 하한 미달 — 판정이 아니라 계측 조사 (§2)",
+            sessions, total_prompts, treatment, control, gap, ratio,
+        )
 
     if sessions < MIN_SESSIONS or total_prompts < MIN_INJECTED_PROMPTS:
         short = []
