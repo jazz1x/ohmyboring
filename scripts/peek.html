@@ -537,10 +537,14 @@ function renderVerdict(w, scoring, pace) {
     return d;
   };
   if (w) {
+    // The daily rate answers "will we reach the floor in time", so it is worth reading until the
+    // floor is reached and dead weight after — and both floors have been met since 2026-09-08.
+    // Shown per floor, not for the pair: one can be met while the other is still climbing.
+    const rate = (p) => (p && !p.reaches_floor ? p.per_day + "/일" : "");
     box.appendChild(cell("세션", w.floor_sessions, w.min_sessions,
-      pace && pace.sessions ? pace.sessions.per_day + "/일" : ""));
+      rate(pace && pace.sessions)));
     box.appendChild(cell("주입 프롬프트", w.floor_prompts, w.min_prompts,
-      pace && pace.prompts ? pace.prompts.per_day + "/일" : ""));
+      rate(pace && pace.prompts)));
   }
   if (scoring) {
     // The hidden risk: the newest rows over-represent sessions that have not ended, so the table
@@ -996,8 +1000,11 @@ function renderWhy(w) {
     head.appendChild(el("span", "nowrap", k.kind));
     // A label and its number are one token. Letting the flex row break between them puts a bare
     // `max` at the end of a line and the figure on the next, which reads as two facts.
-    [["n=", k.n], ["min ", k.min.toFixed(3)], ["median ", k.median.toFixed(3)],
-     ["max ", k.max.toFixed(3)]].forEach(([label, value]) => {
+    // n and median only. min/max are the two values a distribution can produce by accident — one
+    // unusual query moves either — and the six-band grid under them was eighteen more numbers
+    // answering a question this page does not ask: distance is not use. The median is what a
+    // reader can carry, and `n` is what stops it being quoted as a corpus fact.
+    [["n=", k.n], ["median ", k.median.toFixed(3)]].forEach(([label, value]) => {
       const pair = el("span", "nowrap");
       pair.appendChild(txt(label));
       const b = el("b"); b.appendChild(txt(String(value))); pair.appendChild(b);
@@ -1005,23 +1012,6 @@ function renderWhy(w) {
     });
     box.appendChild(head);
 
-    // Scale within this kind only — a shared scale across kinds would imply comparable units.
-    const peak = k.bands.reduce((mx, b) => Math.max(mx, b.n), 0) || 1;
-    const grid = el("div", "bands");
-    k.bands.forEach((b) => {
-      const cell = el("div", "band");
-      const rng = el("div", "rng");
-      rng.appendChild(txt(b.lo.toFixed(2) + "–" + b.hi.toFixed(2)));
-      cell.appendChild(rng);
-      const bar = el("div", "bar" + (b.n ? "" : " zero"));
-      bar.style.width = b.n ? Math.max(6, Math.round((b.n / peak) * 100)) + "%" : "100%";
-      cell.appendChild(bar);
-      const n = el("div", "n");
-      n.appendChild(txt(String(b.n)));
-      cell.appendChild(n);
-      grid.appendChild(cell);
-    });
-    box.appendChild(grid);
   });
 }
 
