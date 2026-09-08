@@ -314,6 +314,64 @@ def test_the_sensitivity_gate_only_guards_the_not_working_reading():
 
 
 
+def test_the_window_day_is_the_owners_calendar_day():
+    """§2 registered the window in the owner's dates; the events are stamped UTC.
+
+    The two disagree for nine hours a day. Measured 2026-09-08: five uptake events fall on
+    different days under the two readings, four of them at the opening boundary where the
+    disagreement decides whether they are in the sample at all.
+    """
+    # 20:00 UTC on 08-31 is already 09-01 in Seoul.
+    assert V.window_day("2026-08-31T20:00:00+00:00") == "2026-09-01"
+    assert V.window_day("2026-08-31T05:00:00+00:00") == "2026-08-31"
+    # 15:00 UTC is the exact cutover.
+    assert V.window_day("2026-09-07T15:00:00+00:00") == "2026-09-08"
+    assert V.window_day("2026-09-07T14:59:59+00:00") == "2026-09-07"
+    # `Z` is the spelling the engine emits.
+    assert V.window_day("2026-08-31T20:00:00Z") == "2026-09-01"
+
+    # An unparseable stamp keeps its prefix rather than vanishing: a row dropped for an odd clock
+    # is worse than one filed a day off, because nothing counts what was dropped.
+    assert V.window_day("not-a-date") == "not-a-date"
+    assert V.window_day("") == ""
+    assert V.window_day(None) == ""
+
+
+def test_collect_closes_the_window_at_both_ends():
+    """A floor with no ceiling stops being the registered window the day after it closes.
+
+    `peek` filtered to the window and this did not, so from 09-15 the two surfaces would read the
+    same ledger and count different samples — the dates would still be printed, and would no
+    longer be what either number described.
+    """
+    def row(day, agent="claude-code"):
+        return {
+            "event": "injection_uptake",
+            "observed_at": f"{day}T03:00:00+00:00",
+            "agent": agent,
+            "used_prompts": 1,
+            "total_prompts": 10,
+            "used_control_prompts": 0,
+        }
+
+    rows = [row("2026-09-10"), row("2026-09-20")]
+    inside, _ = V.collect(rows, since="2026-08-31", until="2026-09-14")
+    assert inside["claude-code"]["total_prompts"] == 10, inside
+
+    # Which side is kept, not merely how many. A ceiling written as a floor drops the same count
+    # and keeps the wrong row, so asserting on the total alone passes for the inverted comparison.
+    kept = V.collect([row("2026-09-10")], since="2026-08-31", until="2026-09-14")[0]
+    assert kept["claude-code"]["total_prompts"] == 10, kept
+    dropped = V.collect([row("2026-09-20")], since="2026-08-31", until="2026-09-14")[0]
+    assert not dropped, dropped
+
+    # Without the ceiling the later row joins the sample — this is the old behaviour, kept
+    # reachable so callers with no window of their own are not forced into one.
+    unbounded, _ = V.collect(rows, since="2026-08-31")
+    assert unbounded["claude-code"]["total_prompts"] == 20, unbounded
+
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

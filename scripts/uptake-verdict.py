@@ -175,8 +175,14 @@ def main(argv=None):
     # but never read by the verdict — and they are reported rather than dropped, because hiding
     # them is the same move as quoting them.
     pre_rows, post_rows = partition_at_repair(rows)
-    pre_agent, _ = collect(pre_rows, since=args.since, agent=args.agent)
-    per_agent, skipped_old = collect(post_rows, since=args.since, agent=args.agent)
+    # The ceiling matters from 09-15: without it this counts events the pre-registered window
+    # excludes while `peek` filters them out, and the two surfaces stop describing the same sample.
+    pre_agent, _ = collect(
+        pre_rows, since=args.since, agent=args.agent, until=verdict_core.WINDOW_UNTIL
+    )
+    per_agent, skipped_old = collect(
+        post_rows, since=args.since, agent=args.agent, until=verdict_core.WINDOW_UNTIL
+    )
     # `--json` keeps stdout to exactly one line. A caller that pipes this into a parser should not
     # have to strip advisory prose, and prose on stdout is how a machine-readable mode stops being
     # machine-readable without anybody noticing.

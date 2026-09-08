@@ -257,12 +257,15 @@ def engine_block(health):
 
 
 def _in_window(row):
-    """Same lexical `observed_at[:10]` comparison `verdict_core.collect()` makes, plus a ceiling.
+    """The same day bucket `verdict_core.collect()` uses, and the same window on both sides.
 
-    `observed_at` is RFC3339 UTC, so the day bucket is a UTC day. Nothing here is bucketed in KST;
-    the response says so in `notes` rather than leaving the zone to the reader's assumption.
+    `observed_at` is RFC3339 UTC but the window's dates are the owner's (§2, `WINDOW_TZ`), so the
+    conversion belongs in one place and this asks for it rather than repeating the arithmetic.
     """
-    observed = (row.get("observed_at") or "")[:10]
+    # The day bucket comes from `verdict_core.window_day`, which converts to the owner's calendar
+    # (WINDOW_TZ) rather than slicing the UTC string. Bucketing here and there differently is how
+    # one boundary event lands inside the window on one surface and outside it on the other.
+    observed = verdict_core.window_day(row.get("observed_at"))
     if not observed:
         return False
     return WINDOW_SINCE <= observed <= WINDOW_UNTIL
@@ -762,8 +765,9 @@ def build_state():
         " 들어가지 않는다 — 비율은 '측정된 것 중'이며 '보낸 것 중'이 아니다."
     )
     notes.append(
-        "모든 타임스탬프와 창 경계는 UTC 다(이벤트 observed_at 은 RFC3339 UTC, 날짜 비교도 UTC"
-        " 일자). KST 로 읽으면 자정 근처 행이 하루 밀린다."
+        "타임스탬프는 RFC3339 UTC 로 저장되지만 창 경계는 오너의 달력(KST, PRD §2)으로 판정한다"
+        " — verdict_core.window_day 가 한 곳에서 변환한다. 표에 찍히는 시각은 UTC 원문이므로"
+        " 자정 근처 행은 표의 날짜와 창 소속이 하루 다를 수 있다."
     )
     notes.append(
         "prompt 행에는 거리(dist)가 없다. 원장에 query_log id 가 없어서 basename 과 시간창으로"
