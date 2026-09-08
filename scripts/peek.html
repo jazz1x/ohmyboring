@@ -506,7 +506,21 @@ function renderVerdict(w, scoring, pace) {
   sub.appendChild(txt(
     "채점된 범위에서 에코 " + ech + "/" + det + " — 무신호이지 무효과 판정이 아니다. "
   ));
-  const why = el("span", "dim", "표본 하한 미달로 판정 보류 · ");
+  // Why the verdict above reads the way it does — taken from the payload, not asserted here. This
+  // line used to say "표본 하한 미달로 판정 보류" unconditionally, so on 2026-09-08 the page
+  // showed 비작동 in the largest type with "판정 보류" directly beneath it, and the floors it
+  // named had in fact been cleared (29/20, 394/200). A caption that contradicts the headline
+  // teaches the reader to trust neither.
+  const cov = w && w.coverage;
+  let caption = "";
+  if (cov && !cov.clears_floor) {
+    const pct = cov.ratio === null ? "—" : Math.round(cov.ratio * 100) + "%";
+    caption = "커버리지 " + cov.scored_sessions + "/" + cov.eligible + " = " + pct
+      + " < " + Math.round(cov.floor * 100) + "% — 판정이 아니라 계측 조사 (§2) · ";
+  } else if (w && w.label === "판정 거부") {
+    caption = "판정 거부 — 위 사유 참조 · ";
+  }
+  const why = el("span", "dim", caption);
   const deadline = el("span", "dim nowrap", "창 마감 " + ((w && w.until) || "?"));
   why.appendChild(deadline);
   sub.appendChild(why);
@@ -1100,11 +1114,17 @@ function renderAll(s) {
 }
 
 function fail(msg) {
-  const strip = $("verdict");
-  strip.textContent = "";
-  strip.appendChild(el("span", "seg", "state unavailable — " + msg));
+  // `$("verdict")` was an id no element carries, so this threw before it could paint anything and
+  // an engine outage rendered a blank page instead of saying the state is unknown. The headline
+  // is where the reader looks first, so that is where the outage has to appear.
+  const label = $("hero-label");
+  label.className = "unknown";
+  label.textContent = "상태 없음";
+  const sub = $("hero-sub");
+  sub.textContent = "";
+  sub.appendChild(el("span", "dim", "GET /api/state 응답 없음 — " + msg));
   $("meta").textContent = "";
-  $("meta").appendChild(el("span", null, "GET /api/state did not answer; nothing below is current"));
+  $("meta").appendChild(el("span", null, "아래 숫자는 현재 상태가 아니다"));
   $("fault").className = "unknown";
   $("fault").textContent = "";
   $("fault").appendChild(el("span", "state", "instrument state unknown"));

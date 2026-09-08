@@ -325,9 +325,43 @@ def window_block(rows, notes):
             f"per-prompt 대조 카운터보다 오래된 이벤트 {skipped_old}건은 집계에서 빠졌다."
             " 0 으로 세면 우연율이 0 인 것처럼 읽힌다 — 계측 결함이 아니라 카운터가 더 어린 것이다."
         )
+    # §2's coverage clause, which this page did not read until 2026-09-08: below half, the number
+    # stops being a verdict and becomes an instrumentation investigation. The CLI knew
+    # (`clears_floor: false`) and the page printed 비작동 anyway — the clause lived in one of the
+    # two surfaces that render the same window.
+    scored_sessions, distilled_sessions = set(), set()
+    for row in windowed:
+        sid = row.get("session_id") or (row.get("attributes") or {}).get("session_id")
+        if not sid:
+            continue
+        if row.get("event") == UPTAKE_EVENT:
+            scored_sessions.add(sid)
+        elif row.get("event") == SESSION_END_EVENT:
+            distilled_sessions.add(sid)
+    cov_ratio, cov_eligible, cov_ok = verdict_core.coverage(
+        len(distilled_sessions), len(scored_sessions)
+    )
+    if not cov_ok:
+        notes.append(
+            f"커버리지 {len(scored_sessions)}/{cov_eligible}"
+            f" = {'—' if cov_ratio is None else f'{cov_ratio:.0%}'}"
+            f" < {verdict_core.COVERAGE_FLOOR:.0%} — PRD §2 에 따라 판정이 아니라 계측 조사다."
+            " 위 판정 줄은 우리가 **본 것**에 대한 진술이지 우리가 **보낸 것**에 대한 진술이 아니다."
+        )
+
     return {
         "line": list(verdict_core.format_verdict(verdict)),
         "label": verdict.label,
+        # Reported beside the verdict, never folded into it: §2 wants both numbers visible so a
+        # reader cannot quote the rate without knowing what share of the channel produced it.
+        "coverage": {
+            "scored_sessions": len(scored_sessions),
+            "eligible": cov_eligible,
+            "ratio": None if cov_ratio is None else round(cov_ratio, 4),
+            "clears_floor": bool(cov_ok),
+            "floor": verdict_core.COVERAGE_FLOOR,
+            "denominator": "all_distilled_sessions",
+        },
         "floor_sessions": verdict.sessions,
         "min_sessions": verdict_core.MIN_SESSIONS,
         "floor_prompts": verdict.total_prompts,
@@ -365,15 +399,21 @@ def instrument_fault(rows):
             "uptake_events_48h": None,
         }
     cutoff = datetime.now(timezone.utc) - timedelta(hours=FAULT_WINDOW_HOURS)
-    ends = uptakes = 0
+    # Distinct sessions, not rows. `distill_resolution` can fire more than once for one session
+    # (a retry, a repair), and PRD §3 names a surface that reports those rows as a session count
+    # as an instrumentation fault in itself. Measured 2026-09-08: 324 rows against 302 sessions
+    # inside the window, so the two diverge by enough to move a ratio.
+    end_sessions, uptake_sessions = set(), set()
     for row in rows:
         when = _observed_dt(row)
         if when is None or when < cutoff:
             continue
+        sid = row.get("session_id") or (row.get("attributes") or {}).get("session_id")
         if row.get("event") == SESSION_END_EVENT:
-            ends += 1
+            end_sessions.add(sid or f"row:{id(row)}")
         elif row.get("event") == UPTAKE_EVENT:
-            uptakes += 1
+            uptake_sessions.add(sid or f"row:{id(row)}")
+    ends, uptakes = len(end_sessions), len(uptake_sessions)
     if ends and not uptakes:
         state = "investigate"
         reason = (
