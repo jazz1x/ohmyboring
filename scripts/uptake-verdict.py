@@ -27,6 +27,7 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agents", "shared"))
 
 import verdict_core  # noqa: E402
+import uptake_core  # noqa: E402
 from verdict_core import collect, coverage, partition_at_repair, unreported  # noqa: E402
 
 DEFAULT_URL = os.environ.get("BORING_URL") or "http://127.0.0.1:7700"
@@ -302,9 +303,15 @@ def main(argv=None):
             " 그 편향은 세션 길이 방향이다(PRD §8 D4). 비율을 내지 않는다."
         )
 
+    # Probed once, not per adapter: the detector is one instrument and the ledger is one file.
+    sensitive = uptake_core.detector_is_sensitive()
     for who, c in sorted(per_agent.items()):
         v = verdict_core.verdict(
-            c["sessions"], c["used_prompts"], c["total_prompts"], c["used_control_prompts"]
+            c["sessions"],
+            c["used_prompts"],
+            c["total_prompts"],
+            c["used_control_prompts"],
+            detector_sensitive=sensitive,
         )
         print(f"\n[{who} · 수리 이후]")
         for line in verdict_core.format_verdict(v):

@@ -273,6 +273,47 @@ def test_the_self_check_is_measured_against_the_treatment_rate_not_a_constant():
 
 
 
+def test_two_zeros_are_not_a_verdict_until_the_detector_is_shown_to_see():
+    """§2: 처치·대조 동시 0 은 "아무도 안 썼다"이기 전에 "검출기가 못 본다"일 수 있다.
+
+    Live on 2026-09-08: treatment 0, control 0, denominator 515 — and the dashboard printed
+    비작동 in the largest type on the page. The two readings are indistinguishable from the rates
+    alone, which is exactly why the contract requires sensitivity to be shown first.
+    """
+    silent = V.verdict(29, 0, 515, 0)
+    assert silent.label == V.REFUSED, silent
+    assert "계측 조사" in silent.reason, silent.reason
+
+    # Shown to see, and still nothing landed: that is a real "not working".
+    shown = V.verdict(29, 0, 515, 0, detector_sensitive=True)
+    assert shown.label == V.BROKEN, shown
+
+    # Probed and blind is worse than unprobed, and says so differently.
+    blind = V.verdict(29, 0, 515, 0, detector_sensitive=False)
+    assert blind.label == V.REFUSED
+    assert "손에 쥐여준" in blind.reason, blind.reason
+
+
+def test_the_sensitivity_gate_only_guards_the_not_working_reading():
+    """It must not become a way to withhold an inconvenient result.
+
+    The clause is symmetric in the contract's words — it protects against reading a blind detector
+    as evidence — so it may not touch a window where something was actually detected, in either
+    direction, and it may not block 작동.
+    """
+    # One arm non-zero: the detector demonstrably sees, no gate needed.
+    assert V.verdict(29, 2, 515, 3).label == V.BROKEN
+    assert V.verdict(29, 0, 515, 4).label == V.BROKEN
+
+    # Working is never gated, probe or no probe.
+    assert V.verdict(29, 40, 515, 10).label == V.WORKS
+    assert V.verdict(29, 40, 515, 10, detector_sensitive=False).label == V.WORKS
+
+    # The floor still refuses first — a short sample is not rescued by a live detector.
+    assert V.verdict(1, 0, 5, 0, detector_sensitive=True).label == V.REFUSED
+
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
