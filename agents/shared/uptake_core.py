@@ -500,6 +500,42 @@ def _probe_main(rest):
     return 1 if ok is False else 0
 
 
+def detector_is_sensitive(path=None):
+    """Whether the detector can see a use handed to it, for the verdict to gate on.
+
+    The same probe `--sensitivity-probe` runs, returned rather than printed so the verdict path can
+    read it. §2 makes this a precondition for the "not working" reading, and a precondition that
+    only a CLI subcommand can reach is one the verdict never actually applies — which is how a
+    dashboard came to print 비작동 on 2026-09-08 with both arms at zero and nobody having asked.
+
+    None when there is no ledger to probe. That is not a passing answer and not a failing one; the
+    caller treats anything other than True as grounds to withhold, so an absent ledger withholds.
+    """
+    by_session = {}
+    try:
+        with open(path or ledger_path(), encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                sid = record.get("session_id")
+                if sid:
+                    by_session.setdefault(sid, []).append(record)
+    except OSError:
+        return None
+    if not by_session:
+        return None
+    newest = max(
+        by_session.values(), key=lambda rows: max((r.get("ts") or 0) for r in rows)
+    )
+    ok, _reason = sensitivity_probe(newest)
+    return ok
+
+
 def _main(argv):
     rest = [a for a in argv if not a.startswith("--")]
     if "--sensitivity-probe" in argv:

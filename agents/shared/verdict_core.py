@@ -62,11 +62,24 @@ def _pp(numerator, denominator):
     return (100.0 * numerator / denominator) if denominator else 0.0
 
 
-def verdict(sessions, used_prompts, total_prompts, used_control_prompts):
+def verdict(
+    sessions,
+    used_prompts,
+    total_prompts,
+    used_control_prompts,
+    detector_sensitive=None,
+):
     """Judge the window, or refuse to.
 
     Refusal comes first and is not overridable: the sample floors were registered before the data
     existed precisely so that a short sample could not be argued into a verdict afterwards.
+
+    `detector_sensitive` carries §2's sensitivity clause: True when the probe found a phrase it was
+    handed on a plate, False when it could not, None when nobody asked. Only False blocks, and only
+    the "not working" reading — a detector that sees nothing produces two zeros, and two zeros are
+    equally consistent with a channel nobody used. Passing None keeps the old behaviour for callers
+    that have no ledger to probe, and those callers must not be able to reach BROKEN either, so the
+    block covers both False and the both-arms-zero shape that makes the question matter.
     """
     treatment = _pp(used_prompts, total_prompts)
     control = _pp(used_control_prompts, total_prompts)
@@ -95,6 +108,23 @@ def verdict(sessions, used_prompts, total_prompts, used_control_prompts):
             sessions, total_prompts, treatment, control, gap, ratio,
         )
     if gap <= BROKEN_MARGIN_PP:
+        # §2: "처치군과 대조군이 동시에 0 인 것은 '아무도 안 썼다'의 증거이기 전에 '이 검출기는
+        # 아무것도 못 본다'의 증거일 수 있다." Both arms at zero is the shape where the two
+        # readings are indistinguishable, and on 2026-09-08 that was the live state — treatment 0,
+        # control 0, denominator 515 — while the dashboard printed 비작동 in the largest type on
+        # the page. A verdict the instrument cannot support is not a conservative verdict.
+        both_silent = used_prompts == 0 and used_control_prompts == 0
+        if both_silent and detector_sensitive is not True:
+            why = (
+                "검출기 감도 미증명"
+                if detector_sensitive is None
+                else "검출기가 손에 쥐여준 사용도 못 봤다"
+            )
+            return Verdict(
+                REFUSED,
+                f"처치·대조 동시 0 (분모 {total_prompts}) · {why} — 판정이 아니라 계측 조사 (§2)",
+                sessions, total_prompts, treatment, control, gap, ratio,
+            )
         return Verdict(
             BROKEN, f"처치 {treatment:.2f}pp ≤ 대조 {control:.2f}pp + {BROKEN_MARGIN_PP:g}pp — 현재 형태의 주입 채널 비작동",
             sessions, total_prompts, treatment, control, gap, ratio,

@@ -299,11 +299,15 @@ def window_block(rows, notes):
             )
         else:
             notes.append(f"판정 표본은 어댑터 '{agent}' 것이다 (창 안에서 보고한 유일한 어댑터).")
+        # §2 gates the "not working" reading on the detector having been shown to see. Passing the
+        # probe rather than omitting it is the difference between a verdict and a guess: on
+        # 2026-09-08 both arms sat at zero and this page printed 비작동 with nobody having asked.
         verdict = verdict_core.verdict(
             counts["sessions"],
             counts["used_prompts"],
             counts["total_prompts"],
             counts["used_control_prompts"],
+            detector_sensitive=uptake_core.detector_is_sensitive(),
         )
     else:
         notes.append(
