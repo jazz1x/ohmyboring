@@ -284,17 +284,25 @@ def window_block(rows, notes):
     # stops being a verdict and becomes an instrumentation investigation. The CLI knew
     # (`clears_floor: false`) and the page printed 비작동 anyway — the clause lived in one of the
     # two surfaces that render the same window.
-    scored_sessions, distilled_sessions = set(), set()
+    scored_sessions, distilled_sessions, automated_sessions = set(), set(), set()
     for row in windowed:
-        sid = row.get("session_id") or (row.get("attributes") or {}).get("session_id")
+        attrs = row.get("attributes") or {}
+        sid = row.get("session_id") or attrs.get("session_id")
         if not sid:
             continue
         if row.get("event") == UPTAKE_EVENT:
             scored_sessions.add(sid)
         elif row.get("event") == SESSION_END_EVENT:
             distilled_sessions.add(sid)
+            # A tool reviewing a diff receives injections it has no occasion to use, so it belongs
+            # in neither half of this ratio. #286 stopped distilling those runs and kept logging
+            # that they ended; the reason it wrote down is read here rather than guessed.
+            if (attrs.get("reason") or row.get("reason")) == "automated_run":
+                automated_sessions.add(sid)
     cov_ratio, cov_eligible, cov_ok = verdict_core.coverage(
-        len(distilled_sessions), len(scored_sessions)
+        len(distilled_sessions),
+        len(scored_sessions),
+        automated_sessions=len(automated_sessions),
     )
     if not cov_ok:
         notes.append(
@@ -365,7 +373,8 @@ def window_block(rows, notes):
             "ratio": None if cov_ratio is None else round(cov_ratio, 4),
             "clears_floor": bool(cov_ok),
             "floor": verdict_core.COVERAGE_FLOOR,
-            "denominator": "all_distilled_sessions",
+            "automated_excluded": len(automated_sessions),
+            "denominator": "distilled_sessions_minus_automated_runs",
         },
         "floor_sessions": verdict.sessions,
         "min_sessions": verdict_core.MIN_SESSIONS,
