@@ -1817,19 +1817,33 @@ impl Store {
             // planner, so nothing is slower and nothing errors; they simply never leave.
             let leftovers = db
                 .query(
-                    "SELECT c.relname FROM pg_class c
+                    // `REINDEX TABLE` rebuilds the table's TOAST index too, so a failure leaves
+                    // `pg_toast_<oid>_index_ccnewN` behind -- and that index belongs to the TOAST
+                    // table, not to `claim`, so a sweep matching only `t.relname = $1` never saw
+                    // it. Nine generations had collected on the claim TOAST by 2026-09-09, one
+                    // per failed reindex, while the sweep reported itself clean.
+                    //
+                    // `c.oid::regclass` rather than `c.relname`, because a TOAST index lives in
+                    // the `pg_toast` schema, which is not on `search_path`: `DROP INDEX IF EXISTS
+                    // "pg_toast_16765_index_ccnew2"` resolves to nothing, prints
+                    // `NOTICE: does not exist, skipping`, and returns success. The sweep would
+                    // have counted nine drops and removed nothing -- a gate reporting a number it
+                    // did not do. `regclass` renders the schema qualifier when one is needed.
+                    "SELECT c.oid::regclass::text FROM pg_class c
                        JOIN pg_index i ON i.indexrelid = c.oid
                        JOIN pg_class t ON t.oid = i.indrelid
-                      WHERE NOT i.indisvalid AND t.relname = $1
+                       JOIN pg_class owner ON owner.oid = t.oid OR owner.reltoastrelid = t.oid
+                      WHERE NOT i.indisvalid AND owner.relname = $1
                         AND c.relname LIKE '%\\_ccnew%'",
                     &[&table],
                 )
                 .await
                 .with_context(|| format!("list invalid indexes on {table}"))?;
             for row in leftovers {
+                // Already quoted where quoting is needed: `regclass` output is a ready
+                // identifier, so wrapping it again would make `pg_toast.x` one bare name.
                 let name: String = row.get(0);
-                // Quoted as an identifier because it comes from the catalogue, not from a caller.
-                db.batch_execute(&format!("DROP INDEX CONCURRENTLY IF EXISTS \"{name}\";"))
+                db.batch_execute(&format!("DROP INDEX CONCURRENTLY IF EXISTS {name};"))
                     .await
                     .with_context(|| format!("drop invalid index {name}"))?;
                 report.dropped_invalid_indexes += 1;
