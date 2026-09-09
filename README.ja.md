@@ -84,6 +84,18 @@ python3 agents/shared/agent_wiring.py --install \
 
 ノートはただのマークダウンなので、**`vault/` フォルダを [Obsidian](https://obsidian.md) のvault（保管庫）として開く** だけで、グラフビュー・バックリンク・タグ・全文検索がそのまま使えます。コンパイル済みノートには Obsidian-safe な `tags` と `[[wiki-NNNN]]` の `relates_to` リンクが既に入っているため、グラフビューがメモリのつながりをそのまま描画します（`BORING_VECTOR=on` のとき GraphRAG グラフがこのリンクに投影され最も豊かになります）。専用 UI を作る必要はありません。Obsidian が作る `.obsidian/` ワークスペースフォルダは gitignore されているので、レイアウトはローカルに留まり git に漏れません。
 
+Obsidian はコーパスが何を **持っているか** を見せます。コーパスが実際に何を **しているか** — recall
+フックがどのノートをセッションに注入したか、リトリーバがそれを見つけるまでどこまで手を伸ばしたか、
+測定ウィンドウが計画どおり進んでいるか — は `make peek` で <http://127.0.0.1:7788> を開きます。
+読み取り専用で、ループバックにのみバインドし（変更するフラグはありません）、生成エンドポイントを
+一度も呼ばず、company 由来ノートの本文は伏せます。ページで `?` を押すとキーマップ、`stop` で終了です。
+
+`make peek` がコーパスの働きを見せるなら、`make usage` はその費用を見せます。同じローカル transcript
+から畳み出したトークン・モデル使用量を、日付別・モデル別・リポジトリ別・レーン別に出します。fan-out は
+会話自身の合計に混ぜず独立したレーンとして数え、リトライは一度だけ課金し、worktree は親リポジトリに
+畳み込みます。出力して終わります — 画面もネットワークもなく、キャッシュされたインデックスが一つある
+ので、再スキャンはツリー全体を舐める代わりに数秒で終わります。
+
 ---
 
 ## アーキテクチャ
@@ -234,6 +246,44 @@ make readiness
 構造化イベントは distill、collector/worker、`doctor`/`readiness`、`guard`、`eval` から記録されます。memory-ingest イベントには Rust ワークフローグラフ契約に沿った `workflow=memory_ingest`、`workflow_node`、`workflow_outcome` フィールドが付きます。イベントはまず OpenTelemetry 形式のログレコードとしてローカルエンジン DB に保存されます。NDJSON ファイルはエンジン停止時の fallback スプールで、`BORING_EVENT_SINK=spool` または `both` を選んだ場合だけ意図的にファイル中心/同時記録になります。DB view は HTTP `/events`（`/otel-events` alias も同じ）または MCP `events`、`make events` は DB を先に読み、失敗時はファイルスプールを読みます。
 
 > **埋め込みモデルを変えるとベクトルの次元が変わります。** 合成モデル（`llm.model`）は自由に差し替えられますが、`llm.embed_model` を変えるとサイズの異なるベクトルが出力されるため、`llm.embed_dim` を一致させ、**かつ** `make reset` を実行する必要があります — そうしないと旧形状のベクトルへの upsert が失敗します。よくある次元: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768。
+
+### ローカルモデルの選択
+
+ohmyboring はローカルモデルを 2 つ動かします: 蒸留/ask 用の **synthesis モデル** と、ベクトル検索用の
+**embedding モデル** です。synthesis モデルは自由に差し替えられます。embedding モデルも差し替えられますが、
+`llm.embed_dim` の更新と `make reset` が必要です。
+
+以下は MacBook の RAM 別・同スケール対応表です。片方のファミリーに実用的なモデルがない段は空欄です。
+
+| MacBook RAM | gemma4 (Google) | qwen3 (Alibaba) | 備考 |
+|------------:|-----------------|-----------------|-------|
+| 8 GB | — | `qwen3:4b` | Gemma4 に実用的な 8 GB 版はありません。 |
+| 16 GB | `gemma4:12b` | `qwen3:14b` | 最も近い同スケールの dense ペア (12B 対 14B)。 |
+| 24 GB | `gemma4:26b-a4b` | `qwen3:30b-a3b` | 同スケールの MoE ペア。 |
+| 32 GB | `gemma4:31b` | `qwen3:32b` | dense フラッグシップのペア。 |
+| 48 GB | `gemma4:31b` | `qwen3:32b` | 同じモデルで、コンテキストやアプリ用の余裕あり。 |
+| 64 GB+ | — | — | 実用的な新しいローカルペアなし。`qwen3:235b-a22b` は約 142 GB のディスクが必要。 |
+
+ベンチマークコマンド:
+
+```bash
+# RAM 段別の LLM 蒸留ベンチマーク
+make bench-llm                  # 既定は 16 GB 段
+make bench-llm-tier TIER=32gb
+
+# Embedding モデルのベンチマーク (dim / レイテンシ / sanity)
+make bench-embed
+```
+
+計測環境は MacBook Pro (M5 Pro, RAM 48 GB) + ローカル Ollama。16 GB 段のペア (`gemma4:12b` 対
+`qwen3:14b`) は、有効な JSON・目標言語のタイトル・2 つ以上の本文セクション・きれいな本文を韓国語と
+英語で 100% 達成します。日本語では `qwen3:14b` が時々韓国語のタイトルに戻り (3 サンプルで日本語
+タイトル率 67%)、`gemma4:12b` と `qwen3:8b` は 100% を保ちます。平均レイテンシは `gemma4:12b` が
+約 13–16 秒、`qwen3:14b` が約 12–18 秒、`qwen3:8b` が約 6–8 秒。`bge-m3` の embedding は 1 テキスト
+あたり平均 **0.105 秒**で、コサインの sanity check を通過しました。
+
+言語別の表・タグサイズ・方法論・LM Studio に関する注記は
+[`docs/reports/llm-pair-matrix.md`](docs/reports/llm-pair-matrix.md) を参照してください。
 
 ### ネーミング階層
 
@@ -389,6 +439,23 @@ curl -s -X POST http://localhost:7700/mcp \
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 手動 | 古い Kimi Code セッションの lazy バックフィル |
 | shared | `agents/shared/boring_config.py` | アダプター import | `boring.json` ポリシーローダー |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | 有効なエージェントの hook/MCP 設定を idempotent に構成 |
+
+### 消費エンドポイント
+
+メモリは HTTP エンドポイントまたは MCP サーバー(`http://localhost:7700/mcp`)から利用できます:
+
+| エンドポイント / MCP tool | 用途 | ベクトルバックエンド |
+|---|---|---|
+| `POST /context` / `context` | 構造化された context カード: decisions, risks, facts, glossary, next_actions | 不要 |
+| `POST /next_actions` / `next_actions` | 次アクション台帳: 明示された次の一手 + 有効な blocker | 必要 |
+| `POST /stalled` / `stalled` | 停滞台帳: 古い次の一手と blocker | 必要 |
+| `POST /status` / `project_status` | 30 日分のプロジェクト状況 (Done/Next/Blocked/Decisions/Risks) | 必要 |
+| `POST /weekly` / `weekly_brief` | プロジェクト横断の直近 7 日 | 必要 |
+| `POST /decisions` / `decisions` | プロジェクトの decision claim | 必要 |
+| `POST /risks` / `risks` | プロジェクトの risk/assumption/blocked claim | 必要 |
+| `POST /ask` / `ask` | メモリから直接答える質問 | 不要 |
+| `POST /search` / `recall` | 生のメモリ抜粋。各 hit は、配信経路に比較可能な数値がある場合に `dist` と `dist_kind`(`vector_cosine` または `text_rank`)を伴います。wiki-recall フォールバックでは、比較できない第三の尺度のスコアを報告する代わりに両方を省きます | 不要。セマンティック検索は有効時にベクトルを使用 |
+| `/remember` / `remember` | 整えたノートを保存 | — |
 
 ### トークン予算
 
