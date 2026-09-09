@@ -16,6 +16,14 @@ services:
     image: pgvector/pgvector:pg16
     container_name: boring-postgres
     restart: unless-stopped
+    # Docker gives a container 64 MB of /dev/shm, and `REINDEX CONCURRENTLY claim` wants more:
+    # the parallel build of the HNSW index over the claim embeddings asked for 61 MB in one
+    # segment and got `could not resize shared memory segment ... No space left on device`.
+    # It had been failing on every run since the index grew, which is where the invalid
+    # `claim_*_ccnew` leftovers came from -- compact swept them, rebuilt, failed, and left a
+    # fresh one behind. 1 GB is the size Postgres images are normally run with; it is an upper
+    # bound on parallel-query scratch space, not an allocation.
+    shm_size: 1gb
     environment:
       POSTGRES_USER: boring
       POSTGRES_PASSWORD: boring
