@@ -123,7 +123,11 @@ const WORK_DENIALS: &[&str] = &[
 ];
 
 fn denies_work(value: &str) -> bool {
-    let v = value.trim().trim_end_matches(['.', '。']).trim().to_lowercase();
+    let v = value
+        .trim()
+        .trim_end_matches(['.', '。'])
+        .trim()
+        .to_lowercase();
     WORK_DENIALS.contains(&v.as_str())
 }
 
@@ -354,7 +358,15 @@ mod tests {
     /// their own existence were holding several of them every morning.
     #[test]
     fn a_next_step_of_none_is_a_fact_not_a_next_step() {
-        for value in ["none", "None", " none. ", "없음", "남은 작업이 없음", "なし", "N/A"] {
+        for value in [
+            "none",
+            "None",
+            " none. ",
+            "없음",
+            "남은 작업이 없음",
+            "なし",
+            "N/A",
+        ] {
             assert_eq!(
                 claim("next", value).kind(),
                 "fact",
@@ -396,7 +408,11 @@ mod tests {
     fn the_downgrade_only_touches_the_work_kinds() {
         assert_eq!(claim("decision", "none").kind(), "decision");
         assert_eq!(claim("risk", "없음").kind(), "risk");
-        assert_eq!(claim("", "none").kind(), "fact", "absent kind still defaults");
+        assert_eq!(
+            claim("", "none").kind(),
+            "fact",
+            "absent kind still defaults"
+        );
     }
 
     /// SQL cannot call into Rust, so `store::open`'s one-time relabel repeats this vocabulary
