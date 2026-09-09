@@ -42,6 +42,7 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<HealthResp> {
         corpus_count: state.wiki_dir().as_deref().and_then(count_wiki_notes),
         db_healthy,
         build_sha: crate::serve::build_sha(),
+        compact_failure: state.compact_failure.lock().await.clone(),
     })
 }
 
@@ -703,7 +704,7 @@ pub(crate) async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncRe
     }))
 }
 
-fn system_time_rfc3339(value: SystemTime) -> String {
+pub(crate) fn system_time_rfc3339(value: SystemTime) -> String {
     let datetime: chrono::DateTime<chrono::Utc> = value.into();
     datetime.to_rfc3339()
 }
@@ -733,7 +734,23 @@ pub(crate) async fn handle_compact(
     State(s): State<AppState>,
 ) -> Result<Json<CompactResp>, AppError> {
     let _guard = s.sync_lock.lock().await;
-    let summary = super::scheduler::do_compact(s.store.as_deref()).await?;
+    let summary = match super::scheduler::do_compact(s.store.as_deref()).await {
+        Ok(summary) => {
+            *s.compact_failure.lock().await = None;
+            summary
+        }
+        Err(e) => {
+            // A hand-run compact is the same event as a scheduled one, and its failure has to
+            // land in the same place — otherwise `/health` reads clean while `/compact` 500s.
+            let mut slot = s.compact_failure.lock().await;
+            *slot = Some(super::CompactFailure::next(
+                slot.as_ref(),
+                system_time_rfc3339(SystemTime::now()),
+                format!("{e:#}"),
+            ));
+            return Err(e.into());
+        }
+    };
     *s.last_compact.lock().await = Some(Instant::now());
     Ok(Json(CompactResp {
         vacuum_ms: summary.report.vacuum_ms,

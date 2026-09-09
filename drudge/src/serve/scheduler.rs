@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 
 use anyhow::Result;
 
+use super::CompactFailure;
 use crate::ask;
 use crate::audit;
 use crate::config;
@@ -149,18 +150,32 @@ async fn run_sync(
     }
 }
 
-async fn run_compact(store: Option<&Store>) {
+/// Returns whether the run finished, and records a failure where something can read it.
+async fn run_compact(store: Option<&Store>, failure: &Mutex<Option<CompactFailure>>) -> bool {
     match do_compact(store).await {
-        Ok(s) => eprintln!(
-            "[scheduler] compact done — vacuum {}ms reindex {}ms prune_query_log {} gc(tool {} concept {}) total {}ms",
-            s.report.vacuum_ms,
-            s.report.reindex_ms,
-            s.report.prune_query_log,
-            s.report.gc_tool,
-            s.report.gc_concept,
-            s.total_ms
-        ),
-        Err(e) => eprintln!("[scheduler] compact error: {e:#}"),
+        Ok(s) => {
+            eprintln!(
+                "[scheduler] compact done — vacuum {}ms reindex {}ms prune_query_log {} gc(tool {} concept {}) total {}ms",
+                s.report.vacuum_ms,
+                s.report.reindex_ms,
+                s.report.prune_query_log,
+                s.report.gc_tool,
+                s.report.gc_concept,
+                s.total_ms
+            );
+            *failure.lock().await = None;
+            true
+        }
+        Err(e) => {
+            eprintln!("[scheduler] compact error: {e:#}");
+            let mut slot = failure.lock().await;
+            *slot = Some(CompactFailure::next(
+                slot.as_ref(),
+                super::http::system_time_rfc3339(std::time::SystemTime::now()),
+                format!("{e:#}"),
+            ));
+            false
+        }
     }
 }
 
@@ -246,6 +261,7 @@ pub(crate) fn spawn_scheduler(
     cfg: Arc<config::BoringConfig>,
     sync_lock: Arc<Mutex<()>>,
     last_compact: Arc<Mutex<Option<Instant>>>,
+    compact_failure: Arc<Mutex<Option<CompactFailure>>>,
 ) {
     // `.max(1)` — `BORING_SYNC_HOURS=0` would make a zero Duration, and
     // tokio::time::interval panics on a zero period. Clamp to ≥1h.
@@ -307,8 +323,11 @@ pub(crate) fn spawn_scheduler(
                 // This keeps maintenance aligned with write load rather than running on a fixed clock.
                 let mut last = last_compact.lock().await;
                 if last.is_none_or(|t| t.elapsed() >= compact_interval) {
-                    run_compact(store_ref).await;
-                    *last = Some(Instant::now());
+                    // Only a run that finished resets the window. Stamping the clock on failure
+                    // made a compact that never once succeeded look like one on schedule.
+                    if run_compact(store_ref, &compact_failure).await {
+                        *last = Some(Instant::now());
+                    }
                 }
             }
         }

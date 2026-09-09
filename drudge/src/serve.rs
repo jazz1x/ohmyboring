@@ -87,6 +87,12 @@ pub struct AppState {
     pub(crate) wiki_index: Arc<std::sync::Mutex<wiki_recall::WikiIndex>>,
     /// Last successful compact time, shared with scheduler so manual `/compact` resets the window.
     pub(crate) last_compact: Arc<Mutex<Option<std::time::Instant>>>,
+    /// The last compact failure, or `None` when the last attempt succeeded. `REINDEX CONCURRENTLY`
+    /// had been failing on every run for weeks against a container's default 64 MB of /dev/shm,
+    /// and the only trace was `eprintln!` in the docker log: `/health` did not carry it, `doctor`
+    /// did not ask, and the scheduler reset its window as though the run had worked. A failure
+    /// nothing can observe is indistinguishable from no failure.
+    pub(crate) compact_failure: Arc<Mutex<Option<CompactFailure>>>,
     /// Last observed DB health state for transition logging. `Unknown` until the first /health probe.
     /// Wrapped in Arc so AppState remains Clone while the atomic is shared across cloned state handles.
     pub(crate) db_healthy_last: Arc<AtomicU8>,
@@ -199,7 +205,7 @@ fn transition_log(prev: DbHealthState, next: DbHealthState, error: Option<&str>)
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{DbHealthState, transition_log};
+    use super::{CompactFailure, DbHealthState, HealthResp, SyncState, transition_log};
 
     #[test]
     fn same_state_is_silent() {
@@ -243,6 +249,62 @@ mod tests {
         .unwrap();
         assert!(log.starts_with("[health] db degraded:"));
         assert!(log.contains("cannot connect"));
+    }
+
+    /// The number the docker log could never carry. A compact that fails once is a hiccup;
+    /// the 64 MB case (#304) had been failing on every run for weeks, and nothing counted.
+    #[test]
+    fn consecutive_failures_accumulate_until_a_run_succeeds() {
+        let first = CompactFailure::next(None, "2026-09-09T00:00:00Z".into(), "shm".into());
+        assert_eq!(first.consecutive, 1);
+        let second =
+            CompactFailure::next(Some(&first), "2026-09-09T04:00:00Z".into(), "shm".into());
+        assert_eq!(second.consecutive, 2, "a second failure is not a first one");
+        assert_eq!(
+            second.at, "2026-09-09T04:00:00Z",
+            "the timestamp is of the latest attempt, not the first"
+        );
+        let capped = CompactFailure::next(
+            Some(&CompactFailure {
+                at: String::new(),
+                consecutive: u32::MAX,
+                error: String::new(),
+            }),
+            String::new(),
+            String::new(),
+        );
+        assert_eq!(
+            capped.consecutive,
+            u32::MAX,
+            "saturates rather than wrapping to 0"
+        );
+    }
+
+    /// Health carries the failure only while there is one: the field's presence is the alarm,
+    /// and `doctor` (a2c) tests presence rather than parsing a status word.
+    #[test]
+    fn health_omits_the_failure_once_a_compact_succeeds() {
+        let mut resp = HealthResp {
+            status: "ok",
+            vector: true,
+            sync: SyncState::Idle,
+            corpus_count: None,
+            db_healthy: None,
+            build_sha: None,
+            compact_failure: Some(CompactFailure::next(
+                None,
+                "2026-09-09T00:00:00Z".into(),
+                "boom".into(),
+            )),
+        };
+        let failing = serde_json::to_string(&resp).unwrap();
+        assert!(failing.contains("compact_failure"), "was {failing}");
+        resp.compact_failure = None;
+        let healthy = serde_json::to_string(&resp).unwrap();
+        assert!(
+            !healthy.contains("compact_failure"),
+            "a healthy engine's /health must read exactly as it did before: {healthy}"
+        );
     }
 
     #[test]
@@ -656,6 +718,34 @@ pub(crate) struct HealthResp {
     /// to see whether what is running is what was merged; `scripts/doctor.sh` does exactly that.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) build_sha: Option<String>,
+    /// Present only while the last compact attempt failed, so a healthy engine's /health is
+    /// unchanged and the field's mere presence is the alarm. `scripts/doctor.sh` (d7) reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) compact_failure: Option<CompactFailure>,
+}
+
+impl CompactFailure {
+    /// The next failure record, given whatever the last one was. Pulled out of the two call
+    /// sites (the scheduler and hand-run `/compact`) so the count is defined in one place and
+    /// can be tested without a database: the number that matters is not "it failed" but "it has
+    /// been failing since July", and that is the one a run-by-run `eprintln!` can never carry.
+    pub(crate) fn next(previous: Option<&Self>, at: String, error: String) -> Self {
+        Self {
+            at,
+            consecutive: previous.map_or(1, |f| f.consecutive.saturating_add(1)),
+            error,
+        }
+    }
+}
+
+/// A compact run that did not finish, kept until one does.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct CompactFailure {
+    /// RFC3339, so the reader can tell "failing since breakfast" from "failing since July".
+    pub(crate) at: String,
+    /// Consecutive failures. One is a hiccup; the 64 MB case would have been counting for weeks.
+    pub(crate) consecutive: u32,
+    pub(crate) error: String,
 }
 
 /// Reads the build stamp. Empty or unset both mean "not stamped" — an empty string would
@@ -710,6 +800,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
     let addr = config::env_set("BORING_HTTP_ADDR").unwrap_or_else(|| "0.0.0.0:7700".to_owned());
 
     let last_compact = Arc::new(Mutex::new(None));
+    let compact_failure = Arc::new(Mutex::new(None));
     let pii = vault_dir
         .as_ref()
         .map(|vd| crate::pii::PiiScanner::load_from_vault(vd))
@@ -736,6 +827,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         cfg_path: Arc::new(cfg_path),
         sync_lock: Arc::new(Mutex::new(())),
         last_compact: Arc::clone(&last_compact),
+        compact_failure: Arc::clone(&compact_failure),
         wiki_index: Arc::new(std::sync::Mutex::new(wiki_recall::WikiIndex::default())),
         db_healthy_last: Arc::new(AtomicU8::new(DbHealthState::Unknown.to_u8())),
     };
@@ -747,6 +839,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         Arc::clone(&state.cfg),
         Arc::clone(&state.sync_lock),
         Arc::clone(&last_compact),
+        Arc::clone(&compact_failure),
     );
     // cfg_path is only used by the HTTP/MCP handlers; the scheduler does not need it.
 

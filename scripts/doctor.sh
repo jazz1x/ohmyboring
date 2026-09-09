@@ -56,6 +56,7 @@ failed_midpoint=0
 failed_codex=0
 failed_resolution=0
 failed_freshness=0
+failed_maintenance=0
 
 ok()   { echo "✓ $1"; }
 bad()  { echo "✗ $1"; }
@@ -82,6 +83,7 @@ log_doctor_event() {
             --field "failed_codex=$failed_codex" \
             --field "failed_resolution=$failed_resolution" \
             --field "failed_freshness=$failed_freshness" \
+            --field "failed_maintenance=$failed_maintenance" \
             --field "drudge_down=$drudge_down"; then
             echo "⚠ doctor event log write failed" >&2
         fi
@@ -536,6 +538,44 @@ if [ -f "$ledger_probe" ] && [ "${BORING_SKIP_LEDGER_PROBE:-0}" != 1 ]; then
 fi
 
 wiring="$BORING_HOME/agents/shared/agent_wiring.py"
+# (a2c) A compact that never finishes. `REINDEX CONCURRENTLY claim` had been failing on every
+# run against a container's default 64 MB of /dev/shm (#304) and the only trace was one
+# `eprintln!` in the docker log — /health did not carry it, this file did not ask, and the
+# scheduler stamped its window as though the run had worked. Weeks of a maintenance job doing
+# nothing, with every gate green.
+#
+# The engine now keeps the last failure and omits the field entirely once a run succeeds, so
+# the field's presence is the alarm and a healthy engine reads exactly as it did before.
+if [ "$drudge_down" -eq 0 ]; then
+    compact_fail="$(curl -sf -m5 "$BORING_URL/health" 2>/dev/null \
+        | sed -n 's/.*"compact_failure":{\([^}]*\)}.*/\1/p')"
+    if [ -z "$compact_fail" ]; then
+        ok "maintenance: last compact finished (no compact_failure on /health)"
+    else
+        compact_n="$(printf '%s' "$compact_fail" | sed -n 's/.*"consecutive":\([0-9]*\).*/\1/p')"
+        compact_at="$(printf '%s' "$compact_fail" | sed -n 's/.*"at":"\([^"]*\)".*/\1/p')"
+        compact_err="$(printf '%s' "$compact_fail" | sed -n 's/.*"error":"\(.*\)"$/\1/p')"
+        bad "COMPACT FAILING — ${compact_n:-?} consecutive, last at ${compact_at:-unknown}: ${compact_err:-no message}. VACUUM/REINDEX/prune/orphan-GC are all not running; the tables only grow and invalid index leftovers accumulate."
+        failed_maintenance=1
+    fi
+fi
+
+# (a2d) The repo's own gate, unwired. `.pre-commit-config.yaml` and the `pre-commit` binary were
+# both present on 2026-09-09 while `.git/hooks/` held nothing but samples, so `scripts/guard.sh`
+# was something a person remembered to run and then read the result of by hand. That is where the
+# day's worst mistake came from: guard printed `exit=1` on the first line of its log, the wrapper
+# printed `exited with code 0` on the last, and the last line is what got read and believed.
+#
+# A gate whose verdict a human carries is not an edge. This checks that the edge exists.
+if [ -f "$BORING_HOME/.pre-commit-config.yaml" ]; then
+    if [ -x "$BORING_HOME/.git/hooks/pre-commit" ]; then
+        ok "pre-commit hook installed — guard runs on commit, not on memory"
+    else
+        bad "PRE-COMMIT HOOK MISSING — .pre-commit-config.yaml exists but .git/hooks/pre-commit does not. Run 'pre-commit install'. Until then every gate result is one a person has to read and carry."
+        failed_maintenance=1
+    fi
+fi
+
 # (d5e) The same hook registered twice, read from the configs rather than from the damage.
 # (d5c) below finds a hook that FIRED twice, which means it only speaks after the duplicate has
 # written rows, and it stays silent forever for an adapter registered twice that never runs. Kimi
@@ -664,8 +704,8 @@ fi
 
 echo
 if [ "$STRICT" -eq 1 ]; then
-    failures="${failed_env}${failed_hooks}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}${failed_midpoint}"
-    if [ "$failures" = "00000000000" ]; then
+    failures="${failed_env}${failed_hooks}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}${failed_midpoint}${failed_maintenance}"
+    if [ "$failures" = "000000000000" ]; then
         ok "readiness: all doctor checks passed — briefing/write-door dependencies are ready."
         log_doctor_event ok
         exit 0

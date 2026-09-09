@@ -88,6 +88,7 @@ sh scripts/test_restore_db.sh
 echo "7) shell readiness gate guardrails (doctor --strict)…"
 sh scripts/test_doctor.sh
 sh scripts/test_drudge_health_readiness.sh
+sh scripts/test_doctor_maintenance.sh
 echo "8) shell LLM/provider guardrails (verify-llm)…"
 sh scripts/test_verify_llm.sh
 echo "✅ 구조 게이트 통과 — 컴파일러/clippy/test + Python adapters 무위반."
