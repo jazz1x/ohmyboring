@@ -135,6 +135,49 @@ def _session_throttled(session_id: str | None) -> bool:
     return False
 
 
+#: The injected budget per hit. Unchanged: this is not about carrying more, it is about carrying
+#: the right half.
+SNIPPET_CHARS = 280
+
+#: Section headings a distilled note uses for what it decided, in the order the distiller writes
+#: them. The prose before these is what happened; the prose under them is what to do about it.
+DECISION_HEADINGS = ("## 결정", "## 남은 일", "## 결과", "## 교훈", "## Decision")
+
+
+def salient(snippet, limit=SNIPPET_CHARS):
+    """The part of a note worth carrying, not merely its first `limit` characters.
+
+    Distilled notes run 배경 → 실측 → 뿌리 → 결정, so a head-only slice injects the diagnosis and
+    leaves the prescription behind — every time, for every note longer than the cap. Measured
+    2026-09-09: `wiki-1636` was injected nine times and all nine carried the same four phrases
+    from its 배경/실측 sections. Its 결정 lines ("노드 완료 = 커밋 수", "완료 통지가 곧 엣지") sit
+    at 721–860 characters and were injected zero times. A note that diagnosed a repeating mistake
+    could not deliver the fix for it.
+
+    Half the budget goes to the head so the note still says what it is about; the rest starts at
+    the first decision heading. With no such heading, or a note that fits, this is the old
+    behaviour exactly — it changes long structured notes and nothing else.
+    """
+    flat = " ".join((snippet or "").split())
+    if len(flat) <= limit:
+        # Removing this guard changes no observable output — a short note slices to itself either
+        # way — so no test can kill that mutant. It stays because the intent is "short notes are
+        # not truncated", and a reader should not have to derive that from slice arithmetic.
+        return flat
+    cut = -1
+    for heading in DECISION_HEADINGS:
+        found = flat.find(heading)
+        if found > 0 and (cut < 0 or found < cut):
+            cut = found
+    # A decision that starts inside the head slice is already being carried; splicing there would
+    # spend the budget printing the same words twice.
+    if cut < 0 or cut < limit // 2:
+        return flat[:limit]
+    head = flat[: limit // 2].rstrip()
+    tail = flat[cut : cut + max(0, limit - len(head) - 3)].rstrip()
+    return f"{head} … {tail}"
+
+
 def run_recall(
     data: dict,
     is_injection: Optional[Callable[[dict], bool]] = None,
@@ -180,7 +223,7 @@ def run_recall(
         # comparable to RELEVANCE_MAX_DIST, so they are never judged by it (see the constant above).
         if exceeds_relevance_ceiling(h):
             over_ceiling.append((src, dist))
-        snip = " ".join((h.get("snippet") or "").split())[:280]
+        snip = salient(h.get("snippet"))
         if snip:
             lines.append(f"- [{src}] {snip}")
     if over_ceiling:
