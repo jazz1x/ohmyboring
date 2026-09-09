@@ -84,6 +84,18 @@ python3 agents/shared/agent_wiring.py --install \
 
 노트는 그냥 마크다운이므로, **`vault/` 폴더를 [Obsidian](https://obsidian.md) 보관함(vault)으로 열면** 그래프 뷰, 백링크, 태그, 전문 검색을 그대로 쓸 수 있습니다. 컴파일된 노트에는 이미 Obsidian-safe `tags`와 `[[wiki-NNNN]]` `relates_to` 링크가 들어 있어, 그래프 뷰가 메모리의 연결 관계를 바로 그려 줍니다(`BORING_VECTOR=on`일 때 GraphRAG 그래프가 이 링크로 투영되어 가장 풍부합니다). 별도 UI를 만들 필요가 없습니다. Obsidian이 만드는 `.obsidian/` 작업 폴더는 gitignore 처리되어, 내 레이아웃이 로컬에만 남고 git에 새지 않습니다.
 
+Obsidian은 코퍼스가 무엇을 **담고 있는지** 보여 줍니다. 코퍼스가 실제로 무엇을 **하는지** — 회수 훅이
+어떤 노트를 세션에 주입했는지, 검색기가 그 노트를 찾기까지 얼마나 멀리 뻗었는지, 측정 창이 계획대로
+가고 있는지 — 는 `make peek`으로 보고 <http://127.0.0.1:7788>을 엽니다. 읽기 전용이고, 루프백에만
+바인딩하며 그것을 바꿀 플래그가 없고, 생성 엔드포인트를 한 번도 부르지 않으며, 회사 출처 노트의
+본문은 가립니다. 페이지에서 `?`를 누르면 키 맵이, `stop`은 종료입니다.
+
+`make peek`이 코퍼스가 나에게 해 준 일을 보여 준다면, `make usage`는 그 비용을 보여 줍니다. 같은
+로컬 transcript에서 접어 낸 토큰·모델 사용량을 날짜별·모델별·레포별·레인별로 냅니다. 팬아웃은 대화
+자신의 합계에 섞이지 않고 별도 레인으로 잡히고, 재시도는 한 번만 과금되며, worktree는 부모 레포로
+접힙니다. 출력하고 끝납니다 — 화면도 네트워크도 없고, 캐시된 인덱스 하나 덕분에 재스캔은 트리 전체를
+훑는 대신 수 초로 끝납니다.
+
 ---
 
 ## 아키텍처
@@ -419,6 +431,23 @@ curl -s -X POST http://localhost:7700/mcp \
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 수동 | 오래된 Kimi Code 세션 lazy 백필 |
 | shared | `agents/shared/boring_config.py` | 어댑터 import | `boring.json` 정책 로더 |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | 활성화된 에이전트의 hook/MCP 설정을 idempotent하게 구성 |
+
+### 소비 엔드포인트
+
+메모리는 HTTP 엔드포인트나 MCP 서버(`http://localhost:7700/mcp`)로 접근할 수 있습니다:
+
+| 엔드포인트 / MCP tool | 용도 | 벡터 백엔드 |
+|---|---|---|
+| `POST /context` / `context` | 구조화된 context 카드: decisions, risks, facts, glossary, next_actions | 불필요 |
+| `POST /next_actions` / `next_actions` | 다음 행동 대장: 명시된 다음 단계 + 활성 blocker | 필요 |
+| `POST /stalled` / `stalled` | 정체 대장: 오래된 다음 단계와 blocker | 필요 |
+| `POST /status` / `project_status` | 30일 프로젝트 상태 (Done/Next/Blocked/Decisions/Risks) | 필요 |
+| `POST /weekly` / `weekly_brief` | 프로젝트 전반의 최근 7일 | 필요 |
+| `POST /decisions` / `decisions` | 프로젝트의 decision claim | 필요 |
+| `POST /risks` / `risks` | 프로젝트의 risk/assumption/blocked claim | 필요 |
+| `POST /ask` / `ask` | 메모리에서 바로 답하는 직접 질문 | 불필요 |
+| `POST /search` / `recall` | 가공하지 않은 메모리 발췌. 각 hit은 서빙 경로에 비교 가능한 수치가 있을 때 `dist`와 `dist_kind`(`vector_cosine` 또는 `text_rank`)를 함께 냅니다. wiki-recall 폴백에서는 세 번째 비교 불가능한 척도의 점수를 보고하는 대신 둘 다 생략합니다 | 불필요. 시맨틱 검색은 활성화 시 벡터 사용 |
+| `/remember` / `remember` | 정제된 노트 저장 | — |
 
 ### 토큰 예산
 

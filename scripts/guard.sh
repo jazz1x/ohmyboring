@@ -82,6 +82,7 @@ python3 scripts/test_uptake_verdict.py
 python3 scripts/test_retention.py
 python3 scripts/test_self_verify_contract.py
 python3 scripts/test_peek.py
+python3 scripts/test_readme_locale_parity.py
 echo "6) shell destructive-path guardrails (restore-db)…"
 sh scripts/test_restore_db.sh
 echo "7) shell readiness gate guardrails (doctor --strict)…"
