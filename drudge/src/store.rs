@@ -453,6 +453,43 @@ impl Store {
                      WHERE superseded_at IS NULL;
                  CREATE INDEX IF NOT EXISTS claim_kind ON claim(kind)
                      WHERE superseded_at IS NULL;
+                 -- A claim that there is no next step is not a next step. The distiller has
+                 -- been writing `next-step: none` / `남은작업: 없음` as `kind: next` since the
+                 -- beginning, so the stalled register reported work that was already finished every
+                 -- morning: 75 of 645 current next/blocked claims (2026-09-09) denied their own
+                 -- existence, and `k6/k7`, `pr-232`, `fds-17084` and `omcr-completed-form` were
+                 -- holding slots in the twelve the register actually renders.
+                 --
+                 -- `frontmatter::Claim::kind` stops new ones; this relabels what is already
+                 -- stored. A non-fact claim writes two node rows (`claim:s:p` carrying the kind
+                 -- in `outcome`, plus a typed `next:s:p` node joined by `is_a`), so the mirror
+                 -- has to lose the typed node and its edge, exactly as the non-fact
+                 -- branch in `upsert_claim_node` would never have created them.
+                 --
+                 -- Idempotent: each predicate matches nothing on a second run. The vocabulary is
+                 -- duplicated from `frontmatter::WORK_DENIALS` because SQL cannot call into Rust;
+                 -- `test_work_denials_match_the_migration` fails if the two lists drift apart.
+                 CREATE TEMP TABLE denied_claim ON COMMIT DROP AS
+                   SELECT DISTINCT subject, predicate, kind FROM claim
+                    WHERE kind IN ('next', 'blocked')
+                      AND lower(btrim(btrim(value), '.。')) = ANY(ARRAY[
+                          'none', 'nothing', 'n/a', 'na', 'not applicable', 'no', '-', '--',
+                          '없음', '없다', '없습니다', '없어요', '해당 없음', '해당없음',
+                          '남은 작업 없음', '남은 작업이 없음', 'なし', '無し', '該当なし']);
+                 DELETE FROM edge e USING denied_claim d
+                  WHERE e.kind = 'is_a'
+                    AND e.src = 'claim:' || d.subject || ':' || d.predicate
+                    AND e.dst = d.kind  || ':' || d.subject || ':' || d.predicate;
+                 DELETE FROM node n USING denied_claim d
+                  WHERE n.id = d.kind || ':' || d.subject || ':' || d.predicate;
+                 UPDATE node n SET outcome = 'fact'
+                   FROM denied_claim d
+                  WHERE n.id = 'claim:' || d.subject || ':' || d.predicate
+                    AND n.outcome IN ('next', 'blocked');
+                 UPDATE claim c SET kind = 'fact'
+                   FROM denied_claim d
+                  WHERE c.subject = d.subject AND c.predicate = d.predicate
+                    AND c.kind IN ('next', 'blocked');
                  CREATE INDEX IF NOT EXISTS claim_hnsw ON claim USING hnsw (embedding vector_cosine_ops)
                      WHERE superseded_at IS NULL;
                  CREATE TABLE IF NOT EXISTS query_log (

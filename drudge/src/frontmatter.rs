@@ -58,9 +58,28 @@ pub struct Claim {
 
 impl Claim {
     /// Normalized kind, or `"fact"` when absent/unknown.
+    ///
+    /// A `next` or `blocked` claim whose value is a denial -- `none`, `없음`, `なし` -- is
+    /// downgraded to `fact`, because it is one: the note is reporting that there is no next
+    /// step, and that report is true. Read as `next` it becomes its own opposite, and the
+    /// stalled register spent months telling the owner every morning to go finish
+    /// `fds-17084 next-step: none`. 75 of 645 current next/blocked claims said this
+    /// (measured 2026-09-09); `k6/k7`, `pr-232` and `omcr-completed-form` were among the
+    /// twelve slots the register actually renders.
+    ///
+    /// Downgrading rather than dropping, because "nothing is left here" is worth keeping and
+    /// worth being asked about -- it just is not work. The vocabulary is deliberately literal
+    /// and whole-value only: `pending`, `unrelated` and `미정` stay `next`, since those name a
+    /// state the work is in rather than its absence.
     pub fn kind(&self) -> &str {
         let k = self.kind.trim();
-        if k.is_empty() { "fact" } else { k }
+        if k.is_empty() {
+            return "fact";
+        }
+        if (k == "next" || k == "blocked") && denies_work(&self.value) {
+            return "fact";
+        }
+        k
     }
 
     /// Normalized confidence, or `"unknown"` when the note did not say.
@@ -74,6 +93,38 @@ impl Claim {
         let c = self.confidence.trim();
         if c.is_empty() { "unknown" } else { c }
     }
+}
+
+/// Whole-value denials of work, in the three languages the corpus is written in.
+///
+/// Whole-value only, and lowercased after trimming a single trailing `.`: a value that merely
+/// *contains* one of these is a real next step ("none of the retries landed"), and only a value
+/// that *is* one is the note saying there is nothing to do.
+const WORK_DENIALS: &[&str] = &[
+    "none",
+    "nothing",
+    "n/a",
+    "na",
+    "not applicable",
+    "no",
+    "-",
+    "--",
+    "없음",
+    "없다",
+    "없습니다",
+    "없어요",
+    "해당 없음",
+    "해당없음",
+    "남은 작업 없음",
+    "남은 작업이 없음",
+    "なし",
+    "無し",
+    "該当なし",
+];
+
+fn denies_work(value: &str) -> bool {
+    let v = value.trim().trim_end_matches(['.', '。']).trim().to_lowercase();
+    WORK_DENIALS.contains(&v.as_str())
 }
 
 impl FrontMatter {
@@ -170,7 +221,7 @@ pub fn render(front: &FrontMatter, body: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use super::{FrontMatter, parse, render};
+    use super::{Claim, FrontMatter, WORK_DENIALS, parse, render};
     use crate::config::BoringConfig;
 
     fn test_cfg() -> BoringConfig {
@@ -287,6 +338,89 @@ mod tests {
         let raw = "---\norigin: personal\n---\n본문";
         let (fm, _) = parse(raw, "/vault/wiki/note.md", &test_cfg()).unwrap();
         assert_eq!(fm.project, "");
+    }
+
+    fn claim(kind: &str, value: &str) -> Claim {
+        Claim {
+            subject: "fds-17084".into(),
+            predicate: "next-step".into(),
+            value: value.into(),
+            kind: kind.into(),
+            confidence: "certain".into(),
+        }
+    }
+
+    /// The bug this fixes: the stalled register renders twelve slots, and claims that denied
+    /// their own existence were holding several of them every morning.
+    #[test]
+    fn a_next_step_of_none_is_a_fact_not_a_next_step() {
+        for value in ["none", "None", " none. ", "없음", "남은 작업이 없음", "なし", "N/A"] {
+            assert_eq!(
+                claim("next", value).kind(),
+                "fact",
+                "{value:?} denies that there is a next step"
+            );
+            assert_eq!(
+                claim("blocked", value).kind(),
+                "fact",
+                "{value:?} denies that there is a blocker"
+            );
+        }
+    }
+
+    /// Naming the state the work is in is not the same as saying there is no work. These were
+    /// live values in the corpus when the gate went in; downgrading them would lose real items.
+    #[test]
+    fn a_next_step_that_names_a_state_stays_a_next_step() {
+        for value in [
+            "pending",
+            "required",
+            "필요",
+            "미정",
+            "unavailable",
+            "docker rerun",
+            "none of the retries landed",
+            "확인 결과 해당 없음으로 판명되어 재작업 필요",
+        ] {
+            assert_eq!(
+                claim("next", value).kind(),
+                "next",
+                "{value:?} names a state, not an absence"
+            );
+        }
+    }
+
+    /// A `fact` or `decision` is never reinterpreted -- the downgrade only ever removes a claim
+    /// from the work registers, and must not reach into the rest of the vocabulary.
+    #[test]
+    fn the_downgrade_only_touches_the_work_kinds() {
+        assert_eq!(claim("decision", "none").kind(), "decision");
+        assert_eq!(claim("risk", "없음").kind(), "risk");
+        assert_eq!(claim("", "none").kind(), "fact", "absent kind still defaults");
+    }
+
+    /// SQL cannot call into Rust, so `store::open`'s one-time relabel repeats this vocabulary
+    /// by hand. If someone adds a word here and not there, new notes are downgraded while the
+    /// rows already in the database keep haunting the stalled register -- the exact
+    /// one-value-in-two-places defect this repo keeps paying for. Fail loudly instead.
+    #[test]
+    fn test_work_denials_match_the_migration() {
+        let store = include_str!("store.rs");
+        let start = store
+            .find("CREATE TEMP TABLE denied_claim")
+            .expect("the relabel migration is gone -- was it dropped, or renamed?");
+        let end = store[start..]
+            .find("]);")
+            .map(|i| start + i)
+            .expect("migration array is unterminated");
+        let sql = &store[start..end];
+        for word in WORK_DENIALS {
+            assert!(
+                sql.contains(&format!("'{word}'")),
+                "{word:?} is in WORK_DENIALS but not in the migration, so notes written from \
+                 now on are downgraded while the rows already stored are not"
+            );
+        }
     }
 
     /// The scheduler writes a `brief_sources:` list into the brief note so `/brief` can serve it
