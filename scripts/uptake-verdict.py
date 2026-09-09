@@ -44,29 +44,36 @@ def fetch_events(base_url, limit):
 
 
 def session_counts(rows, since, until):
-    """Sessions distilled and sessions scored inside the window, for §2's coverage clause.
+    """Sessions distilled, scored, and skipped as automated inside the window, for §2's coverage.
 
-    Reads the same `/events` feed the verdict already fetches. The automated share is not counted
-    here: this file cannot see a transcript, and guessing from an event would be inventing the
-    number that decides whether a verdict is allowed. The caller that can classify passes it in;
-    a caller that cannot gets the raw ratio and the contract's stricter reading of it.
+    Reads the same `/events` feed the verdict already fetches. The automated count comes from the
+    ledger's own `automated_run` reason rather than from re-reading transcripts: the distiller
+    already classified those sessions and wrote the answer down, so counting them here is reading
+    a recorded fact, not guessing one.
     """
-    distilled, scored = set(), set()
+    distilled, scored, automated = set(), set(), set()
     for row in rows or []:
-        observed = (row.get("observed_at") or "")[:10]
+        observed = verdict_core.window_day(row.get("observed_at"))
         if since and observed < since:
             continue
         if until and observed > until:
             continue
-        sid = row.get("session_id") or (row.get("attributes") or {}).get("session_id")
+        attrs = row.get("attributes") or {}
+        sid = row.get("session_id") or attrs.get("session_id")
         if not sid:
             continue
         name = row.get("event")
         if name == "distill_resolution":
             distilled.add(sid)
+            # #286 stopped distilling automated runs but kept recording that they ended, so they
+            # stayed in the coverage denominator — 74 of them inside the window. `coverage()` has
+            # taken an `automated_sessions` argument since #289 and neither caller filled it, which
+            # is how a parameter written for exactly this becomes decoration.
+            if (attrs.get("reason") or row.get("reason")) == "automated_run":
+                automated.add(sid)
         elif name == "injection_uptake":
             scored.add(sid)
-    return len(distilled), len(scored)
+    return len(distilled), len(scored), len(automated)
 
 
 #: Exit codes for `--midpoint`. Distinct on purpose: four different absences read as "0 sessions"
@@ -126,8 +133,8 @@ def _midpoint(per_agent, skipped_old, today=None):
 
 def _coverage_payload(rows, since, until):
     """The coverage clause as data: the ratio, its denominator, and whether §2 allows a verdict."""
-    distilled, scored = session_counts(rows, since, until)
-    ratio, eligible, ok = coverage(distilled, scored)
+    distilled, scored, automated = session_counts(rows, since, until)
+    ratio, eligible, ok = coverage(distilled, scored, automated_sessions=automated)
     return {
         "distilled_sessions": distilled,
         "scored_sessions": scored,
@@ -139,7 +146,10 @@ def _coverage_payload(rows, since, until):
         # distinction moved the ratio from 14% to 83% (§8 D8). A reader who does not know which
         # population a coverage number describes cannot use it, and a field named
         # `automated_excluded: 0` would have read as "we checked, there were none".
-        "denominator": "all_distilled_sessions",
+        "automated_excluded": automated,
+        # Named so a reader knows which population the ratio describes. §8 D8: the same figure was
+        # 14% over every distilled session and 83% over the sessions a person actually ran.
+        "denominator": "distilled_sessions_minus_automated_runs",
     }
 
 
