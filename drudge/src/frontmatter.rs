@@ -423,7 +423,7 @@ mod tests {
     fn test_work_denials_match_the_migration() {
         let store = include_str!("store.rs");
         let start = store
-            .find("CREATE TEMP TABLE denied_claim")
+            .find("CREATE TEMP TABLE denied_now")
             .expect("the relabel migration is gone -- was it dropped, or renamed?");
         let end = store[start..]
             .find("]);")
