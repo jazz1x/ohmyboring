@@ -22,25 +22,72 @@ from datetime import datetime, timezone
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agents", "shared"))
 
 import verdict_core  # noqa: E402
 import uptake_core  # noqa: E402
+import distill_core  # noqa: E402
 from verdict_core import collect, coverage, partition_at_repair, unreported  # noqa: E402
 
 DEFAULT_URL = os.environ.get("BORING_URL") or "http://127.0.0.1:7700"
 
 
-def fetch_events(base_url, limit):
+#: The event names the verdict actually reads. Fetched one at a time because `/events` clamps
+#: `limit` to 1000 server-side and says nothing about it: asking for 5000 returned 1000 of the
+#: window's 1860 rows, and the pre-registered verdict was being computed on 54% of its own sample
+#: with no line anywhere saying so. Split by name, each query is far under the cap -- 364
+#: `distill_resolution` and 44 `injection_uptake` inside the window on 2026-09-10.
+VERDICT_EVENT_NAMES = ("injection_uptake", "distill_resolution")
+
+
+def _fetch_page(base_url, limit, event_name=None):
     url = f"{base_url.rstrip('/')}/events?limit={limit}"
+    if event_name:
+        # The query parameter is `event`; the field it fills is named `event_name`
+        # (`EventLogReq`, serde rename). Sending `event_name=` is accepted and silently ignored,
+        # which returns the whole unfiltered feed — a filter that looks applied and is not.
+        url += f"&event={urllib.parse.quote(event_name)}"
     try:
         with urllib.request.urlopen(url, timeout=60) as resp:
-            return json.loads(resp.read().decode("utf-8")).get("entries") or []
+            body = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         print(f"[uptake-verdict] engine unreachable at {url}: {exc}", file=sys.stderr)
         return None
+    return body.get("entries") or [], bool(body.get("maybe_truncated")), body.get("limit_applied")
+
+
+def fetch_events(base_url, limit):
+    """Every event the verdict reads, or None when the engine is unreachable.
+
+    A full page is reported rather than swallowed. Truncation and completeness look identical
+    from the caller's side -- both are just "some rows" -- and the one that gets believed is
+    whichever the reader assumed.
+    """
+    rows, truncated = [], []
+    for name in VERDICT_EVENT_NAMES:
+        page = _fetch_page(base_url, limit, name)
+        if page is None:
+            return None
+        entries, maybe_truncated, applied = page
+        # The server's own word, not a guess from the row count. `/events` clamps `limit` to
+        # 1000 server-side, so asking for 5000 and receiving 1000 looks complete from here:
+        # `len(entries) < limit` is true and says nothing. Only the end that did the clamping
+        # can tell the caller it happened.
+        if maybe_truncated:
+            truncated.append(f"{name}={len(entries)} (limit_applied={applied})")
+        rows.extend(entries)
+    if truncated:
+        print(
+            "[uptake-verdict] the event feed came back full — "
+            + ", ".join(truncated)
+            + ". There may be more of the window behind it; the counts below are a lower bound,"
+            " not the sample. §2 is a contract about a population, and a truncated one is not it.",
+            file=sys.stderr,
+        )
+    return rows
 
 
 def session_counts(rows, since, until):
@@ -51,7 +98,7 @@ def session_counts(rows, since, until):
     already classified those sessions and wrote the answer down, so counting them here is reading
     a recorded fact, not guessing one.
     """
-    distilled, scored, automated = set(), set(), set()
+    distilled, scored, automated, unlabelled = set(), set(), set(), set()
     for row in rows or []:
         observed = verdict_core.window_day(row.get("observed_at"))
         if since and observed < since:
@@ -71,8 +118,20 @@ def session_counts(rows, since, until):
             # is how a parameter written for exactly this becomes decoration.
             if (attrs.get("reason") or row.get("reason")) == "automated_run":
                 automated.add(sid)
+            else:
+                unlabelled.add(sid)
         elif name == "injection_uptake":
             scored.add(sid)
+    # The label only exists for the days after it shipped (#286, 2026-09-06). Everything distilled
+    # before that reads as a person's session because nothing was asking, and inside the window
+    # that is 181 scripted security reviews holding down the denominator -- the whole distance
+    # between 19% coverage and 86%. Judged from the transcript at read time rather than by writing
+    # the missing label into the event log: the ledger is the measurement series, and a row put
+    # there by hand cannot be told from one the instrument produced.
+    retro, _unreadable = distill_core.classify_automated_sessions(
+        unlabelled - automated, distill_core.transcript_reader()
+    )
+    automated |= retro
     return len(distilled), len(scored), len(automated)
 
 
@@ -157,7 +216,15 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--url", default=DEFAULT_URL)
     ap.add_argument("--limit", type=int, default=5000, help="events to scan (default 5000)")
-    ap.add_argument("--since", help="ISO date; drop events observed before it")
+    # Defaulted to the window's own start. It used to default to None, which put no lower bound
+    # on the coverage denominator at all: sessions distilled before the window opened were being
+    # counted against it, reading 793 distilled where the window holds 381. A contract that names
+    # its dates cannot have a tool that reads past them unless asked to.
+    ap.add_argument(
+        "--since",
+        default=verdict_core.WINDOW_SINCE,
+        help=f"ISO date; drop events observed before it (default: the window's start, {verdict_core.WINDOW_SINCE})",
+    )
     ap.add_argument("--agent", help="report only this adapter")
     ap.add_argument(
         "--midpoint",

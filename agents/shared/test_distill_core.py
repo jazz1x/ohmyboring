@@ -560,6 +560,51 @@ class AutomatedRunsAreNotMemory(unittest.TestCase):
         self.assertFalse(distill_core.is_automated_run(""))
 
 
+class RetroactiveAutomatedLabelTests(unittest.TestCase):
+    """`is_automated_run` shipped on 2026-09-06. The six days before it carry no label at all."""
+
+    AUTOMATED = "[user] Review this change for security vulnerabilities.\n[assistant] ok"
+    HUMAN = "[user] 커버리지가 왜 이래요\n[assistant] 봅니다"
+
+    def test_the_label_is_read_back_off_the_transcript(self):
+        texts = {"a": self.AUTOMATED, "b": self.HUMAN}
+        automated, unreadable = distill_core.classify_automated_sessions(
+            ["a", "b"], texts.get
+        )
+        self.assertEqual(automated, {"a"})
+        self.assertEqual(unreadable, set())
+
+    def test_an_unreadable_session_stays_in_the_denominator(self):
+        # The failure direction that shrinks a denominator is the one that flatters coverage:
+        # every classifier failure would raise the ratio, which is exactly backwards.
+        automated, unreadable = distill_core.classify_automated_sessions(
+            ["gone"], lambda _sid: None
+        )
+        self.assertEqual(automated, set())
+        self.assertEqual(unreadable, {"gone"}, "unreadable is reported, not silently dropped")
+
+    def test_a_reader_that_raises_is_unreadable_not_automated(self):
+        def boom(_sid):
+            raise OSError("disk")
+
+        automated, unreadable = distill_core.classify_automated_sessions(["x"], boom)
+        self.assertEqual(automated, set())
+        self.assertEqual(unreadable, {"x"})
+
+    def test_the_transcript_index_maps_session_id_to_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "proj").mkdir()
+            wanted = root / "proj" / "abc123.jsonl"
+            wanted.write_text("{}\n", encoding="utf-8")
+            (root / "proj" / "notes.md").write_text("x", encoding="utf-8")
+            index = distill_core.transcript_index(source_dirs=[str(root)])
+        self.assertEqual(index.get("abc123"), wanted)
+        self.assertNotIn("notes", index, "only transcripts, not every file beside them")
+
+    def test_a_missing_root_is_skipped_rather_than_raising(self):
+        self.assertEqual(distill_core.transcript_index(source_dirs=["/nope/not/here"]), {})
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -11,6 +11,7 @@ Agent-specific transcript extraction and hook I/O live in the per-agent modules.
 """
 import json
 import os
+import pathlib
 import re
 import socket
 import subprocess
@@ -25,6 +26,7 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config  # noqa: E402
 import event_log
+import transcript  # noqa: E402
 import uptake_core  # noqa: E402
 import markers  # noqa: E402
 import omb_env  # noqa: E402
@@ -837,6 +839,75 @@ def is_automated_run(transcript_text):
         opening = line[len("[user]") :].strip().lower()
         return any(opening.startswith(mark) for mark in AUTOMATED_RUN_OPENINGS)
     return False
+
+
+def transcript_index(source_dirs=None):
+    """Map session id -> transcript path, over the same directories the collector scans.
+
+    The roots come from `boring_config.source_dirs` rather than a fresh `~/.claude/projects`
+    literal: a path written down twice is the defect this repo keeps paying for, and the one
+    that goes stale is always the copy nobody runs.
+    """
+    roots = source_dirs
+    if roots is None:
+        roots = boring_config.source_dirs(adapter="session-end") or [
+            os.path.expanduser("~/.claude/projects")
+        ]
+    index = {}
+    for root in roots:
+        base = pathlib.Path(os.path.expanduser(root))
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.jsonl"):
+            index.setdefault(path.stem, path)
+    return index
+
+
+def transcript_reader(index=None, fmt="claude-json"):
+    """A `transcript_for` callable over `transcript_index`, for `classify_automated_sessions`."""
+    resolved = transcript_index() if index is None else index
+
+    def read(session_id):
+        path = resolved.get(session_id)
+        if path is None:
+            return None
+        try:
+            return transcript.extract(str(path), fmt)
+        except Exception:
+            return None
+
+    return read
+
+
+def classify_automated_sessions(session_ids, transcript_for):
+    """Which of these sessions were automated runs, judged from the transcript.
+
+    `is_automated_run` shipped on 2026-09-06 (#286). Every session distilled before that carries
+    no `automated_run` reason -- not because it was a person's, but because nothing was asking.
+    Inside the measurement window that is 181 sessions of scripted security review sitting in
+    §2's coverage denominator, which is the whole distance between 19% coverage and 86%.
+
+    Reading it back off the transcript rather than writing the missing label into the event log:
+    the ledger is the measurement series, and a hand-written row in it is indistinguishable from
+    one the instrument produced. This is a read-time judgement the caller can re-run and check.
+
+    `transcript_for` maps a session id to its transcript text, or None when it cannot be read.
+    Unreadable is not automated -- an unreadable session stays in the denominator, because the
+    failure direction that shrinks a denominator is the one that flatters the result.
+
+    Returns `(automated_ids, unreadable_ids)`.
+    """
+    automated, unreadable = set(), set()
+    for sid in session_ids:
+        try:
+            text = transcript_for(sid)
+        except Exception:
+            text = None
+        if not text:
+            unreadable.add(sid)
+        elif is_automated_run(text):
+            automated.add(sid)
+    return automated, unreadable
 
 
 def log_skip_event(session_id, origin, repo, resolution, reason):

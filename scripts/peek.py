@@ -56,6 +56,7 @@ import boring_config  # noqa: E402
 import label_core  # noqa: E402
 import uptake_core  # noqa: E402
 import verdict_core  # noqa: E402
+import distill_core  # noqa: E402
 
 #: The window, transcribed from docs/PRD.md §8 D1 (the first window, 08-26 -> 09-09, was reset for
 #: an instrumentation fault; no threshold moved). Constants rather than flags on purpose: a window
@@ -299,6 +300,17 @@ def window_block(rows, notes):
             # that they ended; the reason it wrote down is read here rather than guessed.
             if (attrs.get("reason") or row.get("reason")) == "automated_run":
                 automated_sessions.add(sid)
+    # The label only exists for the days after it shipped (#286, 2026-09-06); everything distilled
+    # before that reads as a person's session because nothing was asking. Inside the window that
+    # is 181 scripted security reviews sitting in the denominator — the whole distance between 19%
+    # coverage and 89%. Judged from the transcript here rather than by backfilling the event log:
+    # the ledger is the measurement series, and a row written into it by hand cannot be told from
+    # one the instrument produced. The verdict CLI reads it the same way, so the two surfaces that
+    # render this window agree.
+    retro, _unreadable = distill_core.classify_automated_sessions(
+        distilled_sessions - automated_sessions, distill_core.transcript_reader()
+    )
+    automated_sessions |= retro
     cov_ratio, cov_eligible, cov_ok = verdict_core.coverage(
         len(distilled_sessions),
         len(scored_sessions),
