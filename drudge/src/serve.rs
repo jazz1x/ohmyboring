@@ -654,6 +654,16 @@ fn default_event_log_limit() -> i64 {
 #[derive(Serialize)]
 pub(crate) struct EventLogResp {
     pub(crate) entries: Vec<EventLogEntry>,
+    /// The limit actually used, after clamping to `EVENT_LOG_MAX_LIMIT`. A caller asking for 5000
+    /// got 1000 and no word about it, so the pre-registered verdict was being computed on 54% of
+    /// its own window with nothing anywhere saying so (2026-09-10). Truncation and completeness
+    /// look identical from the client's side; only the server knows which one it sent.
+    pub(crate) limit_applied: i64,
+    /// `true` when the page came back full at that limit, so there may be more behind it. Says
+    /// "there may be more", never "there are more" -- a page that happens to end exactly on the
+    /// boundary is complete, and claiming otherwise would be the same guess in the other
+    /// direction.
+    pub(crate) maybe_truncated: bool,
 }
 
 #[derive(Serialize)]

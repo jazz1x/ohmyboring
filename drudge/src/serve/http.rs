@@ -520,7 +520,7 @@ pub(crate) async fn handle_events(
             since_hours: params.since_hours,
         })
         .await?;
-    let entries = rows
+    let entries: Vec<EventLogEntry> = rows
         .into_iter()
         .map(|r| {
             let observed_at = system_time_rfc3339(r.observed_at);
@@ -567,7 +567,12 @@ pub(crate) async fn handle_events(
             }
         })
         .collect();
-    Ok(Json(EventLogResp { entries }))
+    let maybe_truncated = i64::try_from(entries.len()).unwrap_or(i64::MAX) >= limit;
+    Ok(Json(EventLogResp {
+        entries,
+        limit_applied: limit,
+        maybe_truncated,
+    }))
 }
 
 const RECALL_VERDICTS: [&str; 3] = ["relevant", "irrelevant", "unsure"];
