@@ -297,7 +297,22 @@
     padding: 1px 0 1px 10px; border-left: 1px solid var(--line-strong);
     white-space: pre-wrap; word-break: break-word;
   }
-  .empty { padding: 12px var(--inset); font-size: var(--t-cell); color: var(--fg-dim); }
+  .brief-sec{border-bottom:1px solid var(--line,#e6e6e6)}
+.brief-head{display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;background:none;border:0;padding:7px 2px;cursor:pointer;font:inherit;color:inherit}
+.brief-head:hover{background:var(--hover,#f6f6f6)}
+.brief-head[aria-expanded="true"] .brief-name{font-weight:600}
+.brief-name{flex:0 0 auto}
+.brief-n{flex:0 0 auto;opacity:.5;font-size:11px}
+.brief-src{flex:1 1 auto;text-align:right;opacity:.55;font-size:11px}
+.brief-body{padding:2px 2px 10px 14px}
+.brief-item{display:flex;gap:8px;padding:2px 0;line-height:1.45}
+.brief-label{flex:0 0 62px;opacity:.6;font-size:11px;text-transform:lowercase}
+.brief-text{flex:1 1 auto}
+.brief-sub{margin:8px 0 2px;font-size:11px;opacity:.55}
+.brief-edge{padding:1px 0 1px 10px;border-left:2px solid var(--accent,#7aa2c8)}
+.brief-near{padding:1px 0 1px 10px;border-left:2px dotted var(--line,#ccc);opacity:.7}
+.brief-note{margin:8px 2px;font-size:11px}
+.empty { padding: 12px var(--inset); font-size: var(--t-cell); color: var(--fg-dim); }
 
   /* ── 4. labels line ────────────────────────────────────────────────── */
   #labels {
@@ -402,6 +417,8 @@
     </table>
     <div class="empty" id="stream-empty" hidden></div>
   </div>
+  <div class="sec" id="sec-brief"><span class="label">this morning</span><span class="count dim" id="brief-foot"></span></div>
+  <div id="brief"></div>
   <div id="notes"></div>
  </div>
 
@@ -576,6 +593,81 @@ function renderVerdict(w, scoring, pace) {
     warn.appendChild(txt("경과 " + pace.elapsed_days + "일 — 이 속도로 전망하지 말 것"));
     warn.title = "1~2일 위에서 2주를 외삽하면 주말 하나로 결론이 뒤집힌다";
     box.appendChild(warn);
+  }
+}
+
+// This morning's briefing, as sections that open. The owner reads this in Slack every day as
+// thirty lines of prose with no way to ask where a line came from; the evidence was always there
+// (`brief_sources` in the note, the project axis on every document) and no surface joined them.
+//
+// Sections open, bullets do not. `ask::brief` writes prose from several notes at once and records
+// its sources for the brief as a whole, so pinning one bullet to one note would assert an identity
+// the data cannot support — the same reason a prompt row here carries no distance.
+function renderBrief(brief, graph) {
+  const host = document.getElementById("brief");
+  const foot = document.getElementById("brief-foot");
+  host.textContent = "";
+  if (!brief || !brief.available) {
+    foot.textContent = "";
+    host.appendChild(el("div", "empty", "오늘 브리핑을 읽지 못했다."));
+    return;
+  }
+  const sections = brief.sections || [];
+  const known = (graph && graph.sections) || {};
+  const unmatched = (graph && graph.unmatched) || [];
+  foot.textContent = sections.length + " sections · " + (brief.item_count || 0) + " items";
+
+  sections.forEach(function (sec) {
+    const box = el("div", "brief-sec");
+    const head = el("button", "brief-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", "false");
+    head.appendChild(el("span", "brief-name", sec.project));
+    head.appendChild(el("span", "brief-n", String((sec.items || []).length)));
+    const g = known[sec.project];
+    if (g) head.appendChild(el("span", "brief-src mono", g.hit));
+    box.appendChild(head);
+
+    const body = el("div", "brief-body");
+    body.hidden = true;
+    (sec.items || []).forEach(function (item) {
+      const row = el("div", "brief-item");
+      row.appendChild(el("span", "brief-label", item.label));
+      row.appendChild(el("span", "brief-text", item.text));
+      body.appendChild(row);
+    });
+    if (g) {
+      // Edge-joined and distance-joined stay apart. Merging them into one ranked list is exactly
+      // the blur this panel exists to undo: the graph has held these edges since June and the
+      // retrieval path walked one six times in seven days.
+      if (g.graph && g.graph.length) {
+        body.appendChild(el("div", "brief-sub", "graph — 간선으로 이어진 것"));
+        g.graph.forEach(function (n) { body.appendChild(el("div", "brief-edge", n)); });
+      }
+      if (g.semantic && g.semantic.length) {
+        body.appendChild(el("div", "brief-sub", "semantic — 거리로 가까운 것"));
+        g.semantic.forEach(function (n) { body.appendChild(el("div", "brief-near", n)); });
+      }
+    } else {
+      body.appendChild(el("div", "brief-sub dim", "그래프가 이 절에 답하지 않았다."));
+    }
+    box.appendChild(body);
+    head.addEventListener("click", function () {
+      const open = body.hidden;
+      body.hidden = !open;
+      head.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    host.appendChild(box);
+  });
+
+  if (unmatched.length) {
+    // Named, not left as a gap. A reader who sees nothing cannot tell "the graph does not know
+    // this project" from "the panel is broken".
+    host.appendChild(el("div", "brief-note dim",
+      "그래프가 못 짚은 절: " + unmatched.join(" · ") + " — 코퍼스에 해당 프로젝트 노트가 없거나 프로젝트가 아니다."));
+  }
+  if (brief.sources && brief.sources.length) {
+    host.appendChild(el("div", "brief-note dim", "brief_sources " + brief.sources.length + "건"));
   }
 }
 
@@ -1137,6 +1229,7 @@ function renderAll(s) {
   renderVerdict(s.window, s.scoring, s.pace);
   renderMeta(s);
   renderFault(s.instrument_fault);
+  renderBrief(s.brief, s.brief_graph);
   PAGE = s.page || null;
   LAST_PROMPTS = s.prompts;
   paintStream();

@@ -29,8 +29,13 @@ because the source was down or because the value was zero will eventually guess 
   could only be attached by matching a basename inside a time window — an assertion of identity
   the data cannot support, in the one view whose entire job is explaining *why*.
 * No psql, ever. Engine HTTP plus the ledger file, nothing else.
-* No generative endpoint: `/ask`, `/brief`, `/weekly`, `/status`, `/decisions`, `/risks`,
-  `/next_actions`, `/stalled` are measured at 21-64 seconds and are never called from here.
+* No generating endpoint: `/ask`, `/weekly`, `/status`, `/decisions`, `/risks`, `/next_actions`
+  and `/stalled` synthesise with the LLM at 21-64 seconds and are never called from here.
+  `/brief` is called, and is not one of them: once the scheduler has written today's note into
+  the vault it serves that file back rather than generating a second one (#280), measured at
+  3.8ms. `/graph` is called too — one embedding plus an edge walk, 82-367ms. The rule was always
+  about spending a minute of the owner's morning on a page they wanted to glance at; naming the
+  routes instead of the cost let it outlive its own reason.
 * No writes of any kind. GET only, no mutating route, no file written anywhere.
 * No auth, and nothing that invites one: no token flag, no `.env` read, no credential storage.
   It binds 127.0.0.1 and refuses to bind anything else, which is the whole of its access control.
@@ -232,6 +237,153 @@ def _get_json(path):
             return json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return None
+
+
+def _post_json(path, body=None):
+    """POST one engine endpoint, or None. Same contract as `_get_json`: None is "would not say".
+
+    Only for routes that read. `/brief` serves today's cached vault note when it exists — 3.8ms
+    measured, a file read, not a generation — and `/graph` is one embedding plus an edge walk at
+    82-367ms. The 21-64 second figure in this file's header was measured against the generating
+    path and outlived it.
+    """
+    payload = json.dumps(body or {}).encode("utf-8")
+    request = urllib.request.Request(
+        _ENGINE_URL + path,
+        data=payload,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=ENGINE_TIMEOUT_S) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+
+
+#: A `## heading` in the brief is a project name. The renderer already decided that (the
+#: `_NOT_A_PROJECT` shape test in `slack_briefing.py`), and the graph stores the same axis on
+#: `document.project`, so a section and a project node are the same thing under two names.
+_BRIEF_HEADING = re.compile(r"^##\s+(.+?)\s*$")
+#: `- Done: …` / `- Next: …`. The label is what the briefing sorts by and what the reader scans.
+_BRIEF_ITEM = re.compile(r"^-\s*(?:\*\*)?([A-Za-z가-힣]+)(?:\*\*)?\s*[:：]\s*(.+)$")
+
+
+def brief_block(brief, notes):
+    """Today's briefing, as sections a reader can open — never regenerated, only read back.
+
+    The dashboard showed what the corpus measured and never what it said. The owner reads the
+    briefing every morning in Slack, where it is thirty lines of prose with no way to ask "where
+    did this come from"; the evidence exists (`brief_sources` in the note's own frontmatter, and
+    the project axis on every document) and no surface had ever joined the two.
+
+    Per-item provenance is deliberately absent. `ask::brief` writes prose from several notes at
+    once and records its sources for the brief as a whole, so pinning one bullet to one note
+    would be an assertion of identity the data cannot support — the same reason this page refuses
+    to put a `dist` on a prompt row. Sections carry provenance because sections *are* the project
+    axis; bullets do not, and saying so is more useful than guessing.
+    """
+    if not isinstance(brief, dict):
+        notes.append(
+            "브리핑을 못 읽었다 — 엔진이 안 뜬 것과 오늘 브리핑이 아직 없는 것을 구분하지 못한다."
+        )
+        return {"available": False, "sections": [], "sources": []}
+    answer = brief.get("answer") or ""
+    sources = [s for s in (brief.get("sources") or []) if isinstance(s, str)]
+    sections, current = [], None
+    for line in answer.splitlines():
+        heading = _BRIEF_HEADING.match(line)
+        if heading:
+            current = {"project": heading.group(1).strip(), "items": []}
+            sections.append(current)
+            continue
+        item = _BRIEF_ITEM.match(line.strip())
+        if item and current is not None:
+            current["items"].append({"label": item.group(1), "text": item.group(2).strip()})
+    if not sections and answer.strip():
+        # The briefing exists but says nothing this parser recognises. Reporting it as an empty
+        # briefing would read as "quiet morning" — the failure that looks like a fact.
+        notes.append("브리핑을 읽었으나 `## 프로젝트` 절을 하나도 못 찾았다 — 형식이 바뀌었을 수 있다.")
+    return {
+        "available": bool(answer.strip()),
+        "sections": sections,
+        "sources": [_scrub(s) for s in sources],
+        "item_count": sum(len(sec["items"]) for sec in sections),
+    }
+
+
+#: One `/graph` call per section costs an embedding plus an edge walk (82-367ms measured), and
+#: the briefing has six sections on a normal morning. Bounded anyway: a briefing that grows a
+#: dozen sections should make the page slower to load, not slower without end.
+BRIEF_GRAPH_SECTIONS = 8
+
+
+_NOTE_ID = re.compile(r"(wiki-\d+)")
+
+
+def _note_id(text):
+    """`wiki-1203` out of `/vault/wiki/wiki-1203.md (proj)`, or None when there is no such name."""
+    found = _NOTE_ID.search(text or "")
+    return found.group(1) if found else None
+
+
+def brief_graph(sections):
+    """What the graph knows about each briefing section, for the reader who asks "why this".
+
+    The corpus has kept 39,501 edges since June and the retrieval path reads none of them: over
+    seven days, 2,850 `/search` calls walked an edge exactly six times (`mcp.ask`). The graph is
+    written and never read, which is the same as not having one.
+
+    This is the first surface that reads it back. `/graph` takes the section name, finds its
+    nearest note, and returns that note's graph neighbours — claims and concepts joined by real
+    edges, not by a distance. A section whose name matches nothing comes back empty rather than
+    borrowing the nearest thing: an unrelated neighbour presented as provenance is worse than
+    none, because the reader cannot tell which they were given.
+    """
+    out, unmatched = {}, []
+    for section in sections[:BRIEF_GRAPH_SECTIONS]:
+        name = section.get("project") or ""
+        if not name:
+            continue
+        # The section's items, not its name. Measured across one morning's six sections: asking
+        # by name landed in the right project 2 times, name plus the first item 3, and the items
+        # together 4 — and the four are the notes `brief_sources` actually names. A project name
+        # is a label; the work is what the sentences are about.
+        query = " ".join(item["text"] for item in section.get("items") or []) or name
+        answer = _post_json("/graph", {"query": query})
+        if not isinstance(answer, dict):
+            continue
+        hit = answer.get("hit") or ""
+        # `/graph` answers with its nearest note whatever was asked, so an unknown section name
+        # comes back holding some other project's thread. Measured while building this: the
+        # `oh-my-witness` section was handed `kb-ingest`'s note, which as provenance is worse
+        # than nothing — the reader cannot tell a match from a near miss. The hit renders as
+        # `path (project)`, so the section's own name has to be in the parenthesis or the answer
+        # is dropped.
+        if f"({name})" not in hit:
+            # Said out loud rather than left as a gap. Both of this morning's two misses were
+            # honest ones — `oh-my-witness` has no note under that project yet, and
+            # `기타 (Stalled)` is the briefing's own bucket, not a project — and a reader who
+            # sees nothing cannot tell "the graph does not know this" from "the panel is broken".
+            unmatched.append(name)
+            continue
+        neighbours = [n for n in (answer.get("graph_neighbors") or []) if isinstance(n, str)]
+        if not neighbours:
+            continue
+        out[name] = {
+            # The note id, not the path. `_scrub` redacts anything path-shaped and is right to —
+            # but `wiki-1203` is the corpus's own name for the thing and leaks no filesystem.
+            "hit": _note_id(hit) or _scrub(hit),
+            # Edge-joined, not distance-joined. The distinction is the whole point of the panel,
+            # so the two lists stay apart rather than being merged into one ranked blur.
+            "graph": [_scrub(n) for n in neighbours[:8]],
+            "semantic": [
+                _scrub(n)
+                for n in (answer.get("semantic_neighbors") or [])[:4]
+                if isinstance(n, str)
+            ],
+        }
+    return {"sections": out, "unmatched": unmatched}
 
 
 def engine_block(health):
@@ -842,12 +994,15 @@ def build_state(offset=0):
             "query_log 을 못 읽어 '왜 뽑혔나'(거리) 패널이 비었다 — 거리가 0 이라는 뜻이 아니다."
         )
     window = window_block(rows, notes)
+    brief_payload = brief_block(_post_json("/brief"), notes)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "engine": engine_block(health),
         "window": window,
         "instrument_fault": instrument_fault(rows),
         "prompts": prompts_out,
+        "brief": brief_payload,
+        "brief_graph": brief_graph(brief_payload["sections"]),
         "labels": labels_block(_get_json("/recall-label-stats")),
         "scoring": scoring_block(prompts_out),
         "pace": pace_block(window),

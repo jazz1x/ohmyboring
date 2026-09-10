@@ -14,6 +14,7 @@ import sys
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -133,6 +134,120 @@ class BindAddress(unittest.TestCase):
         )
         self.assertNotEqual(proc.returncode, 0, "a --host flag must not exist")
         self.assertIn("unrecognized arguments", (proc.stderr or "").lower())
+
+
+class BriefBlockTests(unittest.TestCase):
+    BRIEF = {
+        "answer": (
+            "## oh-my-codereview\n"
+            "- Done: `R-TARGET` 규칙을 advisory 등급으로 구현\n"
+            "- Next: 이미지 발행 후 수치 확인\n"
+            "## kb-ingest\n"
+            "- Decision: 백필 전 테이블 생성이 선행되도록 수정\n"
+        ),
+        "sources": ["/vault/wiki/wiki-1663.md", "/vault/wiki/wiki-1665.md"],
+    }
+
+    def test_the_briefing_opens_into_sections_and_items(self):
+        notes = []
+        out = peek.brief_block(self.BRIEF, notes)
+        self.assertTrue(out["available"])
+        self.assertEqual([s["project"] for s in out["sections"]], ["oh-my-codereview", "kb-ingest"])
+        self.assertEqual(out["item_count"], 3)
+        self.assertEqual(out["sections"][0]["items"][0]["label"], "Done")
+        self.assertEqual(notes, [], "a briefing that parsed needs no note")
+
+    def test_an_unreachable_engine_is_not_a_quiet_morning(self):
+        # None means "the engine would not say". Rendering that as an empty briefing would read
+        # as "nothing happened today" — the failure that looks like a fact.
+        notes = []
+        out = peek.brief_block(None, notes)
+        self.assertFalse(out["available"])
+        self.assertEqual(out["sections"], [])
+        self.assertTrue(notes, "the reader is told the briefing could not be read")
+
+    def test_a_briefing_in_an_unknown_shape_says_so(self):
+        notes = []
+        out = peek.brief_block({"answer": "오늘은 조용했습니다.", "sources": []}, notes)
+        self.assertEqual(out["sections"], [])
+        self.assertTrue(
+            any("절" in n for n in notes),
+            "prose with no ## heading is reported, not silently rendered as empty",
+        )
+
+    def test_sources_are_scrubbed(self):
+        out = peek.brief_block(
+            {"answer": "## p\n- Done: x\n", "sources": ["/Users/someone/secret/wiki-1.md"]}, []
+        )
+        self.assertTrue(
+            all("/Users/" not in s for s in out["sources"]),
+            f"host paths must not leave this process: {out['sources']}",
+        )
+
+
+class BriefGraphTests(unittest.TestCase):
+    SECTIONS = [
+        {"project": "kb-ingest", "items": [{"label": "Done", "text": "백필 수정"}]},
+        {"project": "oh-my-witness", "items": [{"label": "Next", "text": "구조 설계"}]},
+    ]
+
+    def _with_engine(self, answers):
+        calls = []
+
+        def fake_post(path, body=None):
+            calls.append((path, body))
+            return answers.get((body or {}).get("query"))
+
+        return fake_post, calls
+
+    def test_a_section_the_graph_answers_carries_its_edges(self):
+        fake, _calls = self._with_engine(
+            {
+                "백필 수정": {
+                    "hit": "/vault/wiki/wiki-1665.md (kb-ingest)",
+                    "graph_neighbors": ["kb-ingest", "ci"],
+                    "semantic_neighbors": ["discipline"],
+                },
+                "구조 설계": None,
+            }
+        )
+        with mock.patch.object(peek, "_post_json", fake):
+            out = peek.brief_graph(self.SECTIONS)
+        self.assertEqual(out["sections"]["kb-ingest"]["hit"], "wiki-1665")
+        self.assertEqual(out["sections"]["kb-ingest"]["graph"], ["kb-ingest", "ci"])
+
+    def test_a_near_miss_is_dropped_and_named(self):
+        # `/graph` answers with its nearest note whatever was asked. Handing one project's thread
+        # to another section as provenance is worse than showing nothing, because the reader
+        # cannot tell a match from a near miss.
+        fake, _calls = self._with_engine(
+            {
+                "백필 수정": {
+                    "hit": "/vault/wiki/wiki-1664.md (some-other-project)",
+                    "graph_neighbors": ["x"],
+                },
+                "구조 설계": None,
+            }
+        )
+        with mock.patch.object(peek, "_post_json", fake):
+            out = peek.brief_graph(self.SECTIONS)
+        self.assertEqual(out["sections"], {})
+        self.assertIn("kb-ingest", out["unmatched"])
+
+    def test_the_query_is_the_items_not_the_project_name(self):
+        fake, calls = self._with_engine({})
+        with mock.patch.object(peek, "_post_json", fake):
+            peek.brief_graph(self.SECTIONS)
+        asked = [(body or {}).get("query") for _path, body in calls]
+        self.assertIn("백필 수정", asked)
+        self.assertNotIn("kb-ingest", asked, "the label is not the work")
+
+    def test_the_number_of_engine_calls_is_bounded(self):
+        many = [{"project": f"p{i}", "items": [{"label": "Done", "text": f"t{i}"}]} for i in range(30)]
+        fake, calls = self._with_engine({})
+        with mock.patch.object(peek, "_post_json", fake):
+            peek.brief_graph(many)
+        self.assertLessEqual(len(calls), peek.BRIEF_GRAPH_SECTIONS)
 
 
 if __name__ == "__main__":
