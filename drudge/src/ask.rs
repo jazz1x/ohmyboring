@@ -412,6 +412,63 @@ const BRIEF_CLAIM_RESERVE: &[(&str, i64)] =
 /// only prose and sources, so a quality gate could score the output's shape and never notice
 /// that half its highest-priority input had vanished. Returned rather than re-queried so the
 /// record cannot drift from the prompt it describes.
+/// How many of the recent notes get a concept walk, and how far each one reaches.
+///
+/// Bounded because the briefing runs unattended every morning and a corpus that grows does not
+/// get to make it slower without end. Three notes deep is the recency head; two neighbours each
+/// is enough to say "this continues X" without turning the prompt into an archive.
+const CONTINUITY_HEADS: usize = 3;
+const CONTINUITY_PER_HEAD: i64 = 2;
+/// Enough of an older note to recognise the thread, not enough to retell it.
+const CONTINUITY_CHARS: usize = 600;
+
+/// Older notes sharing a concept with the recency head — the threads this morning continues.
+///
+/// Deduplicated across heads: three recent notes on the same subject reach the same older note,
+/// and printing it three times spends the prompt on repetition and teaches the model the note is
+/// three times as important.
+async fn brief_continuity(store: &Store, docs: &[crate::store::RecentDoc]) -> Result<String> {
+    let mut walks = Vec::new();
+    for head in docs.iter().take(CONTINUITY_HEADS) {
+        walks.push(
+            store
+                .related_by_concept(&head.source_path, CONTINUITY_PER_HEAD)
+                .await?,
+        );
+    }
+    Ok(render_continuity(docs, &walks))
+}
+
+/// The prompt section, given what the walks returned. Split from the IO so the two rules that
+/// decide what a reader sees -- deduplication and the length cap -- can be checked without a
+/// database.
+fn render_continuity(
+    recent: &[crate::store::RecentDoc],
+    walks: &[Vec<crate::store::RecentDoc>],
+) -> String {
+    let mut seen: HashSet<&str> = recent.iter().map(|d| d.source_path.as_str()).collect();
+    let mut out = String::new();
+    for walk in walks {
+        for older in walk {
+            // Three recent notes on one subject reach the same older note. Printing it three
+            // times spends the prompt on repetition and tells the model it matters three times
+            // as much.
+            if !seen.insert(older.source_path.as_str()) {
+                continue;
+            }
+            let body: String = older.content.chars().take(CONTINUITY_CHARS).collect();
+            let _ = write!(
+                out,
+                "## (earlier) {} · {}\n{}\n\n",
+                older.project,
+                older.source_path,
+                defang(&body)
+            );
+        }
+    }
+    out
+}
+
 pub async fn brief(
     store: &Store,
     llm: &Llm,
@@ -457,18 +514,39 @@ pub async fn brief(
         );
     }
 
+    // What this morning continues. The briefing read the last twelve notes by recency and nothing
+    // else, so every morning started over: a reader was told what happened and never that it was
+    // the fourth day of the same thread. The edges to say so have been in the corpus since June
+    // and no consumer read them -- 2,850 `/search` calls in seven days walked one six times.
+    //
+    // Concept edges, not the neighbour walk `ask` uses. Measured on one morning's twelve notes:
+    // what they shared was `tool:rg` (9), `tool:python` (6), `tool:sed` (6) -- a bundle of
+    // "things that ran rg". Excluding tools, the same twelve reach 71 older notes through
+    // `concept:mutationtesting` and 19 through `concept:singlesourceoftruth`.
+    let continuity = brief_continuity(store, &docs).await?;
+
     // Authority injection: current claims — even if old exploration notes (e.g. discarded Neo4j/SurrealDB)
     // look recent by mtime, claim authority nails down the true current fact.
     let (claim_ctx, injected_claims) = brief_claim_ctx(store).await?;
     let (fo, fc) = data_fence("brief");
     let rule = fence_rule(&fo, &fc);
-    let prompt = if claim_ctx.is_empty() {
+    let mut prompt = if claim_ctx.is_empty() {
         format!("{rule}# Recent work records (newest-first, top is latest)\n{fo}\n{context}{fc}")
     } else {
         format!(
             "{rule}# Recency-prioritized facts (prefer the most recent on conflict)\n{fo}\n{claim_ctx}{fc}\n# Recent work records (newest-first, top is latest)\n{fo}\n{context}{fc}"
         )
     };
+    if !continuity.is_empty() {
+        // Last, and labelled as background. These notes are older than everything above by
+        // construction, and a model given them without that word writes last week's work into
+        // today's briefing -- which is the failure this section is supposed to prevent, arriving
+        // by the front door.
+        let _ = write!(
+            prompt,
+            "\n# Earlier notes on the same concepts — background only, do NOT report as today's work\n{fo}\n{continuity}{fc}"
+        );
+    }
     // note_lang policy wins over "match the records": ko → always Korean, en → English, auto → records' language.
     let lang_rule = match lang {
         "ko" => {
@@ -1034,6 +1112,68 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
+
+    fn doc(path: &str, project: &str, content: &str) -> crate::store::RecentDoc {
+        crate::store::RecentDoc {
+            source_path: path.to_owned(),
+            project: project.to_owned(),
+            content: content.to_owned(),
+            tags: vec![],
+        }
+    }
+
+    /// The briefing already holds today. What it never had was the week before it.
+    #[test]
+    fn earlier_notes_are_rendered_and_labelled_as_earlier() {
+        let recent = vec![doc("/w/a.md", "p", "today")];
+        let walks = vec![vec![doc("/w/old.md", "p", "last week")]];
+        let out = super::render_continuity(&recent, &walks);
+        assert!(out.contains("(earlier)"), "was {out:?}");
+        assert!(out.contains("/w/old.md"));
+        assert!(out.contains("last week"));
+    }
+
+    /// A note already in the recency head is not background for itself.
+    #[test]
+    fn a_note_already_in_the_briefing_is_not_repeated_as_earlier() {
+        let recent = vec![doc("/w/a.md", "p", "today")];
+        let walks = vec![vec![doc("/w/a.md", "p", "today")]];
+        assert_eq!(super::render_continuity(&recent, &walks), "");
+    }
+
+    /// Three heads on one subject reach the same older note; it is printed once.
+    #[test]
+    fn the_same_older_note_reached_twice_is_printed_once() {
+        let recent = vec![doc("/w/a.md", "p", "today")];
+        let walks = vec![
+            vec![doc("/w/old.md", "p", "shared")],
+            vec![doc("/w/old.md", "p", "shared")],
+        ];
+        let out = super::render_continuity(&recent, &walks);
+        assert_eq!(out.matches("/w/old.md").count(), 1, "was {out:?}");
+    }
+
+    /// Enough to recognise the thread, not enough to retell it — the briefing runs unattended
+    /// every morning and a corpus that grows does not get to make the prompt grow with it.
+    #[test]
+    fn an_older_note_is_capped_not_pasted_whole() {
+        let long = "가".repeat(super::CONTINUITY_CHARS * 3);
+        let out = super::render_continuity(&[], &[vec![doc("/w/old.md", "p", &long)]]);
+        let kept = out.matches('가').count();
+        assert_eq!(
+            kept,
+            super::CONTINUITY_CHARS,
+            "cap counts characters, not bytes"
+        );
+    }
+
+    /// Nothing to continue is not a broken walk: an empty section is simply left out, and the
+    /// caller appends no heading for it.
+    #[test]
+    fn no_earlier_notes_renders_nothing() {
+        assert_eq!(super::render_continuity(&[], &[]), "");
+        assert_eq!(super::render_continuity(&[], &[vec![]]), "");
+    }
     use super::{data_fence, defang};
 
     #[test]
