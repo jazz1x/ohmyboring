@@ -30,12 +30,7 @@ import transcript
 
 
 def _transcript_format(path):
-    """Which reader this file needs, from where it lives.
-
-    The two collectors write different shapes and the self-check walks both roots, so a single
-    default would silently return nothing for one of them — the same failure this function was
-    added to end, one directory over.
-    """
+    """Which reader this file needs, from where it lives."""
     return "codex-jsonl" if os.sep + ".codex" + os.sep in path else "claude-json"
 
 
@@ -363,20 +358,9 @@ def sensitivity_probe(records):
 
 
 def pipeline_probe(records, transcript_path):
-    """The same question as `sensitivity_probe`, asked through the whole pipeline.
+    """`sensitivity_probe` asked through `transcript.extract` instead of around it.
 
-    That one builds `"[assistant] " + phrase` itself, which skips the step that actually broke
-    here: `transcript.extract`. The self-check handed raw `.jsonl` to a splitter that only knows
-    `[assistant] `, scored nothing against nothing for weeks, and printed it as a clean zero —
-    while `sensitivity_probe` kept answering yes, because it never went near the reader.
-
-    So: take a real transcript off disk, read it the way production reads it, append one phrase
-    the ledger says was injected, and require the scorer to find it. A format change, a reader
-    that returns the wrong shape, a turn marker that moved — all of them fail here and none of
-    them fail the plate-handed probe.
-
-    Returns `(ok, reason)`. `None` when there is nothing to probe with, which is not a pass:
-    absence of a probe is absence of evidence, and §2 wants evidence before it reads a zero.
+    `(ok, reason)`; `None` when there was nothing to probe with — absence of a probe, not a pass.
     """
     if not transcript_path or not os.path.exists(transcript_path):
         return None, "no transcript to read — the pipeline cannot be probed without one"
@@ -384,15 +368,6 @@ def pipeline_probe(records, transcript_path):
         body = transcript.extract(transcript_path, _transcript_format(transcript_path))
     except (OSError, ValueError) as exc:
         return False, f"transcript.extract failed on {os.path.basename(transcript_path)}: {exc}"
-    # Two different silences, and the gate is only about one of them.
-    #
-    # No turn markers at all means the reader handed back something the splitter cannot parse —
-    # raw `.jsonl` where `[user] `/`[assistant] ` was expected. That is the blindness this exists
-    # to catch, and it scored nothing against nothing for weeks while reading as a clean zero.
-    #
-    # Markers present but no assistant turn means a session that never got an answer. Short, and
-    # every fixture is like that. Calling it blindness fires on the fixtures, and a gate that
-    # cries on its own test data earns the mute it then dies of.
     if not _TURN.search(body):
         return False, (
             f"{os.path.basename(transcript_path)} read back with no turn markers at all —"
@@ -703,20 +678,7 @@ def _self_check_main(rest):
             index.setdefault(os.path.splitext(os.path.basename(path))[0], path)
 
     def transcript_for(session_id):
-        """The session's turns, in the shape `assistant_text` reads.
-
-        This used to hand back the raw `.jsonl`. `assistant_text` splits on `[assistant] `, which
-        a raw transcript never contains, so it returned the empty string for every session and the
-        self-check scored nothing against nothing. Measured 2026-09-10 on one live transcript: raw
-        gives `assistant_text` 0 characters, the same file through `transcript.extract` gives
-        108,365.
-
-        The check reported `cross=0/2460 treatment=0/2460` and that zero was read as "coincidence
-        produces no matches on this corpus". It meant the detector had been handed nothing to
-        match — a command failure, an absent instrument and an empty population all look like 0,
-        and here the instrument was the one that was absent. Its own gate (`doctor` d5e) was
-        blind in exactly the way it exists to rule out.
-        """
+        """The session's turns, in the shape `assistant_text` reads."""
         path = index.get(session_id)
         if not path:
             return ""
@@ -743,11 +705,7 @@ def _self_check_main(rest):
 
 
 def _pipeline_probe_main(rest):
-    """`--pipeline-probe` — the sensitivity question asked through `transcript.extract`.
-
-    Picks the newest ledger session that has a transcript on disk, so the shape being checked is
-    the one production is reading today rather than one this file built for itself.
-    """
+    """`--pipeline-probe` over the newest ledger session that has a transcript on disk."""
     records = []
     try:
         with open(rest[0] if rest else ledger_path(), encoding="utf-8") as handle:

@@ -93,10 +93,6 @@ case "${1:-}" in
         echo "uptake_sensitivity=ok rows=12 reason=phrase from wiki-0001.md was detected"
         exit 0
     fi
-    # The same sensitivity question asked through `transcript.extract` rather than around it.
-    # `--sensitivity-probe` builds the assistant turn itself, so it never touches the reader —
-    # and the reader is what broke: the self-check handed it raw `.jsonl` and scored nothing
-    # against nothing for weeks while both instrument checks stayed green.
     if [ "${2:-}" = --pipeline-probe ]; then
         if [ "${DOCTOR_UPTAKE_PIPELINE_BLIND:-0}" = 1 ]; then
             echo "uptake_pipeline_probe=blind reason=a.jsonl read back with no turn markers at all"
@@ -658,10 +654,6 @@ esac
   echo "ok - a blind uptake detector fails readiness"
 )
 
-# The pipeline probe has to fail readiness on its own. `--sensitivity-probe` builds the assistant
-# turn itself and never touches `transcript.extract`, so it kept answering yes while the reader
-# handed the scorer raw `.jsonl` and every uptake score was 0 for a reason that had nothing to do
-# with the channel. Two green instrument checks with a blind pipeline between them.
 ( make_case "$TMP/uptake-pipeline" yes
   if DOCTOR_UPTAKE_PIPELINE_BLIND=1 run_strict "$TMP/uptake-pipeline" "$TMP/uptake-pipeline.out"; then
       cat "$TMP/uptake-pipeline.out"
@@ -676,10 +668,6 @@ esac
   echo "ok - a blind uptake pipeline fails readiness"
 )
 
-# And it must not fail when there is simply nothing to probe with. A gate that cannot tell "no
-# subject" from "blind" fires on every fixture and short session, and a gate that cries on its own
-# test data earns the mute it then dies of — which is the exact confusion (absent instrument vs
-# empty population) this check exists to prevent elsewhere.
 ( make_case "$TMP/uptake-pipeline-unknown" yes
   if DOCTOR_UPTAKE_PIPELINE_UNKNOWN=1 run_strict "$TMP/uptake-pipeline-unknown" "$TMP/uptake-pipeline-unknown.out"; then
       echo "ok - nothing to probe with is not a blind pipeline"
