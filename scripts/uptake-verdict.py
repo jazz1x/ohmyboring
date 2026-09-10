@@ -72,6 +72,20 @@ def fetch_events(base_url, limit):
         if page is None:
             return None
         entries, maybe_truncated, applied = page
+        # Did the filter actually filter? The parameter is `event`; the field behind it is named
+        # `event_name` (serde rename), and sending the field name is accepted and ignored — the
+        # endpoint returns the whole unfiltered feed while this code says it read one kind. That
+        # is not a typo a compiler sees, and no amount of grepping the source separates a query
+        # string bound for the engine from one a script parses on its own route. The answer knows,
+        # so ask the answer.
+        others = {e.get("event") for e in entries} - {name}
+        if others:
+            print(
+                f"[uptake-verdict] asked /events for {name!r} and got"
+                f" {', '.join(sorted(str(o) for o in others))} as well — the filter did not apply."
+                " The counts below are over the whole feed, not that event.",
+                file=sys.stderr,
+            )
         # The server's own word, not a guess from the row count. `/events` clamps `limit` to
         # 1000 server-side, so asking for 5000 and receiving 1000 looks complete from here:
         # `len(entries) < limit` is true and says nothing. Only the end that did the clamping
