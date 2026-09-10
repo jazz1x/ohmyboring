@@ -424,6 +424,32 @@ def test_the_self_check_cannot_be_run_on_a_ledger_with_nothing_to_pair():
 
 
 
+def test_a_raw_transcript_gives_the_detector_nothing_to_read():
+    """The self-check was scoring nothing against nothing and reporting it as a clean zero.
+
+    `assistant_text` splits on `[assistant] `, which a raw `.jsonl` never contains, so handing it
+    one returns the empty string for every session: `cross=0/2460 treatment=0/2460`, read as
+    "coincidence finds no matches on this corpus". It meant the detector had been given nothing.
+    Live after routing through `transcript.extract`: `treatment=17/2460`.
+
+    Pinned here because the distinction the gate exists to make — an absent instrument versus an
+    empty population — is exactly the one it failed at.
+    """
+    raw = json.dumps(
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "토큰 예산을 늘렸다"}]}}
+    )
+    assert uptake_core.assistant_text(raw) == "", "a raw jsonl line is not turn-formatted"
+    extracted = "[user] 뭐지\n[assistant] 토큰 예산을 늘렸다"
+    assert "토큰 예산을 늘렸다" in uptake_core.assistant_text(extracted)
+
+
+def test_the_transcript_format_follows_the_directory():
+    """Two collectors, two shapes. One default would return nothing for the other root — the same
+    silence this fix ended, one directory over."""
+    assert uptake_core._transcript_format("/Users/x/.codex/sessions/a.jsonl") == "codex-jsonl"
+    assert uptake_core._transcript_format("/Users/x/.claude/projects/p/a.jsonl") == "claude-json"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

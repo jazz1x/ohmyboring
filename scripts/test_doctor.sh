@@ -93,6 +93,22 @@ case "${1:-}" in
         echo "uptake_sensitivity=ok rows=12 reason=phrase from wiki-0001.md was detected"
         exit 0
     fi
+    # The same sensitivity question asked through `transcript.extract` rather than around it.
+    # `--sensitivity-probe` builds the assistant turn itself, so it never touches the reader —
+    # and the reader is what broke: the self-check handed it raw `.jsonl` and scored nothing
+    # against nothing for weeks while both instrument checks stayed green.
+    if [ "${2:-}" = --pipeline-probe ]; then
+        if [ "${DOCTOR_UPTAKE_PIPELINE_BLIND:-0}" = 1 ]; then
+            echo "uptake_pipeline_probe=blind reason=a.jsonl read back with no turn markers at all"
+            exit 1
+        fi
+        if [ "${DOCTOR_UPTAKE_PIPELINE_UNKNOWN:-0}" = 1 ]; then
+            echo "uptake_pipeline_probe=unknown reason=no_ledger_session_has_a_transcript"
+            exit 0
+        fi
+        echo "uptake_pipeline_probe=ok reason=phrase from wiki-0001.md survived a.jsonl → extract → scorer"
+        exit 0
+    fi
     # The other half of §2's instrument check: each transcript scored against a session's hits it
     # never received. A rate that reaches the treatment rate means the scorer is reading topic
     # overlap, so doctor has to be able to fail on it — and to tell "could not run" apart from
@@ -640,6 +656,38 @@ esac
       exit 1
   }
   echo "ok - a blind uptake detector fails readiness"
+)
+
+# The pipeline probe has to fail readiness on its own. `--sensitivity-probe` builds the assistant
+# turn itself and never touches `transcript.extract`, so it kept answering yes while the reader
+# handed the scorer raw `.jsonl` and every uptake score was 0 for a reason that had nothing to do
+# with the channel. Two green instrument checks with a blind pipeline between them.
+( make_case "$TMP/uptake-pipeline" yes
+  if DOCTOR_UPTAKE_PIPELINE_BLIND=1 run_strict "$TMP/uptake-pipeline" "$TMP/uptake-pipeline.out"; then
+      cat "$TMP/uptake-pipeline.out"
+      echo "FAIL: a blind uptake pipeline must fail strict doctor" >&2
+      exit 1
+  fi
+  grep -q "UPTAKE PIPELINE BLIND" "$TMP/uptake-pipeline.out" || {
+      cat "$TMP/uptake-pipeline.out"
+      echo "FAIL: the blind pipeline must be named, not merely counted" >&2
+      exit 1
+  }
+  echo "ok - a blind uptake pipeline fails readiness"
+)
+
+# And it must not fail when there is simply nothing to probe with. A gate that cannot tell "no
+# subject" from "blind" fires on every fixture and short session, and a gate that cries on its own
+# test data earns the mute it then dies of — which is the exact confusion (absent instrument vs
+# empty population) this check exists to prevent elsewhere.
+( make_case "$TMP/uptake-pipeline-unknown" yes
+  if DOCTOR_UPTAKE_PIPELINE_UNKNOWN=1 run_strict "$TMP/uptake-pipeline-unknown" "$TMP/uptake-pipeline-unknown.out"; then
+      echo "ok - nothing to probe with is not a blind pipeline"
+  else
+      cat "$TMP/uptake-pipeline-unknown.out"
+      echo "FAIL: an unprobeable pipeline must warn, not fail readiness" >&2
+      exit 1
+  fi
 )
 
 # A contaminated self-check has to fail readiness for the same reason a blind one does, from the

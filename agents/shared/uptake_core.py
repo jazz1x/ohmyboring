@@ -18,12 +18,26 @@ No I/O beyond a JSONL append the caller hands a path to; the hooks own the rest.
 
 import contextlib
 import fcntl
+import glob
 import json
 import os
 import re
 import sys
 import time
 from typing import NamedTuple
+
+import transcript
+
+
+def _transcript_format(path):
+    """Which reader this file needs, from where it lives.
+
+    The two collectors write different shapes and the self-check walks both roots, so a single
+    default would silently return nothing for one of them — the same failure this function was
+    added to end, one directory over.
+    """
+    return "codex-jsonl" if os.sep + ".codex" + os.sep in path else "claude-json"
+
 
 def ledger_path():
     """Where the recall hook leaves its record — resolved per call, never cached at import.
@@ -348,6 +362,71 @@ def sensitivity_probe(records):
     return None, "no ledger record carries a phrase outside its own prompt — nothing to probe with"
 
 
+def pipeline_probe(records, transcript_path):
+    """The same question as `sensitivity_probe`, asked through the whole pipeline.
+
+    That one builds `"[assistant] " + phrase` itself, which skips the step that actually broke
+    here: `transcript.extract`. The self-check handed raw `.jsonl` to a splitter that only knows
+    `[assistant] `, scored nothing against nothing for weeks, and printed it as a clean zero —
+    while `sensitivity_probe` kept answering yes, because it never went near the reader.
+
+    So: take a real transcript off disk, read it the way production reads it, append one phrase
+    the ledger says was injected, and require the scorer to find it. A format change, a reader
+    that returns the wrong shape, a turn marker that moved — all of them fail here and none of
+    them fail the plate-handed probe.
+
+    Returns `(ok, reason)`. `None` when there is nothing to probe with, which is not a pass:
+    absence of a probe is absence of evidence, and §2 wants evidence before it reads a zero.
+    """
+    if not transcript_path or not os.path.exists(transcript_path):
+        return None, "no transcript to read — the pipeline cannot be probed without one"
+    try:
+        body = transcript.extract(transcript_path, _transcript_format(transcript_path))
+    except (OSError, ValueError) as exc:
+        return False, f"transcript.extract failed on {os.path.basename(transcript_path)}: {exc}"
+    # Two different silences, and the gate is only about one of them.
+    #
+    # No turn markers at all means the reader handed back something the splitter cannot parse —
+    # raw `.jsonl` where `[user] `/`[assistant] ` was expected. That is the blindness this exists
+    # to catch, and it scored nothing against nothing for weeks while reading as a clean zero.
+    #
+    # Markers present but no assistant turn means a session that never got an answer. Short, and
+    # every fixture is like that. Calling it blindness fires on the fixtures, and a gate that
+    # cries on its own test data earns the mute it then dies of.
+    if not _TURN.search(body):
+        return False, (
+            f"{os.path.basename(transcript_path)} read back with no turn markers at all —"
+            " the reader and the turn splitter disagree, so every uptake score over it is 0"
+            " for a reason that has nothing to do with the channel"
+        )
+    if not assistant_text(body):
+        return None, (
+            f"{os.path.basename(transcript_path)} has no assistant turns — nothing to probe with,"
+            " which is not the same as a probe that failed"
+        )
+    for record in records or []:
+        prompt_words = set(record.get("prompt_words") or [])
+        for hit in record.get("hits") or []:
+            for phrase in hit.get("phrases") or []:
+                words = _words(phrase)
+                if not words or any(w in prompt_words for w in words):
+                    continue
+                # Appended as its own assistant turn, in the shape the reader emits, so the match
+                # has to survive everything between the file and the scorer.
+                probe = [dict(record, controls=[], hits=[hit])]
+                result = session_uptake(probe, body + "\n[assistant] " + phrase)
+                if result.used_prompts >= 1:
+                    return True, (
+                        f"phrase from {hit.get('src') or '?'} survived"
+                        f" {os.path.basename(transcript_path)} → extract → scorer"
+                    )
+                return False, (
+                    f"a phrase from {hit.get('src') or '?'} was appended to a real transcript and"
+                    " did not survive the read — the pipeline loses uses the detector can match"
+                )
+    return None, "no ledger record carries a phrase outside its own prompt — nothing to probe with"
+
+
 def prune_session(session_id, path=None, now=None, max_age_days=LEDGER_MAX_AGE_DAYS):
     """Drop this session's records, and any left behind by sessions that never ended.
 
@@ -624,13 +703,26 @@ def _self_check_main(rest):
             index.setdefault(os.path.splitext(os.path.basename(path))[0], path)
 
     def transcript_for(session_id):
+        """The session's turns, in the shape `assistant_text` reads.
+
+        This used to hand back the raw `.jsonl`. `assistant_text` splits on `[assistant] `, which
+        a raw transcript never contains, so it returned the empty string for every session and the
+        self-check scored nothing against nothing. Measured 2026-09-10 on one live transcript: raw
+        gives `assistant_text` 0 characters, the same file through `transcript.extract` gives
+        108,365.
+
+        The check reported `cross=0/2460 treatment=0/2460` and that zero was read as "coincidence
+        produces no matches on this corpus". It meant the detector had been handed nothing to
+        match — a command failure, an absent instrument and an empty population all look like 0,
+        and here the instrument was the one that was absent. Its own gate (`doctor` d5e) was
+        blind in exactly the way it exists to rule out.
+        """
         path = index.get(session_id)
         if not path:
             return ""
         try:
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                return handle.read()
-        except OSError:
+            return transcript.extract(path, _transcript_format(path))
+        except (OSError, ValueError):
             return ""
 
     (used, total), (t_used, t_total) = cross_session_rate(
@@ -650,15 +742,64 @@ def _self_check_main(rest):
     return 1 if ok is False else 0
 
 
+def _pipeline_probe_main(rest):
+    """`--pipeline-probe` — the sensitivity question asked through `transcript.extract`.
+
+    Picks the newest ledger session that has a transcript on disk, so the shape being checked is
+    the one production is reading today rather than one this file built for itself.
+    """
+    records = []
+    try:
+        with open(rest[0] if rest else ledger_path(), encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        print("uptake_pipeline_probe=unknown reason=no_ledger")
+        return 0
+    if not records:
+        print("uptake_pipeline_probe=unknown reason=empty_ledger")
+        return 0
+    index = {}
+    for root in (
+        os.path.expanduser("~/.claude/projects"),
+        os.path.expanduser("~/.codex/sessions"),
+    ):
+        for path in glob.iglob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+            index.setdefault(os.path.splitext(os.path.basename(path))[0], path)
+
+    for record in reversed(records):
+        path = index.get(record.get("session_id"))
+        if not path:
+            continue
+        ok, reason = pipeline_probe([record], path)
+        if ok is None:
+            continue
+        state = {True: "ok", False: "blind"}[ok]
+        print(f"uptake_pipeline_probe={state} reason={reason}")
+        return 1 if ok is False else 0
+    print("uptake_pipeline_probe=unknown reason=no_ledger_session_has_a_transcript")
+    return 0
+
+
 def _main(argv):
     rest = [a for a in argv if not a.startswith("--")]
     if "--sensitivity-probe" in argv:
         return _probe_main(rest)
+    if "--pipeline-probe" in argv:
+        return _pipeline_probe_main(rest)
     if "--self-check" in argv:
         return _self_check_main(rest)
     if "--duplicate-injections" not in argv:
         print(
-            "usage: uptake_core.py [--duplicate-injections|--sensitivity-probe|--self-check] [ledger-path]",
+            "usage: uptake_core.py"
+            " [--duplicate-injections|--sensitivity-probe|--pipeline-probe|--self-check]"
+            " [ledger-path]",
             file=sys.stderr,
         )
         return 2
