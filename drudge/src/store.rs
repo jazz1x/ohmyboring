@@ -791,6 +791,71 @@ impl Store {
 
     /// GraphRAG retrieval: the body of the top-N connected documents that **share a concrete concept/tool** with a document.
     /// Surfaces, via the graph (concept links), the right answer that the vector buried in noise. project/topic excluded.
+    /// Older notes that share a **concept** with this one — the thread it continues.
+    ///
+    /// `related_doc_content` is the neighbour walk `ask` uses, and it counts every non-project
+    /// node including tools, needing two shared. For a briefing that is the wrong shape twice
+    /// over. Measured on one morning's twelve notes: the nodes they shared were `tool:rg` (9),
+    /// `tool:python` (6), `tool:sed` (6), `tool:git` (5) -- grouping by those produces "things
+    /// that ran rg". Excluding tools, the same twelve reached `concept:mutationtesting` in 71
+    /// older notes and `concept:singlesourceoftruth` in 19, which is the thread a reader means
+    /// when they ask what this continues.
+    ///
+    /// One shared concept is enough here, where the neighbour walk wants two: concepts are
+    /// specific (`contractdrivendevelopment`, not `git`), and requiring a second is what kept
+    /// this reachable only through tools.
+    ///
+    /// Older only. A briefing already holds today; what it never had was last week.
+    pub async fn related_by_concept(
+        &self,
+        source_path: &str,
+        limit: i64,
+    ) -> Result<Vec<RecentDoc>> {
+        let doc_id = doc_node_id(source_path);
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "WITH self_concepts AS (
+                     SELECT dst FROM edge WHERE src = $1 AND kind = 'about'
+                       AND dst LIKE 'concept:%'
+                 ),
+                 -- Older-than is a predicate on the candidates, not a filter on the winners.
+                 -- Ranking first and trimming after is how a selector returns nothing: the two
+                 -- best-connected notes are usually this morning's own, so the filter emptied a
+                 -- set it was meant to narrow. Measured: three heads produced one row that way
+                 -- and eleven this way.
+                 ranked AS (
+                     SELECT e.src AS doc_node, count(*) AS shared
+                     FROM edge e
+                     JOIN self_concepts sc ON e.dst = sc.dst
+                     JOIN document od ON ('doc:' || od.source_path) = e.src
+                     WHERE e.src <> $1 AND e.kind = 'about'
+                       AND od.updated_at < (SELECT updated_at FROM document WHERE source_path = $3)
+                     GROUP BY e.src ORDER BY shared DESC, e.src ASC LIMIT $2
+                 )
+                 SELECT d.source_path, d.project, d.tags,
+                        string_agg(c.content, E'\n' ORDER BY c.chunk_idx) AS content
+                 FROM ranked r
+                 JOIN document d ON ('doc:' || d.source_path) = r.doc_node
+                 JOIN chunk c ON c.source_path = d.source_path
+                 GROUP BY d.source_path, d.project, d.tags, r.shared
+                 ORDER BY r.shared DESC;",
+                &[&doc_id, &limit, &source_path],
+            )
+            .await
+            .context("related by concept")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| RecentDoc {
+                source_path: r.get(0),
+                project: r.get(1),
+                tags: r.get(2),
+                content: r.get::<_, Option<String>>(3).unwrap_or_default(),
+            })
+            .collect())
+    }
+
     pub async fn related_doc_content(
         &self,
         source_path: &str,
