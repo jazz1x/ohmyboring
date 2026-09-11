@@ -280,7 +280,8 @@ def hit_was_used(hit, assistant_words_text, prompt_words):
     for name in source_names(hit.get("src") or ""):
         if _contains(assistant_words_text, name) and not _contains(prompt_blob, name):
             return True
-    for phrase in hit.get("phrases") or []:
+    for stored in hit.get("phrases") or []:
+        phrase = " ".join(_words(stored))
         if _contains(assistant_words_text, phrase) and not _contains(prompt_blob, phrase):
             return True
     return False
