@@ -99,6 +99,14 @@ def test_assistant_citing_the_note_without_its_suffix_counts():
     assert (r.used_hits, r.total_hits) == (0, 1), "a stem the user typed is still not evidence"
 
 
+def test_a_note_named_at_the_end_of_a_sentence_counts():
+    """`per wiki-0007.` — the period was being kept as part of the token, so the commonest
+    place to cite a note (sentence end) scored zero."""
+    record = uptake_core.injection_record("s1", "why did the pool die", [_hit()], 3)
+    r = uptake_core.session_uptake([record], "[user] why did the pool die\n[assistant] This is per wiki-0007.\n")
+    assert (r.used_hits, r.total_hits) == (1, 1)
+
+
 def test_a_bare_word_stem_is_not_tried():
     # `pool.md` → `pool` would score every sentence about pools. Only numbered ids get a stem.
     assert uptake_core.source_names("pool.md") == ["pool.md"]
@@ -473,20 +481,37 @@ def test_consumption_names_what_was_used_and_what_was_argued_with():
         "[assistant] per wiki-0007 this is the recycled-socket case. wiki-0099 is outdated — the pool "
         "no longer recycles. I looked at wiki-0042 too. That advice was wrong in another context.\n"
     )
-    used, contested = uptake_core.consumption([record], transcript)
+    used, contested, supersedes = uptake_core.consumption([record], transcript)
     assert used == ["/vault/wiki/wiki-0007.md", "/vault/wiki/wiki-0099.md", "/vault/wiki/wiki-0042.md"], used
     assert contested == ["/vault/wiki/wiki-0099.md"], "the marker has to sit in the sentence that names the note"
+    assert supersedes == []
     assert record["hits"][0]["path"] == "/vault/wiki/wiki-0007.md", "the ledger keeps the engine path"
+
+
+def test_consumption_reads_which_note_replaced_which():
+    """`superseded_by` is set on 0 of 1,342 notes because it waited for the distilling LLM to
+    emit it. The agent says it in prose instead; English names the newer note first, Korean the
+    older first, and a pair only counts when both notes were handed to the session."""
+    hits = [_hit(src="wiki-1682.md"), _hit(src="wiki-1683.md"), _hit(src="wiki-0100.md")]
+    record = uptake_core.injection_record("s1", "how do we handle revision", hits, 3)
+    en = "[user] how do we handle revision\n[assistant] Going with wiki-1683 instead of wiki-1682 here; wiki-1683 supersedes it.\n"
+    _, _, pairs = uptake_core.consumption([record], en)
+    assert pairs == [("/vault/wiki/wiki-1683.md", "/vault/wiki/wiki-1682.md")], pairs
+    ko = "[user] 퇴고는 어떻게\n[assistant] wiki-1682 대신 wiki-1683 을 따른다.\n"
+    _, _, pairs = uptake_core.consumption([record], ko)
+    assert pairs == [("/vault/wiki/wiki-1683.md", "/vault/wiki/wiki-1682.md")], "Korean names the older note first"
+    stranger = "[user] x\n[assistant] wiki-1683 instead of wiki-9999, which was never injected.\n"
+    assert uptake_core.consumption([record], stranger)[2] == [], "both notes must have been handed over"
 
 
 def test_consumption_reads_korean_contradictions_and_old_rows_without_a_path():
     record = uptake_core.injection_record("s1", "풀이 왜 죽었지", [_hit(src="wiki-1290.md")], 3)
     del record["hits"][0]["path"]
     transcript = "[user] 풀이 왜 죽었지\n[assistant] wiki-1290 은 지금 코드와 어긋난다, 풀은 이제 소켓을 재활용 안 한다.\n"
-    used, contested = uptake_core.consumption([record], transcript)
+    used, contested, _ = uptake_core.consumption([record], transcript)
     assert used == ["/vault/wiki/wiki-1290.md"], used
     assert contested == ["/vault/wiki/wiki-1290.md"], contested
-    assert uptake_core.consumption([record], "[assistant] nothing here\n") == ([], [])
+    assert uptake_core.consumption([record], "[assistant] nothing here\n") == ([], [], [])
 
 
 def test_the_transcript_format_follows_the_directory():

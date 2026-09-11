@@ -210,7 +210,7 @@ def ranked_by_consumption(hits: list[dict]) -> list[dict]:
     notes nobody has consumed keep the engine's order among themselves."""
     def key(h):
         used, contested = int(h.get("used_count") or 0), int(h.get("contested_count") or 0)
-        return (contested > used, -used)
+        return (bool(h.get("superseded_by")), contested > used, -used)
 
     return sorted(hits, key=key)
 
@@ -222,6 +222,9 @@ def consumption_note(hit: dict) -> str:
         parts.append(f"reused {used}×")
     if contested:
         parts.append(f"contested {contested}×")
+    newer = [source_name({"source_path": p}) for p in hit.get("superseded_by") or []]
+    if newer:
+        parts.append(f"superseded by {', '.join(newer)}")
     return f" ({', '.join(parts)})" if parts else ""
 
 

@@ -612,18 +612,25 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
     def _records(self):
         import uptake_core
 
-        hits = [{"source_path": "/vault/wiki/wiki-0007.md", "snippet": "the pool died because deadpool recycled a closed socket " * 3}]
+        hits = [
+            {"source_path": "/vault/wiki/wiki-0007.md", "snippet": "the pool died because deadpool recycled a closed socket " * 3},
+            {"source_path": "/vault/wiki/wiki-0003.md", "snippet": "the older pool note said keep the socket warm " * 3},
+        ]
         return [uptake_core.injection_record("s1", "why did the pool die", hits, 3)]
 
-    def test_used_and_contested_notes_are_posted_as_edges(self):
-        transcript = "[user] why did the pool die\n[assistant] per wiki-0007, but wiki-0007 is outdated now.\n"
+    def test_used_contested_and_superseding_notes_are_posted_as_edges(self):
+        transcript = (
+            "[user] why did the pool die\n"
+            "[assistant] per wiki-0007 instead of wiki-0003. Even so, wiki-0007 is outdated now.\n"
+        )
         with mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}), \
              mock.patch("drudge_client.DrudgeClient") as client:
             distill_core.write_consumption_to_graph("s1", self._records(), transcript)
-        (sid, when, used, contested), _ = client.return_value.consumption.call_args
+        (sid, when, used, contested), kwargs = client.return_value.consumption.call_args
         self.assertEqual(sid, "s1")
-        self.assertEqual(used, ["/vault/wiki/wiki-0007.md"])
+        self.assertEqual(used, ["/vault/wiki/wiki-0007.md", "/vault/wiki/wiki-0003.md"])
         self.assertEqual(contested, ["/vault/wiki/wiki-0007.md"])
+        self.assertEqual(kwargs["supersedes"], [["/vault/wiki/wiki-0007.md", "/vault/wiki/wiki-0003.md"]])
         self.assertRegex(when, r"^\d{4}-\d{2}-\d{2}T")
 
     def test_a_spooled_sink_never_writes_to_the_live_graph(self):
