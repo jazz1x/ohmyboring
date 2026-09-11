@@ -834,7 +834,7 @@ def test_the_briefing_counts_the_verdicts_population_not_a_neighbouring_one():
             },
         }
 
-    before, after = "2026-09-01T00:00:00+00:00", "2026-09-03T00:00:00+00:00"
+    before, after = "2026-09-11T00:00:00+00:00", "2026-09-13T00:00:00+00:00"
     rows = [row(f"old{i}", "claude-code", before, 10) for i in range(6)]
     rows += [row(f"new{i}", "claude-code", after, 10) for i in range(3)]
     rows += [row(f"k{i}", "kimi", after, 10) for i in range(4)]
@@ -881,8 +881,8 @@ def test_the_midpoint_warning_rides_the_one_channel_that_reaches_a_person():
         finally:
             os.environ.pop("BORING_TODAY", None)
 
-    assert "중간점" not in on("2026-09-02"), "before the midpoint it is not due"
-    assert "중간점" not in on("2026-09-20"), "after the close it is spent"
+    assert "중간점" not in on("2026-09-13"), "before the midpoint it is not due"
+    assert "중간점" not in on("2026-09-27"), "after the close it is spent"
 
     due = on(V.MIDPOINT)
     assert "중간점" in due and f"3/{floor}" in due, due
@@ -909,7 +909,7 @@ def test_the_audit_backlog_is_named_in_both_renderings_and_falls_silent_when_met
     answer = "# p\n- Next: 뭔가 한다\n"
     behind = {"judges": [{"judge": "llm", "relevant": 18, "irrelevant": 30}], "compared": 4}
 
-    os.environ["BORING_TODAY"] = "2026-09-07"  # a Monday inside the window
+    os.environ["BORING_TODAY"] = "2026-09-14"  # a Monday inside the window
     body = slack_briefing.render_message_mrkdwn("*T*", "S", answer, [], "empty", behind)
     payload = slack_briefing.render_blocks_payload("T", "S", answer, [], "empty", behind)
     def all_text(blocks):
@@ -942,13 +942,13 @@ def test_the_audit_backlog_is_named_in_both_renderings_and_falls_silent_when_met
     # itself word for word -- it stood at 20 across all 8 briefings actually sent, nine days
     # running. A line that never changes is one the reader learns to skip.
     try:
-        os.environ["BORING_TODAY"] = "2026-09-08"  # Tuesday, mid-window
+        os.environ["BORING_TODAY"] = "2026-09-15"  # Tuesday, mid-window
         assert slack_briefing.audit_notice(behind) == "", "a daily repeat of yesterday's number"
 
-        os.environ["BORING_TODAY"] = "2026-09-12"  # the last stretch: a deadline is behind it now
+        os.environ["BORING_TODAY"] = "2026-09-24"  # the last stretch: a deadline is behind it now
         assert "--audit" in slack_briefing.audit_notice(behind)
 
-        os.environ["BORING_TODAY"] = "2026-09-15"  # past the window
+        os.environ["BORING_TODAY"] = "2026-09-27"  # past the window
         assert slack_briefing.audit_notice(behind) == "", (
             "the figure this unblocks can no longer be computed, so the ask is spent"
         )

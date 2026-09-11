@@ -481,8 +481,8 @@ def window_block(rows, notes):
         pre_prompts = sum(c["total_prompts"] for c in pre_agent.values())
         notes.append(
             f"수리 이전 표본 세션 {pre_sessions} · 주입 프롬프트 {pre_prompts} 은 판정에서 제외된다"
-            f" (경계 {verdict_core.LEDGER_REPAIR_AT}). 원장이 3일에 잘리던 시기라 3일보다 오래 산"
-            " 세션은 채점 전에 증거가 사라졌고, 그 편향은 세션 길이 방향이다 — PRD §8 D4."
+            f" (경계 {verdict_core.LEDGER_REPAIR_AT}). 그 전 행은 위조 SessionEnd 와 접미사만 아는"
+            " 채점기가 만든 것이라 같은 계기의 값이 아니다 — PRD §8 D9."
         )
 
     # Per agent, never pooled: Claude Code injects on every prompt while Kimi throttles to once a
