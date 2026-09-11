@@ -73,13 +73,15 @@ class DrudgeClient:
                 raise
         raise last_err or RuntimeError("unexpected empty retry loop")
 
-    def search(self, query: str, max_results: int = 3, max_tokens: int = 1500) -> list[dict[str, Any]]:
-        """POST /search and return the hits list."""
-        data = self._retry(
-            "POST",
-            "/search",
-            {"query": query, "max_results": max_results, "max_tokens": max_tokens},
-        )
+    def search(
+        self, query: str, max_results: int = 3, max_tokens: int = 1500, related: int = 0, related_heads: int = 2
+    ) -> list[dict[str, Any]]:
+        """POST /search and return the hits list. `related` > 0 asks for the older notes each
+        of the first `related_heads` hits shares a concept with, under the hit's `related` key."""
+        payload = {"query": query, "max_results": max_results, "max_tokens": max_tokens}
+        if related:
+            payload.update(related=related, related_heads=related_heads)
+        data = self._retry("POST", "/search", payload)
         return data.get("hits", []) if isinstance(data, dict) else []
 
     def health(self) -> dict[str, Any]:
