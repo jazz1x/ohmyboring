@@ -2137,7 +2137,7 @@ impl Store {
                      SELECT id FROM node
                      WHERE kind = 'session'
                        AND label ~ '^\\d{4}-\\d{2}-\\d{2}T'
-                       AND label::timestamptz >= now() - make_interval(days => $1)
+                       AND label::timestamptz >= now() - make_interval(days => ($1::bigint)::int)
                  ),
                  counts AS (
                      SELECT e.dst AS doc_node,
@@ -2151,11 +2151,11 @@ impl Store {
                      LIMIT $2
                  )
                  SELECT d.source_path, d.project, d.tags,
-                        string_agg(c.content, E'\\n' ORDER BY c.chunk_idx) AS content,
+                        coalesce(string_agg(c.content, E'\\n' ORDER BY c.chunk_idx), '') AS content,
                         counts.used, counts.contested
                  FROM counts
                  JOIN document d ON ('doc:' || d.source_path) = counts.doc_node
-                 JOIN chunk c ON c.source_path = d.source_path
+                 LEFT JOIN chunk c ON c.source_path = d.source_path
                  GROUP BY d.source_path, d.project, d.tags, counts.used, counts.contested
                  ORDER BY counts.used DESC, counts.contested DESC, d.source_path ASC;",
                 &[&days, &limit],
