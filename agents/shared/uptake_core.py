@@ -60,7 +60,9 @@ _TURN = re.compile(r"^\[(user|assistant)\]\s?", re.MULTILINE)
 
 
 def _words(text):
-    return _WORD.findall((text or "").lower())
+    """Lower-cased tokens; a sentence-ending `.`/`:`/`,` is not part of the word it follows —
+    `per wiki-1603.` names wiki-1603, and until 2026-09-11 the scorer could not see that."""
+    return [w for w in (t.rstrip(".:,") for t in _WORD.findall((text or "").lower())) if w]
 
 
 def phrases(snippet, size=PHRASE_WORDS, limit=MAX_PHRASES):
@@ -360,30 +362,50 @@ CONTESTED_MARKERS = (
 
 _SENTENCE = re.compile(r"[.!?\n]+")
 
+#: The sentence shapes in which an assistant says one note replaced another. English names the
+#: newer note first ("wiki-1683 instead of wiki-1682"); Korean names the older first
+#: ("wiki-1682 대신 wiki-1683"). Both groups are named so the order is carried by the pattern.
+_NOTE = r"[\w-]*\d[\w-]*(?:\.md)?"
+_SUPERSEDES_FORMS = (
+    re.compile(rf"\b(?P<newer>{_NOTE})\b[^.!?\n]{{0,40}}?\b(?:instead of|rather than|replaces|supersedes)\b[^.!?\n]{{0,12}}?\b(?P<older>{_NOTE})\b", re.IGNORECASE),
+    re.compile(rf"\b(?P<older>{_NOTE})\b[^.!?\n]{{0,12}}?(?:대신|말고)[^.!?\n]{{0,12}}?\b(?P<newer>{_NOTE})\b", re.IGNORECASE),
+)
+
 
 def consumption(records, transcript_text):
-    """What this session did with each note it was handed: `(used_paths, contested_paths)`.
+    """What this session did with each note it was handed.
 
-    Used is the scorer's own test (`hit_was_used`). Contested is a note the assistant named in
-    a sentence that also carries a contradiction marker — the act the fence protocol asks for.
-    A note can be both: it was read closely enough to be argued with.
+    Returns `(used_paths, contested_paths, supersedes_pairs)`. Used is the scorer's own test
+    (`hit_was_used`). Contested is a note the assistant named in a sentence that also carries a
+    contradiction marker — the act the fence protocol asks for. Supersedes is a `(newer, older)`
+    pair the assistant named as "X instead of Y" where both were handed to the session. A note
+    can be used and contested at once: it was read closely enough to be argued with.
     """
     text = assistant_text(transcript_text)
     blob = " ".join(_words(text))
     sentences = [" ".join(_words(s)) for s in _SENTENCE.split(text.lower()) if s.strip()]
-    used, contested = [], []
+    by_name = {}
+    used, contested, supersedes = [], [], []
     for record in records or []:
         prompt_words = record.get("prompt_words") or []
         for hit in record.get("hits") or []:
             path = note_path(hit)
+            names = source_names(hit.get("src") or "")
+            for n in names:
+                by_name.setdefault(n, path)
             if hit_was_used(hit, blob, prompt_words) and path not in used:
                 used.append(path)
-            names = source_names(hit.get("src") or "")
             if path not in contested and any(
                 _contains(s, n) and any(m in s for m in CONTESTED_MARKERS) for s in sentences for n in names
             ):
                 contested.append(path)
-    return used, contested
+    for s in sentences:
+        for form in _SUPERSEDES_FORMS:
+            for m in form.finditer(s):
+                newer, older = by_name.get(m.group("newer")), by_name.get(m.group("older"))
+                if newer and older and newer != older and (newer, older) not in supersedes:
+                    supersedes.append((newer, older))
+    return used, contested, supersedes
 
 
 def sensitivity_probe(records):
@@ -811,8 +833,52 @@ def _pipeline_probe_main(rest):
     return 0
 
 
+def _transcript_index():
+    import glob
+
+    index = {}
+    for root in (os.path.expanduser("~/.claude/projects"), os.path.expanduser("~/.codex/sessions")):
+        for path in glob.iglob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+            index.setdefault(os.path.splitext(os.path.basename(path))[0], path)
+    return index
+
+
+def _consumption_main(rest, write):
+    """`--consumption <session_id> [--write]`: what a session did with its notes, from its own
+    ledger rows and transcript; `--write` hands it to the engine the way SessionEnd does."""
+    if not rest:
+        print("usage: uptake_core.py --consumption <session_id> [--write]", file=sys.stderr)
+        return 2
+    session_id = rest[0]
+    path = _transcript_index().get(session_id)
+    if not path:
+        print(f"consumption session={session_id} reason=no_transcript")
+        return 1
+    records = load_records(session_id)
+    text = transcript.extract(path, _transcript_format(path))
+    used, contested, supersedes = consumption(records, text)
+    print(
+        f"consumption session={session_id} ledger_rows={len(records)} used={len(used)}"
+        f" contested={len(contested)} supersedes={len(supersedes)}"
+    )
+    for p in used:
+        print(f"  used       {p}")
+    for p in contested:
+        print(f"  contested  {p}")
+    for newer, older in supersedes:
+        print(f"  supersedes {newer} -> {older}")
+    if write:
+        import distill_core
+
+        distill_core.write_consumption_to_graph(session_id, records, text)
+        print("  written to the engine")
+    return 0
+
+
 def _main(argv):
     rest = [a for a in argv if not a.startswith("--")]
+    if "--consumption" in argv:
+        return _consumption_main(rest, "--write" in argv)
     if "--sensitivity-probe" in argv:
         return _probe_main(rest)
     if "--pipeline-probe" in argv:

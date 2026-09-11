@@ -214,6 +214,23 @@ def test_what_earlier_sessions_did_with_a_note_reorders_the_pool_and_shows():
         assert "- [wiki-0002.md] the pool" in ctx, "untouched notes carry no parenthesis"
 
 
+def test_a_superseded_note_goes_last_and_says_what_replaced_it():
+    text = "the pool died because deadpool recycled a closed socket " * 3
+    pool = [
+        dict(_hit("wiki-0001.md", text), used_count=9, superseded_by=["/vault/wiki/wiki-0009.md"]),
+        _hit("wiki-0002.md", text),
+        _hit("wiki-0003.md", text),
+        _hit("wiki-0004.md", text),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        ledger = os.path.join(d, "ledger.jsonl")
+        ctx = _recall(pool, ledger=ledger)
+        injected, controls = _ledger_sources(ledger)[0]
+        assert injected == ["wiki-0002.md", "wiki-0003.md", "wiki-0004.md"], "nine reuses do not outrank being replaced"
+        assert controls == ["wiki-0001.md"]
+        assert "wiki-0001.md" not in ctx
+
+
 def test_an_unreadable_ledger_keeps_the_injection():
     """§8 D6: re-injection is cheaper than omission, and the ledger can die before the session."""
     pool = [_hit("wiki-0007.md", "the pool died because deadpool recycled a closed socket " * 3)]
