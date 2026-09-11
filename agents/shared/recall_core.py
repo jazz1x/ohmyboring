@@ -192,22 +192,13 @@ def source_name(hit: dict) -> str:
 
 
 def split_fresh(hits: list[dict], already_injected: set[str]) -> tuple[list[dict], list[dict]]:
-    """Injected hits and control hits, both drawn only from notes this session has not seen.
-
-    Measured 2026-09-02: 34% of in-session injections were notes already in the agent's context,
-    one of them 25 times in a single session (docs/PRD.md §8 D6). A note the agent already holds
-    is neither evidence nor help, and as a control it is contaminated — the agent has seen it.
-    The pool the engine returns is unchanged, so the hits and their order are the same as before;
-    only the partition moves.
-    """
+    """Injected and control hits, both from notes this session has not seen (PRD §8 D6)."""
     fresh = ranked_by_consumption([h for h in hits if source_name(h) not in already_injected])
     return fresh[:MAX_RESULTS], fresh[MAX_RESULTS:]
 
 
 def ranked_by_consumption(hits: list[dict]) -> list[dict]:
-    """The engine's order, then what earlier sessions did with each note: a note argued with
-    more often than it was reused goes to the back, a note reused goes to the front. Stable, so
-    notes nobody has consumed keep the engine's order among themselves."""
+    """Superseded last, argued-with-more-than-reused next, reused first; otherwise engine order."""
     def key(h):
         used, contested = int(h.get("used_count") or 0), int(h.get("contested_count") or 0)
         return (bool(h.get("superseded_by")), contested > used, -used)
@@ -228,17 +219,11 @@ def consumption_note(hit: dict) -> str:
     return f" ({', '.join(parts)})" if parts else ""
 
 
-#: Related notes carried per injection, across all hits. One is the thread; more is the
-#: neighbourhood, and the budget is the agent's context.
 RELATED_PER_INJECTION = 2
 
 
 def fresh_related(injected: list[dict], already_injected: set[str]) -> dict[str, list[dict]]:
-    """The older note each injected hit shares a concept with, keyed by the hit's name.
-
-    The engine attaches these per hit (`/search` `related`, #318); this keeps only what the
-    session has not seen — as a hit, as an earlier related note, or in a previous prompt.
-    """
+    """Concept-linked older notes per injected hit, only those the session has not seen."""
     seen = set(already_injected) | {source_name(h) for h in injected}
     out: dict[str, list[dict]] = {}
     budget = RELATED_PER_INJECTION

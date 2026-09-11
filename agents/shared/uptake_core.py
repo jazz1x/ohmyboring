@@ -60,8 +60,7 @@ _TURN = re.compile(r"^\[(user|assistant)\]\s?", re.MULTILINE)
 
 
 def _words(text):
-    """Lower-cased tokens; a sentence-ending `.`/`:`/`,` is not part of the word it follows —
-    `per wiki-1603.` names wiki-1603, and until 2026-09-11 the scorer could not see that."""
+    """Lower-cased tokens, sentence punctuation shed — `per wiki-1603.` names wiki-1603."""
     return [w for w in (t.rstrip(".:,") for t in _WORD.findall((text or "").lower())) if w]
 
 
@@ -254,9 +253,7 @@ def _contains(blob, needle):
 
 
 def source_names(src):
-    """The forms an agent cites a source under: the basename, and its stem when the stem is a
-    numbered id. Agents write `wiki-1603`, the ledger stores `wiki-1603.md`; a bare-word stem
-    like `pool` is not tried because it would match ordinary prose."""
+    """The basename, plus its stem when the stem carries a digit (`wiki-1603`; never `pool`)."""
     src = src.lower()
     if not src:
         return []
@@ -273,10 +270,6 @@ def hit_was_used(hit, assistant_words_text, prompt_words):
     subtraction is what keeps this from being a similarity score between prompt and answer.
     """
     prompt_blob = " ".join(prompt_words or [])
-    # The same subtraction the phrases get. It was missing here, and a note name is the easiest
-    # thing for a user to type: "wiki-1292.md 다시 봐" would have counted as the agent using a
-    # memory it was told to look at. Every path into this function has to survive the question
-    # "would the agent have said this anyway".
     for name in source_names(hit.get("src") or ""):
         if _contains(assistant_words_text, name) and not _contains(prompt_blob, name):
             return True
@@ -352,10 +345,7 @@ def session_uptake(records, transcript_text):
     )
 
 
-#: Words an assistant uses when it follows the fence protocol's second sentence — "if one
-#: contradicts the code in front of you, say which". Matched inside the sentence that names the
-#: note, so "wiki-1603 is outdated" counts and "wiki-1603 fixed the outdated pool" does too;
-#: that overcount is accepted over the alternative of asking a model.
+#: What an assistant says after a note's name when it follows the fence's second sentence.
 CONTESTED_MARKERS = (
     "contradict", "outdated", "stale", "no longer", "wrong", "incorrect", "superseded",
     "어긋", "낡", "틀렸", "틀린", "맞지 않", "지금은 다르", "더 이상",
@@ -363,9 +353,7 @@ CONTESTED_MARKERS = (
 
 _SENTENCE = re.compile(r"[.!?\n]+")
 
-#: The sentence shapes in which an assistant says one note replaced another. English names the
-#: newer note first ("wiki-1683 instead of wiki-1682"); Korean names the older first
-#: ("wiki-1682 대신 wiki-1683"). Both groups are named so the order is carried by the pattern.
+#: "newer instead of older" in English; "older 대신 newer" in Korean. The groups carry the order.
 _NOTE = r"[\w-]*\d[\w-]*(?:\.md)?"
 _SUPERSEDES_FORMS = (
     re.compile(rf"\b(?P<newer>{_NOTE})\b[^.!?\n]{{0,40}}?\b(?:instead of|rather than|replaces|supersedes)\b[^.!?\n]{{0,12}}?\b(?P<older>{_NOTE})\b", re.IGNORECASE),
@@ -373,19 +361,31 @@ _SUPERSEDES_FORMS = (
 )
 
 
-def consumption(records, transcript_text):
-    """What this session did with each note it was handed.
+def argued_with(sentence, names):
+    """The note is named and a contradiction marker follows it in the same sentence."""
+    padded = f" {sentence} "
+    for name in names:
+        at = padded.find(f" {name} ")
+        if at >= 0 and any(m in padded[at + len(name) :] for m in CONTESTED_MARKERS):
+            return True
+    return False
 
-    Returns `(used_paths, contested_paths, supersedes_pairs)`. Used is the scorer's own test
-    (`hit_was_used`). Contested is a note the assistant named in a sentence that also carries a
-    contradiction marker — the act the fence protocol asks for. Supersedes is a `(newer, older)`
-    pair the assistant named as "X instead of Y" where both were handed to the session. A note
-    can be used and contested at once: it was read closely enough to be argued with.
-    """
+
+def replacements_named(sentence, path_by_name):
+    """`(newer, older)` pairs this sentence names, restricted to notes the session was handed."""
+    for form in _SUPERSEDES_FORMS:
+        for m in form.finditer(sentence):
+            newer, older = path_by_name.get(m.group("newer")), path_by_name.get(m.group("older"))
+            if newer and older and newer != older:
+                yield newer, older
+
+
+def consumption(records, transcript_text):
+    """`(used, contested, supersedes)` — what this session did with the notes it was handed."""
     text = assistant_text(transcript_text)
     blob = " ".join(_words(text))
     sentences = [" ".join(_words(s)) for s in _SENTENCE.split(text.lower()) if s.strip()]
-    by_name = {}
+    path_by_name = {}
     used, contested, supersedes = [], [], []
     for record in records or []:
         prompt_words = record.get("prompt_words") or []
@@ -393,19 +393,15 @@ def consumption(records, transcript_text):
             path = note_path(hit)
             names = source_names(hit.get("src") or "")
             for n in names:
-                by_name.setdefault(n, path)
+                path_by_name.setdefault(n, path)
             if hit_was_used(hit, blob, prompt_words) and path not in used:
                 used.append(path)
-            if path not in contested and any(
-                _contains(s, n) and any(m in s for m in CONTESTED_MARKERS) for s in sentences for n in names
-            ):
+            if path not in contested and any(argued_with(s, names) for s in sentences):
                 contested.append(path)
     for s in sentences:
-        for form in _SUPERSEDES_FORMS:
-            for m in form.finditer(s):
-                newer, older = by_name.get(m.group("newer")), by_name.get(m.group("older"))
-                if newer and older and newer != older and (newer, older) not in supersedes:
-                    supersedes.append((newer, older))
+        for pair in replacements_named(s, path_by_name):
+            if pair not in supersedes:
+                supersedes.append(pair)
     return used, contested, supersedes
 
 
