@@ -18,13 +18,17 @@ use crate::serve::{
     AppError, AppState, AskReq, AskResp, CompactResp, EventIngestResp, EventLogEntry, EventLogReq,
     EventLogResp, GraphReq, GraphResp, HealthResp, MCP_MAX_RESULTS, MCP_MAX_TOKENS, ProjectsResp,
     QueryLogEntry, QueryLogReq, QueryLogResp, RecallLabelEntry, RecallLabelJudgeStats,
-    RecallLabelReq, RecallLabelStatsResp, RecallLabelsReq, RecallLabelsResp, SearchHit, SearchResp,
-    StalledReq, SyncResp, SyncState, count_wiki_notes, spawn_query_log, vector_disabled,
+    RecallLabelReq, RecallLabelStatsResp, RecallLabelsReq, RecallLabelsResp, RelatedNote,
+    SearchHit, SearchResp, StalledReq, SyncResp, SyncState, count_wiki_notes, spawn_query_log,
+    vector_disabled,
 };
 use crate::store::{EventLogFilter, LoggedHit};
+use std::collections::HashSet;
 
 const EVENT_LOG_MAX_LIMIT: i64 = 1000;
 const EVENT_INGEST_MAX_BATCH: usize = 100;
+/// Same cap `ask` uses for graph context — enough of an older note to recognise the thread.
+const RELATED_SNIPPET_CHARS: usize = 1200;
 
 pub(crate) async fn health(State(state): State<AppState>) -> Json<HealthResp> {
     // Non-blocking: try_lock reveals whether a sync is mid-flight without ever waiting on it. The
@@ -375,7 +379,8 @@ pub(crate) async fn handle_search(
     let since_hours = req.since_hours;
     // vector-first: /search is the external accuracy contract (eval gate). Use the strongest
     // retriever when available; fall back to direct wiki reads only when vector is off.
-    let mapped: Vec<SearchHit> = if let Some(store) = s.store.as_ref() {
+    let related = req.related();
+    let mut mapped: Vec<SearchHit> = if let Some(store) = s.store.as_ref() {
         retrieve::retrieve_budget(
             store,
             &s.llm,
@@ -396,6 +401,7 @@ pub(crate) async fn handle_search(
             snippet: h.content,
             dist: Some(h.dist),
             dist_kind: Some(h.dist_kind),
+            related: Vec::new(),
         })
         .collect()
     } else {
@@ -413,9 +419,34 @@ pub(crate) async fn handle_search(
                 snippet: h.snippet,
                 dist: None,
                 dist_kind: None,
+                related: Vec::new(),
             })
             .collect()
     };
+    // Opt-in graph read: beside each of the first `related_heads` hits, the older notes that
+    // share a concept with it. The concept walk, not the shared-node walk — measured 2026-09-10,
+    // shared nodes between recent notes are almost all `tool:*`, so the node walk links everything
+    // to everything. No store (wiki-recall fallback): hits keep empty `related`, no error.
+    if related > 0
+        && let Some(store) = s.store.as_ref()
+    {
+        let mut seen: HashSet<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
+        for hit in mapped.iter_mut().take(req.related_heads(max_results)) {
+            for older in store
+                // `related()` clamps to 0..=3, so the conversion cannot wrap.
+                .related_by_concept(&hit.source_path, i64::try_from(related).unwrap_or(3))
+                .await?
+            {
+                if !seen.insert(older.source_path.clone()) {
+                    continue;
+                }
+                hit.related.push(RelatedNote {
+                    snippet: older.content.chars().take(RELATED_SNIPPET_CHARS).collect(),
+                    source_path: older.source_path,
+                });
+            }
+        }
+    }
     let hits: Vec<LoggedHit> = mapped
         .iter()
         .map(|h| match (h.dist, h.dist_kind) {

@@ -311,6 +311,52 @@ mod tests {
     fn unknown_to_healthy_is_silent_at_startup() {
         assert!(transition_log(DbHealthState::Unknown, DbHealthState::Healthy, None).is_none());
     }
+
+    #[test]
+    fn search_req_defaults_to_todays_shape_and_clamps_related() {
+        let req: super::SearchReq = serde_json::from_str(r#"{"query":"x"}"#).unwrap();
+        assert_eq!(
+            req.related, 0,
+            "absent means today's behaviour, byte-for-byte"
+        );
+        assert_eq!(req.related_heads, 2);
+
+        let req: super::SearchReq = serde_json::from_str(r#"{"query":"x","related":9}"#).unwrap();
+        assert_eq!(req.related(), 3, "the walk per hit is capped");
+        assert_eq!(
+            req.related_heads(usize::MAX),
+            2,
+            "the default head count is within range, untouched"
+        );
+        let req: super::SearchReq =
+            serde_json::from_str(r#"{"query":"x","related_heads":99}"#).unwrap();
+        assert_eq!(req.related_heads(5), 5, "cannot exceed max_results");
+    }
+
+    #[test]
+    fn search_hit_omits_related_key_until_one_is_attached() {
+        let mut hit = super::SearchHit {
+            id: "1".into(),
+            origin: "wiki".into(),
+            project: "p".into(),
+            source_path: "a.md".into(),
+            snippet: "s".into(),
+            dist: None,
+            dist_kind: None,
+            related: vec![],
+        };
+        let json = serde_json::to_string(&hit).unwrap();
+        assert!(
+            !json.contains("related"),
+            "callers that did not ask see no new key: {json}"
+        );
+        hit.related.push(super::RelatedNote {
+            source_path: "b.md".into(),
+            snippet: "older".into(),
+        });
+        let json = serde_json::to_string(&hit).unwrap();
+        assert!(json.contains("\"related\":"), "was {json}");
+    }
 }
 
 /// Fire-and-forget query logging. Latency and result context are recorded for
@@ -419,6 +465,28 @@ pub(crate) struct SearchReq {
     pub(crate) project: Option<String>,
     #[serde(default)]
     pub(crate) since_hours: Option<i32>,
+    #[serde(default)]
+    pub(crate) related: usize,
+    #[serde(default = "default_related_heads")]
+    pub(crate) related_heads: usize,
+}
+
+impl SearchReq {
+    /// Related notes per hit, clamped: each one is a graph walk, and an unbounded count
+    /// would let one search fan out into the whole neighbourhood.
+    pub(crate) fn related(&self) -> usize {
+        self.related.min(3)
+    }
+
+    /// How many of the top hits get related notes. Cannot exceed `max_results` — there is
+    /// no hit past that to attach anything to.
+    pub(crate) fn related_heads(&self, max_results: usize) -> usize {
+        self.related_heads.min(max_results)
+    }
+}
+
+fn default_related_heads() -> usize {
+    2
 }
 
 fn default_max_results() -> usize {
@@ -427,6 +495,14 @@ fn default_max_results() -> usize {
 
 fn default_max_tokens() -> usize {
     2000
+}
+
+#[derive(Serialize)]
+pub(crate) struct RelatedNote {
+    pub(crate) source_path: String,
+    /// Older note content, truncated to 1200 chars on a char boundary — the same cap
+    /// `ask` uses for graph context.
+    pub(crate) snippet: String,
 }
 
 #[derive(Serialize)]
@@ -444,6 +520,11 @@ pub(crate) struct SearchHit {
     /// consumer must branch on this before comparing `dist` against a threshold.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) dist_kind: Option<crate::store::DistKind>,
+    /// Older notes sharing a concept with this hit, walked from the graph rather than
+    /// retrieved by the query. Present only when the request asked for them — a caller
+    /// that did not set `related` sees no new key.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) related: Vec<RelatedNote>,
 }
 
 #[derive(Serialize)]
