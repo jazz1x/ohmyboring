@@ -13,6 +13,7 @@
 //!
 //! ## Advantage over AGE
 //! Every value goes through `tokio-postgres` parameter binding ($1,$2…) → eliminates the cypher string-escaping footgun.
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
@@ -114,6 +115,22 @@ pub struct RecentDoc {
     pub project: String,
     pub content: String,
     pub tags: Vec<String>,
+}
+
+/// Result of a consumption write: how many edges were written and how many paths had no
+/// `document` row and were skipped.
+#[derive(Debug, Default)]
+pub struct ConsumptionReport {
+    pub used: usize,
+    pub contested: usize,
+    pub unknown: usize,
+}
+
+/// Consumption edge counts pointing at one document.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ConsumptionCounts {
+    pub used: i64,
+    pub contested: i64,
 }
 
 /// Graph size summary (for audit).
@@ -1968,6 +1985,77 @@ impl Store {
             .await
             .context("upsert edge")?;
         Ok(())
+    }
+
+    /// The scorer's write door: record what one session consumed. Upserts `session:<id>` (label =
+    /// `observed_at`) and one `used`/`contested` edge per known path. Idempotent — a repeat call
+    /// updates the label and adds edges, never deletes. Paths with no `document` row are skipped
+    /// and counted in the report, not errored.
+    pub async fn record_consumption(
+        &self,
+        session_id: &str,
+        observed_at: &str,
+        used: &[String],
+        contested: &[String],
+    ) -> Result<ConsumptionReport> {
+        let session_node = format!("session:{session_id}");
+        self.upsert_node(&session_node, "session", observed_at, None)
+            .await?;
+
+        let mut report = ConsumptionReport::default();
+        for path in used {
+            if self.get_doc_sha(path).await?.is_none() {
+                report.unknown += 1;
+                continue;
+            }
+            self.upsert_edge(&session_node, &doc_node_id(path), "used")
+                .await?;
+            report.used += 1;
+        }
+        for path in contested {
+            if self.get_doc_sha(path).await?.is_none() {
+                report.unknown += 1;
+                continue;
+            }
+            self.upsert_edge(&session_node, &doc_node_id(path), "contested")
+                .await?;
+            report.contested += 1;
+        }
+        Ok(report)
+    }
+
+    /// Consumption counts (`used`/`contested` edges) per document — one query for all hits of a
+    /// `/search` response. Keyed by `source_path`; documents with no consumption edges are absent.
+    pub async fn consumption_counts(
+        &self,
+        paths: &[String],
+    ) -> Result<HashMap<String, ConsumptionCounts>> {
+        let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT dst, kind, count(*) FROM edge
+                 WHERE dst = ANY($1) AND kind IN ('used','contested')
+                 GROUP BY dst, kind;",
+                &[&doc_ids],
+            )
+            .await
+            .context("consumption counts")?;
+        let mut counts: HashMap<String, ConsumptionCounts> = HashMap::new();
+        for row in rows {
+            let dst: String = row.get(0);
+            let kind: String = row.get(1);
+            let n: i64 = row.get(2);
+            let path = dst.strip_prefix("doc:").unwrap_or(&dst).to_owned();
+            let entry = counts.entry(path).or_default();
+            if kind == "used" {
+                entry.used = n;
+            } else {
+                entry.contested = n;
+            }
+        }
+        Ok(counts)
     }
 
     // ── semantic nodes ──────────────────────────────────────────────────────────

@@ -402,6 +402,8 @@ pub(crate) async fn handle_search(
             dist: Some(h.dist),
             dist_kind: Some(h.dist_kind),
             related: Vec::new(),
+            used_count: 0,
+            contested_count: 0,
         })
         .collect()
     } else {
@@ -420,9 +422,22 @@ pub(crate) async fn handle_search(
                 dist: None,
                 dist_kind: None,
                 related: Vec::new(),
+                used_count: 0,
+                contested_count: 0,
             })
             .collect()
     };
+    // Consumption counts beside every hit — one query for the whole response, 0 on the
+    // wiki-recall fallback where the graph cannot say.
+    if let Some(store) = s.store.as_ref() {
+        let paths: Vec<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
+        let counts = store.consumption_counts(&paths).await?;
+        for hit in &mut mapped {
+            let c = counts.get(&hit.source_path).copied().unwrap_or_default();
+            hit.used_count = c.used;
+            hit.contested_count = c.contested;
+        }
+    }
     // Opt-in graph read: beside each of the first `related_heads` hits, the older notes that
     // share a concept with it. The concept walk, not the shared-node walk — measured 2026-09-10,
     // shared nodes between recent notes are almost all `tool:*`, so the node walk links everything
@@ -467,6 +482,23 @@ pub(crate) async fn handle_search(
         started.elapsed(),
     );
     Ok(Json(SearchResp { hits: mapped }))
+}
+
+pub(crate) async fn handle_consumption(
+    State(s): State<AppState>,
+    Json(req): Json<crate::serve::ConsumptionReq>,
+) -> Result<Json<crate::serve::ConsumptionResp>, AppError> {
+    crate::serve::validate_consumption_req(&req)?;
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let report = store
+        .record_consumption(&req.session_id, &req.observed_at, &req.used, &req.contested)
+        .await?;
+    Ok(Json(crate::serve::ConsumptionResp {
+        session: format!("session:{}", req.session_id),
+        used: report.used,
+        contested: report.contested,
+        unknown: report.unknown,
+    }))
 }
 
 pub(crate) async fn handle_graph(
