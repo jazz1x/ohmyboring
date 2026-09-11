@@ -206,6 +206,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{CompactFailure, DbHealthState, HealthResp, SyncState, transition_log};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
 
     #[test]
     fn same_state_is_silent() {
@@ -344,6 +346,8 @@ mod tests {
             dist: None,
             dist_kind: None,
             related: vec![],
+            used_count: 0,
+            contested_count: 0,
         };
         let json = serde_json::to_string(&hit).unwrap();
         assert!(
@@ -356,6 +360,91 @@ mod tests {
         });
         let json = serde_json::to_string(&hit).unwrap();
         assert!(json.contains("\"related\":"), "was {json}");
+    }
+
+    /// Consumption counts are part of the accuracy contract with the recall hook: always present,
+    /// integers, even when nothing has consumed the note yet.
+    #[test]
+    fn search_hit_always_carries_consumption_counts() {
+        let hit = super::SearchHit {
+            id: "1".into(),
+            origin: "wiki".into(),
+            project: "p".into(),
+            source_path: "a.md".into(),
+            snippet: "s".into(),
+            dist: None,
+            dist_kind: None,
+            related: vec![],
+            used_count: 3,
+            contested_count: 1,
+        };
+        let json = serde_json::to_value(&hit).unwrap();
+        assert_eq!(json["used_count"], serde_json::json!(3));
+        assert_eq!(json["contested_count"], serde_json::json!(1));
+        assert!(
+            json["used_count"].is_i64() && json["contested_count"].is_i64(),
+            "counts must serialize as integers: {json}"
+        );
+
+        let zero = super::SearchHit {
+            used_count: 0,
+            contested_count: 0,
+            ..hit
+        };
+        let json = serde_json::to_string(&zero).unwrap();
+        assert!(
+            json.contains("\"used_count\":0") && json.contains("\"contested_count\":0"),
+            "absence of consumption is 0, not a missing key: {json}"
+        );
+    }
+
+    fn consumption_req(
+        session_id: &str,
+        observed_at: &str,
+        used: Vec<String>,
+        contested: Vec<String>,
+    ) -> super::ConsumptionReq {
+        super::ConsumptionReq {
+            session_id: session_id.to_owned(),
+            observed_at: observed_at.to_owned(),
+            used,
+            contested,
+        }
+    }
+
+    #[test]
+    fn consumption_rejects_empty_session_id() {
+        let req = consumption_req("   ", "2026-09-11T05:12:00+00:00", vec![], vec![]);
+        let err = super::validate_consumption_req(&req).unwrap_err();
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn consumption_rejects_unparsable_observed_at() {
+        for bad in ["yesterday", "2026-09-11", "2026-09-11 05:12:00"] {
+            let req = consumption_req("s-1", bad, vec![], vec![]);
+            let err = super::validate_consumption_req(&req).unwrap_err();
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::BAD_REQUEST,
+                "{bad:?} must be rejected"
+            );
+        }
+        let ok = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
+        assert!(super::validate_consumption_req(&ok).is_ok());
+    }
+
+    #[test]
+    fn consumption_rejects_more_than_200_paths_per_list() {
+        let paths = vec!["/vault/wiki/wiki-0001.md".to_owned(); super::CONSUMPTION_MAX_PATHS + 1];
+        for (used, contested) in [(paths.clone(), vec![]), (vec![], paths.clone())] {
+            let req = consumption_req("s-1", "2026-09-11T05:12:00+00:00", used, contested);
+            let err = super::validate_consumption_req(&req).unwrap_err();
+            assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+        }
+        let at_cap = vec!["/vault/wiki/wiki-0001.md".to_owned(); super::CONSUMPTION_MAX_PATHS];
+        let ok = consumption_req("s-1", "2026-09-11T05:12:00+00:00", at_cap, vec![]);
+        assert!(super::validate_consumption_req(&ok).is_ok());
     }
 }
 
@@ -525,11 +614,62 @@ pub(crate) struct SearchHit {
     /// that did not set `related` sees no new key.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) related: Vec<RelatedNote>,
+    /// How many sessions recorded this note as used (`used` edges with this doc as dst).
+    /// Always present; 0 on the wiki-recall fallback, where the graph cannot say.
+    pub(crate) used_count: i64,
+    /// Same for `contested` edges — the note was injected and the session pushed back.
+    pub(crate) contested_count: i64,
 }
 
 #[derive(Serialize)]
 pub(crate) struct SearchResp {
     pub(crate) hits: Vec<SearchHit>,
+}
+
+/// Hard ceiling on paths per list in one `/consumption` call — the scorer reports one session at a time.
+pub(crate) const CONSUMPTION_MAX_PATHS: usize = 200;
+
+#[derive(Deserialize)]
+pub(crate) struct ConsumptionReq {
+    pub(crate) session_id: String,
+    /// RFC 3339 — becomes the `session:<id>` node's label.
+    pub(crate) observed_at: String,
+    #[serde(default)]
+    pub(crate) used: Vec<String>,
+    #[serde(default)]
+    pub(crate) contested: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ConsumptionResp {
+    pub(crate) session: String,
+    pub(crate) used: usize,
+    pub(crate) contested: usize,
+    /// Paths skipped because no `document` row exists for them.
+    pub(crate) unknown: usize,
+}
+
+/// Parse-don't-validate at the HTTP boundary: an unparsable timestamp or an oversized list is
+/// rejected here rather than stored and surfaced later as a wrong count.
+pub(crate) fn validate_consumption_req(req: &ConsumptionReq) -> Result<(), AppError> {
+    if req.session_id.trim().is_empty() {
+        return Err(AppError::bad_request("session_id must not be empty"));
+    }
+    if chrono::DateTime::parse_from_rfc3339(&req.observed_at).is_err() {
+        return Err(AppError::bad_request(format!(
+            "observed_at must be RFC 3339, got {:?}",
+            req.observed_at
+        )));
+    }
+    for (name, list) in [("used", &req.used), ("contested", &req.contested)] {
+        if list.len() > CONSUMPTION_MAX_PATHS {
+            return Err(AppError::bad_request(format!(
+                "{name}: at most {CONSUMPTION_MAX_PATHS} paths, got {}",
+                list.len()
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -946,6 +1086,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .route("/stalled", post(http::handle_stalled))
         .route("/context", post(http::handle_context))
         .route("/search", post(http::handle_search))
+        .route("/consumption", post(http::handle_consumption))
         .route("/graph", post(http::handle_graph))
         .route("/audit", get(http::handle_audit))
         .route("/query-log", get(http::handle_query_log))
