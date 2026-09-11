@@ -187,6 +187,23 @@ def salient(snippet, limit=SNIPPET_CHARS):
     return f"{head} … {tail}"
 
 
+def source_name(hit: dict) -> str:
+    return (hit.get("source_path") or "").rsplit("/", 1)[-1]
+
+
+def split_fresh(hits: list[dict], already_injected: set[str]) -> tuple[list[dict], list[dict]]:
+    """Injected hits and control hits, both drawn only from notes this session has not seen.
+
+    Measured 2026-09-02: 34% of in-session injections were notes already in the agent's context,
+    one of them 25 times in a single session (docs/PRD.md §8 D6). A note the agent already holds
+    is neither evidence nor help, and as a control it is contaminated — the agent has seen it.
+    The pool the engine returns is unchanged, so the hits and their order are the same as before;
+    only the partition moves.
+    """
+    fresh = [h for h in hits if source_name(h) not in already_injected]
+    return fresh[:MAX_RESULTS], fresh[MAX_RESULTS:]
+
+
 def run_recall(
     data: dict,
     is_injection: Optional[Callable[[dict], bool]] = None,
@@ -223,9 +240,13 @@ def run_recall(
     if not hits:
         return
 
+    injected, controls = split_fresh(hits, uptake_core.sources_already_injected(data.get("session_id") or ""))
+    if not injected:
+        return
+
     lines = []
     over_ceiling = []
-    for h in hits[:MAX_RESULTS]:
+    for h in injected:
         dist = h.get("dist")
         src = (h.get("source_path") or "").rsplit("/", 1)[-1]
         # Only "vector_cosine" is a distance (lower = closer) — "text_rank" and "missing" are not
@@ -242,7 +263,7 @@ def run_recall(
         # 0.514 survived on self-written calibration queries as long as it did.
         detail = ", ".join(f"{s}@{d:.4f}" for s, d in over_ceiling)
         print(
-            f"[omb-recall] would drop {len(over_ceiling)}/{len(hits[:MAX_RESULTS])} over "
+            f"[omb-recall] would drop {len(over_ceiling)}/{len(injected)} over "
             f"dist {RELEVANCE_MAX_DIST}: {detail}",
             file=sys.stderr,
         )
@@ -257,9 +278,9 @@ def run_recall(
         uptake_core.injection_record(
             data.get("session_id") or "",
             prompt,
-            hits[:MAX_RESULTS],
+            injected,
             MAX_RESULTS,
-            controls=hits[MAX_RESULTS:],
+            controls=controls,
         )
     )
 

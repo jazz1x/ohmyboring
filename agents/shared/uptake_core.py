@@ -208,6 +208,16 @@ def load_records(session_id, path=None):
     return out
 
 
+def sources_already_injected(session_id, path=None):
+    """Basenames this session has already been handed, so the hook does not hand them again."""
+    return {
+        hit.get("src")
+        for row in load_records(session_id, path)
+        for hit in row.get("hits") or []
+        if hit.get("src")
+    }
+
+
 def assistant_text(transcript_text):
     """Only what the assistant said, concatenated.
 

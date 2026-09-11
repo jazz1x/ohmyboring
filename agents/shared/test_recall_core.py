@@ -109,7 +109,7 @@ def _hit(name, text):
     return {"source_path": f"/vault/wiki/{name}", "snippet": text, "dist": 0.3, "dist_kind": "vector_cosine"}
 
 
-def _recall(hits, session_id="s1", prompt="why did the connection pool die again"):
+def _recall(hits, session_id="s1", prompt="why did the connection pool die again", ledger=None):
     """Drive the real hook path with a stubbed engine and a spooled ledger; return the injected text."""
     import io
     import json
@@ -117,7 +117,7 @@ def _recall(hits, session_id="s1", prompt="why did the connection pool die again
     from unittest import mock
 
     with tempfile.TemporaryDirectory() as d:
-        env = {"BORING_INJECTION_LEDGER": os.path.join(d, "ledger.jsonl"), "BORING_EVENT_SINK": "spool"}
+        env = {"BORING_INJECTION_LEDGER": ledger or os.path.join(d, "ledger.jsonl"), "BORING_EVENT_SINK": "spool"}
         with mock.patch.dict(os.environ, env), mock.patch.object(recall_core, "DrudgeClient") as client:
             client.return_value.search.return_value = hits
             out = io.StringIO()
@@ -127,6 +127,40 @@ def _recall(hits, session_id="s1", prompt="why did the connection pool die again
     if not raw:
         return ""
     return json.loads(raw)["hookSpecificOutput"]["additionalContext"]
+
+
+def _ledger_sources(ledger):
+    import json
+
+    rows = [json.loads(l) for l in open(ledger, encoding="utf-8") if l.strip()]
+    return [([h["src"] for h in r["hits"]], [c["src"] for c in r["controls"]]) for r in rows]
+
+
+def test_a_note_already_given_this_session_is_not_given_again():
+    """§8 D6: 34% of in-session injections were repeats, one note 25 times in one session."""
+    pool = [_hit(f"wiki-{i:04d}.md", f"note {i} says the socket was recycled by deadpool " * 3) for i in range(5)]
+    with tempfile.TemporaryDirectory() as d:
+        ledger = os.path.join(d, "ledger.jsonl")
+        first = _recall(pool, ledger=ledger)
+        assert "[wiki-0000.md]" in first and "[wiki-0002.md]" in first and "[wiki-0003.md]" not in first
+        second = _recall(pool, ledger=ledger, prompt="the pool died again, second prompt")
+        assert "[wiki-0000.md]" not in second, "already in the agent's context"
+        assert "[wiki-0003.md]" in second and "[wiki-0004.md]" in second, second
+        injected, controls = _ledger_sources(ledger)[1]
+        assert injected == ["wiki-0003.md", "wiki-0004.md"]
+        assert controls == [], "a control the agent has already seen is contaminated"
+        third = _recall(pool, ledger=ledger, prompt="and a third time")
+        assert third == "", "nothing fresh means nothing injected — not a repeat"
+        other = _recall(pool, session_id="s2", ledger=ledger)
+        assert "[wiki-0000.md]" in other, "another session has not seen it"
+
+
+def test_an_unreadable_ledger_keeps_the_injection():
+    """§8 D6: re-injection is cheaper than omission, and the ledger can die before the session."""
+    pool = [_hit("wiki-0007.md", "the pool died because deadpool recycled a closed socket " * 3)]
+    with tempfile.TemporaryDirectory() as d:
+        ctx = _recall(pool, ledger=os.path.join(d, "missing", "ledger.jsonl"))
+        assert "[wiki-0007.md]" in ctx
 
 
 def test_the_fence_says_how_to_use_what_it_injects():
