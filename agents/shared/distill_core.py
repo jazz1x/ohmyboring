@@ -931,12 +931,7 @@ def log_skip_event(session_id, origin, repo, resolution, reason):
 
 
 def write_consumption_to_graph(session_id, records, transcript_text):
-    """Hand the graph what this session did with its notes: used edges, contested edges.
-
-    Skipped when the event sink is spooled — that is the switch tests and probes set so a
-    measurement never writes to the live engine — and never raises: a session's note does not
-    depend on the graph learning from it.
-    """
+    """Hand the graph what this session did with its notes. Spooled sink → no write; never raises."""
     if event_log._event_sink_mode() == "spool":
         return
     used, contested, supersedes = uptake_core.consumption(records, transcript_text)

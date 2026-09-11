@@ -514,6 +514,14 @@ def test_consumption_reads_which_note_replaced_which():
     assert uptake_core.consumption([record], stranger)[2] == [], "both notes must have been handed over"
 
 
+def test_a_marker_before_the_name_is_about_something_else():
+    record = uptake_core.injection_record("s1", "why did the pool die", [_hit()], 3)
+    fixed = "[user] why did the pool die\n[assistant] the outdated pool code was replaced, per wiki-0007.\n"
+    assert uptake_core.consumption([record], fixed)[1] == [], "outdated describes the code, not the note"
+    argued = "[user] why did the pool die\n[assistant] wiki-0007 is outdated for this repo.\n"
+    assert uptake_core.consumption([record], argued)[1] == ["/vault/wiki/wiki-0007.md"]
+
+
 def test_consumption_reads_korean_contradictions_and_old_rows_without_a_path():
     record = uptake_core.injection_record("s1", "풀이 왜 죽었지", [_hit(src="wiki-1290.md")], 3)
     del record["hits"][0]["path"]
