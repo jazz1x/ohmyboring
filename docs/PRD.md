@@ -1,412 +1,288 @@
 <!-- prd-version: 4 -->
 # ohmyboring PRD
 
-이 저장소의 제품 정의. `GOALS.md` 는 여기서 파생되는 "현재 슬라이스 실행 계약"이다.
+The product definition for this repository. `GOALS.md` is the "current-slice execution contract" derived from it.
 
-> 이 문서 이전의 39 커밋은 결함 발견이 문서를 끌고 갔다. 이 문서는 그 방향을 뒤집으려고 존재한다.
-> 초안 → 6석 패널 리뷰 → 독립 어드바이저 2회를 거쳤고, 그 과정 기록은
-> `docs/reports/2026-08-25-panel-review.md` 에 있다 — 판정 근거는 거기서 읽고,
-> 여기서는 **결정만** 읽는다.
+> For the 39 commits before this document, defect discovery dragged the documentation along. This document exists to reverse that direction.
+> Draft → six-seat panel review → two independent advisor rounds; the record of that process is in
+> `docs/reports/2026-08-25-panel-review.md` — read the reasoning there, and read
+> **only the decisions** here.
 
 ## 0. BLUF
 
-- **1차 사용자 = 에이전트** 결론은 유지하되, **근거를 교체한다**: 공급량(주 1472 주입)이 아니라 **업테이크**(#224 원장: 주입 지문의 어시스턴트-턴 재등장)가 근거가 된다. 판정 계약을 이 문서에 사전 등록한다(§2): **2주 창에서 per-prompt 업테이크가 대조군(주입되지 않은 hit)을 유의하게 넘지 못하면 현재 형태의 주입 채널을 비작동 선언하고 R6 파라미터를 재개방한다.** 절대 임계값이 아니라 측정된 바닥선 대비다.
-- **스로틀 결정**(제품 결정, §5-R6): 세션 스로틀 개념을 버린다. `agents/claude-code/README.md:10` 의 "(throttled to once per session)"은 거짓이므로 삭제하고, 업테이크 측정 창(2주) 동안 주입 빈도는 동결한다 — 측정 중 채널을 바꾸면 표본이 죽는다.
-- **지표 위계 교정**: M8 업테이크(신설)가 1급 성과 지표, M1 정밀도는 진단 지표로 강등, M2 는 "R1 의 측정"이 아니라 **회귀 바닥(smoke)** 으로 재명명(18문서 fixture 코퍼스에서의 22/22 다).
-- **R3 는 미해결로 남는다**: 세션의 최대 결정이 증류에서 탈락하는 결함(#218 유실)은 지표 개명으로 답할 수 없다. 파생 작업과 정직한 비용(1~2주)을 §5-R3 에 적고, 착수는 측정 창 종료 이후로 못 박는다 — 증류를 바꾸면 주입되는 노트가 바뀌기 때문이다.
-- **채택 결정(§7)**: `docs/PRD.md` 로 **이번 슬라이스에 커밋한다** — §2 판정 계약의 사전 등록처가 되기 위해서다. anti-drift 는 최소판으로 설계했다(§6).
-- **다음 슬라이스 = "주입 채널 수요 판정"**(§7.2): 빌드 0, 측정 2주, 반증 조건 명시.
+- The **primary user = the agent** conclusion stands, but **its grounds are replaced**: not supply (1,472 injections/week) but **uptake** (the #224 ledger: injected fingerprints reappearing in assistant turns). The verdict contract is pre-registered in this document (§2): **if, over a two-week window, per-prompt uptake does not significantly exceed the control (hits that were not injected), the injection channel in its current form is declared not working and the R6 parameters are reopened.** Measured against a floor, not an absolute threshold.
+- **Throttle decision** (product decision, §5-R6): the session-throttle concept is dropped. `agents/claude-code/README.md:10` "(throttled to once per session)" is false and is deleted; injection frequency is frozen for the two-week uptake window — changing the channel mid-measurement kills the sample.
+- **Metric hierarchy corrected**: M8 uptake (new) is the first-class outcome metric, M1 precision is demoted to diagnostic, and M2 is renamed from "the measurement of R1" to a **regression floor (smoke)** (22/22 on an 18-document fixture corpus).
+- **R3 stays unresolved**: the defect where a session's biggest decision drops out of distillation (the #218 loss) cannot be answered by renaming a metric. The derived work and its honest cost (1–2 weeks) are recorded in §5-R3, and the start is pinned to after the measurement window — changing distillation changes the notes that get injected.
+- **Adoption decision (§7)**: **commit to `docs/PRD.md` in this slice** — so that it can be the pre-registration site for the §2 contract. Anti-drift is designed in its minimal form (§6).
+- **Next slice = "demand verdict for the injection channel"** (§7.2): zero build, two weeks of measurement, falsification conditions stated.
 
 ---
 
-## 1. 이 제품이 하는 일
+## 1. What this product does
 
-오너가 코딩 에이전트에 프롬프트를 입력하는 그 순간, `UserPromptSubmit` 훅이 과거에 같은 문제를 어떻게 풀었는지를 vault 에서 찾아 **매 프롬프트마다** 최대 3개 스니펫(280자, 주입 펜스 포함 — `agents/shared/recall_core.py:193–198`)으로 에이전트 컨텍스트에 주입한다(v0.1 이 적었던 "세션당 1h 스로틀"은 Claude Code 경로에 존재하지 않는 거짓 사실이었다 — §5-R6). 세션이 끝나면 `SessionEnd` 훅이 transcript 를 로컬 LLM 으로 증류해 마크다운 노트로 적재하고(verifier 필수·1회 수리·dead-letter), **이제 같은 시점에 그 세션에 주입됐던 것이 실제로 쓰였는지도 기록한다**(#224, `agents/shared/distill_core.py:791–819`). vault 가 SSOT 이고 DB 는 `sync` 로 재구성되는 파생 인덱스다. 전 과정 로컬(zero cloud), 사용자 개입 없음. 제품이 성공하는 순간은 "에이전트가 오너가 이미 풀었던 문제를 처음부터 다시 풀지 않을 때" — 그리고 이제 그 성공은 업테이크 원장으로 **측정된다**.
+At the moment the owner types a prompt into a coding agent, the `UserPromptSubmit` hook looks in the vault for how the same problem was solved before and injects up to three snippets (280 chars, with an injection fence — `agents/shared/recall_core.py:193–198`) into the agent's context **on every prompt** (the "1h per-session throttle" v0.1 described was a false fact — it never existed on the Claude Code path, §5-R6). When the session ends, the `SessionEnd` hook distills the transcript with a local LLM into a markdown note (verifier required, one repair, dead-letter), and **now, at the same moment, also records whether what was injected into that session was actually used** (#224, `agents/shared/distill_core.py:791–819`). The vault is the source of truth and the DB is a derived index rebuilt by `sync`. Everything is local (zero cloud), with no user intervention. The product succeeds at the moment "the agent does not re-solve from scratch a problem the owner already solved" — and that success is now **measured** by the uptake ledger.
 
-## 2. 사용자와 판정 계약
+## 2. Users and the verdict contract
 
-**패널 판정 — 동의(수정 수용).** v0.1 은 "주 1472 주입"을 에이전트-1차의 근거로 썼다. AI PM 의 반박이 맞다: 1472 는 opt-in 없는 훅이 만든 **공급**이고, 이 논리면 광고 노출도 사용자를 가진다. 수요의 증거는 소비자가 대가를 지불하는 순간 — 능동 호출(주 16회)이거나, **주입받은 것을 실제로 쓰는 것**이다.
+**Panel ruling — agreed (amendment accepted).** v0.1 used "1,472 injections/week" as the grounds for agent-first. The AI PM's objection is right: 1,472 is **supply** created by a hook nobody opted into, and by that logic ad impressions have users too. Evidence of demand is the moment the consumer pays — an active call (16/week), or **actually using what was injected**.
 
-**교체된 근거**: 에이전트-1차 결론은 이제 두 다리로 선다.
+**Replaced grounds**: the agent-first conclusion now stands on two legs.
 
-1. (소거) 사람의 직접 소비(brief 7/주)는 어떤 제품 결정도 끌 수 없는 부피다 — AI PM 도 이 이유로 결론 자체는 지지.
-2. (검증 대기) #224 업테이크 원장 — 주입 노트의 지문(스니펫 원문이 아니라 지문만 저장, `agents/shared/uptake_core.py:88–96`)이 **어시스턴트 턴에서만** 재등장했는지를 SessionEnd 에 계수한다(사용자가 이미 말한 문구는 증거에서 제외 — `uptake_core.py:166–176`). per-hit(밀어넣은 것 중 쓰인 비율)과 per-prompt(주입이 그 턴에 의미 있었던 비율) 두 율을 낸다(`uptake_core.py:180–208`).
+1. (Elimination) Direct human consumption (brief, 7/week) is not a volume that can drive any product decision — the AI PM supports the conclusion itself on this ground.
+2. (Awaiting verification) The #224 uptake ledger — at SessionEnd it counts whether the fingerprints of injected notes (fingerprints only, never the snippet text — `agents/shared/uptake_core.py:88–96`) reappeared **in assistant turns only** (phrases the user already said are excluded from evidence — `uptake_core.py:166–176`). Two rates come out: per-hit (share of what was pushed that got used) and per-prompt (share of turns where the injection meant something) (`uptake_core.py:180–208`).
 
-**판정 계약 (사전 등록 — 이 커밋이 아니라 미래 데이터로 판정한다):**
+**Verdict contract (pre-registered — judged on future data, not on this commit):**
 
-이 계약이 재는 것은 **처치군 대비 대조군**이지 절대 비율이 아니다. 업테이크 수치 단독으로는
-"기억이 쓰였다"와 "이 주제 노트면 무엇이든 답과 단어가 겹쳤을 것"을 구분할 수 없고, 그 구분을
-빼먹은 것이 `0.514` 를 만든 실수다. 그래서 주입되지 **않은** hit 도 같은 방식으로 채점해
-우연율을 만든다(`agents/shared/recall_core.py` `CONTROL_RESULTS`).
+What this contract measures is **treatment against control**, not an absolute rate. An uptake number on its own cannot tell "the memory was used" from "any note on this topic would have shared words with the answer", and skipping that distinction is the mistake that produced `0.514`. So hits that were **not** injected are scored the same way to produce the chance rate (`agents/shared/recall_core.py` `CONTROL_RESULTS`).
 
-대조군은 공짜다: `drudge/src/retrieve.rs:93` 이 `pool = (max_results*4).max(20)` 이라 3과 5가
-같은 후보 풀을 그린다. 라이브 실측으로 top-3 순서·거리·**주입될 280자 바이트가 동일**함을
-확인했다 — 채널은 약속이 아니라 구조로 불변이다.
+The control is free: `drudge/src/retrieve.rs:93` has `pool = (max_results*4).max(20)`, so 3 and 5 draw from the same candidate pool. Live measurement confirmed the top-3 order, distances and **the 280 bytes that get injected are identical** — the channel is invariant by structure, not by promise.
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 창 | **2026-09-12 → 09-26**, 2주 — 최초 창(08-26→09-09)은 §8 D1, 둘째 창(08-31→09-14)은 §8 D9 의 계측 결함으로 리셋됨. 지표·하한·임계는 한 글자도 바뀌지 않았다 |
-| 지표 | per-prompt 업테이크(처치군) 대 per-prompt 대조군 |
-| **표본 하한** | 세션 ≥20 **AND** 주입된 프롬프트 ≥200. 미달이면 **판정 거부** — 숫자를 내지 않는다(`agents/shared/label_core.py` 의 `MIN_DECIDED` 선례와 같은 형태) |
-| **작동** | 처치군 ≥ 대조군 **2배** AND 격차 ≥ **3pp** |
-| **비작동** | 처치군 ≤ 대조군 + 1pp → 현재 형태의 주입 채널 비작동 선언, R6 파라미터(형태·시점·on-demand) 재개방 |
-| **판정 유보** | 그 사이 → 창 1회 연장, 강제 행동 없음 |
-| 계측 결함 조항 | 세션 종료가 있는데 48h 내 `injection_uptake` 이벤트 0건이면 판정이 아니라 **계측 조사**로 전환 |
-| 계측 자체 점검 | 같은 transcript 를 **다른 세션의** 원장 hit 로도 채점한다. ≈0 이어야 하며, 그것이 처치군 이상이면 계측이 고장난 것이다 |
+| Window | **2026-09-12 → 2026-09-26**, two weeks — the first window (08-26→09-09) was reset for the instrumentation fault in §8 D1, the second (08-31→09-14) for the one in §8 D9. Metric, floors and thresholds did not change by a character |
+| Metric | per-prompt uptake (treatment) vs per-prompt control |
+| **Sample floor** | sessions ≥20 **AND** injected prompts ≥200. Below it, the **verdict is refused** — no number is produced (same shape as the `MIN_DECIDED` precedent in `agents/shared/label_core.py`) |
+| **Works** | treatment ≥ **2**× control AND gap ≥ **3**pp |
+| **Not working** | treatment ≤ control + 1pp → the injection channel in its current form is declared not working; R6 parameters (form, timing, on-demand) reopened |
+| **Withheld** | anything in between → the window is extended once, no forced action |
+| Instrumentation-fault clause | sessions end but zero `injection_uptake` events within 48h → not a verdict but an **instrumentation investigation** |
+| Instrument self-check | the same transcript is also scored against **another session's** ledger hits. It must be ≈0; if it is at or above the treatment, the instrument is broken |
 
-**표본의 커버리지는 판정과 함께 보고한다.** 창 안에서 증류된 세션 대비 채점된 세션의 비율을
-판정 옆에 놓는다. 이 비율이 낮으면 "처치군 x%"는 우리가 **보낸 것**이 아니라 우리가 **본 것**에
-대한 진술이고, 두 문장은 다르다. 커버리지가 **1/2 미만이면 판정이 아니라 계측 조사**로 전환한다 —
-비율은 살아남아도 그 비율이 무엇의 비율인지가 죽기 때문이다(§8 D4 가 이 조항이 생긴 이유다).
+**Sample coverage is reported beside the verdict.** The share of sessions scored out of sessions distilled inside the window goes next to the verdict. When that share is low, "treatment x%" is a statement about what we **saw**, not what we **sent**, and those are different sentences. **Below 1/2 coverage it is an instrumentation investigation, not a verdict** — the rate survives but what it is a rate *of* does not (§8 D4 is why this clause exists).
 
-**검출기 감도는 판정 전에 증명한다.** 처치군과 대조군이 **동시에** 0 인 것은 "아무도 안 썼다"의
-증거이기 전에 "이 검출기는 아무것도 못 본다"의 증거일 수 있다. 그러므로 판정일 이전에, 원장
-지문을 어시스턴트 턴에 의도적으로 포함시킨 **고정 합성 transcript** 를 `session_uptake` 에
-통과시켜 `used_prompts ≥ 1` 을 단언한다. 이 단언이 실패한 상태에서 내려지는 "비작동"은 판정이
-아니라 계측 조사다. 트리거가 라이브 숫자가 아니라 고정 입력에만 걸리므로 사후 튜닝이 불가능하고,
-처치·대조 양팔에 대칭이라 어느 결론도 유리해지지 않는다.
+**Detector sensitivity is proven before the verdict.** Treatment and control **both** at zero can be evidence that "this detector sees nothing" before it is evidence that "nobody used it". So before the verdict date, a **fixed synthetic transcript** that deliberately places ledger fingerprints in assistant turns is run through `session_uptake` and `used_prompts ≥ 1` is asserted. A "not working" reached while that assertion fails is an instrumentation investigation, not a verdict. The trigger is a fixed input rather than a live number, so it cannot be tuned after the fact, and it is symmetric across both arms, so neither conclusion is favoured.
 
-**판정 원장에 테스트가 쓸 수 없다.** 판정 집계는 `injection_uptake` 이벤트만 읽고, 판정 전에
-이벤트 저장소에서 테스트 기원 세션 id(`codex-abc` 류)의 **부재를 단언**한다. 2026-09-02 실측:
-판정 계열은 오염 0/104 로 깨끗했으나 인접 계열(`distill_resolution`)은 1014/9396(10.8%)이
-테스트 산물이었고 매일 증가 중이었다 — **현재의 무오염은 구조가 아니라 우연이다.**
+**Tests cannot write to the verdict ledger.** The verdict aggregation reads only `injection_uptake` events, and before the verdict the **absence** of test-origin session ids (`codex-abc` and the like) in the event store is asserted. Measured 2026-09-02: the verdict series was clean at 0/104 contaminated, but the adjacent series (`distill_resolution`) was 1,014/9,396 (10.8%) test artifacts and growing daily — **the current cleanliness is luck, not structure.**
 
-**비율은 모집단과 함께만 인용한다.** 이 문서와 PR 본문에 실리는 모든 측정 비율·백분율·"0건"
-단언은 같은 문단에 **분모의 출처**(재현 명령 또는 원장 경로)를 병기한다. 병기 없는 측정 문장은
-등록되지 않은 것으로 본다. 그리고 **분자와 분모의 이벤트 모집단이 다르면 그 비교는 무효다 — 필드
-부재를 0으로 읽는 것을 포함한다.**
+**Rates are quoted only with their population.** Every measured rate, percentage or "0 cases" assertion in this document or a PR body carries, in the same paragraph, **the source of the denominator** (a reproduction command or a ledger path). A measurement sentence without it counts as unregistered. And **if the numerator and denominator come from different event populations, the comparison is void — including reading a missing field as 0.**
 
-이 규칙은 실측된 사고에서 나왔다(2026-09-02). `injection_uptake` 106건 중 `used_control_prompts`
-필드를 가진 것은 **13건뿐**인데(#242 이전 이벤트엔 그 필드가 없다), `SUM` 이 NULL 을 무시하면서
-"처치 11/770 대 대조 0/770" 이라는 **성립하지 않는 비교**가 만들어졌다. 분자 11은 필드가 없던 93건에서
-나왔고 대조 분자는 13건에서만 존재한다. 비교 가능한 유일한 모집단에서는 **처치 0/130 · 대조 0/130**
-으로 양팔이 모두 0이고, 그 구간은 정보가 없다. 같은 창에서 표본을 모집단으로 인용한 사고가 여섯
-번째였고, CI 8잡은 하나도 잡지 못했다 — 게이트는 코드를 검사하고 **주장은 아무도 검사하지 않는다.**
+This rule came from a measured incident (2026-09-02). Of 106 `injection_uptake` events, **only 13** carried the `used_control_prompts` field (events before #242 do not have it); `SUM` ignored the NULLs and manufactured a **comparison that does not hold**: "treatment 11/770 vs control 0/770". The numerator 11 came from the 93 events without the field, and the control numerator exists only in the 13. In the only comparable population it is **treatment 0/130 · control 0/130**, both arms at zero, and that interval carries no information. It was the sixth time in one window that a sample was quoted as a population, and none of the eight CI jobs caught it — gates check code and **nobody checks claims.**
 
-**부정형 단언은 감도 증명과 함께만 기록한다.** "0건"·"없음"은 대상이 사라져도 참이므로, 탐지기가
-심어둔 양성 1건을 잡는다는 증명(`doctor (d5d)`) 없이는 판정에 인용할 수 없다.
+**Negative assertions are recorded only with a sensitivity proof.** "0 cases" and "none" stay true when the subject disappears, so without a proof that the detector catches one planted positive (`doctor (d5d)`) they cannot be cited in a verdict.
 
-**창의 날짜는 오너의 달력 날짜다 — `Asia/Seoul (UTC+09:00)`.** 이 문단의 모든 날짜가 그렇다.
-UTC 로 재면 08:00 KST 에 도는 아침 브리핑이 전날로 읽혀 게이트가 하루 늦게 울린다(실측). 머신의
-로컬 시간대가 아니라 **고정 오프셋**인 이유는 같은 코드가 컨테이너 안에서도 돌기 때문이다 — `TZ`
-설정에 따라 움직이는 날짜는 등록된 날짜가 아니다.
+**The window's dates are the owner's calendar dates — `Asia/Seoul (UTC+09:00)`.** Every date in this section is. Measured in UTC, the 08:00 KST morning briefing reads as the previous day and the gate fires a day late (measured). A **fixed offset** rather than the machine's local zone, because the same code runs inside a container — a date that moves with the `TZ` setting is not a registered date.
 
-**창 중간점 점검 (2026-09-19).** 창은 **2026-09-12 → 2026-09-26** 이고, 그 중간점인 2026-09-19 에
-**어댑터당 채점 세션이 10 미만**이면 창 종료를 기다리지 않고 **계측 조사**로 전환한다 — §2 의
-"48h 내 0건" 조항이 시점 하나만 보는 데 대한 진도판이다.
+**Window midpoint check (2026-09-19).** The window is **2026-09-12 → 2026-09-26**; at its midpoint, 2026-09-19, if **scored sessions per adapter are under 10**, switch to an **instrumentation investigation** without waiting for the close — a progress gauge for the fact that §2's "zero within 48h" clause looks at a single moment.
 
-**어댑터당인 이유**: 하한 20 이 어댑터별로 적용되기 때문이다(어댑터마다 다른 제품을 돌린다 — §3 M8).
-합산하면 Claude Code 8 세션에 다른 어댑터 3 을 더해 **어느 쪽도 통과 못 하는 문을 통과**시키는
-자유도가 생긴다. 09-19 이전에 닫는다.
+**Why per adapter**: because the floor of 20 applies per adapter (each adapter runs a different product — §3 M8). Summed, 8 Claude Code sessions plus 3 from another adapter would **pass a gate neither of them passes**. Closed before 2026-09-19.
 
-**중간점은 1회성이다** — 연장 창에는 적용하지 않는다. 연장은 지표·하한·임계를 하나도 바꾸지 않으며,
-매일 울리는 진도 경보는 빨간불을 배경으로 만들어 그 자체가 무시되도록 학습시킨다.
+**The midpoint is one-time** — it does not apply to an extended window. An extension changes none of the metric, floors or thresholds, and a daily progress alarm turns the red light into a background that trains itself to be ignored.
 
-창 종료 시 하한 미달이면 판정 거부를 기록하고 **정확히 1회, 2026-10-10 까지 연장**한다(지표·하한·임계
-무변경). 연장 후에도 미달이면
-**하한을 내리지 않는다.** 대신 "주입 채널이 4주간 판정 가능한 표본을 만들지 못했다"를 비작동과
-동급의 제품 신호로 채택하고 R6 파라미터를 재개방한다. 출구가 "하한 인하"가 아니라 "표본 부족 자체의
-판정"으로 고정되므로, 09-26 에 부분 숫자를 본 뒤 조정할 자유도가 없다.
+If the floor is not met at the close, a refused verdict is recorded and the window is **extended exactly once, until 2026-10-10** (metric, floors, thresholds unchanged). If it is still short after the extension, **the floor is not lowered.** Instead, "the injection channel could not produce a judgeable sample in four weeks" is adopted as a product signal on par with "not working", and the R6 parameters are reopened. Because the exit is fixed as "the shortfall itself is the verdict" rather than "lower the floor", there is no freedom to adjust after seeing partial numbers on 2026-09-26.
 
-**2배·3pp·1pp 는 선험 없이 고른 값이다.** 다만 절대 임계값이 아니라 **측정된 바닥선 위의 우월성
-마진**이고, 어느 쪽도 아닐 때 강제 행동이 없는 판정 유보 구간을 둔다 — 0.514 와 다른 점은
-그것이다. 계약은 진실이 아니라 **행동**을 구속한다.
+**2×, 3pp and 1pp were chosen without priors.** But they are **superiority margins above a measured floor**, not absolute thresholds, and there is a withheld band with no forced action when neither side is met — that is the difference from 0.514. The contract binds **behaviour**, not truth.
 
-*정직성 각주*: 지문 재사용은 **주로 과소집계**다 — 주입이 행동을 바꿔도 어휘 재사용 없이 바뀔 수
-있다(경로 회피, 결정 확인). 잔여 과대집계 경로는 열거되어 있고 작다: 어시스턴트가 노트를
-**기각하려고** 언급해도 사용으로 집계된다. 따라서 "작동" 판정은 강한 증거이고, "비작동" 판정은
-**어휘적 재사용이 대조군을 못 넘었다**는 뜻이지 기억 주입 개념 전체의 기각이 아니다.
+*Honesty footnote*: fingerprint reuse is **mostly an undercount** — an injection can change behaviour without lexical reuse (avoiding a path, confirming a decision). The remaining overcount paths are enumerated and small: an assistant mentioning a note **in order to dismiss it** counts as use. So a "works" verdict is strong evidence, and a "not working" verdict means **lexical reuse did not beat the control**, not a rejection of memory injection as a concept.
 
-사용자/JTBD 표는 v0.1 §2 와 동일하게 유지하되 빈도 열의 해석을 "공급 실측"으로 정정한다.
+The user/JTBD table stays as in v0.1 §2, with the frequency column reinterpreted as "measured supply".
 
-## 3. 성공 지표
+## 3. Success metrics
 
-| ID | 지표 | 소스 | 현재값 (2026-08-25 실측) | 목표/판정 |
+| ID | Metric | Source | Current value (measured 2026-08-25) | Target / verdict |
 |---|---|---|---|---|
-| **M8 (신설·1급)** | 주입 업테이크 per-prompt | `event_log` `recall-uptake`/`injection_uptake` (#224) | **이벤트 0건** (라이브 `/events` 확인 — 첫 세션 종료 대기) | 목표 아님 — **대조군 대비 판정** (§2 계약) |
-| M1 (진단) | 주입 정밀도 | `recall_label` (#221, 일일 자동 수집 #223) | LLM 판정 relevant 6 / irrelevant 18 (라이브 `/recall-label-stats`) — **n=24 < 30 이라 리포터가 보고 거부**(`agents/shared/label_core.py:26,167`) · human 교차 agreed 0/compared 0 | 미설정 — human `--audit` n≥30 후에만. **LLM 판정 단독으로는 목표를 영구히 못 정한다** |
+| **M8 (new · first-class)** | injection uptake per prompt | `event_log` `recall-uptake`/`injection_uptake` (#224) | **0 events** (live `/events` — waiting for the first session end) | Not a target — **verdict against control** (§2 contract) |
+| M1 (diagnostic) | injection precision | `recall_label` (#221, daily auto-collection #223) | LLM judge relevant 6 / irrelevant 18 (live `/recall-label-stats`) — **n=24 < 30, so the reporter refuses to report** (`agents/shared/label_core.py:26,167`) · human cross-check agreed 0 / compared 0 | Unset — only after human `--audit` n≥30. **An LLM judge alone can never set the target** |
 
-**human 판정자의 역할은 정답이 아니라 계기 교정이다.** 근거는 "판정자가 임베딩 계열을 공유해서"가
-**아니다** — 실측(2026-09-02) 임베더는 `bge-m3`, 판정자는 `gemma4:12b` 로 계보가 다르다. 그 문장은
-틀렸고 코드 주석 3곳에 복제돼 있었으며, 이 커밋이 함께 고친다. 진짜 근거는 둘이다: ① **아무도 이
-판정자를 검증한 적이 없고, 판정자는 자기 정확도를 스스로 세울 수 없다** ② M1 이 재는 것이
-"**사람이** 읽었으면 도움이 됐겠나"라는 반사실이므로 사람이 선호가 아니라 **정의상** 기준이다.
+**The human judge's role is instrument calibration, not ground truth.** The reason is **not** "the judge shares the embedding lineage" — measured (2026-09-02), the embedder is `bge-m3` and the judge is `gemma4:12b`, different lineages. That sentence was wrong, was copied into three code comments, and this commit fixes them together. The real reasons are two: ① **nobody has ever validated this judge, and a judge cannot establish its own accuracy** ② what M1 measures is the counterfactual "would it have helped if a **person** read it", so a person is the standard **by definition**, not by preference.
 
-**M1 라벨은 어떤 형태로도 세션 내 에이전트가 달 수 없다.** 업테이크(M8)가 이미 에이전트의
-transcript 에서 나오므로, M1 까지 같은 주체의 판단이 되면 **"관련은 있는데 안 쓰였다"(채널 결함)와
-"무관하다"(회수 결함)의 구분이 소멸한다** — 그 둘을 가르는 것이 M1 을 M8 과 따로 두는 유일한
-이유다. 다른 벤더의 LLM 을 제3 판정자로 두는 것 자체는 금지가 아니나, 그것은 `judge` 를 확장한
-별도 계열이며 **`compared` 에는 산입되지 않는다**: `compared` 를 채우려면 그 라벨을 `human` 으로
-기록해야 하고 그것은 provenance 위조다. 그리고 제3 판정자의 신뢰성을 확인하는 control 은 그 자체로
-사람 라벨 ~20건을 요구하므로, 대체하려던 비용과 정확히 같다 — 순환이다.
+**M1 labels cannot be assigned by the in-session agent in any form.** Uptake (M8) already comes from the agent's transcript; if M1 becomes the same party's judgement too, **the distinction between "relevant but unused" (a channel defect) and "irrelevant" (a recall defect) disappears** — separating those two is the only reason M1 exists apart from M8. Using another vendor's LLM as a third judge is not forbidden as such, but it is a separate series extending `judge` and **does not count toward `compared`**: filling `compared` would require recording that label as `human`, which is provenance forgery. And the control needed to confirm a third judge's reliability itself requires ~20 human labels, exactly the cost it was meant to replace — a circle.
 
-**표본 20 이 결정하는 것 하나**: 임계값을 뒤집지 않는다(강제 경로는 #218 로 이미 삭제). 여는 것은
-**야간 자동 누적되는 gemma 계기를 보고 가능한 지표로 승격할지** 하나뿐이고, 회수 거리 질량이
-0.40–0.56 모호대역에 몰려 있어 거리로는 영원히 판정할 수 없으므로 라벨이 유일한 경로다.
-| M2 (재명명) | golden **회귀 바닥** (구 "R1 의 측정") | eval gate | 22/22, MRR 1.000 — 단 **18문서 fixture 코퍼스**(`data/eval/fixtures/` 18파일), 랜덤 기준선 ~17%(추론: 18문서 top-3) | 22/22 유지 (달성값의 회귀 방지) |
-| M3 | golden false_pass | eval gate | 4/6 | 미설정 — 재도입 바 동일(양면 predicate, 다른 커밋, `run_eval.py:184–194`) |
-| M4 (재명명) | **파이프라인 생존** (구 "인제스트 무손실") | `event_log`/readiness | pass | dead-letter 0 · readiness 100% |
-| M5 (방법 교체) | claim 현재성 — **표본 감사** | 수동: 현재-claim 무작위 n≥20 vs 현행 코드 대조 (연속 계측은 R2 의존성) | 08-20 프로브 표본에서 최소 2건 거짓 | 미설정 |
-| M6 (범위 확장) | 배포 일치 — 엔진 **+ 호스트 바이너리** | `/health.build_sha` + readiness(#222 로 실패 조건화) | 엔진 **일치**(`d6fad0e`==HEAD) · 호스트 CLI 는 **무버전 — 계측 의존성**(§5-R4) | 일치 |
-| M7 | 능동 MCP 사용 (recall+ask/주) | `query_log` | 16/주 | 관측 전용 — "수요 순간" 표면 설계의 입력 |
+**The one thing a sample of 20 decides**: it does not flip the threshold (the enforce path was already deleted in #218). The only thing it opens is **whether the nightly-accumulating gemma instrument is promoted to a reportable metric**, and since recall distance mass sits in the 0.40–0.56 ambiguous band, distance can never decide it, so labels are the only path.
+| M2 (renamed) | golden **regression floor** (formerly "the measurement of R1") | eval gate | 22/22, MRR 1.000 — on an **18-document fixture corpus** (`data/eval/fixtures/`, 18 files), random baseline ~17% (inferred: 18 documents, top-3) | keep 22/22 (regression guard on an achieved value) |
+| M3 | golden false_pass | eval gate | 4/6 | Unset — same reintroduction bar (two-sided predicate, separate commit, `run_eval.py:184–194`) |
+| M4 (renamed) | **pipeline survival** (formerly "lossless ingest") | `event_log`/readiness | pass | dead-letter 0 · readiness 100% |
+| M5 (method replaced) | claim currency — **sample audit** | manual: random n≥20 current claims vs current code (continuous instrumentation depends on R2) | at least 2 false in the 08-20 probe sample | Unset |
+| M6 (scope widened) | deploy match — engine **+ host binary** | `/health.build_sha` + readiness (failure-conditioned by #222) | engine **matches** (`d6fad0e`==HEAD) · host CLI **unversioned — instrumentation dependency** (§5-R4) | match |
+| M7 | active MCP use (recall+ask / week) | `query_log` | 16/week | observation only — input to the "moment of demand" surface design |
 
-**"세션"의 정의**: M8 에서 세션이란 `log_uptake_event` 가 `SessionEnd` 에 기록한 단위만을
-뜻한다. `distill_resolution` 은 모든 증류 실행마다(중간 압축 포함) 발화하므로 세션 수가 아니다.
-그 행 수를 세션 수로 보고하는 표면은 그 자체로 계측 결함이다.
+**Definition of "session"**: in M8 a session means only a unit that `log_uptake_event` recorded at `SessionEnd`. `distill_resolution` fires on every distillation run (including mid-session compactions), so it is not a session count. Any surface that reports that row count as a session count is itself an instrumentation defect.
 
-**M2 인용 규칙**: M2 는 18문서 fixture 에서의 **배선** 회귀 바닥이다. 프로덕션 회수 품질의
-근거로 인용할 수 없다 — 18문서에는 근접 경쟁자가 없고, 프로덕션의 실패 모드는 정확히 근접
-경쟁자다. 품질 주장은 M8/M1 만 할 수 있다.
+**M2 citation rule**: M2 is a **wiring** regression floor on an 18-document fixture. It cannot be cited as evidence of production recall quality — 18 documents have no near competitors, and production's failure mode is exactly near competitors. Only M8/M1 can make quality claims.
 
-코퍼스 갱신: 1381 documents(라이브 `/health`). code_index: **rust 836 · python 11678 · shell 61 심볼**(라이브 `code_index_status`, #226).
+Corpus update: 1,381 documents (live `/health`). code_index: **rust 836 · python 11,678 · shell 61 symbols** (live `code_index_status`, #226).
 
 ## 4. Non-goals
 
-v0.1 의 팀 공유·회사 KB·클라우드·코드검색 제품화·게이트 없는 쓰기 제외는 유지. **수정 1건**:
+v0.1's exclusions stand: team sharing, company KB, cloud, code-search productisation, ungated writes. **One amendment**:
 
-- ~~"별도 UI 없음(Obsidian 이 UI)"~~ → **"인터랙티브/그래픽 UI *제품*은 비목표. 단, 주입 관측성 — '내 최근 N 프롬프트에 무엇이 주입됐고 왜인가' — 은 R1 의 파생 요구이고, 그 표면은 읽기 전용 로컬 뷰를 포함한다."**
+- ~~"No separate UI (Obsidian is the UI)"~~ → **"An interactive/graphical UI *product* is a non-goal. But injection observability — 'what was injected into my last N prompts, and why' — is a derived requirement of R1, and that surface includes a read-only local view."**
 
-  **개정 사유 (2026-09-02, 오너 결정).** v2 는 "화면"이라는 형태 가정을 기각하고 CLI 확장이 최저가
-  경로라고 판정했다. 그 판정은 **틀렸고, 실측이 틀렸음을 보였다**: 화면(`scripts/peek.py`)이 만들어진
-  뒤 일주일 안에 CLI 가 몇 달간 못 낸 것 세 가지가 나왔다 — ① 표본 커버리지 11.8%(§8 D4, 판정을
-  바꾼 발견) ② 회수 거리 대역 분포 ③ 채점 확정과 대기의 분리. 전부 데이터는 원래 있었고 아무도
-  질의하지 않았을 뿐이다. **"데이터가 이미 있다"는 그것이 읽힌다는 뜻이 아니다** — 이 레포가 배달
-  결함 6건에서 배운 것과 같은 형태의 착각이다.
+  **Reason for the amendment (2026-09-02, owner decision).** v2 rejected the form assumption "a screen" and ruled that extending the CLI was the cheapest path. That ruling was **wrong, and measurement showed it**: within a week of the screen (`scripts/peek.py`) existing, three things came out that the CLI had not produced in months — ① sample coverage 11.8% (§8 D4, the finding that changed the verdict) ② the recall distance band distribution ③ separating confirmed scoring from pending. All the data was already there; nobody had queried it. **"The data already exists" does not mean it gets read** — the same shape of illusion this repo learned from six delivery defects.
 
-  경계는 형태가 아니라 **성질**로 긋는다: 관측 표면은 읽기 전용이고(쓰기 없음, 생성 엔드포인트 호출
-  없음), 루프백에만 바인드하며, 회사 출처 노트의 산문을 서버 밖으로 내보내지 않고, 판정 숫자를 스스로
-  다시 계산하지 않는다(`verdict_core` 에서 그대로 읽는다). 이 성질을 만족하지 않는 화면은 여전히
-  비목표다. 공유·배포·다중 사용자·인증이 붙는 순간 그것은 다른 제품이다.
+  The boundary is drawn by **property**, not by form: the observation surface is read-only (no writes, no calls to generating endpoints), binds to loopback only, never sends prose from company-origin notes out of the server, and does not recompute verdict numbers itself (it reads them from `verdict_core`). A screen that does not satisfy those properties is still a non-goal. The moment sharing, distribution, multiple users or authentication attach, it is a different product.
 
-## 5. 요구사항
+## 5. Requirements
 
-### R1. 주입은 정밀해야 한다 — *지표 위계 교정*
-1급 측정은 M8(업테이크), 진단은 M1(정밀도). 파생 작업: ① 업테이크 2주 창 완주(§7.2) ② human `--audit` n≥30 ③ **README 진실 교정** — `README.md:10` "recalls the useful parts"는 라벨 실측(LLM 판정 6/24 relevant)과 양립 불가하다는 비개발직군 지적에 동의. 문구를 측정-중 사실로 교체("captures how you solved things; recall precision is being measured in the open")하고, 품질 형용사는 M8/M1 보고 후에만 복원한다.
+### R1. Injection must be precise — *metric hierarchy corrected*
+The first-class measurement is M8 (uptake), the diagnostic is M1 (precision). Derived work: ① complete the two-week uptake window (§7.2) ② human `--audit` n≥30 ③ **README truth correction** — agreed with the non-engineering reviewer that `README.md:10` "recalls the useful parts" is incompatible with the measured labels (LLM judge 6/24 relevant). Replace the wording with a measured-in-progress statement ("captures how you solved things; recall precision is being measured in the open") and restore quality adjectives only after M8/M1 are reported.
 
-### R2. 회수된 기억은 현재여야 한다 — *스코프 결정 추가*
-- **certainty 어휘의 실측**: 패널의 "전부 certain"은 과장이다 — 실측 4395 certain / 1150 likely / 24 빈문자열 / 2 assumption(전 vault grep). 그러나 실질은 맞다: **한번 certain 이면 영원히 certain** — 강등 경로가 없어 낡은 claim 이 `certain` 으로 반환된다(08-20 프로브 D1). 파생: confidence 는 부여가 아니라 **유지되어야 하는** 상태다. (+빈문자열 24건은 스키마 누수, R7 소관)
-- **소급 불가의 수용**: 기존 7243 claims 는 원본 raw 부재로 앵커 소급 불가(동의 — 엔지니어). **R2 는 forward-only 다.** 레거시 처리(감쇠 라벨 vs `certain` 제외)는 오너 결정(§8 Q5).
-- M5 는 순환이 아니다: 표본 감사는 기구 없이 지금 가능하고, 연속 계측이 그 뒤에 온다.
+### R2. Recalled memory must be current — *scope decision added*
+- **Measured certainty vocabulary**: the panel's "everything is certain" is an exaggeration — measured 4,395 certain / 1,150 likely / 24 empty string / 2 assumption (grep across the vault). But the substance holds: **once certain, certain forever** — there is no demotion path, so stale claims come back as `certain` (08-20 probe D1). Derived: confidence is a state that has to be **maintained**, not granted. (+ the 24 empty strings are a schema leak, R7's domain)
+- **Accepting non-retroactivity**: the existing 7,243 claims cannot be retroactively anchored because the original raws are gone (agreed — engineer). **R2 is forward-only.** Legacy handling (decay label vs excluding `certain`) is an owner decision (§8 Q5).
+- M5 is not circular: the sample audit is possible now without instrumentation, and continuous instrumentation comes after.
 
-### R3. 해결 경험은 조용히 사라지지 않는다
-게이트는 유지하되(verifier→수리 1회→dead-letter), 통과한 세션의 **핵심 결정이 증류에서 탈락하면 안 된다.**
+### R3. Solved experience does not silently vanish
+The gate stays (verifier → one repair → dead-letter), but **the key decision of a session that passed must not drop out of distillation.**
 
-위반 실물: PR 4개짜리 세션이 claim 4개로 고정 압축되어 그날 최대 결정(#218, 임계값 강제 경로 삭제)이 **어떤 노트에도 없다**(`docs/reports/2026-08-20-rag-usage-probe.md` §4 D2). 그리고 이 일은 M4 가 초록인 상태에서 일어났다 — 그래서 M4 를 "파이프라인 생존"으로 개명했다. **개명은 지표의 정직성 교정이지 이 요구사항의 해결이 아니다.**
+A real violation: a four-PR session was compressed to a fixed four claims and the day's biggest decision (#218, deleting the threshold enforce path) is **in no note at all** (`docs/reports/2026-08-20-rag-usage-probe.md` §4 D2). And this happened while M4 was green — which is why M4 was renamed "pipeline survival". **The rename is an honesty correction of the metric, not a resolution of this requirement.**
 
-**파생 작업 (일정 명시)**: 노트당 claim 수의 구조적 고정 해소 또는 결정-단위 분할 증류. 정직한 비용 **1~2주** — 프롬프트·verifier 수정 자체는 2~4일이지만 dedup·claim upsert·eval 픽스처·변이 검증까지 가로지른다. 그리고 **forward-only 다**: 엔진이 재증류를 3/3 거부했고 원본 raw 도 없으므로 기존 노트의 압축은 되돌릴 수 없다.
+**Derived work (scheduled)**: remove the structural fixed claim count per note, or split distillation per decision. Honest cost **1–2 weeks** — the prompt/verifier change itself is 2–4 days but it cuts across dedup, claim upsert, eval fixtures and mutation verification. And it is **forward-only**: the engine refused re-distillation 3/3 and the original raws are gone, so the compression of existing notes cannot be undone.
 
-**일정**: 이 작업은 증류를 바꾸므로 주입될 노트의 내용을 바꾼다 — §2 측정 창과 **직교하지 않는다.** 착수는 창 종료 이후.
+**Schedule**: this work changes distillation and therefore the content of the notes that get injected — it is **not orthogonal** to the §2 measurement window. Start after the window closes.
 
-**착수 전까지 raw transcript 를 retention 삭제에서 제외한다 — 다만 급한 불은 아니다.**
+**Until it starts, raw transcripts are excluded from retention deletion — but it is not urgent.**
 
-이 문단의 앞선 판(#259)은 "미루는 동안 원본이 계속 지워지므로 비용이 영구 유실"이라고 적었다.
-**실측하니 과장이었다**(2026-09-02): retention 은 처리된 세션을 30일에 **아카이브**(gzip, 내용
-보존)하고 삭제는 **아카이브 후 180일**인데, 전사 3023개 중 가장 오래된 것이 **75일**이고 180일을
-넘긴 파일은 **0건**이다. 아카이브 105개는 전부 복원 가능하다. 즉 지금 사라지고 있는 원본은 없다.
+The earlier version of this paragraph (#259) said "originals keep being deleted while we defer, so the cost is permanent loss". **Measured, that was an exaggeration** (2026-09-02): retention **archives** processed sessions at 30 days (gzip, content preserved) and deletes **180 days after archiving**; of 3,023 transcripts the oldest is **75 days** and **0** files have passed 180. All 105 archives are restorable. Nothing is being lost right now.
 
-그럼에도 제외 조항을 남기는 이유는 두 가지다: ① 첫 삭제까지 약 105일이고 R3 착수가 그 안에
-들어간다는 보장이 없다 ② R3 가 forward-only 인 것은 **이미 잃은** 원본 때문이지 앞으로 잃을
-것 때문이 아니므로, 남은 원본은 R3 가 되돌릴 수 있는 유일한 범위다. 보존은 증류·주입 어느 것도
-건드리지 않으므로 창과 직교한다.
+The exclusion clause stays for two reasons anyway: ① the first deletion is ~105 days out and there is no guarantee R3 starts inside that ② R3 is forward-only because of originals **already lost**, not ones we will lose, so the remaining originals are the only range R3 can ever recover. Retention touches neither distillation nor injection, so it is orthogonal to the window.
 
-### R4. vault 는 SSOT, 파생 상태는 일치·재구성 가능 — *2개 확장*
-- (기존) 엔진 배포 드리프트: #222 로 **readiness 실패 조건**이 됐고 재배포 전 RC=1 로 실제 작동 확인(코디네이터 실측). 종결.
-- **(신설) 설정↔바이너리 결합**: 미래 바이너리용 설정값이 현재 바이너리를 크래시 루프에 빠뜨린 실사례(`unknown variant 'python', expected 'rust'` — 코디네이터 보고, #226 의 config.rs enum 확장과 정합). 속성: **설정 파싱 실패는 진단 가능한 오류 상태로 격하되어야지 크래시 루프가 되어선 안 된다**(parse-don't-validate 는 경계에서 거부를 의미하지, 프로세스 자살 반복을 의미하지 않는다). 파생: 기동 시 설정 거부를 `/health` 로 보고 + readiness 가 "설정이 바이너리보다 새로움"을 잡는 검사. 근본원인 우선 — 재시도 루프 완화책 금지(`GOALS.md:80` 운영 원칙).
-- **(신설) 호스트 CLI 바이너리 무버전**: `scripts/schedule-maintenance.sh:45` 가 `./drudge/target/release/drudge code-sync` 를 부르는데 이 바이너리는 `cargo build --release` 전까지 옛것이고 #222 는 엔진만 본다. M6 범위를 호스트로 확장 — **의존성: 호스트 바이너리에 버전 표면(`--version` → build sha)이 먼저 필요하다.**
+### R4. The vault is the source of truth; derived state is consistent and rebuildable — *2 extensions*
+- (Existing) Engine deploy drift: #222 made it a **readiness failure condition** and it was confirmed working with RC=1 before redeploy (coordinator measured). Closed.
+- **(New) Config↔binary coupling**: a real case where a config value meant for a future binary put the current binary in a crash loop (`unknown variant 'python', expected 'rust'` — coordinator report, consistent with the config.rs enum extension in #226). Property: **a config parse failure must degrade to a diagnosable error state, not a crash loop** (parse-don't-validate means rejecting at the boundary, not repeated process suicide). Derived: report config rejection at startup via `/health` + a readiness check that catches "config newer than binary". Root cause first — no retry-loop mitigations (`GOALS.md:80` operating principle).
+- **(New) The host CLI binary is unversioned**: `scripts/schedule-maintenance.sh:45` calls `./drudge/target/release/drudge code-sync`, and that binary is stale until `cargo build --release`; #222 only checks the engine. Widen M6's scope to the host — **dependency: the host binary first needs a version surface (`--version` → build sha).**
 
-- **(신설) 머지는 도달이 아니다.** 이 레포의 게이트는 전부 **레포 안**을 판정하는데, 관측된
-  배달 실패 6건은 전부 **레포 밖 접합부**(크론 설치 목록, 훅 등록 수, 프로덕션 env, Makefile
-  진입점)에서 죽었다. 판정 대상 ≠ 실행 대상이면 게이트는 구조적으로 못 잡는다. 파생: readiness 가
-  ① 훅 경로 유일성(정규화 후 정확히 1회) ② 코드가 읽는 `BORING_*` 게이트 플래그의 프로덕션 존재
-  ③ 새 실행 표면의 호출자 등록(Makefile·크론·훅 중 하나)을 단언한다. M6 의 범위를 "바이너리
-  일치"에서 **"호출 경로 도달"**로 확장한다. 신규 도구 금지 — doctor/readiness 확장이다.
-- **(신설) 측정 원장 쓰기는 기록자 쪽에서 닫는다.** 관례("테스트는 spool 을 기억하라")는 이미
-  실패했다 — `test_codex.py` 가 17곳에서 `BORING_EVENT_SINK=spool` 을 패치하는데도 누락 경로가
-  `guard.sh` 1회당 2행을 프로덕션 저장소에 흘렸다. 파생: 테스트 진입점 한 곳에서 spool 을 강제해
-  개별 테스트가 잊을 수 없게 한다. 프로덕션 기본값을 뒤집지는 않는다 — 프로덕션 opt-in 은 `=db`
-  를 모든 훅·크론 환경에 **배달**해야 하고, 그것이 바로 위 항목의 배달 실패 클래스를 계측 자체에
-  재수입하는 것이다.
+- **(New) Merged is not delivered.** Every gate in this repo judges **inside the repo**, but all six observed delivery failures died at **joints outside the repo** (cron install lists, hook registration count, production env, Makefile entry points). When the judged target ≠ the executed target, a gate structurally cannot catch it. Derived: readiness asserts ① hook path uniqueness (exactly once after normalisation) ② production presence of the `BORING_*` gate flags the code reads ③ a registered caller for every new execution surface (one of Makefile, cron, hook). M6's scope widens from "binary match" to **"call path reached"**. No new tooling — this is a doctor/readiness extension.
+- **(New) Writes to the measurement ledger are closed on the recorder's side.** The convention ("tests remember to spool") has already failed — `test_codex.py` patches `BORING_EVENT_SINK=spool` in 17 places and a missed path still leaked 2 rows per `guard.sh` run into the production store. Derived: force spool at the single test entry point so an individual test cannot forget. Do not flip the production default — production opt-in would require **delivering** `=db` to every hook and cron environment, which re-imports the delivery-failure class above into the instrumentation itself.
 
-- **(신설) 머지한 날 배달을 확인한다.** `drudge/` 또는 `~/.hermes` 로 도달하는 파일을 만진 PR 은
-  머지 당일 `/health.build_sha == HEAD` 와 설치기 실행을 확인하며, **확인 전까지 그 PR 의 주장을
-  라이브에 적용된 것으로 인용하지 않는다.** 2026-09-02 실측: 오전에 잡아 고친 드리프트가 오후
-  머지(#266, `store.rs`)로 즉시 재발해 엔진이 `5b5f0ab` 에 머물렀다 — 같은 클래스의 **7번째**다.
-  doctor 가 사후에 잡는 것과 머지 시점에 확인하는 것은 다른 일이다.
+- **(New) Confirm delivery on merge day.** A PR that touches files reaching `drudge/` or `~/.hermes` confirms `/health.build_sha == HEAD` and an installer run on the day it merges, and **until then its claims are not cited as applied live.** Measured 2026-09-02: drift caught and fixed in the morning recurred immediately with an afternoon merge (#266, `store.rs`), leaving the engine at `5b5f0ab` — the **seventh** of the same class. Doctor catching it afterwards and confirming at merge time are different jobs.
 
-### R5. 경계 기본 닫힘 — 유지, 파생 없음
-(§8 Q7 `forget` traversal 상태 확인은 여전히 오너 몫.)
+### R5. Boundaries closed by default — unchanged, nothing derived
+(Confirming the state of the §8 Q7 `forget` traversal is still the owner's.)
 
-### R6. 읽기 문은 빠르고 LLM 없이 — *스로틀 결정(이번 라운드의 제품 결정)*
-사실관계(전부 검증): Claude Code 훅은 스로틀 없이 매 프롬프트 주입(`agents/claude-code/recall.py:46` — `throttle_session` 미전달, 기본 False `recall_core.py:128`), Kimi 만 켜져 있고(`agents/kimi/recall.py:30`), `agents/claude-code/README.md:10` 은 "throttled to once per session"이라 **거짓말한다**.
+### R6. The read door is fast and LLM-free — *throttle decision (this round's product decision)*
+Facts (all verified): the Claude Code hook injects on every prompt with no throttle (`agents/claude-code/recall.py:46` — `throttle_session` not passed, default False at `recall_core.py:128`), only Kimi has it on (`agents/kimi/recall.py:30`), and `agents/claude-code/README.md:10` **lies** with "throttled to once per session".
 
-**결정: 스로틀 개념을 버리고 문서를 사실에 맞춘다.** 근거 3개:
-1. ~~**비용이 실재하지 않는다** — 3×280자는 현대 컨텍스트의 ~0.1%.~~ **이 근거는 2026-09-02
-   실측으로 기각한다.** 그 계산은 **주입 1회**를 쟀는데, 채널은 **같은 컨텍스트에 세션당 32~168회**
-   넣는다. 원장 실측:
+**Decision: drop the throttle concept and make the docs match the facts.** Three grounds:
+1. ~~**The cost is not real** — 3×280 chars is ~0.1% of a modern context.~~ **This ground is rejected by the 2026-09-02 measurement.** That calculation measured **one injection**; the channel puts **32–168 per session** into the same context. Ledger measurement:
 
-   | | 주입 횟수 | 컨텍스트 적재 | 그중 무관 추정(precision 0.319) |
+   | | Injections | Context loaded | Est. irrelevant (precision 0.319) |
    |---|---|---|---|
-   | 중앙값 세션 | 32 | ~28,800 토큰 | ~19,600 |
-   | 상위 25% | 75 | ~67,500 | ~45,900 |
-   | 최대 | 168 | ~151,200 | ~102,800 |
+   | Median session | 32 | ~28,800 tokens | ~19,600 |
+   | Top quartile | 75 | ~67,500 | ~45,900 |
+   | Max | 168 | ~151,200 | ~102,800 |
 
-   메시지당 평균 캐시읽기가 ~502k 토큰이므로, 최악 세션은 **컨텍스트의 약 30%가 회수 노트**이고
-   그 2/3이 무관하다. 주간으로는 약 205만 토큰이 대화에 적재되고 캐시 증폭 64배를 거쳐 주
-   **~1.3억 토큰**의 캐시읽기에 기여한다(cache_creation 대비 0.71%).
+   With an average cache read of ~502k tokens per message, the worst session has **about 30% of its context as recalled notes**, two-thirds of it irrelevant. Weekly, about 2.05M tokens are loaded into conversations and, through 64× cache amplification, contribute **~130M tokens** of cache reads per week (0.71% of cache_creation).
 
-   **그리고 그중 34%는 같은 세션에서 이미 준 노트다** — 세션 내 주입 hit 3,795건 중 고유 2,521건,
-   한 노트가 한 세션에서 최대 **25회** 재주입. 에이전트가 이미 컨텍스트에 갖고 있는 텍스트를 다시
-   넣는 것이므로 이 부분은 노이즈도 아니고 **순수 중복**이다.
+   **And 34% of those are notes already given in the same session** — of 3,795 in-session injected hits, 2,521 are unique; one note was re-injected up to **25 times** in one session. That text is already in the agent's context, so this part is not even noise but **pure duplication**.
 
-   근거 1이 기각돼도 **결정(스로틀 개념 폐기)은 유지된다** — 근거 2·3이 독립적으로 지탱하고,
-   스로틀은 어차피 중복 문제를 풀지 못한다(좋은 주입까지 같이 죽인다). 다만 **비용이 없다는
-   주장은 더 이상 할 수 없고**, 세션 내 중복 제거는 창 종료 후 첫 작업 후보다(§5-R6 동결 대상이므로
-   창 중 변경 금지). 진짜 비용은 여전히 노이즈지만, **토큰도 공짜가 아니었다.**
-2. **측정 무결성** — 업테이크 2주 창의 표본은 현행 주입 빈도 위에서 정의됐다. 창 중간에 빈도를 바꾸면 §2 계약이 무효가 된다. 창 동안 동결.
-3. **판정이 상위 결정을 대체한다** — 비작동이면 채널 자체가 재설계되므로 스로틀 논쟁은 무의미해지고, 작동이면 per-prompt 주입이 값을 증명한 것이다.
-파생: ① `agents/claude-code/README.md:10` 거짓 제거(즉시, 문서 수정) ② Kimi 의 `throttle_session=True` 는 **창 종료 후** 채널 계약을 하나로 통일할 때 함께 처분(창 중 변경 금지는 Kimi 에도 적용 — 단 Kimi 채널 부피는 미미하다, 추론). AI PM 의 "수요 순간(막힘)에 아무것도 안 준다"는 지적은 옳고, 그 표면은 M7 이 입력이 되는 **차기 설계 후보**로 §8 Q8 에 올린다.
+   Even with ground 1 rejected, **the decision (dropping the throttle concept) stands** — grounds 2 and 3 hold it up independently, and a throttle would not fix duplication anyway (it kills the good injections too). But **the claim that there is no cost can no longer be made**, and in-session dedup is the first candidate after the window closes (frozen under §5-R6, so no change during the window). The real cost is still noise, but **tokens were not free either.**
+2. **Measurement integrity** — the two-week uptake sample is defined on the current injection frequency. Changing frequency mid-window voids the §2 contract. Frozen for the window.
+3. **The verdict supersedes the decision** — if not working, the channel itself is redesigned and the throttle debate is moot; if working, per-prompt injection has proven its value.
+Derived: ① remove the falsehood in `agents/claude-code/README.md:10` (immediately, a doc fix) ② Kimi's `throttle_session=True` is disposed of **after the window** when the channel contract is unified (the no-change-during-window rule applies to Kimi too — though Kimi's channel volume is negligible, inferred). The AI PM's point that "nothing is offered at the moment of demand (being stuck)" is right, and that surface goes to §8 Q8 as a **next-design candidate** with M7 as input.
 
-### R7. 주입 표면은 선언이지 코드가 아니다 — *신설*
+### R7. The injection surface is a declaration, not code — *new*
 
-표면은 **트리거·선택·렌더** 세 축으로 이미 갈라져 있는데 코드가 그것을 인정하지 않는다:
+The surface is already split along three axes — **trigger, selection, render** — and the code does not acknowledge it:
 
-| 축 | 청크 주입 | claim 카드 |
+| Axis | Chunk injection | Claim card |
 |---|---|---|
-| 트리거 | `UserPromptSubmit` | `SessionStart` |
-| 선택 | `/search`(프롬프트, 3+대조2) | `/context`(프로젝트, max_items=5) |
-| 렌더 | `- [src] snippet[:280]` + 펜스 | `- [kind\|conf] subject predicate: value` |
-| 원장 기록 | 있음 | **없음** |
+| Trigger | `UserPromptSubmit` | `SessionStart` |
+| Selection | `/search` (prompt, 3 + 2 control) | `/context` (project, max_items=5) |
+| Render | `- [src] snippet[:280]` + fence | `- [kind\|conf] subject predicate: value` |
+| Ledger record | yes | **no** |
 
-파생: 표면·정책 파라미터를 어댑터 코드에 직접 쓰는 것은 결함이다(2026-09-02 kimi 미배달 사건이
-근거 — #245 의 dedup 수정이 `wire_claude_code` 에만 배달됐다). 어댑터는 선언을 렌더하는 emit
-코드만 갖는다. **부수 이득**: claim 카드가 지금 업테이크 원장 밖에 있어 "받고도 안 썼다"가 측정
-불가인데, 통합하면 공짜로 계측된다.
+Derived: writing surface/policy parameters directly into adapter code is a defect (grounds: the 2026-09-02 kimi non-delivery incident — the dedup fix in #245 was delivered only to `wire_claude_code`). Adapters hold only emit code that renders the declaration. **Side benefit**: claim cards currently sit outside the uptake ledger, so "received and not used" cannot be measured; unifying instruments them for free.
 
-### 5.7. code_index 의 지위
-엔지니어 반박을 수용한다: 최저가 R2 구현(claim→`file:symbol` 앵커)의 소비자가 코드 인덱스이고, Python 커버리지는 정확히 `recall_core.py` 형태의 claim 이 요구하는 것이다. 배포 실측이 이를 뒷받침한다: python 11678 심볼, `code_search("session_uptake")` 가 `uptake_core.py` 를 정확히 짚음(코디네이터 확인). **판정: code_index 는 R2 의 조건부 인프라로 파생된다 — 조건은 오너가 §8 Q5 에서 앵커 설계를 고르는 것.** TTL/감쇠를 고르면 비파생으로 되돌아가고, 그때는 유지 모드(일일 sync + doctor 노후 경고는 이미 있음, #226)로 동결하거나 별도 슬라이스 정의를 쓴다.
+### 5.7. Status of code_index
+The engineer's objection is accepted: the consumer of the cheapest R2 implementation (claim → `file:symbol` anchor) is the code index, and Python coverage is exactly what claims of the `recall_core.py` shape require. Deployment measurement supports it: python 11,678 symbols, `code_search("session_uptake")` points precisely at `uptake_core.py` (coordinator confirmed). **Ruling: code_index is derived as conditional infrastructure for R2 — the condition is the owner choosing the anchor design in §8 Q5.** Choosing TTL/decay would make it non-derived again, in which case it is frozen in maintenance mode (daily sync + doctor staleness warning already exist, #226) or gets its own slice definition.
 
-## 6. 파생 문서 anti-drift
+## 6. Derived-document anti-drift
 
-**인정 2건**: ① 버전 핸드셰이크 단독은 "주석 두 줄 체크섬"이 맞다 — 둘 다 올리고 내용은 낡게 둘 수 있다. ② v0.1 규칙2(R-id 앵커)는 GOALS.md 의 파싱 가능 문법 재작성을 암묵 요구했고 그 비용을 견적("Rust 테스트 1–2개 + 주석 한 줄")에서 뺐다 — **부정직한 견적이었다.**
+**Two concessions**: ① a version handshake alone is indeed a "two-comment-line checksum" — both can be bumped while the content stays stale. ② v0.1 rule 2 (R-id anchors) implicitly demanded a rewrite of GOALS.md into a parseable grammar and left that cost out of the estimate ("1–2 Rust tests + one comment line") — **a dishonest estimate.**
 
-**방어 1건**: 핸드셰이크의 목적은 진실 보증이 아니라 **침묵 제거**다. v0.1 이 겨눈 실패 모드는 "PRD 가 움직였는데 파생 문서가 *조용히* 낡는다"였고, 강제 터치는 낡음을 시끄럽게 만든다. 내용의 진실성은 어떤 기계 규칙도 보증 못 하며, 그 잔여는 리뷰의 몫이다.
+**One defence**: the handshake's purpose is not to guarantee truth but to **remove silence**. The failure mode v0.1 aimed at was "the PRD moved and the derived doc went stale *quietly*", and a forced touch makes staleness loud. No mechanical rule can guarantee content truth; the remainder belongs to review.
 
-**재설계 (최소판, 기존 패턴만 사용)** — `quality_gate_readmes_match_mcp_tool_inventory`(`drudge/src/serve/mcp.rs:2096`)와 같은 contains-수준 검사로 한정:
-1. 버전 핸드셰이크: PRD `<!-- prd-version: N -->` ↔ GOALS `<!-- derived-from: PRD vN -->` 일치 단언.
-2. R-id 존재 검사(양방향, **문법 재작성 없음**): PRD 가 정의한 모든 `R#` 토큰이 GOALS.md 에 1회 이상 등장; GOALS.md 의 모든 `[R#]` 토큰이 PRD 에 존재. grep 수준 — GOALS 는 게이트 행에 `[R4]` 태그를 붙이기만 하면 된다.
-3. ~~숫자 SSOT (v0.1 규칙3)~~ — **이번 슬라이스에서 제외.** 문서 수가 지금 규모에선 비용>효익.
+**Redesign (minimal, existing patterns only)** — limited to contains-level checks like `quality_gate_readmes_match_mcp_tool_inventory` (`drudge/src/serve/mcp.rs:2096`):
+1. Version handshake: assert PRD `<!-- prd-version: N -->` ↔ GOALS `<!-- derived-from: PRD vN -->` match.
+2. R-id existence check (both directions, **no grammar rewrite**): every `R#` token the PRD defines appears at least once in GOALS.md; every `[R#]` token in GOALS.md exists in the PRD. grep level — GOALS only needs an `[R4]`-style tag on gate rows.
+3. ~~Number SSOT (v0.1 rule 3)~~ — **out of this slice.** At the current document count, cost > benefit.
 
-**정직한 견적**: Rust 테스트 1개 + GOALS.md 태그 부착 = 0.5–1일. **영구 유지비**: PRD 의 R-id 변경마다 GOALS 동시 수정 강제(회당 5–10분) — 이것이 비용이자 기능이다. 태그 없는 게이트 행을 실패시키는 검사(defect-log 차단)는 GOALS 재작성 비용이 확정되는 시점으로 이연.
+**Honest estimate**: 1 Rust test + GOALS.md tagging = 0.5–1 day. **Permanent upkeep**: every R-id change in the PRD forces a simultaneous GOALS edit (5–10 min each) — that is both the cost and the feature. A check that fails untagged gate rows (defect-log blocking) is deferred until the GOALS rewrite cost is settled.
 
-## 7. 채택 경로와 다음 슬라이스
+## 7. Adoption path and the next slice
 
-### 7.1 채택
-**`docs/PRD.md` 로 이번 슬라이스에 커밋한다.** 결정적 이유: §2 의 판정 계약은 **데이터가 도착하기 전에, 측정을 심은 커밋과 다른 커밋에서** 등록되어야 의미가 있다(이 레포가 0.514 에서 배운 규칙 그 자체 — `run_eval.py:190–194`). 스크래치패드는 등록처가 될 수 없다.
+### 7.1 Adoption
+**Commit to `docs/PRD.md` in this slice.** The decisive reason: the §2 verdict contract is only meaningful if it is registered **before the data arrives, in a commit different from the one that plants the measurement** (the very rule this repo learned from 0.514 — `run_eval.py:190–194`). A scratchpad cannot be a registration site.
 
-**한 문서로 간다.** "계약만 먼저, 나머지는 다음 커밋"은 두 번째 문서가 죽는 방식이고, anti-drift 핸드셰이크도 붙일 PRD 가 있어야 성립한다.
+**One document.** "Contract first, the rest next commit" is how the second document dies, and the anti-drift handshake needs a PRD to attach to.
 
-### 7.2 다음 슬라이스: **"주입 채널 수요 판정"** (R1×§2 파생, 빌드 0, 2주 반증 가능)
-| 항목 | 내용 |
+### 7.2 Next slice: **"demand verdict for the injection channel"** (derived from R1×§2, zero build, falsifiable in two weeks)
+| Item | Content |
 |---|---|
-| 파생 | R1(주입 정밀) + §2 판정 계약. 결함 목록 아님 — "이 채널에 수요가 있는가"라는 제품 질문 하나 |
-| 작업 | ① 업테이크 창 완주(계측 배포됨, 이벤트 0→N) ② 라벨 축적: 일일 자동 24건이면 LLM n≥30 은 ~2일 내, human `--audit` ≥30 병행(§3 M1) ③ 문서 2건: README 스로틀 거짓 제거 + PRD 커밋(§7.1) |
-| 판정(사전 등록) | §2 표 그대로 — 처치군 대 대조군, 표본 하한 미달 시 판정 거부 |
-| 반증 조건 | 이 슬라이스 자체가 실패하는 법도 명시한다 — 48h 내 uptake 이벤트 0건이면 계측 결함 조사(§2), human-LLM agreement(`MIN_COMPARED 20`, `label_core.py:29`) 미달이면 M1 은 계속 미설정 |
-| 하지 않는 것 | 창 중 주입 파라미터 변경(§5-R6), 정밀도 개선 작업 착수(측정 전 개입 금지), R2 구현(Q5 대기) |
+| Derived from | R1 (injection precision) + the §2 verdict contract. Not a defect list — one product question: "is there demand for this channel" |
+| Work | ① complete the uptake window (instrumentation deployed, events 0→N) ② accumulate labels: at 24 automatic per day, LLM n≥30 within ~2 days, human `--audit` ≥30 in parallel (§3 M1) ③ two doc changes: remove the README throttle falsehood + commit the PRD (§7.1) |
+| Verdict (pre-registered) | exactly the §2 table — treatment vs control, refused below the sample floor |
+| Falsification | how this slice itself fails is stated too — zero uptake events within 48h → instrumentation-fault investigation (§2); human–LLM agreement below `MIN_COMPARED 20` (`label_core.py:29`) → M1 stays unset |
+| Not doing | changing injection parameters during the window (§5-R6), starting precision work (no intervention before measurement), implementing R2 (waiting on Q5) |
 
-## 8. 오너 결정
+## 8. Owner decisions
 
-### D9. 둘째 창 폐기 — 표본의 72% 가 계기가 만든 행이었다 (2026-09-11, 새 창 표본 0/0 시점에 기록)
+### D9. Second window abandoned — 72% of the sample were rows the instrument made (2026-09-11, recorded with the new window's sample at 0/0)
 
-**08-31→09-14 창은 판정이 아니라 계측 조사로 끝난다.** 결함 2건, 둘 다 실측:
+**The 08-31→09-14 window ends as an instrumentation investigation, not a verdict.** Two defects, both measured:
 
-1. **밤 배수기가 살아 있는 세션에 SessionEnd 를 위조했다.** `agents/schedulers/collect-sessions.py`
-   가 mtime 순으로 고른 세션 — 가장 새것은 아직 도는 것 — 에 `hook_event_name: SessionEnd` 를
-   넣어 증류를 불렀고, 채점기는 그것을 세션 종료로 읽어 03:20 KST 에 중간 채점한 뒤 원장을
-   지웠다. 창 안 `injection_uptake` 36행 중 **26행이 그 스냅샷**이다. `#312` 로 수정.
-2. **채점기가 원장이 저장한 이름만 알았다.** 원장은 `wiki-1603.md`, 에이전트는 `wiki-1603` 으로
-   인용한다. 라이브 히트 12,651 중 12,184 가 그 형태라 가장 흔한 인용이 0점이었다. 같은 2,490쌍
-   자기점검에서 옛/새 채점기가 처치 35→95, 교차 대조 2→12. `#313` 으로 수정.
+1. **The night drain forged SessionEnd on live sessions.** `agents/schedulers/collect-sessions.py`
+   picked sessions by mtime — the newest being the one still running — and called distillation
+   with `hook_event_name: SessionEnd`; the scorer read that as a session end, scored mid-session
+   at 03:20 KST and pruned the ledger. Of the 36 `injection_uptake` rows inside the window,
+   **26 are those snapshots**. Fixed by `#312`.
+2. **The scorer only knew the name the ledger stored.** The ledger holds `wiki-1603.md`; agents
+   cite `wiki-1603`. 12,184 of 12,651 live hits have that form, so the commonest citation scored
+   zero. On the same 2,490 self-check pairs, old vs new scorer: treatment 35→95, cross-session
+   control 2→12. Fixed by `#313`.
 
-남는 10행은 하한(세션 20)의 절반이고, §2 커버리지 조항이 말하는 그 경우다. 하한을 내리지 않는다.
+The remaining 10 rows are half the floor (20 sessions), the exact case §2's coverage clause describes. The floor is not lowered.
 
-**새 창 2026-09-12 → 09-26 (KST), 2주.** 지표·하한·임계·연장 규칙(1회, 10-10 까지) 무변경. 수리
-경계는 `#313` 의 커밋 시각 `2026-09-11T00:31:53Z` 이고 창 시작이 그 뒤라 창 안의 모든 행은 한 계기의
-값이다(`verdict_core.LEDGER_REPAIR_AT`). 이 문단을 쓰는 시점에 새 계기 아래 usable sample 은
-**세션 0 · 프롬프트 0** — D1 과 같은 방어다.
+**New window 2026-09-12 → 2026-09-26 (KST), two weeks.** Metric, floors, thresholds and the extension rule (once, until 10-10) unchanged. The repair boundary is the commit instant of `#313`, `2026-09-11T00:31:53Z`, and the window opens after it, so every row inside the window is a value from one instrument (`verdict_core.LEDGER_REPAIR_AT`). At the time of writing this paragraph the usable sample under the new instrument is **0 sessions · 0 prompts** — the same defence as D1.
 
-**바뀌지 않은 것**: 주입 내용·빈도·순서(§5-R6). 검색 경로에 간선을 읽히는 일(`related_doc_content`,
-근거 +93% 실측)은 주입 내용을 바꾸므로 **창 종료(09-26) 이후**다. 창이 열리기 전에 넣으면 D1 방어를
-유지하지만 그러면 이 창이 재는 채널이 바뀌고, 그 결정은 이 문단이 아니라 별도 결정으로 적는다.
+**Unchanged**: injection content, frequency and order (§5-R6). Reading edges in the search path (`related_doc_content`, measured +93% evidence) changes injection content, so it is **after the window closes (09-26)**. Landing it before the window opens would keep the D1 defence but would change the channel this window measures, and that decision is recorded as a separate one, not in this paragraph.
 
-**격리 기록**: 08-31→09-11 의 숫자(36행, 처치·대조 어느 쪽이든)는 판정 입력이 아니다.
+**Quarantine record**: the 08-31→09-11 numbers (36 rows, treatment or control) are not verdict input.
 
-**셋째 수리(채점 뒤 원장 삭제 대신 보존)는 보류**: 지배 원인은 1 로 끊겼고, 세션별 재채점은
-판정 집계 방식을 바꾸므로 창 안 수리(D4) 범위 밖이다. 창 종료 뒤 별도 결정.
+**The third repair (keeping ledger rows after scoring instead of deleting them) is deferred**: the dominant cause was cut off by defect 1 above, and per-session rescoring changes how the verdict aggregates, which is outside an in-window repair (D4). A separate decision after the window closes.
 
-### D8. D7 정정 — 그 숫자는 계약이 재는 값이 아니었다 (2026-09-07, 같은 날)
+### D8. D7 corrected — that number was not the value the contract measures (2026-09-07, same day)
 
-D7 을 쓴 날 같은 자리에서 세 번 틀렸다. 판정일 전에 잡혔으니 기록으로 남기고, D7 의 수치는
-**판정 근거로 인용 금지**다.
+On the day D7 was written, the same spot was wrong three times. It was caught before the verdict date, so it is kept as a record, and D7's figures are **not to be cited as verdict grounds**.
 
-**틀림 1 — 모집단이 이중계수였다.** D7 은 원장 전체를 재채점했다. 그런데 이미 판정된 세션 36개
-중 26개가 원장에 남아 있어(`prune_session` 이 안 지웠다) 두 번 세어졌다. 판정 전 세션만으로
-다시 재면 처치 10.9% / 대조 7.7% 로 값 자체가 움직인다.
+**Wrong 1 — the population was double-counted.** D7 rescored the whole ledger. But 26 of the 36 already-judged sessions were still in the ledger (`prune_session` had not removed them) and were counted twice. Measured again on pre-verdict sessions only, treatment 10.9% / control 7.7% — the value itself moves.
 
-**틀림 2 — 파일명 매치가 처치로 세어졌다.** 처치 188 중 154(82%)가 세션 두 개에서 나왔고, 그
-둘은 코퍼스를 점검하던 세션이다. 어시스턴트가 `wiki-1290.md` 를 말한 것이 "기억을 썼다"로
-계수됐다. 기억을 쓴 것이 아니라 **기억을 들여다본 것**이다. 파일명 매치를 빼면 처치 10.2% /
-대조 7.0%, 격차 3.2pp.
+**Wrong 2 — filename matches were counted as treatment.** 154 of the 188 treatment hits (82%) came from two sessions, and both were sessions inspecting the corpus. The assistant saying `wiki-1290.md` was counted as "used a memory". That is not using a memory, it is **looking at one**. Without filename matches: treatment 10.2% / control 7.0%, gap 3.2pp.
 
-**틀림 3 — 라이브 판정이 0 인 이유를 계기 결함으로 의심했다.** 아니다. 처치가 있는 세션들이
-**아직 SessionEnd 를 지나지 않았다.** 가장 크게 기여하는 세션(122/262)은 지금도 살아 있고,
-끝나면 그 값이 기록된다. 라이브 0 과 재채점 값은 고장이 아니라 **다른 시점의 같은 계기**다.
+**Wrong 3 — the live verdict reading 0 was suspected as an instrument defect.** It is not. The sessions carrying treatment **have not passed SessionEnd yet.** The largest contributor (122/262) is still alive now, and its value is recorded when it ends. Live 0 and the rescored value are not a fault but **the same instrument at different moments**.
 
-| 채점 방식 | 처치 | 대조 | 비고 |
+| Scoring | Treatment | Control | Note |
 |---|---|---|---|
-| D7 (원장 전체, 파일명 포함) | 7.9% | 5.6% | **이중계수 · 자기관측 오염** |
-| 판정 전 세션만, 파일명 포함 | 10.9% | 7.7% | 자기관측 오염 |
-| 판정 전 세션만, 문구만 | 10.2% | 7.0% | 오염 제거, 다만 미완료 세션 포함 |
-| **event_log 기록분(계약)** | **0%** | **0%** | 완료된 세션만 — 계약이 재는 값 |
+| D7 (whole ledger, filenames included) | 7.9% | 5.6% | **double-counted · self-observation contamination** |
+| Pre-verdict sessions only, filenames included | 10.9% | 7.7% | self-observation contamination |
+| Pre-verdict sessions only, phrases only | 10.2% | 7.0% | contamination removed, but includes unfinished sessions |
+| **event_log rows (the contract)** | **0%** | **0%** | completed sessions only — the value the contract measures |
 
-**계약이 재는 값은 마지막 줄뿐이다.** §2 는 "SessionEnd 에 계수한다"이고, 임의 시점 스냅샷은
-그 계약이 아니다. 앞의 세 줄은 세션이 끝나기 전의 중간 상태이며, 그중 어느 것도 09-14 판정에
-들어가지 않는다.
+**Only the last row is what the contract measures.** §2 says "counted at SessionEnd", and a snapshot at an arbitrary moment is not that contract. The first three rows are mid-states before sessions end, and none of them enters the 09-14 verdict.
 
-**그래서 09-14 에 실제로 갈리는 것**: 지금 살아 있는 세션들이 그날까지 종료되는지다. 종료되면
-그 처치값이 원장에서 event_log 로 옮겨가고 판정이 성립한다. 안 되면 §2 의 계측 결함 조항이
-아니라 **LEDGER_MAX_AGE_DAYS(14일) 안에 끝나지 않는 세션이 이 트래픽의 정상**이라는 뜻이고,
-그것은 하한이 아니라 **계기의 관측창이 대상보다 짧다**는 D4 와 같은 결함 계열이다.
+**So what actually decides on 09-14**: whether the sessions alive now end by that day. If they do, their treatment values move from the ledger to event_log and the verdict stands. If not, that is not §2's instrumentation-fault clause but a sign that **sessions not finishing inside LEDGER_MAX_AGE_DAYS (14 days) are normal for this traffic** — the same defect family as D4, **the instrument's observation window is shorter than its subject**, not the floor.
 
-### D7. 창 중간 기준선 — 판정 유보, 그리고 분모가 사람이 아니었다는 것 (2026-09-07)
+### D7. Mid-window baseline — withheld, and the denominator was not people (2026-09-07)
 
-> **[2026-09-07 정정 — D8 참조] 아래 수치는 무효다.** 모집단이 이중계수였고, 처치의 82%가
-> 코퍼스를 점검하던 세션의 파일명 매치였다. 판정 근거로 인용하지 말 것. 서술은 무엇을
-> 어떻게 잘못 셌는지 남기려고 보존한다.
+> **[2026-09-07 correction — see D8] The figures below are void.** The population was double-counted, and 82% of the treatment was filename matches from sessions inspecting the corpus. Do not cite as verdict grounds. The narrative is preserved to record what was miscounted and how.
 
-창 마감 7일 전에 §2 계약을 **그 계약이 정한 방식 그대로** 돌렸다고 썼지만 그렇지 않았다. 아래 숫자는 사전 등록된
-임계에 대입하기 위한 것이지 결론이 아니다 — 판정일은 09-14 이며, 이 기록은 그날 숫자가
-움직였는지 아닌지를 볼 수 있게 만들려고 남긴다.
+Seven days before the close, this claimed to have run the §2 contract **exactly the way the contract defines it**, and it had not. The numbers below are for plugging into the pre-registered thresholds, not conclusions — the verdict date is 09-14, and this record is kept so that day can show whether the numbers moved.
 
-**계기 점검이 먼저다.** §2 의 "계측 자체 점검" 조항대로 같은 transcript 를 **다른 세션의**
-원장 hit 로 채점했다: `11/6,681 = 0.2%`. 처치군(per-hit 3.8%)의 1/19 이므로 계기는 살아 있다.
-이 값이 처치군 이상이었다면 아래 숫자는 전부 폐기해야 한다.
+**Instrument check first.** Per §2's "instrument self-check" clause, the same transcripts were scored against **other sessions'** ledger hits: `11/6,681 = 0.2%`. That is 1/19 of the treatment (per-hit 3.8%), so the instrument is alive. Had it been at or above the treatment, every number below would have to be discarded.
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 표본 | 사람 세션 43 · 주입된 프롬프트 2,337 |
-| 처치군 (per-prompt) | **185/2,337 = 7.9%** |
-| 대조군 (per-prompt) | **131/2,337 = 5.6%** |
-| 격차 | **+2.3pp** · 배수 **1.41×** |
+| Sample | 43 human sessions · 2,337 injected prompts |
+| Treatment (per-prompt) | **185/2,337 = 7.9%** |
+| Control (per-prompt) | **131/2,337 = 5.6%** |
+| Gap | **+2.3pp** · ratio **1.41×** |
 
-**사전 등록 임계 대입**: 작동은 ≥2배 **AND** ≥3pp — 둘 다 미달. 비작동은 ≤ 대조군+1pp(6.6%)
-— 7.9% 는 그 위. 따라서 **판정 유보**이며 §2 대로 창 1회 연장 대상이다. 어느 쪽으로도 읽지
-않는다는 것이 이 칸의 내용이다.
+**Against the pre-registered thresholds**: works needs ≥2× **AND** ≥3pp — both unmet. Not working is ≤ control+1pp (6.6%) — 7.9% is above that. So **withheld**, and per §2 subject to a single extension. Reading it neither way is the content of this cell.
 
-**탐지 임계를 느슨하게 해도 답이 바뀌지 않는다.** 지문 창을 8→3 낱말로 줄이며 처치·대조를
-같은 방식으로 다시 채점했다.
+**Loosening the detection threshold does not change the answer.** The fingerprint window was shrunk from 8 to 3 words, rescoring treatment and control the same way.
 
-| 창 | 처치군 | 대조군 | 격차 |
+| Window | Treatment | Control | Gap |
 |---|---|---|---|
 | 8 | 3.5% | 3.3% | 0.2pp |
 | 6 | 5.2% | 4.5% | 0.8pp |
@@ -414,220 +290,134 @@ D7 을 쓴 날 같은 자리에서 세 번 틀렸다. 판정일 전에 잡혔으
 | 4 | 10.9% | 9.3% | 1.5pp |
 | 3 | 22.9% | 21.6% | 1.4pp |
 
-느슨하게 해서 얻는 것은 처치군만이 아니라 대조군도 같이 얻는다. 격차는 내내 1pp 안팎이므로
-**8 낱말은 바꿀 이유가 없다** — 임계를 낮춰 처치군 숫자를 키우는 것은 우연율을 키우는 것과
-구분되지 않는다.
+What loosening gains is not only treatment but control alongside it. The gap stays around 1pp throughout, so **there is no reason to change 8 words** — lowering the threshold to inflate the treatment number is indistinguishable from inflating the chance rate.
 
-**커버리지 조항이 걸릴 뻔했고, 걸리지 않는 이유가 분모에 있다.** §2 는 커버리지가 1/2 미만이면
-판정이 아니라 계측 조사로 전환하라고 한다. 창 안 증류 세션 257개 기준 커버리지는 36/257 = 14%
-로 그 선 아래다. 그런데 257개를 전수 분류하니 **215개가 자동 보안리뷰 실행**이었다(사람 39,
-판별불가 3). 그것들은 사람이 문제를 푼 세션이 아니라 도구가 스스로를 돌린 기록이고, 주입을
-받아도 쓸 일이 구조적으로 없다.
+**The coverage clause nearly triggered, and the reason it does not is the denominator.** §2 says below 1/2 coverage it is an instrumentation investigation, not a verdict. Against the 257 sessions distilled inside the window, coverage is 36/257 = 14%, below that line. But classifying all 257 showed **215 were automated security-review runs** (39 human, 3 undeterminable). Those are not a person solving a problem but a tool running itself, and structurally there is nothing to use an injection for.
 
-| 분모 | 커버리지 | 계약상 처리 |
+| Denominator | Coverage | Contract handling |
 |---|---|---|
-| 증류된 모든 세션 257 | 36/257 = 14% | 계측 조사 |
-| **사람 세션 39** | **35/39 = 90%** | 판정 가능 |
+| All distilled sessions, 257 | 36/257 = 14% | instrumentation investigation |
+| **Human sessions, 39** | **35/39 = 90%** | judgeable |
 
-계측이 샌 것이 아니라 **분모가 사람이 아니었다.** 같은 발견으로 `#286` 이 자동 실행을 증류
-경계 밖으로 냈다(창 안 노트 183개 중 143개, 78%가 그 출처였다). 즉 이 기준선은 **코퍼스의
-5분의 4가 기계 기록이던 시절에 측정된 값**이고, 09-14 판정은 그것이 걷힌 뒤의 값이다. 둘이
-같으면 코퍼스 구성은 이 채널의 효과와 무관하다는 뜻이고, 다르면 그 차이가 `#286` 의 효과다.
+The instrumentation did not leak; **the denominator was not people.** The same finding led `#286` to move automated runs outside the distillation boundary (143 of 183 notes inside the window, 78%, came from that source). So this baseline was **measured when four-fifths of the corpus was machine records**, and the 09-14 verdict is the value after that is cleared. If the two match, corpus composition is irrelevant to this channel's effect; if they differ, the difference is the effect of `#286`.
 
-### D1. 측정 창 리셋 — 계측 결함 (2026-08-31, 표본 0/0 시점에 기록)
+### D1. Measurement window reset — instrumentation fault (2026-08-31, recorded at sample 0/0)
 
-**최초 창 08-26→09-09 은 측정 기간이 아니라 계기 고장 기간이었다.** 결함 2건, 둘 다 실측:
+**The first window, 08-26→09-09, was not a measurement period but an instrument-failure period.** Two defects, both measured:
 
-1. **계약이 명명한 양이 존재하지 않았다.** §2 는 지표를 *per-prompt* 처치군 대 *per-prompt*
-   대조군으로 등록했는데, 계측은 대조군을 **hit 단위로만** 셌다(`used_control_prompts` 부재).
-   같은 원장에서 per-prompt 는 4.8배, per-hit 는 1.2배 — 거친 근사가 아니라 **다른 비율**이고
-   임계(≥2배)가 정반대로 읽힌다. `#242` 로 오늘 배포. **그 이전 이벤트는 전부 사용 불가.**
-2. **표본이 2배로 부풀어 있었다.** recall 훅이 같은 파일을 두 경로 표기로 이중 등록되어
-   프롬프트마다 원장에 두 줄을 썼다(서명 508개 중 451개가 0.14초 간격 완전중복). 비율은
-   살아남지만 `total_prompts` 는 2배가 되므로, 하한 200 이 **실제 100 프롬프트에서** 충족된다.
-   `#245` 로 수정, `#246` 으로 재발 게이트, 기존 원장 중복 제거(965→510행).
+1. **The quantity the contract named did not exist.** §2 registered the metric as *per-prompt* treatment vs *per-prompt* control, but the instrumentation counted the control **per hit only** (`used_control_prompts` absent). On the same ledger, per-prompt is 4.8× and per-hit is 1.2× — not a rough approximation but a **different ratio**, and the threshold (≥2×) reads the opposite way. Deployed today as `#242`. **Every earlier event is unusable.**
+2. **The sample was inflated twofold.** The recall hook was registered twice under two path spellings of the same file and wrote two ledger lines per prompt (451 of 508 signatures were exact duplicates 0.14s apart). The rate survives but `total_prompts` doubles, so the floor of 200 is met at **100 real prompts**. Fixed in `#245`, recurrence gate in `#246`, existing ledger de-duplicated (965→510 rows).
 
-**이 리셋이 사후 조작이 아닌 이유는 타이밍뿐이다.** 새 계기 아래 usable sample 은 이 문단을
-쓰는 시점에 **세션 0 · 프롬프트 0** 이다. 데이터가 존재하기 전의 리셋은 정의상 결과를 보고
-고른 것일 수 없다. 09-14 에 부분 숫자를 본 뒤 내리는 어떤 조정도 이 방어를 갖지 못한다.
+**The only reason this reset is not post-hoc manipulation is timing.** The usable sample under the new instrument is **0 sessions · 0 prompts** at the time of writing this paragraph. A reset before data exists cannot, by definition, have been chosen after seeing a result. No adjustment made after seeing partial numbers on 09-14 has this defence.
 
-**바뀌지 않은 것**: 지표, 표본 하한(20/200), 작동·비작동·유보 임계, 계측 결함 조항, 자체 점검.
+**Unchanged**: the metric, the sample floor (20/200), the works/not-working/withheld thresholds, the instrumentation-fault clause, the self-check.
 
-**격리 기록**: 구계기 원장에서 손으로 계산한 예비값(12세션, 처치 2.34pp 대 대조 0.49pp,
-4.8배·격차 1.85pp)은 **판정 입력이 아니다.** 숨기면 나중에 발견될 때 더 나쁘므로 남기되,
-새 창의 어떤 판정에도 인용되지 않는다.
+**Quarantine record**: the preliminary figures hand-computed from the old-instrument ledger (12 sessions, treatment 2.34pp vs control 0.49pp, 4.8× · gap 1.85pp) are **not verdict input.** Hiding them would be worse when found later, so they stay, but no verdict in the new window cites them.
 
-**09-14 에도 하한 미달이면** 그것은 리셋의 실패가 아니라 **하한이 이 트래픽에 비현실적**이라는
-증거다. 그때 하한을 내리는 것은 데이터를 본 뒤의 개정이며, 그렇게 기록해야 한다.
+**If the floor is still unmet on 09-14**, that is not a failure of the reset but evidence that **the floor is unrealistic for this traffic**. Lowering the floor then is a revision after seeing data, and must be recorded as such.
 
-### D4. 표본 커버리지 결함 — 원장이 세션보다 먼저 죽는다 (2026-09-02 기록)
+### D4. Sample coverage defect — the ledger dies before the session does (recorded 2026-09-02)
 
-**실측 (라이브, psql + 원장 직접):**
+**Measured (live, psql + the ledger directly):**
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 창 안에서 증류된 세션 | **93** |
-| 그중 `injection_uptake` 이 기록된 세션 | **11 (11.8%)** |
-| 주입 원장의 세션 수명 | 중앙값 **48h** · 최대 **177h** |
-| 3일(72h) 만료를 넘긴 세션 | **22개 중 10개** |
-| 그 10개 세션이 보유한 원장 행 | **875 / 1125 (78%)** |
+| Sessions distilled inside the window | **93** |
+| Of those, with an `injection_uptake` row | **11 (11.8%)** |
+| Session lifetime in the injection ledger | median **48h** · max **177h** |
+| Sessions past the 3-day (72h) expiry | **10 of 22** |
+| Ledger rows held by those 10 sessions | **875 / 1,125 (78%)** |
 
-**기구**: `uptake_core.LEDGER_MAX_AGE_DAYS = 3`. `log_uptake_event` 는 원장 행이 없으면
-`if not records: return` 으로 **조용히 아무것도 남기지 않는다**. 이 레포의 세션은 며칠씩 열려
-있으므로, 세션이 끝나기 전에 자기 증거가 만료된다.
+**Mechanism**: `uptake_core.LEDGER_MAX_AGE_DAYS = 3`. When a session has no ledger rows, `log_uptake_event` **quietly leaves nothing** via `if not records: return`. Sessions in this repo stay open for days, so their evidence expires before they end.
 
-**왜 이것이 단순 결측이 아니라 편향인가**: 탈락 방향이 무작위가 아니라 **세션 길이**다. 긴
-세션은 주입을 가장 많이 받고 업테이크 기회도 가장 많다. 즉 측정은 신호가 있을 법한 표본을
-체계적으로 버리고 짧은 세션만 남긴다. 원장 행 기준 **78%** 가 그렇게 사라진다.
+**Why this is bias, not simple missingness**: the drop-out direction is not random but **session length**. Long sessions receive the most injections and have the most uptake opportunity. The measurement systematically discards the samples likely to carry signal and keeps only short sessions. By ledger rows, **78%** vanish that way.
 
-**D1 과 다른 점을 숨기지 않는다.** D1 은 usable sample 0/0 시점의 리셋이라 "결과를 보고 골랐을
-수 없다"는 정의상의 방어를 가졌다. 이 결정은 그 방어가 **없다**. 이 문단을 쓰는 시점에 보이는
-것은: 관측 도구가 화면에 띄운 원장 200행 중 채점 확정 61건에서 에코 0건, 세션 11/20, 프롬프트
-108/200.
+**The difference from D1 is not hidden.** D1 was a reset at usable sample 0/0 and had the definitional defence "could not have been chosen after seeing results". This decision **does not** have that defence. What is visible at the time of writing: of the 200 ledger rows the observation tool showed, 61 confirmed scorings with 0 echoes, sessions 11/20, prompts 108/200.
 
-**이 문장의 "에코 0"은 모집단을 잘못 인용한 것이다 (2026-09-02 정정).** 그 61건은 관측 도구가
-띄운 **원장 행**의 부분집합 — 최근 3일, 대부분 아직 끝나지 않은 세션 — 이고, 판정이 읽는 모집단이
-아니다. 판정 계열(`injection_uptake` 이벤트)을 전부 세면 **106건 · used_prompts 11 / total 770**
-으로 에코는 **0이 아니다**(수리 이전 11/748, 수리 이후 0/22). 대조군은 전 구간 0/770 이다.
+**That sentence's "0 echoes" quoted the wrong population (corrected 2026-09-02).** Those 61 are a subset of the **ledger rows** the observation tool showed — the last 3 days, mostly sessions not yet ended — not the population the verdict reads. Counting the whole verdict series (`injection_uptake` events): **106 events · used_prompts 11 / total 770**, so echoes are **not zero** (11/748 before the repair, 0/22 after). The control is 0/770 throughout.
 
-정정해도 D4 의 결론은 바뀌지 않는다 — 커버리지 11.8% 도, 수리 결정도, (A) 선택도 그 숫자에
-기대지 않는다. 그러나 **"에코 0"은 이 문서가 근거로 삼을 수 있는 사실이 아니었고**, 그것을 여기
-적어 둔다. 표본을 모집단으로 인용한 사례가 이 창에서만 네 번째다.
-그 숫자를 본 뒤의 판단이다.
+The correction does not change D4's conclusion — neither the 11.8% coverage, nor the repair decision, nor the choice of (A) rests on that number. But **"0 echoes" was not a fact this document could rest on**, and that is recorded here. It was the fourth time in this window alone that a sample was quoted as a population.
+This is a judgement after seeing that number.
 
-**그래서 바꾸는 것과 바꾸지 않는 것을 분리한다.**
-- **바꾼다 (계기 수리)**: 원장 만료를 세션 수명보다 길게 둔다. 주입되는 내용·빈도·순위는 한
-  글자도 바뀌지 않으므로 §5-R6 의 창중 동결과 충돌하지 않는다. 고장난 계기를 계속 돌리는 것은
-  유효한 연장도 유효한 리셋도 만들지 못한다.
-- **바꾸지 않는다**: 지표, 표본 하한(20/200), 작동·비작동·유보 임계(2배·3pp·1pp). 지금 이
-  숫자들을 만지는 것은 0.514 와 같은 종류의 사후조작이다.
+**So what changes and what does not are separated.**
+- **Changes (instrument repair)**: the ledger expiry is set longer than a session's lifetime. Injected content, frequency and ranking do not change by a character, so this does not conflict with §5-R6's in-window freeze. Keeping a broken instrument running makes neither a valid extension nor a valid reset.
+- **Does not change**: the metric, the sample floor (20/200), the works/not-working/withheld thresholds (2×·3pp·1pp). Touching those numbers now is the same kind of post-hoc manipulation as 0.514.
 
-**오너 결정 (2026-09-02): (A) 창 유지 + 분리 집계.** 창 마감은 09-14 그대로다. 수리 전/후 표본을
-나눠 보고하고, **판정은 수리 이후 표본만 읽는다.** 수리 이전 표본을 지우지는 않는다 — 실제로 있었던
-세션이고, 감추는 것은 인용하는 것과 같은 종류의 조작이다. (B) 리셋을 고르지 않은 이유는 그것이
-결과를 본 뒤의 리셋이라 D1 의 방어를 갖지 못하기 때문이고, (A) 는 그 방어를 흉내내지 않으면서
-하한도 지킨다.
+**Owner decision (2026-09-02): (A) keep the window + split aggregation.** The window close stays 09-14. Pre- and post-repair samples are reported separately, and **the verdict reads only the post-repair sample.** The pre-repair sample is not deleted — those sessions really happened, and hiding them is the same kind of manipulation as citing them. (B) reset was not chosen because it would be a reset after seeing results and would not have D1's defence; (A) keeps the floor without imitating that defence.
 
-**경계는 고르지 않는다 — 수리 커밋의 시각이다.** `verdict_core.LEDGER_REPAIR_AT =
-2026-09-02T00:45:38+00:00` (커밋 `1f45fec`). 누군가 나중에 밀거나 당길 수 있는 날짜는 경계가 아니다.
-행은 문자열이 아니라 **시각으로 파싱해 비교**하며(오프셋이 다른 행이 조용히 반대편으로 넘어간다),
-파싱되지 않는 행은 **판정이 읽지 않는 쪽(수리 이전)** 으로 센다.
+**The boundary is not chosen — it is the repair commit's instant.** `verdict_core.LEDGER_REPAIR_AT = 2026-09-02T00:45:38+00:00` (commit `1f45fec`). A date somebody can later push or pull is not a boundary. Rows are **parsed as instants and compared**, not as strings (a row with a different offset silently crosses to the other side), and a row that does not parse counts toward **the side the verdict does not read (pre-repair)**.
 
-**이 결정의 즉각적 결과**: 판정 표본이 0/0 으로 재시작한다(수리 이전 세션 11 · 프롬프트 108 은
-분리 보고). 남은 13일 동안 하한(20/200)을 채워야 하며, 못 채우면 그것은 §8 D1 이 말한 대로
-"하한이 이 트래픽에 비현실적"이라는 증거이지 리셋의 실패가 아니다.
+**Immediate consequence of this decision**: the verdict sample restarts at 0/0 (the pre-repair 11 sessions · 108 prompts are reported separately). The floor (20/200) has to be filled in the remaining 13 days, and if it is not, that is — as §8 D1 says — evidence that "the floor is unrealistic for this traffic", not a failure of the reset.
 
-### Q8 / D5. 수요 순간의 표면 — 채택: **PostToolUse 앵커 트리거** (2026-09-02)
+### Q8 / D5. The moment-of-demand surface — adopted: **PostToolUse anchor trigger** (2026-09-02)
 
-§5-R6 이 "§8 Q8 에 올린다"고 참조했으나 **Q8 은 존재한 적이 없었다** — 참조 1건, 정의 0건. 이
-항목이 그 참조를 갚는다.
+§5-R6 referred to "raised in §8 Q8", but **Q8 never existed** — one reference, zero definitions. This item pays that reference.
 
-**결정: 과업 범위의 관측 단위는 파일이다.**
+**Decision: the unit of observation for task scope is the file.**
 
-| 신호 | 판별력 | 근거 |
+| Signal | Discriminative power | Grounds |
 |---|---|---|
-| 프롬프트(현행) | **실패** | 거리 질량 0.40–0.56, 정밀도 0.319 — 거리로는 판정 불능이 실측됨 |
-| 오류("막힘") | **측정 불가** | 어떤 로그에도 정의·계측된 바 없다. 반복 서명 상위가 에이전트 자신의 heredoc 노이즈(`Exit code N`) |
-| **파일** | **유일하게 상한이 측정됨** | 30일 코드 편집 4,190회 중 971(23%)이 이전 세션이 만진 파일, 그중 **81%(편집 가중)가 vault 노트에 언급** → 상한 ≈ 19% |
+| Prompt (current) | **fails** | distance mass 0.40–0.56, precision 0.319 — measured undecidable by distance |
+| Error ("stuck") | **unmeasurable** | defined and instrumented in no log. The top recurring signatures are the agent's own heredoc noise (`Exit code N`) |
+| **File** | **the only one with a measured ceiling** | of 4,190 code edits in 30 days, 971 (23%) touched a file a previous session had touched, and **81% of those (edit-weighted) are mentioned in a vault note** → ceiling ≈ 19% |
 
-**1인칭 증거**: `SessionStart` claim 카드는 이번 세션에도 에이전트에게 도착했고 **하나도 쓰이지
-않았다**(`transcript.py update-allowlist`, `claude_clamp_default new-value` 등). 전부 "이 프로젝트에서
-있었던 일"이고 "지금 만질 파일"이 아니었다. 이는 claim 이 나쁘다는 증거가 아니라 **배달 주소가
-프로젝트여서 틀렸다**는 증거다. 다만 1세션 일화이므로 처분은 섀도 로그로 재확인 후.
+**First-person evidence**: the `SessionStart` claim cards reached the agent in this session too and **none was used** (`transcript.py update-allowlist`, `claude_clamp_default new-value`, etc.). All were "things that happened in this project" and none was "the file I am about to touch". That is not evidence the claims are bad but that **the delivery address was wrong because it was the project**. A one-session anecdote, though, so disposal only after the shadow log confirms it.
 
-**창 중에는 섀도만, 주입은 09-15부터.** PostToolUse 는 표면으로는 직교하지만 **주입하면 transcript
-가 바뀌어 §2 처치군의 지문 에코를 오염시킨다.** 창 중에는 로그만 남기고 주입 0.
+**Shadow only during the window; injection from 09-15.** PostToolUse is orthogonal as a surface, but **injecting changes the transcript and contaminates the §2 treatment's fingerprint echoes.** During the window: log only, inject 0.
 
-**반증 조건 (사전 등록)**: 09-15→09-29 창에서 ① 앵커 적중률(재방문 편집 중 앵커 claim 이 존재한
-비율)이 **10% 미만**이거나 ② 앵커 주입의 업테이크가 무작위 동일-프로젝트 claim 대조군의 **2배 미만**
-또는 격차 **3pp 미만**이면, 앵커 트리거를 비작동 선언하고 표면을 제거한다. 임계는 §2 와 동일값
-재사용이며 창 중 변경 금지.
+**Falsification conditions (pre-registered)**: in the 09-15→09-29 window, if ① the anchor hit rate (share of revisit edits for which an anchor claim existed) is **under 10%**, or ② uptake of anchor injections is **under 2×** a random same-project-claim control or the gap is **under 3pp**, the anchor trigger is declared not working and the surface is removed. The thresholds reuse the §2 values and do not change during the window.
 
-**기각된 후보**: 광고판+pull — pull 수요는 이미 죽어 있다(MCP 툴 22개 중 20개가 주 1~2회, 능동 회수
-최근 3건이 전부 자기진단). 막힘 트리거 — 상한을 측정할 수 없어 반증 불가 설계다. 앵커 검증 후 2차
-후보로 남긴다.
+**Rejected candidates**: billboard + pull — pull demand is already dead (20 of 22 MCP tools at 1–2 uses per week, the last 3 active recalls all self-diagnosis). Stuck trigger — its ceiling cannot be measured, so the design is unfalsifiable. Kept as a second candidate after the anchor is validated.
 
-### D6. 세션 내 재주입 — 34%는 노이즈가 아니라 중복이다 (2026-09-02)
+### D6. In-session re-injection — 34% is not noise but duplication (2026-09-02)
 
-주입 hit 3,795건이 고유 노트 2,521건으로 접힌다. 한 노트가 한 세션에서 **최대 25회** 재주입된다.
-에이전트가 이미 컨텍스트에 들고 있는 텍스트라 정밀도 논쟁 밖의 **순수 중복**이다.
+3,795 injected hits fold to 2,521 unique notes. One note is re-injected up to **25 times** in one session. It is text the agent already holds in context, so it is **pure duplication** outside the precision debate.
 
-**dedup 은 업테이크 원장을 SSOT 로 읽어 shared core 에서 수행한다.** 어댑터별 상태파일은 kimi 사건의
-재발 구조이고, 엔진에 두면 서버가 세션 상태를 갖게 되며(로컬 serve 코퍼스 이중화 전례) 대조군
-측정을 오염시킨다. **원장 읽기 실패 시 주입을 유지한다** — 재주입이 누락보다 싸고, 원장은 세션보다
-먼저 죽을 수 있다(§8 D4). 착수는 창 종료(09-26) 이후, §5-R6 파생 1순위.
+**Dedup reads the uptake ledger as the source of truth and runs in the shared core.** Per-adapter state files are the structure that reproduced the kimi incident; putting it in the engine gives the server session state (precedent: the local-serve corpus doubling) and contaminates the control measurement. **If the ledger cannot be read, the injection is kept** — re-injection is cheaper than omission, and the ledger can die before the session does (§8 D4). Start after the window closes (09-26), first in §5-R6's derived list.
 
-### D2. R2 앵커 설계 (§5-R2 의 Q5 해소)
+### D2. R2 anchor design (resolving Q5 of §5-R2)
 
-**채택: 코드 앵커 + `supersedes` 프론트매터. 정관 축 레지스트리와 TTL/감쇠는 기각.**
+**Adopted: code anchors + `supersedes` frontmatter. Canonical-axis registry and TTL/decay rejected.**
 
-- 실측된 오염(`threshold-value 0.54`, eval `6/6`)은 전부 **코드에 앵커 가능한 사실**이다.
-- TTL/감쇠는 나이를 진실의 대리변수로 쓴다 — 맞는 옛 주장을 강등하고 틀린 새 주장을 보존하므로
-  root cause 회피다. 이 레포가 방어 패턴을 기각하는 것과 같은 이유로 기각.
-- 정관 축 레지스트리는 PRD 가 경고하는 선제 분류학이다. rule-of-three 발화 전까지 보류.
-- `supersedes` 는 남긴다: 앵커가 불가능한 **대화 결정**을 봉인할 유일한 경로다.
-- 따라서 **code_index 는 R2 의 파생 인프라로 확정된다**(§5.7 의 조건 충족).
+- Every measured contamination (`threshold-value 0.54`, eval `6/6`) is a **fact anchorable to code**.
+- TTL/decay uses age as a proxy for truth — it demotes correct old claims and preserves wrong new ones, so it dodges the root cause. Rejected for the same reason this repo rejects defensive patterns.
+- The canonical-axis registry is the premature taxonomy the PRD warns against. Held until the rule of three fires.
+- `supersedes` stays: it is the only path to seal **conversational decisions** that cannot be anchored.
+- Therefore **code_index is confirmed as R2's derived infrastructure** (§5.7's condition is met).
 
-**공급 측이 이 설계의 급소다.** `superseded_by` 가 1342 노트 중 **0건** 쓰인 것은 이미 측정된
-증거다 — *작성자(로컬 LLM)가 emit 해야 작동하는 필드는 emit 되지 않는다.* 그러므로 앵커는
-LLM 출력이 아니라 **증류 후 결정론적 리졸버**가 붙인다(claim subject → code_index 해석 → 앵커
-자동 부착). 소비 측(필터·마커)만 튼튼하고 공급 측을 LLM 에 맡기면 첫 커밋 전체가 coverage ≈ 0
-인 죽은 코드가 된다. 첫 커밋에 **채택 카운터**가 들어가는 이유가 이것이다.
+**The supply side is this design's weak point.** `superseded_by` used in **0 of 1,342 notes** is already measured evidence — *a field that only works if the author (a local LLM) emits it does not get emitted.* So anchors are attached not by LLM output but by a **deterministic post-distillation resolver** (claim subject → code_index lookup → automatic anchor). If only the consumer side (filters, markers) is solid and the supply side is left to the LLM, the entire first commit becomes dead code at coverage ≈ 0. That is why the first commit includes an **adoption counter**.
 
-**리졸버의 입력은 claim subject 가 아니라 노트 본문이다 (2026-09-02 실측 정정).** 원료가 어디
-있는지 재보니:
+**The resolver's input is the note body, not the claim subject (corrected by 2026-09-02 measurement).** Measuring where the raw material is:
 
-| 원료 | 전체 | 최근 창(197노트) |
+| Raw material | All | Recent window (197 notes) |
 |---|---|---|
-| claim value 에 `path:line` | **12 / 8,003 (0.15%)** | — |
-| claim subject 가 코드 파일 | 220 (2.7%) | — |
-| **노트 본문**에 `path:line` | 90노트 (5.7%) | **31 (16%)** |
-| **노트 본문**에 `dir/file.ext` | 293노트 (18.5%) | **66 (34%)** |
+| `path:line` in claim value | **12 / 8,003 (0.15%)** | — |
+| claim subject is a code file | 220 (2.7%) | — |
+| `path:line` in **note body** | 90 notes (5.7%) | **31 (16%)** |
+| `dir/file.ext` in **note body** | 293 notes (18.5%) | **66 (34%)** |
 
-즉 원료는 **노트 본문에 있고 claim 행에는 없다.** subject→code_index 리졸버는 커버리지 2.7% 로
-죽는다. claim 은 `source_path` 로 노트에 이미 묶여 있으므로 본문에서 뽑아 **상속**시킨다.
+So the raw material is **in the note body and not in the claim rows.** A subject→code_index resolver dies at 2.7% coverage. Claims are already tied to notes by `source_path`, so extract from the body and **inherit**.
 
-**추출은 2단이다**: T1 `path:line` 정규식(최근 창 16%, 상승 중) → T2 경로+백틱 심볼을 code_index
-심볼의 줄범위로 승격(34%). 앵커는 `project:path[:span]` 문자열로 **검증 없이 저장 가능**하고,
-code_index 등재 레포만 존재검증·해시 계층을 얹는다 — 경로 노트의 최대 프로젝트가
-`oh-my-codereview`(88건)인데 **미등재**이기 때문이다.
+**Extraction has two tiers**: T1 `path:line` regex (recent window 16%, rising) → T2 path + backtick symbol promoted to a code_index symbol's line span (34%). An anchor is a `project:path[:span]` string **storable without verification**, and only repos registered in code_index get the existence-check and hash layers on top — because the biggest project in path notes is `oh-my-codereview` (88) and it is **not registered**.
 
-**stale 판정 1차는 줄범위 해시가 아니라 심볼 스팬 해시다.** 줄범위 해시는 D2 가 자인했듯 *이동*에도
-깨진다. code_index 심볼의 줄범위를 재조회해 그 본문을 해싱하면 상하 삽입·이동에 강하고, 심볼
-미해석 앵커만 줄범위 해시로 폴백한다. 스팬이 **내용 동일한 채 이동만 했으면 앵커를 re-pin 하고
-stale 로 치지 않는다.**
+**First-pass staleness is a symbol-span hash, not a line-range hash.** A line-range hash breaks on *moves* too, as D2 admitted. Re-querying the code_index symbol's line span and hashing that body is robust to insertions above/below and to moves; only symbol-unresolved anchors fall back to the line-range hash. If the span **moved with identical content, the anchor is re-pinned and not counted stale.**
 
-**앵커는 축 붕괴를 우회하지만 대체하지는 않는다.** `(subject,predicate)` 84% 싱글턴 문제를 고치는
-게 아니라 새 조인 축을 더한다 — "지금 이 파일" 역조회는 predicate 정규화 없이 성립하고, supersede
-매칭도 `같은 앵커 + 같은 kind` 로 predicate 를 안 거친다. 다만 상한이 ~34% 이므로 나머지 66% 의
-질의축은 여전히 `kind`(7종 통제 어휘) + 임베딩뿐이다. 소비 질의 형태는 **앵커 필터(있으면) → kind
-필터 → 임베딩 top-k**, predicate 는 표시용 문자열로 강등한다.
+**Anchors route around the axis collapse but do not replace it.** They do not fix the 84% singleton problem on `(subject, predicate)`; they add a new join axis — the "this file, now" reverse lookup works without predicate normalisation, and supersede matching goes through `same anchor + same kind` without the predicate. But the ceiling is ~34%, so for the other 66% the query axes are still only `kind` (7-value controlled vocabulary) + embeddings. The consumption query shape is **anchor filter (if any) → kind filter → embedding top-k**, with predicate demoted to a display string.
 
-**첫 커밋에 들어갈 것**: 스키마 3필드(`anchor`, `stale_at`+사유, `era`), 노트 본문 기반 T1/T2
-리졸버, sync 시 심볼 스팬 해시 재계산 → `stale_at` 마킹(이동만이면 re-pin), `current_claims` 의
-`stale_at IS NULL` 기본 필터 + `include_stale`, 레거시 era 마이그레이션(마커만), 앵커·supersedes
-**채택 카운터**.
+**What goes into the first commit**: 3 schema fields (`anchor`, `stale_at` + reason, `era`), the note-body T1/T2 resolver, symbol-span hash recomputation on sync → `stale_at` marking (re-pin if moved only), a `stale_at IS NULL` default filter on `current_claims` + `include_stale`, the legacy era migration (marker only), and the anchor/supersedes **adoption counter**.
 
-**들어가면 안 되는 것**: 정관 축 레지스트리, TTL/감쇠, stale 자동 복구·재증류, `confidence` 값
-재작성, 행 삭제, code_index 신규 언어 확장.
+**What must not go in**: the canonical-axis registry, TTL/decay, automatic stale recovery or re-distillation, rewriting `confidence` values, row deletion, new-language extension of code_index.
 
-**틀렸을 때의 신호**: 대규모 리팩터 직후 `stale_at` 스파이크(줄 해시는 *이동*에도 깨진다) →
-에이전트가 습관적으로 `include_stale` 을 켜면 필터가 무의미해진다. 측정: 리팩터 커밋당 stale
-전환 수 대 실제 무효화 수.
+**Signal that it is wrong**: a `stale_at` spike right after a large refactor (line hashes break on *moves* too) → agents habitually turning on `include_stale`, which makes the filter meaningless. Measure: stale transitions per refactor commit vs actual invalidations.
 
-### D3. 레거시 4395 `certain` claims
+### D3. Legacy 4,395 `certain` claims
 
-**채택: `era: pre-anchor` 마커 + 표시 시 상한. `confidence` 값은 고쳐 쓰지 않는다.**
+**Adopted: an `era: pre-anchor` marker + a cap at display time. `confidence` values are not rewritten.**
 
-값을 재작성하면 데이터 변조이고 감사가 불가능하다. 대신 시대 마커를 붙이고 `claims` 렌더링에서
-`certain (legacy, unverifiable)` 로 캡핑한다 — `#218` 이 조용한 삭제 대신 사유를 가진 마커를
-남긴 것과 같은 형태이고, 되돌릴 수 있으며, 마이그레이션 1회로 끝난다. "감쇠 라벨" 은 D2 가
-기각한 TTL 사고방식의 재수입이라 함께 기각.
+Rewriting values is data tampering and cannot be audited. Instead an era marker is attached and the `claims` rendering caps it as `certain (legacy, unverifiable)` — the same shape as `#218` leaving a marker with a reason instead of silent deletion; reversible, and done in one migration. The "decay label" is a re-import of the TTL thinking D2 rejected, so it is rejected with it.
 
-**틀렸을 때의 신호**: 레거시가 실은 대부분 참이었다면 브리핑이 아는 사실마다 헤징하고 에이전트가
-이미 아는 것을 재도출한다 — recall 응답의 재질문율 상승으로 보인다.
+**Signal that it is wrong**: if the legacy was in fact mostly true, the briefing hedges on every fact it knows and the agent re-derives what it already knows — visible as a rising re-ask rate in recall responses.
 
-### 일정
+### Schedule
 
-D2·D3 의 구현 착수는 **창 종료(09-26) 이후**다. 증류·claim 표면을 바꾸면 주입될 노트의 내용이
-바뀌고, 그것은 §2 측정과 직교하지 않는다(§5-R3 과 같은 이유).
+Implementation of D2 and D3 starts **after the window closes (09-26)**. Changing the distillation or claim surface changes the content of the notes that get injected, and that is not orthogonal to the §2 measurement (same reason as §5-R3).
