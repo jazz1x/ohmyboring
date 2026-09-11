@@ -22,7 +22,7 @@ use crate::serve::{
     SearchHit, SearchResp, StalledReq, SyncResp, SyncState, count_wiki_notes, spawn_query_log,
     vector_disabled,
 };
-use crate::store::{EventLogFilter, LoggedHit};
+use crate::store::{EventLogFilter, LoggedHit, Store};
 use std::collections::HashSet;
 
 const EVENT_LOG_MAX_LIMIT: i64 = 1000;
@@ -367,6 +367,25 @@ pub(crate) async fn handle_context(
     Ok(Json(card))
 }
 
+/// Consumption counts beside every hit — `used`/`contested` edges and `superseded_by` (the newer
+/// docs that declared themselves the replacement), two grouped queries for the whole response,
+/// never one per hit.
+async fn attach_consumption(store: &Store, hits: &mut [SearchHit]) -> Result<(), AppError> {
+    let paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
+    let counts = store.consumption_counts(&paths).await?;
+    let superseded = store.superseded_by(&paths).await?;
+    for hit in hits.iter_mut() {
+        let c = counts.get(&hit.source_path).copied().unwrap_or_default();
+        hit.used_count = c.used;
+        hit.contested_count = c.contested;
+        hit.superseded_by = superseded
+            .get(&hit.source_path)
+            .cloned()
+            .unwrap_or_default();
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_search(
     State(s): State<AppState>,
     Json(req): Json<crate::serve::SearchReq>,
@@ -402,6 +421,7 @@ pub(crate) async fn handle_search(
             dist: Some(h.dist),
             dist_kind: Some(h.dist_kind),
             related: Vec::new(),
+            superseded_by: Vec::new(),
             used_count: 0,
             contested_count: 0,
         })
@@ -422,6 +442,7 @@ pub(crate) async fn handle_search(
                 dist: None,
                 dist_kind: None,
                 related: Vec::new(),
+                superseded_by: Vec::new(),
                 used_count: 0,
                 contested_count: 0,
             })
@@ -430,13 +451,7 @@ pub(crate) async fn handle_search(
     // Consumption counts beside every hit — one query for the whole response, 0 on the
     // wiki-recall fallback where the graph cannot say.
     if let Some(store) = s.store.as_ref() {
-        let paths: Vec<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
-        let counts = store.consumption_counts(&paths).await?;
-        for hit in &mut mapped {
-            let c = counts.get(&hit.source_path).copied().unwrap_or_default();
-            hit.used_count = c.used;
-            hit.contested_count = c.contested;
-        }
+        attach_consumption(store, &mut mapped).await?;
     }
     // Opt-in graph read: beside each of the first `related_heads` hits, the older notes that
     // share a concept with it. The concept walk, not the shared-node walk — measured 2026-09-10,
@@ -491,12 +506,19 @@ pub(crate) async fn handle_consumption(
     crate::serve::validate_consumption_req(&req)?;
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
     let report = store
-        .record_consumption(&req.session_id, &req.observed_at, &req.used, &req.contested)
+        .record_consumption(
+            &req.session_id,
+            &req.observed_at,
+            &req.used,
+            &req.contested,
+            &req.supersedes,
+        )
         .await?;
     Ok(Json(crate::serve::ConsumptionResp {
         session: format!("session:{}", req.session_id),
         used: report.used,
         contested: report.contested,
+        supersedes: report.supersedes,
         unknown: report.unknown,
     }))
 }

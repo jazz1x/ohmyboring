@@ -123,7 +123,25 @@ pub struct RecentDoc {
 pub struct ConsumptionReport {
     pub used: usize,
     pub contested: usize,
+    /// `supersedes` edges written (`doc:<newer>` → `doc:<older>` pairs).
+    pub supersedes: usize,
     pub unknown: usize,
+}
+
+/// Splits `supersedes` pairs into edge-worthy ones and the count of equal-path pairs. A pair that
+/// names the same path twice replaces nothing, so it is skipped and counted as unknown, never
+/// written.
+fn split_supersedes(pairs: &[[String; 2]]) -> (Vec<&[String; 2]>, usize) {
+    let mut valid = Vec::with_capacity(pairs.len());
+    let mut skipped = 0_usize;
+    for pair in pairs {
+        if pair[0] == pair[1] {
+            skipped += 1;
+        } else {
+            valid.push(pair);
+        }
+    }
+    (valid, skipped)
 }
 
 /// Consumption edge counts pointing at one document.
@@ -1997,6 +2015,7 @@ impl Store {
         observed_at: &str,
         used: &[String],
         contested: &[String],
+        supersedes: &[[String; 2]],
     ) -> Result<ConsumptionReport> {
         let session_node = format!("session:{session_id}");
         self.upsert_node(&session_node, "session", observed_at, None)
@@ -2020,6 +2039,21 @@ impl Store {
             self.upsert_edge(&session_node, &doc_node_id(path), "contested")
                 .await?;
             report.contested += 1;
+        }
+        // The only writer of `supersedes` edges: what one note replaced another is read out of the
+        // session's own words at scoring time, not emitted by the distilling LLM.
+        let (pairs, skipped) = split_supersedes(supersedes);
+        report.unknown += skipped;
+        for pair in pairs {
+            if self.get_doc_sha(&pair[0]).await?.is_none()
+                || self.get_doc_sha(&pair[1]).await?.is_none()
+            {
+                report.unknown += 1;
+                continue;
+            }
+            self.upsert_edge(&doc_node_id(&pair[0]), &doc_node_id(&pair[1]), "supersedes")
+                .await?;
+            report.supersedes += 1;
         }
         Ok(report)
     }
@@ -2056,6 +2090,93 @@ impl Store {
             }
         }
         Ok(counts)
+    }
+
+    /// `supersedes` edges pointing at these documents — the `source_path`s of the newer docs that
+    /// replaced each one, i.e. `superseded_by` for every hit of a `/search` response in one query.
+    pub async fn superseded_by(&self, paths: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT dst, src FROM edge WHERE dst = ANY($1) AND kind = 'supersedes';",
+                &[&doc_ids],
+            )
+            .await
+            .context("superseded by")?;
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for row in rows {
+            let dst: String = row.get(0);
+            let src: String = row.get(1);
+            map.entry(dst.strip_prefix("doc:").unwrap_or(&dst).to_owned())
+                .or_default()
+                .push(src.strip_prefix("doc:").unwrap_or(&src).to_owned());
+        }
+        Ok(map)
+    }
+
+    /// Documents with the most `used` edges from sessions whose `observed_at` label falls within
+    /// the last `days` days, newest signal first. Each row carries its `used` and `contested`
+    /// counts over the same window — the "reused this week" section of the briefing.
+    ///
+    /// The session label is an RFC 3339 string; it is compared by casting `label::timestamptz`,
+    /// guarded by `kind = 'session'` so non-session nodes are never cast, and by a regex that
+    /// requires the RFC 3339 date-time prefix — a label that fails to parse must not abort the
+    /// query, it just drops out of the window.
+    pub async fn reused_recently(
+        &self,
+        days: i64,
+        limit: i64,
+    ) -> Result<Vec<(RecentDoc, i64, i64)>> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "WITH window_sessions AS (
+                     SELECT id FROM node
+                     WHERE kind = 'session'
+                       AND label ~ '^\\d{4}-\\d{2}-\\d{2}T'
+                       AND label::timestamptz >= now() - make_interval(days => $1)
+                 ),
+                 counts AS (
+                     SELECT e.dst AS doc_node,
+                            count(*) FILTER (WHERE e.kind = 'used')      AS used,
+                            count(*) FILTER (WHERE e.kind = 'contested') AS contested
+                     FROM edge e
+                     JOIN window_sessions s ON s.id = e.src
+                     WHERE e.kind IN ('used', 'contested')
+                     GROUP BY e.dst
+                     ORDER BY used DESC, contested DESC, e.dst ASC
+                     LIMIT $2
+                 )
+                 SELECT d.source_path, d.project, d.tags,
+                        string_agg(c.content, E'\\n' ORDER BY c.chunk_idx) AS content,
+                        counts.used, counts.contested
+                 FROM counts
+                 JOIN document d ON ('doc:' || d.source_path) = counts.doc_node
+                 JOIN chunk c ON c.source_path = d.source_path
+                 GROUP BY d.source_path, d.project, d.tags, counts.used, counts.contested
+                 ORDER BY counts.used DESC, counts.contested DESC, d.source_path ASC;",
+                &[&days, &limit],
+            )
+            .await
+            .context("reused recently")?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    RecentDoc {
+                        source_path: r.get(0),
+                        project: r.get(1),
+                        tags: r.get(2),
+                        content: r.get(3),
+                    },
+                    r.get(4),
+                    r.get(5),
+                )
+            })
+            .collect())
     }
 
     // ── semantic nodes ──────────────────────────────────────────────────────────
@@ -2238,6 +2359,31 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{DistKind, NOT_USER_MEMORY_RE};
+
+    /// A pair naming the same path twice replaces nothing: it is not written, and it is counted
+    /// as unknown so the caller sees the pair was seen but produced no edge.
+    #[test]
+    fn an_equal_paths_supersedes_pair_is_skipped_and_counted() {
+        let pairs = [
+            ["/w/new.md".to_owned(), "/w/old.md".to_owned()],
+            ["/w/same.md".to_owned(), "/w/same.md".to_owned()],
+        ];
+        let (valid, skipped) = super::split_supersedes(&pairs);
+        assert_eq!(valid.len(), 1, "the equal-paths pair is not written");
+        assert_eq!(valid[0][1], "/w/old.md");
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    fn split_supersedes_passes_distinct_paths_through() {
+        let pairs = [
+            ["/w/b.md".to_owned(), "/w/a.md".to_owned()],
+            ["/w/c.md".to_owned(), "/w/b.md".to_owned()],
+        ];
+        let (valid, skipped) = super::split_supersedes(&pairs);
+        assert_eq!(valid.len(), 2);
+        assert_eq!(skipped, 0);
+    }
 
     /// The recency and claim surfaces feed the briefing, and the briefing writes notes into the
     /// same vault — so without this exclusion it reads yesterday's summary and restates it as

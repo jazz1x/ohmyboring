@@ -346,6 +346,7 @@ mod tests {
             dist: None,
             dist_kind: None,
             related: vec![],
+            superseded_by: vec![],
             used_count: 0,
             contested_count: 0,
         };
@@ -362,6 +363,36 @@ mod tests {
         assert!(json.contains("\"related\":"), "was {json}");
     }
 
+    /// `superseded_by` follows the `related` contract: no key until a replacement is recorded,
+    /// then the replacing doc's `source_path`.
+    #[test]
+    fn search_hit_omits_superseded_by_key_until_one_exists() {
+        let mut hit = super::SearchHit {
+            id: "1".into(),
+            origin: "wiki".into(),
+            project: "p".into(),
+            source_path: "a.md".into(),
+            snippet: "s".into(),
+            dist: None,
+            dist_kind: None,
+            related: vec![],
+            superseded_by: vec![],
+            used_count: 0,
+            contested_count: 0,
+        };
+        let json = serde_json::to_string(&hit).unwrap();
+        assert!(
+            !json.contains("superseded_by"),
+            "callers see no new key until a replacement exists: {json}"
+        );
+        hit.superseded_by.push("/w/b.md".into());
+        let json = serde_json::to_string(&hit).unwrap();
+        assert!(
+            json.contains("\"superseded_by\":[\"/w/b.md\"]"),
+            "was {json}"
+        );
+    }
+
     /// Consumption counts are part of the accuracy contract with the recall hook: always present,
     /// integers, even when nothing has consumed the note yet.
     #[test]
@@ -375,6 +406,7 @@ mod tests {
             dist: None,
             dist_kind: None,
             related: vec![],
+            superseded_by: vec![],
             used_count: 3,
             contested_count: 1,
         };
@@ -409,6 +441,7 @@ mod tests {
             observed_at: observed_at.to_owned(),
             used,
             contested,
+            supersedes: vec![],
         }
     }
 
@@ -445,6 +478,23 @@ mod tests {
         let at_cap = vec!["/vault/wiki/wiki-0001.md".to_owned(); super::CONSUMPTION_MAX_PATHS];
         let ok = consumption_req("s-1", "2026-09-11T05:12:00+00:00", at_cap, vec![]);
         assert!(super::validate_consumption_req(&ok).is_ok());
+    }
+
+    /// `supersedes` pairs share the same ceiling as the path lists — the scorer reports one
+    /// session at a time.
+    #[test]
+    fn consumption_rejects_more_than_200_supersedes_pairs() {
+        let pair = [
+            "/vault/wiki/wiki-new.md".to_owned(),
+            "/vault/wiki/wiki-old.md".to_owned(),
+        ];
+        let mut req = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
+        req.supersedes = vec![pair.clone(); super::CONSUMPTION_MAX_PATHS + 1];
+        let err = super::validate_consumption_req(&req).unwrap_err();
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+
+        req.supersedes = vec![pair; super::CONSUMPTION_MAX_PATHS];
+        assert!(super::validate_consumption_req(&req).is_ok());
     }
 }
 
@@ -614,6 +664,10 @@ pub(crate) struct SearchHit {
     /// that did not set `related` sees no new key.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) related: Vec<RelatedNote>,
+    /// `source_path`s of the docs that declared themselves the replacement for this hit
+    /// (`supersedes` edges with this doc as dst). Absent until one exists.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) superseded_by: Vec<String>,
     /// How many sessions recorded this note as used (`used` edges with this doc as dst).
     /// Always present; 0 on the wiki-recall fallback, where the graph cannot say.
     pub(crate) used_count: i64,
@@ -638,6 +692,10 @@ pub(crate) struct ConsumptionReq {
     pub(crate) used: Vec<String>,
     #[serde(default)]
     pub(crate) contested: Vec<String>,
+    /// `[newer_path, older_path]` pairs — for each known pair, one
+    /// `(doc:<newer>) -[supersedes]-> (doc:<older>)` edge.
+    #[serde(default)]
+    pub(crate) supersedes: Vec<[String; 2]>,
 }
 
 #[derive(Serialize)]
@@ -645,7 +703,9 @@ pub(crate) struct ConsumptionResp {
     pub(crate) session: String,
     pub(crate) used: usize,
     pub(crate) contested: usize,
-    /// Paths skipped because no `document` row exists for them.
+    /// `supersedes` edges written from the request's pairs.
+    pub(crate) supersedes: usize,
+    /// Paths skipped because no `document` row exists for them (or a pair named one path twice).
     pub(crate) unknown: usize,
 }
 
@@ -661,11 +721,14 @@ pub(crate) fn validate_consumption_req(req: &ConsumptionReq) -> Result<(), AppEr
             req.observed_at
         )));
     }
-    for (name, list) in [("used", &req.used), ("contested", &req.contested)] {
-        if list.len() > CONSUMPTION_MAX_PATHS {
+    for (name, len) in [
+        ("used", req.used.len()),
+        ("contested", req.contested.len()),
+        ("supersedes", req.supersedes.len()),
+    ] {
+        if len > CONSUMPTION_MAX_PATHS {
             return Err(AppError::bad_request(format!(
-                "{name}: at most {CONSUMPTION_MAX_PATHS} paths, got {}",
-                list.len()
+                "{name}: at most {CONSUMPTION_MAX_PATHS} paths, got {len}"
             )));
         }
     }

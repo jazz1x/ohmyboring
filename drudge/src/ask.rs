@@ -422,12 +422,22 @@ const CONTINUITY_PER_HEAD: i64 = 2;
 /// Enough of an older note to recognise the thread, not enough to retell it.
 const CONTINUITY_CHARS: usize = 600;
 
+/// How far "reused this week" reaches back, and how many notes the section may hold.
+const REUSE_WINDOW_DAYS: i64 = 7;
+const REUSE_MAX: usize = 5;
+/// Enough of a reused note to recognise why it keeps being reached for, not its whole body.
+const REUSE_CHARS: usize = 200;
+
 /// Older notes sharing a concept with the recency head — the threads this morning continues.
 ///
 /// Deduplicated across heads: three recent notes on the same subject reach the same older note,
 /// and printing it three times spends the prompt on repetition and teaches the model the note is
-/// three times as important.
-async fn brief_continuity(store: &Store, docs: &[crate::store::RecentDoc]) -> Result<String> {
+/// three times as important. Returns the walks alongside their rendering so `brief_reuse` can
+/// deduplicate against them without a second query.
+async fn brief_continuity(
+    store: &Store,
+    docs: &[crate::store::RecentDoc],
+) -> Result<(String, Vec<Vec<crate::store::RecentDoc>>)> {
     let mut walks = Vec::new();
     for head in docs.iter().take(CONTINUITY_HEADS) {
         walks.push(
@@ -436,7 +446,59 @@ async fn brief_continuity(store: &Store, docs: &[crate::store::RecentDoc]) -> Re
                 .await?,
         );
     }
-    Ok(render_continuity(docs, &walks))
+    let rendered = render_continuity(docs, &walks);
+    Ok((rendered, walks))
+}
+
+/// The notes other sessions kept reaching for this week — the graph answer to "what got reused".
+/// A note already shown as recent or as continuity background is skipped: the section adds
+/// memory the briefing does not already hold, not a second print of it.
+async fn brief_reuse(
+    store: &Store,
+    recent: &[crate::store::RecentDoc],
+    walks: &[Vec<crate::store::RecentDoc>],
+) -> Result<String> {
+    let rows = store
+        .reused_recently(REUSE_WINDOW_DAYS, i64::try_from(REUSE_MAX).unwrap_or(5))
+        .await?;
+    Ok(render_reuse(recent, walks, &rows))
+}
+
+/// The "reused this week" section, given what the store returned. Split from the IO so the
+/// dedup-against-recent-and-continuity and the cap are testable without a database.
+fn render_reuse(
+    recent: &[crate::store::RecentDoc],
+    walks: &[Vec<crate::store::RecentDoc>],
+    rows: &[(crate::store::RecentDoc, i64, i64)],
+) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut seen: HashSet<&str> = recent.iter().map(|d| d.source_path.as_str()).collect();
+    for walk in walks {
+        seen.extend(walk.iter().map(|d| d.source_path.as_str()));
+    }
+    let mut lines = Vec::new();
+    for (doc, used, contested) in rows {
+        if lines.len() >= REUSE_MAX {
+            break;
+        }
+        if !seen.insert(doc.source_path.as_str()) {
+            continue;
+        }
+        let body: String = doc.content.chars().take(REUSE_CHARS).collect();
+        lines.push(format!(
+            "- {} · used {}× · contested {}× · {}",
+            doc.source_path,
+            used,
+            contested,
+            defang(&body).trim_end()
+        ));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!("## (reused this week)\n{}\n", lines.join("\n"))
 }
 
 /// The prompt section, given what the walks returned. Split from the IO so the two rules that
@@ -523,7 +585,8 @@ pub async fn brief(
     // what they shared was `tool:rg` (9), `tool:python` (6), `tool:sed` (6) -- a bundle of
     // "things that ran rg". Excluding tools, the same twelve reach 71 older notes through
     // `concept:mutationtesting` and 19 through `concept:singlesourceoftruth`.
-    let continuity = brief_continuity(store, &docs).await?;
+    let (continuity, walks) = brief_continuity(store, &docs).await?;
+    let reuse = brief_reuse(store, &docs, &walks).await?;
 
     // Authority injection: current claims — even if old exploration notes (e.g. discarded Neo4j/SurrealDB)
     // look recent by mtime, claim authority nails down the true current fact.
@@ -545,6 +608,15 @@ pub async fn brief(
         let _ = write!(
             prompt,
             "\n# Earlier notes on the same concepts — background only, do NOT report as today's work\n{fo}\n{continuity}{fc}"
+        );
+    }
+    if !reuse.is_empty() {
+        // Also background: a note reused all week is evidence of what mattered, not of what
+        // happened this morning. Same dedup rule as the section itself — nothing here is
+        // already in the recency head or the continuity walks.
+        let _ = write!(
+            prompt,
+            "\n# Reused this week — background only, do NOT report as today's work\n{fo}\n{reuse}{fc}"
         );
     }
     // note_lang policy wins over "match the records": ko → always Korean, en → English, auto → records' language.
@@ -1173,6 +1245,68 @@ mod tests {
     fn no_earlier_notes_renders_nothing() {
         assert_eq!(super::render_continuity(&[], &[]), "");
         assert_eq!(super::render_continuity(&[], &[vec![]]), "");
+    }
+
+    fn reuse_row(
+        path: &str,
+        content: &str,
+        used: i64,
+        contested: i64,
+    ) -> (crate::store::RecentDoc, i64, i64) {
+        (doc(path, "p", content), used, contested)
+    }
+
+    /// The heading and the per-note line: path, both counts, and a defanged content teaser.
+    #[test]
+    fn reused_notes_are_rendered_with_counts() {
+        let rows = vec![reuse_row("/w/reused.md", "kept coming back", 3, 1)];
+        let out = super::render_reuse(&[], &[], &rows);
+        assert!(out.starts_with("## (reused this week)\n"), "was {out:?}");
+        assert!(
+            out.contains("- /w/reused.md · used 3× · contested 1× · kept coming back"),
+            "was {out:?}"
+        );
+    }
+
+    /// A note already in the recency head or the continuity walks adds nothing here — the
+    /// section is memory the briefing does not already hold, not a second print.
+    #[test]
+    fn reuse_skips_notes_already_shown_as_recent_or_continuity() {
+        let recent = vec![doc("/w/recent.md", "p", "today")];
+        let walks = vec![vec![doc("/w/older.md", "p", "last week")]];
+        let rows = vec![
+            reuse_row("/w/recent.md", "dup of recent", 9, 0),
+            reuse_row("/w/older.md", "dup of continuity", 8, 0),
+            reuse_row("/w/fresh.md", "new", 1, 0),
+        ];
+        let out = super::render_reuse(&recent, &walks, &rows);
+        assert!(!out.contains("/w/recent.md"), "was {out:?}");
+        assert!(!out.contains("/w/older.md"), "was {out:?}");
+        assert!(out.contains("/w/fresh.md"), "was {out:?}");
+    }
+
+    /// The store already limits to 5; the renderer enforces the same cap on its own so a
+    /// different caller cannot grow the prompt past it.
+    #[test]
+    fn reuse_is_capped_at_five() {
+        let rows: Vec<_> = (0..7)
+            .map(|i| reuse_row(&format!("/w/r{i}.md"), "x", i64::from(i), 0))
+            .collect();
+        let out = super::render_reuse(&[], &[], &rows);
+        assert_eq!(
+            out.matches("\n- ").count() + usize::from(out.starts_with("- ")),
+            5
+        );
+    }
+
+    /// No rows (and: every row filtered out by dedup) means no section at all — never an
+    /// empty heading.
+    #[test]
+    fn reuse_with_no_rows_renders_nothing() {
+        assert_eq!(super::render_reuse(&[], &[], &[]), "");
+        let recent = vec![doc("/w/recent.md", "p", "today")];
+        let rows = vec![reuse_row("/w/recent.md", "dup", 5, 0)];
+        assert_eq!(super::render_reuse(&recent, &[], &rows), "");
     }
     use super::{data_fence, defang};
 
