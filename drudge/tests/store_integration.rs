@@ -192,13 +192,14 @@ async fn current_claims_honors_exclude_origins() {
     }
 
     let query = [0.5_f32; 1024]; // near both
-    let subjects =
-        |rows: Vec<Claim>| -> Vec<String> { rows.into_iter().map(|c| c.subject).collect() };
+    let subjects = |rows: Vec<drudge::store::AnchoredClaim>| -> Vec<String> {
+        rows.into_iter().map(|c| c.claim.subject).collect()
+    };
 
     // No exclusion → both visible.
     let all = subjects(
         store
-            .current_claims(&query, 20, &[], None, None)
+            .current_claims(&query, 20, &[], None, None, None)
             .await
             .expect("claims all"),
     );
@@ -210,7 +211,7 @@ async fn current_claims_honors_exclude_origins() {
     // Exclude company → company claim must be filtered out, personal kept.
     let filtered = subjects(
         store
-            .current_claims(&query, 20, &["company".to_string()], None, None)
+            .current_claims(&query, 20, &["company".to_string()], None, None, None)
             .await
             .expect("claims filtered"),
     );
@@ -1911,6 +1912,202 @@ async fn gc_keeps_a_claim_node_whose_only_row_is_sealed() {
         .await
         .expect("cleanup claim");
     store.gc_orphans().await.expect("sweep the orphaned mirror");
+    store
+        .delete_document(&path)
+        .await
+        .expect("cleanup document");
+}
+
+#[tokio::test]
+async fn claim_inherits_note_anchor_and_era_is_marked() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let path = unique_path("claim-anchor");
+    let subject = format!("anchor-probe-{}", std::process::id());
+    let project = "test";
+
+    let mut emb = [0.0_f32; 1024];
+    emb[0] = 1.0;
+
+    let front = dummy_frontmatter(&path);
+    store
+        .upsert_document(&front, "sha-anchor", SystemTime::now())
+        .await
+        .expect("upsert document");
+
+    let before = store.claim_era_counts().await.expect("era counts before");
+
+    let body = "the regression lives in a/b.rs:10 since the refactor";
+    let note_anchors = drudge::anchor::from_note_body(project, body);
+    let anchor = drudge::anchor::anchor_for_claim(&note_anchors, &subject, "regression")
+        .map(|a| a.to_db_string());
+    store
+        .upsert_claim_with_anchor(
+            &subject,
+            "location",
+            "a/b.rs",
+            &path,
+            SystemTime::now(),
+            &emb,
+            "fact",
+            "certain",
+            anchor.as_deref(),
+        )
+        .await
+        .expect("upsert anchored claim");
+
+    let row = db
+        .query_one(
+            "SELECT anchor, era FROM claim WHERE subject = $1 AND predicate = 'location';",
+            &[&subject],
+        )
+        .await
+        .expect("read claim row");
+    let stored_anchor: Option<String> = row.get(0);
+    let era: String = row.get(1);
+    assert_eq!(stored_anchor.as_deref(), Some("test:a/b.rs:L10"));
+    assert_eq!(era, "anchored");
+
+    let bare = format!("{subject}-bare");
+    store
+        .upsert_claim(
+            &bare,
+            "location",
+            "nowhere",
+            &path,
+            SystemTime::now(),
+            &emb,
+            "fact",
+            "certain",
+        )
+        .await
+        .expect("upsert unanchored claim");
+    let row = db
+        .query_one("SELECT anchor, era FROM claim WHERE subject = $1;", &[&bare])
+        .await
+        .expect("read bare row");
+    assert_eq!(row.get::<_, Option<String>>(0), None);
+    assert_eq!(row.get::<_, String>(1), "unanchored");
+
+    let legacy = format!("{subject}-legacy");
+    db.execute(
+        "INSERT INTO claim (subject, predicate, value, source_path, valid_from, kind, confidence)
+         VALUES ($1, 'location', 'old world', $2, now(), 'fact', 'certain');",
+        &[&legacy, &path],
+    )
+    .await
+    .expect("insert legacy claim");
+    let era: String = db
+        .query_one("SELECT era FROM claim WHERE subject = $1;", &[&legacy])
+        .await
+        .expect("read legacy row")
+        .get(0);
+    assert_eq!(era, "pre-anchor");
+
+    let after = store.claim_era_counts().await.expect("era counts after");
+    assert_eq!(after.anchored, before.anchored + 1);
+    assert_eq!(after.unanchored, before.unanchored + 1);
+    assert_eq!(after.pre_anchor, before.pre_anchor + 1);
+
+    db.execute(
+        "DELETE FROM claim WHERE subject LIKE $1;",
+        &[&format!("{subject}%")],
+    )
+    .await
+    .expect("cleanup claims");
+    store
+        .delete_document(&path)
+        .await
+        .expect("cleanup document");
+}
+
+#[tokio::test]
+async fn current_claims_filters_by_anchor_path() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let path = unique_path("claim-anchor-filter");
+    let subject = format!("anchor-filter-{}", std::process::id());
+    let project = "test";
+
+    let mut emb = [0.0_f32; 1024];
+    emb[0] = 1.0;
+
+    let front = dummy_frontmatter(&path);
+    store
+        .upsert_document(&front, "sha-anchor-filter", SystemTime::now())
+        .await
+        .expect("upsert document");
+    store
+        .upsert_claim_with_anchor(
+            &subject,
+            "location",
+            "a/b.rs",
+            &path,
+            SystemTime::now(),
+            &emb,
+            "fact",
+            "certain",
+            Some("test:a/b.rs:L10"),
+        )
+        .await
+        .expect("upsert anchored claim");
+
+    let hits = store
+        .current_claims(&emb, 10, &[], Some(project), None, Some("a/b.rs"))
+        .await
+        .expect("claims filtered by anchor_path");
+    assert!(
+        hits.iter().any(|c| c.subject == subject),
+        "the anchored claim must match anchor_path a/b.rs"
+    );
+    assert_eq!(
+        hits.iter().find(|c| c.subject == subject).unwrap().era,
+        "anchored"
+    );
+    let misses = store
+        .current_claims(&emb, 10, &[], Some(project), None, Some("no/such.rs"))
+        .await
+        .expect("claims filtered by missing anchor_path");
+    assert!(
+        !misses.iter().any(|c| c.subject == subject),
+        "a non-matching anchor_path must drop the claim"
+    );
+    let suffix = store
+        .current_claims(&emb, 10, &[], Some(project), None, Some("b.rs"))
+        .await
+        .expect("claims filtered by path suffix");
+    assert!(
+        !suffix.iter().any(|c| c.subject == subject),
+        "a path suffix is not an anchor prefix and must not match"
+    );
+    let prefix = store
+        .current_claims(&emb, 10, &[], Some(project), None, Some("a/"))
+        .await
+        .expect("claims filtered by path prefix");
+    assert!(
+        prefix.iter().any(|c| c.subject == subject),
+        "a path prefix must match"
+    );
+    let unfiltered = store
+        .current_claims(&emb, 10, &[], Some(project), None, None)
+        .await
+        .expect("claims unfiltered");
+    assert!(
+        unfiltered.iter().any(|c| c.subject == subject),
+        "the filter absent must keep default behaviour"
+    );
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
     store
         .delete_document(&path)
         .await
