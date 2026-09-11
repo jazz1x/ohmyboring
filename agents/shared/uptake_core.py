@@ -100,12 +100,18 @@ LEDGER_MAX_AGE_DAYS = 14
 def _fingerprints(hits, limit):
     out = []
     for hit in (hits or [])[:limit]:
-        src = (hit.get("source_path") or "").rsplit("/", 1)[-1]
+        path = hit.get("source_path") or ""
+        src = path.rsplit("/", 1)[-1]
         snippet = " ".join((hit.get("snippet") or "").split())[:280]
         if not (src and snippet):
             continue
-        out.append({"src": src, "phrases": phrases(snippet)})
+        out.append({"src": src, "path": path, "phrases": phrases(snippet)})
     return out
+
+
+def note_path(hit):
+    """The engine-side path of a ledgered hit; rows older than the `path` field get the wiki default."""
+    return hit.get("path") or f"/vault/wiki/{hit.get('src', '')}"
 
 
 def injection_record(session_id, prompt, hits, max_results, controls=None):
@@ -341,6 +347,43 @@ def session_uptake(records, transcript_text):
         total_controls,
         used_control_prompts,
     )
+
+
+#: Words an assistant uses when it follows the fence protocol's second sentence — "if one
+#: contradicts the code in front of you, say which". Matched inside the sentence that names the
+#: note, so "wiki-1603 is outdated" counts and "wiki-1603 fixed the outdated pool" does too;
+#: that overcount is accepted over the alternative of asking a model.
+CONTESTED_MARKERS = (
+    "contradict", "outdated", "stale", "no longer", "wrong", "incorrect", "superseded",
+    "어긋", "낡", "틀렸", "틀린", "맞지 않", "지금은 다르", "더 이상",
+)
+
+_SENTENCE = re.compile(r"[.!?\n]+")
+
+
+def consumption(records, transcript_text):
+    """What this session did with each note it was handed: `(used_paths, contested_paths)`.
+
+    Used is the scorer's own test (`hit_was_used`). Contested is a note the assistant named in
+    a sentence that also carries a contradiction marker — the act the fence protocol asks for.
+    A note can be both: it was read closely enough to be argued with.
+    """
+    text = assistant_text(transcript_text)
+    blob = " ".join(_words(text))
+    sentences = [" ".join(_words(s)) for s in _SENTENCE.split(text.lower()) if s.strip()]
+    used, contested = [], []
+    for record in records or []:
+        prompt_words = record.get("prompt_words") or []
+        for hit in record.get("hits") or []:
+            path = note_path(hit)
+            if hit_was_used(hit, blob, prompt_words) and path not in used:
+                used.append(path)
+            names = source_names(hit.get("src") or "")
+            if path not in contested and any(
+                _contains(s, n) and any(m in s for m in CONTESTED_MARKERS) for s in sentences for n in names
+            ):
+                contested.append(path)
+    return used, contested
 
 
 def sensitivity_probe(records):

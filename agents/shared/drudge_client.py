@@ -84,6 +84,16 @@ class DrudgeClient:
         data = self._retry("POST", "/search", payload)
         return data.get("hits", []) if isinstance(data, dict) else []
 
+    def consumption(
+        self, session_id: str, observed_at: str, used: list[str], contested: list[str]
+    ) -> dict[str, Any]:
+        """POST /consumption — what a session did with the notes it was handed, as graph edges."""
+        return self._retry(
+            "POST",
+            "/consumption",
+            {"session_id": session_id, "observed_at": observed_at, "used": used, "contested": contested},
+        )
+
     def health(self) -> dict[str, Any]:
         """GET /health."""
         return self._retry("GET", "/health")

@@ -193,6 +193,27 @@ def test_the_engine_asked_for_related_notes_on_every_pool_hit():
     assert kwargs["related_heads"] == kwargs["max_results"] == recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS
 
 
+def test_what_earlier_sessions_did_with_a_note_reorders_the_pool_and_shows():
+    """A note reused before goes first, a note argued with more than reused goes to the back,
+    and the agent is told both. The engine's order survives among untouched notes."""
+    text = "the pool died because deadpool recycled a closed socket " * 3
+    pool = [
+        dict(_hit("wiki-0001.md", text), used_count=1, contested_count=3),
+        _hit("wiki-0002.md", text),
+        dict(_hit("wiki-0003.md", text), used_count=4, contested_count=1),
+        _hit("wiki-0004.md", text),
+        _hit("wiki-0005.md", text),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        ledger = os.path.join(d, "ledger.jsonl")
+        ctx = _recall(pool, ledger=ledger)
+        injected, controls = _ledger_sources(ledger)[0]
+        assert injected == ["wiki-0003.md", "wiki-0002.md", "wiki-0004.md"], injected
+        assert controls == ["wiki-0005.md", "wiki-0001.md"], "the contested note fell out of the injection"
+        assert "- [wiki-0003.md] (reused 4×, contested 1×) the pool" in ctx, ctx
+        assert "- [wiki-0002.md] the pool" in ctx, "untouched notes carry no parenthesis"
+
+
 def test_an_unreadable_ledger_keeps_the_injection():
     """§8 D6: re-injection is cheaper than omission, and the ledger can die before the session."""
     pool = [_hit("wiki-0007.md", "the pool died because deadpool recycled a closed socket " * 3)]
