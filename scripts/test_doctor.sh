@@ -93,6 +93,18 @@ case "${1:-}" in
         echo "uptake_sensitivity=ok rows=12 reason=phrase from wiki-0001.md was detected"
         exit 0
     fi
+    if [ "${2:-}" = --pipeline-probe ]; then
+        if [ "${DOCTOR_UPTAKE_PIPELINE_BLIND:-0}" = 1 ]; then
+            echo "uptake_pipeline_probe=blind reason=a.jsonl read back with no turn markers at all"
+            exit 1
+        fi
+        if [ "${DOCTOR_UPTAKE_PIPELINE_UNKNOWN:-0}" = 1 ]; then
+            echo "uptake_pipeline_probe=unknown reason=no_ledger_session_has_a_transcript"
+            exit 0
+        fi
+        echo "uptake_pipeline_probe=ok reason=phrase from wiki-0001.md survived a.jsonl → extract → scorer"
+        exit 0
+    fi
     # The other half of §2's instrument check: each transcript scored against a session's hits it
     # never received. A rate that reaches the treatment rate means the scorer is reading topic
     # overlap, so doctor has to be able to fail on it — and to tell "could not run" apart from
@@ -640,6 +652,30 @@ esac
       exit 1
   }
   echo "ok - a blind uptake detector fails readiness"
+)
+
+( make_case "$TMP/uptake-pipeline" yes
+  if DOCTOR_UPTAKE_PIPELINE_BLIND=1 run_strict "$TMP/uptake-pipeline" "$TMP/uptake-pipeline.out"; then
+      cat "$TMP/uptake-pipeline.out"
+      echo "FAIL: a blind uptake pipeline must fail strict doctor" >&2
+      exit 1
+  fi
+  grep -q "UPTAKE PIPELINE BLIND" "$TMP/uptake-pipeline.out" || {
+      cat "$TMP/uptake-pipeline.out"
+      echo "FAIL: the blind pipeline must be named, not merely counted" >&2
+      exit 1
+  }
+  echo "ok - a blind uptake pipeline fails readiness"
+)
+
+( make_case "$TMP/uptake-pipeline-unknown" yes
+  if DOCTOR_UPTAKE_PIPELINE_UNKNOWN=1 run_strict "$TMP/uptake-pipeline-unknown" "$TMP/uptake-pipeline-unknown.out"; then
+      echo "ok - nothing to probe with is not a blind pipeline"
+  else
+      cat "$TMP/uptake-pipeline-unknown.out"
+      echo "FAIL: an unprobeable pipeline must warn, not fail readiness" >&2
+      exit 1
+  fi
 )
 
 # A contaminated self-check has to fail readiness for the same reason a blind one does, from the

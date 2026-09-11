@@ -424,6 +424,20 @@ def test_the_self_check_cannot_be_run_on_a_ledger_with_nothing_to_pair():
 
 
 
+def test_a_raw_transcript_gives_the_detector_nothing_to_read():
+    raw = json.dumps(
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "토큰 예산을 늘렸다"}]}}
+    )
+    assert uptake_core.assistant_text(raw) == "", "a raw jsonl line is not turn-formatted"
+    extracted = "[user] 뭐지\n[assistant] 토큰 예산을 늘렸다"
+    assert "토큰 예산을 늘렸다" in uptake_core.assistant_text(extracted)
+
+
+def test_the_transcript_format_follows_the_directory():
+    assert uptake_core._transcript_format("/Users/x/.codex/sessions/a.jsonl") == "codex-jsonl"
+    assert uptake_core._transcript_format("/Users/x/.claude/projects/p/a.jsonl") == "claude-json"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

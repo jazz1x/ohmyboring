@@ -651,6 +651,19 @@ if [ -f "$ledger_probe" ] && [ "${BORING_SKIP_LEDGER_PROBE:-0}" != 1 ]; then
     fi
 fi
 
+# (d5g) (d5d) asked through `transcript.extract` rather than around it — see #311.
+if [ -f "$ledger_probe" ] && [ "${BORING_SKIP_LEDGER_PROBE:-0}" != 1 ]; then
+    if pipe_out="$(python3 "$ledger_probe" --pipeline-probe 2>/dev/null)"; then
+        case "$pipe_out" in
+            *uptake_pipeline_probe=ok*) ok "uptake survives the reader (${pipe_out#*reason=})" ;;
+            *) warn "uptake pipeline probe undetermined — $pipe_out. Not a fault; no ledger session has a transcript to read." ;;
+        esac
+    else
+        bad "UPTAKE PIPELINE BLIND — $pipe_out. A use the detector can match does not survive transcript.extract, so every uptake score is 0 for a reason that has nothing to do with the channel (PRD §2)."
+        failed_hooks=1
+    fi
+fi
+
 # (d5b) The briefing scripts hermes actually runs. `make build` redeploys the engine image, but
 # the scripts hermes executes live in ~/.hermes/scripts and only the installer copies them there
 # — so merging a briefing change does not deliver it. Measured on 2026-08-26: the installed
