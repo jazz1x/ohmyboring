@@ -606,5 +606,41 @@ class RetroactiveAutomatedLabelTests(unittest.TestCase):
         self.assertEqual(distill_core.transcript_index(source_dirs=["/nope/not/here"]), {})
 
 
+class ConsumptionReachesTheGraph(unittest.TestCase):
+    """The scorer's verdict on each note has to leave the session, or the note learns nothing."""
+
+    def _records(self):
+        import uptake_core
+
+        hits = [{"source_path": "/vault/wiki/wiki-0007.md", "snippet": "the pool died because deadpool recycled a closed socket " * 3}]
+        return [uptake_core.injection_record("s1", "why did the pool die", hits, 3)]
+
+    def test_used_and_contested_notes_are_posted_as_edges(self):
+        transcript = "[user] why did the pool die\n[assistant] per wiki-0007, but wiki-0007 is outdated now.\n"
+        with mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}), \
+             mock.patch("drudge_client.DrudgeClient") as client:
+            distill_core.write_consumption_to_graph("s1", self._records(), transcript)
+        (sid, when, used, contested), _ = client.return_value.consumption.call_args
+        self.assertEqual(sid, "s1")
+        self.assertEqual(used, ["/vault/wiki/wiki-0007.md"])
+        self.assertEqual(contested, ["/vault/wiki/wiki-0007.md"])
+        self.assertRegex(when, r"^\d{4}-\d{2}-\d{2}T")
+
+    def test_a_spooled_sink_never_writes_to_the_live_graph(self):
+        transcript = "[user] why\n[assistant] per wiki-0007.\n"
+        with mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "spool"}), \
+             mock.patch("drudge_client.DrudgeClient") as client:
+            distill_core.write_consumption_to_graph("s1", self._records(), transcript)
+        client.return_value.consumption.assert_not_called()
+
+    def test_nothing_consumed_means_no_call_and_a_dead_engine_does_not_raise(self):
+        with mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}), \
+             mock.patch("drudge_client.DrudgeClient") as client:
+            distill_core.write_consumption_to_graph("s1", self._records(), "[assistant] unrelated.\n")
+            client.return_value.consumption.assert_not_called()
+            client.return_value.consumption.side_effect = OSError("down")
+            distill_core.write_consumption_to_graph("s1", self._records(), "[assistant] per wiki-0007.\n")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

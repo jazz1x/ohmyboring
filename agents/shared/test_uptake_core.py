@@ -462,6 +462,33 @@ def test_a_raw_transcript_gives_the_detector_nothing_to_read():
     assert "토큰 예산을 늘렸다" in uptake_core.assistant_text(extracted)
 
 
+def test_consumption_names_what_was_used_and_what_was_argued_with():
+    """The fence asks the agent to say `per <note>` when it reuses one and to say which note
+    contradicts the code. Both acts have to reach the graph, so both are read here."""
+    record = uptake_core.injection_record(
+        "s1", "why did the pool die", [_hit(), _hit(src="wiki-0099.md"), _hit(src="wiki-0042.md")], 3
+    )
+    transcript = (
+        "[user] why did the pool die\n"
+        "[assistant] per wiki-0007 this is the recycled-socket case. wiki-0099 is outdated — the pool "
+        "no longer recycles. I looked at wiki-0042 too. That advice was wrong in another context.\n"
+    )
+    used, contested = uptake_core.consumption([record], transcript)
+    assert used == ["/vault/wiki/wiki-0007.md", "/vault/wiki/wiki-0099.md", "/vault/wiki/wiki-0042.md"], used
+    assert contested == ["/vault/wiki/wiki-0099.md"], "the marker has to sit in the sentence that names the note"
+    assert record["hits"][0]["path"] == "/vault/wiki/wiki-0007.md", "the ledger keeps the engine path"
+
+
+def test_consumption_reads_korean_contradictions_and_old_rows_without_a_path():
+    record = uptake_core.injection_record("s1", "풀이 왜 죽었지", [_hit(src="wiki-1290.md")], 3)
+    del record["hits"][0]["path"]
+    transcript = "[user] 풀이 왜 죽었지\n[assistant] wiki-1290 은 지금 코드와 어긋난다, 풀은 이제 소켓을 재활용 안 한다.\n"
+    used, contested = uptake_core.consumption([record], transcript)
+    assert used == ["/vault/wiki/wiki-1290.md"], used
+    assert contested == ["/vault/wiki/wiki-1290.md"], contested
+    assert uptake_core.consumption([record], "[assistant] nothing here\n") == ([], [])
+
+
 def test_the_transcript_format_follows_the_directory():
     assert uptake_core._transcript_format("/Users/x/.codex/sessions/a.jsonl") == "codex-jsonl"
     assert uptake_core._transcript_format("/Users/x/.claude/projects/p/a.jsonl") == "claude-json"

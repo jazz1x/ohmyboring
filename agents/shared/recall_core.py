@@ -200,8 +200,29 @@ def split_fresh(hits: list[dict], already_injected: set[str]) -> tuple[list[dict
     The pool the engine returns is unchanged, so the hits and their order are the same as before;
     only the partition moves.
     """
-    fresh = [h for h in hits if source_name(h) not in already_injected]
+    fresh = ranked_by_consumption([h for h in hits if source_name(h) not in already_injected])
     return fresh[:MAX_RESULTS], fresh[MAX_RESULTS:]
+
+
+def ranked_by_consumption(hits: list[dict]) -> list[dict]:
+    """The engine's order, then what earlier sessions did with each note: a note argued with
+    more often than it was reused goes to the back, a note reused goes to the front. Stable, so
+    notes nobody has consumed keep the engine's order among themselves."""
+    def key(h):
+        used, contested = int(h.get("used_count") or 0), int(h.get("contested_count") or 0)
+        return (contested > used, -used)
+
+    return sorted(hits, key=key)
+
+
+def consumption_note(hit: dict) -> str:
+    used, contested = int(hit.get("used_count") or 0), int(hit.get("contested_count") or 0)
+    parts = []
+    if used:
+        parts.append(f"reused {used}×")
+    if contested:
+        parts.append(f"contested {contested}×")
+    return f" ({', '.join(parts)})" if parts else ""
 
 
 #: Related notes carried per injection, across all hits. One is the thread; more is the
@@ -284,7 +305,7 @@ def run_recall(
             over_ceiling.append((src, dist))
         snip = salient(h.get("snippet"))
         if snip:
-            lines.append(f"- [{src}] {snip}")
+            lines.append(f"- [{src}]{consumption_note(h)} {snip}")
         for r in related.get(src, []):
             lines.append(f"  ↳ shares a concept with [{source_name(r)}] {salient(r.get('snippet'))}")
     if over_ceiling:
