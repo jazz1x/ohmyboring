@@ -107,6 +107,16 @@ def test_a_note_named_at_the_end_of_a_sentence_counts():
     assert (r.used_hits, r.total_hits) == (1, 1)
 
 
+def test_a_phrase_stored_by_the_old_tokenizer_still_matches():
+    """Ledger rows written before 2026-09-11 hold phrases with the sentence punctuation glued on
+    (`closed.`). The transcript side stopped keeping it, and the sensitivity probe went blind on
+    live rows within the hour. Stored phrases are normalised at compare time, not rewritten."""
+    record = uptake_core.injection_record("s1", "why did the pool die", [_hit()], 3)
+    record["hits"][0]["phrases"] = ["deadpool recycled a socket the server had already closed."]
+    transcript = "[user] why did the pool die\n[assistant] deadpool recycled a socket the server had already closed.\n"
+    assert uptake_core.session_uptake([record], transcript).used_hits == 1
+
+
 def test_a_bare_word_stem_is_not_tried():
     # `pool.md` → `pool` would score every sentence about pools. Only numbered ids get a stem.
     assert uptake_core.source_names("pool.md") == ["pool.md"]
