@@ -175,7 +175,7 @@ def main():
         # get a correct repo/<slug> + company-origin tag (matching live-hook notes).
         cwd = transcript_cwd(tp)
         payload = json.dumps(
-            {"transcript_path": tp, "cwd": cwd, "session_id": sid, "hook_event_name": "SessionEnd"}
+            {"transcript_path": tp, "cwd": cwd, "session_id": sid, "hook_event_name": "Backfill"}
         )
         try:
             r = subprocess.run(
