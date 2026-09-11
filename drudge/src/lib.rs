@@ -5,6 +5,7 @@
 //! The binary (`src/main.rs`) uses this library. Integration tests under
 //! `tests/` also link against it so they can exercise the Storage Layer and
 //! other kernel contracts directly against a live Postgres backend.
+pub mod anchor;
 pub mod ask;
 pub mod audit;
 pub mod code_index;

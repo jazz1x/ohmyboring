@@ -145,7 +145,7 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         store: &Store,
         llm: &Llm,
         front: &FrontMatter,
-        _body: &str,
+        body: &str,
         stats: &mut Stats,
     ) -> Result<()> {
         let path = &front.source_path;
@@ -189,6 +189,13 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         // valid_from = document mtime (chronological ordering). value embedding via bge-m3 (no generation).
         if !front.claims.is_empty() {
             let valid_from = store.doc_updated_at(path).await?;
+            // D2: every claim inherits the code anchor its note body cites. A note without a
+            // project has no anchor address (`:path` names nothing), so it stays unanchored.
+            let note_anchors = if front.project.is_empty() {
+                Vec::new()
+            } else {
+                crate::anchor::from_note_body(&front.project, body)
+            };
             for cl in &front.claims {
                 let subject = canon(&cl.subject);
                 let predicate = canon(&cl.predicate);
@@ -220,8 +227,10 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                     continue;
                 }
                 let emb = llm.embed(&format!("{subject} {predicate} {value}")).await?;
+                let anchor = crate::anchor::anchor_for_claim(&note_anchors, &subject, value)
+                    .map(|a| a.to_db_string());
                 store
-                    .upsert_claim(
+                    .upsert_claim_with_anchor(
                         &subject,
                         &predicate,
                         value,
@@ -230,6 +239,7 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                         &emb,
                         cl.kind(),
                         cl.confidence(),
+                        anchor.as_deref(),
                     )
                     .await?;
                 store.upsert_claim_node(path, &front.project, cl).await?;

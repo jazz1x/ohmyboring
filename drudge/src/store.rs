@@ -351,6 +351,32 @@ async fn count_edge_kind(db: &Client, kind: &str) -> Result<usize> {
     Ok(usize::try_from(n).unwrap_or(0))
 }
 
+/// A current claim as stored, plus its D2 anchor metadata. `Deref<Target = Claim>` keeps the
+/// existing consumers (`ask.rs`) working on `cl.subject` / `cl.kind()` while new surfaces read
+/// `anchor`/`era`.
+#[derive(Debug)]
+pub struct AnchoredClaim {
+    pub claim: Claim,
+    pub anchor: Option<String>,
+    pub era: String,
+}
+
+impl std::ops::Deref for AnchoredClaim {
+    type Target = Claim;
+    fn deref(&self) -> &Claim {
+        &self.claim
+    }
+}
+
+/// D2 adoption counter: CURRENT claims grouped by era (PRD §8 D2 — a supply-side feature nobody
+/// can see the uptake of is dead code at coverage ≈ 0, so the first commit carries the counter).
+#[derive(Debug, Default)]
+pub struct ClaimEraCounts {
+    pub anchored: usize,
+    pub unanchored: usize,
+    pub pre_anchor: usize,
+}
+
 impl Store {
     // ── connect + ensure schema ───────────────────────────────────────────────
 
@@ -472,6 +498,10 @@ impl Store {
                      embedding     vector({dim}), -- = boring.json embed_dim
                      kind          text NOT NULL DEFAULT 'fact',
                      confidence    text NOT NULL DEFAULT 'certain',
+                     anchor        text,
+                     stale_at      timestamptz,
+                     stale_reason  text,
+                     era           text NOT NULL DEFAULT 'pre-anchor',
                      PRIMARY KEY (subject, predicate, valid_from)
                  );
                  -- `about` was carrying two different relations under one name: a claim
@@ -484,6 +514,16 @@ impl Store {
                   WHERE kind = 'about' AND src LIKE 'claim:%' AND dst LIKE 'project:%';
                  ALTER TABLE claim ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'fact';
                  ALTER TABLE claim ADD COLUMN IF NOT EXISTS confidence text NOT NULL DEFAULT 'certain';
+                 -- D2 step 1 (PRD §8): a claim anchors to the code its note cites. `anchor` is
+                 -- `project:path[:span]`; `stale_at`/`stale_reason` belong to step 2 (stale
+                 -- detection) and are written by nothing yet; `era` is the D3 legacy marker —
+                 -- rows written after this lands are 'anchored'/'unanchored' per the resolver,
+                 -- existing rows keep the default 'pre-anchor' (marker only, no rewrite).
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor text;
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS stale_at timestamptz;
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS stale_reason text;
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS era text NOT NULL DEFAULT 'pre-anchor';
+                 CREATE INDEX IF NOT EXISTS claim_anchor ON claim(anchor) WHERE anchor IS NOT NULL;
                  CREATE INDEX IF NOT EXISTS claim_current ON claim(subject, predicate)
                      WHERE superseded_at IS NULL;
                  CREATE INDEX IF NOT EXISTS claim_kind ON claim(kind)
@@ -995,9 +1035,9 @@ impl Store {
         Ok(!rows.is_empty())
     }
 
-    /// Temporal fact claim upsert + supersede. For the same `(subject,predicate)`, old values are
-    /// sealed via `superseded_at`, and only the latest `valid_from` row is current (NULL). Idempotent (re-ingesting the same row is harmless).
-    /// 0 extra gemma calls — takes the claims that extract already produced as-is.
+    /// Temporal fact claim upsert + supersede, without a code anchor (see
+    /// `upsert_claim_with_anchor`). Rows written through this path are marked `era =
+    /// 'unanchored'`.
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_claim(
         &self,
@@ -1010,14 +1050,50 @@ impl Store {
         kind: &str,
         confidence: &str,
     ) -> Result<()> {
+        self.upsert_claim_with_anchor(
+            subject,
+            predicate,
+            value,
+            source_path,
+            valid_from,
+            embedding,
+            kind,
+            confidence,
+            None,
+        )
+        .await
+    }
+
+    /// Temporal fact claim upsert + supersede. For the same `(subject,predicate)`, old values are
+    /// sealed via `superseded_at`, and only the latest `valid_from` row is current (NULL). Idempotent (re-ingesting the same row is harmless).
+    /// 0 extra gemma calls — takes the claims that extract already produced as-is.
+    ///
+    /// D2 anchor inheritance: `anchor` (`project:path[:span]`) attaches the claim to the code its
+    /// note cites; `era` is derived from it — 'anchored' when present, 'unanchored' when the note
+    /// yielded none (legacy rows written before this column keep 'pre-anchor').
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_claim_with_anchor(
+        &self,
+        subject: &str,
+        predicate: &str,
+        value: &str,
+        source_path: &str,
+        valid_from: SystemTime,
+        embedding: &[f32],
+        kind: &str,
+        confidence: &str,
+        anchor: Option<&str>,
+    ) -> Result<()> {
         let vec = self.checked_vector(embedding)?; // dim guard (shared with upsert_chunk)
         self.db().await?
             .execute(
-                "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence, anchor, era)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text,
+                         CASE WHEN $9::text IS NULL THEN 'unanchored' ELSE 'anchored' END)
                  ON CONFLICT (subject, predicate, valid_from) DO UPDATE SET
                      value = EXCLUDED.value, source_path = EXCLUDED.source_path,
-                     embedding = EXCLUDED.embedding, kind = EXCLUDED.kind, confidence = EXCLUDED.confidence;",
+                     embedding = EXCLUDED.embedding, kind = EXCLUDED.kind, confidence = EXCLUDED.confidence,
+                     anchor = EXCLUDED.anchor, era = EXCLUDED.era;",
                 &[
                     &subject,
                     &predicate,
@@ -1027,6 +1103,7 @@ impl Store {
                     &vec,
                     &kind,
                     &confidence,
+                    &anchor,
                 ],
             )
             .await
@@ -1209,6 +1286,12 @@ impl Store {
     }
 
     /// Query embedding → top-k **current** claims (superseded_at IS NULL). Authority retrieval.
+    ///
+    /// D2: `anchor_path` optionally keeps only rows whose anchor starts with
+    /// `<project>:<anchor_path>` — the stored path (the anchor between its `project:` prefix and
+    /// its optional `:Lstart[-Lend]` span) must start with `anchor_path`. Resolver-produced paths
+    /// never contain `:`, so `split_part(.., ':', 2)` is exactly that path; NULL anchors fall out.
+    /// Every row carries its `anchor` and `era`.
     pub async fn current_claims(
         &self,
         query_emb: &[f32],
@@ -1216,7 +1299,8 @@ impl Store {
         exclude_origins: &[String],
         project: Option<&str>,
         kinds: Option<&[String]>,
-    ) -> Result<Vec<Claim>> {
+        anchor_path: Option<&str>,
+    ) -> Result<Vec<AnchoredClaim>> {
         let vec = Vector::from(query_emb.to_vec());
         // Honor the SAME origin boundary the recall path applies (retrieve::merge_hits filters by
         // exclude_origins). Claims carry no origin column, but their parent document does — JOIN and
@@ -1227,13 +1311,15 @@ impl Store {
             .db()
             .await?
             .query(
-                "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence FROM claim c
+                "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.anchor, c.era
+                 FROM claim c
                  JOIN document d ON d.source_path = c.source_path
                  WHERE c.superseded_at IS NULL AND c.embedding IS NOT NULL
                    AND NOT (d.origin = ANY($3))
                    AND ($4::text IS NULL OR d.project = $4)
                    AND ($5::text[] IS NULL OR c.kind = ANY($5))
                    AND d.source_path !~ $6
+                   AND ($7::text IS NULL OR split_part(c.anchor, ':', 2) LIKE replace(replace($7, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\')
                  ORDER BY c.embedding <=> $1
                  LIMIT $2;",
                 &[
@@ -1243,18 +1329,23 @@ impl Store {
                     &project,
                     &kinds,
                     &NOT_USER_MEMORY_RE,
+                    &anchor_path,
                 ],
             )
             .await
             .context("current claims")?;
         Ok(rows
             .iter()
-            .map(|r| Claim {
-                subject: r.get(0),
-                predicate: r.get(1),
-                value: r.get(2),
-                kind: r.get(3),
-                confidence: r.get(4),
+            .map(|r| AnchoredClaim {
+                claim: Claim {
+                    subject: r.get(0),
+                    predicate: r.get(1),
+                    value: r.get(2),
+                    kind: r.get(3),
+                    confidence: r.get(4),
+                },
+                anchor: r.get(5),
+                era: r.get(6),
             })
             .collect())
     }
@@ -2270,6 +2361,32 @@ impl Store {
             concepts: count_node_kind(&db, "concept").await?,
             uses: count_edge_kind(&db, "uses").await?,
             about: count_edge_kind(&db, "about").await?,
+        })
+    }
+
+    /// CURRENT claims (superseded_at IS NULL) grouped by `era` — the D2 adoption counter.
+    pub async fn claim_era_counts(&self) -> Result<ClaimEraCounts> {
+        let row = self
+            .db()
+            .await?
+            .query_one(
+                "SELECT count(*) FILTER (WHERE era = 'anchored'),
+                        count(*) FILTER (WHERE era = 'unanchored'),
+                        count(*) FILTER (WHERE era = 'pre-anchor')
+                   FROM claim
+                  WHERE superseded_at IS NULL;",
+                &[],
+            )
+            .await
+            .context("claim era counts")?;
+        let n = |i: usize| {
+            let v: i64 = row.get(i);
+            usize::try_from(v).unwrap_or(0)
+        };
+        Ok(ClaimEraCounts {
+            anchored: n(0),
+            unanchored: n(1),
+            pre_anchor: n(2),
         })
     }
 
