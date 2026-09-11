@@ -182,18 +182,16 @@ def test_the_thresholds_still_match_the_registered_contract():
         (int(V.WORKS_RATIO), "작동 배수"),
         (int(V.WORKS_GAP_PP), "작동 격차"),
         (int(V.BROKEN_MARGIN_PP), "비작동 여유"),
-        # Dates and the midpoint gate travel with the thresholds. They used to be spelled in
-        # peek.py, GOALS and a docstring at once, and the docstring still said the window closed
-        # 2026-09-09 a day after the reset moved it to 09-14 — nobody could see that rot.
         (V.MIDPOINT_MIN_SCORED, "중간점 채점 세션 하한"),
     ):
         assert re.search(rf"\b{value}\b", section), f"{what} {value} 가 PRD §2 에 없다"
-    for date, what in (
-        (V.WINDOW_SINCE, "창 시작"),
-        (V.WINDOW_UNTIL, "창 마감"),
-        (V.MIDPOINT, "중간점"),
-    ):
-        assert date in section, f"{what} {date} 가 PRD §2 에 없다"
+    # The dates are registered in code, not in the PRD (2026-09-11): every instrument repair
+    # was opening the contract document to move a date, and the document filled with repair
+    # logs. The PRD names the constants; the commit history of this module is the registration.
+    for name in ("WINDOW_SINCE", "WINDOW_UNTIL", "MIDPOINT"):
+        assert f"verdict_core.{name}" in section, f"PRD §2 가 {name} 이 코드에 등록됐다고 말하지 않는다"
+    for date in (V.WINDOW_SINCE, V.WINDOW_UNTIL, V.MIDPOINT):
+        assert date not in section, f"{date} 가 PRD §2 에 다시 적혔다 — 한 값이 두 곳"
     # The zone is half the meaning of the dates: read as UTC they are a different day, and the
     # briefing runs at 08:00 in this one. A code comment registered that and the contract did not.
     hours = int(V.WINDOW_TZ.utcoffset(None).total_seconds() // 3600)

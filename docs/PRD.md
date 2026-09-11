@@ -40,7 +40,7 @@ The control is free: `drudge/src/retrieve.rs:93` has `pool = (max_results*4).max
 
 | Item | Value |
 |---|---|
-| Window | **2026-09-12 → 2026-09-26**, two weeks — the first window (08-26→09-09) was reset for the instrumentation fault in §8 D1, the second (08-31→09-14) for the one in §8 D9. Metric, floors and thresholds did not change by a character |
+| Window | Two weeks. The dates are registered in code — `verdict_core.WINDOW_SINCE`, `verdict_core.WINDOW_UNTIL`, `verdict_core.MIDPOINT` — with the commit history as the timestamp of registration. A reset is a dated decision commit that moves those constants before any row exists under the new instrument (§8 D1, D9); metric, floors and thresholds never move with them |
 | Metric | per-prompt uptake (treatment) vs per-prompt control |
 | **Sample floor** | sessions ≥20 **AND** injected prompts ≥200. Below it, the **verdict is refused** — no number is produced (same shape as the `MIN_DECIDED` precedent in `agents/shared/label_core.py`) |
 | **Works** | treatment ≥ **2**× control AND gap ≥ **3**pp |
@@ -63,13 +63,13 @@ This rule came from a measured incident (2026-09-02). Of 106 `injection_uptake` 
 
 **The window's dates are the owner's calendar dates — `Asia/Seoul (UTC+09:00)`.** Every date in this section is. Measured in UTC, the 08:00 KST morning briefing reads as the previous day and the gate fires a day late (measured). A **fixed offset** rather than the machine's local zone, because the same code runs inside a container — a date that moves with the `TZ` setting is not a registered date.
 
-**Window midpoint check (2026-09-19).** The window is **2026-09-12 → 2026-09-26**; at its midpoint, 2026-09-19, if **scored sessions per adapter are under 10**, switch to an **instrumentation investigation** without waiting for the close — a progress gauge for the fact that §2's "zero within 48h" clause looks at a single moment.
+**Window midpoint check.** At the window's midpoint (`verdict_core.MIDPOINT`), if **scored sessions per adapter are under 10**, switch to an **instrumentation investigation** without waiting for the close — a progress gauge for the fact that §2's "zero within 48h" clause looks at a single moment.
 
-**Why per adapter**: because the floor of 20 applies per adapter (each adapter runs a different product — §3 M8). Summed, 8 Claude Code sessions plus 3 from another adapter would **pass a gate neither of them passes**. Closed before 2026-09-19.
+**Why per adapter**: because the floor of 20 applies per adapter (each adapter runs a different product — §3 M8). Summed, 8 Claude Code sessions plus 3 from another adapter would **pass a gate neither of them passes**. Closed before the midpoint.
 
 **The midpoint is one-time** — it does not apply to an extended window. An extension changes none of the metric, floors or thresholds, and a daily progress alarm turns the red light into a background that trains itself to be ignored.
 
-If the floor is not met at the close, a refused verdict is recorded and the window is **extended exactly once, until 2026-10-10** (metric, floors, thresholds unchanged). If it is still short after the extension, **the floor is not lowered.** Instead, "the injection channel could not produce a judgeable sample in four weeks" is adopted as a product signal on par with "not working", and the R6 parameters are reopened. Because the exit is fixed as "the shortfall itself is the verdict" rather than "lower the floor", there is no freedom to adjust after seeing partial numbers on 2026-09-26.
+If the floor is not met at the close, a refused verdict is recorded and the window is **extended exactly once, by two weeks** (metric, floors, thresholds unchanged). If it is still short after the extension, **the floor is not lowered.** Instead, "the injection channel could not produce a judgeable sample in four weeks" is adopted as a product signal on par with "not working", and the R6 parameters are reopened. Because the exit is fixed as "the shortfall itself is the verdict" rather than "lower the floor", there is no freedom to adjust after seeing partial numbers at the close.
 
 **2×, 3pp and 1pp were chosen without priors.** But they are **superiority margins above a measured floor**, not absolute thresholds, and there is a withheld band with no forced action when neither side is met — that is the difference from 0.514. The contract binds **behaviour**, not truth.
 
@@ -218,167 +218,25 @@ The engineer's objection is accepted: the consumer of the cheapest R2 implementa
 
 ## 8. Owner decisions
 
-### D10. The channel the window measures is the product, not the instrument (2026-09-11, before the window opened, sample 0/0)
+### Instrument log — decisions that moved the window or the instrument, not the product
 
-D9 left one door open: landing channel changes before 09-12 keeps the D1 defence but changes
-what the window measures. The owner chose to walk through it — "product first" — and three
-changes to the injection channel landed the same day, all before the first row of the window:
+Each of these opened this document once. None of them changed a requirement, a metric, a floor
+or a threshold; each moved a date, a boundary, or corrected a number. The full account of each
+lives in the PR it names and in the vault notes it produced; the commit history of this file
+holds the earlier long-form text. From here on, an instrument repair does not open the PRD —
+it moves the constants in `verdict_core` in a dated commit and cites this table.
 
-1. **The fence says what to do with what it injects** (`#316`). It carried prohibitions only.
-   Now: if a note fits, say `per <note>` and reuse it; if it contradicts the code in front of
-   you, say which and follow the code; if none fits, say nothing. `per <note>` is the form the
-   scorer detects (`#313`), so following the protocol is the act the instrument measures.
-2. **A note already given this session is not given again** (`#317`, §8 D6 built). The engine's
-   pool and order are unchanged; the hook partitions it into fresh injected hits and fresh
-   controls using its own ledger rows. A control the agent already holds is dropped too.
-3. **The injection carries what the note connects to** (`#318` engine, `#319` hook). `/search`
-   gains an opt-in `related` walk over concept edges; the hook prints one older note under each
-   hit as "shares a concept with", capped at two per injection, ledgered and deduplicated like a
-   hit. Measured before this: 2,850 of ~2,870 weekly retrieval calls read zero edges.
-
-**What the window now measures**: per-prompt uptake of *this* channel — protocol, dedup, edges —
-against the same per-prompt control, with the same floors and thresholds. The §2 invariance
-argument (3 and 5 draw the same pool) still holds for the hits; related notes are additive and
-are recorded as injected, so they are in the treatment arm and never in the control.
-
-**Not changed**: metric, floors (20/200), thresholds (2×·3pp·1pp), window dates, midpoint,
-extension rule. No change to the channel during the window from here (§5-R6 applies from
-2026-09-12 00:00 KST).
-
-**Not built today, still owed**: consumption as edges — when the scorer finds a note was used,
-write a session→note edge so the next session, and the briefing, can see what got reused.
-Schema change; after the window.
-
-### D9. Second window abandoned — 72% of the sample were rows the instrument made (2026-09-11, recorded with the new window's sample at 0/0)
-
-**The 08-31→09-14 window ends as an instrumentation investigation, not a verdict.** Two defects, both measured:
-
-1. **The night drain forged SessionEnd on live sessions.** `agents/schedulers/collect-sessions.py`
-   picked sessions by mtime — the newest being the one still running — and called distillation
-   with `hook_event_name: SessionEnd`; the scorer read that as a session end, scored mid-session
-   at 03:20 KST and pruned the ledger. Of the 36 `injection_uptake` rows inside the window,
-   **26 are those snapshots**. Fixed by `#312`.
-2. **The scorer only knew the name the ledger stored.** The ledger holds `wiki-1603.md`; agents
-   cite `wiki-1603`. 12,184 of 12,651 live hits have that form, so the commonest citation scored
-   zero. On the same 2,490 self-check pairs, old vs new scorer: treatment 35→95, cross-session
-   control 2→12. Fixed by `#313`.
-
-The remaining 10 rows are half the floor (20 sessions), the exact case §2's coverage clause describes. The floor is not lowered.
-
-**New window 2026-09-12 → 2026-09-26 (KST), two weeks.** Metric, floors, thresholds and the extension rule (once, until 10-10) unchanged. The repair boundary is the commit instant of `#313`, `2026-09-11T00:31:53Z`, and the window opens after it, so every row inside the window is a value from one instrument (`verdict_core.LEDGER_REPAIR_AT`). At the time of writing this paragraph the usable sample under the new instrument is **0 sessions · 0 prompts** — the same defence as D1.
-
-**Unchanged**: injection content, frequency and order (§5-R6). Reading edges in the search path (`related_doc_content`, measured +93% evidence) changes injection content, so it is **after the window closes (09-26)**. Landing it before the window opens would keep the D1 defence but would change the channel this window measures, and that decision is recorded as a separate one, not in this paragraph.
-
-**Quarantine record**: the 08-31→09-11 numbers (36 rows, treatment or control) are not verdict input.
-
-**The third repair (keeping ledger rows after scoring instead of deleting them) is deferred**: the dominant cause was cut off by defect 1 above, and per-session rescoring changes how the verdict aggregates, which is outside an in-window repair (D4). A separate decision after the window closes.
-
-### D8. D7 corrected — that number was not the value the contract measures (2026-09-07, same day)
-
-On the day D7 was written, the same spot was wrong three times. It was caught before the verdict date, so it is kept as a record, and D7's figures are **not to be cited as verdict grounds**.
-
-**Wrong 1 — the population was double-counted.** D7 rescored the whole ledger. But 26 of the 36 already-judged sessions were still in the ledger (`prune_session` had not removed them) and were counted twice. Measured again on pre-verdict sessions only, treatment 10.9% / control 7.7% — the value itself moves.
-
-**Wrong 2 — filename matches were counted as treatment.** 154 of the 188 treatment hits (82%) came from two sessions, and both were sessions inspecting the corpus. The assistant saying `wiki-1290.md` was counted as "used a memory". That is not using a memory, it is **looking at one**. Without filename matches: treatment 10.2% / control 7.0%, gap 3.2pp.
-
-**Wrong 3 — the live verdict reading 0 was suspected as an instrument defect.** It is not. The sessions carrying treatment **have not passed SessionEnd yet.** The largest contributor (122/262) is still alive now, and its value is recorded when it ends. Live 0 and the rescored value are not a fault but **the same instrument at different moments**.
-
-| Scoring | Treatment | Control | Note |
-|---|---|---|---|
-| D7 (whole ledger, filenames included) | 7.9% | 5.6% | **double-counted · self-observation contamination** |
-| Pre-verdict sessions only, filenames included | 10.9% | 7.7% | self-observation contamination |
-| Pre-verdict sessions only, phrases only | 10.2% | 7.0% | contamination removed, but includes unfinished sessions |
-| **event_log rows (the contract)** | **0%** | **0%** | completed sessions only — the value the contract measures |
-
-**Only the last row is what the contract measures.** §2 says "counted at SessionEnd", and a snapshot at an arbitrary moment is not that contract. The first three rows are mid-states before sessions end, and none of them enters the 09-14 verdict.
-
-**So what actually decides on 09-14**: whether the sessions alive now end by that day. If they do, their treatment values move from the ledger to event_log and the verdict stands. If not, that is not §2's instrumentation-fault clause but a sign that **sessions not finishing inside LEDGER_MAX_AGE_DAYS (14 days) are normal for this traffic** — the same defect family as D4, **the instrument's observation window is shorter than its subject**, not the floor.
-
-### D7. Mid-window baseline — withheld, and the denominator was not people (2026-09-07)
-
-> **[2026-09-07 correction — see D8] The figures below are void.** The population was double-counted, and 82% of the treatment was filename matches from sessions inspecting the corpus. Do not cite as verdict grounds. The narrative is preserved to record what was miscounted and how.
-
-Seven days before the close, this claimed to have run the §2 contract **exactly the way the contract defines it**, and it had not. The numbers below are for plugging into the pre-registered thresholds, not conclusions — the verdict date is 09-14, and this record is kept so that day can show whether the numbers moved.
-
-**Instrument check first.** Per §2's "instrument self-check" clause, the same transcripts were scored against **other sessions'** ledger hits: `11/6,681 = 0.2%`. That is 1/19 of the treatment (per-hit 3.8%), so the instrument is alive. Had it been at or above the treatment, every number below would have to be discarded.
-
-| Item | Value |
-|---|---|
-| Sample | 43 human sessions · 2,337 injected prompts |
-| Treatment (per-prompt) | **185/2,337 = 7.9%** |
-| Control (per-prompt) | **131/2,337 = 5.6%** |
-| Gap | **+2.3pp** · ratio **1.41×** |
-
-**Against the pre-registered thresholds**: works needs ≥2× **AND** ≥3pp — both unmet. Not working is ≤ control+1pp (6.6%) — 7.9% is above that. So **withheld**, and per §2 subject to a single extension. Reading it neither way is the content of this cell.
-
-**Loosening the detection threshold does not change the answer.** The fingerprint window was shrunk from 8 to 3 words, rescoring treatment and control the same way.
-
-| Window | Treatment | Control | Gap |
-|---|---|---|---|
-| 8 | 3.5% | 3.3% | 0.2pp |
-| 6 | 5.2% | 4.5% | 0.8pp |
-| 5 | 7.8% | 6.7% | 1.2pp |
-| 4 | 10.9% | 9.3% | 1.5pp |
-| 3 | 22.9% | 21.6% | 1.4pp |
-
-What loosening gains is not only treatment but control alongside it. The gap stays around 1pp throughout, so **there is no reason to change 8 words** — lowering the threshold to inflate the treatment number is indistinguishable from inflating the chance rate.
-
-**The coverage clause nearly triggered, and the reason it does not is the denominator.** §2 says below 1/2 coverage it is an instrumentation investigation, not a verdict. Against the 257 sessions distilled inside the window, coverage is 36/257 = 14%, below that line. But classifying all 257 showed **215 were automated security-review runs** (39 human, 3 undeterminable). Those are not a person solving a problem but a tool running itself, and structurally there is nothing to use an injection for.
-
-| Denominator | Coverage | Contract handling |
+| Date | What | Where the account lives |
 |---|---|---|
-| All distilled sessions, 257 | 36/257 = 14% | instrumentation investigation |
-| **Human sessions, 39** | **35/39 = 90%** | judgeable |
+| 2026-08-31 | D1 — first window (08-26→09-09) reset: the control was counted per hit, not per prompt (`#242`); the hook was registered twice and doubled the sample (`#245`, `#246`). Reset at sample 0/0 | `#242` `#245` `#246`, this file's history |
+| 2026-09-02 | D4 — ledger expiry (3 days) shorter than session lifetime (median 48h, max 177h); 78% of ledger rows lost before scoring. Expiry moved to 14 days; window kept, sample split at the repair commit (`LEDGER_REPAIR_AT`); verdict reads post-repair only | `1f45fec`, `scripts/peek.py`, this file's history |
+| 2026-09-07 | D7/D8 — a mid-window baseline was hand-computed, then found double-counted and contaminated by filename matches from sessions inspecting the corpus. Figures void; only `event_log` rows at SessionEnd are the contract's value | this file's history |
+| 2026-09-11 | D9 — second window (08-31→09-14) abandoned: 26 of 36 rows were mid-session snapshots from a drain forging SessionEnd (`#312`); the scorer missed `wiki-NNNN` without `.md` (`#313`). New window registered in code at sample 0/0; repair boundary = `#313` commit instant | `#312` `#313` `#314`, vault `wiki-1676` `wiki-1677` |
+| 2026-09-11 | D10 — three channel changes landed before the window opened: fence usage protocol (`#316`), in-session dedup (`#317`, D6 built), concept-linked notes in the injection (`#318` `#319`). The window measures this channel. Still owed: consumption as edges, after the window | `#316`–`#320`, vault `wiki-1679` |
 
-The instrumentation did not leak; **the denominator was not people.** The same finding led `#286` to move automated runs outside the distillation boundary (143 of 183 notes inside the window, 78%, came from that source). So this baseline was **measured when four-fifths of the corpus was machine records**, and the 09-14 verdict is the value after that is cleared. If the two match, corpus composition is irrelevant to this channel's effect; if they differ, the difference is the effect of `#286`.
-
-### D1. Measurement window reset — instrumentation fault (2026-08-31, recorded at sample 0/0)
-
-**The first window, 08-26→09-09, was not a measurement period but an instrument-failure period.** Two defects, both measured:
-
-1. **The quantity the contract named did not exist.** §2 registered the metric as *per-prompt* treatment vs *per-prompt* control, but the instrumentation counted the control **per hit only** (`used_control_prompts` absent). On the same ledger, per-prompt is 4.8× and per-hit is 1.2× — not a rough approximation but a **different ratio**, and the threshold (≥2×) reads the opposite way. Deployed today as `#242`. **Every earlier event is unusable.**
-2. **The sample was inflated twofold.** The recall hook was registered twice under two path spellings of the same file and wrote two ledger lines per prompt (451 of 508 signatures were exact duplicates 0.14s apart). The rate survives but `total_prompts` doubles, so the floor of 200 is met at **100 real prompts**. Fixed in `#245`, recurrence gate in `#246`, existing ledger de-duplicated (965→510 rows).
-
-**The only reason this reset is not post-hoc manipulation is timing.** The usable sample under the new instrument is **0 sessions · 0 prompts** at the time of writing this paragraph. A reset before data exists cannot, by definition, have been chosen after seeing a result. No adjustment made after seeing partial numbers on 09-14 has this defence.
-
-**Unchanged**: the metric, the sample floor (20/200), the works/not-working/withheld thresholds, the instrumentation-fault clause, the self-check.
-
-**Quarantine record**: the preliminary figures hand-computed from the old-instrument ledger (12 sessions, treatment 2.34pp vs control 0.49pp, 4.8× · gap 1.85pp) are **not verdict input.** Hiding them would be worse when found later, so they stay, but no verdict in the new window cites them.
-
-**If the floor is still unmet on 09-14**, that is not a failure of the reset but evidence that **the floor is unrealistic for this traffic**. Lowering the floor then is a revision after seeing data, and must be recorded as such.
-
-### D4. Sample coverage defect — the ledger dies before the session does (recorded 2026-09-02)
-
-**Measured (live, psql + the ledger directly):**
-
-| Item | Value |
-|---|---|
-| Sessions distilled inside the window | **93** |
-| Of those, with an `injection_uptake` row | **11 (11.8%)** |
-| Session lifetime in the injection ledger | median **48h** · max **177h** |
-| Sessions past the 3-day (72h) expiry | **10 of 22** |
-| Ledger rows held by those 10 sessions | **875 / 1,125 (78%)** |
-
-**Mechanism**: `uptake_core.LEDGER_MAX_AGE_DAYS = 3`. When a session has no ledger rows, `log_uptake_event` **quietly leaves nothing** via `if not records: return`. Sessions in this repo stay open for days, so their evidence expires before they end.
-
-**Why this is bias, not simple missingness**: the drop-out direction is not random but **session length**. Long sessions receive the most injections and have the most uptake opportunity. The measurement systematically discards the samples likely to carry signal and keeps only short sessions. By ledger rows, **78%** vanish that way.
-
-**The difference from D1 is not hidden.** D1 was a reset at usable sample 0/0 and had the definitional defence "could not have been chosen after seeing results". This decision **does not** have that defence. What is visible at the time of writing: of the 200 ledger rows the observation tool showed, 61 confirmed scorings with 0 echoes, sessions 11/20, prompts 108/200.
-
-**That sentence's "0 echoes" quoted the wrong population (corrected 2026-09-02).** Those 61 are a subset of the **ledger rows** the observation tool showed — the last 3 days, mostly sessions not yet ended — not the population the verdict reads. Counting the whole verdict series (`injection_uptake` events): **106 events · used_prompts 11 / total 770**, so echoes are **not zero** (11/748 before the repair, 0/22 after). The control is 0/770 throughout.
-
-The correction does not change D4's conclusion — neither the 11.8% coverage, nor the repair decision, nor the choice of (A) rests on that number. But **"0 echoes" was not a fact this document could rest on**, and that is recorded here. It was the fourth time in this window alone that a sample was quoted as a population.
-This is a judgement after seeing that number.
-
-**So what changes and what does not are separated.**
-- **Changes (instrument repair)**: the ledger expiry is set longer than a session's lifetime. Injected content, frequency and ranking do not change by a character, so this does not conflict with §5-R6's in-window freeze. Keeping a broken instrument running makes neither a valid extension nor a valid reset.
-- **Does not change**: the metric, the sample floor (20/200), the works/not-working/withheld thresholds (2×·3pp·1pp). Touching those numbers now is the same kind of post-hoc manipulation as 0.514.
-
-**Owner decision (2026-09-02): (A) keep the window + split aggregation.** The window close stays 09-14. Pre- and post-repair samples are reported separately, and **the verdict reads only the post-repair sample.** The pre-repair sample is not deleted — those sessions really happened, and hiding them is the same kind of manipulation as citing them. (B) reset was not chosen because it would be a reset after seeing results and would not have D1's defence; (A) keeps the floor without imitating that defence.
-
-**The boundary is not chosen — it is the repair commit's instant.** `verdict_core.LEDGER_REPAIR_AT = 2026-09-02T00:45:38+00:00` (commit `1f45fec`). A date somebody can later push or pull is not a boundary. Rows are **parsed as instants and compared**, not as strings (a row with a different offset silently crosses to the other side), and a row that does not parse counts toward **the side the verdict does not read (pre-repair)**.
-
-**Immediate consequence of this decision**: the verdict sample restarts at 0/0 (the pre-repair 11 sessions · 108 prompts are reported separately). The floor (20/200) has to be filled in the remaining 13 days, and if it is not, that is — as §8 D1 says — evidence that "the floor is unrealistic for this traffic", not a failure of the reset.
+**Rule for §8 from here** (per the five tests this repo adopted for what belongs in a PRD): an
+entry stays in §8 in full only if its subject is the product and it would still matter after the
+defect that prompted it is fixed. Otherwise it is one row above.
 
 ### Q8 / D5. The moment-of-demand surface — adopted: **PostToolUse anchor trigger** (2026-09-02)
 
@@ -394,9 +252,9 @@ This is a judgement after seeing that number.
 
 **First-person evidence**: the `SessionStart` claim cards reached the agent in this session too and **none was used** (`transcript.py update-allowlist`, `claude_clamp_default new-value`, etc.). All were "things that happened in this project" and none was "the file I am about to touch". That is not evidence the claims are bad but that **the delivery address was wrong because it was the project**. A one-session anecdote, though, so disposal only after the shadow log confirms it.
 
-**Shadow only during the window; injection from 09-15.** PostToolUse is orthogonal as a surface, but **injecting changes the transcript and contaminates the §2 treatment's fingerprint echoes.** During the window: log only, inject 0.
+**Shadow only during the §2 window; injection after it closes.** PostToolUse is orthogonal as a surface, but **injecting changes the transcript and contaminates the §2 treatment's fingerprint echoes.** During the window: log only, inject 0.
 
-**Falsification conditions (pre-registered)**: in the 09-15→09-29 window, if ① the anchor hit rate (share of revisit edits for which an anchor claim existed) is **under 10%**, or ② uptake of anchor injections is **under 2×** a random same-project-claim control or the gap is **under 3pp**, the anchor trigger is declared not working and the surface is removed. The thresholds reuse the §2 values and do not change during the window.
+**Falsification conditions (pre-registered)**: in the two weeks after the §2 window closes (dates registered in code when it opens, like §2's), if ① the anchor hit rate (share of revisit edits for which an anchor claim existed) is **under 10%**, or ② uptake of anchor injections is **under 2×** a random same-project-claim control or the gap is **under 3pp**, the anchor trigger is declared not working and the surface is removed. The thresholds reuse the §2 values and do not change during the window.
 
 **Rejected candidates**: billboard + pull — pull demand is already dead (20 of 22 MCP tools at 1–2 uses per week, the last 3 active recalls all self-diagnosis). Stuck trigger — its ceiling cannot be measured, so the design is unfalsifiable. Kept as a second candidate after the anchor is validated.
 
@@ -404,7 +262,7 @@ This is a judgement after seeing that number.
 
 3,795 injected hits fold to 2,521 unique notes. One note is re-injected up to **25 times** in one session. It is text the agent already holds in context, so it is **pure duplication** outside the precision debate.
 
-**Dedup reads the uptake ledger as the source of truth and runs in the shared core.** Per-adapter state files are the structure that reproduced the kimi incident; putting it in the engine gives the server session state (precedent: the local-serve corpus doubling) and contaminates the control measurement. **If the ledger cannot be read, the injection is kept** — re-injection is cheaper than omission, and the ledger can die before the session does (§8 D4). Start after the window closes (09-26), first in §5-R6's derived list.
+**Dedup reads the uptake ledger as the source of truth and runs in the shared core.** Per-adapter state files are the structure that reproduced the kimi incident; putting it in the engine gives the server session state (precedent: the local-serve corpus doubling) and contaminates the control measurement. **If the ledger cannot be read, the injection is kept** — re-injection is cheaper than omission, and the ledger can die before the session does (§8 D4). Built 2026-09-11 (`#317`, §8 D10), first in §5-R6's derived list.
 
 ### D2. R2 anchor design (resolving Q5 of §5-R2)
 
@@ -451,4 +309,4 @@ Rewriting values is data tampering and cannot be audited. Instead an era marker 
 
 ### Schedule
 
-Implementation of D2 and D3 starts **after the window closes (09-26)**. Changing the distillation or claim surface changes the content of the notes that get injected, and that is not orthogonal to the §2 measurement (same reason as §5-R3).
+Implementation of D2 and D3 starts **after the window closes**. Changing the distillation or claim surface changes the content of the notes that get injected, and that is not orthogonal to the §2 measurement (same reason as §5-R3).
