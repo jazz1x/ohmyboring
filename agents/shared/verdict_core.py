@@ -188,10 +188,8 @@ def unreported(rows):
     return sessions, total
 
 
-#: The window's own dates and its one-time progress gate, held here beside the thresholds so the
-#: PRD-transcription test covers them too. They were previously spelled in `scripts/peek.py`, in
-#: GOALS, in the PRD, and in a docstring that still said the window closed 2026-09-09 a day after
-#: it was reset to 09-14 — a comment nobody could see rot.
+#: The window's own dates and its one-time progress gate, held beside the thresholds so the
+#: PRD-transcription test covers them too.
 #:
 #: The midpoint is a one-time progress gate, not a recurring one: below the floor on that date the
 #: window becomes an instrumentation investigation rather than a wait (docs/PRD.md §2). It does not
@@ -202,21 +200,17 @@ def unreported(rows):
 #: watched precisely because it is short. Fixed offset rather than the machine's local zone: this
 #: also runs inside a container, and a gate that moves with `TZ` is not a registered date.
 WINDOW_TZ = timezone(timedelta(hours=9))
-WINDOW_SINCE = "2026-08-31"
-WINDOW_UNTIL = "2026-09-14"
-MIDPOINT = "2026-09-08"
+WINDOW_SINCE = "2026-09-12"
+WINDOW_UNTIL = "2026-09-26"
+MIDPOINT = "2026-09-19"
 #: Scored sessions required at the midpoint, **per adapter** — the same basis as MIN_SESSIONS,
 #: which is applied per agent because the adapters run different products. Summing them would let
 #: 8 Claude Code sessions plus 3 from elsewhere clear a gate neither of them clears.
 MIDPOINT_MIN_SCORED = 10
 
-#: The moment the ledger cutoff went from 3 days to 14 (commit 1f45fec, docs/PRD.md §8 D4).
-#: Before it, a session that outlived three days had its injection rows pruned before SessionEnd
-#: could score them, and `log_uptake_event` returned silently — 93 sessions distilled inside the
-#: window, 11 with an uptake row. The owner chose to keep the window and split the sample rather
-#: than reset (§8 D4), so this boundary has to be mechanical: it is the commit timestamp, not a
-#: date anybody picked after looking at the rates.
-LEDGER_REPAIR_AT = "2026-09-02T00:45:38+00:00"
+#: Commit instant of the last instrument repair (#313, 7d99f7d). Rows before it were scored by a
+#: different instrument and are not read by the verdict — docs/PRD.md §8 D9.
+LEDGER_REPAIR_AT = "2026-09-11T00:31:53+00:00"
 
 
 def _instant(value):
@@ -404,5 +398,3 @@ def collect(rows, since=None, agent=None, until=None):
         for key in COUNTERS:
             bucket[key] += field(row, key)
     return per_agent, skipped_old
-
-

@@ -12,7 +12,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -237,7 +237,12 @@ class BriefDocument:
 
 #: The window's final stretch, after which the ask runs every morning: three days is enough to sit
 #: down for the minute it takes and not so long that daily becomes the nag it replaced.
-_AUDIT_LAST_CALL = "2026-09-12"
+_AUDIT_LAST_CALL_DAYS = 3
+
+
+def _audit_last_call():
+    close = datetime.fromisoformat(verdict_core.WINDOW_UNTIL)
+    return (close - timedelta(days=_AUDIT_LAST_CALL_DAYS - 1)).date().isoformat()
 
 
 def _is_monday(stamp: str) -> bool:
@@ -271,7 +276,7 @@ def audit_notice(label_stats) -> str:
         # Past the window the figure this unblocks can no longer be computed, so the ask is spent.
         # Without this the line outlives the thing it was asking for.
         return ""
-    if today < _AUDIT_LAST_CALL and not _is_monday(today):
+    if today < _audit_last_call() and not _is_monday(today):
         # The count only moves when a person sits down for a minute, so on the days nobody did it
         # says exactly what it said yesterday. It stood at 20 in all 8 briefings actually sent,
         # 9 days running -- which is how a line teaches the reader to skip that part of the

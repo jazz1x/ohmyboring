@@ -22,7 +22,7 @@ uv = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(uv)
 
 
-def _event(session, used, total, when="2026-09-03T00:00:00+00:00"):
+def _event(session, used, total, when="2026-09-13T00:00:00+00:00"):
     return {
         "event": "injection_uptake",
         "observed_at": when,
@@ -56,7 +56,7 @@ class JsonMode(unittest.TestCase):
         """
         rows = [
             _event("a", 0, 10),
-            {"event": "injection_unreported", "observed_at": "2026-09-03T00:00:00+00:00",
+            {"event": "injection_unreported", "observed_at": "2026-09-13T00:00:00+00:00",
              "attributes": {"aged_sessions": 2, "aged_rows": 9}},
         ]
         code, out, err = self._run(rows)
@@ -86,14 +86,14 @@ class JsonMode(unittest.TestCase):
         self.assertEqual(payload["floors"]["prompts"], uv.verdict_core.MIN_INJECTED_PROMPTS)
 
     def test_pre_and_post_repair_stay_separate(self):
-        """§8 D4 chose (A): the verdict reads only post-repair rows, and the rest is reported."""
+        """§8 D9: the window opens after the last repair, so a pre-repair row never reaches it."""
         rows = [
-            _event("old", 5, 50, when="2026-09-01T00:00:00+00:00"),
-            _event("new", 0, 10, when="2026-09-03T00:00:00+00:00"),
+            _event("old", 5, 50, when="2026-09-11T00:00:00+00:00"),
+            _event("new", 0, 10, when="2026-09-13T00:00:00+00:00"),
         ]
         _, out, _ = self._run(rows)
         payload = json.loads(out)
-        self.assertEqual(payload["pre_repair"]["claude-code"]["sessions"], 1)
+        self.assertEqual(payload["pre_repair"], {})
         self.assertEqual(payload["post_repair"]["claude-code"]["sessions"], 1)
         self.assertEqual(payload["post_repair"]["claude-code"]["used_prompts"], 0)
 
@@ -124,20 +124,20 @@ class Midpoint(unittest.TestCase):
         """Before the midpoint it is not due; after the close it is spent — and an empty sample
         must not turn either into noise."""
         thin = self._events(1)
-        self.assertEqual(self._cli(thin, "2026-09-02")[0], uv.MIDPOINT_NOT_DUE)
-        self.assertEqual(self._cli(thin, "2026-09-20")[0], uv.MIDPOINT_NOT_DUE)
-        self.assertEqual(self._cli([], "2026-09-02")[0], uv.MIDPOINT_NOT_DUE)
-        self.assertEqual(self._cli(thin, "2026-09-08")[0], uv.MIDPOINT_SHORT)
+        self.assertEqual(self._cli(thin, "2026-09-13")[0], uv.MIDPOINT_NOT_DUE)
+        self.assertEqual(self._cli(thin, "2026-09-27")[0], uv.MIDPOINT_NOT_DUE)
+        self.assertEqual(self._cli([], "2026-09-13")[0], uv.MIDPOINT_NOT_DUE)
+        self.assertEqual(self._cli(thin, "2026-09-19")[0], uv.MIDPOINT_SHORT)
 
     def test_nothing_to_read_is_not_a_shortfall(self):
         """No events at all is a failure of observation, not of sample — and it must survive the
         trip through `main()`, which is where it did not."""
-        code, out = self._cli([], "2026-09-08")
+        code, out = self._cli([], "2026-09-19")
         self.assertEqual(code, uv.MIDPOINT_UNREADABLE, out)
         self.assertIn("관측 불가", out)
 
     def test_an_unreachable_engine_never_reads_as_a_shortfall(self):
-        code, _ = self._cli([], "2026-09-08", url_ok=False)
+        code, _ = self._cli([], "2026-09-19", url_ok=False)
         self.assertEqual(code, 2)
 
     def test_the_floor_is_per_adapter(self):
@@ -145,14 +145,14 @@ class Midpoint(unittest.TestCase):
         rows = [_event("a", 0, 10) for _ in range(8)]
         rows += [dict(_event("k", 0, 10), attributes={**_event("k", 0, 10)["attributes"],
                                                       "agent": "kimi"}) for _ in range(3)]
-        code, out = self._cli(rows, "2026-09-08")
+        code, out = self._cli(rows, "2026-09-19")
         self.assertEqual(code, uv.MIDPOINT_SHORT, out)
         self.assertIn("claude-code", out)
         self.assertIn("kimi", out)
 
     def test_json_and_midpoint_refuse_each_other(self):
         """One answers with a payload, the other with an exit code; dropping either is silent."""
-        code, out = self._cli(self._events(1), "2026-09-08", argv=("--json", "--midpoint"))
+        code, out = self._cli(self._events(1), "2026-09-19", argv=("--json", "--midpoint"))
         self.assertEqual(code, 2)
         self.assertIn("함께 못 쓴다", out)
 
@@ -163,15 +163,15 @@ class Midpoint(unittest.TestCase):
         made the message text load-bearing.
         """
         met = [_event(f"s{i}", 0, 10) for i in range(uv.verdict_core.MIDPOINT_MIN_SCORED)]
-        self.assertEqual(self._cli(met, "2026-09-08")[0], uv.MIDPOINT_OK)
-        self.assertEqual(self._cli(met, "2026-09-02")[0], uv.MIDPOINT_NOT_DUE)
+        self.assertEqual(self._cli(met, "2026-09-19")[0], uv.MIDPOINT_OK)
+        self.assertEqual(self._cli(met, "2026-09-13")[0], uv.MIDPOINT_NOT_DUE)
         self.assertNotEqual(uv.MIDPOINT_OK, uv.MIDPOINT_NOT_DUE)
 
     def test_the_gate_cannot_be_narrowed_to_one_adapter(self):
         """`--agent` would hide another adapter's shortfall — the sum the per-adapter rule forbids,
         arriving through a flag instead of arithmetic."""
         code, out = self._cli(
-            self._events(1), "2026-09-08", argv=("--midpoint", "--agent", "claude-code")
+            self._events(1), "2026-09-19", argv=("--midpoint", "--agent", "claude-code")
         )
         self.assertEqual(code, 2)
         self.assertIn("좁힐 수 없다", out)
@@ -186,8 +186,8 @@ class Midpoint(unittest.TestCase):
 
         V = uv.verdict_core
         self.assertEqual(V.WINDOW_TZ.utcoffset(None), timedelta(hours=9))
-        run = datetime(2026, 9, 8, 8, 0, tzinfo=V.WINDOW_TZ)
-        self.assertEqual(run.astimezone(tz.utc).date().isoformat(), "2026-09-07")
+        run = datetime(2026, 9, 19, 8, 0, tzinfo=V.WINDOW_TZ)
+        self.assertEqual(run.astimezone(tz.utc).date().isoformat(), "2026-09-18")
         self.assertEqual(run.date().isoformat(), V.MIDPOINT, "the gate must be due on that run")
 
     def test_the_unset_path_reads_the_window_zone_not_utc(self):
@@ -203,7 +203,7 @@ class Midpoint(unittest.TestCase):
         V = uv.verdict_core
         # 23:30 UTC is already the next day in the window's zone. If `window_today` reads UTC it
         # answers with yesterday, which is exactly the day the 08:00 KST briefing would lose.
-        late = datetime(2026, 9, 7, 23, 30, tzinfo=tz.utc)
+        late = datetime(2026, 9, 18, 23, 30, tzinfo=tz.utc)
 
         class _Frozen(datetime):
             @classmethod
@@ -213,8 +213,8 @@ class Midpoint(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("BORING_TODAY", None)
             with mock.patch.object(V, "datetime", _Frozen):
-                self.assertEqual(V.window_today(), "2026-09-08")
-                self.assertEqual(late.date().isoformat(), "2026-09-07", "UTC would say yesterday")
+                self.assertEqual(V.window_today(), "2026-09-19")
+                self.assertEqual(late.date().isoformat(), "2026-09-18", "UTC would say yesterday")
 
     def test_a_malformed_override_falls_back_loudly(self):
         """A back door that turns the measurement off by accident is worse than no back door.
@@ -235,14 +235,14 @@ class Midpoint(unittest.TestCase):
             self.assertNotEqual(got, bad, f"{bad!r} must not be taken as a date")
             self.assertIn("YYYY-MM-DD", err.getvalue(), bad)
 
-        with mock.patch.dict(os.environ, {"BORING_TODAY": "2026-09-08"}):
-            self.assertEqual(V.window_today(), "2026-09-08", "a well-formed override still works")
+        with mock.patch.dict(os.environ, {"BORING_TODAY": "2026-09-19"}):
+            self.assertEqual(V.window_today(), "2026-09-19", "a well-formed override still works")
 
     def test_the_dates_are_not_spelled_here(self):
         """The gate reads `verdict_core`, which the PRD-transcription test covers."""
         source = (HERE / "uptake-verdict.py").read_text(encoding="utf-8")
-        self.assertNotIn("2026-09-08", source, "the midpoint date is owned by verdict_core")
-        self.assertNotIn("2026-09-14", source, "the window close is owned by verdict_core")
+        self.assertNotIn("2026-09-19", source, "the midpoint date is owned by verdict_core")
+        self.assertNotIn("2026-09-26", source, "the window close is owned by verdict_core")
 
 
 if __name__ == "__main__":
