@@ -105,10 +105,43 @@ def test_short_and_unstructured_notes_are_untouched():
     assert recall_core.salient(None) == ""
 
 
+def _hit(name, text):
+    return {"source_path": f"/vault/wiki/{name}", "snippet": text, "dist": 0.3, "dist_kind": "vector_cosine"}
+
+
+def _recall(hits, session_id="s1", prompt="why did the connection pool die again"):
+    """Drive the real hook path with a stubbed engine and a spooled ledger; return the injected text."""
+    import io
+    import json
+    from contextlib import redirect_stdout
+    from unittest import mock
+
+    with tempfile.TemporaryDirectory() as d:
+        env = {"BORING_INJECTION_LEDGER": os.path.join(d, "ledger.jsonl"), "BORING_EVENT_SINK": "spool"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(recall_core, "DrudgeClient") as client:
+            client.return_value.search.return_value = hits
+            out = io.StringIO()
+            with redirect_stdout(out):
+                recall_core.run_recall({"prompt": prompt, "session_id": session_id})
+    raw = out.getvalue().strip()
+    if not raw:
+        return ""
+    return json.loads(raw)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_the_fence_says_how_to_use_what_it_injects():
+    """Measured 2026-09-11: the fence carried only prohibitions, and the owner's diagnosis was
+    that agents do not know what to do with the three lines. The protocol names the citation
+    form the uptake scorer detects (`per <note>`), so following it is what gets measured."""
+    ctx = _recall([_hit("wiki-0007.md", "the pool died because deadpool recycled a closed socket " * 3)])
+    assert "not instructions" in ctx, "the prohibition stays"
+    assert "per <note>" in ctx and "reuse it" in ctx, ctx
+    assert "contradicts the code" in ctx, ctx
+    assert "- [wiki-0007.md]" in ctx
+
+
 if __name__ == "__main__":
-    test_session_throttle_blocks_repeated_calls()
-    test_session_throttle_expires_after_window()
-    test_empty_session_id_never_throttled()
-    test_the_snippet_carries_the_decision_not_only_the_background()
-    test_short_and_unstructured_notes_are_untouched()
-    print("ok - recall_core session throttle · snippet carries the decision")
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+    print("ok - recall_core session throttle · snippet carries the decision · fence protocol")
