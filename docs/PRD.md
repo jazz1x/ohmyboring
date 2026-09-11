@@ -218,6 +218,37 @@ The engineer's objection is accepted: the consumer of the cheapest R2 implementa
 
 ## 8. Owner decisions
 
+### D10. The channel the window measures is the product, not the instrument (2026-09-11, before the window opened, sample 0/0)
+
+D9 left one door open: landing channel changes before 09-12 keeps the D1 defence but changes
+what the window measures. The owner chose to walk through it — "product first" — and three
+changes to the injection channel landed the same day, all before the first row of the window:
+
+1. **The fence says what to do with what it injects** (`#316`). It carried prohibitions only.
+   Now: if a note fits, say `per <note>` and reuse it; if it contradicts the code in front of
+   you, say which and follow the code; if none fits, say nothing. `per <note>` is the form the
+   scorer detects (`#313`), so following the protocol is the act the instrument measures.
+2. **A note already given this session is not given again** (`#317`, §8 D6 built). The engine's
+   pool and order are unchanged; the hook partitions it into fresh injected hits and fresh
+   controls using its own ledger rows. A control the agent already holds is dropped too.
+3. **The injection carries what the note connects to** (`#318` engine, `#319` hook). `/search`
+   gains an opt-in `related` walk over concept edges; the hook prints one older note under each
+   hit as "shares a concept with", capped at two per injection, ledgered and deduplicated like a
+   hit. Measured before this: 2,850 of ~2,870 weekly retrieval calls read zero edges.
+
+**What the window now measures**: per-prompt uptake of *this* channel — protocol, dedup, edges —
+against the same per-prompt control, with the same floors and thresholds. The §2 invariance
+argument (3 and 5 draw the same pool) still holds for the hits; related notes are additive and
+are recorded as injected, so they are in the treatment arm and never in the control.
+
+**Not changed**: metric, floors (20/200), thresholds (2×·3pp·1pp), window dates, midpoint,
+extension rule. No change to the channel during the window from here (§5-R6 applies from
+2026-09-12 00:00 KST).
+
+**Not built today, still owed**: consumption as edges — when the scorer finds a note was used,
+write a session→note edge so the next session, and the briefing, can see what got reused.
+Schema change; after the window.
+
 ### D9. Second window abandoned — 72% of the sample were rows the instrument made (2026-09-11, recorded with the new window's sample at 0/0)
 
 **The 08-31→09-14 window ends as an instrumentation investigation, not a verdict.** Two defects, both measured:
