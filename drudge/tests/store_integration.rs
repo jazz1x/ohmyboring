@@ -37,7 +37,6 @@ fn unique_path(prefix: &str) -> String {
         .as_nanos();
     format!("/vault/wiki/{prefix}-{ts}.md")
 }
-
 fn dummy_frontmatter(path: &str) -> FrontMatter {
     FrontMatter {
         origin: "personal".to_string(),
@@ -199,7 +198,7 @@ async fn current_claims_honors_exclude_origins() {
     // No exclusion → both visible.
     let all = subjects(
         store
-            .current_claims(&query, 20, &[], None, None, None)
+            .current_claims(&query, 20, &[], None, None, None, false)
             .await
             .expect("claims all"),
     );
@@ -211,7 +210,15 @@ async fn current_claims_honors_exclude_origins() {
     // Exclude company → company claim must be filtered out, personal kept.
     let filtered = subjects(
         store
-            .current_claims(&query, 20, &["company".to_string()], None, None, None)
+            .current_claims(
+                &query,
+                20,
+                &["company".to_string()],
+                None,
+                None,
+                None,
+                false,
+            )
             .await
             .expect("claims filtered"),
     );
@@ -1312,6 +1319,8 @@ async fn claim_inherits_note_anchor_and_era_is_marked() {
             "fact",
             "certain",
             anchor.as_deref(),
+            None,
+            None,
         )
         .await
         .expect("upsert anchored claim");
@@ -1420,12 +1429,14 @@ async fn current_claims_filters_by_anchor_path() {
             "fact",
             "certain",
             Some("test:a/b.rs:L10"),
+            None,
+            None,
         )
         .await
         .expect("upsert anchored claim");
 
     let hits = store
-        .current_claims(&emb, 10, &[], Some(project), None, Some("a/b.rs"))
+        .current_claims(&emb, 10, &[], Some(project), None, Some("a/b.rs"), false)
         .await
         .expect("claims filtered by anchor_path");
     assert!(
@@ -1437,7 +1448,15 @@ async fn current_claims_filters_by_anchor_path() {
         "anchored"
     );
     let misses = store
-        .current_claims(&emb, 10, &[], Some(project), None, Some("no/such.rs"))
+        .current_claims(
+            &emb,
+            10,
+            &[],
+            Some(project),
+            None,
+            Some("no/such.rs"),
+            false,
+        )
         .await
         .expect("claims filtered by missing anchor_path");
     assert!(
@@ -1447,7 +1466,7 @@ async fn current_claims_filters_by_anchor_path() {
     // Prefix semantics (contract): only the path STARTING with anchor_path matches — a bare
     // suffix of the path (`b.rs` inside `a/b.rs`) is not `<project>:b.rs…` and must not match.
     let suffix = store
-        .current_claims(&emb, 10, &[], Some(project), None, Some("b.rs"))
+        .current_claims(&emb, 10, &[], Some(project), None, Some("b.rs"), false)
         .await
         .expect("claims filtered by path suffix");
     assert!(
@@ -1455,7 +1474,7 @@ async fn current_claims_filters_by_anchor_path() {
         "a path suffix is not an anchor prefix and must not match"
     );
     let prefix = store
-        .current_claims(&emb, 10, &[], Some(project), None, Some("a/"))
+        .current_claims(&emb, 10, &[], Some(project), None, Some("a/"), false)
         .await
         .expect("claims filtered by path prefix");
     assert!(
@@ -1463,7 +1482,7 @@ async fn current_claims_filters_by_anchor_path() {
         "a path prefix must match"
     );
     let unfiltered = store
-        .current_claims(&emb, 10, &[], Some(project), None, None)
+        .current_claims(&emb, 10, &[], Some(project), None, None, false)
         .await
         .expect("claims unfiltered");
     assert!(

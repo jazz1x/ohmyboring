@@ -102,6 +102,7 @@ pub trait GraphExtractor: Send + Sync + Default {
         &'a self,
         store: &'a Store,
         llm: &'a Llm,
+        cfg: &'a config::BoringConfig,
         front: &'a FrontMatter,
         body: &'a str,
         stats: &'a mut Stats,
@@ -144,6 +145,7 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         &self,
         store: &Store,
         llm: &Llm,
+        cfg: &config::BoringConfig,
         front: &FrontMatter,
         body: &str,
         stats: &mut Stats,
@@ -227,8 +229,13 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                     continue;
                 }
                 let emb = llm.embed(&format!("{subject} {predicate} {value}")).await?;
-                let anchor = crate::anchor::anchor_for_claim(&note_anchors, &subject, value)
-                    .map(|a| a.to_db_string());
+                let anchor = crate::anchor::anchor_for_claim(&note_anchors, &subject, value);
+                // D2 step 2: an anchor under a registered code_index root gets the symbol-span
+                // hash layer; unregistered projects stay storable without verification.
+                let anchor_hash = anchor
+                    .as_ref()
+                    .and_then(|a| crate::anchor_hash::hash_for_anchor(a, &cfg.code_index.sources));
+                let anchor_db = anchor.as_ref().map(crate::anchor::Anchor::to_db_string);
                 store
                     .upsert_claim_with_anchor(
                         &subject,
@@ -239,7 +246,9 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                         &emb,
                         cl.kind(),
                         cl.confidence(),
-                        anchor.as_deref(),
+                        anchor_db.as_deref(),
+                        anchor_hash.as_ref().map(|h| h.hash.as_str()),
+                        anchor_hash.as_ref().map(|h| h.symbol.as_str()),
                     )
                     .await?;
                 store.upsert_claim_node(path, &front.project, cl).await?;
@@ -432,7 +441,7 @@ pub async fn ingest_file_with<C: Chunker, G: GraphExtractor>(
 
     // deterministic semantic graph from frontmatter (no LLM extraction).
     G::default()
-        .extract(store, llm, &front, &body, stats)
+        .extract(store, llm, cfg, &front, &body, stats)
         .await?;
 
     if prev.is_some() {

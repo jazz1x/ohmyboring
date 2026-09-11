@@ -62,6 +62,9 @@ pub struct AuditStats {
     pub claims_anchored: usize,
     pub claims_unanchored: usize,
     pub claims_pre_anchor: usize,
+    /// D2 step 2: claims whose code anchor no longer hashes equal — the moment-of fact counter
+    /// beside the era counts.
+    pub claims_stale: usize,
 }
 
 /// Pure logic: DB aggregation → returns `AuditStats`. No I/O.
@@ -121,6 +124,7 @@ pub async fn stats(store: &Store, allow_company: bool) -> Result<AuditStats> {
         claims_anchored: eras.anchored,
         claims_unanchored: eras.unanchored,
         claims_pre_anchor: eras.pre_anchor,
+        claims_stale: store.claim_stale_count().await?,
     })
 }
 
@@ -177,8 +181,8 @@ pub async fn run(store: &Store, allow_company: bool) -> Result<()> {
         s.semantic_uses, s.semantic_about
     );
     println!(
-        "  [claims by era] anchored {} · unanchored {} · pre-anchor {}",
-        s.claims_anchored, s.claims_unanchored, s.claims_pre_anchor
+        "  [claims by era] anchored {} · unanchored {} · pre-anchor {} · stale {}",
+        s.claims_anchored, s.claims_unanchored, s.claims_pre_anchor, s.claims_stale
     );
     Ok(())
 }

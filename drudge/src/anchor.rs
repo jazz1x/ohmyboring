@@ -50,6 +50,41 @@ impl Anchor {
             None => format!("{}:{}", self.project, self.path),
         }
     }
+
+    /// Parse the stored `project:path[:Lstart[-Lend]]` back into an anchor (the inverse of
+    /// `to_db_string`). Resolver-produced paths never contain `:`, so the fields before the
+    /// optional span are exactly project and path; anything else yields `None`.
+    pub fn from_db_string(db: &str) -> Option<Anchor> {
+        let (project, rest) = db.split_once(':')?;
+        let (path, span) = match rest.rsplit_once(':') {
+            Some((path, span)) => (path, Some(parse_db_span(span)?)),
+            None => (rest, None),
+        };
+        if project.is_empty() || path.is_empty() {
+            return None;
+        }
+        Some(Anchor {
+            project: project.to_owned(),
+            path: path.to_owned(),
+            span,
+        })
+    }
+}
+
+/// `L10` → 10-10, `L10-L24` → 10-24.
+fn parse_db_span(span: &str) -> Option<LineSpan> {
+    let span = span.strip_prefix('L')?;
+    if let Some((start, end)) = span.split_once("-L") {
+        return Some(LineSpan {
+            start: start.parse().ok()?,
+            end: end.parse().ok()?,
+        });
+    }
+    let line: u32 = span.parse().ok()?;
+    Some(LineSpan {
+        start: line,
+        end: line,
+    })
 }
 
 /// D2 inheritance: a claim takes the note anchor whose path (or file stem) the claim's
@@ -419,5 +454,28 @@ mod tests {
     fn anchor_for_claim_without_anchors_is_none() {
         assert!(anchor_for_claim(&[], "subject", "value").is_none());
         assert!(anchor_for_claim(&anchor("nothing here"), "subject", "value").is_none());
+    }
+
+    #[test]
+    fn from_db_string_round_trips_every_stored_shape() {
+        use super::Anchor;
+
+        for db in [
+            "ohmyboring:agents/shared/uptake_core.py",
+            "ohmyboring:agents/shared/uptake_core.py:L283",
+            "ohmyboring:drudge/src/store.rs:L1212-L1240",
+        ] {
+            let parsed = Anchor::from_db_string(db).unwrap_or_else(|| panic!("parse {db}"));
+            assert_eq!(parsed.to_db_string(), db);
+        }
+        // An absolute path under a registered root keeps its span.
+        let abs = Anchor::from_db_string("proj:/var/tmp/repo/src/x.rs:L3-L5")
+            .unwrap_or_else(|| panic!("parse absolute path anchor"));
+        assert_eq!(abs.project, "proj");
+        assert_eq!(abs.path, "/var/tmp/repo/src/x.rs");
+        assert_eq!(abs.span, Some(ls(3, 5)));
+        // Garbage stays None instead of guessing.
+        assert!(Anchor::from_db_string("no-project-separator").is_none());
+        assert!(Anchor::from_db_string("p:path:not-a-span").is_none());
     }
 }
