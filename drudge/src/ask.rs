@@ -125,7 +125,7 @@ pub async fn answer(
     let q_emb = llm.embed(question).await?;
     let mut claim_ctx = String::new();
     for cl in store
-        .current_claims(&q_emb, 5, exclude_origins, project, None, None)
+        .current_claims(&q_emb, 5, exclude_origins, project, None, None, false)
         .await?
     {
         let _ = writeln!(
@@ -713,7 +713,15 @@ pub async fn project_status(
         .await?;
     let q_emb = llm.embed(project).await?;
     let claims = store
-        .current_claims(&q_emb, 10, exclude_origins, Some(project), None, None)
+        .current_claims(
+            &q_emb,
+            10,
+            exclude_origins,
+            Some(project),
+            None,
+            None,
+            false,
+        )
         .await?;
 
     if docs.is_empty() && claims.is_empty() {

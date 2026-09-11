@@ -112,6 +112,14 @@ pub(crate) async fn do_sync(
         }
     };
 
+    match crate::anchor_hash::check_stale_anchors(store, &cfg.code_index.sources).await {
+        Ok(stats) => eprintln!(
+            "[scheduler] anchors checked={} repinned={} stale={}",
+            stats.checked, stats.repinned, stats.stale
+        ),
+        Err(e) => eprintln!("[scheduler] anchor staleness warning (ignored): {e:#}"),
+    }
+
     Ok(SyncOutcome {
         ingest,
         total_chunks,

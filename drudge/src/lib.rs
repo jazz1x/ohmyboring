@@ -6,6 +6,7 @@
 //! `tests/` also link against it so they can exercise the Storage Layer and
 //! other kernel contracts directly against a live Postgres backend.
 pub mod anchor;
+pub mod anchor_hash;
 pub mod ask;
 pub mod audit;
 pub mod code_index;
