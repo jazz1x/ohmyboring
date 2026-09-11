@@ -83,6 +83,35 @@ def test_a_note_name_the_user_typed_is_not_evidence():
     assert (used, total) == (0, 1)
 
 
+def test_assistant_citing_the_note_without_its_suffix_counts():
+    # Live 2026-09-11: 12,184 of 12,651 ledger hits are wiki-NNNN.md and agents cite them as
+    # wiki-NNNN. Scoring the suffixed form only made those citations invisible.
+    record = uptake_core.injection_record("s1", "why did the pool die", [_hit()], 3)
+    transcript = (
+        f"[user] 📚 past experience\n- [wiki-0007.md] {SNIPPET}\nwhy did the pool die\n"
+        "[assistant] wiki-0007 covers this: same recycled-socket case.\n"
+    )
+    r = uptake_core.session_uptake([record], transcript)
+    assert (r.used_hits, r.total_hits) == (1, 1)
+    typed = "wiki-0007 다시 봐줘"
+    record = uptake_core.injection_record("s1", typed, [_hit()], 3)
+    r = uptake_core.session_uptake([record], f"[user] {typed}\n[assistant] wiki-0007 다시 읽었습니다.\n")
+    assert (r.used_hits, r.total_hits) == (0, 1), "a stem the user typed is still not evidence"
+
+
+def test_a_bare_word_stem_is_not_tried():
+    # `pool.md` → `pool` would score every sentence about pools. Only numbered ids get a stem.
+    assert uptake_core.source_names("pool.md") == ["pool.md"]
+    assert uptake_core.source_names("wiki-0007.md") == ["wiki-0007.md", "wiki-0007"]
+    assert uptake_core.source_names("daily-brief-2026-09-11.md") == [
+        "daily-brief-2026-09-11.md",
+        "daily-brief-2026-09-11",
+    ]
+    record = uptake_core.injection_record("s1", "why", [_hit(src="pool.md")], 3)
+    r = uptake_core.session_uptake([record], "[user] why\n[assistant] the pool is fine.\n")
+    assert r.used_hits == 0
+
+
 def test_a_source_name_must_match_on_word_boundaries():
     # Both sides are space-joined token streams, so a bare substring search let "pool.md" match
     # inside "connection-pool.md". Ledger sources are arbitrary basenames, not only wiki-NNNN.
