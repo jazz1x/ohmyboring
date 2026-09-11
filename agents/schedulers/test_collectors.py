@@ -71,6 +71,40 @@ def test_claude_collector_fails_when_sync_fails():
         claude_collect.LIMIT = old_limit
 
 
+def test_claude_backfill_does_not_claim_to_be_a_session_end():
+    old_mark_dir = claude_collect.markers.MARK_DIR
+    old_min_kb = claude_collect.MIN_KB
+    old_limit = claude_collect.LIMIT
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "claude" / "project"
+            source.mkdir(parents=True)
+            (source / "s1.jsonl").write_text(json.dumps({"cwd": "/work/repo"}) + "\nbody\n", encoding="utf-8")
+
+            claude_collect.markers.set_mark_dir(str(root / "markers"))
+            claude_collect.MIN_KB = 0
+            claude_collect.LIMIT = 1
+
+            with (
+                mock.patch.object(claude_collect.sys, "argv", ["collect-sessions.py"]),
+                mock.patch.object(claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]),
+                mock.patch.object(claude_collect, "_warm_llm"),
+                mock.patch.object(claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)) as run,
+                mock.patch.object(claude_collect, "DrudgeClient"),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(root / "events.ndjson"), "BORING_EVENT_SINK": "spool"}),
+            ):
+                claude_collect.main()
+
+            payloads = [json.loads(c.kwargs["input"]) for c in run.call_args_list if "input" in c.kwargs]
+            assert payloads, "the hook was never invoked"
+            assert all(p["hook_event_name"] != "SessionEnd" for p in payloads), payloads
+    finally:
+        claude_collect.markers.set_mark_dir(old_mark_dir)
+        claude_collect.MIN_KB = old_min_kb
+        claude_collect.LIMIT = old_limit
+
+
 def test_kimi_collector_fails_when_distill_fails():
     old_home = kimi_collect.KIMI_HOME
     old_hook = kimi_collect.HOOK
@@ -153,6 +187,7 @@ def test_kimi_marked_excludes_dead_lettered_session():
 
 if __name__ == "__main__":
     test_claude_collector_fails_when_sync_fails()
+    test_claude_backfill_does_not_claim_to_be_a_session_end()
     test_kimi_collector_fails_when_distill_fails()
     test_claude_marked_excludes_dead_lettered_session()
     test_kimi_marked_excludes_dead_lettered_session()
