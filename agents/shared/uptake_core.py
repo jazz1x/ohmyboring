@@ -235,6 +235,19 @@ def _contains(blob, needle):
     return f" {needle} " in f" {blob} "
 
 
+def source_names(src):
+    """The forms an agent cites a source under: the basename, and its stem when the stem is a
+    numbered id. Agents write `wiki-1603`, the ledger stores `wiki-1603.md`; a bare-word stem
+    like `pool` is not tried because it would match ordinary prose."""
+    src = src.lower()
+    if not src:
+        return []
+    stem = src[: -len(".md")] if src.endswith(".md") else src
+    if stem != src and re.search(r"\d", stem):
+        return [src, stem]
+    return [src]
+
+
 def hit_was_used(hit, assistant_words_text, prompt_words):
     """True if the assistant echoed this hit's source name or one of its phrases.
 
@@ -242,13 +255,13 @@ def hit_was_used(hit, assistant_words_text, prompt_words):
     subtraction is what keeps this from being a similarity score between prompt and answer.
     """
     prompt_blob = " ".join(prompt_words or [])
-    src = (hit.get("src") or "").lower()
     # The same subtraction the phrases get. It was missing here, and a note name is the easiest
     # thing for a user to type: "wiki-1292.md 다시 봐" would have counted as the agent using a
     # memory it was told to look at. Every path into this function has to survive the question
     # "would the agent have said this anyway".
-    if _contains(assistant_words_text, src) and not _contains(prompt_blob, src):
-        return True
+    for name in source_names(hit.get("src") or ""):
+        if _contains(assistant_words_text, name) and not _contains(prompt_blob, name):
+            return True
     for phrase in hit.get("phrases") or []:
         if _contains(assistant_words_text, phrase) and not _contains(prompt_blob, phrase):
             return True
