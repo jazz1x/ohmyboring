@@ -129,13 +129,13 @@ jobs:
       # short-circuited) because `cargo test` refuses to start a later test binary once an earlier
       # one has failed — running them as one invocation would silently hide every suite after the
       # first failure.
-      - name: DB gate suites (origin_boundary, store_integration, context_integration, data_integrity, redact_fuzz, code_index_integration)
+      - name: DB gate suites (every drudge/tests/*.rs)
         env:
           BORING_TEST_DATABASE_URL: postgresql://boring:boring@127.0.0.1:5432/boring
         run: |
           cd drudge
           fail=0
-          for suite in origin_boundary store_integration context_integration data_integrity redact_fuzz code_index_integration; do
+          for suite in $(ls tests/*.rs | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "::group::cargo test --test $suite"
             if ! cargo test -p drudge --test "$suite" -- --test-threads=1; then
               echo "FAILED: $suite"

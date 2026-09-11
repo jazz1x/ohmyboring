@@ -128,7 +128,7 @@ guard: ## Structural gate (fmt+clippy+test+py-compile+py-unit-tests) + vault dat
 quality: ## Release acceptance gate (MCP contract + docs drift + removed dangerous surface)
 	cd drudge && cargo test --quiet quality_gate
 
-test-db: ## Run the DB gate suites (origin_boundary/store_integration/context_integration/data_integrity/redact_fuzz/code_index_integration) against a disposable local pgvector container. Needs docker; the container is always removed on exit.
+test-db: ## Run every drudge/tests/*.rs suite against a disposable local pgvector container. Needs docker; the container is always removed on exit.
 	@command -v docker >/dev/null 2>&1 || { echo 'docker not found — required for make test-db (spins up a disposable pgvector container)'; exit 1; }
 	@name="drudge-test-db-$$$$"; \
 	trap 'docker rm -f "$$name" >/dev/null 2>&1 || true' EXIT INT TERM; \
@@ -148,7 +148,7 @@ test-db: ## Run the DB gate suites (origin_boundary/store_integration/context_in
 	export BORING_TEST_DATABASE_URL="postgresql://boring:boring@127.0.0.1:$$port/boring"; \
 	echo "▶ running DB gate suites against $$BORING_TEST_DATABASE_URL …"; \
 	fail=0; \
-	for suite in origin_boundary store_integration context_integration data_integrity redact_fuzz code_index_integration; do \
+	for suite in $$(ls drudge/tests/*.rs | xargs -n1 basename | sed 's/\.rs$$//'); do \
 	  echo "── $$suite ──"; \
 	  (cd drudge && cargo test -p drudge --test "$$suite" -- --test-threads=1) || { echo "FAILED: $$suite"; fail=1; }; \
 	done; \
