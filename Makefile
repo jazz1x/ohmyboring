@@ -51,8 +51,7 @@ ask: ## Single query   make ask Q="question"
 	@code=$$(curl -s -m120 -o /tmp/omb-ask.$$$$ -w '%{http_code}' "$${BORING_URL:-http://127.0.0.1:7700}/ask" \
 	  -H 'content-type: application/json' \
 	  -d "$$(jq -nc --arg q "$(Q)" '{question:$$q}')"); \
-	  body=$$(cat /tmp/omb-ask.$$$$ 2>/dev/null); rm -f /tmp/omb-ask.$$$$; \
-	  echo "$$body" | jq -r '.answer // .error // "ask failed"'; \
+	  jq -r '.answer // .error // "ask failed"' /tmp/omb-ask.$$$$ 2>/dev/null || cat /tmp/omb-ask.$$$$; rm -f /tmp/omb-ask.$$$$; \
 	  [ "$$code" = 200 ] || { echo "ask failed: HTTP $$code" >&2; exit 1; }
 
 sync: ## Deterministic re-ingest of the vault (vault/wiki → embed → graph → relates_to)
