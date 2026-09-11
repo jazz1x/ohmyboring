@@ -204,6 +204,31 @@ def split_fresh(hits: list[dict], already_injected: set[str]) -> tuple[list[dict
     return fresh[:MAX_RESULTS], fresh[MAX_RESULTS:]
 
 
+#: Related notes carried per injection, across all hits. One is the thread; more is the
+#: neighbourhood, and the budget is the agent's context.
+RELATED_PER_INJECTION = 2
+
+
+def fresh_related(injected: list[dict], already_injected: set[str]) -> dict[str, list[dict]]:
+    """The older note each injected hit shares a concept with, keyed by the hit's name.
+
+    The engine attaches these per hit (`/search` `related`, #318); this keeps only what the
+    session has not seen — as a hit, as an earlier related note, or in a previous prompt.
+    """
+    seen = set(already_injected) | {source_name(h) for h in injected}
+    out: dict[str, list[dict]] = {}
+    budget = RELATED_PER_INJECTION
+    for h in injected:
+        for r in h.get("related") or []:
+            name = source_name(r)
+            if budget == 0 or not name or name in seen or not (r.get("snippet") or "").strip():
+                continue
+            seen.add(name)
+            out.setdefault(source_name(h), []).append(r)
+            budget -= 1
+    return out
+
+
 def run_recall(
     data: dict,
     is_injection: Optional[Callable[[dict], bool]] = None,
@@ -232,6 +257,8 @@ def run_recall(
             prompt,
             max_results=MAX_RESULTS + CONTROL_RESULTS,
             max_tokens=MAX_TOKENS,
+            related=1,
+            related_heads=MAX_RESULTS + CONTROL_RESULTS,
         )
     except Exception as e:
         print(f"[omb-recall] search failed after {RETRIES} retries: {e}", file=sys.stderr)
@@ -240,15 +267,17 @@ def run_recall(
     if not hits:
         return
 
-    injected, controls = split_fresh(hits, uptake_core.sources_already_injected(data.get("session_id") or ""))
+    already = uptake_core.sources_already_injected(data.get("session_id") or "")
+    injected, controls = split_fresh(hits, already)
     if not injected:
         return
+    related = fresh_related(injected, already)
 
     lines = []
     over_ceiling = []
     for h in injected:
         dist = h.get("dist")
-        src = (h.get("source_path") or "").rsplit("/", 1)[-1]
+        src = source_name(h)
         # Only "vector_cosine" is a distance (lower = closer) — "text_rank" and "missing" are not
         # comparable to RELEVANCE_MAX_DIST, so they are never judged by it (see the constant above).
         if exceeds_relevance_ceiling(h):
@@ -256,6 +285,8 @@ def run_recall(
         snip = salient(h.get("snippet"))
         if snip:
             lines.append(f"- [{src}] {snip}")
+        for r in related.get(src, []):
+            lines.append(f"  ↳ shares a concept with [{source_name(r)}] {salient(r.get('snippet'))}")
     if over_ceiling:
         # The hit is kept and the measurement is printed anyway. This line is the only record of
         # what a filter on this ceiling would have cost, and it has to keep coming from real
@@ -274,12 +305,13 @@ def run_recall(
     # injections say the hook is installed; only uptake says anything wanted them. Fire-and-forget
     # by construction — `append_record` swallows its own errors, because a ledger write must never
     # cost the user a prompt (same contract as the search failure above).
+    everything_injected = injected + [r for rs in related.values() for r in rs]
     uptake_core.append_record(
         uptake_core.injection_record(
             data.get("session_id") or "",
             prompt,
-            injected,
-            MAX_RESULTS,
+            everything_injected,
+            len(everything_injected),
             controls=controls,
         )
     )

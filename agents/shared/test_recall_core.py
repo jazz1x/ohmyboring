@@ -155,6 +155,44 @@ def test_a_note_already_given_this_session_is_not_given_again():
         assert "[wiki-0000.md]" in other, "another session has not seen it"
 
 
+def test_the_injection_carries_the_note_each_hit_connects_to():
+    """The engine walks concept edges per hit (#318). The line under a hit is the thread the note
+    belongs to, and it is injected — so it is ledgered, deduplicated and scored like any hit."""
+    text = "deadpool recycled a closed socket and the retry loop handed it back " * 3
+    older = {"source_path": "/vault/wiki/wiki-0001.md", "snippet": "the earlier pool incident: idle timeout below the LB's " * 3}
+    hit = dict(_hit("wiki-0007.md", text), related=[older])
+    twin = dict(_hit("wiki-0008.md", text), related=[older, {"source_path": "/vault/wiki/wiki-0002.md", "snippet": "second thread " * 8}])
+    with tempfile.TemporaryDirectory() as d:
+        ledger = os.path.join(d, "ledger.jsonl")
+        ctx = _recall([hit, twin], ledger=ledger)
+        assert "- [wiki-0007.md]" in ctx
+        assert "↳ shares a concept with [wiki-0001.md]" in ctx, ctx
+        assert ctx.count("[wiki-0001.md]") == 1, "the same older note is not attached twice"
+        assert "[wiki-0002.md]" in ctx
+        injected, _ = _ledger_sources(ledger)[0]
+        assert injected == ["wiki-0007.md", "wiki-0008.md", "wiki-0001.md", "wiki-0002.md"], injected
+        again = _recall([hit, twin], ledger=ledger, prompt="the pool died again, second prompt")
+        assert again == "", "hits and their related notes were all given already"
+        new_hit = dict(_hit("wiki-0009.md", text), related=[older])
+        later = _recall([new_hit], ledger=ledger, prompt="a third prompt on the same pool")
+        assert "- [wiki-0009.md]" in later
+        assert "[wiki-0001.md]" not in later, "a related note given in an earlier prompt is not given again"
+
+
+def test_the_engine_asked_for_related_notes_on_every_pool_hit():
+    """Dedup can promote pool hit 4 to injected, so related has to be there for every hit."""
+    from unittest import mock
+
+    with tempfile.TemporaryDirectory() as d, mock.patch.dict(
+        os.environ, {"BORING_INJECTION_LEDGER": os.path.join(d, "l.jsonl"), "BORING_EVENT_SINK": "spool"}
+    ), mock.patch.object(recall_core, "DrudgeClient") as client:
+        client.return_value.search.return_value = []
+        recall_core.run_recall({"prompt": "why did the connection pool die again", "session_id": "s1"})
+    kwargs = client.return_value.search.call_args.kwargs
+    assert kwargs["related"] == 1
+    assert kwargs["related_heads"] == kwargs["max_results"] == recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS
+
+
 def test_an_unreadable_ledger_keeps_the_injection():
     """§8 D6: re-injection is cheaper than omission, and the ledger can die before the session."""
     pool = [_hit("wiki-0007.md", "the pool died because deadpool recycled a closed socket " * 3)]
