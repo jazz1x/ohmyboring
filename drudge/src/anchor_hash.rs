@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use crate::anchor::{Anchor, LineSpan};
 use crate::code_index::{self, ParsedSymbol};
 use crate::config::CodeIndexSource;
-use crate::store::{AnchorCheckRow, Store};
+use crate::store::{AnchorCheckRow, AnchorCheckWatermark, Store};
 
 pub const ANCHOR_CHECK_BATCH: usize = 2_000;
 
@@ -109,6 +109,7 @@ pub struct AnchorCheckStats {
     pub checked: usize,
     pub repinned: usize,
     pub stale: usize,
+    pub unreadable: usize,
 }
 
 pub async fn check_stale_anchors(
@@ -128,8 +129,10 @@ pub async fn check_stale_anchors_limited(
         return Ok(stats);
     }
     let watermark = store.anchor_check_watermark().await?;
-    let mut rows = store.claims_due_for_anchor_check(watermark, batch).await?;
-    if let Some(watermark) = watermark
+    let mut rows = store
+        .claims_due_for_anchor_check(watermark.as_ref(), batch)
+        .await?;
+    if let Some(watermark) = watermark.as_ref()
         && rows.len() < batch
     {
         rows.extend(
@@ -140,29 +143,38 @@ pub async fn check_stale_anchors_limited(
     }
 
     for row in &rows {
-        let Some(verdict) = recheck_anchor(sources, row) else {
-            continue;
-        };
-        stats.checked += 1;
-        match verdict {
-            StaleVerdict::Unchanged => {}
-            StaleVerdict::Repin(span) => {
-                let anchor = repinned_anchor(&row.anchor, span);
-                store
-                    .repin_claim(&row.subject, &row.predicate, row.valid_from, &anchor)
-                    .await?;
-                stats.repinned += 1;
-            }
-            StaleVerdict::Stale(reason) => {
-                store
-                    .mark_claim_stale(&row.subject, &row.predicate, row.valid_from, reason)
-                    .await?;
-                stats.stale += 1;
+        match recheck_anchor(sources, row) {
+            Recheck::Unreadable => stats.unreadable += 1,
+            Recheck::NoEvidence => {}
+            Recheck::Verdict(verdict) => {
+                stats.checked += 1;
+                match verdict {
+                    StaleVerdict::Unchanged => {}
+                    StaleVerdict::Repin(span) => {
+                        let anchor = repinned_anchor(&row.anchor, span);
+                        store
+                            .repin_claim(&row.subject, &row.predicate, row.valid_from, &anchor)
+                            .await?;
+                        stats.repinned += 1;
+                    }
+                    StaleVerdict::Stale(reason) => {
+                        store
+                            .mark_claim_stale(&row.subject, &row.predicate, row.valid_from, reason)
+                            .await?;
+                        stats.stale += 1;
+                    }
+                }
             }
         }
     }
     if let Some(last) = rows.last() {
-        store.set_anchor_check_watermark(last.valid_from).await?;
+        store
+            .set_anchor_check_watermark(&AnchorCheckWatermark {
+                valid_from: last.valid_from,
+                subject: last.subject.clone(),
+                predicate: last.predicate.clone(),
+            })
+            .await?;
     }
     Ok(stats)
 }
@@ -174,13 +186,25 @@ fn repinned_anchor(db: &str, span: LineSpan) -> String {
     }
 }
 
-fn recheck_anchor(sources: &[CodeIndexSource], row: &AnchorCheckRow) -> Option<StaleVerdict> {
-    let anchor = Anchor::from_db_string(&row.anchor)?;
-    let source = registered_source(&anchor, sources)?;
-    let Some(content) = read_under_root(source, &anchor.path) else {
-        return Some(StaleVerdict::Stale("file missing"));
+enum Recheck {
+    Verdict(StaleVerdict),
+    NoEvidence,
+    Unreadable,
+}
+
+fn recheck_anchor(sources: &[CodeIndexSource], row: &AnchorCheckRow) -> Recheck {
+    let Some(anchor) = Anchor::from_db_string(&row.anchor) else {
+        return Recheck::Unreadable;
     };
-    let symbols = code_index::parse_symbols(source, &anchor.path, &content).ok()?;
+    let Some(source) = registered_source(&anchor, sources) else {
+        return Recheck::NoEvidence;
+    };
+    let Some(content) = read_under_root(source, &anchor.path) else {
+        return Recheck::Verdict(StaleVerdict::Stale("file missing"));
+    };
+    let Ok(symbols) = code_index::parse_symbols(source, &anchor.path, &content) else {
+        return Recheck::NoEvidence;
+    };
     let probe = |symbol: &ParsedSymbol| SymbolProbe {
         span: LineSpan {
             start: row_to_line(symbol.start_row),
@@ -191,20 +215,22 @@ fn recheck_anchor(sources: &[CodeIndexSource], row: &AnchorCheckRow) -> Option<S
     match anchor.span {
         None => {
             if sha256_hex(content.as_bytes()) == row.anchor_hash {
-                Some(StaleVerdict::Unchanged)
+                Recheck::Verdict(StaleVerdict::Unchanged)
             } else {
-                Some(StaleVerdict::Stale("symbol body changed"))
+                Recheck::Verdict(StaleVerdict::Stale("symbol body changed"))
             }
         }
         Some(span) => {
-            let stored_symbol = row.anchor_symbol.as_deref()?;
+            let Some(stored_symbol) = row.anchor_symbol.as_deref() else {
+                return Recheck::NoEvidence;
+            };
             let covering = resolve_covering(&symbols, span).map(&probe);
             let same_name: Vec<SymbolProbe> = symbols
                 .iter()
                 .filter(|symbol| symbol.qualified_name == stored_symbol)
                 .map(probe)
                 .collect();
-            Some(stale_verdict(
+            Recheck::Verdict(stale_verdict(
                 &row.anchor_hash,
                 covering.as_ref(),
                 &same_name,
