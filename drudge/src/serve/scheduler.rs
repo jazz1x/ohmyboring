@@ -116,8 +116,8 @@ pub(crate) async fn do_sync(
     // ingestion — a failure logs and does not fail the sync.
     match crate::anchor_hash::check_stale_anchors(store, &cfg.code_index.sources).await {
         Ok(stats) => eprintln!(
-            "[scheduler] anchors checked={} repinned={} stale={}",
-            stats.checked, stats.repinned, stats.stale
+            "[scheduler] anchors checked={} repinned={} stale={} unreadable={}",
+            stats.checked, stats.repinned, stats.stale, stats.unreadable
         ),
         Err(e) => eprintln!("[scheduler] anchor staleness warning (ignored): {e:#}"),
     }

@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::anchor::{Anchor, LineSpan};
 use crate::code_index::{self, ParsedSymbol};
 use crate::config::CodeIndexSource;
-use crate::store::{AnchorCheckRow, Store};
+use crate::store::{AnchorCheckRow, AnchorCheckWatermark, Store};
 
 /// Max anchors re-checked per sync. A full pass over 8,794 hashed claims takes 5 syncs at this
 /// batch, so `sync` stays bounded instead of growing with the corpus.
@@ -146,12 +146,17 @@ pub struct AnchorCheckStats {
     pub checked: usize,
     pub repinned: usize,
     pub stale: usize,
+    /// The stored anchor string did not parse — corruption of our own row (it parsed at ingest
+    /// or the row would carry no hash), counted so it is visible instead of silently retried
+    /// forever. Never marked stale: staleness is a claim about the code, not about our row.
+    pub unreadable: usize,
 }
 
-/// Re-check up to [`ANCHOR_CHECK_BATCH`] hashed anchors, oldest `valid_from` first, continuing
-/// where the last sweep stopped (the `sync_state` watermark wraps to the corpus head, so every
-/// hashed claim is re-checked on a ceil(n / batch) sync cadence and one pass never makes sync
-/// minutes longer). Already-stale claims are facts about a moment and are not re-checked.
+/// Re-check up to [`ANCHOR_CHECK_BATCH`] hashed anchors, oldest `(valid_from, subject,
+/// predicate)` first, continuing where the last sweep stopped (the `sync_state` watermark is
+/// that full sort key and wraps to the corpus head, so every hashed claim is re-checked on a
+/// ceil(n / batch) sync cadence and one pass never makes sync minutes longer). Already-stale
+/// claims are facts about a moment and are not re-checked.
 pub async fn check_stale_anchors(
     store: &Store,
     sources: &[CodeIndexSource],
@@ -171,8 +176,10 @@ pub async fn check_stale_anchors_limited(
         return Ok(stats); // nothing registered — every anchor_hash is NULL anyway.
     }
     let watermark = store.anchor_check_watermark().await?;
-    let mut rows = store.claims_due_for_anchor_check(watermark, batch).await?;
-    if let Some(watermark) = watermark
+    let mut rows = store
+        .claims_due_for_anchor_check(watermark.as_ref(), batch)
+        .await?;
+    if let Some(watermark) = watermark.as_ref()
         && rows.len() < batch
     {
         rows.extend(
@@ -183,33 +190,46 @@ pub async fn check_stale_anchors_limited(
     }
 
     for row in &rows {
-        let Some(verdict) = recheck_anchor(sources, row) else {
-            continue; // no evidence (unparseable, unregistered) — not staleness; retried next pass.
-        };
-        stats.checked += 1;
-        match verdict {
-            StaleVerdict::Unchanged => {}
-            StaleVerdict::Repin(span) => {
-                let anchor = repinned_anchor(&row.anchor, span);
-                store
-                    .repin_claim(&row.subject, &row.predicate, row.valid_from, &anchor)
-                    .await?;
-                stats.repinned += 1;
-            }
-            StaleVerdict::Stale(reason) => {
-                store
-                    .mark_claim_stale(&row.subject, &row.predicate, row.valid_from, reason)
-                    .await?;
-                stats.stale += 1;
+        match recheck_anchor(sources, row) {
+            Recheck::Unreadable => stats.unreadable += 1,
+            Recheck::NoEvidence => {} // nothing to decide from — not staleness; retried next pass.
+            Recheck::Verdict(verdict) => {
+                stats.checked += 1;
+                match verdict {
+                    StaleVerdict::Unchanged => {}
+                    StaleVerdict::Repin(span) => {
+                        let anchor = repinned_anchor(&row.anchor, span);
+                        store
+                            .repin_claim(&row.subject, &row.predicate, row.valid_from, &anchor)
+                            .await?;
+                        stats.repinned += 1;
+                    }
+                    StaleVerdict::Stale(reason) => {
+                        store
+                            .mark_claim_stale(&row.subject, &row.predicate, row.valid_from, reason)
+                            .await?;
+                        stats.stale += 1;
+                    }
+                }
             }
         }
     }
-    // The watermark is the cyclic position — the LAST row taken this sweep, wrap included. It
-    // may regress (head rows fill the tail of a batch); that is the round in round-robin, and
-    // it is what keeps every claim re-checked on a ceil(n / batch) cadence instead of starving
-    // the tail. Rows we skipped for lack of evidence still advance it — they had their turn.
+    // The watermark is the cyclic position — the FULL SORT KEY (valid_from, subject, predicate)
+    // of the LAST row taken this sweep, wrap included. Storing the whole key, not just the
+    // timestamp, is the fix: claims distilled from one note share a valid_from, and a
+    // timestamp-only watermark made the next sweep resume past the whole group, skipping its
+    // tail for a whole cycle. It may regress (head rows fill the tail of a batch); that is the
+    // round in round-robin, and it is what keeps every claim re-checked on a ceil(n / batch)
+    // cadence instead of starving the tail. Rows we skipped for lack of evidence still advance
+    // it — they had their turn.
     if let Some(last) = rows.last() {
-        store.set_anchor_check_watermark(last.valid_from).await?;
+        store
+            .set_anchor_check_watermark(&AnchorCheckWatermark {
+                valid_from: last.valid_from,
+                subject: last.subject.clone(),
+                predicate: last.predicate.clone(),
+            })
+            .await?;
     }
     Ok(stats)
 }
@@ -223,18 +243,38 @@ fn repinned_anchor(db: &str, span: LineSpan) -> String {
     }
 }
 
-/// Re-run the hash layer for one stored claim and decide. `None` when there is no evidence to
-/// decide from: the anchor string does not parse, the project left the registry, the file
-/// unparseable, or a spanned hash has no stored symbol key.
-fn recheck_anchor(sources: &[CodeIndexSource], row: &AnchorCheckRow) -> Option<StaleVerdict> {
-    let anchor = Anchor::from_db_string(&row.anchor)?;
-    let source = registered_source(&anchor, sources)?; // unregistered since hashing — a config change, not code change.
+/// What re-checking one stored row produced: a verdict, or the reason it produced none. The two
+/// no-verdict cases must stay distinct — they mean opposite things:
+/// - [`Recheck::NoEvidence`] — the project left the registry, the file no longer parses, or a
+///   spanned hash has no stored symbol key: there is nothing to decide from. Not staleness; the
+///   row keeps its place in the round-robin and is retried next pass.
+/// - [`Recheck::Unreadable`] — the stored anchor string does not parse. It parsed at ingest or
+///   the row would carry no hash at all, so this is corruption of our own row, not a fact about
+///   the code. Counted `unreadable` so it is visible instead of silently retried forever;
+///   never marked stale (staleness is a claim about the code, not about our own row) and it
+///   does not fail the sweep.
+enum Recheck {
+    Verdict(StaleVerdict),
+    NoEvidence,
+    Unreadable,
+}
+
+/// Re-run the hash layer for one stored claim and decide.
+fn recheck_anchor(sources: &[CodeIndexSource], row: &AnchorCheckRow) -> Recheck {
+    let Some(anchor) = Anchor::from_db_string(&row.anchor) else {
+        return Recheck::Unreadable;
+    };
+    let Some(source) = registered_source(&anchor, sources) else {
+        return Recheck::NoEvidence; // unregistered since hashing — a config change, not code change.
+    };
     // A hashed anchor whose file can no longer be read under the registered root is stale:
     // the code it points at is gone.
     let Some(content) = read_under_root(source, &anchor.path) else {
-        return Some(StaleVerdict::Stale("file missing"));
+        return Recheck::Verdict(StaleVerdict::Stale("file missing"));
     };
-    let symbols = code_index::parse_symbols(source, &anchor.path, &content).ok()?;
+    let Ok(symbols) = code_index::parse_symbols(source, &anchor.path, &content) else {
+        return Recheck::NoEvidence;
+    };
     let probe = |symbol: &ParsedSymbol| SymbolProbe {
         span: LineSpan {
             start: row_to_line(symbol.start_row),
@@ -246,20 +286,22 @@ fn recheck_anchor(sources: &[CodeIndexSource], row: &AnchorCheckRow) -> Option<S
         // Span-less anchor: the file itself is the hashed body.
         None => {
             if sha256_hex(content.as_bytes()) == row.anchor_hash {
-                Some(StaleVerdict::Unchanged)
+                Recheck::Verdict(StaleVerdict::Unchanged)
             } else {
-                Some(StaleVerdict::Stale("symbol body changed"))
+                Recheck::Verdict(StaleVerdict::Stale("symbol body changed"))
             }
         }
         Some(span) => {
-            let stored_symbol = row.anchor_symbol.as_deref()?;
+            let Some(stored_symbol) = row.anchor_symbol.as_deref() else {
+                return Recheck::NoEvidence;
+            };
             let covering = resolve_covering(&symbols, span).map(&probe);
             let same_name: Vec<SymbolProbe> = symbols
                 .iter()
                 .filter(|symbol| symbol.qualified_name == stored_symbol)
                 .map(probe)
                 .collect();
-            Some(stale_verdict(
+            Recheck::Verdict(stale_verdict(
                 &row.anchor_hash,
                 covering.as_ref(),
                 &same_name,

@@ -404,6 +404,18 @@ pub struct AnchorCheckRow {
     pub anchor_symbol: Option<String>,
 }
 
+/// The sweep watermark: the `(valid_from, subject, predicate)` sort key of the last claim the
+/// previous sweep took — the sweep's full `ORDER BY` key, not just its timestamp. Resuming with
+/// the whole key is what keeps claims sharing one `valid_from` (one note distills in a single
+/// transaction, so its claims all carry the same timestamp) from being skipped when a batch
+/// boundary lands inside their group.
+#[derive(Debug, Clone)]
+pub struct AnchorCheckWatermark {
+    pub valid_from: SystemTime,
+    pub subject: String,
+    pub predicate: String,
+}
+
 impl Store {
     // ── connect + ensure schema ───────────────────────────────────────────────
 
@@ -674,12 +686,21 @@ impl Store {
                  CREATE INDEX IF NOT EXISTS event_log_status ON event_log(status, observed_at DESC);
                  CREATE INDEX IF NOT EXISTS event_log_run_id ON event_log(run_id, observed_at DESC);
                  -- Round-robin watermark for the D2 step-2 anchor staleness sweep: each sync takes
-                 -- the next batch of hashed claims AFTER this valid_from (wrapping to the corpus
+                 -- the next batch of hashed claims after this position (wrapping to the corpus
                  -- head), so a full pass is bounded per sync instead of growing with the corpus.
+                 -- The watermark is the WHOLE (valid_from, subject, predicate) sort key, not just
+                 -- the timestamp: claims distilled from one note share a valid_from, and a
+                 -- timestamp-only resume made a batch boundary inside such a group skip the rest
+                 -- of the group for a whole cycle.
                  CREATE TABLE IF NOT EXISTS sync_state (
                      key   text PRIMARY KEY,
                      value timestamptz NOT NULL
-                 );"
+                 );
+                 -- Rows written when the watermark was a bare timestamp read the NOT NULL DEFAULT
+                 -- '' pair — empty strings sort before every real key, so the sweep re-checks that
+                 -- timestamp's group once, which is correct, not a skip.
+                 ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS value_subject text NOT NULL DEFAULT '';
+                 ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS value_predicate text NOT NULL DEFAULT '';"
             ))
             .await
             .context("pgvector + graph schema")?;
@@ -2466,42 +2487,63 @@ impl Store {
         .await
     }
 
-    /// The sweep watermark: the `valid_from` the last anchor staleness sweep reached. `None`
-    /// before the first sweep — the sweep then starts at the corpus head.
-    pub async fn anchor_check_watermark(&self) -> Result<Option<SystemTime>> {
+    /// The sweep watermark: the full `(valid_from, subject, predicate)` sort key the last anchor
+    /// staleness sweep reached. `None` before the first sweep — the sweep then starts at the
+    /// corpus head. A row written when the watermark was a bare timestamp reads the default
+    /// empty pair, which sorts before every real key: the sweep re-checks that timestamp's
+    /// group once and moves on.
+    pub async fn anchor_check_watermark(&self) -> Result<Option<AnchorCheckWatermark>> {
         let row = self
             .db()
             .await?
             .query_opt(
-                "SELECT value FROM sync_state WHERE key = 'anchor_check_watermark';",
+                "SELECT value, value_subject, value_predicate
+                   FROM sync_state WHERE key = 'anchor_check_watermark';",
                 &[],
             )
             .await
             .context("anchor check watermark")?;
-        Ok(row.map(|r| r.get(0)))
+        Ok(row.map(|r| AnchorCheckWatermark {
+            valid_from: r.get(0),
+            subject: r.get(1),
+            predicate: r.get(2),
+        }))
     }
 
-    pub async fn set_anchor_check_watermark(&self, watermark: SystemTime) -> Result<()> {
+    pub async fn set_anchor_check_watermark(&self, watermark: &AnchorCheckWatermark) -> Result<()> {
         self.db()
             .await?
             .execute(
-                "INSERT INTO sync_state (key, value) VALUES ('anchor_check_watermark', $1)
-                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;",
-                &[&watermark],
+                "INSERT INTO sync_state (key, value, value_subject, value_predicate)
+                 VALUES ('anchor_check_watermark', $1, $2, $3)
+                 ON CONFLICT (key) DO UPDATE SET
+                     value = EXCLUDED.value,
+                     value_subject = EXCLUDED.value_subject,
+                     value_predicate = EXCLUDED.value_predicate;",
+                &[
+                    &watermark.valid_from,
+                    &watermark.subject,
+                    &watermark.predicate,
+                ],
             )
             .await
             .context("set anchor check watermark")?;
         Ok(())
     }
 
-    /// Hashed, not-yet-stale claims with `valid_from` after the sweep watermark, oldest first —
-    /// the sweep continues where the last sync stopped. `None` watermark starts at the head.
+    /// Hashed, not-yet-stale claims whose full sort key is after the sweep watermark, ordered by
+    /// that key — the sweep continues exactly where the last sync stopped, even mid-group.
+    /// `None` watermark starts at the head.
     pub async fn claims_due_for_anchor_check(
         &self,
-        after: Option<SystemTime>,
+        after: Option<&AnchorCheckWatermark>,
         limit: usize,
     ) -> Result<Vec<AnchorCheckRow>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let (after_at, after_subject, after_predicate) = after.map_or_else(
+            || (None, String::new(), String::new()),
+            |w| (Some(w.valid_from), w.subject.clone(), w.predicate.clone()),
+        );
         let rows = self
             .db()
             .await?
@@ -2509,10 +2551,11 @@ impl Store {
                 "SELECT subject, predicate, valid_from, anchor, anchor_hash, anchor_symbol
                    FROM claim
                   WHERE anchor_hash IS NOT NULL AND stale_at IS NULL
-                    AND ($1::timestamptz IS NULL OR valid_from > $1)
+                    AND ($1::timestamptz IS NULL
+                         OR (valid_from, subject, predicate) > ($1, $2, $3))
                   ORDER BY valid_from, subject, predicate
-                  LIMIT $2;",
-                &[&after, &limit],
+                  LIMIT $4;",
+                &[&after_at, &after_subject, &after_predicate, &limit],
             )
             .await
             .context("claims due for anchor check")?;
@@ -2521,9 +2564,11 @@ impl Store {
 
     /// The wrap-around half of the sweep: rows at or before the watermark, from the corpus head.
     /// Without it the same oldest rows would be re-checked every sync and the tail never reached.
+    /// The comparison is the exact complement of `claims_due_for_anchor_check` — the same full
+    /// sort key with `<=` instead of `>`.
     pub async fn claims_due_for_anchor_check_head(
         &self,
-        watermark: SystemTime,
+        watermark: &AnchorCheckWatermark,
         limit: usize,
     ) -> Result<Vec<AnchorCheckRow>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -2534,10 +2579,15 @@ impl Store {
                 "SELECT subject, predicate, valid_from, anchor, anchor_hash, anchor_symbol
                    FROM claim
                   WHERE anchor_hash IS NOT NULL AND stale_at IS NULL
-                    AND valid_from <= $1
+                    AND (valid_from, subject, predicate) <= ($1, $2, $3)
                   ORDER BY valid_from, subject, predicate
-                  LIMIT $2;",
-                &[&watermark, &limit],
+                  LIMIT $4;",
+                &[
+                    &watermark.valid_from,
+                    &watermark.subject,
+                    &watermark.predicate,
+                    &limit,
+                ],
             )
             .await
             .context("claims due for anchor check (head)")?;
