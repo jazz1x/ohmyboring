@@ -77,10 +77,11 @@ WINDOW_UNTIL = verdict_core.WINDOW_UNTIL
 #: the window closes.
 
 #: PRD §2 계측 결함 조항: sessions ended but zero `injection_uptake` inside 48h is an
-#: instrumentation investigation, not a verdict. `distill_resolution` is the session-end trace —
-#: `distill_core.log_uptake_event` and `_log_resolution_event` both fire from SessionEnd.
+#: instrumentation investigation, not a verdict. The trace is `session_end`; `distill_resolution`
+#: is read only where no marker exists yet, because it fires on every distillation including
+#: mid-session compactions and §3 calls counting it as a session the defect itself. This constant
+#: was named `SESSION_END_EVENT` while holding `distill_resolution` — the misreading in a name.
 FAULT_WINDOW_HOURS = 48
-SESSION_END_EVENT = "distill_resolution"
 UPTAKE_EVENT = "injection_uptake"
 
 #: Newest ledger rows carried to the page. The ledger holds ~1000 rows and each carries up to four
@@ -437,40 +438,25 @@ def window_block(rows, notes):
     # stops being a verdict and becomes an instrumentation investigation. The CLI knew
     # (`clears_floor: false`) and the page printed 비작동 anyway — the clause lived in one of the
     # two surfaces that render the same window.
-    scored_sessions, distilled_sessions, automated_sessions = set(), set(), set()
-    for row in windowed:
-        attrs = row.get("attributes") or {}
-        sid = row.get("session_id") or attrs.get("session_id")
-        if not sid:
-            continue
-        if row.get("event") == UPTAKE_EVENT:
-            scored_sessions.add(sid)
-        elif row.get("event") == SESSION_END_EVENT:
-            distilled_sessions.add(sid)
-            # A tool reviewing a diff receives injections it has no occasion to use, so it belongs
-            # in neither half of this ratio. #286 stopped distilling those runs and kept logging
-            # that they ended; the reason it wrote down is read here rather than guessed.
-            if (attrs.get("reason") or row.get("reason")) == "automated_run":
-                automated_sessions.add(sid)
-    # The label only exists for the days after it shipped (#286, 2026-09-06); everything distilled
-    # before that reads as a person's session because nothing was asking. Inside the window that
-    # is 181 scripted security reviews sitting in the denominator — the whole distance between 19%
-    # coverage and 89%. Judged from the transcript here rather than by backfilling the event log:
-    # the ledger is the measurement series, and a row written into it by hand cannot be told from
-    # one the instrument produced. The verdict CLI reads it the same way, so the two surfaces that
-    # render this window agree.
-    retro, _unreadable = distill_core.classify_automated_sessions(
-        distilled_sessions - automated_sessions, distill_core.transcript_reader()
+    # Counted by `verdict_core`, the same call the verdict CLI makes. This page had its own copy
+    # and had named `distill_resolution` its `SESSION_END_EVENT` — the reading §3 calls an
+    # instrumentation defect — so the two surfaces that render one window could disagree about
+    # what a session is, in the direction nobody was looking at. A session distilled mid-flight
+    # is not a session that ended, and only the second belongs in a coverage denominator.
+    counts = verdict_core.session_counts(
+        windowed,
+        WINDOW_SINCE,
+        WINDOW_UNTIL,
+        classify=lambda ids: distill_core.classify_automated_sessions(
+            ids, distill_core.transcript_reader()
+        ),
     )
-    automated_sessions |= retro
     cov_ratio, cov_eligible, cov_ok = verdict_core.coverage(
-        len(distilled_sessions),
-        len(scored_sessions),
-        automated_sessions=len(automated_sessions),
+        counts.total, counts.scored, automated_sessions=counts.automated
     )
     if not cov_ok:
         notes.append(
-            f"커버리지 {len(scored_sessions)}/{cov_eligible}"
+            f"커버리지 {counts.scored}/{cov_eligible}"
             f" = {'—' if cov_ratio is None else f'{cov_ratio:.0%}'}"
             f" < {verdict_core.COVERAGE_FLOOR:.0%} — PRD §2 에 따라 판정이 아니라 계측 조사다."
             " 위 판정 줄은 우리가 **본 것**에 대한 진술이지 우리가 **보낸 것**에 대한 진술이 아니다."
@@ -532,13 +518,16 @@ def window_block(rows, notes):
         # Reported beside the verdict, never folded into it: §2 wants both numbers visible so a
         # reader cannot quote the rate without knowing what share of the channel produced it.
         "coverage": {
-            "scored_sessions": len(scored_sessions),
+            "scored_sessions": counts.scored,
             "eligible": cov_eligible,
             "ratio": None if cov_ratio is None else round(cov_ratio, 4),
             "clears_floor": bool(cov_ok),
             "floor": verdict_core.COVERAGE_FLOOR,
-            "automated_excluded": len(automated_sessions),
+            "automated_excluded": counts.automated,
             "denominator": "distilled_sessions_minus_automated_runs",
+            # Which event the denominator counted. `session_end` means sessions that ended;
+            # `distill_resolution` means distillation runs, which includes sessions still open.
+            "denominator_event": counts.source,
         },
         "floor_sessions": verdict.sessions,
         "min_sessions": verdict_core.MIN_SESSIONS,
@@ -581,17 +570,24 @@ def instrument_fault(rows):
     # (a retry, a repair), and PRD §3 names a surface that reports those rows as a session count
     # as an instrumentation fault in itself. Measured 2026-09-08: 324 rows against 302 sessions
     # inside the window, so the two diverge by enough to move a ratio.
-    end_sessions, uptake_sessions = set(), set()
+    ended, distilled, uptake_sessions = set(), set(), set()
     for row in rows:
         when = _observed_dt(row)
         if when is None or when < cutoff:
             continue
         sid = row.get("session_id") or (row.get("attributes") or {}).get("session_id")
-        if row.get("event") == SESSION_END_EVENT:
-            end_sessions.add(sid or f"row:{id(row)}")
+        key = sid or f"row:{id(row)}"
+        if row.get("event") == "session_end":
+            ended.add(key)
+        elif row.get("event") == "distill_resolution":
+            distilled.add(key)
         elif row.get("event") == UPTAKE_EVENT:
-            uptake_sessions.add(sid or f"row:{id(row)}")
-    ends, uptakes = len(end_sessions), len(uptake_sessions)
+            uptake_sessions.add(key)
+    # Only the marker counts here. A coverage ratio may fall back to distillation runs — it stays
+    # informative — but a *fault declaration* may not: §3 says reading a distillation run as a
+    # session end is itself the defect, and doing it here would send someone to debug a live hook
+    # every time a long session is compacted mid-flight.
+    ends, uptakes = len(ended), len(uptake_sessions)
     if ends and not uptakes:
         state = "investigate"
         reason = (
@@ -601,8 +597,9 @@ def instrument_fault(rows):
     elif not ends and not uptakes:
         state = "unknown"
         reason = (
-            f"최근 {FAULT_WINDOW_HOURS}h 에 세션 종료도 uptake 도 0건 — 계측이 고장난 것과"
-            " 세션이 없었던 것을 구분할 수 없다."
+            f"최근 {FAULT_WINDOW_HOURS}h 에 종료 표시(session_end)도 uptake 도 0건"
+            f" — 증류 실행은 {len(distilled)}건 있으나 그것은 세션 종료가 아니다(§3)."
+            " 계측이 고장난 것과 아무 세션도 안 끝난 것을 구분할 수 없다."
         )
     else:
         state = "ok"

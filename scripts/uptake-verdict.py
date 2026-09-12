@@ -41,7 +41,7 @@ DEFAULT_URL = os.environ.get("BORING_URL") or "http://127.0.0.1:7700"
 #: window's 1860 rows, and the pre-registered verdict was being computed on 54% of its own sample
 #: with no line anywhere saying so. Split by name, each query is far under the cap -- 364
 #: `distill_resolution` and 44 `injection_uptake` inside the window on 2026-09-10.
-VERDICT_EVENT_NAMES = ("injection_uptake", "distill_resolution")
+VERDICT_EVENT_NAMES = ("injection_uptake", "distill_resolution", "session_end")
 
 
 def hours_since(day, now=None):
@@ -128,48 +128,16 @@ def fetch_events(base_url, limit, since_hours=None):
 
 
 def session_counts(rows, since, until):
-    """Sessions distilled, scored, and skipped as automated inside the window, for §2's coverage.
-
-    Reads the same `/events` feed the verdict already fetches. The automated count comes from the
-    ledger's own `automated_run` reason rather than from re-reading transcripts: the distiller
-    already classified those sessions and wrote the answer down, so counting them here is reading
-    a recorded fact, not guessing one.
-    """
-    distilled, scored, automated, unlabelled = set(), set(), set(), set()
-    for row in rows or []:
-        observed = verdict_core.window_day(row.get("observed_at"))
-        if since and observed < since:
-            continue
-        if until and observed > until:
-            continue
-        attrs = row.get("attributes") or {}
-        sid = row.get("session_id") or attrs.get("session_id")
-        if not sid:
-            continue
-        name = row.get("event")
-        if name == "distill_resolution":
-            distilled.add(sid)
-            # #286 stopped distilling automated runs but kept recording that they ended, so they
-            # stayed in the coverage denominator — 74 of them inside the window. `coverage()` has
-            # taken an `automated_sessions` argument since #289 and neither caller filled it, which
-            # is how a parameter written for exactly this becomes decoration.
-            if (attrs.get("reason") or row.get("reason")) == "automated_run":
-                automated.add(sid)
-            else:
-                unlabelled.add(sid)
-        elif name == "injection_uptake":
-            scored.add(sid)
-    # The label only exists for the days after it shipped (#286, 2026-09-06). Everything distilled
-    # before that reads as a person's session because nothing was asking, and inside the window
-    # that is 181 scripted security reviews holding down the denominator -- the whole distance
-    # between 19% coverage and 86%. Judged from the transcript at read time rather than by writing
-    # the missing label into the event log: the ledger is the measurement series, and a row put
-    # there by hand cannot be told from one the instrument produced.
-    retro, _unreadable = distill_core.classify_automated_sessions(
-        unlabelled - automated, distill_core.transcript_reader()
+    """§2's coverage inputs. The counting lives in `verdict_core` so `peek` and this script
+    cannot drift apart on what a session is; the transcript classifier is handed in from here."""
+    return verdict_core.session_counts(
+        rows,
+        since,
+        until,
+        classify=lambda ids: distill_core.classify_automated_sessions(
+            ids, distill_core.transcript_reader()
+        ),
     )
-    automated |= retro
-    return len(distilled), len(scored), len(automated)
 
 
 #: Exit codes for `--midpoint`. Distinct on purpose: four different absences read as "0 sessions"
@@ -229,10 +197,14 @@ def _midpoint(per_agent, skipped_old, today=None):
 
 def _coverage_payload(rows, since, until):
     """The coverage clause as data: the ratio, its denominator, and whether §2 allows a verdict."""
-    distilled, scored, automated = session_counts(rows, since, until)
+    distilled, scored, automated, source = session_counts(rows, since, until)
     ratio, eligible, ok = coverage(distilled, scored, automated_sessions=automated)
     return {
         "distilled_sessions": distilled,
+        # Which event the denominator was counted from. `session_end` means sessions that ended;
+        # `distill_resolution` means distillation runs, which includes sessions still open, and
+        # holds the ratio down for as long as they stay open.
+        "denominator_event": source,
         "scored_sessions": scored,
         "eligible": eligible,
         "ratio": None if ratio is None else round(ratio, 4),
@@ -369,13 +341,32 @@ def main(argv=None):
         # instrumentation defect that clause warns about. With no session-end signal, zero uptake
         # rows is a window nobody has finished a session in — indistinguishable from a broken
         # hook, and saying which would be a claim the data does not carry.
-        distills = sum(1 for r in rows if r.get("event") == "distill_resolution")
-        print(
-            f"[uptake-verdict] injection_uptake 0건. 창 안 distill_resolution {distills}건이 있으나"
-            " 그것은 세션 종료가 아니라 증류 실행 수다(§3) — 종료 신호가 없어 '아직 아무 세션도 안 끝났다'와"
-            " '훅이 죽었다'를 가를 수 없다. 판정도 계측 결함 선언도 하지 않는다",
-            file=note,
+        ended, _scored, _automated, source = session_counts(
+            rows, args.since, verdict_core.WINDOW_UNTIL
         )
+        if source == "session_end" and ended:
+            # Now the clause can fire as written: sessions ended, and none of them recorded an
+            # uptake row. That is the instrument, not the sample.
+            print(
+                f"[uptake-verdict] 창 안에서 세션 {ended}건이 종료됐는데 injection_uptake 0건 —"
+                " 계측 조사 대상(PRD §2)",
+                file=note,
+            )
+        elif source == "session_end":
+            print(
+                "[uptake-verdict] injection_uptake 0건 — 창 안에서 종료된 세션도 0건이다."
+                " 표본이 아직 없는 것이지 계측 결함이 아니다",
+                file=note,
+            )
+        else:
+            distills = sum(1 for r in rows if r.get("event") == "distill_resolution")
+            print(
+                f"[uptake-verdict] injection_uptake 0건. 창 안 distill_resolution {distills}건이 있으나"
+                " 그것은 세션 종료가 아니라 증류 실행 수다(§3). 종료 표시(session_end)가 아직 이 구간에"
+                " 없어 '아무 세션도 안 끝났다'와 '훅이 죽었다'를 가를 수 없다 — 판정도 계측 결함 선언도"
+                " 하지 않는다",
+                file=note,
+            )
         return 1
 
     lost_sessions, lost_rows = unreported(rows)

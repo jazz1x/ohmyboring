@@ -302,5 +302,51 @@ class WindowScoping(unittest.TestCase):
             self.assertIn("since_hours=42", url)
 
 
+class SessionEndDenominator(unittest.TestCase):
+    """`distill_resolution` counts distillation runs (PRD §3), so a session distilled mid-flight
+    sits in the coverage denominator before it could be scored. `session_end` fires once, at the
+    end. But it only exists for sessions that ended after it shipped, so its absence in an older
+    window must not read as "no session ended"."""
+
+    def _end(self, session, when="2026-09-13T00:00:00+00:00", **attrs):
+        return {"event": "session_end", "observed_at": when, "session_id": session,
+                "attributes": {"agent": "claude-code", **attrs}}
+
+    def _distill(self, session, when="2026-09-13T00:00:00+00:00", reason=None):
+        return {"event": "distill_resolution", "observed_at": when, "session_id": session,
+                "attributes": {"reason": reason} if reason else {}}
+
+    def test_session_end_wins_over_distillation_runs(self):
+        rows = [self._distill("a"), self._distill("a"), self._distill("b"), self._end("a"),
+                _event("a", 1, 10)]
+        total, scored, _automated, source = uv.session_counts(rows, "2026-09-12", "2026-09-26")
+        self.assertEqual(source, "session_end")
+        self.assertEqual(total, 1, "b was distilled mid-flight and has not ended")
+        self.assertEqual(scored, 1)
+
+    def test_no_session_end_in_the_window_falls_back_rather_than_reporting_zero(self):
+        rows = [self._distill("a"), self._distill("b"), _event("a", 1, 10)]
+        total, _scored, _automated, source = uv.session_counts(rows, "2026-09-12", "2026-09-26")
+        self.assertEqual(source, "distill_resolution")
+        self.assertEqual(total, 2, "an older window must not read as zero sessions")
+
+    def test_an_ended_session_with_no_uptake_row_is_the_clause_firing(self):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(uv, "fetch_events", lambda *a, **k: [self._end("a")]):
+            with redirect_stdout(out), redirect_stderr(err):
+                code = uv.main([])
+        self.assertEqual(code, 1)
+        # Without --json the human line is the output, so it goes to stdout.
+        self.assertIn("계측 조사", out.getvalue() + err.getvalue())
+
+    def test_no_ended_session_is_an_empty_sample_not_a_fault(self):
+        out, err = io.StringIO(), io.StringIO()
+        rows = [self._end("a", when="2026-08-01T00:00:00+00:00")]  # outside the window
+        with mock.patch.object(uv, "fetch_events", lambda *a, **k: rows):
+            with redirect_stdout(out), redirect_stderr(err):
+                uv.main([])
+        self.assertNotIn("계측 조사", out.getvalue() + err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
