@@ -1996,7 +1996,10 @@ async fn claim_inherits_note_anchor_and_era_is_marked() {
         .await
         .expect("upsert unanchored claim");
     let row = db
-        .query_one("SELECT anchor, era FROM claim WHERE subject = $1;", &[&bare])
+        .query_one(
+            "SELECT anchor, era FROM claim WHERE subject = $1;",
+            &[&bare],
+        )
         .await
         .expect("read bare row");
     assert_eq!(row.get::<_, Option<String>>(0), None);
@@ -2138,7 +2141,6 @@ use std::fs;
 use drudge::config::{CodeIndexSource, CodeLanguage};
 use tempfile::tempdir;
 
-/// code_index source ids share the database across suites — keep each registration unique.
 fn unique_source_id(prefix: &str) -> String {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2147,8 +2149,6 @@ fn unique_source_id(prefix: &str) -> String {
     format!("{prefix}-{ts}")
 }
 
-/// One claim anchored to a temp source root registered in code_index, seeded the way ingest now
-/// writes it: anchor + symbol-span hash layer. `root` must stay alive for the whole test.
 struct HashedFixture {
     root: tempfile::TempDir,
     source: CodeIndexSource,
@@ -2158,7 +2158,6 @@ struct HashedFixture {
     subject: String,
 }
 
-/// Seed a hashed claim against a fresh temp repo whose `known()` spans lines 3-5 of x.rs.
 async fn seed_hashed_claim(store: &Store) -> HashedFixture {
     let root = tempdir().expect("temp source root");
     fs::write(
@@ -2230,9 +2229,6 @@ async fn cleanup_hashed_claim(store: &Store, db: &Client, fixture: &HashedFixtur
         .expect("cleanup document");
 }
 
-/// D2 step 2 ingest side: a registered repo gets `anchor_hash` (sha256 of the covering symbol's
-/// body) attached at upsert; an unregistered project or an uncovered span gets none — anchors
-/// are storable without verification, and only registered repos get the hash layer.
 #[tokio::test]
 async fn anchor_hash_is_set_at_ingest_only_for_registered_repos() {
     let Some(dsn) = test_dsn() else {
@@ -2278,9 +2274,6 @@ async fn anchor_hash_is_set_at_ingest_only_for_registered_repos() {
     cleanup_hashed_claim(&store, &db, &fixture).await;
 }
 
-/// D2 step 2: an edited symbol body marks the claim stale (`symbol body changed`), and
-/// `current_claims` hides the stale row by default, showing it — with stale_at/stale_reason —
-/// only under `include_stale`.
 #[tokio::test]
 async fn anchor_hash_marks_edited_bodies_stale_and_current_claims_hides_them() {
     let Some(dsn) = test_dsn() else {
@@ -2292,7 +2285,6 @@ async fn anchor_hash_marks_edited_bodies_stale_and_current_claims_hides_them() {
     let fixture = seed_hashed_claim(&store).await;
     let sources = [fixture.source.clone()];
 
-    // Nothing changed → the sweep is a no-op for this claim.
     let quiet = drudge::anchor_hash::check_stale_anchors(&store, &sources)
         .await
         .expect("quiet sweep");
@@ -2307,7 +2299,6 @@ async fn anchor_hash_marks_edited_bodies_stale_and_current_claims_hides_them() {
         .get(0);
     assert!(untouched.is_none(), "an untouched body must not go stale");
 
-    // Edit the function body → the sweep marks the claim stale with the reason.
     fs::write(
         fixture.root.path().join("x.rs"),
         "// fixture header\n\nfn known() {\n    let value = 2;\n}\n",
@@ -2329,7 +2320,6 @@ async fn anchor_hash_marks_edited_bodies_stale_and_current_claims_hides_them() {
     assert!(stale_at.is_some(), "stale_at is stamped");
     assert_eq!(reason.as_deref(), Some("symbol body changed"));
 
-    // The reading side: hidden by default, surfaced with stale fields under include_stale.
     let query = [0.5_f32; 1024];
     let hidden = store
         .current_claims(&query, 50, &[], None, None, None, false)
@@ -2356,9 +2346,6 @@ async fn anchor_hash_marks_edited_bodies_stale_and_current_claims_hides_them() {
     cleanup_hashed_claim(&store, &db, &fixture).await;
 }
 
-/// D2 step 2: first-pass staleness is a symbol-span hash, not a line-range hash (PRD §8).
-/// Restoring the body with blank lines inserted above the function (lines 3-5 → 5-7) re-pins the
-/// anchor to the shifted span instead of counting it stale — the move case D2 insists on.
 #[tokio::test]
 async fn anchor_hash_repins_a_moved_symbol_instead_of_stale() {
     let Some(dsn) = test_dsn() else {
@@ -2370,8 +2357,6 @@ async fn anchor_hash_repins_a_moved_symbol_instead_of_stale() {
     let fixture = seed_hashed_claim(&store).await;
     let sources = [fixture.source.clone()];
 
-    // Make the claim stale first: a stale row is a fact about a moment and the sweep never
-    // re-checks it, so this stands in for the note re-asserting the claim (a fresh row).
     fs::write(
         fixture.root.path().join("x.rs"),
         "// fixture header\n\nfn known() {\n    let value = 2;\n}\n",
@@ -2381,7 +2366,6 @@ async fn anchor_hash_repins_a_moved_symbol_instead_of_stale() {
         .await
         .expect("sweep after edit");
 
-    // Restore the original body with two blank lines above the function.
     fs::write(
         fixture.root.path().join("x.rs"),
         "// fixture header\n\n\n\nfn known() {\n    let value = 1;\n}\n",
@@ -2435,10 +2419,6 @@ async fn stale_subjects_now(db: &Client, subjects: &[String]) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
-/// The sweep is bounded per run and continues where it stopped: three hashed claims, batch of
-/// two. The first sweep takes the two oldest — the third claim's edited file goes UNNOTICED
-/// because its turn has not come. The second sweep continues after the watermark, catches the
-/// third, and wraps to the head for the rest of its batch.
 #[tokio::test]
 async fn anchor_sweep_is_bounded_and_continues_by_valid_from() {
     let Some(dsn) = test_dsn() else {
@@ -2448,8 +2428,6 @@ async fn anchor_sweep_is_bounded_and_continues_by_valid_from() {
     let store = Store::open(&dsn, 1024).await.expect("open store");
     let db = connect(&dsn).await;
 
-    // Three claims, oldest valid_from first, each anchored to its own file in one registered
-    // root. Span-less anchors hash the file bytes.
     let root = tempdir().expect("temp source root");
     let source_id = unique_source_id("anchor-sweep");
     let source = CodeIndexSource::new(
@@ -2506,8 +2484,6 @@ async fn anchor_sweep_is_bounded_and_continues_by_valid_from() {
             .expect("upsert hashed claim");
     }
 
-    // Edit the files of claim 0 and claim 2 BEFORE any sweep. Claim 0's edit is caught by the
-    // first sweep; claim 2's must wait for its turn — the batch stops at two.
     fs::write(root.path().join("x0.rs"), "fn known() { let a = 1; }\n").expect("edit file 0");
     fs::write(root.path().join("x2.rs"), "fn known() { let a = 1; }\n").expect("edit file 2");
 
@@ -2521,8 +2497,6 @@ async fn anchor_sweep_is_bounded_and_continues_by_valid_from() {
         "the two oldest were checked; the third has not had its turn"
     );
 
-    // The second sweep continues after the watermark: claim 2 goes stale, then the batch wraps
-    // to the head and re-checks claim 1 (still fresh — its file never changed).
     let second = drudge::anchor_hash::check_stale_anchors_limited(&store, &sources, 2)
         .await
         .expect("second sweep");
@@ -2532,6 +2506,154 @@ async fn anchor_sweep_is_bounded_and_continues_by_valid_from() {
     let mut expected = vec![subjects[0].clone(), subjects[2].clone()];
     expected.sort();
     assert_eq!(stale, expected, "the second sweep reaches the tail");
+
+    for (i, subject) in subjects.iter().enumerate() {
+        db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+            .await
+            .expect("cleanup claim");
+        store
+            .delete_document(&note_paths[i])
+            .await
+            .expect("cleanup document");
+    }
+}
+
+async fn repinned_subjects_now(db: &Client, subjects: &[String]) -> Vec<String> {
+    let rows = db
+        .query(
+            "SELECT subject FROM claim
+              WHERE subject = ANY($1) AND anchor LIKE '%:L5-L7';",
+            &[&subjects],
+        )
+        .await
+        .expect("read repinned subjects");
+    let mut out: Vec<String> = rows.iter().map(|row| row.get::<_, String>(0)).collect();
+    out.sort();
+    out
+}
+
+async fn seed_shared_valid_from_group(
+    store: &Store,
+    n: usize,
+) -> (
+    tempfile::TempDir,
+    Vec<CodeIndexSource>,
+    Vec<String>,
+    Vec<String>,
+) {
+    let root = tempdir().expect("temp source root");
+    let source_id = unique_source_id("anchor-sweep-group");
+    let source = CodeIndexSource::new(
+        &source_id,
+        "Anchor Sweep Group Fixture",
+        root.path().to_path_buf(),
+        CodeLanguage::Rust,
+        true,
+    )
+    .expect("valid source");
+    let sources = vec![source];
+    let shared_from = SystemTime::now()
+        .checked_sub(Duration::from_hours(1))
+        .expect("shared valid_from");
+    let subjects: Vec<String> = (0..n)
+        .map(|i| format!("anchor-sweep-group-{}-{i:02}", unique_source_id("subj")))
+        .collect();
+    let note_paths: Vec<String> = (0..n)
+        .map(|i| unique_path(&format!("claim-anchor-sweep-group-{i}")))
+        .collect();
+    for (i, subject) in subjects.iter().enumerate() {
+        let file = root.path().join(format!("x{i}.rs"));
+        fs::write(
+            &file,
+            "// fixture header\n\nfn known() {\n    let value = 1;\n}\n",
+        )
+        .expect("write fixture");
+        let anchor = drudge::anchor::Anchor {
+            project: source_id.clone(),
+            path: file.to_string_lossy().into_owned(),
+            span: Some(drudge::anchor::LineSpan { start: 3, end: 5 }),
+        };
+        let hashed = drudge::anchor_hash::hash_for_anchor(&anchor, &sources)
+            .expect("a registered repo resolves the covering symbol");
+        let mut front = dummy_frontmatter(&note_paths[i]);
+        front.project = source_id.clone();
+        let mut emb = [0.0_f32; 1024];
+        emb[0] = 1.0;
+        store
+            .upsert_document(
+                &front,
+                &format!("sha-anchor-sweep-group-{i}"),
+                SystemTime::now(),
+            )
+            .await
+            .expect("upsert document");
+        store
+            .upsert_claim_with_anchor(
+                subject,
+                "location",
+                "x.rs",
+                &note_paths[i],
+                shared_from,
+                &emb,
+                "fact",
+                "certain",
+                Some(&anchor.to_db_string()),
+                Some(&hashed.hash),
+                Some(&hashed.symbol),
+            )
+            .await
+            .expect("upsert hashed claim");
+    }
+    (root, sources, subjects, note_paths)
+}
+
+#[tokio::test]
+async fn anchor_sweep_resumes_inside_a_shared_valid_from_group() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let (root, sources, subjects, note_paths) = seed_shared_valid_from_group(&store, 4).await;
+
+    for i in 0..4 {
+        fs::write(
+            root.path().join(format!("x{i}.rs")),
+            "// fixture header\n\n\n\nfn known() {\n    let value = 1;\n}\n",
+        )
+        .expect("move the function down");
+    }
+
+    let first = drudge::anchor_hash::check_stale_anchors_limited(&store, &sources, 2)
+        .await
+        .expect("first sweep");
+    assert_eq!(first.checked, 2, "the first sweep stops at its batch");
+    assert_eq!(first.repinned, 2, "both checked claims re-pinned");
+    assert_eq!(first.stale, 0, "a move is never counted stale");
+    let mut first_two = subjects[0..2].to_vec();
+    first_two.sort();
+    assert_eq!(
+        repinned_subjects_now(&db, &subjects).await,
+        first_two,
+        "the first sweep took exactly the first two of the shared group"
+    );
+
+    let second = drudge::anchor_hash::check_stale_anchors_limited(&store, &sources, 2)
+        .await
+        .expect("second sweep");
+    assert_eq!(second.checked, 2);
+    assert_eq!(
+        second.repinned, 2,
+        "the second sweep took the remaining two"
+    );
+    let mut all_four = subjects.clone();
+    all_four.sort();
+    assert_eq!(
+        repinned_subjects_now(&db, &subjects).await,
+        all_four,
+        "every claim was checked exactly once across the two sweeps — none skipped"
+    );
 
     for (i, subject) in subjects.iter().enumerate() {
         db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])

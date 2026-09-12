@@ -1420,6 +1420,7 @@ impl Store {
     }
 
     /// Query embedding → top-k **current** claims (superseded_at IS NULL). Authority retrieval.
+    #[allow(clippy::too_many_arguments)]
     pub async fn current_claims(
         &self,
         query_emb: &[f32],
