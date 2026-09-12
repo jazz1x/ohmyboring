@@ -319,6 +319,44 @@ fn content_sha(content: &str) -> String {
     hex::encode(Sha256::digest(content.as_bytes()))
 }
 
+/// One syntax symbol as the D2 anchor-hash layer needs it: its identity, its line span, and the
+/// exact body text. Rows are 0-based (tree-sitter convention), matching the code_index.symbol
+/// columns.
+#[derive(Debug)]
+pub struct ParsedSymbol {
+    pub qualified_name: String,
+    pub start_row: usize,
+    pub end_row: usize,
+    pub body: String,
+}
+
+/// Parse `content` with the source's own parser — the same one the indexer runs — so the anchor
+/// hash covers exactly the symbol spans code_index would store. Used by the hash layer to read a
+/// symbol body from disk without a code sync in between; never writes the code_index schema.
+pub fn parse_symbols(
+    source: &CodeIndexSource,
+    path_for_ids: &str,
+    content: &str,
+) -> Result<Vec<ParsedSymbol>, CodeIndexError> {
+    let file_id = stable_id(&["file", source.id(), path_for_ids]);
+    let parsed = match source.language() {
+        CodeLanguage::Rust => parser::parse_rust(source.id(), path_for_ids, &file_id, content)?,
+        CodeLanguage::Python => parser::parse_python(source.id(), path_for_ids, &file_id, content)?,
+        CodeLanguage::Shell => parser::parse_shell(source.id(), path_for_ids, &file_id, content)?,
+    };
+    Ok(parsed
+        .symbols
+        .into_iter()
+        .map(|symbol| ParsedSymbol {
+            qualified_name: symbol.qualified_name,
+            start_row: symbol.start_line,
+            end_row: symbol.end_line,
+            // Tree-sitter byte offsets are char boundaries of the same `content` — indexing is exact.
+            body: content[symbol.start_byte..symbol.end_byte].to_owned(),
+        })
+        .collect())
+}
+
 fn stable_id(parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
     for part in parts {

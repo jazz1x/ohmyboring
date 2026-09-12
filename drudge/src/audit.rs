@@ -57,6 +57,14 @@ pub struct AuditStats {
     pub semantic_concepts: usize,
     pub semantic_uses: usize,
     pub semantic_about: usize,
+    /// D2 adoption counter: CURRENT claims by era — anchored by the note-body resolver,
+    /// unanchored (no citation found), pre-anchor (written before this column existed).
+    pub claims_anchored: usize,
+    pub claims_unanchored: usize,
+    pub claims_pre_anchor: usize,
+    /// D2 step 2: claims whose code anchor no longer hashes equal — the moment-of fact counter
+    /// beside the era counts.
+    pub claims_stale: usize,
 }
 
 /// Pure logic: DB aggregation → returns `AuditStats`. No I/O.
@@ -88,6 +96,7 @@ pub async fn stats(store: &Store, allow_company: bool) -> Result<AuditStats> {
 
     let gs = store.graph_stats().await?;
     let ss = store.semantic_stats().await?;
+    let eras = store.claim_era_counts().await?;
 
     Ok(AuditStats {
         total_chunks,
@@ -112,6 +121,10 @@ pub async fn stats(store: &Store, allow_company: bool) -> Result<AuditStats> {
         semantic_concepts: ss.concepts,
         semantic_uses: ss.uses,
         semantic_about: ss.about,
+        claims_anchored: eras.anchored,
+        claims_unanchored: eras.unanchored,
+        claims_pre_anchor: eras.pre_anchor,
+        claims_stale: store.claim_stale_count().await?,
     })
 }
 
@@ -166,6 +179,10 @@ pub async fn run(store: &Store, allow_company: bool) -> Result<()> {
     println!(
         "  [semantic edges] uses {} · about {}",
         s.semantic_uses, s.semantic_about
+    );
+    println!(
+        "  [claims by era] anchored {} · unanchored {} · pre-anchor {} · stale {}",
+        s.claims_anchored, s.claims_unanchored, s.claims_pre_anchor, s.claims_stale
     );
     Ok(())
 }

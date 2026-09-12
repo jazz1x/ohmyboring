@@ -351,6 +351,71 @@ async fn count_edge_kind(db: &Client, kind: &str) -> Result<usize> {
     Ok(usize::try_from(n).unwrap_or(0))
 }
 
+fn anchor_check_row_from(row: &tokio_postgres::Row) -> AnchorCheckRow {
+    AnchorCheckRow {
+        subject: row.get(0),
+        predicate: row.get(1),
+        valid_from: row.get(2),
+        anchor: row.get(3),
+        anchor_hash: row.get(4),
+        anchor_symbol: row.get(5),
+    }
+}
+
+/// A current claim as stored, plus its D2 anchor metadata. `Deref<Target = Claim>` keeps the
+/// existing consumers (`ask.rs`) working on `cl.subject` / `cl.kind()` while new surfaces read
+/// `anchor`/`era`/`stale_*`.
+#[derive(Debug)]
+pub struct AnchoredClaim {
+    pub claim: Claim,
+    pub anchor: Option<String>,
+    pub era: String,
+    /// Set when the code the anchor points at no longer hashes equal — the moment it was
+    /// detected, plus why. Hidden from `current_claims` unless `include_stale` lifts the filter.
+    pub stale_at: Option<SystemTime>,
+    pub stale_reason: Option<String>,
+}
+
+impl std::ops::Deref for AnchoredClaim {
+    type Target = Claim;
+    fn deref(&self) -> &Claim {
+        &self.claim
+    }
+}
+
+/// D2 adoption counter: CURRENT claims grouped by era (PRD §8 D2 — a supply-side feature nobody
+/// can see the uptake of is dead code at coverage ≈ 0, so the first commit carries the counter).
+#[derive(Debug, Default)]
+pub struct ClaimEraCounts {
+    pub anchored: usize,
+    pub unanchored: usize,
+    pub pre_anchor: usize,
+}
+
+/// One claim due for its periodic anchor staleness re-check (D2 step 2): the stored anchor, the
+/// hash it must still match, and the qualified name the re-pin looks the hash up by.
+#[derive(Debug)]
+pub struct AnchorCheckRow {
+    pub subject: String,
+    pub predicate: String,
+    pub valid_from: SystemTime,
+    pub anchor: String,
+    pub anchor_hash: String,
+    pub anchor_symbol: Option<String>,
+}
+
+/// The sweep watermark: the `(valid_from, subject, predicate)` sort key of the last claim the
+/// previous sweep took — the sweep's full `ORDER BY` key, not just its timestamp. Resuming with
+/// the whole key is what keeps claims sharing one `valid_from` (one note distills in a single
+/// transaction, so its claims all carry the same timestamp) from being skipped when a batch
+/// boundary lands inside their group.
+#[derive(Debug, Clone)]
+pub struct AnchorCheckWatermark {
+    pub valid_from: SystemTime,
+    pub subject: String,
+    pub predicate: String,
+}
+
 impl Store {
     // ── connect + ensure schema ───────────────────────────────────────────────
 
@@ -472,6 +537,12 @@ impl Store {
                      embedding     vector({dim}), -- = boring.json embed_dim
                      kind          text NOT NULL DEFAULT 'fact',
                      confidence    text NOT NULL DEFAULT 'certain',
+                     anchor        text,
+                     stale_at      timestamptz,
+                     stale_reason  text,
+                     era           text NOT NULL DEFAULT 'pre-anchor',
+                     anchor_hash   text,
+                     anchor_symbol text,
                      PRIMARY KEY (subject, predicate, valid_from)
                  );
                  -- `about` was carrying two different relations under one name: a claim
@@ -484,6 +555,23 @@ impl Store {
                   WHERE kind = 'about' AND src LIKE 'claim:%' AND dst LIKE 'project:%';
                  ALTER TABLE claim ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'fact';
                  ALTER TABLE claim ADD COLUMN IF NOT EXISTS confidence text NOT NULL DEFAULT 'certain';
+                 -- D2 step 1 (PRD §8): a claim anchors to the code its note cites. `anchor` is
+                 -- `project:path[:span]`; `stale_at`/`stale_reason` belong to step 2 (stale
+                 -- detection) and are written by nothing yet; `era` is the D3 legacy marker —
+                 -- rows written after this lands are 'anchored'/'unanchored' per the resolver,
+                 -- existing rows keep the default 'pre-anchor' (marker only, no rewrite).
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor text;
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS stale_at timestamptz;
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS stale_reason text;
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS era text NOT NULL DEFAULT 'pre-anchor';
+                 -- D2 step 2 (PRD §8): first-pass staleness is a symbol-span hash, not a
+                 -- line-range hash — a line-range hash breaks on moves too. `anchor_hash` is
+                 -- sha256 of the covering symbol's body, set only when the anchor's project is
+                 -- registered in code_index; `anchor_symbol` is that symbol's qualified name,
+                 -- the key the sync-time re-pin looks the hash up by after a move.
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_hash text;
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_symbol text;
+                 CREATE INDEX IF NOT EXISTS claim_anchor ON claim(anchor) WHERE anchor IS NOT NULL;
                  CREATE INDEX IF NOT EXISTS claim_current ON claim(subject, predicate)
                      WHERE superseded_at IS NULL;
                  CREATE INDEX IF NOT EXISTS claim_kind ON claim(kind)
@@ -596,7 +684,23 @@ impl Store {
                  CREATE INDEX IF NOT EXISTS event_log_component ON event_log(component, observed_at DESC);
                  CREATE INDEX IF NOT EXISTS event_log_event ON event_log(event_name, observed_at DESC);
                  CREATE INDEX IF NOT EXISTS event_log_status ON event_log(status, observed_at DESC);
-                 CREATE INDEX IF NOT EXISTS event_log_run_id ON event_log(run_id, observed_at DESC);"
+                 CREATE INDEX IF NOT EXISTS event_log_run_id ON event_log(run_id, observed_at DESC);
+                 -- Round-robin watermark for the D2 step-2 anchor staleness sweep: each sync takes
+                 -- the next batch of hashed claims after this position (wrapping to the corpus
+                 -- head), so a full pass is bounded per sync instead of growing with the corpus.
+                 -- The watermark is the WHOLE (valid_from, subject, predicate) sort key, not just
+                 -- the timestamp: claims distilled from one note share a valid_from, and a
+                 -- timestamp-only resume made a batch boundary inside such a group skip the rest
+                 -- of the group for a whole cycle.
+                 CREATE TABLE IF NOT EXISTS sync_state (
+                     key   text PRIMARY KEY,
+                     value timestamptz NOT NULL
+                 );
+                 -- Rows written when the watermark was a bare timestamp read the NOT NULL DEFAULT
+                 -- '' pair — empty strings sort before every real key, so the sweep re-checks that
+                 -- timestamp's group once, which is correct, not a skip.
+                 ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS value_subject text NOT NULL DEFAULT '';
+                 ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS value_predicate text NOT NULL DEFAULT '';"
             ))
             .await
             .context("pgvector + graph schema")?;
@@ -995,9 +1099,9 @@ impl Store {
         Ok(!rows.is_empty())
     }
 
-    /// Temporal fact claim upsert + supersede. For the same `(subject,predicate)`, old values are
-    /// sealed via `superseded_at`, and only the latest `valid_from` row is current (NULL). Idempotent (re-ingesting the same row is harmless).
-    /// 0 extra gemma calls — takes the claims that extract already produced as-is.
+    /// Temporal fact claim upsert + supersede, without a code anchor (see
+    /// `upsert_claim_with_anchor`). Rows written through this path are marked `era =
+    /// 'unanchored'`.
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_claim(
         &self,
@@ -1010,14 +1114,60 @@ impl Store {
         kind: &str,
         confidence: &str,
     ) -> Result<()> {
+        self.upsert_claim_with_anchor(
+            subject,
+            predicate,
+            value,
+            source_path,
+            valid_from,
+            embedding,
+            kind,
+            confidence,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Temporal fact claim upsert + supersede. For the same `(subject,predicate)`, old values are
+    /// sealed via `superseded_at`, and only the latest `valid_from` row is current (NULL). Idempotent (re-ingesting the same row is harmless).
+    /// 0 extra gemma calls — takes the claims that extract already produced as-is.
+    ///
+    /// D2 anchor inheritance: `anchor` (`project:path[:span]`) attaches the claim to the code its
+    /// note cites; `era` is derived from it — 'anchored' when present, 'unanchored' when the note
+    /// yielded none (legacy rows written before this column keep 'pre-anchor').
+    ///
+    /// D2 step 2 hash layer: `anchor_hash`/`anchor_symbol` (sha256 of the covering symbol's body
+    /// and its qualified name) attach only when the anchor's project is registered in code_index;
+    /// otherwise both stay NULL and nothing else changes — anchors are storable without
+    /// verification, and only registered repos get the hash layer.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_claim_with_anchor(
+        &self,
+        subject: &str,
+        predicate: &str,
+        value: &str,
+        source_path: &str,
+        valid_from: SystemTime,
+        embedding: &[f32],
+        kind: &str,
+        confidence: &str,
+        anchor: Option<&str>,
+        anchor_hash: Option<&str>,
+        anchor_symbol: Option<&str>,
+    ) -> Result<()> {
         let vec = self.checked_vector(embedding)?; // dim guard (shared with upsert_chunk)
         self.db().await?
             .execute(
-                "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence, anchor, anchor_hash, anchor_symbol, era)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text, $10::text, $11::text,
+                         CASE WHEN $9::text IS NULL THEN 'unanchored' ELSE 'anchored' END)
                  ON CONFLICT (subject, predicate, valid_from) DO UPDATE SET
                      value = EXCLUDED.value, source_path = EXCLUDED.source_path,
-                     embedding = EXCLUDED.embedding, kind = EXCLUDED.kind, confidence = EXCLUDED.confidence;",
+                     embedding = EXCLUDED.embedding, kind = EXCLUDED.kind, confidence = EXCLUDED.confidence,
+                     anchor = EXCLUDED.anchor, anchor_hash = EXCLUDED.anchor_hash,
+                     anchor_symbol = EXCLUDED.anchor_symbol, era = EXCLUDED.era;",
                 &[
                     &subject,
                     &predicate,
@@ -1027,6 +1177,9 @@ impl Store {
                     &vec,
                     &kind,
                     &confidence,
+                    &anchor,
+                    &anchor_hash,
+                    &anchor_symbol,
                 ],
             )
             .await
@@ -1209,6 +1362,16 @@ impl Store {
     }
 
     /// Query embedding → top-k **current** claims (superseded_at IS NULL). Authority retrieval.
+    ///
+    /// D2: `anchor_path` optionally keeps only rows whose anchor starts with
+    /// `<project>:<anchor_path>` — the stored path (the anchor between its `project:` prefix and
+    /// its optional `:Lstart[-Lend]` span) must start with `anchor_path`. Resolver-produced paths
+    /// never contain `:`, so `split_part(.., ':', 2)` is exactly that path; NULL anchors fall out.
+    ///
+    /// D2 step 2: claims whose anchor went stale are hidden by default (`stale_at IS NULL`);
+    /// `include_stale` lifts the filter for surfaces that want the full record. Every row carries
+    /// its `anchor`, `era`, and — when set — `stale_at`/`stale_reason`.
+    #[allow(clippy::too_many_arguments)] // one flag per axis; a params struct would bury the SQL pairing.
     pub async fn current_claims(
         &self,
         query_emb: &[f32],
@@ -1216,7 +1379,9 @@ impl Store {
         exclude_origins: &[String],
         project: Option<&str>,
         kinds: Option<&[String]>,
-    ) -> Result<Vec<Claim>> {
+        anchor_path: Option<&str>,
+        include_stale: bool,
+    ) -> Result<Vec<AnchoredClaim>> {
         let vec = Vector::from(query_emb.to_vec());
         // Honor the SAME origin boundary the recall path applies (retrieve::merge_hits filters by
         // exclude_origins). Claims carry no origin column, but their parent document does — JOIN and
@@ -1227,13 +1392,17 @@ impl Store {
             .db()
             .await?
             .query(
-                "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence FROM claim c
+                "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.anchor, c.era,
+                        c.stale_at, c.stale_reason
+                 FROM claim c
                  JOIN document d ON d.source_path = c.source_path
                  WHERE c.superseded_at IS NULL AND c.embedding IS NOT NULL
                    AND NOT (d.origin = ANY($3))
                    AND ($4::text IS NULL OR d.project = $4)
                    AND ($5::text[] IS NULL OR c.kind = ANY($5))
                    AND d.source_path !~ $6
+                   AND ($7::text IS NULL OR split_part(c.anchor, ':', 2) LIKE replace(replace($7, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\')
+                   AND ($8::bool OR c.stale_at IS NULL)
                  ORDER BY c.embedding <=> $1
                  LIMIT $2;",
                 &[
@@ -1243,18 +1412,26 @@ impl Store {
                     &project,
                     &kinds,
                     &NOT_USER_MEMORY_RE,
+                    &anchor_path,
+                    &include_stale,
                 ],
             )
             .await
             .context("current claims")?;
         Ok(rows
             .iter()
-            .map(|r| Claim {
-                subject: r.get(0),
-                predicate: r.get(1),
-                value: r.get(2),
-                kind: r.get(3),
-                confidence: r.get(4),
+            .map(|r| AnchoredClaim {
+                claim: Claim {
+                    subject: r.get(0),
+                    predicate: r.get(1),
+                    value: r.get(2),
+                    kind: r.get(3),
+                    confidence: r.get(4),
+                },
+                anchor: r.get(5),
+                era: r.get(6),
+                stale_at: r.get(7),
+                stale_reason: r.get(8),
             })
             .collect())
     }
@@ -2271,6 +2448,191 @@ impl Store {
             uses: count_edge_kind(&db, "uses").await?,
             about: count_edge_kind(&db, "about").await?,
         })
+    }
+
+    /// CURRENT claims (superseded_at IS NULL) grouped by `era` — the D2 adoption counter.
+    pub async fn claim_era_counts(&self) -> Result<ClaimEraCounts> {
+        let row = self
+            .db()
+            .await?
+            .query_one(
+                "SELECT count(*) FILTER (WHERE era = 'anchored'),
+                        count(*) FILTER (WHERE era = 'unanchored'),
+                        count(*) FILTER (WHERE era = 'pre-anchor')
+                   FROM claim
+                  WHERE superseded_at IS NULL;",
+                &[],
+            )
+            .await
+            .context("claim era counts")?;
+        let n = |i: usize| {
+            let v: i64 = row.get(i);
+            usize::try_from(v).unwrap_or(0)
+        };
+        Ok(ClaimEraCounts {
+            anchored: n(0),
+            unanchored: n(1),
+            pre_anchor: n(2),
+        })
+    }
+
+    /// Claims marked stale (stale_at IS NOT NULL) — the moment-of fact counter reported beside
+    /// the era counts.
+    pub async fn claim_stale_count(&self) -> Result<usize> {
+        let db = self.db().await?;
+        pg_count(
+            &db,
+            "SELECT count(*) FROM claim WHERE stale_at IS NOT NULL;",
+        )
+        .await
+    }
+
+    /// The sweep watermark: the full `(valid_from, subject, predicate)` sort key the last anchor
+    /// staleness sweep reached. `None` before the first sweep — the sweep then starts at the
+    /// corpus head. A row written when the watermark was a bare timestamp reads the default
+    /// empty pair, which sorts before every real key: the sweep re-checks that timestamp's
+    /// group once and moves on.
+    pub async fn anchor_check_watermark(&self) -> Result<Option<AnchorCheckWatermark>> {
+        let row = self
+            .db()
+            .await?
+            .query_opt(
+                "SELECT value, value_subject, value_predicate
+                   FROM sync_state WHERE key = 'anchor_check_watermark';",
+                &[],
+            )
+            .await
+            .context("anchor check watermark")?;
+        Ok(row.map(|r| AnchorCheckWatermark {
+            valid_from: r.get(0),
+            subject: r.get(1),
+            predicate: r.get(2),
+        }))
+    }
+
+    pub async fn set_anchor_check_watermark(&self, watermark: &AnchorCheckWatermark) -> Result<()> {
+        self.db()
+            .await?
+            .execute(
+                "INSERT INTO sync_state (key, value, value_subject, value_predicate)
+                 VALUES ('anchor_check_watermark', $1, $2, $3)
+                 ON CONFLICT (key) DO UPDATE SET
+                     value = EXCLUDED.value,
+                     value_subject = EXCLUDED.value_subject,
+                     value_predicate = EXCLUDED.value_predicate;",
+                &[
+                    &watermark.valid_from,
+                    &watermark.subject,
+                    &watermark.predicate,
+                ],
+            )
+            .await
+            .context("set anchor check watermark")?;
+        Ok(())
+    }
+
+    /// Hashed, not-yet-stale claims whose full sort key is after the sweep watermark, ordered by
+    /// that key — the sweep continues exactly where the last sync stopped, even mid-group.
+    /// `None` watermark starts at the head.
+    pub async fn claims_due_for_anchor_check(
+        &self,
+        after: Option<&AnchorCheckWatermark>,
+        limit: usize,
+    ) -> Result<Vec<AnchorCheckRow>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let (after_at, after_subject, after_predicate) = after.map_or_else(
+            || (None, String::new(), String::new()),
+            |w| (Some(w.valid_from), w.subject.clone(), w.predicate.clone()),
+        );
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT subject, predicate, valid_from, anchor, anchor_hash, anchor_symbol
+                   FROM claim
+                  WHERE anchor_hash IS NOT NULL AND stale_at IS NULL
+                    AND ($1::timestamptz IS NULL
+                         OR (valid_from, subject, predicate) > ($1, $2, $3))
+                  ORDER BY valid_from, subject, predicate
+                  LIMIT $4;",
+                &[&after_at, &after_subject, &after_predicate, &limit],
+            )
+            .await
+            .context("claims due for anchor check")?;
+        Ok(rows.iter().map(anchor_check_row_from).collect())
+    }
+
+    /// The wrap-around half of the sweep: rows at or before the watermark, from the corpus head.
+    /// Without it the same oldest rows would be re-checked every sync and the tail never reached.
+    /// The comparison is the exact complement of `claims_due_for_anchor_check` — the same full
+    /// sort key with `<=` instead of `>`.
+    pub async fn claims_due_for_anchor_check_head(
+        &self,
+        watermark: &AnchorCheckWatermark,
+        limit: usize,
+    ) -> Result<Vec<AnchorCheckRow>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT subject, predicate, valid_from, anchor, anchor_hash, anchor_symbol
+                   FROM claim
+                  WHERE anchor_hash IS NOT NULL AND stale_at IS NULL
+                    AND (valid_from, subject, predicate) <= ($1, $2, $3)
+                  ORDER BY valid_from, subject, predicate
+                  LIMIT $4;",
+                &[
+                    &watermark.valid_from,
+                    &watermark.subject,
+                    &watermark.predicate,
+                    &limit,
+                ],
+            )
+            .await
+            .context("claims due for anchor check (head)")?;
+        Ok(rows.iter().map(anchor_check_row_from).collect())
+    }
+
+    /// A moved symbol re-pins the anchor to its new span; the hash stays (the body is identical).
+    pub async fn repin_claim(
+        &self,
+        subject: &str,
+        predicate: &str,
+        valid_from: SystemTime,
+        anchor: &str,
+    ) -> Result<()> {
+        self.db()
+            .await?
+            .execute(
+                "UPDATE claim SET anchor = $4
+                  WHERE subject = $1 AND predicate = $2 AND valid_from = $3 AND stale_at IS NULL;",
+                &[&subject, &predicate, &valid_from, &anchor],
+            )
+            .await
+            .context("repin claim anchor")?;
+        Ok(())
+    }
+
+    /// The code under the anchor changed (or vanished) — stamp the moment and why. A claim that
+    /// is already stale is a fact about its moment and is not re-stamped.
+    pub async fn mark_claim_stale(
+        &self,
+        subject: &str,
+        predicate: &str,
+        valid_from: SystemTime,
+        reason: &str,
+    ) -> Result<()> {
+        self.db()
+            .await?
+            .execute(
+                "UPDATE claim SET stale_at = now(), stale_reason = $4
+                  WHERE subject = $1 AND predicate = $2 AND valid_from = $3 AND stale_at IS NULL;",
+                &[&subject, &predicate, &valid_from, &reason],
+            )
+            .await
+            .context("mark claim stale")?;
+        Ok(())
     }
 
     /// Remove orphan semantic nodes — entity nodes not referenced by any edge.
