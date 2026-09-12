@@ -128,58 +128,16 @@ def fetch_events(base_url, limit, since_hours=None):
 
 
 def session_counts(rows, since, until):
-    """Sessions distilled, scored, and skipped as automated inside the window, for §2's coverage.
-
-    Reads the same `/events` feed the verdict already fetches. The automated count comes from the
-    ledger's own `automated_run` reason rather than from re-reading transcripts: the distiller
-    already classified those sessions and wrote the answer down, so counting them here is reading
-    a recorded fact, not guessing one.
-    """
-    distilled, scored, automated, unlabelled, ended = set(), set(), set(), set(), set()
-    for row in rows or []:
-        observed = verdict_core.window_day(row.get("observed_at"))
-        if since and observed < since:
-            continue
-        if until and observed > until:
-            continue
-        attrs = row.get("attributes") or {}
-        sid = row.get("session_id") or attrs.get("session_id")
-        if not sid:
-            continue
-        name = row.get("event")
-        if name == "distill_resolution":
-            distilled.add(sid)
-            # #286 stopped distilling automated runs but kept recording that they ended, so they
-            # stayed in the coverage denominator — 74 of them inside the window. `coverage()` has
-            # taken an `automated_sessions` argument since #289 and neither caller filled it, which
-            # is how a parameter written for exactly this becomes decoration.
-            if (attrs.get("reason") or row.get("reason")) == "automated_run":
-                automated.add(sid)
-            else:
-                unlabelled.add(sid)
-        elif name == "session_end":
-            ended.add(sid)
-        elif name == "injection_uptake":
-            scored.add(sid)
-    # The label only exists for the days after it shipped (#286, 2026-09-06). Everything distilled
-    # before that reads as a person's session because nothing was asking, and inside the window
-    # that is 181 scripted security reviews holding down the denominator -- the whole distance
-    # between 19% coverage and 86%. Judged from the transcript at read time rather than by writing
-    # the missing label into the event log: the ledger is the measurement series, and a row put
-    # there by hand cannot be told from one the instrument produced.
-    retro, _unreadable = distill_core.classify_automated_sessions(
-        unlabelled - automated, distill_core.transcript_reader()
+    """§2's coverage inputs. The counting lives in `verdict_core` so `peek` and this script
+    cannot drift apart on what a session is; the transcript classifier is handed in from here."""
+    return verdict_core.session_counts(
+        rows,
+        since,
+        until,
+        classify=lambda ids: distill_core.classify_automated_sessions(
+            ids, distill_core.transcript_reader()
+        ),
     )
-    automated |= retro
-    # `session_end` is the honest denominator — a session that ended. `distill_resolution` counts
-    # distillation runs, so a session distilled mid-flight sits in the denominator before it could
-    # possibly be scored and holds coverage down for as long as it stays open. But the marker only
-    # exists for sessions that ended after it shipped; before that the feed has none, and reading
-    # that absence as "no session ended" would report 0 for every historical window. So: prefer it
-    # where it exists, fall back where it does not, and tell the caller which it was.
-    if ended:
-        return len(ended - automated), len(scored), len(automated & ended), "session_end"
-    return len(distilled), len(scored), len(automated), "distill_resolution"
 
 
 #: Exit codes for `--midpoint`. Distinct on purpose: four different absences read as "0 sessions"
