@@ -245,5 +245,62 @@ class Midpoint(unittest.TestCase):
         self.assertNotIn("2026-09-26", source, "the window close is owned by verdict_core")
 
 
+class WindowScoping(unittest.TestCase):
+    """The window is the population; asking for all of history puts the server's cap between
+    the two, and the coverage denominator arrives already truncated."""
+
+    def test_hours_since_covers_the_window_and_never_undercuts_it(self):
+        from datetime import datetime
+
+        tz = uv.verdict_core.WINDOW_TZ
+        now = datetime(2026, 9, 12, 16, 30, tzinfo=tz)
+        hours = uv.hours_since("2026-09-12", now=now)
+        self.assertGreaterEqual(hours, 17, "must cover every hour since the window opened")
+        self.assertLessEqual(hours, 19, "and not ask for days more than it needs")
+        same = uv.hours_since("2026-09-12", now=datetime(2026, 9, 12, 0, 0, tzinfo=tz))
+        self.assertGreaterEqual(same, 1, "a window that just opened still asks for a whole hour")
+        self.assertIsNone(uv.hours_since("not-a-date"), "an unparsable date scopes nothing")
+
+    def test_main_scopes_its_own_fetch_to_the_window(self):
+        """The wiring, not the function. `fetch_events` taking a scope proves nothing if `main`
+        calls it without one — that shape has shipped here before (a helper built and its caller
+        left unchanged), and the cost is the coverage denominator arriving truncated again."""
+        seen = {}
+
+        def _fetch(url, limit, since_hours=None):
+            seen["since_hours"] = since_hours
+            return []
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(uv, "fetch_events", _fetch):
+            with redirect_stdout(out), redirect_stderr(err):
+                uv.main([])
+        self.assertIsNotNone(seen["since_hours"], "main must scope the fetch to the window")
+        self.assertGreaterEqual(seen["since_hours"], 1)
+
+    def test_the_request_carries_the_window_scope(self):
+        seen = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({"entries": [], "maybe_truncated": False}).encode()
+
+        def _urlopen(url, timeout=0):
+            seen.setdefault("urls", []).append(url)
+            return _Resp()
+
+        with mock.patch.object(uv.urllib.request, "urlopen", _urlopen):
+            uv.fetch_events("http://engine", 5000, since_hours=42)
+        self.assertTrue(seen["urls"], "the fetch must have asked for something")
+        for url in seen["urls"]:
+            self.assertIn("since_hours=42", url)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

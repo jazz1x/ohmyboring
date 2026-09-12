@@ -19,6 +19,7 @@ throttles to once per session, so a combined rate answers neither product's ques
 import argparse
 import json
 from datetime import datetime, timezone
+from math import ceil
 import os
 import sys
 import urllib.error
@@ -43,8 +44,30 @@ DEFAULT_URL = os.environ.get("BORING_URL") or "http://127.0.0.1:7700"
 VERDICT_EVENT_NAMES = ("injection_uptake", "distill_resolution")
 
 
-def _fetch_page(base_url, limit, event_name=None):
+def hours_since(day, now=None):
+    """Whole hours from the start of `day` in the window's zone until now, or None.
+
+    Rounded up and padded by one hour so the request can only ever be wider than the window —
+    the date filter downstream is what trims it. A request narrower than the window would drop
+    real rows and read as a smaller sample rather than as a mistake.
+    """
+    try:
+        start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=verdict_core.WINDOW_TZ)
+    except (TypeError, ValueError):
+        return None
+    now = now or datetime.now(verdict_core.WINDOW_TZ)
+    hours = (now - start).total_seconds() / 3600.0
+    return max(1, ceil(hours) + 1)
+
+
+def _fetch_page(base_url, limit, event_name=None, since_hours=None):
     url = f"{base_url.rstrip('/')}/events?limit={limit}"
+    if since_hours:
+        # The window is the population. Asking for all of history and trimming afterwards puts
+        # the cap between the two: `distill_resolution` has more rows than the endpoint will
+        # return, so the coverage denominator arrived already truncated and the verdict was
+        # computed against a sample of its own sample.
+        url += f"&since_hours={int(since_hours)}"
     if event_name:
         # The query parameter is `event`; the field it fills is named `event_name`
         # (`EventLogReq`, serde rename). Sending `event_name=` is accepted and silently ignored,
@@ -59,7 +82,7 @@ def _fetch_page(base_url, limit, event_name=None):
     return body.get("entries") or [], bool(body.get("maybe_truncated")), body.get("limit_applied")
 
 
-def fetch_events(base_url, limit):
+def fetch_events(base_url, limit, since_hours=None):
     """Every event the verdict reads, or None when the engine is unreachable.
 
     A full page is reported rather than swallowed. Truncation and completeness look identical
@@ -68,7 +91,7 @@ def fetch_events(base_url, limit):
     """
     rows, truncated = [], []
     for name in VERDICT_EVENT_NAMES:
-        page = _fetch_page(base_url, limit, name)
+        page = _fetch_page(base_url, limit, name, since_hours)
         if page is None:
             return None
         entries, maybe_truncated, applied = page
@@ -252,7 +275,7 @@ def main(argv=None):
     )
     args = ap.parse_args(argv)
 
-    rows = fetch_events(args.url, args.limit)
+    rows = fetch_events(args.url, args.limit, since_hours=hours_since(args.since))
     if rows is None:
         # Exit 2, distinct from "no events" (1) and "verdict printed" (0). A caller that cannot
         # tell an unreachable engine from an empty one reads absence as a measurement, which is
@@ -340,7 +363,19 @@ def main(argv=None):
                 file=note,
             )
             return 1
-        print("[uptake-verdict] 집계할 injection_uptake 이벤트가 없다 — 계측 조사 대상(PRD §2)", file=note)
+        # §2's clause is "세션 종료가 있는데 0건" — the fault needs an ended session to be a fault.
+        # Nothing in the feed marks one: `distill_resolution` fires on every distillation
+        # including mid-session compactions (§3), so counting it as a session end is itself the
+        # instrumentation defect that clause warns about. With no session-end signal, zero uptake
+        # rows is a window nobody has finished a session in — indistinguishable from a broken
+        # hook, and saying which would be a claim the data does not carry.
+        distills = sum(1 for r in rows if r.get("event") == "distill_resolution")
+        print(
+            f"[uptake-verdict] injection_uptake 0건. 창 안 distill_resolution {distills}건이 있으나"
+            " 그것은 세션 종료가 아니라 증류 실행 수다(§3) — 종료 신호가 없어 '아직 아무 세션도 안 끝났다'와"
+            " '훅이 죽었다'를 가를 수 없다. 판정도 계측 결함 선언도 하지 않는다",
+            file=note,
+        )
         return 1
 
     lost_sessions, lost_rows = unreported(rows)
