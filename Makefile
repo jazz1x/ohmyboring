@@ -178,6 +178,9 @@ bench-embed: ## Benchmark local embedding model (dim, latency, sanity)
 anchor-shadow: ## Anchor hit rate: how many code edits revisit a file the vault already knows (PRD §8 Q8)
 	@python3 scripts/anchor-shadow.py --days $(or $(DAYS),30)
 
+rework-shadow: ## Re-invention rate: turns that rebuilt a note the session never named (PRD §1)
+	@python3 scripts/rework-shadow.py --days $(or $(DAYS),14)
+
 usage: ## Token and model usage read from local transcripts (make usage GROUP=day,model SINCE=2026-08-26)
 	@python3 scripts/usage.py --group "$(or $(GROUP),model)" $(if $(SINCE),--since $(SINCE),) $(if $(UNTIL),--until $(UNTIL),)
 
