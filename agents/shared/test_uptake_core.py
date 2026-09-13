@@ -532,6 +532,53 @@ def test_consumption_reads_korean_contradictions_and_old_rows_without_a_path():
     assert uptake_core.consumption([record], "[assistant] nothing here\n") == ([], [], [])
 
 
+def _ledger(tmp, rows):
+    target = os.path.join(tmp, "injections.jsonl")
+    with open(target, "w", encoding="utf-8") as handle:
+        for session_id, ts in rows:
+            handle.write(json.dumps({"session_id": session_id, "ts": ts, "hits": []}) + "\n")
+    return target
+
+
+#: 2026-09-12T00:00:00Z, 2026-09-13T00:00:00Z, 2026-09-26T00:00:00Z — the window's own boundaries.
+DAY_12, DAY_13, DAY_26 = 1789171200.0, 1789257600.0, 1790380800.0
+
+
+def test_the_window_sample_counts_sessions_and_prompts_the_ledger_holds():
+    with tempfile.TemporaryDirectory() as tmp:
+        target = _ledger(
+            tmp,
+            [
+                ("before", DAY_12 - 1),
+                ("a", DAY_12 + 10),
+                ("a", DAY_12 + 20),
+                ("b", DAY_13 + 30),
+                ("a", DAY_13 + 40),
+                ("a", DAY_13 + 86400 + 50),
+                ("after", DAY_26),
+            ],
+        )
+        sample = uptake_core.window_sample("2026-09-12", "2026-09-26", path=target)
+        # Two sessions over three days: `a` spans all three, and a session split across days is
+        # one session in the floor docs/PRD.md §2 registered — days are not sessions.
+        assert sample.sessions == 2, sample
+        assert sample.prompts == 5, sample
+        assert sample.per_day == {
+            "2026-09-12": (1, 2),
+            "2026-09-13": (2, 2),
+            "2026-09-14": (1, 1),
+        }, sample.per_day
+
+
+def test_the_window_sample_survives_a_ledger_it_cannot_read():
+    assert uptake_core.window_sample("2026-09-12", "2026-09-26", path="/nope.jsonl") == (0, 0, {})
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, "injections.jsonl")
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("not json\n\n" + json.dumps({"session_id": "a"}) + "\n")
+        assert uptake_core.window_sample("2026-09-12", "2026-09-26", path=target).prompts == 0
+
+
 def test_the_transcript_format_follows_the_directory():
     assert uptake_core._transcript_format("/Users/x/.codex/sessions/a.jsonl") == "codex-jsonl"
     assert uptake_core._transcript_format("/Users/x/.claude/projects/p/a.jsonl") == "claude-json"

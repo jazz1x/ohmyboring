@@ -370,10 +370,13 @@ def main(argv=None):
         # rows is a window nobody has finished a session in — indistinguishable from a broken
         # hook, and saying which would be a claim the data does not carry.
         distills = sum(1 for r in rows if r.get("event") == "distill_resolution")
+        sample = uptake_core.window_sample(verdict_core.WINDOW_SINCE, verdict_core.WINDOW_UNTIL)
         print(
             f"[uptake-verdict] injection_uptake 0건. 창 안 distill_resolution {distills}건이 있으나"
             " 그것은 세션 종료가 아니라 증류 실행 수다(§3) — 종료 신호가 없어 '아직 아무 세션도 안 끝났다'와"
-            " '훅이 죽었다'를 가를 수 없다. 판정도 계측 결함 선언도 하지 않는다",
+            " '훅이 죽었다'를 가를 수 없다. 판정도 계측 결함 선언도 하지 않는다."
+            f" 다만 표본 하한은 장부에서 지금 읽힌다: 세션 {sample.sessions}/{verdict_core.MIN_SESSIONS}"
+            f" · 주입 프롬프트 {sample.prompts}/{verdict_core.MIN_INJECTED_PROMPTS}",
             file=note,
         )
         return 1
