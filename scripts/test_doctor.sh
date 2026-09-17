@@ -218,7 +218,7 @@ JSON
     # Real shape, not the flat list (a1) greps: (a1b) replays the SessionEnd command, so the
     # fixture must carry one in the repaired read-stdin-into-a-file-first form.
     cat >"$home/.claude/settings.json" <<'JSON'
-{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"f=$(mktemp); cat > \"$f\"; nohup sh -c 'python3 ~/oh-my-boring/hooks/distill-session.py < \"$0\"; rm -f \"$0\"' \"$f\" >>~/.cache/boring-distill/sessionend.log 2>&1 &"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 ~/oh-my-boring/hooks/recall.py"}]}]}}
+{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"f=$(mktemp); cat > \"$f\"; nohup sh -c 'python3 ~/oh-my-boring/hooks/distill-session.py < \"$0\"; rm -f \"$0\"' \"$f\" >/dev/null 2>&1 &"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 ~/oh-my-boring/hooks/recall.py"}]}]}}
 JSON
     if [ -n "${DOCTOR_HOST_CLI_SHA:-}" ]; then
         mkdir -p "$boring/drudge/target/release"
@@ -462,7 +462,7 @@ fi
 # Both cases carry a real-shape SessionEnd command so (a1b)'s probe has something to replay.
 make_case "$TMP/hooks-tilde" yes
 cat >"$TMP/hooks-tilde/home/.claude/settings.json" <<'JSON'
-{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"f=$(mktemp); cat > \"$f\"; nohup sh -c 'python3 ~/oh-my-boring/hooks/distill-session.py < \"$0\"; rm -f \"$0\"' \"$f\" >>~/.cache/boring-distill/sessionend.log 2>&1 &"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 ~/oh-my-boring/hooks/recall.py"}]}]}}
+{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"f=$(mktemp); cat > \"$f\"; nohup sh -c 'python3 ~/oh-my-boring/hooks/distill-session.py < \"$0\"; rm -f \"$0\"' \"$f\" >/dev/null 2>&1 &"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 ~/oh-my-boring/hooks/recall.py"}]}]}}
 JSON
 if ! run_strict "$TMP/hooks-tilde" "$TMP/hooks-tilde.out"; then
     cat "$TMP/hooks-tilde.out"
@@ -480,7 +480,7 @@ esac
 
 make_case "$TMP/hooks-partial" yes
 cat >"$TMP/hooks-partial/home/.claude/settings.json" <<'JSON'
-{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"f=$(mktemp); cat > \"$f\"; nohup sh -c 'python3 ~/oh-my-boring/hooks/distill-session.py < \"$0\"; rm -f \"$0\"' \"$f\" >>~/.cache/boring-distill/sessionend.log 2>&1 &"}]}]}}
+{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"f=$(mktemp); cat > \"$f\"; nohup sh -c 'python3 ~/oh-my-boring/hooks/distill-session.py < \"$0\"; rm -f \"$0\"' \"$f\" >/dev/null 2>&1 &"}]}]}}
 JSON
 if run_strict "$TMP/hooks-partial" "$TMP/hooks-partial.out"; then
     cat "$TMP/hooks-partial.out"
@@ -492,6 +492,29 @@ case "$(cat "$TMP/hooks-partial.out")" in
   *)
     cat "$TMP/hooks-partial.out"
     echo "FAIL: strict doctor did not report the half-wired hooks" >&2
+    exit 1
+    ;;
+esac
+
+# (a1b) The point of the gate: the registered command can be present and still dead. The old
+# form backgrounded python3 with `&`, so it read /dev/null — how the real hook ran for months,
+# registered, firing, receiving nothing, with >/dev/null swallowing the error. Everything else
+# about this fixture is healthy, so the case fails only if the probe replays the command and
+# catches the drop; a strict pass here would mean the gate never ran at all.
+make_case "$TMP/hooks-stdin-dropped" yes
+cat >"$TMP/hooks-stdin-dropped/home/.claude/settings.json" <<'JSON'
+{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"nohup python3 ~/oh-my-boring/hooks/distill-session.py >/dev/null 2>&1 &"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 ~/oh-my-boring/hooks/recall.py"}]}]}}
+JSON
+if run_strict "$TMP/hooks-stdin-dropped" "$TMP/hooks-stdin-dropped.out"; then
+    cat "$TMP/hooks-stdin-dropped.out"
+    echo "FAIL: strict doctor should fail when the SessionEnd command drops its stdin" >&2
+    exit 1
+fi
+case "$(cat "$TMP/hooks-stdin-dropped.out")" in
+  *"drops its stdin"*) ;;
+  *)
+    cat "$TMP/hooks-stdin-dropped.out"
+    echo "FAIL: strict doctor did not name the dropped-stdin SessionEnd command" >&2
     exit 1
     ;;
 esac
