@@ -319,6 +319,37 @@ fn content_sha(content: &str) -> String {
     hex::encode(Sha256::digest(content.as_bytes()))
 }
 
+#[derive(Debug)]
+pub struct ParsedSymbol {
+    pub qualified_name: String,
+    pub start_row: usize,
+    pub end_row: usize,
+    pub body: String,
+}
+
+pub fn parse_symbols(
+    source: &CodeIndexSource,
+    path_for_ids: &str,
+    content: &str,
+) -> Result<Vec<ParsedSymbol>, CodeIndexError> {
+    let file_id = stable_id(&["file", source.id(), path_for_ids]);
+    let parsed = match source.language() {
+        CodeLanguage::Rust => parser::parse_rust(source.id(), path_for_ids, &file_id, content)?,
+        CodeLanguage::Python => parser::parse_python(source.id(), path_for_ids, &file_id, content)?,
+        CodeLanguage::Shell => parser::parse_shell(source.id(), path_for_ids, &file_id, content)?,
+    };
+    Ok(parsed
+        .symbols
+        .into_iter()
+        .map(|symbol| ParsedSymbol {
+            qualified_name: symbol.qualified_name,
+            start_row: symbol.start_line,
+            end_row: symbol.end_line,
+            body: content[symbol.start_byte..symbol.end_byte].to_owned(),
+        })
+        .collect())
+}
+
 fn stable_id(parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
     for part in parts {

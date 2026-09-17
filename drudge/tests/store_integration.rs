@@ -37,7 +37,6 @@ fn unique_path(prefix: &str) -> String {
         .as_nanos();
     format!("/vault/wiki/{prefix}-{ts}.md")
 }
-
 fn dummy_frontmatter(path: &str) -> FrontMatter {
     FrontMatter {
         origin: "personal".to_string(),
@@ -192,13 +191,14 @@ async fn current_claims_honors_exclude_origins() {
     }
 
     let query = [0.5_f32; 1024]; // near both
-    let subjects =
-        |rows: Vec<Claim>| -> Vec<String> { rows.into_iter().map(|c| c.subject).collect() };
+    let subjects = |rows: Vec<drudge::store::AnchoredClaim>| -> Vec<String> {
+        rows.into_iter().map(|c| c.claim.subject).collect()
+    };
 
     // No exclusion → both visible.
     let all = subjects(
         store
-            .current_claims(&query, 20, &[], None, None)
+            .current_claims(&query, 20, &[], None, None, None, false)
             .await
             .expect("claims all"),
     );
@@ -210,7 +210,15 @@ async fn current_claims_honors_exclude_origins() {
     // Exclude company → company claim must be filtered out, personal kept.
     let filtered = subjects(
         store
-            .current_claims(&query, 20, &["company".to_string()], None, None)
+            .current_claims(
+                &query,
+                20,
+                &["company".to_string()],
+                None,
+                None,
+                None,
+                false,
+            )
             .await
             .expect("claims filtered"),
     );
@@ -1915,4 +1923,745 @@ async fn gc_keeps_a_claim_node_whose_only_row_is_sealed() {
         .delete_document(&path)
         .await
         .expect("cleanup document");
+}
+
+#[tokio::test]
+async fn claim_inherits_note_anchor_and_era_is_marked() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let path = unique_path("claim-anchor");
+    let subject = format!("anchor-probe-{}", std::process::id());
+    let project = "test";
+
+    let mut emb = [0.0_f32; 1024];
+    emb[0] = 1.0;
+
+    let front = dummy_frontmatter(&path);
+    store
+        .upsert_document(&front, "sha-anchor", SystemTime::now())
+        .await
+        .expect("upsert document");
+
+    let before = store.claim_era_counts().await.expect("era counts before");
+
+    let body = "the regression lives in a/b.rs:10 since the refactor";
+    let note_anchors = drudge::anchor::from_note_body(project, body);
+    let anchor = drudge::anchor::anchor_for_claim(&note_anchors, &subject, "regression")
+        .map(|a| a.to_db_string());
+    store
+        .upsert_claim_with_anchor(
+            &subject,
+            "location",
+            "a/b.rs",
+            &path,
+            SystemTime::now(),
+            &emb,
+            "fact",
+            "certain",
+            anchor.as_deref(),
+            None,
+            None,
+        )
+        .await
+        .expect("upsert anchored claim");
+
+    let row = db
+        .query_one(
+            "SELECT anchor, era FROM claim WHERE subject = $1 AND predicate = 'location';",
+            &[&subject],
+        )
+        .await
+        .expect("read claim row");
+    let stored_anchor: Option<String> = row.get(0);
+    let era: String = row.get(1);
+    assert_eq!(stored_anchor.as_deref(), Some("test:a/b.rs:L10"));
+    assert_eq!(era, "anchored");
+
+    let bare = format!("{subject}-bare");
+    store
+        .upsert_claim(
+            &bare,
+            "location",
+            "nowhere",
+            &path,
+            SystemTime::now(),
+            &emb,
+            "fact",
+            "certain",
+        )
+        .await
+        .expect("upsert unanchored claim");
+    let row = db
+        .query_one(
+            "SELECT anchor, era FROM claim WHERE subject = $1;",
+            &[&bare],
+        )
+        .await
+        .expect("read bare row");
+    assert_eq!(row.get::<_, Option<String>>(0), None);
+    assert_eq!(row.get::<_, String>(1), "unanchored");
+
+    let legacy = format!("{subject}-legacy");
+    db.execute(
+        "INSERT INTO claim (subject, predicate, value, source_path, valid_from, kind, confidence)
+         VALUES ($1, 'location', 'old world', $2, now(), 'fact', 'certain');",
+        &[&legacy, &path],
+    )
+    .await
+    .expect("insert legacy claim");
+    let era: String = db
+        .query_one("SELECT era FROM claim WHERE subject = $1;", &[&legacy])
+        .await
+        .expect("read legacy row")
+        .get(0);
+    assert_eq!(era, "pre-anchor");
+
+    let after = store.claim_era_counts().await.expect("era counts after");
+    assert_eq!(after.anchored, before.anchored + 1);
+    assert_eq!(after.unanchored, before.unanchored + 1);
+    assert_eq!(after.pre_anchor, before.pre_anchor + 1);
+
+    db.execute(
+        "DELETE FROM claim WHERE subject LIKE $1;",
+        &[&format!("{subject}%")],
+    )
+    .await
+    .expect("cleanup claims");
+    store
+        .delete_document(&path)
+        .await
+        .expect("cleanup document");
+}
+
+#[tokio::test]
+async fn current_claims_filters_by_anchor_path() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let path = unique_path("claim-anchor-filter");
+    let subject = format!("anchor-filter-{}", std::process::id());
+    let project = "test";
+
+    let mut emb = [0.0_f32; 1024];
+    emb[0] = 1.0;
+
+    let front = dummy_frontmatter(&path);
+    store
+        .upsert_document(&front, "sha-anchor-filter", SystemTime::now())
+        .await
+        .expect("upsert document");
+    store
+        .upsert_claim_with_anchor(
+            &subject,
+            "location",
+            "a/b.rs",
+            &path,
+            SystemTime::now(),
+            &emb,
+            "fact",
+            "certain",
+            Some("test:a/b.rs:L10"),
+            None,
+            None,
+        )
+        .await
+        .expect("upsert anchored claim");
+
+    let hits = store
+        .current_claims(&emb, 10, &[], Some(project), None, Some("a/b.rs"), false)
+        .await
+        .expect("claims filtered by anchor_path");
+    assert!(
+        hits.iter().any(|c| c.subject == subject),
+        "the anchored claim must match anchor_path a/b.rs"
+    );
+    assert_eq!(
+        hits.iter().find(|c| c.subject == subject).unwrap().era,
+        "anchored"
+    );
+    let misses = store
+        .current_claims(
+            &emb,
+            10,
+            &[],
+            Some(project),
+            None,
+            Some("no/such.rs"),
+            false,
+        )
+        .await
+        .expect("claims filtered by missing anchor_path");
+    assert!(
+        !misses.iter().any(|c| c.subject == subject),
+        "a non-matching anchor_path must drop the claim"
+    );
+    let suffix = store
+        .current_claims(&emb, 10, &[], Some(project), None, Some("b.rs"), false)
+        .await
+        .expect("claims filtered by path suffix");
+    assert!(
+        !suffix.iter().any(|c| c.subject == subject),
+        "a path suffix is not an anchor prefix and must not match"
+    );
+    let prefix = store
+        .current_claims(&emb, 10, &[], Some(project), None, Some("a/"), false)
+        .await
+        .expect("claims filtered by path prefix");
+    assert!(
+        prefix.iter().any(|c| c.subject == subject),
+        "a path prefix must match"
+    );
+    let unfiltered = store
+        .current_claims(&emb, 10, &[], Some(project), None, None, false)
+        .await
+        .expect("claims unfiltered");
+    assert!(
+        unfiltered.iter().any(|c| c.subject == subject),
+        "the filter absent must keep default behaviour"
+    );
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+    store
+        .delete_document(&path)
+        .await
+        .expect("cleanup document");
+}
+
+use std::fs;
+
+use drudge::config::{CodeIndexSource, CodeLanguage};
+use tempfile::tempdir;
+
+fn unique_source_id(prefix: &str) -> String {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{prefix}-{ts}")
+}
+
+struct HashedFixture {
+    root: tempfile::TempDir,
+    source: CodeIndexSource,
+    anchor: drudge::anchor::Anchor,
+    hashed: drudge::anchor_hash::AnchorHash,
+    note_path: String,
+    subject: String,
+}
+
+async fn seed_hashed_claim(store: &Store) -> HashedFixture {
+    let root = tempdir().expect("temp source root");
+    fs::write(
+        root.path().join("x.rs"),
+        "// fixture header\n\nfn known() {\n    let value = 1;\n}\n",
+    )
+    .expect("write fixture");
+    let source_id = unique_source_id("anchor-hash");
+    let source = CodeIndexSource::new(
+        &source_id,
+        "Anchor Hash Fixture",
+        root.path().to_path_buf(),
+        CodeLanguage::Rust,
+        true,
+    )
+    .expect("valid source");
+    let anchor = drudge::anchor::Anchor {
+        project: source_id,
+        path: root.path().join("x.rs").to_string_lossy().into_owned(),
+        span: Some(drudge::anchor::LineSpan { start: 3, end: 5 }),
+    };
+    let hashed = drudge::anchor_hash::hash_for_anchor(&anchor, std::slice::from_ref(&source))
+        .expect("a registered repo resolves the covering symbol");
+    assert_eq!(hashed.symbol, "known");
+
+    let note_path = unique_path("claim-anchor-hash");
+    let subject = format!("anchor-hash-{}", unique_source_id("subj"));
+    let mut front = dummy_frontmatter(&note_path);
+    front.project = anchor.project.clone();
+    let mut emb = [0.0_f32; 1024];
+    emb[0] = 1.0;
+    store
+        .upsert_document(&front, "sha-anchor-hash", SystemTime::now())
+        .await
+        .expect("upsert document");
+    store
+        .upsert_claim_with_anchor(
+            &subject,
+            "location",
+            "x.rs",
+            &note_path,
+            SystemTime::now(),
+            &emb,
+            "fact",
+            "certain",
+            Some(&anchor.to_db_string()),
+            Some(&hashed.hash),
+            Some(&hashed.symbol),
+        )
+        .await
+        .expect("upsert hashed claim");
+    HashedFixture {
+        root,
+        source,
+        anchor,
+        hashed,
+        note_path,
+        subject,
+    }
+}
+
+async fn cleanup_hashed_claim(store: &Store, db: &Client, fixture: &HashedFixture) {
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&fixture.subject])
+        .await
+        .expect("cleanup claim");
+    store
+        .delete_document(&fixture.note_path)
+        .await
+        .expect("cleanup document");
+}
+
+#[tokio::test]
+async fn anchor_hash_is_set_at_ingest_only_for_registered_repos() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let fixture = seed_hashed_claim(&store).await;
+    let sources = [fixture.source.clone()];
+
+    let stored_hash: Option<String> = db
+        .query_one(
+            "SELECT anchor_hash FROM claim WHERE subject = $1;",
+            &[&fixture.subject],
+        )
+        .await
+        .expect("read hash")
+        .get(0);
+    assert_eq!(
+        stored_hash.as_deref(),
+        Some(fixture.hashed.hash.as_str()),
+        "anchor_hash is stored at ingest"
+    );
+
+    let foreign = drudge::anchor::Anchor {
+        project: "not-registered".to_owned(),
+        ..fixture.anchor.clone()
+    };
+    assert!(
+        drudge::anchor_hash::hash_for_anchor(&foreign, &sources).is_none(),
+        "an unregistered project must not get the hash layer"
+    );
+    let uncovered = drudge::anchor::Anchor {
+        span: Some(drudge::anchor::LineSpan { start: 1, end: 2 }),
+        ..fixture.anchor.clone()
+    };
+    assert!(
+        drudge::anchor_hash::hash_for_anchor(&uncovered, &sources).is_none(),
+        "a span no symbol covers must not get a hash"
+    );
+
+    cleanup_hashed_claim(&store, &db, &fixture).await;
+}
+
+#[tokio::test]
+async fn anchor_hash_marks_edited_bodies_stale_and_current_claims_hides_them() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let fixture = seed_hashed_claim(&store).await;
+    let sources = [fixture.source.clone()];
+
+    let quiet = drudge::anchor_hash::check_stale_anchors(&store, &sources)
+        .await
+        .expect("quiet sweep");
+    assert_eq!(quiet.repinned, 0, "an untouched body must not re-pin");
+    let untouched: Option<SystemTime> = db
+        .query_one(
+            "SELECT stale_at FROM claim WHERE subject = $1;",
+            &[&fixture.subject],
+        )
+        .await
+        .expect("read stale_at")
+        .get(0);
+    assert!(untouched.is_none(), "an untouched body must not go stale");
+
+    fs::write(
+        fixture.root.path().join("x.rs"),
+        "// fixture header\n\nfn known() {\n    let value = 2;\n}\n",
+    )
+    .expect("edit body");
+    let sweep = drudge::anchor_hash::check_stale_anchors(&store, &sources)
+        .await
+        .expect("sweep after edit");
+    assert!(sweep.stale >= 1, "the edited body must be counted stale");
+    let row = db
+        .query_one(
+            "SELECT stale_at, stale_reason FROM claim WHERE subject = $1;",
+            &[&fixture.subject],
+        )
+        .await
+        .expect("read stale row");
+    let stale_at: Option<SystemTime> = row.get(0);
+    let reason: Option<String> = row.get(1);
+    assert!(stale_at.is_some(), "stale_at is stamped");
+    assert_eq!(reason.as_deref(), Some("symbol body changed"));
+
+    let query = [0.5_f32; 1024];
+    let hidden = store
+        .current_claims(&query, 50, &[], None, None, None, false)
+        .await
+        .expect("claims default");
+    assert!(
+        !hidden.iter().any(|c| c.subject == fixture.subject),
+        "a stale claim must be hidden by default"
+    );
+    let shown = store
+        .current_claims(&query, 50, &[], None, None, None, true)
+        .await
+        .expect("claims include_stale");
+    let stale_row = shown
+        .iter()
+        .find(|c| c.subject == fixture.subject)
+        .expect("include_stale must surface the stale claim");
+    assert!(stale_row.stale_at.is_some());
+    assert_eq!(
+        stale_row.stale_reason.as_deref(),
+        Some("symbol body changed")
+    );
+
+    cleanup_hashed_claim(&store, &db, &fixture).await;
+}
+
+#[tokio::test]
+async fn anchor_hash_repins_a_moved_symbol_instead_of_stale() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let fixture = seed_hashed_claim(&store).await;
+    let sources = [fixture.source.clone()];
+
+    fs::write(
+        fixture.root.path().join("x.rs"),
+        "// fixture header\n\nfn known() {\n    let value = 2;\n}\n",
+    )
+    .expect("edit body");
+    drudge::anchor_hash::check_stale_anchors(&store, &sources)
+        .await
+        .expect("sweep after edit");
+
+    fs::write(
+        fixture.root.path().join("x.rs"),
+        "// fixture header\n\n\n\nfn known() {\n    let value = 1;\n}\n",
+    )
+    .expect("move the function down");
+    db.execute(
+        "UPDATE claim SET stale_at = NULL, stale_reason = NULL WHERE subject = $1;",
+        &[&fixture.subject],
+    )
+    .await
+    .expect("clear stale marker");
+    let sweep = drudge::anchor_hash::check_stale_anchors(&store, &sources)
+        .await
+        .expect("sweep after move");
+    assert!(sweep.repinned >= 1, "the moved body must be re-pinned");
+
+    let row = db
+        .query_one(
+            "SELECT anchor, stale_at, anchor_hash FROM claim WHERE subject = $1;",
+            &[&fixture.subject],
+        )
+        .await
+        .expect("read re-pinned row");
+    let repinned_anchor: String = row.get(0);
+    let stale_at: Option<SystemTime> = row.get(1);
+    let hash_after: String = row.get(2);
+    assert_eq!(
+        repinned_anchor,
+        format!("{}:{}:L5-L7", fixture.anchor.project, fixture.anchor.path),
+        "the anchor re-pins to the shifted span"
+    );
+    assert!(stale_at.is_none(), "a move is not counted stale");
+    assert_eq!(
+        hash_after, fixture.hashed.hash,
+        "the re-pinned anchor keeps its hash — same body, moved"
+    );
+
+    cleanup_hashed_claim(&store, &db, &fixture).await;
+}
+
+async fn stale_subjects_now(db: &Client, subjects: &[String]) -> Vec<String> {
+    let rows = db
+        .query(
+            "SELECT subject FROM claim WHERE subject = ANY($1) AND stale_at IS NOT NULL;",
+            &[&subjects],
+        )
+        .await
+        .expect("read stale subjects");
+    rows.iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>()
+}
+
+#[tokio::test]
+async fn anchor_sweep_is_bounded_and_continues_by_valid_from() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let root = tempdir().expect("temp source root");
+    let source_id = unique_source_id("anchor-sweep");
+    let source = CodeIndexSource::new(
+        &source_id,
+        "Anchor Sweep Fixture",
+        root.path().to_path_buf(),
+        CodeLanguage::Rust,
+        true,
+    )
+    .expect("valid source");
+    let sources = [source];
+    let base = SystemTime::now()
+        .checked_sub(Duration::from_hours(1))
+        .expect("base time");
+    let subjects: Vec<String> = (0..3)
+        .map(|i| format!("anchor-sweep-{}-{i}", unique_source_id("subj")))
+        .collect();
+    let note_paths: Vec<String> = (0..3)
+        .map(|i| unique_path(&format!("claim-anchor-sweep-{i}")))
+        .collect();
+    for (i, subject) in subjects.iter().enumerate() {
+        let file = root.path().join(format!("x{i}.rs"));
+        fs::write(&file, "fn known() {}\n").expect("write fixture");
+        let anchor = drudge::anchor::Anchor {
+            project: source_id.clone(),
+            path: file.to_string_lossy().into_owned(),
+            span: None,
+        };
+        let hashed = drudge::anchor_hash::hash_for_anchor(&anchor, &sources)
+            .expect("span-less anchor hashes the file bytes");
+        let mut front = dummy_frontmatter(&note_paths[i]);
+        front.project = source_id.clone();
+        let mut emb = [0.0_f32; 1024];
+        emb[0] = 1.0;
+        store
+            .upsert_document(&front, &format!("sha-anchor-sweep-{i}"), SystemTime::now())
+            .await
+            .expect("upsert document");
+        store
+            .upsert_claim_with_anchor(
+                subject,
+                "location",
+                "x.rs",
+                &note_paths[i],
+                base + Duration::from_secs(i as u64),
+                &emb,
+                "fact",
+                "certain",
+                Some(&anchor.to_db_string()),
+                Some(&hashed.hash),
+                Some(&hashed.symbol),
+            )
+            .await
+            .expect("upsert hashed claim");
+    }
+
+    fs::write(root.path().join("x0.rs"), "fn known() { let a = 1; }\n").expect("edit file 0");
+    fs::write(root.path().join("x2.rs"), "fn known() { let a = 1; }\n").expect("edit file 2");
+
+    let first = drudge::anchor_hash::check_stale_anchors_limited(&store, &sources, 2)
+        .await
+        .expect("first sweep");
+    assert_eq!(first.checked, 2, "the first sweep stops at its batch");
+    assert_eq!(
+        stale_subjects_now(&db, &subjects).await,
+        vec![subjects[0].clone()],
+        "the two oldest were checked; the third has not had its turn"
+    );
+
+    let second = drudge::anchor_hash::check_stale_anchors_limited(&store, &sources, 2)
+        .await
+        .expect("second sweep");
+    assert_eq!(second.checked, 2);
+    let mut stale = stale_subjects_now(&db, &subjects).await;
+    stale.sort();
+    let mut expected = vec![subjects[0].clone(), subjects[2].clone()];
+    expected.sort();
+    assert_eq!(stale, expected, "the second sweep reaches the tail");
+
+    for (i, subject) in subjects.iter().enumerate() {
+        db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+            .await
+            .expect("cleanup claim");
+        store
+            .delete_document(&note_paths[i])
+            .await
+            .expect("cleanup document");
+    }
+}
+
+async fn repinned_subjects_now(db: &Client, subjects: &[String]) -> Vec<String> {
+    let rows = db
+        .query(
+            "SELECT subject FROM claim
+              WHERE subject = ANY($1) AND anchor LIKE '%:L5-L7';",
+            &[&subjects],
+        )
+        .await
+        .expect("read repinned subjects");
+    let mut out: Vec<String> = rows.iter().map(|row| row.get::<_, String>(0)).collect();
+    out.sort();
+    out
+}
+
+async fn seed_shared_valid_from_group(
+    store: &Store,
+    n: usize,
+) -> (
+    tempfile::TempDir,
+    Vec<CodeIndexSource>,
+    Vec<String>,
+    Vec<String>,
+) {
+    let root = tempdir().expect("temp source root");
+    let source_id = unique_source_id("anchor-sweep-group");
+    let source = CodeIndexSource::new(
+        &source_id,
+        "Anchor Sweep Group Fixture",
+        root.path().to_path_buf(),
+        CodeLanguage::Rust,
+        true,
+    )
+    .expect("valid source");
+    let sources = vec![source];
+    let shared_from = SystemTime::now()
+        .checked_sub(Duration::from_hours(1))
+        .expect("shared valid_from");
+    let subjects: Vec<String> = (0..n)
+        .map(|i| format!("anchor-sweep-group-{}-{i:02}", unique_source_id("subj")))
+        .collect();
+    let note_paths: Vec<String> = (0..n)
+        .map(|i| unique_path(&format!("claim-anchor-sweep-group-{i}")))
+        .collect();
+    for (i, subject) in subjects.iter().enumerate() {
+        let file = root.path().join(format!("x{i}.rs"));
+        fs::write(
+            &file,
+            "// fixture header\n\nfn known() {\n    let value = 1;\n}\n",
+        )
+        .expect("write fixture");
+        let anchor = drudge::anchor::Anchor {
+            project: source_id.clone(),
+            path: file.to_string_lossy().into_owned(),
+            span: Some(drudge::anchor::LineSpan { start: 3, end: 5 }),
+        };
+        let hashed = drudge::anchor_hash::hash_for_anchor(&anchor, &sources)
+            .expect("a registered repo resolves the covering symbol");
+        let mut front = dummy_frontmatter(&note_paths[i]);
+        front.project = source_id.clone();
+        let mut emb = [0.0_f32; 1024];
+        emb[0] = 1.0;
+        store
+            .upsert_document(
+                &front,
+                &format!("sha-anchor-sweep-group-{i}"),
+                SystemTime::now(),
+            )
+            .await
+            .expect("upsert document");
+        store
+            .upsert_claim_with_anchor(
+                subject,
+                "location",
+                "x.rs",
+                &note_paths[i],
+                shared_from,
+                &emb,
+                "fact",
+                "certain",
+                Some(&anchor.to_db_string()),
+                Some(&hashed.hash),
+                Some(&hashed.symbol),
+            )
+            .await
+            .expect("upsert hashed claim");
+    }
+    (root, sources, subjects, note_paths)
+}
+
+#[tokio::test]
+async fn anchor_sweep_resumes_inside_a_shared_valid_from_group() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let (root, sources, subjects, note_paths) = seed_shared_valid_from_group(&store, 4).await;
+
+    for i in 0..4 {
+        fs::write(
+            root.path().join(format!("x{i}.rs")),
+            "// fixture header\n\n\n\nfn known() {\n    let value = 1;\n}\n",
+        )
+        .expect("move the function down");
+    }
+
+    let first = drudge::anchor_hash::check_stale_anchors_limited(&store, &sources, 2)
+        .await
+        .expect("first sweep");
+    assert_eq!(first.checked, 2, "the first sweep stops at its batch");
+    assert_eq!(first.repinned, 2, "both checked claims re-pinned");
+    assert_eq!(first.stale, 0, "a move is never counted stale");
+    let mut first_two = subjects[0..2].to_vec();
+    first_two.sort();
+    assert_eq!(
+        repinned_subjects_now(&db, &subjects).await,
+        first_two,
+        "the first sweep took exactly the first two of the shared group"
+    );
+
+    let second = drudge::anchor_hash::check_stale_anchors_limited(&store, &sources, 2)
+        .await
+        .expect("second sweep");
+    assert_eq!(second.checked, 2);
+    assert_eq!(
+        second.repinned, 2,
+        "the second sweep took the remaining two"
+    );
+    let mut all_four = subjects.clone();
+    all_four.sort();
+    assert_eq!(
+        repinned_subjects_now(&db, &subjects).await,
+        all_four,
+        "every claim was checked exactly once across the two sweeps — none skipped"
+    );
+
+    for (i, subject) in subjects.iter().enumerate() {
+        db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+            .await
+            .expect("cleanup claim");
+        store
+            .delete_document(&note_paths[i])
+            .await
+            .expect("cleanup document");
+    }
 }
