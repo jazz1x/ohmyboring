@@ -1231,12 +1231,10 @@ async fn an_identical_claim_is_not_a_new_version() {
         );
     }
 
-    // Sealed or current, an exact repeat is nothing: the v1 row still matches the whole
-    // tuple, so the probe reads it as unchanged. The trade-off is deliberate — a note that
-    // flips v1 → v2 → v1 reads as unchanged on the way back and the slot keeps answering v2
-    // until the note asserts something new. That staleness is what killing the cross-note
-    // ping-pong costs: scoping this probe to the current row wrote a fresh row on every
-    // re-sync of either note (56,966 rows, 11,251 distinct tuples, on the live store).
+    // A value that was superseded and then came back must NOT read as unchanged. The probe
+    // asks only about this note's own latest row — v2 — so the returning v1 reads as changed,
+    // is inserted, and the slot follows the note on disk. Matching the older sealed row here
+    // would leave the store answering v2 while the note says v1.
     store
         .upsert_claim(
             &subject,
@@ -1251,11 +1249,11 @@ async fn an_identical_claim_is_not_a_new_version() {
         .await
         .expect("supersede with v2");
     assert!(
-        store
+        !store
             .claim_is_unchanged(&subject, "axis", "v1", &path, "fact", "certain")
             .await
             .expect("probe"),
-        "a sealed exact repeat still reads as unchanged — re-opening the slot would ping-pong"
+        "a sealed value returning is new information, not an unchanged claim"
     );
     assert!(
         store
@@ -1360,6 +1358,85 @@ async fn a_resynced_note_does_not_reinsert_a_claim_it_recorded() {
         valid_from, t_a,
         "A's row keeps the first time V was true, not the re-sync's mtime"
     );
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+}
+
+/// The note on disk is the source of truth, so a note edited back to an old value must update
+/// the slot. The probe asks what the note's own latest row says: after v1 -> v2 the latest
+/// row is v2, the returning v1 reads as changed, and the insert makes v1 current again.
+/// Scoping the probe to "has this note ever recorded this" misses that and the slot keeps
+/// answering v2 while the note says v1.
+#[tokio::test]
+async fn a_note_oscillating_back_updates_the_slot() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject = format!(
+        "osc-probe-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let predicate = "axis".to_string();
+    let path = unique_path("osc-a");
+    let t1 = UNIX_EPOCH
+        + Duration::from_secs(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+    let t2 = t1 + Duration::from_mins(1);
+    let t3 = t2 + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_claim(
+            &subject, &predicate, "v1", &path, t1, &emb, "fact", "certain",
+        )
+        .await
+        .expect("ingest v1");
+    store
+        .upsert_claim(
+            &subject, &predicate, "v2", &path, t2, &emb, "fact", "certain",
+        )
+        .await
+        .expect("ingest v2");
+
+    // The note is edited back to v1, as ingest.rs runs it: probe before writing. The note's
+    // own latest row says v2, so the returning v1 is new information and must be inserted.
+    assert!(
+        !store
+            .claim_is_unchanged(&subject, &predicate, "v1", &path, "fact", "certain")
+            .await
+            .expect("probe"),
+        "the note's own latest row says v2; the returning v1 must read as changed"
+    );
+    store
+        .upsert_claim(
+            &subject, &predicate, "v1", &path, t3, &emb, "fact", "certain",
+        )
+        .await
+        .expect("re-ingest v1");
+
+    let current: String = db
+        .query_one(
+            "SELECT value FROM claim WHERE subject = $1 AND predicate = $2
+             AND superseded_at IS NULL;",
+            &[&subject, &predicate],
+        )
+        .await
+        .expect("current row")
+        .get(0);
+    assert_eq!(current, "v1", "the slot must follow the note on disk");
 
     db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
         .await

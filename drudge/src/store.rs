@@ -953,8 +953,8 @@ impl Store {
         Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
-    /// True when this note has already recorded exactly this claim for `(subject, predicate)` —
-    /// the current row or a sealed one.
+    /// True when the note's own latest row for `(subject, predicate)` already says exactly
+    /// this.
     ///
     /// Re-ingesting a note re-asserts every claim in it, and `valid_from` is the note's mtime —
     /// so editing one line of a note wrote a fresh row, and a fresh 1024-dim embedding, for
@@ -964,10 +964,9 @@ impl Store {
     ///
     /// Comparing the whole tuple, not just the value: a different note asserting the same value
     /// is new provenance and must still be recorded, and so is a change of `kind` or
-    /// `confidence`. Only an exact repeat is nothing. A sealed exact repeat is still nothing:
-    /// when one slot holds rows from two notes, scoping this probe to the current row missed
-    /// the sealed one, so re-syncing the loser inserted a fresh row, took the slot, and sealed
-    /// the winner — every sync of either note wrote a row forever.
+    /// `confidence`. Only an exact repeat of the note's own latest row is nothing — the note
+    /// on disk is the source of truth, so a note edited back to an old value must read as
+    /// changed, while re-syncing a value the slot took from another note must not write a row.
     pub async fn claim_is_unchanged(
         &self,
         subject: &str,
@@ -982,8 +981,10 @@ impl Store {
             .await?
             .query(
                 "SELECT 1 FROM claim
-                 WHERE subject = $1 AND predicate = $2
-                   AND value = $3 AND source_path = $4 AND kind = $5 AND confidence = $6
+                 WHERE subject = $1 AND predicate = $2 AND source_path = $4
+                   AND valid_from = (SELECT max(valid_from) FROM claim
+                                      WHERE subject = $1 AND predicate = $2 AND source_path = $4)
+                   AND value = $3 AND kind = $5 AND confidence = $6
                  LIMIT 1;",
                 &[
                     &subject,
