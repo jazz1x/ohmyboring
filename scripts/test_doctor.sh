@@ -170,11 +170,8 @@ if [ "${2:-}" = --status ]; then
     echo "[codex-status] host_worker found=true loaded=true kind=launchd path=/tmp/fake.plist"
     exit 0
 fi
-# (a1b) doctor extracts the SessionEnd command with `python3 - settings.json` and then replays
-# the registered command with the distill script swapped for a sentinel. Both need the real
-# interpreter: the extraction parses the fixture's JSON, and the sentinel records the payload
-# the command delivered. Delegating on any existing file keeps the fake from having to know
-# the probe's mktemp path; unmodelled calls that name no real file still fail loudly above.
+# (a1b) the probe needs the real interpreter — extraction parses the fixture JSON, and the
+# sentinel must record what the replayed command delivered. Models above take precedence.
 if [ "${1:-}" = "-" ] || { [ -n "${1:-}" ] && [ -f "${1:-}" ]; }; then
     exec /usr/bin/python3 "$@"
 fi
@@ -218,9 +215,8 @@ make_case() {
     cat >"$boring/boring.json" <<'JSON'
 {"llm":{"provider":"ollama","base_url":"http://localhost:11434/v1"}}
 JSON
-    # Real shape, not the flat list (a1) greps: (a1b) extracts the SessionEnd command and
-    # replays it, so the fixture must carry one, in the repaired read-stdin-into-a-file-first
-    # form, or every healthy case fails on a check the fixture simply cannot reach.
+    # Real shape, not the flat list (a1) greps: (a1b) replays the SessionEnd command, so the
+    # fixture must carry one in the repaired read-stdin-into-a-file-first form.
     cat >"$home/.claude/settings.json" <<'JSON'
 {"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"f=$(mktemp); cat > \"$f\"; nohup sh -c 'python3 ~/oh-my-boring/hooks/distill-session.py < \"$0\"; rm -f \"$0\"' \"$f\" >>~/.cache/boring-distill/sessionend.log 2>&1 &"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 ~/oh-my-boring/hooks/recall.py"}]}]}}
 JSON
@@ -285,6 +281,13 @@ case "$(cat "$TMP/pass/events.calls")" in
     exit 1
     ;;
 esac
+# (a1b) control: the strict pass above only proves the probe did not fail readiness; assert
+# the ok line itself, or a check that never prints cannot be told from one that passes.
+grep -q "✓ SessionEnd hook delivers its stdin to distill-session.py" "$TMP/pass.out" || {
+    cat "$TMP/pass.out"
+    echo "FAIL: the healthy case must say the SessionEnd payload is delivered" >&2
+    exit 1
+}
 
 make_case "$TMP/fail" no
 if run_strict "$TMP/fail" "$TMP/fail.out"; then
