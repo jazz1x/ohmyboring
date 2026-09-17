@@ -496,29 +496,6 @@ case "$(cat "$TMP/hooks-partial.out")" in
     ;;
 esac
 
-# (a1b) The point of the gate: the registered command can be present and still dead. The old
-# form backgrounded python3 with `&`, so it read /dev/null — how the real hook ran for months,
-# registered, firing, receiving nothing, with >/dev/null swallowing the error. Everything else
-# about this fixture is healthy, so the case fails only if the probe replays the command and
-# catches the drop; a strict pass here would mean the gate never ran at all.
-make_case "$TMP/hooks-stdin-dropped" yes
-cat >"$TMP/hooks-stdin-dropped/home/.claude/settings.json" <<'JSON'
-{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"nohup python3 ~/oh-my-boring/hooks/distill-session.py >/dev/null 2>&1 &"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 ~/oh-my-boring/hooks/recall.py"}]}]}}
-JSON
-if run_strict "$TMP/hooks-stdin-dropped" "$TMP/hooks-stdin-dropped.out"; then
-    cat "$TMP/hooks-stdin-dropped.out"
-    echo "FAIL: strict doctor should fail when the SessionEnd command drops its stdin" >&2
-    exit 1
-fi
-case "$(cat "$TMP/hooks-stdin-dropped.out")" in
-  *"drops its stdin"*) ;;
-  *)
-    cat "$TMP/hooks-stdin-dropped.out"
-    echo "FAIL: strict doctor did not name the dropped-stdin SessionEnd command" >&2
-    exit 1
-    ;;
-esac
-
 # (a1b) The registered command can be present and still dead: a command backgrounded with `&`
 # gets /dev/null as stdin, which is how the real hook ran for months — registered, firing,
 # receiving nothing, with >/dev/null swallowing the error. The check must go red on that exact
@@ -569,6 +546,30 @@ JSON
       exit 1
   }
   echo "ok - unreadable settings JSON fails readiness" )
+
+# The probe swaps the script path for a sentinel so the real distiller never runs during a doctor
+# run. A command that names the script twice — a retry, a fallback — must have both swapped: one
+# missed occurrence distills into the vault every time the doctor runs.
+( make_case "$TMP/sessionend-named-twice" yes
+  twice_boring="$TMP/sessionend-named-twice/boring"
+  probe_marker="$TMP/sessionend-named-twice/doctor-probe-reached-the-real-script"
+  mkdir -p "$twice_boring/hooks"
+  cat >"$twice_boring/hooks/distill-session.py" <<PY
+open("$probe_marker", "w").write("the doctor probe ran the real distiller")
+PY
+  cat >"$TMP/sessionend-named-twice/home/.claude/settings.json" <<JSON
+{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"f=\$(mktemp); cat > \"\$f\"; python3 $twice_boring/hooks/distill-session.py < \"\$f\"; python3 $twice_boring/hooks/distill-session.py < \"\$f\"; rm -f \"\$f\""}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 $twice_boring/hooks/recall.py"}]}]}}
+JSON
+  if ! run_strict "$TMP/sessionend-named-twice" "$TMP/sessionend-named-twice.out"; then
+      cat "$TMP/sessionend-named-twice.out"
+      echo "FAIL: a command naming the script twice still delivers its stdin and must pass" >&2
+      exit 1
+  fi
+  if [ -e "$probe_marker" ]; then
+      echo "FAIL: the doctor probe executed the real distill script — only the first occurrence was swapped" >&2
+      exit 1
+  fi
+  echo "ok - a SessionEnd command naming the script twice is fully sandboxed" )
 
 # (a2b2) The host CLI is a separate artifact from the image: `make build` does not refresh it, and
 # the daily code-sync runs it. A stale one ran old logic against live data with every gate green.
