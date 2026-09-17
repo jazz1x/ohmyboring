@@ -71,15 +71,16 @@ fn parse_db_span(span: &str) -> Option<LineSpan> {
 }
 
 pub fn anchor_for_claim(note_anchors: &[Anchor], subject: &str, value: &str) -> Option<Anchor> {
-    let first = note_anchors.first()?;
     let haystack = format!("{} {}", subject.to_lowercase(), value.to_lowercase());
-    let matched = note_anchors.iter().find(|a| {
-        haystack.contains(&a.path.to_lowercase()) || {
-            let stem = file_stem(&a.path).to_lowercase();
-            !stem.is_empty() && haystack.contains(&stem)
-        }
-    });
-    Some(matched.unwrap_or(first).clone())
+    note_anchors
+        .iter()
+        .find(|a| {
+            haystack.contains(&a.path.to_lowercase()) || {
+                let stem = file_stem(&a.path).to_lowercase();
+                !stem.is_empty() && haystack.contains(&stem)
+            }
+        })
+        .cloned()
 }
 
 fn file_stem(path: &str) -> &str {
@@ -406,10 +407,9 @@ mod tests {
     }
 
     #[test]
-    fn anchor_for_claim_falls_back_to_first() {
-        let anchors = anchor("a/b.rs:10 c/d.py:20");
-        let got = anchor_for_claim(&anchors, "unrelated subject", "unrelated value").unwrap();
-        assert_eq!(got.path, "a/b.rs");
+    fn anchor_for_claim_names_no_path_is_none() {
+        let anchors = anchor("src/qzxw.rs:10 lib/jkqv.py:20");
+        assert!(anchor_for_claim(&anchors, "unrelated subject", "unrelated value").is_none());
     }
 
     #[test]
