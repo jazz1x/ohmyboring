@@ -823,6 +823,8 @@ pub(crate) struct CompactResp {
     pub(crate) prune_query_log: usize,
     pub(crate) gc_tool: usize,
     pub(crate) gc_concept: usize,
+    pub(crate) gc_claim_nodes: usize,
+    pub(crate) gc_claim_edges: usize,
     pub(crate) total_ms: u128,
 }
 
