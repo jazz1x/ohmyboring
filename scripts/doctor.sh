@@ -7,7 +7,8 @@
 #
 # Mostly read-only: probes /health, provider/model shape, compose status, mtimes,
 # and Codex queue/worker status. The marker-dir check writes and removes one
-# owner-only sentinel file so strict readiness can prove queue state is writable.
+# owner-only sentinel file so strict readiness can prove queue state is writable,
+# and the (a1b) SessionEnd probe writes and removes one scratch dir from mktemp.
 # Default mode exits non-zero only when drudge is down; the other lines are advisory so the
 # user sees the WHOLE picture in one run, not just the first failure. Use --strict for the
 # release/briefing readiness gate: every failed dependency/check makes the command fail.
@@ -47,6 +48,7 @@ doctor_started_at="$(date +%s)"
 # Track which checks failed so --fix knows what to repair.
 failed_env=0
 failed_hooks=0
+failed_hookprobe=0
 failed_engine=0
 failed_ollama=0
 failed_containers=0
@@ -75,6 +77,7 @@ log_doctor_event() {
             --field "duration_s=$duration_s" \
             --field "failed_env=$failed_env" \
             --field "failed_hooks=$failed_hooks" \
+            --field "failed_hookprobe=$failed_hookprobe" \
             --field "failed_engine=$failed_engine" \
             --field "failed_ollama=$failed_ollama" \
             --field "failed_containers=$failed_containers" \
@@ -200,7 +203,7 @@ if [ -f "$BORING_HOME/.env" ]; then
 fi
 
 # (a1) Claude Code hooks — the async write-door into ~/.claude/settings.json.
-settings="$HOME/.claude/settings.json"
+settings="${DOCTOR_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 if [ -f "$settings" ]; then
     # Match on `hooks/<script>.py`, not on a full path. install.sh may register the tilde
     # form (`~/oh-my-boring/hooks/...`), which the shell expands at run time but which a
@@ -216,6 +219,64 @@ if [ -f "$settings" ]; then
     fi
 else
     bad "Claude Code settings not found at $settings — run install.sh"; failed_hooks=1
+fi
+
+# (a1b) The SessionEnd command must deliver its stdin to the script it runs: a command
+# backgrounded with `&` reads /dev/null, and that is how this hook ran for months on no payload.
+hook_cmd=$(python3 - "$settings" 2>/dev/null <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        doc = json.load(fh)
+except (OSError, ValueError):
+    sys.exit(2)
+for group in doc.get("hooks", {}).get("SessionEnd", []) or []:
+    for hook in group.get("hooks", []):
+        cmd = hook.get("command", "")
+        if "distill-session.py" in cmd:
+            print(cmd)
+            sys.exit(0)
+sys.exit(1)
+PY
+)
+probe_rc=$?
+if [ "$probe_rc" -eq 2 ]; then
+    bad "Claude Code settings unreadable at $settings — cannot prove the SessionEnd hook receives its payload"
+    failed_hookprobe=1
+elif [ "$probe_rc" -ne 0 ]; then
+    bad "no SessionEnd command running distill-session.py in $settings — the write-door hook is not registered"
+    failed_hookprobe=1
+else
+    # Swap the distill script itself for a sentinel, by path token, so the probe runs the
+    # registered command's own plumbing (mktemp, cat, nohup, &, redirects) while the real
+    # hook — which would distill into the vault — can never run regardless of how the path
+    # is spelled (~ form or absolute). Relying on ~ expansion alone would execute the real
+    # script for an absolute-path registration.
+    sandbox=$(mktemp -d)
+    sentinel="$sandbox/sentinel.py"
+    mkdir -p "$sandbox/.cache/boring-distill"
+    cat > "$sentinel" <<PY
+import sys
+with open("$sandbox/payload.seen", "wb") as fh:
+    fh.write(sys.stdin.buffer.read())
+PY
+    printf '%s' '{"session_id":"doctor-probe","hook_event_name":"SessionEnd"}' > "$sandbox/expected.json"
+    # Every occurrence, not the first: a command that names the script twice would otherwise
+    # keep one live invocation of the real distiller.
+    probe_cmd=$(printf '%s' "$hook_cmd" | sed "s|[^ \"']*distill-session\.py|$sentinel|g")
+    printf '%s' '{"session_id":"doctor-probe","hook_event_name":"SessionEnd"}' \
+        | HOME="$sandbox" sh -c "$probe_cmd" >/dev/null 2>&1
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        cmp -s "$sandbox/expected.json" "$sandbox/payload.seen" && break
+        sleep 0.1
+    done
+    if cmp -s "$sandbox/expected.json" "$sandbox/payload.seen"; then
+        ok "SessionEnd hook delivers its stdin to distill-session.py (sandbox probe reached the script)"
+    else
+        bad "SessionEnd hook drops its stdin — the command backgrounded with & reads /dev/null, so distill-session.py never receives a payload"
+        failed_hookprobe=1
+    fi
+    rm -rf "$sandbox"
 fi
 
 # (a2) engine /health — the deterministic write gate the hook POSTs `remember` to.
@@ -717,8 +778,8 @@ fi
 
 echo
 if [ "$STRICT" -eq 1 ]; then
-    failures="${failed_env}${failed_hooks}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}${failed_midpoint}${failed_maintenance}"
-    if [ "$failures" = "000000000000" ]; then
+    failures="${failed_env}${failed_hooks}${failed_hookprobe}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}${failed_midpoint}${failed_maintenance}"
+    if [ "$failures" = "0000000000000" ]; then
         ok "readiness: all doctor checks passed — briefing/write-door dependencies are ready."
         log_doctor_event ok
         exit 0
