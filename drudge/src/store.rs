@@ -169,11 +169,13 @@ pub struct GraphStats {
 pub struct GcStats {
     pub tool: usize,
     pub concept: usize,
+    pub claim_nodes: usize,
+    pub claim_edges: usize,
 }
 
 impl GcStats {
     pub const fn total(&self) -> usize {
-        self.tool + self.concept
+        self.tool + self.concept + self.claim_nodes
     }
 }
 
@@ -261,6 +263,8 @@ pub struct CompactReport {
     pub prune_query_log: usize,
     pub gc_tool: usize,
     pub gc_concept: usize,
+    pub gc_claim_nodes: usize,
+    pub gc_claim_edges: usize,
 }
 
 /// Compact report with an overall elapsed time.
@@ -290,6 +294,10 @@ pub struct Store {
 /// Kernel A: graph is tool/concept only (`uses`/`about`). Narrative (problem/attempt/solution) lives in
 /// the note body markdown, not as graph nodes — so those edge kinds are gone.
 const SEMANTIC_EDGE_KINDS: [&str; 3] = ["uses", "about", "claims"];
+
+const STALE_CLAIM_MIRROR_NODES: &str = "(kind = 'claim' AND id NOT IN (SELECT 'claim:' || subject || ':' || predicate FROM claim)) \
+     OR (kind IN (SELECT DISTINCT kind FROM claim WHERE kind <> 'fact') \
+         AND id NOT IN (SELECT kind || ':' || subject || ':' || predicate FROM claim WHERE kind <> 'fact'))";
 /// Not user memory, though both live in the vault and stay searchable elsewhere.
 ///
 /// - `eval-*.md`: internal fixtures, which must remain searchable while `make eval` runs.
@@ -566,6 +574,12 @@ impl Store {
                     AND NOT EXISTS (SELECT 1 FROM claim l
                                      WHERE l.subject = c.subject AND l.predicate = c.predicate
                                        AND l.source_path = c.source_path AND l.valid_from > c.valid_from);
+                 CREATE TABLE IF NOT EXISTS node_gc_backup_20260917 AS
+                   SELECT * FROM node WHERE {STALE_CLAIM_MIRROR_NODES};
+                 CREATE TABLE IF NOT EXISTS edge_gc_backup_20260917 AS
+                   SELECT * FROM edge
+                    WHERE src IN (SELECT id FROM node WHERE {STALE_CLAIM_MIRROR_NODES})
+                       OR dst IN (SELECT id FROM node WHERE {STALE_CLAIM_MIRROR_NODES});
                  CREATE INDEX IF NOT EXISTS claim_hnsw ON claim USING hnsw (embedding vector_cosine_ops)
                      WHERE superseded_at IS NULL;
                  CREATE TABLE IF NOT EXISTS query_log (
@@ -2037,6 +2051,8 @@ impl Store {
         let gc = self.gc_orphans().await.context("gc orphans")?;
         report.gc_tool = gc.tool;
         report.gc_concept = gc.concept;
+        report.gc_claim_nodes = gc.claim_nodes;
+        report.gc_claim_edges = gc.claim_edges;
 
         Ok(CompactSummary {
             report,
@@ -2362,6 +2378,28 @@ impl Store {
                 "tool" => gc.tool = c,
                 _ => gc.concept = c,
             }
+        }
+        let db = self.db().await?;
+        let doomed: Vec<String> = db
+            .query(
+                &format!("SELECT id FROM node WHERE {STALE_CLAIM_MIRROR_NODES}"),
+                &[],
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect();
+        gc.claim_nodes = doomed.len();
+        if !doomed.is_empty() {
+            let edges = db
+                .execute(
+                    "DELETE FROM edge WHERE src = ANY($1) OR dst = ANY($1);",
+                    &[&doomed],
+                )
+                .await?;
+            db.execute("DELETE FROM node WHERE id = ANY($1);", &[&doomed])
+                .await?;
+            gc.claim_edges = usize::try_from(edges).unwrap_or(0);
         }
         Ok(gc)
     }

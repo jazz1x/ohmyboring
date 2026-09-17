@@ -1701,3 +1701,218 @@ async fn two_notes_facts_still_collapse_to_one() {
         .await
         .expect("cleanup claim");
 }
+
+async fn claim_mirror_node_count(db: &Client, id: &str) -> i64 {
+    db.query_one("SELECT count(*) FROM node WHERE id = $1;", &[&id])
+        .await
+        .expect("count node")
+        .get(0)
+}
+
+async fn edges_touching(db: &Client, ids: &[String]) -> i64 {
+    db.query_one(
+        "SELECT count(*) FROM edge WHERE src = ANY($1) OR dst = ANY($1);",
+        &[&ids.to_vec()],
+    )
+    .await
+    .expect("count edges")
+    .get(0)
+}
+
+async fn write_claim_mirror(store: &Store, key: &str, kind: &str) -> (String, String, String) {
+    let path = unique_path(key);
+    store
+        .upsert_document(&dummy_frontmatter(&path), "sha-gc", SystemTime::now())
+        .await
+        .expect("upsert document");
+    let claim = Claim {
+        subject: format!("{key}-subject"),
+        predicate: "axis".to_string(),
+        value: "v".to_string(),
+        kind: kind.to_string(),
+        confidence: "certain".to_string(),
+    };
+    store
+        .upsert_claim(
+            &claim.subject,
+            &claim.predicate,
+            &claim.value,
+            &path,
+            SystemTime::now(),
+            &[0.0_f32; 1024],
+            &claim.kind,
+            &claim.confidence,
+        )
+        .await
+        .expect("upsert claim");
+    store
+        .upsert_claim_node(&path, "test", &claim)
+        .await
+        .expect("upsert claim node");
+    (path, claim.subject, claim.predicate)
+}
+
+fn gc_key(prefix: &str) -> String {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{prefix}-{ts}")
+}
+
+#[tokio::test]
+async fn gc_removes_a_claim_node_whose_row_is_gone() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let db = connect(&dsn).await;
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let (path, subject, predicate) =
+        write_claim_mirror(&store, &gc_key("gc-gone"), "decision").await;
+    let (anchor_path, anchor_subject, _) =
+        write_claim_mirror(&store, &gc_key("gc-anchor"), "decision").await;
+    let claim_id = format!("claim:{subject}:{predicate}");
+    let typed_id = format!("decision:{subject}:{predicate}");
+
+    assert_eq!(claim_mirror_node_count(&db, &claim_id).await, 1);
+    assert_eq!(claim_mirror_node_count(&db, &typed_id).await, 1);
+    assert!(
+        edges_touching(&db, &[claim_id.clone(), typed_id.clone()]).await >= 2,
+        "claims and is_a edges keep the mirror reachable, not alive"
+    );
+
+    db.execute(
+        "DELETE FROM claim WHERE subject = $1 AND predicate = $2;",
+        &[&subject, &predicate],
+    )
+    .await
+    .expect("delete claim row");
+
+    let gc = store.gc_orphans().await.expect("gc orphans");
+    assert!(
+        gc.claim_nodes >= 2,
+        "the sweep counts the claim and typed mirrors it removes"
+    );
+    assert_eq!(claim_mirror_node_count(&db, &claim_id).await, 0);
+    assert_eq!(claim_mirror_node_count(&db, &typed_id).await, 0);
+    assert_eq!(
+        edges_touching(&db, &[claim_id.clone(), typed_id.clone()]).await,
+        0,
+        "edges leave with the nodes they join"
+    );
+    assert_eq!(
+        claim_mirror_node_count(&db, &format!("claim:{anchor_subject}:axis")).await,
+        1,
+        "a live claim of the same kind anchors the vocabulary and survives"
+    );
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&anchor_subject])
+        .await
+        .expect("cleanup anchor claim");
+    store.gc_orphans().await.expect("sweep the anchor mirror");
+    store
+        .delete_document(&anchor_path)
+        .await
+        .expect("cleanup anchor document");
+    store
+        .delete_document(&path)
+        .await
+        .expect("cleanup document");
+}
+
+#[tokio::test]
+async fn gc_keeps_a_claim_node_that_still_has_a_row() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let db = connect(&dsn).await;
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let (path, subject, predicate) =
+        write_claim_mirror(&store, &gc_key("gc-live"), "decision").await;
+    let claim_id = format!("claim:{subject}:{predicate}");
+    let typed_id = format!("decision:{subject}:{predicate}");
+
+    store.gc_orphans().await.expect("gc orphans");
+
+    assert_eq!(claim_mirror_node_count(&db, &claim_id).await, 1);
+    assert_eq!(claim_mirror_node_count(&db, &typed_id).await, 1);
+    assert_eq!(
+        edges_touching(&db, &[claim_id.clone(), typed_id.clone()]).await,
+        3,
+        "claims, is_a and claim_of_project edges all survive"
+    );
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+    store.gc_orphans().await.expect("sweep the orphaned mirror");
+    store
+        .delete_document(&path)
+        .await
+        .expect("cleanup document");
+}
+
+#[tokio::test]
+async fn gc_keeps_a_claim_node_whose_only_row_is_sealed() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let db = connect(&dsn).await;
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let (path, subject, predicate) = write_claim_mirror(&store, &gc_key("gc-sealed"), "risk").await;
+    let claim_id = format!("claim:{subject}:{predicate}");
+    let typed_id = format!("risk:{subject}:{predicate}");
+
+    db.execute(
+        "UPDATE claim SET superseded_at = now() WHERE subject = $1;",
+        &[&subject],
+    )
+    .await
+    .expect("seal the only version");
+
+    let sealed: i64 = db
+        .query_one(
+            "SELECT count(*) FROM claim WHERE subject = $1 AND predicate = $2
+             AND superseded_at IS NOT NULL;",
+            &[&subject, &predicate],
+        )
+        .await
+        .expect("count sealed")
+        .get(0);
+    assert_eq!(sealed, 1, "the only version is sealed");
+    let current: i64 = db
+        .query_one(
+            "SELECT count(*) FROM claim WHERE subject = $1 AND predicate = $2
+             AND superseded_at IS NULL;",
+            &[&subject, &predicate],
+        )
+        .await
+        .expect("count current")
+        .get(0);
+    assert_eq!(current, 0, "no current row remains, history does");
+
+    store.gc_orphans().await.expect("gc orphans");
+
+    assert_eq!(
+        claim_mirror_node_count(&db, &claim_id).await,
+        1,
+        "a sealed row is still a row"
+    );
+    assert_eq!(claim_mirror_node_count(&db, &typed_id).await, 1);
+    assert_eq!(
+        edges_touching(&db, &[claim_id.clone(), typed_id.clone()]).await,
+        3
+    );
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+    store.gc_orphans().await.expect("sweep the orphaned mirror");
+    store
+        .delete_document(&path)
+        .await
+        .expect("cleanup document");
+}

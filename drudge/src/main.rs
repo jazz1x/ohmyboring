@@ -373,9 +373,11 @@ async fn main() -> Result<()> {
             let store = store.as_ref().context(VEC_OFF)?;
             let gc = store.gc_orphans().await?;
             println!(
-                "gc orphans — tool: {} · concept: {} · total: {}",
+                "gc orphans — tool: {} · concept: {} · claim nodes: {} · claim edges: {} · total: {}",
                 gc.tool,
                 gc.concept,
+                gc.claim_nodes,
+                gc.claim_edges,
                 gc.total()
             );
         }
@@ -391,12 +393,14 @@ async fn main() -> Result<()> {
             let store = store.as_ref().context(VEC_OFF)?;
             let summary = store.compact().await?;
             println!(
-                "compact done — vacuum {}ms, reindex {}ms, prune_query_log {}, gc(tool {} concept {}), total {}ms",
+                "compact done — vacuum {}ms, reindex {}ms, prune_query_log {}, gc(tool {} concept {} claim nodes {} claim edges {}), total {}ms",
                 summary.report.vacuum_ms,
                 summary.report.reindex_ms,
                 summary.report.prune_query_log,
                 summary.report.gc_tool,
                 summary.report.gc_concept,
+                summary.report.gc_claim_nodes,
+                summary.report.gc_claim_edges,
                 summary.total_ms,
             );
         }

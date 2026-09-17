@@ -848,6 +848,8 @@ pub(crate) async fn handle_compact(
         prune_query_log: summary.report.prune_query_log,
         gc_tool: summary.report.gc_tool,
         gc_concept: summary.report.gc_concept,
+        gc_claim_nodes: summary.report.gc_claim_nodes,
+        gc_claim_edges: summary.report.gc_claim_edges,
         total_ms: summary.total_ms,
     }))
 }
