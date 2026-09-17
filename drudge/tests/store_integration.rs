@@ -1231,9 +1231,12 @@ async fn an_identical_claim_is_not_a_new_version() {
         );
     }
 
-    // A value that was superseded and then came back must NOT read as unchanged. Without the
-    // `superseded_at IS NULL` filter the probe finds the sealed row, skips the insert, and the
-    // current value stays at v2 — so `claims` answers with something the note no longer says.
+    // Sealed or current, an exact repeat is nothing: the v1 row still matches the whole
+    // tuple, so the probe reads it as unchanged. The trade-off is deliberate — a note that
+    // flips v1 → v2 → v1 reads as unchanged on the way back and the slot keeps answering v2
+    // until the note asserts something new. That staleness is what killing the cross-note
+    // ping-pong costs: scoping this probe to the current row wrote a fresh row on every
+    // re-sync of either note (56,966 rows, 11,251 distinct tuples, on the live store).
     store
         .upsert_claim(
             &subject,
@@ -1248,11 +1251,11 @@ async fn an_identical_claim_is_not_a_new_version() {
         .await
         .expect("supersede with v2");
     assert!(
-        !store
+        store
             .claim_is_unchanged(&subject, "axis", "v1", &path, "fact", "certain")
             .await
             .expect("probe"),
-        "a sealed value returning is new information, not an unchanged claim"
+        "a sealed exact repeat still reads as unchanged — re-opening the slot would ping-pong"
     );
     assert!(
         store
@@ -1260,6 +1263,102 @@ async fn an_identical_claim_is_not_a_new_version() {
             .await
             .expect("probe"),
         "the current value must still read as unchanged"
+    );
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+}
+
+/// One slot, two notes: A asserts V, B asserts W and takes the slot, so A's row is sealed.
+/// Re-syncing A re-asserts V — the exact tuple A already recorded. The probe used to scope to
+/// the current row, miss the sealed one, and answer "changed": ingest then inserted a fresh
+/// V with a fresh mtime, which took the slot and sealed B; the next sync of B did the same
+/// back. Every sync of either note wrote a row forever — measured on the live store: 56,966
+/// rows collapsing to 11,251 distinct tuples. A note that has already recorded this exact
+/// claim has nothing new to say, whether or not its row currently wins the slot.
+#[tokio::test]
+async fn a_resynced_note_does_not_reinsert_a_claim_it_recorded() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject = format!(
+        "resync-probe-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let predicate = "axis".to_string();
+    let path_a = unique_path("resync-a");
+    let path_b = unique_path("resync-b");
+    // Whole seconds: timestamptz round-trips at microsecond precision and the assertion
+    // below compares A's valid_from for equality.
+    let t_a = UNIX_EPOCH
+        + Duration::from_secs(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+    let t_b = t_a + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    // 1. Note A records V for the slot.
+    store
+        .upsert_claim(
+            &subject, &predicate, "v", &path_a, t_a, &emb, "fact", "certain",
+        )
+        .await
+        .expect("ingest V from A");
+    // 2. Note B records W for the same slot; B's later valid_from takes it, sealing A's row.
+    store
+        .upsert_claim(
+            &subject, &predicate, "w", &path_b, t_b, &emb, "fact", "certain",
+        )
+        .await
+        .expect("ingest W from B");
+
+    // 3. A re-sync, as ingest.rs runs it: probe before writing. A's sealed row matches the
+    //    exact tuple, so there is nothing new to record.
+    assert!(
+        store
+            .claim_is_unchanged(&subject, &predicate, "v", &path_a, "fact", "certain")
+            .await
+            .expect("probe"),
+        "A already recorded exactly this claim; sealed or not, re-asserting it is nothing new"
+    );
+
+    // 4. Exactly two rows for the slot — the re-sync added none — and A's row keeps the
+    //    valid_from it was first recorded with.
+    let rows: i64 = db
+        .query_one(
+            "SELECT count(*) FROM claim WHERE subject = $1 AND predicate = $2;",
+            &[&subject, &predicate],
+        )
+        .await
+        .expect("count slot rows")
+        .get(0);
+    assert_eq!(
+        rows, 2,
+        "re-syncing A must not insert a third row for the slot"
+    );
+    let valid_from: SystemTime = db
+        .query_one(
+            "SELECT valid_from FROM claim
+             WHERE subject = $1 AND predicate = $2 AND value = 'v' AND source_path = $3;",
+            &[&subject, &predicate, &path_a],
+        )
+        .await
+        .expect("A's row still there")
+        .get(0);
+    assert_eq!(
+        valid_from, t_a,
+        "A's row keeps the first time V was true, not the re-sync's mtime"
     );
 
     db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])

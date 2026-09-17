@@ -953,7 +953,8 @@ impl Store {
         Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
-    /// True when the current row for `(subject, predicate)` already says exactly this.
+    /// True when this note has already recorded exactly this claim for `(subject, predicate)` —
+    /// the current row or a sealed one.
     ///
     /// Re-ingesting a note re-asserts every claim in it, and `valid_from` is the note's mtime —
     /// so editing one line of a note wrote a fresh row, and a fresh 1024-dim embedding, for
@@ -963,7 +964,10 @@ impl Store {
     ///
     /// Comparing the whole tuple, not just the value: a different note asserting the same value
     /// is new provenance and must still be recorded, and so is a change of `kind` or
-    /// `confidence`. Only an exact repeat is nothing.
+    /// `confidence`. Only an exact repeat is nothing. A sealed exact repeat is still nothing:
+    /// when one slot holds rows from two notes, scoping this probe to the current row missed
+    /// the sealed one, so re-syncing the loser inserted a fresh row, took the slot, and sealed
+    /// the winner — every sync of either note wrote a row forever.
     pub async fn claim_is_unchanged(
         &self,
         subject: &str,
@@ -978,7 +982,7 @@ impl Store {
             .await?
             .query(
                 "SELECT 1 FROM claim
-                 WHERE subject = $1 AND predicate = $2 AND superseded_at IS NULL
+                 WHERE subject = $1 AND predicate = $2
                    AND value = $3 AND source_path = $4 AND kind = $5 AND confidence = $6
                  LIMIT 1;",
                 &[
