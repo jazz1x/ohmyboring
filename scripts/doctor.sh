@@ -134,6 +134,22 @@ newest() {
     ls -t $1 2>/dev/null | head -n 1
 }
 
+# Last-written note, by id rather than by mtime. The scheduler rewrites `relates_to` into notes
+# that already exist (`graph→obsidian: updated 8 wiki relates_to`), so mtime says a note was
+# touched, not that a session was distilled: on 2026-09-15 the newest mtime was wiki-0120, an old
+# note, while the write door had not opened since 09-12. Ids only ever go up, and only a
+# distillation mints one.
+newest_minted() {
+    # shellcheck disable=SC2086
+    ls $1 2>/dev/null | sort | tail -n 1
+}
+
+days_since() {
+    then_epoch=$(mtime_epoch "$1") || return 1
+    [ -n "$then_epoch" ] || return 1
+    echo $(( ( $(date +%s) - then_epoch ) / 86400 ))
+}
+
 newest_session_marker() {
     # shellcheck disable=SC2086
     for f in $(ls -t $1 2>/dev/null); do
@@ -420,9 +436,9 @@ fi
 
 # (d1) Newest distilled note — proof the write door produced output. The hook writes notes
 # as vault/wiki/wiki-*.md, so the newest mtime is the last successful distillation.
-note=$(newest "$BORING_HOME/vault/wiki/wiki-*.md")
+note=$(newest_minted "$BORING_HOME/vault/wiki/wiki-*.md")
 if [ -n "$note" ]; then
-    ok "newest distilled note: $(mtime_human "$note")"
+    ok "newest distilled note: $(mtime_human "$note") ($(days_since "$note") days ago)"
     echo "    $note"
 else
     bad "no distilled notes in $BORING_HOME/vault/wiki/ — nothing written yet"; failed_note=1
@@ -432,7 +448,7 @@ fi
 # a successful remember). A fresh note but a stale marker (or vice-versa) localizes the break.
 mark=$(newest_session_marker "$MARK_DIR/*.ts")
 if [ -n "$mark" ]; then
-    ok "newest Claude/Kimi SessionEnd hook marker: $(mtime_human "$mark")"
+    ok "newest Claude/Kimi SessionEnd hook marker: $(mtime_human "$mark") ($(days_since "$mark") days ago)"
     echo "    $mark"
 else
     bad "no Claude/Kimi hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"; failed_marker=1

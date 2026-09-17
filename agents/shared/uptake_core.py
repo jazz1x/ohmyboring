@@ -24,6 +24,8 @@ import os
 import re
 import sys
 import time
+from collections import defaultdict
+from datetime import datetime, timezone
 from typing import NamedTuple
 
 import transcript
@@ -569,6 +571,53 @@ def _prune_locked(handle, session_id, now, max_age_days):
 #: (#245) all 455 duplicate pairs landed within 0.14s, and there was not a single pair anywhere
 #: between that and the next observation. A real repeat cannot arrive inside it.
 DUPLICATE_WINDOW_S = 1.0
+
+
+class WindowSample(NamedTuple):
+    """What the ledger says the window has, against the floors docs/PRD.md §2 registered."""
+
+    sessions: int
+    prompts: int
+    per_day: dict
+
+
+def window_sample(since, until, path=None):
+    """Sessions the channel reached and prompts it injected, between two `YYYY-MM-DD` days.
+
+    The floors are a property of what was injected, and the ledger is where injection is written —
+    so they are readable without the event feed, which carries only what a *finished* session
+    reported. Reading them from the feed instead made a starving window look like a silent one.
+
+    `until` is exclusive, matching how the window dates are compared everywhere else.
+    """
+    per_day = defaultdict(lambda: [set(), 0])
+    try:
+        with open(path or ledger_path(), encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                ts = row.get("ts")
+                if not isinstance(ts, (int, float)):
+                    continue
+                day = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+                if day < since or day >= until:
+                    continue
+                per_day[day][0].add(row.get("session_id"))
+                per_day[day][1] += 1
+    except OSError:
+        return WindowSample(0, 0, {})
+    sessions = {s for seen, _ in per_day.values() for s in seen}
+    prompts = sum(count for _, count in per_day.values())
+    return WindowSample(
+        len(sessions),
+        prompts,
+        {day: (len(seen), count) for day, (seen, count) in sorted(per_day.items())},
+    )
 
 
 def duplicate_injections(path=None, window=DUPLICATE_WINDOW_S):
