@@ -538,6 +538,34 @@ impl Store {
                         'none', 'nothing', 'n/a', 'na', 'not applicable', 'no', '-', '--',
                         '없음', '없다', '없습니다', '없어요', '해당 없음', '해당없음',
                         '남은 작업 없음', '남은 작업이 없음', 'なし', '無し', '該当なし']);
+                 -- A list-kind claim must not be sealed by a sibling. The seal used to scope to
+                 -- (subject, predicate) for every kind, so the newest incident, next-step,
+                 -- decision or risk in a slot silently evicted every other one — measured on
+                 -- the live store 2026-09-17: decision 1,871 current vs 10,127 sealed, next
+                 -- 516 vs 5,166, risk 192 vs 4,020, blocked 74 vs 299; 555 distinct next-steps
+                 -- and 662 distinct risks held a value different from their slot's survivor.
+                 -- `upsert_claim` now seals non-fact kinds on (subject, predicate, source_path);
+                 -- this backfill unseals the rows the old rule sealed, but only where the
+                 -- writing note has no later row in the slot — a note's own superseded history
+                 -- stays sealed.
+                 --
+                 -- This carries a backup table, not just the UPDATE: it moves ~19k rows back
+                 -- into the population `next_actions`, `risks`, `/claims` and the brief read,
+                 -- and if the rule is wrong the owner needs the old state back. The backup is
+                 -- written first and `CREATE TABLE IF NOT EXISTS ... AS` skips once it exists,
+                 -- so a re-run never clobbers it. Idempotent: after the first run the predicate
+                 -- matches nothing.
+                 CREATE TABLE IF NOT EXISTS claim_unseal_backup_20260917 AS
+                   SELECT * FROM claim
+                    WHERE kind <> 'fact' AND superseded_at IS NOT NULL
+                      AND NOT EXISTS (SELECT 1 FROM claim l
+                                       WHERE l.subject = claim.subject AND l.predicate = claim.predicate
+                                         AND l.source_path = claim.source_path AND l.valid_from > claim.valid_from);
+                 UPDATE claim c SET superseded_at = NULL
+                  WHERE c.kind <> 'fact' AND c.superseded_at IS NOT NULL
+                    AND NOT EXISTS (SELECT 1 FROM claim l
+                                     WHERE l.subject = c.subject AND l.predicate = c.predicate
+                                       AND l.source_path = c.source_path AND l.valid_from > c.valid_from);
                  CREATE INDEX IF NOT EXISTS claim_hnsw ON claim USING hnsw (embedding vector_cosine_ops)
                      WHERE superseded_at IS NULL;
                  CREATE TABLE IF NOT EXISTS query_log (
@@ -1000,8 +1028,11 @@ impl Store {
         Ok(!rows.is_empty())
     }
 
-    /// Temporal fact claim upsert + supersede. For the same `(subject,predicate)`, old values are
-    /// sealed via `superseded_at`, and only the latest `valid_from` row is current (NULL). Idempotent (re-ingesting the same row is harmless).
+    /// Temporal claim upsert + supersede. A `fact` is a slot: for the same `(subject,predicate)`,
+    /// old values are sealed via `superseded_at` across notes, and only the latest `valid_from`
+    /// row is current (NULL). Every other kind is an item in a list — a project has many
+    /// next-steps, risks, decisions — so the seal scope narrows to the note's own rows:
+    /// `(subject, predicate, source_path)`. Idempotent (re-ingesting the same row is harmless).
     /// 0 extra gemma calls — takes the claims that extract already produced as-is.
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_claim(
@@ -1036,30 +1067,65 @@ impl Store {
             )
             .await
             .context("insert claim")?;
-        // seal everything below the latest valid_from, leaving only the single latest row as current.
-        self.db()
-            .await?
-            .execute(
-                "UPDATE claim c SET superseded_at = m.mx
-                 FROM (SELECT subject, predicate, max(valid_from) AS mx FROM claim
-                       WHERE subject = $1 AND predicate = $2 GROUP BY subject, predicate) m
-                 WHERE c.subject = m.subject AND c.predicate = m.predicate
-                   AND c.valid_from < m.mx AND c.superseded_at IS DISTINCT FROM m.mx;",
-                &[&subject, &predicate],
-            )
-            .await
-            .context("seal old claims")?;
-        self.db()
-            .await?
-            .execute(
-                "UPDATE claim SET superseded_at = NULL
-                 WHERE subject = $1 AND predicate = $2 AND superseded_at IS NOT NULL
-                   AND valid_from = (SELECT max(valid_from) FROM claim
-                                     WHERE subject = $1 AND predicate = $2);",
-                &[&subject, &predicate],
-            )
-            .await
-            .context("unseal latest claim")?;
+        // Seal everything below the latest valid_from, leaving only the single latest row as
+        // current. A `fact` is a slot: seal across notes on (subject, predicate). Every other
+        // kind is an item in a list, so the seal stays inside the note that wrote the row:
+        // (subject, predicate, source_path). A note's own later row supersedes its own earlier
+        // one; another note's items are never touched. The unseal below stays on the same scope
+        // as the seal — scoping them differently is how a slot ends with no current row at all.
+        if kind == "fact" {
+            self.db()
+                .await?
+                .execute(
+                    "UPDATE claim c SET superseded_at = m.mx
+                     FROM (SELECT subject, predicate, max(valid_from) AS mx FROM claim
+                           WHERE subject = $1 AND predicate = $2 GROUP BY subject, predicate) m
+                     WHERE c.subject = m.subject AND c.predicate = m.predicate
+                       AND c.valid_from < m.mx AND c.superseded_at IS DISTINCT FROM m.mx;",
+                    &[&subject, &predicate],
+                )
+                .await
+                .context("seal old claims")?;
+            self.db()
+                .await?
+                .execute(
+                    "UPDATE claim SET superseded_at = NULL
+                     WHERE subject = $1 AND predicate = $2 AND superseded_at IS NOT NULL
+                       AND valid_from = (SELECT max(valid_from) FROM claim
+                                         WHERE subject = $1 AND predicate = $2);",
+                    &[&subject, &predicate],
+                )
+                .await
+                .context("unseal latest claim")?;
+        } else {
+            self.db()
+                .await?
+                .execute(
+                    "UPDATE claim c SET superseded_at = m.mx
+                     FROM (SELECT subject, predicate, source_path, max(valid_from) AS mx FROM claim
+                           WHERE subject = $1 AND predicate = $2 AND source_path = $3
+                           GROUP BY subject, predicate, source_path) m
+                     WHERE c.subject = m.subject AND c.predicate = m.predicate
+                       AND c.source_path = m.source_path
+                       AND c.valid_from < m.mx AND c.superseded_at IS DISTINCT FROM m.mx;",
+                    &[&subject, &predicate, &source_path],
+                )
+                .await
+                .context("seal old claims")?;
+            self.db()
+                .await?
+                .execute(
+                    "UPDATE claim SET superseded_at = NULL
+                     WHERE subject = $1 AND predicate = $2 AND source_path = $3
+                       AND superseded_at IS NOT NULL
+                       AND valid_from = (SELECT max(valid_from) FROM claim
+                                         WHERE subject = $1 AND predicate = $2
+                                           AND source_path = $3);",
+                    &[&subject, &predicate, &source_path],
+                )
+                .await
+                .context("unseal latest claim")?;
+        }
         Ok(())
     }
 

@@ -1442,3 +1442,262 @@ async fn a_note_oscillating_back_updates_the_slot() {
         .await
         .expect("cleanup claim");
 }
+
+/// A slot holds one fact but many items. Note A records `next` X and note B records `next` Y
+/// for the same (subject, predicate): both are open work the owner recorded, so both rows must
+/// stay current. The old (subject, predicate) seal scope let B's later row evict A's — on the
+/// live store that hid 555 distinct next-steps from `next_actions`.
+#[tokio::test]
+async fn two_notes_next_steps_both_stay_current() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject = format!(
+        "items-probe-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let predicate = "next-step".to_string();
+    let path_a = unique_path("items-a");
+    let path_b = unique_path("items-b");
+    let t_a = UNIX_EPOCH
+        + Duration::from_secs(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+    let t_b = t_a + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_claim(
+            &subject, &predicate, "x", &path_a, t_a, &emb, "next", "certain",
+        )
+        .await
+        .expect("ingest X from A");
+    store
+        .upsert_claim(
+            &subject, &predicate, "y", &path_b, t_b, &emb, "next", "certain",
+        )
+        .await
+        .expect("ingest Y from B");
+
+    let current: i64 = db
+        .query_one(
+            "SELECT count(*) FROM claim WHERE subject = $1 AND predicate = $2
+             AND superseded_at IS NULL;",
+            &[&subject, &predicate],
+        )
+        .await
+        .expect("count current rows")
+        .get(0);
+    assert_eq!(
+        current, 2,
+        "two notes' next-steps are items, not values of one slot; both stay current"
+    );
+    let a_sealed: Option<SystemTime> = db
+        .query_one(
+            "SELECT superseded_at FROM claim WHERE subject = $1 AND predicate = $2
+             AND source_path = $3;",
+            &[&subject, &predicate, &path_a],
+        )
+        .await
+        .expect("A's row")
+        .get(0);
+    assert_eq!(
+        a_sealed, None,
+        "B's later row must not seal A's — the pre-fix scope stamped A with B's valid_from"
+    );
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+}
+
+/// A note that edits its own next-step from X to Y no longer asserts X, so A's X must be
+/// sealed — but only within A's own rows. Another note's row for the same slot is never
+/// touched, no matter how many times A rewrites its own.
+#[tokio::test]
+async fn a_note_replacing_its_own_next_step_seals_the_old_one() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject = format!(
+        "own-item-probe-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let predicate = "next-step".to_string();
+    let path_a = unique_path("own-item-a");
+    let path_b = unique_path("own-item-b");
+    let t1 = UNIX_EPOCH
+        + Duration::from_secs(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+    let t2 = t1 + Duration::from_mins(1);
+    let t3 = t2 + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_claim(
+            &subject, &predicate, "x", &path_a, t1, &emb, "next", "certain",
+        )
+        .await
+        .expect("ingest X from A");
+    store
+        .upsert_claim(
+            &subject, &predicate, "w", &path_b, t2, &emb, "next", "certain",
+        )
+        .await
+        .expect("ingest W from B");
+    store
+        .upsert_claim(
+            &subject, &predicate, "y", &path_a, t3, &emb, "next", "certain",
+        )
+        .await
+        .expect("A replaces its own next-step with Y");
+
+    let x_sealed: SystemTime = db
+        .query_one(
+            "SELECT superseded_at FROM claim WHERE subject = $1 AND predicate = $2
+             AND source_path = $3 AND value = 'x';",
+            &[&subject, &predicate, &path_a],
+        )
+        .await
+        .expect("A's old row")
+        .get(0);
+    assert_eq!(
+        x_sealed, t3,
+        "A's own later row seals X — the note no longer asserts it"
+    );
+    let current: i64 = db
+        .query_one(
+            "SELECT count(*) FROM claim WHERE subject = $1 AND predicate = $2
+             AND superseded_at IS NULL;",
+            &[&subject, &predicate],
+        )
+        .await
+        .expect("count current rows")
+        .get(0);
+    assert_eq!(current, 2, "A's Y and B's W are both current");
+    let b_sealed: Option<SystemTime> = db
+        .query_one(
+            "SELECT superseded_at FROM claim WHERE subject = $1 AND predicate = $2
+             AND source_path = $3;",
+            &[&subject, &predicate, &path_b],
+        )
+        .await
+        .expect("B's row")
+        .get(0);
+    assert_eq!(
+        b_sealed, None,
+        "A rewriting its own next-step must never touch B's row"
+    );
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+}
+
+/// Control: facts still collapse. Note A asserts `fact` X and note B asserts `fact` Y for the
+/// same slot — exactly one current row, B's, as before. Without this the fix would be
+/// indistinguishable from removing sealing altogether.
+#[tokio::test]
+async fn two_notes_facts_still_collapse_to_one() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject = format!(
+        "fact-slot-probe-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let predicate = "axis".to_string();
+    let path_a = unique_path("fact-a");
+    let path_b = unique_path("fact-b");
+    let t_a = UNIX_EPOCH
+        + Duration::from_secs(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+    let t_b = t_a + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_claim(
+            &subject, &predicate, "x", &path_a, t_a, &emb, "fact", "certain",
+        )
+        .await
+        .expect("ingest X from A");
+    store
+        .upsert_claim(
+            &subject, &predicate, "y", &path_b, t_b, &emb, "fact", "certain",
+        )
+        .await
+        .expect("ingest Y from B");
+
+    let current: i64 = db
+        .query_one(
+            "SELECT count(*) FROM claim WHERE subject = $1 AND predicate = $2
+             AND superseded_at IS NULL;",
+            &[&subject, &predicate],
+        )
+        .await
+        .expect("count current rows")
+        .get(0);
+    assert_eq!(
+        current, 1,
+        "a fact is a slot: one current value per (subject, predicate)"
+    );
+    let value: String = db
+        .query_one(
+            "SELECT value FROM claim WHERE subject = $1 AND predicate = $2
+             AND superseded_at IS NULL;",
+            &[&subject, &predicate],
+        )
+        .await
+        .expect("the current row")
+        .get(0);
+    let path: String = db
+        .query_one(
+            "SELECT source_path FROM claim WHERE subject = $1 AND predicate = $2
+             AND superseded_at IS NULL;",
+            &[&subject, &predicate],
+        )
+        .await
+        .expect("the current row")
+        .get(0);
+    assert_eq!(
+        (value.as_str(), path.as_str()),
+        ("y", path_b.as_str()),
+        "B's later row holds the slot, sealing A's across notes"
+    );
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+}
