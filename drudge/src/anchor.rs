@@ -75,17 +75,14 @@ pub fn anchor_for_claim(note_anchors: &[Anchor], subject: &str, value: &str) -> 
     note_anchors
         .iter()
         .find(|a| {
-            haystack.contains(&a.path.to_lowercase()) || {
-                let stem = file_stem(&a.path).to_lowercase();
-                !stem.is_empty() && haystack.contains(&stem)
-            }
+            haystack.contains(&a.path.to_lowercase())
+                || haystack.contains(&file_name(&a.path).to_lowercase())
         })
         .cloned()
 }
 
-fn file_stem(path: &str) -> &str {
-    let file = path.rsplit('/').next().unwrap_or(path);
-    file.split_once('.').map_or(file, |(stem, _)| stem)
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 pub fn from_note_body(project: &str, body: &str) -> Vec<Anchor> {
@@ -397,13 +394,27 @@ mod tests {
     }
 
     #[test]
-    fn anchor_for_claim_matches_path_or_stem() {
+    fn anchor_for_claim_matches_path_or_file_name() {
         let anchors = anchor("drudge/src/store.rs:1212 and agents/shared/uptake_core.py:283");
-        let by_stem = anchor_for_claim(&anchors, "store claim rows", "x").unwrap();
-        assert_eq!(by_stem.path, "drudge/src/store.rs");
+        let by_name = anchor_for_claim(&anchors, "store.rs holds the claim rows", "x").unwrap();
+        assert_eq!(by_name.path, "drudge/src/store.rs");
         let by_path =
             anchor_for_claim(&anchors, "subj", "see agents/shared/uptake_core.py").unwrap();
         assert_eq!(by_path.path, "agents/shared/uptake_core.py");
+    }
+
+    #[test]
+    fn a_bare_word_is_not_a_citation() {
+        let anchors = anchor("drudge/src/store.rs:1212");
+        assert!(anchor_for_claim(&anchors, "store claim rows", "x").is_none());
+    }
+
+    #[test]
+    fn a_longer_word_containing_the_name_is_not_a_citation() {
+        let anchors = anchor("mimir-proxy/src/contract.rs:635-649");
+        assert!(
+            anchor_for_claim(&anchors, "blocker", "contracts/ 에 Rust 마찰 기록 0건").is_none()
+        );
     }
 
     #[test]
