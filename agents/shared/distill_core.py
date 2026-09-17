@@ -965,6 +965,20 @@ def log_uptake_event(session_id, repo, transcript_text, agent):
     """
     try:
         records = uptake_core.load_records(session_id)
+        # The only event in the feed that means "a session ended". `distill_resolution` fires on
+        # every distillation including mid-session compactions, so counting it as a session is
+        # the defect docs/PRD.md §3 names — which left §2's coverage clause (scored sessions over
+        # sessions this channel could have reached) with no denominator it could read, and left
+        # "zero uptake rows" unable to say whether any session had ended at all.
+        event_log.try_append_event(
+            "recall-uptake",
+            "session_end",
+            "ok",
+            session_id=session_id,
+            repo=repo,
+            agent=agent,
+            injected_prompts=len(records),
+        )
         if not records:
             return
         uptake = uptake_core.session_uptake(records, transcript_text)

@@ -14,6 +14,7 @@ import sys
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
 
@@ -248,6 +249,34 @@ class BriefGraphTests(unittest.TestCase):
         with mock.patch.object(peek, "_post_json", fake):
             peek.brief_graph(many)
         self.assertLessEqual(len(calls), peek.BRIEF_GRAPH_SECTIONS)
+
+
+class InstrumentFaultReadsAnEndedSession(unittest.TestCase):
+    """§2's clause needs a session that ENDED. `distill_resolution` fires on every distillation
+    including mid-session compactions (§3), so reading it as an end declares a fault while
+    sessions are merely still open — and this page had that misreading in a constant's name."""
+
+    def _row(self, event, sid, minutes_ago=1):
+        when = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+        return {"event": event, "observed_at": when.isoformat(), "session_id": sid}
+
+    def test_an_open_session_being_distilled_is_not_a_fault(self):
+        out = peek.instrument_fault([self._row("distill_resolution", "a"),
+                                     self._row("distill_resolution", "a")])
+        self.assertNotEqual(out["state"], "investigate", out.get("reason"))
+
+    def test_an_ended_session_with_no_uptake_is_a_fault(self):
+        out = peek.instrument_fault([self._row("session_end", "a")])
+        self.assertEqual(out["state"], "investigate", out.get("reason"))
+
+    def test_the_marker_wins_over_the_old_proxy(self):
+        """Both present: the distillation runs must not inflate the end count."""
+        rows = [self._row("session_end", "a"),
+                self._row("distill_resolution", "a"),
+                self._row("distill_resolution", "b"),
+                self._row("distill_resolution", "c")]
+        out = peek.instrument_fault(rows)
+        self.assertEqual(out["session_ends_48h"], 1, "one session ended; b and c are still open")
 
 
 if __name__ == "__main__":

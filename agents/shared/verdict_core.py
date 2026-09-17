@@ -169,6 +169,64 @@ def format_verdict(v):
 #: Counters an `injection_uptake` event carries that the verdict adds up.
 COUNTERS = ("used_prompts", "total_prompts", "used_control_prompts")
 
+
+class SessionCounts(NamedTuple):
+    """§2's coverage inputs, and which event the denominator came from.
+
+    `source` is named because the two are not the same population: `session_end` is a session that
+    ended, `distill_resolution` is a distillation run — it fires on mid-session compactions too
+    (§3), so a session still open sits in the denominator holding coverage down.
+    """
+
+    total: int
+    scored: int
+    automated: int
+    source: str
+
+
+def session_counts(rows, since, until, classify=None):
+    """Sessions eligible, scored, and excluded as automated inside the window.
+
+    One counter for both surfaces that render this window. They each had their own copy, and
+    `peek` had gone as far as naming `distill_resolution` its `SESSION_END_EVENT` — the reading
+    §3 calls an instrumentation defect, frozen into a constant. Two copies of a population
+    definition drift apart in the direction nobody is looking at.
+
+    `classify` is passed in rather than imported: the automated label only exists for sessions
+    that ended after #286 shipped, so earlier ones are judged from their transcripts at read time
+    — and that judgement lives in the distiller, which must not become something the thresholds
+    module depends on.
+    """
+    distilled, scored, automated, unlabelled, ended = set(), set(), set(), set(), set()
+    for row in rows or []:
+        observed = window_day(row.get("observed_at"))
+        if (since and observed < since) or (until and observed > until):
+            continue
+        attrs = row.get("attributes") or {}
+        sid = row.get("session_id") or attrs.get("session_id")
+        if not sid:
+            continue
+        name = row.get("event")
+        if name == "distill_resolution":
+            distilled.add(sid)
+            if (attrs.get("reason") or row.get("reason")) == "automated_run":
+                automated.add(sid)
+            else:
+                unlabelled.add(sid)
+        elif name == "session_end":
+            ended.add(sid)
+        elif name == "injection_uptake":
+            scored.add(sid)
+    if classify:
+        retro, _unreadable = classify(unlabelled - automated)
+        automated |= retro
+    # Prefer the marker where it exists. It only exists for sessions that ended after it shipped,
+    # and reading its absence as "no session ended" would report zero for every historical window
+    # — the shape of the label-postdates-the-rows correction in §8.
+    if ended:
+        return SessionCounts(len(ended - automated), len(scored), len(automated & ended), "session_end")
+    return SessionCounts(len(distilled), len(scored), len(automated), "distill_resolution")
+
 def unreported(rows):
     """(sessions, rows) that were injected into and never scored, from `injection_unreported`.
 

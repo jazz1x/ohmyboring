@@ -649,5 +649,53 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
             distill_core.write_consumption_to_graph("s1", self._records(), "[assistant] per wiki-0007.\n")
 
 
+class SessionEndIsRecorded(unittest.TestCase):
+    """`distill_resolution` fires on every distillation including mid-session compactions (PRD §3),
+    so nothing in the feed meant "a session ended" — which left §2's coverage clause without a
+    denominator and "zero uptake rows" unable to say whether any session had finished at all."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_log = os.environ.get("BORING_EVENT_LOG")
+        self.old_sink = os.environ.get("BORING_EVENT_SINK")
+        self.old_ledger = os.environ.get("BORING_INJECTION_LEDGER")
+        os.environ["BORING_EVENT_LOG"] = os.path.join(self.tmp.name, "events.ndjson")
+        os.environ["BORING_EVENT_SINK"] = "spool"
+        os.environ["BORING_INJECTION_LEDGER"] = os.path.join(self.tmp.name, "ledger.jsonl")
+
+    def tearDown(self):
+        _restore_env("BORING_EVENT_LOG", self.old_log)
+        _restore_env("BORING_EVENT_SINK", self.old_sink)
+        _restore_env("BORING_INJECTION_LEDGER", self.old_ledger)
+        self.tmp.cleanup()
+
+    def _events(self):
+        with open(os.environ["BORING_EVENT_LOG"], encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+    def test_a_session_with_no_injections_still_says_it_ended(self):
+        """The session that received nothing is exactly the one the old early return erased, and
+        it belongs in the denominator: the channel could have reached it and did not."""
+        distill_core.log_uptake_event("s-empty", "repo", "[assistant] hi\n", "claude-code")
+        events = self._events()
+        kinds = [e["event"] for e in events]
+        self.assertIn("session_end", kinds)
+        self.assertNotIn("injection_uptake", kinds, "nothing was injected, so nothing is scored")
+        end = next(e for e in events if e["event"] == "session_end")
+        self.assertEqual(end["session_id"], "s-empty")
+        self.assertEqual(end["injected_prompts"], 0)
+
+    def test_a_scored_session_says_it_ended_too(self):
+        import uptake_core
+
+        hits = [{"source_path": "/vault/wiki/wiki-0007.md",
+                 "snippet": "the pool died because deadpool recycled a closed socket " * 3}]
+        uptake_core.append_record(uptake_core.injection_record("s-scored", "why", hits, 3))
+        distill_core.log_uptake_event("s-scored", "repo", "[assistant] per wiki-0007.\n", "claude-code")
+        kinds = [e["event"] for e in self._events()]
+        self.assertIn("session_end", kinds)
+        self.assertIn("injection_uptake", kinds)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
