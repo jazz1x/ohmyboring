@@ -246,23 +246,37 @@ elif [ "$probe_rc" -ne 0 ]; then
     bad "no SessionEnd command running distill-session.py in $settings — the write-door hook is not registered"
     failed_hookprobe=1
 else
+    # Swap the distill script itself for a sentinel, by path token, so the probe runs the
+    # registered command's own plumbing (mktemp, cat, nohup, &, redirects) while the real
+    # hook — which would distill into the vault — can never run regardless of how the path
+    # is spelled (~ form or absolute). Relying on ~ expansion alone would execute the real
+    # script for an absolute-path registration.
     sandbox=$(mktemp -d)
-    mkdir -p "$sandbox/oh-my-boring/hooks" "$sandbox/.cache/boring-distill"
-    cat > "$sandbox/oh-my-boring/hooks/distill-session.py" <<'PY'
-import os, sys
-open(os.path.join(os.environ["HOME"], "payload.seen"), "a").write(sys.stdin.read())
+    sentinel="$sandbox/sentinel.py"
+    mkdir -p "$sandbox/.cache/boring-distill"
+    cat > "$sentinel" <<PY
+import sys
+with open("$sandbox/payload.seen", "wb") as fh:
+    fh.write(sys.stdin.buffer.read())
 PY
-    printf '%s' '{"session_id":"doctor-probe","hook_event_name":"SessionEnd"}' \
-        | HOME="$sandbox" sh -c "$hook_cmd" >/dev/null 2>&1
-    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-        [ -s "$sandbox/payload.seen" ] && break
-        sleep 0.1
-    done
-    if [ -s "$sandbox/payload.seen" ]; then
-        ok "SessionEnd hook delivers its stdin to distill-session.py (sandbox probe reached the script)"
-    else
-        bad "SessionEnd hook drops its stdin — the command backgrounded with & reads /dev/null, so distill-session.py never receives a payload"
+    printf '%s' '{"session_id":"doctor-probe","hook_event_name":"SessionEnd"}' > "$sandbox/expected.json"
+    probe_cmd=$(printf '%s' "$hook_cmd" | sed "s|[^ \"']*distill-session\.py|$sentinel|")
+    if [ "$probe_cmd" = "$hook_cmd" ]; then
+        bad "SessionEnd command cannot be sandboxed — it does not name distill-session.py by path, so payload delivery is unverified"
         failed_hookprobe=1
+    else
+        printf '%s' '{"session_id":"doctor-probe","hook_event_name":"SessionEnd"}' \
+            | HOME="$sandbox" sh -c "$probe_cmd" >/dev/null 2>&1
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            cmp -s "$sandbox/expected.json" "$sandbox/payload.seen" && break
+            sleep 0.1
+        done
+        if cmp -s "$sandbox/expected.json" "$sandbox/payload.seen"; then
+            ok "SessionEnd hook delivers its stdin to distill-session.py (sandbox probe reached the script)"
+        else
+            bad "SessionEnd hook drops its stdin — the command backgrounded with & reads /dev/null, so distill-session.py never receives a payload"
+            failed_hookprobe=1
+        fi
     fi
     rm -rf "$sandbox"
 fi
