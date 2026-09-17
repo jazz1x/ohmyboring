@@ -170,6 +170,14 @@ if [ "${2:-}" = --status ]; then
     echo "[codex-status] host_worker found=true loaded=true kind=launchd path=/tmp/fake.plist"
     exit 0
 fi
+# (a1b) doctor extracts the SessionEnd command with `python3 - settings.json` and then replays
+# the registered command with the distill script swapped for a sentinel. Both need the real
+# interpreter: the extraction parses the fixture's JSON, and the sentinel records the payload
+# the command delivered. Delegating on any existing file keeps the fake from having to know
+# the probe's mktemp path; unmodelled calls that name no real file still fail loudly above.
+if [ "${1:-}" = "-" ] || { [ -n "${1:-}" ] && [ -f "${1:-}" ]; }; then
+    exec /usr/bin/python3 "$@"
+fi
 exit 1
 SH
 
@@ -210,8 +218,11 @@ make_case() {
     cat >"$boring/boring.json" <<'JSON'
 {"llm":{"provider":"ollama","base_url":"http://localhost:11434/v1"}}
 JSON
-    cat >"$home/.claude/settings.json" <<JSON
-{"hooks":["$boring/hooks/distill-session.py","$boring/hooks/recall.py"]}
+    # Real shape, not the flat list (a1) greps: (a1b) extracts the SessionEnd command and
+    # replays it, so the fixture must carry one, in the repaired read-stdin-into-a-file-first
+    # form, or every healthy case fails on a check the fixture simply cannot reach.
+    cat >"$home/.claude/settings.json" <<'JSON'
+{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"f=$(mktemp); cat > \"$f\"; nohup sh -c 'python3 ~/oh-my-boring/hooks/distill-session.py < \"$0\"; rm -f \"$0\"' \"$f\" >>~/.cache/boring-distill/sessionend.log 2>&1 &"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 ~/oh-my-boring/hooks/recall.py"}]}]}}
 JSON
     if [ -n "${DOCTOR_HOST_CLI_SHA:-}" ]; then
         mkdir -p "$boring/drudge/target/release"
@@ -445,9 +456,10 @@ fi
 
 # (a1) hook wiring. install.sh may register the tilde form, which the shell expands at run time
 # but which a grep for the expanded path never matches — doctor called working hooks missing.
+# Both cases carry a real-shape SessionEnd command so (a1b)'s probe has something to replay.
 make_case "$TMP/hooks-tilde" yes
 cat >"$TMP/hooks-tilde/home/.claude/settings.json" <<'JSON'
-{"hooks":["~/oh-my-boring/hooks/distill-session.py","~/oh-my-boring/hooks/recall.py"]}
+{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"f=$(mktemp); cat > \"$f\"; nohup sh -c 'python3 ~/oh-my-boring/hooks/distill-session.py < \"$0\"; rm -f \"$0\"' \"$f\" >>~/.cache/boring-distill/sessionend.log 2>&1 &"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 ~/oh-my-boring/hooks/recall.py"}]}]}}
 JSON
 if ! run_strict "$TMP/hooks-tilde" "$TMP/hooks-tilde.out"; then
     cat "$TMP/hooks-tilde.out"
@@ -465,7 +477,7 @@ esac
 
 make_case "$TMP/hooks-partial" yes
 cat >"$TMP/hooks-partial/home/.claude/settings.json" <<'JSON'
-{"hooks":["~/oh-my-boring/hooks/distill-session.py"]}
+{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"f=$(mktemp); cat > \"$f\"; nohup sh -c 'python3 ~/oh-my-boring/hooks/distill-session.py < \"$0\"; rm -f \"$0\"' \"$f\" >>~/.cache/boring-distill/sessionend.log 2>&1 &"}]}]}}
 JSON
 if run_strict "$TMP/hooks-partial" "$TMP/hooks-partial.out"; then
     cat "$TMP/hooks-partial.out"
@@ -480,6 +492,57 @@ case "$(cat "$TMP/hooks-partial.out")" in
     exit 1
     ;;
 esac
+
+# (a1b) The registered command can be present and still dead: a command backgrounded with `&`
+# gets /dev/null as stdin, which is how the real hook ran for months — registered, firing,
+# receiving nothing, with >/dev/null swallowing the error. The check must go red on that exact
+# old form, stay green on the repaired form (every case above exercises it), and treat a
+# missing SessionEnd entry as a failure rather than a silent pass.
+( make_case "$TMP/sessionend-drops-stdin" yes
+  cat >"$TMP/sessionend-drops-stdin/home/.claude/settings.json" <<'JSON'
+{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"DISTILL_COMPANY_CWD=marketboro nohup python3 ~/oh-my-boring/hooks/distill-session.py >/dev/null 2>&1 &"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 ~/oh-my-boring/hooks/recall.py"}]}]}}
+JSON
+  if run_strict "$TMP/sessionend-drops-stdin" "$TMP/sessionend-drops-stdin.out"; then
+      cat "$TMP/sessionend-drops-stdin.out"
+      echo "FAIL: the backgrounded-stdin mutant must fail strict doctor" >&2
+      exit 1
+  fi
+  grep -q "✗ SessionEnd hook drops its stdin" "$TMP/sessionend-drops-stdin.out" || {
+      cat "$TMP/sessionend-drops-stdin.out"
+      echo "FAIL: the dropped-stdin mutant must be named, not merely counted" >&2
+      exit 1
+  }
+  echo "ok - a SessionEnd command that backgrounds stdin away fails readiness" )
+
+( make_case "$TMP/sessionend-absent" yes
+  cat >"$TMP/sessionend-absent/home/.claude/settings.json" <<'JSON'
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 ~/oh-my-boring/hooks/recall.py"}]}]}}
+JSON
+  if run_strict "$TMP/sessionend-absent" "$TMP/sessionend-absent.out"; then
+      cat "$TMP/sessionend-absent.out"
+      echo "FAIL: a settings file with no SessionEnd entry must not pass strict doctor" >&2
+      exit 1
+  fi
+  grep -q "✗ no SessionEnd command running distill-session.py" "$TMP/sessionend-absent.out" || {
+      cat "$TMP/sessionend-absent.out"
+      echo "FAIL: the absent SessionEnd entry must be named, not merely counted" >&2
+      exit 1
+  }
+  echo "ok - a settings file with no SessionEnd entry fails readiness" )
+
+( make_case "$TMP/sessionend-unreadable" yes
+  printf '{"hooks": {"SessionEnd": [unterminated\n' >"$TMP/sessionend-unreadable/home/.claude/settings.json"
+  if run_strict "$TMP/sessionend-unreadable" "$TMP/sessionend-unreadable.out"; then
+      cat "$TMP/sessionend-unreadable.out"
+      echo "FAIL: unreadable settings JSON must not pass strict doctor" >&2
+      exit 1
+  fi
+  grep -q "✗ Claude Code settings unreadable" "$TMP/sessionend-unreadable.out" || {
+      cat "$TMP/sessionend-unreadable.out"
+      echo "FAIL: unreadable settings must be named, not merely counted" >&2
+      exit 1
+  }
+  echo "ok - unreadable settings JSON fails readiness" )
 
 # (a2b2) The host CLI is a separate artifact from the image: `make build` does not refresh it, and
 # the daily code-sync runs it. A stale one ran old logic against live data with every gate green.
