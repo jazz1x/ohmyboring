@@ -202,7 +202,9 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                     continue;
                 }
                 // Nothing changed for this axis, so there is nothing to embed and nothing to
-                // seal. Leaving the existing row alone also keeps its `valid_from`, which is
+                // seal. The probe asks what this note's own latest row says — an exact match
+                // means re-opening the slot would just ping-pong it against the other note's
+                // row. Leaving the existing row alone also keeps its `valid_from`, which is
                 // the first time this value was true rather than the last time the note was
                 // touched — the more honest of the two.
                 if store
