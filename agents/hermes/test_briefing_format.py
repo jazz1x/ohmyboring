@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import datetime
 import importlib.util
 import json
 import sys
@@ -834,7 +835,11 @@ def test_the_briefing_counts_the_verdicts_population_not_a_neighbouring_one():
             },
         }
 
-    before, after = "2026-09-11T00:00:00+00:00", "2026-09-13T00:00:00+00:00"
+    # Straddle the registered boundary rather than naming dates: both moved at every reset, and a
+    # fixture that has to be edited to stay green stops testing the split it is named for.
+    repair = datetime.datetime.fromisoformat(briefing.verdict_core.LEDGER_REPAIR_AT)
+    before = (repair - datetime.timedelta(days=1)).isoformat()
+    after = (repair + datetime.timedelta(days=1)).isoformat()
     rows = [row(f"old{i}", "claude-code", before, 10) for i in range(6)]
     rows += [row(f"new{i}", "claude-code", after, 10) for i in range(3)]
     rows += [row(f"k{i}", "kimi", after, 10) for i in range(4)]
@@ -881,8 +886,10 @@ def test_the_midpoint_warning_rides_the_one_channel_that_reaches_a_person():
         finally:
             os.environ.pop("BORING_TODAY", None)
 
-    assert "중간점" not in on("2026-09-13"), "before the midpoint it is not due"
-    assert "중간점" not in on("2026-09-27"), "after the close it is spent"
+    before_midpoint = datetime.date.fromisoformat(V.MIDPOINT) - datetime.timedelta(days=1)
+    after_close = datetime.date.fromisoformat(V.WINDOW_UNTIL) + datetime.timedelta(days=1)
+    assert "중간점" not in on(before_midpoint.isoformat()), "before the midpoint it is not due"
+    assert "중간점" not in on(after_close.isoformat()), "after the close it is spent"
 
     due = on(V.MIDPOINT)
     assert "중간점" in due and f"3/{floor}" in due, due
@@ -941,14 +948,21 @@ def test_the_audit_backlog_is_named_in_both_renderings_and_falls_silent_when_met
     # The count only moves when a person sits down for a minute, so on every other day it repeats
     # itself word for word -- it stood at 20 across all 8 briefings actually sent, nine days
     # running. A line that never changes is one the reader learns to skip.
+    # Derived from the window, not written down: these dates moved with every reset and the test
+    # broke each time, which taught nothing about the behaviour it is here to pin.
+    last_call = datetime.date.fromisoformat(slack_briefing._audit_last_call())
+    close = datetime.date.fromisoformat(slack_briefing.verdict_core.WINDOW_UNTIL)
+    quiet = last_call - datetime.timedelta(days=2)
+    while quiet.weekday() == 0:  # Mondays speak regardless; pick a day that should stay silent
+        quiet -= datetime.timedelta(days=1)
     try:
-        os.environ["BORING_TODAY"] = "2026-09-15"  # Tuesday, mid-window
+        os.environ["BORING_TODAY"] = quiet.isoformat()  # mid-window, not a Monday
         assert slack_briefing.audit_notice(behind) == "", "a daily repeat of yesterday's number"
 
-        os.environ["BORING_TODAY"] = "2026-09-24"  # the last stretch: a deadline is behind it now
+        os.environ["BORING_TODAY"] = last_call.isoformat()  # the last stretch: a deadline behind it
         assert "--audit" in slack_briefing.audit_notice(behind)
 
-        os.environ["BORING_TODAY"] = "2026-09-27"  # past the window
+        os.environ["BORING_TODAY"] = (close + datetime.timedelta(days=1)).isoformat()
         assert slack_briefing.audit_notice(behind) == "", (
             "the figure this unblocks can no longer be computed, so the ask is spent"
         )

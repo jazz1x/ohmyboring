@@ -207,20 +207,27 @@ def test_the_repair_boundary_splits_by_instant_not_by_string():
     reads. That is the direction that matters: a pre-repair session counted as post is exactly the
     biased sample §8 D4 exists to keep out.
     """
+    boundary = "2026-09-11T00:31:53+00:00"
     rows = [
-        {"observed_at": "2026-09-11T09:00:00+09:00"},  # 00:00Z — before the repair
+        {"observed_at": "2026-09-11T09:00:00+09:00"},  # 00:00Z — before the boundary
         {"observed_at": "2026-09-11T10:00:00+09:00"},  # 01:00Z — after it
         {"observed_at": None},
         {"observed_at": "not a timestamp"},
     ]
-    pre, post = V.partition_at_repair(rows)
+    pre, post = V.partition_at_repair(rows, boundary=boundary)
     assert [r["observed_at"] for r in post] == ["2026-09-11T10:00:00+09:00"], post
     assert len(pre) == 3, "an unplaceable row counts as pre — the half the verdict does not read"
 
 
-def test_the_boundary_is_the_repair_commit_not_a_chosen_date():
-    """A boundary someone can nudge is not a boundary. It has to trace to the commit."""
-    assert V.LEDGER_REPAIR_AT.startswith("2026-09-11T00:31:53"), V.LEDGER_REPAIR_AT
+def test_the_boundary_is_a_recorded_instant_not_a_chosen_date():
+    """A boundary someone can nudge is not a boundary — it traces to a record outside this file.
+
+    Through D9 that record was the repair commit. D11's defect was in the SessionEnd registration
+    in `~/.claude/settings.json`, which no repository holds, so the record is the first entry the
+    repaired command wrote to `~/.cache/boring-distill/sessionend.log`. Pinning it here is the
+    point: moving the boundary has to be an edit someone reviews, not a default that drifts.
+    """
+    assert V.LEDGER_REPAIR_AT.startswith("2026-09-17T01:51:35"), V.LEDGER_REPAIR_AT
     assert V._instant(V.LEDGER_REPAIR_AT) is not None
 
 
