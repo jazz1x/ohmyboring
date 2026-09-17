@@ -371,4 +371,22 @@ mod tests {
             "body was {body:?}"
         );
     }
+
+    #[test]
+    fn a_work_denial_survives_any_run_of_trailing_stops() {
+        for value in ["none", "none.", "none...", "없음.", "없음。。", "없음 ."] {
+            let denial = Claim {
+                subject: "s".to_owned(),
+                predicate: "next".to_owned(),
+                value: value.to_owned(),
+                kind: "next".to_owned(),
+                confidence: String::new(),
+            };
+            assert_eq!(
+                denial.kind(),
+                "fact",
+                "{value:?} denies work, so it is not a next step"
+            );
+        }
+    }
 }
