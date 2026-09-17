@@ -62,6 +62,10 @@ def main() -> int:
         print(f"[omb-distill] invalid stdin JSON: {e}", file=sys.stderr)
         return 2
 
+    # Two log lines in the same second are either two sessions or one payload fired
+    # twice, and only the id tells those apart.
+    print(f"[omb-distill] session={data.get('session_id') or '?'} event={data.get('hook_event_name') or '?'}", file=sys.stderr)
+
     transcript_path = data.get("transcript_path") or ""
     if not transcript_path or not os.path.exists(transcript_path):
         print(f"[omb-distill] transcript not found: {transcript_path!r}", file=sys.stderr)
