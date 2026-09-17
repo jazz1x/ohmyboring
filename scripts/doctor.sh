@@ -7,7 +7,8 @@
 #
 # Mostly read-only: probes /health, provider/model shape, compose status, mtimes,
 # and Codex queue/worker status. The marker-dir check writes and removes one
-# owner-only sentinel file so strict readiness can prove queue state is writable.
+# owner-only sentinel file so strict readiness can prove queue state is writable,
+# and the (a1b) SessionEnd probe writes and removes one scratch dir from mktemp.
 # Default mode exits non-zero only when drudge is down; the other lines are advisory so the
 # user sees the WHOLE picture in one run, not just the first failure. Use --strict for the
 # release/briefing readiness gate: every failed dependency/check makes the command fail.
