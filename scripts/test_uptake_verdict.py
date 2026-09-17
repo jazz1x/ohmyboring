@@ -326,25 +326,25 @@ class SessionEndDenominator(unittest.TestCase):
     end. But it only exists for sessions that ended after it shipped, so its absence in an older
     window must not read as "no session ended"."""
 
-    def _end(self, session, when="2026-09-13T00:00:00+00:00", **attrs):
+    def _end(self, session, when=IN_WINDOW, **attrs):
         return {"event": "session_end", "observed_at": when, "session_id": session,
                 "attributes": {"agent": "claude-code", **attrs}}
 
-    def _distill(self, session, when="2026-09-13T00:00:00+00:00", reason=None):
+    def _distill(self, session, when=IN_WINDOW, reason=None):
         return {"event": "distill_resolution", "observed_at": when, "session_id": session,
                 "attributes": {"reason": reason} if reason else {}}
 
     def test_session_end_wins_over_distillation_runs(self):
         rows = [self._distill("a"), self._distill("a"), self._distill("b"), self._end("a"),
                 _event("a", 1, 10)]
-        total, scored, _automated, source = uv.session_counts(rows, "2026-09-12", "2026-09-26")
+        total, scored, _automated, source = uv.session_counts(rows, uv.verdict_core.WINDOW_SINCE, uv.verdict_core.WINDOW_UNTIL)
         self.assertEqual(source, "session_end")
         self.assertEqual(total, 1, "b was distilled mid-flight and has not ended")
         self.assertEqual(scored, 1)
 
     def test_no_session_end_in_the_window_falls_back_rather_than_reporting_zero(self):
         rows = [self._distill("a"), self._distill("b"), _event("a", 1, 10)]
-        total, _scored, _automated, source = uv.session_counts(rows, "2026-09-12", "2026-09-26")
+        total, _scored, _automated, source = uv.session_counts(rows, uv.verdict_core.WINDOW_SINCE, uv.verdict_core.WINDOW_UNTIL)
         self.assertEqual(source, "distill_resolution")
         self.assertEqual(total, 2, "an older window must not read as zero sessions")
 
