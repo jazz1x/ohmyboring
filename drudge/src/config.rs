@@ -1,19 +1,9 @@
-//! BoringConfig — personal memory policy SSOT (`boring.json`).
-//!
-//! Cross-reference: ENFORCEMENT.md §A (ADT) · PHILOSOPHY.md Layer 1 (parse-don't-validate at the boundary).
-//!
-//! Design:
-//! - `.env` keeps secrets/runtime switches; `boring.json` keeps policy/metadata.
-//! - Forward-compatible: newer `schema_version` loads with a warning, unknown fields are ignored.
-//! - File absence is not an error — defaults are returned (env fallback is added in a later layer).
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-// v2: added the `llm` block (provider/base_url/model/api_key_env/bootstrap + optional embed model).
-// v1 configs still load (top-level embed_model/embed_dim resolved into the llm block at parse time).
 const CURRENT_SCHEMA_VERSION: u32 = 2;
 const KNOWN_TOP_LEVEL: &[&str] = &[
     "schema_version",
@@ -26,24 +16,13 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "llm",
     "code_index",
 ];
-/// Default embedder (bge-m3 = 1024-dim) — the kernel's sole model dependency.
 const DEFAULT_EMBED_MODEL: &str = "bge-m3";
 const DEFAULT_PG_DSN: &str = "postgresql://boring:boring@localhost:5432/boring";
 const DEFAULT_EMBED_DIM: u32 = 1024;
-/// Default OpenAI-compatible endpoint = host Ollama `/v1` as seen from inside the container
-/// (`host.docker.internal` resolves to the host). boring.json (bind-mounted) is the SSOT; compose no
-/// longer injects a base_url default that would shadow it. Overridable at runtime via env (see
-/// `Llm::from_config`). NOTE: running the `drudge` binary directly on the host (e.g. `selftest`) needs
-/// `BORING_LLM_BASE_URL=http://localhost:11434/v1`, since `host.docker.internal` resolves only in-container.
 const DEFAULT_LLM_BASE_URL: &str = "http://host.docker.internal:11434/v1";
-/// Default synthesis (chat) model — used only by the `ask`/`brief` generation path.
 const DEFAULT_CHAT_MODEL: &str = "gemma4:12b";
-/// Default env var name holding the LLM API key (providers that need auth — OpenAI etc.).
-/// Named (not the key itself) so the secret never lands in boring.json.
 const DEFAULT_API_KEY_ENV: &str = "BORING_LLM_API_KEY";
 
-/// Read a `BORING_*` env var. Empty = unset (so a `BORING_X=` placeholder doesn't mask the
-/// boring.json value / default). The single env-var prefix — no legacy aliases.
 #[must_use]
 pub fn env_set(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
@@ -54,7 +33,6 @@ pub fn pg_dsn() -> String {
     std::env::var("PG_DSN").unwrap_or_else(|_| DEFAULT_PG_DSN.to_owned())
 }
 
-/// Personal memory policy configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BoringConfig {
@@ -62,24 +40,10 @@ pub struct BoringConfig {
     pub note_lang: NoteLang,
     pub repos: Vec<RepoRule>,
     pub agents: Vec<AgentSource>,
-    /// Embedding model — the only model drudge itself calls (kernel A). `embed_dim` MUST match its
-    /// output dimension (guarded at every upsert). Changing the dim needs a `make reset` (existing
-    /// vectors are a different shape). base_url/api_key stay in env (.env = runtime/secret SSOT).
     pub embed_model: String,
     pub embed_dim: u32,
-    /// When true, `origin: company` notes are an accepted part of the corpus (session experience from
-    /// company work) rather than contamination — the audit `clean` flag stops penalizing them. Default
-    /// false keeps the strict boundary (company notes flagged for review). See `allow_company_origin`
-    /// in boring.json. Note: this governs *session experience*, not company KB originals (still off-policy).
     pub allow_company_origin: bool,
-    /// LLM connection + bootstrap policy (v2). The OpenAI-compatible engine is backend-agnostic; this
-    /// block tells the *bootstrap scripts* which provider to prepare (Ollama pull vs LM Studio health
-    /// vs nothing) and supplies declarative connection defaults. Runtime env still overrides (see
-    /// `Llm::from_config`). embed_model/embed_dim here are authoritative when set (v2 SSOT); they are
-    /// resolved into the top-level fields at parse time so the rest of the kernel reads one place.
     pub llm: LlmConfig,
-    /// Explicit code corpus. This is intentionally separate from `repos`, which only classifies
-    /// session-memory origin and never authorizes source-code ingestion.
     pub code_index: CodeIndexConfig,
 }
 
@@ -99,14 +63,11 @@ impl Default for BoringConfig {
     }
 }
 
-/// Explicitly enabled source-code repositories. An empty list disables code indexing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct CodeIndexConfig {
     pub sources: Vec<CodeIndexSource>,
 }
 
-/// One repository owned by the code index. `id` is the stable persistence identity; `name` is its
-/// human-facing label. Neither field participates in memory-origin classification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CodeIndexSource {
@@ -201,7 +162,6 @@ impl<'de> Deserialize<'de> for CodeIndexConfig {
 }
 
 impl CodeIndexSource {
-    /// Construct a source while preserving the same invariants as JSON deserialization.
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -270,7 +230,6 @@ impl RepositoryDisplayName {
     }
 }
 
-/// Languages accepted at the config boundary. Unknown values are serde parse errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CodeLanguage {
@@ -290,17 +249,12 @@ impl CodeLanguage {
     }
 }
 
-/// OpenAI-compatible LLM provider. The engine talks `/v1` to all of them identically; the value only
-/// steers the host-side bootstrap (model pull / daemon ensure / health probe shape).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {
-    /// Local Ollama — bootstrap ensures `ollama serve` and `ollama pull`s the models (`/api/tags`).
     #[default]
     Ollama,
-    /// LM Studio — OpenAI-compatible `/v1`; models are loaded via its UI/`lms` CLI (no pull), health = `/v1/models`.
     Lmstudio,
-    /// Any other OpenAI-compatible server (vLLM, llama.cpp, remote OpenAI) — health = `/v1/models`, no pull.
     OpenaiCompatible,
 }
 
@@ -315,8 +269,6 @@ impl Provider {
     }
 }
 
-/// Whether the bootstrap scripts may start a daemon / pull models (`auto`) or must leave the server to
-/// the user (`manual` — only health-checks, never `ollama serve`/`pull`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Bootstrap {
@@ -325,23 +277,16 @@ pub enum Bootstrap {
     Manual,
 }
 
-/// LLM connection + bootstrap config (the `llm` block of boring.json).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LlmConfig {
     pub provider: Provider,
-    /// OpenAI-compatible base URL (e.g. `http://localhost:11434/v1`, LM Studio `http://localhost:1234/v1`).
     pub base_url: String,
-    /// Chat/synthesis model (used only by the `ask`/`brief` generation path).
     pub model: String,
-    /// Embedding model — authoritative when set (resolves into the top-level `embed_model`). None = use
-    /// the (legacy) top-level field / default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embed_model: Option<String>,
-    /// Embedding dimension — authoritative when set (resolves into top-level `embed_dim`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embed_dim: Option<u32>,
-    /// Name of the env var holding the API key (the key itself never lives in boring.json).
     pub api_key_env: String,
     pub bootstrap: Bootstrap,
 }
@@ -382,7 +327,6 @@ impl NoteLang {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RepoRule {
-    /// Substring matched against git remote URL first, then cwd (case-insensitive).
     #[serde(rename = "match")]
     pub matcher: String,
     pub origin: Origin,
@@ -390,18 +334,13 @@ pub struct RepoRule {
     pub name: String,
 }
 
-/// How an agent adapter is wired into the host/IDE. Mirrors the `adapter` field in boring.json.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Adapter {
-    /// Claude Code style — session-end (and optionally prompt-submit) hooks.
     #[default]
     SessionEnd,
-    /// Prompt-submit hook only.
     PromptSubmit,
-    /// MCP-only agent (Cursor, Codex, Windsurf, Claude Desktop, …).
     McpOnly,
-    /// Background cron ingestion (hermes-agent).
     Cron,
 }
 
@@ -416,7 +355,6 @@ pub enum Origin {
 }
 
 impl Origin {
-    /// Render back to the lowercase string the DB / frontmatter expect (mirrors `NoteLang::as_str`).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -428,9 +366,6 @@ impl Origin {
     }
 }
 
-/// The single SSOT `str -> Origin` boundary parse (parse-don't-validate). Reused by `remember` +
-/// `classify_repo` so a typo'd origin is rejected once, not silently coerced to personal anywhere.
-/// `config::Origin` is the SSOT — `vault.rs` has a duplicate enum; the parse lives only here.
 impl std::str::FromStr for Origin {
     type Err = String;
 
@@ -456,8 +391,6 @@ pub struct AgentSource {
     pub format: String,
     #[serde(default)]
     pub paths: Vec<String>,
-    /// Optional override for the agent's settings file path (e.g. MCP config or Claude Code
-    /// settings.json). When absent, the wiring script uses per-agent defaults.
     #[serde(default)]
     pub settings_path: Option<String>,
 }
@@ -480,8 +413,6 @@ const fn default_true() -> bool {
 }
 
 impl BoringConfig {
-    /// Load config from `path`, or discover it via `BORING_CONFIG` / `BORING_HOME` / cwd.
-    /// Missing file falls back to legacy env vars (with deprecation warnings).
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let path = match path {
             Some(p) => p.to_path_buf(),
@@ -500,12 +431,10 @@ impl BoringConfig {
         Self::from_str(&raw)
     }
 
-    /// Build config from the current process env vars. Emits deprecation warnings to stderr.
     pub fn from_env() -> Self {
         Self::from_env_map(&std::env::vars().collect())
     }
 
-    /// Build config from an explicit map (testable). Emits deprecation warnings to stderr.
     pub fn from_env_map(vars: &std::collections::HashMap<String, String>) -> Self {
         let mut cfg = Self::default();
 
@@ -560,7 +489,6 @@ impl BoringConfig {
         cfg
     }
 
-    /// Parse from JSON string. Checks schema_version and warns on unknown top-level fields.
     pub fn from_str(raw: &str) -> Result<Self> {
         let value: serde_json::Value =
             serde_json::from_str(raw).context("parse boring.json as JSON")?;
@@ -585,7 +513,6 @@ impl BoringConfig {
         if let Some(obj) = value.as_object() {
             for key in obj.keys() {
                 let k = key.as_str();
-                // $schema and other JSON-metadata keys starting with '$' are ignored silently.
                 if k.starts_with('$') {
                     continue;
                 }
@@ -601,10 +528,6 @@ impl BoringConfig {
         Ok(config)
     }
 
-    /// Resolve the embedding model/dim SSOT. The `llm` block (v2) is authoritative when it sets either
-    /// field; otherwise the (legacy v1) top-level field stays. After this, the rest of the kernel reads
-    /// `embed_model`/`embed_dim` as the single source — and the `llm` block is backfilled so `drudge
-    /// config` output is internally consistent.
     fn resolve_embed(&mut self) {
         if let Some(m) = self.llm.embed_model.clone() {
             self.embed_model = m;
@@ -618,9 +541,6 @@ impl BoringConfig {
         }
     }
 
-    /// Expand enabled agent paths and apply `~` → `$HOME` expansion.
-    /// Graceful default: if no enabled agent contributes a path, fall back to `~/.claude/projects`
-    /// rather than scanning nothing silently (a config with empty `agents` must not zero out ingest).
     pub fn source_dirs(&self) -> Vec<String> {
         let home = std::env::var("HOME").unwrap_or_default();
         let dirs: Vec<String> = self
@@ -636,13 +556,6 @@ impl BoringConfig {
         dirs
     }
 
-    /// Return a canonical project/repo slug.
-    ///
-    /// 1. If a repo rule has a non-empty `name` and its `match` is a substring of
-    ///    `raw_repo` (case-insensitive), use that name.
-    /// 2. Strip an org prefix (`org/repo` → `repo`).
-    /// 3. Strip a trailing `.git`.
-    /// 4. Otherwise return as-is.
     pub fn canonical_repo(&self, raw_repo: &str) -> String {
         let repo = raw_repo.trim();
         if repo.is_empty() {
@@ -664,9 +577,6 @@ impl BoringConfig {
         repo.to_owned()
     }
 
-    /// Classify a session/working dir into (origin, optional repo name).
-    /// Git remote URL is matched before cwd so a checkout folder name never
-    /// overrides the repository's canonical origin rule.
     pub fn classify(&self, cwd: &str, remote_url: Option<&str>) -> (Origin, Option<String>) {
         let matchers: Vec<String> = self
             .repos
@@ -674,7 +584,6 @@ impl BoringConfig {
             .map(|r| r.matcher.to_lowercase())
             .collect();
 
-        // Remote first: a rule like "acme/" should win even if cwd is just "~/src/acme".
         if let Some(url) = remote_url {
             let lowered = url.to_lowercase();
             for (i, rule) in self.repos.iter().enumerate() {
@@ -689,7 +598,6 @@ impl BoringConfig {
             }
         }
 
-        // Fallback to cwd.
         let lowered = cwd.to_lowercase();
         for (i, rule) in self.repos.iter().enumerate() {
             if lowered.contains(&matchers[i]) {
@@ -712,10 +620,6 @@ fn split_tokens(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Agent-control write path: upsert a repo classification rule into a specific `boring.json`
-/// path (matched by the `match` field). Takes effect on the next config load (sync/restart).
-/// Loud (`Err`) on missing file / parse failure / write failure — never a silent swallow (ROP).
-/// Edits via `serde_json::Value` so unknown fields (agents, schema, future keys) are preserved verbatim.
 pub fn upsert_repo_rule_at(
     match_: &str,
     origin: &str,
@@ -748,7 +652,6 @@ pub fn upsert_repo_rule_at(
     Ok(path.to_path_buf())
 }
 
-/// Discover the path to `boring.json` from the canonical env overrides.
 pub fn discover_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("BORING_CONFIG") {
         return Some(PathBuf::from(p));
@@ -779,12 +682,10 @@ fn expand_tilde(path: &str, home: &str) -> String {
 }
 
 fn derive_name_from_match(matcher: &str, cwd: &str, remote_url: Option<&str>) -> Option<String> {
-    // If matcher looks like org/name, use the last two segments.
     if matcher.contains('/') {
         let parts: Vec<&str> = matcher.split('/').filter(|s| !s.is_empty()).collect();
         return parts.last().map(|s| (*s).to_owned());
     }
-    // Otherwise try git remote slug, then cwd folder name.
     if let Some(url) = remote_url {
         let slug = url
             .trim_end_matches(".git")
@@ -812,14 +713,10 @@ mod tests {
     #[test]
     fn origin_parse_roundtrips_and_rejects_unknown() {
         use std::str::FromStr;
-        // every valid variant parses and renders back to its lowercase string (the SSOT round-trip
-        // that remember + classify_repo share).
         for s in ["personal", "company", "mirror", "community"] {
             assert_eq!(Origin::from_str(s).unwrap().as_str(), s);
         }
-        // whitespace is trimmed at the boundary.
         assert_eq!(Origin::from_str("  company  ").unwrap(), Origin::Company);
-        // present-but-invalid is REJECTED (parse-don't-validate) — never silently coerced to personal.
         assert!(Origin::from_str("evil").is_err());
         assert!(Origin::from_str("").is_err());
     }
@@ -838,22 +735,18 @@ mod tests {
             }"#,
         )
         .unwrap();
-        // org prefix stripped when no explicit name
         assert_eq!(
             cfg.canonical_repo("marketboro/foodspring-front"),
             "foodspring-front"
         );
         assert_eq!(cfg.canonical_repo("foodspring-front"), "foodspring-front");
-        // explicit rule name wins
         assert_eq!(cfg.canonical_repo("jazz1x/ohmyboring"), "ohmyboring");
         assert_eq!(cfg.canonical_repo("jazz1x/oh-my-boring"), "ohmyboring");
         assert_eq!(cfg.canonical_repo("oh-my-boring"), "ohmyboring");
-        // .git suffix removed
         assert_eq!(
             cfg.canonical_repo("git@github.com:acme/widget.git"),
             "widget"
         );
-        // empty stays empty
         assert_eq!(cfg.canonical_repo(""), "");
     }
 
@@ -869,7 +762,6 @@ mod tests {
 
     #[test]
     fn llm_block_defaults_when_absent() {
-        // v1-style config (no llm block) → default provider/connection, embed resolves from top-level.
         let cfg = BoringConfig::from_str(
             r#"{"schema_version": 1, "embed_model": "nomic-embed-text", "embed_dim": 768}"#,
         )
@@ -879,7 +771,6 @@ mod tests {
         assert_eq!(cfg.llm.model, "gemma4:12b");
         assert_eq!(cfg.llm.api_key_env, "BORING_LLM_API_KEY");
         assert_eq!(cfg.llm.bootstrap, Bootstrap::Auto);
-        // top-level embed is backfilled into the llm block so `drudge config` is consistent.
         assert_eq!(cfg.embed_model, "nomic-embed-text");
         assert_eq!(cfg.embed_dim, 768);
         assert_eq!(cfg.llm.embed_model.as_deref(), Some("nomic-embed-text"));
@@ -910,7 +801,6 @@ mod tests {
         assert_eq!(cfg.llm.model, "qwen2.5-coder");
         assert_eq!(cfg.llm.api_key_env, "MY_KEY");
         assert_eq!(cfg.llm.bootstrap, Bootstrap::Manual);
-        // llm block wins over the top-level embed fields (v2 SSOT).
         assert_eq!(cfg.embed_model, "text-embedding-3-small");
         assert_eq!(cfg.embed_dim, 1536);
     }
@@ -933,11 +823,9 @@ mod tests {
 
     #[test]
     fn embed_defaults_and_override() {
-        // missing → bge-m3 / 1024 (kernel default)
         let def = BoringConfig::from_str(r#"{"schema_version": 1}"#).unwrap();
         assert_eq!(def.embed_model, "bge-m3");
         assert_eq!(def.embed_dim, 1024);
-        // explicit override
         let cfg = BoringConfig::from_str(
             r#"{"schema_version": 1, "embed_model": "nomic-embed-text", "embed_dim": 768}"#,
         )
@@ -1045,7 +933,6 @@ mod tests {
             .unwrap();
             assert_eq!(cfg.agents[0].adapter, expected);
         }
-        // omitted → default
         let cfg =
             BoringConfig::from_str(r#"{"schema_version": 1, "agents": [{"id": "x"}]}"#).unwrap();
         assert_eq!(cfg.agents[0].adapter, Adapter::SessionEnd);
@@ -1142,7 +1029,6 @@ mod tests {
             ],
             ..Default::default()
         };
-        // cwd says "personal" but remote says "acme-corp" → remote wins.
         let (origin, name) = cfg.classify(
             "/Users/x/personal",
             Some("https://github.com/acme-corp/secret-project.git"),

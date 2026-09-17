@@ -1,9 +1,3 @@
-//! MCP-over-HTTP (Nous Hermes Agent connection) — JSON-RPC 2.0 tool dispatch.
-//!
-//! JSON-RPC 2.0: initialize · tools/list · tools/call(recall). Notifications get 202 (no response).
-//! The `recall` tool = retrieve (vector+graph) → text → the agent retrieves from our self-augmenting KB.
-//!
-//! Cross-reference: design decision D3 (write door gated / read door open).
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -28,10 +22,6 @@ use crate::vault;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
-/// GET /mcp — Streamable HTTP SSE endpoint. MCP spec requires servers to expose a
-/// server-to-client stream; drudge has no async notifications, so we send the initial
-/// `endpoint` event and keep the connection alive with periodic comments. This keeps
-/// strict clients from seeing a 405 while remaining stateless.
 pub(crate) async fn handle_mcp_get() -> Result<Response, crate::serve::AppError> {
     let endpoint = tokio_stream::once(Ok::<_, std::convert::Infallible>(Bytes::from_static(
         b"event: endpoint\ndata: /mcp\n\n",
@@ -60,7 +50,7 @@ pub(crate) async fn handle_mcp(State(s): State<AppState>, Json(req): Json<Value>
         .and_then(Value::as_str)
         .unwrap_or_default();
     if method.starts_with("notifications/") {
-        return StatusCode::ACCEPTED.into_response(); // notifications get no response
+        return StatusCode::ACCEPTED.into_response();
     }
     let outcome = match method {
         "initialize" => Ok(mcp_initialize(&req)),
@@ -78,7 +68,6 @@ pub(crate) async fn handle_mcp(State(s): State<AppState>, Json(req): Json<Value>
     Json(body).into_response()
 }
 
-/// Echo the protocolVersion the client sent (compatibility), or the default if absent.
 fn mcp_initialize(req: &Value) -> Value {
     let pv = req
         .get("params")
@@ -92,12 +81,8 @@ fn mcp_initialize(req: &Value) -> Value {
     })
 }
 
-// A flat tool-schema data literal, not logic — splitting it would only fragment the one place the whole
-// contract is visible. Same call as `main.rs` (the CLI dispatch). NOT masking complexity.
 #[allow(clippy::too_many_lines)]
 fn mcp_tools_list() -> Value {
-    // Tools the agent (Nous Hermes Agent) uses to *drive* the engine. The engine systematizes the mechanical work
-    // (lint·compile·ingest·embedding·graph), while the agent decides *when and what* to ingest/retrieve.
     json!({"tools": [
         {
             "name": "recall",
@@ -381,23 +366,18 @@ fn mcp_tools_list() -> Value {
     ]})
 }
 
-/// A tool's payload. PROSE/ACK tools return text; STRUCTURED/GENERATIVE tools return a JSON Value
-/// surfaced natively via `structuredContent`, with a serialized-JSON text fallback for clients that read
-/// only `content[]` — the MCP dual-payload convention (`structuredContent` since the 2025-06-18 spec).
 enum ToolOut {
     Text(String),
     Structured(Value),
 }
 
 impl ToolOut {
-    /// Shape the payload into the MCP `tools/call` result.
     fn into_result(self) -> Value {
         match self {
             Self::Text(text) => {
                 json!({"content": [{"type": "text", "text": text}], "isError": false})
             }
             Self::Structured(value) => {
-                // serialize before moving `value` into structuredContent (Value→string is infallible here).
                 let text = serde_json::to_string(&value).unwrap_or_default();
                 json!({
                     "content": [{"type": "text", "text": text}],
@@ -409,9 +389,6 @@ impl ToolOut {
     }
 }
 
-/// All MCP tool names — the single source of truth. Pinned against `mcp_tools_list()` by
-/// `quality_gate_mcp_tool_contract_is_explicit`; the endpoint-tag allowlist reads it too,
-/// so a newly added tool is logged automatically under a bounded tag.
 const MCP_TOOL_NAMES: [&str; 22] = [
     "ask",
     "brief",
@@ -437,8 +414,6 @@ const MCP_TOOL_NAMES: [&str; 22] = [
     "weekly_brief",
 ];
 
-/// Dispatch outcome for one tools/call. `From<(i32, String)>` keeps every arm's `?`
-/// byte-identical to the pre-logging dispatch; only the unknown-tool arm is typed directly.
 enum ToolCallError {
     UnknownTool(String),
     Failed(i32, String),
@@ -450,10 +425,6 @@ impl From<(i32, String)> for ToolCallError {
     }
 }
 
-/// Endpoint tag for one tools/call: `mcp.<tool>` for a known tool, `mcp.unknown` otherwise.
-/// A dot, not an underscore — `_` is a SQL LIKE single-char wildcard, and six tool names
-/// collide with existing HTTP endpoint values. The tag set stays bounded: an unvalidated
-/// name is never interpolated into the tag.
 fn mcp_endpoint_tag(name: Option<&str>) -> String {
     match name {
         Some(name) if MCP_TOOL_NAMES.contains(&name) => format!("mcp.{name}"),
@@ -461,9 +432,6 @@ fn mcp_endpoint_tag(name: Option<&str>) -> String {
     }
 }
 
-/// Query text for the log row: first non-empty of a fixed key list, truncated to 500 chars.
-/// NEVER serialize the whole args object — `title`/`body` carry PII that has not passed
-/// `apply_pii_gate`, and `query_log` is exported by backup-db.sh.
 fn tool_query_arg(args: Option<&Value>) -> String {
     let Some(args) = args else {
         return String::new();
@@ -476,15 +444,6 @@ fn tool_query_arg(args: Option<&Value>) -> String {
         .unwrap_or_default()
 }
 
-/// Answer snippet for the log row, from either arm of the dispatch result, capped at 500 chars.
-///
-/// `Structured` results are serialized and truncated, so an MCP snippet is deliberately a
-/// NON-PARSEABLE fragment — it is for eyeballing what came back, never for machine reading.
-/// This reverses an earlier design note that wanted structured outcomes reduced to a bare
-/// "ok"; the fragment carries real diagnostic value (which fields came back) and the column
-/// is named `answer_snippet`, not `answer`. Recorded here because the reversal happened at
-/// the plan→contract seam without being written down, and a later reader would otherwise
-/// find the two documents contradicting each other.
 fn tool_outcome_snippet(out: &Result<ToolOut, ToolCallError>) -> String {
     let raw = match out {
         Ok(ToolOut::Text(text)) => text.clone(),
@@ -495,16 +454,12 @@ fn tool_outcome_snippet(out: &Result<ToolOut, ToolCallError>) -> String {
     raw.chars().take(500).collect()
 }
 
-/// tools/call dispatcher — routes by tool name. The entry point through which the agent drives the engine.
 async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
     let started = std::time::Instant::now();
     let params = req.get("params");
     let name = params.and_then(|p| p.get("name")).and_then(Value::as_str);
     let args = params.and_then(|p| p.get("arguments"));
     let out = dispatch(s, name.unwrap_or_default(), args).await;
-    // ONE log site, at the dispatch: every tools/call leaves a query_log row, success or
-    // failure, tagged `mcp.<tool>` so MCP rows can never be confused with HTTP rows.
-    // Fire-and-forget — a failed write must not fail the tool call.
     crate::serve::spawn_query_log(
         s.store.clone(),
         mcp_endpoint_tag(name),
@@ -521,13 +476,11 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
     }
 }
 
-/// The dispatch itself, held as a Result so failures are logged too before mapping to the RPC response.
 async fn dispatch(
     s: &AppState,
     name: &str,
     args: Option<&Value>,
 ) -> Result<ToolOut, ToolCallError> {
-    // PROSE/ACK tools → text block; STRUCTURED/GENERATIVE tools → native `structuredContent` + text fallback.
     Ok(match name {
         "recall" => ToolOut::Text(mcp_recall(s, args).await?),
         "remember" => ToolOut::Text(mcp_remember(s, args).await?),
@@ -617,14 +570,6 @@ async fn mcp_code_index_status(s: &AppState, args: Option<&Value>) -> Result<Val
     Ok(json!({"repositories": repositories}))
 }
 
-/// `recall` — vector+graph retrieval. Returns relevant excerpts within an agent-supplied token budget.
-///
-/// Args:
-///   - `query` (required)
-///   - `max_results` (optional, default 5) — max number of hits.
-///   - `max_tokens`  (optional, default 2000) — approximate token ceiling for the returned text.
-///
-/// The budget prevents token explosions when agents pull context automatically.
 async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let query = args
         .and_then(|a| a.get("query"))
@@ -657,8 +602,6 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         .and_then(Value::as_i64)
         .and_then(|n| i32::try_from(n).ok());
 
-    // wiki-first: direct vault/wiki read snippets before paying for embedding/vector.
-    // vector on → if wiki search yields nothing, fall back to budget-aware vector+graph chunks.
     let wiki_hits = s
         .wiki_recall(query, max_results, project, since_hours)
         .map_err(|e| (-32603_i32, format!("wiki recall: {e:#}")))?;
@@ -699,8 +642,6 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         .join("\n\n"))
 }
 
-/// `neighbors` — graph traversal: vector top-1 → 1-hop graph + semantic neighbors. Pure DATA (embed only,
-/// no LLM). Returns structured JSON (not prose) so it does not duplicate `recall`. Vector-only.
 async fn mcp_neighbors(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
     let query = args
         .and_then(|a| a.get("query"))
@@ -721,8 +662,6 @@ async fn mcp_neighbors(s: &AppState, args: Option<&Value>) -> Result<Value, (i32
     }))
 }
 
-/// `corpus_status` — KB health introspection (audit::stats). Aggregate counts only, no vault prose
-/// (so no untrusted-data fence needed). Vector-only.
 async fn mcp_corpus_status(s: &AppState) -> Result<Value, (i32, String)> {
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
     let stats = audit::stats(store, s.cfg.allow_company_origin)
@@ -731,8 +670,6 @@ async fn mcp_corpus_status(s: &AppState) -> Result<Value, (i32, String)> {
     serde_json::to_value(&stats).map_err(|e| (-32603_i32, format!("json: {e}")))
 }
 
-/// `events` — recent workflow/adapter events in OpenTelemetry log shape. Vector-only because the
-/// current local event sink is the pgvector Store.
 async fn mcp_events(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
     let limit = args
@@ -840,8 +777,6 @@ fn mcp_nonnegative_i32(args: Option<&Value>, key: &str) -> Result<Option<i32>, (
         .transpose()
 }
 
-/// `claims` — current (non-superseded) claims nearest the query. Pure DATA (embed only). Returns a JSON
-/// array of (subject, predicate, value); the consumer applies the recalled-memory fence. Vector-only.
 async fn mcp_claims(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
     let query = args
         .and_then(|a| a.get("query"))
@@ -879,12 +814,9 @@ async fn mcp_claims(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, S
             })
         })
         .collect();
-    // structuredContent must be a JSON object → wrap the array (MCP forbids a top-level array result).
     Ok(json!({ "claims": arr }))
 }
 
-/// `ask` — the ONE generative MCP tool: retrieval → LLM synthesis. Wraps the sanctioned `ask.rs` path
-/// (the same call as the `/ask` HTTP route — no new kernel generator). Returns `{answer, sources}`.
 async fn mcp_ask(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
     let question = args
         .and_then(|a| a.get("question"))
@@ -903,7 +835,6 @@ async fn mcp_ask(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, Stri
         .and_then(|a| a.get("since_hours"))
         .and_then(Value::as_i64)
         .and_then(|n| i32::try_from(n).ok());
-    // vector on → vector+graph synthesis; off → direct vault/wiki synthesis (mirrors handle_ask).
     let out = if let Some(store) = s.store.as_ref() {
         ask::answer(store, &s.llm, question, &[], project, since_hours).await
     } else {
@@ -923,13 +854,8 @@ async fn mcp_ask(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, Stri
     }))
 }
 
-/// `brief` — recency-first work briefing (no query): the sanctioned `ask::brief` path (same as `/brief`).
-/// Vector-only — recency ordering needs pgvector. Returns `{answer, sources, injected_claims}`;
-/// the last is what went into the prompt, so a consumer can tell whether the answer kept it.
 async fn mcp_brief(s: &AppState) -> Result<Value, (i32, String)> {
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    // Same day, same brief, whichever door it comes through. Serving today's note over HTTP while
-    // this path still generated left "one briefing a day" true of one caller and not the other.
     if let Some((answer, sources)) = super::http::todays_brief_note(s.vault_dir.as_ref().as_ref()) {
         return Ok(json!({
             "answer": answer,
@@ -947,7 +873,6 @@ async fn mcp_brief(s: &AppState) -> Result<Value, (i32, String)> {
     }))
 }
 
-/// `weekly_brief` — last 7 days by project. Returns `{answer, sources}`.
 async fn mcp_weekly_brief(s: &AppState) -> Result<Value, (i32, String)> {
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
     let out = ask::weekly_brief(store, &s.llm, &[], s.cfg.note_lang.as_str())
@@ -956,7 +881,6 @@ async fn mcp_weekly_brief(s: &AppState) -> Result<Value, (i32, String)> {
     Ok(json!({"answer": out.answer, "sources": out.sources}))
 }
 
-/// `project_status` — 30-day status for a single project. Returns `{answer, sources}`.
 async fn mcp_project_status(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
     let project = args
         .and_then(|a| a.get("project"))
@@ -973,8 +897,6 @@ async fn mcp_project_status(s: &AppState, args: Option<&Value>) -> Result<Value,
     Ok(json!({"answer": out.answer, "sources": out.sources}))
 }
 
-/// `context` — structured context card. Returns `{decisions, risks, facts, glossary, language}`.
-/// Works even when BORING_VECTOR=off (returns an empty card if the DB store is unavailable).
 async fn mcp_context(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
     let project = args
         .and_then(|a| a.get("project"))
@@ -1004,7 +926,6 @@ async fn mcp_context(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
     serde_json::to_value(card).map_err(|e| (-32603_i32, format!("context serialize: {e}")))
 }
 
-/// `decisions` — recent decision claims. Returns `{answer, sources}`.
 async fn mcp_decisions(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
     let project = args
         .and_then(|a| a.get("project"))
@@ -1017,7 +938,6 @@ async fn mcp_decisions(s: &AppState, args: Option<&Value>) -> Result<Value, (i32
     Ok(json!({"answer": out.answer, "sources": out.sources}))
 }
 
-/// `risks` — recent risk/assumption/blocked claims. Returns `{answer, sources}`.
 async fn mcp_risks(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
     let project = args
         .and_then(|a| a.get("project"))
@@ -1030,7 +950,6 @@ async fn mcp_risks(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, St
     Ok(json!({"answer": out.answer, "sources": out.sources}))
 }
 
-/// `next_actions` — recent explicit next steps and active blockers. Returns `{answer, sources}`.
 async fn mcp_next_actions(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
     let project = args
         .and_then(|a| a.get("project"))
@@ -1043,7 +962,6 @@ async fn mcp_next_actions(s: &AppState, args: Option<&Value>) -> Result<Value, (
     Ok(json!({"answer": out.answer, "sources": out.sources}))
 }
 
-/// `stalled` — next/blocker claims that have not moved in N days. Returns `{answer, sources}`.
 async fn mcp_stalled(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
     let project = args
         .and_then(|a| a.get("project"))
@@ -1075,8 +993,6 @@ fn system_time_rfc3339(value: std::time::SystemTime) -> String {
     datetime.to_rfc3339()
 }
 
-/// `forget` — remove a note by wiki id or exact title. Deletes the vault file and, in vector mode, purges
-/// embeddings, graph edges, and claims. Idempotent: forgetting a non-existent note returns a clear error.
 async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
         return Err((-32603, "BORING_VAULT_DIR not set".to_owned()));
@@ -1099,8 +1015,6 @@ async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     }
 
     let path = if let Some(id) = id {
-        // `id` is untrusted (MCP arg). Parse it into a bare filename: any path
-        // navigation would let `forget` delete files outside the vault.
         if id.contains('/') || id.contains('\\') || id.contains("..") {
             return Err((-32602, format!("invalid note id {id:?}")));
         }
@@ -1145,13 +1059,8 @@ async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     let source_path = path.to_string_lossy().into_owned();
     std::fs::remove_file(&path).map_err(|e| (-32603_i32, format!("delete note: {e}")))?;
 
-    // The note IS deleted once we reach here; the relates_to projection is an auxiliary refresh.
-    // If it fails we surface partial-success in the reply (not a silent swallow) — the next sync
-    // recomputes relations, so it's degraded-but-not-lost, ROP-honest about which part deferred.
     let mut partial = "";
     if let Some(store) = s.store.as_ref() {
-        // Serialize against sync: project_links rewrites wiki relates_to in place, and a concurrent
-        // sync does the same — without the lock the two interleave into torn/partial wiki writes.
         let _guard = s.sync_lock.lock().await;
         store
             .delete_document(&source_path)
@@ -1166,9 +1075,6 @@ async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     Ok(format!("forgot → {source_path}{partial}"))
 }
 
-/// `remember` — the kernel ingest entry. The agent hands a COMPLETE curated note; drudge deterministically
-/// writes it as a wiki page, embeds + upserts it, builds the graph from the supplied fields, and recomputes
-/// relations. No generation in the kernel — embed (bge-m3) is the only model call. Recallable immediately.
 async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
         return Err((
@@ -1178,11 +1084,8 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
     };
     let mut note = parse_remember_note(args, &s.cfg)?;
 
-    // PII / sensitive-data gate: block rules reject the note, redact rules mask
-    // in-place, and flag rules add `pii-flag` for review.
     apply_pii_gate(s.pii.as_ref().as_ref(), &mut note)?;
 
-    // Deduplication gate — prevent near-duplicate session notes from accumulating.
     let wiki_dir = vault_root.join("wiki");
     if let Some(existing) = check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir)
         .await
@@ -1218,12 +1121,8 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
         return Ok(format!("skipped — duplicate of {}", existing.source_path));
     }
 
-    // No duplicate — the store-new baseline that makes the replace/skip rates meaningful.
     let telemetry = dedup_decision_event(&note, None, DedupOutcome::StoreNew);
 
-    // 1. atomically allocate id + path, then write the wiki note (deterministic file IO — the SSOT artifact).
-    //    Include existing vector-store ids so we never reuse a source_path that still lives in Postgres
-    //    even if its wiki file is temporarily gone (sync will reconcile, but remember should not collide).
     let mut db_ids: HashSet<u32> = HashSet::new();
     if let Some(store) = s.store.as_ref() {
         for p in store.all_doc_paths().await.map_err(|e| {
@@ -1266,25 +1165,17 @@ async fn finish_remembered_note(
         ""
     };
 
-    // vector off → the wiki file is first-class memory (wiki_recall reads it). Nothing to embed.
     let Some(store) = s.store.as_ref() else {
         return Ok(format!(
             "remembered → wiki/{wiki_id}.md{duplicate_suffix} (vector off — wiki is first-class memory; recallable now)"
         ));
     };
 
-    // deterministic ingest of this one note (chunk→embed→upsert→graph) + relation recompute.
-    // Serialize against sync: project_links rewrites wiki relates_to in place, so it must not
-    // interleave with a concurrent sync doing the same (torn/partial wiki writes otherwise).
     let _guard = s.sync_lock.lock().await;
     let mut stats = ingest::Stats::default();
     ingest::ingest_file(store, &s.llm, &s.cfg, &front.source_path, &mut stats)
         .await
         .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
-    // The note is written + ingested + recallable by now; relates_to projection is the auxiliary
-    // refresh. Project ONLY this new note (bounded: ~3 queries + 1 write) instead of recomputing the
-    // whole corpus — its neighbors' backlinks are reconciled by the next periodic full project_links
-    // (invisible to recall, which is embedding-based). On failure report partial-success.
     let relates = match vault::project_note(store, path, 6).await {
         Ok(_) => "",
         Err(e) => {
@@ -1298,8 +1189,6 @@ async fn finish_remembered_note(
     ))
 }
 
-/// Apply the PII scanner to a parsed note. Mutates rendered fields in place.
-/// Returns an error (block) if a critical rule matched.
 fn apply_pii_gate(
     scanner: Option<&crate::pii::PiiScanner>,
     note: &mut RememberNote,
@@ -1371,13 +1260,11 @@ fn apply_pii_to_field(
     }
 }
 
-/// A parsed remember note — the typed boundary value (parse-don't-validate).
 struct RememberNote {
     front: FrontMatter,
     body: String,
 }
 
-/// Maximum cosine distance for a duplicate (1.0 - cosine_similarity). 0.07 ≈ similarity 0.93.
 const DUPLICATE_MAX_DIST: f64 = 0.07;
 
 const SESSION_DUP_TITLE_MIN: (usize, usize) = (1, 5);
@@ -1407,11 +1294,6 @@ struct NoteQuality {
     evidence_signal: bool,
 }
 
-/// Deduplication gate for `remember`. Checks, in order:
-///   1. Same `omb_session_id` already stored (same session distilled twice).
-///   2. Stack-free session-note similarity (different rollout ids, same distilled event).
-///   3. Case-insensitive exact title match.
-///   4. Embedding similarity within `DUPLICATE_MAX_DIST` (when pgvector is on).
 async fn check_duplicate(
     store: Option<&crate::store::Store>,
     llm: &crate::llm::Llm,
@@ -1434,7 +1316,6 @@ async fn check_duplicate(
         }
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let (yaml, existing_body) = crate::vault::split_frontmatter(&content).unwrap_or(("", ""));
-        // YAML parse is cheap for one note; reuse FrontMatter deserialization.
         let fm: crate::frontmatter::FrontMatter = serde_yaml::from_str(yaml).unwrap_or_default();
         if let Some(sid) = target_session
             && fm.omb_session_id.as_deref() == Some(sid)
@@ -1540,8 +1421,6 @@ fn note_quality(front: &FrontMatter, body: &str) -> NoteQuality {
     }
 }
 
-/// The three ways the dedup gate can settle a `remember`. `status()` is the string written
-/// to the `event_log.status` column, so `GROUP BY event_name, status` reads as per-branch rates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DedupOutcome {
     Replace,
@@ -1568,18 +1447,12 @@ fn duplicate_reason_str(reason: DuplicateReason) -> &'static str {
     }
 }
 
-/// Build the `event_log` payload for one dedup-gate decision. Carries the margin (incoming
-/// vs existing score) and the `DuplicateReason`, not just the verdict, so a refusal that
-/// barely missed `DUPLICATE_REPLACE_MIN_DELTA` is distinguishable from one nowhere close.
-/// Pure observation — the decision itself is made (and unchanged) by the caller.
 fn dedup_decision_event(
     note: &RememberNote,
     existing: Option<&DuplicateMatch>,
     outcome: DedupOutcome,
 ) -> Value {
     let incoming = note_quality(&note.front, &note.body);
-    // Embedding matches carry no existing content (check_duplicate only has a path), so the
-    // existing score is genuinely unknown there — null, not a bogus score of an empty note.
     let existing_score = existing.and_then(|m| match m.reason {
         DuplicateReason::Embedding => None,
         _ => Some(note_quality(&m.front, &m.body).score),
@@ -1598,10 +1471,6 @@ fn dedup_decision_event(
     })
 }
 
-/// Emit one `dedup_decision` row through the existing `Store::log_event` writer (no second
-/// path — retention/redaction stay inherited). Telemetry is downstream of the decision: a
-/// logging failure warns and is ignored so the remember still succeeds — same
-/// degraded-but-honest idiom as the `project_links` warning in `mcp_forget`.
 async fn log_dedup_decision(s: &AppState, event: &Value) {
     let Some(store) = s.store.as_ref() else {
         return;
@@ -1729,10 +1598,6 @@ fn token_set(text: &str) -> HashSet<String> {
     out
 }
 
-/// Parse + normalize the `remember` arguments into a typed note. The deterministic boundary: sanitize tags,
-/// fold the repo slug into project + a `repo/<slug>` tag, scrub secrets from EVERY field rendered into the
-/// tracked vault note (the git leak boundary): the body, the title, each tool/concept/source, and every
-/// claim field — not just the body, since `render_wiki_note` writes them all verbatim.
 fn parse_remember_note(
     args: Option<&Value>,
     cfg: &config::BoringConfig,
@@ -1759,9 +1624,6 @@ fn parse_remember_note(
     };
 
     let title = get_str("title");
-    // Decode LLM JSON-string escapes (literal \n, stray \`/\#/\") at the deterministic boundary,
-    // so every writer (hook, hermes cron, direct MCP) yields real markdown — not just the one adapter
-    // that happened to patch it. SSOT for note-body normalization lives in vault::normalize_body.
     let body = vault::normalize_body(&get_str("body"));
     if title.is_empty() {
         return Err((-32602, "missing argument: title".to_owned()));
@@ -1770,21 +1632,12 @@ fn parse_remember_note(
         return Err((-32602, "missing argument: body".to_owned()));
     }
 
-    // Deterministic boundary cleanup for EVERY field render_wiki_note writes verbatim into the tracked
-    // vault — not just the body. `clean` = decode LLM JSON-escapes (literal \n, stray \`/\#/\" via
-    // normalize_body) THEN scrub secrets (the one git-leak boundary). Applying it to title/tools/concepts/
-    // claims too closes the gap where escapes leaked through the structured fields (e.g. a claim value
-    // `16 items\n`, wiki-0148). `‹REDACTED›` is non-empty, so scrubbing never reintroduces an empty value.
-    // `sources` is path-like rather than prose-like, so it is trimmed and scrubbed without body newline
-    // decoding; otherwise a literal "\n" in a bad path would become a physical YAML line break.
     let re = redact::build_secret_re().map_err(|e| (-32603_i32, format!("secret regex: {e:#}")))?;
     let scrub = |s: &str| redact::redact(re, s);
     let clean = |s: &str| scrub(&vault::normalize_body(s));
     let title = clean(&title);
-    let body = scrub(&body); // body already normalized above (needed for the empty-check) — just scrub
+    let body = scrub(&body);
 
-    // origin: parsed at the boundary — absent → default personal, present-but-invalid → reject
-    // (parse-don't-validate; shared `config::Origin` parse, no silent coercion to personal on a typo).
     let origin_in = get_str("origin");
     let origin = if origin_in.is_empty() {
         config::Origin::Personal
@@ -1797,8 +1650,6 @@ fn parse_remember_note(
     .to_owned();
     let repo = cfg.canonical_repo(&get_str("repo"));
 
-    // Ephemeral ingestion queue marker (not part of the semantic graph). Carried transparently in
-    // frontmatter so the hermes/cron worker can confirm per-session idempotency.
     let omb_session_id = args
         .and_then(|a| a.get("omb_session_id"))
         .and_then(Value::as_str)
@@ -1806,7 +1657,6 @@ fn parse_remember_note(
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
 
-    // tags: Obsidian-safe, ≤6; prepend repo/<slug> as the category axis.
     let mut tags: Vec<String> = get_arr("tags")
         .iter()
         .filter_map(|t| vault::sanitize_tag(t))
@@ -1818,7 +1668,6 @@ fn parse_remember_note(
         tags.insert(0, format!("repo/{r}"));
     }
 
-    // claims: (subject,predicate,value) triples — scrub each field (all three land in the vault note).
     let claims: Vec<Claim> = args
         .and_then(|a| a.get("claims"))
         .and_then(Value::as_array)
@@ -1838,10 +1687,10 @@ fn parse_remember_note(
 
     let front = FrontMatter {
         origin,
-        project: repo, // repo slug as project (may be empty)
+        project: repo,
         date: vault::today_utc(),
         kind: "note".to_owned(),
-        source_path: String::new(), // filled by caller after id allocation
+        source_path: String::new(),
         title: Some(title),
         tags,
         tools: get_arr("tools").iter().map(|t| clean(t)).collect(),
@@ -1853,7 +1702,6 @@ fn parse_remember_note(
     Ok(RememberNote { front, body })
 }
 
-/// One claim JSON object → typed `Claim`. None if any field is missing/empty (skipped at the boundary).
 fn parse_claim(v: &Value) -> Option<Claim> {
     let f = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().trim();
     let (subject, predicate, value) = (f("subject"), f("predicate"), f("value"));
@@ -1866,7 +1714,6 @@ fn parse_claim(v: &Value) -> Option<Claim> {
     })
 }
 
-/// `classify_repo` — upsert a repo origin rule into boring.json (agent self-maintains classification).
 fn mcp_classify_repo(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let g = |k: &str| args.and_then(|a| a.get(k)).and_then(Value::as_str);
     let match_ = g("match")
@@ -1875,16 +1722,12 @@ fn mcp_classify_repo(s: &AppState, args: Option<&Value>) -> Result<String, (i32,
     let origin = g("origin")
         .filter(|v| !v.is_empty())
         .ok_or((-32602, "missing argument: origin".to_owned()))?;
-    // parse-don't-validate: reject a typo'd origin here instead of writing it to boring.json (where a
-    // bad value would break the next config load — the Origin enum has no unknown-variant fallback).
     let origin = origin
         .parse::<config::Origin>()
         .map_err(|e| (-32602_i32, e))?
         .as_str();
     let name = g("name").filter(|v| !v.is_empty());
 
-    // Write back to the same file we loaded from (respects BORING_CONFIG / BORING_HOME), instead of
-    // rediscovering and possibly picking a different path.
     let path = (*s.cfg_path)
         .clone()
         .or_else(config::discover_path)
@@ -1904,14 +1747,11 @@ fn mcp_classify_repo(s: &AppState, args: Option<&Value>) -> Result<String, (i32,
     .map_err(|e| (-32603, format!("json: {e}")))
 }
 
-/// `sync` — one deterministic re-ingest pass (walk→embed→upsert→graph→relations). No LLM curation.
 async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
     let _guard = s.sync_lock.lock().await;
     let o = super::scheduler::do_sync(s.store.as_deref(), &s.llm, (*s.vault_dir).as_ref(), &s.cfg)
         .await
         .map_err(|e| (-32603_i32, format!("sync: {e:#}")))?;
-    // Corpus totals are `None` when the post-sync audit was unavailable — render "unavailable",
-    // never a fabricated 0 (the delta fields above still report what this run actually did).
     let total_chunks = o
         .total_chunks
         .map_or_else(|| "unavailable".to_owned(), |n| n.to_string());
@@ -2010,9 +1850,6 @@ mod tests {
 
     #[test]
     fn quality_gate_mcp_endpoint_tags_disjoint_from_http_endpoints() {
-        // Extract every endpoint string literal from http.rs: the first string literal
-        // after each HTTP logging call site is the endpoint argument. The needle is
-        // split so this file keeps exactly ONE log-site line (contract gate).
         let needle = concat!("spawn_", "query_log(");
         let http = repo_file("drudge/src/serve/http.rs");
         let mut http_endpoints = std::collections::BTreeSet::new();
@@ -2024,14 +1861,10 @@ mod tests {
             http_endpoints.insert(rest[start..end].to_owned());
             rest = &rest[end..];
         }
-        // ANTI-VACUITY GUARD: if a refactor breaks the extraction above, fail loudly
-        // instead of passing while checking nothing.
         assert!(
             !http_endpoints.is_empty(),
             "no HTTP endpoint literals extracted from http.rs — extraction is broken"
         );
-        // Build the tags through the REAL tag function, so mutating the tag scheme
-        // (e.g. dropping the `mcp.` prefix) fails here on the colliding names.
         let mcp_tags: std::collections::BTreeSet<String> = MCP_TOOL_NAMES
             .iter()
             .map(|tool| mcp_endpoint_tag(Some(tool)))
@@ -2048,7 +1881,6 @@ mod tests {
     fn quality_gate_mcp_endpoint_tag_is_bounded() {
         assert_eq!(mcp_endpoint_tag(Some("recall")), "mcp.recall");
         assert_eq!(mcp_endpoint_tag(Some("stalled")), "mcp.stalled");
-        // Unknown/missing/malicious names never reach the tag — the set stays bounded.
         assert_eq!(mcp_endpoint_tag(Some("not-a-tool")), "mcp.unknown");
         assert_eq!(mcp_endpoint_tag(Some("mcp.recall")), "mcp.unknown");
         assert_eq!(mcp_endpoint_tag(Some("'; DROP TABLE--")), "mcp.unknown");
@@ -2058,8 +1890,6 @@ mod tests {
 
     #[test]
     fn quality_gate_tool_query_arg_uses_fixed_allowlist() {
-        // A remember-shaped args object logs "": title/body carry PII that has not passed
-        // the PII gate and must never reach query_log (backup-db.sh exports it).
         let remember_args =
             json!({"title": "secret title", "body": "secret body", "origin": "personal"});
         assert_eq!(tool_query_arg(Some(&remember_args)), "");
@@ -2069,7 +1899,6 @@ mod tests {
             tool_query_arg(Some(&json!({"query": "find this"}))),
             "find this"
         );
-        // First non-empty of query/question/id, in that order.
         assert_eq!(
             tool_query_arg(Some(&json!({"query": "", "question": "q?"}))),
             "q?"
@@ -2078,7 +1907,6 @@ mod tests {
             tool_query_arg(Some(&json!({"id": "wiki-0001"}))),
             "wiki-0001"
         );
-        // Truncated to 500 chars.
         let long = "x".repeat(600);
         assert_eq!(tool_query_arg(Some(&json!({"query": long}))).len(), 500);
     }
@@ -2090,7 +1918,6 @@ mod tests {
         let ok_structured: Result<ToolOut, ToolCallError> =
             Ok(ToolOut::Structured(json!({"a": 1})));
         assert_eq!(tool_outcome_snippet(&ok_structured), "{\"a\":1}");
-        // Failures are logged too — "this tool always errors" must be visible.
         let failed: Result<ToolOut, ToolCallError> =
             Err(ToolCallError::Failed(-32603, "db down".to_owned()));
         assert_eq!(tool_outcome_snippet(&failed), "error -32603: db down");
@@ -2101,10 +1928,6 @@ mod tests {
         assert_eq!(tool_outcome_snippet(&big).len(), 500);
     }
 
-    /// `forget` deletes a file, and its `id` comes from an MCP argument — the one place a
-    /// recall-injection attack would aim. The boundary check exists (#102, 2026-06-21 red team)
-    /// but nothing asserted it, so it could be refactored away in silence. This pins the
-    /// rejected shapes to the source rather than to a running engine.
     #[test]
     fn forget_rejects_path_navigation_in_the_note_id() {
         let src = repo_file("drudge/src/serve/mcp.rs");
@@ -2135,17 +1958,6 @@ mod tests {
         );
     }
 
-    /// GOALS.md derives from docs/PRD.md, and this asserts the two stayed in step.
-    ///
-    /// It cannot check that GOALS is *true* — no machine rule can — but it removes the silence.
-    /// The failure mode it exists for is a PRD that moves while its derived contract quietly
-    /// rots, which is exactly what happened to GOALS.md for 39 commits before the PRD existed.
-    /// Editing the PRD's version without touching GOALS now turns CI red.
-    ///
-    /// What it deliberately does NOT catch, verified by mutation: removing one of several `[R1]`
-    /// mentions still passes, because the check is existence-level. Tightening it to per-gate-row
-    /// tagging needs GOALS.md rewritten into a parseable grammar, and that cost is not paid yet.
-    /// So this gate removes silence, not staleness — the remaining gap is the reviewer's.
     #[test]
     fn quality_gate_goals_derives_from_prd() {
         let prd = repo_file("docs/PRD.md");
@@ -2167,10 +1979,6 @@ mod tests {
              contract did not follow"
         );
 
-        // Every requirement the PRD defines has to be enforced by, or explicitly named in, the
-        // current slice; and the slice cannot cite a requirement that does not exist. Both
-        // directions matter: the first catches a requirement nobody carries, the second catches
-        // a gate justified by an R-id that was renamed or removed.
         let defined: Vec<String> = (1..=9)
             .map(|n| format!("R{n}"))
             .filter(|r| prd.contains(&format!("### {r}.")))
@@ -2274,12 +2082,10 @@ mod tests {
         }
     }
 
-    // The secret scrub must cover EVERY field render_wiki_note writes verbatim into the tracked vault —
-    // a token pasted into the title or a claim value would otherwise leak into git just like one in the body.
     #[test]
     fn parse_remember_scrubs_secrets_in_title_and_claim_value() {
-        let slack = "xoxb-1234567890abcdef"; // matches the xoxb- token format
-        let anthropic = "sk-ant-abcdefghij1234567890XYZ"; // matches the sk-ant- key format
+        let slack = "xoxb-1234567890abcdef";
+        let anthropic = "sk-ant-abcdefghij1234567890XYZ";
         let args = json!({
             "title": format!("leaked {slack} in the title"),
             "body": "an ordinary problem-solving note body",
@@ -2307,9 +2113,6 @@ mod tests {
         );
     }
 
-    // Literal JSON-escapes (the two chars backslash-n, stray markdown escapes) must be DECODED — not just
-    // scrubbed — in the structured fields too, or a claim/title/tool carries `parity\n` into the vault
-    // (the wiki-0148 class). Body decoding alone is not enough.
     #[test]
     fn parse_remember_normalizes_escapes_in_all_fields() {
         let args = json!({
@@ -2646,8 +2449,6 @@ mod tests {
     #[test]
     fn dedup_decision_event_embedding_match_has_unknown_existing_score() {
         let note = telemetry_note();
-        // check_duplicate loads no content for embedding matches — the score must read
-        // as unknown (null), never as the quality of an empty note.
         let existing = telemetry_existing(DuplicateReason::Embedding);
 
         let event = dedup_decision_event(&note, Some(&existing), DedupOutcome::Skip);

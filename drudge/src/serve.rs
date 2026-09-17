@@ -1,12 +1,3 @@
-//! Serve — HTTP resident daemon (axum) + background sync scheduler.
-//!
-//! Cross-reference: design decision D3 (write door gated / read door open).
-//!
-//! Architecture:
-//! - Shares `Store` + `Llm` via `Arc` (the Postgres client supports concurrent use).
-//! - axum router: /health · /ask · /brief · /search · /graph · /audit · /sync
-//! - Background scheduler: `BORING_SYNC_HOURS` (default 4h) interval + one immediate run at startup.
-//! - Error propagation: `AppError` → explicit HTTP status + JSON body.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -32,10 +23,6 @@ mod http;
 mod mcp;
 mod scheduler;
 
-// ── shared state ──────────────────────────────────────────────────────────────
-
-/// Last-observed DB health state for /health transition logging. Stored as an AtomicU8 so concurrent
-/// /health probes can detect a flip with a single atomic RMW — no load-then-store race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DbHealthState {
     Unknown,
@@ -63,49 +50,25 @@ impl DbHealthState {
 
 #[derive(Clone)]
 pub struct AppState {
-    /// pgvector backend. If `None`, `BORING_VECTOR=off` — retrieval is direct vault/wiki reads (wiki_recall),
-    /// and remember writes the wiki note as first-class memory (no embed/graph). Vector/graph-dependent endpoints reject explicitly.
     pub(crate) store: Option<Arc<Store>>,
-    /// Explicit source-code corpus. It is never backed by the vault/wiki or memory tables.
     pub(crate) code_index: Option<Arc<CodeIndexStore>>,
     pub(crate) llm: Arc<Llm>,
-    /// vault root (`BORING_VAULT_DIR`). The remember target (`<vault>/wiki/wiki-NNNN.md`) + the relates_to projection root.
     pub(crate) vault_dir: Arc<Option<PathBuf>>,
-    /// PII / sensitive-data gate. None when no rule files are present.
     pub(crate) pii: Arc<Option<pii::PiiScanner>>,
-    /// Policy config (`boring.json`).
     pub(crate) cfg: Arc<config::BoringConfig>,
-    /// Resolved path to the loaded config, so `classify_repo` writes back to the same file.
     pub(crate) cfg_path: Arc<Option<PathBuf>>,
-    /// Serializes startup, periodic, and HTTP-triggered syncs so they never overlap.
-    /// `/sync` waits for an in-flight startup sync and returns its actual outcome.
     pub(crate) sync_lock: Arc<Mutex<()>>,
-    /// Resident wiki recall index (BORING_VECTOR=off path). Persists parsed/lowercased notes across
-    /// requests; `refresh()` re-reads only mtime-changed files, so repeated `/search` (the recall hook
-    /// fires per prompt) scores in memory instead of re-reading the whole corpus. std Mutex — the
-    /// critical section is sync (refresh+score) and never held across an await.
     pub(crate) wiki_index: Arc<std::sync::Mutex<wiki_recall::WikiIndex>>,
-    /// Last successful compact time, shared with scheduler so manual `/compact` resets the window.
     pub(crate) last_compact: Arc<Mutex<Option<std::time::Instant>>>,
-    /// The last compact failure, or `None` when the last attempt succeeded. `REINDEX CONCURRENTLY`
-    /// had been failing on every run for weeks against a container's default 64 MB of /dev/shm,
-    /// and the only trace was `eprintln!` in the docker log: `/health` did not carry it, `doctor`
-    /// did not ask, and the scheduler reset its window as though the run had worked. A failure
-    /// nothing can observe is indistinguishable from no failure.
     pub(crate) compact_failure: Arc<Mutex<Option<CompactFailure>>>,
-    /// Last observed DB health state for transition logging. `Unknown` until the first /health probe.
-    /// Wrapped in Arc so AppState remains Clone while the atomic is shared across cloned state handles.
     pub(crate) db_healthy_last: Arc<AtomicU8>,
 }
 
 impl AppState {
-    /// vault/wiki directory (the retrieval target for `BORING_VECTOR=off`). None if vault is unset.
     pub(crate) fn wiki_dir(&self) -> Option<PathBuf> {
         (*self.vault_dir).as_ref().map(|v| v.join("wiki"))
     }
 
-    /// Cached wiki recall: refresh the resident index (mtime-incremental — only changed files are
-    /// re-read, so this stays honest, not stale) then score in memory. Empty when the vault is unset.
     pub(crate) fn wiki_recall(
         &self,
         query: &str,
@@ -116,7 +79,6 @@ impl AppState {
         let Some(dir) = self.wiki_dir() else {
             return Ok(Vec::new());
         };
-        // Recover a poisoned lock instead of unwrapping (a prior panic must not wedge recall).
         let mut idx = self
             .wiki_index
             .lock()
@@ -125,9 +87,6 @@ impl AppState {
         Ok(idx.search(query, k, project, since_hours))
     }
 
-    /// Probe all resident DB clients and return `(db_healthy, optional_error_text)`.
-    /// `db_healthy` is `None` when no DB client is configured (vector off + code_index off).
-    /// `Some(false)` means at least one configured client failed its liveness probe.
     pub(crate) async fn probe_db_health(&self) -> (Option<bool>, Option<String>) {
         let mut errors = Vec::new();
 
@@ -152,8 +111,6 @@ impl AppState {
         }
     }
 
-    /// Update the atomic last-observed state and emit a transition log line only on flip.
-    /// Returns the status string for the HTTP response ("ok" or "degraded").
     pub(crate) async fn check_db_health(&self) -> (Option<bool>, &'static str) {
         let (db_healthy, error_text) = self.probe_db_health().await;
         let next_state = DbHealthState::from_option(db_healthy);
@@ -183,8 +140,6 @@ impl DbHealthState {
     }
 }
 
-/// Pure transition logger. Returns `None` when the state hasn't changed or when the change doesn't
-/// deserve a log line (e.g. initial Unknown → Healthy at startup).
 fn transition_log(prev: DbHealthState, next: DbHealthState, error: Option<&str>) -> Option<String> {
     if prev == next {
         return None;
@@ -253,8 +208,6 @@ mod tests {
         assert!(log.contains("cannot connect"));
     }
 
-    /// The number the docker log could never carry. A compact that fails once is a hiccup;
-    /// the 64 MB case (#304) had been failing on every run for weeks, and nothing counted.
     #[test]
     fn consecutive_failures_accumulate_until_a_run_succeeds() {
         let first = CompactFailure::next(None, "2026-09-09T00:00:00Z".into(), "shm".into());
@@ -282,8 +235,6 @@ mod tests {
         );
     }
 
-    /// Health carries the failure only while there is one: the field's presence is the alarm,
-    /// and `doctor` (a2c) tests presence rather than parsing a status word.
     #[test]
     fn health_omits_the_failure_once_a_compact_succeeds() {
         let mut resp = HealthResp {
@@ -363,8 +314,6 @@ mod tests {
         assert!(json.contains("\"related\":"), "was {json}");
     }
 
-    /// `superseded_by` follows the `related` contract: no key until a replacement is recorded,
-    /// then the replacing doc's `source_path`.
     #[test]
     fn search_hit_omits_superseded_by_key_until_one_exists() {
         let mut hit = super::SearchHit {
@@ -393,8 +342,6 @@ mod tests {
         );
     }
 
-    /// Consumption counts are part of the accuracy contract with the recall hook: always present,
-    /// integers, even when nothing has consumed the note yet.
     #[test]
     fn search_hit_always_carries_consumption_counts() {
         let hit = super::SearchHit {
@@ -480,8 +427,6 @@ mod tests {
         assert!(super::validate_consumption_req(&ok).is_ok());
     }
 
-    /// `supersedes` pairs share the same ceiling as the path lists — the scorer reports one
-    /// session at a time.
     #[test]
     fn consumption_rejects_more_than_200_supersedes_pairs() {
         let pair = [
@@ -498,9 +443,7 @@ mod tests {
     }
 }
 
-/// Fire-and-forget query logging. Latency and result context are recorded for
-/// memory-utility analytics; failures are logged to stderr and never fail the request.
-#[allow(clippy::needless_borrow)] // tokio-postgres needs &&str to coerce to &dyn ToSql.
+#[allow(clippy::needless_borrow)]
 pub(crate) fn spawn_query_log(
     store: Option<Arc<Store>>,
     endpoint: impl Into<String>,
@@ -531,8 +474,6 @@ pub(crate) fn spawn_query_log(
         }
     });
 }
-
-// ── error type (ROP: AppError → HTTP status) ────────────────────────────────
 
 pub(crate) struct AppError {
     status: StatusCode,
@@ -570,8 +511,6 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
     }
 }
 
-// ── request/response types ─────────────────────────────────────────────────
-
 #[derive(Deserialize)]
 pub(crate) struct AskReq {
     pub(crate) question: String,
@@ -585,10 +524,6 @@ pub(crate) struct AskReq {
 pub(crate) struct AskResp {
     pub(crate) answer: String,
     pub(crate) sources: Vec<String>,
-    /// Claims placed in the prompt, `kind|subject|predicate|value`. Present so a consumer can
-    /// ask "did the answer keep what it was given?" — the briefing dropped both injected
-    /// `blocked` claims on 2026-08-14 and nothing downstream could tell. Empty on paths that
-    /// inject none, so existing consumers are unaffected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) injected_claims: Vec<String>,
 }
@@ -611,14 +546,10 @@ pub(crate) struct SearchReq {
 }
 
 impl SearchReq {
-    /// Related notes per hit, clamped: each one is a graph walk, and an unbounded count
-    /// would let one search fan out into the whole neighbourhood.
     pub(crate) fn related(&self) -> usize {
         self.related.min(3)
     }
 
-    /// How many of the top hits get related notes. Cannot exceed `max_results` — there is
-    /// no hit past that to attach anything to.
     pub(crate) fn related_heads(&self, max_results: usize) -> usize {
         self.related_heads.min(max_results)
     }
@@ -639,8 +570,6 @@ fn default_max_tokens() -> usize {
 #[derive(Serialize)]
 pub(crate) struct RelatedNote {
     pub(crate) source_path: String,
-    /// Older note content, truncated to 1200 chars on a char boundary — the same cap
-    /// `ask` uses for graph context.
     pub(crate) snippet: String,
 }
 
@@ -651,27 +580,15 @@ pub(crate) struct SearchHit {
     pub(crate) project: String,
     pub(crate) source_path: String,
     pub(crate) snippet: String,
-    /// Relevance signal for this hit — see `dist_kind` for what it means. `None` when the serving
-    /// path (wiki-recall fallback, `BORING_VECTOR=off`) has no comparable number to offer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) dist: Option<f32>,
-    /// What `dist` measures. Cosine distance and full-text rank are not the same scale — a
-    /// consumer must branch on this before comparing `dist` against a threshold.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) dist_kind: Option<crate::store::DistKind>,
-    /// Older notes sharing a concept with this hit, walked from the graph rather than
-    /// retrieved by the query. Present only when the request asked for them — a caller
-    /// that did not set `related` sees no new key.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) related: Vec<RelatedNote>,
-    /// `source_path`s of the docs that declared themselves the replacement for this hit
-    /// (`supersedes` edges with this doc as dst). Absent until one exists.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) superseded_by: Vec<String>,
-    /// How many sessions recorded this note as used (`used` edges with this doc as dst).
-    /// Always present; 0 on the wiki-recall fallback, where the graph cannot say.
     pub(crate) used_count: i64,
-    /// Same for `contested` edges — the note was injected and the session pushed back.
     pub(crate) contested_count: i64,
 }
 
@@ -680,20 +597,16 @@ pub(crate) struct SearchResp {
     pub(crate) hits: Vec<SearchHit>,
 }
 
-/// Hard ceiling on paths per list in one `/consumption` call — the scorer reports one session at a time.
 pub(crate) const CONSUMPTION_MAX_PATHS: usize = 200;
 
 #[derive(Deserialize)]
 pub(crate) struct ConsumptionReq {
     pub(crate) session_id: String,
-    /// RFC 3339 — becomes the `session:<id>` node's label.
     pub(crate) observed_at: String,
     #[serde(default)]
     pub(crate) used: Vec<String>,
     #[serde(default)]
     pub(crate) contested: Vec<String>,
-    /// `[newer_path, older_path]` pairs — for each known pair, one
-    /// `(doc:<newer>) -[supersedes]-> (doc:<older>)` edge.
     #[serde(default)]
     pub(crate) supersedes: Vec<[String; 2]>,
 }
@@ -703,14 +616,10 @@ pub(crate) struct ConsumptionResp {
     pub(crate) session: String,
     pub(crate) used: usize,
     pub(crate) contested: usize,
-    /// `supersedes` edges written from the request's pairs.
     pub(crate) supersedes: usize,
-    /// Paths skipped because no `document` row exists for them (or a pair named one path twice).
     pub(crate) unknown: usize,
 }
 
-/// Parse-don't-validate at the HTTP boundary: an unparsable timestamp or an oversized list is
-/// rejected here rather than stored and surfaced later as a wrong count.
 pub(crate) fn validate_consumption_req(req: &ConsumptionReq) -> Result<(), AppError> {
     if req.session_id.trim().is_empty() {
         return Err(AppError::bad_request("session_id must not be empty"));
@@ -794,24 +703,14 @@ pub(crate) struct SyncResp {
     pub(crate) ingest_new: usize,
     pub(crate) ingest_updated: usize,
     pub(crate) ingest_deleted: usize,
-    /// Notes the walk reached but did not ingest. Non-zero means the corpus is smaller than the
-    /// vault and the difference is NOT visible anywhere else — `new/updated/deleted` all stay
-    /// consistent while notes go missing. On 2026-08-14 three real notes vanished this way and
-    /// the only reason it was caught was a manual file-vs-DB diff.
     pub(crate) ingest_skipped: usize,
-    /// Notes that errored on parse/ingest. The sync deliberately does not abort (resilience),
-    /// so this is the only signal that it happened.
     pub(crate) ingest_failed: usize,
-    /// Notes whose frontmatter was rewritten on disk before re-ingesting. A silent mutation of
-    /// the user's files, so it is reported even when it succeeded.
     pub(crate) ingest_repaired: usize,
     pub(crate) ingest_chunks: usize,
     pub(crate) graph_tools: usize,
     pub(crate) graph_concepts: usize,
     pub(crate) graph_claims: usize,
     pub(crate) graph_edges: usize,
-    /// Total corpus size after sync (independent of whether this run produced deltas). `null` when the
-    /// post-sync audit was unavailable — reported honestly as "not measured", never fabricated as 0.
     pub(crate) total_chunks: Option<usize>,
     pub(crate) total_edges: Option<usize>,
 }
@@ -850,9 +749,6 @@ pub(crate) struct QueryLogEntry {
     pub(crate) endpoint: String,
     pub(crate) query: String,
     pub(crate) hit_paths: Vec<String>,
-    // Distances were persisted by #209 but never surfaced here, so a caller could see WHICH notes
-    // were injected and not how far they were — the labeller needs both to sample the band where a
-    // relevance decision would actually bite. Absent stays `null`, never 0.
     pub(crate) hit_dists: Vec<Option<f32>>,
     pub(crate) hit_dist_kinds: Vec<Option<String>>,
     pub(crate) sources: Vec<String>,
@@ -901,8 +797,6 @@ pub(crate) struct ProjectsResp {
 #[derive(Serialize)]
 pub(crate) struct RecallLabelStatsResp {
     pub(crate) judges: Vec<RecallLabelJudgeStats>,
-    /// Hits where both judges gave a real verdict, and how many of those matched. Reported even
-    /// when tiny, because a precision number from an unaudited LLM judge is not evidence.
     pub(crate) agreed: i64,
     pub(crate) compared: i64,
 }
@@ -940,15 +834,7 @@ fn default_event_log_limit() -> i64 {
 #[derive(Serialize)]
 pub(crate) struct EventLogResp {
     pub(crate) entries: Vec<EventLogEntry>,
-    /// The limit actually used, after clamping to `EVENT_LOG_MAX_LIMIT`. A caller asking for 5000
-    /// got 1000 and no word about it, so the pre-registered verdict was being computed on 54% of
-    /// its own window with nothing anywhere saying so (2026-09-10). Truncation and completeness
-    /// look identical from the client's side; only the server knows which one it sent.
     pub(crate) limit_applied: i64,
-    /// `true` when the page came back full at that limit, so there may be more behind it. Says
-    /// "there may be more", never "there are more" -- a page that happens to end exactly on the
-    /// boundary is complete, and claiming otherwise would be the same guess in the other
-    /// direction.
     pub(crate) maybe_truncated: bool,
 }
 
@@ -982,10 +868,6 @@ pub(crate) struct EventIngestResp {
     pub(crate) accepted: usize,
 }
 
-// ── shared handler helpers ──────────────────────────────────────────────────
-
-/// Whether a sync/remember/forget is mid-flight (holds the sync lock). An enum, not a string —
-/// the two states are closed at the type so an impossible third value can't exist (Layer 1: ADT).
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum SyncState {
@@ -997,34 +879,18 @@ pub(crate) enum SyncState {
 pub(crate) struct HealthResp {
     pub(crate) status: &'static str,
     pub(crate) vector: bool,
-    /// "running" while a sync/remember/forget holds the sync lock, else "idle". Lets `make up` callers
-    /// tell a still-warming corpus (empty results are expected) from a genuinely empty one.
     pub(crate) sync: SyncState,
-    /// Wiki note count (vault/wiki/*.md) — the corpus size in both modes. `null` when the vault is
-    /// unset/unreadable (kept best-effort so /health stays a liveness probe).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) corpus_count: Option<usize>,
-    /// `true` when all configured DB clients answer `SELECT 1`, `false` when any fail,
-    /// omitted when no DB client is configured (vector off + code_index off) to avoid false alarms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) db_healthy: Option<bool>,
-    /// The commit this binary was built from, stamped by the image build (`BORING_BUILD_SHA`).
-    /// `null` when the builder did not pass one — merging is not deploying, and an absent sha
-    /// says "unknown" rather than asserting a wrong one. Compare against `git rev-parse HEAD`
-    /// to see whether what is running is what was merged; `scripts/doctor.sh` does exactly that.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) build_sha: Option<String>,
-    /// Present only while the last compact attempt failed, so a healthy engine's /health is
-    /// unchanged and the field's mere presence is the alarm. `scripts/doctor.sh` (d7) reads it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) compact_failure: Option<CompactFailure>,
 }
 
 impl CompactFailure {
-    /// The next failure record, given whatever the last one was. Pulled out of the two call
-    /// sites (the scheduler and hand-run `/compact`) so the count is defined in one place and
-    /// can be tested without a database: the number that matters is not "it failed" but "it has
-    /// been failing since July", and that is the one a run-by-run `eprintln!` can never carry.
     pub(crate) fn next(previous: Option<&Self>, at: String, error: String) -> Self {
         Self {
             at,
@@ -1034,19 +900,13 @@ impl CompactFailure {
     }
 }
 
-/// A compact run that did not finish, kept until one does.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct CompactFailure {
-    /// RFC3339, so the reader can tell "failing since breakfast" from "failing since July".
     pub(crate) at: String,
-    /// Consecutive failures. One is a hiccup; the 64 MB case would have been counting for weeks.
     pub(crate) consecutive: u32,
     pub(crate) error: String,
 }
 
-/// Reads the build stamp. Empty or unset both mean "not stamped" — an empty string would
-/// otherwise serialize as a sha of `""` and compare unequal to everything, which reads as
-/// drift when the truth is that nobody recorded it.
 pub(crate) fn build_sha() -> Option<String> {
     std::env::var("BORING_BUILD_SHA")
         .ok()
@@ -1054,8 +914,6 @@ pub(crate) fn build_sha() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Best-effort count of wiki notes (`vault/wiki/*.md`). `None` on any IO error — `/health` must stay a
-/// liveness signal, so an unreadable/absent vault reports "unknown" (null), never fails the probe.
 pub(crate) fn count_wiki_notes(wiki_dir: &Path) -> Option<usize> {
     let entries = std::fs::read_dir(wiki_dir).ok()?;
     Some(
@@ -1066,7 +924,6 @@ pub(crate) fn count_wiki_notes(wiki_dir: &Path) -> Option<usize> {
     )
 }
 
-/// The explicit rejection (not silence) that vector/graph-dependent endpoints return under `BORING_VECTOR=off`.
 pub(crate) fn vector_disabled() -> AppError {
     anyhow::anyhow!(
         "BORING_VECTOR=off — this feature requires the vector backend (pgvector). Set BORING_VECTOR=on and start Postgres."
@@ -1074,23 +931,16 @@ pub(crate) fn vector_disabled() -> AppError {
     .into()
 }
 
-/// The same rejection mapped into the MCP `(code, message)` tuple — for vector-only tools
-/// (neighbors/claims/corpus_status). SSOT with `vector_disabled`; never `unwrap` the store (ROP).
 pub(crate) fn vec_off_rpc() -> (i32, String) {
     (-32603, format!("{:#}", vector_disabled().error))
 }
 
-/// Hard ceiling on agent-supplied recall budget to prevent token/DoS explosions.
 pub(crate) const MCP_MAX_RESULTS: usize = 50;
 pub(crate) const MCP_MAX_TOKENS: usize = 16_384;
 
-// ── entry point ─────────────────────────────────────────────────────────────
-
 pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> Result<()> {
-    // vault root — when set, sync includes the raw→wiki compile stage.
     let vault_dir: Option<PathBuf> = config::env_set("BORING_VAULT_DIR").map(PathBuf::from);
 
-    // Remember which config file we loaded so `classify_repo` writes back to the same file.
     let cfg_path = config::discover_path();
 
     let addr = config::env_set("BORING_HTTP_ADDR").unwrap_or_else(|| "0.0.0.0:7700".to_owned());
@@ -1137,7 +987,6 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         Arc::clone(&last_compact),
         Arc::clone(&compact_failure),
     );
-    // cfg_path is only used by the HTTP/MCP handlers; the scheduler does not need it.
 
     let router = axum::Router::new()
         .route("/health", get(http::health))
@@ -1171,7 +1020,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         )
         .route("/sync", post(http::handle_sync))
         .route("/compact", post(http::handle_compact))
-        .route("/mcp", get(mcp::handle_mcp_get).post(mcp::handle_mcp)) // MCP-over-HTTP (Streamable HTTP: GET SSE + POST JSON-RPC)
+        .route("/mcp", get(mcp::handle_mcp_get).post(mcp::handle_mcp))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr)
