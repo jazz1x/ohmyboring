@@ -778,6 +778,68 @@ async fn decision_register_answers_from_rows() {
     store.delete_document(&path).await.expect("cleanup");
 }
 
+/// The registers take an origin filter. They are also the only surface that used to bind it and
+/// throw it away, so the filter is pinned at the register rather than only at the store.
+#[tokio::test]
+async fn decision_register_honours_the_origin_filter() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let emb = [0.1_f32; 1024];
+    let mut paths = vec![];
+    for origin in ["personal", "company"] {
+        let path = unique_path(&format!("register-origin-{origin}"));
+        let mut front = dummy_frontmatter(&path);
+        front.project = "origin-test".to_owned();
+        front.origin = origin.to_owned();
+        store
+            .upsert_document(&front, "sha", SystemTime::now())
+            .await
+            .expect("upsert doc");
+        store
+            .upsert_claim(
+                origin,
+                "decision",
+                "shipped",
+                &path,
+                SystemTime::now(),
+                &emb,
+                "decision",
+                "certain",
+            )
+            .await
+            .expect("upsert decision claim");
+        paths.push(path);
+    }
+
+    let unfiltered = drudge::ask::decision_register(&store, Some("origin-test"), &[])
+        .await
+        .expect("decision register");
+    assert_eq!(unfiltered.items.len(), 2);
+
+    let filtered =
+        drudge::ask::decision_register(&store, Some("origin-test"), &["company".to_owned()])
+            .await
+            .expect("decision register with origin filter");
+    assert_eq!(
+        filtered
+            .items
+            .iter()
+            .map(|i| i.subject.as_str())
+            .collect::<Vec<_>>(),
+        vec!["personal"],
+        "a company-origin claim must not reach a register asked to exclude it"
+    );
+    assert_eq!(filtered.total_matching, 1);
+
+    for path in paths {
+        store.delete_document(&path).await.expect("cleanup");
+    }
+}
+
 /// Regression test for the 2026-07-25 outage: a single `tokio_postgres::Client` wedged permanently
 /// once its underlying connection died, and every subsequent write failed silently for 5.5 days.
 /// `Store` now holds a `deadpool_postgres::Pool` (`RecyclingMethod::Verified`), which must

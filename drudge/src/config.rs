@@ -413,6 +413,15 @@ const fn default_true() -> bool {
 }
 
 impl BoringConfig {
+    #[must_use]
+    pub fn origins_excluded_by_policy(&self) -> Vec<String> {
+        if self.allow_company_origin {
+            Vec::new()
+        } else {
+            vec![Origin::Company.as_str().to_owned()]
+        }
+    }
+
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let path = match path {
             Some(p) => p.to_path_buf(),
@@ -1057,5 +1066,22 @@ mod tests {
         assert!(cfg.repos.iter().all(|r| r.origin == Origin::Company));
         assert_eq!(cfg.agents.len(), 1);
         assert_eq!(cfg.agents[0].paths, vec!["/x", "/y"]);
+    }
+
+    #[test]
+    fn the_policy_decides_which_origins_a_reader_may_not_see() {
+        let mut cfg = BoringConfig::default();
+        assert!(!cfg.allow_company_origin);
+        assert_eq!(
+            cfg.origins_excluded_by_policy(),
+            vec!["company".to_owned()],
+            "with company origin disallowed, a caller passing the policy must exclude it"
+        );
+
+        cfg.allow_company_origin = true;
+        assert!(
+            cfg.origins_excluded_by_policy().is_empty(),
+            "with company origin allowed, the policy excludes nothing"
+        );
     }
 }
