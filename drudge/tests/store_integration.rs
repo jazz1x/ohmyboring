@@ -669,11 +669,12 @@ async fn stalled_register_rows_report_total_matching_within_the_window() {
 
     let ten_days = Duration::from_hours(10 * 24);
     let emb = [0.1_f32; 1024];
+    let project = unique_path("register-stalled-p");
     let mut paths = vec![];
     for i in 0u32..3 {
         let path = unique_path(&format!("register-stalled-{i}"));
         let mut front = dummy_frontmatter(&path);
-        front.project = "register-test".to_owned();
+        front.project.clone_from(&project);
         store
             .upsert_document(&front, "sha", SystemTime::now())
             .await
@@ -695,7 +696,7 @@ async fn stalled_register_rows_report_total_matching_within_the_window() {
     }
 
     let res = store
-        .stalled_register_rows(2, Some("register-test"), Some(&["next".to_owned()]), &[], 7)
+        .stalled_register_rows(2, Some(&project), Some(&["next".to_owned()]), &[], 7)
         .await
         .expect("stalled register rows");
     assert_eq!(res.rows.len(), 2);
@@ -3004,4 +3005,447 @@ async fn anchor_sweep_resumes_inside_a_shared_valid_from_group() {
             .await
             .expect("cleanup document");
     }
+}
+
+// ── claim graph edges: an unchanged claim still belongs to the graph ─────────
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use drudge::audit;
+use drudge::config::BoringConfig;
+use drudge::ingest::{
+    DefaultChunker, Embed, FileOutcome, FrontmatterGraphExtractor, GraphExtractor, Stats,
+    ingest_file_with,
+};
+
+struct CountingEmbed {
+    calls: AtomicUsize,
+    panic_on_call: bool,
+}
+
+impl CountingEmbed {
+    fn lenient() -> Self {
+        Self {
+            panic_on_call: false,
+            ..Self::default()
+        }
+    }
+    fn strict() -> Self {
+        Self {
+            panic_on_call: true,
+            ..Self::default()
+        }
+    }
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for CountingEmbed {
+    fn default() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            panic_on_call: false,
+        }
+    }
+}
+
+impl Embed for CountingEmbed {
+    fn embed(
+        &self,
+        text: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<f32>>> + Send {
+        let _ = text;
+        assert!(
+            !self.panic_on_call,
+            "embed called on a path that must stay un-embedded"
+        );
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::future::ready(Ok(vec![0.0_f32; 1024]))
+    }
+}
+
+fn claim_note(path: &str, subject: &str) -> FrontMatter {
+    FrontMatter {
+        origin: "personal".to_string(),
+        project: String::new(),
+        kind: "note".to_string(),
+        source_path: path.to_string(),
+        title: Some("claim edge test".to_string()),
+        tags: Vec::new(),
+        claims: vec![Claim {
+            subject: subject.to_string(),
+            predicate: "axis".to_string(),
+            value: "v1".to_string(),
+            kind: "fact".to_string(),
+            confidence: "certain".to_string(),
+        }],
+        ..Default::default()
+    }
+}
+
+async fn extract_note_graph(store: &Store, llm: &impl Embed, front: &FrontMatter) -> Stats {
+    let cfg = BoringConfig::default();
+    let mut stats = Stats::default();
+    FrontmatterGraphExtractor::new()
+        .extract(store, llm, &cfg, front, "body", &mut stats)
+        .await
+        .expect("graph extract");
+    stats
+}
+
+async fn claims_edge_count(db: &Client, path: &str, subject: &str) -> i64 {
+    db.query_one(
+        "SELECT count(*) FROM edge WHERE src = $1 AND dst = $2 AND kind = 'claims';",
+        &[&format!("doc:{path}"), &format!("claim:{subject}:axis")],
+    )
+    .await
+    .expect("count claims edge")
+    .get(0)
+}
+
+async fn claim_row_count(db: &Client, path: &str, subject: &str) -> i64 {
+    db.query_one(
+        "SELECT count(*) FROM claim WHERE subject = $1 AND predicate = 'axis' AND source_path = $2;",
+        &[&subject, &path],
+    )
+    .await
+    .expect("count claim rows")
+    .get(0)
+}
+
+async fn claim_valid_from(db: &Client, path: &str, subject: &str) -> SystemTime {
+    db.query_one(
+        "SELECT valid_from FROM claim WHERE subject = $1 AND predicate = 'axis' AND source_path = $2
+         ORDER BY valid_from DESC LIMIT 1;",
+        &[&subject, &path],
+    )
+    .await
+    .expect("read valid_from")
+    .get(0)
+}
+
+async fn delete_claims_edge(db: &Client, subject: &str) {
+    db.execute(
+        "DELETE FROM edge WHERE kind = 'claims' AND dst = $1;",
+        &[&format!("claim:{subject}:axis")],
+    )
+    .await
+    .expect("delete claims edge");
+}
+
+async fn cleanup_claim_edge_fixture(store: &Store, db: &Client, path: &str, subject: &str) {
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+    db.execute(
+        "DELETE FROM edge WHERE dst = $1;",
+        &[&format!("claim:{subject}:axis")],
+    )
+    .await
+    .expect("cleanup claim edges");
+    db.execute(
+        "DELETE FROM node WHERE id = $1;",
+        &[&format!("claim:{subject}:axis")],
+    )
+    .await
+    .expect("cleanup claim node");
+    store.delete_document(path).await.expect("cleanup document");
+}
+
+fn unique_subject(tag: &str) -> String {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("claim-edge-{tag}-{ts}")
+}
+
+/// Re-asserting an unchanged claim keeps its row (`valid_from` stays — the row guard still
+/// works) and now also writes the `doc —claims→ claim` edge. The fixture is a note ingested
+/// before the claim-graph code existed: the row is present, the edge is not.
+#[tokio::test]
+async fn unchanged_claim_keeps_row_and_gets_graph_edge() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = unique_subject("row");
+    let path = format!("/vault/wiki/{subject}.md");
+    let front = claim_note(&path, &subject);
+    store
+        .upsert_document(&front, &format!("sha-{subject}"), SystemTime::now())
+        .await
+        .expect("upsert document");
+    store
+        .upsert_claim(
+            &subject,
+            "axis",
+            "v1",
+            &path,
+            SystemTime::now(),
+            &[0.0_f32; 1024],
+            "fact",
+            "certain",
+        )
+        .await
+        .expect("seed claim row");
+    let valid_from = claim_valid_from(&db, &path, &subject).await;
+
+    let embedder = CountingEmbed::lenient();
+    let stats = extract_note_graph(&store, &embedder, &front).await;
+
+    assert_eq!(embedder.calls(), 0, "an unchanged claim must not embed");
+    assert_eq!(stats.claims_unchanged, 1, "the row skip is counted");
+    assert!(
+        stats.edges > 0,
+        "the graph write is counted on the unchanged path"
+    );
+    assert_eq!(
+        claim_row_count(&db, &path, &subject).await,
+        1,
+        "no second row"
+    );
+    extract_note_graph(&store, &embedder, &front).await;
+    assert_eq!(
+        claim_valid_from(&db, &path, &subject).await,
+        valid_from,
+        "valid_from must not move"
+    );
+    assert_eq!(
+        claims_edge_count(&db, &path, &subject).await,
+        1,
+        "the claims edge exists after the unchanged pass"
+    );
+    cleanup_claim_edge_fixture(&store, &db, &path, &subject).await;
+}
+
+/// The 4,321 case: the row exists and the `claims` edge was lost (deleted directly here, as the
+/// old unchanged-claim path dropped it on every re-ingest). The next ingest of the identical
+/// note restores the edge and leaves the row — `valid_from` included — untouched.
+#[tokio::test]
+async fn deleted_claims_edge_is_restored_on_next_ingest() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = unique_subject("restore");
+    let path = format!("/vault/wiki/{subject}.md");
+    let front = claim_note(&path, &subject);
+    store
+        .upsert_document(&front, &format!("sha-{subject}"), SystemTime::now())
+        .await
+        .expect("upsert document");
+
+    let embedder = CountingEmbed::lenient();
+    extract_note_graph(&store, &embedder, &front).await;
+    assert_eq!(claims_edge_count(&db, &path, &subject).await, 1);
+    let valid_from = claim_valid_from(&db, &path, &subject).await;
+
+    delete_claims_edge(&db, &subject).await;
+    assert_eq!(claims_edge_count(&db, &path, &subject).await, 0);
+
+    let stats = extract_note_graph(&store, &embedder, &front).await;
+
+    assert_eq!(
+        claims_edge_count(&db, &path, &subject).await,
+        1,
+        "the edge comes back on the next ingest"
+    );
+    assert_eq!(
+        claim_row_count(&db, &path, &subject).await,
+        1,
+        "the row is not rewritten"
+    );
+    assert_eq!(
+        claim_valid_from(&db, &path, &subject).await,
+        valid_from,
+        "the row's valid_from is untouched"
+    );
+    assert_eq!(
+        embedder.calls(),
+        1,
+        "proving the edge must not re-embed the claim"
+    );
+    assert_eq!(stats.claims_unchanged, 1);
+    cleanup_claim_edge_fixture(&store, &db, &path, &subject).await;
+}
+
+/// Structural control for the row guard: the embed call sits on the changed branch only, so a
+/// stub that panics on any call makes "the unchanged path does not embed" a hard failure.
+#[tokio::test]
+async fn unchanged_claim_path_never_embeds() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = unique_subject("noembed");
+    let path = format!("/vault/wiki/{subject}.md");
+    let front = claim_note(&path, &subject);
+    store
+        .upsert_document(&front, &format!("sha-{subject}"), SystemTime::now())
+        .await
+        .expect("upsert document");
+    store
+        .upsert_claim(
+            &subject,
+            "axis",
+            "v1",
+            &path,
+            SystemTime::now(),
+            &[0.0_f32; 1024],
+            "fact",
+            "certain",
+        )
+        .await
+        .expect("seed claim row");
+
+    let embedder = CountingEmbed::strict();
+    extract_note_graph(&store, &embedder, &front).await;
+
+    assert_eq!(embedder.calls(), 0);
+    assert_eq!(claims_edge_count(&db, &path, &subject).await, 1);
+    cleanup_claim_edge_fixture(&store, &db, &path, &subject).await;
+}
+
+/// `corpus_status` reports claim-edge coverage as two integers — claim nodes total and claim
+/// nodes with a `claims` edge — and the second moves only when an edge is added, not when a
+/// bare node appears.
+#[tokio::test]
+async fn corpus_status_reports_claim_edge_coverage() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = unique_subject("coverage");
+    let path = format!("/vault/wiki/{subject}.md");
+    let front = claim_note(&path, &subject);
+
+    let before = audit::stats(&store, false).await.expect("audit stats");
+
+    store
+        .upsert_claim_node(&path, "", &front.claims[0])
+        .await
+        .expect("upsert claim node");
+    delete_claims_edge(&db, &subject).await;
+
+    let mid = audit::stats(&store, false).await.expect("audit stats");
+    assert_eq!(
+        mid.graph_claims,
+        before.graph_claims + 1,
+        "a claim node moves the total"
+    );
+    assert_eq!(
+        mid.graph_claims_with_doc, before.graph_claims_with_doc,
+        "an edgeless claim node is not coverage"
+    );
+
+    store
+        .upsert_claim_node(&path, "", &front.claims[0])
+        .await
+        .expect("restore claims edge");
+    let after = audit::stats(&store, false).await.expect("audit stats");
+    assert_eq!(
+        after.graph_claims, mid.graph_claims,
+        "adding an edge does not move the total"
+    );
+    assert_eq!(
+        after.graph_claims_with_doc,
+        mid.graph_claims_with_doc + 1,
+        "adding an edge moves coverage"
+    );
+    cleanup_claim_edge_fixture(&store, &db, &path, &subject).await;
+}
+
+/// The backfill path for the 4,321: re-ingesting a byte-identical note still takes the
+/// `Unchanged` verdict (no chunk re-embedding — the panic-on-call stub survives), but the
+/// deterministic graph now rebuilds, so a deleted `claims` edge is written back.
+#[tokio::test]
+async fn unchanged_note_reingest_repairs_claim_edge_without_embedding() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = unique_subject("sync");
+    let dir = tempdir().expect("tempdir");
+    let note_path = dir.path().join(format!("{subject}.md"));
+    fs::write(
+        &note_path,
+        format!(
+            "---\norigin: personal\nproject: \"\"\nkind: note\nclaims:\n  - subject: {subject}\n    predicate: axis\n    value: v1\n    kind: fact\n    confidence: certain\n---\n\nbody\n"
+        ),
+    )
+    .expect("write note");
+    let note_path_str = note_path.to_string_lossy().into_owned();
+    let cfg = BoringConfig::default();
+
+    let mut stats = Stats::default();
+    let embedder = CountingEmbed::lenient();
+    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+        &store,
+        &embedder,
+        &cfg,
+        &note_path_str,
+        &mut stats,
+    )
+    .await
+    .expect("first ingest");
+    assert_eq!(outcome, FileOutcome::New);
+    assert_eq!(claims_edge_count(&db, &note_path_str, &subject).await, 1);
+    let valid_from = claim_valid_from(&db, &note_path_str, &subject).await;
+
+    delete_claims_edge(&db, &subject).await;
+
+    let mut stats = Stats::default();
+    let strict = CountingEmbed::strict();
+    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+        &store,
+        &strict,
+        &cfg,
+        &note_path_str,
+        &mut stats,
+    )
+    .await
+    .expect("second ingest");
+    assert_eq!(outcome, FileOutcome::Unchanged);
+    assert!(stats.edges > 0, "the sync must report the edges it wrote");
+    assert_eq!(
+        claims_edge_count(&db, &note_path_str, &subject).await,
+        1,
+        "the byte-identical re-ingest repairs the claims edge"
+    );
+    assert_eq!(
+        claim_valid_from(&db, &note_path_str, &subject).await,
+        valid_from,
+        "the claim row is untouched"
+    );
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+    db.execute(
+        "DELETE FROM edge WHERE dst = $1;",
+        &[&format!("claim:{subject}:axis")],
+    )
+    .await
+    .expect("cleanup claim edges");
+    db.execute(
+        "DELETE FROM node WHERE id = $1;",
+        &[&format!("claim:{subject}:axis")],
+    )
+    .await
+    .expect("cleanup claim node");
+    store
+        .delete_document(&note_path_str)
+        .await
+        .expect("cleanup document");
 }

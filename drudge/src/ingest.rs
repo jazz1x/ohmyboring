@@ -93,15 +93,30 @@ impl Chunker for DefaultChunker {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Embed trait — the embedding boundary behind the ingest pipeline
+// ─────────────────────────────────────────────────────────────
+
+/// The embedding boundary behind the ingest pipeline.
+pub trait Embed: Send + Sync {
+    fn embed(&self, text: &str) -> impl std::future::Future<Output = Result<Vec<f32>>> + Send;
+}
+
+impl Embed for Llm {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        Llm::embed(self, text).await
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 // GraphExtractor trait + default frontmatter extractor
 // ─────────────────────────────────────────────────────────────
 
 /// Strategy for extracting the semantic graph (tools/concepts/claims) from a parsed note.
 pub trait GraphExtractor: Send + Sync + Default {
-    fn extract<'a>(
+    fn extract<'a, E: Embed>(
         &'a self,
         store: &'a Store,
-        llm: &'a Llm,
+        llm: &'a E,
         cfg: &'a config::BoringConfig,
         front: &'a FrontMatter,
         body: &'a str,
@@ -141,10 +156,10 @@ impl FrontmatterGraphExtractor {
 }
 
 impl GraphExtractor for FrontmatterGraphExtractor {
-    async fn extract(
+    async fn extract<E: Embed>(
         &self,
         store: &Store,
-        llm: &Llm,
+        llm: &E,
         cfg: &config::BoringConfig,
         front: &FrontMatter,
         body: &str,
@@ -229,29 +244,29 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                     .await?
                 {
                     stats.claims_unchanged += 1;
-                    continue;
+                } else {
+                    let emb = llm.embed(&format!("{subject} {predicate} {value}")).await?;
+                    let anchor_hash = anchor.as_ref().and_then(|a| {
+                        crate::anchor_hash::hash_for_anchor(a, &cfg.code_index.sources)
+                    });
+                    store
+                        .upsert_claim_with_anchor(
+                            &subject,
+                            &predicate,
+                            value,
+                            path,
+                            valid_from,
+                            &emb,
+                            cl.kind(),
+                            cl.confidence(),
+                            anchor_db.as_deref(),
+                            anchor_hash.as_ref().map(|h| h.hash.as_str()),
+                            anchor_hash.as_ref().map(|h| h.symbol.as_str()),
+                        )
+                        .await?;
+                    stats.claims += 1;
                 }
-                let emb = llm.embed(&format!("{subject} {predicate} {value}")).await?;
-                let anchor_hash = anchor
-                    .as_ref()
-                    .and_then(|a| crate::anchor_hash::hash_for_anchor(a, &cfg.code_index.sources));
-                store
-                    .upsert_claim_with_anchor(
-                        &subject,
-                        &predicate,
-                        value,
-                        path,
-                        valid_from,
-                        &emb,
-                        cl.kind(),
-                        cl.confidence(),
-                        anchor_db.as_deref(),
-                        anchor_hash.as_ref().map(|h| h.hash.as_str()),
-                        anchor_hash.as_ref().map(|h| h.symbol.as_str()),
-                    )
-                    .await?;
                 store.upsert_claim_node(path, &front.project, cl).await?;
-                stats.claims += 1;
                 stats.edges += if front.project.is_empty() { 1 } else { 2 };
                 if cl.kind() != "fact" {
                     stats.edges += 1;
@@ -344,8 +359,8 @@ fn is_target(path: &Path, exclude: &[String]) -> bool {
 }
 
 /// Ingest one note file into the vector store + deterministic graph. The SSOT per-file pipeline.
-/// Reads `path` from disk, parses frontmatter, chunks, embeds, upserts, and (on new/changed content)
-/// rebuilds the semantic graph from the frontmatter. Accumulates into `stats`. Returns the verdict.
+/// Reads `path` from disk, parses frontmatter, chunks, embeds, upserts, and rebuilds the
+/// semantic graph from the frontmatter. Accumulates into `stats`. Returns the verdict.
 ///
 /// Uses the default chunker and frontmatter graph extractor. For custom strategies see
 /// [`ingest_file_with`].
@@ -356,14 +371,14 @@ pub async fn ingest_file(
     path: &str,
     stats: &mut Stats,
 ) -> Result<FileOutcome> {
-    ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor>(store, llm, cfg, path, stats)
+    ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, Llm>(store, llm, cfg, path, stats)
         .await
 }
 
-/// Same as [`ingest_file`], but with injectable `Chunker` and `GraphExtractor` strategies.
-pub async fn ingest_file_with<C: Chunker, G: GraphExtractor>(
+/// Same as [`ingest_file`], but with injectable `Chunker`, `GraphExtractor`, and `Embed` strategies.
+pub async fn ingest_file_with<C: Chunker, G: GraphExtractor, E: Embed>(
     store: &Store,
-    llm: &Llm,
+    llm: &E,
     cfg: &config::BoringConfig,
     path: &str,
     stats: &mut Stats,
@@ -387,16 +402,21 @@ pub async fn ingest_file_with<C: Chunker, G: GraphExtractor>(
         .and_then(|m| m.modified().ok())
         .unwrap_or_else(SystemTime::now);
 
+    let (front, body) = frontmatter::parse(&data, path, cfg)?;
+
     let sha = sha256(&data);
     let prev = store.get_doc_sha(path).await?;
     if prev.as_deref() == Some(sha.as_str()) {
-        // Content identical — backfill only recency without re-embedding (graph already built).
+        // Content identical — chunk re-embedding is skipped, but the deterministic graph still
+        // rebuilds: "graph already built" holds only for notes ingested after the graph code
+        // that wrote their edges, and the rebuild embeds nothing for claims whose row exists.
         store.set_updated_at(path, mtime).await?;
+        G::default()
+            .extract(store, llm, cfg, &front, &body, stats)
+            .await?;
         stats.unchanged += 1;
         return Ok(FileOutcome::Unchanged);
     }
-
-    let (front, body) = frontmatter::parse(&data, path, cfg)?;
     let pieces = C::default().chunk(body.trim());
     if pieces.iter().all(|p| p.trim().is_empty()) {
         // Expected for placeholder notes (empty daily-briefs), but it must still be named —
@@ -463,13 +483,13 @@ pub async fn run(
     cfg: &config::BoringConfig,
     dirs: &[String],
 ) -> Result<Stats> {
-    run_with::<DefaultChunker, FrontmatterGraphExtractor>(store, llm, cfg, dirs).await
+    run_with::<DefaultChunker, FrontmatterGraphExtractor, Llm>(store, llm, cfg, dirs).await
 }
 
-/// Same as [`run`], but with injectable `Chunker` and `GraphExtractor` strategies.
-pub async fn run_with<C: Chunker, G: GraphExtractor>(
+/// Same as [`run`], but with injectable `Chunker`, `GraphExtractor`, and `Embed` strategies.
+pub async fn run_with<C: Chunker, G: GraphExtractor, E: Embed>(
     store: &Store,
-    llm: &Llm,
+    llm: &E,
     cfg: &config::BoringConfig,
     dirs: &[String],
 ) -> Result<Stats> {
@@ -487,13 +507,13 @@ pub async fn run_with<C: Chunker, G: GraphExtractor>(
         // autonomous repair (quote unsafe scalar frontmatter, e.g. an unquoted `title: [FEDEV-97] …`
         // that YAML reads as a sequence) and re-ingest; only if THAT still fails do we skip + log.
         // Either way the rest of the corpus keeps syncing.
-        if let Err(e) = ingest_file_with::<C, G>(store, llm, cfg, &pstr, &mut stats).await {
+        if let Err(e) = ingest_file_with::<C, G, E>(store, llm, cfg, &pstr, &mut stats).await {
             if let Some(fixed) = std::fs::read_to_string(&pstr)
                 .ok()
                 .and_then(|c| crate::vault::repair_note_frontmatter(&c))
                 && frontmatter::parse(&fixed, &pstr, cfg).is_ok()
                 && std::fs::write(&pstr, &fixed).is_ok()
-                && ingest_file_with::<C, G>(store, llm, cfg, &pstr, &mut stats)
+                && ingest_file_with::<C, G, E>(store, llm, cfg, &pstr, &mut stats)
                     .await
                     .is_ok()
             {
