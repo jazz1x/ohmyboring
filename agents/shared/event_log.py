@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import sys
@@ -337,6 +338,58 @@ def _is_resolution_failure(event: dict[str, Any]) -> bool:
     return event.get("verifier_status") == "failed" or event.get("status") == "failed"
 
 
+def verdict_spool_loss() -> dict[str, Any]:
+    """Spool rows of verdict-read kinds, split by the verdict's open window.
+
+    The event names are loaded from scripts/uptake-verdict.py and the window bounds from
+    verdict_core, the same places the verdict reads them, so this check cannot drift from
+    what it guards. Timestamps are compared as instants on the window's calendar, not as
+    strings: the spool writes ts with an offset, and a lexical compare silently reorders
+    a row written with a different one. A row whose timestamp will not parse cannot be
+    placed inside the window and is counted outside it, the side the open verdict cannot
+    read; guessing would place it wherever the guess is convenient.
+    """
+    shared_dir = os.path.dirname(os.path.abspath(__file__))
+    if shared_dir not in sys.path:
+        sys.path.insert(0, shared_dir)
+    import verdict_core
+
+    verdict_script = os.path.join(shared_dir, "..", "..", "scripts", "uptake-verdict.py")
+    spec = importlib.util.spec_from_file_location("uptake_verdict", verdict_script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    since = datetime.strptime(verdict_core.WINDOW_SINCE, "%Y-%m-%d").replace(tzinfo=verdict_core.WINDOW_TZ)
+    until = datetime.strptime(verdict_core.WINDOW_UNTIL, "%Y-%m-%d").replace(tzinfo=verdict_core.WINDOW_TZ)
+    in_rows = []
+    out_rows = 0
+    oldest = None
+    for row in iter_events():
+        if row.get("event") not in module.VERDICT_EVENT_NAMES:
+            continue
+        at = verdict_core._instant(row.get("ts"))
+        if at is not None and since <= at < until:
+            in_rows.append(row)
+            continue
+        out_rows += 1
+        if at is not None and (oldest is None or at < oldest):
+            oldest = at
+    sessions = {
+        row.get("session_id") or (row.get("attributes") or {}).get("session_id")
+        for row in in_rows
+    }
+    sessions.discard(None)
+    sessions.discard("")
+    return {
+        "in_rows": len(in_rows),
+        "in_sessions": len(sessions),
+        "out_rows": out_rows,
+        "oldest": oldest.astimezone(verdict_core.WINDOW_TZ).date().isoformat() if oldest else "undated",
+        "since": verdict_core.WINDOW_SINCE,
+        "until": verdict_core.WINDOW_UNTIL,
+    }
+
+
 def _parse_ts(value: str) -> Optional[datetime]:
     if not value:
         return None
@@ -392,6 +445,7 @@ def _format_event(event: dict[str, Any]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Inspect oh-my-boring workflow events")
     parser.add_argument("--sink-mode", action="store_true")
+    parser.add_argument("--verdict-spool-loss", action="store_true")
     parser.add_argument("--recent-resolution-failures", action="store_true")
     parser.add_argument("--stale-gates", action="store_true")
     parser.add_argument("--record", nargs=3, metavar=("COMPONENT", "EVENT", "STATUS"))
@@ -407,6 +461,19 @@ def main() -> int:
 
     if args.sink_mode:
         print(_event_sink_mode())
+        return 0
+
+    if args.verdict_spool_loss:
+        loss = verdict_spool_loss()
+        print(
+            "verdict_spool "
+            f"in_window_rows={loss['in_rows']} "
+            f"in_window_sessions={loss['in_sessions']} "
+            f"out_of_window_rows={loss['out_rows']} "
+            f"oldest={loss['oldest']} "
+            f"since={loss['since']} "
+            f"until={loss['until']}"
+        )
         return 0
 
     if args.record:

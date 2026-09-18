@@ -4,6 +4,8 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
+REAL_PY="$(command -v python3)"
+export ROOT REAL_PY
 
 make_fake_path() {
     fakebin="$1"
@@ -166,6 +168,9 @@ case "${1:-}" in
         echo "${DOCTOR_EVENT_SINK_MODE:-db}"
         exit 0
     fi
+    if [ "${2:-}" = --verdict-spool-loss ]; then
+        exec "${REAL_PY:-/usr/bin/python3}" "${ROOT:?}/agents/shared/event_log.py" --verdict-spool-loss
+    fi
     echo "resolution_quality recent_failures=0 log=/tmp/events.ndjson"
     exit 0
     ;;
@@ -183,6 +188,17 @@ exit 1
 SH
 
     chmod +x "$fakebin/curl" "$fakebin/docker" "$fakebin/jq" "$fakebin/python3"
+}
+
+window_ts() {
+    python3 - "$ROOT" "$1" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/agents/shared")
+from datetime import datetime, timedelta, timezone
+import verdict_core
+start = datetime.strptime(verdict_core.WINDOW_SINCE, "%Y-%m-%d").replace(tzinfo=verdict_core.WINDOW_TZ)
+print((start + timedelta(hours=float(sys.argv[2]))).astimezone(timezone.utc).isoformat())
+PY
 }
 
 make_case() {
@@ -215,9 +231,10 @@ make_case() {
     touch "$home/.cache/boring-distill/session.ts"
     mkdir -p "$home/.cache/oh-my-boring"
     if [ "${DOCTOR_SPOOL_ROWS:-0}" -gt 0 ] 2>/dev/null; then
+        spool_ts="$(window_ts 9)"
         n=0
         while [ "$n" -lt "$DOCTOR_SPOOL_ROWS" ]; do
-            printf '%s\n' '{"event":"injection_uptake","session_id":"spooled-session"}' >>"$home/.cache/oh-my-boring/events.ndjson"
+            printf '%s\n' "{\"event\":\"injection_uptake\",\"session_id\":\"spooled-session\",\"ts\":\"$spool_ts\"}" >>"$home/.cache/oh-my-boring/events.ndjson"
             n=$((n + 1))
         done
     fi
@@ -865,6 +882,91 @@ esac
       exit 1
   }
   echo "ok - events trapped in the spool fail readiness" )
+
+( make_case "$TMP/in_window_spool_rows_fail_readiness" yes
+  printf '{"event":"injection_uptake","session_id":"spooled-in-window","ts":"%s"}\n' "$(window_ts 9)" \
+      >>"$TMP/in_window_spool_rows_fail_readiness/home/.cache/oh-my-boring/events.ndjson"
+  if run_strict "$TMP/in_window_spool_rows_fail_readiness" "$TMP/in_window_spool_rows_fail_readiness.out"; then
+      cat "$TMP/in_window_spool_rows_fail_readiness.out"
+      echo "FAIL: a verdict-kind row dated inside the window must fail strict doctor" >&2
+      exit 1
+  fi
+  grep -q "✗ EVENTS TRAPPED IN THE SPOOL" "$TMP/in_window_spool_rows_fail_readiness.out" || {
+      cat "$TMP/in_window_spool_rows_fail_readiness.out"
+      echo "FAIL: the in-window loss must be named as a failure, not a warning" >&2
+      exit 1
+  }
+  grep -q "1 verdict-kind row(s) from 1 session(s)" "$TMP/in_window_spool_rows_fail_readiness.out" || {
+      cat "$TMP/in_window_spool_rows_fail_readiness.out"
+      echo "FAIL: the failure must carry the in-window row and session counts" >&2
+      exit 1
+  }
+  echo "ok - in_window_spool_rows_fail_readiness" ) || exit 1
+
+( make_case "$TMP/out_of_window_spool_rows_warn_instead_of_failing" yes
+  printf '{"event":"session_end","session_id":"spooled-historical","ts":"%s"}\n' "$(window_ts -12)" \
+      >>"$TMP/out_of_window_spool_rows_warn_instead_of_failing/home/.cache/oh-my-boring/events.ndjson"
+  if ! run_strict "$TMP/out_of_window_spool_rows_warn_instead_of_failing" "$TMP/out_of_window_spool_rows_warn_instead_of_failing.out"; then
+      cat "$TMP/out_of_window_spool_rows_warn_instead_of_failing.out"
+      echo "FAIL: history the open verdict cannot read must not fail strict readiness" >&2
+      exit 1
+  fi
+  grep -q "! verdict-kind rows trapped in the spool before the window" "$TMP/out_of_window_spool_rows_warn_instead_of_failing.out" || {
+      cat "$TMP/out_of_window_spool_rows_warn_instead_of_failing.out"
+      echo "FAIL: the historical rows must still be said out loud, as a warning" >&2
+      exit 1
+  }
+  grep -q "1 row(s) older than" "$TMP/out_of_window_spool_rows_warn_instead_of_failing.out" || {
+      cat "$TMP/out_of_window_spool_rows_warn_instead_of_failing.out"
+      echo "FAIL: the warning must carry the out-of-window count" >&2
+      exit 1
+  }
+  grep -q "oldest $(window_ts -12 | cut -c1-10)" "$TMP/out_of_window_spool_rows_warn_instead_of_failing.out" || {
+      cat "$TMP/out_of_window_spool_rows_warn_instead_of_failing.out"
+      echo "FAIL: the warning must carry the oldest date, not merely the count" >&2
+      exit 1
+  }
+  echo "ok - out_of_window_spool_rows_warn_instead_of_failing" ) || exit 1
+
+( make_case "$TMP/non_verdict_spool_rows_do_not_raise_a_verdict_alarm" yes
+  printf '{"event":"doctor","status":"ok","ts":"%s"}\n' "$(window_ts 9)" \
+      >>"$TMP/non_verdict_spool_rows_do_not_raise_a_verdict_alarm/home/.cache/oh-my-boring/events.ndjson"
+  if ! run_strict "$TMP/non_verdict_spool_rows_do_not_raise_a_verdict_alarm" "$TMP/non_verdict_spool_rows_do_not_raise_a_verdict_alarm.out"; then
+      cat "$TMP/non_verdict_spool_rows_do_not_raise_a_verdict_alarm.out"
+      echo "FAIL: spool volume of kinds the verdict never reads must not fail strict readiness" >&2
+      exit 1
+  fi
+  grep -q "✓ event spool holds 1 row(s), none of the kinds" "$TMP/non_verdict_spool_rows_do_not_raise_a_verdict_alarm.out" || {
+      cat "$TMP/non_verdict_spool_rows_do_not_raise_a_verdict_alarm.out"
+      echo "FAIL: non-verdict rows must be reported as volume the verdict cannot miss" >&2
+      exit 1
+  }
+  if grep -q "verdict-kind rows trapped" "$TMP/non_verdict_spool_rows_do_not_raise_a_verdict_alarm.out"; then
+      cat "$TMP/non_verdict_spool_rows_do_not_raise_a_verdict_alarm.out"
+      echo "FAIL: a doctor row must not raise a verdict-shaped alarm" >&2
+      exit 1
+  fi
+  echo "ok - non_verdict_spool_rows_do_not_raise_a_verdict_alarm" ) || exit 1
+
+( make_case "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string" yes
+  printf '{"event":"session_end","session_id":"spooled-boundary","ts":"%s"}\n' "$(window_ts -1)" \
+      >>"$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string/home/.cache/oh-my-boring/events.ndjson"
+  if ! run_strict "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string" "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out"; then
+      cat "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out"
+      echo "FAIL: a +09:00 row one hour before the window opens on the owner's calendar is outside it; only a string compare files it inside" >&2
+      exit 1
+  fi
+  grep -q "! verdict-kind rows trapped in the spool before the window" "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out" || {
+      cat "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out"
+      echo "FAIL: the boundary row must warn as history the open verdict cannot read" >&2
+      exit 1
+  }
+  if grep -q "✗ EVENTS TRAPPED IN THE SPOOL" "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out"; then
+      cat "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out"
+      echo "FAIL: the boundary row must not be counted as in-window loss" >&2
+      exit 1
+  fi
+  echo "ok - a_window_boundary_row_is_placed_by_instant_not_by_string" ) || exit 1
 
 ( make_case "$TMP/spool-unwritable" yes
   rm -rf "$TMP/spool-unwritable/home/.cache/oh-my-boring"
