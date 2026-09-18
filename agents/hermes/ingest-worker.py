@@ -32,7 +32,9 @@ import sys
 import time
 import urllib.request
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+_HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 import boring_config
 import distill_core
 import event_log
@@ -81,6 +83,7 @@ BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 TRANSCRIPT_FORMAT = boring_config.agent_config("claude-code").get("format") or "claude-json"
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
+STABLE_AGE_S = float(os.environ.get("COLLECT_STABLE_AGE_SECONDS") or "1800")
 CLAMP = int(os.environ.get("INGEST_CLAMP") or "4000")  # 12B digest ceiling — above this the agent derails
 MIN_TEXT = 500  # below this = no real content → skip (host-side pre-filter)
 # A pending-marker prevents the same session being re-offered every tick while the agent is still
@@ -149,14 +152,17 @@ def _log_worker_event(event, status, **fields):
 
 
 def _eligible(p):
-    """A session is queue-eligible if: within window, big enough, not yet done, not pending,
-    not in fresh retry state, and not already handled by the engine-direct SessionEnd hook."""
+    """A session is queue-eligible if: within window, big enough, finished writing, not yet
+    done, not pending, not in fresh retry state, and not already handled by the engine-direct
+    SessionEnd hook."""
     sid = os.path.splitext(os.path.basename(p))[0]
     if markers.is_done(sid):
         return False
     if markers.is_pending(sid, ttl=PENDING_TTL):
         return False
     if markers.is_retry(sid, ttl=RETRY_TTL):
+        return False
+    if STABLE_AGE_S > 0 and os.path.getmtime(p) > time.time() - STABLE_AGE_S:
         return False
     return True
 

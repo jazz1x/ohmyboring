@@ -554,7 +554,12 @@ def _upsert_mcp_block(lines: list[str], mcp_idx: int, server_name: str, url: str
 
 #: Scripts hermes *runs* out of ~/.hermes/scripts. Each is an entry point, so whatever it
 #: imports from its own directory has to land there beside it.
-_HERMES_ENTRY_SCRIPT_NAMES = ("briefing.py", "weekly-briefing.py", "codex-collect-sessions.py")
+_HERMES_ENTRY_SCRIPT_NAMES = (
+    "briefing.py",
+    "weekly-briefing.py",
+    "codex-collect-sessions.py",
+    "ingest-worker.py",
+)
 
 #: Entries with an installer of their own further down. Copying them here as well would run
 #: `_backup` twice, and the second backup would overwrite the saved original with the copy the
@@ -857,8 +862,7 @@ def _ensure_memory_ingest_worker(
     canonical repo script. This job is intentionally not exposed in boring.json hermes_cron_jobs
     because it is infrastructure, not user scheduling.
     """
-    # The hermes-agent container always mounts the repo root at /host/oh-my-boring.
-    script = "/host/oh-my-boring/agents/hermes/ingest-worker.py"
+    script = "ingest-worker.py"
     desired_schedule = {"kind": "interval", "minutes": 20, "display": "every 20m"}
     existing = next((j for j in jobs if j.get("name") == "memory-ingest-worker"), None)
     if existing:
