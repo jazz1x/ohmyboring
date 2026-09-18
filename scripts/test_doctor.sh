@@ -162,6 +162,10 @@ case "${1:-}" in
         fi
         exit 0
     fi
+    if [ "${2:-}" = --sink-mode ]; then
+        echo "${DOCTOR_EVENT_SINK_MODE:-db}"
+        exit 0
+    fi
     echo "resolution_quality recent_failures=0 log=/tmp/events.ndjson"
     exit 0
     ;;
@@ -209,6 +213,14 @@ make_case() {
     done
     [ "${DOCTOR_HERMES_STATE:-match}" = none ] && rm -rf "$home/.hermes"
     touch "$home/.cache/boring-distill/session.ts"
+    mkdir -p "$home/.cache/oh-my-boring"
+    if [ "${DOCTOR_SPOOL_ROWS:-0}" -gt 0 ] 2>/dev/null; then
+        n=0
+        while [ "$n" -lt "$DOCTOR_SPOOL_ROWS" ]; do
+            printf '%s\n' '{"event":"injection_uptake","session_id":"spooled-session"}' >>"$home/.cache/oh-my-boring/events.ndjson"
+            n=$((n + 1))
+        done
+    fi
     [ "$with_note" = yes ] && touch "$boring/vault/wiki/wiki-0001.md"
     printf 'DRUDGE_TOKEN=local\n' >"$boring/.env"
     chmod 600 "$boring/.env"
@@ -821,6 +833,76 @@ esac
   grep -q "✗ DOUBLE-RECORDED INJECTIONS" "$TMP/ledger-dupes.out" || {
       cat "$TMP/ledger-dupes.out"
       echo "FAIL: the duplicate must be reported as a failure, not a warning" >&2
+      exit 1
+  } ) || exit 1
+
+( make_case "$TMP/spool-clean" yes
+  if ! run_strict "$TMP/spool-clean" "$TMP/spool-clean.out"; then
+      cat "$TMP/spool-clean.out"
+      echo "FAIL: an empty spool must pass strict doctor" >&2
+      exit 1
+  fi
+  grep -q "✓ event spool is empty" "$TMP/spool-clean.out" || {
+      cat "$TMP/spool-clean.out"
+      echo "FAIL: the healthy case must say the spool is empty" >&2
+      exit 1
+  }
+  grep -q "✓ event spool dir is writable" "$TMP/spool-clean.out" || {
+      cat "$TMP/spool-clean.out"
+      echo "FAIL: the healthy case must say the spool dir is writable" >&2
+      exit 1
+  } ) || exit 1
+
+( DOCTOR_SPOOL_ROWS=3 make_case "$TMP/spool-trapped" yes
+  if run_strict "$TMP/spool-trapped" "$TMP/spool-trapped.out"; then
+      cat "$TMP/spool-trapped.out"
+      echo "FAIL: rows trapped in the spool must fail strict doctor" >&2
+      exit 1
+  fi
+  grep -q "✗ EVENTS TRAPPED IN THE SPOOL" "$TMP/spool-trapped.out" || {
+      cat "$TMP/spool-trapped.out"
+      echo "FAIL: the trapped rows must be named, not merely counted" >&2
+      exit 1
+  }
+  echo "ok - events trapped in the spool fail readiness" )
+
+( make_case "$TMP/spool-unwritable" yes
+  rm -rf "$TMP/spool-unwritable/home/.cache/oh-my-boring"
+  touch "$TMP/spool-unwritable/home/.cache/oh-my-boring"
+  if run_strict "$TMP/spool-unwritable" "$TMP/spool-unwritable.out"; then
+      cat "$TMP/spool-unwritable.out"
+      echo "FAIL: an unusable spool dir must fail strict doctor" >&2
+      exit 1
+  fi
+  grep -q "✗ event spool dir cannot be created" "$TMP/spool-unwritable.out" || {
+      cat "$TMP/spool-unwritable.out"
+      echo "FAIL: the unusable spool dir must be named, not merely counted" >&2
+      exit 1
+  }
+  echo "ok - an unusable spool dir fails readiness" )
+
+( make_case "$TMP/spool-mode-override" yes
+  if ! DOCTOR_EVENT_SINK_MODE=spool run_strict "$TMP/spool-mode-override" "$TMP/spool-mode-override.out"; then
+      cat "$TMP/spool-mode-override.out"
+      echo "FAIL: a deliberate spool-mode override must warn, not fail readiness" >&2
+      exit 1
+  fi
+  grep -q "! event sink is 'spool'" "$TMP/spool-mode-override.out" || {
+      cat "$TMP/spool-mode-override.out"
+      echo "FAIL: the spool-mode override must be named as a warning" >&2
+      exit 1
+  }
+  echo "ok - a spool-mode override warns instead of failing" )
+
+( DOCTOR_EVENT_SINK_MODE=both DOCTOR_SPOOL_ROWS=2 make_case "$TMP/spool-mirror" yes
+  if ! DOCTOR_EVENT_SINK_MODE=both run_strict "$TMP/spool-mirror" "$TMP/spool-mirror.out"; then
+      cat "$TMP/spool-mirror.out"
+      echo "FAIL: mirror rows under sink=both must pass strict doctor" >&2
+      exit 1
+  fi
+  grep -q "✓ event sink mirrors to the spool" "$TMP/spool-mirror.out" || {
+      cat "$TMP/spool-mirror.out"
+      echo "FAIL: sink=both mirror rows must be reported as healthy" >&2
       exit 1
   } ) || exit 1
 

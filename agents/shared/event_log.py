@@ -391,6 +391,7 @@ def _format_event(event: dict[str, Any]) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Inspect oh-my-boring workflow events")
+    parser.add_argument("--sink-mode", action="store_true")
     parser.add_argument("--recent-resolution-failures", action="store_true")
     parser.add_argument("--stale-gates", action="store_true")
     parser.add_argument("--record", nargs=3, metavar=("COMPONENT", "EVENT", "STATUS"))
@@ -403,6 +404,10 @@ def main() -> int:
     parser.add_argument("--max", type=int, default=3)
     parser.add_argument("--hours", type=int, default=None)
     args = parser.parse_args()
+
+    if args.sink_mode:
+        print(_event_sink_mode())
+        return 0
 
     if args.record:
         fields = dict(args.field)

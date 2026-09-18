@@ -59,6 +59,7 @@ failed_codex=0
 failed_resolution=0
 failed_freshness=0
 failed_maintenance=0
+failed_eventlog=0
 
 ok()   { echo "✓ $1"; }
 bad()  { echo "✗ $1"; }
@@ -87,6 +88,7 @@ log_doctor_event() {
             --field "failed_resolution=$failed_resolution" \
             --field "failed_freshness=$failed_freshness" \
             --field "failed_maintenance=$failed_maintenance" \
+            --field "failed_eventlog=$failed_eventlog" \
             --field "drudge_down=$drudge_down"; then
             echo "⚠ doctor event log write failed" >&2
         fi
@@ -562,6 +564,45 @@ if [ -f "$event_log_probe" ]; then
     fi
 fi
 
+event_spool="${BORING_EVENT_LOG:-$HOME/.cache/oh-my-boring/events.ndjson}"
+spool_dir="${event_spool%/*}"
+if mkdir -p "$spool_dir" 2>/dev/null; then
+    if (umask 077; : >"$spool_dir/.doctor-spool-write-test.$$") 2>/dev/null; then
+        rm -f "$spool_dir/.doctor-spool-write-test.$$"
+        ok "event spool dir is writable — the fallback can take rows while the engine cannot"
+    else
+        bad "event spool dir is not writable ($spool_dir) — when the engine is down, session_end and injection_uptake rows are dropped with no trace anywhere"
+        failed_eventlog=1
+    fi
+else
+    bad "event spool dir cannot be created ($spool_dir) — when the engine is down, session_end and injection_uptake rows are dropped with no trace anywhere"
+    failed_eventlog=1
+fi
+sink_mode="$(BORING_EVENT_LOG="$event_spool" python3 "$event_log_probe" --sink-mode 2>/dev/null || true)"
+spool_rows=0
+if [ -f "$event_spool" ]; then
+    spool_rows=$(wc -l <"$event_spool" 2>/dev/null | tr -d ' ')
+fi
+case "$sink_mode" in
+    db)
+        if [ "$spool_rows" -gt 0 ]; then
+            bad "EVENTS TRAPPED IN THE SPOOL — $event_spool holds $spool_rows row(s) the engine store never received. scripts/uptake-verdict.py reads the engine only, so a session that ended while the engine could not take the write is missing from the verdict population and from coverage at the same time — coverage cannot see the loss because its numerator and denominator vanish together (docs/PRD.md §2)."
+            failed_eventlog=1
+        else
+            ok "event spool is empty — every event reached the engine store the verdict reads"
+        fi
+        ;;
+    both)
+        ok "event sink mirrors to the spool (sink=both) — the engine store remains the verdict's source ($spool_rows mirror row(s))"
+        ;;
+    spool)
+        warn "event sink is 'spool' — events bypass the engine store that scripts/uptake-verdict.py reads. An operator or test override, not the production shape."
+        ;;
+    *)
+        warn "event sink mode unreadable — the trapped-spool check was skipped, not passed"
+        ;;
+esac
+
 # (d6) Code index freshness. last_synced_at older than BORING_CODE_INDEX_MAX_DAYS (default 7)
 # is a warning, not a strict failure — the index can still be read; it is just no longer current.
 max_days="${BORING_CODE_INDEX_MAX_DAYS:-7}"
@@ -794,8 +835,8 @@ fi
 
 echo
 if [ "$STRICT" -eq 1 ]; then
-    failures="${failed_env}${failed_hooks}${failed_hookprobe}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}${failed_midpoint}${failed_maintenance}"
-    if [ "$failures" = "0000000000000" ]; then
+    failures="${failed_env}${failed_hooks}${failed_hookprobe}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}${failed_midpoint}${failed_maintenance}${failed_eventlog}"
+    if [ "$failures" = "00000000000000" ]; then
         ok "readiness: all doctor checks passed — briefing/write-door dependencies are ready."
         log_doctor_event ok
         exit 0
