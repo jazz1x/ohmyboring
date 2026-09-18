@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::llm::Llm;
 use crate::retrieve;
-use crate::store::Store;
+use crate::store::{RegisterRow, Store};
 use crate::wiki_recall;
 
 const SYSTEM: &str = "You are the user's personal assistant. Reply in the same language as the user's question.\n\
@@ -777,177 +777,146 @@ pub async fn project_status(
     })
 }
 
-const DECISION_REGISTER_SYSTEM: &str = "You are the user's memory assistant. List the decisions below in the same language as the records.\n\
-[Specific] Preserve project names, predicates, and values verbatim.\n\
-[No fabrication] Don't invent decisions not in the records.\n\
-[Format] Group by project if a project filter is present; otherwise list newest-first.\n\
-Each bullet: '<project> — <predicate>: <value> (<confidence>)'. If there are no decisions, say so plainly.";
+#[derive(Debug)]
+pub struct RegisterOut {
+    pub answer: String,
+    pub sources: Vec<String>,
+    pub items: Vec<RegisterRow>,
+    pub limit_applied: bool,
+    pub total_matching: i64,
+}
 
-const RISK_REGISTER_SYSTEM: &str = "You are the user's memory assistant. List the risks, assumptions, and blockers below in the same language as the records.\n\
-[Specific] Preserve project names, predicates, and values verbatim.\n\
-[No fabrication] Don't invent risks not in the records.\n\
-[Format] Group by project if a project filter is present; otherwise list newest-first.\n\
-Each bullet: '<project> — <predicate>: <value> (kind=<kind>, confidence=<confidence>)'. If none, say so plainly.";
+const REGISTER_LIMIT: i64 = 50;
 
-const NEXT_ACTION_REGISTER_SYSTEM: &str = "You are the user's memory assistant. List the explicit next actions and current blockers below in the same language as the records.\n\
-[Specific] Preserve project names, predicates, and values verbatim.\n\
-[No fabrication] Don't invent next actions or blockers not in the records.\n\
-[Format] Group by project if a project filter is present; otherwise list newest-first.\n\
-Each bullet: '<project> — <predicate>: <value> (kind=<kind>, confidence=<confidence>)'.\n\
-Use 'Next:' for kind=next and 'Blocked:' for kind=blocked. If there are none, say so plainly.";
+fn render_register(rows: &[RegisterRow], limit_applied: bool, total_matching: i64) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Showing {} of {total_matching} matching claims (limit_applied={limit_applied}).",
+        rows.len()
+    );
+    for r in rows {
+        let _ = writeln!(
+            out,
+            "* {subject} — {predicate}: {value} (kind={kind}, confidence={confidence})",
+            subject = r.subject,
+            predicate = r.predicate,
+            value = r.value,
+            kind = r.kind,
+            confidence = r.confidence,
+        );
+    }
+    out.trim_end().to_owned()
+}
 
-const STALLED_REGISTER_SYSTEM: &str = "You are the user's memory assistant. List explicit next actions and blockers that have gone stale (no update for a long time) in the same language as the records.\n\
-[Specific] Preserve project names, predicates, and values verbatim.\n\
-[No fabrication] Don't invent stalled items not in the records.\n\
-[Format] Group by project if a project filter is present; otherwise list oldest-first (longest frozen first).\n\
-Each bullet: '<project> — <predicate>: <value> (kind=<kind>, confidence=<confidence>). Mention how old it is if the date is available.\n\
-Use 'Stalled next:' for kind=next and 'Stalled blocker:' for kind=blocked. If there are none, say so plainly.";
+fn register_sources(rows: &[RegisterRow]) -> Vec<String> {
+    let mut sources: Vec<String> = rows.iter().map(|r| r.subject.clone()).collect();
+    sources.sort();
+    sources.dedup();
+    sources
+}
+
+impl RegisterOut {
+    fn from_rows(rows: Vec<RegisterRow>, total_matching: i64) -> Self {
+        let shown = i64::try_from(rows.len()).unwrap_or(i64::MAX);
+        let limit_applied = shown < total_matching;
+        let answer = render_register(&rows, limit_applied, total_matching);
+        let sources = register_sources(&rows);
+        Self {
+            answer,
+            sources,
+            items: rows,
+            limit_applied,
+            total_matching,
+        }
+    }
+
+    fn empty(answer: impl Into<String>) -> Self {
+        Self {
+            answer: answer.into(),
+            sources: vec![],
+            items: vec![],
+            limit_applied: false,
+            total_matching: 0,
+        }
+    }
+}
 
 pub async fn decision_register(
     store: &Store,
-    llm: &Llm,
     project: Option<&str>,
-    _exclude_origins: &[String],
-    lang: &str,
-) -> Result<AnswerOut> {
+    exclude_origins: &[String],
+) -> Result<RegisterOut> {
     let kinds = ["decision".to_owned()];
-    let claims = store.recent_claims(50, project, Some(&kinds), &[]).await?;
-    if claims.is_empty() {
-        return Ok(AnswerOut {
-            answer: "No decisions recorded yet.".to_owned(),
-            sources: vec![],
-        });
+    let res = store
+        .recent_register_rows(REGISTER_LIMIT, project, Some(&kinds), exclude_origins)
+        .await?;
+    if res.rows.is_empty() {
+        return Ok(RegisterOut::empty("No decisions recorded yet."));
     }
-    let context = format_claims_for_register(&claims);
-    let lang_rule = match lang {
-        "ko" => " ALWAYS write the register in Korean (한국어).",
-        "en" => " ALWAYS write the register in English.",
-        _ => "",
-    };
-    let system = format!("{DECISION_REGISTER_SYSTEM}{lang_rule}");
-    let answer = llm.generate(&system, &context).await?;
-    let sources: Vec<String> = claims
-        .iter()
-        .map(|c| c.subject.clone())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    Ok(AnswerOut {
-        answer: answer.trim().to_owned(),
-        sources,
-    })
+    Ok(RegisterOut::from_rows(res.rows, res.total_matching))
 }
 
 pub async fn risk_register(
     store: &Store,
-    llm: &Llm,
     project: Option<&str>,
-    _exclude_origins: &[String],
-    lang: &str,
-) -> Result<AnswerOut> {
+    exclude_origins: &[String],
+) -> Result<RegisterOut> {
     let kinds = [
         "risk".to_owned(),
         "assumption".to_owned(),
         "blocked".to_owned(),
     ];
-    let claims = store.recent_claims(50, project, Some(&kinds), &[]).await?;
-    if claims.is_empty() {
-        return Ok(AnswerOut {
-            answer: "No risks, assumptions, or blockers recorded yet.".to_owned(),
-            sources: vec![],
-        });
+    let res = store
+        .recent_register_rows(REGISTER_LIMIT, project, Some(&kinds), exclude_origins)
+        .await?;
+    if res.rows.is_empty() {
+        return Ok(RegisterOut::empty(
+            "No risks, assumptions, or blockers recorded yet.",
+        ));
     }
-    let context = format_claims_for_register(&claims);
-    let lang_rule = match lang {
-        "ko" => " ALWAYS write the register in Korean (한국어).",
-        "en" => " ALWAYS write the register in English.",
-        _ => "",
-    };
-    let system = format!("{RISK_REGISTER_SYSTEM}{lang_rule}");
-    let answer = llm.generate(&system, &context).await?;
-    let sources: Vec<String> = claims
-        .iter()
-        .map(|c| c.subject.clone())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    Ok(AnswerOut {
-        answer: answer.trim().to_owned(),
-        sources,
-    })
+    Ok(RegisterOut::from_rows(res.rows, res.total_matching))
 }
 
 pub async fn next_action_register(
     store: &Store,
-    llm: &Llm,
     project: Option<&str>,
-    _exclude_origins: &[String],
-    lang: &str,
-) -> Result<AnswerOut> {
+    exclude_origins: &[String],
+) -> Result<RegisterOut> {
     let kinds = ["next".to_owned(), "blocked".to_owned()];
-    let claims = store.recent_claims(50, project, Some(&kinds), &[]).await?;
-    if claims.is_empty() {
-        return Ok(AnswerOut {
-            answer: "No next actions or blockers recorded yet.".to_owned(),
-            sources: vec![],
-        });
+    let res = store
+        .recent_register_rows(REGISTER_LIMIT, project, Some(&kinds), exclude_origins)
+        .await?;
+    if res.rows.is_empty() {
+        return Ok(RegisterOut::empty(
+            "No next actions or blockers recorded yet.",
+        ));
     }
-    let context = format_claims_for_register(&claims);
-    let lang_rule = match lang {
-        "ko" => " ALWAYS write the register in Korean (한국어).",
-        "en" => " ALWAYS write the register in English.",
-        _ => "",
-    };
-    let system = format!("{NEXT_ACTION_REGISTER_SYSTEM}{lang_rule}");
-    let answer = llm.generate(&system, &context).await?;
-    let sources: Vec<String> = claims
-        .iter()
-        .map(|c| c.subject.clone())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    Ok(AnswerOut {
-        answer: answer.trim().to_owned(),
-        sources,
-    })
+    Ok(RegisterOut::from_rows(res.rows, res.total_matching))
 }
 
 pub async fn stalled_register(
     store: &Store,
-    llm: &Llm,
     project: Option<&str>,
-    _exclude_origins: &[String],
-    lang: &str,
+    exclude_origins: &[String],
     older_than_days: u32,
-) -> Result<AnswerOut> {
+) -> Result<RegisterOut> {
     let kinds = ["next".to_owned(), "blocked".to_owned()];
-    let claims = store
-        .stalled_claims(50, project, Some(&kinds), &[], i64::from(older_than_days))
+    let res = store
+        .stalled_register_rows(
+            REGISTER_LIMIT,
+            project,
+            Some(&kinds),
+            exclude_origins,
+            i64::from(older_than_days),
+        )
         .await?;
-    if claims.is_empty() {
-        return Ok(AnswerOut {
-            answer: format!("No stalled items older than {older_than_days} days."),
-            sources: vec![],
-        });
+    if res.rows.is_empty() {
+        return Ok(RegisterOut::empty(format!(
+            "No stalled items older than {older_than_days} days."
+        )));
     }
-    let context = format_claims_for_register(&claims);
-    let lang_rule = match lang {
-        "ko" => " ALWAYS write the register in Korean (한국어).",
-        "en" => " ALWAYS write the register in English.",
-        _ => "",
-    };
-    let system = format!("{STALLED_REGISTER_SYSTEM}{lang_rule}");
-    let answer = llm.generate(&system, &context).await?;
-    let sources: Vec<String> = claims
-        .iter()
-        .map(|c| c.subject.clone())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    Ok(AnswerOut {
-        answer: answer.trim().to_owned(),
-        sources,
-    })
+    Ok(RegisterOut::from_rows(res.rows, res.total_matching))
 }
 
 #[derive(Debug, Serialize)]
@@ -1027,23 +996,6 @@ pub async fn context_card(
         next_actions: next_actions.iter().map(ContextItem::from).collect(),
         language: lang.to_owned(),
     })
-}
-
-fn format_claims_for_register(claims: &[crate::frontmatter::Claim]) -> String {
-    let mut out = String::from("# Claims (newest-first)\n");
-    for (i, c) in claims.iter().enumerate() {
-        let _ = writeln!(
-            out,
-            "[{i}] {} — {} {} = {} (kind={}, confidence={})",
-            c.subject,
-            c.subject,
-            c.predicate,
-            c.value,
-            c.kind(),
-            c.confidence()
-        );
-    }
-    out
 }
 
 pub async fn run(
@@ -1262,5 +1214,91 @@ mod tests {
         assert!(!out.contains("Blocked: -"));
         assert!(!out.contains("Next: none"));
         assert!(!out.contains("Risks: 없음"));
+    }
+
+    fn register_row(
+        subject: &str,
+        predicate: &str,
+        value: &str,
+        kind: &str,
+        confidence: &str,
+    ) -> crate::store::RegisterRow {
+        crate::store::RegisterRow::new(
+            subject.to_owned(),
+            predicate.to_owned(),
+            value.to_owned(),
+            kind.to_owned(),
+            confidence.to_owned(),
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+            "proj".to_owned(),
+        )
+    }
+
+    #[test]
+    fn register_answer_is_an_exact_rendering_newest_first() {
+        let rows = vec![
+            register_row("gamma", "decided", "use rows", "decision", "certain"),
+            register_row("beta", "decided", "keep answer", "decision", "likely"),
+            register_row("alpha", "decided", "drop llm", "decision", ""),
+        ];
+        let out = super::RegisterOut::from_rows(rows, 3);
+        assert_eq!(
+            out.answer,
+            "Showing 3 of 3 matching claims (limit_applied=false).\n\
+             * gamma — decided: use rows (kind=decision, confidence=certain)\n\
+             * beta — decided: keep answer (kind=decision, confidence=likely)\n\
+             * alpha — decided: drop llm (kind=decision, confidence=unknown)"
+        );
+    }
+
+    #[test]
+    fn register_cut_is_reported_in_the_fields_and_in_the_answer_text() {
+        let rows = vec![
+            register_row("beta", "decided", "keep answer", "decision", "likely"),
+            register_row("alpha", "decided", "drop llm", "decision", "certain"),
+        ];
+        let out = super::RegisterOut::from_rows(rows, 5);
+        assert!(out.limit_applied);
+        assert_eq!(out.total_matching, 5);
+        assert!(
+            out.answer
+                .starts_with("Showing 2 of 5 matching claims (limit_applied=true)."),
+            "was {:?}",
+            out.answer
+        );
+    }
+
+    #[test]
+    fn register_row_node_id_is_the_claim_node_key() {
+        let row = register_row("ommc", "has_capability", "recall", "fact", "certain");
+        assert_eq!(row.node_id, "claim:ommc:has_capability");
+    }
+
+    #[test]
+    fn register_sources_are_sorted_and_deduplicated() {
+        let rows = vec![
+            register_row("b", "follow-up", "v1", "next", "likely"),
+            register_row("a", "follow-up", "v2", "next", "likely"),
+            register_row("b", "follow-up", "v3", "next", "likely"),
+        ];
+        let out = super::RegisterOut::from_rows(rows, 3);
+        assert_eq!(out.sources, vec!["a".to_owned(), "b".to_owned()]);
+    }
+
+    #[test]
+    fn empty_register_keeps_the_none_recorded_messages() {
+        for message in [
+            "No decisions recorded yet.",
+            "No risks, assumptions, or blockers recorded yet.",
+            "No next actions or blockers recorded yet.",
+            "No stalled items older than 7 days.",
+        ] {
+            let out = super::RegisterOut::empty(message);
+            assert_eq!(out.answer, message);
+            assert!(out.sources.is_empty());
+            assert!(out.items.is_empty());
+            assert!(!out.limit_applied);
+            assert_eq!(out.total_matching, 0);
+        }
     }
 }

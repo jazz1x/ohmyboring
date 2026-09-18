@@ -327,8 +327,9 @@ fn mcp_tools_list() -> Value {
         },
         {
             "name": "decisions",
-            "description": "Decision register: recent decision claims (kind=decision). Optionally filter by project. \
-                            Generative (runs the LLM). Requires the vector backend.",
+            "description": "Decision register: recent decision claims (kind=decision), newest first. Optionally filter by project. \
+                            Deterministic — answers straight from current claims, no LLM. Shows the newest 50; \
+                            the answer states the full match count.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -338,8 +339,9 @@ fn mcp_tools_list() -> Value {
         },
         {
             "name": "risks",
-            "description": "Risk register: recent risk, assumption, and blocked claims. Optionally filter by project. \
-                            Generative (runs the LLM). Requires the vector backend.",
+            "description": "Risk register: recent risk, assumption, and blocked claims, newest first. Optionally filter by project. \
+                            Deterministic — answers straight from current claims, no LLM. Shows the newest 50; \
+                            the answer states the full match count.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -349,8 +351,9 @@ fn mcp_tools_list() -> Value {
         },
         {
             "name": "next_actions",
-            "description": "Next-action register: recent explicit next steps (kind=next) and active blockers (kind=blocked). \
-                            Optionally filter by project. Generative (runs the LLM). Requires the vector backend.",
+            "description": "Next-action register: recent explicit next steps (kind=next) and active blockers (kind=blocked), newest first. \
+                            Optionally filter by project. Deterministic — answers straight from current claims, no LLM. \
+                            Shows the newest 50; the answer states the full match count.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -360,8 +363,9 @@ fn mcp_tools_list() -> Value {
         },
         {
             "name": "stalled",
-            "description": "Stalled register: next steps or blockers that have not moved in N days (default 7). \
-                            Optionally filter by project or change the threshold. Generative (runs the LLM). Requires the vector backend.",
+            "description": "Stalled register: next steps or blockers that have not moved in N days (default 7), newest first. \
+                            Optionally filter by project or change the threshold. Deterministic — answers straight from \
+                            current claims, no LLM. Shows the newest 50; the answer states the full match count.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -960,10 +964,10 @@ async fn mcp_decisions(s: &AppState, args: Option<&Value>) -> Result<Value, (i32
         .and_then(Value::as_str)
         .map(str::trim);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::decision_register(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
+    let out = ask::decision_register(store, project, &[])
         .await
         .map_err(|e| (-32603_i32, format!("decisions: {e:#}")))?;
-    Ok(json!({"answer": out.answer, "sources": out.sources}))
+    Ok(register_json(&out))
 }
 
 async fn mcp_risks(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
@@ -972,10 +976,10 @@ async fn mcp_risks(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, St
         .and_then(Value::as_str)
         .map(str::trim);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::risk_register(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
+    let out = ask::risk_register(store, project, &[])
         .await
         .map_err(|e| (-32603_i32, format!("risks: {e:#}")))?;
-    Ok(json!({"answer": out.answer, "sources": out.sources}))
+    Ok(register_json(&out))
 }
 
 async fn mcp_next_actions(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
@@ -984,10 +988,10 @@ async fn mcp_next_actions(s: &AppState, args: Option<&Value>) -> Result<Value, (
         .and_then(Value::as_str)
         .map(str::trim);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::next_action_register(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
+    let out = ask::next_action_register(store, project, &[])
         .await
         .map_err(|e| (-32603_i32, format!("next_actions: {e:#}")))?;
-    Ok(json!({"answer": out.answer, "sources": out.sources}))
+    Ok(register_json(&out))
 }
 
 async fn mcp_stalled(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
@@ -1003,17 +1007,20 @@ async fn mcp_stalled(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
         .map_err(|_| (-32602_i32, "older_than_days is too large".to_owned()))?
         .unwrap_or(7);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::stalled_register(
-        store,
-        &s.llm,
-        project,
-        &[],
-        s.cfg.note_lang.as_str(),
-        older_than_days,
-    )
-    .await
-    .map_err(|e| (-32603_i32, format!("stalled: {e:#}")))?;
-    Ok(json!({"answer": out.answer, "sources": out.sources}))
+    let out = ask::stalled_register(store, project, &[], older_than_days)
+        .await
+        .map_err(|e| (-32603_i32, format!("stalled: {e:#}")))?;
+    Ok(register_json(&out))
+}
+
+fn register_json(out: &ask::RegisterOut) -> Value {
+    json!({
+        "answer": out.answer,
+        "sources": out.sources,
+        "items": out.items,
+        "limit_applied": out.limit_applied,
+        "total_matching": out.total_matching,
+    })
 }
 
 fn system_time_rfc3339(value: std::time::SystemTime) -> String {

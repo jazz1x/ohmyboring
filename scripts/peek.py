@@ -29,8 +29,9 @@ because the source was down or because the value was zero will eventually guess 
   could only be attached by matching a basename inside a time window — an assertion of identity
   the data cannot support, in the one view whose entire job is explaining *why*.
 * No psql, ever. Engine HTTP plus the ledger file, nothing else.
-* No generating endpoint: `/ask`, `/weekly`, `/status`, `/decisions`, `/risks`, `/next_actions`
-  and `/stalled` synthesise with the LLM at 21-64 seconds and are never called from here.
+* No generating endpoint: `/ask`, `/weekly` and `/status` synthesise with the LLM and are never
+  called from here. `/decisions`, `/risks`, `/next_actions` and `/stalled` answer from current
+  claims with no LLM; they are still never called from here.
   `/brief` is called, and is not one of them: once the scheduler has written today's note into
   the vault it serves that file back rather than generating a second one (#280), measured at
   3.8ms. `/graph` is called too — one embedding plus an edge walk, 82-367ms. The rule was always

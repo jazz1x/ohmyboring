@@ -44,7 +44,7 @@ Blocked:
 • oh-my-boring
    ◦ 🚨 LM Studio embedding model is not loaded
    ◦ ▶️ add ops status JSON
-_→ `recall("…", "oh-my-boring")` · 느림 `next_actions("oh-my-boring")`_"""
+_→ `recall("…", "oh-my-boring")` · `next_actions("oh-my-boring")`_"""
 
     assert briefing.slack_mrkdwn(answer) == expected
     assert weekly.slack_mrkdwn(answer) == expected
@@ -1029,11 +1029,11 @@ def test_each_zone_names_the_call_that_digs_into_it():
     # The project is filled in, not left as a placeholder for the reader to supply.
     assert '"kb-rag-bot"' in body
     assert "project)" not in body, "the briefing knows the name; do not make the reader type it"
-    # Deterministic tools lead. next_actions was measured at over 30s with no response, so a
-    # suggestion that leaves the reader waiting half a minute must at least say so.
+    # Deterministic tools lead. next_actions answers straight from current claims (no LLM), so it
+    # no longer carries the slow-marker; the ordering assertion above is the contract now.
     action_line = next(ln for ln in body.split("\n") if ln.startswith("_→") and "recall(" in ln)
     assert action_line.index("recall(") < action_line.index("next_actions("), action_line
-    assert "느림" in action_line
+    assert "느림" not in action_line
 
 
 def test_endings_are_shaved_not_truncated():

@@ -465,12 +465,11 @@ ZONES = (
 #: placeholder, because the briefing already knows the name.
 #:
 #: Deterministic tools lead. `recall` and `claims` embed and return; `next_actions`, `stalled`,
-#: `decisions`, `risks` and `ask` all run the local LLM, and `next_actions` was measured at over
-#: 30s with no response. Suggesting a call that leaves the reader waiting half a minute is worse
-#: than suggesting nothing, so the slow ones are named second and marked.
+#: `decisions`, and `risks` answer straight from current claims — no LLM, sub-second. Only `ask`
+#: still runs the local LLM, and it is not suggested here.
 ZONE_FOLLOWUP = {
-    "행동": '`recall("…", "{p}")` · 느림 `next_actions("{p}")`',
-    "참고": '`claims("{p}")` · 느림 `decisions("{p}")`',
+    "행동": '`recall("…", "{p}")` · `next_actions("{p}")`',
+    "참고": '`claims("{p}")` · `decisions("{p}")`',
 }
 
 
