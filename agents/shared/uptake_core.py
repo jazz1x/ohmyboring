@@ -25,7 +25,7 @@ import re
 import sys
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import NamedTuple
 
 import transcript
@@ -590,6 +590,8 @@ def window_sample(since, until, path=None):
 
     `until` is exclusive, matching how the window dates are compared everywhere else.
     """
+    import verdict_core
+
     per_day = defaultdict(lambda: [set(), 0])
     try:
         with open(path or ledger_path(), encoding="utf-8") as handle:
@@ -604,7 +606,7 @@ def window_sample(since, until, path=None):
                 ts = row.get("ts")
                 if not isinstance(ts, (int, float)):
                     continue
-                day = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+                day = datetime.fromtimestamp(ts, verdict_core.WINDOW_TZ).strftime("%Y-%m-%d")
                 if day < since or day >= until:
                     continue
                 per_day[day][0].add(row.get("session_id"))
