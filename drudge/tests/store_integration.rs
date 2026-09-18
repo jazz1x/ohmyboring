@@ -700,6 +700,14 @@ async fn stalled_register_rows_report_total_matching_within_the_window() {
         .expect("stalled register rows");
     assert_eq!(res.rows.len(), 2);
     assert_eq!(res.total_matching, 3);
+    assert_eq!(
+        res.rows
+            .iter()
+            .map(|r| r.predicate.as_str())
+            .collect::<Vec<_>>(),
+        vec!["next-0", "next-1"],
+        "a stalled register leads with what has been frozen longest, not with what stalled most recently"
+    );
 
     for path in paths {
         store.delete_document(&path).await.expect("cleanup");

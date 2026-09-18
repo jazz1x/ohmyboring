@@ -1558,7 +1558,7 @@ impl Store {
                         COUNT(*) OVER () AS total
                    FROM ranked
                   WHERE per_doc = 1
-                  ORDER BY valid_from DESC
+                  ORDER BY valid_from ASC
                   LIMIT $1;",
                 &[
                     &k,
