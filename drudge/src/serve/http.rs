@@ -219,7 +219,12 @@ pub(crate) async fn handle_decisions(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
-    let out = ask::decision_register(store, req.project.as_deref(), &[]).await?;
+    let out = ask::decision_register(
+        store,
+        req.project.as_deref(),
+        &s.cfg.origins_excluded_by_policy(),
+    )
+    .await?;
     spawn_query_log(
         s.store.clone(),
         "decisions",
@@ -243,7 +248,12 @@ pub(crate) async fn handle_risks(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
-    let out = ask::risk_register(store, req.project.as_deref(), &[]).await?;
+    let out = ask::risk_register(
+        store,
+        req.project.as_deref(),
+        &s.cfg.origins_excluded_by_policy(),
+    )
+    .await?;
     spawn_query_log(
         s.store.clone(),
         "risks",
@@ -267,7 +277,12 @@ pub(crate) async fn handle_next_actions(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
-    let out = ask::next_action_register(store, req.project.as_deref(), &[]).await?;
+    let out = ask::next_action_register(
+        store,
+        req.project.as_deref(),
+        &s.cfg.origins_excluded_by_policy(),
+    )
+    .await?;
     spawn_query_log(
         s.store.clone(),
         "next_actions",
@@ -294,7 +309,7 @@ pub(crate) async fn handle_stalled(
     let out = ask::stalled_register(
         store,
         req.project.as_deref(),
-        &[],
+        &s.cfg.origins_excluded_by_policy(),
         req.older_than_days.unwrap_or(7),
     )
     .await?;

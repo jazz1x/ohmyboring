@@ -964,7 +964,7 @@ async fn mcp_decisions(s: &AppState, args: Option<&Value>) -> Result<Value, (i32
         .and_then(Value::as_str)
         .map(str::trim);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::decision_register(store, project, &[])
+    let out = ask::decision_register(store, project, &s.cfg.origins_excluded_by_policy())
         .await
         .map_err(|e| (-32603_i32, format!("decisions: {e:#}")))?;
     Ok(register_json(&out))
@@ -976,7 +976,7 @@ async fn mcp_risks(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, St
         .and_then(Value::as_str)
         .map(str::trim);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::risk_register(store, project, &[])
+    let out = ask::risk_register(store, project, &s.cfg.origins_excluded_by_policy())
         .await
         .map_err(|e| (-32603_i32, format!("risks: {e:#}")))?;
     Ok(register_json(&out))
@@ -988,7 +988,7 @@ async fn mcp_next_actions(s: &AppState, args: Option<&Value>) -> Result<Value, (
         .and_then(Value::as_str)
         .map(str::trim);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::next_action_register(store, project, &[])
+    let out = ask::next_action_register(store, project, &s.cfg.origins_excluded_by_policy())
         .await
         .map_err(|e| (-32603_i32, format!("next_actions: {e:#}")))?;
     Ok(register_json(&out))
@@ -1007,9 +1007,14 @@ async fn mcp_stalled(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
         .map_err(|_| (-32602_i32, "older_than_days is too large".to_owned()))?
         .unwrap_or(7);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::stalled_register(store, project, &[], older_than_days)
-        .await
-        .map_err(|e| (-32603_i32, format!("stalled: {e:#}")))?;
+    let out = ask::stalled_register(
+        store,
+        project,
+        &s.cfg.origins_excluded_by_policy(),
+        older_than_days,
+    )
+    .await
+    .map_err(|e| (-32603_i32, format!("stalled: {e:#}")))?;
     Ok(register_json(&out))
 }
 
