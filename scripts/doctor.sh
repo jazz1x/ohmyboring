@@ -585,9 +585,32 @@ if [ -f "$event_spool" ]; then
 fi
 case "$sink_mode" in
     db)
-        if [ "$spool_rows" -gt 0 ]; then
-            bad "EVENTS TRAPPED IN THE SPOOL — $event_spool holds $spool_rows row(s) the engine store never received. scripts/uptake-verdict.py reads the engine only, so a session that ended while the engine could not take the write is missing from the verdict population and from coverage at the same time — coverage cannot see the loss because its numerator and denominator vanish together (docs/PRD.md §2)."
+        spool_loss="$(BORING_EVENT_LOG="$event_spool" python3 "$event_log_probe" --verdict-spool-loss 2>/dev/null || true)"
+        in_rows=0
+        in_sessions=0
+        out_rows=0
+        oldest=""
+        since_day=""
+        until_day=""
+        for kv in $spool_loss; do
+            case "$kv" in
+                in_window_rows=*) in_rows="${kv#in_window_rows=}" ;;
+                in_window_sessions=*) in_sessions="${kv#in_window_sessions=}" ;;
+                out_of_window_rows=*) out_rows="${kv#out_of_window_rows=}" ;;
+                oldest=*) oldest="${kv#oldest=}" ;;
+                since=*) since_day="${kv#since=}" ;;
+                until=*) until_day="${kv#until=}" ;;
+            esac
+        done
+        if [ -z "$spool_loss" ]; then
+            warn "trapped-spool window split unreadable — the in-window loss check was skipped, not passed"
+        elif [ "$in_rows" -gt 0 ]; then
+            bad "EVENTS TRAPPED IN THE SPOOL — $event_spool holds $in_rows verdict-kind row(s) from $in_sessions session(s) inside the window [$since_day, $until_day) that the engine store never received. scripts/uptake-verdict.py reads the engine only, so those sessions are missing from the verdict population and from coverage at the same time — coverage cannot see the loss because its numerator and denominator vanish together (docs/PRD.md §2)."
             failed_eventlog=1
+        elif [ "$out_rows" -gt 0 ]; then
+            warn "verdict-kind rows trapped in the spool before the window — $out_rows row(s) older than $since_day, oldest $oldest, sessions the engine store never received but unable to change the verdict open now; only in-window rows can, and there are $in_rows"
+        elif [ "$spool_rows" -gt 0 ]; then
+            ok "event spool holds $spool_rows row(s), none of the kinds scripts/uptake-verdict.py reads — the open verdict cannot miss any of them"
         else
             ok "event spool is empty — every event reached the engine store the verdict reads"
         fi
