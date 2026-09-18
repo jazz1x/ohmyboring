@@ -21,15 +21,6 @@ class DrudgeNotWritableError(Exception):
     """drudge cannot accept writes right now — distillation must not run."""
 
 
-def sync_deadline_passed(exc: BaseException) -> bool:
-    """True when exc means the client's own deadline passed: the request was accepted
-    and the engine kept going; the caller stopped waiting. Everything else — refused
-    connections, 5xx, unreadable bodies — means the engine could not do it."""
-    if isinstance(exc, (socket.timeout, TimeoutError)):
-        return True
-    return isinstance(getattr(exc, "reason", None), (socket.timeout, TimeoutError))
-
-
 class DrudgeClient:
     """Minimal drudge HTTP client. Silent failures are left to callers."""
 
