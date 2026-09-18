@@ -409,6 +409,75 @@ pub struct AnchorCheckWatermark {
     pub predicate: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RegisterRow {
+    pub node_id: String,
+    pub subject: String,
+    pub predicate: String,
+    pub value: String,
+    pub kind: String,
+    pub confidence: String,
+    #[serde(serialize_with = "serialize_valid_from")]
+    pub valid_from: SystemTime,
+    pub project: String,
+}
+
+fn serialize_valid_from<S: serde::Serializer>(
+    valid_from: &SystemTime,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let dt = chrono::DateTime::<chrono::Utc>::from(*valid_from);
+    serializer.serialize_str(&dt.to_rfc3339())
+}
+
+impl RegisterRow {
+    pub fn new(
+        subject: String,
+        predicate: String,
+        value: String,
+        kind: String,
+        confidence: String,
+        valid_from: SystemTime,
+        project: String,
+    ) -> Self {
+        let claim = Claim {
+            subject: subject.clone(),
+            predicate: predicate.clone(),
+            value: value.clone(),
+            kind,
+            confidence,
+        };
+        Self {
+            node_id: format!("claim:{subject}:{predicate}"),
+            subject,
+            predicate,
+            value,
+            kind: claim.kind().to_owned(),
+            confidence: claim.confidence().to_owned(),
+            valid_from,
+            project,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RegisterRows {
+    pub rows: Vec<RegisterRow>,
+    pub total_matching: i64,
+}
+
+fn register_row(r: &tokio_postgres::Row) -> RegisterRow {
+    RegisterRow::new(
+        r.get(0),
+        r.get(1),
+        r.get(2),
+        r.get(3),
+        r.get(4),
+        r.get(5),
+        r.get(6),
+    )
+}
+
 impl Store {
     // ── connect + ensure schema ───────────────────────────────────────────────
 
@@ -1421,6 +1490,92 @@ impl Store {
                 confidence: r.get(4),
             })
             .collect())
+    }
+
+    /// Top-k current claims for a register answer, plus the full match count so the cut is stated, not silent.
+    pub async fn recent_register_rows(
+        &self,
+        k: i64,
+        project: Option<&str>,
+        kinds: Option<&[String]>,
+        exclude_origins: &[String],
+    ) -> Result<RegisterRows> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.valid_from, d.project,
+                        COUNT(*) OVER () AS total
+                   FROM claim c
+                   JOIN document d ON d.source_path = c.source_path
+                  WHERE c.superseded_at IS NULL
+                    AND ($2::text IS NULL OR d.project = $2)
+                    AND ($3::text[] IS NULL OR c.kind = ANY($3))
+                    AND NOT (d.origin = ANY($4))
+                    AND d.source_path !~ $5
+                  ORDER BY c.valid_from DESC
+                  LIMIT $1;",
+                &[&k, &project, &kinds, &exclude_origins, &NOT_USER_MEMORY_RE],
+            )
+            .await
+            .context("recent register rows")?;
+        Ok(RegisterRows {
+            rows: rows.iter().map(register_row).collect(),
+            total_matching: rows.first().map_or(0, |r| r.get::<_, i64>(7)),
+        })
+    }
+
+    /// Stalled claims for a register answer: same window as `stalled_claims`, newest-first,
+    /// plus the full match count so the cut is stated, not silent.
+    pub async fn stalled_register_rows(
+        &self,
+        k: i64,
+        project: Option<&str>,
+        kinds: Option<&[String]>,
+        exclude_origins: &[String],
+        older_than_days: i64,
+    ) -> Result<RegisterRows> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "WITH ranked AS (
+                   SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.valid_from, d.project,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY c.source_path ORDER BY c.valid_from ASC
+                          ) AS per_doc
+                     FROM claim c
+                     JOIN document d ON d.source_path = c.source_path
+                    WHERE c.superseded_at IS NULL
+                      AND c.valid_from <  (NOW() - INTERVAL '1 day' * ($5::bigint))
+                      AND c.valid_from >= (NOW() - INTERVAL '1 day' * ($7::bigint))
+                      AND ($2::text IS NULL OR d.project = $2)
+                      AND ($3::text[] IS NULL OR c.kind = ANY($3))
+                      AND NOT (d.origin = ANY($4))
+                      AND d.source_path !~ $6
+                 )
+                 SELECT subject, predicate, value, kind, confidence, valid_from, project,
+                        COUNT(*) OVER () AS total
+                   FROM ranked
+                  WHERE per_doc = 1
+                  ORDER BY valid_from DESC
+                  LIMIT $1;",
+                &[
+                    &k,
+                    &project,
+                    &kinds,
+                    &exclude_origins,
+                    &older_than_days,
+                    &NOT_USER_MEMORY_RE,
+                    &STALE_HORIZON_DAYS,
+                ],
+            )
+            .await
+            .context("stalled register rows")?;
+        Ok(RegisterRows {
+            rows: rows.iter().map(register_row).collect(),
+            total_matching: rows.first().map_or(0, |r| r.get::<_, i64>(7)),
+        })
     }
 
     /// Query embedding → top-k **current** claims (superseded_at IS NULL). Authority retrieval.

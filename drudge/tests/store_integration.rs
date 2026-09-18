@@ -607,6 +607,169 @@ async fn next_claim_is_recallable() {
     store.delete_document(&path).await.expect("cleanup");
 }
 
+/// Register queries carry the full match count alongside the limited rows, so the cut is stated.
+#[tokio::test]
+async fn recent_register_rows_report_total_matching_beyond_the_limit() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let path = unique_path("register-recent");
+    let mut front = dummy_frontmatter(&path);
+    front.project = "register-test".to_owned();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let emb = [0.1_f32; 1024];
+    for i in 0u32..3 {
+        store
+            .upsert_claim(
+                "omb",
+                &format!("decision-{i}"),
+                "0.2.0",
+                &path,
+                SystemTime::now() + Duration::from_secs(u64::from(i)),
+                &emb,
+                "decision",
+                "certain",
+            )
+            .await
+            .expect("upsert decision claim");
+    }
+
+    let res = store
+        .recent_register_rows(
+            2,
+            Some("register-test"),
+            Some(&["decision".to_owned()]),
+            &[],
+        )
+        .await
+        .expect("recent register rows");
+    assert_eq!(res.rows.len(), 2);
+    assert_eq!(res.total_matching, 3);
+    assert_eq!(res.rows[0].node_id, "claim:omb:decision-2");
+    assert_eq!(res.rows[0].project, "register-test");
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
+/// The stalled register window matches `stalled_claims` and also reports the full match count.
+#[tokio::test]
+async fn stalled_register_rows_report_total_matching_within_the_window() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let ten_days = Duration::from_hours(10 * 24);
+    let emb = [0.1_f32; 1024];
+    let mut paths = vec![];
+    for i in 0u32..3 {
+        let path = unique_path(&format!("register-stalled-{i}"));
+        let mut front = dummy_frontmatter(&path);
+        front.project = "register-test".to_owned();
+        store
+            .upsert_document(&front, "sha", SystemTime::now())
+            .await
+            .expect("upsert doc");
+        store
+            .upsert_claim(
+                "omb",
+                &format!("next-{i}"),
+                "follow up",
+                &path,
+                SystemTime::now() - ten_days + Duration::from_secs(u64::from(i)),
+                &emb,
+                "next",
+                "likely",
+            )
+            .await
+            .expect("upsert next claim");
+        paths.push(path);
+    }
+
+    let res = store
+        .stalled_register_rows(2, Some("register-test"), Some(&["next".to_owned()]), &[], 7)
+        .await
+        .expect("stalled register rows");
+    assert_eq!(res.rows.len(), 2);
+    assert_eq!(res.total_matching, 3);
+
+    for path in paths {
+        store.delete_document(&path).await.expect("cleanup");
+    }
+}
+
+/// The register tools answer from rows: structured items carry the claim node id, the answer
+/// states the cut, and an empty claim set keeps the none-recorded message.
+#[tokio::test]
+async fn decision_register_answers_from_rows() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let path = unique_path("register-fn");
+    let mut front = dummy_frontmatter(&path);
+    front.project = "register-test".to_owned();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let emb = [0.1_f32; 1024];
+    for (subject, predicate) in [("omb", "release-version"), ("omb", "auth-flow")] {
+        store
+            .upsert_claim(
+                subject,
+                predicate,
+                "0.2.0",
+                &path,
+                SystemTime::now(),
+                &emb,
+                "decision",
+                "certain",
+            )
+            .await
+            .expect("upsert decision claim");
+    }
+
+    let out = drudge::ask::decision_register(&store, Some("register-test"), &[])
+        .await
+        .expect("decision register");
+    assert!(
+        out.answer
+            .starts_with("Showing 2 of 2 matching claims (limit_applied=false)."),
+        "was {:?}",
+        out.answer
+    );
+    assert_eq!(out.items.len(), 2);
+    for item in &out.items {
+        assert_eq!(
+            item.node_id,
+            format!("claim:{}:{}", item.subject, item.predicate)
+        );
+    }
+    assert_eq!(out.sources, vec!["omb".to_owned()]);
+
+    let empty = drudge::ask::decision_register(&store, Some("no-such-project"), &[])
+        .await
+        .expect("decision register on empty project");
+    assert_eq!(empty.answer, "No decisions recorded yet.");
+    assert!(empty.items.is_empty());
+    assert!(!empty.limit_applied);
+    assert_eq!(empty.total_matching, 0);
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
 /// Regression test for the 2026-07-25 outage: a single `tokio_postgres::Client` wedged permanently
 /// once its underlying connection died, and every subsequent write failed silently for 5.5 days.
 /// `Store` now holds a `deadpool_postgres::Pool` (`RecyclingMethod::Verified`), which must
