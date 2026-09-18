@@ -223,6 +223,17 @@ def _codex_fixture(root: Path) -> Path:
     return source
 
 
+def _kimi_fixture(root: Path) -> None:
+    session_dir = root / "session"
+    session_dir.mkdir()
+    (root / "session_index.jsonl").write_text(
+        json.dumps({"sessionId": "k1", "sessionDir": str(session_dir), "workDir": "/work/repo"}) + "\n",
+        encoding="utf-8",
+    )
+    hook = root / "distill-session.py"
+    hook.write_text("# stub\n", encoding="utf-8")
+
+
 def test_claude_collector_passes_explicit_sync_timeout_to_urlopen():
     old_mark_dir = claude_collect.markers.MARK_DIR
     old_min_kb = claude_collect.MIN_KB
@@ -448,6 +459,116 @@ def test_codex_collector_refused_sync_fails_the_run():
         codex_collect.LIMIT = old_limit
 
 
+def test_kimi_collector_passes_explicit_sync_timeout_to_urlopen():
+    old_home = kimi_collect.KIMI_HOME
+    old_hook = kimi_collect.HOOK
+    old_limit = kimi_collect.LIMIT
+    old_mark_dir = kimi_collect.markers.MARK_DIR
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _kimi_fixture(root)
+            event_path = root / "events.ndjson"
+            calls = []
+
+            kimi_collect.KIMI_HOME = str(root)
+            kimi_collect.HOOK = str(root / "distill-session.py")
+            kimi_collect.LIMIT = 1
+            kimi_collect.markers.set_mark_dir(str(root / "markers"))
+
+            with (
+                mock.patch.object(kimi_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
+                mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+            ):
+                rc = kimi_collect.main()
+
+            assert rc == 0
+            sync_timeouts = [t for (url, t) in calls if url.endswith("/sync")]
+            assert sync_timeouts == [kimi_collect.SYNC_TIMEOUT_S]
+    finally:
+        kimi_collect.KIMI_HOME = old_home
+        kimi_collect.HOOK = old_hook
+        kimi_collect.LIMIT = old_limit
+        kimi_collect.markers.set_mark_dir(old_mark_dir)
+
+
+def test_kimi_collector_sync_timeout_marks_running_and_run_stays_ok():
+    old_home = kimi_collect.KIMI_HOME
+    old_hook = kimi_collect.HOOK
+    old_limit = kimi_collect.LIMIT
+    old_mark_dir = kimi_collect.markers.MARK_DIR
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _kimi_fixture(root)
+            event_path = root / "events.ndjson"
+            stderr = io.StringIO()
+
+            kimi_collect.KIMI_HOME = str(root)
+            kimi_collect.HOOK = str(root / "distill-session.py")
+            kimi_collect.LIMIT = 1
+            kimi_collect.markers.set_mark_dir(str(root / "markers"))
+
+            with (
+                mock.patch.object(kimi_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
+                mock.patch.object(kimi_collect.sys, "stderr", stderr),
+                mock.patch.object(kimi_collect, "DrudgeClient") as client,
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+            ):
+                client.return_value.sync.side_effect = socket.timeout("timed out")
+                rc = kimi_collect.main()
+
+            assert rc == 0
+            assert "engine kept going" in stderr.getvalue()
+            assert "4h scheduler" in stderr.getvalue()
+            event = _last_event(event_path)
+            assert event["status"] == "ok"
+            assert event["sync_status"] == "running"
+            assert event["processed"] == 1
+            assert event["failed"] == 0
+    finally:
+        kimi_collect.KIMI_HOME = old_home
+        kimi_collect.HOOK = old_hook
+        kimi_collect.LIMIT = old_limit
+        kimi_collect.markers.set_mark_dir(old_mark_dir)
+
+
+def test_kimi_collector_refused_sync_fails_the_run():
+    old_home = kimi_collect.KIMI_HOME
+    old_hook = kimi_collect.HOOK
+    old_limit = kimi_collect.LIMIT
+    old_mark_dir = kimi_collect.markers.MARK_DIR
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _kimi_fixture(root)
+            event_path = root / "events.ndjson"
+
+            kimi_collect.KIMI_HOME = str(root)
+            kimi_collect.HOOK = str(root / "distill-session.py")
+            kimi_collect.LIMIT = 1
+            kimi_collect.markers.set_mark_dir(str(root / "markers"))
+
+            with (
+                mock.patch.object(kimi_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
+                mock.patch.object(kimi_collect, "DrudgeClient") as client,
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+            ):
+                client.return_value.sync.side_effect = urllib.error.URLError(ConnectionRefusedError("refused"))
+                rc = kimi_collect.main()
+
+            assert rc == 1
+            event = _last_event(event_path)
+            assert event["status"] == "failed"
+            assert event["sync_status"] == "failed"
+    finally:
+        kimi_collect.KIMI_HOME = old_home
+        kimi_collect.HOOK = old_hook
+        kimi_collect.LIMIT = old_limit
+        kimi_collect.markers.set_mark_dir(old_mark_dir)
+
+
 if __name__ == "__main__":
     test_claude_collector_fails_when_sync_fails()
     test_claude_backfill_does_not_claim_to_be_a_session_end()
@@ -456,8 +577,11 @@ if __name__ == "__main__":
     test_kimi_marked_excludes_dead_lettered_session()
     test_claude_collector_passes_explicit_sync_timeout_to_urlopen()
     test_codex_collector_passes_explicit_sync_timeout_to_urlopen()
+    test_kimi_collector_passes_explicit_sync_timeout_to_urlopen()
     test_claude_collector_sync_timeout_marks_running_and_run_stays_ok()
     test_codex_collector_sync_timeout_marks_running_and_run_stays_ok()
+    test_kimi_collector_sync_timeout_marks_running_and_run_stays_ok()
     test_claude_collector_refused_sync_fails_the_run()
     test_codex_collector_refused_sync_fails_the_run()
+    test_kimi_collector_refused_sync_fails_the_run()
     print("ok - scheduler collectors")
