@@ -4,12 +4,14 @@ import json
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import uptake_core
+import verdict_core
 
 SNIPPET = (
     "the connection pool died because deadpool recycled a socket the server had already closed "
@@ -549,7 +551,7 @@ def test_the_window_sample_counts_sessions_and_prompts_the_ledger_holds():
         target = _ledger(
             tmp,
             [
-                ("before", DAY_12 - 1),
+                ("before", DAY_12 - 9 * 3600 - 1),
                 ("a", DAY_12 + 10),
                 ("a", DAY_12 + 20),
                 ("b", DAY_13 + 30),
@@ -577,6 +579,47 @@ def test_the_window_sample_survives_a_ledger_it_cannot_read():
         with open(target, "w", encoding="utf-8") as handle:
             handle.write("not json\n\n" + json.dumps({"session_id": "a"}) + "\n")
         assert uptake_core.window_sample("2026-09-12", "2026-09-26", path=target).prompts == 0
+
+
+def test_a_prompt_in_the_windows_first_local_hours_is_inside_it():
+    with tempfile.TemporaryDirectory() as tmp:
+        first_morning = (
+            datetime.strptime(verdict_core.WINDOW_SINCE, "%Y-%m-%d")
+            .replace(tzinfo=verdict_core.WINDOW_TZ)
+            + timedelta(hours=3)
+        )
+        target = _ledger(tmp, [("first-morning", first_morning.timestamp())])
+        sample = uptake_core.window_sample(
+            verdict_core.WINDOW_SINCE, verdict_core.WINDOW_UNTIL, path=target
+        )
+        assert sample.prompts == 1, (
+            "the window's first 00:00-09:00 in WINDOW_TZ is the previous day in UTC; it must count"
+        )
+        assert sample.per_day == {verdict_core.WINDOW_SINCE: (1, 1)}, sample.per_day
+
+
+def test_a_prompt_in_the_last_local_evening_is_still_inside_it():
+    with tempfile.TemporaryDirectory() as tmp:
+        closing_midnight = datetime.strptime(verdict_core.WINDOW_UNTIL, "%Y-%m-%d").replace(
+            tzinfo=verdict_core.WINDOW_TZ
+        )
+        last_evening = closing_midnight - timedelta(hours=4)
+        past_midnight = closing_midnight + timedelta(hours=3)
+        last_day = (closing_midnight - timedelta(days=1)).date().isoformat()
+        target = _ledger(
+            tmp,
+            [
+                ("last-evening", last_evening.timestamp()),
+                ("past-local-midnight", past_midnight.timestamp()),
+            ],
+        )
+        sample = uptake_core.window_sample(
+            verdict_core.WINDOW_SINCE, verdict_core.WINDOW_UNTIL, path=target
+        )
+        assert sample.prompts == 1, (
+            "the final day's local evening counts; the hours past the owner's midnight must not"
+        )
+        assert sample.per_day == {last_day: (1, 1)}, sample.per_day
 
 
 def test_the_transcript_format_follows_the_directory():
