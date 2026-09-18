@@ -194,10 +194,10 @@ window_ts() {
     python3 - "$ROOT" "$1" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1] + "/agents/shared")
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import verdict_core
 start = datetime.strptime(verdict_core.WINDOW_SINCE, "%Y-%m-%d").replace(tzinfo=verdict_core.WINDOW_TZ)
-print((start + timedelta(hours=float(sys.argv[2]))).isoformat())
+print((start + timedelta(hours=float(sys.argv[2]))).astimezone(timezone.utc).isoformat())
 PY
 }
 
@@ -921,7 +921,7 @@ esac
       echo "FAIL: the warning must carry the out-of-window count" >&2
       exit 1
   }
-  grep -q "oldest 2" "$TMP/out_of_window_spool_rows_warn_instead_of_failing.out" || {
+  grep -q "oldest $(window_ts -12 | cut -c1-10)" "$TMP/out_of_window_spool_rows_warn_instead_of_failing.out" || {
       cat "$TMP/out_of_window_spool_rows_warn_instead_of_failing.out"
       echo "FAIL: the warning must carry the oldest date, not merely the count" >&2
       exit 1
@@ -949,18 +949,23 @@ esac
   echo "ok - non_verdict_spool_rows_do_not_raise_a_verdict_alarm" ) || exit 1
 
 ( make_case "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string" yes
-  printf '{"event":"session_end","session_id":"spooled-boundary","ts":"%s"}\n' "$(window_ts 6)" \
+  printf '{"event":"session_end","session_id":"spooled-boundary","ts":"%s"}\n' "$(window_ts -1)" \
       >>"$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string/home/.cache/oh-my-boring/events.ndjson"
-  if run_strict "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string" "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out"; then
+  if ! run_strict "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string" "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out"; then
       cat "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out"
-      echo "FAIL: a +09:00 row on the window's first morning is inside the window; placing it by string files it the day before" >&2
+      echo "FAIL: a +09:00 row one hour before the window opens on the owner's calendar is outside it; only a string compare files it inside" >&2
       exit 1
   fi
-  grep -q "✗ EVENTS TRAPPED IN THE SPOOL" "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out" || {
+  grep -q "! verdict-kind rows trapped in the spool before the window" "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out" || {
       cat "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out"
-      echo "FAIL: the boundary row must be counted as in-window loss" >&2
+      echo "FAIL: the boundary row must warn as history the open verdict cannot read" >&2
       exit 1
   }
+  if grep -q "✗ EVENTS TRAPPED IN THE SPOOL" "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out"; then
+      cat "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string.out"
+      echo "FAIL: the boundary row must not be counted as in-window loss" >&2
+      exit 1
+  fi
   echo "ok - a_window_boundary_row_is_placed_by_instant_not_by_string" ) || exit 1
 
 ( make_case "$TMP/spool-unwritable" yes
