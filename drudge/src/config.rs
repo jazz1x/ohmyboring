@@ -611,6 +611,14 @@ impl BoringConfig {
         }
         (Origin::Personal, None)
     }
+
+    pub fn origins_excluded_by_policy(&self) -> Vec<String> {
+        if self.allow_company_origin {
+            Vec::new()
+        } else {
+            vec![Origin::Company.as_str().to_owned()]
+        }
+    }
 }
 
 fn split_tokens(s: &str) -> Vec<String> {
@@ -1057,5 +1065,22 @@ mod tests {
         assert!(cfg.repos.iter().all(|r| r.origin == Origin::Company));
         assert_eq!(cfg.agents.len(), 1);
         assert_eq!(cfg.agents[0].paths, vec!["/x", "/y"]);
+    }
+
+    #[test]
+    fn origins_excluded_by_policy_follows_allow_company_origin() {
+        let denied = BoringConfig {
+            allow_company_origin: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            denied.origins_excluded_by_policy(),
+            vec!["company".to_owned()]
+        );
+        let allowed = BoringConfig {
+            allow_company_origin: true,
+            ..Default::default()
+        };
+        assert!(allowed.origins_excluded_by_policy().is_empty());
     }
 }

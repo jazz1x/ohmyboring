@@ -807,11 +807,13 @@ pub async fn decision_register(
     store: &Store,
     llm: &Llm,
     project: Option<&str>,
-    _exclude_origins: &[String],
+    exclude_origins: &[String],
     lang: &str,
 ) -> Result<AnswerOut> {
     let kinds = ["decision".to_owned()];
-    let claims = store.recent_claims(50, project, Some(&kinds), &[]).await?;
+    let claims = store
+        .recent_claims(50, project, Some(&kinds), exclude_origins)
+        .await?;
     if claims.is_empty() {
         return Ok(AnswerOut {
             answer: "No decisions recorded yet.".to_owned(),
@@ -842,7 +844,7 @@ pub async fn risk_register(
     store: &Store,
     llm: &Llm,
     project: Option<&str>,
-    _exclude_origins: &[String],
+    exclude_origins: &[String],
     lang: &str,
 ) -> Result<AnswerOut> {
     let kinds = [
@@ -850,7 +852,9 @@ pub async fn risk_register(
         "assumption".to_owned(),
         "blocked".to_owned(),
     ];
-    let claims = store.recent_claims(50, project, Some(&kinds), &[]).await?;
+    let claims = store
+        .recent_claims(50, project, Some(&kinds), exclude_origins)
+        .await?;
     if claims.is_empty() {
         return Ok(AnswerOut {
             answer: "No risks, assumptions, or blockers recorded yet.".to_owned(),
@@ -881,11 +885,13 @@ pub async fn next_action_register(
     store: &Store,
     llm: &Llm,
     project: Option<&str>,
-    _exclude_origins: &[String],
+    exclude_origins: &[String],
     lang: &str,
 ) -> Result<AnswerOut> {
     let kinds = ["next".to_owned(), "blocked".to_owned()];
-    let claims = store.recent_claims(50, project, Some(&kinds), &[]).await?;
+    let claims = store
+        .recent_claims(50, project, Some(&kinds), exclude_origins)
+        .await?;
     if claims.is_empty() {
         return Ok(AnswerOut {
             answer: "No next actions or blockers recorded yet.".to_owned(),
@@ -916,13 +922,19 @@ pub async fn stalled_register(
     store: &Store,
     llm: &Llm,
     project: Option<&str>,
-    _exclude_origins: &[String],
+    exclude_origins: &[String],
     lang: &str,
     older_than_days: u32,
 ) -> Result<AnswerOut> {
     let kinds = ["next".to_owned(), "blocked".to_owned()];
     let claims = store
-        .stalled_claims(50, project, Some(&kinds), &[], i64::from(older_than_days))
+        .stalled_claims(
+            50,
+            project,
+            Some(&kinds),
+            exclude_origins,
+            i64::from(older_than_days),
+        )
         .await?;
     if claims.is_empty() {
         return Ok(AnswerOut {

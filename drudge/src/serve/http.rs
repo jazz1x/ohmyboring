@@ -219,11 +219,14 @@ pub(crate) async fn handle_decisions(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let exclude_origins = req
+        .exclude_origins
+        .unwrap_or_else(|| s.cfg.origins_excluded_by_policy());
     let out = ask::decision_register(
         store,
         &s.llm,
         req.project.as_deref(),
-        &[],
+        &exclude_origins,
         s.cfg.note_lang.as_str(),
     )
     .await?;
@@ -250,11 +253,14 @@ pub(crate) async fn handle_risks(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let exclude_origins = req
+        .exclude_origins
+        .unwrap_or_else(|| s.cfg.origins_excluded_by_policy());
     let out = ask::risk_register(
         store,
         &s.llm,
         req.project.as_deref(),
-        &[],
+        &exclude_origins,
         s.cfg.note_lang.as_str(),
     )
     .await?;
@@ -281,11 +287,14 @@ pub(crate) async fn handle_next_actions(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let exclude_origins = req
+        .exclude_origins
+        .unwrap_or_else(|| s.cfg.origins_excluded_by_policy());
     let out = ask::next_action_register(
         store,
         &s.llm,
         req.project.as_deref(),
-        &[],
+        &exclude_origins,
         s.cfg.note_lang.as_str(),
     )
     .await?;
@@ -312,11 +321,14 @@ pub(crate) async fn handle_stalled(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let exclude_origins = req
+        .exclude_origins
+        .unwrap_or_else(|| s.cfg.origins_excluded_by_policy());
     let out = ask::stalled_register(
         store,
         &s.llm,
         req.project.as_deref(),
-        &[],
+        &exclude_origins,
         s.cfg.note_lang.as_str(),
         req.older_than_days.unwrap_or(7),
     )
@@ -948,5 +960,185 @@ mod tests {
             "no vault configured"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU8;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use axum::extract::{Json, State};
+
+    use crate::config::{BoringConfig, LlmConfig};
+    use crate::frontmatter::FrontMatter;
+    use crate::llm::Llm;
+    use crate::serve::{AppState, AskResp, DecisionsReq};
+    use crate::store::Store;
+
+    #[tokio::test]
+    async fn decisions_route_absent_exclude_origins_uses_policy() {
+        let Some(fx) = decisions_fixture().await else {
+            eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+            return;
+        };
+
+        let absent = call_decisions(
+            fx.state.clone(),
+            DecisionsReq {
+                project: Some(fx.project.clone()),
+                exclude_origins: None,
+            },
+        )
+        .await;
+        assert!(
+            absent.sources.contains(&fx.p_subject),
+            "absent field must use the policy value"
+        );
+        assert!(
+            !absent.sources.contains(&fx.c_subject),
+            "absent field must not mean exclude nothing"
+        );
+
+        let empty = call_decisions(
+            fx.state.clone(),
+            DecisionsReq {
+                project: Some(fx.project.clone()),
+                exclude_origins: Some(vec![]),
+            },
+        )
+        .await;
+        assert!(
+            empty.sources.contains(&fx.c_subject),
+            "explicit empty list must exclude nothing"
+        );
+
+        let named = call_decisions(
+            fx.state,
+            DecisionsReq {
+                project: Some(fx.project.clone()),
+                exclude_origins: Some(vec!["company".to_owned()]),
+            },
+        )
+        .await;
+        assert!(
+            !named.sources.contains(&fx.c_subject),
+            "named origins must be used verbatim"
+        );
+
+        fx.store
+            .delete_document(&fx.p_path)
+            .await
+            .expect("cleanup p");
+        fx.store
+            .delete_document(&fx.c_path)
+            .await
+            .expect("cleanup c");
+    }
+
+    struct DecisionsFixture {
+        state: AppState,
+        store: Arc<Store>,
+        project: String,
+        p_path: String,
+        c_path: String,
+        p_subject: String,
+        c_subject: String,
+    }
+
+    async fn call_decisions(state: AppState, req: DecisionsReq) -> AskResp {
+        match super::handle_decisions(State(state), Json(req)).await {
+            Ok(Json(resp)) => resp,
+            Err(e) => panic!("decisions route returned an error: {:?}", e.into_response()),
+        }
+    }
+
+    async fn decisions_fixture() -> Option<DecisionsFixture> {
+        let dsn = std::env::var("BORING_TEST_DATABASE_URL").ok()?;
+
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(|| async {
+                Json(json!({
+                    "choices": [{"message": {"content": "mock register answer"}}]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let cfg = BoringConfig {
+            allow_company_origin: false,
+            llm: LlmConfig {
+                base_url: format!("http://{addr}"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let store = Arc::new(Store::open(&dsn, 1024).await.expect("open store"));
+
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let project = format!("http-decisions-{ts}");
+        let p_path = format!("/tmp/{project}-personal");
+        let c_path = format!("/tmp/{project}-company");
+        for (path, origin, subject) in [
+            (p_path.as_str(), "personal", format!("{project}-personal")),
+            (c_path.as_str(), "company", format!("{project}-company")),
+        ] {
+            let front = FrontMatter {
+                source_path: path.to_owned(),
+                origin: origin.to_owned(),
+                project: project.clone(),
+                title: Some("t".to_owned()),
+                kind: "note".to_owned(),
+                tags: vec![],
+                ..Default::default()
+            };
+            store
+                .upsert_document(&front, "sha", SystemTime::now())
+                .await
+                .expect("upsert doc");
+            store
+                .upsert_claim(
+                    &subject,
+                    "status",
+                    "open",
+                    path,
+                    SystemTime::now(),
+                    &[0.1_f32; 1024],
+                    "decision",
+                    "certain",
+                )
+                .await
+                .expect("upsert claim");
+        }
+        let state = AppState {
+            store: Some(Arc::clone(&store)),
+            code_index: None,
+            llm: Arc::new(Llm::from_config(&cfg)),
+            vault_dir: Arc::new(None),
+            pii: Arc::new(None),
+            cfg: Arc::new(cfg),
+            cfg_path: Arc::new(None),
+            sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            wiki_index: Arc::new(std::sync::Mutex::new(
+                crate::wiki_recall::WikiIndex::default(),
+            )),
+            last_compact: Arc::new(tokio::sync::Mutex::new(None)),
+            compact_failure: Arc::new(tokio::sync::Mutex::new(None)),
+            db_healthy_last: Arc::new(AtomicU8::new(0)),
+        };
+        Some(DecisionsFixture {
+            state,
+            store,
+            p_path,
+            c_path,
+            p_subject: format!("{project}-personal"),
+            c_subject: format!("{project}-company"),
+            project,
+        })
     }
 }

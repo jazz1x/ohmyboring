@@ -938,9 +938,16 @@ async fn mcp_context(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
         .unwrap_or(5)
         .clamp(1, MCP_MAX_RESULTS);
     let card = if let Some(store) = s.store.as_ref() {
-        ask::context_card(store, project, &[], max_items, s.cfg.note_lang.as_str())
-            .await
-            .map_err(|e| (-32603_i32, format!("context: {e:#}")))?
+        let exclude_origins = s.cfg.origins_excluded_by_policy();
+        ask::context_card(
+            store,
+            project,
+            &exclude_origins,
+            max_items,
+            s.cfg.note_lang.as_str(),
+        )
+        .await
+        .map_err(|e| (-32603_i32, format!("context: {e:#}")))?
     } else {
         ask::ContextCard {
             decisions: vec![],
@@ -960,9 +967,16 @@ async fn mcp_decisions(s: &AppState, args: Option<&Value>) -> Result<Value, (i32
         .and_then(Value::as_str)
         .map(str::trim);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::decision_register(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
-        .await
-        .map_err(|e| (-32603_i32, format!("decisions: {e:#}")))?;
+    let exclude_origins = s.cfg.origins_excluded_by_policy();
+    let out = ask::decision_register(
+        store,
+        &s.llm,
+        project,
+        &exclude_origins,
+        s.cfg.note_lang.as_str(),
+    )
+    .await
+    .map_err(|e| (-32603_i32, format!("decisions: {e:#}")))?;
     Ok(json!({"answer": out.answer, "sources": out.sources}))
 }
 
@@ -972,9 +986,16 @@ async fn mcp_risks(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, St
         .and_then(Value::as_str)
         .map(str::trim);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::risk_register(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
-        .await
-        .map_err(|e| (-32603_i32, format!("risks: {e:#}")))?;
+    let exclude_origins = s.cfg.origins_excluded_by_policy();
+    let out = ask::risk_register(
+        store,
+        &s.llm,
+        project,
+        &exclude_origins,
+        s.cfg.note_lang.as_str(),
+    )
+    .await
+    .map_err(|e| (-32603_i32, format!("risks: {e:#}")))?;
     Ok(json!({"answer": out.answer, "sources": out.sources}))
 }
 
@@ -984,9 +1005,16 @@ async fn mcp_next_actions(s: &AppState, args: Option<&Value>) -> Result<Value, (
         .and_then(Value::as_str)
         .map(str::trim);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::next_action_register(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
-        .await
-        .map_err(|e| (-32603_i32, format!("next_actions: {e:#}")))?;
+    let exclude_origins = s.cfg.origins_excluded_by_policy();
+    let out = ask::next_action_register(
+        store,
+        &s.llm,
+        project,
+        &exclude_origins,
+        s.cfg.note_lang.as_str(),
+    )
+    .await
+    .map_err(|e| (-32603_i32, format!("next_actions: {e:#}")))?;
     Ok(json!({"answer": out.answer, "sources": out.sources}))
 }
 
@@ -1003,11 +1031,12 @@ async fn mcp_stalled(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
         .map_err(|_| (-32602_i32, "older_than_days is too large".to_owned()))?
         .unwrap_or(7);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    let exclude_origins = s.cfg.origins_excluded_by_policy();
     let out = ask::stalled_register(
         store,
         &s.llm,
         project,
-        &[],
+        &exclude_origins,
         s.cfg.note_lang.as_str(),
         older_than_days,
     )

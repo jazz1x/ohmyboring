@@ -660,22 +660,30 @@ pub(crate) struct StatusReq {
 #[derive(Deserialize)]
 pub(crate) struct DecisionsReq {
     pub(crate) project: Option<String>,
+    #[serde(default)]
+    pub(crate) exclude_origins: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct RisksReq {
     pub(crate) project: Option<String>,
+    #[serde(default)]
+    pub(crate) exclude_origins: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct NextActionsReq {
     pub(crate) project: Option<String>,
+    #[serde(default)]
+    pub(crate) exclude_origins: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct StalledReq {
     pub(crate) project: Option<String>,
     pub(crate) older_than_days: Option<u32>,
+    #[serde(default)]
+    pub(crate) exclude_origins: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
