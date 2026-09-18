@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Network-free regression tests for session collector status semantics."""
 import importlib.util
+import io
 import json
 import os
+import socket
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -22,6 +26,7 @@ def _load(name, filename):
 
 claude_collect = _load("claude_collect_sessions", "collect-sessions.py")
 kimi_collect = _load("kimi_collect_sessions", "collect-kimi-sessions.py")
+codex_collect = _load("codex_collect_sessions", "../codex/collect-sessions.py")
 
 
 def _last_event(path: Path) -> dict:
@@ -185,10 +190,274 @@ def test_kimi_marked_excludes_dead_lettered_session():
         kimi_collect.markers.set_mark_dir(old_mark_dir)
 
 
+class _FakeResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return b'{"ok": true}'
+
+
+def _recording_urlopen(calls: list):
+    def fake_urlopen(req, timeout):
+        calls.append((req.full_url, timeout))
+        return _FakeResponse()
+
+    return fake_urlopen
+
+
+def _claude_fixture(root: Path) -> Path:
+    source = root / "claude" / "project"
+    source.mkdir(parents=True)
+    (source / "s1.jsonl").write_text(json.dumps({"cwd": "/work/repo"}) + "\nbody\n", encoding="utf-8")
+    return source
+
+
+def _codex_fixture(root: Path) -> Path:
+    source = root / "sessions"
+    source.mkdir(parents=True)
+    (source / "todo.jsonl").write_text(json.dumps({"payload": {}}) + "\nbody\n", encoding="utf-8")
+    return source
+
+
+def test_claude_collector_passes_explicit_sync_timeout_to_urlopen():
+    old_mark_dir = claude_collect.markers.MARK_DIR
+    old_min_kb = claude_collect.MIN_KB
+    old_limit = claude_collect.LIMIT
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _claude_fixture(root)
+            event_path = root / "events.ndjson"
+            calls = []
+
+            claude_collect.markers.set_mark_dir(str(root / "markers"))
+            claude_collect.MIN_KB = 0
+            claude_collect.LIMIT = 1
+
+            with (
+                mock.patch.object(claude_collect.sys, "argv", ["collect-sessions.py"]),
+                mock.patch.object(claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]),
+                mock.patch.object(claude_collect, "_warm_llm"),
+                mock.patch.object(claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
+                mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+            ):
+                rc = claude_collect.main()
+
+            assert rc == 0
+            sync_timeouts = [t for (url, t) in calls if url.endswith("/sync")]
+            assert sync_timeouts == [claude_collect.SYNC_TIMEOUT_S]
+    finally:
+        claude_collect.markers.set_mark_dir(old_mark_dir)
+        claude_collect.MIN_KB = old_min_kb
+        claude_collect.LIMIT = old_limit
+
+
+def test_codex_collector_passes_explicit_sync_timeout_to_urlopen():
+    old_mark_dir = codex_collect.markers.MARK_DIR
+    old_min_kb = codex_collect.MIN_KB
+    old_stable_age = codex_collect.STABLE_AGE_S
+    old_limit = codex_collect.LIMIT
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _codex_fixture(root)
+            event_path = root / "events.ndjson"
+            calls = []
+
+            codex_collect.markers.set_mark_dir(str(root / "markers"))
+            codex_collect.MIN_KB = 0
+            codex_collect.STABLE_AGE_S = 0
+            codex_collect.LIMIT = 1
+
+            with (
+                mock.patch.object(codex_collect, "_source_dir", return_value=str(root / "sessions")),
+                mock.patch.object(codex_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
+                mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+            ):
+                rc = codex_collect.main([])
+
+            assert rc == 0
+            sync_timeouts = [t for (url, t) in calls if url.endswith("/sync")]
+            assert sync_timeouts == [codex_collect.SYNC_TIMEOUT_S]
+    finally:
+        codex_collect.markers.set_mark_dir(old_mark_dir)
+        codex_collect.MIN_KB = old_min_kb
+        codex_collect.STABLE_AGE_S = old_stable_age
+        codex_collect.LIMIT = old_limit
+
+
+def test_claude_collector_sync_timeout_marks_running_and_run_stays_ok():
+    old_mark_dir = claude_collect.markers.MARK_DIR
+    old_min_kb = claude_collect.MIN_KB
+    old_limit = claude_collect.LIMIT
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _claude_fixture(root)
+            event_path = root / "events.ndjson"
+            stderr = io.StringIO()
+
+            claude_collect.markers.set_mark_dir(str(root / "markers"))
+            claude_collect.MIN_KB = 0
+            claude_collect.LIMIT = 1
+
+            with (
+                mock.patch.object(claude_collect.sys, "argv", ["collect-sessions.py"]),
+                mock.patch.object(claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]),
+                mock.patch.object(claude_collect, "_warm_llm"),
+                mock.patch.object(claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
+                mock.patch.object(claude_collect.sys, "stderr", stderr),
+                mock.patch.object(claude_collect, "DrudgeClient") as client,
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+            ):
+                client.return_value.sync.side_effect = socket.timeout("timed out")
+                rc = claude_collect.main()
+
+            assert rc == 0
+            assert "engine kept going" in stderr.getvalue()
+            assert "4h scheduler" in stderr.getvalue()
+            event = _last_event(event_path)
+            assert event["status"] == "ok"
+            assert event["sync_status"] == "running"
+            assert event["processed"] == 1
+            assert event["failed"] == 0
+    finally:
+        claude_collect.markers.set_mark_dir(old_mark_dir)
+        claude_collect.MIN_KB = old_min_kb
+        claude_collect.LIMIT = old_limit
+
+
+def test_codex_collector_sync_timeout_marks_running_and_run_stays_ok():
+    old_mark_dir = codex_collect.markers.MARK_DIR
+    old_min_kb = codex_collect.MIN_KB
+    old_stable_age = codex_collect.STABLE_AGE_S
+    old_limit = codex_collect.LIMIT
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _codex_fixture(root)
+            event_path = root / "events.ndjson"
+            stderr = io.StringIO()
+
+            codex_collect.markers.set_mark_dir(str(root / "markers"))
+            codex_collect.MIN_KB = 0
+            codex_collect.STABLE_AGE_S = 0
+            codex_collect.LIMIT = 1
+
+            with (
+                mock.patch.object(codex_collect, "_source_dir", return_value=str(root / "sessions")),
+                mock.patch.object(codex_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
+                mock.patch.object(codex_collect.sys, "stderr", stderr),
+                mock.patch.object(codex_collect, "DrudgeClient") as client,
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+            ):
+                client.return_value.sync.side_effect = socket.timeout("timed out")
+                rc = codex_collect.main([])
+
+            assert rc == 0
+            assert "engine kept going" in stderr.getvalue()
+            assert "4h scheduler" in stderr.getvalue()
+            event = _last_event(event_path)
+            assert event["status"] == "ok"
+            assert event["sync_status"] == "running"
+            assert event["processed"] == 1
+            assert event["failed"] == 0
+            assert "sync_degraded" not in event
+    finally:
+        codex_collect.markers.set_mark_dir(old_mark_dir)
+        codex_collect.MIN_KB = old_min_kb
+        codex_collect.STABLE_AGE_S = old_stable_age
+        codex_collect.LIMIT = old_limit
+
+
+def test_claude_collector_refused_sync_fails_the_run():
+    old_mark_dir = claude_collect.markers.MARK_DIR
+    old_min_kb = claude_collect.MIN_KB
+    old_limit = claude_collect.LIMIT
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _claude_fixture(root)
+            event_path = root / "events.ndjson"
+
+            claude_collect.markers.set_mark_dir(str(root / "markers"))
+            claude_collect.MIN_KB = 0
+            claude_collect.LIMIT = 1
+
+            with (
+                mock.patch.object(claude_collect.sys, "argv", ["collect-sessions.py"]),
+                mock.patch.object(claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]),
+                mock.patch.object(claude_collect, "_warm_llm"),
+                mock.patch.object(claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
+                mock.patch.object(claude_collect, "DrudgeClient") as client,
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+            ):
+                client.return_value.sync.side_effect = ConnectionRefusedError("refused")
+                rc = claude_collect.main()
+
+            assert rc == 1
+            event = _last_event(event_path)
+            assert event["status"] == "failed"
+            assert event["sync_status"] == "failed"
+    finally:
+        claude_collect.markers.set_mark_dir(old_mark_dir)
+        claude_collect.MIN_KB = old_min_kb
+        claude_collect.LIMIT = old_limit
+
+
+def test_codex_collector_refused_sync_fails_the_run():
+    old_mark_dir = codex_collect.markers.MARK_DIR
+    old_min_kb = codex_collect.MIN_KB
+    old_stable_age = codex_collect.STABLE_AGE_S
+    old_limit = codex_collect.LIMIT
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _codex_fixture(root)
+            event_path = root / "events.ndjson"
+
+            codex_collect.markers.set_mark_dir(str(root / "markers"))
+            codex_collect.MIN_KB = 0
+            codex_collect.STABLE_AGE_S = 0
+            codex_collect.LIMIT = 1
+
+            with (
+                mock.patch.object(codex_collect, "_source_dir", return_value=str(root / "sessions")),
+                mock.patch.object(codex_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
+                mock.patch.object(codex_collect, "DrudgeClient") as client,
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+            ):
+                client.return_value.sync.side_effect = urllib.error.URLError(ConnectionRefusedError("refused"))
+                rc = codex_collect.main([])
+
+            assert rc == 1
+            event = _last_event(event_path)
+            assert event["status"] == "failed"
+            assert event["sync_status"] == "failed"
+            assert "sync_degraded" not in event
+    finally:
+        codex_collect.markers.set_mark_dir(old_mark_dir)
+        codex_collect.MIN_KB = old_min_kb
+        codex_collect.STABLE_AGE_S = old_stable_age
+        codex_collect.LIMIT = old_limit
+
+
 if __name__ == "__main__":
     test_claude_collector_fails_when_sync_fails()
     test_claude_backfill_does_not_claim_to_be_a_session_end()
     test_kimi_collector_fails_when_distill_fails()
     test_claude_marked_excludes_dead_lettered_session()
     test_kimi_marked_excludes_dead_lettered_session()
+    test_claude_collector_passes_explicit_sync_timeout_to_urlopen()
+    test_codex_collector_passes_explicit_sync_timeout_to_urlopen()
+    test_claude_collector_sync_timeout_marks_running_and_run_stays_ok()
+    test_codex_collector_sync_timeout_marks_running_and_run_stays_ok()
+    test_claude_collector_refused_sync_fails_the_run()
+    test_codex_collector_refused_sync_fails_the_run()
     print("ok - scheduler collectors")

@@ -21,6 +21,15 @@ class DrudgeNotWritableError(Exception):
     """drudge cannot accept writes right now — distillation must not run."""
 
 
+def sync_deadline_passed(exc: BaseException) -> bool:
+    """True when exc means the client's own deadline passed: the request was accepted
+    and the engine kept going; the caller stopped waiting. Everything else — refused
+    connections, 5xx, unreadable bodies — means the engine could not do it."""
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return True
+    return isinstance(getattr(exc, "reason", None), (socket.timeout, TimeoutError))
+
+
 class DrudgeClient:
     """Minimal drudge HTTP client. Silent failures are left to callers."""
 
@@ -105,9 +114,11 @@ class DrudgeClient:
         """GET /health."""
         return self._retry("GET", "/health")
 
-    def sync(self) -> dict[str, Any]:
-        """POST /sync."""
-        return self._retry("POST", "/sync")
+    def sync(self, timeout: Optional[float] = None) -> dict[str, Any]:
+        """POST /sync. The class default is sized for point reads; a whole-vault scan
+        outgrows any constant, so callers that only need the engine to keep going pass
+        their own deadline explicitly."""
+        return self._retry("POST", "/sync", timeout=timeout)
 
     def audit(self) -> dict[str, Any]:
         """GET /audit."""
