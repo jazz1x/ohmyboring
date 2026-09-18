@@ -607,6 +607,134 @@ async fn next_claim_is_recallable() {
     store.delete_document(&path).await.expect("cleanup");
 }
 
+/// With more matching rows than the register limit, the structured cut is reported and the answer names it.
+#[tokio::test]
+async fn risk_register_reports_limit_applied_and_total_matching() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let project = format!("risk-reg-cut-{run}");
+    let path = unique_path("risk-reg-cut");
+    let mut front = dummy_frontmatter(&path);
+    front.project = project.clone();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let emb = [0.1_f32; 1024];
+    for i in 0u32..60 {
+        store
+            .upsert_claim(
+                &format!("risk-reg-subj-{i}"),
+                "incident",
+                "boom",
+                &path,
+                SystemTime::now() + Duration::from_secs(u64::from(i)),
+                &emb,
+                "risk",
+                "likely",
+            )
+            .await
+            .expect("upsert risk claim");
+    }
+
+    let out = drudge::ask::risk_register(&store, Some(&project), &[])
+        .await
+        .expect("risk register");
+    assert_eq!(out.limit_applied, 50);
+    assert_eq!(out.total_matching, 60);
+    assert_eq!(out.rows.len(), 50);
+    assert_eq!(out.rows[0].subject, "risk-reg-subj-59");
+    assert!(
+        out.answer
+            .starts_with("Showing the newest 50 of 60 matching risks, assumptions, and blockers."),
+        "was {:?}",
+        out.answer
+    );
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
+/// Register rows carry the live graph's claim node id scheme.
+#[tokio::test]
+async fn risk_register_node_id_follows_claim_scheme() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let project = format!("risk-reg-id-{run}");
+    let path = unique_path("risk-reg-id");
+    let mut front = dummy_frontmatter(&path);
+    front.project = project.clone();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let emb = [0.1_f32; 1024];
+    store
+        .upsert_claim(
+            "ommc",
+            "has_capability",
+            "relay sync",
+            &path,
+            SystemTime::now(),
+            &emb,
+            "risk",
+            "likely",
+        )
+        .await
+        .expect("upsert risk claim");
+
+    let out = drudge::ask::risk_register(&store, Some(&project), &[])
+        .await
+        .expect("risk register");
+    assert_eq!(out.rows.len(), 1);
+    assert_eq!(out.rows[0].node_id, "claim:ommc:has_capability");
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
+/// An empty claim set keeps the none-recorded message verbatim.
+#[tokio::test]
+async fn risk_register_empty_claim_set() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let project = format!("risk-reg-empty-{run}");
+    let out = drudge::ask::risk_register(&store, Some(&project), &[])
+        .await
+        .expect("risk register");
+    assert_eq!(
+        out.answer,
+        "No risks, assumptions, or blockers recorded yet."
+    );
+    assert!(out.rows.is_empty());
+    assert!(out.sources.is_empty());
+    assert_eq!(out.total_matching, 0);
+}
+
 /// Regression test for the 2026-07-25 outage: a single `tokio_postgres::Client` wedged permanently
 /// once its underlying connection died, and every subsequent write failed silently for 5.5 days.
 /// `Store` now holds a `deadpool_postgres::Pool` (`RecyclingMethod::Verified`), which must

@@ -338,8 +338,9 @@ fn mcp_tools_list() -> Value {
         },
         {
             "name": "risks",
-            "description": "Risk register: recent risk, assumption, and blocked claims. Optionally filter by project. \
-                            Generative (runs the LLM). Requires the vector backend.",
+            "description": "Risk register: recent risk, assumption, and blocked claims, newest first. Optionally filter by project. \
+                            Deterministic — answers from current claims in the store; no LLM. The answer names the cut when \
+                            more claims match than the newest 50 shown.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -972,10 +973,16 @@ async fn mcp_risks(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, St
         .and_then(Value::as_str)
         .map(str::trim);
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::risk_register(store, &s.llm, project, &[], s.cfg.note_lang.as_str())
+    let out = ask::risk_register(store, project, &[])
         .await
         .map_err(|e| (-32603_i32, format!("risks: {e:#}")))?;
-    Ok(json!({"answer": out.answer, "sources": out.sources}))
+    Ok(json!({
+        "answer": out.answer,
+        "sources": out.sources,
+        "rows": out.rows,
+        "limit_applied": out.limit_applied,
+        "total_matching": out.total_matching,
+    }))
 }
 
 async fn mcp_next_actions(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {

@@ -250,14 +250,7 @@ pub(crate) async fn handle_risks(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
-    let out = ask::risk_register(
-        store,
-        &s.llm,
-        req.project.as_deref(),
-        &[],
-        s.cfg.note_lang.as_str(),
-    )
-    .await?;
+    let out = ask::risk_register(store, req.project.as_deref(), &[]).await?;
     spawn_query_log(
         s.store.clone(),
         "risks",

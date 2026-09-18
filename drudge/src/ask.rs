@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::llm::Llm;
 use crate::retrieve;
-use crate::store::Store;
+use crate::store::{RegisterRow, Store};
 use crate::wiki_recall;
 
 const SYSTEM: &str = "You are the user's personal assistant. Reply in the same language as the user's question.\n\
@@ -783,12 +783,6 @@ const DECISION_REGISTER_SYSTEM: &str = "You are the user's memory assistant. Lis
 [Format] Group by project if a project filter is present; otherwise list newest-first.\n\
 Each bullet: '<project> — <predicate>: <value> (<confidence>)'. If there are no decisions, say so plainly.";
 
-const RISK_REGISTER_SYSTEM: &str = "You are the user's memory assistant. List the risks, assumptions, and blockers below in the same language as the records.\n\
-[Specific] Preserve project names, predicates, and values verbatim.\n\
-[No fabrication] Don't invent risks not in the records.\n\
-[Format] Group by project if a project filter is present; otherwise list newest-first.\n\
-Each bullet: '<project> — <predicate>: <value> (kind=<kind>, confidence=<confidence>)'. If none, say so plainly.";
-
 const NEXT_ACTION_REGISTER_SYSTEM: &str = "You are the user's memory assistant. List the explicit next actions and current blockers below in the same language as the records.\n\
 [Specific] Preserve project names, predicates, and values verbatim.\n\
 [No fabrication] Don't invent next actions or blockers not in the records.\n\
@@ -838,42 +832,74 @@ pub async fn decision_register(
     })
 }
 
+pub struct RegisterOut {
+    pub answer: String,
+    pub sources: Vec<String>,
+    pub rows: Vec<RegisterRow>,
+    pub limit_applied: i64,
+    pub total_matching: i64,
+}
+
+const RISK_REGISTER_LIMIT: i64 = 50;
+
+fn render_risk_register(rows: &[RegisterRow], limit_applied: i64, total_matching: i64) -> String {
+    let mut out = String::new();
+    if total_matching > limit_applied {
+        let _ = writeln!(
+            out,
+            "Showing the newest {limit_applied} of {total_matching} matching risks, assumptions, and blockers."
+        );
+    }
+    for row in rows {
+        let _ = writeln!(
+            out,
+            "* {subject} — {predicate}: {value} (kind={kind}, confidence={confidence})",
+            subject = row.subject,
+            predicate = row.predicate,
+            value = row.value,
+            kind = row.kind,
+            confidence = row.confidence,
+        );
+    }
+    out.trim_end().to_owned()
+}
+
+fn register_sources(rows: &[RegisterRow]) -> Vec<String> {
+    let mut sources: Vec<String> = rows.iter().map(|r| r.subject.clone()).collect();
+    sources.sort();
+    sources.dedup();
+    sources
+}
+
 pub async fn risk_register(
     store: &Store,
-    llm: &Llm,
     project: Option<&str>,
     _exclude_origins: &[String],
-    lang: &str,
-) -> Result<AnswerOut> {
+) -> Result<RegisterOut> {
     let kinds = [
         "risk".to_owned(),
         "assumption".to_owned(),
         "blocked".to_owned(),
     ];
-    let claims = store.recent_claims(50, project, Some(&kinds), &[]).await?;
-    if claims.is_empty() {
-        return Ok(AnswerOut {
+    let page = store
+        .recent_register_rows(RISK_REGISTER_LIMIT, project, Some(&kinds), &[])
+        .await?;
+    if page.rows.is_empty() {
+        return Ok(RegisterOut {
             answer: "No risks, assumptions, or blockers recorded yet.".to_owned(),
             sources: vec![],
+            rows: vec![],
+            limit_applied: RISK_REGISTER_LIMIT,
+            total_matching: page.total_matching,
         });
     }
-    let context = format_claims_for_register(&claims);
-    let lang_rule = match lang {
-        "ko" => " ALWAYS write the register in Korean (한국어).",
-        "en" => " ALWAYS write the register in English.",
-        _ => "",
-    };
-    let system = format!("{RISK_REGISTER_SYSTEM}{lang_rule}");
-    let answer = llm.generate(&system, &context).await?;
-    let sources: Vec<String> = claims
-        .iter()
-        .map(|c| c.subject.clone())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    Ok(AnswerOut {
-        answer: answer.trim().to_owned(),
-        sources,
+    let answer = render_risk_register(&page.rows, RISK_REGISTER_LIMIT, page.total_matching);
+    Ok(RegisterOut {
+        answer,
+        sources: register_sources(&page.rows),
+        rows: page.rows,
+        limit_applied: RISK_REGISTER_LIMIT,
+        total_matching: page.total_matching,
     })
 }
 
@@ -1067,6 +1093,96 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use crate::store::RegisterRow;
+
+    fn register_row(
+        subject: &str,
+        predicate: &str,
+        value: &str,
+        kind: &str,
+        confidence: &str,
+        secs: u64,
+    ) -> RegisterRow {
+        RegisterRow::new(
+            subject.to_owned(),
+            predicate.to_owned(),
+            value.to_owned(),
+            kind.to_owned(),
+            confidence.to_owned(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+            "test".to_owned(),
+        )
+    }
+
+    #[test]
+    fn risk_register_answer_is_exact_newest_first() {
+        let rows = vec![
+            register_row(
+                "mimir-proxy",
+                "incident",
+                "relay-synchronization",
+                "risk",
+                "likely",
+                300,
+            ),
+            register_row(
+                "boro-vigil",
+                "incident",
+                "rendering-delay",
+                "assumption",
+                "certain",
+                200,
+            ),
+            register_row(
+                "chunk_embed_blocked",
+                "status",
+                "not_present_in_production_ddl",
+                "blocked",
+                "certain",
+                100,
+            ),
+        ];
+        let answer = super::render_risk_register(&rows, 50, 3);
+        assert_eq!(
+            answer,
+            "* mimir-proxy — incident: relay-synchronization (kind=risk, confidence=likely)\n\
+             * boro-vigil — incident: rendering-delay (kind=assumption, confidence=certain)\n\
+             * chunk_embed_blocked — status: not_present_in_production_ddl (kind=blocked, confidence=certain)"
+        );
+    }
+
+    #[test]
+    fn a_register_row_carries_the_graph_node_id_that_addresses_it() {
+        let row = register_row(
+            "mimir-proxy",
+            "incident",
+            "relay-synchronization",
+            "risk",
+            "likely",
+            300,
+        );
+        assert_eq!(row.node_id, "claim:mimir-proxy:incident");
+    }
+
+    #[test]
+    fn risk_register_sources_are_sorted_and_deduped() {
+        let rows = vec![
+            register_row("mimir-proxy", "incident", "a", "risk", "likely", 400),
+            register_row("boro-vigil", "incident", "b", "risk", "likely", 300),
+            register_row("mimir-proxy", "incident", "c", "risk", "likely", 200),
+            register_row("boro-janus", "incident", "d", "risk", "likely", 100),
+        ];
+        assert_eq!(
+            super::register_sources(&rows),
+            vec![
+                "boro-janus".to_owned(),
+                "boro-vigil".to_owned(),
+                "mimir-proxy".to_owned(),
+            ]
+        );
+    }
 
     fn doc(path: &str, project: &str, content: &str) -> crate::store::RecentDoc {
         crate::store::RecentDoc {

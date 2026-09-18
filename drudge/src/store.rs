@@ -409,6 +409,75 @@ pub struct AnchorCheckWatermark {
     pub predicate: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RegisterRow {
+    pub node_id: String,
+    pub subject: String,
+    pub predicate: String,
+    pub value: String,
+    pub kind: String,
+    pub confidence: String,
+    #[serde(serialize_with = "system_time_rfc3339")]
+    pub valid_from: SystemTime,
+    pub project: String,
+}
+
+impl RegisterRow {
+    pub fn new(
+        subject: String,
+        predicate: String,
+        value: String,
+        kind: String,
+        confidence: String,
+        valid_from: SystemTime,
+        project: String,
+    ) -> Self {
+        let claim = Claim {
+            subject: subject.clone(),
+            predicate: predicate.clone(),
+            value: value.clone(),
+            kind,
+            confidence,
+        };
+        Self {
+            node_id: format!("claim:{subject}:{predicate}"),
+            subject,
+            predicate,
+            value,
+            kind: claim.kind().to_owned(),
+            confidence: claim.confidence().to_owned(),
+            valid_from,
+            project,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RegisterRows {
+    pub rows: Vec<RegisterRow>,
+    pub total_matching: i64,
+}
+
+fn register_row(r: &tokio_postgres::Row) -> RegisterRow {
+    RegisterRow::new(
+        r.get(0),
+        r.get(1),
+        r.get(2),
+        r.get(3),
+        r.get(4),
+        r.get(5),
+        r.get(6),
+    )
+}
+
+fn system_time_rfc3339<S>(value: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let datetime: chrono::DateTime<chrono::Utc> = (*value).into();
+    serializer.serialize_str(&datetime.to_rfc3339())
+}
+
 impl Store {
     // ── connect + ensure schema ───────────────────────────────────────────────
 
@@ -1349,6 +1418,40 @@ impl Store {
                 confidence: r.get(4),
             })
             .collect())
+    }
+
+    /// Top-k current claims for a register answer, newest-first, with the unlimited match count
+    /// carried in the same statement (`COUNT(*) OVER ()`).
+    pub async fn recent_register_rows(
+        &self,
+        k: i64,
+        project: Option<&str>,
+        kinds: Option<&[String]>,
+        exclude_origins: &[String],
+    ) -> Result<RegisterRows> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.valid_from, d.project,
+                        COUNT(*) OVER () AS total
+                   FROM claim c
+                   JOIN document d ON d.source_path = c.source_path
+                  WHERE c.superseded_at IS NULL
+                    AND ($2::text IS NULL OR d.project = $2)
+                    AND ($3::text[] IS NULL OR c.kind = ANY($3))
+                    AND NOT (d.origin = ANY($4))
+                    AND d.source_path !~ $5
+                  ORDER BY c.valid_from DESC
+                  LIMIT $1;",
+                &[&k, &project, &kinds, &exclude_origins, &NOT_USER_MEMORY_RE],
+            )
+            .await
+            .context("recent register rows")?;
+        Ok(RegisterRows {
+            rows: rows.iter().map(register_row).collect(),
+            total_matching: rows.first().map_or(0, |r| r.get::<_, i64>(7)),
+        })
     }
 
     /// Stalled claims: current claims whose valid_from is older than `older_than_days`.
