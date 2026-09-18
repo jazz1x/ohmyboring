@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Tests for uptake_core.py — above all, that an injection cannot count as its own uptake."""
+import contextlib
+import io
 import json
 import os
 import sys
@@ -342,6 +344,33 @@ def test_snippet_text_is_not_stored_in_the_ledger():
     assert "wiki-0007.md" in blob
 
 
+def _window_open():
+    return datetime.strptime(verdict_core.WINDOW_SINCE, "%Y-%m-%d").replace(
+        tzinfo=verdict_core.WINDOW_TZ
+    )
+
+
+def _stamped_record(session_id, prompt, at):
+    row = uptake_core.injection_record(session_id, prompt, [_hit()], 3)
+    row["ts"] = at.timestamp()
+    return row
+
+
+def _write_rows(tmp, rows):
+    target = os.path.join(tmp, "injections.jsonl")
+    with open(target, "w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return target
+
+
+def _run_duplicate_probe(path):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = uptake_core._main(["--duplicate-injections", path])
+    return code, buf.getvalue()
+
+
 def test_a_prompt_recorded_twice_in_the_same_instant_is_one_prompt():
     """The shape #245 left behind: one UserPromptSubmit, two hook registrations, two rows.
 
@@ -349,38 +378,134 @@ def test_a_prompt_recorded_twice_in_the_same_instant_is_one_prompt():
     the only place it can be caught is here, before it inflates a pre-registered sample floor.
     """
     with tempfile.TemporaryDirectory() as d:
-        path = str(Path(d) / "injections.jsonl")
-        first = uptake_core.injection_record("s1", "why did it die", [_hit()], 3)
-        twin = dict(first, ts=first["ts"] + 0.0001)     # the second hook, same instant
-        later = dict(first, ts=first["ts"] + 900)       # the person genuinely asking again
-        other = uptake_core.injection_record("s1", "unrelated", [_hit()], 3)
-        Path(path).write_text(
-            "\n".join(json.dumps(r, ensure_ascii=False) for r in (first, twin, later, other))
-            + "\n",
-            encoding="utf-8",
-        )
+        base = _window_open()
+        first = _stamped_record("s1", "why did it die", base + timedelta(minutes=10))
+        twin = dict(first, ts=(base + timedelta(minutes=10, seconds=0.25)).timestamp())
+        later = _stamped_record("s1", "why did it die", base + timedelta(minutes=25))
+        other = _stamped_record("s1", "unrelated", base + timedelta(minutes=30))
 
-        extra, total, sessions = uptake_core.duplicate_injections(path)
+        report = uptake_core.duplicate_injections(_write_rows(d, [first, twin, later, other]))
 
-        assert (extra, total, sessions) == (1, 4, 1), (extra, total, sessions)
+        assert report["extra_in"] == 1
+        assert report["extra_out"] == 0
+        assert report["total_in"] == 4
+        assert report["sessions_in"] == 1
+        assert report["oldest_out"] is None
 
 
 def test_a_repeat_outside_the_window_is_a_real_repeat():
     """Fifteen minutes later is a person, not a second hook — counting it would erase evidence."""
     with tempfile.TemporaryDirectory() as d:
-        path = str(Path(d) / "injections.jsonl")
-        first = uptake_core.injection_record("s1", "same question", [_hit()], 3)
-        later = dict(first, ts=first["ts"] + 900)
-        Path(path).write_text(
-            "\n".join(json.dumps(r, ensure_ascii=False) for r in (first, later)) + "\n",
-            encoding="utf-8",
-        )
+        base = _window_open()
+        first = _stamped_record("s1", "same question", base + timedelta(minutes=10))
+        later = _stamped_record("s1", "same question", base + timedelta(minutes=25))
 
-        assert uptake_core.duplicate_injections(path)[0] == 0
+        report = uptake_core.duplicate_injections(_write_rows(d, [first, later]))
+
+        assert report["extra_in"] == 0
+        assert report["extra_out"] == 0
 
 
 def test_a_missing_ledger_is_not_a_duplicate_report():
-    assert uptake_core.duplicate_injections("/nonexistent/injections.jsonl") == (0, 0, 0)
+    assert uptake_core.duplicate_injections("/nonexistent/injections.jsonl") == {
+        "extra_in": 0,
+        "extra_out": 0,
+        "total_in": 0,
+        "total_out": 0,
+        "sessions_in": 0,
+        "sessions_out": 0,
+        "oldest_out": None,
+        "since": verdict_core.WINDOW_SINCE,
+        "until": verdict_core.WINDOW_UNTIL,
+    }
+
+
+def test_a_duplicate_inside_the_window_counts_against_the_open_verdict():
+    with tempfile.TemporaryDirectory() as d:
+        base = _window_open()
+        first = _stamped_record("s1", "why did it die", base + timedelta(minutes=10))
+        twin = dict(first, ts=(base + timedelta(minutes=10, seconds=0.25)).timestamp())
+
+        report = uptake_core.duplicate_injections(_write_rows(d, [first, twin]))
+
+        assert report["extra_in"] == 1
+        assert report["extra_out"] == 0
+        assert report["total_in"] == 2
+        assert report["sessions_out"] == 0
+        assert report["oldest_out"] is None
+
+
+def test_a_duplicate_before_the_window_cannot_move_the_floor():
+    with tempfile.TemporaryDirectory() as d:
+        base = _window_open()
+        first = _stamped_record("s1", "why did it die", base - timedelta(days=7))
+        twin = dict(first, ts=(base - timedelta(days=7) + timedelta(seconds=0.25)).timestamp())
+
+        report = uptake_core.duplicate_injections(_write_rows(d, [first, twin]))
+
+        assert report["extra_in"] == 0
+        assert report["extra_out"] == 1
+        assert report["total_out"] == 2
+        assert report["sessions_in"] == 0
+        assert report["oldest_out"] == datetime.fromtimestamp(
+            twin["ts"], verdict_core.WINDOW_TZ
+        ).isoformat()
+
+
+def test_a_duplicate_in_the_windows_first_local_hours_is_in_window():
+    """00:30 KST on the window's first day is 15:30 UTC the day before — the discriminating hours.
+
+    Under WINDOW_TZ bucketing the later row lands inside [since, until); under a UTC bucketing
+    mutant it lands the day before and is filed out. 06:00 local, or -1h local, would read the
+    same under both and prove nothing, so the pair straddles the local midnight by half a second.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        base = _window_open()
+        first = _stamped_record(
+            "s1", "same question", base + timedelta(minutes=29, seconds=59, milliseconds=750)
+        )
+        twin = dict(first, ts=(base + timedelta(minutes=30, milliseconds=250)).timestamp())
+
+        report = uptake_core.duplicate_injections(_write_rows(d, [first, twin]))
+
+        assert report["extra_in"] == 1, (
+            "00:30 on the window's first local day is the previous day in UTC; it must count"
+        )
+        assert report["extra_out"] == 0
+        assert report["total_in"] == 2
+
+
+def test_a_row_with_no_usable_timestamp_is_still_counted():
+    """It cannot be placed in the window, but dropping it would make the totals stop summing."""
+    with tempfile.TemporaryDirectory() as d:
+        base = _window_open()
+        dated = _stamped_record("s1", "why did it die", base + timedelta(minutes=10))
+        undated = dict(_stamped_record("s1", "no clock", base + timedelta(minutes=11)), ts=None)
+
+        report = uptake_core.duplicate_injections(_write_rows(d, [dated, undated]))
+
+        assert report["total_in"] + report["total_out"] == 2
+        assert report["total_out"] == 1
+        assert report["extra_in"] == 0
+        assert report["extra_out"] == 0
+
+
+def test_the_probe_exits_one_only_for_in_window_duplicates():
+    with tempfile.TemporaryDirectory() as d:
+        base = _window_open()
+        stale = _stamped_record("s1", "old news", base - timedelta(days=7))
+        stale_twin = dict(
+            stale, ts=(base - timedelta(days=7) + timedelta(seconds=0.25)).timestamp()
+        )
+        old_code, old_out = _run_duplicate_probe(_write_rows(d, [stale, stale_twin]))
+        live = _stamped_record("s1", "live wire", base + timedelta(minutes=5))
+        live_twin = dict(live, ts=(base + timedelta(minutes=5, seconds=0.25)).timestamp())
+        new_code, new_out = _run_duplicate_probe(_write_rows(d, [live, live_twin]))
+
+        assert old_code == 0, "out-of-window duplicates cannot fail the gate"
+        assert "out_of_window_duplicates=1" in old_out
+        assert new_code == 1, "only in-window duplicates fail the gate"
+        assert "in_window_duplicates=1" in new_out
 
 
 #: The longest session span measured in the live ledger on 2026-09-02 was 177h (7.4 days), with a

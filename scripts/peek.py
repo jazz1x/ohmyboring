@@ -974,11 +974,17 @@ def build_state(offset=0):
     page = {"returned": 0, "total": 0, "limit": MAX_PROMPT_ROWS, "truncated": False}
     echoes = _echo_map(rows or [])
     if ledger:
-        extra, total, sessions = uptake_core.duplicate_injections(ledger_file)
-        if extra:
+        dup = uptake_core.duplicate_injections(ledger_file)
+        if dup["extra_in"]:
             notes.append(
-                f"원장에 한 프롬프트를 두 번 기록한 행 {extra}/{total} (세션 {sessions}) — 비율은"
+                f"원장에 창 [{dup['since']}, {dup['until']}) 안에서 한 프롬프트를 두 번 기록한 행"
+                f" {dup['extra_in']}/{dup['total_in']} (세션 {dup['sessions_in']}) — 비율은"
                 " 그대로지만 표본 하한(주입 프롬프트 수)이 부풀어 보인다."
+            )
+        elif dup["extra_out"]:
+            notes.append(
+                f"원장에 한 프롬프트를 두 번 기록한 행 {dup['extra_out']}건이 있지만"
+                f" {dup['since']} 이전 것이라 지금 열린 창의 표본 하한을 움직이지 못한다."
             )
 
     prompts_out = prompt_rows(ledger, echoes, notes, page, offset=offset)

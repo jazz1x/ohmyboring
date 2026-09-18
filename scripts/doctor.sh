@@ -670,11 +670,32 @@ fi
 # everywhere else.
 ledger_probe="$BORING_HOME/agents/shared/uptake_core.py"
 if [ -f "$ledger_probe" ] && [ "${BORING_SKIP_LEDGER_PROBE:-0}" != 1 ]; then
-    if dup_out="$(python3 "$ledger_probe" --duplicate-injections 2>/dev/null)"; then
-        ok "injection ledger has no double-recorded prompts (${dup_out##*total_rows=})"
-    else
-        bad "DOUBLE-RECORDED INJECTIONS — $dup_out. One prompt logged twice means the recall hook fired twice; the uptake rate hides it while the sample floor counts double."
+    dup_split="$(python3 "$ledger_probe" --duplicate-injections 2>/dev/null || true)"
+    dup_in=0
+    dup_out=0
+    total_in=0
+    oldest_out=""
+    since_day=""
+    until_day=""
+    for kv in $dup_split; do
+        case "$kv" in
+            in_window_duplicates=*) dup_in="${kv#in_window_duplicates=}" ;;
+            out_of_window_duplicates=*) dup_out="${kv#out_of_window_duplicates=}" ;;
+            in_window_rows=*) total_in="${kv#in_window_rows=}" ;;
+            oldest_out=*) oldest_out="${kv#oldest_out=}" ;;
+            since=*) since_day="${kv#since=}" ;;
+            until=*) until_day="${kv#until=}" ;;
+        esac
+    done
+    if [ -z "$dup_split" ]; then
+        warn "injection-ledger duplicate split unreadable — the double-recording check was skipped, not passed"
+    elif [ "$dup_in" -gt 0 ]; then
+        bad "DOUBLE-RECORDED INJECTIONS — $dup_in duplicate row(s) inside the window [$since_day, $until_day) across $total_in row(s). One prompt logged twice means the recall hook fired twice; the uptake rate hides it while the sample floor counts double."
         failed_hooks=1
+    elif [ "$dup_out" -gt 0 ]; then
+        warn "double-recorded injections before the window — $dup_out duplicate row(s) older than $since_day, oldest $oldest_out. The open verdict's sample floor is counted from $since_day, so these cannot inflate it; inside [$since_day, $until_day) there are $dup_in across $total_in row(s)"
+    else
+        ok "injection ledger has no double-recorded prompts in the window ($total_in rows in [$since_day, $until_day))"
     fi
 fi
 
