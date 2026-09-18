@@ -9,10 +9,8 @@ healthy wiki-first engine that simply has no DB to report on.
 from __future__ import annotations
 
 import os
-import socket
 import sys
 import unittest
-import urllib.error
 import urllib.request
 from unittest import mock
 
@@ -22,7 +20,6 @@ from drudge_client import (  # noqa: E402
     DrudgeClient,
     DrudgeNotWritableError,
     check_drudge_writable,
-    sync_deadline_passed,
 )
 
 
@@ -105,20 +102,6 @@ class SyncTimeoutTest(unittest.TestCase):
             DrudgeClient(base_url="http://127.0.0.1:9").sync(timeout=123.0)
 
         self.assertEqual(seen["timeout"], 123.0)
-
-
-class SyncDeadlinePassedTest(unittest.TestCase):
-    def test_timeout_family_means_we_stopped_waiting(self):
-        self.assertTrue(sync_deadline_passed(socket.timeout("timed out")))
-        self.assertTrue(sync_deadline_passed(TimeoutError("timed out")))
-        self.assertTrue(sync_deadline_passed(urllib.error.URLError(TimeoutError("timed out"))))
-        self.assertTrue(sync_deadline_passed(urllib.error.URLError(socket.timeout("timed out"))))
-
-    def test_engine_failures_are_not_deadlines(self):
-        self.assertFalse(sync_deadline_passed(ConnectionRefusedError("refused")))
-        self.assertFalse(sync_deadline_passed(urllib.error.URLError(ConnectionRefusedError("refused"))))
-        self.assertFalse(sync_deadline_passed(urllib.error.URLError("down")))
-        self.assertFalse(sync_deadline_passed(OSError("boom")))
 
 
 if __name__ == "__main__":

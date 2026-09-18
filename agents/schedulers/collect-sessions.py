@@ -9,8 +9,8 @@ captured. This collector scans the top-level session .jsonl files under ~/.claud
 - Marker: ~/.cache/boring-distill/<sid>.ts, same as distill-session.py. If present, skip (already done).
 - LIMIT (default 1, COLLECT_LIMIT): number processed per invocation. Called periodically via launchd/cron → drains slowly.
 - WINDOW (default 720h=30d, COLLECT_WINDOW_HOURS): ignore anything too old.
-- Each session → distill-session.py (wakes the agent → remember). One /sync at the end re-scans the
-  vault (idempotent safety net; remember already ingests each note live).
+- Each session → distill-session.py (wakes the agent → remember). No trailing /sync: remember
+  ingests each note live, and the engine's own 4h scheduler re-scans the vault regardless.
 - cwd = the real working dir from the transcript → distill-session determines origin via boring.json.
 """
 import argparse
@@ -29,14 +29,13 @@ import event_log
 import markers
 import omb_env
 import workflow_contract
-from drudge_client import DrudgeClient, DrudgeNotWritableError, check_drudge_writable, sync_deadline_passed
+from drudge_client import DrudgeClient, DrudgeNotWritableError, check_drudge_writable
 
 BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")  # skip small sessions (distill would SKIP anyway)
 PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("INGEST_PENDING_TTL") or "1800")
-SYNC_TIMEOUT_S = float(os.environ.get("COLLECT_SYNC_TIMEOUT_S") or "120")
 # BORING_HOME: repo clone location (default ~/oh-my-boring). Lets a forker clone elsewhere
 # without editing this file.
 BORING_HOME = os.environ.get("BORING_HOME") or os.path.expanduser("~/oh-my-boring")
@@ -190,24 +189,8 @@ def main():
             timed_out += 1
             print(f"[{label}] timeout  {proj}", flush=True)
 
-    sync_status = "ok"
-    try:
-        DrudgeClient().sync(timeout=SYNC_TIMEOUT_S)
-        print(f"[{label}] sync ok", flush=True)
-    except Exception as e:
-        if sync_deadline_passed(e):
-            sync_status = "running"
-            print(
-                f"[{label}] sync running: engine kept going past our {SYNC_TIMEOUT_S:g}s "
-                "deadline; the vault will be indexed by the engine's own 4h scheduler regardless",
-                file=sys.stderr,
-                flush=True,
-            )
-        else:
-            sync_status = "failed"
-            print(f"[{label}] sync failed: {e}", file=sys.stderr, flush=True)
     print(f"[{label}] done={done}/{len(batch)}  remaining={len(todo) - done}", flush=True)
-    status = "ok" if done == len(batch) and sync_status != "failed" else "failed"
+    status = "ok" if done == len(batch) else "failed"
     event_log.try_append_event(
         "claude-collector",
         "collector_run",
@@ -220,7 +203,6 @@ def main():
         failed=failed,
         timed_out=timed_out,
         remaining=len(todo) - done,
-        sync_status=sync_status,
         mode=label,
         **workflow_contract.collector_run_fields(status, len(batch)),
     )

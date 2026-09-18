@@ -11,14 +11,13 @@ import os
 import subprocess
 import sys
 import time
-import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import event_log
 import markers
 import omb_env
 import workflow_contract
-from drudge_client import DrudgeClient, DrudgeNotWritableError, check_drudge_writable, sync_deadline_passed
+from drudge_client import DrudgeClient, DrudgeNotWritableError, check_drudge_writable
 
 BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias
 KIMI_HOME = os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code")
@@ -27,7 +26,6 @@ HOOK = os.path.join(BORING_HOME, "agents", "kimi", "distill-session.py")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("INGEST_PENDING_TTL") or "1800")
-SYNC_TIMEOUT_S = float(os.environ.get("COLLECT_SYNC_TIMEOUT_S") or "120")
 
 
 def _marked(session_id: str) -> bool:
@@ -79,24 +77,6 @@ def _distill(session_id: str, cwd: str) -> bool:
     except Exception as e:
         print(f"[collect-kimi] failed to distill {session_id}: {e}", file=sys.stderr)
         return False
-
-
-def _sync() -> str:
-    try:
-        DrudgeClient().sync(timeout=SYNC_TIMEOUT_S)
-        print("[collect-kimi] sync ok", flush=True)
-        return "ok"
-    except Exception as e:
-        if sync_deadline_passed(e):
-            print(
-                f"[collect-kimi] sync running: engine kept going past our {SYNC_TIMEOUT_S:g}s "
-                "deadline; the vault will be indexed by the engine's own 4h scheduler regardless",
-                file=sys.stderr,
-                flush=True,
-            )
-            return "running"
-        print(f"[collect-kimi] sync failed: {e}", file=sys.stderr, flush=True)
-        return "failed"
 
 
 def main():
@@ -159,11 +139,8 @@ def main():
             failed += 1
             print(f"[collect-kimi] retry marker left for {sid}", file=sys.stderr)
 
-    sync_status = "skipped"
-    if processed:
-        sync_status = _sync()
     print(f"[collect-kimi] processed {processed} session(s)")
-    status = "ok" if failed == 0 and sync_status != "failed" else "failed"
+    status = "ok" if failed == 0 else "failed"
     event_log.try_append_event(
         "kimi-collector",
         "collector_run",
@@ -174,7 +151,6 @@ def main():
         attempted=attempted,
         processed=processed,
         failed=failed,
-        sync_status=sync_status,
         **workflow_contract.collector_run_fields(status, attempted),
     )
     return 0 if status == "ok" else 1
