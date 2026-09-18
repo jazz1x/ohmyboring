@@ -159,6 +159,7 @@ pub struct GraphStats {
     pub projects: usize,
     pub topics: usize,
     pub claims: usize,
+    pub claims_with_doc: usize,
     pub decisions: usize,
     pub risks: usize,
     pub edges: usize,
@@ -2644,6 +2645,11 @@ impl Store {
             projects: count_node_kind(&db, "project").await?,
             topics: count_node_kind(&db, "topic").await?,
             claims: count_node_kind(&db, "claim").await?,
+            claims_with_doc: pg_count(
+                &db,
+                "SELECT count(DISTINCT dst) FROM edge WHERE kind = 'claims';",
+            )
+            .await?,
             decisions: count_node_kind(&db, "decision").await?,
             risks: count_node_kind(&db, "risk").await?,
             edges: pg_count(&db, "SELECT count(*) FROM edge;").await?,
