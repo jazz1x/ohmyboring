@@ -669,11 +669,12 @@ async fn stalled_register_rows_report_total_matching_within_the_window() {
 
     let ten_days = Duration::from_hours(10 * 24);
     let emb = [0.1_f32; 1024];
+    let project = unique_path("register-stalled-p");
     let mut paths = vec![];
     for i in 0u32..3 {
         let path = unique_path(&format!("register-stalled-{i}"));
         let mut front = dummy_frontmatter(&path);
-        front.project = "register-test".to_owned();
+        front.project.clone_from(&project);
         store
             .upsert_document(&front, "sha", SystemTime::now())
             .await
@@ -695,7 +696,7 @@ async fn stalled_register_rows_report_total_matching_within_the_window() {
     }
 
     let res = store
-        .stalled_register_rows(2, Some("register-test"), Some(&["next".to_owned()]), &[], 7)
+        .stalled_register_rows(2, Some(&project), Some(&["next".to_owned()]), &[], 7)
         .await
         .expect("stalled register rows");
     assert_eq!(res.rows.len(), 2);
@@ -3050,14 +3051,17 @@ impl Default for CountingEmbed {
 }
 
 impl Embed for CountingEmbed {
-    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+    fn embed(
+        &self,
+        text: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<f32>>> + Send {
         let _ = text;
         assert!(
             !self.panic_on_call,
             "embed called on a path that must stay un-embedded"
         );
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(vec![0.0_f32; 1024])
+        std::future::ready(Ok(vec![0.0_f32; 1024]))
     }
 }
 
