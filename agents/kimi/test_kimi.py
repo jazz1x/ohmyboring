@@ -26,6 +26,9 @@ for _var in ("BORING_CONFIG", "BORING_HOME", "BORING_URL", "BORING_EVENT_SINK",
 # 2026-09-02, growing daily. Isolation and a closed write door are both required, so the pop is
 # followed by an explicit spool rather than by nothing.
 os.environ["BORING_EVENT_SINK"] = "spool"
+os.environ.setdefault(
+    "BORING_EVENT_LOG", os.path.join(tempfile.gettempdir(), "omb-test-events.ndjson")
+)
 
 
 def _load(name, filename):
