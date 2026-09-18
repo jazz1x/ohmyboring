@@ -266,7 +266,9 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                         .await?;
                     stats.claims += 1;
                 }
-                store.upsert_claim_node(path, &front.project, cl).await?;
+                store
+                    .upsert_claim_node(path, &front.project, &subject, &predicate, cl)
+                    .await?;
                 stats.edges += if front.project.is_empty() { 1 } else { 2 };
                 if cl.kind() != "fact" {
                     stats.edges += 1;
