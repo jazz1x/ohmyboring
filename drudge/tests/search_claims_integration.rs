@@ -157,14 +157,17 @@ async fn declared_claims_skips_rows_without_claims_edge() {
     }
 
     // A live row for this source_path the note no longer declares: no `claims` edge points at it.
+    // Seeded NEWER than the declared claim on purpose: a source_path regression must surface this
+    // row, not lose it to the same-key dedup and slip past the guard.
     let embedding = vec![0.0_f32; 1024];
+    let base = SystemTime::now();
     store
         .upsert_claim(
             &format!("orphan-row-{ts}"),
             "decision",
             "stale wording",
             &path,
-            SystemTime::now(),
+            base + Duration::from_secs(10),
             &embedding,
             "decision",
             "high",
@@ -179,7 +182,7 @@ async fn declared_claims_skips_rows_without_claims_edge() {
         "decision",
         "current wording",
         "decision",
-        SystemTime::now(),
+        base,
     )
     .await;
     // A claim of the OTHER note: edge-backed, but not by this document.
@@ -190,7 +193,7 @@ async fn declared_claims_skips_rows_without_claims_edge() {
         "decision",
         "someone else's solve",
         "decision",
-        SystemTime::now(),
+        base,
     )
     .await;
 
