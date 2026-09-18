@@ -287,6 +287,67 @@ mod tests {
     }
 
     #[test]
+    fn search_req_claims_defaults_to_zero_and_clamps() {
+        let absent: super::SearchReq = serde_json::from_str(r#"{"query":"x"}"#).unwrap();
+        let zero: super::SearchReq = serde_json::from_str(r#"{"query":"x","claims":0}"#).unwrap();
+        assert_eq!(
+            absent.claims(),
+            0,
+            "absent means no claims, like explicit 0"
+        );
+        assert_eq!(zero.claims(), 0);
+        let req: super::SearchReq = serde_json::from_str(r#"{"query":"x","claims":99}"#).unwrap();
+        assert_eq!(
+            req.claims(),
+            super::SEARCH_MAX_CLAIMS,
+            "the per-hit handover is capped"
+        );
+    }
+
+    #[test]
+    fn search_hit_omits_claims_keys_until_claims_attached() {
+        let mut hit = super::SearchHit {
+            id: "1".into(),
+            origin: "wiki".into(),
+            project: "p".into(),
+            source_path: "a.md".into(),
+            snippet: "s".into(),
+            dist: None,
+            dist_kind: None,
+            related: vec![],
+            superseded_by: vec![],
+            used_count: 0,
+            contested_count: 0,
+            claims: vec![],
+            claims_total: None,
+        };
+        let json = serde_json::to_string(&hit).unwrap();
+        assert!(
+            !json.contains("claims"),
+            "callers that did not ask see no claims keys: {json}"
+        );
+        hit.claims_total = Some(1);
+        hit.claims.push(crate::store::RegisterRow::new(
+            "subject".into(),
+            "decision".into(),
+            "value".into(),
+            "decision".into(),
+            "high".into(),
+            std::time::SystemTime::UNIX_EPOCH,
+            "p".into(),
+        ));
+        let json = serde_json::to_string(&hit).unwrap();
+        assert!(
+            json.contains("\"claims_total\":1") && json.contains("\"claims\":"),
+            "was {json}"
+        );
+        assert!(
+            json.contains("\"node_id\":\"claim:subject:decision\""),
+            "the canonical node id rides along: {json}"
+        );
+    }
+
+    #[test]
     fn search_hit_omits_related_key_until_one_is_attached() {
         let mut hit = super::SearchHit {
             id: "1".into(),
@@ -300,6 +361,8 @@ mod tests {
             superseded_by: vec![],
             used_count: 0,
             contested_count: 0,
+            claims: vec![],
+            claims_total: None,
         };
         let json = serde_json::to_string(&hit).unwrap();
         assert!(
@@ -328,6 +391,8 @@ mod tests {
             superseded_by: vec![],
             used_count: 0,
             contested_count: 0,
+            claims: vec![],
+            claims_total: None,
         };
         let json = serde_json::to_string(&hit).unwrap();
         assert!(
@@ -356,6 +421,8 @@ mod tests {
             superseded_by: vec![],
             used_count: 3,
             contested_count: 1,
+            claims: vec![],
+            claims_total: None,
         };
         let json = serde_json::to_value(&hit).unwrap();
         assert_eq!(json["used_count"], serde_json::json!(3));
@@ -475,6 +542,7 @@ pub(crate) fn spawn_query_log(
     });
 }
 
+#[derive(Debug)]
 pub(crate) struct AppError {
     status: StatusCode,
     error: anyhow::Error,
@@ -543,6 +611,8 @@ pub(crate) struct SearchReq {
     pub(crate) related: usize,
     #[serde(default = "default_related_heads")]
     pub(crate) related_heads: usize,
+    #[serde(default)]
+    pub(crate) claims: Option<u32>,
 }
 
 impl SearchReq {
@@ -552,6 +622,12 @@ impl SearchReq {
 
     pub(crate) fn related_heads(&self, max_results: usize) -> usize {
         self.related_heads.min(max_results)
+    }
+
+    /// Opt-in claims handover per hit. Absent and `0` are the same request — the response a
+    /// caller gets today, byte for byte; the hook relies on that until the freeze lifts.
+    pub(crate) fn claims(&self) -> u32 {
+        self.claims.unwrap_or(0).min(SEARCH_MAX_CLAIMS)
     }
 }
 
@@ -590,6 +666,10 @@ pub(crate) struct SearchHit {
     pub(crate) superseded_by: Vec<String>,
     pub(crate) used_count: i64,
     pub(crate) contested_count: i64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) claims: Vec<crate::store::RegisterRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) claims_total: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -937,6 +1017,9 @@ pub(crate) fn vec_off_rpc() -> (i32, String) {
 
 pub(crate) const MCP_MAX_RESULTS: usize = 50;
 pub(crate) const MCP_MAX_TOKENS: usize = 16_384;
+/// Per-hit cap for the opt-in claims handover — a note declares a handful of solving claims,
+/// not dozens, so a runaway `claims=N` cannot turn a search hit into a register dump.
+pub(crate) const SEARCH_MAX_CLAIMS: u32 = 10;
 
 pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> Result<()> {
     let vault_dir: Option<PathBuf> = config::env_set("BORING_VAULT_DIR").map(PathBuf::from);
