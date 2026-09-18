@@ -208,6 +208,8 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                 {
                     continue;
                 }
+                let anchor = crate::anchor::anchor_for_claim(&note_anchors, &subject, value);
+                let anchor_db = anchor.as_ref().map(crate::anchor::Anchor::to_db_string);
                 // Nothing changed for this axis, so there is nothing to embed and nothing to
                 // seal. The probe asks what this note's own latest row says — an exact match
                 // means re-opening the slot would just ping-pong it against the other note's
@@ -222,6 +224,7 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                         path,
                         cl.kind(),
                         cl.confidence(),
+                        anchor_db.as_deref(),
                     )
                     .await?
                 {
@@ -229,11 +232,9 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                     continue;
                 }
                 let emb = llm.embed(&format!("{subject} {predicate} {value}")).await?;
-                let anchor = crate::anchor::anchor_for_claim(&note_anchors, &subject, value);
                 let anchor_hash = anchor
                     .as_ref()
                     .and_then(|a| crate::anchor_hash::hash_for_anchor(a, &cfg.code_index.sources));
-                let anchor_db = anchor.as_ref().map(crate::anchor::Anchor::to_db_string);
                 store
                     .upsert_claim_with_anchor(
                         &subject,
