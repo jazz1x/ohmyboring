@@ -78,10 +78,14 @@ case "${1:-}" in
     # leaves the uptake rate unchanged and doubles a pre-registered sample floor.
     if [ "${2:-}" = --duplicate-injections ]; then
         if [ "${DOCTOR_LEDGER_DUPES:-0}" = 1 ]; then
-            echo "injection_ledger duplicate_rows=42 total_rows=100 sessions=3"
+            echo "injection_ledger in_window_duplicates=42 in_window_rows=100 in_window_sessions=3 out_of_window_duplicates=0 out_of_window_rows=0 oldest_out=- since=2026-09-18 until=2026-10-02"
             exit 1
         fi
-        echo "injection_ledger duplicate_rows=0 total_rows=100 sessions=0"
+        if [ "${DOCTOR_LEDGER_DUPES_BEFORE_WINDOW:-0}" = 1 ]; then
+            echo "injection_ledger in_window_duplicates=0 in_window_rows=100 in_window_sessions=0 out_of_window_duplicates=7 out_of_window_rows=900 oldest_out=2026-09-10T14:15:09+09:00 since=2026-09-18 until=2026-10-02"
+            exit 0
+        fi
+        echo "injection_ledger in_window_duplicates=0 in_window_rows=100 in_window_sessions=0 out_of_window_duplicates=0 out_of_window_rows=0 oldest_out=- since=2026-09-18 until=2026-10-02"
         exit 0
     fi
     # doctor asks whether the uptake detector can still see a use handed to it verbatim. A zero
@@ -861,6 +865,21 @@ esac
   grep -q "✗ DOUBLE-RECORDED INJECTIONS" "$TMP/ledger-dupes.out" || {
       cat "$TMP/ledger-dupes.out"
       echo "FAIL: the duplicate must be reported as a failure, not a warning" >&2
+      exit 1
+  } ) || exit 1
+
+# The control for the case above: the same defect, dated before the window the verdict is counted
+# over. It cannot inflate that sample floor, so it must be said and not failed on — otherwise one
+# old row holds doctor red for the rest of the window and the check stops being read.
+( make_case "$TMP/ledger-dupes-old" yes
+  if ! DOCTOR_LEDGER_DUPES_BEFORE_WINDOW=1 run_strict "$TMP/ledger-dupes-old" "$TMP/ledger-dupes-old.out"; then
+      cat "$TMP/ledger-dupes-old.out"
+      echo "FAIL: duplicates older than the window must not fail strict" >&2
+      exit 1
+  fi
+  grep -q "! double-recorded injections before the window" "$TMP/ledger-dupes-old.out" || {
+      cat "$TMP/ledger-dupes-old.out"
+      echo "FAIL: pre-window duplicates must still be named, as a warning" >&2
       exit 1
   } ) || exit 1
 

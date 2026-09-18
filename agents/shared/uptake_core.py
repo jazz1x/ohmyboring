@@ -623,17 +623,21 @@ def window_sample(since, until, path=None):
 
 
 def duplicate_injections(path=None, window=DUPLICATE_WINDOW_S):
-    """Rows that are a second recording of one prompt: (extra_rows, total_rows, sessions).
+    """Rows that are a second recording of one prompt, split by the verdict's open window.
 
     Double-firing does not move the uptake rate — numerator and denominator both double — so
     nothing in the numbers looks wrong. What it moves is `total_prompts`, and that is a
-    pre-registered sample floor (docs/PRD.md §2). A floor met at half the evidence it names is
-    not the floor that was registered, and the only trace is here.
+    pre-registered sample floor (docs/PRD.md §2), counted from WINDOW_SINCE. A duplicate that
+    predates the window cannot inflate that floor, so only in-window extras alarm; out-of-window
+    ones are reported for the record, with the oldest instant kept. Bucketing follows
+    `window_sample`: epoch `ts` read on the WINDOW_TZ calendar against midnights built in
+    WINDOW_TZ. A ledger that cannot be read returns every count at zero and `oldest_out` None.
     """
+    import verdict_core
+
+    since = datetime.strptime(verdict_core.WINDOW_SINCE, "%Y-%m-%d").replace(tzinfo=verdict_core.WINDOW_TZ)
+    until = datetime.strptime(verdict_core.WINDOW_UNTIL, "%Y-%m-%d").replace(tzinfo=verdict_core.WINDOW_TZ)
     target = path or ledger_path()
-    seen = {}
-    extra = total = 0
-    sessions = set()
     try:
         with open(target, encoding="utf-8") as handle:
             rows = []
@@ -646,18 +650,48 @@ def duplicate_injections(path=None, window=DUPLICATE_WINDOW_S):
                 except ValueError:
                     continue
     except OSError:
-        return 0, 0, 0
+        rows = []
+    report = {
+        "extra_in": 0,
+        "extra_out": 0,
+        "total_in": 0,
+        "total_out": 0,
+        "sessions_in": 0,
+        "sessions_out": 0,
+        "oldest_out": None,
+        "since": verdict_core.WINDOW_SINCE,
+        "until": verdict_core.WINDOW_UNTIL,
+    }
+    sessions_in = set()
+    sessions_out = set()
+    oldest_out = None
+    seen = {}
     for row in sorted(rows, key=lambda r: (r.get("session_id") or "", r.get("ts") or 0)):
-        total += 1
-        key = (row.get("session_id"), tuple(row.get("prompt_words") or []))
-        ts = row.get("ts") or 0
-        previous = seen.get(key)
-        if previous is not None and (ts - previous) <= window:
-            extra += 1
-            sessions.add(row.get("session_id"))
+        ts = row.get("ts")
+        datable = isinstance(ts, (int, float))
+        at = datetime.fromtimestamp(ts, verdict_core.WINDOW_TZ) if datable else None
+        inside = at is not None and since <= at < until
+        report["total_in" if inside else "total_out"] += 1
+        if not datable:
             continue
-        seen[key] = ts
-    return extra, total, len(sessions)
+        key = (row.get("session_id"), tuple(row.get("prompt_words") or []))
+        previous = seen.get(key)
+        if previous is None or (ts - previous) > window:
+            seen[key] = ts
+            continue
+        if inside:
+            report["extra_in"] += 1
+            sessions_in.add(row.get("session_id"))
+        else:
+            report["extra_out"] += 1
+            sessions_out.add(row.get("session_id"))
+            if oldest_out is None or at < oldest_out:
+                oldest_out = at
+    report["sessions_in"] = len(sessions_in)
+    report["sessions_out"] = len(sessions_out)
+    if oldest_out is not None:
+        report["oldest_out"] = oldest_out.isoformat()
+    return report
 
 
 def _probe_main(rest):
@@ -941,9 +975,18 @@ def _main(argv):
             file=sys.stderr,
         )
         return 2
-    extra, total, sessions = duplicate_injections(rest[0] if rest else None)
-    print(f"injection_ledger duplicate_rows={extra} total_rows={total} sessions={sessions}")
-    if extra:
+    report = duplicate_injections(rest[0] if rest else None)
+    print(
+        "injection_ledger"
+        f" in_window_duplicates={report['extra_in']}"
+        f" in_window_rows={report['total_in']}"
+        f" in_window_sessions={report['sessions_in']}"
+        f" out_of_window_duplicates={report['extra_out']}"
+        f" out_of_window_rows={report['total_out']}"
+        f" oldest_out={report['oldest_out'] or '-'}"
+        f" since={report['since']} until={report['until']}"
+    )
+    if report["extra_in"]:
         print(
             "  a prompt recorded twice means the recall hook fired twice; the uptake rate looks"
             " unchanged while the sample floor counts double",
