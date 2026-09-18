@@ -27,8 +27,9 @@ down: ## Stop the whole stack, including Postgres when vector mode was used (kee
 	  *) $(COMPOSE) down ;; \
 	esac
 
-build: ## Build images (stamps the image with the current commit; see /health build_sha)
+build: ## Build both artifacts that run: the engine image and the host CLI (doctor checks both)
 	BUILD_SHA=$$(git rev-parse HEAD 2>/dev/null || true) $(COMPOSE) build
+	cd drudge && cargo build --release
 
 logs: ## engine logs
 	$(COMPOSE) logs -f boring-drudge
