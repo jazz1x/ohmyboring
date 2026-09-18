@@ -18,7 +18,7 @@ import event_log
 import markers
 import omb_env
 import workflow_contract
-from drudge_client import DrudgeClient, DrudgeNotWritableError, check_drudge_writable
+from drudge_client import DrudgeClient, DrudgeNotWritableError, check_drudge_writable, sync_deadline_passed
 
 BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias
 KIMI_HOME = os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code")
@@ -27,6 +27,7 @@ HOOK = os.path.join(BORING_HOME, "agents", "kimi", "distill-session.py")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("INGEST_PENDING_TTL") or "1800")
+SYNC_TIMEOUT_S = float(os.environ.get("COLLECT_SYNC_TIMEOUT_S") or "120")
 
 
 def _marked(session_id: str) -> bool:
@@ -80,13 +81,22 @@ def _distill(session_id: str, cwd: str) -> bool:
         return False
 
 
-def _sync() -> bool:
+def _sync() -> str:
     try:
-        DrudgeClient().sync()
+        DrudgeClient().sync(timeout=SYNC_TIMEOUT_S)
+        print("[collect-kimi] sync ok", flush=True)
+        return "ok"
     except Exception as e:
-        print(f"[collect-kimi] sync call failed: {e}", file=sys.stderr)
-        return False
-    return True
+        if sync_deadline_passed(e):
+            print(
+                f"[collect-kimi] sync running: engine kept going past our {SYNC_TIMEOUT_S:g}s "
+                "deadline; the vault will be indexed by the engine's own 4h scheduler regardless",
+                file=sys.stderr,
+                flush=True,
+            )
+            return "running"
+        print(f"[collect-kimi] sync failed: {e}", file=sys.stderr, flush=True)
+        return "failed"
 
 
 def main():
@@ -151,7 +161,7 @@ def main():
 
     sync_status = "skipped"
     if processed:
-        sync_status = "ok" if _sync() else "failed"
+        sync_status = _sync()
     print(f"[collect-kimi] processed {processed} session(s)")
     status = "ok" if failed == 0 and sync_status != "failed" else "failed"
     event_log.try_append_event(
