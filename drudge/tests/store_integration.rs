@@ -1950,7 +1950,7 @@ async fn claim_inherits_note_anchor_and_era_is_marked() {
 
     let body = "the regression lives in a/b.rs:10 since the refactor";
     let note_anchors = drudge::anchor::from_note_body(project, body);
-    let anchor = drudge::anchor::anchor_for_claim(&note_anchors, &subject, "regression")
+    let anchor = drudge::anchor::anchor_for_claim(&note_anchors, &subject, "regression in b.rs")
         .map(|a| a.to_db_string());
     store
         .upsert_claim_with_anchor(
