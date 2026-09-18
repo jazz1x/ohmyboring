@@ -63,6 +63,12 @@ This rule came from a measured incident (2026-09-02). Of 106 `injection_uptake` 
 
 **The window's dates are the owner's calendar dates — `Asia/Seoul (UTC+09:00)`.** Every date in this section is. Measured in UTC, the 08:00 KST morning briefing reads as the previous day and the gate fires a day late (measured). A **fixed offset** rather than the machine's local zone, because the same code runs inside a container — a date that moves with the `TZ` setting is not a registered date.
 
+**The scorer is frozen too.** §5-R6 freezes the channel — what gets injected, and how often. It did not name the code that *counts*, and that omission was used on 2026-09-18, the window's first day: three merges changed `agents/shared/uptake_core.py` and `agents/shared/verdict_core.py` — #352 (day bucketing moved from UTC to the owner's calendar), #353 (a session counted once rather than once per `session_end` row), #355 (the duplicate-injection alarm scoped to the open window). The party being measured edited the measuring stick, inside the window, with rows already recorded. None of the three was caught by the contract, because the contract was not looking there.
+
+The change was measured rather than argued: the verdict was recomputed from the same ledger with the pre-#352 scorer restored, and the output was identical — `sessions 4 · injected prompts 132 · treatment 0.00pp · control 0.00pp · refused, sample floor`. So no advantage was realised and the window is not reset; discarding the accumulated rows would cost evidence to buy nothing.
+
+For the remainder of the window `uptake_core.py` and `verdict_core.py` are frozen on the same terms as the channel. The one exception is a defect that makes the verdict **uncomputable** — not one that makes it wrong in a direction someone would prefer. Any such change is recorded here with the verdict computed both ways on the same ledger, before and after, so that "it did not matter" stays a measurement rather than a claim.
+
 **Window midpoint check.** At the window's midpoint (`verdict_core.MIDPOINT`), if **scored sessions per adapter are under 10**, switch to an **instrumentation investigation** without waiting for the close — a progress gauge for the fact that §2's "zero within 48h" clause looks at a single moment.
 
 **Why per adapter**: because the floor of 20 applies per adapter (each adapter runs a different product — §3 M8). Summed, 8 Claude Code sessions plus 3 from another adapter would **pass a gate neither of them passes**. Closed before the midpoint.
