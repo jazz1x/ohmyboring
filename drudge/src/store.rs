@@ -1098,6 +1098,7 @@ impl Store {
     /// `confidence`. Only an exact repeat of the note's own latest row is nothing — the note
     /// on disk is the source of truth, so a note edited back to an old value must read as
     /// changed, while re-syncing a value the slot took from another note must not write a row.
+    #[allow(clippy::too_many_arguments)]
     pub async fn claim_is_unchanged(
         &self,
         subject: &str,
@@ -1106,6 +1107,7 @@ impl Store {
         source_path: &str,
         kind: &str,
         confidence: &str,
+        anchor: Option<&str>,
     ) -> Result<bool> {
         let rows = self
             .db()
@@ -1116,6 +1118,7 @@ impl Store {
                    AND valid_from = (SELECT max(valid_from) FROM claim
                                       WHERE subject = $1 AND predicate = $2 AND source_path = $4)
                    AND value = $3 AND kind = $5 AND confidence = $6
+                   AND anchor IS NOT DISTINCT FROM $7
                  LIMIT 1;",
                 &[
                     &subject,
@@ -1124,6 +1127,7 @@ impl Store {
                     &source_path,
                     &kind,
                     &confidence,
+                    &anchor,
                 ],
             )
             .await

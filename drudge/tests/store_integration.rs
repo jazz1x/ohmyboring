@@ -1180,7 +1180,7 @@ async fn an_identical_claim_is_not_a_new_version() {
     let path = format!("/vault/wiki/{subject}.md");
 
     let unchanged = store
-        .claim_is_unchanged(&subject, "axis", "v1", &path, "fact", "certain")
+        .claim_is_unchanged(&subject, "axis", "v1", &path, "fact", "certain", None)
         .await
         .expect("probe");
     assert!(
@@ -1204,7 +1204,7 @@ async fn an_identical_claim_is_not_a_new_version() {
 
     assert!(
         store
-            .claim_is_unchanged(&subject, "axis", "v1", &path, "fact", "certain")
+            .claim_is_unchanged(&subject, "axis", "v1", &path, "fact", "certain", None)
             .await
             .expect("probe"),
         "the same tuple must read as unchanged"
@@ -1232,7 +1232,7 @@ async fn an_identical_claim_is_not_a_new_version() {
     ] {
         assert!(
             !store
-                .claim_is_unchanged(&subject, "axis", value, src, kind, conf)
+                .claim_is_unchanged(&subject, "axis", value, src, kind, conf, None)
                 .await
                 .expect("probe"),
             "{why} must not read as unchanged"
@@ -1258,17 +1258,124 @@ async fn an_identical_claim_is_not_a_new_version() {
         .expect("supersede with v2");
     assert!(
         !store
-            .claim_is_unchanged(&subject, "axis", "v1", &path, "fact", "certain")
+            .claim_is_unchanged(&subject, "axis", "v1", &path, "fact", "certain", None)
             .await
             .expect("probe"),
         "a sealed value returning is new information, not an unchanged claim"
     );
     assert!(
         store
-            .claim_is_unchanged(&subject, "axis", "v2", &path, "fact", "certain")
+            .claim_is_unchanged(&subject, "axis", "v2", &path, "fact", "certain", None)
             .await
             .expect("probe"),
         "the current value must still read as unchanged"
+    );
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+}
+
+#[tokio::test]
+async fn a_claim_whose_anchor_would_change_is_not_unchanged() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = format!("anchor-shift-probe-{}", std::process::id());
+    let path = format!("/vault/wiki/{subject}.md");
+    let stored_anchor = "test:a/b.rs:L10";
+
+    store
+        .upsert_claim_with_anchor(
+            &subject,
+            "axis",
+            "v1",
+            &path,
+            SystemTime::now(),
+            &[0.0_f32; 1024],
+            "fact",
+            "certain",
+            Some(stored_anchor),
+            None,
+            None,
+        )
+        .await
+        .expect("insert anchored claim");
+
+    assert!(
+        !store
+            .claim_is_unchanged(
+                &subject,
+                "axis",
+                "v1",
+                &path,
+                "fact",
+                "certain",
+                Some("test:c/d.rs:L20"),
+            )
+            .await
+            .expect("probe with a different anchor"),
+        "a different anchor must not read as unchanged"
+    );
+
+    assert!(
+        store
+            .claim_is_unchanged(
+                &subject,
+                "axis",
+                "v1",
+                &path,
+                "fact",
+                "certain",
+                Some(stored_anchor)
+            )
+            .await
+            .expect("probe with the same anchor"),
+        "the same anchor must still read as unchanged"
+    );
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+}
+
+#[tokio::test]
+async fn a_claim_that_loses_its_anchor_is_not_unchanged() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = format!("anchor-loss-probe-{}", std::process::id());
+    let path = format!("/vault/wiki/{subject}.md");
+
+    store
+        .upsert_claim_with_anchor(
+            &subject,
+            "axis",
+            "v1",
+            &path,
+            SystemTime::now(),
+            &[0.0_f32; 1024],
+            "fact",
+            "certain",
+            Some("test:a/b.rs:L10"),
+            None,
+            None,
+        )
+        .await
+        .expect("insert anchored claim");
+
+    assert!(
+        !store
+            .claim_is_unchanged(&subject, "axis", "v1", &path, "fact", "certain", None)
+            .await
+            .expect("probe with no anchor"),
+        "losing the anchor must read as changed"
     );
 
     db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
@@ -1333,7 +1440,7 @@ async fn a_resynced_note_does_not_reinsert_a_claim_it_recorded() {
     //    exact tuple, so there is nothing new to record.
     assert!(
         store
-            .claim_is_unchanged(&subject, &predicate, "v", &path_a, "fact", "certain")
+            .claim_is_unchanged(&subject, &predicate, "v", &path_a, "fact", "certain", None)
             .await
             .expect("probe"),
         "A already recorded exactly this claim; sealed or not, re-asserting it is nothing new"
@@ -1423,7 +1530,7 @@ async fn a_note_oscillating_back_updates_the_slot() {
     // own latest row says v2, so the returning v1 is new information and must be inserted.
     assert!(
         !store
-            .claim_is_unchanged(&subject, &predicate, "v1", &path, "fact", "certain")
+            .claim_is_unchanged(&subject, &predicate, "v1", &path, "fact", "certain", None)
             .await
             .expect("probe"),
         "the note's own latest row says v2; the returning v1 must read as changed"
