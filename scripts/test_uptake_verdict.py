@@ -366,5 +366,43 @@ class SessionEndDenominator(unittest.TestCase):
         self.assertNotIn("계측 조사", out.getvalue() + err.getvalue())
 
 
+class RepeatedSessionEnd(unittest.TestCase):
+    """`session_end` is the denominator §2 reads: scored sessions over sessions this channel
+    could have reached. A reopened session fires SessionEnd again, and each firing with
+    records emits an `injection_uptake` row — count rows and one session reads as three,
+    doubling the sample floor while the rate stays unchanged, which is the shape nothing
+    on the page notices. Only the newest firing's counters may stand for the session."""
+
+    def _payload(self, rows):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(uv, "fetch_events", return_value=rows):
+            with redirect_stdout(out), redirect_stderr(err):
+                code = uv.main(["--json"])
+        self.assertEqual(code, 0, err.getvalue())
+        return json.loads(out.getvalue())
+
+    def test_a_session_that_ended_three_times_is_one_session(self):
+        day = uv.verdict_core.WINDOW_SINCE
+        rows = [
+            _event("one-session", 0, 10, when=f"{day}T01:00:00+00:00"),
+            _event("one-session", 0, 20, when=f"{day}T02:00:00+00:00"),
+            _event("one-session", 0, 30, when=f"{day}T03:00:00+00:00"),
+        ]
+        claude = self._payload(rows)["post_repair"]["claude-code"]
+        self.assertEqual(claude["sessions"], 1)
+        self.assertEqual(claude["total_prompts"], 30)
+
+    def test_two_sessions_that_ended_in_the_same_second_are_two_sessions(self):
+        day = uv.verdict_core.WINDOW_SINCE
+        same_second = f"{day}T04:00:00+00:00"
+        rows = [
+            _event("session-a", 0, 10, when=same_second),
+            _event("session-b", 0, 20, when=same_second),
+        ]
+        claude = self._payload(rows)["post_repair"]["claude-code"]
+        self.assertEqual(claude["sessions"], 2)
+        self.assertEqual(claude["total_prompts"], 30)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

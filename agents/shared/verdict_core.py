@@ -422,6 +422,16 @@ def window_day(observed_at):
     return moment.astimezone(WINDOW_TZ).date().isoformat()
 
 
+def _later(row, previous):
+    instant = _instant(row.get("observed_at"))
+    prior = _instant(previous.get("observed_at"))
+    if instant is None:
+        return False
+    if prior is None:
+        return True
+    return instant > prior
+
+
 def collect(rows, since=None, agent=None, until=None):
     """Fold uptake events into per-agent totals, skipping rows the instrument predates.
 
@@ -433,8 +443,14 @@ def collect(rows, since=None, agent=None, until=None):
     to the window itself) and `uptake-verdict` (which did not) would read the same ledger and count
     different samples the moment the window closes — the pre-registered dates would stop meaning
     anything on one of the two surfaces on 09-15.
+
+    A session that ends more than once is still one session. Rows are keyed by session_id, the
+    session's counters come from the newest firing alone — its final state, the one nothing
+    later revises — and summing across firings would inflate both the session floor and the
+    prompt floor the way duplicate rows do.
     """
-    per_agent = defaultdict(lambda: defaultdict(int))
+    per_agent_sessions = defaultdict(set)
+    per_agent_latest = {}
     skipped_old = 0
     for row in rows:
         if row.get("event") != "injection_uptake":
@@ -453,8 +469,17 @@ def collect(rows, since=None, agent=None, until=None):
         if not has_control_prompts:
             skipped_old += 1
             continue
+        sid = row.get("session_id") or (row.get("attributes") or {}).get("session_id")
+        key = (who, sid if sid else f"row:{id(row)}")
+        per_agent_sessions[who].add(key)
+        previous = per_agent_latest.get(key)
+        if previous is None or _later(row, previous):
+            per_agent_latest[key] = row
+    per_agent = defaultdict(lambda: defaultdict(int))
+    for who, keys in per_agent_sessions.items():
         bucket = per_agent[who]
-        bucket["sessions"] += 1
-        for key in COUNTERS:
-            bucket[key] += field(row, key)
+        bucket["sessions"] = len(keys)
+        for key in keys:
+            for counter in COUNTERS:
+                bucket[counter] += field(per_agent_latest[key], counter)
     return per_agent, skipped_old
