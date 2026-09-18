@@ -959,6 +959,21 @@ esac
   fi
   echo "ok - non_verdict_spool_rows_do_not_raise_a_verdict_alarm" ) || exit 1
 
+( make_case "$TMP/the_windows_first_utc_hours_are_in_window_loss" yes
+  printf '{"event":"session_end","session_id":"spooled-first-morning","ts":"%s"}\n' "$(window_ts 1)" \
+      >>"$TMP/the_windows_first_utc_hours_are_in_window_loss/home/.cache/oh-my-boring/events.ndjson"
+  if run_strict "$TMP/the_windows_first_utc_hours_are_in_window_loss" "$TMP/the_windows_first_utc_hours_are_in_window_loss.out"; then
+      cat "$TMP/the_windows_first_utc_hours_are_in_window_loss.out"
+      echo "FAIL: the window's first morning is UTC's previous day; a string compare files that loss outside the window and demotes it to a warning" >&2
+      exit 1
+  fi
+  grep -q "✗ EVENTS TRAPPED IN THE SPOOL" "$TMP/the_windows_first_utc_hours_are_in_window_loss.out" || {
+      cat "$TMP/the_windows_first_utc_hours_are_in_window_loss.out"
+      echo "FAIL: a row inside the window must be named as in-window loss" >&2
+      exit 1
+  }
+  echo "ok - the_windows_first_utc_hours_are_in_window_loss" ) || exit 1
+
 ( make_case "$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string" yes
   printf '{"event":"session_end","session_id":"spooled-boundary","ts":"%s"}\n' "$(window_ts_local -1)" \
       >>"$TMP/a_window_boundary_row_is_placed_by_instant_not_by_string/home/.cache/oh-my-boring/events.ndjson"
