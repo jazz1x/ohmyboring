@@ -2095,7 +2095,7 @@ async fn write_claim_mirror(store: &Store, key: &str, kind: &str) -> (String, St
         .await
         .expect("upsert claim");
     store
-        .upsert_claim_node(&path, "test", &claim)
+        .upsert_claim_node(&path, "test", &claim.subject, &claim.predicate, &claim)
         .await
         .expect("upsert claim node");
     (path, claim.subject, claim.predicate)
@@ -3332,7 +3332,13 @@ async fn corpus_status_reports_claim_edge_coverage() {
     let before = audit::stats(&store, false).await.expect("audit stats");
 
     store
-        .upsert_claim_node(&path, "", &front.claims[0])
+        .upsert_claim_node(
+            &path,
+            "",
+            &front.claims[0].subject,
+            &front.claims[0].predicate,
+            &front.claims[0],
+        )
         .await
         .expect("upsert claim node");
     delete_claims_edge(&db, &subject).await;
@@ -3349,7 +3355,13 @@ async fn corpus_status_reports_claim_edge_coverage() {
     );
 
     store
-        .upsert_claim_node(&path, "", &front.claims[0])
+        .upsert_claim_node(
+            &path,
+            "",
+            &front.claims[0].subject,
+            &front.claims[0].predicate,
+            &front.claims[0],
+        )
         .await
         .expect("restore claims edge");
     let after = audit::stats(&store, false).await.expect("audit stats");
@@ -3448,4 +3460,211 @@ async fn unchanged_note_reingest_repairs_claim_edge_without_embedding() {
         .delete_document(&note_path_str)
         .await
         .expect("cleanup document");
+}
+
+/// The missing-node mechanism: the claim row is keyed by `canon(subject)` while the graph node
+/// was assembled from the raw frontmatter spelling, so a claim whose subject is not already
+/// canonical was written as a node under a spelling no row uses — and `gc_orphans` deleted that
+/// node (with its edges) as a stale mirror at the end of every sync. The live trace: wiki-1718
+/// declares `feature/FDS-16749-resetkeys-restore / status`, the row reads
+/// `feature/fds-16749-resetkeys-restore`, and no node exists under either spelling after a
+/// sync. The node must be written under exactly the key the row uses, and survive the sweep.
+/// The already-canonical claim in the same note is the in-test control: it never lost its node.
+#[tokio::test]
+async fn claim_node_is_keyed_canonically_like_the_row() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let raw_subject = format!("Feature/FDS-16749-ResetKeys-Restore-{ts}");
+    let canon_subject = format!("feature/fds-16749-resetkeys-restore-{ts}");
+    let plain_subject = format!("plainkey-{ts}");
+    let path = format!("/vault/wiki/claim-node-key-{ts}.md");
+    let front = FrontMatter {
+        origin: "personal".to_string(),
+        project: String::new(),
+        kind: "note".to_string(),
+        source_path: path.clone(),
+        title: Some("claim node key test".to_string()),
+        tags: Vec::new(),
+        claims: vec![
+            Claim {
+                subject: raw_subject.clone(),
+                predicate: "axis".to_string(),
+                value: "v1".to_string(),
+                kind: "decision".to_string(),
+                confidence: "certain".to_string(),
+            },
+            Claim {
+                subject: plain_subject.clone(),
+                predicate: "axis".to_string(),
+                value: "v2".to_string(),
+                kind: "fact".to_string(),
+                confidence: "certain".to_string(),
+            },
+        ],
+        ..Default::default()
+    };
+    store
+        .upsert_document(&front, &format!("sha-{ts}"), SystemTime::now())
+        .await
+        .expect("upsert document");
+
+    let embedder = CountingEmbed::lenient();
+    extract_note_graph(&store, &embedder, &front).await;
+
+    assert_eq!(
+        claim_row_count(&db, &path, &canon_subject).await,
+        1,
+        "the row is keyed by the canonical subject"
+    );
+    let canonical_node = format!("claim:{canon_subject}:axis");
+    assert_eq!(
+        claim_mirror_node_count(&db, &canonical_node).await,
+        1,
+        "the node exists under the same key the row uses"
+    );
+    assert_eq!(
+        claim_mirror_node_count(&db, &format!("claim:{raw_subject}:axis")).await,
+        0,
+        "no node lingers under the raw frontmatter spelling"
+    );
+    assert_eq!(
+        claims_edge_count(&db, &path, &canon_subject).await,
+        1,
+        "the doc claims edge points at the canonical node"
+    );
+    assert_eq!(
+        claim_mirror_node_count(&db, &format!("decision:{canon_subject}:axis")).await,
+        1,
+        "the typed decision node shares the canonical key"
+    );
+    assert_eq!(
+        claim_mirror_node_count(&db, &format!("claim:{plain_subject}:axis")).await,
+        1,
+        "control: the already-canonical claim has its node"
+    );
+    assert_eq!(
+        claims_edge_count(&db, &path, &plain_subject).await,
+        1,
+        "control: the already-canonical claim keeps its edge"
+    );
+
+    store.gc_orphans().await.expect("gc orphans");
+
+    assert_eq!(
+        claim_mirror_node_count(&db, &canonical_node).await,
+        1,
+        "the canonical node survives the sweep that removed the raw-spelled one"
+    );
+    assert_eq!(
+        claims_edge_count(&db, &path, &canon_subject).await,
+        1,
+        "the claims edge survives gc too"
+    );
+    assert_eq!(
+        claim_mirror_node_count(&db, &format!("decision:{canon_subject}:axis")).await,
+        1,
+        "the typed node survives gc"
+    );
+
+    cleanup_claim_edge_fixture(&store, &db, &path, &canon_subject).await;
+    cleanup_claim_edge_fixture(&store, &db, &path, &plain_subject).await;
+}
+
+/// The population mechanism, pinned as deliberate behavior so a fix for the canonicalisation
+/// loss cannot be read as covering it: when a note stops declaring a claim, the re-ingest
+/// clears the doc's semantic edges and rewrites only what the note declares now — the dropped
+/// claim loses its `claims` edge while its row and its mirror node persist (re-ingest never
+/// seals or deletes rows, and the node still mirrors a live row, so gc leaves it). Those
+/// edgeless rows are the other share of the corpus-wide gap; sealing them is a separate
+/// decision this change does not make.
+#[tokio::test]
+async fn undeclared_claim_row_and_node_outlive_their_edge() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject_x = unique_subject("outlives-x");
+    let subject_y = unique_subject("outlives-y");
+    let dir = tempdir().expect("tempdir");
+    let note_path = dir.path().join("note.md");
+    let note = |claims: &str| {
+        format!(
+            "---\norigin: personal\nproject: \"\"\nkind: note\nclaims:\n{claims}\n---\n\nbody\n"
+        )
+    };
+    let claim_yaml = |subject: &str| {
+        format!(
+            "  - subject: {subject}\n    predicate: axis\n    value: v1\n    kind: fact\n    confidence: certain"
+        )
+    };
+    fs::write(&note_path, note(&claim_yaml(&subject_x))).expect("write note v1");
+    let note_path_str = note_path.to_string_lossy().into_owned();
+    let cfg = BoringConfig::default();
+
+    let mut stats = Stats::default();
+    let embedder = CountingEmbed::lenient();
+    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+        &store,
+        &embedder,
+        &cfg,
+        &note_path_str,
+        &mut stats,
+    )
+    .await
+    .expect("first ingest");
+    assert_eq!(outcome, FileOutcome::New);
+    assert_eq!(claim_row_count(&db, &note_path_str, &subject_x).await, 1);
+    assert_eq!(claims_edge_count(&db, &note_path_str, &subject_x).await, 1);
+
+    fs::write(&note_path, note(&claim_yaml(&subject_y))).expect("write note v2");
+    let mut stats = Stats::default();
+    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+        &store,
+        &embedder,
+        &cfg,
+        &note_path_str,
+        &mut stats,
+    )
+    .await
+    .expect("second ingest");
+    assert_eq!(outcome, FileOutcome::Updated);
+
+    assert_eq!(
+        claim_row_count(&db, &note_path_str, &subject_x).await,
+        1,
+        "the undeclared claim's row persists"
+    );
+    assert_eq!(
+        claim_mirror_node_count(&db, &format!("claim:{subject_x}:axis")).await,
+        1,
+        "the undeclared claim's node persists — its row still mirrors it"
+    );
+    assert_eq!(
+        claims_edge_count(&db, &note_path_str, &subject_x).await,
+        0,
+        "the undeclared claim's edge is gone — the note no longer declares it"
+    );
+    assert_eq!(
+        claim_row_count(&db, &note_path_str, &subject_y).await,
+        1,
+        "the surviving claim has its row"
+    );
+    assert_eq!(
+        claims_edge_count(&db, &note_path_str, &subject_y).await,
+        1,
+        "the surviving claim has the edge"
+    );
+
+    cleanup_claim_edge_fixture(&store, &db, &note_path_str, &subject_x).await;
+    cleanup_claim_edge_fixture(&store, &db, &note_path_str, &subject_y).await;
 }

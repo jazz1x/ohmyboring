@@ -1346,14 +1346,18 @@ impl Store {
     /// Upsert graph nodes/edges for a claim: `doc —claims→ claim:{subject}:{predicate}` and,
     /// for non-fact claims, a typed node (`decision:|risk:...`) plus an `is_a` edge.
     /// Also links the claim node to `project:{project}` when a project is present.
+    /// `subject`/`predicate` must be the canonical key — the same strings the claim row was
+    /// written under; passing the raw frontmatter spelling strands the node from its row.
     pub async fn upsert_claim_node(
         &self,
         path: &str,
         project: &str,
+        subject: &str,
+        predicate: &str,
         claim: &crate::frontmatter::Claim,
     ) -> Result<()> {
-        let claim_id = format!("claim:{}:{}", claim.subject, claim.predicate);
-        let label = format!("{}: {}", claim.predicate, claim.value);
+        let claim_id = format!("claim:{subject}:{predicate}");
+        let label = format!("{predicate}: {}", claim.value);
         let kind = claim.kind();
         let confidence = claim.confidence();
 
@@ -1363,8 +1367,8 @@ impl Store {
 
         // typed node for decisions/risks/etc.
         if kind != "fact" {
-            let typed_id = format!("{}:{}:{}", kind, claim.subject, claim.predicate);
-            let typed_label = format!("{} — {}", claim.subject, claim.value);
+            let typed_id = format!("{kind}:{subject}:{predicate}");
+            let typed_label = format!("{subject} — {}", claim.value);
             self.upsert_node(&typed_id, kind, &typed_label, Some(confidence))
                 .await?;
             self.upsert_edge(&claim_id, &typed_id, "is_a").await?;
