@@ -9,8 +9,11 @@ healthy wiki-first engine that simply has no DB to report on.
 from __future__ import annotations
 
 import os
+import socket
 import sys
 import unittest
+import urllib.error
+import urllib.request
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -19,6 +22,7 @@ from drudge_client import (  # noqa: E402
     DrudgeClient,
     DrudgeNotWritableError,
     check_drudge_writable,
+    sync_deadline_passed,
 )
 
 
@@ -76,6 +80,45 @@ class CheckDrudgeWritableTest(unittest.TestCase):
         with mock.patch.object(DrudgeClient, "health", return_value=payload) as health:
             check_drudge_writable()
         health.assert_called_once()
+
+
+class _FakeResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return b'{"ok": true}'
+
+
+class SyncTimeoutTest(unittest.TestCase):
+    def test_sync_passes_explicit_timeout_to_urlopen(self):
+        seen = {}
+
+        def fake_urlopen(req, timeout):
+            seen["timeout"] = timeout
+            return _FakeResponse()
+
+        with mock.patch.object(urllib.request, "urlopen", fake_urlopen):
+            DrudgeClient(base_url="http://127.0.0.1:9").sync(timeout=123.0)
+
+        self.assertEqual(seen["timeout"], 123.0)
+
+
+class SyncDeadlinePassedTest(unittest.TestCase):
+    def test_timeout_family_means_we_stopped_waiting(self):
+        self.assertTrue(sync_deadline_passed(socket.timeout("timed out")))
+        self.assertTrue(sync_deadline_passed(TimeoutError("timed out")))
+        self.assertTrue(sync_deadline_passed(urllib.error.URLError(TimeoutError("timed out"))))
+        self.assertTrue(sync_deadline_passed(urllib.error.URLError(socket.timeout("timed out"))))
+
+    def test_engine_failures_are_not_deadlines(self):
+        self.assertFalse(sync_deadline_passed(ConnectionRefusedError("refused")))
+        self.assertFalse(sync_deadline_passed(urllib.error.URLError(ConnectionRefusedError("refused"))))
+        self.assertFalse(sync_deadline_passed(urllib.error.URLError("down")))
+        self.assertFalse(sync_deadline_passed(OSError("boom")))
 
 
 if __name__ == "__main__":
