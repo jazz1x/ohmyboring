@@ -462,8 +462,9 @@ def test_sync_hermes_cron_jobs_adds_managed_job():
             result = agent_wiring._sync_hermes_cron_jobs()
         assert result["changed"] is True
         saved = mock_save.call_args[0][1]
-        # weekly-briefing (managed from config) + morning-briefing (preserved) + memory-ingest-worker + codex-memory-ingest-worker
-        assert len(saved["jobs"]) == 4
+        # weekly-briefing (managed from config) + morning-briefing (preserved) + memory-ingest-worker.
+        # No codex job: the host worker (launchd/crontab) owns that schedule — see below.
+        assert len(saved["jobs"]) == 3
         weekly = next(j for j in saved["jobs"] if j["name"] == "weekly-briefing")
         assert weekly["script"] == "weekly-briefing.py"
         assert weekly["enabled"] is True
@@ -472,12 +473,24 @@ def test_sync_hermes_cron_jobs_adds_managed_job():
         assert worker["script"] == "ingest-worker.py"
         assert worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
         assert worker["skill"] == "memory-ingest"
-        codex_worker = next(j for j in saved["jobs"] if j["name"] == "codex-memory-ingest-worker")
-        assert codex_worker["script"] == "codex-collect-sessions.py"
-        assert codex_worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
-        assert codex_worker["skill"] is None
-        assert codex_worker["skills"] == []
-        assert codex_worker["no_agent"] is True
+        assert [j["name"] for j in saved["jobs"] if j["name"] == "codex-memory-ingest-worker"] == [], (
+            "the host worker already runs the collector every 20m; a hermes job is a second owner"
+        )
+
+
+def test_install_removes_a_hermes_codex_job_left_by_an_older_install():
+    """An install that ran before this change left the duplicate behind, and disabling it by hand
+    did not survive the next install. The removal has to happen on the way through, or the two
+    schedulers stay and `doctor` keeps reporting `dual codex scheduler active`."""
+    jobs = [
+        {"name": "morning-briefing", "deliver": "slack:test"},
+        {"name": "codex-memory-ingest-worker", "script": "codex-collect-sessions.py", "enabled": True},
+    ]
+    assert agent_wiring._retire_codex_memory_ingest_worker(jobs) is True
+    assert [j["name"] for j in jobs] == ["morning-briefing"]
+    assert agent_wiring._retire_codex_memory_ingest_worker(jobs) is False, (
+        "nothing to remove is not a change — an install that changes nothing must not rewrite the file"
+    )
 
 
 def test_install_places_ingest_worker_and_job_uses_relative_script():
@@ -693,4 +706,5 @@ if __name__ == "__main__":
     test_installed_ingest_worker_imports_resolve_from_the_scripts_dir()
     test_ingest_worker_skips_session_inside_stability_window()
     test_sync_hermes_cron_jobs_repairs_blocked_absolute_worker_path()
+    test_install_removes_a_hermes_codex_job_left_by_an_older_install()
     print("ok - agent_wiring failure propagation + hermes wiring + settings_path")
