@@ -43,6 +43,7 @@ import omb_env
 import transcript
 import workflow_contract
 from drudge_client import DrudgeClient
+from vault_note import frontmatter_text
 
 # Runs in TWO contexts: inside the hermes-agent container (via `hermes cron --script`) or on the host
 # (manual/launchd). Auto-detect by the container's bind mount so paths + the engine URL resolve in both.
@@ -119,13 +120,9 @@ def _frontmatter_session_id(path):
             text = f.read()
     except OSError:
         return None
-    if not text.startswith("---\n"):
-        return None
-    end = text.find("\n---\n")
-    if end == -1:
-        return None
-    yaml_text = text[4:end]
-    m = re.search(r'^omb_session_id:\s*"?([^"\n]+)"?\s*$', yaml_text, re.MULTILINE)
+    m = re.search(
+        r'^omb_session_id:\s*"?([^"\n]+)"?\s*$', frontmatter_text(text), re.MULTILINE
+    )
     return m.group(1).strip() if m else None
 
 

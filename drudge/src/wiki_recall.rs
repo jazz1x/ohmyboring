@@ -115,10 +115,7 @@ fn snippet_around(text: &str, pos: usize) -> String {
 
 /// Split `--- yaml ---\nbody` + extract the title from frontmatter. If absent, the first `# ` heading, and failing that the stem. Pure.
 fn extract_title_body<'a>(content: &'a str, stem: &str) -> (String, &'a str) {
-    let (yaml, body) = content
-        .strip_prefix("---\n")
-        .and_then(|rest| rest.find("\n---\n").map(|e| (&rest[..e], &rest[e + 5..])))
-        .unwrap_or(("", content));
+    let (yaml, body) = crate::vault::split_frontmatter(content).unwrap_or(("", content));
     if let Some(line) = yaml.lines().find(|l| l.trim_start().starts_with("title:")) {
         let t = line
             .split_once(':')
@@ -137,9 +134,8 @@ fn extract_title_body<'a>(content: &'a str, stem: &str) -> (String, &'a str) {
 
 /// Extract `project:` from the YAML frontmatter, if present. Pure.
 fn extract_project(content: &str) -> String {
-    content
-        .strip_prefix("---\n")
-        .and_then(|rest| rest.find("\n---\n").map(|e| &rest[..e]))
+    crate::vault::split_frontmatter(content)
+        .map(|(yaml, _)| yaml)
         .and_then(|yaml| {
             yaml.lines()
                 .find(|l| l.trim_start().starts_with("project:"))

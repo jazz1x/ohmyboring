@@ -18,6 +18,7 @@ from typing import Any, Optional
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared"))
 import omb_env  # noqa: E402
 from drudge_client import DrudgeClient  # noqa: E402
+from vault_note import split_frontmatter  # noqa: E402
 
 DEFAULT_THRESHOLD = 0.93
 DEFAULT_ARCHIVE_DIR = "data/archive/dup"
@@ -83,13 +84,10 @@ class UnionFind:
 
 def parse_note(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
+    split = split_frontmatter(text)
+    if split is None:
         return {"path": path, "title": "", "body": text, "mtime": path.stat().st_mtime}
-    end = text.find("\n---\n")
-    if end == -1:
-        return {"path": path, "title": "", "body": text, "mtime": path.stat().st_mtime}
-    yaml_text = text[4:end]
-    body = text[end + 5 :]
+    yaml_text, body = split
     try:
         fm = json.loads(yaml_text) if yaml_text.strip().startswith("{") else yaml.safe_load(yaml_text)
     except Exception:

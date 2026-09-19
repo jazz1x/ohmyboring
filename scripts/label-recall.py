@@ -25,6 +25,7 @@ sys.path.insert(0, str(SHARED))
 import label_core  # noqa: E402
 import omb_env  # noqa: E402
 from drudge_client import DrudgeClient  # noqa: E402
+from vault_note import split_frontmatter  # noqa: E402
 
 #: How much of a note the judge sees. Long enough to decide, short enough that a local model
 #: answers in seconds; the note's own opening carries its subject.
@@ -48,8 +49,8 @@ def read_excerpt(path):
     if not candidate.is_file():
         return None
     text = candidate.read_text(encoding="utf-8", errors="replace")
-    body = text.split("---", 2)[-1] if text.startswith("---") else text
-    return body.strip()[:EXCERPT_CHARS]
+    split = split_frontmatter(text)
+    return (split[1] if split else text).strip()[:EXCERPT_CHARS]
 
 
 def call_judge(prompt, base_url, model, api_key, timeout=90):

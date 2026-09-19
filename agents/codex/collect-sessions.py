@@ -46,6 +46,7 @@ import omb_env
 import transcript
 import workflow_contract
 from drudge_client import DrudgeClient, DrudgeNotWritableError, check_drudge_writable
+from vault_note import frontmatter_text
 
 BORING_URL = omb_env.drudge_url()
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
@@ -349,12 +350,7 @@ def _vault_wiki_dir() -> str:
 def _frontmatter_session_id(path: str) -> str:
     with open(path, encoding="utf-8") as f:
         text = f.read()
-    if not text.startswith("---\n"):
-        return ""
-    end = text.find("\n---\n")
-    if end < 0:
-        return ""
-    for line in text[4:end].splitlines():
+    for line in frontmatter_text(text).splitlines():
         if line.startswith("omb_session_id:"):
             return line.split(":", 1)[1].strip().strip("\"'")
     return ""

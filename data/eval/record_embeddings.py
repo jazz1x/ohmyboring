@@ -20,6 +20,9 @@ import sys
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "agents" / "shared"))
+from vault_note import split_frontmatter  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 FIXTURES = HERE / "fixtures"
 GOLDEN = HERE / "golden.json"
@@ -35,13 +38,8 @@ def key(text: str) -> str:
 def body_of(raw: str) -> str:
     """Replicate frontmatter::parse + chunk(body.trim()): the exact text drudge embeds for a
     single-chunk note. Strip BOM, drop the `---\\n...\\n---\\n` frontmatter, trim."""
-    raw = raw.removeprefix("﻿")
-    if raw.startswith("---\n"):
-        rest = raw[4:]
-        end = rest.find("\n---\n")
-        if end != -1:
-            return rest[end + 5 :].strip()
-    return raw.strip()
+    split = split_frontmatter(raw)
+    return (split[1] if split else raw).strip()
 
 
 def embed(text: str) -> list:
