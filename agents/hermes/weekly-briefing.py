@@ -19,6 +19,7 @@ from slack_briefing import (
     render_weekly_blocks,
     render_weekly_mrkdwn,
 )
+from vault_note import split_frontmatter
 from weekly_trend import collect_week, label_trend, needs_intervention, scoreboard
 
 HERMES_URL = os.environ.get("BORING_URL") or os.environ.get(
@@ -67,8 +68,8 @@ def read_week(today, span=WINDOW_DAYS, wiki_dir=None):
                 raw = handle.read()
         except OSError:
             continue
-        body = raw.split("---", 2)[-1] if raw.startswith("---") else raw
-        out.append((date, parse_brief(body)))
+        split = split_frontmatter(raw)
+        out.append((date, parse_brief(split[1] if split else raw)))
     return out
 
 

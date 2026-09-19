@@ -31,6 +31,7 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared")
 )
 import boring_config  # noqa: E402
+from vault_note import split_frontmatter  # noqa: E402
 
 PLACEHOLDER_TAGS = {"_", "pr_", "slack_", ""}
 GENERIC_PROJECTS = {"Development", "wiki", ""}
@@ -77,13 +78,10 @@ def _collect_notes(wiki_dir: Path):
         if p.name == SEED_NOTE:
             continue
         text = p.read_text(encoding="utf-8")
-        if not text.startswith("---\n"):
+        split = split_frontmatter(text)
+        if split is None:
             continue
-        end = text.find("\n---\n")
-        if end < 0:
-            continue
-        yaml_text = text[4:end]
-        body = text[end + 5 :]
+        yaml_text, body = split
         try:
             import yaml
 

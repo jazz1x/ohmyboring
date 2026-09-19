@@ -1,0 +1,13 @@
+# Everything this repo's Python runs on, and it is one line.
+#
+# The adapters, hooks and gates are stdlib-only on purpose: an agent hook that needs a
+# virtualenv on someone else's machine does not get installed. PyYAML is the single
+# exception, and only where a note's frontmatter has to come back as a mapping rather than
+# as text — scripts/data-steward.py, scripts/dedup-wiki.py, scripts/vault-cleanup-gate.py
+# and their tests. Splitting the frontmatter needs no parser at all (agents/shared/vault_note.py).
+#
+# It was undeclared until 2026-09-19 and `scripts/guard.sh` ran two suites that import it, so
+# the gate was green because the CI runner image happened to ship PyYAML, not because anything
+# asked for it. scripts/test_python_deps.py now fails if a second dependency appears here or in
+# the source without the other side agreeing.
+PyYAML>=6.0

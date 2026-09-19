@@ -26,6 +26,11 @@ jobs:
         with:
           workspaces: drudge
           shared-key: drudge # same key across every job that builds drudge, so the cache isn't split per job name
+      # guard.sh runs the Python suites too, and two of them need PyYAML. Until 2026-09-19 nothing
+      # installed it and the job was green because the runner image ships it — an accident, not a
+      # gate. scripts/test_python_deps.py fails if this list and the imports drift apart.
+      - name: install the declared Python dependency
+        run: python3 -m pip install --quiet -r requirements.txt
       # scripts/guard.sh = rustfmt --check + clippy -D warnings + test (스택-프리).
       - name: structural gate (guard.sh)
         run: ./scripts/guard.sh

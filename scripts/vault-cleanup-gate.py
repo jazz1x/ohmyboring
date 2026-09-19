@@ -21,8 +21,10 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "agents" / "shared"))
+from vault_note import split_frontmatter  # noqa: E402
+
 DATA_STEWARD = ROOT / "scripts" / "data-steward.py"
 
 
@@ -61,15 +63,12 @@ def _frontmatter_errors(wiki_dir: Path) -> list[str]:
     errors = []
     for path in sorted(wiki_dir.glob("wiki-*.md")):
         text = path.read_text(encoding="utf-8")
-        if not text.startswith("---\n"):
+        split = split_frontmatter(text)
+        if split is None:
             errors.append(f"{path.name}: missing frontmatter fence")
             continue
-        end = text.find("\n---\n")
-        if end < 0:
-            errors.append(f"{path.name}: missing closing frontmatter fence")
-            continue
         try:
-            yaml.safe_load(text[4:end])
+            yaml.safe_load(split[0])
         except Exception as e:  # noqa: BLE001
             errors.append(f"{path.name}: frontmatter parse error: {e}")
     return errors
