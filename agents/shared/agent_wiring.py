@@ -842,7 +842,7 @@ def _sync_hermes_cron_jobs() -> dict:
     if _ensure_memory_ingest_worker(jobs, tz, now, BORING_HOME):
         changed = True
 
-    if _ensure_codex_memory_ingest_worker(jobs, tz, now, BORING_HOME):
+    if _retire_codex_memory_ingest_worker(jobs):
         changed = True
 
     data["jobs"] = jobs
@@ -924,79 +924,23 @@ def _ensure_memory_ingest_worker(
     return True
 
 
-def _ensure_codex_memory_ingest_worker(
-    jobs: list[dict],
-    tz: datetime.timezone,
-    now: datetime.datetime,
-    boring_home: str,
-) -> bool:
-    """Ensure the autonomous 20-minute Codex session-ingestion worker exists.
+def _retire_codex_memory_ingest_worker(jobs: list[dict]) -> bool:
+    """Drop the hermes copy of the Codex collector: the host worker owns that schedule.
 
-    Unlike the Claude memory-ingest-worker, this script distills and remembers on
-    its own. Run it as a no-agent cron script so Hermes does not try to resolve
-    the memory-ingest skill before executing it.
+    `install_codex_host_worker` installs the collector on every platform this runs on —
+    launchd on macOS, crontab on Linux — and that is the canonical owner (`doctor`'s
+    `readiness_issue dual codex scheduler active` says so by name). This installer used to
+    assert a hermes job for the same script on the same 20-minute interval, so one
+    `--install` produced two schedulers for one collector, and disabling either by hand was
+    undone by the next run.
+
+    Two owners is not twice the ingestion: the collector takes one session per tick and
+    marks it done, so the loser of the race spends an LLM call to find nothing. Returns
+    True when a job was actually removed, so the caller knows the file changed.
     """
-    script = "codex-collect-sessions.py"
-    desired_schedule = {"kind": "interval", "minutes": 20, "display": "every 20m"}
-    existing = next((j for j in jobs if j.get("name") == "codex-memory-ingest-worker"), None)
-    if existing:
-        needs_update = (
-            existing.get("script") != script
-            or existing.get("schedule") != desired_schedule
-            or not existing.get("enabled", True)
-            or existing.get("skill") is not None
-            or existing.get("skills") != []
-            or existing.get("no_agent", False) is not True
-        )
-        if not needs_update:
-            return False
-        existing["script"] = script
-        existing["schedule"] = desired_schedule
-        existing["schedule_display"] = "every 20m"
-        existing["enabled"] = True
-        existing["state"] = "scheduled"
-        existing["skills"] = []
-        existing["skill"] = None
-        existing["no_agent"] = True
-        existing["next_run_at"] = (now + datetime.timedelta(minutes=1)).isoformat()
-        existing["paused_at"] = None
-        existing["paused_reason"] = None
-        return True
-
-    jobs.append(
-        {
-            "id": secrets.token_hex(8),
-            "name": "codex-memory-ingest-worker",
-            "prompt": "",
-            "skills": [],
-            "skill": None,
-            "model": None,
-            "provider": None,
-            "base_url": None,
-            "script": script,
-            "no_agent": True,
-            "context_from": None,
-            "schedule": desired_schedule,
-            "schedule_display": "every 20m",
-            "repeat": {"times": None, "completed": 0},
-            "enabled": True,
-            "state": "scheduled",
-            "paused_at": None,
-            "paused_reason": None,
-            "created_at": now.isoformat(),
-            "next_run_at": (now + datetime.timedelta(minutes=1)).isoformat(),
-            "last_run_at": None,
-            "last_status": None,
-            "last_error": None,
-            "last_delivery_error": None,
-            "deliver": "local",
-            "origin": None,
-            "enabled_toolsets": None,
-            "workdir": None,
-            "profile": None,
-        }
-    )
-    return True
+    before = len(jobs)
+    jobs[:] = [j for j in jobs if j.get("name") != "codex-memory-ingest-worker"]
+    return len(jobs) != before
 
 
 _HERMES_HINT = (
