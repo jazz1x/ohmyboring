@@ -31,6 +31,12 @@ MAX_RESULTS = int(os.environ.get("RECALL_MAX_RESULTS") or "3")
 #: by promise. 6 would move the pool to 24 and forfeit that proof — hence 2, not more.
 CONTROL_RESULTS = int(os.environ.get("RECALL_CONTROL_RESULTS") or "2")
 MAX_TOKENS = int(os.environ.get("RECALL_MAX_TOKENS") or "1500")
+#: How many claims each hit hands over. A claim is the record of a settled thing — what was
+#: decided, what is next, what bit us — and the north star is that the agent does not re-solve
+#: what the owner already solved. 1, because a claim runs ~60-120 chars against the snippet's
+#: 280: three hits spend ~300 characters to say what three notes settled, and the engine's own
+#: ledger puts roughly one decision on each of the most-injected notes anyway.
+CLAIMS_PER_HIT = int(os.environ.get("RECALL_CLAIMS_PER_HIT") or "1")
 TIMEOUT = float(os.environ.get("RECALL_TIMEOUT") or "5")
 RETRIES = int(os.environ.get("RECALL_RETRIES") or "1")
 SESSION_THROTTLE_SECONDS = int(os.environ.get("RECALL_SESSION_THROTTLE_SECONDS") or "3600")
@@ -219,6 +225,33 @@ def consumption_note(hit: dict) -> str:
     return f" ({', '.join(parts)})" if parts else ""
 
 
+CLAIM_VALUE_MAX = 200
+
+
+def claim_lines(hit: dict) -> list[str]:
+    """The claims this hit handed over, one line each, as the settled thing they are.
+
+    A claim reads `subject predicate value`; the kind says whether it is a decision, a risk,
+    or what comes next, and that is what the agent needs to know before re-deciding it. The
+    cut is stated when the note declared more than were handed over — a bare list hides that
+    there was more, and this hook's whole job is to say what it is handing over."""
+    rows = hit.get("claims") or []
+    if not rows:
+        return []
+    out = []
+    for r in rows:
+        value = " ".join((r.get("value") or "").split())[:CLAIM_VALUE_MAX]
+        subject = " ".join((r.get("subject") or "").split())
+        predicate = " ".join((r.get("predicate") or "").split())
+        if not value:
+            continue
+        out.append(f"  · [{r.get('kind') or 'claim'}] {subject} {predicate}: {value}".rstrip())
+    total = int(hit.get("claims_total") or 0)
+    if out and total > len(rows):
+        out[-1] += f" (declared {total}, handed over {len(rows)})"
+    return out
+
+
 RELATED_PER_INJECTION = 2
 
 
@@ -268,6 +301,7 @@ def run_recall(
             max_tokens=MAX_TOKENS,
             related=1,
             related_heads=MAX_RESULTS + CONTROL_RESULTS,
+            claims=CLAIMS_PER_HIT,
         )
     except Exception as e:
         print(f"[omb-recall] search failed after {RETRIES} retries: {e}", file=sys.stderr)
@@ -294,6 +328,8 @@ def run_recall(
         snip = salient(h.get("snippet"))
         if snip:
             lines.append(f"- [{src}]{consumption_note(h)} {snip}")
+        for line in claim_lines(h):
+            lines.append(line)
         for r in related.get(src, []):
             lines.append(f"  ↳ shares a concept with [{source_name(r)}] {salient(r.get('snippet'))}")
     if over_ceiling:

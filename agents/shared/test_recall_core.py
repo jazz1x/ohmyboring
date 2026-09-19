@@ -193,6 +193,47 @@ def test_the_engine_asked_for_related_notes_on_every_pool_hit():
     assert kwargs["related_heads"] == kwargs["max_results"] == recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS
 
 
+def test_the_engine_is_asked_for_the_claims_behind_each_hit():
+    """The ask is the whole point: the engine has held the claims since #365 and handed over
+    none, because nobody asked. A zero here is the feature switched off."""
+    from unittest import mock
+
+    with tempfile.TemporaryDirectory() as d, mock.patch.dict(
+        os.environ, {"BORING_INJECTION_LEDGER": os.path.join(d, "l.jsonl"), "BORING_EVENT_SINK": "spool"}
+    ), mock.patch.object(recall_core, "DrudgeClient") as client:
+        client.return_value.search.return_value = []
+        recall_core.run_recall({"prompt": "why did the connection pool die again", "session_id": "s1"})
+    assert client.return_value.search.call_args.kwargs["claims"] == recall_core.CLAIMS_PER_HIT >= 1
+
+
+def test_a_hit_that_declares_a_decision_puts_it_in_the_prompt():
+    """A decision claim is the record of a solve. It reaches the prompt as its own line under the
+    hit, and when the note declared more than were handed over, the line says so."""
+    text = "the pool died because deadpool recycled a closed socket " * 3
+    hit = dict(
+        _hit("wiki-0007.md", text),
+        claims=[{"subject": "pool", "predicate": "sizing", "value": "max 8, idle 30s", "kind": "decision"}],
+        claims_total=3,
+    )
+    with tempfile.TemporaryDirectory() as d:
+        ctx = _recall([hit], ledger=os.path.join(d, "l.jsonl"))
+    assert "· [decision] pool sizing: max 8, idle 30s" in ctx, ctx
+    assert "declared 3, handed over 1" in ctx, ctx
+
+
+def test_a_hit_with_no_claims_reads_exactly_as_it_did_before():
+    """The claim line is additive. A hit the engine handed no claims for injects the same bytes
+    it injected before this change — otherwise the render, not the ask, is the channel change."""
+    text = "the pool died because deadpool recycled a closed socket " * 3
+    with tempfile.TemporaryDirectory() as d:
+        bare = _recall([_hit("wiki-0007.md", text)], ledger=os.path.join(d, "l1.jsonl"))
+        empty = _recall(
+            [dict(_hit("wiki-0007.md", text), claims=[], claims_total=0)], ledger=os.path.join(d, "l2.jsonl")
+        )
+    assert bare == empty, "an empty claims list is not a rendering difference"
+    assert " · [" not in bare
+
+
 def test_what_earlier_sessions_did_with_a_note_reorders_the_pool_and_shows():
     """A note reused before goes first, a note argued with more than reused goes to the back,
     and the agent is told both. The engine's order survives among untouched notes."""
