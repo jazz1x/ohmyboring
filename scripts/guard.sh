@@ -76,6 +76,7 @@ python3 agents/hermes/test_briefing_format.py
 python3 agents/hermes/test_ingest_worker.py
 python3 agents/shared/test_vault_note.py
 python3 scripts/test_python_deps.py
+python3 scripts/test_runbook.py
 python3 scripts/test_data_steward.py
 python3 scripts/test_vault_cleanup_gate.py
 python3 scripts/test_usage.py
