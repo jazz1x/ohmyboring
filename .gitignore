@@ -48,6 +48,9 @@ docs/*
 # `docs/*` exists for personal working docs; a tracked contract needs an explicit exception —
 # this is the second artifact caught by that rule after data/schema/baseline.sql.
 !docs/PRD.md
+# The runbook is read when something is down, so it ships with the repo, and a gate
+# (scripts/test_runbook.py) checks the commands it names — the third artifact this rule caught.
+!docs/RUNBOOK.md
 
 # 개인 정책 설정 — 예시 파일(boring.example.json)만 추적
 boring.json
