@@ -208,6 +208,8 @@ class ReconcileTest(unittest.TestCase):
         os.utime(retry, (stale, stale))
         session = Path(self.tmp.name) / "s-retry.jsonl"
         session.write_text("{}\n")
+        stable = time.time() - ingest_worker.STABLE_AGE_S - 1
+        os.utime(session, (stable, stable))
 
         self.assertTrue(ingest_worker._eligible(str(session)))
 

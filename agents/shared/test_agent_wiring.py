@@ -7,11 +7,13 @@ Guards the installer surface that is otherwise only exercised at install time:
   - install() must report failures instead of swallowing them.
   - hermes-agent must not be reported as "unsupported".
 """
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest import TestCase, mock
 
@@ -226,6 +228,7 @@ def test_wire_hermes_adds_hint_and_weekly():
         )
         (scripts / "weekly-briefing.py").write_text("# stub", encoding="utf-8")
         (scripts / "codex-collect-sessions.py").write_text("# stub", encoding="utf-8")
+        (scripts / "ingest-worker.py").write_text("# stub", encoding="utf-8")
         installed_scripts = fake_home / ".hermes" / "scripts"
         installed_slack_briefing = installed_scripts / "slack_briefing.py"
         assert not installed_scripts.exists()
@@ -354,6 +357,7 @@ def test_wire_hermes_missing_slack_briefing_has_no_side_effects():
         (source_dir / "briefing.py").write_text("import slack_briefing\n", encoding="utf-8")
         (source_dir / "weekly-briefing.py").write_text("# stub\n", encoding="utf-8")
         (source_dir / "codex-collect-sessions.py").write_text("# stub\n", encoding="utf-8")
+        (source_dir / "ingest-worker.py").write_text("# stub\n", encoding="utf-8")
         cfg = Path(d) / "config.yaml"
         original = b"agent:\n  environment_hint: 'keep exactly'\n"
         cfg.write_bytes(original)
@@ -465,7 +469,7 @@ def test_sync_hermes_cron_jobs_adds_managed_job():
         assert weekly["enabled"] is True
         assert weekly["deliver"] == "slack:test"
         worker = next(j for j in saved["jobs"] if j["name"] == "memory-ingest-worker")
-        assert worker["script"] == "/host/oh-my-boring/agents/hermes/ingest-worker.py"
+        assert worker["script"] == "ingest-worker.py"
         assert worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
         assert worker["skill"] == "memory-ingest"
         codex_worker = next(j for j in saved["jobs"] if j["name"] == "codex-memory-ingest-worker")
@@ -474,6 +478,141 @@ def test_sync_hermes_cron_jobs_adds_managed_job():
         assert codex_worker["skill"] is None
         assert codex_worker["skills"] == []
         assert codex_worker["no_agent"] is True
+
+
+def test_install_places_ingest_worker_and_job_uses_relative_script():
+    """--install must place ingest-worker.py in ~/.hermes/scripts AND point the job at the
+    relative name — either alone leaves the job blocked with 'script path resolves outside
+    the scripts directory' on every tick."""
+    repo = HERE.parent.parent
+    with tempfile.TemporaryDirectory() as d, mock.patch.object(
+        agent_wiring.boring_config, "hermes_cron_jobs", return_value={}
+    ):
+        fake_home = Path(d) / "home"
+
+        def fake_expanduser(value):
+            if value == "~":
+                return str(fake_home)
+            if value.startswith("~/"):
+                return str(fake_home / value[2:])
+            return value
+
+        cfg = Path(d) / "config.yaml"
+        with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser):
+            agent_wiring.wire_hermes(cfg, boring_home=str(repo))
+
+        installed = fake_home / ".hermes" / "scripts" / "ingest-worker.py"
+        assert installed.exists(), "the worker must be installed where hermes resolves scripts"
+
+        data = json.loads(
+            (fake_home / ".hermes" / "cron" / "jobs.json").read_text(encoding="utf-8")
+        )
+        worker = next(j for j in data["jobs"] if j["name"] == "memory-ingest-worker")
+        assert worker["script"] == "ingest-worker.py"
+        assert not os.path.isabs(worker["script"])
+
+
+def test_installed_ingest_worker_imports_resolve_from_the_scripts_dir():
+    """Whatever the worker imports at runtime must be present beside the installed copy —
+    asserted by importing, the way the briefing install's test does."""
+    repo = HERE.parent.parent
+    with tempfile.TemporaryDirectory() as d, mock.patch.object(
+        agent_wiring.boring_config, "hermes_cron_jobs", return_value={}
+    ):
+        fake_home = Path(d) / "home"
+
+        def fake_expanduser(value):
+            if value == "~":
+                return str(fake_home)
+            if value.startswith("~/"):
+                return str(fake_home / value[2:])
+            return value
+
+        cfg = Path(d) / "config.yaml"
+        with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser):
+            agent_wiring.wire_hermes(cfg, boring_home=str(repo))
+
+        installed_scripts = (fake_home / ".hermes" / "scripts").resolve()
+        imported = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import pathlib, runpy, sys; "
+                "ns = runpy.run_path(sys.argv[1], run_name='ingest_worker'); "
+                "print(pathlib.Path(ns['distill_core'].__file__).resolve())",
+                str(installed_scripts / "ingest-worker.py"),
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "BORING_HOME": str(repo), "BORING_IN_CONTAINER": "0"},
+        )
+        assert imported.returncode == 0, imported.stderr
+        assert Path(imported.stdout.strip()) == installed_scripts / "distill_core.py"
+
+
+def _load_ingest_worker():
+    """Import agents/hermes/ingest-worker.py (hyphenated name) for direct unit tests."""
+    src = HERE.parent / "hermes" / "ingest-worker.py"
+    spec = importlib.util.spec_from_file_location("omb_ingest_worker_test", src)
+    worker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(worker)
+    return worker
+
+
+def test_ingest_worker_skips_session_inside_stability_window():
+    """A transcript modified within COLLECT_STABLE_AGE_SECONDS is still open — offering it
+    would pay for a note the SessionEnd hook is about to write itself."""
+    worker = _load_ingest_worker()
+    original_mark_dir = worker.markers.MARK_DIR
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            worker.markers.set_mark_dir(str(Path(d) / "markers"))
+            fresh = Path(d) / "s-fresh.jsonl"
+            fresh.write_text("{}\n", encoding="utf-8")
+            settled = Path(d) / "s-settled.jsonl"
+            settled.write_text("{}\n", encoding="utf-8")
+            old = time.time() - 2 * worker.STABLE_AGE_S
+            os.utime(settled, (old, old))
+            assert worker._eligible(str(fresh)) is False
+            assert worker._eligible(str(settled)) is True
+    finally:
+        worker.markers.set_mark_dir(original_mark_dir)
+
+
+def test_sync_hermes_cron_jobs_repairs_blocked_absolute_worker_path():
+    """The job as installed until now points at a /host absolute path hermes refuses; the next
+    --install must rewrite it to the relative name rather than re-assert the blocked path."""
+    existing = {
+        "jobs": [
+            {
+                "name": "memory-ingest-worker",
+                "script": "/host/oh-my-boring/agents/hermes/ingest-worker.py",
+                "schedule": {"kind": "interval", "minutes": 20, "display": "every 20m"},
+                "schedule_display": "every 20m",
+                "enabled": True,
+                "state": "scheduled",
+                "skill": "memory-ingest",
+                "skills": ["memory-ingest"],
+                "no_agent": False,
+            }
+        ]
+    }
+    with tempfile.TemporaryDirectory() as d, mock.patch.object(
+        agent_wiring.boring_config, "hermes_cron_jobs", return_value={}
+    ), mock.patch.object(
+        agent_wiring, "_load_json", return_value=existing
+    ), mock.patch.object(agent_wiring, "_save_json") as mock_save:
+        jobs_path = Path(d) / "jobs.json"
+        with mock.patch.object(Path, "expanduser", return_value=jobs_path):
+            result = agent_wiring._sync_hermes_cron_jobs()
+        assert result["changed"] is True
+        saved = mock_save.call_args[0][1]
+        worker = next(j for j in saved["jobs"] if j["name"] == "memory-ingest-worker")
+        assert worker["script"] == "ingest-worker.py"
+        assert worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
+        assert worker["skill"] == "memory-ingest"
+        assert worker["enabled"] is True
 
 
 
@@ -550,4 +689,8 @@ if __name__ == "__main__":
     test_install_codex_host_worker_macos_writes_launch_agent()
     test_next_cron_run_finds_next_monday()
     test_sync_hermes_cron_jobs_adds_managed_job()
+    test_install_places_ingest_worker_and_job_uses_relative_script()
+    test_installed_ingest_worker_imports_resolve_from_the_scripts_dir()
+    test_ingest_worker_skips_session_inside_stability_window()
+    test_sync_hermes_cron_jobs_repairs_blocked_absolute_worker_path()
     print("ok - agent_wiring failure propagation + hermes wiring + settings_path")
