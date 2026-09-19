@@ -378,6 +378,30 @@ async fn attach_consumption(store: &Store, hits: &mut [SearchHit]) -> Result<(),
     Ok(())
 }
 
+/// The claims behind each hit, when the caller asked for them (`claims` > 0). One grouped query
+/// for the whole response, never one per hit. At `0` — absent or explicit — nothing is attached
+/// and no query runs: the response stays byte-identical to what the freeze window measures.
+/// No store (wiki-recall fallback): hits keep empty `claims`, no error — same contract as `related`.
+async fn attach_claims(
+    store: &Store,
+    hits: &mut [SearchHit],
+    per_hit: u32,
+) -> Result<(), AppError> {
+    if per_hit == 0 {
+        return Ok(());
+    }
+    let paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
+    let declared = store.declared_claims(&paths, i64::from(per_hit)).await?;
+    for hit in hits.iter_mut() {
+        let rows = declared.get(&hit.source_path);
+        hit.claims_total = Some(rows.map_or(0, |r| r.total_matching));
+        if let Some(r) = rows {
+            hit.claims = r.rows.clone();
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_search(
     State(s): State<AppState>,
     Json(req): Json<crate::serve::SearchReq>,
@@ -416,6 +440,8 @@ pub(crate) async fn handle_search(
             superseded_by: Vec::new(),
             used_count: 0,
             contested_count: 0,
+            claims: Vec::new(),
+            claims_total: None,
         })
         .collect()
     } else {
@@ -437,13 +463,16 @@ pub(crate) async fn handle_search(
                 superseded_by: Vec::new(),
                 used_count: 0,
                 contested_count: 0,
+                claims: Vec::new(),
+                claims_total: None,
             })
             .collect()
     };
-    // Consumption counts beside every hit — one query for the whole response, 0 on the
-    // wiki-recall fallback where the graph cannot say.
+    // Graph-backed enrichments beside every hit — one grouped query each (consumption counts,
+    // and the opt-in claims handover). Both no-op where the graph cannot speak: no store, or `claims=0` — the §5-R6 frozen shape.
     if let Some(store) = s.store.as_ref() {
         attach_consumption(store, &mut mapped).await?;
+        attach_claims(store, &mut mapped, req.claims()).await?;
     }
     // Opt-in graph read: beside each of the first `related_heads` hits, the older notes that
     // share a concept with it. The concept walk, not the shared-node walk — measured 2026-09-10,
@@ -469,6 +498,17 @@ pub(crate) async fn handle_search(
             }
         }
     }
+    log_search_query(&s, &req, &mapped, started);
+    Ok(Json(SearchResp { hits: mapped }))
+}
+
+/// Query-log row for a finished /search: one line per hit, best snippet as the answer preview.
+fn log_search_query(
+    s: &AppState,
+    req: &crate::serve::SearchReq,
+    mapped: &[SearchHit],
+    started: Instant,
+) {
     let hits: Vec<LoggedHit> = mapped
         .iter()
         .map(|h| match (h.dist, h.dist_kind) {
@@ -488,7 +528,6 @@ pub(crate) async fn handle_search(
             .unwrap_or_default(),
         started.elapsed(),
     );
-    Ok(Json(SearchResp { hits: mapped }))
 }
 
 pub(crate) async fn handle_consumption(
@@ -873,6 +912,108 @@ mod tests {
             panic!("oversized batch should fail");
         };
         assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Build the serialized /search response for one request the way `handle_search` does:
+    /// deserialize, attach claims through the same `attach_claims` the handler calls, serialize.
+    async fn search_response(store: &super::Store, req_json: &str, path: &str) -> String {
+        let req: crate::serve::SearchReq = serde_json::from_str(req_json).unwrap();
+        let mut hit = crate::serve::SearchHit {
+            id: "1".into(),
+            origin: "wiki".into(),
+            project: "p".into(),
+            source_path: path.into(),
+            snippet: "s".into(),
+            dist: None,
+            dist_kind: None,
+            related: vec![],
+            superseded_by: vec![],
+            used_count: 0,
+            contested_count: 0,
+            claims: vec![],
+            claims_total: None,
+        };
+        super::attach_claims(store, std::slice::from_mut(&mut hit), req.claims())
+            .await
+            .unwrap();
+        serde_json::to_string(&crate::serve::SearchResp { hits: vec![hit] }).unwrap()
+    }
+
+    /// The freeze guard (PRD §5-R6): a /search request with no `claims` field must produce a
+    /// response byte-identical to one with `claims=0`, and neither may carry any claim payload.
+    /// The seeded note holds a qualifying edge-backed claim, so a flipped default (0 → 1) would
+    /// attach it and change the bytes — this test is what protects the measurement window.
+    #[tokio::test]
+    async fn search_absent_claims_field_is_byte_identical_to_claims_zero() {
+        let Some(dsn) = std::env::var("BORING_TEST_DATABASE_URL").ok() else {
+            eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+            return;
+        };
+        let store = super::Store::open(&dsn, 1024).await.expect("open store");
+
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = format!("/vault/wiki/freeze-claims-{ts}.md");
+        let subject = format!("freeze-subject-{ts}");
+        let predicate = "decision".to_owned();
+        let front = crate::frontmatter::FrontMatter {
+            origin: "personal".to_owned(),
+            project: format!("freeze-project-{ts}"),
+            kind: "note".to_owned(),
+            source_path: path.clone(),
+            title: Some("freeze note".to_owned()),
+            tags: vec![],
+            ..Default::default()
+        };
+        store
+            .upsert_document(&front, "sha-freeze-claims", std::time::SystemTime::now())
+            .await
+            .expect("upsert document");
+        let embedding = vec![0.0_f32; 1024];
+        store
+            .upsert_claim(
+                &subject,
+                &predicate,
+                "ship the handover",
+                &path,
+                std::time::SystemTime::now(),
+                &embedding,
+                "decision",
+                "high",
+            )
+            .await
+            .expect("upsert claim");
+        store
+            .upsert_claim_node(
+                &path,
+                &front.project,
+                &subject,
+                &predicate,
+                &crate::frontmatter::Claim {
+                    subject: subject.clone(),
+                    predicate: predicate.clone(),
+                    value: "ship the handover".to_owned(),
+                    kind: "decision".to_owned(),
+                    confidence: "high".to_owned(),
+                },
+            )
+            .await
+            .expect("upsert claim node");
+
+        let without = search_response(&store, r#"{"query":"x"}"#, &path).await;
+        let with_zero = search_response(&store, r#"{"query":"x","claims":0}"#, &path).await;
+        assert_eq!(
+            without, with_zero,
+            "absent `claims` and `claims=0` must be the same response"
+        );
+        assert!(
+            !without.contains("\"claims\":") && !without.contains("claims_total"),
+            "the frozen response carries no claim payload: {without}"
+        );
+
+        store.delete_document(&path).await.expect("cleanup");
     }
 
     /// The cached path replaces a model call, so a parse that is subtly wrong does not fail

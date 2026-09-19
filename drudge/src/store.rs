@@ -1530,6 +1530,89 @@ impl Store {
         })
     }
 
+    /// The claims a set of documents currently declare, one `RegisterRows` per path — the
+    /// register row shape, so a hit's claims and a register entry serialize identically.
+    /// "Currently declare" is the `doc —claims→ claim` edge, not the `source_path` column: a
+    /// rewritten note keeps its old rows alive, but only edge-reachable claims are handed over.
+    /// Current rows only, `fact` excluded (facts are context, not the record of a solve), most
+    /// solving kind first (`decision`, then `next`/`blocked`, then `risk`), newest `valid_from`
+    /// first within a kind, at most `per_doc` rows per document, with the full qualifying count
+    /// in `total_matching` so a cut is stated, not silent.
+    pub async fn declared_claims(
+        &self,
+        paths: &[String],
+        per_doc: i64,
+    ) -> Result<HashMap<String, RegisterRows>> {
+        let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "WITH asked AS (
+                     SELECT unnest($1::text[]) AS doc_id, unnest($2::text[]) AS path
+                 ),
+                 declared AS (
+                     SELECT a.path AS doc_path,
+                            c.subject, c.predicate, c.value, c.kind, c.confidence, c.valid_from,
+                            dm.project,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY e.src, e.dst
+                                ORDER BY (c.source_path = a.path) DESC, c.valid_from DESC
+                            ) AS pick
+                     FROM edge e
+                     JOIN asked a ON a.doc_id = e.src
+                     JOIN claim c ON ('claim:' || c.subject || ':' || c.predicate) = e.dst
+                     JOIN document dm ON dm.source_path = c.source_path
+                     WHERE e.kind = 'claims'
+                       AND c.superseded_at IS NULL
+                       AND c.kind <> 'fact'
+                 ),
+                 ranked AS (
+                     SELECT doc_path, subject, predicate, value, kind, confidence, valid_from, project,
+                            CASE kind WHEN 'decision' THEN 0
+                                      WHEN 'next' THEN 1
+                                      WHEN 'blocked' THEN 1
+                                      WHEN 'risk' THEN 2
+                                      ELSE 3 END AS tier,
+                            COUNT(*) OVER (PARTITION BY doc_path) AS total
+                     FROM declared
+                     WHERE pick = 1
+                 ),
+                 picked AS (
+                     SELECT *, ROW_NUMBER() OVER (
+                         PARTITION BY doc_path
+                         ORDER BY tier ASC, valid_from DESC, subject ASC, predicate ASC
+                     ) AS rn
+                     FROM ranked
+                 )
+                 SELECT doc_path, subject, predicate, value, kind, confidence, valid_from, project, total
+                 FROM picked
+                 WHERE rn <= $3
+                 ORDER BY doc_path, rn;",
+                &[&doc_ids, &paths, &per_doc],
+            )
+            .await
+            .context("declared claims")?;
+        let mut map: HashMap<String, RegisterRows> = HashMap::new();
+        for r in &rows {
+            let path: String = r.get(0);
+            let entry = map.entry(path).or_insert_with(|| RegisterRows {
+                rows: Vec::new(),
+                total_matching: r.get(8),
+            });
+            entry.rows.push(RegisterRow::new(
+                r.get(1),
+                r.get(2),
+                r.get(3),
+                r.get(4),
+                r.get(5),
+                r.get(6),
+                r.get(7),
+            ));
+        }
+        Ok(map)
+    }
+
     /// Stalled claims for a register answer: same window as `stalled_claims`, newest-first,
     /// plus the full match count so the cut is stated, not silent.
     pub async fn stalled_register_rows(
