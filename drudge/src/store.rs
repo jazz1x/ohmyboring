@@ -329,7 +329,7 @@ const NOT_USER_MEMORY_RE: &str = r"(^|/)(eval-|daily-brief-|weekly-brief-)[^/]*\
 /// 472 hold a value under this length, and what those look like in the session-start card is
 /// `ohmyboring incident: code-implementation-mismatch` — a tag, not a risk. Rows below the line
 /// are not hidden; they sort after rows above it, so a register with nothing better still answers.
-const INFORMATIVE_VALUE_CHARS: i32 = 25;
+pub const INFORMATIVE_VALUE_CHARS: i32 = 25;
 
 /// Predicates that merely restate their own `kind`, by kind.
 ///
@@ -409,6 +409,15 @@ pub struct ClaimEraCounts {
     pub anchored: usize,
     pub unanchored: usize,
     pub pre_anchor: usize,
+    /// Current claims that carry a label rather than a statement — the same two tests the
+    /// registers and the session-start card demote on (`INFORMATIVE_VALUE_CHARS`,
+    /// `TAUTOLOGICAL_PREDICATES`), counted so the weakness is visible instead of merely sorted
+    /// to the bottom.
+    ///
+    /// Ordering hides the problem from whoever reads a register; this number keeps it in the
+    /// sync log and in `/audit`. Measured 2026-09-20 before any of it was wired: 647 of 769 risk
+    /// claims restate their kind in the predicate, and 472 hold a value under 25 characters.
+    pub label_only: usize,
 }
 
 #[derive(Debug)]
@@ -2809,10 +2818,11 @@ impl Store {
             .query_one(
                 "SELECT count(*) FILTER (WHERE era = 'anchored'),
                         count(*) FILTER (WHERE era = 'unanchored'),
-                        count(*) FILTER (WHERE era = 'pre-anchor')
+                        count(*) FILTER (WHERE era = 'pre-anchor'),
+                        count(*) FILTER (WHERE length(value) < $1 OR predicate ~* $2)
                    FROM claim
                   WHERE superseded_at IS NULL;",
-                &[],
+                &[&INFORMATIVE_VALUE_CHARS, &TAUTOLOGICAL_PREDICATES],
             )
             .await
             .context("claim era counts")?;
@@ -2824,6 +2834,7 @@ impl Store {
             anchored: n(0),
             unanchored: n(1),
             pre_anchor: n(2),
+            label_only: n(3),
         })
     }
 
