@@ -94,6 +94,7 @@ sh scripts/doctor.sh          # ✗ 가 0개인지
 | 회수가 안 들어온다 | `curl -s localhost:7700/health` | 엔진이 떴는지, `corpus_count` 가 0 아닌지 |
 | 노트가 안 쌓인다 | `sh scripts/doctor.sh` | `note_freshness` 가 최신인지 |
 | 크론 잡이 안 돈다 | `ls -t ~/.hermes/cron/output/<job-id>/ \| head -1` | **최신 파일의 시각**. 개수는 50에서 회전하므로 신호가 아니다 |
+| 그 파일이 0바이트다 | `curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker'` | **유휴인지 고장인지는 여기서 갈린다** (§4) |
 | 브리핑이 안 온다 | `make agent-logs` | hermes 가 스크립트를 찾았는지, 경로가 막혔는지 |
 | 무엇이 정체돼 있나 | `make doctor` | `readiness_issue` 줄 |
 | 판정 창 상태 | `make peek` | 표본·바닥·판정 (localhost 전용) |
@@ -114,6 +115,18 @@ ls -t ~/.hermes/cron/output/cc33a556631a/ | head -3   # memory-ingest-worker
 
 파일 안에 프롬프트와 응답이 통째로 있다. `Blocked:` 로 시작하는 줄이 있으면 hermes 가 스크립트를
 거부한 것이고, `stored → wiki/wiki-NNNN.md` 가 있으면 성공한 것이다.
+
+**0바이트 파일은 고장이 아니다.** 먹을 세션이 없으면 워커는 아무것도 출력하지 않고, 출력이 없으면
+hermes 는 빈 파일을 남긴다. 유휴와 고장은 크론 파일로는 못 가르고, **이벤트로 갈린다** — 워커는
+유휴 틱에도 `ingest_offer / offered=0` 를 남긴다.
+
+```bash
+curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker' \
+  | python3 -c 'import json,sys; [print(e["observed_at"], e["event"], e["status"]) for e in json.load(sys.stdin)["entries"]]'
+```
+
+응답의 최상위 키는 `entries` 다. `events` 로 읽으면 언제나 빈손이고, 그건 계기가 죽은 것처럼
+보인다 — 실제로 그렇게 읽고 "계기가 없다"고 두 번 적었다.
 
 호스트 스케줄러는 `/tmp` 에 남긴다.
 
