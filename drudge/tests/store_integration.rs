@@ -658,6 +658,106 @@ async fn recent_register_rows_report_total_matching_beyond_the_limit() {
     store.delete_document(&path).await.expect("cleanup");
 }
 
+/// A row that says something outranks a newer row that only labels something.
+///
+/// The session-start card showed four risks in a row reading `ohmyboring incident: <fragment>`
+/// (measured 2026-09-20: 647 of 766 current risk claims carry the predicate `incident`, and 472
+/// carry a value under 25 characters). Recency alone put those first because they were the
+/// newest, so the most privileged slot in the product — what the agent reads before anything
+/// else — was spent on labels.
+#[tokio::test]
+async fn recent_register_rows_put_the_informative_row_first() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    // A project name shared with another run is a shared fixture: the first failing run leaves its
+    // rows behind (the cleanup sits after the assert) and the next run reads them as its own.
+    let path = unique_path("register-informative");
+    let project = path
+        .rsplit('/')
+        .next()
+        .unwrap_or("informative-test")
+        .to_owned();
+    let mut front = dummy_frontmatter(&path);
+    front.project = project.clone();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let emb = [0.1_f32; 1024];
+    let now = SystemTime::now();
+    // Oldest, but it is a sentence and its predicate names something.
+    store
+        .upsert_claim(
+            "pool sizing",
+            "chosen-bound",
+            "max 8 connections with a 30s idle timeout, measured against the 502 spike",
+            &path,
+            now,
+            &emb,
+            "risk",
+            "certain",
+        )
+        .await
+        .expect("informative claim");
+    // Newer, but the predicate restates the kind.
+    store
+        .upsert_claim(
+            "ohmyboring",
+            "incident",
+            "the retry loop handed back a socket the pool had already closed",
+            &path,
+            now + Duration::from_secs(10),
+            &emb,
+            "risk",
+            "certain",
+        )
+        .await
+        .expect("tautological-predicate claim");
+    // Newest of all, and both a label and a fragment. A different subject, because a claim is
+    // keyed by (subject, predicate) — reusing the pair would supersede the row above instead of
+    // adding a third one.
+    store
+        .upsert_claim(
+            "ohmyboring web",
+            "incident",
+            "mismatch",
+            &path,
+            now + Duration::from_secs(20),
+            &emb,
+            "risk",
+            "certain",
+        )
+        .await
+        .expect("fragment claim");
+
+    let res = store
+        .recent_register_rows(3, Some(&project), Some(&["risk".to_owned()]), &[])
+        .await
+        .expect("recent register rows");
+
+    let order: Vec<&str> = res.rows.iter().map(|r| r.predicate.as_str()).collect();
+    assert_eq!(
+        order,
+        vec!["chosen-bound", "incident", "incident"],
+        "a naming predicate outranks a restating one"
+    );
+    assert_eq!(
+        res.rows[2].value, "mismatch",
+        "the row that is both a label and a fragment goes last, and is still returned"
+    );
+    assert_eq!(
+        res.total_matching, 3,
+        "demotion is ordering, never filtering"
+    );
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
 /// The stalled register window matches `stalled_claims` and also reports the full match count.
 #[tokio::test]
 async fn stalled_register_rows_report_total_matching_within_the_window() {
