@@ -290,12 +290,24 @@ def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
         "  confidence: one of certain, likely, assumption, outdated.\n"
         "  Extract concrete decisions, status changes, version selections, open risks, and any explicit next action still pending.\n"
         "  Use kind='next' for concrete follow-up actions left undone at session end. Use kind='blocked' only when an active obstacle prevents progress.\n"
-        "  Prefer project-scoped subjects. Examples:\n"
-        '  {\"subject\":\"kb-rag-bot\",\"predicate\":\"model-interface\",\"value\":\"bedrock-converse\",\"kind\":\"decision\",\"confidence\":\"certain\"}\n'
-        '  {\"subject\":\"qa-tests\",\"predicate\":\"rtk-status\",\"value\":\"removed\",\"kind\":\"fact\",\"confidence\":\"certain\"}\n'
-        '  {\"subject\":\"omb\",\"predicate\":\"release-version\",\"value\":\"0.1.3\",\"kind\":\"fact\",\"confidence\":\"certain\"}\n'
-        '  {\"subject\":\"kb-rag-bot\",\"predicate\":\"auth-flow\",\"value\":\"oauth-redirect-unverified\",\"kind\":\"risk\",\"confidence\":\"likely\"}\n'
-        '  {\"subject\":\"omb\",\"predicate\":\"next-step\",\"value\":\"add /next_actions endpoint\",\"kind\":\"next\",\"confidence\":\"certain\"}\n'
+        "  Prefer project-scoped subjects.\n"
+        "  The value must READ AS A STATEMENT that stands on its own months later, not as a tag:\n"
+        "  it says what was chosen, what broke, or what is left to do, and enough of why that the\n"
+        "  next reader does not have to open the note. A value under ~25 characters is almost\n"
+        "  always a tag — write the sentence instead.\n"
+        "  The predicate NAMES THE ASPECT the value is about — which knob, which flow, which file,\n"
+        "  which decision. Ask: could this predicate sit on a completely different claim? If yes it\n"
+        "  is a slot word, not a name. These are rejected for EVERY kind, not just the matching one:\n"
+        "  status, state, result, outcome, info, detail, incident, decision, action, next-step,\n"
+        "  상태, 결정, 결과. Write `path_resolution`, `retry-bound`, `auth-flow` instead.\n"
+        "  Examples:\n"
+        '  {\"subject\":\"kb-rag-bot\",\"predicate\":\"model-interface\",\"value\":\"bedrock-converse, because the streaming API drops tool calls mid-turn\",\"kind\":\"decision\",\"confidence\":\"certain\"}\n'
+        '  {\"subject\":\"qa-tests\",\"predicate\":\"rtk-dependency\",\"value\":\"removed — the store was only read in two dead components\",\"kind\":\"fact\",\"confidence\":\"certain\"}\n'
+        '  {\"subject\":\"omb\",\"predicate\":\"release-version\",\"value\":\"0.1.3, the first build that ships the host CLI alongside the image\",\"kind\":\"fact\",\"confidence\":\"certain\"}\n'
+        '  {\"subject\":\"kb-rag-bot\",\"predicate\":\"auth-flow\",\"value\":\"the oauth redirect is never verified, so any return URL is accepted\",\"kind\":\"risk\",\"confidence\":\"likely\"}\n'
+        '  {\"subject\":\"omb\",\"predicate\":\"register-endpoint\",\"value\":\"add /next_actions so the card stops synthesising its own next steps\",\"kind\":\"next\",\"confidence\":\"certain\"}\n'
+        "  Counter-examples, all rejected: value \"removed\", value \"completed\", value \"PASS\",\n"
+        "  predicate \"incident\", predicate \"status\".\n"
         '- Pure chit-chat with no real work → output only: {"skip": true}\n\n'
         "=== SESSION TRANSCRIPT ===\n" + text
     )

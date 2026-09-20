@@ -697,5 +697,52 @@ class SessionEndIsRecorded(unittest.TestCase):
         self.assertIn("injection_uptake", kinds)
 
 
+
+class ClaimExamplesTeachStatementsTests(unittest.TestCase):
+    """The prompt's own examples are the strongest instruction in it.
+
+    Measured 2026-09-20: 68% of the corpus's 10,267 current claims hold a value under 25
+    characters or a predicate that restates the kind — and four of the five examples this prompt
+    shipped were exactly that shape (`"removed"`, `"0.1.3"`, `"bedrock-converse"`). The model was
+    not ignoring the instructions; it was copying them.
+    """
+
+    def _claim_examples(self):
+        prompt = distill_core._build_prompt("transcript", "personal", "omb")
+        start = prompt.index("Examples:")
+        end = prompt.index("Counter-examples", start)
+        return [
+            json.loads(line.strip())
+            for line in prompt[start:end].splitlines()
+            if line.strip().startswith("{")
+        ]
+
+    def test_every_example_value_reads_as_a_statement(self):
+        examples = self._claim_examples()
+        self.assertGreaterEqual(len(examples), 4, "the examples went missing from the prompt")
+        short = [c["value"] for c in examples if len(c["value"]) < 25]
+        self.assertEqual(
+            short, [], f"example values shorter than the corpus threshold teach tags: {short}"
+        )
+
+    def test_no_example_predicate_restates_its_kind(self):
+        tautological = {"incident", "status", "decision", "state", "next-step", "action"}
+        offenders = [
+            (c["predicate"], c["kind"])
+            for c in self._claim_examples()
+            if c["predicate"].lower() in tautological
+        ]
+        self.assertEqual(
+            offenders, [], f"a predicate that restates the kind says nothing: {offenders}"
+        )
+
+    def test_the_prompt_states_the_rule_and_not_only_the_examples(self):
+        """Examples alone drift when someone edits one; the rule survives an edit."""
+        prompt = distill_core._build_prompt("transcript", "personal", "omb")
+        self.assertIn("READ AS A STATEMENT", prompt)
+        self.assertIn("NAMES THE ASPECT", prompt)
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
