@@ -758,6 +758,74 @@ async fn recent_register_rows_put_the_informative_row_first() {
     store.delete_document(&path).await.expect("cleanup");
 }
 
+/// The session-start card orders like the registers do.
+///
+/// `recent_claims` is what `ask::context_card` calls; `recent_register_rows` is what the MCP
+/// registers call. The demotion rule shipped in the second one while the card — the surface that
+/// showed four consecutive `ohmyboring incident: <fragment>` rows and the reason the rule exists —
+/// kept its recency-only order. This test reads the card's own path.
+#[tokio::test]
+async fn recent_claims_put_the_informative_row_first() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let path = unique_path("card-informative");
+    let project = path.rsplit('/').next().unwrap_or("card-test").to_owned();
+    let mut front = dummy_frontmatter(&path);
+    front.project = project.clone();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let emb = [0.1_f32; 1024];
+    let now = SystemTime::now();
+    store
+        .upsert_claim(
+            "pool sizing",
+            "chosen-bound",
+            "max 8 connections with a 30s idle timeout, after the 502 spike",
+            &path,
+            now,
+            &emb,
+            "risk",
+            "certain",
+        )
+        .await
+        .expect("informative claim");
+    store
+        .upsert_claim(
+            "ohmyboring",
+            "incident",
+            "the retry loop handed back a socket the pool had already closed",
+            &path,
+            now + Duration::from_secs(10),
+            &emb,
+            "risk",
+            "certain",
+        )
+        .await
+        .expect("tautological claim");
+
+    let rows = store
+        .recent_claims(2, Some(&project), Some(&["risk".to_owned()]), &[])
+        .await
+        .expect("recent claims");
+
+    assert_eq!(
+        rows.iter()
+            .map(|c| c.predicate.as_str())
+            .collect::<Vec<_>>(),
+        vec!["chosen-bound", "incident"],
+        "the card's own query has to demote the label, not just the registers' query"
+    );
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
 /// The stalled register window matches `stalled_claims` and also reports the full match count.
 #[tokio::test]
 async fn stalled_register_rows_report_total_matching_within_the_window() {
