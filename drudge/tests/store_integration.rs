@@ -826,6 +826,83 @@ async fn recent_claims_put_the_informative_row_first() {
     store.delete_document(&path).await.expect("cleanup");
 }
 
+/// The corpus counts the claims that only label something, so the weakness is visible and not
+/// merely sorted to the bottom of a register.
+///
+/// Sorting them last fixes what a reader sees now; it says nothing about a corpus drifting that
+/// way, and on 2026-09-20 it had — 647 of 769 risk claims restated their kind in the predicate.
+#[tokio::test]
+async fn claim_era_counts_count_the_rows_that_only_label() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let path = unique_path("label-only-count");
+    let mut front = dummy_frontmatter(&path);
+    front.project = path.rsplit('/').next().unwrap_or("label-test").to_owned();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let before = store.claim_era_counts().await.expect("era counts before");
+    let emb = [0.1_f32; 1024];
+    let now = SystemTime::now();
+    // Says something: a predicate that names, a value that is a sentence.
+    store
+        .upsert_claim(
+            "pool sizing",
+            "chosen-bound",
+            "max 8 connections with a 30s idle timeout, after the 502 spike",
+            &path,
+            now,
+            &emb,
+            "decision",
+            "certain",
+        )
+        .await
+        .expect("informative claim");
+    // Labels something: the predicate restates the kind.
+    store
+        .upsert_claim(
+            "ohmyboring",
+            "incident",
+            "the retry loop handed back a socket the pool had already closed",
+            &path,
+            now,
+            &emb,
+            "risk",
+            "certain",
+        )
+        .await
+        .expect("tautological claim");
+    // Labels something: the value is a tag.
+    store
+        .upsert_claim(
+            "ohmyboring web",
+            "observed-effect",
+            "mismatch",
+            &path,
+            now,
+            &emb,
+            "risk",
+            "certain",
+        )
+        .await
+        .expect("fragment claim");
+
+    let after = store.claim_era_counts().await.expect("era counts after");
+    assert_eq!(
+        after.label_only - before.label_only,
+        2,
+        "the tautological predicate and the fragment value each count; the sentence does not"
+    );
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
 /// The stalled register window matches `stalled_claims` and also reports the full match count.
 #[tokio::test]
 async fn stalled_register_rows_report_total_matching_within_the_window() {

@@ -61,6 +61,10 @@ pub struct AuditStats {
     pub claims_anchored: usize,
     pub claims_unanchored: usize,
     pub claims_pre_anchor: usize,
+    /// Current claims whose value is a label or whose predicate restates its kind. Reported, never
+    /// dropped: the registers already sort these last, and sorting alone would leave the corpus
+    /// getting worse with nothing saying so.
+    pub claims_label_only: usize,
     pub claims_stale: usize,
 }
 
@@ -122,6 +126,7 @@ pub async fn stats(store: &Store, allow_company: bool) -> Result<AuditStats> {
         claims_anchored: eras.anchored,
         claims_unanchored: eras.unanchored,
         claims_pre_anchor: eras.pre_anchor,
+        claims_label_only: eras.label_only,
         claims_stale: store.claim_stale_count().await?,
     })
 }
@@ -181,6 +186,12 @@ pub async fn run(store: &Store, allow_company: bool) -> Result<()> {
     println!(
         "  [claims by era] anchored {} · unanchored {} · pre-anchor {} · stale {}",
         s.claims_anchored, s.claims_unanchored, s.claims_pre_anchor, s.claims_stale
+    );
+    println!(
+        "  [claims that only label] {} of {} current — a value under {} chars, or a predicate that restates its kind",
+        s.claims_label_only,
+        s.claims_anchored + s.claims_unanchored + s.claims_pre_anchor,
+        crate::store::INFORMATIVE_VALUE_CHARS
     );
     Ok(())
 }

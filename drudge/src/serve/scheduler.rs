@@ -101,6 +101,19 @@ pub(crate) async fn do_sync(
                     }
                 );
             }
+            // Ordering hides this; counting keeps it in the log. A claim that only labels
+            // something still answers a register, just last — and a corpus drifting that way
+            // would otherwise look identical to a healthy one from here.
+            let current_claims =
+                audit.claims_anchored + audit.claims_unanchored + audit.claims_pre_anchor;
+            if current_claims > 0 {
+                eprintln!(
+                    "[hygiene] claims that only label: {} of {} current ({}%) — registers sort them last",
+                    audit.claims_label_only,
+                    current_claims,
+                    audit.claims_label_only.saturating_mul(100) / current_claims
+                );
+            }
             (Some(audit.total_chunks), Some(audit.graph_edges))
         }
         Err(e) => {
