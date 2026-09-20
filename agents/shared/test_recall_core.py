@@ -206,6 +206,13 @@ def test_the_engine_is_asked_for_the_claims_behind_each_hit():
     assert client.return_value.search.call_args.kwargs["claims"] == recall_core.CLAIMS_PER_HIT >= 1
 
 
+def test_two_claims_is_the_measured_default():
+    """The number is a budget decision and it was measured: at 2 a three-hit injection spends 306
+    characters on settled material against the snippets' 840, and 54.4% of hits have a second
+    claim to give. Pinned so a silent change has to state its own measurement."""
+    assert recall_core.CLAIMS_PER_HIT == 2
+
+
 def test_a_hit_that_declares_a_decision_puts_it_in_the_prompt():
     """A decision claim is the record of a solve. It reaches the prompt as its own line under the
     hit, and when the note declared more than were handed over, the line says so."""
