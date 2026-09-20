@@ -108,8 +108,34 @@ def _fingerprints(hits, limit):
         snippet = " ".join((hit.get("snippet") or "").split())[:280]
         if not (src and snippet):
             continue
-        out.append({"src": src, "path": path, "phrases": phrases(snippet)})
+        row = {"src": src, "path": path, "phrases": phrases(snippet)}
+        # How much settled material rode along with this snippet, and how much the note had to
+        # give. Counts only — the claim text is not copied here, for the same reason the snippet
+        # is not: the ledger must not become a second vault.
+        #
+        # Reconstructing this afterwards is possible but wrong: it reads today's database for a
+        # row written weeks ago, so a claim added since would be counted as though it had been
+        # handed over at the time. Measured 2026-09-20 by exactly that reconstruction — 71.3% of
+        # injected hits carried a claim — and the number cannot be pinned to a date without this.
+        given, total = _claim_counts(hit)
+        if total is not None:
+            row["claims_given"], row["claims_total"] = given, total
+        out.append(row)
     return out
+
+
+def _claim_counts(hit):
+    """(handed over, declared) for one hit, or (0, None) when the engine did not report claims.
+
+    None is not zero. An engine that predates the claims handover, or a caller that did not ask
+    for claims, says nothing about how many the note declares — recording that as 0 would put a
+    fact in the ledger that nobody measured.
+    """
+    total = hit.get("claims_total")
+    if not isinstance(total, int):
+        return 0, None
+    given = hit.get("claims")
+    return (len(given) if isinstance(given, list) else 0), total
 
 
 def note_path(hit):

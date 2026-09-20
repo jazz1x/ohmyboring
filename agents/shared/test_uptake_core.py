@@ -752,6 +752,59 @@ def test_the_transcript_format_follows_the_directory():
     assert uptake_core._transcript_format("/Users/x/.claude/projects/p/a.jsonl") == "claude-json"
 
 
+def test_the_ledger_records_how_many_claims_rode_along():
+    """The row says what was handed over and what the note had to give, at the moment it was
+    handed over. Reading it back out of today's database instead would count a claim written
+    since as though the session had received it."""
+    hit = {
+        "source_path": "/vault/wiki/wiki-0435.md",
+        "snippet": "the branch naming question came up again and was settled " * 4,
+        "claims": [{"subject": "ohmyboring", "predicate": "branch-name", "value": "fix/..."}],
+        "claims_total": 4,
+    }
+    row = uptake_core.injection_record("s1", "how did I name that branch", [hit], 1)
+    assert row["hits"][0]["claims_given"] == 1
+    assert row["hits"][0]["claims_total"] == 4
+
+
+def test_a_hit_the_engine_said_nothing_about_records_nothing():
+    """No claims_total means nobody asked, or the engine is older than the handover. Writing 0
+    there would be a measurement nobody made — the fields stay absent instead."""
+    hit = {
+        "source_path": "/vault/wiki/wiki-0001.md",
+        "snippet": "the pool died because deadpool recycled a closed socket " * 4,
+    }
+    row = uptake_core.injection_record("s1", "why did the pool die", [hit], 1)
+    assert "claims_given" not in row["hits"][0]
+    assert "claims_total" not in row["hits"][0]
+
+
+def test_a_note_that_declared_claims_but_handed_none_over_is_recorded_as_such():
+    """0 of 3 is a different fact from "nobody asked", and it is the one that says the cut was
+    tight rather than the note being empty."""
+    hit = {
+        "source_path": "/vault/wiki/wiki-0002.md",
+        "snippet": "the retry loop handed back a closed socket every time " * 4,
+        "claims": [],
+        "claims_total": 3,
+    }
+    row = uptake_core.injection_record("s1", "the retry loop again", [hit], 1)
+    assert row["hits"][0]["claims_given"] == 0
+    assert row["hits"][0]["claims_total"] == 3
+
+
+def test_the_claim_text_never_enters_the_ledger():
+    """Same contract as the snippet: fingerprints and counts, never the material itself."""
+    hit = {
+        "source_path": "/vault/wiki/wiki-0435.md",
+        "snippet": "the branch naming question came up again and was settled " * 4,
+        "claims": [{"subject": "ohmyboring", "predicate": "branch-name", "value": "fix/SECRETVALUE"}],
+        "claims_total": 1,
+    }
+    row = uptake_core.injection_record("s1", "branch naming", [hit], 1)
+    assert "SECRETVALUE" not in json.dumps(row)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
