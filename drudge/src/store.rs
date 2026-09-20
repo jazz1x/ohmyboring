@@ -1406,7 +1406,13 @@ impl Store {
         Ok(())
     }
 
-    /// Top-k **current** claims (superseded_at IS NULL) by recency (valid_from desc). For injecting authority into the briefing.
+    /// Top-k **current** claims (superseded_at IS NULL) for the session-start card and the
+    /// briefing, ordered the way the registers are: a row that says something outranks one that
+    /// only labels something, and newest-first decides inside each rank.
+    ///
+    /// The two paths have to agree. The card is the surface that showed four consecutive
+    /// `ohmyboring incident: <fragment>` rows, and the ordering rule shipped one function away
+    /// from it — in `recent_register_rows`, which the card never calls.
     pub async fn recent_claims(
         &self,
         k: i64,
@@ -1425,9 +1431,19 @@ impl Store {
                    AND ($3::text[] IS NULL OR c.kind = ANY($3))
                    AND NOT (d.origin = ANY($4))
                    AND d.source_path !~ $5
-                 ORDER BY c.valid_from DESC
+                 ORDER BY (CASE WHEN length(c.value) < $6 THEN 1 ELSE 0 END)
+                        + (CASE WHEN c.predicate ~* $7 THEN 1 ELSE 0 END),
+                          c.valid_from DESC
                  LIMIT $1;",
-                &[&k, &project, &kinds, &exclude_origins, &NOT_USER_MEMORY_RE],
+                &[
+                    &k,
+                    &project,
+                    &kinds,
+                    &exclude_origins,
+                    &NOT_USER_MEMORY_RE,
+                    &INFORMATIVE_VALUE_CHARS,
+                    &TAUTOLOGICAL_PREDICATES,
+                ],
             )
             .await
             .context("recent claims")?;
