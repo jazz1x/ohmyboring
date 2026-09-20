@@ -321,6 +321,24 @@ const STALE_CLAIM_MIRROR_NODES: &str = "(kind = 'claim' AND id NOT IN (SELECT 'c
 const STALE_HORIZON_DAYS: i64 = 30;
 
 const NOT_USER_MEMORY_RE: &str = r"(^|/)(eval-|daily-brief-|weekly-brief-)[^/]*\.md$";
+
+/// Shortest `value` that still reads as a statement rather than a label.
+///
+/// A register row is read as `subject predicate: value`, and the value is the only part that
+/// carries what happened. Measured on the live corpus (2026-09-20): of 766 current risk claims
+/// 472 hold a value under this length, and what those look like in the session-start card is
+/// `ohmyboring incident: code-implementation-mismatch` — a tag, not a risk. Rows below the line
+/// are not hidden; they sort after rows above it, so a register with nothing better still answers.
+const INFORMATIVE_VALUE_CHARS: i32 = 25;
+
+/// Predicates that merely restate their own `kind`, by kind.
+///
+/// `risk` + `incident` is 647 of 766 current risk claims; `decision` + `decision` is 620 of 2,399.
+/// In those rows the predicate slot carries no information at all, so the reader gets
+/// `subject incident: <value>` where the useful half is whatever the value happens to hold. Same
+/// treatment as a short value: demoted, never dropped.
+const TAUTOLOGICAL_PREDICATES: &str = "^(incident|decision|status|state|상태|결정|\
+                                       next[-_ ]?(step|action)|action|다음 작업)$";
 /// I/O-boundary timeout for pool wait/create/recycle. Prevents infinite hangs on DB loss;
 /// drudge/CLAUDE.md treats this as a graceful boundary, distinct from defensive `{timeout:200}` bounds.
 const POOL_TIMEOUT_SECONDS: u64 = 5;
@@ -1498,6 +1516,11 @@ impl Store {
     }
 
     /// Top-k current claims for a register answer, plus the full match count so the cut is stated, not silent.
+    ///
+    /// Rows that say something sort ahead of rows that only label something: a value shorter than
+    /// `INFORMATIVE_VALUE_CHARS` or a predicate that restates its kind costs a row one rank, both
+    /// cost two, and newest-first decides inside each rank. Nothing is filtered out — a register
+    /// whose every row is a label still answers with them, in the order it always had.
     pub async fn recent_register_rows(
         &self,
         k: i64,
@@ -1518,9 +1541,19 @@ impl Store {
                     AND ($3::text[] IS NULL OR c.kind = ANY($3))
                     AND NOT (d.origin = ANY($4))
                     AND d.source_path !~ $5
-                  ORDER BY c.valid_from DESC
+                  ORDER BY (CASE WHEN length(c.value) < $6 THEN 1 ELSE 0 END)
+                         + (CASE WHEN c.predicate ~* $7 THEN 1 ELSE 0 END),
+                           c.valid_from DESC
                   LIMIT $1;",
-                &[&k, &project, &kinds, &exclude_origins, &NOT_USER_MEMORY_RE],
+                &[
+                    &k,
+                    &project,
+                    &kinds,
+                    &exclude_origins,
+                    &NOT_USER_MEMORY_RE,
+                    &INFORMATIVE_VALUE_CHARS,
+                    &TAUTOLOGICAL_PREDICATES,
+                ],
             )
             .await
             .context("recent register rows")?;
