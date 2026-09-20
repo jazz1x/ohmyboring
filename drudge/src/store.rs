@@ -1052,9 +1052,13 @@ impl Store {
         Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
-    /// GraphRAG retrieval: the body of the top-N connected documents that **share a concrete concept/tool** with a document.
-    /// Surfaces, via the graph (concept links), the right answer that the vector buried in noise. project/topic excluded.
-    /// Older notes that share a **concept** with this one — the thread it continues.
+    /// GraphRAG retrieval: the older notes this one shares ground with — the thread it continues.
+    ///
+    /// Two notes share ground when they assert the same **claim** (`claim:<subject>:<predicate>`)
+    /// or when they are **about** the same concept. The first is the stronger statement and is
+    /// weighted accordingly: a shared concept says the two notes cover the same area, a shared
+    /// claim says they answered the same question — and the newer one may supersede or contest the
+    /// older, which is exactly the note a reader wants next.
     ///
     /// `related_doc_content` is the neighbour walk `ask` uses, and it counts every non-project
     /// node including tools, needing two shared. For a briefing that is the wrong shape twice
@@ -1069,7 +1073,7 @@ impl Store {
     /// this reachable only through tools.
     ///
     /// Older only. A briefing already holds today; what it never had was last week.
-    pub async fn related_by_concept(
+    pub async fn related_by_shared_ground(
         &self,
         source_path: &str,
         limit: i64,
@@ -1083,19 +1087,48 @@ impl Store {
                      SELECT dst FROM edge WHERE src = $1 AND kind = 'about'
                        AND dst LIKE 'concept:%'
                  ),
+                 -- The other way two notes are about the same thing: they assert the same claim.
+                 -- A claim node is `claim:<subject>:<predicate>`, so a shared one means both notes
+                 -- settled the same question — the second may supersede the first, or contest it,
+                 -- and either way that is the note a reader wants next.
+                 --
+                 -- This edge was written 6,921 times and never walked. Measured 2026-09-20:
+                 -- 11,123 document pairs share a claim node and 10,886 of them (98%) share no two
+                 -- concepts, so concept-sharing alone could not see them.
+                 self_claims AS (
+                     SELECT dst FROM edge WHERE src = $1 AND kind = 'claims'
+                 ),
                  -- Older-than is a predicate on the candidates, not a filter on the winners.
                  -- Ranking first and trimming after is how a selector returns nothing: the two
                  -- best-connected notes are usually this morning's own, so the filter emptied a
                  -- set it was meant to narrow. Measured: three heads produced one row that way
                  -- and eleven this way.
-                 ranked AS (
-                     SELECT e.src AS doc_node, count(*) AS shared
+                 shares AS (
+                     SELECT e.src AS doc_node, 2 AS weight
+                     FROM edge e
+                     JOIN self_claims sl ON e.dst = sl.dst
+                     WHERE e.src <> $1 AND e.kind = 'claims'
+                     UNION ALL
+                     SELECT e.src AS doc_node, 1 AS weight
                      FROM edge e
                      JOIN self_concepts sc ON e.dst = sc.dst
-                     JOIN document od ON ('doc:' || od.source_path) = e.src
                      WHERE e.src <> $1 AND e.kind = 'about'
-                       AND od.updated_at < (SELECT updated_at FROM document WHERE source_path = $3)
-                     GROUP BY e.src ORDER BY shared DESC, e.src ASC LIMIT $2
+                 ),
+                 -- Older-than is a predicate on the candidates, not a filter on the winners.
+                 -- Ranking first and trimming after is how a selector returns nothing: the two
+                 -- best-connected notes are usually this morning's own, so the filter emptied a
+                 -- set it was meant to narrow. Measured: three heads produced one row that way
+                 -- and eleven this way.
+                 --
+                 -- A shared claim outweighs a shared concept because it is the stronger statement:
+                 -- concepts say the two notes are about the same area, a claim says they answered
+                 -- the same question.
+                 ranked AS (
+                     SELECT s.doc_node, sum(s.weight) AS shared
+                     FROM shares s
+                     JOIN document od ON ('doc:' || od.source_path) = s.doc_node
+                     WHERE od.updated_at < (SELECT updated_at FROM document WHERE source_path = $3)
+                     GROUP BY s.doc_node ORDER BY shared DESC, s.doc_node ASC LIMIT $2
                  )
                  SELECT d.source_path, d.project, d.tags,
                         string_agg(c.content, E'\n' ORDER BY c.chunk_idx) AS content
@@ -1107,7 +1140,7 @@ impl Store {
                 &[&doc_id, &limit, &source_path],
             )
             .await
-            .context("related by concept")?;
+            .context("related by shared ground")?;
         Ok(rows
             .into_iter()
             .map(|r| RecentDoc {

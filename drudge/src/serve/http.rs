@@ -485,7 +485,7 @@ pub(crate) async fn handle_search(
         for hit in mapped.iter_mut().take(req.related_heads(max_results)) {
             for older in store
                 // `related()` clamps to 0..=3, so the conversion cannot wrap.
-                .related_by_concept(&hit.source_path, i64::try_from(related).unwrap_or(3))
+                .related_by_shared_ground(&hit.source_path, i64::try_from(related).unwrap_or(3))
                 .await?
             {
                 if !seen.insert(older.source_path.clone()) {

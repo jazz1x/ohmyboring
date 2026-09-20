@@ -378,7 +378,7 @@ async fn brief_continuity(
     for head in docs.iter().take(CONTINUITY_HEADS) {
         walks.push(
             store
-                .related_by_concept(&head.source_path, CONTINUITY_PER_HEAD)
+                .related_by_shared_ground(&head.source_path, CONTINUITY_PER_HEAD)
                 .await?,
         );
     }
