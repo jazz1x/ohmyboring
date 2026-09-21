@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now collect-kimi smoke e2e doctor readiness heal verify-llm maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary
+.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now collect-kimi smoke e2e doctor readiness heal verify-llm maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary door
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -45,6 +45,9 @@ events-replay: ## Hand spooled events to the engine (after an outage; doctor nam
 
 secretary: ## Answer @mentions in Slack from memory (Socket Mode; needs SLACK_APP_TOKEN/SLACK_BOT_TOKEN in .env)
 	set -a; . ./.env; set +a; python3 agents/slack/secretary.py
+
+door: ## The read-only door — proxies the five read-only doors to the Rust engine (DOOR_PORT, default 7710)
+	set -a; . ./.env 2>/dev/null || true; set +a; uvicorn agents.door.door:app --host 127.0.0.1 --port $${DOOR_PORT:-7710}
 
 models: ## Pull Ollama models (DRUDGE_LLM_MODEL + DRUDGE_EMBED_MODEL, defaults gemma4:12b + bge-m3)
 	ollama pull "${DRUDGE_LLM_MODEL:-gemma4:12b}" && ollama pull "${DRUDGE_EMBED_MODEL:-bge-m3}"

@@ -15,3 +15,8 @@ PyYAML>=6.0
 # imported lazily inside main()/dispatch() so the handlers and their tests still run without the
 # package. The brain (secretary_core) speaks to the engine, never to Slack, and needs nothing here.
 slack-sdk>=3.27
+# fastapi + uvicorn are the door's whole runtime (agents/door/door.py) — the read-only proxy that
+# forwards the five read-only doors to the Rust engine while the migration replaces it. The door
+# lives outside hooks/ on purpose: hooks stay stdlib-only, a door may have dependencies.
+fastapi>=0.110
+uvicorn>=0.29
