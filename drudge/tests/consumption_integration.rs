@@ -1,5 +1,7 @@
 //! Consumption write-back: `used`/`contested` edges must survive re-ingest, and `session` nodes
-//! must survive GC — a note the scorer says was consumed has to stay consumed.
+//! must survive GC — a note the scorer says was consumed has to stay consumed. Handover is the
+//! door before consumption: `handed` edges record what a session was shown, and a bare
+//! `{session_id, verdict}` applies the verdict to exactly those notes.
 //!
 //! Needs a Postgres instance reachable via `BORING_TEST_DATABASE_URL`; without it the tests skip
 //! (the same guard `store_integration.rs` / `code_index_integration.rs` use).
@@ -367,4 +369,261 @@ async fn reused_recently_counts_only_sessions_inside_the_window() {
     )
     .await
     .expect("cleanup session nodes");
+}
+
+/// A handover writes one `handed` edge per known path — counted in the report, never in
+/// `consumption_counts`: being handed is not being consumed, so the verdict-free docs read as
+/// having no consumption at all. Unknown paths are counted, not written; a repeat call adds
+/// nothing.
+#[tokio::test]
+async fn handover_edges_are_written_and_never_counted_as_consumption() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let path_a = unique_path("handover-a");
+    let path_b = unique_path("handover-b");
+    let session = unique_id("handover-s");
+    let session_node = format!("session:{session}");
+    for path in [&path_a, &path_b] {
+        store
+            .upsert_document(&dummy_frontmatter(path), "sha-v1", SystemTime::now())
+            .await
+            .expect("upsert doc");
+    }
+
+    let report = store
+        .record_handover(
+            &session,
+            "2026-09-21T05:00:00+00:00",
+            &[
+                path_a.clone(),
+                path_b.clone(),
+                "/vault/wiki/never-ingested.md".to_owned(),
+            ],
+        )
+        .await
+        .expect("record handover");
+    assert_eq!(report.handed, 2, "two known paths wrote two handed edges");
+    assert_eq!(
+        report.unknown, 1,
+        "a path with no document row is counted, not an error"
+    );
+
+    let handed_rows: i64 = db
+        .query_one(
+            "SELECT count(*) FROM edge WHERE src = $1 AND kind = 'handed';",
+            &[&session_node],
+        )
+        .await
+        .expect("count handed edges")
+        .get(0);
+    assert_eq!(handed_rows, 2);
+
+    // The /search-side aggregation must not see handed: no verdict has happened yet.
+    let counts = store
+        .consumption_counts(&[path_a.clone(), path_b.clone()])
+        .await
+        .expect("consumption counts");
+    assert!(
+        !counts.contains_key(&path_a) && !counts.contains_key(&path_b),
+        "handed edges are not consumption — the counts stay empty"
+    );
+
+    // Read back through the same query the verdict-only /consumption path uses.
+    let handed = store.handed_paths(&session).await.expect("handed paths");
+    let mut expected = vec![path_a.clone(), path_b.clone()];
+    expected.sort();
+    assert_eq!(handed, expected, "distinct, in path order");
+
+    // Idempotence: a repeat call updates the label and adds no duplicate edges.
+    store
+        .record_handover(
+            &session,
+            "2026-09-21T06:00:00+00:00",
+            std::slice::from_ref(&path_a),
+        )
+        .await
+        .expect("repeat handover");
+    let label: String = db
+        .query_one("SELECT label FROM node WHERE id = $1;", &[&session_node])
+        .await
+        .expect("session node label")
+        .get(0);
+    assert_eq!(label, "2026-09-21T06:00:00+00:00");
+    let again: i64 = db
+        .query_one(
+            "SELECT count(*) FROM edge WHERE src = $1 AND kind = 'handed';",
+            &[&session_node],
+        )
+        .await
+        .expect("count handed edges again")
+        .get(0);
+    assert_eq!(again, 2, "a repeat handover must not duplicate edges");
+
+    store.delete_document(&path_a).await.expect("cleanup doc a");
+    store.delete_document(&path_b).await.expect("cleanup doc b");
+    db.execute("DELETE FROM node WHERE id = $1;", &[&session_node])
+        .await
+        .expect("cleanup session node");
+}
+
+/// End to end through the real HTTP surface: `/handover` records what a session was shown, and a
+/// verdict-only `/consumption` (`{session_id, verdict}` — no path lists) applies the verdict to
+/// exactly the handed docs and nothing else. An unknown session is a normal zero response, not an
+/// error. The verdict branch ignoring `handed_paths` (empty lists) fails this test: used stays 0.
+#[tokio::test]
+async fn verdict_only_consumption_marks_exactly_the_handed_docs() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let path_a = unique_path("verdict-a");
+    let path_b = unique_path("verdict-b");
+    let path_c = unique_path("verdict-c");
+    let session = unique_id("verdict-s");
+    let unknown_session = unique_id("verdict-unknown-s");
+    for path in [&path_a, &path_b, &path_c] {
+        store
+            .upsert_document(&dummy_frontmatter(path), "sha-v1", SystemTime::now())
+            .await
+            .expect("upsert doc");
+    }
+
+    let port = free_port();
+    let _server = spawn_server(&dsn, port);
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+    wait_for_health(&client, &base).await;
+
+    // Hand two of the three docs; the third is never handed.
+    let resp = client
+        .post(format!("{base}/handover"))
+        .json(&serde_json::json!({
+            "session_id": session,
+            "observed_at": "2026-09-21T05:00:00+00:00",
+            "paths": [path_a, path_b, "/vault/wiki/never-ingested.md"],
+        }))
+        .send()
+        .await
+        .expect("post /handover");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("handover response");
+    assert_eq!(body["handed"], 2);
+    assert_eq!(body["unknown"], 1);
+
+    // The whole feedback signal: verdict=used, no paths. The handler resolves what was handed.
+    // Padded on purpose: the validator and the handler once trimmed differently, and " used "
+    // came out as contested. The assertions below (used edges, zero contested) are the check.
+    let resp = client
+        .post(format!("{base}/consumption"))
+        .json(&serde_json::json!({
+            "session_id": session,
+            "observed_at": "2026-09-21T06:00:00+00:00",
+            "verdict": " used ",
+        }))
+        .send()
+        .await
+        .expect("post /consumption");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("consumption response");
+    assert_eq!(
+        body["used"], 2,
+        "verdict=used applies to exactly the two handed docs"
+    );
+    assert_eq!(body["contested"], 0);
+    assert_eq!(body["unknown"], 0);
+
+    // An unknown session handed nothing — a normal zero response, not an error.
+    let resp = client
+        .post(format!("{base}/consumption"))
+        .json(&serde_json::json!({
+            "session_id": unknown_session,
+            "observed_at": "2026-09-21T06:00:00+00:00",
+            "verdict": "used",
+        }))
+        .send()
+        .await
+        .expect("post /consumption for unknown session");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("consumption response");
+    assert_eq!(body["used"], 0);
+    assert_eq!(body["unknown"], 0);
+
+    // Exactly the handed docs carry the verdict; the un-handed doc stays untouched.
+    let counts = store
+        .consumption_counts(&[path_a.clone(), path_b.clone(), path_c.clone()])
+        .await
+        .expect("consumption counts");
+    assert_eq!(counts.get(&path_a).copied().unwrap_or_default().used, 1);
+    assert_eq!(counts.get(&path_b).copied().unwrap_or_default().used, 1);
+    assert!(
+        !counts.contains_key(&path_c),
+        "the doc that was never handed gets no verdict edge"
+    );
+
+    for path in [&path_a, &path_b, &path_c] {
+        store.delete_document(path).await.expect("cleanup doc");
+    }
+    db.execute(
+        "DELETE FROM node WHERE id = ANY($1);",
+        &[&vec![
+            format!("session:{session}"),
+            format!("session:{unknown_session}"),
+        ]],
+    )
+    .await
+    .expect("cleanup session nodes");
+}
+
+/// Spawn `drudge serve` against the disposable test DB on an ephemeral loopback port. No vault
+/// (nothing to re-ingest), no brief scheduler (99 is out of range); killed by the guard on drop.
+fn spawn_server(dsn: &str, port: u16) -> ServerGuard {
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_drudge"))
+        .arg("serve")
+        .env("BORING_VECTOR", "on")
+        .env("PG_DSN", dsn)
+        .env("BORING_HTTP_ADDR", format!("127.0.0.1:{port}"))
+        .env("BORING_BRIEF_HOUR", "99")
+        .env_remove("BORING_VAULT_DIR")
+        .env_remove("BORING_LLM_BASE_URL")
+        .env_remove("BORING_LLM_MODEL")
+        .spawn()
+        .expect("spawn drudge serve");
+    ServerGuard(child)
+}
+
+/// Poll `/health` until the server answers 2xx (it retries its own DB connect at startup).
+async fn wait_for_health(client: &reqwest::Client, base: &str) {
+    let mut ready = false;
+    for _ in 0..150 {
+        if let Ok(resp) = client.get(format!("{base}/health")).send().await
+            && resp.status().is_success()
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(ready, "drudge serve did not come up on {base}");
+}
+
+/// Kills the spawned `drudge serve` child when the test ends — on success or mid-panic.
+struct ServerGuard(std::process::Child);
+
+impl Drop for ServerGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// An ephemeral port for the spawned server — freed (with the usual tiny race) before bind.
+fn free_port() -> u16 {
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind port probe");
+    probe.local_addr().expect("probe local addr").port()
 }

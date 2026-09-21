@@ -99,7 +99,8 @@ fn mcp_tools_list() -> Value {
                     "project": {"type": "string", "description": "optional project slug to restrict results"},
                     "since_hours": {"type": "integer", "description": "optional recency window in hours (e.g. 24 for last day)"},
                     "max_results": {"type": "integer", "description": "max hits (default 5, cap 20)"},
-                    "max_tokens": {"type": "integer", "description": "approximate token budget (default 2000)"}
+                    "max_tokens": {"type": "integer", "description": "approximate token budget (default 2000)"},
+                    "session_id": {"type": "string", "description": "optional session id — the notes returned are recorded as handed to this session (the write side of the feedback door)"}
                 },
                 "required": ["query"]
             }
@@ -428,6 +429,23 @@ fn mcp_tools_list() -> Value {
                     "older_than_days": {"type": "integer", "description": "threshold in days (default 7)"}
                 }
             }
+        },
+        {
+            "name": "verdict",
+            "description": "Record the user's verdict on what one session was handed: `verdict: \"used\"` marks every note \
+                            handed to that session as consumed-right, `\"contested\"` as consumed-wrong. \
+                            CALL THIS after the user says a recalled note was right (used) or wrong (contested) — \
+                            a thumbs-up or thumbs-down is the whole signal; the engine already knows what was handed \
+                            to the session, so no paths are passed. The verdict lands on exactly the notes a prior \
+                            `recall`/`/search` with the same `session_id` handed over. Requires the vector backend.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "the session whose handed notes the verdict applies to"},
+                    "verdict": {"type": "string", "enum": ["used", "contested"], "description": "used = the handed notes were right; contested = they were wrong"}
+                },
+                "required": ["session_id", "verdict"]
+            }
         }
     ]})
 }
@@ -455,7 +473,7 @@ impl ToolOut {
     }
 }
 
-const MCP_TOOL_NAMES: [&str; 22] = [
+const MCP_TOOL_NAMES: [&str; 23] = [
     "ask",
     "brief",
     "claims",
@@ -477,6 +495,7 @@ const MCP_TOOL_NAMES: [&str; 22] = [
     "risks",
     "stalled",
     "sync",
+    "verdict",
     "weekly_brief",
 ];
 
@@ -572,6 +591,7 @@ async fn dispatch(
         "risks" => ToolOut::Structured(mcp_risks(s, args).await?),
         "next_actions" => ToolOut::Structured(mcp_next_actions(s, args).await?),
         "stalled" => ToolOut::Structured(mcp_stalled(s, args).await?),
+        "verdict" => ToolOut::Structured(mcp_verdict(s, args).await?),
         other => return Err(ToolCallError::UnknownTool(other.to_owned())),
     })
 }
@@ -667,6 +687,11 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         .and_then(|a| a.get("since_hours"))
         .and_then(Value::as_i64)
         .and_then(|n| i32::try_from(n).ok());
+    let session_id = args
+        .and_then(|a| a.get("session_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
     let wiki_hits = s
         .wiki_recall(query, max_results, project, since_hours)
@@ -698,6 +723,21 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     if lines.is_empty() {
         return Ok("(no experience recalled)".to_owned());
     }
+    // Opt-in handover: name the session and the notes this recall surfaced are recorded as
+    // handed to it — the same write `/search` does with `session_id`. A failure must never
+    // fail the recall: a lost handover only means a later bare verdict has nothing to apply to.
+    if let Some(session_id) = session_id
+        && let Some(store) = s.store.as_ref()
+    {
+        let paths: Vec<String> = lines.iter().map(|(path, _)| path.clone()).collect();
+        let observed_at = chrono::Utc::now().to_rfc3339();
+        if let Err(error) = store
+            .record_handover(session_id, &observed_at, &paths)
+            .await
+        {
+            eprintln!("[mcp] handover for session {session_id} failed: {error:#}");
+        }
+    }
     Ok(lines
         .iter()
         .map(|(path, body)| {
@@ -706,6 +746,62 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         })
         .collect::<Vec<_>>()
         .join("\n\n"))
+}
+
+async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
+    let session_id = args
+        .and_then(|a| a.get("session_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(session_id) = session_id else {
+        return Err((-32602, "missing argument: session_id".to_owned()));
+    };
+    let verdict = args
+        .and_then(|a| a.get("verdict"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(verdict) = verdict else {
+        return Err((-32602, "missing argument: verdict".to_owned()));
+    };
+    if verdict != "used" && verdict != "contested" {
+        return Err((
+            -32602,
+            format!("verdict must be \"used\" or \"contested\", got {verdict:?}"),
+        ));
+    }
+    let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    // The verdict applies to exactly what was handed to this session — the caller brings only
+    // the thumbs-up/down. An unknown session handed nothing: an empty verdict is a normal
+    // response, not an error.
+    let handed = store
+        .handed_paths(session_id)
+        .await
+        .map_err(|e| (-32603, format!("handed paths: {e:#}")))?;
+    let empty: Vec<String> = Vec::new();
+    let (used, contested) = if verdict == "used" {
+        (&handed, &empty)
+    } else {
+        (&empty, &handed)
+    };
+    let report = store
+        .record_consumption(
+            session_id,
+            &chrono::Utc::now().to_rfc3339(),
+            used,
+            contested,
+            &[],
+        )
+        .await
+        .map_err(|e| (-32603, format!("verdict: {e:#}")))?;
+    Ok(json!({
+        "session": format!("session:{session_id}"),
+        "used": report.used,
+        "contested": report.contested,
+        "supersedes": report.supersedes,
+        "unknown": report.unknown,
+    }))
 }
 
 async fn mcp_neighbors(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
@@ -1882,7 +1978,7 @@ mod tests {
     use crate::frontmatter::FrontMatter;
     use serde_json::json;
 
-    const VECTOR_REQUIRED_TOOLS: [&str; 11] = [
+    const VECTOR_REQUIRED_TOOLS: [&str; 12] = [
         "neighbors",
         "claims",
         "corpus_status",
@@ -1894,6 +1990,7 @@ mod tests {
         "risks",
         "next_actions",
         "stalled",
+        "verdict",
     ];
 
     const VECTOR_FREE_TOOLS: [&str; 11] = [

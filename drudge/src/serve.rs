@@ -456,6 +456,7 @@ mod tests {
             used,
             contested,
             supersedes: vec![],
+            verdict: None,
         }
     }
 
@@ -507,6 +508,77 @@ mod tests {
 
         req.supersedes = vec![pair; super::CONSUMPTION_MAX_PATHS];
         assert!(super::validate_consumption_req(&req).is_ok());
+    }
+
+    #[test]
+    fn a_padded_verdict_reads_as_used_not_contested() {
+        // The validator trimmed and the handler did not, so `" used "` passed validation and
+        // then fell into the contested branch. Both now read through `verdict()`.
+        let mut req = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
+        req.verdict = Some(" used ".to_owned());
+        assert!(super::validate_consumption_req(&req).is_ok());
+        assert_eq!(req.verdict(), Some("used"));
+        assert_ne!(req.verdict(), Some(" used "));
+    }
+
+    #[test]
+    fn a_blank_search_session_records_no_handover() {
+        let mut req = super::SearchReq {
+            query: "q".to_owned(),
+            max_results: 3,
+            max_tokens: 100,
+            project: None,
+            since_hours: None,
+            related: 0,
+            related_heads: 0,
+            claims: None,
+            session_id: Some("  ".to_owned()),
+        };
+        assert_eq!(req.session_id(), None);
+        req.session_id = Some(" slack:C1:1.0 ".to_owned());
+        assert_eq!(req.session_id(), Some("slack:C1:1.0"));
+    }
+
+    #[test]
+    fn consumption_rejects_verdict_other_than_used_or_contested() {
+        for bad in ["helpful", "wrong", "", "USED"] {
+            let mut req = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
+            req.verdict = Some(bad.to_owned());
+            let err = super::validate_consumption_req(&req).unwrap_err();
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::BAD_REQUEST,
+                "{bad:?} must be rejected"
+            );
+        }
+        for good in ["used", "contested"] {
+            let mut req = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
+            req.verdict = Some(good.to_owned());
+            assert!(
+                super::validate_consumption_req(&req).is_ok(),
+                "{good:?} is a valid verdict"
+            );
+        }
+    }
+
+    #[test]
+    fn consumption_rejects_verdict_alongside_path_lists() {
+        let path = || vec!["/vault/wiki/wiki-0001.md".to_owned()];
+        for (verdict, used, contested) in [
+            ("used", path(), vec![]),
+            ("used", vec![], path()),
+            ("contested", path(), vec![]),
+            ("contested", vec![], path()),
+        ] {
+            let mut req = consumption_req("s-1", "2026-09-11T05:12:00+00:00", used, contested);
+            req.verdict = Some(verdict.to_owned());
+            let err = super::validate_consumption_req(&req).unwrap_err();
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::BAD_REQUEST,
+                "verdict={verdict:?} plus a path list must be rejected"
+            );
+        }
     }
 }
 
@@ -613,6 +685,10 @@ pub(crate) struct SearchReq {
     pub(crate) related_heads: usize,
     #[serde(default)]
     pub(crate) claims: Option<u32>,
+    /// Opt-in: name the session these results are for and every hit shown is recorded as handed
+    /// to it (a `handed` edge per hit). Absent — today's request, byte for byte.
+    #[serde(default)]
+    pub(crate) session_id: Option<String>,
 }
 
 impl SearchReq {
@@ -628,6 +704,15 @@ impl SearchReq {
     /// caller gets today, byte for byte; the hook relies on that until the freeze lifts.
     pub(crate) fn claims(&self) -> u32 {
         self.claims.unwrap_or(0).min(SEARCH_MAX_CLAIMS)
+    }
+
+    /// The session to record the handover for — trimmed, and blank means "no session", so
+    /// `"  "` cannot mint a `session:` node the way MCP `recall` already refuses to.
+    pub(crate) fn session_id(&self) -> Option<&str> {
+        self.session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -689,6 +774,20 @@ pub(crate) struct ConsumptionReq {
     pub(crate) contested: Vec<String>,
     #[serde(default)]
     pub(crate) supersedes: Vec<[String; 2]>,
+    /// Verdict-only consumption: apply one verdict to everything handed to the session, no path
+    /// lists. `used`/`contested` lists must stay empty when this is set — the engine already
+    /// knows what was handed; listing paths again is a 400.
+    #[serde(default)]
+    pub(crate) verdict: Option<String>,
+}
+
+impl ConsumptionReq {
+    /// The verdict as one normalised string, read here by both the validator and the handler.
+    /// Two readers with two spellings of "trim" turned `" used "` into a contested edge once.
+    /// Blank stays `Some("")` so the validator still rejects a verdict field that says nothing.
+    pub(crate) fn verdict(&self) -> Option<&str> {
+        self.verdict.as_deref().map(str::trim)
+    }
 }
 
 #[derive(Serialize)]
@@ -710,6 +809,18 @@ pub(crate) fn validate_consumption_req(req: &ConsumptionReq) -> Result<(), AppEr
             req.observed_at
         )));
     }
+    if let Some(verdict) = req.verdict() {
+        if verdict != "used" && verdict != "contested" {
+            return Err(AppError::bad_request(format!(
+                "verdict must be \"used\" or \"contested\", got {verdict:?}"
+            )));
+        }
+        if !req.used.is_empty() || !req.contested.is_empty() {
+            return Err(AppError::bad_request(
+                "verdict applies to what was handed; do not also list paths",
+            ));
+        }
+    }
     for (name, len) in [
         ("used", req.used.len()),
         ("contested", req.contested.len()),
@@ -720,6 +831,40 @@ pub(crate) fn validate_consumption_req(req: &ConsumptionReq) -> Result<(), AppEr
                 "{name}: at most {CONSUMPTION_MAX_PATHS} paths, got {len}"
             )));
         }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub(crate) struct HandoverReq {
+    pub(crate) session_id: String,
+    pub(crate) observed_at: String,
+    #[serde(default)]
+    pub(crate) paths: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct HandoverResp {
+    pub(crate) session: String,
+    pub(crate) handed: usize,
+    pub(crate) unknown: usize,
+}
+
+pub(crate) fn validate_handover_req(req: &HandoverReq) -> Result<(), AppError> {
+    if req.session_id.trim().is_empty() {
+        return Err(AppError::bad_request("session_id must not be empty"));
+    }
+    if chrono::DateTime::parse_from_rfc3339(&req.observed_at).is_err() {
+        return Err(AppError::bad_request(format!(
+            "observed_at must be RFC 3339, got {:?}",
+            req.observed_at
+        )));
+    }
+    if req.paths.len() > CONSUMPTION_MAX_PATHS {
+        return Err(AppError::bad_request(format!(
+            "paths: at most {CONSUMPTION_MAX_PATHS} paths, got {}",
+            req.paths.len()
+        )));
     }
     Ok(())
 }
@@ -1084,6 +1229,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .route("/context", post(http::handle_context))
         .route("/search", post(http::handle_search))
         .route("/consumption", post(http::handle_consumption))
+        .route("/handover", post(http::handle_handover))
         .route("/graph", post(http::handle_graph))
         .route("/audit", get(http::handle_audit))
         .route("/query-log", get(http::handle_query_log))

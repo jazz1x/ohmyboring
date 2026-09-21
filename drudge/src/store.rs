@@ -128,6 +128,14 @@ pub struct ConsumptionReport {
     pub unknown: usize,
 }
 
+/// Result of a handover write: how many `handed` edges were written and how many paths had no
+/// `document` row and were skipped.
+#[derive(Debug, Default)]
+pub struct HandoverReport {
+    pub handed: usize,
+    pub unknown: usize,
+}
+
 /// Splits `supersedes` pairs into edge-worthy ones and the count of equal-path pairs. A pair that
 /// names the same path twice replaces nothing, so it is skipped and counted as unknown, never
 /// written.
@@ -2624,8 +2632,38 @@ impl Store {
         Ok(report)
     }
 
+    /// The handover door: record what one session was handed, without judging it. Upserts
+    /// `session:<id>` (label = `observed_at`) and one `handed` edge per known path — the same
+    /// skeleton as `record_consumption`, with edge kind `handed` instead of a verdict. Handed
+    /// edges are deliberately invisible to `consumption_counts`: being handed is not being
+    /// consumed. Idempotent — a repeat call updates the label and adds no duplicate edges. Paths
+    /// with no `document` row are counted in `unknown`, not errored.
+    pub async fn record_handover(
+        &self,
+        session_id: &str,
+        observed_at: &str,
+        paths: &[String],
+    ) -> Result<HandoverReport> {
+        let session_node = format!("session:{session_id}");
+        self.upsert_node(&session_node, "session", observed_at, None)
+            .await?;
+
+        let mut report = HandoverReport::default();
+        for path in paths {
+            if self.get_doc_sha(path).await?.is_none() {
+                report.unknown += 1;
+                continue;
+            }
+            self.upsert_edge(&session_node, &doc_node_id(path), "handed")
+                .await?;
+            report.handed += 1;
+        }
+        Ok(report)
+    }
+
     /// Consumption counts (`used`/`contested` edges) per document — one query for all hits of a
     /// `/search` response. Keyed by `source_path`; documents with no consumption edges are absent.
+    /// `handed` edges never count here: being handed is not being consumed.
     pub async fn consumption_counts(
         &self,
         paths: &[String],
@@ -2656,6 +2694,29 @@ impl Store {
             }
         }
         Ok(counts)
+    }
+
+    /// Paths handed to one session — the `source_path`s of the documents its `handed` edges
+    /// reach, distinct, in path order. This is what a bare `{session_id, verdict}` `/consumption`
+    /// applies the verdict to: the engine already knows what was handed, the caller only brings
+    /// the thumbs-up/down. An unknown session hands nothing — an empty read, not an error.
+    pub async fn handed_paths(&self, session_id: &str) -> Result<Vec<String>> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT DISTINCT dst FROM edge WHERE src = $1 AND kind = 'handed' ORDER BY dst;",
+                &[&format!("session:{session_id}")],
+            )
+            .await
+            .context("handed paths")?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let dst: String = row.get(0);
+                dst.strip_prefix("doc:").unwrap_or(&dst).to_owned()
+            })
+            .collect())
     }
 
     /// `supersedes` edges pointing at these documents — the `source_path`s of the newer docs that
