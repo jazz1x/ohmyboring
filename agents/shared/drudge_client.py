@@ -111,6 +111,10 @@ class DrudgeClient:
         payload listing paths beside a verdict is rejected."""
         payload: dict[str, Any] = {"session_id": session_id, "observed_at": observed_at}
         if verdict is not None:
+            # Dropping the lists here would hide a caller bug behind a 200: the caller thinks
+            # its paths were judged, the engine judged what it had handed. Refuse instead.
+            if used or contested:
+                raise ValueError("consumption: pass either a verdict or path lists, not both")
             payload["verdict"] = verdict
         else:
             payload["used"] = used or []

@@ -138,6 +138,20 @@ def test_the_client_sends_a_verdict_without_path_lists():
         "paths beside a verdict are a 400; the verdict must travel alone"
 
 
+def test_the_client_refuses_a_verdict_beside_path_lists():
+    # Silently dropping the lists would answer 200 for a request the engine never judged.
+    client = dc.DrudgeClient(base_url="http://drudge.test", retries=0)
+    sent = []
+    client._retry = lambda method, path, payload=None, timeout=None: sent.append(payload) or {}
+    try:
+        client.consumption("k", "2026-09-21T00:00:00+00:00", used=["/vault/wiki/a.md"], verdict="used")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("verdict beside paths must raise, not send")
+    assert sent == [], "nothing may reach the engine when the call is ambiguous"
+
+
 def test_remember_handed_hands_the_engine_paths():
     key = "slack:C123:1726900000.000100"
     hits = [
