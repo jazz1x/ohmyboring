@@ -64,6 +64,7 @@ failed_hookprobe=0
 failed_engine=0
 failed_ollama=0
 failed_containers=0
+looping_services=""   # services whose log tail is mostly failures; --fix restarts these alone
 failed_note=0
 failed_marker=0
 failed_midpoint=0
@@ -129,6 +130,18 @@ fix_ollama() {
 }
 
 fix_containers() {
+    # A service looping inside a container that reports Up is restarted on its own. Bouncing the
+    # whole stack for it would drop the engine — and with it every hook that fires while it is
+    # down — to cure a Slack socket. The loop seen 2026-09-21 was exactly that: hermes' Slack
+    # adapter reconnecting on a client session it had already closed, forever, while the engine
+    # beside it was healthy.
+    if [ -n "${looping_services:-}" ]; then
+        for svc in $looping_services; do
+            echo "  → restarting $svc: it was looping inside while reporting Up"
+            (cd "$BORING_HOME" && "$docker_bin" compose restart "$svc" >>/tmp/omb-doctor-fix-containers.log 2>&1)
+        done
+        return 0
+    fi
     echo "  → fixing containers: make down && make up in $BORING_HOME"
     (cd "$BORING_HOME" && make down >/tmp/omb-doctor-fix-containers.log 2>&1 && make up >>/tmp/omb-doctor-fix-containers.log 2>&1)
 }
@@ -460,8 +473,9 @@ if docker_bin="$(resolve_docker)"; then
             fi
             n=$(printf '%s\n' "$logs" | grep -Eci 'Traceback|RuntimeError|Failed to connect|panicked|FATAL' || true)
             if [ "${n:-0}" -ge "$LOG_FAILURE_MAX" ]; then
-                bad "$svc: $n of its last $LOG_TAIL_LINES log lines are failures while the container reports Up — it is looping inside (make agent-logs)"
+                bad "$svc: $n of its last $LOG_TAIL_LINES log lines are failures while the container reports Up — it is looping inside (make heal restarts it)"
                 failed_containers=1
+                looping_services="$looping_services $svc"
             fi
         done
     else
