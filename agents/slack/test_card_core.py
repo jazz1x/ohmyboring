@@ -112,10 +112,11 @@ RESOLUTIONS = {
 EXPECTED_NOTES = ["/vault/wiki/wiki-0900.md", "/vault/wiki/wiki-0576.md", "/vault/wiki/wiki-0101.md"]
 
 # Past approvals, newest first: the first still resolves from today's registers (아직),
-# the second no longer does (했다).
+# the other two no longer do (했다 2 · 아직 1 — asymmetric, so a done/pending swap shows).
 PAST_APPROVED = [
     cc.PastApproved(session="slack:C1:1759000000.000001", note="/vault/wiki/wiki-0900.md", at="t-1"),
     cc.PastApproved(session="slack:C1:1758000000.000002", note="/vault/wiki/wiki-9999.md", at="t-2"),
+    cc.PastApproved(session="slack:C1:1757000000.000003", note="/vault/wiki/wiki-9998.md", at="t-3"),
 ]
 PAST_SESSION = "slack:C1:1759000000.000001"
 
@@ -135,12 +136,20 @@ def _payload(action_id: str, user: str = OWNER) -> dict:
 
 
 class Stubs:
-    """The three new collaborators, recording every call."""
+    """The stub collaborators, recording every call. `failures` maps a subject to the
+    Unresolved reason the door would have returned (5xx, unreachable)."""
 
-    def __init__(self, resolutions: dict[str, str] | None = None, approved=None, paths_resolve: bool = True):
+    def __init__(
+        self,
+        resolutions: dict[str, str] | None = None,
+        approved=None,
+        paths_resolve: bool = True,
+        failures: dict[str, str] | None = None,
+    ):
         self.resolutions = resolutions if resolutions is not None else RESOLUTIONS
         self.approved_items = approved if approved is not None else PAST_APPROVED
         self.paths_resolve = paths_resolve
+        self.failures = failures or {}
         self.propose_calls: list[str] = []
         self.resolve_calls: list[tuple[str, str]] = []
         self.records: list[tuple[str, dict]] = []
@@ -151,11 +160,14 @@ class Stubs:
 
     def resolve(self, subject: str, register: str):
         self.resolve_calls.append((subject, register))
+        reason = self.failures.get(subject)
+        if reason is not None:
+            return cc.Unresolved(subject=subject, register=register, reason=reason)
         if self.paths_resolve and subject.startswith("/"):
             return cc.ResolvedNote(subject=subject, note=subject)
         note = self.resolutions.get(subject)
         if note is None:
-            return cc.Unresolved(subject=subject, register=register, reason="no current claim for subject")
+            return cc.Unresolved(subject=subject, register=register, reason=cc.NO_CURRENT_CLAIM)
         return cc.ResolvedNote(subject=subject, note=note)
 
     def approved(self, since_hours: int):
@@ -209,10 +221,24 @@ class BuildBlocksTests(unittest.TestCase):
         self.assertNotIn("card:1:", _blocks_text(blocks))
 
     def test_confirmation_line_sits_under_the_header_when_there_is_one(self):
-        confirmation = cc.Confirmation(total=2, done=PAST_APPROVED[:1], pending=PAST_APPROVED[1:])
+        confirmation = cc.Confirmation(
+            total=3,
+            done=["/vault/wiki/wiki-9999.md", "/vault/wiki/wiki-9998.md"],
+            pending=["/vault/wiki/wiki-0900.md"],
+        )
         blocks = cc.build_blocks(self.proposals, confirmation=confirmation)
         self.assertEqual(blocks[1]["type"], "context")
-        self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 2 · 했다 1 · 아직 1")
+        self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 3 · 했다 2 · 아직 1")
+
+    def test_confirmation_line_counts_unknown_when_the_door_failed(self):
+        confirmation = cc.Confirmation(
+            total=2,
+            done=[],
+            pending=["/vault/wiki/wiki-0900.md"],
+            unknown=[("/vault/wiki/wiki-9999.md", "claim-source answered 500")],
+        )
+        blocks = cc.build_blocks(self.proposals, confirmation=confirmation)
+        self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 2 · 했다 0 · 아직 1 · 확인불가 1")
 
     def test_no_confirmation_no_line(self):
         for none in (None, cc.Confirmation(total=0, done=[], pending=[])):
@@ -223,13 +249,36 @@ class BuildBlocksTests(unittest.TestCase):
 class ConfirmPastTests(unittest.TestCase):
     def test_note_still_in_today_register_is_pending_otherwise_done(self):
         out = cc.confirm_past(PAST_APPROVED, {"/vault/wiki/wiki-0900.md"})
-        self.assertEqual(out.total, 2)
-        self.assertEqual([d.note for d in out.done], ["/vault/wiki/wiki-9999.md"])
-        self.assertEqual([p.note for p in out.pending], ["/vault/wiki/wiki-0900.md"])
+        self.assertEqual(out.total, 3)
+        self.assertEqual(out.done, ["/vault/wiki/wiki-9999.md", "/vault/wiki/wiki-9998.md"])
+        self.assertEqual(out.pending, ["/vault/wiki/wiki-0900.md"])
+        self.assertEqual(out.unknown, [])
+        self.assertEqual(out.session, PAST_SESSION)
+
+    def test_absence_is_done_only_when_the_door_answered(self):
+        # 404 on today's subjects proves absence: unresolved past approvals are 했다.
+        out = cc.confirm_past(PAST_APPROVED[1:], set())
+        self.assertEqual(out.done, ["/vault/wiki/wiki-9999.md", "/vault/wiki/wiki-9998.md"])
+        self.assertEqual(out.pending, [])
+
+    def test_door_failure_leaves_the_past_approval_unknown(self):
+        # 5xx·불통 proves nothing: what a dead door cannot disprove is never 했다.
+        out = cc.confirm_past(PAST_APPROVED, set(), failures=["claim-source answered 500"])
+        self.assertEqual(out.done, [])
+        self.assertEqual(out.pending, [])
+        self.assertEqual(
+            out.unknown,
+            [
+                ("/vault/wiki/wiki-0900.md", "claim-source answered 500"),
+                ("/vault/wiki/wiki-9999.md", "claim-source answered 500"),
+                ("/vault/wiki/wiki-9998.md", "claim-source answered 500"),
+            ],
+        )
 
     def test_empty_past_is_a_zero_confirmation(self):
         out = cc.confirm_past([], {"/vault/wiki/wiki-0900.md"})
         self.assertEqual(out.total, 0)
+        self.assertIsNone(out.session)
 
 
 class ParseActionTests(unittest.TestCase):
@@ -328,6 +377,15 @@ class ParseProposalsTests(unittest.TestCase):
         self.assertNotIn("\n1. next_action\n", prompt)
         self.assertIn("sources:\n1. loop", prompt)
 
+    def test_pending_subjects_get_a_priority_clause(self):
+        prompt = cc.build_prompt(self.registers, priority=["f64_risk"])
+        self.assertIn("우선 후보", prompt)
+        self.assertIn("f64_risk", prompt)
+
+    def test_no_pending_means_no_priority_clause(self):
+        self.assertNotIn("우선 후보", cc.build_prompt(self.registers))
+        self.assertNotIn("우선 후보", cc.build_prompt(self.registers, priority=[]))
+
 
 class GraphTests(unittest.TestCase):
     def setUp(self):
@@ -364,32 +422,20 @@ class GraphTests(unittest.TestCase):
         verdict = cc.ButtonVerdict(idx=idx, choice=choice, user=OWNER, at="t")
         return self.graph.invoke(Command(resume=verdict), self.cfg)
 
-    def test_ascii_has_the_six_nodes(self):
-        drawing = (
-            card.build_graph(
-                card.Collaborators(
-                    fetch=_fetch,
-                    propose=self.stubs.propose,
-                    send=self._send,
-                    handover=self._handover,
-                    consumption=self._consumption,
-                    resolve=self.stubs.resolve,
-                    approved=self.stubs.approved,
-                    record=self.stubs.record,
-                )
-            )
-            .get_graph()
-            .draw_ascii()
+    def test_graph_has_the_seven_nodes(self):
+        names = set(self.graph.get_graph().nodes) - {"__start__", "__end__"}
+        self.assertEqual(
+            names,
+            {
+                "read_registers",
+                "cross_check",
+                "propose",
+                "resolve",
+                "post_card",
+                "await_verdict",
+                "record_verdict",
+            },
         )
-        for name in (
-            "read_registers",
-            "propose",
-            "resolve",
-            "post_card",
-            "await_verdict",
-            "record_verdict",
-        ):
-            self.assertIn(name, drawing)
 
     def test_unresolved_subject_is_dropped_and_reproposed_once(self):
         out = self.graph.invoke({"verdicts": []}, self.cfg)
@@ -427,16 +473,99 @@ class GraphTests(unittest.TestCase):
         out = self.graph.invoke({"verdicts": []}, self.cfg)
         confirmation = out["confirmation"]
         self.assertIsNotNone(confirmation)
-        self.assertEqual(confirmation.total, 2)
-        self.assertEqual(len(confirmation.done), 1)
-        self.assertEqual(len(confirmation.pending), 1)
+        self.assertEqual(confirmation.total, 3)
+        self.assertEqual(confirmation.done, ["/vault/wiki/wiki-9999.md", "/vault/wiki/wiki-9998.md"])
+        self.assertEqual(confirmation.pending, ["/vault/wiki/wiki-0900.md"])
+        self.assertEqual(confirmation.unknown, [])
         blocks = self.sends[0]
         self.assertEqual(blocks[1]["type"], "context")
-        self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 2 · 했다 1 · 아직 1")
+        self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 3 · 했다 2 · 아직 1")
         self.assertEqual(
             self.stubs.records,
-            [("card_confirmation", {"done": 1, "pending": 1, "session": PAST_SESSION})],
+            [("card_confirmation", {"done": 2, "pending": 1, "session": PAST_SESSION})],
         )
+
+    def test_pending_subject_leads_the_proposal_prompt(self):
+        self.graph.invoke({"verdicts": []}, self.cfg)
+        first_prompt = self.stubs.propose_calls[0]
+        self.assertIn("우선 후보", first_prompt)
+        self.assertIn("f64_risk", first_prompt)  # the subject still claimed by a past 「해」
+
+    def test_door_failure_marks_unknown_instead_of_done(self):
+        stubs = Stubs(failures={"f64_risk": "claim-source answered 500"})
+        collabs = card.Collaborators(
+            fetch=_fetch,
+            propose=stubs.propose,
+            send=self._send,
+            handover=self._handover,
+            consumption=self._consumption,
+            resolve=stubs.resolve,
+            approved=stubs.approved,
+            record=stubs.record,
+        )
+        graph = card.build_graph(collabs)
+        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-card-500"}})
+        confirmation = out["confirmation"]
+        self.assertEqual(confirmation.done, [])
+        self.assertEqual(confirmation.pending, [])
+        self.assertEqual(
+            [note for note, _ in confirmation.unknown],
+            ["/vault/wiki/wiki-0900.md", "/vault/wiki/wiki-9999.md", "/vault/wiki/wiki-9998.md"],
+        )
+        blocks = self.sends[-1]
+        self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 3 · 했다 0 · 아직 0 · 확인불가 3")
+        self.assertEqual(
+            stubs.records,
+            [
+                (
+                    "card_confirmation",
+                    {"done": 0, "pending": 0, "session": PAST_SESSION, "unknown": 3},
+                )
+            ],
+        )
+
+    def test_approved_failure_stops_the_run_before_any_send(self):
+        stubs = Stubs()
+
+        def dead_door(since_hours: int):
+            raise OSError("door unreachable")
+
+        collabs = card.Collaborators(
+            fetch=_fetch,
+            propose=stubs.propose,
+            send=self._send,
+            handover=self._handover,
+            consumption=self._consumption,
+            resolve=stubs.resolve,
+            approved=dead_door,
+            record=stubs.record,
+        )
+        graph = card.build_graph(collabs)
+        with self.assertRaises(OSError):
+            graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-card-dead"}})
+        self.assertEqual(self.sends, [])
+        self.assertEqual(stubs.records, [])
+
+    def test_send_failure_leaves_no_confirmation_event(self):
+        stubs = Stubs()
+
+        def dead_slack(blocks):
+            raise OSError("slack unreachable")
+
+        collabs = card.Collaborators(
+            fetch=_fetch,
+            propose=stubs.propose,
+            send=dead_slack,
+            handover=self._handover,
+            consumption=self._consumption,
+            resolve=stubs.resolve,
+            approved=stubs.approved,
+            record=stubs.record,
+        )
+        graph = card.build_graph(collabs)
+        with self.assertRaises(OSError):
+            graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-card-nosend"}})
+        self.assertEqual(stubs.records, [])  # the card never went out — no confirmation log
 
     def test_no_past_approvals_means_no_line_no_event(self):
         stubs = Stubs(approved=[])

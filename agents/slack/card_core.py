@@ -97,21 +97,57 @@ class PastApproved(BaseModel):
     at: str
 
 
+#: The /claim-source 404 reason — the door answered, and the subject has no current claim.
+#: Every other Unresolved reason is a door failure (5xx, unreachable), which proves nothing.
+NO_CURRENT_CLAIM = "no current claim for subject"
+
+
+def is_absence(reason: str) -> bool:
+    """404 establishes absence; 5xx·불통 leave the question open."""
+    return reason == NO_CURRENT_CLAIM
+
+
 class Confirmation(BaseModel):
-    """The past-approval cross-check for the card's head. A past 「해」 whose note path no
-    longer resolves from any of today's register subjects is 했다 (the register let it go);
-    one that still resolves is 아직 — it comes back as a proposal candidate."""
+    """The past-approval cross-check for the card's head, as note paths. A past 「해」 whose
+    note no longer resolves from any of today's register subjects is 했다 (the register let
+    it go) — but only a clean run earns that: a door failure (5xx·불통) leaves its absence
+    unproven, so it lands in unknown, never a false 했다. One whose note still resolves is
+    아직 — its subject comes back as a proposal candidate."""
 
     total: int
-    done: list[PastApproved]
-    pending: list[PastApproved]
+    done: list[str]
+    pending: list[str]
+    unknown: list[tuple[str, str]] = []
+    session: str | None = None
 
 
-def confirm_past(approved: list[PastApproved], today_notes: set[str]) -> Confirmation:
-    """Partition past approvals against the note paths today's registers resolve to."""
-    done = [item for item in approved if item.note not in today_notes]
-    pending = [item for item in approved if item.note in today_notes]
-    return Confirmation(total=len(approved), done=done, pending=pending)
+def confirm_past(
+    approved: list[PastApproved],
+    today_notes: set[str],
+    failures: Iterable[str] = (),
+) -> Confirmation:
+    """Partition past approvals against the note paths today's registers resolve to. A
+    failure during today's resolves degrades the run: what a dead door cannot disprove
+    stays unknown, not done."""
+    failures = list(failures)
+    reason = "; ".join(sorted(set(failures)))
+    done: list[str] = []
+    pending: list[str] = []
+    unknown: list[tuple[str, str]] = []
+    for item in approved:
+        if item.note in today_notes:
+            pending.append(item.note)
+        elif failures:
+            unknown.append((item.note, reason))
+        else:
+            done.append(item.note)
+    return Confirmation(
+        total=len(approved),
+        done=done,
+        pending=pending,
+        unknown=unknown,
+        session=approved[0].session if approved else None,
+    )
 
 
 class ButtonVerdict(BaseModel):
@@ -196,11 +232,16 @@ def collect_registers(fetch: Callable[[str], dict[str, Any]]) -> Registers:
     return Registers(texts=texts, sources=sources)
 
 
-def build_prompt(registers: Registers, exclude: set[str] | None = None) -> str:
+def build_prompt(
+    registers: Registers,
+    exclude: set[str] | None = None,
+    priority: Iterable[str] = (),
+) -> str:
     """The whole proposal task: the registers with their allow-lists, and the rules. The model
     only picks and justifies — invention is refused later, in parse_proposals. `exclude`
     narrows the allow-lists to what a previous round has not already picked or failed to
-    resolve; the re-propose after a resolve failure runs on the remainder."""
+    resolve; the re-propose after a resolve failure runs on the remainder. `priority` lists
+    subjects whose past 「해」 is still claimed today — the card asks for them first."""
     exclude = exclude or set()
     sections = []
     for name in REGISTER_NAMES:
@@ -227,6 +268,14 @@ def build_prompt(registers: Registers, exclude: set[str] | None = None) -> str:
         "- register 는 그 제안을 고른 섹션 이름이다(next_actions | risks | stalled | recurrences).\n"
         "- title 과 why 는 한국어로.\n"
     )
+    priority = list(priority)
+    if priority:
+        listed = "\n".join(f"- {s}" for s in priority)
+        sections.append(
+            "[우선 후보]\n"
+            "아직 끝나지 않은 지난 승인의 주어들이다. 가능하면 제안 셋을 이 목록에서 고른 "
+            f"subject 로 채워라.\n{listed}"
+        )
     return rules + "\n" + "\n\n".join(sections)
 
 
@@ -267,16 +316,12 @@ def _actions_block(idx: int, proposal: Proposal) -> dict:
 
 
 def _confirmation_block(confirmation: Confirmation) -> dict:
-    return {
-        "type": "context",
-        "elements": [
-            {
-                "type": "mrkdwn",
-                "text": f"지난 승인 {confirmation.total} · 했다 {len(confirmation.done)} · "
-                f"아직 {len(confirmation.pending)}",
-            }
-        ],
-    }
+    text = (
+        f"지난 승인 {confirmation.total} · 했다 {len(confirmation.done)} · 아직 {len(confirmation.pending)}"
+    )
+    if confirmation.unknown:
+        text += f" · 확인불가 {len(confirmation.unknown)}"
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
 
 def build_blocks(

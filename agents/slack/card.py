@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """The morning card — one LangGraph run: read the registers, propose, resolve, post, interrupt.
 
-`make card` runs g_card once. The graph reads the engine's four registers, the local model
-picks three proposals grounded in them, the resolve node turns each proposal's subject into
-the note path the door's /claim-source names (dropping what no longer resolves, re-proposing
-once on the remainder), cross-checks the past 48h of 「해」 against today's registers for
-the card's head line, posts to SLACK_CARD_CHANNEL, and stops at an interrupt — a Slack
-button press (해 · 미뤄 · 빼) resumes it with Command(resume=…), and record_verdict writes
-the verdict to the engine. Sent and judged stay in one state, so the card a person answered
-is exactly the card the engine remembers.
+`make card` runs g_card once. The graph reads the engine's four registers, cross-checks
+the past 48h of 「해」 against today's registers for the card's head line (a door failure
+leaves an approval 확인불가 — never a false 「했다」), the local model picks three proposals
+grounded in the registers — 「아직」 subjects asked for first — the resolve node turns each
+proposal's subject into the note path the door's /claim-source names (dropping what no
+longer resolves, re-proposing once on the remainder), posts to SLACK_CARD_CHANNEL, and
+stops at an interrupt — a Slack button press (해 · 미뤄 · 빼) resumes it with
+Command(resume=…), and record_verdict writes the verdict to the engine. Sent and judged
+stay in one state, so the card a person answered is exactly the card the engine
+remembers.
 
 The socket lives here, not in the secretary: hermes can only text, and the secretary answers
 questions while this file asks them. Everything decided lives in card_core; everything
@@ -57,6 +59,7 @@ class CardState(TypedDict):
     proposals: list[card_core.Proposal]
     message: card_core.PostedCard | None
     confirmation: card_core.Confirmation | None
+    priority_subjects: list[str]
     verdicts: Annotated[list[card_core.ButtonVerdict], _append_verdicts]
 
 
@@ -95,9 +98,47 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     def read_registers(_: CardState) -> dict:
         return {"registers": card_core.collect_registers(collabs.fetch)}
 
+    #: subject → resolution, shared by cross_check and resolve so the door is asked once
+    #: per subject per run.
+    resolve_cache: dict[tuple[str, str], card_core.ResolvedNote | card_core.Unresolved] = {}
+
+    def _resolve(subject: str, register: str) -> card_core.ResolvedNote | card_core.Unresolved:
+        key = (subject, register)
+        if key not in resolve_cache:
+            resolve_cache[key] = collabs.resolve(subject, register)
+        return resolve_cache[key]
+
+    def cross_check(state: CardState) -> dict:
+        """The card's head line, before the model picks: yesterday's 「해」, each checked
+        against whether its note path still resolves from today's register subjects. A 404
+        establishes absence; a door failure (5xx·불통) leaves the approval unknown — the
+        card never reads a dead door as 「했다」. A dead /approved is not a value either:
+        the exception stops the run, and main exits 3 without posting."""
+        registers = state["registers"]
+        past = collabs.approved(CONFIRM_SINCE_HOURS)
+        if not past:
+            return {"confirmation": None, "priority_subjects": []}
+        today_notes: set[str] = set()
+        note_to_subject: dict[str, str] = {}
+        failures: list[str] = []
+        for name in card_core.ANSWER_REGISTERS:
+            for subject in registers.sources.get(name, []):
+                result = _resolve(subject, name)
+                if isinstance(result, card_core.ResolvedNote):
+                    today_notes.add(result.note)
+                    note_to_subject.setdefault(result.note, subject)
+                elif not card_core.is_absence(result.reason):
+                    failures.append(result.reason)
+        for path in registers.sources.get("recurrences", []):
+            today_notes.add(path)
+            note_to_subject.setdefault(path, path)
+        confirmation = card_core.confirm_past(past, today_notes, failures)
+        priority = sorted({note_to_subject[note] for note in confirmation.pending if note in note_to_subject})
+        return {"confirmation": confirmation, "priority_subjects": priority}
+
     def propose(state: CardState) -> dict:
         registers = state["registers"]
-        llm_json = collabs.propose(card_core.build_prompt(registers))
+        llm_json = collabs.propose(card_core.build_prompt(registers, priority=state["priority_subjects"]))
         return {"proposals": card_core.parse_proposals(llm_json, registers)}
 
     def resolve(state: CardState) -> dict:
@@ -116,7 +157,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 if proposal.subject in tried:
                     continue
                 tried.add(proposal.subject)
-                result = collabs.resolve(proposal.subject, proposal.register_)
+                result = _resolve(proposal.subject, proposal.register_)
                 if isinstance(result, card_core.Unresolved):
                     dropped.append(result)
                     continue
@@ -139,32 +180,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         if not picked:
             reasons = "; ".join(f"{u.subject}: {u.reason}" for u in dropped)
             raise ValueError(f"근거 노트 없음 — 제안 0: {reasons or 'no proposals'}")
-        return {"proposals": picked, "confirmation": _cross_check(registers)}
-
-    def _cross_check(registers: card_core.Registers) -> card_core.Confirmation | None:
-        """The card's head line: yesterday's 「해」, each checked against whether its note path
-        still resolves from any of today's register subjects. The check lands in the engine's
-        event log — the engine's own gauge fills the confirmation, not the card's opinion."""
-        past = collabs.approved(CONFIRM_SINCE_HOURS)
-        if not past:
-            return None
-        today_notes: set[str] = set()
-        for name in card_core.ANSWER_REGISTERS:
-            for subject in registers.sources.get(name, []):
-                result = collabs.resolve(subject, name)
-                if isinstance(result, card_core.ResolvedNote):
-                    today_notes.add(result.note)
-        today_notes.update(registers.sources.get("recurrences", []))
-        confirmation = card_core.confirm_past(past, today_notes)
-        collabs.record(
-            "card_confirmation",
-            {
-                "done": len(confirmation.done),
-                "pending": len(confirmation.pending),
-                "session": past[0].session,
-            },
-        )
-        return confirmation
+        return {"proposals": picked}
 
     def post_card(state: CardState) -> dict:
         message = collabs.send(card_core.build_blocks(state["proposals"], confirmation=state["confirmation"]))
@@ -173,6 +189,16 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             datetime.now(UTC).isoformat(),
             [p.note for p in state["proposals"]],
         )
+        confirmation = state["confirmation"]
+        if confirmation is not None:
+            fields: dict[str, Any] = {
+                "done": len(confirmation.done),
+                "pending": len(confirmation.pending),
+                "session": confirmation.session,
+            }
+            if confirmation.unknown:
+                fields["unknown"] = len(confirmation.unknown)
+            collabs.record("card_confirmation", fields)
         return {"message": message}
 
     def await_verdict(state: CardState) -> dict:
@@ -190,13 +216,15 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
 
     graph = StateGraph(CardState)
     graph.add_node("read_registers", read_registers)
+    graph.add_node("cross_check", cross_check)
     graph.add_node("propose", propose)
     graph.add_node("resolve", resolve)
     graph.add_node("post_card", post_card)
     graph.add_node("await_verdict", await_verdict)
     graph.add_node("record_verdict", record_verdict)
     graph.add_edge(START, "read_registers")
-    graph.add_edge("read_registers", "propose")
+    graph.add_edge("read_registers", "cross_check")
+    graph.add_edge("cross_check", "propose")
     graph.add_edge("propose", "resolve")
     graph.add_edge("resolve", "post_card")
     graph.add_edge("post_card", "await_verdict")
@@ -238,7 +266,7 @@ def _live_resolve(subject: str, register: str) -> card_core.ResolvedNote | card_
             payload = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            reason = "no current claim for subject"
+            reason = card_core.NO_CURRENT_CLAIM
         else:
             reason = f"claim-source answered {e.code}"
         return card_core.Unresolved(subject=subject, register=register, reason=reason)
