@@ -903,6 +903,107 @@ async fn claim_era_counts_count_the_rows_that_only_label() {
     store.delete_document(&path).await.expect("cleanup");
 }
 
+/// Two notes that settled the same question find each other, even sharing no concept.
+///
+/// The `claims` edge was written 6,921 times and walked by nothing: related-note retrieval
+/// followed `about` edges only. Measured 2026-09-20 on the live corpus — 11,123 document pairs
+/// share a claim node and 10,886 of them (98%) share no two concepts, so the strongest link in
+/// the graph was invisible to the surface that asks "what does this continue".
+#[tokio::test]
+async fn related_follows_a_shared_claim_with_no_shared_concept() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let subject = unique_subject("shared-ground");
+    let older_path = format!("/vault/wiki/{subject}-older.md");
+    let newer_path = format!("/vault/wiki/{subject}-newer.md");
+    let emb = [0.1_f32; 1024];
+
+    // The older note settles a question. No tags, no concepts — only the claim.
+    let older = claim_note(&older_path, &subject);
+    store
+        .upsert_document(
+            &older,
+            "sha-older",
+            SystemTime::now() - Duration::from_mins(10),
+        )
+        .await
+        .expect("older doc");
+    store
+        .upsert_chunk(&Doc {
+            id: format!("{older_path}#0"),
+            content: "the pool bound was settled here".to_string(),
+            embedding: emb.to_vec(),
+            front: older.clone(),
+            chunk_idx: 0,
+        })
+        .await
+        .expect("older chunk");
+    store
+        .upsert_claim_node(
+            &older_path,
+            "",
+            &older.claims[0].subject,
+            &older.claims[0].predicate,
+            &older.claims[0],
+        )
+        .await
+        .expect("older claim node");
+
+    // The newer note answers the same question again — same subject and predicate.
+    let newer = claim_note(&newer_path, &subject);
+    store
+        .upsert_document(&newer, "sha-newer", SystemTime::now())
+        .await
+        .expect("newer doc");
+    store
+        .upsert_chunk(&Doc {
+            id: format!("{newer_path}#0"),
+            content: "the pool bound came up again".to_string(),
+            embedding: emb.to_vec(),
+            front: newer.clone(),
+            chunk_idx: 0,
+        })
+        .await
+        .expect("newer chunk");
+    store
+        .upsert_claim_node(
+            &newer_path,
+            "",
+            &newer.claims[0].subject,
+            &newer.claims[0].predicate,
+            &newer.claims[0],
+        )
+        .await
+        .expect("newer claim node");
+
+    let related = store
+        .related_by_shared_ground(&newer_path, 5)
+        .await
+        .expect("related by shared ground");
+
+    assert!(
+        related.iter().any(|d| d.source_path == older_path),
+        "the older note answering the same question has to be reachable; got {:?}",
+        related
+            .iter()
+            .map(|d| d.source_path.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    store
+        .delete_document(&older_path)
+        .await
+        .expect("cleanup older");
+    store
+        .delete_document(&newer_path)
+        .await
+        .expect("cleanup newer");
+}
+
 /// The stalled register window matches `stalled_claims` and also reports the full match count.
 #[tokio::test]
 async fn stalled_register_rows_report_total_matching_within_the_window() {
