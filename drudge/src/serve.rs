@@ -850,6 +850,9 @@ pub(crate) struct HandoverResp {
     pub(crate) unknown: usize,
 }
 
+/// What `/remember` answers. When the note was a duplicate of an existing one, `duplicate`
+/// carries that note's path and `source_path`/`wiki_id` name the *existing* note, not a new
+/// one — nothing was written and no `supersedes` edge was drawn (`supersedes` is 0).
 #[derive(Serialize)]
 pub(crate) struct RememberResp {
     pub(crate) source_path: String,
