@@ -432,6 +432,22 @@ fn mcp_tools_list() -> Value {
             }
         },
         {
+            "name": "recurrences",
+            "description": "CALL THIS when the user asks whether a problem happened before, or before repeating a plan that failed once — \
+                            the recurrence register pairs a recent risk/blocked claim with the older claim from another note whose \
+                            value it restates, so the answer is a pairing (newer + older), not a hunch. Optionally filter by \
+                            project or widen the window. Deterministic — no LLM, sub-second. \
+                            Values under 25 characters are excluded; rows whose predicate only labels are flagged label_only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "optional project slug filter"},
+                    "days": {"type": "integer", "description": "window in days for the newer claim (default 30)"},
+                    "limit": {"type": "integer", "description": "max recurrence rows (default 10, capped at 50)"}
+                }
+            }
+        },
+        {
             "name": "verdict",
             "description": "Record the user's verdict on what one session was handed: `verdict: \"used\"` marks every note \
                             handed to that session as consumed-right, `\"contested\"` as consumed-wrong. \
@@ -474,7 +490,7 @@ impl ToolOut {
     }
 }
 
-const MCP_TOOL_NAMES: [&str; 23] = [
+const MCP_TOOL_NAMES: [&str; 24] = [
     "ask",
     "brief",
     "claims",
@@ -492,6 +508,7 @@ const MCP_TOOL_NAMES: [&str; 23] = [
     "next_actions",
     "project_status",
     "recall",
+    "recurrences",
     "remember",
     "risks",
     "stalled",
@@ -592,6 +609,7 @@ async fn dispatch(
         "risks" => ToolOut::Structured(mcp_risks(s, args).await?),
         "next_actions" => ToolOut::Structured(mcp_next_actions(s, args).await?),
         "stalled" => ToolOut::Structured(mcp_stalled(s, args).await?),
+        "recurrences" => ToolOut::Structured(mcp_recurrences(s, args).await?),
         "verdict" => ToolOut::Structured(mcp_verdict(s, args).await?),
         other => return Err(ToolCallError::UnknownTool(other.to_owned())),
     })
@@ -1168,6 +1186,38 @@ async fn mcp_stalled(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
     .await
     .map_err(|e| (-32603_i32, format!("stalled: {e:#}")))?;
     Ok(register_json(&out))
+}
+
+async fn mcp_recurrences(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
+    let project = args
+        .and_then(|a| a.get("project"))
+        .and_then(Value::as_str)
+        .map(str::trim);
+    let days = args
+        .and_then(|a| a.get("days"))
+        .and_then(Value::as_u64)
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| (-32602_i32, "days is too large".to_owned()))?;
+    let limit = args
+        .and_then(|a| a.get("limit"))
+        .and_then(Value::as_u64)
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| (-32602_i32, "limit is too large".to_owned()))?;
+    let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
+    let days = crate::serve::recurrences_days(days);
+    let limit = crate::serve::recurrences_limit(limit);
+    let rows = store
+        .recurrences(days, project, limit)
+        .await
+        .map_err(|e| (-32603_i32, format!("recurrences: {e:#}")))?;
+    Ok(json!({
+        "rows": rows,
+        "days": days,
+        "max_distance": crate::store::RECURRENCE_MAX_DISTANCE,
+        "min_days_apart": crate::store::RECURRENCE_MIN_DAYS_APART,
+    }))
 }
 
 fn register_json(out: &ask::RegisterOut) -> Value {
@@ -2093,7 +2143,7 @@ mod tests {
     use crate::frontmatter::FrontMatter;
     use serde_json::json;
 
-    const VECTOR_REQUIRED_TOOLS: [&str; 12] = [
+    const VECTOR_REQUIRED_TOOLS: [&str; 13] = [
         "neighbors",
         "claims",
         "corpus_status",
@@ -2105,6 +2155,7 @@ mod tests {
         "risks",
         "next_actions",
         "stalled",
+        "recurrences",
         "verdict",
     ];
 

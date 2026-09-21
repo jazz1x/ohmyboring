@@ -444,6 +444,7 @@ Memory can be reached through HTTP endpoints or the MCP server (`http://localhos
 | `POST /context` / `context` | Structured context card: decisions, risks, facts, glossary, next_actions | not required |
 | `POST /next_actions` / `next_actions` | Next-action register: explicit next steps + active blockers | required |
 | `POST /stalled` / `stalled` | Stalled register: old next steps and blockers | required |
+| `POST /recurrences` / `recurrences` | Recurrence register: recent risk/blocked claims repeating an older one | required |
 | `POST /status` / `project_status` | 30-day project status (Done/Next/Blocked/Decisions/Risks) | required |
 | `POST /weekly` / `weekly_brief` | Last 7 days across projects | required |
 | `POST /decisions` / `decisions` | Decision claims for a project | required |
@@ -483,12 +484,13 @@ For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~
 
 (VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. Compose siblings reach it at `http://boring-drudge:7700/mcp`.)
 
-Available tools (23): `recall`, `neighbors`, `claims` (memory retrieval) · `code_search`, `code_symbol`, `code_index_status` (separate AST code corpus) · `ask`, `brief`, `weekly_brief`, `project_status` (generative — run the LLM) · `decisions`, `risks`, `next_actions`, `stalled` (registers — rows, no LLM) · `context`, `corpus_status`, `events`, `config_get` (structured / introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain) · `verdict` (thumbs-up/down on what a session was handed).
+Available tools (24): `recall`, `neighbors`, `claims` (memory retrieval) · `code_search`, `code_symbol`, `code_index_status` (separate AST code corpus) · `ask`, `brief`, `weekly_brief`, `project_status` (generative — run the LLM) · `decisions`, `risks`, `next_actions`, `stalled`, `recurrences` (registers — rows, no LLM) · `context`, `corpus_status`, `events`, `config_get` (structured / introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain) · `verdict` (thumbs-up/down on what a session was handed).
 
-In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency/vector ordering, the graph, or the local event DB return JSON-RPC `-32603` until you set `BORING_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `events`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `verdict`. `recall` and `ask` read `vault/wiki` directly; `context` is callable but returns an empty claim card without the store; `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `code_search`, `code_symbol`, and `code_index_status` do not require vector mode. The three code tools require an enabled `code_index` source and a prior `code-sync`.
+In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency/vector ordering, the graph, or the local event DB return JSON-RPC `-32603` until you set `BORING_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `events`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `verdict`. `recall` and `ask` read `vault/wiki` directly; `context` is callable but returns an empty claim card without the store; `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `code_search`, `code_symbol`, and `code_index_status` do not require vector mode. The three code tools require an enabled `code_index` source and a prior `code-sync`.
 
 - `next_actions` *(requires `BORING_VECTOR=on`)* — next-action register: recent `next` claims and active `blocked` claims synthesized into a short todo/blocker list. Optionally filter by project.
 - `stalled` *(requires `BORING_VECTOR=on`)* — stalled register: `next` and `blocked` claims older than `older_than_days` (default 7).
+- `recurrences` *(requires `BORING_VECTOR=on`)* — recurrence register: recent `risk`/`blocked` claims whose value sits within cosine distance 0.2 of an older claim from another note, 3+ days earlier ("the same mistake again"). Rows whose predicate only labels are flagged `label_only`.
 - `decisions` *(requires `BORING_VECTOR=on`)* — decision register: recent `decision` claims for a project.
 - `risks` *(requires `BORING_VECTOR=on`)* — risk register: recent `risk`, `assumption`, and `blocked` claims for a project.
 - `neighbors` *(requires `BORING_VECTOR=on`)* — graph traversal from a topic: embeds the query, takes the single closest note, then returns its 1-hop labels (`{hit, graph_neighbors, semantic_neighbors}` JSON). `hit` is the matched note's path; `graph_neighbors` are its project/topic labels and `semantic_neighbors` its shared tool/concept labels — flat strings, not note paths.
@@ -496,10 +498,10 @@ In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency
 - `corpus_status` *(requires `BORING_VECTOR=on`)* — KB health snapshot (file/chunk counts, by origin/kind/project, contamination, graph/semantic nodes+edges).
 - `events` *(requires `BORING_VECTOR=on`)* — recent workflow/adapter events stored in the DB as OpenTelemetry-shaped records. Filter by component, event, status, run_id, workflow, or since_hours.
 - `ask` / `brief` / `weekly_brief` / `project_status` — LLM-running tools. `ask` answers a question with cited sources and works in wiki-first mode; the three briefings require `BORING_VECTOR=on`.
-- `decisions` / `risks` / `next_actions` / `stalled` — registers. They return the claim rows themselves, with no LLM in the path: same question, same answer, measured at 0.02s against 119.6s when they still synthesised prose. They require `BORING_VECTOR=on`. When the result is cut, the response says so (`limit_applied`).
+- `decisions` / `risks` / `next_actions` / `stalled` / `recurrences` — registers. They return the claim rows themselves, with no LLM in the path: same question, same answer, measured at 0.02s against 119.6s when they still synthesised prose. They require `BORING_VECTOR=on`. When the result is cut, the response says so (`limit_applied`).
 - `forget` — delete a note by wiki id or exact title. Removes the wiki file and, in vector mode, also purges embeddings, graph edges, and claims.
 
-Structured tools (`neighbors`, `claims`, `corpus_status`, `events`, `config_get`, `code_search`, `code_symbol`, `code_index_status`, `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `context`) return native `structuredContent` (JSON) alongside the text block; prose/ack tools (`recall`, `remember`, `forget`, `sync`, `classify_repo`) return text.
+Structured tools (`neighbors`, `claims`, `corpus_status`, `events`, `config_get`, `code_search`, `code_symbol`, `code_index_status`, `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `context`) return native `structuredContent` (JSON) alongside the text block; prose/ack tools (`recall`, `remember`, `forget`, `sync`, `classify_repo`) return text.
 
 Example MCP call (raw JSON-RPC over HTTP):
 

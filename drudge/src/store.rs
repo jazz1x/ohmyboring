@@ -356,6 +356,18 @@ pub const INFORMATIVE_VALUE_CHARS: i32 = 25;
 /// treatment as a short value: demoted, never dropped.
 const TAUTOLOGICAL_PREDICATES: &str = "^(incident|decision|status|state|상태|결정|\
                                        next[-_ ]?(step|action)|action|다음 작업)$";
+
+/// Cosine-distance ceiling for a recurrence pair. Measured against the live corpus
+/// (2026-09-21): at 0.2 the pairs are the same incident restated ("Orca CLI cannot connect
+/// to the running app" ↔ "orca orchestration cannot connect because Orca is not running",
+/// 0.121); from 0.25 different incidents mix in ("missing sealed CSV" ↔ "Vigil
+/// approval/schema…", 0.246).
+pub const RECURRENCE_MAX_DISTANCE: f32 = 0.2;
+
+/// Minimum gap between the newer and the older claim of a recurrence pair. A same-day
+/// near-duplicate is the same write restated, not "the same mistake again".
+pub const RECURRENCE_MIN_DAYS_APART: i64 = 3;
+
 /// I/O-boundary timeout for pool wait/create/recycle. Prevents infinite hangs on DB loss;
 /// drudge/CLAUDE.md treats this as a graceful boundary, distinct from defensive `{timeout:200}` bounds.
 const POOL_TIMEOUT_SECONDS: u64 = 5;
@@ -509,6 +521,32 @@ impl RegisterRow {
 pub struct RegisterRows {
     pub rows: Vec<RegisterRow>,
     pub total_matching: i64,
+}
+
+/// One end of a recurrence pair, as the register cites it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ClaimRef {
+    pub source_path: String,
+    pub subject: String,
+    pub predicate: String,
+    pub value: String,
+    pub kind: String,
+    #[serde(serialize_with = "serialize_valid_from")]
+    pub valid_from: SystemTime,
+}
+
+/// One row of the recurrence register: a recent risk/blocked claim whose value restates an
+/// older claim from a different note — "the same mistake again". `older` holds every
+/// earlier claim within `RECURRENCE_MAX_DISTANCE`, oldest first. `label_only` mirrors the
+/// register demotion rule: the newer claim's predicate merely restates its kind
+/// (`TAUTOLOGICAL_PREDICATES`), so the row pairs labels, not statements.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Recurrence {
+    pub newer: ClaimRef,
+    pub older: Vec<ClaimRef>,
+    pub distance: f32,
+    pub days_apart: i64,
+    pub label_only: bool,
 }
 
 fn register_row(r: &tokio_postgres::Row) -> RegisterRow {
@@ -1772,6 +1810,114 @@ impl Store {
             rows: rows.iter().map(register_row).collect(),
             total_matching: rows.first().map_or(0, |r| r.get::<_, i64>(7)),
         })
+    }
+
+    /// Recurrence register: current risk/blocked claims from the last `days` whose value is
+    /// semantically near an older current risk/blocked claim from a different note — "the
+    /// same mistake again". Read-only, one SQL round-trip; the pairing and the per-newer
+    /// grouping happen here.
+    ///
+    /// The gates reuse the register rules instead of inventing new numbers: a value under
+    /// `INFORMATIVE_VALUE_CHARS` reads as a tag, and a predicate that restates its kind
+    /// carries no information — such rows still answer, flagged `label_only`.
+    pub async fn recurrences(
+        &self,
+        days: i64,
+        project: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Recurrence>> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT a.source_path, a.subject, a.predicate, a.value, a.kind, a.valid_from,
+                        b.source_path, b.subject, b.predicate, b.value, b.kind, b.valid_from,
+                        (a.embedding <=> b.embedding)::float4 AS distance,
+                        (a.valid_from::date - b.valid_from::date)::bigint AS days_apart,
+                        (a.predicate ~* $6) AS label_only
+                   FROM claim a
+                   JOIN claim b ON b.source_path <> a.source_path
+                   JOIN document da ON da.source_path = a.source_path
+                   JOIN document db ON db.source_path = b.source_path
+                  WHERE a.superseded_at IS NULL
+                    AND b.superseded_at IS NULL
+                    AND a.kind IN ('risk', 'blocked')
+                    AND b.kind IN ('risk', 'blocked')
+                    AND a.embedding IS NOT NULL
+                    AND b.embedding IS NOT NULL
+                    AND length(a.value) >= $3
+                    AND length(b.value) >= $3
+                    AND a.valid_from >= (NOW() - INTERVAL '1 day' * ($1::bigint))
+                    AND (a.valid_from::date - b.valid_from::date) >= ($2::bigint)
+                    AND (a.embedding <=> b.embedding) <= $4::real
+                    AND ($5::text IS NULL OR da.project = $5)
+                    AND ($5::text IS NULL OR db.project = $5)
+                  ORDER BY distance ASC, a.valid_from DESC;",
+                &[
+                    &days,
+                    &RECURRENCE_MIN_DAYS_APART,
+                    &INFORMATIVE_VALUE_CHARS,
+                    &RECURRENCE_MAX_DISTANCE,
+                    &project,
+                    &TAUTOLOGICAL_PREDICATES,
+                ],
+            )
+            .await
+            .context("recurrences")?;
+        // Pairs arrive nearest-first, so the first row seen for a newer claim carries that
+        // group's smallest distance; the group order below is exactly the sort the register
+        // promises. `limit` counts newers, not pairs. Rows of one newer claim are NOT
+        // adjacent — the sort interleaves them with other claims' pairs — so grouping goes
+        // through a key→index map, not "same as the previous row" (live: 6 newers came out
+        // as 16 rows that way).
+        let mut out: Vec<Recurrence> = Vec::new();
+        let mut index: HashMap<(String, String, String, SystemTime), usize> = HashMap::new();
+        for r in &rows {
+            let newer = ClaimRef {
+                source_path: r.get(0),
+                subject: r.get(1),
+                predicate: r.get(2),
+                value: r.get(3),
+                kind: r.get(4),
+                valid_from: r.get(5),
+            };
+            let older = ClaimRef {
+                source_path: r.get(6),
+                subject: r.get(7),
+                predicate: r.get(8),
+                value: r.get(9),
+                kind: r.get(10),
+                valid_from: r.get(11),
+            };
+            let distance: f32 = r.get(12);
+            let days_apart: i64 = r.get(13);
+            let label_only: bool = r.get(14);
+            let key = (
+                newer.source_path.clone(),
+                newer.subject.clone(),
+                newer.predicate.clone(),
+                newer.valid_from,
+            );
+            if let Some(&i) = index.get(&key) {
+                out[i].older.push(older);
+            } else {
+                index.insert(key, out.len());
+                out.push(Recurrence {
+                    newer,
+                    older: vec![older],
+                    distance,
+                    days_apart,
+                    label_only,
+                });
+            }
+        }
+        for row in &mut out {
+            row.older.sort_by_key(|c| c.valid_from);
+        }
+        if limit >= 0 {
+            out.truncate(usize::try_from(limit).unwrap_or(out.len()));
+        }
+        Ok(out)
     }
 
     /// Query embedding → top-k **current** claims (superseded_at IS NULL). Authority retrieval.
