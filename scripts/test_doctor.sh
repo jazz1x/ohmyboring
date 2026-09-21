@@ -57,6 +57,21 @@ if [ "${1:-}" = compose ] && [ "${2:-}" = exec ]; then
     fi
     exit 0
 fi
+if [ "${1:-}" = logs ]; then
+    # `docker logs <svc> --tail N` — doctor reads the tail because --since returns nothing for
+    # these containers. DOCTOR_FAKE_LOOPING names a service whose tail is mostly failures.
+    svc="${2:-}"
+    if [ "$svc" = "${DOCTOR_FAKE_LOOPING:-}" ]; then
+        i=0
+        while [ "$i" -lt 40 ]; do
+            echo "ERROR slack_bolt.AsyncApp: Failed to connect (error: Session is closed)"
+            i=$((i + 1))
+        done
+        exit 0
+    fi
+    echo "INFO ready"
+    exit 0
+fi
 echo "fake docker: unmodelled call: $*" >&2
 exit 7
 SH
@@ -301,6 +316,7 @@ run_strict() {
     case_dir="$1"
     out="$2"
     HOME="$case_dir/home" \
+    DOCTOR_FAKE_LOOPING="${DOCTOR_FAKE_LOOPING:-}" \
     BORING_HOME="$case_dir/boring" \
     BORING_URL="http://127.0.0.1:7700" \
     BORING_READINESS_NOTE_MAX_HOURS="${BORING_READINESS_NOTE_MAX_HOURS:-48}" \
@@ -1052,5 +1068,34 @@ esac
       echo "FAIL: sink=both mirror rows must be reported as healthy" >&2
       exit 1
   } ) || exit 1
+
+# (a12) A container that reports Up can still be looping inside. `boring-agent` reported Up for
+# ten days while its socket failed 267,201 times, and the only crash check read the compose
+# STATUS column, which never said anything but Up. The control matters as much as the case: the
+# same doctor on the same fake stack must stay silent when the tail is clean, or a check that
+# always fires is indistinguishable from one that works.
+make_case "$TMP/looping" yes
+# Subshell, not a bare prefix: `VAR=x func` stays set after the function returns in dash, so the
+# control case below would inherit the looping stack and fail for the wrong reason. It did.
+if ( DOCTOR_FAKE_LOOPING=boring-agent; export DOCTOR_FAKE_LOOPING; run_strict "$TMP/looping" "$TMP/looping.out" ); then
+    cat "$TMP/looping.out"
+    echo "FAIL: strict doctor passed while a container was looping inside" >&2
+    exit 1
+fi
+grep -q "log lines are failures while the container reports Up" "$TMP/looping.out" || {
+    cat "$TMP/looping.out"
+    echo "FAIL: doctor did not name the container looping inside" >&2
+    exit 1
+}
+make_case "$TMP/quietlogs" yes
+if ! run_strict "$TMP/quietlogs" "$TMP/quietlogs.out"; then
+    cat "$TMP/quietlogs.out"
+    echo "FAIL: control — a clean log tail must not trip the loop check" >&2
+    exit 1
+fi
+if grep -q "log lines are failures" "$TMP/quietlogs.out"; then
+    echo "FAIL: control — the loop check fired on a clean tail" >&2
+    exit 1
+fi
 
 echo "doctor strict gate tests passed"
