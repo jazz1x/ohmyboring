@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **문 빌드·기동이 엔진과 격리된다** — `make door-build`·`make door-up` 이 boring-door 만 다룬다(`--no-deps`: depends_on 수렴으로 엔진이 재생성되는 사이클 4 사고를 막는다). 워크트리에서 엔진 이미지·컨테이너는 무접촉, `.dockerignore` 가 `**/__pycache__` 로 깊이 무관하게 제외, doctor 가 문의 /health 를 한 항목으로 본다(문 없음은 경고, 200 인데 본문이 엔진과 다르거나 502 면 실패).
 - **문이 compose 서비스로 선다** — `docker compose up -d boring-door` 이 `agents/door/Dockerfile`(python:3.12-slim, uid 10001, 마운트 0)으로 빌드한 컨테이너를 띄워 엔진 바로 앞, 호스트 `127.0.0.1:7710` 에 선다. `DOOR_UPSTREAM=http://boring-drudge:7700` — 같은 compose 네트워크라 서비스 이름으로 닿고, 넘기는 환경은 그 하나뿐. /health 는 엔진 것을 그대로 흘리니 엔진이 죽으면 문도 unhealthy. `make build` 가 엔진과 문을 같이 빌드한다. 소비자 URL 전환은 아직 — 이 판의 끝은 문과 엔진이 나란히 뜬 것.
 - **Python 위생은 ruff 까지, 그 밖은 스킬로** — `ruff.toml`(110자, E·F·I·B·UP) 이 pre-commit·`guard.sh`·CI 에서 돈다. 규칙 채택 시 lint 412건 중 자동수정 198 + 손수정 7, 포맷 93/119 파일 — 이 한 번의 재정렬이 이 항목의 diff 대부분이다. 이전(migration) 슬라이스 절차와 코드 규율(주석은 드물게·조용한 폴백 금지·훅은 stdlib)은 도구가 아니라 `.claude/skills/migration-slice/SKILL.md` 한 장으로 배선한다 — 새 게이트는 같은 부류 실수가 반복 관측된 뒤에만.
 - **Python 문(door)이 읽기 전용 문 다섯을 Rust 엔진에 프록시한다** — `make door` 가 :7710 에 FastAPI 프로세스를 띄워 GET /health·/audit·/projects·/recall-label-stats 와 POST /mcp 를 Rust 엔진(:7700)에 그대로 넘기고 상태코드·본문·content-type 을 바이트 그대로 돌려받는다. 엔진이 죽으면 502 JSON(`engine unreachable`) — 빈 본문 200 으로 조용히 넘어가지 않는다. Rust 코드 변경 0, `DRUDGE_URL=http://127.0.0.1:7710 python3 scripts/contract-parity.py --check` 가 Rust 가 아닌 프로세스를 처음으로 통과시킨다. 미등록 경로는 404 — 만능 프록시가 아니고, 스텁 엔진 단위 시험 4개가 네트워크 없이 이를 못박는다.

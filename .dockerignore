@@ -9,4 +9,4 @@
 !data/contract
 !data/contract/**
 agents/door/Dockerfile
-__pycache__
+**/__pycache__

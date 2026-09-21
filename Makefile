@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now collect-kimi smoke e2e doctor readiness heal verify-llm maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary door
+.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now collect-kimi smoke e2e doctor readiness heal verify-llm door-build door-up maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary door
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -48,6 +48,12 @@ secretary: ## Answer @mentions in Slack from memory (Socket Mode; needs SLACK_AP
 
 door: ## The read-only door — served by the boring-door container at 127.0.0.1:7710; this runs the same app on the host (DOOR_PORT, default 7710)
 	set -a; . ./.env 2>/dev/null || true; set +a; uvicorn agents.door.door:app --host 127.0.0.1 --port $${DOOR_PORT:-7710}
+
+door-build: ## Build only the boring-door image (never touches the engine)
+	BUILD_SHA=$$(git rev-parse HEAD 2>/dev/null || true) $(COMPOSE) build boring-door
+
+door-up: ## Start only the boring-door container (--no-deps; never recreates the engine)
+	$(COMPOSE) up -d --no-deps boring-door
 
 models: ## Pull Ollama models (DRUDGE_LLM_MODEL + DRUDGE_EMBED_MODEL, defaults gemma4:12b + bge-m3)
 	ollama pull "${DRUDGE_LLM_MODEL:-gemma4:12b}" && ollama pull "${DRUDGE_EMBED_MODEL:-bge-m3}"

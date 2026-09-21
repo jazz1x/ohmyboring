@@ -13,8 +13,29 @@ make_fake_path() {
 
     cat >"$fakebin/curl" <<'SH'
 #!/bin/sh
-# Two shapes of /health call in doctor.sh: the status probe (-w %{http_code}) and the body read
-# that carries build_sha. Answering only the first is what left the drift check untestable.
+# Three shapes of /health call in doctor.sh: the engine status probe (-w %{http_code}),
+# the engine body read that carries build_sha, and the door probe at 127.0.0.1:7710.
+# Answering only the first is what left the drift check untestable.
+case " $* " in
+  *":7710"*)
+    # The read-only door. Default body mirrors the engine's, so every existing case that
+    # leaves the door alone still sees door == engine; DOCTOR_DOOR_CODE/DOCTOR_DOOR_BODY
+    # model a stopped (000), broken (502), or diverged door.
+    if [ -n "${DOCTOR_DOOR_BODY:-}" ]; then
+        door_body="$DOCTOR_DOOR_BODY"
+    elif [ -n "${DOCTOR_BUILD_SHA:-}" ]; then
+        door_body="{\"status\":\"ok\",\"build_sha\":\"$DOCTOR_BUILD_SHA\"}"
+    else
+        door_body='{"status":"ok"}'
+    fi
+    case " $* " in
+      *" -w %{http_code} "*) printf '%s' "${DOCTOR_DOOR_CODE:-200}"; exit 0 ;;
+    esac
+    case " $* " in
+      *"/health"*) printf '%s' "$door_body"; exit 0 ;;
+    esac
+    ;;
+esac
 case " $* " in
   *" -w %{http_code} "*) printf 200; exit 0 ;;
 esac
@@ -1097,5 +1118,58 @@ if grep -q "log lines are failures" "$TMP/quietlogs.out"; then
     echo "FAIL: control — the loop check fired on a clean tail" >&2
     exit 1
 fi
+
+# (c2) The read-only door. Optional until consumers switch: a stopped door warns and must not
+# move a single readiness counter, a healthy door that mirrors the engine passes, and a door
+# that answers at all but wrongly fails — 502 or a 200 with a foreign body both mean the door
+# is not serving the engine it proxies.
+( make_case "$TMP/door-running" yes
+  if ! run_strict "$TMP/door-running" "$TMP/door-running.out"; then
+      cat "$TMP/door-running.out"
+      echo "FAIL: a running door mirroring the engine must pass strict doctor" >&2
+      exit 1
+  fi
+  grep -q "✓ door /health 200 (http://127.0.0.1:7710) — same body as engine" "$TMP/door-running.out" || {
+      cat "$TMP/door-running.out"
+      echo "FAIL: the healthy case must say the door serves the engine's body" >&2
+      exit 1
+  } ) || exit 1
+
+( make_case "$TMP/door-absent" yes
+  if ! ( DOCTOR_DOOR_CODE=000 run_strict "$TMP/door-absent" "$TMP/door-absent.out" ); then
+      cat "$TMP/door-absent.out"
+      echo "FAIL: a stopped door is optional and must not fail strict readiness" >&2
+      exit 1
+  fi
+  grep -q "! door not running (optional until consumers switch)" "$TMP/door-absent.out" || {
+      cat "$TMP/door-absent.out"
+      echo "FAIL: the stopped door must be named as a warning" >&2
+      exit 1
+  } ) || exit 1
+
+( make_case "$TMP/door-502" yes
+  if ( DOCTOR_DOOR_CODE=502 run_strict "$TMP/door-502" "$TMP/door-502.out" ); then
+      cat "$TMP/door-502.out"
+      echo "FAIL: a door answering 502 must fail strict doctor" >&2
+      exit 1
+  fi
+  grep -q "✗ door /health answered 502" "$TMP/door-502.out" || {
+      cat "$TMP/door-502.out"
+      echo "FAIL: the 502 door must be named as a failure" >&2
+      exit 1
+  } ) || exit 1
+
+( make_case "$TMP/door-body-drift" yes
+  if ( DOCTOR_DOOR_BODY='{"status":"ok","door_only":true}' \
+       run_strict "$TMP/door-body-drift" "$TMP/door-body-drift.out" ); then
+      cat "$TMP/door-body-drift.out"
+      echo "FAIL: a 200 door whose body is not the engine's must fail strict doctor" >&2
+      exit 1
+  fi
+  grep -q "✗ door /health 200 (http://127.0.0.1:7710) but body differs from engine" "$TMP/door-body-drift.out" || {
+      cat "$TMP/door-body-drift.out"
+      echo "FAIL: the diverged body must be named as a failure" >&2
+      exit 1
+  } ) || exit 1
 
 echo "doctor strict gate tests passed"

@@ -21,6 +21,10 @@ description: drudge → Python 스트랭글러 이전의 슬라이스 하나를 
 - CI eval-gate — recall@3 15/15 + 계약 파리티
 - 새 게이트가 떠오르면 먼저 "스킬 한 줄로 되나". 도구는 같은 부류 실수가 반복 관측된 뒤에만.
 
+## compose 규칙
+- `up`/`build` 전량은 정본 체크아웃(/Users/jongyun/Development/mine/oh-my-boring)에서만 친다. 워크트리에서는 `make door-build`·`make door-up`(--no-deps) 만.
+- 엔진 이미지·컨테이너(boring-drudge/boring-postgres/boring-agent)는 워크트리에서 절대 건드리지 않는다. compose 는 `name: oh-my-boring` 고정이라 어느 디렉터리에서 쳐도 같은 프로젝트다. 문만 다룰 때도 언제나 `--no-deps` 로 — depends_on 수렴이 엔진을 재생성했다(사이클 4 사고).
+
 ## 코드 규율
 - 주석은 드물게. 0 이 아니라 과다 경계 — 「왜」는 커밋 본문·PR 에. 이름과 구조로 말하고, 주석은 코드가 말 못 하는 것(외부 제약·좌표)만.
 - ROP: 조용한 폴백·삼킨 예외·방어적 타임아웃·catch-all 금지. 업스트림 불통은 502 JSON 처럼 **보이는 실패**로.
