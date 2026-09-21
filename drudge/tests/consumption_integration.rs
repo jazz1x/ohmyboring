@@ -580,6 +580,114 @@ async fn verdict_only_consumption_marks_exactly_the_handed_docs() {
     .expect("cleanup session nodes");
 }
 
+/// Verdicts move the next ranking: two identical notes, one `contested` and one `used` — the
+/// used one must land above the contested one even though, before any edge existed, it ranked
+/// below by almost two rank steps. Control pair: two edge-less notes keep exactly the relative
+/// order they had before the edges were written. The query matches nothing full-text, so only
+/// the vector list carries the docs, with one pinned distance per doc — ranking is
+/// deterministic before and after the verdicts.
+#[tokio::test]
+async fn consumption_verdicts_reorder_ranking() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let mut cfg = drudge::config::BoringConfig::default();
+    cfg.llm.base_url = spawn_stub_embedder().await;
+    let llm = drudge::llm::Llm::from_config(&cfg);
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let project = format!("feedback-{ts}");
+    let path_a = unique_path("feedback-contested");
+    let path_m = unique_path("feedback-control-mid");
+    let path_b = unique_path("feedback-used");
+    let path_c = unique_path("feedback-control-last");
+    let content = "feedback ranking fixture note — no query term lives here";
+    // The stub embedder returns [1, 0, …]; each doc's pinned vector picks its rank by cosine
+    // distance from it: contested 0.0 < mid ≈ 0.29 < used 1.0 < last ≈ 1.71.
+    let norm2 = |x: f32, y: f32| {
+        let n = (x * x + y * y).sqrt();
+        let mut e = vec![0.0_f32; 1024];
+        e[0] = x / n;
+        e[1] = y / n;
+        e
+    };
+    let mut used_vec = vec![0.0_f32; 1024];
+    used_vec[1] = 1.0;
+    for (path, embedding) in [
+        (&path_a, stub_vector()),
+        (&path_m, norm2(1.0, 1.0)),
+        (&path_b, used_vec),
+        (&path_c, norm2(-1.0, 1.0)),
+    ] {
+        seed_rank_doc(&store, path, &project, content, embedding).await;
+    }
+
+    let base =
+        drudge::retrieve::retrieve(&store, &llm, "fiddlesticks", 10, &[], Some(&project), None)
+            .await
+            .expect("baseline retrieve");
+    let base_order: Vec<&str> = base.iter().map(|h| h.source_path.as_str()).collect();
+    assert_eq!(
+        base_order,
+        vec![
+            path_a.as_str(),
+            path_m.as_str(),
+            path_b.as_str(),
+            path_c.as_str()
+        ],
+        "distinct pinned distances fix the base order before any verdict edge exists"
+    );
+
+    let session = unique_id("feedback-s");
+    store
+        .record_consumption(
+            &session,
+            "2026-09-21T06:00:00+00:00",
+            std::slice::from_ref(&path_b),
+            std::slice::from_ref(&path_a),
+            &[],
+        )
+        .await
+        .expect("record verdicts");
+
+    let ranked =
+        drudge::retrieve::retrieve(&store, &llm, "fiddlesticks", 10, &[], Some(&project), None)
+            .await
+            .expect("feedback retrieve");
+    let pos = |hits: &[drudge::store::Hit], p: &str| {
+        hits.iter()
+            .position(|h| h.source_path == p)
+            .expect("every seeded doc is still retrieved")
+    };
+    assert_eq!(ranked.len(), 4, "feedback must not drop hits");
+    assert!(
+        pos(&ranked, &path_b) < pos(&ranked, &path_a),
+        "one 👍 lifts the used doc above the contested one (base had it ~2 rank steps below)"
+    );
+    // Control pair — no verdict edges: same relative order as before the edges, rank for rank.
+    assert_eq!(
+        pos(&ranked, &path_m) < pos(&ranked, &path_c),
+        pos(&base, &path_m) < pos(&base, &path_c),
+        "docs without verdict edges keep the order they had before the edges existed"
+    );
+
+    for path in [&path_a, &path_m, &path_b, &path_c] {
+        store.delete_document(path).await.expect("cleanup doc");
+    }
+    db.execute(
+        "DELETE FROM node WHERE id = $1;",
+        &[&format!("session:{session}")],
+    )
+    .await
+    .expect("cleanup session node");
+}
+
 /// Spawn `drudge serve` against the disposable test DB on an ephemeral loopback port. No vault
 /// (nothing to re-ingest), no brief scheduler (99 is out of range); killed by the guard on drop.
 fn spawn_server(dsn: &str, port: u16) -> ServerGuard {
@@ -626,4 +734,62 @@ impl Drop for ServerGuard {
 fn free_port() -> u16 {
     let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind port probe");
     probe.local_addr().expect("probe local addr").port()
+}
+
+/// The stub embedder's fixed vector: [1, 0, 0, …]. The query embeds to this, and each seeded
+/// doc's pinned vector picks its rank by cosine distance from it.
+fn stub_vector() -> Vec<f32> {
+    let mut v = vec![0.0_f32; 1024];
+    v[0] = 1.0;
+    v
+}
+
+/// One OpenAI-compatible `/embeddings` stub: every input embeds to `stub_vector()`, so
+/// `retrieve`'s query embedding is pinned without a model server in the loop.
+async fn spawn_stub_embedder() -> String {
+    async fn embeddings() -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({ "data": [{ "embedding": stub_vector() }] }))
+    }
+    let app = axum::Router::new().route("/embeddings", axum::routing::post(embeddings));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stub");
+    let url = format!("http://{}", listener.local_addr().expect("stub addr"));
+    let _server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serve");
+    });
+    url
+}
+
+/// One document row + its single chunk, pinned into `project`.
+async fn seed_rank_doc(
+    store: &Store,
+    path: &str,
+    project: &str,
+    content: &str,
+    embedding: Vec<f32>,
+) {
+    let front = FrontMatter {
+        origin: "personal".to_string(),
+        project: project.to_string(),
+        kind: "note".to_string(),
+        source_path: path.to_string(),
+        title: Some("feedback fixture".to_string()),
+        tags: vec!["test".to_string()],
+        ..Default::default()
+    };
+    store
+        .upsert_document(&front, "sha-v1", SystemTime::now())
+        .await
+        .expect("upsert doc");
+    store
+        .upsert_chunk(&drudge::store::Doc {
+            id: format!("{path}#0"),
+            content: content.to_owned(),
+            embedding,
+            front,
+            chunk_idx: 0,
+        })
+        .await
+        .expect("upsert chunk");
 }
