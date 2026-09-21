@@ -21,6 +21,18 @@ BORING_URL="${BORING_URL:-http://127.0.0.1:7700}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
 BORING_HOME="${BORING_HOME:-$HOME/oh-my-boring}"
 MARK_DIR="${HOME}/.cache/boring-distill"
+# (d0b) How much of a container's log tail to read, and how many failures in it mean the process
+# is looping rather than having had a bad minute.
+#
+# The tail, not a time window. `docker logs --since` returns nothing for these containers — not
+# an error, an empty result, at every duration tried including 48h, while `--tail` returns the
+# same lines fine. A check built on `--since` would have counted zero failures forever and read
+# as health; that is how the loop below went unnoticed in the first place.
+#
+# Measured 2026-09-21 with the loop running: the last 200 lines held 46 failures in the looping
+# container and 0 in both healthy ones.
+LOG_TAIL_LINES="${BORING_LOG_TAIL_LINES:-200}"
+LOG_FAILURE_MAX="${BORING_LOG_FAILURE_MAX:-20}"
 
 # host.docker.internal resolves only inside containers; from the host it must be localhost,
 # or this host-side reachability check fails even when Ollama is healthy. dash has no
@@ -429,6 +441,29 @@ if docker_bin="$(resolve_docker)"; then
         if printf '%s\n' "$ps" | grep -qi 'restarting'; then
             bad "a container is RESTARTING (crash-loop) — check 'make logs'"; failed_containers=1
         fi
+        # (d0b) A container that never restarts can still be broken. `boring-agent` spent ten days
+        # reporting `Up` while its Slack socket failed 267,201 times inside it — the process stayed
+        # alive, so the RESTARTING check above saw nothing, and nothing else looked at the logs.
+        #
+        # Rate, not presence: one traceback is a bad minute, a wall of them is a loop. The observed
+        # loop ran ~18 failures a minute (267,201 over ten days); a healthy window here is 0. The
+        # threshold sits between those, far enough below the loop to catch it early and far enough
+        # above a single error to stay quiet.
+        #
+        # An unreadable log is reported as unreadable. Counting zero lines from a command that
+        # failed would report a crash-looping container as healthy, which is the failure this
+        # check exists to end.
+        for svc in boring-agent boring-drudge; do
+            if ! logs=$("$docker_bin" logs "$svc" --tail "$LOG_TAIL_LINES" 2>&1) || [ -z "$logs" ]; then
+                warn "container log for $svc unreadable — failure rate not measured (this is not zero failures)"
+                continue
+            fi
+            n=$(printf '%s\n' "$logs" | grep -Eci 'Traceback|RuntimeError|Failed to connect|panicked|FATAL' || true)
+            if [ "${n:-0}" -ge "$LOG_FAILURE_MAX" ]; then
+                bad "$svc: $n of its last $LOG_TAIL_LINES log lines are failures while the container reports Up — it is looping inside (make agent-logs)"
+                failed_containers=1
+            fi
+        done
     else
         bad "no compose containers found in $BORING_HOME (stack not started? set BORING_HOME?)"; failed_containers=1
     fi
