@@ -5,6 +5,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ## [Unreleased]
 
+### Added
+- **기억이 `@멘션` 에 스레드로 답한다** — `make secretary` 가 Socket Mode 로 붙어 멘션에 답하고, 그 답에 붙은 👍/👎 를 `used`/`contested` 로 엔진에 넘긴다. 뇌(`secretary_core`)와 귀(S2)는 있고 얼굴은 없던 자리 — hermes 가 그 얼굴이었고 소켓 루프로 죽었다. 얼굴은 얇게: 이벤트 둘, 핸들러 둘, 상태 없음. 답↔노트 매핑은 S2 의 렛저가 이미 담당하므로 전송층은 아무것도 기억하지 않는다.
+
 ### Fixed
 - **`make heal` restarts only the service that is looping** — a container reporting `Up` while its log tail is mostly failures is restarted on its own, instead of bouncing the whole stack (and the engine, and every hook that fires while it is down) to cure a Slack socket. The loop itself is hermes' Slack adapter reconnecting on a client session it already closed; that bug is upstream, this is the remedy at hand.
 

@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 REQUIREMENTS = ROOT / "requirements.txt"
 
 #: Import name → distribution name, for the few where they differ.
-IMPORT_TO_DISTRIBUTION = {"yaml": "pyyaml"}
+IMPORT_TO_DISTRIBUTION = {"yaml": "pyyaml", "slack_sdk": "slack-sdk"}
 
 #: The three ways this repo used to open a note by hand, each found in the source when the
 #: splitter was written. They are spelled precisely on purpose: `startswith("---")` without the

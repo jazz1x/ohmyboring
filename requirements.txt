@@ -11,3 +11,7 @@
 # asked for it. scripts/test_python_deps.py now fails if a second dependency appears here or in
 # the source without the other side agreeing.
 PyYAML>=6.0
+# slack-sdk is the secretary's face only — SocketModeClient + WebClient in agents/slack/secretary.py,
+# imported lazily inside main()/dispatch() so the handlers and their tests still run without the
+# package. The brain (secretary_core) speaks to the engine, never to Slack, and needs nothing here.
+slack-sdk>=3.27
