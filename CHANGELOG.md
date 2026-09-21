@@ -5,6 +5,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ## [Unreleased]
 
+### Fixed
+- **`make heal` restarts only the service that is looping** — a container reporting `Up` while its log tail is mostly failures is restarted on its own, instead of bouncing the whole stack (and the engine, and every hook that fires while it is down) to cure a Slack socket. The loop itself is hermes' Slack adapter reconnecting on a client session it already closed; that bug is upstream, this is the remedy at hand.
+
 ## [0.2.0] - 2026-09-21
 
 0.1.0 이후 196 커밋, 그중 동작을 바꾼 것 159 건. 주입이 무엇을 건네는지가 이 판의 축이다 —
