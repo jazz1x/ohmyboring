@@ -7,8 +7,12 @@ description: drudge → Python 스트랭글러 이전의 슬라이스 하나를 
 
 트렁크 `feat/migration-python` (draft PR #396) 위에서 슬라이스 하나 = 계약 1개 → 커밋 1개.
 
+## 시작 전 — 이 둘을 못 하면 시작하지 않는다
+- 설계·계약·슬라이스를 **쓰기 직전** `ls -t ~/Documents/ohmyboring/*/*.html | head` 로 소유자의 최신 문서를 열고 그 위에 얹는다. 순서·어휘는 그 문서 것을 쓴다(2026-09-21: 각서 「기억이 되묻는 법」 — 문 셋, 남은 조각 순서 정정 문 → 아침 카드 → 훅 세션 이름 → hermes 제거). 볼트 노트 wiki-1736 이 같은 내용.
+- dispatch **직전** 한 줄: 「이 사이클이 끝나면 소유자가 쓰는 것은 ___ 이다」. 발판·게이트·도구만 나오는 사이클은 시작하지 않는다(2026-09-21 문 트랙 4사이클 = 기능 0).
+
 ## 절차
-1. 계약은 `data/loop/cycle-N.yaml` (gitignore, 레포 밖 취급). 형식·필수 필드는 `~/.claude/orca-model-routing.md` §1 Contract Map. `baseline.sha` = 트렁크 HEAD, `given` 에 워커가 뒤질 필요 없는 사실을 심볼 단위로.
+1. 계약은 `data/loop/cycle-N.yaml` (gitignore, 레포 밖 취급). 형식·필수 필드는 `~/.claude/orca-model-routing.md` §1 Contract Map. `baseline.sha` = 트렁크 HEAD, `given` 에 워커가 뒤질 필요 없는 사실을 심볼 단위로 — **한 줄마다 그 주장을 만든 명령 출력이 같은 턴에 있어야 적는다**(사이클 2·3 의 given 이 틀려 워커가 30분씩 헤맸다).
 2. preflight: `origin/feat/migration-python` 이 baseline 과 같아야 dispatch. 아니면 PARK.
 3. 구현: `kimi -m kimi-code/kimi-for-coding -p "$(cat 계약)"` 헤드리스. 커밋 정확히 1개, amend·push 금지.
 4. 검증: 계약을 쓴 세션이 아닌 독립 컨텍스트(Opus). 입력은 계약·diff·구현 보고·게이트 출력만. 변이는 사본(`cp`)에서, `__pycache__` 비우고. 판정 필드 `verdict / contract_defects / edge_necessity / mutants_run`.
