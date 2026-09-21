@@ -104,15 +104,17 @@ def test_a_branch_that_changes_behaviour_says_so_in_the_changelog():
     )
 
 
-def test_the_unreleased_section_exists_and_is_not_empty():
+def test_there_is_an_unreleased_section_to_add_to():
     """A catch-up commit once found `Unreleased` missing 33 commits. It can only be missing
-    entries if it is there at all."""
+    entries if it is there at all.
+
+    Existence only. An empty `Unreleased` is the correct state for the hour after a release is
+    cut, and the first test above already fails a branch that changes behaviour without adding a
+    line — so requiring entries here would have blocked the very next release cut, which is how
+    this assertion read when it shipped an hour ago.
+    """
     text = (ROOT / CHANGELOG).read_text(encoding="utf-8")
     assert "## [Unreleased]" in text, "CHANGELOG.md has no Unreleased section to add to"
-    body = text.split("## [Unreleased]", 1)[1].split("\n## ", 1)[0]
-    assert [ln for ln in body.splitlines() if ln.startswith("- ")], (
-        "the Unreleased section holds no entries — a released-looking changelog with unreleased work"
-    )
 
 
 if __name__ == "__main__":

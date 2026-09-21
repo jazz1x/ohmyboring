@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-21
+
+0.1.0 이후 196 커밋, 그중 동작을 바꾼 것 159 건. 주입이 무엇을 건네는지가 이 판의 축이다 —
+노트 조각만 가던 자리에 그 노트가 정한 것이 함께 가고, 레지스터 넷이 LLM 을 거치지 않으며,
+계기들이 자기가 못 본 것을 못 봤다고 말하기 시작했다.
+
 ### Added
 - **The changelog is gated** — a branch whose commits announce a `feat` or `fix` in shipped source must also touch this file, checked by `scripts/test_changelog.py` in `guard.sh`. Measured when the gate was written: the file had last been touched 157 merges earlier, by a commit titled "record the 33 commits Unreleased was missing".
 - **The injection carries what the note settled** — each recalled snippet now arrives with up to two of its claims (`RECALL_CLAIMS_PER_HIT`, default 2), so the agent reads the decision rather than only the prose around it. Measured on a week of real traffic: 71.3% of injected hits have a claim to give, at 102 characters per hit against the 840 the snippets already spend.
@@ -42,7 +48,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 - **`sync` reports the notes it dropped** instead of counting them privately.
 - **The briefing renders the claim kinds its own prompt asks for.**
 
-## 기록 보충 — 2026-08-21 … 2026-09-21
+### 기록 보충 — 2026-08-21 … 2026-09-21
 
 이 절은 **나중에 쓴 것**이다. 2026-08-20 이후 157번의 머지가 changelog 없이 지나갔고, 그것을
 커밋 로그에서 되짚어 날짜별로 적었다. 그날의 판단이 아니라 그날의 제목에서 나온 항목이므로,
