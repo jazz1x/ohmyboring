@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Network-free regression tests for the Codex adapter."""
+
 import importlib.util
 import io
 import json
@@ -33,9 +34,7 @@ for _var in (
 # 2026-09-02, growing daily. Isolation and a closed write door are both required, so the pop is
 # followed by an explicit spool rather than by nothing.
 os.environ["BORING_EVENT_SINK"] = "spool"
-os.environ.setdefault(
-    "BORING_EVENT_LOG", os.path.join(tempfile.gettempdir(), "omb-test-events.ndjson")
-)
+os.environ.setdefault("BORING_EVENT_LOG", os.path.join(tempfile.gettempdir(), "omb-test-events.ndjson"))
 
 
 def _load(name, filename):
@@ -149,7 +148,9 @@ def test_small_raw_parse_short_marks_done():
                 "raw_bytes": 5,
                 "min_raw_bytes_for_retry": 10,
             }
-            with mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}):
+            with mock.patch.dict(
+                os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+            ):
                 rc, err, mark = _run_main(payload, "too short")
             assert rc == 0
             assert "transcript too short" in err
@@ -220,7 +221,9 @@ def test_codex_distill_clamps_with_ingest_budget():
                 extracted = "START-" + ("x" * 700) + "-END"
                 stderr = io.StringIO()
                 with (
-                    mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+                    mock.patch.dict(
+                        os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                    ),
                     mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
                     mock.patch.object(distill.sys, "stderr", stderr),
                     mock.patch.object(distill, "extract", return_value=extracted),
@@ -273,7 +276,9 @@ def test_codex_distill_respects_zero_payload_clamp_override():
                 extracted = "START-" + ("x" * 700) + "-END"
                 stderr = io.StringIO()
                 with (
-                    mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+                    mock.patch.dict(
+                        os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                    ),
                     mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
                     mock.patch.object(distill.sys, "stderr", stderr),
                     mock.patch.object(distill, "extract", return_value=extracted),
@@ -488,7 +493,9 @@ def test_collect_noop_run_logs_workflow_fields():
             stdout = io.StringIO()
             with (
                 mock.patch.object(collect, "_source_dir", return_value=str(source)),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+                mock.patch.dict(
+                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                ),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.subprocess, "run") as run,
                 mock.patch.object(collect, "DrudgeClient") as client,
@@ -592,7 +599,9 @@ def test_status_mode_reports_queue_worker_and_note_without_mutation():
             out = stdout.getvalue()
             assert "queue_pending=1" in out
             assert "distill_clamp=" in out
-            assert "skipped_new=0 skipped_small=0 skipped_rollout=0 skipped_marked=0 skipped_subagent=0" in out
+            assert (
+                "skipped_new=0 skipped_small=0 skipped_rollout=0 skipped_marked=0 skipped_subagent=0" in out
+            )
             assert "markers done=1 pending=0 retry=0 dead_letter=0 stale_pending=0 stale_retry=0" in out
             assert "codex-rollout-" not in out
             assert "worker found=true enabled=false state=scheduled last_status=success" in out
@@ -662,7 +671,9 @@ def test_status_strict_fails_when_host_worker_missing():
                         "path": "/tmp/com.ohmyboring.codex-ingest.plist",
                     },
                 ),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+                mock.patch.dict(
+                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                ),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.sys, "stderr", stderr),
             ):
@@ -718,7 +729,10 @@ def test_status_strict_fails_when_hermes_worker_failed():
                         "path": "/tmp/com.ohmyboring.codex-ingest.plist",
                     },
                 ),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(root / "events.ndjson"), "BORING_EVENT_SINK": "spool"}),
+                mock.patch.dict(
+                    os.environ,
+                    {"BORING_EVENT_LOG": str(root / "events.ndjson"), "BORING_EVENT_SINK": "spool"},
+                ),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.sys, "stderr", stderr),
             ):
@@ -788,7 +802,10 @@ def test_status_strict_fails_on_stale_codex_markers():
                         "path": "/tmp/com.ohmyboring.codex-ingest.plist",
                     },
                 ),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(root / "events.ndjson"), "BORING_EVENT_SINK": "spool"}),
+                mock.patch.dict(
+                    os.environ,
+                    {"BORING_EVENT_LOG": str(root / "events.ndjson"), "BORING_EVENT_SINK": "spool"},
+                ),
                 mock.patch.object(collect.sys, "stdout", stdout),
                 mock.patch.object(collect.sys, "stderr", stderr),
             ):
@@ -807,7 +824,6 @@ def test_status_strict_fails_on_stale_codex_markers():
         collect.RETRY_TTL = old_retry_ttl
 
 
-
 def test_recommended_plugins_block_is_noise():
     """The plugin advert Codex injects is not session content.
 
@@ -817,14 +833,37 @@ def test_recommended_plugins_block_is_noise():
     import transcript as t
 
     raw = (
-        json.dumps({"type": "response_item", "payload": {"role": "user", "content": [
-            {"type": "input_text", "text": "<recommended_plugins>\nBox (box@openai-curated-remote)\n</recommended_plugins>"}]}})
+        json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "<recommended_plugins>\nBox (box@openai-curated-remote)\n</recommended_plugins>",
+                        }
+                    ],
+                },
+            }
+        )
         + "\n"
-        + json.dumps({"type": "response_item", "payload": {"role": "user", "content": [
-            {"type": "input_text", "text": "reply with just: ok"}]}})
+        + json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "reply with just: ok"}],
+                },
+            }
+        )
         + "\n"
-        + json.dumps({"type": "response_item", "payload": {"role": "assistant", "content": [
-            {"type": "output_text", "text": "ok"}]}})
+        + json.dumps(
+            {
+                "type": "response_item",
+                "payload": {"role": "assistant", "content": [{"type": "output_text", "text": "ok"}]},
+            }
+        )
         + "\n"
     )
     with tempfile.TemporaryDirectory() as d:
@@ -942,7 +981,9 @@ def test_collect_run_skips_when_locked_by_another_instance():
             stderr = io.StringIO()
             with (
                 mock.patch.object(collect, "_source_dir", return_value=str(source)),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+                mock.patch.dict(
+                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                ),
                 mock.patch.object(collect.sys, "stderr", stderr),
                 mock.patch.object(collect.subprocess, "run") as run,
                 mock.patch.object(collect, "DrudgeClient") as client,
@@ -975,15 +1016,29 @@ def test_acknowledgement_only_session_is_not_substantive():
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "s.jsonl")
         with open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"type": "response_item", "payload": {"role": "assistant",
-                "content": [{"type": "output_text", "text": "ok"}]}}) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {"role": "assistant", "content": [{"type": "output_text", "text": "ok"}]},
+                    }
+                )
+                + "\n"
+            )
         assert distill._has_substantive_assistant_turn(path) is False
 
         long_path = os.path.join(d, "long.jsonl")
         body = "x" * (distill.MIN_SUBSTANTIVE_ASSISTANT_CHARS + 1)
         with open(long_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"type": "response_item", "payload": {"role": "assistant",
-                "content": [{"type": "output_text", "text": body}]}}) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {"role": "assistant", "content": [{"type": "output_text", "text": body}]},
+                    }
+                )
+                + "\n"
+            )
         assert distill._has_substantive_assistant_turn(long_path) is True
 
 

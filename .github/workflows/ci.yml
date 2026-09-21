@@ -32,7 +32,7 @@ jobs:
       # installed it and the job was green because the runner image ships it — an accident, not a
       # gate. scripts/test_python_deps.py fails if this list and the imports drift apart.
       - name: install the declared Python dependency
-        run: python3 -m pip install --quiet -r requirements.txt
+        run: python3 -m pip install --quiet -r requirements.txt -r requirements-dev.txt
       # scripts/guard.sh = rustfmt --check + clippy -D warnings + test (스택-프리).
       - name: structural gate (guard.sh)
         run: ./scripts/guard.sh

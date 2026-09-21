@@ -10,9 +10,7 @@ from http import server
 from pathlib import Path
 
 # Load the module under test (ingest-worker.py) under a Python-valid name.
-_ingest_worker_path = os.path.join(
-    os.path.dirname(os.path.realpath(__file__)), "ingest-worker.py"
-)
+_ingest_worker_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ingest-worker.py")
 spec = importlib.util.spec_from_file_location("ingest_worker", _ingest_worker_path)
 ingest_worker = importlib.util.module_from_spec(spec)
 sys.modules["ingest_worker"] = ingest_worker
@@ -109,9 +107,7 @@ class ReconcileTest(unittest.TestCase):
 
     def _write_note(self, sid, wiki_id="wiki-9999"):
         note = self.wiki_dir / f"{wiki_id}.md"
-        note.write_text(
-            f"---\ntitle: test\nomb_session_id: {sid}\n---\nbody\n"
-        )
+        note.write_text(f"---\ntitle: test\nomb_session_id: {sid}\n---\nbody\n")
 
     def test_frontmatter_session_id_parsing(self):
         self._write_note("s-parse", "wiki-0001")
@@ -127,9 +123,7 @@ class ReconcileTest(unittest.TestCase):
 
     def test_find_session_note_uses_vault_wiki_not_vault_root(self):
         root_note = self.vault_root / "wiki-0001.md"
-        root_note.write_text(
-            "---\ntitle: wrong\nomb_session_id: s-root\n---\nbody\n"
-        )
+        root_note.write_text("---\ntitle: wrong\nomb_session_id: s-root\n---\nbody\n")
         self._write_note("s-root", "wiki-0002")
 
         found = ingest_worker._find_session_note("s-root")

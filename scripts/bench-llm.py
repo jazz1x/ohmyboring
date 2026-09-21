@@ -20,6 +20,7 @@ Run by MacBook RAM tier (recommended pairs):
 
 See docs/reports/llm-pair-matrix.md for the full matrix.
 """
+
 import argparse
 import json
 import os
@@ -28,7 +29,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from typing import Any, Optional
+from typing import Any
 
 # Reuse the production distillation prompt / JSON extractor.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared"))
@@ -130,9 +131,7 @@ SAMPLES: list[dict[str, str]] = [
 def _local_models() -> set[str]:
     """Return the set of models currently available in the local Ollama library."""
     try:
-        result = subprocess.run(
-            ["ollama", "list"], capture_output=True, text=True, timeout=30, check=False
-        )
+        result = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=30, check=False)
         if result.returncode != 0:
             return set()
         models: set[str] = set()
@@ -223,7 +222,7 @@ def _section_patterns(note_lang: str) -> list[tuple[str, str]]:
     ]
 
 
-def _evaluate(parsed: Optional[dict[str, Any]], note_lang: str) -> dict[str, Any]:
+def _evaluate(parsed: dict[str, Any] | None, note_lang: str) -> dict[str, Any]:
     metrics: dict[str, Any] = {
         "valid_json": parsed is not None,
         "has_title": False,
@@ -254,9 +253,7 @@ def _evaluate(parsed: Optional[dict[str, Any]], note_lang: str) -> dict[str, Any
     metrics["body_has_sections"] = len(sections) >= 2
     # trailing metadata leak detection
     tail = "\n".join(body.splitlines()[-6:])
-    metrics["trailing_metadata"] = bool(
-        re.search(r"^(tags|tools|concepts|claims):\s*", tail, re.MULTILINE)
-    )
+    metrics["trailing_metadata"] = bool(re.search(r"^(tags|tools|concepts|claims):\s*", tail, re.MULTILINE))
     return metrics
 
 
@@ -365,8 +362,7 @@ def main() -> None:
         clean = sum(1 for r in runs if not r["trailing_metadata"]) / len(runs)
         avg_lat = sum(r["latency_sec"] for r in runs) / len(runs)
         print(
-            f"{model:<20} {valid:>6.0%} {title_ok:>11.0%} "
-            f"{sections:>11.0%} {clean:>11.0%} {avg_lat:>9.2f}s"
+            f"{model:<20} {valid:>6.0%} {title_ok:>11.0%} {sections:>11.0%} {clean:>11.0%} {avg_lat:>9.2f}s"
         )
 
 

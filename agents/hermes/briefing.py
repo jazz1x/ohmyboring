@@ -5,28 +5,26 @@ hermes-agent cron --no-agent --script 로 호출 → stdout 이 그대로 Slack 
 지능은 ohmyboring 엔진이 SSOT. 이 스크립트는 호출+포맷만 담당.
 의존성 0 (stdlib urllib). 실패는 침묵하지 않는다(ROP: 실패는 보인다).
 """
+
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
+# After slack_briefing on purpose: in ~/.hermes/scripts every module sits flat and the order is
+# irrelevant, but running from the repo it is slack_briefing that puts agents/shared on the path.
+import verdict_core  # noqa: E402
 from slack_briefing import (
     maybe_print_blocks_json,
     render_body_mrkdwn,
     render_message_mrkdwn,
 )
 
-# After slack_briefing on purpose: in ~/.hermes/scripts every module sits flat and the order is
-# irrelevant, but running from the repo it is slack_briefing that puts agents/shared on the path.
-import verdict_core  # noqa: E402
-
 # BORING_URL is the canonical env var used throughout oh-my-boring.
 # DRUDGE_URL is kept as a fallback for legacy scripts only.
-HERMES_URL = os.environ.get("BORING_URL") or os.environ.get(
-    "DRUDGE_URL", "http://boring-drudge:7700"
-)
+HERMES_URL = os.environ.get("BORING_URL") or os.environ.get("DRUDGE_URL", "http://boring-drudge:7700")
 KST = timezone(timedelta(hours=9))
 DATE = datetime.now(KST).strftime("%Y-%m-%d %a")
 TITLE = "☀️ 아침 브리핑"
@@ -130,15 +128,9 @@ def main() -> None:
     stats = label_stats()
     window = uptake_stats()
     projects = known_projects()
-    if maybe_print_blocks_json(
-        TITLE, DATE, answer, sources, EMPTY_MESSAGE, stats, window, projects
-    ):
+    if maybe_print_blocks_json(TITLE, DATE, answer, sources, EMPTY_MESSAGE, stats, window, projects):
         return
-    print(
-        render_message_mrkdwn(
-            f"*{TITLE}*", DATE, answer, sources, EMPTY_MESSAGE, stats, window, projects
-        )
-    )
+    print(render_message_mrkdwn(f"*{TITLE}*", DATE, answer, sources, EMPTY_MESSAGE, stats, window, projects))
 
 
 if __name__ == "__main__":

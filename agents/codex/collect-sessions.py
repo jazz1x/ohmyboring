@@ -26,6 +26,7 @@ running both, only duplicate-run risk. `--status` reports it as an issue if both
 active at once, or if neither is; `acquire_collector_lock` below is the runtime backstop
 for the same failure mode.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -39,7 +40,6 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-import boring_config
 import event_log
 import markers
 import omb_env
@@ -55,7 +55,9 @@ MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
 DISTILL_CLAMP = transcript.codex_distill_clamp()
 STABLE_AGE_S = float(os.environ.get("COLLECT_STABLE_AGE_SECONDS") or "1800")
 PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("INGEST_PENDING_TTL") or "1800")
-RETRY_TTL = float(os.environ.get("COLLECT_RETRY_TTL") or os.environ.get("INGEST_RETRY_TTL") or str(PENDING_TTL))
+RETRY_TTL = float(
+    os.environ.get("COLLECT_RETRY_TTL") or os.environ.get("INGEST_RETRY_TTL") or str(PENDING_TTL)
+)
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 HOOK = os.path.join(BORING_HOME, "agents/codex/distill-session.py")
 HOST_WORKER_LABEL = "com.ohmyboring.codex-ingest"
@@ -719,7 +721,10 @@ def main(argv: list[str] | None = None):
 
     batch = todo[:1] if args.now else todo[:LIMIT]
     label = "distill-now" if args.now else "collect"
-    print(f"[{label}] pending={len(todo)} this_batch={len(batch)} (LIMIT={1 if args.now else LIMIT})", flush=True)
+    print(
+        f"[{label}] pending={len(todo)} this_batch={len(batch)} (LIMIT={1 if args.now else LIMIT})",
+        flush=True,
+    )
     if not batch:
         print(f"[{label}] nothing to do", flush=True)
         event_log.try_append_event(

@@ -3,9 +3,8 @@
 
 import argparse
 import csv
-from pathlib import Path
 import sys
-
+from pathlib import Path
 
 REQUIRED_EVERY_CYCLE = ("codex-status-strict", "readiness", "quality", "recent-events")
 GUARD_STEP = "guard"
@@ -19,7 +18,9 @@ STAGES = {
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Check self-verification stage contract")
-    parser.add_argument("--summary", help="summary.tsv path; defaults to newest under /private/tmp/omb-self-verify")
+    parser.add_argument(
+        "--summary", help="summary.tsv path; defaults to newest under /private/tmp/omb-self-verify"
+    )
     parser.add_argument("--stage", choices=sorted(STAGES), default="bootstrap")
     args = parser.parse_args(argv)
 
@@ -59,7 +60,11 @@ def evaluate(rows, stage):
     cycles = sorted({int(row["cycle"]) for row in rows if row.get("cycle", "").isdigit()})
     cycle_count = len(cycles)
     guard_cycles = sorted(
-        {int(row["cycle"]) for row in rows if row.get("step") == GUARD_STEP and row.get("cycle", "").isdigit()}
+        {
+            int(row["cycle"])
+            for row in rows
+            if row.get("step") == GUARD_STEP and row.get("cycle", "").isdigit()
+        }
     )
     guard_runs = len(guard_cycles)
     failed_rows = [row for row in rows if row.get("status") != "ok" or row.get("exit_code") != "0"]

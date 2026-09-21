@@ -14,6 +14,7 @@ on disk, with no runtime surface and nothing to contaminate.
 
 Read-only: transcripts, the vault, and the claims table. Writes nothing anywhere.
 """
+
 import argparse
 import collections
 import json
@@ -37,9 +38,7 @@ VAULT = Path(__file__).resolve().parent.parent / "vault" / "wiki"
 
 def transcripts(days):
     cut = time.time() - days * 86400
-    dirs = boring_config.source_dirs(adapter="session-end") or [
-        os.path.expanduser("~/.claude/projects")
-    ]
+    dirs = boring_config.source_dirs(adapter="session-end") or [os.path.expanduser("~/.claude/projects")]
     out = []
     for d in dirs:
         base = Path(d)
@@ -139,10 +138,12 @@ def main(argv=None):
     covered_edits = sum(c for n, c in revisit.items() if mentions.get(n))
 
     print(f"전사 {args.days}일 · 코드 편집 {total:,}")
-    print(f"  재방문 편집 (이전 세션이 만진 파일)  {revisits:,} ({revisits/total:.0%})")
-    print(f"  그중 노트가 있는 것                  {covered_edits:,} ({covered_edits/max(revisits,1):.0%})"
-          f"  · 고유 파일 {covered_files}/{len(revisit)}")
-    print(f"  **앵커 트리거 상한**                 {covered_edits/total:.1%} of all code edits")
+    print(f"  재방문 편집 (이전 세션이 만진 파일)  {revisits:,} ({revisits / total:.0%})")
+    print(
+        f"  그중 노트가 있는 것                  {covered_edits:,} ({covered_edits / max(revisits, 1):.0%})"
+        f"  · 고유 파일 {covered_files}/{len(revisit)}"
+    )
+    print(f"  **앵커 트리거 상한**                 {covered_edits / total:.1%} of all code edits")
     print()
     print("  언어:", ", ".join(f"{k} {v}" for k, v in by_lang.most_common(6)))
     print()

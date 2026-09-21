@@ -15,6 +15,7 @@ Policy knobs (env):
 
 Dry-run by default; pass --apply to execute.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,9 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(
-    0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared")
-)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared"))
 import boring_config  # noqa: E402
 
 DEFAULT_PROCESSED_DAYS = 30
@@ -212,7 +211,9 @@ def main():
     stale_retry = p["stale_retry"]
     bytes_to_archive = p["bytes"]
 
-    total_actions = len(to_archive) + len(to_delete) + len(ancient_archives) + len(stale_pending) + len(stale_retry)
+    total_actions = (
+        len(to_archive) + len(to_delete) + len(ancient_archives) + len(stale_pending) + len(stale_retry)
+    )
 
     print(f"📂 source dirs: {[str(d) for d in source_dirs]}")
     print(f"🗑  mark dir:   {mark_dir}")

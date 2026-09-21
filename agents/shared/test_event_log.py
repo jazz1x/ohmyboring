@@ -3,12 +3,13 @@
 
 Run: python3 agents/shared/test_event_log.py
 """
-import json
+
 import io
+import json
 import os
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 import event_log
@@ -97,7 +98,9 @@ class EventLogTests(unittest.TestCase):
 
         stdout = io.StringIO()
         with (
-            mock.patch.object(event_log.sys, "argv", ["event_log.py", "--tail", "--component", "guard", "--json"]),
+            mock.patch.object(
+                event_log.sys, "argv", ["event_log.py", "--tail", "--component", "guard", "--json"]
+            ),
             mock.patch.object(event_log.sys, "stdout", stdout),
         ):
             self.assertEqual(event_log.main(), 0)
@@ -144,7 +147,9 @@ class EventLogTests(unittest.TestCase):
     def test_append_event_spools_when_engine_store_fails(self):
         os.environ.pop("BORING_EVENT_DB_MIRROR", None)
 
-        with mock.patch.object(event_log.urllib.request, "urlopen", side_effect=event_log.urllib.error.URLError("down")):
+        with mock.patch.object(
+            event_log.urllib.request, "urlopen", side_effect=event_log.urllib.error.URLError("down")
+        ):
             event_log.append_event("guard", "structural_guard", "failed", run_id="r1")
 
         with open(os.environ["BORING_EVENT_LOG"], encoding="utf-8") as f:
@@ -208,7 +213,7 @@ class EventLogTests(unittest.TestCase):
                     {
                         "entries": [
                             {
-                                "observed_at": datetime.now(timezone.utc).isoformat(),
+                                "observed_at": datetime.now(UTC).isoformat(),
                                 "component": "distill-session",
                                 "event": "distill_resolution",
                                 "status": "failed",
@@ -318,7 +323,7 @@ class EventLogTests(unittest.TestCase):
         self.assertEqual(failures[0]["session_id"], "bad")
 
     def test_recent_resolution_failures_ignores_stale_failures(self):
-        old = datetime.now(timezone.utc) - timedelta(hours=48)
+        old = datetime.now(UTC) - timedelta(hours=48)
         stale = {
             "ts": old.isoformat(),
             "component": "distill-session",
@@ -350,26 +355,33 @@ class SpoolReplayTests(unittest.TestCase):
         return path
 
     def test_replay_hands_rows_to_the_engine_and_keeps_only_the_refused(self):
-        rows = [json.dumps({"ts": "t1", "component": "c", "event": "e1", "status": "ok"}),
-                json.dumps({"ts": "t2", "component": "c", "event": "e2", "status": "ok"}),
-                json.dumps({"ts": "t3", "component": "c", "event": "e3", "status": "ok"})]
+        rows = [
+            json.dumps({"ts": "t1", "component": "c", "event": "e1", "status": "ok"}),
+            json.dumps({"ts": "t2", "component": "c", "event": "e2", "status": "ok"}),
+            json.dumps({"ts": "t3", "component": "c", "event": "e3", "status": "ok"}),
+        ]
         with tempfile.TemporaryDirectory() as d:
             path = self._spool(d, rows)
             refuse = {"e2"}
-            with mock.patch.object(
-                event_log, "_try_store_in_engine", side_effect=lambda p: p["event"] not in refuse
-            ), mock.patch.dict(os.environ, {"BORING_EVENT_LOG": path}):
+            with (
+                mock.patch.object(
+                    event_log, "_try_store_in_engine", side_effect=lambda p: p["event"] not in refuse
+                ),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": path}),
+            ):
                 counts = event_log.replay_spool()
             self.assertEqual(counts, {"replayed": 2, "kept": 1, "unparseable": 0})
-            left = [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
+            left = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
             self.assertEqual([r["event"] for r in left], ["e2"], "only the refused row stays")
 
     def test_a_row_that_does_not_parse_is_kept_and_counted_not_dropped(self):
         rows = [json.dumps({"ts": "t1", "component": "c", "event": "e1", "status": "ok"}), "{not json"]
         with tempfile.TemporaryDirectory() as d:
             path = self._spool(d, rows)
-            with mock.patch.object(event_log, "_try_store_in_engine", return_value=True), \
-                 mock.patch.dict(os.environ, {"BORING_EVENT_LOG": path}):
+            with (
+                mock.patch.object(event_log, "_try_store_in_engine", return_value=True),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": path}),
+            ):
                 counts = event_log.replay_spool()
             self.assertEqual(counts, {"replayed": 1, "kept": 0, "unparseable": 1})
             self.assertEqual(open(path, encoding="utf-8").read().strip(), "{not json")
@@ -381,8 +393,10 @@ class SpoolReplayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = self._spool(d, rows)
             before = open(path, encoding="utf-8").read()
-            with mock.patch.object(event_log, "_try_store_in_engine", return_value=False), \
-                 mock.patch.dict(os.environ, {"BORING_EVENT_LOG": path}):
+            with (
+                mock.patch.object(event_log, "_try_store_in_engine", return_value=False),
+                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": path}),
+            ):
                 counts = event_log.replay_spool()
             self.assertEqual(counts, {"replayed": 0, "kept": 1, "unparseable": 0})
             self.assertEqual(open(path, encoding="utf-8").read(), before)

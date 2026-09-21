@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Tests for scripts/self-verify-contract.py."""
 
-import os
 import importlib.util
-from pathlib import Path
+import os
 import tempfile
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(

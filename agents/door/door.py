@@ -11,6 +11,7 @@ through as-is; an engine that cannot be reached is a 502 with a JSON body,
 never a silent 200 with an empty one. Unregistered paths get FastAPI's
 default 404: this is a door, not a catch-all proxy.
 """
+
 from __future__ import annotations
 
 import os

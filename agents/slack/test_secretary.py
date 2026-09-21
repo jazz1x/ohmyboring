@@ -8,14 +8,15 @@ client/request objects for the rest.
 
 Run: python3 agents/slack/test_secretary.py
 """
+
 import os
 import sys
 import types
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
-import secretary_core as sc  # noqa: E402
 import secretary as sec  # noqa: E402
+import secretary_core as sc  # noqa: E402
 
 BOT = "U_BOT"
 OWNER = "U_OWNER"
@@ -123,18 +124,24 @@ def test_a_mention_is_answered_in_its_thread_and_then_ledgered():
     web = FakeWeb()
     posted = sec.on_mention(_mention(), web, ask=ask, remember=remember)
 
-    assert asked == ["<@U_BOT> 브랜치 이름 어떻게 정했더라"], "the brain receives the raw mention and strips it itself"
-    assert web.posts == [{
-        "channel": CH,
-        "thread_ts": TS,  # no thread yet: the mention's own ts opens it
-        "text": "답 본문",
-    }]
+    assert asked == ["<@U_BOT> 브랜치 이름 어떻게 정했더라"], (
+        "the brain receives the raw mention and strips it itself"
+    )
+    assert web.posts == [
+        {
+            "channel": CH,
+            "thread_ts": TS,  # no thread yet: the mention's own ts opens it
+            "text": "답 본문",
+        }
+    ]
     assert posted == POSTED_TS, "the posted ts is returned so the caller knows where the answer lives"
-    assert remembered == [{
-        "key": f"slack:{CH}:{POSTED_TS}",  # ledgered under the POSTED message, not the question
-        "question": "브랜치 이름 어떻게 정했더라",
-        "hits": given,
-    }], "the ledger gets exactly the notes the reader saw, under the answer's own key"
+    assert remembered == [
+        {
+            "key": f"slack:{CH}:{POSTED_TS}",  # ledgered under the POSTED message, not the question
+            "question": "브랜치 이름 어떻게 정했더라",
+            "hits": given,
+        }
+    ], "the ledger gets exactly the notes the reader saw, under the answer's own key"
 
 
 def test_a_threaded_mention_answers_inside_that_thread():
@@ -217,7 +224,8 @@ def test_a_reaction_after_a_real_answer_reaches_the_engine_verdict():
         return {"used": 1, "contested": 0}
 
     sec.on_mention(
-        _mention(), web,
+        _mention(),
+        web,
         ask=lambda q: sc.Answer("답 본문", given),
         remember=lambda key, q, hits: sc.remember_handed(key, q, hits, handover=handover),
     )
@@ -229,8 +237,7 @@ def test_a_reaction_after_a_real_answer_reaches_the_engine_verdict():
     )
     assert out.get("unknown_answer") is not True, "the handover connects the posted answer to the reaction"
     assert engine == [
-        {"kind": "handover", "session_id": f"slack:{CH}:{POSTED_TS}",
-         "paths": ["/vault/wiki/wiki-0435.md"]},
+        {"kind": "handover", "session_id": f"slack:{CH}:{POSTED_TS}", "paths": ["/vault/wiki/wiki-0435.md"]},
         {"kind": "consumption", "session_id": f"slack:{CH}:{POSTED_TS}", "verdict": "used"},
     ]
 
@@ -249,16 +256,27 @@ def test_dispatch_acks_first_then_dispatches_and_swallows_handler_errors():
 
     try:
         sec.dispatch(client, FakeReq("env-1", payload={"event": _mention()}), bot_user_id=BOT, owner_id=OWNER)
-        sec.dispatch(client, FakeReq("env-2", payload={"event": _reaction("thumbsup")}), bot_user_id=BOT, owner_id=OWNER)
+        sec.dispatch(
+            client,
+            FakeReq("env-2", payload={"event": _reaction("thumbsup")}),
+            bot_user_id=BOT,
+            owner_id=OWNER,
+        )
         sec.dispatch(client, FakeReq("env-3", type="slash_commands"), bot_user_id=BOT, owner_id=OWNER)
         sec.on_mention = boom
         sec.dispatch(client, FakeReq("env-4", payload={"event": _mention()}), bot_user_id=BOT, owner_id=OWNER)
     finally:
         sec.on_mention, sec.on_reaction = real_mention, real_reaction
 
-    assert client.acks == ["env-1", "env-2", "env-3", "env-4"], "every envelope is acked, slash commands included"
-    assert order.index("post") > order.index("ack"), "the ack lands before the answer — Slack resends the un-acked"
-    assert handled == ["mention", "reaction"], "env-3 is not an event, env-4 raised and was swallowed, not propagated"
+    assert client.acks == ["env-1", "env-2", "env-3", "env-4"], (
+        "every envelope is acked, slash commands included"
+    )
+    assert order.index("post") > order.index("ack"), (
+        "the ack lands before the answer — Slack resends the un-acked"
+    )
+    assert handled == ["mention", "reaction"], (
+        "env-3 is not an event, env-4 raised and was swallowed, not propagated"
+    )
 
 
 def test_dispatch_a_failed_ack_means_no_handling():
@@ -283,18 +301,25 @@ def _reply(text="정정: 재시작은 2시에 한다", user=OWNER, thread_ts=POS
 
 
 def _answer_parent():
-    text = sc.render([
-        {"source_path": "/vault/wiki/wiki-0435.md", "snippet": "branch naming settled " * 3},
-        {"source_path": "/vault/wiki/wiki-1000.md", "snippet": "pool question settled " * 3},
-    ])
+    text = sc.render(
+        [
+            {"source_path": "/vault/wiki/wiki-0435.md", "snippet": "branch naming settled " * 3},
+            {"source_path": "/vault/wiki/wiki-1000.md", "snippet": "pool question settled " * 3},
+        ]
+    )
     return {"user": BOT, "text": text}
 
 
 def _recording_correct(calls):
     def correct(key, question, handed_paths, text):
         calls.append({"key": key, "question": question, "handed_paths": handed_paths, "text": text})
-        return {"source_path": "/vault/wiki/wiki-1077.md", "wiki_id": "wiki-1077",
-                "duplicate": None, "supersedes": list(handed_paths), "unknown": []}
+        return {
+            "source_path": "/vault/wiki/wiki-1077.md",
+            "wiki_id": "wiki-1077",
+            "duplicate": None,
+            "supersedes": list(handed_paths),
+            "unknown": [],
+        }
 
     return correct
 
@@ -305,41 +330,48 @@ def test_a_correction_on_the_bots_answer_becomes_a_note():
     out = sec.on_thread_reply(_reply(), web, BOT, correct=_recording_correct(calls), owner_id=OWNER)
 
     assert web.replies_calls == [{"channel": CH, "ts": POSTED_TS, "limit": 1}]
-    assert calls == [{
-        "key": f"slack:{CH}:{POSTED_TS}",
-        "question": "",
-        "handed_paths": ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md"],
-        "text": "정정: 재시작은 2시에 한다",
-    }], "the paths are rebuilt from the parent body's names, in the order the answer listed them"
-    assert web.posts == [{
-        "channel": CH,
-        "thread_ts": POSTED_TS,
-        "text": "정정 기록 → wiki-1077.md (대체 2)",
-    }]
+    assert calls == [
+        {
+            "key": f"slack:{CH}:{POSTED_TS}",
+            "question": "",
+            "handed_paths": ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md"],
+            "text": "정정: 재시작은 2시에 한다",
+        }
+    ], "the paths are rebuilt from the parent body's names, in the order the answer listed them"
+    assert web.posts == [
+        {
+            "channel": CH,
+            "thread_ts": POSTED_TS,
+            "text": "정정 기록 → wiki-1077.md (대체 2)",
+        }
+    ]
     assert out["wiki_id"] == "wiki-1077"
 
 
 def test_a_message_without_a_thread_is_just_conversation():
     calls = []
     web = FakeWeb(parent=_answer_parent())
-    out = sec.on_thread_reply(_reply(thread_ts=None), web, BOT,
-                              correct=_recording_correct(calls), owner_id=OWNER)
+    out = sec.on_thread_reply(
+        _reply(thread_ts=None), web, BOT, correct=_recording_correct(calls), owner_id=OWNER
+    )
     assert out is None and calls == [] and web.replies_calls == [] and web.posts == []
 
 
 def test_a_correction_from_someone_else_is_ignored_when_an_owner_is_configured():
     calls = []
     web = FakeWeb(parent=_answer_parent())
-    out = sec.on_thread_reply(_reply(user="U_STRANGER"), web, BOT,
-                              correct=_recording_correct(calls), owner_id=OWNER)
+    out = sec.on_thread_reply(
+        _reply(user="U_STRANGER"), web, BOT, correct=_recording_correct(calls), owner_id=OWNER
+    )
     assert out is None and calls == [] and web.replies_calls == []
 
 
 def test_thread_chatter_that_is_not_a_correction_is_left_alone():
     calls = []
     web = FakeWeb(parent=_answer_parent())
-    out = sec.on_thread_reply(_reply(text="고마워, 도움 됐어!"), web, BOT,
-                              correct=_recording_correct(calls), owner_id=OWNER)
+    out = sec.on_thread_reply(
+        _reply(text="고마워, 도움 됐어!"), web, BOT, correct=_recording_correct(calls), owner_id=OWNER
+    )
     assert out is None and calls == [] and web.replies_calls == []
 
 
@@ -349,7 +381,9 @@ def test_a_correction_on_someone_elses_thread_is_not_ours_to_keep():
     calls = []
     web = FakeWeb(parent=parent)
     out = sec.on_thread_reply(_reply(), web, BOT, correct=_recording_correct(calls), owner_id=OWNER)
-    assert out is None and calls == [] and web.posts == [], "남의 메시지에 정정이 달려도 우리 노트가 되지 않는다"
+    assert out is None and calls == [] and web.posts == [], (
+        "남의 메시지에 정정이 달려도 우리 노트가 되지 않는다"
+    )
 
 
 def test_a_thread_on_a_message_that_is_not_our_answer_is_ignored():
@@ -370,11 +404,14 @@ def test_dispatch_routes_thread_replies_and_skips_bot_echoes():
         echo = _reply()
         echo["subtype"] = "bot_message"
         sec.dispatch(client, FakeReq("env-m2", payload={"event": echo}), bot_user_id=BOT, owner_id=OWNER)
-        sec.dispatch(client, FakeReq("env-m3", payload={"event": _reply(user=BOT)}), bot_user_id=BOT, owner_id=OWNER)
+        sec.dispatch(
+            client, FakeReq("env-m3", payload={"event": _reply(user=BOT)}), bot_user_id=BOT, owner_id=OWNER
+        )
     finally:
         sec.on_thread_reply = real
-    assert len(handled) == 1 and handled[0].get("subtype") is None, \
+    assert len(handled) == 1 and handled[0].get("subtype") is None, (
         "only a plain human reply reaches the handler; echoes and the bot's own messages do not"
+    )
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ Apply fixes (rewrites vault/wiki/*.md — backs up each touched note to <note>.m
 vault/wiki is gitignored so `git diff` shows nothing — review the .bak files):
     python3 scripts/data-steward.py --fix
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,9 +28,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 # shared policy library lives next to the hooks
-sys.path.insert(
-    0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared")
-)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared"))
 import boring_config  # noqa: E402
 from vault_note import split_frontmatter  # noqa: E402
 
@@ -41,7 +40,16 @@ MIN_CLAIMS_PER_SESSION = 2
 # A claim value shorter than this is too vague to be authoritative.
 MIN_CLAIM_VALUE_LEN = 4
 # Markers that make a fact/decision claim sound like a next-step rather than completed work.
-WEAK_CLAIM_KO_PATTERNS = {"검토 필요", "검토 예정", "확인 필요", "확인 예정", "확인해야", "고민", "예정", "계획"}
+WEAK_CLAIM_KO_PATTERNS = {
+    "검토 필요",
+    "검토 예정",
+    "확인 필요",
+    "확인 예정",
+    "확인해야",
+    "고민",
+    "예정",
+    "계획",
+}
 WEAK_CLAIM_EN_PATTERN = re.compile(r"\b(review|consider|plan|todo)\b", re.IGNORECASE)
 PLAN_LIKE_CLAIM_KINDS = {"fact", "decision", "assumption", "term"}
 SHORT_VALUE_PREDICATE_HINTS = {
@@ -161,9 +169,7 @@ def _claim_value_sounds_like_plan(claim: dict) -> bool:
     if "status_mark" in predicate and value.startswith("(") and value.endswith(")"):
         return False
     lowered = value.lower()
-    return any(w in value for w in WEAK_CLAIM_KO_PATTERNS) or bool(
-        WEAK_CLAIM_EN_PATTERN.search(lowered)
-    )
+    return any(w in value for w in WEAK_CLAIM_KO_PATTERNS) or bool(WEAK_CLAIM_EN_PATTERN.search(lowered))
 
 
 def _claim_issues(notes):
@@ -309,13 +315,9 @@ def _build_report(wiki_dir: Path, notes: list[dict]) -> dict:
             )
         for bad, good, *_ in typos:
             if proj == bad:
-                note_issues[n["path"].name].append(
-                    {"kind": "project-typo", "old": proj, "suggested": good}
-                )
+                note_issues[n["path"].name].append({"kind": "project-typo", "old": proj, "suggested": good})
         if proj in GENERIC_PROJECTS:
-            note_issues[n["path"].name].append(
-                {"kind": "generic-project", "value": proj or "(empty)"}
-            )
+            note_issues[n["path"].name].append({"kind": "generic-project", "value": proj or "(empty)"})
         bad_tags = [t for t in tags if t in PLACEHOLDER_TAGS]
         if bad_tags:
             note_issues[n["path"].name].append({"kind": "placeholder-tags", "tags": bad_tags})
@@ -357,7 +359,9 @@ def fixable_note_names(report: dict) -> list[str]:
 
 def main():
     parser = argparse.ArgumentParser(description="Inspect/repair ohmyboring vault data hygiene")
-    parser.add_argument("--vault", help="vault root directory (default: BORING_VAULT_DIR or ~/oh-my-boring/vault)")
+    parser.add_argument(
+        "--vault", help="vault root directory (default: BORING_VAULT_DIR or ~/oh-my-boring/vault)"
+    )
     parser.add_argument("--fix", action="store_true", help="rewrite notes in place (review with git diff)")
     parser.add_argument("--yes", action="store_true", help="skip confirmation prompt")
     parser.add_argument("--json", action="store_true", help="output structured JSON report")
@@ -393,10 +397,7 @@ def main():
     if typos:
         print("🔤 Likely project typos:")
         for bad, good, r, bad_count, good_count in typos:
-            print(
-                f"   {bad!r} ({bad_count}) → {good!r} ({good_count}) "
-                f"(similarity {r:.2f})"
-            )
+            print(f"   {bad!r} ({bad_count}) → {good!r} ({good_count}) (similarity {r:.2f})")
         print()
 
     if note_issues:
@@ -421,10 +422,7 @@ def main():
         print(f"\n🧭 Session notes with weak claims: {len(claim_issues)}")
         for issue in sorted(claim_issues, key=lambda x: x["path"]):
             if issue["kind"] == "missing-claims":
-                print(
-                    f"  {issue['path']}: only {issue['count']} claim(s) "
-                    f"(aim for ≥{issue['min']})"
-                )
+                print(f"  {issue['path']}: only {issue['count']} claim(s) (aim for ≥{issue['min']})")
             elif issue["kind"] == "weak-claims":
                 print(f"  {issue['path']}:")
                 for w in issue["claims"]:
@@ -455,10 +453,7 @@ def main():
         proj = n["fm"].get("project") or ""
         tags = list(n["fm"].get("tags") or [])
         target = _issue_target_project(proj)
-        needs_fix = (
-            target != proj
-            or any(t in PLACEHOLDER_TAGS for t in tags)
-        )
+        needs_fix = target != proj or any(t in PLACEHOLDER_TAGS for t in tags)
         if needs_fix:
             _fix_note(n, target)
             fixed += 1

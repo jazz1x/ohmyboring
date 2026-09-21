@@ -4,12 +4,13 @@
 hermes-agent cron --no-agent --script 로 호출 → stdout 이 그대로 Slack DM 등으로 배달.
 지능은 ohmyboring 엔진이 SSOT. 이 스크립트는 호출+포맷만 담당.
 """
+
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 from slack_briefing import (
     maybe_print_blocks_json,
@@ -22,9 +23,7 @@ from slack_briefing import (
 from vault_note import split_frontmatter
 from weekly_trend import collect_week, label_trend, needs_intervention, scoreboard
 
-HERMES_URL = os.environ.get("BORING_URL") or os.environ.get(
-    "DRUDGE_URL", "http://boring-drudge:7700"
-)
+HERMES_URL = os.environ.get("BORING_URL") or os.environ.get("DRUDGE_URL", "http://boring-drudge:7700")
 KST = timezone(timedelta(hours=9))
 # ISO week: YYYY-WNN
 TODAY = datetime.now(KST)
@@ -84,12 +83,21 @@ def print_trend_blocks(days) -> bool:
     intervention = [(w, label, count, span) for w, label, count in needs_intervention(projects)]
     board = [(w, span) for w in scoreboard(projects)]
     blocks = render_weekly_blocks(
-        TITLE, f"{STAMP} · 스냅샷 {span}/{WINDOW_DAYS}일", projects, intervention, board,
-        label_trend(days), [],
+        TITLE,
+        f"{STAMP} · 스냅샷 {span}/{WINDOW_DAYS}일",
+        projects,
+        intervention,
+        board,
+        label_trend(days),
+        [],
     )
     text = render_weekly_mrkdwn(
-        TITLE, f"{STAMP} · 스냅샷 {span}/{WINDOW_DAYS}일", intervention, board,
-        label_trend(days), [],
+        TITLE,
+        f"{STAMP} · 스냅샷 {span}/{WINDOW_DAYS}일",
+        intervention,
+        board,
+        label_trend(days),
+        [],
     )
     # Cron delivery is text-only, so text is the default and the JSON payload is the opt-in.
     # It was the other way round, which put this whole weekly behind an env var nothing sets.

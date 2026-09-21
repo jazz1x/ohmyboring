@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Network-free regression tests for vault-cleanup-gate.py."""
+
 from __future__ import annotations
 
 import argparse
@@ -9,7 +10,6 @@ import tempfile
 from pathlib import Path
 
 import yaml
-
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("vault_cleanup_gate", str(HERE / "vault-cleanup-gate.py"))
@@ -76,8 +76,7 @@ def test_check_fails_when_fixable_issues_remain():
         _write_note(
             wiki,
             "wiki-0001.md",
-            "id: wiki-0001\ntitle: t\nkind: note\norigin: personal\n"
-            "project: marketboro/omb\ntags: [_]\n",
+            "id: wiki-0001\ntitle: t\nkind: note\norigin: personal\nproject: marketboro/omb\ntags: [_]\n",
         )
 
         rc = gate.run(_args(root, fix=False))

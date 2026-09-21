@@ -3,18 +3,18 @@
 
 Run: python3 agents/shared/test_distill_core.py
 """
+
 import io
 import json
-import subprocess
-import pathlib
 import os
+import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 import distill_core
 import transcript
-
 
 SHALLOW_NOTE = {
     "title": "작업 정리",
@@ -169,9 +169,11 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
 
     def test_distill_skip_logs_workflow_event(self):
         stderr = io.StringIO()
-        with mock.patch.object(distill_core, "_call_llm", return_value={"skip": True}), \
-             mock.patch.object(distill_core, "_call_remember") as remember, \
-             mock.patch.object(distill_core.sys, "stderr", stderr):
+        with (
+            mock.patch.object(distill_core, "_call_llm", return_value={"skip": True}),
+            mock.patch.object(distill_core, "_call_remember") as remember,
+            mock.patch.object(distill_core.sys, "stderr", stderr),
+        ):
             ok = distill_core.distill_and_remember(
                 "pure chit-chat",
                 "personal",
@@ -192,13 +194,15 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
 
     def test_resolution_failure_repairs_once_then_remembers(self):
         stderr = io.StringIO()
-        with mock.patch.object(distill_core, "_call_llm", side_effect=[SHALLOW_NOTE, RICH_NOTE]) as llm, \
-             mock.patch.object(
-                 distill_core,
-                 "_call_remember",
-                 return_value=distill_core.RememberOutcome(True, "remembered"),
-             ) as remember, \
-             mock.patch.object(distill_core.sys, "stderr", stderr):
+        with (
+            mock.patch.object(distill_core, "_call_llm", side_effect=[SHALLOW_NOTE, RICH_NOTE]) as llm,
+            mock.patch.object(
+                distill_core,
+                "_call_remember",
+                return_value=distill_core.RememberOutcome(True, "remembered"),
+            ) as remember,
+            mock.patch.object(distill_core.sys, "stderr", stderr),
+        ):
             ok = distill_core.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
                 "personal",
@@ -220,13 +224,15 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
 
     def test_resolution_repair_failure_blocks_remember(self):
         stderr = io.StringIO()
-        with mock.patch.object(distill_core, "_call_llm", side_effect=[SHALLOW_NOTE, SHALLOW_NOTE]), \
-             mock.patch.object(
-                 distill_core,
-                 "_call_remember",
-                 return_value=distill_core.RememberOutcome(True, "remembered"),
-             ) as remember, \
-             mock.patch.object(distill_core.sys, "stderr", stderr):
+        with (
+            mock.patch.object(distill_core, "_call_llm", side_effect=[SHALLOW_NOTE, SHALLOW_NOTE]),
+            mock.patch.object(
+                distill_core,
+                "_call_remember",
+                return_value=distill_core.RememberOutcome(True, "remembered"),
+            ) as remember,
+            mock.patch.object(distill_core.sys, "stderr", stderr),
+        ):
             ok = distill_core.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
                 "personal",
@@ -246,13 +252,15 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
 
     def test_resolution_pass_calls_remember_and_logs_event(self):
         stderr = io.StringIO()
-        with mock.patch.object(distill_core, "_call_llm", return_value=RICH_NOTE), \
-             mock.patch.object(
-                 distill_core,
-                 "_call_remember",
-                 return_value=distill_core.RememberOutcome(True, "duplicate"),
-             ) as remember, \
-             mock.patch.object(distill_core.sys, "stderr", stderr):
+        with (
+            mock.patch.object(distill_core, "_call_llm", return_value=RICH_NOTE),
+            mock.patch.object(
+                distill_core,
+                "_call_remember",
+                return_value=distill_core.RememberOutcome(True, "duplicate"),
+            ) as remember,
+            mock.patch.object(distill_core.sys, "stderr", stderr),
+        ):
             ok = distill_core.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
                 "personal",
@@ -310,10 +318,34 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
                 ]
             ),
             "claims": [
-                {"subject": "olympus", "predicate": "report-count", "value": "0개", "kind": "fact", "confidence": "certain"},
-                {"subject": "olympus", "predicate": "date", "value": "2026-06-18", "kind": "fact", "confidence": "certain"},
-                {"subject": "olympus", "predicate": "target", "value": "hermes-rs", "kind": "fact", "confidence": "certain"},
-                {"subject": "olympus", "predicate": "next-step", "value": "추가 분석", "kind": "next", "confidence": "certain"},
+                {
+                    "subject": "olympus",
+                    "predicate": "report-count",
+                    "value": "0개",
+                    "kind": "fact",
+                    "confidence": "certain",
+                },
+                {
+                    "subject": "olympus",
+                    "predicate": "date",
+                    "value": "2026-06-18",
+                    "kind": "fact",
+                    "confidence": "certain",
+                },
+                {
+                    "subject": "olympus",
+                    "predicate": "target",
+                    "value": "hermes-rs",
+                    "kind": "fact",
+                    "confidence": "certain",
+                },
+                {
+                    "subject": "olympus",
+                    "predicate": "next-step",
+                    "value": "추가 분석",
+                    "kind": "next",
+                    "confidence": "certain",
+                },
             ],
         }
 
@@ -350,10 +382,34 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
                 ]
             ),
             "claims": [
-                {"subject": "evidence", "predicate": "policy", "value": "derive excerpt", "kind": "decision", "confidence": "certain"},
-                {"subject": "verifier", "predicate": "state", "value": "strict", "kind": "fact", "confidence": "certain"},
-                {"subject": "readiness", "predicate": "status", "value": "checked", "kind": "fact", "confidence": "certain"},
-                {"subject": "follow-up", "predicate": "next-step", "value": "none", "kind": "next", "confidence": "certain"},
+                {
+                    "subject": "evidence",
+                    "predicate": "policy",
+                    "value": "derive excerpt",
+                    "kind": "decision",
+                    "confidence": "certain",
+                },
+                {
+                    "subject": "verifier",
+                    "predicate": "state",
+                    "value": "strict",
+                    "kind": "fact",
+                    "confidence": "certain",
+                },
+                {
+                    "subject": "readiness",
+                    "predicate": "status",
+                    "value": "checked",
+                    "kind": "fact",
+                    "confidence": "certain",
+                },
+                {
+                    "subject": "follow-up",
+                    "predicate": "next-step",
+                    "value": "none",
+                    "kind": "next",
+                    "confidence": "certain",
+                },
             ],
         }
 
@@ -369,12 +425,14 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertIn("42", fixed["body"])
 
     def test_remember_failure_logs_failed_status(self):
-        with mock.patch.object(distill_core, "_call_llm", return_value=RICH_NOTE), \
-             mock.patch.object(
-                 distill_core,
-                 "_call_remember",
-                 return_value=distill_core.RememberOutcome(False, "failed"),
-             ):
+        with (
+            mock.patch.object(distill_core, "_call_llm", return_value=RICH_NOTE),
+            mock.patch.object(
+                distill_core,
+                "_call_remember",
+                return_value=distill_core.RememberOutcome(False, "failed"),
+            ),
+        ):
             ok = distill_core.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
                 "personal",
@@ -391,14 +449,16 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
 
     def test_event_log_write_failure_does_not_override_remember_success(self):
         stderr = io.StringIO()
-        with mock.patch.object(distill_core, "_call_llm", return_value=RICH_NOTE), \
-             mock.patch.object(
-                 distill_core,
-                 "_call_remember",
-                 return_value=distill_core.RememberOutcome(True, "remembered"),
-             ), \
-             mock.patch.object(distill_core.event_log, "append_event", side_effect=OSError("denied")), \
-             mock.patch.object(distill_core.sys, "stderr", stderr):
+        with (
+            mock.patch.object(distill_core, "_call_llm", return_value=RICH_NOTE),
+            mock.patch.object(
+                distill_core,
+                "_call_remember",
+                return_value=distill_core.RememberOutcome(True, "remembered"),
+            ),
+            mock.patch.object(distill_core.event_log, "append_event", side_effect=OSError("denied")),
+            mock.patch.object(distill_core.sys, "stderr", stderr),
+        ):
             ok = distill_core.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
                 "personal",
@@ -434,16 +494,21 @@ class BackstopClampTests(unittest.TestCase):
             seen["prompt"] = prompt
             return None  # stop right after the clamp; nothing downstream is under test
 
-        with mock.patch.object(distill_core, "_call_llm", fake_llm), \
-             mock.patch.object(distill_core.sys, "stderr", stderr):
+        with (
+            mock.patch.object(distill_core, "_call_llm", fake_llm),
+            mock.patch.object(distill_core.sys, "stderr", stderr),
+        ):
             distill_core.distill_and_remember(text, "personal", "repo")
         return seen.get("prompt", ""), stderr.getvalue()
 
     def test_backstop_sits_above_every_caller_default(self):
         # The previous backstop equalled the caller defaults, so raising a caller's clamp was
         # silently undone here. A guard at the same value as the knob it guards is a hidden knob.
-        for accessor in (transcript.claude_distill_clamp, transcript.codex_distill_clamp,
-                         transcript.kimi_distill_clamp):
+        for accessor in (
+            transcript.claude_distill_clamp,
+            transcript.codex_distill_clamp,
+            transcript.kimi_distill_clamp,
+        ):
             self.assertGreater(distill_core.BACKSTOP_CLAMP, accessor())
 
     def test_over_backstop_is_cut_and_announced(self):
@@ -463,7 +528,7 @@ class BackstopClampTests(unittest.TestCase):
         # ever goes back to slicing by index this lands mid-line and the assertion fails.
         text = "\n".join("y" * 200 for _ in range(1200))
         prompt, _err = self._run(text)
-        body = prompt[prompt.find("y" * 200):]
+        body = prompt[prompt.find("y" * 200) :]
         self.assertNotIn("y" * 201, body)
 
 
@@ -473,7 +538,10 @@ class RepoIdentityAcrossWorktrees(unittest.TestCase):
     def _repo(self, tmp):
         repo = pathlib.Path(tmp) / "parent-repo"
         repo.mkdir()
-        run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True)
+
+        def run(*a):
+            return subprocess.run(["git", "-C", str(repo), *a], capture_output=True)
+
         run("init", "-q")
         run("config", "user.email", "t@example.invalid")
         run("config", "user.name", "t")
@@ -568,18 +636,14 @@ class RetroactiveAutomatedLabelTests(unittest.TestCase):
 
     def test_the_label_is_read_back_off_the_transcript(self):
         texts = {"a": self.AUTOMATED, "b": self.HUMAN}
-        automated, unreadable = distill_core.classify_automated_sessions(
-            ["a", "b"], texts.get
-        )
+        automated, unreadable = distill_core.classify_automated_sessions(["a", "b"], texts.get)
         self.assertEqual(automated, {"a"})
         self.assertEqual(unreadable, set())
 
     def test_an_unreadable_session_stays_in_the_denominator(self):
         # The failure direction that shrinks a denominator is the one that flatters coverage:
         # every classifier failure would raise the ratio, which is exactly backwards.
-        automated, unreadable = distill_core.classify_automated_sessions(
-            ["gone"], lambda _sid: None
-        )
+        automated, unreadable = distill_core.classify_automated_sessions(["gone"], lambda _sid: None)
         self.assertEqual(automated, set())
         self.assertEqual(unreadable, {"gone"}, "unreadable is reported, not silently dropped")
 
@@ -613,8 +677,14 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
         import uptake_core
 
         hits = [
-            {"source_path": "/vault/wiki/wiki-0007.md", "snippet": "the pool died because deadpool recycled a closed socket " * 3},
-            {"source_path": "/vault/wiki/wiki-0003.md", "snippet": "the older pool note said keep the socket warm " * 3},
+            {
+                "source_path": "/vault/wiki/wiki-0007.md",
+                "snippet": "the pool died because deadpool recycled a closed socket " * 3,
+            },
+            {
+                "source_path": "/vault/wiki/wiki-0003.md",
+                "snippet": "the older pool note said keep the socket warm " * 3,
+            },
         ]
         return [uptake_core.injection_record("s1", "why did the pool die", hits, 3)]
 
@@ -623,8 +693,10 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
             "[user] why did the pool die\n"
             "[assistant] per wiki-0007 instead of wiki-0003. Even so, wiki-0007 is outdated now.\n"
         )
-        with mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}), \
-             mock.patch("drudge_client.DrudgeClient") as client:
+        with (
+            mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}),
+            mock.patch("drudge_client.DrudgeClient") as client,
+        ):
             distill_core.write_consumption_to_graph("s1", self._records(), transcript)
         (sid, when, used, contested), kwargs = client.return_value.consumption.call_args
         self.assertEqual(sid, "s1")
@@ -635,14 +707,18 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
 
     def test_a_spooled_sink_never_writes_to_the_live_graph(self):
         transcript = "[user] why\n[assistant] per wiki-0007.\n"
-        with mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "spool"}), \
-             mock.patch("drudge_client.DrudgeClient") as client:
+        with (
+            mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "spool"}),
+            mock.patch("drudge_client.DrudgeClient") as client,
+        ):
             distill_core.write_consumption_to_graph("s1", self._records(), transcript)
         client.return_value.consumption.assert_not_called()
 
     def test_nothing_consumed_means_no_call_and_a_dead_engine_does_not_raise(self):
-        with mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}), \
-             mock.patch("drudge_client.DrudgeClient") as client:
+        with (
+            mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}),
+            mock.patch("drudge_client.DrudgeClient") as client,
+        ):
             distill_core.write_consumption_to_graph("s1", self._records(), "[assistant] unrelated.\n")
             client.return_value.consumption.assert_not_called()
             client.return_value.consumption.side_effect = OSError("down")
@@ -688,14 +764,17 @@ class SessionEndIsRecorded(unittest.TestCase):
     def test_a_scored_session_says_it_ended_too(self):
         import uptake_core
 
-        hits = [{"source_path": "/vault/wiki/wiki-0007.md",
-                 "snippet": "the pool died because deadpool recycled a closed socket " * 3}]
+        hits = [
+            {
+                "source_path": "/vault/wiki/wiki-0007.md",
+                "snippet": "the pool died because deadpool recycled a closed socket " * 3,
+            }
+        ]
         uptake_core.append_record(uptake_core.injection_record("s-scored", "why", hits, 3))
         distill_core.log_uptake_event("s-scored", "repo", "[assistant] per wiki-0007.\n", "claude-code")
         kinds = [e["event"] for e in self._events()]
         self.assertIn("session_end", kinds)
         self.assertIn("injection_uptake", kinds)
-
 
 
 class ClaimExamplesTeachStatementsTests(unittest.TestCase):
@@ -721,9 +800,7 @@ class ClaimExamplesTeachStatementsTests(unittest.TestCase):
         examples = self._claim_examples()
         self.assertGreaterEqual(len(examples), 4, "the examples went missing from the prompt")
         short = [c["value"] for c in examples if len(c["value"]) < 25]
-        self.assertEqual(
-            short, [], f"example values shorter than the corpus threshold teach tags: {short}"
-        )
+        self.assertEqual(short, [], f"example values shorter than the corpus threshold teach tags: {short}")
 
     def test_no_example_predicate_restates_its_kind(self):
         tautological = {"incident", "status", "decision", "state", "next-step", "action"}
@@ -732,16 +809,13 @@ class ClaimExamplesTeachStatementsTests(unittest.TestCase):
             for c in self._claim_examples()
             if c["predicate"].lower() in tautological
         ]
-        self.assertEqual(
-            offenders, [], f"a predicate that restates the kind says nothing: {offenders}"
-        )
+        self.assertEqual(offenders, [], f"a predicate that restates the kind says nothing: {offenders}")
 
     def test_the_prompt_states_the_rule_and_not_only_the_examples(self):
         """Examples alone drift when someone edits one; the rule survives an edit."""
         prompt = distill_core._build_prompt("transcript", "personal", "omb")
         self.assertIn("READ AS A STATEMENT", prompt)
         self.assertIn("NAMES THE ASPECT", prompt)
-
 
 
 if __name__ == "__main__":

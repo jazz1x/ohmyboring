@@ -7,6 +7,7 @@ Each case here is a note shape the four hand-rolled copies got wrong in the same
 they answered "this note has no frontmatter", and a note with no frontmatter loses its id and
 its claims on the next pass.
 """
+
 import os
 import sys
 

@@ -15,12 +15,13 @@ at the dispatch boundary, because one bad envelope must not kill the socket loop
 is imported only in `main()`/`dispatch()` (lazily), so the handlers are tested without the
 library and without a workspace.
 """
+
 from __future__ import annotations
 
 import os
 import re
 import sys
-from typing import Callable, Optional
+from collections.abc import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import secretary_core  # noqa: E402
@@ -41,7 +42,7 @@ def on_mention(
     *,
     ask: Callable[..., secretary_core.Answer] = secretary_core.answer,
     remember: Callable[..., bool] = secretary_core.remember_handed,
-) -> Optional[str]:
+) -> str | None:
     """Answer a mention in its thread, then ledger the answer under the posted message's ts so a
     later reaction can find the notes it carried. Returns the posted ts (the tests read it);
     `remember` is called even when the answer carried nothing — S2 owns the empty-hands policy."""
@@ -65,8 +66,8 @@ def on_reaction(
     bot_user_id: str,
     *,
     judge: Callable[..., dict] = secretary_core.feedback,
-    owner_id: Optional[str] = None,
-) -> Optional[dict]:
+    owner_id: str | None = None,
+) -> dict | None:
     """Turn a 👍/👎 on the bot's own answer into the engine's verdict. A reaction to anyone
     else's message, an emoji the map does not know, or — when an owner is configured — a
     non-owner's tap are all None: the verdict must come from the person the answer was for."""
@@ -102,8 +103,8 @@ def on_thread_reply(
     bot_user_id: str,
     *,
     correct: Callable[..., dict] = secretary_core.correct,
-    owner_id: Optional[str] = None,
-) -> Optional[dict]:
+    owner_id: str | None = None,
+) -> dict | None:
     """A thread reply on the bot's own answer, starting with "정정:", becomes a new note that
     replaces the answer's notes — all of them, or one, when the reply says "정정 2:". Slack
     sends thread replies as `message` events, and the transport keeps no state about which ts
@@ -134,7 +135,7 @@ def on_thread_reply(
     return result
 
 
-def dispatch(client, req, *, bot_user_id: str, owner_id: Optional[str] = None) -> None:
+def dispatch(client, req, *, bot_user_id: str, owner_id: str | None = None) -> None:
     """Ack every envelope first (Slack resends what is not acked), then act on `events_api`
     only. Never raises — one malformed event must not cost the socket loop its connection."""
     try:
@@ -164,13 +165,16 @@ def main() -> int:
     app_token = os.environ.get("SLACK_APP_TOKEN")
     bot_token = os.environ.get("SLACK_BOT_TOKEN")
     if not app_token or not bot_token:
-        print("[secretary] SLACK_APP_TOKEN and SLACK_BOT_TOKEN must be set (see .env.example)", file=sys.stderr)
+        print(
+            "[secretary] SLACK_APP_TOKEN and SLACK_BOT_TOKEN must be set (see .env.example)", file=sys.stderr
+        )
         return 2
     owner_id = os.environ.get("SECRETARY_OWNER_ID") or None
 
+    from threading import Event
+
     from slack_sdk.socket_mode import SocketModeClient
     from slack_sdk.web import WebClient
-    from threading import Event
 
     web_client = WebClient(token=bot_token)
     try:

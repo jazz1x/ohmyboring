@@ -5,6 +5,7 @@ Reads the session-start payload, guesses the project from cwd/git remote, then
 pulls either /status (when a project is known) or /brief (fallback) and prints
 the result as additionalContext.
 """
+
 import json
 import os
 import sys
@@ -71,9 +72,7 @@ def main() -> None:
     if not ctx.strip():
         return
 
-    print(json.dumps({
-        "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}
-    }))
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}}))
 
 
 if __name__ == "__main__":

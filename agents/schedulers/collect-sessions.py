@@ -13,11 +13,11 @@ captured. This collector scans the top-level session .jsonl files under ~/.claud
   ingests each note live, and the engine's own 4h scheduler re-scans the vault regardless.
 - cwd = the real working dir from the transcript → distill-session determines origin via boring.json.
 """
+
 import argparse
 import glob
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -82,8 +82,9 @@ def _warm_llm():
     body = json.dumps({"model": model, "prompt": "ok", "stream": False, "keep_alive": 1800}).encode()
     try:
         urllib.request.urlopen(
-            urllib.request.Request(f"{base}/api/generate", data=body,
-                                   headers={"Content-Type": "application/json"}),
+            urllib.request.Request(
+                f"{base}/api/generate", data=body, headers={"Content-Type": "application/json"}
+            ),
             timeout=120,
         ).read()
     except Exception:
@@ -117,7 +118,10 @@ def main():
     # --now is an on-demand single-shot on the current (newest) session, not a batch drain.
     batch = todo[:1] if args.now else todo[:LIMIT]
     label = "distill-now" if args.now else "collect"
-    print(f"[{label}] pending={len(todo)} this_batch={len(batch)} (LIMIT={1 if args.now else LIMIT})", flush=True)
+    print(
+        f"[{label}] pending={len(todo)} this_batch={len(batch)} (LIMIT={1 if args.now else LIMIT})",
+        flush=True,
+    )
     if not batch:
         print(f"[{label}] nothing to do", flush=True)
         event_log.try_append_event(
@@ -164,7 +168,9 @@ def main():
 
     env = dict(os.environ)
     if args.now:
-        env["BORING_DISTILL_NO_MARK"] = "1"  # leave the session un-marked → re-distillable + SessionEnd still fires
+        env["BORING_DISTILL_NO_MARK"] = (
+            "1"  # leave the session un-marked → re-distillable + SessionEnd still fires
+        )
     done = 0
     failed = 0
     timed_out = 0
@@ -178,9 +184,7 @@ def main():
             {"transcript_path": tp, "cwd": cwd, "session_id": sid, "hook_event_name": "Backfill"}
         )
         try:
-            r = subprocess.run(
-                [sys.executable, HOOK], input=payload, text=True, env=env, timeout=180
-            )
+            r = subprocess.run([sys.executable, HOOK], input=payload, text=True, env=env, timeout=180)
             done += 1 if r.returncode == 0 else 0
             failed += 1 if r.returncode != 0 else 0
             print(f"[{label}] {'ok' if r.returncode == 0 else 'fail'}  {proj}", flush=True)

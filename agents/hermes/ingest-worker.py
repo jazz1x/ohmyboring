@@ -24,13 +24,13 @@ This script shares the SessionEnd hook's marker directory (~/.cache/boring-disti
 and the engine-direct path do not duplicate sessions. The directory is bind-mounted into the
 hermes-agent container at /host/.cache/boring-distill.
 """
+
 import glob
 import json
 import os
 import re
 import sys
 import time
-import urllib.request
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, _HERE)
@@ -64,21 +64,25 @@ def _source_dirs():
     mapped = []
     for d in dirs:
         if d.startswith(home + "/"):
-            mapped.append("/host" + d[len(home):])
+            mapped.append("/host" + d[len(home) :])
         elif d == home:
             mapped.append("/host")
         else:
             mapped.append(d)
     return mapped
+
+
 # Shared marker directory: host ~/.cache/boring-distill is mounted at /host/.cache/boring-distill
 # inside the hermes-agent container so host SessionEnd hook markers are visible here too.
-DISTILL_MARK_DIR = "/host/.cache/boring-distill" if _IN_CONTAINER else os.path.expanduser(
-    "~/.cache/boring-distill"
+DISTILL_MARK_DIR = (
+    "/host/.cache/boring-distill" if _IN_CONTAINER else os.path.expanduser("~/.cache/boring-distill")
 )
 if _IN_CONTAINER:
     markers.set_mark_dir(DISTILL_MARK_DIR)
 MARK_DIR = DISTILL_MARK_DIR
-BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias; container-aware default
+BORING_URL = (
+    omb_env.drudge_url()
+)  # BORING_URL canonical, BORING_URL deprecated alias; container-aware default
 # BORING_HOME is only meaningful on the host; inside the container we rely on /host/boring.json.
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 TRANSCRIPT_FORMAT = boring_config.agent_config("claude-code").get("format") or "claude-json"
@@ -95,6 +99,7 @@ RETRY_TTL = float(os.environ.get("INGEST_RETRY_TTL") or str(PENDING_TTL))
 # wiki-first mode has no chunk counter, so we retry a bounded number of confirmation attempts before
 # surfacing a visible retry marker. We do not mark unconfirmed sessions done.
 MAX_WIKI_ATTEMPTS = int(os.environ.get("INGEST_WIKI_ATTEMPTS") or "3")
+
 
 def _repo_slug(cwd):
     """Category axis: canonical repo slug from git remote or cwd basename."""
@@ -120,9 +125,7 @@ def _frontmatter_session_id(path):
             text = f.read()
     except OSError:
         return None
-    m = re.search(
-        r'^omb_session_id:\s*"?([^"\n]+)"?\s*$', frontmatter_text(text), re.MULTILINE
-    )
+    m = re.search(r'^omb_session_id:\s*"?([^"\n]+)"?\s*$', frontmatter_text(text), re.MULTILINE)
     return m.group(1).strip() if m else None
 
 
@@ -219,7 +222,9 @@ def _reconcile():
                 os.remove(pend)
             except OSError:
                 pass
-            _log_worker_event("ingest_reconcile", "failed", session_id=sid, reason="pending_marker_unreadable")
+            _log_worker_event(
+                "ingest_reconcile", "failed", session_id=sid, reason="pending_marker_unreadable"
+            )
             continue
         sid, before, attempts = parsed
 
@@ -238,7 +243,9 @@ def _reconcile():
                 _log_worker_event("ingest_reconcile", "ok", session_id=sid, witness="chunk_count")
             elif not markers.is_pending(sid, ttl=PENDING_TTL):
                 markers.remove_pending(sid)  # stale failure → retry next time
-                _log_worker_event("ingest_reconcile", "retry", session_id=sid, reason="chunk_count_not_increased")
+                _log_worker_event(
+                    "ingest_reconcile", "retry", session_id=sid, reason="chunk_count_not_increased"
+                )
             continue
 
         # wiki-first mode: no secondary signal → bounded retry, then give up.

@@ -5,6 +5,7 @@ Install (persistence) — ~/.claude/settings.json:
   {"type":"command","command":"python3 ~/oh-my-boring/hooks/distill-session.py",
    "timeout":130,"async":true}
 """
+
 import json
 import os
 import sys
@@ -14,18 +15,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 import boring_config
 import transcript
 from distill_core import (  # noqa: F401
-    _extract_json,
-    _mark,
-    _strip_trailing_metadata,
     _build_prompt,
     _call_llm,
     _call_remember,
     _distill_resolution,
+    _extract_json,
+    _mark,
+    _strip_trailing_metadata,
     _throttled,
     distill_and_remember,
     git_remote_url,
-    log_skip_event,
     is_automated_run,
+    log_skip_event,
     log_uptake_event,
     repo_slug,
 )
@@ -64,7 +65,10 @@ def main() -> int:
 
     # Two log lines in the same second are either two sessions or one payload fired
     # twice, and only the id tells those apart.
-    print(f"[omb-distill] session={data.get('session_id') or '?'} event={data.get('hook_event_name') or '?'}", file=sys.stderr)
+    print(
+        f"[omb-distill] session={data.get('session_id') or '?'} event={data.get('hook_event_name') or '?'}",
+        file=sys.stderr,
+    )
 
     transcript_path = data.get("transcript_path") or ""
     if not transcript_path or not os.path.exists(transcript_path):

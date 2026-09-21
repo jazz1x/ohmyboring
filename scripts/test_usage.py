@@ -7,6 +7,7 @@ A meter that is merely wrong is worse than no meter, because a number gets quote
 three miscounts that produce a plausible total: charging a retry twice, pooling fan-out cost into
 the conversation's own, and reporting a stale cache as current.
 """
+
 import importlib.util
 import json
 import os
@@ -34,9 +35,7 @@ def _row(request_id, output, sidechain=False, day="2026-09-02"):
 
 def _write(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8"
-    )
+    path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
 
 
 class Counting(unittest.TestCase):

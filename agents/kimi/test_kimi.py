@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Network-free regression tests for the Kimi Code CLI adapters."""
+
 import importlib.util
 import io
 import json
@@ -14,9 +15,17 @@ SHARED_DIR = HERE.parent / "shared"
 sys.path.insert(0, str(SHARED_DIR))
 
 # Neutralize ambient env so module-load + assertions are deterministic.
-for _var in ("BORING_CONFIG", "BORING_HOME", "BORING_URL", "BORING_EVENT_SINK",
-             "BORING_EVENT_SPOOL", "BORING_EVENT_DB_MIRROR", "BORING_LLM_BASE_URL",
-             "BORING_LLM_MODEL", "KIMI_CODE_HOME"):
+for _var in (
+    "BORING_CONFIG",
+    "BORING_HOME",
+    "BORING_URL",
+    "BORING_EVENT_SINK",
+    "BORING_EVENT_SPOOL",
+    "BORING_EVENT_DB_MIRROR",
+    "BORING_LLM_BASE_URL",
+    "BORING_LLM_MODEL",
+    "KIMI_CODE_HOME",
+):
     os.environ.pop(_var, None)
 
 # The pop above isolates these tests from the host's env, and in doing so it removed the one value
@@ -26,9 +35,7 @@ for _var in ("BORING_CONFIG", "BORING_HOME", "BORING_URL", "BORING_EVENT_SINK",
 # 2026-09-02, growing daily. Isolation and a closed write door are both required, so the pop is
 # followed by an explicit spool rather than by nothing.
 os.environ["BORING_EVENT_SINK"] = "spool"
-os.environ.setdefault(
-    "BORING_EVENT_LOG", os.path.join(tempfile.gettempdir(), "omb-test-events.ndjson")
-)
+os.environ.setdefault("BORING_EVENT_LOG", os.path.join(tempfile.gettempdir(), "omb-test-events.ndjson"))
 
 
 def _load(name, filename):
@@ -56,8 +63,7 @@ def test_find_session_dir_uses_index():
         session_dir.mkdir(parents=True)
         index = Path(home) / "session_index.jsonl"
         index.write_text(
-            json.dumps({"sessionId": "session_abc", "sessionDir": str(session_dir), "workDir": "/x"})
-            + "\n",
+            json.dumps({"sessionId": "session_abc", "sessionDir": str(session_dir), "workDir": "/x"}) + "\n",
             encoding="utf-8",
         )
         # Load a fresh module copy so the new KIMI_HOME constant is picked up.
@@ -106,12 +112,22 @@ def test_recall_skips_short_and_injection():
 def test_recall_formats_context():
     captured = io.StringIO()
     hits = [{"source_path": "vault/wiki/wiki-0007.md", "snippet": "fixed   the\ncache"}]
-    with mock.patch.object(recall.sys, "stdin", io.StringIO(json.dumps({
-        "prompt": "how did I fix the docker cache issue",
-        "origin": {"kind": "user"},
-    }))), \
-         mock.patch.object(recall_core.DrudgeClient, "search", return_value=hits), \
-         mock.patch.object(recall.sys, "stdout", captured):
+    with (
+        mock.patch.object(
+            recall.sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "prompt": "how did I fix the docker cache issue",
+                        "origin": {"kind": "user"},
+                    }
+                )
+            ),
+        ),
+        mock.patch.object(recall_core.DrudgeClient, "search", return_value=hits),
+        mock.patch.object(recall.sys, "stdout", captured),
+    ):
         recall.main()
     payload = json.loads(captured.getvalue())
     ctx = payload["hookSpecificOutput"]["additionalContext"]
@@ -124,13 +140,23 @@ def test_recall_failed_search_logs_to_stderr():
     try:
         captured = io.StringIO()
         stderr = io.StringIO()
-        with mock.patch.object(recall.sys, "stdin", io.StringIO(json.dumps({
-            "prompt": "how did I fix the docker cache issue",
-            "origin": {"kind": "user"},
-        }))), \
-             mock.patch.object(recall_core.DrudgeClient, "search", side_effect=OSError("down")), \
-             mock.patch.object(recall.sys, "stdout", captured), \
-             mock.patch.object(recall.sys, "stderr", stderr):
+        with (
+            mock.patch.object(
+                recall.sys,
+                "stdin",
+                io.StringIO(
+                    json.dumps(
+                        {
+                            "prompt": "how did I fix the docker cache issue",
+                            "origin": {"kind": "user"},
+                        }
+                    )
+                ),
+            ),
+            mock.patch.object(recall_core.DrudgeClient, "search", side_effect=OSError("down")),
+            mock.patch.object(recall.sys, "stdout", captured),
+            mock.patch.object(recall.sys, "stderr", stderr),
+        ):
             recall.main()
         assert captured.getvalue() == ""
         assert "[omb-recall] search failed" in stderr.getvalue()
@@ -141,10 +167,12 @@ def test_recall_failed_search_logs_to_stderr():
 def test_distill_invalid_stdin_logs_error():
     captured = io.StringIO()
     stderr = io.StringIO()
-    with mock.patch.object(distill.sys, "stdin", io.StringIO("not json")), \
-         mock.patch.object(distill.sys, "stdout", captured), \
-         mock.patch.object(distill.sys, "stderr", stderr), \
-         mock.patch.object(distill, "_throttled", return_value=False):
+    with (
+        mock.patch.object(distill.sys, "stdin", io.StringIO("not json")),
+        mock.patch.object(distill.sys, "stdout", captured),
+        mock.patch.object(distill.sys, "stderr", stderr),
+        mock.patch.object(distill, "_throttled", return_value=False),
+    ):
         rc = distill.main()
     assert captured.getvalue() == ""
     assert rc == 2
@@ -158,16 +186,18 @@ def test_distill_short_transcript_logs_skip_and_marks_done():
         captured = io.StringIO()
         stderr = io.StringIO()
         payload = {"session_id": "session_abc", "cwd": "/x", "hook_event_name": "SessionEnd"}
-        with mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))), \
-             mock.patch.object(distill.sys, "stdout", captured), \
-             mock.patch.object(distill.sys, "stderr", stderr), \
-             mock.patch.object(distill, "_find_session_dir", return_value=session_dir), \
-             mock.patch.object(distill, "extract_session", return_value="too short"), \
-             mock.patch.object(distill, "git_remote_url", return_value=""), \
-             mock.patch.object(distill, "repo_slug", return_value="repo"), \
-             mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)), \
-             mock.patch.object(distill, "_mark") as mark, \
-             mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}):
+        with (
+            mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
+            mock.patch.object(distill.sys, "stdout", captured),
+            mock.patch.object(distill.sys, "stderr", stderr),
+            mock.patch.object(distill, "_find_session_dir", return_value=session_dir),
+            mock.patch.object(distill, "extract_session", return_value="too short"),
+            mock.patch.object(distill, "git_remote_url", return_value=""),
+            mock.patch.object(distill, "repo_slug", return_value="repo"),
+            mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
+            mock.patch.object(distill, "_mark") as mark,
+            mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+        ):
             rc = distill.main()
 
         assert captured.getvalue() == ""
@@ -185,16 +215,18 @@ def test_distill_remember_failure_returns_nonzero_and_marks_retry():
         captured = io.StringIO()
         stderr = io.StringIO()
         payload = {"session_id": "session_abc", "cwd": "/x", "hook_event_name": "SessionEnd"}
-        with mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))), \
-             mock.patch.object(distill.sys, "stdout", captured), \
-             mock.patch.object(distill.sys, "stderr", stderr), \
-             mock.patch.object(distill, "_find_session_dir", return_value=session_dir), \
-             mock.patch.object(distill, "extract_session", return_value="x" * 600), \
-             mock.patch.object(distill, "git_remote_url", return_value=""), \
-             mock.patch.object(distill, "repo_slug", return_value="repo"), \
-             mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)), \
-             mock.patch.object(distill, "distill_and_remember", return_value=False), \
-             mock.patch.object(distill, "_mark") as mark:
+        with (
+            mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
+            mock.patch.object(distill.sys, "stdout", captured),
+            mock.patch.object(distill.sys, "stderr", stderr),
+            mock.patch.object(distill, "_find_session_dir", return_value=session_dir),
+            mock.patch.object(distill, "extract_session", return_value="x" * 600),
+            mock.patch.object(distill, "git_remote_url", return_value=""),
+            mock.patch.object(distill, "repo_slug", return_value="repo"),
+            mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
+            mock.patch.object(distill, "distill_and_remember", return_value=False),
+            mock.patch.object(distill, "_mark") as mark,
+        ):
             rc = distill.main()
 
     assert captured.getvalue() == ""
@@ -205,8 +237,10 @@ def test_distill_remember_failure_returns_nonzero_and_marks_retry():
 
 def test_distill_run_returns_nonzero_on_crash():
     stderr = io.StringIO()
-    with mock.patch.object(distill, "main", side_effect=RuntimeError("boom")), \
-         mock.patch.object(distill.sys, "stderr", stderr):
+    with (
+        mock.patch.object(distill, "main", side_effect=RuntimeError("boom")),
+        mock.patch.object(distill.sys, "stderr", stderr),
+    ):
         rc = distill.run()
     assert rc == 1
     assert "[omb-distill] crashed: boom" in stderr.getvalue()

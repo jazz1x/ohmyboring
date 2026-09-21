@@ -49,6 +49,7 @@ def ledger_path():
         "~/.cache/boring-distill/injections.jsonl"
     )
 
+
 #: Words per phrase when fingerprinting a snippet. Long enough that a match is not a coincidence
 #: of common words, short enough to survive the agent paraphrasing around it.
 PHRASE_WORDS = 8
@@ -356,9 +357,7 @@ def session_uptake(records, transcript_text):
             used_prompts += 1
         controls = record.get("controls") or []
         total_controls += len(controls)
-        used_control_here = sum(
-            1 for c in controls if hit_was_used(c, assistant_blob, prompt_words)
-        )
+        used_control_here = sum(1 for c in controls if hit_was_used(c, assistant_blob, prompt_words))
         used_controls += used_control_here
         if used_control_here:
             used_control_prompts += 1
@@ -375,8 +374,20 @@ def session_uptake(records, transcript_text):
 
 #: What an assistant says after a note's name when it follows the fence's second sentence.
 CONTESTED_MARKERS = (
-    "contradict", "outdated", "stale", "no longer", "wrong", "incorrect", "superseded",
-    "어긋", "낡", "틀렸", "틀린", "맞지 않", "지금은 다르", "더 이상",
+    "contradict",
+    "outdated",
+    "stale",
+    "no longer",
+    "wrong",
+    "incorrect",
+    "superseded",
+    "어긋",
+    "낡",
+    "틀렸",
+    "틀린",
+    "맞지 않",
+    "지금은 다르",
+    "더 이상",
 )
 
 _SENTENCE = re.compile(r"[.!?\n]+")
@@ -384,8 +395,14 @@ _SENTENCE = re.compile(r"[.!?\n]+")
 #: "newer instead of older" in English; "older 대신 newer" in Korean. The groups carry the order.
 _NOTE = r"[\w-]*\d[\w-]*(?:\.md)?"
 _SUPERSEDES_FORMS = (
-    re.compile(rf"\b(?P<newer>{_NOTE})\b[^.!?\n]{{0,40}}?\b(?:instead of|rather than|replaces|supersedes)\b[^.!?\n]{{0,12}}?\b(?P<older>{_NOTE})\b", re.IGNORECASE),
-    re.compile(rf"\b(?P<older>{_NOTE})\b[^.!?\n]{{0,12}}?(?:대신|말고)[^.!?\n]{{0,12}}?\b(?P<newer>{_NOTE})\b", re.IGNORECASE),
+    re.compile(
+        rf"\b(?P<newer>{_NOTE})\b[^.!?\n]{{0,40}}?\b(?:instead of|rather than|replaces|supersedes)\b[^.!?\n]{{0,12}}?\b(?P<older>{_NOTE})\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?P<older>{_NOTE})\b[^.!?\n]{{0,12}}?(?:대신|말고)[^.!?\n]{{0,12}}?\b(?P<newer>{_NOTE})\b",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -741,9 +758,7 @@ def _probe_main(rest):
     if not by_session:
         print("uptake_sensitivity=unknown reason=empty_ledger")
         return 0
-    newest = max(
-        by_session.values(), key=lambda rows: max((r.get("ts") or 0) for r in rows)
-    )
+    newest = max(by_session.values(), key=lambda rows: max((r.get("ts") or 0) for r in rows))
     ok, reason = sensitivity_probe(newest)
     state = {True: "ok", False: "blind", None: "unknown"}[ok]
     print(f"uptake_sensitivity={state} rows={len(newest)} reason={reason}")
@@ -843,9 +858,7 @@ def detector_is_sensitive(path=None):
         return None
     if not by_session:
         return None
-    newest = max(
-        by_session.values(), key=lambda rows: max((r.get("ts") or 0) for r in rows)
-    )
+    newest = max(by_session.values(), key=lambda rows: max((r.get("ts") or 0) for r in rows))
     ok, _reason = sensitivity_probe(newest)
     return ok
 
@@ -883,9 +896,7 @@ def _self_check_main(rest):
         except (OSError, ValueError):
             return ""
 
-    (used, total), (t_used, t_total) = cross_session_rate(
-        transcript_for, rest[0] if rest else None
-    )
+    (used, total), (t_used, t_total) = cross_session_rate(transcript_for, rest[0] if rest else None)
     if not total:
         print("uptake_self_check=unknown cross=0/0 reason=too_few_sessions_or_transcripts")
         return 0
@@ -893,10 +904,7 @@ def _self_check_main(rest):
     treatment_rate = (t_used / t_total) if t_total else None
     ok = verdict_core.self_check_verdict(rate, treatment_rate)
     state = {True: "ok", False: "contaminated", None: "unknown"}[ok]
-    print(
-        f"uptake_self_check={state} cross={used}/{total} rate={rate:.4f}"
-        f" treatment={t_used}/{t_total}"
-    )
+    print(f"uptake_self_check={state} cross={used}/{total} rate={rate:.4f} treatment={t_used}/{t_total}")
     return 1 if ok is False else 0
 
 

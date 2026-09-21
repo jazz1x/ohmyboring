@@ -1,0 +1,15 @@
+line-length = 110
+target-version = "py311"
+include = ["agents/**/*.py", "hooks/**/*.py", "scripts/**/*.py", "data/eval/**/*.py"]
+
+[lint]
+select = ["E", "F", "I", "B", "UP"]
+# E501: format handles code; long strings and Korean prose lines stay.
+# E402: hooks and scripts put agents/shared on sys.path before importing it.
+# B905: zip(strict=) is a behaviour decision per call site, not hygiene.
+# E101: after `ruff format` the only hits are tabs inside string literals (a launchd plist
+#       template, a verbose regex) — data, not indentation.
+ignore = ["E501", "E402", "B905", "E101"]
+
+[format]
+quote-style = "double"

@@ -14,6 +14,7 @@ whole ingest), so it always returns a valid same-dim vector.
 
 Usage (CI): python3 data/eval/stub_embedder.py  # serves 0.0.0.0:11434, OpenAI /v1 surface
 """
+
 import hashlib
 import json
 import os
@@ -68,7 +69,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         # /v1/models — health/probe surface for the openai-compatible provider check.
         if self.path.rstrip("/").endswith("/models"):
-            self._json(200, {"object": "list", "data": [{"id": REC.get("model", "bge-m3"), "object": "model"}]})
+            self._json(
+                200, {"object": "list", "data": [{"id": REC.get("model", "bge-m3"), "object": "model"}]}
+            )
         else:
             self._json(200, {"status": "ok"})
 
@@ -85,8 +88,7 @@ class Handler(BaseHTTPRequestHandler):
         inp = req.get("input")
         items = inp if isinstance(inp, list) else [inp if inp is not None else ""]
         data = [
-            {"object": "embedding", "index": i, "embedding": _embed_one(str(t))}
-            for i, t in enumerate(items)
+            {"object": "embedding", "index": i, "embedding": _embed_one(str(t))} for i, t in enumerate(items)
         ]
         self._json(200, {"object": "list", "data": data, "model": req.get("model", "stub")})
 

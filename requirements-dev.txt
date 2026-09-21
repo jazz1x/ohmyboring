@@ -1,0 +1,3 @@
+# Tools the gates run, not modules the code imports — scripts/test_python_deps.py reads
+# requirements.txt only, so a linter listed here does not trip the "declared but unused" check.
+ruff==0.16.8

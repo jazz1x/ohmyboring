@@ -54,6 +54,10 @@ cargo test --quiet
 cd "$ROOT"
 echo "4) python py-compile (agents + hooks + scripts + data/eval)…"
 find agents hooks scripts data/eval -name '*.py' -type f -print0 | xargs -0 -n1 python3 -m py_compile
+echo "4b) python lint + format (ruff, rules in ruff.toml)…"
+command -v ruff >/dev/null 2>&1 || { echo "ruff not installed — pip install -r requirements-dev.txt (or: uvx ruff)"; exit 1; }
+ruff check .
+ruff format --check .
 echo "5) python unit tests…"
 python3 agents/shared/test_boring_config.py
 python3 agents/shared/test_agent_wiring.py

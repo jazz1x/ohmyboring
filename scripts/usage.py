@@ -13,6 +13,7 @@ reappearing — is the hour's proxy and the PRD says so; this is the input for a
 Read-only, local, no network. Writes exactly one thing: an incremental index under the cache dir,
 so a rescan costs seconds instead of the ~19s a cold pass over 3 GB takes.
 """
+
 import argparse
 import collections
 import json
@@ -61,9 +62,7 @@ def transcript_files():
     files share zero `requestId`s.
     """
     out = []
-    dirs = boring_config.source_dirs(adapter="session-end") or [
-        os.path.expanduser("~/.claude/projects")
-    ]
+    dirs = boring_config.source_dirs(adapter="session-end") or [os.path.expanduser("~/.claude/projects")]
     for d in dirs:
         base = Path(d)
         if not base.is_dir():

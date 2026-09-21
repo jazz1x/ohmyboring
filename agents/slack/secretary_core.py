@@ -11,13 +11,15 @@ face is the part that broke — a socket reconnect loop the engine never saw. Ke
 free of Slack means it is tested without Slack, and the face can be swapped without touching
 what it says.
 """
+
 from __future__ import annotations
 
 import os
 import re
 import sys
-from datetime import datetime, timezone
-from typing import Callable, NamedTuple, Optional
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import NamedTuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import recall_core  # noqa: E402
@@ -91,7 +93,7 @@ def render(hits: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def answer(question: str, search: Optional[Callable[..., list[dict]]] = None) -> Answer:
+def answer(question: str, search: Callable[..., list[dict]] | None = None) -> Answer:
     """One question in, one message out. `search` is injectable so the brain is testable
     without an engine; the default is the live client. `hits` is what the message carried,
     so the transport can ledger the answer and later attach a verdict — or a correction — to it."""
@@ -115,7 +117,7 @@ def answer(question: str, search: Optional[Callable[..., list[dict]]] = None) ->
 _CORRECTION_RE = re.compile(r"^\s*정정(?:\s+(\d+))?\s*[:：]\s*(.*?)\s*$")
 
 
-def parse_correction(text: str) -> Optional[tuple[Optional[int], str]]:
+def parse_correction(text: str) -> tuple[int | None, str] | None:
     """`정정: X` → `(None, "X")` — the whole answer is wrong and X replaces all of it.
     `정정 2: X` → `(2, "X")` — only the numbered note is wrong. Anything else → None,
     an empty correction body included: not every sentence about "정정" is a correction."""
@@ -145,7 +147,7 @@ def correct(
     question: str,
     handed_paths: list[str],
     text: str,
-    remember: Optional[Callable[..., dict]] = None,
+    remember: Callable[..., dict] | None = None,
 ) -> dict:
     """A thread reply of "정정: …" turned into a new note that replaces the answer's notes. With a
     number ("정정 2:") only that one note is superseded — 1-based, in the order the answer listed
@@ -173,7 +175,7 @@ def remember_handed(
     answer_key: str,
     question: str,
     hits: list[dict],
-    handover: Optional[Callable[..., dict]] = None,
+    handover: Callable[..., dict] | None = None,
 ) -> bool:
     """Hand the engine the list of note paths one answer carried, under the answer's own
     session name, so a later 👍/👎 only has to send the verdict. `question` stays in the
@@ -185,7 +187,7 @@ def remember_handed(
         handover = DrudgeClient(timeout=TIMEOUT, retries=0).handover
     paths = [hit["source_path"] for hit in hits]
     try:
-        handover(answer_key, datetime.now(timezone.utc).isoformat(), paths)
+        handover(answer_key, datetime.now(UTC).isoformat(), paths)
     except Exception as e:  # noqa: BLE001 — an unrecorded answer must not cost the transport a crash
         print(f"[secretary] handover failed: {e}", file=sys.stderr)
         return False
@@ -195,8 +197,8 @@ def remember_handed(
 def feedback(
     answer_key: str,
     verdict: str,
-    consumption: Optional[Callable[..., dict]] = None,
-    observed_at: Optional[str] = None,
+    consumption: Callable[..., dict] | None = None,
+    observed_at: str | None = None,
 ) -> dict:
     """A 👍/👎 on an answer, turned into the engine's verdict. The engine already recorded
     what the answer carried when it was handed over, so only the verdict travels now; a
@@ -207,7 +209,7 @@ def feedback(
     if consumption is None:
         consumption = DrudgeClient(timeout=TIMEOUT, retries=0).consumption
     if observed_at is None:
-        observed_at = datetime.now(timezone.utc).isoformat()
+        observed_at = datetime.now(UTC).isoformat()
     try:
         resp = consumption(answer_key, observed_at, verdict=verdict)
     except Exception as e:  # noqa: BLE001 — a reaction must not cost the transport a crash

@@ -47,6 +47,8 @@ def audit_backlog(stats) -> int:
     so the surface can fall silent rather than nag forever.
     """
     return max(0, MIN_COMPARED - int((stats or {}).get("compared") or 0))
+
+
 #: An LLM judge whose agreement with the person falls below this is not usable as an instrument;
 #: the reporter says so and the human-only numbers are the ones that count.
 AGREEMENT_FLOOR = 0.80
@@ -76,11 +78,7 @@ def _hits(entry):
 
 def labeled_keys(labels, judge):
     """{(query_log_id, hit_index)} already carrying this judge's verdict."""
-    return {
-        (row.get("query_log_id"), row.get("hit_index"))
-        for row in labels
-        if row.get("judge") == judge
-    }
+    return {(row.get("query_log_id"), row.get("hit_index")) for row in labels if row.get("judge") == judge}
 
 
 def select_samples(
@@ -250,9 +248,7 @@ def format_report(stats):
                 f"relevant {relevant} / irrelevant {irrelevant} / unsure {unsure})"
             )
         else:
-            lines.append(
-                f"{judge}: precision {rate:.3f} (n={decided}, unsure {unsure})"
-            )
+            lines.append(f"{judge}: precision {rate:.3f} (n={decided}, unsure {unsure})")
     rate = agreement(agreed, compared)
     if rate is None:
         lines.append(f"llm↔human 일치율 판단 보류 (compared {compared} < {MIN_COMPARED})")

@@ -11,6 +11,7 @@ real door runs under uvicorn in a thread against it. Covers:
   (d) unregistered paths (GET /nope, POST /search) get FastAPI's 404 and never
       reach the stub — the door is not a catch-all proxy (AC6)
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -27,7 +28,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import door  # noqa: E402
-
 import uvicorn  # noqa: E402
 
 # Deliberately non-canonical bytes: odd spacing, a non-ASCII value. Any
@@ -142,14 +142,10 @@ class DoorTest(unittest.TestCase):
         status, body, _ = _req(self.door_port, "GET", "/health")
         self.assertEqual(status, 200)
         self.assertEqual(body, HEALTH_BODY)
-        self.assertEqual(
-            hashlib.sha256(body).hexdigest(), hashlib.sha256(HEALTH_BODY).hexdigest()
-        )
+        self.assertEqual(hashlib.sha256(body).hexdigest(), hashlib.sha256(HEALTH_BODY).hexdigest())
 
     def test_mcp_post_passthrough(self):
-        payload = json.dumps(
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
-        ).encode()
+        payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode()
         status, body, _ = _req(
             self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
         )
@@ -179,8 +175,9 @@ class DoorTest(unittest.TestCase):
         hits_before = StubHandler.hits
         status, _, _ = _req(self.door_port, "GET", "/nope")
         self.assertEqual(status, 404)
-        status, _, _ = _req(self.door_port, "POST", "/search", body=b"{}",
-                            headers={"content-type": "application/json"})
+        status, _, _ = _req(
+            self.door_port, "POST", "/search", body=b"{}", headers={"content-type": "application/json"}
+        )
         self.assertEqual(status, 404)
         self.assertEqual(StubHandler.hits, hits_before, "unregistered paths must not reach the stub")
 

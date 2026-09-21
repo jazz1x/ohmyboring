@@ -18,19 +18,19 @@ throttles to once per session, so a combined rate answers neither product's ques
 
 import argparse
 import json
-from datetime import datetime, timezone
-from math import ceil
 import os
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
+from math import ceil
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agents", "shared"))
 
-import verdict_core  # noqa: E402
-import uptake_core  # noqa: E402
 import distill_core  # noqa: E402
+import uptake_core  # noqa: E402
+import verdict_core  # noqa: E402
 from verdict_core import collect, coverage, partition_at_repair, unreported  # noqa: E402
 
 DEFAULT_URL = os.environ.get("BORING_URL") or "http://127.0.0.1:7700"
@@ -134,9 +134,7 @@ def session_counts(rows, since, until):
         rows,
         since,
         until,
-        classify=lambda ids: distill_core.classify_automated_sessions(
-            ids, distill_core.transcript_reader()
-        ),
+        classify=lambda ids: distill_core.classify_automated_sessions(ids, distill_core.transcript_reader()),
     )
 
 
@@ -174,9 +172,7 @@ def _midpoint(per_agent, skipped_old, today=None):
         return MIDPOINT_NOT_DUE
     if not per_agent:
         reason = (
-            f"per-prompt 대조 카운터보다 오래된 이벤트 {skipped_old}건뿐"
-            if skipped_old
-            else "이벤트 0건"
+            f"per-prompt 대조 카운터보다 오래된 이벤트 {skipped_old}건뿐" if skipped_old else "이벤트 0건"
         )
         print(f"[midpoint] 읽을 표본이 없다 — {reason}. 표본 부족이 아니라 관측 불가", file=sys.stderr)
         return MIDPOINT_UNREADABLE
@@ -263,9 +259,7 @@ def main(argv=None):
     pre_rows, post_rows = partition_at_repair(rows)
     # The ceiling matters from 09-15: without it this counts events the pre-registered window
     # excludes while `peek` filters them out, and the two surfaces stop describing the same sample.
-    pre_agent, _ = collect(
-        pre_rows, since=args.since, agent=args.agent, until=verdict_core.WINDOW_UNTIL
-    )
+    pre_agent, _ = collect(pre_rows, since=args.since, agent=args.agent, until=verdict_core.WINDOW_UNTIL)
     per_agent, skipped_old = collect(
         post_rows, since=args.since, agent=args.agent, until=verdict_core.WINDOW_UNTIL
     )
@@ -341,9 +335,7 @@ def main(argv=None):
         # instrumentation defect that clause warns about. With no session-end signal, zero uptake
         # rows is a window nobody has finished a session in — indistinguishable from a broken
         # hook, and saying which would be a claim the data does not carry.
-        ended, _scored, _automated, source = session_counts(
-            rows, args.since, verdict_core.WINDOW_UNTIL
-        )
+        ended, _scored, _automated, source = session_counts(rows, args.since, verdict_core.WINDOW_UNTIL)
         sample = uptake_core.window_sample(verdict_core.WINDOW_SINCE, verdict_core.WINDOW_UNTIL)
         floors = (
             f" 표본 하한은 장부에서 지금 읽힌다: 세션 {sample.sessions}/{verdict_core.MIN_SESSIONS}"
@@ -417,9 +409,7 @@ def main(argv=None):
         return 0
 
     if pre_agent:
-        print(
-            f"\n[수리 이전 · 판정에 쓰지 않음]  경계 {verdict_core.LEDGER_REPAIR_AT}"
-        )
+        print(f"\n[수리 이전 · 판정에 쓰지 않음]  경계 {verdict_core.LEDGER_REPAIR_AT}")
         for who, c in sorted(pre_agent.items()):
             used, total = c["used_prompts"], c["total_prompts"]
             print(

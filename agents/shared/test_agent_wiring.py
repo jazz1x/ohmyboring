@@ -7,6 +7,7 @@ Guards the installer surface that is otherwise only exercised at install time:
   - install() must report failures instead of swallowing them.
   - hermes-agent must not be reported as "unsupported".
 """
+
 import importlib.util
 import json
 import os
@@ -27,9 +28,7 @@ import agent_wiring
 
 
 def test_install_reports_failure():
-    with mock.patch.object(
-        agent_wiring, "wire_claude_code", side_effect=PermissionError("denied")
-    ):
+    with mock.patch.object(agent_wiring, "wire_claude_code", side_effect=PermissionError("denied")):
         results, failed = agent_wiring.install(["claude-code"], "ohmyboring", {})
     assert failed is True, "install() must return failed=True when a wire raises"
     assert results == [], "no successful result should be returned for a failed agent"
@@ -100,9 +99,7 @@ def test_settings_path_override():
 def test_default_path_when_no_override():
     """When settings_path is absent, the per-agent default is used."""
     with mock.patch.object(agent_wiring.boring_config, "load", return_value={}):
-        assert agent_wiring._agent_path("claude-code") == Path(
-            os.path.expanduser("~/.claude/settings.json")
-        )
+        assert agent_wiring._agent_path("claude-code") == Path(os.path.expanduser("~/.claude/settings.json"))
 
 
 def test_wire_claude_code_adds_session_start():
@@ -114,11 +111,7 @@ def test_wire_claude_code_adds_session_start():
         data = json.loads(settings.read_text(encoding="utf-8"))
         hooks = data.get("hooks", {})
         assert "SessionStart" in hooks
-        commands = [
-            h.get("command")
-            for group in hooks["SessionStart"]
-            for h in group.get("hooks", [])
-        ]
+        commands = [h.get("command") for group in hooks["SessionStart"] for h in group.get("hooks", [])]
         assert any("session-start-recall.py" in c for c in commands)
 
 
@@ -175,14 +168,20 @@ def test_existing_duplicate_registrations_are_collapsed():
         settings = {
             "hooks": {
                 "UserPromptSubmit": [
-                    {"matcher": "", "hooks": [
-                        {"type": "command", "command": f"python3 {link}/hooks/recall.py"},
-                        {"type": "command", "command": "/other/unrelated-hook.sh"},
-                    ]},
-                    {"matcher": "", "hooks": [
-                        {"type": "command", "command": ours},
-                        {"type": "command", "command": "/other/unrelated-hook.sh"},
-                    ]},
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {"type": "command", "command": f"python3 {link}/hooks/recall.py"},
+                            {"type": "command", "command": "/other/unrelated-hook.sh"},
+                        ],
+                    },
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {"type": "command", "command": ours},
+                            {"type": "command", "command": "/other/unrelated-hook.sh"},
+                        ],
+                    },
                 ]
             }
         }
@@ -190,11 +189,7 @@ def test_existing_duplicate_registrations_are_collapsed():
         removed = agent_wiring._drop_duplicate_hooks(settings, (ours,))
 
         assert removed == 1, removed
-        commands = [
-            h["command"]
-            for g in settings["hooks"]["UserPromptSubmit"]
-            for h in g["hooks"]
-        ]
+        commands = [h["command"] for g in settings["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
         assert commands.count(f"python3 {link}/hooks/recall.py") == 1, commands
         assert ours not in commands, "the first registration wins; the later copy goes"
         assert commands.count("/other/unrelated-hook.sh") == 2, (
@@ -204,9 +199,12 @@ def test_existing_duplicate_registrations_are_collapsed():
 
 def test_wire_hermes_adds_hint_and_weekly():
     """Fresh Hermes wiring installs importable briefing scripts and config."""
-    with tempfile.TemporaryDirectory() as d, mock.patch.object(
-        agent_wiring, "_sync_hermes_cron_jobs", return_value={"changed": False, "jobs_count": 3}
-    ) as mock_cron:
+    with (
+        tempfile.TemporaryDirectory() as d,
+        mock.patch.object(
+            agent_wiring, "_sync_hermes_cron_jobs", return_value={"changed": False, "jobs_count": 3}
+        ) as mock_cron,
+    ):
         fake_home = Path(d) / "home"
 
         def fake_expanduser(value):
@@ -223,9 +221,7 @@ def test_wire_hermes_adds_hint_and_weekly():
             "import slack_briefing\nDEPENDENCY_PATH = slack_briefing.__file__\n",
             encoding="utf-8",
         )
-        (scripts / "slack_briefing.py").write_text(
-            'BRIEFING_DEPENDENCY = "installed"\n', encoding="utf-8"
-        )
+        (scripts / "slack_briefing.py").write_text('BRIEFING_DEPENDENCY = "installed"\n', encoding="utf-8")
         (scripts / "weekly-briefing.py").write_text("# stub", encoding="utf-8")
         (scripts / "codex-collect-sessions.py").write_text("# stub", encoding="utf-8")
         (scripts / "ingest-worker.py").write_text("# stub", encoding="utf-8")
@@ -287,9 +283,7 @@ def test_install_hermes_briefing_backs_up_existing_scripts():
         for src in sources:
             installed = installed_scripts / src.name
             assert installed.read_text(encoding="utf-8") == f"# new {src.name}\n"
-            assert Path(str(installed) + ".omb-bak").read_text(
-                encoding="utf-8"
-            ) == f"# old {src.name}\n"
+            assert Path(str(installed) + ".omb-bak").read_text(encoding="utf-8") == f"# old {src.name}\n"
 
 
 def test_real_hermes_entry_scripts_ship_every_module_they_import():
@@ -309,8 +303,7 @@ def test_real_hermes_entry_scripts_ship_every_module_they_import():
     for name in agent_wiring._HERMES_ENTRY_SCRIPT_NAMES:
         for dep in agent_wiring._local_module_deps(src_dir / name, (shared_dir,)):
             assert dep.name in installed, (
-                f"{name} imports {dep.name}, which the installer never copies to"
-                " ~/.hermes/scripts"
+                f"{name} imports {dep.name}, which the installer never copies to ~/.hermes/scripts"
             )
 
 
@@ -367,9 +360,10 @@ def test_wire_hermes_missing_slack_briefing_has_no_side_effects():
                 return str(fake_home / value[2:])
             return value
 
-        with mock.patch.object(
-            agent_wiring.os.path, "expanduser", side_effect=fake_expanduser
-        ), TestCase().assertRaisesRegex(FileNotFoundError, "slack_briefing.py"):
+        with (
+            mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser),
+            TestCase().assertRaisesRegex(FileNotFoundError, "slack_briefing.py"),
+        ):
             agent_wiring.wire_hermes(cfg, boring_home=str(Path(d) / "omb"))
 
         assert cfg.read_bytes() == original
@@ -422,8 +416,9 @@ def test_install_codex_host_worker_macos_writes_launch_agent():
             return value
 
         completed = mock.Mock(returncode=0)
-        with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser), mock.patch.object(
-            agent_wiring.subprocess, "run", return_value=completed
+        with (
+            mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser),
+            mock.patch.object(agent_wiring.subprocess, "run", return_value=completed),
         ):
             result = agent_wiring._install_codex_host_worker_macos(str(omb))
 
@@ -448,15 +443,22 @@ def test_next_cron_run_finds_next_monday():
 
 def test_sync_hermes_cron_jobs_adds_managed_job():
     """_sync_hermes_cron_jobs creates missing managed jobs without touching others."""
-    with tempfile.TemporaryDirectory() as d, mock.patch.object(
-        agent_wiring.boring_config, "hermes_cron_jobs", return_value={
-            "weekly-briefing": {"enabled": True, "schedule": "0 9 * * 1", "script": "weekly-briefing.py"}
-        }
-    ), mock.patch.object(
-        agent_wiring, "_load_json", return_value={
-            "jobs": [{"name": "morning-briefing", "deliver": "slack:test"}]
-        }
-    ), mock.patch.object(agent_wiring, "_save_json") as mock_save:
+    with (
+        tempfile.TemporaryDirectory() as d,
+        mock.patch.object(
+            agent_wiring.boring_config,
+            "hermes_cron_jobs",
+            return_value={
+                "weekly-briefing": {"enabled": True, "schedule": "0 9 * * 1", "script": "weekly-briefing.py"}
+            },
+        ),
+        mock.patch.object(
+            agent_wiring,
+            "_load_json",
+            return_value={"jobs": [{"name": "morning-briefing", "deliver": "slack:test"}]},
+        ),
+        mock.patch.object(agent_wiring, "_save_json") as mock_save,
+    ):
         jobs_path = Path(d) / "jobs.json"
         with mock.patch.object(Path, "expanduser", return_value=jobs_path):
             result = agent_wiring._sync_hermes_cron_jobs()
@@ -498,8 +500,9 @@ def test_install_places_ingest_worker_and_job_uses_relative_script():
     relative name — either alone leaves the job blocked with 'script path resolves outside
     the scripts directory' on every tick."""
     repo = HERE.parent.parent
-    with tempfile.TemporaryDirectory() as d, mock.patch.object(
-        agent_wiring.boring_config, "hermes_cron_jobs", return_value={}
+    with (
+        tempfile.TemporaryDirectory() as d,
+        mock.patch.object(agent_wiring.boring_config, "hermes_cron_jobs", return_value={}),
     ):
         fake_home = Path(d) / "home"
 
@@ -517,9 +520,7 @@ def test_install_places_ingest_worker_and_job_uses_relative_script():
         installed = fake_home / ".hermes" / "scripts" / "ingest-worker.py"
         assert installed.exists(), "the worker must be installed where hermes resolves scripts"
 
-        data = json.loads(
-            (fake_home / ".hermes" / "cron" / "jobs.json").read_text(encoding="utf-8")
-        )
+        data = json.loads((fake_home / ".hermes" / "cron" / "jobs.json").read_text(encoding="utf-8"))
         worker = next(j for j in data["jobs"] if j["name"] == "memory-ingest-worker")
         assert worker["script"] == "ingest-worker.py"
         assert not os.path.isabs(worker["script"])
@@ -529,8 +530,9 @@ def test_installed_ingest_worker_imports_resolve_from_the_scripts_dir():
     """Whatever the worker imports at runtime must be present beside the installed copy —
     asserted by importing, the way the briefing install's test does."""
     repo = HERE.parent.parent
-    with tempfile.TemporaryDirectory() as d, mock.patch.object(
-        agent_wiring.boring_config, "hermes_cron_jobs", return_value={}
+    with (
+        tempfile.TemporaryDirectory() as d,
+        mock.patch.object(agent_wiring.boring_config, "hermes_cron_jobs", return_value={}),
     ):
         fake_home = Path(d) / "home"
 
@@ -611,11 +613,12 @@ def test_sync_hermes_cron_jobs_repairs_blocked_absolute_worker_path():
             }
         ]
     }
-    with tempfile.TemporaryDirectory() as d, mock.patch.object(
-        agent_wiring.boring_config, "hermes_cron_jobs", return_value={}
-    ), mock.patch.object(
-        agent_wiring, "_load_json", return_value=existing
-    ), mock.patch.object(agent_wiring, "_save_json") as mock_save:
+    with (
+        tempfile.TemporaryDirectory() as d,
+        mock.patch.object(agent_wiring.boring_config, "hermes_cron_jobs", return_value={}),
+        mock.patch.object(agent_wiring, "_load_json", return_value=existing),
+        mock.patch.object(agent_wiring, "_save_json") as mock_save,
+    ):
         jobs_path = Path(d) / "jobs.json"
         with mock.patch.object(Path, "expanduser", return_value=jobs_path):
             result = agent_wiring._sync_hermes_cron_jobs()
@@ -626,8 +629,6 @@ def test_sync_hermes_cron_jobs_repairs_blocked_absolute_worker_path():
         assert worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
         assert worker["skill"] == "memory-ingest"
         assert worker["enabled"] is True
-
-
 
 
 def test_kimi_hooks_are_deduped_across_path_spellings():
@@ -652,12 +653,12 @@ def test_kimi_hooks_are_deduped_across_path_spellings():
 
         config = Path(d) / "config.toml"
         config.write_text(
-            "[model]\nname = \"kimi\"\n"
-            "\n[[hooks]]\nevent = \"UserPromptSubmit\"\n"
+            '[model]\nname = "kimi"\n'
+            '\n[[hooks]]\nevent = "UserPromptSubmit"\n'
             f'command = "python3 {home}/hooks/kimi-recall.py"\ntimeout = 10\n'
-            "\n[[hooks]]\nevent = \"UserPromptSubmit\"\n"
+            '\n[[hooks]]\nevent = "UserPromptSubmit"\n'
             f'command = "python3 {link}/hooks/kimi-recall.py"\ntimeout = 10\n'
-            "\n[[hooks]]\nevent = \"SessionEnd\"\n"
+            '\n[[hooks]]\nevent = "SessionEnd"\n'
             f'command = "python3 {home}/hooks/kimi-distill-session.py"\ntimeout = 130\n'
             # Twice on purpose. With one copy, "a foreign hook survives" is true even for a
             # deduper that removes every duplicate it finds regardless of owner — the assertion
@@ -680,6 +681,7 @@ def test_kimi_hooks_are_deduped_across_path_spellings():
             " are not ours to tidy away"
         )
         assert 'name = "kimi"' in text, "the rest of the config must survive"
+
 
 if __name__ == "__main__":
     test_install_reports_failure()

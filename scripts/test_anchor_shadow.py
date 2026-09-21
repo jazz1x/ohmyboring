@@ -3,6 +3,7 @@
 
 Run: python3 scripts/test_anchor_shadow.py
 """
+
 import importlib.util
 import json
 import os
@@ -75,13 +76,7 @@ class WhatCounts(unittest.TestCase):
         p = root / "proj" / f"{name}.jsonl"
         p.parent.mkdir(parents=True, exist_ok=True)
         rows = [
-            {
-                "message": {
-                    "content": [
-                        {"type": "tool_use", "name": "Edit", "input": {"file_path": f}}
-                    ]
-                }
-            }
+            {"message": {"content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": f}}]}}
             for f in files
         ]
         p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
@@ -125,9 +120,7 @@ class VaultSearch(unittest.TestCase):
             notes.mkdir()
             (notes / "n1.md").write_text("touches markers.py:63 here\n", encoding="utf-8")
 
-            hidden = subprocess.run(
-                ["git", "check-ignore", "-q", str(notes / "n1.md")], cwd=str(root)
-            )
+            hidden = subprocess.run(["git", "check-ignore", "-q", str(notes / "n1.md")], cwd=str(root))
             self.assertEqual(hidden.returncode, 0, "fixture must actually be ignored")
 
             saved = shadow.VAULT

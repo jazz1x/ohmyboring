@@ -33,9 +33,7 @@ EXCERPT_CHARS = 1200
 
 
 def vault_dir():
-    return Path(
-        os.environ.get("BORING_VAULT_DIR") or f"{omb_env.omb_home().rstrip('/')}/vault"
-    )
+    return Path(os.environ.get("BORING_VAULT_DIR") or f"{omb_env.omb_home().rstrip('/')}/vault")
 
 
 def read_excerpt(path):

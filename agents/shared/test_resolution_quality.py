@@ -3,16 +3,17 @@
 
 Run: python3 agents/shared/test_resolution_quality.py
 """
+
 import unittest
 from typing import Optional, get_type_hints
 
+import resolution_quality
 from resolution_quality import (
     body_survives_storage_normalize,
     normalize_resolution,
     resolution_prompt_contract,
     verify_note_resolution,
 )
-import resolution_quality
 
 
 def claim(subject, predicate, value, kind="fact"):
@@ -204,7 +205,7 @@ class ResolutionQualityTests(unittest.TestCase):
     def test_public_annotations_are_python39_type_hint_safe(self):
         hints = get_type_hints(resolution_quality.normalize_resolution)
 
-        self.assertEqual(hints["resolution"], Optional[str])
+        self.assertEqual(hints["resolution"], Optional[str])  # noqa: UP045 — the assertion is about 3.9 compatibility
 
     def test_forensic_requires_cause_timeline_regression_and_next_claim(self):
         transcript = (

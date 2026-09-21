@@ -14,6 +14,7 @@ The snapshot holds three things a consumer (agents/, hooks/, cron, MCP clients) 
 Anything the check cannot read is a failure, not an empty set: an unreachable engine must go red,
 otherwise "0 tools == 0 tools" passes for a dead server (CLAUDE.md §4).
 """
+
 import argparse
 import json
 import os
@@ -69,12 +70,20 @@ def live_shapes(base: str) -> dict:
     out = {}
     for path, optional in GET_SHAPES.items():
         seen = set(fetch_json(f"{base}{path}").keys())
-        out[path] = {"required": sorted(seen - set(optional)), "optional": sorted(optional), "seen": sorted(seen)}
+        out[path] = {
+            "required": sorted(seen - set(optional)),
+            "optional": sorted(optional),
+            "seen": sorted(seen),
+        }
     return out
 
 
 def capture(base: str) -> dict:
-    return {"mcp_tools": live_tools(base), "http_routes": routes_from_source(), "get_shapes": live_shapes(base)}
+    return {
+        "mcp_tools": live_tools(base),
+        "http_routes": routes_from_source(),
+        "get_shapes": live_shapes(base),
+    }
 
 
 def diff(expected: dict, actual: dict) -> list[str]:
@@ -122,8 +131,9 @@ def main() -> int:
 
     if args.snapshot:
         os.makedirs(os.path.dirname(args.file), exist_ok=True)
+        # `seen` is what this engine returned today; the contract is required + optional
         snapshot = dict(actual)
-        snapshot["get_shapes"] = {  # `seen` is what this engine returned today; the contract is required + optional
+        snapshot["get_shapes"] = {
             p: {"required": s["required"], "optional": s["optional"]} for p, s in actual["get_shapes"].items()
         }
         with open(args.file, "w", encoding="utf-8") as f:

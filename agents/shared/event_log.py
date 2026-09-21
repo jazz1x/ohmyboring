@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Record local workflow events into the engine DB, with a file spool fallback."""
+
 from __future__ import annotations
 
 import argparse
@@ -8,14 +9,13 @@ import importlib.util
 import json
 import os
 import sys
-import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
+import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
-
+from typing import Any
 
 DEFAULT_EVENT_LOG = "~/.cache/oh-my-boring/events.ndjson"
 DEFAULT_RECENT_HOURS = 24
@@ -41,7 +41,7 @@ def _event_payload(component: str, event: str, status: str, **fields: Any) -> di
     normalized = {k: v for k, v in fields.items() if v is not None}
     if "run_id" not in normalized and normalized.get("session_id"):
         normalized["run_id"] = normalized["session_id"]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "ts": now.isoformat(),
         "component": component,
@@ -61,7 +61,7 @@ def _append_to_spool(payload: dict[str, Any]) -> None:
         f.write("\n")
 
 
-def replay_spool(path: Optional[Path] = None) -> dict[str, int]:
+def replay_spool(path: Path | None = None) -> dict[str, int]:
     """Hand the spooled rows to the engine, and keep only the ones it still refuses.
 
     The spool is where a row lands when the engine is down. Nothing brought those rows back:
@@ -154,7 +154,7 @@ def _severity(status: str) -> tuple[str, int]:
     return ("INFO", 9)
 
 
-def _trace_span_ids(run_key: str, payload: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+def _trace_span_ids(run_key: str, payload: dict[str, Any]) -> tuple[str | None, str | None]:
     if not run_key:
         return (None, None)
     seed = json.dumps(
@@ -191,7 +191,7 @@ def _try_store_in_engine(payload: dict[str, Any]) -> bool:
         return False
 
 
-def _event_sink_url() -> Optional[str]:
+def _event_sink_url() -> str | None:
     if _event_sink_mode() == "spool":
         return None
     explicit = os.environ.get("BORING_EVENT_SINK_URL")
@@ -226,10 +226,10 @@ def _event_spool_mode(db_enabled: bool) -> str:
 
 def _fetch_engine_events(
     limit: int,
-    component: Optional[str] = None,
-    event_name: Optional[str] = None,
-    status: Optional[str] = None,
-) -> Optional[list[dict[str, Any]]]:
+    component: str | None = None,
+    event_name: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]] | None:
     url = _event_sink_url()
     if not url:
         return None
@@ -285,9 +285,9 @@ def iter_events() -> list[dict[str, Any]]:
 
 def recent_events(
     limit: int = 20,
-    component: Optional[str] = None,
-    event_name: Optional[str] = None,
-    status: Optional[str] = None,
+    component: str | None = None,
+    event_name: str | None = None,
+    status: str | None = None,
 ) -> list[dict[str, Any]]:
     engine_events = _fetch_engine_events(limit, component, event_name, status)
     if engine_events is not None:
@@ -312,14 +312,14 @@ WATCHED_GATES = ("eval_gate",)
 GATE_STALE_DAYS = int(os.environ.get("BORING_GATE_STALE_DAYS") or "7")
 
 
-def stale_gates(max_days: int | None = None) -> list[tuple[str, Optional[int]]]:
+def stale_gates(max_days: int | None = None) -> list[tuple[str, int | None]]:
     """Return (gate, days_since_last_run) for watched gates that are stale or never seen.
 
     `None` days means the gate has no recorded run at all — worse than stale, not better.
     """
     limit = GATE_STALE_DAYS if max_days is None else max_days
-    now = datetime.now(timezone.utc)
-    out: list[tuple[str, Optional[int]]] = []
+    now = datetime.now(UTC)
+    out: list[tuple[str, int | None]] = []
     for gate in WATCHED_GATES:
         events = _fetch_engine_events(200, event_name=gate)
         if events is None:
@@ -336,11 +336,11 @@ def stale_gates(max_days: int | None = None) -> list[tuple[str, Optional[int]]]:
     return out
 
 
-def recent_resolution_failures(limit: int = 3, hours: Optional[int] = None) -> list[dict[str, Any]]:
+def recent_resolution_failures(limit: int = 3, hours: int | None = None) -> list[dict[str, Any]]:
     if hours is None:
         raw_hours = os.environ.get("BORING_EVENT_RECENT_HOURS") or str(DEFAULT_RECENT_HOURS)
         hours = int(raw_hours)
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
     latest_by_key: dict[tuple[str, str], tuple[int, dict[str, Any]]] = {}
     anonymous_failures: list[tuple[int, dict[str, Any]]] = []
     events = _fetch_engine_events(1000, event_name="distill_resolution")
@@ -359,15 +359,13 @@ def recent_resolution_failures(limit: int = 3, hours: Optional[int] = None) -> l
             continue
         latest_by_key[key] = (idx, event)
     failures = anonymous_failures + [
-        (idx, event)
-        for idx, event in latest_by_key.values()
-        if _is_resolution_failure(event)
+        (idx, event) for idx, event in latest_by_key.values() if _is_resolution_failure(event)
     ]
     failures.sort(key=lambda item: item[0])
     return [event for _, event in failures[-limit:]]
 
 
-def _resolution_event_key(event: dict[str, Any]) -> Optional[tuple[str, str]]:
+def _resolution_event_key(event: dict[str, Any]) -> tuple[str, str] | None:
     session = event.get("session_id") or event.get("run_id")
     if not session:
         return None
@@ -414,10 +412,7 @@ def verdict_spool_loss() -> dict[str, Any]:
         out_rows += 1
         if at is not None and (oldest is None or at < oldest):
             oldest = at
-    sessions = {
-        row.get("session_id") or (row.get("attributes") or {}).get("session_id")
-        for row in in_rows
-    }
+    sessions = {row.get("session_id") or (row.get("attributes") or {}).get("session_id") for row in in_rows}
     sessions.discard(None)
     sessions.discard("")
     return {
@@ -430,7 +425,7 @@ def verdict_spool_loss() -> dict[str, Any]:
     }
 
 
-def _parse_ts(value: str) -> Optional[datetime]:
+def _parse_ts(value: str) -> datetime | None:
     if not value:
         return None
     try:
@@ -438,8 +433,8 @@ def _parse_ts(value: str) -> Optional[datetime]:
     except ValueError:
         return None
     if ts.tzinfo is None:
-        return ts.replace(tzinfo=timezone.utc)
-    return ts.astimezone(timezone.utc)
+        return ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC)
 
 
 def _parse_field(raw: str) -> tuple[str, Any]:

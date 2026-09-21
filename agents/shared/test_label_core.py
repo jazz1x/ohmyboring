@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tests for label_core.py — sampling, verdict parsing, and the refusal to report a tiny sample."""
+
 import sys
 from pathlib import Path
 
@@ -41,7 +42,10 @@ def test_non_search_endpoints_are_not_sampled():
 
 
 def test_caps_bound_queries_and_hits():
-    entries = [_entry(i, paths=[f"n{j}.md" for j in range(5)], dists=[0.3] * 5, kinds=["vector_cosine"] * 5) for i in range(9)]
+    entries = [
+        _entry(i, paths=[f"n{j}.md" for j in range(5)], dists=[0.3] * 5, kinds=["vector_cosine"] * 5)
+        for i in range(9)
+    ]
     samples = label_core.select_samples(entries, [], max_queries=2, max_hits=3)
     assert len(samples) == 6
     assert len({s["query_log_id"] for s in samples}) == 2
@@ -139,9 +143,7 @@ def test_the_audit_pick_reaches_past_queries_the_model_has_not_judged():
 
     filtered_after = [
         s
-        for s in label_core.select_samples(
-            entries, labels, judge=label_core.JUDGE_HUMAN, max_queries=2
-        )
+        for s in label_core.select_samples(entries, labels, judge=label_core.JUDGE_HUMAN, max_queries=2)
         if (s["query_log_id"], s["hit_index"]) in {(95, 0), (95, 1)}
     ]
     assert filtered_after == [], "the old sample-then-filter order must still come up empty"

@@ -4,6 +4,7 @@
 Hermes no-agent cron scripts must live in ~/.hermes/scripts inside the agent
 container. Keep the real collector in the repo and execute it from here.
 """
+
 import os
 import runpy
 

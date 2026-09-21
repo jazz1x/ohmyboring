@@ -17,6 +17,7 @@ touching shipped source must also touch `CHANGELOG.md`. Not the wording, not the
 whether the entry is any good — a person judges that. A gate that claimed to judge it would be
 selling a guarantee it does not have.
 """
+
 import re
 import subprocess
 import sys
@@ -34,9 +35,7 @@ _ANNOUNCES = re.compile(r"^(feat|fix)(\([^)]*\))?!?:")
 
 
 def _git(*args: str) -> str:
-    return subprocess.run(
-        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=True
-    ).stdout.strip()
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
 
 
 def _base() -> str:
@@ -58,7 +57,10 @@ def _base() -> str:
     # of this branch — plain fetch failed, unshallow found the base.
     subprocess.run(
         ["git", "fetch", "--no-tags", "--unshallow", "origin", "main:refs/remotes/origin/main"],
-        cwd=ROOT, capture_output=True, text=True, check=False,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     try:
         return _git("merge-base", "HEAD", "origin/main")

@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **Python 위생은 ruff 까지, 그 밖은 스킬로** — `ruff.toml`(110자, E·F·I·B·UP) 이 pre-commit·`guard.sh`·CI 에서 돈다. 규칙 채택 시 lint 412건 중 자동수정 198 + 손수정 7, 포맷 93/119 파일 — 이 한 번의 재정렬이 이 항목의 diff 대부분이다. 이전(migration) 슬라이스 절차와 코드 규율(주석은 드물게·조용한 폴백 금지·훅은 stdlib)은 도구가 아니라 `.claude/skills/migration-slice/SKILL.md` 한 장으로 배선한다 — 새 게이트는 같은 부류 실수가 반복 관측된 뒤에만.
 - **Python 문(door)이 읽기 전용 문 다섯을 Rust 엔진에 프록시한다** — `make door` 가 :7710 에 FastAPI 프로세스를 띄워 GET /health·/audit·/projects·/recall-label-stats 와 POST /mcp 를 Rust 엔진(:7700)에 그대로 넘기고 상태코드·본문·content-type 을 바이트 그대로 돌려받는다. 엔진이 죽으면 502 JSON(`engine unreachable`) — 빈 본문 200 으로 조용히 넘어가지 않는다. Rust 코드 변경 0, `DRUDGE_URL=http://127.0.0.1:7710 python3 scripts/contract-parity.py --check` 가 Rust 가 아닌 프로세스를 처음으로 통과시킨다. 미등록 경로는 404 — 만능 프록시가 아니고, 스텁 엔진 단위 시험 4개가 네트워크 없이 이를 못박는다.
 - **엔진 계약이 스냅샷으로 고정된다** — `scripts/contract-parity.py --snapshot` 이 라이브 엔진에서 MCP `tools/list` 24개(이름+inputSchema)·HTTP 라우트 24개(`serve.rs` 라우터에서 읽음)·읽기 전용 GET 4개의 최상위 키를 `data/contract/engine-contract.json` 에 적고, `--check` 가 CI eval-gate 단계에서 라이브와 대조한다. 엔진에 닿지 못하면 빈 집합이 아니라 실패다. 이전(migration) 트렁크의 첫 게이트 — 뒤에 오는 엔진이 같은 문을 지키는지는 이 파일이 판정한다.
 - **터미널 훅도 건넨 노트를 엔진에 알린다** — 프롬프트 훅이 주입한 노트 경로를 `POST /handover` 로 세션 이름 아래 남긴다. 대조군으로 가져만 온 hit 은 건넨 것이 아니라 빠진다(그래서 `/search` 의 `session_id` 가 아니라 별도 호출). 렛저 기록은 그대로 — 판정 계열의 원천은 아직 렛저다. 문이 죽어도 프롬프트는 안 잃는다.

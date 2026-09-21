@@ -10,6 +10,7 @@ golden fixture ids. It also reports a two-sided relevance error rate
 
 Run via `make eval` (requires a live stack on :7700).
 """
+
 import json
 import os
 import sys
@@ -17,9 +18,7 @@ import urllib.request
 
 # The gate scores the predicate the agents actually run, imported rather than restated:
 # a second copy would drift from the shipped behaviour while still reporting green.
-sys.path.insert(
-    0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "agents", "shared")
-)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "agents", "shared"))
 from recall_core import RELEVANCE_MAX_DIST, exceeds_relevance_ceiling  # noqa: E402
 
 BORING_URL = os.environ.get("BORING_URL") or "http://localhost:7700"
@@ -138,8 +137,7 @@ def main():
             false_pass += 1
             ids = source_ids(surviving)
             print(
-                f"[negative] {query!r} -> FALSE PASS ids={ids} "
-                f"(survived {len(surviving)}/{len(hits)} hits)"
+                f"[negative] {query!r} -> FALSE PASS ids={ids} (survived {len(surviving)}/{len(hits)} hits)"
             )
         else:
             print(f"[negative] {query!r} -> suppressed ({len(hits)} hits dropped)")
@@ -155,8 +153,7 @@ def main():
             mid = band[len(band) // 2]
             margin = RELEVANCE_MAX_DIST - band[-1]
             print(
-                f"  positive dist: min {band[0]:.4f} / median {mid:.4f} / max {band[-1]:.4f}"
-                f"  (n={len(band)})"
+                f"  positive dist: min {band[0]:.4f} / median {mid:.4f} / max {band[-1]:.4f}  (n={len(band)})"
             )
             print(
                 f"  margin to ceiling {RELEVANCE_MAX_DIST}: {margin:+.4f}"
@@ -164,9 +161,7 @@ def main():
             )
         if negative_dists:
             nb = sorted(negative_dists)
-            print(
-                f"  negative dist (nearest hit): min {nb[0]:.4f} / max {nb[-1]:.4f}  (n={len(nb)})"
-            )
+            print(f"  negative dist (nearest hit): min {nb[0]:.4f} / max {nb[-1]:.4f}  (n={len(nb)})")
         if positive_dists and negative_dists:
             overlap = min(negative_dists) < max(positive_dists)
             print(
@@ -177,9 +172,7 @@ def main():
     if negatives:
         print(f"\nRelevance filter (forced ON, max_dist={RELEVANCE_MAX_DIST}):")
         print(f"  false_drop: {false_drop}/{n} positives = {false_drop / n:.3f}")
-        print(
-            f"  false_pass: {false_pass}/{len(negatives)} negatives = {false_pass / len(negatives):.3f}"
-        )
+        print(f"  false_pass: {false_pass}/{len(negatives)} negatives = {false_pass / len(negatives):.3f}")
 
     # The gate's original exit condition is preserved and no new failing condition is added.
     # false_drop/false_pass here are real forced-ON measurements of a filter recall does not

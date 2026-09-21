@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Regression tests for recall_core.py session throttle."""
+
 import os
 import sys
 import tempfile
@@ -55,7 +56,6 @@ def test_empty_session_id_never_throttled():
     assert recall_core._session_throttled("") is False
 
 
-
 def test_the_snippet_carries_the_decision_not_only_the_background():
     """A head-only slice injects the diagnosis and leaves the prescription behind.
 
@@ -65,8 +65,10 @@ def test_the_snippet_carries_the_decision_not_only_the_background():
     deliver the fix for it, nine times over.
     """
     note = (
-        "## 배경 / 문제 " + ("배경 " * 60)
-        + "## 실측 " + ("측정값 " * 60)
+        "## 배경 / 문제 "
+        + ("배경 " * 60)
+        + "## 실측 "
+        + ("측정값 " * 60)
         + "## 결정 노드 완료는 커밋 수다. pgrep 로 판정 금지."
     )
     out = recall_core.salient(note)
@@ -117,7 +119,10 @@ def _recall(hits, session_id="s1", prompt="why did the connection pool die again
     from unittest import mock
 
     with tempfile.TemporaryDirectory() as d:
-        env = {"BORING_INJECTION_LEDGER": ledger or os.path.join(d, "ledger.jsonl"), "BORING_EVENT_SINK": "spool"}
+        env = {
+            "BORING_INJECTION_LEDGER": ledger or os.path.join(d, "ledger.jsonl"),
+            "BORING_EVENT_SINK": "spool",
+        }
         with mock.patch.dict(os.environ, env), mock.patch.object(recall_core, "DrudgeClient") as client:
             client.return_value.search.return_value = hits
             out = io.StringIO()
@@ -132,13 +137,15 @@ def _recall(hits, session_id="s1", prompt="why did the connection pool die again
 def _ledger_sources(ledger):
     import json
 
-    rows = [json.loads(l) for l in open(ledger, encoding="utf-8") if l.strip()]
+    rows = [json.loads(line) for line in open(ledger, encoding="utf-8") if line.strip()]
     return [([h["src"] for h in r["hits"]], [c["src"] for c in r["controls"]]) for r in rows]
 
 
 def test_a_note_already_given_this_session_is_not_given_again():
     """§8 D6: 34% of in-session injections were repeats, one note 25 times in one session."""
-    pool = [_hit(f"wiki-{i:04d}.md", f"note {i} says the socket was recycled by deadpool " * 3) for i in range(5)]
+    pool = [
+        _hit(f"wiki-{i:04d}.md", f"note {i} says the socket was recycled by deadpool " * 3) for i in range(5)
+    ]
     with tempfile.TemporaryDirectory() as d:
         ledger = os.path.join(d, "ledger.jsonl")
         first = _recall(pool, ledger=ledger)
@@ -159,9 +166,15 @@ def test_the_injection_carries_the_note_each_hit_connects_to():
     """The engine walks concept edges per hit (#318). The line under a hit is the thread the note
     belongs to, and it is injected — so it is ledgered, deduplicated and scored like any hit."""
     text = "deadpool recycled a closed socket and the retry loop handed it back " * 3
-    older = {"source_path": "/vault/wiki/wiki-0001.md", "snippet": "the earlier pool incident: idle timeout below the LB's " * 3}
+    older = {
+        "source_path": "/vault/wiki/wiki-0001.md",
+        "snippet": "the earlier pool incident: idle timeout below the LB's " * 3,
+    }
     hit = dict(_hit("wiki-0007.md", text), related=[older])
-    twin = dict(_hit("wiki-0008.md", text), related=[older, {"source_path": "/vault/wiki/wiki-0002.md", "snippet": "second thread " * 8}])
+    twin = dict(
+        _hit("wiki-0008.md", text),
+        related=[older, {"source_path": "/vault/wiki/wiki-0002.md", "snippet": "second thread " * 8}],
+    )
     with tempfile.TemporaryDirectory() as d:
         ledger = os.path.join(d, "ledger.jsonl")
         ctx = _recall([hit, twin], ledger=ledger)
@@ -183,14 +196,22 @@ def test_the_engine_asked_for_related_notes_on_every_pool_hit():
     """Dedup can promote pool hit 4 to injected, so related has to be there for every hit."""
     from unittest import mock
 
-    with tempfile.TemporaryDirectory() as d, mock.patch.dict(
-        os.environ, {"BORING_INJECTION_LEDGER": os.path.join(d, "l.jsonl"), "BORING_EVENT_SINK": "spool"}
-    ), mock.patch.object(recall_core, "DrudgeClient") as client:
+    with (
+        tempfile.TemporaryDirectory() as d,
+        mock.patch.dict(
+            os.environ, {"BORING_INJECTION_LEDGER": os.path.join(d, "l.jsonl"), "BORING_EVENT_SINK": "spool"}
+        ),
+        mock.patch.object(recall_core, "DrudgeClient") as client,
+    ):
         client.return_value.search.return_value = []
         recall_core.run_recall({"prompt": "why did the connection pool die again", "session_id": "s1"})
     kwargs = client.return_value.search.call_args.kwargs
     assert kwargs["related"] == 1
-    assert kwargs["related_heads"] == kwargs["max_results"] == recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS
+    assert (
+        kwargs["related_heads"]
+        == kwargs["max_results"]
+        == recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS
+    )
 
 
 def test_the_engine_is_asked_for_the_claims_behind_each_hit():
@@ -198,9 +219,13 @@ def test_the_engine_is_asked_for_the_claims_behind_each_hit():
     none, because nobody asked. A zero here is the feature switched off."""
     from unittest import mock
 
-    with tempfile.TemporaryDirectory() as d, mock.patch.dict(
-        os.environ, {"BORING_INJECTION_LEDGER": os.path.join(d, "l.jsonl"), "BORING_EVENT_SINK": "spool"}
-    ), mock.patch.object(recall_core, "DrudgeClient") as client:
+    with (
+        tempfile.TemporaryDirectory() as d,
+        mock.patch.dict(
+            os.environ, {"BORING_INJECTION_LEDGER": os.path.join(d, "l.jsonl"), "BORING_EVENT_SINK": "spool"}
+        ),
+        mock.patch.object(recall_core, "DrudgeClient") as client,
+    ):
         client.return_value.search.return_value = []
         recall_core.run_recall({"prompt": "why did the connection pool die again", "session_id": "s1"})
     assert client.return_value.search.call_args.kwargs["claims"] == recall_core.CLAIMS_PER_HIT >= 1
@@ -274,7 +299,9 @@ def test_a_superseded_note_goes_last_and_says_what_replaced_it():
         ledger = os.path.join(d, "ledger.jsonl")
         ctx = _recall(pool, ledger=ledger)
         injected, controls = _ledger_sources(ledger)[0]
-        assert injected == ["wiki-0002.md", "wiki-0003.md", "wiki-0004.md"], "nine reuses do not outrank being replaced"
+        assert injected == ["wiki-0002.md", "wiki-0003.md", "wiki-0004.md"], (
+            "nine reuses do not outrank being replaced"
+        )
         assert controls == ["wiki-0001.md"]
         assert "wiki-0001.md" not in ctx
 
