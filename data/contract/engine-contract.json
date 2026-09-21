@@ -61,6 +61,9 @@
       ]
     }
   },
+  "door_routes": [
+    "GET /approved"
+  ],
   "http_routes": [
     "GET /audit",
     "GET /health",

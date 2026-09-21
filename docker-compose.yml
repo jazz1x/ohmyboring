@@ -96,6 +96,7 @@ services:
       - boring-drudge
     environment:
       DOOR_UPSTREAM: http://boring-drudge:7700
+      DOOR_PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring
     ports:
       - "127.0.0.1:7710:7710"
     healthcheck:

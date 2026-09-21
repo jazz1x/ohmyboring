@@ -29,3 +29,8 @@ langgraph>=1.2.10
 langchain_core>=1.5.3
 langchain_ollama>=1.1.0
 pydantic>=2.13.4
+# psycopg is the door's first read of the store (agents/door/approved.py — what the morning
+# card's 「해」 judged). Bare name on purpose: scripts/test_python_deps.py matches import names
+# literally and knows no extra→distribution mapping; the Dockerfile installs psycopg[binary],
+# the same distribution with the prebuilt driver.
+psycopg>=3.2

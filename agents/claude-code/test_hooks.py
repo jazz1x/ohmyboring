@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -49,6 +50,7 @@ for _var in (
     "RECALL_TIMEOUT",
     "RECALL_RETRIES",
     "RECALL_RELEVANCE_MAX_DIST",
+    "BORING_DOOR_URL",
 ):
     os.environ.pop(_var, None)
 
@@ -340,6 +342,104 @@ class SessionStartRecallTests(unittest.TestCase):
         )
         self.assertEqual(out, "")
         self.assertIn("context failed", _err)
+
+
+class DoorApprovedSectionTests(unittest.TestCase):
+    """The 「오늘 승인한 것」 section in session-start-recall.py — three fates (AC5).
+
+    The hook must prepend what the morning card's 「해」 judged when BORING_DOOR_URL
+    points at a live door, say so on stderr and continue when the door is dead,
+    and stay silent when no door URL is configured (not configuring is normal).
+    """
+
+    class _DoorResp:
+        def __init__(self, payload):
+            self._body = json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return self._body
+
+    def _run_with_door(self, env, urlopen):
+        captured = io.StringIO()
+        stderr = io.StringIO()
+        module = _load("session_start_recall_door", "session-start-recall.py")
+        with (
+            mock.patch.object(
+                module.sys,
+                "stdin",
+                io.StringIO(json.dumps({"hook_event_name": "SessionStart", "cwd": "/tmp/my-project"})),
+            ),
+            mock.patch.object(module.sys, "stdout", captured),
+            mock.patch.object(module.sys, "stderr", stderr),
+            mock.patch.object(
+                module.DrudgeClient,
+                "context",
+                lambda _s, project=None, max_items=5: {
+                    "decisions": [],
+                    "risks": [],
+                    "facts": [],
+                    "glossary": [],
+                    "language": "ko",
+                },
+            ),
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch.object(module.urllib.request, "urlopen", urlopen),
+        ):
+            module.main()
+        return captured.getvalue(), stderr.getvalue()
+
+    def test_live_door_prepends_approved_section(self):
+        payload = {
+            "since_hours": 24,
+            "approved": [
+                {"session": "slack:C1:1758470000.5", "note": "/vault/wiki/wiki-1734.md", "at": "t"},
+                {"session": "slack:C1:1758470001.5", "note": "/vault/wiki/wiki-1735.md", "at": "t"},
+            ],
+            "contested": [],
+        }
+        seen_urls = []
+
+        def urlopen(url, timeout):
+            seen_urls.append(url)
+            return self._DoorResp(payload)
+
+        out, err = self._run_with_door({"BORING_DOOR_URL": "http://127.0.0.1:7710"}, urlopen)
+        self.assertEqual(err, "")
+        self.assertEqual(seen_urls, ["http://127.0.0.1:7710/approved?since_hours=24"])
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        approved_at = ctx.index("## 오늘 승인한 것 (2)")
+        card_at = ctx.index("📚 Project context")
+        self.assertLess(approved_at, card_at, "the approval section goes ahead of the card")
+        self.assertIn("- /vault/wiki/wiki-1734.md", ctx)
+        self.assertIn("- /vault/wiki/wiki-1735.md", ctx)
+
+    def test_dead_door_logs_to_stderr_and_omits_the_section(self):
+        def urlopen(url, timeout):
+            raise urllib.error.URLError("connection refused")
+
+        out, err = self._run_with_door({"BORING_DOOR_URL": "http://127.0.0.1:7710"}, urlopen)
+        self.assertIn("[omb-start-recall] approved fetch failed", err)
+        self.assertNotIn("오늘 승인한 것", out)
+        # the card itself still reaches the session — the hook lives
+        self.assertIn("📚 Project context", json.loads(out)["hookSpecificOutput"]["additionalContext"])
+
+    def test_no_door_url_omits_silently(self):
+        called = []
+
+        def urlopen(url, timeout):
+            called.append(url)
+            return self._DoorResp({})
+
+        out, err = self._run_with_door({}, urlopen)
+        self.assertEqual(err, "", "an unconfigured door is normal, not an error")
+        self.assertEqual(called, [])
+        self.assertNotIn("오늘 승인한 것", out)
 
 
 class DistillExitCodeTests(unittest.TestCase):

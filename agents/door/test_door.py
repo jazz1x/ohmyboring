@@ -11,8 +11,12 @@ real door runs under uvicorn in a thread against it. Covers:
       never a 200 with an empty body (AC5)
   (d) unregistered paths (GET /nope, POST /nope, GET /docs) get FastAPI's 404
       and never reach the stub — the door is not a catch-all proxy (AC6)
-  (e) the route table is read from the contract snapshot: all 24 (method, path)
-      pairs registered, nothing beyond (AC1)
+  (e) the route table is read from the contract snapshot: http_routes ∪ door_routes
+      is exactly the registered set, nothing beyond (AC1)
+  (l) GET /approved: without DOOR_PG_DSN it is 503 JSON "store not configured",
+      never a silent empty 200; with stub rows injected it answers the ADT —
+      used/contested separated, ts parsed out of the slack session name,
+      sorted newest first (AC2)
   (f) only content-type, accept, mcp-session-id, x-request-id travel upstream;
       authorization and x-forwarded-for do not (AC4)
   (g) a non-JSON upstream content-type passes through untouched (AC3)
@@ -38,13 +42,22 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, _ROOT)
 
-import door  # noqa: E402
+# Loaded as a package (the way uvicorn and the container load it) because door.py
+# imports its sibling with `from . import approved`; test_python_deps.py has no
+# notion of repo-local packages, so the import goes through importlib.
+import importlib  # noqa: E402
+
 import fastapi  # noqa: E402
 import uvicorn  # noqa: E402
+
+door = importlib.import_module("agents.door.door")
+approved = importlib.import_module("agents.door.approved")
 
 STUB_CONTENT_TYPE = "application/json; charset=utf-8"
 
@@ -269,14 +282,15 @@ class DoorTest(unittest.TestCase):
         self.assertEqual(StubHandler.hits, hits_before, "unregistered paths must not reach the stub")
 
     def test_routes_match_contract_snapshot(self):
-        entries = json.loads(door._CONTRACT.read_text(encoding="utf-8"))["http_routes"]
+        contract = json.loads(door._CONTRACT.read_text(encoding="utf-8"))
+        entries = contract["http_routes"] + contract.get("door_routes", [])
         expected = set()
         for entry in entries:
             method, path = entry.split(" ", 1)
             expected.add((method, path))
         actual = {(method, route.path) for route in door.app.routes for method in route.methods}
         self.assertEqual(actual, expected)
-        self.assertEqual(len(expected), 24)
+        self.assertEqual(len(contract["http_routes"]), 24)
 
     def test_request_header_policy(self):
         payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode()
@@ -355,6 +369,156 @@ class DoorTest(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertIn("closed", StubHandler.sse_events)
+
+
+class ApprovedSelectTests(unittest.TestCase):
+    """approved.select_approved — pure: rows in, partitioned dataclasses out (AC1)."""
+
+    NOW = datetime(2026, 9, 22, 12, 0, 0, tzinfo=approved.SEOUL)
+
+    def _ts(self, hours_ago: float) -> str:
+        at = self.NOW - timedelta(hours=hours_ago)
+        return f"slack:C1:{at.timestamp()}"
+
+    def test_window_in_and_out(self):
+        rows = [
+            ("session:" + self._ts(1), "/vault/wiki/wiki-1.md", "used"),
+            ("session:" + self._ts(30), "/vault/wiki/wiki-2.md", "used"),
+        ]
+        selection = approved.select_approved(rows, since_hours=24, now=self.NOW)
+        self.assertEqual([a.note for a in selection.approved], ["/vault/wiki/wiki-1.md"])
+        self.assertEqual(selection.contested, [])
+        self.assertEqual(selection.skipped, [])
+
+    def test_used_and_contested_are_separated(self):
+        rows = [
+            ("session:" + self._ts(1), "/a.md", "used"),
+            ("session:" + self._ts(2), "/b.md", "contested"),
+        ]
+        selection = approved.select_approved(rows, since_hours=24, now=self.NOW)
+        self.assertEqual([a.note for a in selection.approved], ["/a.md"])
+        self.assertEqual([c.note for c in selection.contested], ["/b.md"])
+
+    def test_non_slack_session_is_skipped_not_raised(self):
+        rows = [
+            ("session:ff8b2f41-uuid-session", "/a.md", "used"),
+            ("doc:/vault/wiki/wiki-9.md", "/b.md", "used"),
+        ]
+        selection = approved.select_approved(rows, since_hours=24, now=self.NOW)
+        self.assertEqual(selection.approved, [])
+        self.assertEqual(
+            [(s.session, s.reason) for s in selection.skipped],
+            [
+                ("session:ff8b2f41-uuid-session", "not a slack card session"),
+                ("doc:/vault/wiki/wiki-9.md", "not a slack card session"),
+            ],
+        )
+
+    def test_session_name_without_ts_is_a_skipped_value(self):
+        rows = [("session:slack:C1", "/a.md", "used")]
+        selection = approved.select_approved(rows, since_hours=24, now=self.NOW)
+        self.assertEqual(selection.approved, [])
+        self.assertEqual(selection.skipped[0].session, "session:slack:C1")
+        self.assertEqual(selection.skipped[0].reason, "no parseable ts in session name")
+
+    def test_sorted_newest_first(self):
+        rows = [
+            ("session:" + self._ts(3), "/old.md", "used"),
+            ("session:" + self._ts(0.5), "/new.md", "used"),
+            ("session:" + self._ts(2), "/mid.md", "used"),
+        ]
+        selection = approved.select_approved(rows, since_hours=24, now=self.NOW)
+        self.assertEqual([a.note for a in selection.approved], ["/new.md", "/mid.md", "/old.md"])
+
+    def test_parse_session_ts(self):
+        at = approved.parse_session_ts("slack:C1:1758470000.5")
+        self.assertEqual(at.tzinfo, approved.SEOUL)
+        self.assertEqual(at.timestamp(), 1758470000.5)
+        # the edge src carries a `session:` prefix — same answer
+        self.assertEqual(approved.parse_session_ts("session:slack:C1:1758470000.5"), at)
+        self.assertIsNone(approved.parse_session_ts("slack:C1"))
+        self.assertIsNone(approved.parse_session_ts("session:ff8b2f41-uuid"))
+
+
+class ApprovedRouteTests(unittest.TestCase):
+    """GET /approved through the real door app — stub rows, no DB (AC2)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                with socket.create_connection(("127.0.0.1", cls.door_port), timeout=1):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+
+    def setUp(self):
+        self._saved_dsn = os.environ.get("DOOR_PG_DSN")
+        self._rows: list[tuple[str, str, str]] = []
+        self._orig_fetch = door._fetch_edges
+        door._fetch_edges = lambda: self._rows
+
+    def tearDown(self):
+        door._fetch_edges = self._orig_fetch
+        if self._saved_dsn is None:
+            os.environ.pop("DOOR_PG_DSN", None)
+        else:
+            os.environ["DOOR_PG_DSN"] = self._saved_dsn
+
+    def test_no_dsn_is_503_never_empty_200(self):
+        os.environ.pop("DOOR_PG_DSN", None)
+        status, body, content_type = _req(self.door_port, "GET", "/approved")
+        self.assertEqual(status, 503)
+        self.assertIn("application/json", content_type)
+        self.assertEqual(json.loads(body), {"error": "store not configured"})
+
+    def test_stub_rows_answer_the_adt(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        now = datetime.now(tz=approved.SEOUL)
+        self._rows = [
+            (
+                f"session:slack:C1:{(now - timedelta(hours=2)).timestamp()}",
+                "/vault/wiki/wiki-1734.md",
+                "used",
+            ),
+            (
+                f"session:slack:C1:{(now - timedelta(hours=1)).timestamp()}",
+                "/vault/wiki/wiki-1735.md",
+                "contested",
+            ),
+            ("session:ff8b2f41-uuid", "/vault/wiki/wiki-1700.md", "used"),
+        ]
+        status, body, _ = _req(self.door_port, "GET", "/approved?since_hours=48")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["since_hours"], 48)
+        self.assertEqual(len(payload["approved"]), 1)
+        self.assertEqual(payload["approved"][0]["note"], "/vault/wiki/wiki-1734.md")
+        self.assertTrue(payload["approved"][0]["session"].startswith("slack:C1:"))
+        self.assertEqual(payload["contested"][0]["note"], "/vault/wiki/wiki-1735.md")
+        self.assertIn("+09:00", payload["approved"][0]["at"])
+        # the uuid session must not leak into either list
+        self.assertNotIn("/vault/wiki/wiki-1700.md", json.dumps(payload))
+
+    def test_bad_since_hours_is_400(self):
+        status, body, _ = _req(self.door_port, "GET", "/approved?since_hours=abc")
+        self.assertEqual(status, 400)
+        self.assertIn("since_hours", json.loads(body)["error"])
 
 
 if __name__ == "__main__":

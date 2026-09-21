@@ -9,6 +9,8 @@ the result as additionalContext.
 import json
 import os
 import sys
+import urllib.error
+import urllib.request
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
@@ -48,6 +50,21 @@ def _format_context(card: dict[str, Any], project: str) -> str:
     return "\n".join(lines)
 
 
+def _approved_section(door_url: str) -> str:
+    """「오늘 승인한 것」 — what the morning card's 「해」 judged, read from the door.
+
+    Raises on any failure — the caller logs to stderr and continues without the
+    section: a dead door must not kill the card.
+    """
+    with urllib.request.urlopen(f"{door_url}/approved?since_hours=24", timeout=5) as resp:
+        payload = json.load(resp)
+    approved = payload.get("approved") or []
+    lines = [f"## 오늘 승인한 것 ({len(approved)})"]
+    for item in approved:
+        lines.append(f"- {item['note']}")
+    return "\n".join(lines)
+
+
 def main() -> None:
     try:
         data = json.load(sys.stdin)
@@ -68,7 +85,16 @@ def main() -> None:
         print(f"[omb-start-recall] context failed: {e}", file=sys.stderr)
         return
 
-    ctx = _format_context(resp, project or "recent work")
+    sections: list[str] = []
+    door_url = os.environ.get("BORING_DOOR_URL")
+    if door_url:
+        try:
+            sections.append(_approved_section(door_url.rstrip("/")))
+        except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
+            print(f"[omb-start-recall] approved fetch failed: {e}", file=sys.stderr)
+
+    sections.append(_format_context(resp, project or "recent work"))
+    ctx = "\n\n".join(sections)
     if not ctx.strip():
         return
 

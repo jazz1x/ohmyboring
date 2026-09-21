@@ -15,7 +15,9 @@ completion first, and the upstream socket is closed when the client goes away �
 an endless engine stream stays endless through the door. An engine answer, 4xx
 included, passes through as-is; an engine that cannot be reached is a 502 JSON
 body, never a silent 200 with an empty one. Unregistered paths get FastAPI's
-404: this is a door, not a catch-all proxy.
+404: this is a door, not a catch-all proxy. One route is the door's own,
+registered outside the engine's table: GET /approved reads the graph store
+(what the morning card's 「해」 judged) and never touches the upstream.
 """
 
 from __future__ import annotations
@@ -28,10 +30,14 @@ import socket
 import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 
+import psycopg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+
+from . import approved
 
 _TIMEOUT = float(os.environ.get("DOOR_TIMEOUT", "130"))
 
@@ -104,6 +110,8 @@ async def _proxy(request: Request) -> Response:
 
 
 def _load_routes() -> dict[str, list[str]]:
+    """Proxy table: the engine's http_routes only. door_routes are the door's own
+    and are registered natively below — never forwarded upstream."""
     entries = json.loads(_CONTRACT.read_text(encoding="utf-8"))["http_routes"]
     by_path: dict[str, list[str]] = {}
     for entry in entries:
@@ -112,8 +120,65 @@ def _load_routes() -> dict[str, list[str]]:
     return by_path
 
 
+def _load_door_routes() -> dict[str, str]:
+    """Snapshot door_routes as {path: method} — the native registration table."""
+    contract = json.loads(_CONTRACT.read_text(encoding="utf-8"))
+    pairs = (entry.split(" ", 1) for entry in contract.get("door_routes", []))
+    return {path: method for method, path in pairs}
+
+
+_EDGES_SQL = (
+    "select src, dst, kind from edge where src like 'session:slack:%' and kind in ('used', 'contested')"
+)
+
+
+def _fetch_edges() -> list[tuple[str, str, str]]:
+    with psycopg.connect(os.environ["DOOR_PG_DSN"]) as conn, conn.cursor() as cur:
+        cur.execute(_EDGES_SQL)
+        return cur.fetchall()
+
+
+def _approved_payload(since_hours: int) -> dict:
+    rows = _fetch_edges()
+    selection = approved.select_approved(rows, since_hours, datetime.now(tz=approved.SEOUL))
+    return {
+        "since_hours": since_hours,
+        "approved": [
+            {"session": item.session, "note": item.note, "at": item.at.isoformat(timespec="seconds")}
+            for item in selection.approved
+        ],
+        "contested": [
+            {"session": item.session, "note": item.note, "at": item.at.isoformat(timespec="seconds")}
+            for item in selection.contested
+        ],
+    }
+
+
+async def _approved(request: Request) -> Response:
+    raw = request.query_params.get("since_hours", "24")
+    try:
+        since_hours = int(raw)
+        if since_hours < 0:
+            raise ValueError
+    except ValueError:
+        return JSONResponse({"error": "since_hours must be a non-negative integer"}, status_code=400)
+    if not os.environ.get("DOOR_PG_DSN"):
+        return JSONResponse({"error": "store not configured"}, status_code=503)
+    try:
+        payload = await asyncio.to_thread(_approved_payload, since_hours)
+    except psycopg.OperationalError as e:
+        return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
+    return JSONResponse(payload)
+
+
 for _path, _methods in _load_routes().items():
     app.add_api_route(_path, _proxy, methods=_methods)
+
+# The door's own routes, driven by the snapshot's door_routes key. A snapshot
+# entry without a native handler here is a KeyError at startup, not a proxy hole.
+_DOOR_HANDLERS = {"GET /approved": _approved}
+for _path, _method in _load_door_routes().items():
+    app.add_api_route(_path, _DOOR_HANDLERS[f"{_method} {_path}"], methods=[_method])
 
 
 if __name__ == "__main__":
