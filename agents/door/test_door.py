@@ -17,6 +17,13 @@ real door runs under uvicorn in a thread against it. Covers:
       authorization and x-forwarded-for do not (AC4)
   (g) a non-JSON upstream content-type passes through untouched (AC3)
   (h) an upstream response without content-type stays without one (AC3)
+  (i) a text/event-stream answer is relayed chunk by chunk: the first chunk
+      reaches the client before the stub sends its second one, the response is
+      chunked (no content-length) (AC1, AC2)
+  (j) the query string travels verbatim: /query-log?limit=1 arrives with the
+      query attached, a query-less request gets no "?" (AC4)
+  (k) a client that disconnects mid-stream makes the door close the upstream —
+      the stub sees the connection go away (AC6)
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ import os
 import socket
 import sys
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -35,9 +43,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import door  # noqa: E402
+import fastapi  # noqa: E402
 import uvicorn  # noqa: E402
 
 STUB_CONTENT_TYPE = "application/json; charset=utf-8"
+
+SSE_FIRST = b"event: first\ndata: one\n\n"
+SSE_SECOND = b"event: second\ndata: two\n\n"
 
 # Deliberately non-canonical bytes: odd spacing, a non-ASCII value. Any
 # json.loads → json.dumps round-trip changes these bytes, so a door that
@@ -62,15 +74,21 @@ class StubHandler(BaseHTTPRequestHandler):
     seen_bodies: list[bytes] = []
     seen_content_types: list[str] = []
     seen_headers: list[dict[str, str]] = []
+    last_path: str | None = None
+    sse_events: list[str] = []
     hits = 0
 
     def do_GET(self):
+        type(self).last_path = self.path
         if self.path == "/health":
             self._reply(200, HEALTH_BODY)
+        elif self.path == "/sse":
+            self._sse()
         else:
             self._reply(404, b'{"error":"stub 404"}')
 
     def do_POST(self):
+        type(self).last_path = self.path
         length = int(self.headers.get("content-length", 0))
         body = self.rfile.read(length)
         type(self).seen_bodies.append(body)
@@ -96,6 +114,32 @@ class StubHandler(BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _sse(self) -> None:
+        type(self).sse_events.append("open")
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("cache-control", "no-cache")
+        self.end_headers()
+        self.wfile.write(SSE_FIRST)
+        self.wfile.flush()
+        type(self).sse_events.append("chunk1")
+        time.sleep(0.2)
+        try:
+            self.wfile.write(SSE_SECOND)
+            self.wfile.flush()
+            type(self).sse_events.append("chunk2")
+        except (BrokenPipeError, ConnectionResetError):
+            type(self).sse_events.append("closed")
+            return
+        self.request.settimeout(3.0)
+        try:
+            if self.rfile.read(1) == b"":
+                type(self).sse_events.append("closed")
+        except TimeoutError:
+            pass
+        except (ConnectionResetError, BrokenPipeError):
+            type(self).sse_events.append("closed")
 
     def log_message(self, *args):
         pass
@@ -132,8 +176,15 @@ class DoorTest(unittest.TestCase):
         )
         cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
         cls.door_thread.start()
+        cls.sse_port = _free_port()
+        cls.sse_app = fastapi.FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+        cls.sse_app.add_api_route("/sse", door._proxy, methods=["GET"])
+        cls.sse_server = uvicorn.Server(
+            uvicorn.Config(cls.sse_app, host="127.0.0.1", port=cls.sse_port, log_level="warning")
+        )
+        cls.sse_thread = threading.Thread(target=cls.sse_server.run, daemon=True)
+        cls.sse_thread.start()
         deadline = 10.0
-        import time
 
         while deadline > 0:
             try:
@@ -147,9 +198,22 @@ class DoorTest(unittest.TestCase):
         else:
             raise RuntimeError("door did not come up within 10s")
 
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                with socket.create_connection(("127.0.0.1", cls.sse_port), timeout=1):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("sse app did not come up within 10s")
+
     @classmethod
     def tearDownClass(cls):
         cls.door_server.should_exit = True
+        cls.sse_server.should_exit = True
         cls.stub.shutdown()
         cls.stub.server_close()
         if cls._saved_upstream is None:
@@ -248,6 +312,49 @@ class DoorTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertIsNone(content_type)
+
+    def test_sse_first_chunk_streams_before_stub_sends_second(self):
+        sock = socket.create_connection(("127.0.0.1", self.sse_port), timeout=10)
+        try:
+            sock.sendall(b"GET /sse HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            wire = b""
+            started = time.monotonic()
+            while b"\r\n\r\n" not in wire:
+                wire += sock.recv(4096)
+            headers, _, body = wire.partition(b"\r\n\r\n")
+            headers = headers.lower()
+            self.assertIn(b"content-type: text/event-stream", headers)
+            self.assertNotIn(b"content-length", headers)
+            self.assertLess(time.monotonic() - started, 0.2)
+            started = time.monotonic()
+            while SSE_FIRST not in body:
+                chunk = sock.recv(64)
+                self.assertTrue(chunk, "stream ended before the first chunk")
+                body += chunk
+            self.assertLess(time.monotonic() - started, 0.2)
+        finally:
+            sock.close()
+
+    def test_query_string_passes_through_verbatim(self):
+        _req(self.door_port, "GET", "/query-log?limit=1")
+        self.assertEqual(StubHandler.last_path, "/query-log?limit=1")
+        _req(self.door_port, "GET", "/query-log")
+        self.assertEqual(StubHandler.last_path, "/query-log")
+
+    def test_client_disconnect_closes_upstream(self):
+        StubHandler.sse_events.clear()
+        sock = socket.create_connection(("127.0.0.1", self.sse_port), timeout=10)
+        sock.sendall(b"GET /sse HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        wire = b""
+        while b"\r\n\r\n" not in wire:
+            wire += sock.recv(4096)
+        sock.close()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if "closed" in StubHandler.sse_events:
+                break
+            time.sleep(0.05)
+        self.assertIn("closed", StubHandler.sse_events)
 
 
 if __name__ == "__main__":

@@ -9,23 +9,29 @@ snapshot's routes to the engine at DOOR_UPSTREAM (default http://127.0.0.1:7700)
 Only the headers the engine reads travel on (content-type, accept,
 mcp-session-id, x-request-id); the response carries the upstream content-type,
 or none at all when the engine sent none — never a default. Status code and
-body bytes come back exactly as sent. An engine answer, 4xx included, passes
-through as-is; an engine that cannot be reached is a 502 JSON body, never a
-silent 200 with an empty one. Unregistered paths get FastAPI's 404: this is a
-door, not a catch-all proxy.
+body bytes come back exactly as sent. An answer whose content-type is
+text/event-stream is relayed chunk by chunk as it arrives, never read to
+completion first, and the upstream socket is closed when the client goes away —
+an endless engine stream stays endless through the door. An engine answer, 4xx
+included, passes through as-is; an engine that cannot be reached is a 502 JSON
+body, never a silent 200 with an empty one. Unregistered paths get FastAPI's
+404: this is a door, not a catch-all proxy.
 """
 
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import os
+import socket
 import urllib.error
 import urllib.request
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 _TIMEOUT = float(os.environ.get("DOOR_TIMEOUT", "130"))
 
@@ -43,14 +49,39 @@ def _pass_through(status: int, body: bytes, content_type: str | None) -> Respons
     return Response(content=body, status_code=status, headers=headers)
 
 
+async def _stream_chunks(upstream: http.client.HTTPResponse) -> AsyncIterator[bytes]:
+    try:
+        while chunk := await asyncio.to_thread(upstream.read1, 1024):
+            yield chunk
+    finally:
+        # A worker thread may still be blocked in read1; on macOS close() is
+        # deferred until that recv returns, so shut the socket down first.
+        dup = socket.fromfd(upstream.fileno(), socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            dup.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        finally:
+            dup.close()
+        upstream.close()
+
+
 def _fetch(url: str, body: bytes, headers: dict[str, str], method: str) -> Response:
     upstream_req = urllib.request.Request(url, data=body if body else None, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(upstream_req, timeout=_TIMEOUT) as upstream:
-            return _pass_through(upstream.status, upstream.read(), upstream.headers.get("content-type"))
+        upstream = urllib.request.urlopen(upstream_req, timeout=_TIMEOUT)
     except urllib.error.HTTPError as e:
         # The engine answered; it just said no. A faithful door passes that through.
         return _pass_through(e.code, e.read(), e.headers.get("content-type"))
+    content_type = upstream.headers.get("content-type")
+    if content_type is not None and content_type.startswith("text/event-stream"):
+        return StreamingResponse(
+            _stream_chunks(upstream),
+            status_code=upstream.status,
+            headers={"content-type": content_type},
+        )
+    with upstream:
+        return _pass_through(upstream.status, upstream.read(), content_type)
 
 
 async def _proxy(request: Request) -> Response:
@@ -63,8 +94,6 @@ async def _proxy(request: Request) -> Response:
         if name in request.headers
     }
     try:
-        # The upstream call is blocking and can outlive any single request (the
-        # p95 brief is ~77s); off the loop so one slow call cannot starve the rest.
         return await asyncio.to_thread(_fetch, url, body, headers, request.method)
     except OSError:
         # URLError, ConnectionRefusedError, timeout — one class: the engine is gone.
