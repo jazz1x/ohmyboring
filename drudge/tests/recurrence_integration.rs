@@ -166,6 +166,98 @@ async fn recurrence_pair_is_one_row_with_oldest_first() {
     );
 }
 
+/// Two newer claims whose pairs interleave in the nearest-first order (X 0.05, Y 0.10,
+/// X 0.15, Y 0.18). Grouping by "same as the previous row" split each into two rows — live,
+/// 6 newers came out as 16. The register promises one row per newer claim.
+#[tokio::test]
+async fn interleaved_pairs_still_gather_one_row_per_newer_claim() {
+    let Some(dsn) = test_dsn() else { return };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let project = unique_project("rec-mix");
+    let now = SystemTime::now();
+    let day = Duration::from_hours(24);
+    let path_x = unique_path("mix-x");
+    let path_y = unique_path("mix-y");
+    let olders = [
+        (unique_path("mix-x1"), 0usize, 1usize, 0.95f32, 8u32),
+        // Olders of one newer must stay > 0.2 from each other (0.95·0.80 = 0.76 → 0.24) or
+        // they pair with each other and the fixture answers a different question.
+        (unique_path("mix-x2"), 0, 2, 0.80, 12),
+        (unique_path("mix-y1"), 3, 4, 0.90, 9),
+        (unique_path("mix-y2"), 3, 5, 0.82, 14),
+    ];
+    for p in [&path_x, &path_y] {
+        seed_note(&store, p, &project).await;
+    }
+    for (p, _, _, _, _) in &olders {
+        seed_note(&store, p, &project).await;
+    }
+    let subject_x = unique_project("mix-subj-x");
+    let subject_y = unique_project("mix-subj-y");
+    seed_claim(
+        &store,
+        &path_x,
+        &subject_x,
+        "observed",
+        "the x trouble came back this week again",
+        "risk",
+        now - day * 2,
+        unit_vec(1024, 0),
+    )
+    .await;
+    seed_claim(
+        &store,
+        &path_y,
+        &subject_y,
+        "observed",
+        "the y trouble came back this week again",
+        "risk",
+        now - day * 2,
+        unit_vec(1024, 3),
+    )
+    .await;
+    for (p, one_at, tilt_at, cos, days_ago) in &olders {
+        let subject = if *one_at == 0 { &subject_x } else { &subject_y };
+        seed_claim(
+            &store,
+            p,
+            subject,
+            "symptom",
+            "an older sighting of the same trouble",
+            "risk",
+            now - day * *days_ago,
+            tilted_vec(1024, *one_at, *tilt_at, *cos),
+        )
+        .await;
+    }
+
+    let rows = store
+        .recurrences(30, Some(&project), 10)
+        .await
+        .expect("recurrences");
+    assert_eq!(
+        rows.len(),
+        2,
+        "one row per newer claim, however the pairs interleave"
+    );
+    for row in &rows {
+        assert_eq!(
+            row.older.len(),
+            2,
+            "both olders gather under {}",
+            row.newer.source_path
+        );
+    }
+    assert_eq!(
+        rows[0].newer.source_path, path_x,
+        "nearest pair first (x at 0.05)"
+    );
+    assert!(
+        rows[0].distance < rows[1].distance,
+        "row distance is the group's smallest"
+    );
+}
+
 #[tokio::test]
 async fn same_day_pair_is_not_a_recurrence() {
     // Control 1: near-identical values, zero-day gap — the same write restated, not a repeat.

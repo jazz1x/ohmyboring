@@ -1866,8 +1866,12 @@ impl Store {
             .context("recurrences")?;
         // Pairs arrive nearest-first, so the first row seen for a newer claim carries that
         // group's smallest distance; the group order below is exactly the sort the register
-        // promises. `limit` counts newers, not pairs.
+        // promises. `limit` counts newers, not pairs. Rows of one newer claim are NOT
+        // adjacent — the sort interleaves them with other claims' pairs — so grouping goes
+        // through a key→index map, not "same as the previous row" (live: 6 newers came out
+        // as 16 rows that way).
         let mut out: Vec<Recurrence> = Vec::new();
+        let mut index: HashMap<(String, String, String, SystemTime), usize> = HashMap::new();
         for r in &rows {
             let newer = ClaimRef {
                 source_path: r.get(0),
@@ -1888,21 +1892,23 @@ impl Store {
             let distance: f32 = r.get(12);
             let days_apart: i64 = r.get(13);
             let label_only: bool = r.get(14);
-            match out.last_mut() {
-                Some(last)
-                    if last.newer.subject == newer.subject
-                        && last.newer.predicate == newer.predicate
-                        && last.newer.valid_from == newer.valid_from =>
-                {
-                    last.older.push(older);
-                }
-                _ => out.push(Recurrence {
+            let key = (
+                newer.source_path.clone(),
+                newer.subject.clone(),
+                newer.predicate.clone(),
+                newer.valid_from,
+            );
+            if let Some(&i) = index.get(&key) {
+                out[i].older.push(older);
+            } else {
+                index.insert(key, out.len());
+                out.push(Recurrence {
                     newer,
                     older: vec![older],
                     distance,
                     days_apart,
                     label_only,
-                }),
+                });
             }
         }
         for row in &mut out {
