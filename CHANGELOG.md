@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **The changelog is gated** — a branch whose commits announce a `feat` or `fix` in shipped source must also touch this file, checked by `scripts/test_changelog.py` in `guard.sh`. Measured when the gate was written: the file had last been touched 157 merges earlier, by a commit titled "record the 33 commits Unreleased was missing".
 - **The injection carries what the note settled** — each recalled snippet now arrives with up to two of its claims (`RECALL_CLAIMS_PER_HIT`, default 2), so the agent reads the decision rather than only the prose around it. Measured on a week of real traffic: 71.3% of injected hits have a claim to give, at 102 characters per hit against the 840 the snippets already spend.
 - **Related notes follow a shared claim** — retrieval used to walk concept edges only, leaving 10,886 of 11,123 claim-sharing document pairs unreachable. Two notes that answered the same question now find each other, weighted above two notes that merely cover the same area.
 - **The corpus counts what only labels** — every sync reports the current claims whose value is a tag or whose predicate restates its kind (69.1% when the count was added), so a corpus drifting that way stops looking identical to a healthy one.
