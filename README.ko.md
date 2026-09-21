@@ -231,6 +231,7 @@ make readiness
 | `CODEX_DISTILL_CLAMP` | Codex 세션에 대한 동일한 값; `INGEST_CLAMP`, 그다음 `12000` |
 | `KIMI_DISTILL_CLAMP` | Kimi Code 세션에 대한 동일한 값; `INGEST_CLAMP`, 그다음 `12000` |
 | `DISTILL_BACKSTOP_CLAMP` | 호출자가 clamp 하지 않고 넘긴 경우에만 걸리는 최후 상한(`48000`). 위 세 기본값보다 의도적으로 높게 두어, 그중 하나를 올렸을 때 조용히 되잘리지 않게 합니다. 여기 걸리면 어느 노브를 올려야 하는지 로그로 알려줍니다 |
+| `RECALL_CLAIMS_PER_HIT` | 주입되는 스니펫마다 함께 실어 보낼 claim 개수(`2`). claim은 무엇을 정했고 다음이 무엇이며 무엇에 물렸는지입니다 — 스니펫이 그 노트가 무엇에 관한 것인지 말한다면, claim은 그것이 무엇으로 끝났는지 말합니다. 실제 한 주 주입으로 실측: 1개면 히트당 59자, 2개면 102자이고 스니펫 세 개가 이미 쓰는 840자 옆입니다. 히트의 54.4%가 두 번째 claim을 가지고 있습니다. `0`이면 인계를 끕니다 |
 | `RECALL_RELEVANCE_MAX_DIST` | 회수된 hit이 주제에서 얼마나 벗어났는지를 *측정*하는 cosine 거리 상한(`0.514`). 이 값으로 버리는 일은 없습니다 — 스칼라 하나로는 두 부류가 갈리지 않습니다(`data/eval` 밴드가 겹치고, `0.514`는 라이브 주입 23건 중 47.8%를 버렸을 값입니다). 그래서 비용을 지불하는 대신 보고만 합니다. `vector_cosine`만 비교하며, `text_rank` hit이나 거리가 없는 hit은 이 값으로 판정하지 않습니다 |
 | `BORING_EVENT_LOG` | 로컬 NDJSON fallback 스풀; 기본값 `~/.cache/oh-my-boring/events.ndjson` |
 | `BORING_EVENT_SINK` | 이벤트 sink 모드: `db`(기본), `spool`, `both`. `db`는 엔진 DB에 먼저 쓰고 실패 시에만 스풀 |
@@ -482,7 +483,7 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 
 (VS Code Copilot은 root key `servers`를 쓰는 `.vscode/mcp.json`을 사용합니다. CLI 대안: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. compose sibling 컨테이너는 `http://boring-drudge:7700/mcp`로 접근합니다.)
 
-사용 가능한 tools (22개): `recall` · `neighbors` · `claims`(기억 검색) · `code_search` · `code_symbol` · `code_index_status`(별도 AST 코드 코퍼스) · `ask` · `brief` · `weekly_brief` · `project_status` · `decisions` · `risks` · `next_actions` · `stalled`(생성 — LLM 실행) · `context` · `corpus_status` · `events` · `config_get`(구조화 / introspection) · `remember` · `forget` · `classify_repo` · `sync`(쓰기 / 유지보수).
+사용 가능한 tools (22개): `recall` · `neighbors` · `claims`(기억 검색) · `code_search` · `code_symbol` · `code_index_status`(별도 AST 코드 코퍼스) · `ask` · `brief` · `weekly_brief` · `project_status`(생성 — LLM 실행) · `decisions` · `risks` · `next_actions` · `stalled`(레지스터 — 행 반환, LLM 없음) · `context` · `corpus_status` · `events` · `config_get`(구조화 / introspection) · `remember` · `forget` · `classify_repo` · `sync`(쓰기 / 유지보수).
 
 기본 wiki-first 모드(`BORING_VECTOR=off`)에서는 recency/vector 순서, 그래프, 로컬 이벤트 DB에 의존하는 tool이 pgvector 백엔드를 필요로 하며, `BORING_VECTOR=on`을 설정하기 전까지 JSON-RPC `-32603`을 반환합니다: `neighbors`, `claims`, `corpus_status`, `events`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`. `recall`과 `ask`는 `vault/wiki`를 직접 읽고, `context`는 호출 가능하지만 store가 없으면 빈 claim 카드를 반환합니다. `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `code_search`, `code_symbol`, `code_index_status`는 vector 모드가 필요 없습니다. 세 코드 tool은 활성화된 `code_index` source와 선행 `code-sync`가 필요합니다.
 
@@ -494,7 +495,8 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 - `claims` *(`BORING_VECTOR=on` 필요)* — 쿼리 근처의 현재(미대체) `{subject, predicate, value}` 결정 top-k.
 - `corpus_status` *(`BORING_VECTOR=on` 필요)* — KB 상태 스냅샷(파일/청크 수, origin/kind/project별, 오염도, graph/semantic 노드+엣지).
 - `events` *(`BORING_VECTOR=on` 필요)* — DB에 OpenTelemetry 형태로 저장된 최근 workflow/adapter 이벤트를 반환합니다. component, event, status, run_id, workflow, since_hours로 필터링할 수 있습니다.
-- `ask` / `brief` / `weekly_brief` / `project_status` / `decisions` / `risks` / `next_actions` / `stalled` — LLM을 실행하는 tool: `ask`는 출처를 인용해 질문에 답하고(wiki-first 모드에서 동작), 나머지는 recency/claim 레지스터이며 `BORING_VECTOR=on`이 필요합니다.
+- `ask` / `brief` / `weekly_brief` / `project_status` — LLM을 실행하는 tool. `ask`는 출처를 인용해 답하고 wiki-first 모드에서도 동작하며, 브리핑 셋은 `BORING_VECTOR=on`이 필요합니다.
+- `decisions` / `risks` / `next_actions` / `stalled` — 레지스터. claim 행을 그대로 돌려주며 경로에 LLM이 없습니다: 같은 질문에 같은 답이고, 산문을 짓던 때의 119.6초 대신 0.02초로 실측됐습니다. `BORING_VECTOR=on`이 필요하고, 결과가 잘리면 응답이 그렇게 말합니다(`limit_applied`).
 - `forget` — wiki id나 정확한 제목으로 노트를 삭제합니다. wiki 파일을 제거하고, vector 모드에서는 임베딩·그래프 엣지·claim도 함께 정리합니다.
 
 구조화 tool(`neighbors`, `claims`, `corpus_status`, `events`, `config_get`, `code_search`, `code_symbol`, `code_index_status`, `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `context`)은 텍스트 블록과 함께 네이티브 `structuredContent`(JSON)를 반환하고, 산문/ack tool(`recall`, `remember`, `forget`, `sync`, `classify_repo`)은 텍스트를 반환합니다.
