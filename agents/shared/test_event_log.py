@@ -336,5 +336,57 @@ class EventLogTests(unittest.TestCase):
         self.assertEqual(failures, [])
 
 
+class SpoolReplayTests(unittest.TestCase):
+    """The spool is where a row lands when the engine is down; nothing brought it back.
+
+    Measured 2026-09-21 after a Docker restart: `doctor` reported 2 verdict-kind rows trapped
+    from a session inside the open window, and the only remedy was a person with curl.
+    """
+
+    def _spool(self, d, lines):
+        path = os.path.join(d, "events.ndjson")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("".join(f"{ln}\n" for ln in lines))
+        return path
+
+    def test_replay_hands_rows_to_the_engine_and_keeps_only_the_refused(self):
+        rows = [json.dumps({"ts": "t1", "component": "c", "event": "e1", "status": "ok"}),
+                json.dumps({"ts": "t2", "component": "c", "event": "e2", "status": "ok"}),
+                json.dumps({"ts": "t3", "component": "c", "event": "e3", "status": "ok"})]
+        with tempfile.TemporaryDirectory() as d:
+            path = self._spool(d, rows)
+            refuse = {"e2"}
+            with mock.patch.object(
+                event_log, "_try_store_in_engine", side_effect=lambda p: p["event"] not in refuse
+            ), mock.patch.dict(os.environ, {"BORING_EVENT_LOG": path}):
+                counts = event_log.replay_spool()
+            self.assertEqual(counts, {"replayed": 2, "kept": 1, "unparseable": 0})
+            left = [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
+            self.assertEqual([r["event"] for r in left], ["e2"], "only the refused row stays")
+
+    def test_a_row_that_does_not_parse_is_kept_and_counted_not_dropped(self):
+        rows = [json.dumps({"ts": "t1", "component": "c", "event": "e1", "status": "ok"}), "{not json"]
+        with tempfile.TemporaryDirectory() as d:
+            path = self._spool(d, rows)
+            with mock.patch.object(event_log, "_try_store_in_engine", return_value=True), \
+                 mock.patch.dict(os.environ, {"BORING_EVENT_LOG": path}):
+                counts = event_log.replay_spool()
+            self.assertEqual(counts, {"replayed": 1, "kept": 0, "unparseable": 1})
+            self.assertEqual(open(path, encoding="utf-8").read().strip(), "{not json")
+
+    def test_an_engine_that_is_still_down_leaves_the_spool_untouched(self):
+        """The control: a replay that cannot reach the engine must change nothing, or a
+        second outage would lose what the first one saved."""
+        rows = [json.dumps({"ts": "t1", "component": "c", "event": "e1", "status": "ok"})]
+        with tempfile.TemporaryDirectory() as d:
+            path = self._spool(d, rows)
+            before = open(path, encoding="utf-8").read()
+            with mock.patch.object(event_log, "_try_store_in_engine", return_value=False), \
+                 mock.patch.dict(os.environ, {"BORING_EVENT_LOG": path}):
+                counts = event_log.replay_spool()
+            self.assertEqual(counts, {"replayed": 0, "kept": 1, "unparseable": 0})
+            self.assertEqual(open(path, encoding="utf-8").read(), before)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

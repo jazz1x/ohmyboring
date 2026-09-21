@@ -12,6 +12,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 계기들이 자기가 못 본 것을 못 봤다고 말하기 시작했다.
 
 ### Added
+- **The spool drains into the engine** — `make events-replay` hands rows spooled during an outage back to the engine and keeps only what it still refuses. `doctor` had the alarm ("EVENTS TRAPPED IN THE SPOOL") and no remedy; after one Docker restart, 102 rows — 2 of them verdict-kind, inside the open window — sat there until this replayed them.
 - **The changelog is gated** — a branch whose commits announce a `feat` or `fix` in shipped source must also touch this file, checked by `scripts/test_changelog.py` in `guard.sh`. Measured when the gate was written: the file had last been touched 157 merges earlier, by a commit titled "record the 33 commits Unreleased was missing".
 - **The injection carries what the note settled** — each recalled snippet now arrives with up to two of its claims (`RECALL_CLAIMS_PER_HIT`, default 2), so the agent reads the decision rather than only the prose around it. Measured on a week of real traffic: 71.3% of injected hits have a claim to give, at 102 characters per hit against the 840 the snippets already spend.
 - **Related notes follow a shared claim** — retrieval used to walk concept edges only, leaving 10,886 of 11,123 claim-sharing document pairs unreachable. Two notes that answered the same question now find each other, weighted above two notes that merely cover the same area.
