@@ -18,9 +18,9 @@ use crate::serve::{
     AppError, AppState, AskReq, AskResp, CompactResp, EventIngestResp, EventLogEntry, EventLogReq,
     EventLogResp, GraphReq, GraphResp, HealthResp, MCP_MAX_RESULTS, MCP_MAX_TOKENS, ProjectsResp,
     QueryLogEntry, QueryLogReq, QueryLogResp, RecallLabelEntry, RecallLabelJudgeStats,
-    RecallLabelReq, RecallLabelStatsResp, RecallLabelsReq, RecallLabelsResp, RelatedNote,
-    SearchHit, SearchResp, StalledReq, SyncResp, SyncState, count_wiki_notes, spawn_query_log,
-    vector_disabled,
+    RecallLabelReq, RecallLabelStatsResp, RecallLabelsReq, RecallLabelsResp, RecurrencesReq,
+    RecurrencesResp, RelatedNote, SearchHit, SearchResp, StalledReq, SyncResp, SyncState,
+    count_wiki_notes, recurrences_days, recurrences_limit, spawn_query_log, vector_disabled,
 };
 use crate::store::{EventLogFilter, LoggedHit, Store};
 use std::collections::HashSet;
@@ -326,6 +326,36 @@ pub(crate) async fn handle_stalled(
         answer: out.answer,
         sources: out.sources,
         injected_claims: Vec::new(),
+    }))
+}
+
+/// Recurrence register — recent risk/blocked claims whose value restates an older one's
+/// from a different note ("the same mistake again"). Rows only, no LLM.
+pub(crate) async fn handle_recurrences(
+    State(s): State<AppState>,
+    Json(req): Json<RecurrencesReq>,
+) -> Result<Json<RecurrencesResp>, AppError> {
+    let started = Instant::now();
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let days = recurrences_days(req.days);
+    let limit = recurrences_limit(req.limit);
+    let rows = store
+        .recurrences(days, req.project.as_deref(), limit)
+        .await?;
+    spawn_query_log(
+        s.store.clone(),
+        "recurrences",
+        req.project.clone().unwrap_or_default(),
+        Vec::new(),
+        Vec::new(),
+        format!("{} recurrence rows", rows.len()),
+        started.elapsed(),
+    );
+    Ok(Json(RecurrencesResp {
+        rows,
+        days,
+        max_distance: crate::store::RECURRENCE_MAX_DISTANCE,
+        min_days_apart: crate::store::RECURRENCE_MIN_DAYS_APART,
     }))
 }
 

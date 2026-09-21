@@ -99,4 +99,4 @@ Codex will automatically invoke the right ohmyboring tool:
 
 ## Available tools
 
-`context`, `recall`, `ask`, `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `project_status`, `weekly_brief`, `decisions`, `risks`, `next_actions`, `stalled`, `brief`, `claims`, `corpus_status`, `events`, `neighbors`, `code_search`, `code_symbol`, `code_index_status`, `verdict`.
+`context`, `recall`, `ask`, `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `project_status`, `weekly_brief`, `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `brief`, `claims`, `corpus_status`, `events`, `neighbors`, `code_search`, `code_symbol`, `code_index_status`, `verdict`.

@@ -442,6 +442,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | `POST /context` / `context` | 구조화된 context 카드: decisions, risks, facts, glossary, next_actions | 불필요 |
 | `POST /next_actions` / `next_actions` | 다음 행동 대장: 명시된 다음 단계 + 활성 blocker | 필요 |
 | `POST /stalled` / `stalled` | 정체 대장: 오래된 다음 단계와 blocker | 필요 |
+| `POST /recurrences` / `recurrences` | 재발 대장: 과거의 실수를 되풀이하는 최근 risk/blocked claim | 필요 |
 | `POST /status` / `project_status` | 30일 프로젝트 상태 (Done/Next/Blocked/Decisions/Risks) | 필요 |
 | `POST /weekly` / `weekly_brief` | 프로젝트 전반의 최근 7일 | 필요 |
 | `POST /decisions` / `decisions` | 프로젝트의 decision claim | 필요 |
@@ -483,12 +484,13 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 
 (VS Code Copilot은 root key `servers`를 쓰는 `.vscode/mcp.json`을 사용합니다. CLI 대안: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. compose sibling 컨테이너는 `http://boring-drudge:7700/mcp`로 접근합니다.)
 
-사용 가능한 tools (23개): `recall` · `neighbors` · `claims`(기억 검색) · `code_search` · `code_symbol` · `code_index_status`(별도 AST 코드 코퍼스) · `ask` · `brief` · `weekly_brief` · `project_status`(생성 — LLM 실행) · `decisions` · `risks` · `next_actions` · `stalled`(레지스터 — 행 반환, LLM 없음) · `context` · `corpus_status` · `events` · `config_get`(구조화 / introspection) · `remember` · `forget` · `classify_repo` · `sync`(쓰기 / 유지보수) · `verdict`(걸어준 노트에 대한 판정).
+사용 가능한 tools (24개): `recall` · `neighbors` · `claims`(기억 검색) · `code_search` · `code_symbol` · `code_index_status`(별도 AST 코드 코퍼스) · `ask` · `brief` · `weekly_brief` · `project_status`(생성 — LLM 실행) · `decisions` · `risks` · `next_actions` · `stalled` · `recurrences`(레지스터 — 행 반환, LLM 없음) · `context` · `corpus_status` · `events` · `config_get`(구조화 / introspection) · `remember` · `forget` · `classify_repo` · `sync`(쓰기 / 유지보수) · `verdict`(걸어준 노트에 대한 판정).
 
-기본 wiki-first 모드(`BORING_VECTOR=off`)에서는 recency/vector 순서, 그래프, 로컬 이벤트 DB에 의존하는 tool이 pgvector 백엔드를 필요로 하며, `BORING_VECTOR=on`을 설정하기 전까지 JSON-RPC `-32603`을 반환합니다: `neighbors`, `claims`, `corpus_status`, `events`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `verdict`. `recall`과 `ask`는 `vault/wiki`를 직접 읽고, `context`는 호출 가능하지만 store가 없으면 빈 claim 카드를 반환합니다. `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `code_search`, `code_symbol`, `code_index_status`는 vector 모드가 필요 없습니다. 세 코드 tool은 활성화된 `code_index` source와 선행 `code-sync`가 필요합니다.
+기본 wiki-first 모드(`BORING_VECTOR=off`)에서는 recency/vector 순서, 그래프, 로컬 이벤트 DB에 의존하는 tool이 pgvector 백엔드를 필요로 하며, `BORING_VECTOR=on`을 설정하기 전까지 JSON-RPC `-32603`을 반환합니다: `neighbors`, `claims`, `corpus_status`, `events`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `verdict`. `recall`과 `ask`는 `vault/wiki`를 직접 읽고, `context`는 호출 가능하지만 store가 없으면 빈 claim 카드를 반환합니다. `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `code_search`, `code_symbol`, `code_index_status`는 vector 모드가 필요 없습니다. 세 코드 tool은 활성화된 `code_index` source와 선행 `code-sync`가 필요합니다.
 
 - `next_actions` *(`BORING_VECTOR=on` 필요)* — 다음 행동 레지스터: 최근 `next` claim과 활성 `blocked` claim을 짧은 할 일/차단 목록으로 요약합니다. 프로젝트 필터 optional.
 - `stalled` *(`BORING_VECTOR=on` 필요)* — 정체 레지스터: `older_than_days`(기본 7)보다 오래된 `next`, `blocked` claim을 보여줍니다.
+- `recurrences` *(`BORING_VECTOR=on` 필요)* — 재발 레지스터: 3일 이상 전 다른 노트의 오래된 claim 과 값이 코사인 거리 0.2 안에 있는 최근 `risk`/`blocked` claim 을 짝지어 보여줍니다("또 났네요"). predicate 가 꼬리표만 달면 `label_only: true` 로 표시합니다.
 - `decisions` *(`BORING_VECTOR=on` 필요)* — 결정 레지스터: 최근 `decision` claim.
 - `risks` *(`BORING_VECTOR=on` 필요)* — 위험 레지스터: 최근 `risk`·`assumption`·`blocked` claim.
 - `neighbors` *(`BORING_VECTOR=on` 필요)* — 토픽에서 출발하는 그래프 순회: 쿼리를 임베딩해 가장 가까운 노트 하나를 잡고, 그 노트의 1-hop 라벨을 반환합니다(`{hit, graph_neighbors, semantic_neighbors}` JSON). `hit`은 매칭된 노트 경로, `graph_neighbors`는 그 노트의 project/topic 라벨, `semantic_neighbors`는 공유 tool/concept 라벨이며 — 노트 경로가 아니라 평탄한 문자열입니다.
@@ -496,10 +498,10 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 - `corpus_status` *(`BORING_VECTOR=on` 필요)* — KB 상태 스냅샷(파일/청크 수, origin/kind/project별, 오염도, graph/semantic 노드+엣지).
 - `events` *(`BORING_VECTOR=on` 필요)* — DB에 OpenTelemetry 형태로 저장된 최근 workflow/adapter 이벤트를 반환합니다. component, event, status, run_id, workflow, since_hours로 필터링할 수 있습니다.
 - `ask` / `brief` / `weekly_brief` / `project_status` — LLM을 실행하는 tool. `ask`는 출처를 인용해 답하고 wiki-first 모드에서도 동작하며, 브리핑 셋은 `BORING_VECTOR=on`이 필요합니다.
-- `decisions` / `risks` / `next_actions` / `stalled` — 레지스터. claim 행을 그대로 돌려주며 경로에 LLM이 없습니다: 같은 질문에 같은 답이고, 산문을 짓던 때의 119.6초 대신 0.02초로 실측됐습니다. `BORING_VECTOR=on`이 필요하고, 결과가 잘리면 응답이 그렇게 말합니다(`limit_applied`).
+- `decisions` / `risks` / `next_actions` / `stalled` / `recurrences` — 레지스터. claim 행을 그대로 돌려주며 경로에 LLM이 없습니다: 같은 질문에 같은 답이고, 산문을 짓던 때의 119.6초 대신 0.02초로 실측됐습니다. `BORING_VECTOR=on`이 필요하고, 결과가 잘리면 응답이 그렇게 말합니다(`limit_applied`).
 - `forget` — wiki id나 정확한 제목으로 노트를 삭제합니다. wiki 파일을 제거하고, vector 모드에서는 임베딩·그래프 엣지·claim도 함께 정리합니다.
 
-구조화 tool(`neighbors`, `claims`, `corpus_status`, `events`, `config_get`, `code_search`, `code_symbol`, `code_index_status`, `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `context`)은 텍스트 블록과 함께 네이티브 `structuredContent`(JSON)를 반환하고, 산문/ack tool(`recall`, `remember`, `forget`, `sync`, `classify_repo`)은 텍스트를 반환합니다.
+구조화 tool(`neighbors`, `claims`, `corpus_status`, `events`, `config_get`, `code_search`, `code_symbol`, `code_index_status`, `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `context`)은 텍스트 블록과 함께 네이티브 `structuredContent`(JSON)를 반환하고, 산문/ack tool(`recall`, `remember`, `forget`, `sync`, `classify_repo`)은 텍스트를 반환합니다.
 
 MCP 호출 예시 (HTTP 위의 raw JSON-RPC):
 

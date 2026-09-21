@@ -160,9 +160,41 @@ fn transition_log(prev: DbHealthState, next: DbHealthState, error: Option<&str>)
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{CompactFailure, DbHealthState, HealthResp, SyncState, transition_log};
+    use super::{
+        CompactFailure, DbHealthState, HealthResp, RecurrencesResp, SyncState, recurrences_days,
+        recurrences_limit, transition_log,
+    };
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+
+    #[test]
+    fn recurrences_days_defaults_to_30() {
+        assert_eq!(recurrences_days(None), 30);
+        assert_eq!(recurrences_days(Some(7)), 7);
+    }
+
+    #[test]
+    fn recurrences_limit_defaults_and_clamps() {
+        assert_eq!(recurrences_limit(None), 10);
+        assert_eq!(recurrences_limit(Some(5)), 5);
+        assert_eq!(recurrences_limit(Some(50)), 50);
+        assert_eq!(recurrences_limit(Some(500)), 50);
+        assert_eq!(recurrences_limit(Some(0)), 1);
+    }
+
+    #[test]
+    fn recurrences_response_carries_the_written_numbers() {
+        let resp = RecurrencesResp {
+            rows: Vec::new(),
+            days: recurrences_days(None),
+            max_distance: crate::store::RECURRENCE_MAX_DISTANCE,
+            min_days_apart: crate::store::RECURRENCE_MIN_DAYS_APART,
+        };
+        let body = serde_json::to_value(&resp).unwrap();
+        assert_eq!(body["days"], 30);
+        assert_eq!(body["max_distance"], serde_json::json!(0.2f32));
+        assert_eq!(body["min_days_apart"], 3);
+    }
 
     #[test]
     fn same_state_is_silent() {
@@ -916,6 +948,39 @@ pub(crate) struct StalledReq {
 }
 
 #[derive(Deserialize)]
+pub(crate) struct RecurrencesReq {
+    pub(crate) days: Option<u32>,
+    pub(crate) project: Option<String>,
+    pub(crate) limit: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct RecurrencesResp {
+    pub(crate) rows: Vec<crate::store::Recurrence>,
+    pub(crate) days: i64,
+    pub(crate) max_distance: f32,
+    pub(crate) min_days_apart: i64,
+}
+
+pub(crate) const RECURRENCES_DEFAULT_DAYS: i64 = 30;
+pub(crate) const RECURRENCES_DEFAULT_LIMIT: i64 = 10;
+/// Upper bound for `limit` so one call cannot page the whole table.
+pub(crate) const RECURRENCES_MAX_LIMIT: u32 = 50;
+
+/// Window for the newer claim, defaulting to the last 30 days — the horizon the live
+/// pair count was measured over.
+pub(crate) fn recurrences_days(days: Option<u32>) -> i64 {
+    days.map_or(RECURRENCES_DEFAULT_DAYS, i64::from)
+}
+
+/// Row cap, default 10, clamped into `1..=RECURRENCES_MAX_LIMIT`.
+pub(crate) fn recurrences_limit(limit: Option<u32>) -> i64 {
+    limit.map_or(RECURRENCES_DEFAULT_LIMIT, |l| {
+        i64::from(l.clamp(1, RECURRENCES_MAX_LIMIT))
+    })
+}
+
+#[derive(Deserialize)]
 pub(crate) struct ContextReq {
     pub(crate) project: Option<String>,
     #[serde(default)]
@@ -1238,6 +1303,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .route("/risks", post(http::handle_risks))
         .route("/next_actions", post(http::handle_next_actions))
         .route("/stalled", post(http::handle_stalled))
+        .route("/recurrences", post(http::handle_recurrences))
         .route("/context", post(http::handle_context))
         .route("/search", post(http::handle_search))
         .route("/consumption", post(http::handle_consumption))
