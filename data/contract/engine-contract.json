@@ -1,51 +1,65 @@
 {
   "get_shapes": {
-    "/audit": [
-      "by_kind",
-      "by_origin",
-      "by_project",
-      "claims_anchored",
-      "claims_label_only",
-      "claims_pre_anchor",
-      "claims_stale",
-      "claims_unanchored",
-      "clean",
-      "company_allowed",
-      "company_contamination",
-      "graph_chunks",
-      "graph_claims",
-      "graph_claims_with_doc",
-      "graph_decisions",
-      "graph_documents",
-      "graph_edges",
-      "graph_projects",
-      "graph_risks",
-      "graph_topics",
-      "missing_origin",
-      "missing_project",
-      "semantic_about",
-      "semantic_concepts",
-      "semantic_tools",
-      "semantic_uses",
-      "total_chunks",
-      "total_files"
-    ],
-    "/health": [
-      "build_sha",
-      "corpus_count",
-      "db_healthy",
-      "status",
-      "sync",
-      "vector"
-    ],
-    "/projects": [
-      "projects"
-    ],
-    "/recall-label-stats": [
-      "agreed",
-      "compared",
-      "judges"
-    ]
+    "/audit": {
+      "optional": [],
+      "required": [
+        "by_kind",
+        "by_origin",
+        "by_project",
+        "claims_anchored",
+        "claims_label_only",
+        "claims_pre_anchor",
+        "claims_stale",
+        "claims_unanchored",
+        "clean",
+        "company_allowed",
+        "company_contamination",
+        "graph_chunks",
+        "graph_claims",
+        "graph_claims_with_doc",
+        "graph_decisions",
+        "graph_documents",
+        "graph_edges",
+        "graph_projects",
+        "graph_risks",
+        "graph_topics",
+        "missing_origin",
+        "missing_project",
+        "semantic_about",
+        "semantic_concepts",
+        "semantic_tools",
+        "semantic_uses",
+        "total_chunks",
+        "total_files"
+      ]
+    },
+    "/health": {
+      "optional": [
+        "build_sha",
+        "compact_failure",
+        "corpus_count",
+        "db_healthy"
+      ],
+      "required": [
+        "status",
+        "sync",
+        "vector"
+      ]
+    },
+    "/projects": {
+      "optional": [],
+      "required": [
+        "projects"
+      ]
+    },
+    "/recall-label-stats": {
+      "optional": [],
+      "required": [
+        "agreed",
+        "compared",
+        "judges"
+      ]
+    }
   },
   "http_routes": [
     "GET /audit",

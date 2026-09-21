@@ -25,7 +25,16 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SNAPSHOT = os.path.join(ROOT, "data", "contract", "engine-contract.json")
 SERVE_RS = os.path.join(ROOT, "drudge", "src", "serve.rs")
-GET_SHAPES = ("/health", "/audit", "/projects", "/recall-label-stats")
+# path → keys the response may omit: the `#[serde(skip_serializing_if = "Option::is_none")]` fields
+# of the response struct (drudge/src/serve.rs `HealthResp`). A CI engine built without a git sha has
+# no `build_sha`, an engine without a store has no `corpus_count`/`db_healthy`, `compact_failure`
+# appears only after a failed compact. Every key not listed here is required.
+GET_SHAPES = {
+    "/health": ("build_sha", "compact_failure", "corpus_count", "db_healthy"),
+    "/audit": (),
+    "/projects": (),
+    "/recall-label-stats": (),
+}
 
 
 def engine_url() -> str:
@@ -56,7 +65,12 @@ def routes_from_source() -> list[str]:
 
 
 def live_shapes(base: str) -> dict:
-    return {p: sorted(fetch_json(f"{base}{p}").keys()) for p in GET_SHAPES}
+    """{path: {"required": keys seen live minus the declared optional, "optional": declared, "seen": live keys}}."""
+    out = {}
+    for path, optional in GET_SHAPES.items():
+        seen = set(fetch_json(f"{base}{path}").keys())
+        out[path] = {"required": sorted(seen - set(optional)), "optional": sorted(optional), "seen": sorted(seen)}
+    return out
 
 
 def capture(base: str) -> dict:
@@ -78,12 +92,16 @@ def diff(expected: dict, actual: dict) -> list[str]:
         lines.append(f"http route missing: {r}")
     for r in sorted(act_routes - exp_routes):
         lines.append(f"http route added (update the snapshot on purpose): {r}")
-    for path, keys in expected["get_shapes"].items():
+    for path, shape in expected["get_shapes"].items():
         got = actual["get_shapes"].get(path)
         if got is None:
             lines.append(f"get shape missing: {path}")
-        elif got != keys:
-            lines.append(f"get shape changed: {path} expected {keys} got {got}")
+            continue
+        required, optional, live = set(shape["required"]), set(shape["optional"]), set(got["seen"])
+        for key in sorted(required - live):
+            lines.append(f"get shape key missing: {path} {key}")
+        for key in sorted(live - required - optional):
+            lines.append(f"get shape key added (update the snapshot on purpose): {path} {key}")
     return lines
 
 
@@ -104,8 +122,12 @@ def main() -> int:
 
     if args.snapshot:
         os.makedirs(os.path.dirname(args.file), exist_ok=True)
+        snapshot = dict(actual)
+        snapshot["get_shapes"] = {  # `seen` is what this engine returned today; the contract is required + optional
+            p: {"required": s["required"], "optional": s["optional"]} for p, s in actual["get_shapes"].items()
+        }
         with open(args.file, "w", encoding="utf-8") as f:
-            json.dump(actual, f, ensure_ascii=False, indent=2, sort_keys=True)
+            json.dump(snapshot, f, ensure_ascii=False, indent=2, sort_keys=True)
             f.write("\n")
         print(
             f"contract-parity: wrote {os.path.relpath(args.file, ROOT)} — "
