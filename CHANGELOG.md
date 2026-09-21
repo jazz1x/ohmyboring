@@ -9,6 +9,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 - **기억이 `@멘션` 에 스레드로 답한다** — `make secretary` 가 Socket Mode 로 붙어 멘션에 답하고, 그 답에 붙은 👍/👎 를 `used`/`contested` 로 엔진에 넘긴다. hermes 가 그 얼굴이었고 소켓 재접속 루프로 죽었다. 이번 얼굴은 얇다: 이벤트 둘(멘션·반응), 핸들러 둘, 상태 없음 — 어느 답이 어느 노트를 건넸는지는 주입 렛저가 이미 알고 있어서 전송층은 아무것도 기억하지 않는다. 뇌는 `agents/slack/secretary_core.py` 에 Slack 없이 따로 있고, 시험 25개가 소켓 없이 돈다.
 - **The engine records what it handed over** — `/search` and MCP `recall` take an optional `session_id` and write `handed` edges (session → doc) for what was shown; `POST /handover` records a handover explicitly; and `/consumption` plus the new MCP `verdict` tool accept a bare `{session_id, verdict: used|contested}` that applies the verdict to everything handed to that session — a face brings one key and a thumbs-up/down, no ledger digging. `handed` never counts in consumption aggregation.
 
+### Changed
+- **비서는 렛저 대신 엔진 문을 쓴다** — `remember_handed` 가 주입 렛저에 적던 경로 목록을 `POST /handover` 로 볂고, `feedback` 이 렛저를 뒤져 경로를 되찾던 일을 그만두고 verdict-only `POST /consumption` 에 판정만 실어 볂는다. 같은 사실이 두 곳에 있던 건 여기까지 — 얼굴이 늘 때마다 렛저를 뒤지지 않는다.
+
 ### Fixed
 - **`make heal` restarts only the service that is looping** — a container reporting `Up` while its log tail is mostly failures is restarted on its own, instead of bouncing the whole stack (and the engine, and every hook that fires while it is down) to cure a Slack socket. The loop itself is hermes' Slack adapter reconnecting on a client session it already closed; that bug is upstream, this is the remedy at hand.
 

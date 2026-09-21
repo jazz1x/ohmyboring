@@ -5,12 +5,11 @@ Run: python3 agents/slack/test_secretary_core.py
 """
 import os
 import sys
-import tempfile
-
-os.environ["BORING_INJECTION_LEDGER"] = os.path.join(tempfile.mkdtemp(), "injections.jsonl")
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 
+import drudge_client as dc  # noqa: E402
 import secretary_core as sc  # noqa: E402
 
 
@@ -22,17 +21,31 @@ def _hit(src, text, claims=None, total=None):
     return h
 
 
-def _recorder():
+def _handover_recorder():
     calls = []
 
-    def fake(session_id, observed_at, used, contested, supersedes=None):
+    def fake(session_id, observed_at, paths):
         calls.append({
             "session_id": session_id,
             "observed_at": observed_at,
-            "used": list(used),
-            "contested": list(contested),
+            "paths": list(paths),
         })
-        return {"used": len(used), "contested": len(contested), "unknown": []}
+        return {"session": session_id, "handed": len(paths), "unknown": []}
+
+    return calls, fake
+
+
+def _verdict_recorder(result=None):
+    calls = []
+
+    def fake(session_id, observed_at, verdict=None, **kw):
+        assert not kw, f"a verdict travels without path lists, got unexpected {sorted(kw)}"
+        calls.append({
+            "session_id": session_id,
+            "observed_at": observed_at,
+            "verdict": verdict,
+        })
+        return result if result is not None else {"used": 1, "contested": 0, "unknown": []}
 
     return calls, fake
 
@@ -80,7 +93,7 @@ def test_a_question_too_short_to_search_asks_for_one():
 def test_hits_are_exactly_the_notes_the_reader_saw():
     hits = [
         _hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3),
-        _hit("wiki-0999.md", ""),  # no snippet: rendered by neither, so ledgered by neither
+        _hit("wiki-0999.md", ""),  # no snippet: rendered by neither, so handed by neither
         _hit("wiki-1000.md", "the pool question came up again and was settled " * 3),
         _hit("wiki-1001.md", "the cron question came up again and was settled " * 3),
     ]
@@ -99,46 +112,99 @@ def test_empty_and_failed_answers_carry_no_hits():
     assert sc.answer("엔진이 죽었다", search=down).hits == []
 
 
-def test_feedback_marks_the_handed_notes_used():
+def test_the_client_hands_paths_over_under_the_sessions_own_name():
+    client = dc.DrudgeClient(base_url="http://drudge.test", retries=0)
+    sent = []
+    client._retry = lambda method, path, payload=None, timeout=None: sent.append(
+        {"method": method, "path": path, "payload": payload}
+    ) or {"session": "s", "handed": 1, "unknown": []}
+    client.handover("s", "2026-09-21T00:00:00+00:00", ["/vault/wiki/wiki-0435.md"])
+    assert sent[0]["method"] == "POST" and sent[0]["path"] == "/handover"
+    assert sent[0]["payload"] == {
+        "session_id": "s",
+        "observed_at": "2026-09-21T00:00:00+00:00",
+        "paths": ["/vault/wiki/wiki-0435.md"],
+    }
+
+
+def test_the_client_sends_a_verdict_without_path_lists():
+    client = dc.DrudgeClient(base_url="http://drudge.test", retries=0)
+    sent = []
+    client._retry = lambda method, path, payload=None, timeout=None: sent.append(payload) or {
+        "used": 0, "contested": 0}
+    client.consumption("probe:e1b", "2026-09-21T00:00:00+00:00", verdict="used")
+    assert sent[0]["verdict"] == "used"
+    assert "used" not in sent[0] and "contested" not in sent[0], \
+        "paths beside a verdict are a 400; the verdict must travel alone"
+
+
+def test_the_client_refuses_a_verdict_beside_path_lists():
+    # Silently dropping the lists would answer 200 for a request the engine never judged.
+    client = dc.DrudgeClient(base_url="http://drudge.test", retries=0)
+    sent = []
+    client._retry = lambda method, path, payload=None, timeout=None: sent.append(payload) or {}
+    try:
+        client.consumption("k", "2026-09-21T00:00:00+00:00", used=["/vault/wiki/a.md"], verdict="used")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("verdict beside paths must raise, not send")
+    assert sent == [], "nothing may reach the engine when the call is ambiguous"
+
+
+def test_remember_handed_hands_the_engine_paths():
     key = "slack:C123:1726900000.000100"
-    hits = [_hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3)]
-    assert sc.remember_handed(key, "브랜치 이름 어떻게 정했더라", hits) is True
-    calls, fake = _recorder()
-    out = sc.feedback(key, "used", consumption=fake)
+    hits = [
+        _hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3),
+        _hit("wiki-1000.md", "the pool question came up again and was settled " * 3),
+    ]
+    calls, fake = _handover_recorder()
+    assert sc.remember_handed(key, "브랜치 이름 어떻게 정했더라", hits, handover=fake) is True
     assert calls[0]["session_id"] == key
-    assert calls[0]["used"] == ["/vault/wiki/wiki-0435.md"]
-    assert calls[0]["contested"] == []
-    assert calls[0]["observed_at"], "a default timestamp is stamped on the edge"
-    assert out["used"] == 1 and out["contested"] == 0
+    assert calls[0]["paths"] == ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md"]
+    assert calls[0]["observed_at"], "a default timestamp is stamped on the handover"
 
 
-def test_feedback_contested_marks_the_other_list():
-    key = "slack:C123:1726900000.000200"
-    sc.remember_handed(key, "브랜치 이름 어떻게 정했더라",
-                       [_hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3)])
-    calls, fake = _recorder()
-    sc.feedback(key, "contested", consumption=fake)
-    assert calls[0]["contested"] == ["/vault/wiki/wiki-0435.md"]
-    assert calls[0]["used"] == []
+def test_remember_handed_with_empty_hands_sends_nothing():
+    calls, fake = _handover_recorder()
+    assert sc.remember_handed("slack:C123:1726900000.000300", "질문", [], handover=fake) is False
+    assert calls == [], "empty hands mean nothing was handed over, so nothing is sent"
 
 
-def test_feedback_on_an_unknown_answer_never_reaches_the_engine():
-    calls, fake = _recorder()
+def test_remember_handed_survives_a_dead_engine():
+    def boom(*a, **kw): raise ConnectionError("refused")
+    assert sc.remember_handed(
+        "slack:C123:1726900000.000500", "질문",
+        [_hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3)],
+        handover=boom,
+    ) is False
+
+
+def test_feedback_sends_only_the_verdict():
+    calls, fake = _verdict_recorder()
+    out = sc.feedback("slack:C123:1726900000.000100", "used", consumption=fake)
+    assert calls[0]["session_id"] == "slack:C123:1726900000.000100"
+    assert calls[0]["verdict"] == "used"
+    assert calls[0]["observed_at"], "a default timestamp is stamped on the verdict"
+    assert out == {"used": 1, "contested": 0, "unknown": []}
+
+
+def test_feedback_contested_sends_the_other_verdict():
+    calls, fake = _verdict_recorder()
+    sc.feedback("slack:C123:1726900000.000200", "contested", consumption=fake)
+    assert calls[0]["verdict"] == "contested"
+
+
+def test_feedback_on_an_answer_the_engine_does_not_know_is_unknown():
+    calls, fake = _verdict_recorder(result={"used": 0, "contested": 0, "unknown": []})
     out = sc.feedback("slack:C123:1726900000.000999", "used", consumption=fake)
-    assert calls == []
-    assert out == {"unknown_answer": True}
-
-
-def test_remember_handed_with_empty_hands_writes_nothing():
-    key = "slack:C123:1726900000.000300"
-    assert sc.remember_handed(key, "질문", []) is False
-    calls, fake = _recorder()
-    assert sc.feedback(key, "used", consumption=fake) == {"unknown_answer": True}
-    assert calls == []
+    assert calls[0]["verdict"] == "used", "the verdict still travels; the engine is what knows nothing"
+    assert out["unknown_answer"] is True
+    assert out["used"] == 0 and out["contested"] == 0
 
 
 def test_feedback_rejects_a_verdict_that_is_not_a_verdict():
-    calls, fake = _recorder()
+    calls, fake = _verdict_recorder()
     try:
         sc.feedback("slack:C123:x", "meh", consumption=fake)
     except ValueError:
@@ -149,11 +215,8 @@ def test_feedback_rejects_a_verdict_that_is_not_a_verdict():
 
 
 def test_feedback_survives_a_dead_engine():
-    key = "slack:C123:1726900000.000400"
-    sc.remember_handed(key, "질문",
-                       [_hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3)])
     def boom(*a, **kw): raise ConnectionError("refused")
-    assert sc.feedback(key, "used", consumption=boom) == {"error": "refused"}
+    assert sc.feedback("slack:C123:x", "used", consumption=boom) == {"error": "refused"}
 
 
 if __name__ == "__main__":
