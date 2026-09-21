@@ -11,6 +11,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ### Changed
 - **비서는 렛저 대신 엔진 문을 쓴다** — `remember_handed` 가 주입 렛저에 적던 경로 목록을 `POST /handover` 로 볂고, `feedback` 이 렛저를 뒤져 경로를 되찾던 일을 그만두고 verdict-only `POST /consumption` 에 판정만 실어 볂는다. 같은 사실이 두 곳에 있던 건 여기까지 — 얼굴이 늘 때마다 렛저를 뒤지지 않는다.
+- **판정이 다음 검색 순위를 바꾼다** — `/search`·MCP `recall`·`/ask`·CLI 가 공유하는 RRF 병합 뒤, 문서별 `net = clamp(used − contested, −FEEDBACK_NET_MAX, +FEEDBACK_NET_MAX)` (`FEEDBACK_NET_MAX = 3`) 만큼 점수를 움직인다: `score += net × FEEDBACK_STEP`, `FEEDBACK_STEP = rrf_term(1) − rrf_term(2)` — 👍 하나 = 한 목록에서 한 등수. 스팸 반응 셋이 두 목록 1등(≈0.0328)을 못 뒤집게 상한은 세 칸. 소비 간선이 없는 코퍼스에선 되먹임 항이 0이라 순위가 바이트 단위로 같다(골든 게이트가 이를 고정).
 
 ### Fixed
 - **`make heal` restarts only the service that is looping** — a container reporting `Up` while its log tail is mostly failures is restarted on its own, instead of bouncing the whole stack (and the engine, and every hook that fires while it is down) to cure a Slack socket. The loop itself is hermes' Slack adapter reconnecting on a client session it already closed; that bug is upstream, this is the remedy at hand.
