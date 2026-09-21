@@ -517,12 +517,14 @@ async fn verdict_only_consumption_marks_exactly_the_handed_docs() {
     assert_eq!(body["unknown"], 1);
 
     // The whole feedback signal: verdict=used, no paths. The handler resolves what was handed.
+    // Padded on purpose: the validator and the handler once trimmed differently, and " used "
+    // came out as contested. The assertions below (used edges, zero contested) are the check.
     let resp = client
         .post(format!("{base}/consumption"))
         .json(&serde_json::json!({
             "session_id": session,
             "observed_at": "2026-09-21T06:00:00+00:00",
-            "verdict": "used",
+            "verdict": " used ",
         }))
         .send()
         .await
