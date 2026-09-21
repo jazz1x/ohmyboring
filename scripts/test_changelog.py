@@ -40,13 +40,33 @@ def _git(*args: str) -> str:
 
 
 def _base() -> str:
-    """The commit this branch grew from — `origin/main`, or `main` when there is no remote."""
+    """The commit this branch grew from — `origin/main`, or `main` when there is no remote.
+
+    CI checks out a shallow clone with no `origin/main` ref at all, and the first run of this
+    gate failed there with "neither origin/main nor main is reachable". So when neither ref
+    exists the gate fetches `main` from origin before giving up — a network call, but one CI
+    already made to get here. It still fails loudly when the base cannot be found: a gate that
+    silently skips in CI is a gate that only runs on laptops.
+    """
     for ref in ("origin/main", "main"):
         try:
             return _git("merge-base", "HEAD", ref)
         except subprocess.CalledProcessError:
             continue
-    raise AssertionError("neither origin/main nor main is reachable — cannot scope the branch")
+    # `--unshallow`, not a plain fetch: a depth-1 clone shares no history with main, so fetching
+    # the ref alone still leaves merge-base with nothing in common. Rehearsed on a depth-1 clone
+    # of this branch — plain fetch failed, unshallow found the base.
+    subprocess.run(
+        ["git", "fetch", "--no-tags", "--unshallow", "origin", "main:refs/remotes/origin/main"],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    try:
+        return _git("merge-base", "HEAD", "origin/main")
+    except subprocess.CalledProcessError as e:
+        raise AssertionError(
+            "neither origin/main nor main is reachable, and fetching origin/main did not help — "
+            "check out with full history (fetch-depth: 0) so the branch can be scoped"
+        ) from e
 
 
 def _branch_commits(base: str) -> list[tuple[str, str]]:
