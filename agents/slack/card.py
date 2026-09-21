@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""The morning card — one LangGraph run: read the registers, propose, post, interrupt.
+"""The morning card — one LangGraph run: read the registers, propose, resolve, post, interrupt.
 
 `make card` runs g_card once. The graph reads the engine's four registers, the local model
-picks three proposals grounded in them, the card posts to SLACK_CARD_CHANNEL, and the graph
-stops at an interrupt — a Slack button press (해 · 미뤄 · 빼) resumes it with
-Command(resume=…), and record_verdict writes the verdict to the engine. Sent and judged stay
-in one state, so the card a person answered is exactly the card the engine remembers.
+picks three proposals grounded in them, the resolve node turns each proposal's subject into
+the note path the door's /claim-source names (dropping what no longer resolves, re-proposing
+once on the remainder), cross-checks the past 48h of 「해」 against today's registers for
+the card's head line, posts to SLACK_CARD_CHANNEL, and stops at an interrupt — a Slack
+button press (해 · 미뤄 · 빼) resumes it with Command(resume=…), and record_verdict writes
+the verdict to the engine. Sent and judged stay in one state, so the card a person answered
+is exactly the card the engine remembers.
 
 The socket lives here, not in the secretary: hermes can only text, and the secretary answers
 questions while this file asks them. Everything decided lives in card_core; everything
@@ -14,8 +17,12 @@ external is a collaborator.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, Any, NamedTuple, TypedDict
@@ -35,6 +42,8 @@ DEFAULT_MODEL = os.environ.get("CARD_MODEL") or "gemma4:12b"
 # Register answers carry up to 50 claims each; the door timeout lesson (brief p95 77s) says the
 # point read is far cheaper, but a cold engine still earns more than a point-read default.
 ENGINE_TIMEOUT = float(os.environ.get("CARD_ENGINE_TIMEOUT") or "30")
+# The confirmation window on the card's head line — yesterday's and the day before's approvals.
+CONFIRM_SINCE_HOURS = 48
 
 
 def _append_verdicts(
@@ -47,18 +56,22 @@ class CardState(TypedDict):
     registers: card_core.Registers
     proposals: list[card_core.Proposal]
     message: card_core.PostedCard | None
+    confirmation: card_core.Confirmation | None
     verdicts: Annotated[list[card_core.ButtonVerdict], _append_verdicts]
 
 
 class Collaborators(NamedTuple):
     """Everything the graph reaches outside itself. Injected so the graph runs in tests with
-    no engine, no model and no Slack; live defaults are the module-level makers below."""
+    no engine, no model, no door and no Slack; live defaults are the module-level makers below."""
 
     fetch: Callable[[str], dict[str, Any]]  # register path → engine JSON
     propose: Callable[[str], str]  # prompt → proposal JSON text
     send: Callable[[list[dict]], card_core.PostedCard]  # Block Kit → posted card
-    handover: Callable[[str, str, list[str]], dict]  # session, at, source notes
+    handover: Callable[[str, str, list[str]], dict]  # session, at, note paths
     consumption: Callable[[str, str, list[str]], dict]  # session, used|contested, paths
+    resolve: Callable[[str, str], card_core.ResolvedNote | card_core.Unresolved]
+    approved: Callable[[int], list[card_core.PastApproved]]  # since_hours → past approvals
+    record: Callable[[str, dict], None]  # event name, fields → engine event log
 
 
 def session_name(card: card_core.PostedCard) -> str:
@@ -74,6 +87,9 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             send=_env_send,
             handover=_live_handover,
             consumption=_live_consumption,
+            resolve=_live_resolve,
+            approved=_live_approved,
+            record=_live_record,
         )
 
     def read_registers(_: CardState) -> dict:
@@ -84,12 +100,78 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         llm_json = collabs.propose(card_core.build_prompt(registers))
         return {"proposals": card_core.parse_proposals(llm_json, registers)}
 
+    def resolve(state: CardState) -> dict:
+        """subject → note path through the door. A subject that does not resolve is dropped
+        as a value — 「근거 노트 없음」 never rides a card — and if that leaves fewer than
+        three, the model re-picks once from the subjects this node has not yet tried. Zero
+        after both rounds is a refusal, not an empty card: the graph raises and main exits 3."""
+        registers = state["registers"]
+        picked: list[card_core.Proposal] = []
+        seen_notes: set[str] = set()
+        dropped: list[card_core.Unresolved] = []
+        tried: set[str] = set()
+        round_proposals = state["proposals"]
+        for round_no in range(2):
+            for proposal in round_proposals:
+                if proposal.subject in tried:
+                    continue
+                tried.add(proposal.subject)
+                result = collabs.resolve(proposal.subject, proposal.register_)
+                if isinstance(result, card_core.Unresolved):
+                    dropped.append(result)
+                    continue
+                if result.note in seen_notes:
+                    continue
+                seen_notes.add(result.note)
+                picked.append(proposal.model_copy(update={"note": result.note}))
+            if len(picked) >= 3:
+                break
+            remaining = {
+                subject
+                for name in card_core.REGISTER_NAMES
+                for subject in registers.sources.get(name, [])
+                if subject not in tried
+            }
+            if not remaining or round_no == 1:
+                break
+            llm_json = collabs.propose(card_core.build_prompt(registers, tried))
+            round_proposals = card_core.parse_proposals(llm_json, registers, tried)
+        if not picked:
+            reasons = "; ".join(f"{u.subject}: {u.reason}" for u in dropped)
+            raise ValueError(f"근거 노트 없음 — 제안 0: {reasons or 'no proposals'}")
+        return {"proposals": picked, "confirmation": _cross_check(registers)}
+
+    def _cross_check(registers: card_core.Registers) -> card_core.Confirmation | None:
+        """The card's head line: yesterday's 「해」, each checked against whether its note path
+        still resolves from any of today's register subjects. The check lands in the engine's
+        event log — the engine's own gauge fills the confirmation, not the card's opinion."""
+        past = collabs.approved(CONFIRM_SINCE_HOURS)
+        if not past:
+            return None
+        today_notes: set[str] = set()
+        for name in card_core.ANSWER_REGISTERS:
+            for subject in registers.sources.get(name, []):
+                result = collabs.resolve(subject, name)
+                if isinstance(result, card_core.ResolvedNote):
+                    today_notes.add(result.note)
+        today_notes.update(registers.sources.get("recurrences", []))
+        confirmation = card_core.confirm_past(past, today_notes)
+        collabs.record(
+            "card_confirmation",
+            {
+                "done": len(confirmation.done),
+                "pending": len(confirmation.pending),
+                "session": past[0].session,
+            },
+        )
+        return confirmation
+
     def post_card(state: CardState) -> dict:
-        message = collabs.send(card_core.build_blocks(state["proposals"]))
+        message = collabs.send(card_core.build_blocks(state["proposals"], confirmation=state["confirmation"]))
         collabs.handover(
             session_name(message),
             datetime.now(UTC).isoformat(),
-            [p.source_note for p in state["proposals"]],
+            [p.note for p in state["proposals"]],
         )
         return {"message": message}
 
@@ -102,19 +184,21 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         if verdict.choice == "defer":
             return {}  # recorded in state only — no engine call
         kind = "used" if verdict.choice == "do" else "contested"
-        note = state["proposals"][verdict.idx].source_note
+        note = state["proposals"][verdict.idx].note
         collabs.consumption(session_name(state["message"]), kind, [note])
         return {}
 
     graph = StateGraph(CardState)
     graph.add_node("read_registers", read_registers)
     graph.add_node("propose", propose)
+    graph.add_node("resolve", resolve)
     graph.add_node("post_card", post_card)
     graph.add_node("await_verdict", await_verdict)
     graph.add_node("record_verdict", record_verdict)
     graph.add_edge(START, "read_registers")
     graph.add_edge("read_registers", "propose")
-    graph.add_edge("propose", "post_card")
+    graph.add_edge("propose", "resolve")
+    graph.add_edge("resolve", "post_card")
     graph.add_edge("post_card", "await_verdict")
     graph.add_edge("await_verdict", "record_verdict")
     graph.add_conditional_edges(
@@ -139,6 +223,50 @@ def _live_consumption(session: str, kind: str, paths: list[str]) -> dict:
     if kind == "used":
         return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(session, at, used=paths)
     return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(session, at, contested=paths)
+
+
+def _live_resolve(subject: str, register: str) -> card_core.ResolvedNote | card_core.Unresolved:
+    """subject → current claim's note path through the door. A recurrence source is already
+    a note path — it resolves to itself without a door round-trip. Everything else asks
+    /claim-source; every failure mode is an Unresolved value: the card drops the proposal,
+    and only an all-dropped run stops the card (with the reasons, in main's exit 3)."""
+    if subject.startswith("/"):
+        return card_core.ResolvedNote(subject=subject, note=subject)
+    url = f"{_door_url()}/claim-source?subject={urllib.parse.quote(subject)}"
+    try:
+        with urllib.request.urlopen(url, timeout=ENGINE_TIMEOUT) as r:
+            payload = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            reason = "no current claim for subject"
+        else:
+            reason = f"claim-source answered {e.code}"
+        return card_core.Unresolved(subject=subject, register=register, reason=reason)
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return card_core.Unresolved(
+            subject=subject, register=register, reason=f"claim-source unreachable: {e}"
+        )
+    return card_core.ResolvedNote(subject=subject, note=payload["note"])
+
+
+def _live_approved(since_hours: int) -> list[card_core.PastApproved]:
+    url = f"{_door_url()}/approved?since_hours={since_hours}"
+    with urllib.request.urlopen(url, timeout=ENGINE_TIMEOUT) as r:
+        payload = json.loads(r.read().decode("utf-8"))
+    return [
+        card_core.PastApproved(session=item["session"], note=item["note"], at=item["at"])
+        for item in payload["approved"]
+    ]
+
+
+def _live_record(event: str, fields: dict) -> None:
+    import event_log
+
+    event_log.append_event("slack-card", event, "ok", **fields)
+
+
+def _door_url() -> str:
+    return os.environ["BORING_DOOR_URL"].rstrip("/")
 
 
 def _env_send(blocks: list[dict]) -> card_core.PostedCard:
@@ -227,6 +355,14 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if not os.environ.get("BORING_DOOR_URL"):
+        print(
+            "[card] BORING_DOOR_URL must be set — the card cannot attach 판정 to notes without "
+            "the door's /claim-source, and cannot cross-check past approvals without /approved "
+            "(see .env.example)",
+            file=sys.stderr,
+        )
+        return 2
     owner_id = os.environ.get("SECRETARY_OWNER_ID") or None
     if owner_id is None:
         print("[card] no SECRETARY_OWNER_ID — any user may judge", file=sys.stderr)
@@ -265,8 +401,11 @@ def main() -> int:
                     break
         except KeyboardInterrupt:
             print("[card] 결재 대기를 멈춘다 — 카드는 슬랙에 남아 있다.", file=sys.stderr)
-        except ValueError as e:
-            # A malformed register or an ungrounded proposal — say why in one line and stop.
+        except (ValueError, OSError) as e:
+            # A malformed register, an ungrounded proposal, a dead door, a refused resolve —
+            # say why in one line and stop. OSError covers URLError: the door was the only
+            # road to /claim-source and /approved, and a card that cannot confirm is a card
+            # that must not ship quietly.
             print(f"[card] 카드 거부: {' '.join(str(e).split())}", file=sys.stderr)
             return 3
     finally:

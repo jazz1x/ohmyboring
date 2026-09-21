@@ -62,7 +62,8 @@
     }
   },
   "door_routes": [
-    "GET /approved"
+    "GET /approved",
+    "GET /claim-source"
   ],
   "http_routes": [
     "GET /audit",

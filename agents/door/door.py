@@ -37,7 +37,7 @@ import psycopg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import approved
+from . import approved, claim_source
 
 _TIMEOUT = float(os.environ.get("DOOR_TIMEOUT", "130"))
 
@@ -157,11 +157,9 @@ def _approved_payload(since_hours: int) -> dict:
 async def _approved(request: Request) -> Response:
     raw = request.query_params.get("since_hours", "24")
     try:
-        since_hours = int(raw)
-        if since_hours < 0:
-            raise ValueError
-    except ValueError:
-        return JSONResponse({"error": "since_hours must be a non-negative integer"}, status_code=400)
+        since_hours = approved.check_since_hours(raw)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     if not os.environ.get("DOOR_PG_DSN"):
         return JSONResponse({"error": "store not configured"}, status_code=503)
     try:
@@ -171,12 +169,34 @@ async def _approved(request: Request) -> Response:
     return JSONResponse(payload)
 
 
+def _fetch_claim_source(subject: str) -> list:
+    with psycopg.connect(os.environ["DOOR_PG_DSN"]) as conn, conn.cursor() as cur:
+        cur.execute(claim_source.SQL, (subject,))
+        return cur.fetchall()
+
+
+async def _claim_source(request: Request) -> Response:
+    subject = request.query_params.get("subject", "")
+    if not subject.strip():
+        return JSONResponse({"error": "subject query param is required"}, status_code=400)
+    if not os.environ.get("DOOR_PG_DSN"):
+        return JSONResponse({"error": "store not configured"}, status_code=503)
+    try:
+        rows = await asyncio.to_thread(_fetch_claim_source, subject)
+    except psycopg.OperationalError as e:
+        return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
+    payload = claim_source.pick_current(subject, rows)
+    if payload is None:
+        return JSONResponse({"error": "no current claim for subject"}, status_code=404)
+    return JSONResponse(payload)
+
+
 for _path, _methods in _load_routes().items():
     app.add_api_route(_path, _proxy, methods=_methods)
 
 # The door's own routes, driven by the snapshot's door_routes key. A snapshot
 # entry without a native handler here is a KeyError at startup, not a proxy hole.
-_DOOR_HANDLERS = {"GET /approved": _approved}
+_DOOR_HANDLERS = {"GET /approved": _approved, "GET /claim-source": _claim_source}
 for _path, _method in _load_door_routes().items():
     app.add_api_route(_path, _DOOR_HANDLERS[f"{_method} {_path}"], methods=[_method])
 

@@ -41,6 +41,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -58,6 +59,7 @@ import uvicorn  # noqa: E402
 
 door = importlib.import_module("agents.door.door")
 approved = importlib.import_module("agents.door.approved")
+claim_source = importlib.import_module("agents.door.claim_source")
 
 STUB_CONTENT_TYPE = "application/json; charset=utf-8"
 
@@ -519,6 +521,131 @@ class ApprovedRouteTests(unittest.TestCase):
         status, body, _ = _req(self.door_port, "GET", "/approved?since_hours=abc")
         self.assertEqual(status, 400)
         self.assertIn("since_hours", json.loads(body)["error"])
+
+    def test_since_hours_outside_bounds_is_400(self):
+        for bad in ("0", "-1", "1.5", "99999999999999", "8761"):
+            status, body, _ = _req(self.door_port, "GET", f"/approved?since_hours={bad}")
+            self.assertEqual(status, 400, f"since_hours={bad}")
+            self.assertIn("application/json", _)
+            self.assertIn("since_hours", json.loads(body)["error"])
+
+    def test_since_hours_at_bounds_is_200(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = []
+        for ok in ("1", "8760"):
+            status, body, _ = _req(self.door_port, "GET", f"/approved?since_hours={ok}")
+            self.assertEqual(status, 200, f"since_hours={ok}")
+            self.assertEqual(json.loads(body)["since_hours"], int(ok))
+
+
+class SinceHoursPureTests(unittest.TestCase):
+    """approved.check_since_hours — pure: string in, bounded int or ValueError (AC1)."""
+
+    def test_inside_bounds_passthrough(self):
+        for ok in ("1", "24", "8760"):
+            self.assertEqual(approved.check_since_hours(ok), int(ok))
+
+    def test_outside_bounds_is_a_value_error(self):
+        for bad in ("0", "-1", "1.5", "99999999999999", "8761", "", "abc"):
+            with self.assertRaises(ValueError, msg=f"since_hours={bad!r}"):
+                approved.check_since_hours(bad)
+
+
+class ClaimSourcePureTests(unittest.TestCase):
+    """claim_source.pick_current — pure: rows in, newest claim + candidates out (AC2)."""
+
+    def test_newest_valid_from_wins_and_ascending_input_is_sorted(self):
+        rows = [
+            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL)),
+            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL)),
+            ("/vault/wiki/wiki-1200.md", datetime(2026, 9, 10, tzinfo=approved.SEOUL)),
+        ]
+        out = claim_source.pick_current("3차 창 샘플링", rows)
+        self.assertEqual(out["subject"], "3차 창 샘플링")
+        self.assertEqual(out["note"], "/vault/wiki/wiki-1405.md")
+        self.assertEqual(out["valid_from"], "2026-09-20T00:00:00+09:00")
+        self.assertEqual(
+            [c["note"] for c in out["candidates"]],
+            ["/vault/wiki/wiki-1405.md", "/vault/wiki/wiki-1200.md", "/vault/wiki/wiki-1001.md"],
+        )
+
+    def test_empty_rows_is_none_the_doors_404(self):
+        self.assertIsNone(claim_source.pick_current("없는 주어", []))
+
+
+class ClaimSourceRouteTests(unittest.TestCase):
+    """GET /claim-source through the real door app — stub rows, no DB (AC2)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                with socket.create_connection(("127.0.0.1", cls.door_port), timeout=1):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+
+    def setUp(self):
+        self._saved_dsn = os.environ.get("DOOR_PG_DSN")
+        self._rows: list = []
+        self._orig_fetch = door._fetch_claim_source
+        door._fetch_claim_source = lambda subject: self._rows
+
+    def tearDown(self):
+        door._fetch_claim_source = self._orig_fetch
+        if self._saved_dsn is None:
+            os.environ.pop("DOOR_PG_DSN", None)
+        else:
+            os.environ["DOOR_PG_DSN"] = self._saved_dsn
+
+    def test_no_dsn_is_503(self):
+        os.environ.pop("DOOR_PG_DSN", None)
+        status, body, _ = _req(self.door_port, "GET", "/claim-source?subject=x")
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body), {"error": "store not configured"})
+
+    def test_empty_subject_is_400(self):
+        for path in ("/claim-source", "/claim-source?subject="):
+            status, body, _ = _req(self.door_port, "GET", path)
+            self.assertEqual(status, 400, path)
+            self.assertIn("subject", json.loads(body)["error"])
+
+    def test_unknown_subject_is_404_json(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = []
+        status, body, _ = _req(self.door_port, "GET", "/claim-source?subject=nobody")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body), {"error": "no current claim for subject"})
+
+    def test_stub_rows_answer_the_note_path(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = [
+            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL)),
+            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL)),
+        ]
+        subject = urllib.parse.quote("3차 창 샘플링")
+        status, body, content_type = _req(self.door_port, "GET", f"/claim-source?subject={subject}")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        payload = json.loads(body)
+        self.assertEqual(payload["subject"], "3차 창 샘플링")
+        self.assertEqual(payload["note"], "/vault/wiki/wiki-1405.md")
+        self.assertEqual(len(payload["candidates"]), 2)
 
 
 if __name__ == "__main__":

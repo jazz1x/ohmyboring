@@ -22,6 +22,28 @@ SEOUL = ZoneInfo("Asia/Seoul")
 APPROVED_KIND = "used"
 CONTESTED_KIND = "contested"
 
+SINCE_HOURS_MIN = 1
+# 24 × 365: the window a card ever asks about. Above this, timedelta(hours=…) overflows
+# on absurd input and the door died 500 (cycle-7 defect); outside [1, 8760] is a 400.
+SINCE_HOURS_MAX = 24 * 365
+
+_SINCE_HOURS_ERROR = f"since_hours must be an integer in [{SINCE_HOURS_MIN}, {SINCE_HOURS_MAX}]"
+
+
+def check_since_hours(raw: str) -> int:
+    """Query string in, bounded int out — ValueError with the reason otherwise.
+
+    `since_hours=0` is refused too: an empty window answers an empty list that
+    reads like "nothing was approved", which is not a fact the store holds.
+    """
+    try:
+        hours = int(raw)
+    except ValueError:
+        raise ValueError(_SINCE_HOURS_ERROR) from None
+    if not SINCE_HOURS_MIN <= hours <= SINCE_HOURS_MAX:
+        raise ValueError(_SINCE_HOURS_ERROR)
+    return hours
+
 
 @dataclass(frozen=True)
 class Approved:
