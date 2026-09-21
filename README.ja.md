@@ -242,7 +242,7 @@ make readiness
 | `BORING_READINESS_NOTE_MAX_HOURS` | ブリーフィング readiness が許容する最新ノート freshness 範囲。デフォルトは `48` |
 | `BORING_READINESS_PENDING_TTL` | readiness で stale `.pending` とみなす閾値。`INGEST_PENDING_TTL`、次に `1800` 秒へフォールバック |
 | `BORING_READINESS_RETRY_TTL` | readiness で stale `.retry` とみなす閾値。`INGEST_RETRY_TTL`、次に pending 閾値へフォールバック |
-| `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプション Slack assistant |
+| `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプションの Slack 秘書（`make secretary`）。ボットトークンには `message.channels` スコープが必要 — スレッド返信が訂正を記憶に届ける経路 |
 
 構造化イベントは distill、collector/worker、`doctor`/`readiness`、`guard`、`eval` から記録されます。memory-ingest イベントには Rust ワークフローグラフ契約に沿った `workflow=memory_ingest`、`workflow_node`、`workflow_outcome` フィールドが付きます。イベントはまず OpenTelemetry 形式のログレコードとしてローカルエンジン DB に保存されます。NDJSON ファイルはエンジン停止時の fallback スプールで、`BORING_EVENT_SINK=spool` または `both` を選んだ場合だけ意図的にファイル中心/同時記録になります。DB view は HTTP `/events`（`/otel-events` alias も同じ）または MCP `events`、`make events` は DB を先に読み、失敗時はファイルスプールを読みます。
 

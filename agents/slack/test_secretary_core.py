@@ -102,7 +102,8 @@ def test_hits_are_exactly_the_notes_the_reader_saw():
         "/vault/wiki/wiki-0435.md",
         "/vault/wiki/wiki-1000.md",
     ], "the empty snippet drops out and the MAX_HITS cut still applies"
-    assert out.text.count("• ") == len(out.hits) == 2, "one bullet per handed note, nothing else"
+    assert "① " in out.text and "② " in out.text and "③" not in out.text, "one circled number per handed note, nothing else"
+    assert len(out.hits) == 2
     assert "wiki-0999" not in out.text and "wiki-1001" not in out.text
 
 
@@ -217,6 +218,85 @@ def test_feedback_rejects_a_verdict_that_is_not_a_verdict():
 def test_feedback_survives_a_dead_engine():
     def boom(*a, **kw): raise ConnectionError("refused")
     assert sc.feedback("slack:C123:x", "used", consumption=boom) == {"error": "refused"}
+
+
+def test_an_answer_numbers_its_notes_under_a_head():
+    hits = [
+        _hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3),
+        _hit("wiki-1000.md", "the pool question came up again and was settled " * 3),
+    ]
+    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, **kw: hits)
+    assert out.text.startswith("_기억에서 찾은 것 2개_"), "the head names the count and marks the message as ours"
+    assert "① *wiki-0435.md*" in out.text and "② *wiki-1000.md*" in out.text
+
+
+def test_parse_correction_shapes():
+    assert sc.parse_correction("정정: 재시작은 2시에 한다") == (None, "재시작은 2시에 한다")
+    assert sc.parse_correction("정정 2: 재시작은 2시에 한다") == (2, "재시작은 2시에 한다")
+    assert sc.parse_correction("정정：전각 콜론도 된다") == (None, "전각 콜론도 된다")
+    assert sc.parse_correction("  정정 :  앞뒤 공백  ") == (None, "앞뒤 공백")
+    assert sc.parse_correction("그냥 정정 얘기하는 문장") is None, "정정 이 문장 중간에 있으면 대화다"
+    assert sc.parse_correction("정정: ") is None, "빈 정정은 정정이 아니다"
+
+
+def _remember_recorder():
+    calls = []
+
+    def fake(title, body, **kw):
+        calls.append({"title": title, "body": body, **kw})
+        return {"source_path": "/vault/wiki/wiki-1077.md", "wiki_id": "wiki-1077",
+                "duplicate": None, "supersedes": kw.get("supersedes") or [], "unknown": []}
+
+    return calls, fake
+
+
+def test_correct_without_a_number_supersedes_everything_the_answer_carried():
+    calls, fake = _remember_recorder()
+    out = sc.correct(
+        "slack:C123:1.000", "배포 언제였더라",
+        ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md"],
+        "정정: 재시작은 매일 2시에 한다",
+        remember=fake,
+    )
+    assert calls[0]["supersedes"] == ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md"]
+    assert calls[0]["tags"] == ["correction", "slack"]
+    assert calls[0]["body"] == "질문: 배포 언제였더라\n\n정정: 재시작은 매일 2시에 한다"
+    assert calls[0]["title"] == "재시작은 매일 2시에 한다"
+    assert out["source_path"] == "/vault/wiki/wiki-1077.md", "the engine's answer travels back untouched"
+
+
+def test_correct_with_a_number_supersedes_only_that_note():
+    calls, fake = _remember_recorder()
+    sc.correct(
+        "slack:C123:1.000", "질문",
+        ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md", "/vault/wiki/wiki-1001.md"],
+        "정정 2: 풀은 아니고 브랜치다",
+        remember=fake,
+    )
+    assert calls[0]["supersedes"] == ["/vault/wiki/wiki-1000.md"], "1-based, in the order the answer listed them"
+
+
+def test_correct_with_a_number_outside_the_answer_is_refused():
+    calls, fake = _remember_recorder()
+    out = sc.correct("slack:C123:1.000", "질문", ["/vault/wiki/wiki-0435.md"], "정정 9: 없는 번호", remember=fake)
+    assert out == {"error": "no such number"}
+    assert calls == [], "nothing may reach the engine when the number points at no note"
+
+
+def test_correct_titles_the_note_with_the_first_sentence_capped():
+    calls, fake = _remember_recorder()
+    sc.correct("slack:C123:1.000", "", ["/vault/wiki/wiki-0435.md"],
+               "정정: 첫 문장이다. 두 번째 문장은 노트 본문에만.", remember=fake)
+    assert calls[0]["title"] == "첫 문장이다."
+    calls.clear()
+    sc.correct("slack:C123:1.000", "", ["/vault/wiki/wiki-0435.md"], "정정: " + "아" * 100, remember=fake)
+    assert calls[0]["title"] == "아" * 60
+
+
+def test_correct_survives_a_dead_engine():
+    def boom(*a, **kw): raise ConnectionError("refused")
+    out = sc.correct("slack:C123:1.000", "질문", ["/vault/wiki/wiki-0435.md"], "정정: 무언가", remember=boom)
+    assert out == {"error": "refused"}
 
 
 if __name__ == "__main__":
