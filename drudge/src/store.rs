@@ -136,6 +136,15 @@ pub struct HandoverReport {
     pub unknown: usize,
 }
 
+/// Result of a supersedes write: how many `supersedes` edges were written and how many pairs were
+/// skipped — a pair naming the same path twice, or one naming a path with no `document` row.
+#[derive(Debug, Default)]
+pub struct SupersedesReport {
+    /// `supersedes` edges written (`doc:<newer>` → `doc:<older>` pairs).
+    pub supersedes: usize,
+    pub unknown: usize,
+}
+
 /// Splits `supersedes` pairs into edge-worthy ones and the count of equal-path pairs. A pair that
 /// names the same path twice replaces nothing, so it is skipped and counted as unknown, never
 /// written.
@@ -2579,6 +2588,28 @@ impl Store {
         Ok(())
     }
 
+    /// The only writer of `supersedes` edges: what one note replaced another is read out of the
+    /// session's own words at scoring time, not emitted by the distilling LLM. Idempotent — a
+    /// repeat call adds edges that are not already there, never deletes. Skipped pairs (same path
+    /// twice, or a path with no `document` row) are counted in `unknown`, not errored.
+    pub async fn record_supersedes(&self, pairs: &[[String; 2]]) -> Result<SupersedesReport> {
+        let mut report = SupersedesReport::default();
+        let (pairs, skipped) = split_supersedes(pairs);
+        report.unknown += skipped;
+        for pair in pairs {
+            if self.get_doc_sha(&pair[0]).await?.is_none()
+                || self.get_doc_sha(&pair[1]).await?.is_none()
+            {
+                report.unknown += 1;
+                continue;
+            }
+            self.upsert_edge(&doc_node_id(&pair[0]), &doc_node_id(&pair[1]), "supersedes")
+                .await?;
+            report.supersedes += 1;
+        }
+        Ok(report)
+    }
+
     /// The scorer's write door: record what one session consumed. Upserts `session:<id>` (label =
     /// `observed_at`) and one `used`/`contested` edge per known path. Idempotent — a repeat call
     /// updates the label and adds edges, never deletes. Paths with no `document` row are skipped
@@ -2614,21 +2645,9 @@ impl Store {
                 .await?;
             report.contested += 1;
         }
-        // The only writer of `supersedes` edges: what one note replaced another is read out of the
-        // session's own words at scoring time, not emitted by the distilling LLM.
-        let (pairs, skipped) = split_supersedes(supersedes);
-        report.unknown += skipped;
-        for pair in pairs {
-            if self.get_doc_sha(&pair[0]).await?.is_none()
-                || self.get_doc_sha(&pair[1]).await?.is_none()
-            {
-                report.unknown += 1;
-                continue;
-            }
-            self.upsert_edge(&doc_node_id(&pair[0]), &doc_node_id(&pair[1]), "supersedes")
-                .await?;
-            report.supersedes += 1;
-        }
+        let supersedes_report = self.record_supersedes(supersedes).await?;
+        report.supersedes += supersedes_report.supersedes;
+        report.unknown += supersedes_report.unknown;
         Ok(report)
     }
 

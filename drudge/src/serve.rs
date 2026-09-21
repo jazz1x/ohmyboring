@@ -850,6 +850,15 @@ pub(crate) struct HandoverResp {
     pub(crate) unknown: usize,
 }
 
+#[derive(Serialize)]
+pub(crate) struct RememberResp {
+    pub(crate) source_path: String,
+    pub(crate) wiki_id: String,
+    pub(crate) duplicate: Option<String>,
+    pub(crate) supersedes: usize,
+    pub(crate) unknown: usize,
+}
+
 pub(crate) fn validate_handover_req(req: &HandoverReq) -> Result<(), AppError> {
     if req.session_id.trim().is_empty() {
         return Err(AppError::bad_request("session_id must not be empty"));
@@ -1230,6 +1239,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .route("/search", post(http::handle_search))
         .route("/consumption", post(http::handle_consumption))
         .route("/handover", post(http::handle_handover))
+        .route("/remember", post(http::handle_remember))
         .route("/graph", post(http::handle_graph))
         .route("/audit", get(http::handle_audit))
         .route("/query-log", get(http::handle_query_log))
