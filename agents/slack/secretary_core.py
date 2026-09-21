@@ -14,6 +14,7 @@ what it says.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Callable, NamedTuple, Optional
@@ -28,6 +29,16 @@ MAX_HITS = int(os.environ.get("SECRETARY_MAX_HITS") or "3")
 #: Claims per note, same knob as the hook.
 CLAIMS_PER_HIT = int(os.environ.get("SECRETARY_CLAIMS_PER_HIT") or str(recall_core.CLAIMS_PER_HIT))
 TIMEOUT = float(os.environ.get("SECRETARY_TIMEOUT") or "8")
+
+#: The first line of every answer. The transport reads a thread parent back through the Slack API
+#: to recognize its own answers without keeping any state, and this header — not the notes below
+#: it, which move as the engine re-ranks — is what it matches on. Renaming this is a transport
+#: change, not a wording change.
+ANSWER_HEAD = "_기억에서 찾은 것 {n}개_"
+ANSWER_HEAD_PREFIX = "_기억에서 찾은 것"
+#: Circled numbers for the notes of one answer, so a thread reply can say "정정 2:" and mean the
+#: second note on the list the reader saw, not the second note of the vault.
+NUMERALS = "①②③④⑤"
 
 #: What the secretary says when the engine has nothing, and when the engine is unreachable. The
 #: two are different facts and the reader gets to tell them apart — "I found nothing" is an
@@ -66,11 +77,15 @@ def handed(hits: list[dict]) -> list[dict]:
 
 
 def render(hits: list[dict]) -> str:
-    """The same lines the prompt hook injects, minus the fence — a person is reading."""
-    lines = []
-    for hit in handed(hits):
+    """The same lines the prompt hook injects, minus the fence — a person is reading. The first
+    line names the count and each note carries its circled number, so a later "정정 2:" in the
+    thread points at exactly the note the reader saw second."""
+    given = handed(hits)
+    lines = [ANSWER_HEAD.format(n=len(given))]
+    for i, hit in enumerate(given):
         snip = recall_core.salient(hit.get("snippet"))
-        lines.append(f"• *{recall_core.source_name(hit)}*{recall_core.consumption_note(hit)} {snip}")
+        numeral = NUMERALS[i] if i < len(NUMERALS) else "·"
+        lines.append(f"{numeral} *{recall_core.source_name(hit)}*{recall_core.consumption_note(hit)} {snip}")
         for line in recall_core.claim_lines(hit):
             lines.append("    " + line.strip())
     return "\n".join(lines)
@@ -79,7 +94,7 @@ def render(hits: list[dict]) -> str:
 def answer(question: str, search: Optional[Callable[..., list[dict]]] = None) -> Answer:
     """One question in, one message out. `search` is injectable so the brain is testable
     without an engine; the default is the live client. `hits` is what the message carried,
-    so the transport can ledger the answer and later attach a verdict to it."""
+    so the transport can ledger the answer and later attach a verdict — or a correction — to it."""
     q = strip_mention(question)
     if len(q) < 4:
         return Answer("무엇을 찾을까요? 한 문장으로 물어봐 주세요.", [])
@@ -92,10 +107,66 @@ def answer(question: str, search: Optional[Callable[..., list[dict]]] = None) ->
         print(f"[secretary] search failed: {e}", file=sys.stderr)
         return Answer(ENGINE_DOWN, [])
     given = handed(hits or [])
-    body = render(hits or [])
-    if not body:
+    if not given:
         return Answer(NOTHING_FOUND, [])
-    return Answer(body + "\n\n_더 보려면 `recall`, 정한 것만 보려면 `claims` 를 터미널에서._", given)
+    return Answer(render(given) + "\n\n_더 보려면 `recall`, 정한 것만 보려면 `claims` 를 터미널에서._", given)
+
+
+_CORRECTION_RE = re.compile(r"^\s*정정(?:\s+(\d+))?\s*[:：]\s*(.*?)\s*$")
+
+
+def parse_correction(text: str) -> Optional[tuple[Optional[int], str]]:
+    """`정정: X` → `(None, "X")` — the whole answer is wrong and X replaces all of it.
+    `정정 2: X` → `(2, "X")` — only the numbered note is wrong. Anything else → None,
+    an empty correction body included: not every sentence about "정정" is a correction."""
+    m = _CORRECTION_RE.match(text or "")
+    if not m:
+        return None
+    body = (m.group(2) or "").strip()
+    if not body:
+        return None
+    return (int(m.group(1)) if m.group(1) else None), body
+
+
+def _first_sentence(text: str, limit: int = 60) -> str:
+    """The note's title: the first sentence, capped. No sentence end on the line → the line
+    itself; past the cap → the cap — a title is never empty and never a wall of text."""
+    head = text.strip().split("\n", 1)[0]
+    cut = len(head)
+    for sep in (".", "!", "?"):
+        i = head.find(sep)
+        if i != -1:
+            cut = min(cut, i + 1)
+    return head[:cut][:limit]
+
+
+def correct(
+    answer_key: str,
+    question: str,
+    handed_paths: list[str],
+    text: str,
+    remember: Optional[Callable[..., dict]] = None,
+) -> dict:
+    """A thread reply of "정정: …" turned into a new note that replaces the answer's notes. With a
+    number ("정정 2:") only that one note is superseded — 1-based, in the order the answer listed
+    them; a number outside the answer is refused, not guessed. Without a number, everything the
+    answer carried is superseded. The owner's sentence is the note: no LLM is asked to reword it.
+    The engine's response travels back untouched."""
+    parsed = parse_correction(text)
+    if parsed is None:
+        return {"error": "not a correction"}
+    number, body = parsed
+    if number is not None and not 1 <= number <= len(handed_paths):
+        return {"error": "no such number"}
+    supersedes = [handed_paths[number - 1]] if number is not None else list(handed_paths)
+    if remember is None:
+        remember = DrudgeClient(timeout=TIMEOUT, retries=0).remember
+    note = f"질문: {question}\n\n정정: {body}"
+    try:
+        return remember(_first_sentence(body), note, tags=["correction", "slack"], supersedes=supersedes)
+    except Exception as e:  # noqa: BLE001 — a failed correction must not cost the transport a crash
+        print(f"[secretary] correction on {answer_key} failed: {e}", file=sys.stderr)
+        return {"error": str(e)}
 
 
 def remember_handed(

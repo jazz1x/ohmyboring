@@ -243,7 +243,7 @@ The model ids must match what LM Studio reports. `make verify-llm` also calls `/
 | `BORING_READINESS_NOTE_MAX_HOURS` | newest-note freshness window for briefing readiness; defaults to `48` |
 | `BORING_READINESS_PENDING_TTL` | stale `.pending` marker threshold for readiness; falls back to `INGEST_PENDING_TTL`, then `1800` seconds |
 | `BORING_READINESS_RETRY_TTL` | stale `.retry` marker threshold for readiness; falls back to `INGEST_RETRY_TTL`, then the pending threshold |
-| `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant |
+| `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant (`make secretary`); the bot token needs the `message.channels` scope — thread replies are how corrections reach memory |
 
 Structured events are emitted by distill, collectors/workers, `doctor`/`readiness`, `guard`, and `eval`. Memory-ingest events carry `workflow=memory_ingest`, `workflow_node`, and `workflow_outcome` fields that mirror the Rust workflow graph contract. Events are stored in the local engine DB first as OpenTelemetry-shaped log records; the NDJSON file is a fallback spool for engine-down cases unless you choose `BORING_EVENT_SINK=spool` or `both`. Use HTTP `/events` (or the `/otel-events` alias) or MCP `events` for the DB view; use `make events` for the DB view with automatic fallback to the file spool.
 

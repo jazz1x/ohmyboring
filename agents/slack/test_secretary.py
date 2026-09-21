@@ -42,17 +42,24 @@ def _reaction(reaction, user=OWNER, item_user=BOT, ts=POSTED_TS):
 
 
 class FakeWeb:
-    """Records chat_postMessage and answers like Slack: a posted message has a ts."""
+    """Records chat_postMessage and conversations_replies, and answers like Slack: a posted
+    message has a ts, a replies call returns the parent message it was given."""
 
-    def __init__(self, order=None):
+    def __init__(self, order=None, parent=None):
         self.posts = []
+        self.replies_calls = []
         self._order = order
+        self._parent = parent
 
     def chat_postMessage(self, **kw):
         if self._order is not None:
             self._order.append("post")
         self.posts.append(kw)
         return {"ts": POSTED_TS}
+
+    def conversations_replies(self, **kw):
+        self.replies_calls.append(kw)
+        return {"messages": [self._parent] if self._parent is not None else []}
 
 
 def _recorder():
@@ -266,6 +273,108 @@ def test_dispatch_a_failed_ack_means_no_handling():
     finally:
         sec.on_mention = real
     assert handled == [], "an un-acked envelope comes back as a retry; answering now would double-post"
+
+
+def _reply(text="정정: 재시작은 2시에 한다", user=OWNER, thread_ts=POSTED_TS):
+    event = {"type": "message", "user": user, "text": text, "channel": CH, "ts": "1726900000.000200"}
+    if thread_ts:
+        event["thread_ts"] = thread_ts
+    return event
+
+
+def _answer_parent():
+    text = sc.render([
+        {"source_path": "/vault/wiki/wiki-0435.md", "snippet": "branch naming settled " * 3},
+        {"source_path": "/vault/wiki/wiki-1000.md", "snippet": "pool question settled " * 3},
+    ])
+    return {"user": BOT, "text": text}
+
+
+def _recording_correct(calls):
+    def correct(key, question, handed_paths, text):
+        calls.append({"key": key, "question": question, "handed_paths": handed_paths, "text": text})
+        return {"source_path": "/vault/wiki/wiki-1077.md", "wiki_id": "wiki-1077",
+                "duplicate": None, "supersedes": list(handed_paths), "unknown": []}
+
+    return correct
+
+
+def test_a_correction_on_the_bots_answer_becomes_a_note():
+    calls = []
+    web = FakeWeb(parent=_answer_parent())
+    out = sec.on_thread_reply(_reply(), web, BOT, correct=_recording_correct(calls), owner_id=OWNER)
+
+    assert web.replies_calls == [{"channel": CH, "ts": POSTED_TS, "limit": 1}]
+    assert calls == [{
+        "key": f"slack:{CH}:{POSTED_TS}",
+        "question": "",
+        "handed_paths": ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md"],
+        "text": "정정: 재시작은 2시에 한다",
+    }], "the paths are rebuilt from the parent body's names, in the order the answer listed them"
+    assert web.posts == [{
+        "channel": CH,
+        "thread_ts": POSTED_TS,
+        "text": "정정 기록 → wiki-1077.md (대체 2)",
+    }]
+    assert out["wiki_id"] == "wiki-1077"
+
+
+def test_a_message_without_a_thread_is_just_conversation():
+    calls = []
+    web = FakeWeb(parent=_answer_parent())
+    out = sec.on_thread_reply(_reply(thread_ts=None), web, BOT,
+                              correct=_recording_correct(calls), owner_id=OWNER)
+    assert out is None and calls == [] and web.replies_calls == [] and web.posts == []
+
+
+def test_a_correction_from_someone_else_is_ignored_when_an_owner_is_configured():
+    calls = []
+    web = FakeWeb(parent=_answer_parent())
+    out = sec.on_thread_reply(_reply(user="U_STRANGER"), web, BOT,
+                              correct=_recording_correct(calls), owner_id=OWNER)
+    assert out is None and calls == [] and web.replies_calls == []
+
+
+def test_thread_chatter_that_is_not_a_correction_is_left_alone():
+    calls = []
+    web = FakeWeb(parent=_answer_parent())
+    out = sec.on_thread_reply(_reply(text="고마워, 도움 됐어!"), web, BOT,
+                              correct=_recording_correct(calls), owner_id=OWNER)
+    assert out is None and calls == [] and web.replies_calls == []
+
+
+def test_a_correction_on_someone_elses_thread_is_not_ours_to_keep():
+    parent = dict(_answer_parent())
+    parent["user"] = "U_SOMEONE_ELSE"
+    calls = []
+    web = FakeWeb(parent=parent)
+    out = sec.on_thread_reply(_reply(), web, BOT, correct=_recording_correct(calls), owner_id=OWNER)
+    assert out is None and calls == [] and web.posts == [], "남의 메시지에 정정이 달려도 우리 노트가 되지 않는다"
+
+
+def test_a_thread_on_a_message_that_is_not_our_answer_is_ignored():
+    calls = []
+    web = FakeWeb(parent={"user": BOT, "text": "그냥 봇이 한 말"})
+    out = sec.on_thread_reply(_reply(), web, BOT, correct=_recording_correct(calls), owner_id=OWNER)
+    assert out is None and calls == [] and web.posts == []
+
+
+def test_dispatch_routes_thread_replies_and_skips_bot_echoes():
+    _install_fake_slack_sdk()
+    handled = []
+    real = sec.on_thread_reply
+    sec.on_thread_reply = lambda event, web, bot, owner_id=None: handled.append(event) or {}
+    try:
+        client = FakeClient(web=FakeWeb(parent=_answer_parent()))
+        sec.dispatch(client, FakeReq("env-m1", payload={"event": _reply()}), bot_user_id=BOT, owner_id=OWNER)
+        echo = _reply()
+        echo["subtype"] = "bot_message"
+        sec.dispatch(client, FakeReq("env-m2", payload={"event": echo}), bot_user_id=BOT, owner_id=OWNER)
+        sec.dispatch(client, FakeReq("env-m3", payload={"event": _reply(user=BOT)}), bot_user_id=BOT, owner_id=OWNER)
+    finally:
+        sec.on_thread_reply = real
+    assert len(handled) == 1 and handled[0].get("subtype") is None, \
+        "only a plain human reply reaches the handler; echoes and the bot's own messages do not"
 
 
 if __name__ == "__main__":

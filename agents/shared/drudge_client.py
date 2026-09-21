@@ -123,6 +123,29 @@ class DrudgeClient:
             payload["supersedes"] = supersedes
         return self._retry("POST", "/consumption", payload)
 
+    def remember(
+        self,
+        title: str,
+        body: str,
+        *,
+        tags: Optional[list[str]] = None,
+        supersedes: Optional[list[str]] = None,
+        origin: str = "personal",
+        repo: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """POST /remember — a new note, optionally correcting older ones. `supersedes` names the
+        source paths the new note replaces; the engine writes the supersede edges so the next
+        recall sinks the old notes below the new one. Same body the MCP `remember` tool sends;
+        the response is `{source_path, wiki_id, duplicate, supersedes, unknown}`."""
+        payload: dict[str, Any] = {"title": title, "body": body, "origin": origin}
+        if tags:
+            payload["tags"] = tags
+        if supersedes:
+            payload["supersedes"] = supersedes
+        if repo:
+            payload["repo"] = repo
+        return self._retry("POST", "/remember", payload)
+
     def health(self) -> dict[str, Any]:
         """GET /health."""
         return self._retry("GET", "/health")
