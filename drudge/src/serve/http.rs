@@ -474,6 +474,22 @@ pub(crate) async fn handle_search(
         attach_consumption(store, &mut mapped).await?;
         attach_claims(store, &mut mapped, req.claims()).await?;
     }
+    // Opt-in handover: name the session and everything /search just showed is recorded as handed
+    // to it (`session:<id>` -[handed]-> doc) — the write side of the feedback door. A failure
+    // must never fail the search: a lost handover only means a later bare verdict has nothing
+    // to apply to.
+    if let Some(session_id) = req.session_id.as_deref()
+        && let Some(store) = s.store.as_ref()
+    {
+        let paths: Vec<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
+        let observed_at = chrono::Utc::now().to_rfc3339();
+        if let Err(error) = store
+            .record_handover(session_id, &observed_at, &paths)
+            .await
+        {
+            eprintln!("[search] handover for session {session_id} failed: {error:#}");
+        }
+    }
     // Opt-in graph read: beside each of the first `related_heads` hits, the older notes that
     // share a concept with it. The concept walk, not the shared-node walk — measured 2026-09-10,
     // shared nodes between recent notes are almost all `tool:*`, so the node walk links everything
@@ -536,20 +552,61 @@ pub(crate) async fn handle_consumption(
 ) -> Result<Json<crate::serve::ConsumptionResp>, AppError> {
     crate::serve::validate_consumption_req(&req)?;
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
-    let report = store
-        .record_consumption(
-            &req.session_id,
-            &req.observed_at,
-            &req.used,
-            &req.contested,
-            &req.supersedes,
-        )
-        .await?;
+    // A bare verdict applies to everything handed to the session — the engine already knows
+    // what was handed; the caller only brings the thumbs-up/down. An unknown session handed
+    // nothing: empty verdict list, normal response — not an error.
+    let report = match req.verdict.as_deref() {
+        Some(verdict) => {
+            let handed = store.handed_paths(&req.session_id).await?;
+            let empty: Vec<String> = Vec::new();
+            let (used, contested) = if verdict == "used" {
+                (&handed, &empty)
+            } else {
+                (&empty, &handed)
+            };
+            store
+                .record_consumption(
+                    &req.session_id,
+                    &req.observed_at,
+                    used,
+                    contested,
+                    &req.supersedes,
+                )
+                .await?
+        }
+        None => {
+            store
+                .record_consumption(
+                    &req.session_id,
+                    &req.observed_at,
+                    &req.used,
+                    &req.contested,
+                    &req.supersedes,
+                )
+                .await?
+        }
+    };
     Ok(Json(crate::serve::ConsumptionResp {
         session: format!("session:{}", req.session_id),
         used: report.used,
         contested: report.contested,
         supersedes: report.supersedes,
+        unknown: report.unknown,
+    }))
+}
+
+pub(crate) async fn handle_handover(
+    State(s): State<AppState>,
+    Json(req): Json<crate::serve::HandoverReq>,
+) -> Result<Json<crate::serve::HandoverResp>, AppError> {
+    crate::serve::validate_handover_req(&req)?;
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let report = store
+        .record_handover(&req.session_id, &req.observed_at, &req.paths)
+        .await?;
+    Ok(Json(crate::serve::HandoverResp {
+        session: format!("session:{}", req.session_id),
+        handed: report.handed,
         unknown: report.unknown,
     }))
 }
