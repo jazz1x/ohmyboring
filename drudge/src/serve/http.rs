@@ -478,7 +478,7 @@ pub(crate) async fn handle_search(
     // to it (`session:<id>` -[handed]-> doc) — the write side of the feedback door. A failure
     // must never fail the search: a lost handover only means a later bare verdict has nothing
     // to apply to.
-    if let Some(session_id) = req.session_id.as_deref()
+    if let Some(session_id) = req.session_id()
         && let Some(store) = s.store.as_ref()
     {
         let paths: Vec<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
@@ -555,7 +555,7 @@ pub(crate) async fn handle_consumption(
     // A bare verdict applies to everything handed to the session — the engine already knows
     // what was handed; the caller only brings the thumbs-up/down. An unknown session handed
     // nothing: empty verdict list, normal response — not an error.
-    let report = match req.verdict.as_deref() {
+    let report = match req.verdict() {
         Some(verdict) => {
             let handed = store.handed_paths(&req.session_id).await?;
             let empty: Vec<String> = Vec::new();

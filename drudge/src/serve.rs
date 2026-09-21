@@ -511,6 +511,35 @@ mod tests {
     }
 
     #[test]
+    fn a_padded_verdict_reads_as_used_not_contested() {
+        // The validator trimmed and the handler did not, so `" used "` passed validation and
+        // then fell into the contested branch. Both now read through `verdict()`.
+        let mut req = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
+        req.verdict = Some(" used ".to_owned());
+        assert!(super::validate_consumption_req(&req).is_ok());
+        assert_eq!(req.verdict(), Some("used"));
+        assert_ne!(req.verdict(), Some(" used "));
+    }
+
+    #[test]
+    fn a_blank_search_session_records_no_handover() {
+        let mut req = super::SearchReq {
+            query: "q".to_owned(),
+            max_results: 3,
+            max_tokens: 100,
+            project: None,
+            since_hours: None,
+            related: 0,
+            related_heads: 0,
+            claims: None,
+            session_id: Some("  ".to_owned()),
+        };
+        assert_eq!(req.session_id(), None);
+        req.session_id = Some(" slack:C1:1.0 ".to_owned());
+        assert_eq!(req.session_id(), Some("slack:C1:1.0"));
+    }
+
+    #[test]
     fn consumption_rejects_verdict_other_than_used_or_contested() {
         for bad in ["helpful", "wrong", "", "USED"] {
             let mut req = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
@@ -676,6 +705,15 @@ impl SearchReq {
     pub(crate) fn claims(&self) -> u32 {
         self.claims.unwrap_or(0).min(SEARCH_MAX_CLAIMS)
     }
+
+    /// The session to record the handover for — trimmed, and blank means "no session", so
+    /// `"  "` cannot mint a `session:` node the way MCP `recall` already refuses to.
+    pub(crate) fn session_id(&self) -> Option<&str> {
+        self.session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
 }
 
 fn default_related_heads() -> usize {
@@ -743,6 +781,15 @@ pub(crate) struct ConsumptionReq {
     pub(crate) verdict: Option<String>,
 }
 
+impl ConsumptionReq {
+    /// The verdict as one normalised string, read here by both the validator and the handler.
+    /// Two readers with two spellings of "trim" turned `" used "` into a contested edge once.
+    /// Blank stays `Some("")` so the validator still rejects a verdict field that says nothing.
+    pub(crate) fn verdict(&self) -> Option<&str> {
+        self.verdict.as_deref().map(str::trim)
+    }
+}
+
 #[derive(Serialize)]
 pub(crate) struct ConsumptionResp {
     pub(crate) session: String,
@@ -762,7 +809,7 @@ pub(crate) fn validate_consumption_req(req: &ConsumptionReq) -> Result<(), AppEr
             req.observed_at
         )));
     }
-    if let Some(verdict) = req.verdict.as_deref().map(str::trim) {
+    if let Some(verdict) = req.verdict() {
         if verdict != "used" && verdict != "contested" {
             return Err(AppError::bad_request(format!(
                 "verdict must be \"used\" or \"contested\", got {verdict:?}"
