@@ -231,6 +231,7 @@ make readiness
 | `CODEX_DISTILL_CLAMP` | Codex セッション向けの同じ値。`INGEST_CLAMP`、次に `12000` |
 | `KIMI_DISTILL_CLAMP` | Kimi Code セッション向けの同じ値。`INGEST_CLAMP`、次に `12000` |
 | `DISTILL_BACKSTOP_CLAMP` | 呼び出し側が clamp せずに渡した場合だけ効く最終上限（`48000`）。上の 3 つのデフォルトより意図的に高く置き、そのいずれかを上げたときに黙って切り戻されないようにしています。ここに掛かった場合はどのノブを上げるべきかをログに出します |
+| `RECALL_CLAIMS_PER_HIT` | 注入されるスニペットごとに同送する claim の数（`2`）。claim は何を決め、次に何をし、何に噛まれたかです — スニペットがそのノートが何についてかを言うなら、claim はそれが何に落ち着いたかを言います。実際の一週間の注入で実測: 1 個ならヒットあたり 59 文字、2 個なら 102 文字で、スニペット三つが既に使う 840 文字の隣です。ヒットの 54.4% が二つ目の claim を持ちます。`0` で同送を止めます |
 | `RECALL_RELEVANCE_MAX_DIST` | 取得した hit が主題からどれだけ外れているかを*測る*ための cosine 距離の上限（`0.514`）。この値で破棄することはありません — スカラー 1 つでは 2 つのクラスを分離できません（`data/eval` のバンドが重なり、`0.514` はライブ注入 23 件のうち 47.8% を捨てる値でした）。よって支払う代わりに報告だけします。`vector_cosine` のみを比較し、`text_rank` の hit や距離を持たない hit はこの値で判定しません |
 | `BORING_EVENT_LOG` | ローカル NDJSON fallback スプール。デフォルトは `~/.cache/oh-my-boring/events.ndjson` |
 | `BORING_EVENT_SINK` | イベント sink モード: `db`(デフォルト)、`spool`、`both`。`db` はエンジン DB に先に書き、失敗時だけスプールします |
@@ -490,7 +491,7 @@ MCP に対応したエージェントならどれも ohmyboring を利用でき�
 
 （VS Code Copilot は root key `servers` を使う `.vscode/mcp.json` を使用します。CLI 代替: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`。compose の sibling コンテナは `http://boring-drudge:7700/mcp` でアクセスします。）
 
-利用可能な tools（22個）: `recall` · `neighbors` · `claims`（記憶検索）· `code_search` · `code_symbol` · `code_index_status`（独立した AST コードコーパス）· `ask` · `brief` · `weekly_brief` · `project_status` · `decisions` · `risks` · `next_actions` · `stalled`（生成 — LLM 実行）· `context` · `corpus_status` · `events` · `config_get`（構造化 / introspection）· `remember` · `forget` · `classify_repo` · `sync`（書き込み / メンテナンス）。
+利用可能な tools（22個）: `recall` · `neighbors` · `claims`（記憶検索）· `code_search` · `code_symbol` · `code_index_status`（独立した AST コードコーパス）· `ask` · `brief` · `weekly_brief` · `project_status`（生成 — LLM 実行）· `decisions` · `risks` · `next_actions` · `stalled`（レジスタ — 行を返す、LLM なし）· `context` · `corpus_status` · `events` · `config_get`（構造化 / introspection）· `remember` · `forget` · `classify_repo` · `sync`（書き込み / メンテナンス）。
 
 デフォルトの wiki-first モード（`BORING_VECTOR=off`）では、recency/vector 順序、グラフ、ローカルイベント DB に依存する tool が pgvector バックエンドを必要とし、`BORING_VECTOR=on` を設定するまで JSON-RPC `-32603` を返します: `neighbors`、`claims`、`corpus_status`、`events`、`brief`、`weekly_brief`、`project_status`、`decisions`、`risks`、`next_actions`、`stalled`。`recall` と `ask` は `vault/wiki` を直接読み、`context` は呼び出し可能ですが store がない場合は空の claim card を返します。`remember`、`forget`、`sync`、`config_get`、`classify_repo`、`code_search`、`code_symbol`、`code_index_status` は vector モードを必要としません。3 つのコード tool には有効な `code_index` source と事前の `code-sync` が必要です。
 
@@ -502,7 +503,8 @@ MCP に対応したエージェントならどれも ohmyboring を利用でき�
 - `claims` *(`BORING_VECTOR=on` が必要)* — クエリ近傍の現在（未置換）の `{subject, predicate, value}` 決定の top-k。
 - `corpus_status` *(`BORING_VECTOR=on` が必要)* — KB ヘルスのスナップショット（ファイル/チャンク数、origin/kind/project 別、汚染度、graph/semantic のノード+エッジ）。
 - `events` *(`BORING_VECTOR=on` が必要)* — DB に OpenTelemetry 形式で保存された最近の workflow/adapter イベントを返します。component、event、status、run_id、workflow、since_hours でフィルタできます。
-- `ask` / `brief` / `weekly_brief` / `project_status` / `decisions` / `risks` / `next_actions` / `stalled` — LLM を実行する tool: `ask` は出典を引用して質問に答え（wiki-first モードで動作）、残りは recency/claim レジスタで `BORING_VECTOR=on` が必要です。
+- `ask` / `brief` / `weekly_brief` / `project_status` — LLM を実行する tool。`ask` は出典を引用して答え wiki-first モードでも動作し、ブリーフィング三つは `BORING_VECTOR=on` が必要です。
+- `decisions` / `risks` / `next_actions` / `stalled` — レジスタ。claim の行をそのまま返し、経路に LLM がありません: 同じ問いに同じ答えで、散文を生成していた頃の 119.6 秒に対し 0.02 秒と実測されました。`BORING_VECTOR=on` が必要で、結果が切られた場合は応答がそう述べます（`limit_applied`）。
 - `forget` — wiki id または正確なタイトルでノートを削除します。wiki ファイルを削除し、vector モードでは embedding・graph edge・claim も同時に削除します。
 
 構造化 tool（`neighbors`、`claims`、`corpus_status`、`events`、`config_get`、`code_search`、`code_symbol`、`code_index_status`、`ask`、`brief`、`weekly_brief`、`project_status`、`decisions`、`risks`、`next_actions`、`stalled`、`context`）はテキストブロックと共にネイティブの `structuredContent`（JSON）を返し、プローズ/ack tool（`recall`、`remember`、`forget`、`sync`、`classify_repo`）はテキストを返します。

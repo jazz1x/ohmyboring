@@ -6,6 +6,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **The injection carries what the note settled** — each recalled snippet now arrives with up to two of its claims (`RECALL_CLAIMS_PER_HIT`, default 2), so the agent reads the decision rather than only the prose around it. Measured on a week of real traffic: 71.3% of injected hits have a claim to give, at 102 characters per hit against the 840 the snippets already spend.
+- **Related notes follow a shared claim** — retrieval used to walk concept edges only, leaving 10,886 of 11,123 claim-sharing document pairs unreachable. Two notes that answered the same question now find each other, weighted above two notes that merely cover the same area.
+- **The corpus counts what only labels** — every sync reports the current claims whose value is a tag or whose predicate restates its kind (69.1% when the count was added), so a corpus drifting that way stops looking identical to a healthy one.
+- **doctor sees a container looping inside** — a failure-rate check on each container's log tail, because `boring-agent` reported `Up` for ten days while failing 267,201 times inside it and the RESTARTING check never fired.
+- **The ledger records what rode along** — each injected hit stores how many claims it handed over and how many the note had to give, so "did the settled material get used" becomes answerable later instead of reconstructed.
 - **Code graph indexing** — an AST-based index over the repo, queryable through the `code_index_status`, `code_search`, and `code_symbol` MCP tools.
 - **Retrieval distance is part of the contract** — `/search` hits carry `dist` and `dist_kind`, `query_log` persists both per hit (absent stays distinguishable from `0`), and MCP tool calls are recorded with the tag that names the tool.
 - **The engine says which commit it is running** — `/health` reports `build_sha`, and `doctor` compares it against the checkout by sha, not timestamp, so a merged-but-not-deployed image is caught instead of assumed.
@@ -23,6 +28,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 - **Briefing readability** — daily/weekly Slack digests are now grouped by priority (Blocked → Next → Stalled → Risks → Decisions → Done) with a short summary count, and Block Kit payloads no longer double-escape section text.
 
 ### Fixed
+- **The registers and the session-start card prefer rows that say something** — a claim whose value is a fragment or whose predicate restates its kind now sorts last instead of first-by-recency. Nothing is filtered; the card simply stops opening with four `incident: <tag>` lines.
+- **Distillation stopped teaching itself to write tags** — four of the five claim examples in the prompt were tags, and the model copied them. Rewritten as statements: on one transcript, median claim value length went 24 → 37 characters and slot predicates 17% → 0%.
+- **One splitter for the vault's file format** — the `---` frontmatter split was hand-rolled in eleven places that all failed the same way on a BOM, CRLF, or a trailing space; they now call one tested function, and the single undeclared Python dependency is declared.
+
 - `agents/hermes/ingest-worker.py` now reuses the same git-first repo-slug logic as the session hooks instead of reading only the cwd basename.
 - **Recall no longer retrieves on text the harness wrote** — task notifications and image-only prompts are not user turns, and they were driving a large share of daily retrievals.
 - **`doctor` no longer calls working hooks missing** — hook wiring is matched on `hooks/<script>.py`, so the tilde form `install.sh` registers is recognised instead of reported as absent.
