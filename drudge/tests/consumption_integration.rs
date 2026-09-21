@@ -722,7 +722,6 @@ async fn wait_for_health(client: &reqwest::Client, base: &str) {
 
 /// Kills the spawned `drudge serve` child when the test ends — on success or mid-panic.
 struct ServerGuard(std::process::Child);
-
 impl Drop for ServerGuard {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -792,4 +791,275 @@ async fn seed_rank_doc(
         })
         .await
         .expect("upsert chunk");
+}
+
+/// POST /remember and hand back the parsed body — the door answers 200 or the test fails.
+async fn post_remember(
+    client: &reqwest::Client,
+    base: &str,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    let resp = client
+        .post(format!("{base}/remember"))
+        .json(&payload)
+        .send()
+        .await
+        .expect("post /remember");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    resp.json().await.expect("remember response")
+}
+
+/// POST /search and hand back the hits array — the door answers 200 or the test fails.
+async fn post_search(
+    client: &reqwest::Client,
+    base: &str,
+    payload: serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let resp = client
+        .post(format!("{base}/search"))
+        .json(&payload)
+        .send()
+        .await
+        .expect("post /search");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    resp.json::<serde_json::Value>()
+        .await
+        .expect("search response")["hits"]
+        .as_array()
+        .expect("hits")
+        .clone()
+}
+
+/// End to end through the real HTTP surface: `POST /remember` writes note A; note B names A in
+/// `supersedes` and the response reports the one edge; `/search` reads A back with
+/// `superseded_by` pointing at B. A `supersedes` path that names no document row is counted in
+/// `unknown`, not an error. The stub embedder is a hashing vectorizer, so a query sharing
+/// tokens with A ranks A first and the 0.07 dedup cap never trips on lexically disjoint notes.
+#[tokio::test]
+async fn remember_http_supersedes_edges_sink_the_old_note_in_search() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let vault = tempfile::tempdir().expect("temp vault");
+    std::fs::create_dir_all(vault.path().join("wiki")).expect("wiki dir");
+    let llm_base = format!("http://127.0.0.1:{}/v1", spawn_hashing_embedder().await);
+
+    let port = free_port();
+    let _server = spawn_server_with_vault(&dsn, port, vault.path(), &llm_base);
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+    wait_for_health(&client, &base).await;
+
+    // Note A — the one that gets corrected.
+    let body = post_remember(
+        &client,
+        &base,
+        serde_json::json!({
+            "title": "alpha fixture lever jam",
+            "body": "The alpha fixture jams when the lever is cold; warm the lever first.",
+        }),
+    )
+    .await;
+    let path_a = body["source_path"]
+        .as_str()
+        .expect("a source_path")
+        .to_owned();
+    assert!(
+        body["wiki_id"]
+            .as_str()
+            .expect("a wiki_id")
+            .starts_with("wiki-"),
+        "wiki_id is allocated: {:?}",
+        body["wiki_id"]
+    );
+    assert!(body["duplicate"].is_null(), "a fresh note is no duplicate");
+    assert_eq!(body["supersedes"], 0);
+    assert_eq!(body["unknown"], 0);
+
+    // Note B corrects A: one supersedes edge, zero unknown.
+    let body = post_remember(
+        &client,
+        &base,
+        serde_json::json!({
+            "title": "beta widget pedal squeak",
+            "body": "The beta widget squeaks when the pedal is humid; park it in the shade.",
+            "supersedes": [path_a],
+        }),
+    )
+    .await;
+    let path_b = body["source_path"]
+        .as_str()
+        .expect("b source_path")
+        .to_owned();
+    assert!(body["duplicate"].is_null());
+    assert_eq!(
+        body["supersedes"], 1,
+        "the note that corrects A reports one supersedes edge"
+    );
+    assert_eq!(body["unknown"], 0);
+
+    // A supersedes path naming no document row is counted, not an error.
+    let body = post_remember(
+        &client,
+        &base,
+        serde_json::json!({
+            "title": "gamma panel toggle flicker",
+            "body": "The gamma panel flickers when the toggle is wet; dry the toggle first.",
+            "supersedes": ["/vault/wiki/never-ingested.md"],
+        }),
+    )
+    .await;
+    let path_c = body["source_path"]
+        .as_str()
+        .expect("c source_path")
+        .to_owned();
+    assert_eq!(body["supersedes"], 0);
+    assert_eq!(
+        body["unknown"], 1,
+        "a supersedes path with no document row is counted, not an error"
+    );
+
+    // The next recall sinks the old note: A comes back with superseded_by pointing at B.
+    let hits = post_search(
+        &client,
+        &base,
+        serde_json::json!({"query": "alpha fixture lever", "max_results": 5}),
+    )
+    .await;
+    let hit_a = hits
+        .iter()
+        .find(|h| h["source_path"] == path_a)
+        .expect("note A is a hit for its own tokens");
+    let superseded_by = hit_a["superseded_by"]
+        .as_array()
+        .expect("A carries a superseded_by list now");
+    assert_eq!(
+        superseded_by
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>(),
+        vec![path_b.as_str()],
+        "recall reports B as A's replacement"
+    );
+
+    for path in [&path_a, &path_b, &path_c] {
+        store.delete_document(path).await.expect("cleanup doc");
+    }
+}
+
+/// Spawn `drudge serve` with a vault and a stub embedder — the correction door needs both: the
+/// wiki note lands in the vault, and vector mode on means ingest/dedup/project all embed.
+fn spawn_server_with_vault(
+    dsn: &str,
+    port: u16,
+    vault: &std::path::Path,
+    llm_base: &str,
+) -> ServerGuard {
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_drudge"))
+        .arg("serve")
+        .env("BORING_VECTOR", "on")
+        .env("PG_DSN", dsn)
+        .env("BORING_HTTP_ADDR", format!("127.0.0.1:{port}"))
+        .env("BORING_BRIEF_HOUR", "99")
+        .env("BORING_VAULT_DIR", vault)
+        .env("BORING_LLM_BASE_URL", llm_base)
+        .env_remove("BORING_LLM_MODEL")
+        .spawn()
+        .expect("spawn drudge serve");
+    ServerGuard(child)
+}
+
+/// A stub OpenAI-compatible `/embeddings` for the spawned server: one 1024-dim hashing vector
+/// per request body. Texts sharing tokens land near each other (a query about note A ranks A
+/// first); lexically disjoint notes are cosine-far apart, so the 0.07 dedup cap never trips.
+/// One request per connection (`connection: close`); runs until the test process exits.
+async fn spawn_hashing_embedder() -> u16 {
+    use std::hash::{Hash, Hasher};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Hashing vectorizer: each alphanumeric token claims one dimension. Same text → same
+    /// vector; shared tokens → shared dimensions; disjoint texts → near-orthogonal.
+    fn vectorize(text: &str) -> Vec<f32> {
+        const DIM: usize = 1024;
+        let mut v = vec![0f32; DIM];
+        for token in text.split(|c: char| !c.is_alphanumeric()) {
+            let token = token.to_lowercase();
+            if token.is_empty() {
+                continue;
+            }
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            token.hash(&mut h);
+            let dim = usize::try_from(h.finish() % DIM as u64).unwrap_or(0);
+            v[dim] += 1.0;
+        }
+        if v.iter().all(|&x| x == 0.0) {
+            v[0] = 1.0;
+        }
+        v
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stub embedder");
+    let port = listener.local_addr().expect("stub addr").port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let headers_end = loop {
+                    let Ok(n) = socket.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&buf[..headers_end]).to_string();
+                let content_length = headers
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                while buf.len() < headers_end + content_length {
+                    let Ok(n) = socket.read(&mut chunk).await else {
+                        break;
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let body = String::from_utf8_lossy(&buf[headers_end..]).to_string();
+                let payload = serde_json::json!({
+                    "object": "list",
+                    "data": [{"object": "embedding", "index": 0, "embedding": vectorize(&body)}],
+                });
+                let out = payload.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}",
+                    out.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            });
+        }
+    });
+    port
 }

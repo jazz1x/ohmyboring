@@ -611,6 +611,33 @@ pub(crate) async fn handle_handover(
     }))
 }
 
+/// The correction door: `remember` over HTTP — same parser, same write path as MCP `remember`
+/// (the body JSON is handed over as-is). A note that corrects earlier ones names them in
+/// `supersedes`; after the note is written and ingested, each pair becomes a `supersedes` edge
+/// from the new note, and the next recall sinks the old note below the new one. Parse errors
+/// (-32602) are 400; a failure past the parse is 500.
+pub(crate) async fn handle_remember(
+    State(s): State<AppState>,
+    Json(req): Json<Value>,
+) -> Result<Json<crate::serve::RememberResp>, AppError> {
+    let remembered = crate::serve::mcp::remember_note(&s, Some(&req))
+        .await
+        .map_err(|(code, msg)| {
+            if code == -32602 {
+                AppError::bad_request(msg)
+            } else {
+                AppError::from(anyhow::anyhow!(msg))
+            }
+        })?;
+    Ok(Json(crate::serve::RememberResp {
+        source_path: remembered.source_path,
+        wiki_id: remembered.wiki_id,
+        duplicate: remembered.duplicate,
+        supersedes: remembered.supersedes,
+        unknown: remembered.unknown,
+    }))
+}
+
 pub(crate) async fn handle_graph(
     State(s): State<AppState>,
     Json(req): Json<GraphReq>,

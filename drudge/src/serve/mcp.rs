@@ -127,6 +127,7 @@ fn mcp_tools_list() -> Value {
                     "origin": {"type": "string", "enum": ["personal", "company", "mirror", "community"], "description": "default personal"},
                     "repo": {"type": "string", "description": "optional repo slug → becomes the project + a repo/<slug> tag"},
                     "sources": {"type": "array", "items": {"type": "string"}, "description": "optional vault-local evidence paths for this note, e.g. raw/<file>.md"},
+                    "supersedes": {"type": "array", "items": {"type": "string"}, "description": "source_path of notes this one corrects; each gets a supersedes edge from the new note and sinks below it in recall"},
                     "omb_session_id": {"type": "string", "description": "optional ephemeral ingestion marker — include only when requested by the ingestion worker"},
                     "claims": {
                         "type": "array",
@@ -1266,13 +1267,41 @@ async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     Ok(format!("forgot → {source_path}{partial}"))
 }
 
+/// Structured outcome of one `remember` — `POST /remember` answers with the fields; MCP keeps
+/// answering with just `message`, the text agents already parse.
+pub(crate) struct Remembered {
+    pub(crate) source_path: String,
+    pub(crate) wiki_id: String,
+    /// `Some(path)` when the note landed on (or skipped over) a duplicate of an existing note.
+    pub(crate) duplicate: Option<String>,
+    /// `supersedes` edges written from this note to the paths it corrects.
+    pub(crate) supersedes: usize,
+    /// Paths named in `supersedes` that could not be linked: no `document` row, or the whole
+    /// list when vector mode is off.
+    pub(crate) unknown: usize,
+    /// The exact text MCP `remember` has always answered with.
+    pub(crate) message: String,
+}
+
 async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
+    Ok(remember_note(s, args).await?.message)
+}
+
+/// The write door both MCP `remember` and `POST /remember` go through: one parser, one write
+/// path, one dedup policy. `supersedes` (optional) names the notes this one corrects; after the
+/// note is written and ingested, each pair becomes a `supersedes` edge from the new note, and
+/// the next recall sinks the old note below the new one.
+pub(crate) async fn remember_note(
+    s: &AppState,
+    args: Option<&Value>,
+) -> Result<Remembered, (i32, String)> {
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
         return Err((
             -32603,
             "BORING_VAULT_DIR not set — no target to write remember notes to".to_owned(),
         ));
     };
+    let supersedes = parse_supersedes(args)?;
     let mut note = parse_remember_note(args, &s.cfg)?;
 
     apply_pii_gate(s.pii.as_ref().as_ref(), &mut note)?;
@@ -1302,19 +1331,63 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
             std::fs::write(&path, content)
                 .map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
             log_dedup_decision(s, &telemetry).await;
-            return finish_remembered_note(s, &path, &wiki_id, &front, true).await;
+            let message = finish_remembered_note(s, &path, &wiki_id, &front, true).await?;
+            let (sup_count, unk_count) =
+                write_supersedes_edges(s, &front.source_path, &supersedes).await?;
+            return Ok(Remembered {
+                source_path: front.source_path.clone(),
+                wiki_id,
+                duplicate: Some(existing.source_path),
+                supersedes: sup_count,
+                unknown: unk_count,
+                message,
+            });
         }
         log_dedup_decision(
             s,
             &dedup_decision_event(&note, Some(&existing), DedupOutcome::Skip),
         )
         .await;
-        return Ok(format!("skipped — duplicate of {}", existing.source_path));
+        let skipped_path = existing.source_path;
+        return Ok(Remembered {
+            wiki_id: crate::vault::wiki_stem(&skipped_path).unwrap_or_default(),
+            source_path: skipped_path.clone(),
+            duplicate: Some(skipped_path.clone()),
+            // A skipped note leaves no new note behind, so nothing is superseded.
+            supersedes: 0,
+            unknown: 0,
+            message: format!("skipped — duplicate of {skipped_path}"),
+        });
     }
 
     let telemetry = dedup_decision_event(&note, None, DedupOutcome::StoreNew);
 
-    let mut db_ids: HashSet<u32> = HashSet::new();
+    let db_ids = existing_wiki_ids(s).await?;
+    let (wiki_id, path) = vault::allocate_wiki_path(&wiki_dir, Some(&db_ids))
+        .map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
+    let mut front = note.front;
+    front.source_path = path.to_string_lossy().into_owned();
+    let content = vault::render_wiki_note(&wiki_id, &front, &note.body)
+        .map_err(|e| (-32603_i32, format!("render wiki note: {e:#}")))?;
+    std::fs::write(&path, content).map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
+    log_dedup_decision(s, &telemetry).await;
+
+    let message = finish_remembered_note(s, &path, &wiki_id, &front, false).await?;
+    let (sup_count, unk_count) = write_supersedes_edges(s, &front.source_path, &supersedes).await?;
+    Ok(Remembered {
+        source_path: front.source_path.clone(),
+        wiki_id,
+        duplicate: None,
+        supersedes: sup_count,
+        unknown: unk_count,
+        message,
+    })
+}
+
+/// Wiki ids already taken, on disk and in the vector store — `allocate_wiki_path` picks the
+/// next free `wiki-NNNN` from the union.
+async fn existing_wiki_ids(s: &AppState) -> Result<HashSet<u32>, (i32, String)> {
+    let mut db_ids = HashSet::new();
     if let Some(store) = s.store.as_ref() {
         for p in store.all_doc_paths().await.map_err(|e| {
             (
@@ -1331,16 +1404,32 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
             }
         }
     }
-    let (wiki_id, path) = vault::allocate_wiki_path(&wiki_dir, Some(&db_ids))
-        .map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
-    let mut front = note.front;
-    front.source_path = path.to_string_lossy().into_owned();
-    let content = vault::render_wiki_note(&wiki_id, &front, &note.body)
-        .map_err(|e| (-32603_i32, format!("render wiki note: {e:#}")))?;
-    std::fs::write(&path, content).map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
-    log_dedup_decision(s, &telemetry).await;
+    Ok(db_ids)
+}
 
-    finish_remembered_note(s, &path, &wiki_id, &front, false).await
+/// After the note is on disk and ingested, one `supersedes` edge per corrected path. Vector off
+/// (no store): nothing can be written — the whole list reports as `unknown`, and that is not a
+/// failure; the wiki note itself is already recallable.
+async fn write_supersedes_edges(
+    s: &AppState,
+    new_path: &str,
+    supersedes: &[String],
+) -> Result<(usize, usize), (i32, String)> {
+    if supersedes.is_empty() {
+        return Ok((0, 0));
+    }
+    let Some(store) = s.store.as_ref() else {
+        return Ok((0, supersedes.len()));
+    };
+    let pairs: Vec<[String; 2]> = supersedes
+        .iter()
+        .map(|old| [new_path.to_owned(), old.clone()])
+        .collect();
+    let report = store
+        .record_supersedes(&pairs)
+        .await
+        .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))?;
+    Ok((report.supersedes, report.unknown))
 }
 
 async fn finish_remembered_note(
@@ -1789,6 +1878,32 @@ fn token_set(text: &str) -> HashSet<String> {
     out
 }
 
+/// Optional `supersedes` argument: source_paths of the notes this one corrects. Absent → empty.
+/// Present-but-wrong-shaped (not an array, or a non-string item) is -32602, the same door as the
+/// other argument errors.
+fn parse_supersedes(args: Option<&Value>) -> Result<Vec<String>, (i32, String)> {
+    let Some(raw) = args.and_then(|a| a.get("supersedes")) else {
+        return Ok(Vec::new());
+    };
+    let items = raw.as_array().ok_or((
+        -32602,
+        "supersedes must be an array of source_path strings".to_owned(),
+    ))?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let s = item.as_str().ok_or((
+            -32602,
+            "supersedes items must be strings (source_path of the note this one corrects)"
+                .to_owned(),
+        ))?;
+        let s = s.trim();
+        if !s.is_empty() {
+            out.push(s.to_owned());
+        }
+    }
+    Ok(out)
+}
+
 fn parse_remember_note(
     args: Option<&Value>,
     cfg: &config::BoringConfig,
@@ -1971,8 +2086,8 @@ mod tests {
     use super::{
         DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote, ToolCallError,
         ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_tools_list,
-        parse_remember_note, probable_session_duplicate, should_replace_duplicate,
-        tool_outcome_snippet, tool_query_arg,
+        parse_remember_note, parse_supersedes, probable_session_duplicate,
+        should_replace_duplicate, tool_outcome_snippet, tool_query_arg,
     };
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
@@ -2033,6 +2148,30 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort();
         names
+    }
+
+    #[test]
+    fn parse_supersedes_absent_is_empty() {
+        assert_eq!(parse_supersedes(None).unwrap(), Vec::<String>::new());
+        let args = json!({"title": "t", "body": "b"});
+        assert_eq!(parse_supersedes(Some(&args)).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_supersedes_collects_trimmed_non_empty_paths() {
+        let args = json!({"supersedes": [" /vault/wiki/a.md ", "", "/vault/wiki/b.md"]});
+        assert_eq!(
+            parse_supersedes(Some(&args)).unwrap(),
+            vec!["/vault/wiki/a.md".to_owned(), "/vault/wiki/b.md".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parse_supersedes_rejects_non_array_and_non_string_items() {
+        let args = json!({"supersedes": ["/vault/wiki/a.md", 7]});
+        assert_eq!(parse_supersedes(Some(&args)).unwrap_err().0, -32602);
+        let args = json!({"supersedes": "/vault/wiki/a.md"});
+        assert_eq!(parse_supersedes(Some(&args)).unwrap_err().0, -32602);
     }
 
     #[test]
