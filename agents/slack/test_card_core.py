@@ -175,6 +175,33 @@ class ParseProposalsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cc.parse_proposals(json.dumps(data, ensure_ascii=False), self.registers)
 
+    def test_prefix_of_a_real_path_is_refused(self):
+        # startswith is not membership: /vault/wiki/wiki-0576 is the real path minus .md.
+        data = json.loads(PROPOSE_JSON)
+        data["proposals"][2]["source_note"] = "/vault/wiki/wiki-0576"
+        with self.assertRaises(ValueError):
+            cc.parse_proposals(json.dumps(data), self.registers)
+
+    def test_path_with_trailing_space_is_refused(self):
+        data = json.loads(PROPOSE_JSON)
+        data["proposals"][2]["source_note"] = "/vault/wiki/wiki-0576.md "
+        with self.assertRaises(ValueError):
+            cc.parse_proposals(json.dumps(data), self.registers)
+
+    def test_not_exactly_three_is_refused(self):
+        data = json.loads(PROPOSE_JSON)
+        data["proposals"] = data["proposals"][:2]
+        with self.assertRaises(ValueError):
+            cc.parse_proposals(json.dumps(data), self.registers)
+
+    def test_duplicate_source_note_is_refused(self):
+        # Each note grounds one proposal — the same note twice means the set is a lie.
+        data = json.loads(PROPOSE_JSON)
+        data["proposals"][1]["source_note"] = "next_action"
+        data["proposals"][1]["register"] = "next_actions"
+        with self.assertRaises(ValueError):
+            cc.parse_proposals(json.dumps(data), self.registers)
+
     def test_bad_json_and_bad_register_are_refused(self):
         with self.assertRaises(ValueError):
             cc.parse_proposals("not json", self.registers)
@@ -188,13 +215,13 @@ class GraphTests(unittest.TestCase):
     def setUp(self):
         self.sends = []
         self.handovers = []
-        self.feedbacks = []
+        self.consumptions = []
         collabs = card.Collaborators(
             fetch=_fetch,
             propose=lambda prompt: PROPOSE_JSON,
             send=self._send,
             handover=self._handover,
-            feedback=self._feedback,
+            consumption=self._consumption,
         )
         self.graph = card.build_graph(collabs)
         self.cfg = {"configurable": {"thread_id": "test-card"}}
@@ -207,9 +234,9 @@ class GraphTests(unittest.TestCase):
         self.handovers.append((session, at, paths))
         return {}
 
-    def _feedback(self, key, verdict):
-        self.feedbacks.append((key, verdict))
-        return {"used": 1}
+    def _consumption(self, session, kind, paths):
+        self.consumptions.append((session, kind, paths))
+        return {"edges": 1}
 
     def _resume(self, idx, choice):
         verdict = cc.ButtonVerdict(idx=idx, choice=choice, user=OWNER, at="t")
@@ -223,7 +250,7 @@ class GraphTests(unittest.TestCase):
                     propose=lambda p: PROPOSE_JSON,
                     send=self._send,
                     handover=self._handover,
-                    feedback=self._feedback,
+                    consumption=self._consumption,
                 )
             )
             .get_graph()
@@ -244,14 +271,17 @@ class GraphTests(unittest.TestCase):
         out = self._resume(0, "do")
         self.assertIn("__interrupt__", out)
         self.assertEqual([v.choice for v in out["verdicts"]], ["do"])
-        self.assertEqual(self.feedbacks, [(SESSION, "used")])
+        self.assertEqual(self.consumptions, [(SESSION, "used", ["next_action"])])
 
         out = self._resume(1, "drop")
-        self.assertEqual(self.feedbacks, [(SESSION, "used"), (SESSION, "contested")])
+        self.assertEqual(
+            self.consumptions,
+            [(SESSION, "used", ["next_action"]), (SESSION, "contested", ["f64_risk"])],
+        )
 
         out = self._resume(2, "defer")
         self.assertNotIn("__interrupt__", out)
-        self.assertEqual(len(self.feedbacks), 2)  # defer adds no engine call
+        self.assertEqual(len(self.consumptions), 2)  # defer adds no engine call
         self.assertEqual(len(self.sends), 1)  # the card went out once
 
 

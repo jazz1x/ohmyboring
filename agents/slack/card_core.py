@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 RegisterName = Literal["next_actions", "risks", "stalled", "recurrences"]
 Choice = Literal["do", "defer", "drop"]
@@ -49,9 +49,20 @@ class Proposal(BaseModel):
 
 
 class Proposals(BaseModel):
-    """The structured-output schema handed to the local model."""
+    """The structured-output schema handed to the local model — exactly three proposals,
+    each grounded in a different note. Two, four, or one note twice is refused here with
+    the reason, before a card exists."""
 
-    proposals: list[Proposal] = Field(min_length=1)
+    proposals: list[Proposal] = Field(min_length=3, max_length=3)
+
+    @field_validator("proposals")
+    @classmethod
+    def _distinct_source_notes(cls, proposals: list[Proposal]) -> list[Proposal]:
+        notes = [p.source_note for p in proposals]
+        if len(set(notes)) != len(notes):
+            dupes = sorted({n for n in notes if notes.count(n) > 1})
+            raise ValueError(f"proposals: duplicate source_note(s): {', '.join(dupes)}")
+        return proposals
 
 
 class ButtonVerdict(BaseModel):

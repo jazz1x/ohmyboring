@@ -25,7 +25,6 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 
 import card_core  # noqa: E402
-import secretary_core  # noqa: E402
 from drudge_client import DrudgeClient  # noqa: E402
 from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
 from langgraph.graph import END, START, StateGraph  # noqa: E402
@@ -59,7 +58,7 @@ class Collaborators(NamedTuple):
     propose: Callable[[str], str]  # prompt → proposal JSON text
     send: Callable[[list[dict]], card_core.PostedCard]  # Block Kit → posted card
     handover: Callable[[str, str, list[str]], dict]  # session, at, source notes
-    feedback: Callable[[str, str], dict]  # session, verdict → engine answer
+    consumption: Callable[[str, str, list[str]], dict]  # session, used|contested, paths
 
 
 def session_name(card: card_core.PostedCard) -> str:
@@ -74,7 +73,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             propose=make_propose(),
             send=_env_send,
             handover=_live_handover,
-            feedback=secretary_core.feedback,
+            consumption=_live_consumption,
         )
 
     def read_registers(_: CardState) -> dict:
@@ -100,12 +99,12 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
 
     def record_verdict(state: CardState) -> dict:
         verdict = state["verdicts"][-1]
-        key = session_name(state["message"])
-        if verdict.choice == "do":
-            collabs.feedback(key, "used")
-        elif verdict.choice == "drop":
-            collabs.feedback(key, "contested")
-        return {}  # defer is recorded in state only — no engine verdict
+        if verdict.choice == "defer":
+            return {}  # recorded in state only — no engine call
+        kind = "used" if verdict.choice == "do" else "contested"
+        note = state["proposals"][verdict.idx].source_note
+        collabs.consumption(session_name(state["message"]), kind, [note])
+        return {}
 
     graph = StateGraph(CardState)
     graph.add_node("read_registers", read_registers)
@@ -132,6 +131,14 @@ def _live_fetch(path: str) -> dict[str, Any]:
 
 def _live_handover(session: str, at: str, paths: list[str]) -> dict:
     return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).handover(session, at, paths)
+
+
+def _live_consumption(session: str, kind: str, paths: list[str]) -> dict:
+    # Row-level, not session-level: a button judges the note its row cited, and only that one.
+    at = datetime.now(UTC).isoformat()
+    if kind == "used":
+        return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(session, at, used=paths)
+    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(session, at, contested=paths)
 
 
 def _env_send(blocks: list[dict]) -> card_core.PostedCard:
@@ -221,6 +228,8 @@ def main() -> int:
         )
         return 2
     owner_id = os.environ.get("SECRETARY_OWNER_ID") or None
+    if owner_id is None:
+        print("[card] no SECRETARY_OWNER_ID — any user may judge", file=sys.stderr)
 
     from slack_sdk.socket_mode import SocketModeClient
     from slack_sdk.web import WebClient
@@ -235,27 +244,33 @@ def main() -> int:
     holder = _Holder()
     client = SocketModeClient(app_token=app_token, web_client=web_client)
     client.socket_mode_request_listeners.append(_listener(holder, owner_id))
-    client.connect()
-
-    graph = build_graph()
-    config = {"configurable": {"thread_id": f"card-{datetime.now(UTC):%Y%m%d}"}}
     try:
-        state = graph.invoke({"verdicts": []}, config)
-        holder.message = state["message"]
-        holder.proposals = state["proposals"]
-        while True:
-            verdict = holder.queue.get()
-            holder.judged.add(verdict.idx)
-            state = graph.invoke(Command(resume=verdict), config)
-            web_client.chat_update(
-                channel=holder.message.channel,
-                ts=holder.message.ts,
-                blocks=card_core.build_blocks(state["proposals"], state["verdicts"]),
-            )
-            if "__interrupt__" not in state:
-                break
-    except KeyboardInterrupt:
-        print("[card] 결재 대기를 멈춘다 — 카드는 슬랙에 남아 있다.", file=sys.stderr)
+        client.connect()
+        graph = build_graph()
+        config = {"configurable": {"thread_id": f"card-{datetime.now(UTC):%Y%m%d}"}}
+        try:
+            state = graph.invoke({"verdicts": []}, config)
+            holder.message = state["message"]
+            holder.proposals = state["proposals"]
+            while True:
+                verdict = holder.queue.get()
+                holder.judged.add(verdict.idx)
+                state = graph.invoke(Command(resume=verdict), config)
+                web_client.chat_update(
+                    channel=holder.message.channel,
+                    ts=holder.message.ts,
+                    blocks=card_core.build_blocks(state["proposals"], state["verdicts"]),
+                )
+                if "__interrupt__" not in state:
+                    break
+        except KeyboardInterrupt:
+            print("[card] 결재 대기를 멈춘다 — 카드는 슬랙에 남아 있다.", file=sys.stderr)
+        except ValueError as e:
+            # A malformed register or an ungrounded proposal — say why in one line and stop.
+            print(f"[card] 카드 거부: {' '.join(str(e).split())}", file=sys.stderr)
+            return 3
+    finally:
+        client.close()
     return 0
 
 
