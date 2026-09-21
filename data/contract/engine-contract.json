@@ -1,0 +1,503 @@
+{
+  "get_shapes": {
+    "/audit": [
+      "by_kind",
+      "by_origin",
+      "by_project",
+      "claims_anchored",
+      "claims_label_only",
+      "claims_pre_anchor",
+      "claims_stale",
+      "claims_unanchored",
+      "clean",
+      "company_allowed",
+      "company_contamination",
+      "graph_chunks",
+      "graph_claims",
+      "graph_claims_with_doc",
+      "graph_decisions",
+      "graph_documents",
+      "graph_edges",
+      "graph_projects",
+      "graph_risks",
+      "graph_topics",
+      "missing_origin",
+      "missing_project",
+      "semantic_about",
+      "semantic_concepts",
+      "semantic_tools",
+      "semantic_uses",
+      "total_chunks",
+      "total_files"
+    ],
+    "/health": [
+      "build_sha",
+      "corpus_count",
+      "db_healthy",
+      "status",
+      "sync",
+      "vector"
+    ],
+    "/projects": [
+      "projects"
+    ],
+    "/recall-label-stats": [
+      "agreed",
+      "compared",
+      "judges"
+    ]
+  },
+  "http_routes": [
+    "GET /audit",
+    "GET /health",
+    "GET /mcp",
+    "GET /projects",
+    "GET /query-log",
+    "GET /recall-label-stats",
+    "POST /ask",
+    "POST /brief",
+    "POST /compact",
+    "POST /consumption",
+    "POST /context",
+    "POST /decisions",
+    "POST /graph",
+    "POST /handover",
+    "POST /mcp",
+    "POST /next_actions",
+    "POST /recurrences",
+    "POST /remember",
+    "POST /risks",
+    "POST /search",
+    "POST /stalled",
+    "POST /status",
+    "POST /sync",
+    "POST /weekly"
+  ],
+  "mcp_tools": {
+    "ask": {
+      "properties": {
+        "project": {
+          "description": "optional project slug to restrict retrieval",
+          "type": "string"
+        },
+        "question": {
+          "description": "the question to answer from memory",
+          "type": "string"
+        },
+        "since_hours": {
+          "description": "optional recency window in hours",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "question"
+      ],
+      "type": "object"
+    },
+    "brief": {
+      "properties": {},
+      "type": "object"
+    },
+    "claims": {
+      "properties": {
+        "anchor_path": {
+          "description": "optional code-path filter — keep only claims anchored under this path (their anchor starts with <project>:<anchor_path>)",
+          "type": "string"
+        },
+        "include_stale": {
+          "description": "also return claims whose code anchor went stale (default false)",
+          "type": "boolean"
+        },
+        "max_results": {
+          "description": "max claims (default 5)",
+          "type": "integer"
+        },
+        "query": {
+          "description": "topic to retrieve current claims about",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "classify_repo": {
+      "properties": {
+        "match": {
+          "description": "case-insensitive substring matched against git remote URL first, then cwd (e.g. an org/repo slug)",
+          "type": "string"
+        },
+        "name": {
+          "description": "optional repo slug override",
+          "type": "string"
+        },
+        "origin": {
+          "enum": [
+            "personal",
+            "company",
+            "mirror",
+            "community"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "match",
+        "origin"
+      ],
+      "type": "object"
+    },
+    "code_index_status": {
+      "properties": {
+        "repository": {
+          "description": "optional configured code_index source id",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "code_search": {
+      "properties": {
+        "query": {
+          "description": "literal symbol or path fragment",
+          "type": "string"
+        },
+        "repository": {
+          "description": "optional configured code_index source id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "code_symbol": {
+      "properties": {
+        "id": {
+          "description": "stable symbol id returned by code_search",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "config_get": {
+      "properties": {},
+      "type": "object"
+    },
+    "context": {
+      "properties": {
+        "max_items": {
+          "description": "max items per section (default 5, max 20)",
+          "type": "integer"
+        },
+        "project": {
+          "description": "optional project slug filter",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "corpus_status": {
+      "properties": {},
+      "type": "object"
+    },
+    "decisions": {
+      "properties": {
+        "project": {
+          "description": "optional project slug filter",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "events": {
+      "properties": {
+        "component": {
+          "description": "optional component filter, e.g. guard or distill-session",
+          "type": "string"
+        },
+        "event": {
+          "description": "optional event name filter, e.g. distill_resolution",
+          "type": "string"
+        },
+        "limit": {
+          "description": "max events (default 50, cap 1000)",
+          "type": "integer"
+        },
+        "run_id": {
+          "description": "optional run/session id filter",
+          "type": "string"
+        },
+        "since_hours": {
+          "description": "optional recent window in hours",
+          "type": "integer"
+        },
+        "status": {
+          "description": "optional status filter, e.g. ok or failed",
+          "type": "string"
+        },
+        "workflow": {
+          "description": "optional workflow filter, e.g. memory_ingest",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "forget": {
+      "oneOf": [
+        {
+          "required": [
+            "id"
+          ]
+        },
+        {
+          "required": [
+            "title"
+          ]
+        }
+      ],
+      "properties": {
+        "id": {
+          "description": "wiki id of the note to delete (e.g. wiki-0042). Either id or title is required.",
+          "type": "string"
+        },
+        "title": {
+          "description": "exact title of the note to delete. Use id when multiple notes share a title.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "neighbors": {
+      "properties": {
+        "query": {
+          "description": "topic or document to anchor traversal on",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "next_actions": {
+      "properties": {
+        "project": {
+          "description": "optional project slug filter",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "project_status": {
+      "properties": {
+        "project": {
+          "description": "project slug to summarize",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
+    "recall": {
+      "properties": {
+        "max_results": {
+          "description": "max hits (default 5, cap 20)",
+          "type": "integer"
+        },
+        "max_tokens": {
+          "description": "approximate token budget (default 2000)",
+          "type": "integer"
+        },
+        "project": {
+          "description": "optional project slug to restrict results",
+          "type": "string"
+        },
+        "query": {
+          "description": "topic or question to recall",
+          "type": "string"
+        },
+        "session_id": {
+          "description": "optional session id — the notes returned are recorded as handed to this session (the write side of the feedback door)",
+          "type": "string"
+        },
+        "since_hours": {
+          "description": "optional recency window in hours (e.g. 24 for last day)",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "recurrences": {
+      "properties": {
+        "days": {
+          "description": "window in days for the newer claim (default 30)",
+          "type": "integer"
+        },
+        "limit": {
+          "description": "max recurrence rows (default 10, capped at 50)",
+          "type": "integer"
+        },
+        "project": {
+          "description": "optional project slug filter",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "remember": {
+      "properties": {
+        "body": {
+          "description": "the curated note body (markdown problem-solving narrative)",
+          "type": "string"
+        },
+        "claims": {
+          "description": "durable facts/decisions as (subject,predicate,value) triples (a new value supersedes the old)",
+          "items": {
+            "properties": {
+              "predicate": {
+                "type": "string"
+              },
+              "subject": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "subject",
+              "predicate",
+              "value"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "concepts": {
+          "description": "key technical concepts/patterns (≤6)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "omb_session_id": {
+          "description": "optional ephemeral ingestion marker — include only when requested by the ingestion worker",
+          "type": "string"
+        },
+        "origin": {
+          "description": "default personal",
+          "enum": [
+            "personal",
+            "company",
+            "mirror",
+            "community"
+          ],
+          "type": "string"
+        },
+        "repo": {
+          "description": "optional repo slug → becomes the project + a repo/<slug> tag",
+          "type": "string"
+        },
+        "sources": {
+          "description": "optional vault-local evidence paths for this note, e.g. raw/<file>.md",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "supersedes": {
+          "description": "source_path of notes this one corrects; each gets a supersedes edge from the new note and sinks below it in recall",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tags": {
+          "description": "topical tags (≤6), lowercase, no CJK",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "one-line note title",
+          "type": "string"
+        },
+        "tools": {
+          "description": "software tools/libraries used (≤6), short canonical names",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "title",
+        "body"
+      ],
+      "type": "object"
+    },
+    "risks": {
+      "properties": {
+        "project": {
+          "description": "optional project slug filter",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "stalled": {
+      "properties": {
+        "older_than_days": {
+          "description": "threshold in days (default 7)",
+          "type": "integer"
+        },
+        "project": {
+          "description": "optional project slug filter",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "sync": {
+      "properties": {},
+      "type": "object"
+    },
+    "verdict": {
+      "properties": {
+        "session_id": {
+          "description": "the session whose handed notes the verdict applies to",
+          "type": "string"
+        },
+        "verdict": {
+          "description": "used = the handed notes were right; contested = they were wrong",
+          "enum": [
+            "used",
+            "contested"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "verdict"
+      ],
+      "type": "object"
+    },
+    "weekly_brief": {
+      "properties": {},
+      "type": "object"
+    }
+  }
+}

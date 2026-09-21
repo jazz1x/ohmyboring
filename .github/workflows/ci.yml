@@ -187,6 +187,10 @@ jobs:
         env:
           BORING_URL: http://127.0.0.1:7700
         run: ./scripts/eval-gate.sh
+      - name: engine contract parity (MCP tools · HTTP routes · GET shapes == data/contract snapshot)
+        env:
+          DRUDGE_URL: http://127.0.0.1:7700
+        run: python3 scripts/contract-parity.py --check
       - name: engine logs on failure
         if: failure()
         run: docker compose --profile vector logs boring-drudge boring-postgres

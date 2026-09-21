@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **엔진 계약이 스냅샷으로 고정된다** — `scripts/contract-parity.py --snapshot` 이 라이브 엔진에서 MCP `tools/list` 24개(이름+inputSchema)·HTTP 라우트 24개(`serve.rs` 라우터에서 읽음)·읽기 전용 GET 4개의 최상위 키를 `data/contract/engine-contract.json` 에 적고, `--check` 가 CI eval-gate 단계에서 라이브와 대조한다. 엔진에 닿지 못하면 빈 집합이 아니라 실패다. 이전(migration) 트렁크의 첫 게이트 — 뒤에 오는 엔진이 같은 문을 지키는지는 이 파일이 판정한다.
 - **터미널 훅도 건넨 노트를 엔진에 알린다** — 프롬프트 훅이 주입한 노트 경로를 `POST /handover` 로 세션 이름 아래 남긴다. 대조군으로 가져만 온 hit 은 건넨 것이 아니라 빠진다(그래서 `/search` 의 `session_id` 가 아니라 별도 호출). 렛저 기록은 그대로 — 판정 계열의 원천은 아직 렛저다. 문이 죽어도 프롬프트는 안 잃는다.
 - **슬랙 스레드의 "정정: …" 이 노트가 된다** — 비서의 답(`_기억에서 찾은 것 N개_` 머리표와 ①②③ 번호로 시작)에 스레드로 "정정: X" 를 달면 X 가 새 노트가 되어 그 답이 건넨 노트 전부를, "정정 2: X" 면 그 번호의 노트 하나를 대체한다. 전송층은 상태 없이 부모 메시지를 한 번 읽어 머리표로 자기 답을 알아보고, 본문의 `*wiki-NNNN.md*` 이름으로 경로를 되살린 뒤 `/remember` 에 `supersedes` 를 싣는다. LLM 은 부르지 않는다 — 소유자가 쓴 문장이 곧 노트다.
 - **재발 명부 — "과거의 실수가 또 났다"를 행으로 답한다** — `POST /recurrences` + MCP `recurrences`(도구 24개). 최근 30일의 risk/blocked claim 중 값 임베딩 거리 ≤ 0.2 · 3일 이상 전 다른 노트의 risk/blocked claim 과 가까운 쌍을 짝지어 돌려준다. 값 길이는 기존 25자 규칙(`INFORMATIVE_VALUE_CHARS`)을 재사용하고, predicate 가 꼬리표만 달면 잡되 `label_only: true`로 표시한다. 읽기 전용 — 새 표·새 간선 없음.
@@ -15,7 +16,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ### Changed
 - **비서는 렛저 대신 엔진 문을 쓴다** — `remember_handed` 가 주입 렛저에 적던 경로 목록을 `POST /handover` 로 볂고, `feedback` 이 렛저를 뒤져 경로를 되찾던 일을 그만두고 verdict-only `POST /consumption` 에 판정만 실어 볂는다. 같은 사실이 두 곳에 있던 건 여기까지 — 얼굴이 늘 때마다 렛저를 뒤지지 않는다.
-- **판정이 다음 검색 순위를 바꾼다** — `/search`·MCP `recall`·`/ask`·CLI 가 공유하는 RRF 병합 뒤, 문서별 `net = clamp(used − contested, −FEEDBACK_NET_MAX, +FEEDBACK_NET_MAX)` (`FEEDBACK_NET_MAX = 3`) 만큼 점수를 움직인다: `score += net × FEEDBACK_STEP`, `FEEDBACK_STEP = rrf_term(1) − rrf_term(2)` — 👍 하나 = 한 목록에서 한 등수. 스팸 반응 셋이 두 목록 1등(≈0.0328)을 못 뒤집게 상한은 세 칸. 소비 간선이 없는 코퍼스에선 되먹임 항이 0이라 순위가 바이트 단위로 같다(골든 게이트가 이를 고정).
+- **판정이 다음 검색 순위를 바꾼다** — `/search`·MCP `recall`·`/ask`·CLI 가 공유하는 RRF 병합 뒤, 문서별 `net = clamp(used − contested, −FEEDBACK_NET_MAX, +FEEDBACK_NET_MAX)` (`FEEDBACK_NET_MAX = 3`) 만큼 점수를 움직인다: `score += net × FEEDBACK_STEP`, `FEEDBACK_STEP = rrf_term(1) − rrf_term(2)` — 👍 하나 = 한 목록에서 한 등수. 스팸 반응 셋이 두 목록 1등(≈0.0328)을 못 뒤집게 상한은 세 칸. 소비 간선이 없는 코퍼스에선 피드백 항이 0이라 순위가 바이트 단위로 같다(골든 게이트가 이를 고정).
 
 ### Fixed
 - **`make heal` restarts only the service that is looping** — a container reporting `Up` while its log tail is mostly failures is restarted on its own, instead of bouncing the whole stack (and the engine, and every hook that fires while it is down) to cure a Slack socket. The loop itself is hermes' Slack adapter reconnecting on a client session it already closed; that bug is upstream, this is the remedy at hand.
