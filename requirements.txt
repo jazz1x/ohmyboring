@@ -20,3 +20,12 @@ slack-sdk>=3.27
 # lives outside hooks/ on purpose: hooks stay stdlib-only, a door may have dependencies.
 fastapi>=0.110
 uvicorn>=0.29
+# langgraph is the morning card's run loop (agents/slack/card.py) — one StateGraph that reads the
+# engine registers, posts the Slack card, interrupts for a human verdict, and resumes on the
+# button. langchain_core/langchain_ollama are the structured-output seam to the local model,
+# pydantic is card_core's ADT language. Underscores on purpose: scripts/test_python_deps.py
+# matches import names literally, and pip normalizes them anyway.
+langgraph>=1.2.10
+langchain_core>=1.5.3
+langchain_ollama>=1.1.0
+pydantic>=2.13.4

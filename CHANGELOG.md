@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **아침 카드 — 제안 셋을 보내고 버튼이 곧 판정이 된다** — `make card` 가 LangGraph 그래프 하나(g_card)로 엔진 레지스터 넷(next_actions·risks·stalled·recurrences)을 읽고, 로컬 gemma4:12b 가 제안 셋을 골라 Slack Block Kit 카드를 `SLACK_CARD_CHANNEL` 에 보내낸 뒤 `interrupt()` 로 멈춰 사람 결재를 기다린다. 버튼(해·미뤄·빼) 이 눌리면 `Command(resume=…)` 로 같은 그래프가 이어 돌아 판정을 내리고 — 해=used, 빼=contested, 미뤄=기록만 — 보내낸 것과 판정이 한 상태에 남는다. 제안은 레지스터에 있는 것만: `parse_proposals` 가 `source_note` 가 그 레지스터의 sources 에 없으면 카드 없이 거부하고, 버튼 payload 의 이상은 `Rejected` 값으로 돌려 받는다(`agents/slack/card_core.py` + 시험 13개, 네트워크 없음). 실측: 레지스터 수집→구조화 출력까지 16초.
 - **문 빌드·기동이 엔진과 격리된다** — `make door-build`·`make door-up` 이 boring-door 만 다룬다(`--no-deps`: depends_on 수렴으로 엔진이 재생성되는 사이클 4 사고를 막는다). 워크트리에서 엔진 이미지·컨테이너는 무접촉, `.dockerignore` 가 `**/__pycache__` 로 깊이 무관하게 제외, doctor 가 문의 /health 를 한 항목으로 본다(문 없음은 경고, 200 인데 본문이 엔진과 다르거나 502 면 실패).
 - **문이 compose 서비스로 선다** — `docker compose up -d boring-door` 이 `agents/door/Dockerfile`(python:3.12-slim, uid 10001, 마운트 0)으로 빌드한 컨테이너를 띄워 엔진 바로 앞, 호스트 `127.0.0.1:7710` 에 선다. `DOOR_UPSTREAM=http://boring-drudge:7700` — 같은 compose 네트워크라 서비스 이름으로 닿고, 넘기는 환경은 그 하나뿐. /health 는 엔진 것을 그대로 흘리니 엔진이 죽으면 문도 unhealthy. `make build` 가 엔진과 문을 같이 빌드한다. 소비자 URL 전환은 아직 — 이 판의 끝은 문과 엔진이 나란히 뜬 것.
 - **Python 위생은 ruff 까지, 그 밖은 스킬로** — `ruff.toml`(110자, E·F·I·B·UP) 이 pre-commit·`guard.sh`·CI 에서 돈다. 규칙 채택 시 lint 412건 중 자동수정 198 + 손수정 7, 포맷 93/119 파일 — 이 한 번의 재정렬이 이 항목의 diff 대부분이다. 이전(migration) 슬라이스 절차와 코드 규율(주석은 드물게·조용한 폴백 금지·훅은 stdlib)은 도구가 아니라 `.claude/skills/migration-slice/SKILL.md` 한 장으로 배선한다 — 새 게이트는 같은 부류 실수가 반복 관측된 뒤에만.
@@ -20,7 +21,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ### Changed
 - **문이 계약 스냅샷의 라우트 24개를 전부 프록시한다** — `agents/door/door.py` 의 등록 표는 손으로 나열하지 않고 시작 때 `data/contract/engine-contract.json` 의 `http_routes` 를 읽어 세운다 — 계약이 바뀌면 문이 따라 바뀌고, 문이 계약보다 좁거나 넓으면 시험이 죽는다. 요청은 content-type·accept·mcp-session-id·x-request-id 넷만 전달하고, 응답 content-type 은 있으면 그대로·없으면 없이 — `application/json` 이라는 조용한 기본값은 폐기됐다. `DOOR_TIMEOUT` 기본 20 → 130초 (30일 p95: brief 77초 — 20초면 정상 brief 를 문이 끊는다). 블로킹 업스트림 호출은 스레드 풀로 옮겨 한 번의 느린 호출이 문 전체를 굶기지 않게 했다. 그리고 업스트림 응답의 content-type 이 `text/event-stream` 이면 본문 전체를 기다리지 않고 받는 대로 흘려보낸다 — `GET /mcp` 의 무한 SSE 는 문에서도 끝없이 이어지고, 클라이언트가 끊으면 문은 업스트림 소켓도 함께 닫는다.
-- **비서는 렛저 대신 엔진 문을 쓴다** — `remember_handed` 가 주입 렛저에 적던 경로 목록을 `POST /handover` 로 볂고, `feedback` 이 렛저를 뒤져 경로를 되찾던 일을 그만두고 verdict-only `POST /consumption` 에 판정만 실어 볂는다. 같은 사실이 두 곳에 있던 건 여기까지 — 얼굴이 늘 때마다 렛저를 뒤지지 않는다.
+- **비서는 렛저 대신 엔진 문을 쓴다** — `remember_handed` 가 주입 렛저에 적던 경로 목록을 `POST /handover` 로 보내고, `feedback` 이 렛저를 뒤져 경로를 되찾던 일을 그만두고 verdict-only `POST /consumption` 에 판정만 실어 볂는다. 같은 사실이 두 곳에 있던 건 여기까지 — 얼굴이 늘 때마다 렛저를 뒤지지 않는다.
 - **판정이 다음 검색 순위를 바꾼다** — `/search`·MCP `recall`·`/ask`·CLI 가 공유하는 RRF 병합 뒤, 문서별 `net = clamp(used − contested, −FEEDBACK_NET_MAX, +FEEDBACK_NET_MAX)` (`FEEDBACK_NET_MAX = 3`) 만큼 점수를 움직인다: `score += net × FEEDBACK_STEP`, `FEEDBACK_STEP = rrf_term(1) − rrf_term(2)` — 👍 하나 = 한 목록에서 한 등수. 스팸 반응 셋이 두 목록 1등(≈0.0328)을 못 뒤집게 상한은 세 칸. 소비 간선이 없는 코퍼스에선 피드백 항이 0이라 순위가 바이트 단위로 같다(골든 게이트가 이를 고정).
 
 ### Fixed
