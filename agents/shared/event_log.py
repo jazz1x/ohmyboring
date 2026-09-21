@@ -61,6 +61,46 @@ def _append_to_spool(payload: dict[str, Any]) -> None:
         f.write("\n")
 
 
+def replay_spool(path: Optional[Path] = None) -> dict[str, int]:
+    """Hand the spooled rows to the engine, and keep only the ones it still refuses.
+
+    The spool is where a row lands when the engine is down. Nothing brought those rows back:
+    `doctor` had an alarm for them — "EVENTS TRAPPED IN THE SPOOL" — and no remedy, so the
+    sessions they describe stayed missing from the verdict population for as long as nobody
+    replayed them by hand. Measured 2026-09-21 after a Docker restart: 2 verdict-kind rows from 1
+    session inside the open window, invisible to coverage because its numerator and denominator
+    vanished together.
+
+    Each row is POSTed exactly as it was spooled — the engine keys on the row's own timestamp, so a
+    replay is not a second event. Rows the engine still refuses stay in the spool for the next
+    attempt; a row that cannot be parsed stays too, and is counted, rather than being dropped on
+    the way through. Returns counts so the caller can say what happened instead of "done".
+    """
+    spool = path or event_log_path()
+    if not spool.exists():
+        return {"replayed": 0, "kept": 0, "unparseable": 0}
+    replayed = kept = unparseable = 0
+    remaining: list[str] = []
+    for line in spool.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            unparseable += 1
+            remaining.append(line)
+            continue
+        if _try_store_in_engine(payload):
+            replayed += 1
+        else:
+            kept += 1
+            remaining.append(line)
+    tmp = spool.with_suffix(spool.suffix + ".replaying")
+    tmp.write_text("".join(f"{ln}\n" for ln in remaining), encoding="utf-8")
+    tmp.replace(spool)
+    return {"replayed": replayed, "kept": kept, "unparseable": unparseable}
+
+
 def try_append_event(component: str, event: str, status: str, **fields: Any) -> bool:
     try:
         append_event(component, event, status, **fields)
@@ -448,6 +488,11 @@ def main() -> int:
     parser.add_argument("--verdict-spool-loss", action="store_true")
     parser.add_argument("--recent-resolution-failures", action="store_true")
     parser.add_argument("--stale-gates", action="store_true")
+    parser.add_argument(
+        "--replay-spool",
+        action="store_true",
+        help="hand spooled rows to the engine; rows it still refuses stay in the spool",
+    )
     parser.add_argument("--record", nargs=3, metavar=("COMPONENT", "EVENT", "STATUS"))
     parser.add_argument("--field", action="append", default=[], type=_parse_field)
     parser.add_argument("--tail", action="store_true")
@@ -498,6 +543,14 @@ def main() -> int:
         for gate, days in stale:
             print(f"  gate={gate} last_run={'never' if days is None else str(days) + 'd ago'}")
         return 1
+
+    if args.replay_spool:
+        counts = replay_spool()
+        print(
+            f"spool replay: replayed={counts['replayed']} kept={counts['kept']} "
+            f"unparseable={counts['unparseable']} spool={event_log_path()}"
+        )
+        return 0 if counts["kept"] == 0 and counts["unparseable"] == 0 else 1
 
     if args.recent_resolution_failures:
         failures = recent_resolution_failures(args.max, args.hours)
