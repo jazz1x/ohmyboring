@@ -1,59 +1,71 @@
 #!/usr/bin/env python3
-"""The door — a read-only FastAPI proxy in front of the Rust engine.
+"""The door — a FastAPI proxy in front of the Rust engine.
 
-The migration to a Python engine opens one door at a time. This process
-listens on DOOR_PORT (default 7710) and forwards exactly the five read-only
-doors to the Rust engine at DOOR_UPSTREAM (default http://127.0.0.1:7700):
-GET /health, /audit, /projects, /recall-label-stats and POST /mcp. Status
-code, body bytes and content-type come back exactly as the engine sent them —
-the door never re-serializes a payload. An engine error answer is passed
-through as-is; an engine that cannot be reached is a 502 with a JSON body,
-never a silent 200 with an empty one. Unregistered paths get FastAPI's
-default 404: this is a door, not a catch-all proxy.
+The route table is read at startup from the contract snapshot
+(data/contract/engine-contract.json), never hand-listed: the contract changes
+and the door follows, and a door narrower or wider than the contract fails its
+tests. This process listens on DOOR_PORT (default 7710) and forwards the
+snapshot's routes to the engine at DOOR_UPSTREAM (default http://127.0.0.1:7700).
+Only the headers the engine reads travel on (content-type, accept,
+mcp-session-id, x-request-id); the response carries the upstream content-type,
+or none at all when the engine sent none — never a default. Status code and
+body bytes come back exactly as sent. An engine answer, 4xx included, passes
+through as-is; an engine that cannot be reached is a 502 JSON body, never a
+silent 200 with an empty one. Unregistered paths get FastAPI's 404: this is a
+door, not a catch-all proxy.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
-_TIMEOUT = float(os.environ.get("DOOR_TIMEOUT", "20"))
+_TIMEOUT = float(os.environ.get("DOOR_TIMEOUT", "130"))
 
-app = FastAPI(title="oh-my-boring door")
+_CONTRACT = Path(__file__).resolve().parents[2] / "data" / "contract" / "engine-contract.json"
+
+app = FastAPI(title="oh-my-boring door", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 def _upstream() -> str:
     return os.environ.get("DOOR_UPSTREAM", "http://127.0.0.1:7700").rstrip("/")
 
 
-async def _proxy(request: Request, path: str) -> Response:
-    query = request.url.query
-    url = f"{_upstream()}{path}" + (f"?{query}" if query else "")
-    body = await request.body()
-    headers = {}
-    if "content-type" in request.headers:
-        headers["content-type"] = request.headers["content-type"]
-    upstream_req = urllib.request.Request(
-        url, data=body if body else None, headers=headers, method=request.method
-    )
+def _pass_through(status: int, body: bytes, content_type: str | None) -> Response:
+    headers = {"content-type": content_type} if content_type is not None else {}
+    return Response(content=body, status_code=status, headers=headers)
+
+
+def _fetch(url: str, body: bytes, headers: dict[str, str], method: str) -> Response:
+    upstream_req = urllib.request.Request(url, data=body if body else None, headers=headers, method=method)
     try:
         with urllib.request.urlopen(upstream_req, timeout=_TIMEOUT) as upstream:
-            return Response(
-                content=upstream.read(),
-                status_code=upstream.status,
-                headers={"content-type": upstream.headers.get("content-type", "application/json")},
-            )
+            return _pass_through(upstream.status, upstream.read(), upstream.headers.get("content-type"))
     except urllib.error.HTTPError as e:
         # The engine answered; it just said no. A faithful door passes that through.
-        return Response(
-            content=e.read(),
-            status_code=e.code,
-            headers={"content-type": e.headers.get("content-type", "application/json")},
-        )
+        return _pass_through(e.code, e.read(), e.headers.get("content-type"))
+
+
+async def _proxy(request: Request) -> Response:
+    query = request.url.query
+    url = f"{_upstream()}{request.url.path}" + (f"?{query}" if query else "")
+    body = await request.body()
+    headers = {
+        name: request.headers[name]
+        for name in ("content-type", "accept", "mcp-session-id", "x-request-id")
+        if name in request.headers
+    }
+    try:
+        # The upstream call is blocking and can outlive any single request (the
+        # p95 brief is ~77s); off the loop so one slow call cannot starve the rest.
+        return await asyncio.to_thread(_fetch, url, body, headers, request.method)
     except OSError:
         # URLError, ConnectionRefusedError, timeout — one class: the engine is gone.
         return JSONResponse(
@@ -62,29 +74,17 @@ async def _proxy(request: Request, path: str) -> Response:
         )
 
 
-@app.get("/health")
-async def health(request: Request) -> Response:
-    return await _proxy(request, "/health")
+def _load_routes() -> dict[str, list[str]]:
+    entries = json.loads(_CONTRACT.read_text(encoding="utf-8"))["http_routes"]
+    by_path: dict[str, list[str]] = {}
+    for entry in entries:
+        method, path = entry.split(" ", 1)
+        by_path.setdefault(path, []).append(method)
+    return by_path
 
 
-@app.get("/audit")
-async def audit(request: Request) -> Response:
-    return await _proxy(request, "/audit")
-
-
-@app.get("/projects")
-async def projects(request: Request) -> Response:
-    return await _proxy(request, "/projects")
-
-
-@app.get("/recall-label-stats")
-async def recall_label_stats(request: Request) -> Response:
-    return await _proxy(request, "/recall-label-stats")
-
-
-@app.post("/mcp")
-async def mcp(request: Request) -> Response:
-    return await _proxy(request, "/mcp")
+for _path, _methods in _load_routes().items():
+    app.add_api_route(_path, _proxy, methods=_methods)
 
 
 if __name__ == "__main__":

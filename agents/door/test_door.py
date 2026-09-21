@@ -3,13 +3,20 @@
 
 A stub engine (http.server, random port) stands in for the Rust engine and the
 real door runs under uvicorn in a thread against it. Covers:
-  (a) GET /health body bytes are identical to the engine's — sha256 equal (AC2)
+  (a) GET /health body bytes are identical to the engine's — sha256 equal,
+      content-type included (AC2, AC3)
   (b) POST /mcp forwards the request body untouched and returns the response
-      byte-for-byte, tool order included (AC3)
+      byte-for-byte, tool order included (AC2, AC3)
   (c) with the engine down the door answers 502 and the ROP JSON body,
-      never a 200 with an empty body (AC4)
-  (d) unregistered paths (GET /nope, POST /search) get FastAPI's 404 and never
-      reach the stub — the door is not a catch-all proxy (AC6)
+      never a 200 with an empty body (AC5)
+  (d) unregistered paths (GET /nope, POST /nope, GET /docs) get FastAPI's 404
+      and never reach the stub — the door is not a catch-all proxy (AC6)
+  (e) the route table is read from the contract snapshot: all 24 (method, path)
+      pairs registered, nothing beyond (AC1)
+  (f) only content-type, accept, mcp-session-id, x-request-id travel upstream;
+      authorization and x-forwarded-for do not (AC4)
+  (g) a non-JSON upstream content-type passes through untouched (AC3)
+  (h) an upstream response without content-type stays without one (AC3)
 """
 
 from __future__ import annotations
@@ -30,6 +37,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import door  # noqa: E402
 import uvicorn  # noqa: E402
 
+STUB_CONTENT_TYPE = "application/json; charset=utf-8"
+
 # Deliberately non-canonical bytes: odd spacing, a non-ASCII value. Any
 # json.loads → json.dumps round-trip changes these bytes, so a door that
 # re-serializes fails test (a) on the hash.
@@ -44,10 +53,15 @@ TOOLS_LIST_BODY = (
 
 
 class StubHandler(BaseHTTPRequestHandler):
-    """The engine's stand-in: fixed /health, tools/list answer, otherwise echo."""
+    """The engine's stand-in: fixed /health, tools/list answer, otherwise echo.
+
+    A POST body {"respond_as": <content-type>|null} overrides the response
+    content-type — None omits the header entirely.
+    """
 
     seen_bodies: list[bytes] = []
     seen_content_types: list[str] = []
+    seen_headers: list[dict[str, str]] = []
     hits = 0
 
     def do_GET(self):
@@ -62,18 +76,23 @@ class StubHandler(BaseHTTPRequestHandler):
         type(self).seen_bodies.append(body)
         type(self).seen_content_types.append(self.headers.get("content-type", ""))
         try:
-            method = json.loads(body).get("method")
-        except (ValueError, AttributeError):
-            method = None
-        if method == "tools/list":
-            self._reply(200, TOOLS_LIST_BODY)
+            parsed = json.loads(body)
+        except ValueError:
+            parsed = None
+        respond_as = STUB_CONTENT_TYPE
+        if isinstance(parsed, dict) and "respond_as" in parsed:
+            respond_as = parsed["respond_as"]
+        if isinstance(parsed, dict) and parsed.get("method") == "tools/list":
+            self._reply(200, TOOLS_LIST_BODY, respond_as)
         else:
-            self._reply(200, body)
+            self._reply(200, body, respond_as)
 
-    def _reply(self, code: int, body: bytes) -> None:
+    def _reply(self, code: int, body: bytes, content_type: str | None = STUB_CONTENT_TYPE) -> None:
         type(self).hits += 1
+        type(self).seen_headers.append({k.lower(): v for k, v in self.headers.items()})
         self.send_response(code)
-        self.send_header("content-type", "application/json; charset=utf-8")
+        if content_type is not None:
+            self.send_header("content-type", content_type)
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -139,20 +158,22 @@ class DoorTest(unittest.TestCase):
             os.environ["DOOR_UPSTREAM"] = cls._saved_upstream
 
     def test_get_health_bytes_identical(self):
-        status, body, _ = _req(self.door_port, "GET", "/health")
+        status, body, content_type = _req(self.door_port, "GET", "/health")
         self.assertEqual(status, 200)
         self.assertEqual(body, HEALTH_BODY)
         self.assertEqual(hashlib.sha256(body).hexdigest(), hashlib.sha256(HEALTH_BODY).hexdigest())
+        self.assertEqual(content_type, STUB_CONTENT_TYPE)
 
     def test_mcp_post_passthrough(self):
         payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode()
-        status, body, _ = _req(
+        status, body, content_type = _req(
             self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
         )
         self.assertEqual(status, 200)
         self.assertEqual(StubHandler.seen_bodies[-1], payload)
         self.assertEqual(StubHandler.seen_content_types[-1], "application/json")
         self.assertEqual(body, TOOLS_LIST_BODY)
+        self.assertEqual(content_type, STUB_CONTENT_TYPE)
         names = [t["name"] for t in json.loads(body)["result"]["tools"]]
         self.assertEqual(names, ["alpha", "beta", "gamma"])
 
@@ -176,10 +197,57 @@ class DoorTest(unittest.TestCase):
         status, _, _ = _req(self.door_port, "GET", "/nope")
         self.assertEqual(status, 404)
         status, _, _ = _req(
-            self.door_port, "POST", "/search", body=b"{}", headers={"content-type": "application/json"}
+            self.door_port, "POST", "/nope", body=b"{}", headers={"content-type": "application/json"}
         )
         self.assertEqual(status, 404)
+        status, _, _ = _req(self.door_port, "GET", "/docs")
+        self.assertEqual(status, 404)
         self.assertEqual(StubHandler.hits, hits_before, "unregistered paths must not reach the stub")
+
+    def test_routes_match_contract_snapshot(self):
+        entries = json.loads(door._CONTRACT.read_text(encoding="utf-8"))["http_routes"]
+        expected = set()
+        for entry in entries:
+            method, path = entry.split(" ", 1)
+            expected.add((method, path))
+        actual = {(method, route.path) for route in door.app.routes for method in route.methods}
+        self.assertEqual(actual, expected)
+        self.assertEqual(len(expected), 24)
+
+    def test_request_header_policy(self):
+        payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode()
+        headers = {
+            "content-type": "application/json",
+            "accept": "application/json",
+            "mcp-session-id": "sess-123",
+            "x-request-id": "req-abc",
+            "authorization": "Bearer secret",
+            "x-forwarded-for": "1.2.3.4",
+        }
+        status, _, _ = _req(self.door_port, "POST", "/mcp", body=payload, headers=headers)
+        self.assertEqual(status, 200)
+        seen = StubHandler.seen_headers[-1]
+        for name in ("content-type", "accept", "mcp-session-id", "x-request-id"):
+            self.assertEqual(seen.get(name), headers[name])
+        self.assertNotIn("authorization", seen)
+        self.assertNotIn("x-forwarded-for", seen)
+
+    def test_non_json_content_type_passthrough(self):
+        payload = json.dumps({"respond_as": "text/plain; charset=utf-8"}).encode()
+        status, body, content_type = _req(
+            self.door_port, "POST", "/status", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, payload)
+        self.assertEqual(content_type, "text/plain; charset=utf-8")
+
+    def test_missing_upstream_content_type_stays_missing(self):
+        payload = json.dumps({"respond_as": None}).encode()
+        status, _, content_type = _req(
+            self.door_port, "POST", "/status", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertIsNone(content_type)
 
 
 if __name__ == "__main__":
