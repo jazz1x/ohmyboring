@@ -89,19 +89,32 @@ class DrudgeClient:
         data = self._retry("POST", "/search", payload)
         return data.get("hits", []) if isinstance(data, dict) else []
 
+    def handover(self, session_id: str, observed_at: str, paths: list[str]) -> dict[str, Any]:
+        """POST /handover — record what was handed to a session under its own name, so a later
+        verdict-only `/consumption` has something to apply to. The engine answers with its
+        `{session, handed, unknown}` summary."""
+        payload = {"session_id": session_id, "observed_at": observed_at, "paths": paths}
+        return self._retry("POST", "/handover", payload)
+
     def consumption(
         self,
         session_id: str,
         observed_at: str,
-        used: list[str],
-        contested: list[str],
+        used: Optional[list[str]] = None,
+        contested: Optional[list[str]] = None,
         supersedes: list[list[str]] | None = None,
+        verdict: Optional[str] = None,
     ) -> dict[str, Any]:
         """POST /consumption — what a session did with the notes it was handed, as graph edges.
-        `supersedes` pairs are `[newer_path, older_path]`."""
-        payload: dict[str, Any] = {
-            "session_id": session_id, "observed_at": observed_at, "used": used, "contested": contested
-        }
+        `supersedes` pairs are `[newer_path, older_path]`. A `verdict` (`used`|`contested`)
+        travels alone: the engine applies it to everything it handed that session, and a
+        payload listing paths beside a verdict is rejected."""
+        payload: dict[str, Any] = {"session_id": session_id, "observed_at": observed_at}
+        if verdict is not None:
+            payload["verdict"] = verdict
+        else:
+            payload["used"] = used or []
+            payload["contested"] = contested or []
         if supersedes:
             payload["supersedes"] = supersedes
         return self._retry("POST", "/consumption", payload)

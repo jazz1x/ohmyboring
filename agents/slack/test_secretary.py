@@ -6,17 +6,11 @@ The handlers take the brain and the web client as arguments, so a fake `web` plu
 here on purpose. `dispatch` gets a fake `slack_sdk` in `sys.modules` for its ack, and fake
 client/request objects for the rest.
 
-Run: BORING_INJECTION_LEDGER=$(mktemp) python3 agents/slack/test_secretary.py
+Run: python3 agents/slack/test_secretary.py
 """
 import os
 import sys
-import tempfile
 import types
-
-os.environ.setdefault(
-    "BORING_INJECTION_LEDGER",
-    os.path.join(tempfile.mkdtemp(), "injections.jsonl"),
-)
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
@@ -201,29 +195,37 @@ def test_with_an_owner_configured_only_the_owner_taps_count():
 
 
 def test_a_reaction_after_a_real_answer_reaches_the_engine_verdict():
-    """The integration the transport exists for: mention → posted answer → 👍 → engine edges
-    on exactly the notes the answer carried. The ledger is the only bridge."""
+    """The integration the transport exists for: mention → posted answer → 👍 → one verdict
+    on exactly the notes the answer carried. The engine's handover record is the only bridge."""
     given = [{"source_path": "/vault/wiki/wiki-0435.md", "snippet": "branch naming settled " * 3}]
     web = FakeWeb()
-    sec.on_mention(_mention(), web, ask=lambda q: sc.Answer("답 본문", given))
+    engine = []
 
-    seen = []
+    def handover(session_id, observed_at, paths):
+        engine.append({"kind": "handover", "session_id": session_id, "paths": list(paths)})
+        return {"session": session_id, "handed": len(paths), "unknown": []}
 
-    def consumption(session_id, observed_at, used, contested, supersedes=None):
-        seen.append({"session_id": session_id, "used": list(used), "contested": list(contested)})
-        return {"used": len(used), "contested": len(contested), "unknown": []}
+    def consumption(session_id, observed_at, verdict=None):
+        engine.append({"kind": "consumption", "session_id": session_id, "verdict": verdict})
+        return {"used": 1, "contested": 0}
+
+    sec.on_mention(
+        _mention(), web,
+        ask=lambda q: sc.Answer("답 본문", given),
+        remember=lambda key, q, hits: sc.remember_handed(key, q, hits, handover=handover),
+    )
 
     out = sec.on_reaction(
         _reaction("thumbsup"),
         BOT,
         judge=lambda key, verdict: sc.feedback(key, verdict, consumption=consumption),
     )
-    assert out.get("unknown_answer") is not True, "the ledger connects the posted answer to the reaction"
-    assert seen == [{
-        "session_id": f"slack:{CH}:{POSTED_TS}",
-        "used": ["/vault/wiki/wiki-0435.md"],
-        "contested": [],
-    }]
+    assert out.get("unknown_answer") is not True, "the handover connects the posted answer to the reaction"
+    assert engine == [
+        {"kind": "handover", "session_id": f"slack:{CH}:{POSTED_TS}",
+         "paths": ["/vault/wiki/wiki-0435.md"]},
+        {"kind": "consumption", "session_id": f"slack:{CH}:{POSTED_TS}", "verdict": "used"},
+    ]
 
 
 def test_dispatch_acks_first_then_dispatches_and_swallows_handler_errors():

@@ -20,7 +20,6 @@ from typing import Callable, NamedTuple, Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import recall_core  # noqa: E402
-import uptake_core  # noqa: E402
 from drudge_client import DrudgeClient  # noqa: E402
 
 #: How many notes an answer carries. Three is what the prompt hook injects; a person reading in
@@ -99,14 +98,27 @@ def answer(question: str, search: Optional[Callable[..., list[dict]]] = None) ->
     return Answer(body + "\n\n_더 보려면 `recall`, 정한 것만 보려면 `claims` 를 터미널에서._", given)
 
 
-def remember_handed(answer_key: str, question: str, hits: list[dict]) -> bool:
-    """Ledger one answer as its own session, so a later 👍/👎 can find the notes it carried.
-    `answer_key` is the transport's opaque name for the answer (e.g. a Slack message ref);
-    empty hands mean nothing was handed over, so nothing is written."""
+def remember_handed(
+    answer_key: str,
+    question: str,
+    hits: list[dict],
+    handover: Optional[Callable[..., dict]] = None,
+) -> bool:
+    """Hand the engine the list of note paths one answer carried, under the answer's own
+    session name, so a later 👍/👎 only has to send the verdict. `question` stays in the
+    signature to keep the transport's call shape; it is not used here. Empty hands mean
+    nothing was handed over, so nothing is sent."""
     if not hits:
         return False
-    record = uptake_core.injection_record(answer_key, question, hits, len(hits))
-    return uptake_core.append_record(record)
+    if handover is None:
+        handover = DrudgeClient(timeout=TIMEOUT, retries=0).handover
+    paths = [hit["source_path"] for hit in hits]
+    try:
+        handover(answer_key, datetime.now(timezone.utc).isoformat(), paths)
+    except Exception as e:  # noqa: BLE001 — an unrecorded answer must not cost the transport a crash
+        print(f"[secretary] handover failed: {e}", file=sys.stderr)
+        return False
+    return True
 
 
 def feedback(
@@ -115,32 +127,21 @@ def feedback(
     consumption: Optional[Callable[..., dict]] = None,
     observed_at: Optional[str] = None,
 ) -> dict:
-    """A 👍/👎 on an answer, turned into engine edges. Terminal sessions get their edges
-    inferred from the transcript at SessionEnd; a Slack answer has no transcript, so the
-    owner's reaction is the explicit verdict instead. The note paths the answer carried
-    become `used` or `contested` on the graph, where the next answer's `(reused N×)` count
-    reads them."""
+    """A 👍/👎 on an answer, turned into the engine's verdict. The engine already recorded
+    what the answer carried when it was handed over, so only the verdict travels now; a
+    verdict on an answer the engine never heard of comes back with zero edges, which the
+    transport reads as an unknown answer."""
     if verdict not in ("used", "contested"):
         raise ValueError(f"verdict must be 'used' or 'contested', got {verdict!r}")
-    records = uptake_core.load_records(answer_key)
-    if not records:
-        return {"unknown_answer": True}
-    paths = [
-        uptake_core.note_path(hit)
-        for record in records
-        for hit in record.get("hits") or []
-    ]
     if consumption is None:
         consumption = DrudgeClient(timeout=TIMEOUT, retries=0).consumption
     if observed_at is None:
         observed_at = datetime.now(timezone.utc).isoformat()
     try:
-        return consumption(
-            answer_key,
-            observed_at,
-            used=paths if verdict == "used" else [],
-            contested=paths if verdict == "contested" else [],
-        )
+        resp = consumption(answer_key, observed_at, verdict=verdict)
     except Exception as e:  # noqa: BLE001 — a reaction must not cost the transport a crash
         print(f"[secretary] feedback failed: {e}", file=sys.stderr)
         return {"error": str(e)}
+    if resp.get("used", 0) + resp.get("contested", 0) == 0:
+        return {"unknown_answer": True, **resp}
+    return resp
