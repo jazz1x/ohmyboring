@@ -130,6 +130,27 @@ def _save_throttle(state: dict[str, float]) -> None:
     os.replace(tmp, path)
 
 
+def hand_over(client: DrudgeClient, session_id: str, hits: list[dict]) -> bool:
+    """Record the injected notes as handed to `session_id` on the engine side. Never raises —
+    the engine door failing must not cost the user a prompt, same as the ledger write. Nothing
+    is sent for a blank session or empty hands (there is nothing a verdict could apply to)."""
+    paths = [h.get("source_path") for h in hits if h.get("source_path")]
+    if not session_id or not paths:
+        return False
+    try:
+        client.handover(session_id, _utc_now_iso(), paths)
+        return True
+    except Exception as e:  # noqa: BLE001 — fire-and-forget by contract
+        print(f"[omb-recall] handover failed: {e}", file=sys.stderr)
+        return False
+
+
+def _utc_now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _session_throttled(session_id: str | None) -> bool:
     """Return True if this session was recalled recently (default 1h)."""
     if not session_id:
@@ -366,6 +387,10 @@ def run_recall(
             controls=controls,
         )
     )
+    # Tell the engine the same thing, under the same session name, so a verdict for this session
+    # can be applied there without anyone re-reading the ledger. Only what was injected — the
+    # controls were fetched, not handed — which is why this is not `/search`'s own session_id.
+    hand_over(client, data.get("session_id") or "", everything_injected)
 
     ctx = FENCE + "\n".join(lines)
     print(json.dumps({

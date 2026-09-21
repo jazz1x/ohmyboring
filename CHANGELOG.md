@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **터미널 훅도 건넨 노트를 엔진에 알린다** — 프롬프트 훅이 주입한 노트 경로를 `POST /handover` 로 세션 이름 아래 남긴다. 대조군으로 가져만 온 hit 은 건넨 것이 아니라 빠진다(그래서 `/search` 의 `session_id` 가 아니라 별도 호출). 렛저 기록은 그대로 — 판정 계열의 원천은 아직 렛저다. 문이 죽어도 프롬프트는 안 잃는다.
 - **슬랙 스레드의 "정정: …" 이 노트가 된다** — 비서의 답(`_기억에서 찾은 것 N개_` 머리표와 ①②③ 번호로 시작)에 스레드로 "정정: X" 를 달면 X 가 새 노트가 되어 그 답이 건넨 노트 전부를, "정정 2: X" 면 그 번호의 노트 하나를 대체한다. 전송층은 상태 없이 부모 메시지를 한 번 읽어 머리표로 자기 답을 알아보고, 본문의 `*wiki-NNNN.md*` 이름으로 경로를 되살린 뒤 `/remember` 에 `supersedes` 를 싣는다. LLM 은 부르지 않는다 — 소유자가 쓴 문장이 곧 노트다.
 - **재발 명부 — "과거의 실수가 또 났다"를 행으로 답한다** — `POST /recurrences` + MCP `recurrences`(도구 24개). 최근 30일의 risk/blocked claim 중 값 임베딩 거리 ≤ 0.2 · 3일 이상 전 다른 노트의 risk/blocked claim 과 가까운 쌍을 짝지어 돌려준다. 값 길이는 기존 25자 규칙(`INFORMATIVE_VALUE_CHARS`)을 재사용하고, predicate 가 꼬리표만 달면 잡되 `label_only: true`로 표시한다. 읽기 전용 — 새 표·새 간선 없음.
 - **기억이 `@멘션` 에 스레드로 답한다** — `make secretary` 가 Socket Mode 로 붙어 멘션에 답하고, 그 답에 붙은 👍/👎 를 `used`/`contested` 로 엔진에 넘긴다. hermes 가 그 얼굴이었고 소켓 재접속 루프로 죽었다. 이번 얼굴은 얇다: 이벤트 둘(멘션·반응), 핸들러 둘, 상태 없음 — 어느 답이 어느 노트를 건넸는지는 주입 렛저가 이미 알고 있어서 전송층은 아무것도 기억하지 않는다. 뇌는 `agents/slack/secretary_core.py` 에 Slack 없이 따로 있고, 시험 25개가 소켓 없이 돈다.

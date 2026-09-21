@@ -406,22 +406,63 @@ class DistillExitCodeTests(unittest.TestCase):
 class RecallFormattingTests(unittest.TestCase):
     """recall.main reads stdin + posts to /search; we mock urlopen so NO network happens."""
 
-    def _run_main(self, prompt, hits, search_side_effect=None):
+    def _run_main(self, prompt, hits, search_side_effect=None, session_id=None, handover=None):
         captured = io.StringIO()
         stderr = io.StringIO()
         if search_side_effect is None:
             search_mock = mock.MagicMock(return_value=hits)
         else:
             search_mock = mock.MagicMock(side_effect=search_side_effect)
+        # The engine's handover door is a network call; it is mocked here so the tests never
+        # reach it, and so a test can look at what was handed.
+        handover_mock = handover or mock.MagicMock(return_value={"handed": 0, "unknown": 0})
+        stdin = {"prompt": prompt}
+        if session_id:
+            stdin["session_id"] = session_id
         # recall_core writes its own diagnostics through its own `sys`, so both modules' stderr
         # must be captured or the over-ceiling report escapes the assertion.
-        with mock.patch.object(recall.sys, "stdin", io.StringIO(json.dumps({"prompt": prompt}))), \
+        with mock.patch.object(recall.sys, "stdin", io.StringIO(json.dumps(stdin))), \
              mock.patch.object(recall_core.DrudgeClient, "search", search_mock), \
+             mock.patch.object(recall_core.DrudgeClient, "handover", handover_mock), \
              mock.patch.object(recall.sys, "stdout", captured), \
              mock.patch.object(recall.sys, "stderr", stderr), \
              mock.patch.object(recall_core.sys, "stderr", stderr):
             recall.main()
         return captured.getvalue(), stderr.getvalue()
+
+    # ── the engine learns what was handed, not what was fetched ─────────────────────
+    def test_injected_notes_are_handed_to_the_engine_under_the_session(self):
+        hits = [
+            {"source_path": f"/vault/wiki/wiki-{i:04d}.md", "snippet": f"note {i} body text"}
+            for i in range(recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS)
+        ]
+        handover = mock.MagicMock(return_value={"handed": recall_core.MAX_RESULTS, "unknown": 0})
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"BORING_INJECTION_LEDGER": os.path.join(tmp, "l.jsonl")}):
+            out, err = self._run_main("a sufficiently long prompt", hits, session_id="s-hand", handover=handover)
+        self.assertIn("additionalContext", out)
+        self.assertEqual(handover.call_count, 1)
+        session, _observed_at, paths = handover.call_args.args
+        self.assertEqual(session, "s-hand")
+        self.assertEqual(paths, [h["source_path"] for h in hits[: recall_core.MAX_RESULTS]],
+                         "controls were fetched, not handed — they must not be recorded")
+        self.assertNotIn("handover failed", err)
+
+    def test_no_session_means_nothing_is_handed(self):
+        handover = mock.MagicMock()
+        self._run_main("a sufficiently long prompt", [{"source_path": "/vault/wiki/wiki-0001.md", "snippet": "x y z"}],
+                       handover=handover)
+        handover.assert_not_called()
+
+    def test_a_dead_handover_door_does_not_cost_the_prompt(self):
+        handover = mock.MagicMock(side_effect=OSError("refused"))
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"BORING_INJECTION_LEDGER": os.path.join(tmp, "l.jsonl")}):
+            out, err = self._run_main("a sufficiently long prompt",
+                                      [{"source_path": "/vault/wiki/wiki-0001.md", "snippet": "x y z"}],
+                                      session_id="s-dead", handover=handover)
+        self.assertIn("additionalContext", out, "the context still reaches the prompt")
+        self.assertIn("[omb-recall] handover failed", err)
 
     def test_short_prompt_is_noop(self):
         # < 8 chars → recall is meaningless → no output, urlopen never reached.
