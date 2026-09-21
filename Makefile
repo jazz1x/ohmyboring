@@ -46,7 +46,7 @@ events-replay: ## Hand spooled events to the engine (after an outage; doctor nam
 secretary: ## Answer @mentions in Slack from memory (Socket Mode; needs SLACK_APP_TOKEN/SLACK_BOT_TOKEN in .env)
 	set -a; . ./.env; set +a; python3 agents/slack/secretary.py
 
-door: ## The read-only door — proxies the five read-only doors to the Rust engine (DOOR_PORT, default 7710)
+door: ## The read-only door — served by the boring-door container at 127.0.0.1:7710; this runs the same app on the host (DOOR_PORT, default 7710)
 	set -a; . ./.env 2>/dev/null || true; set +a; uvicorn agents.door.door:app --host 127.0.0.1 --port $${DOOR_PORT:-7710}
 
 models: ## Pull Ollama models (DRUDGE_LLM_MODEL + DRUDGE_EMBED_MODEL, defaults gemma4:12b + bge-m3)
