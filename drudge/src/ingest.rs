@@ -332,12 +332,25 @@ fn slugify(s: &str) -> String {
         .collect()
 }
 
-/// claim subject/predicate normalization — lowercase, trim, collapse whitespace (matching consistency).
+/// claim subject/predicate normalization — lowercase, collapse whitespace/`_`/`-` runs into one
+/// `-` (matches repo-slug convention), trim leading/trailing `-`. Prevents "foo bar" and "foo-bar"
+/// from landing as distinct claim subjects.
 fn canon(s: &str) -> String {
-    s.to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let lower = s.to_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut prev_sep = false;
+    for c in lower.chars() {
+        if c.is_whitespace() || c == '_' || c == '-' {
+            prev_sep = true;
+        } else {
+            if prev_sep && !out.is_empty() {
+                out.push('-');
+            }
+            prev_sep = false;
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Strip NUL (0x00) — Postgres `text` cannot store NUL. Strip once at the IO boundary (lossless,
@@ -587,7 +600,9 @@ mod tests {
 
     #[test]
     fn canon_normalizes() {
-        assert_eq!(canon("  OH-my  Boring  DB "), "oh-my boring db");
+        assert_eq!(canon("  OH-my  Boring  DB "), "oh-my-boring-db");
+        assert_eq!(canon("foodspring front"), "foodspring-front");
+        assert_eq!(canon("a_b--c"), "a-b-c");
     }
 
     #[test]
