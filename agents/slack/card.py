@@ -75,7 +75,12 @@ def _append_verdicts(
     return (existing or []) + updates
 
 
-def _merge_repair_results(existing: dict[int, dict] | None, updates: dict[int, dict]) -> dict[int, dict]:
+_RepairResult = card_types.RepairDone | card_types.RepairFailed
+
+
+def _merge_repair_results(
+    existing: dict[int, _RepairResult] | None, updates: dict[int, _RepairResult]
+) -> dict[int, _RepairResult]:
     return {**(existing or {}), **updates}
 
 
@@ -88,7 +93,9 @@ class CardState(TypedDict):
     repairs: list[card_types.Repair]  # execute lane's rows — read_repairs' top-N groups
     repairs_total_groups: int  # read_repairs' full count, for the head line
     merged_yesterday_rows: int | None  # None when nothing merged in the last 24h
-    repair_results: Annotated[dict[int, dict], _merge_repair_results]  # repair idx → door POST result
+    repair_results: Annotated[
+        dict[int, _RepairResult], _merge_repair_results
+    ]  # repair idx → door POST result
     message: card_types.PostedCard | None
     confirmation: card_types.Confirmation | None
     priority_subjects: list[tuple[str, str]]  # (project, subject)
@@ -118,7 +125,9 @@ class Collaborators(NamedTuple):
     # repair lane keeps working unchanged. repairs(limit) is the door's GET; execute_repair
     # is its POST; merged_yesterday is the head line's optional "merged m rows yesterday".
     repairs: Callable[[int], dict[str, Any]] = lambda limit: {"groups": [], "total_groups": 0}
-    execute_repair: Callable[[str], dict[str, Any]] = lambda subject: {}
+    execute_repair: Callable[[str], _RepairResult] = lambda subject: card_types.RepairFailed(
+        subject=subject, deleted_rows=0, reread_notes=0, reason="no repair collaborator configured"
+    )
     merged_yesterday: Callable[[], int | None] = lambda: None
 
 

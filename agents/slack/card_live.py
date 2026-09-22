@@ -25,6 +25,8 @@ from card_types import (
     NO_CURRENT_CLAIM,
     PastApproved,
     PastVerdictPair,
+    RepairDone,
+    RepairFailed,
     ResolvedNote,
     Unresolved,
 )
@@ -37,6 +39,14 @@ ENGINE_TIMEOUT = float(os.environ.get("CARD_ENGINE_TIMEOUT") or "30")
 # A card's own lifespan — the next card's post outlives any button the owner never got to
 # press, so waiting past this is polling a socket nobody is going to answer on.
 CARD_WAIT_HOURS = float(os.environ.get("CARD_WAIT_HOURS") or "23")
+# execute_repair's own timeout — separate from ENGINE_TIMEOUT (30s), which every quick
+# point-read here shares. The door's POST blocks on the engine's synchronous /sync (global
+# lock, full re-embed of every reread note); a 212-note group is not a point read. 600s is
+# the door's own upstream ceiling headroom (DOOR_TIMEOUT=130s per hop, but /sync's own cost
+# scales with note count, not request count) — long enough that a real repair's sync finishes
+# under it rather than the card's http client giving up first and turning a slow-but-working
+# merge into a fabricated failure (F2, 2026-09-22).
+CARD_REPAIR_TIMEOUT = float(os.environ.get("CARD_REPAIR_TIMEOUT") or "600")
 
 
 def _live_fetch(path: str, project: str) -> dict[str, Any]:
@@ -180,7 +190,14 @@ def _live_repairs(limit: int = REPAIRS_LIMIT) -> dict[str, Any]:
         return json.loads(r.read().decode("utf-8"))
 
 
-def _live_execute_repair(subject: str) -> dict[str, Any]:
+def _live_execute_repair(subject: str) -> RepairDone | RepairFailed:
+    """POST the door's merge. F2 (2026-09-22): this used to let urlopen's exception — a 502
+    when the engine's /sync fails, or a timeout on a genuinely slow one — reach main() as an
+    OSError, which the card treats as "refuse the whole card, exit 3". Both are now values:
+    the door's own 502 body still carries the counts it already committed before /sync
+    failed (AC3 — not a silent rollback), so those ride along in RepairFailed rather than
+    being thrown away with the exception. An unreachable door has no counts to report but is
+    still not a reason to kill the other rows' buttons."""
     body = json.dumps({"subject": subject}).encode()
     req = urllib.request.Request(
         f"{_door_url()}/repairs/split-subjects",
@@ -188,8 +205,34 @@ def _live_execute_repair(subject: str) -> dict[str, Any]:
         headers={"content-type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=ENGINE_TIMEOUT) as r:
-        return json.loads(r.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=CARD_REPAIR_TIMEOUT) as r:
+            payload = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            failed_payload = json.loads(e.read().decode("utf-8"))
+        except (ValueError, OSError):
+            failed_payload = {}
+        sync = failed_payload.get("sync")
+        reason = (
+            sync["error"]
+            if isinstance(sync, dict) and sync.get("error") is not None
+            else f"door answered {e.code}"
+        )
+        return RepairFailed(
+            subject=subject,
+            deleted_rows=int(failed_payload.get("deleted_rows") or 0),
+            reread_notes=int(failed_payload.get("reread_notes") or 0),
+            reason=str(reason),
+        )
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return RepairFailed(subject=subject, deleted_rows=0, reread_notes=0, reason=f"door unreachable: {e}")
+    return RepairDone(
+        subject=subject,
+        deleted_rows=payload["deleted_rows"],
+        reread_notes=payload["reread_notes"],
+        remaining_variants=payload.get("remaining_variants"),
+    )
 
 
 def _live_merged_yesterday() -> int | None:

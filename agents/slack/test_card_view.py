@@ -323,11 +323,31 @@ class CardV2ShapeTests(unittest.TestCase):
             [verdict],
             repairs=[repair],
             repairs_total_groups=1,
-            repair_results={0: {"deleted_rows": 5, "reread_notes": 2}},
+            repair_results={0: cc.RepairDone(subject="foodspring-front", deleted_rows=5, reread_notes=2)},
             lang="ko",
         )
         mark = next(b for b in judged if b["type"] == "context" and "합침" in _blocks_text([b]))
         self.assertIn("✓ 합침 — 지운 행 5 · 다시 읽은 노트 2", mark["elements"][0]["text"])
+
+        # F2: a failed merge (door 502, sync error) still names the counts it committed —
+        # never the plain "✓ 채택" mark, never silence.
+        failed_judged = cv.build_blocks(
+            [proposal],
+            [verdict],
+            repairs=[repair],
+            repairs_total_groups=1,
+            repair_results={
+                0: cc.RepairFailed(
+                    subject="foodspring-front", deleted_rows=5, reread_notes=2, reason="engine unreachable"
+                )
+            },
+            lang="ko",
+        )
+        failed_mark = next(b for b in failed_judged if b["type"] == "context" and "실패" in _blocks_text([b]))
+        self.assertIn(
+            "✕ 합침 실패 — 지운 행 5 · 다시 읽은 노트 2 · engine unreachable",
+            failed_mark["elements"][0]["text"],
+        )
 
         # repairs empty (nothing to do today) but the lane is still active (merged yesterday) —
         # the 오늘 할 일 header must not appear, 짚어 둔 것 still does

@@ -42,6 +42,7 @@ STRINGS: dict[Lang, dict[str, str]] = {
         "repair_button_defer": "Hold",
         "repair_button_drop": "Reject",
         "repair_verdict_done": "✓ Merged — {deleted} rows deleted · {reread} notes reread",
+        "repair_verdict_failed": "✕ Merge failed — {deleted} rows deleted · {reread} notes reread · {reason}",
     },
     "ko": {
         "card_title": "☀️ 오늘 제안",
@@ -66,6 +67,7 @@ STRINGS: dict[Lang, dict[str, str]] = {
         "repair_button_defer": "보류",
         "repair_button_drop": "거절",
         "repair_verdict_done": "✓ 합침 — 지운 행 {deleted} · 다시 읽은 노트 {reread}",
+        "repair_verdict_failed": "✕ 합침 실패 — 지운 행 {deleted} · 다시 읽은 노트 {reread} · {reason}",
     },
     "ja": {
         "card_title": "☀️ 今日の提案",
@@ -90,6 +92,7 @@ STRINGS: dict[Lang, dict[str, str]] = {
         "repair_button_defer": "保留",
         "repair_button_drop": "却下",
         "repair_verdict_done": "✓ 統合 — 削除{deleted}行 · 再読込{reread}件",
+        "repair_verdict_failed": "✕ 統合失敗 — 削除{deleted}行 · 再読込{reread}件 · {reason}",
     },
 }
 

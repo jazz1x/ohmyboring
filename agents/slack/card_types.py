@@ -235,6 +235,28 @@ class Repair(BaseModel):
     notes: int
 
 
+class RepairDone(BaseModel):
+    """execute_repair's success value — the door's own committed counts, straight through."""
+
+    subject: str
+    deleted_rows: int
+    reread_notes: int
+    remaining_variants: int | None = None
+
+
+class RepairFailed(BaseModel):
+    """execute_repair's failure value. A door-level failure (its own 502) still carries the
+    counts of what it already committed before the sync call failed — those are real, not a
+    symptom to discard, so they ride along here too. An unreachable door has nothing to
+    report and both counts stay 0. Never raised: F2 — a 502 or a slow sync must not end the
+    card's whole run over one button."""
+
+    subject: str
+    deleted_rows: int
+    reread_notes: int
+    reason: str
+
+
 class Registers(BaseModel):
     """The four engine registers as prompt text, and per register the allow-list a
     proposal's `source_note` must come from."""

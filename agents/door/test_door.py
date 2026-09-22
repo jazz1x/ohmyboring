@@ -32,7 +32,9 @@ real door runs under uvicorn in a thread against it. Covers:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import socket
@@ -913,6 +915,7 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
 
         def fake_emit(subject, deleted_rows, reread_notes, remaining_variants):
             order.append("event")
+            return "delivered"
 
         self._sync_result = {"ok": True, "summary": {"ingest_new": 0, "ingest_repaired": 2}}
         door._split_subjects_connect = fake_connect
@@ -958,6 +961,7 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
         self.assertEqual(out["reread_notes"], 2)
         self.assertEqual(out["remaining_variants"], 1)
         self.assertEqual(out["sync"], {"ingest_new": 0, "ingest_repaired": 2})
+        self.assertEqual(out["event"], "delivered")
 
         # (c) a failing sync is a 502 whose body says so — but the delete/update/commit already
         # ran, so the response still carries the (already-committed) row counts
@@ -971,6 +975,30 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
         self.assertEqual(out["reread_notes"], 2)
         self.assertEqual(out["sync"], {"error": "engine unreachable: connection refused"})
         self.assertEqual(self.order, ["delete", "update", "commit", "sync"])
+
+
+class EmitSubjectMergedEventTests(unittest.TestCase):
+    """F3 (2026-09-22): _emit_subject_merged_event's own status handling, not the wholesale
+    stub the POST-order test above uses. A non-2xx /events answer must be reported (one
+    stderr line naming the subject and the status) and reflected in the return value the
+    caller folds into the POST response — it must not read as a silent success."""
+
+    def test_non_2xx_events_answer_is_reported_on_stderr_and_returned(self):
+        orig_fetch = door._fetch
+
+        def fake_fetch(url, body, headers, method):
+            return door._pass_through(500, b'{"error":"boom"}', "application/json")
+
+        door._fetch = fake_fetch
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(buf):
+                status = door._emit_subject_merged_event("foodspring-front", 2, 2, 1)
+        finally:
+            door._fetch = orig_fetch
+        self.assertEqual(status, "failed: 500")
+        self.assertIn("foodspring-front", buf.getvalue())
+        self.assertIn("500", buf.getvalue())
 
 
 if __name__ == "__main__":

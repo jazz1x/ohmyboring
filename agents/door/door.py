@@ -36,6 +36,7 @@ import http.client
 import json
 import os
 import socket
+import sys
 import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator
@@ -332,9 +333,14 @@ def _fetch_split_subject_rows() -> list[tuple[str, str]]:
 
 def _emit_subject_merged_event(
     subject: str, deleted_rows: int, reread_notes: int, remaining_variants: int
-) -> None:
+) -> str:
     """POST straight to the engine's /events (the same wire contract as agents/shared/event_log,
-    reused inline: the door container does not ship agents/shared, and this is one write)."""
+    reused inline: the door container does not ship agents/shared, and this is one write).
+    F3 (2026-09-22): a failed delivery used to be silent past a stdout print — no status
+    check on the response, so the merge response never said whether the headline's "어제 합친
+    행" would actually be there tomorrow. Now checked both ways (a non-2xx answer, or the
+    request never landing at all) and reported both ways: one stderr line naming the subject
+    and what happened, and a status string the caller folds into the POST response."""
     payload = {
         "ts": datetime.now(tz=UTC).isoformat(),
         "component": "door",
@@ -346,14 +352,23 @@ def _emit_subject_merged_event(
         "remaining_variants": remaining_variants,
     }
     try:
-        _fetch(
+        response = _fetch(
             f"{_upstream()}/events",
             json.dumps(payload).encode(),
             {"content-type": "application/json"},
             "POST",
         )
     except OSError as e:
-        print(f"[door] subject_merged event not delivered: {e}", flush=True)
+        print(f"[door] subject_merged event not delivered for {subject!r}: {e}", file=sys.stderr, flush=True)
+        return f"failed: {e}"
+    if 200 <= response.status_code < 300:
+        return "delivered"
+    print(
+        f"[door] subject_merged event not delivered for {subject!r}: engine answered {response.status_code}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return f"failed: {response.status_code}"
 
 
 def _call_engine_sync() -> dict[str, Any]:
@@ -408,13 +423,14 @@ def _merge_split_subject(subject: str) -> dict[str, Any] | None:
 
     rows_after = _fetch_split_subject_rows()
     remaining_variants = _count_variants(rows_after, subject)
-    _emit_subject_merged_event(subject, deleted_rows, reread_notes, remaining_variants)
+    event_status = _emit_subject_merged_event(subject, deleted_rows, reread_notes, remaining_variants)
     return {
         "subject": subject,
         "deleted_rows": deleted_rows,
         "reread_notes": reread_notes,
         "remaining_variants": remaining_variants,
         "sync": sync_result["summary"],
+        "event": event_status,
     }
 
 

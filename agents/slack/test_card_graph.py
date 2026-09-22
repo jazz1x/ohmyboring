@@ -896,6 +896,71 @@ class LiveFetchTests(unittest.TestCase):
         self.assertIn(("POST", "/recurrences", {"project": ""}), calls)
 
 
+class LiveExecuteRepairTests(unittest.TestCase):
+    """F2 (2026-09-22): the door's own 502 (sync failed, but delete+update already
+    committed) must become a RepairFailed value carrying those committed counts — never an
+    exception that reaches main()'s `except OSError: return 3` and kills the whole card over
+    one button."""
+
+    def test_engine_502_becomes_a_repairfailed_value_with_the_committed_counts(self):
+        body = json.dumps(
+            {
+                "subject": "foodspring-front",
+                "deleted_rows": 5,
+                "reread_notes": 2,
+                "remaining_variants": None,
+                "sync": {"error": "engine unreachable: connection refused"},
+            }
+        ).encode()
+
+        def fake_urlopen(req, timeout=None):
+            import urllib.error
+
+            raise urllib.error.HTTPError(req.full_url, 502, "Bad Gateway", {}, io.BytesIO(body))
+
+        with (
+            mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.invalid"}),
+            mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        ):
+            result = card_live._live_execute_repair("foodspring-front")
+
+        self.assertIsInstance(result, cc.RepairFailed)
+        self.assertEqual(result.deleted_rows, 5)
+        self.assertEqual(result.reread_notes, 2)
+        self.assertEqual(result.reason, "engine unreachable: connection refused")
+
+        # the graph itself must keep going: a RepairFailed value flowing through
+        # record_verdict raises nothing and the run reaches the next interrupt.
+        stubs = Stubs(repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 1})
+        stubs.execute_repair = lambda subject: result  # type: ignore[method-assign]
+        sends: list = []
+        collabs = card.Collaborators(
+            fetch=_fetch,
+            search=stubs.search,
+            read_note=stubs.read_note,
+            propose=stubs.propose,
+            send=lambda blocks: (sends.append(blocks), cc.PostedCard(channel=CARD_CH, ts=CARD_TS))[1],
+            handover=lambda session, at, paths: {},
+            consumption=lambda session, kind, paths: {},
+            resolve=stubs.resolve,
+            approved=stubs.approved,
+            record=stubs.record,
+            active_projects=stubs.active_projects,
+            past_verdicts=stubs.past_verdicts,
+            lang="ko",
+            repairs=stubs.repairs,
+            execute_repair=stubs.execute_repair,
+            merged_yesterday=stubs.merged_yesterday,
+        )
+        graph = card.build_graph(collabs)
+        cfg = {"configurable": {"thread_id": "test-repair-failed-continues"}}
+        graph.invoke({"verdicts": []}, cfg)
+        verdict = cc.ButtonVerdict(idx=0, choice="do", user=OWNER, at="t")
+        out = graph.invoke(Command(resume=verdict), cfg)
+        self.assertIn("__interrupt__", out)  # still waiting on the advice rows — not dead
+        self.assertEqual(out["repair_results"][0], result)
+
+
 class LivePastVerdictsTests(unittest.TestCase):
     """F5: a malformed or unjoined card_verdict/card_proposal row is a visible failure
     (ValueError), never a silently skipped one, and the proposal window must be wider than

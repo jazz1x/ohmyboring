@@ -26,7 +26,16 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 import card_i18n
-from card_types import CHOICES, ButtonVerdict, Confirmation, Evidence, Proposal, Repair
+from card_types import (
+    CHOICES,
+    ButtonVerdict,
+    Confirmation,
+    Evidence,
+    Proposal,
+    Repair,
+    RepairDone,
+    RepairFailed,
+)
 
 #: Language-independent register glyphs — the words come from card_i18n.REGISTER_LABELS.
 REGISTER_ICONS: dict[str, str] = {
@@ -180,13 +189,19 @@ def _repair_actions_block(idx: int, strings: dict[str, str]) -> dict:
     return {"type": "actions", "elements": elements}
 
 
-def _repair_verdict_block(verdict: ButtonVerdict, result: dict | None, strings: dict[str, str]) -> dict:
-    """An adopted repair shows the door's own numbers once execute_repair answered; every
-    other mark (hold/reject, or adopt before the door has answered) falls back to the same
-    verdict words the advice lane uses — 보류/거절 mean the same thing in either lane."""
-    if verdict.choice == "do" and result is not None:
-        text = strings["repair_verdict_done"].format(
-            deleted=result["deleted_rows"], reread=result["reread_notes"]
+def _repair_verdict_block(
+    verdict: ButtonVerdict, result: RepairDone | RepairFailed | None, strings: dict[str, str]
+) -> dict:
+    """An adopted repair shows the door's own numbers once execute_repair answered — done or
+    failed get their own marks (F2: a failed merge still names the rows it already
+    committed, never a plain "✓ 채택" and never silence). Hold/reject, or adopt before the
+    door has answered, fall back to the same verdict words the advice lane uses — 보류/거절
+    mean the same thing in either lane."""
+    if verdict.choice == "do" and isinstance(result, RepairDone):
+        text = strings["repair_verdict_done"].format(deleted=result.deleted_rows, reread=result.reread_notes)
+    elif verdict.choice == "do" and isinstance(result, RepairFailed):
+        text = strings["repair_verdict_failed"].format(
+            deleted=result.deleted_rows, reread=result.reread_notes, reason=result.reason
         )
     else:
         text = strings[f"verdict_{verdict.choice}"]
@@ -252,7 +267,7 @@ def build_blocks(
     repairs: list[Repair] = (),
     repairs_total_groups: int = 0,
     merged_yesterday_rows: int | None = None,
-    repair_results: dict[int, dict] | None = None,
+    repair_results: dict[int, RepairDone | RepairFailed] | None = None,
     *,
     lang: str,
 ) -> list[dict]:
