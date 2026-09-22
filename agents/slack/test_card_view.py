@@ -49,11 +49,9 @@ class BuildBlocksTests(unittest.TestCase):
             buttons = {b["action_id"]: b for b in row["elements"]}
             self.assertEqual(set(buttons), {f"card:{idx}:do", f"card:{idx}:defer", f"card:{idx}:drop"})
             for button in row["elements"]:
-                self.assertEqual(button["value"], EXPECTED_NOTES[idx])
-                self.assertTrue(button["value"].startswith("/vault/wiki/"))
+                self.assertEqual(button["value"], EXPECTED_NOTES[idx].rsplit("/", 1)[-1].removesuffix(".md"))
             labels = [b["text"]["text"] for b in row["elements"]]
-            self.assertEqual(labels, ["해", "미뤄", "빼"])
-        self.assertIn("주어 0", _blocks_text(blocks))
+            self.assertEqual(labels, ["채택", "보류", "거절"])
 
     def test_each_proposal_shows_its_bottleneck_and_evidence_coordinate(self):
         blocks = cv.build_blocks(self.proposals, lang="ko")
@@ -69,7 +67,7 @@ class BuildBlocksTests(unittest.TestCase):
         marks = [b for b in blocks if b["type"] == "context" and "✓" in _blocks_text([b])]
         self.assertEqual(len(action_rows), 2)
         self.assertEqual(len(marks), 1)
-        self.assertIn("✓ 해", marks[0]["elements"][0]["text"])
+        self.assertIn("✓ 채택", marks[0]["elements"][0]["text"])
         self.assertNotIn("card:1:", _blocks_text(blocks))
 
     def test_confirmation_line_sits_under_the_header_when_there_is_one(self):
@@ -123,20 +121,26 @@ class ProjectGroupingBlocksTests(unittest.TestCase):
             self._proposal("s4", "proj-a", "/vault/wiki/wiki-0004.md"),
         ]
         blocks = cv.build_blocks(proposals, lang="ko")
-        headers = [b["text"]["text"] for b in blocks if b["type"] == "header"]
-        # title header, then one per project in first-seen order: proj-a, unassigned, proj-b.
-        self.assertEqual(headers, ["☀️ 오늘 제안 4", "proj-a", "무소속", "proj-b"])
+        self.assertEqual(blocks[0]["text"]["text"], "☀️ 오늘 제안 4")
+        # v2: the project's own label is a section block ("　\n*label*"), not a header — only
+        # the card's title uses "header". One per project in first-seen order.
+        labels = [
+            b["text"]["text"]
+            for b in blocks
+            if b["type"] == "section" and b["text"]["text"].startswith("　\n")
+        ]
+        self.assertEqual(labels, ["　\n*proj-a*", "　\n*프로젝트 없음*", "　\n*proj-b*"])
         action_rows = [b for b in blocks if b["type"] == "actions"]
         self.assertEqual(len(action_rows), 4)
 
     def test_english_lang_uses_the_unassigned_label_and_button_words(self):
         proposals = [self._proposal("s1", "", "/vault/wiki/wiki-0001.md")]
         blocks = cv.build_blocks(proposals, lang="en")
-        headers = [b["text"]["text"] for b in blocks if b["type"] == "header"]
-        self.assertEqual(headers, ["☀️ Today's picks 1", "Unassigned"])
+        self.assertEqual(blocks[0]["text"]["text"], "☀️ Today's picks 1")
+        self.assertIn("No project", _blocks_text(blocks))
         action_row = next(b for b in blocks if b["type"] == "actions")
         labels = [el["text"]["text"] for el in action_row["elements"]]
-        self.assertEqual(labels, ["Do", "Defer", "Drop"])
+        self.assertEqual(labels, ["Adopt", "Hold", "Reject"])
 
 
 #: A run of 3+ ASCII words — a proper noun ("Slack", "JSON") or a symbol never matches this;
@@ -173,6 +177,109 @@ class CardI18nTests(unittest.TestCase):
         self.assertIsNotNone(_LATIN_SENTENCE.search("오늘 제안 please do the thing now"))
         self.assertIsNotNone(_HANGUL.search("Today's picks 오늘"))
         self.assertIsNotNone(_HANGUL.search("今日の提案 오늘"))
+
+
+class CardV2ShapeTests(unittest.TestCase):
+    """One test per AC3-AC8 — the v2 layout's shape, not a restatement of BuildBlocksTests."""
+
+    def _proposal(self, **overrides) -> cc.Proposal:
+        base = dict(
+            subject="주어",
+            note="/vault/wiki/wiki-0900.md",
+            register="stalled",
+            bottleneck="병목 문장 열자 이상입니다",
+            advice="조언 문장 열자 이상입니다",
+            evidence=[cc.Evidence(note="/vault/wiki/wiki-0900.md", quote="근거 인용문 열두자 이상", line=1)],
+        )
+        base.update(overrides)
+        return cc.Proposal(**base)
+
+    def test_row_order_is_divider_context_section_richtext_actions(self):
+        # AC3: a mutant moving the register tag after the buttons must kill this.
+        blocks = cv.build_blocks([self._proposal()], lang="ko")
+        row = blocks[2:7]  # [0]=header, [1]=project label, then the one row
+        self.assertEqual([b["type"] for b in row], ["divider", "context", "section", "rich_text", "actions"])
+
+    def test_quote_block_is_a_top_level_rich_text_with_two_evidence_joined(self):
+        # AC4: a mutant rendering the quote as a context block must kill this.
+        proposal = self._proposal(
+            evidence=[
+                cc.Evidence(note="/vault/wiki/wiki-0900.md", quote="첫째 근거 인용문 열두자 이상", line=3),
+                cc.Evidence(note="/vault/wiki/wiki-0536.md", quote="둘째 근거 인용문 열두자 이상", line=7),
+            ]
+        )
+        blocks = cv.build_blocks([proposal], lang="ko")
+        quote_block = next(b for b in blocks if b["type"] == "rich_text")
+        self.assertEqual(quote_block["elements"][0]["type"], "rich_text_quote")
+        texts = quote_block["elements"][0]["elements"]
+        joined = "".join(t["text"] for t in texts)
+        self.assertIn("첫째 근거", joined)
+        self.assertIn("둘째 근거", joined)
+        self.assertIn("\n\n", joined)
+        code_pieces = [t["text"] for t in texts if t.get("style") == {"code": True}]
+        self.assertEqual(code_pieces, ["\nwiki-0900 L3", "\nwiki-0536 L7"])
+
+    def test_button_words_styles_and_verdict_marks_come_from_i18n(self):
+        # AC5: a mutant dropping style="danger" from the reject button must kill this.
+        proposal = self._proposal()
+        action_row = next(b for b in cv.build_blocks([proposal], lang="ko") if b["type"] == "actions")
+        by_choice = {el["action_id"].split(":")[-1]: el for el in action_row["elements"]}
+        self.assertEqual(by_choice["do"]["text"]["text"], "채택")
+        self.assertEqual(by_choice["do"]["style"], "primary")
+        self.assertEqual(by_choice["drop"]["text"]["text"], "거절")
+        self.assertEqual(by_choice["drop"]["style"], "danger")
+        self.assertEqual(by_choice["defer"]["text"]["text"], "보류")
+        self.assertNotIn("style", by_choice["defer"])
+
+        verdict = cc.ButtonVerdict(idx=0, choice="drop", user="U1", at="t")
+        judged = cv.build_blocks([proposal], [verdict], lang="ko")
+        mark = next(b for b in judged if b["type"] == "context" and "✕" in _blocks_text([b]))
+        self.assertIn("✕ 거절", mark["elements"][0]["text"])
+
+    def test_register_tag_uses_localized_name_and_icon_in_three_languages(self):
+        # AC6: recurrences → 🔁 + localized name, checked in ko/en/ja.
+        proposal = self._proposal(register="recurrences", note="/vault/wiki/wiki-0576.md")
+        expected = {"ko": "재발", "en": "Recurring", "ja": "再発"}
+        for lang, label in expected.items():
+            blocks = cv.build_blocks([proposal], lang=lang)
+            tag = next(b for b in blocks if b["type"] == "context" and "wiki-0576" in _blocks_text([b]))
+            text = tag["elements"][0]["text"]
+            self.assertIn("🔁", text)
+            self.assertIn(label, text)
+        self.assertEqual(
+            {k: cv.REGISTER_ICONS[k] for k in ("recurrences", "risks", "stalled", "next_actions")},
+            {"recurrences": "🔁", "risks": "⚠️", "stalled": "🧊", "next_actions": "➡️"},
+        )
+
+    def test_no_vault_path_appears_anywhere_in_the_blocks(self):
+        # AC7: a mutant putting the full note path back in the button value must kill this.
+        proposal = self._proposal(
+            project="proj-a",
+            evidence=[cc.Evidence(note="/vault/wiki/wiki-0536.md", quote="근거 인용문 열두자 이상", line=4)],
+        )
+        blocks = cv.build_blocks([proposal], lang="ko")
+        self.assertNotIn("/vault/", _blocks_text(blocks))
+
+    def test_more_than_fifty_blocks_reports_overflow_instead_of_truncating_silently(self):
+        # AC8: a mutant that silently truncates past 50 blocks must kill this.
+        proposals = [
+            self._proposal(
+                subject=f"주어 {i}",
+                note=f"/vault/wiki/wiki-{1000 + i}.md",
+                evidence=[
+                    cc.Evidence(
+                        note=f"/vault/wiki/wiki-{1000 + i}.md", quote="근거 인용문 열두자 이상", line=1
+                    )
+                ],
+            )
+            for i in range(12)
+        ]
+        blocks = cv.build_blocks(proposals, lang="ko")
+        self.assertLessEqual(len(blocks), cv.BLOCK_LIMIT)
+        shown = len([b for b in blocks if b["type"] == "actions"])
+        self.assertLess(shown, 12)
+        overflow = next(b for b in blocks if b["type"] == "context" and "더 있음" in _blocks_text([b]))
+        self.assertIn(str(12 - shown), overflow["elements"][0]["text"])
 
 
 if __name__ == "__main__":
