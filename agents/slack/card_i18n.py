@@ -3,10 +3,10 @@
 
 Every string the card puts in front of the owner (title, buttons, verdict marks, the
 past-approval head line, the unassigned-project bucket name) lives here, keyed by the
-language `card_core.resolve_lang(boring_config.note_lang())` picks. card_core.py and
+language `card_advice.resolve_lang(boring_config.note_lang())` picks. card_view.py and
 card.py never spell out a display string themselves -- a Korean literal in either file's
 display path is the bug this file exists to remove. The model's own advice prompt is not
-a display string (nobody reads it in Slack) and stays out of this table; card_core attaches
+a display string (nobody reads it in Slack) and stays out of this table; card_advice attaches
 its own language instruction to that prompt separately, the way distill_core does.
 """
 

@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""card_view — build_blocks, and card_i18n's display-string table it renders.
+
+Run: python3 agents/slack/test_card_view.py
+"""
+
+import json
+import os
+import re
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+import card_i18n  # noqa: E402
+import card_types as cc  # noqa: E402
+import card_view as cv  # noqa: E402
+
+# The happy path's candidate order is: f64_risk (priority) → wiki-0536 → wiki-0576 →
+# essential_mode → draft_wiring (recurrence sources are sorted, so 0536 precedes 0576).
+# Three successes stop the loop after the first three.
+EXPECTED_NOTES = ["/vault/wiki/wiki-0900.md", "/vault/wiki/wiki-0536.md", "/vault/wiki/wiki-0576.md"]
+
+
+def _blocks_text(blocks) -> str:
+    return json.dumps(blocks, ensure_ascii=False)
+
+
+class BuildBlocksTests(unittest.TestCase):
+    def setUp(self):
+        self.proposals = [
+            cc.Proposal(
+                subject=f"주어 {i}",
+                note=note,
+                register="stalled",
+                bottleneck=f"병목 설명 {i} 열자 이상",
+                advice=f"오늘 할 일 {i} 열자 이상",
+                evidence=[cc.Evidence(note=note, quote="근거 인용문 열두자 이상입니다", line=i + 1)],
+            )
+            for i, note in enumerate(EXPECTED_NOTES)
+        ]
+
+    def test_header_counts_the_proposals_and_rows_carry_note_paths(self):
+        blocks = cv.build_blocks(self.proposals, lang="ko")
+        self.assertEqual(blocks[0]["text"]["text"], f"☀️ 오늘 제안 {len(self.proposals)}")
+        action_rows = [b for b in blocks if b["type"] == "actions"]
+        self.assertEqual(len(action_rows), 3)
+        for idx, row in enumerate(action_rows):
+            buttons = {b["action_id"]: b for b in row["elements"]}
+            self.assertEqual(set(buttons), {f"card:{idx}:do", f"card:{idx}:defer", f"card:{idx}:drop"})
+            for button in row["elements"]:
+                self.assertEqual(button["value"], EXPECTED_NOTES[idx])
+                self.assertTrue(button["value"].startswith("/vault/wiki/"))
+            labels = [b["text"]["text"] for b in row["elements"]]
+            self.assertEqual(labels, ["해", "미뤄", "빼"])
+        self.assertIn("주어 0", _blocks_text(blocks))
+
+    def test_each_proposal_shows_its_bottleneck_and_evidence_coordinate(self):
+        blocks = cv.build_blocks(self.proposals, lang="ko")
+        text = _blocks_text(blocks)
+        self.assertIn("병목 설명 0", text)
+        self.assertIn("wiki-0900 L1", text)
+        self.assertIn("근거 인용문", text)
+
+    def test_judged_row_shows_its_mark_instead_of_buttons(self):
+        verdict = cc.ButtonVerdict(idx=1, choice="do", user="U_OWNER", at="t")
+        blocks = cv.build_blocks(self.proposals, [verdict], lang="ko")
+        action_rows = [b for b in blocks if b["type"] == "actions"]
+        marks = [b for b in blocks if b["type"] == "context" and "✓" in _blocks_text([b])]
+        self.assertEqual(len(action_rows), 2)
+        self.assertEqual(len(marks), 1)
+        self.assertIn("✓ 해", marks[0]["elements"][0]["text"])
+        self.assertNotIn("card:1:", _blocks_text(blocks))
+
+    def test_confirmation_line_sits_under_the_header_when_there_is_one(self):
+        confirmation = cc.Confirmation(
+            total=3,
+            done=["/vault/wiki/wiki-9999.md", "/vault/wiki/wiki-9998.md"],
+            pending=["/vault/wiki/wiki-0900.md"],
+        )
+        blocks = cv.build_blocks(self.proposals, confirmation=confirmation, lang="ko")
+        self.assertEqual(blocks[1]["type"], "context")
+        self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 3 · 했다 2 · 아직 1")
+
+    def test_confirmation_line_counts_unknown_when_the_door_failed(self):
+        confirmation = cc.Confirmation(
+            total=2,
+            done=[],
+            pending=["/vault/wiki/wiki-0900.md"],
+            unknown=[("/vault/wiki/wiki-9999.md", "claim-source answered 500")],
+        )
+        blocks = cv.build_blocks(self.proposals, confirmation=confirmation, lang="ko")
+        self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 2 · 했다 0 · 아직 1 · 확인불가 1")
+
+    def test_no_confirmation_no_line(self):
+        for none in (None, cc.Confirmation(total=0, done=[], pending=[])):
+            blocks = cv.build_blocks(self.proposals, confirmation=none, lang="ko")
+            self.assertNotIn("지난 승인", _blocks_text(blocks))
+
+    def test_empty_proposals_still_renders_a_zero_header(self):
+        blocks = cv.build_blocks([], lang="ko")
+        self.assertEqual(blocks[0]["text"]["text"], "☀️ 오늘 제안 0")
+        self.assertEqual(len(blocks), 1)
+
+
+class ProjectGroupingBlocksTests(unittest.TestCase):
+    def _proposal(self, subject: str, project: str, note: str) -> cc.Proposal:
+        return cc.Proposal(
+            subject=subject,
+            note=note,
+            project=project,
+            register="stalled",
+            bottleneck=f"{subject} 병목 열자 이상 문장",
+            advice=f"{subject} 조언 열자 이상 문장",
+            evidence=[cc.Evidence(note=note, quote="근거 인용문 열두자 이상입니다", line=1)],
+        )
+
+    def test_two_projects_and_unassigned_get_three_fixed_order_headers(self):
+        proposals = [
+            self._proposal("s1", "proj-a", "/vault/wiki/wiki-0001.md"),
+            self._proposal("s2", "", "/vault/wiki/wiki-0002.md"),
+            self._proposal("s3", "proj-b", "/vault/wiki/wiki-0003.md"),
+            self._proposal("s4", "proj-a", "/vault/wiki/wiki-0004.md"),
+        ]
+        blocks = cv.build_blocks(proposals, lang="ko")
+        headers = [b["text"]["text"] for b in blocks if b["type"] == "header"]
+        # title header, then one per project in first-seen order: proj-a, unassigned, proj-b.
+        self.assertEqual(headers, ["☀️ 오늘 제안 4", "proj-a", "무소속", "proj-b"])
+        action_rows = [b for b in blocks if b["type"] == "actions"]
+        self.assertEqual(len(action_rows), 4)
+
+    def test_english_lang_uses_the_unassigned_label_and_button_words(self):
+        proposals = [self._proposal("s1", "", "/vault/wiki/wiki-0001.md")]
+        blocks = cv.build_blocks(proposals, lang="en")
+        headers = [b["text"]["text"] for b in blocks if b["type"] == "header"]
+        self.assertEqual(headers, ["☀️ Today's picks 1", "Unassigned"])
+        action_row = next(b for b in blocks if b["type"] == "actions")
+        labels = [el["text"]["text"] for el in action_row["elements"]]
+        self.assertEqual(labels, ["Do", "Defer", "Drop"])
+
+
+#: A run of 3+ ASCII words — a proper noun ("Slack", "JSON") or a symbol never matches this;
+#: three real English words in a row does.
+_LATIN_SENTENCE = re.compile(r"[A-Za-z]+(?:\s+[A-Za-z]+){2,}")
+_HANGUL = re.compile(r"[가-힣]")
+_KANA_OR_KANJI = re.compile(r"[぀-ヿ一-鿿]")
+
+
+class CardI18nTests(unittest.TestCase):
+    """AC3: en/ko/ja key parity, and no language bleeding into a table that isn't its own."""
+
+    def test_key_sets_match_across_languages(self):
+        en, ko, ja = card_i18n.STRINGS["en"], card_i18n.STRINGS["ko"], card_i18n.STRINGS["ja"]
+        self.assertEqual(set(en), set(ko))
+        self.assertEqual(set(en), set(ja))
+
+    def test_ko_table_has_no_latin_sentence(self):
+        for key, value in card_i18n.STRINGS["ko"].items():
+            self.assertIsNone(_LATIN_SENTENCE.search(value), f"{key}: {value!r}")
+
+    def test_en_table_has_no_hangul_or_kana(self):
+        for key, value in card_i18n.STRINGS["en"].items():
+            self.assertIsNone(_HANGUL.search(value), f"{key}: {value!r}")
+            self.assertIsNone(_KANA_OR_KANJI.search(value), f"{key}: {value!r}")
+
+    def test_ja_table_has_no_hangul(self):
+        for key, value in card_i18n.STRINGS["ja"].items():
+            self.assertIsNone(_HANGUL.search(value), f"{key}: {value!r}")
+
+    def test_the_detectors_actually_catch_a_planted_violation(self):
+        # A guard nobody has seen fail is not proven — plant one of each violation the three
+        # tests above are meant to catch, on a copy, and check the same regex still fires.
+        self.assertIsNotNone(_LATIN_SENTENCE.search("오늘 제안 please do the thing now"))
+        self.assertIsNotNone(_HANGUL.search("Today's picks 오늘"))
+        self.assertIsNotNone(_HANGUL.search("今日の提案 오늘"))
+
+
+if __name__ == "__main__":
+    unittest.main()

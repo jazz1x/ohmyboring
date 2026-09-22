@@ -79,7 +79,12 @@ python3 agents/schedulers/test_collectors.py
 python3 agents/codex/test_codex.py
 python3 agents/hermes/test_briefing_format.py
 python3 agents/hermes/test_ingest_worker.py
-python3 agents/slack/test_card_core.py
+python3 agents/slack/test_card_types.py
+python3 agents/slack/test_card_registers.py
+python3 agents/slack/test_card_advice.py
+python3 agents/slack/test_card_verdicts.py
+python3 agents/slack/test_card_view.py
+python3 agents/slack/test_card_graph.py
 python3 agents/shared/test_vault_note.py
 python3 scripts/test_python_deps.py
 python3 scripts/test_runbook.py
