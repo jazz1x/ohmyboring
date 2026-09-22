@@ -149,6 +149,36 @@ class Unresolved(BaseModel):
     reason: str
 
 
+class AdviseStats(BaseModel):
+    """The advise loop's own tally, computed once in `advise` and carried in state so nobody
+    downstream recomputes it: how many candidates were tried, how many became proposals, and
+    why the rest were refused. AC5 asks the dry-run executor to be able to quote a run's
+    numbers back — before this, `NotWorth.reason` and the `Ungrounded` reasons were discarded
+    the moment `advise` read them."""
+
+    calls: int
+    proposals_passed: int
+    not_worth: int
+    ungrounded: int
+    not_worth_reasons: list[str] = []
+    ungrounded_reasons: list[str] = []
+
+
+def handover_paths(proposals: Iterable[Proposal]) -> list[str]:
+    """Every note path a card actually cited to the owner: each proposal's own resolved note,
+    plus every note its evidence quoted — de-duplicated, first-seen order. A card that quoted
+    a note in its evidence line without listing it here would leave the engine unable to see
+    what actually grounded the pitch (AC4)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for proposal in proposals:
+        for note in (proposal.note, *(e.note for e in proposal.evidence)):
+            if note and note not in seen:
+                seen.add(note)
+                out.append(note)
+    return out
+
+
 class PastApproved(BaseModel):
     """One 「해」 from a past card, as /approved reports it."""
 

@@ -13,10 +13,13 @@ quote check has something real to check against.
 Run: python3 agents/slack/test_card_core.py
 """
 
+import contextlib
+import io
 import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
@@ -416,6 +419,17 @@ class ParseAdvisedTests(unittest.TestCase):
         )
         self.assertIsInstance(out, cc.Ungrounded)
 
+    def test_paraphrase_sharing_only_a_quote_prefix_is_ungrounded(self):
+        # A prefix-matching bug (checking only the first MIN_QUOTE_CHARS characters) would
+        # treat this as grounded because it shares a real line's opening — the tail is a
+        # plausible paraphrase, fabricated, and never appears verbatim anywhere in the note.
+        real_line = " ".join(self.TEXT.splitlines()[1].split())
+        prefix = real_line[: cc.MIN_QUOTE_CHARS]
+        quote = prefix + " 이하는 노트에 없는 완전히 다른 결말이다"
+        self.assertGreaterEqual(len(quote), cc.MIN_QUOTE_CHARS)
+        out = cc.parse_advised(self._proposal_json(quote), {self.NOTE: self.TEXT})
+        self.assertIsInstance(out, cc.Ungrounded)
+
     def test_not_worth_passes_through(self):
         out = cc.parse_advised(NOT_WORTH_JSON, {self.NOTE: self.TEXT})
         self.assertIsInstance(out, cc.NotWorth)
@@ -567,6 +581,11 @@ class GraphTests(unittest.TestCase):
         out = self.graph.invoke({"verdicts": []}, self.cfg)
         self.assertEqual(len(self.handovers), 1)
         self.assertEqual(self.handovers[0][0], SESSION)
+        # AC4: handover must carry the union of proposal notes and evidence notes. In this
+        # fixture each proposal's evidence cites its own resolved note, so the union equals
+        # EXPECTED_NOTES exactly — test_handover_cites_evidence_notes_even_when_they_differ_
+        # from_the_resolved_note below exercises the case where they diverge.
+        self.assertEqual(self.handovers[0][2], cc.handover_paths(out["proposals"]))
         self.assertEqual(self.handovers[0][2], EXPECTED_NOTES)
         for path in self.handovers[0][2]:
             self.assertTrue(path.startswith("/vault/wiki/"))
@@ -582,6 +601,59 @@ class GraphTests(unittest.TestCase):
         self.assertNotIn("__interrupt__", out)
         self.assertEqual(len(self.consumptions), 2)  # defer adds no engine call
         self.assertEqual(len(self.sends), 1)  # the card went out once
+
+    def test_handover_cites_evidence_notes_even_when_they_differ_from_the_resolved_note(self):
+        # f64_risk's own past hit (and so its Advice evidence) cites wiki-0900.md, but the
+        # door resolves f64_risk's *current* claim to a different note (wiki-7777.md) — a
+        # proposal's evidence is not guaranteed to be the same note its subject resolves to
+        # today. handover must still cite both: the owner saw the wiki-0900.md quote. The
+        # propose stub here matches by the subject named in the prompt (not call position),
+        # so it stays correct even though this resolutions override changes candidate order.
+        def propose_by_subject(prompt: str) -> str:
+            for subject in CANDIDATE_QUEUE:
+                if repr(subject) in prompt:
+                    return ADVICE[subject]
+            return NOT_WORTH_JSON
+
+        resolutions = dict(RESOLUTIONS)
+        resolutions["f64_risk"] = "/vault/wiki/wiki-7777.md"
+        stubs = Stubs(resolutions=resolutions)
+        stubs.propose = propose_by_subject
+        graph = self._build(stubs)
+        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-union-diverge"}})
+        f64_proposal = next(p for p in out["proposals"] if p.subject == "f64_risk")
+        self.assertEqual(f64_proposal.note, "/vault/wiki/wiki-7777.md")
+        self.assertEqual(f64_proposal.evidence[0].note, "/vault/wiki/wiki-0900.md")
+        paths = self.handovers[0][2]
+        self.assertIn("/vault/wiki/wiki-7777.md", paths)
+        self.assertIn("/vault/wiki/wiki-0900.md", paths)
+        self.assertEqual(paths, cc.handover_paths(out["proposals"]))
+
+    def test_advise_stats_counts_not_worth_and_ungrounded_with_their_reasons(self):
+        stubs = Stubs(responses=[NOT_WORTH_JSON, "not json"] + [ADVICE[s] for s in CANDIDATE_QUEUE[2:]])
+        graph = self._build(stubs)
+        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-stats"}})
+        stats = out["advise_stats"]
+        self.assertEqual(stats.calls, 5)
+        self.assertEqual(stats.proposals_passed, 3)
+        self.assertEqual(stats.not_worth, 1)
+        self.assertEqual(stats.ungrounded, 1)
+        self.assertEqual(stats.not_worth_reasons, ["근거가 약하다"])
+        self.assertIn("not JSON", stats.ungrounded_reasons[0])
+
+    def test_missing_note_bodies_speak_the_vault_dir_on_stderr(self):
+        class BlindStubs(Stubs):
+            def read_note(self, note: str) -> str | None:
+                return None
+
+        stubs = BlindStubs(responses=[NOT_WORTH_JSON] * 8)
+        graph = self._build(stubs)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-blind-vault"}})
+        err = buf.getvalue()
+        self.assertIn("BORING_VAULT_DIR", err)
+        self.assertEqual(err.count("BORING_VAULT_DIR"), 1)  # one line, not once per candidate
 
     def test_confirmation_line_and_event(self):
         out = self.graph.invoke({"verdicts": []}, self.cfg)
@@ -680,6 +752,83 @@ class GraphTests(unittest.TestCase):
         self.assertIsNone(out["confirmation"])
         self.assertNotIn("지난 승인", _blocks_text(self.sends[-1]))
         self.assertEqual(stubs.records, [])
+
+
+class DryRunWiringTests(unittest.TestCase):
+    """AC5: CARD_DRY_RUN must run the graph with the dry collaborators — never the live Slack
+    send, the live handover, or the live event log. A mutant that wired `_run_dry`'s
+    Collaborators to `send=_env_send, handover=_live_handover` survived all existing tests
+    because nothing exercised `_run_dry` directly; this drives it end to end with every live
+    network/model seam stubbed and asserts which functions were actually called."""
+
+    def test_dry_run_never_calls_live_send_handover_or_record(self):
+        calls = {"live_send": 0, "live_handover": 0, "live_record": 0}
+        dry_calls = {"send": 0, "handover": 0, "record": 0}
+
+        def fake_env_send(blocks):
+            calls["live_send"] += 1
+            raise AssertionError("dry run must not call the live Slack send")
+
+        def fake_live_handover(session, at, paths):
+            calls["live_handover"] += 1
+            raise AssertionError("dry run must not call the live handover")
+
+        def fake_live_record(event, fields):
+            calls["live_record"] += 1
+            raise AssertionError("dry run must not call the live event log")
+
+        real_dry_send, real_dry_handover, real_dry_record = (
+            card._dry_send,
+            card._dry_handover,
+            card._dry_record,
+        )
+
+        def counting_dry_send(blocks):
+            dry_calls["send"] += 1
+            return real_dry_send(blocks)
+
+        def counting_dry_handover(session, at, paths):
+            dry_calls["handover"] += 1
+            return real_dry_handover(session, at, paths)
+
+        def counting_dry_record(event, fields):
+            dry_calls["record"] += 1
+            return real_dry_record(event, fields)
+
+        stubs = Stubs(responses=[NOT_WORTH_JSON] * 8)
+        buf = io.StringIO()
+
+        with (
+            mock.patch.object(card, "_env_send", side_effect=fake_env_send),
+            mock.patch.object(card, "_live_handover", side_effect=fake_live_handover),
+            mock.patch.object(card, "_live_record", side_effect=fake_live_record),
+            mock.patch.object(card, "_dry_send", side_effect=counting_dry_send),
+            mock.patch.object(card, "_dry_handover", side_effect=counting_dry_handover),
+            mock.patch.object(card, "_dry_record", side_effect=counting_dry_record),
+            mock.patch.object(card, "_live_fetch", side_effect=_fetch),
+            mock.patch.object(card, "_live_search", side_effect=stubs.search),
+            mock.patch.object(card, "_live_read_note", side_effect=stubs.read_note),
+            mock.patch.object(card, "_live_resolve", side_effect=stubs.resolve),
+            mock.patch.object(card, "_live_approved", side_effect=stubs.approved),
+            mock.patch.object(card, "make_propose", return_value=stubs.propose),
+            contextlib.redirect_stdout(buf),
+        ):
+            rc = card._run_dry()
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, {"live_send": 0, "live_handover": 0, "live_record": 0})
+        self.assertEqual(dry_calls["send"], 1)
+        self.assertEqual(dry_calls["handover"], 1)
+        self.assertEqual(dry_calls["record"], 1)  # PAST_APPROVED is non-empty → one confirmation event
+
+        # AC5 telemetry: the dry-run JSON also carries the counters the contract asks the
+        # executor to be able to quote back.
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["calls"], 5)
+        self.assertEqual(payload["proposals_passed"], 0)
+        self.assertEqual(payload["not_worth"], 5)
+        self.assertEqual(payload["ungrounded"], 0)
+        self.assertEqual(len(payload["not_worth_reasons"]), 5)
 
 
 if __name__ == "__main__":

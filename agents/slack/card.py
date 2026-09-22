@@ -66,6 +66,7 @@ class CardState(TypedDict):
     confirmation: card_core.Confirmation | None
     priority_subjects: list[str]
     verdicts: Annotated[list[card_core.ButtonVerdict], _append_verdicts]
+    advise_stats: card_core.AdviseStats
 
 
 class Collaborators(NamedTuple):
@@ -149,16 +150,30 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         """The bottleneck pick, one candidate at a time (subject in, its register's search
         hits and gemma4's grounded pitch or refusal out) — up to three proposals, at most
         ADVISE_CALL_CAP calls. A candidate that fails to ground (schema, quote, or NotWorth)
-        is not an error: it just does not become a proposal, and the queue moves on."""
+        is not an error: it just does not become a proposal, and the queue moves on — but its
+        reason is kept in advise_stats, not discarded, so a dry run can quote why."""
         registers = state["registers"]
         candidates = card_core.candidate_order(registers, state["priority_subjects"])
         proposals: list[card_core.Proposal] = []
+        not_worth_reasons: list[str] = []
+        ungrounded_reasons: list[str] = []
         calls = 0
+        warned_empty_vault = False
         for subject, register in candidates:
             if len(proposals) >= 3 or calls >= ADVISE_CALL_CAP:
                 break
             hits = collabs.search(subject)
             note_texts = _note_texts_for_hits(collabs.read_note, hits)
+            if hits and not note_texts and not warned_empty_vault:
+                # Search had something to say about this subject, but every note it pointed
+                # at came back unreadable — that is not the same as "no evidence exists" (a
+                # wrong BORING_VAULT_DIR looks identical to a quiet morning otherwise).
+                print(
+                    f"[card] 검색 결과 {len(hits)}건은 있었지만 노트 본문을 하나도 못 읽었다 — "
+                    f"BORING_VAULT_DIR={_vault_dir()!r} 확인",
+                    file=sys.stderr,
+                )
+                warned_empty_vault = True
             prompt = card_core.build_advice_prompt(subject, register, hits)
             calls += 1
             advised = card_core.parse_advised(collabs.propose(prompt), note_texts)
@@ -172,7 +187,21 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                         evidence=advised.evidence,
                     )
                 )
-        return {"proposals": proposals}
+            elif isinstance(advised, card_core.NotWorth):
+                not_worth_reasons.append(advised.reason)
+            else:
+                ungrounded_reasons.append(advised.reason)
+        return {
+            "proposals": proposals,
+            "advise_stats": card_core.AdviseStats(
+                calls=calls,
+                proposals_passed=len(proposals),
+                not_worth=len(not_worth_reasons),
+                ungrounded=len(ungrounded_reasons),
+                not_worth_reasons=not_worth_reasons,
+                ungrounded_reasons=ungrounded_reasons,
+            ),
+        }
 
     def resolve(state: CardState) -> dict:
         """subject → note path through the door, for whatever advise picked. A subject that
@@ -196,7 +225,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         collabs.handover(
             session_name(message),
             datetime.now(UTC).isoformat(),
-            [p.note for p in state["proposals"]],
+            card_core.handover_paths(state["proposals"]),
         )
         confirmation = state["confirmation"]
         if confirmation is not None:
@@ -450,12 +479,19 @@ def _run_dry() -> int:
     config = {"configurable": {"thread_id": f"card-dry-{datetime.now(UTC):%Y%m%d%H%M%S}"}}
     state = graph.invoke({"verdicts": []}, config)
     confirmation = state["confirmation"]
+    stats = state["advise_stats"]
     print(
         json.dumps(
             {
                 "count": len(state["proposals"]),
                 "proposals": [p.model_dump(by_alias=True) for p in state["proposals"]],
                 "confirmation": confirmation.model_dump() if confirmation else None,
+                "calls": stats.calls,
+                "proposals_passed": stats.proposals_passed,
+                "not_worth": stats.not_worth,
+                "ungrounded": stats.ungrounded,
+                "not_worth_reasons": stats.not_worth_reasons,
+                "ungrounded_reasons": stats.ungrounded_reasons,
             },
             ensure_ascii=False,
             indent=2,
