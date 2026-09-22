@@ -5,7 +5,7 @@ description: drudge → Python 스트랭글러 이전의 슬라이스 하나를 
 
 # migration-slice
 
-트렁크 `feat/migration-python` (draft PR #396) 위에서 슬라이스 하나 = 계약 1개 → 커밋 1개.
+트렁크 `feat/migration-python` 위에서 슬라이스 하나 = 계약 1개 → 커밋 1개. main 으로는 소유자가 「다 됐다」고 한 뒤 한 번만 간다(#396 은 2026-09-22 소유자 결정 없이 조기 머지된 사고 — CLAUDE.md §9). 배달은 그 전에도 워크트리에서 한다.
 
 ## 시작 전 — 이 둘을 못 하면 시작하지 않는다
 - 설계·계약·슬라이스를 **쓰기 직전** `ls -t ~/Documents/ohmyboring/*/*.html | head` 로 소유자의 최신 문서를 열고 그 위에 얹는다. 순서·어휘는 그 문서 것을 쓴다(각서 「기억이 되묻는 법」 `feedback-loop/design.html`, 볼트 사본 wiki-1736).
