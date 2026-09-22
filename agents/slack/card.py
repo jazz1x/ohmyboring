@@ -30,6 +30,7 @@ external is a collaborator.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -53,6 +54,7 @@ from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
 from langgraph.graph import END, START, StateGraph  # noqa: E402
 from langgraph.graph.state import CompiledStateGraph  # noqa: E402
 from langgraph.types import Command, interrupt  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
 
 DEFAULT_MODEL = os.environ.get("CARD_MODEL") or "gemma4:12b"
 # Register answers carry up to 50 claims each; the door timeout lesson (brief p95 77s) says the
@@ -368,9 +370,17 @@ def _live_events(event_name: str, since_hours: int) -> list[dict[str, Any]]:
 
 def _live_past_verdicts(since_hours: int) -> list[card_core.PastVerdictPair]:
     """Join card_proposal and card_verdict events by (card_ts, idx) — a card_verdict event
-    alone carries no note or evidence, only the button press (knowns: card_ts·idx·choice)."""
+    alone carries no note or evidence, only the button press (knowns: card_ts·idx·choice).
+    Proposals are read over a wider window than verdicts: a press can land up to
+    CARD_WAIT_HOURS after its card posted, so a verdict at hour 167 of the 168h window
+    would otherwise be joined against a proposal that already fell outside it. A
+    card_verdict with no matching card_proposal, or a matching one missing note/evidence/
+    choice/timestamp, is a malformed row — F5/ROP: that is a visible failure (ValueError
+    naming the row), never a silently skipped one, because a dropped row here is exactly a
+    suppression pair going missing without anyone knowing."""
+    proposal_window = since_hours + math.ceil(CARD_WAIT_HOURS)
     proposals_by_key: dict[tuple[Any, Any], dict[str, Any]] = {}
-    for entry in _live_events("card_proposal", since_hours):
+    for entry in _live_events("card_proposal", proposal_window):
         attrs = entry.get("attributes") or {}
         key = (attrs.get("card_ts"), attrs.get("idx"))
         if key[0] is not None and key[1] is not None:
@@ -378,22 +388,26 @@ def _live_past_verdicts(since_hours: int) -> list[card_core.PastVerdictPair]:
     out: list[card_core.PastVerdictPair] = []
     for entry in _live_events("card_verdict", since_hours):
         attrs = entry.get("attributes") or {}
-        proposal = proposals_by_key.get((attrs.get("card_ts"), attrs.get("idx")))
+        key = (attrs.get("card_ts"), attrs.get("idx"))
+        proposal = proposals_by_key.get(key)
         if proposal is None:
-            continue
+            raise ValueError(f"card_verdict {key!r} has no matching card_proposal event: {attrs!r}")
         evidence = proposal.get("evidence") or []
         if not evidence:
-            continue
+            raise ValueError(f"card_proposal {key!r} was recorded with no evidence: {proposal!r}")
         first = evidence[0]
-        out.append(
-            card_core.PastVerdictPair(
-                note=proposal.get("note", ""),
-                evidence_note=first.get("note", ""),
-                evidence_line=int(first.get("line", -1)),
-                choice=attrs.get("choice", "defer"),
-                at=entry.get("observed_at", ""),
+        try:
+            out.append(
+                card_core.PastVerdictPair(
+                    note=proposal["note"],
+                    evidence_note=first["note"],
+                    evidence_line=int(first["line"]),
+                    choice=attrs["choice"],
+                    at=entry["observed_at"],
+                )
             )
-        )
+        except (KeyError, TypeError, ValueError, ValidationError) as e:
+            raise ValueError(f"malformed card_verdict/card_proposal pair {key!r}: {e}") from e
     return out
 
 
@@ -519,6 +533,40 @@ def make_propose(model: str = DEFAULT_MODEL) -> Callable[[str], str]:
         return str(llm.invoke(prompt).content)
 
     return propose
+
+
+def _lock_path(app_token: str) -> str:
+    """One lock file per Slack app token, in /tmp — the same path every run computes from the
+    same token, so a second concurrent card.py on that token always finds the first one's
+    lock. Hashed rather than the raw token: this path can show up in an error message."""
+    import hashlib
+
+    digest = hashlib.sha256(app_token.encode("utf-8")).hexdigest()[:16]
+    return f"/tmp/card-{digest}.lock"
+
+
+def _acquire_single_instance_lock(app_token: str):
+    """Refuse a second live card on the same app token — two Socket Mode clients would both
+    receive every button press (F7: only CARD_WAIT_HOURS < 24h keeping the daily cadence from
+    overlapping was not a guard, just a coincidence). Returns (open file handle, None) on
+    success — keep it open for the process lifetime, closing releases the advisory lock — or
+    (None, holder pid) when another instance already holds it."""
+    import fcntl
+
+    path = _lock_path(app_token)
+    fh = open(path, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.seek(0)
+        holder_pid = fh.read().strip() or "unknown"
+        fh.close()
+        return None, holder_pid
+    fh.seek(0)
+    fh.truncate()
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh, None
 
 
 class _Holder:
@@ -694,6 +742,15 @@ def main() -> int:
     if os.environ.get("CARD_DRY_RUN"):
         return _run_dry()
 
+    lock_fh, holder_pid = _acquire_single_instance_lock(app_token)
+    if lock_fh is None:
+        print(
+            f"[card] another card is already running (pid {holder_pid}) — refusing a second "
+            "Socket Mode listener on the same app token",
+            file=sys.stderr,
+        )
+        return 2
+
     from slack_sdk.socket_mode import SocketModeClient
     from slack_sdk.web import WebClient
 
@@ -702,6 +759,7 @@ def main() -> int:
         web_client.auth_test()
     except Exception as e:  # noqa: BLE001 — say why in one line, not with a stack trace and no token
         print(f"[card] auth_test failed: {e}", file=sys.stderr)
+        lock_fh.close()
         return 1
 
     holder = _Holder()
@@ -727,6 +785,7 @@ def main() -> int:
             return 3
     finally:
         client.close()
+        lock_fh.close()  # releases the flock — the file itself stays, harmlessly, for next time
     return 0
 
 

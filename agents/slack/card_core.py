@@ -224,17 +224,17 @@ def suppressed(
     within the last 7 days. 미뤄 leaves no trace here — card.py never asks record_verdict for
     a consumption call on defer, so a deferred pair can never enter `past` and can never
     suppress. A pair older than the window does not suppress either: the owner may see the
-    same bottleneck again once enough time has passed for it to be worth asking again."""
+    same bottleneck again once enough time has passed for it to be worth asking again. A
+    `past` entry whose `at` does not parse is not skipped: a judged-history row this function
+    cannot place in time is exactly the case the contract calls a wrong card, not a quiet
+    gap — it raises, same as an unresolvable pair upstream in card.py's own read."""
     now = now or datetime.now(UTC)
     cutoff = now - timedelta(hours=SUPPRESS_WINDOW_HOURS)
     recent: set[tuple[str, str, int]] = set()
     for verdict in past:
         if verdict.choice not in ("do", "drop"):
             continue
-        try:
-            at = datetime.fromisoformat(verdict.at)
-        except ValueError:
-            continue
+        at = datetime.fromisoformat(verdict.at)
         if at < cutoff:
             continue
         recent.add((verdict.note, verdict.evidence_note, verdict.evidence_line))

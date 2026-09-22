@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import threading
 import unittest
 from datetime import UTC, datetime, timedelta
 from unittest import mock
@@ -666,6 +667,18 @@ class SuppressedTests(unittest.TestCase):
         self.assertEqual(kept, [candidate])
         self.assertEqual(dropped, [])
 
+    def test_a_malformed_timestamp_raises_instead_of_being_silently_skipped(self):
+        # F5/ROP: a judged-history row this function cannot place in time is a wrong-card
+        # signal, not a quiet gap — the old `except ValueError: continue` hid exactly this.
+        candidate = self._proposal("/n1.md", "/e1.md", 3)
+        past = [
+            cc.PastVerdictPair(
+                note="/n1.md", evidence_note="/e1.md", evidence_line=3, choice="drop", at="not-a-timestamp"
+            )
+        ]
+        with self.assertRaises(ValueError):
+            cc.suppressed([candidate], past, now=self.NOW)
+
 
 class EventFieldsTests(unittest.TestCase):
     def test_proposal_event_fields_carries_the_full_contract_field_set(self):
@@ -1059,6 +1072,36 @@ class GraphTests(unittest.TestCase):
         self.assertEqual([p.note for p in out["proposals"]], EXPECTED_NOTES[1:])
         self.assertEqual(out["suppressed_count"], 1)
 
+    def test_past_verdicts_failure_stops_the_run_before_any_send(self):
+        # AC5: a card that cannot read its own judged history must not ship — mirrors
+        # test_approved_failure_stops_the_run_before_any_send for the other read the resolve
+        # node depends on.
+        stubs = Stubs()
+
+        def dead_events(since_hours: int):
+            raise OSError("events unreachable")
+
+        collabs = card.Collaborators(
+            fetch=_fetch,
+            search=stubs.search,
+            read_note=stubs.read_note,
+            propose=stubs.propose,
+            send=self._send,
+            handover=self._handover,
+            consumption=self._consumption,
+            resolve=stubs.resolve,
+            approved=stubs.approved,
+            record=stubs.record,
+            active_projects=stubs.active_projects,
+            past_verdicts=dead_events,
+            lang="ko",
+        )
+        graph = card.build_graph(collabs)
+        with self.assertRaises(OSError):
+            graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-card-dead-events"}})
+        self.assertEqual(self.sends, [])
+        self.assertEqual(stubs.records, [])
+
     def test_active_projects_are_dialed_and_shared_subjects_are_deduplicated(self):
         # Every fixture project answers identical registers (the _fetch stub ignores its
         # project argument), so the global subject dedup in merge_project_candidates means
@@ -1094,6 +1137,41 @@ class AwaitVerdictsTests(unittest.TestCase):
             )
         self.assertEqual(web.chat_update_calls, 0)
         self.assertIs(out, state)
+
+    def test_positive_wait_with_empty_queue_returns_promptly_not_hangs(self):
+        # M6: a mutant that drops `timeout=remaining` from `holder.queue.get(...)` blocks
+        # forever on an empty queue. wait_hours=0 (the test above) never reaches that call at
+        # all — remaining<=0 breaks first — so it cannot see that mutant. A small positive
+        # wait does reach queue.get, and running it on a thread with a bounded join means a
+        # hung mutant fails this test instead of hanging the whole suite.
+        holder = card._Holder()
+        holder.message = cc.PostedCard(channel="C1", ts=CARD_TS)
+        proposal = cc.Proposal(
+            subject="주어",
+            note="/n1.md",
+            register="stalled",
+            bottleneck="병목 문장 열자 이상입니다",
+            advice="조언 문장 열자 이상입니다",
+            evidence=[cc.Evidence(note="/n1.md", quote="근거 인용문 열두자 이상", line=1)],
+        )
+        state = {"proposals": [proposal], "verdicts": [], "lang": "ko"}
+        web = self._FakeWeb()
+        buf = io.StringIO()
+        result: dict = {}
+
+        def target():
+            with contextlib.redirect_stderr(buf):
+                result["state"] = card._await_verdicts(
+                    holder, graph=None, config={}, state=state, web_client=web, wait_hours=1e-4
+                )
+
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive(), "_await_verdicts hung — queue.get's timeout is missing")
+        self.assertIn("state", result)
+        self.assertEqual(web.chat_update_calls, 0)
+        self.assertIn("1건", buf.getvalue())
 
 
 class DryRunWiringTests(unittest.TestCase):
@@ -1173,6 +1251,135 @@ class DryRunWiringTests(unittest.TestCase):
         self.assertEqual(payload["not_worth"], 5)
         self.assertEqual(payload["ungrounded"], 0)
         self.assertEqual(len(payload["not_worth_reasons"]), 5)
+
+
+class LiveFetchTests(unittest.TestCase):
+    """M1: _live_fetch must send `project` in the POST body — a mutant that calls
+    `_retry("POST", path, {})` (project dropped) makes the whole project axis silently
+    degrade to identical unfiltered reads. Patches DrudgeClient._retry itself, not
+    _live_fetch, so it observes exactly what goes over the wire."""
+
+    def test_project_is_always_sent_in_the_post_body(self):
+        calls: list[tuple[str, str, dict]] = []
+
+        def fake_retry(self, method, path, payload=None, timeout=None):
+            calls.append((method, path, payload))
+            return {"rows": []} if path == "/recurrences" else {"answer": "", "sources": []}
+
+        with mock.patch.object(card.DrudgeClient, "_retry", fake_retry):
+            card._live_fetch("/risks", "proj-a")
+            card._live_fetch("/recurrences", "")
+        self.assertIn(("POST", "/risks", {"project": "proj-a"}), calls)
+        self.assertIn(("POST", "/recurrences", {"project": ""}), calls)
+
+
+class LivePastVerdictsTests(unittest.TestCase):
+    """F5: a malformed or unjoined card_verdict/card_proposal row is a visible failure
+    (ValueError), never a silently skipped one, and the proposal window must be wider than
+    the verdict window (CARD_WAIT_HOURS)."""
+
+    @staticmethod
+    def _events(proposals: list[dict], verdicts: list[dict]):
+        def fake(event_name: str, since_hours: int):
+            return proposals if event_name == "card_proposal" else verdicts
+
+        return fake
+
+    def test_unmatched_verdict_raises(self):
+        verdicts = [{"attributes": {"card_ts": "1.0", "idx": 0, "choice": "do"}, "observed_at": "t"}]
+        with mock.patch.object(card, "_live_events", side_effect=self._events([], verdicts)):
+            with self.assertRaises(ValueError):
+                card._live_past_verdicts(168)
+
+    def test_proposal_without_evidence_raises(self):
+        proposals = [{"attributes": {"card_ts": "1.0", "idx": 0, "note": "/n.md", "evidence": []}}]
+        verdicts = [{"attributes": {"card_ts": "1.0", "idx": 0, "choice": "do"}, "observed_at": "t"}]
+        with mock.patch.object(card, "_live_events", side_effect=self._events(proposals, verdicts)):
+            with self.assertRaises(ValueError):
+                card._live_past_verdicts(168)
+
+    def test_missing_choice_raises(self):
+        proposals = [
+            {
+                "attributes": {
+                    "card_ts": "1.0",
+                    "idx": 0,
+                    "note": "/n.md",
+                    "evidence": [{"note": "/e.md", "line": 2}],
+                }
+            }
+        ]
+        verdicts = [{"attributes": {"card_ts": "1.0", "idx": 0}, "observed_at": "t"}]
+        with mock.patch.object(card, "_live_events", side_effect=self._events(proposals, verdicts)):
+            with self.assertRaises(ValueError):
+                card._live_past_verdicts(168)
+
+    def test_well_formed_pair_parses(self):
+        proposals = [
+            {
+                "attributes": {
+                    "card_ts": "1.0",
+                    "idx": 0,
+                    "note": "/n.md",
+                    "evidence": [{"note": "/e.md", "line": 4}],
+                }
+            }
+        ]
+        verdicts = [
+            {
+                "attributes": {"card_ts": "1.0", "idx": 0, "choice": "drop"},
+                "observed_at": "2026-09-22T00:00:00+00:00",
+            }
+        ]
+        with mock.patch.object(card, "_live_events", side_effect=self._events(proposals, verdicts)):
+            out = card._live_past_verdicts(168)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(
+            (out[0].note, out[0].evidence_note, out[0].evidence_line, out[0].choice),
+            ("/n.md", "/e.md", 4, "drop"),
+        )
+
+    def test_proposal_window_is_wider_than_the_verdict_window(self):
+        seen: dict[str, int] = {}
+
+        def fake(event_name: str, since_hours: int):
+            seen[event_name] = since_hours
+            return []
+
+        with mock.patch.object(card, "_live_events", side_effect=fake):
+            card._live_past_verdicts(168)
+        self.assertEqual(seen["card_verdict"], 168)
+        self.assertGreater(seen["card_proposal"], 168)
+
+
+class SingleInstanceLockTests(unittest.TestCase):
+    """F7: a second card.py on the same Slack app token must not open a second Socket Mode
+    listener — refused with the first pid, not a silent double-listen."""
+
+    def test_second_lock_attempt_is_refused_with_the_first_pid(self):
+        token = f"xapp-test-{os.getpid()}-{id(self)}"
+        fh1, holder1 = card._acquire_single_instance_lock(token)
+        self.assertIsNotNone(fh1)
+        self.assertIsNone(holder1)
+        try:
+            fh2, holder2 = card._acquire_single_instance_lock(token)
+            self.assertIsNone(fh2)
+            self.assertEqual(holder2, str(os.getpid()))
+        finally:
+            fh1.close()
+            os.remove(card._lock_path(token))
+
+    def test_lock_is_free_again_after_release(self):
+        token = f"xapp-test-release-{os.getpid()}-{id(self)}"
+        fh1, _ = card._acquire_single_instance_lock(token)
+        fh1.close()
+        try:
+            fh2, holder2 = card._acquire_single_instance_lock(token)
+            self.assertIsNotNone(fh2)
+            self.assertIsNone(holder2)
+            fh2.close()
+        finally:
+            os.remove(card._lock_path(token))
 
 
 if __name__ == "__main__":

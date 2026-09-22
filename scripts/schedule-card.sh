@@ -26,13 +26,26 @@ EOF
 }
 
 run_card() {
-    if ! curl -sf "${DOOR_URL}/health" >/dev/null 2>&1; then
-        echo "✗ door not answering at ${DOOR_URL}/health — start it (make door-up) before the card can run" >&2
+    cd "$BORING_HOME" || { echo "✗ cannot cd to $BORING_HOME"; exit 1; }
+    # launchd runs this with none of the interactive shell's env — no SLACK_APP_TOKEN, no
+    # BORING_DOOR_URL, nothing from .env. `make card` sources .env the same way; a card that
+    # only ever ran from an interactive shell was never actually going to fire at 08:00.
+    if [ -f ./.env ]; then
+        set -a
+        # shellcheck disable=SC1091
+        . ./.env
+        set +a
+    fi
+    door_url="${BORING_DOOR_URL:-$DOOR_URL}"
+    if ! curl -sf "${door_url}/health" >/dev/null 2>&1; then
+        echo "✗ door not answering at ${door_url}/health — start it (make door-up) before the card can run" >&2
         exit 2
     fi
-    cd "$BORING_HOME" || { echo "✗ cannot cd to $BORING_HOME"; exit 1; }
     echo "=== morning card started at $(date) ==="
-    python3 agents/slack/card.py
+    # launchd's own PATH has no notion of Homebrew (python3 resolves to the PATH-less
+    # system stub, which has no langgraph) — PYTHON3 is set in the plist's own
+    # EnvironmentVariables at install time so this never depends on launchd's PATH.
+    "${PYTHON3:-python3}" agents/slack/card.py
     status=$?
     echo "=== morning card finished at $(date) (exit $status) ==="
     exit "$status"
@@ -45,6 +58,13 @@ escaped_boring_home() {
 install_macos() {
     plist="$HOME/Library/LaunchAgents/${LABEL}.plist"
     mkdir -p "$HOME/Library/LaunchAgents"
+    # Resolved once, here, in the installer's own interactive PATH — launchd's own PATH
+    # never sees Homebrew, so the plist carries the absolute interpreter instead of a name.
+    python3_bin="$(command -v python3 || true)"
+    if [ -z "$python3_bin" ]; then
+        echo "✗ no python3 on PATH — cannot resolve the interpreter to pin into the plist"
+        exit 1
+    fi
     cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -58,6 +78,11 @@ install_macos() {
         <string>-c</string>
         <string>cd $(escaped_boring_home) &amp;&amp; ./scripts/schedule-card.sh run</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHON3</key>
+        <string>${python3_bin}</string>
+    </dict>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
