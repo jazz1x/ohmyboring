@@ -82,6 +82,8 @@ install_macos() {
     <dict>
         <key>PYTHON3</key>
         <string>${python3_bin}</string>
+        <key>BORING_HOME</key>
+        <string>${BORING_HOME}</string>
     </dict>
     <key>StartCalendarInterval</key>
     <dict>
