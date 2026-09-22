@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Network-free regression tests for session collector status semantics."""
+
 import importlib.util
 import json
 import os
@@ -48,11 +49,18 @@ def test_claude_backfill_does_not_claim_to_be_a_session_end():
 
             with (
                 mock.patch.object(claude_collect.sys, "argv", ["collect-sessions.py"]),
-                mock.patch.object(claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]),
+                mock.patch.object(
+                    claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]
+                ),
                 mock.patch.object(claude_collect, "_warm_llm"),
-                mock.patch.object(claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)) as run,
+                mock.patch.object(
+                    claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)
+                ) as run,
                 mock.patch.object(claude_collect, "DrudgeClient"),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(root / "events.ndjson"), "BORING_EVENT_SINK": "spool"}),
+                mock.patch.dict(
+                    os.environ,
+                    {"BORING_EVENT_LOG": str(root / "events.ndjson"), "BORING_EVENT_SINK": "spool"},
+                ),
             ):
                 claude_collect.main()
 
@@ -80,7 +88,9 @@ def test_kimi_collector_fails_when_distill_fails():
             index.write_text(
                 json.dumps({"sessionId": "k1", "sessionDir": str(session_dir), "workDir": "/work/repo"})
                 + "\n"
-                + json.dumps({"sessionId": "k2", "sessionDir": str(second_session_dir), "workDir": "/work/repo"})
+                + json.dumps(
+                    {"sessionId": "k2", "sessionDir": str(second_session_dir), "workDir": "/work/repo"}
+                )
                 + "\n",
                 encoding="utf-8",
             )
@@ -97,7 +107,9 @@ def test_kimi_collector_fails_when_distill_fails():
                 # Stub the client so the write-door preflight does not make this test depend on
                 # a reachable engine — it owns the distill-failure path, not readiness.
                 mock.patch.object(kimi_collect, "DrudgeClient"),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+                mock.patch.dict(
+                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                ),
             ):
                 rc = kimi_collect.main()
 
@@ -208,11 +220,15 @@ def test_claude_collector_run_makes_no_sync_request():
 
             with (
                 mock.patch.object(claude_collect.sys, "argv", ["collect-sessions.py"]),
-                mock.patch.object(claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]),
+                mock.patch.object(
+                    claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]
+                ),
                 mock.patch.object(claude_collect, "_warm_llm"),
                 mock.patch.object(claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
                 mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+                mock.patch.dict(
+                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                ),
             ):
                 rc = claude_collect.main()
 
@@ -246,11 +262,15 @@ def test_claude_collector_fails_when_distill_fails():
 
             with (
                 mock.patch.object(claude_collect.sys, "argv", ["collect-sessions.py"]),
-                mock.patch.object(claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]),
+                mock.patch.object(
+                    claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]
+                ),
                 mock.patch.object(claude_collect, "_warm_llm"),
                 mock.patch.object(claude_collect.subprocess, "run", return_value=mock.Mock(returncode=1)),
                 mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+                mock.patch.dict(
+                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                ),
             ):
                 rc = claude_collect.main()
 
@@ -286,7 +306,9 @@ def test_kimi_collector_run_makes_no_sync_request():
             with (
                 mock.patch.object(kimi_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
                 mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+                mock.patch.dict(
+                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                ),
             ):
                 rc = kimi_collect.main()
 
@@ -325,7 +347,9 @@ def test_codex_collector_run_makes_no_sync_request():
                 mock.patch.object(codex_collect, "_source_dir", return_value=str(root / "sessions")),
                 mock.patch.object(codex_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
                 mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+                mock.patch.dict(
+                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                ),
             ):
                 rc = codex_collect.main([])
 
@@ -364,7 +388,9 @@ def test_codex_collector_fails_when_distill_fails():
                 mock.patch.object(codex_collect, "_source_dir", return_value=str(root / "sessions")),
                 mock.patch.object(codex_collect.subprocess, "run", return_value=mock.Mock(returncode=1)),
                 mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
-                mock.patch.dict(os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}),
+                mock.patch.dict(
+                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                ),
             ):
                 rc = codex_collect.main([])
 

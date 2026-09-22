@@ -81,6 +81,30 @@ services:
     ports:
       - "127.0.0.1:7700:7700"             # for host debugging / direct curl
 
+  # ─────────────────────────── The door (read-only proxy) ───────────────────────
+  # Same FastAPI app as `make door`, packaged to stand next to the engine: the image
+  # (agents/door/Dockerfile, uid 10001, no mounts) reads the engine by compose service
+  # name. /health relays the engine's, so the door goes unhealthy with the engine.
+  boring-door:
+    build:
+      context: .
+      dockerfile: agents/door/Dockerfile
+    image: boring-door
+    container_name: boring-door
+    restart: unless-stopped
+    depends_on:
+      - boring-drudge
+    environment:
+      DOOR_UPSTREAM: http://boring-drudge:7700
+      DOOR_PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring
+    ports:
+      - "127.0.0.1:7710:7710"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:7710/health',timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 3
+
   # ─────────────────────────── Hermes Agent (the brain) ─────────────────────────
   # Nous Hermes Agent — optional autonomous supervisor. Persists config/memory in the ~/.hermes volume → the container is disposable.
   # Mac: their compose's network_mode:host isn't supported by Mac Docker → bridge + host.docker.internal.

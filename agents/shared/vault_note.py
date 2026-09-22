@@ -12,6 +12,7 @@ This module takes the assumptions out of the callers and into one function with 
 deliberately does NOT parse YAML — callers that need a mapping still bring their own parser,
 because writing a YAML parser here would be a second, worse one.
 """
+
 from __future__ import annotations
 
 _FENCE = "---"

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tests for uptake_core.py — above all, that an injection cannot count as its own uptake."""
+
 import contextlib
 import io
 import json
@@ -67,8 +68,7 @@ def test_a_phrase_the_user_already_said_is_not_evidence():
     prompt = "deadpool recycled a socket the server had already closed — why did the pool die"
     record = uptake_core.injection_record("s1", prompt, [_hit()], 3)
     transcript = (
-        f"[user] {prompt}\n"
-        "[assistant] Right, deadpool recycled a socket the server had already closed.\n"
+        f"[user] {prompt}\n[assistant] Right, deadpool recycled a socket the server had already closed.\n"
     )
     r = uptake_core.session_uptake([record], transcript)
     used, total = r.used_hits, r.total_hits
@@ -107,7 +107,9 @@ def test_a_note_named_at_the_end_of_a_sentence_counts():
     """`per wiki-0007.` — the period was being kept as part of the token, so the commonest
     place to cite a note (sentence end) scored zero."""
     record = uptake_core.injection_record("s1", "why did the pool die", [_hit()], 3)
-    r = uptake_core.session_uptake([record], "[user] why did the pool die\n[assistant] This is per wiki-0007.\n")
+    r = uptake_core.session_uptake(
+        [record], "[user] why did the pool die\n[assistant] This is per wiki-0007.\n"
+    )
     assert (r.used_hits, r.total_hits) == (1, 1)
 
 
@@ -117,7 +119,9 @@ def test_a_phrase_stored_by_the_old_tokenizer_still_matches():
     live rows within the hour. Stored phrases are normalised at compare time, not rewritten."""
     record = uptake_core.injection_record("s1", "why did the pool die", [_hit()], 3)
     record["hits"][0]["phrases"] = ["deadpool recycled a socket the server had already closed."]
-    transcript = "[user] why did the pool die\n[assistant] deadpool recycled a socket the server had already closed.\n"
+    transcript = (
+        "[user] why did the pool die\n[assistant] deadpool recycled a socket the server had already closed.\n"
+    )
     assert uptake_core.session_uptake([record], transcript).used_hits == 1
 
 
@@ -162,9 +166,9 @@ def test_a_long_running_session_does_not_lose_its_early_rows():
         # change to the cutoff.
         stale = now - (uptake_core.LEDGER_MAX_AGE_DAYS + 2) * 86400
         early = uptake_core.injection_record("long", "p", [_hit()], 3)
-        early["ts"] = stale                       # older than the cutoff …
+        early["ts"] = stale  # older than the cutoff …
         recent = uptake_core.injection_record("long", "p", [_hit()], 3)
-        recent["ts"] = now                        # … but the session is still alive
+        recent["ts"] = now  # … but the session is still alive
         dead = uptake_core.injection_record("dead", "p", [_hit()], 3)
         dead["ts"] = stale
         Path(path).write_text(
@@ -190,7 +194,7 @@ def test_controls_are_scored_but_never_injected():
 
     transcript = (
         "[user] why did it die\n"
-        "[assistant] wiki-0099.md 를 보면 답이 있습니다.\n"   # echoes the CONTROL, not the hit
+        "[assistant] wiki-0099.md 를 보면 답이 있습니다.\n"  # echoes the CONTROL, not the hit
     )
     r = uptake_core.session_uptake([record], transcript)
     assert (r.used_hits, r.total_hits) == (0, 1), "the injected note was not echoed"
@@ -233,7 +237,7 @@ def test_only_assistant_turns_are_scanned():
     record = uptake_core.injection_record("s1", "unrelated question", [_hit()], 3)
     transcript = (
         "[user] unrelated question\n"
-        f"[user] deadpool recycled a socket the server had already closed\n"
+        "[user] deadpool recycled a socket the server had already closed\n"
         "[assistant] I have no idea.\n"
     )
     used = uptake_core.session_uptake([record], transcript).used_hits
@@ -345,9 +349,7 @@ def test_snippet_text_is_not_stored_in_the_ledger():
 
 
 def _window_open():
-    return datetime.strptime(verdict_core.WINDOW_SINCE, "%Y-%m-%d").replace(
-        tzinfo=verdict_core.WINDOW_TZ
-    )
+    return datetime.strptime(verdict_core.WINDOW_SINCE, "%Y-%m-%d").replace(tzinfo=verdict_core.WINDOW_TZ)
 
 
 def _stamped_record(session_id, prompt, at):
@@ -447,9 +449,7 @@ def test_a_duplicate_before_the_window_cannot_move_the_floor():
         assert report["extra_out"] == 1
         assert report["total_out"] == 2
         assert report["sessions_in"] == 0
-        assert report["oldest_out"] == datetime.fromtimestamp(
-            twin["ts"], verdict_core.WINDOW_TZ
-        ).isoformat()
+        assert report["oldest_out"] == datetime.fromtimestamp(twin["ts"], verdict_core.WINDOW_TZ).isoformat()
 
 
 def test_a_duplicate_in_the_windows_first_local_hours_is_in_window():
@@ -494,9 +494,7 @@ def test_the_probe_exits_one_only_for_in_window_duplicates():
     with tempfile.TemporaryDirectory() as d:
         base = _window_open()
         stale = _stamped_record("s1", "old news", base - timedelta(days=7))
-        stale_twin = dict(
-            stale, ts=(base - timedelta(days=7) + timedelta(seconds=0.25)).timestamp()
-        )
+        stale_twin = dict(stale, ts=(base - timedelta(days=7) + timedelta(seconds=0.25)).timestamp())
         old_code, old_out = _run_duplicate_probe(_write_rows(d, [stale, stale_twin]))
         live = _stamped_record("s1", "live wire", base + timedelta(minutes=5))
         live_twin = dict(live, ts=(base + timedelta(minutes=5, seconds=0.25)).timestamp())
@@ -561,21 +559,26 @@ def test_cross_session_scoring_pairs_every_session_with_one_it_never_saw():
     phrase_b = "관측창이 대상보다 짧다는 것은 결측이 아니라"
     with open(ledger, "w", encoding="utf-8") as handle:
         for sid, phrase in (("a-session", phrase_a), ("b-session", phrase_b)):
-            handle.write(json.dumps({
-                "session_id": sid, "ts": 1,
-                "prompt_words": ["질문"],
-                "hits": [{"src": f"{sid}.md", "phrases": [phrase]}],
-                "controls": [],
-            }, ensure_ascii=False) + "\n")
+            handle.write(
+                json.dumps(
+                    {
+                        "session_id": sid,
+                        "ts": 1,
+                        "prompt_words": ["질문"],
+                        "hits": [{"src": f"{sid}.md", "phrases": [phrase]}],
+                        "controls": [],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
 
     # Each transcript echoes its OWN phrase and nothing else.
     def transcript_for(sid):
         own = phrase_a if sid == "a-session" else phrase_b
         return f"[user] 질문\n[assistant] {own}"
 
-    (cross_used, cross_total), (own_used, own_total) = uptake_core.cross_session_rate(
-        transcript_for, ledger
-    )
+    (cross_used, cross_total), (own_used, own_total) = uptake_core.cross_session_rate(transcript_for, ledger)
     assert cross_total == 2 and own_total == 2, (cross_total, own_total)
     assert cross_used == 0, "a phrase the session never received was counted as used"
     assert own_used == 2, "the same scorer must find the phrase each session did receive"
@@ -587,15 +590,23 @@ def test_the_self_check_cannot_be_run_on_a_ledger_with_nothing_to_pair():
 
     ledger = os.path.join(tempfile.mkdtemp(), "inj.jsonl")
     with open(ledger, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps({
-            "session_id": "only", "ts": 1, "prompt_words": [],
-            "hits": [{"src": "x.md", "phrases": ["아무 문구"]}], "controls": [],
-        }, ensure_ascii=False) + "\n")
+        handle.write(
+            json.dumps(
+                {
+                    "session_id": "only",
+                    "ts": 1,
+                    "prompt_words": [],
+                    "hits": [{"src": "x.md", "phrases": ["아무 문구"]}],
+                    "controls": [],
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
 
     assert uptake_core.cross_session_rate(lambda _s: "x", ledger) == ((0, 0), (0, 0))
     # A path that cannot be read is the same answer, not a pass.
     assert uptake_core.cross_session_rate(lambda _s: "x", "/nonexistent") == ((0, 0), (0, 0))
-
 
 
 def test_a_raw_transcript_gives_the_detector_nothing_to_read():
@@ -620,7 +631,9 @@ def test_consumption_names_what_was_used_and_what_was_argued_with():
     )
     used, contested, supersedes = uptake_core.consumption([record], transcript)
     assert used == ["/vault/wiki/wiki-0007.md", "/vault/wiki/wiki-0099.md", "/vault/wiki/wiki-0042.md"], used
-    assert contested == ["/vault/wiki/wiki-0099.md"], "the marker has to sit in the sentence that names the note"
+    assert contested == ["/vault/wiki/wiki-0099.md"], (
+        "the marker has to sit in the sentence that names the note"
+    )
     assert supersedes == []
     assert record["hits"][0]["path"] == "/vault/wiki/wiki-0007.md", "the ledger keeps the engine path"
 
@@ -636,7 +649,9 @@ def test_consumption_reads_which_note_replaced_which():
     assert pairs == [("/vault/wiki/wiki-1683.md", "/vault/wiki/wiki-1682.md")], pairs
     ko = "[user] 퇴고는 어떻게\n[assistant] wiki-1682 대신 wiki-1683 을 따른다.\n"
     _, _, pairs = uptake_core.consumption([record], ko)
-    assert pairs == [("/vault/wiki/wiki-1683.md", "/vault/wiki/wiki-1682.md")], "Korean names the older note first"
+    assert pairs == [("/vault/wiki/wiki-1683.md", "/vault/wiki/wiki-1682.md")], (
+        "Korean names the older note first"
+    )
     stranger = "[user] x\n[assistant] wiki-1683 instead of wiki-9999, which was never injected.\n"
     assert uptake_core.consumption([record], stranger)[2] == [], "both notes must have been handed over"
 
@@ -708,15 +723,11 @@ def test_the_window_sample_survives_a_ledger_it_cannot_read():
 
 def test_a_prompt_in_the_windows_first_local_hours_is_inside_it():
     with tempfile.TemporaryDirectory() as tmp:
-        first_morning = (
-            datetime.strptime(verdict_core.WINDOW_SINCE, "%Y-%m-%d")
-            .replace(tzinfo=verdict_core.WINDOW_TZ)
-            + timedelta(hours=3)
-        )
+        first_morning = datetime.strptime(verdict_core.WINDOW_SINCE, "%Y-%m-%d").replace(
+            tzinfo=verdict_core.WINDOW_TZ
+        ) + timedelta(hours=3)
         target = _ledger(tmp, [("first-morning", first_morning.timestamp())])
-        sample = uptake_core.window_sample(
-            verdict_core.WINDOW_SINCE, verdict_core.WINDOW_UNTIL, path=target
-        )
+        sample = uptake_core.window_sample(verdict_core.WINDOW_SINCE, verdict_core.WINDOW_UNTIL, path=target)
         assert sample.prompts == 1, (
             "the window's first 00:00-09:00 in WINDOW_TZ is the previous day in UTC; it must count"
         )
@@ -738,9 +749,7 @@ def test_a_prompt_in_the_last_local_evening_is_still_inside_it():
                 ("past-local-midnight", past_midnight.timestamp()),
             ],
         )
-        sample = uptake_core.window_sample(
-            verdict_core.WINDOW_SINCE, verdict_core.WINDOW_UNTIL, path=target
-        )
+        sample = uptake_core.window_sample(verdict_core.WINDOW_SINCE, verdict_core.WINDOW_UNTIL, path=target)
         assert sample.prompts == 1, (
             "the final day's local evening counts; the hours past the owner's midnight must not"
         )

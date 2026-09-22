@@ -5,6 +5,7 @@ Currently supports the Claude Code JSONL format. The `format` field from
 boring.json selects the parser; unknown formats are rejected loudly so a
 misconfigured agent does not silently produce empty notes.
 """
+
 import json
 import os
 import sys
@@ -69,8 +70,9 @@ def clamp_text(text, limit):
 # (old_string/new_string/content) are never taken — file_path only, per the
 # must_not: no tool_result bodies.
 _CLAUDE_TOOL_ALLOWLIST = {
-    "Bash": lambda args: args.get("command", "")
-    + (f"  # {args['description']}" if args.get("description") else ""),
+    "Bash": lambda args: (
+        args.get("command", "") + (f"  # {args['description']}" if args.get("description") else "")
+    ),
     "Edit": lambda args: args.get("file_path", ""),
     "Write": lambda args: args.get("file_path", ""),
     "TodoWrite": lambda args: "; ".join(
@@ -162,9 +164,7 @@ def _extract_claude_jsonl(path: str) -> str:
             if not isinstance(c, list):
                 continue
             t = " ".join(
-                b.get("text", "")
-                for b in c
-                if isinstance(b, dict) and b.get("type") == "text"
+                b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"
             ).strip()
             if t:
                 out.append(f"[{role}] {t}")
@@ -266,9 +266,7 @@ _CODEX_USER_NOISE_MARKERS = (
 _CODEX_TOOL_ALLOWLIST = {
     "exec_command": lambda args: args.get("cmd"),
     "update_plan": lambda args: "; ".join(
-        f"{s.get('status', '?')}:{s.get('step', '')}"
-        for s in (args.get("plan") or [])
-        if isinstance(s, dict)
+        f"{s.get('status', '?')}:{s.get('step', '')}" for s in (args.get("plan") or []) if isinstance(s, dict)
     ),
 }
 

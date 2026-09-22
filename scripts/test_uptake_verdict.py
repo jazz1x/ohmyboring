@@ -6,13 +6,14 @@ Run: python3 scripts/test_uptake_verdict.py
 `--json` exists so every consumer reads the verdict's own numbers instead of recomputing them.
 That only holds if the channel stays clean and the three outcomes stay distinguishable.
 """
+
 import importlib.util
 import io
 import json
 import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import date, timedelta
+from datetime import UTC, date, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -70,8 +71,11 @@ class JsonMode(unittest.TestCase):
         """
         rows = [
             _event("a", 0, 10),
-            {"event": "injection_unreported", "observed_at": "2026-09-13T00:00:00+00:00",
-             "attributes": {"aged_sessions": 2, "aged_rows": 9}},
+            {
+                "event": "injection_unreported",
+                "observed_at": "2026-09-13T00:00:00+00:00",
+                "attributes": {"aged_sessions": 2, "aged_rows": 9},
+            },
         ]
         code, out, err = self._run(rows)
         self.assertEqual(code, 0)
@@ -158,8 +162,10 @@ class Midpoint(unittest.TestCase):
     def test_the_floor_is_per_adapter(self):
         """Summing adapters would clear a gate neither of them clears."""
         rows = [_event("a", 0, 10) for _ in range(8)]
-        rows += [dict(_event("k", 0, 10), attributes={**_event("k", 0, 10)["attributes"],
-                                                      "agent": "kimi"}) for _ in range(3)]
+        rows += [
+            dict(_event("k", 0, 10), attributes={**_event("k", 0, 10)["attributes"], "agent": "kimi"})
+            for _ in range(3)
+        ]
         code, out = self._cli(rows, uv.verdict_core.MIDPOINT)
         self.assertEqual(code, uv.MIDPOINT_SHORT, out)
         self.assertIn("claude-code", out)
@@ -197,13 +203,13 @@ class Midpoint(unittest.TestCase):
         Measured against a UTC date, the 09-08 briefing says nothing and the 09-09 one carries the
         warning — handing back a day of a window that is short enough to be watched daily.
         """
-        from datetime import datetime, timedelta, timezone as tz
+        from datetime import datetime, timedelta
 
         V = uv.verdict_core
         self.assertEqual(V.WINDOW_TZ.utcoffset(None), timedelta(hours=9))
         midpoint = date.fromisoformat(V.MIDPOINT)
         run = datetime(midpoint.year, midpoint.month, midpoint.day, 8, 0, tzinfo=V.WINDOW_TZ)
-        self.assertEqual(run.astimezone(tz.utc).date().isoformat(), _day_before(V.MIDPOINT))
+        self.assertEqual(run.astimezone(UTC).date().isoformat(), _day_before(V.MIDPOINT))
         self.assertEqual(run.date().isoformat(), V.MIDPOINT, "the gate must be due on that run")
 
     def test_the_unset_path_reads_the_window_zone_not_utc(self):
@@ -214,12 +220,12 @@ class Midpoint(unittest.TestCase):
         the architect found last round, where the function was right and only the wiring was
         wrong, so it is asserted here without the override.
         """
-        from datetime import datetime, timedelta, timezone as tz
+        from datetime import datetime
 
         V = uv.verdict_core
         # 23:30 UTC is already the next day in the window's zone. If `window_today` reads UTC it
         # answers with yesterday, which is exactly the day the 08:00 KST briefing would lose.
-        late = datetime(2026, 9, 18, 23, 30, tzinfo=tz.utc)
+        late = datetime(2026, 9, 18, 23, 30, tzinfo=UTC)
 
         class _Frozen(datetime):
             @classmethod
@@ -242,7 +248,7 @@ class Midpoint(unittest.TestCase):
         the day's report.
         """
         V = uv.verdict_core
-        real = V.window_today.__wrapped__ if hasattr(V.window_today, "__wrapped__") else None
+        V.window_today.__wrapped__ if hasattr(V.window_today, "__wrapped__") else None
         for bad in ("2026-9-8", "internal", "20260908", "2026-09-08T00:00:00"):
             err = io.StringIO()
             with mock.patch.dict(os.environ, {"BORING_TODAY": bad}):
@@ -258,9 +264,7 @@ class Midpoint(unittest.TestCase):
         """The gate reads `verdict_core`, which the PRD-transcription test covers."""
         source = (HERE / "uptake-verdict.py").read_text(encoding="utf-8")
         self.assertNotIn(uv.verdict_core.MIDPOINT, source, "the midpoint date is owned by verdict_core")
-        self.assertNotIn(
-            uv.verdict_core.WINDOW_UNTIL, source, "the window close is owned by verdict_core"
-        )
+        self.assertNotIn(uv.verdict_core.WINDOW_UNTIL, source, "the window close is owned by verdict_core")
 
 
 class WindowScoping(unittest.TestCase):
@@ -327,24 +331,41 @@ class SessionEndDenominator(unittest.TestCase):
     window must not read as "no session ended"."""
 
     def _end(self, session, when=IN_WINDOW, **attrs):
-        return {"event": "session_end", "observed_at": when, "session_id": session,
-                "attributes": {"agent": "claude-code", **attrs}}
+        return {
+            "event": "session_end",
+            "observed_at": when,
+            "session_id": session,
+            "attributes": {"agent": "claude-code", **attrs},
+        }
 
     def _distill(self, session, when=IN_WINDOW, reason=None):
-        return {"event": "distill_resolution", "observed_at": when, "session_id": session,
-                "attributes": {"reason": reason} if reason else {}}
+        return {
+            "event": "distill_resolution",
+            "observed_at": when,
+            "session_id": session,
+            "attributes": {"reason": reason} if reason else {},
+        }
 
     def test_session_end_wins_over_distillation_runs(self):
-        rows = [self._distill("a"), self._distill("a"), self._distill("b"), self._end("a"),
-                _event("a", 1, 10)]
-        total, scored, _automated, source = uv.session_counts(rows, uv.verdict_core.WINDOW_SINCE, uv.verdict_core.WINDOW_UNTIL)
+        rows = [
+            self._distill("a"),
+            self._distill("a"),
+            self._distill("b"),
+            self._end("a"),
+            _event("a", 1, 10),
+        ]
+        total, scored, _automated, source = uv.session_counts(
+            rows, uv.verdict_core.WINDOW_SINCE, uv.verdict_core.WINDOW_UNTIL
+        )
         self.assertEqual(source, "session_end")
         self.assertEqual(total, 1, "b was distilled mid-flight and has not ended")
         self.assertEqual(scored, 1)
 
     def test_no_session_end_in_the_window_falls_back_rather_than_reporting_zero(self):
         rows = [self._distill("a"), self._distill("b"), _event("a", 1, 10)]
-        total, _scored, _automated, source = uv.session_counts(rows, uv.verdict_core.WINDOW_SINCE, uv.verdict_core.WINDOW_UNTIL)
+        total, _scored, _automated, source = uv.session_counts(
+            rows, uv.verdict_core.WINDOW_SINCE, uv.verdict_core.WINDOW_UNTIL
+        )
         self.assertEqual(source, "distill_resolution")
         self.assertEqual(total, 2, "an older window must not read as zero sessions")
 

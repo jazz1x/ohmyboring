@@ -13,6 +13,7 @@ each query string both resolve to their recorded vector.
 Run locally against your embedder, then commit recorded_embeddings.json:
     BORING_LLM_BASE_URL=http://localhost:11434/v1 python3 data/eval/record_embeddings.py
 """
+
 import hashlib
 import json
 import os

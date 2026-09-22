@@ -21,6 +21,7 @@ the vault are both files already on disk, so the number comes out of them direct
 
 Read-only: transcripts and `vault/wiki`. Writes nothing anywhere, calls nothing.
 """
+
 import argparse
 import collections
 import json
@@ -49,9 +50,7 @@ MIN_NOTE_CHARS = 400
 
 def transcripts(days):
     cut = time.time() - days * 86400
-    dirs = boring_config.source_dirs(adapter="session-end") or [
-        os.path.expanduser("~/.claude/projects")
-    ]
+    dirs = boring_config.source_dirs(adapter="session-end") or [os.path.expanduser("~/.claude/projects")]
     out = []
     for directory in dirs:
         base = Path(directory)
@@ -138,15 +137,20 @@ def main(argv=None):
 
     share = (100.0 * sessions_with / len(sessions)) if sessions else 0.0
     if args.json:
-        print(json.dumps({
-            "days": args.days,
-            "sessions": len(sessions),
-            "sessions_with_reinvention": sessions_with,
-            "share_pct": round(share, 1),
-            "turns_scanned": turns_scanned,
-            "notes": per_note.most_common(args.limit),
-            "vault_notes_indexed": len(names),
-        }, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "days": args.days,
+                    "sessions": len(sessions),
+                    "sessions_with_reinvention": sessions_with,
+                    "share_pct": round(share, 1),
+                    "turns_scanned": turns_scanned,
+                    "notes": per_note.most_common(args.limit),
+                    "vault_notes_indexed": len(names),
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     print(

@@ -129,10 +129,7 @@ def label_trend(days: list[tuple[str, object]]) -> dict[str, tuple[int, int]]:
 
     def counts(doc: object) -> Counter:
         return Counter(
-            item.label
-            for project in getattr(doc, "projects", [])
-            for item in project.items
-            if item.label
+            item.label for project in getattr(doc, "projects", []) for item in project.items if item.label
         )
 
     first, last = counts(days[0][1]), counts(days[-1][1])

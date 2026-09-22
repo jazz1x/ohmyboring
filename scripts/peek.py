@@ -44,25 +44,25 @@ because the source was down or because the value was zero will eventually guess 
 
 import argparse
 import json
-import pathlib
 import os
+import pathlib
 import re
 import sys
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "agents", "shared"))
 
 import boring_config  # noqa: E402
+import distill_core  # noqa: E402
 import label_core  # noqa: E402
 import uptake_core  # noqa: E402
 import verdict_core  # noqa: E402
-import distill_core  # noqa: E402
 
 #: The window, transcribed from docs/PRD.md §8 D1 (the first window, 08-26 -> 09-09, was reset for
 #: an instrumentation fault; no threshold moved). Constants rather than flags on purpose: a window
@@ -286,9 +286,7 @@ def brief_block(brief, notes):
     axis; bullets do not, and saying so is more useful than guessing.
     """
     if not isinstance(brief, dict):
-        notes.append(
-            "브리핑을 못 읽었다 — 엔진이 안 뜬 것과 오늘 브리핑이 아직 없는 것을 구분하지 못한다."
-        )
+        notes.append("브리핑을 못 읽었다 — 엔진이 안 뜬 것과 오늘 브리핑이 아직 없는 것을 구분하지 못한다.")
         return {"available": False, "sections": [], "sources": []}
     answer = brief.get("answer") or ""
     sources = [s for s in (brief.get("sources") or []) if isinstance(s, str)]
@@ -380,9 +378,7 @@ def brief_graph(sections):
             # so the two lists stay apart rather than being merged into one ranked blur.
             "graph": [_scrub(n) for n in neighbours[:8]],
             "semantic": [
-                _scrub(n)
-                for n in (answer.get("semantic_neighbors") or [])[:4]
-                if isinstance(n, str)
+                _scrub(n) for n in (answer.get("semantic_neighbors") or [])[:4] if isinstance(n, str)
             ],
         }
     return {"sections": out, "unmatched": unmatched}
@@ -448,9 +444,7 @@ def window_block(rows, notes):
         windowed,
         WINDOW_SINCE,
         WINDOW_UNTIL,
-        classify=lambda ids: distill_core.classify_automated_sessions(
-            ids, distill_core.transcript_reader()
-        ),
+        classify=lambda ids: distill_core.classify_automated_sessions(ids, distill_core.transcript_reader()),
     )
     cov_ratio, cov_eligible, cov_ok = verdict_core.coverage(
         counts.total, counts.scored, automated_sessions=counts.automated
@@ -566,7 +560,7 @@ def instrument_fault(rows):
             "session_ends_48h": None,
             "uptake_events_48h": None,
         }
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=FAULT_WINDOW_HOURS)
+    cutoff = datetime.now(UTC) - timedelta(hours=FAULT_WINDOW_HOURS)
     # Distinct sessions, not rows. `distill_resolution` can fire more than once for one session
     # (a retry, a repair), and PRD §3 names a surface that reports those rows as a session count
     # as an instrumentation fault in itself. Measured 2026-09-08: 324 rows against 302 sessions
@@ -648,7 +642,7 @@ def _load_ledger(path):
 def _iso(ts):
     if not isinstance(ts, (int, float)):
         return None
-    return datetime.fromtimestamp(float(ts), timezone.utc).isoformat()
+    return datetime.fromtimestamp(float(ts), UTC).isoformat()
 
 
 def _echo_map(rows):
@@ -725,9 +719,7 @@ def prompt_rows(ledger, echoes, notes, page=None, offset=0):
             hits.append(
                 {
                     "src": src,
-                    "phrases": (
-                        [_scrub(p) for p in (hit.get("phrases") or []) if p] if personal else []
-                    ),
+                    "phrases": ([_scrub(p) for p in (hit.get("phrases") or []) if p] if personal else []),
                     "origin_withheld": not personal,
                 }
             )
@@ -771,7 +763,6 @@ def labels_block(stats):
     block["compared"] = int(stats.get("compared") or 0)
     block["owed"] = label_core.audit_backlog(stats)
     return block
-
 
 
 # --------------------------------------------------------------------------- scoring / pace
@@ -827,7 +818,7 @@ def pace_block(window, now=None):
     repair = verdict_core._instant(verdict_core.LEDGER_REPAIR_AT)
     if repair and repair > start:
         start = repair
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     elapsed = max((now - start).total_seconds() / 86400.0, 0.25)
     span = max((end - start).total_seconds() / 86400.0, 1.0)
     # A linear projection over a day and a half is arithmetic, not a forecast. This exact error
@@ -927,9 +918,7 @@ def build_state(offset=0):
     events = _get_json(f"/events?limit={EVENT_LIMIT}")
     rows = events.get("entries") if isinstance(events, dict) else None
     if rows is None:
-        notes.append(
-            "엔진 이벤트 저장소에 접근 못 함 — 판정·계측 상태는 '알 수 없음'이다. 0 이 아니다."
-        )
+        notes.append("엔진 이벤트 저장소에 접근 못 함 — 판정·계측 상태는 '알 수 없음'이다. 0 이 아니다.")
     if not isinstance(health, dict):
         notes.append("엔진 /health 응답 없음 — 엔진 블록은 미도달 표시이며 코퍼스가 빈 것이 아니다.")
 
@@ -994,13 +983,11 @@ def build_state(offset=0):
     # identity the data cannot support.
     qlog = (_get_json("/query-log?limit=200") or {}).get("entries")
     if qlog is None:
-        notes.append(
-            "query_log 을 못 읽어 '왜 뽑혔나'(거리) 패널이 비었다 — 거리가 0 이라는 뜻이 아니다."
-        )
+        notes.append("query_log 을 못 읽어 '왜 뽑혔나'(거리) 패널이 비었다 — 거리가 0 이라는 뜻이 아니다.")
     window = window_block(rows, notes)
     brief_payload = brief_block(_post_json("/brief"), notes)
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "engine": engine_block(health),
         "window": window,
         "instrument_fault": instrument_fault(rows),

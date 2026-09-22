@@ -5,15 +5,16 @@ Clusters notes by embedding cosine similarity and archives the older duplicates
 so the newest note per cluster remains. Defaults to --dry-run; pass --apply to
 actually move files and call ohmyboring/forget.
 """
+
 import argparse
 import json
 import math
 import os
 import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared"))
 import omb_env  # noqa: E402
@@ -25,7 +26,7 @@ DEFAULT_ARCHIVE_DIR = "data/archive/dup"
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class LlmEmbedder:
@@ -54,6 +55,7 @@ class LlmEmbedder:
 
 # Pull in urllib only where we need it to keep the top clean.
 import urllib.request  # noqa: E402
+
 import yaml  # noqa: E402
 
 
@@ -115,7 +117,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Deduplicate vault/wiki notes")
     parser.add_argument("--wiki-dir", default="vault/wiki", help="wiki directory")
     parser.add_argument("--archive-dir", default=DEFAULT_ARCHIVE_DIR, help="archive directory")
-    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="cosine similarity threshold")
+    parser.add_argument(
+        "--threshold", type=float, default=DEFAULT_THRESHOLD, help="cosine similarity threshold"
+    )
     parser.add_argument("--apply", action="store_true", help="actually archive and forget duplicates")
     args = parser.parse_args()
 
@@ -161,18 +165,24 @@ def main() -> int:
         group.sort(key=lambda i: notes[i]["mtime"], reverse=True)
         keeper = group[0]
         dupes = group[1:]
-        print(f"Cluster {cid}: keep {notes[keeper]['path'].name} (mtime={datetime.fromtimestamp(notes[keeper]['mtime'], tz=timezone.utc).isoformat()})")
+        print(
+            f"Cluster {cid}: keep {notes[keeper]['path'].name} (mtime={datetime.fromtimestamp(notes[keeper]['mtime'], tz=UTC).isoformat()})"
+        )
         for d in dupes:
-            print(f"  → archive {notes[d]['path'].name} (mtime={datetime.fromtimestamp(notes[d]['mtime'], tz=timezone.utc).isoformat()})")
+            print(
+                f"  → archive {notes[d]['path'].name} (mtime={datetime.fromtimestamp(notes[d]['mtime'], tz=UTC).isoformat()})"
+            )
             actions.append((notes[d]["path"], notes[keeper]["path"]))
 
     if not args.apply:
-        print(f"\n[{_now()}] Dry run complete. Pass --apply to archive {len(actions)} files and call ohmyboring/forget.")
+        print(
+            f"\n[{_now()}] Dry run complete. Pass --apply to archive {len(actions)} files and call ohmyboring/forget."
+        )
         return 0
 
     archive_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n[{_now()}] Archiving {len(actions)} duplicates to {archive_dir} ...")
-    for dup_path, keeper_path in actions:
+    for dup_path, _keeper_path in actions:
         dst = archive_dir / dup_path.name
         shutil.move(str(dup_path), str(dst))
         print(f"  archived {dup_path.name}")

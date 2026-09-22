@@ -4,15 +4,18 @@
 Agent-specific entry points (Claude Code, Kimi, etc.) become thin wrappers that
 only supply their injection-filter, if any, and then delegate here.
 """
+
 from __future__ import annotations
 
 import json
 import os
 import sys
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+from datetime import UTC
+
 import uptake_core  # noqa: E402
 from drudge_client import DrudgeClient  # noqa: E402
 
@@ -99,11 +102,7 @@ def exceeds_relevance_ceiling(hit: dict) -> bool:
     what enforcing *would* cost.
     """
     dist = hit.get("dist")
-    return (
-        hit.get("dist_kind") == "vector_cosine"
-        and dist is not None
-        and dist > RELEVANCE_MAX_DIST
-    )
+    return hit.get("dist_kind") == "vector_cosine" and dist is not None and dist > RELEVANCE_MAX_DIST
 
 
 def _throttle_path() -> str:
@@ -115,7 +114,7 @@ def _throttle_path() -> str:
 def _load_throttle() -> dict[str, float]:
     path = _throttle_path()
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError):
@@ -146,9 +145,9 @@ def hand_over(client: DrudgeClient, session_id: str, hits: list[dict]) -> bool:
 
 
 def _utc_now_iso() -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _session_throttled(session_id: str | None) -> bool:
@@ -232,6 +231,7 @@ def split_fresh(hits: list[dict], already_injected: set[str]) -> tuple[list[dict
 
 def ranked_by_consumption(hits: list[dict]) -> list[dict]:
     """Superseded last, argued-with-more-than-reused next, reused first; otherwise engine order."""
+
     def key(h):
         used, contested = int(h.get("used_count") or 0), int(h.get("contested_count") or 0)
         return (bool(h.get("superseded_by")), contested > used, -used)
@@ -300,7 +300,7 @@ def fresh_related(injected: list[dict], already_injected: set[str]) -> dict[str,
 
 def run_recall(
     data: dict,
-    is_injection: Optional[Callable[[dict], bool]] = None,
+    is_injection: Callable[[dict], bool] | None = None,
     throttle_session: bool = False,
 ) -> None:
     """Recall relevant notes via drudge /search and print the hook output.
@@ -393,6 +393,4 @@ def run_recall(
     hand_over(client, data.get("session_id") or "", everything_injected)
 
     ctx = FENCE + "\n".join(lines)
-    print(json.dumps({
-        "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}
-    }))
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}}))

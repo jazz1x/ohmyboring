@@ -18,6 +18,7 @@ boring_config (test_boring_config.py guards that resolver). We load them by file
 importlib the same way, after neutralizing ambient policy env so the run is deterministic.
 HTTP is never touched: the pure helpers don't call out, and recall.main's urlopen is mocked.
 """
+
 import importlib.util
 import io
 import json
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -36,10 +38,20 @@ SHARED_DIR = HERE.parent / "shared"
 sys.path.insert(0, str(SHARED_DIR))
 
 # Neutralize ambient policy/endpoint env so module-load + assertions are deterministic.
-for _var in ("BORING_CONFIG", "BORING_HOME", "BORING_URL", "BORING_EVENT_SINK",
-             "BORING_EVENT_SPOOL", "BORING_EVENT_DB_MIRROR", "RECALL_MAX_RESULTS",
-             "RECALL_MAX_TOKENS", "RECALL_TIMEOUT", "RECALL_RETRIES",
-             "RECALL_RELEVANCE_MAX_DIST"):
+for _var in (
+    "BORING_CONFIG",
+    "BORING_HOME",
+    "BORING_URL",
+    "BORING_EVENT_SINK",
+    "BORING_EVENT_SPOOL",
+    "BORING_EVENT_DB_MIRROR",
+    "RECALL_MAX_RESULTS",
+    "RECALL_MAX_TOKENS",
+    "RECALL_TIMEOUT",
+    "RECALL_RETRIES",
+    "RECALL_RELEVANCE_MAX_DIST",
+    "BORING_DOOR_URL",
+):
     os.environ.pop(_var, None)
 
 # The pop above isolates these tests from the host's env, and in doing so it removed the one value
@@ -49,9 +61,7 @@ for _var in ("BORING_CONFIG", "BORING_HOME", "BORING_URL", "BORING_EVENT_SINK",
 # 2026-09-02, growing daily. Isolation and a closed write door are both required, so the pop is
 # followed by an explicit spool rather than by nothing.
 os.environ["BORING_EVENT_SINK"] = "spool"
-os.environ.setdefault(
-    "BORING_EVENT_LOG", os.path.join(tempfile.gettempdir(), "omb-test-events.ndjson")
-)
+os.environ.setdefault("BORING_EVENT_LOG", os.path.join(tempfile.gettempdir(), "omb-test-events.ndjson"))
 
 
 def _load(name, filename):
@@ -65,11 +75,12 @@ def _load(name, filename):
 distill = _load("distill_session_hook", "distill-session.py")
 recall = _load("recall_hook", "recall.py")
 import distill_core  # noqa: E402
+
 # The recall tests drive the real injection path, which appends to the injection ledger.
 # Redirect it before import or the suite writes into the owner's live cache.
 os.environ["BORING_INJECTION_LEDGER"] = str(Path(tempfile.mkdtemp()) / "injections.jsonl")
-import recall_core  # noqa: E402
 import markers  # noqa: E402
+import recall_core  # noqa: E402
 
 
 class ExtractJsonTests(unittest.TestCase):
@@ -199,9 +210,7 @@ class RepoSlugTests(unittest.TestCase):
                 subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True)
             open(os.path.join(repo, "f"), "w").close()
             subprocess.run(["git", "-C", repo, "add", "-A"], check=True, capture_output=True)
-            subprocess.run(
-                ["git", "-C", repo, "commit", "-qm", "init"], check=True, capture_output=True
-            )
+            subprocess.run(["git", "-C", repo, "commit", "-qm", "init"], check=True, capture_output=True)
             wt = os.path.join(d, "widget-t5-parts")
             subprocess.run(
                 ["git", "-C", repo, "worktree", "add", "-q", "--detach", wt, "HEAD"],
@@ -219,9 +228,12 @@ class ExtractTranscriptTests(unittest.TestCase):
     def test_extracts_user_and_assistant_text(self):
         lines = [
             {"message": {"role": "user", "content": "hi there"}},
-            {"message": {"role": "assistant",
-                         "content": [{"type": "text", "text": "hello"},
-                                     {"type": "tool_use", "name": "x"}]}},
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "hello"}, {"type": "tool_use", "name": "x"}],
+                }
+            },
             {"message": {"role": "system", "content": "ignored"}},
             {"type": "summary"},  # non user/assistant → skipped
         ]
@@ -238,94 +250,205 @@ class ExtractTranscriptTests(unittest.TestCase):
 
 
 class SessionStartRecallTests(unittest.TestCase):
-        """session-start-recall.py reads stdin + calls /context; NO network."""
+    """session-start-recall.py reads stdin + calls /context; NO network."""
 
-        def _run_main(self, payload, context_resp=None, side_effect=None):
-            captured = io.StringIO()
-            stderr = io.StringIO()
-            if context_resp is None:
-                context_resp = {
+    def _run_main(self, payload, context_resp=None, side_effect=None):
+        captured = io.StringIO()
+        stderr = io.StringIO()
+        if context_resp is None:
+            context_resp = {
+                "decisions": [],
+                "risks": [],
+                "facts": [],
+                "glossary": [],
+                "language": "ko",
+            }
+
+        def fake_context(_self, project=None, max_items=5):
+            if side_effect is not None:
+                raise side_effect
+            return context_resp
+
+        module = _load("session_start_recall", "session-start-recall.py")
+        with (
+            mock.patch.object(module.sys, "stdin", io.StringIO(json.dumps(payload))),
+            mock.patch.object(module.sys, "stdout", captured),
+            mock.patch.object(module.sys, "stderr", stderr),
+            mock.patch.object(module.DrudgeClient, "context", fake_context),
+        ):
+            module.main()
+        return captured.getvalue(), stderr.getvalue()
+
+    def test_session_start_with_project_formats_context_card(self):
+        out, _err = self._run_main(
+            {"hook_event_name": "SessionStart", "cwd": "/tmp/my-project"},
+            context_resp={
+                "decisions": [
+                    {
+                        "subject": "omb",
+                        "predicate": "use",
+                        "value": "context cards",
+                        "kind": "decision",
+                        "confidence": "certain",
+                    }
+                ],
+                "risks": [
+                    {
+                        "subject": "omb",
+                        "predicate": "risk",
+                        "value": "token noise",
+                        "kind": "risk",
+                        "confidence": "likely",
+                    }
+                ],
+                "facts": [],
+                "glossary": [],
+                "language": "ko",
+            },
+        )
+        payload = json.loads(out)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Decisions", ctx)
+        self.assertIn("[decision|certain] omb use: context cards", ctx)
+        self.assertIn("Risks", ctx)
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
+
+    def test_session_start_without_project_uses_recent_work(self):
+        out, _err = self._run_main(
+            {"hook_event_name": "SessionStart", "cwd": ""},
+            context_resp={
+                "decisions": [],
+                "risks": [],
+                "facts": [
+                    {"subject": "x", "predicate": "is", "value": "y", "kind": "fact", "confidence": "certain"}
+                ],
+                "glossary": [],
+                "language": "ko",
+            },
+        )
+        payload = json.loads(out)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("recent work", ctx)
+        self.assertIn("Facts", ctx)
+
+    def test_non_sessionstart_is_noop(self):
+        out, _err = self._run_main({"hook_event_name": "UserPromptSubmit", "cwd": "/x"})
+        self.assertEqual(out, "")
+
+    def test_failed_context_is_silent(self):
+        out, _err = self._run_main(
+            {"hook_event_name": "SessionStart", "cwd": "/x"},
+            side_effect=OSError("down"),
+        )
+        self.assertEqual(out, "")
+        self.assertIn("context failed", _err)
+
+
+class DoorApprovedSectionTests(unittest.TestCase):
+    """The 「오늘 승인한 것」 section in session-start-recall.py — three fates (AC5).
+
+    The hook must prepend what the morning card's 「해」 judged when BORING_DOOR_URL
+    points at a live door, say so on stderr and continue when the door is dead,
+    and stay silent when no door URL is configured (not configuring is normal).
+    """
+
+    class _DoorResp:
+        def __init__(self, payload):
+            self._body = json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return self._body
+
+    def _run_with_door(self, env, urlopen):
+        captured = io.StringIO()
+        stderr = io.StringIO()
+        module = _load("session_start_recall_door", "session-start-recall.py")
+        with (
+            mock.patch.object(
+                module.sys,
+                "stdin",
+                io.StringIO(json.dumps({"hook_event_name": "SessionStart", "cwd": "/tmp/my-project"})),
+            ),
+            mock.patch.object(module.sys, "stdout", captured),
+            mock.patch.object(module.sys, "stderr", stderr),
+            mock.patch.object(
+                module.DrudgeClient,
+                "context",
+                lambda _s, project=None, max_items=5: {
                     "decisions": [],
                     "risks": [],
                     "facts": [],
                     "glossary": [],
                     "language": "ko",
-                }
-
-            def fake_context(_self, project=None, max_items=5):
-                if side_effect is not None:
-                    raise side_effect
-                return context_resp
-
-            module = _load("session_start_recall", "session-start-recall.py")
-            with mock.patch.object(
-                module.sys, "stdin", io.StringIO(json.dumps(payload))
-            ), mock.patch.object(module.sys, "stdout", captured), mock.patch.object(
-                module.sys, "stderr", stderr
-            ), mock.patch.object(
-                module.DrudgeClient, "context", fake_context
-            ):
-                module.main()
-            return captured.getvalue(), stderr.getvalue()
-
-        def test_session_start_with_project_formats_context_card(self):
-            out, _err = self._run_main(
-                {"hook_event_name": "SessionStart", "cwd": "/tmp/my-project"},
-                context_resp={
-                    "decisions": [
-                        {"subject": "omb", "predicate": "use", "value": "context cards", "kind": "decision", "confidence": "certain"}
-                    ],
-                    "risks": [
-                        {"subject": "omb", "predicate": "risk", "value": "token noise", "kind": "risk", "confidence": "likely"}
-                    ],
-                    "facts": [],
-                    "glossary": [],
-                    "language": "ko",
                 },
-            )
-            payload = json.loads(out)
-            ctx = payload["hookSpecificOutput"]["additionalContext"]
-            self.assertIn("Decisions", ctx)
-            self.assertIn("[decision|certain] omb use: context cards", ctx)
-            self.assertIn("Risks", ctx)
-            self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
+            ),
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch.object(module.urllib.request, "urlopen", urlopen),
+        ):
+            module.main()
+        return captured.getvalue(), stderr.getvalue()
 
-        def test_session_start_without_project_uses_recent_work(self):
-            out, _err = self._run_main(
-                {"hook_event_name": "SessionStart", "cwd": ""},
-                context_resp={
-                    "decisions": [],
-                    "risks": [],
-                    "facts": [
-                        {"subject": "x", "predicate": "is", "value": "y", "kind": "fact", "confidence": "certain"}
-                    ],
-                    "glossary": [],
-                    "language": "ko",
-                },
-            )
-            payload = json.loads(out)
-            ctx = payload["hookSpecificOutput"]["additionalContext"]
-            self.assertIn("recent work", ctx)
-            self.assertIn("Facts", ctx)
+    def test_live_door_prepends_approved_section(self):
+        payload = {
+            "since_hours": 24,
+            "approved": [
+                {"session": "slack:C1:1758470000.5", "note": "/vault/wiki/wiki-1734.md", "at": "t"},
+                {"session": "slack:C1:1758470001.5", "note": "/vault/wiki/wiki-1735.md", "at": "t"},
+            ],
+            "contested": [],
+        }
+        seen_urls = []
 
-        def test_non_sessionstart_is_noop(self):
-            out, _err = self._run_main({"hook_event_name": "UserPromptSubmit", "cwd": "/x"})
-            self.assertEqual(out, "")
+        def urlopen(url, timeout):
+            seen_urls.append(url)
+            return self._DoorResp(payload)
 
-        def test_failed_context_is_silent(self):
-            out, _err = self._run_main(
-                {"hook_event_name": "SessionStart", "cwd": "/x"},
-                side_effect=OSError("down"),
-            )
-            self.assertEqual(out, "")
-            self.assertIn("context failed", _err)
+        out, err = self._run_with_door({"BORING_DOOR_URL": "http://127.0.0.1:7710"}, urlopen)
+        self.assertEqual(err, "")
+        self.assertEqual(seen_urls, ["http://127.0.0.1:7710/approved?since_hours=24"])
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        approved_at = ctx.index("## 오늘 승인한 것 (2)")
+        card_at = ctx.index("📚 Project context")
+        self.assertLess(approved_at, card_at, "the approval section goes ahead of the card")
+        self.assertIn("- /vault/wiki/wiki-1734.md", ctx)
+        self.assertIn("- /vault/wiki/wiki-1735.md", ctx)
+
+    def test_dead_door_logs_to_stderr_and_omits_the_section(self):
+        def urlopen(url, timeout):
+            raise urllib.error.URLError("connection refused")
+
+        out, err = self._run_with_door({"BORING_DOOR_URL": "http://127.0.0.1:7710"}, urlopen)
+        self.assertIn("[omb-start-recall] approved fetch failed", err)
+        self.assertNotIn("오늘 승인한 것", out)
+        # the card itself still reaches the session — the hook lives
+        self.assertIn("📚 Project context", json.loads(out)["hookSpecificOutput"]["additionalContext"])
+
+    def test_no_door_url_omits_silently(self):
+        called = []
+
+        def urlopen(url, timeout):
+            called.append(url)
+            return self._DoorResp({})
+
+        out, err = self._run_with_door({}, urlopen)
+        self.assertEqual(err, "", "an unconfigured door is normal, not an error")
+        self.assertEqual(called, [])
+        self.assertNotIn("오늘 승인한 것", out)
 
 
 class DistillExitCodeTests(unittest.TestCase):
     def test_invalid_stdin_returns_input_error(self):
         stderr = io.StringIO()
-        with mock.patch.object(distill.sys, "stdin", io.StringIO("not json")), \
-             mock.patch.object(distill.sys, "stderr", stderr):
+        with (
+            mock.patch.object(distill.sys, "stdin", io.StringIO("not json")),
+            mock.patch.object(distill.sys, "stderr", stderr),
+        ):
             rc = distill.main()
 
         self.assertEqual(rc, 2)
@@ -345,14 +468,18 @@ class DistillExitCodeTests(unittest.TestCase):
                     "cwd": "/work/oh-my-boring",
                     "hook_event_name": "SessionEnd",
                 }
-                with mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))), \
-                     mock.patch.object(distill.sys, "stderr", stderr), \
-                     mock.patch.object(distill, "extract", return_value="too short"), \
-                     mock.patch.object(distill, "git_remote_url", return_value=""), \
-                     mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"), \
-                     mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)), \
-                     mock.patch.object(distill, "_mark") as mark, \
-                     mock.patch.dict(os.environ, {"BORING_EVENT_LOG": event_path, "BORING_EVENT_SINK": "spool"}):
+                with (
+                    mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(distill.sys, "stderr", stderr),
+                    mock.patch.object(distill, "extract", return_value="too short"),
+                    mock.patch.object(distill, "git_remote_url", return_value=""),
+                    mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
+                    mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
+                    mock.patch.object(distill, "_mark") as mark,
+                    mock.patch.dict(
+                        os.environ, {"BORING_EVENT_LOG": event_path, "BORING_EVENT_SINK": "spool"}
+                    ),
+                ):
                     rc = distill.main()
 
                 self.assertEqual(rc, 0)
@@ -377,14 +504,16 @@ class DistillExitCodeTests(unittest.TestCase):
                 "cwd": "/work/oh-my-boring",
                 "hook_event_name": "SessionEnd",
             }
-            with mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))), \
-                 mock.patch.object(distill.sys, "stderr", stderr), \
-                 mock.patch.object(distill, "extract", return_value="x" * 600), \
-                 mock.patch.object(distill, "git_remote_url", return_value=""), \
-                 mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"), \
-                 mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)), \
-                 mock.patch.object(distill, "distill_and_remember", return_value=False), \
-                 mock.patch.object(distill, "_mark") as mark:
+            with (
+                mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
+                mock.patch.object(distill.sys, "stderr", stderr),
+                mock.patch.object(distill, "extract", return_value="x" * 600),
+                mock.patch.object(distill, "git_remote_url", return_value=""),
+                mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
+                mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
+                mock.patch.object(distill, "distill_and_remember", return_value=False),
+                mock.patch.object(distill, "_mark") as mark,
+            ):
                 rc = distill.main()
 
             self.assertEqual(rc, 1)
@@ -395,8 +524,10 @@ class DistillExitCodeTests(unittest.TestCase):
 
     def test_run_returns_nonzero_on_crash(self):
         stderr = io.StringIO()
-        with mock.patch.object(distill, "main", side_effect=RuntimeError("boom")), \
-             mock.patch.object(distill.sys, "stderr", stderr):
+        with (
+            mock.patch.object(distill, "main", side_effect=RuntimeError("boom")),
+            mock.patch.object(distill.sys, "stderr", stderr),
+        ):
             rc = distill.run()
 
         self.assertEqual(rc, 1)
@@ -421,12 +552,14 @@ class RecallFormattingTests(unittest.TestCase):
             stdin["session_id"] = session_id
         # recall_core writes its own diagnostics through its own `sys`, so both modules' stderr
         # must be captured or the over-ceiling report escapes the assertion.
-        with mock.patch.object(recall.sys, "stdin", io.StringIO(json.dumps(stdin))), \
-             mock.patch.object(recall_core.DrudgeClient, "search", search_mock), \
-             mock.patch.object(recall_core.DrudgeClient, "handover", handover_mock), \
-             mock.patch.object(recall.sys, "stdout", captured), \
-             mock.patch.object(recall.sys, "stderr", stderr), \
-             mock.patch.object(recall_core.sys, "stderr", stderr):
+        with (
+            mock.patch.object(recall.sys, "stdin", io.StringIO(json.dumps(stdin))),
+            mock.patch.object(recall_core.DrudgeClient, "search", search_mock),
+            mock.patch.object(recall_core.DrudgeClient, "handover", handover_mock),
+            mock.patch.object(recall.sys, "stdout", captured),
+            mock.patch.object(recall.sys, "stderr", stderr),
+            mock.patch.object(recall_core.sys, "stderr", stderr),
+        ):
             recall.main()
         return captured.getvalue(), stderr.getvalue()
 
@@ -437,30 +570,45 @@ class RecallFormattingTests(unittest.TestCase):
             for i in range(recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS)
         ]
         handover = mock.MagicMock(return_value={"handed": recall_core.MAX_RESULTS, "unknown": 0})
-        with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.dict(os.environ, {"BORING_INJECTION_LEDGER": os.path.join(tmp, "l.jsonl")}):
-            out, err = self._run_main("a sufficiently long prompt", hits, session_id="s-hand", handover=handover)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"BORING_INJECTION_LEDGER": os.path.join(tmp, "l.jsonl")}),
+        ):
+            out, err = self._run_main(
+                "a sufficiently long prompt", hits, session_id="s-hand", handover=handover
+            )
         self.assertIn("additionalContext", out)
         self.assertEqual(handover.call_count, 1)
         session, _observed_at, paths = handover.call_args.args
         self.assertEqual(session, "s-hand")
-        self.assertEqual(paths, [h["source_path"] for h in hits[: recall_core.MAX_RESULTS]],
-                         "controls were fetched, not handed — they must not be recorded")
+        self.assertEqual(
+            paths,
+            [h["source_path"] for h in hits[: recall_core.MAX_RESULTS]],
+            "controls were fetched, not handed — they must not be recorded",
+        )
         self.assertNotIn("handover failed", err)
 
     def test_no_session_means_nothing_is_handed(self):
         handover = mock.MagicMock()
-        self._run_main("a sufficiently long prompt", [{"source_path": "/vault/wiki/wiki-0001.md", "snippet": "x y z"}],
-                       handover=handover)
+        self._run_main(
+            "a sufficiently long prompt",
+            [{"source_path": "/vault/wiki/wiki-0001.md", "snippet": "x y z"}],
+            handover=handover,
+        )
         handover.assert_not_called()
 
     def test_a_dead_handover_door_does_not_cost_the_prompt(self):
         handover = mock.MagicMock(side_effect=OSError("refused"))
-        with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.dict(os.environ, {"BORING_INJECTION_LEDGER": os.path.join(tmp, "l.jsonl")}):
-            out, err = self._run_main("a sufficiently long prompt",
-                                      [{"source_path": "/vault/wiki/wiki-0001.md", "snippet": "x y z"}],
-                                      session_id="s-dead", handover=handover)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"BORING_INJECTION_LEDGER": os.path.join(tmp, "l.jsonl")}),
+        ):
+            out, err = self._run_main(
+                "a sufficiently long prompt",
+                [{"source_path": "/vault/wiki/wiki-0001.md", "snippet": "x y z"}],
+                session_id="s-dead",
+                handover=handover,
+            )
         self.assertIn("additionalContext", out, "the context still reaches the prompt")
         self.assertIn("[omb-recall] handover failed", err)
 
@@ -519,7 +667,7 @@ class RecallFormattingTests(unittest.TestCase):
         ctx = payload["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
         self.assertIn("- [wiki-0007.md] fixed the cache", ctx)  # basename + whitespace collapsed
-        self.assertIn("self-augmenting RAG recall", ctx)        # the injection fence is present
+        self.assertIn("self-augmenting RAG recall", ctx)  # the injection fence is present
 
     _NEAR = {"source_path": "x/near.md", "snippet": "close", "dist": 0.3, "dist_kind": "vector_cosine"}
     _FAR = {"source_path": "x/far.md", "snippet": "irrelevant", "dist": 0.9, "dist_kind": "vector_cosine"}
@@ -593,10 +741,12 @@ class DistillMainLoggingTests(unittest.TestCase):
     def _run_main(self, stdin_text, **patches):
         captured = io.StringIO()
         stderr = io.StringIO()
-        with mock.patch.object(distill.sys, "stdin", io.StringIO(stdin_text)), \
-             mock.patch.object(distill.sys, "stdout", captured), \
-             mock.patch.object(distill.sys, "stderr", stderr), \
-             mock.patch.object(distill, "_throttled", return_value=False):
+        with (
+            mock.patch.object(distill.sys, "stdin", io.StringIO(stdin_text)),
+            mock.patch.object(distill.sys, "stdout", captured),
+            mock.patch.object(distill.sys, "stderr", stderr),
+            mock.patch.object(distill, "_throttled", return_value=False),
+        ):
             for key, val in patches.items():
                 patcher = mock.patch.object(distill, key, val)
                 patcher.start()
@@ -609,7 +759,9 @@ class DistillMainLoggingTests(unittest.TestCase):
         self.assertIn("[omb-distill] invalid stdin JSON", err)
 
     def test_missing_transcript_logs_error(self):
-        _out, err = self._run_main(json.dumps({"session_id": "s1", "cwd": "/tmp", "hook_event_name": "SessionEnd"}))
+        _out, err = self._run_main(
+            json.dumps({"session_id": "s1", "cwd": "/tmp", "hook_event_name": "SessionEnd"})
+        )
         self.assertIn("[omb-distill] transcript not found", err)
 
 

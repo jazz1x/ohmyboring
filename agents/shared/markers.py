@@ -15,12 +15,12 @@ Markers:
                        ``.dead`` from their queues so a repeatedly-failing session stops
                        occupying the head of the line (head-of-line blocking).
 """
+
 import os
 import re
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 MARK_DIR = os.path.expanduser("~/.cache/boring-distill")
 
@@ -151,7 +151,7 @@ def is_dead(session_id: str) -> bool:
     return os.path.exists(_paths(session_id)[3])
 
 
-def is_pending(session_id: str, ttl: Optional[float] = None) -> bool:
+def is_pending(session_id: str, ttl: float | None = None) -> bool:
     """Return True if a pending marker exists and (when ttl is given) is not expired."""
     _, path, _, _ = _paths(session_id)
     if not os.path.exists(path):
@@ -164,7 +164,7 @@ def is_pending(session_id: str, ttl: Optional[float] = None) -> bool:
         return False
 
 
-def is_retry(session_id: str, ttl: Optional[float] = None) -> bool:
+def is_retry(session_id: str, ttl: float | None = None) -> bool:
     """Return True if a retry marker exists and (when ttl is given) is not expired."""
     path = _paths(session_id)[2]
     if not os.path.exists(path):
@@ -177,7 +177,7 @@ def is_retry(session_id: str, ttl: Optional[float] = None) -> bool:
         return False
 
 
-def done_time(session_id: str) -> Optional[float]:
+def done_time(session_id: str) -> float | None:
     """Return the mtime of the done marker, or None if absent."""
     ts, _, _, _ = _paths(session_id)
     try:
@@ -189,6 +189,7 @@ def done_time(session_id: str) -> Optional[float]:
 # ─────────────────────────────────────────────────────────────
 # hermes ingest-worker pending marker (carries extra metadata)
 # ─────────────────────────────────────────────────────────────
+
 
 def ingest_pending_path(session_id: str) -> str:
     """Path to the ingest-worker's pending marker for ``session_id``."""
@@ -202,7 +203,7 @@ def write_ingest_pending(session_id: str, before: int, attempts: int) -> None:
     _transition_marker(path, (ts, retry), f"{session_id}\n{before}\n{attempts}")
 
 
-def read_ingest_pending(session_id: str) -> Optional[tuple[str, int, int]]:
+def read_ingest_pending(session_id: str) -> tuple[str, int, int] | None:
     """Parse the ingest-worker's pending marker. Return None if absent/corrupt."""
     _, path, _, _ = _paths(session_id)
     try:

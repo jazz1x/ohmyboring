@@ -9,11 +9,11 @@ Hosts the pure, agent-agnostic pieces of the self-augmentation loop:
 
 Agent-specific transcript extraction and hook I/O live in the per-agent modules.
 """
+
 import json
 import os
 import pathlib
 import re
-import socket
 import subprocess
 import sys
 import time
@@ -26,11 +26,10 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config  # noqa: E402
 import event_log
-import transcript  # noqa: E402
-import uptake_core  # noqa: E402
 import markers  # noqa: E402
 import omb_env  # noqa: E402
 import transcript  # noqa: E402
+import uptake_core  # noqa: E402
 import workflow_contract  # noqa: E402
 from resolution_quality import (  # noqa: E402
     ALLOWED_CLAIM_KINDS,
@@ -71,6 +70,7 @@ def _distill_resolution():
             file=sys.stderr,
         )
     return level
+
 
 def _throttled(session_id):
     """True (skip) if this session was already distilled within the last THROTTLE_MIN minutes."""
@@ -240,20 +240,20 @@ def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
     resolution = normalize_resolution(resolution or _distill_resolution())
     lang_instruction = {
         "ko": "ALL fields MUST be in Korean (한국어), regardless of the transcript's language. "
-              "The TITLE especially must be a Korean sentence — even if the session is full of English "
-              "ticket IDs (e.g. [FEDEV-97]) or English error names, write the title in Korean and keep "
-              "only the proper nouns/IDs/code verbatim. e.g. title → '[FEDEV-97] 하이드레이션 에러 및 "
-              "Relay 동기화 해결'. Never copy an all-English title from the transcript.",
+        "The TITLE especially must be a Korean sentence — even if the session is full of English "
+        "ticket IDs (e.g. [FEDEV-97]) or English error names, write the title in Korean and keep "
+        "only the proper nouns/IDs/code verbatim. e.g. title → '[FEDEV-97] 하이드레이션 에러 및 "
+        "Relay 동기화 해결'. Never copy an all-English title from the transcript.",
         "ja": "ALL fields MUST be in Japanese (日本語), regardless of the transcript's language. "
-              "The TITLE especially must be a Japanese sentence — even if the session is full of English "
-              "ticket IDs (e.g. [FEDEV-97]) or English error names, write the title in Japanese and keep "
-              "only the proper nouns/IDs/code verbatim. e.g. title → '[FEDEV-97] ハイドレーションエラーと "
-              "Relay同期の解決'. Never copy an all-English title from the transcript.",
+        "The TITLE especially must be a Japanese sentence — even if the session is full of English "
+        "ticket IDs (e.g. [FEDEV-97]) or English error names, write the title in Japanese and keep "
+        "only the proper nouns/IDs/code verbatim. e.g. title → '[FEDEV-97] ハイドレーションエラーと "
+        "Relay同期の解決'. Never copy an all-English title from the transcript.",
         "en": "ALL fields MUST be in English, regardless of the transcript's language. "
-              "The TITLE especially must be an English sentence — even if the session is full of Korean "
-              "or Japanese text, write the title in English and keep only proper nouns/IDs/code verbatim. "
-              "e.g. title → '[FEDEV-97] Fixing hydration error and Relay sync'. Never copy a non-English "
-              "title from the transcript.",
+        "The TITLE especially must be an English sentence — even if the session is full of Korean "
+        "or Japanese text, write the title in English and keep only proper nouns/IDs/code verbatim. "
+        "e.g. title → '[FEDEV-97] Fixing hydration error and Relay sync'. Never copy a non-English "
+        "title from the transcript.",
     }.get(lang, "Write in the same language as the transcript.")
 
     repo_hint = f" repo='{repo}'." if repo else ""
@@ -266,7 +266,7 @@ def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
         f"problem-solving narrative. {lang_instruction}{origin_hint}{repo_hint}\n\n"
         "Output ONLY a single JSON object, no text before or after it:\n"
         '{"title": "...", "body": "...", "tags": ["..."], "tools": ["..."], "concepts": ["..."], '
-        "\"claims\": [{\"subject\":\"...\",\"predicate\":\"...\",\"value\":\"...\",\"kind\":\"...\",\"confidence\":\"...\"}]}\\n\\n"
+        '"claims": [{"subject":"...","predicate":"...","value":"...","kind":"...","confidence":"..."}]}\\n\\n'
         f"{body_format}\n\n"
         "CRITICAL — body content rules (format-breaking bugs happen when you ignore these):\n"
         "- The body MUST contain ONLY markdown prose. NEVER put tags, tools, concepts, claims, or any metadata inside the body.\n"
@@ -301,13 +301,13 @@ def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
         "  status, state, result, outcome, info, detail, incident, decision, action, next-step,\n"
         "  상태, 결정, 결과. Write `path_resolution`, `retry-bound`, `auth-flow` instead.\n"
         "  Examples:\n"
-        '  {\"subject\":\"kb-rag-bot\",\"predicate\":\"model-interface\",\"value\":\"bedrock-converse, because the streaming API drops tool calls mid-turn\",\"kind\":\"decision\",\"confidence\":\"certain\"}\n'
-        '  {\"subject\":\"qa-tests\",\"predicate\":\"rtk-dependency\",\"value\":\"removed — the store was only read in two dead components\",\"kind\":\"fact\",\"confidence\":\"certain\"}\n'
-        '  {\"subject\":\"omb\",\"predicate\":\"release-version\",\"value\":\"0.1.3, the first build that ships the host CLI alongside the image\",\"kind\":\"fact\",\"confidence\":\"certain\"}\n'
-        '  {\"subject\":\"kb-rag-bot\",\"predicate\":\"auth-flow\",\"value\":\"the oauth redirect is never verified, so any return URL is accepted\",\"kind\":\"risk\",\"confidence\":\"likely\"}\n'
-        '  {\"subject\":\"omb\",\"predicate\":\"register-endpoint\",\"value\":\"add /next_actions so the card stops synthesising its own next steps\",\"kind\":\"next\",\"confidence\":\"certain\"}\n'
-        "  Counter-examples, all rejected: value \"removed\", value \"completed\", value \"PASS\",\n"
-        "  predicate \"incident\", predicate \"status\".\n"
+        '  {"subject":"kb-rag-bot","predicate":"model-interface","value":"bedrock-converse, because the streaming API drops tool calls mid-turn","kind":"decision","confidence":"certain"}\n'
+        '  {"subject":"qa-tests","predicate":"rtk-dependency","value":"removed — the store was only read in two dead components","kind":"fact","confidence":"certain"}\n'
+        '  {"subject":"omb","predicate":"release-version","value":"0.1.3, the first build that ships the host CLI alongside the image","kind":"fact","confidence":"certain"}\n'
+        '  {"subject":"kb-rag-bot","predicate":"auth-flow","value":"the oauth redirect is never verified, so any return URL is accepted","kind":"risk","confidence":"likely"}\n'
+        '  {"subject":"omb","predicate":"register-endpoint","value":"add /next_actions so the card stops synthesising its own next steps","kind":"next","confidence":"certain"}\n'
+        '  Counter-examples, all rejected: value "removed", value "completed", value "PASS",\n'
+        '  predicate "incident", predicate "status".\n'
         '- Pure chit-chat with no real work → output only: {"skip": true}\n\n'
         "=== SESSION TRANSCRIPT ===\n" + text
     )
@@ -533,7 +533,7 @@ def _call_remember(title, body, origin, repo, tags, tools, concepts, claims, ses
                 continue
             print(f"[distill-session] remember call failed: {e}", file=sys.stderr)
             return RememberOutcome(False, "failed")
-        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+        except (urllib.error.URLError, TimeoutError) as e:
             if attempt < max_retries:
                 print(
                     f"[distill-session] remember attempt {attempt + 1} failed transiently ({e}), retrying...",
@@ -630,7 +630,9 @@ def _prepare_note(parsed):
                     "subject": subject,
                     "predicate": predicate,
                     "value": value,
-                    "kind": _normalize_claim_kind(str(c.get("kind", "fact")).strip(), subject, predicate, value),
+                    "kind": _normalize_claim_kind(
+                        str(c.get("kind", "fact")).strip(), subject, predicate, value
+                    ),
                     "confidence": str(c.get("confidence", "certain")).strip() or "certain",
                 }
             )
@@ -684,7 +686,9 @@ def _ensure_required_claim_kinds(note, resolution, repo):
             )
             kinds.add("decision")
     if "fact" in required and "fact" not in kinds:
-        fact = _section_excerpt(note["body"], ("evidence", "근거", "검증", "根拠", "検証", "result", "결과", "結果"))
+        fact = _section_excerpt(
+            note["body"], ("evidence", "근거", "검증", "根拠", "検証", "result", "결과", "結果")
+        )
         if fact:
             claims.append(
                 {
@@ -705,11 +709,15 @@ def _ensure_required_evidence_tokens(note, transcript, resolution):
         transcript=transcript,
         resolution=resolution,
     )
-    missing_token_rule = next((item for item in report.missing if item.startswith("evidence-tokens:min:")), "")
+    missing_token_rule = next(
+        (item for item in report.missing if item.startswith("evidence-tokens:min:")), ""
+    )
     if not missing_token_rule:
         return note
     required = int(missing_token_rule.rsplit(":", 1)[1])
-    missing_tokens = [token for token in report.evidence_tokens_seen if token not in report.evidence_tokens_kept]
+    missing_tokens = [
+        token for token in report.evidence_tokens_seen if token not in report.evidence_tokens_kept
+    ]
     if not missing_tokens:
         return note
     needed = max(0, required - len(report.evidence_tokens_kept))
@@ -862,9 +870,7 @@ def transcript_index(source_dirs=None):
     """
     roots = source_dirs
     if roots is None:
-        roots = boring_config.source_dirs(adapter="session-end") or [
-            os.path.expanduser("~/.claude/projects")
-        ]
+        roots = boring_config.source_dirs(adapter="session-end") or [os.path.expanduser("~/.claude/projects")]
     index = {}
     for root in roots:
         base = pathlib.Path(os.path.expanduser(root))
@@ -1114,7 +1120,11 @@ def distill_and_remember(text, origin, repo, session_id=""):
         repaired_note = _ensure_required_claim_kinds(repaired_note, resolution, repo)
         repaired_note = _ensure_required_evidence_tokens(repaired_note, text, resolution)
         repaired_report = verify_note_resolution(
-            {"title": repaired_note["title"], "body": repaired_note["body"], "claims": repaired_note["claims"]},
+            {
+                "title": repaired_note["title"],
+                "body": repaired_note["body"],
+                "claims": repaired_note["claims"],
+            },
             transcript=text,
             resolution=resolution,
         )

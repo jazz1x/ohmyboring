@@ -5,6 +5,7 @@ Avoids duplicating `localhost:7700` / `host.docker.internal` logic across shell
 scripts and Python hooks. All functions honor the corresponding environment
 variables and fall back to sensible defaults.
 """
+
 from __future__ import annotations
 
 import os
@@ -53,9 +54,7 @@ def llm_base_url() -> str:
     On the host (not in a container) rewrite host.docker.internal → localhost, mirroring the shell
     scripts — the configured in-container default must still work for host-side distillation."""
     url = (
-        os.environ.get("BORING_LLM_BASE_URL")
-        or _boring_llm().get("base_url")
-        or "http://localhost:11434/v1"
+        os.environ.get("BORING_LLM_BASE_URL") or _boring_llm().get("base_url") or "http://localhost:11434/v1"
     )
     if not _in_container():
         url = url.replace("host.docker.internal", "localhost")

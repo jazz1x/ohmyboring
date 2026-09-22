@@ -14,6 +14,7 @@ It runs in both directions on purpose: an undeclared import fails, and a declara
 imports fails too. A requirements file that lists what the code stopped using teaches the next
 reader that the dependency is load-bearing when it is not.
 """
+
 import ast
 import subprocess
 import sys
@@ -29,7 +30,7 @@ IMPORT_TO_DISTRIBUTION = {"yaml": "pyyaml", "slack_sdk": "slack-sdk"}
 #: splitter was written. They are spelled precisely on purpose: `startswith("---")` without the
 #: newline is how a Markdown horizontal rule is detected (`scripts/peek.py`), which is a
 #: different thing that happens to start with the same three characters.
-_SPLIT_IDIOMS = ('[4:end]', 'startswith("---\\n")', 'split("---", 2)')
+_SPLIT_IDIOMS = ("[4:end]", 'startswith("---\\n")', 'split("---", 2)')
 
 
 def _tracked_python() -> list[Path]:
@@ -127,9 +128,7 @@ def test_every_third_party_import_is_declared():
 
 def test_nothing_is_declared_that_nothing_imports():
     files = _tracked_python()
-    imported = {
-        IMPORT_TO_DISTRIBUTION.get(name, name).lower() for name in _imported_top_level(files)
-    }
+    imported = {IMPORT_TO_DISTRIBUTION.get(name, name).lower() for name in _imported_top_level(files)}
     unused = _declared() - imported
     assert not unused, (
         f"declared in requirements.txt but imported nowhere: {sorted(unused)}. "
@@ -149,9 +148,7 @@ def test_the_frontmatter_split_has_exactly_one_implementation():
         # Judge code, not prose: this file and vault_note.py both have to name the old idiom in
         # order to explain it, and a gate that cannot tell a docstring from a statement teaches
         # people to stop writing the explanation.
-        code = "\n".join(
-            line for line in _executable_lines(source) if line
-        )
+        code = "\n".join(line for line in _executable_lines(source) if line)
         if any(idiom in code for idiom in _SPLIT_IDIOMS):
             offenders.append(str(path.relative_to(ROOT)))
     assert not offenders, (

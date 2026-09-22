@@ -6,6 +6,7 @@ result? Getting this wrong either burns an LLM pass per cycle on input that cann
 written (the 2026-07-25 failure mode) or, in the other direction, blocks ingestion on a
 healthy wiki-first engine that simply has no DB to report on.
 """
+
 from __future__ import annotations
 
 import os
@@ -50,9 +51,7 @@ class CheckDrudgeWritableTest(unittest.TestCase):
             check_drudge_writable(client)
 
     def test_allows_healthy_engine(self):
-        client = _FakeClient(
-            {"status": "ok", "vector": True, "sync": "idle", "db_healthy": True}
-        )
+        client = _FakeClient({"status": "ok", "vector": True, "sync": "idle", "db_healthy": True})
         check_drudge_writable(client)  # must not raise
 
     def test_allows_response_without_db_healthy(self):

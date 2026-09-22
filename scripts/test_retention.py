@@ -13,6 +13,7 @@ Owned guardrails (what would break in production if these regress):
   5. Ancient-archive deletion only targets PROCESSED archives.
   6. plan() is pure — it mutates nothing on disk.
 """
+
 import os
 import sys
 import tempfile

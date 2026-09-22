@@ -9,6 +9,7 @@ Discovery order (first wins):
 Missing file is not an error — hooks degrade gracefully to an empty policy
 (personal origin, no source dirs, note_lang=auto).
 """
+
 from __future__ import annotations
 
 import json
@@ -17,7 +18,6 @@ import sys
 from pathlib import Path
 
 from omb_env import _in_container
-
 
 DEFAULT_ORIGIN = "personal"
 DEFAULT_NOTE_LANG = "auto"

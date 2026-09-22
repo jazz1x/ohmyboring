@@ -73,3 +73,6 @@ docs/reports/*.html
 # 공개 런북은 README에서 링크하므로 추적
 !docs/runbooks/
 !docs/runbooks/*.md
+# Engine contract snapshot (MCP tools · HTTP routes · GET shapes) — the P0 gate the migration
+# loop compares against. Runtime data is ignored above; this is a contract artifact like data/schema/.
+!data/contract/

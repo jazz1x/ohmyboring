@@ -5,6 +5,7 @@ Parses a Codex JSONL session transcript, extracts user/assistant text, and
 stores a curated note via ohmyboring's remember tool. Designed to be called by
 both the host-side backfill collector and a hermes-agent cron worker.
 """
+
 import json
 import os
 import sys
@@ -15,13 +16,13 @@ import boring_config
 import event_log
 import transcript
 from distill_core import (  # noqa: F401
-    _extract_json,
-    _mark,
-    _strip_trailing_metadata,
     _build_prompt,
     _call_llm,
     _call_remember,
     _distill_resolution,
+    _extract_json,
+    _mark,
+    _strip_trailing_metadata,
     _throttled,
     distill_and_remember,
     git_remote_url,

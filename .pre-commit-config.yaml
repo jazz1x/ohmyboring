@@ -21,6 +21,14 @@ repos:
     hooks:
       - id: gitleaks
 
+  # Python 위생 = 린터 + 포맷터까지 (ruff.toml 이 규칙). 그 밖의 규율은 도구가 아니라 스킬로.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.8
+    hooks:
+      - id: ruff-check
+      - id: ruff-format
+        args: [--check]
+
   - repo: local
     hooks:
       - id: no-meaningless-filenames

@@ -7,6 +7,7 @@ This wraps data-steward's safe repairs with a verification contract:
 - keep every note frontmatter parseable
 - clear only automatically fixable steward issues
 """
+
 from __future__ import annotations
 
 import argparse
@@ -47,7 +48,7 @@ def _wiki_dir(vault: Path) -> Path:
 
 
 def _stamp() -> str:
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 def _default_report_path(mode: str) -> Path:
@@ -101,7 +102,7 @@ def _create_backup(wiki_dir: Path, backup_dir: Path) -> Path:
             if path.is_file():
                 tar.add(path, arcname=f"wiki/{path.name}")
         manifest = {
-            "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "created_at": dt.datetime.now(dt.UTC).isoformat(),
             "wiki_dir": str(wiki_dir),
             "file_count": len([p for p in wiki_dir.iterdir() if p.is_file()]),
         }

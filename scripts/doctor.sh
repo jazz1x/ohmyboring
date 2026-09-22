@@ -485,6 +485,29 @@ else
     bad "docker not found — can't inspect container status (set DOCKER_BIN or install Docker CLI)"; failed_containers=1
 fi
 
+# (c2) the read-only door at 127.0.0.1:7710. Optional until consumers switch (P1-e) —
+# a missing door is "not switched yet", not a failure, so absence warns and only a
+# running-but-wrong door fails.
+door_url="${DOOR_URL:-http://127.0.0.1:7710}"
+door_code="$(curl -s -o /dev/null -w '%{http_code}' -m3 "$door_url/health" 2>/dev/null || true)"
+case "$door_code" in
+    200)
+        door_body="$(curl -sf -m3 "$door_url/health" 2>/dev/null || true)"
+        engine_body="$(curl -sf -m5 "$BORING_URL/health" 2>/dev/null || true)"
+        if [ "$door_body" = "$engine_body" ] && [ -n "$door_body" ]; then
+            ok "door /health 200 ($door_url) — same body as engine"
+        else
+            bad "door /health 200 ($door_url) but body differs from engine — the door is not serving the engine it proxies"; failed_containers=1
+        fi
+        ;;
+    000|"")
+        warn "door not running (optional until consumers switch)"
+        ;;
+    *)
+        bad "door /health answered $door_code ($door_url) — expected 200"; failed_containers=1
+        ;;
+esac
+
 # (d1) Newest distilled note — proof the write door produced output. The hook writes notes
 # as vault/wiki/wiki-*.md, so the newest mtime is the last successful distillation.
 note=$(newest_minted "$BORING_HOME/vault/wiki/wiki-*.md")

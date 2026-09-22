@@ -5,13 +5,13 @@ This module is intentionally pure: it does not call the LLM, read the vault, or
 write markers. It answers one question before a note is remembered: is this note
 specific enough for the requested resolution level?
 """
+
 from __future__ import annotations
 
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, Optional
-
+from typing import Any
 
 ALLOWED_RESOLUTIONS = {"compact", "standard", "evidence", "forensic"}
 ALLOWED_CLAIM_KINDS = {"fact", "decision", "assumption", "risk", "blocked", "goal", "term", "next"}
@@ -30,7 +30,18 @@ SECTION_SIGNALS = {
     "as_is": ("as-is", "as is", "before", "current state", "현재", "이전 상태", "現状", "以前"),
     "to_be": ("to-be", "to be", "after", "target state", "목표", "목표 상태", "目標", "あるべき姿"),
     "decision": ("decision", "decided", "결정", "선택", "決定", "判断"),
-    "evidence": ("evidence", "basis", "command", "verified", "근거", "명령", "검증", "根拠", "コマンド", "検証"),
+    "evidence": (
+        "evidence",
+        "basis",
+        "command",
+        "verified",
+        "근거",
+        "명령",
+        "검증",
+        "根拠",
+        "コマンド",
+        "検証",
+    ),
     "result": ("result", "outcome", "결과", "상태", "結果", "解決", "状態"),
     "next": ("next", "remaining", "follow-up", "다음", "남은 일", "次", "残件", "残作業"),
     "timeline": ("timeline", "sequence", "타임라인", "시점", "タイムライン", "時系列"),
@@ -110,7 +121,7 @@ class ResolutionReport:
     evidence_tokens_kept: tuple[str, ...]
 
 
-def normalize_resolution(resolution: Optional[str], default: str = "standard") -> str:
+def normalize_resolution(resolution: str | None, default: str = "standard") -> str:
     fallback = default if default in ALLOWED_RESOLUTIONS else "standard"
     value = (resolution or "standard").strip().lower()
     if value not in ALLOWED_RESOLUTIONS:
@@ -121,7 +132,7 @@ def normalize_resolution(resolution: Optional[str], default: str = "standard") -
 def verify_note_resolution(
     note: dict[str, Any],
     transcript: str = "",
-    resolution: Optional[str] = None,
+    resolution: str | None = None,
 ) -> ResolutionReport:
     level = normalize_resolution(resolution)
     rule = RESOLUTION_RULES[level]
@@ -177,7 +188,7 @@ def verify_note_resolution(
     )
 
 
-def resolution_prompt_contract(resolution: Optional[str]) -> str:
+def resolution_prompt_contract(resolution: str | None) -> str:
     level = normalize_resolution(resolution)
     rule = RESOLUTION_RULES[level]
     sections = ", ".join(rule["sections"])
@@ -188,7 +199,7 @@ def resolution_prompt_contract(resolution: Optional[str]) -> str:
         f"- Minimum claims: {rule['min_claims']}.\n"
         f"- Required claim kinds: {kinds}.\n"
         f"- Required claim kinds are hard gates: emit at least one claim for each kind in [{kinds}], "
-        "using the exact JSON value (for example \"kind\":\"decision\"), never a synonym.\n"
+        'using the exact JSON value (for example "kind":"decision"), never a synonym.\n'
         f"- Minimum preserved evidence tokens: {rule['min_evidence_tokens']}.\n"
         "- Preserve concrete evidence from the transcript: PR numbers, ticket ids, model names, "
         "commands, durations, counts, statuses, before/after values. Do not invent missing evidence.\n"

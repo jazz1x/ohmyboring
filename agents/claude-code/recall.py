@@ -5,6 +5,7 @@ prompt from ohmyboring (vector+graph) and injects them as context.
 This script is a thin agent-specific entry point; all shared recall logic lives in
 `agents/shared/recall_core.py`.
 """
+
 import json
 import os
 import re

@@ -27,7 +27,6 @@ if _SHARED_DIR.is_dir() and str(_SHARED_DIR) not in sys.path:
 import label_core  # noqa: E402
 import verdict_core  # noqa: E402
 
-
 EMPTY_VALUES = {
     "",
     "-",
@@ -354,9 +353,7 @@ def render_body_mrkdwn(answer: str, known_projects=None) -> str:
     if not doc.projects:
         return _compact_text(answer)
 
-    items_by_label: dict[str, list[tuple[str, BriefItem]]] = {
-        label: [] for label in SECTION_ORDER
-    }
+    items_by_label: dict[str, list[tuple[str, BriefItem]]] = {label: [] for label in SECTION_ORDER}
     seen: dict[str, tuple[str, BriefItem]] = {}
     for project in doc.projects:
         for item in project.items:
@@ -388,8 +385,7 @@ def render_body_mrkdwn(answer: str, known_projects=None) -> str:
     if picks and _shortlist_earns_its_place(items_by_label):
         lines.append("*오늘의 1순위*")
         lines.extend(
-            pick_line(n, label, project_name, item)
-            for n, (label, project_name, item) in enumerate(picks, 1)
+            pick_line(n, label, project_name, item) for n, (label, project_name, item) in enumerate(picks, 1)
         )
         lines.append("")
 
@@ -501,6 +497,7 @@ def zone_followup(zone_title: str, entries) -> str:
         return ""
     busiest = max(counts, key=lambda name: (counts[name], name))
     return template.format(p=_slack_inline(busiest))
+
 
 #: How many items the top-of-message shortlist carries. Three is what fits above the fold on a
 #: phone next to a header and a count line; a shortlist that needs scrolling is not a shortlist.
@@ -623,9 +620,7 @@ def render_zone_lines(entries, limit, sub="   ◦"):
         shown += len(take)
         if project_name == UNATTRIBUTED:
             # No project the reader could look up, so no name on the line. See `render_group_lines`.
-            lines.extend(
-                f"{SECTION_EMOJI[label]} {_slack_inline(item.text)}" for label, item in take
-            )
+            lines.extend(f"{SECTION_EMOJI[label]} {_slack_inline(item.text)}" for label, item in take)
             continue
         name = _slack_inline(project_name)
         if len(take) == 1:
@@ -634,9 +629,7 @@ def render_zone_lines(entries, limit, sub="   ◦"):
         else:
             # Mixed statuses under one project keep their own emoji on each row.
             lines.append(f"• {name}")
-            lines.extend(
-                f"{sub} {SECTION_EMOJI[label]} {_slack_inline(item.text)}" for label, item in take
-            )
+            lines.extend(f"{sub} {SECTION_EMOJI[label]} {_slack_inline(item.text)}" for label, item in take)
     omitted = len(entries) - shown
     if omitted > 0:
         lines.append(f"• _외 {omitted}개 항목_")
@@ -709,9 +702,7 @@ def zone_plan(items_by_label):
     if len(action) <= plain:
         return plain, False
     busy = sum(
-        len(items_by_label.get(label, ()))
-        if label in NEVER_TRUNCATED
-        else BUSY_ITEM_LIMIT
+        len(items_by_label.get(label, ())) if label in NEVER_TRUNCATED else BUSY_ITEM_LIMIT
         for label in action_labels
     )
     return busy, True
@@ -760,9 +751,7 @@ def render_blocks_payload(
         },
     ]
 
-    items_by_label: dict[str, list[tuple[str, BriefItem]]] = {
-        label: [] for label in SECTION_ORDER
-    }
+    items_by_label: dict[str, list[tuple[str, BriefItem]]] = {label: [] for label in SECTION_ORDER}
     seen: dict[str, tuple[str, BriefItem]] = {}
     for project in doc.projects:
         for item in project.items:
@@ -806,23 +795,17 @@ def render_blocks_payload(
             if not entries:
                 continue
             if labels is not ACTIONABLE and reference_yields:
-                blocks.append(
-                    _context(f"*{zone_title}* ({len(entries)}) — {reference_counts(entries)}")
-                )
+                blocks.append(_context(f"*{zone_title}* ({len(entries)}) — {reference_counts(entries)}"))
                 continue
             # Done stays out of the zones entirely: it is confirmation, not work, and on a phone
             # sixteen finished items push the blockers off the first screen.
             zone_limit = (
                 action_limit
                 if labels is ACTIONABLE
-                else sum(
-                    group_limit(label, len(items_by_label.get(label, ()))) for label in labels
-                )
+                else sum(group_limit(label, len(items_by_label.get(label, ()))) for label in labels)
             )
             item_lines = render_zone_lines(entries, zone_limit)
-            blocks.append(
-                _section(f"*{zone_title}* ({len(entries)})\n" + "\n".join(item_lines))
-            )
+            blocks.append(_section(f"*{zone_title}* ({len(entries)})\n" + "\n".join(item_lines)))
             followup = zone_followup(zone_title, entries)
             if followup:
                 # A context block: present when wanted, visually quiet when not.

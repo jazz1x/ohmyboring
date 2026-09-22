@@ -8,15 +8,16 @@ question is not "did we remember to redact" but "can prose reach the response at
 pin the structural answer: a note's own `origin:` decides, unknown counts as company, and the
 absence of a phrase window is reported as withheld rather than as nothing.
 """
+
 import importlib.util
 import json
-import sys
 import subprocess
+import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
-from unittest import mock
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("peek", HERE / "peek.py")
@@ -257,12 +258,13 @@ class InstrumentFaultReadsAnEndedSession(unittest.TestCase):
     sessions are merely still open — and this page had that misreading in a constant's name."""
 
     def _row(self, event, sid, minutes_ago=1):
-        when = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+        when = datetime.now(UTC) - timedelta(minutes=minutes_ago)
         return {"event": event, "observed_at": when.isoformat(), "session_id": sid}
 
     def test_an_open_session_being_distilled_is_not_a_fault(self):
-        out = peek.instrument_fault([self._row("distill_resolution", "a"),
-                                     self._row("distill_resolution", "a")])
+        out = peek.instrument_fault(
+            [self._row("distill_resolution", "a"), self._row("distill_resolution", "a")]
+        )
         self.assertNotEqual(out["state"], "investigate", out.get("reason"))
 
     def test_an_ended_session_with_no_uptake_is_a_fault(self):
@@ -271,10 +273,12 @@ class InstrumentFaultReadsAnEndedSession(unittest.TestCase):
 
     def test_the_marker_wins_over_the_old_proxy(self):
         """Both present: the distillation runs must not inflate the end count."""
-        rows = [self._row("session_end", "a"),
-                self._row("distill_resolution", "a"),
-                self._row("distill_resolution", "b"),
-                self._row("distill_resolution", "c")]
+        rows = [
+            self._row("session_end", "a"),
+            self._row("distill_resolution", "a"),
+            self._row("distill_resolution", "b"),
+            self._row("distill_resolution", "c"),
+        ]
         out = peek.instrument_fault(rows)
         self.assertEqual(out["session_ends_48h"], 1, "one session ended; b and c are still open")
 

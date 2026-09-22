@@ -3,6 +3,7 @@
 
 Run: python3 agents/slack/test_secretary_core.py
 """
+
 import os
 import sys
 
@@ -25,11 +26,13 @@ def _handover_recorder():
     calls = []
 
     def fake(session_id, observed_at, paths):
-        calls.append({
-            "session_id": session_id,
-            "observed_at": observed_at,
-            "paths": list(paths),
-        })
+        calls.append(
+            {
+                "session_id": session_id,
+                "observed_at": observed_at,
+                "paths": list(paths),
+            }
+        )
         return {"session": session_id, "handed": len(paths), "unknown": []}
 
     return calls, fake
@@ -40,11 +43,13 @@ def _verdict_recorder(result=None):
 
     def fake(session_id, observed_at, verdict=None, **kw):
         assert not kw, f"a verdict travels without path lists, got unexpected {sorted(kw)}"
-        calls.append({
-            "session_id": session_id,
-            "observed_at": observed_at,
-            "verdict": verdict,
-        })
+        calls.append(
+            {
+                "session_id": session_id,
+                "observed_at": observed_at,
+                "verdict": verdict,
+            }
+        )
         return result if result is not None else {"used": 1, "contested": 0, "unknown": []}
 
     return calls, fake
@@ -57,9 +62,14 @@ def test_a_mention_is_stripped_before_it_is_asked():
 
 def test_the_answer_is_the_hooks_lines_with_the_claims_under_each():
     hits = [
-        _hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3,
-             claims=[{"subject": "ohmyboring", "predicate": "branch-name", "value": "fix/...", "kind": "decision"}],
-             total=4),
+        _hit(
+            "wiki-0435.md",
+            "the branch naming question came up again and was settled " * 3,
+            claims=[
+                {"subject": "ohmyboring", "predicate": "branch-name", "value": "fix/...", "kind": "decision"}
+            ],
+            total=4,
+        ),
     ]
     out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, **kw: hits)
     assert "*wiki-0435.md*" in out.text
@@ -69,8 +79,11 @@ def test_the_answer_is_the_hooks_lines_with_the_claims_under_each():
 
 def test_the_search_is_asked_for_claims_like_the_hook_is():
     seen = {}
+
     def search(q, **kw):
-        seen.update(kw); return []
+        seen.update(kw)
+        return []
+
     sc.answer("아무 질문이나", search=search)
     assert seen["claims"] == sc.CLAIMS_PER_HIT >= 1
     assert seen["max_results"] == sc.MAX_HITS
@@ -78,7 +91,10 @@ def test_the_search_is_asked_for_claims_like_the_hook_is():
 
 def test_nothing_found_and_engine_down_are_different_answers():
     assert sc.answer("이 주제는 없다", search=lambda q, **kw: []).text == sc.NOTHING_FOUND
-    def down(q, **kw): raise ConnectionError("refused")
+
+    def down(q, **kw):
+        raise ConnectionError("refused")
+
     assert sc.answer("엔진이 죽었다", search=down).text == sc.ENGINE_DOWN
     assert sc.NOTHING_FOUND != sc.ENGINE_DOWN
 
@@ -102,23 +118,29 @@ def test_hits_are_exactly_the_notes_the_reader_saw():
         "/vault/wiki/wiki-0435.md",
         "/vault/wiki/wiki-1000.md",
     ], "the empty snippet drops out and the MAX_HITS cut still applies"
-    assert "① " in out.text and "② " in out.text and "③" not in out.text, "one circled number per handed note, nothing else"
+    assert "① " in out.text and "② " in out.text and "③" not in out.text, (
+        "one circled number per handed note, nothing else"
+    )
     assert len(out.hits) == 2
     assert "wiki-0999" not in out.text and "wiki-1001" not in out.text
 
 
 def test_empty_and_failed_answers_carry_no_hits():
     assert sc.answer("이 주제는 없다", search=lambda q, **kw: []).hits == []
-    def down(q, **kw): raise ConnectionError("refused")
+
+    def down(q, **kw):
+        raise ConnectionError("refused")
+
     assert sc.answer("엔진이 죽었다", search=down).hits == []
 
 
 def test_the_client_hands_paths_over_under_the_sessions_own_name():
     client = dc.DrudgeClient(base_url="http://drudge.test", retries=0)
     sent = []
-    client._retry = lambda method, path, payload=None, timeout=None: sent.append(
-        {"method": method, "path": path, "payload": payload}
-    ) or {"session": "s", "handed": 1, "unknown": []}
+    client._retry = lambda method, path, payload=None, timeout=None: (
+        sent.append({"method": method, "path": path, "payload": payload})
+        or {"session": "s", "handed": 1, "unknown": []}
+    )
     client.handover("s", "2026-09-21T00:00:00+00:00", ["/vault/wiki/wiki-0435.md"])
     assert sent[0]["method"] == "POST" and sent[0]["path"] == "/handover"
     assert sent[0]["payload"] == {
@@ -131,12 +153,14 @@ def test_the_client_hands_paths_over_under_the_sessions_own_name():
 def test_the_client_sends_a_verdict_without_path_lists():
     client = dc.DrudgeClient(base_url="http://drudge.test", retries=0)
     sent = []
-    client._retry = lambda method, path, payload=None, timeout=None: sent.append(payload) or {
-        "used": 0, "contested": 0}
+    client._retry = lambda method, path, payload=None, timeout=None: (
+        sent.append(payload) or {"used": 0, "contested": 0}
+    )
     client.consumption("probe:e1b", "2026-09-21T00:00:00+00:00", verdict="used")
     assert sent[0]["verdict"] == "used"
-    assert "used" not in sent[0] and "contested" not in sent[0], \
+    assert "used" not in sent[0] and "contested" not in sent[0], (
         "paths beside a verdict are a 400; the verdict must travel alone"
+    )
 
 
 def test_the_client_refuses_a_verdict_beside_path_lists():
@@ -173,12 +197,18 @@ def test_remember_handed_with_empty_hands_sends_nothing():
 
 
 def test_remember_handed_survives_a_dead_engine():
-    def boom(*a, **kw): raise ConnectionError("refused")
-    assert sc.remember_handed(
-        "slack:C123:1726900000.000500", "질문",
-        [_hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3)],
-        handover=boom,
-    ) is False
+    def boom(*a, **kw):
+        raise ConnectionError("refused")
+
+    assert (
+        sc.remember_handed(
+            "slack:C123:1726900000.000500",
+            "질문",
+            [_hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3)],
+            handover=boom,
+        )
+        is False
+    )
 
 
 def test_feedback_sends_only_the_verdict():
@@ -216,7 +246,9 @@ def test_feedback_rejects_a_verdict_that_is_not_a_verdict():
 
 
 def test_feedback_survives_a_dead_engine():
-    def boom(*a, **kw): raise ConnectionError("refused")
+    def boom(*a, **kw):
+        raise ConnectionError("refused")
+
     assert sc.feedback("slack:C123:x", "used", consumption=boom) == {"error": "refused"}
 
 
@@ -226,7 +258,9 @@ def test_an_answer_numbers_its_notes_under_a_head():
         _hit("wiki-1000.md", "the pool question came up again and was settled " * 3),
     ]
     out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, **kw: hits)
-    assert out.text.startswith("_기억에서 찾은 것 2개_"), "the head names the count and marks the message as ours"
+    assert out.text.startswith("_기억에서 찾은 것 2개_"), (
+        "the head names the count and marks the message as ours"
+    )
     assert "① *wiki-0435.md*" in out.text and "② *wiki-1000.md*" in out.text
 
 
@@ -244,8 +278,13 @@ def _remember_recorder():
 
     def fake(title, body, **kw):
         calls.append({"title": title, "body": body, **kw})
-        return {"source_path": "/vault/wiki/wiki-1077.md", "wiki_id": "wiki-1077",
-                "duplicate": None, "supersedes": kw.get("supersedes") or [], "unknown": []}
+        return {
+            "source_path": "/vault/wiki/wiki-1077.md",
+            "wiki_id": "wiki-1077",
+            "duplicate": None,
+            "supersedes": kw.get("supersedes") or [],
+            "unknown": [],
+        }
 
     return calls, fake
 
@@ -253,7 +292,8 @@ def _remember_recorder():
 def test_correct_without_a_number_supersedes_everything_the_answer_carried():
     calls, fake = _remember_recorder()
     out = sc.correct(
-        "slack:C123:1.000", "배포 언제였더라",
+        "slack:C123:1.000",
+        "배포 언제였더라",
         ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md"],
         "정정: 재시작은 매일 2시에 한다",
         remember=fake,
@@ -268,25 +308,35 @@ def test_correct_without_a_number_supersedes_everything_the_answer_carried():
 def test_correct_with_a_number_supersedes_only_that_note():
     calls, fake = _remember_recorder()
     sc.correct(
-        "slack:C123:1.000", "질문",
+        "slack:C123:1.000",
+        "질문",
         ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md", "/vault/wiki/wiki-1001.md"],
         "정정 2: 풀은 아니고 브랜치다",
         remember=fake,
     )
-    assert calls[0]["supersedes"] == ["/vault/wiki/wiki-1000.md"], "1-based, in the order the answer listed them"
+    assert calls[0]["supersedes"] == ["/vault/wiki/wiki-1000.md"], (
+        "1-based, in the order the answer listed them"
+    )
 
 
 def test_correct_with_a_number_outside_the_answer_is_refused():
     calls, fake = _remember_recorder()
-    out = sc.correct("slack:C123:1.000", "질문", ["/vault/wiki/wiki-0435.md"], "정정 9: 없는 번호", remember=fake)
+    out = sc.correct(
+        "slack:C123:1.000", "질문", ["/vault/wiki/wiki-0435.md"], "정정 9: 없는 번호", remember=fake
+    )
     assert out == {"error": "no such number"}
     assert calls == [], "nothing may reach the engine when the number points at no note"
 
 
 def test_correct_titles_the_note_with_the_first_sentence_capped():
     calls, fake = _remember_recorder()
-    sc.correct("slack:C123:1.000", "", ["/vault/wiki/wiki-0435.md"],
-               "정정: 첫 문장이다. 두 번째 문장은 노트 본문에만.", remember=fake)
+    sc.correct(
+        "slack:C123:1.000",
+        "",
+        ["/vault/wiki/wiki-0435.md"],
+        "정정: 첫 문장이다. 두 번째 문장은 노트 본문에만.",
+        remember=fake,
+    )
     assert calls[0]["title"] == "첫 문장이다."
     calls.clear()
     sc.correct("slack:C123:1.000", "", ["/vault/wiki/wiki-0435.md"], "정정: " + "아" * 100, remember=fake)
@@ -294,7 +344,9 @@ def test_correct_titles_the_note_with_the_first_sentence_capped():
 
 
 def test_correct_survives_a_dead_engine():
-    def boom(*a, **kw): raise ConnectionError("refused")
+    def boom(*a, **kw):
+        raise ConnectionError("refused")
+
     out = sc.correct("slack:C123:1.000", "질문", ["/vault/wiki/wiki-0435.md"], "정정: 무언가", remember=boom)
     assert out == {"error": "refused"}
 

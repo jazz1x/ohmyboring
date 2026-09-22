@@ -8,6 +8,7 @@ Run:
   make bench-embed
   python3 scripts/bench-embed.py --model bge-m3 --embed-dim 1024
 """
+
 import argparse
 import json
 import math
@@ -29,9 +30,7 @@ SAMPLES: dict[str, str] = {
 }
 
 
-def _embed(
-    texts: list[str], base_url: str, api_key: str, model: str
-) -> tuple[list[list[float]], float]:
+def _embed(texts: list[str], base_url: str, api_key: str, model: str) -> tuple[list[list[float]], float]:
     headers: dict[str, str] = {"content-type": "application/json"}
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"

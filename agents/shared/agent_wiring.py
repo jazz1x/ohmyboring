@@ -4,6 +4,7 @@
 Reads boring.json to decide which agents are enabled, then idempotently
 configures each agent's settings file. Backups are created as `.omb-bak`.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,9 +21,7 @@ import sys
 from pathlib import Path
 
 # Allow import of shared agent policy library regardless of how this script is invoked.
-sys.path.insert(
-    0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared")
-)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import boring_config
 
 BORING_HOME = os.environ.get("BORING_HOME") or os.path.expanduser("~/oh-my-boring")
@@ -88,7 +87,7 @@ def _agent_path(agent_id: str) -> Path:
 def _load_json(path: Path) -> dict:
     if not path.exists():
         return {}
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -186,9 +185,7 @@ def _drop_duplicate_hooks(settings: dict, commands) -> int:
                 kept.append(h)
             entry["hooks"] = kept
     for key, groups in list(settings.get("hooks", {}).items()):
-        settings["hooks"][key] = [
-            g for g in groups if not (isinstance(g, dict) and g.get("hooks") == [])
-        ]
+        settings["hooks"][key] = [g for g in groups if not (isinstance(g, dict) and g.get("hooks") == [])]
     return removed
 
 
@@ -281,7 +278,7 @@ def wire_kimi(path: Path | None = None) -> dict:
     for line in existing.splitlines():
         stripped = line.strip()
         if stripped.startswith("command"):
-            installed |= _hook_scripts(stripped.split("=", 1)[-1].strip().strip('"\''))
+            installed |= _hook_scripts(stripped.split("=", 1)[-1].strip().strip("\"'"))
     wanted = _hook_scripts(distill) | _hook_scripts(recall)
 
     removed = _drop_duplicate_kimi_hooks(path, wanted) if path.exists() else 0
@@ -333,9 +330,7 @@ def _drop_duplicate_kimi_hooks(path: Path, ours: set) -> int:
                 current = None
                 continue
             if line.strip().startswith("command"):
-                current["scripts"] |= _hook_scripts(
-                    line.strip().split("=", 1)[-1].strip().strip('"\'')
-                )
+                current["scripts"] |= _hook_scripts(line.strip().split("=", 1)[-1].strip().strip("\"'"))
             current["end"] = index
     if current is not None:
         blocks.append(current)
@@ -355,9 +350,7 @@ def _drop_duplicate_kimi_hooks(path: Path, ours: set) -> int:
     kill = set()
     for block in drop:
         kill.update(range(block["start"], block["end"] + 1))
-    path.write_text(
-        "".join(line for i, line in enumerate(lines) if i not in kill), encoding="utf-8"
-    )
+    path.write_text("".join(line for i, line in enumerate(lines) if i not in kill), encoding="utf-8")
     return len(drop)
 
 
@@ -384,12 +377,7 @@ def wire_mcp_agent(agent_id: str, server_name: str, server_config: dict, path: P
 
 
 def _xml_escape(value: str) -> str:
-    return (
-        value.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def _sh_quote(value: str) -> str:
@@ -492,7 +480,9 @@ def install_codex_host_worker(boring_home: str | None = None) -> dict:
     raise RuntimeError(f"unsupported OS for Codex host worker: {system}")
 
 
-def wire_codex(server_name: str, server_config: dict, path: Path | None = None, boring_home: str | None = None) -> dict:
+def wire_codex(
+    server_name: str, server_config: dict, path: Path | None = None, boring_home: str | None = None
+) -> dict:
     mcp = wire_mcp_agent("codex", server_name, server_config, path)
     worker = install_codex_host_worker(boring_home)
     return {
@@ -513,7 +503,9 @@ def _write_text_atomic(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def _upsert_mcp_block(lines: list[str], mcp_idx: int, server_name: str, url: str, transport: str) -> tuple[list[str], bool]:
+def _upsert_mcp_block(
+    lines: list[str], mcp_idx: int, server_name: str, url: str, transport: str
+) -> tuple[list[str], bool]:
     """Replace only the mcp_servers block in a YAML text, preserving the rest of the file.
 
     Parses existing servers with 2-space YAML indentation and rebuilds the block
@@ -635,9 +627,7 @@ def _hermes_briefing_sources(boring_home: str | None = None) -> tuple[Path, ...]
             raise FileNotFoundError(f"briefing template not found: {entry}")
 
     sources: list[Path] = [
-        src_dir / name
-        for name in _HERMES_ENTRY_SCRIPT_NAMES
-        if name not in _HERMES_SEPARATELY_INSTALLED
+        src_dir / name for name in _HERMES_ENTRY_SCRIPT_NAMES if name not in _HERMES_SEPARATELY_INSTALLED
     ]
     for entry in entries:
         for dep in sorted(_local_module_deps(entry, (shared_dir,))):
@@ -1166,12 +1156,8 @@ def _report_duplicate_registrations():
 
 def main():
     global BORING_HOME
-    parser = argparse.ArgumentParser(
-        description="Wire ohmyboring adapters for enabled agents"
-    )
-    parser.add_argument(
-        "--install", action="store_true", help="Install/update settings for enabled agents"
-    )
+    parser = argparse.ArgumentParser(description="Wire ohmyboring adapters for enabled agents")
+    parser.add_argument("--install", action="store_true", help="Install/update settings for enabled agents")
     parser.add_argument(
         "--list-hermes-scripts",
         action="store_true",
@@ -1197,9 +1183,7 @@ def main():
         src_dir = Path(BORING_HOME) / "agents" / "hermes"
         paths = list(_hermes_briefing_sources(BORING_HOME))
         paths += [
-            src_dir / name
-            for name in _HERMES_ENTRY_SCRIPT_NAMES
-            if name in _HERMES_SEPARATELY_INSTALLED
+            src_dir / name for name in _HERMES_ENTRY_SCRIPT_NAMES if name in _HERMES_SEPARATELY_INSTALLED
         ]
         for path in paths:
             print(path)

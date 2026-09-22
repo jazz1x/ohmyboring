@@ -13,6 +13,7 @@ What this CANNOT check is whether the prose is true — whether the worker reall
 minutes, whether that log really says what the file claims. That is a person's job, and saying so
 is part of the gate: a check that implied more than it verifies would be worse than none.
 """
+
 import re
 import subprocess
 import sys

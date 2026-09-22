@@ -4,15 +4,15 @@
 Centralizes retries, timeouts, and JSON parsing so Python adapters (recall,
 distillation, schedulers, diagnostics) stop duplicating urllib boilerplate.
 """
+
 from __future__ import annotations
 
 import json
 import os
-import socket
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Optional
+from typing import Any
 
 import omb_env
 
@@ -26,7 +26,7 @@ class DrudgeClient:
 
     def __init__(
         self,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
         timeout: float = 5.0,
         retries: int = 1,
     ):
@@ -38,8 +38,8 @@ class DrudgeClient:
         self,
         method: str,
         path: str,
-        payload: Optional[dict[str, Any]] = None,
-        timeout: Optional[float] = None,
+        payload: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> Any:
         url = f"{self.base_url}{path}"
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -52,10 +52,10 @@ class DrudgeClient:
         self,
         method: str,
         path: str,
-        payload: Optional[dict[str, Any]] = None,
-        timeout: Optional[float] = None,
+        payload: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> Any:
-        last_err: Optional[Exception] = None
+        last_err: Exception | None = None
         for attempt in range(self.retries + 1):
             try:
                 return self._request(method, path, payload, timeout)
@@ -65,7 +65,7 @@ class DrudgeClient:
                     time.sleep(1 << attempt)
                     continue
                 raise
-            except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+            except (urllib.error.URLError, TimeoutError) as e:
                 last_err = e
                 if attempt < self.retries:
                     time.sleep(1 << attempt)
@@ -74,8 +74,13 @@ class DrudgeClient:
         raise last_err or RuntimeError("unexpected empty retry loop")
 
     def search(
-        self, query: str, max_results: int = 3, max_tokens: int = 1500, related: int = 0, related_heads: int = 2,
-        claims: int = 0
+        self,
+        query: str,
+        max_results: int = 3,
+        max_tokens: int = 1500,
+        related: int = 0,
+        related_heads: int = 2,
+        claims: int = 0,
     ) -> list[dict[str, Any]]:
         """POST /search and return the hits list. `related` > 0 asks for the older notes each
         of the first `related_heads` hits shares a concept with, under the hit's `related` key.
@@ -100,10 +105,10 @@ class DrudgeClient:
         self,
         session_id: str,
         observed_at: str,
-        used: Optional[list[str]] = None,
-        contested: Optional[list[str]] = None,
+        used: list[str] | None = None,
+        contested: list[str] | None = None,
         supersedes: list[list[str]] | None = None,
-        verdict: Optional[str] = None,
+        verdict: str | None = None,
     ) -> dict[str, Any]:
         """POST /consumption — what a session did with the notes it was handed, as graph edges.
         `supersedes` pairs are `[newer_path, older_path]`. A `verdict` (`used`|`contested`)
@@ -128,10 +133,10 @@ class DrudgeClient:
         title: str,
         body: str,
         *,
-        tags: Optional[list[str]] = None,
-        supersedes: Optional[list[str]] = None,
+        tags: list[str] | None = None,
+        supersedes: list[str] | None = None,
         origin: str = "personal",
-        repo: Optional[str] = None,
+        repo: str | None = None,
     ) -> dict[str, Any]:
         """POST /remember — a new note, optionally correcting older ones. `supersedes` names the
         source paths the new note replaces; the engine writes the supersede edges so the next
@@ -150,7 +155,7 @@ class DrudgeClient:
         """GET /health."""
         return self._retry("GET", "/health")
 
-    def sync(self, timeout: Optional[float] = None) -> dict[str, Any]:
+    def sync(self, timeout: float | None = None) -> dict[str, Any]:
         """POST /sync. The class default is sized for point reads; a whole-vault scan
         outgrows any constant, so callers that only need the engine to keep going pass
         their own deadline explicitly."""
@@ -178,7 +183,7 @@ class DrudgeClient:
         return self._retry("POST", "/context", payload)
 
 
-def check_drudge_writable(client: Optional["DrudgeClient"] = None) -> None:
+def check_drudge_writable(client: DrudgeClient | None = None) -> None:
     """Raise DrudgeNotWritableError unless drudge can accept a write right now.
 
     Collectors distill first and remember second, so a dead write door used to burn a
@@ -201,6 +206,4 @@ def check_drudge_writable(client: Optional["DrudgeClient"] = None) -> None:
             "drudge reports db_healthy=false — postgres is degraded, writes would fail"
         )
     if "db_healthy" in health and health.get("status") == "degraded":
-        raise DrudgeNotWritableError(
-            f"drudge reports status={health.get('status')!r} — writes would fail"
-        )
+        raise DrudgeNotWritableError(f"drudge reports status={health.get('status')!r} — writes would fail")

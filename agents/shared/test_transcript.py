@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Regression tests for the shared transcript parser."""
+
 import json
 import os
 import sys
@@ -85,11 +86,7 @@ def test_extract_claude_jsonl_includes_allowlisted_tool_calls():
                             {
                                 "type": "tool_use",
                                 "name": "TodoWrite",
-                                "input": {
-                                    "todos": [
-                                        {"content": "inventory files", "status": "in_progress"}
-                                    ]
-                                },
+                                "input": {"todos": [{"content": "inventory files", "status": "in_progress"}]},
                             },
                             {
                                 "type": "tool_use",

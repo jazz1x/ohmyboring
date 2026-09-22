@@ -3,6 +3,7 @@
 
 Run: python3 agents/shared/test_workflow_contract.py
 """
+
 import re
 from pathlib import Path
 

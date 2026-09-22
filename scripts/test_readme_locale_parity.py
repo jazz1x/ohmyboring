@@ -11,6 +11,7 @@ legitimately change: how many sections there are, and which commands the
 reader is told to run. If English grows a section or a `make` target, the
 translations have to grow it too or this fails and names what is missing.
 """
+
 import pathlib
 import re
 import sys
@@ -39,9 +40,11 @@ def main():
     want_headings = len(HEADING.findall(english))
     want_targets = set(MAKE_TARGET.findall(english))
     if not want_targets or want_headings < 5:
-        sys.exit(f"FAIL: {ENGLISH} parsed as {want_headings} headings and "
-                 f"{len(want_targets)} make targets — the parser is broken, "
-                 "not the translations")
+        sys.exit(
+            f"FAIL: {ENGLISH} parsed as {want_headings} headings and "
+            f"{len(want_targets)} make targets — the parser is broken, "
+            "not the translations"
+        )
 
     failures = []
     for name in TRANSLATIONS:
@@ -54,21 +57,23 @@ def main():
             )
         missing = sorted(want_targets - set(MAKE_TARGET.findall(text)))
         if missing:
-            failures.append(
-                f"{name}: never mentions " + ", ".join(f"`make {t}`" for t in missing)
-            )
+            failures.append(f"{name}: never mentions " + ", ".join(f"`make {t}`" for t in missing))
 
     if failures:
         print("FAIL: the translated READMEs have drifted from " + ENGLISH)
         for line in failures:
             print("  - " + line)
-        print("\nPort the missing section rather than deleting the translation —"
-              " measure the gap before you decide it is unmaintainable.")
+        print(
+            "\nPort the missing section rather than deleting the translation —"
+            " measure the gap before you decide it is unmaintainable."
+        )
         sys.exit(1)
 
-    print(f"ok - README locale parity ({want_headings} sections, "
-          f"{len(want_targets)} make targets across "
-          f"{len(TRANSLATIONS) + 1} languages)")
+    print(
+        f"ok - README locale parity ({want_headings} sections, "
+        f"{len(want_targets)} make targets across "
+        f"{len(TRANSLATIONS) + 1} languages)"
+    )
 
 
 if __name__ == "__main__":

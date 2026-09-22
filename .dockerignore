@@ -1,0 +1,12 @@
+# Build context for the boring-door image (dockerfile: agents/door/Dockerfile, context: .).
+# Docker cannot re-include a file under an excluded parent, so each parent dir
+# is re-included one level at a time; everything else stays out of the context.
+**
+!agents
+!agents/door
+!agents/door/**
+!data
+!data/contract
+!data/contract/**
+agents/door/Dockerfile
+**/__pycache__

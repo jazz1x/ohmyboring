@@ -6,6 +6,7 @@ distilled (no .ts marker) and processes a small batch per run. Designed to be
 invoked from cron/launchd so long or past Kimi sessions slowly drain into the
 vault without blocking the active session.
 """
+
 import json
 import os
 import subprocess
@@ -63,9 +64,9 @@ def _load_index():
 
 
 def _distill(session_id: str, cwd: str) -> bool:
-    payload = json.dumps(
-        {"session_id": session_id, "cwd": cwd, "hook_event_name": "SessionEnd"}
-    ).encode("utf-8")
+    payload = json.dumps({"session_id": session_id, "cwd": cwd, "hook_event_name": "SessionEnd"}).encode(
+        "utf-8"
+    )
     try:
         proc = subprocess.run(
             [sys.executable, HOOK],

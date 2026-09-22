@@ -17,10 +17,10 @@ treatment is a different ratio, not a rougher one — see `uptake_core.session_u
 """
 
 import os
-import sys
 import re
+import sys
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import NamedTuple
 
 #: Sessions the window needs before any number is reported. Below this the rates are noise from
@@ -98,7 +98,12 @@ def verdict(
         return Verdict(
             REFUSED,
             "커버리지 하한 미달 — 판정이 아니라 계측 조사 (§2)",
-            sessions, total_prompts, treatment, control, gap, ratio,
+            sessions,
+            total_prompts,
+            treatment,
+            control,
+            gap,
+            ratio,
         )
 
     if sessions < MIN_SESSIONS or total_prompts < MIN_INJECTED_PROMPTS:
@@ -108,8 +113,14 @@ def verdict(
         if total_prompts < MIN_INJECTED_PROMPTS:
             short.append(f"주입 프롬프트 {total_prompts} < {MIN_INJECTED_PROMPTS}")
         return Verdict(
-            REFUSED, "표본 하한 미달 — " + " · ".join(short),
-            sessions, total_prompts, treatment, control, gap, ratio,
+            REFUSED,
+            "표본 하한 미달 — " + " · ".join(short),
+            sessions,
+            total_prompts,
+            treatment,
+            control,
+            gap,
+            ratio,
         )
 
     # Written as a multiplication, which is what §2 says: 처치군 ≥ 대조군 2배. Dividing instead
@@ -119,8 +130,14 @@ def verdict(
     ratio_ok = treatment >= WORKS_RATIO * control
     if ratio_ok and gap >= WORKS_GAP_PP:
         return Verdict(
-            WORKS, f"처치 {treatment:.2f}pp ≥ 대조 {control:.2f}pp × {WORKS_RATIO:g} 이고 격차 {gap:.2f}pp ≥ {WORKS_GAP_PP:g}pp",
-            sessions, total_prompts, treatment, control, gap, ratio,
+            WORKS,
+            f"처치 {treatment:.2f}pp ≥ 대조 {control:.2f}pp × {WORKS_RATIO:g} 이고 격차 {gap:.2f}pp ≥ {WORKS_GAP_PP:g}pp",
+            sessions,
+            total_prompts,
+            treatment,
+            control,
+            gap,
+            ratio,
         )
     if gap <= BROKEN_MARGIN_PP:
         # §2: "처치군과 대조군이 동시에 0 인 것은 '아무도 안 썼다'의 증거이기 전에 '이 검출기는
@@ -131,18 +148,27 @@ def verdict(
         both_silent = used_prompts == 0 and used_control_prompts == 0
         if both_silent and detector_sensitive is not True:
             why = (
-                "검출기 감도 미증명"
-                if detector_sensitive is None
-                else "검출기가 손에 쥐여준 사용도 못 봤다"
+                "검출기 감도 미증명" if detector_sensitive is None else "검출기가 손에 쥐여준 사용도 못 봤다"
             )
             return Verdict(
                 REFUSED,
                 f"처치·대조 동시 0 (분모 {total_prompts}) · {why} — 판정이 아니라 계측 조사 (§2)",
-                sessions, total_prompts, treatment, control, gap, ratio,
+                sessions,
+                total_prompts,
+                treatment,
+                control,
+                gap,
+                ratio,
             )
         return Verdict(
-            BROKEN, f"처치 {treatment:.2f}pp ≤ 대조 {control:.2f}pp + {BROKEN_MARGIN_PP:g}pp — 현재 형태의 주입 채널 비작동",
-            sessions, total_prompts, treatment, control, gap, ratio,
+            BROKEN,
+            f"처치 {treatment:.2f}pp ≤ 대조 {control:.2f}pp + {BROKEN_MARGIN_PP:g}pp — 현재 형태의 주입 채널 비작동",
+            sessions,
+            total_prompts,
+            treatment,
+            control,
+            gap,
+            ratio,
         )
     unmet = []
     if not ratio_ok:
@@ -150,8 +176,14 @@ def verdict(
     if gap < WORKS_GAP_PP:
         unmet.append(f"격차 {gap:.2f}pp < {WORKS_GAP_PP:g}pp")
     return Verdict(
-        WITHHELD, "작동 조건 미충족, 비작동 조건에도 해당 없음 — " + " · ".join(unmet),
-        sessions, total_prompts, treatment, control, gap, ratio,
+        WITHHELD,
+        "작동 조건 미충족, 비작동 조건에도 해당 없음 — " + " · ".join(unmet),
+        sessions,
+        total_prompts,
+        treatment,
+        control,
+        gap,
+        ratio,
     )
 
 
@@ -227,6 +259,7 @@ def session_counts(rows, since, until, classify=None):
         return SessionCounts(len(ended - automated), len(scored), len(automated & ended), "session_end")
     return SessionCounts(len(distilled), len(scored), len(automated), "distill_resolution")
 
+
 def unreported(rows):
     """(sessions, rows) that were injected into and never scored, from `injection_unreported`.
 
@@ -283,7 +316,7 @@ def _instant(value):
         parsed = datetime.fromisoformat(str(value))
     except (TypeError, ValueError):
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 #: `YYYY-MM-DD`. The comparison against MIDPOINT and WINDOW_UNTIL is lexical, which is exact for
@@ -418,7 +451,7 @@ def window_day(observed_at):
     except ValueError:
         return stamp[:10]
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
     return moment.astimezone(WINDOW_TZ).date().isoformat()
 
 

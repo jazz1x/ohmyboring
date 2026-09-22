@@ -5,10 +5,10 @@ Guardrail owned: `--fix` must NEVER produce unparseable frontmatter. The origina
 line-splice preserved an inline `tags: []` line and appended block entries after
 it, yielding YAML that fails to parse (silent vault data loss on re-ingest).
 """
+
 import importlib.util
 import os
 import re
-import sys
 import tempfile
 from pathlib import Path
 
@@ -38,7 +38,9 @@ def _assert_parses(fm: str, label: str):
     try:
         yaml.safe_load(fm)
     except Exception as e:  # noqa: BLE001
-        raise AssertionError(f"{label}: rewritten frontmatter is unparseable YAML: {e}\n---\n{fm}\n---")
+        raise AssertionError(
+            f"{label}: rewritten frontmatter is unparseable YAML: {e}\n---\n{fm}\n---"
+        ) from e
 
 
 def test_inline_empty_tags_stays_parseable():
@@ -56,8 +58,7 @@ def test_inline_empty_tags_stays_parseable():
 
 def test_inline_nonempty_tags_stays_parseable():
     fm = _roundtrip_fix(
-        "id: wiki-0042\ntitle: t\nproject: marketboro/omb\n"
-        "tags: [repo/marketboro/omb, effect]\nsources: []"
+        "id: wiki-0042\ntitle: t\nproject: marketboro/omb\ntags: [repo/marketboro/omb, effect]\nsources: []"
     )
     _assert_parses(fm, "inline-nonempty-tags")
     loaded = yaml.safe_load(fm)
@@ -75,9 +76,7 @@ def test_block_tags_stays_parseable():
 
 
 def test_placeholder_tags_removed_cleanly():
-    fm = _roundtrip_fix(
-        "id: wiki-0042\ntitle: t\nproject: omb\ntags:\n- _\n- pr_\n- real\nsources: []"
-    )
+    fm = _roundtrip_fix("id: wiki-0042\ntitle: t\nproject: omb\ntags:\n- _\n- pr_\n- real\nsources: []")
     _assert_parses(fm, "placeholder-tags")
     loaded = yaml.safe_load(fm)
     tags = loaded.get("tags") or []
@@ -123,10 +122,7 @@ def test_missing_claims_flags_session_notes():
 
 
 def test_non_session_note_without_claims_is_ok():
-    note = _make_note(
-        "id: wiki-0042\ntitle: t\nkind: note\norigin: personal\n"
-        "claims: []\nsources: []"
-    )
+    note = _make_note("id: wiki-0042\ntitle: t\nkind: note\norigin: personal\nclaims: []\nsources: []")
     issues = ds._claim_issues([note])
     assert len(issues) == 0, issues
 

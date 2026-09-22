@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tests for verdict_core.py — above all, that a short sample cannot be argued into a verdict."""
+
 import re
 import sys
 from pathlib import Path
@@ -277,7 +278,6 @@ def test_the_self_check_is_measured_against_the_treatment_rate_not_a_constant():
     assert V.self_check_verdict(0.002, None) is None
 
 
-
 def test_two_zeros_are_not_a_verdict_until_the_detector_is_shown_to_see():
     """§2: 처치·대조 동시 0 은 "아무도 안 썼다"이기 전에 "검출기가 못 본다"일 수 있다.
 
@@ -318,7 +318,6 @@ def test_the_sensitivity_gate_only_guards_the_not_working_reading():
     assert V.verdict(1, 0, 5, 0, detector_sensitive=True).label == V.REFUSED
 
 
-
 def test_the_window_day_is_the_owners_calendar_day():
     """§2 registered the window in the owner's dates; the events are stamped UTC.
 
@@ -349,6 +348,7 @@ def test_collect_closes_the_window_at_both_ends():
     same ledger and count different samples — the dates would still be printed, and would no
     longer be what either number described.
     """
+
     def row(day, agent="claude-code"):
         return {
             "event": "injection_uptake",
@@ -376,7 +376,6 @@ def test_collect_closes_the_window_at_both_ends():
     assert unbounded["claude-code"]["total_prompts"] == 20, unbounded
 
 
-
 def test_coverage_decides_whether_a_verdict_is_allowed_at_all():
     """§2 puts coverage before the thresholds, not beside them.
 
@@ -396,7 +395,6 @@ def test_coverage_decides_whether_a_verdict_is_allowed_at_all():
     # channel that was measured — the clause is about the population, not about the direction.
     assert V.verdict(29, 40, 515, 10, coverage_ok=False).label == V.REFUSED
     assert V.verdict(29, 40, 515, 10, coverage_ok=True).label == V.WORKS
-
 
 
 if __name__ == "__main__":

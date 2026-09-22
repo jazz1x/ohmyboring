@@ -11,6 +11,7 @@ too high), so boring.json discovery returned None and note_lang + repo rules wer
 ignored for every distilled session. The root must be the dir that holds
 boring.example.json (and, when present, boring.json).
 """
+
 import os
 import sys
 from pathlib import Path
@@ -35,10 +36,9 @@ ROOT_MARKER = "boring.example.json"
 
 def test_repo_root_is_dir_with_example():
     root = boring_config._repo_root()
-    expected = (root / ROOT_MARKER)
+    expected = root / ROOT_MARKER
     assert expected.is_file(), (
-        f"_repo_root() = {root} does not contain {ROOT_MARKER}; "
-        f"resolver is pointing at the wrong level"
+        f"_repo_root() = {root} does not contain {ROOT_MARKER}; resolver is pointing at the wrong level"
     )
 
 
@@ -65,9 +65,7 @@ def test_discover_path_targets_repo_root():
     # Whether or not a local boring.json exists, the result must never be the
     # bogus agents/boring.json that the off-by-one produced.
     if found is not None:
-        assert found.parent.name != "agents", (
-            f"discover_path() = {found} resolved under agents/ (off-by-one)"
-        )
+        assert found.parent.name != "agents", f"discover_path() = {found} resolved under agents/ (off-by-one)"
 
 
 def test_source_dirs_filter_by_adapter_and_agent():
@@ -135,7 +133,7 @@ def test_load_warns_on_parse_error():
     """A corrupt boring.json must not silently look like an empty policy."""
     import tempfile
 
-    old_path = boring_config.discover_path()
+    boring_config.discover_path()
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         f.write('{"schema_version": 1, "note_lang": "ko",}')  # trailing comma
         tmp = f.name
@@ -176,7 +174,11 @@ def test_classify_adversarial_inputs():
     cfg = {
         "repos": [
             {"match": "acme", "origin": "company", "name": "acme"},
-            {"match": " ~/work ", "origin": "personal", "name": "work"},  # spaces should still match via strip? no, matcher is used as-is in _matches
+            {
+                "match": " ~/work ",
+                "origin": "personal",
+                "name": "work",
+            },  # spaces should still match via strip? no, matcher is used as-is in _matches
         ]
     }
     old_load = boring_config.load
@@ -186,7 +188,10 @@ def test_classify_adversarial_inputs():
         assert boring_config.classify("", "") == ("personal", None)
         assert boring_config.classify("", None) == ("personal", None)
         # No rule matches.
-        assert boring_config.classify("/tmp/orphan", "https://github.com/orphan/repo.git") == ("personal", None)
+        assert boring_config.classify("/tmp/orphan", "https://github.com/orphan/repo.git") == (
+            "personal",
+            None,
+        )
         # Case-insensitive remote match; .git suffix ignored by matcher.
         assert boring_config.classify("/tmp/foo", "https://github.com/ACME/Widget.git") == ("company", "acme")
         # SSH remote format.

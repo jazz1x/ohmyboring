@@ -9,7 +9,6 @@ import json
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
@@ -141,9 +140,7 @@ def test_blocked_is_never_truncated_and_both_renderers_agree():
 
     body = slack_briefing.render_body_mrkdwn(answer)
     payload = slack_briefing.render_blocks_payload("T", "S", answer, [], "empty")
-    blocks_text = "\n".join(
-        b["text"]["text"] for b in payload["blocks"] if b.get("type") == "section"
-    )
+    blocks_text = "\n".join(b["text"]["text"] for b in payload["blocks"] if b.get("type") == "section")
 
     # A "+N more" hiding a blocker is the one omission that can cost the reader their morning.
     for i in range(8):
@@ -162,8 +159,7 @@ def test_done_does_not_push_blockers_off_the_first_screen():
     slack_briefing = load_module("slack_briefing_done", ROOT / "slack_briefing.py")
 
     answer = "\n".join(
-        ["# proj", "- Blocked: the one blocker"]
-        + [f"- Done: finished {i}" for i in range(10)]
+        ["# proj", "- Blocked: the one blocker"] + [f"- Done: finished {i}" for i in range(10)]
     )
     payload = slack_briefing.render_blocks_payload("T", "S", answer, [], "empty")
     sections = [b for b in payload["blocks"] if b.get("type") == "section"]
@@ -173,10 +169,7 @@ def test_done_does_not_push_blockers_off_the_first_screen():
     for i in range(10):
         assert f"finished {i}" not in section_text, "Done items must not occupy sections"
     tail = "\n".join(
-        e["text"]
-        for b in payload["blocks"]
-        if b.get("type") == "context"
-        for e in b["elements"]
+        e["text"] for b in payload["blocks"] if b.get("type") == "context" for e in b["elements"]
     )
     assert "완료 10" in tail
     assert "the one blocker" in sections[0]["text"]["text"], "the blocker leads the message"
@@ -210,10 +203,7 @@ def test_weekly_reports_persistence_not_closure():
     # happens, because each daily is re-synthesised by the model (measured: 252 items over a
     # week, adjacent-day overlap 0,0,0,2,0,0).
     days = _week(
-        [
-            (f"2026-08-2{i}", f"# kb-rag-bot\n- Blocked: corpus boundary issue variant {i}\n")
-            for i in range(4)
-        ]
+        [(f"2026-08-2{i}", f"# kb-rag-bot\n- Blocked: corpus boundary issue variant {i}\n") for i in range(4)]
         # Blocked on exactly one day: a thing can be blocked overnight and cleared by lunch,
         # and calling that persistent would fill the intervention list with noise. It must be a
         # *blocked* project — a Done one is filtered by label anyway and would prove nothing.
@@ -291,17 +281,18 @@ def test_weekly_blocks_carry_the_not_a_closure_rate_caveat():
     slack_briefing = load_module("slack_briefing_caveat", ROOT / "slack_briefing.py")
     trend = load_module("weekly_trend_caveat", ROOT / "weekly_trend.py")
 
-    days = _week([("2026-08-2%d" % i, "# p\n- Blocked: x%d\n" % i) for i in range(3)])
+    days = _week([(f"2026-08-2{i}", f"# p\n- Blocked: x{i}\n") for i in range(3)])
     projects = trend.collect_week(days)
     blocks = slack_briefing.render_weekly_blocks(
-        "T", "S", projects,
-        [(w, l, n, 3) for w, l, n in trend.needs_intervention(projects)],
+        "T",
+        "S",
+        projects,
+        [(w, label, n, 3) for w, label, n in trend.needs_intervention(projects)],
         [(w, 3) for w in trend.scoreboard(projects)],
-        trend.label_trend(days), [],
+        trend.label_trend(days),
+        [],
     )
-    tail = "\n".join(
-        e["text"] for b in blocks if b.get("type") == "context" for e in b["elements"]
-    )
+    tail = "\n".join(e["text"] for b in blocks if b.get("type") == "context" for e in b["elements"])
     # A reader who adds "✅ 10→10" into "twenty done" has been lied to. The caveat is contract.
     assert "마감률이 아니다" in tail
     # No item bullets beyond the one quoted line per persistent project.
@@ -355,10 +346,8 @@ Blocked:
 - Next: fix <body> & "quotes"
 """
     body = slack_briefing.render_body_mrkdwn(html)
-    assert "fix <body> & \"quotes\"" in body
-    payload = slack_briefing.render_blocks_payload(
-        "t", "s", html, [], "empty"
-    )
+    assert 'fix <body> & "quotes"' in body
+    payload = slack_briefing.render_blocks_payload("t", "s", html, [], "empty")
     # Fallback mrkdwn keeps raw characters; Block Kit blocks escape them.
     block_blob = json.dumps(payload["blocks"], ensure_ascii=False)
     assert "&lt;body&gt;" in block_blob
@@ -491,9 +480,7 @@ def test_the_window_sample_is_named_in_both_renderings_and_falls_silent_when_met
     assert slack_briefing.window_notice(met) == "", "a met floor stops reporting the sample"
 
     # One floor met is not both — the line has to keep reporting until the verdict is computable.
-    assert slack_briefing.window_notice(
-        {"sessions": V.MIN_SESSIONS, "total_prompts": 1}
-    ) != ""
+    assert slack_briefing.window_notice({"sessions": V.MIN_SESSIONS, "total_prompts": 1}) != ""
 
     assert slack_briefing.window_notice(None) == "", "an unreachable engine is not a zero sample"
 
@@ -542,9 +529,7 @@ def test_nothing_in_the_message_names_the_unattributed_group_as_a_project():
     across the 62 briefings in the vault), so none of these is an edge case.
     """
     slack_briefing = load_module("slack_briefing_orphan_render", ROOT / "slack_briefing.py")
-    answer = "\n".join(
-        f"## 다른 프로젝트\n- Blocked: 막힌 항목 {n}" for n in range(1, 8)
-    )
+    answer = "\n".join(f"## 다른 프로젝트\n- Blocked: 막힌 항목 {n}" for n in range(1, 8))
     rendered = slack_briefing.render_message_mrkdwn(
         "*brief*", "2026-09-03", answer, [], "없음", None, None, ["foodspring-front"]
     )
@@ -774,9 +759,7 @@ def test_an_unreachable_engine_does_not_read_as_a_corpus_with_no_projects():
         "an empty corpus is an answer: no heading names a project the reader could look up"
     )
 
-    doc = slack_briefing.parse_brief(
-        "## foodspring-front\n- Next: ship the thing\n", known_projects=None
-    )
+    doc = slack_briefing.parse_brief("## foodspring-front\n- Next: ship the thing\n", known_projects=None)
     assert [p.name for p in doc.projects] == ["foodspring-front"]
 
 
@@ -857,9 +840,7 @@ def test_the_briefing_counts_the_verdicts_population_not_a_neighbouring_one():
     with mock.patch.object(briefing.urllib.request, "urlopen", lambda *a, **k: _Resp()):
         stats = briefing.uptake_stats()
 
-    assert stats["sessions"] == 3, (
-        f"pre-repair rows and other adapters must not inflate it: {stats}"
-    )
+    assert stats["sessions"] == 3, f"pre-repair rows and other adapters must not inflate it: {stats}"
 
 
 def test_the_midpoint_warning_rides_the_one_channel_that_reaches_a_person():
@@ -897,9 +878,9 @@ def test_the_midpoint_warning_rides_the_one_channel_that_reaches_a_person():
 
     os.environ["BORING_TODAY"] = V.MIDPOINT
     try:
-        assert "중간점" not in slack_briefing.window_notice(
-            {"sessions": floor, "total_prompts": 31}
-        ), "at the floor there is no shortfall to report"
+        assert "중간점" not in slack_briefing.window_notice({"sessions": floor, "total_prompts": 31}), (
+            "at the floor there is no shortfall to report"
+        )
     finally:
         os.environ.pop("BORING_TODAY", None)
 
@@ -919,6 +900,7 @@ def test_the_audit_backlog_is_named_in_both_renderings_and_falls_silent_when_met
     os.environ["BORING_TODAY"] = "2026-09-14"  # a Monday inside the window
     body = slack_briefing.render_message_mrkdwn("*T*", "S", answer, [], "empty", behind)
     payload = slack_briefing.render_blocks_payload("T", "S", answer, [], "empty", behind)
+
     def all_text(blocks):
         # context blocks carry their text in `elements`, sections in `text` -- read both, or
         # the assertion passes for the wrong reason on whichever shape it forgot.
@@ -973,9 +955,7 @@ def test_the_audit_backlog_is_named_in_both_renderings_and_falls_silent_when_met
 def test_the_text_fallback_carries_the_shortlist_too():
     slack_briefing = load_module("slack_briefing_fb", ROOT / "slack_briefing.py")
 
-    answer = "# p\n- Blocked: the blocker\n" + "\n".join(
-        f"- Next: action {i}" for i in range(6)
-    )
+    answer = "# p\n- Blocked: the blocker\n" + "\n".join(f"- Next: action {i}" for i in range(6))
     body = slack_briefing.render_body_mrkdwn(answer)
     payload = slack_briefing.render_blocks_payload("T", "S", answer, [], "empty")
     blocks_text = "\n".join(
@@ -994,7 +974,9 @@ def test_the_text_fallback_carries_the_shortlist_too():
 def test_zones_replace_status_headings_but_keep_the_status():
     slack_briefing = load_module("slack_briefing_zone", ROOT / "slack_briefing.py")
 
-    answer = "# p\n- Blocked: cannot start\n- Stalled: sitting a week\n- Next: do the thing\n- Risk: might break\n"
+    answer = (
+        "# p\n- Blocked: cannot start\n- Stalled: sitting a week\n- Next: do the thing\n- Risk: might break\n"
+    )
     body = slack_briefing.render_body_mrkdwn(answer)
 
     # Six headings were more precision than the classifier delivers — the distiller's own labels
