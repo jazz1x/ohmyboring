@@ -373,6 +373,116 @@ class DoorTest(unittest.TestCase):
         self.assertIn("closed", StubHandler.sse_events)
 
 
+class ActiveProjectsRouteTests(unittest.TestCase):
+    """GET /projects?active_days= through the real door app — stub rows, no DB (AC1)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved_upstream = os.environ.get("DOOR_UPSTREAM")
+        cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), StubHandler)
+        cls.stub_thread = threading.Thread(target=cls.stub.serve_forever, daemon=True)
+        cls.stub_thread.start()
+        os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{cls.stub.server_address[1]}"
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                with socket.create_connection(("127.0.0.1", cls.door_port), timeout=1):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+        cls.stub.shutdown()
+        cls.stub.server_close()
+        if cls._saved_upstream is None:
+            os.environ.pop("DOOR_UPSTREAM", None)
+        else:
+            os.environ["DOOR_UPSTREAM"] = cls._saved_upstream
+
+    def setUp(self):
+        self._saved_dsn = os.environ.get("DOOR_PG_DSN")
+        self._rows: list[tuple[str, int]] = []
+        self._orig_fetch = door._fetch_active_projects
+        door._fetch_active_projects = lambda active_days: self._rows
+
+    def tearDown(self):
+        door._fetch_active_projects = self._orig_fetch
+        if self._saved_dsn is None:
+            os.environ.pop("DOOR_PG_DSN", None)
+        else:
+            os.environ["DOOR_PG_DSN"] = self._saved_dsn
+
+    def test_no_active_days_proxies_the_plain_engine_route(self):
+        # No active_days param: the door's own /projects handler falls through to _proxy,
+        # so a call still reaches the stub engine at exactly this path — proved here by the
+        # stub's fixed 404 body, which only a real round trip through the stub can produce.
+        StubHandler.last_path = None
+        status, body, _ = _req(self.door_port, "GET", "/projects")
+        self.assertEqual(StubHandler.last_path, "/projects")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body), {"error": "stub 404"})
+
+    def test_no_dsn_with_active_days_is_503_never_empty_200(self):
+        os.environ.pop("DOOR_PG_DSN", None)
+        status, body, content_type = _req(self.door_port, "GET", "/projects?active_days=14")
+        self.assertEqual(status, 503)
+        self.assertIn("application/json", content_type)
+        self.assertEqual(json.loads(body), {"error": "store not configured"})
+
+    def test_out_of_range_active_days_is_400(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        for bad in ("0", "-1", "366", "abc", "1.5"):
+            status, body, _ = _req(self.door_port, "GET", f"/projects?active_days={bad}")
+            self.assertEqual(status, 400, f"active_days={bad}")
+            self.assertIn("active_days", json.loads(body)["error"])
+
+    def test_stub_rows_answer_project_and_document_counts(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = [("foodspring-front", 72), ("ohmyboring", 42)]
+        status, body, content_type = _req(self.door_port, "GET", "/projects?active_days=14")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        payload = json.loads(body)
+        self.assertEqual(payload["active_days"], 14)
+        self.assertEqual(
+            payload["projects"],
+            [{"project": "foodspring-front", "documents": 72}, {"project": "ohmyboring", "documents": 42}],
+        )
+
+    def test_active_days_at_bounds_is_200(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = []
+        for ok in ("1", "365"):
+            status, body, _ = _req(self.door_port, "GET", f"/projects?active_days={ok}")
+            self.assertEqual(status, 200, f"active_days={ok}")
+            self.assertEqual(json.loads(body)["active_days"], int(ok))
+
+
+class ActiveDaysPureTests(unittest.TestCase):
+    """door._check_active_days — pure: string in, bounded int or ValueError (AC1)."""
+
+    def test_inside_bounds_passthrough(self):
+        for ok in ("1", "14", "365"):
+            self.assertEqual(door._check_active_days(ok), int(ok))
+
+    def test_outside_bounds_is_a_value_error(self):
+        for bad in ("0", "-1", "366", "1.5", "", "abc"):
+            with self.assertRaises(ValueError, msg=f"active_days={bad!r}"):
+                door._check_active_days(bad)
+
+
 class ApprovedSelectTests(unittest.TestCase):
     """approved.select_approved — pure: rows in, partitioned dataclasses out (AC1)."""
 

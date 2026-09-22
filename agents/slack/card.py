@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """The morning card — one LangGraph run: read the registers, advise, resolve, post, interrupt.
 
-`make card` runs g_card once. The graph reads the engine's four registers, cross-checks
-the past 48h of 「해」 against today's registers for the card's head line (a door failure
-leaves an approval 확인불가 — never a false 「했다」), then the advise node walks the
-bottleneck candidates one at a time — 「아직」 subjects first — searching each subject's past
-record and asking the local model for a grounded pitch (or a NotWorth refusal), up to three
-proposals or eight calls. The resolve node turns each proposal's subject into the note path
-the door's /claim-source names (dropping what does not resolve — fewer than three, even
-zero, still ships), posts to SLACK_CARD_CHANNEL, and stops at an interrupt — a Slack button
-press (해 · 미뤄 · 빼) resumes it with Command(resume=…), and record_verdict writes the
-verdict to the engine. Sent and judged stay in one state, so the card a person answered is
-exactly the card the engine remembers. CARD_DRY_RUN=1 stops right after post_card and prints
-the proposals instead of touching Slack, handover, or the event log.
+`make card` runs g_card once. read_registers calls the door for the active-project list
+(14d) plus the unassigned bucket and reads each one's four registers separately; cross_check
+checks the past 48h of 「해」 against the union of today's registers for the card's head
+line (a door failure leaves an approval 확인불가 — never a false 「했다」); advise walks the
+merged (project, subject) queue one candidate at a time — 「아직」 pairs first — searching
+each subject's past record and asking the local model (in whichever language
+boring.json's note_lang resolves to) for a grounded pitch, up to three proposals or eight
+calls total, regardless of how many projects were active. resolve turns each proposal's
+subject into its note path via /claim-source, then drops any candidate whose (note,
+evidence) pair already got a 해/빼 verdict in the last 7 days (`card_core.suppressed`) —
+reading that history is not optional: a card that cannot read it does not ship. post_card
+sends the Block Kit card (grouped by project), records a card_proposal event per surviving
+proposal, and stops at an interrupt; a Slack button press (해 · 미뤄 · 빼) resumes it with
+Command(resume=…), record_verdict logs a card_verdict event for every press (미뤄 included)
+and, for 해/빼, writes the verdict to the engine. The wait for presses ends after
+CARD_WAIT_HOURS regardless of how many proposals are still unanswered — an unanswered
+proposal is left exactly as it is, the same as 미뤄. Sent and judged stay in one state, so
+the card a person answered is exactly the card the engine remembers. CARD_DRY_RUN=1 stops
+right after post_card and prints the proposals instead of touching Slack, handover, or the
+event log.
 
 The socket lives here, not in the secretary: hermes can only text, and the secretary answers
 questions while this file asks them. Everything decided lives in card_core; everything
@@ -24,18 +32,22 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
+from queue import Empty
 from typing import Annotated, Any, NamedTuple, TypedDict
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 
+import boring_config  # noqa: E402
 import card_core  # noqa: E402
+import omb_env  # noqa: E402
 from drudge_client import DrudgeClient  # noqa: E402
 from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
 from langgraph.graph import END, START, StateGraph  # noqa: E402
@@ -51,6 +63,12 @@ CONFIRM_SINCE_HOURS = 48
 # The advise loop's call budget: one gemma4 call per candidate, at most this many candidates
 # tried per run — a small local model's context outgrows a whole day's registers otherwise.
 ADVISE_CALL_CAP = 8
+# The project axis: registers are called once per project active in this window, plus once
+# more for the unassigned bucket (project="").
+PROJECT_ACTIVE_DAYS = 14
+# A card's own lifespan — the next card's post outlives any button the owner never got to
+# press, so waiting past this is polling a socket nobody is going to answer on.
+CARD_WAIT_HOURS = float(os.environ.get("CARD_WAIT_HOURS") or "23")
 
 
 def _append_verdicts(
@@ -60,20 +78,24 @@ def _append_verdicts(
 
 
 class CardState(TypedDict):
-    registers: card_core.Registers
+    lang: str
+    projects: list[str]  # active projects (14d) + [""] unassigned, in call order
+    project_registers: dict[str, card_core.Registers]
+    per_project_candidates: dict[str, int]
     proposals: list[card_core.Proposal]
     message: card_core.PostedCard | None
     confirmation: card_core.Confirmation | None
-    priority_subjects: list[str]
+    priority_subjects: list[tuple[str, str]]  # (project, subject)
     verdicts: Annotated[list[card_core.ButtonVerdict], _append_verdicts]
     advise_stats: card_core.AdviseStats
+    suppressed_count: int
 
 
 class Collaborators(NamedTuple):
     """Everything the graph reaches outside itself. Injected so the graph runs in tests with
     no engine, no model, no door and no Slack; live defaults are the module-level makers below."""
 
-    fetch: Callable[[str], dict[str, Any]]  # register path → engine JSON
+    fetch: Callable[[str, str], dict[str, Any]]  # register path, project → engine JSON
     search: Callable[[str], list[dict[str, Any]]]  # subject → past hits (claims included)
     read_note: Callable[[str], str | None]  # note path → its own text, or None if unreadable
     propose: Callable[[str], str]  # prompt → advised JSON text (one candidate)
@@ -83,6 +105,9 @@ class Collaborators(NamedTuple):
     resolve: Callable[[str, str], card_core.ResolvedNote | card_core.Unresolved]
     approved: Callable[[int], list[card_core.PastApproved]]  # since_hours → past approvals
     record: Callable[[str, dict], None]  # event name, fields → engine event log
+    active_projects: Callable[[int], list[str]]  # active_days → project names, doc-count desc
+    past_verdicts: Callable[[int], list[card_core.PastVerdictPair]]  # since_hours → 7d 해/빼 pairs
+    lang: str  # resolve_lang(boring_config.note_lang()) — a value, not a callable: no network
 
 
 def session_name(card: card_core.PostedCard) -> str:
@@ -103,10 +128,16 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             resolve=_live_resolve,
             approved=_live_approved,
             record=_live_record,
+            active_projects=_live_active_projects,
+            past_verdicts=_live_past_verdicts,
+            lang=card_core.resolve_lang(boring_config.note_lang()),
         )
 
     def read_registers(_: CardState) -> dict:
-        return {"registers": card_core.collect_registers(collabs.fetch)}
+        active = collabs.active_projects(PROJECT_ACTIVE_DAYS)
+        projects = [*active, ""]
+        project_registers = {p: card_core.collect_registers(collabs.fetch, p) for p in projects}
+        return {"lang": collabs.lang, "projects": projects, "project_registers": project_registers}
 
     #: subject → resolution, shared by cross_check and resolve so the door is asked once
     #: per subject per run.
@@ -120,46 +151,55 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
 
     def cross_check(state: CardState) -> dict:
         """The card's head line, before the model picks: yesterday's 「해」, each checked
-        against whether its note path still resolves from today's register subjects. A 404
-        establishes absence; a door failure (5xx·불통) leaves the approval unknown — the
-        card never reads a dead door as 「했다」. A dead /approved is not a value either:
-        the exception stops the run, and main exits 3 without posting."""
-        registers = state["registers"]
+        against whether its note path still resolves from today's registers — now the union
+        across every active project plus the unassigned bucket, since a past approval does
+        not remember which project's register it came from. A 404 establishes absence; a
+        door failure (5xx·불통) leaves the approval unknown — the card never reads a dead
+        door as 「했다」. A dead /approved is not a value either: the exception stops the
+        run, and main exits 3 without posting."""
+        project_registers = state["project_registers"]
         past = collabs.approved(CONFIRM_SINCE_HOURS)
         if not past:
             return {"confirmation": None, "priority_subjects": []}
         today_notes: set[str] = set()
-        note_to_subject: dict[str, str] = {}
+        note_to_pick: dict[str, tuple[str, str]] = {}
         failures: list[str] = []
-        for name in card_core.ANSWER_REGISTERS:
-            for subject in registers.sources.get(name, []):
-                result = _resolve(subject, name)
-                if isinstance(result, card_core.ResolvedNote):
-                    today_notes.add(result.note)
-                    note_to_subject.setdefault(result.note, subject)
-                elif not card_core.is_absence(result.reason):
-                    failures.append(result.reason)
-        for path in registers.sources.get("recurrences", []):
-            today_notes.add(path)
-            note_to_subject.setdefault(path, path)
+        for project, registers in project_registers.items():
+            for name in card_core.ANSWER_REGISTERS:
+                for subject in registers.sources.get(name, []):
+                    result = _resolve(subject, name)
+                    if isinstance(result, card_core.ResolvedNote):
+                        today_notes.add(result.note)
+                        note_to_pick.setdefault(result.note, (project, subject))
+                    elif not card_core.is_absence(result.reason):
+                        failures.append(result.reason)
+            for path in registers.sources.get("recurrences", []):
+                today_notes.add(path)
+                note_to_pick.setdefault(path, (project, path))
         confirmation = card_core.confirm_past(past, today_notes, failures)
-        priority = sorted({note_to_subject[note] for note in confirmation.pending if note in note_to_subject})
+        priority = sorted({note_to_pick[note] for note in confirmation.pending if note in note_to_pick})
         return {"confirmation": confirmation, "priority_subjects": priority}
 
     def advise(state: CardState) -> dict:
-        """The bottleneck pick, one candidate at a time (subject in, its register's search
-        hits and gemma4's grounded pitch or refusal out) — up to three proposals, at most
-        ADVISE_CALL_CAP calls. A candidate that fails to ground (schema, quote, or NotWorth)
-        is not an error: it just does not become a proposal, and the queue moves on — but its
-        reason is kept in advise_stats, not discarded, so a dry run can quote why."""
-        registers = state["registers"]
-        candidates = card_core.candidate_order(registers, state["priority_subjects"])
+        """The bottleneck pick, one candidate at a time (project+subject in, its register's
+        search hits and gemma4's grounded pitch or refusal out) — up to three proposals, at
+        most ADVISE_CALL_CAP calls, shared across every active project so the call budget
+        does not scale with how many projects were active this window. A candidate that
+        fails to ground (schema, quote, or NotWorth) is not an error: it just does not
+        become a proposal, and the queue moves on — but its reason is kept in advise_stats,
+        not discarded, so a dry run can quote why."""
+        candidates = card_core.merge_project_candidates(
+            state["projects"], state["project_registers"], state["priority_subjects"]
+        )
+        per_project_candidates: dict[str, int] = {}
+        for project, _subject, _register in candidates:
+            per_project_candidates[project] = per_project_candidates.get(project, 0) + 1
         proposals: list[card_core.Proposal] = []
         not_worth_reasons: list[str] = []
         ungrounded_reasons: list[str] = []
         calls = 0
         warned_empty_vault = False
-        for subject, register in candidates:
+        for project, subject, register in candidates:
             if len(proposals) >= 3 or calls >= ADVISE_CALL_CAP:
                 break
             hits = collabs.search(subject)
@@ -174,7 +214,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                     file=sys.stderr,
                 )
                 warned_empty_vault = True
-            prompt = card_core.build_advice_prompt(subject, register, hits)
+            prompt = card_core.build_advice_prompt(subject, register, hits, state["lang"])
             calls += 1
             advised = card_core.parse_advised(collabs.propose(prompt), note_texts)
             if isinstance(advised, card_core.Advice):
@@ -182,6 +222,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                     card_core.Proposal(
                         subject=subject,
                         register=register,
+                        project=project,
                         bottleneck=advised.bottleneck,
                         advice=advised.advice,
                         evidence=advised.evidence,
@@ -193,6 +234,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 ungrounded_reasons.append(advised.reason)
         return {
             "proposals": proposals,
+            "per_project_candidates": per_project_candidates,
             "advise_stats": card_core.AdviseStats(
                 calls=calls,
                 proposals_passed=len(proposals),
@@ -207,7 +249,10 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         """subject → note path through the door, for whatever advise picked. A subject that
         does not resolve is dropped as a value — 「근거 노트 없음」 never rides a card. Fewer
         than three, even zero, ships: NotWorth and an unresolved subject are both legitimate
-        answers now (실험 1's recall precision was 1/5), not a reason to refuse the card."""
+        answers now (실험 1's recall precision was 1/5), not a reason to refuse the card.
+        A resolved candidate is then run through the 7-day 판정 suppression: past_verdicts
+        is read unconditionally, even when there is nothing left to suppress — a card that
+        cannot read its own judged history is the wrong card to send (같은 원칙: /approved)."""
         picked: list[card_core.Proposal] = []
         seen_notes: set[str] = set()
         for proposal in state["proposals"]:
@@ -218,15 +263,23 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 continue
             seen_notes.add(result.note)
             picked.append(proposal.model_copy(update={"note": result.note}))
-        return {"proposals": picked}
+        past = collabs.past_verdicts(card_core.SUPPRESS_WINDOW_HOURS)
+        kept, dropped = card_core.suppressed(picked, past)
+        return {"proposals": kept, "suppressed_count": len(dropped)}
 
     def post_card(state: CardState) -> dict:
-        message = collabs.send(card_core.build_blocks(state["proposals"], confirmation=state["confirmation"]))
+        lang = state["lang"]
+        message = collabs.send(
+            card_core.build_blocks(state["proposals"], confirmation=state["confirmation"], lang=lang)
+        )
+        card_ts = message.ts
         collabs.handover(
             session_name(message),
             datetime.now(UTC).isoformat(),
             card_core.handover_paths(state["proposals"]),
         )
+        for idx, proposal in enumerate(state["proposals"]):
+            collabs.record("card_proposal", card_core.proposal_event_fields(proposal, lang, card_ts, idx))
         confirmation = state["confirmation"]
         if confirmation is not None:
             fields: dict[str, Any] = {
@@ -245,8 +298,9 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
 
     def record_verdict(state: CardState) -> dict:
         verdict = state["verdicts"][-1]
+        collabs.record("card_verdict", card_core.verdict_event_fields(verdict, state["message"].ts))
         if verdict.choice == "defer":
-            return {}  # recorded in state only — no engine call
+            return {}  # a card_verdict event, but no consumption call — never suppresses
         kind = "used" if verdict.choice == "do" else "contested"
         note = state["proposals"][verdict.idx].note
         collabs.consumption(session_name(state["message"]), kind, [note])
@@ -274,9 +328,73 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     return graph.compile(checkpointer=MemorySaver())
 
 
-def _live_fetch(path: str) -> dict[str, Any]:
+def _live_fetch(path: str, project: str) -> dict[str, Any]:
     # DrudgeClient has no public raw-POST door; _retry is the one that speaks JSON both ways.
-    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0)._retry("POST", path, {})
+    # project is always sent, even "" — the engine's own filter treats an explicit empty
+    # string as "unassigned documents only", not "no filter" (measured 2026-09-22).
+    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0)._retry("POST", path, {"project": project})
+
+
+def _live_active_projects(active_days: int) -> list[str]:
+    """The door's own GET /projects?active_days=N — DB-backed, unlike the engine's plain
+    /projects (no activity filter), so this asks the door, not DrudgeClient's engine URL."""
+    url = f"{_door_url()}/projects?active_days={active_days}"
+    with urllib.request.urlopen(url, timeout=ENGINE_TIMEOUT) as r:
+        payload = json.loads(r.read().decode("utf-8"))
+    return [str(item["project"]) for item in payload["projects"]]
+
+
+def _live_events(event_name: str, since_hours: int) -> list[dict[str, Any]]:
+    """GET /events, one event name at a time. §정정 (2026-09-22): the given assumed /events
+    sits among the door's proxied routes — measured false: `data/contract/engine-contract.json`
+    http_routes has 24 entries and /events is not one of them (`curl :7710/events` → 404),
+    while the engine answers it directly (`curl :7700/events?limit=3` → 200). /events is a
+    plain, non-DB-backed engine route, so this reads the engine directly (omb_env.drudge_url(),
+    the same resolution DrudgeClient uses) rather than adding a route to the door that the
+    door's own job (DB-backed answers the engine cannot give) never needed. maybe_truncated is
+    not a value to shrug at here: a clipped 7-day window would silently under-suppress (a
+    do/drop that should have hidden a repeat candidate falls outside the page handed back), so
+    it is raised, the same way an unreadable window is raised anywhere else in this file."""
+    url = f"{omb_env.drudge_url()}/events?event={urllib.parse.quote(event_name)}&since_hours={since_hours}&limit=1000"
+    with urllib.request.urlopen(url, timeout=ENGINE_TIMEOUT) as r:
+        payload = json.loads(r.read().decode("utf-8"))
+    if payload.get("maybe_truncated"):
+        raise OSError(
+            f"/events?event={event_name}&since_hours={since_hours} maybe_truncated=true — "
+            "a clipped judged-history window cannot ground 판정 suppression"
+        )
+    return payload["entries"]
+
+
+def _live_past_verdicts(since_hours: int) -> list[card_core.PastVerdictPair]:
+    """Join card_proposal and card_verdict events by (card_ts, idx) — a card_verdict event
+    alone carries no note or evidence, only the button press (knowns: card_ts·idx·choice)."""
+    proposals_by_key: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for entry in _live_events("card_proposal", since_hours):
+        attrs = entry.get("attributes") or {}
+        key = (attrs.get("card_ts"), attrs.get("idx"))
+        if key[0] is not None and key[1] is not None:
+            proposals_by_key[key] = attrs
+    out: list[card_core.PastVerdictPair] = []
+    for entry in _live_events("card_verdict", since_hours):
+        attrs = entry.get("attributes") or {}
+        proposal = proposals_by_key.get((attrs.get("card_ts"), attrs.get("idx")))
+        if proposal is None:
+            continue
+        evidence = proposal.get("evidence") or []
+        if not evidence:
+            continue
+        first = evidence[0]
+        out.append(
+            card_core.PastVerdictPair(
+                note=proposal.get("note", ""),
+                evidence_note=first.get("note", ""),
+                evidence_line=int(first.get("line", -1)),
+                choice=attrs.get("choice", "defer"),
+                at=entry.get("observed_at", ""),
+            )
+        )
+    return out
 
 
 def _live_handover(session: str, at: str, paths: list[str]) -> dict:
@@ -447,6 +565,42 @@ def _listener(holder: _Holder, owner_id: str | None) -> Callable:
     return on_request
 
 
+def _await_verdicts(
+    holder: _Holder,
+    graph: CompiledStateGraph,
+    config: dict,
+    state: dict,
+    web_client,
+    wait_hours: float,
+) -> dict:
+    """Resume the graph with each verdict as Slack delivers it, editing the card in place —
+    until every proposal is judged or `wait_hours` has passed since this call started. A
+    proposal still unanswered at that point is left exactly as it is, the same as 미뤄: this
+    card's life is over once the next one is due, not once someone gets around to it."""
+    deadline = time.monotonic() + wait_hours * 3600
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            verdict = holder.queue.get(timeout=remaining)
+        except Empty:
+            break
+        holder.judged.add(verdict.idx)
+        state = graph.invoke(Command(resume=verdict), config)
+        web_client.chat_update(
+            channel=holder.message.channel,
+            ts=holder.message.ts,
+            blocks=card_core.build_blocks(state["proposals"], state["verdicts"], lang=state["lang"]),
+        )
+        if "__interrupt__" not in state:
+            break
+    unanswered = len(state["proposals"]) - len(state["verdicts"])
+    if unanswered > 0:
+        print(f"[card] 대기 끝 — 안 누른 제안 {unanswered}건은 그대로 둔다", file=sys.stderr)
+    return state
+
+
 def _dry_send(blocks: list[dict]) -> card_core.PostedCard:
     return card_core.PostedCard(channel="dry-run", ts="0")
 
@@ -461,8 +615,11 @@ def _dry_record(event: str, fields: dict) -> None:
 
 def _run_dry() -> int:
     """CARD_DRY_RUN=1: run the graph up through post_card with everything live except Slack,
-    handover, and the event log — print the proposals and stop before the interrupt. AC5:
-    no send, no handover, no /consumption, no event — only stdout."""
+    handover, and the event log — print the proposals and stop before the interrupt. No
+    send, no handover, no /consumption, no card_proposal/card_confirmation event — only
+    stdout. active_projects and past_verdicts stay live: both are reads (GET /projects,
+    GET /events), not writes, so the dry run's projects_called and suppression numbers are
+    the real ones the next live card would see."""
     collabs = Collaborators(
         fetch=_live_fetch,
         search=_live_search,
@@ -474,6 +631,9 @@ def _run_dry() -> int:
         resolve=_live_resolve,
         approved=_live_approved,
         record=_dry_record,
+        active_projects=_live_active_projects,
+        past_verdicts=_live_past_verdicts,
+        lang=card_core.resolve_lang(boring_config.note_lang()),
     )
     graph = build_graph(collabs)
     config = {"configurable": {"thread_id": f"card-dry-{datetime.now(UTC):%Y%m%d%H%M%S}"}}
@@ -486,12 +646,15 @@ def _run_dry() -> int:
                 "count": len(state["proposals"]),
                 "proposals": [p.model_dump(by_alias=True) for p in state["proposals"]],
                 "confirmation": confirmation.model_dump() if confirmation else None,
+                "projects_called": len(state["projects"]),
+                "per_project_candidates": state["per_project_candidates"],
                 "calls": stats.calls,
                 "proposals_passed": stats.proposals_passed,
                 "not_worth": stats.not_worth,
                 "ungrounded": stats.ungrounded,
                 "not_worth_reasons": stats.not_worth_reasons,
                 "ungrounded_reasons": stats.ungrounded_reasons,
+                "suppressed": state["suppressed_count"],
             },
             ensure_ascii=False,
             indent=2,
@@ -552,17 +715,7 @@ def main() -> int:
             state = graph.invoke({"verdicts": []}, config)
             holder.message = state["message"]
             holder.proposals = state["proposals"]
-            while True:
-                verdict = holder.queue.get()
-                holder.judged.add(verdict.idx)
-                state = graph.invoke(Command(resume=verdict), config)
-                web_client.chat_update(
-                    channel=holder.message.channel,
-                    ts=holder.message.ts,
-                    blocks=card_core.build_blocks(state["proposals"], state["verdicts"]),
-                )
-                if "__interrupt__" not in state:
-                    break
+            _await_verdicts(holder, graph, config, state, web_client, CARD_WAIT_HOURS)
         except KeyboardInterrupt:
             print("[card] 결재 대기를 멈춘다 — 카드는 슬랙에 남아 있다.", file=sys.stderr)
         except (ValueError, OSError) as e:

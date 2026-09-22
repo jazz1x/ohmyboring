@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
+import card_i18n
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 RegisterName = Literal["next_actions", "risks", "stalled", "recurrences"]
@@ -26,9 +27,40 @@ Choice = Literal["do", "defer", "drop"]
 ANSWER_REGISTERS: tuple[str, ...] = ("next_actions", "risks", "stalled")
 REGISTER_NAMES: tuple[str, ...] = ANSWER_REGISTERS + ("recurrences",)
 
-CARD_TITLE = "☀️ 오늘 제안"
-BUTTON_LABELS: dict[str, str] = {"do": "해", "defer": "미뤄", "drop": "빼"}
-VERDICT_MARKS: dict[str, str] = {"do": "✓ 해", "defer": "… 미뤄", "drop": "✕ 빼"}
+#: The button/verdict vocabulary itself — language-independent, unlike its label text
+#: (card_i18n.STRINGS). parse_action validates a press against this, never against a
+#: language table, so a Japanese-language card still accepts the same action_ids.
+CHOICES: tuple[str, ...] = ("do", "defer", "drop")
+
+#: card_i18n.STRINGS keys this file's display-building functions may render.
+DISPLAY_LANGS: tuple[str, ...] = ("en", "ko", "ja")
+
+
+def resolve_lang(raw: str) -> str:
+    """boring.json's note_lang, folded to one of the three languages the card's display
+    table (card_i18n.STRINGS) knows. An explicit ko/ja/en passes straight through; anything
+    else — 'auto' included — falls back to English, the same way distill_core's own
+    lang_instruction dict falls back for an unmapped lang, except a card's title and
+    buttons have no transcript to auto-detect a language from, so the fallback here is a
+    fixed value rather than distill's 'write in whatever language the transcript is'."""
+    return raw if raw in DISPLAY_LANGS else "en"
+
+
+#: The advise loop's per-candidate model prompt gets one language-instruction line appended,
+#: attached the same way distill_core._build_prompt attaches its lang_instruction — the rest
+#: of the prompt (JSON schema, field-format rules) is not a display string and stays as-is.
+ADVICE_LANG_INSTRUCTION: dict[str, str] = {
+    "ko": "bottleneck 과 advice 는 반드시 한국어 문장으로 써라.",
+    "ja": "bottleneck と advice は必ず日本語の文で書け。",
+    "en": "Write bottleneck and advice as English sentences.",
+}
+
+
+def _advice_lang_instruction(lang: str) -> str:
+    return ADVICE_LANG_INSTRUCTION.get(
+        lang, "Write bottleneck and advice in the same language as the past record above."
+    )
+
 
 #: Per-register cap on the text that enters the prompt. The engine answers are already capped,
 #: but three of them plus the sources lists still outgrow a small local model's context.
@@ -117,14 +149,16 @@ class Proposal(BaseModel):
     evidence (past notes, quoted and located) that grounds them. `subject` is the register
     entry that led to this pick; `note` is the current claim path the door resolved that
     subject to (empty until the resolve node fills it — the button value, handover, and
-    consumption all cite `note`, never `subject`). The attribute is `register_` only because
-    a field literally named `register` would shadow BaseModel.register; the JSON name stays
-    `register` via the alias."""
+    consumption all cite `note`, never `subject`). `project` is which active project's
+    register call this candidate came from — "" for the unassigned bucket, never absent.
+    The attribute is `register_` only because a field literally named `register` would
+    shadow BaseModel.register; the JSON name stays `register` via the alias."""
 
     model_config = ConfigDict(populate_by_name=True)
 
     subject: str = Field(min_length=1)
     note: str = ""
+    project: str = ""
     register_: RegisterName = Field(alias="register")
     bottleneck: str = Field(min_length=MIN_BOTTLENECK_CHARS)
     advice: str = Field(min_length=MIN_ADVICE_CHARS)
@@ -162,6 +196,81 @@ class AdviseStats(BaseModel):
     ungrounded: int
     not_worth_reasons: list[str] = []
     ungrounded_reasons: list[str] = []
+
+
+#: The suppression window, hours — 7 days, matching the contract's "지난 7일" rule.
+SUPPRESS_WINDOW_HOURS = 168
+
+
+class PastVerdictPair(BaseModel):
+    """One past button press, joined back to the note+evidence its card_proposal event
+    named — a card_verdict event alone carries only card_ts, idx, and choice, so the join
+    happens on the read side (card.py) before this value ever reaches `suppressed`."""
+
+    note: str
+    evidence_note: str
+    evidence_line: int
+    choice: Choice
+    at: str
+
+
+def suppressed(
+    candidates: list[Proposal],
+    past: list[PastVerdictPair],
+    now: datetime | None = None,
+) -> tuple[list[Proposal], list[Proposal]]:
+    """Split resolved candidates into (kept, dropped): a candidate is dropped when its own
+    note and its first evidence's (note, line) match a pair that already got a 해/빼 verdict
+    within the last 7 days. 미뤄 leaves no trace here — card.py never asks record_verdict for
+    a consumption call on defer, so a deferred pair can never enter `past` and can never
+    suppress. A pair older than the window does not suppress either: the owner may see the
+    same bottleneck again once enough time has passed for it to be worth asking again."""
+    now = now or datetime.now(UTC)
+    cutoff = now - timedelta(hours=SUPPRESS_WINDOW_HOURS)
+    recent: set[tuple[str, str, int]] = set()
+    for verdict in past:
+        if verdict.choice not in ("do", "drop"):
+            continue
+        try:
+            at = datetime.fromisoformat(verdict.at)
+        except ValueError:
+            continue
+        if at < cutoff:
+            continue
+        recent.add((verdict.note, verdict.evidence_note, verdict.evidence_line))
+    kept: list[Proposal] = []
+    dropped: list[Proposal] = []
+    for candidate in candidates:
+        if not candidate.evidence:
+            kept.append(candidate)
+            continue
+        key = (candidate.note, candidate.evidence[0].note, candidate.evidence[0].line)
+        (dropped if key in recent else kept).append(candidate)
+    return kept, dropped
+
+
+def proposal_event_fields(proposal: Proposal, lang: str, card_ts: str, idx: int) -> dict[str, Any]:
+    """The card_proposal event's fields — everything the owner saw plus enough to join a
+    later card_verdict event back to it (card_ts + idx, the only two fields a button press
+    itself carries)."""
+    return {
+        "register": proposal.register_,
+        "project": proposal.project,
+        "subject": proposal.subject,
+        "note": proposal.note,
+        "bottleneck": proposal.bottleneck,
+        "advice": proposal.advice,
+        "evidence": [e.model_dump() for e in proposal.evidence],
+        "lang": lang,
+        "card_ts": card_ts,
+        "idx": idx,
+    }
+
+
+def verdict_event_fields(verdict: ButtonVerdict, card_ts: str) -> dict[str, Any]:
+    """The card_verdict event's fields — deliberately thin; the note and evidence a press
+    judged are recovered by joining back to that card_ts+idx's card_proposal event."""
+    return {"card_ts": card_ts, "idx": verdict.idx, "choice": verdict.choice}
 
 
 def handover_paths(proposals: Iterable[Proposal]) -> list[str]:
@@ -299,21 +408,24 @@ def _recurrence_text(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def collect_registers(fetch: Callable[[str], dict[str, Any]]) -> Registers:
-    """Shape the four register answers through the injected `fetch` (path in, engine JSON out).
-    A malformed payload is a ValueError, not a skip — proposals are grounded on these, and
-    half a register set means grounding on nothing."""
+def collect_registers(fetch: Callable[[str, str], dict[str, Any]], project: str = "") -> Registers:
+    """Shape one project's four register answers through the injected `fetch` (path, project
+    in — engine JSON out). `project=""` is not "no filter": the engine's own register filter
+    treats an explicit empty string as "unassigned documents only" (measured 2026-09-22), so
+    every call — active project or the unassigned bucket alike — always names one. A
+    malformed payload is a ValueError, not a skip — proposals are grounded on these, and half
+    a register set means grounding on nothing."""
 
     texts: dict[str, str] = {}
     sources: dict[str, list[str]] = {}
     for name in ANSWER_REGISTERS:
-        data = fetch(f"/{name}")
+        data = fetch(f"/{name}", project)
         answer, srcs = data.get("answer"), data.get("sources")
         if not isinstance(answer, str) or not isinstance(srcs, list):
             raise ValueError(f"register {name}: expected {{answer, sources}}, got keys {sorted(data)!r}")
         texts[name] = answer
         sources[name] = [str(s) for s in srcs]
-    data = fetch("/recurrences")
+    data = fetch("/recurrences", project)
     rows = data.get("rows")
     if not isinstance(rows, list):
         raise ValueError(f"register recurrences: expected rows list, got keys {sorted(data)!r}")
@@ -347,7 +459,43 @@ def candidate_order(registers: Registers, priority: Iterable[str] = ()) -> list[
     return out
 
 
-def build_advice_prompt(subject: str, register: RegisterName, hits: list[dict[str, Any]]) -> str:
+def merge_project_candidates(
+    project_order: Iterable[str],
+    project_registers: dict[str, Registers],
+    priority: Iterable[tuple[str, str]] = (),
+) -> list[tuple[str, str, RegisterName]]:
+    """One (project, subject, register) queue across every active project plus the
+    unassigned bucket — reusing candidate_order per project so the advise loop's own
+    per-project ordering (재발 → 위험 → 정체) is unchanged. `priority` is (project, subject)
+    pairs from cross_check's 아직 set and always leads, whichever project they came from.
+    A subject is deduplicated globally, not per project: the same string appearing in two
+    projects' registers would otherwise spend two of the loop's eight calls on one idea."""
+    seen: set[str] = set()
+    out: list[tuple[str, str, RegisterName]] = []
+    for project, subject in priority:
+        if subject in seen:
+            continue
+        registers = project_registers.get(project)
+        if registers is None:
+            continue
+        matched = candidate_order(registers, [subject])
+        if not matched:
+            continue
+        seen.add(subject)
+        out.append((project, subject, matched[0][1]))
+    for project in project_order:
+        registers = project_registers.get(project)
+        if registers is None:
+            continue
+        for subject, register in candidate_order(registers):
+            if subject in seen:
+                continue
+            seen.add(subject)
+            out.append((project, subject, register))
+    return out
+
+
+def build_advice_prompt(subject: str, register: RegisterName, hits: list[dict[str, Any]], lang: str) -> str:
     """One candidate's whole task: a subject, its register, and up to three past hits
     (`/search` with `claims`) to ground advice in. The model only quotes and reasons —
     parse_advised is the boundary that checks a quote actually appears in its note."""
@@ -383,6 +531,7 @@ def build_advice_prompt(subject: str, register: RegisterName, hits: list[dict[st
         '- note 는 "노트 경로: " 뒤에 오는 문자열 그대로다. 대괄호나 다른 기호를 붙이지 마라. '
         '예: 노트 경로: /vault/wiki/wiki-0900.md 이면 "note": "/vault/wiki/wiki-0900.md" 다.\n'
         "- 근거가 하나도 검증되지 않을 것 같으면 처음부터 not_worth 를 골라라.\n"
+        f"- {_advice_lang_instruction(lang)}\n"
     )
 
 
@@ -433,17 +582,17 @@ def parse_advised(llm_json: str, note_texts: dict[str, str]) -> Advice | NotWort
     return Advice(bottleneck=advised.bottleneck, advice=advised.advice, evidence=grounded)
 
 
-def _actions_block(idx: int, proposal: Proposal) -> dict:
+def _actions_block(idx: int, proposal: Proposal, strings: dict[str, str]) -> dict:
     return {
         "type": "actions",
         "elements": [
             {
                 "type": "button",
-                "text": {"type": "plain_text", "text": label, "emoji": True},
+                "text": {"type": "plain_text", "text": strings[f"button_{choice}"], "emoji": True},
                 "action_id": f"card:{idx}:{choice}",
                 "value": proposal.note,
             }
-            for choice, label in BUTTON_LABELS.items()
+            for choice in CHOICES
         ],
     }
 
@@ -469,58 +618,88 @@ def _evidence_block(evidence: list[Evidence]) -> dict:
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": "\n".join(lines)}]}
 
 
-def _confirmation_block(confirmation: Confirmation) -> dict:
-    text = (
-        f"지난 승인 {confirmation.total} · 했다 {len(confirmation.done)} · 아직 {len(confirmation.pending)}"
+def _confirmation_block(confirmation: Confirmation, strings: dict[str, str]) -> dict:
+    text = strings["confirmation_line"].format(
+        total=confirmation.total, done=len(confirmation.done), pending=len(confirmation.pending)
     )
     if confirmation.unknown:
-        text += f" · 확인불가 {len(confirmation.unknown)}"
+        text += strings["confirmation_unknown"].format(unknown=len(confirmation.unknown))
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+
+
+def _project_groups(proposals: list[Proposal]) -> list[tuple[str, list[int]]]:
+    """proposals grouped by `.project`, each project's rows kept together under one header —
+    in first-seen order, so a priority (아직) pick from project B ahead of project A's own
+    picks still puts B's header first. Indices are into the original `proposals` list; the
+    button `action_id`s (and so `record_verdict`'s `state["proposals"][verdict.idx]` lookup)
+    must reference that list, never a position inside the display grouping."""
+    order: list[str] = []
+    groups: dict[str, list[int]] = {}
+    for idx, proposal in enumerate(proposals):
+        if proposal.project not in groups:
+            groups[proposal.project] = []
+            order.append(proposal.project)
+        groups[proposal.project].append(idx)
+    return [(project, groups[project]) for project in order]
 
 
 def build_blocks(
     proposals: list[Proposal],
     verdicts: Iterable[ButtonVerdict] = (),
     confirmation: Confirmation | None = None,
+    *,
+    lang: str,
 ) -> list[dict]:
     """Block Kit for the card: the head line (past approvals cross-checked against today's
-    registers — present only when there were any), then one section and one button row per
-    proposal. A judged row shows its mark instead of its buttons — the card is edited in
-    place as 판정들 arrive. Buttons carry the note path: a verdict attaches to the note."""
+    registers — present only when there were any), then one header and one section+button
+    row per proposal, proposals grouped under their project's own header (the unassigned
+    bucket's name comes from card_i18n too). A judged row shows its mark instead of its
+    buttons — the card is edited in place as 판정들 arrive. Buttons carry the note path: a
+    verdict attaches to the note."""
+    strings = card_i18n.STRINGS[lang]
     by_idx = {v.idx: v for v in verdicts}
     blocks: list[dict] = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": f"{CARD_TITLE} {len(proposals)}", "emoji": True},
+            "text": {
+                "type": "plain_text",
+                "text": f"{strings['card_title']} {len(proposals)}",
+                "emoji": True,
+            },
         }
     ]
     if confirmation is not None and confirmation.total > 0:
-        blocks.append(_confirmation_block(confirmation))
-    for idx, proposal in enumerate(proposals):
-        blocks.append(
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*{idx + 1}. {proposal.advice}*\n병목: {proposal.bottleneck}\n"
-                        f"_{proposal.register_} · {proposal.subject}_"
-                    ),
-                },
-            }
-        )
-        blocks.append(_evidence_block(proposal.evidence))
-        verdict = by_idx.get(idx)
-        if verdict is None:
-            blocks.append(_actions_block(idx, proposal))
-        else:
-            mark = VERDICT_MARKS[verdict.choice]
+        blocks.append(_confirmation_block(confirmation, strings))
+    for project, indices in _project_groups(proposals):
+        label = project if project else strings["unassigned_project"]
+        blocks.append({"type": "header", "text": {"type": "plain_text", "text": label, "emoji": False}})
+        for idx in indices:
+            proposal = proposals[idx]
             blocks.append(
                 {
-                    "type": "context",
-                    "elements": [{"type": "mrkdwn", "text": f"{mark} — <@{verdict.user}>"}],
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*{idx + 1}. {proposal.advice}*\n"
+                            f"{strings['bottleneck_label']}: {proposal.bottleneck}\n"
+                            f"_{proposal.register_} · {proposal.subject}_"
+                        ),
+                    },
                 }
             )
+            blocks.append(_evidence_block(proposal.evidence))
+            verdict = by_idx.get(idx)
+            if verdict is None:
+                blocks.append(_actions_block(idx, proposal, strings))
+            else:
+                mark = strings[f"verdict_{verdict.choice}"]
+                blocks.append(
+                    {
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": f"{mark} — <@{verdict.user}>"}],
+                    }
+                )
     return blocks
 
 
@@ -549,7 +728,7 @@ def parse_action(
     except ValueError:
         return Rejected(reason=f"unknown action_id {action_id!r}")
     choice = parts[2]
-    if choice not in BUTTON_LABELS:
+    if choice not in CHOICES:
         return Rejected(reason=f"unknown choice {choice!r}")
     if idx < 0 or idx >= n_proposals:
         return Rejected(reason=f"no proposal {idx}")

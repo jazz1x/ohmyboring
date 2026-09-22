@@ -17,14 +17,17 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import unittest
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 import card  # noqa: E402
 import card_core as cc  # noqa: E402
+import card_i18n  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 
 OWNER = "U_OWNER"
@@ -138,7 +141,7 @@ PAST_APPROVED = [
 PAST_SESSION = "slack:C1:1759000000.000001"
 
 
-def _fetch(path: str) -> dict:
+def _fetch(path: str, project: str = "") -> dict:
     return FETCH_DATA[path]
 
 
@@ -165,6 +168,8 @@ class Stubs:
         paths_resolve: bool = True,
         failures: dict[str, str] | None = None,
         responses: list[str] | None = None,
+        active_project_names: list[str] | None = None,
+        past_verdict_pairs: list[cc.PastVerdictPair] | None = None,
     ):
         self.resolutions = resolutions if resolutions is not None else RESOLUTIONS
         self.approved_items = approved if approved is not None else PAST_APPROVED
@@ -173,6 +178,8 @@ class Stubs:
         self.responses = (
             list(responses) if responses is not None else [ADVICE[s] for s in CANDIDATE_QUEUE[:3]]
         )
+        self.active_project_names = active_project_names if active_project_names is not None else []
+        self.past_verdict_pairs = past_verdict_pairs if past_verdict_pairs is not None else []
         self.propose_calls: list[str] = []
         self.search_calls: list[str] = []
         self.resolve_calls: list[tuple[str, str]] = []
@@ -209,6 +216,14 @@ class Stubs:
     def record(self, event: str, fields: dict) -> None:
         self.records.append((event, fields))
 
+    def active_projects(self, active_days: int) -> list[str]:
+        assert active_days == card.PROJECT_ACTIVE_DAYS
+        return self.active_project_names
+
+    def past_verdicts(self, since_hours: int) -> list[cc.PastVerdictPair]:
+        assert since_hours == cc.SUPPRESS_WINDOW_HOURS
+        return self.past_verdict_pairs
+
 
 def _blocks_text(blocks) -> str:
     return json.dumps(blocks, ensure_ascii=False)
@@ -229,7 +244,7 @@ class BuildBlocksTests(unittest.TestCase):
         ]
 
     def test_header_counts_the_proposals_and_rows_carry_note_paths(self):
-        blocks = cc.build_blocks(self.proposals)
+        blocks = cc.build_blocks(self.proposals, lang="ko")
         self.assertEqual(blocks[0]["text"]["text"], f"☀️ 오늘 제안 {len(self.proposals)}")
         action_rows = [b for b in blocks if b["type"] == "actions"]
         self.assertEqual(len(action_rows), 3)
@@ -244,7 +259,7 @@ class BuildBlocksTests(unittest.TestCase):
         self.assertIn("주어 0", _blocks_text(blocks))
 
     def test_each_proposal_shows_its_bottleneck_and_evidence_coordinate(self):
-        blocks = cc.build_blocks(self.proposals)
+        blocks = cc.build_blocks(self.proposals, lang="ko")
         text = _blocks_text(blocks)
         self.assertIn("병목 설명 0", text)
         self.assertIn("wiki-0900 L1", text)
@@ -252,7 +267,7 @@ class BuildBlocksTests(unittest.TestCase):
 
     def test_judged_row_shows_its_mark_instead_of_buttons(self):
         verdict = cc.ButtonVerdict(idx=1, choice="do", user=OWNER, at="t")
-        blocks = cc.build_blocks(self.proposals, [verdict])
+        blocks = cc.build_blocks(self.proposals, [verdict], lang="ko")
         action_rows = [b for b in blocks if b["type"] == "actions"]
         marks = [b for b in blocks if b["type"] == "context" and "✓" in _blocks_text([b])]
         self.assertEqual(len(action_rows), 2)
@@ -266,7 +281,7 @@ class BuildBlocksTests(unittest.TestCase):
             done=["/vault/wiki/wiki-9999.md", "/vault/wiki/wiki-9998.md"],
             pending=["/vault/wiki/wiki-0900.md"],
         )
-        blocks = cc.build_blocks(self.proposals, confirmation=confirmation)
+        blocks = cc.build_blocks(self.proposals, confirmation=confirmation, lang="ko")
         self.assertEqual(blocks[1]["type"], "context")
         self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 3 · 했다 2 · 아직 1")
 
@@ -277,16 +292,16 @@ class BuildBlocksTests(unittest.TestCase):
             pending=["/vault/wiki/wiki-0900.md"],
             unknown=[("/vault/wiki/wiki-9999.md", "claim-source answered 500")],
         )
-        blocks = cc.build_blocks(self.proposals, confirmation=confirmation)
+        blocks = cc.build_blocks(self.proposals, confirmation=confirmation, lang="ko")
         self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 2 · 했다 0 · 아직 1 · 확인불가 1")
 
     def test_no_confirmation_no_line(self):
         for none in (None, cc.Confirmation(total=0, done=[], pending=[])):
-            blocks = cc.build_blocks(self.proposals, confirmation=none)
+            blocks = cc.build_blocks(self.proposals, confirmation=none, lang="ko")
             self.assertNotIn("지난 승인", _blocks_text(blocks))
 
     def test_empty_proposals_still_renders_a_zero_header(self):
-        blocks = cc.build_blocks([])
+        blocks = cc.build_blocks([], lang="ko")
         self.assertEqual(blocks[0]["text"]["text"], "☀️ 오늘 제안 0")
         self.assertEqual(len(blocks), 1)
 
@@ -444,6 +459,252 @@ class ParseAdvisedTests(unittest.TestCase):
         self.assertIsInstance(out, cc.Ungrounded)
 
 
+#: A run of 3+ ASCII words — a proper noun ("Slack", "JSON") or a symbol never matches this;
+#: three real English words in a row does.
+_LATIN_SENTENCE = re.compile(r"[A-Za-z]+(?:\s+[A-Za-z]+){2,}")
+_HANGUL = re.compile(r"[가-힣]")
+_KANA_OR_KANJI = re.compile(r"[぀-ヿ一-鿿]")
+
+
+class CardI18nTests(unittest.TestCase):
+    """AC3: en/ko/ja key parity, and no language bleeding into a table that isn't its own."""
+
+    def test_key_sets_match_across_languages(self):
+        en, ko, ja = card_i18n.STRINGS["en"], card_i18n.STRINGS["ko"], card_i18n.STRINGS["ja"]
+        self.assertEqual(set(en), set(ko))
+        self.assertEqual(set(en), set(ja))
+
+    def test_ko_table_has_no_latin_sentence(self):
+        for key, value in card_i18n.STRINGS["ko"].items():
+            self.assertIsNone(_LATIN_SENTENCE.search(value), f"{key}: {value!r}")
+
+    def test_en_table_has_no_hangul_or_kana(self):
+        for key, value in card_i18n.STRINGS["en"].items():
+            self.assertIsNone(_HANGUL.search(value), f"{key}: {value!r}")
+            self.assertIsNone(_KANA_OR_KANJI.search(value), f"{key}: {value!r}")
+
+    def test_ja_table_has_no_hangul(self):
+        for key, value in card_i18n.STRINGS["ja"].items():
+            self.assertIsNone(_HANGUL.search(value), f"{key}: {value!r}")
+
+    def test_the_detectors_actually_catch_a_planted_violation(self):
+        # A guard nobody has seen fail is not proven — plant one of each violation the three
+        # tests above are meant to catch, on a copy, and check the same regex still fires.
+        self.assertIsNotNone(_LATIN_SENTENCE.search("오늘 제안 please do the thing now"))
+        self.assertIsNotNone(_HANGUL.search("Today's picks 오늘"))
+        self.assertIsNotNone(_HANGUL.search("今日の提案 오늘"))
+
+
+class ResolveLangTests(unittest.TestCase):
+    def test_explicit_languages_pass_through(self):
+        for lang in ("en", "ko", "ja"):
+            self.assertEqual(cc.resolve_lang(lang), lang)
+
+    def test_auto_and_anything_unmapped_falls_back_to_english(self):
+        for raw in ("auto", "", "fr", "KO"):
+            self.assertEqual(cc.resolve_lang(raw), "en")
+
+
+class AdviceLangInstructionTests(unittest.TestCase):
+    """AC3: build_advice_prompt attaches a language instruction, distill_core-style."""
+
+    def test_ja_instruction_is_in_the_prompt(self):
+        prompt = cc.build_advice_prompt("주어", "risks", [], "ja")
+        self.assertIn(cc.ADVICE_LANG_INSTRUCTION["ja"], prompt)
+
+    def test_ko_and_en_instructions_are_in_the_prompt(self):
+        for lang in ("ko", "en"):
+            prompt = cc.build_advice_prompt("주어", "risks", [], lang)
+            self.assertIn(cc.ADVICE_LANG_INSTRUCTION[lang], prompt)
+
+    def test_unmapped_lang_gets_the_fallback_instruction(self):
+        prompt = cc.build_advice_prompt("주어", "risks", [], "auto")
+        self.assertIn("same language as the past record above", prompt)
+
+
+def _registers(sources: dict[str, list[str]]) -> cc.Registers:
+    full = {name: sources.get(name, []) for name in cc.REGISTER_NAMES}
+    return cc.Registers(texts={name: "" for name in cc.REGISTER_NAMES}, sources=full)
+
+
+class MergeProjectCandidatesTests(unittest.TestCase):
+    def setUp(self):
+        self.registers_a = _registers({"risks": ["f64_risk"], "stalled": ["a_only"]})
+        self.registers_b = _registers({"risks": ["f64_risk"], "stalled": ["b_only"]})
+        self.project_registers = {"proj-a": self.registers_a, "proj-b": self.registers_b}
+
+    def test_priority_pair_leads_regardless_of_project_order(self):
+        order = cc.merge_project_candidates(
+            ["proj-a", "proj-b"], self.project_registers, priority=[("proj-b", "f64_risk")]
+        )
+        self.assertEqual(order[0], ("proj-b", "f64_risk", "risks"))
+
+    def test_project_order_is_respected_after_priority(self):
+        order = cc.merge_project_candidates(["proj-a", "proj-b"], self.project_registers)
+        projects_in_order = [p for p, _, _ in order]
+        # proj-a's own candidates all precede proj-b's — merge_project_candidates walks
+        # project_order in sequence, each project's own candidate_order intact within it.
+        first_b_index = projects_in_order.index("proj-b")
+        self.assertTrue(all(p == "proj-a" for p in projects_in_order[:first_b_index]))
+
+    def test_a_subject_is_deduplicated_across_projects(self):
+        # f64_risk appears identically in both projects' registers (same fixture data) — it
+        # must be spent once, not once per project, or the call budget scales with project
+        # count instead of staying fixed at ADVISE_CALL_CAP.
+        order = cc.merge_project_candidates(["proj-a", "proj-b"], self.project_registers)
+        subjects = [s for _, s, _ in order]
+        self.assertEqual(subjects.count("f64_risk"), 1)
+
+    def test_unknown_project_in_the_order_is_skipped_not_raised(self):
+        order = cc.merge_project_candidates(["proj-a", "ghost"], self.project_registers)
+        self.assertTrue(all(p != "ghost" for p, _, _ in order))
+
+
+class ProjectGroupingBlocksTests(unittest.TestCase):
+    def _proposal(self, subject: str, project: str, note: str) -> cc.Proposal:
+        return cc.Proposal(
+            subject=subject,
+            note=note,
+            project=project,
+            register="stalled",
+            bottleneck=f"{subject} 병목 열자 이상 문장",
+            advice=f"{subject} 조언 열자 이상 문장",
+            evidence=[cc.Evidence(note=note, quote="근거 인용문 열두자 이상입니다", line=1)],
+        )
+
+    def test_two_projects_and_unassigned_get_three_fixed_order_headers(self):
+        proposals = [
+            self._proposal("s1", "proj-a", "/vault/wiki/wiki-0001.md"),
+            self._proposal("s2", "", "/vault/wiki/wiki-0002.md"),
+            self._proposal("s3", "proj-b", "/vault/wiki/wiki-0003.md"),
+            self._proposal("s4", "proj-a", "/vault/wiki/wiki-0004.md"),
+        ]
+        blocks = cc.build_blocks(proposals, lang="ko")
+        headers = [b["text"]["text"] for b in blocks if b["type"] == "header"]
+        # title header, then one per project in first-seen order: proj-a, unassigned, proj-b.
+        self.assertEqual(headers, ["☀️ 오늘 제안 4", "proj-a", "무소속", "proj-b"])
+        action_rows = [b for b in blocks if b["type"] == "actions"]
+        self.assertEqual(len(action_rows), 4)
+
+    def test_english_lang_uses_the_unassigned_label_and_button_words(self):
+        proposals = [self._proposal("s1", "", "/vault/wiki/wiki-0001.md")]
+        blocks = cc.build_blocks(proposals, lang="en")
+        headers = [b["text"]["text"] for b in blocks if b["type"] == "header"]
+        self.assertEqual(headers, ["☀️ Today's picks 1", "Unassigned"])
+        action_row = next(b for b in blocks if b["type"] == "actions")
+        labels = [el["text"]["text"] for el in action_row["elements"]]
+        self.assertEqual(labels, ["Do", "Defer", "Drop"])
+
+
+class SuppressedTests(unittest.TestCase):
+    NOW = datetime(2026, 9, 22, 8, 0, 0, tzinfo=UTC)
+
+    def _proposal(self, note: str, evidence_note: str, line: int) -> cc.Proposal:
+        return cc.Proposal(
+            subject="주어",
+            note=note,
+            register="stalled",
+            bottleneck="병목 문장 열자 이상입니다",
+            advice="조언 문장 열자 이상입니다",
+            evidence=[cc.Evidence(note=evidence_note, quote="근거 인용문 열두자 이상", line=line)],
+        )
+
+    def test_recent_do_or_drop_suppresses_the_same_pair(self):
+        candidate = self._proposal("/n1.md", "/e1.md", 3)
+        for choice in ("do", "drop"):
+            past = [
+                cc.PastVerdictPair(
+                    note="/n1.md",
+                    evidence_note="/e1.md",
+                    evidence_line=3,
+                    choice=choice,
+                    at=(self.NOW - timedelta(days=1)).isoformat(),
+                )
+            ]
+            kept, dropped = cc.suppressed([candidate], past, now=self.NOW)
+            self.assertEqual(kept, [], choice)
+            self.assertEqual(dropped, [candidate], choice)
+
+    def test_defer_never_suppresses(self):
+        candidate = self._proposal("/n1.md", "/e1.md", 3)
+        past = [
+            cc.PastVerdictPair(
+                note="/n1.md",
+                evidence_note="/e1.md",
+                evidence_line=3,
+                choice="defer",
+                at=self.NOW.isoformat(),
+            )
+        ]
+        kept, dropped = cc.suppressed([candidate], past, now=self.NOW)
+        self.assertEqual(kept, [candidate])
+        self.assertEqual(dropped, [])
+
+    def test_a_verdict_older_than_the_window_does_not_suppress(self):
+        candidate = self._proposal("/n1.md", "/e1.md", 3)
+        past = [
+            cc.PastVerdictPair(
+                note="/n1.md",
+                evidence_note="/e1.md",
+                evidence_line=3,
+                choice="drop",
+                at=(self.NOW - timedelta(hours=cc.SUPPRESS_WINDOW_HOURS + 1)).isoformat(),
+            )
+        ]
+        kept, dropped = cc.suppressed([candidate], past, now=self.NOW)
+        self.assertEqual(kept, [candidate])
+        self.assertEqual(dropped, [])
+
+    def test_a_different_pair_is_unaffected(self):
+        candidate = self._proposal("/n1.md", "/e1.md", 3)
+        past = [
+            cc.PastVerdictPair(
+                note="/n1.md", evidence_note="/e1.md", evidence_line=9, choice="drop", at=self.NOW.isoformat()
+            )
+        ]
+        kept, dropped = cc.suppressed([candidate], past, now=self.NOW)
+        self.assertEqual(kept, [candidate])
+        self.assertEqual(dropped, [])
+
+
+class EventFieldsTests(unittest.TestCase):
+    def test_proposal_event_fields_carries_the_full_contract_field_set(self):
+        proposal = cc.Proposal(
+            subject="주어",
+            note="/n1.md",
+            project="proj-a",
+            register="stalled",
+            bottleneck="병목 문장 열자 이상입니다",
+            advice="조언 문장 열자 이상입니다",
+            evidence=[cc.Evidence(note="/e1.md", quote="근거 인용문 열두자 이상", line=4)],
+        )
+        fields = cc.proposal_event_fields(proposal, "ko", "1234.5", 2)
+        self.assertEqual(
+            set(fields),
+            {
+                "register",
+                "project",
+                "subject",
+                "note",
+                "bottleneck",
+                "advice",
+                "evidence",
+                "lang",
+                "card_ts",
+                "idx",
+            },
+        )
+        self.assertEqual(
+            fields["evidence"], [{"note": "/e1.md", "quote": "근거 인용문 열두자 이상", "line": 4}]
+        )
+        self.assertEqual((fields["card_ts"], fields["idx"]), ("1234.5", 2))
+
+    def test_verdict_event_fields_is_thin(self):
+        verdict = cc.ButtonVerdict(idx=1, choice="drop", user="U1", at="t")
+        fields = cc.verdict_event_fields(verdict, "1234.5")
+        self.assertEqual(fields, {"card_ts": "1234.5", "idx": 1, "choice": "drop"})
+
+
 class GraphTests(unittest.TestCase):
     def setUp(self):
         self.sends = []
@@ -453,7 +714,7 @@ class GraphTests(unittest.TestCase):
         self.graph = self._build(self.stubs)
         self.cfg = {"configurable": {"thread_id": "test-card"}}
 
-    def _build(self, stubs: Stubs):
+    def _build(self, stubs: Stubs, lang: str = "ko"):
         collabs = card.Collaborators(
             fetch=_fetch,
             search=stubs.search,
@@ -465,6 +726,9 @@ class GraphTests(unittest.TestCase):
             resolve=stubs.resolve,
             approved=stubs.approved,
             record=stubs.record,
+            active_projects=stubs.active_projects,
+            past_verdicts=stubs.past_verdicts,
+            lang=lang,
         )
         return card.build_graph(collabs)
 
@@ -666,8 +930,9 @@ class GraphTests(unittest.TestCase):
         blocks = self.sends[0]
         self.assertEqual(blocks[1]["type"], "context")
         self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 3 · 했다 2 · 아직 1")
+        confirmation_events = [r for r in self.stubs.records if r[0] == "card_confirmation"]
         self.assertEqual(
-            self.stubs.records,
+            confirmation_events,
             [("card_confirmation", {"done": 2, "pending": 1, "session": PAST_SESSION})],
         )
 
@@ -688,8 +953,9 @@ class GraphTests(unittest.TestCase):
         )
         blocks = self.sends[-1]
         self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 3 · 했다 0 · 아직 0 · 확인불가 3")
+        confirmation_events = [r for r in stubs.records if r[0] == "card_confirmation"]
         self.assertEqual(
-            stubs.records,
+            confirmation_events,
             [
                 (
                     "card_confirmation",
@@ -715,6 +981,9 @@ class GraphTests(unittest.TestCase):
             resolve=stubs.resolve,
             approved=dead_door,
             record=stubs.record,
+            active_projects=stubs.active_projects,
+            past_verdicts=stubs.past_verdicts,
+            lang="ko",
         )
         graph = card.build_graph(collabs)
         with self.assertRaises(OSError):
@@ -739,19 +1008,92 @@ class GraphTests(unittest.TestCase):
             resolve=stubs.resolve,
             approved=stubs.approved,
             record=stubs.record,
+            active_projects=stubs.active_projects,
+            past_verdicts=stubs.past_verdicts,
+            lang="ko",
         )
         graph = card.build_graph(collabs)
         with self.assertRaises(OSError):
             graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-card-nosend"}})
         self.assertEqual(stubs.records, [])  # the card never went out — no confirmation log
 
-    def test_no_past_approvals_means_no_line_no_event(self):
+    def test_no_past_approvals_means_no_line_no_confirmation_event(self):
         stubs = Stubs(approved=[])
         graph = self._build(stubs)
         out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-card-empty"}})
         self.assertIsNone(out["confirmation"])
         self.assertNotIn("지난 승인", _blocks_text(self.sends[-1]))
-        self.assertEqual(stubs.records, [])
+        self.assertNotIn("card_confirmation", [r[0] for r in stubs.records])
+
+    def test_card_proposal_and_card_verdict_events_fire_for_every_row(self):
+        # AC4: 3 proposals, 3 presses (해·빼·미뤄) → 3 card_proposal + 3 card_verdict events,
+        # plus the existing card_confirmation — 7 record calls, none dropped or duplicated.
+        self.graph.invoke({"verdicts": []}, self.cfg)
+        self._resume(0, "do")
+        self._resume(1, "drop")
+        self._resume(2, "defer")
+        names = [name for name, _ in self.stubs.records]
+        self.assertEqual(names.count("card_proposal"), 3)
+        self.assertEqual(names.count("card_verdict"), 3)
+        self.assertEqual(names.count("card_confirmation"), 1)
+        self.assertEqual(len(self.stubs.records), 7)
+        verdict_fields = [fields for name, fields in self.stubs.records if name == "card_verdict"]
+        self.assertEqual([v["choice"] for v in verdict_fields], ["do", "drop", "defer"])
+        self.assertEqual({v["card_ts"] for v in verdict_fields}, {CARD_TS})
+        proposal_fields = [fields for name, fields in self.stubs.records if name == "card_proposal"]
+        self.assertEqual([p["idx"] for p in proposal_fields], [0, 1, 2])
+
+    def test_a_recently_judged_pair_is_suppressed_before_the_card_ships(self):
+        past = [
+            cc.PastVerdictPair(
+                note=EXPECTED_NOTES[0],
+                evidence_note=EXPECTED_NOTES[0],
+                evidence_line=2,
+                choice="do",
+                at=datetime.now(UTC).isoformat(),
+            )
+        ]
+        stubs = Stubs(past_verdict_pairs=past)
+        graph = self._build(stubs)
+        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-suppress"}})
+        self.assertEqual([p.note for p in out["proposals"]], EXPECTED_NOTES[1:])
+        self.assertEqual(out["suppressed_count"], 1)
+
+    def test_active_projects_are_dialed_and_shared_subjects_are_deduplicated(self):
+        # Every fixture project answers identical registers (the _fetch stub ignores its
+        # project argument), so the global subject dedup in merge_project_candidates means
+        # only the first-called project is credited with any candidates.
+        stubs = Stubs(active_project_names=["proj-x", "proj-y"], responses=[NOT_WORTH_JSON] * 8)
+        graph = self._build(stubs)
+        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-multi-project"}})
+        self.assertEqual(out["projects"], ["proj-x", "proj-y", ""])
+        self.assertEqual(set(out["per_project_candidates"]), {"proj-x"})
+        self.assertEqual(out["per_project_candidates"]["proj-x"], 5)
+
+
+class AwaitVerdictsTests(unittest.TestCase):
+    """AC6: CARD_WAIT_HOURS=0 (or expired) ends the wait immediately, touching Slack 0 times,
+    leaving whatever was unanswered exactly as it is."""
+
+    class _FakeWeb:
+        def __init__(self):
+            self.chat_update_calls = 0
+
+        def chat_update(self, **kwargs):
+            self.chat_update_calls += 1
+
+    def test_zero_wait_hours_returns_immediately_without_a_chat_update(self):
+        holder = card._Holder()
+        holder.message = cc.PostedCard(channel="C1", ts=CARD_TS)
+        state = {"proposals": [], "verdicts": [], "lang": "ko"}
+        web = self._FakeWeb()
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            out = card._await_verdicts(
+                holder, graph=None, config={}, state=state, web_client=web, wait_hours=0
+            )
+        self.assertEqual(web.chat_update_calls, 0)
+        self.assertIs(out, state)
 
 
 class DryRunWiringTests(unittest.TestCase):
@@ -810,6 +1152,8 @@ class DryRunWiringTests(unittest.TestCase):
             mock.patch.object(card, "_live_read_note", side_effect=stubs.read_note),
             mock.patch.object(card, "_live_resolve", side_effect=stubs.resolve),
             mock.patch.object(card, "_live_approved", side_effect=stubs.approved),
+            mock.patch.object(card, "_live_active_projects", side_effect=stubs.active_projects),
+            mock.patch.object(card, "_live_past_verdicts", side_effect=stubs.past_verdicts),
             mock.patch.object(card, "make_propose", return_value=stubs.propose),
             contextlib.redirect_stdout(buf),
         ):
