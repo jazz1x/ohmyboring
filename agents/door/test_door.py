@@ -758,5 +758,220 @@ class ClaimSourceRouteTests(unittest.TestCase):
         self.assertEqual(len(payload["candidates"]), 2)
 
 
+class SplitSubjectsGetRouteTests(unittest.TestCase):
+    """GET /repairs/split-subjects through the real door app — stub rows, no DB (AC2).
+    One test: shape, rows-desc sort, limit application, out-of-range limit, missing DSN."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                with socket.create_connection(("127.0.0.1", cls.door_port), timeout=1):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+
+    def setUp(self):
+        self._saved_dsn = os.environ.get("DOOR_PG_DSN")
+        self._rows: list[tuple[str, str]] = []
+        self._orig_fetch = door._fetch_split_subject_rows
+        door._fetch_split_subject_rows = lambda: self._rows
+
+    def tearDown(self):
+        door._fetch_split_subject_rows = self._orig_fetch
+        if self._saved_dsn is None:
+            os.environ.pop("DOOR_PG_DSN", None)
+        else:
+            os.environ["DOOR_PG_DSN"] = self._saved_dsn
+
+    def test_shape_sort_limit_and_missing_dsn(self):
+        os.environ.pop("DOOR_PG_DSN", None)
+        status, body, _ = _req(self.door_port, "GET", "/repairs/split-subjects")
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body), {"error": "store not configured"})
+
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = [
+            ("kb rag bot", "/a.md"),
+            ("kb-rag-bot", "/b.md"),
+            ("foodspring front", "/c.md"),
+            ("foodspring-front", "/d.md"),
+            ("foodspring-front", "/e.md"),
+            ("solo-subject", "/f.md"),  # single spelling — never a group
+        ]
+        status, body, content_type = _req(self.door_port, "GET", "/repairs/split-subjects?limit=1")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        payload = json.loads(body)
+        self.assertEqual(payload["total_groups"], 2)
+        self.assertEqual(len(payload["groups"]), 1)
+        self.assertEqual(payload["groups"][0]["subject"], "foodspring-front")
+        self.assertEqual(payload["groups"][0]["variants"], ["foodspring front", "foodspring-front"])
+        self.assertEqual(payload["groups"][0]["rows"], 3)
+        self.assertEqual(payload["groups"][0]["notes"], 3)
+
+        for bad in ("0", "-1", "51", "abc"):
+            status, body, _ = _req(self.door_port, "GET", f"/repairs/split-subjects?limit={bad}")
+            self.assertEqual(status, 400, f"limit={bad}")
+            self.assertIn("limit", json.loads(body)["error"])
+
+
+class SplitSubjectsPostRouteTests(unittest.TestCase):
+    """POST /repairs/split-subjects through the real door app — stub cursor + stub sync
+    callable, never a live DB or a live engine (AC3)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                with socket.create_connection(("127.0.0.1", cls.door_port), timeout=1):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+
+    def setUp(self):
+        self._saved_dsn = os.environ.get("DOOR_PG_DSN")
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self.order: list[str] = []
+        self._before_rows = [
+            ("foodspring front", "/a.md"),
+            ("foodspring-front", "/b.md"),
+        ]
+        self._after_rows = [("foodspring-front", "/a.md"), ("foodspring-front", "/b.md")]
+        self._fetch_calls = 0
+        self._orig_connect = door._split_subjects_connect
+        self._orig_fetch = door._fetch_split_subject_rows
+        self._orig_sync = door._call_engine_sync
+        self._orig_emit = door._emit_subject_merged_event
+        order = self.order
+
+        class _StubCursor:
+            def __enter__(self_c):
+                return self_c
+
+            def __exit__(self_c, *exc):
+                return False
+
+            def execute(self_c, sql, params):
+                if sql is door._SPLIT_DELETE_SQL:
+                    order.append("delete")
+                    self_c.rowcount = 2
+                elif sql is door._SPLIT_UPDATE_SQL:
+                    order.append("update")
+                    self_c.rowcount = 2
+
+        class _StubConn:
+            def cursor(self_c):
+                return _StubCursor()
+
+            def commit(self_c):
+                order.append("commit")
+
+            def close(self_c):
+                pass
+
+        def fake_connect():
+            return _StubConn()
+
+        def fake_fetch():
+            self._fetch_calls += 1
+            return self._before_rows if self._fetch_calls == 1 else self._after_rows
+
+        def fake_sync():
+            order.append("sync")
+            return self._sync_result
+
+        def fake_emit(subject, deleted_rows, reread_notes, remaining_variants):
+            order.append("event")
+
+        self._sync_result = {"ok": True, "summary": {"ingest_new": 0, "ingest_repaired": 2}}
+        door._split_subjects_connect = fake_connect
+        door._fetch_split_subject_rows = fake_fetch
+        door._call_engine_sync = fake_sync
+        door._emit_subject_merged_event = fake_emit
+
+    def tearDown(self):
+        door._split_subjects_connect = self._orig_connect
+        door._fetch_split_subject_rows = self._orig_fetch
+        door._call_engine_sync = self._orig_sync
+        door._emit_subject_merged_event = self._orig_emit
+        if self._saved_dsn is None:
+            os.environ.pop("DOOR_PG_DSN", None)
+        else:
+            os.environ["DOOR_PG_DSN"] = self._saved_dsn
+
+    def _post(self, subject: str):
+        payload = json.dumps({"subject": subject}).encode()
+        return _req(
+            self.door_port,
+            "POST",
+            "/repairs/split-subjects",
+            body=payload,
+            headers={"content-type": "application/json"},
+        )
+
+    def test_order_unknown_subject_and_sync_failure(self):
+        # (a) unknown canon form — 404, nothing was touched
+        status, body, _ = self._post("nobody-canonical")
+        self.assertEqual(status, 404)
+        self.assertIn("error", json.loads(body))
+        self.assertEqual(self.order, [])
+
+        # (b) success — the stub cursor records DELETE, UPDATE, commit, the sync call and the
+        # recount, in that order
+        self._fetch_calls = 0
+        status, body, _ = self._post("foodspring-front")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.order, ["delete", "update", "commit", "sync", "event"])
+        out = json.loads(body)
+        self.assertEqual(out["deleted_rows"], 2)
+        self.assertEqual(out["reread_notes"], 2)
+        self.assertEqual(out["remaining_variants"], 1)
+        self.assertEqual(out["sync"], {"ingest_new": 0, "ingest_repaired": 2})
+
+        # (c) a failing sync is a 502 whose body says so — but the delete/update/commit already
+        # ran, so the response still carries the (already-committed) row counts
+        self.order.clear()
+        self._fetch_calls = 0
+        self._sync_result = {"ok": False, "error": "engine unreachable: connection refused"}
+        status, body, _ = self._post("foodspring-front")
+        self.assertEqual(status, 502)
+        out = json.loads(body)
+        self.assertEqual(out["deleted_rows"], 2)
+        self.assertEqual(out["reread_notes"], 2)
+        self.assertEqual(out["sync"], {"error": "engine unreachable: connection refused"})
+        self.assertEqual(self.order, ["delete", "update", "commit", "sync"])
+
+
 if __name__ == "__main__":
     unittest.main()

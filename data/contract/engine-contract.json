@@ -64,7 +64,9 @@
   "door_routes": [
     "GET /approved",
     "GET /claim-source",
-    "GET /projects"
+    "GET /projects",
+    "GET /repairs/split-subjects",
+    "POST /repairs/split-subjects"
   ],
   "http_routes": [
     "GET /audit",
