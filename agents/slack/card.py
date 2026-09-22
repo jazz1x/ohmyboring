@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""The morning card — one LangGraph run: read the registers, propose, resolve, post, interrupt.
+"""The morning card — one LangGraph run: read the registers, advise, resolve, post, interrupt.
 
 `make card` runs g_card once. The graph reads the engine's four registers, cross-checks
 the past 48h of 「해」 against today's registers for the card's head line (a door failure
-leaves an approval 확인불가 — never a false 「했다」), the local model picks three proposals
-grounded in the registers — 「아직」 subjects asked for first — the resolve node turns each
-proposal's subject into the note path the door's /claim-source names (dropping what no
-longer resolves, re-proposing once on the remainder), posts to SLACK_CARD_CHANNEL, and
-stops at an interrupt — a Slack button press (해 · 미뤄 · 빼) resumes it with
-Command(resume=…), and record_verdict writes the verdict to the engine. Sent and judged
-stay in one state, so the card a person answered is exactly the card the engine
-remembers.
+leaves an approval 확인불가 — never a false 「했다」), then the advise node walks the
+bottleneck candidates one at a time — 「아직」 subjects first — searching each subject's past
+record and asking the local model for a grounded pitch (or a NotWorth refusal), up to three
+proposals or eight calls. The resolve node turns each proposal's subject into the note path
+the door's /claim-source names (dropping what does not resolve — fewer than three, even
+zero, still ships), posts to SLACK_CARD_CHANNEL, and stops at an interrupt — a Slack button
+press (해 · 미뤄 · 빼) resumes it with Command(resume=…), and record_verdict writes the
+verdict to the engine. Sent and judged stay in one state, so the card a person answered is
+exactly the card the engine remembers. CARD_DRY_RUN=1 stops right after post_card and prints
+the proposals instead of touching Slack, handover, or the event log.
 
 The socket lives here, not in the secretary: hermes can only text, and the secretary answers
 questions while this file asks them. Everything decided lives in card_core; everything
@@ -46,6 +48,9 @@ DEFAULT_MODEL = os.environ.get("CARD_MODEL") or "gemma4:12b"
 ENGINE_TIMEOUT = float(os.environ.get("CARD_ENGINE_TIMEOUT") or "30")
 # The confirmation window on the card's head line — yesterday's and the day before's approvals.
 CONFIRM_SINCE_HOURS = 48
+# The advise loop's call budget: one gemma4 call per candidate, at most this many candidates
+# tried per run — a small local model's context outgrows a whole day's registers otherwise.
+ADVISE_CALL_CAP = 8
 
 
 def _append_verdicts(
@@ -68,7 +73,9 @@ class Collaborators(NamedTuple):
     no engine, no model, no door and no Slack; live defaults are the module-level makers below."""
 
     fetch: Callable[[str], dict[str, Any]]  # register path → engine JSON
-    propose: Callable[[str], str]  # prompt → proposal JSON text
+    search: Callable[[str], list[dict[str, Any]]]  # subject → past hits (claims included)
+    read_note: Callable[[str], str | None]  # note path → its own text, or None if unreadable
+    propose: Callable[[str], str]  # prompt → advised JSON text (one candidate)
     send: Callable[[list[dict]], card_core.PostedCard]  # Block Kit → posted card
     handover: Callable[[str, str, list[str]], dict]  # session, at, note paths
     consumption: Callable[[str, str, list[str]], dict]  # session, used|contested, paths
@@ -86,6 +93,8 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     if collabs is None:
         collabs = Collaborators(
             fetch=_live_fetch,
+            search=_live_search,
+            read_note=_live_read_note,
             propose=make_propose(),
             send=_env_send,
             handover=_live_handover,
@@ -136,50 +145,50 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         priority = sorted({note_to_subject[note] for note in confirmation.pending if note in note_to_subject})
         return {"confirmation": confirmation, "priority_subjects": priority}
 
-    def propose(state: CardState) -> dict:
+    def advise(state: CardState) -> dict:
+        """The bottleneck pick, one candidate at a time (subject in, its register's search
+        hits and gemma4's grounded pitch or refusal out) — up to three proposals, at most
+        ADVISE_CALL_CAP calls. A candidate that fails to ground (schema, quote, or NotWorth)
+        is not an error: it just does not become a proposal, and the queue moves on."""
         registers = state["registers"]
-        llm_json = collabs.propose(card_core.build_prompt(registers, priority=state["priority_subjects"]))
-        return {"proposals": card_core.parse_proposals(llm_json, registers)}
+        candidates = card_core.candidate_order(registers, state["priority_subjects"])
+        proposals: list[card_core.Proposal] = []
+        calls = 0
+        for subject, register in candidates:
+            if len(proposals) >= 3 or calls >= ADVISE_CALL_CAP:
+                break
+            hits = collabs.search(subject)
+            note_texts = _note_texts_for_hits(collabs.read_note, hits)
+            prompt = card_core.build_advice_prompt(subject, register, hits)
+            calls += 1
+            advised = card_core.parse_advised(collabs.propose(prompt), note_texts)
+            if isinstance(advised, card_core.Advice):
+                proposals.append(
+                    card_core.Proposal(
+                        subject=subject,
+                        register=register,
+                        bottleneck=advised.bottleneck,
+                        advice=advised.advice,
+                        evidence=advised.evidence,
+                    )
+                )
+        return {"proposals": proposals}
 
     def resolve(state: CardState) -> dict:
-        """subject → note path through the door. A subject that does not resolve is dropped
-        as a value — 「근거 노트 없음」 never rides a card — and if that leaves fewer than
-        three, the model re-picks once from the subjects this node has not yet tried. Zero
-        after both rounds is a refusal, not an empty card: the graph raises and main exits 3."""
-        registers = state["registers"]
+        """subject → note path through the door, for whatever advise picked. A subject that
+        does not resolve is dropped as a value — 「근거 노트 없음」 never rides a card. Fewer
+        than three, even zero, ships: NotWorth and an unresolved subject are both legitimate
+        answers now (실험 1's recall precision was 1/5), not a reason to refuse the card."""
         picked: list[card_core.Proposal] = []
         seen_notes: set[str] = set()
-        dropped: list[card_core.Unresolved] = []
-        tried: set[str] = set()
-        round_proposals = state["proposals"]
-        for round_no in range(2):
-            for proposal in round_proposals:
-                if proposal.subject in tried:
-                    continue
-                tried.add(proposal.subject)
-                result = _resolve(proposal.subject, proposal.register_)
-                if isinstance(result, card_core.Unresolved):
-                    dropped.append(result)
-                    continue
-                if result.note in seen_notes:
-                    continue
-                seen_notes.add(result.note)
-                picked.append(proposal.model_copy(update={"note": result.note}))
-            if len(picked) >= 3:
-                break
-            remaining = {
-                subject
-                for name in card_core.REGISTER_NAMES
-                for subject in registers.sources.get(name, [])
-                if subject not in tried
-            }
-            if not remaining or round_no == 1:
-                break
-            llm_json = collabs.propose(card_core.build_prompt(registers, tried))
-            round_proposals = card_core.parse_proposals(llm_json, registers, tried)
-        if not picked:
-            reasons = "; ".join(f"{u.subject}: {u.reason}" for u in dropped)
-            raise ValueError(f"근거 노트 없음 — 제안 0: {reasons or 'no proposals'}")
+        for proposal in state["proposals"]:
+            result = _resolve(proposal.subject, proposal.register_)
+            if isinstance(result, card_core.Unresolved):
+                continue
+            if result.note in seen_notes:
+                continue
+            seen_notes.add(result.note)
+            picked.append(proposal.model_copy(update={"note": result.note}))
         return {"proposals": picked}
 
     def post_card(state: CardState) -> dict:
@@ -217,15 +226,15 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     graph = StateGraph(CardState)
     graph.add_node("read_registers", read_registers)
     graph.add_node("cross_check", cross_check)
-    graph.add_node("propose", propose)
+    graph.add_node("advise", advise)
     graph.add_node("resolve", resolve)
     graph.add_node("post_card", post_card)
     graph.add_node("await_verdict", await_verdict)
     graph.add_node("record_verdict", record_verdict)
     graph.add_edge(START, "read_registers")
     graph.add_edge("read_registers", "cross_check")
-    graph.add_edge("cross_check", "propose")
-    graph.add_edge("propose", "resolve")
+    graph.add_edge("cross_check", "advise")
+    graph.add_edge("advise", "resolve")
     graph.add_edge("resolve", "post_card")
     graph.add_edge("post_card", "await_verdict")
     graph.add_edge("await_verdict", "record_verdict")
@@ -256,8 +265,8 @@ def _live_consumption(session: str, kind: str, paths: list[str]) -> dict:
 def _live_resolve(subject: str, register: str) -> card_core.ResolvedNote | card_core.Unresolved:
     """subject → current claim's note path through the door. A recurrence source is already
     a note path — it resolves to itself without a door round-trip. Everything else asks
-    /claim-source; every failure mode is an Unresolved value: the card drops the proposal,
-    and only an all-dropped run stops the card (with the reasons, in main's exit 3)."""
+    /claim-source; every failure mode is an Unresolved value: the resolve node drops that
+    proposal and the card ships with whatever is left, even zero."""
     if subject.startswith("/"):
         return card_core.ResolvedNote(subject=subject, note=subject)
     url = f"{_door_url()}/claim-source?subject={urllib.parse.quote(subject)}"
@@ -297,6 +306,43 @@ def _door_url() -> str:
     return os.environ["BORING_DOOR_URL"].rstrip("/")
 
 
+def _live_search(subject: str) -> list[dict[str, Any]]:
+    """A candidate's past record — `/search` with claims, the door's own recall of what the
+    engine has decided about this subject before (wiki-1765 step 1)."""
+    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).search(subject, max_results=3, claims=3)
+
+
+def _vault_dir() -> str:
+    return os.path.expanduser(os.environ.get("BORING_VAULT_DIR") or "~/oh-my-boring/vault")
+
+
+def _live_read_note(note: str) -> str | None:
+    """A hit's own note text, read from the host vault (the card runs on the host, not in a
+    container). `note` looks like `/vault/wiki/wiki-NNNN.md`; missing on disk is a value —
+    that evidence simply cannot verify — never an exception here."""
+    relative = note.removeprefix("/vault/") if note.startswith("/vault/") else note.lstrip("/")
+    path = os.path.join(_vault_dir(), relative)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _note_texts_for_hits(
+    read_note: Callable[[str], str | None], hits: list[dict[str, Any]]
+) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for hit in hits:
+        note = hit.get("source_path")
+        if not note or note in out:
+            continue
+        text = read_note(note)
+        if text is not None:
+            out[note] = text
+    return out
+
+
 def _env_send(blocks: list[dict]) -> card_core.PostedCard:
     from slack_sdk.web import WebClient
 
@@ -307,18 +353,23 @@ def _env_send(blocks: list[dict]) -> card_core.PostedCard:
 
 
 def make_propose(model: str = DEFAULT_MODEL) -> Callable[[str], str]:
-    """The structured-output seam: prompt in, proposal JSON text out. Structured output keeps
-    gemma4 inside the schema; parse_proposals keeps it inside the registers. `reasoning=False`
-    — gemma4 is a thinking variant and the thinking is latency with no pick to show for it."""
+    """The JSON-mode seam: one candidate's prompt in, raw completion text out. `format="json"`
+    keeps gemma4 to syntactically valid JSON; the schema itself is only ever enforced at
+    parse_advised, the one boundary built and tested to treat a malformed or partial
+    completion as a value (Ungrounded), not an exception. A stricter LangChain
+    with_structured_output(AdvisedInput) was tried first and raised on live gemma4: a real
+    NotWorth answer that omitted the `kind` default failed a schema LangChain validates
+    before parse_advised ever sees it — two boundaries disagreeing on the same JSON is the
+    defect, not gemma4's output. `reasoning=False` — gemma4 is a thinking variant and the
+    thinking is latency with no pick to show for it."""
 
     from langchain_core.runnables import Runnable
     from langchain_ollama import ChatOllama
 
-    llm = ChatOllama(model=model, format="json", temperature=0, reasoning=False, num_ctx=16384)
-    chain: Runnable = llm.with_structured_output(card_core.Proposals)
+    llm: Runnable = ChatOllama(model=model, format="json", temperature=0, reasoning=False, num_ctx=16384)
 
     def propose(prompt: str) -> str:
-        return chain.invoke(prompt).model_dump_json(by_alias=True)
+        return str(llm.invoke(prompt).content)
 
     return propose
 
@@ -367,6 +418,52 @@ def _listener(holder: _Holder, owner_id: str | None) -> Callable:
     return on_request
 
 
+def _dry_send(blocks: list[dict]) -> card_core.PostedCard:
+    return card_core.PostedCard(channel="dry-run", ts="0")
+
+
+def _dry_handover(session: str, at: str, paths: list[str]) -> dict:
+    return {}
+
+
+def _dry_record(event: str, fields: dict) -> None:
+    return None
+
+
+def _run_dry() -> int:
+    """CARD_DRY_RUN=1: run the graph up through post_card with everything live except Slack,
+    handover, and the event log — print the proposals and stop before the interrupt. AC5:
+    no send, no handover, no /consumption, no event — only stdout."""
+    collabs = Collaborators(
+        fetch=_live_fetch,
+        search=_live_search,
+        read_note=_live_read_note,
+        propose=make_propose(),
+        send=_dry_send,
+        handover=_dry_handover,
+        consumption=_live_consumption,
+        resolve=_live_resolve,
+        approved=_live_approved,
+        record=_dry_record,
+    )
+    graph = build_graph(collabs)
+    config = {"configurable": {"thread_id": f"card-dry-{datetime.now(UTC):%Y%m%d%H%M%S}"}}
+    state = graph.invoke({"verdicts": []}, config)
+    confirmation = state["confirmation"]
+    print(
+        json.dumps(
+            {
+                "count": len(state["proposals"]),
+                "proposals": [p.model_dump(by_alias=True) for p in state["proposals"]],
+                "confirmation": confirmation.model_dump() if confirmation else None,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
 def main() -> int:
     app_token = os.environ.get("SLACK_APP_TOKEN")
     bot_token = os.environ.get("SLACK_BOT_TOKEN")
@@ -394,6 +491,9 @@ def main() -> int:
     owner_id = os.environ.get("SECRETARY_OWNER_ID") or None
     if owner_id is None:
         print("[card] no SECRETARY_OWNER_ID — any user may judge", file=sys.stderr)
+
+    if os.environ.get("CARD_DRY_RUN"):
+        return _run_dry()
 
     from slack_sdk.socket_mode import SocketModeClient
     from slack_sdk.web import WebClient
