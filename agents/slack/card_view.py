@@ -10,14 +10,23 @@ register-tag context line, a section (advice + bottleneck), a top-level rich_tex
 context line with the verdict mark. No `/vault/wiki/...` path appears anywhere in the
 output; only the short `wiki-NNNN` form does. Slack caps one message at 50 blocks: past
 that, this stops adding proposal rows and reports how many were left out in a final context
-line instead of silently dropping them."""
+line instead of silently dropping them.
+
+When the caller passes repair data (`repairs`/`repairs_total_groups`/`merged_yesterday_rows`
+— all optional, and off by default so every existing single-lane caller renders exactly as
+before), the card grows a second lane above the advice one: a head-line context block
+("remaining groups n · merged yesterday m"), then, if `repairs` itself is non-empty, a
+「오늘 할 일」 section label and one four-block row per repair group (divider, tag, section,
+actions-or-mark), then a 「짚어 둔 것」 section label before the existing advice rows. A
+repair row's button idx shares one space with the advice rows — repairs first, 0..k-1 — so
+`card.py`'s record_verdict can tell the two lanes apart by idx alone."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 
 import card_i18n
-from card_types import CHOICES, ButtonVerdict, Confirmation, Evidence, Proposal
+from card_types import CHOICES, ButtonVerdict, Confirmation, Evidence, Proposal, Repair
 
 #: Language-independent register glyphs — the words come from card_i18n.REGISTER_LABELS.
 REGISTER_ICONS: dict[str, str] = {
@@ -67,8 +76,8 @@ def _verdict_block(verdict: ButtonVerdict, strings: dict[str, str]) -> dict:
 
 
 def _tag_block(idx: int, total: int, proposal: Proposal, register_labels: dict[str, str]) -> dict:
-    icon = REGISTER_ICONS.get(proposal.register_, "•")
-    label = register_labels.get(proposal.register_, proposal.register_)
+    icon = REGISTER_ICONS[proposal.register_]
+    label = register_labels[proposal.register_]
     note = _note_label(proposal.note)
     text = f"{icon}  *{label}*  ·  `{note}`  ·  {idx + 1}/{total}"
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
@@ -103,7 +112,12 @@ def _proposal_row(
     verdict: ButtonVerdict | None,
     strings: dict[str, str],
     register_labels: dict[str, str],
+    *,
+    action_idx: int,
 ) -> list[dict]:
+    """`idx`/`total` are the display position within the advice lane (unchanged by the repair
+    lane's presence); `action_idx` is the shared button-idx space record_verdict reads —
+    n_repairs + idx once a repair lane exists, idx alone otherwise."""
     row = [
         {"type": "divider"},
         _tag_block(idx, total, proposal, register_labels),
@@ -111,7 +125,9 @@ def _proposal_row(
         _quote_block(proposal.evidence),
     ]
     row.append(
-        _verdict_block(verdict, strings) if verdict is not None else _actions_block(idx, proposal, strings)
+        _verdict_block(verdict, strings)
+        if verdict is not None
+        else _actions_block(action_idx, proposal, strings)
     )
     return row
 
@@ -123,6 +139,94 @@ def _confirmation_block(confirmation: Confirmation, strings: dict[str, str]) -> 
     if confirmation.unknown:
         text += strings["confirmation_unknown"].format(unknown=len(confirmation.unknown))
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+
+
+#: The repair tag's icon — language-independent, like REGISTER_ICONS.
+REPAIR_ICON = "🧩"
+
+
+def _section_header_block(label: str) -> dict:
+    """A lane label — the same "section with a leading full-width space" shape _project_groups
+    already uses for a project's own label, reused here for the two lane headers."""
+    return {"type": "section", "text": {"type": "mrkdwn", "text": f"　\n*{label}*"}}
+
+
+def _repairs_headline_block(
+    total_groups: int, merged_yesterday_rows: int | None, strings: dict[str, str]
+) -> dict:
+    if merged_yesterday_rows is not None:
+        text = strings["repairs_headline_with_merged"].format(
+            remaining=total_groups, merged=merged_yesterday_rows
+        )
+    else:
+        text = strings["repairs_headline"].format(remaining=total_groups)
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+
+
+def _repair_actions_block(idx: int, strings: dict[str, str]) -> dict:
+    elements = []
+    for choice in CHOICES:
+        button = {
+            "type": "button",
+            "text": {"type": "plain_text", "text": strings[f"repair_button_{choice}"], "emoji": True},
+            "action_id": f"card:{idx}:{choice}",
+            "value": "",
+        }
+        if choice == "do":
+            button["style"] = "primary"
+        elif choice == "drop":
+            button["style"] = "danger"
+        elements.append(button)
+    return {"type": "actions", "elements": elements}
+
+
+def _repair_verdict_block(verdict: ButtonVerdict, result: dict | None, strings: dict[str, str]) -> dict:
+    """An adopted repair shows the door's own numbers once execute_repair answered; every
+    other mark (hold/reject, or adopt before the door has answered) falls back to the same
+    verdict words the advice lane uses — 보류/거절 mean the same thing in either lane."""
+    if verdict.choice == "do" and result is not None:
+        text = strings["repair_verdict_done"].format(
+            deleted=result["deleted_rows"], reread=result["reread_notes"]
+        )
+    else:
+        text = strings[f"verdict_{verdict.choice}"]
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+
+
+def _repair_tag_block(idx: int, total: int, repair: Repair, strings: dict[str, str]) -> dict:
+    text = f"{REPAIR_ICON}  *{strings['repair_tag_label']}*  ·  `{repair.subject}`  ·  {idx + 1}/{total}"
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+
+
+def _repair_section_block(repair: Repair, strings: dict[str, str]) -> dict:
+    body = strings["repair_body"].format(
+        variant=repair.variants[0], rows=f"{repair.rows:,}", notes=repair.notes
+    )
+    return {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": f"*{strings['repair_section_title']}*\n{body}"},
+    }
+
+
+def _repair_row(
+    idx: int,
+    total: int,
+    repair: Repair,
+    verdict: ButtonVerdict | None,
+    result: dict | None,
+    strings: dict[str, str],
+) -> list[dict]:
+    row = [
+        {"type": "divider"},
+        _repair_tag_block(idx, total, repair, strings),
+        _repair_section_block(repair, strings),
+    ]
+    row.append(
+        _repair_verdict_block(verdict, result, strings)
+        if verdict is not None
+        else _repair_actions_block(idx, strings)
+    )
+    return row
 
 
 def _project_groups(proposals: list[Proposal]) -> list[tuple[str, list[int]]]:
@@ -145,6 +249,10 @@ def build_blocks(
     proposals: list[Proposal],
     verdicts: Iterable[ButtonVerdict] = (),
     confirmation: Confirmation | None = None,
+    repairs: list[Repair] = (),
+    repairs_total_groups: int = 0,
+    merged_yesterday_rows: int | None = None,
+    repair_results: dict[int, dict] | None = None,
     *,
     lang: str,
 ) -> list[dict]:
@@ -152,22 +260,44 @@ def build_blocks(
     registers — present only when there were any), then a project label and one five-block
     row per proposal, proposals grouped under their project's own label (the unassigned
     bucket's name comes from card_i18n too). A judged row shows its mark instead of its
-    buttons — the card is edited in place as 판정들 arrive. Slack's 50-block cap on one
+    buttons — the card is edited in place as verdicts arrive. Slack's 50-block cap on one
     message means a large enough proposal list cannot all be shown; rather than drop rows
     silently, this stops adding rows once the next one would not fit and says how many were
-    left out in a final context line (AC8)."""
+    left out in a final context line (AC8).
+
+    A repair lane sits above the advice one when the caller has repair data to show
+    (`repairs_total_groups > 0`, or `repairs` itself non-empty, or a merge happened
+    yesterday) — every existing single-lane caller leaves these at their defaults and
+    renders exactly as before. When shown: a head-line context block, then, only if
+    `repairs` itself is non-empty, a 「오늘 할 일」 label and one four-block row per repair,
+    then a 「짚어 둔 것」 label before the advice rows. Repair rows occupy button idx
+    0..len(repairs)-1; advice rows continue from there — one shared space, repairs first."""
     strings = card_i18n.STRINGS[lang]
     register_labels = card_i18n.REGISTER_LABELS[lang]
+    repair_results = repair_results or {}
     by_idx = {v.idx: v for v in verdicts}
     total = len(proposals)
+    n_repairs = len(repairs)
+    show_lanes = repairs_total_groups > 0 or n_repairs > 0 or merged_yesterday_rows is not None
     blocks: list[dict] = [
         {
             "type": "header",
             "text": {"type": "plain_text", "text": f"{strings['card_title']} {total}", "emoji": True},
         }
     ]
+    if show_lanes:
+        blocks.append(_repairs_headline_block(repairs_total_groups, merged_yesterday_rows, strings))
     if confirmation is not None and confirmation.total > 0:
         blocks.append(_confirmation_block(confirmation, strings))
+
+    if show_lanes:
+        if repairs:
+            blocks.append(_section_header_block(strings["todo_header"]))
+            for ridx, repair in enumerate(repairs):
+                blocks.extend(
+                    _repair_row(ridx, n_repairs, repair, by_idx.get(ridx), repair_results.get(ridx), strings)
+                )
+        blocks.append(_section_header_block(strings["advice_header"]))
 
     shown = 0
     overflowed = False
@@ -177,7 +307,15 @@ def build_blocks(
         label_pending = True
         for idx in indices:
             proposal = proposals[idx]
-            row = _proposal_row(idx, total, proposal, by_idx.get(idx), strings, register_labels)
+            row = _proposal_row(
+                idx,
+                total,
+                proposal,
+                by_idx.get(n_repairs + idx),
+                strings,
+                register_labels,
+                action_idx=n_repairs + idx,
+            )
             addition = ([label_block] if label_pending else []) + row
             remaining_after = total - shown - 1
             reserve = 1 if remaining_after > 0 else 0

@@ -74,24 +74,24 @@ class ConfirmPastTests(unittest.TestCase):
 
 class ParseActionTests(unittest.TestCase):
     def test_valid_press_is_a_verdict(self):
-        out = cv.parse_action(_payload("card:1:do"), owner_id=OWNER, n_proposals=3, at="t")
+        out = cv.parse_action(_payload("card:1:do"), owner_id=OWNER, n_total=3, at="t")
         self.assertIsInstance(out, cc.ButtonVerdict)
         self.assertEqual((out.idx, out.choice, out.user, out.at), (1, "do", OWNER, "t"))
 
     def test_unknown_action_id_is_rejected(self):
-        out = cv.parse_action(_payload("card:1:nope"), owner_id=OWNER, n_proposals=3)
+        out = cv.parse_action(_payload("card:1:nope"), owner_id=OWNER, n_total=3)
         self.assertIsInstance(out, cc.Rejected)
-        out = cv.parse_action(_payload("reaction:x"), owner_id=OWNER, n_proposals=3)
+        out = cv.parse_action(_payload("reaction:x"), owner_id=OWNER, n_total=3)
         self.assertIsInstance(out, cc.Rejected)
 
     def test_missing_proposal_is_rejected(self):
-        out = cv.parse_action(_payload("card:7:do"), owner_id=OWNER, n_proposals=3)
+        out = cv.parse_action(_payload("card:7:do"), owner_id=OWNER, n_total=3)
         self.assertIsInstance(out, cc.Rejected)
 
     def test_non_owner_press_is_rejected_only_when_owner_configured(self):
-        out = cv.parse_action(_payload("card:0:do", user=OTHER), owner_id=OWNER, n_proposals=3)
+        out = cv.parse_action(_payload("card:0:do", user=OTHER), owner_id=OWNER, n_total=3)
         self.assertIsInstance(out, cc.Rejected)
-        out = cv.parse_action(_payload("card:0:do", user=OTHER), owner_id=None, n_proposals=3)
+        out = cv.parse_action(_payload("card:0:do", user=OTHER), owner_id=None, n_total=3)
         self.assertIsInstance(out, cc.ButtonVerdict)
 
 

@@ -170,6 +170,38 @@ def _live_record(event: str, fields: dict) -> None:
     event_log.append_event("slack-card", event, "ok", **fields)
 
 
+#: how many split-subject groups the "오늘 할 일" lane shows — the door's own default too.
+REPAIRS_LIMIT = 3
+
+
+def _live_repairs(limit: int = REPAIRS_LIMIT) -> dict[str, Any]:
+    url = f"{_door_url()}/repairs/split-subjects?limit={limit}"
+    with urllib.request.urlopen(url, timeout=ENGINE_TIMEOUT) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _live_execute_repair(subject: str) -> dict[str, Any]:
+    body = json.dumps({"subject": subject}).encode()
+    req = urllib.request.Request(
+        f"{_door_url()}/repairs/split-subjects",
+        data=body,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=ENGINE_TIMEOUT) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _live_merged_yesterday() -> int | None:
+    """Sum of yesterday's subject_merged deleted_rows, or None when nothing merged — the head
+    line's optional clause. Read straight from the engine's /events, the same route
+    _live_past_verdicts already reads."""
+    entries = _live_events("subject_merged", 24)
+    if not entries:
+        return None
+    return sum(int((e.get("attributes") or {}).get("deleted_rows") or 0) for e in entries)
+
+
 def _door_url() -> str:
     return os.environ["BORING_DOOR_URL"].rstrip("/")
 

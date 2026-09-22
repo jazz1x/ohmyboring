@@ -223,6 +223,18 @@ class PostedCard(BaseModel):
     ts: str
 
 
+class Repair(BaseModel):
+    """One split-subject group from the door's GET /repairs/split-subjects — the execute
+    lane's row shape, distinct from Proposal (the advice lane's). `variants` holds the raw
+    spellings the engine's canon() folds into `subject`; `rows`/`notes` are the door's own
+    counts, shown as-is."""
+
+    subject: str
+    variants: list[str] = Field(min_length=2)
+    rows: int
+    notes: int
+
+
 class Registers(BaseModel):
     """The four engine registers as prompt text, and per register the allow-list a
     proposal's `source_note` must come from."""

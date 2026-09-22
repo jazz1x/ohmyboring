@@ -281,6 +281,87 @@ class CardV2ShapeTests(unittest.TestCase):
         overflow = next(b for b in blocks if b["type"] == "context" and "더 있음" in _blocks_text([b]))
         self.assertIn(str(12 - shown), overflow["elements"][0]["text"])
 
+    def test_repair_lane_sits_above_the_advice_lane_and_shares_its_idx_space(self):
+        # AC6: a mutant moving 「짚어 둔 것」 ahead of the repair rows, or one that leaves the
+        # 「오늘 할 일」 header up when repairs is empty, or one that fails to offset the advice
+        # button idx by n_repairs, must each kill this.
+        repair = cc.Repair(
+            subject="foodspring-front",
+            variants=["foodspring front", "foodspring-front"],
+            rows=3218,
+            notes=212,
+        )
+        proposal = self._proposal()
+        blocks = cv.build_blocks([proposal], repairs=[repair], repairs_total_groups=1, lang="ko")
+        section_labels = [
+            b["text"]["text"]
+            for b in blocks
+            if b["type"] == "section" and b["text"]["text"].startswith("　\n")
+        ]
+        self.assertEqual(section_labels[:2], ["　\n*오늘 할 일*", "　\n*짚어 둔 것*"])
+        sections = [b for b in blocks if b["type"] == "section"]
+        todo_idx = blocks.index(next(b for b in sections if b["text"]["text"] == "　\n*오늘 할 일*"))
+        advice_idx = blocks.index(next(b for b in sections if b["text"]["text"] == "　\n*짚어 둔 것*"))
+        self.assertLess(todo_idx, advice_idx)
+        repair_action_row = next(b for b in blocks if b["type"] == "actions")
+        self.assertEqual(
+            {el["action_id"] for el in repair_action_row["elements"]},
+            {"card:0:do", "card:0:defer", "card:0:drop"},
+        )
+        labels = {el["action_id"]: el["text"]["text"] for el in repair_action_row["elements"]}
+        self.assertEqual(labels["card:0:do"], "실행")
+        # the advice row's own button idx is offset by n_repairs=1, not 0
+        advice_action_row = [b for b in blocks if b["type"] == "actions"][1]
+        self.assertEqual(
+            {el["action_id"] for el in advice_action_row["elements"]},
+            {"card:1:do", "card:1:defer", "card:1:drop"},
+        )
+        # a judged repair row with a door result shows the merge numbers, not the plain mark
+        verdict = cc.ButtonVerdict(idx=0, choice="do", user="U1", at="t")
+        judged = cv.build_blocks(
+            [proposal],
+            [verdict],
+            repairs=[repair],
+            repairs_total_groups=1,
+            repair_results={0: {"deleted_rows": 5, "reread_notes": 2}},
+            lang="ko",
+        )
+        mark = next(b for b in judged if b["type"] == "context" and "합침" in _blocks_text([b]))
+        self.assertIn("✓ 합침 — 지운 행 5 · 다시 읽은 노트 2", mark["elements"][0]["text"])
+
+        # repairs empty (nothing to do today) but the lane is still active (merged yesterday) —
+        # the 오늘 할 일 header must not appear, 짚어 둔 것 still does
+        blocks_empty = cv.build_blocks(
+            [proposal], repairs=[], repairs_total_groups=0, merged_yesterday_rows=7, lang="ko"
+        )
+        labels_empty = [
+            b["text"]["text"]
+            for b in blocks_empty
+            if b["type"] == "section" and b["text"]["text"].startswith("　\n")
+        ]
+        self.assertEqual(labels_empty[:1], ["　\n*짚어 둔 것*"])
+
+        # the default (no repairs args at all) renders exactly as the pre-existing single lane
+        plain = cv.build_blocks([proposal], lang="ko")
+        self.assertNotIn("오늘 할 일", _blocks_text(plain))
+        self.assertNotIn("짚어 둔 것", _blocks_text(plain))
+
+    def test_headline_shows_remaining_groups_and_optional_merged_yesterday(self):
+        # AC7: a mutant dropping the remaining-groups count from the head line must kill this.
+        proposal = self._proposal()
+        with_merge = cv.build_blocks(
+            [proposal], repairs_total_groups=42, merged_yesterday_rows=120, lang="ko"
+        )
+        headline = with_merge[1]["elements"][0]["text"]
+        self.assertEqual(headline, "남은 묶음 42 · 어제 합친 행 120")
+
+        without_merge = cv.build_blocks(
+            [proposal], repairs_total_groups=42, merged_yesterday_rows=None, lang="ko"
+        )
+        headline_no_merge = without_merge[1]["elements"][0]["text"]
+        self.assertEqual(headline_no_merge, "남은 묶음 42")
+        self.assertNotIn("어제", headline_no_merge)
+
 
 if __name__ == "__main__":
     unittest.main()

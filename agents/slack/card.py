@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
-"""The morning card — one LangGraph run: read the registers, advise, resolve, post, interrupt.
+"""The morning card — one LangGraph run: read repairs+registers, advise, resolve, post, interrupt.
 
-`make card` runs g_card once. read_registers calls the door for the active-project list
-(14d) plus the unassigned bucket and reads each one's four registers separately; cross_check
-checks the past 48h of 「해」 against the union of today's registers for the card's head
-line (a door failure leaves an approval 확인불가 — never a false 「했다」); advise walks the
-merged (project, subject) queue one candidate at a time — 「아직」 pairs first — searching
-each subject's past record and asking the local model (in whichever language
-boring.json's note_lang resolves to) for a grounded pitch, up to three proposals or eight
-calls total, regardless of how many projects were active. resolve turns each proposal's
-subject into its note path via /claim-source, then drops any candidate whose (note,
-evidence) pair already got a 해/빼 verdict in the last 7 days (`card_verdicts.suppressed`) —
-reading that history is not optional: a card that cannot read it does not ship. post_card
-sends the Block Kit card (grouped by project), records a card_proposal event per surviving
-proposal, and stops at an interrupt; a Slack button press (해 · 미뤄 · 빼) resumes it with
-Command(resume=…), record_verdict logs a card_verdict event for every press (미뤄 included)
-and, for 해/빼, writes the verdict to the engine. The wait for presses ends after
-CARD_WAIT_HOURS regardless of how many proposals are still unanswered — an unanswered
-proposal is left exactly as it is, the same as 미뤄. Sent and judged stay in one state, so
-the card a person answered is exactly the card the engine remembers. CARD_DRY_RUN=1 stops
-right after post_card and prints the proposals instead of touching Slack, handover, or the
-event log.
+`make card` runs g_card once. read_repairs calls the door for its top split-subject groups
+(the execute lane's rows) and yesterday's merged-row count for the head line; read_registers
+calls the door for the active-project list (14d) plus the unassigned bucket and reads each
+one's four registers separately; cross_check checks the past 48h of past approvals against
+the union of today's registers for the card's confirmation line (a door failure leaves an
+approval unresolved — never a false "already handled"); advise walks the merged (project,
+subject) queue one candidate at a time — priority pairs first — searching each subject's past
+record and asking the local model (in whichever language boring.json's note_lang resolves to)
+for a grounded pitch, up to three proposals or eight calls total, regardless of how many
+projects were active. resolve turns each proposal's subject into its note path via
+/claim-source, then drops any candidate whose (note, evidence) pair already got a verdict in
+the last 7 days (`card_verdicts.suppressed`) — reading that history is not optional: a card
+that cannot read it does not ship. post_card sends the Block Kit card (repair rows above the
+advice rows, each grouped and labeled its own way), records a card_proposal event per
+surviving proposal, and stops at an interrupt; a Slack button press resumes it with
+Command(resume=…) — the verdict's idx spans both lanes, repair rows first. record_verdict
+logs a card_verdict event for every press, then branches: a repair row's adopt button calls
+the door's own merge (POST /repairs/split-subjects); an advice row's adopt/reject writes the
+verdict to the engine, its hold leaves no trace beyond the event. The wait for presses ends
+after CARD_WAIT_HOURS regardless of how many rows are still unanswered — an unanswered row is
+left exactly as it is, the same as a hold. Sent and judged stay in one state, so the card a
+person answered is exactly the card the engine remembers. CARD_DRY_RUN=1 stops right after
+post_card and prints the proposals instead of touching Slack, handover, or the event log.
 
 The socket lives here, not in the secretary: hermes can only text, and the secretary answers
 questions while this file asks them. Everything decided lives in card_types/card_registers/
@@ -72,12 +75,20 @@ def _append_verdicts(
     return (existing or []) + updates
 
 
+def _merge_repair_results(existing: dict[int, dict] | None, updates: dict[int, dict]) -> dict[int, dict]:
+    return {**(existing or {}), **updates}
+
+
 class CardState(TypedDict):
     lang: str
     projects: list[str]  # active projects (14d) + [""] unassigned, in call order
     project_registers: dict[str, card_types.Registers]
     per_project_candidates: dict[str, int]
     proposals: list[card_types.Proposal]
+    repairs: list[card_types.Repair]  # execute lane's rows — read_repairs' top-N groups
+    repairs_total_groups: int  # read_repairs' full count, for the head line
+    merged_yesterday_rows: int | None  # None when nothing merged in the last 24h
+    repair_results: Annotated[dict[int, dict], _merge_repair_results]  # repair idx → door POST result
     message: card_types.PostedCard | None
     confirmation: card_types.Confirmation | None
     priority_subjects: list[tuple[str, str]]  # (project, subject)
@@ -101,8 +112,14 @@ class Collaborators(NamedTuple):
     approved: Callable[[int], list[card_types.PastApproved]]  # since_hours → past approvals
     record: Callable[[str, dict], None]  # event name, fields → engine event log
     active_projects: Callable[[int], list[str]]  # active_days → project names, doc-count desc
-    past_verdicts: Callable[[int], list[card_types.PastVerdictPair]]  # since_hours → 7d 해/빼 pairs
+    past_verdicts: Callable[[int], list[card_types.PastVerdictPair]]  # since_hours → 7d 판정 pairs
     lang: str  # resolve_lang(boring_config.note_lang()) — a value, not a callable: no network
+    # Defaulted (unlike everything above): every existing caller that never heard of the
+    # repair lane keeps working unchanged. repairs(limit) is the door's GET; execute_repair
+    # is its POST; merged_yesterday is the head line's optional "merged m rows yesterday".
+    repairs: Callable[[int], dict[str, Any]] = lambda limit: {"groups": [], "total_groups": 0}
+    execute_repair: Callable[[str], dict[str, Any]] = lambda subject: {}
+    merged_yesterday: Callable[[], int | None] = lambda: None
 
 
 def session_name(card: card_types.PostedCard) -> str:
@@ -126,7 +143,22 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             active_projects=card_live._live_active_projects,
             past_verdicts=card_live._live_past_verdicts,
             lang=card_advice.resolve_lang(boring_config.note_lang()),
+            repairs=card_live._live_repairs,
+            execute_repair=card_live._live_execute_repair,
+            merged_yesterday=card_live._live_merged_yesterday,
         )
+
+    def read_repairs(_: CardState) -> dict:
+        """The execute lane's rows — the door's own top groups, plus yesterday's merged-row
+        tally for the head line. A 5xx/unreachable door raises (same principle as /approved):
+        a card that cannot read its own repair queue is the wrong card to send."""
+        payload = collabs.repairs(card_live.REPAIRS_LIMIT)
+        repairs = [card_types.Repair(**group) for group in payload["groups"]]
+        return {
+            "repairs": repairs,
+            "repairs_total_groups": payload["total_groups"],
+            "merged_yesterday_rows": collabs.merged_yesterday(),
+        }
 
     def read_registers(_: CardState) -> dict:
         active = collabs.active_projects(PROJECT_ACTIVE_DAYS)
@@ -264,8 +296,16 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
 
     def post_card(state: CardState) -> dict:
         lang = state["lang"]
+        n_repairs = len(state["repairs"])
         message = collabs.send(
-            card_view.build_blocks(state["proposals"], confirmation=state["confirmation"], lang=lang)
+            card_view.build_blocks(
+                state["proposals"],
+                confirmation=state["confirmation"],
+                repairs=state["repairs"],
+                repairs_total_groups=state["repairs_total_groups"],
+                merged_yesterday_rows=state["merged_yesterday_rows"],
+                lang=lang,
+            )
         )
         card_ts = message.ts
         collabs.handover(
@@ -274,7 +314,11 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             card_verdicts.handover_paths(state["proposals"]),
         )
         for idx, proposal in enumerate(state["proposals"]):
-            collabs.record("card_proposal", card_verdicts.proposal_event_fields(proposal, lang, card_ts, idx))
+            # global idx (repairs first) — record_verdict's later card_verdict event carries
+            # the same button idx, and _live_past_verdicts joins the two events on it.
+            collabs.record(
+                "card_proposal", card_verdicts.proposal_event_fields(proposal, lang, card_ts, n_repairs + idx)
+            )
         confirmation = state["confirmation"]
         if confirmation is not None:
             fields: dict[str, Any] = {
@@ -288,20 +332,30 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         return {"message": message}
 
     def await_verdict(state: CardState) -> dict:
-        verdict = interrupt({"judged": len(state["verdicts"]), "of": len(state["proposals"])})
+        total_rows = len(state["proposals"]) + len(state["repairs"])
+        verdict = interrupt({"judged": len(state["verdicts"]), "of": total_rows})
         return {"verdicts": [verdict]}
 
     def record_verdict(state: CardState) -> dict:
         verdict = state["verdicts"][-1]
         collabs.record("card_verdict", card_verdicts.verdict_event_fields(verdict, state["message"].ts))
+        n_repairs = len(state["repairs"])
+        if verdict.idx < n_repairs:
+            # the execute lane: adopt calls the door's own merge; hold/reject leave no trace
+            # beyond the event above — there is nothing to suppress in this lane.
+            if verdict.choice != "do":
+                return {}
+            result = collabs.execute_repair(state["repairs"][verdict.idx].subject)
+            return {"repair_results": {verdict.idx: result}}
         if verdict.choice == "defer":
             return {}  # a card_verdict event, but no consumption call — never suppresses
         kind = "used" if verdict.choice == "do" else "contested"
-        note = state["proposals"][verdict.idx].note
+        note = state["proposals"][verdict.idx - n_repairs].note
         collabs.consumption(session_name(state["message"]), kind, [note])
         return {}
 
     graph = StateGraph(CardState)
+    graph.add_node("read_repairs", read_repairs)
     graph.add_node("read_registers", read_registers)
     graph.add_node("cross_check", cross_check)
     graph.add_node("advise", advise)
@@ -309,7 +363,8 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     graph.add_node("post_card", post_card)
     graph.add_node("await_verdict", await_verdict)
     graph.add_node("record_verdict", record_verdict)
-    graph.add_edge(START, "read_registers")
+    graph.add_edge(START, "read_repairs")
+    graph.add_edge("read_repairs", "read_registers")
     graph.add_edge("read_registers", "cross_check")
     graph.add_edge("cross_check", "advise")
     graph.add_edge("advise", "resolve")
@@ -318,7 +373,11 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     graph.add_edge("await_verdict", "record_verdict")
     graph.add_conditional_edges(
         "record_verdict",
-        lambda state: "await_verdict" if len(state["verdicts"]) < len(state["proposals"]) else END,
+        lambda state: (
+            "await_verdict"
+            if len(state["verdicts"]) < len(state["proposals"]) + len(state["repairs"])
+            else END
+        ),
     )
     return graph.compile(checkpointer=MemorySaver())
 
@@ -403,14 +462,16 @@ def _acquire_single_instance_lock(app_token: str):
 
 
 class _Holder:
-    """What the socket listener and the main loop share: the posted card, the proposals, the
-    presses already judged, and a queue of verdicts waiting to resume the graph."""
+    """What the socket listener and the main loop share: the posted card, the repairs and
+    proposals (idx space: repairs first), the presses already judged, and a queue of
+    verdicts waiting to resume the graph."""
 
     def __init__(self) -> None:
         from queue import Queue
 
         self.queue: Queue[card_types.ButtonVerdict] = Queue()
         self.message: card_types.PostedCard | None = None
+        self.repairs: list[card_types.Repair] = []
         self.proposals: list[card_types.Proposal] = []
         self.judged: set[int] = set()
 
@@ -434,7 +495,8 @@ def _listener(holder: _Holder, owner_id: str | None) -> Callable:
             return
         if (payload.get("message") or {}).get("ts") != holder.message.ts:
             return
-        verdict = card_verdicts.parse_action(payload, owner_id=owner_id, n_proposals=len(holder.proposals))
+        n_total = len(holder.repairs) + len(holder.proposals)
+        verdict = card_verdicts.parse_action(payload, owner_id=owner_id, n_total=n_total)
         if isinstance(verdict, card_types.Rejected):
             print(f"[card] rejected: {verdict.reason}", file=sys.stderr)
             return
@@ -472,11 +534,20 @@ def _await_verdicts(
         web_client.chat_update(
             channel=holder.message.channel,
             ts=holder.message.ts,
-            blocks=card_view.build_blocks(state["proposals"], state["verdicts"], lang=state["lang"]),
+            blocks=card_view.build_blocks(
+                state["proposals"],
+                state["verdicts"],
+                confirmation=state["confirmation"],
+                repairs=state["repairs"],
+                repairs_total_groups=state["repairs_total_groups"],
+                merged_yesterday_rows=state["merged_yesterday_rows"],
+                repair_results=state["repair_results"],
+                lang=state["lang"],
+            ),
         )
         if "__interrupt__" not in state:
             break
-    unanswered = len(state["proposals"]) - len(state["verdicts"])
+    unanswered = len(state["proposals"]) + len(state["repairs"]) - len(state["verdicts"])
     if unanswered > 0:
         print(f"[card] 대기 끝 — 안 누른 제안 {unanswered}건은 그대로 둔다", file=sys.stderr)
     return state
@@ -515,6 +586,8 @@ def _run_dry() -> int:
         active_projects=card_live._live_active_projects,
         past_verdicts=card_live._live_past_verdicts,
         lang=card_advice.resolve_lang(boring_config.note_lang()),
+        repairs=card_live._live_repairs,
+        merged_yesterday=card_live._live_merged_yesterday,
     )
     graph = build_graph(collabs)
     config = {"configurable": {"thread_id": f"card-dry-{datetime.now(UTC):%Y%m%d%H%M%S}"}}
@@ -605,6 +678,7 @@ def main() -> int:
         try:
             state = graph.invoke({"verdicts": []}, config)
             holder.message = state["message"]
+            holder.repairs = state["repairs"]
             holder.proposals = state["proposals"]
             _await_verdicts(holder, graph, config, state, web_client, card_live.CARD_WAIT_HOURS)
         except KeyboardInterrupt:

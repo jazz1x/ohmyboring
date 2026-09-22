@@ -140,12 +140,13 @@ def parse_action(
     payload: dict,
     *,
     owner_id: str | None,
-    n_proposals: int,
+    n_total: int,
     at: str | None = None,
 ) -> ButtonVerdict | Rejected:
     """A block_actions payload in, one verdict out — or Rejected with the reason. Nothing here
     raises: a weird button is a fact about the world, not a crash. When an owner is configured,
-    nobody else's press counts."""
+    nobody else's press counts. `n_total` bounds idx across both card lanes — repair rows
+    then advice rows, one shared index space (card.py's record_verdict splits on it)."""
 
     if payload.get("type") != "block_actions":
         return Rejected(reason="not block_actions")
@@ -163,7 +164,7 @@ def parse_action(
     choice = parts[2]
     if choice not in CHOICES:
         return Rejected(reason=f"unknown choice {choice!r}")
-    if idx < 0 or idx >= n_proposals:
+    if idx < 0 or idx >= n_total:
         return Rejected(reason=f"no proposal {idx}")
     user = (payload.get("user") or {}).get("id") or ""
     if not user:

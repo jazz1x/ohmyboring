@@ -140,6 +140,16 @@ PAST_APPROVED = [
 ]
 PAST_SESSION = "slack:C1:1759000000.000001"
 
+# The door's GET /repairs/split-subjects shape — one group is enough to exercise the lane.
+REPAIR_GROUPS = [
+    {
+        "subject": "foodspring-front",
+        "variants": ["foodspring front", "foodspring-front"],
+        "rows": 3218,
+        "notes": 212,
+    }
+]
+
 
 def _fetch(path: str, project: str = "") -> dict:
     return FETCH_DATA[path]
@@ -160,6 +170,9 @@ class Stubs:
         responses: list[str] | None = None,
         active_project_names: list[str] | None = None,
         past_verdict_pairs: list[cc.PastVerdictPair] | None = None,
+        repairs_payload: dict | None = None,
+        merged_yesterday_rows: int | None = None,
+        execute_repair_result: dict | None = None,
     ):
         self.resolutions = resolutions if resolutions is not None else RESOLUTIONS
         self.approved_items = approved if approved is not None else PAST_APPROVED
@@ -170,10 +183,17 @@ class Stubs:
         )
         self.active_project_names = active_project_names if active_project_names is not None else []
         self.past_verdict_pairs = past_verdict_pairs if past_verdict_pairs is not None else []
+        self.repairs_payload = (
+            repairs_payload if repairs_payload is not None else {"groups": [], "total_groups": 0}
+        )
+        self.merged_yesterday_rows = merged_yesterday_rows
+        self.execute_repair_result = execute_repair_result if execute_repair_result is not None else {}
         self.propose_calls: list[str] = []
         self.search_calls: list[str] = []
         self.resolve_calls: list[tuple[str, str]] = []
         self.records: list[tuple[str, dict]] = []
+        self.execute_repair_calls: list[str] = []
+        self.repairs_calls: list[int] = []
 
     def search(self, subject: str) -> list[dict]:
         self.search_calls.append(subject)
@@ -214,6 +234,17 @@ class Stubs:
         assert since_hours == card_verdicts.SUPPRESS_WINDOW_HOURS
         return self.past_verdict_pairs
 
+    def repairs(self, limit: int) -> dict:
+        self.repairs_calls.append(limit)
+        return self.repairs_payload
+
+    def merged_yesterday(self) -> int | None:
+        return self.merged_yesterday_rows
+
+    def execute_repair(self, subject: str) -> dict:
+        self.execute_repair_calls.append(subject)
+        return self.execute_repair_result
+
 
 def _blocks_text(blocks) -> str:
     return json.dumps(blocks, ensure_ascii=False)
@@ -243,6 +274,9 @@ class GraphTests(unittest.TestCase):
             active_projects=stubs.active_projects,
             past_verdicts=stubs.past_verdicts,
             lang=lang,
+            repairs=stubs.repairs,
+            execute_repair=stubs.execute_repair,
+            merged_yesterday=stubs.merged_yesterday,
         )
         return card.build_graph(collabs)
 
@@ -262,11 +296,12 @@ class GraphTests(unittest.TestCase):
         verdict = cc.ButtonVerdict(idx=idx, choice=choice, user=OWNER, at="t")
         return self.graph.invoke(Command(resume=verdict), self.cfg)
 
-    def test_graph_has_the_seven_nodes(self):
+    def test_graph_has_the_eight_nodes(self):
         names = set(self.graph.get_graph().nodes) - {"__start__", "__end__"}
         self.assertEqual(
             names,
             {
+                "read_repairs",
                 "read_registers",
                 "cross_check",
                 "advise",
@@ -614,6 +649,71 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(set(out["per_project_candidates"]), {"proj-x"})
         self.assertEqual(out["per_project_candidates"]["proj-x"], 5)
 
+    def test_read_repairs_populates_state_once_and_a_dead_door_refuses_the_card(self):
+        # AC4: the door's GET is called exactly once, its groups land in state, and a
+        # 5xx/unreachable door — same principle as /approved — refuses the card outright.
+        stubs = Stubs(repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 5}, merged_yesterday_rows=12)
+        graph = self._build(stubs)
+        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-read-repairs"}})
+        self.assertEqual(stubs.repairs_calls, [card_live.REPAIRS_LIMIT])
+        self.assertEqual(out["repairs_total_groups"], 5)
+        self.assertEqual(out["merged_yesterday_rows"], 12)
+        self.assertEqual([r.subject for r in out["repairs"]], ["foodspring-front"])
+
+        def dead_repairs(limit: int) -> dict:
+            raise OSError("door unreachable")
+
+        dead_stubs = Stubs()
+        collabs = card.Collaborators(
+            fetch=_fetch,
+            search=dead_stubs.search,
+            read_note=dead_stubs.read_note,
+            propose=dead_stubs.propose,
+            send=self._send,
+            handover=self._handover,
+            consumption=self._consumption,
+            resolve=dead_stubs.resolve,
+            approved=dead_stubs.approved,
+            record=dead_stubs.record,
+            active_projects=dead_stubs.active_projects,
+            past_verdicts=dead_stubs.past_verdicts,
+            lang="ko",
+            repairs=dead_repairs,
+            execute_repair=dead_stubs.execute_repair,
+            merged_yesterday=dead_stubs.merged_yesterday,
+        )
+        graph = card.build_graph(collabs)
+        sends_before = len(self.sends)
+        with self.assertRaises(OSError):
+            graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-read-repairs-dead"}})
+        self.assertEqual(len(self.sends), sends_before)
+
+    def test_execute_repair_branch_dispatch(self):
+        # AC5: a repair row's adopt calls the door's own merge and never consumption; an
+        # advice row's adopt/reject does the reverse. One test, both branches.
+        stubs = Stubs(
+            repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 1},
+            execute_repair_result={"deleted_rows": 5, "reread_notes": 2, "remaining_variants": 1},
+        )
+        graph = self._build(stubs)
+        cfg = {"configurable": {"thread_id": "test-execute-repair"}}
+        out = graph.invoke({"verdicts": []}, cfg)
+        self.assertEqual(len(out["repairs"]), 1)
+
+        verdict = cc.ButtonVerdict(idx=0, choice="do", user=OWNER, at="t")
+        out = graph.invoke(Command(resume=verdict), cfg)
+        self.assertEqual(stubs.execute_repair_calls, ["foodspring-front"])
+        self.assertEqual(self.consumptions, [])
+        self.assertEqual(out["repair_results"], {0: stubs.execute_repair_result})
+
+        n_repairs = len(out["repairs"])
+        advice_verdict = cc.ButtonVerdict(idx=n_repairs, choice="do", user=OWNER, at="t")
+        out = graph.invoke(Command(resume=advice_verdict), cfg)
+        self.assertEqual(stubs.execute_repair_calls, ["foodspring-front"])  # unchanged
+        self.assertEqual(len(self.consumptions), 1)
+        self.assertEqual(self.consumptions[0][0], SESSION)
+        self.assertEqual(self.consumptions[0][1], "used")
+
 
 class AwaitVerdictsTests(unittest.TestCase):
     """AC6: CARD_WAIT_HOURS=0 (or expired) ends the wait immediately, touching Slack 0 times,
@@ -629,7 +729,16 @@ class AwaitVerdictsTests(unittest.TestCase):
     def test_zero_wait_hours_returns_immediately_without_a_chat_update(self):
         holder = card._Holder()
         holder.message = cc.PostedCard(channel="C1", ts=CARD_TS)
-        state = {"proposals": [], "verdicts": [], "lang": "ko"}
+        state = {
+            "proposals": [],
+            "verdicts": [],
+            "lang": "ko",
+            "confirmation": None,
+            "repairs": [],
+            "repairs_total_groups": 0,
+            "merged_yesterday_rows": None,
+            "repair_results": {},
+        }
         web = self._FakeWeb()
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
@@ -655,7 +764,16 @@ class AwaitVerdictsTests(unittest.TestCase):
             advice="조언 문장 열자 이상입니다",
             evidence=[cc.Evidence(note="/n1.md", quote="근거 인용문 열두자 이상", line=1)],
         )
-        state = {"proposals": [proposal], "verdicts": [], "lang": "ko"}
+        state = {
+            "proposals": [proposal],
+            "verdicts": [],
+            "lang": "ko",
+            "confirmation": None,
+            "repairs": [],
+            "repairs_total_groups": 0,
+            "merged_yesterday_rows": None,
+            "repair_results": {},
+        }
         web = self._FakeWeb()
         buf = io.StringIO()
         result: dict = {}
@@ -733,6 +851,10 @@ class DryRunWiringTests(unittest.TestCase):
             mock.patch.object(card_live, "_live_approved", side_effect=stubs.approved),
             mock.patch.object(card_live, "_live_active_projects", side_effect=stubs.active_projects),
             mock.patch.object(card_live, "_live_past_verdicts", side_effect=stubs.past_verdicts),
+            mock.patch.object(
+                card_live, "_live_repairs", side_effect=lambda limit: {"groups": [], "total_groups": 0}
+            ),
+            mock.patch.object(card_live, "_live_merged_yesterday", side_effect=lambda: None),
             mock.patch.object(card, "make_propose", return_value=stubs.propose),
             contextlib.redirect_stdout(buf),
         ):
