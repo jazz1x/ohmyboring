@@ -668,14 +668,15 @@ class ClaimSourcePureTests(unittest.TestCase):
 
     def test_newest_valid_from_wins_and_ascending_input_is_sorted(self):
         rows = [
-            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL)),
-            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL)),
-            ("/vault/wiki/wiki-1200.md", datetime(2026, 9, 10, tzinfo=approved.SEOUL)),
+            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "v1"),
+            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL), "v2"),
+            ("/vault/wiki/wiki-1200.md", datetime(2026, 9, 10, tzinfo=approved.SEOUL), "v3"),
         ]
         out = claim_source.pick_current("3차 창 샘플링", rows)
         self.assertEqual(out["subject"], "3차 창 샘플링")
         self.assertEqual(out["note"], "/vault/wiki/wiki-1405.md")
         self.assertEqual(out["valid_from"], "2026-09-20T00:00:00+09:00")
+        self.assertEqual(out["value"], "v2", "the current claim's value rides the answer")
         self.assertEqual(
             [c["note"] for c in out["candidates"]],
             ["/vault/wiki/wiki-1405.md", "/vault/wiki/wiki-1200.md", "/vault/wiki/wiki-1001.md"],
@@ -747,8 +748,8 @@ class ClaimSourceRouteTests(unittest.TestCase):
     def test_stub_rows_answer_the_note_path(self):
         os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
         self._rows = [
-            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL)),
-            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL)),
+            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL), "v2"),
+            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "v1"),
         ]
         subject = urllib.parse.quote("3차 창 샘플링")
         status, body, content_type = _req(self.door_port, "GET", f"/claim-source?subject={subject}")
@@ -757,6 +758,7 @@ class ClaimSourceRouteTests(unittest.TestCase):
         payload = json.loads(body)
         self.assertEqual(payload["subject"], "3차 창 샘플링")
         self.assertEqual(payload["note"], "/vault/wiki/wiki-1405.md")
+        self.assertEqual(payload["value"], "v2", "the current claim's value rides the answer")
         self.assertEqual(len(payload["candidates"]), 2)
 
 

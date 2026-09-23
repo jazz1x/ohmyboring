@@ -17,24 +17,27 @@ from __future__ import annotations
 from typing import Any
 
 SQL = (
-    "select source_path, valid_from from claim "
+    "select source_path, valid_from, value from claim "
     "where subject = %s and superseded_at is null "
     "order by valid_from desc"
 )
 
 
-def pick_current(subject: str, rows: list[tuple[str, Any]]) -> dict[str, Any] | None:
-    """rows: (source_path, valid_from) as fetched — any order. Newest claim wins;
-    all current claims are the candidates. No rows → None, the door's 404."""
+def pick_current(subject: str, rows: list[tuple[str, Any, Any]]) -> dict[str, Any] | None:
+    """rows: (source_path, valid_from, value) as fetched — any order. Newest claim wins;
+    all current claims are the candidates, and the winner's value rides along for
+    callers (the LangGraph store's get) that need the claim payload, not just the path.
+    No rows → None, the door's 404."""
     if not rows:
         return None
     ordered = sorted(rows, key=lambda row: row[1], reverse=True)
-    note, valid_from = ordered[0]
+    note, valid_from, value = ordered[0]
     return {
         "subject": subject,
         "note": note,
         "valid_from": valid_from.isoformat(timespec="seconds"),
+        "value": value,
         "candidates": [
-            {"note": path, "valid_from": at.isoformat(timespec="seconds")} for path, at in ordered
+            {"note": path, "valid_from": at.isoformat(timespec="seconds")} for path, at, _ in ordered
         ],
     }
