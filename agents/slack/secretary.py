@@ -91,6 +91,8 @@ def _handed_paths_from(answer_text: str) -> list[str]:
 
 def _correction_line(result: dict) -> str:
     """The one line the thread gets back: what was recorded and how much it replaced, or the error."""
+    if result.get("error") == "number required":
+        return f"노트가 {result['count']}개입니다 — 「정정 2: …」처럼 번호를 붙여 주세요"
     if result.get("error"):
         return f"정정 기록 실패 — {result['error']}"
     if result.get("duplicate"):
@@ -99,7 +101,7 @@ def _correction_line(result: dict) -> str:
         name = result["duplicate"].rsplit("/", 1)[-1]
         return f"정정 기록 안 됨 — 기존 노트 {name} 와 같다고 봄"
     name = (result.get("source_path") or "?").rsplit("/", 1)[-1]
-    return f"정정 기록 → {name} (대체 {len(result.get('supersedes') or [])})"
+    return f"정정 기록 → {name} (대체 {result['supersedes']})"
 
 
 def on_thread_reply(
@@ -111,7 +113,7 @@ def on_thread_reply(
     owner_id: str | None = None,
 ) -> dict | None:
     """A thread reply on the bot's own answer, starting with "정정:", becomes a new note that
-    replaces the answer's notes — all of them, or one, when the reply says "정정 2:". Slack
+    replaces one of the answer's notes — the only one, or the one "정정 2:" names. Slack
     sends thread replies as `message` events, and the transport keeps no state about which ts
     was its own answer: the parent is read back through the API (one call) and recognized by
     the answer header the brain puts on every answer. Everything else is None — threaded

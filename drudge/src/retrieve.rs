@@ -112,6 +112,67 @@ async fn merge_hits(
     Ok(merged)
 }
 
+/// Membership is decided by score first; only then does a superseded note (a `supersedes` edge
+/// points at it) move after the live notes of the returned set. Demoted, never cut: the stable
+/// sort keeps score order within each group.
+async fn demote_superseded<F, Fut>(mut hits: Vec<Hit>, lookup: F) -> Result<Vec<Hit>>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<HashMap<String, Vec<String>>>>,
+{
+    let mut paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    let superseded = lookup(paths).await.context("rank: superseded lookup")?;
+    hits.sort_by_key(|h| superseded.contains_key(&h.source_path));
+    Ok(hits)
+}
+
+async fn top_k_demoted<F, Fut>(mut merged: Vec<Hit>, top_k: usize, lookup: F) -> Result<Vec<Hit>>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<HashMap<String, Vec<String>>>>,
+{
+    merged.truncate(top_k);
+    demote_superseded(merged, lookup).await
+}
+
+async fn budget_demoted<F, Fut>(
+    merged: Vec<Hit>,
+    max_results: usize,
+    max_chars: usize,
+    lookup: F,
+) -> Result<Vec<Hit>>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<HashMap<String, Vec<String>>>>,
+{
+    demote_superseded(within_budget(merged, max_results, max_chars), lookup).await
+}
+
+fn within_budget(merged: Vec<Hit>, max_results: usize, max_chars: usize) -> Vec<Hit> {
+    let per_hit_cap = max_chars / max_results;
+    let mut budget = max_chars;
+    let mut out = Vec::new();
+    for mut h in merged {
+        if out.len() >= max_results {
+            break;
+        }
+        let take = per_hit_cap.min(budget);
+        if take == 0 {
+            break;
+        }
+        let cut = h.content.chars().take(take).collect::<String>();
+        if cut.is_empty() {
+            continue;
+        }
+        budget = budget.saturating_sub(cut.chars().count());
+        h.content = cut;
+        out.push(h);
+    }
+    out
+}
+
 /// Vector top-N + BM25 top-N → RRF position-based merge → exclude origin → top-k.
 /// Optional `project`/`since_hours` narrow the pool before ranking.
 pub async fn retrieve(
@@ -131,9 +192,11 @@ pub async fn retrieve(
     let txt_hits = store
         .text_search_filtered(query, pool, project, since_hours)
         .await?;
-    let mut merged = merge_hits(store, vec_hits, txt_hits, exclude_origins).await?;
-    merged.truncate(top_k);
-    Ok(merged)
+    let merged = merge_hits(store, vec_hits, txt_hits, exclude_origins).await?;
+    top_k_demoted(merged, top_k, |paths| async move {
+        store.superseded_by(&paths).await
+    })
+    .await
 }
 
 /// Token-/character-budget aware retrieval.
@@ -164,27 +227,10 @@ pub async fn retrieve_budget(
         .text_search_filtered(query, pool, project, since_hours)
         .await?;
     let merged = merge_hits(store, vec_hits, txt_hits, exclude_origins).await?;
-
-    let per_hit_cap = max_chars / max_results;
-    let mut budget = max_chars;
-    let mut out = Vec::new();
-    for mut h in merged {
-        if out.len() >= max_results {
-            break;
-        }
-        let take = per_hit_cap.min(budget);
-        if take == 0 {
-            break;
-        }
-        let cut = h.content.chars().take(take).collect::<String>();
-        if cut.is_empty() {
-            continue;
-        }
-        budget = budget.saturating_sub(cut.chars().count());
-        h.content = cut;
-        out.push(h);
-    }
-    Ok(out)
+    budget_demoted(merged, max_results, max_chars, |paths| async move {
+        store.superseded_by(&paths).await
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -256,5 +302,46 @@ mod tests {
         let before = fused["b#0"];
         apply_net(&mut fused, &byid, "/b.md", 0);
         assert_eq!(fused["b#0"], before);
+    }
+
+    fn score_ordered_pool() -> Vec<Hit> {
+        ["old", "new", "b", "c", "d"]
+            .into_iter()
+            .map(|n| Hit {
+                content: "x".to_owned(),
+                ..hit(&format!("{n}#0"), &format!("/{n}.md"))
+            })
+            .collect()
+    }
+
+    fn ids(hits: Vec<Hit>) -> Vec<String> {
+        hits.into_iter().map(|h| h.id).collect()
+    }
+
+    #[tokio::test]
+    async fn superseded_top_scorer_is_returned_after_the_live_notes() {
+        let superseded = HashMap::from([("/old.md".to_owned(), vec!["/new.md".to_owned()])]);
+        let found = |_| async { Ok(superseded.clone()) };
+        let none = |_| async { Ok(HashMap::new()) };
+
+        let top = top_k_demoted(score_ordered_pool(), 3, none).await.unwrap();
+        assert_eq!(ids(top), ["old#0", "new#0", "b#0"], "control: score order");
+
+        let top = top_k_demoted(score_ordered_pool(), 3, found).await.unwrap();
+        assert_eq!(ids(top), ["new#0", "b#0", "old#0"], "demoted, not cut");
+
+        let budget = budget_demoted(score_ordered_pool(), 3, 300, found)
+            .await
+            .unwrap();
+        assert_eq!(ids(budget), ["new#0", "b#0", "old#0"], "budget path too");
+    }
+
+    #[tokio::test]
+    async fn failed_superseded_lookup_fails_the_retrieval() {
+        let failing = |_| async { Err(anyhow::anyhow!("db down")) };
+        let err = top_k_demoted(score_ordered_pool(), 3, failing)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("superseded lookup"));
     }
 }

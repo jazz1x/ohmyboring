@@ -317,17 +317,44 @@ def _recording_correct(calls):
             "source_path": "/vault/wiki/wiki-1077.md",
             "wiki_id": "wiki-1077",
             "duplicate": None,
-            "supersedes": list(handed_paths),
-            "unknown": [],
+            "supersedes": 1,
+            "unknown": 0,
         }
 
     return correct
 
 
+def test_a_correction_without_a_number_on_many_notes_asks_for_one():
+    remembered = []
+    web = FakeWeb(parent=_answer_parent())
+    out = sec.on_thread_reply(
+        _reply(),
+        web,
+        BOT,
+        correct=lambda *a: sc.correct(*a, remember=lambda *x, **kw: remembered.append(kw)),
+        owner_id=OWNER,
+    )
+    assert remembered == [], "two notes and no number: nothing may be superseded"
+    assert out == {"error": "number required", "count": 2}
+    assert web.posts == [
+        {
+            "channel": CH,
+            "thread_ts": POSTED_TS,
+            "text": "노트가 2개입니다 — 「정정 2: …」처럼 번호를 붙여 주세요",
+        }
+    ]
+
+
 def test_a_correction_on_the_bots_answer_becomes_a_note():
     calls = []
     web = FakeWeb(parent=_answer_parent())
-    out = sec.on_thread_reply(_reply(), web, BOT, correct=_recording_correct(calls), owner_id=OWNER)
+    out = sec.on_thread_reply(
+        _reply(text="정정 2: 재시작은 2시에 한다"),
+        web,
+        BOT,
+        correct=_recording_correct(calls),
+        owner_id=OWNER,
+    )
 
     assert web.replies_calls == [{"channel": CH, "ts": POSTED_TS, "limit": 1}]
     assert calls == [
@@ -335,14 +362,14 @@ def test_a_correction_on_the_bots_answer_becomes_a_note():
             "key": f"slack:{CH}:{POSTED_TS}",
             "question": "",
             "handed_paths": ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md"],
-            "text": "정정: 재시작은 2시에 한다",
+            "text": "정정 2: 재시작은 2시에 한다",
         }
     ], "the paths are rebuilt from the parent body's names, in the order the answer listed them"
     assert web.posts == [
         {
             "channel": CH,
             "thread_ts": POSTED_TS,
-            "text": "정정 기록 → wiki-1077.md (대체 2)",
+            "text": "정정 기록 → wiki-1077.md (대체 1)",
         }
     ]
     assert out["wiki_id"] == "wiki-1077"
@@ -357,8 +384,8 @@ def test_a_correction_the_engine_duplicated_is_a_failure_not_a_recorded_line():
             "source_path": "/vault/wiki/wiki-0435.md",
             "wiki_id": "wiki-0435",
             "duplicate": "/vault/wiki/wiki-0435.md",
-            "supersedes": [],
-            "unknown": [],
+            "supersedes": 0,
+            "unknown": 0,
         }
 
     web = FakeWeb(parent=_answer_parent())

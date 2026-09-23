@@ -2148,7 +2148,7 @@ mod tests {
         DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote, ToolCallError,
         ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_tools_list,
         needs_dedup, parse_remember_note, parse_supersedes, probable_session_duplicate,
-        should_replace_duplicate, tool_outcome_snippet, tool_query_arg,
+        remember_note, should_replace_duplicate, tool_outcome_snippet, tool_query_arg,
     };
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
@@ -2244,6 +2244,41 @@ mod tests {
         assert!(!needs_dedup(&["/vault/wiki/wiki-0001.md".to_owned()]));
         assert!(!needs_dedup(&["/a.md".to_owned(), "/b.md".to_owned()]));
         assert!(needs_dedup(&[]));
+    }
+
+    #[tokio::test]
+    async fn remember_note_lets_a_correction_past_the_duplicate_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("wiki")).unwrap();
+        let cfg = BoringConfig::default();
+        let s = crate::serve::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(Some(tmp.path().to_path_buf())),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+        };
+        let note = |supersedes: &[&str]| json!({"title": "t", "body": "b", "omb_session_id": "s1", "supersedes": supersedes});
+
+        let first = remember_note(&s, Some(&note(&[]))).await.unwrap();
+        let unmarked = remember_note(&s, Some(&note(&[]))).await.unwrap();
+        assert!(
+            unmarked.duplicate.is_some(),
+            "same session, no supersedes: the gate sees the duplicate"
+        );
+
+        let fix = remember_note(&s, Some(&note(&[first.source_path.as_str()])))
+            .await
+            .unwrap();
+        assert_eq!(fix.duplicate, None, "a correction skips the gate");
+        assert_ne!(fix.source_path, first.source_path);
     }
 
     #[test]

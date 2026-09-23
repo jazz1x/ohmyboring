@@ -151,13 +151,16 @@ def correct(
 ) -> dict:
     """A thread reply of "정정: …" turned into a new note that replaces the answer's notes. With a
     number ("정정 2:") only that one note is superseded — 1-based, in the order the answer listed
-    them; a number outside the answer is refused, not guessed. Without a number, everything the
-    answer carried is superseded. The owner's sentence is the note: no LLM is asked to reword it.
+    them; a number outside the answer is refused, not guessed. Without a number, the answer's one
+    note is superseded; if it carried several, the owner is asked for a number instead.
+    The owner's sentence is the note: no LLM is asked to reword it.
     The engine's response travels back untouched."""
     parsed = parse_correction(text)
     if parsed is None:
         return {"error": "not a correction"}
     number, body = parsed
+    if number is None and len(handed_paths) > 1:
+        return {"error": "number required", "count": len(handed_paths)}
     if number is not None and not 1 <= number <= len(handed_paths):
         return {"error": "no such number"}
     supersedes = [handed_paths[number - 1]] if number is not None else list(handed_paths)
