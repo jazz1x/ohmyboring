@@ -173,6 +173,7 @@ class Stubs:
         repairs_payload: dict | None = None,
         merged_yesterday_rows: int | None = None,
         execute_repair_result: dict | None = None,
+        proposed_items: list[cc.ProposedVerdict] | None = None,
     ):
         self.resolutions = resolutions if resolutions is not None else RESOLUTIONS
         self.approved_items = approved if approved is not None else PAST_APPROVED
@@ -188,6 +189,7 @@ class Stubs:
         )
         self.merged_yesterday_rows = merged_yesterday_rows
         self.execute_repair_result = execute_repair_result if execute_repair_result is not None else {}
+        self.proposed_items = proposed_items if proposed_items is not None else []
         self.propose_calls: list[str] = []
         self.search_calls: list[str] = []
         self.resolve_calls: list[tuple[str, str]] = []
@@ -245,6 +247,10 @@ class Stubs:
         self.execute_repair_calls.append(subject)
         return self.execute_repair_result
 
+    def proposed(self, since_hours: int) -> list[cc.ProposedVerdict]:
+        assert since_hours == card.REVIEW_SINCE_HOURS
+        return self.proposed_items
+
 
 def _blocks_text(blocks) -> str:
     return json.dumps(blocks, ensure_ascii=False)
@@ -277,6 +283,7 @@ class GraphTests(unittest.TestCase):
             repairs=stubs.repairs,
             execute_repair=stubs.execute_repair,
             merged_yesterday=stubs.merged_yesterday,
+            proposed=stubs.proposed,
         )
         return card.build_graph(collabs)
 
@@ -296,12 +303,13 @@ class GraphTests(unittest.TestCase):
         verdict = cc.ButtonVerdict(idx=idx, choice=choice, user=OWNER, at="t")
         return self.graph.invoke(Command(resume=verdict), self.cfg)
 
-    def test_graph_has_the_eight_nodes(self):
+    def test_graph_has_the_nine_nodes(self):
         names = set(self.graph.get_graph().nodes) - {"__start__", "__end__"}
         self.assertEqual(
             names,
             {
                 "read_repairs",
+                "read_proposed",
                 "read_registers",
                 "cross_check",
                 "advise",
@@ -714,6 +722,80 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(self.consumptions[0][0], SESSION)
         self.assertEqual(self.consumptions[0][1], "used")
 
+    def test_three_lanes_share_one_idx_space_and_the_run_ends_at_their_sum(self):
+        # The idx space runs repairs → advice → reviews; await_verdict's `of` and the END
+        # condition both count all three lanes — a review-less total is the mutant the
+        # verifier names, and a run that kept waiting after every row was judged is the other.
+        reviews = [
+            cc.ProposedVerdict(
+                session_id="sess-agent-1", note="/vault/wiki/wiki-0701.md", kind="used", at="t-1"
+            ),
+            cc.ProposedVerdict(
+                session_id="sess-agent-2", note="/vault/wiki/wiki-0702.md", kind="contested", at="t-2"
+            ),
+        ]
+        stubs = Stubs(repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 1}, proposed_items=reviews)
+        graph = self._build(stubs)
+        cfg = {"configurable": {"thread_id": "test-three-lanes"}}
+        out = graph.invoke({"verdicts": []}, cfg)
+        total = len(out["repairs"]) + len(out["proposals"]) + len(out["reviews"])
+        self.assertEqual(total, 1 + 3 + 2)
+        self.assertEqual(out["__interrupt__"][0].value["of"], total)
+        for idx in range(total):
+            verdict = cc.ButtonVerdict(idx=idx, choice="do", user=OWNER, at="t")
+            out = graph.invoke(Command(resume=verdict), cfg)
+        self.assertNotIn("__interrupt__", out)
+        self.assertEqual(len(out["verdicts"]), total)
+
+    def test_review_lane_flip_judges_the_proposing_session_with_the_opposite_kind(self):
+        reviews = [
+            cc.ProposedVerdict(
+                session_id="sess-agent-1", note="/vault/wiki/wiki-0700.md", kind="used", at="t-1"
+            )
+        ]
+        stubs = Stubs(proposed_items=reviews)
+        graph = self._build(stubs)
+        cfg = {"configurable": {"thread_id": "test-review-flip"}}
+        out = graph.invoke({"verdicts": []}, cfg)
+        n_slots = len(out["repairs"]) + len(out["proposals"])
+        verdict = cc.ButtonVerdict(idx=n_slots, choice="drop", user=OWNER, at="t")
+        graph.invoke(Command(resume=verdict), cfg)
+        self.assertEqual(self.consumptions[-1], ("sess-agent-1", "contested", ["/vault/wiki/wiki-0700.md"]))
+        reviewed = [fields for name, fields in stubs.records if name == "verdict_reviewed"]
+        self.assertEqual(
+            reviewed,
+            [
+                {
+                    "session_id": "sess-agent-1",
+                    "note": "/vault/wiki/wiki-0700.md",
+                    "proposed_kind": "used",
+                    "card_ts": CARD_TS,
+                    "choice": "flip",
+                }
+            ],
+        )
+
+    def test_review_lane_agree_records_only_the_review_event(self):
+        reviews = [
+            cc.ProposedVerdict(
+                session_id="sess-agent-2", note="/vault/wiki/wiki-0800.md", kind="contested", at="t-2"
+            )
+        ]
+        stubs = Stubs(proposed_items=reviews)
+        graph = self._build(stubs)
+        cfg = {"configurable": {"thread_id": "test-review-agree"}}
+        out = graph.invoke({"verdicts": []}, cfg)
+        n_slots = len(out["repairs"]) + len(out["proposals"])
+        consumption_calls = len(self.consumptions)
+        verdict = cc.ButtonVerdict(idx=n_slots, choice="do", user=OWNER, at="t")
+        graph.invoke(Command(resume=verdict), cfg)
+        self.assertEqual(len(self.consumptions), consumption_calls)  # agree never touches the graph
+        reviewed = [fields for name, fields in stubs.records if name == "verdict_reviewed"]
+        self.assertEqual(
+            [(r["choice"], r["proposed_kind"], r["session_id"], r["note"]) for r in reviewed],
+            [("agree", "contested", "sess-agent-2", "/vault/wiki/wiki-0800.md")],
+        )
+
 
 class AwaitVerdictsTests(unittest.TestCase):
     """AC6: CARD_WAIT_HOURS=0 (or expired) ends the wait immediately, touching Slack 0 times,
@@ -738,6 +820,7 @@ class AwaitVerdictsTests(unittest.TestCase):
             "repairs_total_groups": 0,
             "merged_yesterday_rows": None,
             "repair_results": {},
+            "reviews": [],
         }
         web = self._FakeWeb()
         buf = io.StringIO()
@@ -773,6 +856,7 @@ class AwaitVerdictsTests(unittest.TestCase):
             "repairs_total_groups": 0,
             "merged_yesterday_rows": None,
             "repair_results": {},
+            "reviews": [],
         }
         web = self._FakeWeb()
         buf = io.StringIO()
@@ -851,6 +935,7 @@ class DryRunWiringTests(unittest.TestCase):
             mock.patch.object(card_live, "_live_approved", side_effect=stubs.approved),
             mock.patch.object(card_live, "_live_active_projects", side_effect=stubs.active_projects),
             mock.patch.object(card_live, "_live_past_verdicts", side_effect=stubs.past_verdicts),
+            mock.patch.object(card_live, "_live_proposed", side_effect=stubs.proposed),
             mock.patch.object(
                 card_live, "_live_repairs", side_effect=lambda limit: {"groups": [], "total_groups": 0}
             ),

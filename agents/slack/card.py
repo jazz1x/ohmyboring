@@ -16,14 +16,18 @@ the last 7 days (`card_verdicts.suppressed`) — reading that history is not opt
 that cannot read it does not ship. post_card sends the Block Kit card (repair rows above the
 advice rows, each grouped and labeled its own way), records a card_proposal event per
 surviving proposal, and stops at an interrupt; a Slack button press resumes it with
-Command(resume=…) — the verdict's idx spans both lanes, repair rows first. record_verdict
-logs a card_verdict event for every press, then branches: a repair row's adopt button calls
-the door's own merge (POST /repairs/split-subjects); an advice row's adopt/reject writes the
-verdict to the engine, its hold leaves no trace beyond the event. The wait for presses ends
-after CARD_WAIT_HOURS regardless of how many rows are still unanswered — an unanswered row is
-left exactly as it is, the same as a hold. Sent and judged stay in one state, so the card a
-person answered is exactly the card the engine remembers. CARD_DRY_RUN=1 stops right after
-post_card and prints the proposals instead of touching Slack, handover, or the event log.
+Command(resume=…) — the verdict's idx spans all three lanes, repair rows first, then
+advice rows, then the review rows. record_verdict logs a card_verdict event for every
+press, then branches: a repair row's adopt button calls the door's own merge (POST
+/repairs/split-subjects); an advice row's adopt/reject writes the verdict to the engine,
+its hold leaves no trace beyond the event; a review row's agree leaves only a
+verdict_reviewed event, its flip writes the opposite-kind verdict to the proposing
+session and the same event — the agent's own edge is never deleted. The wait for presses
+ends after CARD_WAIT_HOURS regardless of how many rows are still unanswered — an
+unanswered row is left exactly as it is, the same as a hold. Sent and judged stay in one
+state, so the card a person answered is exactly the card the engine remembers.
+CARD_DRY_RUN=1 stops right after post_card and prints the proposals instead of touching
+Slack, handover, or the event log.
 
 The socket lives here, not in the secretary: hermes can only text, and the secretary answers
 questions while this file asks them. Everything decided lives in card_types/card_registers/
@@ -69,6 +73,10 @@ ADVISE_CALL_CAP = 8
 PROJECT_ACTIVE_DAYS = 14
 
 
+# The review lane's window — what the agent proposed over the last day.
+REVIEW_SINCE_HOURS = 24
+
+
 def _append_verdicts(
     existing: list[card_types.ButtonVerdict] | None, updates: list[card_types.ButtonVerdict]
 ) -> list[card_types.ButtonVerdict]:
@@ -93,6 +101,7 @@ class CardState(TypedDict):
     repairs: list[card_types.Repair]  # execute lane's rows — read_repairs' top-N groups
     repairs_total_groups: int  # read_repairs' full count, for the head line
     merged_yesterday_rows: int | None  # None when nothing merged in the last 24h
+    reviews: list[card_types.ProposedVerdict]  # review lane's rows — the agent's own calls
     repair_results: Annotated[
         dict[int, _RepairResult], _merge_repair_results
     ]  # repair idx → door POST result
@@ -123,12 +132,15 @@ class Collaborators(NamedTuple):
     lang: str  # resolve_lang(boring_config.note_lang()) — a value, not a callable: no network
     # Defaulted (unlike everything above): every existing caller that never heard of the
     # repair lane keeps working unchanged. repairs(limit) is the door's GET; execute_repair
-    # is its POST; merged_yesterday is the head line's optional "merged m rows yesterday".
+    # is its POST; merged_yesterday is the head line's optional "merged m rows yesterday";
+    # proposed is the review lane's engine read — defaulting to none keeps every pre-lane
+    # caller rendering exactly the card it rendered before.
     repairs: Callable[[int], dict[str, Any]] = lambda limit: {"groups": [], "total_groups": 0}
     execute_repair: Callable[[str], _RepairResult] = lambda subject: card_types.RepairFailed(
         subject=subject, deleted_rows=0, reread_notes=0, reason="no repair collaborator configured"
     )
     merged_yesterday: Callable[[], int | None] = lambda: None
+    proposed: Callable[[int], list[card_types.ProposedVerdict]] = lambda since_hours: []
 
 
 def session_name(card: card_types.PostedCard) -> str:
@@ -155,6 +167,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             repairs=card_live._live_repairs,
             execute_repair=card_live._live_execute_repair,
             merged_yesterday=card_live._live_merged_yesterday,
+            proposed=card_live._live_proposed,
         )
 
     def read_repairs(_: CardState) -> dict:
@@ -168,6 +181,13 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             "repairs_total_groups": payload["total_groups"],
             "merged_yesterday_rows": collabs.merged_yesterday(),
         }
+
+    def read_proposed(_: CardState) -> dict:
+        """The review lane's rows — what the agent classified at session end over the last
+        day. A dead engine raises here the same way an unreadable judged history does in
+        resolve: a card that cannot read the proposals it would ask the owner to flip is
+        the wrong card to send."""
+        return {"reviews": collabs.proposed(REVIEW_SINCE_HOURS)}
 
     def read_registers(_: CardState) -> dict:
         active = collabs.active_projects(PROJECT_ACTIVE_DAYS)
@@ -313,6 +333,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 repairs=state["repairs"],
                 repairs_total_groups=state["repairs_total_groups"],
                 merged_yesterday_rows=state["merged_yesterday_rows"],
+                reviews=state["reviews"],
                 lang=lang,
             )
         )
@@ -341,7 +362,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         return {"message": message}
 
     def await_verdict(state: CardState) -> dict:
-        total_rows = len(state["proposals"]) + len(state["repairs"])
+        total_rows = len(state["proposals"]) + len(state["repairs"]) + len(state["reviews"])
         verdict = interrupt({"judged": len(state["verdicts"]), "of": total_rows})
         return {"verdicts": [verdict]}
 
@@ -356,15 +377,37 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 return {}
             result = collabs.execute_repair(state["repairs"][verdict.idx].subject)
             return {"repair_results": {verdict.idx: result}}
-        if verdict.choice == "defer":
-            return {}  # a card_verdict event, but no consumption call — never suppresses
-        kind = "used" if verdict.choice == "do" else "contested"
-        note = state["proposals"][verdict.idx - n_repairs].note
-        collabs.consumption(session_name(state["message"]), kind, [note])
+        n_proposals = len(state["proposals"])
+        if verdict.idx < n_repairs + n_proposals:
+            if verdict.choice == "defer":
+                return {}  # a card_verdict event, but no consumption call — never suppresses
+            kind = "used" if verdict.choice == "do" else "contested"
+            note = state["proposals"][verdict.idx - n_repairs].note
+            collabs.consumption(session_name(state["message"]), kind, [note])
+            return {}
+        # the review lane: the agent proposed, the owner may only agree or flip. Agreeing
+        # records nothing but the review event — no edge, silence ≠ agreement elsewhere too.
+        # Flipping judges the proposing session with the opposite kind: the agent's own edge
+        # stays in the graph (an agent 표 and an owner 표, side by side, by design).
+        review = state["reviews"][verdict.idx - n_repairs - n_proposals]
+        fields: dict[str, Any] = {
+            "session_id": review.session_id,
+            "note": review.note,
+            "proposed_kind": review.kind,
+            "card_ts": state["message"].ts,
+        }
+        if verdict.choice == "do":
+            collabs.record("verdict_reviewed", {**fields, "choice": "agree"})
+            return {}
+        collabs.consumption(
+            review.session_id, "contested" if review.kind == "used" else "used", [review.note]
+        )
+        collabs.record("verdict_reviewed", {**fields, "choice": "flip"})
         return {}
 
     graph = StateGraph(CardState)
     graph.add_node("read_repairs", read_repairs)
+    graph.add_node("read_proposed", read_proposed)
     graph.add_node("read_registers", read_registers)
     graph.add_node("cross_check", cross_check)
     graph.add_node("advise", advise)
@@ -373,7 +416,8 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     graph.add_node("await_verdict", await_verdict)
     graph.add_node("record_verdict", record_verdict)
     graph.add_edge(START, "read_repairs")
-    graph.add_edge("read_repairs", "read_registers")
+    graph.add_edge("read_repairs", "read_proposed")
+    graph.add_edge("read_proposed", "read_registers")
     graph.add_edge("read_registers", "cross_check")
     graph.add_edge("cross_check", "advise")
     graph.add_edge("advise", "resolve")
@@ -384,7 +428,8 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         "record_verdict",
         lambda state: (
             "await_verdict"
-            if len(state["verdicts"]) < len(state["proposals"]) + len(state["repairs"])
+            if len(state["verdicts"])
+            < len(state["proposals"]) + len(state["repairs"]) + len(state["reviews"])
             else END
         ),
     )
@@ -482,6 +527,7 @@ class _Holder:
         self.message: card_types.PostedCard | None = None
         self.repairs: list[card_types.Repair] = []
         self.proposals: list[card_types.Proposal] = []
+        self.reviews: list[card_types.ProposedVerdict] = []
         self.judged: set[int] = set()
 
 
@@ -504,7 +550,7 @@ def _listener(holder: _Holder, owner_id: str | None) -> Callable:
             return
         if (payload.get("message") or {}).get("ts") != holder.message.ts:
             return
-        n_total = len(holder.repairs) + len(holder.proposals)
+        n_total = len(holder.repairs) + len(holder.proposals) + len(holder.reviews)
         verdict = card_verdicts.parse_action(payload, owner_id=owner_id, n_total=n_total)
         if isinstance(verdict, card_types.Rejected):
             print(f"[card] rejected: {verdict.reason}", file=sys.stderr)
@@ -551,12 +597,15 @@ def _await_verdicts(
                 repairs_total_groups=state["repairs_total_groups"],
                 merged_yesterday_rows=state["merged_yesterday_rows"],
                 repair_results=state["repair_results"],
+                reviews=state["reviews"],
                 lang=state["lang"],
             ),
         )
         if "__interrupt__" not in state:
             break
-    unanswered = len(state["proposals"]) + len(state["repairs"]) - len(state["verdicts"])
+    unanswered = (
+        len(state["proposals"]) + len(state["repairs"]) + len(state["reviews"]) - len(state["verdicts"])
+    )
     if unanswered > 0:
         print(f"[card] 대기 끝 — 안 누른 제안 {unanswered}건은 그대로 둔다", file=sys.stderr)
     return state
@@ -597,6 +646,7 @@ def _run_dry() -> int:
         lang=card_advice.resolve_lang(boring_config.note_lang()),
         repairs=card_live._live_repairs,
         merged_yesterday=card_live._live_merged_yesterday,
+        proposed=card_live._live_proposed,
     )
     graph = build_graph(collabs)
     config = {"configurable": {"thread_id": f"card-dry-{datetime.now(UTC):%Y%m%d%H%M%S}"}}
@@ -689,6 +739,7 @@ def main() -> int:
             holder.message = state["message"]
             holder.repairs = state["repairs"]
             holder.proposals = state["proposals"]
+            holder.reviews = state["reviews"]
             _await_verdicts(holder, graph, config, state, web_client, card_live.CARD_WAIT_HOURS)
         except KeyboardInterrupt:
             print("[card] 결재 대기를 멈춘다 — 카드는 슬랙에 남아 있다.", file=sys.stderr)

@@ -209,6 +209,18 @@ class ButtonVerdict(BaseModel):
     at: str
 
 
+class ProposedVerdict(BaseModel):
+    """One session-end classification the agent already made and proposed — not the owner's.
+    `session_id` is the session that judged the note (the /consumption edge's own session),
+    so an owner flip judges that same session, never the card's. The card's review lane shows
+    these; the owner may agree or flip, and silence records nothing."""
+
+    session_id: str
+    note: str
+    kind: Literal["used", "contested"]
+    at: str
+
+
 class Rejected(BaseModel):
     """A button press that is not a verdict. A value, never an exception — the socket loop
     logs the reason and keeps listening."""

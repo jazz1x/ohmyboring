@@ -26,6 +26,7 @@ from card_types import (
     NO_CURRENT_CLAIM,
     PastApproved,
     PastVerdictPair,
+    ProposedVerdict,
     RepairDone,
     RepairFailed,
     ResolvedNote,
@@ -192,6 +193,32 @@ def _live_record(event: str, fields: dict) -> None:
 
 #: how many split-subject groups the "오늘 할 일" lane shows — the door's own default too.
 REPAIRS_LIMIT = 3
+
+#: how many of the agent's session-end classifications the review lane shows.
+REVIEW_LIMIT = 3
+
+
+def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
+    """The review lane's rows: session-end verdict_proposed events, contested first, then
+    newest first, at most REVIEW_LIMIT. A row missing a field this value needs is malformed —
+    raise (F5/ROP), never skip: a dropped row here is a flip the owner was never shown."""
+    parsed: list[ProposedVerdict] = []
+    for entry in _live_events("verdict_proposed", since_hours):
+        attrs = entry.get("attributes") or {}
+        try:
+            parsed.append(
+                ProposedVerdict(
+                    session_id=attrs["session_id"],
+                    note=attrs["note"],
+                    kind=attrs["kind"],
+                    at=entry["observed_at"],
+                )
+            )
+        except (KeyError, TypeError, ValidationError) as e:
+            raise ValueError(f"malformed verdict_proposed row: {attrs!r}: {e}") from e
+    parsed.sort(key=lambda p: p.at, reverse=True)  # newest first
+    parsed.sort(key=lambda p: p.kind != "contested")  # stable: contested keeps the head
+    return parsed[:REVIEW_LIMIT]
 
 
 def _live_repairs(limit: int = REPAIRS_LIMIT) -> dict[str, Any]:

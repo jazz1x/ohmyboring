@@ -145,8 +145,9 @@ def parse_action(
 ) -> ButtonVerdict | Rejected:
     """A block_actions payload in, one verdict out — or Rejected with the reason. Nothing here
     raises: a weird button is a fact about the world, not a crash. When an owner is configured,
-    nobody else's press counts. `n_total` bounds idx across both card lanes — repair rows
-    then advice rows, one shared index space (card.py's record_verdict splits on it)."""
+    nobody else's press counts. `n_total` bounds idx across all three card lanes — repair rows,
+    then advice rows, then the review rows, one shared index space (card.py's record_verdict
+    splits on it)."""
 
     if payload.get("type") != "block_actions":
         return Rejected(reason="not block_actions")

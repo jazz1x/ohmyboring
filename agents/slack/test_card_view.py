@@ -366,6 +366,56 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertNotIn("오늘 할 일", _blocks_text(plain))
         self.assertNotIn("짚어 둔 것", _blocks_text(plain))
 
+    def test_review_lane_sits_below_the_advice_lane_with_agree_and_flip_only(self):
+        # 분류 칸: 조언 칸 아래 머리 + 행마다 kind_label · 짧은 노트 이름 + 맞음/뒤집기 두
+        # 버튼뿐. 비면 머리도 없다 — 0건 아침이 카드 모양을 바꾸면 안 된다(검증자 첫 질문).
+        proposal = self._proposal()
+        reviews = [
+            cc.ProposedVerdict(session_id="s1", note="/vault/wiki/wiki-0700.md", kind="contested", at="t-1"),
+            cc.ProposedVerdict(session_id="s2", note="/vault/wiki/wiki-0701.md", kind="used", at="t-2"),
+        ]
+        blocks = cv.build_blocks([proposal], reviews=reviews, lang="ko")
+        section_labels = [
+            b["text"]["text"]
+            for b in blocks
+            if b["type"] == "section" and b["text"]["text"].startswith("　\n")
+        ]
+        self.assertEqual(section_labels[-1], "　\n*에이전트가 가른 것*")
+        advice_row = next(b for b in blocks if b["type"] == "actions")
+        review_header = next(
+            b for b in blocks if b["type"] == "section" and "에이전트가 가른 것" in b["text"]["text"]
+        )
+        self.assertGreater(blocks.index(review_header), blocks.index(advice_row))
+        action_rows = [b for b in blocks if b["type"] == "actions"]
+        self.assertEqual(len(action_rows), 3)  # one advice row + two review rows
+        for row, expected_idx in zip(action_rows[1:], (1, 2)):
+            buttons = {el["action_id"]: el for el in row["elements"]}
+            self.assertEqual(set(buttons), {f"card:{expected_idx}:do", f"card:{expected_idx}:drop"})
+        self.assertEqual([el["text"]["text"] for el in action_rows[1]["elements"]], ["맞음", "뒤집기"])
+        tag = next(b for b in blocks if b["type"] == "context" and "wiki-0700" in _blocks_text([b]))
+        self.assertEqual(tag["elements"][0]["text"], "틀린 노트 · wiki-0700")
+        self.assertNotIn("/vault/", _blocks_text(blocks))
+
+        judged = cv.build_blocks(
+            [proposal],
+            [
+                cc.ButtonVerdict(idx=1, choice="do", user="U1", at="t"),
+                cc.ButtonVerdict(idx=2, choice="drop", user="U1", at="t"),
+            ],
+            reviews=reviews,
+            lang="ko",
+        )
+        marks = [
+            b
+            for b in judged
+            if b["type"] == "context" and ("✓ 맞음" in _blocks_text([b]) or "↺" in _blocks_text([b]))
+        ]
+        self.assertEqual(marks[0]["elements"][0]["text"], "✓ 맞음")
+        self.assertEqual(marks[1]["elements"][0]["text"], "↺ 뒤집음 — 소유자 판정으로 틀린 노트")
+
+        plain = cv.build_blocks([proposal], reviews=[], lang="ko")
+        self.assertNotIn("에이전트가 가른 것", _blocks_text(plain))
+
     def test_headline_shows_remaining_groups_and_optional_merged_yesterday(self):
         # AC7: a mutant dropping the remaining-groups count from the head line must kill this.
         proposal = self._proposal()

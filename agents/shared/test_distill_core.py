@@ -705,6 +705,44 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
         self.assertEqual(kwargs["supersedes"], [["/vault/wiki/wiki-0007.md", "/vault/wiki/wiki-0003.md"]])
         self.assertRegex(when, r"^\d{4}-\d{2}-\d{2}T")
 
+    def test_verdict_proposed_events_fire_per_note_only_after_a_successful_write(self):
+        # The agent's call is visible to the owner the next morning: one verdict_proposed per
+        # used/contested note, only when the consumption write itself succeeded — the failure
+        # arm is the control group and must leave zero proposals behind.
+        transcript = (
+            "[user] why did the pool die\n"
+            "[assistant] per wiki-0007 instead of wiki-0003. Even so, wiki-0007 is outdated now.\n"
+        )
+        with (
+            mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}),
+            mock.patch("drudge_client.DrudgeClient") as client,
+            mock.patch.object(distill_core.event_log, "append_event") as append_event,
+        ):
+            distill_core.write_consumption_to_graph("s1", self._records(), transcript)
+        proposals = [c for c in append_event.call_args_list if c.args[1] == "verdict_proposed"]
+        self.assertEqual(
+            [(c.kwargs["note"], c.kwargs["kind"]) for c in proposals],
+            [
+                ("/vault/wiki/wiki-0007.md", "used"),
+                ("/vault/wiki/wiki-0003.md", "used"),
+                ("/vault/wiki/wiki-0007.md", "contested"),
+            ],
+        )
+        for call in proposals:
+            self.assertEqual((call.args[0], call.args[2]), ("distill", "ok"))
+            self.assertEqual(call.kwargs["session_id"], "s1")
+            self.assertEqual(call.kwargs["judge"], "inferred")
+
+        append_event.reset_mock()
+        with (
+            mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}),
+            mock.patch("drudge_client.DrudgeClient") as client,
+            mock.patch.object(distill_core.event_log, "append_event") as append_event,
+        ):
+            client.return_value.consumption.side_effect = OSError("down")
+            distill_core.write_consumption_to_graph("s1", self._records(), transcript)
+        append_event.assert_not_called()
+
     def test_a_spooled_sink_never_writes_to_the_live_graph(self):
         transcript = "[user] why\n[assistant] per wiki-0007.\n"
         with (

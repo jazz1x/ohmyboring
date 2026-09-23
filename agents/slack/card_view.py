@@ -32,6 +32,7 @@ from card_types import (
     Confirmation,
     Evidence,
     Proposal,
+    ProposedVerdict,
     Repair,
     RepairDone,
     RepairFailed,
@@ -244,6 +245,54 @@ def _repair_row(
     return row
 
 
+def _review_tag_block(review: ProposedVerdict, strings: dict[str, str]) -> dict:
+    text = f"{strings[f'review_kind_{review.kind}']} · {_note_label(review.note)}"
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+
+
+def _review_actions_block(idx: int, strings: dict[str, str]) -> dict:
+    # Agree (do) or flip (drop) only — no hold: not pressing is the hold, and it records
+    # nothing, so a hold button would promise a trace the run never leaves.
+    elements = []
+    for choice in ("do", "drop"):
+        button = {
+            "type": "button",
+            "text": {"type": "plain_text", "text": strings[f"review_button_{choice}"], "emoji": True},
+            "action_id": f"card:{idx}:{choice}",
+            "value": "",
+        }
+        if choice == "do":
+            button["style"] = "primary"
+        elif choice == "drop":
+            button["style"] = "danger"
+        elements.append(button)
+    return {"type": "actions", "elements": elements}
+
+
+def _review_verdict_block(review: ProposedVerdict, verdict: ButtonVerdict, strings: dict[str, str]) -> dict:
+    if verdict.choice == "do":
+        text = strings["review_verdict_agree"]
+    else:
+        flipped = strings[f"review_kind_{'contested' if review.kind == 'used' else 'used'}"]
+        text = strings["review_verdict_flip"].format(kind=flipped)
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+
+
+def _review_row(
+    idx: int,
+    review: ProposedVerdict,
+    verdict: ButtonVerdict | None,
+    strings: dict[str, str],
+) -> list[dict]:
+    row = [{"type": "divider"}, _review_tag_block(review, strings)]
+    row.append(
+        _review_verdict_block(review, verdict, strings)
+        if verdict is not None
+        else _review_actions_block(idx, strings)
+    )
+    return row
+
+
 def _project_groups(proposals: list[Proposal]) -> list[tuple[str, list[int]]]:
     """proposals grouped by `.project`, each project's rows kept together under one label —
     in first-seen order, so a priority (아직) pick from project B ahead of project A's own
@@ -268,6 +317,7 @@ def build_blocks(
     repairs_total_groups: int = 0,
     merged_yesterday_rows: int | None = None,
     repair_results: dict[int, RepairDone | RepairFailed] | None = None,
+    reviews: Iterable[ProposedVerdict] = (),
     *,
     lang: str,
 ) -> list[dict]:
@@ -286,7 +336,11 @@ def build_blocks(
     renders exactly as before. When shown: a head-line context block, then, only if
     `repairs` itself is non-empty, a 「오늘 할 일」 label and one four-block row per repair,
     then a 「짚어 둔 것」 label before the advice rows. Repair rows occupy button idx
-    0..len(repairs)-1; advice rows continue from there — one shared space, repairs first."""
+    0..len(repairs)-1; advice rows continue from there — one shared space, repairs first.
+    A review lane sits below the advice lane when `reviews` is non-empty — the agent's own
+    session-end classifications, one three-block row each, agree/flip buttons occupying the
+    idx slots after the advice rows. Empty `reviews` leaves the card exactly as it was —
+    a zero-proposal morning must not change the card's shape."""
     strings = card_i18n.STRINGS[lang]
     register_labels = card_i18n.REGISTER_LABELS[lang]
     repair_results = repair_results or {}
@@ -351,4 +405,17 @@ def build_blocks(
                 "elements": [{"type": "mrkdwn", "text": strings["overflow_line"].format(n=remaining)}],
             }
         )
+
+    reviews = list(reviews)
+    if reviews:
+        # the review lane sits below the advice one — the agent's own session-end calls,
+        # which the owner may agree with or flip. No reviews, no header: a lane the agent
+        # never filled must not render as an empty promise.
+        blocks.append(_section_header_block(strings["review_header"]))
+        n_slots = n_repairs + total
+        for ridx, review in enumerate(reviews):
+            addition = _review_row(n_slots + ridx, review, by_idx.get(n_slots + ridx), strings)
+            if len(blocks) + len(addition) > BLOCK_LIMIT:
+                break
+            blocks.extend(addition)
     return blocks
