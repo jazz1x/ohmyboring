@@ -348,6 +348,30 @@ def test_a_correction_on_the_bots_answer_becomes_a_note():
     assert out["wiki_id"] == "wiki-1077"
 
 
+def test_a_correction_the_engine_duplicated_is_a_failure_not_a_recorded_line():
+    calls = []
+
+    def duplicating_correct(key, question, handed_paths, text):
+        calls.append(text)
+        return {
+            "source_path": "/vault/wiki/wiki-0435.md",
+            "wiki_id": "wiki-0435",
+            "duplicate": "/vault/wiki/wiki-0435.md",
+            "supersedes": [],
+            "unknown": [],
+        }
+
+    web = FakeWeb(parent=_answer_parent())
+    sec.on_thread_reply(_reply(), web, BOT, correct=duplicating_correct, owner_id=OWNER)
+    assert web.posts == [
+        {
+            "channel": CH,
+            "thread_ts": POSTED_TS,
+            "text": "정정 기록 안 됨 — 기존 노트 wiki-0435.md 와 같다고 봄",
+        }
+    ], "a swallowed correction must read as failure — the old note still stands"
+
+
 def test_a_message_without_a_thread_is_just_conversation():
     calls = []
     web = FakeWeb(parent=_answer_parent())

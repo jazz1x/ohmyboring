@@ -93,6 +93,11 @@ def _correction_line(result: dict) -> str:
     """The one line the thread gets back: what was recorded and how much it replaced, or the error."""
     if result.get("error"):
         return f"정정 기록 실패 — {result['error']}"
+    if result.get("duplicate"):
+        # Since r4.1 the engine never gates a correction, so a duplicate answer means the
+        # write was swallowed — the old note still stands and the thread must hear failure.
+        name = result["duplicate"].rsplit("/", 1)[-1]
+        return f"정정 기록 안 됨 — 기존 노트 {name} 와 같다고 봄"
     name = (result.get("source_path") or "?").rsplit("/", 1)[-1]
     return f"정정 기록 → {name} (대체 {len(result.get('supersedes') or [])})"
 

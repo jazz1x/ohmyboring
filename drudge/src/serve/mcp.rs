@@ -1341,7 +1341,8 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
 /// The write door both MCP `remember` and `POST /remember` go through: one parser, one write
 /// path, one dedup policy. `supersedes` (optional) names the notes this one corrects; after the
 /// note is written and ingested, each pair becomes a `supersedes` edge from the new note, and
-/// the next recall sinks the old note below the new one.
+/// the next recall sinks the old note below the new one. A note that names what it corrects
+/// skips the duplicate gate — a correction must land, never be swallowed as "too similar".
 pub(crate) async fn remember_note(
     s: &AppState,
     args: Option<&Value>,
@@ -1358,9 +1359,14 @@ pub(crate) async fn remember_note(
     apply_pii_gate(s.pii.as_ref().as_ref(), &mut note)?;
 
     let wiki_dir = vault_root.join("wiki");
-    if let Some(existing) = check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir)
-        .await
-        .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
+    // A correction (supersedes names what it fixes) must land as a new note: a one-word
+    // fix of a long note still embeds within DUPLICATE_MAX_DIST, so a corrected note that
+    // went through the gate would be skipped as "too similar" and the wrong fact would
+    // stay live. Only unmarked notes go through the duplicate gate.
+    if needs_dedup(&supersedes)
+        && let Some(existing) = check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir)
+            .await
+            .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
     {
         if should_replace_duplicate(&note, &existing) {
             let telemetry = dedup_decision_event(&note, Some(&existing), DedupOutcome::Replace);
@@ -1708,6 +1714,10 @@ fn duplicate_match(
         front,
         body: body.to_owned(),
     }
+}
+
+fn needs_dedup(supersedes: &[String]) -> bool {
+    supersedes.is_empty()
 }
 
 fn should_replace_duplicate(note: &RememberNote, existing: &DuplicateMatch) -> bool {
@@ -2137,7 +2147,7 @@ mod tests {
     use super::{
         DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote, ToolCallError,
         ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_tools_list,
-        parse_remember_note, parse_supersedes, probable_session_duplicate,
+        needs_dedup, parse_remember_note, parse_supersedes, probable_session_duplicate,
         should_replace_duplicate, tool_outcome_snippet, tool_query_arg,
     };
     use crate::config::BoringConfig;
@@ -2224,6 +2234,16 @@ mod tests {
         assert_eq!(parse_supersedes(Some(&args)).unwrap_err().0, -32602);
         let args = json!({"supersedes": "/vault/wiki/a.md"});
         assert_eq!(parse_supersedes(Some(&args)).unwrap_err().0, -32602);
+    }
+
+    #[test]
+    fn needs_dedup_skips_the_gate_for_corrections_only() {
+        // supersedes 를 밝힌 고침 기록은 중복 검사를 아예 걷지 않는다 — 조금만 고친 값도
+        // 임베딩 거리 안에서 기존 노트와 닮아 gate 가 삼킬 수 있기 때문. 표기 없는 기록은
+        // 지금 그대로 검사를 탄다.
+        assert!(!needs_dedup(&["/vault/wiki/wiki-0001.md".to_owned()]));
+        assert!(!needs_dedup(&["/a.md".to_owned(), "/b.md".to_owned()]));
+        assert!(needs_dedup(&[]));
     }
 
     #[test]

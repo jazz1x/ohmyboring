@@ -10,11 +10,14 @@ stay on record — records are never deleted. Delete is refused, not emulated.
 
 Coverage on purpose, each a visible raise rather than a silent fallback:
   - get    → door GET /claim-source (404 → None; the claim's value rides the 200)
-  - put    → door GET /claim-source, then engine POST /remember. The note title
-             carries a value revision so the engine's title-duplicate gate never
-             swallows a re-put; a same-value re-put stops after the GET — a quiet
-             no-op, no write leaves. A changed value names the current note in
-             supersedes and becomes the new current claim.
+  - put    → door GET /claim-source, then engine POST /remember. A same-value re-put
+             stops after the GET — a quiet no-op, no write leaves. A changed value names
+             the current note in supersedes, and since r4.1 a corrected note always lands:
+             the engine skips the duplicate gate for anything that names what it
+             supersedes, so the engine answering `duplicate` is a real failure and
+             raises instead of passing for success. The first put stamps `created_at`
+             (UTC ISO) into the claim value; a re-put inherits it from the current
+             value, so get's created_at is when the record was born, not last written.
   - search → ("boring", ...) only, over the engine's /search via BoringRetriever
              (nothing re-implemented here); any other prefix is next wheel
   - delete / list_namespaces / ttl / index → refused or next wheel, never faked
@@ -67,24 +70,30 @@ def _subject_for(namespace: tuple[str, ...], key: str) -> str:
     return "langgraph-store-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
-def _claim_value(namespace: tuple[str, ...], key: str, value: dict[str, Any]) -> str:
-    """What the claim carries: the coordinates plus the value, one JSON string."""
+def _claim_value(namespace: tuple[str, ...], key: str, value: dict[str, Any], created_at: datetime) -> str:
+    """What the claim carries: the coordinates, the value, and when the record was born,
+    one JSON string. `created_at` never changes after the first put — a re-put inherits
+    it from the current value, so get answers "when was this record created", not "when
+    was it last written"."""
     return json.dumps(
-        {"namespace": list(namespace), "key": key, "value": value}, ensure_ascii=False, sort_keys=True
+        {
+            "namespace": list(namespace),
+            "key": key,
+            "value": value,
+            "created_at": created_at.isoformat(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
     )
 
 
-def _value_revision(value: dict[str, Any], current_note: str | None) -> str:
-    """One note title never repeats: the engine's duplicate gate scans the wiki dir and
-    skips a write whose title it has seen (DuplicateReason::ExactTitle), so a title that
-    recreates an old value would be swallowed by the note that value left behind. The
-    revision hashes the value with the chain head it replaces — A→B→A writes a third,
-    differently-titled note. Same value at the same head yields the same revision, which
-    the caller-side no-op check uses to skip the write before it ever leaves."""
-    raw = json.dumps(value, ensure_ascii=False, sort_keys=True)
-    if current_note is not None:
-        raw += "|" + current_note
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+def _created_at_of(payload: dict[str, Any]) -> datetime:
+    """A claim value's created_at. Values written before r4.1 lack the field; the record's
+    first candidate valid_from is the closest honest answer for those."""
+    raw = json.loads(payload["value"]).get("created_at")
+    if raw is not None:
+        return datetime.fromisoformat(raw)
+    return min(datetime.fromisoformat(c["valid_from"]) for c in payload["candidates"])
 
 
 def _get_json(url: str) -> dict[str, Any]:
@@ -135,12 +144,11 @@ class BoringStore(BaseStore):
         # The door must carry the claim's value; a door from before that field
         # raises KeyError here rather than answering a stale shape.
         envelope = json.loads(payload["value"])
-        valid_froms = [datetime.fromisoformat(c["valid_from"]) for c in payload["candidates"]]
         return Item(
             value=envelope["value"],
             key=envelope["key"],
             namespace=tuple(envelope["namespace"]),
-            created_at=min(valid_froms),
+            created_at=_created_at_of(payload),
             updated_at=datetime.fromisoformat(payload["valid_from"]),
         )
 
@@ -156,18 +164,17 @@ class BoringStore(BaseStore):
         current_note = current["note"] if current is not None else None
         if current is not None and json.loads(current["value"])["value"] == op.value:
             # Same value already current — nothing to supersede. Quiet no-op, and no
-            # write leaves: the engine's title-duplicate gate would skip it anyway.
+            # write leaves: the engine's duplicate gate would skip it anyway.
             return None
+        created_at = _created_at_of(current) if current is not None else datetime.now(UTC)
         body: dict[str, Any] = {
-            "title": (
-                f"langgraph store {'/'.join(op.namespace)}/{op.key} {_value_revision(op.value, current_note)}"
-            ),
+            "title": f"langgraph store {'/'.join(op.namespace)}/{op.key}",
             "body": "```json\n" + json.dumps(op.value, ensure_ascii=False, sort_keys=True) + "\n```",
             "claims": [
                 {
                     "subject": subject,
                     "predicate": _PREDICATE,
-                    "value": _claim_value(op.namespace, op.key, op.value),
+                    "value": _claim_value(op.namespace, op.key, op.value, created_at),
                 }
             ],
             "tags": ["langgraph-store"],
@@ -175,9 +182,13 @@ class BoringStore(BaseStore):
         }
         if current_note is not None:
             body["supersedes"] = [current_note]
-        # A duplicate answer names the existing note and writes nothing — put stays
-        # quiet either way; it returns nothing.
-        _post_json(f"{self.engine_url}/remember", body)
+        resp = _post_json(f"{self.engine_url}/remember", body)
+        # Since r4.1 a corrected note always lands: the engine skips the duplicate gate
+        # for anything that names what it supersedes. A duplicate answer here means the
+        # gate fired anyway and the write was swallowed — that is a failure, not a quiet
+        # None: the caller's new value is NOT what get will answer.
+        if resp.get("duplicate"):
+            raise RuntimeError(f"/remember swallowed the put as a duplicate of {resp['duplicate']}")
         return None
 
     def _search(self, op: SearchOp) -> list[SearchItem]:
