@@ -87,5 +87,23 @@ class NormalizeCardTest(unittest.TestCase):
         self.assertEqual(dp.normalize_card("recurrences", a), dp.normalize_card("recurrences", b))
 
 
+class InstrumentFailureTest(unittest.TestCase):
+    def test_psql_failure_exits_2_not_1(self):
+        # 장비(psql) 불통은 데이터 차이(1) 가 아니라 잰 게 아님(2) — 깨진 계기를 차이로 읽지 않는다.
+        import sys
+        from unittest import mock
+
+        argv = sys.argv
+        sys.argv = ["data-parity.py", "--a", "http://x", "--b", "http://y", "--a-db", "a", "--b-db", "b"]
+        try:
+            with (
+                mock.patch.object(dp, "health", return_value=None),
+                mock.patch.object(dp, "psql_csv", side_effect=RuntimeError("psql 실패 (a)")),
+            ):
+                self.assertEqual(dp.main(), 2)
+        finally:
+            sys.argv = argv
+
+
 if __name__ == "__main__":
     unittest.main()

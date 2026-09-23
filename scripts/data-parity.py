@@ -270,6 +270,11 @@ def main() -> int:
     except EngineDown as e:
         print(f"엔진 불통: {e}", file=sys.stderr)
         return 2
+    except RuntimeError as e:
+        # 측정 장비(psql·행 파싱) 불통은 데이터 차이(1) 와 같은 코드로 읽히면 안 된다 — 고장 낸 장비를
+        # "차이 없음/있음"으로 읽는 것보다 "잰 게 아니다"(2) 가 맞다.
+        print(f"측정 장비 불통: {e}", file=sys.stderr)
+        return 2
 
     results = [
         ("① 현재기록", len(rec_a), len(rec_b), len(only_a) + len(only_b)),
