@@ -17,12 +17,14 @@ that cannot read it does not ship. post_card sends the Block Kit card (repair ro
 advice rows, each grouped and labeled its own way), records a card_proposal event per
 surviving proposal, and stops at an interrupt; a Slack button press resumes it with
 Command(resume=…) — the verdict's idx spans all three lanes, repair rows first, then
-advice rows, then the review rows. record_verdict logs a card_verdict event for every
-press, then branches: a repair row's adopt button calls the door's own merge (POST
-/repairs/split-subjects); an advice row's adopt/reject writes the verdict to the engine,
-its hold leaves no trace beyond the event; a review row's agree leaves only a
-verdict_reviewed event, its flip writes the opposite-kind verdict to the proposing
-session and the same event — the agent's own edge is never deleted. The wait for presses
+advice rows, then the review rows. record_verdict branches by lane: a repair row's adopt
+button calls the door's own merge (POST /repairs/split-subjects); an advice row's press
+logs a card_verdict event — card_proposal exists only for these rows, and
+card_live._live_past_verdicts joins the two by (card_ts, idx), raising on a verdict with
+no proposal — then its adopt/reject writes the verdict to the engine while its hold
+leaves no trace beyond the event; a review row's agree leaves only a verdict_reviewed
+event, its flip writes the opposite-kind verdict to the proposing session and the same
+event — the agent's own edge is never deleted. The wait for presses
 ends after CARD_WAIT_HOURS regardless of how many rows are still unanswered — an
 unanswered row is left exactly as it is, the same as a hold. Sent and judged stay in one
 state, so the card a person answered is exactly the card the engine remembers.
@@ -368,17 +370,21 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
 
     def record_verdict(state: CardState) -> dict:
         verdict = state["verdicts"][-1]
-        collabs.record("card_verdict", card_verdicts.verdict_event_fields(verdict, state["message"].ts))
         n_repairs = len(state["repairs"])
         if verdict.idx < n_repairs:
-            # the execute lane: adopt calls the door's own merge; hold/reject leave no trace
-            # beyond the event above — there is nothing to suppress in this lane.
+            # the execute lane: adopt calls the door's own merge; hold/reject leave no
+            # trace at all — there is nothing to suppress in this lane.
             if verdict.choice != "do":
                 return {}
             result = collabs.execute_repair(state["repairs"][verdict.idx].subject)
             return {"repair_results": {verdict.idx: result}}
         n_proposals = len(state["proposals"])
         if verdict.idx < n_repairs + n_proposals:
+            # card_verdict is recorded only here, in the advice lane: card_proposal events
+            # exist only for these rows, and _live_past_verdicts joins the two by
+            # (card_ts, idx) — a press in any other lane would orphan that join and the
+            # next morning's card would raise on it and refuse to ship.
+            collabs.record("card_verdict", card_verdicts.verdict_event_fields(verdict, state["message"].ts))
             if verdict.choice == "defer":
                 return {}  # a card_verdict event, but no consumption call — never suppresses
             kind = "used" if verdict.choice == "do" else "contested"

@@ -339,7 +339,9 @@ def build_blocks(
     0..len(repairs)-1; advice rows continue from there — one shared space, repairs first.
     A review lane sits below the advice lane when `reviews` is non-empty — the agent's own
     session-end classifications, one three-block row each, agree/flip buttons occupying the
-    idx slots after the advice rows. Empty `reviews` leaves the card exactly as it was —
+    idx slots after the advice rows. It shares the 50-block cap: the advice lane reserves
+    the review lane's tail, and review rows that still do not fit are reported in an
+    overflow line, not dropped. Empty `reviews` leaves the card exactly as it was —
     a zero-proposal morning must not change the card's shape."""
     strings = card_i18n.STRINGS[lang]
     register_labels = card_i18n.REGISTER_LABELS[lang]
@@ -370,6 +372,13 @@ def build_blocks(
 
     shown = 0
     overflowed = False
+    reviews = list(reviews)
+    # the review lane below must fit inside the same 50-block cap: the advice loop
+    # reserves its whole tail (header + one 3-block row per review), and the review loop
+    # reserves its own overflow line — an unshown row is counted there, never dropped
+    # silently. A card that filled all 50 blocks with advice rows used to push the
+    # review header past the cap.
+    review_tail = (1 + 3 * len(reviews)) if reviews else 0
     for project, indices in _project_groups(proposals):
         label = project if project else strings["unassigned_project"]
         label_block = {"type": "section", "text": {"type": "mrkdwn", "text": f"　\n*{label}*"}}
@@ -387,7 +396,7 @@ def build_blocks(
             )
             addition = ([label_block] if label_pending else []) + row
             remaining_after = total - shown - 1
-            reserve = 1 if remaining_after > 0 else 0
+            reserve = (1 if remaining_after > 0 else 0) + review_tail
             if len(blocks) + len(addition) + reserve > BLOCK_LIMIT:
                 overflowed = True
                 break
@@ -406,16 +415,33 @@ def build_blocks(
             }
         )
 
-    reviews = list(reviews)
     if reviews:
         # the review lane sits below the advice one — the agent's own session-end calls,
         # which the owner may agree with or flip. No reviews, no header: a lane the agent
         # never filled must not render as an empty promise.
         blocks.append(_section_header_block(strings["review_header"]))
         n_slots = n_repairs + total
+        r_shown = 0
+        r_overflowed = False
         for ridx, review in enumerate(reviews):
             addition = _review_row(n_slots + ridx, review, by_idx.get(n_slots + ridx), strings)
-            if len(blocks) + len(addition) > BLOCK_LIMIT:
+            remaining_after = len(reviews) - ridx - 1
+            reserve = 1 if remaining_after > 0 else 0
+            if len(blocks) + len(addition) + reserve > BLOCK_LIMIT:
+                r_overflowed = True
                 break
             blocks.extend(addition)
+            r_shown += 1
+        if r_overflowed:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": strings["overflow_line"].format(n=len(reviews) - r_shown),
+                        }
+                    ],
+                }
+            )
     return blocks

@@ -416,6 +416,77 @@ class CardV2ShapeTests(unittest.TestCase):
         plain = cv.build_blocks([proposal], reviews=[], lang="ko")
         self.assertNotIn("에이전트가 가른 것", _blocks_text(plain))
 
+    def test_review_lane_counts_against_the_block_limit(self):
+        # r3.1: the review lane's header and rows live inside the same 50-block cap as the
+        # advice rows — the advice loop reserves their tail, and review rows that still do
+        # not fit are reported in an overflow line, never dropped silently. A mutant that
+        # counts the review header outside the limit (the 51-block morning), or that breaks
+        # out of the review loop without the overflow line, must each kill this.
+        proposals = [
+            self._proposal(
+                subject=f"주어 {i}",
+                note=f"/vault/wiki/wiki-{1000 + i}.md",
+                evidence=[
+                    cc.Evidence(note=f"/vault/wiki/wiki-{1000 + i}.md", quote="근거 인용문 열자 이상", line=1)
+                ],
+            )
+            for i in range(12)
+        ]
+        reviews = [
+            cc.ProposedVerdict(
+                session_id=f"s{i}",
+                note=f"/vault/wiki/wiki-07{i:02d}.md",
+                kind="contested",
+                at=f"t-{i}",
+            )
+            for i in range(3)
+        ]
+        blocks = cv.build_blocks(proposals, reviews=reviews, lang="ko")
+        self.assertEqual(len(blocks), 48)
+        self.assertLessEqual(len(blocks), cv.BLOCK_LIMIT)
+        advice_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 3]
+        review_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 2]
+        self.assertEqual(len(advice_rows), 7)
+        self.assertEqual(len(review_rows), 3)
+        overflows = [
+            b["elements"][0]["text"]
+            for b in blocks
+            if b["type"] == "context" and "더 있음" in _blocks_text([b])
+        ]
+        self.assertEqual(overflows, ["+5건 더 있음 (블록 50개 상한)"])
+        # shown advice rows + the overflow count == the lane's of-total: nothing double-
+        # counted, nothing lost
+        self.assertEqual(len(advice_rows) + 5, len(proposals))
+
+        # when the lanes above already ate the cap, the review lane itself overflows —
+        # its unshown rows land in the overflow line, not on the floor
+        repairs = [
+            cc.Repair(
+                subject=f"split-{i}",
+                variants=[f"split {i}", f"split-{i}"],
+                rows=100 + i,
+                notes=10 + i,
+            )
+            for i in range(10)
+        ]
+        blocks_full = cv.build_blocks(
+            [proposals[0]], repairs=repairs, repairs_total_groups=10, reviews=reviews, lang="ko"
+        )
+        self.assertEqual(len(blocks_full), 50)
+        self.assertLessEqual(len(blocks_full), cv.BLOCK_LIMIT)
+        self.assertIn("에이전트가 가른 것", _blocks_text(blocks_full))
+        review_rows_full = [b for b in blocks_full if b["type"] == "actions" and len(b["elements"]) == 2]
+        self.assertEqual(len(review_rows_full), 1)
+        overflows_full = [
+            b["elements"][0]["text"]
+            for b in blocks_full
+            if b["type"] == "context" and "더 있음" in _blocks_text([b])
+        ]
+        self.assertEqual(
+            overflows_full,
+            ["+1건 더 있음 (블록 50개 상한)", "+2건 더 있음 (블록 50개 상한)"],
+        )
+
     def test_headline_shows_remaining_groups_and_optional_merged_yesterday(self):
         # AC7: a mutant dropping the remaining-groups count from the head line must kill this.
         proposal = self._proposal()

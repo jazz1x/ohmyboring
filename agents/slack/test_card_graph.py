@@ -796,6 +796,109 @@ class GraphTests(unittest.TestCase):
             [("agree", "contested", "sess-agent-2", "/vault/wiki/wiki-0800.md")],
         )
 
+    def test_card_verdict_event_fires_only_for_an_advice_lane_press(self):
+        # r3.1: card_proposal events exist only for advice rows, and card_live's
+        # _live_past_verdicts joins card_verdict back to them by (card_ts, idx) — raising
+        # on a verdict with no proposal. A press in the repair or review lane must leave
+        # no card_verdict at all: one orphan is a next-morning card that refuses to ship.
+        reviews = [
+            cc.ProposedVerdict(
+                session_id="sess-agree", note="/vault/wiki/wiki-0700.md", kind="used", at="t-1"
+            ),
+            cc.ProposedVerdict(
+                session_id="sess-flip", note="/vault/wiki/wiki-0701.md", kind="contested", at="t-2"
+            ),
+        ]
+        stubs = Stubs(
+            repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 1},
+            proposed_items=reviews,
+            execute_repair_result={"deleted_rows": 5, "reread_notes": 2, "remaining_variants": 1},
+        )
+        graph = self._build(stubs)
+        cfg = {"configurable": {"thread_id": "test-verdict-event-lanes"}}
+        out = graph.invoke({"verdicts": []}, cfg)
+        self.assertEqual((len(out["repairs"]), len(out["proposals"]), len(out["reviews"])), (1, 3, 2))
+
+        presses = [
+            (0, "do"),  # execute lane: adopt → the door's own merge, no card_verdict
+            (1, "do"),  # advice lane: the only lane whose press records a card_verdict
+            (4, "do"),  # review lane: agree → the verdict_reviewed event only
+            (5, "drop"),  # review lane: flip → verdict_reviewed + the opposite-kind edge
+        ]
+        for idx, choice in presses:
+            verdict = cc.ButtonVerdict(idx=idx, choice=choice, user=OWNER, at="t")
+            graph.invoke(Command(resume=verdict), cfg)
+
+        verdict_events = [fields for name, fields in stubs.records if name == "card_verdict"]
+        self.assertEqual(verdict_events, [{"card_ts": CARD_TS, "idx": 1, "choice": "do"}])
+        reviewed = [fields for name, fields in stubs.records if name == "verdict_reviewed"]
+        self.assertEqual(
+            [(r["session_id"], r["choice"]) for r in reviewed],
+            [("sess-agree", "agree"), ("sess-flip", "flip")],
+        )
+        self.assertEqual(stubs.execute_repair_calls, ["foodspring-front"])
+        self.assertEqual(
+            self.consumptions,
+            [
+                (SESSION, "used", [EXPECTED_NOTES[0]]),
+                ("sess-flip", "used", ["/vault/wiki/wiki-0701.md"]),
+            ],
+        )
+        names = [name for name, _ in stubs.records]
+        self.assertEqual(
+            names,
+            ["card_proposal"] * 3 + ["card_confirmation"] + ["card_verdict"] + ["verdict_reviewed"] * 2,
+        )
+
+
+class ListenerTests(unittest.TestCase):
+    """r3.1: the socket listener bounds a press by n_total = repairs + proposals + reviews —
+    one shared idx space across all three lanes. A listener that drops the review lane from
+    its total rejects the review rows' own buttons as 'no proposal', and one that drops the
+    repair lane over-accepts past the card's end."""
+
+    class _FakeClient:
+        def __init__(self):
+            self.acks = 0
+
+        def send_socket_mode_response(self, response):
+            self.acks += 1
+
+    class _Req:
+        def __init__(self, payload):
+            self.envelope_id = "e-1"
+            self.type = "interactive"
+            self.payload = payload
+
+    @staticmethod
+    def _press(idx: int, choice: str = "do", user: str = OWNER) -> dict:
+        return {
+            "type": "block_actions",
+            "message": {"ts": CARD_TS},
+            "user": {"id": user},
+            "actions": [{"action_id": f"card:{idx}:{choice}"}],
+        }
+
+    def test_n_total_covers_all_three_lanes(self):
+        holder = card._Holder()
+        holder.message = cc.PostedCard(channel=CARD_CH, ts=CARD_TS)
+        holder.repairs = [object()]
+        holder.proposals = [object(), object(), object()]
+        holder.reviews = [object(), object()]
+        listener = card._listener(holder, OWNER)
+        client = self._FakeClient()
+        buf = io.StringIO()
+
+        with contextlib.redirect_stderr(buf):
+            listener(client, self._Req(self._press(5)))  # the last review slot → queued
+            listener(client, self._Req(self._press(6)))  # one past the end → rejected
+
+        self.assertEqual(client.acks, 2)
+        self.assertEqual(holder.queue.qsize(), 1)
+        verdict = holder.queue.get_nowait()
+        self.assertEqual((verdict.idx, verdict.choice, verdict.user), (5, "do", OWNER))
+        self.assertIn("no proposal 6", buf.getvalue())
+
 
 class AwaitVerdictsTests(unittest.TestCase):
     """AC6: CARD_WAIT_HOURS=0 (or expired) ends the wait immediately, touching Slack 0 times,
@@ -1154,6 +1257,36 @@ class LivePastVerdictsTests(unittest.TestCase):
             card_live._live_past_verdicts(168)
         self.assertEqual(seen["card_verdict"], 168)
         self.assertGreater(seen["card_proposal"], 168)
+
+
+class LiveProposedTests(unittest.TestCase):
+    """r3.1: the review lane's surviving mutations — the verdict_proposed rows come back
+    contested first, newest first, capped at REVIEW_LIMIT. A mutant dropping the contested
+    sort, reversing the newest-first order, or removing the cap must each kill this."""
+
+    @staticmethod
+    def _events(rows: list[dict]):
+        def fake(event_name: str, since_hours: int):
+            assert event_name == "verdict_proposed"
+            return rows
+
+        return fake
+
+    def test_contested_first_then_newest_first_capped_at_review_limit(self):
+        rows = [
+            {
+                "attributes": {"session_id": f"s-{kind}-{i}", "note": f"/n{i}.md", "kind": kind},
+                "observed_at": f"2026-09-2{i}T00:00:00+00:00",
+            }
+            for i, kind in enumerate(["used", "contested", "used", "contested", "contested"], start=1)
+        ]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows)):
+            out = card_live._live_proposed(24)
+        self.assertEqual(
+            [p.session_id for p in out],
+            ["s-contested-5", "s-contested-4", "s-contested-2"],
+        )
+        self.assertEqual(len(out), card_live.REVIEW_LIMIT)
 
 
 class SingleInstanceLockTests(unittest.TestCase):
