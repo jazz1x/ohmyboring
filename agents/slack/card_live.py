@@ -32,7 +32,7 @@ from card_types import (
     ResolvedNote,
     Unresolved,
 )
-from drudge_client import DrudgeClient
+from drudge_client import OWNER, DrudgeClient
 from pydantic import ValidationError
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "memory"))
@@ -141,15 +141,15 @@ def _live_handover(session: str, at: str, paths: list[str]) -> dict:
 
 def _live_consumption(session: str, kind: str, paths: list[str]) -> dict:
     # Row-level, not session-level: a button judges the note its row cited, and only that one.
-    # judge="owner": this verdict is the owner's own hand on the button, and the edge must
-    # say so — 'inferred' (session-end distillation) and 'agent:<name>' are different hands.
+    # judge=OWNER: a button press is the owner's hand, and the client carries the owner token
+    # the engine demands for that word.
     at = datetime.now(UTC).isoformat()
     if kind == "used":
         return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(
-            session, at, used=paths, judge="owner"
+            session, at, used=paths, judge=OWNER
         )
     return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(
-        session, at, contested=paths, judge="owner"
+        session, at, contested=paths, judge=OWNER
     )
 
 

@@ -16,6 +16,7 @@ import unittest
 import urllib.error
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
@@ -51,6 +52,7 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
         self.server.last_body = body
+        self.server.last_token = self.headers.get("X-Boring-Owner-Token")
         if self.server.status != 200:
             data = json.dumps({"error": "stub failure"}).encode("utf-8")
             self.send_response(self.server.status)
@@ -136,21 +138,25 @@ class RetrieverTest(unittest.TestCase):
         self.assertEqual(BoringRetriever(base_url=self.base_url).invoke("q"), [])
 
     def test_record_verdict_sends_verdict_judge_and_timestamp(self) -> None:
-        resp = record_verdict(self.base_url, "sess-B", "contested", "owner")
+        resp = record_verdict(self.base_url, "sess-B", "contested", "inferred")
         body = self.server.last_body
         self.assertEqual(set(body), {"session_id", "observed_at", "verdict", "judge"})
         self.assertEqual(body["session_id"], "sess-B")
         self.assertEqual(body["verdict"], "contested")
-        self.assertEqual(body["judge"], "owner")
+        self.assertEqual(body["judge"], "inferred")
         datetime.fromisoformat(body["observed_at"])  # raises if not RFC 3339
         self.assertEqual(
             resp, {"session": "sess-B", "used": 0, "contested": 1, "supersedes": 0, "unknown": 0}
         )
 
-    def test_record_verdict_sends_judge_verbatim(self) -> None:
-        for judge in ("inferred", "agent:r2-check"):
-            record_verdict(self.base_url, "sess-B", "used", judge)
-            self.assertEqual(self.server.last_body["judge"], judge)
+    def test_owner_judge_carries_the_owner_token_and_no_one_else_does(self) -> None:
+        with mock.patch.dict(os.environ, {"BORING_OWNER_TOKEN": "door-1"}):
+            record_verdict(self.base_url, "sess-B", "used", "owner")
+            self.assertEqual(self.server.last_token, "door-1")
+            record_notes(self.base_url, "sess-B", "owner", used=["/vault/wiki/wiki-0001.md"])
+            self.assertEqual(self.server.last_token, "door-1")
+            record_verdict(self.base_url, "sess-B", "used", "agent:r2-check")
+            self.assertIsNone(self.server.last_token, "control: a non-owner judge carries no token")
 
     def test_record_notes_sends_lists_and_judge_without_verdict(self) -> None:
         record_notes(

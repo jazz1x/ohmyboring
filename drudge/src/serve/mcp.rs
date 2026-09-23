@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
@@ -12,10 +12,11 @@ use tokio_stream::StreamExt;
 use crate::ask;
 use crate::audit;
 use crate::config;
-use crate::frontmatter::{Claim, FrontMatter};
+use crate::frontmatter::{Author, Claim, FrontMatter};
 use crate::graph;
 use crate::ingest;
 use crate::redact;
+use crate::serve::owner::{self, Caller};
 use crate::serve::{AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, vec_off_rpc};
 use crate::store::EventLogFilter;
 use crate::vault;
@@ -39,7 +40,12 @@ pub(crate) async fn handle_mcp_get() -> Result<Response, crate::serve::AppError>
     Ok(resp.into_response())
 }
 
-pub(crate) async fn handle_mcp(State(s): State<AppState>, Json(req): Json<Value>) -> Response {
+pub(crate) async fn handle_mcp(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<Value>,
+) -> Response {
+    let caller = Caller::from_headers((*s.owner_token).as_deref(), &headers);
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     if req.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         let body = json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32600, "message": "Invalid Request — jsonrpc must be \"2.0\""}});
@@ -56,7 +62,7 @@ pub(crate) async fn handle_mcp(State(s): State<AppState>, Json(req): Json<Value>
         "initialize" => Ok(mcp_initialize(&req)),
         "tools/list" => Ok(mcp_tools_list()),
         "ping" => Ok(json!({})),
-        "tools/call" => mcp_call(&s, &req).await,
+        "tools/call" => mcp_call(&s, caller, &req).await,
         other => Err((-32601_i32, format!("method not found: {other}"))),
     };
     let body = match outcome {
@@ -129,6 +135,8 @@ fn mcp_tools_list() -> Value {
                     "sources": {"type": "array", "items": {"type": "string"}, "description": "optional vault-local evidence paths for this note, e.g. raw/<file>.md"},
                     "supersedes": {"type": "array", "items": {"type": "string"}, "description": "source_path of notes this one corrects; each gets a supersedes edge from the new note and sinks below it in recall"},
                     "omb_session_id": {"type": "string", "description": "optional ephemeral ingestion marker — include only when requested by the ingestion worker"},
+                    "author": {"type": "string", "description": "who wrote the note: inferred | unknown | agent:<your name> (default unknown). owner is accepted only through the owner's door"},
+                    "judge": {"type": "string", "description": "who judged the corrections named in supersedes, same values as author; carried on those edges (default = author)"},
                     "claims": {
                         "type": "array",
                         "description": "durable facts/decisions as (subject,predicate,value) triples (a new value supersedes the old)",
@@ -148,11 +156,9 @@ fn mcp_tools_list() -> Value {
         },
         {
             "name": "forget",
-            "description": "Remove a note from memory by wiki id or exact title. Deletes the wiki file and, when vector mode is on, \
-                            also removes its embeddings, graph edges, and claims. CALL THIS only when the owner asks for a note to go, or when a \
-                            note is provably wrong — a fact that turned out false, a duplicate of one written moments earlier. Deletion is \
-                            not reversible. A note that has merely been overtaken is not wrong: write the new one and let the newer claim \
-                            supersede the old.",
+            "description": "Delete a note — CLOSED during the migration: every call is refused and nothing is deleted, the owner \
+                            included. CALL THIS not at all until the migration is over; correct a wrong or overtaken note with \
+                            `remember` and `supersedes` naming it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -557,12 +563,12 @@ fn tool_outcome_snippet(out: &Result<ToolOut, ToolCallError>) -> String {
     raw.chars().take(500).collect()
 }
 
-async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
+async fn mcp_call(s: &AppState, caller: Caller, req: &Value) -> Result<Value, (i32, String)> {
     let started = std::time::Instant::now();
     let params = req.get("params");
     let name = params.and_then(|p| p.get("name")).and_then(Value::as_str);
     let args = params.and_then(|p| p.get("arguments"));
-    let out = dispatch(s, name.unwrap_or_default(), args).await;
+    let out = dispatch(s, caller, name.unwrap_or_default(), args).await;
     crate::serve::spawn_query_log(
         s.store.clone(),
         mcp_endpoint_tag(name),
@@ -581,12 +587,13 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
 
 async fn dispatch(
     s: &AppState,
+    caller: Caller,
     name: &str,
     args: Option<&Value>,
 ) -> Result<ToolOut, ToolCallError> {
     Ok(match name {
         "recall" => ToolOut::Text(mcp_recall(s, args).await?),
-        "remember" => ToolOut::Text(mcp_remember(s, args).await?),
+        "remember" => ToolOut::Text(mcp_remember(s, caller, args).await?),
         "forget" => ToolOut::Text(mcp_forget(s, args).await?),
         "sync" => ToolOut::Text(mcp_sync(s).await?),
         "classify_repo" => ToolOut::Text(mcp_classify_repo(s, args)?),
@@ -1236,90 +1243,26 @@ fn system_time_rfc3339(value: std::time::SystemTime) -> String {
     datetime.to_rfc3339()
 }
 
+/// Owner decision 2026-09-24: notes are distilled automatically, so nothing is deleted while the
+/// migration runs — the owner's token included. Reopened after the migration.
 async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
-    let Some(vault_root) = (*s.vault_dir).as_ref() else {
-        return Err((-32603, "BORING_VAULT_DIR not set".to_owned()));
-    };
-    let wiki_dir = vault_root.join("wiki");
-
-    let get_str = |k: &str| {
-        args.and_then(|a| a.get(k))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-    };
-
-    let id = get_str("id");
-    let title = get_str("title");
-
-    if id.is_none() && title.is_none() {
-        return Err((-32602, "forget requires either 'id' or 'title'".to_owned()));
-    }
-
-    let path = if let Some(id) = id {
-        if id.contains('/') || id.contains('\\') || id.contains("..") {
-            return Err((-32602, format!("invalid note id {id:?}")));
-        }
-        let p = wiki_dir.join(format!("{id}.md"));
-        if !p.exists() {
-            return Err((-32602, format!("note {id} not found")));
-        }
-        p
-    } else if let Some(title) = title {
-        let mut matches = Vec::new();
-        for entry in
-            std::fs::read_dir(&wiki_dir).map_err(|e| (-32603_i32, format!("wiki dir: {e}")))?
-        {
-            let entry = entry.map_err(|e| (-32603_i32, format!("wiki entry: {e}")))?;
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("md") {
-                continue;
-            }
-            let content =
-                std::fs::read_to_string(&p).map_err(|e| (-32603_i32, format!("read note: {e}")))?;
-            let (front, _) =
-                crate::frontmatter::parse(&content, p.to_string_lossy().as_ref(), &s.cfg)
-                    .map_err(|e| (-32603_i32, format!("parse frontmatter: {e:#}")))?;
-            if front.title.as_deref().unwrap_or("") == title {
-                matches.push(p);
-            }
-        }
-        match matches.len() {
-            0 => return Err((-32602, format!("note with title {title:?} not found"))),
-            1 => matches.remove(0),
-            _ => {
-                return Err((
-                    -32602,
-                    format!("multiple notes match title {title:?}; use id"),
-                ));
-            }
-        }
-    } else {
-        return Err((-32602, "forget requires either 'id' or 'title'".to_owned()));
-    };
-
-    let source_path = path.to_string_lossy().into_owned();
-    std::fs::remove_file(&path).map_err(|e| (-32603_i32, format!("delete note: {e}")))?;
-
-    let mut partial = "";
-    if let Some(store) = s.store.as_ref() {
-        let _guard = s.sync_lock.lock().await;
-        store
-            .delete_document(&source_path)
-            .await
-            .map_err(|e| (-32603_i32, format!("delete from vector store: {e:#}")))?;
-        if let Err(e) = vault::project_links(store, vault_root, 6).await {
-            eprintln!("[forget] project_links warning (ignored): {e:#}");
-            partial = " (partial: relates_to projection deferred — refreshes on next sync)";
-        }
-    }
-
-    Ok(format!("forgot → {source_path}{partial}"))
+    let asked: Vec<String> = ["id", "title"]
+        .into_iter()
+        .filter_map(|k| args.and_then(|a| a.get(k)).and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    owner::record_refusal(s.store.as_deref(), "forget_refused", &asked, "forget").await;
+    Err((
+        -32602,
+        "forget is closed during the migration: no note is deleted until it is over. \
+         Write the corrected note with `supersedes` instead."
+            .to_owned(),
+    ))
 }
 
 /// Structured outcome of one `remember` — `POST /remember` answers with the fields; MCP keeps
 /// answering with just `message`, the text agents already parse.
+#[derive(Debug)]
 pub(crate) struct Remembered {
     pub(crate) source_path: String,
     pub(crate) wiki_id: String,
@@ -1334,8 +1277,12 @@ pub(crate) struct Remembered {
     pub(crate) message: String,
 }
 
-async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
-    Ok(remember_note(s, args).await?.message)
+async fn mcp_remember(
+    s: &AppState,
+    caller: Caller,
+    args: Option<&Value>,
+) -> Result<String, (i32, String)> {
+    Ok(remember_note(s, caller, args).await?.message)
 }
 
 /// The write door both MCP `remember` and `POST /remember` go through: one parser, one write
@@ -1343,8 +1290,11 @@ async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32
 /// note is written and ingested, each pair becomes a `supersedes` edge from the new note, and
 /// the next recall sinks the old note below the new one. A note that names what it corrects
 /// skips the duplicate gate — a correction must land, never be swallowed as "too similar".
+/// `owner` as author or judge needs `caller` to be the owner, and only the owner supersedes or
+/// rewrites a note the owner wrote; an owner write is never skipped against someone else's note.
 pub(crate) async fn remember_note(
     s: &AppState,
+    caller: Caller,
     args: Option<&Value>,
 ) -> Result<Remembered, (i32, String)> {
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
@@ -1354,7 +1304,18 @@ pub(crate) async fn remember_note(
         ));
     };
     let supersedes = parse_supersedes(args)?;
+    let judge = parse_judge(args)?;
     let mut note = parse_remember_note(args, &s.cfg)?;
+    let standing = owner::standing(
+        caller,
+        note.front.author == Author::Owner || judge == Some(Author::Owner),
+    )
+    .map_err(|m| (-32602_i32, m))?;
+    let edge_judge = judge.as_ref().unwrap_or(&note.front.author).as_judge();
+    let refused = owner::refused_supersedes(s.store.as_deref(), standing, &supersedes, "remember")
+        .await
+        .map_err(|e| (-32603_i32, format!("owner guard: {e:#}")))?;
+    owner::none_refused(&refused).map_err(|m| (-32602_i32, m))?;
 
     apply_pii_gate(s.pii.as_ref().as_ref(), &mut note)?;
 
@@ -1367,8 +1328,11 @@ pub(crate) async fn remember_note(
         && let Some(existing) = check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir)
             .await
             .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
+        && owner::gated_by(standing, &existing.front.author)
     {
-        if should_replace_duplicate(&note, &existing) {
+        if should_replace_duplicate(&note, &existing)
+            && owner::may_rewrite(standing, &existing.front.author)
+        {
             let telemetry = dedup_decision_event(&note, Some(&existing), DedupOutcome::Replace);
             let Some(wiki_id) = crate::vault::wiki_stem(&existing.source_path) else {
                 return Err((
@@ -1390,7 +1354,8 @@ pub(crate) async fn remember_note(
             log_dedup_decision(s, &telemetry).await;
             let message = finish_remembered_note(s, &path, &wiki_id, &front, true).await?;
             let (sup_count, unk_count) =
-                write_supersedes_edges(s, &front.source_path, &supersedes).await?;
+                write_supersedes_edges(s, &front.source_path, &supersedes, edge_judge.as_deref())
+                    .await?;
             return Ok(Remembered {
                 source_path: front.source_path.clone(),
                 wiki_id,
@@ -1430,7 +1395,8 @@ pub(crate) async fn remember_note(
     log_dedup_decision(s, &telemetry).await;
 
     let message = finish_remembered_note(s, &path, &wiki_id, &front, false).await?;
-    let (sup_count, unk_count) = write_supersedes_edges(s, &front.source_path, &supersedes).await?;
+    let (sup_count, unk_count) =
+        write_supersedes_edges(s, &front.source_path, &supersedes, edge_judge.as_deref()).await?;
     Ok(Remembered {
         source_path: front.source_path.clone(),
         wiki_id,
@@ -1471,6 +1437,7 @@ async fn write_supersedes_edges(
     s: &AppState,
     new_path: &str,
     supersedes: &[String],
+    judge: Option<&str>,
 ) -> Result<(usize, usize), (i32, String)> {
     if supersedes.is_empty() {
         return Ok((0, 0));
@@ -1483,7 +1450,7 @@ async fn write_supersedes_edges(
         .map(|old| [new_path.to_owned(), old.clone()])
         .collect();
     let report = store
-        .record_supersedes(&pairs)
+        .record_supersedes(&pairs, judge)
         .await
         .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))?;
     Ok((report.supersedes, report.unknown))
@@ -1965,6 +1932,26 @@ fn parse_supersedes(args: Option<&Value>) -> Result<Vec<String>, (i32, String)> 
     Ok(out)
 }
 
+/// Optional `judge`: who judged the corrections this note makes, in the author vocabulary.
+fn parse_judge(args: Option<&Value>) -> Result<Option<Author>, (i32, String)> {
+    args.and_then(|a| a.get("judge"))
+        .map(|raw| parse_person("judge", raw))
+        .transpose()
+}
+
+/// Optional `author`: owner | inferred | unknown | agent:<name>. Absent → unknown.
+fn parse_author(args: Option<&Value>) -> Result<Author, (i32, String)> {
+    args.and_then(|a| a.get("author"))
+        .map_or(Ok(Author::Unknown), |raw| parse_person("author", raw))
+}
+
+fn parse_person(field: &str, raw: &Value) -> Result<Author, (i32, String)> {
+    raw.as_str()
+        .ok_or_else(|| format!("{field} must be a string"))
+        .and_then(str::parse)
+        .map_err(|m| (-32602, format!("{field}: {m}")))
+}
+
 fn parse_remember_note(
     args: Option<&Value>,
     cfg: &config::BoringConfig,
@@ -2065,6 +2052,7 @@ fn parse_remember_note(
         sources: get_arr("sources").iter().map(|s| scrub(s.trim())).collect(),
         claims,
         omb_session_id,
+        author: parse_author(args)?,
     };
     Ok(RememberNote { front, body })
 }
@@ -2152,7 +2140,8 @@ mod tests {
     };
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
-    use serde_json::json;
+    use crate::serve::owner::{self, Caller};
+    use serde_json::{Value, json};
 
     const VECTOR_REQUIRED_TOOLS: [&str; 13] = [
         "neighbors",
@@ -2246,16 +2235,14 @@ mod tests {
         assert!(needs_dedup(&[]));
     }
 
-    #[tokio::test]
-    async fn remember_note_lets_a_correction_past_the_duplicate_gate() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("wiki")).unwrap();
+    fn vault_state(root: &std::path::Path) -> crate::serve::AppState {
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
         let cfg = BoringConfig::default();
-        let s = crate::serve::AppState {
+        crate::serve::AppState {
             store: None,
             code_index: None,
             llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
-            vault_dir: std::sync::Arc::new(Some(tmp.path().to_path_buf())),
+            vault_dir: std::sync::Arc::new(Some(root.to_path_buf())),
             pii: std::sync::Arc::new(None),
             cfg: std::sync::Arc::new(cfg),
             cfg_path: std::sync::Arc::new(None),
@@ -2264,21 +2251,184 @@ mod tests {
             last_compact: std::sync::Arc::default(),
             compact_failure: std::sync::Arc::default(),
             db_healthy_last: std::sync::Arc::default(),
-        };
+            owner_token: std::sync::Arc::new(Some(DOOR_TOKEN.to_owned())),
+        }
+    }
+
+    const DOOR_TOKEN: &str = "door-7f3a";
+
+    fn caller_with(configured: Option<&str>, presented: Option<&str>) -> Caller {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(token) = presented {
+            headers.insert(owner::OWNER_TOKEN_HEADER, token.parse().unwrap());
+        }
+        Caller::from_headers(configured, &headers)
+    }
+
+    fn wiki_notes(root: &std::path::Path) -> usize {
+        std::fs::read_dir(root.join("wiki")).unwrap().count()
+    }
+
+    #[tokio::test]
+    async fn remember_note_lets_a_correction_past_the_duplicate_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
         let note = |supersedes: &[&str]| json!({"title": "t", "body": "b", "omb_session_id": "s1", "supersedes": supersedes});
 
-        let first = remember_note(&s, Some(&note(&[]))).await.unwrap();
-        let unmarked = remember_note(&s, Some(&note(&[]))).await.unwrap();
+        let first = remember_note(&s, Caller::Unverified, Some(&note(&[])))
+            .await
+            .unwrap();
+        let unmarked = remember_note(&s, Caller::Unverified, Some(&note(&[])))
+            .await
+            .unwrap();
         assert!(
             unmarked.duplicate.is_some(),
             "same session, no supersedes: the gate sees the duplicate"
         );
 
-        let fix = remember_note(&s, Some(&note(&[first.source_path.as_str()])))
-            .await
-            .unwrap();
+        let fix = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&note(&[first.source_path.as_str()])),
+        )
+        .await
+        .unwrap();
         assert_eq!(fix.duplicate, None, "a correction skips the gate");
         assert_ne!(fix.source_path, first.source_path);
+    }
+
+    #[tokio::test]
+    async fn owner_is_accepted_only_with_the_door_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let correction = json!({
+            "title": "정정: 금요일 배포는 하지 않는다",
+            "body": "금요일 배포는 하지 않는다 — 소유자가 슬랙 스레드에서 정정했다.",
+            "tags": ["correction", "slack"],
+            "author": "owner",
+            "judge": "owner",
+        });
+        let judge_only = json!({"title": "판정", "body": "소유자 판정", "judge": "owner"});
+
+        for (label, caller, args) in [
+            ("no token", caller_with(Some(DOOR_TOKEN), None), &correction),
+            (
+                "wrong token",
+                caller_with(Some(DOOR_TOKEN), Some("door-7f3b")),
+                &correction,
+            ),
+            (
+                "engine has no token",
+                caller_with(None, Some(DOOR_TOKEN)),
+                &correction,
+            ),
+            (
+                "judge owner, no token",
+                caller_with(Some(DOOR_TOKEN), None),
+                &judge_only,
+            ),
+        ] {
+            let err = remember_note(&s, caller, Some(args)).await.unwrap_err();
+            assert_eq!(
+                err.0, -32602,
+                "{label}: owner without the door token is a 400"
+            );
+        }
+        assert_eq!(
+            wiki_notes(tmp.path()),
+            0,
+            "a refused owner claim writes nothing"
+        );
+
+        let door = caller_with(Some(DOOR_TOKEN), Some(DOOR_TOKEN));
+        let written = remember_note(&s, door, Some(&correction)).await.unwrap();
+        let content = std::fs::read_to_string(&written.source_path).unwrap();
+        assert!(content.contains("author: owner"), "{content}");
+    }
+
+    #[tokio::test]
+    async fn an_owner_write_is_not_swallowed_by_someone_elses_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let door = caller_with(Some(DOOR_TOKEN), Some(DOOR_TOKEN));
+        let session_note = |author: &str| {
+            json!({
+                "title": "배포 요일",
+                "body": "금요일 배포는 하지 않는다.",
+                "omb_session_id": "s-shared",
+                "author": author,
+            })
+        };
+        let agent = remember_note(&s, Caller::Unverified, Some(&session_note("agent:hermes")))
+            .await
+            .unwrap();
+
+        let again = remember_note(&s, Caller::Unverified, Some(&session_note("agent:x")))
+            .await
+            .unwrap();
+        assert_eq!(
+            again.duplicate.as_deref(),
+            Some(agent.source_path.as_str()),
+            "control: a non-owner near-duplicate is still skipped"
+        );
+
+        let owner = remember_note(&s, door, Some(&session_note("owner")))
+            .await
+            .unwrap();
+        assert_eq!(owner.duplicate, None);
+        assert_ne!(owner.source_path, agent.source_path);
+        assert!(
+            std::fs::read_to_string(&owner.source_path)
+                .unwrap()
+                .contains("author: owner")
+        );
+        assert!(
+            std::fs::read_to_string(&agent.source_path)
+                .unwrap()
+                .contains("author: agent:hermes")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_cannot_rewrite_an_owner_note_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let door = caller_with(Some(DOOR_TOKEN), Some(DOOR_TOKEN));
+        let session_note = |author: &str, claims: Value| {
+            json!({
+                "title": "배포 요일",
+                "body": "금요일 배포는 하지 않는다.",
+                "omb_session_id": "s-owner",
+                "author": author,
+                "claims": claims,
+            })
+        };
+        let richer = json!([{"subject": "deploy", "predicate": "blocked_on", "value": "friday"}]);
+
+        let original = remember_note(&s, door, Some(&session_note("owner", json!([]))))
+            .await
+            .unwrap();
+        let agent = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&session_note("agent:hermes", richer.clone())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            agent.duplicate.as_deref(),
+            Some(original.source_path.as_str())
+        );
+        let kept = std::fs::read_to_string(&original.source_path).unwrap();
+        assert!(
+            kept.contains("author: owner") && !kept.contains("friday"),
+            "an agent's richer same-session note must not rewrite the owner's: {kept}"
+        );
+        remember_note(&s, door, Some(&session_note("owner", richer)))
+            .await
+            .unwrap();
+        let rewritten = std::fs::read_to_string(&original.source_path).unwrap();
+        assert!(rewritten.contains("friday"), "the owner may: {rewritten}");
     }
 
     #[test]
@@ -2385,36 +2535,6 @@ mod tests {
         assert_eq!(tool_outcome_snippet(&unknown), "unknown tool: nope");
         let big: Result<ToolOut, ToolCallError> = Ok(ToolOut::Text("y".repeat(600)));
         assert_eq!(tool_outcome_snippet(&big).len(), 500);
-    }
-
-    #[test]
-    fn forget_rejects_path_navigation_in_the_note_id() {
-        let src = repo_file("drudge/src/serve/mcp.rs");
-        let start = src
-            .find("async fn mcp_forget")
-            .expect("mcp_forget must exist");
-        let body = &src[start..start + 2000.min(src.len() - start)];
-        for needle in [r"id.contains('/')", r"id.contains('\\')"] {
-            assert!(
-                body.contains(needle),
-                "mcp_forget must contain {needle} — path navigation has to be rejected before \
-                 the filesystem is touched"
-            );
-        }
-        assert!(
-            body.contains(r#"id.contains("..")"#),
-            "mcp_forget must reject an id containing `..`"
-        );
-        let guard = body
-            .find("invalid note id")
-            .expect("rejection must be explicit");
-        let join = body
-            .find("wiki_dir.join")
-            .expect("mcp_forget must build a path");
-        assert!(
-            guard < join,
-            "the id must be rejected BEFORE it is joined onto the vault path"
-        );
     }
 
     #[test]

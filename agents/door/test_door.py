@@ -668,9 +668,9 @@ class ClaimSourcePureTests(unittest.TestCase):
 
     def test_newest_valid_from_wins_and_ascending_input_is_sorted(self):
         rows = [
-            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "v1"),
-            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL), "v2"),
-            ("/vault/wiki/wiki-1200.md", datetime(2026, 9, 10, tzinfo=approved.SEOUL), "v3"),
+            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "v1", "unknown"),
+            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL), "v2", "inferred"),
+            ("/vault/wiki/wiki-1200.md", datetime(2026, 9, 10, tzinfo=approved.SEOUL), "v3", "agent:hermes"),
         ]
         out = claim_source.pick_current("3차 창 샘플링", rows)
         self.assertEqual(out["subject"], "3차 창 샘플링")
@@ -681,6 +681,14 @@ class ClaimSourcePureTests(unittest.TestCase):
             [c["note"] for c in out["candidates"]],
             ["/vault/wiki/wiki-1405.md", "/vault/wiki/wiki-1200.md", "/vault/wiki/wiki-1001.md"],
         )
+
+    def test_an_owner_claim_wins_over_a_newer_one(self):
+        rows = [
+            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL), "any day", "agent:x"),
+            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "not friday", "owner"),
+        ]
+        out = claim_source.pick_current("배포 요일", rows)
+        self.assertEqual((out["note"], out["value"]), ("/vault/wiki/wiki-1001.md", "not friday"))
 
     def test_empty_rows_is_none_the_doors_404(self):
         self.assertIsNone(claim_source.pick_current("없는 주어", []))
@@ -748,8 +756,8 @@ class ClaimSourceRouteTests(unittest.TestCase):
     def test_stub_rows_answer_the_note_path(self):
         os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
         self._rows = [
-            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL), "v2"),
-            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "v1"),
+            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL), "v2", "unknown"),
+            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "v1", "unknown"),
         ]
         subject = urllib.parse.quote("3차 창 샘플링")
         status, body, content_type = _req(self.door_port, "GET", f"/claim-source?subject={subject}")

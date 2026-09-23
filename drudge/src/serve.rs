@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::code_index::CodeIndexStore;
 use crate::config;
+use crate::frontmatter::Author;
 use crate::llm::Llm;
 use crate::pii;
 use crate::store::{LoggedHit, Store};
@@ -21,6 +22,7 @@ use crate::wiki_recall;
 
 mod http;
 mod mcp;
+mod owner;
 mod scheduler;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +64,7 @@ pub struct AppState {
     pub(crate) last_compact: Arc<Mutex<Option<std::time::Instant>>>,
     pub(crate) compact_failure: Arc<Mutex<Option<CompactFailure>>>,
     pub(crate) db_healthy_last: Arc<AtomicU8>,
+    pub(crate) owner_token: Arc<Option<String>>,
 }
 
 impl AppState {
@@ -161,8 +164,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        CompactFailure, DbHealthState, HealthResp, RecurrencesResp, SyncState, recurrences_days,
-        recurrences_limit, transition_log,
+        Author, CompactFailure, DbHealthState, HealthResp, RecurrencesResp, SyncState,
+        recurrences_days, recurrences_limit, transition_log,
     };
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -615,8 +618,8 @@ mod tests {
     }
 
     #[test]
-    fn consumption_rejects_blank_judge() {
-        for bad in ["", "   "] {
+    fn consumption_judge_is_the_author_vocabulary() {
+        for bad in ["", "   ", "Owner", "OWNER", "admin", "agent:"] {
             let mut req = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
             req.judge = Some(bad.to_owned());
             let err = super::validate_consumption_req(&req).unwrap_err();
@@ -626,16 +629,21 @@ mod tests {
                 "judge={bad:?} must be rejected"
             );
         }
-        for good in ["owner", "inferred", "agent:r2-check"] {
+        for (good, parsed) in [
+            ("owner", Author::Owner),
+            ("inferred", Author::Inferred),
+            ("agent:r2-check", Author::Agent("r2-check".to_owned())),
+        ] {
             let mut req = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
             req.judge = Some(good.to_owned());
-            assert!(
-                super::validate_consumption_req(&req).is_ok(),
-                "judge={good:?} is stored verbatim"
+            assert_eq!(
+                super::validate_consumption_req(&req).ok(),
+                Some(Some(parsed)),
+                "judge={good:?}"
             );
         }
         let absent = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
-        assert_eq!(absent.judge(), None);
+        assert_eq!(super::validate_consumption_req(&absent).ok(), Some(None));
     }
 }
 
@@ -836,10 +844,9 @@ pub(crate) struct ConsumptionReq {
     /// knows what was handed; listing paths again is a 400.
     #[serde(default)]
     pub(crate) verdict: Option<String>,
-    /// Who is judging: 'owner' (card button), 'inferred' (session-end distillation),
-    /// 'agent:<name>' (an autonomous caller naming itself). Absent means the caller brings no
-    /// judge and the edges are written with NULL — the engine stores the value verbatim and
-    /// never interprets it.
+    /// Who is judging, in the note-author vocabulary: 'owner' (card button), 'inferred'
+    /// (session-end distillation), 'agent:<name>' (an autonomous caller naming itself),
+    /// 'unknown'. Absent or 'unknown' writes the edges with NULL.
     #[serde(default)]
     pub(crate) judge: Option<String>,
 }
@@ -851,12 +858,6 @@ impl ConsumptionReq {
     pub(crate) fn verdict(&self) -> Option<&str> {
         self.verdict.as_deref().map(str::trim)
     }
-
-    /// The judge as one normalised string — same contract as `verdict()`: trimmed here, blank
-    /// stays `Some("")` so the validator rejects a judge field that says nothing.
-    pub(crate) fn judge(&self) -> Option<&str> {
-        self.judge.as_deref().map(str::trim)
-    }
 }
 
 #[derive(Serialize)]
@@ -866,9 +867,12 @@ pub(crate) struct ConsumptionResp {
     pub(crate) contested: usize,
     pub(crate) supersedes: usize,
     pub(crate) unknown: usize,
+    /// `supersedes` pairs dropped because a non-owner named an owner-written note as the old one.
+    pub(crate) refused: usize,
 }
 
-pub(crate) fn validate_consumption_req(req: &ConsumptionReq) -> Result<(), AppError> {
+/// Validates the request and returns its judge, parsed once here.
+pub(crate) fn validate_consumption_req(req: &ConsumptionReq) -> Result<Option<Author>, AppError> {
     if req.session_id.trim().is_empty() {
         return Err(AppError::bad_request("session_id must not be empty"));
     }
@@ -890,11 +894,12 @@ pub(crate) fn validate_consumption_req(req: &ConsumptionReq) -> Result<(), AppEr
             ));
         }
     }
-    if let Some(judge) = req.judge()
-        && judge.is_empty()
-    {
-        return Err(AppError::bad_request("judge must not be empty"));
-    }
+    let judge = req
+        .judge
+        .as_deref()
+        .map(str::parse::<Author>)
+        .transpose()
+        .map_err(|m| AppError::bad_request(format!("judge: {m}")))?;
     for (name, len) in [
         ("used", req.used.len()),
         ("contested", req.contested.len()),
@@ -906,7 +911,7 @@ pub(crate) fn validate_consumption_req(req: &ConsumptionReq) -> Result<(), AppEr
             )));
         }
     }
-    Ok(())
+    Ok(judge)
 }
 
 #[derive(Deserialize)]
@@ -1323,6 +1328,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         compact_failure: Arc::clone(&compact_failure),
         wiki_index: Arc::new(std::sync::Mutex::new(wiki_recall::WikiIndex::default())),
         db_healthy_last: Arc::new(AtomicU8::new(DbHealthState::Unknown.to_u8())),
+        owner_token: Arc::new(config::env_set("BORING_OWNER_TOKEN")),
     };
 
     scheduler::spawn_scheduler(

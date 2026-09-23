@@ -119,12 +119,14 @@ def on_thread_reply(
     the answer header the brain puts on every answer. Everything else is None — threaded
     chatter that is not a correction, a correction on someone else's message, a correction
     from someone who is not the owner — only the owner's correction on the bot's own answer
-    becomes a note."""
+    becomes a note. Past the owner check a configured owner_id means the reply is the owner's,
+    so the note is signed `owner`; with no owner_id nobody is confirmed and the note goes unsigned."""
     thread_ts = event.get("thread_ts")
     if not thread_ts:
         return None
     if owner_id is not None and event.get("user") != owner_id:
         return None
+    author = None if owner_id is None else secretary_core.OWNER
     if secretary_core.parse_correction(event.get("text") or "") is None:
         return None
     parent = web.conversations_replies(channel=event["channel"], ts=thread_ts, limit=1)["messages"][0]
@@ -137,6 +139,7 @@ def on_thread_reply(
         "",
         _handed_paths_from(parent["text"]),
         event["text"],
+        author=author,
     )
     web.chat_postMessage(channel=event["channel"], thread_ts=thread_ts, text=_correction_line(result))
     return result

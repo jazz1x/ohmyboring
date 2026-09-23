@@ -18,6 +18,8 @@ BoringRetriever(base_url="http://127.0.0.1:7701").
 from __future__ import annotations
 
 import json
+import os
+import sys
 import urllib.request
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -25,6 +27,9 @@ from typing import Any, Literal
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+from drudge_client import owner_headers  # noqa: E402
 
 _TIMEOUT = 30.0
 
@@ -64,9 +69,10 @@ def record_verdict(base_url: str, session_id: str, verdict: Literal["used", "con
 
     The engine rejects a verdict sent alongside used/contested lists (400), so the body
     here is exactly session_id + observed_at (UTC, RFC 3339, call time) + verdict +
-    judge. `judge` names who is judging ('owner', 'inferred', 'agent:<name>') and lands
-    verbatim on every edge this verdict writes — the engine never interprets it. The
-    engine's JSON response is returned as-is.
+    judge. `judge` is the engine's author vocabulary — owner | inferred | unknown |
+    agent:<name>; anything else is a 400. 'owner' travels with BORING_OWNER_TOKEN in the
+    owner-token header, and without that token the engine refuses it (400). The engine's
+    JSON response is returned as-is.
     """
     body = {
         "session_id": session_id,
@@ -88,7 +94,8 @@ def record_notes(
 
     The agent decides per note which of what it was handed actually landed (`used`) and
     which misled it (`contested`); both lists name their paths and every written edge
-    carries `judge` verbatim. At least one list must be non-empty — a judgement that
+    carries `judge`, in the same vocabulary and with the same owner token rule as
+    record_verdict. At least one list must be non-empty — a judgement that
     judged nothing is a caller bug, so both empty raises ValueError before any request.
     """
     used = used or []
@@ -109,7 +116,7 @@ def _post_json(url: str, body: dict[str, Any]) -> dict[str, Any]:
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **owner_headers(body)},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:

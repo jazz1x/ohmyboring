@@ -73,6 +73,8 @@ python3 agents/shared/test_uptake_core.py
 python3 agents/shared/test_verdict_core.py
 python3 agents/shared/test_drudge_client.py
 python3 agents/door/test_door.py
+python3 agents/memory/test_retriever.py
+python3 agents/memory/test_store.py
 python3 agents/claude-code/test_hooks.py
 python3 agents/kimi/test_kimi.py
 python3 agents/schedulers/test_collectors.py
@@ -85,6 +87,8 @@ python3 agents/slack/test_card_advice.py
 python3 agents/slack/test_card_verdicts.py
 python3 agents/slack/test_card_view.py
 python3 agents/slack/test_card_graph.py
+python3 agents/slack/test_secretary.py
+python3 agents/slack/test_secretary_core.py
 python3 agents/shared/test_vault_note.py
 python3 scripts/test_python_deps.py
 python3 scripts/test_runbook.py

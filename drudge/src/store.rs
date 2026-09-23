@@ -674,6 +674,7 @@ impl Store {
                  ALTER TABLE edge ADD COLUMN IF NOT EXISTS judge text;
                  ALTER TABLE document ADD COLUMN IF NOT EXISTS extracted_sha text NOT NULL DEFAULT '';
                  ALTER TABLE document ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+                 ALTER TABLE document ADD COLUMN IF NOT EXISTS author text NOT NULL DEFAULT 'unknown';
                  CREATE INDEX IF NOT EXISTS document_updated ON document(updated_at DESC);
                  -- claim: temporal fact authority (Graphiti-style invalidation, scaled down for personal use).
                  --   current value of (subject,predicate) = superseded_at IS NULL. A new value seals the old.
@@ -1407,6 +1408,7 @@ impl Store {
         // (subject, predicate, source_path). A note's own later row supersedes its own earlier
         // one; another note's items are never touched. The unseal below stays on the same scope
         // as the seal — scoping them differently is how a slot ends with no current row at all.
+        // An owner-written row is sealed only when the latest row is owner-written too.
         if kind == "fact" {
             self.db()
                 .await?
@@ -1415,7 +1417,12 @@ impl Store {
                      FROM (SELECT subject, predicate, max(valid_from) AS mx FROM claim
                            WHERE subject = $1 AND predicate = $2 GROUP BY subject, predicate) m
                      WHERE c.subject = m.subject AND c.predicate = m.predicate
-                       AND c.valid_from < m.mx AND c.superseded_at IS DISTINCT FROM m.mx;",
+                       AND c.valid_from < m.mx AND c.superseded_at IS DISTINCT FROM m.mx
+                       AND (NOT EXISTS (SELECT 1 FROM document o
+                                         WHERE o.source_path = c.source_path AND o.author = 'owner')
+                            OR EXISTS (SELECT 1 FROM claim l JOIN document d ON d.source_path = l.source_path
+                                        WHERE l.subject = m.subject AND l.predicate = m.predicate
+                                          AND l.valid_from = m.mx AND d.author = 'owner'));",
                     &[&subject, &predicate],
                 )
                 .await
@@ -2001,14 +2008,15 @@ impl Store {
     ) -> Result<()> {
         let path = &front.source_path;
         let title_ref: Option<&str> = front.title.as_deref();
+        let author = String::from(front.author.clone());
         self.db().await?
             .execute(
-                "INSERT INTO document (source_path, origin, project, kind, title, tags, sha, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                "INSERT INTO document (source_path, origin, project, kind, title, tags, sha, updated_at, author)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT (source_path) DO UPDATE SET
                      origin = EXCLUDED.origin, project = EXCLUDED.project, kind = EXCLUDED.kind,
                      title = EXCLUDED.title, tags = EXCLUDED.tags, sha = EXCLUDED.sha,
-                     updated_at = EXCLUDED.updated_at;",
+                     updated_at = EXCLUDED.updated_at, author = EXCLUDED.author;",
                 &[
                     path,
                     &front.origin,
@@ -2018,6 +2026,7 @@ impl Store {
                     &front.tags,
                     &sha,
                     &updated_at,
+                    &author,
                 ],
             )
             .await
@@ -2748,8 +2757,13 @@ impl Store {
     /// The only writer of `supersedes` edges: what one note replaced another is read out of the
     /// session's own words at scoring time, not emitted by the distilling LLM. Idempotent — a
     /// repeat call adds edges that are not already there, never deletes. Skipped pairs (same path
-    /// twice, or a path with no `document` row) are counted in `unknown`, not errored.
-    pub async fn record_supersedes(&self, pairs: &[[String; 2]]) -> Result<SupersedesReport> {
+    /// twice, or a path with no `document` row) are counted in `unknown`, not errored. Each edge
+    /// carries `judge` like a consumption edge does.
+    pub async fn record_supersedes(
+        &self,
+        pairs: &[[String; 2]],
+        judge: Option<&str>,
+    ) -> Result<SupersedesReport> {
         let mut report = SupersedesReport::default();
         let (pairs, skipped) = split_supersedes(pairs);
         report.unknown += skipped;
@@ -2764,12 +2778,29 @@ impl Store {
                 &doc_node_id(&pair[0]),
                 &doc_node_id(&pair[1]),
                 "supersedes",
-                None,
+                judge,
             )
             .await?;
             report.supersedes += 1;
         }
         Ok(report)
+    }
+
+    /// Which of `paths` the owner wrote (`document.author = 'owner'`).
+    pub async fn owner_authored(&self, paths: &[String]) -> Result<Vec<String>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT source_path FROM document WHERE source_path = ANY($1) AND author = 'owner' ORDER BY source_path;",
+                &[&paths],
+            )
+            .await
+            .context("owner-authored documents")?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
     /// The scorer's write door: record what one session consumed. Upserts `session:<id>` (label =
@@ -2811,7 +2842,7 @@ impl Store {
                 .await?;
             report.contested += 1;
         }
-        let supersedes_report = self.record_supersedes(supersedes).await?;
+        let supersedes_report = self.record_supersedes(supersedes, judge).await?;
         report.supersedes += supersedes_report.supersedes;
         report.unknown += supersedes_report.unknown;
         Ok(report)

@@ -1086,33 +1086,51 @@ class LiveFetchTests(unittest.TestCase):
 
 class LiveConsumptionTests(unittest.TestCase):
     """The card button's verdict is the owner's own judgement. _live_consumption must send
-    judge="owner" on every consumption payload — a mutant that drops it leaves an edge that
-    cannot say whose hand the verdict was, which is the whole reason this cycle exists."""
+    judge="owner" on every consumption payload, with the owner token beside it — the engine
+    refuses an owner judge that arrives without one."""
 
-    def test_button_verdict_carries_judge_owner(self):
-        calls: list[tuple[str, str, dict]] = []
+    def test_button_verdict_carries_judge_owner_and_the_token(self):
+        calls: list[tuple[str, str, dict, dict]] = []
 
-        def fake_retry(self, method, path, payload=None, timeout=None):
-            calls.append((method, path, payload))
-            return {
-                "session": payload["session_id"],
-                "used": 1,
-                "contested": 0,
-                "supersedes": 0,
-                "unknown": 0,
-            }
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
 
-        with mock.patch.object(card_live.DrudgeClient, "_retry", fake_retry):
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            payload = json.loads(req.data)
+            calls.append((req.get_method(), req.full_url, payload, dict(req.header_items())))
+            return _Resp(
+                json.dumps(
+                    {
+                        "session": payload["session_id"],
+                        "used": 1,
+                        "contested": 0,
+                        "supersedes": 0,
+                        "unknown": 0,
+                    }
+                ).encode()
+            )
+
+        with (
+            mock.patch.dict(os.environ, {"BORING_OWNER_TOKEN": "tok-owner"}),
+            mock.patch("urllib.request.urlopen", fake_urlopen),
+        ):
             card_live._live_consumption("sess-1", "used", ["/vault/wiki/wiki-0001.md"])
             card_live._live_consumption("sess-1", "contested", ["/vault/wiki/wiki-0002.md"])
-        (method, path, used_payload) = calls[0]
-        self.assertEqual((method, path), ("POST", "/consumption"))
+        (method, url, used_payload, used_headers) = calls[0]
+        self.assertEqual(method, "POST")
+        self.assertTrue(url.endswith("/consumption"))
         self.assertEqual(used_payload["judge"], "owner")
         self.assertEqual(used_payload["used"], ["/vault/wiki/wiki-0001.md"])
         self.assertNotIn("verdict", used_payload)
-        (_, _, contested_payload) = calls[1]
+        self.assertEqual(used_headers.get("X-boring-owner-token"), "tok-owner")
+        (_, _, contested_payload, contested_headers) = calls[1]
         self.assertEqual(contested_payload["judge"], "owner")
         self.assertEqual(contested_payload["contested"], ["/vault/wiki/wiki-0002.md"])
+        self.assertEqual(contested_headers.get("X-boring-owner-token"), "tok-owner")
 
 
 class LiveExecuteRepairTests(unittest.TestCase):

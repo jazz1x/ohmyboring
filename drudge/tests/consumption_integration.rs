@@ -424,6 +424,227 @@ async fn supersedes_edges_are_written_and_read_back() {
     .expect("cleanup session node");
 }
 
+const OWNER_TOKEN: &str = "door-7f3a";
+
+async fn post_door(
+    client: &reqwest::Client,
+    url: String,
+    payload: serde_json::Value,
+    token: Option<&str>,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let req = client.post(url).json(&payload);
+    let req = match token {
+        Some(t) => req.header("X-Boring-Owner-Token", t),
+        None => req,
+    };
+    let resp = req.send().await.expect("post");
+    let status = resp.status();
+    (status, resp.json().await.unwrap_or_default())
+}
+
+/// The owner's door over HTTP: `owner` without the door token is a 400; an agent's supersede of
+/// an owner-written note is a 400 plus an `owner_supersede_refused` event and writes nothing;
+/// the owner's own supersede lands with `judge = owner` on the edge.
+#[tokio::test]
+async fn only_the_owner_door_supersedes_an_owner_note() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let vault = tempfile::tempdir().expect("temp vault");
+    std::fs::create_dir_all(vault.path().join("wiki")).expect("wiki dir");
+    let llm_base = format!("http://127.0.0.1:{}/v1", spawn_hashing_embedder().await);
+    let port = free_port();
+    let _server = spawn_server_with_vault(&dsn, port, vault.path(), &llm_base);
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+    wait_for_health(&client, &base).await;
+    let remember = |payload, token| post_door(&client, format!("{base}/remember"), payload, token);
+    let owner_note = serde_json::json!({
+        "title": "delta release window friday",
+        "body": "No delta release on friday; the owner settled it in the thread.",
+        "tags": ["correction", "slack"],
+        "author": "owner",
+        "judge": "owner",
+    });
+
+    let (impostor, _) = remember(owner_note.clone(), None).await;
+    assert_eq!(impostor, reqwest::StatusCode::BAD_REQUEST);
+
+    let (owned, body) = remember(owner_note, Some(OWNER_TOKEN)).await;
+    assert_eq!(owned, reqwest::StatusCode::OK);
+    let path_a = body["source_path"].as_str().expect("path").to_owned();
+
+    let agent_fix = serde_json::json!({
+        "title": "epsilon rollout cadence",
+        "body": "Epsilon rollouts go out any weekday including friday.",
+        "author": "agent:x",
+        "supersedes": [path_a],
+    });
+    let (agent, _) = remember(agent_fix, None).await;
+    assert_eq!(agent, reqwest::StatusCode::BAD_REQUEST);
+    let refused: i64 = db
+        .query_one(
+            "SELECT count(*) FROM event_log WHERE event_name = 'owner_supersede_refused' AND attributes->'targets' ? $1;",
+            &[&path_a],
+        )
+        .await
+        .expect("refusal events")
+        .get(0);
+    assert_eq!(refused, 1);
+
+    let owner_fix = serde_json::json!({
+        "title": "zeta freeze calendar",
+        "body": "Zeta freeze covers thursday evening too.",
+        "author": "owner",
+        "judge": "owner",
+        "supersedes": [path_a],
+    });
+    let (fixed, body) = remember(owner_fix, Some(OWNER_TOKEN)).await;
+    assert_eq!(fixed, reqwest::StatusCode::OK);
+    assert_eq!(body["supersedes"], 1);
+    let path_b = body["source_path"].as_str().expect("path").to_owned();
+    assert_eq!(
+        edge_judge(
+            &db,
+            &format!("doc:{path_b}"),
+            &format!("doc:{path_a}"),
+            "supersedes"
+        )
+        .await,
+        Some("owner".to_owned())
+    );
+    assert_eq!(
+        std::fs::read_dir(vault.path().join("wiki"))
+            .expect("wiki")
+            .count(),
+        2,
+        "the two refusals wrote nothing"
+    );
+
+    let session = unique_id("owner-door-s");
+    let impostor = serde_json::json!({"session_id": session, "observed_at": "2026-09-24T08:00:00+09:00",
+                                      "verdict": "used", "judge": "owner"});
+    let (status, _) = post_door(&client, format!("{base}/consumption"), impostor, None).await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+
+    let mixed = serde_json::json!({"session_id": session, "observed_at": "2026-09-24T08:00:00+09:00",
+                                   "used": [path_b], "supersedes": [[path_b, path_a]], "judge": "agent:x"});
+    let (status, body) = post_door(&client, format!("{base}/consumption"), mixed, None).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(
+        (&body["used"], &body["supersedes"], &body["refused"]),
+        (
+            &serde_json::json!(1),
+            &serde_json::json!(0),
+            &serde_json::json!(1)
+        ),
+        "the used verdict lands, only the owner-target pair is refused: {body}"
+    );
+
+    nobody_forgets_during_the_migration(&client, &base, &db, &path_a).await;
+
+    for path in [&path_a, &path_b] {
+        store.delete_document(path).await.expect("cleanup doc");
+    }
+}
+
+async fn nobody_forgets_during_the_migration(
+    client: &reqwest::Client,
+    base: &str,
+    db: &Client,
+    path: &str,
+) {
+    let id = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("wiki id")
+        .to_owned();
+    let forget = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                    "params": {"name": "forget", "arguments": {"id": id}}});
+    let refusals = || async {
+        db.query_one(
+            "SELECT count(*) FROM event_log WHERE event_name = 'forget_refused' AND attributes->'targets' ? $1;",
+            &[&id],
+        )
+        .await
+        .expect("forget refusal events")
+        .get::<_, i64>(0)
+    };
+    let before = refusals().await;
+    for token in [None, Some(OWNER_TOKEN)] {
+        let (_, refused) = post_door(client, format!("{base}/mcp"), forget.clone(), token).await;
+        assert_eq!(refused["error"]["code"], -32602, "{token:?}: {refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("closed during the migration")),
+            "{refused}"
+        );
+        assert!(std::path::Path::new(path).exists(), "{token:?} deleted it");
+    }
+    assert_eq!(refusals().await - before, 2);
+}
+
+/// A fact slot: a newer agent-written row leaves the owner's row current; a newer owner-written
+/// row seals both.
+#[tokio::test]
+async fn only_an_owner_row_seals_an_owner_fact() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = unique_id("owner-fact");
+    let base = SystemTime::now();
+    let mut paths = Vec::new();
+    for (i, author) in ["owner", "agent:x", "owner"].into_iter().enumerate() {
+        let path = unique_path(&format!("owner-fact-{i}"));
+        let mut front = dummy_frontmatter(&path);
+        front.author = author.parse().expect("author");
+        store
+            .upsert_document(&front, "sha-v1", base)
+            .await
+            .expect("upsert doc");
+        store
+            .upsert_claim(
+                &subject,
+                "deploy_day",
+                &format!("v{i}"),
+                &path,
+                base + std::time::Duration::from_secs(i as u64 + 1),
+                &[0.0_f32; 1024],
+                "fact",
+                "certain",
+            )
+            .await
+            .expect("upsert claim");
+        paths.push(path);
+        let current: Vec<String> = db
+            .query(
+                "SELECT source_path FROM claim WHERE subject = $1 AND superseded_at IS NULL ORDER BY valid_from;",
+                &[&subject],
+            )
+            .await
+            .expect("current claims")
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let expected: Vec<String> = match i {
+            0 => vec![paths[0].clone()],
+            1 => vec![paths[0].clone(), paths[1].clone()],
+            _ => vec![paths[2].clone()],
+        };
+        assert_eq!(current, expected, "after the {author} row");
+    }
+    for path in &paths {
+        store.delete_document(path).await.expect("cleanup doc");
+    }
+}
+
 /// `reused_recently` counts only edges from sessions whose `observed_at` label is inside the
 /// window: two `used` edges from sessions labelled today count, one from a session labelled
 /// 30 days ago does not.
@@ -1083,6 +1304,7 @@ fn spawn_server_with_vault(
         .env("BORING_BRIEF_HOUR", "99")
         .env("BORING_VAULT_DIR", vault)
         .env("BORING_LLM_BASE_URL", llm_base)
+        .env("BORING_OWNER_TOKEN", OWNER_TOKEN)
         .env_remove("BORING_LLM_MODEL")
         .spawn()
         .expect("spawn drudge serve");
