@@ -11,7 +11,9 @@
 #
 # 검색 품질(③)을 재려면 eval 픽스처(data/eval/fixtures/eval-*.md)가 사본 안에 있어야 해서 임시 볼트를
 # /parity-vault 에 마운트해 양쪽에 대칭 수집(기동 sync)한다. /vault 를 쓰면 안 된다 — 관리 경로가
-# /vault/wiki 로 잡혀 prune 이 사본의 기존 행을 통째로 지운다(ingest.rs::is_managed_path 접두 비교).
+# /vault/wiki 로 잡혀 사본의 기존 행이 전부 사라진 파일로 세인다(ingest.rs::is_managed_path 접두 비교).
+# 이전 중엔 prune 이 지우지 않고 prune_skipped 이벤트만 남기지만(④ event_log 수가 바뀜), 이전이 끝나
+# prune 이 다시 열리면 통째로 지운다.
 # 브리핑은 BORING_BRIEF_HOUR=99 로 끈다(0..23 밖이면 안 돈다, scheduler.rs:316).
 set -eu
 

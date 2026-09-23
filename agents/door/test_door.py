@@ -885,7 +885,12 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
         self._orig_fetch = door._fetch_split_subject_rows
         self._orig_sync = door._call_engine_sync
         self._orig_emit = door._emit_subject_merged_event
+        self._saved_token = os.environ.pop("BORING_OWNER_TOKEN", None)
         order = self.order
+        self.owner_notes: set[str] = set()
+        self.touched: dict[str, list[str]] = {}
+        owner_notes = self.owner_notes
+        touched = self.touched
 
         class _StubCursor:
             def __enter__(self_c):
@@ -895,12 +900,19 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
                 return False
 
             def execute(self_c, sql, params):
-                if sql is door._SPLIT_DELETE_SQL:
+                if sql is door._OWNER_NOTES_SQL:
+                    self_c._fetched = [(p,) for p in params[0] if p in owner_notes]
+                elif sql is door._SPLIT_DELETE_SQL:
                     order.append("delete")
-                    self_c.rowcount = 2
+                    touched["delete"] = list(params[1])
+                    self_c.rowcount = len(params[1])
                 elif sql is door._SPLIT_UPDATE_SQL:
                     order.append("update")
-                    self_c.rowcount = 2
+                    touched["update"] = list(params[0])
+                    self_c.rowcount = len(params[0])
+
+            def fetchall(self_c):
+                return self_c._fetched
 
         class _StubConn:
             def cursor(self_c):
@@ -923,8 +935,9 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
             order.append("sync")
             return self._sync_result
 
-        def fake_emit(subject, deleted_rows, reread_notes, remaining_variants):
+        def fake_emit(subject, deleted_rows, reread_notes, remaining_variants, owner_held):
             order.append("event")
+            touched["event_owner_held"] = owner_held
             return "delivered"
 
         self._sync_result = {"ok": True, "summary": {"ingest_new": 0, "ingest_repaired": 2}}
@@ -942,16 +955,47 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
             os.environ.pop("DOOR_PG_DSN", None)
         else:
             os.environ["DOOR_PG_DSN"] = self._saved_dsn
+        os.environ.pop("BORING_OWNER_TOKEN", None)
+        if self._saved_token is not None:
+            os.environ["BORING_OWNER_TOKEN"] = self._saved_token
 
-    def _post(self, subject: str):
+    def _post(self, subject: str, token: str | None = None):
         payload = json.dumps({"subject": subject}).encode()
+        headers = {"content-type": "application/json"}
+        if token is not None:
+            headers["X-Boring-Owner-Token"] = token
         return _req(
             self.door_port,
             "POST",
             "/repairs/split-subjects",
             body=payload,
-            headers={"content-type": "application/json"},
+            headers=headers,
         )
+
+    def test_owner_note_is_held_without_the_owner_token(self):
+        self.owner_notes.add("/a.md")
+        self._after_rows = [("foodspring front", "/a.md"), ("foodspring-front", "/b.md")]
+        os.environ["BORING_OWNER_TOKEN"] = "tok-owner"
+
+        for token in (None, "wrong"):
+            self._fetch_calls = 0
+            status, body, _ = self._post("foodspring-front", token)
+            self.assertEqual(status, 200)
+            out = json.loads(body)
+            self.assertEqual(self.touched["delete"], ["/b.md"], f"token={token}")
+            self.assertEqual(self.touched["update"], ["/b.md"], f"token={token}")
+            self.assertEqual(out["owner_held"], ["/a.md"])
+            self.assertEqual(out["deleted_rows"], 1)
+            self.assertEqual(out["remaining_variants"], 2)
+            self.assertEqual(self.touched["event_owner_held"], ["/a.md"])
+
+        self._fetch_calls = 0
+        status, body, _ = self._post("foodspring-front", "tok-owner")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.touched["delete"], ["/a.md", "/b.md"], "control: the owner token merges owner rows"
+        )
+        self.assertEqual(json.loads(body)["owner_held"], [])
 
     def test_order_unknown_subject_and_sync_failure(self):
         # (a) unknown canon form — 404, nothing was touched
@@ -972,6 +1016,8 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
         self.assertEqual(out["remaining_variants"], 1)
         self.assertEqual(out["sync"], {"ingest_new": 0, "ingest_repaired": 2})
         self.assertEqual(out["event"], "delivered")
+        self.assertEqual(self.touched["delete"], ["/a.md", "/b.md"])
+        self.assertEqual(out["owner_held"], [])
 
         # (c) a failing sync is a 502 whose body says so — but the delete/update/commit already
         # ran, so the response still carries the (already-committed) row counts
@@ -1003,7 +1049,7 @@ class EmitSubjectMergedEventTests(unittest.TestCase):
         buf = io.StringIO()
         try:
             with contextlib.redirect_stderr(buf):
-                status = door._emit_subject_merged_event("foodspring-front", 2, 2, 1)
+                status = door._emit_subject_merged_event("foodspring-front", 2, 2, 1, [])
         finally:
             door._fetch = orig_fetch
         self.assertEqual(status, "failed: 500")

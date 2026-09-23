@@ -4014,3 +4014,123 @@ async fn undeclared_claim_row_and_node_outlive_their_edge() {
     cleanup_claim_edge_fixture(&store, &db, &note_path_str, &subject_x).await;
     cleanup_claim_edge_fixture(&store, &db, &note_path_str, &subject_y).await;
 }
+
+// ── sync prune is closed during the migration ─────────────────────────────────
+
+use drudge::ingest::run_with;
+
+async fn note_row_counts(db: &Client, path: &str, subject: &str) -> [i64; 4] {
+    let one = |row: tokio_postgres::Row| row.get::<_, i64>(0);
+    [
+        one(db
+            .query_one(
+                "SELECT count(*) FROM document WHERE source_path = $1;",
+                &[&path],
+            )
+            .await
+            .expect("count documents")),
+        one(db
+            .query_one(
+                "SELECT count(*) FROM chunk WHERE source_path = $1;",
+                &[&path],
+            )
+            .await
+            .expect("count chunks")),
+        one(db
+            .query_one(
+                "SELECT count(*) FROM edge WHERE src = $1;",
+                &[&format!("doc:{path}")],
+            )
+            .await
+            .expect("count edges")),
+        claim_row_count(db, path, subject).await,
+    ]
+}
+
+async fn prune_skipped_events_naming(store: &Store, path: &str) -> usize {
+    store
+        .recent_events(EventLogFilter {
+            limit: 50,
+            component: Some("drudge.ingest"),
+            event_name: Some("prune_skipped"),
+            status: None,
+            run_id: None,
+            workflow: None,
+            since_hours: None,
+        })
+        .await
+        .expect("read events")
+        .into_iter()
+        .filter(|e| {
+            e.attributes["paths"]
+                .as_array()
+                .is_some_and(|ps| ps.iter().any(|p| p.as_str() == Some(path)))
+        })
+        .count()
+}
+
+/// Owner decision 2026-09-24: a note that leaves the vault keeps its document·chunk·edge·claim
+/// rows and is named in a `prune_skipped` event; putting it back re-ingests onto the same rows.
+#[tokio::test]
+async fn vanished_note_keeps_rows_and_restored_note_does_not_duplicate() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = unique_subject("prune");
+    let vault = tempdir().expect("vault dir");
+    let parking = tempdir().expect("parking dir");
+    let dirs = vec![vault.path().to_string_lossy().into_owned()];
+    let note_path = vault.path().join(format!("{subject}.md"));
+    let parked = parking.path().join("parked.md");
+    fs::write(
+        &note_path,
+        format!(
+            "---\norigin: personal\nproject: \"\"\nkind: note\nclaims:\n  - subject: {subject}\n    predicate: axis\n    value: v1\n    kind: fact\n    confidence: certain\n---\n\nbody\n"
+        ),
+    )
+    .expect("write note");
+    let path = note_path.to_string_lossy().into_owned();
+    let cfg = BoringConfig::default();
+    let embedder = CountingEmbed::lenient();
+    let sync =
+        || run_with::<DefaultChunker, FrontmatterGraphExtractor, _>(&store, &embedder, &cfg, &dirs);
+
+    sync().await.expect("first sync");
+    let ingested = note_row_counts(&db, &path, &subject).await;
+    assert!(
+        ingested.iter().all(|n| *n > 0),
+        "fixture ingested: {ingested:?}"
+    );
+    assert_eq!(prune_skipped_events_naming(&store, &path).await, 0);
+
+    fs::rename(&note_path, &parked).expect("move note out");
+    sync().await.expect("sync with the note gone");
+    assert_eq!(
+        note_row_counts(&db, &path, &subject).await,
+        ingested,
+        "the vanished note keeps every row"
+    );
+    assert_eq!(
+        prune_skipped_events_naming(&store, &path).await,
+        1,
+        "the kept path is named in a prune_skipped event"
+    );
+
+    fs::rename(&parked, &note_path).expect("move note back");
+    sync().await.expect("sync with the note back");
+    assert_eq!(
+        note_row_counts(&db, &path, &subject).await,
+        ingested,
+        "the restored note re-ingests onto the same rows"
+    );
+    assert_eq!(
+        prune_skipped_events_naming(&store, &path).await,
+        1,
+        "a present note is not reported again"
+    );
+
+    cleanup_claim_edge_fixture(&store, &db, &path, &subject).await;
+}

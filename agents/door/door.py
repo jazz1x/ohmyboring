@@ -24,7 +24,8 @@ question the engine cannot (which projects have had a document touched in
 that window), and GET/POST /repairs/split-subjects lists and merges claim
 subjects the engine's canon() folds into one form now but a note still spells
 two ways (e.g. "foodspring front" vs "foodspring-front") — POST is the door's
-first write route: it deletes the split rows, blanks the affected notes' sha
+first write route: it deletes the split rows (an owner-written note's only with the
+owner token — otherwise that note is skipped and named in `owner_held`), blanks the affected notes' sha
 so the engine's own /sync rereads them under the merged form, and calls that
 /sync itself. None of the GETs touches the upstream.
 """
@@ -32,6 +33,8 @@ so the engine's own /sync rereads them under the merged form, and calls that
 from __future__ import annotations
 
 import asyncio
+import enum
+import hmac
 import http.client
 import json
 import os
@@ -275,6 +278,30 @@ _DEFAULT_REPAIR_LIMIT = 3
 _SPLIT_SUBJECTS_SQL = "select subject, source_path from claim"
 _SPLIT_DELETE_SQL = "delete from claim where subject = any(%s) and source_path = any(%s)"
 _SPLIT_UPDATE_SQL = "update document set sha = '' where source_path = any(%s)"
+_OWNER_NOTES_SQL = "select source_path from document where author = 'owner' and source_path = any(%s)"
+_OWNER_TOKEN_HEADER = "x-boring-owner-token"
+
+
+class Standing(enum.Enum):
+    OWNER = "owner"
+    NOT_OWNER = "not_owner"
+
+
+def _standing(presented: str | None) -> Standing:
+    configured = os.environ.get("BORING_OWNER_TOKEN")
+    verified = bool(configured) and presented is not None and hmac.compare_digest(configured, presented)
+    return Standing.OWNER if verified else Standing.NOT_OWNER
+
+
+def _owner_held(cur: psycopg.Cursor, standing: Standing, notes: list[str]) -> list[str]:
+    """The owner-written notes among `notes` a request without the owner token must leave as
+    they are: their claim rows are not deleted and their sha is not blanked."""
+    match standing:
+        case Standing.OWNER:
+            return []
+        case Standing.NOT_OWNER:
+            cur.execute(_OWNER_NOTES_SQL, (notes,))
+            return sorted(path for (path,) in cur.fetchall())
 
 
 def _canon_py(s: str) -> str:
@@ -332,7 +359,7 @@ def _fetch_split_subject_rows() -> list[tuple[str, str]]:
 
 
 def _emit_subject_merged_event(
-    subject: str, deleted_rows: int, reread_notes: int, remaining_variants: int
+    subject: str, deleted_rows: int, reread_notes: int, remaining_variants: int, owner_held: list[str]
 ) -> str:
     """POST straight to the engine's /events (the same wire contract as agents/shared/event_log,
     reused inline: the door container does not ship agents/shared, and this is one write).
@@ -350,6 +377,7 @@ def _emit_subject_merged_event(
         "deleted_rows": deleted_rows,
         "reread_notes": reread_notes,
         "remaining_variants": remaining_variants,
+        "owner_held": owner_held,
     }
     try:
         response = _fetch(
@@ -388,10 +416,12 @@ def _call_engine_sync() -> dict[str, Any]:
     return {"ok": False, "error": parsed}
 
 
-def _merge_split_subject(subject: str) -> dict[str, Any] | None:
+def _merge_split_subject(subject: str, standing: Standing) -> dict[str, Any] | None:
     """The POST body of the repair: locate the group, delete its split rows, blank the affected
-    notes' sha, commit, hand the reread to the engine's /sync, then recount. `None` means
-    `subject` names no live 2+-variant group — the door's 404."""
+    notes' sha, commit, hand the reread to the engine's /sync, then recount. Without the owner
+    token, owner-written notes are skipped and named in `owner_held`, so the merge of everyone
+    else's rows still happens and the leftover spelling stays countable in `remaining_variants`.
+    `None` means `subject` names no live 2+-variant group — the door's 404."""
     rows = _fetch_split_subject_rows()
     groups = _group_split_subjects(rows)
     match = next((g for g in groups if g["subject"] == subject), None)
@@ -403,9 +433,11 @@ def _merge_split_subject(subject: str) -> dict[str, Any] | None:
     conn = _split_subjects_connect()
     try:
         with conn.cursor() as cur:
-            cur.execute(_SPLIT_DELETE_SQL, (variants, notes))
+            owner_held = _owner_held(cur, standing, notes)
+            touched = [path for path in notes if path not in owner_held]
+            cur.execute(_SPLIT_DELETE_SQL, (variants, touched))
             deleted_rows = cur.rowcount
-            cur.execute(_SPLIT_UPDATE_SQL, (notes,))
+            cur.execute(_SPLIT_UPDATE_SQL, (touched,))
             reread_notes = cur.rowcount
         conn.commit()
     finally:
@@ -418,17 +450,21 @@ def _merge_split_subject(subject: str) -> dict[str, Any] | None:
             "deleted_rows": deleted_rows,
             "reread_notes": reread_notes,
             "remaining_variants": None,
+            "owner_held": owner_held,
             "sync": {"error": sync_result["error"]},
         }
 
     rows_after = _fetch_split_subject_rows()
     remaining_variants = _count_variants(rows_after, subject)
-    event_status = _emit_subject_merged_event(subject, deleted_rows, reread_notes, remaining_variants)
+    event_status = _emit_subject_merged_event(
+        subject, deleted_rows, reread_notes, remaining_variants, owner_held
+    )
     return {
         "subject": subject,
         "deleted_rows": deleted_rows,
         "reread_notes": reread_notes,
         "remaining_variants": remaining_variants,
+        "owner_held": owner_held,
         "sync": sync_result["summary"],
         "event": event_status,
     }
@@ -465,7 +501,9 @@ async def _repairs_split_subjects_post(request: Request) -> Response:
     if not os.environ.get("DOOR_PG_DSN"):
         return JSONResponse({"error": "store not configured"}, status_code=503)
     try:
-        result = await asyncio.to_thread(_merge_split_subject, subject)
+        result = await asyncio.to_thread(
+            _merge_split_subject, subject, _standing(request.headers.get(_OWNER_TOKEN_HEADER))
+        )
     except psycopg.OperationalError as e:
         return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
     if result is None:
