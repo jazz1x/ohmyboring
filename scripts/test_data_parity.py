@@ -104,6 +104,21 @@ class InstrumentFailureTest(unittest.TestCase):
         finally:
             sys.argv = argv
 
+    def test_run_recall_search_failed_is_engine_down(self):
+        # run_eval 은 /search 실패를 삼켜 Recall 줄까지 찍는다 — 그 0/22 를 수치로 읽으면 안 된다.
+        import subprocess
+        from unittest import mock
+
+        dead = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="Recall@3: 0/22 = 0.00\n",
+            stderr="search failed for 'q': connection refused",
+        )
+        with mock.patch.object(dp.subprocess, "run", return_value=dead):
+            with self.assertRaises(dp.EngineDown):
+                dp.run_recall("http://x")
+
 
 if __name__ == "__main__":
     unittest.main()

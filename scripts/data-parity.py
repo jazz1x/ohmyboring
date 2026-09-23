@@ -14,6 +14,7 @@ handed 간선을 오염시키므로(probes-must-not-write-to-the-measurement) �
 
 import argparse
 import csv
+import http.client
 import io
 import json
 import os
@@ -74,7 +75,10 @@ def psql_csv(db: str, sql: str) -> list[list[str]]:
         "-c",
         sql,
     ]
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as e:
+        raise RuntimeError(f"psql 실행 불가: {e}") from e
     if p.returncode != 0:
         raise RuntimeError(f"psql 실패 ({db}): {p.stderr.strip()}")
     rows = list(csv.reader(io.StringIO(p.stdout)))
@@ -93,7 +97,13 @@ def http_json(method: str, url: str, payload: dict | None = None) -> dict:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
             body = r.read()
             return json.loads(body) if body else {}
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        ConnectionError,
+        http.client.HTTPException,
+        json.JSONDecodeError,
+    ) as e:
         raise EngineDown(f"{method} {url} 불통: {e}") from e
 
 
@@ -204,9 +214,20 @@ def run_recall(url: str) -> str:
         )
     except subprocess.TimeoutExpired as e:
         raise EngineDown(f"run_eval 900초 초과 ({url})") from e
+    except OSError as e:
+        raise EngineDown(f"run_eval 실행 불가 ({url}): {e}") from e
+    output = p.stdout + p.stderr
+    # run_eval 은 /search 실패를 삼키고 빈 hits 로 계속해 Recall 줄까지 찍는다(data/eval/run_eval.py:44).
+    # 임베더가 죽은 채로 /health 만 살아 있으면 0/22 = 0/22 "같음"이 되는데, 그건 데이터가 아니라
+    # 계기 불통이다 — 'search failed' 가 한 번이라도 나오면 잰 게 아니다(종료코드 2).
+    if "search failed" in output:
+        raise EngineDown(f"run_eval 의 /search 가 불통 ({url}): {p.stderr.strip()[:300]}")
     m = RE_CALL.search(p.stdout)
     if not m:
-        raise EngineDown(f"run_eval 에서 Recall@3 를 못 읽었다 ({url}): {p.stderr.strip()[:300]}")
+        raise EngineDown(
+            f"run_eval 에서 Recall@3 를 못 읽었다 ({url}): exit={p.returncode} {output.strip()[:300]}"
+        )
+    # recall 수치는 읽혔다 — gate 가 FAIL 이라도(수치가 떨어진 것) 그건 데이터 차이로 ③ 에서 잰다.
     return f"{m.group(1)}/{m.group(2)}"
 
 

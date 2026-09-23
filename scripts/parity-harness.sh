@@ -78,6 +78,12 @@ run_engine() {
 }
 
 up() {
+  # boring.json 이 없으면 docker 가 파일 대신 디렉터리를 조용히 만들어 엔진이 묵은 설정으로 뜬다 —
+  # ② 가 눈먼 채 진행되는 것보다 여기서 멈추는 게 맞다.
+  if [ ! -f "$ROOT/boring.json" ]; then
+    echo "parity-harness: $ROOT/boring.json 이 없다 — 읽기 전용 마운트 대신 디렉터리가 생겨 조용히 깨진다" >&2
+    exit 2
+  fi
   base_claims=$(claim_count "$BASE_DB")
   clone_db "$BASE_DB" "$A_DB"
   clone_db "$BASE_DB" "$B_DB"
