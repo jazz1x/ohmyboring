@@ -109,12 +109,17 @@ class DrudgeClient:
         contested: list[str] | None = None,
         supersedes: list[list[str]] | None = None,
         verdict: str | None = None,
+        judge: str | None = None,
     ) -> dict[str, Any]:
         """POST /consumption — what a session did with the notes it was handed, as graph edges.
         `supersedes` pairs are `[newer_path, older_path]`. A `verdict` (`used`|`contested`)
         travels alone: the engine applies it to everything it handed that session, and a
-        payload listing paths beside a verdict is rejected."""
+        payload listing paths beside a verdict is rejected. `judge` names who is judging
+        ('owner', 'inferred', 'agent:<name>') and lands verbatim on every written edge —
+        absent means the edges name nobody (NULL)."""
         payload: dict[str, Any] = {"session_id": session_id, "observed_at": observed_at}
+        if judge is not None:
+            payload["judge"] = judge
         if verdict is not None:
             # Dropping the lists here would hide a caller bug behind a 200: the caller thinks
             # its paths were judged, the engine judged what it had handed. Refuse instead.

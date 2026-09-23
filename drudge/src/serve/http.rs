@@ -601,6 +601,7 @@ pub(crate) async fn handle_consumption(
                     used,
                     contested,
                     &req.supersedes,
+                    req.judge(),
                 )
                 .await?
         }
@@ -612,6 +613,7 @@ pub(crate) async fn handle_consumption(
                     &req.used,
                     &req.contested,
                     &req.supersedes,
+                    req.judge(),
                 )
                 .await?
         }

@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
-from retriever import BoringRetriever, record_verdict  # noqa: E402
+from retriever import BoringRetriever, record_notes, record_verdict  # noqa: E402
 
 HITS = [
     {
@@ -135,16 +135,66 @@ class RetrieverTest(unittest.TestCase):
         self.server.hits = []
         self.assertEqual(BoringRetriever(base_url=self.base_url).invoke("q"), [])
 
-    def test_record_verdict_sends_verdict_and_timestamp_only(self) -> None:
-        resp = record_verdict(self.base_url, "sess-B", "contested")
+    def test_record_verdict_sends_verdict_judge_and_timestamp(self) -> None:
+        resp = record_verdict(self.base_url, "sess-B", "contested", "owner")
         body = self.server.last_body
-        self.assertEqual(set(body), {"session_id", "observed_at", "verdict"})
+        self.assertEqual(set(body), {"session_id", "observed_at", "verdict", "judge"})
         self.assertEqual(body["session_id"], "sess-B")
         self.assertEqual(body["verdict"], "contested")
+        self.assertEqual(body["judge"], "owner")
         datetime.fromisoformat(body["observed_at"])  # raises if not RFC 3339
         self.assertEqual(
             resp, {"session": "sess-B", "used": 0, "contested": 1, "supersedes": 0, "unknown": 0}
         )
+
+    def test_record_verdict_sends_judge_verbatim(self) -> None:
+        for judge in ("inferred", "agent:r2-check"):
+            record_verdict(self.base_url, "sess-B", "used", judge)
+            self.assertEqual(self.server.last_body["judge"], judge)
+
+    def test_record_notes_sends_lists_and_judge_without_verdict(self) -> None:
+        record_notes(
+            self.base_url,
+            "sess-C",
+            "agent:r2-check",
+            used=["/vault/wiki/wiki-0001.md"],
+            contested=["/vault/wiki/wiki-0002.md"],
+        )
+        body = self.server.last_body
+        self.assertEqual(set(body), {"session_id", "observed_at", "judge", "used", "contested"})
+        self.assertNotIn("verdict", body)
+        self.assertEqual(body["session_id"], "sess-C")
+        self.assertEqual(body["judge"], "agent:r2-check")
+        self.assertEqual(body["used"], ["/vault/wiki/wiki-0001.md"])
+        self.assertEqual(body["contested"], ["/vault/wiki/wiki-0002.md"])
+        datetime.fromisoformat(body["observed_at"])  # raises if not RFC 3339
+
+    def test_record_notes_rejects_judging_nothing(self) -> None:
+        with self.assertRaises(ValueError):
+            record_notes(self.base_url, "sess-C", "agent:r2-check")
+        self.assertIsNone(self.server.last_body, "no request may leave for an empty judgement")
+
+    def test_claims_round_trip_into_metadata(self) -> None:
+        self.server.hits = [
+            {
+                **HITS[0],
+                "claims": [
+                    {
+                        "subject": "omb",
+                        "predicate": "status",
+                        "value": "migrating",
+                        "source_path": "/vault/wiki/wiki-0001.md",
+                        "valid_from": "2026-09-23T00:00:00+00:00",
+                    }
+                ],
+                "claims_total": 4,
+            }
+        ]
+        retriever = BoringRetriever(base_url=self.base_url, claims=3)
+        docs = retriever.invoke("omb 상태")
+        self.assertEqual(self.server.last_body["claims"], 3)
+        self.assertEqual(docs[0].metadata["claims"], self.server.hits[0]["claims"])
+        self.assertEqual(docs[0].metadata["claims_total"], 4)
 
 
 if __name__ == "__main__":

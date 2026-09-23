@@ -960,7 +960,12 @@ def write_consumption_to_graph(session_id, records, transcript_text):
         from drudge_client import DrudgeClient
 
         DrudgeClient(timeout=10, retries=1).consumption(
-            session_id, observed_at, used, contested, supersedes=[list(p) for p in supersedes]
+            session_id,
+            observed_at,
+            used,
+            contested,
+            supersedes=[list(p) for p in supersedes],
+            judge="inferred",
         )
     except Exception as e:  # noqa: BLE001 — the graph learning is best-effort
         print(f"[distill-session] consumption write failed: {e}", file=sys.stderr)

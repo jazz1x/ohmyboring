@@ -896,6 +896,37 @@ class LiveFetchTests(unittest.TestCase):
         self.assertIn(("POST", "/recurrences", {"project": ""}), calls)
 
 
+class LiveConsumptionTests(unittest.TestCase):
+    """The card button's verdict is the owner's own judgement. _live_consumption must send
+    judge="owner" on every consumption payload — a mutant that drops it leaves an edge that
+    cannot say whose hand the verdict was, which is the whole reason this cycle exists."""
+
+    def test_button_verdict_carries_judge_owner(self):
+        calls: list[tuple[str, str, dict]] = []
+
+        def fake_retry(self, method, path, payload=None, timeout=None):
+            calls.append((method, path, payload))
+            return {
+                "session": payload["session_id"],
+                "used": 1,
+                "contested": 0,
+                "supersedes": 0,
+                "unknown": 0,
+            }
+
+        with mock.patch.object(card_live.DrudgeClient, "_retry", fake_retry):
+            card_live._live_consumption("sess-1", "used", ["/vault/wiki/wiki-0001.md"])
+            card_live._live_consumption("sess-1", "contested", ["/vault/wiki/wiki-0002.md"])
+        (method, path, used_payload) = calls[0]
+        self.assertEqual((method, path), ("POST", "/consumption"))
+        self.assertEqual(used_payload["judge"], "owner")
+        self.assertEqual(used_payload["used"], ["/vault/wiki/wiki-0001.md"])
+        self.assertNotIn("verdict", used_payload)
+        (_, _, contested_payload) = calls[1]
+        self.assertEqual(contested_payload["judge"], "owner")
+        self.assertEqual(contested_payload["contested"], ["/vault/wiki/wiki-0002.md"])
+
+
 class LiveExecuteRepairTests(unittest.TestCase):
     """F2 (2026-09-22): the door's own 502 (sync failed, but delete+update already
     committed) must become a RepairFailed value carrying those committed counts — never an

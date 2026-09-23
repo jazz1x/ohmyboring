@@ -667,6 +667,11 @@ impl Store {
                  );
                  CREATE INDEX IF NOT EXISTS edge_src ON edge(src);
                  CREATE INDEX IF NOT EXISTS edge_dst ON edge(dst);
+                 -- Who judged this edge: 'owner' (card button), 'inferred' (session-end
+                 -- distillation), 'agent:<name>' (an autonomous caller naming itself). NULL =
+                 -- written before the column existed, or a caller that brings no judge. The
+                 -- engine stores the value verbatim and never interprets it.
+                 ALTER TABLE edge ADD COLUMN IF NOT EXISTS judge text;
                  ALTER TABLE document ADD COLUMN IF NOT EXISTS extracted_sha text NOT NULL DEFAULT '';
                  ALTER TABLE document ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
                  CREATE INDEX IF NOT EXISTS document_updated ON document(updated_at DESC);
@@ -1486,17 +1491,17 @@ impl Store {
             let typed_label = format!("{subject} — {}", claim.value);
             self.upsert_node(&typed_id, kind, &typed_label, Some(confidence))
                 .await?;
-            self.upsert_edge(&claim_id, &typed_id, "is_a").await?;
+            self.upsert_edge(&claim_id, &typed_id, "is_a", None).await?;
         }
 
         // doc -> claim edge
         let doc_id = doc_node_id(path);
-        self.upsert_edge(&doc_id, &claim_id, "claims").await?;
+        self.upsert_edge(&doc_id, &claim_id, "claims", None).await?;
 
         // claim -> project edge
         if !project.is_empty() {
             let project_id = format!("project:{project}");
-            self.upsert_edge(&claim_id, &project_id, "claim_of_project")
+            self.upsert_edge(&claim_id, &project_id, "claim_of_project", None)
                 .await?;
         }
 
@@ -2025,7 +2030,7 @@ impl Store {
             let pid = format!("project:{}", front.project);
             self.upsert_node(&pid, "project", &front.project, None)
                 .await?;
-            self.upsert_edge(&doc_id, &pid, "in_project").await?;
+            self.upsert_edge(&doc_id, &pid, "in_project", None).await?;
         }
 
         // tagged: remove existing then regenerate (idempotent)
@@ -2039,7 +2044,7 @@ impl Store {
         for tag in &front.tags {
             let tid = format!("topic:{tag}");
             self.upsert_node(&tid, "topic", tag, None).await?;
-            self.upsert_edge(&doc_id, &tid, "tagged").await?;
+            self.upsert_edge(&doc_id, &tid, "tagged", None).await?;
         }
         Ok(())
     }
@@ -2722,12 +2727,18 @@ impl Store {
         Ok(())
     }
 
-    async fn upsert_edge(&self, src: &str, dst: &str, kind: &str) -> Result<()> {
+    async fn upsert_edge(
+        &self,
+        src: &str,
+        dst: &str,
+        kind: &str,
+        judge: Option<&str>,
+    ) -> Result<()> {
         self.db()
             .await?
             .execute(
-                "INSERT INTO edge (src, dst, kind) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING;",
-                &[&src, &dst, &kind],
+                "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING;",
+                &[&src, &dst, &kind, &judge],
             )
             .await
             .context("upsert edge")?;
@@ -2749,15 +2760,23 @@ impl Store {
                 report.unknown += 1;
                 continue;
             }
-            self.upsert_edge(&doc_node_id(&pair[0]), &doc_node_id(&pair[1]), "supersedes")
-                .await?;
+            self.upsert_edge(
+                &doc_node_id(&pair[0]),
+                &doc_node_id(&pair[1]),
+                "supersedes",
+                None,
+            )
+            .await?;
             report.supersedes += 1;
         }
         Ok(report)
     }
 
     /// The scorer's write door: record what one session consumed. Upserts `session:<id>` (label =
-    /// `observed_at`) and one `used`/`contested` edge per known path. Idempotent — a repeat call
+    /// `observed_at`) and one `used`/`contested` edge per known path, each carrying `judge` — who
+    /// judged ('owner', 'inferred', 'agent:<name>', or NULL when the caller brings no name). An
+    /// edge that already exists keeps the judge it first carried: ON CONFLICT DO NOTHING does not
+    /// overwrite, so the first judgement to name an edge stays on it. Idempotent — a repeat call
     /// updates the label and adds edges, never deletes. Paths with no `document` row are skipped
     /// and counted in the report, not errored.
     pub async fn record_consumption(
@@ -2767,6 +2786,7 @@ impl Store {
         used: &[String],
         contested: &[String],
         supersedes: &[[String; 2]],
+        judge: Option<&str>,
     ) -> Result<ConsumptionReport> {
         let session_node = format!("session:{session_id}");
         self.upsert_node(&session_node, "session", observed_at, None)
@@ -2778,7 +2798,7 @@ impl Store {
                 report.unknown += 1;
                 continue;
             }
-            self.upsert_edge(&session_node, &doc_node_id(path), "used")
+            self.upsert_edge(&session_node, &doc_node_id(path), "used", judge)
                 .await?;
             report.used += 1;
         }
@@ -2787,7 +2807,7 @@ impl Store {
                 report.unknown += 1;
                 continue;
             }
-            self.upsert_edge(&session_node, &doc_node_id(path), "contested")
+            self.upsert_edge(&session_node, &doc_node_id(path), "contested", judge)
                 .await?;
             report.contested += 1;
         }
@@ -2819,7 +2839,7 @@ impl Store {
                 report.unknown += 1;
                 continue;
             }
-            self.upsert_edge(&session_node, &doc_node_id(path), "handed")
+            self.upsert_edge(&session_node, &doc_node_id(path), "handed", None)
                 .await?;
             report.handed += 1;
         }
@@ -2999,12 +3019,22 @@ impl Store {
     // ── semantic edges (doc → entity) ───────────────────────────────────────────
 
     pub async fn relate_doc_tool(&self, doc_path: &str, slug: &str) -> Result<()> {
-        self.upsert_edge(&doc_node_id(doc_path), &format!("tool:{slug}"), "uses")
-            .await
+        self.upsert_edge(
+            &doc_node_id(doc_path),
+            &format!("tool:{slug}"),
+            "uses",
+            None,
+        )
+        .await
     }
     pub async fn relate_doc_concept(&self, doc_path: &str, slug: &str) -> Result<()> {
-        self.upsert_edge(&doc_node_id(doc_path), &format!("concept:{slug}"), "about")
-            .await
+        self.upsert_edge(
+            &doc_node_id(doc_path),
+            &format!("concept:{slug}"),
+            "about",
+            None,
+        )
+        .await
     }
 
     // ── graph retrieval ───────────────────────────────────────────────────────

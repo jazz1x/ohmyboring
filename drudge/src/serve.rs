@@ -489,6 +489,7 @@ mod tests {
             contested,
             supersedes: vec![],
             verdict: None,
+            judge: None,
         }
     }
 
@@ -611,6 +612,30 @@ mod tests {
                 "verdict={verdict:?} plus a path list must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn consumption_rejects_blank_judge() {
+        for bad in ["", "   "] {
+            let mut req = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
+            req.judge = Some(bad.to_owned());
+            let err = super::validate_consumption_req(&req).unwrap_err();
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::BAD_REQUEST,
+                "judge={bad:?} must be rejected"
+            );
+        }
+        for good in ["owner", "inferred", "agent:r2-check"] {
+            let mut req = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
+            req.judge = Some(good.to_owned());
+            assert!(
+                super::validate_consumption_req(&req).is_ok(),
+                "judge={good:?} is stored verbatim"
+            );
+        }
+        let absent = consumption_req("s-1", "2026-09-11T05:12:00+00:00", vec![], vec![]);
+        assert_eq!(absent.judge(), None);
     }
 }
 
@@ -811,6 +836,12 @@ pub(crate) struct ConsumptionReq {
     /// knows what was handed; listing paths again is a 400.
     #[serde(default)]
     pub(crate) verdict: Option<String>,
+    /// Who is judging: 'owner' (card button), 'inferred' (session-end distillation),
+    /// 'agent:<name>' (an autonomous caller naming itself). Absent means the caller brings no
+    /// judge and the edges are written with NULL — the engine stores the value verbatim and
+    /// never interprets it.
+    #[serde(default)]
+    pub(crate) judge: Option<String>,
 }
 
 impl ConsumptionReq {
@@ -819,6 +850,12 @@ impl ConsumptionReq {
     /// Blank stays `Some("")` so the validator still rejects a verdict field that says nothing.
     pub(crate) fn verdict(&self) -> Option<&str> {
         self.verdict.as_deref().map(str::trim)
+    }
+
+    /// The judge as one normalised string — same contract as `verdict()`: trimmed here, blank
+    /// stays `Some("")` so the validator rejects a judge field that says nothing.
+    pub(crate) fn judge(&self) -> Option<&str> {
+        self.judge.as_deref().map(str::trim)
     }
 }
 
@@ -852,6 +889,11 @@ pub(crate) fn validate_consumption_req(req: &ConsumptionReq) -> Result<(), AppEr
                 "verdict applies to what was handed; do not also list paths",
             ));
         }
+    }
+    if let Some(judge) = req.judge()
+        && judge.is_empty()
+    {
+        return Err(AppError::bad_request("judge must not be empty"));
     }
     for (name, len) in [
         ("used", req.used.len()),

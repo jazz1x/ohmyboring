@@ -811,6 +811,7 @@ async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
             used,
             contested,
             &[],
+            None,
         )
         .await
         .map_err(|e| (-32603, format!("verdict: {e:#}")))?;

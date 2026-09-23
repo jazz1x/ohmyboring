@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -32,6 +33,9 @@ from card_types import (
 )
 from drudge_client import DrudgeClient
 from pydantic import ValidationError
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "memory"))
+from retriever import BoringRetriever  # noqa: E402
 
 # Register answers carry up to 50 claims each; the door timeout lesson (brief p95 77s) says the
 # point read is far cheaper, but a cold engine still earns more than a point-read default.
@@ -136,10 +140,16 @@ def _live_handover(session: str, at: str, paths: list[str]) -> dict:
 
 def _live_consumption(session: str, kind: str, paths: list[str]) -> dict:
     # Row-level, not session-level: a button judges the note its row cited, and only that one.
+    # judge="owner": this verdict is the owner's own hand on the button, and the edge must
+    # say so — 'inferred' (session-end distillation) and 'agent:<name>' are different hands.
     at = datetime.now(UTC).isoformat()
     if kind == "used":
-        return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(session, at, used=paths)
-    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(session, at, contested=paths)
+        return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(
+            session, at, used=paths, judge="owner"
+        )
+    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(
+        session, at, contested=paths, judge="owner"
+    )
 
 
 def _live_resolve(subject: str, register: str) -> ResolvedNote | Unresolved:
@@ -250,9 +260,13 @@ def _door_url() -> str:
 
 
 def _live_search(subject: str) -> list[dict[str, Any]]:
-    """A candidate's past record — `/search` with claims, the door's own recall of what the
-    engine has decided about this subject before (wiki-1765 step 1)."""
-    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).search(subject, max_results=3, claims=3)
+    """A candidate's past record — the BoringRetriever over the door's /search with claims=3:
+    the door's own recall of what the engine has decided about this subject before
+    (wiki-1765 step 1), read through the LangChain seam the advice slot's retriever plugs
+    into. Returned in the dict shape advise has always read: 'id', 'snippet', and the hit
+    metadata (source_path, counts, claims) unpacked alongside."""
+    retriever = BoringRetriever(base_url=_door_url(), max_results=3, claims=3)
+    return [{"id": doc.id, "snippet": doc.page_content, **doc.metadata} for doc in retriever.invoke(subject)]
 
 
 def _vault_dir() -> str:

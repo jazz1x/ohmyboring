@@ -86,6 +86,7 @@ async fn seed_consumption(store: &Store) -> (String, String, String) {
             ],
             std::slice::from_ref(&path_a),
             &[],
+            None,
         )
         .await
         .expect("record consumption");
@@ -148,6 +149,7 @@ async fn consumption_edges_survive_reingest_and_repeat_calls() {
             std::slice::from_ref(&path_a),
             &[],
             &[],
+            None,
         )
         .await
         .expect("repeat consumption");
@@ -190,6 +192,112 @@ async fn consumption_edges_survive_reingest_and_repeat_calls() {
         .expect("cleanup session node");
 }
 
+/// `record_consumption` writes `judge` onto every `used`/`contested` edge it creates, and the
+/// first judge to name an edge stays on it: a repeat call with another judge (or none) hits
+/// ON CONFLICT DO NOTHING, never an overwrite. A call with no judge writes NULL — the edge
+/// exists but names nobody, the same state every pre-column edge is in.
+#[tokio::test]
+async fn consumption_judge_lands_on_edges_and_the_first_judge_stays() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let path_a = unique_path("judge-a");
+    let path_b = unique_path("judge-b");
+    let session = unique_id("judge-s");
+    for path in [&path_a, &path_b] {
+        store
+            .upsert_document(&dummy_frontmatter(path), "sha-v1", SystemTime::now())
+            .await
+            .expect("upsert doc");
+    }
+
+    store
+        .record_consumption(
+            &session,
+            "2026-09-23T05:12:00+00:00",
+            std::slice::from_ref(&path_a),
+            std::slice::from_ref(&path_b),
+            &[],
+            Some("agent:r2-check"),
+        )
+        .await
+        .expect("record judged consumption");
+    let session_node = format!("session:{session}");
+    let doc_a = format!("doc:{path_a}");
+    let doc_b = format!("doc:{path_b}");
+    assert_eq!(
+        edge_judge(&db, &session_node, &doc_a, "used").await,
+        Some("agent:r2-check".to_owned()),
+        "the used edge carries the judge"
+    );
+    assert_eq!(
+        edge_judge(&db, &session_node, &doc_b, "contested").await,
+        Some("agent:r2-check".to_owned()),
+        "the contested edge carries the judge"
+    );
+
+    // A later call with a different judge must not overwrite the first one.
+    store
+        .record_consumption(
+            &session,
+            "2026-09-23T06:00:00+00:00",
+            std::slice::from_ref(&path_a),
+            &[],
+            &[],
+            Some("owner"),
+        )
+        .await
+        .expect("repeat with another judge");
+    assert_eq!(
+        edge_judge(&db, &session_node, &doc_a, "used").await,
+        Some("agent:r2-check".to_owned()),
+        "ON CONFLICT DO NOTHING keeps the judge that named the edge first"
+    );
+
+    // A judge-less session's edges name nobody — NULL, like every pre-column edge.
+    let bare_session = unique_id("judge-bare");
+    store
+        .record_consumption(
+            &bare_session,
+            "2026-09-23T05:30:00+00:00",
+            std::slice::from_ref(&path_a),
+            &[],
+            &[],
+            None,
+        )
+        .await
+        .expect("record judge-less consumption");
+    assert_eq!(
+        edge_judge(&db, &format!("session:{bare_session}"), &doc_a, "used").await,
+        None,
+        "no judge in the request → NULL on the edge"
+    );
+
+    store.delete_document(&path_a).await.expect("cleanup doc a");
+    store.delete_document(&path_b).await.expect("cleanup doc b");
+    for s in [&session, &bare_session] {
+        db.execute(
+            "DELETE FROM node WHERE id = $1;",
+            &[&format!("session:{s}")],
+        )
+        .await
+        .expect("cleanup session node");
+    }
+}
+
+async fn edge_judge(db: &Client, src: &str, dst: &str, kind: &str) -> Option<String> {
+    db.query_opt(
+        "SELECT judge FROM edge WHERE src = $1 AND dst = $2 AND kind = $3;",
+        &[&src, &dst, &kind],
+    )
+    .await
+    .expect("query edge judge")
+    .and_then(|row| row.get::<_, Option<String>>(0))
+}
+
 /// GC only sweeps orphan tool/concept nodes — session nodes are out of scope, even edge-less
 /// ones (a session that consumed nothing yet must not be swept before its first report).
 #[tokio::test]
@@ -204,7 +312,14 @@ async fn gc_keeps_session_nodes() {
     let (path_a, path_b, session) = seed_consumption(&store).await;
     let idle_session = unique_id("consumption-idle");
     let idle_report = store
-        .record_consumption(&idle_session, "2026-09-11T06:00:00+00:00", &[], &[], &[])
+        .record_consumption(
+            &idle_session,
+            "2026-09-11T06:00:00+00:00",
+            &[],
+            &[],
+            &[],
+            None,
+        )
         .await
         .expect("record edge-less session");
     assert_eq!(
@@ -269,6 +384,7 @@ async fn supersedes_edges_are_written_and_read_back() {
                 [newer.clone(), newer.clone()],
                 [newer.clone(), "/vault/wiki/never-ingested.md".to_owned()],
             ],
+            None,
         )
         .await
         .expect("record supersedes pairs");
@@ -332,7 +448,7 @@ async fn reused_recently_counts_only_sessions_inside_the_window() {
 
     for session in [&today_session_a, &today_session_b] {
         store
-            .record_consumption(session, &today, std::slice::from_ref(&path), &[], &[])
+            .record_consumption(session, &today, std::slice::from_ref(&path), &[], &[], None)
             .await
             .expect("record today's consumption");
     }
@@ -343,6 +459,7 @@ async fn reused_recently_counts_only_sessions_inside_the_window() {
             std::slice::from_ref(&path),
             &[],
             &[],
+            None,
         )
         .await
         .expect("record old consumption");
@@ -652,6 +769,7 @@ async fn consumption_verdicts_reorder_ranking() {
             std::slice::from_ref(&path_b),
             std::slice::from_ref(&path_a),
             &[],
+            None,
         )
         .await
         .expect("record verdicts");
