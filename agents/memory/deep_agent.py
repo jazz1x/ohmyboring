@@ -35,7 +35,7 @@ def boring_deep_agent(
             "/memories/": StoreBackend(store=store, namespace=lambda _rt: ("agent", agent_name, "memories")),
         },
     )
-    retriever = BoringRetriever(base_url=engine_url, max_results=max_results, session_id=session_id)
+    retriever = BoringRetriever(base_url=door_url, max_results=max_results, session_id=session_id)
 
     @tool
     def recall(query: str) -> str:

@@ -73,17 +73,24 @@ def _call(name: str, args: dict, n: int) -> dict:
     return {"name": name, "args": args, "id": f"call-{n}", "type": "tool_call"}
 
 
+def _serve(claim_sources: dict, hits: list[dict]) -> tuple[ThreadingHTTPServer, threading.Thread]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _RememberingHandler)
+    server.requests = []
+    server.claim_sources = claim_sources
+    server.listed = []
+    server.hits = hits
+    server.remember_response = {"source_path": "/vault/wiki/x.md", "duplicate": None}
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
 class DeepAgentTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _RememberingHandler)
-        self.server.requests = []
-        self.server.claim_sources = {}
-        self.server.listed = []
-        self.server.hits = HITS
-        self.server.remember_response = {"source_path": "/vault/wiki/x.md", "duplicate": None}
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        url = f"http://127.0.0.1:{self.server.server_port}"
+        claim_sources: dict = {}
+        self.engine, engine_thread = _serve(claim_sources, [])
+        self.door, door_thread = _serve(claim_sources, HITS)
+        self.threads = [engine_thread, door_thread]
         script = iter(
             [
                 AIMessage(content="", tool_calls=[_call("recall", {"query": "우리 순위"}, 1)]),
@@ -102,8 +109,8 @@ class DeepAgentTest(unittest.TestCase):
         )
         agent = boring_deep_agent(
             _ScriptedModel(messages=script),
-            engine_url=url,
-            door_url=url,
+            engine_url=f"http://127.0.0.1:{self.engine.server_port}",
+            door_url=f"http://127.0.0.1:{self.door.server_port}",
             agent_name=AGENT,
             session_id=SESSION,
         )
@@ -112,12 +119,13 @@ class DeepAgentTest(unittest.TestCase):
         ]
 
     def tearDown(self) -> None:
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
+        for server, thread in zip((self.engine, self.door), self.threads, strict=True):
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
-    def _posts(self, path: str) -> list[dict]:
-        return [body for method, p, body in self.server.requests if method == "POST" and p == path]
+    def _posts(self, server: ThreadingHTTPServer, path: str) -> list[dict]:
+        return [body for method, p, body in server.requests if method == "POST" and p == path]
 
     def _tool_answer(self, call_id: str) -> str:
         (msg,) = [m for m in self.messages if isinstance(m, ToolMessage) and m.tool_call_id == call_id]
@@ -125,7 +133,7 @@ class DeepAgentTest(unittest.TestCase):
 
     def test_memories_write_is_one_remember_and_reads_back(self) -> None:
         self.assertIn("/tmp/scratch.md", self._tool_answer("call-3"))
-        (body,) = self._posts("/remember")
+        (body,) = self._posts(self.engine, "/remember")
         self.assertIn("langgraph-store", body["tags"])
         self.assertEqual(
             body["claims"][0]["subject"], _subject_for(("agent", AGENT, "memories"), "/learned.md")
@@ -133,14 +141,16 @@ class DeepAgentTest(unittest.TestCase):
         self.assertEqual(json.loads(body["claims"][0]["value"])["value"]["content"], BODY)
         self.assertIn(BODY, self._tool_answer("call-4"))
         claim_source_gets = [
-            p for m, p, _ in self.server.requests if m == "GET" and p.startswith("/claim-source?")
+            p for m, p, _ in self.door.requests if m == "GET" and p.startswith("/claim-source?")
         ]
         self.assertEqual(len(claim_source_gets), 3, "no memory= — nothing reads /memories/ into the prompt")
 
     def test_recall_hands_over_to_the_session_in_the_engine_order(self) -> None:
         self.assertEqual(
-            self._posts("/search"), [{"query": "우리 순위", "max_results": 5, "session_id": SESSION}]
+            self._posts(self.door, "/search"),
+            [{"query": "우리 순위", "max_results": 5, "session_id": SESSION}],
         )
+        self.assertEqual(self._posts(self.engine, "/search"), [])
         self.assertEqual(
             self._tool_answer("call-1").splitlines(),
             ["note-b · used=0 contested=2 · B 노트", "note-a · used=3 contested=0 · A 노트"],
