@@ -158,7 +158,7 @@ def _extract_claude_jsonl(path: str) -> str:
             c = msg.get("content")
             if isinstance(c, str):
                 t = c.strip()
-                if t:
+                if t and not (role == "user" and _is_claude_harness_user_row(obj, t)):
                     out.append(f"[{role}] {t}")
                 continue
             if not isinstance(c, list):
@@ -166,7 +166,7 @@ def _extract_claude_jsonl(path: str) -> str:
             t = " ".join(
                 b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"
             ).strip()
-            if t:
+            if t and not (role == "user" and _is_claude_harness_user_row(obj, t)):
                 out.append(f"[{role}] {t}")
             for b in c:
                 if not isinstance(b, dict) or b.get("type") != "tool_use":
@@ -251,6 +251,23 @@ _CODEX_USER_NOISE_MARKERS = (
     "<shell>",
     "<cwd>",
 )
+
+# Prefix, not substring: the owner quoting a tag mid-sentence is still the owner speaking.
+_CLAUDE_USER_NOISE_MARKERS = (
+    "<task-notification>",
+    "<command-message>",
+    "<command-name>",
+    "<local-command-stdout>",
+    "<bash-stdout>",
+    "<system-reminder>",
+)
+
+
+def _is_claude_harness_user_row(obj: dict, text: str) -> bool:
+    """True when a role=user row was written by the harness, not typed by the owner."""
+    return bool(obj.get("isMeta") or obj.get("isCompactSummary")) or text.startswith(
+        _CLAUDE_USER_NOISE_MARKERS
+    )
 
 
 # raw codex-jsonl bytes are dominated by function_call_output (huge shell/file
