@@ -394,11 +394,9 @@ def _codex_collector_path(boring_home: str | None = None) -> Path:
     return path
 
 
-def _install_codex_host_worker_macos(boring_home: str | None = None) -> dict:
-    home = boring_home if boring_home is not None else BORING_HOME
+def _codex_host_worker_plist(home: str, python: str = sys.executable) -> str:
     collector = _codex_collector_path(home)
-    plist = Path(os.path.expanduser(f"~/Library/LaunchAgents/{CODEX_HOST_WORKER_LABEL}.plist"))
-    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -413,7 +411,7 @@ def _install_codex_host_worker_macos(boring_home: str | None = None) -> dict:
 	    <string>COLLECT_LIMIT=1</string>
 	    <string>CODEX_INCLUDE_ROLLOUTS=1</string>
 	    <string>COLLECT_STABLE_AGE_SECONDS=1800</string>
-	    <string>python3</string>
+	    <string>{_xml_escape(python)}</string>
 	    <string>{_xml_escape(str(collector))}</string>
   </array>
   <key>StartInterval</key>
@@ -427,6 +425,12 @@ def _install_codex_host_worker_macos(boring_home: str | None = None) -> dict:
 </dict>
 </plist>
 """
+
+
+def _install_codex_host_worker_macos(boring_home: str | None = None) -> dict:
+    home = boring_home if boring_home is not None else BORING_HOME
+    plist = Path(os.path.expanduser(f"~/Library/LaunchAgents/{CODEX_HOST_WORKER_LABEL}.plist"))
+    body = _codex_host_worker_plist(str(home))
     changed = not plist.exists() or plist.read_text(encoding="utf-8") != body
     _write_text_atomic(plist, body)
     domain = f"gui/{os.getuid()}"
@@ -458,7 +462,7 @@ def _install_codex_host_worker_linux(boring_home: str | None = None) -> dict:
         f"*/20 * * * * cd {_sh_quote(str(home))} && "
         f"BORING_HOME={_sh_quote(str(home))} COLLECT_LIMIT=1 CODEX_INCLUDE_ROLLOUTS=1 "
         f"COLLECT_STABLE_AGE_SECONDS=1800 "
-        f"python3 {_sh_quote(str(collector))} >>{_sh_quote(CODEX_HOST_WORKER_LOG)} 2>&1 "
+        f"{_sh_quote(sys.executable)} {_sh_quote(str(collector))} >>{_sh_quote(CODEX_HOST_WORKER_LOG)} 2>&1 "
         f"# {CODEX_HOST_WORKER_LABEL}"
     )
     current = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
