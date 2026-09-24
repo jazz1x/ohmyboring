@@ -75,6 +75,7 @@ python3 agents/shared/test_drudge_client.py
 python3 agents/door/test_door.py
 python3 agents/memory/test_retriever.py
 python3 agents/memory/test_store.py
+python3 agents/memory/test_deep_agent.py
 python3 agents/claude-code/test_hooks.py
 python3 agents/kimi/test_kimi.py
 python3 agents/schedulers/test_collectors.py

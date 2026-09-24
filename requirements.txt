@@ -34,3 +34,7 @@ pydantic>=2.13.4
 # literally and knows no extra→distribution mapping; the Dockerfile installs psycopg[binary],
 # the same distribution with the prebuilt driver.
 psycopg>=3.2
+# deepagents is agents/memory/deep_agent.py — a Deep Agent whose /memories/ is BoringStore and whose
+# recall tool is BoringRetriever. It pulls 17 packages (langchain-anthropic, langchain-google-genai,
+# google-genai, anthropic, …) into the same install as the morning card; none of them is called.
+deepagents>=0.7.18
