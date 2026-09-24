@@ -948,6 +948,7 @@ pub(crate) async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncRe
         ingest_new: o.ingest.new,
         ingest_updated: o.ingest.updated,
         ingest_deleted: o.ingest.deleted,
+        ingest_kept_vanished: o.ingest.kept_vanished,
         ingest_skipped: o.ingest.skipped,
         ingest_failed: o.ingest.failed,
         ingest_repaired: o.ingest.repaired,

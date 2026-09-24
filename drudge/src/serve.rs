@@ -1052,6 +1052,7 @@ pub(crate) struct SyncResp {
     pub(crate) ingest_new: usize,
     pub(crate) ingest_updated: usize,
     pub(crate) ingest_deleted: usize,
+    pub(crate) ingest_kept_vanished: usize,
     pub(crate) ingest_skipped: usize,
     pub(crate) ingest_failed: usize,
     pub(crate) ingest_repaired: usize,

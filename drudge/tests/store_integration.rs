@@ -4098,7 +4098,8 @@ async fn vanished_note_keeps_rows_and_restored_note_does_not_duplicate() {
     let sync =
         || run_with::<DefaultChunker, FrontmatterGraphExtractor, _>(&store, &embedder, &cfg, &dirs);
 
-    sync().await.expect("first sync");
+    let first = sync().await.expect("first sync");
+    assert_eq!(first.kept_vanished, 0, "nothing vanished yet");
     let ingested = note_row_counts(&db, &path, &subject).await;
     assert!(
         ingested.iter().all(|n| *n > 0),
@@ -4107,7 +4108,12 @@ async fn vanished_note_keeps_rows_and_restored_note_does_not_duplicate() {
     assert_eq!(prune_skipped_events_naming(&store, &path).await, 0);
 
     fs::rename(&note_path, &parked).expect("move note out");
-    sync().await.expect("sync with the note gone");
+    let gone = sync().await.expect("sync with the note gone");
+    assert_eq!(
+        (gone.kept_vanished, gone.deleted),
+        (1, 0),
+        "the sync stats count the kept note, not a deletion"
+    );
     assert_eq!(
         note_row_counts(&db, &path, &subject).await,
         ingested,
@@ -4120,7 +4126,8 @@ async fn vanished_note_keeps_rows_and_restored_note_does_not_duplicate() {
     );
 
     fs::rename(&parked, &note_path).expect("move note back");
-    sync().await.expect("sync with the note back");
+    let back = sync().await.expect("sync with the note back");
+    assert_eq!(back.kept_vanished, 0, "a restored note is not kept");
     assert_eq!(
         note_row_counts(&db, &path, &subject).await,
         ingested,

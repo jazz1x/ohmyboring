@@ -2114,10 +2114,11 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
         .total_edges
         .map_or_else(|| "unavailable".to_owned(), |n| n.to_string());
     Ok(format!(
-        "sync complete — ingest(new {} updated {} deleted {} chunks {}) · graph(tools {} concepts {} claims {} edges {}) · total(chunks {total_chunks} edges {total_edges})",
+        "sync complete — ingest(new {} updated {} deleted {} kept_vanished {} chunks {}) · graph(tools {} concepts {} claims {} edges {}) · total(chunks {total_chunks} edges {total_edges})",
         o.ingest.new,
         o.ingest.updated,
         o.ingest.deleted,
+        o.ingest.kept_vanished,
         o.ingest.chunks,
         o.ingest.tools,
         o.ingest.concepts,

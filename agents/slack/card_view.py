@@ -199,14 +199,21 @@ def _repair_verdict_block(
     door has answered, fall back to the same verdict words the advice lane uses — 보류/거절
     mean the same thing in either lane."""
     if verdict.choice == "do" and isinstance(result, RepairDone):
-        text = strings["repair_verdict_done"].format(deleted=result.deleted_rows, reread=result.reread_notes)
+        text = strings["repair_verdict_done"].format(
+            deleted=result.deleted_rows, reread=result.reread_notes
+        ) + _owner_held_suffix(result.owner_held, strings)
     elif verdict.choice == "do" and isinstance(result, RepairFailed):
         text = strings["repair_verdict_failed"].format(
             deleted=result.deleted_rows, reread=result.reread_notes, reason=result.reason
-        )
+        ) + _owner_held_suffix(result.owner_held, strings)
     else:
         text = strings[f"verdict_{verdict.choice}"]
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+
+
+def _owner_held_suffix(held: list[str], strings: dict[str, str]) -> str:
+    notes = ", ".join(f"`{path}`" for path in held)
+    return strings["repair_owner_held"].format(n=len(held), notes=notes) if held else ""
 
 
 def _repair_tag_block(idx: int, total: int, repair: Repair, strings: dict[str, str]) -> dict:

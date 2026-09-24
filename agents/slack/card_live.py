@@ -32,7 +32,7 @@ from card_types import (
     ResolvedNote,
     Unresolved,
 )
-from drudge_client import OWNER, DrudgeClient
+from drudge_client import OWNER, DrudgeClient, owner_headers
 from pydantic import ValidationError
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "memory"))
@@ -235,11 +235,11 @@ def _live_execute_repair(subject: str) -> RepairDone | RepairFailed:
     failed (AC3 — not a silent rollback), so those ride along in RepairFailed rather than
     being thrown away with the exception. An unreachable door has no counts to report but is
     still not a reason to kill the other rows' buttons."""
-    body = json.dumps({"subject": subject}).encode()
+    claim = {"subject": subject, "judge": OWNER}
     req = urllib.request.Request(
         f"{_door_url()}/repairs/split-subjects",
-        data=body,
-        headers={"content-type": "application/json"},
+        data=json.dumps(claim).encode(),
+        headers={"content-type": "application/json", **owner_headers(claim)},
         method="POST",
     )
     try:
@@ -261,6 +261,7 @@ def _live_execute_repair(subject: str) -> RepairDone | RepairFailed:
             deleted_rows=int(failed_payload.get("deleted_rows") or 0),
             reread_notes=int(failed_payload.get("reread_notes") or 0),
             reason=str(reason),
+            owner_held=failed_payload.get("owner_held") or [],
         )
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         return RepairFailed(subject=subject, deleted_rows=0, reread_notes=0, reason=f"door unreachable: {e}")
@@ -269,6 +270,7 @@ def _live_execute_repair(subject: str) -> RepairDone | RepairFailed:
         deleted_rows=payload["deleted_rows"],
         reread_notes=payload["reread_notes"],
         remaining_variants=payload.get("remaining_variants"),
+        owner_held=payload.get("owner_held") or [],
     )
 
 

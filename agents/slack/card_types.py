@@ -254,6 +254,7 @@ class RepairDone(BaseModel):
     deleted_rows: int
     reread_notes: int
     remaining_variants: int | None = None
+    owner_held: list[str] = []
 
 
 class RepairFailed(BaseModel):
@@ -267,6 +268,7 @@ class RepairFailed(BaseModel):
     deleted_rows: int
     reread_notes: int
     reason: str
+    owner_held: list[str] = []
 
 
 class Registers(BaseModel):

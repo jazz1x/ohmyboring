@@ -327,6 +327,21 @@ class CardV2ShapeTests(unittest.TestCase):
             lang="ko",
         )
         mark = next(b for b in judged if b["type"] == "context" and "합침" in _blocks_text([b]))
+        self.assertNotIn("소유자 노트", mark["elements"][0]["text"])
+        held_judged = cv.build_blocks(
+            [proposal],
+            [verdict],
+            repairs=[repair],
+            repairs_total_groups=1,
+            repair_results={
+                0: cc.RepairDone(
+                    subject="foodspring-front", deleted_rows=5, reread_notes=2, owner_held=["/v/wiki-0001.md"]
+                )
+            },
+            lang="ko",
+        )
+        held_mark = next(b for b in held_judged if b["type"] == "context" and "합침" in _blocks_text([b]))
+        self.assertIn("그대로 둔 소유자 노트 1: `/v/wiki-0001.md`", held_mark["elements"][0]["text"])
         self.assertIn("✓ 합침 — 지운 행 5 · 다시 읽은 노트 2", mark["elements"][0]["text"])
 
         # F2: a failed merge (door 502, sync error) still names the counts it committed —

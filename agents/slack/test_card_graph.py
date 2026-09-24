@@ -1197,6 +1197,34 @@ class LiveExecuteRepairTests(unittest.TestCase):
         self.assertIn("__interrupt__", out)  # still waiting on the advice rows — not dead
         self.assertEqual(out["repair_results"][0], result)
 
+    @staticmethod
+    def _post(env: dict, answer: dict):
+        seen: list = []
+
+        def fake_urlopen(req, timeout=None):
+            seen.append(req)
+            return io.BytesIO(json.dumps(answer).encode())
+
+        with (
+            mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.invalid"}),
+            mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        ):
+            os.environ.pop("BORING_OWNER_TOKEN", None)
+            os.environ.update(env)
+            result = card_live._live_execute_repair("foodspring-front")
+        return result, seen[0]
+
+    def test_the_merge_button_carries_the_owner_token_and_shows_what_the_door_held(self):
+        answer = {"deleted_rows": 5, "reread_notes": 2, "owner_held": ["/vault/wiki/wiki-0001.md"]}
+        result, req = self._post({"BORING_OWNER_TOKEN": "tok-owner"}, answer)
+        self.assertEqual(req.get_header("X-boring-owner-token"), "tok-owner")
+        self.assertEqual(result.owner_held, ["/vault/wiki/wiki-0001.md"])
+
+    def test_without_a_token_or_a_held_field_the_merge_still_answers(self):
+        result, req = self._post({}, {"deleted_rows": 5, "reread_notes": 2})
+        self.assertIsNone(req.get_header("X-boring-owner-token"))
+        self.assertEqual(result, cc.RepairDone(subject="foodspring-front", deleted_rows=5, reread_notes=2))
+
 
 class LivePastVerdictsTests(unittest.TestCase):
     """F5: a malformed or unjoined card_verdict/card_proposal row is a visible failure

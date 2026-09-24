@@ -288,6 +288,7 @@ pub struct Stats {
     pub updated: usize,
     pub unchanged: usize,
     pub deleted: usize,
+    pub kept_vanished: usize,
     pub skipped: usize,
     pub failed: usize, // notes that errored on parse/ingest and were skipped (resilient sync, not aborted)
     pub repaired: usize, // notes auto-repaired (unsafe frontmatter re-quoted) then re-ingested
@@ -550,6 +551,7 @@ pub async fn run_with<C: Chunker, G: GraphExtractor, E: Embed>(
         .filter(|p| is_managed_path(Path::new(p), &managed_dirs) && !seen.contains(p))
         .collect();
     vanished.sort();
+    stats.kept_vanished = vanished.len();
     if !vanished.is_empty() {
         record_prune_skipped(store, &vanished).await?;
     }
