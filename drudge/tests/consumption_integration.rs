@@ -1377,6 +1377,103 @@ async fn remember_http_supersedes_edges_sink_the_old_note_in_search() {
     }
 }
 
+/// MCP `recall` answers from the wiki when it has word hits; that set takes the same in-set order
+/// as `/search`. B out-scores A on word overlap in both halves; only the owner-written A goes first.
+/// C is the owner's but holds no query word, so it stays out.
+#[tokio::test]
+async fn mcp_recall_puts_the_owner_note_first_in_the_wiki_set() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let vault = tempfile::tempdir().expect("temp vault");
+    std::fs::create_dir_all(vault.path().join("wiki")).expect("wiki dir");
+    let llm_base = format!("http://127.0.0.1:{}/v1", spawn_hashing_embedder().await);
+    let port = free_port();
+    let _server = spawn_server_with_vault(&dsn, port, vault.path(), &llm_base);
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+    wait_for_health(&client, &base).await;
+    let remember = |payload, token| post_door(&client, format!("{base}/remember"), payload, token);
+    let recall = |query: &str| {
+        let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                      "params": {"name": "recall", "arguments": {"query": query}}});
+        post_door(&client, format!("{base}/mcp"), call, None)
+    };
+    let file = |body: &serde_json::Value| {
+        let path = body["source_path"]
+            .as_str()
+            .expect("source_path")
+            .to_owned();
+        let name = path.rsplit('/').next().expect("file name").to_owned();
+        (path, name)
+    };
+
+    let (_, a) = remember(
+        serde_json::json!({"title": "dock lights after dusk",
+                           "body": "The quartz lantern stays off at the dock after dusk.",
+                           "author": "owner", "judge": "owner"}),
+        Some(OWNER_TOKEN),
+    )
+    .await;
+    let (_, b) = remember(
+        serde_json::json!({"title": "quartz lantern maintenance log",
+                           "body": "Quartz lantern wicks need trimming; quartz lantern glass cracks in frost."}),
+        None,
+    )
+    .await;
+    let (_, c) = remember(
+        serde_json::json!({"title": "harbor bell rota", "body": "The harbor bell rings at noon.",
+                           "author": "owner", "judge": "owner"}),
+        Some(OWNER_TOKEN),
+    )
+    .await;
+    let (_, a_ctl) = remember(
+        serde_json::json!({"title": "garden shed inventory",
+                           "body": "A cobalt kettle sits beside the rake in the shed."}),
+        None,
+    )
+    .await;
+    let (_, b_ctl) = remember(
+        serde_json::json!({"title": "cobalt kettle descaling",
+                           "body": "Descale the cobalt kettle monthly; cobalt kettle scale clogs the spout."}),
+        None,
+    )
+    .await;
+    let [a, b, c, a_ctl, b_ctl] = [&a, &b, &c, &a_ctl, &b_ctl].map(file);
+
+    let (_, owned) = recall("quartz lantern").await;
+    let owned = owned["result"]["content"][0]["text"]
+        .as_str()
+        .expect("recall text")
+        .to_owned();
+    assert!(owned.contains(&b.1), "B is in the set: {owned}");
+    assert!(
+        owned.starts_with(&format!("- [{}]", a.1)),
+        "the owner note leads the wiki set: {owned}"
+    );
+    assert!(
+        !owned.contains(&c.1),
+        "an owner note with no query word is not pulled in: {owned}"
+    );
+
+    let (_, control) = recall("cobalt kettle").await;
+    let control = control["result"]["content"][0]["text"]
+        .as_str()
+        .expect("recall text")
+        .to_owned();
+    assert!(control.contains(&a_ctl.1), "A is in the set: {control}");
+    assert!(
+        control.starts_with(&format!("- [{}]", b_ctl.1)),
+        "without an owner note, word overlap orders the set: {control}"
+    );
+
+    for (path, _) in [a, b, c, a_ctl, b_ctl] {
+        store.delete_document(&path).await.expect("cleanup doc");
+    }
+}
+
 /// Spawn `drudge serve` with a vault and a stub embedder — the correction door needs both: the
 /// wiki note lands in the vault, and vector mode on means ingest/dedup/project all embed.
 fn spawn_server_with_vault(

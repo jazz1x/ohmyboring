@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 
 use crate::llm::Llm;
 use crate::store::{Authorship, Hit, RankFacts, Store};
+use crate::wiki_recall::WikiHit;
 
 const RRF_K: f64 = 60.0; // RRF denominator constant (de facto standard)
 
@@ -136,23 +137,53 @@ fn rank_key(facts: Option<&RankFacts>) -> (bool, bool, Reverse<Option<SystemTime
     }
 }
 
+/// What `order_within_set` reads from a member of an already-cut set.
+trait InSet {
+    fn path(&self) -> &str;
+    fn score(&self) -> f64;
+}
+
+impl InSet for Scored {
+    fn path(&self) -> &str {
+        &self.hit.source_path
+    }
+    fn score(&self) -> f64 {
+        self.score
+    }
+}
+
+impl InSet for WikiHit {
+    fn path(&self) -> &str {
+        &self.source_path
+    }
+    fn score(&self) -> f64 {
+        f64::from(self.score)
+    }
+}
+
 /// Membership is decided by score first; only then is the returned set ordered by `rank_key`.
 /// A note outside the cut is never pulled in, and a superseded note is demoted, never cut.
-async fn order_within_set<F, Fut>(mut set: Vec<Scored>, lookup: F) -> Result<Vec<Hit>>
+async fn order_within_set<T, F, Fut>(mut set: Vec<T>, lookup: F) -> Result<Vec<T>>
 where
+    T: InSet,
     F: FnOnce(Vec<String>) -> Fut,
     Fut: Future<Output = Result<HashMap<String, RankFacts>>>,
 {
-    let mut paths: Vec<String> = set.iter().map(|s| s.hit.source_path.clone()).collect();
+    let mut paths: Vec<String> = set.iter().map(|s| s.path().to_owned()).collect();
     paths.sort_unstable();
     paths.dedup();
     let facts = lookup(paths).await.context("rank: rank facts lookup")?;
     set.sort_by(|a, b| {
-        rank_key(facts.get(&a.hit.source_path))
-            .cmp(&rank_key(facts.get(&b.hit.source_path)))
-            .then_with(|| b.score.total_cmp(&a.score))
+        rank_key(facts.get(a.path()))
+            .cmp(&rank_key(facts.get(b.path())))
+            .then_with(|| b.score().total_cmp(&a.score()))
     });
-    Ok(set.into_iter().map(|s| s.hit).collect())
+    Ok(set)
+}
+
+/// The wiki recall set, already cut by word overlap, in the same in-set order as `retrieve`.
+pub async fn order_wiki_hits(store: &Store, hits: Vec<WikiHit>) -> Result<Vec<WikiHit>> {
+    order_within_set(hits, |paths| async move { store.rank_facts(&paths).await }).await
 }
 
 async fn top_k_ranked<F, Fut>(mut merged: Vec<Scored>, top_k: usize, lookup: F) -> Result<Vec<Hit>>
@@ -161,7 +192,11 @@ where
     Fut: Future<Output = Result<HashMap<String, RankFacts>>>,
 {
     merged.truncate(top_k);
-    order_within_set(merged, lookup).await
+    Ok(hits_of(order_within_set(merged, lookup).await?))
+}
+
+fn hits_of(set: Vec<Scored>) -> Vec<Hit> {
+    set.into_iter().map(|s| s.hit).collect()
 }
 
 async fn budget_ranked<F, Fut>(
@@ -174,7 +209,9 @@ where
     F: FnOnce(Vec<String>) -> Fut,
     Fut: Future<Output = Result<HashMap<String, RankFacts>>>,
 {
-    order_within_set(within_budget(merged, max_results, max_chars), lookup).await
+    Ok(hits_of(
+        order_within_set(within_budget(merged, max_results, max_chars), lookup).await?,
+    ))
 }
 
 fn within_budget(merged: Vec<Scored>, max_results: usize, max_chars: usize) -> Vec<Scored> {

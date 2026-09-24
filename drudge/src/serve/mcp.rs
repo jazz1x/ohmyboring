@@ -722,6 +722,12 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     let wiki_hits = s
         .wiki_recall(query, max_results, project, since_hours)
         .map_err(|e| (-32603_i32, format!("wiki recall: {e:#}")))?;
+    let wiki_hits = match s.store.as_ref() {
+        Some(store) if !wiki_hits.is_empty() => crate::retrieve::order_wiki_hits(store, wiki_hits)
+            .await
+            .map_err(|e| (-32603_i32, format!("wiki recall order: {e:#}")))?,
+        _ => wiki_hits,
+    };
     let lines: Vec<(String, String)> = if !wiki_hits.is_empty() {
         wiki_hits
             .into_iter()
