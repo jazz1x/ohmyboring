@@ -8,6 +8,7 @@ misconfigured agent does not silently produce empty notes.
 
 import json
 import os
+import re
 import sys
 
 
@@ -158,6 +159,7 @@ def _extract_claude_jsonl(path: str) -> str:
             c = msg.get("content")
             if isinstance(c, str):
                 t = c.strip()
+                t = _claude_owner_text(obj, t) if role == "user" else t
                 if t:
                     out.append(f"[{role}] {t}")
                 continue
@@ -166,6 +168,7 @@ def _extract_claude_jsonl(path: str) -> str:
             t = " ".join(
                 b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"
             ).strip()
+            t = _claude_owner_text(obj, t) if role == "user" else t
             if t:
                 out.append(f"[{role}] {t}")
             for b in c:
@@ -251,6 +254,29 @@ _CODEX_USER_NOISE_MARKERS = (
     "<shell>",
     "<cwd>",
 )
+
+# Prefix, not substring: the owner quoting a tag mid-sentence is still the owner speaking.
+_CLAUDE_USER_NOISE_MARKERS = (
+    "<task-notification>",
+    "<command-message>",
+    "<command-name>",
+    "<local-command-stdout>",
+    "<bash-stdout>",
+    "<system-reminder>",
+)
+
+
+_CLAUDE_COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+
+
+def _claude_owner_text(obj: dict, text: str) -> str:
+    """The part of a role=user row the owner typed; empty when the harness wrote all of it."""
+    if text.startswith(("<command-message>", "<command-name>")):
+        m = _CLAUDE_COMMAND_ARGS.search(text)
+        return m.group(1).strip() if m else ""
+    if obj.get("isMeta") or obj.get("isCompactSummary") or text.startswith(_CLAUDE_USER_NOISE_MARKERS):
+        return ""
+    return text
 
 
 # raw codex-jsonl bytes are dominated by function_call_output (huge shell/file
