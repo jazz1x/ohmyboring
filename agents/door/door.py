@@ -7,7 +7,8 @@ and the door follows, and a door narrower or wider than the contract fails its
 tests. This process listens on DOOR_PORT (default 7710) and forwards the
 snapshot's routes to the engine at DOOR_UPSTREAM (default http://127.0.0.1:7700).
 Only the headers the engine reads travel on (content-type, accept,
-mcp-session-id, x-request-id); the response carries the upstream content-type,
+mcp-session-id, x-request-id, x-boring-owner-token — carried as sent, checked
+only by the engine); the response carries the upstream content-type,
 or none at all when the engine sent none — never a default. Status code and
 body bytes come back exactly as sent. An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
@@ -105,13 +106,16 @@ def _fetch(url: str, body: bytes, headers: dict[str, str], method: str) -> Respo
         return _pass_through(upstream.status, upstream.read(), content_type)
 
 
+_OWNER_TOKEN_HEADER = "x-boring-owner-token"
+
+
 async def _proxy(request: Request) -> Response:
     query = request.url.query
     url = f"{_upstream()}{request.url.path}" + (f"?{query}" if query else "")
     body = await request.body()
     headers = {
         name: request.headers[name]
-        for name in ("content-type", "accept", "mcp-session-id", "x-request-id")
+        for name in ("content-type", "accept", "mcp-session-id", "x-request-id", _OWNER_TOKEN_HEADER)
         if name in request.headers
     }
     try:
@@ -299,7 +303,6 @@ _SPLIT_SUBJECTS_SQL = "select subject, source_path from claim"
 _SPLIT_DELETE_SQL = "delete from claim where subject = any(%s) and source_path = any(%s)"
 _SPLIT_UPDATE_SQL = "update document set sha = '' where source_path = any(%s)"
 _OWNER_NOTES_SQL = "select source_path from document where author = 'owner' and source_path = any(%s)"
-_OWNER_TOKEN_HEADER = "x-boring-owner-token"
 
 
 class Standing(enum.Enum):

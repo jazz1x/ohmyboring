@@ -17,8 +17,9 @@ real door runs under uvicorn in a thread against it. Covers:
       never a silent empty 200; with stub rows injected it answers the ADT —
       used/contested separated, ts parsed out of the slack session name,
       sorted newest first (AC2)
-  (f) only content-type, accept, mcp-session-id, x-request-id travel upstream;
-      authorization and x-forwarded-for do not (AC4)
+  (f) only content-type, accept, mcp-session-id, x-request-id, x-boring-owner-token
+      travel upstream; authorization and x-forwarded-for do not (AC4). The owner
+      token travels as sent — never added from the door's own env, never rewritten
   (g) a non-JSON upstream content-type passes through untouched (AC3)
   (h) an upstream response without content-type stays without one (AC3)
   (i) a text/event-stream answer is relayed chunk by chunk: the first chunk
@@ -47,6 +48,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _ROOT)
@@ -303,16 +305,31 @@ class DoorTest(unittest.TestCase):
             "accept": "application/json",
             "mcp-session-id": "sess-123",
             "x-request-id": "req-abc",
+            "x-boring-owner-token": "tok-r9",
             "authorization": "Bearer secret",
             "x-forwarded-for": "1.2.3.4",
         }
         status, _, _ = _req(self.door_port, "POST", "/mcp", body=payload, headers=headers)
         self.assertEqual(status, 200)
         seen = StubHandler.seen_headers[-1]
-        for name in ("content-type", "accept", "mcp-session-id", "x-request-id"):
+        for name in ("content-type", "accept", "mcp-session-id", "x-request-id", "x-boring-owner-token"):
             self.assertEqual(seen.get(name), headers[name])
         self.assertNotIn("authorization", seen)
         self.assertNotIn("x-forwarded-for", seen)
+
+    def test_owner_token_travels_as_sent_and_is_never_minted(self):
+        payload = json.dumps({"session_id": "s", "verdict": "contested", "judge": "owner"}).encode()
+        with mock.patch.dict(os.environ, {"BORING_OWNER_TOKEN": "tok-owner"}):
+            seen = {}
+            for token in ("tok-r9", None, "wrong"):
+                headers = {"content-type": "application/json"}
+                headers |= {"x-boring-owner-token": token} if token else {}
+                status, _, _ = _req(self.door_port, "POST", "/consumption", body=payload, headers=headers)
+                self.assertEqual(status, 200)
+                seen[token] = StubHandler.seen_headers[-1]
+        self.assertEqual(seen["tok-r9"].get("x-boring-owner-token"), "tok-r9")
+        self.assertNotIn("x-boring-owner-token", seen[None])
+        self.assertEqual(seen["wrong"].get("x-boring-owner-token"), "wrong")
 
     def test_non_json_content_type_passthrough(self):
         payload = json.dumps({"respond_as": "text/plain; charset=utf-8"}).encode()
