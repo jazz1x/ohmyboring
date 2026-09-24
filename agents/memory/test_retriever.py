@@ -33,6 +33,7 @@ HITS = [
         "dist_kind": "cosine",
         "used_count": 4,
         "contested_count": 1,
+        "said_by_owner": 2,
         "superseded_by": ["wiki-0002"],
     },
     {
@@ -43,6 +44,7 @@ HITS = [
         "snippet": "두 번째 노트",
         "used_count": 0,
         "contested_count": 0,
+        "said_by_owner": 0,
     },
 ]
 
@@ -108,6 +110,7 @@ class RetrieverTest(unittest.TestCase):
                 "origin": "wiki",
                 "used_count": 4,
                 "contested_count": 1,
+                "said_by_owner": 2,
                 "superseded_by": ["wiki-0002"],
                 "dist": 0.31,
                 "dist_kind": "cosine",
@@ -121,6 +124,7 @@ class RetrieverTest(unittest.TestCase):
                 "origin": "wiki",
                 "used_count": 0,
                 "contested_count": 0,
+                "said_by_owner": 0,
                 "superseded_by": [],
             },
         )

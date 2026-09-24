@@ -393,16 +393,18 @@ pub(crate) async fn handle_context(
 }
 
 /// Consumption counts beside every hit — `used`/`contested` edges and `superseded_by` (the newer
-/// docs that declared themselves the replacement), two grouped queries for the whole response,
-/// never one per hit.
+/// docs that declared themselves the replacement) and `said_by_owner`, three grouped queries for
+/// the whole response, never one per hit.
 async fn attach_consumption(store: &Store, hits: &mut [SearchHit]) -> Result<(), AppError> {
     let paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
     let counts = store.consumption_counts(&paths).await?;
+    let said = store.said_by_owner_counts(&paths).await?;
     let superseded = store.superseded_by(&paths).await?;
     for hit in hits.iter_mut() {
         let c = counts.get(&hit.source_path).copied().unwrap_or_default();
         hit.used_count = c.used;
         hit.contested_count = c.contested;
+        hit.said_by_owner = said.get(&hit.source_path).copied().unwrap_or_default();
         hit.superseded_by = superseded
             .get(&hit.source_path)
             .cloned()
@@ -473,6 +475,7 @@ pub(crate) async fn handle_search(
             superseded_by: Vec::new(),
             used_count: 0,
             contested_count: 0,
+            said_by_owner: 0,
             claims: Vec::new(),
             claims_total: None,
         })
@@ -496,6 +499,7 @@ pub(crate) async fn handle_search(
                 superseded_by: Vec::new(),
                 used_count: 0,
                 contested_count: 0,
+                said_by_owner: 0,
                 claims: Vec::new(),
                 claims_total: None,
             })
@@ -1067,6 +1071,7 @@ mod tests {
             superseded_by: vec![],
             used_count: 0,
             contested_count: 0,
+            said_by_owner: 0,
             claims: vec![],
             claims_total: None,
         };
@@ -1134,6 +1139,7 @@ mod tests {
                     value: "ship the handover".to_owned(),
                     kind: "decision".to_owned(),
                     confidence: "high".to_owned(),
+                    said_by: None,
                 },
             )
             .await

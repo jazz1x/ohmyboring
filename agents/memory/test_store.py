@@ -36,6 +36,7 @@ HIT = {
     "snippet": "문서 정리 원칙 노트",
     "used_count": 2,
     "contested_count": 0,
+    "said_by_owner": 0,
     "superseded_by": [],
 }
 

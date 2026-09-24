@@ -335,6 +335,8 @@ pub struct Store {
 /// the note body markdown, not as graph nodes — so those edge kinds are gone.
 const SEMANTIC_EDGE_KINDS: [&str; 3] = ["uses", "about", "claims"];
 
+const OWNER_SPEAKER_NODE: &str = "person:owner";
+
 const STALE_CLAIM_MIRROR_NODES: &str = "(kind = 'claim' AND id NOT IN (SELECT 'claim:' || subject || ':' || predicate FROM claim)) \
      OR (kind IN (SELECT DISTINCT kind FROM claim WHERE kind <> 'fact') \
          AND id NOT IN (SELECT kind || ':' || subject || ':' || predicate FROM claim WHERE kind <> 'fact'))";
@@ -525,6 +527,7 @@ impl RegisterRow {
             value: value.clone(),
             kind,
             confidence,
+            said_by: None,
         };
         Self {
             node_id: format!("claim:{subject}:{predicate}"),
@@ -744,6 +747,7 @@ impl Store {
                  -- the key the sync-time re-pin looks the hash up by after a move.
                  ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_hash text;
                  ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_symbol text;
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS said_by text;
                  CREATE INDEX IF NOT EXISTS claim_anchor ON claim(anchor) WHERE anchor IS NOT NULL;
                  CREATE INDEX IF NOT EXISTS claim_current ON claim(subject, predicate)
                      WHERE superseded_at IS NULL;
@@ -1494,7 +1498,8 @@ impl Store {
 
     /// Upsert graph nodes/edges for a claim: `doc —claims→ claim:{subject}:{predicate}` and,
     /// for non-fact claims, a typed node (`decision:|risk:...`) plus an `is_a` edge.
-    /// Also links the claim node to `project:{project}` when a project is present.
+    /// Also links the claim node to `project:{project}` when a project is present, and writes
+    /// the `said` edges when the claim names its speaker. Returns the number of edges written.
     /// `subject`/`predicate` must be the canonical key — the same strings the claim row was
     /// written under; passing the raw frontmatter spelling strands the node from its row.
     pub async fn upsert_claim_node(
@@ -1504,7 +1509,7 @@ impl Store {
         subject: &str,
         predicate: &str,
         claim: &crate::frontmatter::Claim,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let claim_id = format!("claim:{subject}:{predicate}");
         let label = format!("{predicate}: {}", claim.value);
         let kind = claim.kind();
@@ -1534,7 +1539,13 @@ impl Store {
                 .await?;
         }
 
-        Ok(())
+        if let Some(said_by) = claim.said_by {
+            self.relate_said(said_by, path, subject, predicate).await?;
+        }
+
+        Ok(1 + usize::from(kind != "fact")
+            + usize::from(!project.is_empty())
+            + 2 * usize::from(claim.said_by.is_some()))
     }
 
     /// Top-k **current** claims (superseded_at IS NULL) for the session-start card and the
@@ -1586,6 +1597,7 @@ impl Store {
                 value: r.get(2),
                 kind: r.get(3),
                 confidence: r.get(4),
+                said_by: None,
             })
             .collect())
     }
@@ -1658,6 +1670,7 @@ impl Store {
                 value: r.get(2),
                 kind: r.get(3),
                 confidence: r.get(4),
+                said_by: None,
             })
             .collect())
     }
@@ -2011,6 +2024,7 @@ impl Store {
                     value: r.get(2),
                     kind: r.get(3),
                     confidence: r.get(4),
+                    said_by: None,
                 },
                 anchor: r.get(5),
                 era: r.get(6),
@@ -2959,6 +2973,51 @@ impl Store {
         Ok(counts)
     }
 
+    /// Current claims the owner said, per note, from the note's own claim rows — a claim node is
+    /// a slot shared by every note that states it, so the edges cannot say whose row it was.
+    pub async fn said_by_owner_counts(&self, paths: &[String]) -> Result<HashMap<String, i64>> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT source_path, count(*) FROM claim
+                 WHERE source_path = ANY($1) AND said_by = 'owner' AND superseded_at IS NULL
+                 GROUP BY source_path;",
+                &[&paths],
+            )
+            .await
+            .context("said-by-owner counts")?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect())
+    }
+
+    /// Mirror the note's `said_by` onto its own latest row for the slot — apart from
+    /// `claim_is_unchanged`, whose tuple does not carry it, so an edited `said_by` still lands.
+    pub async fn mirror_claim_said_by(
+        &self,
+        subject: &str,
+        predicate: &str,
+        source_path: &str,
+        said_by: Option<crate::frontmatter::SaidBy>,
+    ) -> Result<()> {
+        let said_by = said_by.map(String::from);
+        self.db()
+            .await?
+            .execute(
+                "UPDATE claim SET said_by = $4
+                 WHERE subject = $1 AND predicate = $2 AND source_path = $3
+                   AND said_by IS DISTINCT FROM $4
+                   AND valid_from = (SELECT max(valid_from) FROM claim
+                                      WHERE subject = $1 AND predicate = $2 AND source_path = $3);",
+                &[&subject, &predicate, &source_path, &said_by],
+            )
+            .await
+            .context("mirror claim said_by")?;
+        Ok(())
+    }
+
     /// Paths handed to one session — the `source_path`s of the documents its `handed` edges
     /// reach, distinct, in path order. This is what a bare `{session_id, verdict}` `/consumption`
     /// applies the verdict to: the engine already knows what was handed, the caller only brings
@@ -3144,6 +3203,31 @@ impl Store {
             &doc_node_id(doc_path),
             &format!("concept:{slug}"),
             "about",
+            None,
+        )
+        .await
+    }
+
+    /// `person:owner —said→ doc` and `—said→ claim:{subject}:{predicate}`, from the note's own
+    /// `said_by` line, so a re-ingest writes them again. No judge: a speaker is not a verdict.
+    pub async fn relate_said(
+        &self,
+        said_by: crate::frontmatter::SaidBy,
+        doc_path: &str,
+        subject: &str,
+        predicate: &str,
+    ) -> Result<()> {
+        let speaker = match said_by {
+            crate::frontmatter::SaidBy::Owner => OWNER_SPEAKER_NODE,
+        };
+        self.upsert_node(speaker, "person", &String::from(said_by), None)
+            .await?;
+        self.upsert_edge(speaker, &doc_node_id(doc_path), "said", None)
+            .await?;
+        self.upsert_edge(
+            speaker,
+            &format!("claim:{subject}:{predicate}"),
+            "said",
             None,
         )
         .await

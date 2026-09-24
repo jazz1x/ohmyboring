@@ -83,6 +83,41 @@ impl From<Author> for String {
     }
 }
 
+/// Who said a claim in the conversation it was distilled from. Only the owner is named; a claim
+/// with no speaker is `None`. Unlike `Author`, it grants no authority and needs no token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum SaidBy {
+    Owner,
+}
+
+impl std::str::FromStr for SaidBy {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim() {
+            "owner" => Ok(Self::Owner),
+            _ => Err(format!("said_by must be owner, got {raw:?}")),
+        }
+    }
+}
+
+impl TryFrom<String> for SaidBy {
+    type Error = String;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        raw.parse()
+    }
+}
+
+impl From<SaidBy> for String {
+    fn from(said_by: SaidBy) -> Self {
+        match said_by {
+            SaidBy::Owner => "owner".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Claim {
     pub subject: String,
@@ -92,6 +127,8 @@ pub struct Claim {
     pub kind: String,
     #[serde(default)]
     pub confidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub said_by: Option<SaidBy>,
 }
 
 impl Claim {
@@ -316,6 +353,7 @@ mod tests {
             value: "0.514".to_owned(),
             kind: String::new(),
             confidence: String::new(),
+            said_by: None,
         };
         assert_eq!(claim.confidence(), "unknown");
         assert_ne!(
@@ -372,6 +410,7 @@ mod tests {
             value: value.into(),
             kind: kind.into(),
             confidence: "certain".into(),
+            said_by: None,
         }
     }
 
@@ -475,6 +514,7 @@ mod tests {
                 value: value.to_owned(),
                 kind: "next".to_owned(),
                 confidence: String::new(),
+                said_by: None,
             };
             assert_eq!(
                 denial.kind(),
