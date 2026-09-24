@@ -40,6 +40,9 @@ def codex_distill_clamp() -> int:
     return int(raw) if raw else CODEX_CLAMP_DEFAULT
 
 
+CLAMP_MARK = "…(truncated)…"
+
+
 def clamp_text(text, limit):
     """Return a head/tail-clamped transcript and whether it was shortened.
 
@@ -57,7 +60,7 @@ def clamp_text(text, limit):
     tail_nl = text.find("\n", tail_start)
     if tail_nl != -1:
         tail_start = tail_nl + 1
-    return text[:head_cut] + "\n…(truncated)…\n" + text[tail_start:], True
+    return text[:head_cut] + f"\n{CLAMP_MARK}\n" + text[tail_start:], True
 
 
 # Claude Code tool_use blocks dominate raw bytes (measured: dropped tool content is
@@ -179,6 +182,19 @@ def _extract_claude_jsonl(path: str) -> str:
                 if sig:
                     out.append(f"[tool] {name} {sig}")
     return "\n".join(out)
+
+
+def claude_entrypoint(path: str) -> str:
+    """The `entrypoint` of the first Claude Code JSONL row that carries one; empty when none does."""
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and obj.get("entrypoint"):
+                return str(obj["entrypoint"])
+    return ""
 
 
 def _extract_kimi_wire(path: str) -> str:

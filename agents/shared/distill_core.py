@@ -19,6 +19,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 
 # Allow import of shared agent policy library regardless of how this script is invoked.
 # realpath resolves symlinks (e.g. hooks/distill-session.py → agents/claude-code/…) so the
@@ -646,6 +647,94 @@ def _prepare_note(parsed):
     }
 
 
+SAID_BY_OWNER = "owner"
+_TURN_START = re.compile(
+    rf"^(?:\[(user|assistant|tool)\] |{re.escape(transcript.CLAMP_MARK)}$)", re.MULTILINE
+)
+
+
+@dataclass(frozen=True)
+class SaidClaims:
+    numbers: frozenset
+
+
+@dataclass(frozen=True)
+class SaidFailed:
+    reason: str
+
+
+def user_turns(transcript_text):
+    """Distinct `[user]` turn bodies in first-spoken order. Lines a clamp cut loose belong to no turn."""
+    parts = _TURN_START.split(transcript_text or "")
+    bodies = (body.strip() for role, body in zip(parts[1::2], parts[2::2], strict=True) if role == "user")
+    return list(dict.fromkeys(b for b in bodies if b))
+
+
+def owner_turns(transcript_text):
+    joined = "\n".join(f"[user] {b}" for b in user_turns(transcript_text))
+    return transcript.clamp_text(joined, transcript.claude_distill_clamp())[0]
+
+
+def _build_said_prompt(owner_text, claims):
+    numbered = "\n".join(
+        f"{i}. {c['subject']} | {c['predicate']} | {c['value']}" for i, c in enumerate(claims)
+    )
+    return (
+        "The OWNER TURNS below are only what the owner typed in a work session; every assistant reply "
+        "and tool output was removed. The FACTS are numbered claims already distilled from the whole "
+        "session. List the numbers of the facts the owner stated or decided in these turns. A fact only "
+        "the assistant said, or one the owner merely asked about, is not the owner's.\n"
+        'Output ONLY a JSON object: {"said": [numbers]}. Output {"said": []} when none.\n\n'
+        "=== OWNER TURNS ===\n" + owner_text + "\n\n=== FACTS ===\n" + numbered
+    )
+
+
+def _pick_said(parsed, claim_count):
+    said = parsed.get("said") if isinstance(parsed, dict) else None
+    match said:
+        case _ if parsed is None:
+            return SaidFailed("llm_failed")
+        case list() if all(type(n) is int and 0 <= n < claim_count for n in said):
+            return SaidClaims(frozenset(said))
+        case list():
+            return SaidFailed("not_a_claim_number")
+        case _:
+            return SaidFailed("said_not_a_list")
+
+
+def _mark_owner_said(claims, text, origin, repo, session_id):
+    owner_text = owner_turns(text)
+    if not owner_text or not claims:
+        return claims
+    match _pick_said(_call_llm(_build_said_prompt(owner_text, claims)), len(claims)):
+        case SaidClaims(numbers):
+            event_log.try_append_event(
+                "distill-session",
+                "said_extraction",
+                "ok",
+                session_id=session_id,
+                origin=origin,
+                repo=repo,
+                said_claims=len(numbers),
+            )
+            return [{**c, "said_by": SAID_BY_OWNER} if i in numbers else c for i, c in enumerate(claims)]
+        case SaidFailed(reason):
+            print(
+                f"[distill-session] owner-turn marking failed ({reason}); note goes out without said_by",
+                file=sys.stderr,
+            )
+            event_log.try_append_event(
+                "distill-session",
+                "said_extraction",
+                "failed",
+                session_id=session_id,
+                origin=origin,
+                repo=repo,
+                reason=reason,
+            )
+            return claims
+
+
 def _normalize_claim_kind(kind, subject, predicate, value):
     """Normalize obvious semantic kind labels before the verifier checks required kinds."""
     raw = (kind or "fact").strip().lower()
@@ -1078,8 +1167,12 @@ def _log_skip_event(session_id, origin, repo, resolution):
 BACKSTOP_CLAMP = transcript.distill_backstop_clamp()
 
 
-def distill_and_remember(text, origin, repo, session_id=""):
-    """Distill the transcript text via local LLM and write it through ohmyboring's remember tool."""
+def distill_and_remember(text, origin, repo, session_id="", owner_speaks=False):
+    """Distill the transcript text via local LLM and write it through ohmyboring's remember tool.
+
+    `owner_speaks`: the `[user]` turns are the owner's own typing, so a second call may mark which
+    distilled claims the owner said (`said_by: owner`). It picks numbers; it never adds claims.
+    """
     if len(text) > BACKSTOP_CLAMP:
         text, _ = transcript.clamp_text(text, BACKSTOP_CLAMP)
         print(
@@ -1168,6 +1261,9 @@ def distill_and_remember(text, origin, repo, session_id=""):
         verifier_status = "repaired"
         print("[distill-session] resolution repair passed", file=sys.stderr)
 
+    claims = (
+        _mark_owner_said(note["claims"], text, origin, repo, session_id) if owner_speaks else note["claims"]
+    )
     remember = _call_remember(
         note["title"],
         note["body"],
@@ -1176,7 +1272,7 @@ def distill_and_remember(text, origin, repo, session_id=""):
         note["tags"],
         note["tools"],
         note["concepts"],
-        note["claims"],
+        claims,
         session_id,
     )
     _log_resolution_event(session_id, origin, repo, report, verifier_status, remember.status)

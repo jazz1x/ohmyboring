@@ -6,8 +6,10 @@ Install (persistence) — ~/.claude/settings.json:
    "timeout":130,"async":true}
 """
 
+import enum
 import json
 import os
+import re
 import sys
 
 # Allow import of shared agent policy library regardless of how this script is invoked.
@@ -29,6 +31,7 @@ from distill_core import (  # noqa: F401
     log_skip_event,
     log_uptake_event,
     repo_slug,
+    user_turns,
 )
 
 # Re-export generic helpers at module top level so existing tests can keep using them.
@@ -54,6 +57,29 @@ CLAMP = transcript.claude_distill_clamp()
 def extract(path):
     """Extract user/assistant text from a session transcript using the configured format."""
     return transcript.extract(path, TRANSCRIPT_FORMAT)
+
+
+class SessionKind(enum.Enum):
+    HARNESS = "harness"
+    WORKER = "worker"
+    OWNER_TYPED = "owner_typed"
+
+
+_ORCA_WORKER = re.compile(
+    r"You are working inside Orca|You have \d+ orchestration messages?|--- Orchestration Messages"
+)
+
+
+def session_kind(entrypoint, text):
+    """Who typed the `[user]` turns: a harness (sdk-*), an Orca coordinator, or the owner."""
+    first_turn = next(iter(user_turns(text)), "")
+    match (entrypoint.startswith("sdk-"), _ORCA_WORKER.match(first_turn) is not None):
+        case (True, _):
+            return SessionKind.HARNESS
+        case (False, True):
+            return SessionKind.WORKER
+        case _:
+            return SessionKind.OWNER_TYPED
 
 
 def main() -> int:
@@ -105,11 +131,12 @@ def main() -> int:
         if session_id:
             _mark(session_id)
         return 0
+    kind = session_kind(transcript.claude_entrypoint(transcript_path), text)
     text, was_clamped = transcript.clamp_text(text, CLAMP)
     if was_clamped:
         print(f"[omb-distill] transcript clamped to {len(text)} chars", file=sys.stderr)
 
-    if distill_and_remember(text, origin, repo, session_id):
+    if distill_and_remember(text, origin, repo, session_id, owner_speaks=kind is SessionKind.OWNER_TYPED):
         _mark(session_id)
         print("[omb-distill] remembered", file=sys.stderr)
         return 0

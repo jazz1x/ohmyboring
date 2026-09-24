@@ -75,6 +75,7 @@ def _load(name, filename):
 distill = _load("distill_session_hook", "distill-session.py")
 recall = _load("recall_hook", "recall.py")
 import distill_core  # noqa: E402
+import transcript  # noqa: E402
 
 # The recall tests drive the real injection path, which appends to the injection ledger.
 # Redirect it before import or the suite writes into the owner's live cache.
@@ -532,6 +533,87 @@ class DistillExitCodeTests(unittest.TestCase):
 
         self.assertEqual(rc, 1)
         self.assertIn("[omb-distill] crashed: boom", stderr.getvalue())
+
+
+def _claude_session(entrypoint, first_user):
+    """A Claude Code JSONL whose every message row carries the same `entrypoint`."""
+    rows = [
+        {"type": "last-prompt", "sessionId": "s"},
+        {"type": "user", "entrypoint": entrypoint, "message": {"role": "user", "content": first_user}},
+        {
+            "type": "assistant",
+            "entrypoint": entrypoint,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "알겠습니다. " * 120}]},
+        },
+        {
+            "type": "user",
+            "entrypoint": entrypoint,
+            "message": {"role": "user", "content": "좋아요, 그대로 갑시다."},
+        },
+    ]
+    f = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8")
+    with f:
+        f.write("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+    return f.name
+
+
+SESSION_FIXTURES = {
+    "sdk-py": ("sdk-py", "Review this change for security vulnerabilities: …", distill.SessionKind.HARNESS),
+    "sdk-cli": ("sdk-cli", "Summarise the diff below and list the risky files.", distill.SessionKind.HARNESS),
+    "orca": ("cli", "You are working inside Orca. Task: fix the door.", distill.SessionKind.WORKER),
+    "orca-msg": (
+        "cli",
+        "You have 1 orchestration message\n--- Orchestration Messages (1) ---",
+        distill.SessionKind.WORKER,
+    ),
+    "owner": (
+        "cli",
+        "말함 간선은 번호 고르기로 가고, 순위는 아직 안 올린다.",
+        distill.SessionKind.OWNER_TYPED,
+    ),
+    "desktop": (
+        "claude-desktop",
+        "카드 조언 칸은 이번 바퀴에 건드리지 않는다.",
+        distill.SessionKind.OWNER_TYPED,
+    ),
+}
+
+
+class SessionKindTests(unittest.TestCase):
+    def setUp(self):
+        self.paths = {name: _claude_session(ep, first) for name, (ep, first, _) in SESSION_FIXTURES.items()}
+
+    def tearDown(self):
+        for path in self.paths.values():
+            os.unlink(path)
+
+    def test_kind_is_read_from_entrypoint_and_first_user_turn(self):
+        for name, (_, _, kind) in SESSION_FIXTURES.items():
+            path = self.paths[name]
+            with self.subTest(name):
+                self.assertEqual(
+                    distill.session_kind(transcript.claude_entrypoint(path), distill.extract(path)), kind
+                )
+
+    def test_hook_lets_only_owner_typed_sessions_mark_said_claims(self):
+        seen = {}
+        for name in ("sdk-cli", "orca", "orca-msg", "owner", "desktop"):
+            payload = {"transcript_path": self.paths[name], "session_id": name, "cwd": "/work/oh-my-boring"}
+            with (
+                mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
+                mock.patch.object(distill.sys, "stderr", io.StringIO()),
+                mock.patch.object(distill, "_throttled", return_value=False),
+                mock.patch.object(distill, "git_remote_url", return_value=""),
+                mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
+                mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
+                mock.patch.object(distill, "distill_and_remember", return_value=True) as remember,
+                mock.patch.object(distill, "_mark"),
+            ):
+                self.assertEqual(distill.main(), 0)
+            seen[name] = remember.call_args.kwargs["owner_speaks"]
+        self.assertEqual(
+            seen, {"sdk-cli": False, "orca": False, "orca-msg": False, "owner": True, "desktop": True}
+        )
 
 
 class RecallFormattingTests(unittest.TestCase):

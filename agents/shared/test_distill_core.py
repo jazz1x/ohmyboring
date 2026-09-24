@@ -470,6 +470,152 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertIn("event log write failed", stderr.getvalue())
 
 
+class OwnerTurnsTests(unittest.TestCase):
+    def test_only_user_turns_first_utterance_each(self):
+        text = "\n".join(
+            [
+                "[user] 완료 표시 말고 재시도를 보이게 두자.",
+                "backoff 는 지수로.",
+                "[assistant] PR #159 had 8 CI checks passing.",
+                "[tool] Bash gh pr checks 159",
+                "[user] 완료 표시 말고 재시도를 보이게 두자.\nbackoff 는 지수로.",
+                "[user] 다음엔 verifier 를 붙인다.",
+            ]
+        )
+        self.assertEqual(
+            distill_core.owner_turns(text),
+            "[user] 완료 표시 말고 재시도를 보이게 두자.\nbackoff 는 지수로.\n[user] 다음엔 verifier 를 붙인다.",
+        )
+
+    def test_lines_a_clamp_cut_loose_are_nobodys(self):
+        text = (
+            f"[user] 이건 소유자 말.\n{transcript.CLAMP_MARK}\nassistant reply tail after the cut\n[user] 끝."
+        )
+        self.assertEqual(distill_core.owner_turns(text), "[user] 이건 소유자 말.\n[user] 끝.")
+
+    def test_owner_turns_share_the_first_call_ceiling(self):
+        text = "\n".join(f"[user] 지시 {i} " + "가" * 40 for i in range(50))
+        with mock.patch.dict(os.environ, {"DISTILL_CLAMP": "400"}):
+            out = distill_core.owner_turns(text)
+        self.assertIn(transcript.CLAMP_MARK, out)
+        self.assertLessEqual(len(out), 400 + len(transcript.CLAMP_MARK) + 2)
+
+
+OWNER_TRANSCRIPT = "\n".join(
+    [
+        "[user] 완료 표시 말고 재시도를 보이게 두자.",
+        "[assistant] PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
+        "[tool] Bash gh pr checks 159",
+        "[user] 완료 표시 말고 재시도를 보이게 두자.",
+        "[user] 다음엔 verifier 를 붙인다.",
+    ]
+)
+
+FIVE_CLAIM_NOTE = {
+    **RICH_NOTE,
+    "claims": RICH_NOTE["claims"]
+    + [
+        {
+            "subject": "ingest",
+            "predicate": "backoff-policy",
+            "value": "exponential backoff before a note witness exists",
+            "kind": "decision",
+            "confidence": "certain",
+        }
+    ],
+}
+
+
+class OwnerSaidMarkingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env = mock.patch.dict(
+            os.environ,
+            {
+                "BORING_DISTILL_RESOLUTION": "evidence",
+                "BORING_EVENT_LOG": os.path.join(self.tmp.name, "events.ndjson"),
+                "BORING_EVENT_SINK": "spool",
+            },
+        )
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def _run(self, reply, text=OWNER_TRANSCRIPT, owner_speaks=True):
+        prompts = []
+
+        def llm(prompt):
+            prompts.append(prompt)
+            return reply if "=== OWNER TURNS ===" in prompt else FIVE_CLAIM_NOTE
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(distill_core, "_call_llm", side_effect=llm),
+            mock.patch.object(
+                distill_core, "_call_remember", return_value=distill_core.RememberOutcome(True, "remembered")
+            ) as remember,
+            mock.patch.object(distill_core.sys, "stderr", stderr),
+        ):
+            ok = distill_core.distill_and_remember(
+                text, "personal", "oh-my-boring", "s-said", owner_speaks=owner_speaks
+            )
+        self.assertTrue(ok)
+        said_prompts = [p for p in prompts if "=== OWNER TURNS ===" in p]
+        return remember.call_args.args[7], said_prompts, stderr.getvalue()
+
+    def _events(self):
+        with open(os.environ["BORING_EVENT_LOG"], encoding="utf-8") as f:
+            return [json.loads(line) for line in f]
+
+    def test_picked_numbers_mark_exactly_those_claims(self):
+        claims, (prompt,), _ = self._run({"said": [0, 2]})
+        unmarked, _, _ = self._run(None, owner_speaks=False)
+
+        self.assertEqual([i for i, c in enumerate(claims) if "said_by" in c], [0, 2])
+        self.assertEqual({c["said_by"] for c in claims if "said_by" in c}, {"owner"})
+        self.assertEqual([{k: v for k, v in c.items() if k != "said_by"} for c in claims], unmarked)
+        self.assertEqual(len(claims), 5)
+        self.assertIn("다음엔 verifier 를 붙인다.", prompt)
+        self.assertEqual(prompt.count("완료 표시 말고 재시도를 보이게 두자."), 1)
+        self.assertNotIn("2m10s", prompt.split("=== FACTS ===")[0])
+        self.assertNotIn("gh pr checks", prompt)
+        said = [e for e in self._events() if e["event"] == "said_extraction"]
+        self.assertEqual([(e["status"], e["said_claims"]) for e in said], [("ok", 2)])
+
+    def test_empty_pick_is_a_clean_zero(self):
+        claims, _, stderr = self._run({"said": []})
+
+        self.assertFalse(any("said_by" in c for c in claims))
+        said = [e for e in self._events() if e["event"] == "said_extraction"]
+        self.assertEqual([(e["status"], e["said_claims"]) for e in said], [("ok", 0)])
+        self.assertNotIn("marking failed", stderr)
+
+    def test_unusable_pick_marks_nothing_and_says_so(self):
+        for reply in (None, {"said": [7]}, {"said": ["a"]}, {"said": "0"}, [7]):
+            with self.subTest(reply=reply):
+                start = len(self._events()) if os.path.exists(os.environ["BORING_EVENT_LOG"]) else 0
+                claims, _, stderr = self._run(reply)
+
+                self.assertFalse(any("said_by" in c for c in claims))
+                self.assertEqual(len(claims), 5)
+                self.assertIn("owner-turn marking failed (", stderr)
+                events = self._events()[start:]
+                self.assertEqual([e["status"] for e in events if e["event"] == "said_extraction"], ["failed"])
+                self.assertEqual(events[-1]["remember_status"], "remembered")
+
+    def test_no_second_call_without_owner_turns_or_owner_speaks(self):
+        for name, text, speaks in (
+            ("not the owner's session", OWNER_TRANSCRIPT, False),
+            ("no user turn", "[assistant] PR #159 had 8 CI checks passing and eval-gate took 2m10s.", True),
+        ):
+            with self.subTest(name):
+                claims, said_prompts, _ = self._run({"said": [0]}, text=text, owner_speaks=speaks)
+                self.assertEqual(said_prompts, [])
+                self.assertFalse(any("said_by" in c for c in claims))
+
+
 def _restore_env(name, value):
     if value is None:
         os.environ.pop(name, None)
