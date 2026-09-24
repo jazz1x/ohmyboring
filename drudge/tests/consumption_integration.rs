@@ -963,7 +963,7 @@ async fn consumption_verdicts_reorder_ranking() {
         (&path_b, used_vec),
         (&path_c, norm2(-1.0, 1.0)),
     ] {
-        seed_rank_doc(&store, path, &project, content, embedding).await;
+        seed_rank_doc(&store, path, &project, content, embedding, "unknown").await;
     }
 
     let base =
@@ -1025,6 +1025,93 @@ async fn consumption_verdicts_reorder_ranking() {
     )
     .await
     .expect("cleanup session node");
+}
+
+/// An owner note second by score sits one `contested` away from falling out of a top-2 set.
+/// An `agent:x` objection must not push it out; the owner's own objection does (control).
+#[tokio::test]
+async fn only_the_owners_objection_lowers_an_owner_note() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let mut cfg = drudge::config::BoringConfig::default();
+    cfg.llm.base_url = spawn_stub_embedder().await;
+    let llm = drudge::llm::Llm::from_config(&cfg);
+
+    let project = unique_id("owner-feedback");
+    let top = unique_path("owner-feedback-top");
+    let owned = unique_path("owner-feedback-owner");
+    let next = unique_path("owner-feedback-next");
+    let content = "owner feedback fixture note — no query term lives here";
+    let mut orthogonal = vec![0.0_f32; 1024];
+    orthogonal[1] = 1.0;
+    let mut diagonal = vec![0.0_f32; 1024];
+    diagonal[0] = std::f32::consts::FRAC_1_SQRT_2;
+    diagonal[1] = std::f32::consts::FRAC_1_SQRT_2;
+    for (path, embedding, author) in [
+        (&top, stub_vector(), "unknown"),
+        (&owned, diagonal, "owner"),
+        (&next, orthogonal, "unknown"),
+    ] {
+        seed_rank_doc(&store, path, &project, content, embedding, author).await;
+    }
+    let top2 = || async {
+        drudge::retrieve::retrieve(&store, &llm, "fiddlesticks", 2, &[], Some(&project), None)
+            .await
+            .expect("retrieve")
+            .into_iter()
+            .map(|h| h.source_path)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(top2().await, [owned.clone(), top.clone()], "base set");
+
+    let object_to_owned = |session: String, judge: &'static str| {
+        let owned = owned.clone();
+        let store = &store;
+        async move {
+            store
+                .record_consumption(
+                    &session,
+                    "2026-09-24T06:00:00+00:00",
+                    &[],
+                    &[owned],
+                    &[],
+                    Some(judge),
+                )
+                .await
+                .expect("record contested");
+        }
+    };
+    let agent_session = unique_id("owner-feedback-agent");
+    object_to_owned(agent_session.clone(), "agent:x").await;
+    assert_eq!(
+        top2().await,
+        [owned.clone(), top.clone()],
+        "an agent's objection does not lower the owner note"
+    );
+
+    let owner_session = unique_id("owner-feedback-owner");
+    object_to_owned(owner_session.clone(), "owner").await;
+    assert_eq!(
+        top2().await,
+        [top.clone(), next.clone()],
+        "the owner's own objection still lowers it"
+    );
+
+    for path in [&top, &owned, &next] {
+        store.delete_document(path).await.expect("cleanup doc");
+    }
+    for session in [agent_session, owner_session] {
+        db.execute(
+            "DELETE FROM node WHERE id = $1;",
+            &[&format!("session:{session}")],
+        )
+        .await
+        .expect("cleanup session node");
+    }
 }
 
 /// Spawn `drudge serve` against the disposable test DB on an ephemeral loopback port. No vault
@@ -1106,6 +1193,7 @@ async fn seed_rank_doc(
     project: &str,
     content: &str,
     embedding: Vec<f32>,
+    author: &str,
 ) {
     let front = FrontMatter {
         origin: "personal".to_string(),
@@ -1114,6 +1202,7 @@ async fn seed_rank_doc(
         source_path: path.to_string(),
         title: Some("feedback fixture".to_string()),
         tags: vec!["test".to_string()],
+        author: author.parse().expect("author"),
         ..Default::default()
     };
     store

@@ -4,12 +4,14 @@
 //!   - No rewriting/reranker (personal scale = simplest thing that works).
 //!   - Verdicts feed back into ranking: a document's net `used − contested` nudges every one
 //!     of its chunks' RRF scores, so what the owner already judged 👍/👎 moves the next answer.
+use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 
 use crate::llm::Llm;
-use crate::store::{Hit, Store};
+use crate::store::{Authorship, Hit, RankFacts, Store};
 
 const RRF_K: f64 = 60.0; // RRF denominator constant (de facto standard)
 
@@ -65,11 +67,11 @@ async fn apply_feedback(
     let mut paths: Vec<String> = byid.values().map(|h| h.source_path.clone()).collect();
     paths.sort_unstable();
     paths.dedup();
-    let counts = match store.consumption_counts(&paths).await {
+    let counts = match store.ranking_feedback_counts(&paths).await {
         Ok(counts) => counts,
         Err(e) => {
             eprintln!(
-                "apply_feedback: consumption_counts failed ({e:#}); ranking without verdict feedback"
+                "apply_feedback: ranking_feedback_counts failed ({e:#}); ranking without verdict feedback"
             );
             return Ok(());
         }
@@ -87,7 +89,7 @@ async fn merge_hits(
     vec_hits: Vec<Hit>,
     txt_hits: Vec<Hit>,
     exclude_origins: &[String],
-) -> Result<Vec<Hit>> {
+) -> Result<Vec<Scored>> {
     let mut fused: HashMap<String, f64> = HashMap::new();
     let mut byid: HashMap<String, Hit> = HashMap::new();
     for (rank, h) in vec_hits.into_iter().enumerate() {
@@ -100,61 +102,86 @@ async fn merge_hits(
     }
     apply_feedback(store, &mut fused, &byid).await?;
 
-    let mut merged: Vec<Hit> = byid
+    let mut merged: Vec<Scored> = byid
         .into_values()
         .filter(|h| !exclude_origins.iter().any(|o| o == &h.origin))
+        .map(|hit| Scored {
+            score: fused[&hit.id],
+            hit,
+        })
         .collect();
-    merged.sort_by(|a, b| {
-        fused[&b.id]
-            .partial_cmp(&fused[&a.id])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    merged.sort_by(|a, b| b.score.total_cmp(&a.score));
     Ok(merged)
 }
 
-/// Membership is decided by score first; only then does a superseded note (a `supersedes` edge
-/// points at it) move after the live notes of the returned set. Demoted, never cut: the stable
-/// sort keeps score order within each group.
-async fn demote_superseded<F, Fut>(mut hits: Vec<Hit>, lookup: F) -> Result<Vec<Hit>>
+/// A hit with its fused score, carried past the cut so the in-set order can still read it.
+struct Scored {
+    hit: Hit,
+    score: f64,
+}
+
+/// The one order inside a returned set: superseded last, owner notes first and newest first
+/// among themselves, then score.
+fn rank_key(facts: Option<&RankFacts>) -> (bool, bool, Reverse<Option<SystemTime>>) {
+    match facts.copied() {
+        Some(RankFacts {
+            superseded,
+            authorship: Authorship::Owner { updated_at },
+        }) => (superseded, false, Reverse(Some(updated_at))),
+        Some(RankFacts {
+            superseded,
+            authorship: Authorship::Other,
+        }) => (superseded, true, Reverse(None)),
+        None => (false, true, Reverse(None)),
+    }
+}
+
+/// Membership is decided by score first; only then is the returned set ordered by `rank_key`.
+/// A note outside the cut is never pulled in, and a superseded note is demoted, never cut.
+async fn order_within_set<F, Fut>(mut set: Vec<Scored>, lookup: F) -> Result<Vec<Hit>>
 where
     F: FnOnce(Vec<String>) -> Fut,
-    Fut: Future<Output = Result<HashMap<String, Vec<String>>>>,
+    Fut: Future<Output = Result<HashMap<String, RankFacts>>>,
 {
-    let mut paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
+    let mut paths: Vec<String> = set.iter().map(|s| s.hit.source_path.clone()).collect();
     paths.sort_unstable();
     paths.dedup();
-    let superseded = lookup(paths).await.context("rank: superseded lookup")?;
-    hits.sort_by_key(|h| superseded.contains_key(&h.source_path));
-    Ok(hits)
+    let facts = lookup(paths).await.context("rank: rank facts lookup")?;
+    set.sort_by(|a, b| {
+        rank_key(facts.get(&a.hit.source_path))
+            .cmp(&rank_key(facts.get(&b.hit.source_path)))
+            .then_with(|| b.score.total_cmp(&a.score))
+    });
+    Ok(set.into_iter().map(|s| s.hit).collect())
 }
 
-async fn top_k_demoted<F, Fut>(mut merged: Vec<Hit>, top_k: usize, lookup: F) -> Result<Vec<Hit>>
+async fn top_k_ranked<F, Fut>(mut merged: Vec<Scored>, top_k: usize, lookup: F) -> Result<Vec<Hit>>
 where
     F: FnOnce(Vec<String>) -> Fut,
-    Fut: Future<Output = Result<HashMap<String, Vec<String>>>>,
+    Fut: Future<Output = Result<HashMap<String, RankFacts>>>,
 {
     merged.truncate(top_k);
-    demote_superseded(merged, lookup).await
+    order_within_set(merged, lookup).await
 }
 
-async fn budget_demoted<F, Fut>(
-    merged: Vec<Hit>,
+async fn budget_ranked<F, Fut>(
+    merged: Vec<Scored>,
     max_results: usize,
     max_chars: usize,
     lookup: F,
 ) -> Result<Vec<Hit>>
 where
     F: FnOnce(Vec<String>) -> Fut,
-    Fut: Future<Output = Result<HashMap<String, Vec<String>>>>,
+    Fut: Future<Output = Result<HashMap<String, RankFacts>>>,
 {
-    demote_superseded(within_budget(merged, max_results, max_chars), lookup).await
+    order_within_set(within_budget(merged, max_results, max_chars), lookup).await
 }
 
-fn within_budget(merged: Vec<Hit>, max_results: usize, max_chars: usize) -> Vec<Hit> {
+fn within_budget(merged: Vec<Scored>, max_results: usize, max_chars: usize) -> Vec<Scored> {
     let per_hit_cap = max_chars / max_results;
     let mut budget = max_chars;
     let mut out = Vec::new();
-    for mut h in merged {
+    for mut s in merged {
         if out.len() >= max_results {
             break;
         }
@@ -162,13 +189,13 @@ fn within_budget(merged: Vec<Hit>, max_results: usize, max_chars: usize) -> Vec<
         if take == 0 {
             break;
         }
-        let cut = h.content.chars().take(take).collect::<String>();
+        let cut = s.hit.content.chars().take(take).collect::<String>();
         if cut.is_empty() {
             continue;
         }
         budget = budget.saturating_sub(cut.chars().count());
-        h.content = cut;
-        out.push(h);
+        s.hit.content = cut;
+        out.push(s);
     }
     out
 }
@@ -193,8 +220,8 @@ pub async fn retrieve(
         .text_search_filtered(query, pool, project, since_hours)
         .await?;
     let merged = merge_hits(store, vec_hits, txt_hits, exclude_origins).await?;
-    top_k_demoted(merged, top_k, |paths| async move {
-        store.superseded_by(&paths).await
+    top_k_ranked(merged, top_k, |paths| async move {
+        store.rank_facts(&paths).await
     })
     .await
 }
@@ -227,8 +254,8 @@ pub async fn retrieve_budget(
         .text_search_filtered(query, pool, project, since_hours)
         .await?;
     let merged = merge_hits(store, vec_hits, txt_hits, exclude_origins).await?;
-    budget_demoted(merged, max_results, max_chars, |paths| async move {
-        store.superseded_by(&paths).await
+    budget_ranked(merged, max_results, max_chars, |paths| async move {
+        store.rank_facts(&paths).await
     })
     .await
 }
@@ -304,12 +331,16 @@ mod tests {
         assert_eq!(fused["b#0"], before);
     }
 
-    fn score_ordered_pool() -> Vec<Hit> {
+    fn score_ordered_pool() -> Vec<Scored> {
         ["old", "new", "b", "c", "d"]
             .into_iter()
-            .map(|n| Hit {
-                content: "x".to_owned(),
-                ..hit(&format!("{n}#0"), &format!("/{n}.md"))
+            .enumerate()
+            .map(|(rank, n)| Scored {
+                hit: Hit {
+                    content: "x".to_owned(),
+                    ..hit(&format!("{n}#0"), &format!("/{n}.md"))
+                },
+                score: rrf_term(rank + 1).unwrap(),
             })
             .collect()
     }
@@ -318,30 +349,95 @@ mod tests {
         hits.into_iter().map(|h| h.id).collect()
     }
 
+    fn other(superseded: bool) -> RankFacts {
+        RankFacts {
+            superseded,
+            authorship: Authorship::Other,
+        }
+    }
+
+    fn owner(superseded: bool, secs: u64) -> RankFacts {
+        RankFacts {
+            superseded,
+            authorship: Authorship::Owner {
+                updated_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+            },
+        }
+    }
+
+    fn facts<const N: usize>(rows: [(&str, RankFacts); N]) -> HashMap<String, RankFacts> {
+        rows.into_iter().map(|(p, f)| (p.to_owned(), f)).collect()
+    }
+
     #[tokio::test]
     async fn superseded_top_scorer_is_returned_after_the_live_notes() {
-        let superseded = HashMap::from([("/old.md".to_owned(), vec!["/new.md".to_owned()])]);
+        let superseded = facts([("/old.md", other(true)), ("/new.md", other(false))]);
         let found = |_| async { Ok(superseded.clone()) };
         let none = |_| async { Ok(HashMap::new()) };
 
-        let top = top_k_demoted(score_ordered_pool(), 3, none).await.unwrap();
+        let top = top_k_ranked(score_ordered_pool(), 3, none).await.unwrap();
         assert_eq!(ids(top), ["old#0", "new#0", "b#0"], "control: score order");
 
-        let top = top_k_demoted(score_ordered_pool(), 3, found).await.unwrap();
+        let top = top_k_ranked(score_ordered_pool(), 3, found).await.unwrap();
         assert_eq!(ids(top), ["new#0", "b#0", "old#0"], "demoted, not cut");
 
-        let budget = budget_demoted(score_ordered_pool(), 3, 300, found)
+        let budget = budget_ranked(score_ordered_pool(), 3, 300, found)
             .await
             .unwrap();
         assert_eq!(ids(budget), ["new#0", "b#0", "old#0"], "budget path too");
     }
 
     #[tokio::test]
-    async fn failed_superseded_lookup_fails_the_retrieval() {
+    async fn owner_notes_lead_the_returned_set_newest_first_and_nothing_is_pulled_in() {
+        let rank = |rows: HashMap<String, RankFacts>| async move {
+            let top = top_k_ranked(score_ordered_pool(), 3, |_| async { Ok(rows.clone()) })
+                .await
+                .unwrap();
+            let budget =
+                budget_ranked(score_ordered_pool(), 3, 300, |_| async { Ok(rows.clone()) })
+                    .await
+                    .unwrap();
+            let (top, budget) = (ids(top), ids(budget));
+            assert_eq!(top, budget, "top-k and budget paths share one order");
+            top
+        };
+
+        assert_eq!(
+            rank(facts([("/b.md", owner(false, 10))])).await,
+            ["b#0", "old#0", "new#0"],
+            "the owner note sits above higher-scoring notes of the set"
+        );
+        assert_eq!(
+            rank(facts([
+                ("/new.md", owner(false, 10)),
+                ("/b.md", owner(false, 20))
+            ]))
+            .await,
+            ["b#0", "new#0", "old#0"],
+            "owner notes newest first, whatever their score"
+        );
+        assert_eq!(
+            rank(facts([
+                ("/old.md", owner(true, 30)),
+                ("/b.md", owner(false, 10))
+            ]))
+            .await,
+            ["b#0", "new#0", "old#0"],
+            "a superseded owner note is still last"
+        );
+        assert_eq!(
+            rank(facts([("/d.md", owner(false, 10))])).await,
+            ["old#0", "new#0", "b#0"],
+            "an owner note outside the score cut is not pulled in"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_rank_facts_lookup_fails_the_retrieval() {
         let failing = |_| async { Err(anyhow::anyhow!("db down")) };
-        let err = top_k_demoted(score_ordered_pool(), 3, failing)
+        let err = top_k_ranked(score_ordered_pool(), 3, failing)
             .await
             .unwrap_err();
-        assert!(format!("{err:#}").contains("superseded lookup"));
+        assert!(format!("{err:#}").contains("rank facts lookup"));
     }
 }

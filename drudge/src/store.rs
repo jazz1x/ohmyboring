@@ -168,6 +168,28 @@ pub struct ConsumptionCounts {
     pub contested: i64,
 }
 
+/// Whose `contested` edges a count takes. Ranking takes on an owner note only the owner's own
+/// objection; the displayed count takes every judge.
+#[derive(Debug, Clone, Copy)]
+enum ContestedBy {
+    AnyJudge,
+    OwnerOnOwnerNotes,
+}
+
+/// Who wrote a note, as far as ordering inside a returned set is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Authorship {
+    Owner { updated_at: SystemTime },
+    Other,
+}
+
+/// What orders one note inside a returned set, besides its score.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RankFacts {
+    pub superseded: bool,
+    pub authorship: Authorship,
+}
+
 /// Graph size summary (for audit).
 #[derive(Debug, Default)]
 pub struct GraphStats {
@@ -2884,15 +2906,40 @@ impl Store {
         &self,
         paths: &[String],
     ) -> Result<HashMap<String, ConsumptionCounts>> {
+        self.counts_by(paths, ContestedBy::AnyJudge).await
+    }
+
+    /// The counts ranking feeds back: on an owner note, only the owner's own `contested` edges
+    /// count — no other judge lowers what the owner wrote. `used` counts from every judge.
+    pub async fn ranking_feedback_counts(
+        &self,
+        paths: &[String],
+    ) -> Result<HashMap<String, ConsumptionCounts>> {
+        self.counts_by(paths, ContestedBy::OwnerOnOwnerNotes).await
+    }
+
+    async fn counts_by(
+        &self,
+        paths: &[String],
+        contested_by: ContestedBy,
+    ) -> Result<HashMap<String, ConsumptionCounts>> {
         let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
+        let owner_only = match contested_by {
+            ContestedBy::AnyJudge => false,
+            ContestedBy::OwnerOnOwnerNotes => true,
+        };
         let rows = self
             .db()
             .await?
             .query(
-                "SELECT dst, kind, count(*) FROM edge
-                 WHERE dst = ANY($1) AND kind IN ('used','contested')
-                 GROUP BY dst, kind;",
-                &[&doc_ids],
+                "SELECT e.dst, e.kind, count(*) FROM edge e
+                 LEFT JOIN document d ON d.source_path = substr(e.dst, 5)
+                 WHERE e.dst = ANY($1) AND e.kind IN ('used','contested')
+                   AND NOT ($2 AND e.kind = 'contested'
+                            AND d.author IS NOT DISTINCT FROM 'owner'
+                            AND e.judge IS DISTINCT FROM 'owner')
+                 GROUP BY e.dst, e.kind;",
+                &[&doc_ids, &owner_only],
             )
             .await
             .context("consumption counts")?;
@@ -2957,6 +3004,40 @@ impl Store {
                 .push(src.strip_prefix("doc:").unwrap_or(&src).to_owned());
         }
         Ok(map)
+    }
+
+    /// Per document: replaced by a newer note (a `supersedes` edge points at it), and whether
+    /// the owner wrote it, then when (`updated_at`). The one read that orders a returned set.
+    pub async fn rank_facts(&self, paths: &[String]) -> Result<HashMap<String, RankFacts>> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT d.source_path, d.author = 'owner', d.updated_at,
+                        EXISTS (SELECT 1 FROM edge e
+                                WHERE e.dst = 'doc:' || d.source_path AND e.kind = 'supersedes')
+                 FROM document d WHERE d.source_path = ANY($1);",
+                &[&paths],
+            )
+            .await
+            .context("rank facts")?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let authorship = if row.get::<_, bool>(1) {
+                    Authorship::Owner {
+                        updated_at: row.get(2),
+                    }
+                } else {
+                    Authorship::Other
+                };
+                let facts = RankFacts {
+                    superseded: row.get(3),
+                    authorship,
+                };
+                (row.get(0), facts)
+            })
+            .collect())
     }
 
     /// Documents with the most `used` edges from sessions whose `observed_at` label falls within
