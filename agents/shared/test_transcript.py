@@ -176,7 +176,7 @@ def test_extract_claude_jsonl_user_lines_are_only_what_the_owner_typed():
         user([{"type": "text", "text": "D4 는 간선으로 가요"}]),
         user(
             "<command-message>loop</command-message>\n<command-name>/loop</command-name>\n"
-            "<command-args>D4 는 간선으로 간다</command-args>"
+            "<command-args>D4 는 간선으로 간다\n순위는 아직</command-args>"
         ),
         user("그 <task-notification> 은 무시해"),
         user('<pasted_content id="0e6b">owner paste</pasted_content>'),
@@ -191,6 +191,7 @@ def test_extract_claude_jsonl_user_lines_are_only_what_the_owner_typed():
             "[user] 테스트 돌려줘",
             "[user] D4 는 간선으로 가요",
             "[user] D4 는 간선으로 간다",
+            "순위는 아직",
             "[user] 그 <task-notification> 은 무시해",
             '[user] <pasted_content id="0e6b">owner paste</pasted_content>',
             "[assistant] 네",

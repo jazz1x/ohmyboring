@@ -37,6 +37,28 @@ fn unique_path(prefix: &str) -> String {
         .as_nanos();
     format!("/vault/wiki/{prefix}-{ts}.md")
 }
+
+/// `current_claims` reads top-k through HNSW (ef_search 40): a fixture far from the query is
+/// found or missed depending on what earlier suites left in the index. Query along its own direction.
+fn unique_direction() -> [f32; 1024] {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    )
+    .unwrap();
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut state = (nanos ^ (seq << 48)) | 1;
+    std::array::from_fn(|_| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        if state & 1 == 0 { 1.0 } else { -1.0 }
+    })
+}
+
 fn dummy_frontmatter(path: &str) -> FrontMatter {
     FrontMatter {
         origin: "personal".to_string(),
@@ -165,10 +187,8 @@ async fn current_claims_honors_exclude_origins() {
     let mut c_front = dummy_frontmatter(&c_path);
     c_front.origin = "company".to_string();
 
-    let mut emb_p = [0.0_f32; 1024];
-    emb_p[0] = 1.0;
-    let mut emb_c = [0.0_f32; 1024];
-    emb_c[1] = 1.0;
+    let emb_p = unique_direction();
+    let emb_c = unique_direction();
 
     for (front, subj, emb) in [(&p_front, &p_subj, &emb_p), (&c_front, &c_subj, &emb_c)] {
         store
@@ -190,7 +210,7 @@ async fn current_claims_honors_exclude_origins() {
             .expect("upsert claim");
     }
 
-    let query = [0.5_f32; 1024]; // near both
+    let query: [f32; 1024] = std::array::from_fn(|i| emb_p[i] + emb_c[i]);
     let subjects = |rows: Vec<drudge::store::AnchoredClaim>| -> Vec<String> {
         rows.into_iter().map(|c| c.claim.subject).collect()
     };
@@ -382,6 +402,7 @@ async fn delete_document_removes_claims() {
         value: "value".to_string(),
         kind: "fact".to_string(),
         confidence: "certain".to_string(),
+        said_by: None,
     });
 
     store
@@ -2426,6 +2447,7 @@ async fn write_claim_mirror(store: &Store, key: &str, kind: &str) -> (String, St
         value: "v".to_string(),
         kind: kind.to_string(),
         confidence: "certain".to_string(),
+        said_by: None,
     };
     store
         .upsert_claim(
@@ -2843,6 +2865,7 @@ struct HashedFixture {
     hashed: drudge::anchor_hash::AnchorHash,
     note_path: String,
     subject: String,
+    emb: [f32; 1024],
 }
 
 async fn seed_hashed_claim(store: &Store) -> HashedFixture {
@@ -2874,8 +2897,7 @@ async fn seed_hashed_claim(store: &Store) -> HashedFixture {
     let subject = format!("anchor-hash-{}", unique_source_id("subj"));
     let mut front = dummy_frontmatter(&note_path);
     front.project = anchor.project.clone();
-    let mut emb = [0.0_f32; 1024];
-    emb[0] = 1.0;
+    let emb = unique_direction();
     store
         .upsert_document(&front, "sha-anchor-hash", SystemTime::now())
         .await
@@ -2903,6 +2925,7 @@ async fn seed_hashed_claim(store: &Store) -> HashedFixture {
         hashed,
         note_path,
         subject,
+        emb,
     }
 }
 
@@ -3007,7 +3030,7 @@ async fn anchor_hash_marks_edited_bodies_stale_and_current_claims_hides_them() {
     assert!(stale_at.is_some(), "stale_at is stamped");
     assert_eq!(reason.as_deref(), Some("symbol body changed"));
 
-    let query = [0.5_f32; 1024];
+    let query = fixture.emb;
     let hidden = store
         .current_claims(&query, 50, &[], None, None, None, false)
         .await
@@ -3425,6 +3448,7 @@ fn claim_note(path: &str, subject: &str) -> FrontMatter {
             value: "v1".to_string(),
             kind: "fact".to_string(),
             confidence: "certain".to_string(),
+            said_by: None,
         }],
         ..Default::default()
     }
@@ -3846,13 +3870,14 @@ async fn claim_node_is_keyed_canonically_like_the_row() {
                 value: "v1".to_string(),
                 kind: "decision".to_string(),
                 confidence: "certain".to_string(),
+                said_by: None,
             },
             Claim {
                 subject: plain_subject.clone(),
                 predicate: "axis".to_string(),
                 value: "v2".to_string(),
-                kind: "fact".to_string(),
                 confidence: "certain".to_string(),
+                ..Default::default()
             },
         ],
         ..Default::default()

@@ -33,6 +33,7 @@ HITS = [
         "snippet": "B 노트",
         "used_count": 0,
         "contested_count": 2,
+        "said_by_owner": 0,
     },
     {
         "id": "note-a",
@@ -42,6 +43,7 @@ HITS = [
         "snippet": "A 노트",
         "used_count": 3,
         "contested_count": 0,
+        "said_by_owner": 0,
     },
 ]
 

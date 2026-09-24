@@ -75,6 +75,7 @@ async fn declare_claim(
                 value: value.to_string(),
                 kind: kind.to_string(),
                 confidence: "high".to_string(),
+                said_by: None,
             },
         )
         .await
