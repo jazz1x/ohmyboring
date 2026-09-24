@@ -18,7 +18,8 @@ body, never a silent 200 with an empty one. Unregistered paths get FastAPI's
 404: this is a door, not a catch-all proxy. The door's own routes, registered
 outside the engine's proxy table: GET /approved reads the graph store (what
 the morning card's 「해」 judged), GET /claim-source resolves a subject to its
-current claim's note path, GET /projects answers the engine's plain question
+current claim's note path (GET /claim-sources: every subject's current claim for one
+predicate, the same pick per subject), GET /projects answers the engine's plain question
 when called with no params but, with `active_days`, answers a DB-backed
 question the engine cannot (which projects have had a document touched in
 that window), and GET/POST /repairs/split-subjects lists and merges claim
@@ -196,6 +197,12 @@ def _fetch_claim_source(subject: str) -> list:
         return cur.fetchall()
 
 
+def _fetch_claim_sources(predicate: str) -> list:
+    with psycopg.connect(os.environ["DOOR_PG_DSN"]) as conn, conn.cursor() as cur:
+        cur.execute(claim_source.LIST_SQL, (predicate,))
+        return cur.fetchall()
+
+
 #: active_days bounds — 1 day minimum (a shorter window is not "recently active"), 365 days
 #: maximum (a year is not a "recent" filter any more, and an unbounded window is a full scan).
 _MIN_ACTIVE_DAYS = 1
@@ -267,6 +274,19 @@ async def _claim_source(request: Request) -> Response:
     if payload is None:
         return JSONResponse({"error": "no current claim for subject"}, status_code=404)
     return JSONResponse(payload)
+
+
+async def _claim_sources(request: Request) -> Response:
+    predicate = request.query_params.get("predicate", "")
+    if not predicate.strip():
+        return JSONResponse({"error": "predicate query param is required"}, status_code=400)
+    if not os.environ.get("DOOR_PG_DSN"):
+        return JSONResponse({"error": "store not configured"}, status_code=503)
+    try:
+        rows = await asyncio.to_thread(_fetch_claim_sources, predicate)
+    except psycopg.OperationalError as e:
+        return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
+    return JSONResponse({"predicate": predicate, "claims": claim_source.group_current(rows)})
 
 
 #: repair candidates per page — 3 default (the card's "오늘 할 일" shows the top 3), 1..50 range
@@ -521,6 +541,7 @@ for _path, _methods in _load_routes().items():
 _DOOR_HANDLERS = {
     "GET /approved": _approved,
     "GET /claim-source": _claim_source,
+    "GET /claim-sources": _claim_sources,
     "GET /projects": _projects,
     "GET /repairs/split-subjects": _repairs_split_subjects_get,
     "POST /repairs/split-subjects": _repairs_split_subjects_post,

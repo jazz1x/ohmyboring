@@ -64,6 +64,7 @@
   "door_routes": [
     "GET /approved",
     "GET /claim-source",
+    "GET /claim-sources",
     "GET /projects",
     "GET /repairs/split-subjects",
     "POST /repairs/split-subjects"

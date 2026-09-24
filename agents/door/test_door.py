@@ -693,6 +693,23 @@ class ClaimSourcePureTests(unittest.TestCase):
     def test_empty_rows_is_none_the_doors_404(self):
         self.assertIsNone(claim_source.pick_current("없는 주어", []))
 
+    def test_group_current_picks_once_per_subject(self):
+        rows = [
+            ("s-b", "/vault/wiki/wiki-3.md", datetime(2026, 9, 3, tzinfo=approved.SEOUL), "b", "unknown"),
+            (
+                "s-a",
+                "/vault/wiki/wiki-2.md",
+                datetime(2026, 9, 20, tzinfo=approved.SEOUL),
+                "newer",
+                "agent:x",
+            ),
+            ("s-a", "/vault/wiki/wiki-1.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "owner's", "owner"),
+        ]
+        out = claim_source.group_current(rows)
+        self.assertEqual([(c["subject"], c["value"]) for c in out], [("s-a", "owner's"), ("s-b", "b")])
+        self.assertEqual(len(out[0]["candidates"]), 2)
+        self.assertEqual(claim_source.group_current([]), [])
+
 
 class ClaimSourceRouteTests(unittest.TestCase):
     """GET /claim-source through the real door app — stub rows, no DB (AC2)."""
@@ -726,9 +743,12 @@ class ClaimSourceRouteTests(unittest.TestCase):
         self._rows: list = []
         self._orig_fetch = door._fetch_claim_source
         door._fetch_claim_source = lambda subject: self._rows
+        self._orig_fetch_list = door._fetch_claim_sources
+        door._fetch_claim_sources = lambda predicate: self._rows
 
     def tearDown(self):
         door._fetch_claim_source = self._orig_fetch
+        door._fetch_claim_sources = self._orig_fetch_list
         if self._saved_dsn is None:
             os.environ.pop("DOOR_PG_DSN", None)
         else:
@@ -768,6 +788,23 @@ class ClaimSourceRouteTests(unittest.TestCase):
         self.assertEqual(payload["note"], "/vault/wiki/wiki-1405.md")
         self.assertEqual(payload["value"], "v2", "the current claim's value rides the answer")
         self.assertEqual(len(payload["candidates"]), 2)
+
+    def test_claim_sources_lists_one_pick_per_subject_400_and_503(self):
+        status, body, _ = _req(self.door_port, "GET", "/claim-sources?predicate=")
+        self.assertEqual((status, json.loads(body)["error"]), (400, "predicate query param is required"))
+        os.environ.pop("DOOR_PG_DSN", None)
+        status, _, _ = _req(self.door_port, "GET", "/claim-sources?predicate=p")
+        self.assertEqual(status, 503)
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = [
+            ("s-b", "/vault/wiki/wiki-3.md", datetime(2026, 9, 3, tzinfo=approved.SEOUL), "b", "unknown"),
+            ("s-a", "/vault/wiki/wiki-1.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "a", "unknown"),
+        ]
+        status, body, _ = _req(self.door_port, "GET", "/claim-sources?predicate=p")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["predicate"], "p")
+        self.assertEqual([c["subject"] for c in payload["claims"]], ["s-a", "s-b"])
 
 
 class SplitSubjectsGetRouteTests(unittest.TestCase):

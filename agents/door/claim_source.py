@@ -24,6 +24,13 @@ SQL = (
     "order by c.valid_from desc"
 )
 
+LIST_SQL = (
+    "select c.subject, c.source_path, c.valid_from, c.value, coalesce(d.author, 'unknown') from claim c "
+    "left join document d on d.source_path = c.source_path "
+    "where c.predicate = %s and c.superseded_at is null "
+    "order by c.valid_from desc"
+)
+
 
 def pick_current(subject: str, rows: list[tuple[str, Any, Any, str]]) -> dict[str, Any] | None:
     """rows: (source_path, valid_from, value, author) as fetched — any order. Owner-written
@@ -43,3 +50,12 @@ def pick_current(subject: str, rows: list[tuple[str, Any, Any, str]]) -> dict[st
             {"note": path, "valid_from": at.isoformat(timespec="seconds")} for path, at, _, _ in ordered
         ],
     }
+
+
+def group_current(rows: list[tuple[str, str, Any, Any, str]]) -> list[dict[str, Any]]:
+    """rows: (subject, source_path, valid_from, value, author) for one predicate — any order.
+    One pick_current answer per subject, subjects in sorted order."""
+    by_subject: dict[str, list[tuple[str, Any, Any, str]]] = {}
+    for subject, *rest in rows:
+        by_subject.setdefault(subject, []).append(tuple(rest))
+    return [pick_current(subject, by_subject[subject]) for subject in sorted(by_subject)]

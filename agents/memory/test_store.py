@@ -64,6 +64,10 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self.server.requests.append(("GET", self.path, None))
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/claim-sources":
+            predicate = urllib.parse.parse_qs(parsed.query)["predicate"][0]
+            self._send(200, {"predicate": predicate, "claims": self.server.listed})
+            return
         if parsed.path != "/claim-source":
             self._send(404, {"error": "unknown"})
             return
@@ -102,6 +106,7 @@ class StoreTest(unittest.TestCase):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.server.requests = []
         self.server.claim_sources = {}
+        self.server.listed = []
         self.server.hits = []
         self.server.remember_response = {
             "source_path": "/vault/wiki/wiki-9000.md",
@@ -284,13 +289,39 @@ class StoreTest(unittest.TestCase):
             with self.assertRaises(NotImplementedError):
                 self.store.search(bad_prefix, query="q")
         with self.assertRaises(ValueError):
-            self.store.search(("boring",), query=None)
-        with self.assertRaises(ValueError):
             self.store.search(("boring",), query="q", offset=1)
         with self.assertRaises(ValueError):
             self.store.search(("boring",), query="q", filter={"k": "v"})
         with self.assertRaises(NotImplementedError):
             self.store.batch([ListNamespacesOp()])
+
+    def test_search_without_query_lists_the_prefix_in_key_order_and_pages(self) -> None:
+        listed = [
+            _claim_payload(
+                ("agent", "a"), "/a1.md", {"content": "a1"}, "/vault/wiki/w1.md", "2026-09-24T01:00:00+00:00"
+            ),
+            _claim_payload(
+                ("agent", "a"), "/a2.md", {"content": "a2"}, "/vault/wiki/w2.md", "2026-09-24T02:00:00+00:00"
+            ),
+            _claim_payload(
+                ("agent", "b"), "/b1.md", {"content": "b1"}, "/vault/wiki/w3.md", "2026-09-24T03:00:00+00:00"
+            ),
+        ]
+        for rows in (listed, listed[::-1]):
+            self.server.listed = rows
+            self.assertEqual([i.key for i in self.store.search(("agent", "a"))], ["/a1.md", "/a2.md"])
+            everything = self.store.search(("agent",))
+            self.assertEqual([i.key for i in everything], ["/a1.md", "/a2.md", "/b1.md"])
+            self.assertEqual(everything[2].namespace, ("agent", "b"))
+            self.assertEqual(everything[2].value, {"content": "b1"})
+            self.assertEqual([i.key for i in self.store.search(("agent",), limit=2)], ["/a1.md", "/a2.md"])
+            self.assertEqual([i.key for i in self.store.search(("agent",), limit=2, offset=2)], ["/b1.md"])
+            self.assertEqual(self.store.search(("agent",), limit=2, offset=3), [])
+            self.assertEqual(self.store.search(("agent", "zzz")), [])
+        self.assertEqual(
+            {path for method, path, _ in self.server.requests},
+            {"/claim-sources?predicate=langgraph-store-value"},
+        )
 
 
 if __name__ == "__main__":

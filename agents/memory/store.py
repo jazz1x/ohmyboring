@@ -18,8 +18,11 @@ Coverage on purpose, each a visible raise rather than a silent fallback:
              raises instead of passing for success. The first put stamps `created_at`
              (UTC ISO) into the claim value; a re-put inherits it from the current
              value, so get's created_at is when the record was born, not last written.
-  - search → ("boring", ...) only, over the engine's /search via BoringRetriever
-             (nothing re-implemented here); any other prefix is next wheel
+  - search → with a query: ("boring", ...) only, over the engine's /search via
+             BoringRetriever (nothing re-implemented here); any other prefix is next wheel.
+             Without a query: door GET /claim-sources, the current records whose
+             namespace starts with the prefix, key order, offset/limit pages — what
+             Deep Agents' StoreBackend calls for ls/grep/glob
   - delete / list_namespaces / ttl / index → refused or next wheel, never faked
 
 Run against the parity copy only: scripts/parity-harness.sh up, then
@@ -192,14 +195,14 @@ class BoringStore(BaseStore):
         return None
 
     def _search(self, op: SearchOp) -> list[SearchItem]:
+        if op.filter is not None:
+            raise ValueError("search filters are not supported — next wheel")
+        if op.query is None:
+            return self._list(op)
         if not op.namespace_prefix or op.namespace_prefix[0] != "boring":
             raise NotImplementedError(
                 f"search outside ('boring',) is next wheel (agent namespaces): {op.namespace_prefix!r}"
             )
-        if op.query is None:
-            raise ValueError("search needs a query — semantic search over our memory")
-        if op.filter is not None:
-            raise ValueError("search filters are not supported — next wheel")
         if op.offset:
             raise ValueError("search offset is not supported — next wheel")
         project = op.namespace_prefix[1] if len(op.namespace_prefix) > 1 else None
@@ -216,4 +219,27 @@ class BoringStore(BaseStore):
                 score=None,
             )
             for doc in docs
+        ]
+
+    def _list(self, op: SearchOp) -> list[SearchItem]:
+        """No query: the current record under every key whose namespace starts with the prefix,
+        key order so offset pages hold still between calls."""
+        query = urllib.parse.urlencode({"predicate": _PREDICATE})
+        claims = _get_json(f"{self.door_url}/claim-sources?{query}")["claims"]
+        prefix = list(op.namespace_prefix)
+        records = [(json.loads(claim["value"]), claim) for claim in claims]
+        inside = [
+            (envelope, claim) for envelope, claim in records if envelope["namespace"][: len(prefix)] == prefix
+        ]
+        ordered = sorted(inside, key=lambda record: (record[0]["key"], record[0]["namespace"]))
+        return [
+            SearchItem(
+                namespace=tuple(envelope["namespace"]),
+                key=envelope["key"],
+                value=envelope["value"],
+                created_at=_created_at_of(claim),
+                updated_at=datetime.fromisoformat(claim["valid_from"]),
+                score=None,
+            )
+            for envelope, claim in ordered[op.offset : op.offset + op.limit]
         ]
