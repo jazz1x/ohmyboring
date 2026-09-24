@@ -130,6 +130,7 @@ def _hit_to_document(hit: dict[str, Any]) -> Document:
         "origin": hit["origin"],
         "used_count": hit["used_count"],
         "contested_count": hit["contested_count"],
+        "said_by_owner": hit["said_by_owner"],
         "superseded_by": hit.get("superseded_by", []),
     }
     for key in ("dist", "dist_kind", "claims", "claims_total"):

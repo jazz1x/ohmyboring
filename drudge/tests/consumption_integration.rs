@@ -1288,6 +1288,183 @@ async fn remember_http_supersedes_edges_sink_the_old_note_in_search() {
     }
 }
 
+async fn said_edges(db: &Client, dst: &str) -> Vec<Option<String>> {
+    db.query(
+        "SELECT judge FROM edge WHERE src = 'person:owner' AND dst = $1 AND kind = 'said';",
+        &[&dst],
+    )
+    .await
+    .expect("said edges")
+    .iter()
+    .map(|row| row.get(0))
+    .collect()
+}
+
+async fn author_of(db: &Client, path: &str) -> String {
+    db.query_one(
+        "SELECT author FROM document WHERE source_path = $1;",
+        &[&path],
+    )
+    .await
+    .expect("document author")
+    .get(0)
+}
+
+/// A claim the owner said leaves `person:owner —said→` the note and the claim (no judge, no
+/// token, author untouched); a note without `said_by` gets none; a wiped edge comes back from
+/// the note file on `/sync`.
+#[tokio::test]
+async fn said_by_owner_writes_said_edges_that_sync_rebuilds_from_the_file() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let vault = tempfile::tempdir().expect("temp vault");
+    std::fs::create_dir_all(vault.path().join("wiki")).expect("wiki dir");
+    let llm_base = format!("http://127.0.0.1:{}/v1", spawn_hashing_embedder().await);
+    let port = free_port();
+    let _server = spawn_server_with_vault(&dsn, port, vault.path(), &llm_base);
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+    wait_for_health(&client, &base).await;
+    let subject = unique_id("kappa-kiln");
+    let claim_node = format!("claim:{subject}:setpoint");
+
+    let (refused, _) = post_door(
+        &client,
+        format!("{base}/remember"),
+        serde_json::json!({"title": "kappa kiln refused", "body": "never written",
+            "claims": [{"subject": subject, "predicate": "setpoint", "value": "900", "said_by": "assistant"}]}),
+        None,
+    )
+    .await;
+    assert_eq!(refused, reqwest::StatusCode::BAD_REQUEST);
+
+    let said = post_remember(
+        &client,
+        &base,
+        serde_json::json!({"title": "kappa kiln setpoint", "body": "The kappa kiln runs at 900 degrees.",
+            "claims": [{"subject": subject, "predicate": "setpoint", "value": "900", "said_by": "owner"}]}),
+    )
+    .await;
+    let path_said = said["source_path"].as_str().expect("path").to_owned();
+    let plain = post_remember(
+        &client,
+        &base,
+        serde_json::json!({"title": "lambda lathe spindle", "body": "The lambda lathe spindle is oiled weekly.",
+            "claims": [{"subject": unique_id("lambda-lathe"), "predicate": "oil", "value": "weekly"}]}),
+    )
+    .await;
+    let path_plain = plain["source_path"].as_str().expect("path").to_owned();
+    assert_eq!(
+        std::fs::read_dir(vault.path().join("wiki"))
+            .expect("wiki")
+            .count(),
+        2,
+        "the refused note wrote nothing"
+    );
+    assert!(
+        std::fs::read_to_string(&path_said)
+            .expect("note file")
+            .contains("said_by: owner")
+    );
+
+    let doc_said = format!("doc:{path_said}");
+    assert_eq!(said_edges(&db, &doc_said).await, vec![None]);
+    assert_eq!(said_edges(&db, &claim_node).await, vec![None]);
+    assert!(
+        said_edges(&db, &format!("doc:{path_plain}"))
+            .await
+            .is_empty()
+    );
+    assert_eq!(author_of(&db, &path_said).await, "unknown");
+    assert_eq!(author_of(&db, &path_plain).await, "unknown");
+
+    db.execute(
+        "DELETE FROM edge WHERE src = 'person:owner' AND dst = ANY($1);",
+        &[&vec![doc_said.clone(), claim_node.clone()]],
+    )
+    .await
+    .expect("wipe said edges");
+    for _ in 0..2 {
+        let (status, body) =
+            post_door(&client, format!("{base}/sync"), serde_json::json!({}), None).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        assert_eq!(
+            body["ingest_failed"], 0,
+            "a resync re-writes the edges: {body}"
+        );
+    }
+    assert_eq!(said_edges(&db, &doc_said).await, vec![None]);
+    assert_eq!(said_edges(&db, &claim_node).await, vec![None]);
+
+    for path in [&path_said, &path_plain] {
+        store.delete_document(path).await.expect("cleanup doc");
+    }
+}
+
+/// `/search` carries `said_by_owner` on every hit: the owner-said note counts its said claim; a
+/// note restating the same claim slot without `said_by` stays 0.
+#[tokio::test]
+async fn search_hits_carry_said_by_owner() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let vault = tempfile::tempdir().expect("temp vault");
+    std::fs::create_dir_all(vault.path().join("wiki")).expect("wiki dir");
+    let llm_base = format!("http://127.0.0.1:{}/v1", spawn_hashing_embedder().await);
+    let port = free_port();
+    let _server = spawn_server_with_vault(&dsn, port, vault.path(), &llm_base);
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+    wait_for_health(&client, &base).await;
+    let subject = unique_id("mu-mixer");
+
+    let said = post_remember(
+        &client,
+        &base,
+        serde_json::json!({"title": "mu mixer blade speed", "body": "The mu mixer blade spins at 300 rpm.",
+            "claims": [{"subject": subject, "predicate": "speed", "value": "300 rpm", "said_by": "owner"},
+                       {"subject": unique_id("mu-mixer-bowl"), "predicate": "size", "value": "5 litres"}]}),
+    )
+    .await;
+    let path_said = said["source_path"].as_str().expect("path").to_owned();
+    let restated = post_remember(
+        &client,
+        &base,
+        serde_json::json!({"title": "nu mixer blade speed restated", "body": "The nu mixer copies the mu mixer blade speed.",
+            "claims": [{"subject": subject, "predicate": "speed", "value": "310 rpm"}]}),
+    )
+    .await;
+    let path_restated = restated["source_path"].as_str().expect("path").to_owned();
+
+    let hits = post_search(
+        &client,
+        &base,
+        serde_json::json!({"query": "mixer blade speed", "max_results": 10}),
+    )
+    .await;
+    let said_by_owner = |path: &str| {
+        hits.iter()
+            .find(|h| h["source_path"] == path)
+            .map(|h| h["said_by_owner"].clone())
+    };
+    assert_eq!(said_by_owner(&path_said), Some(serde_json::json!(1)));
+    assert_eq!(said_by_owner(&path_restated), Some(serde_json::json!(0)));
+    assert!(
+        hits.iter().all(|h| h["said_by_owner"].is_i64()),
+        "every hit carries the count: {hits:?}"
+    );
+
+    for path in [&path_said, &path_restated] {
+        store.delete_document(path).await.expect("cleanup doc");
+    }
+}
+
 /// Spawn `drudge serve` with a vault and a stub embedder — the correction door needs both: the
 /// wiki note lands in the vault, and vector mode on means ingest/dedup/project all embed.
 fn spawn_server_with_vault(

@@ -12,7 +12,7 @@ use tokio_stream::StreamExt;
 use crate::ask;
 use crate::audit;
 use crate::config;
-use crate::frontmatter::{Author, Claim, FrontMatter};
+use crate::frontmatter::{Author, Claim, FrontMatter, SaidBy};
 use crate::graph;
 use crate::ingest;
 use crate::redact;
@@ -2025,19 +2025,21 @@ fn parse_remember_note(
     let claims: Vec<Claim> = args
         .and_then(|a| a.get("claims"))
         .and_then(Value::as_array)
-        .map(|v| {
-            v.iter()
-                .filter_map(parse_claim)
-                .map(|c| Claim {
-                    subject: clean(&c.subject),
-                    predicate: clean(&c.predicate),
-                    value: clean(&c.value),
-                    kind: clean(&c.kind),
-                    confidence: clean(&c.confidence),
-                })
-                .collect()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .map(parse_claim)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .map(|c| Claim {
+            subject: clean(&c.subject),
+            predicate: clean(&c.predicate),
+            value: clean(&c.value),
+            kind: clean(&c.kind),
+            confidence: clean(&c.confidence),
+            said_by: c.said_by,
         })
-        .unwrap_or_default();
+        .collect();
 
     let front = FrontMatter {
         origin,
@@ -2057,16 +2059,27 @@ fn parse_remember_note(
     Ok(RememberNote { front, body })
 }
 
-fn parse_claim(v: &Value) -> Option<Claim> {
+fn parse_claim(v: &Value) -> Result<Option<Claim>, (i32, String)> {
     let f = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().trim();
+    let said_by = v.get("said_by").map(parse_said_by).transpose()?;
     let (subject, predicate, value) = (f("subject"), f("predicate"), f("value"));
-    (!subject.is_empty() && !predicate.is_empty() && !value.is_empty()).then(|| Claim {
-        subject: subject.to_owned(),
-        predicate: predicate.to_owned(),
-        value: value.to_owned(),
-        kind: f("kind").to_owned(),
-        confidence: f("confidence").to_owned(),
-    })
+    Ok(
+        (!subject.is_empty() && !predicate.is_empty() && !value.is_empty()).then(|| Claim {
+            subject: subject.to_owned(),
+            predicate: predicate.to_owned(),
+            value: value.to_owned(),
+            kind: f("kind").to_owned(),
+            confidence: f("confidence").to_owned(),
+            said_by,
+        }),
+    )
+}
+
+fn parse_said_by(raw: &Value) -> Result<SaidBy, (i32, String)> {
+    raw.as_str()
+        .ok_or_else(|| "said_by must be a string".to_owned())
+        .and_then(str::parse)
+        .map_err(|m| (-32602, format!("claims[].said_by: {m}")))
 }
 
 fn mcp_classify_repo(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
@@ -2748,6 +2761,59 @@ mod tests {
     }
 
     #[test]
+    fn said_by_is_parsed_once_at_the_remember_boundary() {
+        let said_by = |raw: Value| {
+            let args = json!({"title": "t", "body": "b", "claims": [
+                {"subject": "s", "predicate": "p", "value": "v", "said_by": raw},
+                {"subject": "s2", "predicate": "p", "value": "v"},
+            ]});
+            parse_remember_note(Some(&args), &BoringConfig::default())
+                .map(|n| n.front.claims.iter().map(|c| c.said_by).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            said_by(json!("owner")).unwrap(),
+            vec![Some(crate::frontmatter::SaidBy::Owner), None]
+        );
+        for bad in [
+            json!("assistant"),
+            json!("Owner"),
+            json!(""),
+            json!(1),
+            json!(null),
+        ] {
+            assert_eq!(
+                said_by(bad.clone()).map_err(|(code, _)| code),
+                Err(-32602),
+                "{bad} is a 400"
+            );
+        }
+
+        let note = parse_remember_note(
+            Some(&json!({"title": "t", "body": "b", "claims": [
+                {"subject": "s", "predicate": "p", "value": "v", "said_by": "owner"}]})),
+            &BoringConfig::default(),
+        )
+        .unwrap();
+        let file = crate::vault::render_wiki_note("wiki-0001", &note.front, &note.body).unwrap();
+        let (back, _) =
+            crate::frontmatter::parse(&file, "/v/wiki/wiki-0001.md", &BoringConfig::default())
+                .unwrap();
+        assert_eq!(
+            back.claims[0].said_by,
+            Some(crate::frontmatter::SaidBy::Owner)
+        );
+        assert_eq!(back.author, crate::frontmatter::Author::Unknown);
+        assert!(
+            crate::frontmatter::parse(
+                &file.replace("said_by: owner", "said_by: assistant"),
+                "/v/wiki/wiki-0001.md",
+                &BoringConfig::default()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn session_duplicate_gate_catches_rollout_copy() {
         let note = RememberNote {
             front: FrontMatter {
@@ -2762,6 +2828,7 @@ mod tests {
                         value: "secrets in PR via static analysis".to_owned(),
                         kind: "fact".to_owned(),
                         confidence: "certain".to_owned(),
+                        said_by: None,
                     },
                     crate::frontmatter::Claim {
                         subject: "confluence_page".to_owned(),
@@ -2769,6 +2836,7 @@ mod tests {
                         value: "tech-share".to_owned(),
                         kind: "decision".to_owned(),
                         confidence: "certain".to_owned(),
+                        said_by: None,
                     },
                 ],
                 omb_session_id: Some("codex-rollout-a".to_owned()),
@@ -2792,6 +2860,7 @@ mod tests {
                     value: "API keys, tokens, and passwords via regex patterns".to_owned(),
                     kind: "fact".to_owned(),
                     confidence: "certain".to_owned(),
+                    said_by: None,
                 },
                 crate::frontmatter::Claim {
                     subject: "github_action_step".to_owned(),
@@ -2799,6 +2868,7 @@ mod tests {
                     value: "gitleaks/gitleaks-action".to_owned(),
                     kind: "fact".to_owned(),
                     confidence: "certain".to_owned(),
+                    said_by: None,
                 },
             ],
             omb_session_id: Some("codex-rollout-b".to_owned()),
@@ -2851,6 +2921,7 @@ mod tests {
                         value: "weak duplicate notes when the new note is richer".to_owned(),
                         kind: "decision".to_owned(),
                         confidence: "certain".to_owned(),
+                        said_by: None,
                     },
                     crate::frontmatter::Claim {
                         subject: "quality_score".to_owned(),
@@ -2858,6 +2929,7 @@ mod tests {
                         value: "claims, tools, concepts, body tokens, and evidence markers".to_owned(),
                         kind: "fact".to_owned(),
                         confidence: "certain".to_owned(),
+                        said_by: None,
                     },
                 ],
                 omb_session_id: Some("session-a".to_owned()),
@@ -2890,6 +2962,7 @@ mod tests {
                     value: "weak duplicate notes".to_owned(),
                     kind: "decision".to_owned(),
                     confidence: "certain".to_owned(),
+                    said_by: None,
                 }],
                 omb_session_id: Some("session-a".to_owned()),
                 ..Default::default()
@@ -2929,6 +3002,7 @@ mod tests {
                     value: "weak duplicate notes only when incoming quality is higher".to_owned(),
                     kind: "decision".to_owned(),
                     confidence: "certain".to_owned(),
+                    said_by: None,
                 }],
                 omb_session_id: Some("session-a".to_owned()),
                 ..Default::default()
@@ -2949,6 +3023,7 @@ mod tests {
                     value: "weak duplicate notes when the new note is richer".to_owned(),
                     kind: "decision".to_owned(),
                     confidence: "certain".to_owned(),
+                    said_by: None,
                 }],
                 omb_session_id: Some("session-a".to_owned()),
                 ..Default::default()
@@ -3115,6 +3190,7 @@ rules:
                     value: "ABC-123".to_owned(),
                     kind: "fact".to_owned(),
                     confidence: "certain".to_owned(),
+                    said_by: None,
                 }],
                 ..Default::default()
             },

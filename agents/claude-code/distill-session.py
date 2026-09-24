@@ -109,7 +109,7 @@ def main() -> int:
     if was_clamped:
         print(f"[omb-distill] transcript clamped to {len(text)} chars", file=sys.stderr)
 
-    if distill_and_remember(text, origin, repo, session_id):
+    if distill_and_remember(text, origin, repo, session_id, owner_speaks=True):
         _mark(session_id)
         print("[omb-distill] remembered", file=sys.stderr)
         return 0

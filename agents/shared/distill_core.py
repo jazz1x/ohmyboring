@@ -19,6 +19,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 
 # Allow import of shared agent policy library regardless of how this script is invoked.
 # realpath resolves symlinks (e.g. hooks/distill-session.py → agents/claude-code/…) so the
@@ -234,11 +235,34 @@ def _extract_json(text):
         return None
 
 
-def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
-    """Build the distillation prompt, honouring note_lang and repo metadata."""
-    lang = note_lang or NOTE_LANG
-    resolution = normalize_resolution(resolution or _distill_resolution())
-    lang_instruction = {
+CLAIM_SHAPE_RULES = (
+    "  kind: one of fact, decision, assumption, risk, blocked, goal, next.\n"
+    "  confidence: one of certain, likely, assumption, outdated.\n"
+    "  Extract concrete decisions, status changes, version selections, open risks, and any explicit next action still pending.\n"
+    "  Use kind='next' for concrete follow-up actions left undone at session end. Use kind='blocked' only when an active obstacle prevents progress.\n"
+    "  Prefer project-scoped subjects.\n"
+    "  The value must READ AS A STATEMENT that stands on its own months later, not as a tag:\n"
+    "  it says what was chosen, what broke, or what is left to do, and enough of why that the\n"
+    "  next reader does not have to open the note. A value under ~25 characters is almost\n"
+    "  always a tag — write the sentence instead.\n"
+    "  The predicate NAMES THE ASPECT the value is about — which knob, which flow, which file,\n"
+    "  which decision. Ask: could this predicate sit on a completely different claim? If yes it\n"
+    "  is a slot word, not a name. These are rejected for EVERY kind, not just the matching one:\n"
+    "  status, state, result, outcome, info, detail, incident, decision, action, next-step,\n"
+    "  상태, 결정, 결과. Write `path_resolution`, `retry-bound`, `auth-flow` instead.\n"
+    "  Examples:\n"
+    '  {"subject":"kb-rag-bot","predicate":"model-interface","value":"bedrock-converse, because the streaming API drops tool calls mid-turn","kind":"decision","confidence":"certain"}\n'
+    '  {"subject":"qa-tests","predicate":"rtk-dependency","value":"removed — the store was only read in two dead components","kind":"fact","confidence":"certain"}\n'
+    '  {"subject":"omb","predicate":"release-version","value":"0.1.3, the first build that ships the host CLI alongside the image","kind":"fact","confidence":"certain"}\n'
+    '  {"subject":"kb-rag-bot","predicate":"auth-flow","value":"the oauth redirect is never verified, so any return URL is accepted","kind":"risk","confidence":"likely"}\n'
+    '  {"subject":"omb","predicate":"register-endpoint","value":"add /next_actions so the card stops synthesising its own next steps","kind":"next","confidence":"certain"}\n'
+    '  Counter-examples, all rejected: value "removed", value "completed", value "PASS",\n'
+    '  predicate "incident", predicate "status".\n'
+)
+
+
+def _lang_instruction(lang):
+    return {
         "ko": "ALL fields MUST be in Korean (한국어), regardless of the transcript's language. "
         "The TITLE especially must be a Korean sentence — even if the session is full of English "
         "ticket IDs (e.g. [FEDEV-97]) or English error names, write the title in Korean and keep "
@@ -256,6 +280,12 @@ def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
         "title from the transcript.",
     }.get(lang, "Write in the same language as the transcript.")
 
+
+def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
+    """Build the distillation prompt, honouring note_lang and repo metadata."""
+    lang = note_lang or NOTE_LANG
+    resolution = normalize_resolution(resolution or _distill_resolution())
+    lang_instruction = _lang_instruction(lang)
     repo_hint = f" repo='{repo}'." if repo else ""
     origin_hint = f" origin='{origin}'." if origin else ""
     resolution_contract = resolution_prompt_contract(resolution)
@@ -286,29 +316,8 @@ def _build_prompt(text, origin, repo, note_lang=None, resolution=None):
         "- tools: concrete tools/commands used (e.g., git, bun, terraform). [] if none.\n"
         "- concepts: recurring ideas/axes (e.g., code_parity, version_upgrade). [] if none.\n"
         "- claims: 3-5 durable facts/decisions/risks/next-steps as (subject, predicate, value, kind, confidence). [] only if none exist.\n"
-        "  kind: one of fact, decision, assumption, risk, blocked, goal, next.\n"
-        "  confidence: one of certain, likely, assumption, outdated.\n"
-        "  Extract concrete decisions, status changes, version selections, open risks, and any explicit next action still pending.\n"
-        "  Use kind='next' for concrete follow-up actions left undone at session end. Use kind='blocked' only when an active obstacle prevents progress.\n"
-        "  Prefer project-scoped subjects.\n"
-        "  The value must READ AS A STATEMENT that stands on its own months later, not as a tag:\n"
-        "  it says what was chosen, what broke, or what is left to do, and enough of why that the\n"
-        "  next reader does not have to open the note. A value under ~25 characters is almost\n"
-        "  always a tag — write the sentence instead.\n"
-        "  The predicate NAMES THE ASPECT the value is about — which knob, which flow, which file,\n"
-        "  which decision. Ask: could this predicate sit on a completely different claim? If yes it\n"
-        "  is a slot word, not a name. These are rejected for EVERY kind, not just the matching one:\n"
-        "  status, state, result, outcome, info, detail, incident, decision, action, next-step,\n"
-        "  상태, 결정, 결과. Write `path_resolution`, `retry-bound`, `auth-flow` instead.\n"
-        "  Examples:\n"
-        '  {"subject":"kb-rag-bot","predicate":"model-interface","value":"bedrock-converse, because the streaming API drops tool calls mid-turn","kind":"decision","confidence":"certain"}\n'
-        '  {"subject":"qa-tests","predicate":"rtk-dependency","value":"removed — the store was only read in two dead components","kind":"fact","confidence":"certain"}\n'
-        '  {"subject":"omb","predicate":"release-version","value":"0.1.3, the first build that ships the host CLI alongside the image","kind":"fact","confidence":"certain"}\n'
-        '  {"subject":"kb-rag-bot","predicate":"auth-flow","value":"the oauth redirect is never verified, so any return URL is accepted","kind":"risk","confidence":"likely"}\n'
-        '  {"subject":"omb","predicate":"register-endpoint","value":"add /next_actions so the card stops synthesising its own next steps","kind":"next","confidence":"certain"}\n'
-        '  Counter-examples, all rejected: value "removed", value "completed", value "PASS",\n'
-        '  predicate "incident", predicate "status".\n'
-        '- Pure chit-chat with no real work → output only: {"skip": true}\n\n'
+        + CLAIM_SHAPE_RULES
+        + '- Pure chit-chat with no real work → output only: {"skip": true}\n\n'
         "=== SESSION TRANSCRIPT ===\n" + text
     )
 
@@ -619,8 +628,19 @@ def _prepare_note(parsed):
     tags = [t.strip() for t in parsed.get("tags", []) if isinstance(t, str) and t.strip()][:6]
     tools = [t.strip() for t in parsed.get("tools", []) if isinstance(t, str) and t.strip()][:8]
     concepts = [t.strip() for t in parsed.get("concepts", []) if isinstance(t, str) and t.strip()][:8]
+    return {
+        "title": title,
+        "body": body,
+        "tags": tags,
+        "tools": tools,
+        "concepts": concepts,
+        "claims": _prepare_claims(parsed.get("claims", [])),
+    }
+
+
+def _prepare_claims(raw_claims):
     claims = []
-    for c in parsed.get("claims", []):
+    for c in raw_claims:
         if isinstance(c, dict) and c.get("subject") and c.get("predicate") and c.get("value"):
             subject = str(c["subject"]).strip()
             predicate = str(c["predicate"]).strip()
@@ -636,14 +656,99 @@ def _prepare_note(parsed):
                     "confidence": str(c.get("confidence", "certain")).strip() or "certain",
                 }
             )
-    return {
-        "title": title,
-        "body": body,
-        "tags": tags,
-        "tools": tools,
-        "concepts": concepts,
-        "claims": claims,
-    }
+    return claims
+
+
+SAID_BY_OWNER = "owner"
+_TURN_START = re.compile(r"^\[(user|assistant|tool)\] ", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class SaidClaims:
+    claims: list
+
+
+@dataclass(frozen=True)
+class SaidFailed:
+    reason: str
+
+
+def owner_turns(transcript_text):
+    parts = _TURN_START.split(transcript_text or "")
+    return "\n".join(
+        f"[user] {body.strip()}"
+        for role, body in zip(parts[1::2], parts[2::2], strict=True)
+        if role == "user" and body.strip()
+    )
+
+
+def _build_said_prompt(owner_text, origin, repo, note_lang=None):
+    repo_hint = f" repo='{repo}'." if repo else ""
+    origin_hint = f" origin='{origin}'." if origin else ""
+    return (
+        "You are a distillation engine. The text below holds ONLY the turns the owner typed in a "
+        "session; every assistant reply was removed. Extract the durable facts, decisions, risks and "
+        "next steps the OWNER stated. A question the owner asked is not a claim. "
+        f"{_lang_instruction(note_lang or NOTE_LANG)}{origin_hint}{repo_hint}\n\n"
+        "Output ONLY a single JSON object, no text before or after it:\n"
+        '{"claims": [{"subject":"...","predicate":"...","value":"...","kind":"...","confidence":"..."}]}\n\n'
+        "Rules:\n"
+        "- claims: 0-5 durable facts/decisions/risks/next-steps the owner stated, as (subject, predicate, value, kind, confidence). [] when the owner stated none.\n"
+        + CLAIM_SHAPE_RULES
+        + "\n=== OWNER TURNS ===\n"
+        + owner_text
+    )
+
+
+def _extract_said_claims(text, origin, repo):
+    owner_text = owner_turns(text)
+    parsed = _call_llm(_build_said_prompt(owner_text, origin, repo)) if owner_text else {"claims": []}
+    raw = parsed.get("claims", []) if isinstance(parsed, dict) else None
+    if not isinstance(raw, list):
+        return SaidFailed("llm_failed" if raw is None else "claims_not_a_list")
+    return SaidClaims([{**c, "said_by": SAID_BY_OWNER} for c in _prepare_claims(raw)])
+
+
+def _claim_key(claim):
+    return tuple(claim[f].casefold() for f in ("subject", "predicate", "value"))
+
+
+def _merge_said(claims, said):
+    said_by_key = {_claim_key(c): c for c in said}
+    first_keys = {_claim_key(c) for c in claims}
+    marked = [{**c, "said_by": SAID_BY_OWNER} if _claim_key(c) in said_by_key else c for c in claims]
+    return marked + [c for k, c in said_by_key.items() if k not in first_keys]
+
+
+def _with_owner_claims(claims, text, origin, repo, session_id):
+    match _extract_said_claims(text, origin, repo):
+        case SaidClaims(said):
+            event_log.try_append_event(
+                "distill-session",
+                "said_extraction",
+                "ok",
+                session_id=session_id,
+                origin=origin,
+                repo=repo,
+                said_claims=len(said),
+            )
+            return _merge_said(claims, said)
+        case SaidFailed(reason):
+            print(
+                f"[distill-session] owner-turn extraction failed ({reason}); "
+                "note goes out without said_by claims",
+                file=sys.stderr,
+            )
+            event_log.try_append_event(
+                "distill-session",
+                "said_extraction",
+                "failed",
+                session_id=session_id,
+                origin=origin,
+                repo=repo,
+                reason=reason,
+            )
+            return claims
 
 
 def _normalize_claim_kind(kind, subject, predicate, value):
@@ -1078,8 +1183,12 @@ def _log_skip_event(session_id, origin, repo, resolution):
 BACKSTOP_CLAMP = transcript.distill_backstop_clamp()
 
 
-def distill_and_remember(text, origin, repo, session_id=""):
-    """Distill the transcript text via local LLM and write it through ohmyboring's remember tool."""
+def distill_and_remember(text, origin, repo, session_id="", owner_speaks=False):
+    """Distill the transcript text via local LLM and write it through ohmyboring's remember tool.
+
+    `owner_speaks`: the transcript's `[user]` turns are the owner's own words (Claude Code, Codex),
+    so a second pass over those turns alone may mark claims `said_by: owner`.
+    """
     if len(text) > BACKSTOP_CLAMP:
         text, _ = transcript.clamp_text(text, BACKSTOP_CLAMP)
         print(
@@ -1168,6 +1277,9 @@ def distill_and_remember(text, origin, repo, session_id=""):
         verifier_status = "repaired"
         print("[distill-session] resolution repair passed", file=sys.stderr)
 
+    claims = (
+        _with_owner_claims(note["claims"], text, origin, repo, session_id) if owner_speaks else note["claims"]
+    )
     remember = _call_remember(
         note["title"],
         note["body"],
@@ -1176,7 +1288,7 @@ def distill_and_remember(text, origin, repo, session_id=""):
         note["tags"],
         note["tools"],
         note["concepts"],
-        note["claims"],
+        claims,
         session_id,
     )
     _log_resolution_event(session_id, origin, repo, report, verifier_status, remember.status)

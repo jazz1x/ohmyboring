@@ -511,12 +511,13 @@ class DistillExitCodeTests(unittest.TestCase):
                 mock.patch.object(distill, "git_remote_url", return_value=""),
                 mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
                 mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
-                mock.patch.object(distill, "distill_and_remember", return_value=False),
+                mock.patch.object(distill, "distill_and_remember", return_value=False) as remember,
                 mock.patch.object(distill, "_mark") as mark,
             ):
                 rc = distill.main()
 
             self.assertEqual(rc, 1)
+            self.assertTrue(remember.call_args.kwargs["owner_speaks"])
             mark.assert_called_once_with("abc", retry=True, reason="remember failed")
             self.assertIn("remember failed", stderr.getvalue())
         finally:

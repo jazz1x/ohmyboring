@@ -470,6 +470,110 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertIn("event log write failed", stderr.getvalue())
 
 
+MIXED_TRANSCRIPT = "\n".join(
+    [
+        "[user] 완료 표시 말고 재시도를 보이게 두자.",
+        "backoff 는 지수로.",
+        "[assistant] PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
+        "[tool] Bash gh pr checks 159",
+        "[user] 다음엔 verifier 를 붙인다.",
+    ]
+)
+
+OWNER_SAID = {
+    "claims": [
+        {
+            "subject": "ingest",
+            "predicate": "completion-state",
+            "value": "retry-visible",
+            "kind": "decision",
+            "confidence": "certain",
+        },
+        {
+            "subject": "ingest",
+            "predicate": "backoff-policy",
+            "value": "exponential backoff instead of marking done after bounded attempts",
+            "kind": "decision",
+            "confidence": "certain",
+        },
+    ]
+}
+
+
+class OwnerSaidClaimsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env = mock.patch.dict(
+            os.environ,
+            {
+                "BORING_DISTILL_RESOLUTION": "evidence",
+                "BORING_EVENT_LOG": os.path.join(self.tmp.name, "events.ndjson"),
+                "BORING_EVENT_SINK": "spool",
+            },
+        )
+        self.env.start()
+        self.prompts = []
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def _run(self, owner_reply, owner_speaks=True):
+        def llm(prompt):
+            self.prompts.append(prompt)
+            return owner_reply if "=== OWNER TURNS ===" in prompt else RICH_NOTE
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(distill_core, "_call_llm", side_effect=llm),
+            mock.patch.object(
+                distill_core,
+                "_call_remember",
+                return_value=distill_core.RememberOutcome(True, "remembered"),
+            ) as remember,
+            mock.patch.object(distill_core.sys, "stderr", stderr),
+        ):
+            ok = distill_core.distill_and_remember(
+                MIXED_TRANSCRIPT, "personal", "oh-my-boring", "s-said", owner_speaks=owner_speaks
+            )
+        remember.assert_called_once()
+        return ok, remember.call_args.args[7], stderr.getvalue()
+
+    def test_only_owner_turn_claims_carry_said_by(self):
+        ok, claims, _ = self._run(OWNER_SAID)
+
+        self.assertTrue(ok)
+        said = {c["predicate"] for c in claims if c.get("said_by") == "owner"}
+        self.assertEqual(said, {"completion-state", "backoff-policy"})
+        self.assertEqual([c["predicate"] for c in claims].count("completion-state"), 1)
+        duration = next(c for c in claims if c["predicate"] == "duration")
+        self.assertNotIn("said_by", duration)
+        (owner_prompt,) = [p for p in self.prompts if "=== OWNER TURNS ===" in p]
+        self.assertIn("backoff 는 지수로.", owner_prompt)
+        self.assertIn("verifier 를 붙인다", owner_prompt)
+        self.assertNotIn("2m10s", owner_prompt)
+        self.assertNotIn("gh pr checks", owner_prompt)
+
+    def test_sessions_without_owner_turns_get_no_second_pass(self):
+        ok, claims, _ = self._run(OWNER_SAID, owner_speaks=False)
+
+        self.assertTrue(ok)
+        self.assertFalse(any("=== OWNER TURNS ===" in p for p in self.prompts))
+        self.assertFalse(any("said_by" in c for c in claims))
+
+    def test_failed_second_pass_still_remembers_and_says_so(self):
+        ok, claims, stderr = self._run(None)
+
+        self.assertTrue(ok)
+        self.assertEqual(claims, distill_core._prepare_note(RICH_NOTE)["claims"])
+        self.assertIn("owner-turn extraction failed (llm_failed)", stderr)
+        with open(os.environ["BORING_EVENT_LOG"], encoding="utf-8") as f:
+            events = [json.loads(line) for line in f]
+        said = [e for e in events if e["event"] == "said_extraction"]
+        self.assertEqual([e["status"] for e in said], ["failed"])
+        self.assertEqual(events[-1]["remember_status"], "remembered")
+
+
 def _restore_env(name, value):
     if value is None:
         os.environ.pop(name, None)

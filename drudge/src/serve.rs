@@ -353,6 +353,7 @@ mod tests {
             superseded_by: vec![],
             used_count: 0,
             contested_count: 0,
+            said_by_owner: 0,
             claims: vec![],
             claims_total: None,
         };
@@ -396,6 +397,7 @@ mod tests {
             superseded_by: vec![],
             used_count: 0,
             contested_count: 0,
+            said_by_owner: 0,
             claims: vec![],
             claims_total: None,
         };
@@ -426,6 +428,7 @@ mod tests {
             superseded_by: vec![],
             used_count: 0,
             contested_count: 0,
+            said_by_owner: 0,
             claims: vec![],
             claims_total: None,
         };
@@ -456,6 +459,7 @@ mod tests {
             superseded_by: vec![],
             used_count: 3,
             contested_count: 1,
+            said_by_owner: 0,
             claims: vec![],
             claims_total: None,
         };
@@ -816,6 +820,7 @@ pub(crate) struct SearchHit {
     pub(crate) superseded_by: Vec<String>,
     pub(crate) used_count: i64,
     pub(crate) contested_count: i64,
+    pub(crate) said_by_owner: i64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) claims: Vec<crate::store::RegisterRow>,
     #[serde(skip_serializing_if = "Option::is_none")]

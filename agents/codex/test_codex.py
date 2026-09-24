@@ -194,6 +194,7 @@ def test_success_passes_session_id_to_shared_core():
             "personal",
             "oh-my-boring",
             "codex-abc",
+            owner_speaks=True,
         )
         mark.assert_called_once_with("codex-abc")
     finally:
