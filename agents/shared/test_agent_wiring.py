@@ -699,6 +699,73 @@ def test_kimi_hooks_are_deduped_across_path_spellings():
         assert 'name = "kimi"' in text, "the rest of the config must survive"
 
 
+def test_claude_code_hook_commands_pin_the_installing_interpreter():
+    """The hook shell's PATH may front /usr/bin, where bare `python3` is Xcode's 3.9."""
+    with tempfile.TemporaryDirectory() as d:
+        settings = Path(d) / "settings.json"
+        agent_wiring.wire_claude_code(settings)
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = [
+            h["command"] for groups in data["hooks"].values() for group in groups for h in group["hooks"]
+        ]
+        assert len(commands) == 3
+        for command in commands:
+            assert command.split(" ", 1)[0] == sys.executable
+        assert os.path.isabs(sys.executable)
+        assert not any(command.startswith("python3 ") for command in commands)
+
+
+def test_kimi_hook_commands_pin_the_installing_interpreter():
+    with tempfile.TemporaryDirectory() as d:
+        config = Path(d) / "config.toml"
+        agent_wiring.wire_kimi(config)
+        lines = [
+            line for line in config.read_text(encoding="utf-8").splitlines() if line.startswith('command = "')
+        ]
+        assert len(lines) == 2
+        for line in lines:
+            assert line.startswith(f'command = "{sys.executable} ')
+        assert not any(line.startswith('command = "python3 ') for line in lines)
+
+
+def test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3():
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d) / "oh-my-boring"
+        (home / "hooks").mkdir(parents=True)
+        (home / "hooks" / "recall.py").write_text("# recall\n", encoding="utf-8")
+
+        settings = Path(d) / "settings.json"
+        original = f"python3 {home}/hooks/recall.py"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {
+                                "matcher": "",
+                                "hooks": [{"type": "command", "command": original}],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(agent_wiring, "BORING_HOME", str(home)):
+            agent_wiring.wire_claude_code(settings)
+
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        recall_commands = [
+            h["command"]
+            for groups in data["hooks"].values()
+            for group in groups
+            for h in group["hooks"]
+            if h["command"].endswith("/hooks/recall.py")
+        ]
+        assert recall_commands == [original]
+
+
 if __name__ == "__main__":
     test_install_reports_failure()
     test_install_returns_success_when_ok()
@@ -715,6 +782,9 @@ if __name__ == "__main__":
     test_wire_hermes_missing_slack_briefing_has_no_side_effects()
     test_real_hermes_entry_scripts_ship_every_module_they_import()
     test_kimi_hooks_are_deduped_across_path_spellings()
+    test_claude_code_hook_commands_pin_the_installing_interpreter()
+    test_kimi_hook_commands_pin_the_installing_interpreter()
+    test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3()
     test_local_deps_are_transitive_and_reach_the_shared_dir()
     test_install_hermes_skills_removes_legacy_nested_duplicate()
     test_install_codex_host_worker_macos_writes_launch_agent()
