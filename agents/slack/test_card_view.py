@@ -459,6 +459,31 @@ class CardV2ShapeTests(unittest.TestCase):
         plain = cv.build_blocks([proposal], reviews=[], lang="ko")
         self.assertNotIn("에이전트가 가른 것", _blocks_text(plain))
 
+    def test_repair_and_review_buttons_carry_no_empty_value(self):
+        # Slack rejected the live card with invalid_blocks (value must be 1+ chars when
+        # present) and no handler reads value on these rows — the key must be absent, not "".
+        repair = cc.Repair(
+            subject="foodspring-front",
+            variants=["foodspring front", "foodspring-front"],
+            rows=3218,
+            notes=212,
+        )
+        reviews = [
+            cc.ProposedVerdict(session_id="s1", note="/vault/wiki/wiki-0700.md", kind="contested", at="t-1"),
+        ]
+        blocks = cv.build_blocks(
+            [self._proposal()],
+            repairs=[repair],
+            repairs_total_groups=1,
+            reviews=reviews,
+            lang="ko",
+        )
+        action_rows = [b for b in blocks if b["type"] == "actions"]
+        self.assertEqual(len(action_rows), 3)  # repair row + advice row + review row
+        for row in action_rows:
+            for button in row["elements"]:
+                self.assertTrue("value" not in button or button["value"])
+
     def test_review_lane_counts_against_the_block_limit(self):
         # r3.1: the review lane's header and rows live inside the same 50-block cap as the
         # advice rows — the advice loop reserves their tail, and review rows that still do
