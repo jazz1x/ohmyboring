@@ -696,6 +696,7 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
         with (
             mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}),
             mock.patch("drudge_client.DrudgeClient") as client,
+            mock.patch.object(distill_core.event_log, "append_event"),
         ):
             distill_core.write_consumption_to_graph("s1", self._records(), transcript)
         (sid, when, used, contested), kwargs = client.return_value.consumption.call_args
