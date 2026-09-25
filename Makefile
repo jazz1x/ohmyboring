@@ -27,7 +27,7 @@ down: ## Stop the whole stack, including Postgres when vector mode was used (kee
 	  *) $(COMPOSE) down ;; \
 	esac
 
-build: ## Build everything that runs: the compose images (boring-drudge + boring-door) and the host CLI binary (doctor checks the engine build_sha and the host CLI stamp against the checkout)
+build: ## Build the compose images (boring-drudge + boring-door) and the host CLI binary (doctor checks the engine build_sha and the host CLI stamp against the checkout)
 	BUILD_SHA=$$(git rev-parse HEAD 2>/dev/null || true) $(COMPOSE) build
 	cd drudge && cargo build --release
 
