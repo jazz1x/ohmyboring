@@ -37,7 +37,7 @@ _TIMEOUT = 30.0
 class BoringRetriever(BaseRetriever):
     """Our search, wearing LangChain's jacket — an agent plugs this in and gets our memory.
 
-    base_url has no default: the caller names the engine (the door idiom reads
+    base_url has no default: the caller names the door or the engine (the door idiom reads
     BORING_DOOR_URL; here the caller passes the URL in). session_id is opt-in — set it
     and /search leaves a handed edge per hit for that session, so a later record_verdict
     has something to attach to. claims > 0 asks each hit to hand over that many of the

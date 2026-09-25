@@ -104,11 +104,11 @@ class _Handler(BaseHTTPRequestHandler):
 
 class StoreTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.server = self._serve()
+        self.door = self._serve()
         self.engine = self._serve()
         self.store = BoringStore(
             engine_url=f"http://127.0.0.1:{self.engine.server_port}",
-            door_url=f"http://127.0.0.1:{self.server.server_port}",
+            door_url=f"http://127.0.0.1:{self.door.server_port}",
         )
 
     def _serve(self) -> ThreadingHTTPServer:
@@ -167,7 +167,7 @@ class StoreTest(unittest.TestCase):
 
     def test_put_existing_key_supersedes_and_same_value_reput_is_a_noop(self) -> None:
         subject = _subject_for(NS, "prefs")
-        self.server.claim_sources[subject] = _claim_payload(
+        self.door.claim_sources[subject] = _claim_payload(
             NS, "prefs", {"lang": "ko"}, "/vault/wiki/wiki-9001.md", "2026-09-23T10:00:00+00:00"
         )
         self.assertIsNone(self.store.put(NS, "prefs", {"lang": "ja"}))
@@ -176,7 +176,7 @@ class StoreTest(unittest.TestCase):
 
         # A→B→A: the title is the key's plain name — since r4.1 the engine skips the
         # duplicate gate for corrected notes, so a repeated title lands a fresh note.
-        self.server.claim_sources[subject] = _claim_payload(
+        self.door.claim_sources[subject] = _claim_payload(
             NS, "prefs", {"lang": "ja"}, "/vault/wiki/wiki-9002.md", "2026-09-23T10:05:00+00:00"
         )
         self.assertIsNone(self.store.put(NS, "prefs", {"lang": "ko"}))
@@ -185,7 +185,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(body1["title"], body2["title"])
 
         # Same value already current: the GET happens, no /remember leaves.
-        self.server.claim_sources[subject] = _claim_payload(
+        self.door.claim_sources[subject] = _claim_payload(
             NS, "prefs", {"lang": "ko"}, "/vault/wiki/wiki-9003.md", "2026-09-23T10:10:00+00:00"
         )
         self.assertIsNone(self.store.put(NS, "prefs", {"lang": "ko"}))
@@ -193,7 +193,7 @@ class StoreTest(unittest.TestCase):
 
     def test_put_inherits_created_at_from_the_current_value(self) -> None:
         subject = _subject_for(NS, "prefs")
-        self.server.claim_sources[subject] = _claim_payload(
+        self.door.claim_sources[subject] = _claim_payload(
             NS,
             "prefs",
             {"lang": "ko"},
@@ -240,7 +240,7 @@ class StoreTest(unittest.TestCase):
             {"note": "/vault/wiki/wiki-9001.md", "valid_from": "2026-09-23T10:00:00+00:00"},
             {"note": "/vault/wiki/wiki-9002.md", "valid_from": "2026-09-23T11:00:00+00:00"},
         ]
-        self.server.claim_sources[subject] = payload
+        self.door.claim_sources[subject] = payload
         item = self.store.get(NS, "prefs")
         self.assertEqual(item.value, {"lang": "ja"})
         self.assertEqual(item.key, "prefs")
@@ -276,7 +276,7 @@ class StoreTest(unittest.TestCase):
             self.store.batch([PutOp(NS, "prefs", {"lang": "ko"}, index=["lang"])])
         with self.assertRaises(ValueError):
             self.store.batch([PutOp(NS, "prefs", {"lang": "ko"}, ttl=5.0)])
-        self.assertEqual(self.server.requests + self.engine.requests, [], "a refused op must send nothing")
+        self.assertEqual(self.door.requests + self.engine.requests, [], "a refused op must send nothing")
 
     def test_search_boring_prefix_maps_hits_and_anything_else_is_next_wheel(self) -> None:
         self.engine.hits = [HIT]
@@ -321,7 +321,7 @@ class StoreTest(unittest.TestCase):
             ),
         ]
         for rows in (listed, listed[::-1]):
-            self.server.listed = rows
+            self.door.listed = rows
             self.assertEqual([i.key for i in self.store.search(("agent", "a"))], ["/a1.md", "/a2.md"])
             everything = self.store.search(("agent",))
             self.assertEqual([i.key for i in everything], ["/a1.md", "/a2.md", "/b1.md"])
@@ -334,7 +334,7 @@ class StoreTest(unittest.TestCase):
             self.assertEqual(self.store.search(("agent",), limit=2, offset=3), [])
             self.assertEqual(self.store.search(("agent", "zzz")), [])
         self.assertEqual(
-            {path for method, path, _ in self.server.requests},
+            {path for method, path, _ in self.door.requests},
             {"/claim-sources?predicate=langgraph-store-value"},
         )
         self.assertEqual(self.engine.requests, [], "listing reads the door, never the engine")
