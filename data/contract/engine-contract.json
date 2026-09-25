@@ -64,7 +64,10 @@
   "door_routes": [
     "GET /approved",
     "GET /claim-source",
-    "GET /projects"
+    "GET /claim-sources",
+    "GET /projects",
+    "GET /repairs/split-subjects",
+    "POST /repairs/split-subjects"
   ],
   "http_routes": [
     "GET /audit",
@@ -376,6 +379,10 @@
     },
     "remember": {
       "properties": {
+        "author": {
+          "description": "who wrote the note: inferred | unknown | agent:<your name> (default unknown). owner is accepted only through the owner's door",
+          "type": "string"
+        },
         "body": {
           "description": "the curated note body (markdown problem-solving narrative)",
           "type": "string"
@@ -409,6 +416,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "judge": {
+          "description": "who judged the corrections named in supersedes, same values as author; carried on those edges (default = author)",
+          "type": "string"
         },
         "omb_session_id": {
           "description": "optional ephemeral ingestion marker — include only when requested by the ingestion worker",

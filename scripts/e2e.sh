@@ -10,8 +10,8 @@
 #   3. recall    — read it back via `recall`; assert body round-trips
 #   3b. query-log — vector mode: the recall call left an mcp.recall row
 #   4. neighbors — wiki mode: rejected with -32603; vector mode: returns results
-#   5. forget    — delete the throwaway note
-#   6. recall    — assert deletion
+#   6. forget    — refused: closed during the migration
+#   7. recall    — the note is still there
 #
 # This needs a live stack on :7700 (make up). It does NOT start, stop, or build
 # anything. If the stack is down it SKIPS (exit 0), never failing CI on a missing
@@ -204,19 +204,18 @@ else
 fi
 
 # --- 6) forget ------------------------------------------------------------------
-echo "6) forget (MCP tools/call forget — clean up)…"
+echo "6) forget (MCP tools/call forget — closed during the migration)…"
 req=$(jq -nc --arg t "$TITLE" \
   '{jsonrpc:"2.0",id:5,method:"tools/call",params:{name:"forget",arguments:{title:$t}}}')
 resp=$(curl -sf -m30 "$MCP" -H 'content-type: application/json' -d "$req") \
   || fail "forget call failed (curl)"
 err=$(printf '%s' "$resp" | jq -r '.error.message // empty')
-[ -z "$err" ] || fail "forget returned JSON-RPC error: $err"
-ack=$(printf '%s' "$resp" | jq -r '.result.content[0].text // empty')
-printf '%s' "$ack" | grep -q "forgot" || fail "forget ack missing 'forgot': $ack"
-echo "   → $ack"
+printf '%s' "$err" | grep -q "closed during the migration" \
+  || fail "forget was not refused as closed during the migration: $resp"
+echo "   → refused: $err"
 
 # --- 7) recall after forget -----------------------------------------------------
-echo "7) recall after forget (assert the throwaway note is gone)…"
+echo "7) recall after forget (assert the throwaway note is still there)…"
 req=$(jq -nc --arg q "$NONCE" \
   '{jsonrpc:"2.0",id:7,method:"tools/call",params:{name:"recall",arguments:{query:$q}}}')
 resp=$(curl -sf -m120 "$MCP" -H 'content-type: application/json' -d "$req") \
@@ -225,20 +224,13 @@ err=$(printf '%s' "$resp" | jq -r '.error.message // empty')
 [ -z "$err" ] || fail "recall returned JSON-RPC error: $err"
 text=$(printf '%s' "$resp" | jq -r '.result.content[0].text // empty')
 printf '%s' "$text" | grep -q "$NONCE" \
-  && fail "forget failed — nonce '$NONCE' still found after recall: $text" \
-  || echo "   → note no longer recalled"
-
-# --- 8) assert the throwaway file was actually deleted from disk -----------------
-echo "8) assert throwaway file removed from vault/wiki …"
-if [ -f "$note_path" ]; then
-  fail "forget did not remove the file: $note_path"
-fi
-echo "   → file removed"
+  || fail "note with nonce '$NONCE' gone after a refused forget: $text"
+echo "   → note still recalled"
 
 if [ "$VEC" = 0 ]; then
-  echo "OK: e2e passed — wiki-mode remember→recall→forget round-trips, vector-only neighbors/next_actions rejected."
+  echo "OK: e2e passed — wiki-mode remember→recall round-trips, forget refused, vector-only neighbors/next_actions rejected."
 else
-  echo "OK: e2e passed — vector-mode remember→search→recall→neighbors→next_actions→forget round-trips."
+  echo "OK: e2e passed — vector-mode remember→search→recall→neighbors→next_actions round-trips, forget refused."
 fi
 
-echo "NOTE: the throwaway note (title '$TITLE' / $note_path) was removed by the forget step."
+echo "NOTE: the throwaway note (title '$TITLE' / $note_path) stays in the vault — forget is closed during the migration."

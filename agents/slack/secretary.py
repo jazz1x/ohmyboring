@@ -91,10 +91,17 @@ def _handed_paths_from(answer_text: str) -> list[str]:
 
 def _correction_line(result: dict) -> str:
     """The one line the thread gets back: what was recorded and how much it replaced, or the error."""
+    if result.get("error") == "number required":
+        return f"노트가 {result['count']}개입니다 — 「정정 2: …」처럼 번호를 붙여 주세요"
     if result.get("error"):
         return f"정정 기록 실패 — {result['error']}"
+    if result.get("duplicate"):
+        # Since r4.1 the engine never gates a correction, so a duplicate answer means the
+        # write was swallowed — the old note still stands and the thread must hear failure.
+        name = result["duplicate"].rsplit("/", 1)[-1]
+        return f"정정 기록 안 됨 — 기존 노트 {name} 와 같다고 봄"
     name = (result.get("source_path") or "?").rsplit("/", 1)[-1]
-    return f"정정 기록 → {name} (대체 {len(result.get('supersedes') or [])})"
+    return f"정정 기록 → {name} (대체 {result['supersedes']})"
 
 
 def on_thread_reply(
@@ -106,18 +113,20 @@ def on_thread_reply(
     owner_id: str | None = None,
 ) -> dict | None:
     """A thread reply on the bot's own answer, starting with "정정:", becomes a new note that
-    replaces the answer's notes — all of them, or one, when the reply says "정정 2:". Slack
+    replaces one of the answer's notes — the only one, or the one "정정 2:" names. Slack
     sends thread replies as `message` events, and the transport keeps no state about which ts
     was its own answer: the parent is read back through the API (one call) and recognized by
     the answer header the brain puts on every answer. Everything else is None — threaded
     chatter that is not a correction, a correction on someone else's message, a correction
     from someone who is not the owner — only the owner's correction on the bot's own answer
-    becomes a note."""
+    becomes a note. Past the owner check a configured owner_id means the reply is the owner's,
+    so the note is signed `owner`; with no owner_id nobody is confirmed and the note goes unsigned."""
     thread_ts = event.get("thread_ts")
     if not thread_ts:
         return None
     if owner_id is not None and event.get("user") != owner_id:
         return None
+    author = None if owner_id is None else secretary_core.OWNER
     if secretary_core.parse_correction(event.get("text") or "") is None:
         return None
     parent = web.conversations_replies(channel=event["channel"], ts=thread_ts, limit=1)["messages"][0]
@@ -130,6 +139,7 @@ def on_thread_reply(
         "",
         _handed_paths_from(parent["text"]),
         event["text"],
+        author=author,
     )
     web.chat_postMessage(channel=event["channel"], thread_ts=thread_ts, text=_correction_line(result))
     return result

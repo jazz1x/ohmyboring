@@ -282,23 +282,23 @@ def _remember_recorder():
             "source_path": "/vault/wiki/wiki-1077.md",
             "wiki_id": "wiki-1077",
             "duplicate": None,
-            "supersedes": kw.get("supersedes") or [],
-            "unknown": [],
+            "supersedes": len(kw.get("supersedes") or []),
+            "unknown": 0,
         }
 
     return calls, fake
 
 
-def test_correct_without_a_number_supersedes_everything_the_answer_carried():
+def test_correct_without_a_number_supersedes_the_answers_one_note():
     calls, fake = _remember_recorder()
     out = sc.correct(
         "slack:C123:1.000",
         "배포 언제였더라",
-        ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md"],
+        ["/vault/wiki/wiki-0435.md"],
         "정정: 재시작은 매일 2시에 한다",
         remember=fake,
     )
-    assert calls[0]["supersedes"] == ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md"]
+    assert calls[0]["supersedes"] == ["/vault/wiki/wiki-0435.md"]
     assert calls[0]["tags"] == ["correction", "slack"]
     assert calls[0]["body"] == "질문: 배포 언제였더라\n\n정정: 재시작은 매일 2시에 한다"
     assert calls[0]["title"] == "재시작은 매일 2시에 한다"

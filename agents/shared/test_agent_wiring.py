@@ -430,6 +430,22 @@ def test_install_codex_host_worker_macos_writes_launch_agent():
         assert "<integer>1200</integer>" in text
         assert "CODEX_INCLUDE_ROLLOUTS=1" in text
         assert "COLLECT_STABLE_AGE_SECONDS=1800" in text
+        assert text == agent_wiring._codex_host_worker_plist(str(omb))
+
+
+def test_codex_host_worker_plist_pins_the_installing_interpreter():
+    """launchd's PATH is empty, so a bare `python3` resolves to Xcode's 3.9 and dies on import."""
+    with tempfile.TemporaryDirectory() as d:
+        omb = Path(d) / "omb"
+        collector = omb / "agents" / "codex" / "collect-sessions.py"
+        collector.parent.mkdir(parents=True)
+        collector.write_text("# stub", encoding="utf-8")
+
+        text = agent_wiring._codex_host_worker_plist(str(omb))
+
+        assert os.path.isabs(sys.executable)
+        assert f"<string>{sys.executable}</string>" in text
+        assert "<string>python3</string>" not in text
 
 
 def test_next_cron_run_finds_next_monday():
@@ -702,6 +718,7 @@ if __name__ == "__main__":
     test_local_deps_are_transitive_and_reach_the_shared_dir()
     test_install_hermes_skills_removes_legacy_nested_duplicate()
     test_install_codex_host_worker_macos_writes_launch_agent()
+    test_codex_host_worker_plist_pins_the_installing_interpreter()
     test_next_cron_run_finds_next_monday()
     test_sync_hermes_cron_jobs_adds_managed_job()
     test_install_places_ingest_worker_and_job_uses_relative_script()

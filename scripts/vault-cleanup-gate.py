@@ -116,17 +116,15 @@ def _create_backup(wiki_dir: Path, backup_dir: Path) -> Path:
 
 
 def _apply_safe_fixes(notes: list[dict], data_steward) -> list[str]:
-    fixed = []
-    for note in notes:
-        fm = note["fm"]
-        project = fm.get("project") or ""
-        tags = list(fm.get("tags") or [])
-        target = data_steward._issue_target_project(project)
-        needs_fix = target != project or any(t in data_steward.PLACEHOLDER_TAGS for t in tags)
-        if needs_fix:
-            data_steward._fix_note(note, target)
-            fixed.append(note["path"].name)
-    return sorted(fixed)
+    to_fix, _ = data_steward.fix_plan(notes)
+    for note in to_fix:
+        data_steward._fix_note(note, data_steward._issue_target_project(note["fm"].get("project") or ""))
+    return sorted(note["path"].name for note in to_fix)
+
+
+def _owner_held(notes: list[dict], data_steward) -> list[str]:
+    _, held = data_steward.fix_plan(notes)
+    return sorted(note["path"].name for note in held)
 
 
 def _write_report(
@@ -138,6 +136,7 @@ def _write_report(
     before: dict,
     after: dict,
     fixed: list[str],
+    owner_held: list[str],
     issues: list[str],
     data_steward,
 ) -> None:
@@ -153,6 +152,7 @@ def _write_report(
         f"- backup: `{backup or 'not-created'}`",
         f"- notes: `{before['note_count']} -> {after['note_count']}`",
         f"- fixed notes: `{len(fixed)}`",
+        f"- owner notes left as they are: `{len(owner_held)}`",
         f"- fixable before/after: `{len(before_fixable)} -> {len(after_fixable)}`",
         f"- manual remaining: `{_manual_issue_count(after, data_steward)}`",
         "",
@@ -161,7 +161,8 @@ def _write_report(
         "- backup archive exists before rewrite",
         "- wiki note set is stable",
         "- all frontmatter parses after cleanup",
-        "- automatically fixable steward issues are zero after cleanup",
+        "- automatically fixable steward issues are zero after cleanup, except owner-written notes",
+        "  (author: owner), which change only by the owner's hand and are listed below",
         "",
         "## Issue Counts",
         "",
@@ -177,6 +178,9 @@ def _write_report(
         lines.extend(f"- `{name}`" for name in fixed)
     else:
         lines.append("- none")
+    lines.extend(["", "## Owner Notes Left As They Are", ""])
+    lines.extend(f"- `{name}`" for name in owner_held)
+    lines.extend([] if owner_held else ["- none"])
     lines.extend(["", "## Gate Issues", ""])
     if issues:
         lines.extend(f"- {issue}" for issue in issues)
@@ -220,7 +224,8 @@ def run(args: argparse.Namespace) -> int:
         issues.append(f"wiki note set changed: missing={missing} added={added}")
     if args.fix and (backup is None or not backup.exists() or backup.stat().st_size <= 0):
         issues.append("backup archive missing or empty")
-    remaining_fixable = data_steward.fixable_note_names(after)
+    owner_held = _owner_held(after_notes, data_steward)
+    remaining_fixable = [n for n in data_steward.fixable_note_names(after) if n not in owner_held]
     if remaining_fixable:
         issues.append(f"fixable steward issues remain: {remaining_fixable}")
 
@@ -235,6 +240,7 @@ def run(args: argparse.Namespace) -> int:
         before=before,
         after=after,
         fixed=fixed,
+        owner_held=owner_held,
         issues=issues,
         data_steward=data_steward,
     )
@@ -242,7 +248,7 @@ def run(args: argparse.Namespace) -> int:
     print(
         "vault_cleanup_gate "
         f"status={status} mode={mode} "
-        f"notes={after['note_count']} fixed={len(fixed)} "
+        f"notes={after['note_count']} fixed={len(fixed)} owner_held={len(owner_held)} "
         f"manual_remaining={_manual_issue_count(after, data_steward)} "
         f"report={report}"
     )

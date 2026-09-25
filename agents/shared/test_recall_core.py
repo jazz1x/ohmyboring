@@ -266,42 +266,45 @@ def test_a_hit_with_no_claims_reads_exactly_as_it_did_before():
     assert " · [" not in bare
 
 
-def test_what_earlier_sessions_did_with_a_note_reorders_the_pool_and_shows():
-    """A note reused before goes first, a note argued with more than reused goes to the back,
-    and the agent is told both. The engine's order survives among untouched notes."""
+def _counted(name, text, used=0, contested=0, **extra):
+    return dict(_hit(name, text), used_count=used, contested_count=contested, **extra)
+
+
+def test_what_earlier_sessions_did_with_a_note_shows_in_engine_order():
+    """The engine already ordered the set (owner notes first); the hook tells the agent what
+    earlier sessions did with each note and does not re-sort on it."""
     text = "the pool died because deadpool recycled a closed socket " * 3
     pool = [
-        dict(_hit("wiki-0001.md", text), used_count=1, contested_count=3),
-        _hit("wiki-0002.md", text),
-        dict(_hit("wiki-0003.md", text), used_count=4, contested_count=1),
-        _hit("wiki-0004.md", text),
-        _hit("wiki-0005.md", text),
+        _counted("wiki-0001.md", text, used=1, contested=3),
+        _counted("wiki-0002.md", text),
+        _counted("wiki-0003.md", text, used=4, contested=1),
+        _counted("wiki-0004.md", text),
+        _counted("wiki-0005.md", text),
     ]
     with tempfile.TemporaryDirectory() as d:
         ledger = os.path.join(d, "ledger.jsonl")
         ctx = _recall(pool, ledger=ledger)
         injected, controls = _ledger_sources(ledger)[0]
-        assert injected == ["wiki-0003.md", "wiki-0002.md", "wiki-0004.md"], injected
-        assert controls == ["wiki-0005.md", "wiki-0001.md"], "the contested note fell out of the injection"
+        assert injected == ["wiki-0001.md", "wiki-0002.md", "wiki-0003.md"], injected
+        assert controls == ["wiki-0004.md", "wiki-0005.md"], controls
+        assert "- [wiki-0001.md] (reused 1×, contested 3×) the pool" in ctx, ctx
         assert "- [wiki-0003.md] (reused 4×, contested 1×) the pool" in ctx, ctx
         assert "- [wiki-0002.md] the pool" in ctx, "untouched notes carry no parenthesis"
 
 
-def test_a_superseded_note_goes_last_and_says_what_replaced_it():
+def test_a_superseded_note_stays_where_the_engine_put_it():
     text = "the pool died because deadpool recycled a closed socket " * 3
     pool = [
-        dict(_hit("wiki-0001.md", text), used_count=9, superseded_by=["/vault/wiki/wiki-0009.md"]),
-        _hit("wiki-0002.md", text),
-        _hit("wiki-0003.md", text),
-        _hit("wiki-0004.md", text),
+        _counted("wiki-0002.md", text),
+        _counted("wiki-0003.md", text, used=9),
+        _counted("wiki-0004.md", text),
+        _counted("wiki-0001.md", text, used=9, superseded_by=["/vault/wiki/wiki-0009.md"]),
     ]
     with tempfile.TemporaryDirectory() as d:
         ledger = os.path.join(d, "ledger.jsonl")
         ctx = _recall(pool, ledger=ledger)
         injected, controls = _ledger_sources(ledger)[0]
-        assert injected == ["wiki-0002.md", "wiki-0003.md", "wiki-0004.md"], (
-            "nine reuses do not outrank being replaced"
-        )
+        assert injected == ["wiki-0002.md", "wiki-0003.md", "wiki-0004.md"], "engine order, not reuse order"
         assert controls == ["wiki-0001.md"]
         assert "wiki-0001.md" not in ctx
 

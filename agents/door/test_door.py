@@ -17,8 +17,9 @@ real door runs under uvicorn in a thread against it. Covers:
       never a silent empty 200; with stub rows injected it answers the ADT —
       used/contested separated, ts parsed out of the slack session name,
       sorted newest first (AC2)
-  (f) only content-type, accept, mcp-session-id, x-request-id travel upstream;
-      authorization and x-forwarded-for do not (AC4)
+  (f) only content-type, accept, mcp-session-id, x-request-id, x-boring-owner-token
+      travel upstream; authorization and x-forwarded-for do not (AC4). The owner
+      token travels as sent — never added from the door's own env, never rewritten
   (g) a non-JSON upstream content-type passes through untouched (AC3)
   (h) an upstream response without content-type stays without one (AC3)
   (i) a text/event-stream answer is relayed chunk by chunk: the first chunk
@@ -32,7 +33,9 @@ real door runs under uvicorn in a thread against it. Covers:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import socket
@@ -45,6 +48,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _ROOT)
@@ -301,16 +305,31 @@ class DoorTest(unittest.TestCase):
             "accept": "application/json",
             "mcp-session-id": "sess-123",
             "x-request-id": "req-abc",
+            "x-boring-owner-token": "tok-r9",
             "authorization": "Bearer secret",
             "x-forwarded-for": "1.2.3.4",
         }
         status, _, _ = _req(self.door_port, "POST", "/mcp", body=payload, headers=headers)
         self.assertEqual(status, 200)
         seen = StubHandler.seen_headers[-1]
-        for name in ("content-type", "accept", "mcp-session-id", "x-request-id"):
+        for name in ("content-type", "accept", "mcp-session-id", "x-request-id", "x-boring-owner-token"):
             self.assertEqual(seen.get(name), headers[name])
         self.assertNotIn("authorization", seen)
         self.assertNotIn("x-forwarded-for", seen)
+
+    def test_owner_token_travels_as_sent_and_is_never_minted(self):
+        payload = json.dumps({"session_id": "s", "verdict": "contested", "judge": "owner"}).encode()
+        with mock.patch.dict(os.environ, {"BORING_OWNER_TOKEN": "tok-owner"}):
+            seen = {}
+            for token in ("tok-r9", None, "wrong"):
+                headers = {"content-type": "application/json"}
+                headers |= {"x-boring-owner-token": token} if token else {}
+                status, _, _ = _req(self.door_port, "POST", "/consumption", body=payload, headers=headers)
+                self.assertEqual(status, 200)
+                seen[token] = StubHandler.seen_headers[-1]
+        self.assertEqual(seen["tok-r9"].get("x-boring-owner-token"), "tok-r9")
+        self.assertNotIn("x-boring-owner-token", seen[None])
+        self.assertEqual(seen["wrong"].get("x-boring-owner-token"), "wrong")
 
     def test_non_json_content_type_passthrough(self):
         payload = json.dumps({"respond_as": "text/plain; charset=utf-8"}).encode()
@@ -666,21 +685,47 @@ class ClaimSourcePureTests(unittest.TestCase):
 
     def test_newest_valid_from_wins_and_ascending_input_is_sorted(self):
         rows = [
-            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL)),
-            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL)),
-            ("/vault/wiki/wiki-1200.md", datetime(2026, 9, 10, tzinfo=approved.SEOUL)),
+            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "v1", "unknown"),
+            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL), "v2", "inferred"),
+            ("/vault/wiki/wiki-1200.md", datetime(2026, 9, 10, tzinfo=approved.SEOUL), "v3", "agent:hermes"),
         ]
         out = claim_source.pick_current("3차 창 샘플링", rows)
         self.assertEqual(out["subject"], "3차 창 샘플링")
         self.assertEqual(out["note"], "/vault/wiki/wiki-1405.md")
         self.assertEqual(out["valid_from"], "2026-09-20T00:00:00+09:00")
+        self.assertEqual(out["value"], "v2", "the current claim's value rides the answer")
         self.assertEqual(
             [c["note"] for c in out["candidates"]],
             ["/vault/wiki/wiki-1405.md", "/vault/wiki/wiki-1200.md", "/vault/wiki/wiki-1001.md"],
         )
 
+    def test_an_owner_claim_wins_over_a_newer_one(self):
+        rows = [
+            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL), "any day", "agent:x"),
+            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "not friday", "owner"),
+        ]
+        out = claim_source.pick_current("배포 요일", rows)
+        self.assertEqual((out["note"], out["value"]), ("/vault/wiki/wiki-1001.md", "not friday"))
+
     def test_empty_rows_is_none_the_doors_404(self):
         self.assertIsNone(claim_source.pick_current("없는 주어", []))
+
+    def test_group_current_picks_once_per_subject(self):
+        rows = [
+            ("s-b", "/vault/wiki/wiki-3.md", datetime(2026, 9, 3, tzinfo=approved.SEOUL), "b", "unknown"),
+            (
+                "s-a",
+                "/vault/wiki/wiki-2.md",
+                datetime(2026, 9, 20, tzinfo=approved.SEOUL),
+                "newer",
+                "agent:x",
+            ),
+            ("s-a", "/vault/wiki/wiki-1.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "owner's", "owner"),
+        ]
+        out = claim_source.group_current(rows)
+        self.assertEqual([(c["subject"], c["value"]) for c in out], [("s-a", "owner's"), ("s-b", "b")])
+        self.assertEqual(len(out[0]["candidates"]), 2)
+        self.assertEqual(claim_source.group_current([]), [])
 
 
 class ClaimSourceRouteTests(unittest.TestCase):
@@ -715,9 +760,12 @@ class ClaimSourceRouteTests(unittest.TestCase):
         self._rows: list = []
         self._orig_fetch = door._fetch_claim_source
         door._fetch_claim_source = lambda subject: self._rows
+        self._orig_fetch_list = door._fetch_claim_sources
+        door._fetch_claim_sources = lambda predicate: self._rows
 
     def tearDown(self):
         door._fetch_claim_source = self._orig_fetch
+        door._fetch_claim_sources = self._orig_fetch_list
         if self._saved_dsn is None:
             os.environ.pop("DOOR_PG_DSN", None)
         else:
@@ -745,8 +793,8 @@ class ClaimSourceRouteTests(unittest.TestCase):
     def test_stub_rows_answer_the_note_path(self):
         os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
         self._rows = [
-            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL)),
-            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL)),
+            ("/vault/wiki/wiki-1405.md", datetime(2026, 9, 20, tzinfo=approved.SEOUL), "v2", "unknown"),
+            ("/vault/wiki/wiki-1001.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "v1", "unknown"),
         ]
         subject = urllib.parse.quote("3차 창 샘플링")
         status, body, content_type = _req(self.door_port, "GET", f"/claim-source?subject={subject}")
@@ -755,7 +803,312 @@ class ClaimSourceRouteTests(unittest.TestCase):
         payload = json.loads(body)
         self.assertEqual(payload["subject"], "3차 창 샘플링")
         self.assertEqual(payload["note"], "/vault/wiki/wiki-1405.md")
+        self.assertEqual(payload["value"], "v2", "the current claim's value rides the answer")
         self.assertEqual(len(payload["candidates"]), 2)
+
+    def test_claim_sources_lists_one_pick_per_subject_400_and_503(self):
+        status, body, _ = _req(self.door_port, "GET", "/claim-sources?predicate=")
+        self.assertEqual((status, json.loads(body)["error"]), (400, "predicate query param is required"))
+        os.environ.pop("DOOR_PG_DSN", None)
+        status, _, _ = _req(self.door_port, "GET", "/claim-sources?predicate=p")
+        self.assertEqual(status, 503)
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = [
+            ("s-b", "/vault/wiki/wiki-3.md", datetime(2026, 9, 3, tzinfo=approved.SEOUL), "b", "unknown"),
+            ("s-a", "/vault/wiki/wiki-1.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "a", "unknown"),
+        ]
+        status, body, _ = _req(self.door_port, "GET", "/claim-sources?predicate=p")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["predicate"], "p")
+        self.assertEqual([c["subject"] for c in payload["claims"]], ["s-a", "s-b"])
+
+
+class SplitSubjectsGetRouteTests(unittest.TestCase):
+    """GET /repairs/split-subjects through the real door app — stub rows, no DB (AC2).
+    One test: shape, rows-desc sort, limit application, out-of-range limit, missing DSN."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                with socket.create_connection(("127.0.0.1", cls.door_port), timeout=1):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+
+    def setUp(self):
+        self._saved_dsn = os.environ.get("DOOR_PG_DSN")
+        self._rows: list[tuple[str, str]] = []
+        self._orig_fetch = door._fetch_split_subject_rows
+        door._fetch_split_subject_rows = lambda: self._rows
+
+    def tearDown(self):
+        door._fetch_split_subject_rows = self._orig_fetch
+        if self._saved_dsn is None:
+            os.environ.pop("DOOR_PG_DSN", None)
+        else:
+            os.environ["DOOR_PG_DSN"] = self._saved_dsn
+
+    def test_shape_sort_limit_and_missing_dsn(self):
+        os.environ.pop("DOOR_PG_DSN", None)
+        status, body, _ = _req(self.door_port, "GET", "/repairs/split-subjects")
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body), {"error": "store not configured"})
+
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = [
+            ("kb rag bot", "/a.md"),
+            ("kb-rag-bot", "/b.md"),
+            ("foodspring front", "/c.md"),
+            ("foodspring-front", "/d.md"),
+            ("foodspring-front", "/e.md"),
+            ("solo-subject", "/f.md"),  # single spelling — never a group
+        ]
+        status, body, content_type = _req(self.door_port, "GET", "/repairs/split-subjects?limit=1")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        payload = json.loads(body)
+        self.assertEqual(payload["total_groups"], 2)
+        self.assertEqual(len(payload["groups"]), 1)
+        self.assertEqual(payload["groups"][0]["subject"], "foodspring-front")
+        self.assertEqual(payload["groups"][0]["variants"], ["foodspring front", "foodspring-front"])
+        self.assertEqual(payload["groups"][0]["rows"], 3)
+        self.assertEqual(payload["groups"][0]["notes"], 3)
+
+        for bad in ("0", "-1", "51", "abc"):
+            status, body, _ = _req(self.door_port, "GET", f"/repairs/split-subjects?limit={bad}")
+            self.assertEqual(status, 400, f"limit={bad}")
+            self.assertIn("limit", json.loads(body)["error"])
+
+
+class SplitSubjectsPostRouteTests(unittest.TestCase):
+    """POST /repairs/split-subjects through the real door app — stub cursor + stub sync
+    callable, never a live DB or a live engine (AC3)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                with socket.create_connection(("127.0.0.1", cls.door_port), timeout=1):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+
+    def setUp(self):
+        self._saved_dsn = os.environ.get("DOOR_PG_DSN")
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self.order: list[str] = []
+        self._before_rows = [
+            ("foodspring front", "/a.md"),
+            ("foodspring-front", "/b.md"),
+        ]
+        self._after_rows = [("foodspring-front", "/a.md"), ("foodspring-front", "/b.md")]
+        self._fetch_calls = 0
+        self._orig_connect = door._split_subjects_connect
+        self._orig_fetch = door._fetch_split_subject_rows
+        self._orig_sync = door._call_engine_sync
+        self._orig_emit = door._emit_subject_merged_event
+        self._saved_token = os.environ.pop("BORING_OWNER_TOKEN", None)
+        order = self.order
+        self.owner_notes: set[str] = set()
+        self.touched: dict[str, list[str]] = {}
+        owner_notes = self.owner_notes
+        touched = self.touched
+
+        class _StubCursor:
+            def __enter__(self_c):
+                return self_c
+
+            def __exit__(self_c, *exc):
+                return False
+
+            def execute(self_c, sql, params):
+                if sql is door._OWNER_NOTES_SQL:
+                    self_c._fetched = [(p,) for p in params[0] if p in owner_notes]
+                elif sql is door._SPLIT_DELETE_SQL:
+                    order.append("delete")
+                    touched["delete"] = list(params[1])
+                    self_c.rowcount = len(params[1])
+                elif sql is door._SPLIT_UPDATE_SQL:
+                    order.append("update")
+                    touched["update"] = list(params[0])
+                    self_c.rowcount = len(params[0])
+
+            def fetchall(self_c):
+                return self_c._fetched
+
+        class _StubConn:
+            def cursor(self_c):
+                return _StubCursor()
+
+            def commit(self_c):
+                order.append("commit")
+
+            def close(self_c):
+                pass
+
+        def fake_connect():
+            return _StubConn()
+
+        def fake_fetch():
+            self._fetch_calls += 1
+            return self._before_rows if self._fetch_calls == 1 else self._after_rows
+
+        def fake_sync():
+            order.append("sync")
+            return self._sync_result
+
+        def fake_emit(subject, deleted_rows, reread_notes, remaining_variants, owner_held):
+            order.append("event")
+            touched["event_owner_held"] = owner_held
+            return "delivered"
+
+        self._sync_result = {"ok": True, "summary": {"ingest_new": 0, "ingest_repaired": 2}}
+        door._split_subjects_connect = fake_connect
+        door._fetch_split_subject_rows = fake_fetch
+        door._call_engine_sync = fake_sync
+        door._emit_subject_merged_event = fake_emit
+
+    def tearDown(self):
+        door._split_subjects_connect = self._orig_connect
+        door._fetch_split_subject_rows = self._orig_fetch
+        door._call_engine_sync = self._orig_sync
+        door._emit_subject_merged_event = self._orig_emit
+        if self._saved_dsn is None:
+            os.environ.pop("DOOR_PG_DSN", None)
+        else:
+            os.environ["DOOR_PG_DSN"] = self._saved_dsn
+        os.environ.pop("BORING_OWNER_TOKEN", None)
+        if self._saved_token is not None:
+            os.environ["BORING_OWNER_TOKEN"] = self._saved_token
+
+    def _post(self, subject: str, token: str | None = None):
+        payload = json.dumps({"subject": subject}).encode()
+        headers = {"content-type": "application/json"}
+        if token is not None:
+            headers["X-Boring-Owner-Token"] = token
+        return _req(
+            self.door_port,
+            "POST",
+            "/repairs/split-subjects",
+            body=payload,
+            headers=headers,
+        )
+
+    def test_owner_note_is_held_without_the_owner_token(self):
+        self.owner_notes.add("/a.md")
+        self._after_rows = [("foodspring front", "/a.md"), ("foodspring-front", "/b.md")]
+        os.environ["BORING_OWNER_TOKEN"] = "tok-owner"
+
+        for token in (None, "wrong"):
+            self._fetch_calls = 0
+            status, body, _ = self._post("foodspring-front", token)
+            self.assertEqual(status, 200)
+            out = json.loads(body)
+            self.assertEqual(self.touched["delete"], ["/b.md"], f"token={token}")
+            self.assertEqual(self.touched["update"], ["/b.md"], f"token={token}")
+            self.assertEqual(out["owner_held"], ["/a.md"])
+            self.assertEqual(out["deleted_rows"], 1)
+            self.assertEqual(out["remaining_variants"], 2)
+            self.assertEqual(self.touched["event_owner_held"], ["/a.md"])
+
+        self._fetch_calls = 0
+        status, body, _ = self._post("foodspring-front", "tok-owner")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.touched["delete"], ["/a.md", "/b.md"], "control: the owner token merges owner rows"
+        )
+        self.assertEqual(json.loads(body)["owner_held"], [])
+
+    def test_order_unknown_subject_and_sync_failure(self):
+        # (a) unknown canon form — 404, nothing was touched
+        status, body, _ = self._post("nobody-canonical")
+        self.assertEqual(status, 404)
+        self.assertIn("error", json.loads(body))
+        self.assertEqual(self.order, [])
+
+        # (b) success — the stub cursor records DELETE, UPDATE, commit, the sync call and the
+        # recount, in that order
+        self._fetch_calls = 0
+        status, body, _ = self._post("foodspring-front")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.order, ["delete", "update", "commit", "sync", "event"])
+        out = json.loads(body)
+        self.assertEqual(out["deleted_rows"], 2)
+        self.assertEqual(out["reread_notes"], 2)
+        self.assertEqual(out["remaining_variants"], 1)
+        self.assertEqual(out["sync"], {"ingest_new": 0, "ingest_repaired": 2})
+        self.assertEqual(out["event"], "delivered")
+        self.assertEqual(self.touched["delete"], ["/a.md", "/b.md"])
+        self.assertEqual(out["owner_held"], [])
+
+        # (c) a failing sync is a 502 whose body says so — but the delete/update/commit already
+        # ran, so the response still carries the (already-committed) row counts
+        self.order.clear()
+        self._fetch_calls = 0
+        self._sync_result = {"ok": False, "error": "engine unreachable: connection refused"}
+        status, body, _ = self._post("foodspring-front")
+        self.assertEqual(status, 502)
+        out = json.loads(body)
+        self.assertEqual(out["deleted_rows"], 2)
+        self.assertEqual(out["reread_notes"], 2)
+        self.assertEqual(out["sync"], {"error": "engine unreachable: connection refused"})
+        self.assertEqual(self.order, ["delete", "update", "commit", "sync"])
+
+
+class EmitSubjectMergedEventTests(unittest.TestCase):
+    """F3 (2026-09-22): _emit_subject_merged_event's own status handling, not the wholesale
+    stub the POST-order test above uses. A non-2xx /events answer must be reported (one
+    stderr line naming the subject and the status) and reflected in the return value the
+    caller folds into the POST response — it must not read as a silent success."""
+
+    def test_non_2xx_events_answer_is_reported_on_stderr_and_returned(self):
+        orig_fetch = door._fetch
+
+        def fake_fetch(url, body, headers, method):
+            return door._pass_through(500, b'{"error":"boom"}', "application/json")
+
+        door._fetch = fake_fetch
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(buf):
+                status = door._emit_subject_merged_event("foodspring-front", 2, 2, 1, [])
+        finally:
+            door._fetch = orig_fetch
+        self.assertEqual(status, "failed: 500")
+        self.assertIn("foodspring-front", buf.getvalue())
+        self.assertIn("500", buf.getvalue())
 
 
 if __name__ == "__main__":

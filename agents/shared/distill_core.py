@@ -960,10 +960,35 @@ def write_consumption_to_graph(session_id, records, transcript_text):
         from drudge_client import DrudgeClient
 
         DrudgeClient(timeout=10, retries=1).consumption(
-            session_id, observed_at, used, contested, supersedes=[list(p) for p in supersedes]
+            session_id,
+            observed_at,
+            used,
+            contested,
+            supersedes=[list(p) for p in supersedes],
+            judge="inferred",
         )
     except Exception as e:  # noqa: BLE001 — the graph learning is best-effort
         print(f"[distill-session] consumption write failed: {e}", file=sys.stderr)
+        return
+    # The agent's own call is proposed, not final: the ranking may use it right away, but the
+    # owner can flip it on the morning card. One event per used/contested note — supersedes
+    # pairs name no single note, so they propose nothing. Only a successful consumption write
+    # may leave these: a failed write with proposed events would show the owner calls the
+    # graph never actually received.
+    for kind, notes in (("used", used), ("contested", contested)):
+        for note in notes:
+            try:
+                event_log.append_event(
+                    "distill",
+                    "verdict_proposed",
+                    "ok",
+                    session_id=session_id,
+                    note=note,
+                    kind=kind,
+                    judge="inferred",
+                )
+            except Exception as e:  # noqa: BLE001 — never raises, same as the write above
+                print(f"[distill-session] verdict_proposed event failed: {e}", file=sys.stderr)
 
 
 def log_uptake_event(session_id, repo, transcript_text, agent):

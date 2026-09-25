@@ -6,7 +6,10 @@ use std::time::SystemTime;
 
 use axum::Json;
 use axum::extract::{Query, State};
+use axum::http::HeaderMap;
 use serde_json::{Value, json};
+
+use crate::serve::owner;
 
 use crate::ask;
 use crate::audit;
@@ -390,16 +393,18 @@ pub(crate) async fn handle_context(
 }
 
 /// Consumption counts beside every hit — `used`/`contested` edges and `superseded_by` (the newer
-/// docs that declared themselves the replacement), two grouped queries for the whole response,
-/// never one per hit.
+/// docs that declared themselves the replacement) and `said_by_owner`, three grouped queries for
+/// the whole response, never one per hit.
 async fn attach_consumption(store: &Store, hits: &mut [SearchHit]) -> Result<(), AppError> {
     let paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
     let counts = store.consumption_counts(&paths).await?;
+    let said = store.said_by_owner_counts(&paths).await?;
     let superseded = store.superseded_by(&paths).await?;
     for hit in hits.iter_mut() {
         let c = counts.get(&hit.source_path).copied().unwrap_or_default();
         hit.used_count = c.used;
         hit.contested_count = c.contested;
+        hit.said_by_owner = said.get(&hit.source_path).copied().unwrap_or_default();
         hit.superseded_by = superseded
             .get(&hit.source_path)
             .cloned()
@@ -470,6 +475,7 @@ pub(crate) async fn handle_search(
             superseded_by: Vec::new(),
             used_count: 0,
             contested_count: 0,
+            said_by_owner: 0,
             claims: Vec::new(),
             claims_total: None,
         })
@@ -493,6 +499,7 @@ pub(crate) async fn handle_search(
                 superseded_by: Vec::new(),
                 used_count: 0,
                 contested_count: 0,
+                said_by_owner: 0,
                 claims: Vec::new(),
                 claims_total: None,
             })
@@ -578,10 +585,24 @@ fn log_search_query(
 
 pub(crate) async fn handle_consumption(
     State(s): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<crate::serve::ConsumptionReq>,
 ) -> Result<Json<crate::serve::ConsumptionResp>, AppError> {
-    crate::serve::validate_consumption_req(&req)?;
+    let judge = crate::serve::validate_consumption_req(&req)?;
+    let caller = owner::Caller::from_headers((*s.owner_token).as_deref(), &headers);
+    let standing = owner::standing(caller, judge == Some(crate::frontmatter::Author::Owner))
+        .map_err(AppError::bad_request)?;
+    let judge = judge.and_then(|j| j.as_judge());
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let old_paths: Vec<String> = req.supersedes.iter().map(|[_, old]| old.clone()).collect();
+    let refused =
+        owner::refused_supersedes(Some(store), standing, &old_paths, "consumption").await?;
+    let kept_pairs: Vec<[String; 2]> = req
+        .supersedes
+        .iter()
+        .filter(|[_, old]| !refused.contains(old))
+        .cloned()
+        .collect();
     // A bare verdict applies to everything handed to the session — the engine already knows
     // what was handed; the caller only brings the thumbs-up/down. An unknown session handed
     // nothing: empty verdict list, normal response — not an error.
@@ -600,7 +621,8 @@ pub(crate) async fn handle_consumption(
                     &req.observed_at,
                     used,
                     contested,
-                    &req.supersedes,
+                    &kept_pairs,
+                    judge.as_deref(),
                 )
                 .await?
         }
@@ -611,7 +633,8 @@ pub(crate) async fn handle_consumption(
                     &req.observed_at,
                     &req.used,
                     &req.contested,
-                    &req.supersedes,
+                    &kept_pairs,
+                    judge.as_deref(),
                 )
                 .await?
         }
@@ -622,6 +645,7 @@ pub(crate) async fn handle_consumption(
         contested: report.contested,
         supersedes: report.supersedes,
         unknown: report.unknown,
+        refused: req.supersedes.len() - kept_pairs.len(),
     }))
 }
 
@@ -648,9 +672,11 @@ pub(crate) async fn handle_handover(
 /// (-32602) are 400; a failure past the parse is 500.
 pub(crate) async fn handle_remember(
     State(s): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<Value>,
 ) -> Result<Json<crate::serve::RememberResp>, AppError> {
-    let remembered = crate::serve::mcp::remember_note(&s, Some(&req))
+    let caller = owner::Caller::from_headers((*s.owner_token).as_deref(), &headers);
+    let remembered = crate::serve::mcp::remember_note(&s, caller, Some(&req))
         .await
         .map_err(|(code, msg)| {
             if code == -32602 {
@@ -926,6 +952,7 @@ pub(crate) async fn handle_sync(State(s): State<AppState>) -> Result<Json<SyncRe
         ingest_new: o.ingest.new,
         ingest_updated: o.ingest.updated,
         ingest_deleted: o.ingest.deleted,
+        ingest_kept_vanished: o.ingest.kept_vanished,
         ingest_skipped: o.ingest.skipped,
         ingest_failed: o.ingest.failed,
         ingest_repaired: o.ingest.repaired,
@@ -1044,6 +1071,7 @@ mod tests {
             superseded_by: vec![],
             used_count: 0,
             contested_count: 0,
+            said_by_owner: 0,
             claims: vec![],
             claims_total: None,
         };
@@ -1111,6 +1139,7 @@ mod tests {
                     value: "ship the handover".to_owned(),
                     kind: "decision".to_owned(),
                     confidence: "high".to_owned(),
+                    said_by: None,
                 },
             )
             .await

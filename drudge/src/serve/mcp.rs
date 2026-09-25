@@ -1,10 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
@@ -12,10 +12,11 @@ use tokio_stream::StreamExt;
 use crate::ask;
 use crate::audit;
 use crate::config;
-use crate::frontmatter::{Claim, FrontMatter};
+use crate::frontmatter::{Author, Claim, FrontMatter, SaidBy};
 use crate::graph;
 use crate::ingest;
 use crate::redact;
+use crate::serve::owner::{self, Caller};
 use crate::serve::{AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, vec_off_rpc};
 use crate::store::EventLogFilter;
 use crate::vault;
@@ -39,7 +40,12 @@ pub(crate) async fn handle_mcp_get() -> Result<Response, crate::serve::AppError>
     Ok(resp.into_response())
 }
 
-pub(crate) async fn handle_mcp(State(s): State<AppState>, Json(req): Json<Value>) -> Response {
+pub(crate) async fn handle_mcp(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<Value>,
+) -> Response {
+    let caller = Caller::from_headers((*s.owner_token).as_deref(), &headers);
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     if req.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         let body = json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32600, "message": "Invalid Request — jsonrpc must be \"2.0\""}});
@@ -56,7 +62,7 @@ pub(crate) async fn handle_mcp(State(s): State<AppState>, Json(req): Json<Value>
         "initialize" => Ok(mcp_initialize(&req)),
         "tools/list" => Ok(mcp_tools_list()),
         "ping" => Ok(json!({})),
-        "tools/call" => mcp_call(&s, &req).await,
+        "tools/call" => mcp_call(&s, caller, &req).await,
         other => Err((-32601_i32, format!("method not found: {other}"))),
     };
     let body = match outcome {
@@ -129,6 +135,8 @@ fn mcp_tools_list() -> Value {
                     "sources": {"type": "array", "items": {"type": "string"}, "description": "optional vault-local evidence paths for this note, e.g. raw/<file>.md"},
                     "supersedes": {"type": "array", "items": {"type": "string"}, "description": "source_path of notes this one corrects; each gets a supersedes edge from the new note and sinks below it in recall"},
                     "omb_session_id": {"type": "string", "description": "optional ephemeral ingestion marker — include only when requested by the ingestion worker"},
+                    "author": {"type": "string", "description": "who wrote the note: inferred | unknown | agent:<your name> (default unknown). owner is accepted only through the owner's door"},
+                    "judge": {"type": "string", "description": "who judged the corrections named in supersedes, same values as author; carried on those edges (default = author)"},
                     "claims": {
                         "type": "array",
                         "description": "durable facts/decisions as (subject,predicate,value) triples (a new value supersedes the old)",
@@ -148,11 +156,9 @@ fn mcp_tools_list() -> Value {
         },
         {
             "name": "forget",
-            "description": "Remove a note from memory by wiki id or exact title. Deletes the wiki file and, when vector mode is on, \
-                            also removes its embeddings, graph edges, and claims. CALL THIS only when the owner asks for a note to go, or when a \
-                            note is provably wrong — a fact that turned out false, a duplicate of one written moments earlier. Deletion is \
-                            not reversible. A note that has merely been overtaken is not wrong: write the new one and let the newer claim \
-                            supersede the old.",
+            "description": "Delete a note — CLOSED during the migration: every call is refused and nothing is deleted, the owner \
+                            included. CALL THIS not at all until the migration is over; correct a wrong or overtaken note with \
+                            `remember` and `supersedes` naming it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -557,12 +563,12 @@ fn tool_outcome_snippet(out: &Result<ToolOut, ToolCallError>) -> String {
     raw.chars().take(500).collect()
 }
 
-async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
+async fn mcp_call(s: &AppState, caller: Caller, req: &Value) -> Result<Value, (i32, String)> {
     let started = std::time::Instant::now();
     let params = req.get("params");
     let name = params.and_then(|p| p.get("name")).and_then(Value::as_str);
     let args = params.and_then(|p| p.get("arguments"));
-    let out = dispatch(s, name.unwrap_or_default(), args).await;
+    let out = dispatch(s, caller, name.unwrap_or_default(), args).await;
     crate::serve::spawn_query_log(
         s.store.clone(),
         mcp_endpoint_tag(name),
@@ -581,12 +587,13 @@ async fn mcp_call(s: &AppState, req: &Value) -> Result<Value, (i32, String)> {
 
 async fn dispatch(
     s: &AppState,
+    caller: Caller,
     name: &str,
     args: Option<&Value>,
 ) -> Result<ToolOut, ToolCallError> {
     Ok(match name {
         "recall" => ToolOut::Text(mcp_recall(s, args).await?),
-        "remember" => ToolOut::Text(mcp_remember(s, args).await?),
+        "remember" => ToolOut::Text(mcp_remember(s, caller, args).await?),
         "forget" => ToolOut::Text(mcp_forget(s, args).await?),
         "sync" => ToolOut::Text(mcp_sync(s).await?),
         "classify_repo" => ToolOut::Text(mcp_classify_repo(s, args)?),
@@ -715,6 +722,12 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     let wiki_hits = s
         .wiki_recall(query, max_results, project, since_hours)
         .map_err(|e| (-32603_i32, format!("wiki recall: {e:#}")))?;
+    let wiki_hits = match s.store.as_ref() {
+        Some(store) if !wiki_hits.is_empty() => crate::retrieve::order_wiki_hits(store, wiki_hits)
+            .await
+            .map_err(|e| (-32603_i32, format!("wiki recall order: {e:#}")))?,
+        _ => wiki_hits,
+    };
     let lines: Vec<(String, String)> = if !wiki_hits.is_empty() {
         wiki_hits
             .into_iter()
@@ -742,13 +755,20 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     if lines.is_empty() {
         return Ok("(no experience recalled)".to_owned());
     }
+    let paths: Vec<String> = lines.iter().map(|(path, _)| path.clone()).collect();
+    let superseded = match s.store.as_ref() {
+        Some(store) => store
+            .superseded_by(&paths)
+            .await
+            .map_err(|e| (-32603_i32, format!("recall superseded: {e:#}")))?,
+        None => HashMap::new(),
+    };
     // Opt-in handover: name the session and the notes this recall surfaced are recorded as
     // handed to it — the same write `/search` does with `session_id`. A failure must never
     // fail the recall: a lost handover only means a later bare verdict has nothing to apply to.
     if let Some(session_id) = session_id
         && let Some(store) = s.store.as_ref()
     {
-        let paths: Vec<String> = lines.iter().map(|(path, _)| path.clone()).collect();
         let observed_at = chrono::Utc::now().to_rfc3339();
         if let Err(error) = store
             .record_handover(session_id, &observed_at, &paths)
@@ -757,14 +777,26 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             eprintln!("[mcp] handover for session {session_id} failed: {error:#}");
         }
     }
-    Ok(lines
+    Ok(recall_text(&lines, &superseded))
+}
+
+fn recall_text(lines: &[(String, String)], superseded: &HashMap<String, Vec<String>>) -> String {
+    let file_name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_owned();
+    lines
         .iter()
         .map(|(path, body)| {
-            let src = path.rsplit('/').next().unwrap_or(path.as_str());
-            format!("- [{src}] {body}")
+            let src = file_name(path);
+            let label = superseded
+                .get(path)
+                .map(|newer| {
+                    let newer: Vec<String> = newer.iter().map(|p| file_name(p)).collect();
+                    format!("{src} (superseded by {})", newer.join(", "))
+                })
+                .unwrap_or(src);
+            format!("- [{label}] {body}")
         })
         .collect::<Vec<_>>()
-        .join("\n\n"))
+        .join("\n\n")
 }
 
 async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
@@ -811,6 +843,7 @@ async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
             used,
             contested,
             &[],
+            None,
         )
         .await
         .map_err(|e| (-32603, format!("verdict: {e:#}")))?;
@@ -1235,94 +1268,30 @@ fn system_time_rfc3339(value: std::time::SystemTime) -> String {
     datetime.to_rfc3339()
 }
 
+/// Owner decision 2026-09-24: notes are distilled automatically, so nothing is deleted while the
+/// migration runs — the owner's token included. Reopened after the migration.
 async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
-    let Some(vault_root) = (*s.vault_dir).as_ref() else {
-        return Err((-32603, "BORING_VAULT_DIR not set".to_owned()));
-    };
-    let wiki_dir = vault_root.join("wiki");
-
-    let get_str = |k: &str| {
-        args.and_then(|a| a.get(k))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-    };
-
-    let id = get_str("id");
-    let title = get_str("title");
-
-    if id.is_none() && title.is_none() {
-        return Err((-32602, "forget requires either 'id' or 'title'".to_owned()));
-    }
-
-    let path = if let Some(id) = id {
-        if id.contains('/') || id.contains('\\') || id.contains("..") {
-            return Err((-32602, format!("invalid note id {id:?}")));
-        }
-        let p = wiki_dir.join(format!("{id}.md"));
-        if !p.exists() {
-            return Err((-32602, format!("note {id} not found")));
-        }
-        p
-    } else if let Some(title) = title {
-        let mut matches = Vec::new();
-        for entry in
-            std::fs::read_dir(&wiki_dir).map_err(|e| (-32603_i32, format!("wiki dir: {e}")))?
-        {
-            let entry = entry.map_err(|e| (-32603_i32, format!("wiki entry: {e}")))?;
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("md") {
-                continue;
-            }
-            let content =
-                std::fs::read_to_string(&p).map_err(|e| (-32603_i32, format!("read note: {e}")))?;
-            let (front, _) =
-                crate::frontmatter::parse(&content, p.to_string_lossy().as_ref(), &s.cfg)
-                    .map_err(|e| (-32603_i32, format!("parse frontmatter: {e:#}")))?;
-            if front.title.as_deref().unwrap_or("") == title {
-                matches.push(p);
-            }
-        }
-        match matches.len() {
-            0 => return Err((-32602, format!("note with title {title:?} not found"))),
-            1 => matches.remove(0),
-            _ => {
-                return Err((
-                    -32602,
-                    format!("multiple notes match title {title:?}; use id"),
-                ));
-            }
-        }
-    } else {
-        return Err((-32602, "forget requires either 'id' or 'title'".to_owned()));
-    };
-
-    let source_path = path.to_string_lossy().into_owned();
-    std::fs::remove_file(&path).map_err(|e| (-32603_i32, format!("delete note: {e}")))?;
-
-    let mut partial = "";
-    if let Some(store) = s.store.as_ref() {
-        let _guard = s.sync_lock.lock().await;
-        store
-            .delete_document(&source_path)
-            .await
-            .map_err(|e| (-32603_i32, format!("delete from vector store: {e:#}")))?;
-        if let Err(e) = vault::project_links(store, vault_root, 6).await {
-            eprintln!("[forget] project_links warning (ignored): {e:#}");
-            partial = " (partial: relates_to projection deferred — refreshes on next sync)";
-        }
-    }
-
-    Ok(format!("forgot → {source_path}{partial}"))
+    let asked: Vec<String> = ["id", "title"]
+        .into_iter()
+        .filter_map(|k| args.and_then(|a| a.get(k)).and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    owner::record_refusal(s.store.as_deref(), "forget_refused", &asked, "forget").await;
+    Err((
+        -32602,
+        "forget is closed during the migration: no note is deleted until it is over. \
+         Write the corrected note with `supersedes` instead."
+            .to_owned(),
+    ))
 }
 
 /// Structured outcome of one `remember` — `POST /remember` answers with the fields; MCP keeps
 /// answering with just `message`, the text agents already parse.
+#[derive(Debug)]
 pub(crate) struct Remembered {
     pub(crate) source_path: String,
     pub(crate) wiki_id: String,
-    /// `Some(path)` when the note landed on (or skipped over) a duplicate of an existing note.
+    /// `Some(path)` when the note superseded (or was skipped against) a duplicate of an existing note.
     pub(crate) duplicate: Option<String>,
     /// `supersedes` edges written from this note to the paths it corrects.
     pub(crate) supersedes: usize,
@@ -1333,16 +1302,25 @@ pub(crate) struct Remembered {
     pub(crate) message: String,
 }
 
-async fn mcp_remember(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
-    Ok(remember_note(s, args).await?.message)
+async fn mcp_remember(
+    s: &AppState,
+    caller: Caller,
+    args: Option<&Value>,
+) -> Result<String, (i32, String)> {
+    Ok(remember_note(s, caller, args).await?.message)
 }
 
 /// The write door both MCP `remember` and `POST /remember` go through: one parser, one write
 /// path, one dedup policy. `supersedes` (optional) names the notes this one corrects; after the
 /// note is written and ingested, each pair becomes a `supersedes` edge from the new note, and
-/// the next recall sinks the old note below the new one.
+/// the next recall sinks the old note below the new one. A note that names what it corrects
+/// skips the duplicate gate — a correction must land, never be swallowed as "too similar".
+/// A richer note from the same session supersedes the earlier one the same way; no note file is
+/// ever rewritten. `owner` as author or judge needs `caller` to be the owner, and only the owner
+/// supersedes a note the owner wrote; an owner write is never skipped against someone else's note.
 pub(crate) async fn remember_note(
     s: &AppState,
+    caller: Caller,
     args: Option<&Value>,
 ) -> Result<Remembered, (i32, String)> {
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
@@ -1352,82 +1330,139 @@ pub(crate) async fn remember_note(
         ));
     };
     let supersedes = parse_supersedes(args)?;
+    let judge = parse_judge(args)?;
     let mut note = parse_remember_note(args, &s.cfg)?;
+    let standing = owner::standing(
+        caller,
+        note.front.author == Author::Owner || judge == Some(Author::Owner),
+    )
+    .map_err(|m| (-32602_i32, m))?;
+    let edge_judge = judge.as_ref().unwrap_or(&note.front.author).as_judge();
+    let refused = owner::refused_supersedes(s.store.as_deref(), standing, &supersedes, "remember")
+        .await
+        .map_err(|e| (-32603_i32, format!("owner guard: {e:#}")))?;
+    owner::none_refused(&refused).map_err(|m| (-32602_i32, m))?;
 
     apply_pii_gate(s.pii.as_ref().as_ref(), &mut note)?;
 
     let wiki_dir = vault_root.join("wiki");
-    if let Some(existing) = check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir)
-        .await
-        .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
-    {
-        if should_replace_duplicate(&note, &existing) {
-            let telemetry = dedup_decision_event(&note, Some(&existing), DedupOutcome::Replace);
-            let Some(wiki_id) = crate::vault::wiki_stem(&existing.source_path) else {
-                return Err((
-                    -32603,
-                    format!(
-                        "dedup replacement target is not a wiki note: {}",
-                        existing.source_path
-                    ),
-                ));
-            };
-            let source_path = existing.source_path.clone();
-            let path = std::path::PathBuf::from(&source_path);
-            let RememberNote { mut front, body } = note;
-            front.source_path = source_path;
-            let content = vault::render_wiki_note(&wiki_id, &front, &body)
-                .map_err(|e| (-32603_i32, format!("render wiki note: {e:#}")))?;
-            std::fs::write(&path, content)
-                .map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
+    // A correction (supersedes names what it fixes) must land as a new note: a one-word
+    // fix of a long note still embeds within DUPLICATE_MAX_DIST, so a corrected note that
+    // went through the gate would be skipped as "too similar" and the wrong fact would
+    // stay live. Only unmarked notes go through the duplicate gate.
+    let found = if needs_dedup(&supersedes) {
+        check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir)
+            .await
+            .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
+    } else {
+        None
+    };
+    let gate = dedup_gate(&note, standing, found);
+    let telemetry = dedup_decision_event(&note, gate.existing(), gate.outcome());
+    let judge = edge_judge.as_deref();
+    match gate {
+        DedupGate::Skip(existing) => {
             log_dedup_decision(s, &telemetry).await;
-            let message = finish_remembered_note(s, &path, &wiki_id, &front, true).await?;
-            let (sup_count, unk_count) =
-                write_supersedes_edges(s, &front.source_path, &supersedes).await?;
-            return Ok(Remembered {
-                source_path: front.source_path.clone(),
-                wiki_id,
-                duplicate: Some(existing.source_path),
-                supersedes: sup_count,
-                unknown: unk_count,
-                message,
-            });
+            Ok(skipped_duplicate(existing.source_path))
         }
-        log_dedup_decision(
-            s,
-            &dedup_decision_event(&note, Some(&existing), DedupOutcome::Skip),
-        )
-        .await;
-        let skipped_path = existing.source_path;
-        return Ok(Remembered {
-            wiki_id: crate::vault::wiki_stem(&skipped_path).unwrap_or_default(),
-            source_path: skipped_path.clone(),
-            duplicate: Some(skipped_path.clone()),
-            // A skipped note leaves no new note behind, so nothing is superseded.
-            supersedes: 0,
-            unknown: 0,
-            message: format!("skipped — duplicate of {skipped_path}"),
-        });
+        DedupGate::Supersede(existing) => {
+            let old = [existing.source_path.clone()];
+            let duplicate = Some(existing.source_path);
+            store_new_note(s, &wiki_dir, note, &old, duplicate, judge, &telemetry).await
+        }
+        DedupGate::Fresh => {
+            store_new_note(s, &wiki_dir, note, &supersedes, None, judge, &telemetry).await
+        }
+    }
+}
+
+/// What the duplicate gate decided for one unmarked note.
+#[derive(Debug)]
+enum DedupGate {
+    Fresh,
+    Supersede(DuplicateMatch),
+    Skip(DuplicateMatch),
+}
+
+impl DedupGate {
+    fn outcome(&self) -> DedupOutcome {
+        match self {
+            Self::Fresh => DedupOutcome::StoreNew,
+            Self::Supersede(_) => DedupOutcome::Supersede,
+            Self::Skip(_) => DedupOutcome::Skip,
+        }
     }
 
-    let telemetry = dedup_decision_event(&note, None, DedupOutcome::StoreNew);
+    fn existing(&self) -> Option<&DuplicateMatch> {
+        match self {
+            Self::Fresh => None,
+            Self::Supersede(m) | Self::Skip(m) => Some(m),
+        }
+    }
+}
 
+fn dedup_gate(
+    note: &RememberNote,
+    standing: owner::Standing,
+    found: Option<DuplicateMatch>,
+) -> DedupGate {
+    match found.filter(|m| owner::gated_by(standing, &m.front.author)) {
+        None => DedupGate::Fresh,
+        Some(m)
+            if should_replace_duplicate(note, &m)
+                && owner::may_rewrite(standing, &m.front.author) =>
+        {
+            DedupGate::Supersede(m)
+        }
+        Some(m) => DedupGate::Skip(m),
+    }
+}
+
+fn skipped_duplicate(skipped_path: String) -> Remembered {
+    Remembered {
+        wiki_id: crate::vault::wiki_stem(&skipped_path).unwrap_or_default(),
+        source_path: skipped_path.clone(),
+        message: format!("skipped — duplicate of {skipped_path}"),
+        // A skipped note leaves no new note behind, so nothing is superseded.
+        supersedes: 0,
+        unknown: 0,
+        duplicate: Some(skipped_path),
+    }
+}
+
+/// The only path that writes a note file, always at a freshly allocated `wiki-NNNN`.
+async fn store_new_note(
+    s: &AppState,
+    wiki_dir: &std::path::Path,
+    note: RememberNote,
+    supersedes: &[String],
+    duplicate: Option<String>,
+    edge_judge: Option<&str>,
+    telemetry: &Value,
+) -> Result<Remembered, (i32, String)> {
     let db_ids = existing_wiki_ids(s).await?;
-    let (wiki_id, path) = vault::allocate_wiki_path(&wiki_dir, Some(&db_ids))
+    let (wiki_id, path) = vault::allocate_wiki_path(wiki_dir, Some(&db_ids))
         .map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
     let mut front = note.front;
     front.source_path = path.to_string_lossy().into_owned();
     let content = vault::render_wiki_note(&wiki_id, &front, &note.body)
         .map_err(|e| (-32603_i32, format!("render wiki note: {e:#}")))?;
     std::fs::write(&path, content).map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
-    log_dedup_decision(s, &telemetry).await;
+    log_dedup_decision(s, telemetry).await;
 
-    let message = finish_remembered_note(s, &path, &wiki_id, &front, false).await?;
-    let (sup_count, unk_count) = write_supersedes_edges(s, &front.source_path, &supersedes).await?;
+    let supersedes_suffix = duplicate
+        .as_deref()
+        .and_then(crate::vault::wiki_stem)
+        .map(|old| format!(" (supersedes wiki/{old}.md)"))
+        .unwrap_or_default();
+    let label = format!("wiki/{wiki_id}.md{supersedes_suffix}");
+    let message = finish_remembered_note(s, &path, &label, &front).await?;
+    let (sup_count, unk_count) =
+        write_supersedes_edges(s, &front.source_path, supersedes, edge_judge).await?;
     Ok(Remembered {
         source_path: front.source_path.clone(),
         wiki_id,
-        duplicate: None,
+        duplicate,
         supersedes: sup_count,
         unknown: unk_count,
         message,
@@ -1464,6 +1499,7 @@ async fn write_supersedes_edges(
     s: &AppState,
     new_path: &str,
     supersedes: &[String],
+    judge: Option<&str>,
 ) -> Result<(usize, usize), (i32, String)> {
     if supersedes.is_empty() {
         return Ok((0, 0));
@@ -1476,7 +1512,7 @@ async fn write_supersedes_edges(
         .map(|old| [new_path.to_owned(), old.clone()])
         .collect();
     let report = store
-        .record_supersedes(&pairs)
+        .record_supersedes(&pairs, judge)
         .await
         .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))?;
     Ok((report.supersedes, report.unknown))
@@ -1485,19 +1521,12 @@ async fn write_supersedes_edges(
 async fn finish_remembered_note(
     s: &AppState,
     path: &std::path::Path,
-    wiki_id: &str,
+    label: &str,
     front: &FrontMatter,
-    updated_duplicate: bool,
 ) -> Result<String, (i32, String)> {
-    let duplicate_suffix = if updated_duplicate {
-        " (updated duplicate)"
-    } else {
-        ""
-    };
-
     let Some(store) = s.store.as_ref() else {
         return Ok(format!(
-            "remembered → wiki/{wiki_id}.md{duplicate_suffix} (vector off — wiki is first-class memory; recallable now)"
+            "remembered → {label} (vector off — wiki is first-class memory; recallable now)"
         ));
     };
 
@@ -1514,7 +1543,7 @@ async fn finish_remembered_note(
         }
     };
     Ok(format!(
-        "remembered → wiki/{wiki_id}.md{duplicate_suffix} · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
+        "remembered → {label} · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
         stats.chunks, stats.tools, stats.concepts, stats.claims
     ))
 }
@@ -1639,6 +1668,7 @@ async fn check_duplicate(
         .trim()
         .to_lowercase();
 
+    let mut matches = Vec::new();
     for entry in std::fs::read_dir(wiki_dir)? {
         let path = entry?.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
@@ -1647,34 +1677,24 @@ async fn check_duplicate(
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let (yaml, existing_body) = crate::vault::split_frontmatter(&content).unwrap_or(("", ""));
         let fm: crate::frontmatter::FrontMatter = serde_yaml::from_str(yaml).unwrap_or_default();
-        if let Some(sid) = target_session
-            && fm.omb_session_id.as_deref() == Some(sid)
-        {
-            return Ok(Some(duplicate_match(
-                &path,
-                DuplicateReason::SameSession,
-                fm,
-                existing_body,
-            )));
-        }
-        if probable_session_duplicate(note, &fm, existing_body) {
-            return Ok(Some(duplicate_match(
-                &path,
-                DuplicateReason::ProbableSession,
-                fm,
-                existing_body,
-            )));
-        }
-        if !target_title.is_empty()
-            && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title
-        {
-            return Ok(Some(duplicate_match(
-                &path,
-                DuplicateReason::ExactTitle,
-                fm,
-                existing_body,
-            )));
-        }
+        let same_session =
+            target_session.is_some() && fm.omb_session_id.as_deref() == target_session;
+        let same_title = !target_title.is_empty()
+            && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title;
+        let reason = match (
+            same_session,
+            probable_session_duplicate(note, &fm, existing_body),
+            same_title,
+        ) {
+            (true, _, _) => Some(DuplicateReason::SameSession),
+            (false, true, _) => Some(DuplicateReason::ProbableSession),
+            (false, false, true) => Some(DuplicateReason::ExactTitle),
+            (false, false, false) => None,
+        };
+        matches.extend(reason.map(|r| duplicate_match(&path, r, fm, existing_body)));
+    }
+    if let Some(found) = pick_duplicate(matches) {
+        return Ok(Some(found));
     }
 
     if let Some(store) = store {
@@ -1707,6 +1727,32 @@ fn duplicate_match(
         front,
         body: body.to_owned(),
     }
+}
+
+fn pick_duplicate(matches: Vec<DuplicateMatch>) -> Option<DuplicateMatch> {
+    let (same_session, others): (Vec<_>, Vec<_>) = matches
+        .into_iter()
+        .partition(|m| m.reason == DuplicateReason::SameSession);
+    newest_match(same_session).or_else(|| newest_match(others))
+}
+
+/// Superseded notes stay on disk and a superseding note always gets a larger wiki id, so the
+/// live note is the newest match, not whichever `read_dir` lists first.
+fn newest_match(matches: Vec<DuplicateMatch>) -> Option<DuplicateMatch> {
+    matches
+        .into_iter()
+        .max_by_key(|m| wiki_number(&m.source_path))
+}
+
+fn wiki_number(source_path: &str) -> Option<u32> {
+    crate::vault::wiki_stem(source_path)?
+        .strip_prefix("wiki-")?
+        .parse()
+        .ok()
+}
+
+fn needs_dedup(supersedes: &[String]) -> bool {
+    supersedes.is_empty()
 }
 
 fn should_replace_duplicate(note: &RememberNote, existing: &DuplicateMatch) -> bool {
@@ -1753,7 +1799,7 @@ fn note_quality(front: &FrontMatter, body: &str) -> NoteQuality {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DedupOutcome {
-    Replace,
+    Supersede,
     Skip,
     StoreNew,
 }
@@ -1761,7 +1807,7 @@ enum DedupOutcome {
 impl DedupOutcome {
     fn status(self) -> &'static str {
         match self {
-            Self::Replace => "replaced",
+            Self::Supersede => "superseded",
             Self::Skip => "skipped",
             Self::StoreNew => "stored",
         }
@@ -1954,6 +2000,26 @@ fn parse_supersedes(args: Option<&Value>) -> Result<Vec<String>, (i32, String)> 
     Ok(out)
 }
 
+/// Optional `judge`: who judged the corrections this note makes, in the author vocabulary.
+fn parse_judge(args: Option<&Value>) -> Result<Option<Author>, (i32, String)> {
+    args.and_then(|a| a.get("judge"))
+        .map(|raw| parse_person("judge", raw))
+        .transpose()
+}
+
+/// Optional `author`: owner | inferred | unknown | agent:<name>. Absent → unknown.
+fn parse_author(args: Option<&Value>) -> Result<Author, (i32, String)> {
+    args.and_then(|a| a.get("author"))
+        .map_or(Ok(Author::Unknown), |raw| parse_person("author", raw))
+}
+
+fn parse_person(field: &str, raw: &Value) -> Result<Author, (i32, String)> {
+    raw.as_str()
+        .ok_or_else(|| format!("{field} must be a string"))
+        .and_then(str::parse)
+        .map_err(|m| (-32602, format!("{field}: {m}")))
+}
+
 fn parse_remember_note(
     args: Option<&Value>,
     cfg: &config::BoringConfig,
@@ -2027,19 +2093,21 @@ fn parse_remember_note(
     let claims: Vec<Claim> = args
         .and_then(|a| a.get("claims"))
         .and_then(Value::as_array)
-        .map(|v| {
-            v.iter()
-                .filter_map(parse_claim)
-                .map(|c| Claim {
-                    subject: clean(&c.subject),
-                    predicate: clean(&c.predicate),
-                    value: clean(&c.value),
-                    kind: clean(&c.kind),
-                    confidence: clean(&c.confidence),
-                })
-                .collect()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .map(parse_claim)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .map(|c| Claim {
+            subject: clean(&c.subject),
+            predicate: clean(&c.predicate),
+            value: clean(&c.value),
+            kind: clean(&c.kind),
+            confidence: clean(&c.confidence),
+            said_by: c.said_by,
         })
-        .unwrap_or_default();
+        .collect();
 
     let front = FrontMatter {
         origin,
@@ -2054,20 +2122,32 @@ fn parse_remember_note(
         sources: get_arr("sources").iter().map(|s| scrub(s.trim())).collect(),
         claims,
         omb_session_id,
+        author: parse_author(args)?,
     };
     Ok(RememberNote { front, body })
 }
 
-fn parse_claim(v: &Value) -> Option<Claim> {
+fn parse_claim(v: &Value) -> Result<Option<Claim>, (i32, String)> {
     let f = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().trim();
+    let said_by = v.get("said_by").map(parse_said_by).transpose()?;
     let (subject, predicate, value) = (f("subject"), f("predicate"), f("value"));
-    (!subject.is_empty() && !predicate.is_empty() && !value.is_empty()).then(|| Claim {
-        subject: subject.to_owned(),
-        predicate: predicate.to_owned(),
-        value: value.to_owned(),
-        kind: f("kind").to_owned(),
-        confidence: f("confidence").to_owned(),
-    })
+    Ok(
+        (!subject.is_empty() && !predicate.is_empty() && !value.is_empty()).then(|| Claim {
+            subject: subject.to_owned(),
+            predicate: predicate.to_owned(),
+            value: value.to_owned(),
+            kind: f("kind").to_owned(),
+            confidence: f("confidence").to_owned(),
+            said_by,
+        }),
+    )
+}
+
+fn parse_said_by(raw: &Value) -> Result<SaidBy, (i32, String)> {
+    raw.as_str()
+        .ok_or_else(|| "said_by must be a string".to_owned())
+        .and_then(str::parse)
+        .map_err(|m| (-32602, format!("claims[].said_by: {m}")))
 }
 
 fn mcp_classify_repo(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
@@ -2115,10 +2195,11 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
         .total_edges
         .map_or_else(|| "unavailable".to_owned(), |n| n.to_string());
     Ok(format!(
-        "sync complete — ingest(new {} updated {} deleted {} chunks {}) · graph(tools {} concepts {} claims {} edges {}) · total(chunks {total_chunks} edges {total_edges})",
+        "sync complete — ingest(new {} updated {} deleted {} kept_vanished {} chunks {}) · graph(tools {} concepts {} claims {} edges {}) · total(chunks {total_chunks} edges {total_edges})",
         o.ingest.new,
         o.ingest.updated,
         o.ingest.deleted,
+        o.ingest.kept_vanished,
         o.ingest.chunks,
         o.ingest.tools,
         o.ingest.concepts,
@@ -2136,12 +2217,14 @@ mod tests {
     use super::{
         DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote, ToolCallError,
         ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_tools_list,
-        parse_remember_note, parse_supersedes, probable_session_duplicate,
-        should_replace_duplicate, tool_outcome_snippet, tool_query_arg,
+        needs_dedup, parse_remember_note, parse_supersedes, pick_duplicate,
+        probable_session_duplicate, remember_note, should_replace_duplicate, tool_outcome_snippet,
+        tool_query_arg,
     };
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
-    use serde_json::json;
+    use crate::serve::owner::{self, Caller};
+    use serde_json::{Value, json};
 
     const VECTOR_REQUIRED_TOOLS: [&str; 13] = [
         "neighbors",
@@ -2223,6 +2306,404 @@ mod tests {
         assert_eq!(parse_supersedes(Some(&args)).unwrap_err().0, -32602);
         let args = json!({"supersedes": "/vault/wiki/a.md"});
         assert_eq!(parse_supersedes(Some(&args)).unwrap_err().0, -32602);
+    }
+
+    #[test]
+    fn needs_dedup_skips_the_gate_for_corrections_only() {
+        // supersedes 를 밝힌 고침 기록은 중복 검사를 아예 걷지 않는다 — 조금만 고친 값도
+        // 임베딩 거리 안에서 기존 노트와 닮아 gate 가 삼킬 수 있기 때문. 표기 없는 기록은
+        // 지금 그대로 검사를 탄다.
+        assert!(!needs_dedup(&["/vault/wiki/wiki-0001.md".to_owned()]));
+        assert!(!needs_dedup(&["/a.md".to_owned(), "/b.md".to_owned()]));
+        assert!(needs_dedup(&[]));
+    }
+
+    fn vault_state(root: &std::path::Path) -> crate::serve::AppState {
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        let cfg = BoringConfig::default();
+        crate::serve::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(Some(root.to_path_buf())),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+            owner_token: std::sync::Arc::new(Some(DOOR_TOKEN.to_owned())),
+        }
+    }
+
+    const DOOR_TOKEN: &str = "door-7f3a";
+
+    fn caller_with(configured: Option<&str>, presented: Option<&str>) -> Caller {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(token) = presented {
+            headers.insert(owner::OWNER_TOKEN_HEADER, token.parse().unwrap());
+        }
+        Caller::from_headers(configured, &headers)
+    }
+
+    fn wiki_notes(root: &std::path::Path) -> usize {
+        std::fs::read_dir(root.join("wiki")).unwrap().count()
+    }
+
+    #[tokio::test]
+    async fn remember_note_lets_a_correction_past_the_duplicate_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let note = |supersedes: &[&str]| json!({"title": "t", "body": "b", "omb_session_id": "s1", "supersedes": supersedes});
+
+        let first = remember_note(&s, Caller::Unverified, Some(&note(&[])))
+            .await
+            .unwrap();
+        let unmarked = remember_note(&s, Caller::Unverified, Some(&note(&[])))
+            .await
+            .unwrap();
+        assert!(
+            unmarked.duplicate.is_some(),
+            "same session, no supersedes: the gate sees the duplicate"
+        );
+
+        let fix = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&note(&[first.source_path.as_str()])),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fix.duplicate, None, "a correction skips the gate");
+        assert_ne!(fix.source_path, first.source_path);
+    }
+
+    #[tokio::test]
+    async fn owner_is_accepted_only_with_the_door_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let correction = json!({
+            "title": "정정: 금요일 배포는 하지 않는다",
+            "body": "금요일 배포는 하지 않는다 — 소유자가 슬랙 스레드에서 정정했다.",
+            "tags": ["correction", "slack"],
+            "author": "owner",
+            "judge": "owner",
+        });
+        let judge_only = json!({"title": "판정", "body": "소유자 판정", "judge": "owner"});
+
+        for (label, caller, args) in [
+            ("no token", caller_with(Some(DOOR_TOKEN), None), &correction),
+            (
+                "wrong token",
+                caller_with(Some(DOOR_TOKEN), Some("door-7f3b")),
+                &correction,
+            ),
+            (
+                "engine has no token",
+                caller_with(None, Some(DOOR_TOKEN)),
+                &correction,
+            ),
+            (
+                "judge owner, no token",
+                caller_with(Some(DOOR_TOKEN), None),
+                &judge_only,
+            ),
+        ] {
+            let err = remember_note(&s, caller, Some(args)).await.unwrap_err();
+            assert_eq!(
+                err.0, -32602,
+                "{label}: owner without the door token is a 400"
+            );
+        }
+        assert_eq!(
+            wiki_notes(tmp.path()),
+            0,
+            "a refused owner claim writes nothing"
+        );
+
+        let door = caller_with(Some(DOOR_TOKEN), Some(DOOR_TOKEN));
+        let written = remember_note(&s, door, Some(&correction)).await.unwrap();
+        let content = std::fs::read_to_string(&written.source_path).unwrap();
+        assert!(content.contains("author: owner"), "{content}");
+    }
+
+    #[tokio::test]
+    async fn an_owner_write_is_not_swallowed_by_someone_elses_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let door = caller_with(Some(DOOR_TOKEN), Some(DOOR_TOKEN));
+        let session_note = |author: &str| {
+            json!({
+                "title": "배포 요일",
+                "body": "금요일 배포는 하지 않는다.",
+                "omb_session_id": "s-shared",
+                "author": author,
+            })
+        };
+        let agent = remember_note(&s, Caller::Unverified, Some(&session_note("agent:hermes")))
+            .await
+            .unwrap();
+
+        let again = remember_note(&s, Caller::Unverified, Some(&session_note("agent:x")))
+            .await
+            .unwrap();
+        assert_eq!(
+            again.duplicate.as_deref(),
+            Some(agent.source_path.as_str()),
+            "control: a non-owner near-duplicate is still skipped"
+        );
+
+        let owner = remember_note(&s, door, Some(&session_note("owner")))
+            .await
+            .unwrap();
+        assert_eq!(owner.duplicate, None);
+        assert_ne!(owner.source_path, agent.source_path);
+        assert!(
+            std::fs::read_to_string(&owner.source_path)
+                .unwrap()
+                .contains("author: owner")
+        );
+        assert!(
+            std::fs::read_to_string(&agent.source_path)
+                .unwrap()
+                .contains("author: agent:hermes")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_cannot_rewrite_an_owner_note_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let door = caller_with(Some(DOOR_TOKEN), Some(DOOR_TOKEN));
+        let session_note = |author: &str, claims: Value| {
+            json!({
+                "title": "배포 요일",
+                "body": "금요일 배포는 하지 않는다.",
+                "omb_session_id": "s-owner",
+                "author": author,
+                "claims": claims,
+            })
+        };
+        let richer = json!([{"subject": "deploy", "predicate": "blocked_on", "value": "friday"}]);
+
+        let original = remember_note(&s, door, Some(&session_note("owner", json!([]))))
+            .await
+            .unwrap();
+        let agent = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&session_note("agent:hermes", richer.clone())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            agent.duplicate.as_deref(),
+            Some(original.source_path.as_str())
+        );
+        let kept = std::fs::read_to_string(&original.source_path).unwrap();
+        assert!(
+            kept.contains("author: owner") && !kept.contains("friday"),
+            "an agent's richer same-session note must not rewrite the owner's: {kept}"
+        );
+        let owners = remember_note(&s, door, Some(&session_note("owner", richer)))
+            .await
+            .unwrap();
+        assert_eq!(
+            owners.duplicate.as_deref(),
+            Some(original.source_path.as_str())
+        );
+        assert!(
+            std::fs::read_to_string(&owners.source_path)
+                .unwrap()
+                .contains("friday"),
+            "the owner may supersede their own note"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&original.source_path).unwrap(),
+            kept
+        );
+    }
+
+    fn richer_session_note(session: &str, claims: usize) -> Value {
+        let claims: Vec<Value> = (0..claims)
+            .map(|i| json!({"subject": format!("remember-{i}"), "predicate": "updates", "value": "weak duplicate notes"}))
+            .collect();
+        json!({
+            "title": "MCP ingestion",
+            "body": "Short summary.",
+            "omb_session_id": session,
+            "claims": claims,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_richer_same_session_note_supersedes_instead_of_overwriting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let first = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&richer_session_note("s-a1", 0)),
+        )
+        .await
+        .unwrap();
+        let first_bytes = std::fs::read(&first.source_path).unwrap();
+
+        let poorer = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&richer_session_note("s-a1", 0)),
+        )
+        .await
+        .unwrap();
+        assert!(poorer.message.starts_with("skipped — duplicate"));
+        assert_eq!(wiki_notes(tmp.path()), 1, "control: not richer is skipped");
+
+        let second = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&richer_session_note("s-a1", 2)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(wiki_notes(tmp.path()), 2);
+        assert_eq!(std::fs::read(&first.source_path).unwrap(), first_bytes);
+        assert_ne!(second.source_path, first.source_path);
+        assert_eq!(
+            second.duplicate.as_deref(),
+            Some(first.source_path.as_str())
+        );
+        assert!(
+            second.message.contains("(supersedes wiki/"),
+            "{}",
+            second.message
+        );
+    }
+
+    fn dup_match(path: &str, reason: DuplicateReason) -> DuplicateMatch {
+        DuplicateMatch {
+            source_path: path.to_owned(),
+            reason,
+            front: FrontMatter::default(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn newest_match_picks_the_latest_wiki_id_in_any_order() {
+        let a = "/v/wiki/wiki-0001.md";
+        let b = "/v/wiki/wiki-0002.md";
+        for reason in [
+            DuplicateReason::SameSession,
+            DuplicateReason::ProbableSession,
+        ] {
+            for order in [[a, b], [b, a]] {
+                let found = pick_duplicate(order.map(|p| dup_match(p, reason)).into()).unwrap();
+                assert_eq!(found.source_path, b, "{reason:?} {order:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_same_session_match_beats_an_exact_title_match() {
+        let found = pick_duplicate(vec![
+            dup_match("/v/wiki/wiki-0001.md", DuplicateReason::SameSession),
+            dup_match("/v/wiki/wiki-0002.md", DuplicateReason::ExactTitle),
+        ])
+        .unwrap();
+        assert_eq!(found.reason, DuplicateReason::SameSession);
+    }
+
+    fn chain_note(session: &str, claims: usize) -> Value {
+        let mut note = richer_session_note(session, claims);
+        note["tools"] = json!([
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet"
+        ]);
+        note
+    }
+
+    struct Chain {
+        b_path: String,
+        c: super::Remembered,
+        files: usize,
+    }
+
+    async fn probable_chain(c_claims: usize) -> Chain {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let remember = |session, claims| {
+            let args = chain_note(session, claims);
+            let s = &s;
+            async move {
+                remember_note(s, Caller::Unverified, Some(&args))
+                    .await
+                    .unwrap()
+            }
+        };
+        let a = remember("sx", 0).await;
+        let b = remember("sy", 2).await;
+        assert_eq!(b.duplicate.as_deref(), Some(a.source_path.as_str()));
+        let a_bytes = std::fs::read(&a.source_path).unwrap();
+        let b_bytes = std::fs::read(&b.source_path).unwrap();
+
+        let c = remember("sz", c_claims).await;
+        assert_eq!(std::fs::read(&a.source_path).unwrap(), a_bytes);
+        assert_eq!(std::fs::read(&b.source_path).unwrap(), b_bytes);
+        Chain {
+            b_path: b.source_path,
+            c,
+            files: wiki_notes(tmp.path()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_poorer_probable_session_note_is_compared_with_the_live_note() {
+        let chain = probable_chain(1).await;
+        assert_eq!(
+            chain.c.message,
+            format!("skipped — duplicate of {}", chain.b_path)
+        );
+        assert_eq!(chain.files, 2);
+    }
+
+    #[tokio::test]
+    async fn a_richer_probable_session_note_supersedes_the_live_note() {
+        let chain = probable_chain(10).await;
+        assert_eq!(chain.c.duplicate.as_deref(), Some(chain.b_path.as_str()));
+        assert_eq!(chain.files, 3);
+    }
+
+    #[tokio::test]
+    async fn a_third_distill_supersedes_the_second_not_the_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let remember = |claims| {
+            let args = richer_session_note("s-a2", claims);
+            let s = &s;
+            async move {
+                remember_note(s, Caller::Unverified, Some(&args))
+                    .await
+                    .unwrap()
+            }
+        };
+        let a = remember(0).await;
+        let b = remember(1).await;
+        assert_eq!(
+            b.duplicate.as_deref(),
+            Some(a.source_path.as_str()),
+            "control"
+        );
+        let a_bytes = std::fs::read(&a.source_path).unwrap();
+        let b_bytes = std::fs::read(&b.source_path).unwrap();
+
+        let c = remember(2).await;
+        assert_eq!(c.duplicate.as_deref(), Some(b.source_path.as_str()));
+        assert_eq!(wiki_notes(tmp.path()), 3);
+        assert_eq!(std::fs::read(&a.source_path).unwrap(), a_bytes);
+        assert_eq!(std::fs::read(&b.source_path).unwrap(), b_bytes);
     }
 
     #[test]
@@ -2329,36 +2810,6 @@ mod tests {
         assert_eq!(tool_outcome_snippet(&unknown), "unknown tool: nope");
         let big: Result<ToolOut, ToolCallError> = Ok(ToolOut::Text("y".repeat(600)));
         assert_eq!(tool_outcome_snippet(&big).len(), 500);
-    }
-
-    #[test]
-    fn forget_rejects_path_navigation_in_the_note_id() {
-        let src = repo_file("drudge/src/serve/mcp.rs");
-        let start = src
-            .find("async fn mcp_forget")
-            .expect("mcp_forget must exist");
-        let body = &src[start..start + 2000.min(src.len() - start)];
-        for needle in [r"id.contains('/')", r"id.contains('\\')"] {
-            assert!(
-                body.contains(needle),
-                "mcp_forget must contain {needle} — path navigation has to be rejected before \
-                 the filesystem is touched"
-            );
-        }
-        assert!(
-            body.contains(r#"id.contains("..")"#),
-            "mcp_forget must reject an id containing `..`"
-        );
-        let guard = body
-            .find("invalid note id")
-            .expect("rejection must be explicit");
-        let join = body
-            .find("wiki_dir.join")
-            .expect("mcp_forget must build a path");
-        assert!(
-            guard < join,
-            "the id must be rejected BEFORE it is joined onto the vault path"
-        );
     }
 
     #[test]
@@ -2571,6 +3022,59 @@ mod tests {
     }
 
     #[test]
+    fn said_by_is_parsed_once_at_the_remember_boundary() {
+        let said_by = |raw: Value| {
+            let args = json!({"title": "t", "body": "b", "claims": [
+                {"subject": "s", "predicate": "p", "value": "v", "said_by": raw},
+                {"subject": "s2", "predicate": "p", "value": "v"},
+            ]});
+            parse_remember_note(Some(&args), &BoringConfig::default())
+                .map(|n| n.front.claims.iter().map(|c| c.said_by).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            said_by(json!("owner")).unwrap(),
+            vec![Some(crate::frontmatter::SaidBy::Owner), None]
+        );
+        for bad in [
+            json!("assistant"),
+            json!("Owner"),
+            json!(""),
+            json!(1),
+            json!(null),
+        ] {
+            assert_eq!(
+                said_by(bad.clone()).map_err(|(code, _)| code),
+                Err(-32602),
+                "{bad} is a 400"
+            );
+        }
+
+        let note = parse_remember_note(
+            Some(&json!({"title": "t", "body": "b", "claims": [
+                {"subject": "s", "predicate": "p", "value": "v", "said_by": "owner"}]})),
+            &BoringConfig::default(),
+        )
+        .unwrap();
+        let file = crate::vault::render_wiki_note("wiki-0001", &note.front, &note.body).unwrap();
+        let (back, _) =
+            crate::frontmatter::parse(&file, "/v/wiki/wiki-0001.md", &BoringConfig::default())
+                .unwrap();
+        assert_eq!(
+            back.claims[0].said_by,
+            Some(crate::frontmatter::SaidBy::Owner)
+        );
+        assert_eq!(back.author, crate::frontmatter::Author::Unknown);
+        assert!(
+            crate::frontmatter::parse(
+                &file.replace("said_by: owner", "said_by: assistant"),
+                "/v/wiki/wiki-0001.md",
+                &BoringConfig::default()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn session_duplicate_gate_catches_rollout_copy() {
         let note = RememberNote {
             front: FrontMatter {
@@ -2585,6 +3089,7 @@ mod tests {
                         value: "secrets in PR via static analysis".to_owned(),
                         kind: "fact".to_owned(),
                         confidence: "certain".to_owned(),
+                        said_by: None,
                     },
                     crate::frontmatter::Claim {
                         subject: "confluence_page".to_owned(),
@@ -2592,6 +3097,7 @@ mod tests {
                         value: "tech-share".to_owned(),
                         kind: "decision".to_owned(),
                         confidence: "certain".to_owned(),
+                        said_by: None,
                     },
                 ],
                 omb_session_id: Some("codex-rollout-a".to_owned()),
@@ -2615,6 +3121,7 @@ mod tests {
                     value: "API keys, tokens, and passwords via regex patterns".to_owned(),
                     kind: "fact".to_owned(),
                     confidence: "certain".to_owned(),
+                    said_by: None,
                 },
                 crate::frontmatter::Claim {
                     subject: "github_action_step".to_owned(),
@@ -2622,6 +3129,7 @@ mod tests {
                     value: "gitleaks/gitleaks-action".to_owned(),
                     kind: "fact".to_owned(),
                     confidence: "certain".to_owned(),
+                    said_by: None,
                 },
             ],
             omb_session_id: Some("codex-rollout-b".to_owned()),
@@ -2674,6 +3182,7 @@ mod tests {
                         value: "weak duplicate notes when the new note is richer".to_owned(),
                         kind: "decision".to_owned(),
                         confidence: "certain".to_owned(),
+                        said_by: None,
                     },
                     crate::frontmatter::Claim {
                         subject: "quality_score".to_owned(),
@@ -2681,6 +3190,7 @@ mod tests {
                         value: "claims, tools, concepts, body tokens, and evidence markers".to_owned(),
                         kind: "fact".to_owned(),
                         confidence: "certain".to_owned(),
+                        said_by: None,
                     },
                 ],
                 omb_session_id: Some("session-a".to_owned()),
@@ -2713,6 +3223,7 @@ mod tests {
                     value: "weak duplicate notes".to_owned(),
                     kind: "decision".to_owned(),
                     confidence: "certain".to_owned(),
+                    said_by: None,
                 }],
                 omb_session_id: Some("session-a".to_owned()),
                 ..Default::default()
@@ -2752,6 +3263,7 @@ mod tests {
                     value: "weak duplicate notes only when incoming quality is higher".to_owned(),
                     kind: "decision".to_owned(),
                     confidence: "certain".to_owned(),
+                    said_by: None,
                 }],
                 omb_session_id: Some("session-a".to_owned()),
                 ..Default::default()
@@ -2772,6 +3284,7 @@ mod tests {
                     value: "weak duplicate notes when the new note is richer".to_owned(),
                     kind: "decision".to_owned(),
                     confidence: "certain".to_owned(),
+                    said_by: None,
                 }],
                 omb_session_id: Some("session-a".to_owned()),
                 ..Default::default()
@@ -2798,11 +3311,11 @@ mod tests {
         let note = telemetry_note();
         let existing = telemetry_existing(DuplicateReason::SameSession);
 
-        let event = dedup_decision_event(&note, Some(&existing), DedupOutcome::Replace);
+        let event = dedup_decision_event(&note, Some(&existing), DedupOutcome::Supersede);
 
         assert_eq!(event["event"], "dedup_decision");
         assert_eq!(event["component"], "drudge.mcp.remember");
-        assert_eq!(event["status"], "replaced");
+        assert_eq!(event["status"], "superseded");
         assert_eq!(event["reason"], "same_session");
         assert_eq!(event["omb_session_id"], "session-a");
         assert_eq!(
@@ -2938,6 +3451,7 @@ rules:
                     value: "ABC-123".to_owned(),
                     kind: "fact".to_owned(),
                     confidence: "certain".to_owned(),
+                    said_by: None,
                 }],
                 ..Default::default()
             },

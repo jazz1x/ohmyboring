@@ -37,6 +37,28 @@ fn unique_path(prefix: &str) -> String {
         .as_nanos();
     format!("/vault/wiki/{prefix}-{ts}.md")
 }
+
+/// `current_claims` reads top-k through HNSW (ef_search 40): a fixture far from the query is
+/// found or missed depending on what earlier suites left in the index. Query along its own direction.
+fn unique_direction() -> [f32; 1024] {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    )
+    .unwrap();
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut state = (nanos ^ (seq << 48)) | 1;
+    std::array::from_fn(|_| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        if state & 1 == 0 { 1.0 } else { -1.0 }
+    })
+}
+
 fn dummy_frontmatter(path: &str) -> FrontMatter {
     FrontMatter {
         origin: "personal".to_string(),
@@ -165,10 +187,8 @@ async fn current_claims_honors_exclude_origins() {
     let mut c_front = dummy_frontmatter(&c_path);
     c_front.origin = "company".to_string();
 
-    let mut emb_p = [0.0_f32; 1024];
-    emb_p[0] = 1.0;
-    let mut emb_c = [0.0_f32; 1024];
-    emb_c[1] = 1.0;
+    let emb_p = unique_direction();
+    let emb_c = unique_direction();
 
     for (front, subj, emb) in [(&p_front, &p_subj, &emb_p), (&c_front, &c_subj, &emb_c)] {
         store
@@ -190,7 +210,7 @@ async fn current_claims_honors_exclude_origins() {
             .expect("upsert claim");
     }
 
-    let query = [0.5_f32; 1024]; // near both
+    let query: [f32; 1024] = std::array::from_fn(|i| emb_p[i] + emb_c[i]);
     let subjects = |rows: Vec<drudge::store::AnchoredClaim>| -> Vec<String> {
         rows.into_iter().map(|c| c.claim.subject).collect()
     };
@@ -382,6 +402,7 @@ async fn delete_document_removes_claims() {
         value: "value".to_string(),
         kind: "fact".to_string(),
         confidence: "certain".to_string(),
+        said_by: None,
     });
 
     store
@@ -2426,6 +2447,7 @@ async fn write_claim_mirror(store: &Store, key: &str, kind: &str) -> (String, St
         value: "v".to_string(),
         kind: kind.to_string(),
         confidence: "certain".to_string(),
+        said_by: None,
     };
     store
         .upsert_claim(
@@ -2843,6 +2865,7 @@ struct HashedFixture {
     hashed: drudge::anchor_hash::AnchorHash,
     note_path: String,
     subject: String,
+    emb: [f32; 1024],
 }
 
 async fn seed_hashed_claim(store: &Store) -> HashedFixture {
@@ -2874,8 +2897,7 @@ async fn seed_hashed_claim(store: &Store) -> HashedFixture {
     let subject = format!("anchor-hash-{}", unique_source_id("subj"));
     let mut front = dummy_frontmatter(&note_path);
     front.project = anchor.project.clone();
-    let mut emb = [0.0_f32; 1024];
-    emb[0] = 1.0;
+    let emb = unique_direction();
     store
         .upsert_document(&front, "sha-anchor-hash", SystemTime::now())
         .await
@@ -2903,6 +2925,7 @@ async fn seed_hashed_claim(store: &Store) -> HashedFixture {
         hashed,
         note_path,
         subject,
+        emb,
     }
 }
 
@@ -3007,7 +3030,7 @@ async fn anchor_hash_marks_edited_bodies_stale_and_current_claims_hides_them() {
     assert!(stale_at.is_some(), "stale_at is stamped");
     assert_eq!(reason.as_deref(), Some("symbol body changed"));
 
-    let query = [0.5_f32; 1024];
+    let query = fixture.emb;
     let hidden = store
         .current_claims(&query, 50, &[], None, None, None, false)
         .await
@@ -3425,6 +3448,7 @@ fn claim_note(path: &str, subject: &str) -> FrontMatter {
             value: "v1".to_string(),
             kind: "fact".to_string(),
             confidence: "certain".to_string(),
+            said_by: None,
         }],
         ..Default::default()
     }
@@ -3846,13 +3870,14 @@ async fn claim_node_is_keyed_canonically_like_the_row() {
                 value: "v1".to_string(),
                 kind: "decision".to_string(),
                 confidence: "certain".to_string(),
+                said_by: None,
             },
             Claim {
                 subject: plain_subject.clone(),
                 predicate: "axis".to_string(),
                 value: "v2".to_string(),
-                kind: "fact".to_string(),
                 confidence: "certain".to_string(),
+                ..Default::default()
             },
         ],
         ..Default::default()
@@ -4013,4 +4038,131 @@ async fn undeclared_claim_row_and_node_outlive_their_edge() {
 
     cleanup_claim_edge_fixture(&store, &db, &note_path_str, &subject_x).await;
     cleanup_claim_edge_fixture(&store, &db, &note_path_str, &subject_y).await;
+}
+
+// ── sync prune is closed during the migration ─────────────────────────────────
+
+use drudge::ingest::run_with;
+
+async fn note_row_counts(db: &Client, path: &str, subject: &str) -> [i64; 4] {
+    let one = |row: tokio_postgres::Row| row.get::<_, i64>(0);
+    [
+        one(db
+            .query_one(
+                "SELECT count(*) FROM document WHERE source_path = $1;",
+                &[&path],
+            )
+            .await
+            .expect("count documents")),
+        one(db
+            .query_one(
+                "SELECT count(*) FROM chunk WHERE source_path = $1;",
+                &[&path],
+            )
+            .await
+            .expect("count chunks")),
+        one(db
+            .query_one(
+                "SELECT count(*) FROM edge WHERE src = $1;",
+                &[&format!("doc:{path}")],
+            )
+            .await
+            .expect("count edges")),
+        claim_row_count(db, path, subject).await,
+    ]
+}
+
+async fn prune_skipped_events_naming(store: &Store, path: &str) -> usize {
+    store
+        .recent_events(EventLogFilter {
+            limit: 50,
+            component: Some("drudge.ingest"),
+            event_name: Some("prune_skipped"),
+            status: None,
+            run_id: None,
+            workflow: None,
+            since_hours: None,
+        })
+        .await
+        .expect("read events")
+        .into_iter()
+        .filter(|e| {
+            e.attributes["paths"]
+                .as_array()
+                .is_some_and(|ps| ps.iter().any(|p| p.as_str() == Some(path)))
+        })
+        .count()
+}
+
+/// Owner decision 2026-09-24: a note that leaves the vault keeps its document·chunk·edge·claim
+/// rows and is named in a `prune_skipped` event; putting it back re-ingests onto the same rows.
+#[tokio::test]
+async fn vanished_note_keeps_rows_and_restored_note_does_not_duplicate() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = unique_subject("prune");
+    let vault = tempdir().expect("vault dir");
+    let parking = tempdir().expect("parking dir");
+    let dirs = vec![vault.path().to_string_lossy().into_owned()];
+    let note_path = vault.path().join(format!("{subject}.md"));
+    let parked = parking.path().join("parked.md");
+    fs::write(
+        &note_path,
+        format!(
+            "---\norigin: personal\nproject: \"\"\nkind: note\nclaims:\n  - subject: {subject}\n    predicate: axis\n    value: v1\n    kind: fact\n    confidence: certain\n---\n\nbody\n"
+        ),
+    )
+    .expect("write note");
+    let path = note_path.to_string_lossy().into_owned();
+    let cfg = BoringConfig::default();
+    let embedder = CountingEmbed::lenient();
+    let sync =
+        || run_with::<DefaultChunker, FrontmatterGraphExtractor, _>(&store, &embedder, &cfg, &dirs);
+
+    let first = sync().await.expect("first sync");
+    assert_eq!(first.kept_vanished, 0, "nothing vanished yet");
+    let ingested = note_row_counts(&db, &path, &subject).await;
+    assert!(
+        ingested.iter().all(|n| *n > 0),
+        "fixture ingested: {ingested:?}"
+    );
+    assert_eq!(prune_skipped_events_naming(&store, &path).await, 0);
+
+    fs::rename(&note_path, &parked).expect("move note out");
+    let gone = sync().await.expect("sync with the note gone");
+    assert_eq!(
+        (gone.kept_vanished, gone.deleted),
+        (1, 0),
+        "the sync stats count the kept note, not a deletion"
+    );
+    assert_eq!(
+        note_row_counts(&db, &path, &subject).await,
+        ingested,
+        "the vanished note keeps every row"
+    );
+    assert_eq!(
+        prune_skipped_events_naming(&store, &path).await,
+        1,
+        "the kept path is named in a prune_skipped event"
+    );
+
+    fs::rename(&parked, &note_path).expect("move note back");
+    let back = sync().await.expect("sync with the note back");
+    assert_eq!(back.kept_vanished, 0, "a restored note is not kept");
+    assert_eq!(
+        note_row_counts(&db, &path, &subject).await,
+        ingested,
+        "the restored note re-ingests onto the same rows"
+    );
+    assert_eq!(
+        prune_skipped_events_naming(&store, &path).await,
+        1,
+        "a present note is not reported again"
+    );
+
+    cleanup_claim_edge_fixture(&store, &db, &path, &subject).await;
 }

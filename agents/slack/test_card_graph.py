@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""card_core's parsers and builders, and the g_card graph — no network, no LLM, no Slack.
+"""card.py's graph, dry-run, live-collaborator wiring, and single-instance lock.
 
 The graph test drives build_graph with stub collaborators through MemorySaver + thread_id:
 first invoke runs read_registers → cross_check → advise → resolve → post_card and pauses at
@@ -10,29 +10,28 @@ to itself. The search/read_note stubs stand in for the door's /search and the ho
 each candidate subject gets one canned hit whose note has known text, so parse_advised's
 quote check has something real to check against.
 
-Run: python3 agents/slack/test_card_core.py
+Run: python3 agents/slack/test_card_graph.py
 """
 
 import contextlib
 import io
 import json
 import os
-import re
 import sys
 import threading
 import unittest
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 import card  # noqa: E402
-import card_core as cc  # noqa: E402
-import card_i18n  # noqa: E402
+import card_live  # noqa: E402
+import card_types as cc  # noqa: E402
+import card_verdicts  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 
 OWNER = "U_OWNER"
-OTHER = "U_OTHER"
 CARD_TS = "1.0"
 CARD_CH = "C1"
 SESSION = f"slack:{CARD_CH}:{CARD_TS}"
@@ -141,19 +140,19 @@ PAST_APPROVED = [
 ]
 PAST_SESSION = "slack:C1:1759000000.000001"
 
+# The door's GET /repairs/split-subjects shape — one group is enough to exercise the lane.
+REPAIR_GROUPS = [
+    {
+        "subject": "foodspring-front",
+        "variants": ["foodspring front", "foodspring-front"],
+        "rows": 3218,
+        "notes": 212,
+    }
+]
+
 
 def _fetch(path: str, project: str = "") -> dict:
     return FETCH_DATA[path]
-
-
-def _payload(action_id: str, user: str = OWNER) -> dict:
-    return {
-        "type": "block_actions",
-        "actions": [{"action_id": action_id, "value": "/vault/wiki/wiki-0576.md"}],
-        "user": {"id": user},
-        "message": {"ts": CARD_TS},
-        "channel": {"id": CARD_CH},
-    }
 
 
 class Stubs:
@@ -171,6 +170,10 @@ class Stubs:
         responses: list[str] | None = None,
         active_project_names: list[str] | None = None,
         past_verdict_pairs: list[cc.PastVerdictPair] | None = None,
+        repairs_payload: dict | None = None,
+        merged_yesterday_rows: int | None = None,
+        execute_repair_result: dict | None = None,
+        proposed_items: list[cc.ProposedVerdict] | None = None,
     ):
         self.resolutions = resolutions if resolutions is not None else RESOLUTIONS
         self.approved_items = approved if approved is not None else PAST_APPROVED
@@ -181,10 +184,18 @@ class Stubs:
         )
         self.active_project_names = active_project_names if active_project_names is not None else []
         self.past_verdict_pairs = past_verdict_pairs if past_verdict_pairs is not None else []
+        self.repairs_payload = (
+            repairs_payload if repairs_payload is not None else {"groups": [], "total_groups": 0}
+        )
+        self.merged_yesterday_rows = merged_yesterday_rows
+        self.execute_repair_result = execute_repair_result if execute_repair_result is not None else {}
+        self.proposed_items = proposed_items if proposed_items is not None else []
         self.propose_calls: list[str] = []
         self.search_calls: list[str] = []
         self.resolve_calls: list[tuple[str, str]] = []
         self.records: list[tuple[str, dict]] = []
+        self.execute_repair_calls: list[str] = []
+        self.repairs_calls: list[int] = []
 
     def search(self, subject: str) -> list[dict]:
         self.search_calls.append(subject)
@@ -222,500 +233,27 @@ class Stubs:
         return self.active_project_names
 
     def past_verdicts(self, since_hours: int) -> list[cc.PastVerdictPair]:
-        assert since_hours == cc.SUPPRESS_WINDOW_HOURS
+        assert since_hours == card_verdicts.SUPPRESS_WINDOW_HOURS
         return self.past_verdict_pairs
+
+    def repairs(self, limit: int) -> dict:
+        self.repairs_calls.append(limit)
+        return self.repairs_payload
+
+    def merged_yesterday(self) -> int | None:
+        return self.merged_yesterday_rows
+
+    def execute_repair(self, subject: str) -> dict:
+        self.execute_repair_calls.append(subject)
+        return self.execute_repair_result
+
+    def proposed(self, since_hours: int) -> list[cc.ProposedVerdict]:
+        assert since_hours == card.REVIEW_SINCE_HOURS
+        return self.proposed_items
 
 
 def _blocks_text(blocks) -> str:
     return json.dumps(blocks, ensure_ascii=False)
-
-
-class BuildBlocksTests(unittest.TestCase):
-    def setUp(self):
-        self.proposals = [
-            cc.Proposal(
-                subject=f"주어 {i}",
-                note=note,
-                register="stalled",
-                bottleneck=f"병목 설명 {i} 열자 이상",
-                advice=f"오늘 할 일 {i} 열자 이상",
-                evidence=[cc.Evidence(note=note, quote="근거 인용문 열두자 이상입니다", line=i + 1)],
-            )
-            for i, note in enumerate(EXPECTED_NOTES)
-        ]
-
-    def test_header_counts_the_proposals_and_rows_carry_note_paths(self):
-        blocks = cc.build_blocks(self.proposals, lang="ko")
-        self.assertEqual(blocks[0]["text"]["text"], f"☀️ 오늘 제안 {len(self.proposals)}")
-        action_rows = [b for b in blocks if b["type"] == "actions"]
-        self.assertEqual(len(action_rows), 3)
-        for idx, row in enumerate(action_rows):
-            buttons = {b["action_id"]: b for b in row["elements"]}
-            self.assertEqual(set(buttons), {f"card:{idx}:do", f"card:{idx}:defer", f"card:{idx}:drop"})
-            for button in row["elements"]:
-                self.assertEqual(button["value"], EXPECTED_NOTES[idx])
-                self.assertTrue(button["value"].startswith("/vault/wiki/"))
-            labels = [b["text"]["text"] for b in row["elements"]]
-            self.assertEqual(labels, ["해", "미뤄", "빼"])
-        self.assertIn("주어 0", _blocks_text(blocks))
-
-    def test_each_proposal_shows_its_bottleneck_and_evidence_coordinate(self):
-        blocks = cc.build_blocks(self.proposals, lang="ko")
-        text = _blocks_text(blocks)
-        self.assertIn("병목 설명 0", text)
-        self.assertIn("wiki-0900 L1", text)
-        self.assertIn("근거 인용문", text)
-
-    def test_judged_row_shows_its_mark_instead_of_buttons(self):
-        verdict = cc.ButtonVerdict(idx=1, choice="do", user=OWNER, at="t")
-        blocks = cc.build_blocks(self.proposals, [verdict], lang="ko")
-        action_rows = [b for b in blocks if b["type"] == "actions"]
-        marks = [b for b in blocks if b["type"] == "context" and "✓" in _blocks_text([b])]
-        self.assertEqual(len(action_rows), 2)
-        self.assertEqual(len(marks), 1)
-        self.assertIn("✓ 해", marks[0]["elements"][0]["text"])
-        self.assertNotIn("card:1:", _blocks_text(blocks))
-
-    def test_confirmation_line_sits_under_the_header_when_there_is_one(self):
-        confirmation = cc.Confirmation(
-            total=3,
-            done=["/vault/wiki/wiki-9999.md", "/vault/wiki/wiki-9998.md"],
-            pending=["/vault/wiki/wiki-0900.md"],
-        )
-        blocks = cc.build_blocks(self.proposals, confirmation=confirmation, lang="ko")
-        self.assertEqual(blocks[1]["type"], "context")
-        self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 3 · 했다 2 · 아직 1")
-
-    def test_confirmation_line_counts_unknown_when_the_door_failed(self):
-        confirmation = cc.Confirmation(
-            total=2,
-            done=[],
-            pending=["/vault/wiki/wiki-0900.md"],
-            unknown=[("/vault/wiki/wiki-9999.md", "claim-source answered 500")],
-        )
-        blocks = cc.build_blocks(self.proposals, confirmation=confirmation, lang="ko")
-        self.assertEqual(blocks[1]["elements"][0]["text"], "지난 승인 2 · 했다 0 · 아직 1 · 확인불가 1")
-
-    def test_no_confirmation_no_line(self):
-        for none in (None, cc.Confirmation(total=0, done=[], pending=[])):
-            blocks = cc.build_blocks(self.proposals, confirmation=none, lang="ko")
-            self.assertNotIn("지난 승인", _blocks_text(blocks))
-
-    def test_empty_proposals_still_renders_a_zero_header(self):
-        blocks = cc.build_blocks([], lang="ko")
-        self.assertEqual(blocks[0]["text"]["text"], "☀️ 오늘 제안 0")
-        self.assertEqual(len(blocks), 1)
-
-
-class ConfirmPastTests(unittest.TestCase):
-    def test_note_still_in_today_register_is_pending_otherwise_done(self):
-        out = cc.confirm_past(PAST_APPROVED, {"/vault/wiki/wiki-0900.md"})
-        self.assertEqual(out.total, 3)
-        self.assertEqual(out.done, ["/vault/wiki/wiki-9999.md", "/vault/wiki/wiki-9998.md"])
-        self.assertEqual(out.pending, ["/vault/wiki/wiki-0900.md"])
-        self.assertEqual(out.unknown, [])
-        self.assertEqual(out.session, PAST_SESSION)
-
-    def test_absence_is_done_only_when_the_door_answered(self):
-        out = cc.confirm_past(PAST_APPROVED[1:], set())
-        self.assertEqual(out.done, ["/vault/wiki/wiki-9999.md", "/vault/wiki/wiki-9998.md"])
-        self.assertEqual(out.pending, [])
-
-    def test_door_failure_leaves_the_past_approval_unknown(self):
-        out = cc.confirm_past(PAST_APPROVED, set(), failures=["claim-source answered 500"])
-        self.assertEqual(out.done, [])
-        self.assertEqual(out.pending, [])
-        self.assertEqual(
-            out.unknown,
-            [
-                ("/vault/wiki/wiki-0900.md", "claim-source answered 500"),
-                ("/vault/wiki/wiki-9999.md", "claim-source answered 500"),
-                ("/vault/wiki/wiki-9998.md", "claim-source answered 500"),
-            ],
-        )
-
-    def test_empty_past_is_a_zero_confirmation(self):
-        out = cc.confirm_past([], {"/vault/wiki/wiki-0900.md"})
-        self.assertEqual(out.total, 0)
-        self.assertIsNone(out.session)
-
-
-class ParseActionTests(unittest.TestCase):
-    def test_valid_press_is_a_verdict(self):
-        out = cc.parse_action(_payload("card:1:do"), owner_id=OWNER, n_proposals=3, at="t")
-        self.assertIsInstance(out, cc.ButtonVerdict)
-        self.assertEqual((out.idx, out.choice, out.user, out.at), (1, "do", OWNER, "t"))
-
-    def test_unknown_action_id_is_rejected(self):
-        out = cc.parse_action(_payload("card:1:nope"), owner_id=OWNER, n_proposals=3)
-        self.assertIsInstance(out, cc.Rejected)
-        out = cc.parse_action(_payload("reaction:x"), owner_id=OWNER, n_proposals=3)
-        self.assertIsInstance(out, cc.Rejected)
-
-    def test_missing_proposal_is_rejected(self):
-        out = cc.parse_action(_payload("card:7:do"), owner_id=OWNER, n_proposals=3)
-        self.assertIsInstance(out, cc.Rejected)
-
-    def test_non_owner_press_is_rejected_only_when_owner_configured(self):
-        out = cc.parse_action(_payload("card:0:do", user=OTHER), owner_id=OWNER, n_proposals=3)
-        self.assertIsInstance(out, cc.Rejected)
-        out = cc.parse_action(_payload("card:0:do", user=OTHER), owner_id=None, n_proposals=3)
-        self.assertIsInstance(out, cc.ButtonVerdict)
-
-
-class CandidateOrderTests(unittest.TestCase):
-    def setUp(self):
-        self.registers = cc.collect_registers(_fetch)
-
-    def test_priority_subjects_lead_in_their_own_register(self):
-        order = cc.candidate_order(self.registers, priority=["f64_risk"])
-        self.assertEqual(order[0], ("f64_risk", "risks"))
-
-    def test_then_recurrences_then_risks_then_stalled(self):
-        order = cc.candidate_order(self.registers, priority=["f64_risk"])
-        subjects = [s for s, _ in order]
-        self.assertEqual(
-            subjects,
-            [
-                "f64_risk",
-                "/vault/wiki/wiki-0536.md",
-                "/vault/wiki/wiki-0576.md",
-                "essential_mode",
-                "draft_wiring",
-            ],
-        )
-
-    def test_next_actions_never_appears(self):
-        order = cc.candidate_order(self.registers)
-        self.assertNotIn("next_action", [s for s, _ in order])
-        self.assertNotIn("loop", [s for s, _ in order])
-
-    def test_a_subject_appears_once_even_if_also_priority(self):
-        order = cc.candidate_order(self.registers, priority=["essential_mode", "essential_mode"])
-        subjects = [s for s, _ in order]
-        self.assertEqual(subjects.count("essential_mode"), 1)
-
-
-class ParseAdvisedTests(unittest.TestCase):
-    """AC1: exact match, whitespace difference, not-a-substring, missing note, NotWorth."""
-
-    NOTE = "/vault/wiki/wiki-0900.md"
-    TEXT = "머리말\n문 응답 지연이 반복되는 원인은 타임아웃 설정이다\n끝"
-
-    def _proposal_json(self, quote: str, note: str | None = None) -> str:
-        return _advice_json("병목 열자 이상 문장", "조언 열자 이상 문장", note or self.NOTE, quote)
-
-    def test_exact_match_computes_the_line(self):
-        out = cc.parse_advised(
-            self._proposal_json("문 응답 지연이 반복되는 원인은 타임아웃 설정이다"), {self.NOTE: self.TEXT}
-        )
-        self.assertIsInstance(out, cc.Advice)
-        self.assertEqual(out.evidence[0].line, 2)
-
-    def test_whitespace_difference_still_verifies(self):
-        # The model retypes rather than copy-pastes — a run of whitespace collapsing to one
-        # space is not a fabrication.
-        quote = "문 응답    지연이  반복되는 원인은 타임아웃 설정이다"
-        out = cc.parse_advised(self._proposal_json(quote), {self.NOTE: self.TEXT})
-        self.assertIsInstance(out, cc.Advice)
-        self.assertEqual(out.evidence[0].line, 2)
-
-    def test_not_a_substring_is_ungrounded(self):
-        out = cc.parse_advised(
-            self._proposal_json("이 문장은 노트에 없는 지어낸 인용문이다"), {self.NOTE: self.TEXT}
-        )
-        self.assertIsInstance(out, cc.Ungrounded)
-
-    def test_missing_note_is_ungrounded(self):
-        out = cc.parse_advised(
-            self._proposal_json(
-                "문 응답 지연이 반복되는 원인은 타임아웃 설정이다", note="/vault/wiki/wiki-9999.md"
-            ),
-            {self.NOTE: self.TEXT},
-        )
-        self.assertIsInstance(out, cc.Ungrounded)
-
-    def test_paraphrase_sharing_only_a_quote_prefix_is_ungrounded(self):
-        # A prefix-matching bug (checking only the first MIN_QUOTE_CHARS characters) would
-        # treat this as grounded because it shares a real line's opening — the tail is a
-        # plausible paraphrase, fabricated, and never appears verbatim anywhere in the note.
-        real_line = " ".join(self.TEXT.splitlines()[1].split())
-        prefix = real_line[: cc.MIN_QUOTE_CHARS]
-        quote = prefix + " 이하는 노트에 없는 완전히 다른 결말이다"
-        self.assertGreaterEqual(len(quote), cc.MIN_QUOTE_CHARS)
-        out = cc.parse_advised(self._proposal_json(quote), {self.NOTE: self.TEXT})
-        self.assertIsInstance(out, cc.Ungrounded)
-
-    def test_not_worth_passes_through(self):
-        out = cc.parse_advised(NOT_WORTH_JSON, {self.NOTE: self.TEXT})
-        self.assertIsInstance(out, cc.NotWorth)
-        self.assertEqual(out.reason, "근거가 약하다")
-
-    def test_bad_json_is_ungrounded_not_raised(self):
-        out = cc.parse_advised("not json", {})
-        self.assertIsInstance(out, cc.Ungrounded)
-
-    def test_schema_violation_is_ungrounded_not_raised(self):
-        out = cc.parse_advised(json.dumps({"result": {"kind": "proposal"}}), {})
-        self.assertIsInstance(out, cc.Ungrounded)
-
-
-#: A run of 3+ ASCII words — a proper noun ("Slack", "JSON") or a symbol never matches this;
-#: three real English words in a row does.
-_LATIN_SENTENCE = re.compile(r"[A-Za-z]+(?:\s+[A-Za-z]+){2,}")
-_HANGUL = re.compile(r"[가-힣]")
-_KANA_OR_KANJI = re.compile(r"[぀-ヿ一-鿿]")
-
-
-class CardI18nTests(unittest.TestCase):
-    """AC3: en/ko/ja key parity, and no language bleeding into a table that isn't its own."""
-
-    def test_key_sets_match_across_languages(self):
-        en, ko, ja = card_i18n.STRINGS["en"], card_i18n.STRINGS["ko"], card_i18n.STRINGS["ja"]
-        self.assertEqual(set(en), set(ko))
-        self.assertEqual(set(en), set(ja))
-
-    def test_ko_table_has_no_latin_sentence(self):
-        for key, value in card_i18n.STRINGS["ko"].items():
-            self.assertIsNone(_LATIN_SENTENCE.search(value), f"{key}: {value!r}")
-
-    def test_en_table_has_no_hangul_or_kana(self):
-        for key, value in card_i18n.STRINGS["en"].items():
-            self.assertIsNone(_HANGUL.search(value), f"{key}: {value!r}")
-            self.assertIsNone(_KANA_OR_KANJI.search(value), f"{key}: {value!r}")
-
-    def test_ja_table_has_no_hangul(self):
-        for key, value in card_i18n.STRINGS["ja"].items():
-            self.assertIsNone(_HANGUL.search(value), f"{key}: {value!r}")
-
-    def test_the_detectors_actually_catch_a_planted_violation(self):
-        # A guard nobody has seen fail is not proven — plant one of each violation the three
-        # tests above are meant to catch, on a copy, and check the same regex still fires.
-        self.assertIsNotNone(_LATIN_SENTENCE.search("오늘 제안 please do the thing now"))
-        self.assertIsNotNone(_HANGUL.search("Today's picks 오늘"))
-        self.assertIsNotNone(_HANGUL.search("今日の提案 오늘"))
-
-
-class ResolveLangTests(unittest.TestCase):
-    def test_explicit_languages_pass_through(self):
-        for lang in ("en", "ko", "ja"):
-            self.assertEqual(cc.resolve_lang(lang), lang)
-
-    def test_auto_and_anything_unmapped_falls_back_to_english(self):
-        for raw in ("auto", "", "fr", "KO"):
-            self.assertEqual(cc.resolve_lang(raw), "en")
-
-
-class AdviceLangInstructionTests(unittest.TestCase):
-    """AC3: build_advice_prompt attaches a language instruction, distill_core-style."""
-
-    def test_ja_instruction_is_in_the_prompt(self):
-        prompt = cc.build_advice_prompt("주어", "risks", [], "ja")
-        self.assertIn(cc.ADVICE_LANG_INSTRUCTION["ja"], prompt)
-
-    def test_ko_and_en_instructions_are_in_the_prompt(self):
-        for lang in ("ko", "en"):
-            prompt = cc.build_advice_prompt("주어", "risks", [], lang)
-            self.assertIn(cc.ADVICE_LANG_INSTRUCTION[lang], prompt)
-
-    def test_unmapped_lang_gets_the_fallback_instruction(self):
-        prompt = cc.build_advice_prompt("주어", "risks", [], "auto")
-        self.assertIn("same language as the past record above", prompt)
-
-
-def _registers(sources: dict[str, list[str]]) -> cc.Registers:
-    full = {name: sources.get(name, []) for name in cc.REGISTER_NAMES}
-    return cc.Registers(texts={name: "" for name in cc.REGISTER_NAMES}, sources=full)
-
-
-class MergeProjectCandidatesTests(unittest.TestCase):
-    def setUp(self):
-        self.registers_a = _registers({"risks": ["f64_risk"], "stalled": ["a_only"]})
-        self.registers_b = _registers({"risks": ["f64_risk"], "stalled": ["b_only"]})
-        self.project_registers = {"proj-a": self.registers_a, "proj-b": self.registers_b}
-
-    def test_priority_pair_leads_regardless_of_project_order(self):
-        order = cc.merge_project_candidates(
-            ["proj-a", "proj-b"], self.project_registers, priority=[("proj-b", "f64_risk")]
-        )
-        self.assertEqual(order[0], ("proj-b", "f64_risk", "risks"))
-
-    def test_project_order_is_respected_after_priority(self):
-        order = cc.merge_project_candidates(["proj-a", "proj-b"], self.project_registers)
-        projects_in_order = [p for p, _, _ in order]
-        # proj-a's own candidates all precede proj-b's — merge_project_candidates walks
-        # project_order in sequence, each project's own candidate_order intact within it.
-        first_b_index = projects_in_order.index("proj-b")
-        self.assertTrue(all(p == "proj-a" for p in projects_in_order[:first_b_index]))
-
-    def test_a_subject_is_deduplicated_across_projects(self):
-        # f64_risk appears identically in both projects' registers (same fixture data) — it
-        # must be spent once, not once per project, or the call budget scales with project
-        # count instead of staying fixed at ADVISE_CALL_CAP.
-        order = cc.merge_project_candidates(["proj-a", "proj-b"], self.project_registers)
-        subjects = [s for _, s, _ in order]
-        self.assertEqual(subjects.count("f64_risk"), 1)
-
-    def test_unknown_project_in_the_order_is_skipped_not_raised(self):
-        order = cc.merge_project_candidates(["proj-a", "ghost"], self.project_registers)
-        self.assertTrue(all(p != "ghost" for p, _, _ in order))
-
-
-class ProjectGroupingBlocksTests(unittest.TestCase):
-    def _proposal(self, subject: str, project: str, note: str) -> cc.Proposal:
-        return cc.Proposal(
-            subject=subject,
-            note=note,
-            project=project,
-            register="stalled",
-            bottleneck=f"{subject} 병목 열자 이상 문장",
-            advice=f"{subject} 조언 열자 이상 문장",
-            evidence=[cc.Evidence(note=note, quote="근거 인용문 열두자 이상입니다", line=1)],
-        )
-
-    def test_two_projects_and_unassigned_get_three_fixed_order_headers(self):
-        proposals = [
-            self._proposal("s1", "proj-a", "/vault/wiki/wiki-0001.md"),
-            self._proposal("s2", "", "/vault/wiki/wiki-0002.md"),
-            self._proposal("s3", "proj-b", "/vault/wiki/wiki-0003.md"),
-            self._proposal("s4", "proj-a", "/vault/wiki/wiki-0004.md"),
-        ]
-        blocks = cc.build_blocks(proposals, lang="ko")
-        headers = [b["text"]["text"] for b in blocks if b["type"] == "header"]
-        # title header, then one per project in first-seen order: proj-a, unassigned, proj-b.
-        self.assertEqual(headers, ["☀️ 오늘 제안 4", "proj-a", "무소속", "proj-b"])
-        action_rows = [b for b in blocks if b["type"] == "actions"]
-        self.assertEqual(len(action_rows), 4)
-
-    def test_english_lang_uses_the_unassigned_label_and_button_words(self):
-        proposals = [self._proposal("s1", "", "/vault/wiki/wiki-0001.md")]
-        blocks = cc.build_blocks(proposals, lang="en")
-        headers = [b["text"]["text"] for b in blocks if b["type"] == "header"]
-        self.assertEqual(headers, ["☀️ Today's picks 1", "Unassigned"])
-        action_row = next(b for b in blocks if b["type"] == "actions")
-        labels = [el["text"]["text"] for el in action_row["elements"]]
-        self.assertEqual(labels, ["Do", "Defer", "Drop"])
-
-
-class SuppressedTests(unittest.TestCase):
-    NOW = datetime(2026, 9, 22, 8, 0, 0, tzinfo=UTC)
-
-    def _proposal(self, note: str, evidence_note: str, line: int) -> cc.Proposal:
-        return cc.Proposal(
-            subject="주어",
-            note=note,
-            register="stalled",
-            bottleneck="병목 문장 열자 이상입니다",
-            advice="조언 문장 열자 이상입니다",
-            evidence=[cc.Evidence(note=evidence_note, quote="근거 인용문 열두자 이상", line=line)],
-        )
-
-    def test_recent_do_or_drop_suppresses_the_same_pair(self):
-        candidate = self._proposal("/n1.md", "/e1.md", 3)
-        for choice in ("do", "drop"):
-            past = [
-                cc.PastVerdictPair(
-                    note="/n1.md",
-                    evidence_note="/e1.md",
-                    evidence_line=3,
-                    choice=choice,
-                    at=(self.NOW - timedelta(days=1)).isoformat(),
-                )
-            ]
-            kept, dropped = cc.suppressed([candidate], past, now=self.NOW)
-            self.assertEqual(kept, [], choice)
-            self.assertEqual(dropped, [candidate], choice)
-
-    def test_defer_never_suppresses(self):
-        candidate = self._proposal("/n1.md", "/e1.md", 3)
-        past = [
-            cc.PastVerdictPair(
-                note="/n1.md",
-                evidence_note="/e1.md",
-                evidence_line=3,
-                choice="defer",
-                at=self.NOW.isoformat(),
-            )
-        ]
-        kept, dropped = cc.suppressed([candidate], past, now=self.NOW)
-        self.assertEqual(kept, [candidate])
-        self.assertEqual(dropped, [])
-
-    def test_a_verdict_older_than_the_window_does_not_suppress(self):
-        candidate = self._proposal("/n1.md", "/e1.md", 3)
-        past = [
-            cc.PastVerdictPair(
-                note="/n1.md",
-                evidence_note="/e1.md",
-                evidence_line=3,
-                choice="drop",
-                at=(self.NOW - timedelta(hours=cc.SUPPRESS_WINDOW_HOURS + 1)).isoformat(),
-            )
-        ]
-        kept, dropped = cc.suppressed([candidate], past, now=self.NOW)
-        self.assertEqual(kept, [candidate])
-        self.assertEqual(dropped, [])
-
-    def test_a_different_pair_is_unaffected(self):
-        candidate = self._proposal("/n1.md", "/e1.md", 3)
-        past = [
-            cc.PastVerdictPair(
-                note="/n1.md", evidence_note="/e1.md", evidence_line=9, choice="drop", at=self.NOW.isoformat()
-            )
-        ]
-        kept, dropped = cc.suppressed([candidate], past, now=self.NOW)
-        self.assertEqual(kept, [candidate])
-        self.assertEqual(dropped, [])
-
-    def test_a_malformed_timestamp_raises_instead_of_being_silently_skipped(self):
-        # F5/ROP: a judged-history row this function cannot place in time is a wrong-card
-        # signal, not a quiet gap — the old `except ValueError: continue` hid exactly this.
-        candidate = self._proposal("/n1.md", "/e1.md", 3)
-        past = [
-            cc.PastVerdictPair(
-                note="/n1.md", evidence_note="/e1.md", evidence_line=3, choice="drop", at="not-a-timestamp"
-            )
-        ]
-        with self.assertRaises(ValueError):
-            cc.suppressed([candidate], past, now=self.NOW)
-
-
-class EventFieldsTests(unittest.TestCase):
-    def test_proposal_event_fields_carries_the_full_contract_field_set(self):
-        proposal = cc.Proposal(
-            subject="주어",
-            note="/n1.md",
-            project="proj-a",
-            register="stalled",
-            bottleneck="병목 문장 열자 이상입니다",
-            advice="조언 문장 열자 이상입니다",
-            evidence=[cc.Evidence(note="/e1.md", quote="근거 인용문 열두자 이상", line=4)],
-        )
-        fields = cc.proposal_event_fields(proposal, "ko", "1234.5", 2)
-        self.assertEqual(
-            set(fields),
-            {
-                "register",
-                "project",
-                "subject",
-                "note",
-                "bottleneck",
-                "advice",
-                "evidence",
-                "lang",
-                "card_ts",
-                "idx",
-            },
-        )
-        self.assertEqual(
-            fields["evidence"], [{"note": "/e1.md", "quote": "근거 인용문 열두자 이상", "line": 4}]
-        )
-        self.assertEqual((fields["card_ts"], fields["idx"]), ("1234.5", 2))
-
-    def test_verdict_event_fields_is_thin(self):
-        verdict = cc.ButtonVerdict(idx=1, choice="drop", user="U1", at="t")
-        fields = cc.verdict_event_fields(verdict, "1234.5")
-        self.assertEqual(fields, {"card_ts": "1234.5", "idx": 1, "choice": "drop"})
 
 
 class GraphTests(unittest.TestCase):
@@ -742,6 +280,10 @@ class GraphTests(unittest.TestCase):
             active_projects=stubs.active_projects,
             past_verdicts=stubs.past_verdicts,
             lang=lang,
+            repairs=stubs.repairs,
+            execute_repair=stubs.execute_repair,
+            merged_yesterday=stubs.merged_yesterday,
+            proposed=stubs.proposed,
         )
         return card.build_graph(collabs)
 
@@ -761,11 +303,13 @@ class GraphTests(unittest.TestCase):
         verdict = cc.ButtonVerdict(idx=idx, choice=choice, user=OWNER, at="t")
         return self.graph.invoke(Command(resume=verdict), self.cfg)
 
-    def test_graph_has_the_seven_nodes(self):
+    def test_graph_has_the_nine_nodes(self):
         names = set(self.graph.get_graph().nodes) - {"__start__", "__end__"}
         self.assertEqual(
             names,
             {
+                "read_repairs",
+                "read_proposed",
                 "read_registers",
                 "cross_check",
                 "advise",
@@ -787,6 +331,22 @@ class GraphTests(unittest.TestCase):
         self.assertEqual([p.note for p in out["proposals"]], EXPECTED_NOTES)
         for note in EXPECTED_NOTES:
             self.assertTrue(note.startswith("/vault/wiki/"))
+
+    def test_a_superseded_hit_reaches_the_posted_card_as_a_label_on_its_own_evidence(self):
+        old = "/vault/wiki/wiki-0536.md"
+        hit = dict(CANDIDATE_HITS[old][0], superseded_by=["/vault/wiki/wiki-0576.md"])
+        with mock.patch.dict(CANDIDATE_HITS, {old: [hit]}):
+            self.graph.invoke({"verdicts": []}, self.cfg)
+        code_pieces = [
+            el["text"]
+            for b in self.sends[-1]
+            if b["type"] == "rich_text"
+            for el in b["elements"][0]["elements"]
+            if el.get("style") == {"code": True}
+        ]
+        marked = [p for p in code_pieces if "대체됨" in p]
+        self.assertEqual(marked, ["\nwiki-0536 L2 · 대체됨 → wiki-0576"])
+        self.assertEqual(len(code_pieces), 3)
 
     def test_notworth_candidates_are_skipped_not_counted_as_proposals(self):
         stubs = Stubs(responses=[NOT_WORTH_JSON, NOT_WORTH_JSON] + [ADVICE[s] for s in CANDIDATE_QUEUE[2:]])
@@ -862,7 +422,7 @@ class GraphTests(unittest.TestCase):
         # fixture each proposal's evidence cites its own resolved note, so the union equals
         # EXPECTED_NOTES exactly — test_handover_cites_evidence_notes_even_when_they_differ_
         # from_the_resolved_note below exercises the case where they diverge.
-        self.assertEqual(self.handovers[0][2], cc.handover_paths(out["proposals"]))
+        self.assertEqual(self.handovers[0][2], card_verdicts.handover_paths(out["proposals"]))
         self.assertEqual(self.handovers[0][2], EXPECTED_NOTES)
         for path in self.handovers[0][2]:
             self.assertTrue(path.startswith("/vault/wiki/"))
@@ -904,7 +464,7 @@ class GraphTests(unittest.TestCase):
         paths = self.handovers[0][2]
         self.assertIn("/vault/wiki/wiki-7777.md", paths)
         self.assertIn("/vault/wiki/wiki-0900.md", paths)
-        self.assertEqual(paths, cc.handover_paths(out["proposals"]))
+        self.assertEqual(paths, card_verdicts.handover_paths(out["proposals"]))
 
     def test_advise_stats_counts_not_worth_and_ungrounded_with_their_reasons(self):
         stubs = Stubs(responses=[NOT_WORTH_JSON, "not json"] + [ADVICE[s] for s in CANDIDATE_QUEUE[2:]])
@@ -1113,6 +673,248 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(set(out["per_project_candidates"]), {"proj-x"})
         self.assertEqual(out["per_project_candidates"]["proj-x"], 5)
 
+    def test_read_repairs_populates_state_once_and_a_dead_door_refuses_the_card(self):
+        # AC4: the door's GET is called exactly once, its groups land in state, and a
+        # 5xx/unreachable door — same principle as /approved — refuses the card outright.
+        stubs = Stubs(repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 5}, merged_yesterday_rows=12)
+        graph = self._build(stubs)
+        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-read-repairs"}})
+        self.assertEqual(stubs.repairs_calls, [card_live.REPAIRS_LIMIT])
+        self.assertEqual(out["repairs_total_groups"], 5)
+        self.assertEqual(out["merged_yesterday_rows"], 12)
+        self.assertEqual([r.subject for r in out["repairs"]], ["foodspring-front"])
+
+        def dead_repairs(limit: int) -> dict:
+            raise OSError("door unreachable")
+
+        dead_stubs = Stubs()
+        collabs = card.Collaborators(
+            fetch=_fetch,
+            search=dead_stubs.search,
+            read_note=dead_stubs.read_note,
+            propose=dead_stubs.propose,
+            send=self._send,
+            handover=self._handover,
+            consumption=self._consumption,
+            resolve=dead_stubs.resolve,
+            approved=dead_stubs.approved,
+            record=dead_stubs.record,
+            active_projects=dead_stubs.active_projects,
+            past_verdicts=dead_stubs.past_verdicts,
+            lang="ko",
+            repairs=dead_repairs,
+            execute_repair=dead_stubs.execute_repair,
+            merged_yesterday=dead_stubs.merged_yesterday,
+        )
+        graph = card.build_graph(collabs)
+        sends_before = len(self.sends)
+        with self.assertRaises(OSError):
+            graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-read-repairs-dead"}})
+        self.assertEqual(len(self.sends), sends_before)
+
+    def test_execute_repair_branch_dispatch(self):
+        # AC5: a repair row's adopt calls the door's own merge and never consumption; an
+        # advice row's adopt/reject does the reverse. One test, both branches.
+        stubs = Stubs(
+            repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 1},
+            execute_repair_result={"deleted_rows": 5, "reread_notes": 2, "remaining_variants": 1},
+        )
+        graph = self._build(stubs)
+        cfg = {"configurable": {"thread_id": "test-execute-repair"}}
+        out = graph.invoke({"verdicts": []}, cfg)
+        self.assertEqual(len(out["repairs"]), 1)
+
+        verdict = cc.ButtonVerdict(idx=0, choice="do", user=OWNER, at="t")
+        out = graph.invoke(Command(resume=verdict), cfg)
+        self.assertEqual(stubs.execute_repair_calls, ["foodspring-front"])
+        self.assertEqual(self.consumptions, [])
+        self.assertEqual(out["repair_results"], {0: stubs.execute_repair_result})
+
+        n_repairs = len(out["repairs"])
+        advice_verdict = cc.ButtonVerdict(idx=n_repairs, choice="do", user=OWNER, at="t")
+        out = graph.invoke(Command(resume=advice_verdict), cfg)
+        self.assertEqual(stubs.execute_repair_calls, ["foodspring-front"])  # unchanged
+        self.assertEqual(len(self.consumptions), 1)
+        self.assertEqual(self.consumptions[0][0], SESSION)
+        self.assertEqual(self.consumptions[0][1], "used")
+
+    def test_three_lanes_share_one_idx_space_and_the_run_ends_at_their_sum(self):
+        # The idx space runs repairs → advice → reviews; await_verdict's `of` and the END
+        # condition both count all three lanes — a review-less total is the mutant the
+        # verifier names, and a run that kept waiting after every row was judged is the other.
+        reviews = [
+            cc.ProposedVerdict(
+                session_id="sess-agent-1", note="/vault/wiki/wiki-0701.md", kind="used", at="t-1"
+            ),
+            cc.ProposedVerdict(
+                session_id="sess-agent-2", note="/vault/wiki/wiki-0702.md", kind="contested", at="t-2"
+            ),
+        ]
+        stubs = Stubs(repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 1}, proposed_items=reviews)
+        graph = self._build(stubs)
+        cfg = {"configurable": {"thread_id": "test-three-lanes"}}
+        out = graph.invoke({"verdicts": []}, cfg)
+        total = len(out["repairs"]) + len(out["proposals"]) + len(out["reviews"])
+        self.assertEqual(total, 1 + 3 + 2)
+        self.assertEqual(out["__interrupt__"][0].value["of"], total)
+        for idx in range(total):
+            verdict = cc.ButtonVerdict(idx=idx, choice="do", user=OWNER, at="t")
+            out = graph.invoke(Command(resume=verdict), cfg)
+        self.assertNotIn("__interrupt__", out)
+        self.assertEqual(len(out["verdicts"]), total)
+
+    def test_review_lane_flip_judges_the_proposing_session_with_the_opposite_kind(self):
+        reviews = [
+            cc.ProposedVerdict(
+                session_id="sess-agent-1", note="/vault/wiki/wiki-0700.md", kind="used", at="t-1"
+            )
+        ]
+        stubs = Stubs(proposed_items=reviews)
+        graph = self._build(stubs)
+        cfg = {"configurable": {"thread_id": "test-review-flip"}}
+        out = graph.invoke({"verdicts": []}, cfg)
+        n_slots = len(out["repairs"]) + len(out["proposals"])
+        verdict = cc.ButtonVerdict(idx=n_slots, choice="drop", user=OWNER, at="t")
+        graph.invoke(Command(resume=verdict), cfg)
+        self.assertEqual(self.consumptions[-1], ("sess-agent-1", "contested", ["/vault/wiki/wiki-0700.md"]))
+        reviewed = [fields for name, fields in stubs.records if name == "verdict_reviewed"]
+        self.assertEqual(
+            reviewed,
+            [
+                {
+                    "session_id": "sess-agent-1",
+                    "note": "/vault/wiki/wiki-0700.md",
+                    "proposed_kind": "used",
+                    "card_ts": CARD_TS,
+                    "choice": "flip",
+                }
+            ],
+        )
+
+    def test_review_lane_agree_records_only_the_review_event(self):
+        reviews = [
+            cc.ProposedVerdict(
+                session_id="sess-agent-2", note="/vault/wiki/wiki-0800.md", kind="contested", at="t-2"
+            )
+        ]
+        stubs = Stubs(proposed_items=reviews)
+        graph = self._build(stubs)
+        cfg = {"configurable": {"thread_id": "test-review-agree"}}
+        out = graph.invoke({"verdicts": []}, cfg)
+        n_slots = len(out["repairs"]) + len(out["proposals"])
+        consumption_calls = len(self.consumptions)
+        verdict = cc.ButtonVerdict(idx=n_slots, choice="do", user=OWNER, at="t")
+        graph.invoke(Command(resume=verdict), cfg)
+        self.assertEqual(len(self.consumptions), consumption_calls)  # agree never touches the graph
+        reviewed = [fields for name, fields in stubs.records if name == "verdict_reviewed"]
+        self.assertEqual(
+            [(r["choice"], r["proposed_kind"], r["session_id"], r["note"]) for r in reviewed],
+            [("agree", "contested", "sess-agent-2", "/vault/wiki/wiki-0800.md")],
+        )
+
+    def test_card_verdict_event_fires_only_for_an_advice_lane_press(self):
+        # r3.1: card_proposal events exist only for advice rows, and card_live's
+        # _live_past_verdicts joins card_verdict back to them by (card_ts, idx) — raising
+        # on a verdict with no proposal. A press in the repair or review lane must leave
+        # no card_verdict at all: one orphan is a next-morning card that refuses to ship.
+        reviews = [
+            cc.ProposedVerdict(
+                session_id="sess-agree", note="/vault/wiki/wiki-0700.md", kind="used", at="t-1"
+            ),
+            cc.ProposedVerdict(
+                session_id="sess-flip", note="/vault/wiki/wiki-0701.md", kind="contested", at="t-2"
+            ),
+        ]
+        stubs = Stubs(
+            repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 1},
+            proposed_items=reviews,
+            execute_repair_result={"deleted_rows": 5, "reread_notes": 2, "remaining_variants": 1},
+        )
+        graph = self._build(stubs)
+        cfg = {"configurable": {"thread_id": "test-verdict-event-lanes"}}
+        out = graph.invoke({"verdicts": []}, cfg)
+        self.assertEqual((len(out["repairs"]), len(out["proposals"]), len(out["reviews"])), (1, 3, 2))
+
+        presses = [
+            (0, "do"),  # execute lane: adopt → the door's own merge, no card_verdict
+            (1, "do"),  # advice lane: the only lane whose press records a card_verdict
+            (4, "do"),  # review lane: agree → the verdict_reviewed event only
+            (5, "drop"),  # review lane: flip → verdict_reviewed + the opposite-kind edge
+        ]
+        for idx, choice in presses:
+            verdict = cc.ButtonVerdict(idx=idx, choice=choice, user=OWNER, at="t")
+            graph.invoke(Command(resume=verdict), cfg)
+
+        verdict_events = [fields for name, fields in stubs.records if name == "card_verdict"]
+        self.assertEqual(verdict_events, [{"card_ts": CARD_TS, "idx": 1, "choice": "do"}])
+        reviewed = [fields for name, fields in stubs.records if name == "verdict_reviewed"]
+        self.assertEqual(
+            [(r["session_id"], r["choice"]) for r in reviewed],
+            [("sess-agree", "agree"), ("sess-flip", "flip")],
+        )
+        self.assertEqual(stubs.execute_repair_calls, ["foodspring-front"])
+        self.assertEqual(
+            self.consumptions,
+            [
+                (SESSION, "used", [EXPECTED_NOTES[0]]),
+                ("sess-flip", "used", ["/vault/wiki/wiki-0701.md"]),
+            ],
+        )
+        names = [name for name, _ in stubs.records]
+        self.assertEqual(
+            names,
+            ["card_proposal"] * 3 + ["card_confirmation"] + ["card_verdict"] + ["verdict_reviewed"] * 2,
+        )
+
+
+class ListenerTests(unittest.TestCase):
+    """r3.1: the socket listener bounds a press by n_total = repairs + proposals + reviews —
+    one shared idx space across all three lanes. A listener that drops the review lane from
+    its total rejects the review rows' own buttons as 'no proposal', and one that drops the
+    repair lane over-accepts past the card's end."""
+
+    class _FakeClient:
+        def __init__(self):
+            self.acks = 0
+
+        def send_socket_mode_response(self, response):
+            self.acks += 1
+
+    class _Req:
+        def __init__(self, payload):
+            self.envelope_id = "e-1"
+            self.type = "interactive"
+            self.payload = payload
+
+    @staticmethod
+    def _press(idx: int, choice: str = "do", user: str = OWNER) -> dict:
+        return {
+            "type": "block_actions",
+            "message": {"ts": CARD_TS},
+            "user": {"id": user},
+            "actions": [{"action_id": f"card:{idx}:{choice}"}],
+        }
+
+    def test_n_total_covers_all_three_lanes(self):
+        holder = card._Holder()
+        holder.message = cc.PostedCard(channel=CARD_CH, ts=CARD_TS)
+        holder.repairs = [object()]
+        holder.proposals = [object(), object(), object()]
+        holder.reviews = [object(), object()]
+        listener = card._listener(holder, OWNER)
+        client = self._FakeClient()
+        buf = io.StringIO()
+
+        with contextlib.redirect_stderr(buf):
+            listener(client, self._Req(self._press(5)))  # the last review slot → queued
+            listener(client, self._Req(self._press(6)))  # one past the end → rejected
+
+        self.assertEqual(client.acks, 2)
+        self.assertEqual(holder.queue.qsize(), 1)
+        verdict = holder.queue.get_nowait()
+        self.assertEqual((verdict.idx, verdict.choice, verdict.user), (5, "do", OWNER))
+        self.assertIn("no proposal 6", buf.getvalue())
+
 
 class AwaitVerdictsTests(unittest.TestCase):
     """AC6: CARD_WAIT_HOURS=0 (or expired) ends the wait immediately, touching Slack 0 times,
@@ -1128,7 +930,17 @@ class AwaitVerdictsTests(unittest.TestCase):
     def test_zero_wait_hours_returns_immediately_without_a_chat_update(self):
         holder = card._Holder()
         holder.message = cc.PostedCard(channel="C1", ts=CARD_TS)
-        state = {"proposals": [], "verdicts": [], "lang": "ko"}
+        state = {
+            "proposals": [],
+            "verdicts": [],
+            "lang": "ko",
+            "confirmation": None,
+            "repairs": [],
+            "repairs_total_groups": 0,
+            "merged_yesterday_rows": None,
+            "repair_results": {},
+            "reviews": [],
+        }
         web = self._FakeWeb()
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
@@ -1154,7 +966,17 @@ class AwaitVerdictsTests(unittest.TestCase):
             advice="조언 문장 열자 이상입니다",
             evidence=[cc.Evidence(note="/n1.md", quote="근거 인용문 열두자 이상", line=1)],
         )
-        state = {"proposals": [proposal], "verdicts": [], "lang": "ko"}
+        state = {
+            "proposals": [proposal],
+            "verdicts": [],
+            "lang": "ko",
+            "confirmation": None,
+            "repairs": [],
+            "repairs_total_groups": 0,
+            "merged_yesterday_rows": None,
+            "repair_results": {},
+            "reviews": [],
+        }
         web = self._FakeWeb()
         buf = io.StringIO()
         result: dict = {}
@@ -1177,9 +999,9 @@ class AwaitVerdictsTests(unittest.TestCase):
 class DryRunWiringTests(unittest.TestCase):
     """AC5: CARD_DRY_RUN must run the graph with the dry collaborators — never the live Slack
     send, the live handover, or the live event log. A mutant that wired `_run_dry`'s
-    Collaborators to `send=_env_send, handover=_live_handover` survived all existing tests
-    because nothing exercised `_run_dry` directly; this drives it end to end with every live
-    network/model seam stubbed and asserts which functions were actually called."""
+    Collaborators to `send=_env_send, handover=card_live._live_handover` survived all existing
+    tests because nothing exercised `_run_dry` directly; this drives it end to end with every
+    live network/model seam stubbed and asserts which functions were actually called."""
 
     def test_dry_run_never_calls_live_send_handover_or_record(self):
         calls = {"live_send": 0, "live_handover": 0, "live_record": 0}
@@ -1220,18 +1042,23 @@ class DryRunWiringTests(unittest.TestCase):
 
         with (
             mock.patch.object(card, "_env_send", side_effect=fake_env_send),
-            mock.patch.object(card, "_live_handover", side_effect=fake_live_handover),
-            mock.patch.object(card, "_live_record", side_effect=fake_live_record),
+            mock.patch.object(card_live, "_live_handover", side_effect=fake_live_handover),
+            mock.patch.object(card_live, "_live_record", side_effect=fake_live_record),
             mock.patch.object(card, "_dry_send", side_effect=counting_dry_send),
             mock.patch.object(card, "_dry_handover", side_effect=counting_dry_handover),
             mock.patch.object(card, "_dry_record", side_effect=counting_dry_record),
-            mock.patch.object(card, "_live_fetch", side_effect=_fetch),
-            mock.patch.object(card, "_live_search", side_effect=stubs.search),
-            mock.patch.object(card, "_live_read_note", side_effect=stubs.read_note),
-            mock.patch.object(card, "_live_resolve", side_effect=stubs.resolve),
-            mock.patch.object(card, "_live_approved", side_effect=stubs.approved),
-            mock.patch.object(card, "_live_active_projects", side_effect=stubs.active_projects),
-            mock.patch.object(card, "_live_past_verdicts", side_effect=stubs.past_verdicts),
+            mock.patch.object(card_live, "_live_fetch", side_effect=_fetch),
+            mock.patch.object(card_live, "_live_search", side_effect=stubs.search),
+            mock.patch.object(card_live, "_live_read_note", side_effect=stubs.read_note),
+            mock.patch.object(card_live, "_live_resolve", side_effect=stubs.resolve),
+            mock.patch.object(card_live, "_live_approved", side_effect=stubs.approved),
+            mock.patch.object(card_live, "_live_active_projects", side_effect=stubs.active_projects),
+            mock.patch.object(card_live, "_live_past_verdicts", side_effect=stubs.past_verdicts),
+            mock.patch.object(card_live, "_live_proposed", side_effect=stubs.proposed),
+            mock.patch.object(
+                card_live, "_live_repairs", side_effect=lambda limit: {"groups": [], "total_groups": 0}
+            ),
+            mock.patch.object(card_live, "_live_merged_yesterday", side_effect=lambda: None),
             mock.patch.object(card, "make_propose", return_value=stubs.propose),
             contextlib.redirect_stdout(buf),
         ):
@@ -1266,11 +1093,153 @@ class LiveFetchTests(unittest.TestCase):
             calls.append((method, path, payload))
             return {"rows": []} if path == "/recurrences" else {"answer": "", "sources": []}
 
-        with mock.patch.object(card.DrudgeClient, "_retry", fake_retry):
-            card._live_fetch("/risks", "proj-a")
-            card._live_fetch("/recurrences", "")
+        with mock.patch.object(card_live.DrudgeClient, "_retry", fake_retry):
+            card_live._live_fetch("/risks", "proj-a")
+            card_live._live_fetch("/recurrences", "")
         self.assertIn(("POST", "/risks", {"project": "proj-a"}), calls)
         self.assertIn(("POST", "/recurrences", {"project": ""}), calls)
+
+
+class LiveConsumptionTests(unittest.TestCase):
+    """The card button's verdict is the owner's own judgement. _live_consumption must send
+    judge="owner" on every consumption payload, with the owner token beside it — the engine
+    refuses an owner judge that arrives without one."""
+
+    def test_button_verdict_carries_judge_owner_and_the_token(self):
+        calls: list[tuple[str, str, dict, dict]] = []
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            payload = json.loads(req.data)
+            calls.append((req.get_method(), req.full_url, payload, dict(req.header_items())))
+            return _Resp(
+                json.dumps(
+                    {
+                        "session": payload["session_id"],
+                        "used": 1,
+                        "contested": 0,
+                        "supersedes": 0,
+                        "unknown": 0,
+                    }
+                ).encode()
+            )
+
+        with (
+            mock.patch.dict(os.environ, {"BORING_OWNER_TOKEN": "tok-owner"}),
+            mock.patch("urllib.request.urlopen", fake_urlopen),
+        ):
+            card_live._live_consumption("sess-1", "used", ["/vault/wiki/wiki-0001.md"])
+            card_live._live_consumption("sess-1", "contested", ["/vault/wiki/wiki-0002.md"])
+        (method, url, used_payload, used_headers) = calls[0]
+        self.assertEqual(method, "POST")
+        self.assertTrue(url.endswith("/consumption"))
+        self.assertEqual(used_payload["judge"], "owner")
+        self.assertEqual(used_payload["used"], ["/vault/wiki/wiki-0001.md"])
+        self.assertNotIn("verdict", used_payload)
+        self.assertEqual(used_headers.get("X-boring-owner-token"), "tok-owner")
+        (_, _, contested_payload, contested_headers) = calls[1]
+        self.assertEqual(contested_payload["judge"], "owner")
+        self.assertEqual(contested_payload["contested"], ["/vault/wiki/wiki-0002.md"])
+        self.assertEqual(contested_headers.get("X-boring-owner-token"), "tok-owner")
+
+
+class LiveExecuteRepairTests(unittest.TestCase):
+    """F2 (2026-09-22): the door's own 502 (sync failed, but delete+update already
+    committed) must become a RepairFailed value carrying those committed counts — never an
+    exception that reaches main()'s `except OSError: return 3` and kills the whole card over
+    one button."""
+
+    def test_engine_502_becomes_a_repairfailed_value_with_the_committed_counts(self):
+        body = json.dumps(
+            {
+                "subject": "foodspring-front",
+                "deleted_rows": 5,
+                "reread_notes": 2,
+                "remaining_variants": None,
+                "sync": {"error": "engine unreachable: connection refused"},
+            }
+        ).encode()
+
+        def fake_urlopen(req, timeout=None):
+            import urllib.error
+
+            raise urllib.error.HTTPError(req.full_url, 502, "Bad Gateway", {}, io.BytesIO(body))
+
+        with (
+            mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.invalid"}),
+            mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        ):
+            result = card_live._live_execute_repair("foodspring-front")
+
+        self.assertIsInstance(result, cc.RepairFailed)
+        self.assertEqual(result.deleted_rows, 5)
+        self.assertEqual(result.reread_notes, 2)
+        self.assertEqual(result.reason, "engine unreachable: connection refused")
+
+        # the graph itself must keep going: a RepairFailed value flowing through
+        # record_verdict raises nothing and the run reaches the next interrupt.
+        stubs = Stubs(repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 1})
+        stubs.execute_repair = lambda subject: result  # type: ignore[method-assign]
+        sends: list = []
+        collabs = card.Collaborators(
+            fetch=_fetch,
+            search=stubs.search,
+            read_note=stubs.read_note,
+            propose=stubs.propose,
+            send=lambda blocks: (sends.append(blocks), cc.PostedCard(channel=CARD_CH, ts=CARD_TS))[1],
+            handover=lambda session, at, paths: {},
+            consumption=lambda session, kind, paths: {},
+            resolve=stubs.resolve,
+            approved=stubs.approved,
+            record=stubs.record,
+            active_projects=stubs.active_projects,
+            past_verdicts=stubs.past_verdicts,
+            lang="ko",
+            repairs=stubs.repairs,
+            execute_repair=stubs.execute_repair,
+            merged_yesterday=stubs.merged_yesterday,
+        )
+        graph = card.build_graph(collabs)
+        cfg = {"configurable": {"thread_id": "test-repair-failed-continues"}}
+        graph.invoke({"verdicts": []}, cfg)
+        verdict = cc.ButtonVerdict(idx=0, choice="do", user=OWNER, at="t")
+        out = graph.invoke(Command(resume=verdict), cfg)
+        self.assertIn("__interrupt__", out)  # still waiting on the advice rows — not dead
+        self.assertEqual(out["repair_results"][0], result)
+
+    @staticmethod
+    def _post(env: dict, answer: dict):
+        seen: list = []
+
+        def fake_urlopen(req, timeout=None):
+            seen.append(req)
+            return io.BytesIO(json.dumps(answer).encode())
+
+        with (
+            mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.invalid"}),
+            mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        ):
+            os.environ.pop("BORING_OWNER_TOKEN", None)
+            os.environ.update(env)
+            result = card_live._live_execute_repair("foodspring-front")
+        return result, seen[0]
+
+    def test_the_merge_button_carries_the_owner_token_and_shows_what_the_door_held(self):
+        answer = {"deleted_rows": 5, "reread_notes": 2, "owner_held": ["/vault/wiki/wiki-0001.md"]}
+        result, req = self._post({"BORING_OWNER_TOKEN": "tok-owner"}, answer)
+        self.assertEqual(req.get_header("X-boring-owner-token"), "tok-owner")
+        self.assertEqual(result.owner_held, ["/vault/wiki/wiki-0001.md"])
+
+    def test_without_a_token_or_a_held_field_the_merge_still_answers(self):
+        result, req = self._post({}, {"deleted_rows": 5, "reread_notes": 2})
+        self.assertIsNone(req.get_header("X-boring-owner-token"))
+        self.assertEqual(result, cc.RepairDone(subject="foodspring-front", deleted_rows=5, reread_notes=2))
 
 
 class LivePastVerdictsTests(unittest.TestCase):
@@ -1287,16 +1256,16 @@ class LivePastVerdictsTests(unittest.TestCase):
 
     def test_unmatched_verdict_raises(self):
         verdicts = [{"attributes": {"card_ts": "1.0", "idx": 0, "choice": "do"}, "observed_at": "t"}]
-        with mock.patch.object(card, "_live_events", side_effect=self._events([], verdicts)):
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events([], verdicts)):
             with self.assertRaises(ValueError):
-                card._live_past_verdicts(168)
+                card_live._live_past_verdicts(168)
 
     def test_proposal_without_evidence_raises(self):
         proposals = [{"attributes": {"card_ts": "1.0", "idx": 0, "note": "/n.md", "evidence": []}}]
         verdicts = [{"attributes": {"card_ts": "1.0", "idx": 0, "choice": "do"}, "observed_at": "t"}]
-        with mock.patch.object(card, "_live_events", side_effect=self._events(proposals, verdicts)):
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(proposals, verdicts)):
             with self.assertRaises(ValueError):
-                card._live_past_verdicts(168)
+                card_live._live_past_verdicts(168)
 
     def test_missing_choice_raises(self):
         proposals = [
@@ -1310,9 +1279,9 @@ class LivePastVerdictsTests(unittest.TestCase):
             }
         ]
         verdicts = [{"attributes": {"card_ts": "1.0", "idx": 0}, "observed_at": "t"}]
-        with mock.patch.object(card, "_live_events", side_effect=self._events(proposals, verdicts)):
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(proposals, verdicts)):
             with self.assertRaises(ValueError):
-                card._live_past_verdicts(168)
+                card_live._live_past_verdicts(168)
 
     def test_well_formed_pair_parses(self):
         proposals = [
@@ -1331,8 +1300,8 @@ class LivePastVerdictsTests(unittest.TestCase):
                 "observed_at": "2026-09-22T00:00:00+00:00",
             }
         ]
-        with mock.patch.object(card, "_live_events", side_effect=self._events(proposals, verdicts)):
-            out = card._live_past_verdicts(168)
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(proposals, verdicts)):
+            out = card_live._live_past_verdicts(168)
         self.assertEqual(len(out), 1)
         self.assertEqual(
             (out[0].note, out[0].evidence_note, out[0].evidence_line, out[0].choice),
@@ -1346,10 +1315,40 @@ class LivePastVerdictsTests(unittest.TestCase):
             seen[event_name] = since_hours
             return []
 
-        with mock.patch.object(card, "_live_events", side_effect=fake):
-            card._live_past_verdicts(168)
+        with mock.patch.object(card_live, "_live_events", side_effect=fake):
+            card_live._live_past_verdicts(168)
         self.assertEqual(seen["card_verdict"], 168)
         self.assertGreater(seen["card_proposal"], 168)
+
+
+class LiveProposedTests(unittest.TestCase):
+    """r3.1: the review lane's surviving mutations — the verdict_proposed rows come back
+    contested first, newest first, capped at REVIEW_LIMIT. A mutant dropping the contested
+    sort, reversing the newest-first order, or removing the cap must each kill this."""
+
+    @staticmethod
+    def _events(rows: list[dict]):
+        def fake(event_name: str, since_hours: int):
+            assert event_name == "verdict_proposed"
+            return rows
+
+        return fake
+
+    def test_contested_first_then_newest_first_capped_at_review_limit(self):
+        rows = [
+            {
+                "attributes": {"session_id": f"s-{kind}-{i}", "note": f"/n{i}.md", "kind": kind},
+                "observed_at": f"2026-09-2{i}T00:00:00+00:00",
+            }
+            for i, kind in enumerate(["used", "contested", "used", "contested", "contested"], start=1)
+        ]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows)):
+            out = card_live._live_proposed(24)
+        self.assertEqual(
+            [p.session_id for p in out],
+            ["s-contested-5", "s-contested-4", "s-contested-2"],
+        )
+        self.assertEqual(len(out), card_live.REVIEW_LIMIT)
 
 
 class SingleInstanceLockTests(unittest.TestCase):

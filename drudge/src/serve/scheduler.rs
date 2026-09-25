@@ -156,10 +156,11 @@ async fn run_sync(
 ) {
     match do_sync(store, llm, vault_dir, cfg).await {
         Ok(o) => eprintln!(
-            "[scheduler] sync done — ingest(new={} updated={} deleted={} chunks={}) graph(tools={} concepts={} claims={} claims_unchanged={} edges={})",
+            "[scheduler] sync done — ingest(new={} updated={} deleted={} kept_vanished={} chunks={}) graph(tools={} concepts={} claims={} claims_unchanged={} edges={})",
             o.ingest.new,
             o.ingest.updated,
             o.ingest.deleted,
+            o.ingest.kept_vanished,
             o.ingest.chunks,
             o.ingest.tools,
             o.ingest.concepts,
