@@ -72,10 +72,13 @@
 머지는 끝이 아니다. `~/.hermes/scripts` 는 별도 아티팩트다.
 
 호스트 CLI 바이너리도 별도였고, 그래서 2026-09-18 하루에 세 번 드리프트가 났다 — 매번
-`doctor` 가 잡아 손으로 고쳤다. 이제 `make build` 가 **도는 것 둘 다** 만든다.
+`doctor` 가 잡아 손으로 고쳤다. 이제 `make build` 가 compose 이미지(엔진·문)와
+호스트 CLI 바이너리를 한 번에 만든다. 실행물 전부는 아니다 — hermes-agent 는 외부
+이미지(`make hermes-build`)고 `~/.hermes/scripts` 는 별도 산출물이다.
 
 - Python·훅 변경 → `python3 agents/shared/agent_wiring.py --install --boring-home "$PWD"`
 - Rust 변경 → `make build` + 컨테이너 재기동
+- `agents/door/**` 변경 → `make door-build && make door-up` 후 `Recreated` 확인 (이미지가 코드를 COPY 하므로 — `agents/door/Dockerfile`)
 - 확인 → `sh scripts/doctor.sh` 가 ✗ 0 인지, 그리고 소비자 쪽에서 한 번 돌려 값을 인용
 
 ## 8. 파일은 `Edit` 로 고친다

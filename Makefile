@@ -27,7 +27,7 @@ down: ## Stop the whole stack, including Postgres when vector mode was used (kee
 	  *) $(COMPOSE) down ;; \
 	esac
 
-build: ## Build both artifacts that run: the engine image and the host CLI (doctor checks both)
+build: ## Build the compose images (boring-drudge + boring-door) and the host CLI binary (doctor checks the engine build_sha and the host CLI stamp against the checkout)
 	BUILD_SHA=$$(git rev-parse HEAD 2>/dev/null || true) $(COMPOSE) build
 	cd drudge && cargo build --release
 
@@ -49,7 +49,7 @@ secretary: ## Answer @mentions in Slack from memory (Socket Mode; needs SLACK_AP
 card: ## Send the morning proposal card to Slack and record the buttons as verdicts (Socket Mode; needs SLACK_APP_TOKEN/SLACK_BOT_TOKEN/SLACK_CARD_CHANNEL in .env)
 	set -a; . ./.env; set +a; python3 agents/slack/card.py
 
-door: ## The read-only door — served by the boring-door container at 127.0.0.1:7710; this runs the same app on the host (DOOR_PORT, default 7710)
+door: ## The door — served by the boring-door container at 127.0.0.1:7710; this runs the same app on the host (DOOR_PORT, default 7710)
 	set -a; . ./.env 2>/dev/null || true; set +a; uvicorn agents.door.door:app --host 127.0.0.1 --port $${DOOR_PORT:-7710}
 
 door-build: ## Build only the boring-door image (never touches the engine)

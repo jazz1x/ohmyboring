@@ -242,6 +242,8 @@ make readiness
 | `BORING_READINESS_NOTE_MAX_HOURS` | 브리핑 readiness가 허용하는 최신 노트 freshness 범위; 기본값 `48` |
 | `BORING_READINESS_PENDING_TTL` | readiness에서 stale `.pending`으로 보는 임계값; `INGEST_PENDING_TTL`, 그다음 `1800`초를 기본으로 사용 |
 | `BORING_READINESS_RETRY_TTL` | readiness에서 stale `.retry`로 보는 임계값; `INGEST_RETRY_TTL`, 그다음 pending 임계값을 기본으로 사용 |
+| `BORING_OWNER_TOKEN` | 소유자 호출(`supersedes` 정정·카드 판정 버튼)에 필요한 공유 비밀값. 엔진·문·카드가 같은 값을 봐야 하고, compose 가 두 컨테이너에 넘긴다. 미설정 = 누구도 소유자로 쓸 수 없다 |
+| `BORING_DOOR_URL` | 아침 카드와 Claude Code SessionStart 훅이 문을 찾는 URL — 두 소비자 모두 필수다. 없으면 카드가 기동 거부(exit 2)하고 훅은 `오늘 승인한 것` 절을 뺀다. 소비자는 기본값을 두지 않는다 |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack 비서(`make secretary`); 봇 토큰에 `message.channels` 스코프가 필요하다 — 스레드 답글이 정정을 기억에 넣는 길이다 |
 
 구조화 이벤트는 distill, collector/worker, `doctor`/`readiness`, `guard`, `eval`에서 기록됩니다. memory-ingest 이벤트에는 Rust 작업 흐름 그래프 계약을 따르는 `workflow=memory_ingest`, `workflow_node`, `workflow_outcome` 필드가 붙습니다. 이벤트는 OpenTelemetry 형태의 로그 레코드로 로컬 엔진 DB에 먼저 저장됩니다. NDJSON 파일은 엔진이 내려간 경우의 fallback 스풀이고, `BORING_EVENT_SINK=spool` 또는 `both`를 선택한 경우에만 의도적으로 파일 중심/동시 기록이 됩니다. DB 관점은 HTTP `/events`(`/otel-events` alias도 동일) 또는 MCP `events`로 보고, `make events`는 DB를 먼저 조회하되 실패하면 파일 스풀을 봅니다.
@@ -451,6 +453,8 @@ curl -s -X POST http://localhost:7700/mcp \
 | `POST /search` / `recall` | 가공하지 않은 메모리 발췌. 각 hit은 서빙 경로에 비교 가능한 수치가 있을 때 `dist`와 `dist_kind`(`vector_cosine` 또는 `text_rank`)를 함께 냅니다. wiki-recall 폴백에서는 세 번째 비교 불가능한 척도의 점수를 보고하는 대신 둘 다 생략합니다 | 불필요. 시맨틱 검색은 활성화 시 벡터 사용 |
 | `/remember` / `remember` | 정제된 노트 저장 | — |
 
+문(`127.0.0.1:7710`)은 엔진의 경로 표를 대신 전달하고(기동 때 계약 스냅샷에서 읽어 엔진을 따라간다), 자기 경로 `GET /approved`·`GET /claim-source`·`GET /claim-sources`·`GET /projects?active_days=`·`GET`/`POST /repairs/split-subjects` 는 스스로 답한다. 등록되지 않은 경로는 404 — 만능 프록시가 아니다.
+
 ### 토큰 예산
 
 자동 검색은 에이전트의 context window를 폭발시킬 수 있으므로, 검색 표면은 예산을 인식합니다.
@@ -499,7 +503,8 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 - `events` *(`BORING_VECTOR=on` 필요)* — DB에 OpenTelemetry 형태로 저장된 최근 workflow/adapter 이벤트를 반환합니다. component, event, status, run_id, workflow, since_hours로 필터링할 수 있습니다.
 - `ask` / `brief` / `weekly_brief` / `project_status` — LLM을 실행하는 tool. `ask`는 출처를 인용해 답하고 wiki-first 모드에서도 동작하며, 브리핑 셋은 `BORING_VECTOR=on`이 필요합니다.
 - `decisions` / `risks` / `next_actions` / `stalled` / `recurrences` — 레지스터. claim 행을 그대로 돌려주며 경로에 LLM이 없습니다: 같은 질문에 같은 답이고, 산문을 짓던 때의 119.6초 대신 0.02초로 실측됐습니다. `BORING_VECTOR=on`이 필요하고, 결과가 잘리면 응답이 그렇게 말합니다(`limit_applied`).
-- `forget` — wiki id나 정확한 제목으로 노트를 삭제합니다. wiki 파일을 제거하고, vector 모드에서는 임베딩·그래프 엣지·claim도 함께 정리합니다.
+- `forget` — 이전 기간 동안 닫혀 있습니다 — 모든 호출이 거부되고 아무것도 지워지지 않습니다. 노트 정정은 `remember` + `supersedes` 로 하세요.
+  동기화의 prune 과 `scripts/dedup-wiki.py --apply` 도 멈춰 있습니다.
 
 구조화 tool(`neighbors`, `claims`, `corpus_status`, `events`, `config_get`, `code_search`, `code_symbol`, `code_index_status`, `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `context`)은 텍스트 블록과 함께 네이티브 `structuredContent`(JSON)를 반환하고, 산문/ack tool(`recall`, `remember`, `forget`, `sync`, `classify_repo`)은 텍스트를 반환합니다.
 
