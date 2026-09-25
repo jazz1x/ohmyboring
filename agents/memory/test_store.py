@@ -303,7 +303,12 @@ class StoreTest(unittest.TestCase):
     def test_search_without_query_lists_the_prefix_in_key_order_and_pages(self) -> None:
         listed = [
             _claim_payload(
-                ("agent", "a"), "/a1.md", {"content": "a1"}, "/vault/wiki/w1.md", "2026-09-24T01:00:00+00:00"
+                ("agent", "a"),
+                "/a1.md",
+                {"content": "a1"},
+                "/vault/wiki/w1.md",
+                "2026-09-24T01:00:00+00:00",
+                created_at="2026-09-20T08:30:00+00:00",
             ),
             _claim_payload(
                 ("agent", "a"), "/a2.md", {"content": "a2"}, "/vault/wiki/w2.md", "2026-09-24T02:00:00+00:00"
@@ -319,6 +324,8 @@ class StoreTest(unittest.TestCase):
             self.assertEqual([i.key for i in everything], ["/a1.md", "/a2.md", "/b1.md"])
             self.assertEqual(everything[2].namespace, ("agent", "b"))
             self.assertEqual(everything[2].value, {"content": "b1"})
+            self.assertEqual(everything[0].created_at, datetime(2026, 9, 20, 8, 30, tzinfo=UTC))
+            self.assertEqual(everything[0].updated_at, datetime(2026, 9, 24, 1, 0, tzinfo=UTC))
             self.assertEqual([i.key for i in self.store.search(("agent",), limit=2)], ["/a1.md", "/a2.md"])
             self.assertEqual([i.key for i in self.store.search(("agent",), limit=2, offset=2)], ["/b1.md"])
             self.assertEqual(self.store.search(("agent",), limit=2, offset=3), [])
