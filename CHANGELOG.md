@@ -39,6 +39,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 - **판정이 다음 검색 순위를 바꾼다** — `/search`·MCP `recall`·`/ask`·CLI 가 공유하는 RRF 병합 뒤, 문서별 `net = clamp(used − contested, −FEEDBACK_NET_MAX, +FEEDBACK_NET_MAX)` (`FEEDBACK_NET_MAX = 3`) 만큼 점수를 움직인다: `score += net × FEEDBACK_STEP`, `FEEDBACK_STEP = rrf_term(1) − rrf_term(2)` — 👍 하나 = 한 목록에서 한 등수. 스팸 반응 셋이 두 목록 1등(≈0.0328)을 못 뒤집게 상한은 세 칸. 소비 간선이 없는 코퍼스에선 피드백 항이 0이라 순위가 바이트 단위로 같다(골든 게이트가 이를 고정).
 
 ### Fixed
+- **카드의 수리·검토 버튼이 빈 `value` 를 싣지 않는다** — 슬랙은 `value` 가 있으면 1자 이상을 요구해 09-26 08:01 카드 전체를 `invalid_blocks` 로 거부했다. 이 버튼들의 `value` 는 아무도 읽지 않아(처리부는 `action_id` 만 본다) 키를 뺐다. 제안 버튼의 노트 이름 `value` 는 그대로. 시험 1개.
 - **카드 거부 메시지에 실패한 URL 이 실린다** — 문·엔진 GET 넷(`/projects`·`/events`·`/approved`·`/repairs/split-subjects`)이 `카드 거부: HTTP Error 404: Not Found` 처럼 라우트 없이 죽던 것을 `카드 거부: http://…/approved?since_hours=24: HTTP Error 404: Not Found` 로. 예외 종류·받는 자리 무사변경. 시험 2개.
 - **Claude Code·Kimi 훅 명령이 설치한 파이썬 절대경로로 돈다** — 훅 셸의 PATH 가 /usr/bin 을 앞세우면 맨몸 `python3` 가 Xcode 3.9 로 잡혀 `datetime.UTC` ImportError 로 증류가 죽었다(sessionend.log 2건). Codex launchd 잡(b8b1c5c)과 같은 `sys.executable` 방식. 이미 등록된 훅은 손대지 않는다.
 - **카드의 합침 버튼이 문의 개수 없음을 「지운 행 0」으로 읽지 않는다** — 문은 DELETE·UPDATE 를 먼저 commit 하고 뒤에 sync 하므로, 시간 초과·연결 불가·비JSON 응답에 행은 이미 지워졌는데 개수가 없는 상태가 생긴다. `card_live._door_failure` 이 개수 없는 실패를 `RepairUnanswered` 값으로 가려 카드는 「✕ 합침 응답 없음 — 행이 이미 지워졌을 수 있음, 개수 모름 · 사유」만 보이고 지운 수를 만들어 내지 않는다 — 개수를 실은 문 자체의 502 는 여전히 지운 행 수를 적는다. 시험 2개 + 카드 화면 단언 블록.
