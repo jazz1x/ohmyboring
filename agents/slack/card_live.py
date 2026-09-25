@@ -62,12 +62,19 @@ def _live_fetch(path: str, project: str) -> dict[str, Any]:
     return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0)._retry("POST", path, {"project": project})
 
 
+def _door_json(url: str) -> Any:
+    try:
+        with urllib.request.urlopen(url, timeout=ENGINE_TIMEOUT) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except OSError as e:
+        raise OSError(f"{url}: {e}") from e
+
+
 def _live_active_projects(active_days: int) -> list[str]:
     """The door's own GET /projects?active_days=N — DB-backed, unlike the engine's plain
     /projects (no activity filter), so this asks the door, not DrudgeClient's engine URL."""
     url = f"{_door_url()}/projects?active_days={active_days}"
-    with urllib.request.urlopen(url, timeout=ENGINE_TIMEOUT) as r:
-        payload = json.loads(r.read().decode("utf-8"))
+    payload = _door_json(url)
     return [str(item["project"]) for item in payload["projects"]]
 
 
@@ -83,8 +90,7 @@ def _live_events(event_name: str, since_hours: int) -> list[dict[str, Any]]:
     do/drop that should have hidden a repeat candidate falls outside the page handed back), so
     it is raised, the same way an unreadable window is raised anywhere else in this file."""
     url = f"{omb_env.drudge_url()}/events?event={urllib.parse.quote(event_name)}&since_hours={since_hours}&limit=1000"
-    with urllib.request.urlopen(url, timeout=ENGINE_TIMEOUT) as r:
-        payload = json.loads(r.read().decode("utf-8"))
+    payload = _door_json(url)
     if payload.get("maybe_truncated"):
         raise OSError(
             f"/events?event={event_name}&since_hours={since_hours} maybe_truncated=true — "
@@ -178,8 +184,7 @@ def _live_resolve(subject: str, register: str) -> ResolvedNote | Unresolved:
 
 def _live_approved(since_hours: int) -> list[PastApproved]:
     url = f"{_door_url()}/approved?since_hours={since_hours}"
-    with urllib.request.urlopen(url, timeout=ENGINE_TIMEOUT) as r:
-        payload = json.loads(r.read().decode("utf-8"))
+    payload = _door_json(url)
     return [
         PastApproved(session=item["session"], note=item["note"], at=item["at"])
         for item in payload["approved"]
@@ -224,8 +229,7 @@ def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
 
 def _live_repairs(limit: int = REPAIRS_LIMIT) -> dict[str, Any]:
     url = f"{_door_url()}/repairs/split-subjects?limit={limit}"
-    with urllib.request.urlopen(url, timeout=ENGINE_TIMEOUT) as r:
-        return json.loads(r.read().decode("utf-8"))
+    return _door_json(url)
 
 
 def _door_failure(subject: str, code: int, body: bytes) -> RepairFailed | RepairUnanswered:
