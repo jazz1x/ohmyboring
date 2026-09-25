@@ -375,7 +375,6 @@ class CardV2ShapeTests(unittest.TestCase):
             failed_mark["elements"][0]["text"],
         )
 
-        # the door never reported its counts (timeout): 개수 모름 is shown, "지운 행 0" never is
         unanswered_judged = cv.build_blocks(
             [proposal],
             [verdict],
