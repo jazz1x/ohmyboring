@@ -18,7 +18,7 @@ README 는 **설치하고 쓰는 법**이다. 이 파일은 **이미 돌고 있�
 | 서비스 | 하는 일 | 죽으면 |
 |---|---|---|
 | `boring-drudge` | 엔진. 임베드·저장·그래프·`/search`·MCP | 회수와 쓰기 둘 다 멈춘다. 훅은 조용히 no-op |
-| `boring-door` | 문. 엔진 앞 프록시(:7710) — 엔진 경로를 대신 전달하고 `/approved`·`/claim-source`·`/claim-sources`·`/projects?active_days=`·`/repairs/split-subjects` 는 스스로 답한다 | 아침 카드가 스스로 거부되고(등록 스크립트가 exit 2), 세션 시작 카드의 「오늘 승인한 것」 절이 빠진다. 엔진 자체는 뒤의 `:7700` 에 살아 있다 |
+| `boring-door` | 문. 엔진 앞 프록시(:7710) — 엔진 경로를 대신 전달하고 `/approved`·`/claim-source`·`/claim-sources`·`/projects?active_days=`·`/repairs/split-subjects` 는 스스로 답한다 | 아침 카드가 `schedule-card.sh run` 에서 exit 2 로 거부되고, Claude Code SessionStart 훅이 넣는 「오늘 승인한 것」 절이 빠진다. 엔진 자체는 뒤의 `:7700` 에 살아 있다 |
 | `boring-postgres` | pgvector 저장소 | 엔진이 못 뜬다 |
 | `boring-agent` | hermes — 크론 잡의 실행기 | 브리핑·수집 워커가 전부 안 돈다 |
 
@@ -47,7 +47,7 @@ make maintenance                     # 지금 한 번 돌린다
 | 잡 | 주기 | 스크립트 |
 |---|---|---|
 | `memory-ingest-worker` | 20분 | `ingest-worker.py` — Claude 세션 하나를 증류 |
-| `morning-briefing` | — | 꺼짐, 아침 카드로 대체 — 08:00 은 launchd `com.ohmyboring.morning-card` 가 받는다 |
+| `morning-briefing` | — | 지금 운영 상태로 꺼져 있다(`~/.hermes/cron/jobs.json` 의 `enabled: false`) — 아침 카드가 그 자리를 하고 08:00 은 launchd `com.ohmyboring.morning-card` 가 받는다 |
 | `weekly-briefing` | 월 09:00 | `weekly-briefing.py` |
 
 **codex 수집기는 여기 없다.** 호스트 스케줄러가 정본이고, 설치기가 hermes 쪽 사본을 지운다(#370).

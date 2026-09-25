@@ -243,7 +243,7 @@ make readiness
 | `BORING_READINESS_PENDING_TTL` | readiness で stale `.pending` とみなす閾値。`INGEST_PENDING_TTL`、次に `1800` 秒へフォールバック |
 | `BORING_READINESS_RETRY_TTL` | readiness で stale `.retry` とみなす閾値。`INGEST_RETRY_TTL`、次に pending 閾値へフォールバック |
 | `BORING_OWNER_TOKEN` | オーナー呼び出し(`supersedes` 訂正・カード判定ボタン)に必要な共有シークレット。エンジン・ドア・カードが同じ値を見る必要があり、compose が両コンテナに渡す。未設定 = 誰もオーナーとして書けない |
-| `BORING_DOOR_URL` | 朝カードと Claude Code SessionStart フックがドアを探す URL(デフォルト `http://127.0.0.1:7710`)。なければ `make card` が起動拒否(exit 2)し、「今日承認したもの」節は省略される |
+| `BORING_DOOR_URL` | 朝カードと Claude Code SessionStart フックがドアを探す URL — 両方の利用者に必須。なければカードは起動拒否(exit 2)、フックは `오늘 승인한 것` 節を省略する。`http://127.0.0.1:7710` を仮定するのは `schedule-card.sh` の `/health` チェックだけ |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプションの Slack 秘書（`make secretary`）。ボットトークンには `message.channels` スコープが必要 — スレッド返信が訂正を記憶に届ける経路 |
 
 構造化イベントは distill、collector/worker、`doctor`/`readiness`、`guard`、`eval` から記録されます。memory-ingest イベントには Rust ワークフローグラフ契約に沿った `workflow=memory_ingest`、`workflow_node`、`workflow_outcome` フィールドが付きます。イベントはまず OpenTelemetry 形式のログレコードとしてローカルエンジン DB に保存されます。NDJSON ファイルはエンジン停止時の fallback スプールで、`BORING_EVENT_SINK=spool` または `both` を選んだ場合だけ意図的にファイル中心/同時記録になります。DB view は HTTP `/events`（`/otel-events` alias も同じ）または MCP `events`、`make events` は DB を先に読み、失敗時はファイルスプールを読みます。

@@ -243,7 +243,7 @@ make readiness
 | `BORING_READINESS_PENDING_TTL` | readiness에서 stale `.pending`으로 보는 임계값; `INGEST_PENDING_TTL`, 그다음 `1800`초를 기본으로 사용 |
 | `BORING_READINESS_RETRY_TTL` | readiness에서 stale `.retry`로 보는 임계값; `INGEST_RETRY_TTL`, 그다음 pending 임계값을 기본으로 사용 |
 | `BORING_OWNER_TOKEN` | 소유자 호출(`supersedes` 정정·카드 판정 버튼)에 필요한 공유 비밀값. 엔진·문·카드가 같은 값을 봐야 하고, compose 가 두 컨테이너에 넘긴다. 미설정 = 누구도 소유자로 쓸 수 없다 |
-| `BORING_DOOR_URL` | 아침 카드와 Claude Code SessionStart 훅이 문을 찾는 URL(기본 `http://127.0.0.1:7710`). 없으면 `make card` 가 기동 거부(exit 2)하고 「오늘 승인한 것」 절이 빠진다 |
+| `BORING_DOOR_URL` | 아침 카드와 Claude Code SessionStart 훅이 문을 찾는 URL — 두 소비자 모두 필수다. 없으면 카드가 기동 거부(exit 2)하고 훅은 `오늘 승인한 것` 절을 뺀다. `http://127.0.0.1:7710` 을 가정하는 것은 `schedule-card.sh` 의 `/health` 확인뿐이다 |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack 비서(`make secretary`); 봇 토큰에 `message.channels` 스코프가 필요하다 — 스레드 답글이 정정을 기억에 넣는 길이다 |
 
 구조화 이벤트는 distill, collector/worker, `doctor`/`readiness`, `guard`, `eval`에서 기록됩니다. memory-ingest 이벤트에는 Rust 작업 흐름 그래프 계약을 따르는 `workflow=memory_ingest`, `workflow_node`, `workflow_outcome` 필드가 붙습니다. 이벤트는 OpenTelemetry 형태의 로그 레코드로 로컬 엔진 DB에 먼저 저장됩니다. NDJSON 파일은 엔진이 내려간 경우의 fallback 스풀이고, `BORING_EVENT_SINK=spool` 또는 `both`를 선택한 경우에만 의도적으로 파일 중심/동시 기록이 됩니다. DB 관점은 HTTP `/events`(`/otel-events` alias도 동일) 또는 MCP `events`로 보고, `make events`는 DB를 먼저 조회하되 실패하면 파일 스풀을 봅니다.
