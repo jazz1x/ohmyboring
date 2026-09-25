@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """BoringStore against a stub http.server — no engine, no door, no network beyond loopback.
 
-The stub stands where the engine and the door would sit (one process, paths split the
-roles) and records every request it is handed, so each test can read back exactly what
-the store sent and count what it must never send.
+Two stubs stand where the door and the engine would sit, on two addresses, and each
+records every request it is handed, so each test can read back exactly what the store
+sent, to which end, and count what it must never send.
 
 Run: python3 -m unittest agents.memory.test_store
 """
@@ -104,31 +104,34 @@ class _Handler(BaseHTTPRequestHandler):
 
 class StoreTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-        self.server.requests = []
-        self.server.claim_sources = {}
-        self.server.listed = []
-        self.server.hits = []
-        self.server.remember_response = {
+        self.server = self._serve()
+        self.engine = self._serve()
+        self.store = BoringStore(
+            engine_url=f"http://127.0.0.1:{self.engine.server_port}",
+            door_url=f"http://127.0.0.1:{self.server.server_port}",
+        )
+
+    def _serve(self) -> ThreadingHTTPServer:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        server.requests = []
+        server.claim_sources = {}
+        server.listed = []
+        server.hits = []
+        server.remember_response = {
             "source_path": "/vault/wiki/wiki-9000.md",
             "wiki_id": "wiki-9000",
             "duplicate": None,
             "supersedes": 0,
             "unknown": 0,
         }
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
-        self.store = BoringStore(engine_url=self.base_url, door_url=self.base_url)
-
-    def tearDown(self) -> None:
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
 
     def _remember_bodies(self) -> list[dict]:
         return [
-            body for method, path, body in self.server.requests if method == "POST" and path == "/remember"
+            body for method, path, body in self.engine.requests if method == "POST" and path == "/remember"
         ]
 
     def test_put_new_key_sends_remember_without_supersedes(self) -> None:
@@ -211,7 +214,7 @@ class StoreTest(unittest.TestCase):
         # Since r4.1 a corrected note always lands: the engine skips the duplicate gate
         # for anything with supersedes. A duplicate answer means the write was swallowed
         # and the caller's new value is NOT what get will answer — that is a failure.
-        self.server.remember_response = {
+        self.engine.remember_response = {
             "source_path": "/vault/wiki/wiki-9001.md",
             "wiki_id": "wiki-9001",
             "duplicate": "/vault/wiki/wiki-9001.md",
@@ -273,10 +276,10 @@ class StoreTest(unittest.TestCase):
             self.store.batch([PutOp(NS, "prefs", {"lang": "ko"}, index=["lang"])])
         with self.assertRaises(ValueError):
             self.store.batch([PutOp(NS, "prefs", {"lang": "ko"}, ttl=5.0)])
-        self.assertEqual(self.server.requests, [], "a refused op must send nothing")
+        self.assertEqual(self.server.requests + self.engine.requests, [], "a refused op must send nothing")
 
     def test_search_boring_prefix_maps_hits_and_anything_else_is_next_wheel(self) -> None:
-        self.server.hits = [HIT]
+        self.engine.hits = [HIT]
         items = self.store.search(("boring",), query="문서 정리")
         (item,) = items
         self.assertEqual(item.namespace, ("boring", "omb"))
@@ -284,7 +287,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(item.value["content"], "문서 정리 원칙 노트")
         self.assertEqual(item.value["source_path"], "/vault/wiki/wiki-0001.md")
         self.assertIsNone(item.score)
-        self.assertEqual(self.server.requests[-1][2], {"query": "문서 정리", "max_results": 10})
+        self.assertEqual(self.engine.requests[-1][2], {"query": "문서 정리", "max_results": 10})
 
         for bad_prefix in (("agents",), ("boring-agent",)):
             with self.assertRaises(NotImplementedError):
@@ -334,6 +337,7 @@ class StoreTest(unittest.TestCase):
             {path for method, path, _ in self.server.requests},
             {"/claim-sources?predicate=langgraph-store-value"},
         )
+        self.assertEqual(self.engine.requests, [], "listing reads the door, never the engine")
 
 
 if __name__ == "__main__":
