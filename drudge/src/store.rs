@@ -6,7 +6,9 @@
 //! - **pgvector** (`document`, `chunk`): vector (HNSW) + FTS (tsvector) + frontmatter columns.
 //! - **graph** (`node`, `edge`): semantic ontology. node = entity, edge = typed relation.
 //!   - node id convention: `doc:<source_path>` · `project:<name>` · `topic:<tag>`
-//!     · `tool|concept:<slug>` · `claim:<subject>:<predicate>` · `session:<id>` · `person:<name>`.
+//!     · `tool|concept:<slug>` · `claim:<subject>:<predicate>` · `session:<id>` · `person:<name>`
+//!     · `<kind>:<subject>:<predicate>` (non-fact claims — decision·risk·next… — joined to their
+//!     claim node by `is_a`).
 //!   - the `document` table is the SSOT for documents; the graph references them by `doc:<path>` id (no duplicate storage).
 //!
 //! ## Advantage over AGE

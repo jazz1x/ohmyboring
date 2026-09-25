@@ -1,4 +1,4 @@
-//! ohmyboring personal RAG — Rust (pgvector: vector + node/edge graph + recursive CTE + audit).
+//! ohmyboring personal RAG — Rust (pgvector: vector + node/edge graph + audit).
 //! First milestone: embed → store → vector search round-trip proof (selftest).
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
