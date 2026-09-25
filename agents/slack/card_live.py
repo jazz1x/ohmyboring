@@ -29,6 +29,7 @@ from card_types import (
     ProposedVerdict,
     RepairDone,
     RepairFailed,
+    RepairUnanswered,
     ResolvedNote,
     Unresolved,
 )
@@ -227,14 +228,42 @@ def _live_repairs(limit: int = REPAIRS_LIMIT) -> dict[str, Any]:
         return json.loads(r.read().decode("utf-8"))
 
 
-def _live_execute_repair(subject: str) -> RepairDone | RepairFailed:
-    """POST the door's merge. F2 (2026-09-22): this used to let urlopen's exception — a 502
-    when the engine's /sync fails, or a timeout on a genuinely slow one — reach main() as an
-    OSError, which the card treats as "refuse the whole card, exit 3". Both are now values:
-    the door's own 502 body still carries the counts it already committed before /sync
-    failed (AC3 — not a silent rollback), so those ride along in RepairFailed rather than
-    being thrown away with the exception. An unreachable door has no counts to report but is
-    still not a reason to kill the other rows' buttons."""
+def _door_failure(subject: str, code: int, body: bytes) -> RepairFailed | RepairUnanswered:
+    """Classify the door's HTTP-error body: counts reported → RepairFailed, anything else
+    (unreadable, or JSON without both count keys) → RepairUnanswered — the rows may already
+    be committed, so an unknown count must never be written as 0."""
+    try:
+        failed_payload = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return RepairUnanswered(subject=subject, reason=f"door answered {code}")
+    if not isinstance(failed_payload, dict):
+        return RepairUnanswered(subject=subject, reason=f"door answered {code}")
+    deleted = failed_payload.get("deleted_rows")
+    reread = failed_payload.get("reread_notes")
+    if deleted is None or reread is None:
+        reason = f"door answered {code}"
+        error = failed_payload.get("error")
+        if isinstance(error, str) and error:
+            reason = f"{reason}: {error}"
+        return RepairUnanswered(subject=subject, reason=reason)
+    sync = failed_payload.get("sync")
+    reason = (
+        sync["error"] if isinstance(sync, dict) and sync.get("error") is not None else f"door answered {code}"
+    )
+    return RepairFailed(
+        subject=subject,
+        deleted_rows=int(deleted),
+        reread_notes=int(reread),
+        reason=str(reason),
+        owner_held=failed_payload.get("owner_held") or [],
+    )
+
+
+def _live_execute_repair(subject: str) -> RepairDone | RepairFailed | RepairUnanswered:
+    """POST the door's merge. The door commits DELETE+UPDATE before its sync, so a timeout
+    or a count-less body may already have deleted the rows — a failure without reported
+    counts is RepairUnanswered, never a fabricated 0 (F2). Never raised: a slow or failed
+    merge must not end the card's whole run over one button."""
     claim = {"subject": subject, "judge": OWNER}
     req = urllib.request.Request(
         f"{_door_url()}/repairs/split-subjects",
@@ -247,24 +276,12 @@ def _live_execute_repair(subject: str) -> RepairDone | RepairFailed:
             payload = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         try:
-            failed_payload = json.loads(e.read().decode("utf-8"))
-        except (ValueError, OSError):
-            failed_payload = {}
-        sync = failed_payload.get("sync")
-        reason = (
-            sync["error"]
-            if isinstance(sync, dict) and sync.get("error") is not None
-            else f"door answered {e.code}"
-        )
-        return RepairFailed(
-            subject=subject,
-            deleted_rows=int(failed_payload.get("deleted_rows") or 0),
-            reread_notes=int(failed_payload.get("reread_notes") or 0),
-            reason=str(reason),
-            owner_held=failed_payload.get("owner_held") or [],
-        )
+            body = e.read()
+        except OSError:
+            body = b""
+        return _door_failure(subject, e.code, body)
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return RepairFailed(subject=subject, deleted_rows=0, reread_notes=0, reason=f"door unreachable: {e}")
+        return RepairUnanswered(subject=subject, reason=f"door unreachable: {e}")
     return RepairDone(
         subject=subject,
         deleted_rows=payload["deleted_rows"],

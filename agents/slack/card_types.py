@@ -259,17 +259,26 @@ class RepairDone(BaseModel):
 
 
 class RepairFailed(BaseModel):
-    """execute_repair's failure value. A door-level failure (its own 502) still carries the
-    counts of what it already committed before the sync call failed — those are real, not a
-    symptom to discard, so they ride along here too. An unreachable door has nothing to
-    report and both counts stay 0. Never raised: F2 — a 502 or a slow sync must not end the
-    card's whole run over one button."""
+    """execute_repair's failure value — the door answered and reported its own counts. A
+    door-level failure (its own 502) still carries the counts of what it already committed
+    before the sync call failed — those are real, not a symptom to discard, so they ride
+    along here too. Never raised: F2 — a 502 or a slow sync must not end the card's whole
+    run over one button."""
 
     subject: str
     deleted_rows: int
     reread_notes: int
     reason: str
     owner_held: list[str] = []
+
+
+class RepairUnanswered(BaseModel):
+    """execute_repair's failure value — the door never reported its counts (timeout,
+    unreachable, non-JSON body, or JSON without count keys). The rows may already be
+    deleted, so this value must not carry a count at all — writing 0 would be a lie."""
+
+    subject: str
+    reason: str
 
 
 class Registers(BaseModel):

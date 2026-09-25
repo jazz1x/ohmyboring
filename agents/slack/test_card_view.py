@@ -375,6 +375,24 @@ class CardV2ShapeTests(unittest.TestCase):
             failed_mark["elements"][0]["text"],
         )
 
+        # the door never reported its counts (timeout): 개수 모름 is shown, "지운 행 0" never is
+        unanswered_judged = cv.build_blocks(
+            [proposal],
+            [verdict],
+            repairs=[repair],
+            repairs_total_groups=1,
+            repair_results={
+                0: cc.RepairUnanswered(subject="foodspring-front", reason="door unreachable: timed out")
+            },
+            lang="ko",
+        )
+        unanswered_mark = next(
+            b for b in unanswered_judged if b["type"] == "context" and "응답 없음" in _blocks_text([b])
+        )
+        self.assertIn("✕ 합침 응답 없음", unanswered_mark["elements"][0]["text"])
+        self.assertIn("timed out", unanswered_mark["elements"][0]["text"])
+        self.assertNotIn("지운 행 0", _blocks_text(unanswered_judged))
+
         # repairs empty (nothing to do today) but the lane is still active (merged yesterday) —
         # the 오늘 할 일 header must not appear, 짚어 둔 것 still does
         blocks_empty = cv.build_blocks(
