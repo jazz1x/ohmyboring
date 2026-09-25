@@ -1272,6 +1272,63 @@ class LiveExecuteRepairTests(unittest.TestCase):
         self.assertEqual(result, cc.RepairDone(subject="foodspring-front", deleted_rows=5, reread_notes=2))
 
 
+class LiveDoorFetchNamesTheUrl(unittest.TestCase):
+    """card.py's refusal line folds every OSError into one `[card] 카드 거부:` row, and
+    urllib's own message (`HTTP Error 404: Not Found`, `<urlopen error …>`) carries no
+    URL — a dead door route was unanswerable from the log (the 09-24/25 404s). _door_json
+    re-raises with the URL in front: same OSError kind, card.py's catching site untouched."""
+
+    def test_a_door_404_names_the_url_it_refused(self):
+        def fake_urlopen(url, timeout=None):
+            import urllib.error
+
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b""))
+
+        with (
+            mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.invalid"}),
+            mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        ):
+            with self.assertRaises(OSError) as ctx:
+                card_live._live_approved(24)
+
+        self.assertIn("http://door.invalid/approved?since_hours=24", str(ctx.exception))
+        self.assertIn("404", str(ctx.exception))
+
+    def test_a_good_answer_still_parses_through_the_helper(self):
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(url, timeout=None):
+            return _Resp(
+                json.dumps(
+                    {
+                        "approved": [
+                            {
+                                "session": "s",
+                                "note": "/vault/wiki/wiki-0001.md",
+                                "at": "2026-09-25T00:00:00Z",
+                            }
+                        ]
+                    }
+                ).encode()
+            )
+
+        with (
+            mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.invalid"}),
+            mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        ):
+            result = card_live._live_approved(24)
+
+        self.assertEqual(
+            result,
+            [cc.PastApproved(session="s", note="/vault/wiki/wiki-0001.md", at="2026-09-25T00:00:00Z")],
+        )
+
+
 class LivePastVerdictsTests(unittest.TestCase):
     """F5: a malformed or unjoined card_verdict/card_proposal row is a visible failure
     (ValueError), never a silently skipped one, and the proposal window must be wider than
