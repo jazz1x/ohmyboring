@@ -82,14 +82,23 @@ install_macos() {
 </dict>
 </plist>
 EOF
-    if launchctl load "$plist" >/dev/null 2>&1; then
-        echo "✓ loaded $plist"
-    elif launchctl bootstrap "gui/$(id -u)" "$plist" >/dev/null 2>&1; then
-        echo "✓ bootstrapped $plist"
-    else
-        echo "✗ could not load $plist (run 'make doctor' to check permissions)"
+    # launchctl load never replaces an already-loaded job — a reinstall must boot out the
+    # old definition first, then bootstrap the new plist, and verify what actually loaded.
+    if launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then
+        if ! launchctl bootout "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then
+            echo "✗ bootout failed for gui/$(id -u)/${LABEL}"
+            exit 1
+        fi
+    fi
+    if ! launchctl bootstrap "gui/$(id -u)" "$plist" >/dev/null 2>&1; then
+        echo "✗ bootstrap failed for $plist"
         exit 1
     fi
+    if ! launchctl print "gui/$(id -u)/${LABEL}" | grep -qF "$BORING_HOME"; then
+        echo "✗ loaded definition does not match $plist"
+        exit 1
+    fi
+    echo "✓ bootstrapped $plist"
 }
 
 uninstall_macos() {

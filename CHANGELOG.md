@@ -39,6 +39,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 - **판정이 다음 검색 순위를 바꾼다** — `/search`·MCP `recall`·`/ask`·CLI 가 공유하는 RRF 병합 뒤, 문서별 `net = clamp(used − contested, −FEEDBACK_NET_MAX, +FEEDBACK_NET_MAX)` (`FEEDBACK_NET_MAX = 3`) 만큼 점수를 움직인다: `score += net × FEEDBACK_STEP`, `FEEDBACK_STEP = rrf_term(1) − rrf_term(2)` — 👍 하나 = 한 목록에서 한 등수. 스팸 반응 셋이 두 목록 1등(≈0.0328)을 못 뒤집게 상한은 세 칸. 소비 간선이 없는 코퍼스에선 피드백 항이 0이라 순위가 바이트 단위로 같다(골든 게이트가 이를 고정).
 
 ### Fixed
+- **카드·정리 작업을 다시 설치하면 launchd 가 새 정의로 바뀐다** — `launchctl load` 는 이미 올라간 작업 위에서 `Load failed: 5` 를 찍고도 rc=0 을 돌려줘, 09-25 재설치가 ✓ 를 찍고도 옛 migration 워크트리 정의가 남았고 09-26 08:00 카드가 거기서 돌았다. install 이 올라가 있으면 bootout 한 뒤 bootstrap 하고, `launchctl print` 에 현재 `BORING_HOME` 이 없으면 ✗ 로 멈춘다(`schedule-card.sh`·`schedule-maintenance.sh`).
 - **카드의 수리·검토 버튼이 빈 `value` 를 싣지 않는다** — 슬랙은 `value` 가 있으면 1자 이상을 요구해 09-26 08:01 카드 전체를 `invalid_blocks` 로 거부했다. 이 버튼들의 `value` 는 아무도 읽지 않아(처리부는 `action_id` 만 본다) 키를 뺐다. 제안 버튼의 노트 이름 `value` 는 그대로. 시험 1개.
 - **카드 거부 메시지에 실패한 URL 이 실린다** — 문·엔진 GET 넷(`/projects`·`/events`·`/approved`·`/repairs/split-subjects`)이 `카드 거부: HTTP Error 404: Not Found` 처럼 라우트 없이 죽던 것을 `카드 거부: http://…/approved?since_hours=24: HTTP Error 404: Not Found` 로. 예외 종류·받는 자리 무사변경. 시험 2개.
 - **Claude Code·Kimi 훅 명령이 설치한 파이썬 절대경로로 돈다** — 훅 셸의 PATH 가 /usr/bin 을 앞세우면 맨몸 `python3` 가 Xcode 3.9 로 잡혀 `datetime.UTC` ImportError 로 증류가 죽었다(sessionend.log 2건). Codex launchd 잡(b8b1c5c)과 같은 `sys.executable` 방식. 이미 등록된 훅은 손대지 않는다.
