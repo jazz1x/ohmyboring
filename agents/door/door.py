@@ -29,7 +29,7 @@ two ways (e.g. "foodspring front" vs "foodspring-front") — POST is the door's
 first write route: it deletes the split rows (an owner-written note's only with the
 owner token — otherwise that note is skipped and named in `owner_held`), blanks the affected notes' sha
 so the engine's own /sync rereads them under the merged form, and calls that
-/sync itself. None of the GETs touches the upstream.
+/sync itself. Of the GETs, only /projects without active_days reaches the upstream.
 """
 
 from __future__ import annotations

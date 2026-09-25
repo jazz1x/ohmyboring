@@ -2,7 +2,7 @@
 
 A query becomes one POST /search and comes back as list[Document], in the engine's own
 order (RRF + feedback, applied in drudge/src/retrieve.rs apply_feedback). Nothing is
-re-ranked, re-embedded, or re-ranked here. Give the retriever a session_id and /search
+re-ranked or re-embedded here. Give the retriever a session_id and /search
 records every hit shown as handed to that session; record_verdict then attaches one
 verdict to the whole handover and record_notes judges note by note — every edge names
 its judge, and the next same query sees the counts in used_count / contested_count —

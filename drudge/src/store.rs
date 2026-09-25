@@ -1,4 +1,4 @@
-//! Store — pgvector (document/chunk/embedding/FTS) + graph (node/edge tables + recursive CTE).
+//! Store — pgvector (document/chunk/embedding/FTS) + graph (node/edge tables).
 //!
 //! Cross-reference: ENFORCEMENT.md §A (error ADTs) · design decision D5 (claim temporal authority).
 //!
@@ -6,10 +6,8 @@
 //! - **pgvector** (`document`, `chunk`): vector (HNSW) + FTS (tsvector) + frontmatter columns.
 //! - **graph** (`node`, `edge`): semantic ontology. node = entity, edge = typed relation.
 //!   - node id convention: `doc:<source_path>` · `project:<name>` · `topic:<tag>`
-//!     · `problem|solution|tool|concept:<slug>` · `attempt:<path>#<idx>`.
+//!     · `tool|concept:<slug>` · `claim:<subject>:<predicate>` · `session:<id>` · `person:<name>`.
 //!   - the `document` table is the SSOT for documents; the graph references them by `doc:<path>` id (no duplicate storage).
-//! - **traversal**: recursive CTE (`neighbors_khop`) — k-hop works even when the engine is not a graph DB.
-//!   If the CTE proves insufficient, lift-and-shift to AGE/SurrealDB (schema is identical).
 //!
 //! ## Advantage over AGE
 //! Every value goes through `tokio-postgres` parameter binding ($1,$2…) → eliminates the cypher string-escaping footgun.
@@ -3250,7 +3248,7 @@ impl Store {
         Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
-    /// Semantic neighbors (problem/solution/tool/concept/attempt) — 1-hop from the document. Returns labels.
+    /// Semantic neighbors (`uses`/`about`/`claims` edges) — 1-hop from the document. Returns labels.
     pub async fn semantic_neighbors(&self, chunk_id: &str) -> Result<Vec<String>> {
         let doc_id = doc_node_id(chunk_id);
         let rows = self
