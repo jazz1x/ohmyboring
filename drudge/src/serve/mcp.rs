@@ -1272,7 +1272,7 @@ async fn mcp_forget(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
 pub(crate) struct Remembered {
     pub(crate) source_path: String,
     pub(crate) wiki_id: String,
-    /// `Some(path)` when the note landed on (or skipped over) a duplicate of an existing note.
+    /// `Some(path)` when the note superseded (or was skipped against) a duplicate of an existing note.
     pub(crate) duplicate: Option<String>,
     /// `supersedes` edges written from this note to the paths it corrects.
     pub(crate) supersedes: usize,
@@ -1296,8 +1296,9 @@ async fn mcp_remember(
 /// note is written and ingested, each pair becomes a `supersedes` edge from the new note, and
 /// the next recall sinks the old note below the new one. A note that names what it corrects
 /// skips the duplicate gate — a correction must land, never be swallowed as "too similar".
-/// `owner` as author or judge needs `caller` to be the owner, and only the owner supersedes or
-/// rewrites a note the owner wrote; an owner write is never skipped against someone else's note.
+/// A richer note from the same session supersedes the earlier one the same way; no note file is
+/// ever rewritten. `owner` as author or judge needs `caller` to be the owner, and only the owner
+/// supersedes a note the owner wrote; an owner write is never skipped against someone else's note.
 pub(crate) async fn remember_note(
     s: &AppState,
     caller: Caller,
@@ -1330,83 +1331,119 @@ pub(crate) async fn remember_note(
     // fix of a long note still embeds within DUPLICATE_MAX_DIST, so a corrected note that
     // went through the gate would be skipped as "too similar" and the wrong fact would
     // stay live. Only unmarked notes go through the duplicate gate.
-    if needs_dedup(&supersedes)
-        && let Some(existing) = check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir)
+    let found = if needs_dedup(&supersedes) {
+        check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir)
             .await
             .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
-        && owner::gated_by(standing, &existing.front.author)
-    {
-        if should_replace_duplicate(&note, &existing)
-            && owner::may_rewrite(standing, &existing.front.author)
-        {
-            let telemetry = dedup_decision_event(&note, Some(&existing), DedupOutcome::Replace);
-            let Some(wiki_id) = crate::vault::wiki_stem(&existing.source_path) else {
-                return Err((
-                    -32603,
-                    format!(
-                        "dedup replacement target is not a wiki note: {}",
-                        existing.source_path
-                    ),
-                ));
-            };
-            let source_path = existing.source_path.clone();
-            let path = std::path::PathBuf::from(&source_path);
-            let RememberNote { mut front, body } = note;
-            front.source_path = source_path;
-            let content = vault::render_wiki_note(&wiki_id, &front, &body)
-                .map_err(|e| (-32603_i32, format!("render wiki note: {e:#}")))?;
-            std::fs::write(&path, content)
-                .map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
+    } else {
+        None
+    };
+    let gate = dedup_gate(&note, standing, found);
+    let telemetry = dedup_decision_event(&note, gate.existing(), gate.outcome());
+    let judge = edge_judge.as_deref();
+    match gate {
+        DedupGate::Skip(existing) => {
             log_dedup_decision(s, &telemetry).await;
-            let message = finish_remembered_note(s, &path, &wiki_id, &front, true).await?;
-            let (sup_count, unk_count) =
-                write_supersedes_edges(s, &front.source_path, &supersedes, edge_judge.as_deref())
-                    .await?;
-            return Ok(Remembered {
-                source_path: front.source_path.clone(),
-                wiki_id,
-                duplicate: Some(existing.source_path),
-                supersedes: sup_count,
-                unknown: unk_count,
-                message,
-            });
+            Ok(skipped_duplicate(existing.source_path))
         }
-        log_dedup_decision(
-            s,
-            &dedup_decision_event(&note, Some(&existing), DedupOutcome::Skip),
-        )
-        .await;
-        let skipped_path = existing.source_path;
-        return Ok(Remembered {
-            wiki_id: crate::vault::wiki_stem(&skipped_path).unwrap_or_default(),
-            source_path: skipped_path.clone(),
-            duplicate: Some(skipped_path.clone()),
-            // A skipped note leaves no new note behind, so nothing is superseded.
-            supersedes: 0,
-            unknown: 0,
-            message: format!("skipped — duplicate of {skipped_path}"),
-        });
+        DedupGate::Supersede(existing) => {
+            let old = [existing.source_path.clone()];
+            let duplicate = Some(existing.source_path);
+            store_new_note(s, &wiki_dir, note, &old, duplicate, judge, &telemetry).await
+        }
+        DedupGate::Fresh => {
+            store_new_note(s, &wiki_dir, note, &supersedes, None, judge, &telemetry).await
+        }
+    }
+}
+
+/// What the duplicate gate decided for one unmarked note.
+#[derive(Debug)]
+enum DedupGate {
+    Fresh,
+    Supersede(DuplicateMatch),
+    Skip(DuplicateMatch),
+}
+
+impl DedupGate {
+    fn outcome(&self) -> DedupOutcome {
+        match self {
+            Self::Fresh => DedupOutcome::StoreNew,
+            Self::Supersede(_) => DedupOutcome::Supersede,
+            Self::Skip(_) => DedupOutcome::Skip,
+        }
     }
 
-    let telemetry = dedup_decision_event(&note, None, DedupOutcome::StoreNew);
+    fn existing(&self) -> Option<&DuplicateMatch> {
+        match self {
+            Self::Fresh => None,
+            Self::Supersede(m) | Self::Skip(m) => Some(m),
+        }
+    }
+}
 
+fn dedup_gate(
+    note: &RememberNote,
+    standing: owner::Standing,
+    found: Option<DuplicateMatch>,
+) -> DedupGate {
+    match found.filter(|m| owner::gated_by(standing, &m.front.author)) {
+        None => DedupGate::Fresh,
+        Some(m)
+            if should_replace_duplicate(note, &m)
+                && owner::may_rewrite(standing, &m.front.author) =>
+        {
+            DedupGate::Supersede(m)
+        }
+        Some(m) => DedupGate::Skip(m),
+    }
+}
+
+fn skipped_duplicate(skipped_path: String) -> Remembered {
+    Remembered {
+        wiki_id: crate::vault::wiki_stem(&skipped_path).unwrap_or_default(),
+        source_path: skipped_path.clone(),
+        message: format!("skipped — duplicate of {skipped_path}"),
+        // A skipped note leaves no new note behind, so nothing is superseded.
+        supersedes: 0,
+        unknown: 0,
+        duplicate: Some(skipped_path),
+    }
+}
+
+/// The only path that writes a note file, always at a freshly allocated `wiki-NNNN`.
+async fn store_new_note(
+    s: &AppState,
+    wiki_dir: &std::path::Path,
+    note: RememberNote,
+    supersedes: &[String],
+    duplicate: Option<String>,
+    edge_judge: Option<&str>,
+    telemetry: &Value,
+) -> Result<Remembered, (i32, String)> {
     let db_ids = existing_wiki_ids(s).await?;
-    let (wiki_id, path) = vault::allocate_wiki_path(&wiki_dir, Some(&db_ids))
+    let (wiki_id, path) = vault::allocate_wiki_path(wiki_dir, Some(&db_ids))
         .map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
     let mut front = note.front;
     front.source_path = path.to_string_lossy().into_owned();
     let content = vault::render_wiki_note(&wiki_id, &front, &note.body)
         .map_err(|e| (-32603_i32, format!("render wiki note: {e:#}")))?;
     std::fs::write(&path, content).map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
-    log_dedup_decision(s, &telemetry).await;
+    log_dedup_decision(s, telemetry).await;
 
-    let message = finish_remembered_note(s, &path, &wiki_id, &front, false).await?;
+    let supersedes_suffix = duplicate
+        .as_deref()
+        .and_then(crate::vault::wiki_stem)
+        .map(|old| format!(" (supersedes wiki/{old}.md)"))
+        .unwrap_or_default();
+    let label = format!("wiki/{wiki_id}.md{supersedes_suffix}");
+    let message = finish_remembered_note(s, &path, &label, &front).await?;
     let (sup_count, unk_count) =
-        write_supersedes_edges(s, &front.source_path, &supersedes, edge_judge.as_deref()).await?;
+        write_supersedes_edges(s, &front.source_path, supersedes, edge_judge).await?;
     Ok(Remembered {
         source_path: front.source_path.clone(),
         wiki_id,
-        duplicate: None,
+        duplicate,
         supersedes: sup_count,
         unknown: unk_count,
         message,
@@ -1465,19 +1502,12 @@ async fn write_supersedes_edges(
 async fn finish_remembered_note(
     s: &AppState,
     path: &std::path::Path,
-    wiki_id: &str,
+    label: &str,
     front: &FrontMatter,
-    updated_duplicate: bool,
 ) -> Result<String, (i32, String)> {
-    let duplicate_suffix = if updated_duplicate {
-        " (updated duplicate)"
-    } else {
-        ""
-    };
-
     let Some(store) = s.store.as_ref() else {
         return Ok(format!(
-            "remembered → wiki/{wiki_id}.md{duplicate_suffix} (vector off — wiki is first-class memory; recallable now)"
+            "remembered → {label} (vector off — wiki is first-class memory; recallable now)"
         ));
     };
 
@@ -1494,7 +1524,7 @@ async fn finish_remembered_note(
         }
     };
     Ok(format!(
-        "remembered → wiki/{wiki_id}.md{duplicate_suffix} · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
+        "remembered → {label} · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
         stats.chunks, stats.tools, stats.concepts, stats.claims
     ))
 }
@@ -1619,6 +1649,7 @@ async fn check_duplicate(
         .trim()
         .to_lowercase();
 
+    let mut matches = Vec::new();
     for entry in std::fs::read_dir(wiki_dir)? {
         let path = entry?.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
@@ -1627,34 +1658,24 @@ async fn check_duplicate(
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let (yaml, existing_body) = crate::vault::split_frontmatter(&content).unwrap_or(("", ""));
         let fm: crate::frontmatter::FrontMatter = serde_yaml::from_str(yaml).unwrap_or_default();
-        if let Some(sid) = target_session
-            && fm.omb_session_id.as_deref() == Some(sid)
-        {
-            return Ok(Some(duplicate_match(
-                &path,
-                DuplicateReason::SameSession,
-                fm,
-                existing_body,
-            )));
-        }
-        if probable_session_duplicate(note, &fm, existing_body) {
-            return Ok(Some(duplicate_match(
-                &path,
-                DuplicateReason::ProbableSession,
-                fm,
-                existing_body,
-            )));
-        }
-        if !target_title.is_empty()
-            && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title
-        {
-            return Ok(Some(duplicate_match(
-                &path,
-                DuplicateReason::ExactTitle,
-                fm,
-                existing_body,
-            )));
-        }
+        let same_session =
+            target_session.is_some() && fm.omb_session_id.as_deref() == target_session;
+        let same_title = !target_title.is_empty()
+            && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title;
+        let reason = match (
+            same_session,
+            probable_session_duplicate(note, &fm, existing_body),
+            same_title,
+        ) {
+            (true, _, _) => Some(DuplicateReason::SameSession),
+            (false, true, _) => Some(DuplicateReason::ProbableSession),
+            (false, false, true) => Some(DuplicateReason::ExactTitle),
+            (false, false, false) => None,
+        };
+        matches.extend(reason.map(|r| duplicate_match(&path, r, fm, existing_body)));
+    }
+    if let Some(found) = pick_duplicate(matches) {
+        return Ok(Some(found));
     }
 
     if let Some(store) = store {
@@ -1687,6 +1708,28 @@ fn duplicate_match(
         front,
         body: body.to_owned(),
     }
+}
+
+fn pick_duplicate(matches: Vec<DuplicateMatch>) -> Option<DuplicateMatch> {
+    let (same_session, others): (Vec<_>, Vec<_>) = matches
+        .into_iter()
+        .partition(|m| m.reason == DuplicateReason::SameSession);
+    newest_match(same_session).or_else(|| newest_match(others))
+}
+
+/// Superseded notes stay on disk and a superseding note always gets a larger wiki id, so the
+/// live note is the newest match, not whichever `read_dir` lists first.
+fn newest_match(matches: Vec<DuplicateMatch>) -> Option<DuplicateMatch> {
+    matches
+        .into_iter()
+        .max_by_key(|m| wiki_number(&m.source_path))
+}
+
+fn wiki_number(source_path: &str) -> Option<u32> {
+    crate::vault::wiki_stem(source_path)?
+        .strip_prefix("wiki-")?
+        .parse()
+        .ok()
 }
 
 fn needs_dedup(supersedes: &[String]) -> bool {
@@ -1737,7 +1780,7 @@ fn note_quality(front: &FrontMatter, body: &str) -> NoteQuality {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DedupOutcome {
-    Replace,
+    Supersede,
     Skip,
     StoreNew,
 }
@@ -1745,7 +1788,7 @@ enum DedupOutcome {
 impl DedupOutcome {
     fn status(self) -> &'static str {
         match self {
-            Self::Replace => "replaced",
+            Self::Supersede => "superseded",
             Self::Skip => "skipped",
             Self::StoreNew => "stored",
         }
@@ -2155,8 +2198,9 @@ mod tests {
     use super::{
         DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote, ToolCallError,
         ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_tools_list,
-        needs_dedup, parse_remember_note, parse_supersedes, probable_session_duplicate,
-        remember_note, should_replace_duplicate, tool_outcome_snippet, tool_query_arg,
+        needs_dedup, parse_remember_note, parse_supersedes, pick_duplicate,
+        probable_session_duplicate, remember_note, should_replace_duplicate, tool_outcome_snippet,
+        tool_query_arg,
     };
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
@@ -2444,11 +2488,203 @@ mod tests {
             kept.contains("author: owner") && !kept.contains("friday"),
             "an agent's richer same-session note must not rewrite the owner's: {kept}"
         );
-        remember_note(&s, door, Some(&session_note("owner", richer)))
+        let owners = remember_note(&s, door, Some(&session_note("owner", richer)))
             .await
             .unwrap();
-        let rewritten = std::fs::read_to_string(&original.source_path).unwrap();
-        assert!(rewritten.contains("friday"), "the owner may: {rewritten}");
+        assert_eq!(
+            owners.duplicate.as_deref(),
+            Some(original.source_path.as_str())
+        );
+        assert!(
+            std::fs::read_to_string(&owners.source_path)
+                .unwrap()
+                .contains("friday"),
+            "the owner may supersede their own note"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&original.source_path).unwrap(),
+            kept
+        );
+    }
+
+    fn richer_session_note(session: &str, claims: usize) -> Value {
+        let claims: Vec<Value> = (0..claims)
+            .map(|i| json!({"subject": format!("remember-{i}"), "predicate": "updates", "value": "weak duplicate notes"}))
+            .collect();
+        json!({
+            "title": "MCP ingestion",
+            "body": "Short summary.",
+            "omb_session_id": session,
+            "claims": claims,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_richer_same_session_note_supersedes_instead_of_overwriting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let first = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&richer_session_note("s-a1", 0)),
+        )
+        .await
+        .unwrap();
+        let first_bytes = std::fs::read(&first.source_path).unwrap();
+
+        let poorer = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&richer_session_note("s-a1", 0)),
+        )
+        .await
+        .unwrap();
+        assert!(poorer.message.starts_with("skipped — duplicate"));
+        assert_eq!(wiki_notes(tmp.path()), 1, "control: not richer is skipped");
+
+        let second = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&richer_session_note("s-a1", 2)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(wiki_notes(tmp.path()), 2);
+        assert_eq!(std::fs::read(&first.source_path).unwrap(), first_bytes);
+        assert_ne!(second.source_path, first.source_path);
+        assert_eq!(
+            second.duplicate.as_deref(),
+            Some(first.source_path.as_str())
+        );
+        assert!(
+            second.message.contains("(supersedes wiki/"),
+            "{}",
+            second.message
+        );
+    }
+
+    fn dup_match(path: &str, reason: DuplicateReason) -> DuplicateMatch {
+        DuplicateMatch {
+            source_path: path.to_owned(),
+            reason,
+            front: FrontMatter::default(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn newest_match_picks_the_latest_wiki_id_in_any_order() {
+        let a = "/v/wiki/wiki-0001.md";
+        let b = "/v/wiki/wiki-0002.md";
+        for reason in [
+            DuplicateReason::SameSession,
+            DuplicateReason::ProbableSession,
+        ] {
+            for order in [[a, b], [b, a]] {
+                let found = pick_duplicate(order.map(|p| dup_match(p, reason)).into()).unwrap();
+                assert_eq!(found.source_path, b, "{reason:?} {order:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_same_session_match_beats_an_exact_title_match() {
+        let found = pick_duplicate(vec![
+            dup_match("/v/wiki/wiki-0001.md", DuplicateReason::SameSession),
+            dup_match("/v/wiki/wiki-0002.md", DuplicateReason::ExactTitle),
+        ])
+        .unwrap();
+        assert_eq!(found.reason, DuplicateReason::SameSession);
+    }
+
+    fn chain_note(session: &str, claims: usize) -> Value {
+        let mut note = richer_session_note(session, claims);
+        note["tools"] = json!([
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet"
+        ]);
+        note
+    }
+
+    struct Chain {
+        b_path: String,
+        c: super::Remembered,
+        files: usize,
+    }
+
+    async fn probable_chain(c_claims: usize) -> Chain {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let remember = |session, claims| {
+            let args = chain_note(session, claims);
+            let s = &s;
+            async move {
+                remember_note(s, Caller::Unverified, Some(&args))
+                    .await
+                    .unwrap()
+            }
+        };
+        let a = remember("sx", 0).await;
+        let b = remember("sy", 2).await;
+        assert_eq!(b.duplicate.as_deref(), Some(a.source_path.as_str()));
+        let a_bytes = std::fs::read(&a.source_path).unwrap();
+        let b_bytes = std::fs::read(&b.source_path).unwrap();
+
+        let c = remember("sz", c_claims).await;
+        assert_eq!(std::fs::read(&a.source_path).unwrap(), a_bytes);
+        assert_eq!(std::fs::read(&b.source_path).unwrap(), b_bytes);
+        Chain {
+            b_path: b.source_path,
+            c,
+            files: wiki_notes(tmp.path()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_poorer_probable_session_note_is_compared_with_the_live_note() {
+        let chain = probable_chain(1).await;
+        assert_eq!(
+            chain.c.message,
+            format!("skipped — duplicate of {}", chain.b_path)
+        );
+        assert_eq!(chain.files, 2);
+    }
+
+    #[tokio::test]
+    async fn a_richer_probable_session_note_supersedes_the_live_note() {
+        let chain = probable_chain(10).await;
+        assert_eq!(chain.c.duplicate.as_deref(), Some(chain.b_path.as_str()));
+        assert_eq!(chain.files, 3);
+    }
+
+    #[tokio::test]
+    async fn a_third_distill_supersedes_the_second_not_the_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let remember = |claims| {
+            let args = richer_session_note("s-a2", claims);
+            let s = &s;
+            async move {
+                remember_note(s, Caller::Unverified, Some(&args))
+                    .await
+                    .unwrap()
+            }
+        };
+        let a = remember(0).await;
+        let b = remember(1).await;
+        assert_eq!(
+            b.duplicate.as_deref(),
+            Some(a.source_path.as_str()),
+            "control"
+        );
+        let a_bytes = std::fs::read(&a.source_path).unwrap();
+        let b_bytes = std::fs::read(&b.source_path).unwrap();
+
+        let c = remember(2).await;
+        assert_eq!(c.duplicate.as_deref(), Some(b.source_path.as_str()));
+        assert_eq!(wiki_notes(tmp.path()), 3);
+        assert_eq!(std::fs::read(&a.source_path).unwrap(), a_bytes);
+        assert_eq!(std::fs::read(&b.source_path).unwrap(), b_bytes);
     }
 
     #[test]
@@ -3056,11 +3292,11 @@ mod tests {
         let note = telemetry_note();
         let existing = telemetry_existing(DuplicateReason::SameSession);
 
-        let event = dedup_decision_event(&note, Some(&existing), DedupOutcome::Replace);
+        let event = dedup_decision_event(&note, Some(&existing), DedupOutcome::Supersede);
 
         assert_eq!(event["event"], "dedup_decision");
         assert_eq!(event["component"], "drudge.mcp.remember");
-        assert_eq!(event["status"], "replaced");
+        assert_eq!(event["status"], "superseded");
         assert_eq!(event["reason"], "same_session");
         assert_eq!(event["omb_session_id"], "session-a");
         assert_eq!(

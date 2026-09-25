@@ -1377,6 +1377,114 @@ async fn remember_http_supersedes_edges_sink_the_old_note_in_search() {
     }
 }
 
+/// A second distill of the same session that is richer lands as a new note superseding the first:
+/// the first file is untouched, the edge carries the note's author as judge, and `/search` sinks
+/// the first below the second.
+#[tokio::test]
+async fn a_richer_redistill_supersedes_the_first_note_over_http() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let vault = tempfile::tempdir().expect("temp vault");
+    std::fs::create_dir_all(vault.path().join("wiki")).expect("wiki dir");
+    let llm_base = format!("http://127.0.0.1:{}/v1", spawn_hashing_embedder().await);
+    let port = free_port();
+    let _server = spawn_server_with_vault(&dsn, port, vault.path(), &llm_base);
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+    wait_for_health(&client, &base).await;
+
+    let session = unique_id("r11-session");
+    let note = |claims: serde_json::Value| {
+        serde_json::json!({
+            "title": "kappa sprocket drift",
+            "body": "The kappa sprocket drifts when the belt is loose; tighten the belt first.",
+            "omb_session_id": session,
+            "author": "agent:r11",
+            "claims": claims,
+        })
+    };
+    let wiki_files = || {
+        std::fs::read_dir(vault.path().join("wiki"))
+            .unwrap()
+            .count()
+    };
+
+    let first = post_remember(&client, &base, note(serde_json::json!([]))).await;
+    let path_a = first["source_path"].as_str().expect("a path").to_owned();
+    let a_bytes = std::fs::read(&path_a).expect("a on disk");
+
+    let poorer = post_remember(&client, &base, note(serde_json::json!([]))).await;
+    assert_eq!(poorer["duplicate"], path_a.as_str());
+    assert_eq!(poorer["supersedes"], 0);
+    assert_eq!(
+        wiki_files(),
+        1,
+        "control: a note that is not richer is skipped"
+    );
+
+    let subject = unique_id("r11-kappa");
+    let richer = post_remember(
+        &client,
+        &base,
+        note(serde_json::json!([
+            {"subject": subject, "predicate": "drifts_when", "value": "belt loose"},
+            {"subject": subject, "predicate": "fixed_by", "value": "tighten belt"},
+        ])),
+    )
+    .await;
+    let path_b = richer["source_path"].as_str().expect("b path").to_owned();
+    assert_ne!(path_b, path_a);
+    assert_eq!(richer["duplicate"], path_a.as_str());
+    assert_eq!(richer["supersedes"], 1);
+    assert_eq!(richer["unknown"], 0);
+    assert_eq!(wiki_files(), 2);
+    assert_eq!(std::fs::read(&path_a).expect("a on disk"), a_bytes);
+    assert_eq!(
+        edge_judge(
+            &db,
+            &format!("doc:{path_b}"),
+            &format!("doc:{path_a}"),
+            "supersedes"
+        )
+        .await
+        .as_deref(),
+        Some("agent:r11")
+    );
+
+    let hits = post_search(
+        &client,
+        &base,
+        serde_json::json!({"query": "kappa sprocket drift belt", "max_results": 5}),
+    )
+    .await;
+    let rank = |path: &str| hits.iter().position(|h| h["source_path"] == path);
+    let (rank_a, rank_b) = (rank(&path_a), rank(&path_b));
+    assert!(
+        rank_a.is_some() && rank_b.is_some() && rank_a > rank_b,
+        "both notes come back, the superseded one below: a={rank_a:?} b={rank_b:?}"
+    );
+
+    for path in [&path_a, &path_b] {
+        let live: i64 = db
+            .query_one(
+                "SELECT count(*) FROM claim WHERE source_path = $1 AND superseded_at IS NULL;",
+                &[path],
+            )
+            .await
+            .expect("count claims")
+            .get(0);
+        eprintln!("r11 current claim rows {path}: {live}");
+    }
+
+    for path in [&path_a, &path_b] {
+        store.delete_document(path).await.expect("cleanup doc");
+    }
+}
+
 /// MCP `recall` answers from the wiki when it has word hits; that set takes the same in-set order
 /// as `/search`. B out-scores A on word overlap in both halves; only the owner-written A goes first.
 /// C is the owner's but holds no query word, so it stays out.

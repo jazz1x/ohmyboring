@@ -53,7 +53,7 @@ pub(crate) fn gated_by(standing: Standing, existing: &Author) -> bool {
     standing == Standing::NotOwner || *existing == Author::Owner
 }
 
-/// A note the owner wrote may be rewritten in place only by the owner.
+/// A note the owner wrote may be superseded by a richer same-session note only from the owner.
 pub(crate) fn may_rewrite(standing: Standing, existing: &Author) -> bool {
     standing == Standing::Owner || *existing != Author::Owner
 }
