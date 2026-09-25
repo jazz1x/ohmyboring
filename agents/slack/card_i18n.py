@@ -51,6 +51,7 @@ STRINGS: dict[Lang, dict[str, str]] = {
         "review_button_drop": "Flip",
         "review_verdict_agree": "✓ Agreed",
         "review_verdict_flip": "↺ Flipped — owner judged {kind}",
+        "superseded_label": "superseded",
     },
     "ko": {
         "card_title": "☀️ 오늘 제안",
@@ -84,6 +85,7 @@ STRINGS: dict[Lang, dict[str, str]] = {
         "review_button_drop": "뒤집기",
         "review_verdict_agree": "✓ 맞음",
         "review_verdict_flip": "↺ 뒤집음 — 소유자 판정으로 {kind}",
+        "superseded_label": "대체됨",
     },
     "ja": {
         "card_title": "☀️ 今日の提案",
@@ -117,6 +119,7 @@ STRINGS: dict[Lang, dict[str, str]] = {
         "review_button_drop": "ひっくり返す",
         "review_verdict_agree": "✓ 合っている",
         "review_verdict_flip": "↺ 反転 — 所有者の判定で{kind}",
+        "superseded_label": "置換済み",
     },
 }
 

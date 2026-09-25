@@ -100,7 +100,12 @@ def _section_block(proposal: Proposal) -> dict:
     }
 
 
-def _quote_block(evidence: list[Evidence]) -> dict:
+def _evidence_label(e: Evidence, strings: dict[str, str]) -> str:
+    superseded = f" · {strings['superseded_label']} → {', '.join(e.superseded_by)}" if e.superseded_by else ""
+    return f"\n{_note_label(e.note)} L{e.line}{superseded}"
+
+
+def _quote_block(evidence: list[Evidence], strings: dict[str, str]) -> dict:
     """A top-level `rich_text` block holding one `rich_text_quote` — Slack's `context` blocks
     only take mrkdwn/plain_text, never rich text, so the evidence quote cannot live there
     (AC4). Two or more pieces of evidence share one quote block, a blank line between them."""
@@ -109,9 +114,7 @@ def _quote_block(evidence: list[Evidence]) -> dict:
         if i:
             elements.append({"type": "text", "text": "\n\n"})
         elements.append({"type": "text", "text": e.quote[:EVIDENCE_QUOTE_CHARS]})
-        elements.append(
-            {"type": "text", "text": f"\n{_note_label(e.note)} L{e.line}", "style": {"code": True}}
-        )
+        elements.append({"type": "text", "text": _evidence_label(e, strings), "style": {"code": True}})
     return {"type": "rich_text", "elements": [{"type": "rich_text_quote", "elements": elements}]}
 
 
@@ -132,7 +135,7 @@ def _proposal_row(
         {"type": "divider"},
         _tag_block(idx, total, proposal, register_labels),
         _section_block(proposal),
-        _quote_block(proposal.evidence),
+        _quote_block(proposal.evidence, strings),
     ]
     row.append(
         _verdict_block(verdict, strings)

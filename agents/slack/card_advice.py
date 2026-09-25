@@ -57,6 +57,16 @@ def _advice_lang_instruction(lang: str) -> str:
 PROMPT_SECTION_BUDGET = 3500
 
 
+def superseded_names(hit: dict) -> list[str]:
+    """The newer notes that replaced this hit, `/vault/wiki/wiki-0602.md` → `wiki-0602`."""
+    return [p.rsplit("/", 1)[-1].removesuffix(".md") for p in hit.get("superseded_by") or []]
+
+
+def _superseded_line(hit: dict) -> str:
+    names = superseded_names(hit)
+    return f"\n대체됨: 이 노트는 {', '.join(names)} 로 대체됐다 — 옛 기록으로만 읽어라" if names else ""
+
+
 def build_advice_prompt(subject: str, register: RegisterName, hits: list[dict], lang: str) -> str:
     """One candidate's whole task: a subject, its register, and up to three past hits
     (`/search` with `claims`) to ground advice in. The model only quotes and reasons —
@@ -73,7 +83,7 @@ def build_advice_prompt(subject: str, register: RegisterName, hits: list[dict], 
         # `[note]` had gemma4 copy the brackets into evidence.note, so every quote from that
         # hit failed to verify (the real note path never carries them). The label is its own
         # line so nothing but the path itself sits after "노트 경로:".
-        sections.append(f"노트 경로: {note}\n{snippet}\n{claims}".rstrip())
+        sections.append(f"노트 경로: {note}{_superseded_line(hit)}\n{snippet}\n{claims}".rstrip())
     hits_text = "\n\n".join(sections) if sections else "(과거 기록 없음)"
     return (
         f"오늘의 후보 주어: {subject!r} (레지스터: {register})\n\n"
@@ -114,7 +124,9 @@ def _find_quote_line(text: str, quote: str) -> int | None:
     return None
 
 
-def parse_advised(llm_json: str, note_texts: dict[str, str]) -> Advice | NotWorth | Ungrounded:
+def parse_advised(
+    llm_json: str, note_texts: dict[str, str], superseded_by: dict[str, list[str]]
+) -> Advice | NotWorth | Ungrounded:
     """One candidate's structured JSON in, a grounded value out — never an exception: a weak
     candidate is a fact about that candidate, not a reason to stop the advise loop over the
     rest of the queue. Evidence whose quote does not verify against its own note's text
@@ -138,7 +150,14 @@ def parse_advised(llm_json: str, note_texts: dict[str, str]) -> Advice | NotWort
         line = _find_quote_line(text, item.quote)
         if line is None:
             continue
-        grounded.append(Evidence(note=item.note, quote=item.quote, line=line))
+        grounded.append(
+            Evidence(
+                note=item.note,
+                quote=item.quote,
+                line=line,
+                superseded_by=superseded_by.get(item.note, []),
+            )
+        )
     if not grounded:
         return Ungrounded(reason="no evidence verified against note text")
     return Advice(bottleneck=advised.bottleneck, advice=advised.advice, evidence=grounded)

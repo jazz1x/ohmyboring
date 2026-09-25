@@ -274,7 +274,10 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 warned_empty_vault = True
             prompt = card_advice.build_advice_prompt(subject, register, hits, state["lang"])
             calls += 1
-            advised = card_advice.parse_advised(collabs.propose(prompt), note_texts)
+            superseded_by = {
+                h["source_path"]: card_advice.superseded_names(h) for h in hits if h.get("source_path")
+            }
+            advised = card_advice.parse_advised(collabs.propose(prompt), note_texts, superseded_by)
             if isinstance(advised, card_types.Advice):
                 proposals.append(
                     card_types.Proposal(

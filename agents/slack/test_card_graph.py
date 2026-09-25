@@ -332,6 +332,22 @@ class GraphTests(unittest.TestCase):
         for note in EXPECTED_NOTES:
             self.assertTrue(note.startswith("/vault/wiki/"))
 
+    def test_a_superseded_hit_reaches_the_posted_card_as_a_label_on_its_own_evidence(self):
+        old = "/vault/wiki/wiki-0536.md"
+        hit = dict(CANDIDATE_HITS[old][0], superseded_by=["/vault/wiki/wiki-0576.md"])
+        with mock.patch.dict(CANDIDATE_HITS, {old: [hit]}):
+            self.graph.invoke({"verdicts": []}, self.cfg)
+        code_pieces = [
+            el["text"]
+            for b in self.sends[-1]
+            if b["type"] == "rich_text"
+            for el in b["elements"][0]["elements"]
+            if el.get("style") == {"code": True}
+        ]
+        marked = [p for p in code_pieces if "대체됨" in p]
+        self.assertEqual(marked, ["\nwiki-0536 L2 · 대체됨 → wiki-0576"])
+        self.assertEqual(len(code_pieces), 3)
+
     def test_notworth_candidates_are_skipped_not_counted_as_proposals(self):
         stubs = Stubs(responses=[NOT_WORTH_JSON, NOT_WORTH_JSON] + [ADVICE[s] for s in CANDIDATE_QUEUE[2:]])
         graph = self._build(stubs)

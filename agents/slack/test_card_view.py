@@ -219,6 +219,17 @@ class CardV2ShapeTests(unittest.TestCase):
         code_pieces = [t["text"] for t in texts if t.get("style") == {"code": True}]
         self.assertEqual(code_pieces, ["\nwiki-0900 L3", "\nwiki-0536 L7"])
 
+    def test_superseded_evidence_label_names_the_newer_note_in_the_card_language(self):
+        note = "/vault/wiki/wiki-0576.md"
+        evidence = [
+            cc.Evidence(note=note, quote="근거 인용문 열두자 이상", line=2, superseded_by=["wiki-0602"])
+        ]
+        for lang, label in (("ko", "대체됨"), ("en", "superseded")):
+            blocks = cv.build_blocks([self._proposal(note=note, evidence=evidence)], lang=lang)
+            texts = next(b for b in blocks if b["type"] == "rich_text")["elements"][0]["elements"]
+            code_pieces = [t["text"] for t in texts if t.get("style") == {"code": True}]
+            self.assertEqual(code_pieces, [f"\nwiki-0576 L2 · {label} → wiki-0602"])
+
     def test_button_words_styles_and_verdict_marks_come_from_i18n(self):
         # AC5: a mutant dropping style="danger" from the reject button must kill this.
         proposal = self._proposal()

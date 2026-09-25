@@ -51,6 +51,7 @@ class Evidence(BaseModel):
     note: str
     quote: str
     line: int
+    superseded_by: list[str] = []
 
 
 class ProposalInput(BaseModel):

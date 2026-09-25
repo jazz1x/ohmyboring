@@ -74,7 +74,7 @@ def proposal_event_fields(proposal: Proposal, lang: str, card_ts: str, idx: int)
         "note": proposal.note,
         "bottleneck": proposal.bottleneck,
         "advice": proposal.advice,
-        "evidence": [e.model_dump() for e in proposal.evidence],
+        "evidence": [e.model_dump(exclude={"superseded_by"}) for e in proposal.evidence],
         "lang": lang,
         "card_ts": card_ts,
         "idx": idx,
