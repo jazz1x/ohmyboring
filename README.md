@@ -243,6 +243,8 @@ The model ids must match what LM Studio reports. `make verify-llm` also calls `/
 | `BORING_READINESS_NOTE_MAX_HOURS` | newest-note freshness window for briefing readiness; defaults to `48` |
 | `BORING_READINESS_PENDING_TTL` | stale `.pending` marker threshold for readiness; falls back to `INGEST_PENDING_TTL`, then `1800` seconds |
 | `BORING_READINESS_RETRY_TTL` | stale `.retry` marker threshold for readiness; falls back to `INGEST_RETRY_TTL`, then the pending threshold |
+| `BORING_OWNER_TOKEN` | shared secret for owner calls (corrections via `supersedes`, card verdict buttons). The engine, the door, and the card must all see the same value — compose passes it to both containers. Unset = no caller can write as the owner |
+| `BORING_DOOR_URL` | where the morning card and the Claude Code SessionStart hook find the door (default `http://127.0.0.1:7710`). Without it `make card` refuses to start (exit 2) and the 「오늘 승인한 것」 section is skipped |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant (`make secretary`); the bot token needs the `message.channels` scope — thread replies are how corrections reach memory |
 
 Structured events are emitted by distill, collectors/workers, `doctor`/`readiness`, `guard`, and `eval`. Memory-ingest events carry `workflow=memory_ingest`, `workflow_node`, and `workflow_outcome` fields that mirror the Rust workflow graph contract. Events are stored in the local engine DB first as OpenTelemetry-shaped log records; the NDJSON file is a fallback spool for engine-down cases unless you choose `BORING_EVENT_SINK=spool` or `both`. Use HTTP `/events` (or the `/otel-events` alias) or MCP `events` for the DB view; use `make events` for the DB view with automatic fallback to the file spool.
@@ -453,6 +455,8 @@ Memory can be reached through HTTP endpoints or the MCP server (`http://localhos
 | `POST /search` / `recall` | Raw memory excerpts. Each hit carries `dist` and `dist_kind` (`vector_cosine` or `text_rank`) when the serving path has a comparable number; both are absent on the wiki-recall fallback rather than reporting a score from a third, incomparable scale | not required; semantic search uses vector when enabled |
 | `/remember` / `remember` | Store a curated note | — |
 
+The door at `127.0.0.1:7710` relays the engine's route table (read at startup from the contract snapshot, so it follows the engine) and answers routes of its own: `GET /approved`, `GET /claim-source`, `GET /claim-sources`, `GET /projects?active_days=`, and `GET`/`POST /repairs/split-subjects`. Unregistered paths get a 404 — a door, not a catch-all proxy.
+
 ### Token budget
 
 Automatic retrieval can explode an agent's context window, so the retrieval surface is budget-aware:
@@ -499,7 +503,8 @@ In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency
 - `events` *(requires `BORING_VECTOR=on`)* — recent workflow/adapter events stored in the DB as OpenTelemetry-shaped records. Filter by component, event, status, run_id, workflow, or since_hours.
 - `ask` / `brief` / `weekly_brief` / `project_status` — LLM-running tools. `ask` answers a question with cited sources and works in wiki-first mode; the three briefings require `BORING_VECTOR=on`.
 - `decisions` / `risks` / `next_actions` / `stalled` / `recurrences` — registers. They return the claim rows themselves, with no LLM in the path: same question, same answer, measured at 0.02s against 119.6s when they still synthesised prose. They require `BORING_VECTOR=on`. When the result is cut, the response says so (`limit_applied`).
-- `forget` — delete a note by wiki id or exact title. Removes the wiki file and, in vector mode, also purges embeddings, graph edges, and claims.
+- `forget` — closed during the migration: every call is refused and nothing is deleted. Correct a note with `remember` + `supersedes` instead.
+  Sync's prune and `scripts/dedup-wiki.py --apply` are stopped too.
 
 Structured tools (`neighbors`, `claims`, `corpus_status`, `events`, `config_get`, `code_search`, `code_symbol`, `code_index_status`, `ask`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `context`) return native `structuredContent` (JSON) alongside the text block; prose/ack tools (`recall`, `remember`, `forget`, `sync`, `classify_repo`) return text.
 

@@ -24,8 +24,8 @@
 - **Use the simplest thing that works** (Karpathy): at small scale, simplicity > excessive abstraction.
   Don't escalate before the necessary trigger (corpus size · insufficient accuracy).
 - **Clean Architecture**: the dependency arrow always points outer → inner.
-  `store` / `ollama` (adapter · framework) → `ingest` / `retrieve` (use case) → `main`/CLI (interface).
-  However, `ingest`/`retrieve`/`extract` (use case) currently reference the concrete type `store::Store` directly.
+  `store` / `llm` (adapter · framework) → `ingest` / `retrieve` (use case) → `main`/CLI (interface).
+  However, `ingest`/`retrieve` (use case) currently reference the concrete type `store::Store` directly.
   This is intentional design — backend replacement does not meet the rule-of-three (repeated 3+ times) threshold,
   so the cost of trait abstraction was judged to exceed its benefit (§C first principles / rule-of-three).
 - **Composition over duplication** · **avoid half-done state** (a scope that can be finished in one unit of work) ·
@@ -38,7 +38,7 @@
 
 ## Layers (current)
 ```
-main.rs (interface)  →  retrieve / ingest (use case, planned)  →  store / ollama (adapter)
-                                                              ↘  frontmatter (entity, planned)
+main.rs (interface)  →  retrieve / ingest (use case)  →  store / llm (adapter)
+                                                      ↘  frontmatter (entity)
 ```
-SSOT separation: store = persistence · search, ollama = embedding · generation, frontmatter = document schema, retrieve = recall pipeline.
+SSOT separation: store = persistence · search, llm = embedding · generation, frontmatter = document schema, retrieve = recall pipeline.

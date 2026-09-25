@@ -18,6 +18,7 @@ README 는 **설치하고 쓰는 법**이다. 이 파일은 **이미 돌고 있�
 | 서비스 | 하는 일 | 죽으면 |
 |---|---|---|
 | `boring-drudge` | 엔진. 임베드·저장·그래프·`/search`·MCP | 회수와 쓰기 둘 다 멈춘다. 훅은 조용히 no-op |
+| `boring-door` | 문. 엔진 앞 프록시(:7710) — 엔진 경로를 대신 전달하고 `/approved`·`/claim-source`·`/claim-sources`·`/projects?active_days=`·`/repairs/split-subjects` 는 스스로 답한다 | 아침 카드가 스스로 거부되고(등록 스크립트가 exit 2), 세션 시작 카드의 「오늘 승인한 것」 절이 빠진다. 엔진 자체는 뒤의 `:7700` 에 살아 있다 |
 | `boring-postgres` | pgvector 저장소 | 엔진이 못 뜬다 |
 | `boring-agent` | hermes — 크론 잡의 실행기 | 브리핑·수집 워커가 전부 안 돈다 |
 
@@ -33,6 +34,7 @@ make agent-logs    # hermes 로그 (MCP 연결 진단)
 | `com.ohmyboring.codex-ingest` | 20분 | Codex 세션 하나를 집어 증류·저장 |
 | `com.ohmyboring.maintenance` | 매일 | `scripts/schedule-maintenance.sh run` — data-steward + retention |
 | `com.ohmyboring.night-drain` | 03:20 | 밀린 Codex·Claude 세션을 한 번에 최대 40개 |
+| `com.ohmyboring.morning-card` | 매일 08:00 | `scripts/schedule-card.sh run` — 아침 카드. 문(:7710)이 살아 있어야 돌고, 로그는 `/tmp/com.ohmyboring.morning-card.log` |
 
 ```bash
 launchctl list | grep ohmyboring     # 세 번째 칸이 라벨, 두 번째가 마지막 종료 코드
@@ -45,7 +47,7 @@ make maintenance                     # 지금 한 번 돌린다
 | 잡 | 주기 | 스크립트 |
 |---|---|---|
 | `memory-ingest-worker` | 20분 | `ingest-worker.py` — Claude 세션 하나를 증류 |
-| `morning-briefing` | 매일 08:00 | `briefing.py` |
+| `morning-briefing` | — | 꺼짐, 아침 카드로 대체 — 08:00 은 launchd `com.ohmyboring.morning-card` 가 받는다 |
 | `weekly-briefing` | 월 09:00 | `weekly-briefing.py` |
 
 **codex 수집기는 여기 없다.** 호스트 스케줄러가 정본이고, 설치기가 hermes 쪽 사본을 지운다(#370).
@@ -96,6 +98,7 @@ sh scripts/doctor.sh          # ✗ 가 0개인지
 | 크론 잡이 안 돈다 | `ls -t ~/.hermes/cron/output/<job-id>/ \| head -1` | **최신 파일의 시각**. 개수는 50에서 회전하므로 신호가 아니다 |
 | 그 파일이 0바이트다 | `curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker'` | **유휴인지 고장인지는 여기서 갈린다** (§4) |
 | 브리핑이 안 온다 | `make agent-logs` | hermes 가 스크립트를 찾았는지, 경로가 막혔는지 |
+| 카드가 안 왔다 | `./scripts/schedule-card.sh status` | 등록이 됐는지, 마지막 로그 줄 (`/tmp/com.ohmyboring.morning-card.log`) |
 | 무엇이 정체돼 있나 | `make doctor` | `readiness_issue` 줄 |
 | 판정 창 상태 | `make peek` | 표본·바닥·판정 (localhost 전용) |
 | 엄격 점검 | `make readiness` | doctor 결함 하나라도 있으면 실패 |
