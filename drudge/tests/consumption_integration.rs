@@ -1582,6 +1582,94 @@ async fn mcp_recall_puts_the_owner_note_first_in_the_wiki_set() {
     }
 }
 
+/// MCP `recall` names the replacement beside a superseded note and still returns it: B corrects A,
+/// C shares the query words but corrects nothing.
+#[tokio::test]
+async fn mcp_recall_labels_the_superseded_note_and_keeps_it() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let vault = tempfile::tempdir().expect("temp vault");
+    std::fs::create_dir_all(vault.path().join("wiki")).expect("wiki dir");
+    let llm_base = format!("http://127.0.0.1:{}/v1", spawn_hashing_embedder().await);
+    let port = free_port();
+    let _server = spawn_server_with_vault(&dsn, port, vault.path(), &llm_base);
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+    wait_for_health(&client, &base).await;
+    let remember = |payload| post_door(&client, format!("{base}/remember"), payload, None);
+    let file = |body: &serde_json::Value| {
+        let path = body["source_path"]
+            .as_str()
+            .expect("source_path")
+            .to_owned();
+        let name = path.rsplit('/').next().expect("file name").to_owned();
+        (path, name)
+    };
+
+    let (_, a) = remember(serde_json::json!({
+        "title": "copper sluice opening hour",
+        "body": "The copper sluice opens at six; lock it before the evening tide.",
+    }))
+    .await;
+    let a = file(&a);
+    let (_, b) = remember(serde_json::json!({
+        "title": "copper sluice schedule after pump swap",
+        "body": "Since the new pump the copper sluice opens at seven, not six.",
+        "supersedes": [a.0],
+    }))
+    .await;
+    let b = file(&b);
+    let (_, c) = remember(serde_json::json!({
+        "title": "copper sluice railing paint",
+        "body": "Salt spray peels the copper sluice railing; repaint every spring.",
+    }))
+    .await;
+    let c = file(&c);
+
+    let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                  "params": {"name": "recall", "arguments": {"query": "copper sluice"}}});
+    let (_, resp) = post_door(&client, format!("{base}/mcp"), call, None).await;
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("recall text")
+        .to_owned();
+    let line_of = |name: &str| {
+        text.lines()
+            .find(|l| l.starts_with(&format!("- [{name}")))
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    assert!(
+        line_of(&a.1).starts_with(&format!("- [{} (superseded by {})]", a.1, b.1)),
+        "the old note names its replacement: {text}"
+    );
+    assert!(
+        line_of(&b.1).starts_with(&format!("- [{}]", b.1)),
+        "the replacement carries no label: {text}"
+    );
+    assert!(
+        line_of(&c.1).starts_with(&format!("- [{}]", c.1)),
+        "an unrelated note carries no label: {text}"
+    );
+    assert!(
+        text.contains("lock it before the evening tide"),
+        "the old note is not hidden: {text}"
+    );
+    assert_eq!(
+        text.lines().filter(|l| l.starts_with("- [")).count(),
+        3,
+        "all three notes are returned: {text}"
+    );
+
+    for (path, _) in [a, b, c] {
+        store.delete_document(&path).await.expect("cleanup doc");
+    }
+}
+
 async fn said_edges(db: &Client, dst: &str) -> Vec<Option<String>> {
     db.query(
         "SELECT judge FROM edge WHERE src = 'person:owner' AND dst = $1 AND kind = 'said';",

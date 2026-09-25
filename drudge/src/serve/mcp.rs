@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use axum::Json;
@@ -755,13 +755,20 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     if lines.is_empty() {
         return Ok("(no experience recalled)".to_owned());
     }
+    let paths: Vec<String> = lines.iter().map(|(path, _)| path.clone()).collect();
+    let superseded = match s.store.as_ref() {
+        Some(store) => store
+            .superseded_by(&paths)
+            .await
+            .map_err(|e| (-32603_i32, format!("recall superseded: {e:#}")))?,
+        None => HashMap::new(),
+    };
     // Opt-in handover: name the session and the notes this recall surfaced are recorded as
     // handed to it — the same write `/search` does with `session_id`. A failure must never
     // fail the recall: a lost handover only means a later bare verdict has nothing to apply to.
     if let Some(session_id) = session_id
         && let Some(store) = s.store.as_ref()
     {
-        let paths: Vec<String> = lines.iter().map(|(path, _)| path.clone()).collect();
         let observed_at = chrono::Utc::now().to_rfc3339();
         if let Err(error) = store
             .record_handover(session_id, &observed_at, &paths)
@@ -770,14 +777,26 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             eprintln!("[mcp] handover for session {session_id} failed: {error:#}");
         }
     }
-    Ok(lines
+    Ok(recall_text(&lines, &superseded))
+}
+
+fn recall_text(lines: &[(String, String)], superseded: &HashMap<String, Vec<String>>) -> String {
+    let file_name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_owned();
+    lines
         .iter()
         .map(|(path, body)| {
-            let src = path.rsplit('/').next().unwrap_or(path.as_str());
-            format!("- [{src}] {body}")
+            let src = file_name(path);
+            let label = superseded
+                .get(path)
+                .map(|newer| {
+                    let newer: Vec<String> = newer.iter().map(|p| file_name(p)).collect();
+                    format!("{src} (superseded by {})", newer.join(", "))
+                })
+                .unwrap_or(src);
+            format!("- [{label}] {body}")
         })
         .collect::<Vec<_>>()
-        .join("\n\n"))
+        .join("\n\n")
 }
 
 async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
