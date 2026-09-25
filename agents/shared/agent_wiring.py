@@ -189,6 +189,10 @@ def _drop_duplicate_hooks(settings: dict, commands) -> int:
     return removed
 
 
+def _hook_command(script: str, python: str = sys.executable) -> str:
+    return f"{python} {BORING_HOME}/{script}"
+
+
 def wire_claude_code(path: Path | None = None) -> dict:
     """Idempotently wire Claude Code SessionEnd/SessionStart/UserPromptSubmit hooks."""
     path = path if path is not None else _agent_path("claude-code")
@@ -197,9 +201,9 @@ def wire_claude_code(path: Path | None = None) -> dict:
     settings = _load_json(path)
     settings.setdefault("hooks", {})
 
-    distill = f"python3 {BORING_HOME}/hooks/distill-session.py"
-    recall = f"python3 {BORING_HOME}/hooks/recall.py"
-    start_recall = f"python3 {BORING_HOME}/agents/claude-code/session-start-recall.py"
+    distill = _hook_command("hooks/distill-session.py")
+    recall = _hook_command("hooks/recall.py")
+    start_recall = _hook_command("agents/claude-code/session-start-recall.py")
 
     changed = False
     dropped = _drop_duplicate_hooks(settings, (distill, recall, start_recall))
@@ -263,8 +267,8 @@ def wire_kimi(path: Path | None = None) -> dict:
     path = path if path is not None else _agent_path("kimi")
     _backup(path)
 
-    distill = f"python3 {BORING_HOME}/hooks/kimi-distill-session.py"
-    recall = f"python3 {BORING_HOME}/hooks/kimi-recall.py"
+    distill = _hook_command("hooks/kimi-distill-session.py")
+    recall = _hook_command("hooks/kimi-recall.py")
 
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     changed = False
