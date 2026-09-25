@@ -184,7 +184,6 @@ def _repair_actions_block(idx: int, strings: dict[str, str]) -> dict:
             "type": "button",
             "text": {"type": "plain_text", "text": strings[f"repair_button_{choice}"], "emoji": True},
             "action_id": f"card:{idx}:{choice}",
-            "value": "",
         }
         if choice == "do":
             button["style"] = "primary"
@@ -275,7 +274,6 @@ def _review_actions_block(idx: int, strings: dict[str, str]) -> dict:
             "type": "button",
             "text": {"type": "plain_text", "text": strings[f"review_button_{choice}"], "emoji": True},
             "action_id": f"card:{idx}:{choice}",
-            "value": "",
         }
         if choice == "do":
             button["style"] = "primary"
