@@ -291,6 +291,8 @@ class StoreTest(unittest.TestCase):
                 self.store.search(bad_prefix, query="q")
         with self.assertRaises(NotImplementedError):
             self.store.search(("boring",), query=None)
+        with self.assertRaises(NotImplementedError):
+            self.store.search(("boring", "omb"), query=None)
         with self.assertRaises(ValueError):
             self.store.search(("boring",), query="q", offset=1)
         with self.assertRaises(ValueError):
