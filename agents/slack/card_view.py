@@ -36,6 +36,7 @@ from card_types import (
     Repair,
     RepairDone,
     RepairFailed,
+    RepairUnanswered,
 )
 
 #: Language-independent register glyphs — the words come from card_i18n.REGISTER_LABELS.
@@ -194,13 +195,16 @@ def _repair_actions_block(idx: int, strings: dict[str, str]) -> dict:
 
 
 def _repair_verdict_block(
-    verdict: ButtonVerdict, result: RepairDone | RepairFailed | None, strings: dict[str, str]
+    verdict: ButtonVerdict,
+    result: RepairDone | RepairFailed | RepairUnanswered | None,
+    strings: dict[str, str],
 ) -> dict:
     """An adopted repair shows the door's own numbers once execute_repair answered — done or
     failed get their own marks (F2: a failed merge still names the rows it already
-    committed, never a plain "✓ 채택" and never silence). Hold/reject, or adopt before the
-    door has answered, fall back to the same verdict words the advice lane uses — 보류/거절
-    mean the same thing in either lane."""
+    committed, never a plain "✓ 채택" and never silence). An unanswered merge names the
+    reason and no count — the rows may already be gone, so 0 would be a lie. Hold/reject,
+    or adopt before the door has answered, fall back to the same verdict words the advice
+    lane uses — 보류/거절 mean the same thing in either lane."""
     if verdict.choice == "do" and isinstance(result, RepairDone):
         text = strings["repair_verdict_done"].format(
             deleted=result.deleted_rows, reread=result.reread_notes
@@ -209,6 +213,8 @@ def _repair_verdict_block(
         text = strings["repair_verdict_failed"].format(
             deleted=result.deleted_rows, reread=result.reread_notes, reason=result.reason
         ) + _owner_held_suffix(result.owner_held, strings)
+    elif verdict.choice == "do" and isinstance(result, RepairUnanswered):
+        text = strings["repair_verdict_unanswered"].format(reason=result.reason)
     else:
         text = strings[f"verdict_{verdict.choice}"]
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
@@ -326,7 +332,7 @@ def build_blocks(
     repairs: list[Repair] = (),
     repairs_total_groups: int = 0,
     merged_yesterday_rows: int | None = None,
-    repair_results: dict[int, RepairDone | RepairFailed] | None = None,
+    repair_results: dict[int, RepairDone | RepairFailed | RepairUnanswered] | None = None,
     reviews: Iterable[ProposedVerdict] = (),
     *,
     lang: str,

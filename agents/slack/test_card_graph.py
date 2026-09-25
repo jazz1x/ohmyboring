@@ -1213,6 +1213,36 @@ class LiveExecuteRepairTests(unittest.TestCase):
         self.assertIn("__interrupt__", out)  # still waiting on the advice rows — not dead
         self.assertEqual(out["repair_results"][0], result)
 
+    def test_timeout_becomes_a_repairunanswered_value_with_no_counts(self):
+        def fake_urlopen(req, timeout=None):
+            raise TimeoutError("timed out")
+
+        with (
+            mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.invalid"}),
+            mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        ):
+            result = card_live._live_execute_repair("foodspring-front")
+
+        self.assertIsInstance(result, cc.RepairUnanswered)
+        self.assertIn("door unreachable", result.reason)
+        self.assertFalse(hasattr(result, "deleted_rows"))
+
+    def test_engine_502_without_json_becomes_a_repairunanswered_value(self):
+        def fake_urlopen(req, timeout=None):
+            import urllib.error
+
+            raise urllib.error.HTTPError(req.full_url, 502, "Bad Gateway", {}, io.BytesIO(b"Bad Gateway"))
+
+        with (
+            mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.invalid"}),
+            mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        ):
+            result = card_live._live_execute_repair("foodspring-front")
+
+        self.assertIsInstance(result, cc.RepairUnanswered)
+        self.assertIn("door answered 502", result.reason)
+        self.assertFalse(hasattr(result, "deleted_rows"))
+
     @staticmethod
     def _post(env: dict, answer: dict):
         seen: list = []

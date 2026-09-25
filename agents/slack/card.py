@@ -85,7 +85,7 @@ def _append_verdicts(
     return (existing or []) + updates
 
 
-_RepairResult = card_types.RepairDone | card_types.RepairFailed
+_RepairResult = card_types.RepairDone | card_types.RepairFailed | card_types.RepairUnanswered
 
 
 def _merge_repair_results(
