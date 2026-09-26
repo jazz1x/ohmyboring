@@ -4196,6 +4196,30 @@ async fn current_count_at(db: &Client, path: &str) -> i64 {
     .get(0)
 }
 
+/// Sealed-row count for one note — the fixture-scoped way to say "the seal moved nothing",
+/// where a store-wide count would drown the fixture in every other suite's leftovers.
+async fn sealed_count_at(db: &Client, path: &str) -> i64 {
+    db.query_one(
+        "SELECT count(*) FROM claim WHERE source_path = $1 AND superseded_at IS NOT NULL;",
+        &[&path],
+    )
+    .await
+    .expect("count sealed claims")
+    .get(0)
+}
+
+/// `superseded_at` of the note's single claim row — one claim per fixture note, so the path
+/// identifies the row.
+async fn stamp_at(db: &Client, path: &str) -> Option<SystemTime> {
+    db.query_one(
+        "SELECT superseded_at FROM claim WHERE source_path = $1;",
+        &[&path],
+    )
+    .await
+    .expect("read superseded_at")
+    .get(0)
+}
+
 fn whole_second_now() -> SystemTime {
     UNIX_EPOCH
         + Duration::from_secs(
@@ -4207,9 +4231,9 @@ fn whole_second_now() -> SystemTime {
 }
 
 /// Note A holds a `next` item; note B supersedes A → A's item is no longer current and
-/// leaves `next_actions`, while B's own items stay current. Live 2026-09-27: the finished
-/// `remove code_dsn_from_kb_set …` from wiki-1759 came back every morning because a
-/// non-fact claim is sealed only inside its own note and the supersedes edge sealed nothing.
+/// leaves `next_actions`, while B's own items stay current. A non-fact claim is sealed only
+/// inside its own note, so without the supersedes seal a finished item would stay current
+/// for as long as the note that wrote it stays.
 #[tokio::test]
 async fn a_superseding_note_retires_the_older_notes_next_items() {
     let Some(dsn) = test_dsn() else {
@@ -4359,15 +4383,27 @@ async fn record_supersedes_twice_seals_once() {
             .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
             .await
             .expect("record supersedes");
+        // A stamp overwrite moves the stamp value; a re-seal moves the counts. Round 2 must
+        // do neither — the sealed-row count and the stamp stay exactly what round 1 left.
         assert_eq!(
             sealed_at(&db, &subject_a).await,
             Some(t_b),
             "round {round}: the stamp must not move"
         );
         assert_eq!(
+            sealed_count_at(&db, &path_a).await,
+            1,
+            "round {round}: exactly A's row stays sealed — nothing resealed, nothing reopened"
+        );
+        assert_eq!(
             sealed_at(&db, &subject_b).await,
             None,
             "round {round}: B's own claim stays current"
+        );
+        assert_eq!(
+            sealed_count_at(&db, &path_b).await,
+            0,
+            "round {round}: the edge never seals the newer note's own rows"
         );
     }
 
@@ -4443,10 +4479,11 @@ async fn owner_note_superseded_by_a_non_owner_keeps_its_current_claims() {
         "a non-owner note must not retire what the owner wrote"
     );
 
-    let summary = store.compact().await.expect("compact");
+    store.compact().await.expect("compact");
     assert_eq!(
-        summary.report.sealed_superseded_claims, 0,
-        "the compact sweep must hit the same guard"
+        sealed_count_at(&db, &path_a).await,
+        0,
+        "the compact sweep must hit the same guard — the owner's row stays unsealed"
     );
     assert_eq!(
         sealed_at(&db, &subject_a).await,
@@ -4458,9 +4495,9 @@ async fn owner_note_superseded_by_a_non_owner_keeps_its_current_claims() {
     store.delete_document(&path_b).await.expect("cleanup B");
 }
 
-/// Edges written before the seal step existed (the live wiki-1945 → wiki-1759 among them,
-/// four current claims at 2026-09-27) retire their older note's claims on the next
-/// compact — reported in the summary, idempotent across runs.
+/// An edge written before the seal step existed — the live-DB shape, where supersedes edges
+/// predated the retirement pass — seals its older note's claims on the next compact, and a
+/// repeat compact moves nothing.
 #[tokio::test]
 async fn compact_seals_claims_under_a_pre_existing_edge_once() {
     let Some(dsn) = test_dsn() else {
@@ -4525,10 +4562,11 @@ async fn compact_seals_claims_under_a_pre_existing_edge_once() {
         "the unbackfilled edge leaves A's claim current, as on the live DB"
     );
 
-    let first = store.compact().await.expect("first compact");
-    assert!(
-        first.report.sealed_superseded_claims >= 1,
-        "compact reports the retirement, not a silent side effect"
+    store.compact().await.expect("first compact");
+    assert_eq!(
+        sealed_count_at(&db, &path_a).await,
+        1,
+        "the pre-existing edge retires A's single claim on compact"
     );
     assert_eq!(
         sealed_at(&db, &subject_a).await,
@@ -4536,15 +4574,363 @@ async fn compact_seals_claims_under_a_pre_existing_edge_once() {
         "the pre-existing edge retires A's claim with B's latest claim time"
     );
 
-    let second = store.compact().await.expect("second compact");
+    store.compact().await.expect("second compact");
     assert_eq!(
-        second.report.sealed_superseded_claims, 0,
-        "a repeat compact seals nothing — the stamp does not move"
+        sealed_count_at(&db, &path_a).await,
+        1,
+        "a repeat compact seals nothing new — the fixture still holds exactly one sealed row"
     );
     assert_eq!(
         sealed_at(&db, &subject_a).await,
         Some(t_b),
         "the stamp is unchanged after the second compact"
+    );
+
+    store.delete_document(&path_a).await.expect("cleanup A");
+    store.delete_document(&path_b).await.expect("cleanup B");
+}
+
+/// The seal must survive a store open. The schema-init unseal backfill runs on EVERY
+/// `Store::open` (engine start, every host CLI run) and, before the supersedes-target
+/// exclusion, matched every sealed row whose note had no later row in its own slot —
+/// which is exactly what a supersedes-sealed row looks like. Reopening the store used to
+/// quietly un-retire the finished item.
+#[tokio::test]
+async fn a_supersedes_seal_survives_a_store_reopen() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject_a = unique_subject("sup-reopen-a");
+    let subject_b = unique_subject("sup-reopen-b");
+    let path_a = unique_path("sup-reopen-a");
+    let path_b = unique_path("sup-reopen-b");
+    let t_a = whole_second_now();
+    let t_b = t_a + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_document(&dummy_frontmatter(&path_a), "sha-reopen-a", t_a)
+        .await
+        .expect("upsert A");
+    store
+        .upsert_document(&dummy_frontmatter(&path_b), "sha-reopen-b", t_b)
+        .await
+        .expect("upsert B");
+    store
+        .upsert_claim(
+            &subject_a,
+            "next_action",
+            "x",
+            &path_a,
+            t_a,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("A's item");
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "y",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's item");
+    store
+        .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+    assert_eq!(
+        stamp_at(&db, &path_a).await,
+        Some(t_b),
+        "sealed before the reopen"
+    );
+
+    drop(store);
+    let store = Store::open(&dsn, 1024).await.expect("reopen store");
+    assert_eq!(
+        stamp_at(&db, &path_a).await,
+        Some(t_b),
+        "the schema-init backfill must not reopen a supersedes-sealed row"
+    );
+    assert_eq!(
+        sealed_count_at(&db, &path_a).await,
+        1,
+        "exactly A's row stays sealed across the reopen"
+    );
+
+    store.delete_document(&path_a).await.expect("cleanup A");
+    store.delete_document(&path_b).await.expect("cleanup B");
+}
+
+/// Re-upserting the superseded note's own row used to reopen it: `upsert_claim`'s
+/// "unseal latest" step sees the note's own row as the latest of its slot and clears its
+/// stamp. The supersedes-target guard keeps the retirement — the edge, not the row's
+/// position, decides.
+#[tokio::test]
+async fn reupserting_the_superseded_note_does_not_reopen_its_claim() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject_a = unique_subject("sup-reup-a");
+    let subject_b = unique_subject("sup-reup-b");
+    let path_a = unique_path("sup-reup-a");
+    let path_b = unique_path("sup-reup-b");
+    let t_a = whole_second_now();
+    let t_b = t_a + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_document(&dummy_frontmatter(&path_a), "sha-reup-a", t_a)
+        .await
+        .expect("upsert A");
+    store
+        .upsert_document(&dummy_frontmatter(&path_b), "sha-reup-b", t_b)
+        .await
+        .expect("upsert B");
+    store
+        .upsert_claim(
+            &subject_a,
+            "next_action",
+            "first",
+            &path_a,
+            t_a,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("A's item");
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "y",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's item");
+    store
+        .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+
+    // Same (subject, predicate, valid_from): the conflict branch updates the row in place,
+    // then the seal/unseal steps run. The value proves the conflict branch actually fired.
+    store
+        .upsert_claim(
+            &subject_a,
+            "next_action",
+            "second",
+            &path_a,
+            t_a,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("re-upsert A's item");
+    let value: String = db
+        .query_one(
+            "SELECT value FROM claim WHERE source_path = $1;",
+            &[&path_a],
+        )
+        .await
+        .expect("read A's value")
+        .get(0);
+    assert_eq!(value, "second", "the row itself was updated");
+    assert_eq!(
+        stamp_at(&db, &path_a).await,
+        Some(t_b),
+        "re-asserting the superseded note does not reopen its retired claim"
+    );
+    assert_eq!(
+        sealed_count_at(&db, &path_a).await,
+        1,
+        "the slot still holds exactly the one sealed row"
+    );
+
+    store.delete_document(&path_a).await.expect("cleanup A");
+    store.delete_document(&path_b).await.expect("cleanup B");
+}
+
+/// The fact-slot twin of the re-upsert reopen: A held the slot's latest `valid_from`, a
+/// supersedes edge retired A, then another note wrote the same slot with an OLDER
+/// `valid_from`. The "unseal latest" step keys on max(valid_from) — still A's row — and
+/// used to clear A's seal, leaving the retired note as the slot's current value. The
+/// guard keeps A sealed; the older write is sealed as usual.
+#[tokio::test]
+async fn an_older_fact_write_from_another_note_does_not_reopen_the_slot() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject = unique_subject("sup-fact-slot");
+    let subject_b = unique_subject("sup-fact-b");
+    let path_a = unique_path("sup-fact-a");
+    let path_b = unique_path("sup-fact-b");
+    let path_c = unique_path("sup-fact-c");
+    let t_a = whole_second_now();
+    let t_b = t_a + Duration::from_mins(1);
+    let t_c = t_a - Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_document(&dummy_frontmatter(&path_a), "sha-fact-a", t_a)
+        .await
+        .expect("upsert A");
+    store
+        .upsert_document(&dummy_frontmatter(&path_b), "sha-fact-b", t_b)
+        .await
+        .expect("upsert B");
+    store
+        .upsert_document(&dummy_frontmatter(&path_c), "sha-fact-c", t_c)
+        .await
+        .expect("upsert C");
+    store
+        .upsert_claim(
+            &subject, "status", "a-old", &path_a, t_a, &emb, "fact", "certain",
+        )
+        .await
+        .expect("A's fact");
+    // B asserts nothing in this slot; its claim only sets the seal stamp to a fixed t_b.
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "y",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's item");
+    store
+        .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+    assert_eq!(
+        stamp_at(&db, &path_a).await,
+        Some(t_b),
+        "A's fact is retired by the edge, stamped with B's latest claim time"
+    );
+
+    store
+        .upsert_claim(
+            &subject, "status", "c-older", &path_c, t_c, &emb, "fact", "certain",
+        )
+        .await
+        .expect("C's older fact");
+
+    assert_eq!(
+        stamp_at(&db, &path_a).await,
+        Some(t_b),
+        "the older write must not reopen the superseded note's fact"
+    );
+    assert_eq!(
+        sealed_count_at(&db, &path_a).await,
+        1,
+        "A stays sealed — the slot's current value is not the retired note"
+    );
+    assert_eq!(
+        sealed_count_at(&db, &path_c).await,
+        1,
+        "C's older row is sealed below A's valid_from as usual"
+    );
+    assert_eq!(
+        current_count_at(&db, &path_b).await,
+        1,
+        "B's own claim is untouched by the slot write"
+    );
+
+    store.delete_document(&path_a).await.expect("cleanup A");
+    store.delete_document(&path_b).await.expect("cleanup B");
+    store.delete_document(&path_c).await.expect("cleanup C");
+}
+
+/// `unknown` used to be a bare count — the caller could not tell WHICH of its names
+/// missed. The report now carries the skipped paths themselves: a same-paths pair and a
+/// path with no `document` row, in input order.
+#[tokio::test]
+async fn record_supersedes_names_the_paths_it_could_not_link() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let path_a = unique_path("sup-miss-a");
+    let path_b = unique_path("sup-miss-b");
+    let t_a = whole_second_now();
+    let t_b = t_a + Duration::from_mins(1);
+
+    store
+        .upsert_document(&dummy_frontmatter(&path_a), "sha-miss-a", t_a)
+        .await
+        .expect("upsert A");
+    store
+        .upsert_document(&dummy_frontmatter(&path_b), "sha-miss-b", t_b)
+        .await
+        .expect("upsert B");
+
+    let ghost = unique_path("sup-miss-ghost");
+    let report = store
+        .record_supersedes(
+            &[
+                [path_b.clone(), path_a.clone()],
+                [path_b.clone(), path_b.clone()],
+                [path_b.clone(), ghost.clone()],
+            ],
+            None,
+        )
+        .await
+        .expect("record supersedes");
+
+    assert_eq!(report.supersedes, 1, "only the real pair links");
+    assert_eq!(
+        report.unknown, 2,
+        "the equal pair and the ghost are both counted"
+    );
+    assert_eq!(
+        report.unknown_paths,
+        vec![path_b.clone(), ghost.clone()],
+        "the skipped paths are named, in input order"
+    );
+    let ghosts: i64 = db
+        .query_one(
+            "SELECT count(*) FROM edge WHERE kind = 'supersedes' AND dst = $1;",
+            &[&format!("doc:{ghost}")],
+        )
+        .await
+        .expect("count ghost edges")
+        .get(0);
+    assert_eq!(
+        ghosts, 0,
+        "no edge is written to a note that does not exist"
     );
 
     store.delete_document(&path_a).await.expect("cleanup A");

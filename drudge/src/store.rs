@@ -143,17 +143,19 @@ pub struct SupersedesReport {
     /// `supersedes` edges written (`doc:<newer>` → `doc:<older>` pairs).
     pub supersedes: usize,
     pub unknown: usize,
+    /// The skipped paths themselves, in input order — the door echoes them to the caller, which
+    /// otherwise learns "1 unknown" without learning which of its names missed.
+    pub unknown_paths: Vec<String>,
 }
 
-/// Splits `supersedes` pairs into edge-worthy ones and the count of equal-path pairs. A pair that
-/// names the same path twice replaces nothing, so it is skipped and counted as unknown, never
-/// written.
-fn split_supersedes(pairs: &[[String; 2]]) -> (Vec<&[String; 2]>, usize) {
+/// Splits `supersedes` pairs into edge-worthy ones and the skipped paths — a pair that names the
+/// same path twice replaces nothing, so it is skipped and counted as unknown, never written.
+fn split_supersedes(pairs: &[[String; 2]]) -> (Vec<&[String; 2]>, Vec<&str>) {
     let mut valid = Vec::with_capacity(pairs.len());
-    let mut skipped = 0_usize;
+    let mut skipped = Vec::new();
     for pair in pairs {
         if pair[0] == pair[1] {
-            skipped += 1;
+            skipped.push(pair[1].as_str());
         } else {
             valid.push(pair);
         }
@@ -344,6 +346,13 @@ const OWNER_SPEAKER_NODE: &str = "person:owner";
 const STALE_CLAIM_MIRROR_NODES: &str = "(kind = 'claim' AND id NOT IN (SELECT 'claim:' || subject || ':' || predicate FROM claim)) \
      OR (kind IN (SELECT DISTINCT kind FROM claim WHERE kind <> 'fact') \
          AND id NOT IN (SELECT kind || ':' || subject || ':' || predicate FROM claim WHERE kind <> 'fact'))";
+
+/// Rows of a note a `supersedes` edge targets keep every seal the edge stamped. The schema-init
+/// unseal backfill and both of `upsert_claim`'s "unseal latest" steps must skip them — the edge
+/// is the retirement, and reopening its rows puts finished items back on the registers.
+/// `c` is the claim alias at every use site; `doc:` matches what `doc_node_id` writes.
+const SUPERSEDES_TARGET_GUARD: &str = "NOT EXISTS (SELECT 1 FROM edge e \
+     WHERE e.kind = 'supersedes' AND e.dst = 'doc:' || c.source_path)";
 /// Not user memory, though both live in the vault and stay searchable elsewhere.
 ///
 /// - `eval-*.md`: internal fixtures, which must remain searchable while `make eval` runs.
@@ -823,7 +832,9 @@ impl Store {
                  -- and if the rule is wrong the owner needs the old state back. The backup is
                  -- written first and `CREATE TABLE IF NOT EXISTS ... AS` skips once it exists,
                  -- so a re-run never clobbers it. Idempotent: after the first run the predicate
-                 -- matches nothing.
+                 -- matches nothing. A note a `supersedes` edge targets is exempt — the edge's
+                 -- seal is a retirement, not a stale-history row, and this batch runs on every
+                 -- `Store::open`.
                  CREATE TABLE IF NOT EXISTS claim_unseal_backup_20260917 AS
                    SELECT * FROM claim
                     WHERE kind <> 'fact' AND superseded_at IS NOT NULL
@@ -834,7 +845,8 @@ impl Store {
                   WHERE c.kind <> 'fact' AND c.superseded_at IS NOT NULL
                     AND NOT EXISTS (SELECT 1 FROM claim l
                                      WHERE l.subject = c.subject AND l.predicate = c.predicate
-                                       AND l.source_path = c.source_path AND l.valid_from > c.valid_from);
+                                       AND l.source_path = c.source_path AND l.valid_from > c.valid_from)
+                    AND {SUPERSEDES_TARGET_GUARD};
                  CREATE TABLE IF NOT EXISTS node_gc_backup_20260917 AS
                    SELECT * FROM node WHERE {STALE_CLAIM_MIRROR_NODES};
                  CREATE TABLE IF NOT EXISTS edge_gc_backup_20260917 AS
@@ -1438,7 +1450,9 @@ impl Store {
         // (subject, predicate, source_path). A note's own later row supersedes its own earlier
         // one; another note's items are never touched. The unseal below stays on the same scope
         // as the seal — scoping them differently is how a slot ends with no current row at all.
-        // An owner-written row is sealed only when the latest row is owner-written too.
+        // An owner-written row is sealed only when the latest row is owner-written too. Both
+        // unseals skip a note a `supersedes` edge targets: the edge retired the note wholesale,
+        // so its latest row staying latest reopens nothing.
         if kind == "fact" {
             self.db()
                 .await?
@@ -1460,10 +1474,13 @@ impl Store {
             self.db()
                 .await?
                 .execute(
-                    "UPDATE claim SET superseded_at = NULL
-                     WHERE subject = $1 AND predicate = $2 AND superseded_at IS NOT NULL
-                       AND valid_from = (SELECT max(valid_from) FROM claim
-                                         WHERE subject = $1 AND predicate = $2);",
+                    &format!(
+                        "UPDATE claim c SET superseded_at = NULL
+                         WHERE c.subject = $1 AND c.predicate = $2 AND c.superseded_at IS NOT NULL
+                           AND c.valid_from = (SELECT max(valid_from) FROM claim
+                                             WHERE subject = $1 AND predicate = $2)
+                           AND {SUPERSEDES_TARGET_GUARD};"
+                    ),
                     &[&subject, &predicate],
                 )
                 .await
@@ -1486,12 +1503,15 @@ impl Store {
             self.db()
                 .await?
                 .execute(
-                    "UPDATE claim SET superseded_at = NULL
-                     WHERE subject = $1 AND predicate = $2 AND source_path = $3
-                       AND superseded_at IS NOT NULL
-                       AND valid_from = (SELECT max(valid_from) FROM claim
-                                         WHERE subject = $1 AND predicate = $2
-                                           AND source_path = $3);",
+                    &format!(
+                        "UPDATE claim c SET superseded_at = NULL
+                         WHERE c.subject = $1 AND c.predicate = $2 AND c.source_path = $3
+                           AND c.superseded_at IS NOT NULL
+                           AND c.valid_from = (SELECT max(valid_from) FROM claim
+                                             WHERE subject = $1 AND predicate = $2
+                                               AND source_path = $3)
+                           AND {SUPERSEDES_TARGET_GUARD};"
+                    ),
                     &[&subject, &predicate, &source_path],
                 )
                 .await
@@ -2818,12 +2838,19 @@ impl Store {
     ) -> Result<SupersedesReport> {
         let mut report = SupersedesReport::default();
         let (pairs, skipped) = split_supersedes(pairs);
-        report.unknown += skipped;
+        report.unknown += skipped.len();
+        report
+            .unknown_paths
+            .extend(skipped.iter().map(|p| (*p).to_owned()));
         for pair in pairs {
-            if self.get_doc_sha(&pair[0]).await?.is_none()
-                || self.get_doc_sha(&pair[1]).await?.is_none()
-            {
+            if self.get_doc_sha(&pair[0]).await?.is_none() {
                 report.unknown += 1;
+                report.unknown_paths.push(pair[0].clone());
+                continue;
+            }
+            if self.get_doc_sha(&pair[1]).await?.is_none() {
+                report.unknown += 1;
+                report.unknown_paths.push(pair[1].clone());
                 continue;
             }
             self.upsert_edge(
@@ -3641,8 +3668,8 @@ mod tests {
 
     use super::{DistKind, NOT_USER_MEMORY_RE};
 
-    /// A pair naming the same path twice replaces nothing: it is not written, and it is counted
-    /// as unknown so the caller sees the pair was seen but produced no edge.
+    /// A pair naming the same path twice replaces nothing: it is not written, and its path is
+    /// returned with the skipped ones so the caller sees the pair was seen but produced no edge.
     #[test]
     fn an_equal_paths_supersedes_pair_is_skipped_and_counted() {
         let pairs = [
@@ -3652,7 +3679,7 @@ mod tests {
         let (valid, skipped) = super::split_supersedes(&pairs);
         assert_eq!(valid.len(), 1, "the equal-paths pair is not written");
         assert_eq!(valid[0][1], "/w/old.md");
-        assert_eq!(skipped, 1);
+        assert_eq!(skipped, vec!["/w/same.md"]);
     }
 
     #[test]
@@ -3663,7 +3690,7 @@ mod tests {
         ];
         let (valid, skipped) = super::split_supersedes(&pairs);
         assert_eq!(valid.len(), 2);
-        assert_eq!(skipped, 0);
+        assert!(skipped.is_empty());
     }
 
     /// The recency and claim surfaces feed the briefing, and the briefing writes notes into the
