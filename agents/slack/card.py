@@ -464,7 +464,8 @@ def _env_send(blocks: list[dict]) -> card_types.PostedCard:
 
     channel = os.environ["SLACK_CARD_CHANNEL"]  # main() validated before the graph runs
     web = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
-    resp = web.chat_postMessage(channel=channel, blocks=blocks)
+    head = blocks[0].get("text") or {}
+    resp = web.chat_postMessage(channel=channel, blocks=blocks, text=head.get("text") or "아침 카드")
     return card_types.PostedCard(channel=channel, ts=resp["ts"])
 
 

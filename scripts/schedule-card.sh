@@ -25,6 +25,26 @@ Usage: $0 {run|install|uninstall|status}
 EOF
 }
 
+# Slack answers HTTP 200 even when the post fails; only a body with "ok":true is a send.
+notify_failure() {
+    code="$1"; reason="$2"
+    if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${SLACK_CARD_CHANNEL:-}" ]; then
+        echo "✗ 실패 알림도 못 보냈다: SLACK_BOT_TOKEN·SLACK_CARD_CHANNEL 이 없음" >&2
+        return 0
+    fi
+    body=$(curl -sS https://slack.com/api/chat.postMessage \
+        -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+        --data-urlencode "channel=${SLACK_CARD_CHANNEL}" \
+        --data-urlencode "text=오늘 아침 카드를 못 보냈다 — exit ${code} · ${reason}" 2>&1) || {
+        echo "✗ 실패 알림도 못 보냈다: curl: ${body}" >&2
+        return 0
+    }
+    case "$body" in
+        *'"ok":true'*) ;;
+        *) echo "✗ 실패 알림도 못 보냈다: ${body}" >&2 ;;
+    esac
+}
+
 run_card() {
     cd "$BORING_HOME" || { echo "✗ cannot cd to $BORING_HOME"; exit 1; }
     # launchd runs this with none of the interactive shell's env — no SLACK_APP_TOKEN, no
@@ -39,14 +59,22 @@ run_card() {
     door_url="${BORING_DOOR_URL:-$DOOR_URL}"
     if ! curl -sf "${door_url}/health" >/dev/null 2>&1; then
         echo "✗ door not answering at ${door_url}/health — start it (make door-up) before the card can run" >&2
+        notify_failure 2 "문(${door_url})이 응답하지 않음"
         exit 2
     fi
     echo "=== morning card started at $(date) ==="
     # launchd's own PATH has no notion of Homebrew (python3 resolves to the PATH-less
     # system stub, which has no langgraph) — PYTHON3 is set in the plist's own
     # EnvironmentVariables at install time so this never depends on launchd's PATH.
-    "${PYTHON3:-python3}" agents/slack/card.py
+    err_log=$(mktemp)
+    "${PYTHON3:-python3}" agents/slack/card.py 2>"$err_log"
     status=$?
+    cat "$err_log" >&2
+    if [ "$status" -ne 0 ]; then
+        reason=$(sed -e '/^[[:space:]]/d' -e '/^$/d' "$err_log" | tail -n 1 | cut -c1-200)
+        notify_failure "$status" "${reason:-사유 없음}"
+    fi
+    rm -f "$err_log"
     echo "=== morning card finished at $(date) (exit $status) ==="
     exit "$status"
 }
