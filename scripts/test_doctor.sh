@@ -527,9 +527,7 @@ case "$(cat "$TMP/build-sha-match.out")" in
     ;;
 esac
 
-# A commit after the built sha that touches only drudge/CLAUDE.md is docs, not a build input
-# (#404 made both drift lines fail on exactly that). The drift line must read it as a match,
-# and strict with it must pass.
+# A docs-only commit under drudge/ after the built sha is not drift, for the image or the host CLI.
 docs_sha="$(make_case_repo "$TMP/build-sha-docs")"
 mkdir -p "$TMP/build-sha-docs/boring/drudge"
 printf 'fixture docs\n' >"$TMP/build-sha-docs/boring/drudge/CLAUDE.md"
@@ -539,6 +537,11 @@ git -C "$TMP/build-sha-docs/boring" \
 git -C "$TMP/build-sha-docs/boring" \
     -c user.email=fixture@example.invalid -c user.name=fixture -c commit.gpgsign=false \
     commit -q -m "docs only"
+mkdir -p "$TMP/build-sha-docs/boring/drudge/target/release"
+# shellcheck disable=SC2016
+printf '#!/bin/sh\n[ "${1:-}" = version ] && { echo "%s"; exit 0; }\nexit 0\n' "$docs_sha" \
+    >"$TMP/build-sha-docs/boring/drudge/target/release/drudge"
+chmod +x "$TMP/build-sha-docs/boring/drudge/target/release/drudge"
 if ! ( DOCTOR_BUILD_SHA="$docs_sha" \
        run_strict "$TMP/build-sha-docs" "$TMP/build-sha-docs.out" ); then
     cat "$TMP/build-sha-docs.out"
@@ -546,7 +549,7 @@ if ! ( DOCTOR_BUILD_SHA="$docs_sha" \
     exit 1
 fi
 case "$(cat "$TMP/build-sha-docs.out")" in
-  *"engine matches the checkout for drudge/"*) ;;
+  *"engine matches the checkout for drudge/"*"host CLI matches the checkout for drudge/"*) ;;
   *)
     cat "$TMP/build-sha-docs.out"
     echo "FAIL: a docs-only commit after the built sha was reported as drift" >&2
@@ -585,6 +588,23 @@ case "$(cat "$TMP/build-sha-rust.out")" in
     exit 1
     ;;
 esac
+
+# The Dockerfile is a build input too.
+dockerfile_sha="$(make_case_repo "$TMP/build-sha-dockerfile")"
+mkdir -p "$TMP/build-sha-dockerfile/boring/drudge"
+printf 'FROM scratch\n' >"$TMP/build-sha-dockerfile/boring/drudge/Dockerfile"
+git -C "$TMP/build-sha-dockerfile/boring" \
+    -c user.email=fixture@example.invalid -c user.name=fixture -c commit.gpgsign=false \
+    add drudge/Dockerfile
+git -C "$TMP/build-sha-dockerfile/boring" \
+    -c user.email=fixture@example.invalid -c user.name=fixture -c commit.gpgsign=false \
+    commit -q -m "dockerfile change"
+if ( DOCTOR_BUILD_SHA="$dockerfile_sha" \
+     run_strict "$TMP/build-sha-dockerfile" "$TMP/build-sha-dockerfile.out" ); then
+    cat "$TMP/build-sha-dockerfile.out"
+    echo "FAIL: a drudge/Dockerfile change after the built sha must fail strict readiness" >&2
+    exit 1
+fi
 
 # The fixture's own fakes are checked here, because a fake that answers an unmodelled call with
 # exit 0 makes every future check built on it vacuous — that is #217's defect, and it was living

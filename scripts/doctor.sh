@@ -34,15 +34,10 @@ MARK_DIR="${HOME}/.cache/boring-distill"
 LOG_TAIL_LINES="${BORING_LOG_TAIL_LINES:-200}"
 LOG_FAILURE_MAX="${BORING_LOG_FAILURE_MAX:-20}"
 
-# (a2b) Deploy-drift pathspec: what the image and the host CLI are actually built from —
-# drudge/Dockerfile COPYs exactly these (lines 19, 29, 30) and `cargo build --release`
-# reads the same inputs. A commit touching anything else under drudge/ (docs — #404)
-# cannot stale either artifact, so it must not read as drift.
-DRUDGE_BUILD_INPUTS="drudge/Cargo.toml drudge/Cargo.lock drudge/build.rs drudge/src/"
+# What the engine image and the host `cargo build` read; other drudge/ files cannot stale them.
+DRUDGE_BUILD_INPUTS="drudge/Dockerfile drudge/rust-toolchain.toml drudge/Cargo.toml drudge/Cargo.lock drudge/build.rs drudge/src/"
 
-# The comparison both drift checks run: commits between the built sha and HEAD that touch a
-# build input, or empty. The pathspec list is passed unquoted so the shell splits it —
-# quoting would hand git one path with spaces in the name (same trade as `newest()` below).
+# Unquoted on purpose: the list must split into separate pathspecs.
 drudge_input_changes() {
     # shellcheck disable=SC2086
     git -C "$BORING_HOME" diff --name-only "$1" HEAD -- $DRUDGE_BUILD_INPUTS 2>/dev/null
@@ -359,13 +354,7 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$BORING_URL/health" 2>/dev/n
             ok "engine runs the checked-out commit ($(printf '%.8s' "$running_sha"))"
         elif [ -z "$(drudge_input_changes "$running_sha")" ] \
              && git -C "$BORING_HOME" cat-file -e "$running_sha^{commit}" 2>/dev/null; then
-            # The image is built from exactly DRUDGE_BUILD_INPUTS, so a commit touching only
-            # other files under drudge/ — docs, like #404 — cannot make it stale, and calling
-            # one drift is how a failing line stops being read — the same way the warning this
-            # check replaced stopped being read. Seven such commits on 2026-09-07 had this
-            # reporting a stale engine with no Rust changed.
-            # The guard is `cat-file -e`: an unknown sha means the comparison could not be made,
-            # and "could not check" must fall through to the failure below, never to an ok.
+            # An unknown sha (cat-file -e) falls through to the failure below, never to ok.
             ok "engine matches the checkout for drudge/ (image $(printf '%.8s' "$running_sha"), HEAD $(printf '%.8s' "$head_sha"); later commits touch no Rust)"
         else
             # Was a warning until 2026-08-25, and the warning did not work: #221 shipped the
@@ -390,13 +379,7 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$BORING_URL/health" 2>/dev/n
                 "$head_sha") ok "host CLI built from the checked-out commit ($(printf '%.8s' "$host_sha"))" ;;
                 unstamped|"") warn "host CLI reports no build stamp — rebuild with 'cargo build --release' to make its drift detectable" ;;
                 *)
-                    # Same blind spot the engine check had until #290: `cargo build --release`
-                    # reads exactly DRUDGE_BUILD_INPUTS, so a commit touching only other files
-                    # under drudge/ — docs, like #404 — cannot age this binary.
-                    # Fixing one of the two and not the other is how one value in two places
-                    # goes wrong again — the very pattern §8 D8 names. `cat-file -e` guards the
-                    # comparison: an unknown sha means it could not be made, and that falls
-                    # through to the failure rather than to an ok.
+                    # Same inputs and same unknown-sha rule as the image check above.
                     if [ -z "$(drudge_input_changes "$host_sha")" ] \
                        && git -C "$BORING_HOME" cat-file -e "$host_sha^{commit}" 2>/dev/null; then
                         ok "host CLI matches the checkout for drudge/ (binary $(printf '%.8s' "$host_sha"), HEAD $(printf '%.8s' "$head_sha"); later commits touch no Rust)"
