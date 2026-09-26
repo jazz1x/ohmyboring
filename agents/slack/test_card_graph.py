@@ -1100,6 +1100,20 @@ class LiveFetchTests(unittest.TestCase):
         self.assertIn(("POST", "/recurrences", {"project": ""}), calls)
 
 
+class EnvSendTests(unittest.TestCase):
+    """_env_send passes a non-empty top-level text (Slack's push/notification fallback),
+    read from the card's own first block rather than rebuilt."""
+
+    def test_env_send_passes_the_header_text_as_top_level_text(self):
+        env = mock.patch.dict(os.environ, {"SLACK_BOT_TOKEN": "tok", "SLACK_CARD_CHANNEL": CARD_CH})
+        web = mock.MagicMock()
+        web.chat_postMessage.return_value = {"ts": CARD_TS}
+        blocks = [{"type": "header", "text": {"type": "plain_text", "text": "오늘의 카드 3"}}]
+        with env, mock.patch("slack_sdk.web.WebClient", return_value=web):
+            card._env_send(blocks)
+        self.assertEqual(web.chat_postMessage.call_args.kwargs["text"], "오늘의 카드 3")
+
+
 class LiveConsumptionTests(unittest.TestCase):
     """The card button's verdict is the owner's own judgement. _live_consumption must send
     judge="owner" on every consumption payload, with the owner token beside it — the engine
