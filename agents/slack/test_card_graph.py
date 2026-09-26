@@ -383,9 +383,11 @@ class GraphTests(unittest.TestCase):
             self.assertTrue(note.startswith("/vault/wiki/"))
 
     def test_a_superseded_hit_reaches_the_posted_card_as_a_label_on_its_own_evidence(self):
-        old = "/vault/wiki/wiki-0536.md"
-        hit = dict(CANDIDATE_HITS[old][0], superseded_by=["/vault/wiki/wiki-0576.md"])
-        with mock.patch.dict(CANDIDATE_HITS, {old: [hit]}):
+        # A recurrence grounds on its own refetched note now, so the marker rides a
+        # topic candidate's search hit instead.
+        subject = "f64_risk"
+        hit = dict(CANDIDATE_HITS[subject][0], superseded_by=["/vault/wiki/wiki-0576.md"])
+        with mock.patch.dict(CANDIDATE_HITS, {subject: [hit]}):
             self.graph.invoke({"verdicts": []}, self.cfg)
         code_pieces = [
             el["text"]
@@ -395,7 +397,7 @@ class GraphTests(unittest.TestCase):
             if el.get("style") == {"code": True}
         ]
         marked = [p for p in code_pieces if "대체됨" in p]
-        self.assertEqual(marked, ["\nwiki-0536 L2 · 대체됨 → wiki-0576"])
+        self.assertEqual(marked, ["\nwiki-0900 L2 · 대체됨 → wiki-0576"])
         self.assertEqual(len(code_pieces), 3)
 
     def test_notworth_candidates_are_skipped_not_counted_as_proposals(self):
@@ -1048,6 +1050,190 @@ class RestingNoteSkipTests(unittest.TestCase):
         self.assertIn("alpha_subj", stubs.propose_calls[0])
         self.assertEqual(out["advise_stats"].skipped_resting, 0)
         self.assertEqual(len(out["proposals"]), 3)
+
+
+# The sufficiency world: one recurrence candidate whose path search would answer unrelated
+# notes; the note's own text sits behind read_note, with a frontmatter title the card may
+# search on for at most two more hits.
+RECUR_PATH = "/vault/wiki/wiki-0697.md"
+RECUR_TEXT = (
+    "---\nid: wiki-0697\ntitle: relay sync\n---\n"
+    "relay sync recurred three times this week and nobody wrote it down\n"
+)
+RECUR_QUOTE = "relay sync recurred three times this week and nobody wrote it down"
+TITLE_HIT = {
+    "source_path": "/vault/wiki/wiki-0536.md",
+    "snippet": "older relay sync incident",
+    "claims": [],
+}
+PATH_SEARCH_HITS = [
+    {"source_path": "/vault/wiki/wiki-0862.md", "snippet": "unrelated", "claims": []},
+    {"source_path": "/vault/wiki/wiki-0896.md", "snippet": "unrelated", "claims": []},
+]
+SUFFICIENCY_FETCH_DATA = {
+    "/next_actions": {"answer": "next: none", "sources": []},
+    "/risks": {"answer": "risk: none", "sources": []},
+    "/stalled": {"answer": "stalled: none", "sources": []},
+    "/recurrences": {
+        "rows": [
+            {
+                "newer": {
+                    "source_path": "/vault/wiki/wiki-0697.md",
+                    "subject": "relay sync",
+                    "predicate": "incident",
+                    "value": "relay sync recurred",
+                },
+                "older": [],
+            }
+        ],
+        "days": 30,
+        "max_distance": 0.2,
+        "min_days_apart": 3,
+    },
+}
+
+
+class SufficiencyStubs(Stubs):
+    """Records read_note; the path search stands for the live defect (unrelated answers)."""
+
+    def __init__(self, note_texts: dict[str, str], resolutions: dict[str, str] | None = None):
+        super().__init__(approved=[], resolutions=resolutions if resolutions is not None else RESOLUTIONS)
+        self.note_texts = note_texts
+        self.read_note_calls: list[str] = []
+
+    def search(self, subject: str) -> list[dict]:
+        self.search_calls.append(subject)
+        if subject == "relay sync":
+            return [dict(TITLE_HIT)]
+        if subject in SKIP_HITS:
+            return [dict(h) for h in SKIP_HITS[subject]]
+        return [dict(h) for h in PATH_SEARCH_HITS]
+
+    def read_note(self, note: str) -> str | None:
+        self.read_note_calls.append(note)
+        return self.note_texts.get(note)
+
+    def propose(self, prompt: str) -> str:
+        self.propose_calls.append(prompt)
+        if "wiki-0697" in prompt:
+            return _advice_json(
+                "recurrence bottleneck sentence",
+                "recurrence today-do sentence",
+                RECUR_PATH,
+                RECUR_QUOTE,
+            )
+        return NOT_WORTH_JSON
+
+
+class SufficiencyTests(unittest.TestCase):
+    """The card checks it retrieved the candidate's own note before asking the model. A
+    recurrence subject is a note path whose path search answers unrelated notes only —
+    the card must skip it, read the note itself, and put its text first in the prompt's
+    hits. A topic subject already carrying its own note costs no extra read; an unreadable
+    own note and an unresolved subject are recorded reasons, never guesses."""
+
+    def setUp(self):
+        self.sends = []
+
+    def _build(self, fetch_data, stubs):
+        collabs = card.Collaborators(
+            fetch=lambda path, project="": fetch_data[path],
+            search=stubs.search,
+            read_note=stubs.read_note,
+            propose=stubs.propose,
+            send=lambda blocks: (self.sends.append(blocks), cc.PostedCard(channel=CARD_CH, ts=CARD_TS))[1],
+            handover=lambda session, at, paths: {},
+            consumption=lambda session, kind, paths: {},
+            resolve=stubs.resolve,
+            approved=stubs.approved,
+            record=stubs.record,
+            active_projects=stubs.active_projects,
+            past_verdicts=stubs.past_verdicts,
+            lang="ko",
+            repairs=stubs.repairs,
+            execute_repair=stubs.execute_repair,
+            merged_yesterday=stubs.merged_yesterday,
+            proposed=stubs.proposed,
+        )
+        return card.build_graph(collabs)
+
+    def test_a_recurrence_candidate_is_grounded_on_its_own_note(self):
+        # The path search would answer unrelated notes (PATH_SEARCH_HITS). The card skips
+        # it, reads the candidate note itself, puts its body first in the prompt, and the
+        # frontmatter-title search adds the one related hit beside it — the quote
+        # verifies against the note's own text and the proposal ships.
+        stubs = SufficiencyStubs(
+            {RECUR_PATH: RECUR_TEXT, "/vault/wiki/wiki-0536.md": NOTE_TEXTS["/vault/wiki/wiki-0536.md"]}
+        )
+        out = self._build(SUFFICIENCY_FETCH_DATA, stubs).invoke(
+            {"verdicts": []}, {"configurable": {"thread_id": "test-sufficient-recur"}}
+        )
+        self.assertEqual([p.note for p in out["proposals"]], [RECUR_PATH])
+        prompt = stubs.propose_calls[0]
+        self.assertIn("relay sync recurred three times this week", prompt)
+        self.assertIn("older relay sync incident", prompt)
+        note_line = "노트 경로: "
+        self.assertLess(prompt.index(note_line + RECUR_PATH), prompt.index("wiki-0536"))
+        self.assertEqual(stubs.search_calls, ["relay sync"])  # the path search is never asked
+        self.assertEqual(stubs.read_note_calls, [RECUR_PATH, "/vault/wiki/wiki-0536.md"])
+        evidence = out["proposals"][0].evidence[0]
+        self.assertEqual((evidence.note, evidence.line), (RECUR_PATH, 5))
+        stats = out["advise_stats"]
+        self.assertEqual(stats.refetched_own_note, 1)
+        self.assertEqual(stats.sufficiency_reasons, [])
+
+    def test_a_topic_candidate_carrying_its_own_note_costs_no_refetch(self):
+        stubs = SufficiencyStubs(dict(NOTE_TEXTS), resolutions=SKIP_RESOLUTIONS)
+        stubs.propose = lambda prompt: (stubs.propose_calls.append(prompt), _approve_everything(prompt))[1]
+        out = self._build(SKIP_FETCH_DATA, stubs).invoke(
+            {"verdicts": []}, {"configurable": {"thread_id": "test-sufficient-topic"}}
+        )
+        self.assertEqual(len(out["proposals"]), 3)
+        stats = out["advise_stats"]
+        self.assertEqual(stats.refetched_own_note, 0)
+        self.assertEqual(stats.sufficiency_reasons, [])
+        self.assertEqual(stubs.search_calls, ["alpha_subj", "beta_subj", "gamma_subj"])
+        self.assertEqual(
+            sorted(stubs.read_note_calls),
+            ["/vault/wiki/note-alpha.md", "/vault/wiki/note-beta.md", "/vault/wiki/note-gamma.md"],
+        )
+
+    def test_an_unreadable_own_note_records_the_reason_and_carries_on(self):
+        # Nothing is readable, the candidate's own note included: no crash, the reason
+        # lands in advise_stats, and the quote cannot verify without the body — the
+        # live rejection, as a value.
+        stubs = SufficiencyStubs({})
+        out = self._build(SUFFICIENCY_FETCH_DATA, stubs).invoke(
+            {"verdicts": []}, {"configurable": {"thread_id": "test-sufficient-blind"}}
+        )
+        self.assertEqual(out["proposals"], [])
+        stats = out["advise_stats"]
+        self.assertEqual(stats.refetched_own_note, 0)
+        self.assertEqual(stats.ungrounded, 1)
+        self.assertEqual(len(stats.sufficiency_reasons), 1)
+        self.assertIn(RECUR_PATH, stats.sufficiency_reasons[0])
+        self.assertEqual(stubs.search_calls, [])
+        self.assertEqual(stubs.read_note_calls, [RECUR_PATH])  # one try, no retry
+
+    def test_an_unresolved_subject_abstains_with_a_reason_instead_of_guessing(self):
+        stubs = SufficiencyStubs(
+            {k: NOTE_TEXTS[k] for k in ("/vault/wiki/note-beta.md", "/vault/wiki/note-gamma.md")},
+            resolutions={"beta_subj": "/vault/wiki/note-beta.md", "gamma_subj": "/vault/wiki/note-gamma.md"},
+        )
+        stubs.propose = lambda prompt: (stubs.propose_calls.append(prompt), _approve_everything(prompt))[1]
+        out = self._build(SKIP_FETCH_DATA, stubs).invoke(
+            {"verdicts": []}, {"configurable": {"thread_id": "test-sufficient-unknown"}}
+        )
+        self.assertEqual(
+            [p.note for p in out["proposals"]],
+            ["/vault/wiki/note-beta.md", "/vault/wiki/note-gamma.md"],
+        )
+        stats = out["advise_stats"]
+        self.assertEqual(stats.refetched_own_note, 0)
+        self.assertEqual(len(stats.sufficiency_reasons), 1)
+        self.assertIn("unresolved", stats.sufficiency_reasons[0])
+        # alpha's note was read once as an ordinary hit, never refetched.
+        self.assertEqual(stubs.read_note_calls.count("/vault/wiki/note-alpha.md"), 1)
 
 
 class ListenerTests(unittest.TestCase):

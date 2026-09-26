@@ -10,7 +10,13 @@ own text is dropped, never trusted."""
 from __future__ import annotations
 
 import json
+import os
+import sys
+from dataclasses import dataclass
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+
+import vault_note  # noqa: E402
 from card_types import (
     DISPLAY_LANGS,
     MIN_ADVICE_CHARS,
@@ -65,6 +71,68 @@ def superseded_names(hit: dict) -> list[str]:
 def _superseded_line(hit: dict) -> str:
     names = superseded_names(hit)
     return f"\n대체됨: 이 노트는 {', '.join(names)} 로 대체됐다 — 옛 기록으로만 읽어라" if names else ""
+
+
+@dataclass(frozen=True)
+class Sufficient:
+    """The hits already carry the candidate's own note — the retrieval is enough."""
+
+
+@dataclass(frozen=True)
+class MissingOwnNote:
+    """The hits came back without the candidate's own note — the one grounding the pitch
+    most needs. A recurrence subject is a note path, and searching on that path answers
+    unrelated notes only, so the miss is read directly instead."""
+
+    note: str
+
+
+@dataclass(frozen=True)
+class Unknown:
+    """The candidate's own note is itself unknown (the subject did not resolve) — the check
+    abstains rather than guessing, and advise proceeds on the hits as they are."""
+
+    reason: str
+
+
+Sufficiency = Sufficient | MissingOwnNote | Unknown
+
+
+def check_sufficiency(note: str | None, hits: list[dict]) -> Sufficiency:
+    """Is the candidate's own note among the retrieved hits? `note` is the candidate's own
+    path — the subject itself for recurrences, the resolved note for the other registers,
+    None when the subject did not resolve."""
+    if note is None:
+        return Unknown(reason="subject unresolved — no own note to check")
+    if any(hit.get("source_path") == note for hit in hits):
+        return Sufficient()
+    return MissingOwnNote(note=note)
+
+
+def own_note_hit(note: str, text: str) -> dict:
+    """The refetched own note as a search hit: the body after the frontmatter as its snippet
+    (the prompt applies the same ~600-char cap as any other hit) and no claims — the text
+    itself is the grounding."""
+    split = vault_note.split_frontmatter(text)
+    body = split[1] if split is not None else text
+    return {"source_path": note, "snippet": body.strip()[:600], "claims": []}
+
+
+def note_title(text: str) -> str | None:
+    """The frontmatter title — a line scan, not YAML (vault_note's own compromise); the
+    quotes live notes carry (`title: '[FEDEV-97] …'`) are stripped."""
+    split = vault_note.split_frontmatter(text)
+    if split is None:
+        return None
+    for line in split[0].splitlines():
+        key, _, value = line.partition(":")
+        if key.strip() != "title":
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1].strip()
+        return value or None
+    return None
 
 
 def build_advice_prompt(subject: str, register: RegisterName, hits: list[dict], lang: str) -> str:
