@@ -72,6 +72,7 @@ failed_codex=0
 failed_resolution=0
 failed_freshness=0
 failed_maintenance=0
+failed_card=0
 failed_eventlog=0
 
 ok()   { echo "✓ $1"; }
@@ -101,6 +102,7 @@ log_doctor_event() {
             --field "failed_resolution=$failed_resolution" \
             --field "failed_freshness=$failed_freshness" \
             --field "failed_maintenance=$failed_maintenance" \
+            --field "failed_card=$failed_card" \
             --field "failed_eventlog=$failed_eventlog" \
             --field "drudge_down=$drudge_down"; then
             echo "⚠ doctor event log write failed" >&2
@@ -810,6 +812,56 @@ if [ -f "$BORING_HOME/.pre-commit-config.yaml" ]; then
     fi
 fi
 
+# (a2e) The morning card. The launchd log is the only record of a run, and finished lands only
+# after card.py's CARD_WAIT_HOURS button wait — a posted run proves itself with `[card] posted ts=`,
+# not with finished. Lines the ISO regex cannot parse (pre-ISO logs) are skipped, not misread.
+CARD_LOG="${BORING_CARD_LOG:-/tmp/com.ohmyboring.morning-card.log}"
+if [ ! -f "$CARD_LOG" ]; then
+    warn "morning card: 모름 — 로그 파일이 없음 ($CARD_LOG) (not the same as working)"
+else
+    card_started=$(sed -n 's/^=== morning card started at \([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}[+-][0-9]\{4\}\) ===$/\1/p' "$CARD_LOG" | tail -n 1)
+    if [ -z "$card_started" ]; then
+        warn "morning card: 모름 — 읽을 수 있는 'started at <ISO>' 줄이 없음 ($CARD_LOG) (not the same as working)"
+    else
+        card_start_line=$(sed -n '/^=== morning card started at [0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}[+-][0-9]\{4\} ===$/=' "$CARD_LOG" | tail -n 1)
+        card_after=$(tail -n "+$((card_start_line + 1))" "$CARD_LOG")
+        card_exit=$(printf '%s\n' "$card_after" | sed -n 's/^=== morning card finished at .* (exit \([0-9][0-9]*\)) ===$/\1/p' | tail -n 1)
+        card_posted=$(printf '%s\n' "$card_after" | grep -c '\[card\] posted ts=' || true)
+        if [ -n "$card_exit" ] && [ "$card_exit" -ne 0 ]; then
+            bad "morning card FAILED at $card_started (exit $card_exit)"
+            failed_card=1
+        elif { [ -n "$card_exit" ] && [ "$card_exit" -eq 0 ]; } || [ "$card_posted" -gt 0 ]; then
+            ok "morning card: posted at $card_started"
+        else
+            # Date math in python3: GNU/BSD date disagree on every -d/-j spelling, and the 08:05
+            # threshold (the 08:00 run plus its post window) needs local-time comparison only.
+            card_stale=$(python3 - "$card_started" "${BORING_NOW:-}" <<'PY'
+import sys
+from datetime import datetime, timedelta
+
+try:
+    started = datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%S%z")
+    now = (
+        datetime.strptime(sys.argv[2], "%Y-%m-%dT%H:%M:%S%z")
+        if sys.argv[2]
+        else datetime.now().astimezone()
+    )
+except ValueError:
+    print("stale=0")
+    raise SystemExit(0)
+today_0805 = now.replace(hour=8, minute=5, second=0, microsecond=0)
+threshold = today_0805 if now >= today_0805 else today_0805 - timedelta(days=1)
+print(f"stale={int(started < threshold)} threshold={threshold.isoformat()}")
+PY
+)
+            case "$card_stale" in
+                stale=1*) bad "morning card did not run since ${card_stale#stale=1 threshold=}"; failed_card=1 ;;
+                *) bad "morning card started at $card_started but never posted"; failed_card=1 ;;
+            esac
+        fi
+    fi
+fi
+
 # (d5e) The same hook registered twice, read from the configs rather than from the damage.
 # (d5c) below finds a hook that FIRED twice, which means it only speaks after the duplicate has
 # written rows, and it stays silent forever for an adapter registered twice that never runs. Kimi
@@ -951,8 +1003,8 @@ fi
 
 echo
 if [ "$STRICT" -eq 1 ]; then
-    failures="${failed_env}${failed_hooks}${failed_hookprobe}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}${failed_midpoint}${failed_maintenance}${failed_eventlog}"
-    if [ "$failures" = "00000000000000" ]; then
+    failures="${failed_env}${failed_hooks}${failed_hookprobe}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}${failed_midpoint}${failed_maintenance}${failed_card}${failed_eventlog}"
+    if [ "$failures" = "000000000000000" ]; then
         ok "readiness: all doctor checks passed — briefing/write-door dependencies are ready."
         log_doctor_event ok
         exit 0

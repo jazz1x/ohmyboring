@@ -8,6 +8,7 @@
 #   5) py-unit   — network-free Python regression tests (incl. destructive-path planners)
 #   6) sh-unit   — destructive shell-path guardrails (restore-db drop ordering)
 #   7) sh-unit   — readiness gate guardrails (doctor --strict exit semantics)
+#   7b) sh-unit  — morning-card guardrails (doctor says whether the card went out)
 #   8) sh-unit   — provider/model guardrails (verify-llm embedding shape)
 #   9) sh-unit   — morning-card guardrails (failure notice to the owner's DM)
 # No bypassing (git commit --no-verify) — on failure, fix the root cause (don't paper over the symptom).
@@ -111,6 +112,7 @@ echo "7) shell readiness gate guardrails (doctor --strict)…"
 sh scripts/test_doctor.sh
 sh scripts/test_drudge_health_readiness.sh
 sh scripts/test_doctor_maintenance.sh
+sh scripts/test_doctor_card.sh
 echo "8) shell LLM/provider guardrails (verify-llm)…"
 sh scripts/test_verify_llm.sh
 echo "9) shell morning-card guardrails (failure notice)…"
