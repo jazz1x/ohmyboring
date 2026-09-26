@@ -1135,6 +1135,13 @@ async fn decision_register_answers_from_rows() {
     }
     assert_eq!(out.sources, vec!["omb".to_owned()]);
 
+    let narrowed = drudge::ask::decision_register(&store, Some("register-test"), &[], 1)
+        .await
+        .expect("decision register with limit 1");
+    assert_eq!(narrowed.items.len(), 1);
+    assert!(narrowed.limit_applied);
+    assert_eq!(narrowed.total_matching, 2);
+
     let empty = drudge::ask::decision_register(&store, Some("no-such-project"), &[], 50)
         .await
         .expect("decision register on empty project");
