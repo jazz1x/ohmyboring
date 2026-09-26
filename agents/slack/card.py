@@ -294,9 +294,9 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 skipped_resting += 1
                 continue
             # A recurrence subject is a note path, and /search on that path answers
-            # unrelated notes only (the 09-26 dry-run rejections) — skip it. The check
-            # below names the candidate's own note when the grounding is short of it, and
-            # one read_note puts it first in the prompt's hits. No extra model call.
+            # unrelated notes only — skip it. The check below names the candidate's own
+            # note when the grounding is short of it, and one read_note puts it first in
+            # the prompt's hits. No extra model call.
             hits = [] if register == "recurrences" else collabs.search(subject)
             note_texts: dict[str, str] = {}
             refetched = False

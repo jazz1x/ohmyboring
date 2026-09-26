@@ -383,8 +383,8 @@ class GraphTests(unittest.TestCase):
             self.assertTrue(note.startswith("/vault/wiki/"))
 
     def test_a_superseded_hit_reaches_the_posted_card_as_a_label_on_its_own_evidence(self):
-        # A recurrence grounds on its own refetched note now, so the marker rides a
-        # topic candidate's search hit instead.
+        # The marker rides a topic candidate's search hit — a recurrence's refetched
+        # own-note hit is built without superseded_by.
         subject = "f64_risk"
         hit = dict(CANDIDATE_HITS[subject][0], superseded_by=["/vault/wiki/wiki-0576.md"])
         with mock.patch.dict(CANDIDATE_HITS, {subject: [hit]}):
@@ -1093,6 +1093,32 @@ SUFFICIENCY_FETCH_DATA = {
 }
 
 
+# The topic-sufficiency world: one risks candidate resolving to note-risk, whose search
+# answers three other notes. build_advice_prompt keeps hits[:3], so an own note riding
+# last would fall off the prompt entirely — the test below pins it first.
+TOPIC_SUBJECT = "risk_subj"
+TOPIC_RISK_NOTE = "/vault/wiki/note-risk.md"
+TOPIC_RISK_QUOTE = "리스크 노트 본문에서 인용할 수 있는 근거 줄입니다"
+TOPIC_RISK_TEXT = f"머리말\n{TOPIC_RISK_QUOTE}\n끝"
+TOPIC_OTHER_HITS = [
+    {"source_path": "/vault/wiki/note-a.md", "snippet": "첫 번째 다른 노트의 스니펫", "claims": []},
+    {"source_path": "/vault/wiki/note-b.md", "snippet": "두 번째 다른 노트의 스니펫", "claims": []},
+    {"source_path": "/vault/wiki/note-c.md", "snippet": "세 번째 다른 노트의 스니펫", "claims": []},
+]
+TOPIC_NOTE_TEXTS = {
+    TOPIC_RISK_NOTE: TOPIC_RISK_TEXT,
+    "/vault/wiki/note-a.md": "머리말\n첫 번째 다른 노트의 본문입니다\n끝",
+    "/vault/wiki/note-b.md": "머리말\n두 번째 다른 노트의 본문입니다\n끝",
+    "/vault/wiki/note-c.md": "머리말\n세 번째 다른 노트의 본문입니다\n끝",
+}
+TOPIC_FETCH_DATA = {
+    "/next_actions": {"answer": "next: none", "sources": []},
+    "/risks": {"answer": "risk: 하나", "sources": [TOPIC_SUBJECT]},
+    "/stalled": {"answer": "stalled: none", "sources": []},
+    "/recurrences": {"rows": [], "days": 30, "max_distance": 0.2, "min_days_apart": 3},
+}
+
+
 class SufficiencyStubs(Stubs):
     """Records read_note; the path search stands for the live defect (unrelated answers)."""
 
@@ -1234,6 +1260,79 @@ class SufficiencyTests(unittest.TestCase):
         self.assertIn("unresolved", stats.sufficiency_reasons[0])
         # alpha's note was read once as an ordinary hit, never refetched.
         self.assertEqual(stubs.read_note_calls.count("/vault/wiki/note-alpha.md"), 1)
+
+
+class TopicSufficiencyStubs(SufficiencyStubs):
+    """The topic world: /search answers three notes, none of them the candidate's own."""
+
+    def search(self, subject: str) -> list[dict]:
+        self.search_calls.append(subject)
+        return [dict(h) for h in TOPIC_OTHER_HITS]
+
+    def propose(self, prompt: str) -> str:
+        self.propose_calls.append(prompt)
+        if TOPIC_SUBJECT in prompt:
+            return _advice_json(
+                "리스크 병목 한 문장 열자 이상입니다",
+                "리스크 오늘 할 일 열자 이상입니다",
+                TOPIC_RISK_NOTE,
+                TOPIC_RISK_QUOTE,
+            )
+        return NOT_WORTH_JSON
+
+
+class OwnNoteFirstTests(unittest.TestCase):
+    """A topic candidate whose own note is missing from the search hits costs one read_note,
+    and the refetched note must ride FIRST in the prompt's hits — build_advice_prompt keeps
+    only hits[:3], so an own note appended last would fall off the prompt unseen. The quote
+    from it must still verify, or the proposal cannot ship."""
+
+    def setUp(self):
+        self.sends = []
+
+    def _build(self, stubs):
+        collabs = card.Collaborators(
+            fetch=lambda path, project="": TOPIC_FETCH_DATA[path],
+            search=stubs.search,
+            read_note=stubs.read_note,
+            propose=stubs.propose,
+            send=lambda blocks: (self.sends.append(blocks), cc.PostedCard(channel=CARD_CH, ts=CARD_TS))[1],
+            handover=lambda session, at, paths: {},
+            consumption=lambda session, kind, paths: {},
+            resolve=stubs.resolve,
+            approved=stubs.approved,
+            record=stubs.record,
+            active_projects=stubs.active_projects,
+            past_verdicts=stubs.past_verdicts,
+            lang="ko",
+            repairs=stubs.repairs,
+            execute_repair=stubs.execute_repair,
+            merged_yesterday=stubs.merged_yesterday,
+            proposed=stubs.proposed,
+        )
+        return card.build_graph(collabs)
+
+    def test_a_topic_candidates_refetched_own_note_rides_first_past_three_other_hits(self):
+        stubs = TopicSufficiencyStubs(TOPIC_NOTE_TEXTS, resolutions={TOPIC_SUBJECT: TOPIC_RISK_NOTE})
+        out = self._build(stubs).invoke(
+            {"verdicts": []}, {"configurable": {"thread_id": "test-own-note-first"}}
+        )
+        self.assertEqual([p.note for p in out["proposals"]], [TOPIC_RISK_NOTE])
+        prompt = stubs.propose_calls[0]
+        self.assertIn(TOPIC_RISK_QUOTE, prompt)
+        own_at = prompt.index(TOPIC_RISK_QUOTE)
+        for hit in TOPIC_OTHER_HITS[:2]:  # hits[:3] keeps the own note plus the first two
+            self.assertLess(own_at, prompt.index(hit["snippet"]))
+        evidence = out["proposals"][0].evidence[0]
+        self.assertEqual((evidence.note, evidence.line), (TOPIC_RISK_NOTE, 2))
+        stats = out["advise_stats"]
+        self.assertEqual(stats.refetched_own_note, 1)
+        self.assertEqual(stats.sufficiency_reasons, [])
+        self.assertEqual(stubs.search_calls, [TOPIC_SUBJECT])
+        self.assertEqual(
+            stubs.read_note_calls,
+            [TOPIC_RISK_NOTE] + [h["source_path"] for h in TOPIC_OTHER_HITS],
+        )
 
 
 class ListenerTests(unittest.TestCase):
