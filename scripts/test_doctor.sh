@@ -527,6 +527,65 @@ case "$(cat "$TMP/build-sha-match.out")" in
     ;;
 esac
 
+# A commit after the built sha that touches only drudge/CLAUDE.md is docs, not a build input
+# (#404 made both drift lines fail on exactly that). The drift line must read it as a match,
+# and strict with it must pass.
+docs_sha="$(make_case_repo "$TMP/build-sha-docs")"
+mkdir -p "$TMP/build-sha-docs/boring/drudge"
+printf 'fixture docs\n' >"$TMP/build-sha-docs/boring/drudge/CLAUDE.md"
+git -C "$TMP/build-sha-docs/boring" \
+    -c user.email=fixture@example.invalid -c user.name=fixture -c commit.gpgsign=false \
+    add drudge/CLAUDE.md
+git -C "$TMP/build-sha-docs/boring" \
+    -c user.email=fixture@example.invalid -c user.name=fixture -c commit.gpgsign=false \
+    commit -q -m "docs only"
+if ! ( DOCTOR_BUILD_SHA="$docs_sha" \
+       run_strict "$TMP/build-sha-docs" "$TMP/build-sha-docs.out" ); then
+    cat "$TMP/build-sha-docs.out"
+    echo "FAIL: strict doctor should pass when later commits touch only drudge docs" >&2
+    exit 1
+fi
+case "$(cat "$TMP/build-sha-docs.out")" in
+  *"engine matches the checkout for drudge/"*) ;;
+  *)
+    cat "$TMP/build-sha-docs.out"
+    echo "FAIL: a docs-only commit after the built sha was reported as drift" >&2
+    exit 1
+    ;;
+esac
+case "$(cat "$TMP/build-sha-docs.out")" in
+  *"DEPLOY DRIFT"*)
+    cat "$TMP/build-sha-docs.out"
+    echo "FAIL: a docs-only commit after the built sha was reported as drift" >&2
+    exit 1
+    ;;
+esac
+
+# Control: a commit touching drudge/src/ is a build input — the drift line must fail.
+rust_sha="$(make_case_repo "$TMP/build-sha-rust")"
+mkdir -p "$TMP/build-sha-rust/boring/drudge/src"
+printf 'fn fixture() {}\n' >"$TMP/build-sha-rust/boring/drudge/src/fixture.rs"
+git -C "$TMP/build-sha-rust/boring" \
+    -c user.email=fixture@example.invalid -c user.name=fixture -c commit.gpgsign=false \
+    add drudge/src/fixture.rs
+git -C "$TMP/build-sha-rust/boring" \
+    -c user.email=fixture@example.invalid -c user.name=fixture -c commit.gpgsign=false \
+    commit -q -m "rust change"
+if ( DOCTOR_BUILD_SHA="$rust_sha" \
+     run_strict "$TMP/build-sha-rust" "$TMP/build-sha-rust.out" ); then
+    cat "$TMP/build-sha-rust.out"
+    echo "FAIL: a drudge/src change after the built sha must fail strict readiness" >&2
+    exit 1
+fi
+case "$(cat "$TMP/build-sha-rust.out")" in
+  *"DEPLOY DRIFT — engine runs "*) ;;
+  *)
+    cat "$TMP/build-sha-rust.out"
+    echo "FAIL: strict doctor did not report drift for a drudge/src change" >&2
+    exit 1
+    ;;
+esac
+
 # The fixture's own fakes are checked here, because a fake that answers an unmodelled call with
 # exit 0 makes every future check built on it vacuous — that is #217's defect, and it was living
 # in the fake curl until 2026-08-25. Nothing else in this file exercises an unmodelled call, so

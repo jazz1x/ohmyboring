@@ -34,6 +34,20 @@ MARK_DIR="${HOME}/.cache/boring-distill"
 LOG_TAIL_LINES="${BORING_LOG_TAIL_LINES:-200}"
 LOG_FAILURE_MAX="${BORING_LOG_FAILURE_MAX:-20}"
 
+# (a2b) Deploy-drift pathspec: what the image and the host CLI are actually built from —
+# drudge/Dockerfile COPYs exactly these (lines 19, 29, 30) and `cargo build --release`
+# reads the same inputs. A commit touching anything else under drudge/ (docs — #404)
+# cannot stale either artifact, so it must not read as drift.
+DRUDGE_BUILD_INPUTS="drudge/Cargo.toml drudge/Cargo.lock drudge/build.rs drudge/src/"
+
+# The comparison both drift checks run: commits between the built sha and HEAD that touch a
+# build input, or empty. The pathspec list is passed unquoted so the shell splits it —
+# quoting would hand git one path with spaces in the name (same trade as `newest()` below).
+drudge_input_changes() {
+    # shellcheck disable=SC2086
+    git -C "$BORING_HOME" diff --name-only "$1" HEAD -- $DRUDGE_BUILD_INPUTS 2>/dev/null
+}
+
 # host.docker.internal resolves only inside containers; from the host it must be localhost,
 # or this host-side reachability check fails even when Ollama is healthy. dash has no
 # ${VAR/a/b} substitution, so rewrite via sed (same approach as scripts/ensure-ollama.sh).
@@ -343,12 +357,13 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$BORING_URL/health" 2>/dev/n
             warn "cannot read HEAD at $BORING_HOME — drift not checked (engine is running ${running_sha%%????????*}…)"
         elif [ "$running_sha" = "$head_sha" ]; then
             ok "engine runs the checked-out commit ($(printf '%.8s' "$running_sha"))"
-        elif [ -z "$(git -C "$BORING_HOME" diff --name-only "$running_sha" HEAD -- drudge/ 2>/dev/null)" ] \
+        elif [ -z "$(drudge_input_changes "$running_sha")" ] \
              && git -C "$BORING_HOME" cat-file -e "$running_sha^{commit}" 2>/dev/null; then
-            # The image is built from `drudge/`. Commits that touch only Python, hooks or docs
-            # cannot make it stale, and calling them drift is how a failing line stops being read
-            # — the same way the warning this check replaced stopped being read. Seven such
-            # commits on 2026-09-07 had this reporting a stale engine with no Rust changed.
+            # The image is built from exactly DRUDGE_BUILD_INPUTS, so a commit touching only
+            # other files under drudge/ — docs, like #404 — cannot make it stale, and calling
+            # one drift is how a failing line stops being read — the same way the warning this
+            # check replaced stopped being read. Seven such commits on 2026-09-07 had this
+            # reporting a stale engine with no Rust changed.
             # The guard is `cat-file -e`: an unknown sha means the comparison could not be made,
             # and "could not check" must fall through to the failure below, never to an ok.
             ok "engine matches the checkout for drudge/ (image $(printf '%.8s' "$running_sha"), HEAD $(printf '%.8s' "$head_sha"); later commits touch no Rust)"
@@ -375,13 +390,14 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$BORING_URL/health" 2>/dev/n
                 "$head_sha") ok "host CLI built from the checked-out commit ($(printf '%.8s' "$host_sha"))" ;;
                 unstamped|"") warn "host CLI reports no build stamp — rebuild with 'cargo build --release' to make its drift detectable" ;;
                 *)
-                    # Same blind spot the engine check had until #290: this binary is built from
-                    # `drudge/`, so a commit touching only Python, hooks or docs cannot age it.
+                    # Same blind spot the engine check had until #290: `cargo build --release`
+                    # reads exactly DRUDGE_BUILD_INPUTS, so a commit touching only other files
+                    # under drudge/ — docs, like #404 — cannot age this binary.
                     # Fixing one of the two and not the other is how one value in two places
                     # goes wrong again — the very pattern §8 D8 names. `cat-file -e` guards the
                     # comparison: an unknown sha means it could not be made, and that falls
                     # through to the failure rather than to an ok.
-                    if [ -z "$(git -C "$BORING_HOME" diff --name-only "$host_sha" HEAD -- drudge/ 2>/dev/null)" ] \
+                    if [ -z "$(drudge_input_changes "$host_sha")" ] \
                        && git -C "$BORING_HOME" cat-file -e "$host_sha^{commit}" 2>/dev/null; then
                         ok "host CLI matches the checkout for drudge/ (binary $(printf '%.8s' "$host_sha"), HEAD $(printf '%.8s' "$head_sha"); later commits touch no Rust)"
                     else
