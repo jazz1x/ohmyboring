@@ -8,7 +8,9 @@ one's four registers separately; cross_check checks the past 48h of past approva
 the union of today's registers for the card's confirmation line (a door failure leaves an
 approval unresolved — never a false "already handled"); advise walks the merged (project,
 subject) queue one candidate at a time — priority pairs first — searching each subject's past
-record and asking the local model (in whichever language boring.json's note_lang resolves to)
+record, with a sufficiency check that refetches the candidate's own note when the search
+missed it (a recurrence's path search returns unrelated notes only), and asking the
+local model (in whichever language boring.json's note_lang resolves to)
 for a grounded pitch, up to three proposals or eight calls total, regardless of how many
 projects were active. read_history reads the card's own judged history once, before advise,
 and carries it in state; advise skips a candidate with no search and no model call when its
@@ -260,7 +262,12 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         call (미뤄 never rests a note; an unresolvable subject is never skipped on this
         rule). A candidate that fails to ground (schema, quote, or NotWorth) is not an
         error: it just does not become a proposal, and the queue moves on — but its reason
-        is kept in advise_stats, not discarded, so a dry run can quote why."""
+        is kept in advise_stats, not discarded, so a dry run can quote why. Before the
+        prompt, card_advice.check_sufficiency asks whether the grounding actually carries
+        the candidate's own note — a recurrence's path search returns unrelated notes only
+        — and a miss costs one read_note, the note riding first in the prompt's hits; an
+        unresolvable subject or an unreadable note is a recorded reason, never a guess."""
+
         candidates = card_registers.merge_project_candidates(
             state["projects"], state["project_registers"], state["priority_subjects"]
         )
@@ -273,6 +280,8 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         resting = card_verdicts.resting_notes(state["past_verdicts"])
         calls = 0
         skipped_resting = 0
+        refetched_own_note = 0
+        sufficiency_reasons: list[str] = []
         warned_empty_vault = False
         for project, subject, register in candidates:
             if len(proposals) >= 3 or calls >= ADVISE_CALL_CAP:
@@ -284,8 +293,33 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             if note is not None and note in resting:
                 skipped_resting += 1
                 continue
-            hits = collabs.search(subject)
-            note_texts = _note_texts_for_hits(collabs.read_note, hits)
+            # A recurrence subject is a note path, and /search on that path answers
+            # unrelated notes only — skip it. The check below names the candidate's own
+            # note when the grounding is short of it, and one read_note puts it first in
+            # the prompt's hits. No extra model call.
+            hits = [] if register == "recurrences" else collabs.search(subject)
+            note_texts: dict[str, str] = {}
+            refetched = False
+            sufficiency = card_advice.check_sufficiency(note, hits)
+            if isinstance(sufficiency, card_advice.MissingOwnNote):
+                own_text = collabs.read_note(sufficiency.note)
+                if own_text is None:
+                    sufficiency_reasons.append(f"own note {sufficiency.note} absent from hits and unreadable")
+                else:
+                    refetched = True
+                    hits = [card_advice.own_note_hit(sufficiency.note, own_text), *hits]
+                    note_texts[sufficiency.note] = own_text
+                    title = card_advice.note_title(own_text) if register == "recurrences" else None
+                    if title:
+                        extra = [h for h in collabs.search(title) if h.get("source_path") != note]
+                        hits += extra[:2]
+            elif isinstance(sufficiency, card_advice.Unknown):
+                sufficiency_reasons.append(sufficiency.reason)
+            if refetched:
+                refetched_own_note += 1
+            unread = [h for h in hits if h.get("source_path") not in note_texts]
+            for path, text in _note_texts_for_hits(collabs.read_note, unread).items():
+                note_texts[path] = text
             if hits and not note_texts and not warned_empty_vault:
                 # Search had something to say about this subject, but every note it pointed
                 # at came back unreadable — that is not the same as "no evidence exists" (a
@@ -326,8 +360,10 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 not_worth=len(not_worth_reasons),
                 ungrounded=len(ungrounded_reasons),
                 skipped_resting=skipped_resting,
+                refetched_own_note=refetched_own_note,
                 not_worth_reasons=not_worth_reasons,
                 ungrounded_reasons=ungrounded_reasons,
+                sufficiency_reasons=sufficiency_reasons,
             ),
         }
 
@@ -704,7 +740,9 @@ def _run_dry() -> int:
                 "not_worth": stats.not_worth,
                 "ungrounded": stats.ungrounded,
                 "skipped_resting": stats.skipped_resting,
+                "refetched_own_note": stats.refetched_own_note,
                 "not_worth_reasons": stats.not_worth_reasons,
+                "sufficiency_reasons": stats.sufficiency_reasons,
                 "ungrounded_reasons": stats.ungrounded_reasons,
                 "suppressed": state["suppressed_count"],
             },

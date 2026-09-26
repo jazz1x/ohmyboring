@@ -148,18 +148,21 @@ class Unresolved(BaseModel):
 class AdviseStats(BaseModel):
     """The advise loop's own tally, computed once in `advise` and carried in state so nobody
     downstream recomputes it: how many candidates were tried, how many became proposals,
-    why the rest were refused, and how many were skipped before a call because their note
-    was resting. AC5 asks the dry-run executor to be able to quote a run's numbers back —
-    before this, `NotWorth.reason` and the `Ungrounded` reasons were discarded the moment
-    `advise` read them."""
+    why the rest were refused, how many were skipped before a call because their note
+    was resting, and how often the grounding had to refetch the candidate's own note (plus
+    the check's reasons whenever grounding was short of one). AC5 asks the dry-run executor
+    to be able to quote a run's numbers back — before this, `NotWorth.reason` and the
+    `Ungrounded` reasons were discarded the moment `advise` read them."""
 
     calls: int
     proposals_passed: int
     not_worth: int
     ungrounded: int
     skipped_resting: int
+    refetched_own_note: int = 0  # hits missed the candidate's own note → read directly
     not_worth_reasons: list[str] = []
     ungrounded_reasons: list[str] = []
+    sufficiency_reasons: list[str] = []  # why the grounding was short, in the check's words
 
 
 class PastVerdictPair(BaseModel):

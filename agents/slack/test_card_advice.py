@@ -172,5 +172,61 @@ class SupersededPromptTests(unittest.TestCase):
         self.assertNotIn("대체됨", control)
 
 
+class SufficiencyCheckTests(unittest.TestCase):
+    """check_sufficiency — own note among the hits, own note missing, own note unknown."""
+
+    OWN = "/vault/wiki/wiki-0900.md"
+    HIT = {"source_path": OWN, "snippet": "s", "claims": []}
+
+    def test_own_note_among_hits_is_sufficient(self):
+        self.assertIsInstance(ca.check_sufficiency(self.OWN, [self.HIT]), ca.Sufficient)
+
+    def test_own_note_missing_is_named(self):
+        out = ca.check_sufficiency(self.OWN, [])
+        self.assertEqual(out, ca.MissingOwnNote(note=self.OWN))
+
+    def test_unresolved_note_is_unknown_not_a_guess(self):
+        out = ca.check_sufficiency(None, [self.HIT])
+        self.assertIsInstance(out, ca.Unknown)
+        self.assertIn("unresolved", out.reason)
+
+
+class OwnNoteHitTests(unittest.TestCase):
+    TEXT = "---\nid: wiki-0697\ntitle: relay sync\n---\nrelay sync recurred three times\n"
+
+    def test_hit_carries_the_body_after_the_frontmatter(self):
+        hit = ca.own_note_hit("/vault/wiki/wiki-0697.md", self.TEXT)
+        self.assertEqual(
+            hit,
+            {
+                "source_path": "/vault/wiki/wiki-0697.md",
+                "snippet": "relay sync recurred three times",
+                "claims": [],
+            },
+        )
+
+    def test_snippet_is_capped_at_six_hundred_chars(self):
+        hit = ca.own_note_hit("/n.md", "---\nid: x\n---\n" + "가" * 700)
+        self.assertEqual(len(hit["snippet"]), 600)
+
+    def test_a_note_without_frontmatter_grounds_on_itself(self):
+        hit = ca.own_note_hit("/n.md", "no frontmatter at all")
+        self.assertEqual(hit["snippet"], "no frontmatter at all")
+
+
+class NoteTitleTests(unittest.TestCase):
+    def test_quoted_title_is_unquoted(self):
+        text = "---\ntitle: '[FEDEV-97] 하이드레이션'\nid: x\n---\nbody\n"
+        self.assertEqual(ca.note_title(text), "[FEDEV-97] 하이드레이션")
+
+    def test_plain_title_passes_through(self):
+        text = "---\ntitle: FDS-17384 kg당 단가\n---\nbody\n"
+        self.assertEqual(ca.note_title(text), "FDS-17384 kg당 단가")
+
+    def test_no_frontmatter_or_no_title_is_none(self):
+        self.assertIsNone(ca.note_title("just a body"))
+        self.assertIsNone(ca.note_title("---\nid: x\n---\nbody\n"))
+
+
 if __name__ == "__main__":
     unittest.main()
