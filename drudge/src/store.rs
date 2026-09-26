@@ -347,10 +347,11 @@ const STALE_CLAIM_MIRROR_NODES: &str = "(kind = 'claim' AND id NOT IN (SELECT 'c
      OR (kind IN (SELECT DISTINCT kind FROM claim WHERE kind <> 'fact') \
          AND id NOT IN (SELECT kind || ':' || subject || ':' || predicate FROM claim WHERE kind <> 'fact'))";
 
-/// Rows of a note a `supersedes` edge targets keep every seal the edge stamped. The schema-init
-/// unseal backfill and both of `upsert_claim`'s "unseal latest" steps must skip them — the edge
-/// is the retirement, and reopening its rows puts finished items back on the registers.
-/// `c` is the claim alias at every use site; `doc:` matches what `doc_node_id` writes.
+/// A note a `supersedes` edge targets is retired wholesale: its rows keep every seal the
+/// edge stamped and can never be a slot's latest, so every seal/unseal that computes a
+/// slot's latest skips them — reopening a retired note's rows puts finished items back
+/// on the registers. `c` is the claim alias at every use site; `doc:` matches what
+/// `doc_node_id` writes.
 const SUPERSEDES_TARGET_GUARD: &str = "NOT EXISTS (SELECT 1 FROM edge e \
      WHERE e.kind = 'supersedes' AND e.dst = 'doc:' || c.source_path)";
 /// Not user memory, though both live in the vault and stay searchable elsewhere.
@@ -1444,29 +1445,35 @@ impl Store {
             )
             .await
             .context("insert claim")?;
-        // Seal everything below the latest valid_from, leaving only the single latest row as
-        // current. A `fact` is a slot: seal across notes on (subject, predicate). Every other
-        // kind is an item in a list, so the seal stays inside the note that wrote the row:
-        // (subject, predicate, source_path). A note's own later row supersedes its own earlier
-        // one; another note's items are never touched. The unseal below stays on the same scope
-        // as the seal — scoping them differently is how a slot ends with no current row at all.
+        // Seal everything below the slot's latest valid_from, leaving only the single
+        // latest row current. A `fact` is a slot: seal across notes on (subject, predicate).
+        // Every other kind is an item in a list, so the seal stays inside the note that wrote
+        // the row: (subject, predicate, source_path). A note's own later row supersedes its
+        // own earlier one; another note's items are never touched. The slot's latest is
+        // computed over live notes only — a note a `supersedes` edge targets is retired and
+        // out of the competition — so a retired note neither keeps the slot nor stamps the
+        // rows below the next-latest live one. The unseal below stays on the same scope as
+        // the seal — scoping them differently is how a slot ends with no current row at all.
         // An owner-written row is sealed only when the latest row is owner-written too. Both
-        // unseals skip a note a `supersedes` edge targets: the edge retired the note wholesale,
-        // so its latest row staying latest reopens nothing.
+        // unseals also skip the edge's target rows outright: the edge retired the note
+        // wholesale, so nothing about its rows reopens.
         if kind == "fact" {
             self.db()
                 .await?
                 .execute(
-                    "UPDATE claim c SET superseded_at = m.mx
-                     FROM (SELECT subject, predicate, max(valid_from) AS mx FROM claim
-                           WHERE subject = $1 AND predicate = $2 GROUP BY subject, predicate) m
-                     WHERE c.subject = m.subject AND c.predicate = m.predicate
-                       AND c.valid_from < m.mx AND c.superseded_at IS DISTINCT FROM m.mx
-                       AND (NOT EXISTS (SELECT 1 FROM document o
-                                         WHERE o.source_path = c.source_path AND o.author = 'owner')
-                            OR EXISTS (SELECT 1 FROM claim l JOIN document d ON d.source_path = l.source_path
-                                        WHERE l.subject = m.subject AND l.predicate = m.predicate
-                                          AND l.valid_from = m.mx AND d.author = 'owner'));",
+                    &format!(
+                        "UPDATE claim c SET superseded_at = m.mx
+                         FROM (SELECT c.subject, c.predicate, max(c.valid_from) AS mx FROM claim c
+                               WHERE c.subject = $1 AND c.predicate = $2 AND {SUPERSEDES_TARGET_GUARD}
+                               GROUP BY c.subject, c.predicate) m
+                         WHERE c.subject = m.subject AND c.predicate = m.predicate
+                           AND c.valid_from < m.mx AND c.superseded_at IS DISTINCT FROM m.mx
+                           AND (NOT EXISTS (SELECT 1 FROM document o
+                                             WHERE o.source_path = c.source_path AND o.author = 'owner')
+                                OR EXISTS (SELECT 1 FROM claim l JOIN document d ON d.source_path = l.source_path
+                                            WHERE l.subject = m.subject AND l.predicate = m.predicate
+                                              AND l.valid_from = m.mx AND d.author = 'owner'));"
+                    ),
                     &[&subject, &predicate],
                 )
                 .await
@@ -1477,8 +1484,9 @@ impl Store {
                     &format!(
                         "UPDATE claim c SET superseded_at = NULL
                          WHERE c.subject = $1 AND c.predicate = $2 AND c.superseded_at IS NOT NULL
-                           AND c.valid_from = (SELECT max(valid_from) FROM claim
-                                             WHERE subject = $1 AND predicate = $2)
+                           AND c.valid_from = (SELECT max(c.valid_from) FROM claim c
+                                               WHERE c.subject = $1 AND c.predicate = $2
+                                                 AND {SUPERSEDES_TARGET_GUARD})
                            AND {SUPERSEDES_TARGET_GUARD};"
                     ),
                     &[&subject, &predicate],
@@ -2828,7 +2836,8 @@ impl Store {
     /// The edge also retires what the older note currently asserts: its current claims are
     /// sealed, stamped with the newer note's latest claim `valid_from` (a non-fact claim is an
     /// item in a list, so inside one note only that note's own later row could retire it — the
-    /// explicit supersedes is the one legitimate retirement from outside). An owner-written
+    /// explicit supersedes is the one legitimate retirement from outside). Each fact slot the
+    /// retired note touched passes to the latest remaining live row. An owner-written
     /// older note yields only to an owner-written newer one, the store-side half of the door's
     /// refusal.
     pub async fn record_supersedes(
@@ -2870,7 +2879,10 @@ impl Store {
     /// latest claim `valid_from`, falling back to `now()` when the newer note asserts nothing.
     /// Only `superseded_at IS NULL` rows move, so a repeat call — and a later `compact` over the
     /// same edge — changes nothing. An owner-written older note is sealed only by an owner-written
-    /// newer one, matching the fact seal's guard.
+    /// newer one, matching the fact seal's guard. After the seal, each fact
+    /// slot the retired note touched is handed to the next-latest live row: with the retired
+    /// note out of the competition the latest remaining live row becomes current, instead
+    /// of the slot ending with none.
     async fn seal_superseded_claims(&self, newer: &str, older: &str) -> Result<usize> {
         let sealed = self
             .db()
@@ -2888,12 +2900,34 @@ impl Store {
             )
             .await
             .context("seal superseded note claims")?;
+        // Hand each fact slot the retired note touched to its next-latest live row: the
+        // slot's max is taken over notes no `supersedes` edge targets, so the latest among
+        // them becomes current. A slot with no live row left stays empty — all its rows are
+        // the retired note's, sealed above.
+        self.db()
+            .await?
+            .execute(
+                "UPDATE claim c SET superseded_at = NULL
+                 FROM (SELECT l.subject, l.predicate, max(l.valid_from) AS mx
+                       FROM claim l
+                       WHERE (l.subject, l.predicate) IN (SELECT subject, predicate FROM claim
+                                                          WHERE source_path = $1 AND kind = 'fact')
+                         AND NOT EXISTS (SELECT 1 FROM edge e
+                                         WHERE e.kind = 'supersedes' AND e.dst = 'doc:' || l.source_path)
+                       GROUP BY l.subject, l.predicate) m
+                 WHERE c.kind = 'fact' AND c.superseded_at IS NOT NULL
+                   AND c.subject = m.subject AND c.predicate = m.predicate
+                   AND c.valid_from = m.mx;",
+                &[&older],
+            )
+            .await
+            .context("promote next-latest live fact")?;
         Ok(usize::try_from(sealed).unwrap_or(0))
     }
 
-    /// The same retirement over every `supersedes` edge already on the graph — edges written
-    /// before the seal step existed retire their older note's claims on the next compact,
-    /// not never. Returns the number of claims sealed.
+    /// The same retirement over every `supersedes` edge already on the graph — the sweep
+    /// reaches edges whose retirement pass has not run yet, e.g. one written straight onto
+    /// the graph. Returns the number of claims sealed.
     async fn seal_claims_under_supersedes_edges(&self) -> Result<usize> {
         let rows = self
             .db()

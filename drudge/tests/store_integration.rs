@@ -4220,6 +4220,18 @@ async fn stamp_at(db: &Client, path: &str) -> Option<SystemTime> {
     .get(0)
 }
 
+/// `superseded_at` of one slot row — fixtures with several rows in the same slot need
+/// the `valid_from` to say which row.
+async fn row_stamp_at(db: &Client, subject: &str, at: SystemTime) -> Option<SystemTime> {
+    db.query_one(
+        "SELECT superseded_at FROM claim WHERE subject = $1 AND valid_from = $2;",
+        &[&subject, &at],
+    )
+    .await
+    .expect("read row stamp")
+    .get(0)
+}
+
 fn whole_second_now() -> SystemTime {
     UNIX_EPOCH
         + Duration::from_secs(
@@ -4495,9 +4507,9 @@ async fn owner_note_superseded_by_a_non_owner_keeps_its_current_claims() {
     store.delete_document(&path_b).await.expect("cleanup B");
 }
 
-/// An edge written before the seal step existed — the live-DB shape, where supersedes edges
-/// predated the retirement pass — seals its older note's claims on the next compact, and a
-/// repeat compact moves nothing.
+/// An edge written straight onto the graph — no `record_supersedes` retirement pass has
+/// run over it — leaves its older note's claims current until the next compact seals
+/// them, and a repeat compact moves nothing.
 #[tokio::test]
 async fn compact_seals_claims_under_a_pre_existing_edge_once() {
     let Some(dsn) = test_dsn() else {
@@ -4549,7 +4561,7 @@ async fn compact_seals_claims_under_a_pre_existing_edge_once() {
         )
         .await
         .expect("B's item");
-    // The edge predates the seal: written straight onto the graph, the live-DB shape.
+    // Written straight onto the graph: no retirement pass has run over this edge.
     db.execute(
         "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, 'supersedes', NULL);",
         &[&format!("doc:{path_b}"), &format!("doc:{path_a}")],
@@ -4591,10 +4603,10 @@ async fn compact_seals_claims_under_a_pre_existing_edge_once() {
 }
 
 /// The seal must survive a store open. The schema-init unseal backfill runs on EVERY
-/// `Store::open` (engine start, every host CLI run) and, before the supersedes-target
-/// exclusion, matched every sealed row whose note had no later row in its own slot —
-/// which is exactly what a supersedes-sealed row looks like. Reopening the store used to
-/// quietly un-retire the finished item.
+/// `Store::open` (engine start, every host CLI run) and matches every sealed row whose
+/// note has no later row in its own slot — exactly what a supersedes-sealed row looks
+/// like. The backfill's supersedes-target guard is what keeps the retirement closed
+/// across the reopen.
 #[tokio::test]
 async fn a_supersedes_seal_survives_a_store_reopen() {
     let Some(dsn) = test_dsn() else {
@@ -4673,10 +4685,10 @@ async fn a_supersedes_seal_survives_a_store_reopen() {
     store.delete_document(&path_b).await.expect("cleanup B");
 }
 
-/// Re-upserting the superseded note's own row used to reopen it: `upsert_claim`'s
-/// "unseal latest" step sees the note's own row as the latest of its slot and clears its
-/// stamp. The supersedes-target guard keeps the retirement — the edge, not the row's
-/// position, decides.
+/// Re-upserting the superseded note's own row must not reopen it. `upsert_claim`'s
+/// "unseal latest" step keys on the slot's latest `valid_from` — the note's own row
+/// still is — so the supersedes-target guard does the deciding: the edge retires the
+/// note, not the row's position.
 #[tokio::test]
 async fn reupserting_the_superseded_note_does_not_reopen_its_claim() {
     let Some(dsn) = test_dsn() else {
@@ -4772,11 +4784,10 @@ async fn reupserting_the_superseded_note_does_not_reopen_its_claim() {
     store.delete_document(&path_b).await.expect("cleanup B");
 }
 
-/// The fact-slot twin of the re-upsert reopen: A held the slot's latest `valid_from`, a
-/// supersedes edge retired A, then another note wrote the same slot with an OLDER
-/// `valid_from`. The "unseal latest" step keys on max(valid_from) — still A's row — and
-/// used to clear A's seal, leaving the retired note as the slot's current value. The
-/// guard keeps A sealed; the older write is sealed as usual.
+/// A held the slot's latest `valid_from`; a `supersedes` edge retired A; another note
+/// then wrote the same slot with an OLDER `valid_from`. The slot's latest is computed
+/// over live notes only, so the write seals nothing below A and the older row becomes
+/// the slot's current value — the retired note neither holds the slot nor is reopened.
 #[tokio::test]
 async fn an_older_fact_write_from_another_note_does_not_reopen_the_slot() {
     let Some(dsn) = test_dsn() else {
@@ -4856,9 +4867,14 @@ async fn an_older_fact_write_from_another_note_does_not_reopen_the_slot() {
         "A stays sealed — the slot's current value is not the retired note"
     );
     assert_eq!(
-        sealed_count_at(&db, &path_c).await,
+        current_count_at(&db, &path_c).await,
         1,
-        "C's older row is sealed below A's valid_from as usual"
+        "C's older row is the slot's latest live row, so it becomes current"
+    );
+    assert_eq!(
+        sealed_count_at(&db, &path_c).await,
+        0,
+        "nothing below C's row is sealed in the slot"
     );
     assert_eq!(
         current_count_at(&db, &path_b).await,
@@ -4871,9 +4887,356 @@ async fn an_older_fact_write_from_another_note_does_not_reopen_the_slot() {
     store.delete_document(&path_c).await.expect("cleanup C");
 }
 
-/// `unknown` used to be a bare count — the caller could not tell WHICH of its names
-/// missed. The report now carries the skipped paths themselves: a same-paths pair and a
-/// path with no `document` row, in input order.
+/// A fact row written before the `supersedes` edge is the slot's next-latest live row:
+/// while A held the slot the write was sealed below A, and the retirement must hand the
+/// slot to it — the re-evaluation inside `record_supersedes` unseals the latest
+/// remaining live row of every fact slot the retired note touched.
+#[tokio::test]
+async fn a_fact_slot_written_before_the_edge_becomes_current_when_the_holder_retires() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject = unique_subject("sup-slot-before");
+    let subject_b = unique_subject("sup-slot-before-b");
+    let path_a = unique_path("sup-slot-before-a");
+    let path_b = unique_path("sup-slot-before-b");
+    let path_c = unique_path("sup-slot-before-c");
+    let t_a = whole_second_now();
+    let t_b = t_a + Duration::from_mins(1);
+    let t_c = t_a - Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_document(&dummy_frontmatter(&path_a), "sha-slot-before-a", t_a)
+        .await
+        .expect("upsert A");
+    store
+        .upsert_document(&dummy_frontmatter(&path_b), "sha-slot-before-b", t_b)
+        .await
+        .expect("upsert B");
+    store
+        .upsert_document(&dummy_frontmatter(&path_c), "sha-slot-before-c", t_c)
+        .await
+        .expect("upsert C");
+    store
+        .upsert_claim(
+            &subject, "status", "a-old", &path_a, t_a, &emb, "fact", "certain",
+        )
+        .await
+        .expect("A's fact");
+    // B asserts nothing in this slot; its claim only sets the seal stamp to a fixed t_b.
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "y",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's item");
+    store
+        .upsert_claim(
+            &subject, "status", "c-older", &path_c, t_c, &emb, "fact", "certain",
+        )
+        .await
+        .expect("C's older fact");
+    assert_eq!(
+        sealed_count_at(&db, &path_c).await,
+        1,
+        "precondition: while A holds the slot, C's older row is sealed below A"
+    );
+
+    store
+        .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+
+    assert_eq!(
+        stamp_at(&db, &path_a).await,
+        Some(t_b),
+        "A's fact is retired by the edge, stamped with B's latest claim time"
+    );
+    assert_eq!(
+        current_count_at(&db, &path_c).await,
+        1,
+        "the retirement hands the slot to the next-latest live row"
+    );
+    assert_eq!(
+        sealed_count_at(&db, &path_c).await,
+        0,
+        "C's row is current now, not sealed"
+    );
+
+    store.delete_document(&path_a).await.expect("cleanup A");
+    store.delete_document(&path_b).await.expect("cleanup B");
+    store.delete_document(&path_c).await.expect("cleanup C");
+}
+
+/// Retirement empties a fact slot whose rows are all the retired note's: there is no
+/// live row to hand the slot to, and the re-evaluation must not resurrect anything —
+/// the slot honestly holds no current row.
+#[tokio::test]
+async fn a_fact_slot_held_only_by_the_retired_note_ends_empty() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject = unique_subject("sup-slot-empty");
+    let subject_b = unique_subject("sup-slot-empty-b");
+    let path_a = unique_path("sup-slot-empty-a");
+    let path_b = unique_path("sup-slot-empty-b");
+    let t_a = whole_second_now();
+    let t_b = t_a + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_document(&dummy_frontmatter(&path_a), "sha-slot-empty-a", t_a)
+        .await
+        .expect("upsert A");
+    store
+        .upsert_document(&dummy_frontmatter(&path_b), "sha-slot-empty-b", t_b)
+        .await
+        .expect("upsert B");
+    store
+        .upsert_claim(
+            &subject, "status", "a-old", &path_a, t_a, &emb, "fact", "certain",
+        )
+        .await
+        .expect("A's fact");
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "y",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's item");
+
+    store
+        .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+
+    let current_in_slot: i64 = db
+        .query_one(
+            "SELECT count(*) FROM claim WHERE subject = $1 AND predicate = 'status'
+             AND superseded_at IS NULL;",
+            &[&subject],
+        )
+        .await
+        .expect("count current slot rows")
+        .get(0);
+    assert_eq!(
+        current_in_slot, 0,
+        "the slot's only rows were the retired note's — no current row is left"
+    );
+    assert_eq!(
+        sealed_count_at(&db, &path_a).await,
+        1,
+        "A's row stays sealed by the retirement"
+    );
+
+    store.delete_document(&path_a).await.expect("cleanup A");
+    store.delete_document(&path_b).await.expect("cleanup B");
+}
+
+/// The retirement seal moves only current rows: a row the older note sealed itself —
+/// its own later row in the same slot, stamped with that row's `valid_from` — keeps
+/// that stamp through `record_supersedes` and through `compact`. Re-stamping it would
+/// rewrite the history the note wrote about itself.
+#[tokio::test]
+async fn superseded_note_keeps_its_own_earlier_seal_stamp() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject = unique_subject("sup-stamp-a");
+    let subject_b = unique_subject("sup-stamp-b");
+    let path_a = unique_path("sup-stamp-a");
+    let path_b = unique_path("sup-stamp-b");
+    let t_a1 = whole_second_now();
+    let t_a2 = t_a1 + Duration::from_mins(1);
+    let t_b = t_a1 + Duration::from_mins(2);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_document(&dummy_frontmatter(&path_a), "sha-stamp-a", t_a1)
+        .await
+        .expect("upsert A");
+    store
+        .upsert_document(&dummy_frontmatter(&path_b), "sha-stamp-b", t_b)
+        .await
+        .expect("upsert B");
+    store
+        .upsert_claim(
+            &subject, "status", "v1", &path_a, t_a1, &emb, "fact", "certain",
+        )
+        .await
+        .expect("A's first row");
+    store
+        .upsert_claim(
+            &subject, "status", "v2", &path_a, t_a2, &emb, "fact", "certain",
+        )
+        .await
+        .expect("A's own later row seals the first one");
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "y",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's item");
+
+    assert_eq!(
+        row_stamp_at(&db, &subject, t_a1).await,
+        Some(t_a2),
+        "precondition: A's own later row sealed the first one with t_a2"
+    );
+    assert_eq!(
+        row_stamp_at(&db, &subject, t_a2).await,
+        None,
+        "precondition: the later row itself is current"
+    );
+
+    store
+        .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+    assert_eq!(
+        row_stamp_at(&db, &subject, t_a2).await,
+        Some(t_b),
+        "the retirement stamps the note's current row with the newer note's time"
+    );
+    assert_eq!(
+        row_stamp_at(&db, &subject, t_a1).await,
+        Some(t_a2),
+        "the already-sealed row keeps its own stamp — the seal skips it"
+    );
+
+    store.compact().await.expect("compact");
+    assert_eq!(
+        row_stamp_at(&db, &subject, t_a1).await,
+        Some(t_a2),
+        "the compact sweep over the same edge rewrites no already-sealed row"
+    );
+
+    store.delete_document(&path_a).await.expect("cleanup A");
+    store.delete_document(&path_b).await.expect("cleanup B");
+}
+
+/// `compact` reports the retirement it performed: the first sweep seals exactly the
+/// fixture's claims — counted from the fixture, not the whole DB — and a repeat sweep
+/// reports 0. The number is the sweep's own, not a constant that prints every run.
+#[tokio::test]
+async fn compact_reports_the_supersedes_seal_count_then_zero() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject_a1 = unique_subject("sup-count-a1");
+    let subject_a2 = unique_subject("sup-count-a2");
+    let subject_b = unique_subject("sup-count-b");
+    let path_a = unique_path("sup-count-a");
+    let path_b = unique_path("sup-count-b");
+    let t_a = whole_second_now();
+    let t_b = t_a + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_document(&dummy_frontmatter(&path_a), "sha-count-a", t_a)
+        .await
+        .expect("upsert A");
+    store
+        .upsert_document(&dummy_frontmatter(&path_b), "sha-count-b", t_b)
+        .await
+        .expect("upsert B");
+    for subject in [&subject_a1, &subject_a2] {
+        store
+            .upsert_claim(
+                subject,
+                "next_action",
+                "x",
+                &path_a,
+                t_a,
+                &emb,
+                "next",
+                "certain",
+            )
+            .await
+            .expect("A's item");
+    }
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "y",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's item");
+    // Written straight onto the graph, with no retirement pass over it.
+    db.execute(
+        "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, 'supersedes', NULL);",
+        &[&format!("doc:{path_b}"), &format!("doc:{path_a}")],
+    )
+    .await
+    .expect("insert pre-existing edge");
+    let expected = current_count_at(&db, &path_a).await;
+    assert_eq!(
+        expected, 2,
+        "the fixture holds two current claims under the edge"
+    );
+
+    let first = store.compact().await.expect("first compact");
+    assert_eq!(
+        first.report.sealed_superseded_claims,
+        usize::try_from(expected).expect("fixture count fits usize"),
+        "the first compact reports exactly the fixture's retired claims"
+    );
+    let second = store.compact().await.expect("second compact");
+    assert_eq!(
+        second.report.sealed_superseded_claims, 0,
+        "a repeat sweep finds nothing current under the edge — it reports 0"
+    );
+
+    store.delete_document(&path_a).await.expect("cleanup A");
+    store.delete_document(&path_b).await.expect("cleanup B");
+}
+
+/// The report carries the skipped paths themselves, so the caller can tell WHICH of its
+/// names missed: a same-paths pair and a path with no `document` row, in input order.
 #[tokio::test]
 async fn record_supersedes_names_the_paths_it_could_not_link() {
     let Some(dsn) = test_dsn() else {

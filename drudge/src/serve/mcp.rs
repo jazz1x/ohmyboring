@@ -2038,10 +2038,10 @@ fn parse_supersedes(args: Option<&Value>) -> Result<Vec<String>, (i32, String)> 
 }
 
 /// One spelling of the note being corrected, folded to the canonical `/vault/wiki/…` form the
-/// `document` table keys. Agents pass what they saw — `wiki/wiki-1759.md`, sometimes bare
-/// `wiki-1759.md` — and a raw match found no row, wrote no edge, and silently retired nothing.
-/// Anything that is not one of these spellings passes through untouched (and then counts as
-/// unknown, which the answer now says out loud).
+/// `document` table keys — agents pass what they saw (`wiki/wiki-1759.md`, sometimes bare
+/// `wiki-1759.md`), and the lookup keys on this exact form. Anything that is not one of these
+/// spellings passes through untouched and then counts as unknown, which the answer says out
+/// loud.
 fn normalize_supersedes_path(raw: &str) -> String {
     if let Some(rest) = raw
         .strip_prefix("/vault/wiki/")
