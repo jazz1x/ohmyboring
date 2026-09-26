@@ -305,6 +305,10 @@ pub struct CompactReport {
     pub gc_concept: usize,
     pub gc_claim_nodes: usize,
     pub gc_claim_edges: usize,
+    /// Current claims retired because a `supersedes` edge names their note — counted, not
+    /// sealed silently, so a nightly number that is not zero says edges are fixing rows the
+    /// write path missed.
+    pub sealed_superseded_claims: usize,
 }
 
 /// Compact report with an overall elapsed time.
@@ -2746,6 +2750,11 @@ impl Store {
         report.gc_claim_nodes = gc.claim_nodes;
         report.gc_claim_edges = gc.claim_edges;
 
+        report.sealed_superseded_claims = self
+            .seal_claims_under_supersedes_edges()
+            .await
+            .context("seal superseded claims")?;
+
         Ok(CompactSummary {
             report,
             total_ms: started.elapsed().as_millis(),
@@ -2795,6 +2804,13 @@ impl Store {
     /// repeat call adds edges that are not already there, never deletes. Skipped pairs (same path
     /// twice, or a path with no `document` row) are counted in `unknown`, not errored. Each edge
     /// carries `judge` like a consumption edge does.
+    ///
+    /// The edge also retires what the older note currently asserts: its current claims are
+    /// sealed, stamped with the newer note's latest claim `valid_from` (a non-fact claim is an
+    /// item in a list, so inside one note only that note's own later row could retire it — the
+    /// explicit supersedes is the one legitimate retirement from outside). An owner-written
+    /// older note yields only to an owner-written newer one, the store-side half of the door's
+    /// refusal.
     pub async fn record_supersedes(
         &self,
         pairs: &[[String; 2]],
@@ -2818,8 +2834,59 @@ impl Store {
             )
             .await?;
             report.supersedes += 1;
+            self.seal_superseded_claims(&pair[0], &pair[1]).await?;
         }
         Ok(report)
+    }
+
+    /// Seal every current claim of the superseded note: `superseded_at` = the newer note's
+    /// latest claim `valid_from`, falling back to `now()` when the newer note asserts nothing.
+    /// Only `superseded_at IS NULL` rows move, so a repeat call — and a later `compact` over the
+    /// same edge — changes nothing. An owner-written older note is sealed only by an owner-written
+    /// newer one, matching the fact seal's guard.
+    async fn seal_superseded_claims(&self, newer: &str, older: &str) -> Result<usize> {
+        let sealed = self
+            .db()
+            .await?
+            .execute(
+                "UPDATE claim c SET superseded_at = COALESCE(
+                        (SELECT max(valid_from) FROM claim WHERE source_path = $1),
+                        now())
+                 WHERE c.source_path = $2 AND c.superseded_at IS NULL
+                   AND (NOT EXISTS (SELECT 1 FROM document o
+                                    WHERE o.source_path = c.source_path AND o.author = 'owner')
+                        OR EXISTS (SELECT 1 FROM document n
+                                   WHERE n.source_path = $1 AND n.author = 'owner'));",
+                &[&newer, &older],
+            )
+            .await
+            .context("seal superseded note claims")?;
+        Ok(usize::try_from(sealed).unwrap_or(0))
+    }
+
+    /// The same retirement over every `supersedes` edge already on the graph — edges written
+    /// before the seal step existed retire their older note's claims on the next compact,
+    /// not never. Returns the number of claims sealed.
+    async fn seal_claims_under_supersedes_edges(&self) -> Result<usize> {
+        let rows = self
+            .db()
+            .await?
+            .query("SELECT src, dst FROM edge WHERE kind = 'supersedes';", &[])
+            .await
+            .context("list supersedes edges")?;
+        let mut total = 0_usize;
+        for row in rows {
+            let src: String = row.get(0);
+            let dst: String = row.get(1);
+            let (Some(newer), Some(older)) = (
+                src.strip_prefix("doc:").map(str::to_owned),
+                dst.strip_prefix("doc:").map(str::to_owned),
+            ) else {
+                continue;
+            };
+            total += self.seal_superseded_claims(&newer, &older).await?;
+        }
+        Ok(total)
     }
 
     /// Which of `paths` the owner wrote (`document.author = 'owner'`).

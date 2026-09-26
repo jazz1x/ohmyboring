@@ -13,7 +13,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use drudge::frontmatter::{Claim, FrontMatter};
+use drudge::frontmatter::{Author, Claim, FrontMatter};
 use drudge::store::{DistKind, Doc, EventLogFilter, LoggedHit, Store};
 use serde_json::json;
 use tokio_postgres::{Client, NoTls};
@@ -4172,4 +4172,381 @@ async fn vanished_note_keeps_rows_and_restored_note_does_not_duplicate() {
     );
 
     cleanup_claim_edge_fixture(&store, &db, &path, &subject).await;
+}
+
+// ── a supersedes edge retires the older note's current claims ─────────────────
+
+async fn sealed_at(db: &Client, subject: &str) -> Option<SystemTime> {
+    db.query_one(
+        "SELECT superseded_at FROM claim WHERE subject = $1;",
+        &[&subject],
+    )
+    .await
+    .expect("read superseded_at")
+    .get(0)
+}
+
+async fn current_count_at(db: &Client, path: &str) -> i64 {
+    db.query_one(
+        "SELECT count(*) FROM claim WHERE source_path = $1 AND superseded_at IS NULL;",
+        &[&path],
+    )
+    .await
+    .expect("count current claims")
+    .get(0)
+}
+
+fn whole_second_now() -> SystemTime {
+    UNIX_EPOCH
+        + Duration::from_secs(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+}
+
+/// Note A holds a `next` item; note B supersedes A → A's item is no longer current and
+/// leaves `next_actions`, while B's own items stay current. Live 2026-09-27: the finished
+/// `remove code_dsn_from_kb_set …` from wiki-1759 came back every morning because a
+/// non-fact claim is sealed only inside its own note and the supersedes edge sealed nothing.
+#[tokio::test]
+async fn a_superseding_note_retires_the_older_notes_next_items() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let project = unique_subject("sup-project");
+    let subject_a = unique_subject("sup-next-a");
+    let subject_b = unique_subject("sup-next-b");
+    let path_a = unique_path("sup-next-a");
+    let path_b = unique_path("sup-next-b");
+    let t_a = whole_second_now();
+    let t_b = t_a + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    let mut front_a = dummy_frontmatter(&path_a);
+    front_a.project = project.clone();
+    let mut front_b = dummy_frontmatter(&path_b);
+    front_b.project = project.clone();
+    store
+        .upsert_document(&front_a, "sha-sup-a", t_a)
+        .await
+        .expect("upsert A");
+    store
+        .upsert_document(&front_b, "sha-sup-b", t_b)
+        .await
+        .expect("upsert B");
+    store
+        .upsert_claim(
+            &subject_a,
+            "next_action",
+            "remove code_dsn_from_kb_set from the extraction path",
+            &path_a,
+            t_a,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("A's next item");
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "verify the register drops the retired item",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's next item");
+
+    store
+        .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+
+    assert_eq!(
+        sealed_at(&db, &subject_a).await,
+        Some(t_b),
+        "A's item is stamped with the newer note's latest claim time"
+    );
+    assert_eq!(
+        current_count_at(&db, &path_b).await,
+        1,
+        "B's own claims stay current"
+    );
+
+    let out = drudge::ask::next_action_register(&store, Some(&project), &[], 50)
+        .await
+        .expect("next actions");
+    let subjects: Vec<&str> = out.items.iter().map(|r| r.subject.as_str()).collect();
+    assert!(
+        !subjects.contains(&subject_a.as_str()),
+        "the superseded note's item must not come back in next_actions"
+    );
+    assert!(
+        subjects.contains(&subject_b.as_str()),
+        "the superseding note's own item stays"
+    );
+
+    store.delete_document(&path_a).await.expect("cleanup A");
+    store.delete_document(&path_b).await.expect("cleanup B");
+}
+
+/// Repeat calls change nothing: the second `record_supersedes` finds no current row to
+/// stamp, so the seal keeps the first stamp instead of re-stamping with now().
+#[tokio::test]
+async fn record_supersedes_twice_seals_once() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject_a = unique_subject("sup-idem-a");
+    let subject_b = unique_subject("sup-idem-b");
+    let path_a = unique_path("sup-idem-a");
+    let path_b = unique_path("sup-idem-b");
+    let t_a = whole_second_now();
+    let t_b = t_a + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_document(&dummy_frontmatter(&path_a), "sha-idem-a", t_a)
+        .await
+        .expect("upsert A");
+    store
+        .upsert_document(&dummy_frontmatter(&path_b), "sha-idem-b", t_b)
+        .await
+        .expect("upsert B");
+    store
+        .upsert_claim(
+            &subject_a,
+            "next_action",
+            "x",
+            &path_a,
+            t_a,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("A's item");
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "y",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's item");
+
+    for round in 1..=2 {
+        store
+            .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
+            .await
+            .expect("record supersedes");
+        assert_eq!(
+            sealed_at(&db, &subject_a).await,
+            Some(t_b),
+            "round {round}: the stamp must not move"
+        );
+        assert_eq!(
+            sealed_at(&db, &subject_b).await,
+            None,
+            "round {round}: B's own claim stays current"
+        );
+    }
+
+    store.delete_document(&path_a).await.expect("cleanup A");
+    store.delete_document(&path_b).await.expect("cleanup B");
+}
+
+/// The store-side owner guard agrees with the door: an owner-written older note keeps its
+/// current claims when a non-owner note supersedes it. The edge is written (the door, not
+/// the store, refuses the pair) but the seal skips the owner's rows — including on a later
+/// compact, which walks every edge on the graph.
+#[tokio::test]
+async fn owner_note_superseded_by_a_non_owner_keeps_its_current_claims() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject_a = unique_subject("sup-owner-a");
+    let subject_b = unique_subject("sup-owner-b");
+    let path_a = unique_path("sup-owner-a");
+    let path_b = unique_path("sup-owner-b");
+    let t_a = whole_second_now();
+    let t_b = t_a + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    let mut front_a = dummy_frontmatter(&path_a);
+    front_a.author = Author::Owner;
+    store
+        .upsert_document(&front_a, "sha-owner-a", t_a)
+        .await
+        .expect("upsert owner A");
+    store
+        .upsert_document(&dummy_frontmatter(&path_b), "sha-owner-b", t_b)
+        .await
+        .expect("upsert non-owner B");
+    store
+        .upsert_claim(
+            &subject_a,
+            "next_action",
+            "x",
+            &path_a,
+            t_a,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("owner A's item");
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "y",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's item");
+
+    store
+        .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+    assert_eq!(
+        sealed_at(&db, &subject_a).await,
+        None,
+        "a non-owner note must not retire what the owner wrote"
+    );
+
+    let summary = store.compact().await.expect("compact");
+    assert_eq!(
+        summary.report.sealed_superseded_claims, 0,
+        "the compact sweep must hit the same guard"
+    );
+    assert_eq!(
+        sealed_at(&db, &subject_a).await,
+        None,
+        "compact over the same edge still leaves the owner's claim current"
+    );
+
+    store.delete_document(&path_a).await.expect("cleanup A");
+    store.delete_document(&path_b).await.expect("cleanup B");
+}
+
+/// Edges written before the seal step existed (the live wiki-1945 → wiki-1759 among them,
+/// four current claims at 2026-09-27) retire their older note's claims on the next
+/// compact — reported in the summary, idempotent across runs.
+#[tokio::test]
+async fn compact_seals_claims_under_a_pre_existing_edge_once() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let subject_a = unique_subject("sup-compact-a");
+    let subject_b = unique_subject("sup-compact-b");
+    let path_a = unique_path("sup-compact-a");
+    let path_b = unique_path("sup-compact-b");
+    let t_a = whole_second_now();
+    let t_b = t_a + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_document(&dummy_frontmatter(&path_a), "sha-compact-a", t_a)
+        .await
+        .expect("upsert A");
+    store
+        .upsert_document(&dummy_frontmatter(&path_b), "sha-compact-b", t_b)
+        .await
+        .expect("upsert B");
+    store
+        .upsert_claim(
+            &subject_a,
+            "next_action",
+            "x",
+            &path_a,
+            t_a,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("A's item");
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "y",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's item");
+    // The edge predates the seal: written straight onto the graph, the live-DB shape.
+    db.execute(
+        "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, 'supersedes', NULL);",
+        &[&format!("doc:{path_b}"), &format!("doc:{path_a}")],
+    )
+    .await
+    .expect("insert pre-existing edge");
+    assert_eq!(
+        sealed_at(&db, &subject_a).await,
+        None,
+        "the unbackfilled edge leaves A's claim current, as on the live DB"
+    );
+
+    let first = store.compact().await.expect("first compact");
+    assert!(
+        first.report.sealed_superseded_claims >= 1,
+        "compact reports the retirement, not a silent side effect"
+    );
+    assert_eq!(
+        sealed_at(&db, &subject_a).await,
+        Some(t_b),
+        "the pre-existing edge retires A's claim with B's latest claim time"
+    );
+
+    let second = store.compact().await.expect("second compact");
+    assert_eq!(
+        second.report.sealed_superseded_claims, 0,
+        "a repeat compact seals nothing — the stamp does not move"
+    );
+    assert_eq!(
+        sealed_at(&db, &subject_a).await,
+        Some(t_b),
+        "the stamp is unchanged after the second compact"
+    );
+
+    store.delete_document(&path_a).await.expect("cleanup A");
+    store.delete_document(&path_b).await.expect("cleanup B");
 }
