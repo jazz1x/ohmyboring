@@ -10,11 +10,15 @@ approval unresolved — never a false "already handled"); advise walks the merge
 subject) queue one candidate at a time — priority pairs first — searching each subject's past
 record and asking the local model (in whichever language boring.json's note_lang resolves to)
 for a grounded pitch, up to three proposals or eight calls total, regardless of how many
-projects were active. resolve turns each proposal's subject into its note path via
+projects were active. read_history reads the card's own judged history once, before advise,
+and carries it in state; advise skips a candidate with no search and no model call when its
+note is resting — shown but unanswered in the last 72h, or 해/빼-judged in the last 7 days.
+resolve turns each surviving proposal's subject into its note path via
 /claim-source, then drops any candidate whose (note, evidence) pair already got a verdict in
-the last 7 days (`card_verdicts.suppressed`) — reading that history is not optional: a card
-that cannot read it does not ship. post_card sends the Block Kit card (repair rows above the
-advice rows, each grouped and labeled its own way), records a card_proposal event per
+the last 7 days or was shown but never judged in the last 3 days (`card_verdicts.suppressed`)
+— reading that history is not optional: a card that cannot read it does not ship. post_card
+sends the Block Kit card (repair rows above the advice rows, each grouped and labeled its own
+way), records a card_proposal event per
 surviving proposal, and stops at an interrupt; a Slack button press resumes it with
 Command(resume=…) — the verdict's idx spans all three lanes, repair rows first, then
 advice rows, then the review rows. record_verdict branches by lane: a repair row's adopt
@@ -110,6 +114,7 @@ class CardState(TypedDict):
     message: card_types.PostedCard | None
     confirmation: card_types.Confirmation | None
     priority_subjects: list[tuple[str, str]]  # (project, subject)
+    past_verdicts: card_types.PastCardHistory  # read once in read_history, shared by advise and resolve
     verdicts: Annotated[list[card_types.ButtonVerdict], _append_verdicts]
     advise_stats: card_types.AdviseStats
     suppressed_count: int
@@ -130,7 +135,7 @@ class Collaborators(NamedTuple):
     approved: Callable[[int], list[card_types.PastApproved]]  # since_hours → past approvals
     record: Callable[[str, dict], None]  # event name, fields → engine event log
     active_projects: Callable[[int], list[str]]  # active_days → project names, doc-count desc
-    past_verdicts: Callable[[int], list[card_types.PastVerdictPair]]  # since_hours → 7d 판정 pairs
+    past_verdicts: Callable[[int], card_types.PastCardHistory]  # since_hours → judged + unanswered pairs
     lang: str  # resolve_lang(boring_config.note_lang()) — a value, not a callable: no network
     # Defaulted (unlike everything above): every existing caller that never heard of the
     # repair lane keeps working unchanged. repairs(limit) is the door's GET; execute_repair
@@ -238,14 +243,24 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         priority = sorted({note_to_pick[note] for note in confirmation.pending if note in note_to_pick})
         return {"confirmation": confirmation, "priority_subjects": priority}
 
+    def read_history(_: CardState) -> dict:
+        """The card's own judged history over the suppression window — read once, carried in
+        state for advise's resting-note skip and resolve's suppression. The read is not
+        optional: a failing one raises and stops the run (같은 원칙: /approved) — a card
+        that cannot read its own judged history is the wrong card to send."""
+        return {"past_verdicts": collabs.past_verdicts(card_verdicts.SUPPRESS_WINDOW_HOURS)}
+
     def advise(state: CardState) -> dict:
         """The bottleneck pick, one candidate at a time (project+subject in, its register's
         search hits and gemma4's grounded pitch or refusal out) — up to three proposals, at
         most ADVISE_CALL_CAP calls, shared across every active project so the call budget
-        does not scale with how many projects were active this window. A candidate that
-        fails to ground (schema, quote, or NotWorth) is not an error: it just does not
-        become a proposal, and the queue moves on — but its reason is kept in advise_stats,
-        not discarded, so a dry run can quote why."""
+        does not scale with how many projects were active this window. Before any search
+        or call, a candidate whose note is resting — shown but unanswered within
+        REST_HOURS, or 해/빼-judged within SUPPRESS_WINDOW_HOURS — is skipped without a
+        call (미뤄 never rests a note; an unresolvable subject is never skipped on this
+        rule). A candidate that fails to ground (schema, quote, or NotWorth) is not an
+        error: it just does not become a proposal, and the queue moves on — but its reason
+        is kept in advise_stats, not discarded, so a dry run can quote why."""
         candidates = card_registers.merge_project_candidates(
             state["projects"], state["project_registers"], state["priority_subjects"]
         )
@@ -255,11 +270,20 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         proposals: list[card_types.Proposal] = []
         not_worth_reasons: list[str] = []
         ungrounded_reasons: list[str] = []
+        resting = card_verdicts.resting_notes(state["past_verdicts"])
         calls = 0
+        skipped_resting = 0
         warned_empty_vault = False
         for project, subject, register in candidates:
             if len(proposals) >= 3 or calls >= ADVISE_CALL_CAP:
                 break
+            note = subject if register == "recurrences" else None
+            if note is None:
+                resolved = _resolve(subject, register)
+                note = resolved.note if isinstance(resolved, card_types.ResolvedNote) else None
+            if note is not None and note in resting:
+                skipped_resting += 1
+                continue
             hits = collabs.search(subject)
             note_texts = _note_texts_for_hits(collabs.read_note, hits)
             if hits and not note_texts and not warned_empty_vault:
@@ -301,6 +325,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 proposals_passed=len(proposals),
                 not_worth=len(not_worth_reasons),
                 ungrounded=len(ungrounded_reasons),
+                skipped_resting=skipped_resting,
                 not_worth_reasons=not_worth_reasons,
                 ungrounded_reasons=ungrounded_reasons,
             ),
@@ -311,9 +336,11 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         does not resolve is dropped as a value — 「근거 노트 없음」 never rides a card. Fewer
         than three, even zero, ships: NotWorth and an unresolved subject are both legitimate
         answers now (실험 1's recall precision was 1/5), not a reason to refuse the card.
-        A resolved candidate is then run through the 7-day 판정 suppression: past_verdicts
-        is read unconditionally, even when there is nothing left to suppress — a card that
-        cannot read its own judged history is the wrong card to send (같은 원칙: /approved)."""
+        A resolved candidate is then run through suppression (7-day 판정, 72h rest for
+        shown-but-unanswered) on the history read_history already carried in state — read
+        unconditionally, before advise, because a card that cannot read its own judged
+        history is the wrong card to send (같은 원칙: /approved). advise's note-level skip is
+        the coarser call-saver; this pair-level filter stays the source of truth."""
         picked: list[card_types.Proposal] = []
         seen_notes: set[str] = set()
         for proposal in state["proposals"]:
@@ -324,8 +351,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 continue
             seen_notes.add(result.note)
             picked.append(proposal.model_copy(update={"note": result.note}))
-        past = collabs.past_verdicts(card_verdicts.SUPPRESS_WINDOW_HOURS)
-        kept, dropped = card_verdicts.suppressed(picked, past)
+        kept, dropped = card_verdicts.suppressed(picked, state["past_verdicts"])
         return {"proposals": kept, "suppressed_count": len(dropped)}
 
     def post_card(state: CardState) -> dict:
@@ -419,6 +445,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     graph.add_node("read_proposed", read_proposed)
     graph.add_node("read_registers", read_registers)
     graph.add_node("cross_check", cross_check)
+    graph.add_node("read_history", read_history)
     graph.add_node("advise", advise)
     graph.add_node("resolve", resolve)
     graph.add_node("post_card", post_card)
@@ -428,7 +455,8 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     graph.add_edge("read_repairs", "read_proposed")
     graph.add_edge("read_proposed", "read_registers")
     graph.add_edge("read_registers", "cross_check")
-    graph.add_edge("cross_check", "advise")
+    graph.add_edge("cross_check", "read_history")
+    graph.add_edge("read_history", "advise")
     graph.add_edge("advise", "resolve")
     graph.add_edge("resolve", "post_card")
     graph.add_edge("post_card", "await_verdict")
@@ -675,6 +703,7 @@ def _run_dry() -> int:
                 "proposals_passed": stats.proposals_passed,
                 "not_worth": stats.not_worth,
                 "ungrounded": stats.ungrounded,
+                "skipped_resting": stats.skipped_resting,
                 "not_worth_reasons": stats.not_worth_reasons,
                 "ungrounded_reasons": stats.ungrounded_reasons,
                 "suppressed": state["suppressed_count"],

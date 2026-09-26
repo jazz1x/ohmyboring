@@ -147,15 +147,17 @@ class Unresolved(BaseModel):
 
 class AdviseStats(BaseModel):
     """The advise loop's own tally, computed once in `advise` and carried in state so nobody
-    downstream recomputes it: how many candidates were tried, how many became proposals, and
-    why the rest were refused. AC5 asks the dry-run executor to be able to quote a run's
-    numbers back — before this, `NotWorth.reason` and the `Ungrounded` reasons were discarded
-    the moment `advise` read them."""
+    downstream recomputes it: how many candidates were tried, how many became proposals,
+    why the rest were refused, and how many were skipped before a call because their note
+    was resting. AC5 asks the dry-run executor to be able to quote a run's numbers back —
+    before this, `NotWorth.reason` and the `Ungrounded` reasons were discarded the moment
+    `advise` read them."""
 
     calls: int
     proposals_passed: int
     not_worth: int
     ungrounded: int
+    skipped_resting: int
     not_worth_reasons: list[str] = []
     ungrounded_reasons: list[str] = []
 
@@ -170,6 +172,28 @@ class PastVerdictPair(BaseModel):
     evidence_line: int
     choice: Choice
     at: str
+
+
+class PastUnansweredPair(BaseModel):
+    """One proposal the card showed but nobody judged — no card_verdict row exists for its
+    (card_ts, idx). The same (note, evidence) key as PastVerdictPair; `at` is the
+    card_proposal event's own observed_at, the moment the owner saw the proposal, not a
+    press. Such a pair rests REST_HOURS before the card may propose it again."""
+
+    note: str
+    evidence_note: str
+    evidence_line: int
+    at: str
+
+
+class PastCardHistory(BaseModel):
+    """One read of the card's own past over a window: judged pairs (a card_verdict landed,
+    미뤄 포함) and unanswered pairs (shown, never judged). Two typed lists, never one shape
+    with a flag — the suppress rule (7d, 해/빼 only) and the rest rule (사흘) read different
+    lists with different windows."""
+
+    judged: list[PastVerdictPair] = []
+    unanswered: list[PastUnansweredPair] = []
 
 
 class PastApproved(BaseModel):
