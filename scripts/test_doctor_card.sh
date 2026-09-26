@@ -47,6 +47,43 @@ run_doctor() {
         sh "$script" 2>&1 || true
 }
 
+# Case (h) asserts doctor's own exit code, so the rest of the fixture has to pass --strict too:
+# wired hooks (with a deliverable SessionEnd command), a fresh note and hook marker, a healthy
+# compose stack, and no door. The fake docker answers only the calls doctor makes.
+mkdir -p "$tmp/home/.claude" "$tmp/fakebin" "$boring/vault/wiki"
+touch "$boring/vault/wiki/wiki-0001.md"
+touch "$tmp/home/.cache/boring-distill/session.ts"
+cat > "$tmp/home/.claude/settings.json" <<'JSON'
+{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"f=$(mktemp); cat > \"$f\"; nohup sh -c 'python3 ~/oh-my-boring/hooks/distill-session.py < \"$0\"; rm -f \"$0\"' \"$f\" >/dev/null 2>&1 &"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 ~/oh-my-boring/hooks/recall.py"}]}]}}
+JSON
+cat > "$tmp/fakebin/docker" <<'SH'
+#!/bin/sh
+case "${1:-} ${2:-}" in
+  "compose version") echo "Docker Compose version v2.27.0"; exit 0 ;;
+  "compose ps") echo "boring-drudge Up"; exit 0 ;;
+  "compose exec") exit 0 ;;
+esac
+[ "${1:-}" = logs ] && { echo "INFO ready"; exit 0; }
+exit 0
+SH
+chmod +x "$tmp/fakebin/docker"
+
+run_doctor_strict() {
+    card_log="$1"; now="$2"
+    env HOME="$tmp/home" \
+        BORING_HOME="$boring" \
+        BORING_URL="$stub_url" \
+        DOOR_URL="http://127.0.0.1:1" \
+        PATH="$tmp/fakebin:$PATH" \
+        DOCKER_BIN="$tmp/fakebin/docker" \
+        BORING_EVENT_LOG="$tmp/home/.cache/oh-my-boring/events.ndjson" \
+        BORING_SKIP_LEDGER_PROBE=1 \
+        BORING_SKIP_CONFIG_PROBE=1 \
+        BORING_CARD_LOG="$card_log" \
+        BORING_NOW="$now" \
+        sh "$ROOT/scripts/doctor.sh" --strict >/dev/null 2>&1
+}
+
 expect() { # <label> <want-count> <pattern> <output>
     label="$1"; want="$2"; pat="$3"; out="$4"
     got=$(printf '%s\n' "$out" | grep -cF -- "$pat" || true)
@@ -88,10 +125,36 @@ bad=""
 [ "$(printf '%s\n' "$out" | grep -c '✗ morning card' || true)" = 0 ] || bad="${bad:+$bad, }unexpected ✗ card line"
 if [ -z "$bad" ]; then pass "a missing log says 모름, not ✓ and not ✗"; else fail "a missing log — $bad"; fi
 
-# (f) started today with nothing after it, before the 08:05 threshold has passed: never posted.
+# (f) started today with nothing after it, before the 08:05 threshold has passed: not posted yet.
 printf '=== morning card started at %s ===\n' "$START" > "$tmp/logs/f.log"
 out="$(run_doctor "$tmp/logs/f.log" "2026-09-26T08:03:00+0900")"
-expect "a started-but-silent run is reported as never posted" 1 "✗ morning card started at $START but never posted" "$out"
+expect "a started-but-silent run is reported as not posted yet" 1 "✗ morning card started at $START but has not posted yet" "$out"
+
+# (g) yesterday's posted run is not today's: staleness binds before the posted verdict —
+# the 09-24~26 shape (run_card exits before writing `started`, log keeps yesterday's post).
+printf '=== morning card started at 2026-09-25T08:00:03+0900 ===\n[card] posted ts=1.2\n' > "$tmp/logs/g.log"
+out="$(run_doctor "$tmp/logs/g.log" "$NOW")"
+expect "yesterday's posted run is reported as not having run today" 1 "✗ morning card did not run since 2026-09-26T08:05:00+09:00" "$out"
+
+# (h) --strict exit code: the card line alone flips readiness. A FAILED card fails strict; a
+# posted card exits the same as no card log at all. Kills a footer that drops failed_card
+# (string and zero literal) and a FAILED branch that never sets the flag.
+no_log_rc=0
+run_doctor_strict "$tmp/logs/e.log" "$NOW" || no_log_rc=$?
+posted_rc=0
+run_doctor_strict "$tmp/logs/b.log" "$NOW" || posted_rc=$?
+failed_rc=0
+run_doctor_strict "$tmp/logs/a.log" "$NOW" || failed_rc=$?
+if [ "$no_log_rc" -eq 0 ] && [ "$posted_rc" -eq 0 ]; then
+    pass "strict passes with no card log and with a posted card"
+else
+    fail "strict base must pass (no log rc=$no_log_rc, posted rc=$posted_rc) — case (h) is unprovable"
+fi
+if [ "$failed_rc" -ne 0 ]; then
+    pass "a FAILED card makes --strict exit non-zero"
+else
+    fail "a FAILED card left --strict at exit 0 — failed_card does not reach the footer"
+fi
 
 # Non-vacuous proofs on scratch copies: a mutant that cannot turn case (a) or case (d) red
 # proves nothing. The copies share the real scripts/lib via one symlink so sourcing still works.
@@ -108,7 +171,7 @@ else
 fi
 
 # Mutant 2: the staleness decision removed — case (d) must lose its did-not-run line.
-sed 's/int(started < threshold)/int(False)/' "$ROOT/scripts/doctor.sh" > "$tmp/mut/doctor.sh"
+sed 's/int(started.date() < threshold.date())/int(False)/' "$ROOT/scripts/doctor.sh" > "$tmp/mut/doctor.sh"
 out="$(run_doctor "$tmp/logs/d.log" "$NOW" "$tmp/mut/doctor.sh")"
 if printf '%s\n' "$out" | grep -qF "✗ morning card did not run since"; then
     fail "mutation 2: without the staleness branch case (d) still sees did-not-run — the mutant survived"
@@ -117,7 +180,7 @@ else
 fi
 
 if [ "$fails" -eq 0 ]; then
-    echo "morning-card doctor guardrails: 8 passed, 0 failed."
+    echo "morning-card doctor guardrails: 11 passed, 0 failed."
     exit 0
 fi
 echo "morning-card doctor guardrails: $fails failed."

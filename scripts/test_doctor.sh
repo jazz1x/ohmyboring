@@ -336,11 +336,14 @@ make_case_repo() {
 run_strict() {
     case_dir="$1"
     out="$2"
+    # BORING_CARD_LOG points at a path that does not exist: the card check's 모름 warn must not
+    # read the developer's real /tmp/com.ohmyboring.morning-card.log into a strict verdict.
     HOME="$case_dir/home" \
     DOCTOR_FAKE_LOOPING="${DOCTOR_FAKE_LOOPING:-}" \
     BORING_HOME="$case_dir/boring" \
     BORING_URL="http://127.0.0.1:7700" \
     BORING_READINESS_NOTE_MAX_HOURS="${BORING_READINESS_NOTE_MAX_HOURS:-48}" \
+    BORING_CARD_LOG="$case_dir/card.log.absent" \
     DOCTOR_EVENT_CALLS="$case_dir/events.calls" \
     PATH="$TMP/fakebin:$PATH" \
     sh "$ROOT/scripts/doctor.sh" --strict >"$out" 2>&1
