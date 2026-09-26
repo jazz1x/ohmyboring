@@ -204,8 +204,7 @@ class SuppressedTests(unittest.TestCase):
             cv.suppressed([candidate], past, now=self.NOW)
 
     def test_a_shown_but_unanswered_pair_rests(self):
-        # no button, no verdict: the 08:23 card showed it, the 09-26 dry run saw it again —
-        # within REST_HOURS the card must not propose it a second time.
+        # shown, no button: within REST_HOURS the card must not propose it again.
         candidate = self._proposal("/n1.md", "/e1.md", 3)
         past = cc.PastCardHistory(unanswered=[self._unanswered("/n1.md", "/e1.md", 3, hours_ago=24)])
         kept, dropped = cv.suppressed([candidate], past, now=self.NOW)

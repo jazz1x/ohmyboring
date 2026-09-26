@@ -312,7 +312,8 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         does not resolve is dropped as a value — 「근거 노트 없음」 never rides a card. Fewer
         than three, even zero, ships: NotWorth and an unresolved subject are both legitimate
         answers now (실험 1's recall precision was 1/5), not a reason to refuse the card.
-        A resolved candidate is then run through the 7-day 판정 suppression: past_verdicts
+        A resolved candidate is then run through suppression (7-day 판정, 72h rest for
+        shown-but-unanswered): past_verdicts
         is read unconditionally, even when there is nothing left to suppress — a card that
         cannot read its own judged history is the wrong card to send (같은 원칙: /approved)."""
         picked: list[card_types.Proposal] = []
