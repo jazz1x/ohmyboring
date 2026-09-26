@@ -12,9 +12,10 @@ record and asking the local model (in whichever language boring.json's note_lang
 for a grounded pitch, up to three proposals or eight calls total, regardless of how many
 projects were active. resolve turns each proposal's subject into its note path via
 /claim-source, then drops any candidate whose (note, evidence) pair already got a verdict in
-the last 7 days (`card_verdicts.suppressed`) — reading that history is not optional: a card
-that cannot read it does not ship. post_card sends the Block Kit card (repair rows above the
-advice rows, each grouped and labeled its own way), records a card_proposal event per
+the last 7 days or was shown but never judged in the last 3 days (`card_verdicts.suppressed`)
+— reading that history is not optional: a card that cannot read it does not ship. post_card
+sends the Block Kit card (repair rows above the advice rows, each grouped and labeled its own
+way), records a card_proposal event per
 surviving proposal, and stops at an interrupt; a Slack button press resumes it with
 Command(resume=…) — the verdict's idx spans all three lanes, repair rows first, then
 advice rows, then the review rows. record_verdict branches by lane: a repair row's adopt
@@ -130,7 +131,7 @@ class Collaborators(NamedTuple):
     approved: Callable[[int], list[card_types.PastApproved]]  # since_hours → past approvals
     record: Callable[[str, dict], None]  # event name, fields → engine event log
     active_projects: Callable[[int], list[str]]  # active_days → project names, doc-count desc
-    past_verdicts: Callable[[int], list[card_types.PastVerdictPair]]  # since_hours → 7d 판정 pairs
+    past_verdicts: Callable[[int], card_types.PastCardHistory]  # since_hours → judged + unanswered pairs
     lang: str  # resolve_lang(boring_config.note_lang()) — a value, not a callable: no network
     # Defaulted (unlike everything above): every existing caller that never heard of the
     # repair lane keeps working unchanged. repairs(limit) is the door's GET; execute_repair

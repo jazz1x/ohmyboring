@@ -172,6 +172,28 @@ class PastVerdictPair(BaseModel):
     at: str
 
 
+class PastUnansweredPair(BaseModel):
+    """One proposal the card showed but nobody judged — no card_verdict row exists for its
+    (card_ts, idx). The same (note, evidence) key as PastVerdictPair; `at` is the
+    card_proposal event's own observed_at, the moment the owner saw the proposal, not a
+    press. Such a pair rests REST_HOURS before the card may propose it again."""
+
+    note: str
+    evidence_note: str
+    evidence_line: int
+    at: str
+
+
+class PastCardHistory(BaseModel):
+    """One read of the card's own past over a window: judged pairs (a card_verdict landed,
+    미뤄 포함) and unanswered pairs (shown, never judged). Two typed lists, never one shape
+    with a flag — the suppress rule (7d, 해/빼 only) and the rest rule (사흘) read different
+    lists with different windows."""
+
+    judged: list[PastVerdictPair] = []
+    unanswered: list[PastUnansweredPair] = []
+
+
 class PastApproved(BaseModel):
     """One 「해」 from a past card, as /approved reports it."""
 

@@ -232,9 +232,9 @@ class Stubs:
         assert active_days == card.PROJECT_ACTIVE_DAYS
         return self.active_project_names
 
-    def past_verdicts(self, since_hours: int) -> list[cc.PastVerdictPair]:
+    def past_verdicts(self, since_hours: int) -> cc.PastCardHistory:
         assert since_hours == card_verdicts.SUPPRESS_WINDOW_HOURS
-        return self.past_verdict_pairs
+        return cc.PastCardHistory(judged=self.past_verdict_pairs)
 
     def repairs(self, limit: int) -> dict:
         self.repairs_calls.append(limit)
@@ -1403,10 +1403,57 @@ class LivePastVerdictsTests(unittest.TestCase):
         ]
         with mock.patch.object(card_live, "_live_events", side_effect=self._events(proposals, verdicts)):
             out = card_live._live_past_verdicts(168)
-        self.assertEqual(len(out), 1)
+        self.assertEqual(len(out.judged), 1)
         self.assertEqual(
-            (out[0].note, out[0].evidence_note, out[0].evidence_line, out[0].choice),
+            (
+                out.judged[0].note,
+                out.judged[0].evidence_note,
+                out.judged[0].evidence_line,
+                out.judged[0].choice,
+            ),
             ("/n.md", "/e.md", 4, "drop"),
+        )
+        self.assertEqual(out.unanswered, [])
+
+    def test_a_proposal_without_a_verdict_becomes_an_unanswered_pair(self):
+        # the rest rule's read side: a shown-but-never-judged proposal (no card_verdict for
+        # its card_ts+idx) comes back as an unanswered pair at the proposal's own time; a
+        # proposal with a verdict — 미뤄 포함 — is judged, never unanswered.
+        proposals = [
+            {
+                "attributes": {
+                    "card_ts": "1.0",
+                    "idx": 0,
+                    "note": "/n.md",
+                    "evidence": [{"note": "/e.md", "line": 4}],
+                },
+                "observed_at": "2026-09-25T08:23:00+00:00",
+            },
+            {
+                "attributes": {
+                    "card_ts": "1.0",
+                    "idx": 1,
+                    "note": "/n2.md",
+                    "evidence": [{"note": "/e2.md", "line": 7}],
+                },
+                "observed_at": "2026-09-24T08:23:00+00:00",
+            },
+        ]
+        verdicts = [
+            {
+                "attributes": {"card_ts": "1.0", "idx": 1, "choice": "defer"},
+                "observed_at": "2026-09-24T08:24:00+00:00",
+            }
+        ]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(proposals, verdicts)):
+            out = card_live._live_past_verdicts(168)
+        self.assertEqual(
+            [(p.note, p.evidence_note, p.evidence_line, p.choice) for p in out.judged],
+            [("/n2.md", "/e2.md", 7, "defer")],
+        )
+        self.assertEqual(
+            [(p.note, p.evidence_note, p.evidence_line, p.at) for p in out.unanswered],
+            [("/n.md", "/e.md", 4, "2026-09-25T08:23:00+00:00")],
         )
 
     def test_proposal_window_is_wider_than_the_verdict_window(self):

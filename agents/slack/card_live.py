@@ -25,6 +25,8 @@ import omb_env
 from card_types import (
     NO_CURRENT_CLAIM,
     PastApproved,
+    PastCardHistory,
+    PastUnansweredPair,
     PastVerdictPair,
     ProposedVerdict,
     RepairDone,
@@ -99,15 +101,18 @@ def _live_events(event_name: str, since_hours: int) -> list[dict[str, Any]]:
     return payload["entries"]
 
 
-def _live_past_verdicts(since_hours: int) -> list[PastVerdictPair]:
+def _live_past_verdicts(since_hours: int) -> PastCardHistory:
     """Join card_proposal and card_verdict events by (card_ts, idx) — a card_verdict event
     alone carries no note or evidence, only the button press (knowns: card_ts·idx·choice).
     Proposals are read over a wider window than verdicts: a press can land up to
     CARD_WAIT_HOURS after its card posted, so a verdict at hour 167 of the 168h window
-    would otherwise be joined against a proposal that already fell outside it. A
-    card_verdict with no matching card_proposal, or a matching one missing note/evidence/
-    choice/timestamp, is a malformed row — F5/ROP: that is a visible failure (ValueError
-    naming the row), never a silently skipped one, because a dropped row here is exactly a
+    would otherwise be joined against a proposal that already fell outside it. The same
+    join also yields the shown-but-unanswered pairs: a card_proposal with no card_verdict
+    in the window is a proposal the owner saw and never judged, returned with the
+    proposal event's own observed_at so suppressed can rest it REST_HOURS. A card_verdict
+    with no matching card_proposal, or a matching one missing note/evidence/choice/
+    timestamp, is a malformed row — F5/ROP: that is a visible failure (ValueError naming
+    the row), never a silently skipped one, because a dropped row here is exactly a
     suppression pair going missing without anyone knowing."""
     proposal_window = since_hours + math.ceil(CARD_WAIT_HOURS)
     proposals_by_key: dict[tuple[Any, Any], dict[str, Any]] = {}
@@ -115,20 +120,23 @@ def _live_past_verdicts(since_hours: int) -> list[PastVerdictPair]:
         attrs = entry.get("attributes") or {}
         key = (attrs.get("card_ts"), attrs.get("idx"))
         if key[0] is not None and key[1] is not None:
-            proposals_by_key[key] = attrs
-    out: list[PastVerdictPair] = []
+            proposals_by_key[key] = entry
+    judged: list[PastVerdictPair] = []
+    answered: set[tuple[Any, Any]] = set()
     for entry in _live_events("card_verdict", since_hours):
         attrs = entry.get("attributes") or {}
         key = (attrs.get("card_ts"), attrs.get("idx"))
-        proposal = proposals_by_key.get(key)
-        if proposal is None:
+        answered.add(key)
+        proposal_entry = proposals_by_key.get(key)
+        if proposal_entry is None:
             raise ValueError(f"card_verdict {key!r} has no matching card_proposal event: {attrs!r}")
+        proposal = proposal_entry.get("attributes") or {}
         evidence = proposal.get("evidence") or []
         if not evidence:
             raise ValueError(f"card_proposal {key!r} was recorded with no evidence: {proposal!r}")
         first = evidence[0]
         try:
-            out.append(
+            judged.append(
                 PastVerdictPair(
                     note=proposal["note"],
                     evidence_note=first["note"],
@@ -139,7 +147,27 @@ def _live_past_verdicts(since_hours: int) -> list[PastVerdictPair]:
             )
         except (KeyError, TypeError, ValueError, ValidationError) as e:
             raise ValueError(f"malformed card_verdict/card_proposal pair {key!r}: {e}") from e
-    return out
+    unanswered: list[PastUnansweredPair] = []
+    for key, proposal_entry in proposals_by_key.items():
+        if key in answered:
+            continue
+        proposal = proposal_entry.get("attributes") or {}
+        evidence = proposal.get("evidence") or []
+        if not evidence:
+            raise ValueError(f"card_proposal {key!r} was recorded with no evidence: {proposal!r}")
+        first = evidence[0]
+        try:
+            unanswered.append(
+                PastUnansweredPair(
+                    note=proposal["note"],
+                    evidence_note=first["note"],
+                    evidence_line=int(first["line"]),
+                    at=proposal_entry["observed_at"],
+                )
+            )
+        except (KeyError, TypeError, ValueError, ValidationError) as e:
+            raise ValueError(f"malformed card_proposal {key!r}: {e}") from e
+    return PastCardHistory(judged=judged, unanswered=unanswered)
 
 
 def _live_handover(session: str, at: str, paths: list[str]) -> dict:

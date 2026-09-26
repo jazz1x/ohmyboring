@@ -108,59 +108,79 @@ class SuppressedTests(unittest.TestCase):
             evidence=[cc.Evidence(note=evidence_note, quote="근거 인용문 열두자 이상", line=line)],
         )
 
+    def _unanswered(self, note: str, evidence_note: str, line: int, hours_ago: int) -> cc.PastUnansweredPair:
+        return cc.PastUnansweredPair(
+            note=note,
+            evidence_note=evidence_note,
+            evidence_line=line,
+            at=(self.NOW - timedelta(hours=hours_ago)).isoformat(),
+        )
+
     def test_recent_do_or_drop_suppresses_the_same_pair(self):
         candidate = self._proposal("/n1.md", "/e1.md", 3)
         for choice in ("do", "drop"):
-            past = [
-                cc.PastVerdictPair(
-                    note="/n1.md",
-                    evidence_note="/e1.md",
-                    evidence_line=3,
-                    choice=choice,
-                    at=(self.NOW - timedelta(days=1)).isoformat(),
-                )
-            ]
+            past = cc.PastCardHistory(
+                judged=[
+                    cc.PastVerdictPair(
+                        note="/n1.md",
+                        evidence_note="/e1.md",
+                        evidence_line=3,
+                        choice=choice,
+                        at=(self.NOW - timedelta(days=1)).isoformat(),
+                    )
+                ]
+            )
             kept, dropped = cv.suppressed([candidate], past, now=self.NOW)
             self.assertEqual(kept, [], choice)
             self.assertEqual(dropped, [candidate], choice)
 
     def test_defer_never_suppresses(self):
         candidate = self._proposal("/n1.md", "/e1.md", 3)
-        past = [
-            cc.PastVerdictPair(
-                note="/n1.md",
-                evidence_note="/e1.md",
-                evidence_line=3,
-                choice="defer",
-                at=self.NOW.isoformat(),
-            )
-        ]
+        past = cc.PastCardHistory(
+            judged=[
+                cc.PastVerdictPair(
+                    note="/n1.md",
+                    evidence_note="/e1.md",
+                    evidence_line=3,
+                    choice="defer",
+                    at=self.NOW.isoformat(),
+                )
+            ]
+        )
         kept, dropped = cv.suppressed([candidate], past, now=self.NOW)
         self.assertEqual(kept, [candidate])
         self.assertEqual(dropped, [])
 
     def test_a_verdict_older_than_the_window_does_not_suppress(self):
         candidate = self._proposal("/n1.md", "/e1.md", 3)
-        past = [
-            cc.PastVerdictPair(
-                note="/n1.md",
-                evidence_note="/e1.md",
-                evidence_line=3,
-                choice="drop",
-                at=(self.NOW - timedelta(hours=cv.SUPPRESS_WINDOW_HOURS + 1)).isoformat(),
-            )
-        ]
+        past = cc.PastCardHistory(
+            judged=[
+                cc.PastVerdictPair(
+                    note="/n1.md",
+                    evidence_note="/e1.md",
+                    evidence_line=3,
+                    choice="drop",
+                    at=(self.NOW - timedelta(hours=cv.SUPPRESS_WINDOW_HOURS + 1)).isoformat(),
+                )
+            ]
+        )
         kept, dropped = cv.suppressed([candidate], past, now=self.NOW)
         self.assertEqual(kept, [candidate])
         self.assertEqual(dropped, [])
 
     def test_a_different_pair_is_unaffected(self):
         candidate = self._proposal("/n1.md", "/e1.md", 3)
-        past = [
-            cc.PastVerdictPair(
-                note="/n1.md", evidence_note="/e1.md", evidence_line=9, choice="drop", at=self.NOW.isoformat()
-            )
-        ]
+        past = cc.PastCardHistory(
+            judged=[
+                cc.PastVerdictPair(
+                    note="/n1.md",
+                    evidence_note="/e1.md",
+                    evidence_line=9,
+                    choice="drop",
+                    at=self.NOW.isoformat(),
+                )
+            ]
+        )
         kept, dropped = cv.suppressed([candidate], past, now=self.NOW)
         self.assertEqual(kept, [candidate])
         self.assertEqual(dropped, [])
@@ -169,13 +189,57 @@ class SuppressedTests(unittest.TestCase):
         # F5/ROP: a judged-history row this function cannot place in time is a wrong-card
         # signal, not a quiet gap — the old `except ValueError: continue` hid exactly this.
         candidate = self._proposal("/n1.md", "/e1.md", 3)
-        past = [
-            cc.PastVerdictPair(
-                note="/n1.md", evidence_note="/e1.md", evidence_line=3, choice="drop", at="not-a-timestamp"
-            )
-        ]
+        past = cc.PastCardHistory(
+            judged=[
+                cc.PastVerdictPair(
+                    note="/n1.md",
+                    evidence_note="/e1.md",
+                    evidence_line=3,
+                    choice="drop",
+                    at="not-a-timestamp",
+                )
+            ]
+        )
         with self.assertRaises(ValueError):
             cv.suppressed([candidate], past, now=self.NOW)
+
+    def test_a_shown_but_unanswered_pair_rests(self):
+        # no button, no verdict: the 08:23 card showed it, the 09-26 dry run saw it again —
+        # within REST_HOURS the card must not propose it a second time.
+        candidate = self._proposal("/n1.md", "/e1.md", 3)
+        past = cc.PastCardHistory(unanswered=[self._unanswered("/n1.md", "/e1.md", 3, hours_ago=24)])
+        kept, dropped = cv.suppressed([candidate], past, now=self.NOW)
+        self.assertEqual(kept, [])
+        self.assertEqual(dropped, [candidate])
+
+    def test_an_unanswered_pair_past_the_rest_window_comes_back(self):
+        candidate = self._proposal("/n1.md", "/e1.md", 3)
+        past = cc.PastCardHistory(
+            unanswered=[self._unanswered("/n1.md", "/e1.md", 3, hours_ago=cv.REST_HOURS + 8)]
+        )
+        kept, dropped = cv.suppressed([candidate], past, now=self.NOW)
+        self.assertEqual(kept, [candidate])
+        self.assertEqual(dropped, [])
+
+    def test_a_defer_verdict_wins_over_rest(self):
+        # 미뤄 must come back: a key carrying any judged verdict is never rested, even if a
+        # broken reader also hands it over as unanswered — defer answers the pair.
+        candidate = self._proposal("/n1.md", "/e1.md", 3)
+        past = cc.PastCardHistory(
+            judged=[
+                cc.PastVerdictPair(
+                    note="/n1.md",
+                    evidence_note="/e1.md",
+                    evidence_line=3,
+                    choice="defer",
+                    at=(self.NOW - timedelta(hours=1)).isoformat(),
+                )
+            ],
+            unanswered=[self._unanswered("/n1.md", "/e1.md", 3, hours_ago=24)],
+        )
+        kept, dropped = cv.suppressed([candidate], past, now=self.NOW)
+        self.assertEqual(kept, [candidate])
+        self.assertEqual(dropped, [])
 
 
 class EventFieldsTests(unittest.TestCase):
