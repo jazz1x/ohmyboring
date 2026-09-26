@@ -1,16 +1,6 @@
 #!/bin/sh
-# Guardrails for the morning card's failure notice: a failed run must send the owner one plain
-# line in the same DM, and a healthy run must stay silent. Both directions are pinned — a line
-# that fires on a healthy engine is an alarm nobody reads within a week.
-#
-# Why this exists, measured 2026-09-24..26: three mornings failed three different ways (exit 3
-# 거부 twice, an uncaught SlackApiError once) and the owner saw nothing — every failure reached
-# only /tmp/com.ohmyboring.morning-card.log, which is not a notification surface.
-#
-# Everything network-shaped is stubbed: a stub curl first on PATH records its argv and answers
-# the way Slack/the health check would, so the suite never touches the real API. card.py itself
-# is a stub shell script steered by env knobs — the harness tests schedule-card.sh's wiring,
-# not the card.
+# A failed morning card sends one line to the DM; a healthy run stays silent. curl and card.py
+# are stubs, so the suite never reaches the real Slack API.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

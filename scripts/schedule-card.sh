@@ -25,10 +25,7 @@ Usage: $0 {run|install|uninstall|status}
 EOF
 }
 
-# One plain line to the same DM when the run fails. run_card below is the one place every
-# failure passes through (the door check and card.py's exit status), so the notice lives
-# here, not in card.py — card.py has several exit paths a notice there would miss. Slack
-# replies HTTP 200 even when the post fails; only a body with "ok":true is a send.
+# Slack answers HTTP 200 even when the post fails; only a body with "ok":true is a send.
 notify_failure() {
     code="$1"; reason="$2"
     if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${SLACK_CARD_CHANNEL:-}" ]; then
@@ -72,10 +69,8 @@ run_card() {
     err_log=$(mktemp)
     "${PYTHON3:-python3}" agents/slack/card.py 2>"$err_log"
     status=$?
-    cat "$err_log" >&2  # the launchd log keeps card.py's stderr
+    cat "$err_log" >&2
     if [ "$status" -ne 0 ]; then
-        # the refusal's own last plain line — a traceback's final line is the exception
-        # message — capped so the notice stays one line
         reason=$(sed -e '/^[[:space:]]/d' -e '/^$/d' "$err_log" | tail -n 1 | cut -c1-200)
         notify_failure "$status" "${reason:-사유 없음}"
     fi
