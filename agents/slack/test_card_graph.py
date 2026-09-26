@@ -2,7 +2,8 @@
 """card.py's graph, dry-run, live-collaborator wiring, and single-instance lock.
 
 The graph test drives build_graph with stub collaborators through MemorySaver + thread_id:
-first invoke runs read_registers → cross_check → advise → resolve → post_card and pauses at
+first invoke runs read_repairs → read_proposed → read_registers → cross_check →
+read_history → advise → resolve → post_card and pauses at
 the interrupt with no verdicts, each Command(resume=…) records one verdict, and the run ends
 after the last proposal is judged. The resolve stub resolves a fixed map of subjects,
 mirroring the live collaborator's rule that a source already shaped like a note path resolves
@@ -20,7 +21,7 @@ import os
 import sys
 import threading
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -78,6 +79,28 @@ NOTE_TEXTS = {
     "/vault/wiki/wiki-0536.md": "머리말\nearlier relay sync incident logged here\n끝",
     "/vault/wiki/wiki-0101.md": "머리말\nessential mode trims non essential paths\n끝",
     "/vault/wiki/wiki-0202.md": "머리말\ndraft wiring merge is still pending review\n끝",
+    "/vault/wiki/note-alpha.md": "머리말\n알파 병목이 쉬는 노트인지 가리는 근거 줄입니다\n끝",
+    "/vault/wiki/note-beta.md": "머리말\n베타 병목이 쉬는 노트인지 가리는 근거 줄입니다\n끝",
+    "/vault/wiki/note-gamma.md": "머리말\n감마 병목이 살아 있는 제안인 근거 줄입니다\n끝",
+}
+
+# The resting-skip tests' world: three subjects, one per bottleneck register slot,
+# each resolving to its own note, no recurrences, no past approvals.
+SKIP_FETCH_DATA = {
+    "/next_actions": {"answer": "next: 없음", "sources": []},
+    "/risks": {"answer": "risk: 알파와 베타", "sources": ["alpha_subj", "beta_subj"]},
+    "/stalled": {"answer": "stalled: 감마", "sources": ["gamma_subj"]},
+    "/recurrences": {"rows": [], "days": 30, "max_distance": 0.2, "min_days_apart": 3},
+}
+SKIP_RESOLUTIONS = {
+    "alpha_subj": "/vault/wiki/note-alpha.md",
+    "beta_subj": "/vault/wiki/note-beta.md",
+    "gamma_subj": "/vault/wiki/note-gamma.md",
+}
+SKIP_HITS = {
+    "alpha_subj": [{"source_path": "/vault/wiki/note-alpha.md", "snippet": "알파", "claims": []}],
+    "beta_subj": [{"source_path": "/vault/wiki/note-beta.md", "snippet": "베타", "claims": []}],
+    "gamma_subj": [{"source_path": "/vault/wiki/note-gamma.md", "snippet": "감마", "claims": []}],
 }
 
 
@@ -104,6 +127,28 @@ def _advice_for(subject: str) -> str:
     note = CANDIDATE_HITS[subject][0]["source_path"]
     quote = NOTE_TEXTS[note].splitlines()[1]
     return _advice_json(f"{subject} 병목 한 문장 열자 이상", f"{subject} 오늘 할 일 열자 이상", note, quote)
+
+
+def _propose_by_subject(prompt: str) -> str:
+    """A propose stub that answers whichever candidate it was actually asked about —
+    positional response queues break the moment a candidate is skipped before its call."""
+    for subject in CANDIDATE_QUEUE:
+        if repr(subject) in prompt:
+            return ADVICE[subject]
+    return NOT_WORTH_JSON
+
+
+def _approve_everything(prompt: str) -> str:
+    """The SKIP fixture's counterpart: a grounded proposal for whichever skip-world subject
+    is named in the prompt, so any call that happens returns a valid proposal."""
+    for subject, hits in SKIP_HITS.items():
+        if repr(subject) in prompt:
+            note = hits[0]["source_path"]
+            quote = NOTE_TEXTS[note].splitlines()[1]
+            return _advice_json(
+                f"{subject} 병목 한 문장 열자 이상", f"{subject} 오늘 할 일 열자 이상", note, quote
+            )
+    return NOT_WORTH_JSON
 
 
 # candidate_order's order for priority=["f64_risk"]: f64_risk → wiki-0536 (recurrences
@@ -170,6 +215,7 @@ class Stubs:
         responses: list[str] | None = None,
         active_project_names: list[str] | None = None,
         past_verdict_pairs: list[cc.PastVerdictPair] | None = None,
+        past_unanswered_pairs: list[cc.PastUnansweredPair] | None = None,
         repairs_payload: dict | None = None,
         merged_yesterday_rows: int | None = None,
         execute_repair_result: dict | None = None,
@@ -184,6 +230,7 @@ class Stubs:
         )
         self.active_project_names = active_project_names if active_project_names is not None else []
         self.past_verdict_pairs = past_verdict_pairs if past_verdict_pairs is not None else []
+        self.past_unanswered_pairs = past_unanswered_pairs if past_unanswered_pairs is not None else []
         self.repairs_payload = (
             repairs_payload if repairs_payload is not None else {"groups": [], "total_groups": 0}
         )
@@ -193,6 +240,7 @@ class Stubs:
         self.propose_calls: list[str] = []
         self.search_calls: list[str] = []
         self.resolve_calls: list[tuple[str, str]] = []
+        self.past_verdicts_calls: list[int] = []
         self.records: list[tuple[str, dict]] = []
         self.execute_repair_calls: list[str] = []
         self.repairs_calls: list[int] = []
@@ -233,8 +281,9 @@ class Stubs:
         return self.active_project_names
 
     def past_verdicts(self, since_hours: int) -> cc.PastCardHistory:
+        self.past_verdicts_calls.append(since_hours)
         assert since_hours == card_verdicts.SUPPRESS_WINDOW_HOURS
-        return cc.PastCardHistory(judged=self.past_verdict_pairs)
+        return cc.PastCardHistory(judged=self.past_verdict_pairs, unanswered=self.past_unanswered_pairs)
 
     def repairs(self, limit: int) -> dict:
         self.repairs_calls.append(limit)
@@ -303,7 +352,7 @@ class GraphTests(unittest.TestCase):
         verdict = cc.ButtonVerdict(idx=idx, choice=choice, user=OWNER, at="t")
         return self.graph.invoke(Command(resume=verdict), self.cfg)
 
-    def test_graph_has_the_nine_nodes(self):
+    def test_graph_has_the_ten_nodes(self):
         names = set(self.graph.get_graph().nodes) - {"__start__", "__end__"}
         self.assertEqual(
             names,
@@ -312,6 +361,7 @@ class GraphTests(unittest.TestCase):
                 "read_proposed",
                 "read_registers",
                 "cross_check",
+                "read_history",
                 "advise",
                 "resolve",
                 "post_card",
@@ -616,7 +666,7 @@ class GraphTests(unittest.TestCase):
         proposal_fields = [fields for name, fields in self.stubs.records if name == "card_proposal"]
         self.assertEqual([p["idx"] for p in proposal_fields], [0, 1, 2])
 
-    def test_a_recently_judged_pair_is_suppressed_before_the_card_ships(self):
+    def test_a_recently_judged_note_is_skipped_before_any_model_call(self):
         past = [
             cc.PastVerdictPair(
                 note=EXPECTED_NOTES[0],
@@ -627,10 +677,26 @@ class GraphTests(unittest.TestCase):
             )
         ]
         stubs = Stubs(past_verdict_pairs=past)
+
+        def propose(prompt: str) -> str:
+            stubs.propose_calls.append(prompt)
+            return _propose_by_subject(prompt)
+
+        stubs.propose = propose
         graph = self._build(stubs)
         out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-suppress"}})
-        self.assertEqual([p.note for p in out["proposals"]], EXPECTED_NOTES[1:])
-        self.assertEqual(out["suppressed_count"], 1)
+        # the pair is still kept off the card, but now by advise's pre-skip: f64_risk's
+        # note (wiki-0900) carries the 해 verdict, so no search and no call is spent on
+        # it — the queue advances and the next three candidates fill the card.
+        self.assertEqual(
+            [p.note for p in out["proposals"]],
+            ["/vault/wiki/wiki-0536.md", "/vault/wiki/wiki-0576.md", "/vault/wiki/wiki-0101.md"],
+        )
+        self.assertEqual(len(stubs.propose_calls), 3)
+        self.assertIn("wiki-0536", stubs.propose_calls[0])
+        self.assertEqual(out["advise_stats"].skipped_resting, 1)
+        self.assertEqual(out["suppressed_count"], 0)
+        self.assertEqual(stubs.past_verdicts_calls, [card_verdicts.SUPPRESS_WINDOW_HOURS])
 
     def test_past_verdicts_failure_stops_the_run_before_any_send(self):
         # AC5: a card that cannot read its own judged history must not ship — mirrors
@@ -865,6 +931,124 @@ class GraphTests(unittest.TestCase):
             names,
             ["card_proposal"] * 3 + ["card_confirmation"] + ["card_verdict"] + ["verdict_reviewed"] * 2,
         )
+
+
+class SkipStubs(Stubs):
+    """Stubs over the three-subject skip world — search answers from SKIP_HITS."""
+
+    def search(self, subject: str) -> list[dict]:
+        self.search_calls.append(subject)
+        return SKIP_HITS.get(subject, [])
+
+
+class RestingNoteSkipTests(unittest.TestCase):
+    """advise's pre-skip: a candidate whose note is resting must not cost a search or a
+    model call — recurrences carry their own path, everything else resolves through the
+    door, and an unresolvable subject is never skipped on this rule (today's behaviour)."""
+
+    def setUp(self):
+        self.sends = []
+
+    def _build(self, stubs: Stubs):
+        collabs = card.Collaborators(
+            fetch=lambda path, project="": SKIP_FETCH_DATA[path],
+            search=stubs.search,
+            read_note=stubs.read_note,
+            propose=stubs.propose,
+            send=lambda blocks: (self.sends.append(blocks), cc.PostedCard(channel=CARD_CH, ts=CARD_TS))[1],
+            handover=lambda session, at, paths: {},
+            consumption=lambda session, kind, paths: {},
+            resolve=stubs.resolve,
+            approved=stubs.approved,
+            record=stubs.record,
+            active_projects=stubs.active_projects,
+            past_verdicts=stubs.past_verdicts,
+            lang="ko",
+            repairs=stubs.repairs,
+            execute_repair=stubs.execute_repair,
+            merged_yesterday=stubs.merged_yesterday,
+            proposed=stubs.proposed,
+        )
+        return card.build_graph(collabs)
+
+    def _stubs(self, **kwargs) -> SkipStubs:
+        stubs = SkipStubs(resolutions=SKIP_RESOLUTIONS, approved=[], **kwargs)
+
+        def propose(prompt: str) -> str:
+            stubs.propose_calls.append(prompt)
+            return _approve_everything(prompt)
+
+        stubs.propose = propose
+        return stubs
+
+    def test_resting_notes_are_skipped_before_any_model_call(self):
+        # alpha's note is 해/빼-judged within 7 days, beta's shown-but-unanswered within
+        # 사흘 — both are skipped, the model is asked only about gamma.
+        now = datetime.now(UTC)
+        stubs = self._stubs(
+            past_verdict_pairs=[
+                cc.PastVerdictPair(
+                    note="/vault/wiki/note-alpha.md",
+                    evidence_note="/vault/wiki/note-alpha.md",
+                    evidence_line=2,
+                    choice="drop",
+                    at=now.isoformat(),
+                )
+            ],
+            past_unanswered_pairs=[
+                cc.PastUnansweredPair(
+                    note="/vault/wiki/note-beta.md",
+                    evidence_note="/vault/wiki/note-beta.md",
+                    evidence_line=2,
+                    at=now.isoformat(),
+                )
+            ],
+        )
+        out = self._build(stubs).invoke({"verdicts": []}, {"configurable": {"thread_id": "test-rest-skip"}})
+        self.assertEqual(len(stubs.propose_calls), 1)
+        self.assertIn("gamma_subj", stubs.propose_calls[0])
+        self.assertEqual([p.note for p in out["proposals"]], ["/vault/wiki/note-gamma.md"])
+        self.assertEqual(out["advise_stats"].skipped_resting, 2)
+        self.assertEqual(stubs.past_verdicts_calls, [card_verdicts.SUPPRESS_WINDOW_HOURS])
+
+    def test_a_deferred_note_is_not_skipped(self):
+        # 미뤄 판정이 있는 노트는 쉬지 않는다 — alpha 는 그대로 호출된다.
+        now = datetime.now(UTC)
+        stubs = self._stubs(
+            past_verdict_pairs=[
+                cc.PastVerdictPair(
+                    note="/vault/wiki/note-alpha.md",
+                    evidence_note="/vault/wiki/note-alpha.md",
+                    evidence_line=2,
+                    choice="defer",
+                    at=now.isoformat(),
+                )
+            ]
+        )
+        out = self._build(stubs).invoke({"verdicts": []}, {"configurable": {"thread_id": "test-rest-defer"}})
+        self.assertEqual(len(stubs.propose_calls), 3)
+        self.assertIn("alpha_subj", stubs.propose_calls[0])
+        self.assertEqual(out["advise_stats"].skipped_resting, 0)
+        self.assertEqual(len(out["proposals"]), 3)
+
+    def test_an_unanswered_pair_older_than_the_rest_window_is_not_skipped(self):
+        # 사흘을 넘긴 무응답 짝은 쉬는 것이 아니다 — alpha 는 그대로 호출된다.
+        at = (datetime.now(UTC) - timedelta(hours=card_verdicts.REST_HOURS + 1)).isoformat()
+        stubs = self._stubs(
+            past_unanswered_pairs=[
+                cc.PastUnansweredPair(
+                    note="/vault/wiki/note-alpha.md",
+                    evidence_note="/vault/wiki/note-alpha.md",
+                    evidence_line=2,
+                    at=at,
+                )
+            ]
+        )
+        out = self._build(stubs).invoke({"verdicts": []}, {"configurable": {"thread_id": "test-rest-old"}})
+        self.assertEqual(len(stubs.propose_calls), 3)
+        self.assertIn("alpha_subj", stubs.propose_calls[0])
+        self.assertEqual(out["advise_stats"].skipped_resting, 0)
+        self.assertEqual(len(out["proposals"]), 3)
 
 
 class ListenerTests(unittest.TestCase):

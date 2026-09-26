@@ -147,15 +147,17 @@ class Unresolved(BaseModel):
 
 class AdviseStats(BaseModel):
     """The advise loop's own tally, computed once in `advise` and carried in state so nobody
-    downstream recomputes it: how many candidates were tried, how many became proposals, and
-    why the rest were refused. AC5 asks the dry-run executor to be able to quote a run's
-    numbers back — before this, `NotWorth.reason` and the `Ungrounded` reasons were discarded
-    the moment `advise` read them."""
+    downstream recomputes it: how many candidates were tried, how many became proposals,
+    why the rest were refused, and how many were skipped before a call because their note
+    was resting. AC5 asks the dry-run executor to be able to quote a run's numbers back —
+    before this, `NotWorth.reason` and the `Ungrounded` reasons were discarded the moment
+    `advise` read them."""
 
     calls: int
     proposals_passed: int
     not_worth: int
     ungrounded: int
+    skipped_resting: int
     not_worth_reasons: list[str] = []
     ungrounded_reasons: list[str] = []
 

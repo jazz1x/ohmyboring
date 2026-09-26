@@ -32,23 +32,17 @@ SUPPRESS_WINDOW_HOURS = 168
 REST_HOURS = 72
 
 
-def suppressed(
-    candidates: list[Proposal],
-    past: PastCardHistory,
-    now: datetime | None = None,
-) -> tuple[list[Proposal], list[Proposal]]:
-    """Split resolved candidates into (kept, dropped): a candidate is dropped when its own
-    note and its first evidence's (note, line) match a pair that already got a 해/빼 verdict
-    within the last 7 days, or a shown-but-never-judged pair from the last REST_HOURS — an
-    unanswered proposal rests, then may come back. 미뤄 wins over both rules: it suppresses
-    nothing, and a key carrying any judged verdict — 미뤄 포함 — is never rested, because a
-    verdict answers the pair and rest applies only to the never-judged. A pair older than
-    its window does not drop either: the owner may see the same bottleneck again once
-    enough time has passed for it to be worth asking again. A `past` entry whose `at` does
-    not parse is not skipped: a judged-history row this function cannot place in time is
-    exactly the case the contract calls a wrong card, not a quiet gap — it raises, same as
-    an unresolvable pair upstream in card.py's own read."""
-    now = now or datetime.now(UTC)
+def _window_sets(
+    past: PastCardHistory, now: datetime
+) -> tuple[set[tuple[str, str, int]], set[tuple[str, str, int]]]:
+    """The suppression windows' pair sets: (recent 해/빼 judged, rested unanswered). 미뤄 is
+    in neither: it is not 해/빼, and a key carrying any judged verdict — 미뤄 포함 — is
+    never rested, because a verdict answers the pair and rest applies only to the
+    never-judged. A pair older than its window is not in either set: the owner may see the
+    same bottleneck again once enough time has passed for it to be worth asking again. A
+    `past` entry whose `at` does not parse is not skipped: a judged-history row this
+    function cannot place in time is exactly the case the contract calls a wrong card, not
+    a quiet gap — it raises, same as an unresolvable pair upstream in card.py's own read."""
     cutoff = now - timedelta(hours=SUPPRESS_WINDOW_HOURS)
     rest_cutoff = now - timedelta(hours=REST_HOURS)
     judged = {(v.note, v.evidence_note, v.evidence_line) for v in past.judged}
@@ -68,6 +62,21 @@ def suppressed(
         if at < rest_cutoff:
             continue
         rested.add((pair.note, pair.evidence_note, pair.evidence_line))
+    return recent, rested
+
+
+def suppressed(
+    candidates: list[Proposal],
+    past: PastCardHistory,
+    now: datetime | None = None,
+) -> tuple[list[Proposal], list[Proposal]]:
+    """Split resolved candidates into (kept, dropped): a candidate is dropped when its own
+    note and its first evidence's (note, line) match a pair that already got a 해/빼 verdict
+    within the last 7 days, or a shown-but-never-judged pair from the last REST_HOURS — an
+    unanswered proposal rests, then may come back. The pair sets and both window rules live
+    in _window_sets; the drop decision itself is pair-level, never note-level."""
+    now = now or datetime.now(UTC)
+    recent, rested = _window_sets(past, now)
     kept: list[Proposal] = []
     dropped: list[Proposal] = []
     for candidate in candidates:
@@ -77,6 +86,17 @@ def suppressed(
         key = (candidate.note, candidate.evidence[0].note, candidate.evidence[0].line)
         (dropped if key in recent or key in rested else kept).append(candidate)
     return kept, dropped
+
+
+def resting_notes(past: PastCardHistory, now: datetime | None = None) -> set[str]:
+    """The note-level view of the same windows suppressed enforces pair-by-pair: a note
+    rests when one of its pairs was shown but unanswered within REST_HOURS, or 해/빼-judged
+    within SUPPRESS_WINDOW_HOURS — so advise can skip such a candidate before spending a
+    model call on it. Coarser on purpose: it matches the note alone, never the evidence
+    pair, and suppressed in resolve stays the source of truth for what actually ships."""
+    now = now or datetime.now(UTC)
+    recent, rested = _window_sets(past, now)
+    return {note for note, _, _ in recent | rested}
 
 
 def proposal_event_fields(proposal: Proposal, lang: str, card_ts: str, idx: int) -> dict[str, Any]:
