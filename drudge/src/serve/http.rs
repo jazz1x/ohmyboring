@@ -23,7 +23,8 @@ use crate::serve::{
     QueryLogEntry, QueryLogReq, QueryLogResp, RecallLabelEntry, RecallLabelJudgeStats,
     RecallLabelReq, RecallLabelStatsResp, RecallLabelsReq, RecallLabelsResp, RecurrencesReq,
     RecurrencesResp, RelatedNote, SearchHit, SearchResp, StalledReq, SyncResp, SyncState,
-    count_wiki_notes, recurrences_days, recurrences_limit, spawn_query_log, vector_disabled,
+    count_wiki_notes, recurrences_days, recurrences_limit, register_limit, spawn_query_log,
+    vector_disabled,
 };
 use crate::store::{EventLogFilter, LoggedHit, Store};
 use std::collections::HashSet;
@@ -222,10 +223,12 @@ pub(crate) async fn handle_decisions(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let limit = register_limit(req.limit.as_ref()).map_err(AppError::bad_request)?;
     let out = ask::decision_register(
         store,
         req.project.as_deref(),
         &s.cfg.origins_excluded_by_policy(),
+        limit,
     )
     .await?;
     spawn_query_log(
@@ -251,10 +254,12 @@ pub(crate) async fn handle_risks(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let limit = register_limit(req.limit.as_ref()).map_err(AppError::bad_request)?;
     let out = ask::risk_register(
         store,
         req.project.as_deref(),
         &s.cfg.origins_excluded_by_policy(),
+        limit,
     )
     .await?;
     spawn_query_log(
@@ -280,10 +285,12 @@ pub(crate) async fn handle_next_actions(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let limit = register_limit(req.limit.as_ref()).map_err(AppError::bad_request)?;
     let out = ask::next_action_register(
         store,
         req.project.as_deref(),
         &s.cfg.origins_excluded_by_policy(),
+        limit,
     )
     .await?;
     spawn_query_log(
@@ -309,11 +316,13 @@ pub(crate) async fn handle_stalled(
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let limit = register_limit(req.limit.as_ref()).map_err(AppError::bad_request)?;
     let out = ask::stalled_register(
         store,
         req.project.as_deref(),
         &s.cfg.origins_excluded_by_policy(),
         req.older_than_days.unwrap_or(7),
+        limit,
     )
     .await?;
     spawn_query_log(

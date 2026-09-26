@@ -165,7 +165,7 @@ mod tests {
 
     use super::{
         Author, CompactFailure, DbHealthState, HealthResp, RecurrencesResp, SyncState,
-        recurrences_days, recurrences_limit, transition_log,
+        recurrences_days, recurrences_limit, register_limit, transition_log,
     };
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -183,6 +183,27 @@ mod tests {
         assert_eq!(recurrences_limit(Some(50)), 50);
         assert_eq!(recurrences_limit(Some(500)), 50);
         assert_eq!(recurrences_limit(Some(0)), 1);
+    }
+
+    #[test]
+    fn register_limit_defaults_absent_and_accepts_one_to_max() {
+        assert_eq!(register_limit(None), Ok(50));
+        assert_eq!(register_limit(Some(&serde_json::json!(1))), Ok(1));
+        assert_eq!(register_limit(Some(&serde_json::json!(50))), Ok(50));
+    }
+
+    #[test]
+    fn register_limit_rejects_out_of_range_and_non_integer() {
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(51),
+            serde_json::json!("5"),
+            serde_json::json!(1.5),
+        ] {
+            let err = register_limit(Some(&bad)).unwrap_err();
+            assert_eq!(err, "limit must be an integer in 1..=50", "was {err:?}");
+        }
     }
 
     #[test]
@@ -981,22 +1002,26 @@ pub(crate) struct StatusReq {
 #[derive(Deserialize)]
 pub(crate) struct DecisionsReq {
     pub(crate) project: Option<String>,
+    pub(crate) limit: Option<Value>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct RisksReq {
     pub(crate) project: Option<String>,
+    pub(crate) limit: Option<Value>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct NextActionsReq {
     pub(crate) project: Option<String>,
+    pub(crate) limit: Option<Value>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct StalledReq {
     pub(crate) project: Option<String>,
     pub(crate) older_than_days: Option<u32>,
+    pub(crate) limit: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -1030,6 +1055,24 @@ pub(crate) fn recurrences_limit(limit: Option<u32>) -> i64 {
     limit.map_or(RECURRENCES_DEFAULT_LIMIT, |l| {
         i64::from(l.clamp(1, RECURRENCES_MAX_LIMIT))
     })
+}
+
+/// Register row cap parsed once at the door, shared by HTTP and MCP: absent → the cap the
+/// registers have always used; `1..=REGISTER_LIMIT` → that; anything else (0, negative, over
+/// the max, non-integer) is rejected naming the allowed range — no silent clamp.
+pub(crate) fn register_limit(limit: Option<&Value>) -> Result<i64, String> {
+    match limit {
+        None | Some(Value::Null) => Ok(crate::ask::REGISTER_LIMIT),
+        Some(value) => value
+            .as_i64()
+            .filter(|n| (1..=crate::ask::REGISTER_LIMIT).contains(n))
+            .ok_or_else(|| {
+                format!(
+                    "limit must be an integer in 1..={}",
+                    crate::ask::REGISTER_LIMIT
+                )
+            }),
+    }
 }
 
 #[derive(Deserialize)]

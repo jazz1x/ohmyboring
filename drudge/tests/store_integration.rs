@@ -1117,7 +1117,7 @@ async fn decision_register_answers_from_rows() {
             .expect("upsert decision claim");
     }
 
-    let out = drudge::ask::decision_register(&store, Some("register-test"), &[])
+    let out = drudge::ask::decision_register(&store, Some("register-test"), &[], 50)
         .await
         .expect("decision register");
     assert!(
@@ -1135,7 +1135,14 @@ async fn decision_register_answers_from_rows() {
     }
     assert_eq!(out.sources, vec!["omb".to_owned()]);
 
-    let empty = drudge::ask::decision_register(&store, Some("no-such-project"), &[])
+    let narrowed = drudge::ask::decision_register(&store, Some("register-test"), &[], 1)
+        .await
+        .expect("decision register with limit 1");
+    assert_eq!(narrowed.items.len(), 1);
+    assert!(narrowed.limit_applied);
+    assert_eq!(narrowed.total_matching, 2);
+
+    let empty = drudge::ask::decision_register(&store, Some("no-such-project"), &[], 50)
         .await
         .expect("decision register on empty project");
     assert_eq!(empty.answer, "No decisions recorded yet.");
@@ -1183,13 +1190,13 @@ async fn decision_register_honours_the_origin_filter() {
         paths.push(path);
     }
 
-    let unfiltered = drudge::ask::decision_register(&store, Some("origin-test"), &[])
+    let unfiltered = drudge::ask::decision_register(&store, Some("origin-test"), &[], 50)
         .await
         .expect("decision register");
     assert_eq!(unfiltered.items.len(), 2);
 
     let filtered =
-        drudge::ask::decision_register(&store, Some("origin-test"), &["company".to_owned()])
+        drudge::ask::decision_register(&store, Some("origin-test"), &["company".to_owned()], 50)
             .await
             .expect("decision register with origin filter");
     assert_eq!(

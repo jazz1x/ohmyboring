@@ -17,7 +17,7 @@ use crate::graph;
 use crate::ingest;
 use crate::redact;
 use crate::serve::owner::{self, Caller};
-use crate::serve::{AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, vec_off_rpc};
+use crate::serve::{AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, register_limit, vec_off_rpc};
 use crate::store::EventLogFilter;
 use crate::vault;
 
@@ -381,12 +381,13 @@ fn mcp_tools_list() -> Value {
                             CALL THIS BEFORE deciding something that sounds like it may already have been decided — \
                             a library choice, a naming convention, a schema shape, a process rule. The owner has 2,398 \
                             recorded decisions; re-deciding one is the failure this memory exists to prevent. \
-                            Deterministic — answers straight from current claims, no LLM, sub-second. Shows the newest 50; \
-                            the answer states the full match count.",
+                            Deterministic — answers straight from current claims, no LLM, sub-second. Shows the newest 50 \
+                            by default; pass `limit` to narrow it. The answer states the full match count.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": {"type": "string", "description": "optional project slug filter"}
+                    "project": {"type": "string", "description": "optional project slug filter"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": ask::REGISTER_LIMIT, "description": "optional row cap (default 50)"}
                 }
             }
         },
@@ -396,12 +397,13 @@ fn mcp_tools_list() -> Value {
                             CALL THIS BEFORE proposing a change to something that has bitten before — a migration, a \
                             deletion, a schedule change, a retry or timeout — and when about to say a thing is safe. \
                             The owner has already written down what went wrong last time. \
-                            Deterministic — answers straight from current claims, no LLM, sub-second. Shows the newest 50; \
-                            the answer states the full match count.",
+                            Deterministic — answers straight from current claims, no LLM, sub-second. Shows the newest 50 \
+                            by default; pass `limit` to narrow it. The answer states the full match count.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": {"type": "string", "description": "optional project slug filter"}
+                    "project": {"type": "string", "description": "optional project slug filter"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": ask::REGISTER_LIMIT, "description": "optional row cap (default 50)"}
                 }
             }
         },
@@ -412,11 +414,12 @@ fn mcp_tools_list() -> Value {
                             'continue' / 'resume' — the answer to 'where were we' is recorded here, not reconstructible \
                             from the code. Also call it before starting something that may already be half-done. \
                             Optionally filter by project. Deterministic — answers straight from current claims, no LLM, sub-second. \
-                            Shows the newest 50; the answer states the full match count.",
+                            Shows the newest 50 by default; pass `limit` to narrow it. The answer states the full match count.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": {"type": "string", "description": "optional project slug filter"}
+                    "project": {"type": "string", "description": "optional project slug filter"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": ask::REGISTER_LIMIT, "description": "optional row cap (default 50)"}
                 }
             }
         },
@@ -428,12 +431,13 @@ fn mcp_tools_list() -> Value {
                             and before closing out a project or a week. It surfaces work that was written down and then \
                             silently abandoned, which nothing else reports. \
                             Optionally filter by project or change the threshold. Deterministic — no LLM, sub-second. \
-                            Shows the newest 50; the answer states the full match count.",
+                            Shows the newest 50 by default; pass `limit` to narrow it. The answer states the full match count.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project": {"type": "string", "description": "optional project slug filter"},
-                    "older_than_days": {"type": "integer", "description": "threshold in days (default 7)"}
+                    "older_than_days": {"type": "integer", "description": "threshold in days (default 7)"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": ask::REGISTER_LIMIT, "description": "optional row cap (default 50)"}
                 }
             }
         },
@@ -1166,8 +1170,9 @@ async fn mcp_decisions(s: &AppState, args: Option<&Value>) -> Result<Value, (i32
         .and_then(|a| a.get("project"))
         .and_then(Value::as_str)
         .map(str::trim);
+    let limit = register_limit(args.and_then(|a| a.get("limit"))).map_err(|m| (-32602_i32, m))?;
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::decision_register(store, project, &s.cfg.origins_excluded_by_policy())
+    let out = ask::decision_register(store, project, &s.cfg.origins_excluded_by_policy(), limit)
         .await
         .map_err(|e| (-32603_i32, format!("decisions: {e:#}")))?;
     Ok(register_json(&out))
@@ -1178,8 +1183,9 @@ async fn mcp_risks(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, St
         .and_then(|a| a.get("project"))
         .and_then(Value::as_str)
         .map(str::trim);
+    let limit = register_limit(args.and_then(|a| a.get("limit"))).map_err(|m| (-32602_i32, m))?;
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::risk_register(store, project, &s.cfg.origins_excluded_by_policy())
+    let out = ask::risk_register(store, project, &s.cfg.origins_excluded_by_policy(), limit)
         .await
         .map_err(|e| (-32603_i32, format!("risks: {e:#}")))?;
     Ok(register_json(&out))
@@ -1190,8 +1196,9 @@ async fn mcp_next_actions(s: &AppState, args: Option<&Value>) -> Result<Value, (
         .and_then(|a| a.get("project"))
         .and_then(Value::as_str)
         .map(str::trim);
+    let limit = register_limit(args.and_then(|a| a.get("limit"))).map_err(|m| (-32602_i32, m))?;
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
-    let out = ask::next_action_register(store, project, &s.cfg.origins_excluded_by_policy())
+    let out = ask::next_action_register(store, project, &s.cfg.origins_excluded_by_policy(), limit)
         .await
         .map_err(|e| (-32603_i32, format!("next_actions: {e:#}")))?;
     Ok(register_json(&out))
@@ -1209,12 +1216,14 @@ async fn mcp_stalled(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
         .transpose()
         .map_err(|_| (-32602_i32, "older_than_days is too large".to_owned()))?
         .unwrap_or(7);
+    let limit = register_limit(args.and_then(|a| a.get("limit"))).map_err(|m| (-32602_i32, m))?;
     let store = s.store.as_ref().ok_or_else(vec_off_rpc)?;
     let out = ask::stalled_register(
         store,
         project,
         &s.cfg.origins_excluded_by_policy(),
         older_than_days,
+        limit,
     )
     .await
     .map_err(|e| (-32603_i32, format!("stalled: {e:#}")))?;
