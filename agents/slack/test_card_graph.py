@@ -685,9 +685,8 @@ class GraphTests(unittest.TestCase):
         stubs.propose = propose
         graph = self._build(stubs)
         out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-suppress"}})
-        # the pair is still kept off the card, but now by advise's pre-skip: f64_risk's
-        # note (wiki-0900) carries the 해 verdict, so no search and no call is spent on
-        # it — the queue advances and the next three candidates fill the card.
+        # f64_risk's note (wiki-0900) carries the 해 verdict, so advise skips it with no
+        # search and no call — the next three candidates fill the card.
         self.assertEqual(
             [p.note for p in out["proposals"]],
             ["/vault/wiki/wiki-0536.md", "/vault/wiki/wiki-0576.md", "/vault/wiki/wiki-0101.md"],
