@@ -36,9 +36,13 @@ stop_server() {
 
 # The (a2c) parse, exercised through doctor itself rather than a copy of its sed: a test that
 # reimplements the expression it is checking passes when the expression is wrong.
+# BORING_CARD_LOG points at a path that does not exist, so the card check says 모름 instead of
+# reading the developer's real /tmp/com.ohmyboring.morning-card.log.
 check_compact() {
     label="$1"; want="$2"; url="$3"
-    out="$(BORING_URL="$url" BORING_SKIP_LEDGER_PROBE=1 sh "$ROOT/scripts/doctor.sh" 2>&1 || true)"
+    out="$(BORING_URL="$url" BORING_SKIP_LEDGER_PROBE=1 \
+        BORING_CARD_LOG="/tmp/doctor-maintenance-card-never-exists-$$.log" \
+        sh "$ROOT/scripts/doctor.sh" 2>&1 || true)"
     got="$(printf '%s' "$out" | grep -c 'COMPACT FAILING' || true)"
     if [ "$got" = "$want" ]; then
         echo "ok - $label"
@@ -68,6 +72,7 @@ stop_server
 hook_probe() {
     label="$1"; want="$2"; home="$3"
     out="$(BORING_HOME="$home" BORING_URL="http://127.0.0.1:1" BORING_SKIP_LEDGER_PROBE=1 \
+        BORING_CARD_LOG="/tmp/doctor-maintenance-card-never-exists-$$.log" \
         sh "$ROOT/scripts/doctor.sh" 2>&1 || true)"
     got="$(printf '%s' "$out" | grep -c 'PRE-COMMIT HOOK MISSING' || true)"
     if [ "$got" = "$want" ]; then

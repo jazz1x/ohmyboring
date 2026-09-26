@@ -62,7 +62,7 @@ run_card() {
         notify_failure 2 "문(${door_url})이 응답하지 않음"
         exit 2
     fi
-    echo "=== morning card started at $(date) ==="
+    echo "=== morning card started at $(date '+%Y-%m-%dT%H:%M:%S%z') ==="
     # launchd's own PATH has no notion of Homebrew (python3 resolves to the PATH-less
     # system stub, which has no langgraph) — PYTHON3 is set in the plist's own
     # EnvironmentVariables at install time so this never depends on launchd's PATH.
@@ -75,7 +75,7 @@ run_card() {
         notify_failure "$status" "${reason:-사유 없음}"
     fi
     rm -f "$err_log"
-    echo "=== morning card finished at $(date) (exit $status) ==="
+    echo "=== morning card finished at $(date '+%Y-%m-%dT%H:%M:%S%z') (exit $status) ==="
     exit "$status"
 }
 

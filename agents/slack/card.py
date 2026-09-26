@@ -746,6 +746,7 @@ def main() -> int:
         config = {"configurable": {"thread_id": f"card-{datetime.now(UTC):%Y%m%d}"}}
         try:
             state = graph.invoke({"verdicts": []}, config)
+            print(f"[card] posted ts={state['message'].ts}", flush=True)
             holder.message = state["message"]
             holder.repairs = state["repairs"]
             holder.proposals = state["proposals"]
