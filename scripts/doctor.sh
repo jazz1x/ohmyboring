@@ -827,40 +827,23 @@ else
         card_after=$(tail -n "+$((card_start_line + 1))" "$CARD_LOG")
         card_exit=$(printf '%s\n' "$card_after" | sed -n 's/^=== morning card finished at .* (exit \([0-9][0-9]*\)) ===$/\1/p' | tail -n 1)
         card_posted=$(printf '%s\n' "$card_after" | grep -c '\[card\] posted ts=' || true)
-        # Staleness first, and it binds before every outcome below: run_card can exit before
-        # writing `started`, so a last start older than the most recent passed 08:05 (the 08:00
-        # run plus its post window) means this morning's run never happened — what yesterday's
-        # run posted is yesterday's, and must not read as today's. Date math in python3:
-        # GNU/BSD date disagree on every -d/-j spelling, and the threshold needs local-time
-        # comparison only.
+        # Staleness binds first: run_card exits before writing `started` when the door is down,
+        # so yesterday's post must not read as today's. python3 because GNU/BSD date differ.
         card_stale=$(python3 - "$card_started" "${BORING_NOW:-}" <<'PY'
 import sys
 from datetime import datetime, timedelta
 
-try:
-    started = datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%S%z")
-    now = (
-        datetime.strptime(sys.argv[2], "%Y-%m-%dT%H:%M:%S%z")
-        if sys.argv[2]
-        else datetime.now().astimezone()
-    )
-except ValueError:
-    print("stale=0")
-    raise SystemExit(0)
+started = datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%S%z")
+now = datetime.strptime(sys.argv[2], "%Y-%m-%dT%H:%M:%S%z") if sys.argv[2] else datetime.now().astimezone()
 today_0805 = now.replace(hour=8, minute=5, second=0, microsecond=0)
 threshold = today_0805 if now >= today_0805 else today_0805 - timedelta(days=1)
-# Morning-level compare: the 08:05 is the end of the post window, not of who may start — the
-# run that started at 08:00:03 is this morning's run, while a start from an earlier morning
-# means the most recent scheduled run never happened (run_card exits before `started`).
 print(f"stale={int(started.date() < threshold.date())} threshold={threshold.isoformat()}")
 PY
 )
         case "$card_stale" in
             stale=1*) bad "morning card did not run since ${card_stale#stale=1 threshold=}"; failed_card=1 ;;
-            *)
+            stale=0*)
                 if [ "$card_posted" -gt 0 ]; then
-                    # Posted proves delivery; a later non-zero exit (the button wait died after
-                    # the card went out) warns and does not undo the delivery.
                     ok "morning card: posted at $card_started"
                     if [ -n "$card_exit" ] && [ "$card_exit" -ne 0 ]; then
                         warn "morning card ended with exit $card_exit after posting"
@@ -875,6 +858,7 @@ PY
                     failed_card=1
                 fi
                 ;;
+            *) warn "morning card: 모름 — could not compare dates ($card_started, now=${BORING_NOW:-clock})" ;;
         esac
     fi
 fi

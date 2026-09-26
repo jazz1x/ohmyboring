@@ -1,8 +1,5 @@
 #!/bin/sh
-# Guardrails for doctor's morning-card line (a2e): the launchd log is the only record of a run,
-# and finished lands only after card.py's CARD_WAIT_HOURS button wait — a posted run proves
-# itself with `[card] posted ts=`, not with finished. Both directions are pinned per case, and
-# two mutants prove the cases are not vacuous.
+# doctor's morning-card line (a2e), against temp logs and a fixed clock.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -29,7 +26,8 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.3
 done
 
-pass() { echo "ok - $1"; }
+passes=0
+pass() { echo "ok - $1"; passes=$((passes + 1)); }
 fail() { echo "FAIL: $1"; fails=$((fails + 1)); }
 
 # Only the card line is asserted: doctor has no single-block mode, so the suite runs all of it
@@ -136,6 +134,16 @@ printf '=== morning card started at 2026-09-25T08:00:03+0900 ===\n[card] posted 
 out="$(run_doctor "$tmp/logs/g.log" "$NOW")"
 expect "yesterday's posted run is reported as not having run today" 1 "✗ morning card did not run since 2026-09-26T08:05:00+09:00" "$out"
 
+# (i) posted, then the button wait died: delivered, with a warning.
+printf '=== morning card started at %s ===\n[card] posted ts=1.2\n=== morning card finished at 2026-09-26T09:00:00+0900 (exit 1) ===\n' "$START" > "$tmp/logs/i.log"
+out="$(run_doctor "$tmp/logs/i.log" "$NOW")"
+expect "a posted run that later exits 1 is posted" 1 "✓ morning card: posted at $START" "$out"
+expect "a posted run that later exits 1 warns" 1 "! morning card ended with exit 1 after posting" "$out"
+
+# (j) an unreadable clock is 모름, not a pass.
+out="$(run_doctor "$tmp/logs/b.log" "not-a-date")"
+expect "an unreadable clock says 모름" 1 "! morning card: 모름 — could not compare dates" "$out"
+
 # (h) --strict exit code: the card line alone flips readiness. A FAILED card fails strict; a
 # posted card exits the same as no card log at all. Kills a footer that drops failed_card
 # (string and zero literal) and a FAILED branch that never sets the flag.
@@ -180,7 +188,7 @@ else
 fi
 
 if [ "$fails" -eq 0 ]; then
-    echo "morning-card doctor guardrails: 11 passed, 0 failed."
+    echo "morning-card doctor guardrails: $passes passed, 0 failed."
     exit 0
 fi
 echo "morning-card doctor guardrails: $fails failed."
