@@ -4980,6 +4980,217 @@ async fn a_fact_slot_written_before_the_edge_becomes_current_when_the_holder_ret
     store.delete_document(&path_c).await.expect("cleanup C");
 }
 
+/// The probe fixture, shared by the two hand-over tests below: C (live, older) holds a
+/// fact slot; owner A writes the same slot later and becomes its only current row; B
+/// then supersedes A. B's `author` decides whether the edge is allowed to retire A.
+struct OwnerHolderProbe {
+    subject: String,
+    path_c: String,
+    path_a: String,
+    path_b: String,
+    t_b: SystemTime,
+}
+
+async fn owner_holder_probe(store: &Store, db: &Client, b_author: Author) -> OwnerHolderProbe {
+    let subject = unique_subject("sup-probe");
+    let subject_b = unique_subject("sup-probe-b");
+    let path_c = unique_path("sup-probe-c");
+    let path_a = unique_path("sup-probe-a");
+    let path_b = unique_path("sup-probe-b");
+    let t_c = whole_second_now();
+    let t_a = t_c + Duration::from_mins(1);
+    let t_b = t_c + Duration::from_mins(2);
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_document(&dummy_frontmatter(&path_c), "sha-probe-c", t_c)
+        .await
+        .expect("upsert C");
+    let mut front_a = dummy_frontmatter(&path_a);
+    front_a.author = Author::Owner;
+    store
+        .upsert_document(&front_a, "sha-probe-a", t_a)
+        .await
+        .expect("upsert owner A");
+    let mut front_b = dummy_frontmatter(&path_b);
+    front_b.author = b_author;
+    store
+        .upsert_document(&front_b, "sha-probe-b", t_b)
+        .await
+        .expect("upsert B");
+    store
+        .upsert_claim(
+            &subject, "status", "c-old", &path_c, t_c, &emb, "fact", "certain",
+        )
+        .await
+        .expect("C's fact");
+    store
+        .upsert_claim(
+            &subject, "status", "a-new", &path_a, t_a, &emb, "fact", "certain",
+        )
+        .await
+        .expect("owner A's fact");
+    assert_eq!(
+        current_count_at(db, &path_a).await,
+        1,
+        "precondition: A holds the slot"
+    );
+    assert_eq!(
+        sealed_count_at(db, &path_c).await,
+        1,
+        "precondition: C's older row is sealed below A"
+    );
+    // B asserts nothing in the slot; its claim only sets the retirement stamp.
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "y",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's item");
+    OwnerHolderProbe {
+        subject,
+        path_c,
+        path_a,
+        path_b,
+        t_b,
+    }
+}
+
+/// The probe slot's current rows as (value, source_path) pairs — "exactly one row and it
+/// is X" in one assertion.
+async fn slot_current_rows(db: &Client, subject: &str) -> Vec<(String, String)> {
+    db.query(
+        "SELECT value, source_path FROM claim WHERE subject = $1 AND predicate = 'status'
+         AND superseded_at IS NULL ORDER BY valid_from;",
+        &[&subject],
+    )
+    .await
+    .expect("list current slot rows")
+    .iter()
+    .map(|r| (r.get(0), r.get(1)))
+    .collect()
+}
+
+/// The probe: a non-owner B supersedes owner A, who holds a fact slot whose older row
+/// (C) is sealed below it. The edge is written, but the owner rule means A was never
+/// sealed — A is not retired, so the hand-over must not reopen C: the slot keeps
+/// exactly one current row, A's. Two current rows in one slot is the failure this fixes.
+#[tokio::test]
+async fn a_non_owner_supersede_of_an_owner_note_reopens_nothing() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let probe = owner_holder_probe(&store, &db, Author::Unknown).await;
+    store
+        .record_supersedes(&[[probe.path_b.clone(), probe.path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+
+    assert_eq!(
+        sealed_count_at(&db, &probe.path_a).await,
+        0,
+        "the unallowed edge sealed nothing — A stays current"
+    );
+    assert_eq!(
+        sealed_count_at(&db, &probe.path_c).await,
+        1,
+        "C stays sealed below A — the hand-over reopens nothing"
+    );
+    assert_eq!(
+        slot_current_rows(&db, &probe.subject).await,
+        vec![("a-new".to_owned(), probe.path_a.clone())],
+        "exactly one current row in the slot, and it is A's"
+    );
+
+    store.compact().await.expect("compact");
+    assert_eq!(
+        sealed_count_at(&db, &probe.path_a).await,
+        0,
+        "the compact sweep walks the same edge and still seals nothing"
+    );
+    assert_eq!(
+        sealed_count_at(&db, &probe.path_c).await,
+        1,
+        "compact does not reopen C either"
+    );
+
+    store
+        .delete_document(&probe.path_c)
+        .await
+        .expect("cleanup C");
+    store
+        .delete_document(&probe.path_a)
+        .await
+        .expect("cleanup A");
+    store
+        .delete_document(&probe.path_b)
+        .await
+        .expect("cleanup B");
+}
+
+/// The same probe with an owner-written B: the edge is allowed, so A retires — sealed
+/// with B's latest claim time — and the slot passes to C, the next-latest live row.
+#[tokio::test]
+async fn an_owner_supersede_of_an_owner_note_hands_the_slot_back() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let probe = owner_holder_probe(&store, &db, Author::Owner).await;
+    store
+        .record_supersedes(&[[probe.path_b.clone(), probe.path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+
+    assert_eq!(
+        stamp_at(&db, &probe.path_a).await,
+        Some(probe.t_b),
+        "A is retired, stamped with B's latest claim time"
+    );
+    assert_eq!(
+        current_count_at(&db, &probe.path_c).await,
+        1,
+        "the retirement hands the slot back to C"
+    );
+    assert_eq!(
+        sealed_count_at(&db, &probe.path_c).await,
+        0,
+        "C's row is current now, not sealed"
+    );
+    assert_eq!(
+        slot_current_rows(&db, &probe.subject).await,
+        vec![("c-old".to_owned(), probe.path_c.clone())],
+        "exactly one current row in the slot, and it is C's"
+    );
+
+    store
+        .delete_document(&probe.path_c)
+        .await
+        .expect("cleanup C");
+    store
+        .delete_document(&probe.path_a)
+        .await
+        .expect("cleanup A");
+    store
+        .delete_document(&probe.path_b)
+        .await
+        .expect("cleanup B");
+}
+
 /// Retirement empties a fact slot whose rows are all the retired note's: there is no
 /// live row to hand the slot to, and the re-evaluation must not resurrect anything —
 /// the slot honestly holds no current row.
