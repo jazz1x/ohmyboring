@@ -18,7 +18,7 @@ use crate::ingest;
 use crate::redact;
 use crate::serve::owner::{self, Caller};
 use crate::serve::{AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, register_limit, vec_off_rpc};
-use crate::store::EventLogFilter;
+use crate::store::{EventLogFilter, SupersedesReport};
 use crate::vault;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -1459,21 +1459,26 @@ async fn store_new_note(
     std::fs::write(&path, content).map_err(|e| (-32603_i32, format!("wiki note write: {e}")))?;
     log_dedup_decision(s, telemetry).await;
 
-    let supersedes_suffix = duplicate
+    let dup_suffix = duplicate
         .as_deref()
         .and_then(crate::vault::wiki_stem)
         .map(|old| format!(" (supersedes wiki/{old}.md)"))
         .unwrap_or_default();
-    let label = format!("wiki/{wiki_id}.md{supersedes_suffix}");
+    let label = format!("wiki/{wiki_id}.md{dup_suffix}");
     let message = finish_remembered_note(s, &path, &label, &front).await?;
-    let (sup_count, unk_count) =
+    let supersedes_report =
         write_supersedes_edges(s, &front.source_path, supersedes, edge_judge).await?;
+    let message = format!(
+        "{}{}",
+        message,
+        supersedes_suffix(supersedes, &supersedes_report)
+    );
     Ok(Remembered {
         source_path: front.source_path.clone(),
         wiki_id,
         duplicate,
-        supersedes: sup_count,
-        unknown: unk_count,
+        supersedes: supersedes_report.supersedes,
+        unknown: supersedes_report.unknown,
         message,
     })
 }
@@ -1502,29 +1507,52 @@ async fn existing_wiki_ids(s: &AppState) -> Result<HashSet<u32>, (i32, String)> 
 }
 
 /// After the note is on disk and ingested, one `supersedes` edge per corrected path. Vector off
-/// (no store): nothing can be written — the whole list reports as `unknown`, and that is not a
-/// failure; the wiki note itself is already recallable.
+/// (no store): nothing can be written — the whole list reports as `unknown` with the paths
+/// named, and that is not a failure; the wiki note itself is already recallable.
 async fn write_supersedes_edges(
     s: &AppState,
     new_path: &str,
     supersedes: &[String],
     judge: Option<&str>,
-) -> Result<(usize, usize), (i32, String)> {
+) -> Result<SupersedesReport, (i32, String)> {
     if supersedes.is_empty() {
-        return Ok((0, 0));
+        return Ok(SupersedesReport::default());
     }
     let Some(store) = s.store.as_ref() else {
-        return Ok((0, supersedes.len()));
+        return Ok(SupersedesReport {
+            supersedes: 0,
+            unknown: supersedes.len(),
+            unknown_paths: supersedes.to_vec(),
+        });
     };
     let pairs: Vec<[String; 2]> = supersedes
         .iter()
         .map(|old| [new_path.to_owned(), old.clone()])
         .collect();
-    let report = store
+    store
         .record_supersedes(&pairs, judge)
         .await
-        .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))?;
-    Ok((report.supersedes, report.unknown))
+        .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))
+}
+
+/// The `remember` text says when a named correction did not link — a bare "remembered" line
+/// reads as "everything you named was replaced", which is exactly what a mistyped path makes
+/// false. No supersedes: empty, so the answer stays byte-identical to what parsers have always
+/// seen. All linked: the count alone. A miss: the missed paths, so the caller can retry with
+/// the right spelling.
+fn supersedes_suffix(supersedes: &[String], report: &SupersedesReport) -> String {
+    if supersedes.is_empty() {
+        return String::new();
+    }
+    if report.unknown == 0 {
+        return format!(" · supersedes linked {}", report.supersedes);
+    }
+    format!(
+        " · supersedes linked {}, not found {} ({})",
+        report.supersedes,
+        report.unknown,
+        report.unknown_paths.join(", ")
+    )
 }
 
 async fn finish_remembered_note(
@@ -2003,10 +2031,28 @@ fn parse_supersedes(args: Option<&Value>) -> Result<Vec<String>, (i32, String)> 
         ))?;
         let s = s.trim();
         if !s.is_empty() {
-            out.push(s.to_owned());
+            out.push(normalize_supersedes_path(s));
         }
     }
     Ok(out)
+}
+
+/// One spelling of the note being corrected, folded to the canonical `/vault/wiki/…` form the
+/// `document` table keys — agents pass what they saw (`wiki/wiki-1759.md`, sometimes bare
+/// `wiki-1759.md`), and the lookup keys on this exact form. Anything that is not one of these
+/// spellings passes through untouched and then counts as unknown, which the answer says out
+/// loud.
+fn normalize_supersedes_path(raw: &str) -> String {
+    if let Some(rest) = raw
+        .strip_prefix("/vault/wiki/")
+        .or_else(|| raw.strip_prefix("wiki/"))
+    {
+        format!("/vault/wiki/{rest}")
+    } else if !raw.contains('/') {
+        format!("/vault/wiki/{raw}")
+    } else {
+        raw.to_owned()
+    }
 }
 
 /// Optional `judge`: who judged the corrections this note makes, in the author vocabulary.
@@ -2227,8 +2273,8 @@ mod tests {
         DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote, ToolCallError,
         ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_tools_list,
         needs_dedup, parse_remember_note, parse_supersedes, pick_duplicate,
-        probable_session_duplicate, remember_note, should_replace_duplicate, tool_outcome_snippet,
-        tool_query_arg,
+        probable_session_duplicate, remember_note, should_replace_duplicate, supersedes_suffix,
+        tool_outcome_snippet, tool_query_arg,
     };
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
@@ -2318,6 +2364,56 @@ mod tests {
     }
 
     #[test]
+    fn parse_supersedes_folds_short_spellings_to_the_canonical_path() {
+        // The document table keys notes as /vault/wiki/…; agents pass what they saw. Each
+        // spelling below must reach record_supersedes as the canonical form, or the lookup
+        // finds no row and the correction links nothing.
+        let args = json!({"supersedes": [
+            "/vault/wiki/wiki-1759.md",
+            "wiki/wiki-1759.md",
+            "wiki-1759.md",
+        ]});
+        assert_eq!(
+            parse_supersedes(Some(&args)).unwrap(),
+            vec!["/vault/wiki/wiki-1759.md".to_owned(); 3]
+        );
+        // Anything that is not one of those spellings is left for the store to count unknown.
+        let args = json!({"supersedes": ["raw/2026-09-27-session.md", "../outside.md"]});
+        assert_eq!(
+            parse_supersedes(Some(&args)).unwrap(),
+            vec![
+                "raw/2026-09-27-session.md".to_owned(),
+                "../outside.md".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn supersedes_suffix_appends_only_when_supersedes_were_named() {
+        use crate::store::SupersedesReport;
+        let none: Vec<String> = Vec::new();
+        assert_eq!(supersedes_suffix(&none, &SupersedesReport::default()), "");
+
+        let all_linked = SupersedesReport {
+            supersedes: 2,
+            ..SupersedesReport::default()
+        };
+        assert_eq!(
+            supersedes_suffix(&["/vault/wiki/a.md".to_owned()], &all_linked),
+            " · supersedes linked 2"
+        );
+        let missed = SupersedesReport {
+            supersedes: 1,
+            unknown: 1,
+            unknown_paths: vec!["/vault/wiki/ghost.md".to_owned()],
+        };
+        assert_eq!(
+            supersedes_suffix(&["/vault/wiki/a.md".to_owned()], &missed),
+            " · supersedes linked 1, not found 1 (/vault/wiki/ghost.md)"
+        );
+    }
+
+    #[test]
     fn needs_dedup_skips_the_gate_for_corrections_only() {
         // supersedes 를 밝힌 고침 기록은 중복 검사를 아예 걷지 않는다 — 조금만 고친 값도
         // 임베딩 거리 안에서 기존 노트와 닮아 gate 가 삼킬 수 있기 때문. 표기 없는 기록은
@@ -2387,6 +2483,44 @@ mod tests {
         .unwrap();
         assert_eq!(fix.duplicate, None, "a correction skips the gate");
         assert_ne!(fix.source_path, first.source_path);
+    }
+
+    #[tokio::test]
+    async fn remember_text_names_supersedes_entries_it_could_not_link() {
+        // Vector off: nothing can link, so every named correction misses — and the answer must
+        // say so, with the path in its canonical spelling, instead of a bare "remembered".
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let note = json!({
+            "title": "t",
+            "body": "b",
+            "omb_session_id": "s1",
+            "supersedes": ["wiki/wiki-1759.md", "ghost-note.md"],
+        });
+
+        let remembered = remember_note(&s, Caller::Unverified, Some(&note))
+            .await
+            .unwrap();
+        assert!(
+            remembered
+                .message
+                .contains("supersedes linked 0, not found 2 (/vault/wiki/wiki-1759.md, /vault/wiki/ghost-note.md)"),
+            "the missed paths are named: {}",
+            remembered.message
+        );
+
+        let plain = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&json!({"title": "t2", "body": "b2", "omb_session_id": "s1"})),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !plain.message.contains("supersedes"),
+            "no supersedes: the answer keeps its historic shape: {}",
+            plain.message
+        );
     }
 
     #[tokio::test]
