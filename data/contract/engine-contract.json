@@ -230,6 +230,12 @@
     },
     "decisions": {
       "properties": {
+        "limit": {
+          "description": "optional row cap (default 50)",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
         "project": {
           "description": "optional project slug filter",
           "type": "string"
@@ -309,6 +315,12 @@
     },
     "next_actions": {
       "properties": {
+        "limit": {
+          "description": "optional row cap (default 50)",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
         "project": {
           "description": "optional project slug filter",
           "type": "string"
@@ -480,6 +492,12 @@
     },
     "risks": {
       "properties": {
+        "limit": {
+          "description": "optional row cap (default 50)",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
         "project": {
           "description": "optional project slug filter",
           "type": "string"
@@ -489,6 +507,12 @@
     },
     "stalled": {
       "properties": {
+        "limit": {
+          "description": "optional row cap (default 50)",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
         "older_than_days": {
           "description": "threshold in days (default 7)",
           "type": "integer"
