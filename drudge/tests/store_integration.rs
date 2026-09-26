@@ -5191,6 +5191,183 @@ async fn an_owner_supersede_of_an_owner_note_hands_the_slot_back() {
         .expect("cleanup B");
 }
 
+/// The retired-owner sway probe, shared below: owner O takes a fact slot; owner A
+/// writes it later and holds it; B supersedes A, and the hand-over reopens O. X's
+/// write — the probe's trigger — lands after the retirement, in the test body.
+struct RetiredOwnerSwayProbe {
+    subject: String,
+    path_o: String,
+    path_x: String,
+    path_a: String,
+    path_b: String,
+}
+
+async fn retired_owner_sway_probe(store: &Store, db: &Client) -> RetiredOwnerSwayProbe {
+    let subject = unique_subject("sup-sway");
+    let subject_b = unique_subject("sup-sway-b");
+    let path_o = unique_path("sup-sway-o");
+    let path_x = unique_path("sup-sway-x");
+    let path_a = unique_path("sup-sway-a");
+    let path_b = unique_path("sup-sway-b");
+    let t_o = whole_second_now();
+    let t_a = t_o + Duration::from_mins(2);
+    let t_b = t_o + Duration::from_mins(3);
+    let emb = [0.0_f32; 1024];
+
+    let mut front_o = dummy_frontmatter(&path_o);
+    front_o.author = Author::Owner;
+    store
+        .upsert_document(&front_o, "sha-sway-o", t_o)
+        .await
+        .expect("upsert owner O");
+    store
+        .upsert_document(&dummy_frontmatter(&path_x), "sha-sway-x", t_o)
+        .await
+        .expect("upsert X");
+    let mut front_a = dummy_frontmatter(&path_a);
+    front_a.author = Author::Owner;
+    store
+        .upsert_document(&front_a, "sha-sway-a", t_a)
+        .await
+        .expect("upsert owner A");
+    let mut front_b = dummy_frontmatter(&path_b);
+    front_b.author = Author::Owner;
+    store
+        .upsert_document(&front_b, "sha-sway-b", t_b)
+        .await
+        .expect("upsert owner B");
+
+    store
+        .upsert_claim(
+            &subject, "status", "o-old", &path_o, t_o, &emb, "fact", "certain",
+        )
+        .await
+        .expect("O's fact");
+    store
+        .upsert_claim(
+            &subject, "status", "a-new", &path_a, t_a, &emb, "fact", "certain",
+        )
+        .await
+        .expect("owner A's fact");
+    assert_eq!(
+        current_count_at(db, &path_a).await,
+        1,
+        "precondition: A holds the slot"
+    );
+    assert_eq!(
+        sealed_count_at(db, &path_o).await,
+        1,
+        "precondition: O is sealed below owner A"
+    );
+    // B asserts nothing in the slot; its claim only sets the retirement stamp.
+    store
+        .upsert_claim(
+            &subject_b,
+            "next_action",
+            "y",
+            &path_b,
+            t_b,
+            &emb,
+            "next",
+            "certain",
+        )
+        .await
+        .expect("B's item");
+
+    store
+        .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+    assert_eq!(
+        stamp_at(db, &path_a).await,
+        Some(t_b),
+        "A is retired, stamped with B's latest claim time"
+    );
+    assert_eq!(
+        current_count_at(db, &path_o).await,
+        1,
+        "the hand-over reopens O, the slot's only live row"
+    );
+    RetiredOwnerSwayProbe {
+        subject,
+        path_o,
+        path_x,
+        path_a,
+        path_b,
+    }
+}
+
+/// The fact seal reads the slot's max over live rows, and the owner guard reads that
+/// same max: an owner-written row is sealed only when the live latest is owner-written
+/// too. A retired owner note must not sway the guard. In the probe the live race's max
+/// is X's row — not owner-written — so the guard keeps O open and the slot's current
+/// rows are exactly O and X. A mutant that takes the seal's max over ALL rows lets
+/// the retired owner A's row win the race: the guard sees an owner at the max and
+/// seals O. The exact rows hold through `compact`, whose sweep walks the same edge.
+#[tokio::test]
+async fn a_retired_owner_note_does_not_sway_the_fact_seals_owner_guard() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let probe = retired_owner_sway_probe(&store, &db).await;
+    let t_x = whole_second_now() + Duration::from_mins(1);
+    let emb = [0.0_f32; 1024];
+
+    // The probe: X writes the slot after A's retirement. The live race's max is X's
+    // row, which is not owner-written — the guard must keep O open.
+    store
+        .upsert_claim(
+            &probe.subject,
+            "status",
+            "x-new",
+            &probe.path_x,
+            t_x,
+            &emb,
+            "fact",
+            "certain",
+        )
+        .await
+        .expect("X's fact");
+    let expected = vec![
+        ("o-old".to_owned(), probe.path_o.clone()),
+        ("x-new".to_owned(), probe.path_x.clone()),
+    ];
+    assert_eq!(
+        slot_current_rows(&db, &probe.subject).await,
+        expected,
+        "the retired owner A must not win the live race: O stays open because X, \
+         the live latest, is not owner-written"
+    );
+
+    store.compact().await.expect("compact");
+    assert_eq!(
+        slot_current_rows(&db, &probe.subject).await,
+        expected,
+        "the compact sweep walks the same edge — the slot still holds exactly O and X"
+    );
+
+    store
+        .delete_document(&probe.path_o)
+        .await
+        .expect("cleanup O");
+    store
+        .delete_document(&probe.path_x)
+        .await
+        .expect("cleanup X");
+    store
+        .delete_document(&probe.path_a)
+        .await
+        .expect("cleanup A");
+    store
+        .delete_document(&probe.path_b)
+        .await
+        .expect("cleanup B");
+}
+
 /// Retirement empties a fact slot whose rows are all the retired note's: there is no
 /// live row to hand the slot to, and the re-evaluation must not resurrect anything —
 /// the slot honestly holds no current row.
@@ -5362,7 +5539,10 @@ async fn superseded_note_keeps_its_own_earlier_seal_stamp() {
 
 /// `compact` reports the retirement it performed: the first sweep seals exactly the
 /// fixture's claims — counted from the fixture, not the whole DB — and a repeat sweep
-/// reports 0. The number is the sweep's own, not a constant that prints every run.
+/// reports 0. The number is the sweep's own, not a constant that prints every run. A
+/// drain compact runs before the fixture so retirements earlier suites left unsealed
+/// cannot inflate the count: the assertion is the delta attributable to this fixture
+/// alone.
 #[tokio::test]
 async fn compact_reports_the_supersedes_seal_count_then_zero() {
     let Some(dsn) = test_dsn() else {
@@ -5371,6 +5551,9 @@ async fn compact_reports_the_supersedes_seal_count_then_zero() {
     };
     let store = Store::open(&dsn, 1024).await.expect("open store");
     let db = connect(&dsn).await;
+    // Drain first: rows still current under another suite's supersedes edge would be
+    // sealed by this fixture's first compact and drown its count.
+    store.compact().await.expect("drain compact");
 
     let subject_a1 = unique_subject("sup-count-a1");
     let subject_a2 = unique_subject("sup-count-a2");
