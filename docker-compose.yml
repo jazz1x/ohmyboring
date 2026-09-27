@@ -130,6 +130,10 @@ services:
       # Tell host-side adapters they are running inside the hermes container and where the repo is.
       BORING_IN_CONTAINER: "1"
       BORING_HOME: /host/oh-my-boring
+      # The card-button plugin judges presses as the owner — the same token the engine and
+      # door already receive (wiki-2069) — and refuses presses from anyone but the owner.
+      BORING_OWNER_TOKEN: ${BORING_OWNER_TOKEN:-}
+      SECRETARY_OWNER_ID: ${SECRETARY_OWNER_ID:-}
     volumes:
       - ${HOME}/.hermes:/opt/data         # persists config / credentials / session memory (autonomy-augmentation layer)
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: ingest-worker.py only globs /host/.claude/projects)

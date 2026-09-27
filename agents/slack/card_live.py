@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""The morning card's live collaborators — every seam that reaches the door, the engine, or
-the host vault. Depends only on card_types (plus stdlib and the shared engine clients) —
-never on card_registers/card_advice/card_verdicts/card_view/card — so card.py can import
-this module for its default Collaborators without a cycle back.
+"""The morning card's live collaborators — every read-side seam that reaches the door, the
+engine, or the host vault. Depends only on card_types (plus stdlib and the shared engine
+clients) — never on card_registers/card_advice/card_verdicts/card_view/card — so card.py
+can import this module for its default Collaborators without a cycle back.
 
-ENGINE_TIMEOUT and CARD_WAIT_HOURS live here rather than in card.py because the live reads
-below are the only things that need them at module load: `_live_past_verdicts`'s proposal
-window is CARD_WAIT_HOURS-wide, and every DrudgeClient/urlopen call here uses ENGINE_TIMEOUT.
-card.py imports both back from this module for its own wait-loop default."""
+The write-side effects (record/consumption/execute_repair) and the fold that applies a
+card_press.effects list live in card_effects — a module that must stay importable inside
+the hermes venv, which has no langchain. This module imports them back so existing
+references (card.py's Collaborators, tests) keep working; `_door_url` and ENGINE_TIMEOUT
+moved there with them.
+
+CARD_WAIT_HOURS lives here rather than in card.py because the live reads below are the
+only things that need it at module load: `_live_past_verdicts`'s proposal window is
+CARD_WAIT_HOURS-wide. card.py imports it back from this module for its wait-loop default."""
 
 from __future__ import annotations
 
@@ -18,10 +23,16 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import UTC, datetime
 from typing import Any
 
 import omb_env
+from card_effects import (  # noqa: F401
+    ENGINE_TIMEOUT,
+    _door_url,
+    _live_consumption,
+    _live_execute_repair,
+    _live_record,
+)
 from card_types import (
     NO_CURRENT_CLAIM,
     PastApproved,
@@ -29,32 +40,18 @@ from card_types import (
     PastUnansweredPair,
     PastVerdictPair,
     ProposedVerdict,
-    RepairDone,
-    RepairFailed,
-    RepairUnanswered,
     ResolvedNote,
     Unresolved,
 )
-from drudge_client import OWNER, DrudgeClient, owner_headers
+from drudge_client import DrudgeClient
 from pydantic import ValidationError
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "memory"))
 from retriever import BoringRetriever  # noqa: E402
 
-# Register answers carry up to 50 claims each; the door timeout lesson (brief p95 77s) says the
-# point read is far cheaper, but a cold engine still earns more than a point-read default.
-ENGINE_TIMEOUT = float(os.environ.get("CARD_ENGINE_TIMEOUT") or "30")
 # A card's own lifespan — the next card's post outlives any button the owner never got to
 # press, so waiting past this is polling a socket nobody is going to answer on.
 CARD_WAIT_HOURS = float(os.environ.get("CARD_WAIT_HOURS") or "23")
-# execute_repair's own timeout — separate from ENGINE_TIMEOUT (30s), which every quick
-# point-read here shares. The door's POST blocks on the engine's synchronous /sync (global
-# lock, full re-embed of every reread note); a 212-note group is not a point read. 600s is
-# the door's own upstream ceiling headroom (DOOR_TIMEOUT=130s per hop, but /sync's own cost
-# scales with note count, not request count) — long enough that a real repair's sync finishes
-# under it rather than the card's http client giving up first and turning a slow-but-working
-# merge into a fabricated failure (F2, 2026-09-22).
-CARD_REPAIR_TIMEOUT = float(os.environ.get("CARD_REPAIR_TIMEOUT") or "600")
 
 
 def _live_fetch(path: str, project: str) -> dict[str, Any]:
@@ -174,20 +171,6 @@ def _live_handover(session: str, at: str, paths: list[str]) -> dict:
     return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).handover(session, at, paths)
 
 
-def _live_consumption(session: str, kind: str, paths: list[str]) -> dict:
-    # Row-level, not session-level: a button judges the note its row cited, and only that one.
-    # judge=OWNER: a button press is the owner's hand, and the client carries the owner token
-    # the engine demands for that word.
-    at = datetime.now(UTC).isoformat()
-    if kind == "used":
-        return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(
-            session, at, used=paths, judge=OWNER
-        )
-    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(
-        session, at, contested=paths, judge=OWNER
-    )
-
-
 def _live_resolve(subject: str, register: str) -> ResolvedNote | Unresolved:
     """subject → current claim's note path through the door. A recurrence source is already
     a note path — it resolves to itself without a door round-trip. Everything else asks
@@ -217,12 +200,6 @@ def _live_approved(since_hours: int) -> list[PastApproved]:
         PastApproved(session=item["session"], note=item["note"], at=item["at"])
         for item in payload["approved"]
     ]
-
-
-def _live_record(event: str, fields: dict) -> None:
-    import event_log
-
-    event_log.append_event("slack-card", event, "ok", **fields)
 
 
 #: how many split-subject groups the "오늘 할 일" lane shows — the door's own default too.
@@ -260,69 +237,6 @@ def _live_repairs(limit: int = REPAIRS_LIMIT) -> dict[str, Any]:
     return _door_json(url)
 
 
-def _door_failure(subject: str, code: int, body: bytes) -> RepairFailed | RepairUnanswered:
-    """Classify the door's HTTP-error body: counts reported → RepairFailed, anything else
-    (unreadable, or JSON without both count keys) → RepairUnanswered — the rows may already
-    be committed, so an unknown count must never be written as 0."""
-    try:
-        failed_payload = json.loads(body.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return RepairUnanswered(subject=subject, reason=f"door answered {code}")
-    if not isinstance(failed_payload, dict):
-        return RepairUnanswered(subject=subject, reason=f"door answered {code}")
-    deleted = failed_payload.get("deleted_rows")
-    reread = failed_payload.get("reread_notes")
-    if deleted is None or reread is None:
-        reason = f"door answered {code}"
-        error = failed_payload.get("error")
-        if isinstance(error, str) and error:
-            reason = f"{reason}: {error}"
-        return RepairUnanswered(subject=subject, reason=reason)
-    sync = failed_payload.get("sync")
-    reason = (
-        sync["error"] if isinstance(sync, dict) and sync.get("error") is not None else f"door answered {code}"
-    )
-    return RepairFailed(
-        subject=subject,
-        deleted_rows=int(deleted),
-        reread_notes=int(reread),
-        reason=str(reason),
-        owner_held=failed_payload.get("owner_held") or [],
-    )
-
-
-def _live_execute_repair(subject: str) -> RepairDone | RepairFailed | RepairUnanswered:
-    """POST the door's merge. The door commits DELETE+UPDATE before its sync, so a timeout
-    or a count-less body may already have deleted the rows — a failure without reported
-    counts is RepairUnanswered, never a fabricated 0 (F2). Never raised: a slow or failed
-    merge must not end the card's whole run over one button."""
-    claim = {"subject": subject, "judge": OWNER}
-    req = urllib.request.Request(
-        f"{_door_url()}/repairs/split-subjects",
-        data=json.dumps(claim).encode(),
-        headers={"content-type": "application/json", **owner_headers(claim)},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=CARD_REPAIR_TIMEOUT) as r:
-            payload = json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        try:
-            body = e.read()
-        except OSError:
-            body = b""
-        return _door_failure(subject, e.code, body)
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return RepairUnanswered(subject=subject, reason=f"door unreachable: {e}")
-    return RepairDone(
-        subject=subject,
-        deleted_rows=payload["deleted_rows"],
-        reread_notes=payload["reread_notes"],
-        remaining_variants=payload.get("remaining_variants"),
-        owner_held=payload.get("owner_held") or [],
-    )
-
-
 def _live_merged_yesterday() -> int | None:
     """Sum of yesterday's subject_merged deleted_rows, or None when nothing merged — the head
     line's optional clause. Read straight from the engine's /events, the same route
@@ -331,10 +245,6 @@ def _live_merged_yesterday() -> int | None:
     if not entries:
         return None
     return sum(int((e.get("attributes") or {}).get("deleted_rows") or 0) for e in entries)
-
-
-def _door_url() -> str:
-    return os.environ["BORING_DOOR_URL"].rstrip("/")
 
 
 def _live_search(subject: str) -> list[dict[str, Any]]:

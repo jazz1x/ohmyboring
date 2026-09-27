@@ -1,0 +1,5 @@
+name: boring-card
+version: 1.0.0
+description: "Receives the morning card's button presses over the one Slack socket and applies the same effects card.py would."
+author: "oh-my-boring"
+kind: standalone
