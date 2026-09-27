@@ -172,19 +172,10 @@ def confirm_past(
     )
 
 
-def parse_action(
-    payload: dict,
-    *,
-    owner_id: str | None,
-    n_total: int,
-    at: str | None = None,
-) -> ButtonVerdict | Rejected:
-    """A block_actions payload in, one verdict out — or Rejected with the reason. Nothing here
-    raises: a weird button is a fact about the world, not a crash. When an owner is configured,
-    nobody else's press counts. `n_total` bounds idx across all three card lanes — repair rows,
-    then advice rows, then the review rows, one shared index space (card.py's record_verdict
-    splits on it)."""
-
+def parse_action_common(payload: dict, *, owner_id: str | None) -> tuple[tuple[int, str], str] | Rejected:
+    """The press checks parse_action and parse_press share — envelope shape, action_id
+    idx/choice, user, owner. Success is ((idx, choice), user); anything else is a Rejected
+    value, never an exception."""
     if payload.get("type") != "block_actions":
         return Rejected(reason="not block_actions")
     actions = payload.get("actions") or []
@@ -201,11 +192,31 @@ def parse_action(
     choice = parts[2]
     if choice not in CHOICES:
         return Rejected(reason=f"unknown choice {choice!r}")
-    if idx < 0 or idx >= n_total:
-        return Rejected(reason=f"no proposal {idx}")
     user = (payload.get("user") or {}).get("id") or ""
     if not user:
         return Rejected(reason="no user")
     if owner_id is not None and user != owner_id:
         return Rejected(reason=f"user {user} is not the owner")
+    return (idx, choice), user
+
+
+def parse_action(
+    payload: dict,
+    *,
+    owner_id: str | None,
+    n_total: int,
+    at: str | None = None,
+) -> ButtonVerdict | Rejected:
+    """A block_actions payload in, one verdict out — or Rejected with the reason. Nothing here
+    raises: a weird button is a fact about the world, not a crash. When an owner is configured,
+    nobody else's press counts. `n_total` bounds idx across all three card lanes — repair rows,
+    then advice rows, then the review rows, one shared index space (card.py's record_verdict
+    splits on it)."""
+
+    parsed = parse_action_common(payload, owner_id=owner_id)
+    if isinstance(parsed, Rejected):
+        return parsed
+    (idx, choice), user = parsed
+    if idx < 0 or idx >= n_total:
+        return Rejected(reason=f"no proposal {idx}")
     return ButtonVerdict(idx=idx, choice=choice, user=user, at=at or datetime.now(UTC).isoformat())

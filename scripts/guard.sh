@@ -90,6 +90,7 @@ python3 agents/slack/test_card_registers.py
 python3 agents/slack/test_card_advice.py
 python3 agents/slack/test_card_verdicts.py
 python3 agents/slack/test_card_view.py
+python3 agents/slack/test_card_press.py
 python3 agents/slack/test_card_graph.py
 python3 agents/slack/test_secretary.py
 python3 agents/slack/test_secretary_core.py

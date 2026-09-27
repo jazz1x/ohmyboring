@@ -49,7 +49,13 @@ class BuildBlocksTests(unittest.TestCase):
             buttons = {b["action_id"]: b for b in row["elements"]}
             self.assertEqual(set(buttons), {f"card:{idx}:do", f"card:{idx}:defer", f"card:{idx}:drop"})
             for button in row["elements"]:
-                self.assertEqual(button["value"], EXPECTED_NOTES[idx].rsplit("/", 1)[-1].removesuffix(".md"))
+                self.assertEqual(
+                    json.loads(button["value"]),
+                    {
+                        "lane": "advice",
+                        "note": EXPECTED_NOTES[idx].rsplit("/", 1)[-1].removesuffix(".md"),
+                    },
+                )
             labels = [b["text"]["text"] for b in row["elements"]]
             self.assertEqual(labels, ["채택", "보류", "거절"])
 
@@ -459,9 +465,10 @@ class CardV2ShapeTests(unittest.TestCase):
         plain = cv.build_blocks([proposal], reviews=[], lang="ko")
         self.assertNotIn("에이전트가 가른 것", _blocks_text(plain))
 
-    def test_repair_and_review_buttons_carry_no_empty_value(self):
-        # Slack rejected the live card with invalid_blocks (value must be 1+ chars when
-        # present) and no handler reads value on these rows — the key must be absent, not "".
+    def test_repair_and_review_buttons_carry_their_lane_values(self):
+        # Every button's value is compact JSON naming its lane and what that lane needs —
+        # card_press parses it back without any of the card's state. No empty value either:
+        # Slack rejects the block outright when a present value has 0 chars.
         repair = cc.Repair(
             subject="foodspring-front",
             variants=["foodspring front", "foodspring-front"],
@@ -480,9 +487,30 @@ class CardV2ShapeTests(unittest.TestCase):
         )
         action_rows = [b for b in blocks if b["type"] == "actions"]
         self.assertEqual(len(action_rows), 3)  # repair row + advice row + review row
-        for row in action_rows:
+        expected = [
+            {"lane": "repair", "subject": "foodspring-front"},
+            {"lane": "advice", "note": "wiki-0900"},
+            {"lane": "review", "session": "s1", "note": "wiki-0700", "kind": "contested"},
+        ]
+        for row, lane_data in zip(action_rows, expected):
             for button in row["elements"]:
-                self.assertTrue("value" not in button or button["value"])
+                self.assertTrue(button["value"])
+                self.assertEqual(json.loads(button["value"]), lane_data)
+
+    def test_a_note_outside_the_vault_wiki_or_an_over_limit_value_refuses_the_card(self):
+        # A card that cannot be answered must not be sent: the value carries the note in
+        # label form, so a note not under /vault/wiki/ cannot ride it (ValueError at build),
+        # and neither can a value past Slack's 2000-char cap.
+        with self.assertRaises(ValueError):
+            cv.build_blocks([self._proposal(note="/somewhere/note.md")], lang="ko")
+        oversized = cc.Repair(
+            subject="x" * 2100,
+            variants=["a", "b"],
+            rows=1,
+            notes=1,
+        )
+        with self.assertRaises(ValueError):
+            cv.build_blocks([self._proposal()], repairs=[oversized], repairs_total_groups=1, lang="ko")
 
     def test_review_lane_counts_against_the_block_limit(self):
         # r3.1: the review lane's header and rows live inside the same 50-block cap as the

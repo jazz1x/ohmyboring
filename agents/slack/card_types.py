@@ -256,6 +256,73 @@ class Rejected(BaseModel):
     reason: str
 
 
+class CardPress(BaseModel):
+    """One press carrying its own lane data — what card_view packed into the button value,
+    so a process with none of the card's in-memory state can still answer it. `note` stays
+    in the `wiki-NNNN` label form the card shows; effects expands it back to a path."""
+
+    idx: int
+    choice: Choice
+    user: str
+    card_ts: str
+    channel: str
+
+
+class RepairPress(CardPress):
+    """The execute lane's press — its subject is all the door's merge needs."""
+
+    lane: Literal["repair"] = "repair"
+    subject: str
+
+
+class AdvicePress(CardPress):
+    """The advice lane's press — its note is all the consumption verdict needs."""
+
+    lane: Literal["advice"] = "advice"
+    note: str
+
+
+class ReviewPress(CardPress):
+    """The review lane's press — `session` is the proposing session a flip would judge."""
+
+    lane: Literal["review"] = "review"
+    session: str
+    note: str
+    kind: Literal["used", "contested"]
+
+
+#: parse_press's success return — discriminated on the value's own lane tag.
+Press = Annotated[RepairPress | AdvicePress | ReviewPress, Field(discriminator="lane")]
+
+
+class Record(BaseModel):
+    """One engine event-log row to write."""
+
+    effect: Literal["record"] = "record"
+    event: str
+    fields: dict
+
+
+class Consumption(BaseModel):
+    """One /consumption verdict — a used|contested edge onto a session."""
+
+    effect: Literal["consumption"] = "consumption"
+    session: str
+    kind: Literal["used", "contested"]
+    paths: list[str]
+
+
+class ExecuteRepair(BaseModel):
+    """One door merge (POST /repairs/split-subjects) — the only effect that calls the door."""
+
+    effect: Literal["execute_repair"] = "execute_repair"
+    subject: str
+
+
+#: One element of card_press.effects' answer — which collaborator, with what arguments.
+Effect = Annotated[Record | Consumption | ExecuteRepair, Field(discriminator="effect")]
+
+
 class PostedCard(BaseModel):
     """Where the card lives in Slack; also the engine session's identity (slack:<channel>:<ts>)."""
 

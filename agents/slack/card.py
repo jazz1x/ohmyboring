@@ -23,9 +23,11 @@ sends the Block Kit card (repair rows above the advice rows, each grouped and la
 way), records a card_proposal event per
 surviving proposal, and stops at an interrupt; a Slack button press resumes it with
 Command(resume=…) — the verdict's idx spans all three lanes, repair rows first, then
-advice rows, then the review rows. record_verdict branches by lane: a repair row's adopt
-button calls the door's own merge (POST /repairs/split-subjects); an advice row's press
-logs a card_verdict event — card_proposal exists only for these rows, and
+advice rows, then the review rows. record_verdict rebuilds the press for the row's lane
+from its own state and folds the shared decision table (card_press.effects) through its
+collaborators — one table, also the one a second process receiving the same press consults:
+a repair row's adopt calls the door's own merge (POST /repairs/split-subjects); an advice
+row's press logs a card_verdict event — card_proposal exists only for these rows, and
 card_live._live_past_verdicts joins the two by (card_ts, idx), raising on a verdict with
 no proposal — then its adopt/reject writes the verdict to the engine while its hold
 leaves no trace beyond the event; a review row's agree leaves only a verdict_reviewed
@@ -38,9 +40,10 @@ CARD_DRY_RUN=1 stops right after post_card and prints the proposals instead of t
 Slack, handover, or the event log.
 
 The socket lives here, not in the secretary: hermes can only text, and the secretary answers
-questions while this file asks them. Everything decided lives in card_types/card_registers/
-card_advice/card_verdicts/card_view; everything external is a collaborator (card_live, plus
-this file's own _env_send/make_propose/dry-run stubs).
+questions while this file asks them. Everything decided lives in
+card_types/card_registers/card_advice/card_verdicts/card_view/card_press; everything
+external is a collaborator (card_live, plus this file's own _env_send/make_propose/dry-run
+stubs).
 """
 
 from __future__ import annotations
@@ -61,6 +64,7 @@ sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 import boring_config  # noqa: E402
 import card_advice  # noqa: E402
 import card_live  # noqa: E402
+import card_press  # noqa: E402
 import card_registers  # noqa: E402
 import card_types  # noqa: E402
 import card_verdicts  # noqa: E402
@@ -434,47 +438,54 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         return {"verdicts": [verdict]}
 
     def record_verdict(state: CardState) -> dict:
+        # 줄을 상태에서 Press 값으로 만들고(card_press가 페이로드를 해석할 때와 같은
+        # 데이터), 두 프로세스가 공유하는 결정표 card_press.effects를 협력자 위로 접는다.
+        # 효과의 순서가 곧 실행 순서다.
         verdict = state["verdicts"][-1]
         n_repairs = len(state["repairs"])
+        message = state["message"]
+        press: card_types.Press
         if verdict.idx < n_repairs:
-            # the execute lane: adopt calls the door's own merge; hold/reject leave no
-            # trace at all — there is nothing to suppress in this lane.
-            if verdict.choice != "do":
-                return {}
-            result = collabs.execute_repair(state["repairs"][verdict.idx].subject)
-            return {"repair_results": {verdict.idx: result}}
-        n_proposals = len(state["proposals"])
-        if verdict.idx < n_repairs + n_proposals:
-            # card_verdict is recorded only here, in the advice lane: card_proposal events
-            # exist only for these rows, and _live_past_verdicts joins the two by
-            # (card_ts, idx) — a press in any other lane would orphan that join and the
-            # next morning's card would raise on it and refuse to ship.
-            collabs.record("card_verdict", card_verdicts.verdict_event_fields(verdict, state["message"].ts))
-            if verdict.choice == "defer":
-                return {}  # a card_verdict event, but no consumption call — never suppresses
-            kind = "used" if verdict.choice == "do" else "contested"
-            note = state["proposals"][verdict.idx - n_repairs].note
-            collabs.consumption(session_name(state["message"]), kind, [note])
-            return {}
-        # the review lane: the agent proposed, the owner may only agree or flip. Agreeing
-        # records nothing but the review event — no edge, silence ≠ agreement elsewhere too.
-        # Flipping judges the proposing session with the opposite kind: the agent's own edge
-        # stays in the graph (an agent 표 and an owner 표, side by side, by design).
-        review = state["reviews"][verdict.idx - n_repairs - n_proposals]
-        fields: dict[str, Any] = {
-            "session_id": review.session_id,
-            "note": review.note,
-            "proposed_kind": review.kind,
-            "card_ts": state["message"].ts,
-        }
-        if verdict.choice == "do":
-            collabs.record("verdict_reviewed", {**fields, "choice": "agree"})
-            return {}
-        collabs.consumption(
-            review.session_id, "contested" if review.kind == "used" else "used", [review.note]
-        )
-        collabs.record("verdict_reviewed", {**fields, "choice": "flip"})
-        return {}
+            repair = state["repairs"][verdict.idx]
+            press = card_types.RepairPress(
+                idx=verdict.idx,
+                choice=verdict.choice,
+                user=verdict.user,
+                card_ts=message.ts,
+                channel=message.channel,
+                subject=repair.subject,
+            )
+        elif verdict.idx < n_repairs + len(state["proposals"]):
+            proposal = state["proposals"][verdict.idx - n_repairs]
+            press = card_types.AdvicePress(
+                idx=verdict.idx,
+                choice=verdict.choice,
+                user=verdict.user,
+                card_ts=message.ts,
+                channel=message.channel,
+                note=card_view.note_label(proposal.note),
+            )
+        else:
+            review = state["reviews"][verdict.idx - n_repairs - len(state["proposals"])]
+            press = card_types.ReviewPress(
+                idx=verdict.idx,
+                choice=verdict.choice,
+                user=verdict.user,
+                card_ts=message.ts,
+                channel=message.channel,
+                session=review.session_id,
+                note=card_view.note_label(review.note),
+                kind=review.kind,
+            )
+        out: dict = {}
+        for effect in card_press.effects(press):
+            if isinstance(effect, card_types.Record):
+                collabs.record(effect.event, effect.fields)
+            elif isinstance(effect, card_types.Consumption):
+                collabs.consumption(effect.session, effect.kind, effect.paths)
+            else:
+                out["repair_results"] = {press.idx: collabs.execute_repair(effect.subject)}
+        return out
 
     graph = StateGraph(CardState)
     graph.add_node("read_repairs", read_repairs)
