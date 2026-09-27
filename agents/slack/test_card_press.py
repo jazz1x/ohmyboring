@@ -248,13 +248,15 @@ class RejectedTests(unittest.TestCase):
             {**_payload("card:1:do", value), "message": "not-a-dict"},
             {**_payload("card:1:do", value), "channel": ["C1"]},
             {**_payload("card:1:do", value), "actions": "not-a-list"},
+            {**_payload("card:1:do", value), "user": "U1"},
+            {**_payload("card:1:do", value), "actions": [{"action_id": 5, "value": value}]},
         ):
             out = cp.parse_press(payload, owner_id=OWNER)
             self.assertIsInstance(out, cc.Rejected)
 
     def test_a_press_without_card_ts_or_channel_is_rejected(self):
-        # card_ts "" 는 card_verdict 를 고아로 만들어 다음 카드가 배를 거부하고, 채널
-        # 없음은 소비 세션을 "slack::" 로 만든다 — 받지 않는 게 낫다.
+        # 짝 없는 card_verdict 는 다음 날 카드를 멈추고, 채널 없음은 소비 세션을
+        # "slack::" 로 만든다 — 받지 않는 게 낫다.
         value = self.values["card:1:do"]
         out = cp.parse_press({**_payload("card:1:do", value), "message": {}}, owner_id=OWNER)
         self.assertIsInstance(out, cc.Rejected)
@@ -262,6 +264,12 @@ class RejectedTests(unittest.TestCase):
         out = cp.parse_press({**_payload("card:1:do", value), "channel": {}}, owner_id=OWNER)
         self.assertIsInstance(out, cc.Rejected)
         self.assertEqual(out.reason, "no channel")
+
+    def test_the_channel_falls_back_to_the_container(self):
+        value = self.values["card:1:do"]
+        payload = {**_payload("card:1:do", value), "channel": {}, "container": {"channel_id": "C9"}}
+        out = cp.parse_press(payload, owner_id=OWNER)
+        self.assertEqual(out.channel, "C9")
 
     def test_a_negative_idx_is_rejected_in_both_parsers(self):
         value = self.values["card:0:do"]

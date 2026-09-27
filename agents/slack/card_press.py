@@ -49,7 +49,7 @@ def parse_press(payload: dict, owner_id: str | None) -> Press | Rejected:
     message = payload.get("message")
     card_ts = message.get("ts") if isinstance(message, dict) else None
     if not isinstance(card_ts, str) or not card_ts:
-        # card_ts "" 이면 card_verdict 가 고아가 되어 다음 카드가 배를 거부한다
+        # 짝 없는 card_verdict 가 남으면 다음 날 카드가 나가지 못한다
         return Rejected(reason="no card ts")
     channel = payload.get("channel")
     channel_id = channel.get("id") if isinstance(channel, dict) else None

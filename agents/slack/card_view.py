@@ -92,7 +92,7 @@ def _lane_value(lane: str, data: dict, *, note: str | None = None) -> str:
     the label, so the card is refused instead of shipping a button it cannot answer."""
     if note is not None:
         name = note.removeprefix("/vault/wiki/")
-        if name == note or "/" in name or not name.endswith(".md"):
+        if name == note or "/" in name or not name.endswith(".md") or name == ".md":
             raise ValueError(f"note {note!r} is not a flat /vault/wiki/<name>.md note")
         data = {**data, "note": note_label(note)}
     return _button_value({"lane": lane, **data})

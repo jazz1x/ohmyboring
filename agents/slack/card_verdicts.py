@@ -181,7 +181,9 @@ def parse_action_common(payload: dict, *, owner_id: str | None) -> tuple[tuple[i
     actions = payload.get("actions")
     if not isinstance(actions, list) or len(actions) != 1 or not isinstance(actions[0], dict):
         return Rejected(reason="not exactly one action")
-    action_id = actions[0].get("action_id") or ""
+    action_id = actions[0].get("action_id")
+    if not isinstance(action_id, str):
+        return Rejected(reason=f"unknown action_id {action_id!r}")
     parts = action_id.split(":")
     if len(parts) != 3 or parts[0] != "card":
         return Rejected(reason=f"unknown action_id {action_id!r}")
@@ -194,7 +196,8 @@ def parse_action_common(payload: dict, *, owner_id: str | None) -> tuple[tuple[i
         return Rejected(reason=f"unknown choice {choice!r}")
     if idx < 0:
         return Rejected(reason=f"no proposal {idx}")
-    user = (payload.get("user") or {}).get("id") or ""
+    user_obj = payload.get("user")
+    user = user_obj.get("id") if isinstance(user_obj, dict) else None
     if not user:
         return Rejected(reason="no user")
     if owner_id is not None and user != owner_id:
