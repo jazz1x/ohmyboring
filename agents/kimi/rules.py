@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook — surfaces the owner's standing rules the moment their trigger words appear.
+"""Kimi Code CLI UserPromptSubmit hook — surfaces the owner's standing rules at their trigger words.
 
 This script is a thin agent-specific entry point; all shared rules logic lives in
-`agents/shared/rules_core.py`. Claude Code's payload has no `origin` field, so the
-injection filter is the structural one in `agents/claude-code/recall.py`.
+`agents/shared/rules_core.py`. Kimi's payload carries an `origin` and wraps system text
+in its own tags, so the injection filter is Kimi's own (`agents/kimi/recall.py`) —
+a Kimi system prompt containing trigger words must not fire the rule.
 """
 
 import json

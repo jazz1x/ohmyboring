@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
-"""The trigger-word matcher for owner rules — pure: rules + prompt in, firing rules out.
+"""Shared rules logic for agent UserPromptSubmit hooks.
 
-A rule fires only when every trigger group matches the prompt; inside a group any one
-alternative is enough. A match is a case-insensitive substring, so Korean trigger words
-behave exactly like English ones. A rule with no trigger never fires — without trigger
-words there is no moment to surface it at, and a group with no alternatives matches
-nothing, so malformed triggers fire nothing either.
+Agent-specific entry points (Claude Code, Kimi, …) are thin wrappers that only supply
+their injection filter and then delegate to `run_rules`. The trigger-word matcher below
+is pure: rules + prompt in, firing rules out.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import sys
+import urllib.request
+from collections.abc import Callable
+
+import event_log
+
+TIMEOUT = 2
+
+HEADER = "지켜야 할 규칙 (소유자가 바로잡은 것):"
 
 _SPLIT = re.compile(r"[|\s]+")
 
@@ -37,3 +46,49 @@ def fired(rules: list[dict], prompt: str) -> list[dict]:
         if groups and all(any(alt.lower() in needle for alt in group) for group in groups):
             out.append(rule)
     return out
+
+
+def _source_name(path: str) -> str:
+    return os.path.basename(path or "").removesuffix(".md")
+
+
+def run_rules(data: dict, is_injection: Callable[[dict], bool]) -> None:
+    """Fetch the door's rules, inject the ones whose triggers fire, record the firings.
+
+    The door's GET /rules holds owner corrections as claims (kind='rule': a 'rule'
+    sentence plus its 'trigger' words per subject). Every prompt fetches them, keeps
+    the ones whose trigger matches, and injects them as additionalContext. Any failure
+    is one stderr line and nothing on stdout — a dead door never costs the user a
+    prompt. Each firing is recorded as a rule_fired event so fired rules can later be
+    counted against broken ones.
+    """
+    if is_injection(data):
+        return
+    door_url = os.environ.get("BORING_DOOR_URL")
+    if not door_url:
+        return
+    try:
+        with urllib.request.urlopen(f"{door_url.rstrip('/')}/rules", timeout=TIMEOUT) as resp:
+            payload = json.load(resp)
+    except (OSError, ValueError) as e:  # URLError/HTTPError/timeout/JSON — one class: the door is gone
+        print(f"[omb-rules] rules fetch failed: {e}", file=sys.stderr)
+        return
+    hits = fired(payload.get("rules") or [], (data.get("prompt") or ""))
+    if not hits:
+        return
+    lines = [HEADER]
+    lines += [f"- {r.get('rule')} (출처 {_source_name(r.get('source_path') or '')})" for r in hits]
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": "\n".join(lines),
+                }
+            }
+        )
+    )
+    for r in hits:
+        event_log.try_append_event(
+            "rules", "rule_fired", "ok", subject=r.get("subject"), session_id=data.get("session_id") or None
+        )

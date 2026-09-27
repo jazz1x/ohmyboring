@@ -279,7 +279,7 @@ def wire_kimi(path: Path | None = None) -> dict:
 
     distill = _hook_command("hooks/kimi-distill-session.py")
     recall = _hook_command("hooks/kimi-recall.py")
-    rules = _hook_command("hooks/rules.py")
+    rules = _hook_command("hooks/kimi-rules.py")
     kimi_hooks = [
         ("SessionEnd", distill, 130),
         ("UserPromptSubmit", recall, 10),
@@ -308,9 +308,8 @@ def wire_kimi(path: Path | None = None) -> dict:
         existing = path.read_text(encoding="utf-8")
         changed = True
 
-    # Only the missing hooks are appended. The old shape rewrote every block once any one was
-    # missing and leaned on the deduper to clean up afterwards; appending only what is absent
-    # keeps a half-wired install from rewriting hooks it already has.
+    # Append only the hooks that are missing; the blocks already wired stay byte-identical,
+    # so a half-wired install gains the absent ones and loses nothing it has.
     missing = [spec for spec in kimi_hooks if not (_hook_scripts(spec[1]) & installed)]
     if missing:
         snippet = "".join(

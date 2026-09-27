@@ -751,10 +751,10 @@ def test_wire_kimi_adds_the_rules_hook_and_is_idempotent():
         config = Path(d) / "config.toml"
         result = agent_wiring.wire_kimi(config)
         assert result["changed"] is True
-        assert config.read_text(encoding="utf-8").count("hooks/rules.py") == 1
+        assert config.read_text(encoding="utf-8").count("hooks/kimi-rules.py") == 1
         second = agent_wiring.wire_kimi(config)
         assert second["changed"] is False
-        assert config.read_text(encoding="utf-8").count("hooks/rules.py") == 1
+        assert config.read_text(encoding="utf-8").count("hooks/kimi-rules.py") == 1
 
 
 def test_wire_kimi_adds_only_the_missing_rules_block():
@@ -764,7 +764,7 @@ def test_wire_kimi_adds_only_the_missing_rules_block():
     with tempfile.TemporaryDirectory() as d:
         home = Path(d) / "oh-my-boring"
         (home / "hooks").mkdir(parents=True)
-        for name in ("kimi-recall.py", "kimi-distill-session.py", "rules.py"):
+        for name in ("kimi-recall.py", "kimi-distill-session.py", "kimi-rules.py"):
             (home / "hooks" / name).write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         config = Path(d) / "config.toml"
         config.write_text(
@@ -780,7 +780,8 @@ def test_wire_kimi_adds_only_the_missing_rules_block():
         text = config.read_text(encoding="utf-8")
         assert text.count("kimi-distill-session.py") == 1, text
         assert text.count("kimi-recall.py") == 1, text
-        assert text.count("hooks/rules.py") == 1, text
+        assert text.count("hooks/kimi-rules.py") == 1, text
+        assert "hooks/rules.py" not in text, "Kimi must not get Claude Code's rules entry"
 
 
 def test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3():

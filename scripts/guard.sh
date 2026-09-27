@@ -63,6 +63,7 @@ ruff format --check .
 echo "5) python unit tests…"
 python3 agents/shared/test_boring_config.py
 python3 agents/shared/test_agent_wiring.py
+python3 agents/shared/test_rules_core.py
 python3 agents/shared/test_distill_core.py
 python3 agents/shared/test_event_log.py
 python3 agents/shared/test_workflow_contract.py
