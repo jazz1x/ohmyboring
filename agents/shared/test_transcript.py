@@ -170,6 +170,8 @@ def test_extract_claude_jsonl_user_lines_are_only_what_the_owner_typed():
         user("<local-command-stdout>Compacted</local-command-stdout>"),
         user("<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>"),
         user("<system-reminder>Plan mode is active.</system-reminder>"),
+        user('Another Claude session sent a message:\n<agent-message from="a1">hermes 제거</agent-message>'),
+        user('<agent-message from="a1">worker done</agent-message>'),
     ]
     kept_rows = [
         user("테스트 돌려줘"),

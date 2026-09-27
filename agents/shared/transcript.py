@@ -263,6 +263,8 @@ _CLAUDE_USER_NOISE_MARKERS = (
     "<local-command-stdout>",
     "<bash-stdout>",
     "<system-reminder>",
+    "Another Claude session sent a message",
+    "<agent-message",
 )
 
 

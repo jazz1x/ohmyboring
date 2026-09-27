@@ -923,6 +923,17 @@ class RulesHookTests(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual(RulesStubHandler.hits, 0)
 
+    def test_subagent_report_never_reaches_the_door(self):
+        # The report quotes owner words ("hermes remove"), so without the skip it would fire.
+        for prompt in (
+            'Another Claude session sent a message:\n<agent-message from="a1">hermes remove</agent-message>',
+            '<agent-message from="a1">hermes remove</agent-message>',
+        ):
+            out, err = self._run({"prompt": prompt, "session_id": "s-sub"})
+            self.assertEqual(out, "", prompt)
+            self.assertEqual(err, "", prompt)
+        self.assertEqual(RulesStubHandler.hits, 0)
+
     def test_no_door_url_falls_back_to_the_default_and_fires(self):
         # The installed-hook bug: Claude Code's hook env has no BORING_DOOR_URL and the
         # hook used to return silently. Now an unset env means the engine-style default,

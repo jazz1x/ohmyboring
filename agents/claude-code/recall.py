@@ -17,6 +17,10 @@ import recall_core  # noqa: E402
 # A prompt that is nothing but image placeholders carries no words to retrieve on.
 _IMAGE_PLACEHOLDER = re.compile(r"\[Image #\d+\]")
 
+# A subagent's report arrives as a user turn; on 2026-09-27 all four rules firings in
+# one session were these, none the owner.
+_HARNESS_PREFIXES = ("<task-notification>", "Another Claude session sent a message", "<agent-message")
+
 
 def _is_injection(data: dict) -> bool:
     """Skip recall for text the harness injected rather than text the user typed.
@@ -33,7 +37,7 @@ def _is_injection(data: dict) -> bool:
     The `len(prompt) < 8` guard already in `recall_core` is left alone.
     """
     prompt = (data.get("prompt") or "").strip()
-    if prompt.startswith("<task-notification>"):
+    if prompt.startswith(_HARNESS_PREFIXES):
         return True
     return bool(prompt) and not _IMAGE_PLACEHOLDER.sub("", prompt).strip()
 
