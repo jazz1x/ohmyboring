@@ -203,10 +203,11 @@ def wire_claude_code(path: Path | None = None) -> dict:
 
     distill = _hook_command("hooks/distill-session.py")
     recall = _hook_command("hooks/recall.py")
+    rules = _hook_command("hooks/rules.py")
     start_recall = _hook_command("agents/claude-code/session-start-recall.py")
 
     changed = False
-    dropped = _drop_duplicate_hooks(settings, (distill, recall, start_recall))
+    dropped = _drop_duplicate_hooks(settings, (distill, recall, rules, start_recall))
     if dropped:
         print(f"[omb-wire] removed {dropped} duplicate hook registration(s)")
         changed = True
@@ -232,6 +233,15 @@ def wire_claude_code(path: Path | None = None) -> dict:
             {
                 "matcher": "",
                 "hooks": [{"type": "command", "command": recall, "timeout": 10}],
+            }
+        )
+        changed = True
+
+    if not _already_wired(settings, rules):
+        settings["hooks"].setdefault("UserPromptSubmit", []).append(
+            {
+                "matcher": "",
+                "hooks": [{"type": "command", "command": rules, "timeout": 10}],
             }
         )
         changed = True
@@ -269,6 +279,12 @@ def wire_kimi(path: Path | None = None) -> dict:
 
     distill = _hook_command("hooks/kimi-distill-session.py")
     recall = _hook_command("hooks/kimi-recall.py")
+    rules = _hook_command("hooks/kimi-rules.py")
+    kimi_hooks = [
+        ("SessionEnd", distill, 130),
+        ("UserPromptSubmit", recall, 10),
+        ("UserPromptSubmit", rules, 10),
+    ]
 
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     changed = False
@@ -283,23 +299,22 @@ def wire_kimi(path: Path | None = None) -> dict:
         stripped = line.strip()
         if stripped.startswith("command"):
             installed |= _hook_scripts(stripped.split("=", 1)[-1].strip().strip("\"'"))
-    wanted = _hook_scripts(distill) | _hook_scripts(recall)
+    wanted = set()
+    for _, command, _ in kimi_hooks:
+        wanted |= _hook_scripts(command)
 
     removed = _drop_duplicate_kimi_hooks(path, wanted) if path.exists() else 0
     if removed:
         existing = path.read_text(encoding="utf-8")
         changed = True
 
-    if not wanted or not wanted.issubset(installed):
-        snippet = (
-            "\n[[hooks]]\n"
-            'event = "SessionEnd"\n'
-            f'command = "{distill}"\n'
-            "timeout = 130\n"
-            "\n[[hooks]]\n"
-            'event = "UserPromptSubmit"\n'
-            f'command = "{recall}"\n'
-            "timeout = 10\n"
+    # Append only the hooks that are missing; the blocks already wired stay byte-identical,
+    # so a half-wired install gains the absent ones and loses nothing it has.
+    missing = [spec for spec in kimi_hooks if not (_hook_scripts(spec[1]) & installed)]
+    if missing:
+        snippet = "".join(
+            f'\n[[hooks]]\nevent = "{event}"\ncommand = "{command}"\ntimeout = {timeout}\n'
+            for event, command, timeout in missing
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
