@@ -46,7 +46,8 @@ fi
 # skip the agent on purpose.
 # Compose SERVICE name = boring-agent; the IMAGE it runs is the external `hermes-agent` build.
 AGENT="boring-agent"
-if [ -n "${BORING_CORE_ONLY:-}" ] || ! docker image inspect hermes-agent >/dev/null 2>&1; then
+HERMES_IMAGE=$(sed -n 's/^ *image: \(hermes-agent:[^ ]*\).*/\1/p' docker-compose.yml)
+if [ -n "${BORING_CORE_ONLY:-}" ] || ! docker image inspect "$HERMES_IMAGE" >/dev/null 2>&1; then
   AGENT=""
   if [ -z "${BORING_CORE_ONLY:-}" ]; then
     cat <<'MSG'
