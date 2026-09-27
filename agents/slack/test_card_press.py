@@ -249,10 +249,15 @@ class RejectedTests(unittest.TestCase):
             {**_payload("card:1:do", value), "channel": ["C1"]},
             {**_payload("card:1:do", value), "actions": "not-a-list"},
             {**_payload("card:1:do", value), "user": "U1"},
+            {**_payload("card:1:do", value), "user": {"id": 5}},
             {**_payload("card:1:do", value), "actions": [{"action_id": 5, "value": value}]},
         ):
             out = cp.parse_press(payload, owner_id=OWNER)
             self.assertIsInstance(out, cc.Rejected)
+        # with no owner configured, the owner check cannot catch a non-string id for us
+        numeric_id = {**_payload("card:1:do", value), "user": {"id": 5}}
+        out = card_verdicts.parse_action(numeric_id, owner_id=None, n_total=3)
+        self.assertEqual(out, cc.Rejected(reason="no user"))
 
     def test_a_press_without_card_ts_or_channel_is_rejected(self):
         # 짝 없는 card_verdict 는 다음 날 카드를 멈추고, 채널 없음은 소비 세션을

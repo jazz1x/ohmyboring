@@ -198,7 +198,7 @@ def parse_action_common(payload: dict, *, owner_id: str | None) -> tuple[tuple[i
         return Rejected(reason=f"no proposal {idx}")
     user_obj = payload.get("user")
     user = user_obj.get("id") if isinstance(user_obj, dict) else None
-    if not user:
+    if not isinstance(user, str) or not user:
         return Rejected(reason="no user")
     if owner_id is not None and user != owner_id:
         return Rejected(reason=f"user {user} is not the owner")
