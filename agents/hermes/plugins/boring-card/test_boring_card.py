@@ -43,6 +43,7 @@ import os
 import secrets
 import sys
 import tempfile
+import types
 from pathlib import Path
 from unittest import mock
 
@@ -53,6 +54,7 @@ for extra in (REPO / "agents" / "slack", REPO / "agents" / "shared"):
         sys.path.insert(0, str(extra))
 
 import card_effects  # noqa: E402
+import card_press  # noqa: E402
 import card_types  # noqa: E402
 import card_view  # noqa: E402
 
@@ -64,6 +66,8 @@ OWNER = f"U_{secrets.token_hex(4)}"
 OTHER = f"U_{secrets.token_hex(4)}"
 CARD_TS = "1.0"
 CARD_CH = "C1"
+# The plugin reads the clock to refuse presses on old cards; tests press a minute after posting.
+PLUGIN.time = types.SimpleNamespace(time=lambda: float(CARD_TS) + 60)
 ADVICE_VALUE = {"lane": "advice", "note": "wiki-0576"}
 REVIEW_VALUE = {"lane": "review", "session": "sess-agent-1", "note": "wiki-0700", "kind": "used"}
 REPAIR_VALUE = {"lane": "repair", "subject": "foodspring-front"}
@@ -279,6 +283,19 @@ def test_the_handler_acks_before_any_effect():
         with _patched_effects(calls):
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
     assert calls[0] == "ack", "Slack needs the ack first; an effect before it can time the ack out"
+
+
+def test_a_press_on_a_card_older_than_the_answerable_hours_runs_no_effect():
+    # The next card reads proposals only CARD_ANSWERABLE_HOURS past its verdict window; a
+    # later press would leave a verdict with no proposal and stop that card from shipping.
+    ctx = _FakeCtx()
+    late = float(CARD_TS) + (card_press.CARD_ANSWERABLE_HOURS + 1) * 3600
+    with _env(), mock.patch.object(PLUGIN, "time", types.SimpleNamespace(time=lambda: late)):
+        _, handler = _register(ctx)[0]
+        calls = []
+        with _patched_effects(calls):
+            _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
+    assert calls == ["ack"]
 
 
 def test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card():
@@ -517,6 +534,7 @@ if __name__ == "__main__":
     test_register_without_boring_home_registers_nothing()
     test_register_hands_one_handler_the_card_action_ids()
     test_the_handler_acks_before_any_effect()
+    test_a_press_on_a_card_older_than_the_answerable_hours_runs_no_effect()
     test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card()
     test_a_rejected_press_runs_no_effect()
     test_a_raising_effect_stops_the_fold_and_the_handler_survives()

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""card.py's graph, dry-run, live-collaborator wiring, and single-instance lock.
+"""card.py's graph, dry-run, live-collaborator wiring, and main().
 
-The graph test drives build_graph with stub collaborators through MemorySaver + thread_id:
-first invoke runs read_repairs → read_proposed → read_registers → cross_check →
-read_history → advise → resolve → post_card and pauses at
-the interrupt with no verdicts, each Command(resume=…) records one verdict, and the run ends
-after the last proposal is judged. The resolve stub resolves a fixed map of subjects,
-mirroring the live collaborator's rule that a source already shaped like a note path resolves
-to itself. The search/read_note stubs stand in for the door's /search and the host vault —
-each candidate subject gets one canned hit whose note has known text, so parse_advised's
+The graph test drives build_graph with stub collaborators: one invoke runs
+read_repairs → read_proposed → read_registers → cross_check → read_history → advise →
+resolve → post_card and ends — the graph posts the card and stops; a button press never
+reaches this process (hermes owns the only socket and answers the press with the same
+card_press.effects decision table, tested in test_card_press and the plugin's
+test_boring_card). The resolve stub resolves a fixed map of subjects, mirroring the live
+collaborator's rule that a source already shaped like a note path resolves to itself. The
+search/read_note stubs stand in for the door's /search and the host vault — each
+candidate subject gets one canned hit whose note has known text, so parse_advised's
 quote check has something real to check against.
 
 Run: python3 agents/slack/test_card_graph.py
@@ -19,7 +20,6 @@ import io
 import json
 import os
 import sys
-import threading
 import unittest
 from datetime import UTC, datetime, timedelta
 from unittest import mock
@@ -30,7 +30,6 @@ import card  # noqa: E402
 import card_live  # noqa: E402
 import card_types as cc  # noqa: E402
 import card_verdicts  # noqa: E402
-from langgraph.types import Command  # noqa: E402
 
 OWNER = "U_OWNER"
 CARD_TS = "1.0"
@@ -218,7 +217,6 @@ class Stubs:
         past_unanswered_pairs: list[cc.PastUnansweredPair] | None = None,
         repairs_payload: dict | None = None,
         merged_yesterday_rows: int | None = None,
-        execute_repair_result: dict | None = None,
         proposed_items: list[cc.ProposedVerdict] | None = None,
     ):
         self.resolutions = resolutions if resolutions is not None else RESOLUTIONS
@@ -235,14 +233,12 @@ class Stubs:
             repairs_payload if repairs_payload is not None else {"groups": [], "total_groups": 0}
         )
         self.merged_yesterday_rows = merged_yesterday_rows
-        self.execute_repair_result = execute_repair_result if execute_repair_result is not None else {}
         self.proposed_items = proposed_items if proposed_items is not None else []
         self.propose_calls: list[str] = []
         self.search_calls: list[str] = []
         self.resolve_calls: list[tuple[str, str]] = []
         self.past_verdicts_calls: list[int] = []
         self.records: list[tuple[str, dict]] = []
-        self.execute_repair_calls: list[str] = []
         self.repairs_calls: list[int] = []
 
     def search(self, subject: str) -> list[dict]:
@@ -292,10 +288,6 @@ class Stubs:
     def merged_yesterday(self) -> int | None:
         return self.merged_yesterday_rows
 
-    def execute_repair(self, subject: str) -> dict:
-        self.execute_repair_calls.append(subject)
-        return self.execute_repair_result
-
     def proposed(self, since_hours: int) -> list[cc.ProposedVerdict]:
         assert since_hours == card.REVIEW_SINCE_HOURS
         return self.proposed_items
@@ -309,7 +301,6 @@ class GraphTests(unittest.TestCase):
     def setUp(self):
         self.sends = []
         self.handovers = []
-        self.consumptions = []
         self.stubs = Stubs()
         self.graph = self._build(self.stubs)
         self.cfg = {"configurable": {"thread_id": "test-card"}}
@@ -322,7 +313,6 @@ class GraphTests(unittest.TestCase):
             propose=stubs.propose,
             send=self._send,
             handover=self._handover,
-            consumption=self._consumption,
             resolve=stubs.resolve,
             approved=stubs.approved,
             record=stubs.record,
@@ -330,7 +320,6 @@ class GraphTests(unittest.TestCase):
             past_verdicts=stubs.past_verdicts,
             lang=lang,
             repairs=stubs.repairs,
-            execute_repair=stubs.execute_repair,
             merged_yesterday=stubs.merged_yesterday,
             proposed=stubs.proposed,
         )
@@ -344,15 +333,7 @@ class GraphTests(unittest.TestCase):
         self.handovers.append((session, at, paths))
         return {}
 
-    def _consumption(self, session, kind, paths):
-        self.consumptions.append((session, kind, paths))
-        return {"edges": 1}
-
-    def _resume(self, idx, choice):
-        verdict = cc.ButtonVerdict(idx=idx, choice=choice, user=OWNER, at="t")
-        return self.graph.invoke(Command(resume=verdict), self.cfg)
-
-    def test_graph_has_the_ten_nodes(self):
+    def test_graph_has_the_eight_nodes(self):
         names = set(self.graph.get_graph().nodes) - {"__start__", "__end__"}
         self.assertEqual(
             names,
@@ -365,14 +346,12 @@ class GraphTests(unittest.TestCase):
                 "advise",
                 "resolve",
                 "post_card",
-                "await_verdict",
-                "record_verdict",
             },
         )
 
     def test_advise_stops_after_three_successful_candidates(self):
-        out = self.graph.invoke({"verdicts": []}, self.cfg)
-        self.assertIn("__interrupt__", out)
+        out = self.graph.invoke({}, self.cfg)
+        self.assertNotIn("__interrupt__", out)
         self.assertEqual(len(self.stubs.propose_calls), 3)
         self.assertIn("f64_risk", self.stubs.propose_calls[0])
         self.assertIn("wiki-0536", self.stubs.propose_calls[1])
@@ -388,7 +367,7 @@ class GraphTests(unittest.TestCase):
         subject = "f64_risk"
         hit = dict(CANDIDATE_HITS[subject][0], superseded_by=["/vault/wiki/wiki-0576.md"])
         with mock.patch.dict(CANDIDATE_HITS, {subject: [hit]}):
-            self.graph.invoke({"verdicts": []}, self.cfg)
+            self.graph.invoke({}, self.cfg)
         code_pieces = [
             el["text"]
             for b in self.sends[-1]
@@ -403,7 +382,7 @@ class GraphTests(unittest.TestCase):
     def test_notworth_candidates_are_skipped_not_counted_as_proposals(self):
         stubs = Stubs(responses=[NOT_WORTH_JSON, NOT_WORTH_JSON] + [ADVICE[s] for s in CANDIDATE_QUEUE[2:]])
         graph = self._build(stubs)
-        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-notworth"}})
+        out = graph.invoke({}, {"configurable": {"thread_id": "test-notworth"}})
         self.assertEqual(len(stubs.propose_calls), 5)  # all five candidates tried
         self.assertEqual(len(out["proposals"]), 3)
         self.assertEqual(
@@ -417,7 +396,7 @@ class GraphTests(unittest.TestCase):
         card.ADVISE_CALL_CAP = 2
         try:
             graph = self._build(stubs)
-            out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-cap"}})
+            out = graph.invoke({}, {"configurable": {"thread_id": "test-cap"}})
         finally:
             card.ADVISE_CALL_CAP = original_cap
         self.assertEqual(len(stubs.propose_calls), 2)
@@ -426,7 +405,7 @@ class GraphTests(unittest.TestCase):
     def test_zero_proposals_still_sends_a_card(self):
         stubs = Stubs(responses=[NOT_WORTH_JSON] * 8)
         graph = self._build(stubs)
-        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-zero"}})
+        out = graph.invoke({}, {"configurable": {"thread_id": "test-zero"}})
         self.assertEqual(out["proposals"], [])
         self.assertEqual(len(self.sends), 1)
         self.assertEqual(self.sends[0][0]["text"]["text"], "☀️ 오늘 제안 0")
@@ -449,7 +428,7 @@ class GraphTests(unittest.TestCase):
             ],
         )
         graph = self._build(stubs)
-        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-drop"}})
+        out = graph.invoke({}, {"configurable": {"thread_id": "test-drop"}})
         # three candidates were tried and all three grounded — resolve, not advise, drops
         # f64_risk, so the loop never spends a fourth call to backfill it.
         self.assertEqual(len(stubs.propose_calls), 3)
@@ -462,12 +441,12 @@ class GraphTests(unittest.TestCase):
         # note. The card ships with 「제안 0」, never a refusal.
         stubs = Stubs(resolutions={}, paths_resolve=False)
         graph = self._build(stubs)
-        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-all-unresolved"}})
+        out = graph.invoke({}, {"configurable": {"thread_id": "test-all-unresolved"}})
         self.assertEqual(out["proposals"], [])
         self.assertEqual(len(self.sends), 1)
 
-    def test_handover_and_consumption_cite_note_paths(self):
-        out = self.graph.invoke({"verdicts": []}, self.cfg)
+    def test_handover_cites_note_paths(self):
+        out = self.graph.invoke({}, self.cfg)
         self.assertEqual(len(self.handovers), 1)
         self.assertEqual(self.handovers[0][0], SESSION)
         # AC4: handover must carry the union of proposal notes and evidence notes. In this
@@ -478,17 +457,6 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(self.handovers[0][2], EXPECTED_NOTES)
         for path in self.handovers[0][2]:
             self.assertTrue(path.startswith("/vault/wiki/"))
-
-        self._resume(0, "do")
-        self.assertEqual(self.consumptions, [(SESSION, "used", [EXPECTED_NOTES[0]])])
-        self._resume(1, "drop")
-        self.assertEqual(
-            self.consumptions,
-            [(SESSION, "used", [EXPECTED_NOTES[0]]), (SESSION, "contested", [EXPECTED_NOTES[1]])],
-        )
-        out = self._resume(2, "defer")
-        self.assertNotIn("__interrupt__", out)
-        self.assertEqual(len(self.consumptions), 2)  # defer adds no engine call
         self.assertEqual(len(self.sends), 1)  # the card went out once
 
     def test_handover_cites_evidence_notes_even_when_they_differ_from_the_resolved_note(self):
@@ -509,7 +477,7 @@ class GraphTests(unittest.TestCase):
         stubs = Stubs(resolutions=resolutions)
         stubs.propose = propose_by_subject
         graph = self._build(stubs)
-        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-union-diverge"}})
+        out = graph.invoke({}, {"configurable": {"thread_id": "test-union-diverge"}})
         f64_proposal = next(p for p in out["proposals"] if p.subject == "f64_risk")
         self.assertEqual(f64_proposal.note, "/vault/wiki/wiki-7777.md")
         self.assertEqual(f64_proposal.evidence[0].note, "/vault/wiki/wiki-0900.md")
@@ -521,7 +489,7 @@ class GraphTests(unittest.TestCase):
     def test_advise_stats_counts_not_worth_and_ungrounded_with_their_reasons(self):
         stubs = Stubs(responses=[NOT_WORTH_JSON, "not json"] + [ADVICE[s] for s in CANDIDATE_QUEUE[2:]])
         graph = self._build(stubs)
-        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-stats"}})
+        out = graph.invoke({}, {"configurable": {"thread_id": "test-stats"}})
         stats = out["advise_stats"]
         self.assertEqual(stats.calls, 5)
         self.assertEqual(stats.proposals_passed, 3)
@@ -539,13 +507,13 @@ class GraphTests(unittest.TestCase):
         graph = self._build(stubs)
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-blind-vault"}})
+            graph.invoke({}, {"configurable": {"thread_id": "test-blind-vault"}})
         err = buf.getvalue()
         self.assertIn("BORING_VAULT_DIR", err)
         self.assertEqual(err.count("BORING_VAULT_DIR"), 1)  # one line, not once per candidate
 
     def test_confirmation_line_and_event(self):
-        out = self.graph.invoke({"verdicts": []}, self.cfg)
+        out = self.graph.invoke({}, self.cfg)
         confirmation = out["confirmation"]
         self.assertIsNotNone(confirmation)
         self.assertEqual(confirmation.total, 3)
@@ -562,13 +530,13 @@ class GraphTests(unittest.TestCase):
         )
 
     def test_priority_subject_leads_the_first_advice_call(self):
-        self.graph.invoke({"verdicts": []}, self.cfg)
+        self.graph.invoke({}, self.cfg)
         self.assertIn("f64_risk", self.stubs.propose_calls[0])
 
     def test_door_failure_marks_unknown_instead_of_done(self):
         stubs = Stubs(responses=[NOT_WORTH_JSON] * 8, failures={"f64_risk": "claim-source answered 500"})
         graph = self._build(stubs)
-        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-card-500"}})
+        out = graph.invoke({}, {"configurable": {"thread_id": "test-card-500"}})
         confirmation = out["confirmation"]
         self.assertEqual(confirmation.done, [])
         self.assertEqual(confirmation.pending, [])
@@ -602,7 +570,6 @@ class GraphTests(unittest.TestCase):
             propose=stubs.propose,
             send=self._send,
             handover=self._handover,
-            consumption=self._consumption,
             resolve=stubs.resolve,
             approved=dead_door,
             record=stubs.record,
@@ -612,7 +579,7 @@ class GraphTests(unittest.TestCase):
         )
         graph = card.build_graph(collabs)
         with self.assertRaises(OSError):
-            graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-card-dead"}})
+            graph.invoke({}, {"configurable": {"thread_id": "test-card-dead"}})
         self.assertEqual(self.sends, [])
         self.assertEqual(stubs.records, [])
 
@@ -629,7 +596,6 @@ class GraphTests(unittest.TestCase):
             propose=stubs.propose,
             send=dead_slack,
             handover=self._handover,
-            consumption=self._consumption,
             resolve=stubs.resolve,
             approved=stubs.approved,
             record=stubs.record,
@@ -639,34 +605,30 @@ class GraphTests(unittest.TestCase):
         )
         graph = card.build_graph(collabs)
         with self.assertRaises(OSError):
-            graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-card-nosend"}})
+            graph.invoke({}, {"configurable": {"thread_id": "test-card-nosend"}})
         self.assertEqual(stubs.records, [])  # the card never went out — no confirmation log
 
     def test_no_past_approvals_means_no_line_no_confirmation_event(self):
         stubs = Stubs(approved=[])
         graph = self._build(stubs)
-        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-card-empty"}})
+        out = graph.invoke({}, {"configurable": {"thread_id": "test-card-empty"}})
         self.assertIsNone(out["confirmation"])
         self.assertNotIn("지난 승인", _blocks_text(self.sends[-1]))
         self.assertNotIn("card_confirmation", [r[0] for r in stubs.records])
 
-    def test_card_proposal_and_card_verdict_events_fire_for_every_row(self):
-        # AC4: 3 proposals, 3 presses (해·빼·미뤄) → 3 card_proposal + 3 card_verdict events,
-        # plus the existing card_confirmation — 7 record calls, none dropped or duplicated.
-        self.graph.invoke({"verdicts": []}, self.cfg)
-        self._resume(0, "do")
-        self._resume(1, "drop")
-        self._resume(2, "defer")
+    def test_card_proposal_and_confirmation_events_fire_for_every_row(self):
+        # AC4: 3 proposals ship → 3 card_proposal events plus the existing
+        # card_confirmation — 4 record calls, none dropped or duplicated. The press-side
+        # card_verdict event is the plugin's fold of card_press.effects, tested in
+        # test_card_press (the decision table) and test_boring_card (the fold).
+        self.graph.invoke({}, self.cfg)
         names = [name for name, _ in self.stubs.records]
         self.assertEqual(names.count("card_proposal"), 3)
-        self.assertEqual(names.count("card_verdict"), 3)
         self.assertEqual(names.count("card_confirmation"), 1)
-        self.assertEqual(len(self.stubs.records), 7)
-        verdict_fields = [fields for name, fields in self.stubs.records if name == "card_verdict"]
-        self.assertEqual([v["choice"] for v in verdict_fields], ["do", "drop", "defer"])
-        self.assertEqual({v["card_ts"] for v in verdict_fields}, {CARD_TS})
+        self.assertEqual(len(self.stubs.records), 4)
         proposal_fields = [fields for name, fields in self.stubs.records if name == "card_proposal"]
         self.assertEqual([p["idx"] for p in proposal_fields], [0, 1, 2])
+        self.assertEqual({p["card_ts"] for p in proposal_fields}, {CARD_TS})
 
     def test_a_recently_judged_note_is_skipped_before_any_model_call(self):
         past = [
@@ -686,7 +648,7 @@ class GraphTests(unittest.TestCase):
 
         stubs.propose = propose
         graph = self._build(stubs)
-        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-suppress"}})
+        out = graph.invoke({}, {"configurable": {"thread_id": "test-suppress"}})
         # f64_risk's note (wiki-0900) carries the 해 verdict, so advise skips it with no
         # search and no call — the next three candidates fill the card.
         self.assertEqual(
@@ -715,7 +677,6 @@ class GraphTests(unittest.TestCase):
             propose=stubs.propose,
             send=self._send,
             handover=self._handover,
-            consumption=self._consumption,
             resolve=stubs.resolve,
             approved=stubs.approved,
             record=stubs.record,
@@ -725,7 +686,7 @@ class GraphTests(unittest.TestCase):
         )
         graph = card.build_graph(collabs)
         with self.assertRaises(OSError):
-            graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-card-dead-events"}})
+            graph.invoke({}, {"configurable": {"thread_id": "test-card-dead-events"}})
         self.assertEqual(self.sends, [])
         self.assertEqual(stubs.records, [])
 
@@ -735,7 +696,7 @@ class GraphTests(unittest.TestCase):
         # only the first-called project is credited with any candidates.
         stubs = Stubs(active_project_names=["proj-x", "proj-y"], responses=[NOT_WORTH_JSON] * 8)
         graph = self._build(stubs)
-        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-multi-project"}})
+        out = graph.invoke({}, {"configurable": {"thread_id": "test-multi-project"}})
         self.assertEqual(out["projects"], ["proj-x", "proj-y", ""])
         self.assertEqual(set(out["per_project_candidates"]), {"proj-x"})
         self.assertEqual(out["per_project_candidates"]["proj-x"], 5)
@@ -745,7 +706,7 @@ class GraphTests(unittest.TestCase):
         # 5xx/unreachable door — same principle as /approved — refuses the card outright.
         stubs = Stubs(repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 5}, merged_yesterday_rows=12)
         graph = self._build(stubs)
-        out = graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-read-repairs"}})
+        out = graph.invoke({}, {"configurable": {"thread_id": "test-read-repairs"}})
         self.assertEqual(stubs.repairs_calls, [card_live.REPAIRS_LIMIT])
         self.assertEqual(out["repairs_total_groups"], 5)
         self.assertEqual(out["merged_yesterday_rows"], 12)
@@ -762,7 +723,6 @@ class GraphTests(unittest.TestCase):
             propose=dead_stubs.propose,
             send=self._send,
             handover=self._handover,
-            consumption=self._consumption,
             resolve=dead_stubs.resolve,
             approved=dead_stubs.approved,
             record=dead_stubs.record,
@@ -770,168 +730,13 @@ class GraphTests(unittest.TestCase):
             past_verdicts=dead_stubs.past_verdicts,
             lang="ko",
             repairs=dead_repairs,
-            execute_repair=dead_stubs.execute_repair,
             merged_yesterday=dead_stubs.merged_yesterday,
         )
         graph = card.build_graph(collabs)
         sends_before = len(self.sends)
         with self.assertRaises(OSError):
-            graph.invoke({"verdicts": []}, {"configurable": {"thread_id": "test-read-repairs-dead"}})
+            graph.invoke({}, {"configurable": {"thread_id": "test-read-repairs-dead"}})
         self.assertEqual(len(self.sends), sends_before)
-
-    def test_execute_repair_branch_dispatch(self):
-        # AC5: a repair row's adopt calls the door's own merge and never consumption; an
-        # advice row's adopt/reject does the reverse. One test, both branches.
-        stubs = Stubs(
-            repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 1},
-            execute_repair_result={"deleted_rows": 5, "reread_notes": 2, "remaining_variants": 1},
-        )
-        graph = self._build(stubs)
-        cfg = {"configurable": {"thread_id": "test-execute-repair"}}
-        out = graph.invoke({"verdicts": []}, cfg)
-        self.assertEqual(len(out["repairs"]), 1)
-
-        verdict = cc.ButtonVerdict(idx=0, choice="do", user=OWNER, at="t")
-        out = graph.invoke(Command(resume=verdict), cfg)
-        self.assertEqual(stubs.execute_repair_calls, ["foodspring-front"])
-        self.assertEqual(self.consumptions, [])
-        self.assertEqual(out["repair_results"], {0: stubs.execute_repair_result})
-
-        n_repairs = len(out["repairs"])
-        advice_verdict = cc.ButtonVerdict(idx=n_repairs, choice="do", user=OWNER, at="t")
-        out = graph.invoke(Command(resume=advice_verdict), cfg)
-        self.assertEqual(stubs.execute_repair_calls, ["foodspring-front"])  # unchanged
-        self.assertEqual(len(self.consumptions), 1)
-        self.assertEqual(self.consumptions[0][0], SESSION)
-        self.assertEqual(self.consumptions[0][1], "used")
-
-    def test_three_lanes_share_one_idx_space_and_the_run_ends_at_their_sum(self):
-        # The idx space runs repairs → advice → reviews; await_verdict's `of` and the END
-        # condition both count all three lanes — a review-less total is the mutant the
-        # verifier names, and a run that kept waiting after every row was judged is the other.
-        reviews = [
-            cc.ProposedVerdict(
-                session_id="sess-agent-1", note="/vault/wiki/wiki-0701.md", kind="used", at="t-1"
-            ),
-            cc.ProposedVerdict(
-                session_id="sess-agent-2", note="/vault/wiki/wiki-0702.md", kind="contested", at="t-2"
-            ),
-        ]
-        stubs = Stubs(repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 1}, proposed_items=reviews)
-        graph = self._build(stubs)
-        cfg = {"configurable": {"thread_id": "test-three-lanes"}}
-        out = graph.invoke({"verdicts": []}, cfg)
-        total = len(out["repairs"]) + len(out["proposals"]) + len(out["reviews"])
-        self.assertEqual(total, 1 + 3 + 2)
-        self.assertEqual(out["__interrupt__"][0].value["of"], total)
-        for idx in range(total):
-            verdict = cc.ButtonVerdict(idx=idx, choice="do", user=OWNER, at="t")
-            out = graph.invoke(Command(resume=verdict), cfg)
-        self.assertNotIn("__interrupt__", out)
-        self.assertEqual(len(out["verdicts"]), total)
-
-    def test_review_lane_flip_judges_the_proposing_session_with_the_opposite_kind(self):
-        reviews = [
-            cc.ProposedVerdict(
-                session_id="sess-agent-1", note="/vault/wiki/wiki-0700.md", kind="used", at="t-1"
-            )
-        ]
-        stubs = Stubs(proposed_items=reviews)
-        graph = self._build(stubs)
-        cfg = {"configurable": {"thread_id": "test-review-flip"}}
-        out = graph.invoke({"verdicts": []}, cfg)
-        n_slots = len(out["repairs"]) + len(out["proposals"])
-        verdict = cc.ButtonVerdict(idx=n_slots, choice="drop", user=OWNER, at="t")
-        graph.invoke(Command(resume=verdict), cfg)
-        self.assertEqual(self.consumptions[-1], ("sess-agent-1", "contested", ["/vault/wiki/wiki-0700.md"]))
-        reviewed = [fields for name, fields in stubs.records if name == "verdict_reviewed"]
-        self.assertEqual(
-            reviewed,
-            [
-                {
-                    "session_id": "sess-agent-1",
-                    "note": "/vault/wiki/wiki-0700.md",
-                    "proposed_kind": "used",
-                    "card_ts": CARD_TS,
-                    "choice": "flip",
-                }
-            ],
-        )
-
-    def test_review_lane_agree_records_only_the_review_event(self):
-        reviews = [
-            cc.ProposedVerdict(
-                session_id="sess-agent-2", note="/vault/wiki/wiki-0800.md", kind="contested", at="t-2"
-            )
-        ]
-        stubs = Stubs(proposed_items=reviews)
-        graph = self._build(stubs)
-        cfg = {"configurable": {"thread_id": "test-review-agree"}}
-        out = graph.invoke({"verdicts": []}, cfg)
-        n_slots = len(out["repairs"]) + len(out["proposals"])
-        consumption_calls = len(self.consumptions)
-        verdict = cc.ButtonVerdict(idx=n_slots, choice="do", user=OWNER, at="t")
-        graph.invoke(Command(resume=verdict), cfg)
-        self.assertEqual(len(self.consumptions), consumption_calls)  # agree never touches the graph
-        reviewed = [fields for name, fields in stubs.records if name == "verdict_reviewed"]
-        self.assertEqual(
-            [(r["choice"], r["proposed_kind"], r["session_id"], r["note"]) for r in reviewed],
-            [("agree", "contested", "sess-agent-2", "/vault/wiki/wiki-0800.md")],
-        )
-
-    def test_card_verdict_event_fires_only_for_an_advice_lane_press(self):
-        # r3.1: card_proposal events exist only for advice rows, and card_live's
-        # _live_past_verdicts joins card_verdict back to them by (card_ts, idx) — raising
-        # on a verdict with no proposal. A press in the repair or review lane must leave
-        # no card_verdict at all: one orphan is a next-morning card that refuses to ship.
-        reviews = [
-            cc.ProposedVerdict(
-                session_id="sess-agree", note="/vault/wiki/wiki-0700.md", kind="used", at="t-1"
-            ),
-            cc.ProposedVerdict(
-                session_id="sess-flip", note="/vault/wiki/wiki-0701.md", kind="contested", at="t-2"
-            ),
-        ]
-        stubs = Stubs(
-            repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 1},
-            proposed_items=reviews,
-            execute_repair_result={"deleted_rows": 5, "reread_notes": 2, "remaining_variants": 1},
-        )
-        graph = self._build(stubs)
-        cfg = {"configurable": {"thread_id": "test-verdict-event-lanes"}}
-        out = graph.invoke({"verdicts": []}, cfg)
-        self.assertEqual((len(out["repairs"]), len(out["proposals"]), len(out["reviews"])), (1, 3, 2))
-
-        presses = [
-            (0, "do"),  # execute lane: adopt → the door's own merge, no card_verdict
-            (1, "do"),  # advice lane: the only lane whose press records a card_verdict
-            (4, "do"),  # review lane: agree → the verdict_reviewed event only
-            (5, "drop"),  # review lane: flip → verdict_reviewed + the opposite-kind edge
-        ]
-        for idx, choice in presses:
-            verdict = cc.ButtonVerdict(idx=idx, choice=choice, user=OWNER, at="t")
-            graph.invoke(Command(resume=verdict), cfg)
-
-        verdict_events = [fields for name, fields in stubs.records if name == "card_verdict"]
-        self.assertEqual(verdict_events, [{"card_ts": CARD_TS, "idx": 1, "choice": "do"}])
-        reviewed = [fields for name, fields in stubs.records if name == "verdict_reviewed"]
-        self.assertEqual(
-            [(r["session_id"], r["choice"]) for r in reviewed],
-            [("sess-agree", "agree"), ("sess-flip", "flip")],
-        )
-        self.assertEqual(stubs.execute_repair_calls, ["foodspring-front"])
-        self.assertEqual(
-            self.consumptions,
-            [
-                (SESSION, "used", [EXPECTED_NOTES[0]]),
-                ("sess-flip", "used", ["/vault/wiki/wiki-0701.md"]),
-            ],
-        )
-        names = [name for name, _ in stubs.records]
-        self.assertEqual(
-            names,
-            ["card_proposal"] * 3 + ["card_confirmation"] + ["card_verdict"] + ["verdict_reviewed"] * 2,
-        )
 
 
 class SkipStubs(Stubs):
@@ -958,7 +763,6 @@ class RestingNoteSkipTests(unittest.TestCase):
             propose=stubs.propose,
             send=lambda blocks: (self.sends.append(blocks), cc.PostedCard(channel=CARD_CH, ts=CARD_TS))[1],
             handover=lambda session, at, paths: {},
-            consumption=lambda session, kind, paths: {},
             resolve=stubs.resolve,
             approved=stubs.approved,
             record=stubs.record,
@@ -966,7 +770,6 @@ class RestingNoteSkipTests(unittest.TestCase):
             past_verdicts=stubs.past_verdicts,
             lang="ko",
             repairs=stubs.repairs,
-            execute_repair=stubs.execute_repair,
             merged_yesterday=stubs.merged_yesterday,
             proposed=stubs.proposed,
         )
@@ -1005,7 +808,7 @@ class RestingNoteSkipTests(unittest.TestCase):
                 )
             ],
         )
-        out = self._build(stubs).invoke({"verdicts": []}, {"configurable": {"thread_id": "test-rest-skip"}})
+        out = self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-rest-skip"}})
         self.assertEqual(len(stubs.propose_calls), 1)
         self.assertIn("gamma_subj", stubs.propose_calls[0])
         self.assertEqual([p.note for p in out["proposals"]], ["/vault/wiki/note-gamma.md"])
@@ -1026,7 +829,7 @@ class RestingNoteSkipTests(unittest.TestCase):
                 )
             ]
         )
-        out = self._build(stubs).invoke({"verdicts": []}, {"configurable": {"thread_id": "test-rest-defer"}})
+        out = self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-rest-defer"}})
         self.assertEqual(len(stubs.propose_calls), 3)
         self.assertIn("alpha_subj", stubs.propose_calls[0])
         self.assertEqual(out["advise_stats"].skipped_resting, 0)
@@ -1045,7 +848,7 @@ class RestingNoteSkipTests(unittest.TestCase):
                 )
             ]
         )
-        out = self._build(stubs).invoke({"verdicts": []}, {"configurable": {"thread_id": "test-rest-old"}})
+        out = self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-rest-old"}})
         self.assertEqual(len(stubs.propose_calls), 3)
         self.assertIn("alpha_subj", stubs.propose_calls[0])
         self.assertEqual(out["advise_stats"].skipped_resting, 0)
@@ -1169,7 +972,6 @@ class SufficiencyTests(unittest.TestCase):
             propose=stubs.propose,
             send=lambda blocks: (self.sends.append(blocks), cc.PostedCard(channel=CARD_CH, ts=CARD_TS))[1],
             handover=lambda session, at, paths: {},
-            consumption=lambda session, kind, paths: {},
             resolve=stubs.resolve,
             approved=stubs.approved,
             record=stubs.record,
@@ -1177,7 +979,6 @@ class SufficiencyTests(unittest.TestCase):
             past_verdicts=stubs.past_verdicts,
             lang="ko",
             repairs=stubs.repairs,
-            execute_repair=stubs.execute_repair,
             merged_yesterday=stubs.merged_yesterday,
             proposed=stubs.proposed,
         )
@@ -1192,7 +993,7 @@ class SufficiencyTests(unittest.TestCase):
             {RECUR_PATH: RECUR_TEXT, "/vault/wiki/wiki-0536.md": NOTE_TEXTS["/vault/wiki/wiki-0536.md"]}
         )
         out = self._build(SUFFICIENCY_FETCH_DATA, stubs).invoke(
-            {"verdicts": []}, {"configurable": {"thread_id": "test-sufficient-recur"}}
+            {}, {"configurable": {"thread_id": "test-sufficient-recur"}}
         )
         self.assertEqual([p.note for p in out["proposals"]], [RECUR_PATH])
         prompt = stubs.propose_calls[0]
@@ -1212,7 +1013,7 @@ class SufficiencyTests(unittest.TestCase):
         stubs = SufficiencyStubs(dict(NOTE_TEXTS), resolutions=SKIP_RESOLUTIONS)
         stubs.propose = lambda prompt: (stubs.propose_calls.append(prompt), _approve_everything(prompt))[1]
         out = self._build(SKIP_FETCH_DATA, stubs).invoke(
-            {"verdicts": []}, {"configurable": {"thread_id": "test-sufficient-topic"}}
+            {}, {"configurable": {"thread_id": "test-sufficient-topic"}}
         )
         self.assertEqual(len(out["proposals"]), 3)
         stats = out["advise_stats"]
@@ -1230,7 +1031,7 @@ class SufficiencyTests(unittest.TestCase):
         # live rejection, as a value.
         stubs = SufficiencyStubs({})
         out = self._build(SUFFICIENCY_FETCH_DATA, stubs).invoke(
-            {"verdicts": []}, {"configurable": {"thread_id": "test-sufficient-blind"}}
+            {}, {"configurable": {"thread_id": "test-sufficient-blind"}}
         )
         self.assertEqual(out["proposals"], [])
         stats = out["advise_stats"]
@@ -1248,7 +1049,7 @@ class SufficiencyTests(unittest.TestCase):
         )
         stubs.propose = lambda prompt: (stubs.propose_calls.append(prompt), _approve_everything(prompt))[1]
         out = self._build(SKIP_FETCH_DATA, stubs).invoke(
-            {"verdicts": []}, {"configurable": {"thread_id": "test-sufficient-unknown"}}
+            {}, {"configurable": {"thread_id": "test-sufficient-unknown"}}
         )
         self.assertEqual(
             [p.note for p in out["proposals"]],
@@ -1298,7 +1099,6 @@ class OwnNoteFirstTests(unittest.TestCase):
             propose=stubs.propose,
             send=lambda blocks: (self.sends.append(blocks), cc.PostedCard(channel=CARD_CH, ts=CARD_TS))[1],
             handover=lambda session, at, paths: {},
-            consumption=lambda session, kind, paths: {},
             resolve=stubs.resolve,
             approved=stubs.approved,
             record=stubs.record,
@@ -1306,7 +1106,6 @@ class OwnNoteFirstTests(unittest.TestCase):
             past_verdicts=stubs.past_verdicts,
             lang="ko",
             repairs=stubs.repairs,
-            execute_repair=stubs.execute_repair,
             merged_yesterday=stubs.merged_yesterday,
             proposed=stubs.proposed,
         )
@@ -1314,9 +1113,7 @@ class OwnNoteFirstTests(unittest.TestCase):
 
     def test_a_topic_candidates_refetched_own_note_rides_first_past_three_other_hits(self):
         stubs = TopicSufficiencyStubs(TOPIC_NOTE_TEXTS, resolutions={TOPIC_SUBJECT: TOPIC_RISK_NOTE})
-        out = self._build(stubs).invoke(
-            {"verdicts": []}, {"configurable": {"thread_id": "test-own-note-first"}}
-        )
+        out = self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-own-note-first"}})
         self.assertEqual([p.note for p in out["proposals"]], [TOPIC_RISK_NOTE])
         prompt = stubs.propose_calls[0]
         self.assertIn(TOPIC_RISK_QUOTE, prompt)
@@ -1333,135 +1130,6 @@ class OwnNoteFirstTests(unittest.TestCase):
             stubs.read_note_calls,
             [TOPIC_RISK_NOTE] + [h["source_path"] for h in TOPIC_OTHER_HITS],
         )
-
-
-class ListenerTests(unittest.TestCase):
-    """r3.1: the socket listener bounds a press by n_total = repairs + proposals + reviews —
-    one shared idx space across all three lanes. A listener that drops the review lane from
-    its total rejects the review rows' own buttons as 'no proposal', and one that drops the
-    repair lane over-accepts past the card's end."""
-
-    class _FakeClient:
-        def __init__(self):
-            self.acks = 0
-
-        def send_socket_mode_response(self, response):
-            self.acks += 1
-
-    class _Req:
-        def __init__(self, payload):
-            self.envelope_id = "e-1"
-            self.type = "interactive"
-            self.payload = payload
-
-    @staticmethod
-    def _press(idx: int, choice: str = "do", user: str = OWNER) -> dict:
-        return {
-            "type": "block_actions",
-            "message": {"ts": CARD_TS},
-            "user": {"id": user},
-            "actions": [{"action_id": f"card:{idx}:{choice}"}],
-        }
-
-    def test_n_total_covers_all_three_lanes(self):
-        holder = card._Holder()
-        holder.message = cc.PostedCard(channel=CARD_CH, ts=CARD_TS)
-        holder.repairs = [object()]
-        holder.proposals = [object(), object(), object()]
-        holder.reviews = [object(), object()]
-        listener = card._listener(holder, OWNER)
-        client = self._FakeClient()
-        buf = io.StringIO()
-
-        with contextlib.redirect_stderr(buf):
-            listener(client, self._Req(self._press(5)))  # the last review slot → queued
-            listener(client, self._Req(self._press(6)))  # one past the end → rejected
-
-        self.assertEqual(client.acks, 2)
-        self.assertEqual(holder.queue.qsize(), 1)
-        verdict = holder.queue.get_nowait()
-        self.assertEqual((verdict.idx, verdict.choice, verdict.user), (5, "do", OWNER))
-        self.assertIn("no proposal 6", buf.getvalue())
-
-
-class AwaitVerdictsTests(unittest.TestCase):
-    """AC6: CARD_WAIT_HOURS=0 (or expired) ends the wait immediately, touching Slack 0 times,
-    leaving whatever was unanswered exactly as it is."""
-
-    class _FakeWeb:
-        def __init__(self):
-            self.chat_update_calls = 0
-
-        def chat_update(self, **kwargs):
-            self.chat_update_calls += 1
-
-    def test_zero_wait_hours_returns_immediately_without_a_chat_update(self):
-        holder = card._Holder()
-        holder.message = cc.PostedCard(channel="C1", ts=CARD_TS)
-        state = {
-            "proposals": [],
-            "verdicts": [],
-            "lang": "ko",
-            "confirmation": None,
-            "repairs": [],
-            "repairs_total_groups": 0,
-            "merged_yesterday_rows": None,
-            "repair_results": {},
-            "reviews": [],
-        }
-        web = self._FakeWeb()
-        buf = io.StringIO()
-        with contextlib.redirect_stderr(buf):
-            out = card._await_verdicts(
-                holder, graph=None, config={}, state=state, web_client=web, wait_hours=0
-            )
-        self.assertEqual(web.chat_update_calls, 0)
-        self.assertIs(out, state)
-
-    def test_positive_wait_with_empty_queue_returns_promptly_not_hangs(self):
-        # M6: a mutant that drops `timeout=remaining` from `holder.queue.get(...)` blocks
-        # forever on an empty queue. wait_hours=0 (the test above) never reaches that call at
-        # all — remaining<=0 breaks first — so it cannot see that mutant. A small positive
-        # wait does reach queue.get, and running it on a thread with a bounded join means a
-        # hung mutant fails this test instead of hanging the whole suite.
-        holder = card._Holder()
-        holder.message = cc.PostedCard(channel="C1", ts=CARD_TS)
-        proposal = cc.Proposal(
-            subject="주어",
-            note="/n1.md",
-            register="stalled",
-            bottleneck="병목 문장 열자 이상입니다",
-            advice="조언 문장 열자 이상입니다",
-            evidence=[cc.Evidence(note="/n1.md", quote="근거 인용문 열두자 이상", line=1)],
-        )
-        state = {
-            "proposals": [proposal],
-            "verdicts": [],
-            "lang": "ko",
-            "confirmation": None,
-            "repairs": [],
-            "repairs_total_groups": 0,
-            "merged_yesterday_rows": None,
-            "repair_results": {},
-            "reviews": [],
-        }
-        web = self._FakeWeb()
-        buf = io.StringIO()
-        result: dict = {}
-
-        def target():
-            with contextlib.redirect_stderr(buf):
-                result["state"] = card._await_verdicts(
-                    holder, graph=None, config={}, state=state, web_client=web, wait_hours=1e-4
-                )
-
-        thread = threading.Thread(target=target, daemon=True)
-        thread.start()
-        thread.join(timeout=2.0)
-        self.assertFalse(thread.is_alive(), "_await_verdicts hung — queue.get's timeout is missing")
-        self.assertIn("state", result)
-        self.assertEqual(web.chat_update_calls, 0)
-        self.assertIn("1건", buf.getvalue())
 
 
 class DryRunWiringTests(unittest.TestCase):
@@ -1634,8 +1302,8 @@ class LiveConsumptionTests(unittest.TestCase):
 class LiveExecuteRepairTests(unittest.TestCase):
     """F2 (2026-09-22): the door's own 502 (sync failed, but delete+update already
     committed) must become a RepairFailed value carrying those committed counts — never an
-    exception that reaches main()'s `except OSError: return 3` and kills the whole card over
-    one button."""
+    exception: the plugin's fold returns the value to a handler that logs one line, and a
+    failed merge must not take the morning card down with it."""
 
     def test_engine_502_becomes_a_repairfailed_value_with_the_committed_counts(self):
         body = json.dumps(
@@ -1663,37 +1331,6 @@ class LiveExecuteRepairTests(unittest.TestCase):
         self.assertEqual(result.deleted_rows, 5)
         self.assertEqual(result.reread_notes, 2)
         self.assertEqual(result.reason, "engine unreachable: connection refused")
-
-        # the graph itself must keep going: a RepairFailed value flowing through
-        # record_verdict raises nothing and the run reaches the next interrupt.
-        stubs = Stubs(repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 1})
-        stubs.execute_repair = lambda subject: result  # type: ignore[method-assign]
-        sends: list = []
-        collabs = card.Collaborators(
-            fetch=_fetch,
-            search=stubs.search,
-            read_note=stubs.read_note,
-            propose=stubs.propose,
-            send=lambda blocks: (sends.append(blocks), cc.PostedCard(channel=CARD_CH, ts=CARD_TS))[1],
-            handover=lambda session, at, paths: {},
-            consumption=lambda session, kind, paths: {},
-            resolve=stubs.resolve,
-            approved=stubs.approved,
-            record=stubs.record,
-            active_projects=stubs.active_projects,
-            past_verdicts=stubs.past_verdicts,
-            lang="ko",
-            repairs=stubs.repairs,
-            execute_repair=stubs.execute_repair,
-            merged_yesterday=stubs.merged_yesterday,
-        )
-        graph = card.build_graph(collabs)
-        cfg = {"configurable": {"thread_id": "test-repair-failed-continues"}}
-        graph.invoke({"verdicts": []}, cfg)
-        verdict = cc.ButtonVerdict(idx=0, choice="do", user=OWNER, at="t")
-        out = graph.invoke(Command(resume=verdict), cfg)
-        self.assertIn("__interrupt__", out)  # still waiting on the advice rows — not dead
-        self.assertEqual(out["repair_results"][0], result)
 
     def test_timeout_becomes_a_repairunanswered_value_with_no_counts(self):
         def fake_urlopen(req, timeout=None):
@@ -1814,7 +1451,7 @@ class LiveDoorFetchNamesTheUrl(unittest.TestCase):
 class LivePastVerdictsTests(unittest.TestCase):
     """F5: a malformed or unjoined card_verdict/card_proposal row is a visible failure
     (ValueError), never a silently skipped one, and the proposal window must be wider than
-    the verdict window (CARD_WAIT_HOURS)."""
+    the verdict window (CARD_ANSWERABLE_HOURS)."""
 
     @staticmethod
     def _events(proposals: list[dict], verdicts: list[dict]):
@@ -1967,34 +1604,43 @@ class LiveProposedTests(unittest.TestCase):
         self.assertEqual(len(out), card_live.REVIEW_LIMIT)
 
 
-class SingleInstanceLockTests(unittest.TestCase):
-    """F7: a second card.py on the same Slack app token must not open a second Socket Mode
-    listener — refused with the first pid, not a silent double-listen."""
+class MainTests(unittest.TestCase):
+    """Slice ③ (wiki-2049): card.py posts and exits — it never opens the socket hermes
+    owns. A mutant that re-adds a SocketModeClient construction to main() fails the
+    socket assertion here; one that drops the `[card] posted ts=` line fails the stdout
+    assertion (doctor a2e and schedule-card.sh parse that line)."""
 
-    def test_second_lock_attempt_is_refused_with_the_first_pid(self):
-        token = f"xapp-test-{os.getpid()}-{id(self)}"
-        fh1, holder1 = card._acquire_single_instance_lock(token)
-        self.assertIsNotNone(fh1)
-        self.assertIsNone(holder1)
-        try:
-            fh2, holder2 = card._acquire_single_instance_lock(token)
-            self.assertIsNone(fh2)
-            self.assertEqual(holder2, str(os.getpid()))
-        finally:
-            fh1.close()
-            os.remove(card._lock_path(token))
+    def _run_main(self):
+        web_module = mock.MagicMock()
+        socket_module = mock.MagicMock()
+        fake_graph = mock.Mock()
+        fake_graph.invoke.return_value = {"message": cc.PostedCard(channel=CARD_CH, ts=CARD_TS)}
+        buf = io.StringIO()
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SLACK_BOT_TOKEN": "tok",
+                    "SLACK_CARD_CHANNEL": CARD_CH,
+                    "BORING_DOOR_URL": "http://door.invalid",
+                    "CARD_DRY_RUN": "",
+                },
+            ),
+            mock.patch.dict(
+                sys.modules, {"slack_sdk.web": web_module, "slack_sdk.socket_mode": socket_module}
+            ),
+            mock.patch.object(card, "build_graph", return_value=fake_graph),
+            contextlib.redirect_stdout(buf),
+        ):
+            rc = card.main()
+        return rc, buf.getvalue(), socket_module, fake_graph
 
-    def test_lock_is_free_again_after_release(self):
-        token = f"xapp-test-release-{os.getpid()}-{id(self)}"
-        fh1, _ = card._acquire_single_instance_lock(token)
-        fh1.close()
-        try:
-            fh2, holder2 = card._acquire_single_instance_lock(token)
-            self.assertIsNotNone(fh2)
-            self.assertIsNone(holder2)
-            fh2.close()
-        finally:
-            os.remove(card._lock_path(token))
+    def test_main_posts_prints_the_ts_line_and_never_builds_a_socket_client(self):
+        rc, out, socket_module, fake_graph = self._run_main()
+        self.assertEqual(rc, 0)
+        self.assertIn(f"[card] posted ts={CARD_TS}", out)
+        socket_module.SocketModeClient.assert_not_called()
+        fake_graph.invoke.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -811,9 +811,9 @@ if [ -f "$BORING_HOME/.pre-commit-config.yaml" ]; then
     fi
 fi
 
-# (a2e) The morning card. The launchd log is the only record of a run, and finished lands only
-# after card.py's CARD_WAIT_HOURS button wait — a posted run proves itself with `[card] posted ts=`,
-# not with finished. Lines the ISO regex cannot parse (pre-ISO logs) are skipped, not misread.
+# (a2e) The morning card. The launchd log is the only record of a run — a posted run proves
+# itself with `[card] posted ts=`, not with finished. Lines the ISO regex cannot parse
+# (pre-ISO logs) are skipped, not misread.
 CARD_LOG="${BORING_CARD_LOG:-/tmp/com.ohmyboring.morning-card.log}"
 if [ ! -f "$CARD_LOG" ]; then
     warn "morning card: 모름 — 로그 파일이 없음 ($CARD_LOG) (not the same as working)"

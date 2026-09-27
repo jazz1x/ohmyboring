@@ -100,7 +100,7 @@ printf '=== morning card started at %s ===\n=== morning card finished at 2026-09
 out="$(run_doctor "$tmp/logs/a.log" "$NOW")"
 expect "a failed run (exit 1) is reported as FAILED" 1 "✗ morning card FAILED at $START (exit 1)" "$out"
 
-# (b) started + posted line, no finished — the normal state of a good run during the button wait.
+# (b) started + posted line, no finished yet — a run still on its way to finished.
 printf '=== morning card started at %s ===\n[card] posted ts=1.2\n' "$START" > "$tmp/logs/b.log"
 out="$(run_doctor "$tmp/logs/b.log" "$NOW")"
 expect "a posted run without finished reads as posted" 1 "✓ morning card: posted at $START" "$out"
@@ -134,7 +134,7 @@ printf '=== morning card started at 2026-09-25T08:00:03+0900 ===\n[card] posted 
 out="$(run_doctor "$tmp/logs/g.log" "$NOW")"
 expect "yesterday's posted run is reported as not having run today" 1 "✗ morning card did not run since 2026-09-26T08:05:00+09:00" "$out"
 
-# (i) posted, then the button wait died: delivered, with a warning.
+# (i) posted, then a later failure: delivered, with a warning.
 printf '=== morning card started at %s ===\n[card] posted ts=1.2\n=== morning card finished at 2026-09-26T09:00:00+0900 (exit 1) ===\n' "$START" > "$tmp/logs/i.log"
 out="$(run_doctor "$tmp/logs/i.log" "$NOW")"
 expect "a posted run that later exits 1 is posted" 1 "✓ morning card: posted at $START" "$out"

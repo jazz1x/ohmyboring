@@ -10,9 +10,9 @@ the hermes venv, which has no langchain. This module imports them back so existi
 references (card.py's Collaborators, tests) keep working; `_door_url` and ENGINE_TIMEOUT
 moved there with them.
 
-CARD_WAIT_HOURS lives here rather than in card.py because the live reads below are the
-only things that need it at module load: `_live_past_verdicts`'s proposal window is
-CARD_WAIT_HOURS-wide. card.py imports it back from this module for its wait-loop default."""
+`_live_past_verdicts`'s proposal window is card_press.CARD_ANSWERABLE_HOURS wider than its
+verdict window; the hermes plugin refuses presses older than that, which is what keeps the
+join whole."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from card_effects import (  # noqa: F401
     _live_execute_repair,
     _live_record,
 )
+from card_press import CARD_ANSWERABLE_HOURS
 from card_types import (
     NO_CURRENT_CLAIM,
     PastApproved,
@@ -48,10 +49,6 @@ from pydantic import ValidationError
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "memory"))
 from retriever import BoringRetriever  # noqa: E402
-
-# A card's own lifespan — the next card's post outlives any button the owner never got to
-# press, so waiting past this is polling a socket nobody is going to answer on.
-CARD_WAIT_HOURS = float(os.environ.get("CARD_WAIT_HOURS") or "23")
 
 
 def _live_fetch(path: str, project: str) -> dict[str, Any]:
@@ -102,7 +99,7 @@ def _live_past_verdicts(since_hours: int) -> PastCardHistory:
     """Join card_proposal and card_verdict events by (card_ts, idx) — a card_verdict event
     alone carries no note or evidence, only the button press (knowns: card_ts·idx·choice).
     Proposals are read over a wider window than verdicts: a press can land up to
-    CARD_WAIT_HOURS after its card posted, so a verdict at hour 167 of the 168h window
+    CARD_ANSWERABLE_HOURS after its card posted, so a verdict at hour 167 of the 168h window
     would otherwise be joined against a proposal that already fell outside it. The same
     join also yields the shown-but-unanswered pairs: a card_proposal with no card_verdict
     in the window is a proposal the owner saw and never judged, returned with the
@@ -111,7 +108,7 @@ def _live_past_verdicts(since_hours: int) -> PastCardHistory:
     timestamp, is a malformed row — F5/ROP: that is a visible failure (ValueError naming
     the row), never a silently skipped one, because a dropped row here is exactly a
     suppression pair going missing without anyone knowing."""
-    proposal_window = since_hours + math.ceil(CARD_WAIT_HOURS)
+    proposal_window = since_hours + math.ceil(CARD_ANSWERABLE_HOURS)
     proposals_by_key: dict[tuple[Any, Any], dict[str, Any]] = {}
     for entry in _live_events("card_proposal", proposal_window):
         attrs = entry.get("attributes") or {}
