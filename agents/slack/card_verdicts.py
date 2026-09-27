@@ -178,8 +178,8 @@ def parse_action_common(payload: dict, *, owner_id: str | None) -> tuple[tuple[i
     value, never an exception."""
     if payload.get("type") != "block_actions":
         return Rejected(reason="not block_actions")
-    actions = payload.get("actions") or []
-    if len(actions) != 1:
+    actions = payload.get("actions")
+    if not isinstance(actions, list) or len(actions) != 1 or not isinstance(actions[0], dict):
         return Rejected(reason="not exactly one action")
     action_id = actions[0].get("action_id") or ""
     parts = action_id.split(":")
@@ -192,6 +192,8 @@ def parse_action_common(payload: dict, *, owner_id: str | None) -> tuple[tuple[i
     choice = parts[2]
     if choice not in CHOICES:
         return Rejected(reason=f"unknown choice {choice!r}")
+    if idx < 0:
+        return Rejected(reason=f"no proposal {idx}")
     user = (payload.get("user") or {}).get("id") or ""
     if not user:
         return Rejected(reason="no user")
@@ -217,6 +219,6 @@ def parse_action(
     if isinstance(parsed, Rejected):
         return parsed
     (idx, choice), user = parsed
-    if idx < 0 or idx >= n_total:
+    if idx >= n_total:
         return Rejected(reason=f"no proposal {idx}")
     return ButtonVerdict(idx=idx, choice=choice, user=user, at=at or datetime.now(UTC).isoformat())

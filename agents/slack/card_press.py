@@ -6,6 +6,7 @@
 (hermes 플러그인)가 `effects`라는 한 결정표를 공유한다(사유: wiki-2049 — 슬랙 앱 하나,
 hermes가 전부 받는다). parse_press는 슬랙 페이로드를 Press 값으로, effects는 Press를
 Effect 값의 목록으로 바꾼다 — 둘 다 순수하고, 못 믿는 누름은 언제나 Rejected 값이다.
+이상한 페이로드(모양이 이상한 message·channel·actions)도 예외가 아니라 거절이다.
 """
 
 from __future__ import annotations
@@ -20,18 +21,43 @@ from card_types import AdvicePress, Press, Rejected, RepairPress, ReviewPress
 #: 버튼 value의 lane → Press 모형 — parse_press가 여기서 모형을 고른다.
 _LANE_MODELS = {"repair": RepairPress, "advice": AdvicePress, "review": ReviewPress}
 
+#: 노트 라벨은 평탄한 /vault/wiki/<이름>.md 의 짧은 이름(예: wiki-0576) — "/" 가 들어간
+#: 라벨은 note_label이 낼 수 있는 모양이 아니니 경로 새는 구멍으로 본다.
+_NOTE_LANES = ("advice", "review")
 
-def parse_press(payload: dict, owner_id: str | None = None) -> Press | Rejected:
+
+def session_name(channel: str, ts: str) -> str:
+    """The engine's name for a Slack card — the key /handover wrote and /consumption
+    judges. One place; card.py imports this."""
+    return f"slack:{channel}:{ts}"
+
+
+def parse_press(payload: dict, owner_id: str | None) -> Press | Rejected:
     """A block_actions payload in, one press out — or Rejected with the reason. The shared
     envelope/owner checks live in card_verdicts.parse_action_common; this layer reads the
-    button value (`message.ts` as card_ts, the channel id) and validates it against the lane
-    model. Notes stay in the `wiki-NNNN` label form the card carried. Never raises:
-    a malformed value, an unknown lane, a review lane asked to defer, a non-owner — each is
-    a Rejected, like every other untrustworthy press."""
+    button value (`message.ts` as card_ts, the channel id — `channel.id`, else
+    `container.channel_id`) and validates it against the lane model. Notes stay in the
+    `wiki-NNNN` label form the card carried, and a label must look exactly like what
+    note_label produces for a flat /vault/wiki/<name>.md note. Never raises: every
+    malformed shape — envelope, value, lane, label, missing ts or channel, a review lane
+    asked to defer, a non-owner — is a Rejected, because a press that cannot write a
+    trustworthy card_ts would orphan the next morning's join and refuse that card."""
     common = card_verdicts.parse_action_common(payload, owner_id=owner_id)
     if isinstance(common, Rejected):
         return common
     (idx, choice), user = common
+    message = payload.get("message")
+    card_ts = message.get("ts") if isinstance(message, dict) else None
+    if not isinstance(card_ts, str) or not card_ts:
+        # card_ts "" 이면 card_verdict 가 고아가 되어 다음 카드가 배를 거부한다
+        return Rejected(reason="no card ts")
+    channel = payload.get("channel")
+    channel_id = channel.get("id") if isinstance(channel, dict) else None
+    if not channel_id:
+        container = payload.get("container")
+        channel_id = container.get("channel_id") if isinstance(container, dict) else None
+    if not isinstance(channel_id, str) or not channel_id:
+        return Rejected(reason="no channel")
     try:
         value = json.loads(payload["actions"][0].get("value"))
     except (TypeError, ValueError):
@@ -44,13 +70,17 @@ def parse_press(payload: dict, owner_id: str | None = None) -> Press | Rejected:
     model = _LANE_MODELS.get(lane)
     if model is None:
         return Rejected(reason=f"unknown lane {lane!r}")
+    if lane in _NOTE_LANES:
+        note = value.get("note")
+        if not isinstance(note, str) or not note or "/" in note:
+            return Rejected(reason=f"malformed note label {note!r}")
     try:
         press = model(
             idx=idx,
             choice=choice,
             user=user,
-            card_ts=(payload.get("message") or {}).get("ts") or "",
-            channel=(payload.get("channel") or {}).get("id") or "",
+            card_ts=card_ts,
+            channel=channel_id,
             **value,
         )
     except (TypeError, ValueError):  # 모형 검증 실패 / value 키가 공통 필드를 덮음
@@ -80,7 +110,7 @@ def effects(press: Press) -> list[card_types.Effect]:
         return [
             *out,
             card_types.Consumption(
-                session=f"slack:{press.channel}:{press.card_ts}",
+                session=session_name(press.channel, press.card_ts),
                 kind="used" if press.choice == "do" else "contested",
                 paths=[card_view.note_path(press.note)],
             ),

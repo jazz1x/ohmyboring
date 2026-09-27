@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 import card_press as cp  # noqa: E402
 import card_types as cc  # noqa: E402
+import card_verdicts  # noqa: E402
 import card_view as cv  # noqa: E402
 
 OWNER = "U_OWNER"
@@ -125,7 +126,6 @@ class ValueRoundTripTests(unittest.TestCase):
         self.assertEqual(cv.note_label(path), "wiki-0576")
         self.assertEqual(cv.note_path("wiki-0576"), path)
         self.assertEqual(cv.note_path(cv.note_label(path)), path)
-        self.assertEqual(cv.note_path(path), path)  # 이미 경로면 그대로
 
 
 class EffectsTableTests(unittest.TestCase):
@@ -239,6 +239,46 @@ class RejectedTests(unittest.TestCase):
     def test_a_weird_envelope_is_rejected_not_raised(self):
         out = cp.parse_press({"type": "reaction_added"}, owner_id=OWNER)
         self.assertIsInstance(out, cc.Rejected)
+
+    def test_malformed_envelope_shapes_are_rejected_not_raised(self):
+        # message이 문자열이거나 channel이 목록이면 .get 에서 AttributeError — 이상한
+        # 페이로드는 언제나 Rejected 값이지 예외가 아니다.
+        value = self.values["card:1:do"]
+        for payload in (
+            {**_payload("card:1:do", value), "message": "not-a-dict"},
+            {**_payload("card:1:do", value), "channel": ["C1"]},
+            {**_payload("card:1:do", value), "actions": "not-a-list"},
+        ):
+            out = cp.parse_press(payload, owner_id=OWNER)
+            self.assertIsInstance(out, cc.Rejected)
+
+    def test_a_press_without_card_ts_or_channel_is_rejected(self):
+        # card_ts "" 는 card_verdict 를 고아로 만들어 다음 카드가 배를 거부하고, 채널
+        # 없음은 소비 세션을 "slack::" 로 만든다 — 받지 않는 게 낫다.
+        value = self.values["card:1:do"]
+        out = cp.parse_press({**_payload("card:1:do", value), "message": {}}, owner_id=OWNER)
+        self.assertIsInstance(out, cc.Rejected)
+        self.assertEqual(out.reason, "no card ts")
+        out = cp.parse_press({**_payload("card:1:do", value), "channel": {}}, owner_id=OWNER)
+        self.assertIsInstance(out, cc.Rejected)
+        self.assertEqual(out.reason, "no channel")
+
+    def test_a_negative_idx_is_rejected_in_both_parsers(self):
+        value = self.values["card:0:do"]
+        out = cp.parse_press(_payload("card:-5:do", value), owner_id=OWNER)
+        self.assertIsInstance(out, cc.Rejected)
+        self.assertEqual(out.reason, "no proposal -5")
+        out = card_verdicts.parse_action(_payload("card:-5:do", value), owner_id=OWNER, n_total=3)
+        self.assertIsInstance(out, cc.Rejected)
+
+    def test_a_note_label_with_a_slash_is_rejected(self):
+        # 라벨에 "/" 가 들어가면 note_label이 낼 수 있는 모양이 아니다 — 경로 새는
+        # 구멍으로 보고 받지 않는다.
+        for note in ("../../etc/passwd", "/abs/other.md"):
+            value = json.dumps({"lane": "advice", "note": note})
+            out = cp.parse_press(_payload("card:1:do", value), owner_id=OWNER)
+            self.assertIsInstance(out, cc.Rejected)
+            self.assertIn("malformed note label", out.reason)
 
 
 if __name__ == "__main__":

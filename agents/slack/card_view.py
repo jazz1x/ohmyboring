@@ -66,10 +66,9 @@ def note_label(note: str) -> str:
 
 
 def note_path(label: str) -> str:
-    """`wiki-0576` → `/vault/wiki/wiki-0576.md` — note_label's inverse. A label carrying
-    `/` (already a path) passes through untouched."""
-    if "/" in label:
-        return label
+    """`wiki-0576` → `/vault/wiki/wiki-0576.md` — note_label's inverse. Only flat
+    `/vault/wiki/<name>.md` notes round-trip (the build refuses anything else), so a label
+    always expands under `/vault/wiki/` — no path can sneak out through it."""
     return f"/vault/wiki/{label}.md"
 
 
@@ -88,11 +87,13 @@ def _button_value(data: dict) -> str:
 
 
 def _lane_value(lane: str, data: dict, *, note: str | None = None) -> str:
-    """Lane name + the lane's own data as a button value. A note must live under
-    `/vault/wiki/` and rides in label form — no full path leaks into a block (AC7)."""
+    """Lane name + the lane's own data as a button value. A note must be a flat
+    `/vault/wiki/<name>.md` — a subfolder or a `.md`-less name cannot round-trip through
+    the label, so the card is refused instead of shipping a button it cannot answer."""
     if note is not None:
-        if not note.startswith("/vault/wiki/"):
-            raise ValueError(f"note {note!r} is not under /vault/wiki/")
+        name = note.removeprefix("/vault/wiki/")
+        if name == note or "/" in name or not name.endswith(".md"):
+            raise ValueError(f"note {note!r} is not a flat /vault/wiki/<name>.md note")
         data = {**data, "note": note_label(note)}
     return _button_value({"lane": lane, **data})
 

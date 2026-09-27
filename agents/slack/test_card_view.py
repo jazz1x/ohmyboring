@@ -512,6 +512,15 @@ class CardV2ShapeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cv.build_blocks([self._proposal()], repairs=[oversized], repairs_total_groups=1, lang="ko")
 
+    def test_a_subfolder_or_extensionless_note_refuses_the_card(self):
+        # 라벨↔경로는 평탄한 /vault/wiki/<이름>.md 만 왕복한다 — 서브폴더 노트는 라벨로
+        # 접히면 되돌릴 수 없고, .md 없는 이름은 라벨이 아니다. 못 되돌리는 카드는 보내지
+        # 않는다.
+        with self.assertRaises(ValueError):
+            cv.build_blocks([self._proposal(note="/vault/wiki/sub/note.md")], lang="ko")
+        with self.assertRaises(ValueError):
+            cv.build_blocks([self._proposal(note="/vault/wiki/wiki-0576")], lang="ko")
+
     def test_review_lane_counts_against_the_block_limit(self):
         # r3.1: the review lane's header and rows live inside the same 50-block cap as the
         # advice rows — the advice loop reserves their tail, and review rows that still do

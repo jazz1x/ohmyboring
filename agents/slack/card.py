@@ -156,11 +156,6 @@ class Collaborators(NamedTuple):
     proposed: Callable[[int], list[card_types.ProposedVerdict]] = lambda since_hours: []
 
 
-def session_name(card: card_types.PostedCard) -> str:
-    """The engine's name for this card — the same key /handover wrote and /consumption judges."""
-    return f"slack:{card.channel}:{card.ts}"
-
-
 def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     if collabs is None:
         collabs = Collaborators(
@@ -410,7 +405,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         )
         card_ts = message.ts
         collabs.handover(
-            session_name(message),
+            card_press.session_name(message.channel, message.ts),
             datetime.now(UTC).isoformat(),
             card_verdicts.handover_paths(state["proposals"]),
         )
