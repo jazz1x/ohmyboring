@@ -34,6 +34,15 @@ MARK_DIR="${HOME}/.cache/boring-distill"
 LOG_TAIL_LINES="${BORING_LOG_TAIL_LINES:-200}"
 LOG_FAILURE_MAX="${BORING_LOG_FAILURE_MAX:-20}"
 
+# What the engine image and the host `cargo build` read; other drudge/ files cannot stale them.
+DRUDGE_BUILD_INPUTS="drudge/Dockerfile drudge/rust-toolchain.toml drudge/Cargo.toml drudge/Cargo.lock drudge/build.rs drudge/src/"
+
+# Unquoted on purpose: the list must split into separate pathspecs.
+drudge_input_changes() {
+    # shellcheck disable=SC2086
+    git -C "$BORING_HOME" diff --name-only "$1" HEAD -- $DRUDGE_BUILD_INPUTS 2>/dev/null
+}
+
 # host.docker.internal resolves only inside containers; from the host it must be localhost,
 # or this host-side reachability check fails even when Ollama is healthy. dash has no
 # ${VAR/a/b} substitution, so rewrite via sed (same approach as scripts/ensure-ollama.sh).
@@ -72,6 +81,7 @@ failed_codex=0
 failed_resolution=0
 failed_freshness=0
 failed_maintenance=0
+failed_card=0
 failed_eventlog=0
 
 ok()   { echo "✓ $1"; }
@@ -101,6 +111,7 @@ log_doctor_event() {
             --field "failed_resolution=$failed_resolution" \
             --field "failed_freshness=$failed_freshness" \
             --field "failed_maintenance=$failed_maintenance" \
+            --field "failed_card=$failed_card" \
             --field "failed_eventlog=$failed_eventlog" \
             --field "drudge_down=$drudge_down"; then
             echo "⚠ doctor event log write failed" >&2
@@ -341,14 +352,9 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$BORING_URL/health" 2>/dev/n
             warn "cannot read HEAD at $BORING_HOME — drift not checked (engine is running ${running_sha%%????????*}…)"
         elif [ "$running_sha" = "$head_sha" ]; then
             ok "engine runs the checked-out commit ($(printf '%.8s' "$running_sha"))"
-        elif [ -z "$(git -C "$BORING_HOME" diff --name-only "$running_sha" HEAD -- drudge/ 2>/dev/null)" ] \
+        elif [ -z "$(drudge_input_changes "$running_sha")" ] \
              && git -C "$BORING_HOME" cat-file -e "$running_sha^{commit}" 2>/dev/null; then
-            # The image is built from `drudge/`. Commits that touch only Python, hooks or docs
-            # cannot make it stale, and calling them drift is how a failing line stops being read
-            # — the same way the warning this check replaced stopped being read. Seven such
-            # commits on 2026-09-07 had this reporting a stale engine with no Rust changed.
-            # The guard is `cat-file -e`: an unknown sha means the comparison could not be made,
-            # and "could not check" must fall through to the failure below, never to an ok.
+            # An unknown sha (cat-file -e) falls through to the failure below, never to ok.
             ok "engine matches the checkout for drudge/ (image $(printf '%.8s' "$running_sha"), HEAD $(printf '%.8s' "$head_sha"); later commits touch no Rust)"
         else
             # Was a warning until 2026-08-25, and the warning did not work: #221 shipped the
@@ -373,13 +379,8 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$BORING_URL/health" 2>/dev/n
                 "$head_sha") ok "host CLI built from the checked-out commit ($(printf '%.8s' "$host_sha"))" ;;
                 unstamped|"") warn "host CLI reports no build stamp — rebuild with 'cargo build --release' to make its drift detectable" ;;
                 *)
-                    # Same blind spot the engine check had until #290: this binary is built from
-                    # `drudge/`, so a commit touching only Python, hooks or docs cannot age it.
-                    # Fixing one of the two and not the other is how one value in two places
-                    # goes wrong again — the very pattern §8 D8 names. `cat-file -e` guards the
-                    # comparison: an unknown sha means it could not be made, and that falls
-                    # through to the failure rather than to an ok.
-                    if [ -z "$(git -C "$BORING_HOME" diff --name-only "$host_sha" HEAD -- drudge/ 2>/dev/null)" ] \
+                    # Same inputs and same unknown-sha rule as the image check above.
+                    if [ -z "$(drudge_input_changes "$host_sha")" ] \
                        && git -C "$BORING_HOME" cat-file -e "$host_sha^{commit}" 2>/dev/null; then
                         ok "host CLI matches the checkout for drudge/ (binary $(printf '%.8s' "$host_sha"), HEAD $(printf '%.8s' "$head_sha"); later commits touch no Rust)"
                     else
@@ -810,6 +811,57 @@ if [ -f "$BORING_HOME/.pre-commit-config.yaml" ]; then
     fi
 fi
 
+# (a2e) The morning card. The launchd log is the only record of a run, and finished lands only
+# after card.py's CARD_WAIT_HOURS button wait — a posted run proves itself with `[card] posted ts=`,
+# not with finished. Lines the ISO regex cannot parse (pre-ISO logs) are skipped, not misread.
+CARD_LOG="${BORING_CARD_LOG:-/tmp/com.ohmyboring.morning-card.log}"
+if [ ! -f "$CARD_LOG" ]; then
+    warn "morning card: 모름 — 로그 파일이 없음 ($CARD_LOG) (not the same as working)"
+else
+    card_started=$(sed -n 's/^=== morning card started at \([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}[+-][0-9]\{4\}\) ===$/\1/p' "$CARD_LOG" | tail -n 1)
+    if [ -z "$card_started" ]; then
+        warn "morning card: 모름 — 읽을 수 있는 'started at <ISO>' 줄이 없음 ($CARD_LOG) (not the same as working)"
+    else
+        card_start_line=$(sed -n '/^=== morning card started at [0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}[+-][0-9]\{4\} ===$/=' "$CARD_LOG" | tail -n 1)
+        card_after=$(tail -n "+$((card_start_line + 1))" "$CARD_LOG")
+        card_exit=$(printf '%s\n' "$card_after" | sed -n 's/^=== morning card finished at .* (exit \([0-9][0-9]*\)) ===$/\1/p' | tail -n 1)
+        card_posted=$(printf '%s\n' "$card_after" | grep -c '\[card\] posted ts=' || true)
+        # Staleness binds first: run_card exits before writing `started` when the door is down,
+        # so yesterday's post must not read as today's. python3 because GNU/BSD date differ.
+        card_stale=$(python3 - "$card_started" "${BORING_NOW:-}" <<'PY'
+import sys
+from datetime import datetime, timedelta
+
+started = datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%S%z")
+now = datetime.strptime(sys.argv[2], "%Y-%m-%dT%H:%M:%S%z") if sys.argv[2] else datetime.now().astimezone()
+today_0805 = now.replace(hour=8, minute=5, second=0, microsecond=0)
+threshold = today_0805 if now >= today_0805 else today_0805 - timedelta(days=1)
+print(f"stale={int(started.date() < threshold.date())} threshold={threshold.isoformat()}")
+PY
+)
+        case "$card_stale" in
+            stale=1*) bad "morning card did not run since ${card_stale#stale=1 threshold=}"; failed_card=1 ;;
+            stale=0*)
+                if [ "$card_posted" -gt 0 ]; then
+                    ok "morning card: posted at $card_started"
+                    if [ -n "$card_exit" ] && [ "$card_exit" -ne 0 ]; then
+                        warn "morning card ended with exit $card_exit after posting"
+                    fi
+                elif [ -n "$card_exit" ] && [ "$card_exit" -ne 0 ]; then
+                    bad "morning card FAILED at $card_started (exit $card_exit)"
+                    failed_card=1
+                elif [ -n "$card_exit" ]; then
+                    ok "morning card: posted at $card_started"
+                else
+                    bad "morning card started at $card_started but has not posted yet"
+                    failed_card=1
+                fi
+                ;;
+            *) warn "morning card: 모름 — could not compare dates ($card_started, now=${BORING_NOW:-clock})" ;;
+        esac
+    fi
+fi
+
 # (d5e) The same hook registered twice, read from the configs rather than from the damage.
 # (d5c) below finds a hook that FIRED twice, which means it only speaks after the duplicate has
 # written rows, and it stays silent forever for an adapter registered twice that never runs. Kimi
@@ -951,8 +1003,8 @@ fi
 
 echo
 if [ "$STRICT" -eq 1 ]; then
-    failures="${failed_env}${failed_hooks}${failed_hookprobe}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}${failed_midpoint}${failed_maintenance}${failed_eventlog}"
-    if [ "$failures" = "00000000000000" ]; then
+    failures="${failed_env}${failed_hooks}${failed_hookprobe}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}${failed_midpoint}${failed_maintenance}${failed_card}${failed_eventlog}"
+    if [ "$failures" = "000000000000000" ]; then
         ok "readiness: all doctor checks passed — briefing/write-door dependencies are ready."
         log_doctor_event ok
         exit 0

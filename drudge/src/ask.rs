@@ -786,7 +786,8 @@ pub struct RegisterOut {
     pub total_matching: i64,
 }
 
-const REGISTER_LIMIT: i64 = 50;
+/// Default and maximum row cap for the four registers — the doors parse `limit` into this range.
+pub(crate) const REGISTER_LIMIT: i64 = 50;
 
 fn render_register(rows: &[RegisterRow], limit_applied: bool, total_matching: i64) -> String {
     let mut out = String::new();
@@ -846,10 +847,11 @@ pub async fn decision_register(
     store: &Store,
     project: Option<&str>,
     exclude_origins: &[String],
+    limit: i64,
 ) -> Result<RegisterOut> {
     let kinds = ["decision".to_owned()];
     let res = store
-        .recent_register_rows(REGISTER_LIMIT, project, Some(&kinds), exclude_origins)
+        .recent_register_rows(limit, project, Some(&kinds), exclude_origins)
         .await?;
     if res.rows.is_empty() {
         return Ok(RegisterOut::empty("No decisions recorded yet."));
@@ -861,6 +863,7 @@ pub async fn risk_register(
     store: &Store,
     project: Option<&str>,
     exclude_origins: &[String],
+    limit: i64,
 ) -> Result<RegisterOut> {
     let kinds = [
         "risk".to_owned(),
@@ -868,7 +871,7 @@ pub async fn risk_register(
         "blocked".to_owned(),
     ];
     let res = store
-        .recent_register_rows(REGISTER_LIMIT, project, Some(&kinds), exclude_origins)
+        .recent_register_rows(limit, project, Some(&kinds), exclude_origins)
         .await?;
     if res.rows.is_empty() {
         return Ok(RegisterOut::empty(
@@ -882,10 +885,11 @@ pub async fn next_action_register(
     store: &Store,
     project: Option<&str>,
     exclude_origins: &[String],
+    limit: i64,
 ) -> Result<RegisterOut> {
     let kinds = ["next".to_owned(), "blocked".to_owned()];
     let res = store
-        .recent_register_rows(REGISTER_LIMIT, project, Some(&kinds), exclude_origins)
+        .recent_register_rows(limit, project, Some(&kinds), exclude_origins)
         .await?;
     if res.rows.is_empty() {
         return Ok(RegisterOut::empty(
@@ -900,11 +904,12 @@ pub async fn stalled_register(
     project: Option<&str>,
     exclude_origins: &[String],
     older_than_days: u32,
+    limit: i64,
 ) -> Result<RegisterOut> {
     let kinds = ["next".to_owned(), "blocked".to_owned()];
     let res = store
         .stalled_register_rows(
-            REGISTER_LIMIT,
+            limit,
             project,
             Some(&kinds),
             exclude_origins,
@@ -1263,6 +1268,26 @@ mod tests {
         assert!(
             out.answer
                 .starts_with("Showing 2 of 5 matching claims (limit_applied=true)."),
+            "was {:?}",
+            out.answer
+        );
+    }
+
+    /// The store (Postgres) does the cutting, so a unit test exercises `from_rows` the way
+    /// `decision_register(.., limit = 2)` feeds it: 2 rows kept of 3 matching.
+    #[test]
+    fn register_with_limit_two_keeps_two_rows_of_three_matching() {
+        let rows = vec![
+            register_row("gamma", "decided", "use rows", "decision", "certain"),
+            register_row("beta", "decided", "keep answer", "decision", "likely"),
+        ];
+        let out = super::RegisterOut::from_rows(rows, 3);
+        assert_eq!(out.items.len(), 2);
+        assert!(out.limit_applied);
+        assert_eq!(out.total_matching, 3);
+        assert!(
+            out.answer
+                .starts_with("Showing 2 of 3 matching claims (limit_applied=true)."),
             "was {:?}",
             out.answer
         );

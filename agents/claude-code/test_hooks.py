@@ -26,8 +26,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -74,7 +76,9 @@ def _load(name, filename):
 
 distill = _load("distill_session_hook", "distill-session.py")
 recall = _load("recall_hook", "recall.py")
+rules_hook = _load("rules_hook", "rules.py")
 import distill_core  # noqa: E402
+import omb_env  # noqa: E402
 
 # The recall tests drive the real injection path, which appends to the injection ledger.
 # Redirect it before import or the suite writes into the owner's live cache.
@@ -275,6 +279,12 @@ class SessionStartRecallTests(unittest.TestCase):
             mock.patch.object(module.sys, "stdout", captured),
             mock.patch.object(module.sys, "stderr", stderr),
             mock.patch.object(module.DrudgeClient, "context", fake_context),
+            # No BORING_DOOR_URL here → the hook now tries the default door; keep the suite offline.
+            mock.patch.object(
+                module.urllib.request,
+                "urlopen",
+                side_effect=urllib.error.URLError("no door in unit tests"),
+            ),
         ):
             module.main()
         return captured.getvalue(), stderr.getvalue()
@@ -347,9 +357,10 @@ class SessionStartRecallTests(unittest.TestCase):
 class DoorApprovedSectionTests(unittest.TestCase):
     """The 「오늘 승인한 것」 section in session-start-recall.py — three fates (AC5).
 
-    The hook must prepend what the morning card's 「해」 judged when BORING_DOOR_URL
-    points at a live door, say so on stderr and continue when the door is dead,
-    and stay silent when no door URL is configured (not configuring is normal).
+    The hook must prepend what the morning card's 「해」 judged when the door answers,
+    say so on stderr and continue when the door is dead, and with no BORING_DOOR_URL
+    still attempt the fetch on the engine-style default — the installed hook env has
+    no BORING_DOOR_URL, and the silent skip there was the 09-27 live bug.
     """
 
     class _DoorResp:
@@ -429,17 +440,25 @@ class DoorApprovedSectionTests(unittest.TestCase):
         # the card itself still reaches the session — the hook lives
         self.assertIn("📚 Project context", json.loads(out)["hookSpecificOutput"]["additionalContext"])
 
-    def test_no_door_url_omits_silently(self):
+    def test_no_door_url_attempts_the_default_door(self):
+        """Unset BORING_DOOR_URL → the engine-style default (localhost:7710), not a silent skip."""
         called = []
 
         def urlopen(url, timeout):
             called.append(url)
-            return self._DoorResp({})
+            return self._DoorResp({"approved": [{"note": "/vault/wiki/wiki-1734.md"}], "contested": []})
 
-        out, err = self._run_with_door({}, urlopen)
-        self.assertEqual(err, "", "an unconfigured door is normal, not an error")
-        self.assertEqual(called, [])
-        self.assertNotIn("오늘 승인한 것", out)
+        with mock.patch.object(omb_env, "_in_container", return_value=False):
+            out, err = self._run_with_door({}, urlopen)
+        self.assertEqual(
+            called,
+            ["http://localhost:7710/approved?since_hours=24"],
+            "no env → fetch the default door, as the engine URL already does",
+        )
+        self.assertEqual(err, "")
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("## 오늘 승인한 것 (1)", ctx)
+        self.assertIn("- /vault/wiki/wiki-1734.md", ctx)
 
 
 class DistillExitCodeTests(unittest.TestCase):
@@ -790,6 +809,136 @@ class ClampWiringTest(unittest.TestCase):
 def _read_last_event(path):
     with open(path, encoding="utf-8") as f:
         return json.loads(f.readlines()[-1])
+
+
+class RulesStubHandler(BaseHTTPRequestHandler):
+    """The door's stand-in: serves a fixed GET /rules payload and counts hits."""
+
+    hits = 0
+    payload: dict = {"rules": [], "incomplete": 0}
+
+    def do_GET(self):  # noqa: N802 — http.server's spelling
+        type(self).hits += 1
+        body = json.dumps(type(self).payload).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class RulesHookTests(unittest.TestCase):
+    """hooks/rules.py against a stub door on localhost — real HTTP loopback, nothing mocked.
+
+    Covers: a firing prompt injects the header + one line per rule and records one
+    rule_fired event per rule; a non-matching prompt is silent; a dead door is one
+    stderr line and no output; harness-injected prompts never reach the door; with no
+    BORING_DOOR_URL the hook falls back to the engine-style default (omb_env.door_url)
+    and still reaches the door — the installed hook env has none, and the silent skip
+    was the 09-27 live bug.
+    """
+
+    RULE = {
+        "subject": "rule-hermes-not-removed",
+        "rule": "hermes 를 빼지 마세요",
+        "trigger": "hermes + remove|drop",
+        "source_path": "/vault/wiki/wiki-1955.md",
+    }
+
+    def setUp(self):
+        self.stub = ThreadingHTTPServer(("127.0.0.1", 0), RulesStubHandler)
+        self.stub_thread = threading.Thread(target=self.stub.serve_forever, daemon=True)
+        self.stub_thread.start()
+        RulesStubHandler.hits = 0
+        RulesStubHandler.payload = {"rules": [dict(self.RULE)], "incomplete": 0}
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.env = mock.patch.dict(
+            os.environ,
+            {
+                "BORING_DOOR_URL": f"http://127.0.0.1:{self.stub.server_address[1]}",
+                "BORING_EVENT_SINK": "spool",
+                "BORING_EVENT_LOG": os.path.join(self._tmp.name, "events.ndjson"),
+            },
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def tearDown(self):
+        self.stub.shutdown()
+        self.stub.server_close()
+
+    def _run(self, payload):
+        captured, stderr = io.StringIO(), io.StringIO()
+        module = _load("rules_hook_live", "rules.py")
+        with (
+            mock.patch.object(module.sys, "stdin", io.StringIO(json.dumps(payload))),
+            mock.patch.object(module.sys, "stdout", captured),
+            mock.patch.object(module.sys, "stderr", stderr),
+        ):
+            module.main()
+        return captured.getvalue(), stderr.getvalue()
+
+    def test_firing_prompt_injects_the_rule_and_records_the_event(self):
+        out, err = self._run({"prompt": "Hermes 좀 remove 해줘", "session_id": "s-1"})
+        self.assertEqual(err, "")
+        payload = json.loads(out)
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(ctx.startswith("지켜야 할 규칙 (소유자가 바로잡은 것):"), ctx)
+        self.assertIn("- hermes 를 빼지 마세요 (출처 wiki-1955)", ctx)
+        with open(os.path.join(self._tmp.name, "events.ndjson"), encoding="utf-8") as f:
+            events = [json.loads(line) for line in f if line.strip()]
+        fired = [e for e in events if e.get("event") == "rule_fired"]
+        self.assertEqual(len(fired), 1, fired)
+        self.assertEqual(fired[0]["component"], "rules")
+        self.assertEqual(fired[0]["status"], "ok")
+        self.assertEqual(fired[0]["subject"], "rule-hermes-not-removed")
+        self.assertEqual(fired[0]["session_id"], "s-1")
+
+    def test_no_trigger_match_is_silent_but_the_door_was_asked(self):
+        out, err = self._run({"prompt": "그냥 평범한 질문이에요", "session_id": "s-2"})
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+        self.assertEqual(RulesStubHandler.hits, 1)
+        self.assertFalse(
+            os.path.exists(os.path.join(self._tmp.name, "events.ndjson")),
+            "no firing → no rule_fired event",
+        )
+
+    def test_dead_door_is_one_stderr_line_and_no_output(self):
+        os.environ["BORING_DOOR_URL"] = "http://127.0.0.1:1"  # nothing listens there
+        out, err = self._run({"prompt": "hermes remove", "session_id": "s-3"})
+        self.assertEqual(out, "")
+        lines = [line for line in err.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, err)
+        self.assertIn("[omb-rules] rules fetch failed", err)
+
+    def test_injection_prompt_never_reaches_the_door(self):
+        out, err = self._run({"prompt": "<task-notification>\n<status>done</status>"})
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+        self.assertEqual(RulesStubHandler.hits, 0)
+
+    def test_no_door_url_falls_back_to_the_default_and_fires(self):
+        # The installed-hook bug: Claude Code's hook env has no BORING_DOOR_URL and the
+        # hook used to return silently. Now an unset env means the engine-style default,
+        # so a firing prompt must still reach the door (door_url patched to this stub).
+        os.environ.pop("BORING_DOOR_URL", None)
+        with mock.patch.object(
+            omb_env, "door_url", return_value=f"http://127.0.0.1:{self.stub.server_address[1]}"
+        ):
+            out, err = self._run({"prompt": "hermes remove", "session_id": "s-4"})
+        self.assertEqual(err, "")
+        self.assertEqual(RulesStubHandler.hits, 1)
+        payload = json.loads(out)
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
+        self.assertIn(
+            "- hermes 를 빼지 마세요 (출처 wiki-1955)", payload["hookSpecificOutput"]["additionalContext"]
+        )
 
 
 if __name__ == "__main__":

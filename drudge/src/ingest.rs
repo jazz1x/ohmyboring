@@ -2,7 +2,8 @@
 //!
 //! Cross-reference: ENFORCEMENT.md §B (one-way flow) · design decision D2 (deterministic graph).
 //!   - Excludes tool-output dump (noise) paths.
-//!   - sha tracking re-embeds only changed files. Chunks of vanished files are pruned.
+//!   - sha tracking re-embeds only changed files. Vanished files keep their rows during the
+//!     migration (`prune_skipped` event).
 //!   - **Graph is deterministic** (kernel A): semantic nodes/edges (tool·concept·claim) come from the
 //!     note's frontmatter — agent-curated — NOT from an LLM extraction pass. drudge only embeds (bge-m3)
 //!     and links. `ingest_file` is the SSOT per-file pipeline shared by `run` (walk) and `remember` (one file).
@@ -25,6 +26,7 @@ use crate::store::{Doc, Store};
 const EMBED_CONCURRENCY: usize = 8;
 const NOISE_SUBSTR: [&str; 1] = ["tool-results"]; // exclude general noise (tool-output dumps)
 const EXTS: [&str; 3] = ["md", "markdown", "txt"];
+const PRUNE_SKIPPED_SAMPLE: usize = 20;
 
 // ─────────────────────────────────────────────────────────────
 // Chunker trait + default character-based chunker
@@ -267,12 +269,11 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                     stats.claims += 1;
                 }
                 store
+                    .mirror_claim_said_by(&subject, &predicate, path, cl.said_by)
+                    .await?;
+                stats.edges += store
                     .upsert_claim_node(path, &front.project, &subject, &predicate, cl)
                     .await?;
-                stats.edges += if front.project.is_empty() { 1 } else { 2 };
-                if cl.kind() != "fact" {
-                    stats.edges += 1;
-                }
             }
         }
         Ok(())
@@ -286,6 +287,7 @@ pub struct Stats {
     pub updated: usize,
     pub unchanged: usize,
     pub deleted: usize,
+    pub kept_vanished: usize,
     pub skipped: usize,
     pub failed: usize, // notes that errored on parse/ingest and were skipped (resilient sync, not aborted)
     pub repaired: usize, // notes auto-repaired (unsafe frontmatter re-quoted) then re-ingested
@@ -332,12 +334,25 @@ fn slugify(s: &str) -> String {
         .collect()
 }
 
-/// claim subject/predicate normalization — lowercase, trim, collapse whitespace (matching consistency).
+/// claim subject/predicate normalization — lowercase, collapse whitespace/`_`/`-` runs into one
+/// `-` (matches repo-slug convention), trim leading/trailing `-`. Prevents "foo bar" and "foo-bar"
+/// from landing as distinct claim subjects.
 fn canon(s: &str) -> String {
-    s.to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let lower = s.to_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut prev_sep = false;
+    for c in lower.chars() {
+        if c.is_whitespace() || c == '_' || c == '-' {
+            prev_sep = true;
+        } else {
+            if prev_sep && !out.is_empty() {
+                out.push('-');
+            }
+            prev_sep = false;
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Strip NUL (0x00) — Postgres `text` cannot store NUL. Strip once at the IO boundary (lossless,
@@ -528,14 +543,39 @@ pub async fn run_with<C: Chunker, G: GraphExtractor, E: Embed>(
         }
     }
 
-    // prune: vanished files → remove document node + edges + chunks
-    for p in store.all_doc_paths().await? {
-        if is_managed_path(Path::new(&p), &managed_dirs) && !seen.contains(&p) {
-            store.delete_document(&p).await?;
-            stats.deleted += 1;
-        }
+    let mut vanished: Vec<String> = store
+        .all_doc_paths()
+        .await?
+        .into_iter()
+        .filter(|p| is_managed_path(Path::new(p), &managed_dirs) && !seen.contains(p))
+        .collect();
+    vanished.sort();
+    stats.kept_vanished = vanished.len();
+    if !vanished.is_empty() {
+        record_prune_skipped(store, &vanished).await?;
     }
     Ok(stats)
+}
+
+/// Owner decision 2026-09-24 (「적어도 마이그레이션 시점인 지금은 아니라는거임」): prune deletes
+/// nothing while the migration runs. A vanished file keeps its rows and is named here instead;
+/// a restored file re-ingests onto them. Reopened after the migration, like `forget`.
+async fn record_prune_skipped(store: &Store, vanished: &[String]) -> Result<()> {
+    let sample: Vec<&String> = vanished.iter().take(PRUNE_SKIPPED_SAMPLE).collect();
+    eprintln!(
+        "[ingest] prune_skipped: {} vanished note(s) kept (migration) — {:?}",
+        vanished.len(),
+        sample
+    );
+    store
+        .log_event(&serde_json::json!({
+            "component": "drudge.ingest",
+            "event": "prune_skipped",
+            "status": "warn",
+            "count": vanished.len(),
+            "paths": sample,
+        }))
+        .await
 }
 
 fn collect_target_paths(dirs: &[String], exclude: &[String]) -> Result<Vec<String>> {
@@ -587,7 +627,9 @@ mod tests {
 
     #[test]
     fn canon_normalizes() {
-        assert_eq!(canon("  OH-my  Boring  DB "), "oh-my boring db");
+        assert_eq!(canon("  OH-my  Boring  DB "), "oh-my-boring-db");
+        assert_eq!(canon("foodspring front"), "foodspring-front");
+        assert_eq!(canon("a_b--c"), "a-b-c");
     }
 
     #[test]

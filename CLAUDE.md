@@ -73,10 +73,13 @@ Claude 메모리 파일 쓰기를 막고 oh-my-boring `remember` 로 돌린다 (
 머지는 끝이 아니다. `~/.hermes/scripts` 는 별도 아티팩트다.
 
 호스트 CLI 바이너리도 별도였고, 그래서 2026-09-18 하루에 세 번 드리프트가 났다 — 매번
-`doctor` 가 잡아 손으로 고쳤다. 이제 `make build` 가 **도는 것 둘 다** 만든다.
+`doctor` 가 잡아 손으로 고쳤다. 이제 `make build` 가 compose 이미지(엔진·문)와
+호스트 CLI 바이너리를 한 번에 만든다. 실행물 전부는 아니다 — hermes-agent 는 외부
+이미지(`make hermes-build`)고 `~/.hermes/scripts` 는 별도 산출물이다.
 
 - Python·훅 변경 → `python3 agents/shared/agent_wiring.py --install --boring-home "$PWD"`
 - Rust 변경 → `make build` + 컨테이너 재기동
+- `agents/door/**` 변경 → `make door-build && make door-up` 후 `Recreated` 확인 (이미지가 코드를 COPY 하므로 — `agents/door/Dockerfile`)
 - 확인 → `sh scripts/doctor.sh` 가 ✗ 0 인지, 그리고 소비자 쪽에서 한 번 돌려 값을 인용
 
 ## 8. 파일은 `Edit` 로 고친다
@@ -96,3 +99,22 @@ Claude 메모리 파일 쓰기를 막고 oh-my-boring `remember` 로 돌린다 (
 - 파일 통째로 새로 쓰기 → `Write`
 - 5개 넘는 파일 일괄 치환 → `sd --preview` 먼저, 그리고 **바뀐 개수를 세어 확인**
 - heredoc 은 **새 파일 생성**과 **읽기 전용 조회**에만
+
+## 9. 소유자가 정한 것은 다시 열지 않는다
+
+「알아서」는 **방법**의 위임이지 **결정**의 위임이 아니다. 2026-09-22 하루에 세 번, 소유자가 문장으로
+정한 것을 내가 더 나은 논리를 찾았다며 조용히 갈아치웠다:
+
+| 소유자가 정한 것 | 내가 한 것 | 비용 |
+|---|---|---|
+| 각서(`~/Documents/ohmyboring/*/*.html`) 위에 짓는다 | 별도 설계 문서를 새로 지음 | 각서 다시 읽고 폐기 |
+| 도구 말고 제품을 깎는다 | 문 프록시 4사이클, 기능 0 | 반나절 |
+| 이전은 `feat/migration-python` 에 TBD, **다 되면** main | 12사이클째에 main 스쿼시 머지 | 브랜치 재생성, 이중화 위험 |
+
+셋의 공통 신호는 **"제가 정합니다"** 라고 쓰는 순간이다. 그 문장이 나오면 멈춘다.
+
+- 정한 것을 바꾸고 싶으면: 소유자 원문을 그대로 인용하고 → 왜를 한 줄로 → **답이 오기 전에는 원래대로.**
+- 이 저장소의 이전 브랜치 규칙: 사이클은 `feat/migration-python` 에 커밋 1개씩. main 으로 가는 것은 소유자가
+  "다 됐다"고 말한 뒤 한 번. 배달(카드·크론)은 그 전에도 워크트리에서 한다 — 배달 때문에 머지하지 않는다.
+
+게이트가 못 잡는다: 결정의 주인이 누구인지는 diff 에 없다.

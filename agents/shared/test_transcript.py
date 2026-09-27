@@ -157,6 +157,49 @@ def test_extract_claude_jsonl_drops_unknown_tool_calls():
         os.unlink(path)
 
 
+def test_extract_claude_jsonl_user_lines_are_only_what_the_owner_typed():
+    def user(content, **flags):
+        return {"type": "user", **flags, "message": {"role": "user", "content": content}}
+
+    harness_rows = [
+        user([{"type": "text", "text": "Base directory for this skill: /x"}], isMeta=True),
+        user("This session is being continued from a previous conversation.", isCompactSummary=True),
+        user("<task-notification>\n<task-id>a1</task-id> worker done</task-notification>"),
+        user([{"type": "text", "text": "<command-message>pr-craft is running…</command-message>"}]),
+        user("<command-name>/clear</command-name>"),
+        user("<local-command-stdout>Compacted</local-command-stdout>"),
+        user("<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>"),
+        user("<system-reminder>Plan mode is active.</system-reminder>"),
+    ]
+    kept_rows = [
+        user("테스트 돌려줘"),
+        user([{"type": "text", "text": "D4 는 간선으로 가요"}]),
+        user(
+            "<command-message>loop</command-message>\n<command-name>/loop</command-name>\n"
+            "<command-args>D4 는 간선으로 간다\n순위는 아직</command-args>"
+        ),
+        user("그 <task-notification> 은 무시해"),
+        user('<pasted_content id="0e6b">owner paste</pasted_content>'),
+        {"message": {"role": "assistant", "content": [{"type": "text", "text": "네"}]}},
+    ]
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        _write(f.name, harness_rows + kept_rows)
+        path = f.name
+    try:
+        out = transcript.extract(path, "claude-json")
+        assert out.splitlines() == [
+            "[user] 테스트 돌려줘",
+            "[user] D4 는 간선으로 가요",
+            "[user] D4 는 간선으로 간다",
+            "순위는 아직",
+            "[user] 그 <task-notification> 은 무시해",
+            '[user] <pasted_content id="0e6b">owner paste</pasted_content>',
+            "[assistant] 네",
+        ], out
+    finally:
+        os.unlink(path)
+
+
 def test_claude_distill_clamp_default_and_env_override():
     saved = {k: os.environ.pop(k, None) for k in ("DISTILL_CLAMP", "INGEST_CLAMP")}
     try:
@@ -389,6 +432,7 @@ if __name__ == "__main__":
     test_extract_claude_jsonl_ignores_malformed_lines()
     test_extract_claude_jsonl_includes_allowlisted_tool_calls()
     test_extract_claude_jsonl_drops_unknown_tool_calls()
+    test_extract_claude_jsonl_user_lines_are_only_what_the_owner_typed()
     test_claude_distill_clamp_default_and_env_override()
     test_extract_kimi_wire_user_and_assistant()
     test_extract_codex_jsonl_user_and_assistant()

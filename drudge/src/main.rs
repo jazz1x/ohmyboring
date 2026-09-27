@@ -1,4 +1,4 @@
-//! ohmyboring personal RAG — Rust (pgvector: vector + node/edge graph + recursive CTE + audit).
+//! ohmyboring personal RAG — Rust (pgvector: vector + node/edge graph + audit).
 //! First milestone: embed → store → vector search round-trip proof (selftest).
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -285,8 +285,15 @@ async fn main() -> Result<()> {
             println!("sources: {corpus:?}");
             let s = ingest::run(store, &ol, &cfg, &corpus).await?;
             println!(
-                "scanned={} new={} updated={} unchanged={} deleted={} skipped={} chunks={}",
-                s.scanned, s.new, s.updated, s.unchanged, s.deleted, s.skipped, s.chunks
+                "scanned={} new={} updated={} unchanged={} deleted={} kept_vanished={} skipped={} chunks={}",
+                s.scanned,
+                s.new,
+                s.updated,
+                s.unchanged,
+                s.deleted,
+                s.kept_vanished,
+                s.skipped,
+                s.chunks
             );
         }
         Cmd::Audit => {
@@ -338,10 +345,11 @@ async fn main() -> Result<()> {
             let corpus = [vault_wiki_dir(vault_dir.as_deref(), home_dir.as_deref())?];
             let is = ingest::run(store, &ol, &cfg, &corpus).await?;
             println!(
-                "sync: ingest(new={} updated={} deleted={} chunks={}) graph(tools={} concepts={} claims={} claims_unchanged={} edges={})",
+                "sync: ingest(new={} updated={} deleted={} kept_vanished={} chunks={}) graph(tools={} concepts={} claims={} claims_unchanged={} edges={})",
                 is.new,
                 is.updated,
                 is.deleted,
+                is.kept_vanished,
                 is.chunks,
                 is.tools,
                 is.concepts,

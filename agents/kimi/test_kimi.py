@@ -7,6 +7,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -19,6 +21,7 @@ for _var in (
     "BORING_CONFIG",
     "BORING_HOME",
     "BORING_URL",
+    "BORING_DOOR_URL",
     "BORING_EVENT_SINK",
     "BORING_EVENT_SPOOL",
     "BORING_EVENT_DB_MIRROR",
@@ -47,6 +50,8 @@ def _load(name, filename):
 
 distill = _load("kimi_distill_session", "distill-session.py")
 recall = _load("kimi_recall", "recall.py")
+rules = _load("kimi_rules", "rules.py")
+import omb_env  # noqa: E402
 import recall_core  # noqa: E402
 
 
@@ -250,6 +255,164 @@ def _read_last_event(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
 
 
+class _RulesStubHandler(BaseHTTPRequestHandler):
+    """The door's stand-in: serves a fixed GET /rules payload and counts hits."""
+
+    hits = 0
+    payload: dict = {"rules": [], "incomplete": 0}
+
+    def do_GET(self):  # noqa: N802 — http.server's spelling
+        type(self).hits += 1
+        body = json.dumps(type(self).payload).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+_RULES_RULE = {
+    "subject": "rule-hermes-not-removed",
+    "rule": "hermes 를 빼지 마세요",
+    "trigger": "hermes + 제거|remove",
+    "source_path": "/vault/wiki/wiki-1955.md",
+}
+
+
+def _run_rules(payload: dict, port: int, tmp: str):
+    captured, stderr = io.StringIO(), io.StringIO()
+    env = mock.patch.dict(
+        os.environ,
+        {
+            "BORING_DOOR_URL": f"http://127.0.0.1:{port}",
+            "BORING_EVENT_SINK": "spool",
+            "BORING_EVENT_LOG": os.path.join(tmp, "events.ndjson"),
+        },
+    )
+    with env:
+        with (
+            mock.patch.object(rules.sys, "stdin", io.StringIO(json.dumps(payload))),
+            mock.patch.object(rules.sys, "stdout", captured),
+            mock.patch.object(rules.sys, "stderr", stderr),
+        ):
+            rules.main()
+    return captured.getvalue(), stderr.getvalue()
+
+
+def _run_rules_default_door(payload: dict, door: str, tmp: str):
+    """Like _run_rules but with NO BORING_DOOR_URL at all — omb_env.door_url stands in for
+    the engine-style default the hook now resolves on its own."""
+    captured, stderr = io.StringIO(), io.StringIO()
+    env = mock.patch.dict(
+        os.environ,
+        {
+            "BORING_EVENT_SINK": "spool",
+            "BORING_EVENT_LOG": os.path.join(tmp, "events.ndjson"),
+        },
+        clear=True,
+    )
+    with env, mock.patch.object(omb_env, "door_url", return_value=door):
+        with (
+            mock.patch.object(rules.sys, "stdin", io.StringIO(json.dumps(payload))),
+            mock.patch.object(rules.sys, "stdout", captured),
+            mock.patch.object(rules.sys, "stderr", stderr),
+        ):
+            rules.main()
+    return captured.getvalue(), stderr.getvalue()
+
+
+def _rules_stub():
+    stub = ThreadingHTTPServer(("127.0.0.1", 0), _RulesStubHandler)
+    threading.Thread(target=stub.serve_forever, daemon=True).start()
+    _RulesStubHandler.hits = 0
+    _RulesStubHandler.payload = {"rules": [dict(_RULES_RULE)], "incomplete": 0}
+    return stub
+
+
+def test_rules_user_prompt_with_trigger_fires():
+    """Kimi user-origin prompt carrying a trigger injects the rule (loopback stub door)."""
+    stub = _rules_stub()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out, err = _run_rules(
+                {"prompt": "hermes 제거해줘", "origin": {"kind": "user"}, "session_id": "s-1"},
+                stub.server_address[1],
+                tmp,
+            )
+            events_text = (Path(tmp) / "events.ndjson").read_text(encoding="utf-8")
+        assert err == ""
+        assert _RulesStubHandler.hits == 1
+        payload = json.loads(out)
+        assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        assert ctx.startswith("지켜야 할 규칙 (소유자가 바로잡은 것):")
+        assert "- hermes 를 빼지 마세요 (출처 wiki-1955)" in ctx
+        events = [json.loads(line) for line in events_text.splitlines()]
+        fired = [e for e in events if e.get("event") == "rule_fired"]
+        assert len(fired) == 1, fired
+        assert fired[0]["subject"] == "rule-hermes-not-removed"
+        assert fired[0]["session_id"] == "s-1"
+    finally:
+        stub.shutdown()
+        stub.server_close()
+
+
+def test_rules_no_door_url_uses_default_and_fires():
+    """Unset BORING_DOOR_URL → the hook resolves the engine-style default and still fires.
+
+    Same installed-env gap as Claude Code: the hook env has no BORING_DOOR_URL, and the
+    old env-or-return made the rule silently skip. omb_env.door_url is patched to the
+    stub the way the default would resolve; a user prompt with the trigger must fire.
+    """
+    stub = _rules_stub()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out, err = _run_rules_default_door(
+                {"prompt": "hermes 제거해줘", "origin": {"kind": "user"}, "session_id": "s-2"},
+                f"http://127.0.0.1:{stub.server_address[1]}",
+                tmp,
+            )
+            events_file = Path(tmp) / "events.ndjson"
+            events_text = events_file.read_text(encoding="utf-8") if events_file.exists() else ""
+        assert err == ""
+        assert _RulesStubHandler.hits == 1, "no env → the default door is still asked"
+        payload = json.loads(out)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        assert ctx.startswith("지켜야 할 규칙 (소유자가 바로잡은 것):")
+        assert "- hermes 를 빼지 마세요 (출처 wiki-1955)" in ctx
+        fired = [
+            e
+            for e in (json.loads(line) for line in events_text.splitlines())
+            if e.get("event") == "rule_fired"
+        ]
+        assert len(fired) == 1, fired
+        assert fired[0]["session_id"] == "s-2"
+    finally:
+        stub.shutdown()
+        stub.server_close()
+
+
+def test_rules_system_origin_prompt_with_trigger_stays_silent():
+    """The live-measured bug: a Kimi system prompt containing the trigger fired the rule."""
+    stub = _rules_stub()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out, err = _run_rules(
+                {"prompt": "hermes 제거 관련 설정이야", "origin": {"kind": "system"}},
+                stub.server_address[1],
+                tmp,
+            )
+        assert out == ""
+        assert err == ""
+        assert _RulesStubHandler.hits == 0, "system-origin prompt must never reach the door"
+    finally:
+        stub.shutdown()
+        stub.server_close()
+
+
 if __name__ == "__main__":
     test_work_dir_key_format()
     test_find_session_dir_uses_index()
@@ -261,4 +424,7 @@ if __name__ == "__main__":
     test_distill_short_transcript_logs_skip_and_marks_done()
     test_distill_remember_failure_returns_nonzero_and_marks_retry()
     test_distill_run_returns_nonzero_on_crash()
+    test_rules_user_prompt_with_trigger_fires()
+    test_rules_no_door_url_uses_default_and_fires()
+    test_rules_system_origin_prompt_with_trigger_stays_silent()
     print("ok - kimi agent adapters")

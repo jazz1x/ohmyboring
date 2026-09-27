@@ -5,9 +5,6 @@
 //! `store::related_docs`/`related_doc_content` (two hops, shared-neighbour count >= 2), which
 //! `ask` injects as `# Graph-linked documents`. `retrieve` never reads an edge at all.
 //!
-//! There is no recursive CTE here or anywhere in the crate. The header claimed one for a long
-//! time, which is how a reader comes to believe the search path walks the graph when it does not.
-//!
 //! Cross-reference: design decision D2 (deterministic graph) · ENFORCEMENT.md §B (one-way flow).
 //!
 //! SRP: `query()` is pure logic (returns data), `run()` is the CLI I/O shell.

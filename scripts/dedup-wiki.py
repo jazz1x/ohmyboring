@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """One-time duplicate-note cleanup for vault/wiki.
 
-Clusters notes by embedding cosine similarity and archives the older duplicates
-so the newest note per cluster remains. Defaults to --dry-run; pass --apply to
-actually move files and call ohmyboring/forget.
+Clusters notes by embedding cosine similarity and reports which older duplicates
+would be archived. Report only: --apply is refused while the migration runs
+(deletion is closed, loop contract section 0 item 14).
 """
 
 import argparse
 import json
 import math
 import os
-import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,11 +17,9 @@ from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared"))
 import omb_env  # noqa: E402
-from drudge_client import DrudgeClient  # noqa: E402
 from vault_note import split_frontmatter  # noqa: E402
 
 DEFAULT_THRESHOLD = 0.93
-DEFAULT_ARCHIVE_DIR = "data/archive/dup"
 
 
 def _now() -> str:
@@ -116,15 +113,21 @@ def cluster_notes(notes: list[dict[str, Any]], threshold: float) -> list[list[in
 def main() -> int:
     parser = argparse.ArgumentParser(description="Deduplicate vault/wiki notes")
     parser.add_argument("--wiki-dir", default="vault/wiki", help="wiki directory")
-    parser.add_argument("--archive-dir", default=DEFAULT_ARCHIVE_DIR, help="archive directory")
     parser.add_argument(
         "--threshold", type=float, default=DEFAULT_THRESHOLD, help="cosine similarity threshold"
     )
-    parser.add_argument("--apply", action="store_true", help="actually archive and forget duplicates")
+    parser.add_argument("--apply", action="store_true", help="refused during the migration")
     args = parser.parse_args()
 
+    if args.apply:
+        print(
+            "--apply is closed during the migration: archiving a note makes sync prune its record, "
+            "and no record is deleted until the migration is over. Nothing was moved.",
+            file=sys.stderr,
+        )
+        return 2
+
     wiki_dir = Path(args.wiki_dir)
-    archive_dir = Path(args.archive_dir)
     if not wiki_dir.is_dir():
         print(f"wiki dir not found: {wiki_dir}", file=sys.stderr)
         return 1
@@ -138,7 +141,6 @@ def main() -> int:
     notes = [parse_note(p) for p in paths]
 
     embedder = LlmEmbedder()
-    client = DrudgeClient(timeout=30, retries=2)
 
     print(f"[{_now()}] Embedding {len(notes)} notes (model={embedder.model}) ...")
     for i, n in enumerate(notes):
@@ -174,27 +176,7 @@ def main() -> int:
             )
             actions.append((notes[d]["path"], notes[keeper]["path"]))
 
-    if not args.apply:
-        print(
-            f"\n[{_now()}] Dry run complete. Pass --apply to archive {len(actions)} files and call ohmyboring/forget."
-        )
-        return 0
-
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    print(f"\n[{_now()}] Archiving {len(actions)} duplicates to {archive_dir} ...")
-    for dup_path, _keeper_path in actions:
-        dst = archive_dir / dup_path.name
-        shutil.move(str(dup_path), str(dst))
-        print(f"  archived {dup_path.name}")
-        # Also tell the engine to purge the vector/graph record.
-        wiki_id = dup_path.stem
-        try:
-            client.mcp_call("forget", {"id": wiki_id})
-            print(f"  forgot {wiki_id}")
-        except Exception as e:
-            print(f"  ⚠️ forget failed for {wiki_id}: {e}", file=sys.stderr)
-
-    print(f"\n[{_now()}] Done. Run 'make sync' to rebuild the vector/graph state.")
+    print(f"\n[{_now()}] Dry run complete. {len(actions)} duplicates reported; nothing moved.")
     return 0
 
 

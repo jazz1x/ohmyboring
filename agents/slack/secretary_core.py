@@ -23,7 +23,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import recall_core  # noqa: E402
-from drudge_client import DrudgeClient  # noqa: E402
+from drudge_client import OWNER, DrudgeClient  # noqa: E402, F401
 
 #: How many notes an answer carries. Three is what the prompt hook injects; a person reading in
 #: Slack has less patience than an agent, not more.
@@ -148,16 +148,22 @@ def correct(
     handed_paths: list[str],
     text: str,
     remember: Callable[..., dict] | None = None,
+    *,
+    author: str | None = None,
 ) -> dict:
     """A thread reply of "정정: …" turned into a new note that replaces the answer's notes. With a
     number ("정정 2:") only that one note is superseded — 1-based, in the order the answer listed
-    them; a number outside the answer is refused, not guessed. Without a number, everything the
-    answer carried is superseded. The owner's sentence is the note: no LLM is asked to reword it.
+    them; a number outside the answer is refused, not guessed. Without a number, the answer's one
+    note is superseded; if it carried several, the owner is asked for a number instead.
+    The owner's sentence is the note: no LLM is asked to reword it. `author` is whoever the
+    transport confirmed wrote the reply; it signs both the note and its supersede edges.
     The engine's response travels back untouched."""
     parsed = parse_correction(text)
     if parsed is None:
         return {"error": "not a correction"}
     number, body = parsed
+    if number is None and len(handed_paths) > 1:
+        return {"error": "number required", "count": len(handed_paths)}
     if number is not None and not 1 <= number <= len(handed_paths):
         return {"error": "no such number"}
     supersedes = [handed_paths[number - 1]] if number is not None else list(handed_paths)
@@ -165,7 +171,14 @@ def correct(
         remember = DrudgeClient(timeout=TIMEOUT, retries=0).remember
     note = f"질문: {question}\n\n정정: {body}"
     try:
-        return remember(_first_sentence(body), note, tags=["correction", "slack"], supersedes=supersedes)
+        return remember(
+            _first_sentence(body),
+            note,
+            tags=["correction", "slack"],
+            supersedes=supersedes,
+            author=author,
+            judge=author,
+        )
     except Exception as e:  # noqa: BLE001 — a failed correction must not cost the transport a crash
         print(f"[secretary] correction on {answer_key} failed: {e}", file=sys.stderr)
         return {"error": str(e)}

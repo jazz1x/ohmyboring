@@ -189,6 +189,10 @@ def _drop_duplicate_hooks(settings: dict, commands) -> int:
     return removed
 
 
+def _hook_command(script: str, python: str = sys.executable) -> str:
+    return f"{python} {BORING_HOME}/{script}"
+
+
 def wire_claude_code(path: Path | None = None) -> dict:
     """Idempotently wire Claude Code SessionEnd/SessionStart/UserPromptSubmit hooks."""
     path = path if path is not None else _agent_path("claude-code")
@@ -197,12 +201,13 @@ def wire_claude_code(path: Path | None = None) -> dict:
     settings = _load_json(path)
     settings.setdefault("hooks", {})
 
-    distill = f"python3 {BORING_HOME}/hooks/distill-session.py"
-    recall = f"python3 {BORING_HOME}/hooks/recall.py"
-    start_recall = f"python3 {BORING_HOME}/agents/claude-code/session-start-recall.py"
+    distill = _hook_command("hooks/distill-session.py")
+    recall = _hook_command("hooks/recall.py")
+    rules = _hook_command("hooks/rules.py")
+    start_recall = _hook_command("agents/claude-code/session-start-recall.py")
 
     changed = False
-    dropped = _drop_duplicate_hooks(settings, (distill, recall, start_recall))
+    dropped = _drop_duplicate_hooks(settings, (distill, recall, rules, start_recall))
     if dropped:
         print(f"[omb-wire] removed {dropped} duplicate hook registration(s)")
         changed = True
@@ -228,6 +233,15 @@ def wire_claude_code(path: Path | None = None) -> dict:
             {
                 "matcher": "",
                 "hooks": [{"type": "command", "command": recall, "timeout": 10}],
+            }
+        )
+        changed = True
+
+    if not _already_wired(settings, rules):
+        settings["hooks"].setdefault("UserPromptSubmit", []).append(
+            {
+                "matcher": "",
+                "hooks": [{"type": "command", "command": rules, "timeout": 10}],
             }
         )
         changed = True
@@ -263,8 +277,14 @@ def wire_kimi(path: Path | None = None) -> dict:
     path = path if path is not None else _agent_path("kimi")
     _backup(path)
 
-    distill = f"python3 {BORING_HOME}/hooks/kimi-distill-session.py"
-    recall = f"python3 {BORING_HOME}/hooks/kimi-recall.py"
+    distill = _hook_command("hooks/kimi-distill-session.py")
+    recall = _hook_command("hooks/kimi-recall.py")
+    rules = _hook_command("hooks/kimi-rules.py")
+    kimi_hooks = [
+        ("SessionEnd", distill, 130),
+        ("UserPromptSubmit", recall, 10),
+        ("UserPromptSubmit", rules, 10),
+    ]
 
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     changed = False
@@ -279,23 +299,22 @@ def wire_kimi(path: Path | None = None) -> dict:
         stripped = line.strip()
         if stripped.startswith("command"):
             installed |= _hook_scripts(stripped.split("=", 1)[-1].strip().strip("\"'"))
-    wanted = _hook_scripts(distill) | _hook_scripts(recall)
+    wanted = set()
+    for _, command, _ in kimi_hooks:
+        wanted |= _hook_scripts(command)
 
     removed = _drop_duplicate_kimi_hooks(path, wanted) if path.exists() else 0
     if removed:
         existing = path.read_text(encoding="utf-8")
         changed = True
 
-    if not wanted or not wanted.issubset(installed):
-        snippet = (
-            "\n[[hooks]]\n"
-            'event = "SessionEnd"\n'
-            f'command = "{distill}"\n'
-            "timeout = 130\n"
-            "\n[[hooks]]\n"
-            'event = "UserPromptSubmit"\n'
-            f'command = "{recall}"\n'
-            "timeout = 10\n"
+    # Append only the hooks that are missing; the blocks already wired stay byte-identical,
+    # so a half-wired install gains the absent ones and loses nothing it has.
+    missing = [spec for spec in kimi_hooks if not (_hook_scripts(spec[1]) & installed)]
+    if missing:
+        snippet = "".join(
+            f'\n[[hooks]]\nevent = "{event}"\ncommand = "{command}"\ntimeout = {timeout}\n'
+            for event, command, timeout in missing
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
@@ -394,11 +413,9 @@ def _codex_collector_path(boring_home: str | None = None) -> Path:
     return path
 
 
-def _install_codex_host_worker_macos(boring_home: str | None = None) -> dict:
-    home = boring_home if boring_home is not None else BORING_HOME
+def _codex_host_worker_plist(home: str, python: str = sys.executable) -> str:
     collector = _codex_collector_path(home)
-    plist = Path(os.path.expanduser(f"~/Library/LaunchAgents/{CODEX_HOST_WORKER_LABEL}.plist"))
-    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -413,7 +430,7 @@ def _install_codex_host_worker_macos(boring_home: str | None = None) -> dict:
 	    <string>COLLECT_LIMIT=1</string>
 	    <string>CODEX_INCLUDE_ROLLOUTS=1</string>
 	    <string>COLLECT_STABLE_AGE_SECONDS=1800</string>
-	    <string>python3</string>
+	    <string>{_xml_escape(python)}</string>
 	    <string>{_xml_escape(str(collector))}</string>
   </array>
   <key>StartInterval</key>
@@ -427,6 +444,12 @@ def _install_codex_host_worker_macos(boring_home: str | None = None) -> dict:
 </dict>
 </plist>
 """
+
+
+def _install_codex_host_worker_macos(boring_home: str | None = None) -> dict:
+    home = boring_home if boring_home is not None else BORING_HOME
+    plist = Path(os.path.expanduser(f"~/Library/LaunchAgents/{CODEX_HOST_WORKER_LABEL}.plist"))
+    body = _codex_host_worker_plist(str(home))
     changed = not plist.exists() or plist.read_text(encoding="utf-8") != body
     _write_text_atomic(plist, body)
     domain = f"gui/{os.getuid()}"
@@ -458,7 +481,7 @@ def _install_codex_host_worker_linux(boring_home: str | None = None) -> dict:
         f"*/20 * * * * cd {_sh_quote(str(home))} && "
         f"BORING_HOME={_sh_quote(str(home))} COLLECT_LIMIT=1 CODEX_INCLUDE_ROLLOUTS=1 "
         f"COLLECT_STABLE_AGE_SECONDS=1800 "
-        f"python3 {_sh_quote(str(collector))} >>{_sh_quote(CODEX_HOST_WORKER_LOG)} 2>&1 "
+        f"{_sh_quote(sys.executable)} {_sh_quote(str(collector))} >>{_sh_quote(CODEX_HOST_WORKER_LOG)} 2>&1 "
         f"# {CODEX_HOST_WORKER_LABEL}"
     )
     current = subprocess.run(["crontab", "-l"], capture_output=True, text=True)

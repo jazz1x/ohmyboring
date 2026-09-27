@@ -8,7 +8,9 @@
 #   5) py-unit   — network-free Python regression tests (incl. destructive-path planners)
 #   6) sh-unit   — destructive shell-path guardrails (restore-db drop ordering)
 #   7) sh-unit   — readiness gate guardrails (doctor --strict exit semantics)
+#   7b) sh-unit  — morning-card guardrails (doctor says whether the card went out)
 #   8) sh-unit   — provider/model guardrails (verify-llm embedding shape)
+#   9) sh-unit   — morning-card guardrails (failure notice to the owner's DM)
 # No bypassing (git commit --no-verify) — on failure, fix the root cause (don't paper over the symptom).
 set -eu
 PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/oh-my-boring-pyc}"
@@ -61,6 +63,7 @@ ruff format --check .
 echo "5) python unit tests…"
 python3 agents/shared/test_boring_config.py
 python3 agents/shared/test_agent_wiring.py
+python3 agents/shared/test_rules_core.py
 python3 agents/shared/test_distill_core.py
 python3 agents/shared/test_event_log.py
 python3 agents/shared/test_workflow_contract.py
@@ -73,13 +76,23 @@ python3 agents/shared/test_uptake_core.py
 python3 agents/shared/test_verdict_core.py
 python3 agents/shared/test_drudge_client.py
 python3 agents/door/test_door.py
+python3 agents/memory/test_retriever.py
+python3 agents/memory/test_store.py
+python3 agents/memory/test_deep_agent.py
 python3 agents/claude-code/test_hooks.py
 python3 agents/kimi/test_kimi.py
 python3 agents/schedulers/test_collectors.py
 python3 agents/codex/test_codex.py
 python3 agents/hermes/test_briefing_format.py
 python3 agents/hermes/test_ingest_worker.py
-python3 agents/slack/test_card_core.py
+python3 agents/slack/test_card_types.py
+python3 agents/slack/test_card_registers.py
+python3 agents/slack/test_card_advice.py
+python3 agents/slack/test_card_verdicts.py
+python3 agents/slack/test_card_view.py
+python3 agents/slack/test_card_graph.py
+python3 agents/slack/test_secretary.py
+python3 agents/slack/test_secretary_core.py
 python3 agents/shared/test_vault_note.py
 python3 scripts/test_python_deps.py
 python3 scripts/test_runbook.py
@@ -100,6 +113,9 @@ echo "7) shell readiness gate guardrails (doctor --strict)…"
 sh scripts/test_doctor.sh
 sh scripts/test_drudge_health_readiness.sh
 sh scripts/test_doctor_maintenance.sh
+sh scripts/test_doctor_card.sh
 echo "8) shell LLM/provider guardrails (verify-llm)…"
 sh scripts/test_verify_llm.sh
+echo "9) shell morning-card guardrails (failure notice)…"
+sh scripts/test_schedule_card.sh
 echo "✅ 구조 게이트 통과 — 컴파일러/clippy/test + Python adapters 무위반."

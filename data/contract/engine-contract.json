@@ -64,7 +64,11 @@
   "door_routes": [
     "GET /approved",
     "GET /claim-source",
-    "GET /projects"
+    "GET /claim-sources",
+    "GET /projects",
+    "GET /repairs/split-subjects",
+    "POST /repairs/split-subjects",
+    "GET /rules"
   ],
   "http_routes": [
     "GET /audit",
@@ -227,6 +231,12 @@
     },
     "decisions": {
       "properties": {
+        "limit": {
+          "description": "optional row cap (default 50)",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
         "project": {
           "description": "optional project slug filter",
           "type": "string"
@@ -306,6 +316,12 @@
     },
     "next_actions": {
       "properties": {
+        "limit": {
+          "description": "optional row cap (default 50)",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
         "project": {
           "description": "optional project slug filter",
           "type": "string"
@@ -376,6 +392,10 @@
     },
     "remember": {
       "properties": {
+        "author": {
+          "description": "who wrote the note: inferred | unknown | agent:<your name> (default unknown). owner is accepted only through the owner's door",
+          "type": "string"
+        },
         "body": {
           "description": "the curated note body (markdown problem-solving narrative)",
           "type": "string"
@@ -409,6 +429,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "judge": {
+          "description": "who judged the corrections named in supersedes, same values as author; carried on those edges (default = author)",
+          "type": "string"
         },
         "omb_session_id": {
           "description": "optional ephemeral ingestion marker — include only when requested by the ingestion worker",
@@ -469,6 +493,12 @@
     },
     "risks": {
       "properties": {
+        "limit": {
+          "description": "optional row cap (default 50)",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
         "project": {
           "description": "optional project slug filter",
           "type": "string"
@@ -478,6 +508,12 @@
     },
     "stalled": {
       "properties": {
+        "limit": {
+          "description": "optional row cap (default 50)",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
         "older_than_days": {
           "description": "threshold in days (default 7)",
           "type": "integer"

@@ -66,6 +66,7 @@ services:
       BORING_LLM_API_KEY: ${BORING_LLM_API_KEY:-}
       BORING_HTTP_ADDR: 0.0.0.0:7700
       PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring  # host = the boring-postgres service (compose DNS)
+      BORING_OWNER_TOKEN: ${BORING_OWNER_TOKEN:-}  # unset = no caller can write as the owner
       BORING_CONFIG: /app/boring.json     # policy: note language, repo rules, source dirs
       BORING_VAULT_DIR: /vault                # remember target + sync corpus (/vault/wiki)
       BORING_VECTOR: ${BORING_VECTOR:-off} # off = wiki-first direct read. on = vector+graph (boring-postgres alongside via --profile vector)
@@ -97,6 +98,7 @@ services:
     environment:
       DOOR_UPSTREAM: http://boring-drudge:7700
       DOOR_PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring
+      BORING_OWNER_TOKEN: ${BORING_OWNER_TOKEN:-}
     ports:
       - "127.0.0.1:7710:7710"
     healthcheck:

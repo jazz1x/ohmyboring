@@ -224,19 +224,10 @@ def source_name(hit: dict) -> str:
 
 
 def split_fresh(hits: list[dict], already_injected: set[str]) -> tuple[list[dict], list[dict]]:
-    """Injected and control hits, both from notes this session has not seen (PRD §8 D6)."""
-    fresh = ranked_by_consumption([h for h in hits if source_name(h) not in already_injected])
+    """Injected and control hits, both from notes this session has not seen (PRD §8 D6), in the
+    engine's order — the engine alone decides it."""
+    fresh = [h for h in hits if source_name(h) not in already_injected]
     return fresh[:MAX_RESULTS], fresh[MAX_RESULTS:]
-
-
-def ranked_by_consumption(hits: list[dict]) -> list[dict]:
-    """Superseded last, argued-with-more-than-reused next, reused first; otherwise engine order."""
-
-    def key(h):
-        used, contested = int(h.get("used_count") or 0), int(h.get("contested_count") or 0)
-        return (bool(h.get("superseded_by")), contested > used, -used)
-
-    return sorted(hits, key=key)
 
 
 def consumption_note(hit: dict) -> str:

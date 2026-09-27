@@ -9,6 +9,8 @@ it, yielding YAML that fails to parse (silent vault data loss on re-ingest).
 import importlib.util
 import os
 import re
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -364,6 +366,39 @@ def test_allowed_claim_kinds_match_frontmatter_documentation():
         f"  frontmatter.md: {sorted(documented)}\n"
         f"  data-steward.py: {sorted(ds.ALLOWED_CLAIM_KINDS)}"
     )
+
+
+def test_fix_leaves_owner_notes_and_reports_them():
+    wiki = Path(tempfile.mkdtemp()) / "wiki"
+    wiki.mkdir()
+    fm = (
+        "---\nid: {id}\ntitle: t\n{author}project: marketboro/omb\ntags:\n- _\n- real\nsources: []\n---\nb.\n"
+    )
+    owner = wiki / "wiki-0001.md"
+    other = wiki / "wiki-0002.md"
+    owner.write_text(fm.format(id="wiki-0001", author="author: owner\n"), encoding="utf-8")
+    other.write_text(fm.format(id="wiki-0002", author=""), encoding="utf-8")
+    owner_before = owner.read_bytes()
+
+    out = subprocess.run(
+        [
+            sys.executable,
+            os.path.join(_HERE, "data-steward.py"),
+            "--vault",
+            str(wiki.parent),
+            "--fix",
+            "--yes",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    assert owner.read_bytes() == owner_before, "owner note was rewritten"
+    assert not (wiki / "wiki-0001.md.bak").exists()
+    assert "wiki-0001.md" in out.split("owner-written", 1)[1], out
+    loaded = yaml.safe_load(other.read_text(encoding="utf-8").split("---\n")[1])
+    assert loaded["project"] == "omb" and "_" not in loaded["tags"], loaded
 
 
 def main():

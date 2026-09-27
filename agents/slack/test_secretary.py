@@ -9,9 +9,12 @@ client/request objects for the rest.
 Run: python3 agents/slack/test_secretary.py
 """
 
+import io
+import json
 import os
 import sys
 import types
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
@@ -311,23 +314,50 @@ def _answer_parent():
 
 
 def _recording_correct(calls):
-    def correct(key, question, handed_paths, text):
+    def correct(key, question, handed_paths, text, author=None):
         calls.append({"key": key, "question": question, "handed_paths": handed_paths, "text": text})
         return {
             "source_path": "/vault/wiki/wiki-1077.md",
             "wiki_id": "wiki-1077",
             "duplicate": None,
-            "supersedes": list(handed_paths),
-            "unknown": [],
+            "supersedes": 1,
+            "unknown": 0,
         }
 
     return correct
 
 
+def test_a_correction_without_a_number_on_many_notes_asks_for_one():
+    remembered = []
+    web = FakeWeb(parent=_answer_parent())
+    out = sec.on_thread_reply(
+        _reply(),
+        web,
+        BOT,
+        correct=lambda *a, **k: sc.correct(*a, remember=lambda *x, **kw: remembered.append(kw), **k),
+        owner_id=OWNER,
+    )
+    assert remembered == [], "two notes and no number: nothing may be superseded"
+    assert out == {"error": "number required", "count": 2}
+    assert web.posts == [
+        {
+            "channel": CH,
+            "thread_ts": POSTED_TS,
+            "text": "노트가 2개입니다 — 「정정 2: …」처럼 번호를 붙여 주세요",
+        }
+    ]
+
+
 def test_a_correction_on_the_bots_answer_becomes_a_note():
     calls = []
     web = FakeWeb(parent=_answer_parent())
-    out = sec.on_thread_reply(_reply(), web, BOT, correct=_recording_correct(calls), owner_id=OWNER)
+    out = sec.on_thread_reply(
+        _reply(text="정정 2: 재시작은 2시에 한다"),
+        web,
+        BOT,
+        correct=_recording_correct(calls),
+        owner_id=OWNER,
+    )
 
     assert web.replies_calls == [{"channel": CH, "ts": POSTED_TS, "limit": 1}]
     assert calls == [
@@ -335,17 +365,41 @@ def test_a_correction_on_the_bots_answer_becomes_a_note():
             "key": f"slack:{CH}:{POSTED_TS}",
             "question": "",
             "handed_paths": ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md"],
-            "text": "정정: 재시작은 2시에 한다",
+            "text": "정정 2: 재시작은 2시에 한다",
         }
     ], "the paths are rebuilt from the parent body's names, in the order the answer listed them"
     assert web.posts == [
         {
             "channel": CH,
             "thread_ts": POSTED_TS,
-            "text": "정정 기록 → wiki-1077.md (대체 2)",
+            "text": "정정 기록 → wiki-1077.md (대체 1)",
         }
     ]
     assert out["wiki_id"] == "wiki-1077"
+
+
+def test_a_correction_the_engine_duplicated_is_a_failure_not_a_recorded_line():
+    calls = []
+
+    def duplicating_correct(key, question, handed_paths, text, author=None):
+        calls.append(text)
+        return {
+            "source_path": "/vault/wiki/wiki-0435.md",
+            "wiki_id": "wiki-0435",
+            "duplicate": "/vault/wiki/wiki-0435.md",
+            "supersedes": 0,
+            "unknown": 0,
+        }
+
+    web = FakeWeb(parent=_answer_parent())
+    sec.on_thread_reply(_reply(), web, BOT, correct=duplicating_correct, owner_id=OWNER)
+    assert web.posts == [
+        {
+            "channel": CH,
+            "thread_ts": POSTED_TS,
+            "text": "정정 기록 안 됨 — 기존 노트 wiki-0435.md 와 같다고 봄",
+        }
+    ], "a swallowed correction must read as failure — the old note still stands"
 
 
 def test_a_message_without_a_thread_is_just_conversation():
@@ -412,6 +466,53 @@ def test_dispatch_routes_thread_replies_and_skips_bot_echoes():
     assert len(handled) == 1 and handled[0].get("subtype") is None, (
         "only a plain human reply reaches the handler; echoes and the bot's own messages do not"
     )
+
+
+def _remember_on_the_wire(owner_id):
+    """One correction through the real client, the engine replaced at urlopen: what /remember
+    would receive — its body and its headers."""
+    sent = []
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def urlopen(req, timeout=None):
+        sent.append({"body": json.loads(req.data), "headers": dict(req.header_items())})
+        return _Resp(
+            json.dumps(
+                {
+                    "source_path": "/vault/wiki/wiki-1077.md",
+                    "wiki_id": "wiki-1077",
+                    "duplicate": None,
+                    "supersedes": 1,
+                    "unknown": 0,
+                }
+            ).encode()
+        )
+
+    web = FakeWeb(parent=_answer_parent())
+    with (
+        mock.patch.dict(os.environ, {"BORING_OWNER_TOKEN": "tok-owner"}),
+        mock.patch("urllib.request.urlopen", urlopen),
+    ):
+        sec.on_thread_reply(_reply(text="정정 2: 재시작은 2시에 한다"), web, BOT, owner_id=owner_id)
+    return sent[0]
+
+
+def test_an_owner_confirmed_correction_is_signed_owner_and_carries_the_token():
+    wire = _remember_on_the_wire(OWNER)
+    assert wire["body"]["author"] == "owner" and wire["body"]["judge"] == "owner"
+    assert wire["headers"].get("X-boring-owner-token") == "tok-owner"
+
+    unconfirmed = _remember_on_the_wire(None)
+    assert "author" not in unconfirmed["body"] and "judge" not in unconfirmed["body"], (
+        "no owner_id configured: nobody is confirmed, the engine records unknown"
+    )
+    assert "X-boring-owner-token" not in unconfirmed["headers"]
 
 
 if __name__ == "__main__":

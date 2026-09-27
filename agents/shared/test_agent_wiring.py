@@ -430,6 +430,22 @@ def test_install_codex_host_worker_macos_writes_launch_agent():
         assert "<integer>1200</integer>" in text
         assert "CODEX_INCLUDE_ROLLOUTS=1" in text
         assert "COLLECT_STABLE_AGE_SECONDS=1800" in text
+        assert text == agent_wiring._codex_host_worker_plist(str(omb))
+
+
+def test_codex_host_worker_plist_pins_the_installing_interpreter():
+    """launchd's PATH is empty, so a bare `python3` resolves to Xcode's 3.9 and dies on import."""
+    with tempfile.TemporaryDirectory() as d:
+        omb = Path(d) / "omb"
+        collector = omb / "agents" / "codex" / "collect-sessions.py"
+        collector.parent.mkdir(parents=True)
+        collector.write_text("# stub", encoding="utf-8")
+
+        text = agent_wiring._codex_host_worker_plist(str(omb))
+
+        assert os.path.isabs(sys.executable)
+        assert f"<string>{sys.executable}</string>" in text
+        assert "<string>python3</string>" not in text
 
 
 def test_next_cron_run_finds_next_monday():
@@ -683,6 +699,129 @@ def test_kimi_hooks_are_deduped_across_path_spellings():
         assert 'name = "kimi"' in text, "the rest of the config must survive"
 
 
+def test_claude_code_hook_commands_pin_the_installing_interpreter():
+    """The hook shell's PATH may front /usr/bin, where bare `python3` is Xcode's 3.9."""
+    with tempfile.TemporaryDirectory() as d:
+        settings = Path(d) / "settings.json"
+        agent_wiring.wire_claude_code(settings)
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = [
+            h["command"] for groups in data["hooks"].values() for group in groups for h in group["hooks"]
+        ]
+        assert len(commands) == 4
+        for command in commands:
+            assert command.split(" ", 1)[0] == sys.executable
+        assert os.path.isabs(sys.executable)
+        assert not any(command.startswith("python3 ") for command in commands)
+
+
+def test_kimi_hook_commands_pin_the_installing_interpreter():
+    with tempfile.TemporaryDirectory() as d:
+        config = Path(d) / "config.toml"
+        agent_wiring.wire_kimi(config)
+        lines = [
+            line for line in config.read_text(encoding="utf-8").splitlines() if line.startswith('command = "')
+        ]
+        assert len(lines) == 3
+        for line in lines:
+            assert line.startswith(f'command = "{sys.executable} ')
+        assert not any(line.startswith('command = "python3 ') for line in lines)
+
+
+def test_wire_claude_code_adds_the_rules_hook_beside_recall():
+    """The rules hook rides UserPromptSubmit in its own entry, idempotently."""
+    with tempfile.TemporaryDirectory() as d:
+        settings = Path(d) / "settings.json"
+        result = agent_wiring.wire_claude_code(settings)
+        assert result["changed"] is True
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = [h["command"] for group in data["hooks"]["UserPromptSubmit"] for h in group["hooks"]]
+        assert len(commands) == 2
+        assert any(c.endswith("/hooks/rules.py") for c in commands)
+        assert any(c.endswith("/hooks/recall.py") for c in commands)
+        second = agent_wiring.wire_claude_code(settings)
+        assert second["changed"] is False, "a second run must add nothing"
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = [h["command"] for group in data["hooks"]["UserPromptSubmit"] for h in group["hooks"]]
+        assert len(commands) == 2
+
+
+def test_wire_kimi_adds_the_rules_hook_and_is_idempotent():
+    with tempfile.TemporaryDirectory() as d:
+        config = Path(d) / "config.toml"
+        result = agent_wiring.wire_kimi(config)
+        assert result["changed"] is True
+        assert config.read_text(encoding="utf-8").count("hooks/kimi-rules.py") == 1
+        second = agent_wiring.wire_kimi(config)
+        assert second["changed"] is False
+        assert config.read_text(encoding="utf-8").count("hooks/kimi-rules.py") == 1
+
+
+def test_wire_kimi_adds_only_the_missing_rules_block():
+    """A machine wired before rules existed keeps both hooks and gains exactly one block —
+    the old append shape rewrote every block once any one was missing and left the deduper
+    to collapse the copies afterwards."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d) / "oh-my-boring"
+        (home / "hooks").mkdir(parents=True)
+        for name in ("kimi-recall.py", "kimi-distill-session.py", "kimi-rules.py"):
+            (home / "hooks" / name).write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        config = Path(d) / "config.toml"
+        config.write_text(
+            '[model]\nname = "kimi"\n'
+            '\n[[hooks]]\nevent = "SessionEnd"\n'
+            f'command = "{sys.executable} {home}/hooks/kimi-distill-session.py"\ntimeout = 130\n'
+            '\n[[hooks]]\nevent = "UserPromptSubmit"\n'
+            f'command = "{sys.executable} {home}/hooks/kimi-recall.py"\ntimeout = 10\n',
+            encoding="utf-8",
+        )
+        with mock.patch.object(agent_wiring, "BORING_HOME", str(home)):
+            agent_wiring.wire_kimi(config)
+        text = config.read_text(encoding="utf-8")
+        assert text.count("kimi-distill-session.py") == 1, text
+        assert text.count("kimi-recall.py") == 1, text
+        assert text.count("hooks/kimi-rules.py") == 1, text
+        assert "hooks/rules.py" not in text, "Kimi must not get Claude Code's rules entry"
+
+
+def test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3():
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d) / "oh-my-boring"
+        (home / "hooks").mkdir(parents=True)
+        (home / "hooks" / "recall.py").write_text("# recall\n", encoding="utf-8")
+
+        settings = Path(d) / "settings.json"
+        original = f"python3 {home}/hooks/recall.py"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {
+                                "matcher": "",
+                                "hooks": [{"type": "command", "command": original}],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(agent_wiring, "BORING_HOME", str(home)):
+            agent_wiring.wire_claude_code(settings)
+
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        recall_commands = [
+            h["command"]
+            for groups in data["hooks"].values()
+            for group in groups
+            for h in group["hooks"]
+            if h["command"].endswith("/hooks/recall.py")
+        ]
+        assert recall_commands == [original]
+
+
 if __name__ == "__main__":
     test_install_reports_failure()
     test_install_returns_success_when_ok()
@@ -699,9 +838,16 @@ if __name__ == "__main__":
     test_wire_hermes_missing_slack_briefing_has_no_side_effects()
     test_real_hermes_entry_scripts_ship_every_module_they_import()
     test_kimi_hooks_are_deduped_across_path_spellings()
+    test_claude_code_hook_commands_pin_the_installing_interpreter()
+    test_kimi_hook_commands_pin_the_installing_interpreter()
+    test_wire_claude_code_adds_the_rules_hook_beside_recall()
+    test_wire_kimi_adds_the_rules_hook_and_is_idempotent()
+    test_wire_kimi_adds_only_the_missing_rules_block()
+    test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3()
     test_local_deps_are_transitive_and_reach_the_shared_dir()
     test_install_hermes_skills_removes_legacy_nested_duplicate()
     test_install_codex_host_worker_macos_writes_launch_agent()
+    test_codex_host_worker_plist_pins_the_installing_interpreter()
     test_next_cron_run_finds_next_monday()
     test_sync_hermes_cron_jobs_adds_managed_job()
     test_install_places_ingest_worker_and_job_uses_relative_script()

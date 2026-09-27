@@ -18,6 +18,104 @@ pub struct FrontMatter {
     pub claims: Vec<Claim>,
     pub sources: Vec<String>,
     pub omb_session_id: Option<String>,
+    pub author: Author,
+}
+
+/// Who wrote a note — the same vocabulary as an edge's `judge`, plus `unknown` for every note
+/// written before the field existed or by a caller that names nobody.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum Author {
+    Owner,
+    Inferred,
+    Agent(String),
+    #[default]
+    Unknown,
+}
+
+impl Author {
+    /// The judge a write by this author carries onto its edges; `unknown` names nobody.
+    #[must_use]
+    pub fn as_judge(&self) -> Option<String> {
+        match self {
+            Self::Unknown => None,
+            known => Some(String::from(known.clone())),
+        }
+    }
+}
+
+impl std::str::FromStr for Author {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim() {
+            "owner" => Ok(Self::Owner),
+            "inferred" => Ok(Self::Inferred),
+            "unknown" => Ok(Self::Unknown),
+            other => other
+                .strip_prefix("agent:")
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(|name| Self::Agent(name.to_owned()))
+                .ok_or_else(|| {
+                    format!("author must be owner | inferred | unknown | agent:<name>, got {raw:?}")
+                }),
+        }
+    }
+}
+
+impl TryFrom<String> for Author {
+    type Error = String;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        raw.parse()
+    }
+}
+
+impl From<Author> for String {
+    fn from(author: Author) -> Self {
+        match author {
+            Author::Owner => "owner".to_owned(),
+            Author::Inferred => "inferred".to_owned(),
+            Author::Agent(name) => format!("agent:{name}"),
+            Author::Unknown => "unknown".to_owned(),
+        }
+    }
+}
+
+/// Who said a claim in the conversation it was distilled from. Only the owner is named; a claim
+/// with no speaker is `None`. Unlike `Author`, it grants no authority and needs no token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum SaidBy {
+    Owner,
+}
+
+impl std::str::FromStr for SaidBy {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim() {
+            "owner" => Ok(Self::Owner),
+            _ => Err(format!("said_by must be owner, got {raw:?}")),
+        }
+    }
+}
+
+impl TryFrom<String> for SaidBy {
+    type Error = String;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        raw.parse()
+    }
+}
+
+impl From<SaidBy> for String {
+    fn from(said_by: SaidBy) -> Self {
+        match said_by {
+            SaidBy::Owner => "owner".to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -29,6 +127,8 @@ pub struct Claim {
     pub kind: String,
     #[serde(default)]
     pub confidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub said_by: Option<SaidBy>,
 }
 
 impl Claim {
@@ -162,11 +262,42 @@ pub fn render(front: &FrontMatter, body: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use super::{Claim, FrontMatter, WORK_DENIALS, parse, render};
+    use super::{Author, Claim, FrontMatter, WORK_DENIALS, parse, render};
     use crate::config::BoringConfig;
 
     fn test_cfg() -> BoringConfig {
         BoringConfig::default()
+    }
+
+    #[test]
+    fn author_is_parsed_once_at_the_note_boundary() {
+        let author_of = |line: &str| {
+            parse(
+                &format!("---\n{line}---\n본문"),
+                "/vault/wiki/wiki-0001.md",
+                &test_cfg(),
+            )
+            .map(|(fm, _)| fm.author)
+        };
+        assert_eq!(
+            author_of("title: t\n").unwrap(),
+            Author::Unknown,
+            "legacy note"
+        );
+        assert_eq!(author_of("author: owner\n").unwrap(), Author::Owner);
+        assert_eq!(author_of("author: inferred\n").unwrap(), Author::Inferred);
+        assert_eq!(
+            author_of("author: agent:hermes\n").unwrap(),
+            Author::Agent("hermes".to_owned())
+        );
+        for bad in ["author: admin\n", "author: 'agent:'\n", "author: Owner\n"] {
+            assert!(author_of(bad).is_err(), "{bad:?} must be refused");
+        }
+        assert_eq!(
+            Author::Agent("hermes".to_owned()).as_judge().as_deref(),
+            Some("agent:hermes")
+        );
+        assert_eq!(Author::Unknown.as_judge(), None);
     }
 
     #[test]
@@ -222,6 +353,7 @@ mod tests {
             value: "0.514".to_owned(),
             kind: String::new(),
             confidence: String::new(),
+            said_by: None,
         };
         assert_eq!(claim.confidence(), "unknown");
         assert_ne!(
@@ -278,6 +410,7 @@ mod tests {
             value: value.into(),
             kind: kind.into(),
             confidence: "certain".into(),
+            said_by: None,
         }
     }
 
@@ -381,6 +514,7 @@ mod tests {
                 value: value.to_owned(),
                 kind: "next".to_owned(),
                 confidence: String::new(),
+                said_by: None,
             };
             assert_eq!(
                 denial.kind(),

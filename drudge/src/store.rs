@@ -1,4 +1,4 @@
-//! Store — pgvector (document/chunk/embedding/FTS) + graph (node/edge tables + recursive CTE).
+//! Store — pgvector (document/chunk/embedding/FTS) + graph (node/edge tables).
 //!
 //! Cross-reference: ENFORCEMENT.md §A (error ADTs) · design decision D5 (claim temporal authority).
 //!
@@ -6,10 +6,10 @@
 //! - **pgvector** (`document`, `chunk`): vector (HNSW) + FTS (tsvector) + frontmatter columns.
 //! - **graph** (`node`, `edge`): semantic ontology. node = entity, edge = typed relation.
 //!   - node id convention: `doc:<source_path>` · `project:<name>` · `topic:<tag>`
-//!     · `problem|solution|tool|concept:<slug>` · `attempt:<path>#<idx>`.
+//!     · `tool|concept:<slug>` · `claim:<subject>:<predicate>` · `session:<id>` · `person:<name>`
+//!     · `<kind>:<subject>:<predicate>` (non-fact claims — decision·risk·next… — joined to their
+//!     claim node by `is_a`).
 //!   - the `document` table is the SSOT for documents; the graph references them by `doc:<path>` id (no duplicate storage).
-//! - **traversal**: recursive CTE (`neighbors_khop`) — k-hop works even when the engine is not a graph DB.
-//!   If the CTE proves insufficient, lift-and-shift to AGE/SurrealDB (schema is identical).
 //!
 //! ## Advantage over AGE
 //! Every value goes through `tokio-postgres` parameter binding ($1,$2…) → eliminates the cypher string-escaping footgun.
@@ -143,17 +143,19 @@ pub struct SupersedesReport {
     /// `supersedes` edges written (`doc:<newer>` → `doc:<older>` pairs).
     pub supersedes: usize,
     pub unknown: usize,
+    /// The skipped paths themselves, in input order — the door echoes them to the caller, which
+    /// otherwise learns "1 unknown" without learning which of its names missed.
+    pub unknown_paths: Vec<String>,
 }
 
-/// Splits `supersedes` pairs into edge-worthy ones and the count of equal-path pairs. A pair that
-/// names the same path twice replaces nothing, so it is skipped and counted as unknown, never
-/// written.
-fn split_supersedes(pairs: &[[String; 2]]) -> (Vec<&[String; 2]>, usize) {
+/// Splits `supersedes` pairs into edge-worthy ones and the skipped paths — a pair that names the
+/// same path twice replaces nothing, so it is skipped and counted as unknown, never written.
+fn split_supersedes(pairs: &[[String; 2]]) -> (Vec<&[String; 2]>, Vec<&str>) {
     let mut valid = Vec::with_capacity(pairs.len());
-    let mut skipped = 0_usize;
+    let mut skipped = Vec::new();
     for pair in pairs {
         if pair[0] == pair[1] {
-            skipped += 1;
+            skipped.push(pair[1].as_str());
         } else {
             valid.push(pair);
         }
@@ -166,6 +168,28 @@ fn split_supersedes(pairs: &[[String; 2]]) -> (Vec<&[String; 2]>, usize) {
 pub struct ConsumptionCounts {
     pub used: i64,
     pub contested: i64,
+}
+
+/// Whose `contested` edges a count takes. Ranking takes on an owner note only the owner's own
+/// objection; the displayed count takes every judge.
+#[derive(Debug, Clone, Copy)]
+enum ContestedBy {
+    AnyJudge,
+    OwnerOnOwnerNotes,
+}
+
+/// Who wrote a note, as far as ordering inside a returned set is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Authorship {
+    Owner { updated_at: SystemTime },
+    Other,
+}
+
+/// What orders one note inside a returned set, besides its score.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RankFacts {
+    pub superseded: bool,
+    pub authorship: Authorship,
 }
 
 /// Graph size summary (for audit).
@@ -283,6 +307,10 @@ pub struct CompactReport {
     pub gc_concept: usize,
     pub gc_claim_nodes: usize,
     pub gc_claim_edges: usize,
+    /// Current claims retired because a `supersedes` edge names their note — counted, not
+    /// sealed silently, so a nightly number that is not zero says edges are fixing rows the
+    /// write path missed.
+    pub sealed_superseded_claims: usize,
 }
 
 /// Compact report with an overall elapsed time.
@@ -313,9 +341,26 @@ pub struct Store {
 /// the note body markdown, not as graph nodes — so those edge kinds are gone.
 const SEMANTIC_EDGE_KINDS: [&str; 3] = ["uses", "about", "claims"];
 
+const OWNER_SPEAKER_NODE: &str = "person:owner";
+
 const STALE_CLAIM_MIRROR_NODES: &str = "(kind = 'claim' AND id NOT IN (SELECT 'claim:' || subject || ':' || predicate FROM claim)) \
      OR (kind IN (SELECT DISTINCT kind FROM claim WHERE kind <> 'fact') \
          AND id NOT IN (SELECT kind || ':' || subject || ':' || predicate FROM claim WHERE kind <> 'fact'))";
+
+/// Retirement, defined once: a note is retired when a `supersedes` edge points at it
+/// whose source was allowed to retire it — an owner-written note yields to an
+/// owner-written newer note only, so an edge from a non-owner leaves the note live. A
+/// retired note's rows keep every seal the edge stamped and can never be a slot's
+/// latest. Every seal/unseal/race tests this one fragment: a note the seal refused to
+/// close must not read as retired here, or the hand-over reopens its slot's older row
+/// while the note itself stays current — two current rows in one slot. `c` is the claim
+/// alias at every use site; `doc:` matches what `doc_node_id` writes.
+const RETIRED_NOTE: &str = "EXISTS (SELECT 1 FROM edge e \
+     JOIN document n ON n.source_path = substr(e.src, 5) \
+     WHERE e.kind = 'supersedes' AND e.dst = 'doc:' || c.source_path \
+       AND (n.author = 'owner' OR NOT EXISTS (SELECT 1 FROM document o \
+                                             WHERE o.source_path = c.source_path \
+                                               AND o.author = 'owner')))";
 /// Not user memory, though both live in the vault and stay searchable elsewhere.
 ///
 /// - `eval-*.md`: internal fixtures, which must remain searchable while `make eval` runs.
@@ -503,6 +548,7 @@ impl RegisterRow {
             value: value.clone(),
             kind,
             confidence,
+            said_by: None,
         };
         Self {
             node_id: format!("claim:{subject}:{predicate}"),
@@ -667,8 +713,14 @@ impl Store {
                  );
                  CREATE INDEX IF NOT EXISTS edge_src ON edge(src);
                  CREATE INDEX IF NOT EXISTS edge_dst ON edge(dst);
+                 -- Who judged this edge: 'owner' (card button), 'inferred' (session-end
+                 -- distillation), 'agent:<name>' (an autonomous caller naming itself). NULL =
+                 -- written before the column existed, or a caller that brings no judge. The
+                 -- engine stores the value verbatim and never interprets it.
+                 ALTER TABLE edge ADD COLUMN IF NOT EXISTS judge text;
                  ALTER TABLE document ADD COLUMN IF NOT EXISTS extracted_sha text NOT NULL DEFAULT '';
                  ALTER TABLE document ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+                 ALTER TABLE document ADD COLUMN IF NOT EXISTS author text NOT NULL DEFAULT 'unknown';
                  CREATE INDEX IF NOT EXISTS document_updated ON document(updated_at DESC);
                  -- claim: temporal fact authority (Graphiti-style invalidation, scaled down for personal use).
                  --   current value of (subject,predicate) = superseded_at IS NULL. A new value seals the old.
@@ -716,6 +768,7 @@ impl Store {
                  -- the key the sync-time re-pin looks the hash up by after a move.
                  ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_hash text;
                  ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_symbol text;
+                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS said_by text;
                  CREATE INDEX IF NOT EXISTS claim_anchor ON claim(anchor) WHERE anchor IS NOT NULL;
                  CREATE INDEX IF NOT EXISTS claim_current ON claim(subject, predicate)
                      WHERE superseded_at IS NULL;
@@ -787,7 +840,9 @@ impl Store {
                  -- and if the rule is wrong the owner needs the old state back. The backup is
                  -- written first and `CREATE TABLE IF NOT EXISTS ... AS` skips once it exists,
                  -- so a re-run never clobbers it. Idempotent: after the first run the predicate
-                 -- matches nothing.
+                 -- matches nothing. A retired note is exempt — the edge's seal is a
+                 -- retirement, not a stale-history row, and this batch runs on every
+                 -- `Store::open`.
                  CREATE TABLE IF NOT EXISTS claim_unseal_backup_20260917 AS
                    SELECT * FROM claim
                     WHERE kind <> 'fact' AND superseded_at IS NOT NULL
@@ -798,7 +853,8 @@ impl Store {
                   WHERE c.kind <> 'fact' AND c.superseded_at IS NOT NULL
                     AND NOT EXISTS (SELECT 1 FROM claim l
                                      WHERE l.subject = c.subject AND l.predicate = c.predicate
-                                       AND l.source_path = c.source_path AND l.valid_from > c.valid_from);
+                                       AND l.source_path = c.source_path AND l.valid_from > c.valid_from)
+                    AND NOT {RETIRED_NOTE};
                  CREATE TABLE IF NOT EXISTS node_gc_backup_20260917 AS
                    SELECT * FROM node WHERE {STALE_CLAIM_MIRROR_NODES};
                  CREATE TABLE IF NOT EXISTS edge_gc_backup_20260917 AS
@@ -1396,21 +1452,36 @@ impl Store {
             )
             .await
             .context("insert claim")?;
-        // Seal everything below the latest valid_from, leaving only the single latest row as
-        // current. A `fact` is a slot: seal across notes on (subject, predicate). Every other
-        // kind is an item in a list, so the seal stays inside the note that wrote the row:
-        // (subject, predicate, source_path). A note's own later row supersedes its own earlier
-        // one; another note's items are never touched. The unseal below stays on the same scope
-        // as the seal — scoping them differently is how a slot ends with no current row at all.
+        // Seal everything below the slot's latest valid_from, leaving only the single
+        // latest row current. A `fact` is a slot: seal across notes on (subject, predicate).
+        // Every other kind is an item in a list, so the seal stays inside the note that wrote
+        // the row: (subject, predicate, source_path). A note's own later row supersedes its
+        // own earlier one; another note's items are never touched. The slot's latest is
+        // computed over live notes only (NOT {RETIRED_NOTE}), so a retired note neither
+        // keeps the slot nor stamps the rows below the next-latest live one. The unseal
+        // below stays on the same scope as the seal — scoping them differently is how a
+        // slot ends with no current row at all. An owner-written row is sealed only when
+        // the latest row is owner-written too. The non-fact unseal also skips a retired
+        // note's rows outright: nothing about them reopens. The fact unseal needs no such
+        // guard — (subject, predicate, valid_from) is the primary key, so a row equalling
+        // the live race's max is a race row itself and cannot be retired.
         if kind == "fact" {
             self.db()
                 .await?
                 .execute(
-                    "UPDATE claim c SET superseded_at = m.mx
-                     FROM (SELECT subject, predicate, max(valid_from) AS mx FROM claim
-                           WHERE subject = $1 AND predicate = $2 GROUP BY subject, predicate) m
-                     WHERE c.subject = m.subject AND c.predicate = m.predicate
-                       AND c.valid_from < m.mx AND c.superseded_at IS DISTINCT FROM m.mx;",
+                    &format!(
+                        "UPDATE claim c SET superseded_at = m.mx
+                         FROM (SELECT c.subject, c.predicate, max(c.valid_from) AS mx FROM claim c
+                               WHERE c.subject = $1 AND c.predicate = $2 AND NOT {RETIRED_NOTE}
+                               GROUP BY c.subject, c.predicate) m
+                         WHERE c.subject = m.subject AND c.predicate = m.predicate
+                           AND c.valid_from < m.mx AND c.superseded_at IS DISTINCT FROM m.mx
+                           AND (NOT EXISTS (SELECT 1 FROM document o
+                                             WHERE o.source_path = c.source_path AND o.author = 'owner')
+                                OR EXISTS (SELECT 1 FROM claim l JOIN document d ON d.source_path = l.source_path
+                                            WHERE l.subject = m.subject AND l.predicate = m.predicate
+                                              AND l.valid_from = m.mx AND d.author = 'owner'));"
+                    ),
                     &[&subject, &predicate],
                 )
                 .await
@@ -1418,10 +1489,13 @@ impl Store {
             self.db()
                 .await?
                 .execute(
-                    "UPDATE claim SET superseded_at = NULL
-                     WHERE subject = $1 AND predicate = $2 AND superseded_at IS NOT NULL
-                       AND valid_from = (SELECT max(valid_from) FROM claim
-                                         WHERE subject = $1 AND predicate = $2);",
+                    &format!(
+                        "UPDATE claim c SET superseded_at = NULL
+                         WHERE c.subject = $1 AND c.predicate = $2 AND c.superseded_at IS NOT NULL
+                           AND c.valid_from = (SELECT max(c.valid_from) FROM claim c
+                                               WHERE c.subject = $1 AND c.predicate = $2
+                                                 AND NOT {RETIRED_NOTE});"
+                    ),
                     &[&subject, &predicate],
                 )
                 .await
@@ -1444,12 +1518,15 @@ impl Store {
             self.db()
                 .await?
                 .execute(
-                    "UPDATE claim SET superseded_at = NULL
-                     WHERE subject = $1 AND predicate = $2 AND source_path = $3
-                       AND superseded_at IS NOT NULL
-                       AND valid_from = (SELECT max(valid_from) FROM claim
-                                         WHERE subject = $1 AND predicate = $2
-                                           AND source_path = $3);",
+                    &format!(
+                        "UPDATE claim c SET superseded_at = NULL
+                         WHERE c.subject = $1 AND c.predicate = $2 AND c.source_path = $3
+                           AND c.superseded_at IS NOT NULL
+                           AND c.valid_from = (SELECT max(valid_from) FROM claim
+                                             WHERE subject = $1 AND predicate = $2
+                                               AND source_path = $3)
+                           AND NOT {RETIRED_NOTE};"
+                    ),
                     &[&subject, &predicate, &source_path],
                 )
                 .await
@@ -1460,7 +1537,8 @@ impl Store {
 
     /// Upsert graph nodes/edges for a claim: `doc —claims→ claim:{subject}:{predicate}` and,
     /// for non-fact claims, a typed node (`decision:|risk:...`) plus an `is_a` edge.
-    /// Also links the claim node to `project:{project}` when a project is present.
+    /// Also links the claim node to `project:{project}` when a project is present, and writes
+    /// the `said` edges when the claim names its speaker. Returns the number of edges written.
     /// `subject`/`predicate` must be the canonical key — the same strings the claim row was
     /// written under; passing the raw frontmatter spelling strands the node from its row.
     pub async fn upsert_claim_node(
@@ -1470,7 +1548,7 @@ impl Store {
         subject: &str,
         predicate: &str,
         claim: &crate::frontmatter::Claim,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let claim_id = format!("claim:{subject}:{predicate}");
         let label = format!("{predicate}: {}", claim.value);
         let kind = claim.kind();
@@ -1486,21 +1564,27 @@ impl Store {
             let typed_label = format!("{subject} — {}", claim.value);
             self.upsert_node(&typed_id, kind, &typed_label, Some(confidence))
                 .await?;
-            self.upsert_edge(&claim_id, &typed_id, "is_a").await?;
+            self.upsert_edge(&claim_id, &typed_id, "is_a", None).await?;
         }
 
         // doc -> claim edge
         let doc_id = doc_node_id(path);
-        self.upsert_edge(&doc_id, &claim_id, "claims").await?;
+        self.upsert_edge(&doc_id, &claim_id, "claims", None).await?;
 
         // claim -> project edge
         if !project.is_empty() {
             let project_id = format!("project:{project}");
-            self.upsert_edge(&claim_id, &project_id, "claim_of_project")
+            self.upsert_edge(&claim_id, &project_id, "claim_of_project", None)
                 .await?;
         }
 
-        Ok(())
+        if let Some(said_by) = claim.said_by {
+            self.relate_said(said_by, path, subject, predicate).await?;
+        }
+
+        Ok(1 + usize::from(kind != "fact")
+            + usize::from(!project.is_empty())
+            + 2 * usize::from(claim.said_by.is_some()))
     }
 
     /// Top-k **current** claims (superseded_at IS NULL) for the session-start card and the
@@ -1552,6 +1636,7 @@ impl Store {
                 value: r.get(2),
                 kind: r.get(3),
                 confidence: r.get(4),
+                said_by: None,
             })
             .collect())
     }
@@ -1624,6 +1709,7 @@ impl Store {
                 value: r.get(2),
                 kind: r.get(3),
                 confidence: r.get(4),
+                said_by: None,
             })
             .collect())
     }
@@ -1977,6 +2063,7 @@ impl Store {
                     value: r.get(2),
                     kind: r.get(3),
                     confidence: r.get(4),
+                    said_by: None,
                 },
                 anchor: r.get(5),
                 era: r.get(6),
@@ -1996,14 +2083,15 @@ impl Store {
     ) -> Result<()> {
         let path = &front.source_path;
         let title_ref: Option<&str> = front.title.as_deref();
+        let author = String::from(front.author.clone());
         self.db().await?
             .execute(
-                "INSERT INTO document (source_path, origin, project, kind, title, tags, sha, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                "INSERT INTO document (source_path, origin, project, kind, title, tags, sha, updated_at, author)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT (source_path) DO UPDATE SET
                      origin = EXCLUDED.origin, project = EXCLUDED.project, kind = EXCLUDED.kind,
                      title = EXCLUDED.title, tags = EXCLUDED.tags, sha = EXCLUDED.sha,
-                     updated_at = EXCLUDED.updated_at;",
+                     updated_at = EXCLUDED.updated_at, author = EXCLUDED.author;",
                 &[
                     path,
                     &front.origin,
@@ -2013,6 +2101,7 @@ impl Store {
                     &front.tags,
                     &sha,
                     &updated_at,
+                    &author,
                 ],
             )
             .await
@@ -2025,7 +2114,7 @@ impl Store {
             let pid = format!("project:{}", front.project);
             self.upsert_node(&pid, "project", &front.project, None)
                 .await?;
-            self.upsert_edge(&doc_id, &pid, "in_project").await?;
+            self.upsert_edge(&doc_id, &pid, "in_project", None).await?;
         }
 
         // tagged: remove existing then regenerate (idempotent)
@@ -2039,7 +2128,7 @@ impl Store {
         for tag in &front.tags {
             let tid = format!("topic:{tag}");
             self.upsert_node(&tid, "topic", tag, None).await?;
-            self.upsert_edge(&doc_id, &tid, "tagged").await?;
+            self.upsert_edge(&doc_id, &tid, "tagged", None).await?;
         }
         Ok(())
     }
@@ -2696,6 +2785,11 @@ impl Store {
         report.gc_claim_nodes = gc.claim_nodes;
         report.gc_claim_edges = gc.claim_edges;
 
+        report.sealed_superseded_claims = self
+            .seal_claims_under_supersedes_edges()
+            .await
+            .context("seal superseded claims")?;
+
         Ok(CompactSummary {
             report,
             total_ms: started.elapsed().as_millis(),
@@ -2722,12 +2816,18 @@ impl Store {
         Ok(())
     }
 
-    async fn upsert_edge(&self, src: &str, dst: &str, kind: &str) -> Result<()> {
+    async fn upsert_edge(
+        &self,
+        src: &str,
+        dst: &str,
+        kind: &str,
+        judge: Option<&str>,
+    ) -> Result<()> {
         self.db()
             .await?
             .execute(
-                "INSERT INTO edge (src, dst, kind) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING;",
-                &[&src, &dst, &kind],
+                "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING;",
+                &[&src, &dst, &kind, &judge],
             )
             .await
             .context("upsert edge")?;
@@ -2737,27 +2837,148 @@ impl Store {
     /// The only writer of `supersedes` edges: what one note replaced another is read out of the
     /// session's own words at scoring time, not emitted by the distilling LLM. Idempotent — a
     /// repeat call adds edges that are not already there, never deletes. Skipped pairs (same path
-    /// twice, or a path with no `document` row) are counted in `unknown`, not errored.
-    pub async fn record_supersedes(&self, pairs: &[[String; 2]]) -> Result<SupersedesReport> {
+    /// twice, or a path with no `document` row) are counted in `unknown`, not errored. Each edge
+    /// carries `judge` like a consumption edge does.
+    ///
+    /// The edge also retires what the older note currently asserts: its current claims are
+    /// sealed, stamped with the newer note's latest claim `valid_from` (a non-fact claim is an
+    /// item in a list, so inside one note only that note's own later row could retire it — the
+    /// explicit supersedes is the one legitimate retirement from outside). Each fact slot the
+    /// retired note touched passes to the latest remaining live row. Whether the edge retires
+    /// at all is `{RETIRED_NOTE}` — an owner-written older note yields only to an owner-written
+    /// newer one, the store-side half of the door's refusal.
+    pub async fn record_supersedes(
+        &self,
+        pairs: &[[String; 2]],
+        judge: Option<&str>,
+    ) -> Result<SupersedesReport> {
         let mut report = SupersedesReport::default();
         let (pairs, skipped) = split_supersedes(pairs);
-        report.unknown += skipped;
+        report.unknown += skipped.len();
+        report
+            .unknown_paths
+            .extend(skipped.iter().map(|p| (*p).to_owned()));
         for pair in pairs {
-            if self.get_doc_sha(&pair[0]).await?.is_none()
-                || self.get_doc_sha(&pair[1]).await?.is_none()
-            {
+            if self.get_doc_sha(&pair[0]).await?.is_none() {
                 report.unknown += 1;
+                report.unknown_paths.push(pair[0].clone());
                 continue;
             }
-            self.upsert_edge(&doc_node_id(&pair[0]), &doc_node_id(&pair[1]), "supersedes")
-                .await?;
+            if self.get_doc_sha(&pair[1]).await?.is_none() {
+                report.unknown += 1;
+                report.unknown_paths.push(pair[1].clone());
+                continue;
+            }
+            self.upsert_edge(
+                &doc_node_id(&pair[0]),
+                &doc_node_id(&pair[1]),
+                "supersedes",
+                judge,
+            )
+            .await?;
             report.supersedes += 1;
+            self.seal_superseded_claims(&pair[0], &pair[1]).await?;
         }
         Ok(report)
     }
 
+    /// Seal every current claim of the superseded note: `superseded_at` = the newer note's
+    /// latest claim `valid_from`, falling back to `now()` when the newer note asserts nothing.
+    /// Only `superseded_at IS NULL` rows move, so a repeat call — and a later `compact` over the
+    /// same edge — changes nothing. The seal fires only when the note is actually retired —
+    /// the owner rule lives in `{RETIRED_NOTE}`, the same fragment every other site tests.
+    /// After the seal, each fact slot the retired note touched is handed to the next-latest
+    /// live row: with the retired note out of the competition the latest remaining live row
+    /// becomes current, instead of the slot ending with none.
+    async fn seal_superseded_claims(&self, newer: &str, older: &str) -> Result<usize> {
+        let sealed = self
+            .db()
+            .await?
+            .execute(
+                &format!(
+                    "UPDATE claim c SET superseded_at = COALESCE(
+                            (SELECT max(valid_from) FROM claim WHERE source_path = $1),
+                            now())
+                     WHERE c.source_path = $2 AND c.superseded_at IS NULL
+                       AND {RETIRED_NOTE};",
+                ),
+                &[&newer, &older],
+            )
+            .await
+            .context("seal superseded note claims")?;
+        // Hand each fact slot the retired note touched to its next-latest live row: the
+        // slot's max is taken over live rows only (`NOT {RETIRED_NOTE}`), so the latest
+        // among them becomes current. A slot with no live row left stays empty — all its
+        // rows are the retired note's, sealed above.
+        self.db()
+            .await?
+            .execute(
+                &format!(
+                    "UPDATE claim c SET superseded_at = NULL
+                     FROM (SELECT c.subject, c.predicate, max(c.valid_from) AS mx
+                           FROM claim c
+                           WHERE (c.subject, c.predicate) IN (SELECT subject, predicate FROM claim
+                                                              WHERE source_path = $1 AND kind = 'fact')
+                             AND NOT {RETIRED_NOTE}
+                           GROUP BY c.subject, c.predicate) m
+                     WHERE c.kind = 'fact' AND c.superseded_at IS NOT NULL
+                       AND c.subject = m.subject AND c.predicate = m.predicate
+                       AND c.valid_from = m.mx;",
+                ),
+                &[&older],
+            )
+            .await
+            .context("promote next-latest live fact")?;
+        Ok(usize::try_from(sealed).unwrap_or(0))
+    }
+
+    /// The same retirement over every `supersedes` edge already on the graph — the sweep
+    /// reaches edges whose retirement pass has not run yet, e.g. one written straight onto
+    /// the graph. Returns the number of claims sealed.
+    async fn seal_claims_under_supersedes_edges(&self) -> Result<usize> {
+        let rows = self
+            .db()
+            .await?
+            .query("SELECT src, dst FROM edge WHERE kind = 'supersedes';", &[])
+            .await
+            .context("list supersedes edges")?;
+        let mut total = 0_usize;
+        for row in rows {
+            let src: String = row.get(0);
+            let dst: String = row.get(1);
+            let (Some(newer), Some(older)) = (
+                src.strip_prefix("doc:").map(str::to_owned),
+                dst.strip_prefix("doc:").map(str::to_owned),
+            ) else {
+                continue;
+            };
+            total += self.seal_superseded_claims(&newer, &older).await?;
+        }
+        Ok(total)
+    }
+
+    /// Which of `paths` the owner wrote (`document.author = 'owner'`).
+    pub async fn owner_authored(&self, paths: &[String]) -> Result<Vec<String>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT source_path FROM document WHERE source_path = ANY($1) AND author = 'owner' ORDER BY source_path;",
+                &[&paths],
+            )
+            .await
+            .context("owner-authored documents")?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
     /// The scorer's write door: record what one session consumed. Upserts `session:<id>` (label =
-    /// `observed_at`) and one `used`/`contested` edge per known path. Idempotent — a repeat call
+    /// `observed_at`) and one `used`/`contested` edge per known path, each carrying `judge` — who
+    /// judged ('owner', 'inferred', 'agent:<name>', or NULL when the caller brings no name). An
+    /// edge that already exists keeps the judge it first carried: ON CONFLICT DO NOTHING does not
+    /// overwrite, so the first judgement to name an edge stays on it. Idempotent — a repeat call
     /// updates the label and adds edges, never deletes. Paths with no `document` row are skipped
     /// and counted in the report, not errored.
     pub async fn record_consumption(
@@ -2767,6 +2988,7 @@ impl Store {
         used: &[String],
         contested: &[String],
         supersedes: &[[String; 2]],
+        judge: Option<&str>,
     ) -> Result<ConsumptionReport> {
         let session_node = format!("session:{session_id}");
         self.upsert_node(&session_node, "session", observed_at, None)
@@ -2778,7 +3000,7 @@ impl Store {
                 report.unknown += 1;
                 continue;
             }
-            self.upsert_edge(&session_node, &doc_node_id(path), "used")
+            self.upsert_edge(&session_node, &doc_node_id(path), "used", judge)
                 .await?;
             report.used += 1;
         }
@@ -2787,11 +3009,11 @@ impl Store {
                 report.unknown += 1;
                 continue;
             }
-            self.upsert_edge(&session_node, &doc_node_id(path), "contested")
+            self.upsert_edge(&session_node, &doc_node_id(path), "contested", judge)
                 .await?;
             report.contested += 1;
         }
-        let supersedes_report = self.record_supersedes(supersedes).await?;
+        let supersedes_report = self.record_supersedes(supersedes, judge).await?;
         report.supersedes += supersedes_report.supersedes;
         report.unknown += supersedes_report.unknown;
         Ok(report)
@@ -2819,7 +3041,7 @@ impl Store {
                 report.unknown += 1;
                 continue;
             }
-            self.upsert_edge(&session_node, &doc_node_id(path), "handed")
+            self.upsert_edge(&session_node, &doc_node_id(path), "handed", None)
                 .await?;
             report.handed += 1;
         }
@@ -2833,15 +3055,40 @@ impl Store {
         &self,
         paths: &[String],
     ) -> Result<HashMap<String, ConsumptionCounts>> {
+        self.counts_by(paths, ContestedBy::AnyJudge).await
+    }
+
+    /// The counts ranking feeds back: on an owner note, only the owner's own `contested` edges
+    /// count — no other judge lowers what the owner wrote. `used` counts from every judge.
+    pub async fn ranking_feedback_counts(
+        &self,
+        paths: &[String],
+    ) -> Result<HashMap<String, ConsumptionCounts>> {
+        self.counts_by(paths, ContestedBy::OwnerOnOwnerNotes).await
+    }
+
+    async fn counts_by(
+        &self,
+        paths: &[String],
+        contested_by: ContestedBy,
+    ) -> Result<HashMap<String, ConsumptionCounts>> {
         let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
+        let owner_only = match contested_by {
+            ContestedBy::AnyJudge => false,
+            ContestedBy::OwnerOnOwnerNotes => true,
+        };
         let rows = self
             .db()
             .await?
             .query(
-                "SELECT dst, kind, count(*) FROM edge
-                 WHERE dst = ANY($1) AND kind IN ('used','contested')
-                 GROUP BY dst, kind;",
-                &[&doc_ids],
+                "SELECT e.dst, e.kind, count(*) FROM edge e
+                 LEFT JOIN document d ON d.source_path = substr(e.dst, 5)
+                 WHERE e.dst = ANY($1) AND e.kind IN ('used','contested')
+                   AND NOT ($2 AND e.kind = 'contested'
+                            AND d.author IS NOT DISTINCT FROM 'owner'
+                            AND e.judge IS DISTINCT FROM 'owner')
+                 GROUP BY e.dst, e.kind;",
+                &[&doc_ids, &owner_only],
             )
             .await
             .context("consumption counts")?;
@@ -2859,6 +3106,51 @@ impl Store {
             }
         }
         Ok(counts)
+    }
+
+    /// Current claims the owner said, per note, from the note's own claim rows — a claim node is
+    /// a slot shared by every note that states it, so the edges cannot say whose row it was.
+    pub async fn said_by_owner_counts(&self, paths: &[String]) -> Result<HashMap<String, i64>> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT source_path, count(*) FROM claim
+                 WHERE source_path = ANY($1) AND said_by = 'owner' AND superseded_at IS NULL
+                 GROUP BY source_path;",
+                &[&paths],
+            )
+            .await
+            .context("said-by-owner counts")?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect())
+    }
+
+    /// Mirror the note's `said_by` onto its own latest row for the slot — apart from
+    /// `claim_is_unchanged`, whose tuple does not carry it, so an edited `said_by` still lands.
+    pub async fn mirror_claim_said_by(
+        &self,
+        subject: &str,
+        predicate: &str,
+        source_path: &str,
+        said_by: Option<crate::frontmatter::SaidBy>,
+    ) -> Result<()> {
+        let said_by = said_by.map(String::from);
+        self.db()
+            .await?
+            .execute(
+                "UPDATE claim SET said_by = $4
+                 WHERE subject = $1 AND predicate = $2 AND source_path = $3
+                   AND said_by IS DISTINCT FROM $4
+                   AND valid_from = (SELECT max(valid_from) FROM claim
+                                      WHERE subject = $1 AND predicate = $2 AND source_path = $3);",
+                &[&subject, &predicate, &source_path, &said_by],
+            )
+            .await
+            .context("mirror claim said_by")?;
+        Ok(())
     }
 
     /// Paths handed to one session — the `source_path`s of the documents its `handed` edges
@@ -2906,6 +3198,40 @@ impl Store {
                 .push(src.strip_prefix("doc:").unwrap_or(&src).to_owned());
         }
         Ok(map)
+    }
+
+    /// Per document: replaced by a newer note (a `supersedes` edge points at it), and whether
+    /// the owner wrote it, then when (`updated_at`). The one read that orders a returned set.
+    pub async fn rank_facts(&self, paths: &[String]) -> Result<HashMap<String, RankFacts>> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT d.source_path, d.author = 'owner', d.updated_at,
+                        EXISTS (SELECT 1 FROM edge e
+                                WHERE e.dst = 'doc:' || d.source_path AND e.kind = 'supersedes')
+                 FROM document d WHERE d.source_path = ANY($1);",
+                &[&paths],
+            )
+            .await
+            .context("rank facts")?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let authorship = if row.get::<_, bool>(1) {
+                    Authorship::Owner {
+                        updated_at: row.get(2),
+                    }
+                } else {
+                    Authorship::Other
+                };
+                let facts = RankFacts {
+                    superseded: row.get(3),
+                    authorship,
+                };
+                (row.get(0), facts)
+            })
+            .collect())
     }
 
     /// Documents with the most `used` edges from sessions whose `observed_at` label falls within
@@ -2999,12 +3325,47 @@ impl Store {
     // ── semantic edges (doc → entity) ───────────────────────────────────────────
 
     pub async fn relate_doc_tool(&self, doc_path: &str, slug: &str) -> Result<()> {
-        self.upsert_edge(&doc_node_id(doc_path), &format!("tool:{slug}"), "uses")
-            .await
+        self.upsert_edge(
+            &doc_node_id(doc_path),
+            &format!("tool:{slug}"),
+            "uses",
+            None,
+        )
+        .await
     }
     pub async fn relate_doc_concept(&self, doc_path: &str, slug: &str) -> Result<()> {
-        self.upsert_edge(&doc_node_id(doc_path), &format!("concept:{slug}"), "about")
-            .await
+        self.upsert_edge(
+            &doc_node_id(doc_path),
+            &format!("concept:{slug}"),
+            "about",
+            None,
+        )
+        .await
+    }
+
+    /// `person:owner —said→ doc` and `—said→ claim:{subject}:{predicate}`, from the note's own
+    /// `said_by` line, so a re-ingest writes them again. No judge: a speaker is not a verdict.
+    pub async fn relate_said(
+        &self,
+        said_by: crate::frontmatter::SaidBy,
+        doc_path: &str,
+        subject: &str,
+        predicate: &str,
+    ) -> Result<()> {
+        let speaker = match said_by {
+            crate::frontmatter::SaidBy::Owner => OWNER_SPEAKER_NODE,
+        };
+        self.upsert_node(speaker, "person", &String::from(said_by), None)
+            .await?;
+        self.upsert_edge(speaker, &doc_node_id(doc_path), "said", None)
+            .await?;
+        self.upsert_edge(
+            speaker,
+            &format!("claim:{subject}:{predicate}"),
+            "said",
+            None,
+        )
+        .await
     }
 
     // ── graph retrieval ───────────────────────────────────────────────────────
@@ -3024,7 +3385,7 @@ impl Store {
         Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
-    /// Semantic neighbors (problem/solution/tool/concept/attempt) — 1-hop from the document. Returns labels.
+    /// Semantic neighbors (`uses`/`about`/`claims` edges) — 1-hop from the document. Returns labels.
     pub async fn semantic_neighbors(&self, chunk_id: &str) -> Result<Vec<String>> {
         let doc_id = doc_node_id(chunk_id);
         let rows = self
@@ -3348,8 +3709,8 @@ mod tests {
 
     use super::{DistKind, NOT_USER_MEMORY_RE};
 
-    /// A pair naming the same path twice replaces nothing: it is not written, and it is counted
-    /// as unknown so the caller sees the pair was seen but produced no edge.
+    /// A pair naming the same path twice replaces nothing: it is not written, and its path is
+    /// returned with the skipped ones so the caller sees the pair was seen but produced no edge.
     #[test]
     fn an_equal_paths_supersedes_pair_is_skipped_and_counted() {
         let pairs = [
@@ -3359,7 +3720,7 @@ mod tests {
         let (valid, skipped) = super::split_supersedes(&pairs);
         assert_eq!(valid.len(), 1, "the equal-paths pair is not written");
         assert_eq!(valid[0][1], "/w/old.md");
-        assert_eq!(skipped, 1);
+        assert_eq!(skipped, vec!["/w/same.md"]);
     }
 
     #[test]
@@ -3370,7 +3731,7 @@ mod tests {
         ];
         let (valid, skipped) = super::split_supersedes(&pairs);
         assert_eq!(valid.len(), 2);
-        assert_eq!(skipped, 0);
+        assert!(skipped.is_empty());
     }
 
     /// The recency and claim surfaces feed the briefing, and the briefing writes notes into the

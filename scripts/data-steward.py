@@ -357,6 +357,22 @@ def fixable_note_names(report: dict) -> list[str]:
     return sorted(names)
 
 
+def _needs_fix(n: dict) -> bool:
+    proj = n["fm"].get("project") or ""
+    tags = n["fm"].get("tags") or []
+    return _issue_target_project(proj) != proj or any(t in PLACEHOLDER_TAGS for t in tags)
+
+
+def fix_plan(notes: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(notes --fix rewrites, owner-written notes it only reports). Owner notes change only by
+    the owner's hand."""
+    due = [n for n in notes if _needs_fix(n)]
+    return (
+        [n for n in due if n["fm"].get("author") != "owner"],
+        [n for n in due if n["fm"].get("author") == "owner"],
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Inspect/repair ohmyboring vault data hygiene")
     parser.add_argument(
@@ -448,20 +464,18 @@ def main():
             print("aborted.")
             return
 
-    fixed = 0
-    for n in notes:
-        proj = n["fm"].get("project") or ""
-        tags = list(n["fm"].get("tags") or [])
-        target = _issue_target_project(proj)
-        needs_fix = target != proj or any(t in PLACEHOLDER_TAGS for t in tags)
-        if needs_fix:
-            _fix_note(n, target)
-            fixed += 1
+    to_fix, owner_held = fix_plan(notes)
+    for n in to_fix:
+        _fix_note(n, _issue_target_project(n["fm"].get("project") or ""))
 
     print(
-        f"\n✅ Fixed {fixed} note(s). vault/wiki is gitignored, so `git diff` won't show changes — "
+        f"\n✅ Fixed {len(to_fix)} note(s). vault/wiki is gitignored, so `git diff` won't show changes — "
         "review the `*.md.bak` files written next to each fixed note, then delete them once satisfied."
     )
+    if owner_held:
+        print(f"🔒 Left {len(owner_held)} owner-written note(s) as they are (author: owner) — fix by hand:")
+        for n in owner_held:
+            print(f"   {n['path'].name}")
 
 
 if __name__ == "__main__":

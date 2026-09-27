@@ -2,7 +2,7 @@
 //!
 //! This module is the Rust-side "LangGraph" contract: explicit nodes,
 //! labelled edges, and graph validation. It does not execute hooks, call LLMs,
-//! or replace the deterministic semantic graph in `graph.rs`.
+//! or replace the deterministic semantic graph (the `store` node/edge tables that `ingest` writes).
 
 use std::collections::BTreeSet;
 

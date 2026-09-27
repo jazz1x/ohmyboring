@@ -87,6 +87,27 @@ def test_check_fails_when_fixable_issues_remain():
         assert "fixable steward issues remain" in report
 
 
+def test_fix_leaves_owner_notes_and_still_fixes_the_rest():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        wiki = root / "vault" / "wiki"
+        wiki.mkdir(parents=True)
+        fm = "title: t\nkind: note\norigin: personal\nproject: marketboro/omb\ntags: [_]\n"
+        owner = _write_note(wiki, "wiki-0001.md", f"id: wiki-0001\nauthor: owner\n{fm}")
+        agent = _write_note(wiki, "wiki-0002.md", f"id: wiki-0002\n{fm}")
+        owner_before = owner.read_bytes()
+
+        rc = gate.run(_args(root, fix=True))
+
+        assert rc == 0
+        assert owner.read_bytes() == owner_before
+        assert not (wiki / "wiki-0001.md.bak").exists()
+        assert "project: omb" in agent.read_text(encoding="utf-8")
+        report = (root / "report.md").read_text(encoding="utf-8")
+        assert "owner notes left as they are: `1`" in report
+        assert "- `wiki-0001.md`" in report.split("## Owner Notes Left As They Are")[1]
+
+
 def main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

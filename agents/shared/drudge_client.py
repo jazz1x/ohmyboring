@@ -16,6 +16,18 @@ from typing import Any
 
 import omb_env
 
+OWNER = "owner"
+OWNER_TOKEN_HEADER = "X-Boring-Owner-Token"
+
+
+def owner_headers(payload: dict[str, Any] | None) -> dict[str, str]:
+    """The owner token rides only on a payload that names the owner as author or judge. With
+    no token in the env the claim still travels bare, so the engine refuses it out loud (400)
+    instead of this client dropping the owner quietly."""
+    claims_owner = payload is not None and OWNER in (payload.get("author"), payload.get("judge"))
+    token = os.environ.get("BORING_OWNER_TOKEN")
+    return {OWNER_TOKEN_HEADER: token} if claims_owner and token else {}
+
 
 class DrudgeNotWritableError(Exception):
     """drudge cannot accept writes right now — distillation must not run."""
@@ -44,6 +56,7 @@ class DrudgeClient:
         url = f"{self.base_url}{path}"
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         headers = {"content-type": "application/json"} if data is not None else {}
+        headers.update(owner_headers(payload))
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
             return json.loads(r.read().decode("utf-8"))
@@ -109,12 +122,17 @@ class DrudgeClient:
         contested: list[str] | None = None,
         supersedes: list[list[str]] | None = None,
         verdict: str | None = None,
+        judge: str | None = None,
     ) -> dict[str, Any]:
         """POST /consumption — what a session did with the notes it was handed, as graph edges.
         `supersedes` pairs are `[newer_path, older_path]`. A `verdict` (`used`|`contested`)
         travels alone: the engine applies it to everything it handed that session, and a
-        payload listing paths beside a verdict is rejected."""
+        payload listing paths beside a verdict is rejected. `judge` names who is judging
+        ('owner', 'inferred', 'agent:<name>') and lands verbatim on every written edge —
+        absent means the edges name nobody (NULL)."""
         payload: dict[str, Any] = {"session_id": session_id, "observed_at": observed_at}
+        if judge is not None:
+            payload["judge"] = judge
         if verdict is not None:
             # Dropping the lists here would hide a caller bug behind a 200: the caller thinks
             # its paths were judged, the engine judged what it had handed. Refuse instead.
@@ -137,11 +155,14 @@ class DrudgeClient:
         supersedes: list[str] | None = None,
         origin: str = "personal",
         repo: str | None = None,
+        author: str | None = None,
+        judge: str | None = None,
     ) -> dict[str, Any]:
         """POST /remember — a new note, optionally correcting older ones. `supersedes` names the
         source paths the new note replaces; the engine writes the supersede edges so the next
-        recall sinks the old notes below the new one. Same body the MCP `remember` tool sends;
-        the response is `{source_path, wiki_id, duplicate, supersedes, unknown}`."""
+        recall sinks the old notes below the new one. `author` lands on the note, `judge` on the
+        supersede edges; absent, the engine records the note as `unknown`. Same body the MCP
+        `remember` tool sends; the response is `{source_path, wiki_id, duplicate, supersedes, unknown}`."""
         payload: dict[str, Any] = {"title": title, "body": body, "origin": origin}
         if tags:
             payload["tags"] = tags
@@ -149,6 +170,10 @@ class DrudgeClient:
             payload["supersedes"] = supersedes
         if repo:
             payload["repo"] = repo
+        if author is not None:
+            payload["author"] = author
+        if judge is not None:
+            payload["judge"] = judge
         return self._retry("POST", "/remember", payload)
 
     def health(self) -> dict[str, Any]:
