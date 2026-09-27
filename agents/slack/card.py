@@ -63,6 +63,7 @@ sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 
 import boring_config  # noqa: E402
 import card_advice  # noqa: E402
+import card_effects  # noqa: E402
 import card_live  # noqa: E402
 import card_press  # noqa: E402
 import card_registers  # noqa: E402
@@ -473,13 +474,13 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 kind=review.kind,
             )
         out: dict = {}
-        for effect in card_press.effects(press):
-            if isinstance(effect, card_types.Record):
-                collabs.record(effect.event, effect.fields)
-            elif isinstance(effect, card_types.Consumption):
-                collabs.consumption(effect.session, effect.kind, effect.paths)
-            else:
-                out["repair_results"] = {press.idx: collabs.execute_repair(effect.subject)}
+        for result in card_effects.run(
+            card_press.effects(press),
+            collabs.record,
+            collabs.consumption,
+            collabs.execute_repair,
+        ):
+            out["repair_results"] = {press.idx: result}
         return out
 
     graph = StateGraph(CardState)

@@ -985,6 +985,27 @@ if [ -d "$hermes_scripts_dir" ] && [ -f "$wiring" ]; then
     rm -f "$script_list"
 fi
 
+# (d5b2) The card-button plugin hermes actually loads. Same lesson as (d5b): the copy hermes
+# imports lives in ~/.hermes/plugins/ and only the installer copies it there, so merging a
+# plugin change does not deliver it — a stale plugin would answer the owner's buttons with
+# old effects while every other gate stays green.
+hermes_plugins_dir="$HOME/.hermes/plugins"
+card_plugin_src="$BORING_HOME/agents/hermes/plugins/boring-card"
+if [ -d "$hermes_plugins_dir" ] && [ -d "$card_plugin_src" ]; then
+    card_plugin_drift=0
+    for f in plugin.yaml __init__.py; do
+        if [ ! -f "$hermes_plugins_dir/boring-card/$f" ] || ! cmp -s "$card_plugin_src/$f" "$hermes_plugins_dir/boring-card/$f"; then
+            card_plugin_drift=1
+        fi
+    done
+    if [ "$card_plugin_drift" -eq 0 ]; then
+        ok "hermes boring-card plugin matches the checkout"
+    else
+        bad "DEPLOY DRIFT — $hermes_plugins_dir/boring-card differs from the checkout. Merging is not deploying; the card's buttons still run the old plugin."
+        failed_hooks=1
+    fi
+fi
+
 if [ "$FIX" -eq 1 ]; then
     echo
     echo "Applying fixes..."

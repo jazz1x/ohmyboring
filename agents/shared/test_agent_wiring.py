@@ -225,6 +225,10 @@ def test_wire_hermes_adds_hint_and_weekly():
         (scripts / "weekly-briefing.py").write_text("# stub", encoding="utf-8")
         (scripts / "codex-collect-sessions.py").write_text("# stub", encoding="utf-8")
         (scripts / "ingest-worker.py").write_text("# stub", encoding="utf-8")
+        card_plugin = scripts / "plugins" / "boring-card"
+        card_plugin.mkdir(parents=True)
+        (card_plugin / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
+        (card_plugin / "__init__.py").write_text("# stub", encoding="utf-8")
         installed_scripts = fake_home / ".hermes" / "scripts"
         installed_slack_briefing = installed_scripts / "slack_briefing.py"
         assert not installed_scripts.exists()
@@ -351,6 +355,10 @@ def test_wire_hermes_missing_slack_briefing_has_no_side_effects():
         (source_dir / "weekly-briefing.py").write_text("# stub\n", encoding="utf-8")
         (source_dir / "codex-collect-sessions.py").write_text("# stub\n", encoding="utf-8")
         (source_dir / "ingest-worker.py").write_text("# stub\n", encoding="utf-8")
+        card_plugin = source_dir / "plugins" / "boring-card"
+        card_plugin.mkdir(parents=True)
+        (card_plugin / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
+        (card_plugin / "__init__.py").write_text("# stub\n", encoding="utf-8")
         cfg = Path(d) / "config.yaml"
         original = b"agent:\n  environment_hint: 'keep exactly'\n"
         cfg.write_bytes(original)
@@ -397,6 +405,106 @@ def test_install_hermes_skills_removes_legacy_nested_duplicate():
 
         assert (dst / "SKILL.md").exists()
         assert not nested.exists()
+
+
+def test_enable_hermes_plugin_appends_to_the_enabled_list():
+    """boring-card lands in plugins.enabled next to the plugins already there."""
+    text = "plugins:\n  enabled:\n    - orca-status\nmcp_servers:\n  ohmyboring:\n    url: http://x\n"
+    out, changed = agent_wiring._enable_hermes_plugin(text, "boring-card")
+    assert changed is True
+    assert "    - orca-status\n    - boring-card\n" in out
+
+
+def test_enable_hermes_plugin_is_idempotent():
+    text = "plugins:\n  enabled:\n    - orca-status\n    - boring-card\n"
+    out, changed = agent_wiring._enable_hermes_plugin(text, "boring-card")
+    assert changed is False
+    assert out == text
+
+
+def test_enable_hermes_plugin_leaves_everything_outside_the_list_byte_identical():
+    """This installer once round-tripped config.yaml through a YAML library and rewrapped the
+    file's multi-line scalars — so the enabled list is edited as text and the rest of the
+    file must survive byte-for-byte."""
+    text = (
+        "agent:\n"
+        "  personalities:\n"
+        "    shakespeare: 'Hark! Thou speakest with an assistant most versed\n"
+        "      in the elegant manner of the bardic arts.'\n"
+        "  environment_hint: 'At the start of each task,\n"
+        "    call ohmyboring/context.'\n"
+        "plugins:\n"
+        "  enabled:\n"
+        "    - orca-status\n"
+        "mcp_servers:\n"
+        "  ohmyboring:\n"
+        "    url: http://boring-drudge:7700/mcp\n"
+        "    transport: http\n"
+    )
+    out, changed = agent_wiring._enable_hermes_plugin(text, "boring-card")
+    assert changed is True
+    assert "    - orca-status\n    - boring-card\n" in out
+    # remove exactly the inserted line and the file must be the original again
+    assert out.replace("    - boring-card\n", "", 1) == text
+
+
+def test_enable_hermes_plugin_creates_the_block_when_absent():
+    text = "model:\n  default: gemma4:12b\n"
+    out, changed = agent_wiring._enable_hermes_plugin(text, "boring-card")
+    assert changed is True
+    assert out == text + "plugins:\n  enabled:\n    - boring-card\n"
+
+
+def test_enable_hermes_plugin_replaces_an_inline_empty_list():
+    text = "plugins:\n  enabled: []\n"
+    out, changed = agent_wiring._enable_hermes_plugin(text, "boring-card")
+    assert changed is True
+    assert out == "plugins:\n  enabled:\n    - boring-card\n"
+
+
+def test_wire_hermes_installs_the_card_plugin_and_enables_it():
+    """wire_hermes copies the plugin into ~/.hermes/plugins and flips plugins.enabled —
+    a press the owner already trusted card.py with must reach the same effects."""
+    with (
+        tempfile.TemporaryDirectory() as d,
+        mock.patch.object(
+            agent_wiring, "_sync_hermes_cron_jobs", return_value={"changed": False, "jobs_count": 0}
+        ),
+    ):
+        fake_home = Path(d) / "home"
+
+        def fake_expanduser(value):
+            if value == "~":
+                return str(fake_home)
+            if value.startswith("~/"):
+                return str(fake_home / value[2:])
+            return value
+
+        home = Path(d) / "omb"
+        scripts = home / "agents" / "hermes"
+        scripts.mkdir(parents=True)
+        for name in agent_wiring._HERMES_ENTRY_SCRIPT_NAMES:
+            (scripts / name).write_text("# stub\n", encoding="utf-8")
+        plugin_dir = scripts / "plugins" / "boring-card"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
+        (plugin_dir / "__init__.py").write_text("# stub\n", encoding="utf-8")
+        cfg = Path(d) / "config.yaml"
+        cfg.write_text(
+            "plugins:\n  enabled:\n    - orca-status\nagent:\n  personalities:\n    pirate: 'Arrr!'\n",
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser):
+            result = agent_wiring.wire_hermes(cfg, boring_home=str(home))
+
+        assert result["changed"] is True
+        installed = fake_home / ".hermes" / "plugins" / "boring-card"
+        assert (installed / "plugin.yaml").read_text(encoding="utf-8") == "name: boring-card\n"
+        assert (installed / "__init__.py").exists()
+        text = cfg.read_text(encoding="utf-8")
+        assert "    - orca-status\n    - boring-card\n" in text
+        assert "pirate: 'Arrr!'" in text
 
 
 def test_install_codex_host_worker_macos_writes_launch_agent():
@@ -846,6 +954,12 @@ if __name__ == "__main__":
     test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3()
     test_local_deps_are_transitive_and_reach_the_shared_dir()
     test_install_hermes_skills_removes_legacy_nested_duplicate()
+    test_enable_hermes_plugin_appends_to_the_enabled_list()
+    test_enable_hermes_plugin_is_idempotent()
+    test_enable_hermes_plugin_leaves_everything_outside_the_list_byte_identical()
+    test_enable_hermes_plugin_creates_the_block_when_absent()
+    test_enable_hermes_plugin_replaces_an_inline_empty_list()
+    test_wire_hermes_installs_the_card_plugin_and_enables_it()
     test_install_codex_host_worker_macos_writes_launch_agent()
     test_codex_host_worker_plist_pins_the_installing_interpreter()
     test_next_cron_run_finds_next_monday()
