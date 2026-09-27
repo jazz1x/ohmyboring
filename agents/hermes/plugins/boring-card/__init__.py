@@ -39,10 +39,9 @@ _PLUGIN_NAME = "boring-card"
 
 #: Presses already taken, as (card_ts, idx). A row runs its effects at most once per card:
 #: the claim lands before the effects run — two presses racing ahead of the first
-#: chat_update must not both run effects — and is released only when the press fails while
-#: the card still shows the row's buttons (a failed effect, a failed chat_update), so the
-#: owner can press again. Once the card shows the judged row the claim stays: the row is
-#: judged, and the blocks themselves now refuse a re-press.
+#: chat_update must not both run effects — and is released only when an effect fails, so
+#: the owner can press again. Once the effects ran the claim stays, even if chat_update
+#: fails and the buttons are still showing: a re-press would run them twice.
 _claimed: set[tuple[str, int]] = set()
 
 #: The chat_update client built by register(); None when slack_sdk or the bot token is
