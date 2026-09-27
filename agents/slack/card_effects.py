@@ -46,20 +46,29 @@ def run(
     execute_repair: Callable[[str], RepairDone | RepairFailed | RepairUnanswered],
 ) -> list[RepairDone | RepairFailed | RepairUnanswered]:
     """The one interpreter: a card_press.effects list in, applied in order. Each Effect tag
-    picks its collaborator; the list's order is the execution order. Returns the
+    picks its collaborator; the list's order is the execution order, and the fold stops at
+    the first failure — the same exception keeps propagating (card.py's run must die on a
+    dead engine exactly as it always has), annotated with the effect that failed
+    (`card_failed_effect`) and how many effects behind it were skipped
+    (`card_effects_skipped`) so a catcher can log one precise line. Returns the
     execute_repair results (a press carries at most one) — the only effects with a value
     worth handing back. An unknown tag raises: a decision table this small has no fourth
     kind, and a quiet skip here would be a press that half-happened."""
     repairs: list[RepairDone | RepairFailed | RepairUnanswered] = []
-    for effect in effects:
-        if effect.effect == "record":
-            record(effect.event, effect.fields)
-        elif effect.effect == "consumption":
-            consumption(effect.session, effect.kind, effect.paths)
-        elif effect.effect == "execute_repair":
-            repairs.append(execute_repair(effect.subject))
-        else:
-            raise ValueError(f"unknown effect tag {effect.effect!r}")
+    for i, effect in enumerate(effects):
+        try:
+            if effect.effect == "record":
+                record(effect.event, effect.fields)
+            elif effect.effect == "consumption":
+                consumption(effect.session, effect.kind, effect.paths)
+            elif effect.effect == "execute_repair":
+                repairs.append(execute_repair(effect.subject))
+            else:
+                raise ValueError(f"unknown effect tag {effect.effect!r}")
+        except Exception as e:
+            e.card_failed_effect = effect
+            e.card_effects_skipped = len(effects) - i - 1
+            raise
     return repairs
 
 

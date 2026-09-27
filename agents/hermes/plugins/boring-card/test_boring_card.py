@@ -9,14 +9,20 @@ The plugin is the second process that receives the morning card's button presses
   - an owner advice 「해」 press records card_verdict then writes the used consumption,
     with the same arguments card.py's record_verdict would use
   - a Rejected press runs no effect at all
-  - one effect raising is one log line naming the press and the effect — the handler
-    survives and the remaining effects still run
+  - one effect raising stops the fold where card.py would stop it — a dead engine call
+    must not leave a verdict record for a consumption it never received — and the
+    handler survives on one log line naming the press, the failed effect, and how
+    many effects behind it were skipped
+  - a repair the door answers with a non-done value is one log line
   - register() without SECRETARY_OWNER_ID (or without BORING_HOME) registers nothing —
     a press nobody vetted must never reach an effect
   - the import path stays langchain-free, because the hermes venv has no langchain
 
-Mutation targets: moving ack() after the effects kills the first test; dropping the
-owner-id check from register() kills the register-nothing test.
+The owner id is generated per run so a plugin that hardcodes the test owner fails.
+
+Mutation targets: moving ack() after the effects kills the ack-first test; letting the
+fold continue after a failure kills the stop test; dropping the owner-id check from
+register() kills the register-nothing test.
 """
 
 import asyncio
@@ -24,6 +30,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import secrets
 import sys
 from pathlib import Path
 from unittest import mock
@@ -35,17 +42,19 @@ for extra in (REPO / "agents" / "slack", REPO / "agents" / "shared"):
         sys.path.insert(0, str(extra))
 
 import card_effects  # noqa: E402
+import card_types  # noqa: E402
 
 _SPEC = importlib.util.spec_from_file_location("boring_card_plugin", HERE / "__init__.py")
 PLUGIN = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(PLUGIN)
 
-OWNER = "U_OWNER"
-OTHER = "U_OTHER"
+OWNER = f"U_{secrets.token_hex(4)}"
+OTHER = f"U_{secrets.token_hex(4)}"
 CARD_TS = "1.0"
 CARD_CH = "C1"
 ADVICE_VALUE = {"lane": "advice", "note": "wiki-0576"}
 REVIEW_VALUE = {"lane": "review", "session": "sess-agent-1", "note": "wiki-0700", "kind": "used"}
+REPAIR_VALUE = {"lane": "repair", "subject": "foodspring-front"}
 
 
 class _FakeCtx:
@@ -189,9 +198,11 @@ def test_a_rejected_press_runs_no_effect():
     assert log.info.called, "the rejection reason must be logged"
 
 
-def test_a_raising_effect_is_one_log_line_and_the_rest_still_runs():
-    """A flip press is [consumption, record] — the consumption raising must not eat the
-    record behind it, and must not escape the handler as a crash."""
+def test_a_raising_effect_stops_the_fold_and_the_handler_survives():
+    """A flip press is [consumption, record] — the consumption raising must stop the fold
+    before the record, or a dead engine leaves a flip verdict it never received. One log
+    line names the press, the failed effect, and the one effect skipped; the handler
+    itself returns."""
 
     def boom(session, kind, paths):
         raise RuntimeError("engine down")
@@ -204,20 +215,52 @@ def test_a_raising_effect_is_one_log_line_and_the_rest_still_runs():
         mock.patch.object(PLUGIN, "_LOG") as log,
     ):
         _run(handler, _body("card:2:drop", REVIEW_VALUE), calls)
-    assert (
-        "record",
-        "verdict_reviewed",
-        {
-            "session_id": "sess-agent-1",
-            "note": "/vault/wiki/wiki-0700.md",
-            "proposed_kind": "used",
-            "card_ts": CARD_TS,
-            "choice": "flip",
-        },
-    ) in calls, "the effect behind the failing one must still run"
+    assert calls == ["ack"], "the record behind the dead engine call must never run"
     log.error.assert_called_once()
     logged = log.error.call_args.args
     assert CARD_TS in logged and 2 in logged and "consumption" in logged
+    assert 1 in logged, "the log line must say how many effects were skipped"
+
+
+def test_a_repair_answered_with_a_non_done_value_is_one_log_line():
+    """The door answers a failed merge with a value (F2), not a raise — without a card to
+    show it on, one log line is the whole surface until slice ②."""
+
+    def merge_fails(subject):
+        calls.append(("repair", subject))
+        return card_types.RepairFailed(
+            subject=subject,
+            deleted_rows=5,
+            reread_notes=2,
+            reason="engine unreachable: connection refused",
+            owner_held=[],
+        )
+
+    ctx = _FakeCtx()
+    _, handler = _register(ctx)[0]
+    calls = []
+    with (
+        _patched_effects(calls, execute_repair=merge_fails),
+        mock.patch.object(PLUGIN, "_LOG") as log,
+    ):
+        _run(handler, _body("card:0:do", REPAIR_VALUE), calls)
+    assert ("repair", "foodspring-front") in calls
+    log.error.assert_called_once()
+    logged = log.error.call_args.args
+    assert CARD_TS in logged and 0 in logged and "RepairFailed" in logged
+
+
+def test_a_repair_done_value_is_not_an_error():
+    done = card_types.RepairDone(subject="foodspring-front", deleted_rows=5, reread_notes=2)
+    ctx = _FakeCtx()
+    _, handler = _register(ctx)[0]
+    calls = []
+    with (
+        _patched_effects(calls, execute_repair=lambda subject: done),
+        mock.patch.object(PLUGIN, "_LOG") as log,
+    ):
+        _run(handler, _body("card:0:do", REPAIR_VALUE), calls)
+    assert not log.error.called
 
 
 if __name__ == "__main__":
@@ -228,5 +271,7 @@ if __name__ == "__main__":
     test_the_handler_acks_before_any_effect()
     test_an_owner_advice_do_press_records_then_consumes_with_the_card_args()
     test_a_rejected_press_runs_no_effect()
-    test_a_raising_effect_is_one_log_line_and_the_rest_still_runs()
-    print("ok - boring-card plugin: ack-first, same effects, loud refusals, langchain-free")
+    test_a_raising_effect_stops_the_fold_and_the_handler_survives()
+    test_a_repair_answered_with_a_non_done_value_is_one_log_line()
+    test_a_repair_done_value_is_not_an_error()
+    print("ok - boring-card plugin: ack-first, same stop rule, loud refusals, langchain-free")

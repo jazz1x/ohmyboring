@@ -3,7 +3,10 @@ every card button press lands here. The handler acks first, parses the press wit
 card_press.parse_press card.py trusts, and folds the shared decision table
 (card_press.effects) through the same interpreter and the same live functions card.py's
 record_verdict uses (card_effects.run over card_effects._live_*). One table, one
-interpreter, wherever a press lands.
+interpreter, wherever a press lands — and one stop rule: the fold halts at the first
+failed effect, so a dead engine never leaves a verdict record for a consumption it never
+received. A repair the door answers with a non-done value is one log line until slice ②
+gives it a card to show on.
 
 register() refuses loudly instead of half-registering: without SECRETARY_OWNER_ID no
 handler is installed at all — a press from anyone must never reach an effect — and without
@@ -73,26 +76,43 @@ def register(ctx: Any) -> None:
             return
         effects = card_press.effects(press)
 
-        def _apply() -> None:
-            for effect in effects:
-                try:
-                    card_effects.run(
-                        [effect],
-                        card_effects._live_record,
-                        card_effects._live_consumption,
-                        card_effects._live_execute_repair,
-                    )
-                except Exception as e:  # noqa: BLE001 — one bad effect is one line, never a dead handler
-                    _LOG.error(
-                        "%s: press card_ts=%s idx=%s effect=%s failed — %s",
-                        _PLUGIN_NAME,
-                        press.card_ts,
-                        press.idx,
-                        effect.effect,
-                        e,
-                    )
+        def _apply():
+            # One fold over the whole list, in the thread: a failed engine call stops the
+            # press where card.py would have stopped it — never a verdict record for a
+            # consumption the engine never received.
+            return card_effects.run(
+                effects,
+                card_effects._live_record,
+                card_effects._live_consumption,
+                card_effects._live_execute_repair,
+            )
 
-        await asyncio.to_thread(_apply)
+        try:
+            results = await asyncio.to_thread(_apply)
+        except Exception as e:  # noqa: BLE001 — one bad effect is one line, never a dead handler
+            failed = getattr(e, "card_failed_effect", None)
+            _LOG.error(
+                "%s: press card_ts=%s idx=%s effect=%s failed — %s effect(s) skipped — %s",
+                _PLUGIN_NAME,
+                press.card_ts,
+                press.idx,
+                failed.effect if failed is not None else "?",
+                getattr(e, "card_effects_skipped", 0),
+                e,
+            )
+            return
+        for result in results:
+            # A failed merge comes home as a value (F2), and there is no card here to show
+            # it on — one line, until slice ② gives it a surface.
+            if not isinstance(result, card_types.RepairDone):
+                _LOG.error(
+                    "%s: press card_ts=%s idx=%s execute_repair %s — %s",
+                    _PLUGIN_NAME,
+                    press.card_ts,
+                    press.idx,
+                    result.__class__.__name__,
+                    getattr(result, "reason", ""),
+                )
 
     ctx.register_slack_action_handler(_ACTION_ID, _handler)
     _LOG.info("%s: card button handler registered (owner %s)", _PLUGIN_NAME, owner_id)

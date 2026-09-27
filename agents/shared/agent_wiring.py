@@ -776,7 +776,10 @@ def _install_hermes_card_plugin(boring_home: str | None = None) -> None:
 
     hermes discovers directory plugins under $HERMES_HOME/plugins/<name>/ with a
     plugin.yaml + __init__.py; the host's ~/.hermes is the volume the container mounts,
-    so installing here lands in the container on its next start.
+    so installing here lands in the container on its next start. Only those two files
+    ship — the directory is a deployment target, not a checkout, so the plugin's test
+    file stays out and no .omb-bak backups are left inside it (the checkout is the
+    source of truth; doctor (d5b2) compares the copies).
     """
     home = boring_home if boring_home is not None else BORING_HOME
     src_dir = Path(home) / "agents" / "hermes" / "plugins" / HERMES_CARD_PLUGIN
@@ -784,11 +787,17 @@ def _install_hermes_card_plugin(boring_home: str | None = None) -> None:
         raise FileNotFoundError(f"hermes card plugin not found: {src_dir}")
     dst_dir = Path(os.path.expanduser("~/.hermes/plugins")) / HERMES_CARD_PLUGIN
     dst_dir.mkdir(parents=True, exist_ok=True)
-    for src_file in sorted(src_dir.iterdir()):
-        if src_file.is_file():
-            dst = dst_dir / src_file.name
-            _backup(dst)
-            shutil.copy2(src_file, dst)
+    # The first generation of this installer copied every file (including the test) and
+    # backed up overwrites in place — sweep exactly those leftovers before copying, so
+    # the directory ends with exactly what hermes loads and a regression that ships the
+    # test file again cannot hide behind the cleanup.
+    for stale in (dst_dir / "test_boring_card.py", *dst_dir.glob("*.omb-bak")):
+        stale.unlink(missing_ok=True)
+    for name in ("plugin.yaml", "__init__.py"):
+        src_file = src_dir / name
+        if not src_file.is_file():
+            raise FileNotFoundError(f"hermes card plugin is missing {name}: {src_file}")
+        shutil.copy2(src_file, dst_dir / name)
 
 
 def _enable_hermes_plugin(text: str, name: str) -> tuple[str, bool]:

@@ -278,6 +278,17 @@ make_case() {
             *) printf 'current %s\n' "$n" >"$home/.hermes/scripts/$n" ;;
         esac
     done
+    # The card-button plugin ships in the same checkout and is imported from
+    # ~/.hermes/plugins — the same deployed-state fixture as the scripts above.
+    mkdir -p "$boring/agents/hermes/plugins/boring-card" "$home/.hermes/plugins/boring-card"
+    for n in plugin.yaml __init__.py; do
+        printf 'current plugin %s\n' "$n" >"$boring/agents/hermes/plugins/boring-card/$n"
+        case "${DOCTOR_CARD_PLUGIN_STATE:-match}" in
+            drift) printf 'old plugin %s\n' "$n" >"$home/.hermes/plugins/boring-card/$n" ;;
+            missing) rm -f "$home/.hermes/plugins/boring-card/$n" ;;
+            *) printf 'current plugin %s\n' "$n" >"$home/.hermes/plugins/boring-card/$n" ;;
+        esac
+    done
     [ "${DOCTOR_HERMES_STATE:-match}" = none ] && rm -rf "$home/.hermes"
     touch "$home/.cache/boring-distill/session.ts"
     mkdir -p "$home/.cache/oh-my-boring"
@@ -869,6 +880,57 @@ esac
   if grep -q "hermes briefing scripts" "$TMP/hermes-none.out"; then
       cat "$TMP/hermes-none.out"
       echo "FAIL: no hermes install means no hermes verdict" >&2
+      exit 1
+  fi ) || exit 1
+
+# (d5b2) The plugin hermes imports is a separate artifact from the checkout, same as (d5b) —
+# and "hermes is configured but the plugin was never installed" is a failure, not silence:
+# the buttons would land on a socket nobody acts on.
+( DOCTOR_CARD_PLUGIN_STATE=match make_case "$TMP/card-plugin-match" yes
+  if ! run_strict "$TMP/card-plugin-match" "$TMP/card-plugin-match.out"; then
+      cat "$TMP/card-plugin-match.out"
+      echo "FAIL: an installed plugin identical to the checkout must pass" >&2
+      exit 1
+  fi
+  grep -q "✓ hermes boring-card plugin matches the checkout" "$TMP/card-plugin-match.out" || {
+      cat "$TMP/card-plugin-match.out"
+      echo "FAIL: the healthy case must say the plugin matches" >&2
+      exit 1
+  } ) || exit 1
+
+( DOCTOR_CARD_PLUGIN_STATE=drift make_case "$TMP/card-plugin-drift" yes
+  if run_strict "$TMP/card-plugin-drift" "$TMP/card-plugin-drift.out"; then
+      cat "$TMP/card-plugin-drift.out"
+      echo "FAIL: an installed plugin older than the checkout must fail strict" >&2
+      exit 1
+  fi
+  grep -q "✗ DEPLOY DRIFT" "$TMP/card-plugin-drift.out" || {
+      cat "$TMP/card-plugin-drift.out"
+      echo "FAIL: plugin drift must be named, not just counted" >&2
+      exit 1
+  } ) || exit 1
+
+( DOCTOR_CARD_PLUGIN_STATE=missing make_case "$TMP/card-plugin-missing" yes
+  if run_strict "$TMP/card-plugin-missing" "$TMP/card-plugin-missing.out"; then
+      cat "$TMP/card-plugin-missing.out"
+      echo "FAIL: a configured hermes that never received the plugin must fail strict" >&2
+      exit 1
+  fi
+  grep -q "✗ DEPLOY DRIFT" "$TMP/card-plugin-missing.out" || {
+      cat "$TMP/card-plugin-missing.out"
+      echo "FAIL: a never-installed plugin must be reported as drift, not silence" >&2
+      exit 1
+  } ) || exit 1
+
+( DOCTOR_HERMES_STATE=none make_case "$TMP/card-plugin-none" yes
+  if ! run_strict "$TMP/card-plugin-none" "$TMP/card-plugin-none.out"; then
+      cat "$TMP/card-plugin-none.out"
+      echo "FAIL: an install without hermes must not fail on plugin drift" >&2
+      exit 1
+  fi
+  if grep -q "boring-card plugin" "$TMP/card-plugin-none.out"; then
+      cat "$TMP/card-plugin-none.out"
+      echo "FAIL: no hermes install means no plugin verdict" >&2
       exit 1
   fi ) || exit 1
 
