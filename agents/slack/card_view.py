@@ -32,12 +32,16 @@ from card_types import (
     ButtonVerdict,
     Confirmation,
     Evidence,
+    Press,
     Proposal,
     ProposedVerdict,
+    Rejected,
     Repair,
     RepairDone,
     RepairFailed,
+    RepairPress,
     RepairUnanswered,
+    ReviewPress,
 )
 
 #: Language-independent register glyphs — the words come from card_i18n.REGISTER_LABELS.
@@ -343,6 +347,47 @@ def _review_row(
         else _review_actions_block(idx, review, strings)
     )
     return row
+
+
+def mark_pressed(
+    blocks: list[dict],
+    press: Press,
+    *,
+    lang: str,
+    repair_result: RepairDone | RepairFailed | RepairUnanswered | None = None,
+) -> list[dict] | Rejected:
+    """The posted card's blocks with `press`'s row rendered exactly as build_blocks renders
+    it once that verdict exists — the row's actions block becomes the judged block (the
+    repair lane's carries the door's answer when there is one), every other block untouched.
+    The row is found by its buttons' `card:{idx}:*` action_ids, never by position: project
+    grouping can display rows out of idx order, and the payload's blocks are all a press
+    carries. When that actions block is not there — the row was already judged, or these
+    blocks are not this card — the press is refused with a Rejected value, never an
+    exception. build_blocks has no text that counts judged rows (the header counts
+    proposals, the head line counts repair groups), so the parity is exact: this equals
+    build_blocks(..., this one verdict) for the rows, byte for byte everywhere else."""
+    strings = card_i18n.STRINGS[lang]
+    verdict = ButtonVerdict(idx=press.idx, choice=press.choice, user=press.user, at="")
+    prefix = f"card:{press.idx}:"
+    out = list(blocks)
+    for i, block in enumerate(out):
+        if block.get("type") != "actions":
+            continue
+        if not any(
+            isinstance(el, dict)
+            and isinstance(el.get("action_id"), str)
+            and el["action_id"].startswith(prefix)
+            for el in block.get("elements", [])
+        ):
+            continue
+        if isinstance(press, RepairPress):
+            out[i] = _repair_verdict_block(verdict, repair_result, strings)
+        elif isinstance(press, ReviewPress):
+            out[i] = _review_verdict_block(press, verdict, strings)
+        else:
+            out[i] = _verdict_block(verdict, strings)
+        return out
+    return Rejected(reason=f"row {press.idx} is not pressable")
 
 
 def _project_groups(proposals: list[Proposal]) -> list[tuple[str, list[int]]]:

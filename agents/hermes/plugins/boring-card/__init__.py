@@ -1,17 +1,24 @@
 """The morning card's button handler — hermes owns the only Slack socket (wiki-2049), so
 every card button press lands here. The handler acks first, parses the press with the same
-card_press.parse_press card.py trusts, and folds the shared decision table
-(card_press.effects) through the same interpreter and the same live functions card.py's
-record_verdict uses (card_effects.run over card_effects._live_*). One table, one
-interpreter, wherever a press lands — and one stop rule: the fold halts at the first
-failed effect, so a dead engine never leaves a verdict record for a consumption it never
-received. A repair the door answers with a non-done value is one log line until slice ②
-gives it a card to show on.
+card_press.parse_press card.py trusts, refuses a row that is no longer pressable (already
+judged on the card, or a racing second press on the same row), and folds the shared decision
+table (card_press.effects) through the same interpreter and the same live functions card.py's
+record_verdict uses (card_effects.run over card_effects._live_*). One table, one interpreter,
+wherever a press lands — and one stop rule: the fold halts at the first failed effect, so a
+dead engine never leaves a verdict record for a consumption it never received. Effects done,
+the card itself is edited in place: card_view.mark_pressed re-renders just the pressed row on
+the blocks the Slack payload carries, and chat_update swaps them in for the row card.py would
+rebuild from its in-memory graph. The display language is the same resolution card.py builds
+its graph with (card_advice.resolve_lang(boring_config.note_lang())).
 
 register() refuses loudly instead of half-registering: without SECRETARY_OWNER_ID no
 handler is installed at all — a press from anyone must never reach an effect — and without
 BORING_HOME the repo's own modules cannot even be found. All module-level imports stay
-stdlib so a broken repo aborts register(), not the plugin's import.
+stdlib so a broken repo aborts register(), not the plugin's import. The AsyncWebClient
+chat_update needs is the plugin's own: hermes wraps plugin action handlers in
+(ack, body, action) with no client injected, so register() reads the bot token the gateway
+loaded from HERMES_HOME/.env into the environment (gateway/run.py:1611 at v2026.9.24) and
+builds one.
 """
 
 from __future__ import annotations
@@ -30,6 +37,18 @@ _ACTION_ID = re.compile(r"^card:")
 
 _PLUGIN_NAME = "boring-card"
 
+#: Presses already taken, as (card_ts, idx). A row runs its effects at most once per card:
+#: the claim lands before the effects run — two presses racing ahead of the first
+#: chat_update must not both run effects — and is released only when an effect fails, so
+#: the owner can press again. Once the effects ran the claim stays, even if chat_update
+#: fails and the buttons are still showing: a re-press would run them twice.
+_claimed: set[tuple[str, int]] = set()
+
+#: The chat_update client built by register(); None when slack_sdk or the bot token is
+#: absent (one error line at register) — presses still take their effects, the card just
+#: keeps its buttons.
+_client: Any | None = None
+
 
 def _repo_module_dirs() -> tuple[str, str] | None:
     """The repo's agents/slack + agents/shared dirs via BORING_HOME — no hardcoded path."""
@@ -41,6 +60,20 @@ def _repo_module_dirs() -> tuple[str, str] | None:
     if not (os.path.isdir(slack) and os.path.isdir(shared)):
         return None
     return slack, shared
+
+
+def _make_client() -> Any | None:
+    """The AsyncWebClient chat_update needs. hermes wraps plugin action handlers in
+    (ack, body, action) with no client injected, so the plugin reads the same bot token the
+    Slack adapter sends with and builds its own. None when slack_sdk or the token is absent."""
+    try:
+        from slack_sdk.web.async_client import AsyncWebClient
+    except ImportError:
+        return None
+    raw = os.environ.get("SLACK_BOT_TOKEN", "").strip()
+    if not raw:
+        return None
+    return AsyncWebClient(token=raw.split(",")[0].strip())
 
 
 def register(ctx: Any) -> None:
@@ -64,9 +97,21 @@ def register(ctx: Any) -> None:
     for path in dirs:
         if path not in sys.path:
             sys.path.insert(0, path)
+    import boring_config
+    import card_advice
     import card_effects
     import card_press
     import card_types
+    import card_view
+
+    global _client
+    _client = _make_client()
+    if _client is None:
+        _LOG.error(
+            "%s: slack_sdk or SLACK_BOT_TOKEN missing — presses will apply effects but the "
+            "card will not be edited in place",
+            _PLUGIN_NAME,
+        )
 
     async def _handler(ack, body, action) -> None:
         await ack()
@@ -74,6 +119,29 @@ def register(ctx: Any) -> None:
         if isinstance(press, card_types.Rejected):
             _LOG.info("%s: press rejected — %s", _PLUGIN_NAME, press.reason)
             return
+        key = (press.card_ts, press.idx)
+        if key in _claimed:
+            _LOG.info(
+                "%s: press card_ts=%s idx=%s refused — already pressed",
+                _PLUGIN_NAME,
+                press.card_ts,
+                press.idx,
+            )
+            return
+        message = body.get("message")
+        blocks = message.get("blocks") if isinstance(message, dict) else None
+        lang = card_advice.resolve_lang(boring_config.note_lang())
+        marked = card_view.mark_pressed(blocks or [], press, lang=lang)
+        if isinstance(marked, card_types.Rejected):
+            _LOG.info(
+                "%s: press card_ts=%s idx=%s refused — %s",
+                _PLUGIN_NAME,
+                press.card_ts,
+                press.idx,
+                marked.reason,
+            )
+            return
+        _claimed.add(key)
         effects = card_press.effects(press)
 
         def _apply():
@@ -90,6 +158,7 @@ def register(ctx: Any) -> None:
         try:
             results = await asyncio.to_thread(_apply)
         except Exception as e:  # noqa: BLE001 — one bad effect is one line, never a dead handler
+            _claimed.discard(key)
             failed = getattr(e, "card_failed_effect", None)
             _LOG.error(
                 "%s: press card_ts=%s idx=%s effect=%s failed — %s effect(s) skipped — %s",
@@ -102,8 +171,8 @@ def register(ctx: Any) -> None:
             )
             return
         for result in results:
-            # A failed merge comes home as a value (F2), and there is no card here to show
-            # it on — one line, until slice ② gives it a surface.
+            # A failed merge comes home as a value (F2): one error line, and the card shows
+            # the door's own numbers on the row (mark_pressed renders it below).
             if not isinstance(result, card_types.RepairDone):
                 _LOG.error(
                     "%s: press card_ts=%s idx=%s execute_repair %s — %s",
@@ -113,6 +182,30 @@ def register(ctx: Any) -> None:
                     result.__class__.__name__,
                     getattr(result, "reason", ""),
                 )
+        repair_result = results[0] if results else None
+        marked = card_view.mark_pressed(blocks or [], press, lang=lang, repair_result=repair_result)
+        if isinstance(marked, card_types.Rejected):
+            # The effects already ran: the claim stays, or a re-press would run them twice.
+            _LOG.error(
+                "%s: press card_ts=%s idx=%s could not re-render the card — %s",
+                _PLUGIN_NAME,
+                press.card_ts,
+                press.idx,
+                marked.reason,
+            )
+            return
+        if _client is None:
+            return
+        try:
+            await _client.chat_update(channel=press.channel, ts=press.card_ts, blocks=marked)
+        except Exception as e:  # noqa: BLE001 — effects are done; the claim stays so a re-press cannot repeat them
+            _LOG.error(
+                "%s: press card_ts=%s idx=%s chat_update failed — %s",
+                _PLUGIN_NAME,
+                press.card_ts,
+                press.idx,
+                e,
+            )
 
     ctx.register_slack_action_handler(_ACTION_ID, _handler)
     _LOG.info("%s: card button handler registered (owner %s)", _PLUGIN_NAME, owner_id)

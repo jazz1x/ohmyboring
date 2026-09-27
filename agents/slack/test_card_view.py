@@ -609,5 +609,150 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertNotIn("어제", headline_no_merge)
 
 
+class MarkPressedParityTests(unittest.TestCase):
+    """The heart of slice ②: mark_pressed(blocks, press) on the no-verdict card must equal
+    build_blocks with exactly that one verdict — for every lane and choice. The equality is
+    whole-list, so it pins both directions: the pressed row renders exactly as build_blocks
+    renders a judged row, and everything else is byte-identical (build_blocks has no text
+    that counts judged rows — the header counts proposals, the head line counts repair
+    groups — so nothing else may differ). Proposals group by first-seen project, so display
+    order here is rows 1, 3, 2 while the idx space is repair 0, advice 1..3, review 4..5: a
+    mark_pressed that matched by position instead of action_id would mark the wrong row and
+    kill these tests."""
+
+    def setUp(self):
+        self.repair = cc.Repair(
+            subject="foodspring-front",
+            variants=["foodspring front", "foodspring-front"],
+            rows=3218,
+            notes=212,
+        )
+        self.proposals = [
+            cc.Proposal(
+                subject="주어 하나",
+                note="/vault/wiki/wiki-0900.md",
+                project="proj-a",
+                register="stalled",
+                bottleneck="첫째 병목 열자 이상 문장입니다",
+                advice="첫째 조언 열자 이상 문장입니다",
+                evidence=[
+                    cc.Evidence(note="/vault/wiki/wiki-0900.md", quote="근거 인용문 열자 이상", line=1)
+                ],
+            ),
+            cc.Proposal(
+                subject="주어 둘",
+                note="/vault/wiki/wiki-0536.md",
+                project="proj-b",
+                register="risks",
+                bottleneck="둘째 병목 열자 이상 문장입니다",
+                advice="둘째 조언 열자 이상 문장입니다",
+                evidence=[
+                    cc.Evidence(note="/vault/wiki/wiki-0536.md", quote="근거 인용문 열자 이상", line=2)
+                ],
+            ),
+            cc.Proposal(
+                subject="주어 셋",
+                note="/vault/wiki/wiki-0576.md",
+                project="proj-a",
+                register="recurrences",
+                bottleneck="셋째 병목 열자 이상 문장입니다",
+                advice="셋째 조언 열자 이상 문장입니다",
+                evidence=[
+                    cc.Evidence(note="/vault/wiki/wiki-0576.md", quote="근거 인용문 열자 이상", line=3)
+                ],
+            ),
+        ]
+        self.reviews = [
+            cc.ProposedVerdict(session_id="s1", note="/vault/wiki/wiki-0700.md", kind="contested", at="t-1"),
+            cc.ProposedVerdict(session_id="s2", note="/vault/wiki/wiki-0701.md", kind="used", at="t-2"),
+        ]
+        self.result = cc.RepairDone(subject="foodspring-front", deleted_rows=5, reread_notes=2)
+
+    def _card(self, verdicts=(), repair_results=None):
+        return cv.build_blocks(
+            self.proposals,
+            verdicts,
+            repairs=[self.repair],
+            repairs_total_groups=1,
+            repair_results=repair_results,
+            reviews=self.reviews,
+            lang="ko",
+        )
+
+    def _press(self, lane, idx, choice):
+        common = dict(idx=idx, choice=choice, user="U_OWNER", card_ts="1.0", channel="C1")
+        if lane == "repair":
+            return cc.RepairPress(subject=self.repair.subject, **common)
+        if lane == "advice":
+            return cc.AdvicePress(note="wiki-0900", **common)
+        review = self.reviews[idx - len(self.proposals) - 1]
+        return cc.ReviewPress(session=review.session_id, note="wiki-0700", kind=review.kind, **common)
+
+    def _lane_cases(self):
+        return [
+            ("repair", 0, "do", self.result),
+            ("repair", 0, "defer", None),
+            ("repair", 0, "drop", None),
+            ("advice", 1, "do", None),
+            ("advice", 2, "defer", None),
+            ("advice", 3, "drop", None),
+            ("review", 4, "do", None),
+            ("review", 5, "drop", None),
+        ]
+
+    def test_mark_pressed_equals_build_blocks_with_that_one_verdict(self):
+        for lane, idx, choice, result in self._lane_cases():
+            with self.subTest(lane=lane, idx=idx, choice=choice):
+                blocks = self._card()
+                marked = cv.mark_pressed(
+                    blocks, self._press(lane, idx, choice), lang="ko", repair_result=result
+                )
+                verdict = cc.ButtonVerdict(idx=idx, choice=choice, user="U_OWNER", at="t")
+                expected = self._card([verdict], repair_results={idx: result} if result is not None else None)
+                self.assertEqual(marked, expected)
+                # exactly one block changed — the row's actions block became its judged block
+                diffs = [i for i, (a, b) in enumerate(zip(blocks, marked)) if a != b]
+                actions_at = next(
+                    i
+                    for i, b in enumerate(blocks)
+                    if b["type"] == "actions"
+                    and any(el.get("action_id", "").startswith(f"card:{idx}:") for el in b["elements"])
+                )
+                self.assertEqual(diffs, [actions_at])
+                # the source blocks are untouched — the refused-press path relies on it
+                self.assertIn(f"card:{idx}:", _blocks_text(blocks))
+
+    def test_parity_holds_in_every_display_language(self):
+        for lang in ("ko", "en", "ja"):
+            with self.subTest(lang=lang):
+                blocks = cv.build_blocks(
+                    self.proposals,
+                    repairs=[self.repair],
+                    repairs_total_groups=1,
+                    reviews=self.reviews,
+                    lang=lang,
+                )
+                marked = cv.mark_pressed(blocks, self._press("advice", 2, "drop"), lang=lang)
+                expected = cv.build_blocks(
+                    self.proposals,
+                    [cc.ButtonVerdict(idx=2, choice="drop", user="U_OWNER", at="t")],
+                    repairs=[self.repair],
+                    repairs_total_groups=1,
+                    reviews=self.reviews,
+                    lang=lang,
+                )
+                self.assertEqual(marked, expected)
+
+    def test_a_row_without_its_actions_block_is_refused(self):
+        judged = self._card([cc.ButtonVerdict(idx=1, choice="do", user="U_OWNER", at="t")])
+        again = cv.mark_pressed(judged, self._press("advice", 1, "do"), lang="ko")
+        self.assertIsInstance(again, cc.Rejected)
+        blocks = self._card()
+        self.assertIsInstance(
+            cv.mark_pressed(blocks, self._press("advice", 99, "do"), lang="ko"), cc.Rejected
+        )
+        self.assertIsInstance(cv.mark_pressed([], self._press("advice", 1, "do"), lang="ko"), cc.Rejected)
+
+
 if __name__ == "__main__":
     unittest.main()
