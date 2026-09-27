@@ -16,8 +16,8 @@ handler is installed at all — a press from anyone must never reach an effect �
 BORING_HOME the repo's own modules cannot even be found. All module-level imports stay
 stdlib so a broken repo aborts register(), not the plugin's import. The AsyncWebClient
 chat_update needs is the plugin's own: hermes wraps plugin action handlers in
-(ack, body, action) with no client injected, so register() reads the same bot token the
-Slack adapter sends with (agent.secret_scope.get_secret — the multiplex-safe read) and
+(ack, body, action) with no client injected, so register() reads the bot token the gateway
+loaded from HERMES_HOME/.env into the environment (gateway/run.py:1611 at v2026.9.24) and
 builds one.
 """
 
@@ -67,11 +67,10 @@ def _make_client() -> Any | None:
     (ack, body, action) with no client injected, so the plugin reads the same bot token the
     Slack adapter sends with and builds its own. None when slack_sdk or the token is absent."""
     try:
-        from agent.secret_scope import get_secret
         from slack_sdk.web.async_client import AsyncWebClient
     except ImportError:
         return None
-    raw = (get_secret("SLACK_BOT_TOKEN", "") or "").strip()
+    raw = os.environ.get("SLACK_BOT_TOKEN", "").strip()
     if not raw:
         return None
     return AsyncWebClient(token=raw.split(",")[0].strip())
