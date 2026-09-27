@@ -16,6 +16,7 @@ import urllib.request
 from collections.abc import Callable
 
 import event_log
+import omb_env
 
 TIMEOUT = 2
 
@@ -64,9 +65,7 @@ def run_rules(data: dict, is_injection: Callable[[dict], bool]) -> None:
     """
     if is_injection(data):
         return
-    door_url = os.environ.get("BORING_DOOR_URL")
-    if not door_url:
-        return
+    door_url = omb_env.door_url()
     try:
         with urllib.request.urlopen(f"{door_url.rstrip('/')}/rules", timeout=TIMEOUT) as resp:
             payload = json.load(resp)

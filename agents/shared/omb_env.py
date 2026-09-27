@@ -37,6 +37,12 @@ def drudge_url() -> str:
     )
 
 
+def door_url() -> str:
+    return os.environ.get("BORING_DOOR_URL") or (
+        "http://boring-door:7710" if _in_container() else "http://localhost:7710"
+    )
+
+
 def _boring_llm() -> dict:
     """The `llm` block of boring.json (empty dict if absent/unreadable). Imported lazily to avoid a
     circular import (boring_config imports this module)."""

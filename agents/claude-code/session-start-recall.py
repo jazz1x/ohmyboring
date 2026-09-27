@@ -14,6 +14,7 @@ import urllib.request
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+import omb_env  # noqa: E402
 from distill_core import repo_slug  # noqa: E402
 from drudge_client import DrudgeClient  # noqa: E402
 
@@ -86,12 +87,10 @@ def main() -> None:
         return
 
     sections: list[str] = []
-    door_url = os.environ.get("BORING_DOOR_URL")
-    if door_url:
-        try:
-            sections.append(_approved_section(door_url.rstrip("/")))
-        except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
-            print(f"[omb-start-recall] approved fetch failed: {e}", file=sys.stderr)
+    try:
+        sections.append(_approved_section(omb_env.door_url().rstrip("/")))
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
+        print(f"[omb-start-recall] approved fetch failed: {e}", file=sys.stderr)
 
     sections.append(_format_context(resp, project or "recent work"))
     ctx = "\n\n".join(sections)
