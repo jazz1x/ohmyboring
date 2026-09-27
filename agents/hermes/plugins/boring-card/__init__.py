@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import sys
+import time
 from typing import Any
 
 _LOG = logging.getLogger(__name__)
@@ -118,6 +119,15 @@ def register(ctx: Any) -> None:
         press = card_press.parse_press(body, owner_id=owner_id)
         if isinstance(press, card_types.Rejected):
             _LOG.info("%s: press rejected — %s", _PLUGIN_NAME, press.reason)
+            return
+        if not card_press.answerable(press.card_ts, time.time()):
+            _LOG.info(
+                "%s: press card_ts=%s idx=%s refused — the card is older than %sh",
+                _PLUGIN_NAME,
+                press.card_ts,
+                press.idx,
+                card_press.CARD_ANSWERABLE_HOURS,
+            )
             return
         key = (press.card_ts, press.idx)
         if key in _claimed:

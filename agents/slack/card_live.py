@@ -10,9 +10,9 @@ the hermes venv, which has no langchain. This module imports them back so existi
 references (card.py's Collaborators, tests) keep working; `_door_url` and ENGINE_TIMEOUT
 moved there with them.
 
-CARD_ANSWERABLE_HOURS lives here rather than in card.py because the live reads below are
-the only things that need it at module load: `_live_past_verdicts`'s proposal window is
-CARD_ANSWERABLE_HOURS-wide."""
+`_live_past_verdicts`'s proposal window is card_press.CARD_ANSWERABLE_HOURS wider than its
+verdict window; the hermes plugin refuses presses older than that, which is what keeps the
+join whole."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from card_effects import (  # noqa: F401
     _live_execute_repair,
     _live_record,
 )
+from card_press import CARD_ANSWERABLE_HOURS
 from card_types import (
     NO_CURRENT_CLAIM,
     PastApproved,
@@ -48,12 +49,6 @@ from pydantic import ValidationError
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "memory"))
 from retriever import BoringRetriever  # noqa: E402
-
-# How long a posted card's buttons stay pressable — the next card's arrival retires any row
-# still unanswered, so a press landing past this is a press nobody was still going to make.
-# Nothing in card.py waits on it anymore; _live_past_verdicts below is the one reader, and
-# it widens its proposal window by this so a late press still joins its proposal.
-CARD_ANSWERABLE_HOURS = float(os.environ.get("CARD_ANSWERABLE_HOURS") or "23")
 
 
 def _live_fetch(path: str, project: str) -> dict[str, Any]:

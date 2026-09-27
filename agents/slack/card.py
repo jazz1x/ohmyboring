@@ -32,9 +32,9 @@ raising on a verdict with no proposal — then its adopt/reject writes the verdi
 engine while its hold leaves no trace beyond the event; a review row's agree leaves only a
 verdict_reviewed event, its flip writes the opposite-kind verdict to the proposing session
 and the same event — the agent's own edge is never deleted. An unanswered row stays
-answerable only as long as the next card's arrival leaves it: card_live.CARD_ANSWERABLE_HOURS
-is how long a posted card's buttons stay pressable, and _live_past_verdicts widens its
-proposal read by it so a late press still joins its proposal.
+answerable for card_press.CARD_ANSWERABLE_HOURS: the hermes plugin refuses an older press,
+and _live_past_verdicts widens its proposal read by the same hours so every press it
+accepted still joins its proposal.
 CARD_DRY_RUN=1 stops right after post_card and prints the proposals instead of touching
 Slack, handover, or the event log.
 

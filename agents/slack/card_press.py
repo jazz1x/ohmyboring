@@ -12,6 +12,7 @@ Effect 값의 목록으로 바꾼다 — 둘 다 순수하고, 못 믿는 누름
 from __future__ import annotations
 
 import json
+import os
 
 import card_types
 import card_verdicts
@@ -24,6 +25,17 @@ _LANE_MODELS = {"repair": RepairPress, "advice": AdvicePress, "review": ReviewPr
 #: 노트 라벨은 평탄한 /vault/wiki/<이름>.md 의 짧은 이름(예: wiki-0576) — "/" 가 들어간
 #: 라벨은 note_label이 낼 수 있는 모양이 아니니 경로 새는 구멍으로 본다.
 _NOTE_LANES = ("advice", "review")
+
+
+#: How long a posted card's buttons are answered. The next card reads its past proposals
+#: this much wider than its verdict window, so a press older than this would leave a verdict
+#: whose proposal it can no longer see — and that card would refuse to ship.
+CARD_ANSWERABLE_HOURS = float(os.environ.get("CARD_ANSWERABLE_HOURS") or "23")
+
+
+def answerable(card_ts: str, now: float) -> bool:
+    """Whether a press on the card posted at `card_ts` (Slack ts, epoch seconds) still counts."""
+    return now - float(card_ts) <= CARD_ANSWERABLE_HOURS * 3600
 
 
 def session_name(channel: str, ts: str) -> str:
