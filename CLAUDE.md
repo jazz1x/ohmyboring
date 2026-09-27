@@ -37,7 +37,8 @@
 ## 3. 게이트는 저장소에
 
 새 규율은 `scripts/guard.sh`·`scripts/doctor.sh`·`.github/workflows/ci.yml` 안에 세운다.
-`~/.claude/hooks/` 는 늘리지 않는다 (소유자 결재, `wiki-1603`).
+`~/.claude/hooks/` 는 늘리지 않는다 (소유자 결재, `wiki-1603`). 예외 하나: `block-memory-writes.sh` —
+Claude 메모리 파일 쓰기를 막고 oh-my-boring `remember` 로 돌린다 (소유자 결재 2026-09-23, 전역).
 
 게이트를 올리기 전 **위반 변이와 통제군 둘 다** 돌려 red 를 본다. 통제군이 없으면 그 게이트는
 "아무것도 안 잡는 것"과 구분되지 않는다. 2026-09-09: 폴링 게이트가 자기 시험 스크립트를 막았고,
