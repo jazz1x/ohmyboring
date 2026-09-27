@@ -23,6 +23,7 @@ repair row's button idx shares one space with the advice rows — repairs first,
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 
 import card_i18n
@@ -57,11 +58,44 @@ EVIDENCE_QUOTE_CHARS = 60
 EVIDENCE_LINES_SHOWN = 2
 
 
-def _note_label(note: str) -> str:
+def note_label(note: str) -> str:
     """`/vault/wiki/wiki-0576.md` → `wiki-0576` — the short form the owner already reads,
     and the only form of the note path this module ever puts in a block (AC7)."""
     base = note.rsplit("/", 1)[-1]
     return base[:-3] if base.endswith(".md") else base
+
+
+def note_path(label: str) -> str:
+    """`wiki-0576` → `/vault/wiki/wiki-0576.md` — note_label's inverse. Only flat
+    `/vault/wiki/<name>.md` notes round-trip (the build refuses anything else), so a label
+    always expands under `/vault/wiki/` — no path can sneak out through it."""
+    return f"/vault/wiki/{label}.md"
+
+
+#: Slack's own hard cap on a button `value`'s length.
+VALUE_CHAR_LIMIT = 2000
+
+
+def _button_value(data: dict) -> str:
+    """One button value shape — compact `{lane, …}` JSON naming the lane and what that
+    lane needs. Slack refuses an over-long value, so an over-limit card must not ship:
+    a card that cannot be answered is exactly the card to refuse."""
+    value = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    if len(value) > VALUE_CHAR_LIMIT:
+        raise ValueError(f"button value over {VALUE_CHAR_LIMIT} chars")
+    return value
+
+
+def _lane_value(lane: str, data: dict, *, note: str | None = None) -> str:
+    """Lane name + the lane's own data as a button value. A note must be a flat
+    `/vault/wiki/<name>.md` — a subfolder or a `.md`-less name cannot round-trip through
+    the label, so the card is refused instead of shipping a button it cannot answer."""
+    if note is not None:
+        name = note.removeprefix("/vault/wiki/")
+        if name == note or "/" in name or not name.endswith(".md") or name == ".md":
+            raise ValueError(f"note {note!r} is not a flat /vault/wiki/<name>.md note")
+        data = {**data, "note": note_label(note)}
+    return _button_value({"lane": lane, **data})
 
 
 def _actions_block(idx: int, proposal: Proposal, strings: dict[str, str]) -> dict:
@@ -71,7 +105,7 @@ def _actions_block(idx: int, proposal: Proposal, strings: dict[str, str]) -> dic
             "type": "button",
             "text": {"type": "plain_text", "text": strings[f"button_{choice}"], "emoji": True},
             "action_id": f"card:{idx}:{choice}",
-            "value": _note_label(proposal.note),
+            "value": _lane_value("advice", {}, note=proposal.note),
         }
         if choice == "do":
             button["style"] = "primary"
@@ -89,7 +123,7 @@ def _verdict_block(verdict: ButtonVerdict, strings: dict[str, str]) -> dict:
 def _tag_block(idx: int, total: int, proposal: Proposal, register_labels: dict[str, str]) -> dict:
     icon = REGISTER_ICONS[proposal.register_]
     label = register_labels[proposal.register_]
-    note = _note_label(proposal.note)
+    note = note_label(proposal.note)
     text = f"{icon}  *{label}*  ·  `{note}`  ·  {idx + 1}/{total}"
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
@@ -103,7 +137,7 @@ def _section_block(proposal: Proposal) -> dict:
 
 def _evidence_label(e: Evidence, strings: dict[str, str]) -> str:
     superseded = f" · {strings['superseded_label']} → {', '.join(e.superseded_by)}" if e.superseded_by else ""
-    return f"\n{_note_label(e.note)} L{e.line}{superseded}"
+    return f"\n{note_label(e.note)} L{e.line}{superseded}"
 
 
 def _quote_block(evidence: list[Evidence], strings: dict[str, str]) -> dict:
@@ -177,13 +211,14 @@ def _repairs_headline_block(
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
 
-def _repair_actions_block(idx: int, strings: dict[str, str]) -> dict:
+def _repair_actions_block(idx: int, repair: Repair, strings: dict[str, str]) -> dict:
     elements = []
     for choice in CHOICES:
         button = {
             "type": "button",
             "text": {"type": "plain_text", "text": strings[f"repair_button_{choice}"], "emoji": True},
             "action_id": f"card:{idx}:{choice}",
+            "value": _lane_value("repair", {"subject": repair.subject}),
         }
         if choice == "do":
             button["style"] = "primary"
@@ -255,17 +290,17 @@ def _repair_row(
     row.append(
         _repair_verdict_block(verdict, result, strings)
         if verdict is not None
-        else _repair_actions_block(idx, strings)
+        else _repair_actions_block(idx, repair, strings)
     )
     return row
 
 
 def _review_tag_block(review: ProposedVerdict, strings: dict[str, str]) -> dict:
-    text = f"{strings[f'review_kind_{review.kind}']} · {_note_label(review.note)}"
+    text = f"{strings[f'review_kind_{review.kind}']} · {note_label(review.note)}"
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
 
-def _review_actions_block(idx: int, strings: dict[str, str]) -> dict:
+def _review_actions_block(idx: int, review: ProposedVerdict, strings: dict[str, str]) -> dict:
     # Agree (do) or flip (drop) only — no hold: not pressing is the hold, and it records
     # nothing, so a hold button would promise a trace the run never leaves.
     elements = []
@@ -274,6 +309,9 @@ def _review_actions_block(idx: int, strings: dict[str, str]) -> dict:
             "type": "button",
             "text": {"type": "plain_text", "text": strings[f"review_button_{choice}"], "emoji": True},
             "action_id": f"card:{idx}:{choice}",
+            "value": _lane_value(
+                "review", {"session": review.session_id, "kind": review.kind}, note=review.note
+            ),
         }
         if choice == "do":
             button["style"] = "primary"
@@ -302,7 +340,7 @@ def _review_row(
     row.append(
         _review_verdict_block(review, verdict, strings)
         if verdict is not None
-        else _review_actions_block(idx, strings)
+        else _review_actions_block(idx, review, strings)
     )
     return row
 

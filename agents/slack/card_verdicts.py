@@ -172,6 +172,39 @@ def confirm_past(
     )
 
 
+def parse_action_common(payload: dict, *, owner_id: str | None) -> tuple[tuple[int, str], str] | Rejected:
+    """The press checks parse_action and parse_press share — envelope shape, action_id
+    idx/choice, user, owner. Success is ((idx, choice), user); anything else is a Rejected
+    value, never an exception."""
+    if payload.get("type") != "block_actions":
+        return Rejected(reason="not block_actions")
+    actions = payload.get("actions")
+    if not isinstance(actions, list) or len(actions) != 1 or not isinstance(actions[0], dict):
+        return Rejected(reason="not exactly one action")
+    action_id = actions[0].get("action_id")
+    if not isinstance(action_id, str):
+        return Rejected(reason=f"unknown action_id {action_id!r}")
+    parts = action_id.split(":")
+    if len(parts) != 3 or parts[0] != "card":
+        return Rejected(reason=f"unknown action_id {action_id!r}")
+    try:
+        idx = int(parts[1])
+    except ValueError:
+        return Rejected(reason=f"unknown action_id {action_id!r}")
+    choice = parts[2]
+    if choice not in CHOICES:
+        return Rejected(reason=f"unknown choice {choice!r}")
+    if idx < 0:
+        return Rejected(reason=f"no proposal {idx}")
+    user_obj = payload.get("user")
+    user = user_obj.get("id") if isinstance(user_obj, dict) else None
+    if not isinstance(user, str) or not user:
+        return Rejected(reason="no user")
+    if owner_id is not None and user != owner_id:
+        return Rejected(reason=f"user {user} is not the owner")
+    return (idx, choice), user
+
+
 def parse_action(
     payload: dict,
     *,
@@ -185,27 +218,10 @@ def parse_action(
     then advice rows, then the review rows, one shared index space (card.py's record_verdict
     splits on it)."""
 
-    if payload.get("type") != "block_actions":
-        return Rejected(reason="not block_actions")
-    actions = payload.get("actions") or []
-    if len(actions) != 1:
-        return Rejected(reason="not exactly one action")
-    action_id = actions[0].get("action_id") or ""
-    parts = action_id.split(":")
-    if len(parts) != 3 or parts[0] != "card":
-        return Rejected(reason=f"unknown action_id {action_id!r}")
-    try:
-        idx = int(parts[1])
-    except ValueError:
-        return Rejected(reason=f"unknown action_id {action_id!r}")
-    choice = parts[2]
-    if choice not in CHOICES:
-        return Rejected(reason=f"unknown choice {choice!r}")
-    if idx < 0 or idx >= n_total:
+    parsed = parse_action_common(payload, owner_id=owner_id)
+    if isinstance(parsed, Rejected):
+        return parsed
+    (idx, choice), user = parsed
+    if idx >= n_total:
         return Rejected(reason=f"no proposal {idx}")
-    user = (payload.get("user") or {}).get("id") or ""
-    if not user:
-        return Rejected(reason="no user")
-    if owner_id is not None and user != owner_id:
-        return Rejected(reason=f"user {user} is not the owner")
     return ButtonVerdict(idx=idx, choice=choice, user=user, at=at or datetime.now(UTC).isoformat())
