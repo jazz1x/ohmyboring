@@ -204,6 +204,14 @@ def register(ctx: Any) -> None:
                 marked.reason,
             )
             return
+        _LOG.info(
+            "%s: press card_ts=%s idx=%s %s %s applied",
+            _PLUGIN_NAME,
+            press.card_ts,
+            press.idx,
+            press.lane,
+            press.choice,
+        )
         if _client is None:
             return
         try:
