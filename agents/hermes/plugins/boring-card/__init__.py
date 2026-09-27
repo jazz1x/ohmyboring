@@ -97,7 +97,7 @@ def register(ctx: Any) -> None:
                 press.card_ts,
                 press.idx,
                 failed.effect if failed is not None else "?",
-                getattr(e, "card_effects_skipped", 0),
+                getattr(e, "card_effects_skipped", "?"),
                 e,
             )
             return
