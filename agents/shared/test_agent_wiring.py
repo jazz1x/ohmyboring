@@ -708,7 +708,7 @@ def test_claude_code_hook_commands_pin_the_installing_interpreter():
         commands = [
             h["command"] for groups in data["hooks"].values() for group in groups for h in group["hooks"]
         ]
-        assert len(commands) == 3
+        assert len(commands) == 4
         for command in commands:
             assert command.split(" ", 1)[0] == sys.executable
         assert os.path.isabs(sys.executable)
@@ -722,10 +722,65 @@ def test_kimi_hook_commands_pin_the_installing_interpreter():
         lines = [
             line for line in config.read_text(encoding="utf-8").splitlines() if line.startswith('command = "')
         ]
-        assert len(lines) == 2
+        assert len(lines) == 3
         for line in lines:
             assert line.startswith(f'command = "{sys.executable} ')
         assert not any(line.startswith('command = "python3 ') for line in lines)
+
+
+def test_wire_claude_code_adds_the_rules_hook_beside_recall():
+    """The rules hook rides UserPromptSubmit in its own entry, idempotently."""
+    with tempfile.TemporaryDirectory() as d:
+        settings = Path(d) / "settings.json"
+        result = agent_wiring.wire_claude_code(settings)
+        assert result["changed"] is True
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = [h["command"] for group in data["hooks"]["UserPromptSubmit"] for h in group["hooks"]]
+        assert len(commands) == 2
+        assert any(c.endswith("/hooks/rules.py") for c in commands)
+        assert any(c.endswith("/hooks/recall.py") for c in commands)
+        second = agent_wiring.wire_claude_code(settings)
+        assert second["changed"] is False, "a second run must add nothing"
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = [h["command"] for group in data["hooks"]["UserPromptSubmit"] for h in group["hooks"]]
+        assert len(commands) == 2
+
+
+def test_wire_kimi_adds_the_rules_hook_and_is_idempotent():
+    with tempfile.TemporaryDirectory() as d:
+        config = Path(d) / "config.toml"
+        result = agent_wiring.wire_kimi(config)
+        assert result["changed"] is True
+        assert config.read_text(encoding="utf-8").count("hooks/rules.py") == 1
+        second = agent_wiring.wire_kimi(config)
+        assert second["changed"] is False
+        assert config.read_text(encoding="utf-8").count("hooks/rules.py") == 1
+
+
+def test_wire_kimi_adds_only_the_missing_rules_block():
+    """A machine wired before rules existed keeps both hooks and gains exactly one block —
+    the old append shape rewrote every block once any one was missing and left the deduper
+    to collapse the copies afterwards."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d) / "oh-my-boring"
+        (home / "hooks").mkdir(parents=True)
+        for name in ("kimi-recall.py", "kimi-distill-session.py", "rules.py"):
+            (home / "hooks" / name).write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        config = Path(d) / "config.toml"
+        config.write_text(
+            '[model]\nname = "kimi"\n'
+            '\n[[hooks]]\nevent = "SessionEnd"\n'
+            f'command = "{sys.executable} {home}/hooks/kimi-distill-session.py"\ntimeout = 130\n'
+            '\n[[hooks]]\nevent = "UserPromptSubmit"\n'
+            f'command = "{sys.executable} {home}/hooks/kimi-recall.py"\ntimeout = 10\n',
+            encoding="utf-8",
+        )
+        with mock.patch.object(agent_wiring, "BORING_HOME", str(home)):
+            agent_wiring.wire_kimi(config)
+        text = config.read_text(encoding="utf-8")
+        assert text.count("kimi-distill-session.py") == 1, text
+        assert text.count("kimi-recall.py") == 1, text
+        assert text.count("hooks/rules.py") == 1, text
 
 
 def test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3():
@@ -784,6 +839,9 @@ if __name__ == "__main__":
     test_kimi_hooks_are_deduped_across_path_spellings()
     test_claude_code_hook_commands_pin_the_installing_interpreter()
     test_kimi_hook_commands_pin_the_installing_interpreter()
+    test_wire_claude_code_adds_the_rules_hook_beside_recall()
+    test_wire_kimi_adds_the_rules_hook_and_is_idempotent()
+    test_wire_kimi_adds_only_the_missing_rules_block()
     test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3()
     test_local_deps_are_transitive_and_reach_the_shared_dir()
     test_install_hermes_skills_removes_legacy_nested_duplicate()

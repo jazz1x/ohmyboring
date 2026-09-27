@@ -20,7 +20,9 @@ body, never a silent 200 with an empty one. Unregistered paths get FastAPI's
 outside the engine's proxy table: GET /approved reads the graph store (what
 the morning card's 「해」 judged), GET /claim-source resolves a subject to its
 current claim's note path (GET /claim-sources: every subject's current claim for one
-predicate, the same pick per subject), GET /projects answers the engine's plain question
+predicate, the same pick per subject), GET /rules groups the owner's standing
+corrections (kind='rule' claims: the 'rule' sentence + its trigger words per
+subject) for the UserPromptSubmit trigger hook, GET /projects answers the engine's plain question
 when called with no params but, with `active_days`, answers a DB-backed
 question the engine cannot (which projects have had a document touched in
 that window), and GET/POST /repairs/split-subjects lists and merges claim
@@ -53,7 +55,7 @@ import psycopg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import approved, claim_source
+from . import approved, claim_source, rules
 
 _TIMEOUT = float(os.environ.get("DOOR_TIMEOUT", "130"))
 
@@ -291,6 +293,25 @@ async def _claim_sources(request: Request) -> Response:
     except psycopg.OperationalError as e:
         return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
     return JSONResponse({"predicate": predicate, "claims": claim_source.group_current(rows)})
+
+
+def _fetch_rules() -> list:
+    with psycopg.connect(os.environ["DOOR_PG_DSN"]) as conn, conn.cursor() as cur:
+        cur.execute(rules.SQL, ("rule",))
+        return cur.fetchall()
+
+
+async def _rules(request: Request) -> Response:
+    """GET /rules — the owner's standing corrections, grouped by subject for the
+    trigger hook: each subject's 'rule' sentence + its trigger words. A subject
+    holding only one of the pair is counted in `incomplete`, never served half."""
+    if not os.environ.get("DOOR_PG_DSN"):
+        return JSONResponse({"error": "store not configured"}, status_code=503)
+    try:
+        rows = await asyncio.to_thread(_fetch_rules)
+    except psycopg.OperationalError as e:
+        return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
+    return JSONResponse(rules.group_rules(rows))
 
 
 #: repair candidates per page — 3 default (the card's "오늘 할 일" shows the top 3), 1..50 range
@@ -548,6 +569,7 @@ _DOOR_HANDLERS = {
     "GET /projects": _projects,
     "GET /repairs/split-subjects": _repairs_split_subjects_get,
     "POST /repairs/split-subjects": _repairs_split_subjects_post,
+    "GET /rules": _rules,
 }
 for _method, _path in _load_door_routes():
     app.add_api_route(_path, _DOOR_HANDLERS[f"{_method} {_path}"], methods=[_method])

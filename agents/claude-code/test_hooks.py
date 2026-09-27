@@ -26,8 +26,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -74,6 +76,7 @@ def _load(name, filename):
 
 distill = _load("distill_session_hook", "distill-session.py")
 recall = _load("recall_hook", "recall.py")
+rules_hook = _load("rules_hook", "rules.py")
 import distill_core  # noqa: E402
 
 # The recall tests drive the real injection path, which appends to the injection ledger.
@@ -790,6 +793,124 @@ class ClampWiringTest(unittest.TestCase):
 def _read_last_event(path):
     with open(path, encoding="utf-8") as f:
         return json.loads(f.readlines()[-1])
+
+
+class RulesStubHandler(BaseHTTPRequestHandler):
+    """The door's stand-in: serves a fixed GET /rules payload and counts hits."""
+
+    hits = 0
+    payload: dict = {"rules": [], "incomplete": 0}
+
+    def do_GET(self):  # noqa: N802 — http.server's spelling
+        type(self).hits += 1
+        body = json.dumps(type(self).payload).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class RulesHookTests(unittest.TestCase):
+    """hooks/rules.py against a stub door on localhost — real HTTP loopback, nothing mocked.
+
+    Covers: a firing prompt injects the header + one line per rule and records one
+    rule_fired event per rule; a non-matching prompt is silent; a dead door is one
+    stderr line and no output; harness-injected prompts never reach the door; an
+    unconfigured door URL is normal, not an error.
+    """
+
+    RULE = {
+        "subject": "rule-hermes-not-removed",
+        "rule": "hermes 를 빼지 마세요",
+        "trigger": "hermes + remove|drop",
+        "source_path": "/vault/wiki/wiki-1955.md",
+    }
+
+    def setUp(self):
+        self.stub = ThreadingHTTPServer(("127.0.0.1", 0), RulesStubHandler)
+        self.stub_thread = threading.Thread(target=self.stub.serve_forever, daemon=True)
+        self.stub_thread.start()
+        RulesStubHandler.hits = 0
+        RulesStubHandler.payload = {"rules": [dict(self.RULE)], "incomplete": 0}
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.env = mock.patch.dict(
+            os.environ,
+            {
+                "BORING_DOOR_URL": f"http://127.0.0.1:{self.stub.server_address[1]}",
+                "BORING_EVENT_SINK": "spool",
+                "BORING_EVENT_LOG": os.path.join(self._tmp.name, "events.ndjson"),
+            },
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def tearDown(self):
+        self.stub.shutdown()
+        self.stub.server_close()
+
+    def _run(self, payload):
+        captured, stderr = io.StringIO(), io.StringIO()
+        module = _load("rules_hook_live", "rules.py")
+        with (
+            mock.patch.object(module.sys, "stdin", io.StringIO(json.dumps(payload))),
+            mock.patch.object(module.sys, "stdout", captured),
+            mock.patch.object(module.sys, "stderr", stderr),
+        ):
+            module.main()
+        return captured.getvalue(), stderr.getvalue()
+
+    def test_firing_prompt_injects_the_rule_and_records_the_event(self):
+        out, err = self._run({"prompt": "Hermes 좀 remove 해줘", "session_id": "s-1"})
+        self.assertEqual(err, "")
+        payload = json.loads(out)
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(ctx.startswith("지켜야 할 규칙 (소유자가 바로잡은 것):"), ctx)
+        self.assertIn("- hermes 를 빼지 마세요 (출처 wiki-1955)", ctx)
+        with open(os.path.join(self._tmp.name, "events.ndjson"), encoding="utf-8") as f:
+            events = [json.loads(line) for line in f if line.strip()]
+        fired = [e for e in events if e.get("event") == "rule_fired"]
+        self.assertEqual(len(fired), 1, fired)
+        self.assertEqual(fired[0]["component"], "rules")
+        self.assertEqual(fired[0]["status"], "ok")
+        self.assertEqual(fired[0]["subject"], "rule-hermes-not-removed")
+        self.assertEqual(fired[0]["session_id"], "s-1")
+
+    def test_no_trigger_match_is_silent_but_the_door_was_asked(self):
+        out, err = self._run({"prompt": "그냥 평범한 질문이에요", "session_id": "s-2"})
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+        self.assertEqual(RulesStubHandler.hits, 1)
+        self.assertFalse(
+            os.path.exists(os.path.join(self._tmp.name, "events.ndjson")),
+            "no firing → no rule_fired event",
+        )
+
+    def test_dead_door_is_one_stderr_line_and_no_output(self):
+        os.environ["BORING_DOOR_URL"] = "http://127.0.0.1:1"  # nothing listens there
+        out, err = self._run({"prompt": "hermes remove", "session_id": "s-3"})
+        self.assertEqual(out, "")
+        lines = [line for line in err.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, err)
+        self.assertIn("[omb-rules] rules fetch failed", err)
+
+    def test_injection_prompt_never_reaches_the_door(self):
+        out, err = self._run({"prompt": "<task-notification>\n<status>done</status>"})
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+        self.assertEqual(RulesStubHandler.hits, 0)
+
+    def test_no_door_url_is_silent(self):
+        os.environ.pop("BORING_DOOR_URL", None)
+        out, err = self._run({"prompt": "hermes remove"})
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+        self.assertEqual(RulesStubHandler.hits, 0)
 
 
 if __name__ == "__main__":

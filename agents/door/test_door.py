@@ -64,6 +64,7 @@ import uvicorn  # noqa: E402
 door = importlib.import_module("agents.door.door")
 approved = importlib.import_module("agents.door.approved")
 claim_source = importlib.import_module("agents.door.claim_source")
+rules = importlib.import_module("agents.door.rules")
 
 STUB_CONTENT_TYPE = "application/json; charset=utf-8"
 
@@ -1109,6 +1110,124 @@ class EmitSubjectMergedEventTests(unittest.TestCase):
         self.assertEqual(status, "failed: 500")
         self.assertIn("foodspring-front", buf.getvalue())
         self.assertIn("500", buf.getvalue())
+
+
+class RulesGroupPureTests(unittest.TestCase):
+    """rules.group_rules — pure: claim rows in, grouped rules + incomplete count out."""
+
+    def _rows(self):
+        return [
+            ("rule-b", "rule", "b sentence", "/vault/wiki/wiki-2.md"),
+            ("rule-b", "trigger", "bbb", "/vault/wiki/wiki-2.md"),
+            ("rule-a", "trigger", "hermes 헤르메스 + 제거", "/vault/wiki/wiki-1.md"),
+            ("rule-a", "rule", "a newer sentence", "/vault/wiki/wiki-9.md"),
+            ("rule-a", "rule", "a sentence", "/vault/wiki/wiki-1.md"),
+            ("rule-c", "rule", "c has no trigger", "/vault/wiki/wiki-3.md"),
+            ("rule-d", "trigger", "d has no rule", "/vault/wiki/wiki-4.md"),
+            ("rule-e", "note", "unrelated predicate is ignored", "/vault/wiki/wiki-5.md"),
+        ]
+
+    def test_grouped_by_subject_sorted_with_newest_rule_winning(self):
+        out = rules.group_rules(self._rows())
+        self.assertEqual([r["subject"] for r in out["rules"]], ["rule-a", "rule-b"])
+        a = out["rules"][0]
+        self.assertEqual(a["rule"], "a newer sentence", "rows arrive newest-first; the first claim wins")
+        self.assertEqual(a["trigger"], "hermes 헤르메스 + 제거")
+        self.assertEqual(a["source_path"], "/vault/wiki/wiki-9.md")
+        self.assertEqual(
+            out["rules"][1],
+            {
+                "subject": "rule-b",
+                "rule": "b sentence",
+                "trigger": "bbb",
+                "source_path": "/vault/wiki/wiki-2.md",
+            },
+        )
+
+    def test_subjects_missing_rule_or_trigger_are_counted_not_dropped_silently(self):
+        out = rules.group_rules(self._rows())
+        self.assertEqual(out["incomplete"], 3, "rule-c (no trigger), rule-d (no rule), rule-e (neither)")
+        self.assertNotIn("rule-c", [r["subject"] for r in out["rules"]])
+
+    def test_empty_rows_is_an_empty_answer(self):
+        self.assertEqual(rules.group_rules([]), {"rules": [], "incomplete": 0})
+
+
+class RulesRouteTests(unittest.TestCase):
+    """GET /rules through the real door app — stub rows, no DB."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                with socket.create_connection(("127.0.0.1", cls.door_port), timeout=1):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+
+    def setUp(self):
+        self._saved_dsn = os.environ.get("DOOR_PG_DSN")
+        self._rows: list = []
+        self._orig_fetch = door._fetch_rules
+        door._fetch_rules = lambda: self._rows
+
+    def tearDown(self):
+        door._fetch_rules = self._orig_fetch
+        if self._saved_dsn is None:
+            os.environ.pop("DOOR_PG_DSN", None)
+        else:
+            os.environ["DOOR_PG_DSN"] = self._saved_dsn
+
+    def test_no_dsn_is_503_never_empty_200(self):
+        os.environ.pop("DOOR_PG_DSN", None)
+        status, body, content_type = _req(self.door_port, "GET", "/rules")
+        self.assertEqual(status, 503)
+        self.assertIn("application/json", content_type)
+        self.assertEqual(json.loads(body), {"error": "store not configured"})
+
+    def test_stub_rows_answer_grouped_rules_with_incomplete_count(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = [
+            ("rule-hermes-not-removed", "rule", "hermes 를 빼지 마세요", "/vault/wiki/wiki-1955.md"),
+            (
+                "rule-hermes-not-removed",
+                "trigger",
+                "hermes 헤르메스 + 제거|빼|내리|remove|drop",
+                "/vault/wiki/wiki-1955.md",
+            ),
+            ("rule-only-rule", "rule", "no trigger here", "/vault/wiki/wiki-1960.md"),
+        ]
+        status, body, content_type = _req(self.door_port, "GET", "/rules")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        payload = json.loads(body)
+        self.assertEqual(payload["incomplete"], 1)
+        self.assertEqual(
+            payload["rules"],
+            [
+                {
+                    "subject": "rule-hermes-not-removed",
+                    "rule": "hermes 를 빼지 마세요",
+                    "trigger": "hermes 헤르메스 + 제거|빼|내리|remove|drop",
+                    "source_path": "/vault/wiki/wiki-1955.md",
+                }
+            ],
+        )
 
 
 if __name__ == "__main__":
