@@ -428,9 +428,9 @@ def test_a_failed_effect_leaves_the_card_and_releases_the_claim():
     assert len(_updates(calls)) == 1
 
 
-def test_a_failed_chat_update_is_one_log_line_and_releases_the_claim():
-    """chat_update raising leaves the card showing buttons — one error line naming the
-    press, and the claim is released so the owner can press the row again."""
+def test_a_failed_chat_update_is_one_log_line_and_keeps_the_claim():
+    """chat_update raising leaves the card showing buttons, but the effects already ran —
+    one error line naming the press, and a re-press is refused rather than run twice."""
     ctx = _FakeCtx()
     with _env():
         _, handler = _register(ctx)[0]
@@ -451,13 +451,8 @@ def test_a_failed_chat_update_is_one_log_line_and_releases_the_claim():
             assert CARD_TS in logged and 1 in logged
             assert any("chat_update" in str(a) for a in logged)
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
-    retry = calls[4:]
-    assert retry[:3] == [
-        "ack",
-        ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 1, "choice": "do"}),
-        ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"]),
-    ]
-    assert len(_updates(calls)) == 2
+    assert calls[4:] == ["ack"], "the re-press must not repeat the effects"
+    assert len(_updates(calls)) == 1
 
 
 def test_a_repair_answered_with_a_non_done_value_is_one_log_line_and_marks_the_row():
@@ -528,7 +523,7 @@ if __name__ == "__main__":
     test_an_already_judged_row_is_refused_with_one_log_line()
     test_a_racing_second_press_is_refused_while_the_card_still_shows_buttons()
     test_a_failed_effect_leaves_the_card_and_releases_the_claim()
-    test_a_failed_chat_update_is_one_log_line_and_releases_the_claim()
+    test_a_failed_chat_update_is_one_log_line_and_keeps_the_claim()
     test_a_repair_answered_with_a_non_done_value_is_one_log_line_and_marks_the_row()
     test_a_repair_done_value_marks_the_row_with_the_doors_numbers()
     print("ok - boring-card plugin: ack-first, in-place mark, double-press refused, loud refusals")

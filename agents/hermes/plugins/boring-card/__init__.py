@@ -187,9 +187,7 @@ def register(ctx: Any) -> None:
         repair_result = results[0] if results else None
         marked = card_view.mark_pressed(blocks or [], press, lang=lang, repair_result=repair_result)
         if isinstance(marked, card_types.Rejected):
-            # Unreachable while the blocks are the ones the press checked above; kept loud
-            # anyway — a refused press whose effects already ran must not also crash here.
-            _claimed.discard(key)
+            # The effects already ran: the claim stays, or a re-press would run them twice.
             _LOG.error(
                 "%s: press card_ts=%s idx=%s could not re-render the card — %s",
                 _PLUGIN_NAME,
@@ -202,8 +200,7 @@ def register(ctx: Any) -> None:
             return
         try:
             await _client.chat_update(channel=press.channel, ts=press.card_ts, blocks=marked)
-        except Exception as e:  # noqa: BLE001 — one failed update is one line, never a dead handler
-            _claimed.discard(key)
+        except Exception as e:  # noqa: BLE001 — effects are done; the claim stays so a re-press cannot repeat them
             _LOG.error(
                 "%s: press card_ts=%s idx=%s chat_update failed — %s",
                 _PLUGIN_NAME,
