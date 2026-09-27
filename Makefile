@@ -13,13 +13,19 @@ up: ## Setup + start (check Ollama, pull models, build, start everything)
 ollama: ## Ensure Ollama is running (start it in the background if possible)
 	./scripts/ensure-ollama.sh
 
-hermes-build: ## Clone/build the optional hermes-agent image
+HERMES_IMAGE := $(shell sed -n 's/^ *image: \(hermes-agent:[^ ]*\).*/\1/p' docker-compose.yml)
+HERMES_TAG := $(lastword $(subst :, ,$(HERMES_IMAGE)))
+
+hermes-build: ## Clone/build the optional hermes-agent image at the tag docker-compose.yml pins
 	@if [ -d "$(HOME)/hermes-agent-src" ]; then \
 		echo "ⓘ hermes-agent source already exists at $(HOME)/hermes-agent-src"; \
 	else \
 		git clone https://github.com/NousResearch/hermes-agent.git "$(HOME)/hermes-agent-src"; \
 	fi
-	cd "$(HOME)/hermes-agent-src" && docker build -t hermes-agent .
+	cd "$(HOME)/hermes-agent-src" \
+		&& { git rev-parse -q --verify "refs/tags/$(HERMES_TAG)" >/dev/null \
+			|| git fetch --no-tags origin "refs/tags/$(HERMES_TAG):refs/tags/$(HERMES_TAG)"; } \
+		&& git archive "$(HERMES_TAG)" | docker build -t "$(HERMES_IMAGE)" -
 
 down: ## Stop the whole stack, including Postgres when vector mode was used (keeps ./data)
 	@case "$$(printf '%s' "$${BORING_VECTOR:-off}" | tr '[:upper:]' '[:lower:]')" in \

@@ -115,7 +115,7 @@ services:
   # in the repo (external build) + depends on ~/.hermes: start.sh checks for the image and skips the agent
   # if absent, so the core loop works without it.
   boring-agent:
-    image: hermes-agent                   # requires external build (not in repo, Nous Hermes Agent)
+    image: hermes-agent:v2026.9.24        # external build pinned to an upstream tag — `make hermes-build`
     container_name: boring-agent
     restart: unless-stopped
     environment:
