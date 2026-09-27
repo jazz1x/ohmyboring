@@ -215,7 +215,7 @@ def parse_action(
     """A block_actions payload in, one verdict out — or Rejected with the reason. Nothing here
     raises: a weird button is a fact about the world, not a crash. When an owner is configured,
     nobody else's press counts. `n_total` bounds idx across all three card lanes — repair rows,
-    then advice rows, then the review rows, one shared index space (card.py's record_verdict
+    then advice rows, then the review rows, one shared index space (card_press.parse_press
     splits on it)."""
 
     parsed = parse_action_common(payload, owner_id=owner_id)

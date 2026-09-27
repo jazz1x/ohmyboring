@@ -3,9 +3,9 @@
 
 card_press.effects turns a press into a list of Effect values; this module is the one
 interpreter that applies them, through the fold `run`, plus the three live functions the
-fold calls (record/consumption/execute_repair). card.py's record_verdict folds the same
-list through the same fold, and the hermes plugin (agents/hermes/plugins/boring-card)
-does too — one decision table, one interpreter, wherever a press lands.
+fold calls (record/consumption/execute_repair). The hermes plugin
+(agents/hermes/plugins/boring-card) is the one folder now — one decision table, one
+interpreter, wherever a press lands.
 
 This module must stay importable inside the hermes venv: it depends only on card_types
 and the shared engine clients (plus stdlib), never on card_live — the read side pulls
@@ -47,9 +47,8 @@ def run(
 ) -> list[RepairDone | RepairFailed | RepairUnanswered]:
     """The one interpreter: a card_press.effects list in, applied in order. Each Effect tag
     picks its collaborator; the list's order is the execution order, and the fold stops at
-    the first failure — the same exception keeps propagating (card.py's run must die on a
-    dead engine exactly as it always has), annotated with the effect that failed
-    (`card_failed_effect`) and how many effects behind it were skipped
+    the first failure — the same exception keeps propagating, annotated with the effect
+    that failed (`card_failed_effect`) and how many effects behind it were skipped
     (`card_effects_skipped`) so a catcher can log one precise line. Returns the
     execute_repair results (a press carries at most one) — the only effects with a value
     worth handing back. An unknown tag raises: a decision table this small has no fourth

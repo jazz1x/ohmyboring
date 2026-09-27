@@ -19,7 +19,7 @@ before), the card grows a second lane above the advice one: a head-line context 
 「오늘 할 일」 section label and one four-block row per repair group (divider, tag, section,
 actions-or-mark), then a 「짚어 둔 것」 section label before the existing advice rows. A
 repair row's button idx shares one space with the advice rows — repairs first, 0..k-1 — so
-`card.py`'s record_verdict can tell the two lanes apart by idx alone."""
+a button press can tell the two lanes apart by idx alone."""
 
 from __future__ import annotations
 
@@ -168,7 +168,7 @@ def _proposal_row(
     action_idx: int,
 ) -> list[dict]:
     """`idx`/`total` are the display position within the advice lane (unchanged by the repair
-    lane's presence); `action_idx` is the shared button-idx space record_verdict reads —
+    lane's presence); `action_idx` is the shared button-idx space a press reads —
     n_repairs + idx once a repair lane exists, idx alone otherwise."""
     row = [
         {"type": "divider"},
@@ -394,8 +394,8 @@ def _project_groups(proposals: list[Proposal]) -> list[tuple[str, list[int]]]:
     """proposals grouped by `.project`, each project's rows kept together under one label —
     in first-seen order, so a priority (아직) pick from project B ahead of project A's own
     picks still puts B's label first. Indices are into the original `proposals` list; the
-    button `action_id`s (and so `record_verdict`'s `state["proposals"][verdict.idx]` lookup)
-    must reference that list, never a position inside the display grouping."""
+    button `action_id`s (and so a press's lane lookup by idx) must reference that list, never
+    a position inside the display grouping."""
     order: list[str] = []
     groups: dict[str, list[int]] = {}
     for idx, proposal in enumerate(proposals):

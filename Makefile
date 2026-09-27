@@ -52,7 +52,7 @@ events-replay: ## Hand spooled events to the engine (after an outage; doctor nam
 secretary: ## Answer @mentions in Slack from memory (Socket Mode; needs SLACK_APP_TOKEN/SLACK_BOT_TOKEN in .env)
 	set -a; . ./.env; set +a; python3 agents/slack/secretary.py
 
-card: ## Send the morning proposal card to Slack and record the buttons as verdicts (Socket Mode; needs SLACK_APP_TOKEN/SLACK_BOT_TOKEN/SLACK_CARD_CHANNEL in .env)
+card: ## Send the morning proposal card to Slack (needs SLACK_BOT_TOKEN/SLACK_CARD_CHANNEL/BORING_DOOR_URL in .env; buttons are answered by the hermes plugin)
 	set -a; . ./.env; set +a; python3 agents/slack/card.py
 
 door: ## The door — served by the boring-door container at 127.0.0.1:7710; this runs the same app on the host (DOOR_PORT, default 7710)
