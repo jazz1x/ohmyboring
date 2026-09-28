@@ -811,55 +811,100 @@ if [ -f "$BORING_HOME/.pre-commit-config.yaml" ]; then
     fi
 fi
 
-# (a2e) The morning card. The launchd log is the only record of a run — a posted run proves
-# itself with `[card] posted ts=`, not with finished. Lines the ISO regex cannot parse
-# (pre-ISO logs) are skipped, not misread.
-CARD_LOG="${BORING_CARD_LOG:-/tmp/com.ohmyboring.morning-card.log}"
-if [ ! -f "$CARD_LOG" ]; then
-    warn "morning card: 모름 — 로그 파일이 없음 ($CARD_LOG) (not the same as working)"
+# (a2e) The morning card. Since #427 the hermes cron job `morning-card` is the only record a run
+# ever leaves — the launchd job com.ohmyboring.morning-card was uninstalled on 2026-09-28 and
+# /tmp/com.ohmyboring.morning-card.log will never be written again, so a log-only check cries
+# false alarm from 2026-09-29 08:05. A posted run proves itself with
+# `[run-morning-card] ok … posted_ts=`, not with finished; the run's time is the output file's
+# name (local time), and the dir is rotated (output_retention=50), so the newest file by name is
+# the whole record — never a count of files. Missing jobs.json, missing job, missing dir: 모름,
+# not ✓ — zero files is not data, missing is not the same as working.
+HERMES_HOME="${BORING_HERMES_HOME:-$HOME/.hermes}"
+card_jobs_json="$HERMES_HOME/cron/jobs.json"
+if [ ! -r "$card_jobs_json" ]; then
+    warn "morning card: 모름 — hermes 작업 기록이 없음 ($card_jobs_json) (not the same as working)"
 else
-    card_started=$(sed -n 's/^=== morning card started at \([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}[+-][0-9]\{4\}\) ===$/\1/p' "$CARD_LOG" | tail -n 1)
-    if [ -z "$card_started" ]; then
-        warn "morning card: 모름 — 읽을 수 있는 'started at <ISO>' 줄이 없음 ($CARD_LOG) (not the same as working)"
-    else
-        card_start_line=$(sed -n '/^=== morning card started at [0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}[+-][0-9]\{4\} ===$/=' "$CARD_LOG" | tail -n 1)
-        card_after=$(tail -n "+$((card_start_line + 1))" "$CARD_LOG")
-        card_exit=$(printf '%s\n' "$card_after" | sed -n 's/^=== morning card finished at .* (exit \([0-9][0-9]*\)) ===$/\1/p' | tail -n 1)
-        card_posted=$(printf '%s\n' "$card_after" | grep -c '\[card\] posted ts=' || true)
-        # Staleness binds first: run_card exits before writing `started` when the door is down,
-        # so yesterday's post must not read as today's. python3 because GNU/BSD date differ.
-        card_stale=$(python3 - "$card_started" "${BORING_NOW:-}" <<'PY'
+    card_job_id=$(python3 - "$card_jobs_json" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        jobs = json.load(fh).get("jobs", [])
+except Exception:
+    print("UNREADABLE")
+    raise SystemExit(0)
+for job in jobs:
+    if job.get("name") == "morning-card":
+        print(job.get("id") or "")
+        break
+PY
+)
+    case "$card_job_id" in
+        UNREADABLE)
+            warn "morning card: 모름 — hermes 작업 기록을 못 읽음 ($card_jobs_json) (not the same as working)"
+            ;;
+        "")
+            warn "morning card: 모름 — hermes에 morning-card 작업이 없음 ($card_jobs_json) (not the same as working)"
+            ;;
+        *)
+            card_out_dir="$HERMES_HOME/cron/output/$card_job_id"
+            if [ ! -d "$card_out_dir" ]; then
+                warn "morning card: 모름 — 출력 디렉터리가 없음 ($card_out_dir) (not the same as working)"
+            else
+                card_file=$(ls "$card_out_dir" 2>/dev/null | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}\.md$' | sort | tail -n 1)
+                if [ -z "$card_file" ]; then
+                    warn "morning card: 모름 — 출력 파일이 없음 ($card_out_dir) (not the same as working)"
+                else
+                    card_line=$(sed -n 's/^\[run-morning-card\] //p' "$card_out_dir/$card_file" | tail -n 1)
+                    card_posted=$(printf '%s\n' "$card_line" | grep -c 'posted_ts=' || true)
+                    card_failed=$(printf '%s\n' "$card_line" | grep -c 'FAILED' || true)
+                    card_exit=$(printf '%s\n' "$card_line" | sed -n 's/.*exit=\([0-9][0-9]*\).*/\1/p')
+                    # Staleness binds first: the script exits before writing any output when the
+                    # door is down, so yesterday's post must not read as today's. python3 because
+                    # GNU/BSD date differ; the filename is local time, so astimezone() attaches
+                    # this machine's offset and only calendar dates are compared.
+                    card_judge=$(python3 - "${card_file%.md}" "${BORING_NOW:-}" <<'PY'
 import sys
 from datetime import datetime, timedelta
 
-started = datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%S%z")
+run = datetime.strptime(sys.argv[1], "%Y-%m-%d_%H-%M-%S").astimezone()
 now = datetime.strptime(sys.argv[2], "%Y-%m-%dT%H:%M:%S%z") if sys.argv[2] else datetime.now().astimezone()
 today_0805 = now.replace(hour=8, minute=5, second=0, microsecond=0)
 threshold = today_0805 if now >= today_0805 else today_0805 - timedelta(days=1)
-print(f"stale={int(started.date() < threshold.date())} threshold={threshold.isoformat()}")
+print(f"stale={int(run.date() < threshold.date())}")
+print(f"threshold={threshold.isoformat()}")
+print(f"run={run.isoformat()}")
 PY
 )
-        case "$card_stale" in
-            stale=1*) bad "morning card did not run since ${card_stale#stale=1 threshold=}"; failed_card=1 ;;
-            stale=0*)
-                if [ "$card_posted" -gt 0 ]; then
-                    ok "morning card: posted at $card_started"
-                    if [ -n "$card_exit" ] && [ "$card_exit" -ne 0 ]; then
-                        warn "morning card ended with exit $card_exit after posting"
-                    fi
-                elif [ -n "$card_exit" ] && [ "$card_exit" -ne 0 ]; then
-                    bad "morning card FAILED at $card_started (exit $card_exit)"
-                    failed_card=1
-                elif [ -n "$card_exit" ]; then
-                    ok "morning card: posted at $card_started"
-                else
-                    bad "morning card started at $card_started but has not posted yet"
-                    failed_card=1
+                    card_stale=$(printf '%s\n' "$card_judge" | sed -n 's/^stale=//p')
+                    card_threshold=$(printf '%s\n' "$card_judge" | sed -n 's/^threshold=//p')
+                    card_run_at=$(printf '%s\n' "$card_judge" | sed -n 's/^run=//p')
+                    case "$card_stale" in
+                        1)
+                            bad "morning card did not run since $card_threshold"
+                            failed_card=1
+                            ;;
+                        0)
+                            if [ "$card_posted" -gt 0 ]; then
+                                ok "morning card: posted at $card_run_at"
+                                if [ -n "$card_exit" ] && [ "$card_exit" -ne 0 ]; then
+                                    warn "morning card ended with exit $card_exit after posting"
+                                fi
+                            elif [ "$card_failed" -gt 0 ] || { [ -n "$card_exit" ] && [ "$card_exit" -ne 0 ]; }; then
+                                bad "morning card FAILED at $card_run_at (exit ${card_exit:-unknown})"
+                                failed_card=1
+                            else
+                                bad "morning card ran at $card_run_at but has not posted yet"
+                                failed_card=1
+                            fi
+                            ;;
+                        *)
+                            warn "morning card: 모름 — could not compare dates ($card_file, now=${BORING_NOW:-clock})"
+                            ;;
+                    esac
                 fi
-                ;;
-            *) warn "morning card: 모름 — could not compare dates ($card_started, now=${BORING_NOW:-clock})" ;;
-        esac
-    fi
+            fi
+            ;;
+    esac
 fi
 
 # (d5e) The same hook registered twice, read from the configs rather than from the damage.
