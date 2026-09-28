@@ -231,6 +231,10 @@ def test_wire_hermes_adds_hint_and_weekly():
         card_plugin.mkdir(parents=True)
         (card_plugin / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
         (card_plugin / "__init__.py").write_text("# stub", encoding="utf-8")
+        memory_plugin = scripts / "plugins" / "boring-memory"
+        memory_plugin.mkdir(parents=True)
+        (memory_plugin / "plugin.yaml").write_text("name: boring-memory\n", encoding="utf-8")
+        (memory_plugin / "__init__.py").write_text("# stub", encoding="utf-8")
         installed_scripts = fake_home / ".hermes" / "scripts"
         installed_slack_briefing = installed_scripts / "slack_briefing.py"
         assert not installed_scripts.exists()
@@ -468,9 +472,10 @@ def test_enable_hermes_plugin_replaces_an_inline_empty_list():
     assert out == "plugins:\n  enabled:\n    - boring-card\n"
 
 
-def test_wire_hermes_installs_the_card_plugin_and_enables_it():
-    """wire_hermes copies the plugin into ~/.hermes/plugins and flips plugins.enabled —
-    a press the owner already trusted card.py with must reach the same effects."""
+def test_wire_hermes_installs_the_plugins_and_enables_them():
+    """wire_hermes copies every plugin in HERMES_PLUGINS into ~/.hermes/plugins and flips
+    plugins.enabled for each — a press the owner already trusted card.py with must reach
+    the same effects, and a DM must arrive carrying the owner's notes."""
     with (
         tempfile.TemporaryDirectory() as d,
         mock.patch.object(
@@ -491,12 +496,13 @@ def test_wire_hermes_installs_the_card_plugin_and_enables_it():
         scripts.mkdir(parents=True)
         for name in agent_wiring._HERMES_ENTRY_SCRIPT_NAMES:
             (scripts / name).write_text("# stub\n", encoding="utf-8")
-        plugin_dir = scripts / "plugins" / "boring-card"
-        plugin_dir.mkdir(parents=True)
-        (plugin_dir / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
-        (plugin_dir / "__init__.py").write_text("# stub\n", encoding="utf-8")
-        # the checkout also carries the plugin's test — the installer must not ship it
-        (plugin_dir / "test_boring_card.py").write_text("# test\n", encoding="utf-8")
+        for plugin_name in agent_wiring.HERMES_PLUGINS:
+            plugin_dir = scripts / "plugins" / plugin_name
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.yaml").write_text(f"name: {plugin_name}\n", encoding="utf-8")
+            (plugin_dir / "__init__.py").write_text("# stub\n", encoding="utf-8")
+            # the checkout also carries the plugin's test — the installer must not ship it
+            (plugin_dir / f"test_{plugin_name.replace('-', '_')}.py").write_text("# test\n", encoding="utf-8")
         cfg = Path(d) / "config.yaml"
         cfg.write_text(
             "plugins:\n  enabled:\n    - orca-status\nagent:\n  personalities:\n    pirate: 'Arrr!'\n",
@@ -507,34 +513,42 @@ def test_wire_hermes_installs_the_card_plugin_and_enables_it():
             result = agent_wiring.wire_hermes(cfg, boring_home=str(home))
 
         assert result["changed"] is True
-        installed = fake_home / ".hermes" / "plugins" / "boring-card"
-        assert (installed / "plugin.yaml").read_text(encoding="utf-8") == "name: boring-card\n"
-        assert (installed / "__init__.py").exists()
-        # the installed directory is a deployment target, not a checkout: only the two
-        # files hermes loads, and no .omb-bak backups left inside it
-        assert sorted(p.name for p in installed.iterdir()) == ["__init__.py", "plugin.yaml"]
         text = cfg.read_text(encoding="utf-8")
-        assert "    - orca-status\n    - boring-card\n" in text
+        for plugin_name in agent_wiring.HERMES_PLUGINS:
+            installed = fake_home / ".hermes" / "plugins" / plugin_name
+            assert (installed / "plugin.yaml").read_text(encoding="utf-8") == f"name: {plugin_name}\n"
+            assert (installed / "__init__.py").exists()
+            # the installed directory is a deployment target, not a checkout: only the two
+            # files hermes loads, and no .omb-bak backups left inside it
+            assert sorted(p.name for p in installed.iterdir()) == ["__init__.py", "plugin.yaml"]
+        # both plugins land in the enabled list, in HERMES_PLUGINS order after what was there
+        assert "    - orca-status\n    - boring-card\n    - boring-memory\n" in text
         assert "pirate: 'Arrr!'" in text
 
 
-def test_install_hermes_card_plugin_sweeps_the_first_generation_leftovers():
+def test_install_hermes_plugin_sweeps_the_first_generation_leftovers():
     """The first installer copied the plugin's test file and kept .omb-bak copies in the
-    plugin directory — reinstalling must leave exactly the two files hermes loads."""
+    plugin directory — reinstalling any plugin must leave exactly the two files hermes
+    loads, and a plugin whose checkout dir is missing must abort the install."""
     with tempfile.TemporaryDirectory() as d:
         fake_home = Path(d) / "home"
         omb = Path(d) / "omb"
-        src = omb / "agents" / "hermes" / "plugins" / "boring-card"
-        src.mkdir(parents=True)
-        (src / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
-        (src / "__init__.py").write_text("# new\n", encoding="utf-8")
-        (src / "test_boring_card.py").write_text("# stays in the checkout\n", encoding="utf-8")
+        for plugin_name in agent_wiring.HERMES_PLUGINS:
+            src = omb / "agents" / "hermes" / "plugins" / plugin_name
+            src.mkdir(parents=True)
+            (src / "plugin.yaml").write_text(f"name: {plugin_name}\n", encoding="utf-8")
+            (src / "__init__.py").write_text(f"# new {plugin_name}\n", encoding="utf-8")
+            (src / f"test_{plugin_name.replace('-', '_')}.py").write_text(
+                "# stays in the checkout\n", encoding="utf-8"
+            )
 
-        dst = fake_home / ".hermes" / "plugins" / "boring-card"
-        dst.mkdir(parents=True)
-        (dst / "test_boring_card.py").write_text("# old generation\n", encoding="utf-8")
-        (dst / "plugin.yaml.omb-bak").write_text("backup\n", encoding="utf-8")
-        (dst / "__init__.py").write_text("# old\n", encoding="utf-8")
+            dst = fake_home / ".hermes" / "plugins" / plugin_name
+            dst.mkdir(parents=True)
+            (dst / f"test_{plugin_name.replace('-', '_')}.py").write_text(
+                "# old generation\n", encoding="utf-8"
+            )
+            (dst / "plugin.yaml.omb-bak").write_text("backup\n", encoding="utf-8")
+            (dst / "__init__.py").write_text("# old\n", encoding="utf-8")
 
         def fake_expanduser(value):
             if value == "~":
@@ -544,11 +558,19 @@ def test_install_hermes_card_plugin_sweeps_the_first_generation_leftovers():
             return value
 
         with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser):
-            agent_wiring._install_hermes_card_plugin(str(omb))
+            agent_wiring._install_hermes_plugins(str(omb))
+            try:
+                agent_wiring._install_hermes_plugin("boring-missing", str(omb))
+            except FileNotFoundError as exc:
+                assert "boring-missing" in str(exc), exc
+            else:
+                raise AssertionError("a plugin missing from the checkout must abort the install")
 
-        assert sorted(p.name for p in dst.iterdir()) == ["__init__.py", "plugin.yaml"]
-        assert (dst / "__init__.py").read_text(encoding="utf-8") == "# new\n"
-        assert (dst / "plugin.yaml").read_text(encoding="utf-8") == "name: boring-card\n"
+        for plugin_name in agent_wiring.HERMES_PLUGINS:
+            dst = fake_home / ".hermes" / "plugins" / plugin_name
+            assert sorted(p.name for p in dst.iterdir()) == ["__init__.py", "plugin.yaml"]
+            assert (dst / "__init__.py").read_text(encoding="utf-8") == f"# new {plugin_name}\n"
+            assert (dst / "plugin.yaml").read_text(encoding="utf-8") == f"name: {plugin_name}\n"
 
 
 def test_install_codex_host_worker_macos_writes_launch_agent():
@@ -1080,8 +1102,8 @@ if __name__ == "__main__":
     test_enable_hermes_plugin_leaves_everything_outside_the_list_byte_identical()
     test_enable_hermes_plugin_creates_the_block_when_absent()
     test_enable_hermes_plugin_replaces_an_inline_empty_list()
-    test_wire_hermes_installs_the_card_plugin_and_enables_it()
-    test_install_hermes_card_plugin_sweeps_the_first_generation_leftovers()
+    test_wire_hermes_installs_the_plugins_and_enables_them()
+    test_install_hermes_plugin_sweeps_the_first_generation_leftovers()
     test_install_codex_host_worker_macos_writes_launch_agent()
     test_codex_host_worker_plist_pins_the_installing_interpreter()
     test_next_cron_run_finds_next_monday()

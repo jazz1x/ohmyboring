@@ -1,0 +1,5 @@
+name: boring-memory
+version: 1.0.0
+description: "Hands hermes the owner's own memory before it answers a Slack DM — the wiki notes the message names, then an engine recall for the message text."
+author: "oh-my-boring"
+kind: standalone
