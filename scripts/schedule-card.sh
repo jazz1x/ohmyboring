@@ -1,27 +1,66 @@
 #!/bin/sh
-# Register and run the morning card, unattended, at 08:00 — same shape as
-# schedule-maintenance.sh, one launchd label per unattended job.
+# Register and run a card, unattended — same shape as schedule-maintenance.sh, one launchd
+# label per unattended job. Two jobs share every mechanism (install/uninstall/status, the
+# failure notice, the log markers): `card` is the morning card, `weekly` the weekly card.
 #
-#   ./scripts/schedule-card.sh run       # execute now, unattended (needs the door up)
-#   ./scripts/schedule-card.sh install   # register the daily 08:00 job (macOS launchd)
-#   ./scripts/schedule-card.sh uninstall # remove the registration
-#   ./scripts/schedule-card.sh status    # show registration state + last log line
+#   ./scripts/schedule-card.sh run [job]        # execute now, unattended (job default: card)
+#   ./scripts/schedule-card.sh install [job]    # register the job (macOS launchd)
+#   ./scripts/schedule-card.sh uninstall [job]  # remove the registration
+#   ./scripts/schedule-card.sh status [job]     # show registration state + last log line
 set -u
 
 BORING_HOME="${BORING_HOME:-$HOME/oh-my-boring}"
-LABEL="com.ohmyboring.morning-card"
-LOG="/tmp/${LABEL}.log"
 DOOR_URL="${BORING_DOOR_URL:-http://127.0.0.1:7710}"
+
+JOB="${2:-card}"
+case "$JOB" in
+    card)
+        LABEL="com.ohmyboring.morning-card"
+        RUN_MARK="morning card"
+        SCRIPT="agents/slack/card.py"
+        NOTICE="오늘 아침 카드를 못 보냈다"
+        NEEDS_DOOR=1
+        SCHEDULE_PLIST='
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>'
+        ;;
+    weekly)
+        LABEL="com.ohmyboring.weekly-card"
+        RUN_MARK="weekly card"
+        SCRIPT="agents/slack/weekly_card.py"
+        NOTICE="이번 주 주간 카드를 못 보냈다"
+        NEEDS_DOOR=0
+        SCHEDULE_PLIST='
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>'
+        ;;
+    *)
+        echo "✗ unknown job: $JOB (want: card or weekly)" >&2
+        exit 1
+        ;;
+esac
+LOG="/tmp/${LABEL}.log"
 
 usage() {
     cat <<EOF
-Usage: $0 {run|install|uninstall|status}
+Usage: $0 {run|install|uninstall|status} [job]
 
-  run       Run the morning card once, unattended. Fails visibly (exit 2) if the
-            door ($DOOR_URL) is not answering — this script never starts one.
-  install   Register the daily 08:00 job (macOS launchd).
+  job       card (default) — the morning card, every day at 08:00, needs the door up
+            weekly — the weekly briefing card, Monday 09:00, reads the vault first
+
+  run       Run the job once, unattended. The card fails visibly (exit 2) if the
+            door ($DOOR_URL) is not answering — this script never starts one. The
+            weekly has no door pre-check: its signal is the vault, and a broken
+            engine is the poster's own failure, not a reason to skip a quiet week.
+  install   Register the job (macOS launchd).
   uninstall Remove the registration.
-  status    Show whether the daily job is registered, and its last log line.
+  status    Show whether the job is registered, and its last log line.
 EOF
 }
 
@@ -35,7 +74,7 @@ notify_failure() {
     body=$(curl -sS https://slack.com/api/chat.postMessage \
         -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
         --data-urlencode "channel=${SLACK_CARD_CHANNEL}" \
-        --data-urlencode "text=오늘 아침 카드를 못 보냈다 — exit ${code} · ${reason}" 2>&1) || {
+        --data-urlencode "text=${NOTICE} — exit ${code} · ${reason}" 2>&1) || {
         echo "✗ 실패 알림도 못 보냈다: curl: ${body}" >&2
         return 0
     }
@@ -45,29 +84,31 @@ notify_failure() {
     esac
 }
 
-run_card() {
+run_job() {
     cd "$BORING_HOME" || { echo "✗ cannot cd to $BORING_HOME"; exit 1; }
     # launchd runs this with none of the interactive shell's env — no SLACK_APP_TOKEN, no
     # BORING_DOOR_URL, nothing from .env. `make card` sources .env the same way; a card that
-    # only ever ran from an interactive shell was never actually going to fire at 08:00.
+    # only ever ran from an interactive shell was never actually going to fire on schedule.
     if [ -f ./.env ]; then
         set -a
         # shellcheck disable=SC1091
         . ./.env
         set +a
     fi
-    door_url="${BORING_DOOR_URL:-$DOOR_URL}"
-    if ! curl -sf "${door_url}/health" >/dev/null 2>&1; then
-        echo "✗ door not answering at ${door_url}/health — start it (make door-up) before the card can run" >&2
-        notify_failure 2 "문(${door_url})이 응답하지 않음"
-        exit 2
+    if [ "$NEEDS_DOOR" = "1" ]; then
+        door_url="${BORING_DOOR_URL:-$DOOR_URL}"
+        if ! curl -sf "${door_url}/health" >/dev/null 2>&1; then
+            echo "✗ door not answering at ${door_url}/health — start it (make door-up) before the card can run" >&2
+            notify_failure 2 "문(${door_url})이 응답하지 않음"
+            exit 2
+        fi
     fi
-    echo "=== morning card started at $(date '+%Y-%m-%dT%H:%M:%S%z') ==="
+    echo "=== ${RUN_MARK} started at $(date '+%Y-%m-%dT%H:%M:%S%z') ==="
     # launchd's own PATH has no notion of Homebrew (python3 resolves to the PATH-less
     # system stub, which has no langgraph) — PYTHON3 is set in the plist's own
     # EnvironmentVariables at install time so this never depends on launchd's PATH.
     err_log=$(mktemp)
-    "${PYTHON3:-python3}" agents/slack/card.py 2>"$err_log"
+    "${PYTHON3:-python3}" "$SCRIPT" 2>"$err_log"
     status=$?
     cat "$err_log" >&2
     if [ "$status" -ne 0 ]; then
@@ -75,7 +116,7 @@ run_card() {
         notify_failure "$status" "${reason:-사유 없음}"
     fi
     rm -f "$err_log"
-    echo "=== morning card finished at $(date '+%Y-%m-%dT%H:%M:%S%z') (exit $status) ==="
+    echo "=== ${RUN_MARK} finished at $(date '+%Y-%m-%dT%H:%M:%S%z') (exit $status) ==="
     exit "$status"
 }
 
@@ -104,7 +145,7 @@ install_macos() {
     <array>
         <string>/bin/sh</string>
         <string>-c</string>
-        <string>cd $(escaped_boring_home) &amp;&amp; ./scripts/schedule-card.sh run</string>
+        <string>cd $(escaped_boring_home) &amp;&amp; ./scripts/schedule-card.sh run ${JOB}</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -114,11 +155,7 @@ install_macos() {
         <string>${BORING_HOME}</string>
     </dict>
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>8</integer>
-        <key>Minute</key>
-        <integer>0</integer>
+    <dict>${SCHEDULE_PLIST}
     </dict>
     <key>RunAtLoad</key>
     <false/>
@@ -175,11 +212,11 @@ status_macos() {
 }
 
 case "${1:-}" in
-    run) run_card ;;
+    run) run_job ;;
     install)
         case "$(uname -s)" in
             Darwin) install_macos ;;
-            *) echo "✗ unsupported OS: $(uname -s) — the morning card is macOS/launchd only for now"; exit 1 ;;
+            *) echo "✗ unsupported OS: $(uname -s) — the ${RUN_MARK} is macOS/launchd only for now"; exit 1 ;;
         esac
         ;;
     uninstall)

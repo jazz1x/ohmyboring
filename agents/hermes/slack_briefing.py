@@ -27,6 +27,11 @@ if _SHARED_DIR.is_dir() and str(_SHARED_DIR) not in sys.path:
 import label_core  # noqa: E402
 import verdict_core  # noqa: E402
 
+#: The weekly's whole message when a week produced nothing worth saying. Lived in
+#: weekly-briefing.py until the weekly card needed to recognise it on stdout; the renderer is
+#: the SSOT so the script and the poster never drift apart.
+EMPTY_MESSAGE = "이번 주는 새로 짚을 진행/막힘 항목이 회수되지 않았어요."
+
 EMPTY_VALUES = {
     "",
     "-",

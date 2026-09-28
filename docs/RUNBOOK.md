@@ -35,6 +35,7 @@ make agent-logs    # hermes 로그 (MCP 연결 진단)
 | `com.ohmyboring.maintenance` | 매일 | `scripts/schedule-maintenance.sh run` — data-steward + retention |
 | `com.ohmyboring.night-drain` | 03:20 | 밀린 Codex·Claude 세션을 한 번에 최대 40개 |
 | `com.ohmyboring.morning-card` | 매일 08:00 | `scripts/schedule-card.sh run` — 아침 카드. 문(:7710)이 살아 있어야 돌고, 로그는 `/tmp/com.ohmyboring.morning-card.log` |
+| `com.ohmyboring.weekly-card` | 월 09:00 | `scripts/schedule-card.sh run weekly` — 주간 브리핑 카드. 볼트의 매일 브리핑을 먼저 읽어서 문이 필요 없고, 로그는 `/tmp/com.ohmyboring.weekly-card.log` |
 
 ```bash
 launchctl list | grep ohmyboring     # 세 번째 칸이 라벨, 두 번째가 마지막 종료 코드
@@ -48,7 +49,7 @@ make maintenance                     # 지금 한 번 돌린다
 |---|---|---|
 | `memory-ingest-worker` | 20분 | `ingest-worker.py` — Claude 세션 하나를 증류 |
 | `morning-briefing` | — | 지금 운영 상태로 꺼져 있다(`~/.hermes/cron/jobs.json` 의 `enabled: false`) — 아침 카드가 그 자리를 하고 08:00 은 launchd `com.ohmyboring.morning-card` 가 받는다 |
-| `weekly-briefing` | 월 09:00 | `weekly-briefing.py` |
+| `weekly-briefing` | — | 이제 여기서 안 돈다 — 주간 브리핑 카드는 launchd `com.ohmyboring.weekly-card`((나) 위)가 올린다. hermes 크론 래퍼(「Cronjob Response」 머리말과 마크다운 재변환)를 빼려고 자리를 옮겼다 |
 
 **codex 수집기는 여기 없다.** 호스트 스케줄러가 정본이고, 설치기가 hermes 쪽 사본을 지운다(#370).
 둘 다 켜져 있으면 진 쪽이 LLM 호출을 쓰고 빈손으로 끝난다.
@@ -99,6 +100,7 @@ sh scripts/doctor.sh          # ✗ 가 0개인지
 | 그 파일이 0바이트다 | `curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker'` | **유휴인지 고장인지는 여기서 갈린다** (§4) |
 | 브리핑이 안 온다 | `make agent-logs` | hermes 가 스크립트를 찾았는지, 경로가 막혔는지 |
 | 카드가 안 왔다 | `./scripts/schedule-card.sh status` | 등록이 됐는지, 마지막 로그 줄 (`/tmp/com.ohmyboring.morning-card.log`) |
+| 주간 카드가 안 왔다 | `./scripts/schedule-card.sh status weekly` | 등록이 됐는지, 마지막 로그 줄 (`/tmp/com.ohmyboring.weekly-card.log`) |
 | 무엇이 정체돼 있나 | `make doctor` | `readiness_issue` 줄 |
 | 판정 창 상태 | `make peek` | 표본·바닥·판정 (localhost 전용) |
 | 엄격 점검 | `make readiness` | doctor 결함 하나라도 있으면 실패 |

@@ -127,7 +127,7 @@
       "type": "object",
       "default": {
         "weekly-briefing": {
-          "enabled": true,
+          "enabled": false,
           "schedule": "0 9 * * 1",
           "script": "weekly-briefing.py"
         }
