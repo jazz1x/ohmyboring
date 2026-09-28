@@ -13,6 +13,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 from slack_briefing import (
+    EMPTY_MESSAGE,
     maybe_print_blocks_json,
     parse_brief,
     render_body_mrkdwn,
@@ -31,7 +32,6 @@ WEEK = TODAY.strftime("%G-W%V")
 DATE = TODAY.strftime("%Y-%m-%d %a")
 TITLE = "📅 주간 브리핑"
 STAMP = f"{WEEK} · {DATE}"
-EMPTY_MESSAGE = "이번 주는 새로 짚을 진행/막힘 항목이 회수되지 않았어요."
 
 
 def header(body: str) -> str:

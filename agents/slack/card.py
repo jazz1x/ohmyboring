@@ -65,6 +65,7 @@ import card_registers  # noqa: E402
 import card_types  # noqa: E402
 import card_verdicts  # noqa: E402
 import card_view  # noqa: E402
+import slack_post  # noqa: E402
 from langgraph.graph import START, StateGraph  # noqa: E402
 from langgraph.graph.state import CompiledStateGraph  # noqa: E402
 
@@ -431,13 +432,9 @@ def _note_texts_for_hits(
 
 
 def _env_send(blocks: list[dict]) -> card_types.PostedCard:
-    from slack_sdk.web import WebClient
-
-    channel = os.environ["SLACK_CARD_CHANNEL"]  # main() validated before the graph runs
-    web = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
     head = blocks[0].get("text") or {}
-    resp = web.chat_postMessage(channel=channel, blocks=blocks, text=head.get("text") or "아침 카드")
-    return card_types.PostedCard(channel=channel, ts=resp["ts"])
+    ts = slack_post.post_payload({"blocks": blocks, "text": head.get("text") or "아침 카드"})
+    return card_types.PostedCard(channel=os.environ["SLACK_CARD_CHANNEL"], ts=ts)
 
 
 def make_propose(model: str = DEFAULT_MODEL) -> Callable[[str], str]:

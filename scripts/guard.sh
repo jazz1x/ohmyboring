@@ -93,6 +93,7 @@ python3 agents/slack/test_card_verdicts.py
 python3 agents/slack/test_card_view.py
 python3 agents/slack/test_card_press.py
 python3 agents/slack/test_card_graph.py
+python3 agents/slack/test_weekly_card.py
 python3 agents/slack/test_secretary.py
 python3 agents/slack/test_secretary_core.py
 python3 agents/shared/test_vault_note.py
