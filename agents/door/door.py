@@ -32,6 +32,15 @@ first write route: it deletes the split rows (an owner-written note's only with 
 owner token — otherwise that note is skipped and named in `owner_held`), blanks the affected notes' sha
 so the engine's own /sync rereads them under the merged form, and calls that
 /sync itself. Of the GETs, only /projects without active_days reaches the upstream.
+And POST /run/morning-card · POST /run/weekly-card run the card programs
+themselves (agents/slack/card.py · weekly_card.py as a subprocess with the door's
+own env): hermes cron owns the schedule and asks the door to fire the tool, one run
+per route at a time (a second call while one runs is 409), answering {ok, exit,
+posted_ts?, tail} — a non-zero exit is ok:false with the code, never hidden. No
+auth header: the door binds 127.0.0.1 on the host and the compose-internal bridge
+otherwise, the hermes script env carries no token to send, and the tool's own
+once-per-morning / once-per-week guard makes a duplicate trigger exit 0 rather
+than post twice.
 """
 
 from __future__ import annotations
@@ -42,7 +51,9 @@ import hmac
 import http.client
 import json
 import os
+import re
 import socket
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -314,6 +325,79 @@ async def _rules(request: Request) -> Response:
     return JSONResponse(rules.group_rules(rows))
 
 
+#: how long one card run may hold its route before the door gives up on it. Generous on
+#: purpose: the morning card's gemma4 calls and the weekly's own 300s child each fit inside.
+_RUN_CARD_TIMEOUT_S = float(os.environ.get("DOOR_RUN_CARD_TIMEOUT", "900"))
+
+#: The programs the two run routes execute — the same tools launchd used to fire, unchanged.
+_CARD_PROGRAMS = {
+    "morning-card": Path(__file__).resolve().parents[2] / "agents" / "slack" / "card.py",
+    "weekly-card": Path(__file__).resolve().parents[2] / "agents" / "slack" / "weekly_card.py",
+}
+
+#: One lock per route: a card takes minutes (model calls), and a second concurrent run is not
+#: a second opinion but a double post waiting to happen — the second caller gets a 409 instead.
+_RUN_LOCKS: dict[str, asyncio.Lock] = {}
+
+#: The tool prints "[card] posted ts=<slack ts>" (or "already posted today (ts=…)"); the newest
+#: match on stdout becomes the response's posted_ts.
+_POSTED_TS_RE = re.compile(r"ts=([0-9]+\.[0-9]+)")
+
+
+def _run_card_subprocess(script: Path, timeout_s: float) -> subprocess.CompletedProcess[str]:
+    """The subprocess seam the tests stub. Inherits the door's env — compose supplies the
+    Slack token/channel, the vault dir, the engine URL, OLLAMA_HOST."""
+    return subprocess.run(
+        [sys.executable, str(script)],
+        cwd=str(Path(__file__).resolve().parents[2]),
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+    )
+
+
+def _card_run_body(name: str, completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    """{ok, exit, posted_ts?, tail} — a non-zero exit is ok:false with the code, never hidden."""
+    merged = "\n".join(part for part in (completed.stderr.strip(), completed.stdout.strip()) if part)
+    tail = "\n".join(merged.splitlines()[-5:])[-1000:]
+    body: dict[str, Any] = {"ok": completed.returncode == 0, "exit": completed.returncode, "tail": tail}
+    matches = _POSTED_TS_RE.findall(completed.stdout)
+    if matches:
+        body["posted_ts"] = matches[-1]
+    return body
+
+
+async def _run_card_route(request: Request, name: str) -> Response:
+    lock = _RUN_LOCKS.setdefault(name, asyncio.Lock())
+    if lock.locked():
+        return JSONResponse({"error": f"{name} already running"}, status_code=409)
+    async with lock:
+        try:
+            completed = await asyncio.to_thread(
+                _run_card_subprocess, _CARD_PROGRAMS[name], _RUN_CARD_TIMEOUT_S
+            )
+        except subprocess.TimeoutExpired:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "exit": None,
+                    "tail": "",
+                    "error": f"timeout after {_RUN_CARD_TIMEOUT_S:.0f}s",
+                }
+            )
+        except OSError as e:
+            return JSONResponse({"ok": False, "exit": None, "tail": "", "error": f"spawn failed: {e}"})
+        return JSONResponse(_card_run_body(name, completed))
+
+
+async def _run_morning_card(request: Request) -> Response:
+    return await _run_card_route(request, "morning-card")
+
+
+async def _run_weekly_card(request: Request) -> Response:
+    return await _run_card_route(request, "weekly-card")
+
+
 #: repair candidates per page — 3 default (the card's "오늘 할 일" shows the top 3), 1..50 range
 #: (0 is not a page, an unbounded scan is not a "top N" any more).
 _MIN_REPAIR_LIMIT = 1
@@ -569,6 +653,8 @@ _DOOR_HANDLERS = {
     "GET /projects": _projects,
     "GET /repairs/split-subjects": _repairs_split_subjects_get,
     "POST /repairs/split-subjects": _repairs_split_subjects_post,
+    "POST /run/morning-card": _run_morning_card,
+    "POST /run/weekly-card": _run_weekly_card,
     "GET /rules": _rules,
 }
 for _method, _path in _load_door_routes():

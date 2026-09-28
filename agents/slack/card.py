@@ -38,6 +38,11 @@ accepted still joins its proposal.
 CARD_DRY_RUN=1 stops right after post_card and prints the proposals instead of touching
 Slack, handover, or the event log.
 
+During the launchd→hermes handover both schedulers fire the same tool for a while: the
+second runner of one KST morning reads the first card's own events (card_confirmation /
+card_proposal — no new state file) and exits 0 with one line, "already posted today
+(ts=…)", instead of posting a second card.
+
 The socket lives in hermes, not here. Everything decided lives in
 card_types/card_registers/card_advice/card_verdicts/card_view/card_press; everything
 external is a collaborator (card_live, plus this file's own _env_send/make_propose/dry-run
@@ -50,7 +55,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, NamedTuple, TypedDict
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
@@ -65,6 +70,7 @@ import card_registers  # noqa: E402
 import card_types  # noqa: E402
 import card_verdicts  # noqa: E402
 import card_view  # noqa: E402
+import event_log  # noqa: E402
 import slack_post  # noqa: E402
 from langgraph.graph import START, StateGraph  # noqa: E402
 from langgraph.graph.state import CompiledStateGraph  # noqa: E402
@@ -82,6 +88,49 @@ PROJECT_ACTIVE_DAYS = 14
 
 # The review lane's window — what the agent proposed over the last day.
 REVIEW_SINCE_HOURS = 24
+
+_KST = timezone(timedelta(hours=9))
+
+#: The card's own ledger: a posted card leaves card_confirmation (one per card, naming its
+#: card_ts) plus a card_proposal per advice row. The once-a-day guard reads exactly these —
+#: no new state file.
+_CARD_LEDGER_EVENTS = ("card_proposal", "card_confirmation")
+
+
+def _parse_event_ts(raw: Any) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _posted_today_ts(now: datetime | None = None) -> str | None:
+    """The ts of the card already posted today (KST), from the card's own events — or None
+    when this morning is still unposted. launchd and the hermes cron both fire the same tool
+    during the handover; whichever runner goes second sees this and exits 0 instead of
+    posting a second card. A morning with zero proposals and zero approvals in the window
+    leaves neither event by design (a quiet card is still a posted card the guard cannot
+    see — test_no_past_approvals_means_no_line), and an unreadable event log is never a
+    reason to skip a morning: the graph's own reads refuse loudly when the engine is
+    truly down, so a dead read here just means the guard stays blind, silent, and out of
+    the way."""
+    now = now or datetime.now(UTC)
+    today = now.astimezone(_KST).date()
+    newest_at: datetime | None = None
+    newest_ts: str | None = None
+    for name in _CARD_LEDGER_EVENTS:
+        for event in event_log.recent_events(50, event_name=name):
+            at = _parse_event_ts(event.get("ts"))
+            ts = event.get("card_ts")
+            if at is None or not ts or at.astimezone(_KST).date() != today:
+                continue
+            if newest_at is None or at > newest_at:
+                newest_at = at
+                newest_ts = str(ts)
+    return newest_ts
 
 
 class CardState(TypedDict):
@@ -391,6 +440,9 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 "done": len(confirmation.done),
                 "pending": len(confirmation.pending),
                 "session": confirmation.session,
+                # The card's ts, like card_proposal carries — the once-a-day guard reads the
+                # confirmation event too, and needs the ts to name the card it belongs to.
+                "card_ts": card_ts,
             }
             if confirmation.unknown:
                 fields["unknown"] = len(confirmation.unknown)
@@ -547,6 +599,13 @@ def main() -> int:
 
     if os.environ.get("CARD_DRY_RUN"):
         return _run_dry()
+
+    posted = _posted_today_ts()
+    if posted is not None:
+        # launchd and the hermes cron share the handover window; the second runner of the
+        # morning sees the first one's card and stops — one card a day, said in one line.
+        print(f"[card] already posted today (ts={posted})", flush=True)
+        return 0
 
     from slack_sdk.web import WebClient
 

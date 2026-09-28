@@ -225,6 +225,8 @@ def test_wire_hermes_adds_hint_and_weekly():
         (scripts / "weekly-briefing.py").write_text("# stub", encoding="utf-8")
         (scripts / "codex-collect-sessions.py").write_text("# stub", encoding="utf-8")
         (scripts / "ingest-worker.py").write_text("# stub", encoding="utf-8")
+        (scripts / "run-morning-card.py").write_text("# stub", encoding="utf-8")
+        (scripts / "run-weekly-card.py").write_text("# stub", encoding="utf-8")
         card_plugin = scripts / "plugins" / "boring-card"
         card_plugin.mkdir(parents=True)
         (card_plugin / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
@@ -257,6 +259,8 @@ def test_wire_hermes_adds_hint_and_weekly():
         assert Path(imported.stdout.strip()).resolve() == installed_slack_briefing.resolve()
         assert (fake_home / ".hermes" / "scripts" / "weekly-briefing.py").exists()
         assert (fake_home / ".hermes" / "scripts" / "codex-collect-sessions.py").exists()
+        assert (fake_home / ".hermes" / "scripts" / "run-morning-card.py").exists()
+        assert (fake_home / ".hermes" / "scripts" / "run-weekly-card.py").exists()
         assert mock_cron.called is True
 
 
@@ -355,6 +359,8 @@ def test_wire_hermes_missing_slack_briefing_has_no_side_effects():
         (source_dir / "weekly-briefing.py").write_text("# stub\n", encoding="utf-8")
         (source_dir / "codex-collect-sessions.py").write_text("# stub\n", encoding="utf-8")
         (source_dir / "ingest-worker.py").write_text("# stub\n", encoding="utf-8")
+        (source_dir / "run-morning-card.py").write_text("# stub\n", encoding="utf-8")
+        (source_dir / "run-weekly-card.py").write_text("# stub\n", encoding="utf-8")
         card_plugin = source_dir / "plugins" / "boring-card"
         card_plugin.mkdir(parents=True)
         (card_plugin / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
@@ -640,6 +646,83 @@ def test_sync_hermes_cron_jobs_adds_managed_job():
         assert [j["name"] for j in saved["jobs"] if j["name"] == "codex-memory-ingest-worker"] == [], (
             "the host worker already runs the collector every 20m; a hermes job is a second owner"
         )
+
+
+def test_sync_hermes_cron_jobs_a_declared_deliver_sticks_and_repairs_drift():
+    """The card jobs deliver themselves (deliver local in boring.json). A deliver declared in
+    the spec is set at creation and repaired on every sync — a job the config says is local
+    cannot drift back to a wrapped delivery."""
+    with (
+        tempfile.TemporaryDirectory() as d,
+        mock.patch.object(
+            agent_wiring.boring_config,
+            "hermes_cron_jobs",
+            return_value={
+                "morning-card": {
+                    "enabled": True,
+                    "schedule": "0 8 * * *",
+                    "script": "run-morning-card.py",
+                    "deliver": "local",
+                }
+            },
+        ),
+        mock.patch.object(
+            agent_wiring,
+            "_load_json",
+            return_value={
+                "jobs": [
+                    {
+                        "name": "morning-card",
+                        "script": "weekly-briefing.py",
+                        "schedule": {"kind": "cron", "expr": "0 9 * * 1"},
+                        "enabled": True,
+                        "state": "scheduled",
+                        "deliver": "slack:test",
+                    }
+                ]
+            },
+        ),
+        mock.patch.object(agent_wiring, "_save_json") as mock_save,
+    ):
+        jobs_path = Path(d) / "jobs.json"
+        with mock.patch.object(Path, "expanduser", return_value=jobs_path):
+            result = agent_wiring._sync_hermes_cron_jobs()
+        assert result["changed"] is True
+        saved = mock_save.call_args[0][1]
+        job = next(j for j in saved["jobs"] if j["name"] == "morning-card")
+        assert job["deliver"] == "local"
+        assert job["script"] == "run-morning-card.py"
+        assert job["schedule"]["expr"] == "0 8 * * *"
+
+
+def test_sync_hermes_cron_jobs_creates_with_the_declared_deliver():
+    with (
+        tempfile.TemporaryDirectory() as d,
+        mock.patch.object(
+            agent_wiring.boring_config,
+            "hermes_cron_jobs",
+            return_value={
+                "weekly-card": {
+                    "enabled": True,
+                    "schedule": "0 9 * * 1",
+                    "script": "run-weekly-card.py",
+                    "deliver": "local",
+                    "failure_deliver": "slack:D1",
+                }
+            },
+        ),
+        mock.patch.object(agent_wiring, "_load_json", return_value={"jobs": []}),
+        mock.patch.object(agent_wiring, "_save_json") as mock_save,
+    ):
+        jobs_path = Path(d) / "jobs.json"
+        with mock.patch.object(Path, "expanduser", return_value=jobs_path):
+            result = agent_wiring._sync_hermes_cron_jobs()
+        assert result["changed"] is True
+        saved = mock_save.call_args[0][1]
+        job = next(j for j in saved["jobs"] if j["name"] == "weekly-card")
+        assert job["deliver"] == "local"
+        assert job["failure_deliver"] == "slack:D1", "a local job must still send its failures somewhere"
+        assert job["enabled"] is True
 
 
 def test_install_removes_a_hermes_codex_job_left_by_an_older_install():
@@ -1008,4 +1091,6 @@ if __name__ == "__main__":
     test_ingest_worker_skips_session_inside_stability_window()
     test_sync_hermes_cron_jobs_repairs_blocked_absolute_worker_path()
     test_install_removes_a_hermes_codex_job_left_by_an_older_install()
+    test_sync_hermes_cron_jobs_a_declared_deliver_sticks_and_repairs_drift()
+    test_sync_hermes_cron_jobs_creates_with_the_declared_deliver()
     print("ok - agent_wiring failure propagation + hermes wiring + settings_path")

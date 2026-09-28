@@ -18,7 +18,7 @@ README 는 **설치하고 쓰는 법**이다. 이 파일은 **이미 돌고 있�
 | 서비스 | 하는 일 | 죽으면 |
 |---|---|---|
 | `boring-drudge` | 엔진. 임베드·저장·그래프·`/search`·MCP | 회수와 쓰기 둘 다 멈춘다. 훅은 조용히 no-op |
-| `boring-door` | 문. 엔진 앞 프록시(:7710) — 엔진 경로를 대신 전달하고 `/approved`·`/claim-source`·`/claim-sources`·`/projects?active_days=`·`/repairs/split-subjects` 는 스스로 답한다 | 아침 카드가 `schedule-card.sh run` 에서 exit 2 로 거부되고, Claude Code SessionStart 훅이 넣는 「오늘 승인한 것」 절이 빠진다. 엔진 자체는 뒤의 `:7700` 에 살아 있다 |
+| `boring-door` | 문. 엔진 앞 프록시(:7710) — 엔진 경로를 대신 전달하고 `/approved`·`/claim-source`·`/claim-sources`·`/projects?active_days=`·`/repairs/split-subjects` 는 스스로 답한다. 그리고 카드 둘을 직접 돌린다(`POST /run/morning-card`·`/run/weekly-card` — 같은 이미지 안의 카드 프로그램을 서브프로세스로) | 아침 카드가 `schedule-card.sh run` 과 hermes 크론 둘 다 실패하고(문의 run 라우트가 안 뜨면), Claude Code SessionStart 훅이 넣는 「오늘 승인한 것」 절이 빠진다. 엔진 자체는 뒤의 `:7700` 에 살아 있다 |
 | `boring-postgres` | pgvector 저장소 | 엔진이 못 뜬다 |
 | `boring-agent` | hermes — 크론 잡의 실행기 | 브리핑·수집 워커가 전부 안 돈다 |
 
@@ -34,8 +34,8 @@ make agent-logs    # hermes 로그 (MCP 연결 진단)
 | `com.ohmyboring.codex-ingest` | 20분 | Codex 세션 하나를 집어 증류·저장 |
 | `com.ohmyboring.maintenance` | 매일 | `scripts/schedule-maintenance.sh run` — data-steward + retention |
 | `com.ohmyboring.night-drain` | 03:20 | 밀린 Codex·Claude 세션을 한 번에 최대 40개 |
-| `com.ohmyboring.morning-card` | 매일 08:00 | `scripts/schedule-card.sh run` — 아침 카드. 문(:7710)이 살아 있어야 돌고, 로그는 `/tmp/com.ohmyboring.morning-card.log` |
-| `com.ohmyboring.weekly-card` | 월 09:00 | `scripts/schedule-card.sh run weekly` — 주간 브리핑 카드. 볼트의 매일 브리핑을 먼저 읽어서 문이 필요 없고, 로그는 `/tmp/com.ohmyboring.weekly-card.log` |
+| `com.ohmyboring.morning-card` | 매일 08:00 | `scripts/schedule-card.sh run` — 아침 카드. 문(:7710)이 살아 있어야 돌고, 로그는 `/tmp/com.ohmyboring.morning-card.log`. 이주 중 잡 — hermes 크론 `morning-card`((다) 아래)가 같은 도구를 문의 `/run/morning-card` 로 돌리고, 도구 안 지킴이가 하루 두 번 올라가는 것을 막는다 |
+| `com.ohmyboring.weekly-card` | 월 09:00 | `scripts/schedule-card.sh run weekly` — 주간 브리핑 카드. 볼트의 매일 브리핑을 먼저 읽어서 문이 필요 없고, 로그는 `/tmp/com.ohmyboring.weekly-card.log`. 이주 중 잡 — hermes 크론 `weekly-card` 가 같은 도구를 문에 시킨다 |
 
 ```bash
 launchctl list | grep ohmyboring     # 세 번째 칸이 라벨, 두 번째가 마지막 종료 코드
@@ -48,8 +48,10 @@ make maintenance                     # 지금 한 번 돌린다
 | 잡 | 주기 | 스크립트 |
 |---|---|---|
 | `memory-ingest-worker` | 20분 | `ingest-worker.py` — Claude 세션 하나를 증류 |
-| `morning-briefing` | — | 지금 운영 상태로 꺼져 있다(`~/.hermes/cron/jobs.json` 의 `enabled: false`) — 아침 카드가 그 자리를 하고 08:00 은 launchd `com.ohmyboring.morning-card` 가 받는다 |
-| `weekly-briefing` | — | 이제 여기서 안 돈다 — 주간 브리핑 카드는 launchd `com.ohmyboring.weekly-card`((나) 위)가 올린다. hermes 크론 래퍼(「Cronjob Response」 머리말과 마크다운 재변환)를 빼려고 자리를 옮겼다 |
+| `morning-card` | 매일 08:00 | `run-morning-card.py` — 문의 `POST /run/morning-card` 에 부탁해 아침 카드 프로그램을 돌린다. deliver `local`(카드가 스스로 슬랙에 올리니 hermes 가 배달할 것 없음) |
+| `weekly-card` | 월 09:00 | `run-weekly-card.py` — 문의 `POST /run/weekly-card` 에 부탁해 주간 카드 프로그램을 돌린다. deliver `local` |
+| `morning-briefing` | — | 지금 운영 상태로 꺼져 있다(`~/.hermes/cron/jobs.json` 의 `enabled: false`) — 아침 카드가 그 자리를 한다 |
+| `weekly-briefing` | — | 여전히 멈춰 있다(#425) — 주간은 이제 `weekly-card` 가 문에 시켜 올린다. 예전 hermes 크론 래퍼(「Cronjob Response」 머리말과 마크다운 재변환)는 쓰지 않는다 |
 
 **codex 수집기는 여기 없다.** 호스트 스케줄러가 정본이고, 설치기가 hermes 쪽 사본을 지운다(#370).
 둘 다 켜져 있으면 진 쪽이 LLM 호출을 쓰고 빈손으로 끝난다.
@@ -99,8 +101,8 @@ sh scripts/doctor.sh          # ✗ 가 0개인지
 | 크론 잡이 안 돈다 | `ls -t ~/.hermes/cron/output/<job-id>/ \| head -1` | **최신 파일의 시각**. 개수는 50에서 회전하므로 신호가 아니다 |
 | 그 파일이 0바이트다 | `curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker'` | **유휴인지 고장인지는 여기서 갈린다** (§4) |
 | 브리핑이 안 온다 | `make agent-logs` | hermes 가 스크립트를 찾았는지, 경로가 막혔는지 |
-| 카드가 안 왔다 | `./scripts/schedule-card.sh status` | 등록이 됐는지, 마지막 로그 줄 (`/tmp/com.ohmyboring.morning-card.log`) |
-| 주간 카드가 안 왔다 | `./scripts/schedule-card.sh status weekly` | 등록이 됐는지, 마지막 로그 줄 (`/tmp/com.ohmyboring.weekly-card.log`) |
+| 카드가 안 왔다 | `./scripts/schedule-card.sh status` 와 `ls -t ~/.hermes/cron/output/<job-id>/ \| head -1` | launchd 등록·마지막 로그 줄 (`/tmp/com.ohmyboring.morning-card.log`) — 그리고 hermes 크론 `morning-card` 의 최신 출력. 둘 중 하나만 성공해도 되고(도구 안 지킴이가 하루 둘째를 0 으로 멈춤) 둘 다 실패면 문 `POST /run/morning-card` 의 응답을 본다 |
+| 주간 카드가 안 왔다 | `./scripts/schedule-card.sh status weekly` 와 hermes 크론 `weekly-card` 의 최신 출력 | 위와 같다 (`/tmp/com.ohmyboring.weekly-card.log`) |
 | 무엇이 정체돼 있나 | `make doctor` | `readiness_issue` 줄 |
 | 판정 창 상태 | `make peek` | 표본·바닥·판정 (localhost 전용) |
 | 엄격 점검 | `make readiness` | doctor 결함 하나라도 있으면 실패 |

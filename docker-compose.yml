@@ -82,10 +82,12 @@ services:
     ports:
       - "127.0.0.1:7700:7700"             # for host debugging / direct curl
 
-  # ─────────────────────────── The door (read-only proxy) ───────────────────────
+  # ─────────────────────────── The door (read-only proxy + card runner) ───────
   # Same FastAPI app as `make door`, packaged to stand next to the engine: the image
-  # (agents/door/Dockerfile, uid 10001, no mounts) reads the engine by compose service
+  # (agents/door/Dockerfile, uid 10001, no code mounts) reads the engine by compose service
   # name. /health relays the engine's, so the door goes unhealthy with the engine.
+  # The door also RUNS the two card programs (POST /run/morning-card · /run/weekly-card —
+  # the tools launchd used to fire): same image, same requirements.txt, with the env below.
   boring-door:
     build:
       context: .
@@ -99,6 +101,23 @@ services:
       DOOR_UPSTREAM: http://boring-drudge:7700
       DOOR_PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring
       BORING_OWNER_TOKEN: ${BORING_OWNER_TOKEN:-}
+      # The card programs post with the bot token and need the target channel; both arrive
+      # from .env like they do for the secretary. SECRETARY_OWNER_ID rides along for the
+      # same card surface (the button plugin refuses presses without it).
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_CARD_CHANNEL: ${SLACK_CARD_CHANNEL:-}
+      SECRETARY_OWNER_ID: ${SECRETARY_OWNER_ID:-}
+      # The tools call back into the door itself (127.0.0.1:7710) for /claim-source·/approved·
+      # /repairs and reach the engine by service name; the ollama client honors OLLAMA_HOST.
+      BORING_DOOR_URL: http://127.0.0.1:7710
+      BORING_URL: http://boring-drudge:7700
+      OLLAMA_HOST: http://host.docker.internal:11434
+      BORING_VAULT_DIR: /vault
+    volumes:
+      - ./vault:/vault:ro                # the card's advise node verifies quotes against note text
+      - ./boring.json:/app/boring.json:ro # policy (note_lang) for the card programs' boring_config
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Mac/Linux: reach host Ollama (gemma4)
     ports:
       - "127.0.0.1:7710:7710"
     healthcheck:
@@ -127,6 +146,9 @@ services:
       # Legacy alias: some hermes-agent cron scripts (e.g. ~/.hermes/scripts/briefing.py)
       # still read DRUDGE_URL. Keep both names populated so existing scripts keep working.
       DRUDGE_URL: http://boring-drudge:7700
+      # The card cron jobs' trigger scripts reach the door by service name (omb_env.door_url
+      # reads this; the localhost default is wrong inside the container).
+      BORING_DOOR_URL: http://boring-door:7710
       # Tell host-side adapters they are running inside the hermes container and where the repo is.
       BORING_IN_CONTAINER: "1"
       BORING_HOME: /host/oh-my-boring

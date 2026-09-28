@@ -5,8 +5,17 @@
 !agents
 !agents/door
 !agents/door/**
+!agents/slack
+!agents/slack/**
+!agents/shared
+!agents/shared/**
+!agents/memory
+!agents/memory/**
+!agents/hermes
+!agents/hermes/**
 !data
 !data/contract
 !data/contract/**
+!requirements.txt
 agents/door/Dockerfile
 **/__pycache__
