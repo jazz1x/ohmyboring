@@ -71,6 +71,13 @@ exit 0
 EOF
 chmod +x "$tmp/bin/launchctl"
 
+# Stub uname: install/uninstall refuse anything but Darwin, and CI runs on Linux.
+cat > "$tmp/bin/uname" <<'EOF'
+#!/bin/sh
+echo Darwin
+EOF
+chmod +x "$tmp/bin/uname"
+
 pass() { echo "ok - $1"; }
 fail() { echo "FAIL: $1"; fails=$((fails + 1)); }
 
