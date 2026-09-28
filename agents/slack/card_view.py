@@ -5,21 +5,26 @@ build_blocks is the only entry point: proposals in (grouped by project), a Block
 out, judged rows showing their mark instead of buttons. Every display string comes from
 card_i18n.STRINGS/REGISTER_LABELS, keyed by the language the caller passes — no literal
 display text lives in this file's own code. One proposal is five blocks: divider, a
-register-tag context line, a section (advice + bottleneck), a top-level rich_text quote
-(Slack's context blocks cannot carry rich text), and an actions row or — once judged — a
-context line with the verdict mark. No `/vault/wiki/...` path appears anywhere in the
-output; only the short `wiki-NNNN` form does. Slack caps one message at 50 blocks: past
-that, this stops adding proposal rows and reports how many were left out in a final context
-line instead of silently dropping them.
+register-tag context line (glyph · register · project · `wiki-NNNN` · k/N — the project
+name rides in the tag, and the unassigned bucket shows no project segment), a section
+(advice + bottleneck), a top-level rich_text quote (Slack's context blocks cannot carry
+rich text), and an actions row or — once judged — a context line with the verdict mark.
+There are no per-project headings: grouping shows a project's rows together, never a
+same-size title above them. No `/vault/wiki/...` path appears anywhere in the output; only
+the short `wiki-NNNN` form does. Slack caps one message at 50 blocks: past that, this
+stops adding proposal rows and reports how many were left out in a final context line
+instead of silently dropping them.
 
 When the caller passes repair data (`repairs`/`repairs_total_groups`/`merged_yesterday_rows`
 — all optional, and off by default so every existing single-lane caller renders exactly as
 before), the card grows a second lane above the advice one: a head-line context block
-("remaining groups n · merged yesterday m"), then, if `repairs` itself is non-empty, a
-「오늘 할 일」 section label and one four-block row per repair group (divider, tag, section,
-actions-or-mark), then a 「짚어 둔 것」 section label before the existing advice rows. A
-repair row's button idx shares one space with the advice rows — repairs first, 0..k-1 — so
-a button press can tell the two lanes apart by idx alone."""
+("remaining groups n · merged yesterday m"), then, if `repairs` itself is non-empty, an
+「오늘 할 일」 header and one four-block row per repair group (divider, tag, section,
+actions-or-mark), then a 「짚어 둔 것」 header before the existing advice rows. Every lane
+titles itself with the same Slack `header` block — the single prominent title shape — so
+no lane title floats as a section among its own rows. A repair row's button idx shares one
+space with the advice rows — repairs first, 0..k-1 — so a button press can tell the two
+lanes apart by idx alone."""
 
 from __future__ import annotations
 
@@ -128,7 +133,11 @@ def _tag_block(idx: int, total: int, proposal: Proposal, register_labels: dict[s
     icon = REGISTER_ICONS[proposal.register_]
     label = register_labels[proposal.register_]
     note = note_label(proposal.note)
-    text = f"{icon}  *{label}*  ·  `{note}`  ·  {idx + 1}/{total}"
+    parts = [f"{icon} *{label}*"]
+    if proposal.project:
+        parts.append(proposal.project)
+    parts.extend([f"`{note}`", f"{idx + 1}/{total}"])
+    text = " · ".join(parts)
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
 
@@ -197,10 +206,12 @@ def _confirmation_block(confirmation: Confirmation, strings: dict[str, str]) -> 
 REPAIR_ICON = "🧩"
 
 
-def _section_header_block(label: str) -> dict:
-    """A lane label — the same "section with a leading full-width space" shape _project_groups
-    already uses for a project's own label, reused here for the two lane headers."""
-    return {"type": "section", "text": {"type": "mrkdwn", "text": f"　\n*{label}*"}}
+def _lane_header_block(label: str) -> dict:
+    """A lane title — Slack's `header` block, the one prominent title shape Block Kit has.
+    Every lane (오늘 할 일 / 짚어 둔 것 / 에이전트가 가른 것) titles itself with it, so a
+    lane title never stands as a same-size section among its own rows (the v1 look the
+    owner read as a label floating alone)."""
+    return {"type": "header", "text": {"type": "plain_text", "text": label, "emoji": True}}
 
 
 def _repairs_headline_block(
@@ -264,18 +275,15 @@ def _owner_held_suffix(held: list[str], strings: dict[str, str]) -> str:
 
 
 def _repair_tag_block(idx: int, total: int, repair: Repair, strings: dict[str, str]) -> dict:
-    text = f"{REPAIR_ICON}  *{strings['repair_tag_label']}*  ·  `{repair.subject}`  ·  {idx + 1}/{total}"
+    text = f"{REPAIR_ICON} *{strings['repair_tag_label']}* · `{repair.subject}` · {idx + 1}/{total}"
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
 
 def _repair_section_block(repair: Repair, strings: dict[str, str]) -> dict:
     body = strings["repair_body"].format(
-        variant=repair.variants[0], rows=f"{repair.rows:,}", notes=repair.notes
+        variant=repair.variants[0], rows=f"{repair.rows:,}", notes=repair.notes, subject=repair.subject
     )
-    return {
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": f"*{strings['repair_section_title']}*\n{body}"},
-    }
+    return {"type": "section", "text": {"type": "mrkdwn", "text": body}}
 
 
 def _repair_row(
@@ -391,10 +399,11 @@ def mark_pressed(
 
 
 def _project_groups(proposals: list[Proposal]) -> list[tuple[str, list[int]]]:
-    """proposals grouped by `.project`, each project's rows kept together under one label —
+    """proposals grouped by `.project`, each project's rows kept together in display order —
     in first-seen order, so a priority (아직) pick from project B ahead of project A's own
-    picks still puts B's label first. Indices are into the original `proposals` list; the
-    button `action_id`s (and so a press's lane lookup by idx) must reference that list, never
+    picks still puts B's rows first. The project name rides in each row's tag line, never in
+    a heading of its own. Indices are into the original `proposals` list; the button
+    `action_id`s (and so a press's lane lookup by idx) must reference that list, never
     a position inside the display grouping."""
     order: list[str] = []
     groups: dict[str, list[int]] = {}
@@ -419,26 +428,27 @@ def build_blocks(
     lang: str,
 ) -> list[dict]:
     """Block Kit for the card: the head line (past approvals cross-checked against today's
-    registers — present only when there were any), then a project label and one five-block
-    row per proposal, proposals grouped under their project's own label (the unassigned
-    bucket's name comes from card_i18n too). A judged row shows its mark instead of its
-    buttons — the card is edited in place as verdicts arrive. Slack's 50-block cap on one
-    message means a large enough proposal list cannot all be shown; rather than drop rows
-    silently, this stops adding rows once the next one would not fit and says how many were
-    left out in a final context line (AC8).
+    registers — present only when there were any), then one five-block row per proposal,
+    proposals grouped by project in first-seen order with the project name in each row's
+    tag (the unassigned bucket shows no project segment, and no per-project heading exists).
+    A judged row shows its mark instead of its buttons — the card is edited in place as
+    verdicts arrive. Slack's 50-block cap on one message means a large enough proposal list
+    cannot all be shown; rather than drop rows silently, this stops adding rows once the
+    next one would not fit and says how many were left out in a final context line (AC8).
 
     A repair lane sits above the advice one when the caller has repair data to show
     (`repairs_total_groups > 0`, or `repairs` itself non-empty, or a merge happened
     yesterday) — every existing single-lane caller leaves these at their defaults and
     renders exactly as before. When shown: a head-line context block, then, only if
-    `repairs` itself is non-empty, a 「오늘 할 일」 label and one four-block row per repair,
-    then a 「짚어 둔 것」 label before the advice rows. Repair rows occupy button idx
+    `repairs` itself is non-empty, an 「오늘 할 일」 header and one four-block row per repair,
+    then a 「짚어 둔 것」 header before the advice rows. Repair rows occupy button idx
     0..len(repairs)-1; advice rows continue from there — one shared space, repairs first.
     A review lane sits below the advice lane when `reviews` is non-empty — the agent's own
     session-end classifications, one three-block row each, agree/flip buttons occupying the
-    idx slots after the advice rows. It shares the 50-block cap: the advice lane reserves
-    the review lane's tail, and review rows that still do not fit are reported in an
-    overflow line, not dropped. Empty `reviews` leaves the card exactly as it was —
+    idx slots after the advice rows, under the same 「에이전트가 가른 것」 header shape. It
+    shares the 50-block cap: the advice lane reserves the review lane's tail, and review
+    rows that still do not fit are reported in an overflow line, not dropped. Empty
+    `reviews` leaves the card exactly as it was —
     a zero-proposal morning must not change the card's shape."""
     strings = card_i18n.STRINGS[lang]
     register_labels = card_i18n.REGISTER_LABELS[lang]
@@ -460,12 +470,12 @@ def build_blocks(
 
     if show_lanes:
         if repairs:
-            blocks.append(_section_header_block(strings["todo_header"]))
+            blocks.append(_lane_header_block(strings["todo_header"]))
             for ridx, repair in enumerate(repairs):
                 blocks.extend(
                     _repair_row(ridx, n_repairs, repair, by_idx.get(ridx), repair_results.get(ridx), strings)
                 )
-        blocks.append(_section_header_block(strings["advice_header"]))
+        blocks.append(_lane_header_block(strings["advice_header"]))
 
     shown = 0
     overflowed = False
@@ -476,10 +486,7 @@ def build_blocks(
     # silently. A card that filled all 50 blocks with advice rows used to push the
     # review header past the cap.
     review_tail = (1 + 3 * len(reviews)) if reviews else 0
-    for project, indices in _project_groups(proposals):
-        label = project if project else strings["unassigned_project"]
-        label_block = {"type": "section", "text": {"type": "mrkdwn", "text": f"　\n*{label}*"}}
-        label_pending = True
+    for _project, indices in _project_groups(proposals):
         for idx in indices:
             proposal = proposals[idx]
             row = _proposal_row(
@@ -491,14 +498,13 @@ def build_blocks(
                 register_labels,
                 action_idx=n_repairs + idx,
             )
-            addition = ([label_block] if label_pending else []) + row
+            addition = row
             remaining_after = total - shown - 1
             reserve = (1 if remaining_after > 0 else 0) + review_tail
             if len(blocks) + len(addition) + reserve > BLOCK_LIMIT:
                 overflowed = True
                 break
             blocks.extend(addition)
-            label_pending = False
             shown += 1
         if overflowed:
             break
@@ -516,7 +522,7 @@ def build_blocks(
         # the review lane sits below the advice one — the agent's own session-end calls,
         # which the owner may agree with or flip. No reviews, no header: a lane the agent
         # never filled must not render as an empty promise.
-        blocks.append(_section_header_block(strings["review_header"]))
+        blocks.append(_lane_header_block(strings["review_header"]))
         n_slots = n_repairs + total
         r_shown = 0
         r_overflowed = False

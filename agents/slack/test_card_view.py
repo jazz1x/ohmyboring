@@ -119,7 +119,7 @@ class ProjectGroupingBlocksTests(unittest.TestCase):
             evidence=[cc.Evidence(note=note, quote="근거 인용문 열두자 이상입니다", line=1)],
         )
 
-    def test_two_projects_and_unassigned_get_three_fixed_order_headers(self):
+    def test_two_projects_and_unassigned_group_in_first_seen_order_without_headings(self):
         proposals = [
             self._proposal("s1", "proj-a", "/vault/wiki/wiki-0001.md"),
             self._proposal("s2", "", "/vault/wiki/wiki-0002.md"),
@@ -128,22 +128,86 @@ class ProjectGroupingBlocksTests(unittest.TestCase):
         ]
         blocks = cv.build_blocks(proposals, lang="ko")
         self.assertEqual(blocks[0]["text"]["text"], "☀️ 오늘 제안 4")
-        # v2: the project's own label is a section block ("　\n*label*"), not a header — only
-        # the card's title uses "header". One per project in first-seen order.
-        labels = [
-            b["text"]["text"]
+        # v2: no per-project headings at all — grouping shows a project's rows together in
+        # first-seen order (proj-a's second row, original idx 3, displays second with its
+        # own 4/4 — k/N is the original list index, not the display position), and the
+        # project name rides in each row's tag line instead.
+        self.assertEqual(
+            [
+                b["text"]["text"]
+                for b in blocks
+                if b["type"] == "section" and b["text"]["text"].startswith("　\n")
+            ],
+            [],
+        )
+        tags = [
+            b["elements"][0]["text"]
             for b in blocks
-            if b["type"] == "section" and b["text"]["text"].startswith("　\n")
+            if b["type"] == "context" and "`wiki-000" in b["elements"][0]["text"]
         ]
-        self.assertEqual(labels, ["　\n*proj-a*", "　\n*프로젝트 없음*", "　\n*proj-b*"])
+        self.assertEqual(
+            tags,
+            [
+                "🧊 *정체* · proj-a · `wiki-0001` · 1/4",
+                "🧊 *정체* · proj-a · `wiki-0004` · 4/4",
+                "🧊 *정체* · `wiki-0002` · 2/4",
+                "🧊 *정체* · proj-b · `wiki-0003` · 3/4",
+            ],
+        )
         action_rows = [b for b in blocks if b["type"] == "actions"]
         self.assertEqual(len(action_rows), 4)
 
-    def test_english_lang_uses_the_unassigned_label_and_button_words(self):
+    def test_advice_lane_has_one_heading_and_each_tag_carries_its_project(self):
+        # 낱말 고침(2026-09-28): 칸 제목(짚어 둔 것)이 유일한 머릿말 — 프로젝트별 작은
+        # 제목은 없고 프로젝트 이름은 각 제안 꼬리표가 실는다. 무소속("") 버킷은 꼬리표에
+        # 프로젝트 구간 자체가 없다(「프로젝트 없음」 표기도 사라졌다).
+        proposals = [
+            self._proposal("s1", "proj-a", "/vault/wiki/wiki-0001.md"),
+            self._proposal("s2", "", "/vault/wiki/wiki-0002.md"),
+            self._proposal("s3", "proj-b", "/vault/wiki/wiki-0003.md"),
+        ]
+        repair = cc.Repair(
+            subject="foodspring-front",
+            variants=["foodspring front", "foodspring-front"],
+            rows=3218,
+            notes=212,
+        )
+        blocks = cv.build_blocks(proposals, repairs=[repair], repairs_total_groups=1, lang="ko")
+        headers = [b["text"]["text"] for b in blocks if b["type"] == "header"]
+        self.assertEqual(headers, ["☀️ 오늘 제안 3", "오늘 할 일", "짚어 둔 것"])
+        # the advice lane's only heading: everything after the repair lane's header is the
+        # advice lane, and it carries exactly one heading block — its own title
+        advice_header_idx = next(
+            i for i, b in enumerate(blocks) if b["type"] == "header" and b["text"]["text"] == "짚어 둔 것"
+        )
+        advice_headers = [b for b in blocks[advice_header_idx:] if b["type"] == "header"]
+        self.assertEqual([b["text"]["text"] for b in advice_headers], ["짚어 둔 것"])
+        # no section in the whole card pretends to be a lane or project heading
+        self.assertEqual(
+            [b for b in blocks if b["type"] == "section" and b["text"]["text"].startswith("　\n")],
+            [],
+        )
+        self.assertNotIn("프로젝트 없음", _blocks_text(blocks))
+        tags = [
+            b["elements"][0]["text"]
+            for b in blocks
+            if b["type"] == "context" and "`wiki-000" in b["elements"][0]["text"]
+        ]
+        self.assertEqual(
+            tags,
+            [
+                "🧊 *정체* · proj-a · `wiki-0001` · 1/3",
+                "🧊 *정체* · `wiki-0002` · 2/3",
+                "🧊 *정체* · proj-b · `wiki-0003` · 3/3",
+            ],
+        )
+
+    def test_english_lang_buttons_and_unassigned_tag_has_no_project(self):
         proposals = [self._proposal("s1", "", "/vault/wiki/wiki-0001.md")]
         blocks = cv.build_blocks(proposals, lang="en")
         self.assertEqual(blocks[0]["text"]["text"], "☀️ Today's picks 1")
-        self.assertIn("No project", _blocks_text(blocks))
+        tag = next(b for b in blocks if b["type"] == "context" and "wiki-0001" in _blocks_text([b]))
+        self.assertEqual(tag["elements"][0]["text"], "🧊 *Stalled* · `wiki-0001` · 1/1")
         action_row = next(b for b in blocks if b["type"] == "actions")
         labels = [el["text"]["text"] for el in action_row["elements"]]
         self.assertEqual(labels, ["Adopt", "Hold", "Reject"])
@@ -203,7 +267,7 @@ class CardV2ShapeTests(unittest.TestCase):
     def test_row_order_is_divider_context_section_richtext_actions(self):
         # AC3: a mutant moving the register tag after the buttons must kill this.
         blocks = cv.build_blocks([self._proposal()], lang="ko")
-        row = blocks[2:7]  # [0]=header, [1]=project label, then the one row
+        row = blocks[1:6]  # [0]=header, then the one row
         self.assertEqual([b["type"] for b in row], ["divider", "context", "section", "rich_text", "actions"])
 
     def test_quote_block_is_a_top_level_rich_text_with_two_evidence_joined(self):
@@ -310,16 +374,23 @@ class CardV2ShapeTests(unittest.TestCase):
         )
         proposal = self._proposal()
         blocks = cv.build_blocks([proposal], repairs=[repair], repairs_total_groups=1, lang="ko")
-        section_labels = [
-            b["text"]["text"]
-            for b in blocks
-            if b["type"] == "section" and b["text"]["text"].startswith("　\n")
-        ]
-        self.assertEqual(section_labels[:2], ["　\n*오늘 할 일*", "　\n*짚어 둔 것*"])
-        sections = [b for b in blocks if b["type"] == "section"]
-        todo_idx = blocks.index(next(b for b in sections if b["text"]["text"] == "　\n*오늘 할 일*"))
-        advice_idx = blocks.index(next(b for b in sections if b["text"]["text"] == "　\n*짚어 둔 것*"))
+        # every lane titles itself with Slack's header block — the card title, then the two
+        # lane headers in order; no lane title is a same-size section among its rows
+        headers = [b["text"]["text"] for b in blocks if b["type"] == "header"]
+        self.assertEqual(headers[:3], ["☀️ 오늘 제안 1", "오늘 할 일", "짚어 둔 것"])
+        header_blocks = [b for b in blocks if b["type"] == "header"]
+        todo_idx = blocks.index(next(b for b in header_blocks if b["text"]["text"] == "오늘 할 일"))
+        advice_idx = blocks.index(next(b for b in header_blocks if b["text"]["text"] == "짚어 둔 것"))
         self.assertLess(todo_idx, advice_idx)
+        # the repair row's new wording: tag line carries the label·subject·k/N, the section
+        # is the plain before→after sentence (no separate bold title)
+        repair_tag = next(b for b in blocks if b["type"] == "context" and "🧩" in _blocks_text([b]))
+        self.assertEqual(repair_tag["elements"][0]["text"], "🧩 *이름 맞추기* · `foodspring-front` · 1/1")
+        repair_section = next(b for b in blocks if b["type"] == "section" and "3,218" in _blocks_text([b]))
+        self.assertEqual(
+            repair_section["text"]["text"],
+            "`foodspring front` 로 적힌 3,218행(노트 212)을\nfoodspring-front 로 바꿉니다",
+        )
         repair_action_row = next(b for b in blocks if b["type"] == "actions")
         self.assertEqual(
             {el["action_id"] for el in repair_action_row["elements"]},
@@ -403,12 +474,8 @@ class CardV2ShapeTests(unittest.TestCase):
         blocks_empty = cv.build_blocks(
             [proposal], repairs=[], repairs_total_groups=0, merged_yesterday_rows=7, lang="ko"
         )
-        labels_empty = [
-            b["text"]["text"]
-            for b in blocks_empty
-            if b["type"] == "section" and b["text"]["text"].startswith("　\n")
-        ]
-        self.assertEqual(labels_empty[:1], ["　\n*짚어 둔 것*"])
+        headers_empty = [b["text"]["text"] for b in blocks_empty if b["type"] == "header"]
+        self.assertEqual(headers_empty, ["☀️ 오늘 제안 1", "짚어 둔 것"])
 
         # the default (no repairs args at all) renders exactly as the pre-existing single lane
         plain = cv.build_blocks([proposal], lang="ko")
@@ -424,15 +491,11 @@ class CardV2ShapeTests(unittest.TestCase):
             cc.ProposedVerdict(session_id="s2", note="/vault/wiki/wiki-0701.md", kind="used", at="t-2"),
         ]
         blocks = cv.build_blocks([proposal], reviews=reviews, lang="ko")
-        section_labels = [
-            b["text"]["text"]
-            for b in blocks
-            if b["type"] == "section" and b["text"]["text"].startswith("　\n")
-        ]
-        self.assertEqual(section_labels[-1], "　\n*에이전트가 가른 것*")
+        lane_headers = [b["text"]["text"] for b in blocks if b["type"] == "header"]
+        self.assertEqual(lane_headers, ["☀️ 오늘 제안 1", "에이전트가 가른 것"])
         advice_row = next(b for b in blocks if b["type"] == "actions")
         review_header = next(
-            b for b in blocks if b["type"] == "section" and "에이전트가 가른 것" in b["text"]["text"]
+            b for b in blocks if b["type"] == "header" and b["text"]["text"] == "에이전트가 가른 것"
         )
         self.assertGreater(blocks.index(review_header), blocks.index(advice_row))
         action_rows = [b for b in blocks if b["type"] == "actions"]
@@ -547,7 +610,7 @@ class CardV2ShapeTests(unittest.TestCase):
             for i in range(3)
         ]
         blocks = cv.build_blocks(proposals, reviews=reviews, lang="ko")
-        self.assertEqual(len(blocks), 48)
+        self.assertEqual(len(blocks), 47)
         self.assertLessEqual(len(blocks), cv.BLOCK_LIMIT)
         advice_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 3]
         review_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 2]

@@ -2,8 +2,8 @@
 """The morning card's one display-string table -- en/ko/ja, nothing else.
 
 Every string the card puts in front of the owner (title, buttons, verdict marks, the
-past-approval head line, the unassigned-project bucket name, the register tag's localized
-name, the block-limit overflow line) lives here, keyed by the language
+past-approval head line, the lane headers, the register tag's localized name, the
+block-limit overflow line) lives here, keyed by the language
 `card_advice.resolve_lang(boring_config.note_lang())` picks. card_view.py and card.py never
 spell out a display string themselves -- a Korean literal in either file's display path is
 the bug this file exists to remove. Register *icons* are not translatable text and stay out
@@ -29,15 +29,13 @@ STRINGS: dict[Lang, dict[str, str]] = {
         "verdict_drop": "✕ Reject",
         "confirmation_line": "Past approvals {total} · Done {done} · Pending {pending}",
         "confirmation_unknown": " · Unknown {unknown}",
-        "unassigned_project": "No project",
         "overflow_line": "+{n} more not shown (50-block limit)",
         "todo_header": "To-do today",
         "advice_header": "Flagged for you",
         "repairs_headline": "Remaining groups {remaining}",
         "repairs_headline_with_merged": "Remaining groups {remaining} · merged yesterday {merged} rows",
-        "repair_tag_label": "Merge",
-        "repair_section_title": "Two spellings, one subject",
-        "repair_body": "`{variant}` {rows} rows · {notes} notes",
+        "repair_tag_label": "Align names",
+        "repair_body": "Rows spelled `{variant}` — {rows} rows ({notes} notes) — become {subject}",
         "repair_button_do": "Merge",
         "repair_button_defer": "Hold",
         "repair_button_drop": "Reject",
@@ -64,15 +62,13 @@ STRINGS: dict[Lang, dict[str, str]] = {
         "verdict_drop": "✕ 거절",
         "confirmation_line": "지난 승인 {total} · 했다 {done} · 아직 {pending}",
         "confirmation_unknown": " · 확인불가 {unknown}",
-        "unassigned_project": "프로젝트 없음",
         "overflow_line": "+{n}건 더 있음 (블록 50개 상한)",
         "todo_header": "오늘 할 일",
         "advice_header": "짚어 둔 것",
         "repairs_headline": "남은 묶음 {remaining}",
         "repairs_headline_with_merged": "남은 묶음 {remaining} · 어제 합친 행 {merged}",
-        "repair_tag_label": "합치기",
-        "repair_section_title": "주어 두 표기를 하나로",
-        "repair_body": "`{variant}` {rows}행 · 노트 {notes}",
+        "repair_tag_label": "이름 맞추기",
+        "repair_body": "`{variant}` 로 적힌 {rows}행(노트 {notes})을\n{subject} 로 바꿉니다",
         "repair_button_do": "실행",
         "repair_button_defer": "보류",
         "repair_button_drop": "거절",
@@ -99,15 +95,13 @@ STRINGS: dict[Lang, dict[str, str]] = {
         "verdict_drop": "✕ 却下",
         "confirmation_line": "過去の承認 {total} · 完了 {done} · 保留 {pending}",
         "confirmation_unknown": " · 不明 {unknown}",
-        "unassigned_project": "プロジェクトなし",
         "overflow_line": "他{n}件（50ブロック上限）",
         "todo_header": "今日やること",
         "advice_header": "気になった点",
         "repairs_headline": "残りグループ{remaining}",
         "repairs_headline_with_merged": "残りグループ{remaining} · 昨日統合{merged}行",
-        "repair_tag_label": "統合",
-        "repair_section_title": "二つの表記を一つに",
-        "repair_body": "`{variant}` {rows}行 · ノート{notes}件",
+        "repair_tag_label": "表記を揃える",
+        "repair_body": "`{variant}` と書かれた{rows}行（ノート{notes}件）を\n{subject} に統合します",
         "repair_button_do": "統合",
         "repair_button_defer": "保留",
         "repair_button_drop": "却下",
