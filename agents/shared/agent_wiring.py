@@ -768,13 +768,13 @@ def _install_hermes_skills(boring_home: str | None = None) -> None:
                 shutil.copy2(src_file, dst / src_file.name)
 
 
-#: The card-button plugin hermes loads — the checkout is the source of truth; the installed
-#: copy under ~/.hermes/plugins is what hermes actually imports (doctor (d5b2) compares).
-HERMES_CARD_PLUGIN = "boring-card"
+#: The plugins hermes loads — the checkout is the source of truth; the installed copies
+#: under ~/.hermes/plugins are what hermes actually imports (doctor (d5b2) compares).
+HERMES_PLUGINS = ("boring-card", "boring-memory")
 
 
-def _install_hermes_card_plugin(boring_home: str | None = None) -> None:
-    """Install the boring-card plugin into ~/.hermes/plugins/boring-card/.
+def _install_hermes_plugin(plugin_name: str, boring_home: str | None = None) -> None:
+    """Install one hermes plugin into ~/.hermes/plugins/<name>/.
 
     hermes discovers directory plugins under $HERMES_HOME/plugins/<name>/ with a
     plugin.yaml + __init__.py; the host's ~/.hermes is the volume the container mounts,
@@ -784,22 +784,28 @@ def _install_hermes_card_plugin(boring_home: str | None = None) -> None:
     source of truth; doctor (d5b2) compares the copies).
     """
     home = boring_home if boring_home is not None else BORING_HOME
-    src_dir = Path(home) / "agents" / "hermes" / "plugins" / HERMES_CARD_PLUGIN
+    src_dir = Path(home) / "agents" / "hermes" / "plugins" / plugin_name
     if not src_dir.is_dir():
-        raise FileNotFoundError(f"hermes card plugin not found: {src_dir}")
-    dst_dir = Path(os.path.expanduser("~/.hermes/plugins")) / HERMES_CARD_PLUGIN
+        raise FileNotFoundError(f"hermes plugin not found: {src_dir}")
+    dst_dir = Path(os.path.expanduser("~/.hermes/plugins")) / plugin_name
     dst_dir.mkdir(parents=True, exist_ok=True)
-    # The first generation of this installer copied every file (including the test) and
-    # backed up overwrites in place — sweep exactly those leftovers before copying, so
-    # the directory ends with exactly what hermes loads and a regression that ships the
-    # test file again cannot hide behind the cleanup.
-    for stale in (dst_dir / "test_boring_card.py", *dst_dir.glob("*.omb-bak")):
+    # The first generation of the card-plugin installer copied every file (including the
+    # test) and backed up overwrites in place — sweep exactly those leftovers before
+    # copying, so the directory ends with exactly what hermes loads and a regression
+    # that ships the test file again cannot hide behind the cleanup.
+    for stale in (*dst_dir.glob("test_*.py"), *dst_dir.glob("*.omb-bak")):
         stale.unlink(missing_ok=True)
     for name in ("plugin.yaml", "__init__.py"):
         src_file = src_dir / name
         if not src_file.is_file():
-            raise FileNotFoundError(f"hermes card plugin is missing {name}: {src_file}")
+            raise FileNotFoundError(f"hermes plugin {plugin_name} is missing {name}: {src_file}")
         shutil.copy2(src_file, dst_dir / name)
+
+
+def _install_hermes_plugins(boring_home: str | None = None) -> None:
+    """Install every plugin hermes loads — one code path, one list (HERMES_PLUGINS)."""
+    for plugin_name in HERMES_PLUGINS:
+        _install_hermes_plugin(plugin_name, boring_home)
 
 
 def _enable_hermes_plugin(text: str, name: str) -> tuple[str, bool]:
@@ -1097,9 +1103,9 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
     """Idempotently wire ohmyboring into hermes-agent.
 
     - Adds/updates mcp_servers.ohmyboring in ~/.hermes/config.yaml
-    - Enables the boring-card plugin under plugins.enabled (list-only text edit)
+    - Enables every plugin in HERMES_PLUGINS under plugins.enabled (list-only text edit)
     - Installs the canonical briefing.py and slack_briefing.py into ~/.hermes/scripts/
-    - Installs the boring-card plugin into ~/.hermes/plugins/boring-card/
+    - Installs the plugins into ~/.hermes/plugins/<name>/
     """
     briefing_sources = _hermes_briefing_sources(boring_home)
     path = path if path is not None else _agent_path("hermes-agent")
@@ -1117,9 +1123,7 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
             f"    url: {url}\n"
             f"    transport: {transport}\n"
             f"plugins:\n"
-            f"  enabled:\n"
-            f"    - {HERMES_CARD_PLUGIN}\n"
-            f"agent:\n"
+            f"  enabled:\n" + "".join(f"    - {name}\n" for name in HERMES_PLUGINS) + f"agent:\n"
             f"  environment_hint: {_HERMES_HINT!r}\n"
         )
         _write_text_atomic(path, body)
@@ -1127,7 +1131,7 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
         _install_hermes_weekly_briefing(boring_home)
         _install_hermes_codex_collector(boring_home)
         _install_hermes_skills(boring_home)
-        _install_hermes_card_plugin(boring_home)
+        _install_hermes_plugins(boring_home)
         cron_result = _sync_hermes_cron_jobs()
         return {
             "agent": "hermes-agent",
@@ -1161,14 +1165,15 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
     changed = changed or hint_changed
 
     text = "\n".join(lines) + "\n"
-    text, plugin_changed = _enable_hermes_plugin(text, HERMES_CARD_PLUGIN)
-    changed = changed or plugin_changed
+    for plugin_name in HERMES_PLUGINS:
+        text, plugin_changed = _enable_hermes_plugin(text, plugin_name)
+        changed = changed or plugin_changed
     _write_text_atomic(path, text)
     _install_hermes_briefing(briefing_sources)
     _install_hermes_weekly_briefing(boring_home)
     _install_hermes_codex_collector(boring_home)
     _install_hermes_skills(boring_home)
-    _install_hermes_card_plugin(boring_home)
+    _install_hermes_plugins(boring_home)
     cron_result = _sync_hermes_cron_jobs()
     changed = changed or cron_result["changed"]
     return {

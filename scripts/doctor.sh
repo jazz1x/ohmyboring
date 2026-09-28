@@ -1030,27 +1030,31 @@ if [ -d "$hermes_scripts_dir" ] && [ -f "$wiring" ]; then
     rm -f "$script_list"
 fi
 
-# (d5b2) The card-button plugin hermes actually loads. Same lesson as (d5b): the copy hermes
-# imports lives in ~/.hermes/plugins/ and only the installer copies it there, so merging a
-# plugin change does not deliver it — a stale plugin would answer the owner's buttons with
-# old effects while every other gate stays green. "hermes present" is the same condition
-# (d5b) uses: when it holds, a missing or diverged plugin is a failure, not silence.
+# (d5b2) The plugins hermes actually loads. Same lesson as (d5b): the copies hermes
+# imports live in ~/.hermes/plugins/ and only the installer copies them there, so merging
+# a plugin change does not deliver it — a stale plugin would answer the owner's buttons
+# with old effects (or answer a DM without the memory hook) while every other gate stays
+# green. "hermes present" is the same condition (d5b) uses: when it holds, a missing or
+# diverged plugin is a failure, not silence. The list lives in agent_wiring
+# (HERMES_PLUGINS); doctor re-states it so the check does not import the installer.
 hermes_plugins_dir="$HOME/.hermes/plugins"
-card_plugin_src="$BORING_HOME/agents/hermes/plugins/boring-card"
-if [ -d "$hermes_scripts_dir" ] && [ -f "$wiring" ] && [ -d "$card_plugin_src" ]; then
-    card_plugin_drift=0
-    for f in plugin.yaml __init__.py; do
-        if [ ! -f "$hermes_plugins_dir/boring-card/$f" ] || ! cmp -s "$card_plugin_src/$f" "$hermes_plugins_dir/boring-card/$f"; then
-            card_plugin_drift=1
+for hermes_plugin in boring-card boring-memory; do
+    hermes_plugin_src="$BORING_HOME/agents/hermes/plugins/$hermes_plugin"
+    if [ -d "$hermes_scripts_dir" ] && [ -f "$wiring" ] && [ -d "$hermes_plugin_src" ]; then
+        hermes_plugin_drift=0
+        for f in plugin.yaml __init__.py; do
+            if [ ! -f "$hermes_plugins_dir/$hermes_plugin/$f" ] || ! cmp -s "$hermes_plugin_src/$f" "$hermes_plugins_dir/$hermes_plugin/$f"; then
+                hermes_plugin_drift=1
+            fi
+        done
+        if [ "$hermes_plugin_drift" -eq 0 ]; then
+            ok "hermes $hermes_plugin plugin matches the checkout"
+        else
+            bad "DEPLOY DRIFT — $hermes_plugins_dir/$hermes_plugin differs from the checkout (or was never installed). Merging is not deploying; hermes still runs the old plugin."
+            failed_hooks=1
         fi
-    done
-    if [ "$card_plugin_drift" -eq 0 ]; then
-        ok "hermes boring-card plugin matches the checkout"
-    else
-        bad "DEPLOY DRIFT — $hermes_plugins_dir/boring-card differs from the checkout (or was never installed). Merging is not deploying; the card's buttons still run the old plugin."
-        failed_hooks=1
     fi
-fi
+done
 
 if [ "$FIX" -eq 1 ]; then
     echo

@@ -278,16 +278,21 @@ make_case() {
             *) printf 'current %s\n' "$n" >"$home/.hermes/scripts/$n" ;;
         esac
     done
-    # The card-button plugin ships in the same checkout and is imported from
-    # ~/.hermes/plugins — the same deployed-state fixture as the scripts above.
-    mkdir -p "$boring/agents/hermes/plugins/boring-card" "$home/.hermes/plugins/boring-card"
-    for n in plugin.yaml __init__.py; do
-        printf 'current plugin %s\n' "$n" >"$boring/agents/hermes/plugins/boring-card/$n"
-        case "${DOCTOR_CARD_PLUGIN_STATE:-match}" in
-            drift) printf 'old plugin %s\n' "$n" >"$home/.hermes/plugins/boring-card/$n" ;;
-            missing) rm -f "$home/.hermes/plugins/boring-card/$n" ;;
-            *) printf 'current plugin %s\n' "$n" >"$home/.hermes/plugins/boring-card/$n" ;;
-        esac
+    # The plugins ship in the same checkout and are imported from ~/.hermes/plugins — the
+    # same deployed-state fixture as the scripts above. boring-memory rides its own state
+    # knob so drift on either plugin is reachable on its own.
+    for plugin_name in boring-card boring-memory; do
+        mkdir -p "$boring/agents/hermes/plugins/$plugin_name" "$home/.hermes/plugins/$plugin_name"
+        for n in plugin.yaml __init__.py; do
+            printf 'current plugin %s\n' "$n" >"$boring/agents/hermes/plugins/$plugin_name/$n"
+            state="${DOCTOR_CARD_PLUGIN_STATE:-match}"
+            [ "$plugin_name" = boring-memory ] && state="${DOCTOR_MEMORY_PLUGIN_STATE:-match}"
+            case "$state" in
+                drift) printf 'old plugin %s\n' "$n" >"$home/.hermes/plugins/$plugin_name/$n" ;;
+                missing) rm -f "$home/.hermes/plugins/$plugin_name/$n" ;;
+                *) printf 'current plugin %s\n' "$n" >"$home/.hermes/plugins/$plugin_name/$n" ;;
+            esac
+        done
     done
     [ "${DOCTOR_HERMES_STATE:-match}" = none ] && rm -rf "$home/.hermes"
     touch "$home/.cache/boring-distill/session.ts"
@@ -896,6 +901,11 @@ esac
       cat "$TMP/card-plugin-match.out"
       echo "FAIL: the healthy case must say the plugin matches" >&2
       exit 1
+  }
+  grep -q "✓ hermes boring-memory plugin matches the checkout" "$TMP/card-plugin-match.out" || {
+      cat "$TMP/card-plugin-match.out"
+      echo "FAIL: both installed plugins must be reported healthy" >&2
+      exit 1
   } ) || exit 1
 
 ( DOCTOR_CARD_PLUGIN_STATE=drift make_case "$TMP/card-plugin-drift" yes
@@ -922,6 +932,30 @@ esac
       exit 1
   } ) || exit 1
 
+( DOCTOR_MEMORY_PLUGIN_STATE=drift make_case "$TMP/memory-plugin-drift" yes
+  if run_strict "$TMP/memory-plugin-drift" "$TMP/memory-plugin-drift.out"; then
+      cat "$TMP/memory-plugin-drift.out"
+      echo "FAIL: a stale boring-memory plugin must fail strict" >&2
+      exit 1
+  fi
+  if ! grep -q "✗ DEPLOY DRIFT — $TMP/memory-plugin-drift/home/.hermes/plugins/boring-memory differs" "$TMP/memory-plugin-drift.out"; then
+      cat "$TMP/memory-plugin-drift.out"
+      echo "FAIL: boring-memory drift must be named, not just counted" >&2
+      exit 1
+  fi ) || exit 1
+
+( DOCTOR_MEMORY_PLUGIN_STATE=missing make_case "$TMP/memory-plugin-missing" yes
+  if run_strict "$TMP/memory-plugin-missing" "$TMP/memory-plugin-missing.out"; then
+      cat "$TMP/memory-plugin-missing.out"
+      echo "FAIL: a configured hermes that never received boring-memory must fail strict" >&2
+      exit 1
+  fi
+  grep -q "✗ DEPLOY DRIFT" "$TMP/memory-plugin-missing.out" || {
+      cat "$TMP/memory-plugin-missing.out"
+      echo "FAIL: a never-installed boring-memory must be reported as drift, not silence" >&2
+      exit 1
+  } ) || exit 1
+
 ( DOCTOR_HERMES_STATE=none make_case "$TMP/card-plugin-none" yes
   if ! run_strict "$TMP/card-plugin-none" "$TMP/card-plugin-none.out"; then
       cat "$TMP/card-plugin-none.out"
@@ -931,6 +965,11 @@ esac
   if grep -q "boring-card plugin" "$TMP/card-plugin-none.out"; then
       cat "$TMP/card-plugin-none.out"
       echo "FAIL: no hermes install means no plugin verdict" >&2
+      exit 1
+  fi
+  if grep -q "boring-memory plugin" "$TMP/card-plugin-none.out"; then
+      cat "$TMP/card-plugin-none.out"
+      echo "FAIL: no hermes install means no boring-memory verdict either" >&2
       exit 1
   fi ) || exit 1
 
