@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -108,6 +109,42 @@ def _project_variants(notes):
         proj = n["fm"].get("project") or ""
         canonical[boring_config.canonical_repo(proj)].add(proj)
     return {c: sorted(v) for c, v in canonical.items() if len(v) > 1}
+
+
+def _checkout_slugs(roots: list[Path]) -> dict[str, set[str]]:
+    """Folder name → canonical remote slugs, for every git checkout under `roots` (depth ≤ 3)
+    whose folder name differs from its remote. A worktree's `.git` is a file, so both count.
+    A checkout with no readable `origin` has no remote name to disagree with and is left out.
+    One folder name can front several repos (`re-work` was both scenario-compiler and boro-vigil)."""
+    out: dict[str, set[str]] = defaultdict(set)
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for d in [*root.glob("*"), *root.glob("*/*"), *root.glob("*/*/*")]:
+            if not (d / ".git").exists():
+                continue
+            got = subprocess.run(
+                ["git", "-C", str(d), "remote", "get-url", "origin"], capture_output=True, text=True
+            )
+            if got.returncode != 0 or not got.stdout.strip():
+                continue
+            m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", got.stdout.strip())
+            if not m:
+                continue
+            slug = boring_config.canonical_repo(m.group(1))
+            if d.name != slug:
+                out[d.name].add(slug)
+    return dict(out)
+
+
+def _folder_slug_splits(projects: list[str], checkout_slugs: dict[str, set[str]]) -> list[dict]:
+    """Projects that are a checkout's folder name rather than its repository's name."""
+    counts = Counter(p for p in projects if p)
+    return [
+        {"project": p, "repos": sorted(checkout_slugs[p]), "notes": n}
+        for p, n in sorted(counts.items())
+        if p in checkout_slugs
+    ]
 
 
 def _configured_project_names() -> set[str]:
@@ -297,9 +334,13 @@ def _fix_note(n, target_project: str):
     n["path"].write_text("---\n" + new_yaml + "\n---\n" + n["body"], encoding="utf-8")
 
 
-def _build_report(wiki_dir: Path, notes: list[dict]) -> dict:
+def _build_report(
+    wiki_dir: Path, notes: list[dict], checkout_slugs: dict[str, set[str]] | None = None
+) -> dict:
     projects = [n["fm"].get("project") or "" for n in notes]
     variants = _project_variants(notes)
+    # None = checkouts were not scanned, [] = scanned and nothing split. Never read one as the other.
+    folder_splits = None if checkout_slugs is None else _folder_slug_splits(projects, checkout_slugs)
     typos = _likely_typos(projects)
     claim_issues = _claim_issues(notes)
 
@@ -329,6 +370,7 @@ def _build_report(wiki_dir: Path, notes: list[dict]) -> dict:
         "wiki_dir": str(wiki_dir),
         "note_count": len(notes),
         "project_variants": variants,
+        "folder_slug_splits": folder_splits,
         "likely_typos": [
             {
                 "bad": a,
@@ -344,9 +386,11 @@ def _build_report(wiki_dir: Path, notes: list[dict]) -> dict:
     }
 
 
-def analyze_vault(wiki_dir: Path) -> tuple[list[dict], dict]:
+def analyze_vault(
+    wiki_dir: Path, checkout_slugs: dict[str, set[str]] | None = None
+) -> tuple[list[dict], dict]:
     notes = _collect_notes(wiki_dir)
-    return notes, _build_report(wiki_dir, notes)
+    return notes, _build_report(wiki_dir, notes, checkout_slugs)
 
 
 def fixable_note_names(report: dict) -> list[str]:
@@ -381,6 +425,11 @@ def main():
     parser.add_argument("--fix", action="store_true", help="rewrite notes in place (review with git diff)")
     parser.add_argument("--yes", action="store_true", help="skip confirmation prompt")
     parser.add_argument("--json", action="store_true", help="output structured JSON report")
+    parser.add_argument(
+        "--checkout-roots",
+        help="colon-separated dirs to scan for git checkouts; reports projects named after a checkout folder "
+        "instead of its remote repo (e.g. ~/Development:~/orca/workspaces)",
+    )
     args = parser.parse_args()
 
     wiki_dir = _wiki_dir(args)
@@ -388,7 +437,8 @@ def main():
         print(f"[error] wiki directory not found: {wiki_dir}", file=sys.stderr)
         sys.exit(1)
 
-    notes, report = analyze_vault(wiki_dir)
+    roots = [Path(r).expanduser() for r in args.checkout_roots.split(":")] if args.checkout_roots else None
+    notes, report = analyze_vault(wiki_dir, _checkout_slugs(roots) if roots is not None else None)
     variants = report["project_variants"]
     typos = [
         (t["bad"], t["good"], t["similarity"], t["bad_count"], t["good_count"])
@@ -408,6 +458,12 @@ def main():
         print("⚠️  Project variants detected (same repo under multiple names):")
         for canonical, vs in sorted(variants.items()):
             print(f"   canonical={canonical!r}: {vs}")
+        print()
+
+    if report["folder_slug_splits"]:
+        print("📁 Projects named after a checkout folder, not its repo:")
+        for s in report["folder_slug_splits"]:
+            print(f"   {s['project']!r} ({s['notes']}) → repo {' or '.join(s['repos'])}")
         print()
 
     if typos:
