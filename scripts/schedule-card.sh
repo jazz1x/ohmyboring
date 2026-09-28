@@ -64,37 +64,19 @@ Usage: $0 {run|install|uninstall|status} [job]
 EOF
 }
 
-# Slack answers HTTP 200 even when the post fails; only a body with "ok":true is a send.
-notify_failure() {
-    code="$1"; reason="$2"
-    if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${SLACK_CARD_CHANNEL:-}" ]; then
-        echo "✗ 실패 알림도 못 보냈다: SLACK_BOT_TOKEN·SLACK_CARD_CHANNEL 이 없음" >&2
-        return 0
-    fi
-    body=$(curl -sS https://slack.com/api/chat.postMessage \
-        -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
-        --data-urlencode "channel=${SLACK_CARD_CHANNEL}" \
-        --data-urlencode "text=${NOTICE} — exit ${code} · ${reason}" 2>&1) || {
-        echo "✗ 실패 알림도 못 보냈다: curl: ${body}" >&2
-        return 0
-    }
-    case "$body" in
-        *'"ok":true'*) ;;
-        *) echo "✗ 실패 알림도 못 보냈다: ${body}" >&2 ;;
-    esac
-}
+# The failure notice and the .env load live in scripts/lib/ — one copy both schedulers
+# source; copied notices and loaders drift.
+LIB_DIR="$(cd "$(dirname "$0")/lib" && pwd)"
+# shellcheck source=lib/dot_env.sh
+. "$LIB_DIR/dot_env.sh"
+# shellcheck source=lib/slack_notify.sh
+. "$LIB_DIR/slack_notify.sh"
 
 run_job() {
     cd "$BORING_HOME" || { echo "✗ cannot cd to $BORING_HOME"; exit 1; }
-    # launchd runs this with none of the interactive shell's env — no SLACK_APP_TOKEN, no
-    # BORING_DOOR_URL, nothing from .env. `make card` sources .env the same way; a card that
-    # only ever ran from an interactive shell was never actually going to fire on schedule.
-    if [ -f ./.env ]; then
-        set -a
-        # shellcheck disable=SC1091
-        . ./.env
-        set +a
-    fi
+    # launchd runs this with none of the interactive shell's env — the shared loader
+    # (scripts/lib/dot_env.sh) sources ./.env the same way `make card` does.
+    load_dot_env
     if [ "$NEEDS_DOOR" = "1" ]; then
         door_url="${BORING_DOOR_URL:-$DOOR_URL}"
         if ! curl -sf "${door_url}/health" >/dev/null 2>&1; then

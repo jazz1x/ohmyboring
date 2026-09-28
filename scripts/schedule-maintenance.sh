@@ -1,7 +1,8 @@
 #!/bin/sh
 # Register and run unattended housekeeping for oh-my-boring.
 # Combines data-steward (vault hygiene) and retention (raw transcript lifecycle) into a
-# single daily job. On macOS it uses launchd; on Linux it uses the user's crontab.
+# single daily job, then closes with a read-only doctor pass that DMs the owner on ✗.
+# On macOS it uses launchd; on Linux it uses the user's crontab.
 #
 #   ./scripts/schedule-maintenance.sh run       # execute now, unattended
 #   ./scripts/schedule-maintenance.sh install   # register daily job
@@ -13,11 +14,19 @@ BORING_HOME="${BORING_HOME:-$HOME/oh-my-boring}"
 LABEL="com.ohmyboring.maintenance"
 LOG="/tmp/${LABEL}.log"
 
+# The failure notice and the .env load live in scripts/lib/ — one copy both schedulers
+# source; copied notices and loaders drift.
+LIB_DIR="$(cd "$(dirname "$0")/lib" && pwd)"
+# shellcheck source=lib/dot_env.sh
+. "$LIB_DIR/dot_env.sh"
+# shellcheck source=lib/slack_notify.sh
+. "$LIB_DIR/slack_notify.sh"
+
 usage() {
     cat <<EOF
 Usage: $0 {run|install|uninstall|status}
 
-  run       Execute data-steward --fix --yes + retention --apply --yes now.
+  run       Run data-steward, retention, recall labels, code-sync, then a read-only doctor.
   install   Register daily automatic maintenance (macOS launchd / Linux cron).
   uninstall Remove the registration.
   status    Show whether daily maintenance is registered.
@@ -26,6 +35,9 @@ EOF
 
 run_maintenance() {
     cd "$BORING_HOME" || { echo "✗ cannot cd to $BORING_HOME"; exit 1; }
+    # launchd/cron run this with none of the interactive shell's env — the shared loader
+    # (scripts/lib/dot_env.sh) sources ./.env, the same way schedule-card.sh does.
+    load_dot_env
     echo "=== oh-my-boring maintenance started at $(date) ==="
     echo "--- data-steward ---"
     python3 scripts/data-steward.py --fix --yes
@@ -43,6 +55,25 @@ run_maintenance() {
     # and doctor only notices after the fact. Failure must not fail housekeeping either.
     echo "--- code-sync ---"
     ./drudge/target/release/drudge code-sync || echo "(code-sync failed — continuing)"
+    # Close the loop this job used to leave open: twice (2026-09-21 hermes Slack socket failed
+    # 267,201 times over ten days; 2026-09-26→27 ~20 h of reconnect loop) doctor could have
+    # caught it — but nothing ran doctor at 03:00, so nobody was told. Strict and read-only:
+    # --strict turns any ✗ into a non-zero exit, and --fix is deliberately never passed — the
+    # nightly pass reports; a human or an interactive --fix decides.
+    echo "--- doctor ---"
+    doctor_out=$(sh scripts/doctor.sh --strict 2>&1)
+    doctor_rc=$?
+    printf '%s\n' "$doctor_out"
+    if [ "$doctor_rc" -ne 0 ]; then
+        x_count=$(printf '%s\n' "$doctor_out" | grep -c '^✗ ' || true)
+        first_x=$(printf '%s\n' "$doctor_out" | sed -n 's/^✗ //p' | head -n 1 | cut -c1-150)
+        [ -n "$first_x" ] || first_x="✗ 줄 없이 비정상 종료"
+        if [ "$x_count" -gt 1 ]; then
+            notify_slack "새벽 점검에서 ✗ ${x_count}개 — ${first_x}(…외 $((x_count - 1))개)"
+        else
+            notify_slack "새벽 점검에서 ✗ ${x_count}개 — ${first_x}"
+        fi
+    fi
     echo "=== maintenance finished at $(date) ==="
 }
 

@@ -279,8 +279,12 @@ fi
 # shellcheck disable=SC2016
 notify_call='notify_failure "$status"'
 notify_line=$(grep -nF -- "$notify_call" "$ROOT/scripts/schedule-card.sh" | cut -d: -f1)
-grep -vF -- "$notify_call" "$ROOT/scripts/schedule-card.sh" > "$tmp/mutant.sh"
-SCRIPT_UNDER_TEST="$tmp/mutant.sh"
+# The script resolves scripts/lib relative to its own path, so a scratch copy needs the lib
+# next to it — a symlink keeps the mutant exercising the real shared files.
+mkdir -p "$tmp/mutant"
+ln -s "$ROOT/scripts/lib" "$tmp/mutant/lib"
+grep -vF -- "$notify_call" "$ROOT/scripts/schedule-card.sh" > "$tmp/mutant/schedule-card.sh"
+SCRIPT_UNDER_TEST="$tmp/mutant/schedule-card.sh"
 : > "$tmp/curl.log"
 run_case CARD_STUB_EXIT=3 'CARD_STUB_STDERR=[card] 카드 거부: boom'
 SCRIPT_UNDER_TEST="$ROOT/scripts/schedule-card.sh"
@@ -293,8 +297,8 @@ fi
 # Non-vacuous proof for the weekly label: a mutant that registers the weekly job under the
 # card's label must fail case (w3) — its plist never appears where the weekly belongs.
 sed 's/com\.ohmyboring\.weekly-card/com.ohmyboring.morning-card/g' \
-    "$ROOT/scripts/schedule-card.sh" > "$tmp/label-mutant.sh"
-SCRIPT_UNDER_TEST="$tmp/label-mutant.sh"
+    "$ROOT/scripts/schedule-card.sh" > "$tmp/mutant/schedule-card.sh"
+SCRIPT_UNDER_TEST="$tmp/mutant/schedule-card.sh"
 rm -f "$home/Library/LaunchAgents/com.ohmyboring.weekly-card.plist" \
     "$home/Library/LaunchAgents/com.ohmyboring.morning-card.plist"
 : > "$tmp/launchctl.log"
