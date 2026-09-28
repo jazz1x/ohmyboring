@@ -22,9 +22,11 @@ from omb_env import _in_container
 DEFAULT_ORIGIN = "personal"
 DEFAULT_NOTE_LANG = "auto"
 
+# The weekly now posts itself like the morning card (scripts/schedule-card.sh … weekly); the
+# hermes job is kept paused so an install never sends a second copy.
 DEFAULT_HERMES_CRON_JOBS = {
     "weekly-briefing": {
-        "enabled": True,
+        "enabled": False,
         "schedule": "0 9 * * 1",
         "script": "weekly-briefing.py",
     }
@@ -96,9 +98,8 @@ def note_lang() -> str:
 def hermes_cron_jobs() -> dict:
     """Return the configured hermes-agent cron jobs.
 
-    If the user has not set `hermes_cron_jobs` in boring.json, default to a
-    weekly briefing on Monday 09:00 KST. An explicit empty dict means "no
-    managed jobs".
+    If the user has not set `hermes_cron_jobs` in boring.json, default to the
+    weekly briefing job paused. An explicit empty dict means "no managed jobs".
     """
     cfg = load()
     jobs = cfg.get("hermes_cron_jobs")
