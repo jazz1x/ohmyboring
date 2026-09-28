@@ -401,6 +401,27 @@ def test_fix_leaves_owner_notes_and_reports_them():
     assert loaded["project"] == "omb" and "_" not in loaded["tags"], loaded
 
 
+def test_folder_named_project_is_reported_against_its_repo():
+    root = Path(tempfile.mkdtemp())
+    for folder, remote in (
+        ("org/team/re-work", "marketboro/scenario-compiler"),
+        ("vigil/re-work", "marketboro/boro-vigil"),
+        ("plainrepo", "someone/plainrepo"),
+    ):
+        d = root / folder
+        d.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+        subprocess.run(
+            ["git", "-C", str(d), "remote", "add", "origin", f"git@bitbucket.org:{remote}.git"], check=True
+        )
+    slugs = ds._checkout_slugs([root])
+    assert slugs == {"re-work": {"scenario-compiler", "boro-vigil"}}, slugs
+    splits = ds._folder_slug_splits(["re-work", "re-work", "plainrepo"], slugs)
+    assert splits == [{"project": "re-work", "repos": ["boro-vigil", "scenario-compiler"], "notes": 2}], (
+        splits
+    )
+
+
 def main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

@@ -41,6 +41,15 @@ run_maintenance() {
     echo "=== oh-my-boring maintenance started at $(date) ==="
     echo "--- data-steward ---"
     python3 scripts/data-steward.py --fix --yes
+    # --fix cannot repair this one: which repo a folder-named project belongs to takes the
+    # session's cwd, and `re-work` fronted two repos (2026-09-28). So it reports, and says so.
+    splits=$(python3 scripts/data-steward.py --json --checkout-roots "$HOME/Development:$HOME/orca/workspaces" |
+        python3 -c 'import json, sys; print(", ".join("%s(%d)→%s" % (s["project"], s["notes"], "/".join(s["repos"])) for s in json.load(sys.stdin)["folder_slug_splits"]))') ||
+        echo "(folder-name check failed — continuing)"
+    if [ -n "$splits" ]; then
+        echo "folder-named projects: $splits"
+        notify_slack "폴더 이름으로 잡힌 프로젝트 — ${splits}"
+    fi
     echo "--- retention ---"
     python3 scripts/retention.py --apply --yes
     # Injection precision is the product's first-class metric and it cannot be computed from
