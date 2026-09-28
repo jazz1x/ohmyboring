@@ -34,7 +34,7 @@ make agent-logs    # hermes 로그 (MCP 연결 진단)
 | `com.ohmyboring.codex-ingest` | 20분 | Codex 세션 하나를 집어 증류·저장 |
 | `com.ohmyboring.maintenance` | 매일 | `scripts/schedule-maintenance.sh run` — data-steward + retention |
 | `com.ohmyboring.night-drain` | 03:20 | 밀린 Codex·Claude 세션을 한 번에 최대 40개 |
-| `com.ohmyboring.morning-card` | 매일 08:00 | `scripts/schedule-card.sh run` — 아침 카드. 문(:7710)이 살아 있어야 돌고, 로그는 `/tmp/com.ohmyboring.morning-card.log`. 이주 중 잡 — hermes 크론 `morning-card`((다) 아래)가 같은 도구를 문의 `/run/morning-card` 로 돌리고, 도구 안 지킴이가 하루 두 번 올라가는 것을 막는다 |
+| `com.ohmyboring.morning-card` (launchd 잡 — 2026-09-28 에 지움) | 매일 08:00 | 아침 카드는 이제 hermes 크론 `morning-card`((다) 아래)만 돌린다 — 문의 `POST /run/morning-card` 로. 문(:7710)이 살아 있어야 돌고, 실행·성패 기록은 `~/.hermes/cron/output/<job-id>/` 의 최신 파일(파일 이름이 시각) |
 | `com.ohmyboring.weekly-card` | 월 09:00 | `scripts/schedule-card.sh run weekly` — 주간 브리핑 카드. 볼트의 매일 브리핑을 먼저 읽어서 문이 필요 없고, 로그는 `/tmp/com.ohmyboring.weekly-card.log`. 이주 중 잡 — hermes 크론 `weekly-card` 가 같은 도구를 문에 시킨다 |
 
 ```bash
@@ -101,7 +101,7 @@ sh scripts/doctor.sh          # ✗ 가 0개인지
 | 크론 잡이 안 돈다 | `ls -t ~/.hermes/cron/output/<job-id>/ \| head -1` | **최신 파일의 시각**. 개수는 50에서 회전하므로 신호가 아니다 |
 | 그 파일이 0바이트다 | `curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker'` | **유휴인지 고장인지는 여기서 갈린다** (§4) |
 | 브리핑이 안 온다 | `make agent-logs` | hermes 가 스크립트를 찾았는지, 경로가 막혔는지 |
-| 카드가 안 왔다 | `./scripts/schedule-card.sh status` 와 `ls -t ~/.hermes/cron/output/<job-id>/ \| head -1` | launchd 등록·마지막 로그 줄 (`/tmp/com.ohmyboring.morning-card.log`) — 그리고 hermes 크론 `morning-card` 의 최신 출력. 둘 중 하나만 성공해도 되고(도구 안 지킴이가 하루 둘째를 0 으로 멈춤) 둘 다 실패면 문 `POST /run/morning-card` 의 응답을 본다 |
+| 카드가 안 왔다 | `./scripts/schedule-card.sh status` 와 `ls -t ~/.hermes/cron/output/<job-id>/ \| head -1` | hermes 크론 `morning-card` 의 최신 출력 파일 — 이름이 시각이고, 안의 `[run-morning-card]` 줄이 성패(`ok … posted_ts=` 는 게시, `FAILED` 는 실패). launchd 는 09-28 에 지워 더는 안 찍히고, 출력이 없으면 문 `POST /run/morning-card` 의 응답을 본다 |
 | 주간 카드가 안 왔다 | `./scripts/schedule-card.sh status weekly` 와 hermes 크론 `weekly-card` 의 최신 출력 | 위와 같다 (`/tmp/com.ohmyboring.weekly-card.log`) |
 | 무엇이 정체돼 있나 | `make doctor` | `readiness_issue` 줄 |
 | 판정 창 상태 | `make peek` | 표본·바닥·판정 (localhost 전용) |
