@@ -22,8 +22,8 @@ from omb_env import _in_container
 DEFAULT_ORIGIN = "personal"
 DEFAULT_NOTE_LANG = "auto"
 
-# The weekly now posts itself like the morning card (scripts/schedule-card.sh … weekly); the
-# hermes job is kept paused so an install never sends a second copy.
+# The weekly now posts itself like the morning card (scripts/schedule-card.sh … weekly), so
+# the hermes job defaults to paused. A boring.json that lists the job still decides for itself.
 DEFAULT_HERMES_CRON_JOBS = {
     "weekly-briefing": {
         "enabled": False,
