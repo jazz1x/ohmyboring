@@ -126,6 +126,18 @@
     "hermes_cron_jobs": {
       "type": "object",
       "default": {
+        "morning-card": {
+          "enabled": true,
+          "schedule": "0 8 * * *",
+          "script": "run-morning-card.py",
+          "deliver": "local"
+        },
+        "weekly-card": {
+          "enabled": true,
+          "schedule": "0 9 * * 1",
+          "script": "run-weekly-card.py",
+          "deliver": "local"
+        },
         "weekly-briefing": {
           "enabled": false,
           "schedule": "0 9 * * 1",
@@ -148,6 +160,11 @@
               "type": "string",
               "default": "weekly-briefing.py",
               "description": "Script name under ~/.hermes/scripts/."
+            },
+            "deliver": {
+              "type": "string",
+              "default": "local",
+              "description": "hermes delivery target. Use 'local' for jobs whose script already delivers itself (the card scripts post to Slack through the door) — hermes would only re-wrap the output."
             }
           },
           "additionalProperties": false

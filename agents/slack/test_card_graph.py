@@ -526,7 +526,7 @@ class GraphTests(unittest.TestCase):
         confirmation_events = [r for r in self.stubs.records if r[0] == "card_confirmation"]
         self.assertEqual(
             confirmation_events,
-            [("card_confirmation", {"done": 2, "pending": 1, "session": PAST_SESSION})],
+            [("card_confirmation", {"done": 2, "pending": 1, "session": PAST_SESSION, "card_ts": CARD_TS})],
         )
 
     def test_priority_subject_leads_the_first_advice_call(self):
@@ -552,7 +552,7 @@ class GraphTests(unittest.TestCase):
             [
                 (
                     "card_confirmation",
-                    {"done": 0, "pending": 0, "session": PAST_SESSION, "unknown": 3},
+                    {"done": 0, "pending": 0, "session": PAST_SESSION, "unknown": 3, "card_ts": CARD_TS},
                 )
             ],
         )
@@ -1615,6 +1615,8 @@ class MainTests(unittest.TestCase):
         socket_module = mock.MagicMock()
         fake_graph = mock.Mock()
         fake_graph.invoke.return_value = {"message": cc.PostedCard(channel=CARD_CH, ts=CARD_TS)}
+        fake_event_log = mock.Mock()
+        fake_event_log.recent_events.return_value = []  # no card yet this morning
         buf = io.StringIO()
         with (
             mock.patch.dict(
@@ -1630,6 +1632,7 @@ class MainTests(unittest.TestCase):
                 sys.modules, {"slack_sdk.web": web_module, "slack_sdk.socket_mode": socket_module}
             ),
             mock.patch.object(card, "build_graph", return_value=fake_graph),
+            mock.patch.object(card, "event_log", fake_event_log),
             contextlib.redirect_stdout(buf),
         ):
             rc = card.main()
@@ -1641,6 +1644,92 @@ class MainTests(unittest.TestCase):
         self.assertIn(f"[card] posted ts={CARD_TS}", out)
         socket_module.SocketModeClient.assert_not_called()
         fake_graph.invoke.assert_called_once()
+
+
+class PostedTodayGuardTests(unittest.TestCase):
+    """The once-per-morning guard (launchd→hermes handover): the second runner of one KST
+    day reads the first card's own events (card_proposal/card_confirmation) and exits 0
+    with one line — the graph never builds, Slack never opens. A mutant that deletes the
+    guard fails test_main_stops_before_the_graph here: build_graph would run."""
+
+    def _env(self):
+        return {
+            "SLACK_BOT_TOKEN": "tok",
+            "SLACK_CARD_CHANNEL": CARD_CH,
+            "BORING_DOOR_URL": "http://door.invalid",
+            "CARD_DRY_RUN": "",
+        }
+
+    def _today_event(self, card_ts="1727480000.000100", name="card_confirmation"):
+        now = datetime.now(UTC)
+        return {"event": name, "card_ts": card_ts, "ts": now.isoformat()}
+
+    def _run_main(self, events, graph_side_effect="default"):
+        fake_event_log = mock.Mock()
+        fake_event_log.recent_events.return_value = events
+        web_module = mock.MagicMock()
+        fake_graph = mock.Mock()
+        fake_graph.invoke.return_value = {"message": cc.PostedCard(channel=CARD_CH, ts=CARD_TS)}
+        graph_patch = (
+            mock.patch.object(card, "build_graph", side_effect=graph_side_effect)
+            if graph_side_effect != "default"
+            else mock.patch.object(card, "build_graph", return_value=fake_graph)
+        )
+        buf = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, self._env()),
+            mock.patch.dict(sys.modules, {"slack_sdk.web": web_module}),
+            mock.patch.object(card, "event_log", fake_event_log),
+            graph_patch,
+            contextlib.redirect_stdout(buf),
+        ):
+            rc = card.main()
+        return rc, buf.getvalue(), fake_event_log
+
+    def test_main_stops_before_the_graph_when_todays_card_exists(self):
+        rc, out, fake_event_log = self._run_main(
+            [self._today_event()], graph_side_effect=AssertionError("the graph must not run")
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("[card] already posted today (ts=1727480000.000100)", out)
+        self.assertEqual(out.strip().count("\n"), 0, "one line, said so")
+        self.assertEqual(
+            {c.kwargs["event_name"] for c in fake_event_log.recent_events.call_args_list},
+            {"card_proposal", "card_confirmation"},
+        )
+
+    def test_main_runs_when_yesterdays_card_is_the_newest(self):
+        yesterday = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        rc, out, _ = self._run_main([{"event": "card_confirmation", "card_ts": "old", "ts": yesterday}])
+        self.assertEqual(rc, 0)
+        self.assertIn(f"[card] posted ts={CARD_TS}", out)
+
+    def test_posted_today_picks_the_newest_ts_and_reads_the_kst_calendar(self):
+        """15:30 UTC is 00:30 the next day KST: the 15:10 UTC confirmation counts as
+        today's card even though its UTC date is still yesterday; at 23:30 KST the same
+        events are both already tomorrow's, so the morning still belongs to nobody."""
+        now = datetime(2026, 9, 27, 15, 30, tzinfo=UTC)  # 2026-09-28 00:30 KST
+        events = [
+            {"event": "card_proposal", "card_ts": "older", "ts": "2026-09-27T15:00:00+00:00"},
+            {"event": "card_confirmation", "card_ts": "newer", "ts": "2026-09-27T15:10:00+00:00"},
+        ]
+        fake_event_log = mock.Mock()
+        fake_event_log.recent_events.return_value = events
+        with mock.patch.object(card, "event_log", fake_event_log):
+            self.assertEqual(card._posted_today_ts(now=now), "newer")
+            self.assertIsNone(
+                card._posted_today_ts(now=datetime(2026, 9, 27, 14, 30, tzinfo=UTC))  # 23:30 KST 09-27
+            )
+
+    def test_rows_without_card_ts_or_with_unparseable_ts_are_skipped(self):
+        now = datetime.now(UTC)
+        fake_event_log = mock.Mock()
+        fake_event_log.recent_events.return_value = [
+            {"event": "card_confirmation", "ts": now.isoformat()},  # no card_ts
+            {"event": "card_confirmation", "card_ts": "x", "ts": "not a timestamp"},
+        ]
+        with mock.patch.object(card, "event_log", fake_event_log):
+            self.assertIsNone(card._posted_today_ts())
 
 
 if __name__ == "__main__":

@@ -68,7 +68,9 @@
     "GET /projects",
     "GET /repairs/split-subjects",
     "POST /repairs/split-subjects",
-    "GET /rules"
+    "GET /rules",
+    "POST /run/morning-card",
+    "POST /run/weekly-card"
   ],
   "http_routes": [
     "GET /audit",

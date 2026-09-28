@@ -200,6 +200,26 @@ def test_classify_adversarial_inputs():
         boring_config.load = old_load
 
 
+def test_default_hermes_cron_jobs_hand_the_cards_to_hermes():
+    """The defaults hermes_cron_jobs() falls back to: hermes owns WHEN, the card programs stay
+    the tool, delivery is local (they post to Slack themselves). The old weekly-briefing job
+    stays paused (#425)."""
+    jobs = boring_config.DEFAULT_HERMES_CRON_JOBS
+    assert jobs["morning-card"] == {
+        "enabled": True,
+        "schedule": "0 8 * * *",
+        "script": "run-morning-card.py",
+        "deliver": "local",
+    }
+    assert jobs["weekly-card"] == {
+        "enabled": True,
+        "schedule": "0 9 * * 1",
+        "script": "run-weekly-card.py",
+        "deliver": "local",
+    }
+    assert jobs["weekly-briefing"]["enabled"] is False
+
+
 def main():
     tests = [
         test_repo_root_is_dir_with_example,
@@ -211,6 +231,7 @@ def main():
         test_load_warns_on_parse_error,
         test_classify_prefers_remote_url_over_cwd,
         test_classify_adversarial_inputs,
+        test_default_hermes_cron_jobs_hand_the_cards_to_hermes,
     ]
     for t in tests:
         t()

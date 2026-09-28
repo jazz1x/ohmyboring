@@ -39,6 +39,7 @@ import io
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -1228,6 +1229,157 @@ class RulesRouteTests(unittest.TestCase):
                 }
             ],
         )
+
+
+class RunCardRouteTests(unittest.TestCase):
+    """POST /run/morning-card · /run/weekly-card — the door runs the card programs as
+    subprocesses (stubbed here) and answers {ok, exit, posted_ts?, tail}. Covered: a healthy
+    run, a non-zero exit surfacing as ok:false with the code (never hidden), the tool's
+    "already posted" line parsing into posted_ts, a timeout, and one run at a time per route
+    (a second call while one runs is 409)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                with socket.create_connection(("127.0.0.1", cls.door_port), timeout=1):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+
+    def test_a_healthy_run_answers_ok_with_the_ts(self):
+        calls = []
+
+        def fake_run(script, timeout_s):
+            calls.append((script, timeout_s))
+            return subprocess.CompletedProcess(
+                ["x"], 0, stdout="[card] posted ts=1727480000.000100\n", stderr=""
+            )
+
+        with mock.patch.object(door, "_run_card_subprocess", fake_run):
+            status, body, content_type = _req(self.door_port, "POST", "/run/morning-card")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        payload = json.loads(body)
+        self.assertEqual(payload["ok"], True)
+        self.assertEqual(payload["exit"], 0)
+        self.assertEqual(payload["posted_ts"], "1727480000.000100")
+        self.assertIn("posted ts=", payload["tail"])
+        self.assertTrue(str(calls[0][0]).endswith(os.path.join("agents", "slack", "card.py")))
+
+    def test_the_weekly_route_runs_the_weekly_program(self):
+        calls = []
+
+        def fake_run(script, timeout_s):
+            calls.append(script)
+            return subprocess.CompletedProcess(["x"], 0, stdout="[weekly] posted ts=2.0\n", stderr="")
+
+        with mock.patch.object(door, "_run_card_subprocess", fake_run):
+            status, body, _ = _req(self.door_port, "POST", "/run/weekly-card")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["ok"], True)
+        self.assertEqual(payload["posted_ts"], "2.0")
+        self.assertTrue(
+            str(calls[0]).endswith(os.path.join("agents", "slack", "weekly_card.py")),
+            "the weekly route must execute the weekly poster, not the morning card",
+        )
+
+    def test_a_nonzero_exit_is_ok_false_with_the_code_and_tail(self):
+        """The mutation this kills: the route folding a failed card into ok:true — the exit
+        code and the tool's own refusal line must reach the caller verbatim."""
+
+        def fake_run(script, timeout_s):
+            return subprocess.CompletedProcess(
+                ["x"], 3, stdout="", stderr="[card] 카드 거부: 문이 응답하지 않음\n"
+            )
+
+        with mock.patch.object(door, "_run_card_subprocess", fake_run):
+            status, body, _ = _req(self.door_port, "POST", "/run/morning-card")
+        self.assertEqual(
+            status, 200, "the run completed — the tool's answer rides in the body, not the status"
+        )
+        payload = json.loads(body)
+        self.assertEqual(payload["ok"], False)
+        self.assertEqual(payload["exit"], 3)
+        self.assertIn("카드 거부", payload["tail"])
+        self.assertNotIn("posted_ts", payload)
+
+    def test_the_already_posted_line_still_carries_the_ts(self):
+        def fake_run(script, timeout_s):
+            return subprocess.CompletedProcess(
+                ["x"], 0, stdout="[card] already posted today (ts=1727480000.999900)\n", stderr=""
+            )
+
+        with mock.patch.object(door, "_run_card_subprocess", fake_run):
+            status, body, _ = _req(self.door_port, "POST", "/run/morning-card")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["ok"], True)
+        self.assertEqual(payload["exit"], 0)
+        self.assertEqual(payload["posted_ts"], "1727480000.999900")
+
+    def test_a_timeout_is_ok_false_with_a_null_exit(self):
+        def fake_run(script, timeout_s):
+            raise subprocess.TimeoutExpired(["x"], timeout_s)
+
+        with mock.patch.object(door, "_run_card_subprocess", fake_run):
+            status, body, _ = _req(self.door_port, "POST", "/run/weekly-card")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["ok"], False)
+        self.assertIsNone(payload["exit"])
+        self.assertIn("timeout", payload["error"])
+
+    def test_a_second_call_while_one_runs_is_409(self):
+        entered = threading.Event()
+        release = threading.Event()
+        results = []
+        results_lock = threading.Lock()
+
+        def slow_run(script, timeout_s):
+            entered.set()
+            release.wait(15)
+            return subprocess.CompletedProcess(["x"], 0, stdout="[card] posted ts=3.0\n", stderr="")
+
+        def fire():
+            result = _req(self.door_port, "POST", "/run/morning-card")
+            with results_lock:
+                results.append(result)
+
+        try:
+            with mock.patch.object(door, "_run_card_subprocess", slow_run):
+                first = threading.Thread(target=fire)
+                first.start()
+                self.assertTrue(entered.wait(10), "the first run never started")
+                fire()  # the second call lands while the first still holds the route
+                release.set()
+                first.join(10)
+        finally:
+            release.set()
+
+        self.assertEqual(len(results), 2)
+        statuses = sorted(r[0] for r in results)
+        self.assertEqual(statuses, [200, 409], f"one run completes, the concurrent one is refused: {results}")
+        by_status = {r[0]: json.loads(r[1]) for r in results}
+        self.assertEqual(by_status[409], {"error": "morning-card already running"})
+        self.assertEqual(by_status[200]["ok"], True)
+        self.assertEqual(by_status[200]["posted_ts"], "3.0")
 
 
 if __name__ == "__main__":

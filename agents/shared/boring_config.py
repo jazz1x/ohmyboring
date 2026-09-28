@@ -22,14 +22,28 @@ from omb_env import _in_container
 DEFAULT_ORIGIN = "personal"
 DEFAULT_NOTE_LANG = "auto"
 
-# The weekly now posts itself like the morning card (scripts/schedule-card.sh … weekly), so
-# the hermes job defaults to paused. A boring.json that lists the job still decides for itself.
+# The cards used to fire from host launchd (scripts/schedule-card.sh); hermes cron owns the
+# schedule now and asks the door to run the same programs (POST /run/{morning,weekly}-card).
+# Delivery stays local — the card programs post to Slack themselves, so hermes has nothing
+# to deliver. The old weekly-briefing job stays paused (#425): the weekly card posts itself.
 DEFAULT_HERMES_CRON_JOBS = {
+    "morning-card": {
+        "enabled": True,
+        "schedule": "0 8 * * *",
+        "script": "run-morning-card.py",
+        "deliver": "local",
+    },
+    "weekly-card": {
+        "enabled": True,
+        "schedule": "0 9 * * 1",
+        "script": "run-weekly-card.py",
+        "deliver": "local",
+    },
     "weekly-briefing": {
         "enabled": False,
         "schedule": "0 9 * * 1",
         "script": "weekly-briefing.py",
-    }
+    },
 }
 
 

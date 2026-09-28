@@ -81,6 +81,23 @@ class FakeSlackPost(types.ModuleType):
         return TS
 
 
+class FakeEventLog:
+    """Stands in for agents/shared/event_log.py inside weekly_card."""
+
+    def __init__(self):
+        self.recent: list[dict] = []
+        self.appended: list[tuple] = []
+        self.fail_append: OSError | None = None
+
+    def recent_events(self, limit, component=None, event_name=None, status=None):
+        return [dict(e) for e in self.recent]
+
+    def append_event(self, component, event, status, **fields):
+        if self.fail_append is not None:
+            raise self.fail_append
+        self.appended.append((component, event, status, fields))
+
+
 def load_weekly_card(fake_post: FakeSlackPost):
     sys.modules["slack_post"] = fake_post
     spec = importlib.util.spec_from_file_location("weekly_card_under_test", ROOT / "weekly_card.py")
@@ -91,20 +108,24 @@ def load_weekly_card(fake_post: FakeSlackPost):
     return module
 
 
-def run_main(weekly_card, fake_sub, env):
-    """main() with the given Slack env set, everything else cleared; returns (rc, out, err)."""
+def run_main(weekly_card, fake_sub, env, fake_events: FakeEventLog | None = None):
+    """main() with the given Slack env set, everything else cleared; returns (rc, out, err).
+    The event log is always faked (empty unless given) so the guard never reads a live engine."""
     saved = dict(os.environ)
     for key in ("SLACK_BOT_TOKEN", "SLACK_CARD_CHANNEL"):
         os.environ.pop(key, None)
     os.environ.update(env)
     out, err = io.StringIO(), io.StringIO()
     real_sub = weekly_card.subprocess
+    real_log = weekly_card.event_log
     weekly_card.subprocess = fake_sub
+    weekly_card.event_log = fake_events if fake_events is not None else FakeEventLog()
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = weekly_card.main()
     finally:
         weekly_card.subprocess = real_sub
+        weekly_card.event_log = real_log
         os.environ.clear()
         os.environ.update(saved)
     return rc, out.getvalue(), err.getvalue()
@@ -218,6 +239,61 @@ def test_a_slack_refusal_exits_1():
     assert rc == 1, err
     assert "channel_not_found" in err
     assert "posted" not in out
+
+
+def test_already_posted_this_week_stops_before_running_anything():
+    """The launchd→hermes handover guard: a weekly_card event for the current ISO week means
+    the other scheduler already posted — exit 0, one line, no child, no post. A mutant that
+    deletes the guard fails here: the child would run and the assertion on its calls fires."""
+    weekly_card = load_weekly_card(FakeSlackPost())
+    fake_sub = FakeSubprocess()
+    fake_events = FakeEventLog()
+    fake_events.recent = [{"event": "weekly_card", "week": weekly_card.this_week(), "ts": TS}]
+    rc, out, err = run_main(weekly_card, fake_sub, ENV, fake_events)
+    assert rc == 0, err
+    line = out.strip()
+    assert line.count("\n") == 0, f"one line, said so:\n{out}"
+    assert f"[weekly] already posted this week (ts={TS})" in line
+    assert fake_sub.calls == [], "the guard must stop the run before the child starts"
+    assert fake_events.appended == []
+
+
+def test_last_weeks_event_does_not_stop_this_weeks_run():
+    weekly_card = load_weekly_card(FakeSlackPost())
+    fake_sub = FakeSubprocess()
+    fake_events = FakeEventLog()
+    fake_events.recent = [{"event": "weekly_card", "week": "2020-W01", "ts": "1.0"}]
+    rc, out, err = run_main(weekly_card, fake_sub, ENV, fake_events)
+    assert rc == 0, err
+    assert f"[weekly] posted ts={TS}" in out
+    assert len(fake_sub.calls) == 1
+
+
+def test_a_successful_post_records_the_weekly_card_event():
+    """The guard's ledger: one weekly_card event per posted weekly, week label + ts, so the
+    second scheduler of the ISO week sees the card. A mutant that drops the recording fails
+    test_already_posted_this_week_stops_before_running_anything's fixture the other way."""
+    weekly_card = load_weekly_card(FakeSlackPost())
+    fake_sub = FakeSubprocess()
+    fake_events = FakeEventLog()
+    rc, _out, err = run_main(weekly_card, fake_sub, ENV, fake_events)
+    assert rc == 0, err
+    assert len(fake_events.appended) == 1
+    component, event, status, fields = fake_events.appended[0]
+    assert (component, event, status) == ("slack-card", "weekly_card", "ok")
+    assert fields["ts"] == TS
+    assert fields["week"] == weekly_card.this_week()
+
+
+def test_a_failed_event_write_does_not_fail_the_post():
+    weekly_card = load_weekly_card(FakeSlackPost())
+    fake_sub = FakeSubprocess()
+    fake_events = FakeEventLog()
+    fake_events.fail_append = OSError("spool read-only")
+    rc, out, err = run_main(weekly_card, fake_sub, ENV, fake_events)
+    assert rc == 0, "the card is already out — a lost ledger row is a line, not a failure exit"
+    assert f"[weekly] posted ts={TS}" in out
+    assert "weekly_card event not recorded" in err
 
 
 def test_the_blocks_themselves_render_bold_as_bold_with_a_header():

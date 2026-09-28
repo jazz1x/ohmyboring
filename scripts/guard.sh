@@ -86,6 +86,7 @@ python3 agents/schedulers/test_collectors.py
 python3 agents/codex/test_codex.py
 python3 agents/hermes/test_briefing_format.py
 python3 agents/hermes/test_ingest_worker.py
+python3 agents/hermes/test_card_triggers.py
 python3 agents/hermes/plugins/boring-card/test_boring_card.py
 python3 agents/slack/test_card_types.py
 python3 agents/slack/test_card_registers.py
