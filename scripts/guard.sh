@@ -11,6 +11,7 @@
 #   7b) sh-unit  — morning-card guardrails (doctor says whether the card went out)
 #   8) sh-unit   — provider/model guardrails (verify-llm embedding shape)
 #   9) sh-unit   — morning-card guardrails (failure notice to the owner's DM)
+#   10) sh-unit  — nightly-maintenance guardrails (doctor failure DM)
 # No bypassing (git commit --no-verify) — on failure, fix the root cause (don't paper over the symptom).
 set -eu
 PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/oh-my-boring-pyc}"
@@ -122,4 +123,6 @@ echo "8) shell LLM/provider guardrails (verify-llm)…"
 sh scripts/test_verify_llm.sh
 echo "9) shell morning-card guardrails (failure notice)…"
 sh scripts/test_schedule_card.sh
+echo "10) shell nightly-maintenance guardrails (doctor DM)…"
+sh scripts/test_schedule_maintenance.sh
 echo "✅ 구조 게이트 통과 — 컴파일러/clippy/test + Python adapters 무위반."
