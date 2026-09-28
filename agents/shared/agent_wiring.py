@@ -879,6 +879,11 @@ def _sync_hermes_cron_jobs() -> dict:
         # hermes has nothing to send) cannot drift back to a wrapped delivery. A job with no
         # declared deliver keeps the inherited default, the way it always did.
         declared_deliver = spec.get("deliver") if isinstance(spec.get("deliver"), str) else None
+        # A local job's failures also go nowhere unless failure_deliver names a target — managed
+        # the same way, so a card that did not go out still reaches the owner.
+        declared_failure = (
+            spec.get("failure_deliver") if isinstance(spec.get("failure_deliver"), str) else None
+        )
         state = "scheduled" if enabled else "paused"
 
         existing = next((j for j in jobs if j.get("name") == name), None)
@@ -889,6 +894,7 @@ def _sync_hermes_cron_jobs() -> dict:
                 or bool(existing.get("enabled", True)) != enabled
                 or existing.get("state") != state
                 or (declared_deliver is not None and existing.get("deliver") != declared_deliver)
+                or (declared_failure is not None and existing.get("failure_deliver") != declared_failure)
             )
             if needs_update:
                 existing["script"] = script
@@ -902,6 +908,8 @@ def _sync_hermes_cron_jobs() -> dict:
                 existing["state"] = state
                 if declared_deliver is not None:
                     existing["deliver"] = declared_deliver
+                if declared_failure is not None:
+                    existing["failure_deliver"] = declared_failure
                 if enabled:
                     existing["next_run_at"] = _next_cron_run(schedule, tz, now).isoformat()
                     existing["paused_at"] = None
@@ -938,6 +946,7 @@ def _sync_hermes_cron_jobs() -> dict:
                 "last_error": None,
                 "last_delivery_error": None,
                 "deliver": declared_deliver or _default_hermes_deliver(jobs),
+                **({"failure_deliver": declared_failure} if declared_failure is not None else {}),
                 "origin": None,
                 "enabled_toolsets": None,
                 "workdir": None,

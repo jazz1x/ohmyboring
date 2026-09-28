@@ -707,6 +707,7 @@ def test_sync_hermes_cron_jobs_creates_with_the_declared_deliver():
                     "schedule": "0 9 * * 1",
                     "script": "run-weekly-card.py",
                     "deliver": "local",
+                    "failure_deliver": "slack:D1",
                 }
             },
         ),
@@ -720,6 +721,7 @@ def test_sync_hermes_cron_jobs_creates_with_the_declared_deliver():
         saved = mock_save.call_args[0][1]
         job = next(j for j in saved["jobs"] if j["name"] == "weekly-card")
         assert job["deliver"] == "local"
+        assert job["failure_deliver"] == "slack:D1", "a local job must still send its failures somewhere"
         assert job["enabled"] is True
 
 
@@ -1089,4 +1091,6 @@ if __name__ == "__main__":
     test_ingest_worker_skips_session_inside_stability_window()
     test_sync_hermes_cron_jobs_repairs_blocked_absolute_worker_path()
     test_install_removes_a_hermes_codex_job_left_by_an_older_install()
+    test_sync_hermes_cron_jobs_a_declared_deliver_sticks_and_repairs_drift()
+    test_sync_hermes_cron_jobs_creates_with_the_declared_deliver()
     print("ok - agent_wiring failure propagation + hermes wiring + settings_path")

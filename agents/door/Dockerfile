@@ -8,7 +8,8 @@ WORKDIR /app
 # psycopg for the door itself, langgraph/langchain/slack-sdk/pydantic for the card programs
 # the POST /run/* routes execute as subprocesses (installed into the image, not mounted).
 COPY requirements.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# requirements.txt names bare psycopg; the slim image has no libpq, so the door needs the binary wheel.
+RUN pip install --no-cache-dir -r requirements.txt "psycopg[binary]>=3.2"
 
 COPY agents/door/ agents/door/
 COPY agents/slack/ agents/slack/
