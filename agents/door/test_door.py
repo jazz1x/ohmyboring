@@ -41,6 +41,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -49,6 +50,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest import mock
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -82,6 +84,13 @@ TOOLS_LIST_BODY = (
     b'{"name":"alpha","inputSchema":{"type":"object"}},'
     b'{"name":"beta","inputSchema":{"type":"object"}},'
     b'{"name":"gamma","inputSchema":{"type":"object"}}]}}'
+)
+
+#: 엔진 recall 응답의 실측 모양(content-type application/json) — 문이 번호 블록을 앞에
+#: 붙이는 대상. "boom" 이 들어간 query 면 isError 답을 준다(통제군).
+RECALL_BODY = b'{"id":2,"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"- [wiki-2229.md] ..."}],"isError":false}}'
+RECALL_ERROR_BODY = (
+    b'{"id":2,"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"-32000 boom"}],"isError":true}}'
 )
 
 
@@ -121,7 +130,12 @@ class StubHandler(BaseHTTPRequestHandler):
         respond_as = STUB_CONTENT_TYPE
         if isinstance(parsed, dict) and "respond_as" in parsed:
             respond_as = parsed["respond_as"]
-        if isinstance(parsed, dict) and parsed.get("method") == "tools/list":
+        params = parsed.get("params") if isinstance(parsed, dict) else None
+        if isinstance(params, dict) and params.get("name") == "recall":
+            # The engine's tools/call recall answer: fixed body, "boom" in the query → isError.
+            error = "boom" in str(params.get("arguments", {}))
+            self._reply(200, RECALL_ERROR_BODY if error else RECALL_BODY, respond_as)
+        elif isinstance(parsed, dict) and parsed.get("method") == "tools/list":
             self._reply(200, TOOLS_LIST_BODY, respond_as)
         else:
             self._reply(200, body, respond_as)
@@ -392,6 +406,173 @@ class DoorTest(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertIn("closed", StubHandler.sse_events)
+
+
+class McpRecallAugmentTests(unittest.TestCase):
+    """POST /mcp tools/call recall — the door prepends numbered-note blocks (wiki-NNNN) to a
+    2xx application/json engine answer, read from the vault at BORING_VAULT_DIR. Pinned here:
+      - a numbered recall answers with 「- 노트 wiki-NNNN — <title>」 first, engine text after
+      - a missing number is said (「은 볼트에 없음」), engine answer still follows
+      - controls — recall without numbers, a non-recall tool, an isError answer, a non-JSON
+        upstream answer — travel byte-for-byte (the exact stub bytes come back)
+      - an unreadable vault costs one stderr line and the engine answer unchanged,
+        never a dead recall
+    """
+
+    _WIKI_2226 = """---
+id: wiki-2226
+title: '문이 회상 앞에 번호 노트를 붙인다'
+kind: note
+origin: personal
+date: 2026-09-29
+---
+
+첫째 문단 — 엔진 recall 은 검색이라 번호를 못 푼다.
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved_upstream = os.environ.get("DOOR_UPSTREAM")
+        cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), StubHandler)
+        cls.stub_thread = threading.Thread(target=cls.stub.serve_forever, daemon=True)
+        cls.stub_thread.start()
+        os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{cls.stub.server_address[1]}"
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                status, _, _ = _req(cls.door_port, "GET", "/health")
+                if status == 200:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+        cls.stub.shutdown()
+        cls.stub.server_close()
+        if cls._saved_upstream is None:
+            os.environ.pop("DOOR_UPSTREAM", None)
+        else:
+            os.environ["DOOR_UPSTREAM"] = cls._saved_upstream
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        vault = Path(self._tmp.name) / "vault"
+        (vault / "wiki").mkdir(parents=True)
+        (vault / "wiki" / "wiki-2226.md").write_text(self._WIKI_2226, encoding="utf-8")
+        self._saved_vault = os.environ.get("BORING_VAULT_DIR")
+        os.environ["BORING_VAULT_DIR"] = str(vault)
+        self.addCleanup(self._restore_vault)
+
+    def _restore_vault(self):
+        if self._saved_vault is None:
+            os.environ.pop("BORING_VAULT_DIR", None)
+        else:
+            os.environ["BORING_VAULT_DIR"] = self._saved_vault
+
+    def _recall(self, query: str):
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "recall", "arguments": {"query": query}},
+            }
+        ).encode()
+        return _req(
+            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+        )
+
+    def test_a_numbered_recall_leads_with_the_note_block(self):
+        status, body, content_type = self._recall("wiki-2226 봐")
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, STUB_CONTENT_TYPE)
+        text = json.loads(body)["result"]["content"][0]["text"]
+        self.assertTrue(
+            text.startswith("- 노트 wiki-2226 — 문이 회상 앞에 번호 노트를 붙인다\n  날짜: 2026-09-29"),
+            text[:120],
+        )
+        self.assertIn("첫째 문단 — 엔진 recall 은 검색이라 번호를 못 푼다.", text)
+        self.assertTrue(text.endswith("- [wiki-2229.md] ..."), "엔진 본문이 그 뒤에 그대로 와야 한다")
+
+    def test_a_missing_number_is_said_and_the_engine_answer_follows(self):
+        status, body, _ = self._recall("wiki-9999 봐")
+        self.assertEqual(status, 200)
+        text = json.loads(body)["result"]["content"][0]["text"]
+        self.assertTrue(text.startswith("- wiki-9999 은 볼트에 없음\n\n- [wiki-2229.md] ..."), text[:120])
+
+    def test_several_numbers_join_in_order(self):
+        _, body, _ = self._recall("wiki-9999 와 wiki-2226")
+        text = json.loads(body)["result"]["content"][0]["text"]
+        self.assertTrue(
+            text.startswith("- wiki-9999 은 볼트에 없음\n\n- 노트 wiki-2226 — 문이 회상 앞에"),
+            text[:160],
+        )
+
+    def test_a_recall_without_numbers_is_byte_identical(self):
+        status, body, content_type = self._recall("그냥 검색해줘")
+        self.assertEqual((status, body, content_type), (200, RECALL_BODY, STUB_CONTENT_TYPE))
+
+    def test_a_non_recall_tool_is_byte_identical(self):
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "search", "arguments": {"query": "wiki-2226"}},
+            }
+        ).encode()
+        status, body, _ = _req(
+            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, payload, "다른 도구의 답은 요청 바이트를 그대로 돌려받는다(에코 통제군)")
+
+    def test_an_error_answer_is_byte_identical(self):
+        status, body, _ = self._recall("boom wiki-2226")
+        self.assertEqual((status, body), (200, RECALL_ERROR_BODY))
+
+    def test_a_non_json_upstream_answer_is_byte_identical(self):
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "recall", "arguments": {"query": "wiki-2226"}},
+                "respond_as": "text/plain; charset=utf-8",
+            }
+        ).encode()
+        status, body, content_type = _req(
+            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, RECALL_BODY)
+        self.assertEqual(content_type, "text/plain; charset=utf-8")
+
+    def test_an_unreadable_vault_passes_the_answer_and_costs_one_log_line(self):
+        def boom(note_id):
+            raise OSError("vault mount gone")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf), mock.patch.object(door, "_note_block_for", boom):
+            status, body, _ = self._recall("wiki-2226")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, RECALL_BODY, "볼트 불응은 recall 을 죽이지 않는다 — 엔진 답 그대로")
+        lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 1, f"로그는 정확히 한 줄이어야 한다: {lines}")
+        self.assertIn("vault", lines[0])
 
 
 class ActiveProjectsRouteTests(unittest.TestCase):

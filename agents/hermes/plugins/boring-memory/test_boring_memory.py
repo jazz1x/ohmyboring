@@ -273,6 +273,14 @@ def test_a_message_with_nothing_to_recall_gets_no_context():
     assert not _FakeDrudgeClient.instances, "an unrecallable prompt must never reach the engine"
 
 
+def test_the_plugin_keeps_no_renderer_of_its_own():
+    """한 벌 원칙 — 번호 찾기와 노트 블록 렌더는 ohmyboring.recall.named 에만 있다(문도 같은
+    모듈을 쓴다). 플러그인에 옛 사본(_WIKI_TOKEN·_note_block·_frontmatter_value)이 남으면
+    두 벌이 어긋나기 시작하니까 실패로 못 박는다."""
+    for name in ("_WIKI_TOKEN", "_note_block", "_frontmatter_value", "_FRONTMATTER_FIELD", "_BODY_CHARS"):
+        assert not hasattr(PLUGIN, name), f"plugin must not keep its own copy: {name}"
+
+
 if __name__ == "__main__":
     test_the_import_path_stays_langchain_free()
     test_register_without_boring_home_registers_nothing()
@@ -282,4 +290,5 @@ if __name__ == "__main__":
     test_an_engine_down_returns_no_context_and_one_log_line()
     test_a_non_slack_platform_gets_no_context()
     test_a_message_with_nothing_to_recall_gets_no_context()
+    test_the_plugin_keeps_no_renderer_of_its_own()
     print("ok - boring-memory plugin: named notes, 없음 line, recall handover, dead-engine silence")

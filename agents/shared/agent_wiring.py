@@ -64,7 +64,7 @@ AGENTS = {
 
 DEFAULT_MCP_SERVER = {
     "type": "http",
-    "url": "http://localhost:7700/mcp",
+    "url": "http://localhost:7710/mcp",
 }
 
 CODEX_HOST_WORKER_LABEL = "com.ohmyboring.codex-ingest"
@@ -1112,7 +1112,7 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
     _backup(path)
 
     server_name = "ohmyboring"
-    url = "http://boring-drudge:7700/mcp"
+    url = "http://boring-door:7710/mcp"
     transport = "http"
 
     text = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -1310,7 +1310,7 @@ def main():
         help="Report hooks of ours registered more than once across every agent config",
     )
     parser.add_argument("--server-name", default="ohmyboring")
-    parser.add_argument("--server-url", default="http://localhost:7700/mcp")
+    parser.add_argument("--server-url", default="http://localhost:7710/mcp")
     parser.add_argument("--boring-home", default=BORING_HOME)
     args = parser.parse_args()
 

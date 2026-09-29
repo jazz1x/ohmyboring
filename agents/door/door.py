@@ -10,7 +10,12 @@ Only the headers the engine reads travel on (content-type, accept,
 mcp-session-id, x-request-id, x-boring-owner-token — carried as sent, checked
 only by the engine); the response carries the upstream content-type,
 or none at all when the engine sent none — never a default. Status code and
-body bytes come back exactly as sent. An answer whose content-type is
+body bytes come back exactly as sent — one named exception: a POST /mcp
+tools/call `recall` answer, 2xx application/json, gets numbered-note blocks
+prepended (query 안의 wiki-NNNN 마다 볼트 노트 블록이 content 앞에 — 엔진 recall 은
+검색이라 번호를 못 풀어 문이 이름을 푼다; see _augment_mcp_recall). Anything that is
+not exactly that gate — no numbers, another tool, isError, non-JSON, a stream —
+travels byte-for-byte. An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. An engine answer, 4xx
@@ -49,6 +54,7 @@ import asyncio
 import enum
 import hmac
 import http.client
+import importlib
 import json
 import os
 import re
@@ -67,7 +73,16 @@ import psycopg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..shared import vault_note
 from . import approved, claim_source, rules
+
+#: ohmyboring 은 이 저장소의 패키지 — 문 이미지가 `pip install --no-deps .` 로 깔고, 테스트는
+#: 루트를 sys.path 에 둔다. 이름을 문자열로 import 한다: scripts/test_python_deps.py 는
+#: 리터럴 import 문만 보고 requirements.txt 와 대조하는데, ohmyboring 은 그 목록에 올라갈
+#: 외부 배포가 아니라 이 저장소 안의 패키지라서 어느 쪽에도 속하지 않는다.
+mcp_recall = importlib.import_module("ohmyboring.entrypoints.http.mcp_recall")
+vault_notes = importlib.import_module("ohmyboring.adapters.vault")
+recall_named = importlib.import_module("ohmyboring.recall.named")
 
 _TIMEOUT = float(os.environ.get("DOOR_TIMEOUT", "130"))
 
@@ -133,13 +148,63 @@ async def _proxy(request: Request) -> Response:
         if name in request.headers
     }
     try:
-        return await asyncio.to_thread(_fetch, url, body, headers, request.method)
+        response = await asyncio.to_thread(_fetch, url, body, headers, request.method)
     except OSError:
         # URLError, ConnectionRefusedError, timeout — one class: the engine is gone.
         return JSONResponse(
             {"error": "engine unreachable", "upstream": _upstream()},
             status_code=502,
         )
+    if request.method == "POST" and request.url.path == "/mcp":
+        return _augment_mcp_recall(body, response)
+    return response
+
+
+#: 볼트 마운트 — compose 가 읽기 전용 /vault 를 싣고, 호스트·테스트는 BORING_VAULT_DIR 로
+#: 바꾼다(카드 프로그램이 쓰는 환경과 같은 escape hatch).
+_VAULT_ENV = "BORING_VAULT_DIR"
+_DEFAULT_VAULT_DIR = "/vault"
+
+
+def _vault_dir() -> str:
+    return os.environ.get(_VAULT_ENV) or _DEFAULT_VAULT_DIR
+
+
+def _note_block_for(note_id: str) -> str:
+    """번호 하나의 블록 — 볼트에서 노트 텍스트를 읽어(없으면 None) 공용 블록 렌더에 넘긴다.
+    볼트를 못 읽는 OSError 는 여기서 삼키지 않는다 — 호출자가 회상 자체를 죽이지 않게 받는다."""
+    text = vault_notes.read_note(_vault_dir(), note_id)
+    return recall_named.note_block(note_id, text, vault_note.split_frontmatter)
+
+
+def _augment_mcp_recall(body: bytes, response: Response) -> Response:
+    """POST /mcp 만 여기 지난다: 엔진이 2xx application/json 으로 성공한 tools/call recall
+    답이면 번호 노트 블록을 앞에 붙여 돌려준다. 나머지(본문이 JSON 객체가 아님·비 2xx·
+    JSON 아닌 content-type·번호 없음·recall 아닌 도구·isError)는 받은 바이트 그대로 — GET
+    /mcp 스트림은 애초에 이 분기에 안 들어온다."""
+    if not 200 <= response.status_code < 300:
+        return response
+    content_type = response.headers.get("content-type")
+    if content_type is None or not content_type.startswith("application/json"):
+        return response
+    try:
+        request_json = json.loads(body)
+        response_json = json.loads(response.body)
+    except (ValueError, UnicodeDecodeError):
+        return response
+    if not isinstance(request_json, dict) or not isinstance(response_json, dict):
+        return response
+    try:
+        augmented = mcp_recall.augment(request_json, response_json, _note_block_for)
+    except OSError as e:
+        # 볼트 불응은 회상을 죽이지 않는다 — hermes 플러그인과 같은 정책: 로그 한 줄, 엔진 답 그대로.
+        print(f"[door] recall note block skipped: vault unreadable: {e}", file=sys.stderr, flush=True)
+        return response
+    if augmented is response_json:
+        return response
+    return _pass_through(
+        response.status_code, json.dumps(augmented, ensure_ascii=False).encode("utf-8"), content_type
+    )
 
 
 def _load_routes() -> dict[str, list[str]]:

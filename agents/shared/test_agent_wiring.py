@@ -102,6 +102,26 @@ def test_default_path_when_no_override():
         assert agent_wiring._agent_path("claude-code") == Path(os.path.expanduser("~/.claude/settings.json"))
 
 
+def test_install_default_addresses_point_at_the_door():
+    """Slice 2 — every MCP address the installer defaults to is the door (:7710), never the
+    engine's direct port (:7700): the host default server and the --server-url fallback
+    (hermes' own URL is pinned in test_wire_hermes_installs_the_plugins_and_enables_them)."""
+    assert agent_wiring.DEFAULT_MCP_SERVER == {"type": "http", "url": "http://localhost:7710/mcp"}
+    captured = {}
+
+    def fake_install(enabled_agents, server_name, server_config, boring_home=None):
+        captured["server"] = server_config
+        return [], False
+
+    with (
+        mock.patch.object(agent_wiring.boring_config, "load", return_value={"agents": []}),
+        mock.patch.object(agent_wiring, "install", fake_install),
+        mock.patch.object(sys, "argv", ["agent_wiring.py", "--install"]),
+    ):
+        agent_wiring.main()
+    assert captured["server"] == {"type": "http", "url": "http://localhost:7710/mcp"}
+
+
 def test_wire_claude_code_adds_session_start():
     """Claude Code wiring adds a SessionStart recall hook alongside existing hooks."""
     with tempfile.TemporaryDirectory() as d:
@@ -524,6 +544,8 @@ def test_wire_hermes_installs_the_plugins_and_enables_them():
         # both plugins land in the enabled list, in HERMES_PLUGINS order after what was there
         assert "    - orca-status\n    - boring-card\n    - boring-memory\n" in text
         assert "pirate: 'Arrr!'" in text
+        # the MCP address this config gains is the door's, not the engine's direct port
+        assert "    url: http://boring-door:7710/mcp\n" in text
 
 
 def test_install_hermes_plugin_sweeps_the_first_generation_leftovers():
