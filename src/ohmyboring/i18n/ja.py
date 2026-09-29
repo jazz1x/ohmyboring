@@ -1,0 +1,44 @@
+"""Japanese display strings for the morning card — this file holds ja only."""
+
+from __future__ import annotations
+
+STRINGS: dict[str, str] = {
+    "card_title": "☀️ 今日の提案",
+    "button_do": "採用",
+    "button_defer": "保留",
+    "button_drop": "却下",
+    "verdict_do": "✓ 採用",
+    "verdict_defer": "… 保留",
+    "verdict_drop": "✕ 却下",
+    "confirmation_line": "過去の承認 {total} · 完了 {done} · 保留 {pending}",
+    "confirmation_unknown": " · 不明 {unknown}",
+    "overflow_line": "他{n}件（50ブロック上限）",
+    "todo_header": "今日やること",
+    "advice_header": "気になった点",
+    "repairs_headline": "残りグループ{remaining}",
+    "repairs_headline_with_merged": "残りグループ{remaining} · 昨日統合{merged}行",
+    "repair_tag_label": "表記を揃える",
+    "repair_body": "`{variant}` と書かれた{rows}行（ノート{notes}件）を\n{subject} に統合します",
+    "repair_button_do": "統合",
+    "repair_button_defer": "保留",
+    "repair_button_drop": "却下",
+    "repair_verdict_done": "✓ 統合 — 削除{deleted}行 · 再読込{reread}件",
+    "repair_verdict_failed": "✕ 統合失敗 — 削除{deleted}行 · 再読込{reread}件 · {reason}",
+    "repair_verdict_unanswered": "✕ 統合 応答なし — 行は既に削除された可能性あり、件数不明 · {reason}",
+    "repair_owner_held": " · そのままのオーナーノート{n}件: {notes}",
+    "review_header": "エージェントの判定",
+    "review_kind_used": "使ったノート",
+    "review_kind_contested": "間違ったノート",
+    "review_button_do": "合っている",
+    "review_button_drop": "ひっくり返す",
+    "review_verdict_agree": "✓ 合っている",
+    "review_verdict_flip": "↺ 反転 — 所有者の判定で{kind}",
+    "superseded_label": "置換済み",
+}
+
+REGISTER_LABELS: dict[str, str] = {
+    "recurrences": "再発",
+    "risks": "リスク",
+    "stalled": "滞留",
+    "next_actions": "次",
+}

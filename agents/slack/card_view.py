@@ -29,10 +29,13 @@ lanes apart by idx alone."""
 from __future__ import annotations
 
 import json
+import os
+import sys
 from collections.abc import Iterable
 
-import card_i18n
-from card_types import (
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
+
+from card_types import (  # noqa: E402
     CHOICES,
     ButtonVerdict,
     Confirmation,
@@ -48,6 +51,8 @@ from card_types import (
     RepairUnanswered,
     ReviewPress,
 )
+
+from ohmyboring.i18n import card as card_i18n  # noqa: E402
 
 #: Language-independent register glyphs — the words come from card_i18n.REGISTER_LABELS.
 REGISTER_ICONS: dict[str, str] = {

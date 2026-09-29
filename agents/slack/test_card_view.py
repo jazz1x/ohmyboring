@@ -11,10 +11,12 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 
-import card_i18n  # noqa: E402
 import card_types as cc  # noqa: E402
 import card_view as cv  # noqa: E402
+
+from ohmyboring.i18n import card as card_i18n  # noqa: E402
 
 # The happy path's candidate order is: f64_risk (priority) → wiki-0536 → wiki-0576 →
 # essential_mode → draft_wiring (recurrence sources are sorted, so 0536 precedes 0576).
