@@ -13,7 +13,7 @@ up: ## Setup + start (check Ollama, pull models, build, start everything)
 ollama: ## Ensure Ollama is running (start it in the background if possible)
 	./scripts/ensure-ollama.sh
 
-HERMES_IMAGE := $(shell sed -n 's/^ *image: \(hermes-agent:[^ ]*\).*/\1/p' docker-compose.yml)
+HERMES_IMAGE := $(shell sed -n 's/^ *HERMES_BASE: \(hermes-agent:[^ ]*\).*/\1/p' docker-compose.yml)
 HERMES_TAG := $(lastword $(subst :, ,$(HERMES_IMAGE)))
 
 hermes-build: ## Clone/build the optional hermes-agent image at the tag docker-compose.yml pins
@@ -26,6 +26,7 @@ hermes-build: ## Clone/build the optional hermes-agent image at the tag docker-c
 		&& { git rev-parse -q --verify "refs/tags/$(HERMES_TAG)" >/dev/null \
 			|| git fetch --no-tags origin "refs/tags/$(HERMES_TAG):refs/tags/$(HERMES_TAG)"; } \
 		&& git archive "$(HERMES_TAG)" | docker build -t "$(HERMES_IMAGE)" -
+	$(COMPOSE) build boring-agent
 
 down: ## Stop the whole stack, including Postgres when vector mode was used (keeps ./data)
 	@case "$$(printf '%s' "$${BORING_VECTOR:-off}" | tr '[:upper:]' '[:lower:]')" in \
@@ -34,7 +35,7 @@ down: ## Stop the whole stack, including Postgres when vector mode was used (kee
 	esac
 
 build: ## Build the compose images (boring-drudge + boring-door) and the host CLI binary (doctor checks the engine build_sha and the host CLI stamp against the checkout)
-	BUILD_SHA=$$(git rev-parse HEAD 2>/dev/null || true) $(COMPOSE) build
+	BUILD_SHA=$$(git rev-parse HEAD 2>/dev/null || true) $(COMPOSE) build boring-drudge boring-door
 	cd drudge && cargo build --release
 
 logs: ## engine logs

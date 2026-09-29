@@ -42,6 +42,7 @@ from resolution_quality import (  # noqa: E402
 
 from ohmyboring import config as boring_config  # noqa: E402
 from ohmyboring import config as omb_env  # noqa: E402
+from ohmyboring.distill import graph as distill_graph  # noqa: E402
 
 # BORING_HOME: repo clone location (default ~/oh-my-boring).
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
@@ -1085,6 +1086,162 @@ def _log_skip_event(session_id, origin, repo, resolution):
 BACKSTOP_CLAMP = transcript.distill_backstop_clamp()
 
 
+def _draft(state):
+    resolution = _distill_resolution()
+    prompt = _build_prompt(state["text"], state["origin"], state["repo"], resolution=resolution)
+    parsed = _call_llm(prompt)
+    # Language retry: note_lang=ko but the title came back with no Korean → the model ignored the
+    # language instruction (gemma is weak at language control). Re-ask ONCE with a corrective nudge;
+    # keep the retry only if it actually came back in Korean, else fall back to the original.
+    wants_language_retry = (
+        parsed is not None
+        and NOTE_LANG == "ko"
+        and bool(parsed.get("title", ""))
+        and not re.search(r"[가-힣]", parsed["title"])
+    )
+    return {
+        "resolution": resolution,
+        "prompt": prompt,
+        "parsed": parsed,
+        "wants_language_retry": wants_language_retry,
+    }
+
+
+def _skip(state):
+    print("[distill-session] LLM decided SKIP", file=sys.stderr)
+    _log_skip_event(state["session_id"], state["origin"], state["repo"], state["resolution"])
+    return {"ok": True}  # intentional skip → mark as done so we don't retry forever
+
+
+def _retry_language(state):
+    retry = _call_llm(
+        state["prompt"]
+        + "\n\n=== CORRECTION ===\nYour previous output was in English — that is WRONG. Re-emit the "
+        "SAME JSON object but with title, body, tags, and concepts ALL in Korean (한국어). Keep code, "
+        "IDs, and proper nouns verbatim."
+    )
+    if retry and re.search(r"[가-힣]", retry.get("title", "")):
+        print("[distill-session] language retry → Korean OK", file=sys.stderr)
+        return {"parsed": retry}
+    print("[distill-session] language retry failed — keeping original", file=sys.stderr)
+    return {}
+
+
+def _prepare(state):
+    return {"note": _prepare_note(state["parsed"])}
+
+
+def _verified(note, state):
+    note = _ensure_required_claim_kinds(note, state["resolution"], state["repo"])
+    note = _ensure_required_evidence_tokens(note, state["text"], state["resolution"])
+    report = verify_note_resolution(
+        {"title": note["title"], "body": note["body"], "claims": note["claims"]},
+        transcript=state["text"],
+        resolution=state["resolution"],
+    )
+    return note, report
+
+
+def _verify(state):
+    note, report = _verified(state["note"], state)
+    return {"note": note, "report": report, "verified": report.ok}
+
+
+def _repair_call(state):
+    report = state["report"]
+    print(
+        "[distill-session] resolution gate failed "
+        f"({report.resolution}): {', '.join(report.missing)}; "
+        f"claims={report.claim_count}; "
+        f"evidence={len(report.evidence_tokens_kept)}/{len(report.evidence_tokens_seen)}",
+        file=sys.stderr,
+    )
+    prompt = _build_repair_prompt(
+        state["text"], state["origin"], state["repo"], state["note"], report, state["resolution"]
+    )
+    return {"repaired": _call_llm(prompt)}
+
+
+def _repair_prepare(state):
+    return {"repaired_note": _prepare_note(state["repaired"])}
+
+
+def _repair_verify(state):
+    note, report = _verified(state["repaired_note"], state)
+    return {"repaired_note": note, "repaired_report": report, "repaired_verified": report.ok}
+
+
+def _repair_failed(state):
+    report = state["repaired_report"]
+    print(
+        "[distill-session] resolution repair failed "
+        f"({report.resolution}): {', '.join(report.missing)}; "
+        f"claims={report.claim_count}; "
+        f"evidence={len(report.evidence_tokens_kept)}/{len(report.evidence_tokens_seen)}",
+        file=sys.stderr,
+    )
+    _log_resolution_event(state["session_id"], state["origin"], state["repo"], report, "failed", "not_called")
+    return {"ok": False}
+
+
+def _repair_passed(state):
+    print("[distill-session] resolution repair passed", file=sys.stderr)
+    return {
+        "note": state["repaired_note"],
+        "report": state["repaired_report"],
+        "verifier_status": "repaired",
+    }
+
+
+def _give_up(state):
+    _log_resolution_event(
+        state["session_id"], state["origin"], state["repo"], state["report"], "failed", "not_called"
+    )
+    return {"ok": False}
+
+
+def _remember(state):
+    note = state["note"]
+    remember = _call_remember(
+        note["title"],
+        note["body"],
+        state["origin"],
+        state["repo"],
+        note["tags"],
+        note["tools"],
+        note["concepts"],
+        note["claims"],
+        state["session_id"],
+    )
+    _log_resolution_event(
+        state["session_id"],
+        state["origin"],
+        state["repo"],
+        state["report"],
+        state["verifier_status"],
+        remember.status,
+    )
+    return {"ok": remember.ok}
+
+
+_GRAPH = distill_graph.build(
+    distill_graph.Steps(
+        draft=_draft,
+        skip=_skip,
+        retry_language=_retry_language,
+        prepare=_prepare,
+        verify=_verify,
+        repair_call=_repair_call,
+        repair_prepare=_repair_prepare,
+        repair_verify=_repair_verify,
+        repair_passed=_repair_passed,
+        repair_failed=_repair_failed,
+        give_up=_give_up,
+        remember=_remember,
+    )
+)
+
+
 def distill_and_remember(text, origin, repo, session_id=""):
     """Distill the transcript text via local LLM and write it through ohmyboring's remember tool."""
     if len(text) > BACKSTOP_CLAMP:
@@ -1095,96 +1252,14 @@ def distill_and_remember(text, origin, repo, session_id=""):
             file=sys.stderr,
         )
 
-    resolution = _distill_resolution()
-    prompt = _build_prompt(text, origin, repo, resolution=resolution)
-    parsed = _call_llm(prompt)
-    if parsed is None:
-        return False
-    if parsed.get("skip"):
-        print("[distill-session] LLM decided SKIP", file=sys.stderr)
-        _log_skip_event(session_id, origin, repo, resolution)
-        return True  # intentional skip → mark as done so we don't retry forever
-
-    # Language retry: note_lang=ko but the title came back with no Korean → the model ignored the
-    # language instruction (gemma is weak at language control). Re-ask ONCE with a corrective nudge;
-    # keep the retry only if it actually came back in Korean, else fall back to the original.
-    if NOTE_LANG == "ko" and parsed.get("title", "") and not re.search(r"[가-힣]", parsed["title"]):
-        retry = _call_llm(
-            prompt
-            + "\n\n=== CORRECTION ===\nYour previous output was in English — that is WRONG. Re-emit the "
-            "SAME JSON object but with title, body, tags, and concepts ALL in Korean (한국어). Keep code, "
-            "IDs, and proper nouns verbatim."
-        )
-        if retry and re.search(r"[가-힣]", retry.get("title", "")):
-            parsed = retry
-            print("[distill-session] language retry → Korean OK", file=sys.stderr)
-        else:
-            print("[distill-session] language retry failed — keeping original", file=sys.stderr)
-
-    note = _prepare_note(parsed)
-    if note is None:
-        return False
-    note = _ensure_required_claim_kinds(note, resolution, repo)
-    note = _ensure_required_evidence_tokens(note, text, resolution)
-
-    report = verify_note_resolution(
-        {"title": note["title"], "body": note["body"], "claims": note["claims"]},
-        transcript=text,
-        resolution=resolution,
+    final = _GRAPH.invoke(
+        {
+            "text": text,
+            "origin": origin,
+            "repo": repo,
+            "session_id": session_id,
+            "verifier_status": "pass",
+            "ok": False,
+        }
     )
-    verifier_status = "pass"
-    if not report.ok:
-        print(
-            "[distill-session] resolution gate failed "
-            f"({report.resolution}): {', '.join(report.missing)}; "
-            f"claims={report.claim_count}; "
-            f"evidence={len(report.evidence_tokens_kept)}/{len(report.evidence_tokens_seen)}",
-            file=sys.stderr,
-        )
-        repaired = _call_llm(_build_repair_prompt(text, origin, repo, note, report, resolution))
-        if repaired is None or repaired.get("skip"):
-            _log_resolution_event(session_id, origin, repo, report, "failed", "not_called")
-            return False
-        repaired_note = _prepare_note(repaired)
-        if repaired_note is None:
-            _log_resolution_event(session_id, origin, repo, report, "failed", "not_called")
-            return False
-        repaired_note = _ensure_required_claim_kinds(repaired_note, resolution, repo)
-        repaired_note = _ensure_required_evidence_tokens(repaired_note, text, resolution)
-        repaired_report = verify_note_resolution(
-            {
-                "title": repaired_note["title"],
-                "body": repaired_note["body"],
-                "claims": repaired_note["claims"],
-            },
-            transcript=text,
-            resolution=resolution,
-        )
-        if not repaired_report.ok:
-            print(
-                "[distill-session] resolution repair failed "
-                f"({repaired_report.resolution}): {', '.join(repaired_report.missing)}; "
-                f"claims={repaired_report.claim_count}; "
-                f"evidence={len(repaired_report.evidence_tokens_kept)}/{len(repaired_report.evidence_tokens_seen)}",
-                file=sys.stderr,
-            )
-            _log_resolution_event(session_id, origin, repo, repaired_report, "failed", "not_called")
-            return False
-        note = repaired_note
-        report = repaired_report
-        verifier_status = "repaired"
-        print("[distill-session] resolution repair passed", file=sys.stderr)
-
-    remember = _call_remember(
-        note["title"],
-        note["body"],
-        origin,
-        repo,
-        note["tags"],
-        note["tools"],
-        note["concepts"],
-        note["claims"],
-        session_id,
-    )
-    _log_resolution_event(session_id, origin, repo, report, verifier_status, remember.status)
-    return remember.ok
+    return final["ok"]

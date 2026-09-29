@@ -20,15 +20,8 @@ slack-sdk>=3.27
 # The door lives outside hooks/ on purpose: hooks stay stdlib-only, a door may have dependencies.
 fastapi>=0.110
 uvicorn>=0.29
-# langgraph is the morning card's run loop (agents/slack/card.py) — one StateGraph that reads the
-# engine registers, posts the Slack card, interrupts for a human verdict, and resumes on the
-# button. langchain_core/langchain_ollama are the structured-output seam to the local model,
-# pydantic is the card value types' language (agents/slack/card_types.py). Underscores on
-# purpose: scripts/test_python_deps.py matches import names literally, and pip normalizes them anyway.
-langgraph>=1.2.10
-langchain_core>=1.5.3
-langchain_ollama>=1.1.0
-pydantic>=2.13.4
+# langgraph, langchain_core, langchain_ollama and pydantic are the core package's dependencies:
+# their versions live in pyproject.toml (`pip install .` brings them), not here.
 # psycopg is the door's first read of the store (agents/door/approved.py — what the morning
 # card's 「해」 judged). Bare name on purpose: scripts/test_python_deps.py matches import names
 # literally and knows no extra→distribution mapping; the Dockerfile installs psycopg[binary],

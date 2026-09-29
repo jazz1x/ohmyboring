@@ -18,6 +18,7 @@ reader that the dependency is load-bearing when it is not.
 import ast
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -108,8 +109,13 @@ def _declared() -> set[str]:
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
-        declared.add(line.split("==")[0].split(">=")[0].split("[")[0].strip().lower())
-    return declared
+        declared.add(_distribution(line))
+    core = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+    return declared | {_distribution(spec) for spec in core}
+
+
+def _distribution(spec: str) -> str:
+    return spec.split("==")[0].split(">=")[0].split("[")[0].strip().lower()
 
 
 def test_every_third_party_import_is_declared():
