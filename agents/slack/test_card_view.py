@@ -430,7 +430,7 @@ class CardV2ShapeTests(unittest.TestCase):
         )
         held_mark = next(b for b in held_judged if b["type"] == "context" and "합침" in _blocks_text([b]))
         self.assertIn("그대로 둔 소유자 노트 1: `/v/wiki-0001.md`", held_mark["elements"][0]["text"])
-        self.assertIn("✓ 합침 — 지운 행 5 · 다시 읽은 노트 2", mark["elements"][0]["text"])
+        self.assertIn("✓ 합침 — 지운 행 5 · 다시 읽는 노트 2", mark["elements"][0]["text"])
 
         # F2: a failed merge (door 502, sync error) still names the counts it committed —
         # never the plain "✓ 채택" mark, never silence.

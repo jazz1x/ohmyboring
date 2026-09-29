@@ -5,6 +5,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ## [Unreleased]
 
+### Fixed
+- **카드의 「이름 맞추기」가 끝난 합침을 실패로 알리던 것** — 문(`POST /repairs/split-subjects`)은 행을 지우고 커밋한 뒤 엔진의 볼트 전체 다시 읽기(`/sync`)를 130초 한도로 기다렸다. 실측(2026-09-29) 다시 읽기는 그보다 길어서, 이미 합쳐진 세 묶음이 「✕ 합침 실패」로 뜨고 버튼이 되살아났다(엔진 목록은 2,341→2,338 로 실제로 줄어 있었다). 이제 문은 커밋 직후 202 로 답하고(`sync: "started"`, 남은 표기 수는 아직 모름 = null) 다시 읽기·재집계·`subject_merged` 기록은 뒤에서 이어 간다. 다시 읽기가 실패하면 문 로그에 주어와 이유 한 줄. 카드 문구는 「다시 읽는 노트 n」. 시험: 문이 다시 읽기를 기다리는 변이, 실패 줄에서 주어·이유를 빼는 변이 각각 사망 확인.
+
 ### Added
 - **폴더 이름으로 잡힌 프로젝트를 새벽마다 알린다** — 체크아웃 폴더 이름이 원격 저장소 이름과 다르면 그 폴더에서 난 노트가 폴더 이름을 project 로 달고 들어온다(scenario-compiler 노트 16개가 `qa-tests`·`re-work` 로 갈라져 있었다). `scripts/data-steward.py --checkout-roots` 가 폴더 이름마다 원격 slug 집합을 모아(`re-work` 처럼 이름 하나가 저장소 둘에 걸리면 둘 다) 그 이름을 project 로 쓴 노트 수를 보고하고, `scripts/schedule-maintenance.sh run` 이 `~/Development:~/orca/workspaces` 로 돌려 걸린 게 있으면 DM 한 줄을 보낸다. 어느 저장소 것인지는 세션 cwd 를 봐야 알아서 `--fix` 는 고치지 않는다. 첫 라이브 실행 `atl-ez-cli(1)→oh-my-hands`, `gql-edge-proxy-poc(18)→mimir` 은 손으로 고쳐 지금 `[]`. 시험: 저장소 둘에 걸린 이름 하나, 이름당 마지막 slug 만 남기는 변이 사망 확인.
 - **비서가 우리 기억을 들고 답한다** — hermes 플러그인 `agents/hermes/plugins/boring-memory` 가 슬랙 DM 의 pre_llm_call 훅에 주인의 기억을 싣는다: 메시지가 이름 부른 `wiki-NNNN` 마다 볼트(/vault, 읽기 전용) 노트를 vault_note 분리기로 읽어 「노트 wiki-NNNN — <제목>」+날짜+본문 앞 800자를 싣고, 없는 노트는 「wiki-NNNN 은 볼트에 없음」이라 밝힌다(조용히 빠지는 일은 없다) — 그 뒤 메시지 전체로 recall_core 의 엔진 검색·서식을 그대로 돌려 그 hermes 세션에 handover 한다. 카드가 「쓴 노트 · wiki-2121」을 인용한 뒤 주인이 「wiki-2121 변경되었나요 ?」라 물었는데 모른다고 답한 사건(2026-09-28, tool_search 뒤로 밀린 MCP 도구를 모델이 보지 못해 자기 홈만 검색)의 대응. 엔진 불통·볼트 불읽음은 맥락 없음 + 로그 한 줄에 턴은 그대로 산다. 설치기(`agent_wiring.py`)의 HERMES_PLUGINS 목록에 올라 doctor (d5b2)가 설치본 둘을 체크아웃과 대조한다. 시험: 플러그인 8·배선 3·doctor 6 — 이름 있는 노트 찾기를 빼는 변이, 없음 줄을 삼키는 변이 각각 시험으로 사망 확인.

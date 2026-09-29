@@ -996,17 +996,24 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
             touched["event_owner_held"] = owner_held
             return "delivered"
 
+        def fake_reread_in_background(subject, deleted_rows, reread_notes, owner_held):
+            order.append("reread-started")
+            touched["reread_args"] = [subject, deleted_rows, reread_notes, owner_held]
+
         self._sync_result = {"ok": True, "summary": {"ingest_new": 0, "ingest_repaired": 2}}
+        self._orig_reread = door._reread_in_background
         door._split_subjects_connect = fake_connect
         door._fetch_split_subject_rows = fake_fetch
         door._call_engine_sync = fake_sync
         door._emit_subject_merged_event = fake_emit
+        door._reread_in_background = fake_reread_in_background
 
     def tearDown(self):
         door._split_subjects_connect = self._orig_connect
         door._fetch_split_subject_rows = self._orig_fetch
         door._call_engine_sync = self._orig_sync
         door._emit_subject_merged_event = self._orig_emit
+        door._reread_in_background = self._orig_reread
         if self._saved_dsn is None:
             os.environ.pop("DOOR_PG_DSN", None)
         else:
@@ -1036,57 +1043,57 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
         for token in (None, "wrong"):
             self._fetch_calls = 0
             status, body, _ = self._post("foodspring-front", token)
-            self.assertEqual(status, 200)
+            self.assertEqual(status, 202)
             out = json.loads(body)
             self.assertEqual(self.touched["delete"], ["/b.md"], f"token={token}")
             self.assertEqual(self.touched["update"], ["/b.md"], f"token={token}")
             self.assertEqual(out["owner_held"], ["/a.md"])
             self.assertEqual(out["deleted_rows"], 1)
-            self.assertEqual(out["remaining_variants"], 2)
-            self.assertEqual(self.touched["event_owner_held"], ["/a.md"])
+            self.assertEqual(self.touched["reread_args"], ["foodspring-front", 1, 1, ["/a.md"]])
 
         self._fetch_calls = 0
         status, body, _ = self._post("foodspring-front", "tok-owner")
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 202)
         self.assertEqual(
             self.touched["delete"], ["/a.md", "/b.md"], "control: the owner token merges owner rows"
         )
         self.assertEqual(json.loads(body)["owner_held"], [])
 
-    def test_order_unknown_subject_and_sync_failure(self):
+    def test_unknown_subject_and_answer_before_reread(self):
         # (a) unknown canon form — 404, nothing was touched
         status, body, _ = self._post("nobody-canonical")
         self.assertEqual(status, 404)
         self.assertIn("error", json.loads(body))
         self.assertEqual(self.order, [])
 
-        # (b) success — the stub cursor records DELETE, UPDATE, commit, the sync call and the
-        # recount, in that order
+        # (b) the answer comes once the merge is committed: the reread is started, not awaited —
+        # waiting on a whole-vault /sync past the door's timeout reported a done merge as failed
+        # and put its buttons back (2026-09-29)
         self._fetch_calls = 0
         status, body, _ = self._post("foodspring-front")
-        self.assertEqual(status, 200)
-        self.assertEqual(self.order, ["delete", "update", "commit", "sync", "event"])
+        self.assertEqual(status, 202)
+        self.assertEqual(self.order, ["delete", "update", "commit", "reread-started"])
         out = json.loads(body)
         self.assertEqual(out["deleted_rows"], 2)
         self.assertEqual(out["reread_notes"], 2)
-        self.assertEqual(out["remaining_variants"], 1)
-        self.assertEqual(out["sync"], {"ingest_new": 0, "ingest_repaired": 2})
-        self.assertEqual(out["event"], "delivered")
+        self.assertIsNone(out["remaining_variants"])
+        self.assertEqual(out["sync"], "started")
         self.assertEqual(self.touched["delete"], ["/a.md", "/b.md"])
         self.assertEqual(out["owner_held"], [])
 
-        # (c) a failing sync is a 502 whose body says so — but the delete/update/commit already
-        # ran, so the response still carries the (already-committed) row counts
+    def test_reread_recounts_and_records_or_says_it_failed(self):
+        self._fetch_calls = 1
+        door._reread_after_merge("foodspring-front", 2, 2, [])
+        self.assertEqual(self.order, ["sync", "event"])
+
         self.order.clear()
-        self._fetch_calls = 0
-        self._sync_result = {"ok": False, "error": "engine unreachable: connection refused"}
-        status, body, _ = self._post("foodspring-front")
-        self.assertEqual(status, 502)
-        out = json.loads(body)
-        self.assertEqual(out["deleted_rows"], 2)
-        self.assertEqual(out["reread_notes"], 2)
-        self.assertEqual(out["sync"], {"error": "engine unreachable: connection refused"})
-        self.assertEqual(self.order, ["delete", "update", "commit", "sync"])
+        self._sync_result = {"ok": False, "error": "engine unreachable: timed out"}
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            door._reread_after_merge("foodspring-front", 2, 2, [])
+        self.assertEqual(self.order, ["sync"], "no subject_merged event for a reread that did not happen")
+        self.assertIn("foodspring-front", buf.getvalue())
+        self.assertIn("timed out", buf.getvalue())
 
 
 class EmitSubjectMergedEventTests(unittest.TestCase):

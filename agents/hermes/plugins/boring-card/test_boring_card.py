@@ -525,7 +525,7 @@ def test_a_repair_done_value_marks_the_row_with_the_doors_numbers():
     _, channel, ts, updated = updates[0]
     assert (channel, ts) == (CARD_CH, CARD_TS)
     _assert_single_row_marked(BLOCKS, updated, 0)
-    assert "✓ 합침 — 지운 행 5 · 다시 읽은 노트 2" in json.dumps(updated, ensure_ascii=False)
+    assert "✓ 합침 — 지운 행 5 · 다시 읽는 노트 2" in json.dumps(updated, ensure_ascii=False)
 
 
 if __name__ == "__main__":
