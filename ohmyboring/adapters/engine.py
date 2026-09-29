@@ -5,14 +5,15 @@ Centralizes retries, timeouts, and JSON parsing so Python adapters (recall,
 distillation, schedulers, diagnostics) stop duplicating urllib boilerplate.
 
 I/O 실패는 예외 대신 `EngineFailure` 값으로 돌아온다 — `Unreachable`(연결·타임아웃·
-재시도 소진), `Refused`(엔진이 4xx/5xx 로 답함), `NotWritable`(/health 가 쓰기
-불가를 알림). 모든 공개 메서드는 `Either[값, EngineFailure]` 를 돌려주고 부르는 쪽이
+재시도 소진·소켓 끊김), `Refused`(엔진이 4xx/5xx 로 답함), `Malformed`(200 인데 JSON 이
+아님), `NotWritable`(/health 가 쓰기 불가를 알림). 모든 공개 메서드는 `Either[값, EngineFailure]` 를 돌려주고 부르는 쪽이
 match 한 자리에서 접는다. 소비 표시(`ConsumptionMarks`)는 `Verdict`/`PathMarks`
 합 타입이라 둘을 같이 주는 호출 모양 자체가 없다.
 """
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import time
@@ -90,10 +91,21 @@ class Refused:
     """엔진이 4xx/5xx 로 답했다 — 응답 본문을 담는다."""
 
     status: int
+    reason: str
     body: str
 
     def __str__(self) -> str:
-        return f"HTTP Error {self.status}: {self.body}"
+        return f"HTTP Error {self.status}: {self.reason}"
+
+
+@dataclass(frozen=True)
+class Malformed:
+    """엔진이 답했으나 해독할 수 없다 — 200 인데 JSON 이 아니거나 UTF-8 이 아님."""
+
+    detail: str
+
+    def __str__(self) -> str:
+        return self.detail
 
 
 @dataclass(frozen=True)
@@ -107,7 +119,7 @@ class NotWritable:
 
 
 #: 엔진 어댑터의 실패 한 벌 — 모든 공개 메서드의 Err 변형.
-EngineFailure = Unreachable | Refused | NotWritable
+EngineFailure = Unreachable | Refused | Malformed | NotWritable
 
 
 #: frozen 이라 여러 호출이 기본값을 같이 써도 안전 — 서명 기본값은 모듈 싱글턴으로 둔다
@@ -175,7 +187,8 @@ class DrudgeClient:
         """One JSON request with the client's retry budget — Either 로 답한다.
 
         5xx·연결·타임아웃은 남은 재시도를 쓰고, 그래도 실패하면 `Refused`/`Unreachable` 로
-        돌아온다. 재시도·타임아웃 값은 옛 `_retry` 와 같다.
+        돌아온다. 소켓 끊김은 재시도 없이 `Unreachable`, 해독 실패는 `Malformed`. 재시도·타임아웃
+        값은 옛 `_retry` 와 같다.
         """
         for attempt in range(self.retries + 1):
             try:
@@ -184,12 +197,16 @@ class DrudgeClient:
                 if 500 <= e.code < 600 and attempt < self.retries:
                     time.sleep(1 << attempt)
                     continue
-                return Err(Refused(e.code, _error_body(e)))
+                return Err(Refused(e.code, str(e.reason), _error_body(e)))
             except (urllib.error.URLError, TimeoutError) as e:
                 if attempt < self.retries:
                     time.sleep(1 << attempt)
                     continue
                 return Err(Unreachable(str(e)))
+            except (OSError, http.client.HTTPException) as e:
+                return Err(Unreachable(str(e)))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                return Err(Malformed(str(e)))
         return Err(Unreachable("retry loop ended without sending a request"))
 
     def search(
@@ -319,14 +336,12 @@ def check_drudge_writable(client: DrudgeClient | None = None) -> Either[None, No
     client = client or DrudgeClient()
     match client.health():
         case Ok(health):
-            pass
-        case Err(Unreachable(detail)):
-            return Err(NotWritable(f"drudge /health unreachable: {detail}"))
-        case Err(Refused(status, body)):
-            return Err(NotWritable(f"drudge /health unreachable: HTTP Error {status}: {body}"))
-        case Err(NotWritable(detail)):
-            return Err(NotWritable(detail))
+            return _judge_health(health)
+        case Err(failure):
+            return Err(NotWritable(f"drudge /health unreachable: {failure}"))
 
+
+def _judge_health(health: dict[str, Any]) -> Either[None, NotWritable]:
     if health.get("db_healthy") is False:
         return Err(NotWritable("drudge reports db_healthy=false — postgres is degraded, writes would fail"))
     if "db_healthy" in health and health.get("status") == "degraded":

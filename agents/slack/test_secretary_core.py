@@ -4,8 +4,11 @@
 Run: python3 agents/slack/test_secretary_core.py
 """
 
+import json
 import os
 import sys
+import urllib.request
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
@@ -360,6 +363,59 @@ def test_correct_survives_a_dead_engine():
 
     out = sc.correct("slack:C123:1.000", "질문", ["/vault/wiki/wiki-0435.md"], "정정: 무언가", remember=boom)
     assert out == {"error": "refused"}
+
+
+class _Wire:
+    def __init__(self, raw: bytes):
+        self._raw = raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._raw
+
+
+def _live(answer):
+    """live 경로(search=None 등)를 진짜 DrudgeClient 로 타게 한다 — urlopen 만 가짜."""
+
+    def fake(req, timeout):
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    return mock.patch.object(urllib.request, "urlopen", fake)
+
+
+def test_live_answer_folds_an_engine_reply_that_is_not_json_into_engine_down():
+    with _live(_Wire(b"<html>bad gateway</html>")):
+        assert sc.answer("엔진이 헛소리를 한다").text == sc.ENGINE_DOWN
+
+
+def test_live_answer_renders_the_hits_of_an_ok_reply():
+    hits = {"hits": [_hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3)]}
+    with _live(_Wire(json.dumps(hits).encode())):
+        answer = sc.answer("브랜치 이름 규칙이 뭐였지")
+    assert [h["source_path"] for h in answer.hits] == ["/vault/wiki/wiki-0435.md"]
+
+
+def test_live_feedback_folds_a_reset_into_the_old_error_dict():
+    reset = ConnectionResetError(104, "Connection reset by peer")
+    with _live(reset):
+        assert sc.feedback("slack:C123:x", "used") == {"error": str(reset)}
+
+
+def test_live_feedback_reads_an_ok_reply_like_the_injected_path():
+    with _live(_Wire(json.dumps({"used": 0, "contested": 0, "unknown": []}).encode())):
+        assert sc.feedback("slack:C123:x", "used")["unknown_answer"] is True
+
+
+def test_live_remember_handed_survives_a_reply_that_is_not_json():
+    with _live(_Wire(b"oops")):
+        assert sc.remember_handed("slack:C123:x", "질문", [_hit("wiki-0435.md", "x y z")]) is False
 
 
 if __name__ == "__main__":

@@ -56,13 +56,12 @@ from retriever import BoringRetriever  # noqa: E402
 def _live_fetch(path: str, project: str) -> dict[str, Any]:
     # project is always sent, even "" — the engine's own filter treats an explicit empty
     # string as "unassigned documents only", not "no filter" (measured 2026-09-22).
-    # request() 는 Either 로 답하고, 이 바늘의 계약은 그대로 raise-on-failure — 그래프가
-    # engine 불통을 카드 거부(exit 3) 한 줄로 접는다(card.py 의 except 가 그 계약의 주인).
+    # Err→예외는 카드 그래프가 예외를 계약으로 삼는 동안의 임시 경계(card.py 의 except 가 주인).
     match DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).request("POST", path, {"project": project}):
         case Ok(payload):
             return payload
         case Err(failure):
-            raise OSError(f"engine fetch {path} failed: {failure}")
+            raise OSError(str(failure))
 
 
 def _door_json(url: str) -> Any:
@@ -172,12 +171,12 @@ def _live_past_verdicts(since_hours: int) -> PastCardHistory:
 
 
 def _live_handover(session: str, at: str, paths: list[str]) -> dict:
-    # handover 바늘도 raise-on-failure 계약 — 실패한 카드는 게시되지 않는다(card.py: exit 3).
+    # Err→예외는 카드 그래프가 예외를 계약으로 삼는 동안의 임시 경계 — 실패한 카드는 게시되지 않는다.
     match DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).handover(session, at, paths):
         case Ok(resp):
             return resp
         case Err(failure):
-            raise OSError(f"handover failed: {failure}")
+            raise OSError(str(failure))
 
 
 def _live_resolve(subject: str, register: str) -> ResolvedNote | Unresolved:

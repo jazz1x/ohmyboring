@@ -87,13 +87,12 @@ def _live_consumption(session: str, kind: str, paths: list[str]) -> dict:
     # the engine demands for that word.
     at = datetime.now(UTC).isoformat()
     marks = PathMarks(used=paths, judge=OWNER) if kind == "used" else PathMarks(contested=paths, judge=OWNER)
-    # 이 바늘의 계약은 raise-on-failure — run() 이 예외에 effect 표시를 달아 프레스 폴드가
-    # 한 줄로 접는다. 조용한 걸기는 반만 일어난 프레스다.
+    # Err→예외는 카드 그래프가 예외를 계약으로 삼는 동안의 임시 경계 — 조용한 걸기는 반만 일어난 프레스다.
     match DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(session, at, marks):
         case Ok(resp):
             return resp
         case Err(failure):
-            raise OSError(f"consumption failed: {failure}")
+            raise OSError(str(failure))
 
 
 def _door_failure(subject: str, code: int, body: bytes) -> RepairFailed | RepairUnanswered:

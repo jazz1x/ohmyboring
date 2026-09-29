@@ -27,7 +27,7 @@ import omb_env  # noqa: E402
 from vault_note import split_frontmatter  # noqa: E402
 
 from ohmyboring.adapters.engine import DrudgeClient  # noqa: E402
-from ohmyboring.result import Err, Ok  # noqa: E402
+from ohmyboring.result import Err, Ok, bind  # noqa: E402
 
 #: How much of a note the judge sees. Long enough to decide, short enough that a local model
 #: answers in seconds; the note's own opening carries its subject.
@@ -147,11 +147,13 @@ def audit_scan_depth(client, requested):
     depth this function invented would be a number with no evidence behind it. Engine
     failures ride Err back to main's single fold.
     """
-    match fetch(client, "/recall-labels", 5000):
-        case Err(failure):
-            return Err(failure)
-        case Ok(labels_raw):
-            labels = (labels_raw or {}).get("entries") or []
+    return bind(
+        fetch(client, "/recall-labels", 5000),
+        lambda labels_raw: _depth_for_labels(client, requested, (labels_raw or {}).get("entries") or []),
+    )
+
+
+def _depth_for_labels(client, requested, labels):
     judged = {
         (row.get("query_log_id"), row.get("hit_index"))
         for row in labels
@@ -165,23 +167,26 @@ def audit_scan_depth(client, requested):
     outstanding = [qid for qid, _ in (judged - audited) if isinstance(qid, int)]
     if not outstanding:
         return Ok(requested)
-    match fetch(client, "/query-log", 1):
-        case Err(failure):
-            return Err(failure)
-        case Ok(newest_raw):
-            newest = (newest_raw or {}).get("entries") or []
+    return bind(
+        fetch(client, "/query-log", 1),
+        lambda newest_raw: Ok(
+            _depth_reaching(requested, min(outstanding), (newest_raw or {}).get("entries") or [])
+        ),
+    )
+
+
+def _depth_reaching(requested, oldest_outstanding, newest):
     newest_id = newest[0].get("id") if newest else None
     if not isinstance(newest_id, int):
-        return Ok(requested)
-    return Ok(max(requested, newest_id - min(outstanding) + 1))
+        return requested
+    return max(requested, newest_id - oldest_outstanding + 1)
 
 
 def run_judge(client, args):
-    match load(client, args.scan):
-        case Err(failure):
-            return Err(failure)
-        case Ok((entries, labels)):
-            pass
+    return bind(load(client, args.scan), lambda loaded: _judge(client, args, *loaded))
+
+
+def _judge(client, args, entries, labels):
     samples = label_core.select_samples(
         entries, labels, judge=label_core.JUDGE_LLM, max_queries=args.queries, max_hits=args.hits
     )
@@ -222,18 +227,16 @@ def run_judge(client, args):
 
 
 def run_audit(client, args):
-    match audit_scan_depth(client, args.scan):
-        case Err(failure):
-            return Err(failure)
-        case Ok(depth):
-            pass
+    return bind(audit_scan_depth(client, args.scan), lambda depth: _audit_at(client, args, depth))
+
+
+def _audit_at(client, args, depth):
     if depth > args.scan:
         print(f"[label-recall] scanning {depth} rows to reach the oldest hit awaiting a person")
-    match load(client, depth):
-        case Err(failure):
-            return Err(failure)
-        case Ok((entries, labels)):
-            pass
+    return bind(load(client, depth), lambda loaded: _audit(client, args, *loaded))
+
+
+def _audit(client, args, entries, labels):
     llm_verdicts = {
         (row["query_log_id"], row["hit_index"]): row["verdict"]
         for row in labels

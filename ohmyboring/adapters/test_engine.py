@@ -21,6 +21,7 @@ Mutation targets: search 가 related=0 일 때 related 키를 넣는 변이, ver
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import sys
@@ -38,6 +39,7 @@ for path in (ROOT, ROOT / "agents" / "shared"):
 from ohmyboring.adapters.engine import (  # noqa: E402
     ConsumptionMarks,
     DrudgeClient,
+    Malformed,
     NoteProvenance,
     NotWritable,
     PathMarks,
@@ -106,12 +108,24 @@ class CheckDrudgeWritableTest(unittest.TestCase):
                 self.fail(f"expected Err(NotWritable), got {other!r}")
 
     def test_blocks_when_health_is_refused(self):
-        client = _FakeClient(error=Refused(503, "maintenance"))
+        client = _FakeClient(error=Refused(503, "Service Unavailable", "maintenance"))
         match check_drudge_writable(client):
             case Err(NotWritable(detail)):
                 self.assertIn("unreachable", detail)
             case other:
                 self.fail(f"expected Err(NotWritable), got {other!r}")
+
+    def test_a_health_that_is_not_json_blocks_with_the_old_message(self):
+        class _Html(_FakeResponse):
+            def read(self):
+                return b"<html>bad gateway</html>"
+
+        with mock.patch.object(urllib.request, "urlopen", return_value=_Html()):
+            result = check_drudge_writable(DrudgeClient(base_url="http://drudge.test", retries=0))
+        self.assertEqual(
+            result,
+            Err(NotWritable("drudge /health unreachable: Expecting value: line 1 column 1 (char 0)")),
+        )
 
     def test_defaults_to_a_real_client_when_none_is_given(self):
         from ohmyboring.result import Ok
@@ -145,8 +159,8 @@ class RequestFailureTest(unittest.TestCase):
         with mock.patch.object(urllib.request, "urlopen", side_effect=exc):
             result = DrudgeClient(base_url="http://drudge.test", retries=0).request("POST", "/search", {})
         match result:
-            case Err(Refused(status, body)):
-                self.assertEqual(status, 403)
+            case Err(Refused(status, reason, body)):
+                self.assertEqual((status, reason), (403, "Forbidden"))
                 self.assertEqual(body, '{"error":"no"}')
             case other:
                 self.fail(f"expected Err(Refused), got {other!r}")
@@ -157,10 +171,58 @@ class RequestFailureTest(unittest.TestCase):
             result = DrudgeClient(base_url="http://drudge.test", retries=1).request("POST", "/search", {})
         self.assertEqual(urlopen.call_count, 2, "5xx 는 남은 재시도를 쓴다")
         match result:
-            case Err(Refused(status, body)):
+            case Err(Refused(status, _reason, body)):
                 self.assertEqual((status, body), (500, "down"))
             case other:
                 self.fail(f"expected Err(Refused), got {other!r}")
+
+    def test_failure_strings_equal_the_old_exception_strings(self):
+        """로그 문구 보존 — 부르는 쪽이 옛 str(예외) 로 남기던 줄이 그대로 나온다."""
+        http_exc = urllib.error.HTTPError(
+            "http://drudge.test/health", 503, "Service Unavailable", {}, io.BytesIO(b"maintenance")
+        )
+        url_exc = urllib.error.URLError("connection refused")
+        reset_exc = ConnectionResetError(104, "Connection reset by peer")
+        hangup_exc = http.client.RemoteDisconnected("Remote end closed connection without response")
+        cases = (http_exc, url_exc, reset_exc, hangup_exc)
+        for exc in cases:
+            with mock.patch.object(urllib.request, "urlopen", side_effect=exc):
+                result = DrudgeClient(base_url="http://drudge.test", retries=0).request("GET", "/health")
+            match result:
+                case Err(failure):
+                    self.assertEqual(str(failure), str(exc))
+                case other:
+                    self.fail(f"expected Err for {exc!r}, got {other!r}")
+        self.assertEqual(str(http_exc), "HTTP Error 503: Service Unavailable")
+
+    def test_a_socket_reset_is_unreachable_and_is_not_retried(self):
+        reset = ConnectionResetError(104, "Connection reset by peer")
+        with mock.patch.object(urllib.request, "urlopen", side_effect=reset) as urlopen:
+            result = DrudgeClient(base_url="http://drudge.test", retries=3).request("GET", "/health")
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(result, Err(Unreachable(str(reset))))
+
+    def test_a_200_that_is_not_json_is_malformed_with_the_old_decoder_message(self):
+        class _Html(_FakeResponse):
+            def read(self):
+                return b"<html>bad gateway</html>"
+
+        with mock.patch.object(urllib.request, "urlopen", return_value=_Html()):
+            result = DrudgeClient(base_url="http://drudge.test", retries=0).request("GET", "/health")
+        self.assertEqual(result, Err(Malformed("Expecting value: line 1 column 1 (char 0)")))
+
+    def test_a_200_that_is_not_utf8_is_malformed(self):
+        class _Latin1(_FakeResponse):
+            def read(self):
+                return b"\xff\xfe"
+
+        with mock.patch.object(urllib.request, "urlopen", return_value=_Latin1()):
+            result = DrudgeClient(base_url="http://drudge.test", retries=0).request("GET", "/health")
+        match result:
+            case Err(Malformed(detail)):
+                self.assertIn("utf-8", detail)
+            case other:
+                self.fail(f"expected Err(Malformed), got {other!r}")
 
     def test_no_raise_escapes_the_adapter_on_io_failure(self):
         from ohmyboring.result import Err, Ok

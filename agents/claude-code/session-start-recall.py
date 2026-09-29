@@ -85,11 +85,12 @@ def main() -> None:
 
     match client.context(project=project or None, max_items=5):
         case Ok(resp):
-            pass
+            _emit(resp, project)
         case Err(failure):
             print(f"[omb-start-recall] context failed: {failure}", file=sys.stderr)
-            return
 
+
+def _emit(resp: dict[str, Any], project: str) -> None:
     sections: list[str] = []
     try:
         sections.append(_approved_section(omb_env.door_url().rstrip("/")))

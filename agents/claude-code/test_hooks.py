@@ -29,6 +29,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -635,6 +636,76 @@ class RecallFormattingTests(unittest.TestCase):
             )
         self.assertIn("additionalContext", out, "the context still reaches the prompt")
         self.assertIn("[omb-recall] handover failed", err)
+
+    # ── 엔진이 200 비JSON 이나 소켓 끊김으로 답해도 옛 줄 그대로, 훅은 죽지 않는다 ──────────
+    def _run_main_over_wire(self, engine_answers):
+        """진짜 DrudgeClient 로 돌린다 — urlopen 만 가짜. `engine_answers(path)` 가 응답 객체를
+        내놓거나 예외 객체를 내놓는다(예외면 던진다)."""
+
+        def fake_urlopen(req, timeout):
+            answer = engine_answers(req.full_url.rsplit("/", 1)[-1])
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        captured, stderr = io.StringIO(), io.StringIO()
+        stdin = {"prompt": "a sufficiently long prompt", "session_id": "s-wire"}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"BORING_INJECTION_LEDGER": os.path.join(tmp, "l.jsonl")}),
+            mock.patch.object(recall.sys, "stdin", io.StringIO(json.dumps(stdin))),
+            mock.patch.object(urllib.request, "urlopen", fake_urlopen),
+            mock.patch.object(recall.sys, "stdout", captured),
+            mock.patch.object(recall.sys, "stderr", stderr),
+            mock.patch.object(recall_core.sys, "stderr", stderr),
+        ):
+            recall.main()
+        return captured.getvalue(), stderr.getvalue()
+
+    class _Body:
+        def __init__(self, raw: bytes):
+            self._raw = raw
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return self._raw
+
+    def _hits_then(self, handover_answer):
+        hits = {"hits": [{"source_path": "/vault/wiki/wiki-0001.md", "snippet": "x y z"}]}
+
+        def answers(path):
+            return self._Body(json.dumps(hits).encode()) if path == "search" else handover_answer
+
+        return answers
+
+    def test_a_handover_answered_with_non_json_keeps_the_context_and_the_old_line(self):
+        old = json.JSONDecodeError("Expecting value", "<html>", 0)
+        out, err = self._run_main_over_wire(self._hits_then(self._Body(b"<html>bad gateway</html>")))
+        self.assertIn("additionalContext", out)
+        self.assertIn(f"[omb-recall] handover failed: {old}", err)
+
+    def test_a_handover_reset_by_the_peer_keeps_the_context_and_the_old_line(self):
+        reset = ConnectionResetError(104, "Connection reset by peer")
+        out, err = self._run_main_over_wire(self._hits_then(reset))
+        self.assertIn("additionalContext", out)
+        self.assertIn(f"[omb-recall] handover failed: {reset}", err)
+
+    def test_a_search_answered_with_non_json_is_a_silent_noop_with_the_old_line(self):
+        old = json.JSONDecodeError("Expecting value", "<html>", 0)
+        out, err = self._run_main_over_wire(lambda _path: self._Body(b"<html>bad gateway</html>"))
+        self.assertEqual(out, "")
+        self.assertIn(f"[omb-recall] search failed after {recall_core.RETRIES} retries: {old}", err)
+
+    def test_a_search_reset_by_the_peer_is_a_silent_noop_with_the_old_line(self):
+        reset = ConnectionResetError(104, "Connection reset by peer")
+        out, err = self._run_main_over_wire(lambda _path: reset)
+        self.assertEqual(out, "")
+        self.assertIn(f"[omb-recall] search failed after {recall_core.RETRIES} retries: {reset}", err)
 
     def test_short_prompt_is_noop(self):
         # < 8 chars → recall is meaningless → no output, urlopen never reached.

@@ -113,17 +113,20 @@ def answer(question: str, search: Callable[..., list[dict]] | None = None) -> An
     if search is None:
         match DrudgeClient(timeout=TIMEOUT, retries=0).search(q, knobs):
             case Ok(hits):
-                pass
+                return _reply(hits)
             case Err(failure):
                 print(f"[secretary] search failed: {failure}", file=sys.stderr)
                 return Answer(ENGINE_DOWN, [])
-    else:
-        # 주입된 탐색 바늘은 Either 를 모르는 plain callable — 그 계약은 그대로 둔다.
-        try:
-            hits = search(q, knobs)
-        except Exception as e:  # noqa: BLE001 — the reader must see "could not look", not a stack trace
-            print(f"[secretary] search failed: {e}", file=sys.stderr)
-            return Answer(ENGINE_DOWN, [])
+    # 주입된 탐색 바늘은 Either 를 모르는 plain callable — 그 계약은 그대로 둔다.
+    try:
+        hits = search(q, knobs)
+    except Exception as e:  # noqa: BLE001 — the reader must see "could not look", not a stack trace
+        print(f"[secretary] search failed: {e}", file=sys.stderr)
+        return Answer(ENGINE_DOWN, [])
+    return _reply(hits)
+
+
+def _reply(hits: list[dict] | None) -> Answer:
     given = handed(hits or [])
     if not given:
         return Answer(NOTHING_FOUND, [])
@@ -256,16 +259,19 @@ def feedback(
             answer_key, observed_at, Verdict(verdict=verdict)
         ):
             case Ok(resp):
-                pass
+                return _verdict_reply(resp)
             case Err(failure):
                 print(f"[secretary] feedback failed: {failure}", file=sys.stderr)
                 return {"error": str(failure)}
-    else:
-        try:
-            resp = consumption(answer_key, observed_at, Verdict(verdict=verdict))
-        except Exception as e:  # noqa: BLE001 — a reaction must not cost the transport a crash
-            print(f"[secretary] feedback failed: {e}", file=sys.stderr)
-            return {"error": str(e)}
+    try:
+        resp = consumption(answer_key, observed_at, Verdict(verdict=verdict))
+    except Exception as e:  # noqa: BLE001 — a reaction must not cost the transport a crash
+        print(f"[secretary] feedback failed: {e}", file=sys.stderr)
+        return {"error": str(e)}
+    return _verdict_reply(resp)
+
+
+def _verdict_reply(resp: dict) -> dict:
     if resp.get("used", 0) + resp.get("contested", 0) == 0:
         return {"unknown_answer": True, **resp}
     return resp

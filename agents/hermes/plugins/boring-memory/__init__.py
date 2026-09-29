@@ -77,7 +77,7 @@ def _recall_block(recall_core: Any, uptake_core: Any, message: str, session_id: 
     Nothing found, or a prompt too short to retrieve on, is an empty string — never a
     block of silence-padding. A dead engine is an Err for the caller's single fold."""
     from ohmyboring.adapters.engine import SearchKnobs
-    from ohmyboring.result import Err, Ok
+    from ohmyboring.result import Ok, map_ok
 
     prompt = (message or "").strip()
     if len(prompt) < 8:  # recall_core's own floor — a shorter prompt retrieves on nothing
@@ -85,7 +85,7 @@ def _recall_block(recall_core: Any, uptake_core: Any, message: str, session_id: 
     client = recall_core.DrudgeClient(timeout=recall_core.TIMEOUT, retries=recall_core.RETRIES)
     # One call for both, exactly as run_recall takes it: the first MAX_RESULTS are handed
     # over, the rest are controls the engine fetches but never sees.
-    match client.search(
+    found = client.search(
         prompt,
         SearchKnobs(
             max_results=recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS,
@@ -94,17 +94,17 @@ def _recall_block(recall_core: Any, uptake_core: Any, message: str, session_id: 
             related_heads=recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS,
             claims=recall_core.CLAIMS_PER_HIT,
         ),
-    ):
-        case Err(failure):
-            return Err(failure)
-        case Ok(hits):
-            pass
+    )
+    return map_ok(found, lambda hits: _render_hits(recall_core, uptake_core, client, session_id, hits))
+
+
+def _render_hits(recall_core: Any, uptake_core: Any, client: Any, session_id: str, hits: list[dict]) -> str:
     if not hits:
-        return Ok("")
+        return ""
     already = uptake_core.sources_already_injected(session_id)
     injected, _controls = recall_core.split_fresh(hits, already)
     if not injected:
-        return Ok("")
+        return ""
     related = recall_core.fresh_related(injected, already)
 
     lines = []
@@ -133,12 +133,12 @@ def _recall_block(recall_core: Any, uptake_core: Any, message: str, session_id: 
             file=sys.stderr,
         )
     if not lines:
-        return Ok("")
+        return ""
     everything = injected + [rel for rels in related.values() for rel in rels]
     # Fire-and-forget by recall_core's own contract — the engine door failing must not
     # cost the owner an answer.
     recall_core.hand_over(client, session_id, everything)
-    return Ok(recall_core.FENCE + "\n".join(lines))
+    return recall_core.FENCE + "\n".join(lines)
 
 
 def _build_context(

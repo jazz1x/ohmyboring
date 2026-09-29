@@ -326,11 +326,12 @@ def run_recall(
         ),
     ):
         case Ok(hits):
-            pass
+            _inject(data, prompt, client, hits)
         case Err(failure):
             print(f"[omb-recall] search failed after {RETRIES} retries: {failure}", file=sys.stderr)
-            return  # engine down → no-op (graceful)
 
+
+def _inject(data: dict, prompt: str, client: DrudgeClient, hits: list[dict]) -> None:
     if not hits:
         return
 
