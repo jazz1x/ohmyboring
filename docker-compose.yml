@@ -152,6 +152,9 @@ services:
       # Tell host-side adapters they are running inside the hermes container and where the repo is.
       BORING_IN_CONTAINER: "1"
       BORING_HOME: /host/oh-my-boring
+      # The repo root is mounted read-only at /host/oh-my-boring; put it on the import path so
+      # hermes cron scripts can `import ohmyboring` before the packaging slices install it.
+      PYTHONPATH: /host/oh-my-boring
       # The card-button plugin judges presses as the owner — the same token the engine and
       # door already receive (wiki-2069) — and refuses presses from anyone but the owner.
       BORING_OWNER_TOKEN: ${BORING_OWNER_TOKEN:-}

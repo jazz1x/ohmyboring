@@ -33,9 +33,9 @@ repos:
     hooks:
       - id: no-meaningless-filenames
         name: "의미 없는 파일명 금지 (mod/util/misc/helper/common)"
-        entry: "의미 없는 파일명 — 모듈 의도를 드러내는 이름(src/<name>.rs)을 쓰세요. mod.rs 는 edition 2024 폐기, util/misc 등은 junk-drawer."
+        entry: "의미 없는 파일명 — 모듈 의도를 드러내는 이름을 쓰세요. mod.rs 는 edition 2024 폐기, util/misc 등은 junk-drawer. (.rs·.py)"
         language: fail
-        files: (^|/)(mod|utils?|misc|helpers?|common)\.rs$
+        files: (^|/)(mod|utils?|misc|helpers?|common)\.(rs|py)$
 
       - id: cargo-fmt
         name: cargo fmt --check (drudge)

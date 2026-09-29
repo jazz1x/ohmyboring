@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ohmyboring"
+version = "0.1.0"
+description = "ohmyboring core package — hexagonal outside (adapters/ · entrypoints/) over feature slices inside."
+requires-python = ">=3.11"
+# Skeleton only: each migration slice adds its own dependencies as it moves in.
+dependencies = []
+
+[tool.setuptools.packages.find]
+# Flat layout at the repo root — keep the discovery lens on ohmyboring* alone so the
+# to-be-migrated agents/hooks/scripts trees are not swept into the wheel.
+include = ["ohmyboring*"]
