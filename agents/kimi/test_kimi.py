@@ -54,6 +54,9 @@ rules = _load("kimi_rules", "rules.py")
 import omb_env  # noqa: E402
 import recall_core  # noqa: E402
 
+from ohmyboring.adapters.engine import Unreachable  # noqa: E402
+from ohmyboring.result import Err, Ok  # noqa: E402
+
 
 def test_work_dir_key_format():
     key = distill._work_dir_key("/home/user/my-project")
@@ -130,7 +133,7 @@ def test_recall_formats_context():
                 )
             ),
         ),
-        mock.patch.object(recall_core.DrudgeClient, "search", return_value=hits),
+        mock.patch.object(recall_core.DrudgeClient, "search", return_value=Ok(hits)),
         mock.patch.object(recall.sys, "stdout", captured),
     ):
         recall.main()
@@ -158,7 +161,7 @@ def test_recall_failed_search_logs_to_stderr():
                     )
                 ),
             ),
-            mock.patch.object(recall_core.DrudgeClient, "search", side_effect=OSError("down")),
+            mock.patch.object(recall_core.DrudgeClient, "search", return_value=Err(Unreachable("down"))),
             mock.patch.object(recall.sys, "stdout", captured),
             mock.patch.object(recall.sys, "stderr", stderr),
         ):

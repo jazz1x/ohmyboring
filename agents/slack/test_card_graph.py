@@ -1218,18 +1218,20 @@ class DryRunWiringTests(unittest.TestCase):
 
 class LiveFetchTests(unittest.TestCase):
     """M1: _live_fetch must send `project` in the POST body — a mutant that calls
-    `_retry("POST", path, {})` (project dropped) makes the whole project axis silently
-    degrade to identical unfiltered reads. Patches DrudgeClient._retry itself, not
+    `request("POST", path, {})` (project dropped) makes the whole project axis silently
+    degrade to identical unfiltered reads. Patches DrudgeClient.request itself, not
     _live_fetch, so it observes exactly what goes over the wire."""
 
     def test_project_is_always_sent_in_the_post_body(self):
+        from ohmyboring.result import Ok
+
         calls: list[tuple[str, str, dict]] = []
 
-        def fake_retry(self, method, path, payload=None, timeout=None):
+        def fake_request(self, method, path, payload=None, timeout=None):
             calls.append((method, path, payload))
-            return {"rows": []} if path == "/recurrences" else {"answer": "", "sources": []}
+            return Ok({"rows": []} if path == "/recurrences" else {"answer": "", "sources": []})
 
-        with mock.patch.object(card_live.DrudgeClient, "_retry", fake_retry):
+        with mock.patch.object(card_live.DrudgeClient, "request", fake_request):
             card_live._live_fetch("/risks", "proj-a")
             card_live._live_fetch("/recurrences", "")
         self.assertIn(("POST", "/risks", {"project": "proj-a"}), calls)

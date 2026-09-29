@@ -86,6 +86,9 @@ os.environ["BORING_INJECTION_LEDGER"] = str(Path(tempfile.mkdtemp()) / "injectio
 import markers  # noqa: E402
 import recall_core  # noqa: E402
 
+from ohmyboring.adapters.engine import Unreachable  # noqa: E402
+from ohmyboring.result import Err, Ok  # noqa: E402
+
 
 class ExtractJsonTests(unittest.TestCase):
     def test_plain_object(self):
@@ -270,8 +273,8 @@ class SessionStartRecallTests(unittest.TestCase):
 
         def fake_context(_self, project=None, max_items=5):
             if side_effect is not None:
-                raise side_effect
-            return context_resp
+                return Err(Unreachable(str(side_effect)))
+            return Ok(context_resp)
 
         module = _load("session_start_recall", "session-start-recall.py")
         with (
@@ -391,13 +394,15 @@ class DoorApprovedSectionTests(unittest.TestCase):
             mock.patch.object(
                 module.DrudgeClient,
                 "context",
-                lambda _s, project=None, max_items=5: {
-                    "decisions": [],
-                    "risks": [],
-                    "facts": [],
-                    "glossary": [],
-                    "language": "ko",
-                },
+                lambda _s, project=None, max_items=5: Ok(
+                    {
+                        "decisions": [],
+                        "risks": [],
+                        "facts": [],
+                        "glossary": [],
+                        "language": "ko",
+                    }
+                ),
             ),
             mock.patch.dict(os.environ, env, clear=True),
             mock.patch.object(module.urllib.request, "urlopen", urlopen),
@@ -560,12 +565,12 @@ class RecallFormattingTests(unittest.TestCase):
         captured = io.StringIO()
         stderr = io.StringIO()
         if search_side_effect is None:
-            search_mock = mock.MagicMock(return_value=hits)
+            search_mock = mock.MagicMock(return_value=Ok(hits))
         else:
             search_mock = mock.MagicMock(side_effect=search_side_effect)
         # The engine's handover door is a network call; it is mocked here so the tests never
         # reach it, and so a test can look at what was handed.
-        handover_mock = handover or mock.MagicMock(return_value={"handed": 0, "unknown": 0})
+        handover_mock = handover or mock.MagicMock(return_value=Ok({"handed": 0, "unknown": 0}))
         stdin = {"prompt": prompt}
         if session_id:
             stdin["session_id"] = session_id
@@ -588,7 +593,7 @@ class RecallFormattingTests(unittest.TestCase):
             {"source_path": f"/vault/wiki/wiki-{i:04d}.md", "snippet": f"note {i} body text"}
             for i in range(recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS)
         ]
-        handover = mock.MagicMock(return_value={"handed": recall_core.MAX_RESULTS, "unknown": 0})
+        handover = mock.MagicMock(return_value=Ok({"handed": recall_core.MAX_RESULTS, "unknown": 0}))
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.dict(os.environ, {"BORING_INJECTION_LEDGER": os.path.join(tmp, "l.jsonl")}),
@@ -617,7 +622,7 @@ class RecallFormattingTests(unittest.TestCase):
         handover.assert_not_called()
 
     def test_a_dead_handover_door_does_not_cost_the_prompt(self):
-        handover = mock.MagicMock(side_effect=OSError("refused"))
+        handover = mock.MagicMock(return_value=Err(Unreachable("refused")))
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.dict(os.environ, {"BORING_INJECTION_LEDGER": os.path.join(tmp, "l.jsonl")}),
@@ -747,7 +752,9 @@ class RecallFormattingTests(unittest.TestCase):
         # search keeps raising → after retries main logs the failure to stderr and exits gracefully.
         recall_core.RETRIES = 0  # one attempt only for deterministic test
         try:
-            out, err = self._run_main("a sufficiently long prompt", [], search_side_effect=OSError("down"))
+            out, err = self._run_main(
+                "a sufficiently long prompt", [], search_side_effect=[Err(Unreachable("down"))]
+            )
             self.assertEqual(out, "")
             self.assertIn("[omb-recall] search failed", err)
         finally:

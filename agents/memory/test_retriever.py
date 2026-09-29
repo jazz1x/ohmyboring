@@ -13,7 +13,6 @@ import os
 import sys
 import threading
 import unittest
-import urllib.error
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
@@ -135,7 +134,7 @@ class RetrieverTest(unittest.TestCase):
 
     def test_engine_failure_raises_and_empty_hits_is_empty(self) -> None:
         self.server.status = 500
-        with self.assertRaises(urllib.error.HTTPError):
+        with self.assertRaises(ConnectionError):
             BoringRetriever(base_url=self.base_url).invoke("q")
         self.server.status = 200
         self.server.hits = []

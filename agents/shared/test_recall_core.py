@@ -13,6 +13,8 @@ os.environ.pop("BORING_HOME", None)
 
 import recall_core
 
+from ohmyboring.result import Err, Ok  # noqa: F401 — Err: 시험이 곧 Err 경로도 둔다
+
 
 def _tmp_throttle():
     """Point the throttle file at a temp location for isolated tests."""
@@ -124,7 +126,8 @@ def _recall(hits, session_id="s1", prompt="why did the connection pool die again
             "BORING_EVENT_SINK": "spool",
         }
         with mock.patch.dict(os.environ, env), mock.patch.object(recall_core, "DrudgeClient") as client:
-            client.return_value.search.return_value = hits
+            client.return_value.search.return_value = Ok(hits)
+            client.return_value.handover.return_value = Ok({"ok": True})
             out = io.StringIO()
             with redirect_stdout(out):
                 recall_core.run_recall({"prompt": prompt, "session_id": session_id})
@@ -203,7 +206,7 @@ def test_the_engine_asked_for_related_notes_on_every_pool_hit():
         ),
         mock.patch.object(recall_core, "DrudgeClient") as client,
     ):
-        client.return_value.search.return_value = []
+        client.return_value.search.return_value = Ok([])
         recall_core.run_recall({"prompt": "why did the connection pool die again", "session_id": "s1"})
     (query, knobs) = client.return_value.search.call_args.args
     assert knobs.related == 1
@@ -222,7 +225,7 @@ def test_the_engine_is_asked_for_the_claims_behind_each_hit():
         ),
         mock.patch.object(recall_core, "DrudgeClient") as client,
     ):
-        client.return_value.search.return_value = []
+        client.return_value.search.return_value = Ok([])
         recall_core.run_recall({"prompt": "why did the connection pool die again", "session_id": "s1"})
     assert client.return_value.search.call_args.args[1].claims == recall_core.CLAIMS_PER_HIT >= 1
 

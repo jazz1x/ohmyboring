@@ -30,7 +30,8 @@ from langchain_core.retrievers import BaseRetriever
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
-from ohmyboring.adapters.engine import owner_headers  # noqa: E402
+from ohmyboring.adapters.engine import DrudgeClient, owner_headers  # noqa: E402
+from ohmyboring.result import Err, Ok  # noqa: E402
 
 _TIMEOUT = 30.0
 
@@ -61,8 +62,15 @@ class BoringRetriever(BaseRetriever):
             body["session_id"] = self.session_id
         if self.claims > 0:
             body["claims"] = self.claims
-        payload = _post_json(f"{self.base_url}/search", body)
-        return [_hit_to_document(hit) for hit in payload["hits"]]
+        # 엔진 호출은 어댑터 뒤로 — 실패는 Either 로 돌아오고, 여기서만 예외로 바꾼다.
+        # BaseRetriever 의 프레임워크 계약: 실패는 빈 목록이 아니라 raise.
+        match DrudgeClient(base_url=self.base_url, timeout=_TIMEOUT, retries=0).request(
+            "POST", "/search", body
+        ):
+            case Ok(payload):
+                return [_hit_to_document(hit) for hit in payload["hits"]]
+            case Err(failure):
+                raise ConnectionError(f"engine /search failed: {failure}")
 
 
 def record_verdict(base_url: str, session_id: str, verdict: Literal["used", "contested"], judge: str) -> dict:

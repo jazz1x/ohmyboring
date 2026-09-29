@@ -48,7 +48,8 @@ import transcript
 import workflow_contract
 from vault_note import frontmatter_text
 
-from ohmyboring.adapters.engine import DrudgeClient, DrudgeNotWritableError, check_drudge_writable
+from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
+from ohmyboring.result import Err, Ok
 
 BORING_URL = omb_env.drudge_url()
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
@@ -773,26 +774,27 @@ def main(argv: list[str] | None = None):
         # Distilling costs a full LLM pass; remembering is what needs the DB. Check the write
         # door first so a degraded engine leaves the session pending instead of burning the model
         # on input that cannot be stored — that loop re-ran the same session every cycle.
-        try:
-            check_drudge_writable(DrudgeClient())
-        except DrudgeNotWritableError as exc:
-            print(f"[codex-collect] write door closed: {exc}", file=sys.stderr, flush=True)
-            event_log.try_append_event(
-                "codex-collector",
-                "collector_run",
-                "failed",
-                run_id=run_id,
-                agent="codex",
-                pending=len(todo),
-                batch=len(batch),
-                processed=0,
-                failed=0,
-                remaining=len(todo),
-                mode=label,
-                reason=str(exc),
-                **workflow_contract.collector_run_fields("failed", len(batch)),
-            )
-            return 1
+        match check_drudge_writable(DrudgeClient()):
+            case Err(failure):
+                print(f"[codex-collect] write door closed: {failure}", file=sys.stderr, flush=True)
+                event_log.try_append_event(
+                    "codex-collector",
+                    "collector_run",
+                    "failed",
+                    run_id=run_id,
+                    agent="codex",
+                    pending=len(todo),
+                    batch=len(batch),
+                    processed=0,
+                    failed=0,
+                    remaining=len(todo),
+                    mode=label,
+                    reason=str(failure),
+                    **workflow_contract.collector_run_fields("failed", len(batch)),
+                )
+                return 1
+            case Ok(_):
+                pass
 
         env = dict(os.environ)
         if args.now:

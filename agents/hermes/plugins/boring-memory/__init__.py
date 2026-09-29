@@ -71,21 +71,21 @@ def _message_text(message: Any) -> str:
     return str(message or "")
 
 
-def _recall_block(recall_core: Any, uptake_core: Any, message: str, session_id: str) -> str:
+def _recall_block(recall_core: Any, uptake_core: Any, message: str, session_id: str):
     """The same recall Claude's hook injects, built from recall_core's own search and
     formatting, handed over to this hermes session so the engine records what it handed.
     Nothing found, or a prompt too short to retrieve on, is an empty string — never a
-    block of silence-padding. A dead engine raises, and the hook's one catch turns that
-    into no context and one log line."""
+    block of silence-padding. A dead engine is an Err for the caller's single fold."""
+    from ohmyboring.adapters.engine import SearchKnobs
+    from ohmyboring.result import Err, Ok
+
     prompt = (message or "").strip()
     if len(prompt) < 8:  # recall_core's own floor — a shorter prompt retrieves on nothing
-        return ""
+        return Ok("")
     client = recall_core.DrudgeClient(timeout=recall_core.TIMEOUT, retries=recall_core.RETRIES)
     # One call for both, exactly as run_recall takes it: the first MAX_RESULTS are handed
     # over, the rest are controls the engine fetches but never sees.
-    from ohmyboring.adapters.engine import SearchKnobs
-
-    hits = client.search(
+    match client.search(
         prompt,
         SearchKnobs(
             max_results=recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS,
@@ -94,13 +94,17 @@ def _recall_block(recall_core: Any, uptake_core: Any, message: str, session_id: 
             related_heads=recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS,
             claims=recall_core.CLAIMS_PER_HIT,
         ),
-    )
+    ):
+        case Err(failure):
+            return Err(failure)
+        case Ok(hits):
+            pass
     if not hits:
-        return ""
+        return Ok("")
     already = uptake_core.sources_already_injected(session_id)
     injected, _controls = recall_core.split_fresh(hits, already)
     if not injected:
-        return ""
+        return Ok("")
     related = recall_core.fresh_related(injected, already)
 
     lines = []
@@ -129,21 +133,28 @@ def _recall_block(recall_core: Any, uptake_core: Any, message: str, session_id: 
             file=sys.stderr,
         )
     if not lines:
-        return ""
+        return Ok("")
     everything = injected + [rel for rels in related.values() for rel in rels]
     # Fire-and-forget by recall_core's own contract — the engine door failing must not
     # cost the owner an answer.
     recall_core.hand_over(client, session_id, everything)
-    return recall_core.FENCE + "\n".join(lines)
+    return Ok(recall_core.FENCE + "\n".join(lines))
 
 
 def _build_context(
     recall_core: Any, uptake_core: Any, note_blocks: Any, message: str, session_id: str
 ) -> dict | None:
+    from ohmyboring.result import Err, Ok
+
     blocks = note_blocks(message)
-    recall = _recall_block(recall_core, uptake_core, message, session_id)
-    if recall:
-        blocks.append(recall)
+    match _recall_block(recall_core, uptake_core, message, session_id):
+        case Err(failure):
+            # 죽은 엔진은 컨텍스트 전무 + 정확히 한 줄 — 절반의 컨텍스트보다 없는 게 낫다.
+            _LOG.error("%s: memory context failed for this turn — %s", _PLUGIN_NAME, failure)
+            return None
+        case Ok(recall):
+            if recall:
+                blocks.append(recall)
     if not blocks:
         return None
     return {"context": _HEADER + "\n\n" + "\n\n".join(blocks)}

@@ -76,6 +76,7 @@ python3 agents/shared/test_label_core.py
 python3 agents/shared/test_uptake_core.py
 python3 agents/shared/test_verdict_core.py
 python3 ohmyboring/adapters/test_engine.py
+python3 ohmyboring/test_result.py
 python3 agents/door/test_door.py
 python3 agents/memory/test_retriever.py
 python3 agents/memory/test_store.py

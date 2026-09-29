@@ -27,11 +27,12 @@ import recall_core  # noqa: E402
 
 from ohmyboring.adapters.engine import (  # noqa: E402, F401 — OWNER 은 secretary.py 가 secretary_core.OWNER 로 다시 쓴다
     OWNER,
-    ConsumptionMarks,
     DrudgeClient,
     NoteProvenance,
     SearchKnobs,
+    Verdict,
 )
+from ohmyboring.result import Err, Ok  # noqa: E402
 
 #: How many notes an answer carries. Three is what the prompt hook injects; a person reading in
 #: Slack has less patience than an agent, not more.
@@ -108,14 +109,21 @@ def answer(question: str, search: Callable[..., list[dict]] | None = None) -> An
     q = strip_mention(question)
     if len(q) < 4:
         return Answer("무엇을 찾을까요? 한 문장으로 물어봐 주세요.", [])
+    knobs = SearchKnobs(max_results=MAX_HITS, claims=CLAIMS_PER_HIT)
     if search is None:
-        client = DrudgeClient(timeout=TIMEOUT, retries=0)
-        search = client.search
-    try:
-        hits = search(q, SearchKnobs(max_results=MAX_HITS, claims=CLAIMS_PER_HIT))
-    except Exception as e:  # noqa: BLE001 — the reader must see "could not look", not a stack trace
-        print(f"[secretary] search failed: {e}", file=sys.stderr)
-        return Answer(ENGINE_DOWN, [])
+        match DrudgeClient(timeout=TIMEOUT, retries=0).search(q, knobs):
+            case Ok(hits):
+                pass
+            case Err(failure):
+                print(f"[secretary] search failed: {failure}", file=sys.stderr)
+                return Answer(ENGINE_DOWN, [])
+    else:
+        # 주입된 탐색 바늘은 Either 를 모르는 plain callable — 그 계약은 그대로 둔다.
+        try:
+            hits = search(q, knobs)
+        except Exception as e:  # noqa: BLE001 — the reader must see "could not look", not a stack trace
+            print(f"[secretary] search failed: {e}", file=sys.stderr)
+            return Answer(ENGINE_DOWN, [])
     given = handed(hits or [])
     if not given:
         return Answer(NOTHING_FOUND, [])
@@ -175,19 +183,25 @@ def correct(
     if number is not None and not 1 <= number <= len(handed_paths):
         return {"error": "no such number"}
     supersedes = [handed_paths[number - 1]] if number is not None else list(handed_paths)
-    if remember is None:
-        remember = DrudgeClient(timeout=TIMEOUT, retries=0).remember
     note = f"질문: {question}\n\n정정: {body}"
+    provenance = NoteProvenance(
+        tags=["correction", "slack"],
+        supersedes=supersedes,
+        author=author,
+        judge=author,
+    )
+    if remember is None:
+        match DrudgeClient(timeout=TIMEOUT, retries=0).remember(_first_sentence(body), note, provenance):
+            case Ok(resp):
+                return resp
+            case Err(failure):
+                print(f"[secretary] correction on {answer_key} failed: {failure}", file=sys.stderr)
+                return {"error": str(failure)}
     try:
         return remember(
             _first_sentence(body),
             note,
-            NoteProvenance(
-                tags=["correction", "slack"],
-                supersedes=supersedes,
-                author=author,
-                judge=author,
-            ),
+            provenance,
         )
     except Exception as e:  # noqa: BLE001 — a failed correction must not cost the transport a crash
         print(f"[secretary] correction on {answer_key} failed: {e}", file=sys.stderr)
@@ -206,11 +220,17 @@ def remember_handed(
     nothing was handed over, so nothing is sent."""
     if not hits:
         return False
-    if handover is None:
-        handover = DrudgeClient(timeout=TIMEOUT, retries=0).handover
     paths = [hit["source_path"] for hit in hits]
+    at = datetime.now(UTC).isoformat()
+    if handover is None:
+        match DrudgeClient(timeout=TIMEOUT, retries=0).handover(answer_key, at, paths):
+            case Ok(_):
+                return True
+            case Err(failure):
+                print(f"[secretary] handover failed: {failure}", file=sys.stderr)
+                return False
     try:
-        handover(answer_key, datetime.now(UTC).isoformat(), paths)
+        handover(answer_key, at, paths)
     except Exception as e:  # noqa: BLE001 — an unrecorded answer must not cost the transport a crash
         print(f"[secretary] handover failed: {e}", file=sys.stderr)
         return False
@@ -229,15 +249,23 @@ def feedback(
     transport reads as an unknown answer."""
     if verdict not in ("used", "contested"):
         raise ValueError(f"verdict must be 'used' or 'contested', got {verdict!r}")
-    if consumption is None:
-        consumption = DrudgeClient(timeout=TIMEOUT, retries=0).consumption
     if observed_at is None:
         observed_at = datetime.now(UTC).isoformat()
-    try:
-        resp = consumption(answer_key, observed_at, ConsumptionMarks(verdict=verdict))
-    except Exception as e:  # noqa: BLE001 — a reaction must not cost the transport a crash
-        print(f"[secretary] feedback failed: {e}", file=sys.stderr)
-        return {"error": str(e)}
+    if consumption is None:
+        match DrudgeClient(timeout=TIMEOUT, retries=0).consumption(
+            answer_key, observed_at, Verdict(verdict=verdict)
+        ):
+            case Ok(resp):
+                pass
+            case Err(failure):
+                print(f"[secretary] feedback failed: {failure}", file=sys.stderr)
+                return {"error": str(failure)}
+    else:
+        try:
+            resp = consumption(answer_key, observed_at, Verdict(verdict=verdict))
+        except Exception as e:  # noqa: BLE001 — a reaction must not cost the transport a crash
+            print(f"[secretary] feedback failed: {e}", file=sys.stderr)
+            return {"error": str(e)}
     if resp.get("used", 0) + resp.get("contested", 0) == 0:
         return {"unknown_answer": True, **resp}
     return resp

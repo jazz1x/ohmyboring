@@ -47,16 +47,22 @@ from card_types import (
 from pydantic import ValidationError
 
 from ohmyboring.adapters.engine import DrudgeClient
+from ohmyboring.result import Err, Ok
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "memory"))
 from retriever import BoringRetriever  # noqa: E402
 
 
 def _live_fetch(path: str, project: str) -> dict[str, Any]:
-    # DrudgeClient has no public raw-POST door; _retry is the one that speaks JSON both ways.
     # project is always sent, even "" — the engine's own filter treats an explicit empty
     # string as "unassigned documents only", not "no filter" (measured 2026-09-22).
-    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0)._retry("POST", path, {"project": project})
+    # request() 는 Either 로 답하고, 이 바늘의 계약은 그대로 raise-on-failure — 그래프가
+    # engine 불통을 카드 거부(exit 3) 한 줄로 접는다(card.py 의 except 가 그 계약의 주인).
+    match DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).request("POST", path, {"project": project}):
+        case Ok(payload):
+            return payload
+        case Err(failure):
+            raise OSError(f"engine fetch {path} failed: {failure}")
 
 
 def _door_json(url: str) -> Any:
@@ -166,7 +172,12 @@ def _live_past_verdicts(since_hours: int) -> PastCardHistory:
 
 
 def _live_handover(session: str, at: str, paths: list[str]) -> dict:
-    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).handover(session, at, paths)
+    # handover 바늘도 raise-on-failure 계약 — 실패한 카드는 게시되지 않는다(card.py: exit 3).
+    match DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).handover(session, at, paths):
+        case Ok(resp):
+            return resp
+        case Err(failure):
+            raise OSError(f"handover failed: {failure}")
 
 
 def _live_resolve(subject: str, register: str) -> ResolvedNote | Unresolved:

@@ -26,6 +26,8 @@ claude_collect = _load("claude_collect_sessions", "collect-sessions.py")
 kimi_collect = _load("kimi_collect_sessions", "collect-kimi-sessions.py")
 codex_collect = _load("codex_collect_sessions", "../codex/collect-sessions.py")
 
+from ohmyboring.result import Err, Ok  # noqa: E402, F401 — Err: 쓰기 문지기의 거절 경로
+
 
 def _last_event(path: Path) -> dict:
     lines = path.read_text(encoding="utf-8").strip().splitlines()
@@ -56,12 +58,13 @@ def test_claude_backfill_does_not_claim_to_be_a_session_end():
                 mock.patch.object(
                     claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)
                 ) as run,
-                mock.patch.object(claude_collect, "DrudgeClient"),
+                mock.patch.object(claude_collect, "DrudgeClient") as client,
                 mock.patch.dict(
                     os.environ,
                     {"BORING_EVENT_LOG": str(root / "events.ndjson"), "BORING_EVENT_SINK": "spool"},
                 ),
             ):
+                client.return_value.health.return_value = Ok({"status": "ok", "db_healthy": True})
                 claude_collect.main()
 
             payloads = [json.loads(c.kwargs["input"]) for c in run.call_args_list if "input" in c.kwargs]
@@ -106,11 +109,12 @@ def test_kimi_collector_fails_when_distill_fails():
                 mock.patch.object(kimi_collect, "_distill", return_value=False) as distill,
                 # Stub the client so the write-door preflight does not make this test depend on
                 # a reachable engine — it owns the distill-failure path, not readiness.
-                mock.patch.object(kimi_collect, "DrudgeClient"),
+                mock.patch.object(kimi_collect, "DrudgeClient") as client,
                 mock.patch.dict(
                     os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
                 ),
             ):
+                client.return_value.health.return_value = Ok({"status": "ok", "db_healthy": True})
                 rc = kimi_collect.main()
 
             assert rc == 1

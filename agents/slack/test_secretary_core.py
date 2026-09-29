@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 import secretary_core as sc  # noqa: E402
 
 import ohmyboring.adapters.engine as dc  # noqa: E402
+from ohmyboring.result import Ok  # noqa: E402
 
 
 def _hit(src, text, claims=None, total=None):
@@ -44,9 +45,7 @@ def _verdict_recorder(result=None):
     calls = []
 
     def fake(session_id, observed_at, marks):
-        assert marks.used is None and marks.contested is None and marks.supersedes is None, (
-            "a verdict travels without path lists"
-        )
+        assert isinstance(marks, dc.Verdict), "a verdict travels without path lists"
         calls.append(
             {
                 "session_id": session_id,
@@ -142,9 +141,9 @@ def test_empty_and_failed_answers_carry_no_hits():
 def test_the_client_hands_paths_over_under_the_sessions_own_name():
     client = dc.DrudgeClient(base_url="http://drudge.test", retries=0)
     sent = []
-    client._retry = lambda method, path, payload=None, timeout=None: (
+    client.request = lambda method, path, payload=None, timeout=None: (
         sent.append({"method": method, "path": path, "payload": payload})
-        or {"session": "s", "handed": 1, "unknown": []}
+        or Ok({"session": "s", "handed": 1, "unknown": []})
     )
     client.handover("s", "2026-09-21T00:00:00+00:00", ["/vault/wiki/wiki-0435.md"])
     assert sent[0]["method"] == "POST" and sent[0]["path"] == "/handover"
@@ -158,32 +157,26 @@ def test_the_client_hands_paths_over_under_the_sessions_own_name():
 def test_the_client_sends_a_verdict_without_path_lists():
     client = dc.DrudgeClient(base_url="http://drudge.test", retries=0)
     sent = []
-    client._retry = lambda method, path, payload=None, timeout=None: (
-        sent.append(payload) or {"used": 0, "contested": 0}
+    client.request = lambda method, path, payload=None, timeout=None: (
+        sent.append(payload) or Ok({"used": 0, "contested": 0})
     )
-    client.consumption("probe:e1b", "2026-09-21T00:00:00+00:00", dc.ConsumptionMarks(verdict="used"))
+    client.consumption("probe:e1b", "2026-09-21T00:00:00+00:00", dc.Verdict(verdict="used"))
     assert sent[0]["verdict"] == "used"
     assert "used" not in sent[0] and "contested" not in sent[0], (
         "paths beside a verdict are a 400; the verdict must travel alone"
     )
 
 
-def test_the_client_refuses_a_verdict_beside_path_lists():
-    # Silently dropping the lists would answer 200 for a request the engine never judged.
-    client = dc.DrudgeClient(base_url="http://drudge.test", retries=0)
-    sent = []
-    client._retry = lambda method, path, payload=None, timeout=None: sent.append(payload) or {}
-    try:
-        client.consumption(
-            "k",
-            "2026-09-21T00:00:00+00:00",
-            dc.ConsumptionMarks(used=["/vault/wiki/a.md"], verdict="used"),
-        )
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("verdict beside paths must raise, not send")
-    assert sent == [], "nothing may reach the engine when the call is ambiguous"
+def test_the_marks_are_a_sum_type_verdict_or_paths():
+    # 옛 묶음이 ValueError 로 막던 "verdict 옆의 목록"은 호출 모양이 없어졌다 —
+    # ConsumptionMarks 는 Verdict | PathMarks 합 타입이라 타입이 구조적으로 막는다.
+    verdict = dc.Verdict(verdict="used")
+    assert verdict.judge is None
+    paths = dc.PathMarks(used=["/vault/wiki/a.md"], judge="owner")
+    assert paths.used == ["/vault/wiki/a.md"]
+    assert paths.contested is None and paths.supersedes is None
+    assert not hasattr(paths, "verdict"), "PathMarks 는 verdict 를 쓰지 않는다"
+    assert not hasattr(verdict, "used"), "Verdict 는 경로 목록을 쓰지 않는다"
 
 
 def test_remember_handed_hands_the_engine_paths():

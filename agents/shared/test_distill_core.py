@@ -16,6 +16,9 @@ from unittest import mock
 import distill_core
 import transcript
 
+from ohmyboring.adapters.engine import Unreachable
+from ohmyboring.result import Err, Ok
+
 SHALLOW_NOTE = {
     "title": "작업 정리",
     "body": "## Result\nEverything was checked.",
@@ -698,6 +701,7 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
             mock.patch("ohmyboring.adapters.engine.DrudgeClient") as client,
             mock.patch.object(distill_core.event_log, "append_event"),
         ):
+            client.return_value.consumption.return_value = Ok({"used": 2, "contested": 1})
             distill_core.write_consumption_to_graph("s1", self._records(), transcript)
         (sid, when, marks), kwargs = client.return_value.consumption.call_args
         self.assertEqual(sid, "s1")
@@ -741,7 +745,7 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
             mock.patch("ohmyboring.adapters.engine.DrudgeClient") as client,
             mock.patch.object(distill_core.event_log, "append_event") as append_event,
         ):
-            client.return_value.consumption.side_effect = OSError("down")
+            client.return_value.consumption.return_value = Err(Unreachable("down"))
             distill_core.write_consumption_to_graph("s1", self._records(), transcript)
         append_event.assert_not_called()
 
@@ -761,7 +765,7 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
         ):
             distill_core.write_consumption_to_graph("s1", self._records(), "[assistant] unrelated.\n")
             client.return_value.consumption.assert_not_called()
-            client.return_value.consumption.side_effect = OSError("down")
+            client.return_value.consumption.return_value = Err(Unreachable("down"))
             distill_core.write_consumption_to_graph("s1", self._records(), "[assistant] per wiki-0007.\n")
 
 

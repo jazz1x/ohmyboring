@@ -27,7 +27,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 import card_types
 from card_types import RepairDone, RepairFailed, RepairUnanswered
 
-from ohmyboring.adapters.engine import OWNER, ConsumptionMarks, DrudgeClient, owner_headers
+from ohmyboring.adapters.engine import OWNER, DrudgeClient, PathMarks, owner_headers
+from ohmyboring.result import Err, Ok
 
 # Register answers carry up to 50 claims each; the door timeout lesson (brief p95 77s) says the
 # point read is far cheaper, but a cold engine still earns more than a point-read default.
@@ -85,13 +86,14 @@ def _live_consumption(session: str, kind: str, paths: list[str]) -> dict:
     # judge=OWNER: a button press is the owner's hand, and the client carries the owner token
     # the engine demands for that word.
     at = datetime.now(UTC).isoformat()
-    if kind == "used":
-        return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(
-            session, at, ConsumptionMarks(used=paths, judge=OWNER)
-        )
-    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(
-        session, at, ConsumptionMarks(contested=paths, judge=OWNER)
-    )
+    marks = PathMarks(used=paths, judge=OWNER) if kind == "used" else PathMarks(contested=paths, judge=OWNER)
+    # 이 바늘의 계약은 raise-on-failure — run() 이 예외에 effect 표시를 달아 프레스 폴드가
+    # 한 줄로 접는다. 조용한 걸기는 반만 일어난 프레스다.
+    match DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(session, at, marks):
+        case Ok(resp):
+            return resp
+        case Err(failure):
+            raise OSError(f"consumption failed: {failure}")
 
 
 def _door_failure(subject: str, code: int, body: bytes) -> RepairFailed | RepairUnanswered:

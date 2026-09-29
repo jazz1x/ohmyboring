@@ -19,6 +19,7 @@ import omb_env  # noqa: E402
 from distill_core import repo_slug  # noqa: E402
 
 from ohmyboring.adapters.engine import DrudgeClient  # noqa: E402
+from ohmyboring.result import Err, Ok  # noqa: E402
 
 
 def _is_injection(data: dict) -> bool:
@@ -82,11 +83,12 @@ def main() -> None:
     project = repo_slug(cwd)
     client = DrudgeClient(timeout=8, retries=1)
 
-    try:
-        resp = client.context(project=project or None, max_items=5)
-    except Exception as e:
-        print(f"[omb-start-recall] context failed: {e}", file=sys.stderr)
-        return
+    match client.context(project=project or None, max_items=5):
+        case Ok(resp):
+            pass
+        case Err(failure):
+            print(f"[omb-start-recall] context failed: {failure}", file=sys.stderr)
+            return
 
     sections: list[str] = []
     try:

@@ -12,8 +12,8 @@ search and formatting, handed over to the hermes session. These tests pin the co
     skipped, because "I don't know that note" is the failure the plugin exists to kill
   - the recall block reuses recall_core's shapes (snippet line, claim line, consumption
     note) and hands the injected paths to the hermes session id on the engine
-  - a dead engine raises inside the hook and comes home as no context at all, one error
-    line — the turn itself still runs
+  - a dead engine comes home as an Err and one error line, no context at all —
+    the turn itself still runs
   - a non-slack platform gets no context and no log line
   - register() without BORING_HOME registers nothing
   - the import path stays langchain-free, because the hermes venv has no langchain
@@ -38,6 +38,9 @@ for extra in (REPO / "agents" / "shared",):
         sys.path.insert(0, str(extra))
 
 import recall_core  # noqa: E402
+
+from ohmyboring.adapters.engine import Unreachable  # noqa: E402
+from ohmyboring.result import Err, Ok  # noqa: E402
 
 _SPEC = importlib.util.spec_from_file_location("boring_memory_plugin", HERE / "__init__.py")
 PLUGIN = importlib.util.module_from_spec(_SPEC)
@@ -104,12 +107,12 @@ class _FakeDrudgeClient:
     def search(self, prompt, knobs=None):
         self.calls.append(("search", prompt, knobs))
         if _FakeDrudgeClient.down:
-            raise ConnectionError("engine unreachable")
-        return list(_FakeDrudgeClient.hits)
+            return Err(Unreachable("engine unreachable"))
+        return Ok(list(_FakeDrudgeClient.hits))
 
     def handover(self, session_id, observed_at, paths):
         self.calls.append(("handover", session_id, list(paths)))
-        return {"ok": True}
+        return Ok({"ok": True})
 
 
 def _vault(tmp: str) -> Path:
@@ -218,6 +221,13 @@ def test_the_recall_block_reuses_recall_core_shapes_and_hands_over():
     assert "reused 2×" in context
     assert "· [decision] morning-card-runner status: hermes cron 이 문을 통해 카드를 실행" in context
     assert recall_core.FENCE.splitlines()[0] in context
+    # 검색이 부른 knobs 도 못 박는다 — 옛 가짜는 기록만 하고 단언하지 않는 빈틈이 있었다.
+    searches = [c for c in _FakeDrudgeClient.instances[-1].calls if c[0] == "search"]
+    assert len(searches) == 1
+    _, _prompt, knobs = searches[0]
+    assert knobs.related == 1
+    assert knobs.related_heads == recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS
+    assert knobs.claims == recall_core.CLAIMS_PER_HIT
     # handed to THIS hermes session so the engine records what it handed
     handovers = [c for c in _FakeDrudgeClient.instances[-1].calls if c[0] == "handover"]
     assert handovers, "the injected notes must be handed over to the hermes session"
@@ -227,7 +237,7 @@ def test_the_recall_block_reuses_recall_core_shapes_and_hands_over():
 
 
 def test_an_engine_down_returns_no_context_and_one_log_line():
-    """The engine raising must not cost the owner the turn: no context at all, one error
+    """The engine's failure must not cost the owner the turn: no context at all, one error
     line naming the plugin. The named-note lookup already happened — it is dropped too,
     because a half context is worse than none."""
     with tempfile.TemporaryDirectory() as tmp:

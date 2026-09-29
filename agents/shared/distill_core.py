@@ -957,22 +957,25 @@ def write_consumption_to_graph(session_id, records, transcript_text):
     if not (used or contested or supersedes):
         return
     observed_at = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
-    try:
-        from ohmyboring.adapters.engine import ConsumptionMarks, DrudgeClient
+    from ohmyboring.adapters.engine import DrudgeClient, PathMarks
+    from ohmyboring.result import Err, Ok
 
-        DrudgeClient(timeout=10, retries=1).consumption(
-            session_id,
-            observed_at,
-            ConsumptionMarks(
-                used=used,
-                contested=contested,
-                supersedes=[list(p) for p in supersedes],
-                judge="inferred",
-            ),
-        )
-    except Exception as e:  # noqa: BLE001 — the graph learning is best-effort
-        print(f"[distill-session] consumption write failed: {e}", file=sys.stderr)
-        return
+    # 그래프 학습은 최선형(best-effort)이다 — 실패는 한 줄을 남기고 그친다.
+    match DrudgeClient(timeout=10, retries=1).consumption(
+        session_id,
+        observed_at,
+        PathMarks(
+            used=used,
+            contested=contested,
+            supersedes=[list(p) for p in supersedes],
+            judge="inferred",
+        ),
+    ):
+        case Ok(_):
+            pass
+        case Err(failure):
+            print(f"[distill-session] consumption write failed: {failure}", file=sys.stderr)
+            return
     # The agent's own call is proposed, not final: the ranking may use it right away, but the
     # owner can flip it on the morning card. One event per used/contested note — supersedes
     # pairs name no single note, so they propose nothing. Only a successful consumption write

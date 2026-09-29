@@ -46,6 +46,7 @@ import workflow_contract
 from vault_note import frontmatter_text
 
 from ohmyboring.adapters.engine import DrudgeClient
+from ohmyboring.result import Err, Ok
 
 # Runs in TWO contexts: inside the hermes-agent container (via `hermes cron --script`) or on the host
 # (manual/launchd). Auto-detect by the container's bind mount so paths + the engine URL resolve in both.
@@ -194,18 +195,20 @@ def transcript_cwd(path):
 
 def _is_vector_mode():
     """Return True only if the engine reports vector mode (pgvector backend is on)."""
-    try:
-        return DrudgeClient(base_url=BORING_URL, timeout=15.0, retries=0).health().get("vector", False)
-    except Exception:
-        # Engine down or pre-change /health shape → safest fallback is wiki-first.
-        return False
+    match DrudgeClient(base_url=BORING_URL, timeout=15.0, retries=0).health():
+        case Ok(health):
+            return health.get("vector", False)
+        case Err(_):
+            # Engine down or pre-change /health shape → safest fallback is wiki-first.
+            return False
 
 
 def _chunk_count():
-    try:
-        return int(DrudgeClient(base_url=BORING_URL, timeout=15.0, retries=0).audit().get("total_chunks", -1))
-    except Exception:
-        return -1
+    match DrudgeClient(base_url=BORING_URL, timeout=15.0, retries=0).audit():
+        case Ok(audit):
+            return int(audit.get("total_chunks", -1))
+        case Err(_):
+            return -1
 
 
 def _reconcile():
