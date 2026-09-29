@@ -4,6 +4,10 @@
 # standalone `docker-compose` binary works. Fall back transparently.
 COMPOSE := $(shell if docker compose version 2>&1 | grep -q "Docker Compose"; then echo "docker compose"; else echo "docker-compose"; fi)
 
+# Scripts fall back to ~/oh-my-boring when BORING_HOME is unset; a make run from another checkout
+# (a worktree) would then drive that checkout's hooks. Default to this checkout.
+export BORING_HOME ?= $(CURDIR)
+
 help: ## List commands
 	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## / — /' | sort
 
@@ -97,7 +101,7 @@ collect: ## Lazily collect past Claude Code sessions (one at a time)   make coll
 
 distill-now: ## Queue the CURRENT session, then have hermes drain the queue right now (re-runnable)   make distill-now
 	@python3 agents/schedulers/collect-sessions.py --now
-	@docker exec boring-agent /opt/hermes/.venv/bin/python3 /opt/data/scripts/ingest-worker.py --drain-only >/dev/null \
+	@docker exec -u "$$(id -u):$$(id -g)" boring-agent /opt/hermes/.venv/bin/python3 /opt/data/scripts/ingest-worker.py --drain-only >/dev/null \
 	  || { echo 'hermes (boring-agent) is not running — the session stays queued; it is distilled on the next hermes tick'; exit 1; }
 
 collect-kimi: ## Lazily collect past Kimi Code sessions (one at a time)   make collect-kimi [N=1]

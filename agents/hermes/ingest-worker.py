@@ -353,7 +353,8 @@ def _drain_queue():
     match _reachable():
         case Err(reason):
             print(f"[ingest-worker] queue deferred: {reason}", file=sys.stderr)
-            _log_queue("deferred", f"unreachable: {reason}", agent="claude-code", queued=len(items))
+            agents = ",".join(sorted({item.agent for item in items}))
+            _log_queue("deferred", f"unreachable: {reason}", agent=agents, queued=len(items))
             return
         case Ok(_):
             pass

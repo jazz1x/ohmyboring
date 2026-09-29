@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Fixed
+- **워크트리에서 `make distill-now` 가 옛 체크아웃의 훅을 돌리던 것** — 수집기는 훅을 `BORING_HOME` 으로 찾고, 비어 있으면 `~/oh-my-boring` 으로 간다. 실측(2026-09-29): 트렁크 워크트리에서 돌린 `make distill-now` 가 큐가 아니라 옛 체크아웃 훅으로 호스트에서 바로 증류했다(`remembered`). 이제 Makefile 이 `BORING_HOME ?= $(CURDIR)` 를 내보낸다 — make 는 자기가 선 체크아웃을 쓴다. 곁들여: distill-now 의 `docker exec` 는 호스트 uid 로(리눅스에서 root 소유 표시 파일 방지), 큐 미룸 이벤트의 agent 는 큐에 든 항목들의 에이전트.
 - **카드의 「이름 맞추기」가 끝난 합침을 실패로 알리던 것** — 문(`POST /repairs/split-subjects`)은 행을 지우고 커밋한 뒤 엔진의 볼트 전체 다시 읽기(`/sync`)를 130초 한도로 기다렸다. 실측(2026-09-29) 다시 읽기는 그보다 길어서, 이미 합쳐진 세 묶음이 「✕ 합침 실패」로 뜨고 버튼이 되살아났다(엔진 목록은 2,341→2,338 로 실제로 줄어 있었다). 이제 문은 커밋 직후 202 로 답하고(`sync: "started"`, 남은 표기 수는 아직 모름 = null) 다시 읽기·재집계·`subject_merged` 기록은 뒤에서 이어 간다. 다시 읽기가 실패하면 문 로그에 주어와 이유 한 줄. 카드 문구는 「다시 읽는 노트 n」. 시험: 문이 다시 읽기를 기다리는 변이, 실패 줄에서 주어·이유를 빼는 변이 각각 사망 확인.
 
 ### Changed
