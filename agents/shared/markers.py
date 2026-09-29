@@ -135,10 +135,10 @@ def mark_retry(session_id: str, reason: str = "") -> int:
 
 
 def mark_pending(session_id: str) -> None:
-    """Write a plain pending marker and remove done/retry/dead markers."""
-    ts, pending, retry, dead = _paths(session_id)
+    """Write a plain pending marker and remove done/dead markers. A retry marker stays: it holds the attempt count."""
+    ts, pending, _retry, dead = _paths(session_id)
     _ensure_dir()
-    _transition_marker(pending, (ts, retry, dead), str(time.time()))
+    _transition_marker(pending, (ts, dead), str(time.time()))
 
 
 def is_done(session_id: str) -> bool:

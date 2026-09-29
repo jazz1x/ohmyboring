@@ -21,7 +21,6 @@ import os
 import subprocess
 import sys
 import time
-import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
@@ -47,11 +46,12 @@ HOOK = os.path.join(BORING_HOME, "agents/claude-code/distill-session.py")
 
 def _marked(session_id):
     # Done marker means fully handled; hermes pending markers mean "already queued" — don't backfill.
-    # Retry markers are intentionally eligible for backfill (that's what backfill is for), but a
-    # dead-lettered session has exhausted its retries and must not re-occupy the queue head.
+    # A fresh retry marker means hermes still holds the session and will retry it; re-queuing would
+    # overwrite the item for nothing. A dead-lettered session has exhausted its retries.
     return (
         markers.is_done(session_id)
         or markers.is_pending(session_id, ttl=PENDING_TTL)
+        or markers.is_retry(session_id, ttl=PENDING_TTL)
         or markers.is_dead(session_id)
     )
 
@@ -74,24 +74,6 @@ def transcript_cwd(tp):
     except OSError:
         pass
     return ""
-
-
-def _warm_llm():
-    """Pre-load + pin the chat model so a per-run cold start (~70s after idle unload) doesn't make the
-    first agent call exceed its timeout → silent SKIP. Best-effort: any failure is ignored (the agent's
-    own call still works, just slower). Uses Ollama's native /api/generate keep_alive (no-op elsewhere)."""
-    base = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-    model = omb_env.llm_model()
-    body = json.dumps({"model": model, "prompt": "ok", "stream": False, "keep_alive": 1800}).encode()
-    try:
-        urllib.request.urlopen(
-            urllib.request.Request(
-                f"{base}/api/generate", data=body, headers={"Content-Type": "application/json"}
-            ),
-            timeout=120,
-        ).read()
-    except Exception:
-        pass
 
 
 def main():
@@ -168,13 +150,9 @@ def main():
         case Ok(_):
             pass
 
-    _warm_llm()  # pre-warm gemma so the first session isn't a ~70s cold start (→ agent timeout → SKIP)
-
     env = dict(os.environ)
     if args.now:
-        env["BORING_DISTILL_NO_MARK"] = (
-            "1"  # leave the session un-marked → re-distillable + SessionEnd still fires
-        )
+        env["BORING_DISTILL_NO_MARK"] = "1"  # the hook only queues; `make distill-now` drains it in hermes
     done = 0
     failed = 0
     timed_out = 0

@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -16,6 +17,7 @@ spec = importlib.util.spec_from_file_location("ingest_worker", _ingest_worker_pa
 ingest_worker = importlib.util.module_from_spec(spec)
 sys.modules["ingest_worker"] = ingest_worker
 spec.loader.exec_module(ingest_worker)
+Ok, Err = ingest_worker.Ok, ingest_worker.Err
 
 
 class _FakeEngine(server.BaseHTTPRequestHandler):
@@ -220,10 +222,79 @@ class ReconcileTest(unittest.TestCase):
         distill_queue = ingest_worker.distill_queue
         distill_queue.enqueue(distill_queue.QueueItem(sid, "claude-code", "personal", "repo", "text"))
 
-    def _drain_with(self, result):
-        with mock.patch.object(ingest_worker.distill_run, "distill_and_remember", return_value=result) as run:
+    def _drain_with(self, result=None, reachable=None):
+        reachable = reachable or Ok(None)
+        with (
+            mock.patch.object(ingest_worker, "_reachable", return_value=reachable),
+            mock.patch.object(ingest_worker.distill_run, "distill_and_remember", return_value=result) as run,
+        ):
             ingest_worker._drain_queue()
         return run
+
+    def _events(self):
+        lines = Path(os.environ["BORING_EVENT_LOG"]).read_text(encoding="utf-8").splitlines()
+        return [json.loads(line) for line in lines]
+
+    def test_a_raising_item_costs_one_try_and_does_not_stop_the_next(self):
+        self._queue("q-a-boom")
+        self._queue("q-b-good")
+
+        def graph(text, origin, repo, sid):
+            if sid == "q-a-boom":
+                raise TypeError("expected string or bytes-like object, got 'int'")
+            return True
+
+        with (
+            mock.patch.object(ingest_worker, "_reachable", return_value=Ok(None)),
+            mock.patch.object(ingest_worker.distill_run, "distill_and_remember", side_effect=graph),
+        ):
+            ingest_worker._drain_queue()
+
+        self.assertEqual(ingest_worker.markers.retry_count("q-a-boom"), 1)
+        self.assertTrue(self._done_exists("q-b-good"))
+        failed = [e for e in self._events() if e.get("session_id") == "q-a-boom"][-1]
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("TypeError", failed["reason"])
+
+    def test_a_session_that_keeps_failing_is_dead_on_the_fifth_try_and_is_not_requeued(self):
+        for _ in range(7):
+            self._queue("q-loop")
+            self._drain_with(False)
+        self.assertTrue(ingest_worker.markers.is_dead("q-loop"))
+        self.assertFalse(ingest_worker.distill_queue.is_queued("q-loop"))
+        runs = [e for e in self._events() if e.get("session_id") == "q-loop"]
+        self.assertEqual([e["status"] for e in runs], ["failed"] * 4 + ["dead"])
+
+    def test_an_already_done_session_is_not_distilled_again(self):
+        self._queue("q-done")
+        ingest_worker.markers.mark_done("q-done")
+        run = self._drain_with(True)
+        run.assert_not_called()
+        self.assertFalse(ingest_worker.distill_queue.is_queued("q-done"))
+        self.assertEqual(self._last_event()["status"], "skipped")
+        self.assertEqual(self._last_event()["reason"], "already_done")
+
+    def test_an_unreachable_backend_defers_without_spending_a_try(self):
+        self._queue("q-down")
+        ingest_worker.markers.mark_retry("q-down", reason="earlier")
+        run = self._drain_with(True, reachable=Err("llm down"))
+        run.assert_not_called()
+        self.assertEqual(ingest_worker.markers.retry_count("q-down"), 1)
+        self.assertTrue(ingest_worker.distill_queue.is_queued("q-down"))
+        self.assertEqual(self._last_event()["status"], "deferred")
+        self.assertIn("llm down", self._last_event()["reason"])
+
+    def test_drain_only_prints_nothing_to_stdout(self):
+        self._queue("q-now")
+        out = io.StringIO()
+        with (
+            mock.patch.object(ingest_worker, "_reachable", return_value=Ok(None)),
+            mock.patch.object(ingest_worker.distill_run, "distill_and_remember", return_value=True),
+            mock.patch.object(ingest_worker.sys, "stdout", out),
+        ):
+            ingest_worker.main(["--drain-only"])
+        self.assertEqual(out.getvalue(), "")
+        self.assertTrue(self._done_exists("q-now"))
 
     def test_queue_success_marks_done_and_removes_file(self):
         self._queue("q-ok")

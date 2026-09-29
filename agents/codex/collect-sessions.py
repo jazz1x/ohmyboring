@@ -207,6 +207,7 @@ def _marked(session_id: str) -> bool:
     return (
         markers.is_done(prefixed)
         or markers.is_pending(prefixed, ttl=PENDING_TTL)
+        or markers.is_retry(prefixed, ttl=PENDING_TTL)
         or markers.is_dead(prefixed)
     )
 

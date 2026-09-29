@@ -95,8 +95,10 @@ remember: ## Save + ingest a note immediately   make remember M="content" [T="ti
 collect: ## Lazily collect past Claude Code sessions (one at a time)   make collect [N=1]
 	@COLLECT_LIMIT=$${N:-1} python3 agents/schedulers/collect-sessions.py
 
-distill-now: ## Distill the CURRENT session right now (no need to end it; re-runnable)   make distill-now
+distill-now: ## Queue the CURRENT session, then have hermes drain the queue right now (re-runnable)   make distill-now
 	@python3 agents/schedulers/collect-sessions.py --now
+	@docker exec boring-agent /opt/hermes/.venv/bin/python3 /opt/data/scripts/ingest-worker.py --drain-only >/dev/null \
+	  || { echo 'hermes (boring-agent) is not running — the session stays queued; it is distilled on the next hermes tick'; exit 1; }
 
 collect-kimi: ## Lazily collect past Kimi Code sessions (one at a time)   make collect-kimi [N=1]
 	@COLLECT_LIMIT=$${N:-1} python3 agents/schedulers/collect-kimi-sessions.py

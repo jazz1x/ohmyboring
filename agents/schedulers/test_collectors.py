@@ -56,7 +56,6 @@ def test_claude_backfill_does_not_claim_to_be_a_session_end():
                 mock.patch.object(
                     claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]
                 ),
-                mock.patch.object(claude_collect, "_warm_llm"),
                 mock.patch.object(
                     claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)
                 ) as run,
@@ -133,6 +132,18 @@ def test_kimi_collector_fails_when_distill_fails():
         kimi_collect.KIMI_HOME = old_home
         kimi_collect.HOOK = old_hook
         kimi_collect.LIMIT = old_limit
+
+
+def test_claude_marked_respects_a_fresh_retry_marker():
+    old_mark_dir = claude_collect.markers.MARK_DIR
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            claude_collect.markers.set_mark_dir(d)
+            assert claude_collect._marked("s1") is False
+            claude_collect.markers.mark_retry("s1", reason="x")
+            assert claude_collect._marked("s1") is True
+    finally:
+        claude_collect.markers.set_mark_dir(old_mark_dir)
 
 
 def test_claude_marked_excludes_dead_lettered_session():
@@ -229,7 +240,6 @@ def test_claude_collector_run_makes_no_sync_request():
                 mock.patch.object(
                     claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]
                 ),
-                mock.patch.object(claude_collect, "_warm_llm"),
                 mock.patch.object(claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
                 mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
                 mock.patch.dict(
@@ -271,7 +281,6 @@ def test_claude_collector_fails_when_distill_fails():
                 mock.patch.object(
                     claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]
                 ),
-                mock.patch.object(claude_collect, "_warm_llm"),
                 mock.patch.object(claude_collect.subprocess, "run", return_value=mock.Mock(returncode=1)),
                 mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
                 mock.patch.dict(
@@ -473,7 +482,6 @@ def test_claude_collector_exits_1_and_logs_failed_when_the_write_door_is_closed(
                 mock.patch.object(
                     claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]
                 ),
-                mock.patch.object(claude_collect, "_warm_llm"),
                 mock.patch.dict(
                     os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
                 ),
@@ -544,6 +552,7 @@ if __name__ == "__main__":
     test_codex_collector_exits_1_and_logs_failed_when_the_write_door_is_closed()
     test_claude_backfill_does_not_claim_to_be_a_session_end()
     test_kimi_collector_fails_when_distill_fails()
+    test_claude_marked_respects_a_fresh_retry_marker()
     test_claude_marked_excludes_dead_lettered_session()
     test_kimi_marked_excludes_dead_lettered_session()
     test_claude_collector_run_makes_no_sync_request()

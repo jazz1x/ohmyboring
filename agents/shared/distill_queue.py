@@ -9,8 +9,10 @@ time, which is what the hermes container rewrites to its `/host` mirror.
 import json
 import os
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import markers  # noqa: E402
@@ -40,12 +42,18 @@ def is_queued(session_id: str) -> bool:
 
 def enqueue(item: QueueItem) -> None:
     """Write `item` atomically, replacing any earlier item of the same session, and mark it pending."""
+    if markers.is_dead(item.session_id):
+        print(f"[distill-queue] dead session not queued: {item.session_id}", file=sys.stderr)
+        return
     os.makedirs(queue_dir(), exist_ok=True)
     path = item_path(item.session_id)
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(asdict(item), f, ensure_ascii=False)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=queue_dir(), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(asdict(item), f, ensure_ascii=False)
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
     markers.mark_pending(item.session_id)
 
 

@@ -29,8 +29,11 @@ import glob
 import json
 import os
 import re
+import socket
 import sys
 import time
+from dataclasses import dataclass
+from urllib.parse import urlparse
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, _HERE)
@@ -47,7 +50,7 @@ from vault_note import frontmatter_text
 
 from ohmyboring import config as boring_config
 from ohmyboring import config as omb_env
-from ohmyboring.adapters.engine import DrudgeClient
+from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
 from ohmyboring.result import Err, Ok
 
 # Runs in TWO contexts: inside the hermes-agent container (via `hermes cron --script`) or on the host
@@ -290,34 +293,80 @@ def _reconcile():
             )
 
 
+@dataclass(frozen=True)
+class Drain:
+    status: str  # ok | failed | dead | skipped | deferred
+    reason: str = ""
+
+
+def _attempt(item):
+    try:
+        ok = distill_run.distill_and_remember(item.text, item.origin, item.repo, item.session_id)
+    except Exception as e:  # noqa: BLE001 — model output can break the graph in any way; count it as a failed try
+        return Drain("failed", f"{type(e).__name__}: {e}")
+    return Drain("ok") if ok else Drain("failed", "queue distill failed")
+
+
 def _drain_one(item):
-    ok = distill_run.distill_and_remember(item.text, item.origin, item.repo, item.session_id)
-    if ok:
+    if markers.is_done(item.session_id):
+        distill_queue.remove(item.session_id)
+        return Drain("skipped", "already_done")
+    attempt = _attempt(item)
+    if attempt.status == "ok":
         markers.mark_done(item.session_id)
         distill_queue.remove(item.session_id)
-        return "ok"
-    markers.mark_retry(item.session_id, reason="queue distill failed")
+        return attempt
+    markers.mark_retry(item.session_id, reason=attempt.reason)
     if markers.is_dead(item.session_id):
         distill_queue.remove(item.session_id)
-        return "dead"
-    return "failed"
+        return Drain("dead", attempt.reason)
+    return attempt
+
+
+def _llm_reachable():
+    url = urlparse(distill_core.LLM_BASE_URL)
+    port = url.port or (443 if url.scheme == "https" else 80)
+    try:
+        with socket.create_connection((url.hostname, port), timeout=5):
+            return Ok(None)
+    except OSError as e:
+        return Err(f"llm {url.hostname}:{port} unreachable: {e}")
+
+
+def _reachable():
+    match check_drudge_writable(DrudgeClient(base_url=BORING_URL, timeout=15.0, retries=0)):
+        case Err(failure):
+            return Err(str(failure))
+        case Ok(_):
+            return _llm_reachable()
+
+
+def _log_queue(status, reason="", **fields):
+    event_log.try_append_event("hermes-ingest-worker", "ingest_queue", status, reason=reason, **fields)
 
 
 def _drain_queue():
     """Distill up to QUEUE_PER_TICK hook-queued sessions, oldest first."""
-    for item in distill_queue.drain(QUEUE_PER_TICK):
-        status = _drain_one(item)
-        event_log.try_append_event(
-            "hermes-ingest-worker",
-            "ingest_queue",
-            status,
-            agent=item.agent,
-            session_id=item.session_id,
-        )
+    items = distill_queue.drain(QUEUE_PER_TICK)
+    if not items:
+        return
+    match _reachable():
+        case Err(reason):
+            print(f"[ingest-worker] queue deferred: {reason}", file=sys.stderr)
+            _log_queue("deferred", f"unreachable: {reason}", agent="claude-code", queued=len(items))
+            return
+        case Ok(_):
+            pass
+    for item in items:
+        result = _drain_one(item)
+        _log_queue(result.status, result.reason, agent=item.agent, session_id=item.session_id)
 
 
-def main():
+def main(argv=None):
     os.makedirs(MARK_DIR, exist_ok=True)
+    if "--drain-only" in (sys.argv[1:] if argv is None else argv):
+        _drain_queue()
+        return
     _reconcile()  # settle the previous tick before offering a new one
     _drain_queue()
 

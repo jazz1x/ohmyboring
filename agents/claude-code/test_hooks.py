@@ -542,12 +542,14 @@ class DistillExitCodeTests(unittest.TestCase):
                 mock.patch.object(distill_core, "_call_remember") as remember,
                 tempfile.TemporaryDirectory() as mark_dir,
                 mock.patch.object(distill.distill_queue.markers, "MARK_DIR", mark_dir),
+                mock.patch("urllib.request.urlopen") as urlopen,
             ):
                 rc = distill.main()
                 queued = distill.distill_queue.drain()
 
             self.assertEqual(rc, 0)
             llm.assert_not_called()
+            urlopen.assert_not_called()
             remember.assert_not_called()
             self.assertEqual(
                 [(i.session_id, i.agent, i.text) for i in queued], [("abc", "claude-code", "x" * 600)]

@@ -184,10 +184,12 @@ def test_success_passes_session_id_to_shared_core():
             mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
             mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
             mock.patch.object(distill.distill_queue, "enqueue") as enqueue,
+            mock.patch("urllib.request.urlopen") as urlopen,
         ):
             rc = distill.main()
 
         assert rc == 0
+        urlopen.assert_not_called()
         item = enqueue.call_args.args[0]
         assert (item.session_id, item.agent, item.origin, item.repo, item.text) == (
             "codex-abc",
@@ -346,6 +348,18 @@ def test_collect_scan_classifies_queue_marked_rollout_and_subagent():
         collect.INCLUDE_SUBAGENTS = old_include
         collect.INCLUDE_ROLLOUTS = old_include_rollouts
         collect.STABLE_AGE_S = old_stable_age
+
+
+def test_codex_marked_respects_a_fresh_retry_marker():
+    old_mark_dir = collect.markers.MARK_DIR
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            collect.markers.set_mark_dir(d)
+            assert collect._marked("s1") is False
+            collect.markers.mark_retry("codex-s1", reason="x")
+            assert collect._marked("s1") is True
+    finally:
+        collect.markers.set_mark_dir(old_mark_dir)
 
 
 def test_collect_scan_excludes_dead_lettered_sessions_from_queue():
@@ -1047,6 +1061,7 @@ if __name__ == "__main__":
     test_codex_distill_clamps_with_ingest_budget()
     test_codex_distill_respects_zero_payload_clamp_override()
     test_collect_scan_classifies_queue_marked_rollout_and_subagent()
+    test_codex_marked_respects_a_fresh_retry_marker()
     test_collect_scan_excludes_dead_lettered_sessions_from_queue()
     test_collect_scan_can_include_rollouts_without_subagents()
     test_collect_scan_skips_unstable_recent_sessions()

@@ -235,12 +235,14 @@ def test_distill_queues_session_without_calling_the_llm():
             mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
             mock.patch("distill_core._call_llm") as llm,
             mock.patch.object(distill.distill_queue, "enqueue") as enqueue,
+            mock.patch("urllib.request.urlopen") as urlopen,
         ):
             rc = distill.main()
 
     assert captured.getvalue() == ""
     assert rc == 0
     llm.assert_not_called()
+    urlopen.assert_not_called()
     item = enqueue.call_args.args[0]
     assert (item.session_id, item.agent, item.text) == ("session_abc", "kimi", "x" * 600)
     assert "queued for hermes" in stderr.getvalue()
