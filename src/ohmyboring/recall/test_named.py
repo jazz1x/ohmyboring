@@ -20,8 +20,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-for path in (ROOT, ROOT / "agents" / "shared"):
+ROOT = Path(__file__).resolve().parents[3]
+for path in (ROOT / "src", ROOT / "agents" / "shared"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 

@@ -154,7 +154,7 @@ services:
       BORING_HOME: /host/oh-my-boring
       # The repo root is mounted read-only at /host/oh-my-boring; put it on the import path so
       # hermes cron scripts can `import ohmyboring` before the packaging slices install it.
-      PYTHONPATH: /host/oh-my-boring
+      PYTHONPATH: /host/oh-my-boring/src
       # The card-button plugin judges presses as the owner — the same token the engine and
       # door already receive (wiki-2069) — and refuses presses from anyone but the owner.
       BORING_OWNER_TOKEN: ${BORING_OWNER_TOKEN:-}

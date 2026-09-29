@@ -37,7 +37,7 @@ def _import_from_cwd(module: str) -> None:
     """Import with the repo root on sys.path — the contract is "works from the repo root",
     not "works when installed" (installation lands with the delivery slice's image build)."""
     saved = list(sys.path)
-    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(ROOT / "src"))
     try:
         importlib.import_module(module)
     finally:

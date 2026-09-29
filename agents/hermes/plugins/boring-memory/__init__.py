@@ -171,7 +171,7 @@ def register(ctx: Any) -> None:
             _PLUGIN_NAME,
         )
         return
-    for path in (home, shared):
+    for path in (os.path.join(home, "src"), shared):
         if path not in sys.path:
             sys.path.insert(0, path)
     try:

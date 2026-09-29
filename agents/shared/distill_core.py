@@ -24,7 +24,7 @@ import urllib.request
 # realpath resolves symlinks (e.g. hooks/distill-session.py → agents/claude-code/…) so the
 # sibling agents/shared dir is found from the real file location, not the symlink's dir.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import boring_config  # noqa: E402
 import event_log
 import markers  # noqa: E402

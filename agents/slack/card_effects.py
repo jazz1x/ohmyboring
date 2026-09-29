@@ -23,7 +23,7 @@ import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import card_types
 from card_types import RepairDone, RepairFailed, RepairUnanswered
 

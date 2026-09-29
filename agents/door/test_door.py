@@ -54,7 +54,7 @@ from pathlib import Path
 from unittest import mock
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, _ROOT)
+sys.path[:0] = [_ROOT, os.path.join(_ROOT, "src")]
 
 # Loaded as a package (the way uvicorn and the container load it) because door.py
 # imports its sibling with `from . import approved`; test_python_deps.py has no

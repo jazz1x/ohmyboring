@@ -20,7 +20,7 @@ from pathlib import Path
 
 SHARED = Path(__file__).resolve().parents[1] / "agents" / "shared"
 sys.path.insert(0, str(SHARED))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import label_core  # noqa: E402
 import omb_env  # noqa: E402

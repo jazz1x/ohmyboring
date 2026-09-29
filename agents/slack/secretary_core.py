@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from typing import NamedTuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import recall_core  # noqa: E402
 
 from ohmyboring.adapters.engine import (  # noqa: E402, F401 — OWNER 은 secretary.py 가 secretary_core.OWNER 로 다시 쓴다

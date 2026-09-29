@@ -1,6 +1,6 @@
 line-length = 110
 target-version = "py311"
-include = ["agents/**/*.py", "hooks/**/*.py", "scripts/**/*.py", "data/eval/**/*.py", "ohmyboring/**/*.py", "integrations/**/*.py"]
+include = ["agents/**/*.py", "hooks/**/*.py", "scripts/**/*.py", "data/eval/**/*.py", "src/ohmyboring/**/*.py", "integrations/**/*.py"]
 
 [lint]
 select = ["E", "F", "I", "B", "UP", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR1702"]

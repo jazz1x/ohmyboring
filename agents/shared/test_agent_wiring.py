@@ -884,7 +884,7 @@ def test_installed_ingest_worker_imports_resolve_from_the_scripts_dir():
                 **os.environ,
                 "BORING_HOME": str(repo),
                 "BORING_IN_CONTAINER": "0",
-                "PYTHONPATH": str(repo),
+                "PYTHONPATH": str(repo / "src"),
             },
         )
         assert imported.returncode == 0, imported.stderr

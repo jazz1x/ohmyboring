@@ -75,8 +75,8 @@ python3 agents/shared/test_recall_core.py
 python3 agents/shared/test_label_core.py
 python3 agents/shared/test_uptake_core.py
 python3 agents/shared/test_verdict_core.py
-python3 ohmyboring/adapters/test_engine.py
-python3 ohmyboring/test_result.py
+python3 src/ohmyboring/adapters/test_engine.py
+python3 src/ohmyboring/test_result.py
 python3 agents/door/test_door.py
 python3 agents/memory/test_retriever.py
 python3 agents/memory/test_store.py
@@ -116,8 +116,8 @@ python3 scripts/test_self_verify_contract.py
 python3 scripts/test_peek.py
 python3 scripts/test_readme_locale_parity.py
 python3 scripts/test_package_skeleton.py
-python3 ohmyboring/recall/test_named.py
-python3 ohmyboring/entrypoints/http/test_mcp_recall.py
+python3 src/ohmyboring/recall/test_named.py
+python3 src/ohmyboring/entrypoints/http/test_mcp_recall.py
 echo "6) shell destructive-path guardrails (restore-db)…"
 sh scripts/test_restore_db.sh
 echo "7) shell readiness gate guardrails (doctor --strict)…"

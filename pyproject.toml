@@ -11,6 +11,5 @@ requires-python = ">=3.11"
 dependencies = []
 
 [tool.setuptools.packages.find]
-# Flat layout at the repo root — keep the discovery lens on ohmyboring* alone so the
-# to-be-migrated agents/hooks/scripts trees are not swept into the wheel.
+where = ["src"]
 include = ["ohmyboring*"]

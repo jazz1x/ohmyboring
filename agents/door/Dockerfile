@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt "psycopg[binary]>=3.2"
 # The core ohmyboring package skeleton — installed no-deps; dependencies arrive with the
 # slices that move code in. requirements.txt stays the version source for everything else.
 COPY pyproject.toml pyproject.toml
-COPY ohmyboring/ ohmyboring/
+COPY src/ src/
 RUN pip install --no-cache-dir --no-deps .
 
 COPY agents/door/ agents/door/

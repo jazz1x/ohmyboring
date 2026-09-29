@@ -29,7 +29,7 @@ from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 from ohmyboring.adapters.engine import DrudgeClient, owner_headers  # noqa: E402
 from ohmyboring.result import Err, Ok  # noqa: E402
 
