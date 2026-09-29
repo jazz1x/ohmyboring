@@ -15,32 +15,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import distill_queue
 import transcript
-from distill_core import (  # noqa: F401
-    _build_prompt,
-    _call_llm,
-    _call_remember,
-    _distill_resolution,
-    _extract_json,
+from distill_core import (
     _mark,
-    _strip_trailing_metadata,
     _throttled,
     git_remote_url,
     is_automated_run,
-    log_skip_event,
     log_uptake_event,
     repo_slug,
 )
 
 from ohmyboring import config as boring_config
-
-# Re-export generic helpers at module top level so existing tests can keep using them.
-# fmt: off
-__all__ = [
-    "_extract_json", "_mark", "_strip_trailing_metadata",
-    "_build_prompt", "_call_llm", "_call_remember", "_throttled",
-    "git_remote_url", "is_automated_run", "log_skip_event", "log_uptake_event", "repo_slug", "extract", "main", "run",
-]
-# fmt: on
+from ohmyboring.distill.resolution_event import log_skip_event
+from ohmyboring.distill.settings import distill_resolution as _distill_resolution
 
 TRANSCRIPT_FORMAT = boring_config.agent_config("claude-code").get("format") or "claude-json"
 # Direct SessionEnd distill calls the local LLM synchronously. The ceiling lives in transcript.py

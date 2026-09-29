@@ -14,23 +14,18 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import distill_queue
-import event_log
 import transcript
-from distill_core import (  # noqa: F401
-    _build_prompt,
-    _call_llm,
-    _call_remember,
-    _distill_resolution,
-    _extract_json,
+from distill_core import (
     _mark,
-    _strip_trailing_metadata,
     _throttled,
     git_remote_url,
-    log_skip_event,
     repo_slug,
 )
 
 from ohmyboring import config as boring_config
+from ohmyboring.adapters import events as event_log
+from ohmyboring.distill.resolution_event import log_skip_event
+from ohmyboring.distill.settings import distill_resolution as _distill_resolution
 
 TRANSCRIPT_FORMAT = "codex-jsonl"
 CLAMP = transcript.codex_distill_clamp()

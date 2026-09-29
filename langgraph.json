@@ -1,0 +1,6 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "distill": "./src/ohmyboring/distill/graph.py:graph"
+  }
+}

@@ -7,6 +7,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from ohmyboring.distill.nodes import draft, language, note, remember, repair, skip, verify
 from ohmyboring.distill.state import DistillState
 
 Node = Callable[[DistillState], dict[str, Any]]
@@ -88,3 +89,21 @@ def build(steps: Steps) -> CompiledStateGraph:
     for terminal in ("skip", "repair_failed", "give_up", "remember"):
         graph.add_edge(terminal, END)
     return graph.compile()
+
+
+graph = build(
+    Steps(
+        draft=draft.draft,
+        skip=skip.skip,
+        retry_language=language.retry_language,
+        prepare=note.prepare,
+        verify=verify.verify,
+        repair_call=repair.repair_call,
+        repair_prepare=note.repair_prepare,
+        repair_verify=verify.repair_verify,
+        repair_passed=repair.repair_passed,
+        repair_failed=repair.repair_failed,
+        give_up=repair.give_up,
+        remember=remember.remember,
+    )
+)

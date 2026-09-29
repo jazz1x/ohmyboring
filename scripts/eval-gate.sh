@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 URL="${BORING_URL:-http://localhost:7700}"
-EVENT_LOG="$ROOT/agents/shared/event_log.py"
+EVENT_LOG="$ROOT/src/ohmyboring/adapters/events.py"
 eval_run_id="eval-$(date +%Y%m%dT%H%M%S)-$$"
 eval_started_at="$(date +%s)"
 eval_fixtures_copied=0

@@ -15,11 +15,11 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
-import event_log
 import markers
-import workflow_contract
 
 from ohmyboring import config as omb_env
+from ohmyboring.adapters import events as event_log
+from ohmyboring.adapters import workflow_contract
 from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
 from ohmyboring.result import Err, Ok
 

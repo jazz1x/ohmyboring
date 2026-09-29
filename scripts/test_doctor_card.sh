@@ -8,10 +8,10 @@ tmp="$(mktemp -d)"
 fails=0
 
 boring="$tmp/boring"
-mkdir -p "$boring/agents/codex" "$boring/agents/shared" "$boring/scripts" \
+mkdir -p "$boring/agents/codex" "$boring/agents/shared" "$boring/src/ohmyboring/adapters" "$boring/scripts" \
     "$tmp/home/.cache/boring-distill" "$tmp/home/.cache/oh-my-boring" "$tmp/hermes"
 : > "$boring/agents/codex/collect-sessions.py"
-: > "$boring/agents/shared/event_log.py"
+: > "$boring/src/ohmyboring/adapters/events.py"
 : > "$boring/agents/shared/uptake_core.py"
 : > "$boring/agents/shared/agent_wiring.py"
 printf '#!/bin/sh\necho "verify-llm ok"\n' > "$boring/scripts/verify-llm.sh"

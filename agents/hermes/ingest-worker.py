@@ -41,16 +41,16 @@ sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
 import distill_core
 import distill_queue
-import distill_run
-import event_log
 import markers
 import transcript
-import workflow_contract
 from vault_note import frontmatter_text
 
 from ohmyboring import config as boring_config
 from ohmyboring import config as omb_env
+from ohmyboring.adapters import events as event_log
+from ohmyboring.adapters import llm, workflow_contract
 from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
+from ohmyboring.distill import run as distill_run
 from ohmyboring.result import Err, Ok
 
 # Runs in TWO contexts: inside the hermes-agent container (via `hermes cron --script`) or on the host
@@ -299,9 +299,33 @@ class Drain:
     reason: str = ""
 
 
+#: Last-resort guard against *unbounded* input, not a quality knob — every agent path clamps with
+#: its own `transcript.*_distill_clamp()` first, so reaching this is a caller bug. The number and
+#: its rationale live in transcript.py with every other clamp; see `distill_backstop_clamp`.
+BACKSTOP_CLAMP = transcript.distill_backstop_clamp()
+
+
+def _within_backstop(text):
+    if len(text) <= BACKSTOP_CLAMP:
+        return text
+    text, _ = transcript.clamp_text(text, BACKSTOP_CLAMP)
+    print(
+        f"[distill-session] caller passed unclamped text; cut to {len(text)} chars by the "
+        f"{BACKSTOP_CLAMP}-char backstop. Raise the caller's own clamp, not this one.",
+        file=sys.stderr,
+    )
+    return text
+
+
+def _distill(item):
+    return distill_run.distill_and_remember(
+        _within_backstop(item.text), item.origin, item.repo, item.session_id
+    )
+
+
 def _attempt(item):
     try:
-        ok = distill_run.distill_and_remember(item.text, item.origin, item.repo, item.session_id)
+        ok = _distill(item)
     except Exception as e:  # noqa: BLE001 — model output can break the graph in any way; count it as a failed try
         return Drain("failed", f"{type(e).__name__}: {e}")
     return Drain("ok") if ok else Drain("failed", "queue distill failed")
@@ -324,7 +348,7 @@ def _drain_one(item):
 
 
 def _llm_reachable():
-    url = urlparse(distill_core.LLM_BASE_URL)
+    url = urlparse(llm.LLM_BASE_URL)
     port = url.port or (443 if url.scheme == "https" else 80)
     try:
         with socket.create_connection((url.hostname, port), timeout=5):

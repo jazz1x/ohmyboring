@@ -49,10 +49,10 @@ agent-logs: ## boring-agent (hermes) logs (MCP connection diagnostics)
 	$(COMPOSE) logs -f boring-agent
 
 events: ## Show recent workflow events (engine DB first, file fallback)
-	@python3 agents/shared/event_log.py --tail --max "$${N:-20}"
+	@python3 src/ohmyboring/adapters/events.py --tail --max "$${N:-20}"
 
 events-replay: ## Hand spooled events to the engine (after an outage; doctor names the trapped rows)
-	@python3 agents/shared/event_log.py --replay-spool
+	@python3 src/ohmyboring/adapters/events.py --replay-spool
 
 secretary: ## Answer @mentions in Slack from memory (Socket Mode; needs SLACK_APP_TOKEN/SLACK_BOT_TOKEN in .env)
 	set -a; . ./.env; set +a; python3 agents/slack/secretary.py

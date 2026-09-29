@@ -141,36 +141,9 @@ def verify_note_resolution(
     claims = _claims(note)
     body_and_claims = _search_text(title, body, claims)
 
-    missing: list[str] = []
-    if not title.strip():
-        missing.append("title")
-    if not body.strip():
-        missing.append("body")
-    elif not body_survives_storage_normalize(body):
-        missing.append("body:storage-normalize-empty")
-
-    for section in rule["sections"]:
-        if not _has_section_signal(body, section):
-            missing.append(f"section:{section}")
-
-    if len(claims) < int(rule["min_claims"]):
-        missing.append(f"claims:min:{rule['min_claims']}")
-
-    kinds = {str(c.get("kind") or "fact").strip().lower() for c in claims}
-    for kind in rule["claim_kinds"]:
-        if kind not in kinds:
-            missing.append(f"claim-kind:{kind}")
-
-    for c in claims:
-        kind = str(c.get("kind") or "fact").strip().lower()
-        if kind not in ALLOWED_CLAIM_KINDS:
-            missing.append(f"claim-kind-invalid:{kind}")
-        if not str(c.get("subject") or "").strip():
-            missing.append("claim-field:subject")
-        if not str(c.get("predicate") or "").strip():
-            missing.append("claim-field:predicate")
-        if not str(c.get("value") or "").strip():
-            missing.append("claim-field:value")
+    missing: list[str] = _missing_text(title, body)
+    missing += [f"section:{s}" for s in rule["sections"] if not _has_section_signal(body, s)]
+    missing += _missing_claims(claims, rule)
 
     seen = _evidence_tokens(transcript)
     kept = tuple(t for t in seen if t in _evidence_tokens(body_and_claims))
@@ -186,6 +159,38 @@ def verify_note_resolution(
         evidence_tokens_seen=seen,
         evidence_tokens_kept=kept,
     )
+
+
+def _missing_text(title: str, body: str) -> list[str]:
+    missing: list[str] = []
+    if not title.strip():
+        missing.append("title")
+    if not body.strip():
+        missing.append("body")
+    elif not body_survives_storage_normalize(body):
+        missing.append("body:storage-normalize-empty")
+    return missing
+
+
+def _missing_claims(claims: list[dict[str, Any]], rule: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    if len(claims) < int(rule["min_claims"]):
+        missing.append(f"claims:min:{rule['min_claims']}")
+    kinds = {str(c.get("kind") or "fact").strip().lower() for c in claims}
+    missing += [f"claim-kind:{kind}" for kind in rule["claim_kinds"] if kind not in kinds]
+    for c in claims:
+        missing += _missing_claim_fields(c)
+    return missing
+
+
+def _missing_claim_fields(claim: dict[str, Any]) -> list[str]:
+    kind = str(claim.get("kind") or "fact").strip().lower()
+    missing = [] if kind in ALLOWED_CLAIM_KINDS else [f"claim-kind-invalid:{kind}"]
+    return missing + [
+        f"claim-field:{field}"
+        for field in ("subject", "predicate", "value")
+        if not str(claim.get(field) or "").strip()
+    ]
 
 
 def resolution_prompt_contract(resolution: str | None) -> str:

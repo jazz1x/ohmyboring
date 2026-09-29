@@ -387,12 +387,13 @@ def verdict_spool_loss() -> dict[str, Any]:
     placed inside the window and is counted outside it, the side the open verdict cannot
     read; guessing would place it wherever the guess is convenient.
     """
-    shared_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = Path(__file__).resolve().parents[3]
+    shared_dir = str(repo_root / "agents" / "shared")
     if shared_dir not in sys.path:
         sys.path.insert(0, shared_dir)
     import verdict_core
 
-    verdict_script = os.path.join(shared_dir, "..", "..", "scripts", "uptake-verdict.py")
+    verdict_script = str(repo_root / "scripts" / "uptake-verdict.py")
     spec = importlib.util.spec_from_file_location("uptake_verdict", verdict_script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -477,7 +478,7 @@ def _format_event(event: dict[str, Any]) -> str:
     return f"{head} {' '.join(details)}".rstrip()
 
 
-def main() -> int:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Inspect oh-my-boring workflow events")
     parser.add_argument("--sink-mode", action="store_true")
     parser.add_argument("--verdict-spool-loss", action="store_true")
@@ -497,73 +498,98 @@ def main() -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--max", type=int, default=3)
     parser.add_argument("--hours", type=int, default=None)
+    return parser
+
+
+def _print_sink_mode(_args: argparse.Namespace) -> int:
+    print(_event_sink_mode())
+    return 0
+
+
+def _print_verdict_spool_loss(_args: argparse.Namespace) -> int:
+    loss = verdict_spool_loss()
+    print(
+        "verdict_spool "
+        f"in_window_rows={loss['in_rows']} "
+        f"in_window_sessions={loss['in_sessions']} "
+        f"out_of_window_rows={loss['out_rows']} "
+        f"oldest={loss['oldest']} "
+        f"since={loss['since']} "
+        f"until={loss['until']}"
+    )
+    return 0
+
+
+def _record(args: argparse.Namespace) -> int:
+    fields = dict(args.field)
+    append_event(args.record[0], args.record[1], args.record[2], **fields)
+    return 0
+
+
+def _print_tail(args: argparse.Namespace) -> int:
+    events = recent_events(args.max, args.component, args.event, args.status)
+    for event in events:
+        if args.json:
+            print(json.dumps(event, ensure_ascii=False, sort_keys=True))
+        else:
+            print(_format_event(event))
+    return 0
+
+
+def _print_stale_gates(_args: argparse.Namespace) -> int:
+    stale = stale_gates()
+    if not stale:
+        print(f"gates fresh (<= {GATE_STALE_DAYS}d) watched={len(WATCHED_GATES)}")
+        return 0
+    for gate, days in stale:
+        print(f"  gate={gate} last_run={'never' if days is None else str(days) + 'd ago'}")
+    return 1
+
+
+def _print_replay_spool(_args: argparse.Namespace) -> int:
+    counts = replay_spool()
+    print(
+        f"spool replay: replayed={counts['replayed']} kept={counts['kept']} "
+        f"unparseable={counts['unparseable']} spool={event_log_path()}"
+    )
+    return 0 if counts["kept"] == 0 and counts["unparseable"] == 0 else 1
+
+
+def _print_recent_resolution_failures(args: argparse.Namespace) -> int:
+    failures = recent_resolution_failures(args.max, args.hours)
+    if not failures:
+        print(f"resolution_quality recent_failures=0 log={event_log_path()}")
+        return 0
+    print(f"resolution_quality recent_failures={len(failures)} log={event_log_path()}")
+    for event in failures:
+        missing = ",".join(event.get("missing_fields") or [])
+        print(
+            "  "
+            f"session={event.get('session_id', '')} "
+            f"resolution={event.get('resolution', '')} "
+            f"remember={event.get('remember_status', '')} "
+            f"missing={missing}"
+        )
+    return 1
+
+
+_COMMANDS = (
+    ("sink_mode", _print_sink_mode),
+    ("verdict_spool_loss", _print_verdict_spool_loss),
+    ("record", _record),
+    ("tail", _print_tail),
+    ("stale_gates", _print_stale_gates),
+    ("replay_spool", _print_replay_spool),
+    ("recent_resolution_failures", _print_recent_resolution_failures),
+)
+
+
+def main() -> int:
+    parser = _parser()
     args = parser.parse_args()
-
-    if args.sink_mode:
-        print(_event_sink_mode())
-        return 0
-
-    if args.verdict_spool_loss:
-        loss = verdict_spool_loss()
-        print(
-            "verdict_spool "
-            f"in_window_rows={loss['in_rows']} "
-            f"in_window_sessions={loss['in_sessions']} "
-            f"out_of_window_rows={loss['out_rows']} "
-            f"oldest={loss['oldest']} "
-            f"since={loss['since']} "
-            f"until={loss['until']}"
-        )
-        return 0
-
-    if args.record:
-        fields = dict(args.field)
-        append_event(args.record[0], args.record[1], args.record[2], **fields)
-        return 0
-
-    if args.tail:
-        events = recent_events(args.max, args.component, args.event, args.status)
-        for event in events:
-            if args.json:
-                print(json.dumps(event, ensure_ascii=False, sort_keys=True))
-            else:
-                print(_format_event(event))
-        return 0
-
-    if args.stale_gates:
-        stale = stale_gates()
-        if not stale:
-            print(f"gates fresh (<= {GATE_STALE_DAYS}d) watched={len(WATCHED_GATES)}")
-            return 0
-        for gate, days in stale:
-            print(f"  gate={gate} last_run={'never' if days is None else str(days) + 'd ago'}")
-        return 1
-
-    if args.replay_spool:
-        counts = replay_spool()
-        print(
-            f"spool replay: replayed={counts['replayed']} kept={counts['kept']} "
-            f"unparseable={counts['unparseable']} spool={event_log_path()}"
-        )
-        return 0 if counts["kept"] == 0 and counts["unparseable"] == 0 else 1
-
-    if args.recent_resolution_failures:
-        failures = recent_resolution_failures(args.max, args.hours)
-        if not failures:
-            print(f"resolution_quality recent_failures=0 log={event_log_path()}")
-            return 0
-        print(f"resolution_quality recent_failures={len(failures)} log={event_log_path()}")
-        for event in failures:
-            missing = ",".join(event.get("missing_fields") or [])
-            print(
-                "  "
-                f"session={event.get('session_id', '')} "
-                f"resolution={event.get('resolution', '')} "
-                f"remember={event.get('remember_status', '')} "
-                f"missing={missing}"
-            )
-        return 1
-
+    for flag, command in _COMMANDS:
+        if getattr(args, flag):
+            return command(args)
     parser.print_help()
     return 0
 

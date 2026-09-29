@@ -16,6 +16,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -338,6 +339,128 @@ def check_drudge_writable(client: DrudgeClient | None = None) -> Either[None, No
             return _judge_health(health)
         case Err(failure):
             return Err(NotWritable(f"drudge /health unreachable: {failure}"))
+
+
+@dataclass(frozen=True)
+class RememberOutcome:
+    ok: bool
+    status: str
+
+
+@dataclass(frozen=True)
+class _Retry:
+    """한 번의 시도가 일시 실패로 끝나 이미 기다렸다 — 다음 시도로 간다."""
+
+
+def _remember_request(arguments: dict[str, Any]) -> urllib.request.Request:
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "remember", "arguments": arguments},
+        }
+    ).encode("utf-8")
+    return urllib.request.Request(
+        f"{omb_env.drudge_url().rstrip('/')}/mcp",
+        data=payload,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+
+
+def _wait_then_retry(attempt: int) -> _Retry:
+    time.sleep(1 << attempt)
+    return _Retry()
+
+
+def _post_remember(req: urllib.request.Request, timeout: int, attempt: int, max_retries: int) -> Any:
+    """The decoded reply, `_Retry` after a transient failure, or the final failed outcome."""
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if 500 <= e.code < 600 and attempt < max_retries:
+            print(
+                f"[distill-session] remember attempt {attempt + 1} got HTTP {e.code}, retrying...",
+                file=sys.stderr,
+            )
+            return _wait_then_retry(attempt)
+        print(f"[distill-session] remember call failed: {e}", file=sys.stderr)
+        return RememberOutcome(False, "failed")
+    except (urllib.error.URLError, TimeoutError) as e:
+        if attempt < max_retries:
+            print(
+                f"[distill-session] remember attempt {attempt + 1} failed transiently ({e}), retrying...",
+                file=sys.stderr,
+            )
+            return _wait_then_retry(attempt)
+        print(
+            f"[distill-session] remember call failed after {max_retries + 1} attempts: {e}",
+            file=sys.stderr,
+        )
+        return RememberOutcome(False, "failed")
+    except Exception as e:
+        print(f"[distill-session] remember call failed: {e}", file=sys.stderr)
+        return RememberOutcome(False, "failed")
+
+
+def _read_remember_reply(data: Any) -> RememberOutcome:
+    if data.get("error"):
+        print(f"[distill-session] remember error: {data['error']}", file=sys.stderr)
+        return RememberOutcome(False, "failed")
+
+    result = data.get("result", {})
+    content = result.get("content", [])
+    text = ""
+    for item in content if isinstance(content, list) else []:
+        if isinstance(item, dict) and item.get("type") == "text":
+            text += item.get("text", "")
+    print(f"[distill-session] {text}", file=sys.stderr)
+    # A duplicate skip is a successful deterministic outcome, not a transient failure.
+    if "skipped — duplicate" in text:
+        return RememberOutcome(True, "duplicate")
+    if "remembered" in text:
+        return RememberOutcome(True, "remembered")
+    return RememberOutcome(False, "failed")
+
+
+def call_remember(title, body, origin, repo, tags, tools, concepts, claims, session_id="", sources=None):  # noqa: PLR0913
+    """Call ohmyboring's remember MCP tool.
+
+    Retries transient failures (5xx, connection errors, timeouts) a bounded number of times
+    so a momentary engine hiccup does not drop the session. Permanent failures (4xx, MCP
+    error, missing "remembered" ack) are not retried.
+    """
+    arguments = {
+        "title": title,
+        "body": body,
+        "origin": origin,
+        "repo": repo,
+        "tags": tags,
+        "tools": tools,
+        "concepts": concepts,
+        "claims": claims,
+    }
+    if sources:
+        arguments["sources"] = sources
+    if session_id:
+        arguments["omb_session_id"] = session_id
+    req = _remember_request(arguments)
+
+    max_retries = int(os.environ.get("DISTILL_REMEMBER_RETRIES") or "2")
+    timeout = int(os.environ.get("DISTILL_REMEMBER_TIMEOUT") or "45")
+
+    for attempt in range(max_retries + 1):
+        match _post_remember(req, timeout, attempt, max_retries):
+            case _Retry():
+                continue
+            case RememberOutcome() as outcome:
+                return outcome
+            case reply:
+                return _read_remember_reply(reply)
+
+    return RememberOutcome(False, "failed")
 
 
 def _judge_health(health: dict[str, Any]) -> Either[None, NotWritable]:

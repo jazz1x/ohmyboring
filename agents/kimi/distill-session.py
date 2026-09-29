@@ -24,17 +24,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import distill_queue
 import transcript
-from distill_core import (  # noqa: F401
-    _distill_resolution,
+from distill_core import (
     _mark,
     _throttled,
     git_remote_url,
-    log_skip_event,
     log_uptake_event,
     repo_slug,
 )
 
 from ohmyboring import config as boring_config
+from ohmyboring.distill.resolution_event import log_skip_event
+from ohmyboring.distill.settings import distill_resolution as _distill_resolution
 
 KIMI_HOME = os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code")
 CLAMP = transcript.kimi_distill_clamp()

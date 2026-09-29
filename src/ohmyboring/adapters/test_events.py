@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """Network-free tests for local workflow event sinks.
 
-Run: python3 agents/shared/test_event_log.py
+Run: python3 src/ohmyboring/adapters/test_events.py
 """
 
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest import mock
 
-import event_log
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ohmyboring.adapters import events as event_log  # noqa: E402
 
 
 class EventLogTests(unittest.TestCase):

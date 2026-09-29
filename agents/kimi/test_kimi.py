@@ -55,6 +55,7 @@ rules = _load("kimi_rules", "rules.py")
 import recall_core  # noqa: E402
 
 from ohmyboring import config as omb_env  # noqa: E402
+from ohmyboring.adapters import llm as llm_adapter  # noqa: E402
 from ohmyboring.adapters.engine import Unreachable  # noqa: E402
 from ohmyboring.result import Err, Ok  # noqa: E402
 
@@ -233,7 +234,7 @@ def test_distill_queues_session_without_calling_the_llm():
             mock.patch.object(distill, "git_remote_url", return_value=""),
             mock.patch.object(distill, "repo_slug", return_value="repo"),
             mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
-            mock.patch("distill_core._call_llm") as llm,
+            mock.patch.object(llm_adapter, "call_llm") as llm,
             mock.patch.object(distill.distill_queue, "enqueue") as enqueue,
             mock.patch("urllib.request.urlopen") as urlopen,
         ):

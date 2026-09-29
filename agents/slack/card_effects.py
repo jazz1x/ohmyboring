@@ -76,7 +76,7 @@ def run(
 
 
 def _live_record(event: str, fields: dict) -> None:
-    import event_log
+    from ohmyboring.adapters import events as event_log
 
     event_log.append_event("slack-card", event, "ok", **fields)
 

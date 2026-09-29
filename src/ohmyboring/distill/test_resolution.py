@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Network-free tests for distillation resolution quality gates.
 
-Run: python3 agents/shared/test_resolution_quality.py
+Run: python3 src/ohmyboring/distill/test_resolution.py
 """
 
+import sys
 import unittest
+from pathlib import Path
 from typing import Optional, get_type_hints
 
-import resolution_quality
-from resolution_quality import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ohmyboring.distill import resolution as resolution_quality  # noqa: E402
+from ohmyboring.distill.resolution import (  # noqa: E402
     body_survives_storage_normalize,
     normalize_resolution,
     resolution_prompt_contract,

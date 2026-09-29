@@ -29,10 +29,12 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent / "hermes"))
 sys.path.insert(0, str(_HERE.parent / "shared"))
+sys.path.insert(0, str(_HERE.parents[1] / "src"))
 
-import event_log  # noqa: E402
 import slack_briefing  # noqa: E402
 import slack_post  # noqa: E402
+
+from ohmyboring.adapters import events as event_log  # noqa: E402
 
 _KST = timezone(timedelta(hours=9))
 

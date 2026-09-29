@@ -5,10 +5,7 @@ Run: python3 agents/claude-code/test_hooks.py   (no pytest dependency; unittest-
  or: python3 -m pytest agents/claude-code/test_hooks.py
 
 Covers the PURE, no-network helpers in distill-session.py and recall.py:
-  - distill-session._extract_json         — LLM-JSON extraction (fences + trailing prose)
-  - distill-session._strip_trailing_metadata — drop trailing tags/tools/concepts blocks
-  - distill-session._build_prompt         — prompt assembly (JSON skeleton + transcript)
-  - markers.safe_id                       — throttle-marker id sanitization
+  - markers.safe_id                      — throttle-marker id sanitization
   - distill-session.repo_slug             — folder-name fallback (no git remote needed)
   - distill-session.extract               — JSONL transcript → "[role] text" (file I/O only)
   - recall.main                           — context-injection formatting (urlopen mocked)
@@ -89,68 +86,10 @@ os.environ["BORING_INJECTION_LEDGER"] = str(Path(tempfile.mkdtemp()) / "injectio
 import markers  # noqa: E402
 import recall_core  # noqa: E402
 
+from ohmyboring.adapters import engine  # noqa: E402
+from ohmyboring.adapters import llm as llm_adapter  # noqa: E402
 from ohmyboring.adapters.engine import Unreachable  # noqa: E402
 from ohmyboring.result import Err, Ok  # noqa: E402
-
-
-class ExtractJsonTests(unittest.TestCase):
-    def test_plain_object(self):
-        self.assertEqual(distill._extract_json('{"a": 1}'), {"a": 1})
-
-    def test_markdown_fenced(self):
-        text = '```json\n{"title": "x", "body": "y"}\n```'
-        self.assertEqual(distill._extract_json(text), {"title": "x", "body": "y"})
-
-    def test_trailing_prose_ignored(self):
-        # raw_decode stops at the first complete object; trailing garbage is dropped.
-        text = '{"skip": true}\nHere is why I skipped it.'
-        self.assertEqual(distill._extract_json(text), {"skip": True})
-
-    def test_leading_prose_before_object(self):
-        text = 'Sure! Here is the JSON:\n{"k": "v"}'
-        self.assertEqual(distill._extract_json(text), {"k": "v"})
-
-    def test_no_object_returns_none(self):
-        self.assertIsNone(distill._extract_json("no json here at all"))
-
-    def test_malformed_returns_none(self):
-        self.assertIsNone(distill._extract_json('{"a": '))
-
-
-class StripTrailingMetadataTests(unittest.TestCase):
-    def test_strips_trailing_block(self):
-        body = "## 결과\nfixed it.\n\ntags: [a, b]\ntools: [git]\nconcepts: [x]"
-        self.assertEqual(distill._strip_trailing_metadata(body), "## 결과\nfixed it.")
-
-    def test_keeps_clean_body(self):
-        body = "## 배경\nproblem\n\n## 결과\nsolved"
-        self.assertEqual(distill._strip_trailing_metadata(body), body.rstrip())
-
-    def test_does_not_strip_midbody_mention(self):
-        # A "tools:" line in the MIDDLE (not the trailing run) must be preserved.
-        body = "intro\ntools: relevant here\nmore prose"
-        self.assertEqual(distill._strip_trailing_metadata(body), body.rstrip())
-
-
-class BuildPromptTests(unittest.TestCase):
-    def test_contains_json_skeleton_and_transcript(self):
-        prompt = distill._build_prompt("[user] hello world", "personal", "org/repo")
-        self.assertIn('"title"', prompt)
-        self.assertIn('"claims"', prompt)
-        self.assertIn("=== SESSION TRANSCRIPT ===", prompt)
-        self.assertIn("[user] hello world", prompt)
-
-    def test_repo_and_origin_hints(self):
-        with_repo = distill._build_prompt("t", "company", "org/repo")
-        self.assertIn("repo='org/repo'", with_repo)
-        self.assertIn("origin='company'", with_repo)
-        no_repo = distill._build_prompt("t", "personal", "")
-        self.assertNotIn("repo='", no_repo)
-        self.assertIn("origin='personal'", no_repo)
-
-    def test_skip_contract_present(self):
-        # The prompt must teach the {"skip": true} escape hatch that distill_and_remember honors.
-        self.assertIn('"skip": true', distill._build_prompt("t", "personal", ""))
 
 
 class MarkPathTests(unittest.TestCase):
@@ -538,8 +477,8 @@ class DistillExitCodeTests(unittest.TestCase):
                 mock.patch.object(distill, "git_remote_url", return_value=""),
                 mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
                 mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
-                mock.patch.object(distill_core, "_call_llm") as llm,
-                mock.patch.object(distill_core, "_call_remember") as remember,
+                mock.patch.object(llm_adapter, "call_llm") as llm,
+                mock.patch.object(engine, "call_remember") as remember,
                 tempfile.TemporaryDirectory() as mark_dir,
                 mock.patch.object(distill.distill_queue.markers, "MARK_DIR", mark_dir),
                 mock.patch("urllib.request.urlopen") as urlopen,

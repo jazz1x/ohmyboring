@@ -15,10 +15,9 @@ import sys
 import urllib.request
 from collections.abc import Callable
 
-import event_log
-
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 from ohmyboring import config as omb_env  # noqa: E402
+from ohmyboring.adapters import events as event_log  # noqa: E402
 
 TIMEOUT = 2
 

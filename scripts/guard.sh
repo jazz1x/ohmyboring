@@ -19,7 +19,7 @@ export PYTHONPYCACHEPREFIX
 mkdir -p "$PYTHONPYCACHEPREFIX"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-EVENT_LOG="$ROOT/agents/shared/event_log.py"
+EVENT_LOG="$ROOT/src/ohmyboring/adapters/events.py"
 guard_run_id="guard-$(date +%Y%m%dT%H%M%S)-$$"
 guard_started_at="$(date +%s)"
 
@@ -64,20 +64,23 @@ ruff format --check .
 echo "5) python unit tests…"
 python3 src/ohmyboring/test_config.py
 python3 src/ohmyboring/distill/test_graph.py
+python3 src/ohmyboring/distill/test_prompts.py
+python3 src/ohmyboring/distill/test_run.py
+python3 src/ohmyboring/distill/test_resolution.py
 python3 agents/shared/test_agent_wiring.py
 python3 agents/shared/test_rules_core.py
 python3 agents/shared/test_distill_core.py
 python3 agents/shared/test_distill_queue.py
-python3 agents/shared/test_event_log.py
-python3 agents/shared/test_workflow_contract.py
 python3 agents/shared/test_markers.py
-python3 agents/shared/test_resolution_quality.py
 python3 agents/shared/test_transcript.py
 python3 agents/shared/test_recall_core.py
 python3 agents/shared/test_label_core.py
 python3 agents/shared/test_uptake_core.py
 python3 agents/shared/test_verdict_core.py
 python3 src/ohmyboring/adapters/test_engine.py
+python3 src/ohmyboring/adapters/test_events.py
+python3 src/ohmyboring/adapters/test_llm.py
+python3 src/ohmyboring/adapters/test_workflow_contract.py
 python3 src/ohmyboring/test_result.py
 python3 agents/door/test_door.py
 python3 agents/memory/test_retriever.py

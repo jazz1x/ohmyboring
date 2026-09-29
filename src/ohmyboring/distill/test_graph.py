@@ -6,6 +6,8 @@ Run: python3 src/ohmyboring/distill/test_graph.py   (no pytest dependency)
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -93,6 +95,18 @@ class DistillEdgesTest(unittest.TestCase):
     def test_repair_that_returns_nothing_gives_up(self):
         outcomes = {**CLEAN, "verify": {"verified": False}, "repair_call": {"repaired": None}}
         self.assertEqual(run(outcomes), ["draft", "prepare", "verify", "repair_call", "give_up"])
+
+
+class LangGraphJsonTest(unittest.TestCase):
+    def test_registered_path_loads_the_module_level_graph_with_every_node(self):
+        entry = json.loads((ROOT / "langgraph.json").read_text(encoding="utf-8"))["graphs"]["distill"]
+        path, attr = entry.split(":")
+        spec = importlib.util.spec_from_file_location("distill_graph_from_langgraph_json", ROOT / path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        nodes = set(getattr(module, attr).get_graph().nodes)
+        self.assertEqual(nodes - {"__start__", "__end__"}, set(Steps.__dataclass_fields__))
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ for path in (ROOT / "src", ROOT / "agents" / "shared"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+from ohmyboring.adapters import engine  # noqa: E402
 from ohmyboring.adapters.engine import (  # noqa: E402
     ConsumptionMarks,
     DrudgeClient,
@@ -383,6 +384,69 @@ class RememberWireTest(unittest.TestCase):
             wire.body(),
             '{"title": "제목", "body": "본문", "origin": "personal"}',
         )
+
+
+class _Reply:
+    def __init__(self, text):
+        self._body = json.dumps({"result": {"content": [{"type": "text", "text": text}]}}).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def _http_error(code):
+    return urllib.error.HTTPError("http://drudge.test/mcp", code, "boom", None, None)
+
+
+class CallRememberTest(unittest.TestCase):
+    def _call(self, outcomes):
+        """Run call_remember against a scripted sequence of urlopen outcomes; return (result, calls, sleeps)."""
+        script = list(outcomes)
+        calls, sleeps = [], []
+
+        def fake_urlopen(req, timeout):
+            calls.append((json.loads(req.data), timeout))
+            outcome = script.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        with (
+            mock.patch.object(urllib.request, "urlopen", fake_urlopen),
+            mock.patch.object(engine.time, "sleep", sleeps.append),
+            mock.patch.object(engine.sys, "stderr", io.StringIO()),
+            mock.patch.dict(engine.os.environ, {"DISTILL_REMEMBER_RETRIES": "2"}),
+        ):
+            result = engine.call_remember("t", "b", "personal", "repo", ["x"], [], [], [], "sid")
+        return result, calls, sleeps
+
+    def test_transient_server_errors_are_retried_with_doubling_waits(self):
+        result, calls, sleeps = self._call([_http_error(503), _http_error(502), _Reply("remembered wiki-1")])
+        self.assertEqual(result, engine.RememberOutcome(True, "remembered"))
+        self.assertEqual(sleeps, [1, 2])
+        self.assertEqual(len(calls), 3)
+
+    def test_a_client_error_is_final_and_not_retried(self):
+        result, calls, sleeps = self._call([_http_error(400)])
+        self.assertEqual(result, engine.RememberOutcome(False, "failed"))
+        self.assertEqual((sleeps, len(calls)), ([], 1))
+
+    def test_a_duplicate_is_a_success(self):
+        result, _calls, _sleeps = self._call([_Reply("skipped — duplicate of wiki-3")])
+        self.assertEqual(result, engine.RememberOutcome(True, "duplicate"))
+
+    def test_the_request_names_the_session_and_the_tool(self):
+        _result, calls, _sleeps = self._call([_Reply("remembered wiki-1")])
+        payload, timeout = calls[0]
+        self.assertEqual(payload["params"]["name"], "remember")
+        self.assertEqual(payload["params"]["arguments"]["omb_session_id"], "sid")
+        self.assertEqual(timeout, 45)
 
 
 if __name__ == "__main__":

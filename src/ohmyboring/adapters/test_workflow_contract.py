@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Network-free tests for memory-ingest workflow event vocabulary.
 
-Run: python3 agents/shared/test_workflow_contract.py
+Run: python3 src/ohmyboring/adapters/test_workflow_contract.py
 """
 
 import re
+import sys
 from pathlib import Path
 
-import workflow_contract as workflow
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ohmyboring.adapters import workflow_contract as workflow  # noqa: E402
 
 
 def test_python_vocabulary_matches_rust_workflow_contract():
@@ -65,7 +68,7 @@ def test_unknown_workflow_projection_is_rejected():
 
 
 def _rust_workflow_source() -> str:
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     return (repo_root / "drudge" / "src" / "workflow.rs").read_text(encoding="utf-8")
 
 
