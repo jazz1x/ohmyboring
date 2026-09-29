@@ -44,8 +44,9 @@ from card_types import (
     ResolvedNote,
     Unresolved,
 )
-from drudge_client import DrudgeClient
 from pydantic import ValidationError
+
+from ohmyboring.adapters.engine import DrudgeClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "memory"))
 from retriever import BoringRetriever  # noqa: E402

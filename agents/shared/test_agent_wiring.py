@@ -372,6 +372,31 @@ def test_local_deps_are_transitive_and_reach_the_shared_dir():
             raise AssertionError("a missing module must abort the install")
 
 
+def test_local_deps_skip_the_ohmyboring_package_but_still_raise_for_missing_flat_modules():
+    """hermes scripts reach the engine client through the ohmyboring package now: the container's
+    PYTHONPATH provides it, so the collector must not try to copy it flat — while a genuinely
+    missing flat module still aborts the install (the control the old guarantee depends on)."""
+    with tempfile.TemporaryDirectory() as d:
+        src_dir = Path(d) / "hermes"
+        shared_dir = Path(d) / "shared"
+        src_dir.mkdir()
+        shared_dir.mkdir()
+        (src_dir / "entry.py").write_text(
+            "import json\nfrom ohmyboring.adapters.engine import DrudgeClient\n",
+            encoding="utf-8",
+        )
+
+        assert agent_wiring._local_module_deps(src_dir / "entry.py", (shared_dir,)) == set()
+
+        (src_dir / "entry.py").write_text("import vanished\n", encoding="utf-8")
+        try:
+            agent_wiring._local_module_deps(src_dir / "entry.py", (shared_dir,))
+        except FileNotFoundError as exc:
+            assert "vanished.py" in str(exc), exc
+        else:
+            raise AssertionError("a missing flat module must still abort the install")
+
+
 def test_wire_hermes_missing_slack_briefing_has_no_side_effects():
     """Missing slack_briefing aborts before config backup or script installation."""
     with tempfile.TemporaryDirectory() as d:
@@ -817,7 +842,10 @@ def test_install_places_ingest_worker_and_job_uses_relative_script():
 
 def test_installed_ingest_worker_imports_resolve_from_the_scripts_dir():
     """Whatever the worker imports at runtime must be present beside the installed copy —
-    asserted by importing, the way the briefing install's test does."""
+    asserted by importing, the way the briefing install's test does. The engine client
+    moved into the ohmyboring package with this migration: hermes provides it on PYTHONPATH
+    (the container mounts the repo root), so the subprocess runs under the same contract
+    while the flat shared modules must still resolve beside the installed copy."""
     repo = HERE.parent.parent
     with (
         tempfile.TemporaryDirectory() as d,
@@ -840,7 +868,6 @@ def test_installed_ingest_worker_imports_resolve_from_the_scripts_dir():
         imported = subprocess.run(
             [
                 sys.executable,
-                "-I",
                 "-c",
                 "import pathlib, runpy, sys; "
                 "ns = runpy.run_path(sys.argv[1], run_name='ingest_worker'); "
@@ -849,7 +876,16 @@ def test_installed_ingest_worker_imports_resolve_from_the_scripts_dir():
             ],
             capture_output=True,
             text=True,
-            env={**os.environ, "BORING_HOME": str(repo), "BORING_IN_CONTAINER": "0"},
+            # The container contract this worker ships under: the repo root on PYTHONPATH
+            # (hermes sets it), cwd somewhere neutral. -I 는 PYTHONPATH 까지 무시해 빼고,
+            # 대신 cwd 를 tmp 로 옮겨 체크아웃에서 우연히 풀리는 import 를 막는다.
+            cwd=str(Path(d)),
+            env={
+                **os.environ,
+                "BORING_HOME": str(repo),
+                "BORING_IN_CONTAINER": "0",
+                "PYTHONPATH": str(repo),
+            },
         )
         assert imported.returncode == 0, imported.stderr
         assert Path(imported.stdout.strip()) == installed_scripts / "distill_core.py"
@@ -1118,6 +1154,7 @@ if __name__ == "__main__":
     test_wire_kimi_adds_only_the_missing_rules_block()
     test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3()
     test_local_deps_are_transitive_and_reach_the_shared_dir()
+    test_local_deps_skip_the_ohmyboring_package_but_still_raise_for_missing_flat_modules()
     test_install_hermes_skills_removes_legacy_nested_duplicate()
     test_enable_hermes_plugin_appends_to_the_enabled_list()
     test_enable_hermes_plugin_is_idempotent()

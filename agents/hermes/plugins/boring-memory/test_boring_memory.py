@@ -101,8 +101,8 @@ class _FakeDrudgeClient:
         self.calls = []
         _FakeDrudgeClient.instances.append(self)
 
-    def search(self, prompt, **kwargs):
-        self.calls.append(("search", prompt, kwargs))
+    def search(self, prompt, knobs=None):
+        self.calls.append(("search", prompt, knobs))
         if _FakeDrudgeClient.down:
             raise ConnectionError("engine unreachable")
         return list(_FakeDrudgeClient.hits)

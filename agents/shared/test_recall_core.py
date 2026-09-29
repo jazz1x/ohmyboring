@@ -205,13 +205,9 @@ def test_the_engine_asked_for_related_notes_on_every_pool_hit():
     ):
         client.return_value.search.return_value = []
         recall_core.run_recall({"prompt": "why did the connection pool die again", "session_id": "s1"})
-    kwargs = client.return_value.search.call_args.kwargs
-    assert kwargs["related"] == 1
-    assert (
-        kwargs["related_heads"]
-        == kwargs["max_results"]
-        == recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS
-    )
+    (query, knobs) = client.return_value.search.call_args.args
+    assert knobs.related == 1
+    assert knobs.related_heads == knobs.max_results == recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS
 
 
 def test_the_engine_is_asked_for_the_claims_behind_each_hit():
@@ -228,7 +224,7 @@ def test_the_engine_is_asked_for_the_claims_behind_each_hit():
     ):
         client.return_value.search.return_value = []
         recall_core.run_recall({"prompt": "why did the connection pool die again", "session_id": "s1"})
-    assert client.return_value.search.call_args.kwargs["claims"] == recall_core.CLAIMS_PER_HIT >= 1
+    assert client.return_value.search.call_args.args[1].claims == recall_core.CLAIMS_PER_HIT >= 1
 
 
 def test_two_claims_is_the_measured_default():

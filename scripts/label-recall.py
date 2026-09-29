@@ -21,11 +21,13 @@ from pathlib import Path
 
 SHARED = Path(__file__).resolve().parents[1] / "agents" / "shared"
 sys.path.insert(0, str(SHARED))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import label_core  # noqa: E402
 import omb_env  # noqa: E402
-from drudge_client import DrudgeClient  # noqa: E402
 from vault_note import split_frontmatter  # noqa: E402
+
+from ohmyboring.adapters.engine import DrudgeClient  # noqa: E402
 
 #: How much of a note the judge sees. Long enough to decide, short enough that a local model
 #: answers in seconds; the note's own opening carries its subject.

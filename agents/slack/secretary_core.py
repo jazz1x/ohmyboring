@@ -22,8 +22,16 @@ from datetime import UTC, datetime
 from typing import NamedTuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
 import recall_core  # noqa: E402
-from drudge_client import OWNER, DrudgeClient  # noqa: E402, F401
+
+from ohmyboring.adapters.engine import (  # noqa: E402, F401 — OWNER 은 secretary.py 가 secretary_core.OWNER 로 다시 쓴다
+    OWNER,
+    ConsumptionMarks,
+    DrudgeClient,
+    NoteProvenance,
+    SearchKnobs,
+)
 
 #: How many notes an answer carries. Three is what the prompt hook injects; a person reading in
 #: Slack has less patience than an agent, not more.
@@ -104,7 +112,7 @@ def answer(question: str, search: Callable[..., list[dict]] | None = None) -> An
         client = DrudgeClient(timeout=TIMEOUT, retries=0)
         search = client.search
     try:
-        hits = search(q, max_results=MAX_HITS, claims=CLAIMS_PER_HIT)
+        hits = search(q, SearchKnobs(max_results=MAX_HITS, claims=CLAIMS_PER_HIT))
     except Exception as e:  # noqa: BLE001 — the reader must see "could not look", not a stack trace
         print(f"[secretary] search failed: {e}", file=sys.stderr)
         return Answer(ENGINE_DOWN, [])
@@ -174,10 +182,12 @@ def correct(
         return remember(
             _first_sentence(body),
             note,
-            tags=["correction", "slack"],
-            supersedes=supersedes,
-            author=author,
-            judge=author,
+            NoteProvenance(
+                tags=["correction", "slack"],
+                supersedes=supersedes,
+                author=author,
+                judge=author,
+            ),
         )
     except Exception as e:  # noqa: BLE001 — a failed correction must not cost the transport a crash
         print(f"[secretary] correction on {answer_key} failed: {e}", file=sys.stderr)
@@ -224,7 +234,7 @@ def feedback(
     if observed_at is None:
         observed_at = datetime.now(UTC).isoformat()
     try:
-        resp = consumption(answer_key, observed_at, verdict=verdict)
+        resp = consumption(answer_key, observed_at, ConsumptionMarks(verdict=verdict))
     except Exception as e:  # noqa: BLE001 — a reaction must not cost the transport a crash
         print(f"[secretary] feedback failed: {e}", file=sys.stderr)
         return {"error": str(e)}

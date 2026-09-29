@@ -222,8 +222,8 @@ def test_a_reaction_after_a_real_answer_reaches_the_engine_verdict():
         engine.append({"kind": "handover", "session_id": session_id, "paths": list(paths)})
         return {"session": session_id, "handed": len(paths), "unknown": []}
 
-    def consumption(session_id, observed_at, verdict=None):
-        engine.append({"kind": "consumption", "session_id": session_id, "verdict": verdict})
+    def consumption(session_id, observed_at, marks):
+        engine.append({"kind": "consumption", "session_id": session_id, "verdict": marks.verdict})
         return {"used": 1, "contested": 0}
 
     sec.on_mention(

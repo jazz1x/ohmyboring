@@ -29,7 +29,8 @@ from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-from drudge_client import owner_headers  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
+from ohmyboring.adapters.engine import owner_headers  # noqa: E402
 
 _TIMEOUT = 30.0
 

@@ -14,10 +14,12 @@ import time
 from collections.abc import Callable
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
 from datetime import UTC
 
 import uptake_core  # noqa: E402
-from drudge_client import DrudgeClient  # noqa: E402
+
+from ohmyboring.adapters.engine import DrudgeClient, SearchKnobs  # noqa: E402
 
 MAX_RESULTS = int(os.environ.get("RECALL_MAX_RESULTS") or "3")
 
@@ -315,11 +317,13 @@ def run_recall(
         # One call for both: the first MAX_RESULTS are injected, the rest are controls.
         hits = client.search(
             prompt,
-            max_results=MAX_RESULTS + CONTROL_RESULTS,
-            max_tokens=MAX_TOKENS,
-            related=1,
-            related_heads=MAX_RESULTS + CONTROL_RESULTS,
-            claims=CLAIMS_PER_HIT,
+            SearchKnobs(
+                max_results=MAX_RESULTS + CONTROL_RESULTS,
+                max_tokens=MAX_TOKENS,
+                related=1,
+                related_heads=MAX_RESULTS + CONTROL_RESULTS,
+                claims=CLAIMS_PER_HIT,
+            ),
         )
     except Exception as e:
         print(f"[omb-recall] search failed after {RETRIES} retries: {e}", file=sys.stderr)

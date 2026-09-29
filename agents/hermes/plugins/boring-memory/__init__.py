@@ -83,13 +83,17 @@ def _recall_block(recall_core: Any, uptake_core: Any, message: str, session_id: 
     client = recall_core.DrudgeClient(timeout=recall_core.TIMEOUT, retries=recall_core.RETRIES)
     # One call for both, exactly as run_recall takes it: the first MAX_RESULTS are handed
     # over, the rest are controls the engine fetches but never sees.
+    from ohmyboring.adapters.engine import SearchKnobs
+
     hits = client.search(
         prompt,
-        max_results=recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS,
-        max_tokens=recall_core.MAX_TOKENS,
-        related=1,
-        related_heads=recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS,
-        claims=recall_core.CLAIMS_PER_HIT,
+        SearchKnobs(
+            max_results=recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS,
+            max_tokens=recall_core.MAX_TOKENS,
+            related=1,
+            related_heads=recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS,
+            claims=recall_core.CLAIMS_PER_HIT,
+        ),
     )
     if not hits:
         return ""

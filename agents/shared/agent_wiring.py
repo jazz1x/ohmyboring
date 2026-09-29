@@ -623,6 +623,12 @@ def _local_module_deps(script: Path, search_dirs: tuple[Path, ...] = ()) -> set[
             else:
                 continue
             for name in names:
+                if name == "ohmyboring":
+                    # The hermes container puts the repo root on PYTHONPATH, so the package
+                    # imports without copying; a flat copy would land its modules nowhere
+                    # Python looks for a package. Skipping here is the copy list keeping the
+                    # same guarantee — everything else still has to resolve or abort.
+                    continue
                 found = next((d / f"{name}.py" for d in dirs if (d / f"{name}.py").exists()), None)
                 if found is None:
                     if name not in sys.stdlib_module_names:

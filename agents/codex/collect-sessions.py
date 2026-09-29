@@ -40,13 +40,15 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
 import event_log
 import markers
 import omb_env
 import transcript
 import workflow_contract
-from drudge_client import DrudgeClient, DrudgeNotWritableError, check_drudge_writable
 from vault_note import frontmatter_text
+
+from ohmyboring.adapters.engine import DrudgeClient, DrudgeNotWritableError, check_drudge_writable
 
 BORING_URL = omb_env.drudge_url()
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")

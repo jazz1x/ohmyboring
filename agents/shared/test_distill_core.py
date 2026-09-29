@@ -695,15 +695,16 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
         )
         with (
             mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}),
-            mock.patch("drudge_client.DrudgeClient") as client,
+            mock.patch("ohmyboring.adapters.engine.DrudgeClient") as client,
             mock.patch.object(distill_core.event_log, "append_event"),
         ):
             distill_core.write_consumption_to_graph("s1", self._records(), transcript)
-        (sid, when, used, contested), kwargs = client.return_value.consumption.call_args
+        (sid, when, marks), kwargs = client.return_value.consumption.call_args
         self.assertEqual(sid, "s1")
-        self.assertEqual(used, ["/vault/wiki/wiki-0007.md", "/vault/wiki/wiki-0003.md"])
-        self.assertEqual(contested, ["/vault/wiki/wiki-0007.md"])
-        self.assertEqual(kwargs["supersedes"], [["/vault/wiki/wiki-0007.md", "/vault/wiki/wiki-0003.md"]])
+        self.assertEqual(marks.used, ["/vault/wiki/wiki-0007.md", "/vault/wiki/wiki-0003.md"])
+        self.assertEqual(marks.contested, ["/vault/wiki/wiki-0007.md"])
+        self.assertEqual(marks.supersedes, [["/vault/wiki/wiki-0007.md", "/vault/wiki/wiki-0003.md"]])
+        self.assertEqual(marks.judge, "inferred")
         self.assertRegex(when, r"^\d{4}-\d{2}-\d{2}T")
 
     def test_verdict_proposed_events_fire_per_note_only_after_a_successful_write(self):
@@ -716,7 +717,7 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
         )
         with (
             mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}),
-            mock.patch("drudge_client.DrudgeClient") as client,
+            mock.patch("ohmyboring.adapters.engine.DrudgeClient") as client,
             mock.patch.object(distill_core.event_log, "append_event") as append_event,
         ):
             distill_core.write_consumption_to_graph("s1", self._records(), transcript)
@@ -737,7 +738,7 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
         append_event.reset_mock()
         with (
             mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}),
-            mock.patch("drudge_client.DrudgeClient") as client,
+            mock.patch("ohmyboring.adapters.engine.DrudgeClient") as client,
             mock.patch.object(distill_core.event_log, "append_event") as append_event,
         ):
             client.return_value.consumption.side_effect = OSError("down")
@@ -748,7 +749,7 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
         transcript = "[user] why\n[assistant] per wiki-0007.\n"
         with (
             mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "spool"}),
-            mock.patch("drudge_client.DrudgeClient") as client,
+            mock.patch("ohmyboring.adapters.engine.DrudgeClient") as client,
         ):
             distill_core.write_consumption_to_graph("s1", self._records(), transcript)
         client.return_value.consumption.assert_not_called()
@@ -756,7 +757,7 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
     def test_nothing_consumed_means_no_call_and_a_dead_engine_does_not_raise(self):
         with (
             mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}),
-            mock.patch("drudge_client.DrudgeClient") as client,
+            mock.patch("ohmyboring.adapters.engine.DrudgeClient") as client,
         ):
             distill_core.write_consumption_to_graph("s1", self._records(), "[assistant] unrelated.\n")
             client.return_value.consumption.assert_not_called()

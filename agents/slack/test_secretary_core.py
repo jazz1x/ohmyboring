@@ -9,9 +9,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
 
-import drudge_client as dc  # noqa: E402
 import secretary_core as sc  # noqa: E402
+
+import ohmyboring.adapters.engine as dc  # noqa: E402
 
 
 def _hit(src, text, claims=None, total=None):
@@ -41,13 +43,15 @@ def _handover_recorder():
 def _verdict_recorder(result=None):
     calls = []
 
-    def fake(session_id, observed_at, verdict=None, **kw):
-        assert not kw, f"a verdict travels without path lists, got unexpected {sorted(kw)}"
+    def fake(session_id, observed_at, marks):
+        assert marks.used is None and marks.contested is None and marks.supersedes is None, (
+            "a verdict travels without path lists"
+        )
         calls.append(
             {
                 "session_id": session_id,
                 "observed_at": observed_at,
-                "verdict": verdict,
+                "verdict": marks.verdict,
             }
         )
         return result if result is not None else {"used": 1, "contested": 0, "unknown": []}
@@ -71,7 +75,7 @@ def test_the_answer_is_the_hooks_lines_with_the_claims_under_each():
             total=4,
         ),
     ]
-    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, **kw: hits)
+    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, knobs=None: hits)
     assert "*wiki-0435.md*" in out.text
     assert "[decision] ohmyboring branch-name: fix/..." in out.text
     assert "declared 4, handed over 1" in out.text, "the cut is stated to a person too"
@@ -80,8 +84,9 @@ def test_the_answer_is_the_hooks_lines_with_the_claims_under_each():
 def test_the_search_is_asked_for_claims_like_the_hook_is():
     seen = {}
 
-    def search(q, **kw):
-        seen.update(kw)
+    def search(q, knobs):
+        seen["claims"] = knobs.claims
+        seen["max_results"] = knobs.max_results
         return []
 
     sc.answer("아무 질문이나", search=search)
@@ -90,9 +95,9 @@ def test_the_search_is_asked_for_claims_like_the_hook_is():
 
 
 def test_nothing_found_and_engine_down_are_different_answers():
-    assert sc.answer("이 주제는 없다", search=lambda q, **kw: []).text == sc.NOTHING_FOUND
+    assert sc.answer("이 주제는 없다", search=lambda q, knobs=None: []).text == sc.NOTHING_FOUND
 
-    def down(q, **kw):
+    def down(q, knobs=None):
         raise ConnectionError("refused")
 
     assert sc.answer("엔진이 죽었다", search=down).text == sc.ENGINE_DOWN
@@ -101,7 +106,7 @@ def test_nothing_found_and_engine_down_are_different_answers():
 
 def test_a_question_too_short_to_search_asks_for_one():
     called = []
-    out = sc.answer("<@U1> 응", search=lambda q, **kw: called.append(q) or [])
+    out = sc.answer("<@U1> 응", search=lambda q, knobs=None: called.append(q) or [])
     assert called == [], "two characters are not a question; the engine is not consulted"
     assert out.hits == []
 
@@ -113,7 +118,7 @@ def test_hits_are_exactly_the_notes_the_reader_saw():
         _hit("wiki-1000.md", "the pool question came up again and was settled " * 3),
         _hit("wiki-1001.md", "the cron question came up again and was settled " * 3),
     ]
-    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, **kw: hits)
+    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, knobs=None: hits)
     assert [h["source_path"] for h in out.hits] == [
         "/vault/wiki/wiki-0435.md",
         "/vault/wiki/wiki-1000.md",
@@ -126,9 +131,9 @@ def test_hits_are_exactly_the_notes_the_reader_saw():
 
 
 def test_empty_and_failed_answers_carry_no_hits():
-    assert sc.answer("이 주제는 없다", search=lambda q, **kw: []).hits == []
+    assert sc.answer("이 주제는 없다", search=lambda q, knobs=None: []).hits == []
 
-    def down(q, **kw):
+    def down(q, knobs=None):
         raise ConnectionError("refused")
 
     assert sc.answer("엔진이 죽었다", search=down).hits == []
@@ -156,7 +161,7 @@ def test_the_client_sends_a_verdict_without_path_lists():
     client._retry = lambda method, path, payload=None, timeout=None: (
         sent.append(payload) or {"used": 0, "contested": 0}
     )
-    client.consumption("probe:e1b", "2026-09-21T00:00:00+00:00", verdict="used")
+    client.consumption("probe:e1b", "2026-09-21T00:00:00+00:00", dc.ConsumptionMarks(verdict="used"))
     assert sent[0]["verdict"] == "used"
     assert "used" not in sent[0] and "contested" not in sent[0], (
         "paths beside a verdict are a 400; the verdict must travel alone"
@@ -169,7 +174,11 @@ def test_the_client_refuses_a_verdict_beside_path_lists():
     sent = []
     client._retry = lambda method, path, payload=None, timeout=None: sent.append(payload) or {}
     try:
-        client.consumption("k", "2026-09-21T00:00:00+00:00", used=["/vault/wiki/a.md"], verdict="used")
+        client.consumption(
+            "k",
+            "2026-09-21T00:00:00+00:00",
+            dc.ConsumptionMarks(used=["/vault/wiki/a.md"], verdict="used"),
+        )
     except ValueError:
         pass
     else:
@@ -257,7 +266,7 @@ def test_an_answer_numbers_its_notes_under_a_head():
         _hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3),
         _hit("wiki-1000.md", "the pool question came up again and was settled " * 3),
     ]
-    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, **kw: hits)
+    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, knobs=None: hits)
     assert out.text.startswith("_기억에서 찾은 것 2개_"), (
         "the head names the count and marks the message as ours"
     )
@@ -276,13 +285,22 @@ def test_parse_correction_shapes():
 def _remember_recorder():
     calls = []
 
-    def fake(title, body, **kw):
-        calls.append({"title": title, "body": body, **kw})
+    def fake(title, body, provenance):
+        calls.append(
+            {
+                "title": title,
+                "body": body,
+                "tags": provenance.tags,
+                "supersedes": provenance.supersedes,
+                "author": provenance.author,
+                "judge": provenance.judge,
+            }
+        )
         return {
             "source_path": "/vault/wiki/wiki-1077.md",
             "wiki_id": "wiki-1077",
             "duplicate": None,
-            "supersedes": len(kw.get("supersedes") or []),
+            "supersedes": len(provenance.supersedes or []),
             "unknown": 0,
         }
 

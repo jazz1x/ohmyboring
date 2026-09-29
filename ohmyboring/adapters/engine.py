@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared HTTP client for ohmyboring's drudge engine.
+"""엔진에 나가는 쪽 한 벌 — ohmyboring 의 drudge 엔진을 부르는 HTTP 클라이언트.
 
 Centralizes retries, timeouts, and JSON parsing so Python adapters (recall,
 distillation, schedulers, diagnostics) stop duplicating urllib boilerplate.
@@ -12,12 +12,53 @@ import os
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
 import omb_env
 
 OWNER = "owner"
 OWNER_TOKEN_HEADER = "X-Boring-Owner-Token"
+
+
+@dataclass(frozen=True)
+class SearchKnobs:
+    """`DrudgeClient.search` 의 선택 인자 묶음 — 필드 이름·기본값은 옛 키워드 인자와 같다."""
+
+    max_results: int = 3
+    max_tokens: int = 1500
+    related: int = 0
+    related_heads: int = 2
+    claims: int = 0
+
+
+@dataclass(frozen=True)
+class ConsumptionMarks:
+    """`DrudgeClient.consumption` 의 선택 인자 묶음 — 필드 이름·기본값은 옛 키워드 인자와 같다."""
+
+    used: list[str] | None = None
+    contested: list[str] | None = None
+    supersedes: list[list[str]] | None = None
+    verdict: str | None = None
+    judge: str | None = None
+
+
+@dataclass(frozen=True)
+class NoteProvenance:
+    """`DrudgeClient.remember` 의 선택 인자 묶음 — 필드 이름·기본값은 옛 키워드 인자와 같다."""
+
+    tags: list[str] | None = None
+    supersedes: list[str] | None = None
+    origin: str = "personal"
+    repo: str | None = None
+    author: str | None = None
+    judge: str | None = None
+
+
+#: frozen 이라 여러 호출이 기본값을 같이 써도 안전 — 서명 기본값은 모듈 싱글턴으로 둔다
+#: (ruff B008: 인자 기본값에서 함수 호출 금지).
+_DEFAULT_SEARCH_KNOBS = SearchKnobs()
+_DEFAULT_NOTE_PROVENANCE = NoteProvenance()
 
 
 def owner_headers(payload: dict[str, Any] | None) -> dict[str, str]:
@@ -86,24 +127,16 @@ class DrudgeClient:
                 raise
         raise last_err or RuntimeError("unexpected empty retry loop")
 
-    def search(
-        self,
-        query: str,
-        max_results: int = 3,
-        max_tokens: int = 1500,
-        related: int = 0,
-        related_heads: int = 2,
-        claims: int = 0,
-    ) -> list[dict[str, Any]]:
+    def search(self, query: str, knobs: SearchKnobs = _DEFAULT_SEARCH_KNOBS) -> list[dict[str, Any]]:
         """POST /search and return the hits list. `related` > 0 asks for the older notes each
         of the first `related_heads` hits shares a concept with, under the hit's `related` key.
         `claims` > 0 asks each hit to hand over that many of the claims its note declares, under
         the hit's `claims` key — the record of what was settled, not the prose around it."""
-        payload = {"query": query, "max_results": max_results, "max_tokens": max_tokens}
-        if related:
-            payload.update(related=related, related_heads=related_heads)
-        if claims:
-            payload["claims"] = claims
+        payload = {"query": query, "max_results": knobs.max_results, "max_tokens": knobs.max_tokens}
+        if knobs.related:
+            payload.update(related=knobs.related, related_heads=knobs.related_heads)
+        if knobs.claims:
+            payload["claims"] = knobs.claims
         data = self._retry("POST", "/search", payload)
         return data.get("hits", []) if isinstance(data, dict) else []
 
@@ -118,11 +151,7 @@ class DrudgeClient:
         self,
         session_id: str,
         observed_at: str,
-        used: list[str] | None = None,
-        contested: list[str] | None = None,
-        supersedes: list[list[str]] | None = None,
-        verdict: str | None = None,
-        judge: str | None = None,
+        marks: ConsumptionMarks,
     ) -> dict[str, Any]:
         """POST /consumption — what a session did with the notes it was handed, as graph edges.
         `supersedes` pairs are `[newer_path, older_path]`. A `verdict` (`used`|`contested`)
@@ -131,49 +160,43 @@ class DrudgeClient:
         ('owner', 'inferred', 'agent:<name>') and lands verbatim on every written edge —
         absent means the edges name nobody (NULL)."""
         payload: dict[str, Any] = {"session_id": session_id, "observed_at": observed_at}
-        if judge is not None:
-            payload["judge"] = judge
-        if verdict is not None:
+        if marks.judge is not None:
+            payload["judge"] = marks.judge
+        if marks.verdict is not None:
             # Dropping the lists here would hide a caller bug behind a 200: the caller thinks
             # its paths were judged, the engine judged what it had handed. Refuse instead.
-            if used or contested:
+            if marks.used or marks.contested:
                 raise ValueError("consumption: pass either a verdict or path lists, not both")
-            payload["verdict"] = verdict
+            payload["verdict"] = marks.verdict
         else:
-            payload["used"] = used or []
-            payload["contested"] = contested or []
-        if supersedes:
-            payload["supersedes"] = supersedes
+            payload["used"] = marks.used or []
+            payload["contested"] = marks.contested or []
+        if marks.supersedes:
+            payload["supersedes"] = marks.supersedes
         return self._retry("POST", "/consumption", payload)
 
     def remember(
         self,
         title: str,
         body: str,
-        *,
-        tags: list[str] | None = None,
-        supersedes: list[str] | None = None,
-        origin: str = "personal",
-        repo: str | None = None,
-        author: str | None = None,
-        judge: str | None = None,
+        provenance: NoteProvenance = _DEFAULT_NOTE_PROVENANCE,
     ) -> dict[str, Any]:
         """POST /remember — a new note, optionally correcting older ones. `supersedes` names the
         source paths the new note replaces; the engine writes the supersede edges so the next
         recall sinks the old notes below the new one. `author` lands on the note, `judge` on the
         supersede edges; absent, the engine records the note as `unknown`. Same body the MCP
         `remember` tool sends; the response is `{source_path, wiki_id, duplicate, supersedes, unknown}`."""
-        payload: dict[str, Any] = {"title": title, "body": body, "origin": origin}
-        if tags:
-            payload["tags"] = tags
-        if supersedes:
-            payload["supersedes"] = supersedes
-        if repo:
-            payload["repo"] = repo
-        if author is not None:
-            payload["author"] = author
-        if judge is not None:
-            payload["judge"] = judge
+        payload: dict[str, Any] = {"title": title, "body": body, "origin": provenance.origin}
+        if provenance.tags:
+            payload["tags"] = provenance.tags
+        if provenance.supersedes:
+            payload["supersedes"] = provenance.supersedes
+        if provenance.repo:
+            payload["repo"] = provenance.repo
+        if provenance.author is not None:
+            payload["author"] = provenance.author
+        if provenance.judge is not None:
+            payload["judge"] = provenance.judge
         return self._retry("POST", "/remember", payload)
 
     def health(self) -> dict[str, Any]:

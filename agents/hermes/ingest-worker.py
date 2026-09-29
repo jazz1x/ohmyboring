@@ -35,6 +35,7 @@ import time
 _HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
+sys.path.insert(0, os.path.join(_HERE, "..", ".."))
 import boring_config
 import distill_core
 import event_log
@@ -42,8 +43,9 @@ import markers
 import omb_env
 import transcript
 import workflow_contract
-from drudge_client import DrudgeClient
 from vault_note import frontmatter_text
+
+from ohmyboring.adapters.engine import DrudgeClient
 
 # Runs in TWO contexts: inside the hermes-agent container (via `hermes cron --script`) or on the host
 # (manual/launchd). Auto-detect by the container's bind mount so paths + the engine URL resolve in both.

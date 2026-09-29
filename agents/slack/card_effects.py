@@ -17,14 +17,17 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
 import card_types
 from card_types import RepairDone, RepairFailed, RepairUnanswered
-from drudge_client import OWNER, DrudgeClient, owner_headers
+
+from ohmyboring.adapters.engine import OWNER, ConsumptionMarks, DrudgeClient, owner_headers
 
 # Register answers carry up to 50 claims each; the door timeout lesson (brief p95 77s) says the
 # point read is far cheaper, but a cold engine still earns more than a point-read default.
@@ -84,10 +87,10 @@ def _live_consumption(session: str, kind: str, paths: list[str]) -> dict:
     at = datetime.now(UTC).isoformat()
     if kind == "used":
         return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(
-            session, at, used=paths, judge=OWNER
+            session, at, ConsumptionMarks(used=paths, judge=OWNER)
         )
     return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(
-        session, at, contested=paths, judge=OWNER
+        session, at, ConsumptionMarks(contested=paths, judge=OWNER)
     )
 
 

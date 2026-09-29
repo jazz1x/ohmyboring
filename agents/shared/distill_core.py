@@ -24,6 +24,7 @@ import urllib.request
 # realpath resolves symlinks (e.g. hooks/distill-session.py → agents/claude-code/…) so the
 # sibling agents/shared dir is found from the real file location, not the symlink's dir.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
 import boring_config  # noqa: E402
 import event_log
 import markers  # noqa: E402
@@ -957,15 +958,17 @@ def write_consumption_to_graph(session_id, records, transcript_text):
         return
     observed_at = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
     try:
-        from drudge_client import DrudgeClient
+        from ohmyboring.adapters.engine import ConsumptionMarks, DrudgeClient
 
         DrudgeClient(timeout=10, retries=1).consumption(
             session_id,
             observed_at,
-            used,
-            contested,
-            supersedes=[list(p) for p in supersedes],
-            judge="inferred",
+            ConsumptionMarks(
+                used=used,
+                contested=contested,
+                supersedes=[list(p) for p in supersedes],
+                judge="inferred",
+            ),
         )
     except Exception as e:  # noqa: BLE001 — the graph learning is best-effort
         print(f"[distill-session] consumption write failed: {e}", file=sys.stderr)
