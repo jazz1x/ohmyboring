@@ -2,7 +2,7 @@
 
 Every string the card puts in front of the owner (title, buttons, verdict marks, the past-approval
 head line, the lane headers, the register tag's localized name, the block-limit overflow line)
-lives in those files, keyed by the language `card_advice.resolve_lang(boring_config.note_lang())`
+lives in those files, keyed by the language `card_advice.resolve_lang(config.note_lang())`
 picks. card_view.py and card.py never spell out a display string themselves. Register icons are
 not translatable text and stay in card_view.REGISTER_ICONS; the model's advice prompt is not a
 display string and stays with card_advice.

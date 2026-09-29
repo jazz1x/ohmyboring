@@ -91,7 +91,7 @@ def register(ctx: Any) -> None:
     if dirs is None:
         _LOG.error(
             "%s: BORING_HOME does not point at a checkout (agents/slack + agents/shared "
-            "not found) — the press parser and effects cannot be imported; no handler "
+            "+ src not found) — the press parser and effects cannot be imported; no handler "
             "registered",
             _PLUGIN_NAME,
         )

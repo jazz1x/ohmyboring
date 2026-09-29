@@ -86,7 +86,6 @@ MARK_DIR = DISTILL_MARK_DIR
 BORING_URL = (
     omb_env.drudge_url()
 )  # BORING_URL canonical, BORING_URL deprecated alias; container-aware default
-# BORING_HOME is only meaningful on the host; inside the container we rely on /host/boring.json.
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 TRANSCRIPT_FORMAT = boring_config.agent_config("claude-code").get("format") or "claude-json"
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")

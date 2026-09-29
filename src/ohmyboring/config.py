@@ -49,18 +49,7 @@ DEFAULT_HERMES_CRON_JOBS = {
 
 
 def _in_container() -> bool:
-    """Detect whether we are running inside a container with host bind mounts.
-
-    The canonical signal is the env var BORING_IN_CONTAINER=1. The fallback
-    checks for the /host mount used by the hermes-agent and drudge containers
-    so existing stacks keep working without the env var.
-    """
-    env = os.environ.get("BORING_IN_CONTAINER", "").lower()
-    if env in ("1", "true", "yes"):
-        return True
-    if env in ("0", "false", "no"):
-        return False
-    return os.path.isdir("/host") and os.path.isfile("/host/boring.json")
+    return os.environ.get("BORING_IN_CONTAINER", "").lower() in ("1", "true", "yes")
 
 
 def omb_home() -> str:
@@ -144,10 +133,6 @@ def discover_path() -> Path | None:
     """Return the path to boring.json, or None if not found."""
     if env := os.environ.get("BORING_CONFIG"):
         p = Path(env).expanduser()
-        if p.is_file():
-            return p
-    if _in_container():
-        p = Path("/host/boring.json")
         if p.is_file():
             return p
     omb_home = os.environ.get("BORING_HOME")

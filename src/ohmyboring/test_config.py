@@ -63,6 +63,15 @@ def test_discover_path_targets_repo_root():
         assert found.parent.name != "agents", f"discover_path() = {found} resolved under agents/ (off-by-one)"
 
 
+def test_in_container_is_the_env_var_alone():
+    seen = {}
+    for value in ("1", "true", "YES", "0", "no", ""):
+        os.environ["BORING_IN_CONTAINER"] = value
+        seen[value] = boring_config._in_container()
+    os.environ.pop("BORING_IN_CONTAINER")
+    assert seen == {"1": True, "true": True, "YES": True, "0": False, "no": False, "": False}, seen
+
+
 def test_source_dirs_filter_by_adapter_and_agent():
     cfg = {
         "agents": [
@@ -220,6 +229,7 @@ def main():
         test_repo_root_is_dir_with_example,
         test_repo_root_is_not_the_agents_dir,
         test_discover_path_targets_repo_root,
+        test_in_container_is_the_env_var_alone,
         test_source_dirs_filter_by_adapter_and_agent,
         test_agent_config_lookup,
         test_canonical_repo_normalizes_variants,

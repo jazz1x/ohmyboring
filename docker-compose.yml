@@ -113,9 +113,12 @@ services:
       BORING_URL: http://boring-drudge:7700
       OLLAMA_HOST: http://host.docker.internal:11434
       BORING_VAULT_DIR: /vault
+      BORING_CONFIG: /config/boring.json
     volumes:
       - ./vault:/vault:ro                # the card's advise node verifies quotes against note text
-      - ./boring.json:/app/boring.json:ro # policy (note_lang) for the card programs' boring_config
+      # The folder, not the file: an editor that saves by rename swaps the inode, and a file
+      # bind keeps showing the old one until the container is recreated.
+      - ${BORING_CONFIG_DIR:-.}:/config:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"   # Mac/Linux: reach host Ollama (gemma4)
     ports:
@@ -152,6 +155,7 @@ services:
       # Tell host-side adapters they are running inside the hermes container and where the repo is.
       BORING_IN_CONTAINER: "1"
       BORING_HOME: /host/oh-my-boring
+      BORING_CONFIG: /config/boring.json
       # The repo root is mounted read-only at /host/oh-my-boring; put it on the import path so
       # hermes cron scripts can `import ohmyboring` before the packaging slices install it.
       PYTHONPATH: /host/oh-my-boring/src
@@ -165,7 +169,7 @@ services:
       - ${HOME}/.codex:/host/.codex:ro      # Codex session transcripts for codex-memory-ingest-worker
       - ${HOME}/.cache/boring-distill:/host/.cache/boring-distill  # shared SessionEnd hook markers (visible to host and container)
       - ./vault:/vault:ro                   # read-only vault so ingest-worker can verify session-id markers in wiki notes
-      - ./boring.json:/host/boring.json:ro  # policy config for ingest-worker.py (note_lang, repo rules)
+      - ${BORING_CONFIG_DIR:-.}:/config:ro  # boring.json by folder, as for the door
       - .:/host/oh-my-boring:ro             # repo root so hermes cron can run the canonical ingest-worker.py
     extra_hosts:
       - "host.docker.internal:host-gateway"   # Mac: reach host Ollama (gemma4)

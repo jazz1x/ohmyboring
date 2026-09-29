@@ -13,9 +13,9 @@ Covers the PURE, no-network helpers in distill-session.py and recall.py:
   - distill-session.extract               — JSONL transcript → "[role] text" (file I/O only)
   - recall.main                           — context-injection formatting (urlopen mocked)
 
-The two hook modules live in agents/claude-code/ and sys.path-insert ../shared to import
-boring_config (test_boring_config.py guards that resolver). We load them by file path with
-importlib the same way, after neutralizing ambient policy env so the run is deterministic.
+The two hook modules live in agents/claude-code/ and sys.path-insert ../shared and <repo>/src
+to import ohmyboring.config (src/ohmyboring/test_config.py guards that resolver). We load them
+by file path with importlib, after neutralizing ambient policy env so the run is deterministic.
 HTTP is never touched: the pure helpers don't call out, and recall.main's urlopen is mocked.
 """
 
@@ -35,8 +35,8 @@ from pathlib import Path
 from unittest import mock
 
 HERE = Path(__file__).resolve().parent
-# Import boring_config the way the hooks do (insert agents/shared on sys.path). distill-session
-# evaluates NOTE_LANG = boring_config.note_lang() at import time, so the dep must resolve.
+# Same sys.path the hooks set up. distill-session evaluates NOTE_LANG = config.note_lang() at
+# import time, so ohmyboring.config must resolve.
 SHARED_DIR = HERE.parent / "shared"
 sys.path.insert(0, str(SHARED_DIR))
 sys.path.insert(0, str(HERE.parents[1] / "src"))
