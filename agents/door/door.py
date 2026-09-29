@@ -55,6 +55,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator
@@ -544,11 +545,36 @@ def _call_engine_sync() -> dict[str, Any]:
     return {"ok": False, "error": parsed}
 
 
+def _reread_after_merge(subject: str, deleted_rows: int, reread_notes: int, owner_held: list[str]) -> None:
+    """The engine's /sync is a whole-vault pass (minutes on the live corpus, 2026-09-29) and the
+    merge is already committed before it starts, so nobody waits on it: a failure is one stderr
+    line, a success recounts and records `subject_merged`."""
+    sync_result = _call_engine_sync()
+    if not sync_result["ok"]:
+        print(
+            f"[door] reread after merging {subject!r} failed: {sync_result['error']}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    remaining_variants = _count_variants(_fetch_split_subject_rows(), subject)
+    _emit_subject_merged_event(subject, deleted_rows, reread_notes, remaining_variants, owner_held)
+
+
+def _reread_in_background(subject: str, deleted_rows: int, reread_notes: int, owner_held: list[str]) -> None:
+    threading.Thread(
+        target=_reread_after_merge,
+        args=(subject, deleted_rows, reread_notes, owner_held),
+        name=f"reread:{subject}",
+        daemon=True,
+    ).start()
+
+
 def _merge_split_subject(subject: str, standing: Standing) -> dict[str, Any] | None:
     """The POST body of the repair: locate the group, delete its split rows, blank the affected
-    notes' sha, commit, hand the reread to the engine's /sync, then recount. Without the owner
+    notes' sha, commit, then start the reread without waiting for it. Without the owner
     token, owner-written notes are skipped and named in `owner_held`, so the merge of everyone
-    else's rows still happens and the leftover spelling stays countable in `remaining_variants`.
+    else's rows still happens and the leftover spelling stays countable afterwards.
     `None` means `subject` names no live 2+-variant group — the door's 404."""
     rows = _fetch_split_subject_rows()
     groups = _group_split_subjects(rows)
@@ -571,30 +597,14 @@ def _merge_split_subject(subject: str, standing: Standing) -> dict[str, Any] | N
     finally:
         conn.close()
 
-    sync_result = _call_engine_sync()
-    if not sync_result["ok"]:
-        return {
-            "subject": subject,
-            "deleted_rows": deleted_rows,
-            "reread_notes": reread_notes,
-            "remaining_variants": None,
-            "owner_held": owner_held,
-            "sync": {"error": sync_result["error"]},
-        }
-
-    rows_after = _fetch_split_subject_rows()
-    remaining_variants = _count_variants(rows_after, subject)
-    event_status = _emit_subject_merged_event(
-        subject, deleted_rows, reread_notes, remaining_variants, owner_held
-    )
+    _reread_in_background(subject, deleted_rows, reread_notes, owner_held)
     return {
         "subject": subject,
         "deleted_rows": deleted_rows,
         "reread_notes": reread_notes,
-        "remaining_variants": remaining_variants,
+        "remaining_variants": None,
         "owner_held": owner_held,
-        "sync": sync_result["summary"],
-        "event": event_status,
+        "sync": "started",
     }
 
 
@@ -636,9 +646,7 @@ async def _repairs_split_subjects_post(request: Request) -> Response:
         return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
     if result is None:
         return JSONResponse({"error": "no split-subject group for that subject"}, status_code=404)
-    if result["sync"].get("error") is not None:
-        return JSONResponse(result, status_code=502)
-    return JSONResponse(result)
+    return JSONResponse(result, status_code=202)
 
 
 for _path, _methods in _load_routes().items():
