@@ -858,10 +858,13 @@ class SplitSubjectsGetRouteTests(unittest.TestCase):
         self._saved_dsn = os.environ.get("DOOR_PG_DSN")
         self._rows: list[tuple[str, str]] = []
         self._orig_fetch = door._fetch_split_subject_rows
+        self._orig_samples = door._fetch_split_samples
         door._fetch_split_subject_rows = lambda: self._rows
+        door._fetch_split_samples = lambda groups: [{**g, "samples": [{"subject": "stub"}]} for g in groups]
 
     def tearDown(self):
         door._fetch_split_subject_rows = self._orig_fetch
+        door._fetch_split_samples = self._orig_samples
         if self._saved_dsn is None:
             os.environ.pop("DOOR_PG_DSN", None)
         else:
@@ -891,12 +894,64 @@ class SplitSubjectsGetRouteTests(unittest.TestCase):
         self.assertEqual(payload["groups"][0]["subject"], "foodspring-front")
         self.assertEqual(payload["groups"][0]["variants"], ["foodspring front", "foodspring-front"])
         self.assertEqual(payload["groups"][0]["rows"], 3)
+        self.assertEqual(payload["groups"][0]["variant_rows"], {"foodspring front": 1, "foodspring-front": 2})
         self.assertEqual(payload["groups"][0]["notes"], 3)
+        self.assertEqual(payload["groups"][0]["samples"], [{"subject": "stub"}])
 
         for bad in ("0", "-1", "51", "abc"):
             status, body, _ = _req(self.door_port, "GET", f"/repairs/split-subjects?limit={bad}")
             self.assertEqual(status, 400, f"limit={bad}")
             self.assertIn("limit", json.loads(body)["error"])
+
+
+class SplitSamplesTests(unittest.TestCase):
+    """_fetch_split_samples asks for every spelling except the one the group becomes."""
+
+    def test_samples_skip_the_target_spelling(self):
+        asked: list[tuple] = []
+
+        class _Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, sql, params):
+                asked.append(params)
+                self._rows = [(params[0], "pr status", "MERGED", "/vault/wiki/wiki-0595.md")]
+
+            def fetchall(self):
+                return self._rows
+
+        class _Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def cursor(self):
+                return _Cur()
+
+        orig = door._split_subjects_connect
+        door._split_subjects_connect = _Conn
+        try:
+            out = door._fetch_split_samples(
+                [{"subject": "mimir-proxy", "variants": ["mimir proxy", "mimir-proxy", "mimir_proxy"]}]
+            )
+        finally:
+            door._split_subjects_connect = orig
+        self.assertEqual(asked, [("mimir proxy", 2), ("mimir_proxy", 2)])
+        self.assertEqual(
+            out[0]["samples"][0],
+            {
+                "subject": "mimir proxy",
+                "predicate": "pr status",
+                "value": "MERGED",
+                "note": "/vault/wiki/wiki-0595.md",
+            },
+        )
 
 
 class SplitSubjectsPostRouteTests(unittest.TestCase):

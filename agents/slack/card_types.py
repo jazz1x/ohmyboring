@@ -330,6 +330,15 @@ class PostedCard(BaseModel):
     ts: str
 
 
+class RepairSample(BaseModel):
+    """One record the merge would respell, as the door read it."""
+
+    subject: str
+    predicate: str
+    value: str
+    note: str
+
+
 class Repair(BaseModel):
     """One split-subject group from the door's GET /repairs/split-subjects — the execute
     lane's row shape, distinct from Proposal (the advice lane's). `variants` holds the raw
@@ -338,8 +347,10 @@ class Repair(BaseModel):
 
     subject: str
     variants: list[str] = Field(min_length=2)
+    variant_rows: dict[str, int]
     rows: int
     notes: int
+    samples: list[RepairSample] = []
 
 
 class RepairDone(BaseModel):

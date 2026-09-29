@@ -170,6 +170,7 @@ class ProjectGroupingBlocksTests(unittest.TestCase):
             subject="foodspring-front",
             variants=["foodspring front", "foodspring-front"],
             rows=3218,
+            variant_rows={"foodspring front": 3000, "foodspring-front": 218},
             notes=212,
         )
         blocks = cv.build_blocks(proposals, repairs=[repair], repairs_total_groups=1, lang="ko")
@@ -370,7 +371,16 @@ class CardV2ShapeTests(unittest.TestCase):
             subject="foodspring-front",
             variants=["foodspring front", "foodspring-front"],
             rows=3218,
+            variant_rows={"foodspring front": 3000, "foodspring-front": 218},
             notes=212,
+            samples=[
+                cc.RepairSample(
+                    subject="foodspring front",
+                    predicate="pr status",
+                    value="MERGED",
+                    note="/vault/wiki/wiki-0595.md",
+                )
+            ],
         )
         proposal = self._proposal()
         blocks = cv.build_blocks([proposal], repairs=[repair], repairs_total_groups=1, lang="ko")
@@ -382,14 +392,15 @@ class CardV2ShapeTests(unittest.TestCase):
         todo_idx = blocks.index(next(b for b in header_blocks if b["text"]["text"] == "오늘 할 일"))
         advice_idx = blocks.index(next(b for b in header_blocks if b["text"]["text"] == "짚어 둔 것"))
         self.assertLess(todo_idx, advice_idx)
-        # the repair row's new wording: tag line carries the label·subject·k/N, the section
-        # is the plain before→after sentence (no separate bold title)
+        # the repair row: tag line carries the label·subject·k/N; the section counts only the
+        # rows that change spelling (not the group total) and quotes what they say
         repair_tag = next(b for b in blocks if b["type"] == "context" and "🧩" in _blocks_text([b]))
         self.assertEqual(repair_tag["elements"][0]["text"], "🧩 *이름 맞추기* · `foodspring-front` · 1/1")
-        repair_section = next(b for b in blocks if b["type"] == "section" and "3,218" in _blocks_text([b]))
+        repair_section = next(b for b in blocks if b["type"] == "section" and "3,000" in _blocks_text([b]))
         self.assertEqual(
             repair_section["text"]["text"],
-            "`foodspring front` 로 적힌 3,218행(노트 212)을\nfoodspring-front 로 바꿉니다",
+            "`foodspring front` 3,000행\n→ foodspring-front 로 바꿉니다 (노트 212)\n"
+            "> `foodspring front` · pr status: MERGED — wiki-0595",
         )
         repair_action_row = next(b for b in blocks if b["type"] == "actions")
         self.assertEqual(
@@ -536,6 +547,7 @@ class CardV2ShapeTests(unittest.TestCase):
             subject="foodspring-front",
             variants=["foodspring front", "foodspring-front"],
             rows=3218,
+            variant_rows={"foodspring front": 3000, "foodspring-front": 218},
             notes=212,
         )
         reviews = [
@@ -570,6 +582,7 @@ class CardV2ShapeTests(unittest.TestCase):
             subject="x" * 2100,
             variants=["a", "b"],
             rows=1,
+            variant_rows={"a": 1, "b": 0},
             notes=1,
         )
         with self.assertRaises(ValueError):
@@ -633,6 +646,7 @@ class CardV2ShapeTests(unittest.TestCase):
                 subject=f"split-{i}",
                 variants=[f"split {i}", f"split-{i}"],
                 rows=100 + i,
+                variant_rows={f"split {i}": 100 + i, f"split-{i}": 0},
                 notes=10 + i,
             )
             for i in range(10)
@@ -688,6 +702,7 @@ class MarkPressedParityTests(unittest.TestCase):
             subject="foodspring-front",
             variants=["foodspring front", "foodspring-front"],
             rows=3218,
+            variant_rows={"foodspring front": 3000, "foodspring-front": 218},
             notes=212,
         )
         self.proposals = [
