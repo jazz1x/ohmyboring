@@ -183,19 +183,19 @@ def test_success_passes_session_id_to_shared_core():
             mock.patch.object(distill, "git_remote_url", return_value=""),
             mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
             mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
-            mock.patch.object(distill, "_mark") as mark,
-            mock.patch.object(distill, "distill_and_remember", return_value=True) as remember,
+            mock.patch.object(distill.distill_queue, "enqueue") as enqueue,
         ):
             rc = distill.main()
 
         assert rc == 0
-        remember.assert_called_once_with(
-            extracted,
+        item = enqueue.call_args.args[0]
+        assert (item.session_id, item.agent, item.origin, item.repo, item.text) == (
+            "codex-abc",
+            "codex",
             "personal",
             "oh-my-boring",
-            "codex-abc",
+            extracted,
         )
-        mark.assert_called_once_with("codex-abc")
     finally:
         os.unlink(path)
 
@@ -230,13 +230,12 @@ def test_codex_distill_clamps_with_ingest_budget():
                     mock.patch.object(distill, "git_remote_url", return_value=""),
                     mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
                     mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
-                    mock.patch.object(distill, "_mark") as mark,
-                    mock.patch.object(distill, "distill_and_remember", return_value=True) as remember,
+                    mock.patch.object(distill.distill_queue, "enqueue") as remember,
                 ):
                     rc = distill.main()
 
                 assert rc == 0
-                remembered_text = remember.call_args.args[0]
+                remembered_text = remember.call_args.args[0].text
                 assert remembered_text.startswith("START-")
                 assert remembered_text.endswith("-END")
                 assert len(remembered_text) < len(extracted)
@@ -248,7 +247,6 @@ def test_codex_distill_clamps_with_ingest_budget():
                 assert event["emitted_chars"] == len(remembered_text)
                 assert event["distill_clamp"] == 80
                 assert event["clamped"] is True
-                mark.assert_called_once_with("codex-abc")
         finally:
             os.unlink(path)
     finally:
@@ -285,13 +283,12 @@ def test_codex_distill_respects_zero_payload_clamp_override():
                     mock.patch.object(distill, "git_remote_url", return_value=""),
                     mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
                     mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
-                    mock.patch.object(distill, "_mark"),
-                    mock.patch.object(distill, "distill_and_remember", return_value=True) as remember,
+                    mock.patch.object(distill.distill_queue, "enqueue") as remember,
                 ):
                     rc = distill.main()
 
                 assert rc == 0
-                assert remember.call_args.args[0] == extracted
+                assert remember.call_args.args[0].text == extracted
                 assert "transcript clamped" not in stderr.getvalue()
                 event = _read_last_event(event_path)
                 assert event["distill_clamp"] == 0

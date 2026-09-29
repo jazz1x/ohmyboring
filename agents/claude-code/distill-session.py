@@ -13,6 +13,7 @@ import sys
 # Allow import of shared agent policy library regardless of how this script is invoked.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
+import distill_queue
 import transcript
 from distill_core import (  # noqa: F401
     _build_prompt,
@@ -23,7 +24,6 @@ from distill_core import (  # noqa: F401
     _mark,
     _strip_trailing_metadata,
     _throttled,
-    distill_and_remember,
     git_remote_url,
     is_automated_run,
     log_skip_event,
@@ -38,7 +38,7 @@ from ohmyboring import config as boring_config
 __all__ = [
     "_extract_json", "_mark", "_strip_trailing_metadata",
     "_build_prompt", "_call_llm", "_call_remember", "_throttled",
-    "distill_and_remember", "git_remote_url", "is_automated_run", "log_skip_event", "log_uptake_event", "repo_slug", "extract", "main", "run",
+    "git_remote_url", "is_automated_run", "log_skip_event", "log_uptake_event", "repo_slug", "extract", "main", "run",
 ]
 # fmt: on
 
@@ -111,14 +111,9 @@ def main() -> int:
     if was_clamped:
         print(f"[omb-distill] transcript clamped to {len(text)} chars", file=sys.stderr)
 
-    if distill_and_remember(text, origin, repo, session_id):
-        _mark(session_id)
-        print("[omb-distill] remembered", file=sys.stderr)
-        return 0
-    else:
-        _mark(session_id, retry=True, reason="remember failed")
-        print("[omb-distill] remember failed; marked for retry", file=sys.stderr)
-        return 1
+    distill_queue.enqueue(distill_queue.QueueItem(session_id, "claude-code", origin, repo, text))
+    print("[omb-distill] queued for hermes", file=sys.stderr)
+    return 0
 
 
 def run() -> int:

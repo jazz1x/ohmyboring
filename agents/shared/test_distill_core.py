@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 import distill_core
+import distill_run
 import transcript
 
 from ohmyboring.adapters.engine import Unreachable
@@ -177,7 +178,7 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
             mock.patch.object(distill_core, "_call_remember") as remember,
             mock.patch.object(distill_core.sys, "stderr", stderr),
         ):
-            ok = distill_core.distill_and_remember(
+            ok = distill_run.distill_and_remember(
                 "pure chit-chat",
                 "personal",
                 "oh-my-boring",
@@ -206,7 +207,7 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
             ) as remember,
             mock.patch.object(distill_core.sys, "stderr", stderr),
         ):
-            ok = distill_core.distill_and_remember(
+            ok = distill_run.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
                 "personal",
                 "oh-my-boring",
@@ -236,7 +237,7 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
             ) as remember,
             mock.patch.object(distill_core.sys, "stderr", stderr),
         ):
-            ok = distill_core.distill_and_remember(
+            ok = distill_run.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
                 "personal",
                 "oh-my-boring",
@@ -253,6 +254,51 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertEqual(event["workflow_node"], "resolution_repaired")
         self.assertEqual(event["workflow_outcome"], "fail")
 
+    def test_failed_language_retry_keeps_the_original_note(self):
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(distill_core, "NOTE_LANG", "ko"),
+            mock.patch.object(distill_core, "_call_llm", return_value=RICH_NOTE) as llm,
+            mock.patch.object(
+                distill_core,
+                "_call_remember",
+                return_value=distill_core.RememberOutcome(True, "remembered"),
+            ) as remember,
+            mock.patch.object(distill_core.sys, "stderr", stderr),
+        ):
+            ok = distill_run.distill_and_remember(
+                "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
+                "personal",
+                "oh-my-boring",
+                "s-lang",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(llm.call_count, 2)
+        self.assertEqual(remember.call_args.args[0], RICH_NOTE["title"])
+        self.assertIn("language retry failed — keeping original", stderr.getvalue())
+
+    def test_unpreparable_repair_response_logs_failed_not_called(self):
+        prepared = distill_core._prepare_note(SHALLOW_NOTE)
+        with (
+            mock.patch.object(distill_core, "_call_llm", side_effect=[SHALLOW_NOTE, {"title": "x"}]),
+            mock.patch.object(distill_core, "_prepare_note", side_effect=[prepared, None]),
+            mock.patch.object(distill_core, "_call_remember") as remember,
+            mock.patch.object(distill_core, "_log_resolution_event") as log_event,
+            mock.patch.object(distill_core.sys, "stderr", io.StringIO()),
+        ):
+            ok = distill_run.distill_and_remember(
+                "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
+                "personal",
+                "oh-my-boring",
+                "s-noprep",
+            )
+
+        self.assertFalse(ok)
+        remember.assert_not_called()
+        log_event.assert_called_once()
+        self.assertEqual(log_event.call_args.args[-2:], ("failed", "not_called"))
+
     def test_resolution_pass_calls_remember_and_logs_event(self):
         stderr = io.StringIO()
         with (
@@ -264,7 +310,7 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
             ) as remember,
             mock.patch.object(distill_core.sys, "stderr", stderr),
         ):
-            ok = distill_core.distill_and_remember(
+            ok = distill_run.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
                 "personal",
                 "oh-my-boring",
@@ -436,7 +482,7 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
                 return_value=distill_core.RememberOutcome(False, "failed"),
             ),
         ):
-            ok = distill_core.distill_and_remember(
+            ok = distill_run.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
                 "personal",
                 "oh-my-boring",
@@ -462,7 +508,7 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
             mock.patch.object(distill_core.event_log, "append_event", side_effect=OSError("denied")),
             mock.patch.object(distill_core.sys, "stderr", stderr),
         ):
-            ok = distill_core.distill_and_remember(
+            ok = distill_run.distill_and_remember(
                 "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
                 "personal",
                 "oh-my-boring",
@@ -501,7 +547,7 @@ class BackstopClampTests(unittest.TestCase):
             mock.patch.object(distill_core, "_call_llm", fake_llm),
             mock.patch.object(distill_core.sys, "stderr", stderr),
         ):
-            distill_core.distill_and_remember(text, "personal", "repo")
+            distill_run.distill_and_remember(text, "personal", "repo")
         return seen.get("prompt", ""), stderr.getvalue()
 
     def test_backstop_sits_above_every_caller_default(self):

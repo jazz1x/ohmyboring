@@ -131,7 +131,7 @@ def test_every_third_party_import_is_declared():
         if distribution not in declared:
             undeclared[name] = sorted(set(importers))[:3]
     assert not undeclared, (
-        f"imported but not in requirements.txt: {undeclared}. Declare it, or drop the import — "
+        f"imported but not in requirements.txt or pyproject.toml: {undeclared}. Declare it, or drop the import — "
         "a gate that passes only on a runner that happens to ship it is not passing."
     )
 
@@ -141,7 +141,7 @@ def test_nothing_is_declared_that_nothing_imports():
     imported = {IMPORT_TO_DISTRIBUTION.get(name, name).lower() for name in _imported_top_level(files)}
     unused = _declared() - imported
     assert not unused, (
-        f"declared in requirements.txt but imported nowhere: {sorted(unused)}. "
+        f"declared in requirements.txt or pyproject.toml but imported nowhere: {sorted(unused)}. "
         "A stale declaration reads as load-bearing to whoever installs it next."
     )
 

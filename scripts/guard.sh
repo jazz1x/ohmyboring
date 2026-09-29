@@ -67,6 +67,7 @@ python3 src/ohmyboring/distill/test_graph.py
 python3 agents/shared/test_agent_wiring.py
 python3 agents/shared/test_rules_core.py
 python3 agents/shared/test_distill_core.py
+python3 agents/shared/test_distill_queue.py
 python3 agents/shared/test_event_log.py
 python3 agents/shared/test_workflow_contract.py
 python3 agents/shared/test_markers.py

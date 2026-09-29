@@ -37,6 +37,8 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
 import distill_core
+import distill_queue
+import distill_run
 import event_log
 import markers
 import transcript
@@ -101,6 +103,7 @@ RETRY_TTL = float(os.environ.get("INGEST_RETRY_TTL") or str(PENDING_TTL))
 # wiki-first mode has no chunk counter, so we retry a bounded number of confirmation attempts before
 # surfacing a visible retry marker. We do not mark unconfirmed sessions done.
 MAX_WIKI_ATTEMPTS = int(os.environ.get("INGEST_WIKI_ATTEMPTS") or "3")
+QUEUE_PER_TICK = int(os.environ.get("BORING_QUEUE_PER_TICK") or "3")
 
 
 def _repo_slug(cwd):
@@ -158,7 +161,7 @@ def _eligible(p):
     done, not pending, not in fresh retry state, and not already handled by the engine-direct
     SessionEnd hook."""
     sid = os.path.splitext(os.path.basename(p))[0]
-    if markers.is_done(sid):
+    if markers.is_done(sid) or distill_queue.is_queued(sid):
         return False
     if markers.is_pending(sid, ttl=PENDING_TTL):
         return False
@@ -220,6 +223,8 @@ def _reconcile():
     vector = _is_vector_mode()
     for pend in glob.glob(os.path.join(MARK_DIR, "*.pending")):
         sid = os.path.splitext(os.path.basename(pend))[0]
+        if distill_queue.is_queued(sid):
+            continue
         parsed = markers.read_ingest_pending(sid)
         if parsed is None:
             try:
@@ -285,9 +290,36 @@ def _reconcile():
             )
 
 
+def _drain_one(item):
+    ok = distill_run.distill_and_remember(item.text, item.origin, item.repo, item.session_id)
+    if ok:
+        markers.mark_done(item.session_id)
+        distill_queue.remove(item.session_id)
+        return "ok"
+    markers.mark_retry(item.session_id, reason="queue distill failed")
+    if markers.is_dead(item.session_id):
+        distill_queue.remove(item.session_id)
+        return "dead"
+    return "failed"
+
+
+def _drain_queue():
+    """Distill up to QUEUE_PER_TICK hook-queued sessions, oldest first."""
+    for item in distill_queue.drain(QUEUE_PER_TICK):
+        status = _drain_one(item)
+        event_log.try_append_event(
+            "hermes-ingest-worker",
+            "ingest_queue",
+            status,
+            agent=item.agent,
+            session_id=item.session_id,
+        )
+
+
 def main():
     os.makedirs(MARK_DIR, exist_ok=True)
     _reconcile()  # settle the previous tick before offering a new one
+    _drain_queue()
 
     cutoff = time.time() - WINDOW_H * 3600
     paths = []

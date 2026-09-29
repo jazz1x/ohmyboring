@@ -519,7 +519,7 @@ class DistillExitCodeTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_remember_failure_returns_nonzero_and_marks_retry(self):
+    def test_session_is_queued_without_calling_the_llm(self):
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
             f.write("{}\n")
             path = f.name
@@ -538,14 +538,21 @@ class DistillExitCodeTests(unittest.TestCase):
                 mock.patch.object(distill, "git_remote_url", return_value=""),
                 mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
                 mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
-                mock.patch.object(distill, "distill_and_remember", return_value=False),
-                mock.patch.object(distill, "_mark") as mark,
+                mock.patch.object(distill_core, "_call_llm") as llm,
+                mock.patch.object(distill_core, "_call_remember") as remember,
+                tempfile.TemporaryDirectory() as mark_dir,
+                mock.patch.object(distill.distill_queue.markers, "MARK_DIR", mark_dir),
             ):
                 rc = distill.main()
+                queued = distill.distill_queue.drain()
 
-            self.assertEqual(rc, 1)
-            mark.assert_called_once_with("abc", retry=True, reason="remember failed")
-            self.assertIn("remember failed", stderr.getvalue())
+            self.assertEqual(rc, 0)
+            llm.assert_not_called()
+            remember.assert_not_called()
+            self.assertEqual(
+                [(i.session_id, i.agent, i.text) for i in queued], [("abc", "claude-code", "x" * 600)]
+            )
+            self.assertIn("queued for hermes", stderr.getvalue())
         finally:
             os.unlink(path)
 

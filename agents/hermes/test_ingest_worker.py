@@ -8,6 +8,7 @@ import time
 import unittest
 from http import server
 from pathlib import Path
+from unittest import mock
 
 # Load the module under test (ingest-worker.py) under a Python-valid name.
 _ingest_worker_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ingest-worker.py")
@@ -214,6 +215,47 @@ class ReconcileTest(unittest.TestCase):
         # Unreachable engine falls back to wiki-first → attempts incremented, not done yet.
         self.assertFalse(self._done_exists("s6"))
         self.assertEqual(self._read_attempts("s6"), 1)
+
+    def _queue(self, sid):
+        distill_queue = ingest_worker.distill_queue
+        distill_queue.enqueue(distill_queue.QueueItem(sid, "claude-code", "personal", "repo", "text"))
+
+    def _drain_with(self, result):
+        with mock.patch.object(ingest_worker.distill_run, "distill_and_remember", return_value=result) as run:
+            ingest_worker._drain_queue()
+        return run
+
+    def test_queue_success_marks_done_and_removes_file(self):
+        self._queue("q-ok")
+        run = self._drain_with(True)
+        run.assert_called_once_with("text", "personal", "repo", "q-ok")
+        self.assertTrue(self._done_exists("q-ok"))
+        self.assertFalse(ingest_worker.distill_queue.is_queued("q-ok"))
+        self.assertEqual(self._last_event()["status"], "ok")
+        self.assertEqual(self._last_event()["event"], "ingest_queue")
+
+    def test_queue_failure_marks_retry_and_keeps_file(self):
+        self._queue("q-fail")
+        self._drain_with(False)
+        self.assertTrue(self._retry_exists("q-fail"))
+        self.assertTrue(ingest_worker.distill_queue.is_queued("q-fail"))
+        self.assertEqual(self._last_event()["status"], "failed")
+
+    def test_queue_dead_removes_file(self):
+        self._queue("q-dead")
+        with mock.patch.dict(os.environ, {"MARKER_RETRY_MAX_ATTEMPTS": "1"}):
+            self._drain_with(False)
+        self.assertTrue(ingest_worker.markers.is_dead("q-dead"))
+        self.assertFalse(ingest_worker.distill_queue.is_queued("q-dead"))
+        self.assertEqual(self._last_event()["status"], "dead")
+
+    def test_reconcile_leaves_queued_pending_marker_alone(self):
+        self._queue("q-pend")
+        ingest_worker._reconcile()
+        self.assertTrue(ingest_worker.markers.is_pending("q-pend"))
+        session = Path(self.tmp.name) / "q-pend.jsonl"
+        session.write_text("{}\n")
+        self.assertFalse(ingest_worker._eligible(str(session)))
 
 
 if __name__ == "__main__":
