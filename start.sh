@@ -6,9 +6,14 @@ cd "$(dirname "$0")"
 
 [ -f .env ] || cp .env.example .env  # Slack tokens only — the core runs without .env
 chmod 600 .env 2>/dev/null || true
-# Create policy config from example if missing. User edits it to set language, repo rules, source dirs.
-[ -f boring.json ] || cp boring.example.json boring.json
-chmod 644 boring.json 2>/dev/null || true
+# Policy config lives in config/boring.json (edit that file) — the door and hermes mount the config/
+# folder, not the repo root. The root boring.json is a link to it for the engine and host tools.
+# An older install keeps a plain root file: it moves in once (mv keeps the inode a running engine holds).
+mkdir -p config
+if [ -f boring.json ] && [ ! -L boring.json ] && [ ! -e config/boring.json ]; then mv boring.json config/boring.json; fi
+[ -f config/boring.json ] || cp boring.example.json config/boring.json
+[ -L boring.json ] || ln -s config/boring.json boring.json
+chmod 644 config/boring.json 2>/dev/null || true
 # Source .env so that variables like BORING_VECTOR are visible to this script.
 set -a; . .env; set +a
 

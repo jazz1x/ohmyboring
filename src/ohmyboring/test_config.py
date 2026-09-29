@@ -64,11 +64,15 @@ def test_discover_path_targets_repo_root():
 
 
 def test_in_container_is_the_env_var_alone():
+    before = os.environ.get("BORING_IN_CONTAINER")
     seen = {}
     for value in ("1", "true", "YES", "0", "no", ""):
         os.environ["BORING_IN_CONTAINER"] = value
         seen[value] = boring_config._in_container()
     os.environ.pop("BORING_IN_CONTAINER")
+    if before is not None:
+        os.environ["BORING_IN_CONTAINER"] = before
+    assert os.environ.get("BORING_IN_CONTAINER") == before
     assert seen == {"1": True, "true": True, "YES": True, "0": False, "no": False, "": False}, seen
 
 
