@@ -41,7 +41,11 @@ def _tracked_python() -> list[Path]:
 
 
 def _local_module_names(files: list[Path]) -> set[str]:
-    return {p.stem for p in files} | {p.name.replace("-", "_") for p in files}
+    """A tracked file's stem is a local module, and so is every directory holding an
+    `__init__.py` — the repo's own packages (ohmyboring, ohmyboring_<framework>) are local,
+    not distributions requirements.txt should name."""
+    packages = {p.parent.name for p in files if p.name == "__init__.py"}
+    return {p.stem for p in files} | {p.name.replace("-", "_") for p in files} | packages
 
 
 def _imported_top_level(files: list[Path]) -> dict[str, list[str]]:

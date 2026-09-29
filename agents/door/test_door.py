@@ -525,6 +525,20 @@ date: 2026-09-29
         status, body, content_type = self._recall("그냥 검색해줘")
         self.assertEqual((status, body, content_type), (200, RECALL_BODY, STUB_CONTENT_TYPE))
 
+    def test_a_numbered_recall_on_another_route_is_byte_identical(self):
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "recall", "arguments": {"query": "wiki-2226 봐"}},
+            }
+        ).encode()
+        status, body, _ = _req(
+            self.door_port, "POST", "/context", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual((status, body), (200, RECALL_BODY), "only POST /mcp is decorated")
+
     def test_a_non_recall_tool_is_byte_identical(self):
         payload = json.dumps(
             {

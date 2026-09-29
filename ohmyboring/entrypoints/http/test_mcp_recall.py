@@ -14,7 +14,6 @@ Mutation targets: augment 가 isError 도 붙이게 하면 isError 시험이 빨
 
 from __future__ import annotations
 
-import importlib
 import sys
 from pathlib import Path
 
@@ -22,9 +21,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# String form on purpose: scripts/test_python_deps.py matches literal import statements
-# against requirements.txt, and ohmyboring is this repo's own package, not a distribution.
-mcp_recall = importlib.import_module("ohmyboring.entrypoints.http.mcp_recall")
+from ohmyboring.entrypoints.http import mcp_recall  # noqa: E402
 
 RECALL_REQUEST = {
     "jsonrpc": "2.0",

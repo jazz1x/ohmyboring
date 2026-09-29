@@ -33,7 +33,6 @@ import.
 
 from __future__ import annotations
 
-import importlib
 import logging
 import os
 import sys
@@ -165,11 +164,8 @@ def register(ctx: Any) -> None:
         import uptake_core
         import vault_note
 
-        # String form on purpose: scripts/test_python_deps.py matches literal import
-        # statements against requirements.txt, and ohmyboring is this repo's own package
-        # (PYTHONPATH in the container, pip --no-deps in the door image), not a distribution.
-        recall_named = importlib.import_module("ohmyboring.recall.named")
-        vault_notes = importlib.import_module("ohmyboring.adapters.vault")
+        from ohmyboring.adapters import vault as vault_notes
+        from ohmyboring.recall import named as recall_named
     except Exception as e:  # noqa: BLE001 — a broken checkout refuses here, not half-registers
         _LOG.error("%s: repo modules not importable (%s) — no hook registered", _PLUGIN_NAME, e)
         return

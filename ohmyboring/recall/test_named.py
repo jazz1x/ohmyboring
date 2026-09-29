@@ -15,20 +15,20 @@ Mutation targets: named_ids 가 [] 를 돌려주면 순서·중복 시험이 빨
 
 from __future__ import annotations
 
-import importlib
 import os
 import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+for path in (ROOT, ROOT / "agents" / "shared"):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
-# String form on purpose: scripts/test_python_deps.py matches literal import statements
-# against requirements.txt, and ohmyboring is this repo's own package, not a distribution.
-named = importlib.import_module("ohmyboring.recall.named")
-vault = importlib.import_module("ohmyboring.adapters.vault")
+import vault_note  # noqa: E402 — the one frontmatter splitter callers hand in as the port
+
+from ohmyboring.adapters import vault  # noqa: E402
+from ohmyboring.recall import named  # noqa: E402
 
 #: 실제 볼트 노트 모양 — 따옴표 타이틀, 스칼라 날짜, 두 문단.
 _NOTE = """---
@@ -45,14 +45,7 @@ date: 2026-09-28
 """
 
 
-def _split(text: str):
-    """테스트만의 머리말 쪼개기 — 호출자가 포트로 넘기는 split 의 최소 구현."""
-    normalised = text.replace("\r\n", "\n")
-    if not normalised.startswith("---\n"):
-        return None
-    rest = normalised[4:]
-    head, sep, body = rest.partition("\n---\n")
-    return (head, body) if sep else None
+_split = vault_note.split_frontmatter
 
 
 def test_named_ids_in_order_without_duplicates():

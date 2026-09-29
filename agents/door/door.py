@@ -54,7 +54,6 @@ import asyncio
 import enum
 import hmac
 import http.client
-import importlib
 import json
 import os
 import re
@@ -73,16 +72,12 @@ import psycopg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ohmyboring.adapters import vault as vault_notes
+from ohmyboring.entrypoints.http import mcp_recall
+from ohmyboring.recall import named as recall_named
+
 from ..shared import vault_note
 from . import approved, claim_source, rules
-
-#: ohmyboring 은 이 저장소의 패키지 — 문 이미지가 `pip install --no-deps .` 로 깔고, 테스트는
-#: 루트를 sys.path 에 둔다. 이름을 문자열로 import 한다: scripts/test_python_deps.py 는
-#: 리터럴 import 문만 보고 requirements.txt 와 대조하는데, ohmyboring 은 그 목록에 올라갈
-#: 외부 배포가 아니라 이 저장소 안의 패키지라서 어느 쪽에도 속하지 않는다.
-mcp_recall = importlib.import_module("ohmyboring.entrypoints.http.mcp_recall")
-vault_notes = importlib.import_module("ohmyboring.adapters.vault")
-recall_named = importlib.import_module("ohmyboring.recall.named")
 
 _TIMEOUT = float(os.environ.get("DOOR_TIMEOUT", "130"))
 
