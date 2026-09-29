@@ -15,9 +15,9 @@ from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
-import omb_env  # noqa: E402
 from distill_core import repo_slug  # noqa: E402
 
+from ohmyboring import config as omb_env  # noqa: E402
 from ohmyboring.adapters.engine import DrudgeClient  # noqa: E402
 from ohmyboring.result import Err, Ok  # noqa: E402
 

@@ -19,8 +19,9 @@ import urllib.request
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared"))
-import boring_config  # noqa: E402
-import omb_env  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "src"))
+from ohmyboring import config as boring_config  # noqa: E402
+from ohmyboring import config as omb_env  # noqa: E402
 
 SAMPLES: dict[str, str] = {
     "docker": "Dockerfile에서 package.json을 먼저 COPY하고 npm install해야 layer cache가 살아난다.",

@@ -30,8 +30,10 @@ from pathlib import Path
 
 # shared policy library lives next to the hooks
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared"))
-import boring_config  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "src"))
 from vault_note import split_frontmatter  # noqa: E402
+
+from ohmyboring import config as boring_config  # noqa: E402
 
 PLACEHOLDER_TAGS = {"_", "pr_", "slack_", ""}
 GENERIC_PROJECTS = {"Development", "wiki", ""}

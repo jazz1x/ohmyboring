@@ -57,12 +57,14 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "agents", "shared"))
+sys.path.insert(0, os.path.join(_HERE, "..", "src"))
 
-import boring_config  # noqa: E402
 import distill_core  # noqa: E402
 import label_core  # noqa: E402
 import uptake_core  # noqa: E402
 import verdict_core  # noqa: E402
+
+from ohmyboring import config as boring_config  # noqa: E402
 
 #: The window, transcribed from docs/PRD.md §8 D1 (the first window, 08-26 -> 09-09, was reset for
 #: an instrumentation fault; no threshold moved). Constants rather than flags on purpose: a window

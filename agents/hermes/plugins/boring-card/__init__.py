@@ -51,16 +51,17 @@ _claimed: set[tuple[str, int]] = set()
 _client: Any | None = None
 
 
-def _repo_module_dirs() -> tuple[str, str] | None:
-    """The repo's agents/slack + agents/shared dirs via BORING_HOME — no hardcoded path."""
+def _repo_module_dirs() -> tuple[str, str, str] | None:
+    """The repo's agents/slack + agents/shared + src dirs via BORING_HOME — no hardcoded path."""
     home = os.environ.get("BORING_HOME")
     if not home:
         return None
     slack = os.path.join(home, "agents", "slack")
     shared = os.path.join(home, "agents", "shared")
-    if not (os.path.isdir(slack) and os.path.isdir(shared)):
+    src = os.path.join(home, "src")
+    if not (os.path.isdir(slack) and os.path.isdir(shared) and os.path.isdir(src)):
         return None
-    return slack, shared
+    return slack, shared, src
 
 
 def _make_client() -> Any | None:
@@ -98,12 +99,13 @@ def register(ctx: Any) -> None:
     for path in dirs:
         if path not in sys.path:
             sys.path.insert(0, path)
-    import boring_config
     import card_advice
     import card_effects
     import card_press
     import card_types
     import card_view
+
+    from ohmyboring import config as boring_config
 
     global _client
     _client = _make_client()

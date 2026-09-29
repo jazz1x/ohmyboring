@@ -22,9 +22,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agents" / "shared"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import boring_config  # noqa: E402
 import distill_core  # noqa: E402
+
+from ohmyboring import config as boring_config  # noqa: E402
 
 #: Counters that are actual token volumes. `input_tokens` excludes anything served from cache, so
 #: the four are disjoint and summing them is the whole bill rather than a double count.

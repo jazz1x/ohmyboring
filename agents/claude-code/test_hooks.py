@@ -39,6 +39,7 @@ HERE = Path(__file__).resolve().parent
 # evaluates NOTE_LANG = boring_config.note_lang() at import time, so the dep must resolve.
 SHARED_DIR = HERE.parent / "shared"
 sys.path.insert(0, str(SHARED_DIR))
+sys.path.insert(0, str(HERE.parents[1] / "src"))
 
 # Neutralize ambient policy/endpoint env so module-load + assertions are deterministic.
 for _var in (
@@ -79,7 +80,8 @@ distill = _load("distill_session_hook", "distill-session.py")
 recall = _load("recall_hook", "recall.py")
 rules_hook = _load("rules_hook", "rules.py")
 import distill_core  # noqa: E402
-import omb_env  # noqa: E402
+
+from ohmyboring import config as omb_env  # noqa: E402
 
 # The recall tests drive the real injection path, which appends to the injection ledger.
 # Redirect it before import or the suite writes into the owner's live cache.

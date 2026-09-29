@@ -49,7 +49,7 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[3]
-for extra in (REPO / "agents" / "slack", REPO / "agents" / "shared"):
+for extra in (REPO / "agents" / "slack", REPO / "agents" / "shared", REPO / "src"):
     if str(extra) not in sys.path:
         sys.path.insert(0, str(extra))
 
@@ -229,10 +229,11 @@ def test_the_import_path_stays_langchain_free():
     """card_effects, and everything register() imports for the in-place edit, must stay
     importable in the hermes venv — the way back to langchain is card_live, so any of them
     pulling card_live in is the hole this test names."""
-    import boring_config  # noqa: F401
     import card_advice  # noqa: F401
     import card_press  # noqa: F401
     import card_view  # noqa: F401
+
+    from ohmyboring import config as boring_config  # noqa: F401
 
     assert "card_live" not in sys.modules, (
         "the plugin's imports must not import card_live (it pulls langchain)"

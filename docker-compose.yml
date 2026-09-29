@@ -146,7 +146,7 @@ services:
       # Legacy alias: some hermes-agent cron scripts (e.g. ~/.hermes/scripts/briefing.py)
       # still read DRUDGE_URL. Keep both names populated so existing scripts keep working.
       DRUDGE_URL: http://boring-drudge:7700
-      # The card cron jobs' trigger scripts reach the door by service name (omb_env.door_url
+      # The card cron jobs' trigger scripts reach the door by service name (config.door_url
       # reads this; the localhost default is wrong inside the container).
       BORING_DOOR_URL: http://boring-door:7710
       # Tell host-side adapters they are running inside the hermes container and where the repo is.

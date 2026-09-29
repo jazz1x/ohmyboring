@@ -25,7 +25,6 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-import omb_env
 from card_effects import (  # noqa: F401
     ENGINE_TIMEOUT,
     _door_url,
@@ -46,6 +45,7 @@ from card_types import (
 )
 from pydantic import ValidationError
 
+from ohmyboring import config as omb_env
 from ohmyboring.adapters.engine import DrudgeClient
 from ohmyboring.result import Err, Ok
 

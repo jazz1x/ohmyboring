@@ -12,7 +12,7 @@ import sys
 
 # Allow import of shared agent policy library regardless of how this script is invoked.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-import boring_config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import transcript
 from distill_core import (  # noqa: F401
     _build_prompt,
@@ -30,6 +30,8 @@ from distill_core import (  # noqa: F401
     log_uptake_event,
     repo_slug,
 )
+
+from ohmyboring import config as boring_config
 
 # Re-export generic helpers at module top level so existing tests can keep using them.
 # fmt: off

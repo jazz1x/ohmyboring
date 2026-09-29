@@ -31,9 +31,11 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agents" / "shared"))
-import boring_config  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import transcript  # noqa: E402
 import uptake_core  # noqa: E402
+
+from ohmyboring import config as boring_config  # noqa: E402
 
 #: Phrases from one note a turn must carry before it counts as having reproduced that note. One
 #: is a coincidence between two documents about the same subject; the scorer's own control arm

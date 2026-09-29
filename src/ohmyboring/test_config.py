@@ -1,33 +1,28 @@
 #!/usr/bin/env python3
-"""Plain-runnable regression test for boring_config repo-root discovery.
+"""Plain-runnable regression test for ohmyboring.config repo-root discovery.
 
-Run: python3 agents/shared/test_boring_config.py   (no pytest dependency)
+Run: python3 src/ohmyboring/test_config.py   (no pytest dependency)
 
-Guards the off-by-one that silently disabled policy: the installed hooks are
-symlinks (hooks/distill-session.py -> agents/claude-code/distill-session.py) that
-sys.path-insert agents/shared and `import boring_config`. The resolver used
-Path(__file__).resolve().parent.parent, which yields the agents/ dir (one level
-too high), so boring.json discovery returned None and note_lang + repo rules were
-ignored for every distilled session. The root must be the dir that holds
-boring.example.json (and, when present, boring.json).
+Guards the off-by-one that silently disabled policy: the resolver used
+Path(__file__).resolve().parent.parent, one level too high, so boring.json
+discovery returned None and note_lang + repo rules were ignored for every
+distilled session. The root must be the dir that holds boring.example.json
+(and, when present, boring.json).
 """
 
 import os
 import sys
 from pathlib import Path
 
-# Import boring_config the way the hooks do: insert agents/shared onto sys.path
-# then import by name. This file lives in that dir, so the shared dir is its
-# parent. resolve() follows any symlink to the real on-disk location.
-SHARED_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(SHARED_DIR))
+PACKAGE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(PACKAGE_DIR.parent))
 
 # Neutralize ambient policy env so the test exercises the <repo-root>/boring.json
 # branch deterministically from a fresh clone, regardless of the dev's shell.
 for _var in ("BORING_CONFIG", "BORING_HOME"):
     os.environ.pop(_var, None)
 
-import boring_config  # noqa: E402  (import after sys.path/env setup, on purpose)
+from ohmyboring import config as boring_config  # noqa: E402  (import after sys.path/env setup, on purpose)
 
 # The committed marker that pins the repo root in a fresh clone (boring.json is
 # gitignored; only the example is tracked).
@@ -49,9 +44,9 @@ def test_repo_root_is_not_the_agents_dir():
         f"_repo_root() = {root} is the agents/ dir (off-by-one); "
         f"it must be the repo root holding {ROOT_MARKER}"
     )
-    # shared -> agents -> repo: the root is exactly two levels above this dir.
-    assert root == SHARED_DIR.parent.parent, (
-        f"_repo_root() = {root} != {SHARED_DIR.parent.parent} (shared->agents->repo)"
+    # ohmyboring -> src -> repo: the root is exactly two levels above this dir.
+    assert root == PACKAGE_DIR.parent.parent, (
+        f"_repo_root() = {root} != {PACKAGE_DIR.parent.parent} (ohmyboring->src->repo)"
     )
 
 

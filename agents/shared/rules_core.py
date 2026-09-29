@@ -16,7 +16,9 @@ import urllib.request
 from collections.abc import Callable
 
 import event_log
-import omb_env
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
+from ohmyboring import config as omb_env  # noqa: E402
 
 TIMEOUT = 2
 

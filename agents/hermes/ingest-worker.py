@@ -36,15 +36,15 @@ _HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
-import boring_config
 import distill_core
 import event_log
 import markers
-import omb_env
 import transcript
 import workflow_contract
 from vault_note import frontmatter_text
 
+from ohmyboring import config as boring_config
+from ohmyboring import config as omb_env
 from ohmyboring.adapters.engine import DrudgeClient
 from ohmyboring.result import Err, Ok
 

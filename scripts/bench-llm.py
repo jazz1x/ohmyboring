@@ -33,9 +33,11 @@ from typing import Any
 
 # Reuse the production distillation prompt / JSON extractor.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared"))
-import boring_config  # noqa: E402
-import omb_env  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "src"))
 from distill_core import _build_prompt, _extract_json  # noqa: E402
+
+from ohmyboring import config as boring_config  # noqa: E402
+from ohmyboring import config as omb_env  # noqa: E402
 
 # Ollama tag sizes are rounded disk sizes from https://ollama.com/library/<model>/tags.
 # Loaded memory is roughly the same plus KV-cache; leave ~4 GB for macOS + apps.

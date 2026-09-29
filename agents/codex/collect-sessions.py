@@ -43,11 +43,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import event_log
 import markers
-import omb_env
 import transcript
 import workflow_contract
 from vault_note import frontmatter_text
 
+from ohmyboring import config as omb_env
 from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
 from ohmyboring.result import Err, Ok
 

@@ -21,7 +21,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-import boring_config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import transcript
 from distill_core import (  # noqa: F401
     _distill_resolution,
@@ -33,6 +33,8 @@ from distill_core import (  # noqa: F401
     log_uptake_event,
     repo_slug,
 )
+
+from ohmyboring import config as boring_config
 
 KIMI_HOME = os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code")
 CLAMP = transcript.kimi_distill_clamp()

@@ -434,7 +434,7 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 | hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`briefing`, `morning-card`, `weekly-card`) + serial backfill workers (`ingest-worker.py`, Codex collector). The two card jobs ask the door to run the card programs (`POST /run/morning-card` · `/run/weekly-card`, delivery `local` — the tools post to Slack themselves); the launchd registrations (`scripts/schedule-card.sh`) stay until hermes has run one morning successfully, and the tools' own once-per-day/week guard keeps the overlap from double-posting |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older Claude Code sessions |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / manual | Lazy backfill of older Kimi Code sessions |
-| shared | `agents/shared/boring_config.py` | imported by adapters | `boring.json` policy loader |
+| shared | `src/ohmyboring/config.py` | imported by adapters | `boring.json` policy loader |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | Idempotently configures hooks/MCP for enabled agents |
 
 ### Consumption endpoints

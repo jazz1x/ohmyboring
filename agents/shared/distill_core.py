@@ -25,10 +25,8 @@ import urllib.request
 # sibling agents/shared dir is found from the real file location, not the symlink's dir.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
-import boring_config  # noqa: E402
 import event_log
 import markers  # noqa: E402
-import omb_env  # noqa: E402
 import transcript  # noqa: E402
 import uptake_core  # noqa: E402
 import workflow_contract  # noqa: E402
@@ -41,6 +39,9 @@ from resolution_quality import (  # noqa: E402
     resolution_prompt_contract,
     verify_note_resolution,
 )
+
+from ohmyboring import config as boring_config  # noqa: E402
+from ohmyboring import config as omb_env  # noqa: E402
 
 # BORING_HOME: repo clone location (default ~/oh-my-boring).
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()

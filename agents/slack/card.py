@@ -61,8 +61,8 @@ from typing import Any, NamedTuple, TypedDict
 _HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
+sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
 
-import boring_config  # noqa: E402
 import card_advice  # noqa: E402
 import card_live  # noqa: E402
 import card_press  # noqa: E402
@@ -74,6 +74,8 @@ import event_log  # noqa: E402
 import slack_post  # noqa: E402
 from langgraph.graph import START, StateGraph  # noqa: E402
 from langgraph.graph.state import CompiledStateGraph  # noqa: E402
+
+from ohmyboring import config as boring_config  # noqa: E402
 
 DEFAULT_MODEL = os.environ.get("CARD_MODEL") or "gemma4:12b"
 # The confirmation window on the card's head line — yesterday's and the day before's approvals.

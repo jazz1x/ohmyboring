@@ -1,13 +1,15 @@
-#!/usr/bin/env python3
-"""Shared boring.json loader for host-side Python hooks.
+"""Shared boring.json loader and environment / endpoint configuration (stdlib only).
 
 Discovery order (first wins):
   1. $BORING_CONFIG
   2. $BORING_HOME/boring.json
   3. <repo-root>/boring.json
 
-Missing file is not an error — hooks degrade gracefully to an empty policy
+Missing file is not an error — callers degrade gracefully to an empty policy
 (personal origin, no source dirs, note_lang=auto).
+
+Endpoint functions honor the corresponding environment variables and fall back to
+sensible defaults, so `localhost:7700` / `host.docker.internal` logic lives in one place.
 """
 
 from __future__ import annotations
@@ -16,8 +18,7 @@ import json
 import os
 import sys
 from pathlib import Path
-
-from omb_env import _in_container
+from urllib.parse import urlparse
 
 DEFAULT_ORIGIN = "personal"
 DEFAULT_NOTE_LANG = "auto"
@@ -47,13 +48,94 @@ DEFAULT_HERMES_CRON_JOBS = {
 }
 
 
+def _in_container() -> bool:
+    """Detect whether we are running inside a container with host bind mounts.
+
+    The canonical signal is the env var BORING_IN_CONTAINER=1. The fallback
+    checks for the /host mount used by the hermes-agent and drudge containers
+    so existing stacks keep working without the env var.
+    """
+    env = os.environ.get("BORING_IN_CONTAINER", "").lower()
+    if env in ("1", "true", "yes"):
+        return True
+    if env in ("0", "false", "no"):
+        return False
+    return os.path.isdir("/host") and os.path.isfile("/host/boring.json")
+
+
+def omb_home() -> str:
+    return os.environ.get("BORING_HOME") or os.path.expanduser("~/oh-my-boring")
+
+
+def drudge_url() -> str:
+    return os.environ.get("BORING_URL") or (
+        "http://boring-drudge:7700" if _in_container() else "http://localhost:7700"
+    )
+
+
+def door_url() -> str:
+    return os.environ.get("BORING_DOOR_URL") or (
+        "http://boring-door:7710" if _in_container() else "http://localhost:7710"
+    )
+
+
+def _boring_llm() -> dict:
+    """The `llm` block of boring.json (empty dict if absent/unreadable)."""
+    try:
+        return load().get("llm") or {}
+    except Exception:  # noqa: BLE001 — config read is best-effort; defaults follow
+        return {}
+
+
+def llm_base_url() -> str:
+    """Resolve the LLM base URL: env override (BORING_LLM_BASE_URL) → boring.json llm.base_url → default.
+
+    On the host (not in a container) rewrite host.docker.internal → localhost, mirroring the shell
+    scripts — the configured in-container default must still work for host-side distillation."""
+    url = (
+        os.environ.get("BORING_LLM_BASE_URL") or _boring_llm().get("base_url") or "http://localhost:11434/v1"
+    )
+    if not _in_container():
+        url = url.replace("host.docker.internal", "localhost")
+    return url
+
+
+def llm_model() -> str:
+    return os.environ.get("BORING_LLM_MODEL") or _boring_llm().get("model") or "gemma4:12b"
+
+
+def llm_api_key() -> str:
+    """API key for auth providers. boring.json names the env var holding it (api_key_env, default
+    BORING_LLM_API_KEY). Empty when unset (Ollama/LM Studio need none)."""
+    key_env = _boring_llm().get("api_key_env") or "BORING_LLM_API_KEY"
+    return os.environ.get(key_env) or ""
+
+
+def embed_model() -> str:
+    """Embedding model — the engine's policy SSOT (boring.json only, no env knob). Host distillation
+    mirrors that: boring.json llm.embed_model → legacy top-level embed_model → default."""
+    llm = _boring_llm()
+    if llm.get("embed_model"):
+        return llm["embed_model"]
+    try:
+        top = load().get("embed_model")
+        if top:
+            return top
+    except Exception:  # noqa: BLE001 — best-effort
+        pass
+    return "bge-m3"
+
+
+def is_local_llm(url: str | None = None) -> bool:
+    host = urlparse(url or llm_base_url()).hostname or ""
+    return host.lower() in ("localhost", "127.0.0.1", "host.docker.internal")
+
+
 def _repo_root() -> Path:
     """Repo root = the dir holding boring.json / boring.example.json.
 
-    This file lives at <repo>/agents/shared/boring_config.py, so the root is two
-    levels up (shared → agents → repo). The installed hooks are symlinks that
-    sys.path-insert this dir and import it, but `resolve()` follows the symlink to
-    the real file location here, so parents[2] is the repo root either way.
+    This file lives at <repo>/src/ohmyboring/config.py, so the root is two levels up
+    (ohmyboring → src → repo). `resolve()` follows any symlink to the real file location.
     """
     return Path(__file__).resolve().parents[2]
 

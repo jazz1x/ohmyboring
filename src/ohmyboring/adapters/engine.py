@@ -22,8 +22,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-import omb_env
-
+from ohmyboring import config as omb_env
 from ohmyboring.result import Either, Err, Ok, map_ok
 
 OWNER = "owner"

@@ -12,7 +12,7 @@ import sys
 
 # Allow import of shared agent policy library regardless of how this script is invoked.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-import boring_config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import event_log
 import transcript
 from distill_core import (  # noqa: F401
@@ -29,6 +29,8 @@ from distill_core import (  # noqa: F401
     log_skip_event,
     repo_slug,
 )
+
+from ohmyboring import config as boring_config
 
 TRANSCRIPT_FORMAT = "codex-jsonl"
 CLAMP = transcript.codex_distill_clamp()

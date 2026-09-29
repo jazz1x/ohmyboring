@@ -15,6 +15,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 SHARED_DIR = HERE.parent / "shared"
 sys.path.insert(0, str(SHARED_DIR))
+sys.path.insert(0, str(HERE.parents[1] / "src"))
 
 # Neutralize ambient env so module-load + assertions are deterministic.
 for _var in (
@@ -51,9 +52,9 @@ def _load(name, filename):
 distill = _load("kimi_distill_session", "distill-session.py")
 recall = _load("kimi_recall", "recall.py")
 rules = _load("kimi_rules", "rules.py")
-import omb_env  # noqa: E402
 import recall_core  # noqa: E402
 
+from ohmyboring import config as omb_env  # noqa: E402
 from ohmyboring.adapters.engine import Unreachable  # noqa: E402
 from ohmyboring.result import Err, Ok  # noqa: E402
 

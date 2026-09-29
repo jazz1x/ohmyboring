@@ -20,10 +20,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "agents" / "shared"))
 sys.path.insert(0, str(ROOT / "agents" / "claude-code"))
+sys.path.insert(0, str(ROOT / "src"))
 
-import boring_config  # noqa: E402
 import recall  # noqa: E402
 import rules_core  # noqa: E402
+
+from ohmyboring import config as boring_config  # noqa: E402
 
 
 def _prompt_above(row, by_uuid):

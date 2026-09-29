@@ -432,7 +432,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 적재 워커와 정기 브리핑 실행 |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 수동 | 오래된 Claude Code 세션 lazy 백필 |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 수동 | 오래된 Kimi Code 세션 lazy 백필 |
-| shared | `agents/shared/boring_config.py` | 어댑터 import | `boring.json` 정책 로더 |
+| shared | `src/ohmyboring/config.py` | 어댑터 import | `boring.json` 정책 로더 |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | 활성화된 에이전트의 hook/MCP 설정을 idempotent하게 구성 |
 
 ### 소비 엔드포인트

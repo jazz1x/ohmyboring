@@ -440,7 +440,7 @@ curl -s -X POST http://localhost:7700/mcp \
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 取り込みワーカーと定期ブリーフィングを実行 |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 手動 | 古い Claude Code セッションの lazy バックフィル |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 手動 | 古い Kimi Code セッションの lazy バックフィル |
-| shared | `agents/shared/boring_config.py` | アダプター import | `boring.json` ポリシーローダー |
+| shared | `src/ohmyboring/config.py` | アダプター import | `boring.json` ポリシーローダー |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | 有効なエージェントの hook/MCP 設定を idempotent に構成 |
 
 ### 消費エンドポイント
