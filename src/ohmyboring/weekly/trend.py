@@ -60,7 +60,7 @@ class ProjectWeek:
         return held
 
 
-def collect_week(days: list[tuple[str, object]]) -> dict[str, ProjectWeek]:
+def collect_week(days: list[tuple[str, object]]) -> dict[str, ProjectWeek]:  # noqa: C901
     """Fold parsed daily briefs into per-project weeks.
 
     `days` is [(iso_date, BriefDocument)] in chronological order; the last one supplies the

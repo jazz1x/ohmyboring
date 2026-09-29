@@ -67,6 +67,9 @@ python3 src/ohmyboring/distill/test_graph.py
 python3 src/ohmyboring/distill/test_prompts.py
 python3 src/ohmyboring/distill/test_run.py
 python3 src/ohmyboring/distill/test_resolution.py
+python3 src/ohmyboring/weekly/test_graph.py
+python3 src/ohmyboring/weekly/test_run.py
+python3 src/ohmyboring/weekly/test_pins.py
 python3 agents/shared/test_agent_wiring.py
 python3 agents/shared/test_rules_core.py
 python3 agents/shared/test_distill_core.py
@@ -80,6 +83,7 @@ python3 agents/shared/test_verdict_core.py
 python3 src/ohmyboring/adapters/test_engine.py
 python3 src/ohmyboring/adapters/test_events.py
 python3 src/ohmyboring/adapters/test_llm.py
+python3 src/ohmyboring/adapters/test_slack.py
 python3 src/ohmyboring/adapters/test_workflow_contract.py
 python3 src/ohmyboring/test_result.py
 python3 agents/door/test_door.py

@@ -1,6 +1,7 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "distill": "./src/ohmyboring/distill/graph.py:graph"
+    "distill": "./src/ohmyboring/distill/graph.py:graph",
+    "weekly": "./src/ohmyboring/weekly/graph.py:graph"
   }
 }

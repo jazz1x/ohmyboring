@@ -339,6 +339,16 @@ def test_real_hermes_entry_scripts_ship_every_module_they_import():
             )
 
 
+def test_hermes_scripts_ship_the_measurement_modules_the_briefing_notices_import_lazily():
+    """ohmyboring.briefing.notices imports label_core and verdict_core inside its functions, and the
+    dependency scan skips the ohmyboring package — so a briefing entry that stops naming them
+    would ship a ~/.hermes/scripts where the morning notice dies on ImportError."""
+    repo = HERE.parent.parent
+    shipped = {src.name for src in agent_wiring._hermes_briefing_sources(str(repo))}
+    assert {"label_core.py", "verdict_core.py", "vault_note.py"} <= shipped, shipped
+    assert not {"slack_briefing.py", "weekly_trend.py", "slack_post.py"} & shipped, shipped
+
+
 def test_local_deps_are_transitive_and_reach_the_shared_dir():
     """Deps of deps ship; a shared-dir module ships; stdlib does not; a vanished one raises."""
     with tempfile.TemporaryDirectory() as d:
@@ -1146,6 +1156,7 @@ if __name__ == "__main__":
     test_install_hermes_briefing_backs_up_existing_scripts()
     test_wire_hermes_missing_slack_briefing_has_no_side_effects()
     test_real_hermes_entry_scripts_ship_every_module_they_import()
+    test_hermes_scripts_ship_the_measurement_modules_the_briefing_notices_import_lazily()
     test_kimi_hooks_are_deduped_across_path_spellings()
     test_claude_code_hook_commands_pin_the_installing_interpreter()
     test_kimi_hook_commands_pin_the_installing_interpreter()

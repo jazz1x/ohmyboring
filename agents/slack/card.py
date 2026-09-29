@@ -70,12 +70,12 @@ import card_registers  # noqa: E402
 import card_types  # noqa: E402
 import card_verdicts  # noqa: E402
 import card_view  # noqa: E402
-import slack_post  # noqa: E402
 from langgraph.graph import START, StateGraph  # noqa: E402
 from langgraph.graph.state import CompiledStateGraph  # noqa: E402
 
 from ohmyboring import config as boring_config  # noqa: E402
 from ohmyboring.adapters import events as event_log  # noqa: E402
+from ohmyboring.adapters import slack as slack_post  # noqa: E402
 
 DEFAULT_MODEL = os.environ.get("CARD_MODEL") or "gemma4:12b"
 # The confirmation window on the card's head line — yesterday's and the day before's approvals.
