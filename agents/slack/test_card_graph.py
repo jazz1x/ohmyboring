@@ -189,6 +189,7 @@ REPAIR_GROUPS = [
     {
         "subject": "foodspring-front",
         "variants": ["foodspring front", "foodspring-front"],
+        "variant_rows": {"foodspring front": 3000, "foodspring-front": 218},
         "rows": 3218,
         "notes": 212,
     }

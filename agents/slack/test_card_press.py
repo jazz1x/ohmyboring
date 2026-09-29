@@ -32,6 +32,7 @@ REPAIR = cc.Repair(
     subject="foodspring-front",
     variants=["foodspring front", "foodspring-front"],
     rows=3218,
+    variant_rows={"foodspring front": 3000, "foodspring-front": 218},
     notes=212,
 )
 PROPOSAL = cc.Proposal(

@@ -406,6 +406,11 @@ _MAX_REPAIR_LIMIT = 50
 _DEFAULT_REPAIR_LIMIT = 3
 
 _SPLIT_SUBJECTS_SQL = "select subject, source_path from claim"
+_SPLIT_SAMPLES_SQL = (
+    "select subject, predicate, value, source_path from claim where subject = %s "
+    "and superseded_at is null order by source_path limit %s"
+)
+_SAMPLES_PER_SPELLING = 2
 _SPLIT_DELETE_SQL = "delete from claim where subject = any(%s) and source_path = any(%s)"
 _SPLIT_UPDATE_SQL = "update document set sha = '' where source_path = any(%s)"
 _OWNER_NOTES_SQL = "select source_path from document where author = 'owner' and source_path = any(%s)"
@@ -463,6 +468,7 @@ def _group_split_subjects(rows: list[tuple[str, str]]) -> list[dict[str, Any]]:
         {
             "subject": norm,
             "variants": sorted(bucket["variant_rows"]),
+            "variant_rows": dict(sorted(bucket["variant_rows"].items())),
             "rows": sum(bucket["variant_rows"].values()),
             "notes": len(bucket["notes"]),
         }
@@ -485,6 +491,24 @@ def _fetch_split_subject_rows() -> list[tuple[str, str]]:
     with _split_subjects_connect() as conn, conn.cursor() as cur:
         cur.execute(_SPLIT_SUBJECTS_SQL)
         return cur.fetchall()
+
+
+def _fetch_split_samples(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each group plus a few of the records a merge would respell — every spelling but the
+    one it becomes — so the owner sees what changes, not only how many rows."""
+    with _split_subjects_connect() as conn, conn.cursor() as cur:
+
+        def samples_of(group: dict[str, Any]) -> list[dict[str, str]]:
+            out: list[dict[str, str]] = []
+            for spelling in (v for v in group["variants"] if v != group["subject"]):
+                cur.execute(_SPLIT_SAMPLES_SQL, (spelling, _SAMPLES_PER_SPELLING))
+                out += [
+                    {"subject": s, "predicate": p, "value": v, "note": path}
+                    for s, p, v, path in cur.fetchall()
+                ]
+            return out
+
+        return [{**group, "samples": samples_of(group)} for group in groups]
 
 
 def _emit_subject_merged_event(
@@ -622,10 +646,11 @@ async def _repairs_split_subjects_get(request: Request) -> Response:
         return JSONResponse({"error": "store not configured"}, status_code=503)
     try:
         rows = await asyncio.to_thread(_fetch_split_subject_rows)
+        groups = _group_split_subjects(rows)
+        shown = await asyncio.to_thread(_fetch_split_samples, groups[:limit])
     except psycopg.OperationalError as e:
         return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
-    groups = _group_split_subjects(rows)
-    return JSONResponse({"groups": groups[:limit], "total_groups": len(groups)})
+    return JSONResponse({"groups": shown, "total_groups": len(groups)})
 
 
 async def _repairs_split_subjects_post(request: Request) -> Response:

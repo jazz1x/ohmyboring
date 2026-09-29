@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from pathlib import Path
 
 import card_i18n
 from card_types import (
@@ -279,11 +280,21 @@ def _repair_tag_block(idx: int, total: int, repair: Repair, strings: dict[str, s
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
 
+REPAIR_SAMPLE_VALUE_CHARS = 80
+
+
 def _repair_section_block(repair: Repair, strings: dict[str, str]) -> dict:
-    body = strings["repair_body"].format(
-        variant=repair.variants[0], rows=f"{repair.rows:,}", notes=repair.notes, subject=repair.subject
+    spellings = " · ".join(
+        strings["repair_spelling"].format(variant=v, rows=f"{n:,}")
+        for v, n in repair.variant_rows.items()
+        if v != repair.subject
     )
-    return {"type": "section", "text": {"type": "mrkdwn", "text": body}}
+    head = strings["repair_body"].format(spellings=spellings, notes=repair.notes, subject=repair.subject)
+    samples = [
+        f"> `{s.subject}` · {s.predicate}: {s.value[:REPAIR_SAMPLE_VALUE_CHARS]} — {Path(s.note).stem}"
+        for s in repair.samples
+    ]
+    return {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join([head, *samples])}}
 
 
 def _repair_row(
