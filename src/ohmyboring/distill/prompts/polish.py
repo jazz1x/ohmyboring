@@ -29,8 +29,14 @@ _EXAMPLE = """엔진을 부르는 코드(drudge_client)를 `agents/shared` 에�
 """
 
 
-def build_polish_prompt(body: str, note_lang: str) -> str:
+def build_polish_prompt(body: str, note_lang: str, retry_reason: str | None = None) -> str:
     language = _LANGUAGE.get(note_lang, "Keep the note's own language.")
+    retry = ""
+    if retry_reason is not None:
+        retry = f"""
+Your previous rewrite was rejected by the checker: {retry_reason}
+Return the full body once more with exactly that problem fixed. Change nothing else.
+"""
     return f"""You tidy one note from a personal knowledge base so its owner can read it at a glance.
 
 Rewrite ONLY the body below as markdown. {language}
@@ -53,7 +59,7 @@ Must not:
 
 Example of the shape (a different note):
 {_EXAMPLE}
-Return JSON: {{"body": "<the rewritten body>"}}
+{retry}Return JSON: {{"body": "<the rewritten body>"}}
 
 === BODY ===
 {body}

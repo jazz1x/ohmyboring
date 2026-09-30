@@ -7,7 +7,8 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from ohmyboring.distill.nodes import draft, language, note, remember, repair, skip, verify
+from ohmyboring.distill import polish as polish_engine
+from ohmyboring.distill.nodes import draft, language, note, polish, remember, repair, skip, verify
 from ohmyboring.distill.state import DistillState
 
 Node = Callable[[DistillState], dict[str, Any]]
@@ -20,6 +21,8 @@ class Steps:
     retry_language: Node
     prepare: Node
     verify: Node
+    polish: Node
+    polish_retry: Node
     repair_call: Node
     repair_prepare: Node
     repair_verify: Node
@@ -43,7 +46,14 @@ def _after_prepare(state: DistillState) -> str:
 
 
 def _after_verify(state: DistillState) -> str:
-    return "remember" if state["verified"] else "repair_call"
+    return "polish" if state["verified"] else "repair_call"
+
+
+def _after_polish(state: DistillState) -> str:
+    outcome = state["polish_outcome"]
+    if isinstance(outcome, polish_engine.RETRYABLE_KEPT):
+        return "polish_retry"
+    return "remember"
 
 
 def _after_repair_call(state: DistillState) -> str:
@@ -67,6 +77,8 @@ def build(steps: Steps) -> CompiledStateGraph:
         "retry_language",
         "prepare",
         "verify",
+        "polish",
+        "polish_retry",
         "repair_call",
         "repair_prepare",
         "repair_verify",
@@ -82,10 +94,12 @@ def build(steps: Steps) -> CompiledStateGraph:
     graph.add_edge("retry_language", "prepare")
     graph.add_conditional_edges("prepare", _after_prepare)
     graph.add_conditional_edges("verify", _after_verify)
+    graph.add_conditional_edges("polish", _after_polish)
+    graph.add_edge("polish_retry", "remember")
     graph.add_conditional_edges("repair_call", _after_repair_call)
     graph.add_conditional_edges("repair_prepare", _after_repair_prepare)
     graph.add_conditional_edges("repair_verify", _after_repair_verify)
-    graph.add_edge("repair_passed", "remember")
+    graph.add_edge("repair_passed", "polish")
     for terminal in ("skip", "repair_failed", "give_up", "remember"):
         graph.add_edge(terminal, END)
     return graph.compile()
@@ -98,6 +112,8 @@ graph = build(
         retry_language=language.retry_language,
         prepare=note.prepare,
         verify=verify.verify,
+        polish=polish.polish,
+        polish_retry=polish.polish_retry,
         repair_call=repair.repair_call,
         repair_prepare=note.repair_prepare,
         repair_verify=verify.repair_verify,

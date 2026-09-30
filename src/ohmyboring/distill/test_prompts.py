@@ -22,6 +22,7 @@ from ohmyboring.adapters import llm as llm_adapter  # noqa: E402
 from ohmyboring.distill import settings  # noqa: E402
 from ohmyboring.distill.nodes import language  # noqa: E402
 from ohmyboring.distill.prompts.draft import build_prompt  # noqa: E402
+from ohmyboring.distill.prompts.polish import build_polish_prompt  # noqa: E402
 from ohmyboring.distill.prompts.repair import build_repair_prompt  # noqa: E402
 from ohmyboring.distill.prompts.sections import body_format_contract, localized_section_headers  # noqa: E402
 
@@ -33,6 +34,7 @@ INPUTS = (
     ("", "", "omb"),
 )
 NOTE = {"title": "t", "body": "## Result\nok", "claims": [{"kind": "fact"}]}
+POLISH_BODY = "2026-09-29 조사. 문(:7710) 을 재기동 — wiki-2278, `make door-up` 실행\n"
 REPORTS = (
     SimpleNamespace(
         resolution="evidence",
@@ -78,6 +80,10 @@ def digests():
                     ]
                 )
     out["correction"] = _sha([_correction()])
+    out["polish"] = _sha([build_polish_prompt(POLISH_BODY, lang) for lang in ("ko", "en", "ja")])
+    out["polish-retry"] = _sha(
+        [build_polish_prompt(POLISH_BODY, "ko", retry_reason="rewrite lost 1 fact(s): 7710")]
+    )
     return out
 
 
@@ -119,6 +125,8 @@ EXPECTED = {
     "prompt/ko/evidence": "f6b9fcf0c9b9e8c01dd5bf942474df3d0b4da7458a009a0f7ae005a51dfe9bf5",
     "prompt/ko/forensic": "63f9936508fe9f56c3ce9b0c88add812faebccd8f7b5a8637d17fc16aac88af2",
     "prompt/ko/standard": "9303d472c453c4922c0357f4c8b2fc4bd28d773ed86b987b46ecb4bf68020e7b",
+    "polish": "9e1f514664d17dd1b4e6a6647ede991d8d580cdbda63766f2e6f0a5f04adb603",
+    "polish-retry": "480ec59267cacde788a244728802cd4bcc6a9f395615844d76fe3ea5293609e6",
     "repair/auto/compact": "55f1626f3f1d9439cef9067ebf1e76ba3a1383fbfeb3a74e93dcb91b13ca738c",
     "repair/auto/evidence": "130327885db4fc08858b8246613cd68d20b48821cebf2c2b32aecbca31a13c31",
     "repair/auto/forensic": "7cfb8afad51be77947be4f2d21bfc7f53dd398665a4517e05438a5ec73111b5e",

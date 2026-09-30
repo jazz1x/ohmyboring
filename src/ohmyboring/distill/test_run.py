@@ -328,8 +328,41 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         event = _read_last_event()
         self.assertEqual(event["verifier_status"], "pass")
         self.assertEqual(event["remember_status"], "duplicate")
+        self.assertEqual(event["polish_status"], "kept")
+        self.assertEqual(event["polish_reason"], "already readable")
         self.assertEqual(event["workflow_node"], "remember_requested")
         self.assertEqual(event["workflow_outcome"], "duplicate")
+
+    def test_polished_body_replaces_the_note_before_remember_and_the_event_says_polished(self):
+        # padded body: wall-line 으로 퇴고 대상이 되고, 다듬은 본문이 remember 에 들간다.
+        padded = {**RICH_NOTE, "title": "PR #159 증류 정리", "body": RICH_NOTE["body"] + "\n" + "설명 " * 150}
+        tidy_body = (
+            "PR #159 정리, eval-gate 2m10s.\n\n- 확인: PR #159, 8 checks, 2m10s\n\n" + RICH_NOTE["body"]
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(llm_adapter, "call_llm", side_effect=[padded, {"body": tidy_body}]) as llm,
+            mock.patch.object(
+                engine,
+                "call_remember",
+                return_value=engine.RememberOutcome(True, "remembered"),
+            ) as remember,
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            ok = run.distill_and_remember(
+                "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
+                "personal",
+                "oh-my-boring",
+                "s-pol",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(llm.call_count, 2, "초안 1번 + 퇴고 1번")
+        self.assertEqual(remember.call_args.args[1], tidy_body + "\n")
+        self.assertIn("[distill-session] polish: polished", stderr.getvalue())
+        event = _read_last_event()
+        self.assertEqual(event["polish_status"], "polished")
+        self.assertNotIn("polish_reason", event)
 
     def test_prepare_note_promotes_semantic_decision_claim_kind(self):
         parsed = {

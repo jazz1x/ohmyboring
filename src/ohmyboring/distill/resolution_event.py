@@ -5,10 +5,23 @@ from __future__ import annotations
 import sys
 
 from ohmyboring.adapters import events, workflow_contract
+from ohmyboring.distill import polish
 
 
-def log_resolution_event(session_id, origin, repo, report, verifier_status, remember_status):  # noqa: PLR0913
+def _polish_event_fields(outcome):
+    """polish ADT 를 사건 필드로 펼친다 — None 이면 polish 가 안 돈 길(repair_failed·give_up)이라 필드가 빠진다."""
+    if outcome is None:
+        return None, None
+    if isinstance(outcome, polish.Polished):
+        return "polished", None
+    return "kept", outcome.reason
+
+
+def log_resolution_event(  # noqa: PLR0913
+    session_id, origin, repo, report, verifier_status, remember_status, polish_outcome=None
+):
     ok = verifier_status in {"pass", "repaired"} and remember_status in {"remembered", "duplicate"}
+    polish_status, polish_reason = _polish_event_fields(polish_outcome)
     try:
         events.append_event(
             "distill-session",
@@ -24,6 +37,8 @@ def log_resolution_event(session_id, origin, repo, report, verifier_status, reme
             numbers_seen=len(report.evidence_tokens_seen),
             numbers_kept=len(report.evidence_tokens_kept),
             remember_status=remember_status,
+            polish_status=polish_status,
+            polish_reason=polish_reason,
             **workflow_contract.resolution_fields(verifier_status, remember_status),
         )
     except OSError as e:

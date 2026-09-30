@@ -26,5 +26,6 @@ def remember(state):
         state["report"],
         state["verifier_status"],
         outcome.status,
+        polish_outcome=state.get("polish_outcome"),
     )
     return {"ok": outcome.ok}

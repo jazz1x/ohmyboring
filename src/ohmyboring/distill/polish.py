@@ -20,6 +20,11 @@ _FACT_PATTERNS = (
 )
 
 
+# 1500 — the same value as the fixed chunk size (ingest/chunk.py fixed_chunks size=1500). Deliberately
+# a constant of its own: distill must not import ingest, and both must move together by decision.
+MAX_POLISHED_CHARS = 1500
+
+
 @dataclass(frozen=True)
 class Polished:
     body: str
@@ -29,6 +34,40 @@ class Polished:
 class Kept:
     reason: str
 
+
+@dataclass(frozen=True)
+class LostFacts(Kept):
+    """The rewrite dropped fact(s) the original carried — tell the model what fell out and retry."""
+
+
+@dataclass(frozen=True)
+class MissedShape(Kept):
+    """The rewrite misses the owner-approved markdown shape — retry once with the shape named."""
+
+
+@dataclass(frozen=True)
+class NoBetter(Kept):
+    """The rewrite trips at least as many readability signals as the original."""
+
+
+@dataclass(frozen=True)
+class NoBody(Kept):
+    """The model returned nothing usable (no body, empty, or not a string)."""
+
+
+@dataclass(frozen=True)
+class TooLong(Kept):
+    """The rewrite is over MAX_POLISHED_CHARS and longer than the original (wiki-2476)."""
+
+
+@dataclass(frozen=True)
+class AlreadyReadable(Kept):
+    """The original already reads — the model is never asked."""
+
+
+# Which rejections earn the single retry edge in the graph: facts lost or shape missed, nothing else
+# (wiki-2475·2476). The graph routes on this tuple, never on the reason string.
+RETRYABLE_KEPT = (LostFacts, MissedShape)
 
 PolishResult = Polished | Kept
 
@@ -61,25 +100,33 @@ def shape_problems(body: str) -> list[str]:
 
 
 def judge(original: str, rewritten: object) -> PolishResult:
-    """Whether `rewritten` may replace `original`: it must be text, carry every fact, and trip
-    fewer body readability signals — otherwise the original stays, with the reason."""
+    """Whether `rewritten` may replace `original`: it must be text, stay under the length guard,
+    carry every fact, and trip fewer body readability signals — otherwise the original stays, as
+    a tagged Kept naming why (the model only proposes; this function decides)."""
     if not isinstance(rewritten, str) or not rewritten.strip():
-        return Kept(reason="the model returned no body")
+        return NoBody(reason="the model returned no body")
+    if len(rewritten) > MAX_POLISHED_CHARS and len(rewritten) > len(original):
+        return TooLong(
+            reason=f"rewrite is {len(rewritten)} chars — over {MAX_POLISHED_CHARS} and longer than the original"
+        )
     missing = facts(original) - facts(rewritten)
     if missing:
-        return Kept(reason=f"rewrite lost {len(missing)} fact(s): {', '.join(sorted(missing)[:5])}")
+        return LostFacts(reason=f"rewrite lost {len(missing)} fact(s): {', '.join(sorted(missing)[:5])}")
     before, after = readability.body_signals(original), readability.body_signals(rewritten)
     if len(after) >= len(before):
-        return Kept(reason=f"rewrite reads no better ({before or 'clean'} → {after or 'clean'})")
+        return NoBetter(reason=f"rewrite reads no better ({before or 'clean'} → {after or 'clean'})")
     shape = shape_problems(rewritten)
     if shape:
-        return Kept(reason=f"rewrite misses the markdown shape: {', '.join(shape)}")
+        return MissedShape(reason=f"rewrite misses the markdown shape: {', '.join(shape)}")
     return Polished(body=rewritten.strip() + "\n")
 
 
-def polish(body: str, note_lang: str, call_llm: Callable[[str], Any]) -> PolishResult:
-    """One polish attempt. A body that already reads is left alone without calling the model."""
+def polish(
+    body: str, note_lang: str, call_llm: Callable[[str], Any], retry_reason: str | None = None
+) -> PolishResult:
+    """One polish attempt. A body that already reads is left alone without calling the model;
+    `retry_reason` carries the first rejection into the prompt (the lost-fact list verbatim)."""
     if not readability.body_signals(body):
-        return Kept(reason="already readable")
-    answer = call_llm(build_polish_prompt(body, note_lang))
+        return AlreadyReadable(reason="already readable")
+    answer = call_llm(build_polish_prompt(body, note_lang, retry_reason=retry_reason))
     return judge(body, answer.get("body") if isinstance(answer, dict) else None)
