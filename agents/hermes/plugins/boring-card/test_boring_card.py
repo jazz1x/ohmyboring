@@ -129,14 +129,20 @@ class _FakeCtx:
 class _FakeClient:
     """Records chat_update calls; raises when asked, to rehearse a dead Slack API."""
 
-    def __init__(self, calls, *, fail=False):
+    def __init__(self, calls, *, fail=False, current=None):
         self._calls = calls
         self._fail = fail
+        # What Slack holds for the card: the last chat_update that landed, or the posted card.
+        self.current = current if current is not None else BLOCKS
+
+    async def conversations_history(self, *, channel, latest, inclusive, limit):
+        return {"messages": [{"ts": latest, "blocks": self.current}]}
 
     async def chat_update(self, *, channel, ts, blocks):
         self._calls.append(("chat_update", channel, ts, blocks))
         if self._fail:
             raise RuntimeError("slack unreachable")
+        self.current = blocks
 
 
 @contextlib.contextmanager
@@ -595,6 +601,35 @@ def test_an_accepted_merge_stays_in_progress_and_hands_the_door_its_row():
     assert _status_at(progress[3], 0) == "⏳ 진행 중…"
 
 
+def test_a_row_the_door_settled_mid_press_is_not_rolled_back():
+    """The door settles row 0 while row 1's effects run; row 1's final update is built from
+    the card as Slack holds it then, so row 0 keeps the door's mark instead of the click's
+    snapshot putting it back."""
+    ctx = _FakeCtx()
+    calls = []
+    client = _FakeClient(calls)
+
+    def door_settles_row_0(session, kind, paths):
+        client.current = card_view.mark_progress(
+            client.current, 0, card_types.Done(text="✓ 완료 — door"), lang="ko"
+        )
+        calls.append(("consumption", session, kind, paths))
+
+    async def ack():
+        calls.append("ack")
+
+    with _env():
+        _, handler = _register(ctx)[0]
+        with (
+            _patched_effects(calls, consumption=door_settles_row_0),
+            mock.patch.object(PLUGIN, "_client", client),
+        ):
+            asyncio.run(handler(ack, _body("card:1:do", ADVICE_VALUE), {}))
+    final = _updates(calls)[-1][3]
+    assert _status_at(final, 0) == "✓ 완료 — door"
+    assert _status_at(final, 1) is None, "row 1 is judged, not in progress"
+
+
 if __name__ == "__main__":
     test_the_import_path_stays_langchain_free()
     test_register_without_secretary_owner_id_registers_nothing()
@@ -612,4 +647,5 @@ if __name__ == "__main__":
     test_a_failed_chat_update_is_one_log_line_and_keeps_the_claim()
     test_a_repair_answered_with_a_non_done_value_is_one_log_line_and_marks_the_row()
     test_an_accepted_merge_stays_in_progress_and_hands_the_door_its_row()
+    test_a_row_the_door_settled_mid_press_is_not_rolled_back()
     print("ok - boring-card plugin: ack-first, in-place mark, double-press refused, loud refusals")

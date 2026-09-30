@@ -464,6 +464,40 @@ def _status_above_buttons(blocks: list[dict], idx: int, status: dict) -> list[di
     return [*kept[:at], status, *kept[at:]]
 
 
+def _is_row_block(block: dict, idx: int) -> bool:
+    return block.get("block_id") == _status_id(idx) or _is_row_actions(block, idx)
+
+
+def changed_segment(before: list[dict], after: list[dict], idx: int) -> list[dict]:
+    """Row `idx` as `after` renders it: the run between the shared head and the shared tail,
+    widened to the row's own status line and buttons — a failure that keeps the buttons leaves
+    them equal in both, and they still belong to the row."""
+    head = 0
+    while head < min(len(before), len(after)) and before[head] == after[head]:
+        head += 1
+    tail = 0
+    while tail < min(len(before), len(after)) - head and before[-1 - tail] == after[-1 - tail]:
+        tail += 1
+    end = len(after) - tail
+    while head > 0 and _is_row_block(after[head - 1], idx):
+        head -= 1
+    while end < len(after) and _is_row_block(after[end], idx):
+        end += 1
+    return after[head:end]
+
+
+def replace_row(current: list[dict], idx: int, segment: list[dict]) -> list[dict] | Rejected:
+    """`current` — the message as Slack holds it now — with row `idx`'s blocks (its status
+    line, its buttons, or both) swapped for `segment`; every other row stays as it is now, so
+    a row another writer settled meanwhile is not rolled back to a stale snapshot."""
+    positions = [i for i, block in enumerate(current) if _is_row_block(block, idx)]
+    if not positions:
+        return Rejected(reason=f"row {idx} is not on the card any more")
+    kept = [block for i, block in enumerate(current) if i not in positions]
+    at = positions[0]
+    return [*kept[:at], *segment, *kept[at:]]
+
+
 def mark_progress(blocks: list[dict], idx: int, outcome: Outcome, *, lang: str) -> list[dict] | Rejected:
     """Only row `idx` changes, and its status line's block_id names the row so a later writer
     can find it again without knowing the buttons."""
