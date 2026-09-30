@@ -15,6 +15,38 @@
       "default": "auto",
       "description": "Output language for distilled notes (ko/en/auto)."
     },
+    "card": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Morning card display settings.",
+      "properties": {
+        "note_links": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Links shown beside a note id on the card, in this order. Leave out a key to hide that link.",
+          "properties": {
+            "obsidian": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["vault"],
+              "properties": {
+                "vault": {"type": "string", "description": "Obsidian vault name (as Obsidian lists it)."},
+                "folder": {"type": "string", "description": "Notes folder inside the vault, e.g. vault/wiki."}
+              }
+            },
+            "file": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["folder"],
+              "properties": {
+                "folder": {"type": "string", "description": "Absolute path of the notes folder on this machine (~ allowed)."},
+                "editor": {"type": "string", "default": "vscode", "description": "Editor URL scheme that opens the file: vscode, cursor, … (Slack does not link file://)."}
+              }
+            }
+          }
+        }
+      }
+    },
     "llm": {
       "type": "object",
       "description": "LLM connection + bootstrap policy (v2). The engine is OpenAI-compatible and backend-agnostic; `provider` steers only the host-side bootstrap (model pull / daemon ensure / health probe). Runtime env (BORING_LLM_*) still overrides.",

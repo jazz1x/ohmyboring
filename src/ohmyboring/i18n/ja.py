@@ -41,6 +41,8 @@ STRINGS: dict[str, str] = {
     "review_note_bare": "ノート: `{note}`(タイトルなし)",
     "review_work": "作業: {work}",
     "review_work_unknown": "作業: セッション `{session}`(セッションノートなし)",
+    "note_link_obsidian": "Obsidianで開く",
+    "note_link_file": "ファイルで開く",
     "review_verdict_agree": "✓ 合っている",
     "review_verdict_flip": "↺ 反転 — 所有者の判定で{kind}",
     "superseded_label": "置換済み",

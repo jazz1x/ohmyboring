@@ -10,6 +10,7 @@ distilled session. The root must be the dir that holds boring.example.json
 (and, when present, boring.json).
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -61,6 +62,34 @@ def test_discover_path_targets_repo_root():
     # bogus agents/boring.json that the off-by-one produced.
     if found is not None:
         assert found.parent.name != "agents", f"discover_path() = {found} resolved under agents/ (off-by-one)"
+
+
+def test_note_links_come_only_from_boring_json():
+    import tempfile
+
+    cases = [
+        ({}, ()),
+        ({"card": {"note_links": {}}}, ()),
+        (
+            {"card": {"note_links": {"obsidian": {"vault": "v", "folder": "/vault/wiki/"}}}},
+            (boring_config.ObsidianLink(vault="v", folder="vault/wiki"),),
+        ),
+        (
+            {"card": {"note_links": {"file": {"folder": "/n"}, "obsidian": {"vault": "v"}}}},
+            (boring_config.FileLink(folder="/n"), boring_config.ObsidianLink(vault="v", folder="")),
+        ),
+        ({"card": {"note_links": {"obsidian": {"vault": ""}, "file": {}, "web": {"url": "x"}}}}, ()),
+    ]
+    for cfg, expected in cases:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(cfg, f)
+        os.environ["BORING_CONFIG"] = f.name
+        try:
+            got = boring_config.note_links()
+        finally:
+            os.environ.pop("BORING_CONFIG", None)
+            os.unlink(f.name)
+        assert got == expected, (cfg, got)
 
 
 def test_in_container_is_the_env_var_alone():
@@ -234,6 +263,7 @@ def main():
         test_repo_root_is_not_the_agents_dir,
         test_discover_path_targets_repo_root,
         test_in_container_is_the_env_var_alone,
+        test_note_links_come_only_from_boring_json,
         test_source_dirs_filter_by_adapter_and_agent,
         test_agent_config_lookup,
         test_canonical_repo_normalizes_variants,

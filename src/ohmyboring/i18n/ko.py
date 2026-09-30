@@ -41,6 +41,8 @@ STRINGS: dict[str, str] = {
     "review_note_bare": "노트: `{note}` (제목 없음)",
     "review_work": "작업: {work}",
     "review_work_unknown": "작업: 세션 `{session}` (세션 노트 없음)",
+    "note_link_obsidian": "Obsidian 으로 열기",
+    "note_link_file": "파일로 열기",
     "review_verdict_agree": "✓ 맞음",
     "review_verdict_flip": "↺ 뒤집음 — 소유자 판정으로 {kind}",
     "superseded_label": "대체됨",

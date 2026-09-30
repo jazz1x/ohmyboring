@@ -422,6 +422,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 merged_yesterday_rows=state["merged_yesterday_rows"],
                 reviews=state["reviews"],
                 lang=lang,
+                note_links=boring_config.note_links(),
             )
         )
         card_ts = message.ts

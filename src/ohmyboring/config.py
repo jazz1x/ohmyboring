@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -174,6 +175,51 @@ def note_lang() -> str:
     """Return the configured note language (auto/ko/en)."""
     cfg = load()
     return cfg.get("note_lang") or DEFAULT_NOTE_LANG
+
+
+@dataclass(frozen=True)
+class ObsidianLink:
+    vault: str
+    folder: str
+
+
+@dataclass(frozen=True)
+class FileLink:
+    """Opens the note's file in an editor — Slack does not link `file://` (measured 2026-09-30),
+    but it does link an editor's own scheme (`vscode://file/…`, `cursor://file/…`)."""
+
+    folder: str
+    editor: str = "vscode"
+
+
+NoteLink = ObsidianLink | FileLink
+
+
+def _note_link(kind: str, raw: object) -> NoteLink | None:
+    if not isinstance(raw, dict):
+        return None
+    match kind:
+        case "obsidian" if isinstance(raw.get("vault"), str) and raw["vault"].strip():
+            return ObsidianLink(vault=raw["vault"].strip(), folder=str(raw.get("folder") or "").strip("/"))
+        case "file" if isinstance(raw.get("folder"), str) and raw["folder"].strip():
+            editor = raw.get("editor")
+            return FileLink(
+                folder=str(Path(raw["folder"].strip()).expanduser()),
+                editor=editor.strip() if isinstance(editor, str) and editor.strip() else "vscode",
+            )
+        case _:
+            return None
+
+
+def note_links() -> tuple[NoteLink, ...]:
+    """The note links the card shows beside a note id, in boring.json's order — `card.note_links`
+    maps "obsidian" to {vault, folder} and "file" to {folder, editor}. Nothing configured, no links:
+    the paths are the owner's, never the code's."""
+    links = (load().get("card") or {}).get("note_links") or {}
+    if not isinstance(links, dict):
+        return ()
+    parsed = (_note_link(kind, raw) for kind, raw in links.items())
+    return tuple(link for link in parsed if link is not None)
 
 
 def hermes_cron_jobs() -> dict:

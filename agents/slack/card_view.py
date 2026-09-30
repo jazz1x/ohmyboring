@@ -33,6 +33,7 @@ import os
 import sys
 from collections.abc import Iterable
 from typing import assert_never
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 
@@ -57,6 +58,7 @@ from card_types import (  # noqa: E402
     ReviewPress,
 )
 
+from ohmyboring.config import FileLink, NoteLink, ObsidianLink  # noqa: E402
 from ohmyboring.i18n import card as card_i18n  # noqa: E402
 
 #: Language-independent register glyphs — the words come from card_i18n.REGISTER_LABELS.
@@ -139,14 +141,36 @@ def _verdict_block(verdict: ButtonVerdict, strings: dict[str, str]) -> dict:
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": f"{mark} — <@{verdict.user}>"}]}
 
 
-def _tag_block(idx: int, total: int, proposal: Proposal, register_labels: dict[str, str]) -> dict:
+def _note_link_url(label: str, link: NoteLink) -> str:
+    match link:
+        case ObsidianLink(vault=vault, folder=folder):
+            target = f"{folder}/{label}" if folder else label
+            return f"obsidian://open?vault={quote(vault, safe='')}&file={quote(target, safe='')}"
+        case FileLink(folder=folder, editor=editor):
+            return f"{quote(editor, safe='')}://file{quote(f'{folder}/{label}.md', safe='/')}"
+
+
+def note_links_text(label: str, links: tuple[NoteLink, ...], strings: dict[str, str]) -> str:
+    """` · <obsidian://…|Obsidian 으로 열기> · <file://…|파일로 열기>` for the configured links,
+    or "" when boring.json names none."""
+    words = {ObsidianLink: strings["note_link_obsidian"], FileLink: strings["note_link_file"]}
+    return "".join(f" · <{_note_link_url(label, link)}|{words[type(link)]}>" for link in links)
+
+
+def _tag_block(
+    idx: int,
+    total: int,
+    proposal: Proposal,
+    register_labels: dict[str, str],
+    links_text: str = "",
+) -> dict:
     icon = REGISTER_ICONS[proposal.register_]
     label = register_labels[proposal.register_]
     note = note_label(proposal.note)
     parts = [f"{icon} *{label}*"]
     if proposal.project:
         parts.append(proposal.project)
-    parts.extend([f"`{note}`", f"{idx + 1}/{total}"])
+    parts.extend([f"`{note}`{links_text}", f"{idx + 1}/{total}"])
     text = " · ".join(parts)
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
@@ -185,13 +209,15 @@ def _proposal_row(
     register_labels: dict[str, str],
     *,
     action_idx: int,
+    note_links: tuple[NoteLink, ...] = (),
 ) -> list[dict]:
     """`idx`/`total` are the display position within the advice lane (unchanged by the repair
     lane's presence); `action_idx` is the shared button-idx space a press reads —
     n_repairs + idx once a repair lane exists, idx alone otherwise."""
+    links_text = note_links_text(note_label(proposal.note), note_links, strings)
     row = [
         {"type": "divider"},
-        _tag_block(idx, total, proposal, register_labels),
+        _tag_block(idx, total, proposal, register_labels, links_text),
         _section_block(proposal),
         _quote_block(proposal.evidence, strings),
     ]
@@ -321,7 +347,9 @@ def _mrkdwn_plain(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _review_tag_block(review: ProposedVerdict, strings: dict[str, str]) -> dict:
+def _review_tag_block(
+    review: ProposedVerdict, strings: dict[str, str], note_links: tuple[NoteLink, ...] = ()
+) -> dict:
     """What the agent judged, on which note, from which piece of work — ids stand in when the
     vault has no title or no session note."""
     label = note_label(review.note)
@@ -329,7 +357,7 @@ def _review_tag_block(review: ProposedVerdict, strings: dict[str, str]) -> dict:
         strings["review_note_titled"].format(title=_mrkdwn_plain(review.note_title), note=label)
         if review.note_title
         else strings["review_note_bare"].format(note=label)
-    )
+    ) + note_links_text(label, note_links, strings)
     work_line = (
         strings["review_work"].format(work=_mrkdwn_plain(review.work))
         if review.work
@@ -374,8 +402,9 @@ def _review_row(
     review: ProposedVerdict,
     verdict: ButtonVerdict | None,
     strings: dict[str, str],
+    note_links: tuple[NoteLink, ...] = (),
 ) -> list[dict]:
-    row = [{"type": "divider"}, _review_tag_block(review, strings)]
+    row = [{"type": "divider"}, _review_tag_block(review, strings, note_links)]
     row.append(
         _review_verdict_block(review, verdict, strings)
         if verdict is not None
@@ -586,6 +615,7 @@ def build_blocks(
     reviews: Iterable[ProposedVerdict] = (),
     *,
     lang: str,
+    note_links: tuple[NoteLink, ...] = (),
 ) -> list[dict]:
     """Block Kit for the card: the head line (past approvals cross-checked against today's
     registers — present only when there were any), then one five-block row per proposal,
@@ -657,6 +687,7 @@ def build_blocks(
                 strings,
                 register_labels,
                 action_idx=n_repairs + idx,
+                note_links=note_links,
             )
             addition = row
             remaining_after = total - shown - 1
@@ -687,7 +718,7 @@ def build_blocks(
         r_shown = 0
         r_overflowed = False
         for ridx, review in enumerate(reviews):
-            addition = _review_row(n_slots + ridx, review, by_idx.get(n_slots + ridx), strings)
+            addition = _review_row(n_slots + ridx, review, by_idx.get(n_slots + ridx), strings, note_links)
             remaining_after = len(reviews) - ridx - 1
             reserve = 1 if remaining_after > 0 else 0
             if len(blocks) + len(addition) + reserve > BLOCK_LIMIT:

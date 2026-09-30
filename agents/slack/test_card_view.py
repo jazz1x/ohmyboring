@@ -858,6 +858,29 @@ class MarkPressedParityTests(unittest.TestCase):
             self.assertIn("구조 개편 &amp; 정리", text)
             self.assertNotIn("/vault/", text)
 
+    def test_note_links_follow_the_setting_and_no_setting_leaves_the_card_as_it_was(self):
+        from ohmyboring.config import FileLink, ObsidianLink
+
+        proposal = self.proposals[0]
+        review = cc.ProposedVerdict(session_id="s1", note="/vault/wiki/wiki-0700.md", kind="used", at="t")
+        plain = cv.build_blocks([proposal], reviews=[review], lang="ko")
+        self.assertEqual(plain, cv.build_blocks([proposal], reviews=[review], lang="ko", note_links=()))
+        self.assertNotIn("obsidian://", _blocks_text(plain))
+        links = (ObsidianLink(vault="my vault", folder="vault/wiki"), FileLink(folder="/Users/me/notes"))
+        linked = _blocks_text(cv.build_blocks([proposal], reviews=[review], lang="ko", note_links=links))
+        self.assertIn(
+            "<obsidian://open?vault=my%20vault&file=vault%2Fwiki%2Fwiki-0700|Obsidian 으로 열기>", linked
+        )
+        self.assertIn("<vscode://file/Users/me/notes/wiki-0700.md|파일로 열기>", linked)
+        cursor = _blocks_text(
+            cv.build_blocks(
+                [proposal], reviews=[review], lang="ko", note_links=(FileLink(folder="/n", editor="cursor"),)
+            )
+        )
+        self.assertIn("<cursor://file/n/wiki-0700.md|파일로 열기>", cursor)
+        advice_note = cv.note_label(proposal.note)
+        self.assertIn(f"file=vault%2Fwiki%2F{advice_note}|", linked)
+
     def test_a_failure_keeps_the_buttons_and_a_retry_leaves_one_status_line(self):
         blocks = self._card()
         actions_at = cv._row_at(blocks, 2)
