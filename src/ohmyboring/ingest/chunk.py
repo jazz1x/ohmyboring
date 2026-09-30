@@ -47,18 +47,19 @@ def _sections(body: str) -> list[str]:
 
 def _pack(title: str, body: str, max_chars: int) -> list[str]:
     header = f"# {title}" if title else "# (제목 없음)"
+    budget = max_chars - len(header) - 1  # 본문 상한 = 전체 한도에서 머리줄과 그 \n 을 뺀 것
     out: list[str] = []
     current: list[str] = []
     current_len = 0
     for section in _sections(body):
-        if len(section) > max_chars:
+        if len(section) > budget:
             if current:
                 out.append(f"{header}\n" + "\n".join(current))
                 current, current_len = [], 0
-            out.extend(f"{header}\n{piece}" for piece in fixed_chunks(section, size=max_chars))
+            out.extend(f"{header}\n{piece}" for piece in fixed_chunks(section, size=budget))
             continue
         added = len(section) if not current else current_len + 1 + len(section)
-        if current and added > max_chars:
+        if current and added > budget:
             out.append(f"{header}\n" + "\n".join(current))
             current, current_len = [section], len(section)
         else:
@@ -73,7 +74,7 @@ def heading_chunks(title: str, body: str, max_chars: int = 1500) -> list[str]:
     """`## ` 경계로 절을 모아 max_chars 안으로 싸고, 넘는 절만 고정 자르기.
 
     조각맨 앞에 `# <title>` 한 줄을 붙여 에이전트가 조각만 봐도 무슨 노트인지 알게 한다(wiki-2475).
-    머리말 줄은 1500 한도에 안 잰다(본문 경계만 맞춘다).
+    max_chars 는 머리줄까지 포함한 조각 전체 길이 한도다.
     """
     return _pack(title, body, max_chars)
 
@@ -82,7 +83,7 @@ def chunk_stats(titles_bodies: list[tuple[str, str]], max_chars: int = 1500) -> 
     """고정 자르기와 제목 경계 자르기의 조각 수 분포를 나란히 낸다(분모=본문 있는 노트 수)."""
     fixed_counts: list[int] = []
     heading_counts: list[int] = []
-    heading_body_max = 0
+    heading_chunk_max = 0
     for title, body in titles_bodies:
         pieces = fixed_chunks(body.strip())
         if not pieces or all(not piece.strip() for piece in pieces):
@@ -90,7 +91,7 @@ def chunk_stats(titles_bodies: list[tuple[str, str]], max_chars: int = 1500) -> 
         heads = _pack(title, body.strip(), max_chars)
         fixed_counts.append(len(pieces))
         heading_counts.append(len(heads))
-        heading_body_max = max(heading_body_max, max(len(h.split("\n", 1)[1]) for h in heads))
+        heading_chunk_max = max(heading_chunk_max, max(len(h) for h in heads))
     n = len(fixed_counts)
     if n == 0:
         return {"notes": 0, "notes_over_1500_chars": 0}
@@ -109,5 +110,5 @@ def chunk_stats(titles_bodies: list[tuple[str, str]], max_chars: int = 1500) -> 
             "median": statistics.median(heading_counts),
             "max": max(heading_counts),
         },
-        "heading_chunk_chars_max": heading_body_max,
+        "heading_chunk_chars_max": heading_chunk_max,
     }

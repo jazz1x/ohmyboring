@@ -7,7 +7,10 @@
 문 컨테이너 안에서 돌릴 때는 BORING_IN_CONTAINER=1 을 주거나 BORING_LLM_BASE_URL 을 준다 —
 주소는 config.llm_base_url() 이 정하고 코드에 박지 않는다. 머리말 쪼개기는 note.py 가 주입받는
 port(정본은 agents/shared/vault_note.split_frontmatter — 저장소에 구현은 그것 뿐)이고, 모듈
-본체는 agents 에 닿지 않는다; 다만 실행 입구(main) 에서 그것을 싣는다.
+본체는 agents 에 닿지 않는다 — main 도 인자로만 받고, vault_note 를 싣는 구성 뿌리는 저장소
+밖 입구 scripts/ingest-shadow.py 다. 연결은 붙자마자 읽기 전용으로 바꾼다(SET SESSION
+CHARACTERISTICS AS TRANSACTION READ ONLY) — 서버가 응답한 transaction_read_only 값이
+JSON 의 session_read_only 로 실려 온다.
 """
 
 from __future__ import annotations
@@ -97,6 +100,8 @@ class _Ledger:
 
     axes: dict[str, list[int]]
     diffs: dict[str, list[Any]]
+    documents_total: int = 0
+    session_read_only: str = ""
     files_missing: int = 0
     files_unparseable: int = 0
     chunk_docs: int = 0
@@ -176,7 +181,6 @@ def _embedding_sample(
 
 
 def _report(
-    documents_total: int,
     ledger: _Ledger,
     sims: list[float],
     failures: list[dict[str, str]],
@@ -186,8 +190,9 @@ def _report(
         "schema": "omb-ingest-shadow/v1",
         "generated_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "arguments": {"sample": sample},
+        "session_read_only": ledger.session_read_only,
         "population": {
-            "documents_in_db": documents_total,
+            "documents_in_db": ledger.documents_total,
             "files_missing": ledger.files_missing,
             "files_unparseable": ledger.files_unparseable,
         },
@@ -213,8 +218,7 @@ def _report(
 def run(conn: Any, sample: int, split_frontmatter: SplitFrontmatter) -> dict[str, Any]:
     """대조 한 바퀴 — 연결은 밖에서 열리고 여기서는 읽기만 한다."""
     cur = conn.cursor()
-    documents = _documents(cur)
-    chunks_by_doc = _chunks_by_doc(cur)
+    cur.execute("SHOW transaction_read_only")
     ledger = _Ledger(
         axes={"sha": [0, 0], "title": [0, 0], "kind": [0, 0], "tags": [0, 0]},
         diffs={
@@ -225,11 +229,15 @@ def run(conn: Any, sample: int, split_frontmatter: SplitFrontmatter) -> dict[str
             "unparseable": [],
             "missing_file": [],
         },
+        session_read_only=str(cur.fetchone()[0]),
     )
+    documents = _documents(cur)
+    chunks_by_doc = _chunks_by_doc(cur)
+    ledger.documents_total = len(documents)
     for row in documents:
         _ingest_document(ledger, row, chunks_by_doc, split_frontmatter)
     sims, failures = _embedding_sample(cur, ledger.embed_pool, sample)
-    return _report(len(documents), ledger, sims, failures, sample)
+    return _report(ledger, sims, failures, sample)
 
 
 def _connect(dsn: str) -> Any:
@@ -237,21 +245,11 @@ def _connect(dsn: str) -> Any:
 
     conn = psycopg.connect(dsn)
     conn.autocommit = True
+    conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
     return conn
 
 
-def _entry_splitter() -> SplitFrontmatter:
-    """실행 입구에서만 하는 구성 — 저장소의 단 하나 머리말 쪼개기(vault_note)를 싣는다.
-
-    src 모듈은 agents 를 import 하지 않으니 주입은 이곳 한 번이다. 문 이미지에는
-    agents/shared 가 함께 있고, 호스트에서 돌릴 땐 그 경로를 PYTHONPATH 에 넣는다.
-    """
-    from vault_note import split_frontmatter
-
-    return split_frontmatter
-
-
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None, split_frontmatter: SplitFrontmatter) -> int:
     parser = argparse.ArgumentParser(prog="ohmyboring.ingest.shadow")
     parser.add_argument("--sample", type=int, default=20, help="임베딩 대조 표본 수(기본 20)")
     parser.add_argument("--out", default=None, help="JSON 을 stdout 대신 적을 경로")
@@ -262,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     conn = _connect(args.dsn)
     try:
-        report = run(conn, args.sample, _entry_splitter())
+        report = run(conn, args.sample, split_frontmatter)
     finally:
         conn.close()
     text = json.dumps(report, ensure_ascii=False, indent=2)
@@ -273,7 +271,3 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(text)
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

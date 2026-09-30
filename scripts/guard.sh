@@ -84,6 +84,7 @@ python3 agents/shared/test_recall_core.py
 python3 agents/shared/test_label_core.py
 python3 agents/shared/test_uptake_core.py
 python3 agents/shared/test_verdict_core.py
+python3 src/ohmyboring/adapters/test_embed.py
 python3 src/ohmyboring/adapters/test_engine.py
 python3 src/ohmyboring/adapters/test_events.py
 python3 src/ohmyboring/adapters/test_llm.py

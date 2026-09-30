@@ -72,13 +72,14 @@ class HeadingChunksTests(unittest.TestCase):
         chunks = heading_chunks("제목", body)
         self.assertEqual(len(chunks), 2)
         self.assertTrue(all(c.startswith("# 제목\n") for c in chunks))
+        self.assertLessEqual(len(chunks[0]), 1500, "머리줄 포함 조각 전체가 1500 안")
         head0, body0 = chunks[0].split("\n", 1)
         head1, body1 = chunks[1].split("\n", 1)
         self.assertEqual(head0, "# 제목")
-        self.assertEqual(len(body0), 1500)
+        self.assertEqual(len(body0), 1495, "머리줄 4+\\n 을 뺀 본문 상한")
         self.assertTrue(body0.startswith("## A\n"))
-        self.assertEqual(len(body1), 705, "2005 자 절은 1500+705")
-        self.assertEqual(body0[1300:], body1[:200], "겹침 200")
+        self.assertEqual(len(body1), 710, "2005 자 절은 1495+710")
+        self.assertEqual(body0[1295:], body1[:200], "겹침 200")
 
     def test_packing_respects_max(self):
         body = "## A\n" + "a" * 900 + "\n## B\n" + "b" * 900
