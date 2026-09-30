@@ -109,6 +109,7 @@ class HeadingChunksTests(unittest.TestCase):
         self.assertGreaterEqual(len(chunks), 2, "4000자 본문은 쪼개져야 한다")
         self.assertLessEqual(len(chunks), 8, "예산 750 기준 일곱 조각 안팎 — 402 조각 폭증이 아니다")
         self.assertTrue(all(c.startswith("# ") for c in chunks), "조각맨 앞 머리줄은 남는다")
+        self.assertTrue(all(c.split("\n", 1)[0].endswith("…") for c in chunks), "잘린 머리줄 끝에 … 표시")
 
 
 class ChunkStatsTests(unittest.TestCase):

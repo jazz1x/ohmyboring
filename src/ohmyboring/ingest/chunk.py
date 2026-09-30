@@ -47,12 +47,12 @@ def _sections(body: str) -> list[str]:
 
 def _pack(title: str, body: str, max_chars: int) -> list[str]:
     header = f"# {title}" if title else "# (제목 없음)"
-    # 제목이 한도의 절반을 먹을 만큼 길면(약 1298자 이상) 머리줄을 잘라 본문 예산을
-    # max_chars//2 이상으로 지킨다 — 아니면 예산이 겹침 200 아래로 떨어져 고정 자르기가
-    # 절을 통째로 돌려주거나(조각이 한도를 넘음) 조각 수가 폭증한다.
+    # 제목이 한도의 절반을 먹을 만큼 길면(머리줄 `# <title>` 이 749자 — 제목 748자 — 를 넘으면)
+    # 머리줄 끝을 "…" 로 잘라 본문 예산을 max_chars//2 이상으로 지킨다 — 아니면 예산이 겹침 200
+    # 아래로 떨어져 고정 자르기가 절을 통째로 돌려주거나(조각이 한도를 넘음) 조각 수가 폭증한다.
     max_header = max_chars - max_chars // 2 - 1
     if len(header) > max_header:
-        header = header[:max_header]
+        header = header[: max_header - 1] + "…"
     budget = max_chars - len(header) - 1  # 본문 상한 = 전체 한도에서 머리줄과 그 \n 을 뺀 것
     out: list[str] = []
     current: list[str] = []
