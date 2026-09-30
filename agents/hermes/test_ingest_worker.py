@@ -130,10 +130,34 @@ class IngestWorkerTest(unittest.TestCase):
         self._write_session("s-q")
         dq = ingest_worker.distill_queue
         dq.enqueue(dq.QueueItem("s-q", "claude-code", "personal", "repo", "preset-text"))
+        # Age the pending marker past PENDING_TTL — enqueue() rewrote it fresh, and a fresh
+        # pending alone would make _eligible reject. Only a correct is_queued() check blocks
+        # the re-offer, so deleting that check must turn this test red.
+        pending = Path(self.tmp.name) / "s-q.pending"
+        stale = time.time() - ingest_worker.PENDING_TTL - 1
+        os.utime(pending, (stale, stale))
         stdout, run = self._run_main()
         # the drain ran the pre-queued item; the scan did not overwrite it
         run.assert_called_once_with("preset-text", "personal", "repo", "s-q")
         self.assertEqual(self._offer_events("s-q"), [])
+
+    def test_scan_tops_up_queue_to_one_ticks_worth(self):
+        # The queue already holds 2 of this tick's budget of 3 → the scan may add exactly 1.
+        # Without the cap the scan would enqueue all three candidates, and the drain (3 per
+        # tick) would leave the rest waiting past PENDING_TTL.
+        for i in range(2):
+            self._queue(f"pre-{i}")
+        for sid in ("cap-a", "cap-b", "cap-c"):
+            self._write_session(sid)
+        with mock.patch.object(ingest_worker, "QUEUE_PER_TICK", 3):
+            stdout, run = self._run_main()
+        queued = [e for e in self._events() if e["event"] == "ingest_offer" and e.get("status") == "queued"]
+        self.assertEqual([e["session_id"] for e in queued], ["cap-a"])  # oldest first
+        self.assertEqual(run.call_count, 3)  # 2 pre-queued + 1 offered, all drained this tick
+        for sid in ("cap-b", "cap-c"):
+            self.assertFalse(ingest_worker.markers.is_done(sid))
+            self.assertFalse(ingest_worker.distill_queue.is_queued(sid))
+            self.assertEqual(self._offer_events(sid), [])
 
     def test_tick_order_is_offer_then_drain(self):
         self._write_session("s-ord")

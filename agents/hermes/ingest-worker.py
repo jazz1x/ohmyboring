@@ -10,6 +10,9 @@ Flow per cron tick:
   1. OFFER — scan the source-dir window for eligible sessions, extract + clamp each transcript
      to a size the engine can digest without derailing (~4k chars), and enqueue it into the
      shared distill_queue (the same queue the host SessionEnd hooks write, FIFO by mtime).
+     The scan only tops the queue up to one tick's worth — at most
+     max(0, QUEUE_PER_TICK − current queue length) — so no offered session waits past
+     PENDING_TTL for a later tick's drain.
   2. DRAIN — pop up to QUEUE_PER_TICK queued items, oldest first, and run each through
      distill_run.distill_and_remember (verify → resolve → polish → remember, in the graph).
      Success → done marker + queue file removed; failure → retry marker (dead after repeated
@@ -113,7 +116,7 @@ WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
 STABLE_AGE_S = float(os.environ.get("COLLECT_STABLE_AGE_SECONDS") or "1800")
 CLAMP = int(os.environ.get("INGEST_CLAMP") or "4000")  # 12B digest ceiling — above this the agent derails
-MIN_TEXT = 500  # below this = no real content → skip (host-side pre-filter)
+MIN_TEXT = 500  # below this = no real content → skip
 # A pending-marker prevents the same session being re-offered every tick while the agent is still
 # working on it (or just failed). It expires so a crashed tick doesn't pin a session forever.
 PENDING_TTL = float(os.environ.get("INGEST_PENDING_TTL") or "1800")
@@ -127,31 +130,13 @@ def _repo_slug(cwd):
     return distill_core.repo_slug(cwd)
 
 
-def _log_worker_event(event, status, **fields):
+def _log_worker_event(event, status, agent="claude-code", **fields):
     event_log.try_append_event(
         "hermes-ingest-worker",
         event,
         status,
-        agent="claude-code",
+        agent=agent,
         **workflow_contract.worker_fields(event, status),
-        **fields,
-    )
-
-
-def _log_offer_enqueued(**fields):
-    """ingest_offer/queued — the scan handed the session to the shared engine queue.
-
-    `worker_fields()` predates the engine queue and has no 'queued' projection, so this
-    mirrors `_log_worker_event` with the same TRANSCRIPT_PREPARED/CONTINUE shape the old
-    'pending' offer carried.
-    """
-    event_log.try_append_event(
-        "hermes-ingest-worker",
-        "ingest_offer",
-        "queued",
-        **workflow_contract.fields(
-            workflow_contract.Node.TRANSCRIPT_PREPARED, workflow_contract.Outcome.CONTINUE
-        ),
         **fields,
     )
 
@@ -304,9 +289,16 @@ def main(argv=None):
                 candidates.append((os.path.getmtime(p), p, d))
     candidates.sort(key=lambda c: c[0])  # oldest first (FIFO)
 
+    # Top the queue up to one tick's worth, never flood it: the drain below pulls at most
+    # QUEUE_PER_TICK, so a bigger drop would leave items waiting past PENDING_TTL (which
+    # doctor's marker-health check flags). Items beyond the room wait for a later tick.
+    room = max(0, QUEUE_PER_TICK - len(distill_queue.drain()))
     offered = 0
     for _mtime, p, source_dir in candidates:
+        if offered >= room:
+            break
         sid = os.path.splitext(os.path.basename(p))[0]
+        agent = _agent_for_dir(source_dir)
         text = extract(p)
         original_text_chars = len(text)
         if len(text) < MIN_TEXT:
@@ -314,6 +306,7 @@ def main(argv=None):
             _log_worker_event(
                 "ingest_offer",
                 "skipped",
+                agent=agent,
                 session_id=sid,
                 reason="too_short",
                 source_chars=original_text_chars,
@@ -324,12 +317,13 @@ def main(argv=None):
         remote_url = distill_core.git_remote_url(cwd)
         origin, _name = boring_config.classify(cwd, remote_url)
         repo = _repo_slug(cwd)
-        agent = _agent_for_dir(source_dir)
         # The shared queue replaces the old printed prompt: enqueue() marks the session pending,
         # and the drain below runs it through the engine in the same tick.
         distill_queue.enqueue(distill_queue.QueueItem(sid, agent, origin, repo, text))
         offered += 1
-        _log_offer_enqueued(
+        _log_worker_event(
+            "ingest_offer",
+            "queued",
             agent=agent,
             session_id=sid,
             origin=origin,

@@ -54,11 +54,10 @@ def test_collector_run_fields_cover_empty_success_and_failure():
     assert workflow.collector_run_fields("failed", 1)["workflow_node"] == "retry_marked"
 
 
-def test_worker_fields_cover_offer_and_reconcile_events():
-    assert workflow.worker_fields("ingest_offer", "pending")["workflow_node"] == "transcript_prepared"
+def test_worker_fields_cover_offer_events():
+    assert workflow.worker_fields("ingest_offer", "queued")["workflow_node"] == "transcript_prepared"
     assert workflow.worker_fields("ingest_offer", "skipped")["workflow_node"] == "skipped"
-    assert workflow.worker_fields("ingest_reconcile", "ok")["workflow_node"] == "done_marked"
-    assert workflow.worker_fields("ingest_reconcile", "failed")["workflow_node"] == "retry_marked"
+    assert workflow.worker_fields("ingest_offer", "ok")["workflow_node"] == "readiness_projected"
 
 
 def test_unknown_workflow_projection_is_rejected():
@@ -95,6 +94,6 @@ if __name__ == "__main__":
     test_resolution_fields_follow_memory_ingest_graph()
     test_readiness_fields_project_terminal_state()
     test_collector_run_fields_cover_empty_success_and_failure()
-    test_worker_fields_cover_offer_and_reconcile_events()
+    test_worker_fields_cover_offer_events()
     test_unknown_workflow_projection_is_rejected()
     print("ok - workflow contract")

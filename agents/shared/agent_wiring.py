@@ -990,6 +990,10 @@ def _ensure_memory_ingest_worker(
     """Ensure the autonomous 20-minute session-ingestion worker job exists and points to the
     canonical repo script. This job is intentionally not exposed in boring.json hermes_cron_jobs
     because it is infrastructure, not user scheduling.
+
+    The job runs `no_agent: true` with no skill: the script offers eligible sessions to the
+    shared distill queue and drains it through the LangGraph engine itself, so hermes must
+    never call a model for it — not even when the script exits non-zero.
     """
     script = "ingest-worker.py"
     desired_schedule = {"kind": "interval", "minutes": 20, "display": "every 20m"}
@@ -999,8 +1003,9 @@ def _ensure_memory_ingest_worker(
             existing.get("script") != script
             or existing.get("schedule") != desired_schedule
             or not existing.get("enabled", True)
-            or existing.get("skill") != "memory-ingest"
-            or existing.get("no_agent", True) is not False
+            or existing.get("skill") is not None
+            or existing.get("skills") != []
+            or existing.get("no_agent") is not True
         )
         if not needs_update:
             return False
@@ -1009,9 +1014,9 @@ def _ensure_memory_ingest_worker(
         existing["schedule_display"] = "every 20m"
         existing["enabled"] = True
         existing["state"] = "scheduled"
-        existing["skills"] = ["memory-ingest"]
-        existing["skill"] = "memory-ingest"
-        existing["no_agent"] = False
+        existing["skills"] = []
+        existing["skill"] = None
+        existing["no_agent"] = True
         existing["next_run_at"] = (now + datetime.timedelta(minutes=1)).isoformat()
         existing["paused_at"] = None
         existing["paused_reason"] = None
@@ -1022,13 +1027,13 @@ def _ensure_memory_ingest_worker(
             "id": secrets.token_hex(8),
             "name": "memory-ingest-worker",
             "prompt": "",
-            "skills": ["memory-ingest"],
-            "skill": "memory-ingest",
+            "skills": [],
+            "skill": None,
             "model": None,
             "provider": None,
             "base_url": None,
             "script": script,
-            "no_agent": False,
+            "no_agent": True,
             "context_from": None,
             "schedule": desired_schedule,
             "schedule_display": "every 20m",

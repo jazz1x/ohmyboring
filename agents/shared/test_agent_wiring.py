@@ -721,8 +721,12 @@ def test_sync_hermes_cron_jobs_adds_managed_job():
         worker = next(j for j in saved["jobs"] if j["name"] == "memory-ingest-worker")
         assert worker["script"] == "ingest-worker.py"
         assert worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
-        assert worker["skill"] == "memory-ingest"
-        assert [j["name"] for j in saved["jobs"] if j["name"] == "codex-memory-ingest-worker"] == [], (
+        assert worker["skill"] is None
+        assert worker["skills"] == []
+        assert worker["no_agent"] is True, (
+            "the script drives the engine queue itself; hermes must never call a model for it"
+        )
+        assert [j for j in saved["jobs"] if j["name"] == "codex-memory-ingest-worker"] == [], (
             "the host worker already runs the collector every 20m; a hermes job is a second owner"
         )
 
@@ -962,7 +966,9 @@ def test_sync_hermes_cron_jobs_repairs_blocked_absolute_worker_path():
         worker = next(j for j in saved["jobs"] if j["name"] == "memory-ingest-worker")
         assert worker["script"] == "ingest-worker.py"
         assert worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
-        assert worker["skill"] == "memory-ingest"
+        assert worker["skill"] is None
+        assert worker["skills"] == []
+        assert worker["no_agent"] is True
         assert worker["enabled"] is True
 
 

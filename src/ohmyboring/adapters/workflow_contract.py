@@ -97,14 +97,10 @@ def collector_run_fields(status: str, batch: int) -> dict[str, str]:
 
 
 def worker_fields(event: str, status: str) -> dict[str, str]:
-    if event == "ingest_offer" and status == "pending":
+    if event == "ingest_offer" and status == "queued":
         return fields(Node.TRANSCRIPT_PREPARED, Outcome.CONTINUE)
     if event == "ingest_offer" and status == "skipped":
         return fields(Node.SKIPPED, Outcome.SKIP)
     if event == "ingest_offer" and status == "ok":
         return fields(Node.READINESS_PROJECTED, Outcome.PASS)
-    if event == "ingest_reconcile" and status == "ok":
-        return fields(Node.DONE_MARKED, Outcome.CONTINUE)
-    if event == "ingest_reconcile" and status in {"retry", "failed"}:
-        return fields(Node.RETRY_MARKED, Outcome.FAIL)
     raise ValueError(f"unknown worker workflow projection: event={event!r} status={status!r}")

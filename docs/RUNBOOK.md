@@ -47,7 +47,7 @@ make maintenance                     # 지금 한 번 돌린다
 
 | 잡 | 주기 | 스크립트 |
 |---|---|---|
-| `memory-ingest-worker` | 20분 | `ingest-worker.py` — Claude 세션 하나를 증류 |
+| `memory-ingest-worker` | 20분 | `ingest-worker.py` — 창 훑기가 적격 세션을 공유 증류 큐에 넣고, 한 틱에 큐에서 QUEUE_PER_TICK(기본 3)개를 랭그래프 엔진으로 증류 |
 | `morning-card` | 매일 08:00 | `run-morning-card.py` — 문의 `POST /run/morning-card` 에 부탁해 아침 카드 프로그램을 돌린다. deliver `local`(카드가 스스로 슬랙에 올리니 hermes 가 배달할 것 없음) |
 | `weekly-card` | 월 09:00 | `run-weekly-card.py` — 문의 `POST /run/weekly-card` 에 부탁해 주간 카드 프로그램을 돌린다. deliver `local` |
 | `morning-briefing` | — | 지금 운영 상태로 꺼져 있다(`~/.hermes/cron/jobs.json` 의 `enabled: false`) — 아침 카드가 그 자리를 한다 |
