@@ -111,7 +111,7 @@ def _backup(path: Path) -> Path:
 _SCRIPT_TOKEN = re.compile(r"\S+\.(?:py|sh|mjs|js)\b")
 
 #: Repo-relative scripts wire_claude_code owns, one role each. A hook registration is "ours,
-#: role R" when its script resolves to <checkout>/<R> and <checkout> really is an oh-my-boring
+#: role R" when its script token names <checkout>/<R> and <checkout> really is an oh-my-boring
 #: checkout — every checkout carries agents/shared/agent_wiring.py, and requiring that marker
 #: keeps a stranger's unrelated hooks/recall.py out of our hands.
 _CLAUDE_CODE_ROLE_SCRIPTS = (
@@ -123,16 +123,29 @@ _CLAUDE_CODE_ROLE_SCRIPTS = (
 _CHECKOUT_MARKER = ("agents", "shared", "agent_wiring.py")
 
 
-def _checkout_role(script: Path) -> tuple[Path, str] | None:
-    """(checkout root, owned role) for a script inside an oh-my-boring checkout, else None."""
-    parts = script.parts
-    for role in _CLAUDE_CODE_ROLE_SCRIPTS:
-        role_parts = Path(role).parts
-        if len(parts) > len(role_parts) and parts[-len(role_parts) :] == role_parts:
-            root = Path(*parts[: -len(role_parts)])
-            if (root / Path(*_CHECKOUT_MARKER)).exists():
-                return root, role
-    return None
+def _command_roles(command: str) -> set[tuple[Path, str]]:
+    """(resolved checkout root, owned role) pairs for a command's raw script tokens.
+
+    The token is `~`-expanded but its file is NOT resolved: in a real checkout hooks/*.py are
+    symlinks into agents/claude-code/, so a resolved path ends in the link target and the role
+    suffix never matches. Measured 2026-10-01 against a copy of the real settings.json: only
+    session-start-recall.py — the one real file — was repointed; the three symlinked roles
+    survived. The root is resolved only after the suffix strip, so a checkout reached through
+    a symlinked home directory still compares equal to BORING_HOME.
+    """
+    out = set()
+    for token in _SCRIPT_TOKEN.findall(command or ""):
+        try:
+            parts = Path(token).expanduser().parts
+        except (OSError, RuntimeError):
+            continue
+        for role in _CLAUDE_CODE_ROLE_SCRIPTS:
+            role_parts = Path(role).parts
+            if len(parts) > len(role_parts) and parts[-len(role_parts) :] == role_parts:
+                root = Path(*parts[: -len(role_parts)])
+                if (root / Path(*_CHECKOUT_MARKER)).exists():
+                    out.add((root.resolve(), role))
+    return out
 
 
 def _hook_scripts(command: str) -> set:
@@ -166,11 +179,7 @@ def _already_wired(settings: dict, command: str) -> bool:
     """
     wanted = _hook_scripts(command)
     current = Path(BORING_HOME).resolve()
-    wanted_roles = set()
-    for script in wanted:
-        found = _checkout_role(script)
-        if found is not None and found[0] == current:
-            wanted_roles.add(found[1])
+    wanted_roles = {role for root, role in _command_roles(command) if root == current}
     for group in settings.get("hooks", {}).values():
         if not isinstance(group, list):
             continue
@@ -185,11 +194,10 @@ def _already_wired(settings: dict, command: str) -> bool:
                     return True
                 if not wanted and command in existing:
                     return True
-                if wanted_roles:
-                    for script in _hook_scripts(existing):
-                        found = _checkout_role(script)
-                        if found is not None and found[0] == current and found[1] in wanted_roles:
-                            return True
+                if wanted_roles and any(
+                    root == current and role in wanted_roles for root, role in _command_roles(existing)
+                ):
+                    return True
     return False
 
 
@@ -203,6 +211,8 @@ def _drop_duplicate_hooks(settings: dict, commands) -> int:
     the other checkout looked like a different hook and stayed. Measured 2026-10-01 in
     ~/.claude/settings.json: every role registered once per checkout (main and migration), so
     every session got recall injected twice and was distilled twice (2026-09-30 e1c7377b).
+    Roles are matched from the raw script token, not the resolved file, because the checkout's
+    hooks/*.py are symlinks whose targets match no role (_command_roles).
     """
     ours = set()
     for command in commands:
@@ -223,17 +233,11 @@ def _drop_duplicate_hooks(settings: dict, commands) -> int:
                 if not isinstance(h, dict):
                     kept.append(h)
                     continue
-                scripts = _hook_scripts(h.get("command") or "")
-                foreign = False
-                for script in scripts:
-                    found = _checkout_role(script)
-                    if found is not None and found[0] != current:
-                        foreign = True
-                        break
-                if foreign:
+                existing = h.get("command") or ""
+                if any(root != current for root, _ in _command_roles(existing)):
                     removed += 1
                     continue
-                own = scripts & ours
+                own = _hook_scripts(existing) & ours
                 if own and own & seen:
                     removed += 1
                     continue

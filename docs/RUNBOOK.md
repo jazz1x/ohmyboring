@@ -99,7 +99,7 @@ sh scripts/doctor.sh          # ✗ 가 0개인지
 | 회수가 안 들어온다 | `curl -s localhost:7700/health` | 엔진이 떴는지, `corpus_count` 가 0 아닌지 |
 | 노트가 안 쌓인다 | `sh scripts/doctor.sh` | `note_freshness` 가 최신인지 |
 | 크론 잡이 안 돈다 | `ls -t ~/.hermes/cron/output/<job-id>/ \| head -1` | **최신 파일의 시각**. 개수는 50에서 회전하므로 신호가 아니다 |
-| 그 파일이 0바이트다 | `curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker'` | **유휴인지 고장인지는 여기서 갈린다** (§4) |
+| 그 파일이 머리말(~155 바이트)뿐이다 | `curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker'` | **유휴인지 고장인지는 여기서 갈린다** (§4) |
 | 브리핑이 안 온다 | `make agent-logs` | hermes 가 스크립트를 찾았는지, 경로가 막혔는지 |
 | 카드가 안 왔다 | `./scripts/schedule-card.sh status` 와 `ls -t ~/.hermes/cron/output/<job-id>/ \| head -1` | hermes 크론 `morning-card` 의 최신 출력 파일 — 이름이 시각이고, 안의 `[run-morning-card]` 줄이 성패(`ok … posted_ts=` 는 게시, `FAILED` 는 실패). launchd 는 09-28 에 지워 더는 안 찍히고, 출력이 없으면 문 `POST /run/morning-card` 의 응답을 본다 |
 | 주간 카드가 안 왔다 | `./scripts/schedule-card.sh status weekly` 와 hermes 크론 `weekly-card` 의 최신 출력 | 위와 같다 (`/tmp/com.ohmyboring.weekly-card.log`) |
@@ -114,14 +114,22 @@ sh scripts/doctor.sh          # ✗ 가 0개인지
 
 ## 4. 안 돌 때 읽을 자리
 
-**크론 출력 파일은 어느 경로에서나 0바이트다.** memory-ingest-worker 는 `no_agent` 잡이라
-stdout 가 에이전트에게로 가지 않고, 0바이트는 고장이 아니라 정상이다.
+**크론 출력 파일은 머리말만 실린 ~155 바이트다.** memory-ingest-worker 는 `no_agent` 잡이라
+stdout 가 에이전트에게로 가지 않고, 정상 틱의 출력 파일은 이 머리말만 담는다 — 고장이 아니다:
+
+```
+# Cron Job: memory-ingest-worker
+**Job ID:** cc33a556631a
+**Run Time:** 2026-10-01 08:05:57
+**Mode:** no_agent (script)
+**Status:** silent (empty output)
+```
 
 ```bash
 ls -t ~/.hermes/cron/output/cc33a556631a/ | head -3   # memory-ingest-worker
 ```
 
-파일 안에 있을 줄은 `Blocked:` 하나뿐이다 — 있으면 hermes 가 스크립트를 거부한 것이다.
+머리말의 `Status:` 가 `silent (empty output)` 이 아닌 것이 읽을 신호다.
 성공·실패는 크론 파일로는 못 가르고 **이벤트로 판정한다** — `make events` 나
 `curl localhost:7700/events`. 성공은 `ingest_queue` 의 `ok`(세션 하나가 증류를 마친 것),
 제안(`ingest_offer`)은 `queued` / `skipped` / `ok` — 유휴 틱에도 `offered=0` 을 남긴다.

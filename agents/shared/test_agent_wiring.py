@@ -1120,11 +1120,24 @@ def test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3():
 
 
 def _fake_checkout(root: Path) -> Path:
-    """A fake oh-my-boring checkout: the marker module plus the four hook scripts."""
-    for rel in ("agents/shared/agent_wiring.py", *agent_wiring._CLAUDE_CODE_ROLE_SCRIPTS):
-        path = root / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("# stub\n", encoding="utf-8")
+    """A fake oh-my-boring checkout mirroring the real repo's layout.
+
+    hooks/distill-session.py, hooks/recall.py and hooks/rules.py are symlinks into
+    agents/claude-code/ (real files there); agents/claude-code/session-start-recall.py is a
+    real file. The old fixture wrote real files at hooks/*.py, which is exactly why the
+    resolved-path detection passed its test while failing on the real repo.
+    """
+    claude_dir = root / "agents" / "claude-code"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    hooks_dir = root / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("distill-session.py", "recall.py", "rules.py"):
+        (claude_dir / name).write_text("# stub\n", encoding="utf-8")
+        (hooks_dir / name).symlink_to(Path("..") / "agents" / "claude-code" / name)
+    (claude_dir / "session-start-recall.py").write_text("# stub\n", encoding="utf-8")
+    marker = root / "agents" / "shared" / "agent_wiring.py"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("# stub\n", encoding="utf-8")
     return root
 
 
@@ -1135,8 +1148,11 @@ def test_wire_claude_code_repoints_roles_registered_from_another_checkout():
     Measured 2026-10-01: ~/.claude/settings.json carried all four roles from both the main
     checkout and this one, so every session got recall injected twice and was distilled twice
     (2026-09-30 e1c7377b). Two checkouts are two files, so the old resolved-file comparison
-    never saw the duplication. Here checkout B's distill rides in the nohup shell wrapper the
-    old installer wrote, through a `~` symlink, so the wrapper's script token has to count.
+    never saw the duplication — and the first fix still missed the three symlinked roles,
+    because resolving hooks/recall.py lands on agents/claude-code/recall.py, which matches no
+    role; only the real file session-start-recall.py was repointed (independent verification,
+    2026-10-01). Here checkout B's distill rides in the nohup shell wrapper the old installer
+    wrote, through a `~` symlink, so the wrapper's script token has to count.
     """
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
