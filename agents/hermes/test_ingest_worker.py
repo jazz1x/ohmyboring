@@ -4,10 +4,8 @@ import json
 import os
 import sys
 import tempfile
-import threading
 import time
 import unittest
-from http import server
 from pathlib import Path
 from unittest import mock
 
@@ -20,175 +18,174 @@ spec.loader.exec_module(ingest_worker)
 Ok, Err = ingest_worker.Ok, ingest_worker.Err
 
 
-class _FakeEngine(server.BaseHTTPRequestHandler):
-    """Tiny HTTP server that mimics the ohmyboring engine for tests."""
-
-    vector = False
-    total_chunks = 0
-
-    def do_GET(self):
-        if self.path == "/health":
-            body = json.dumps({"status": "ok", "vector": self.vector}).encode()
-        elif self.path == "/audit":
-            body = json.dumps({"total_chunks": self.total_chunks}).encode()
-        else:
-            self.send_response(404)
-            self.end_headers()
-            return
-        self.send_response(200)
-        self.send_header("content-type", "application/json")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
-
-
-class ReconcileTest(unittest.TestCase):
+class IngestWorkerTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         ingest_worker.MARK_DIR = self.tmp.name
         ingest_worker.markers.set_mark_dir(self.tmp.name)
 
-        # BORING_VAULT_DIR is the vault root; notes live under vault/wiki.
-        self.vault_root = Path(self.tmp.name) / "vault"
-        self.wiki_dir = self.vault_root / "wiki"
-        self.wiki_dir.mkdir(parents=True)
-        self._orig_vault_dir = os.environ.get("BORING_VAULT_DIR")
         self._orig_event_log = os.environ.get("BORING_EVENT_LOG")
         self._orig_event_sink = os.environ.get("BORING_EVENT_SINK")
-        os.environ["BORING_VAULT_DIR"] = str(self.vault_root)
+        self._orig_boring_config = os.environ.get("BORING_CONFIG")
         os.environ["BORING_EVENT_LOG"] = str(Path(self.tmp.name) / "events.ndjson")
         os.environ["BORING_EVENT_SINK"] = "spool"
+        # Pin the real config (root boring.json — a symlink to the live one) so classify()
+        # is deterministic regardless of the machine's ~/oh-my-boring.
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        os.environ["BORING_CONFIG"] = str(repo_root / "boring.json")
+        self.addCleanup(self._restore_env)
 
-        self.engine = server.HTTPServer(("127.0.0.1", 0), _FakeEngine)
-        self.thread = threading.Thread(target=self.engine.serve_forever, daemon=True)
-        self.thread.start()
-        self.addCleanup(self.engine.shutdown)
-        self.addCleanup(self.engine.server_close)
-        self.addCleanup(self._restore_vault_dir)
+        # Default scan root lives under a .claude path so the agent axis maps to claude-code.
+        self.sessions_root = str(Path(self.tmp.name) / ".claude" / "projects")
 
-        port = self.engine.server_address[1]
-        self.url = f"http://127.0.0.1:{port}"
-        ingest_worker.BORING_URL = self.url
+    def _restore_env(self):
+        for key, orig in (
+            ("BORING_EVENT_LOG", self._orig_event_log),
+            ("BORING_EVENT_SINK", self._orig_event_sink),
+            ("BORING_CONFIG", self._orig_boring_config),
+        ):
+            if orig is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = orig
 
-    def _restore_vault_dir(self):
-        if self._orig_vault_dir is None:
-            os.environ.pop("BORING_VAULT_DIR", None)
-        else:
-            os.environ["BORING_VAULT_DIR"] = self._orig_vault_dir
-        if self._orig_event_log is None:
-            os.environ.pop("BORING_EVENT_LOG", None)
-        else:
-            os.environ["BORING_EVENT_LOG"] = self._orig_event_log
-        if self._orig_event_sink is None:
-            os.environ.pop("BORING_EVENT_SINK", None)
-        else:
-            os.environ["BORING_EVENT_SINK"] = self._orig_event_sink
+    # ── scan/OFFER path ─────────────────────────────────────────────────────
 
-    def _pending(self, sid, before, attempts=0):
-        path = Path(self.tmp.name) / f"{sid}.pending"
-        path.write_text(f"{sid}\n{before}\n{attempts}\n")
+    def _write_session(self, sid, source_dir=None, text=None, sub="proj"):
+        """Write one claude-json session file and return its path."""
+        root = Path(source_dir or self.sessions_root)
+        d = root / sub
+        d.mkdir(parents=True, exist_ok=True)
+        body = text if text is not None else "y" * 600
+        payload = {"cwd": self.tmp.name, "message": {"role": "user", "content": body}}
+        p = d / f"{sid}.jsonl"
+        p.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        return str(p)
 
-    def _read_attempts(self, sid):
-        path = Path(self.tmp.name) / f"{sid}.pending"
-        if not path.exists():
-            return None
-        parts = path.read_text().strip().split("\n")
-        return int(parts[2]) if len(parts) > 2 else 0
+    def _run_main(self, source_dirs=None):
+        """Run a full tick with the scan pointed at source_dirs, engine + LLM faked.
 
-    def _last_event(self):
-        event_path = Path(os.environ["BORING_EVENT_LOG"])
-        return json.loads(event_path.read_text(encoding="utf-8").splitlines()[-1])
+        Returns (stdout, distill_run mock). The real queue/markers/event log run against the
+        temp MARK_DIR — nothing touches the live queue.
+        """
+        out = io.StringIO()
+        dirs = source_dirs or [self.sessions_root]
+        with (
+            mock.patch.object(ingest_worker, "_source_dirs", return_value=dirs),
+            mock.patch.object(ingest_worker, "MIN_KB", 0),
+            mock.patch.object(ingest_worker, "STABLE_AGE_S", 0),
+            mock.patch.object(ingest_worker, "_reachable", return_value=Ok(None)),
+            mock.patch.object(ingest_worker.distill_run, "distill_and_remember", return_value=True) as run,
+            mock.patch.object(ingest_worker.sys, "stdout", out),
+        ):
+            ingest_worker.main([])
+        return out.getvalue(), run
 
-    def _done_exists(self, sid):
-        return (Path(self.tmp.name) / f"{sid}.ts").exists()
+    def _events(self):
+        lines = Path(os.environ["BORING_EVENT_LOG"]).read_text(encoding="utf-8").splitlines()
+        return [json.loads(line) for line in lines]
 
-    def _retry_exists(self, sid):
-        return (Path(self.tmp.name) / f"{sid}.retry").exists()
+    def _offer_events(self, sid):
+        return [e for e in self._events() if e["event"] == "ingest_offer" and e.get("session_id") == sid]
 
-    def _write_note(self, sid, wiki_id="wiki-9999"):
-        note = self.wiki_dir / f"{wiki_id}.md"
-        note.write_text(f"---\ntitle: test\nomb_session_id: {sid}\n---\nbody\n")
+    def test_scan_enqueues_eligible_session_and_drains_same_tick(self):
+        self._write_session("s1")
+        stdout, run = self._run_main()
+        # stdout stays empty — the cron injects it into the agent prompt; an offer
+        # must never print a memory-ingest instruction again.
+        self.assertEqual(stdout, "")
+        # the engine ran the session this same tick and the queue is settled
+        self.assertTrue(ingest_worker.markers.is_done("s1"))
+        self.assertFalse(ingest_worker.distill_queue.is_queued("s1"))
+        run.assert_called_once()
+        text, origin, repo, sid = run.call_args.args
+        self.assertEqual((sid, origin, repo), ("s1", "personal", ""))
+        self.assertIn("y" * 600, text)  # the clamped transcript is what the engine receives
+        # the offer is recorded as queued with the same fields the old pending offer carried
+        queued = self._offer_events("s1")
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["status"], "queued")
+        self.assertEqual(queued[0]["agent"], "claude-code")
+        self.assertEqual(queued[0]["origin"], "personal")
+        self.assertEqual(queued[0]["repo"], "")
+        self.assertGreaterEqual(queued[0]["source_chars"], 500)
+        self.assertEqual(queued[0]["emitted_chars"], len(text))
+        self.assertFalse(queued[0]["clamped"])
+        self.assertEqual(queued[0]["workflow_node"], "transcript_prepared")
+        # the processing result rides the existing ingest_queue event
+        drained = [e for e in self._events() if e["event"] == "ingest_queue" and e.get("session_id") == "s1"]
+        self.assertEqual(drained[-1]["status"], "ok")
 
-    def test_frontmatter_session_id_parsing(self):
-        self._write_note("s-parse", "wiki-0001")
-        self.assertEqual(
-            ingest_worker._frontmatter_session_id(self.wiki_dir / "wiki-0001.md"),
-            "s-parse",
+    def test_already_done_session_is_not_reoffered(self):
+        self._write_session("s-done")
+        ingest_worker.markers.mark_done("s-done")
+        stdout, run = self._run_main()
+        self.assertEqual(stdout, "")
+        run.assert_not_called()
+        self.assertFalse(ingest_worker.distill_queue.is_queued("s-done"))
+        self.assertEqual(self._offer_events("s-done"), [])
+
+    def test_already_queued_session_is_not_reoffered(self):
+        self._write_session("s-q")
+        dq = ingest_worker.distill_queue
+        dq.enqueue(dq.QueueItem("s-q", "claude-code", "personal", "repo", "preset-text"))
+        stdout, run = self._run_main()
+        # the drain ran the pre-queued item; the scan did not overwrite it
+        run.assert_called_once_with("preset-text", "personal", "repo", "s-q")
+        self.assertEqual(self._offer_events("s-q"), [])
+
+    def test_tick_order_is_offer_then_drain(self):
+        self._write_session("s-ord")
+        stdout, run = self._run_main()
+        self.assertFalse(ingest_worker.distill_queue.is_queued("s-ord"))  # drained same tick
+        events = self._events()
+        offer_idx = next(
+            i for i, e in enumerate(events) if e["event"] == "ingest_offer" and e.get("session_id") == "s-ord"
         )
+        drain_idx = next(
+            i for i, e in enumerate(events) if e["event"] == "ingest_queue" and e.get("session_id") == "s-ord"
+        )
+        self.assertLess(offer_idx, drain_idx)
+        run.assert_called_once()
 
-    def test_find_session_note_finds_marker(self):
-        self._write_note("s-marker")
-        found = ingest_worker._find_session_note("s-marker")
-        self.assertEqual(Path(found), self.wiki_dir / "wiki-9999.md")
+    def test_too_short_session_is_marked_done_and_not_enqueued(self):
+        self._write_session("s-short", text="hi")
+        stdout, run = self._run_main()
+        self.assertEqual(stdout, "")
+        self.assertTrue(ingest_worker.markers.is_done("s-short"))
+        self.assertFalse(ingest_worker.distill_queue.is_queued("s-short"))
+        run.assert_not_called()
+        skipped = self._offer_events("s-short")
+        self.assertEqual(skipped[-1]["status"], "skipped")
+        self.assertEqual(skipped[-1]["reason"], "too_short")
 
-    def test_find_session_note_uses_vault_wiki_not_vault_root(self):
-        root_note = self.vault_root / "wiki-0001.md"
-        root_note.write_text("---\ntitle: wrong\nomb_session_id: s-root\n---\nbody\n")
-        self._write_note("s-root", "wiki-0002")
+    def test_scan_maps_agent_name_from_source_dir(self):
+        codex_root = str(Path(self.tmp.name) / ".codex" / "sessions")
+        self._write_session("s-codex", source_dir=codex_root)
+        stdout, run = self._run_main(source_dirs=[codex_root])
+        self.assertEqual(stdout, "")
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[3], "s-codex")
+        self.assertEqual(self._offer_events("s-codex")[-1]["agent"], "codex")
+        drained = [
+            e for e in self._events() if e["event"] == "ingest_queue" and e.get("session_id") == "s-codex"
+        ]
+        self.assertEqual(drained[-1]["agent"], "codex")
 
-        found = ingest_worker._find_session_note("s-root")
+    def test_scan_records_clamp_when_transcript_is_cut(self):
+        self._write_session("s-big", text="z" * 6000)
+        stdout, run = self._run_main()
+        queued = self._offer_events("s-big")
+        self.assertTrue(queued[-1]["clamped"])
+        # clamp_text snaps cuts to newline boundaries, so the emitted size is CLAMP plus
+        # at most one kept line — well under the unclamped source, and byte-identical to
+        # what the engine received.
+        self.assertLess(queued[-1]["emitted_chars"], 6000)
+        self.assertLessEqual(queued[-1]["emitted_chars"], ingest_worker.CLAMP + 600)
+        self.assertEqual(len(run.call_args.args[0]), queued[-1]["emitted_chars"])
 
-        self.assertEqual(Path(found), self.wiki_dir / "wiki-0002.md")
-
-    def test_find_session_note_none_without_marker(self):
-        note = self.wiki_dir / "wiki-0001.md"
-        note.write_text("---\ntitle: other\n---\nbody\n")
-        self.assertIsNone(ingest_worker._find_session_note("s-other"))
-
-    def test_vector_mode_prefers_session_marker_over_chunk_count(self):
-        _FakeEngine.vector = True
-        _FakeEngine.total_chunks = 0
-        self._pending("s1", 5)
-        self._write_note("s1")
-        ingest_worker._reconcile()
-        self.assertTrue(self._done_exists("s1"))
-        event = self._last_event()
-        self.assertEqual(event["event"], "ingest_reconcile")
-        self.assertEqual(event["workflow_node"], "done_marked")
-        self.assertEqual(event["workflow_outcome"], "continue")
-
-    def test_vector_mode_falls_back_to_chunk_count(self):
-        _FakeEngine.vector = True
-        _FakeEngine.total_chunks = 10
-        self._pending("s2", 5)
-        ingest_worker._reconcile()
-        self.assertTrue(self._done_exists("s2"))
-
-    def test_wiki_mode_uses_session_marker(self):
-        _FakeEngine.vector = False
-        _FakeEngine.total_chunks = 0
-        self._pending("s3", 0)
-        self._write_note("s3")
-        ingest_worker._reconcile()
-        self.assertTrue(self._done_exists("s3"))
-
-    def test_wiki_mode_increments_attempts_without_marker(self):
-        _FakeEngine.vector = False
-        _FakeEngine.total_chunks = 0
-        self._pending("s4", 0, attempts=0)
-        ingest_worker._reconcile()
-        self.assertFalse(self._done_exists("s4"))
-        self.assertEqual(self._read_attempts("s4"), 1)
-
-    def test_wiki_mode_moves_pending_to_retry_after_max_attempts(self):
-        _FakeEngine.vector = False
-        _FakeEngine.total_chunks = 0
-        self._pending("s5", 0, attempts=ingest_worker.MAX_WIKI_ATTEMPTS)
-        ingest_worker._reconcile()
-        self.assertFalse(self._done_exists("s5"))
-        self.assertTrue(self._retry_exists("s5"))
-        self.assertIsNone(self._read_attempts("s5"))
-        event = self._last_event()
-        self.assertEqual(event["event"], "ingest_reconcile")
-        self.assertEqual(event["workflow_node"], "retry_marked")
-        self.assertEqual(event["workflow_outcome"], "fail")
-
-    def test_unknown_worker_projection_raises(self):
-        with self.assertRaises(ValueError):
-            ingest_worker._log_worker_event("unknown", "ok")
+    # ── eligibility ─────────────────────────────────────────────────────────
 
     def test_fresh_retry_marker_is_not_reoffered(self):
         retry = Path(self.tmp.name) / "s-retry.retry"
@@ -210,13 +207,21 @@ class ReconcileTest(unittest.TestCase):
 
         self.assertTrue(ingest_worker._eligible(str(session)))
 
-    def test_health_failure_treated_as_wiki_and_retries(self):
-        ingest_worker.BORING_URL = "http://127.0.0.1:1"  # unreachable
-        self._pending("s6", 0)
-        ingest_worker._reconcile()
-        # Unreachable engine falls back to wiki-first → attempts incremented, not done yet.
-        self.assertFalse(self._done_exists("s6"))
-        self.assertEqual(self._read_attempts("s6"), 1)
+    def test_unknown_worker_projection_raises(self):
+        with self.assertRaises(ValueError):
+            ingest_worker._log_worker_event("unknown", "ok")
+
+    # ── drain path ──────────────────────────────────────────────────────────
+
+    def _done_exists(self, sid):
+        return (Path(self.tmp.name) / f"{sid}.ts").exists()
+
+    def _retry_exists(self, sid):
+        return (Path(self.tmp.name) / f"{sid}.retry").exists()
+
+    def _last_event(self):
+        event_path = Path(os.environ["BORING_EVENT_LOG"])
+        return json.loads(event_path.read_text(encoding="utf-8").splitlines()[-1])
 
     def _queue(self, sid):
         distill_queue = ingest_worker.distill_queue
@@ -230,10 +235,6 @@ class ReconcileTest(unittest.TestCase):
         ):
             ingest_worker._drain_queue()
         return run
-
-    def _events(self):
-        lines = Path(os.environ["BORING_EVENT_LOG"]).read_text(encoding="utf-8").splitlines()
-        return [json.loads(line) for line in lines]
 
     def test_a_raising_item_costs_one_try_and_does_not_stop_the_next(self):
         self._queue("q-a-boom")
@@ -319,14 +320,6 @@ class ReconcileTest(unittest.TestCase):
         self.assertTrue(ingest_worker.markers.is_dead("q-dead"))
         self.assertFalse(ingest_worker.distill_queue.is_queued("q-dead"))
         self.assertEqual(self._last_event()["status"], "dead")
-
-    def test_reconcile_leaves_queued_pending_marker_alone(self):
-        self._queue("q-pend")
-        ingest_worker._reconcile()
-        self.assertTrue(ingest_worker.markers.is_pending("q-pend"))
-        session = Path(self.tmp.name) / "q-pend.jsonl"
-        session.write_text("{}\n")
-        self.assertFalse(ingest_worker._eligible(str(session)))
 
 
 class BackstopClampTests(unittest.TestCase):
