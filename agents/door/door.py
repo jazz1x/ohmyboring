@@ -74,7 +74,7 @@ import psycopg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
-from slack_sdk.errors import SlackApiError
+from slack_sdk.errors import SlackClientError
 
 from ohmyboring import config as boring_config
 from ohmyboring.adapters import vault as vault_notes
@@ -669,7 +669,7 @@ def _show_row(row: card_types.RowRef, outcome: card_types.Outcome, lang: str) ->
                     print(f"[door] card row {row.idx} not settled — {reason}", file=sys.stderr, flush=True)
                 case _:
                     client.chat_update(channel=row.channel, ts=row.card_ts, blocks=marked)
-    except (OSError, SlackApiError) as e:
+    except (OSError, SlackClientError) as e:
         print(f"[door] card row {row.idx} not settled — {e}", file=sys.stderr, flush=True)
 
 
@@ -732,11 +732,28 @@ def _take_batch() -> list[_Merged]:
         return batch
 
 
+def _fail_batch(batch: list[_Merged], error: Exception) -> None:
+    """A batch whose reread raised settles as failed, so no row stays ⏳ and the merges queued
+    behind it still get their own reread."""
+    print(f"[door] reread batch failed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+    lang = card_advice.resolve_lang(boring_config.note_lang())
+    outcome = card_view.reread_failed_outcome(error, lang=lang)
+    for merged in batch:
+        match merged.row:
+            case None:
+                pass
+            case row:
+                _show_row(row, outcome, lang)
+
+
 def _reread_worker() -> None:
     global _REREAD_WORKER
     try:
         while batch := _take_batch():
-            _reread_batch(batch)
+            try:
+                _reread_batch(batch)
+            except Exception as e:  # noqa: BLE001 — the batch's rows must settle either way
+                _fail_batch(batch, e)
     except BaseException:
         # Whatever raised, the next merge must be able to start a worker: a stuck handle would
         # queue merges that no reread ever covers.

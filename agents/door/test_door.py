@@ -1635,9 +1635,13 @@ class RereadSingleFlightTests(unittest.TestCase):
 
     def setUp(self):
         self.syncs = 0
+        self.running = 0
+        self.peak = 0
+        self.count_lock = threading.Lock()
         self.sync_result = {"ok": True, "summary": {}}
         self.gate = threading.Event()
         self.first_entered = threading.Event()
+        self.second_entered = threading.Event()
         self.events = []
         self.web = _FakeWeb(_card_with_pending_rows(3))
         self.patches = [
@@ -1659,9 +1663,16 @@ class RereadSingleFlightTests(unittest.TestCase):
             p.stop()
 
     def _sync(self):
-        self.syncs += 1
+        with self.count_lock:
+            self.syncs += 1
+            self.running += 1
+            self.peak = max(self.peak, self.running)
+            if self.running > 1:
+                self.second_entered.set()
         self.first_entered.set()
         self.gate.wait(10)
+        with self.count_lock:
+            self.running -= 1
         return self.sync_result
 
     def _emit(self, subject, *rest):
@@ -1677,6 +1688,8 @@ class RereadSingleFlightTests(unittest.TestCase):
         self.assertTrue(self.first_entered.wait(10))
         self._merge(1)
         self._merge(2)
+        # A second /sync starting while the first is held is the defect; give it the chance to.
+        self.second_entered.wait(0.5)
         worker = door._REREAD_WORKER
         self.gate.set()
         worker.join(10)
@@ -1691,6 +1704,7 @@ class RereadSingleFlightTests(unittest.TestCase):
 
     def test_three_merges_run_at_most_two_syncs_and_settle_all_three_rows(self):
         self._run_three()
+        self.assertEqual(self.peak, 1, "two /sync passes overlapped")
         self.assertLessEqual(self.syncs, 2)
         self.assertEqual(
             self.syncs, 2, "control: the merges queued behind the first still get their own reread"
@@ -1709,6 +1723,38 @@ class RereadSingleFlightTests(unittest.TestCase):
         self.assertEqual(len(texts), 3)
         self.assertTrue(all(t.startswith("✕ 실패") and "timed out" in t for t in texts), texts)
         self.assertEqual(self.events, [])
+
+    def test_a_batch_that_raises_fails_its_rows_and_the_queue_behind_it_still_rereads(self):
+        calls = iter([ValueError("recount exploded"), self.sync_result])
+
+        def sync():
+            with self.count_lock:
+                self.syncs += 1
+            self.first_entered.set()
+            self.gate.wait(10)
+            result = next(calls)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        buf = io.StringIO()
+        with mock.patch.object(door, "_call_engine_sync", sync), contextlib.redirect_stderr(buf):
+            self._merge(0)
+            self.assertTrue(self.first_entered.wait(10))
+            self._merge(1)
+            worker = door._REREAD_WORKER
+            self.gate.set()
+            worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertIsNone(door._REREAD_WORKER)
+        texts = {
+            b["block_id"]: b["elements"][0]["text"]
+            for b in self.web.blocks
+            if str(b.get("block_id", "")).endswith(":status")
+        }
+        self.assertTrue(texts["card:0:status"].startswith("✕ 실패"), texts)
+        self.assertTrue(texts["card:1:status"].startswith("✓ 완료"), texts)
+        self.assertEqual(self.events, ["subj-1"])
 
     def test_settling_one_row_leaves_every_other_block_as_slack_holds_it(self):
         before = self.web.blocks
