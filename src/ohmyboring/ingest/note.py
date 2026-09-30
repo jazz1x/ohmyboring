@@ -1,20 +1,25 @@
 """볼트 노트 → NoteDoc — drudge 의 파일 읽기 + frontmatter::parse 를 파이썬으로 미러한다.
 
 Rust 동작(정본): UTF-8 로 읽고(못 읽으면 건과 사유), NUL 제거(strip_nul — sha 는 그 뒤 본문),
-BOM 은 파싱에서만 떼고 sha 에는 남는다, `---\\n` … `\\n---\\n` 사이를 YAML 로, 본문은 trim_start.
-머리말이 비어 있으면 kind 만 경로에서 채운다("/notes/"→note, "/memory"→memory, 아니면 doc) —
-origin·project 의 cfg 기반 enrich 는 E3 라 여기 없다. 파싱은 경계에서 한 번.
+BOM 은 파싱에서만 떼고 sha 에는 남는다, 머리말과 본문의 경계는 주입받은 쪼개기 하나가 정한다
+(정본은 agents/shared/vault_note.split_frontmatter — 저장소에 머리말 쪼개기 구현은 그것 뿐),
+본문은 trim_start. 머리말이 비어 있으면 kind 만 경로에서 채운다("/notes/"→note, "/memory"→memory,
+아니면 doc) — origin·project 의 cfg 기반 enrich 는 E3 라 여기 없다. 파싱은 경계에서 한 번.
 """
 
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
 from ohmyboring.result import Either, Err, Ok
+
+SplitFrontmatter = Callable[[str], tuple[str, str] | None]
+
 
 _BOM = "\ufeff"
 
@@ -92,7 +97,7 @@ def _parse_frontmatter(yaml_text: str, path: str) -> Either[tuple[str | None, st
     return Ok((title, kind if kind else _derive_kind(path), tuple(tags or ())))
 
 
-def read_note(path: str) -> Either[NoteDoc, Skipped]:
+def read_note(path: str, split_frontmatter: SplitFrontmatter) -> Either[NoteDoc, Skipped]:
     """파일 하나를 NoteDoc 으로 — 실패는 Skipped 값(경로+사유)이다."""
     try:
         data = Path(path).read_bytes()
@@ -104,24 +109,18 @@ def read_note(path: str) -> Either[NoteDoc, Skipped]:
         return Err(Skipped(path, f"unreadable: not utf-8 ({e.reason})"))
     text = text.replace("\x00", "")
     sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    parse_text = text[len(_BOM) :] if text.startswith(_BOM) else text
 
-    raw = text[len(_BOM) :] if text.startswith(_BOM) else text
     title: str | None = None
     kind = _derive_kind(path)
     tags: tuple[str, ...] = ()
-    if raw.startswith("---\n"):
-        rest = raw[4:]
-        end = rest.find("\n---\n")
-        if end != -1:
-            parsed = _parse_frontmatter(rest[:end], path)
-            match parsed:
-                case Ok(value):
-                    title, kind, tags = value
-                case Err(reason):
-                    return Err(Skipped(path, reason))
-            body = rest[end + 5 :]
-        else:
-            body = raw
-    else:
-        body = raw
+    body = parse_text
+    split = split_frontmatter(parse_text)
+    if split is not None:
+        front, body = split
+        match _parse_frontmatter(front, path):
+            case Ok(value):
+                title, kind, tags = value
+            case Err(reason):
+                return Err(Skipped(path, reason))
     return Ok(NoteDoc(path, title, kind, tags, body.lstrip(), sha))

@@ -5,7 +5,9 @@
 쓰기 문 하나라도 들어오면 시험을 빨갛게 끝낸다. DSN 은 DOOR_PG_DSN(문 안에서는 이미 세팅).
 
 문 컨테이너 안에서 돌릴 때는 BORING_IN_CONTAINER=1 을 주거나 BORING_LLM_BASE_URL 을 준다 —
-주소는 config.llm_base_url() 이 정하고 코드에 박지 않는다.
+주소는 config.llm_base_url() 이 정하고 코드에 박지 않는다. 머리말 쪼개기는 note.py 가 주입받는
+port(정본은 agents/shared/vault_note.split_frontmatter — 저장소에 구현은 그것 뿐)이고, 모듈
+본체는 agents 에 닿지 않는다; 다만 실행 입구(main) 에서 그것을 싣는다.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from typing import Any
 
 from ohmyboring.adapters import embed as embed_adapter
 from ohmyboring.ingest.chunk import chunk_stats, fixed_chunks
-from ohmyboring.ingest.note import NoteDoc, Skipped, read_note
+from ohmyboring.ingest.note import NoteDoc, Skipped, SplitFrontmatter, read_note
 from ohmyboring.result import Err, Ok
 
 SQL_DOCUMENTS = "SELECT source_path, title, kind, tags, sha FROM document ORDER BY source_path"
@@ -139,9 +141,14 @@ def _record_chunks(ledger: _Ledger, note: NoteDoc, db_chunks: list[tuple[int, st
     ledger.embed_pool.extend((f"{note.source_path}#{idx}", content) for idx, content in db_chunks)
 
 
-def _ingest_document(ledger: _Ledger, row: DocRow, chunks_by_doc: dict[str, list[tuple[int, str]]]) -> None:
+def _ingest_document(
+    ledger: _Ledger,
+    row: DocRow,
+    chunks_by_doc: dict[str, list[tuple[int, str]]],
+    split_frontmatter: SplitFrontmatter,
+) -> None:
     """문서 한 줄의 ①② 대조 — read_note 부터 임베딩 풀 등록까지."""
-    match read_note(row[0]):
+    match read_note(row[0], split_frontmatter):
         case Err(skipped):
             _record_skip(ledger, skipped)
         case Ok(note):
@@ -203,7 +210,7 @@ def _report(
     }
 
 
-def run(conn: Any, sample: int) -> dict[str, Any]:
+def run(conn: Any, sample: int, split_frontmatter: SplitFrontmatter) -> dict[str, Any]:
     """대조 한 바퀴 — 연결은 밖에서 열리고 여기서는 읽기만 한다."""
     cur = conn.cursor()
     documents = _documents(cur)
@@ -220,7 +227,7 @@ def run(conn: Any, sample: int) -> dict[str, Any]:
         },
     )
     for row in documents:
-        _ingest_document(ledger, row, chunks_by_doc)
+        _ingest_document(ledger, row, chunks_by_doc, split_frontmatter)
     sims, failures = _embedding_sample(cur, ledger.embed_pool, sample)
     return _report(len(documents), ledger, sims, failures, sample)
 
@@ -231,6 +238,17 @@ def _connect(dsn: str) -> Any:
     conn = psycopg.connect(dsn)
     conn.autocommit = True
     return conn
+
+
+def _entry_splitter() -> SplitFrontmatter:
+    """실행 입구에서만 하는 구성 — 저장소의 단 하나 머리말 쪼개기(vault_note)를 싣는다.
+
+    src 모듈은 agents 를 import 하지 않으니 주입은 이곳 한 번이다. 문 이미지에는
+    agents/shared 가 함께 있고, 호스트에서 돌릴 땐 그 경로를 PYTHONPATH 에 넣는다.
+    """
+    from vault_note import split_frontmatter
+
+    return split_frontmatter
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -244,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     conn = _connect(args.dsn)
     try:
-        report = run(conn, args.sample)
+        report = run(conn, args.sample, _entry_splitter())
     finally:
         conn.close()
     text = json.dumps(report, ensure_ascii=False, indent=2)
