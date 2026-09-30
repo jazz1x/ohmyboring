@@ -67,6 +67,7 @@ python3 src/ohmyboring/distill/test_graph.py
 python3 src/ohmyboring/distill/test_prompts.py
 python3 src/ohmyboring/distill/test_run.py
 python3 src/ohmyboring/distill/test_resolution.py
+python3 src/ohmyboring/distill/test_polish.py
 python3 src/ohmyboring/weekly/test_graph.py
 python3 src/ohmyboring/weekly/test_run.py
 python3 src/ohmyboring/weekly/test_pins.py

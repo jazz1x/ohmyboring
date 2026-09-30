@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 from vault_note import split_frontmatter  # noqa: E402
 
 from ohmyboring import config as boring_config  # noqa: E402
+from ohmyboring.distill import readability  # noqa: E402
 
 PLACEHOLDER_TAGS = {"_", "pr_", "slack_", ""}
 GENERIC_PROJECTS = {"Development", "wiki", ""}
@@ -336,39 +337,11 @@ def _fix_note(n, target_project: str):
     n["path"].write_text("---\n" + new_yaml + "\n---\n" + n["body"], encoding="utf-8")
 
 
-READABILITY_WALL_LINE = 300
-READABILITY_HEADING_MIN_BODY = 400
-READABILITY_TITLE_MAX = 60
-READABILITY_SIGNALS = ("wall-line", "no-heading", "long-title", "sha-in-title")
-_SHA_IN_TITLE = re.compile(r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")
-
-
-def _prose_lines(body: str) -> list[str]:
-    """Non-empty body lines outside ``` fences — a code block's long lines are code, not prose."""
-    lines, fenced = [], False
-    for line in body.splitlines():
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-            continue
-        if not fenced and line.strip():
-            lines.append(line)
-    return lines
+READABILITY_SIGNALS = readability.SIGNALS
 
 
 def _readability_signals(note: dict) -> list[str]:
-    """Which of READABILITY_SIGNALS a note trips — the owner's 「가독성」 complaint (2026-09-30)
-    made countable: a 300-char wall line, a long body with no heading, a title over 60 chars
-    or carrying a commit hash."""
-    title = str(note["fm"].get("title") or "")
-    prose = _prose_lines(note["body"])
-    tripped = {
-        "wall-line": any(len(line) > READABILITY_WALL_LINE for line in prose),
-        "no-heading": len(note["body"]) > READABILITY_HEADING_MIN_BODY
-        and not any(line.startswith("#") for line in prose),
-        "long-title": len(title) > READABILITY_TITLE_MAX,
-        "sha-in-title": bool(_SHA_IN_TITLE.search(title)),
-    }
-    return [name for name in READABILITY_SIGNALS if tripped[name]]
+    return readability.signals(str(note["fm"].get("title") or ""), note["body"])
 
 
 def readability_report(notes: list[dict]) -> dict:
@@ -383,7 +356,7 @@ def readability_report(notes: list[dict]) -> dict:
         "counts": {s: sum(s in signals for signals in per_note.values()) for s in READABILITY_SIGNALS},
         "any": len(tripping),
         "frontmatter_heavier": sum(
-            len(n["yaml_text"].splitlines()) > len(_prose_lines(n["body"])) for n in notes
+            len(n["yaml_text"].splitlines()) > len(readability.prose_lines(n["body"])) for n in notes
         ),
         "notes": dict(sorted(tripping.items(), key=lambda kv: (-len(kv[1]), kv[0]))),
     }
