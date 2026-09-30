@@ -47,6 +47,12 @@ def _sections(body: str) -> list[str]:
 
 def _pack(title: str, body: str, max_chars: int) -> list[str]:
     header = f"# {title}" if title else "# (제목 없음)"
+    # 제목이 한도의 절반을 먹을 만큼 길면(약 1298자 이상) 머리줄을 잘라 본문 예산을
+    # max_chars//2 이상으로 지킨다 — 아니면 예산이 겹침 200 아래로 떨어져 고정 자르기가
+    # 절을 통째로 돌려주거나(조각이 한도를 넘음) 조각 수가 폭증한다.
+    max_header = max_chars - max_chars // 2 - 1
+    if len(header) > max_header:
+        header = header[:max_header]
     budget = max_chars - len(header) - 1  # 본문 상한 = 전체 한도에서 머리줄과 그 \n 을 뺀 것
     out: list[str] = []
     current: list[str] = []
@@ -74,7 +80,8 @@ def heading_chunks(title: str, body: str, max_chars: int = 1500) -> list[str]:
     """`## ` 경계로 절을 모아 max_chars 안으로 싸고, 넘는 절만 고정 자르기.
 
     조각맨 앞에 `# <title>` 한 줄을 붙여 에이전트가 조각만 봐도 무슨 노트인지 알게 한다(wiki-2475).
-    max_chars 는 머리줄까지 포함한 조각 전체 길이 한도다.
+    max_chars 는 머리줄까지 포함한 조각 전체 길이 한도다. 제목이 비정상적으로 길면 머리줄을 잘라
+    본문 예산(최소 max_chars//2)을 지키고 어느 조각이든 max_chars 를 넘지 않게 한다.
     """
     return _pack(title, body, max_chars)
 

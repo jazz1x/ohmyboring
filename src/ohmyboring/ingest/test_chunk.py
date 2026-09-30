@@ -102,6 +102,14 @@ class HeadingChunksTests(unittest.TestCase):
         body = "머리말 본문\n## A\n일"
         self.assertEqual(heading_chunks("t", body), ["# t\n머리말 본문\n## A\n일"])
 
+    def test_2000_char_title_keeps_every_chunk_within_max(self):
+        body = "## A\n" + "x" * 4000
+        chunks = heading_chunks("제" * 2000, body)
+        self.assertTrue(all(len(c) <= 1500 for c in chunks), "머리줄을 잘라도 조각 전부 1500 안")
+        self.assertGreaterEqual(len(chunks), 2, "4000자 본문은 쪼개져야 한다")
+        self.assertLessEqual(len(chunks), 8, "예산 750 기준 일곱 조각 안팎 — 402 조각 폭증이 아니다")
+        self.assertTrue(all(c.startswith("# ") for c in chunks), "조각맨 앞 머리줄은 남는다")
+
 
 class ChunkStatsTests(unittest.TestCase):
     def test_distribution_side_by_side(self):
