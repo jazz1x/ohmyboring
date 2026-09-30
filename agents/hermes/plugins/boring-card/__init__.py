@@ -155,20 +155,18 @@ def register(ctx: Any) -> None:
                 )
                 return snapshot
 
-    async def _push(press, snapshot, rendered) -> None:
-        """One chat_update of the card: the row `rendered` changed on the click's snapshot,
-        spliced into the card as it is now. A Rejected value or a failed call is one log line,
-        never a dead handler: the effects do not depend on the card showing them."""
-        match rendered:
+    async def _push(press, snapshot, row) -> None:
+        """One chat_update of the card: the pressed row's own blocks spliced into the card as
+        Slack holds it now. A Rejected value or a failed call is one log line, never a dead
+        handler: the effects do not depend on the card showing them."""
+        match row:
             case card_types.Rejected(reason=reason):
                 _log_unrendered(press, reason)
                 return
         if _client is None:
             return
         current = await _current_blocks(press, snapshot)
-        blocks = card_view.replace_row(
-            current, press.idx, card_view.changed_segment(snapshot, rendered, press.idx)
-        )
+        blocks = card_view.replace_row(current, press.idx, row)
         match blocks:
             case card_types.Rejected(reason=reason):
                 _log_unrendered(press, reason)
@@ -226,7 +224,7 @@ def register(ctx: Any) -> None:
         row = card_types.RowRef(channel=press.channel, card_ts=press.card_ts, idx=press.idx)
         snapshot = blocks or []
         await _push(
-            press, snapshot, card_view.mark_progress(snapshot, press.idx, card_types.Pending(), lang=lang)
+            press, snapshot, card_view.row_progress(snapshot, press.idx, card_types.Pending(), lang=lang)
         )
 
         def _apply():
@@ -249,7 +247,7 @@ def register(ctx: Any) -> None:
             await _push(
                 press,
                 snapshot,
-                card_view.mark_progress(snapshot, press.idx, card_types.Failed(reason=reason), lang=lang),
+                card_view.row_progress(snapshot, press.idx, card_types.Failed(reason=reason), lang=lang),
             )
             _LOG.error(
                 "%s: press card_ts=%s idx=%s effect=%s failed — %s effect(s) skipped — %s",
@@ -291,7 +289,7 @@ def register(ctx: Any) -> None:
                 await _push(
                     press,
                     snapshot,
-                    card_view.mark_pressed(snapshot, press, lang=lang, repair_result=repair_result),
+                    card_view.row_pressed(snapshot, press, lang=lang, repair_result=repair_result),
                 )
 
     ctx.register_slack_action_handler(_ACTION_ID, _handler)

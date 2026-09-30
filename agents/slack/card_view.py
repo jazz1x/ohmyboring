@@ -468,22 +468,42 @@ def _is_row_block(block: dict, idx: int) -> bool:
     return block.get("block_id") == _status_id(idx) or _is_row_actions(block, idx)
 
 
-def changed_segment(before: list[dict], after: list[dict], idx: int) -> list[dict]:
-    """Row `idx` as `after` renders it: the run between the shared head and the shared tail,
-    widened to the row's own status line and buttons — a failure that keeps the buttons leaves
-    them equal in both, and they still belong to the row."""
-    head = 0
-    while head < min(len(before), len(after)) and before[head] == after[head]:
-        head += 1
-    tail = 0
-    while tail < min(len(before), len(after)) - head and before[-1 - tail] == after[-1 - tail]:
-        tail += 1
-    end = len(after) - tail
-    while head > 0 and _is_row_block(after[head - 1], idx):
-        head -= 1
-    while end < len(after) and _is_row_block(after[end], idx):
-        end += 1
-    return after[head:end]
+def _status_block(idx: int, outcome: Outcome, lang: str) -> dict:
+    return {
+        "type": "context",
+        "block_id": _status_id(idx),
+        "elements": [{"type": "mrkdwn", "text": status_text(outcome, card_i18n.STRINGS[lang])}],
+    }
+
+
+def row_progress(blocks: list[dict], idx: int, outcome: Outcome, *, lang: str) -> list[dict] | Rejected:
+    """Row `idx`'s own blocks once `outcome` shows: the status line alone, or — for a failure —
+    the status line above the row's buttons taken from `blocks`, so the owner can press again."""
+    actions = next((block for block in blocks if _is_row_actions(block, idx)), None)
+    if actions is None and not any(_is_row_block(block, idx) for block in blocks):
+        return Rejected(reason=f"row {idx} has no buttons or status to replace")
+    status = _status_block(idx, outcome, lang)
+    match outcome:
+        case Failed() if actions is not None:
+            return [status, actions]
+        case _:
+            return [status]
+
+
+def row_pressed(
+    blocks: list[dict],
+    press: Press,
+    *,
+    lang: str,
+    repair_result: RepairDone | RepairFailed | RepairUnanswered | None = None,
+) -> list[dict] | Rejected:
+    """Row `press.idx`'s judged block alone, as mark_pressed renders it in place of the buttons."""
+    marked = mark_pressed(blocks, press, lang=lang, repair_result=repair_result)
+    match marked:
+        case Rejected():
+            return marked
+    at = next(i for i, block in enumerate(blocks) if _is_row_actions(block, press.idx))
+    return [marked[at]]
 
 
 def replace_row(current: list[dict], idx: int, segment: list[dict]) -> list[dict] | Rejected:
@@ -501,11 +521,7 @@ def replace_row(current: list[dict], idx: int, segment: list[dict]) -> list[dict
 def mark_progress(blocks: list[dict], idx: int, outcome: Outcome, *, lang: str) -> list[dict] | Rejected:
     """Only row `idx` changes, and its status line's block_id names the row so a later writer
     can find it again without knowing the buttons."""
-    status = {
-        "type": "context",
-        "block_id": _status_id(idx),
-        "elements": [{"type": "mrkdwn", "text": status_text(outcome, card_i18n.STRINGS[lang])}],
-    }
+    status = _status_block(idx, outcome, lang)
     match outcome:
         case Failed():
             return _status_above_buttons(blocks, idx, status)

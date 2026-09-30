@@ -630,6 +630,58 @@ def test_a_row_the_door_settled_mid_press_is_not_rolled_back():
     assert _status_at(final, 1) is None, "row 1 is judged, not in progress"
 
 
+def _press_row_1_with(consumption, times):
+    """Press row 1 `times` times through the real handler against one fake Slack that keeps
+    the last card it was sent — a re-press carries that card, as Slack's payload would."""
+    ctx = _FakeCtx()
+    calls = []
+    client = _FakeClient(calls)
+
+    async def ack():
+        calls.append("ack")
+
+    with _env():
+        _, handler = _register(ctx)[0]
+        with (
+            _patched_effects(calls, consumption=consumption),
+            mock.patch.object(PLUGIN, "_client", client),
+            mock.patch.object(PLUGIN, "_LOG"),
+        ):
+            for _ in range(times):
+                asyncio.run(handler(ack, _body("card:1:do", ADVICE_VALUE, blocks=client.current), {}))
+    for update in _updates(calls):
+        ids = [b.get("block_id") for b in update[3] if b.get("block_id")]
+        assert len(ids) == len(set(ids)), f"duplicate block_id in an update (Slack refuses it): {ids}"
+    return client
+
+
+def test_the_same_failure_twice_keeps_the_row_and_its_buttons():
+    def down(session, kind, paths):
+        raise RuntimeError("engine unreachable")
+
+    card = _press_row_1_with(down, 2).current
+    assert len(card) == len(BLOCKS) + 1, "one reason line added above the buttons, nothing lost"
+    assert _status_at(card, 1) == "✕ 실패 — engine unreachable"
+    assert any(
+        b["type"] == "actions" and any(el.get("action_id", "").startswith("card:1:") for el in b["elements"])
+        for b in card
+    )
+
+
+def test_a_retry_that_succeeds_leaves_no_old_failure_line():
+    state = {"down": True}
+
+    def flaky(session, kind, paths):
+        if state["down"]:
+            state["down"] = False
+            raise RuntimeError("engine down")
+
+    card = _press_row_1_with(flaky, 2).current
+    assert _status_at(card, 1) is None
+    assert len(card) == len(BLOCKS)
+    assert not any("✕ 실패" in json.dumps(b, ensure_ascii=False) for b in card)
+
+
 if __name__ == "__main__":
     test_the_import_path_stays_langchain_free()
     test_register_without_secretary_owner_id_registers_nothing()
@@ -648,4 +700,6 @@ if __name__ == "__main__":
     test_a_repair_answered_with_a_non_done_value_is_one_log_line_and_marks_the_row()
     test_an_accepted_merge_stays_in_progress_and_hands_the_door_its_row()
     test_a_row_the_door_settled_mid_press_is_not_rolled_back()
+    test_the_same_failure_twice_keeps_the_row_and_its_buttons()
+    test_a_retry_that_succeeds_leaves_no_old_failure_line()
     print("ok - boring-card plugin: ack-first, in-place mark, double-press refused, loud refusals")
