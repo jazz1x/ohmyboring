@@ -247,6 +247,11 @@ class ProposedVerdict(BaseModel):
     note: str
     kind: Literal["used", "contested"]
     at: str
+    # What the owner reads to know which note and which piece of work this is: the note's own
+    # title and the judging session's note ("project · MM-DD · title"); empty when the vault
+    # has neither, and the row falls back to the ids.
+    note_title: str = ""
+    work: str = ""
 
 
 class Rejected(BaseModel):

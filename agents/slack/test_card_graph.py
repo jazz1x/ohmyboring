@@ -20,6 +20,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from unittest import mock
@@ -1604,6 +1605,30 @@ class LiveProposedTests(unittest.TestCase):
             ["s-contested-5", "s-contested-4", "s-contested-2"],
         )
         self.assertEqual(len(out), card_live.REVIEW_LIMIT)
+
+    def test_a_repeated_row_shows_once_with_the_note_title_and_the_session_note(self):
+        with tempfile.TemporaryDirectory() as vault:
+            wiki = os.path.join(vault, "wiki")
+            os.makedirs(wiki)
+            with open(os.path.join(wiki, "wiki-2216.md"), "w", encoding="utf-8") as f:
+                f.write("---\nid: wiki-2216\ntitle: '폴더 관례'\nproject: ohmyboring\n---\nbody\n")
+            with open(os.path.join(wiki, "wiki-2300.md"), "w", encoding="utf-8") as f:
+                f.write(
+                    "---\nid: wiki-2300\ntitle: 구조 개편 조각 3d\nproject: ohmyboring\n"
+                    "date: 2026-09-29\nomb_session_id: s-1\n---\nbody\n"
+                )
+            row = {
+                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-2216.md", "kind": "used"},
+                "observed_at": "2026-09-29T23:54:47+00:00",
+            }
+            with (
+                mock.patch.dict(os.environ, {"BORING_VAULT_DIR": vault}),
+                mock.patch.object(card_live, "_live_events", side_effect=self._events([row, dict(row)])),
+            ):
+                out = card_live._live_proposed(24)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].note_title, "폴더 관례")
+        self.assertEqual(out[0].work, "ohmyboring · 09-29 · 구조 개편 조각 3d")
 
 
 class MainTests(unittest.TestCase):

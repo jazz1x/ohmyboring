@@ -505,9 +505,12 @@ class CardV2ShapeTests(unittest.TestCase):
         for row, expected_idx in zip(action_rows[1:], (1, 2)):
             buttons = {el["action_id"]: el for el in row["elements"]}
             self.assertEqual(set(buttons), {f"card:{expected_idx}:do", f"card:{expected_idx}:drop"})
-        self.assertEqual([el["text"]["text"] for el in action_rows[1]["elements"]], ["맞음", "뒤집기"])
-        tag = next(b for b in blocks if b["type"] == "context" and "wiki-0700" in _blocks_text([b]))
-        self.assertEqual(tag["elements"][0]["text"], "틀린 노트 · wiki-0700")
+        self.assertEqual([el["text"]["text"] for el in action_rows[1]["elements"]], ["맞아요", "아니에요"])
+        tag = next(b for b in blocks if b["type"] == "section" and "wiki-0700" in _blocks_text([b]))
+        self.assertEqual(
+            tag["text"]["text"],
+            "에이전트는 *이 노트가 틀렸다*고 봤어요.\n노트: `wiki-0700` (제목 없음)\n작업: 세션 `s1` (세션 노트 없음)",
+        )
         self.assertNotIn("/vault/", _blocks_text(blocks))
 
         judged = cv.build_blocks(
@@ -836,6 +839,24 @@ class MarkPressedParityTests(unittest.TestCase):
             self.assertEqual(failed[: changed[0]], blocks[: changed[0]])
             self.assertEqual(failed[changed[0] + 1 :], blocks[changed[0] + 1 :])
         self.assertIsInstance(cv.mark_progress(blocks, 99, cc.Pending(), lang="ko"), cc.Rejected)
+
+    def test_a_review_row_names_the_note_and_the_work_in_every_language(self):
+        review = cc.ProposedVerdict(
+            session_id="53e83281-ea21",
+            note="/vault/wiki/wiki-2216.md",
+            kind="used",
+            at="t",
+            note_title="폴더 관례 <조사>",
+            work="ohmyboring · 09-29 · 구조 개편 & 정리",
+        )
+        for lang in ("ko", "en", "ja"):
+            strings = card_i18n.STRINGS[lang]
+            text = cv._review_tag_block(review, strings)["text"]["text"]
+            self.assertIn(strings["review_judged_used"], text)
+            self.assertIn("폴더 관례 &lt;조사&gt;", text)
+            self.assertIn("`wiki-2216`", text)
+            self.assertIn("구조 개편 &amp; 정리", text)
+            self.assertNotIn("/vault/", text)
 
     def test_a_failure_keeps_the_buttons_and_a_retry_leaves_one_status_line(self):
         blocks = self._card()

@@ -317,9 +317,26 @@ def _repair_row(
     return row
 
 
+def _mrkdwn_plain(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _review_tag_block(review: ProposedVerdict, strings: dict[str, str]) -> dict:
-    text = f"{strings[f'review_kind_{review.kind}']} · {note_label(review.note)}"
-    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+    """What the agent judged, on which note, from which piece of work — ids stand in when the
+    vault has no title or no session note."""
+    label = note_label(review.note)
+    note_line = (
+        strings["review_note_titled"].format(title=_mrkdwn_plain(review.note_title), note=label)
+        if review.note_title
+        else strings["review_note_bare"].format(note=label)
+    )
+    work_line = (
+        strings["review_work"].format(work=_mrkdwn_plain(review.work))
+        if review.work
+        else strings["review_work_unknown"].format(session=review.session_id[:8])
+    )
+    text = "\n".join((strings[f"review_judged_{review.kind}"], note_line, work_line))
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 
 def _review_actions_block(idx: int, review: ProposedVerdict, strings: dict[str, str]) -> dict:

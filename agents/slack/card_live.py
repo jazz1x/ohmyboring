@@ -16,9 +16,11 @@ join whole."""
 
 from __future__ import annotations
 
+import glob
 import json
 import math
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -51,6 +53,9 @@ from ohmyboring.result import Err, Ok
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "memory"))
 from retriever import BoringRetriever  # noqa: E402
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+import vault_note  # noqa: E402
 
 
 def _live_fetch(path: str, project: str) -> dict[str, Any]:
@@ -237,7 +242,51 @@ def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
             raise ValueError(f"malformed verdict_proposed row: {attrs!r}: {e}") from e
     parsed.sort(key=lambda p: p.at, reverse=True)  # newest first
     parsed.sort(key=lambda p: p.kind != "contested")  # stable: contested keeps the head
-    return parsed[:REVIEW_LIMIT]
+    # The same judgement can land twice (two SessionEnd hooks, 1ms apart — 2026-09-30).
+    seen: set[tuple[str, str, str]] = set()
+    unique = [p for p in parsed if (key := (p.session_id, p.note, p.kind)) not in seen and not seen.add(key)]
+    shown = unique[:REVIEW_LIMIT]
+    works = _session_works() if shown else {}
+    return [
+        p.model_copy(update={"note_title": _note_title(p.note), "work": works.get(p.session_id, "")})
+        for p in shown
+    ]
+
+
+_FRONTMATTER_FIELD = re.compile(r"^(title|project|date|omb_session_id):[ \t]*(.*?)[ \t]*$", re.M)
+
+
+def _frontmatter_fields(text: str) -> dict[str, str]:
+    return {
+        key: value.strip("'\"")
+        for key, value in _FRONTMATTER_FIELD.findall(vault_note.frontmatter_text(text))
+    }
+
+
+def _note_title(note: str) -> str:
+    text = _live_read_note(note)
+    return _frontmatter_fields(text).get("title", "") if text is not None else ""
+
+
+def _work_line(fields: dict[str, str]) -> str:
+    date = fields.get("date", "")
+    parts = (fields.get("project", ""), date[5:10] if len(date) >= 10 else date, fields.get("title", ""))
+    return " · ".join(part for part in parts if part)
+
+
+def _session_works() -> dict[str, str]:
+    """omb_session_id → the work line of the note that session left, over the whole vault."""
+    works: dict[str, str] = {}
+    for path in glob.glob(os.path.join(_vault_dir(), "wiki", "*.md")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                head = f.read(4096)
+        except OSError:
+            continue
+        fields = _frontmatter_fields(head)
+        if session := fields.get("omb_session_id"):
+            works[session] = _work_line(fields)
+    return works
 
 
 def _live_repairs(limit: int = REPAIRS_LIMIT) -> dict[str, Any]:
