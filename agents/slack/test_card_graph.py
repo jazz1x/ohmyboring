@@ -350,6 +350,13 @@ class GraphTests(unittest.TestCase):
             },
         )
 
+    def test_the_posted_card_carries_the_configured_note_links(self):
+        links = (card.boring_config.ObsidianLink(vault="v", folder="vault/wiki"),)
+        with mock.patch.object(card.boring_config, "note_links", return_value=links):
+            self.graph.invoke({}, self.cfg)
+        self.assertEqual(len(self.sends), 1)
+        self.assertIn("obsidian://open?vault=v&file=vault%2Fwiki%2F", _blocks_text(self.sends[0]))
+
     def test_advise_stops_after_three_successful_candidates(self):
         out = self.graph.invoke({}, self.cfg)
         self.assertNotIn("__interrupt__", out)
@@ -1629,6 +1636,28 @@ class LiveProposedTests(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].note_title, "폴더 관례")
         self.assertEqual(out[0].work, "ohmyboring · 09-29 · 구조 개편 조각 3d")
+
+    def test_a_non_utf8_note_and_a_second_session_note_do_not_change_the_row(self):
+        with tempfile.TemporaryDirectory() as vault:
+            wiki = os.path.join(vault, "wiki")
+            os.makedirs(wiki)
+            with open(os.path.join(wiki, "wiki-0100.md"), "w", encoding="utf-8") as f:
+                f.write("---\ntitle: 첫 노트\nproject: p\ndate: 2026-09-01\nomb_session_id: s-1\n---\nb\n")
+            with open(os.path.join(wiki, "wiki-0200.md"), "w", encoding="utf-8") as f:
+                f.write("---\ntitle: 둘째 노트\nproject: p\ndate: 2026-09-02\nomb_session_id: s-1\n---\nb\n")
+            with open(os.path.join(wiki, "wiki-0300.md"), "wb") as f:
+                f.write(b"---\ntitle: \xff\xfe broken\n---\n")
+            row = {
+                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-0300.md", "kind": "used"},
+                "observed_at": "2026-09-29T23:54:47+00:00",
+            }
+            with (
+                mock.patch.dict(os.environ, {"BORING_VAULT_DIR": vault}),
+                mock.patch.object(card_live, "_live_events", side_effect=self._events([row])),
+            ):
+                out = card_live._live_proposed(24)
+        self.assertEqual(out[0].work, "p · 09-01 · 첫 노트", "the session's first note names it, every run")
+        self.assertIn("broken", out[0].note_title)
 
 
 class MainTests(unittest.TestCase):

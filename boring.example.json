@@ -5,7 +5,7 @@
   "card": {
     "note_links": {
       "obsidian": {"vault": "my-vault", "folder": "vault/wiki"},
-      "file": {"folder": "~/src/oh-my-boring/vault/wiki", "editor": "vscode"}
+      "file": {"folder": "/Users/you/src/oh-my-boring/vault/wiki", "editor": "vscode"}
     }
   },
   "llm": {

@@ -39,8 +39,8 @@
               "additionalProperties": false,
               "required": ["folder"],
               "properties": {
-                "folder": {"type": "string", "description": "Absolute path of the notes folder on this machine (~ allowed)."},
-                "editor": {"type": "string", "default": "vscode", "description": "Editor URL scheme that opens the file: vscode, cursor, … (Slack does not link file://)."}
+                "folder": {"type": "string", "pattern": "^/", "description": "Absolute host path of the notes folder — no ~ (the card runs in the door container, whose ~ is not yours)."},
+                "editor": {"type": "string", "pattern": "^[a-z][a-z0-9+.-]*$", "default": "vscode", "description": "Editor URL scheme that opens the file: vscode, cursor, zed (Slack does not link file://)."}
               }
             }
           }

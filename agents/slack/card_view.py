@@ -343,8 +343,14 @@ def _repair_row(
     return row
 
 
+REVIEW_TEXT_MAX = 200
+
+
 def _mrkdwn_plain(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    """A vault string shown as-is in mrkdwn, cut to REVIEW_TEXT_MAX — one row must stay well
+    under Slack's 3,000-char section limit, or Slack refuses the whole card."""
+    cut = text if len(text) <= REVIEW_TEXT_MAX else text[: REVIEW_TEXT_MAX - 1] + "…"
+    return cut.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _review_tag_block(

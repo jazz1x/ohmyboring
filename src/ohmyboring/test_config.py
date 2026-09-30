@@ -79,17 +79,34 @@ def test_note_links_come_only_from_boring_json():
             (boring_config.FileLink(folder="/n"), boring_config.ObsidianLink(vault="v", folder="")),
         ),
         ({"card": {"note_links": {"obsidian": {"vault": ""}, "file": {}, "web": {"url": "x"}}}}, ()),
+        # The card runs in the door container, whose ~ is not the host's — no ~, no relative path.
+        ({"card": {"note_links": {"file": {"folder": "~/notes"}}}}, ()),
+        ({"card": {"note_links": {"file": {"folder": "notes"}}}}, ()),
+        ({"card": {"note_links": {"file": {"folder": "/n", "editor": "vscode://"}}}}, ()),
+        (
+            {"card": {"note_links": {"file": {"folder": "/n/", "editor": "zed"}}}},
+            (boring_config.FileLink(folder="/n", editor="zed"),),
+        ),
+        ({"card": "x"}, ()),
+        ({"card": {"note_links": [1]}}, ()),
     ]
+    import contextlib
+    import io
+
     for cfg, expected in cases:
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
             json.dump(cfg, f)
         os.environ["BORING_CONFIG"] = f.name
+        err = io.StringIO()
         try:
-            got = boring_config.note_links()
+            with contextlib.redirect_stderr(err):
+                got = boring_config.note_links()
         finally:
             os.environ.pop("BORING_CONFIG", None)
             os.unlink(f.name)
         assert got == expected, (cfg, got)
+        dropped = cfg.get("card") not in (None, {"note_links": {}}) and not got
+        assert bool(err.getvalue()) == dropped, (cfg, err.getvalue())
 
 
 def test_in_container_is_the_env_var_alone():

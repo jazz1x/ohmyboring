@@ -275,17 +275,23 @@ def _work_line(fields: dict[str, str]) -> str:
 
 
 def _session_works() -> dict[str, str]:
-    """omb_session_id → the work line of the note that session left, over the whole vault."""
+    """omb_session_id → the work line of the note that session left, over the whole vault. A
+    session with more than one note (21 of 1,650 on 2026-09-30) names its first by file name —
+    the note it left first — so the card says the same thing on every run."""
     works: dict[str, str] = {}
-    for path in glob.glob(os.path.join(_vault_dir(), "wiki", "*.md")):
+    unreadable = 0
+    for path in sorted(glob.glob(os.path.join(_vault_dir(), "wiki", "*.md"))):
         try:
-            with open(path, encoding="utf-8") as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 head = f.read(4096)
         except OSError:
+            unreadable += 1
             continue
         fields = _frontmatter_fields(head)
-        if session := fields.get("omb_session_id"):
+        if (session := fields.get("omb_session_id")) and session not in works:
             works[session] = _work_line(fields)
+    if unreadable:
+        print(f"[card] {unreadable} vault note(s) unreadable — their sessions show by id", file=sys.stderr)
     return works
 
 
@@ -325,7 +331,7 @@ def _live_read_note(note: str) -> str | None:
     relative = note.removeprefix("/vault/") if note.startswith("/vault/") else note.lstrip("/")
     path = os.path.join(_vault_dir(), relative)
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             return f.read()
     except OSError:
         return None

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -195,31 +196,57 @@ class FileLink:
 NoteLink = ObsidianLink | FileLink
 
 
-def _note_link(kind: str, raw: object) -> NoteLink | None:
+_EDITOR_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*$")
+
+
+def _text(raw: dict, key: str) -> str:
+    value = raw.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _note_link(kind: str, raw: object) -> NoteLink | str:
+    """One configured link, or the reason it cannot be one. The file folder must be absolute:
+    the card runs inside the door container, where `~` is that container's home, not the host's
+    (measured 2026-09-30: /home/door)."""
     if not isinstance(raw, dict):
-        return None
+        return f"{kind} must be an object"
     match kind:
-        case "obsidian" if isinstance(raw.get("vault"), str) and raw["vault"].strip():
-            return ObsidianLink(vault=raw["vault"].strip(), folder=str(raw.get("folder") or "").strip("/"))
-        case "file" if isinstance(raw.get("folder"), str) and raw["folder"].strip():
-            editor = raw.get("editor")
-            return FileLink(
-                folder=str(Path(raw["folder"].strip()).expanduser()),
-                editor=editor.strip() if isinstance(editor, str) and editor.strip() else "vscode",
-            )
+        case "obsidian" if _text(raw, "vault"):
+            return ObsidianLink(vault=_text(raw, "vault"), folder=_text(raw, "folder").strip("/"))
+        case "obsidian":
+            return "obsidian needs a vault name"
+        case "file" if _text(raw, "folder").startswith("/") and _EDITOR_SCHEME.match(
+            _text(raw, "editor") or "vscode"
+        ):
+            return FileLink(folder=_text(raw, "folder").rstrip("/"), editor=_text(raw, "editor") or "vscode")
+        case "file":
+            return "file needs an absolute folder (no ~) and an editor scheme like vscode, cursor or zed"
         case _:
-            return None
+            return f"unknown link kind {kind!r}"
 
 
 def note_links() -> tuple[NoteLink, ...]:
     """The note links the card shows beside a note id, in boring.json's order — `card.note_links`
     maps "obsidian" to {vault, folder} and "file" to {folder, editor}. Nothing configured, no links:
-    the paths are the owner's, never the code's."""
-    links = (load().get("card") or {}).get("note_links") or {}
-    if not isinstance(links, dict):
+    the paths are the owner's, never the code's. An entry that cannot be a link is left out with
+    one stderr line naming why — never silently."""
+    card = load().get("card")
+    if card is None:
         return ()
-    parsed = (_note_link(kind, raw) for kind, raw in links.items())
-    return tuple(link for link in parsed if link is not None)
+    if not isinstance(card, dict):
+        print("[boring_config] card must be an object — no note links", file=sys.stderr)
+        return ()
+    links = card.get("note_links")
+    if links is None:
+        return ()
+    if not isinstance(links, dict):
+        print("[boring_config] card.note_links must be an object — no note links", file=sys.stderr)
+        return ()
+    parsed = [(kind, _note_link(kind, raw)) for kind, raw in links.items()]
+    for kind, link in parsed:
+        if isinstance(link, str):
+            print(f"[boring_config] card.note_links.{kind} ignored: {link}", file=sys.stderr)
+    return tuple(link for _, link in parsed if not isinstance(link, str))
 
 
 def hermes_cron_jobs() -> dict:

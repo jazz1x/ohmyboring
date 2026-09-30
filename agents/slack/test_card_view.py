@@ -858,6 +858,19 @@ class MarkPressedParityTests(unittest.TestCase):
             self.assertIn("구조 개편 &amp; 정리", text)
             self.assertNotIn("/vault/", text)
 
+    def test_a_huge_title_keeps_the_row_under_slacks_section_limit(self):
+        review = cc.ProposedVerdict(
+            session_id="s1",
+            note="/vault/wiki/wiki-0700.md",
+            kind="used",
+            at="t",
+            note_title="가" * 3100,
+            work="w" * 3100,
+        )
+        text = cv._review_tag_block(review, card_i18n.STRINGS["ko"])["text"]["text"]
+        self.assertLess(len(text), 3000)
+        self.assertIn("…", text)
+
     def test_note_links_follow_the_setting_and_no_setting_leaves_the_card_as_it_was(self):
         from ohmyboring.config import FileLink, ObsidianLink
 
