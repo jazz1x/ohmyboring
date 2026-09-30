@@ -336,6 +336,59 @@ def _fix_note(n, target_project: str):
     n["path"].write_text("---\n" + new_yaml + "\n---\n" + n["body"], encoding="utf-8")
 
 
+READABILITY_WALL_LINE = 300
+READABILITY_HEADING_MIN_BODY = 400
+READABILITY_TITLE_MAX = 60
+READABILITY_SIGNALS = ("wall-line", "no-heading", "long-title", "sha-in-title")
+_SHA_IN_TITLE = re.compile(r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")
+
+
+def _prose_lines(body: str) -> list[str]:
+    """Non-empty body lines outside ``` fences — a code block's long lines are code, not prose."""
+    lines, fenced = [], False
+    for line in body.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if not fenced and line.strip():
+            lines.append(line)
+    return lines
+
+
+def _readability_signals(note: dict) -> list[str]:
+    """Which of READABILITY_SIGNALS a note trips — the owner's 「가독성」 complaint (2026-09-30)
+    made countable: a 300-char wall line, a long body with no heading, a title over 60 chars
+    or carrying a commit hash."""
+    title = str(note["fm"].get("title") or "")
+    prose = _prose_lines(note["body"])
+    tripped = {
+        "wall-line": any(len(line) > READABILITY_WALL_LINE for line in prose),
+        "no-heading": len(note["body"]) > READABILITY_HEADING_MIN_BODY
+        and not any(line.startswith("#") for line in prose),
+        "long-title": len(title) > READABILITY_TITLE_MAX,
+        "sha-in-title": bool(_SHA_IN_TITLE.search(title)),
+    }
+    return [name for name in READABILITY_SIGNALS if tripped[name]]
+
+
+def readability_report(notes: list[dict]) -> dict:
+    """Per-signal counts over `population` notes (the denominator, printed with every rate) and
+    each tripping note's signals, worst first. `frontmatter_heavier` is reported apart: claims
+    live in the frontmatter, so nearly every note has more frontmatter than body — a storage
+    shape, not something one note's rewrite fixes."""
+    per_note = {n["path"].name: _readability_signals(n) for n in notes}
+    tripping = {name: signals for name, signals in per_note.items() if signals}
+    return {
+        "population": len(notes),
+        "counts": {s: sum(s in signals for signals in per_note.values()) for s in READABILITY_SIGNALS},
+        "any": len(tripping),
+        "frontmatter_heavier": sum(
+            len(n["yaml_text"].splitlines()) > len(_prose_lines(n["body"])) for n in notes
+        ),
+        "notes": dict(sorted(tripping.items(), key=lambda kv: (-len(kv[1]), kv[0]))),
+    }
+
+
 def _build_report(
     wiki_dir: Path, notes: list[dict], checkout_slugs: dict[str, set[str]] | None = None
 ) -> dict:
@@ -392,7 +445,7 @@ def analyze_vault(
     wiki_dir: Path, checkout_slugs: dict[str, set[str]] | None = None
 ) -> tuple[list[dict], dict]:
     notes = _collect_notes(wiki_dir)
-    return notes, _build_report(wiki_dir, notes, checkout_slugs)
+    return notes, {**_build_report(wiki_dir, notes, checkout_slugs), "readability": readability_report(notes)}
 
 
 def fixable_note_names(report: dict) -> list[str]:
@@ -419,6 +472,24 @@ def fix_plan(notes: list[dict]) -> tuple[list[dict], list[dict]]:
     )
 
 
+def _print_readability(r: dict, worst: int = 15) -> None:
+    n = r["population"]
+
+    def rate(k: int) -> str:
+        return f"{k}/{n} ({100 * k / n:.0f}%)" if n else f"{k}/0"
+
+    print(f"📖 Readability over {n} notes (the vault's wiki notes, seed excluded):")
+    for signal in READABILITY_SIGNALS:
+        print(f"   {signal:<20} {rate(r['counts'][signal])}")
+    print(f"   {'any signal':<20} {rate(r['any'])}")
+    print(
+        f"   {'frontmatter > body':<20} {rate(r['frontmatter_heavier'])}  (storage shape: claims live there)"
+    )
+    print(f"\n   worst {min(worst, len(r['notes']))}:")
+    for name, signals in list(r["notes"].items())[:worst]:
+        print(f"   {name}: {', '.join(signals)}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Inspect/repair ohmyboring vault data hygiene")
     parser.add_argument(
@@ -427,6 +498,11 @@ def main():
     parser.add_argument("--fix", action="store_true", help="rewrite notes in place (review with git diff)")
     parser.add_argument("--yes", action="store_true", help="skip confirmation prompt")
     parser.add_argument("--json", action="store_true", help="output structured JSON report")
+    parser.add_argument(
+        "--readability",
+        action="store_true",
+        help="print only the note readability counts and the worst notes",
+    )
     parser.add_argument(
         "--checkout-roots",
         help="colon-separated dirs to scan for git checkouts; reports projects named after a checkout folder "
@@ -451,6 +527,10 @@ def main():
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+
+    if args.readability:
+        _print_readability(report["readability"])
         return
 
     print(f"📂 vault/wiki: {wiki_dir}")

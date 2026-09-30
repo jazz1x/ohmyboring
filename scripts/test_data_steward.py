@@ -123,6 +123,22 @@ def test_missing_claims_flags_session_notes():
     assert issues[0]["kind"] == "missing-claims", issues[0]
 
 
+def test_readability_flags_a_wall_note_and_passes_a_structured_one():
+    wall = _make_note(
+        "id: wiki-0042\ntitle: '조각 3d 완료 — 설정 폴더 마운트 (트렁크 372ad73, 2026-09-29 20:12, 검증 PASS)'",
+        "1. " + "가" * 320 + "\n2. 짧은 줄\n" + "나" * 200 + "\n",
+    )
+    assert ds._readability_signals(wall) == ["wall-line", "no-heading", "long-title", "sha-in-title"]
+    tidy = _make_note(
+        "id: wiki-0042\ntitle: 설정 폴더 마운트",
+        "요약 한 줄.\n\n## 배경\n" + "짧은 줄.\n" * 80 + "```\n" + "x" * 400 + "\n```\n",
+    )
+    assert ds._readability_signals(tidy) == [], "a long code line inside a fence is not a wall"
+    report = ds.readability_report([{**wall, "path": Path("wiki-0001.md")}, tidy])
+    assert report["population"] == 2 and report["any"] == 1, report
+    assert report["counts"]["wall-line"] == 1, report
+
+
 def test_non_session_note_without_claims_is_ok():
     note = _make_note("id: wiki-0042\ntitle: t\nkind: note\norigin: personal\nclaims: []\nsources: []")
     issues = ds._claim_issues([note])
