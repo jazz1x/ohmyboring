@@ -33,10 +33,31 @@ class Kept:
 PolishResult = Polished | Kept
 
 
+# Linter rule codes (PLR0913, B008, E402, C901) mean nothing to the reader; the owner allowed
+# dropping them (2026-09-30), so they are not facts a rewrite must keep.
+_LINT_CODE = re.compile(r"\b[A-Z]{1,4}\d{3,4}\b")
+
+
 def facts(text: str) -> set[str]:
     """The strings a rewrite must carry over verbatim: wiki ids, `code` spans, URLs, #refs, and
     multi-digit numbers (a single digit is too often a list marker to count)."""
-    return {match for pattern in _FACT_PATTERNS for match in pattern.findall(text)}
+    plain = _LINT_CODE.sub("", text)
+    return {match for pattern in _FACT_PATTERNS for match in pattern.findall(plain)}
+
+
+def shape_problems(body: str) -> list[str]:
+    """What the approved markdown shape needs and `body` lacks: plain summary lines before the
+    first heading, at least two `## ` sections, and list items (or table rows) under them."""
+    lines = [line for line in body.splitlines() if line.strip()]
+    first_heading = next((i for i, line in enumerate(lines) if line.startswith("## ")), None)
+    problems = []
+    if first_heading is None or first_heading == 0:
+        problems.append("no summary before the first section")
+    if sum(line.startswith("## ") for line in lines) < 2:
+        problems.append("fewer than two ## sections")
+    if not any(re.match(r"\s*(-|\d+\.)\s|\s*\|.*\|\s*$", line) for line in lines):
+        problems.append("no list items or table rows")
+    return problems
 
 
 def judge(original: str, rewritten: object) -> PolishResult:
@@ -50,6 +71,9 @@ def judge(original: str, rewritten: object) -> PolishResult:
     before, after = readability.body_signals(original), readability.body_signals(rewritten)
     if len(after) >= len(before):
         return Kept(reason=f"rewrite reads no better ({before or 'clean'} → {after or 'clean'})")
+    shape = shape_problems(rewritten)
+    if shape:
+        return Kept(reason=f"rewrite misses the markdown shape: {', '.join(shape)}")
     return Polished(body=rewritten.strip() + "\n")
 
 

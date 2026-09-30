@@ -14,8 +14,8 @@ WALL = (
     + "\n"
 )
 TIDY = (
-    "요약: 2026-09-29 조사, 트렁크 d3088bb.\n\n## 배달\n- 문(:7710) 재기동 — wiki-2278 참고\n"
-    "- `make door-up` 실행\n"
+    "2026-09-29 조사, 트렁크 d3088bb 를 배달했다.\n\n## 배달\n- 문(:7710) 재기동 — wiki-2278 참고\n"
+    "## 확인\n- `make door-up` 실행\n"
 )
 
 
@@ -39,6 +39,21 @@ class PolishTests(unittest.TestCase):
             raise AssertionError("the model must not be called for a readable body")
 
         self.assertEqual(polish.polish(TIDY, "ko", no_call), polish.Kept(reason="already readable"))
+
+    def test_the_markdown_shape_is_required_and_a_table_counts_as_a_list(self):
+        no_summary = "## 배달\n- 문(:7710) — wiki-2278, d3088bb, 2026-09-29\n## 확인\n- `make door-up`\n"
+        result = polish.polish(WALL, "ko", lambda prompt: {"body": no_summary})
+        self.assertIsInstance(result, polish.Kept)
+        self.assertIn("no summary", result.reason)
+        table = (
+            "2026-09-29 조사, d3088bb 배달.\n\n## 배달\n| 무엇 | 값 |\n|---|---|\n| 문 | :7710 |\n"
+            "## 확인\n| 명령 | 참고 |\n|---|---|\n| `make door-up` | wiki-2278 |\n"
+        )
+        self.assertIsInstance(polish.polish(WALL, "ko", lambda prompt: {"body": table}), polish.Polished)
+
+    def test_a_linter_rule_code_may_be_left_out(self):
+        with_code = WALL.replace("참고,", "참고, PLR0913 은 불변 요청 타입,")
+        self.assertIsInstance(polish.polish(with_code, "ko", lambda prompt: {"body": TIDY}), polish.Polished)
 
     def test_a_malformed_answer_keeps_the_original(self):
         for answer in (None, [], {"body": ""}, {"text": TIDY}):
