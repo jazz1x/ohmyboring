@@ -1119,6 +1119,149 @@ def test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3():
         assert recall_commands == [original]
 
 
+def _fake_checkout(root: Path) -> Path:
+    """A fake oh-my-boring checkout: the marker module plus the four hook scripts."""
+    for rel in ("agents/shared/agent_wiring.py", *agent_wiring._CLAUDE_CODE_ROLE_SCRIPTS):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# stub\n", encoding="utf-8")
+    return root
+
+
+def test_wire_claude_code_repoints_roles_registered_from_another_checkout():
+    """Every role registered once, pointing at the current checkout — the other checkout's
+    registrations go, however their commands spell the script.
+
+    Measured 2026-10-01: ~/.claude/settings.json carried all four roles from both the main
+    checkout and this one, so every session got recall injected twice and was distilled twice
+    (2026-09-30 e1c7377b). Two checkouts are two files, so the old resolved-file comparison
+    never saw the duplication. Here checkout B's distill rides in the nohup shell wrapper the
+    old installer wrote, through a `~` symlink, so the wrapper's script token has to count.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        checkout_a = _fake_checkout(base / "a")
+        checkout_b = _fake_checkout(base / "b")
+        fake_home = base / "home"
+        fake_home.mkdir()
+        (fake_home / "oh-my-boring").symlink_to(checkout_b)
+
+        py = sys.executable
+
+        def cmd(root: Path, role: str) -> str:
+            return f"{py} {root}/{role}"
+
+        wrapped_distill = (
+            'f=$(mktemp); cat >"$f"; nohup sh -c \''
+            'python3 ~/oh-my-boring/hooks/distill-session.py < "$0"; '
+            'rm -f "$0"\' "$f" >/dev/null 2>&1 &'
+        )
+
+        settings = Path(d) / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionEnd": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": cmd(checkout_a, "hooks/distill-session.py"),
+                                        "timeout": 130,
+                                        "async": True,
+                                    }
+                                ],
+                            },
+                            {"matcher": "", "hooks": [{"type": "command", "command": wrapped_distill}]},
+                        ],
+                        "UserPromptSubmit": [
+                            {
+                                "matcher": "",
+                                "hooks": [{"type": "command", "command": cmd(r, role), "timeout": 10}],
+                            }
+                            for r in (checkout_a, checkout_b)
+                            for role in ("hooks/recall.py", "hooks/rules.py")
+                        ],
+                        "SessionStart": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": cmd(r, "agents/claude-code/session-start-recall.py"),
+                                        "timeout": 15,
+                                        "async": True,
+                                    }
+                                ],
+                            }
+                            for r in (checkout_a, checkout_b)
+                        ],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)),
+            mock.patch.dict(os.environ, {"HOME": str(fake_home)}),
+        ):
+            result = agent_wiring.wire_claude_code(settings)
+            second = agent_wiring.wire_claude_code(settings)
+
+        assert result["changed"] is True
+        assert second["changed"] is False, "a second run must add nothing"
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = [
+            h["command"] for groups in data["hooks"].values() for group in groups for h in group["hooks"]
+        ]
+        assert len(commands) == 4, commands
+        for role in agent_wiring._CLAUDE_CODE_ROLE_SCRIPTS:
+            assert [c for c in commands if c.endswith(f"/{role}")] == [cmd(checkout_a, role)], (
+                role,
+                commands,
+            )
+
+
+def test_wire_claude_code_leaves_a_strangers_recall_hook_untouched():
+    """Role matching must not claim a hooks/recall.py that is not inside a checkout.
+
+    The checkout test for "ours" is the agent_wiring.py beside the scripts; a directory that
+    lacks it is a stranger's, and its registrations — even of a path that spells like our
+    role — survive the drop pass and do not satisfy _already_wired.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        checkout_a = _fake_checkout(Path(d) / "a")
+        stranger = Path(d) / "stranger"
+        (stranger / "hooks").mkdir(parents=True)
+        (stranger / "hooks" / "recall.py").write_text("# not ours\n", encoding="utf-8")
+        original = f"{sys.executable} {stranger}/hooks/recall.py"
+
+        settings = Path(d) / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {"matcher": "", "hooks": [{"type": "command", "command": original}]}
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)):
+            agent_wiring.wire_claude_code(settings)
+
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = [h["command"] for group in data["hooks"]["UserPromptSubmit"] for h in group["hooks"]]
+        assert commands.count(original) == 1, commands
+        assert f"{sys.executable} {checkout_a}/hooks/recall.py" in commands
+
+
 if __name__ == "__main__":
     test_install_reports_failure()
     test_install_returns_success_when_ok()
@@ -1162,4 +1305,6 @@ if __name__ == "__main__":
     test_install_removes_a_hermes_codex_job_left_by_an_older_install()
     test_sync_hermes_cron_jobs_a_declared_deliver_sticks_and_repairs_drift()
     test_sync_hermes_cron_jobs_creates_with_the_declared_deliver()
+    test_wire_claude_code_repoints_roles_registered_from_another_checkout()
+    test_wire_claude_code_leaves_a_strangers_recall_hook_untouched()
     print("ok - agent_wiring failure propagation + hermes wiring + settings_path")

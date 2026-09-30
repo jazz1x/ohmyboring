@@ -110,6 +110,30 @@ def _backup(path: Path) -> Path:
 
 _SCRIPT_TOKEN = re.compile(r"\S+\.(?:py|sh|mjs|js)\b")
 
+#: Repo-relative scripts wire_claude_code owns, one role each. A hook registration is "ours,
+#: role R" when its script resolves to <checkout>/<R> and <checkout> really is an oh-my-boring
+#: checkout — every checkout carries agents/shared/agent_wiring.py, and requiring that marker
+#: keeps a stranger's unrelated hooks/recall.py out of our hands.
+_CLAUDE_CODE_ROLE_SCRIPTS = (
+    "hooks/distill-session.py",
+    "hooks/recall.py",
+    "hooks/rules.py",
+    "agents/claude-code/session-start-recall.py",
+)
+_CHECKOUT_MARKER = ("agents", "shared", "agent_wiring.py")
+
+
+def _checkout_role(script: Path) -> tuple[Path, str] | None:
+    """(checkout root, owned role) for a script inside an oh-my-boring checkout, else None."""
+    parts = script.parts
+    for role in _CLAUDE_CODE_ROLE_SCRIPTS:
+        role_parts = Path(role).parts
+        if len(parts) > len(role_parts) and parts[-len(role_parts) :] == role_parts:
+            root = Path(*parts[: -len(role_parts)])
+            if (root / Path(*_CHECKOUT_MARKER)).exists():
+                return root, role
+    return None
+
 
 def _hook_scripts(command: str) -> set:
     """The real files a hook command runs, resolved through `~` and symlinks.
@@ -133,12 +157,20 @@ def _hook_scripts(command: str) -> set:
 
 
 def _already_wired(settings: dict, command: str) -> bool:
-    """True when some registered hook already runs the same script this command runs.
+    """True when the current checkout already registers the role this command installs.
 
-    Falls back to the old substring comparison for commands that name no script file, so hooks
-    that are pure shell keep the behaviour they had.
+    The same role from another checkout is a different file and does not count — saying it
+    does would leave settings pointing at a checkout that may be stale. Falls back to the old
+    substring comparison for commands that name no script file, so hooks that are pure shell
+    keep the behaviour they had.
     """
     wanted = _hook_scripts(command)
+    current = Path(BORING_HOME).resolve()
+    wanted_roles = set()
+    for script in wanted:
+        found = _checkout_role(script)
+        if found is not None and found[0] == current:
+            wanted_roles.add(found[1])
     for group in settings.get("hooks", {}).values():
         if not isinstance(group, list):
             continue
@@ -153,21 +185,31 @@ def _already_wired(settings: dict, command: str) -> bool:
                     return True
                 if not wanted and command in existing:
                     return True
+                if wanted_roles:
+                    for script in _hook_scripts(existing):
+                        found = _checkout_role(script)
+                        if found is not None and found[0] == current and found[1] in wanted_roles:
+                            return True
     return False
 
 
 def _drop_duplicate_hooks(settings: dict, commands) -> int:
-    """Keep one registration per script we own; report how many were removed.
+    """Keep one registration per hook role, rooted at this checkout; report removals.
 
     The installer created these before it could see past path spellings, and they stay until
     something takes them out -- an install that only stops adding duplicates leaves every
-    machine that already ran it injecting twice.
+    machine that already ran it injecting twice. Comparing resolved script files fixed two
+    spellings of one checkout, but two checkouts are two files: the same role registered from
+    the other checkout looked like a different hook and stayed. Measured 2026-10-01 in
+    ~/.claude/settings.json: every role registered once per checkout (main and migration), so
+    every session got recall injected twice and was distilled twice (2026-09-30 e1c7377b).
     """
     ours = set()
     for command in commands:
         ours |= _hook_scripts(command)
     if not ours:
         return 0
+    current = Path(BORING_HOME).resolve()
     seen = set()
     removed = 0
     for groups in settings.get("hooks", {}).values():
@@ -178,11 +220,24 @@ def _drop_duplicate_hooks(settings: dict, commands) -> int:
                 continue
             kept = []
             for h in entry["hooks"]:
-                scripts = _hook_scripts(h.get("command") or "") & ours if isinstance(h, dict) else set()
-                if scripts and scripts & seen:
+                if not isinstance(h, dict):
+                    kept.append(h)
+                    continue
+                scripts = _hook_scripts(h.get("command") or "")
+                foreign = False
+                for script in scripts:
+                    found = _checkout_role(script)
+                    if found is not None and found[0] != current:
+                        foreign = True
+                        break
+                if foreign:
                     removed += 1
                     continue
-                seen |= scripts
+                own = scripts & ours
+                if own and own & seen:
+                    removed += 1
+                    continue
+                seen |= own
                 kept.append(h)
             entry["hooks"] = kept
     for key, groups in list(settings.get("hooks", {}).items()):
