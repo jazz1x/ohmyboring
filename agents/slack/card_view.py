@@ -424,40 +424,59 @@ def status_text(outcome: Outcome, strings: dict[str, str]) -> str:
             assert_never(outcome)
 
 
-def _row_at(blocks: list[dict], idx: int) -> int | None:
+def _is_row_actions(block: dict, idx: int) -> bool:
     prefix = f"card:{idx}:"
+    return block.get("type") == "actions" and any(
+        isinstance(el, dict) and isinstance(el.get("action_id"), str) and el["action_id"].startswith(prefix)
+        for el in block.get("elements", [])
+    )
+
+
+def _row_at(blocks: list[dict], idx: int) -> int | None:
     return next(
         (
             i
             for i, block in enumerate(blocks)
-            if block.get("block_id") == _status_id(idx)
-            or (
-                block.get("type") == "actions"
-                and any(
-                    isinstance(el, dict)
-                    and isinstance(el.get("action_id"), str)
-                    and el["action_id"].startswith(prefix)
-                    for el in block.get("elements", [])
-                )
-            )
+            if block.get("block_id") == _status_id(idx) or _is_row_actions(block, idx)
         ),
         None,
     )
 
 
-def mark_progress(blocks: list[dict], idx: int, outcome: Outcome, *, lang: str) -> list[dict] | Rejected:
-    """Only row `idx` changes: its buttons (or its earlier status) become a status line whose
-    block_id names the row, so a later writer can find it again without knowing the buttons."""
+def _status_instead(blocks: list[dict], idx: int, status: dict) -> list[dict] | Rejected:
+    """The row's buttons become the status line; an earlier status line of the row goes."""
+    kept = [block for block in blocks if block.get("block_id") != _status_id(idx)]
+    at = next((i for i, block in enumerate(kept) if _is_row_actions(block, idx)), None)
+    if at is not None:
+        return [*kept[:at], status, *kept[at + 1 :]]
     at = _row_at(blocks, idx)
     if at is None:
         return Rejected(reason=f"row {idx} has no buttons or status to replace")
-    text = status_text(outcome, card_i18n.STRINGS[lang])
+    return [*blocks[:at], status, *blocks[at + 1 :]]
+
+
+def _status_above_buttons(blocks: list[dict], idx: int, status: dict) -> list[dict] | Rejected:
+    """A failure keeps the buttons so the owner can press again; the reason sits above them."""
+    kept = [block for block in blocks if block.get("block_id") != _status_id(idx)]
+    at = next((i for i, block in enumerate(kept) if _is_row_actions(block, idx)), None)
+    if at is None:
+        return _status_instead(blocks, idx, status)
+    return [*kept[:at], status, *kept[at:]]
+
+
+def mark_progress(blocks: list[dict], idx: int, outcome: Outcome, *, lang: str) -> list[dict] | Rejected:
+    """Only row `idx` changes, and its status line's block_id names the row so a later writer
+    can find it again without knowing the buttons."""
     status = {
         "type": "context",
         "block_id": _status_id(idx),
-        "elements": [{"type": "mrkdwn", "text": text}],
+        "elements": [{"type": "mrkdwn", "text": status_text(outcome, card_i18n.STRINGS[lang])}],
     }
-    return [*blocks[:at], status, *blocks[at + 1 :]]
+    match outcome:
+        case Failed():
+            return _status_above_buttons(blocks, idx, status)
+        case _:
+            return _status_instead(blocks, idx, status)
 
 
 def merged_outcome(done: RepairDone, *, lang: str) -> Done:

@@ -209,6 +209,20 @@ def _assert_single_row_marked(blocks, updated, idx):
     assert [i for i, (a, b) in enumerate(zip(blocks, updated)) if a != b] == [actions_at]
 
 
+def _assert_buttons_kept_under_the_reason(blocks, updated, idx):
+    """A failed press leaves the card as shown plus one status line right above the row's
+    buttons, so the owner can press again."""
+    prefix = f"card:{idx}:"
+    actions_at = next(
+        i
+        for i, b in enumerate(blocks)
+        if b["type"] == "actions" and any(el.get("action_id", "").startswith(prefix) for el in b["elements"])
+    )
+    assert updated[:actions_at] == blocks[:actions_at]
+    assert updated[actions_at]["block_id"] == f"card:{idx}:status"
+    assert updated[actions_at + 1 :] == blocks[actions_at:]
+
+
 @contextlib.contextmanager
 def _patched_effects(calls, consumption=None, execute_repair=None):
     """The plugin's live functions replaced by recorders (or the given raising stub)."""
@@ -492,7 +506,7 @@ def test_a_failed_effect_shows_the_reason_on_the_row_and_releases_the_claim():
             progress, failed = _updates(calls)
             assert _status_at(progress[3], 1) == "⏳ 진행 중…"
             assert _status_at(failed[3], 1) == "✕ 실패 — engine down"
-            _assert_single_row_marked(BLOCKS, failed[3], 1)
+            _assert_buttons_kept_under_the_reason(BLOCKS, failed[3], 1)
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
     assert ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"]) in calls
     assert len(_updates(calls)) == 4

@@ -837,6 +837,19 @@ class MarkPressedParityTests(unittest.TestCase):
             self.assertEqual(failed[changed[0] + 1 :], blocks[changed[0] + 1 :])
         self.assertIsInstance(cv.mark_progress(blocks, 99, cc.Pending(), lang="ko"), cc.Rejected)
 
+    def test_a_failure_keeps_the_buttons_and_a_retry_leaves_one_status_line(self):
+        blocks = self._card()
+        actions_at = cv._row_at(blocks, 2)
+        failed = cv.mark_progress(blocks, 2, cc.Failed(reason="boom"), lang="ko")
+        self.assertEqual(failed[actions_at]["block_id"], "card:2:status")
+        self.assertEqual(failed[actions_at + 1 :], blocks[actions_at:])
+        retried = cv.mark_progress(failed, 2, cc.Pending(), lang="ko")
+        statuses = [b for b in retried if b.get("block_id") == "card:2:status"]
+        self.assertEqual(len(statuses), 1)
+        self.assertEqual(statuses[0]["elements"][0]["text"], card_i18n.STRINGS["ko"]["progress_pending"])
+        self.assertFalse(any(cv._is_row_actions(b, 2) for b in retried))
+        self.assertEqual(len(retried), len(blocks))
+
 
 if __name__ == "__main__":
     unittest.main()
