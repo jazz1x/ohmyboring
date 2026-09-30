@@ -114,18 +114,17 @@ sh scripts/doctor.sh          # ✗ 가 0개인지
 
 ## 4. 안 돌 때 읽을 자리
 
-**크론 잡의 출력이 이유를 적어 둔다.** 설정을 추측하기 전에 그 파일을 읽는다.
+**크론 출력 파일은 어느 경로에서나 0바이트다.** memory-ingest-worker 는 `no_agent` 잡이라
+stdout 가 에이전트에게로 가지 않고, 0바이트는 고장이 아니라 정상이다.
 
 ```bash
 ls -t ~/.hermes/cron/output/cc33a556631a/ | head -3   # memory-ingest-worker
 ```
 
-파일 안에 프롬프트와 응답이 통째로 있다. `Blocked:` 로 시작하는 줄이 있으면 hermes 가 스크립트를
-거부한 것이고, `stored → wiki/wiki-NNNN.md` 가 있으면 성공한 것이다.
-
-**0바이트 파일은 고장이 아니다.** 먹을 세션이 없으면 워커는 아무것도 출력하지 않고, 출력이 없으면
-hermes 는 빈 파일을 남긴다. 유휴와 고장은 크론 파일로는 못 가르고, **이벤트로 갈린다** — 워커는
-유휴 틱에도 `ingest_offer / offered=0` 를 남긴다.
+파일 안에 있을 줄은 `Blocked:` 하나뿐이다 — 있으면 hermes 가 스크립트를 거부한 것이다.
+성공·실패는 크론 파일로는 못 가르고 **이벤트로 판정한다** — `make events` 나
+`curl localhost:7700/events`. 성공은 `ingest_queue` 의 `ok`(세션 하나가 증류를 마친 것),
+제안(`ingest_offer`)은 `queued` / `skipped` / `ok` — 유휴 틱에도 `offered=0` 을 남긴다.
 
 ```bash
 curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker' \

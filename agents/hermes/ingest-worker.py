@@ -19,9 +19,9 @@ Flow per cron tick:
      failures) and the file stays; engine/LLM unreachable → deferred without spending a try.
      The scan runs BEFORE the drain so a session offered this tick is processed this tick.
 
-stdout stays empty on every path: the cron injects stdout into the agent's prompt, and an empty
-prompt is a silent no-op. Progress is observable only in the event log (ingest_offer /
-ingest_queue) and stderr.
+stdout stays empty on every path: the hermes job runs with no_agent, so stdout is never handed
+to an agent. Progress is observable only in the event log (ingest_offer / ingest_queue) and
+stderr.
 
 This script shares the SessionEnd hook's marker directory (~/.cache/boring-distill) so hermes cron
 and the engine-direct path do not duplicate sessions. The directory is bind-mounted into the
@@ -335,8 +335,8 @@ def main(argv=None):
     # DRAIN — after the offer scan, so a session offered this tick is processed this tick.
     _drain_queue()
     if offered == 0:
-        # nothing eligible → empty stdout = silent no-op
-        _log_worker_event("ingest_offer", "ok", offered=0, eligible=0)
+        # nothing offered: either nothing eligible, or the queue had no room this tick
+        _log_worker_event("ingest_offer", "ok", offered=0, eligible=len(candidates), room=room)
 
 
 if __name__ == "__main__":

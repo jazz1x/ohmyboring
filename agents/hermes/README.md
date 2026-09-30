@@ -8,7 +8,7 @@ hermes-agent connects to oh-my-boring over MCP and runs cron-driven automation.
 |---|---|---|
 | `briefing.py` | `hermes_cron_jobs.morning-briefing` (optional) | Daily morning digest via `/brief`. |
 | `weekly-briefing.py` | launchd `com.ohmyboring.weekly-card` (via `scripts/schedule-card.sh run weekly`) | Monday 09:00 weekly digest. `agents/slack/weekly_card.py` runs this script in blocks mode and posts the payload with the bot token — hermes is out of the delivery path (its cron wrapper re-rendered our mrkdwn as markdown). |
-| `ingest-worker.py` | `memory-ingest-worker` job (not config-driven) | Pops one un-ingested Claude Code session per tick and asks the `memory-ingest` skill to store it. |
+| `ingest-worker.py` | `memory-ingest-worker` job (not config-driven) | Enqueues eligible Claude Code / Codex sessions into the shared distill queue and distills up to QUEUE_PER_TICK (default 3) per tick through the LangGraph distill engine. |
 | `codex-collect-sessions.py` | `codex-memory-ingest-worker` job (not config-driven) | Hermes-safe wrapper that runs the repo collector, pops one eligible Codex session per tick, harvests stable rollout transcripts, skips true subagents, and stores it through the same remember path. |
 
 ## Config-driven cron
@@ -66,10 +66,6 @@ Preview the future Block Kit payload for Slack's Block Kit Builder or a `blocks`
 ```bash
 BORING_BRIEFING_FORMAT=blocks BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
 ```
-
-## Managed skills
-
-`agents/hermes/skills/memory-ingest/` is copied to `~/.hermes/skills/memory-ingest/` on install. The skill tells hermes how to distill a session and call `ohmyboring/remember`, including extracting `next` and `blocked` claims for the `next_actions` register.
 
 ## Installation
 

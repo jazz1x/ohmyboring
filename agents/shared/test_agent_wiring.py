@@ -444,34 +444,6 @@ def test_wire_hermes_missing_slack_briefing_has_no_side_effects():
         assert not (fake_home / ".hermes" / "scripts").exists()
 
 
-def test_install_hermes_skills_removes_legacy_nested_duplicate():
-    """Old installs could leave memory-ingest/memory-ingest/SKILL.md and confuse Hermes."""
-    with tempfile.TemporaryDirectory() as d:
-        fake_home = Path(d) / "home"
-        omb = Path(d) / "omb"
-        src = omb / "agents" / "hermes" / "skills" / "memory-ingest"
-        src.mkdir(parents=True)
-        (src / "SKILL.md").write_text("name: memory-ingest\n", encoding="utf-8")
-
-        dst = fake_home / ".hermes" / "skills" / "memory-ingest"
-        nested = dst / "memory-ingest"
-        nested.mkdir(parents=True)
-        (nested / "SKILL.md").write_text("stale duplicate\n", encoding="utf-8")
-
-        def fake_expanduser(value):
-            if value == "~":
-                return str(fake_home)
-            if value.startswith("~/"):
-                return str(fake_home / value[2:])
-            return value
-
-        with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser):
-            agent_wiring._install_hermes_skills(str(omb))
-
-        assert (dst / "SKILL.md").exists()
-        assert not nested.exists()
-
-
 def test_enable_hermes_plugin_appends_to_the_enabled_list():
     """boring-card lands in plugins.enabled next to the plugins already there."""
     text = "plugins:\n  enabled:\n    - orca-status\nmcp_servers:\n  ohmyboring:\n    url: http://x\n"
@@ -1172,7 +1144,6 @@ if __name__ == "__main__":
     test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3()
     test_local_deps_are_transitive_and_reach_the_shared_dir()
     test_local_deps_skip_the_ohmyboring_package_but_still_raise_for_missing_flat_modules()
-    test_install_hermes_skills_removes_legacy_nested_duplicate()
     test_enable_hermes_plugin_appends_to_the_enabled_list()
     test_enable_hermes_plugin_is_idempotent()
     test_enable_hermes_plugin_leaves_everything_outside_the_list_byte_identical()

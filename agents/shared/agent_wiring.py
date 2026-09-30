@@ -754,27 +754,6 @@ def _default_hermes_deliver(jobs: list[dict]) -> str:
     return "local"
 
 
-def _install_hermes_skills(boring_home: str | None = None) -> None:
-    """Install oh-my-boring managed hermes-agent skills into ~/.hermes/skills/."""
-    home = boring_home if boring_home is not None else BORING_HOME
-    src_dir = Path(home) / "agents" / "hermes" / "skills"
-    if not src_dir.exists():
-        return
-    dst_root = Path(os.path.expanduser("~/.hermes/skills"))
-    dst_root.mkdir(parents=True, exist_ok=True)
-    for skill_dir in src_dir.iterdir():
-        if not skill_dir.is_dir():
-            continue
-        dst = dst_root / skill_dir.name
-        dst.mkdir(parents=True, exist_ok=True)
-        legacy_nested = dst / skill_dir.name
-        if legacy_nested.is_dir():
-            shutil.rmtree(legacy_nested)
-        for src_file in skill_dir.iterdir():
-            if src_file.is_file():
-                shutil.copy2(src_file, dst / src_file.name)
-
-
 #: The plugins hermes loads — the checkout is the source of truth; the installed copies
 #: under ~/.hermes/plugins are what hermes actually imports (doctor (d5b2) compares).
 HERMES_PLUGINS = ("boring-card", "boring-memory")
@@ -1142,7 +1121,6 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
         _install_hermes_briefing(briefing_sources)
         _install_hermes_weekly_briefing(boring_home)
         _install_hermes_codex_collector(boring_home)
-        _install_hermes_skills(boring_home)
         _install_hermes_plugins(boring_home)
         cron_result = _sync_hermes_cron_jobs()
         return {
@@ -1184,7 +1162,6 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
     _install_hermes_briefing(briefing_sources)
     _install_hermes_weekly_briefing(boring_home)
     _install_hermes_codex_collector(boring_home)
-    _install_hermes_skills(boring_home)
     _install_hermes_plugins(boring_home)
     cron_result = _sync_hermes_cron_jobs()
     changed = changed or cron_result["changed"]

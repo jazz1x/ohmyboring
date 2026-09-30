@@ -159,6 +159,26 @@ class IngestWorkerTest(unittest.TestCase):
             self.assertFalse(ingest_worker.distill_queue.is_queued(sid))
             self.assertEqual(self._offer_events(sid), [])
 
+    def test_offer_ok_reports_real_numbers_when_queue_is_full(self):
+        # The queue is full this tick (3 of 3) and one session is eligible — nothing gets
+        # offered, but the tick-summary event must still carry the real numbers.
+        for i in range(3):
+            self._queue(f"full-{i}")
+        self._write_session("s-waiting")
+        with mock.patch.object(ingest_worker, "QUEUE_PER_TICK", 3):
+            stdout, run = self._run_main()
+        self.assertEqual(stdout, "")
+        ok = [e for e in self._events() if e["event"] == "ingest_offer" and e["status"] == "ok"]
+        self.assertEqual(len(ok), 1)
+        self.assertEqual(ok[0]["offered"], 0)
+        self.assertEqual(ok[0]["eligible"], 1)
+        self.assertEqual(ok[0]["room"], 0)
+        # the full queue still drained; the waiting session waits for a later tick
+        self.assertEqual(run.call_count, 3)
+        self.assertFalse(ingest_worker.markers.is_done("s-waiting"))
+        self.assertFalse(ingest_worker.distill_queue.is_queued("s-waiting"))
+        self.assertEqual(self._offer_events("s-waiting"), [])
+
     def test_tick_order_is_offer_then_drain(self):
         self._write_session("s-ord")
         stdout, run = self._run_main()
