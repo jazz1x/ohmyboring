@@ -184,6 +184,17 @@ def _updates(calls):
     return [c for c in calls if isinstance(c, tuple) and c[0] == "chat_update"]
 
 
+def _without_updates(calls):
+    return [c for c in calls if not (isinstance(c, tuple) and c[0] == "chat_update")]
+
+
+def _status_at(blocks, idx):
+    for b in blocks:
+        if b.get("block_id") == f"card:{idx}:status":
+            return b["elements"][0]["text"]
+    return None
+
+
 def _assert_single_row_marked(blocks, updated, idx):
     """Exactly one block differs from the card as shown — the row's actions block, now its
     judged block — and the row count is unchanged."""
@@ -216,7 +227,7 @@ def _patched_effects(calls, consumption=None, execute_repair=None):
         mock.patch.object(
             card_effects,
             "_live_execute_repair",
-            side_effect=execute_repair or (lambda subject: calls.append(("repair", subject))),
+            side_effect=execute_repair or (lambda subject, row=None: calls.append(("repair", subject, row))),
         ),
     )
     with contextlib.ExitStack() as stack:
@@ -310,17 +321,54 @@ def test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card():
         calls = []
         with _patched_effects(calls):
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
-    assert calls[:3] == [
+    assert [c if isinstance(c, str) else c[0] for c in calls] == [
         "ack",
+        "chat_update",
+        "record",
+        "consumption",
+        "chat_update",
+    ]
+    assert calls[2:4] == [
         ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 1, "choice": "do"}),
         ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"]),
     ]
-    updates = _updates(calls)
-    assert len(updates) == 1
-    _, channel, ts, updated = updates[0]
-    assert (channel, ts) == (CARD_CH, CARD_TS)
-    _assert_single_row_marked(BLOCKS, updated, 1)
-    assert f"✓ 채택 — <@{OWNER}>" in json.dumps(updated, ensure_ascii=False)
+    progress, final = _updates(calls)
+    assert progress[1:3] == (CARD_CH, CARD_TS) and final[1:3] == (CARD_CH, CARD_TS)
+    _assert_single_row_marked(BLOCKS, progress[3], 1)
+    assert _status_at(progress[3], 1) == "⏳ 진행 중…"
+    _assert_single_row_marked(BLOCKS, final[3], 1)
+    assert f"✓ 채택 — <@{OWNER}>" in json.dumps(final[3], ensure_ascii=False)
+
+
+def test_every_lane_shows_progress_first_and_only_that_row_changes():
+    """Advice, review and repair-hold presses each: the first chat_update turns just the pressed
+    row into 「진행 중」 before any effect ran; the last one settles the same row."""
+    cases = [
+        ("card:1:do", ADVICE_VALUE, 1),
+        ("card:3:drop", REVIEW_VALUE, 3),
+        ("card:0:defer", REPAIR_VALUE, 0),
+    ]
+    for action_id, value, idx in cases:
+        ctx = _FakeCtx()
+        with _env():
+            _, handler = _register(ctx)[0]
+            calls = []
+            with _patched_effects(calls):
+                _run(handler, _body(action_id, value), calls)
+        progress, final = _updates(calls)
+        first_effect = min(
+            (i for i, c in enumerate(calls) if isinstance(c, tuple) and c[0] in ("record", "consumption")),
+            default=len(calls),
+        )
+        assert calls.index(progress) < first_effect, (
+            f"{action_id}: progress must land before the first effect"
+        )
+        _assert_single_row_marked(BLOCKS, progress[3], idx)
+        assert _status_at(progress[3], idx) == "⏳ 진행 중…"
+        _assert_single_row_marked(BLOCKS, final[3], idx)
+        assert _status_at(final[3], idx) is None, (
+            f"{action_id}: the settled row is a verdict, not the progress line"
+        )
 
 
 def test_a_rejected_press_runs_no_effect():
@@ -356,7 +404,8 @@ def test_a_raising_effect_stops_the_fold_and_the_handler_survives():
             mock.patch.object(PLUGIN, "_LOG") as log,
         ):
             _run(handler, _body("card:3:drop", REVIEW_VALUE), calls)
-    assert calls == ["ack"], "the record behind the dead engine call must never run"
+    assert _without_updates(calls) == ["ack"], "the record behind the dead engine call must never run"
+    assert _status_at(_updates(calls)[-1][3], 3) == "✕ 실패 — engine down"
     log.error.assert_called_once()
     logged = log.error.call_args.args
     assert CARD_TS in logged and 3 in logged and "consumption" in logged
@@ -408,17 +457,17 @@ def test_a_racing_second_press_is_refused_while_the_card_still_shows_buttons():
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
     assert calls[first:] == ["ack"], "the racing press must not re-run effects or chat_update"
     assert log.info.called, "the refusal is one log line"
-    assert len(_updates(calls)) == 1
+    assert len(_updates(calls)) == 2, "one press = its progress and its final; the refused press adds none"
     verdict_records = [
         c for c in calls if c == ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 1, "choice": "do"})
     ]
     assert len(verdict_records) == 1
 
 
-def test_a_failed_effect_leaves_the_card_and_releases_the_claim():
-    """A dead engine call stops the press where card.py would stop it: no chat_update, and
-    the (card_ts, idx) claim is released — the card still shows the row's buttons, so the
-    owner's next press on that row must run its effects again."""
+def test_a_failed_effect_shows_the_reason_on_the_row_and_releases_the_claim():
+    """A dead engine call stops the press where card.py would stop it: the row goes from
+    「진행 중」 to 「✕ 실패 — reason」, and the (card_ts, idx) claim is released, so a press on a
+    card that still shows the buttons (a lost update) runs its effects again."""
     state = {"down": True}
 
     def flaky(session, kind, paths):
@@ -436,14 +485,17 @@ def test_a_failed_effect_leaves_the_card_and_releases_the_claim():
             mock.patch.object(PLUGIN, "_LOG"),
         ):
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
-            assert calls == [
+            assert _without_updates(calls) == [
                 "ack",
                 ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 1, "choice": "do"}),
             ]
-            assert not _updates(calls), "a failed effect must leave the card untouched"
+            progress, failed = _updates(calls)
+            assert _status_at(progress[3], 1) == "⏳ 진행 중…"
+            assert _status_at(failed[3], 1) == "✕ 실패 — engine down"
+            _assert_single_row_marked(BLOCKS, failed[3], 1)
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
     assert ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"]) in calls
-    assert len(_updates(calls)) == 1
+    assert len(_updates(calls)) == 4
 
 
 def test_a_failed_chat_update_is_one_log_line_and_keeps_the_claim():
@@ -458,26 +510,25 @@ def test_a_failed_chat_update_is_one_log_line_and_keeps_the_claim():
             mock.patch.object(PLUGIN, "_LOG") as log,
         ):
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls, fail=True)
-            assert calls[:3] == [
-                "ack",
+            assert calls[2:4] == [
                 ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 1, "choice": "do"}),
                 ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"]),
             ]
-            assert len(_updates(calls)) == 1, "the failed update is still attempted once"
-            log.error.assert_called_once()
+            assert len(_updates(calls)) == 2, "progress and final are each attempted once"
+            assert log.error.call_count == 2, "each failed update is one line, and the effects still ran"
             logged = log.error.call_args.args
             assert CARD_TS in logged and 1 in logged
             assert any("chat_update" in str(a) for a in logged)
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
-    assert calls[4:] == ["ack"], "the re-press must not repeat the effects"
-    assert len(_updates(calls)) == 1
+    assert calls[5:] == ["ack"], "the re-press must not repeat the effects"
+    assert len(_updates(calls)) == 2
 
 
 def test_a_repair_answered_with_a_non_done_value_is_one_log_line_and_marks_the_row():
     """The door answers a failed merge with a value (F2), not a raise — one error line, and
     the row shows the door's own numbers: never the plain ✓ 채택 mark, never silence."""
 
-    def merge_fails(subject):
+    def merge_fails(subject, row=None):
         calls.append(("repair", subject))
         return card_types.RepairFailed(
             subject=subject,
@@ -501,32 +552,33 @@ def test_a_repair_answered_with_a_non_done_value_is_one_log_line_and_marks_the_r
     logged = log.error.call_args.args
     assert CARD_TS in logged and 0 in logged and "RepairFailed" in logged
     updates = _updates(calls)
-    assert len(updates) == 1
-    _, channel, ts, updated = updates[0]
+    assert len(updates) == 2
+    _, channel, ts, updated = updates[-1]
     assert (channel, ts) == (CARD_CH, CARD_TS)
     _assert_single_row_marked(BLOCKS, updated, 0)
     rendered = json.dumps(updated, ensure_ascii=False)
     assert "✕ 합침 실패" in rendered and "지운 행 5" in rendered
 
 
-def test_a_repair_done_value_marks_the_row_with_the_doors_numbers():
+def test_an_accepted_merge_stays_in_progress_and_hands_the_door_its_row():
+    """The door answered 202 and rereads in the background: the plugin writes no final mark —
+    the door settles the row when the reread ends — and it names the row in the request."""
     done = card_types.RepairDone(subject="foodspring-front", deleted_rows=5, reread_notes=2)
+    seen = []
     ctx = _FakeCtx()
     with _env():
         _, handler = _register(ctx)[0]
         calls = []
         with (
-            _patched_effects(calls, execute_repair=lambda subject: done),
+            _patched_effects(calls, execute_repair=lambda subject, row=None: seen.append(row) or done),
             mock.patch.object(PLUGIN, "_LOG") as log,
         ):
             _run(handler, _body("card:0:do", REPAIR_VALUE), calls)
     assert not log.error.called
-    updates = _updates(calls)
-    assert len(updates) == 1
-    _, channel, ts, updated = updates[0]
-    assert (channel, ts) == (CARD_CH, CARD_TS)
-    _assert_single_row_marked(BLOCKS, updated, 0)
-    assert "✓ 합침 — 지운 행 5 · 다시 읽는 노트 2" in json.dumps(updated, ensure_ascii=False)
+    assert seen == [card_types.RowRef(channel=CARD_CH, card_ts=CARD_TS, idx=0)]
+    (progress,) = _updates(calls)
+    _assert_single_row_marked(BLOCKS, progress[3], 0)
+    assert _status_at(progress[3], 0) == "⏳ 진행 중…"
 
 
 if __name__ == "__main__":
@@ -537,12 +589,13 @@ if __name__ == "__main__":
     test_the_handler_acks_before_any_effect()
     test_a_press_on_a_card_older_than_the_answerable_hours_runs_no_effect()
     test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card()
+    test_every_lane_shows_progress_first_and_only_that_row_changes()
     test_a_rejected_press_runs_no_effect()
     test_a_raising_effect_stops_the_fold_and_the_handler_survives()
     test_an_already_judged_row_is_refused_with_one_log_line()
     test_a_racing_second_press_is_refused_while_the_card_still_shows_buttons()
-    test_a_failed_effect_leaves_the_card_and_releases_the_claim()
+    test_a_failed_effect_shows_the_reason_on_the_row_and_releases_the_claim()
     test_a_failed_chat_update_is_one_log_line_and_keeps_the_claim()
     test_a_repair_answered_with_a_non_done_value_is_one_log_line_and_marks_the_row()
-    test_a_repair_done_value_marks_the_row_with_the_doors_numbers()
+    test_an_accepted_merge_stays_in_progress_and_hands_the_door_its_row()
     print("ok - boring-card plugin: ack-first, in-place mark, double-press refused, loud refusals")

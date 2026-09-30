@@ -5,8 +5,11 @@ judged on the card, or a racing second press on the same row), and folds the sha
 table (card_press.effects) through the same interpreter and the same live functions card.py's
 record_verdict uses (card_effects.run over card_effects._live_*). One table, one interpreter,
 wherever a press lands — and one stop rule: the fold halts at the first failed effect, so a
-dead engine never leaves a verdict record for a consumption it never received. Effects done,
-the card itself is edited in place: card_view.mark_pressed re-renders just the pressed row on
+dead engine never leaves a verdict record for a consumption it never received. Before any
+effect the pressed row turns into 「진행 중」 (card_view.mark_progress); a failed effect turns it
+into 「실패 — reason」; a merge the door accepted stays in progress until the door, which owns
+the reread, settles the row itself. Effects done, the card itself is edited in place:
+card_view.mark_pressed re-renders just the pressed row on
 the blocks the Slack payload carries, and chat_update swaps them in for the row card.py would
 rebuild from its in-memory graph. The display language is the same resolution card.py builds
 its graph with (card_advice.resolve_lang(boring_config.note_lang())).
@@ -116,6 +119,31 @@ def register(ctx: Any) -> None:
             _PLUGIN_NAME,
         )
 
+    async def _push(press, blocks) -> None:
+        """One chat_update of the card — a Rejected value or a failed call is one log line,
+        never a dead handler: the effects do not depend on the card showing them."""
+        if isinstance(blocks, card_types.Rejected):
+            _LOG.error(
+                "%s: press card_ts=%s idx=%s could not re-render the card — %s",
+                _PLUGIN_NAME,
+                press.card_ts,
+                press.idx,
+                blocks.reason,
+            )
+            return
+        if _client is None:
+            return
+        try:
+            await _client.chat_update(channel=press.channel, ts=press.card_ts, blocks=blocks)
+        except Exception as e:  # noqa: BLE001 — effects may be done; the claim stays so a re-press cannot repeat them
+            _LOG.error(
+                "%s: press card_ts=%s idx=%s chat_update failed — %s",
+                _PLUGIN_NAME,
+                press.card_ts,
+                press.idx,
+                e,
+            )
+
     async def _handler(ack, body, action) -> None:
         await ack()
         press = card_press.parse_press(body, owner_id=owner_id)
@@ -155,6 +183,8 @@ def register(ctx: Any) -> None:
             return
         _claimed.add(key)
         effects = card_press.effects(press)
+        row = card_types.RowRef(channel=press.channel, card_ts=press.card_ts, idx=press.idx)
+        await _push(press, card_view.mark_progress(blocks or [], press.idx, card_types.Pending(), lang=lang))
 
         def _apply():
             # One fold over the whole list, in the thread: a failed engine call stops the
@@ -164,7 +194,7 @@ def register(ctx: Any) -> None:
                 effects,
                 card_effects._live_record,
                 card_effects._live_consumption,
-                card_effects._live_execute_repair,
+                lambda subject: card_effects._live_execute_repair(subject, row),
             )
 
         try:
@@ -172,6 +202,11 @@ def register(ctx: Any) -> None:
         except Exception as e:  # noqa: BLE001 — one bad effect is one line, never a dead handler
             _claimed.discard(key)
             failed = getattr(e, "card_failed_effect", None)
+            reason = " ".join(str(e).split()) or type(e).__name__
+            await _push(
+                press,
+                card_view.mark_progress(blocks or [], press.idx, card_types.Failed(reason=reason), lang=lang),
+            )
             _LOG.error(
                 "%s: press card_ts=%s idx=%s effect=%s failed — %s effect(s) skipped — %s",
                 _PLUGIN_NAME,
@@ -195,17 +230,6 @@ def register(ctx: Any) -> None:
                     getattr(result, "reason", ""),
                 )
         repair_result = results[0] if results else None
-        marked = card_view.mark_pressed(blocks or [], press, lang=lang, repair_result=repair_result)
-        if isinstance(marked, card_types.Rejected):
-            # The effects already ran: the claim stays, or a re-press would run them twice.
-            _LOG.error(
-                "%s: press card_ts=%s idx=%s could not re-render the card — %s",
-                _PLUGIN_NAME,
-                press.card_ts,
-                press.idx,
-                marked.reason,
-            )
-            return
         _LOG.info(
             "%s: press card_ts=%s idx=%s %s %s applied",
             _PLUGIN_NAME,
@@ -214,18 +238,16 @@ def register(ctx: Any) -> None:
             press.lane,
             press.choice,
         )
-        if _client is None:
-            return
-        try:
-            await _client.chat_update(channel=press.channel, ts=press.card_ts, blocks=marked)
-        except Exception as e:  # noqa: BLE001 — effects are done; the claim stays so a re-press cannot repeat them
-            _LOG.error(
-                "%s: press card_ts=%s idx=%s chat_update failed — %s",
-                _PLUGIN_NAME,
-                press.card_ts,
-                press.idx,
-                e,
-            )
+        match repair_result:
+            case card_types.RepairDone():
+                # The door committed the merge and rereads in the background; it settles this
+                # row itself when the reread ends, so the row stays "in progress" until then.
+                return
+            case _:
+                await _push(
+                    press,
+                    card_view.mark_pressed(blocks or [], press, lang=lang, repair_result=repair_result),
+                )
 
     ctx.register_slack_action_handler(_ACTION_ID, _handler)
     _LOG.info("%s: card button handler registered (owner %s)", _PLUGIN_NAME, owner_id)

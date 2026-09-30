@@ -126,15 +126,19 @@ def _door_failure(subject: str, code: int, body: bytes) -> RepairFailed | Repair
     )
 
 
-def _live_execute_repair(subject: str) -> RepairDone | RepairFailed | RepairUnanswered:
+def _live_execute_repair(
+    subject: str, row: card_types.RowRef | None = None
+) -> RepairDone | RepairFailed | RepairUnanswered:
     """POST the door's merge. The door commits DELETE+UPDATE before its sync, so a timeout
     or a count-less body may already have deleted the rows — a failure without reported
     counts is RepairUnanswered, never a fabricated 0 (F2). Never raised: a slow or failed
-    merge must not end the card's whole run over one button."""
+    merge must not end the card's whole run over one button. With `row`, the door settles
+    that card row itself once its reread has finished."""
     claim = {"subject": subject, "judge": OWNER}
+    body = claim if row is None else {**claim, "row": row.model_dump()}
     req = urllib.request.Request(
         f"{_door_url()}/repairs/split-subjects",
-        data=json.dumps(claim).encode(),
+        data=json.dumps(body).encode(),
         headers={"content-type": "application/json", **owner_headers(claim)},
         method="POST",
     )

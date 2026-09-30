@@ -32,6 +32,7 @@ import json
 import os
 import sys
 from collections.abc import Iterable
+from typing import assert_never
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 
@@ -39,7 +40,11 @@ from card_types import (  # noqa: E402
     CHOICES,
     ButtonVerdict,
     Confirmation,
+    Done,
     Evidence,
+    Failed,
+    Outcome,
+    Pending,
     Press,
     Proposal,
     ProposedVerdict,
@@ -401,6 +406,70 @@ def mark_pressed(
             out[i] = _verdict_block(verdict, strings)
         return out
     return Rejected(reason=f"row {press.idx} is not pressable")
+
+
+def _status_id(idx: int) -> str:
+    return f"card:{idx}:status"
+
+
+def status_text(outcome: Outcome, strings: dict[str, str]) -> str:
+    match outcome:
+        case Pending():
+            return strings["progress_pending"]
+        case Done(text=text):
+            return text
+        case Failed(reason=reason):
+            return strings["progress_failed"].format(reason=reason)
+        case _:
+            assert_never(outcome)
+
+
+def _row_at(blocks: list[dict], idx: int) -> int | None:
+    prefix = f"card:{idx}:"
+    return next(
+        (
+            i
+            for i, block in enumerate(blocks)
+            if block.get("block_id") == _status_id(idx)
+            or (
+                block.get("type") == "actions"
+                and any(
+                    isinstance(el, dict)
+                    and isinstance(el.get("action_id"), str)
+                    and el["action_id"].startswith(prefix)
+                    for el in block.get("elements", [])
+                )
+            )
+        ),
+        None,
+    )
+
+
+def mark_progress(blocks: list[dict], idx: int, outcome: Outcome, *, lang: str) -> list[dict] | Rejected:
+    """Only row `idx` changes: its buttons (or its earlier status) become a status line whose
+    block_id names the row, so a later writer can find it again without knowing the buttons."""
+    at = _row_at(blocks, idx)
+    if at is None:
+        return Rejected(reason=f"row {idx} has no buttons or status to replace")
+    text = status_text(outcome, card_i18n.STRINGS[lang])
+    status = {
+        "type": "context",
+        "block_id": _status_id(idx),
+        "elements": [{"type": "mrkdwn", "text": text}],
+    }
+    return [*blocks[:at], status, *blocks[at + 1 :]]
+
+
+def merged_outcome(done: RepairDone, *, lang: str) -> Done:
+    strings = card_i18n.STRINGS[lang]
+    text = strings["progress_merged"].format(
+        deleted=done.deleted_rows, reread=done.reread_notes
+    ) + _owner_held_suffix(done.owner_held, strings)
+    return Done(text=text)
+
+
+def reread_failed_outcome(error: object, *, lang: str) -> Failed:
+    return Failed(reason=card_i18n.STRINGS[lang]["reread_failed_reason"].format(error=error))
 
 
 def _project_groups(proposals: list[Proposal]) -> list[tuple[str, list[int]]]:

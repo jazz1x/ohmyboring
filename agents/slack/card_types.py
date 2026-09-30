@@ -375,6 +375,37 @@ class RepairUnanswered(BaseModel):
     reason: str
 
 
+class RowRef(BaseModel):
+    """Where one card row lives: the message and the button idx — what the door needs to
+    settle a merge row itself once its reread has finished."""
+
+    channel: str
+    card_ts: str
+    idx: int
+
+
+class Pending(BaseModel):
+    """A pressed row whose work has not finished."""
+
+    outcome: Literal["pending"] = "pending"
+
+
+class Done(BaseModel):
+    """A pressed row whose work finished; `text` is the whole mark the row shows."""
+
+    outcome: Literal["done"] = "done"
+    text: str
+
+
+class Failed(BaseModel):
+    outcome: Literal["failed"] = "failed"
+    reason: str
+
+
+#: What a pressed row shows — folded into a status block in one place (card_view.status_text).
+Outcome = Annotated[Pending | Done | Failed, Field(discriminator="outcome")]
+
+
 class Registers(BaseModel):
     """The four engine registers as prompt text, and per register the allow-list a
     proposal's `source_note` must come from."""

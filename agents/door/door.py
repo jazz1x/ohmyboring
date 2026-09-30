@@ -36,7 +36,8 @@ two ways (e.g. "foodspring front" vs "foodspring-front") — POST is the door's
 first write route: it deletes the split rows (an owner-written note's only with the
 owner token — otherwise that note is skipped and named in `owner_held`), blanks the affected notes' sha
 so the engine's own /sync rereads them under the merged form, and calls that
-/sync itself. Of the GETs, only /projects without active_days reaches the upstream.
+/sync itself — one reread at a time, merges landing meanwhile queue for the next; a body
+`row: {channel, card_ts, idx}` names the card row the door settles when its reread ends. Of the GETs, only /projects without active_days reaches the upstream.
 And POST /run/morning-card · POST /run/weekly-card run the card programs
 themselves (agents/slack/card.py · weekly_card.py as a subprocess with the door's
 own env): hermes cron owns the schedule and asks the door to fire the tool, one run
@@ -64,6 +65,7 @@ import threading
 import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -71,13 +73,21 @@ from typing import Any
 import psycopg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import ValidationError
+from slack_sdk.errors import SlackApiError
 
+from ohmyboring import config as boring_config
 from ohmyboring.adapters import vault as vault_notes
 from ohmyboring.entrypoints.http import mcp_recall
 from ohmyboring.recall import named as recall_named
 
 from ..shared import vault_note
 from . import approved, claim_source, rules
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "slack"))
+import card_advice  # noqa: E402
+import card_types  # noqa: E402
+import card_view  # noqa: E402
 
 _TIMEOUT = float(os.environ.get("DOOR_TIMEOUT", "130"))
 
@@ -605,32 +615,149 @@ def _call_engine_sync() -> dict[str, Any]:
     return {"ok": False, "error": parsed}
 
 
-def _reread_after_merge(subject: str, deleted_rows: int, reread_notes: int, owner_held: list[str]) -> None:
-    """The engine's /sync is a whole-vault pass (minutes on the live corpus, 2026-09-29) and the
-    merge is already committed before it starts, so nobody waits on it: a failure is one stderr
-    line, a success recounts and records `subject_merged`."""
-    sync_result = _call_engine_sync()
-    if not sync_result["ok"]:
-        print(
-            f"[door] reread after merging {subject!r} failed: {sync_result['error']}",
-            file=sys.stderr,
-            flush=True,
-        )
+@dataclass(frozen=True)
+class _Merged:
+    """A committed merge waiting for the engine to reread it; `row` is the card row to settle."""
+
+    subject: str
+    deleted_rows: int
+    reread_notes: int
+    owner_held: list[str]
+    row: card_types.RowRef | None
+
+
+#: One reread runs at a time: /sync is a whole-vault pass, and three overlapping ones timed out
+#: two of themselves (2026-09-30 08:04). A merge that lands while it runs waits in the queue;
+#: the worker then runs once more, which covers every merge queued meanwhile.
+_REREAD_LOCK = threading.Lock()
+_REREAD_QUEUE: list[_Merged] = []
+_REREAD_WORKER: threading.Thread | None = None
+_ROW_LOCK = threading.Lock()
+
+
+def _slack_client() -> Any | None:
+    token = os.environ.get("SLACK_BOT_TOKEN", "").split(",")[0].strip()
+    if not token:
+        return None
+    from slack_sdk import WebClient
+
+    return WebClient(token=token)
+
+
+def _row_after(messages: list[dict], row: card_types.RowRef, outcome: card_types.Outcome, lang: str):
+    message = next((m for m in messages if m.get("ts") == row.card_ts), None)
+    if message is None:
+        return card_types.Rejected(reason=f"message {row.card_ts} not in the history read")
+    return card_view.mark_progress(message.get("blocks") or [], row.idx, outcome, lang=lang)
+
+
+def _show_row(row: card_types.RowRef, outcome: card_types.Outcome, lang: str) -> None:
+    """Rewrite one row of the card message from the message as Slack holds it now, so the
+    other rows keep whatever the plugin or an earlier settle put there."""
+    client = _slack_client()
+    if client is None:
+        print(f"[door] no SLACK_BOT_TOKEN — card row {row.idx} not settled", file=sys.stderr, flush=True)
         return
-    remaining_variants = _count_variants(_fetch_split_subject_rows(), subject)
-    _emit_subject_merged_event(subject, deleted_rows, reread_notes, remaining_variants, owner_held)
+    try:
+        with _ROW_LOCK:
+            history = client.conversations_history(
+                channel=row.channel, latest=row.card_ts, inclusive=True, limit=1
+            )
+            marked = _row_after(history.get("messages") or [], row, outcome, lang)
+            match marked:
+                case card_types.Rejected(reason=reason):
+                    print(f"[door] card row {row.idx} not settled — {reason}", file=sys.stderr, flush=True)
+                case _:
+                    client.chat_update(channel=row.channel, ts=row.card_ts, blocks=marked)
+    except (OSError, SlackApiError) as e:
+        print(f"[door] card row {row.idx} not settled — {e}", file=sys.stderr, flush=True)
 
 
-def _reread_in_background(subject: str, deleted_rows: int, reread_notes: int, owner_held: list[str]) -> None:
-    threading.Thread(
-        target=_reread_after_merge,
-        args=(subject, deleted_rows, reread_notes, owner_held),
-        name=f"reread:{subject}",
-        daemon=True,
-    ).start()
+def _record_merged(merged: _Merged, rows: list[tuple[str, str]], lang: str) -> card_types.Outcome:
+    remaining = _count_variants(rows, merged.subject)
+    _emit_subject_merged_event(
+        merged.subject, merged.deleted_rows, merged.reread_notes, remaining, merged.owner_held
+    )
+    done = card_types.RepairDone(
+        subject=merged.subject,
+        deleted_rows=merged.deleted_rows,
+        reread_notes=merged.reread_notes,
+        remaining_variants=remaining,
+        owner_held=merged.owner_held,
+    )
+    return card_view.merged_outcome(done, lang=lang)
 
 
-def _merge_split_subject(subject: str, standing: Standing) -> dict[str, Any] | None:
+def _reread_outcomes(
+    batch: list[_Merged], sync_result: dict[str, Any], lang: str
+) -> list[card_types.Outcome]:
+    """One outcome per merge in `batch`, all from the one reread that covered them."""
+    if not sync_result["ok"]:
+        error = sync_result["error"]
+        for merged in batch:
+            print(
+                f"[door] reread after merging {merged.subject!r} failed: {error}", file=sys.stderr, flush=True
+            )
+        return [card_view.reread_failed_outcome(error, lang=lang) for _ in batch]
+    try:
+        rows = _fetch_split_subject_rows()
+    except psycopg.Error as e:
+        print(f"[door] recount after the reread failed: {e}", file=sys.stderr, flush=True)
+        return [card_view.reread_failed_outcome(e, lang=lang) for _ in batch]
+    return [_record_merged(merged, rows, lang) for merged in batch]
+
+
+def _reread_batch(batch: list[_Merged]) -> None:
+    """The engine's /sync is a whole-vault pass (minutes on the live corpus, 2026-09-29) and the
+    merges are already committed before it starts, so nobody waits on it: a failure is one
+    stderr line and a failed row, a success recounts, records `subject_merged` and settles the
+    row — each only once the reread that covers the merge has ended."""
+    lang = card_advice.resolve_lang(boring_config.note_lang())
+    outcomes = _reread_outcomes(batch, _call_engine_sync(), lang)
+    for merged, outcome in zip(batch, outcomes, strict=True):
+        match merged.row:
+            case None:
+                pass
+            case row:
+                _show_row(row, outcome, lang)
+
+
+def _take_batch() -> list[_Merged]:
+    global _REREAD_WORKER
+    with _REREAD_LOCK:
+        batch = list(_REREAD_QUEUE)
+        _REREAD_QUEUE.clear()
+        if not batch:
+            _REREAD_WORKER = None
+        return batch
+
+
+def _reread_worker() -> None:
+    global _REREAD_WORKER
+    try:
+        while batch := _take_batch():
+            _reread_batch(batch)
+    except BaseException:
+        # Whatever raised, the next merge must be able to start a worker: a stuck handle would
+        # queue merges that no reread ever covers.
+        with _REREAD_LOCK:
+            _REREAD_WORKER = None
+        raise
+
+
+def _reread_in_background(merged: _Merged) -> None:
+    global _REREAD_WORKER
+    with _REREAD_LOCK:
+        _REREAD_QUEUE.append(merged)
+        if _REREAD_WORKER is not None:
+            return
+        _REREAD_WORKER = threading.Thread(target=_reread_worker, name="reread", daemon=True)
+        _REREAD_WORKER.start()
+
+
+def _merge_split_subject(
+    subject: str, standing: Standing, row: card_types.RowRef | None = None
+) -> dict[str, Any] | None:
     """The POST body of the repair: locate the group, delete its split rows, blank the affected
     notes' sha, commit, then start the reread without waiting for it. Without the owner
     token, owner-written notes are skipped and named in `owner_held`, so the merge of everyone
@@ -657,7 +784,7 @@ def _merge_split_subject(subject: str, standing: Standing) -> dict[str, Any] | N
     finally:
         conn.close()
 
-    _reread_in_background(subject, deleted_rows, reread_notes, owner_held)
+    _reread_in_background(_Merged(subject, deleted_rows, reread_notes, owner_held, row))
     return {
         "subject": subject,
         "deleted_rows": deleted_rows,
@@ -696,11 +823,18 @@ async def _repairs_split_subjects_post(request: Request) -> Response:
     subject = body.get("subject") if isinstance(body, dict) else None
     if not subject:
         return JSONResponse({"error": "subject is required"}, status_code=400)
+    try:
+        raw_row = body.get("row")
+        row = None if raw_row is None else card_types.RowRef.model_validate(raw_row)
+    except ValidationError as e:
+        return JSONResponse(
+            {"error": "row must be {channel, card_ts, idx}", "detail": str(e)}, status_code=400
+        )
     if not os.environ.get("DOOR_PG_DSN"):
         return JSONResponse({"error": "store not configured"}, status_code=503)
     try:
         result = await asyncio.to_thread(
-            _merge_split_subject, subject, _standing(request.headers.get(_OWNER_TOKEN_HEADER))
+            _merge_split_subject, subject, _standing(request.headers.get(_OWNER_TOKEN_HEADER)), row
         )
     except psycopg.OperationalError as e:
         return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)

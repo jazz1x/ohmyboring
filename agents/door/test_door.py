@@ -1191,9 +1191,15 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
             touched["event_owner_held"] = owner_held
             return "delivered"
 
-        def fake_reread_in_background(subject, deleted_rows, reread_notes, owner_held):
+        def fake_reread_in_background(merged):
             order.append("reread-started")
-            touched["reread_args"] = [subject, deleted_rows, reread_notes, owner_held]
+            touched["reread_args"] = [
+                merged.subject,
+                merged.deleted_rows,
+                merged.reread_notes,
+                merged.owner_held,
+            ]
+            touched["reread_row"] = merged.row
 
         self._sync_result = {"ok": True, "summary": {"ingest_new": 0, "ingest_repaired": 2}}
         self._orig_reread = door._reread_in_background
@@ -1217,8 +1223,8 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
         if self._saved_token is not None:
             os.environ["BORING_OWNER_TOKEN"] = self._saved_token
 
-    def _post(self, subject: str, token: str | None = None):
-        payload = json.dumps({"subject": subject}).encode()
+    def _post(self, subject: str, token: str | None = None, row=None):
+        payload = json.dumps({"subject": subject, **({} if row is None else {"row": row})}).encode()
         headers = {"content-type": "application/json"}
         if token is not None:
             headers["X-Boring-Owner-Token"] = token
@@ -1276,16 +1282,28 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
         self.assertEqual(self.touched["delete"], ["/a.md", "/b.md"])
         self.assertEqual(out["owner_held"], [])
 
+    def test_the_card_row_rides_to_the_reread_and_a_malformed_one_is_a_400(self):
+        row = {"channel": "C1", "card_ts": "1.0", "idx": 2}
+        status, _, _ = self._post("foodspring-front", row=row)
+        self.assertEqual(status, 202)
+        self.assertEqual(self.touched["reread_row"], door.card_types.RowRef(**row))
+
+        self.order.clear()
+        status, _, _ = self._post("foodspring-front", row={"channel": "C1"})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.order, [], "a malformed row touches nothing")
+
     def test_reread_recounts_and_records_or_says_it_failed(self):
         self._fetch_calls = 1
-        door._reread_after_merge("foodspring-front", 2, 2, [])
+        merged = door._Merged("foodspring-front", 2, 2, [], None)
+        door._reread_batch([merged])
         self.assertEqual(self.order, ["sync", "event"])
 
         self.order.clear()
         self._sync_result = {"ok": False, "error": "engine unreachable: timed out"}
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            door._reread_after_merge("foodspring-front", 2, 2, [])
+            door._reread_batch([merged])
         self.assertEqual(self.order, ["sync"], "no subject_merged event for a reread that did not happen")
         self.assertIn("foodspring-front", buf.getvalue())
         self.assertIn("timed out", buf.getvalue())
@@ -1582,6 +1600,138 @@ class RunCardRouteTests(unittest.TestCase):
         self.assertEqual(by_status[409], {"error": "morning-card already running"})
         self.assertEqual(by_status[200]["ok"], True)
         self.assertEqual(by_status[200]["posted_ts"], "3.0")
+
+
+class _FakeWeb:
+    """A Slack message the door reads and rewrites — history returns it as it stands now."""
+
+    def __init__(self, blocks):
+        self.blocks = blocks
+        self.updates = []
+
+    def conversations_history(self, **kw):
+        return {"messages": [{"ts": "1.0", "blocks": self.blocks}]}
+
+    def chat_update(self, *, channel, ts, blocks):
+        self.updates.append((channel, ts))
+        self.blocks = blocks
+
+
+def _card_with_pending_rows(n):
+    repairs = [
+        door.card_types.Repair(subject=f"subj-{i}", variants=[f"subj {i}", f"subj-{i}"], rows=3, notes=2)
+        for i in range(n)
+    ]
+    blocks = door.card_view.build_blocks([], repairs=repairs, repairs_total_groups=n, lang="ko")
+    for i in range(n):
+        blocks = door.card_view.mark_progress(blocks, i, door.card_types.Pending(), lang="ko")
+    return blocks
+
+
+class RereadSingleFlightTests(unittest.TestCase):
+    """Three merges landing while a reread runs must not start three /sync passes (2026-09-30
+    08:04: three overlapped, two timed out), and each merge's card row settles only once the
+    reread that covered it has ended."""
+
+    def setUp(self):
+        self.syncs = 0
+        self.sync_result = {"ok": True, "summary": {}}
+        self.gate = threading.Event()
+        self.first_entered = threading.Event()
+        self.events = []
+        self.web = _FakeWeb(_card_with_pending_rows(3))
+        self.patches = [
+            mock.patch.object(door, "_call_engine_sync", self._sync),
+            mock.patch.object(door, "_fetch_split_subject_rows", lambda: [("subj-0", "/a.md")]),
+            mock.patch.object(door, "_emit_subject_merged_event", self._emit),
+            mock.patch.object(door, "_slack_client", lambda: self.web),
+            mock.patch.object(door.boring_config, "note_lang", lambda: "ko"),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        self.gate.set()
+        worker = door._REREAD_WORKER
+        if worker is not None:
+            worker.join(10)
+        for p in self.patches:
+            p.stop()
+
+    def _sync(self):
+        self.syncs += 1
+        self.first_entered.set()
+        self.gate.wait(10)
+        return self.sync_result
+
+    def _emit(self, subject, *rest):
+        self.events.append(subject)
+        return "delivered"
+
+    def _merge(self, idx):
+        row = door.card_types.RowRef(channel="C1", card_ts="1.0", idx=idx)
+        door._reread_in_background(door._Merged(f"subj-{idx}", 3, 2, [], row))
+
+    def _run_three(self):
+        self._merge(0)
+        self.assertTrue(self.first_entered.wait(10))
+        self._merge(1)
+        self._merge(2)
+        worker = door._REREAD_WORKER
+        self.gate.set()
+        worker.join(10)
+        self.assertFalse(worker.is_alive())
+
+    def _texts(self):
+        return [
+            b["elements"][0]["text"]
+            for b in self.web.blocks
+            if str(b.get("block_id", "")).endswith(":status")
+        ]
+
+    def test_three_merges_run_at_most_two_syncs_and_settle_all_three_rows(self):
+        self._run_three()
+        self.assertLessEqual(self.syncs, 2)
+        self.assertEqual(
+            self.syncs, 2, "control: the merges queued behind the first still get their own reread"
+        )
+        self.assertEqual(sorted(self.events), ["subj-0", "subj-1", "subj-2"])
+        texts = self._texts()
+        self.assertEqual(len(texts), 3)
+        self.assertTrue(all(t.startswith("✓ 완료") for t in texts), texts)
+
+    def test_a_failed_reread_fails_every_row_it_covered_and_records_no_merge(self):
+        self.sync_result = {"ok": False, "error": "engine unreachable: timed out"}
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self._run_three()
+        texts = self._texts()
+        self.assertEqual(len(texts), 3)
+        self.assertTrue(all(t.startswith("✕ 실패") and "timed out" in t for t in texts), texts)
+        self.assertEqual(self.events, [])
+
+    def test_settling_one_row_leaves_every_other_block_as_slack_holds_it(self):
+        before = self.web.blocks
+        outcome = door.card_types.Done(text="✓ 완료 — x")
+        door._show_row(door.card_types.RowRef(channel="C1", card_ts="1.0", idx=1), outcome, "ko")
+        changed = [i for i, (a, b) in enumerate(zip(before, self.web.blocks)) if a != b]
+        self.assertEqual(len(before), len(self.web.blocks))
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(self.web.blocks[changed[0]]["block_id"], "card:1:status")
+        self.assertEqual(self.web.blocks[changed[0]]["elements"][0]["text"], "✓ 완료 — x")
+
+    def test_a_merge_after_the_worker_drained_starts_a_fresh_one(self):
+        self.gate.set()
+        self._merge(0)
+        first = door._REREAD_WORKER
+        if first is not None:
+            first.join(10)
+        self._merge(1)
+        second = door._REREAD_WORKER
+        if second is not None:
+            second.join(10)
+        self.assertEqual(self.syncs, 2)
+        self.assertIsNone(door._REREAD_WORKER)
 
 
 if __name__ == "__main__":

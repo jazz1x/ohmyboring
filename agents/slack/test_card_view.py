@@ -818,6 +818,25 @@ class MarkPressedParityTests(unittest.TestCase):
         )
         self.assertIsInstance(cv.mark_pressed([], self._press("advice", 1, "do"), lang="ko"), cc.Rejected)
 
+    def test_progress_replaces_only_its_row_and_a_later_outcome_settles_over_it(self):
+        blocks = self._card()
+        for lang in ("ko", "en", "ja"):
+            pending = cv.mark_progress(blocks, 2, cc.Pending(), lang=lang)
+            changed = [i for i, (a, b) in enumerate(zip(blocks, pending)) if a != b]
+            self.assertEqual(len(pending), len(blocks))
+            self.assertEqual(len(changed), 1)
+            row = pending[changed[0]]
+            self.assertEqual(row["block_id"], "card:2:status")
+            self.assertEqual(row["elements"][0]["text"], card_i18n.STRINGS[lang]["progress_pending"])
+            failed = cv.mark_progress(pending, 2, cc.Failed(reason="boom"), lang=lang)
+            self.assertEqual(
+                failed[changed[0]]["elements"][0]["text"],
+                card_i18n.STRINGS[lang]["progress_failed"].format(reason="boom"),
+            )
+            self.assertEqual(failed[: changed[0]], blocks[: changed[0]])
+            self.assertEqual(failed[changed[0] + 1 :], blocks[changed[0] + 1 :])
+        self.assertIsInstance(cv.mark_progress(blocks, 99, cc.Pending(), lang="ko"), cc.Rejected)
+
 
 if __name__ == "__main__":
     unittest.main()
