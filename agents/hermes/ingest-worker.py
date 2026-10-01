@@ -143,10 +143,10 @@ def _log_worker_event(event, status, agent="claude-code", **fields):
 
 def _eligible(p):
     """A session is queue-eligible if: within window, big enough, finished writing, not yet
-    done, not pending, not in fresh retry state, and not already handled by the engine-direct
-    SessionEnd hook."""
+    done, not dead, not pending, not in fresh retry state, and not already handled by the
+    engine-direct SessionEnd hook."""
     sid = os.path.splitext(os.path.basename(p))[0]
-    if markers.is_done(sid) or distill_queue.is_queued(sid):
+    if markers.is_done(sid) or markers.is_dead(sid) or distill_queue.is_queued(sid):
         return False
     if markers.is_pending(sid, ttl=PENDING_TTL):
         return False

@@ -159,6 +159,34 @@ class IngestWorkerTest(unittest.TestCase):
             self.assertFalse(ingest_worker.distill_queue.is_queued(sid))
             self.assertEqual(self._offer_events(sid), [])
 
+    def test_dead_session_does_not_eat_a_tick_slot(self):
+        # A dead session sits in the window ahead of an eligible one and QUEUE_PER_TICK=1:
+        # enqueue() would refuse the dead session anyway, but the offer loop would still count
+        # it against this tick's budget and log a false "queued" — the eligible session behind
+        # it must not starve.
+        dead_path = self._write_session("s-dead")
+        live_path = self._write_session("s-live")
+        older = time.time() - 200
+        newer = time.time() - 100
+        os.utime(dead_path, (older, older))
+        os.utime(live_path, (newer, newer))
+        dead_marker = Path(self.tmp.name) / "s-dead.dead"
+        dead_marker.write_text("0")
+        with mock.patch.object(ingest_worker, "QUEUE_PER_TICK", 1):
+            stdout, run = self._run_main()
+        self.assertEqual(stdout, "")
+        # the tick's single slot went to the eligible session: queued and drained this tick
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[3], "s-live")
+        self.assertTrue(ingest_worker.markers.is_done("s-live"))
+        self.assertFalse(ingest_worker.distill_queue.is_queued("s-live"))
+        self.assertEqual(len(self._offer_events("s-live")), 1)
+        # the dead session got no offer, no queue entry, and its marker is untouched
+        self.assertEqual(self._offer_events("s-dead"), [])
+        self.assertFalse(ingest_worker.distill_queue.is_queued("s-dead"))
+        self.assertTrue(ingest_worker.markers.is_dead("s-dead"))
+        self.assertEqual(dead_marker.read_text(encoding="utf-8"), "0")
+
     def test_offer_ok_reports_real_numbers_when_queue_is_full(self):
         # The queue is full this tick (3 of 3) and one session is eligible — nothing gets
         # offered, but the tick-summary event must still carry the real numbers.

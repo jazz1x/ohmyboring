@@ -120,10 +120,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.x"
-      # test_pg.py (DB gate suites) needs psycopg before it can even import; previously these installs
-      # lived in "start door", which runs after the DB gate suites — first CI run of the E2a steps died
-      # with ModuleNotFoundError. requirements.txt mirrors the door image; `pip install .` puts
-      # ohmyboring (src/) on the path.
+      # before the DB gate suites: search/test_pg.py imports psycopg
       - name: install python deps (door + search/pg.py)
         run: |
           pip install -r requirements.txt
