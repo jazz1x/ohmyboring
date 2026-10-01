@@ -9,12 +9,14 @@ Guards the installer surface that is otherwise only exercised at install time:
 """
 
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import time
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import TestCase, mock
 
@@ -1278,6 +1280,97 @@ def test_wire_claude_code_leaves_a_strangers_recall_hook_untouched():
         assert f"{sys.executable} {checkout_a}/hooks/recall.py" in commands
 
 
+def test_duplicate_registrations_count_the_same_role_from_two_checkouts():
+    """A role registered once per checkout is invisible to the per-script count: the two
+    commands resolve to different files, and only files under BORING_HOME are counted anyway,
+    so every role sat in ~/.claude/settings.json twice (main and migration) while doctor (d5e)
+    printed duplicates=0. The role pass has to see it — this test dies on a scratch copy
+    without the role counting.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        checkout_a = _fake_checkout(base / "a")
+        checkout_b = _fake_checkout(base / "b")
+
+        settings = base / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": f"{sys.executable} {root}/hooks/recall.py",
+                                    }
+                                    for root in (checkout_a, checkout_b)
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = io.StringIO()
+        err = io.StringIO()
+        with (
+            mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)),
+            mock.patch.object(agent_wiring, "_REGISTRATION_FILES", (("claude-code", str(settings)),)),
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
+            rc = agent_wiring._report_duplicate_registrations()
+
+        assert rc != 0
+        assert "role=hooks/recall.py" in err.getvalue(), err.getvalue()
+        assert str(checkout_a.resolve()) in err.getvalue()
+        assert str(checkout_b.resolve()) in err.getvalue()
+
+
+def test_duplicate_registrations_pass_when_every_role_is_registered_once():
+    with tempfile.TemporaryDirectory() as d:
+        checkout_a = _fake_checkout(Path(d) / "a")
+
+        settings = Path(d) / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": f"{sys.executable} {checkout_a}/{role}",
+                                    }
+                                    for role in agent_wiring._CLAUDE_CODE_ROLE_SCRIPTS
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = io.StringIO()
+        err = io.StringIO()
+        with (
+            mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)),
+            mock.patch.object(agent_wiring, "_REGISTRATION_FILES", (("claude-code", str(settings)),)),
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
+            rc = agent_wiring._report_duplicate_registrations()
+
+        assert rc == 0, err.getvalue()
+
+
 if __name__ == "__main__":
     test_install_reports_failure()
     test_install_returns_success_when_ok()
@@ -1323,4 +1416,6 @@ if __name__ == "__main__":
     test_sync_hermes_cron_jobs_creates_with_the_declared_deliver()
     test_wire_claude_code_repoints_roles_registered_from_another_checkout()
     test_wire_claude_code_leaves_a_strangers_recall_hook_untouched()
+    test_duplicate_registrations_count_the_same_role_from_two_checkouts()
+    test_duplicate_registrations_pass_when_every_role_is_registered_once()
     print("ok - agent_wiring failure propagation + hermes wiring + settings_path")

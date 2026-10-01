@@ -1313,7 +1313,13 @@ def _report_duplicate_registrations():
             continue
         checked += 1
         counts = {}
+        role_roots = {}
         for command in _registered_commands(path):
+            # The script count below only sees files under this checkout; the same role
+            # registered from two checkouts is two different files and walks past it, so count
+            # roles across checkout roots on their own.
+            for root, role in _command_roles(command):
+                role_roots.setdefault(role, set()).add(root)
             for script in _hook_scripts(command):
                 # Only hooks that live in this checkout are ours to count. Somebody else's tool
                 # registered twice is their business, and a checker that reports it teaches the
@@ -1337,6 +1343,15 @@ def _report_duplicate_registrations():
                 duplicates += 1
                 print(
                     f"hook_registered_twice agent={agent_id} count={count} script={script}",
+                    file=sys.stderr,
+                )
+        for role in sorted(role_roots):
+            roots = role_roots[role]
+            if len(roots) > 1:
+                duplicates += 1
+                joined = ",".join(sorted(str(root) for root in roots))
+                print(
+                    f"hook_registered_twice agent={agent_id} count={len(roots)} role={role} roots={joined}",
                     file=sys.stderr,
                 )
     print(f"hook_registrations checked_configs={checked} duplicates={duplicates}")
