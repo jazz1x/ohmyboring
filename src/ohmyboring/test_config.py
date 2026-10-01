@@ -200,6 +200,18 @@ def test_load_warns_on_parse_error():
         os.unlink(tmp)
 
 
+def test_checkout_roots_unset_is_none_and_set_is_expanded():
+    """Unset must stay distinguishable from an empty scan — the caller reports it as not scanned."""
+    old_load = boring_config.load
+    try:
+        boring_config.load = lambda: {}
+        assert boring_config.checkout_roots() is None
+        boring_config.load = lambda: {"checkout_roots": ["~/src", " ", 3]}
+        assert boring_config.checkout_roots() == [str(Path("~/src").expanduser())]
+    finally:
+        boring_config.load = old_load
+
+
 def test_classify_prefers_remote_url_over_cwd():
     """Git remote identity wins over local working-tree path matching."""
     cfg = {
@@ -285,6 +297,7 @@ def main():
         test_agent_config_lookup,
         test_canonical_repo_normalizes_variants,
         test_load_warns_on_parse_error,
+        test_checkout_roots_unset_is_none_and_set_is_expanded,
         test_classify_prefers_remote_url_over_cwd,
         test_classify_adversarial_inputs,
         test_default_hermes_cron_jobs_hand_the_cards_to_hermes,

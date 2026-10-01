@@ -2,6 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/jazz1x/ohmyboring/main/boring.schema.json",
   "schema_version": 2,
   "note_lang": "auto",
+  "checkout_roots": ["~/src"],
   "card": {
     "note_links": {
       "obsidian": {"vault": "my-vault", "folder": "vault/wiki"},

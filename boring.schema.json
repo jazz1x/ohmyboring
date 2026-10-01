@@ -103,6 +103,11 @@
       "default": 1024,
       "description": "DEPRECATED (v1) — use llm.embed_dim. Still honored as a fallback when llm.embed_dim is unset."
     },
+    "checkout_roots": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Directories (~ expanded, depth ≤ 3) holding your git checkouts. The nightly hygiene pass reports projects named after a checkout folder instead of its remote repo. Unset = the check is not run (reported as not scanned, never as zero)."
+    },
     "allow_company_origin": {
       "type": "boolean",
       "default": false,

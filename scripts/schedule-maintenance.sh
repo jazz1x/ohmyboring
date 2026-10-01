@@ -43,13 +43,19 @@ run_maintenance() {
     python3 scripts/data-steward.py --fix --yes
     # --fix cannot repair this one: which repo a folder-named project belongs to takes the
     # session's cwd, and `re-work` fronted two repos (2026-09-28). So it reports, and says so.
-    splits=$(python3 scripts/data-steward.py --json --checkout-roots "$HOME/Development:$HOME/orca/workspaces" |
-        python3 -c 'import json, sys; print(", ".join("%s(%d)→%s" % (s["project"], s["notes"], "/".join(s["repos"])) for s in json.load(sys.stdin)["folder_slug_splits"]))') ||
-        echo "(folder-name check failed — continuing)"
-    if [ -n "$splits" ]; then
-        echo "folder-named projects: $splits"
-        notify_slack "폴더 이름으로 잡힌 프로젝트 — ${splits}"
-    fi
+    # Where checkouts live is boring.json's checkout_roots; unset is "not scanned", not zero.
+    splits=$(python3 scripts/data-steward.py --json |
+        python3 -c 'import json, sys; s = json.load(sys.stdin)["folder_slug_splits"]; print("-" if s is None else ", ".join("%s(%d)→%s" % (x["project"], x["notes"], "/".join(x["repos"])) for x in s))') ||
+        splits="?"
+    case "$splits" in
+        -) echo "folder-name check: not scanned (boring.json checkout_roots unset)" ;;
+        "?") echo "(folder-name check failed — continuing)" ;;
+        "") echo "folder-name check: none" ;;
+        *)
+            echo "folder-named projects: $splits"
+            notify_slack "폴더 이름으로 잡힌 프로젝트 — ${splits}"
+            ;;
+    esac
     echo "--- retention ---"
     python3 scripts/retention.py --apply --yes
     # Injection precision is the product's first-class metric and it cannot be computed from

@@ -479,7 +479,7 @@ def main():
     parser.add_argument(
         "--checkout-roots",
         help="colon-separated dirs to scan for git checkouts; reports projects named after a checkout folder "
-        "instead of its remote repo (e.g. ~/Development:~/orca/workspaces)",
+        "instead of its remote repo. Default: boring.json checkout_roots; unset = not scanned",
     )
     args = parser.parse_args()
 
@@ -488,7 +488,8 @@ def main():
         print(f"[error] wiki directory not found: {wiki_dir}", file=sys.stderr)
         sys.exit(1)
 
-    roots = [Path(r).expanduser() for r in args.checkout_roots.split(":")] if args.checkout_roots else None
+    raw_roots = args.checkout_roots.split(":") if args.checkout_roots else boring_config.checkout_roots()
+    roots = None if raw_roots is None else [Path(r).expanduser() for r in raw_roots]
     notes, report = analyze_vault(wiki_dir, _checkout_slugs(roots) if roots is not None else None)
     variants = report["project_variants"]
     typos = [
