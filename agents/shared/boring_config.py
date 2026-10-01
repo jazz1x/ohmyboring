@@ -109,6 +109,15 @@ def note_lang() -> str:
     return cfg.get("note_lang") or DEFAULT_NOTE_LANG
 
 
+def checkout_roots() -> list[str] | None:
+    """Directories whose git checkouts the vault hygiene pass compares against project names.
+    `None` = not configured, which callers report as "not scanned" — never as zero findings."""
+    roots = load().get("checkout_roots")
+    if not isinstance(roots, list):
+        return None
+    return [str(Path(r).expanduser()) for r in roots if isinstance(r, str) and r.strip()]
+
+
 def hermes_cron_jobs() -> dict:
     """Return the configured hermes-agent cron jobs.
 
