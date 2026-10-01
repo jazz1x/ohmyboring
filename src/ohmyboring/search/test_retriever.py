@@ -100,6 +100,41 @@ class RetrieverPipelineTests(unittest.TestCase):
         self.assertEqual(first.metadata["dist"], 0.1)
         self.assertEqual(first.metadata["dist_kind"], "vector_cosine")
 
+    def test_feedback_counts_flip_document_order(self):
+        """판정 카운트가 돌려주는 순서까지 닿는지 — 배선 시험 (wiki-2539).
+
+        벡터 [A,B]·어휘 [] 고정, ranking_feedback_counts 만 {} ↔ B 경로 used=3 으로
+        바꿔 끼운다: {} 면 A,B — used=3 이면 B,A. 읽은 카운트를 무시하는 변이는
+        이 시험에서만 드러난다 (test_store_read_failure_is_err 는 실패 경로만 본다).
+        """
+        hits = [hit("a#0", "/a.md", 0.1), hit("b#0", "/b.md", 0.2)]
+        with (
+            mock.patch.object(retriever.pg, "vector_search", return_value=Ok(hits)),
+            mock.patch.object(retriever.pg, "text_search", return_value=Ok([])),
+            mock.patch.object(retriever.pg, "ranking_feedback_counts", return_value=Ok({})),
+        ):
+            match retriever.PgRetriever(dsn=DSN).search("q"):
+                case Err(failure):
+                    self.fail(f"search: {failure}")
+                case Ok(documents):
+                    pass
+            self.assertEqual([d.id for d in documents], ["a#0", "b#0"])
+        with (
+            mock.patch.object(retriever.pg, "vector_search", return_value=Ok(hits)),
+            mock.patch.object(retriever.pg, "text_search", return_value=Ok([])),
+            mock.patch.object(
+                retriever.pg,
+                "ranking_feedback_counts",
+                return_value=Ok({"/b.md": rank.Counts(used=3)}),
+            ),
+        ):
+            match retriever.PgRetriever(dsn=DSN).search("q"):
+                case Err(failure):
+                    self.fail(f"search: {failure}")
+                case Ok(documents):
+                    pass
+            self.assertEqual([d.id for d in documents], ["b#0", "a#0"])
+
     def test_metadata_keys_match_boring_retriever_contract(self):
         match retriever.PgRetriever(dsn=DSN).search("q"):
             case Err(failure):
