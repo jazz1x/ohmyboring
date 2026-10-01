@@ -4,7 +4,7 @@
 //!   - No rewriting/reranker (personal scale = simplest thing that works).
 //!   - Verdicts feed back into ranking: a document's net `used − contested` nudges every one
 //!     of its chunks' RRF scores, so what the owner already judged 👍/👎 moves the next answer.
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::HashMap;
 use std::time::SystemTime;
 
@@ -64,7 +64,8 @@ async fn apply_feedback(
     store: &Store,
     fused: &mut HashMap<String, f64>,
     byid: &HashMap<String, Hit>,
-) -> Result<()> {
+) -> Result<HashMap<String, i64>> {
+    let mut nets: HashMap<String, i64> = HashMap::new();
     let mut paths: Vec<String> = byid.values().map(|h| h.source_path.clone()).collect();
     paths.sort_unstable();
     paths.dedup();
@@ -74,13 +75,15 @@ async fn apply_feedback(
             eprintln!(
                 "apply_feedback: ranking_feedback_counts failed ({e:#}); ranking without verdict feedback"
             );
-            return Ok(());
+            return Ok(nets);
         }
     };
     for (path, c) in &counts {
-        apply_net(fused, byid, path, net_feedback(c.used, c.contested));
+        let net = net_feedback(c.used, c.contested);
+        apply_net(fused, byid, path, net);
+        nets.insert(path.clone(), net);
     }
-    Ok(())
+    Ok(nets)
 }
 
 /// Shared RRF merge. Fuses both hit lists, folds in consumption feedback, then sorts once —
@@ -91,6 +94,25 @@ async fn merge_hits(
     txt_hits: Vec<Hit>,
     exclude_origins: &[String],
 ) -> Result<Vec<Scored>> {
+    let (mut fused, byid) = fuse_rrf(vec_hits, txt_hits)?;
+    let nets = apply_feedback(store, &mut fused, &byid).await?;
+
+    let mut merged: Vec<Scored> = byid
+        .into_values()
+        .filter(|h| !exclude_origins.iter().any(|o| o == &h.origin))
+        .map(|hit| Scored {
+            score: fused[&hit.id],
+            hit,
+        })
+        .collect();
+    merged.sort_by(|a, b| order_merged(a, b, &nets));
+    Ok(merged)
+}
+
+fn fuse_rrf(
+    vec_hits: Vec<Hit>,
+    txt_hits: Vec<Hit>,
+) -> Result<(HashMap<String, f64>, HashMap<String, Hit>)> {
     let mut fused: HashMap<String, f64> = HashMap::new();
     let mut byid: HashMap<String, Hit> = HashMap::new();
     for (rank, h) in vec_hits.into_iter().enumerate() {
@@ -101,18 +123,18 @@ async fn merge_hits(
         *fused.entry(h.id.clone()).or_insert(0.0) += rrf_term(rank + 1)?;
         byid.entry(h.id.clone()).or_insert(h);
     }
-    apply_feedback(store, &mut fused, &byid).await?;
+    Ok((fused, byid))
+}
 
-    let mut merged: Vec<Scored> = byid
-        .into_values()
-        .filter(|h| !exclude_origins.iter().any(|o| o == &h.origin))
-        .map(|hit| Scored {
-            score: fused[&hit.id],
-            hit,
+fn order_merged(a: &Scored, b: &Scored, nets: &HashMap<String, i64>) -> Ordering {
+    b.score
+        .total_cmp(&a.score)
+        .then_with(|| {
+            // A score tie is by construction a verdict tie: one 👍 moves exactly one rank gap.
+            let net = |s: &Scored| nets.get(&s.hit.source_path).copied().unwrap_or(0);
+            net(b).cmp(&net(a))
         })
-        .collect();
-    merged.sort_by(|a, b| b.score.total_cmp(&a.score));
-    Ok(merged)
+        .then_with(|| a.hit.id.cmp(&b.hit.id))
 }
 
 /// A hit with its fused score, carried past the cut so the in-set order can still read it.
@@ -366,6 +388,76 @@ mod tests {
         let before = fused["b#0"];
         apply_net(&mut fused, &byid, "/b.md", 0);
         assert_eq!(fused["b#0"], before);
+    }
+
+    fn merged_ids(
+        vec_hits: Vec<Hit>,
+        txt_hits: Vec<Hit>,
+        nets: &HashMap<String, i64>,
+    ) -> Vec<String> {
+        let (mut fused, byid) = fuse_rrf(vec_hits, txt_hits).unwrap();
+        for (path, net) in nets {
+            apply_net(&mut fused, &byid, path, *net);
+        }
+        let mut merged: Vec<Scored> = byid
+            .into_values()
+            .map(|hit| Scored {
+                score: fused[&hit.id],
+                hit,
+            })
+            .collect();
+        merged.sort_by(|a, b| order_merged(a, b, nets));
+        merged.into_iter().map(|s| s.hit.id).collect()
+    }
+
+    #[test]
+    fn one_verdict_breaks_the_exact_tie_toward_the_verdict() {
+        let fixture = || vec![hit("a#0", "/a.md"), hit("b#0", "/b.md")];
+        let (mut fused, byid) = fuse_rrf(fixture(), Vec::new()).unwrap();
+        let nets = HashMap::from([("/b.md".to_owned(), net_feedback(1, 0))]);
+        for (path, net) in &nets {
+            apply_net(&mut fused, &byid, path, *net);
+        }
+        assert_eq!(
+            fused["a#0"], fused["b#0"],
+            "rank-2 with one 👍 must land exactly on rank-1's score"
+        );
+        assert_eq!(
+            merged_ids(fixture(), Vec::new(), &nets),
+            ["b#0", "a#0"],
+            "the verdict wins its own tie"
+        );
+    }
+
+    #[test]
+    fn merged_order_is_identical_across_fresh_maps() {
+        let nets = HashMap::from([("/b.md".to_owned(), net_feedback(1, 0))]);
+        let build = || {
+            merged_ids(
+                vec![hit("a#0", "/a.md"), hit("b#0", "/b.md")],
+                Vec::new(),
+                &nets,
+            )
+        };
+        let want = build();
+        assert_eq!(want, ["b#0", "a#0"]);
+        for _ in 0..50 {
+            assert_eq!(build(), want, "fresh HashMaps must not change the order");
+        }
+    }
+
+    #[test]
+    fn distinct_scores_without_verdicts_keep_score_order() {
+        let vec_hits = vec![
+            hit("c#0", "/c.md"),
+            hit("a#0", "/a.md"),
+            hit("b#0", "/b.md"),
+        ];
+        assert_eq!(
+            merged_ids(vec_hits, Vec::new(), &HashMap::new()),
+            ["c#0", "a#0", "b#0"],
+            "control: no verdicts, distinct scores — score order stands"
+        );
     }
 
     fn score_ordered_pool() -> Vec<Scored> {
