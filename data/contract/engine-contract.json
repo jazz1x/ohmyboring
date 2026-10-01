@@ -1,4 +1,15 @@
 {
+  "door_routes": [
+    "GET /approved",
+    "GET /claim-source",
+    "GET /claim-sources",
+    "GET /projects",
+    "GET /repairs/split-subjects",
+    "POST /repairs/split-subjects",
+    "GET /rules",
+    "POST /run/morning-card",
+    "POST /run/weekly-card"
+  ],
   "get_shapes": {
     "/audit": {
       "optional": [],
@@ -61,17 +72,6 @@
       ]
     }
   },
-  "door_routes": [
-    "GET /approved",
-    "GET /claim-source",
-    "GET /claim-sources",
-    "GET /projects",
-    "GET /repairs/split-subjects",
-    "POST /repairs/split-subjects",
-    "GET /rules",
-    "POST /run/morning-card",
-    "POST /run/weekly-card"
-  ],
   "http_routes": [
     "GET /audit",
     "GET /health",
@@ -403,9 +403,26 @@
           "type": "string"
         },
         "claims": {
-          "description": "durable facts/decisions as (subject,predicate,value) triples (a new value supersedes the old)",
+          "description": "durable facts/decisions as (subject,predicate,value[,kind,confidence]) triples (a new value supersedes the old)",
           "items": {
             "properties": {
+              "confidence": {
+                "description": "free-form confidence label (e.g. certain, likely, possible) — empty is stored as unknown",
+                "type": "string"
+              },
+              "kind": {
+                "description": "claim kind — empty is stored as fact; next/blocked feed the next_actions register, decision feeds decisions, risk/assumption feed risks, term feeds the glossary",
+                "enum": [
+                  "fact",
+                  "decision",
+                  "next",
+                  "blocked",
+                  "risk",
+                  "assumption",
+                  "term"
+                ],
+                "type": "string"
+              },
               "predicate": {
                 "type": "string"
               },
