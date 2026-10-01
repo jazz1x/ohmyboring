@@ -8,6 +8,7 @@
       "file": {"folder": "/Users/you/src/oh-my-boring/vault/wiki", "editor": "vscode"}
     }
   },
+  "checkout_roots": ["~/src"],
   "llm": {
     "provider": "ollama",
     "base_url": "http://host.docker.internal:11434/v1",
