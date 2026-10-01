@@ -24,6 +24,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import os
 import sys
 import unittest
 import urllib.error
@@ -277,8 +278,8 @@ class _Wire:
         self.sent: list[dict] = []
         client.request = self._request  # noqa: SLF001 — the wire test owns the client's back door
 
-    def _request(self, method, path, payload=None, timeout=None):
-        self.sent.append({"method": method, "path": path, "payload": payload})
+    def _request(self, method, path, payload=None, timeout=None, base_url=None):
+        self.sent.append({"method": method, "path": path, "payload": payload, "base": base_url})
         return Ok({})
 
     def body(self, index: int = 0) -> str:
@@ -384,6 +385,27 @@ class RememberWireTest(unittest.TestCase):
             wire.body(),
             '{"title": "제목", "body": "본문", "origin": "personal"}',
         )
+
+
+class RememberDoorRoutingTest(unittest.TestCase):
+    """E3a-1 — 모든 운영 remember 는 문(:7710) 하나를 지난다.
+
+    DrudgeClient.remember 와 call_remember 가 쓰는 요청 작성자(_remember_request) 둘 다
+    door_url() 로 향한다. 엔진 직행으로 돌아가는 변이는 이 시험에서 빨갛게 끝난다.
+    """
+
+    def test_client_remember_addresses_the_door_not_the_engine(self):
+        client = DrudgeClient(base_url="http://drudge.test", retries=0)
+        wire = _Wire(client)
+        with mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.test:7710"}):
+            client.remember("제목", "본문")
+        self.assertEqual(wire.sent[0]["base"], "http://door.test:7710")
+        self.assertEqual(wire.sent[0]["path"], "/remember")
+
+    def test_remember_request_builder_uses_the_door(self):
+        with mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.test:7710"}):
+            req = engine._remember_request({"title": "t"})
+        self.assertEqual(req.full_url, "http://door.test:7710/mcp")
 
 
 class _Reply:

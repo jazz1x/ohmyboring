@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import sys
 import tempfile
 import time
@@ -371,6 +372,24 @@ class IngestWorkerTest(unittest.TestCase):
         self.assertEqual(self._last_event()["status"], "deferred")
         self.assertIn("llm down", self._last_event()["reason"])
 
+    def test_a_downed_door_defers_the_tick_without_spending_a_try(self):
+        # E3a-1 — remember 는 문을 지나니, 문이 답이 없으면 시도를 태우지 않고 그대로 미룬다.
+        self._queue("q-door-down")
+        ingest_worker.markers.mark_retry("q-door-down", reason="earlier")
+        with (
+            mock.patch.object(ingest_worker, "check_drudge_writable", return_value=Ok(None)),
+            mock.patch.object(
+                ingest_worker, "_door_reachable", return_value=Err("door 127.0.0.1:7710 unreachable: refused")
+            ),
+            mock.patch.object(ingest_worker.distill_run, "distill_and_remember") as run,
+        ):
+            ingest_worker._drain_queue()
+        run.assert_not_called()
+        self.assertEqual(ingest_worker.markers.retry_count("q-door-down"), 1)
+        self.assertTrue(ingest_worker.distill_queue.is_queued("q-door-down"))
+        self.assertEqual(self._last_event()["status"], "deferred")
+        self.assertIn("door", self._last_event()["reason"])
+
     def test_drain_only_prints_nothing_to_stdout(self):
         self._queue("q-now")
         out = io.StringIO()
@@ -463,6 +482,68 @@ class BackstopClampTests(unittest.TestCase):
         prompt, _err = self._run(text)
         body = prompt[prompt.find("y" * 200) :]
         self.assertNotIn("y" * 201, body)
+
+
+class ReachableTests(unittest.TestCase):
+    """E3a-1 — _reachable 안의 문 검사: 문 다운은 엔진·LLM 과 같은 Err 모양으로 접힌다."""
+
+    def _listening_port(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        self.addCleanup(sock.close)
+        return sock.getsockname()[1]
+
+    def _free_port(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def test_door_reachable_ok_when_the_socket_accepts(self):
+        port = self._listening_port()
+        with mock.patch.dict(os.environ, {"BORING_DOOR_URL": f"http://127.0.0.1:{port}"}):
+            self.assertEqual(ingest_worker._door_reachable(), Ok(None))
+
+    def test_door_reachable_err_names_the_door_like_engine_and_llm_do(self):
+        port = self._free_port()
+        with mock.patch.dict(os.environ, {"BORING_DOOR_URL": f"http://127.0.0.1:{port}"}):
+            match ingest_worker._door_reachable():
+                case Err(reason):
+                    self.assertTrue(reason.startswith("door 127.0.0.1:"), reason)
+                    self.assertIn("unreachable", reason)
+                case other:
+                    self.fail(f"expected Err, got {other!r}")
+
+    def test_engine_down_never_asks_the_door(self):
+        with (
+            mock.patch.object(ingest_worker, "check_drudge_writable", return_value=Err("engine down")),
+            mock.patch.object(ingest_worker, "_door_reachable") as door,
+            mock.patch.object(ingest_worker, "_llm_reachable") as llm,
+        ):
+            result = ingest_worker._reachable()
+        self.assertEqual(result, Err("engine down"))
+        door.assert_not_called()
+        llm.assert_not_called()
+
+    def test_door_down_stops_before_the_llm(self):
+        with (
+            mock.patch.object(ingest_worker, "check_drudge_writable", return_value=Ok(None)),
+            mock.patch.object(
+                ingest_worker, "_door_reachable", return_value=Err("door 127.0.0.1:7710 unreachable: refused")
+            ),
+            mock.patch.object(ingest_worker, "_llm_reachable") as llm,
+        ):
+            result = ingest_worker._reachable()
+        self.assertEqual(result, Err("door 127.0.0.1:7710 unreachable: refused"))
+        llm.assert_not_called()
+
+    def test_all_three_up_is_ok(self):
+        with (
+            mock.patch.object(ingest_worker, "check_drudge_writable", return_value=Ok(None)),
+            mock.patch.object(ingest_worker, "_door_reachable", return_value=Ok(None)),
+            mock.patch.object(ingest_worker, "_llm_reachable", return_value=Ok(None)),
+        ):
+            self.assertEqual(ingest_worker._reachable(), Ok(None))
 
 
 if __name__ == "__main__":

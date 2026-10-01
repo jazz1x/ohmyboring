@@ -29,6 +29,9 @@ real door runs under uvicorn in a thread against it. Covers:
       query attached, a query-less request gets no "?" (AC4)
   (k) a client that disconnects mid-stream makes the door close the upstream —
       the stub sees the connection go away (AC6)
+  (l) POST /mcp tools/call `remember` and POST /remember answer byte-for-byte
+      (sha256 vs the stub body) and leave one remember_shadow event after the
+      response — a raising shadow cannot change the answer (E3a-1)
 """
 
 from __future__ import annotations
@@ -93,6 +96,18 @@ RECALL_ERROR_BODY = (
     b'{"id":2,"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"-32000 boom"}],"isError":true}}'
 )
 
+#: 엔진 remember 답의 실측 모양 — 고의로 비정형 바이트(이상한 공백·비아스키)로 만들어
+#: 문이 다시 직렬화하면 sha256 이 갈라지게 한다. 화살표·중점·대시는 UTF-8 이스케이프.
+REMEMBER_MCP_BODY = (
+    b'{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "remembered '
+    b"\xe2\x86\x92 wiki/wiki-2901.md \xc2\xb7 chunks 2 \xc2\xb7 graph(tools 0 concepts 0 claims 0) "
+    b'\xe2\x80\x94 recallable now"}]}}'
+)
+REMEMBER_HTTP_BODY = (
+    b'{"source_path": "/vault/wiki/wiki-2902.md", "wiki_id": "wiki-2902", "duplicate": null, '
+    b'"supersedes": 0, "unknown": 0}'
+)
+
 
 class StubHandler(BaseHTTPRequestHandler):
     """The engine's stand-in: fixed /health, tools/list answer, otherwise echo.
@@ -131,7 +146,12 @@ class StubHandler(BaseHTTPRequestHandler):
         if isinstance(parsed, dict) and "respond_as" in parsed:
             respond_as = parsed["respond_as"]
         params = parsed.get("params") if isinstance(parsed, dict) else None
-        if isinstance(params, dict) and params.get("name") == "recall":
+        if isinstance(params, dict) and params.get("name") == "remember":
+            # The engine's tools/call remember answer — the shadow reads this path.
+            self._reply(200, REMEMBER_MCP_BODY, respond_as)
+        elif self.path == "/remember":
+            self._reply(200, REMEMBER_HTTP_BODY, respond_as)
+        elif isinstance(params, dict) and params.get("name") == "recall":
             # The engine's tools/call recall answer: fixed body, "boom" in the query → isError.
             error = "boom" in str(params.get("arguments", {}))
             self._reply(200, RECALL_ERROR_BODY if error else RECALL_BODY, respond_as)
@@ -587,6 +607,251 @@ date: 2026-09-29
         lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
         self.assertEqual(len(lines), 1, f"로그는 정확히 한 줄이어야 한다: {lines}")
         self.assertIn("vault", lines[0])
+
+
+class RememberShadowTests(unittest.TestCase):
+    """E3a-1 — 문을 지난 remember 는 엔진 답을 바이트 그대로 돌려주고, 응답 뒤에 그림자가
+    엔진이 실제로 쓴 노트와 파이썬 렌더를 칸별 대조해 사건(remember_shadow) 한 줄을 남긴다.
+
+    Pinned here:
+      - POST /mcp tools/call remember 의 응답이 엔진 답과 바이트 같다(sha256)
+      - POST /remember 의 응답이 엔진 답과 바이트 같다(sha256)
+      - 응답 뒤 그림자가 사건 한 줄을 남긴다 — status ok, source_path, omb_session_id
+      - 그림자가 예외를 던져도 응답은 그대로 — 사건 status=error, 로그 한 줄
+      - 응답은 그림자를 기다리지 않는다
+    """
+
+    _WIKI_2901 = """---
+id: wiki-2901
+title: 문 그림자 시험
+kind: note
+origin: personal
+project: ''
+date: "2026-10-01"
+tags:
+- door
+- shadow
+tools: []
+concepts: []
+claims: []
+relates_to: []
+sources: []
+omb_session_id: sess-door-1
+author: unknown
+---
+
+문을 지난 remember 는 엔진 답을 바이트 그대로 돌려준다.
+"""
+
+    _WIKI_2902 = """---
+id: wiki-2902
+title: HTTP remember 그림자 시험
+kind: note
+origin: personal
+project: ''
+date: "2026-10-01"
+tags: []
+tools: []
+concepts: []
+claims: []
+relates_to: []
+sources: []
+author: inferred
+---
+
+POST /remember 도 문을 지난다.
+"""
+
+    _MCP_ARGS = {
+        "title": "문 그림자 시험",
+        "body": "문을 지난 remember 는 엔진 답을 바이트 그대로 돌려준다.",
+        "origin": "personal",
+        "tags": ["door", "shadow"],
+        "omb_session_id": "sess-door-1",
+    }
+    _HTTP_ARGS = {
+        "title": "HTTP remember 그림자 시험",
+        "body": "POST /remember 도 문을 지난다.",
+        "origin": "personal",
+        "author": "inferred",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved = {
+            name: os.environ.get(name)
+            for name in ("DOOR_UPSTREAM", "BORING_VAULT_DIR", "BORING_EVENT_SINK", "BORING_EVENT_LOG")
+        }
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), StubHandler)
+        cls.stub_thread = threading.Thread(target=cls.stub.serve_forever, daemon=True)
+        cls.stub_thread.start()
+        os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{cls.stub.server_address[1]}"
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                status, _, _ = _req(cls.door_port, "GET", "/health")
+                if status == 200:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+        cls.stub.shutdown()
+        cls.stub.server_close()
+        cls._tmp.cleanup()
+        for name, value in cls._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def setUp(self):
+        vault = Path(self._tmp.name) / "vault"
+        (vault / "wiki").mkdir(parents=True, exist_ok=True)
+        (vault / "wiki" / "wiki-2901.md").write_text(self._WIKI_2901, encoding="utf-8")
+        (vault / "wiki" / "wiki-2902.md").write_text(self._WIKI_2902, encoding="utf-8")
+        os.environ["BORING_VAULT_DIR"] = str(vault)
+        os.environ["BORING_EVENT_SINK"] = "spool"
+        os.environ["BORING_EVENT_LOG"] = str(Path(self._tmp.name) / f"events-{time.time_ns()}.ndjson")
+
+    def _mcp_payload(self, arguments: dict) -> bytes:
+        return json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "remember", "arguments": arguments},
+            }
+        ).encode()
+
+    def _shadow_events(self) -> list[dict]:
+        path = Path(os.environ["BORING_EVENT_LOG"])
+        if not path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and json.loads(line).get("event") == "remember_shadow"
+        ]
+
+    def _wait_for_shadow(self, timeout: float = 5.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            events = self._shadow_events()
+            if events:
+                return events[-1]
+            time.sleep(0.05)
+        self.fail(f"remember_shadow event did not land in {os.environ['BORING_EVENT_LOG']}")
+
+    def test_mcp_remember_answer_is_byte_identical(self):
+        payload = self._mcp_payload(self._MCP_ARGS)
+        status, body, content_type = _req(
+            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REMEMBER_MCP_BODY)
+        self.assertEqual(hashlib.sha256(body).hexdigest(), hashlib.sha256(REMEMBER_MCP_BODY).hexdigest())
+        self.assertEqual(content_type, STUB_CONTENT_TYPE)
+        self.assertEqual(StubHandler.seen_bodies[-1], payload, "엔진에 간 본문도 바이트 그대로")
+
+    def test_http_remember_answer_is_byte_identical(self):
+        payload = json.dumps(self._HTTP_ARGS).encode()
+        status, body, content_type = _req(
+            self.door_port, "POST", "/remember", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REMEMBER_HTTP_BODY)
+        self.assertEqual(hashlib.sha256(body).hexdigest(), hashlib.sha256(REMEMBER_HTTP_BODY).hexdigest())
+        self.assertEqual(content_type, STUB_CONTENT_TYPE)
+
+    def test_mcp_remember_leaves_one_shadow_event(self):
+        _req(
+            self.door_port,
+            "POST",
+            "/mcp",
+            body=self._mcp_payload(self._MCP_ARGS),
+            headers={"content-type": "application/json"},
+        )
+        event = self._wait_for_shadow()
+        self.assertEqual(event["component"], "door")
+        self.assertEqual(event["status"], "ok")
+        self.assertEqual(event["source_path"], "/vault/wiki/wiki-2901.md")
+        self.assertEqual(event["omb_session_id"], "sess-door-1")
+        self.assertEqual(event["fields"], [])
+        self.assertIn("excluded", event["relates_to"])
+
+    def test_http_remember_leaves_one_shadow_event(self):
+        _req(
+            self.door_port,
+            "POST",
+            "/remember",
+            body=json.dumps(self._HTTP_ARGS).encode(),
+            headers={"content-type": "application/json"},
+        )
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "ok")
+        self.assertEqual(event["source_path"], "/vault/wiki/wiki-2902.md")
+
+    def test_a_raising_shadow_cannot_change_the_answer(self):
+        payload = self._mcp_payload(self._MCP_ARGS)
+        # 그림자는 응답 뒤에 도니, 패치·stderr 갈무리는 사건이 뜰 때까지 살아 있어야 한다.
+        with mock.patch.object(door.remember_shadow, "run_shadow", side_effect=RuntimeError("boom")):
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                status, body, _ = _req(
+                    self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+                )
+                event = self._wait_for_shadow()
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REMEMBER_MCP_BODY, "그림자 예외는 응답을 바꾸지 못한다")
+        self.assertEqual(len([ln for ln in buf.getvalue().splitlines() if ln.strip()]), 1)
+        self.assertEqual(event["status"], "error")
+        self.assertIn("RuntimeError", event["reason"])
+        self.assertEqual(event["omb_session_id"], "sess-door-1")
+
+    def test_the_answer_does_not_wait_for_the_shadow(self):
+        started = time.monotonic()
+
+        def slow_shadow(**_kwargs):
+            time.sleep(0.6)
+            return door.remember_shadow.ShadowEvent("ok")
+
+        with mock.patch.object(door.remember_shadow, "run_shadow", slow_shadow):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/mcp",
+                body=self._mcp_payload(self._MCP_ARGS),
+                headers={"content-type": "application/json"},
+            )
+            elapsed = time.monotonic() - started
+            self._wait_for_shadow()
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REMEMBER_MCP_BODY)
+        self.assertLess(elapsed, 0.6, "응답이 그림자를 기다리면 이 값이 0.6s 를 넘는다")
+
+    def test_non_remember_calls_leave_no_shadow_event(self):
+        payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode()
+        status, body, _ = _req(
+            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, TOOLS_LIST_BODY)
+        time.sleep(0.3)
+        self.assertEqual(self._shadow_events(), [], "회상·다른 도구엔 그림자가 따라붙지 않는다")
 
 
 class ActiveProjectsRouteTests(unittest.TestCase):

@@ -16,7 +16,7 @@ Flow per cron tick:
   2. DRAIN — pop up to QUEUE_PER_TICK queued items, oldest first, and run each through
      distill_run.distill_and_remember (verify → resolve → polish → remember, in the graph).
      Success → done marker + queue file removed; failure → retry marker (dead after repeated
-     failures) and the file stays; engine/LLM unreachable → deferred without spending a try.
+     failures) and the file stays; engine/door/LLM unreachable → deferred without spending a try.
      The scan runs BEFORE the drain so a session offered this tick is processed this tick.
 
 stdout stays empty on every path: the hermes job runs with no_agent, so stdout is never handed
@@ -244,10 +244,28 @@ def _llm_reachable():
         return Err(f"llm {url.hostname}:{port} unreachable: {e}")
 
 
+def _door_reachable():
+    """문(:7710)이 떠 있는지 — remember 의 새 출구(E3a-1). 엔진·LLM 검사와 같은 Err 모양."""
+    url = urlparse(boring_config.door_url())
+    port = url.port or (443 if url.scheme == "https" else 80)
+    try:
+        with socket.create_connection((url.hostname, port), timeout=5):
+            return Ok(None)
+    except OSError as e:
+        return Err(f"door {url.hostname}:{port} unreachable: {e}")
+
+
 def _reachable():
     match check_drudge_writable(DrudgeClient(base_url=BORING_URL, timeout=15.0, retries=0)):
         case Err(failure):
             return Err(str(failure))
+        case Ok(_):
+            pass
+    # 문이 낮은 동안 시도를 태우지 않는다 — remember 는 문을 지나니, 문이 답이 없으면 그 틱의
+    # 증류는 미루고 큐 항목은 그대로 둔다(시도 소모 없음).
+    match _door_reachable():
+        case Err(reason):
+            return Err(reason)
         case Ok(_):
             return _llm_reachable()
 

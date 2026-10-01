@@ -168,8 +168,9 @@ class DrudgeClient:
         path: str,
         payload: dict[str, Any] | None = None,
         timeout: float | None = None,
+        base_url: str | None = None,
     ) -> Any:
-        url = f"{self.base_url}{path}"
+        url = f"{base_url or self.base_url}{path}"
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         headers = {"content-type": "application/json"} if data is not None else {}
         headers.update(owner_headers(payload))
@@ -183,16 +184,18 @@ class DrudgeClient:
         path: str,
         payload: dict[str, Any] | None = None,
         timeout: float | None = None,
+        base_url: str | None = None,
     ) -> Either[Any, EngineFailure]:
         """One JSON request with the client's retry budget — Either 로 답한다.
 
         5xx·연결·타임아웃은 남은 재시도를 쓰고, 그래도 실패하면 `Refused`/`Unreachable` 로
         돌아온다. 소켓 끊김은 재시도 없이 `Unreachable`, 해독 실패는 `Malformed`. 재시도·타임아웃
-        값은 옛 `_retry` 와 같다.
+        값은 옛 `_retry` 와 같다. `base_url` 을 주면 그 주소로 본다 — remember 만 문(:7710)을
+        지나게 쓴다(E3a-1); 나머지 경로는 클라이언트의 base_url(엔진)이 기본이다.
         """
         for attempt in range(self.retries + 1):
             try:
-                return Ok(self._request(method, path, payload, timeout))
+                return Ok(self._request(method, path, payload, timeout, base_url))
             except urllib.error.HTTPError as e:
                 if 500 <= e.code < 600 and attempt < self.retries:
                     time.sleep(1 << attempt)
@@ -282,7 +285,10 @@ class DrudgeClient:
             payload["author"] = provenance.author
         if provenance.judge is not None:
             payload["judge"] = provenance.judge
-        return self.request("POST", "/remember", payload)
+        # 모든 운영 remember 는 문(:7710) 하나를 지난다 — 문이 엔진으로 바이트 그대로 넘기고
+        # 같은 요청을 파이썬 쓰기 경로에 「쓰지 않고」 태워 대조한다(E3a-1). 엔진 직행은
+        # 이 계약의 non-goal 이라 이 메서드에 남지 않는다.
+        return self.request("POST", "/remember", payload, base_url=omb_env.door_url())
 
     def health(self) -> Either[dict[str, Any], EngineFailure]:
         """GET /health."""
@@ -353,6 +359,7 @@ class _Retry:
 
 
 def _remember_request(arguments: dict[str, Any]) -> urllib.request.Request:
+    """문(:7710)의 POST /mcp 로 가는 remember 요청 한 개 — 얼굴이 몇 개든 문은 하나(E3a-1)."""
     payload = json.dumps(
         {
             "jsonrpc": "2.0",
@@ -362,7 +369,7 @@ def _remember_request(arguments: dict[str, Any]) -> urllib.request.Request:
         }
     ).encode("utf-8")
     return urllib.request.Request(
-        f"{omb_env.drudge_url().rstrip('/')}/mcp",
+        f"{omb_env.door_url().rstrip('/')}/mcp",
         data=payload,
         headers={"content-type": "application/json"},
         method="POST",

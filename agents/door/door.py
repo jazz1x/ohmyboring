@@ -15,7 +15,12 @@ tools/call `recall` answer, 2xx application/json, gets numbered-note blocks
 prepended (query 안의 wiki-NNNN 마다 볼트 노트 블록이 content 앞에 — 엔진 recall 은
 검색이라 번호를 못 풀어 문이 이름을 푼다; see _augment_mcp_recall). Anything that is
 not exactly that gate — no numbers, another tool, isError, non-JSON, a stream —
-travels byte-for-byte. An answer whose content-type is
+travels byte-for-byte. A POST /mcp tools/call `remember` (and POST /remember)
+also travels byte-for-byte — after the answer leaves, a background shadow runs
+the same request through the python write path without writing and compares
+note-by-note with the note the engine actually wrote, leaving one remember_shadow
+event (E3a-1; the response never waits on it and a shadow failure cannot change
+the answer — one log line and a status=error event). An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. An engine answer, 4xx
@@ -76,15 +81,17 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
-from fastapi import FastAPI, Request, Response
+from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictInt, StrictStr, ValidationError, field_validator
 from slack_sdk.errors import SlackClientError
 
 from ohmyboring import config as boring_config
+from ohmyboring.adapters import events as event_log
 from ohmyboring.adapters import vault as vault_notes
 from ohmyboring.entrypoints.http import mcp_recall
 from ohmyboring.recall import named as recall_named
+from ohmyboring.remember import shadow as remember_shadow
 from ohmyboring.result import Either, Err, Ok
 from ohmyboring.search import hits as search_hits
 from ohmyboring.search import pg as search_pg
@@ -152,7 +159,7 @@ def _fetch(url: str, body: bytes, headers: dict[str, str], method: str) -> Respo
 _OWNER_TOKEN_HEADER = "x-boring-owner-token"
 
 
-async def _proxy(request: Request) -> Response:
+async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Response:
     query = request.url.query
     url = f"{_upstream()}{request.url.path}" + (f"?{query}" if query else "")
     body = await request.body()
@@ -170,7 +177,18 @@ async def _proxy(request: Request) -> Response:
             status_code=502,
         )
     if request.method == "POST" and request.url.path == "/mcp":
-        return _augment_mcp_recall(body, response)
+        response = _augment_mcp_recall(body, response)
+        # remember 는 회상과 달리 응답을 안 고친다 — 바이트 그대로 본 뒤 그림자만 태운다(E3a-1).
+        if not isinstance(response, StreamingResponse) and (arguments := _mcp_remember_arguments(body)):
+            background_tasks.add_task(
+                _remember_shadow_task, "mcp", arguments, response.status_code, response.body
+            )
+        return response
+    if request.method == "POST" and request.url.path == "/remember":
+        if not isinstance(response, StreamingResponse) and (arguments := _http_remember_arguments(body)):
+            background_tasks.add_task(
+                _remember_shadow_task, "remember", arguments, response.status_code, response.body
+            )
     return response
 
 
@@ -218,6 +236,74 @@ def _augment_mcp_recall(body: bytes, response: Response) -> Response:
         return response
     return _pass_through(
         response.status_code, json.dumps(augmented, ensure_ascii=False).encode("utf-8"), content_type
+    )
+
+
+def _mcp_remember_arguments(body: bytes) -> dict | None:
+    """POST /mcp 본문이 tools/call remember 이면 그 인자 dict, 아니면 None.
+
+    회상의 그림자는 회상만 건드리는 문과 달리 remember 에만 탠다 — 회상·다른 도구·
+    JSON 아닌 본문은 여기서 걸러져 그림자 없이 바이트만 지나간다."""
+    try:
+        data = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("method") != "tools/call":
+        return None
+    params = data.get("params")
+    if not isinstance(params, dict) or params.get("name") != "remember":
+        return None
+    arguments = params.get("arguments")
+    return arguments if isinstance(arguments, dict) else {}
+
+
+def _http_remember_arguments(body: bytes) -> dict | None:
+    """POST /remember 본문 자체가 인자 — JSON 객천 것만 그림자를 탠다."""
+    try:
+        data = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _omb_session_id(arguments: dict) -> str | None:
+    raw = arguments.get("omb_session_id")
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
+
+def _remember_shadow_task(route: str, arguments: dict, status: int, body: bytes) -> None:
+    """응답을 본 뒤에 도는 그림자 — 같은 요청을 파이썬 쓰기 경로에 「쓰지 않고」 태워
+    엔진이 실제로 쓴 노트와 칸별로 대조하고 사건(remember_shadow) 한 줄을 남긴다(E3a-1).
+    실패는 전부 여기서 접는다: 문 로그 한 줄 + 사건 status=error — 응답은 이미 간 뒤라
+    어떤 예외도 클라이언트에 닿지 않는다."""
+    try:
+        event = remember_shadow.run_shadow(
+            remember_shadow.ShadowRequest(
+                route=route,
+                arguments=arguments,
+                engine_status=status,
+                engine_body=body,
+                vault_dir=_vault_dir(),
+                read_note=vault_notes.read_note,
+                split_frontmatter=vault_note.split_frontmatter,
+            )
+        )
+    except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
+        print(
+            f"[door] remember_shadow failed: {type(e).__name__}: {e}",
+            file=sys.stderr,
+            flush=True,
+        )
+        event_log.try_append_event(
+            "door",
+            remember_shadow.EVENT_NAME,
+            "error",
+            reason=f"{type(e).__name__}: {e}",
+            omb_session_id=_omb_session_id(arguments),
+        )
+        return
+    event_log.try_append_event(
+        "door", remember_shadow.EVENT_NAME, event.status, **remember_shadow.event_payload(event)
     )
 
 
@@ -343,7 +429,7 @@ async def _projects(request: Request) -> Response:
     first — the engine's own /projects has no notion of recency to filter by."""
     raw = request.query_params.get("active_days")
     if raw is None:
-        return await _proxy(request)
+        return await _proxy(request, BackgroundTasks())
     try:
         active_days = _check_active_days(raw)
     except ValueError as e:
