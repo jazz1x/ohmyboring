@@ -76,6 +76,7 @@ class _State:
     said: dict[str, int] = field(default_factory=dict)
     superseded: dict[str, list[str]] = field(default_factory=dict)
     declared: dict[str, pg.RegisterRows] = field(default_factory=dict)
+    # attach_related 가 hit 마다 — 키는 조각 id (source_path 아님, 같은 문서의 조각 둘이 각자 related).
     related_docs: dict[str, list[dict[str, str]]] = field(default_factory=dict)
 
 
@@ -199,10 +200,13 @@ def _related(state: _State) -> Either[_State, SearchFailure]:
     관계 없음(related==0) 이면 질의 없이 상태 그대로. 실패는 'related: …' — 문 핸들러가 502 로 접는다."""
     if state.related <= 0:
         return Ok(state)
-    heads = _paths(state.ordered)[: state.related_heads]
+    heads = state.ordered[: state.related_heads]
     lists: list[list[tuple[str, str]]] = []
-    for path in heads:
-        match _map_err(pg.related_by_shared_ground(state.conn, path, state.related), _pg_failure("related")):
+    for scored in heads:
+        match _map_err(
+            pg.related_by_shared_ground(state.conn, scored.hit.source_path, state.related),
+            _pg_failure("related"),
+        ):
             case Err(failure):
                 return Err(failure)
             case Ok(docs):
@@ -210,7 +214,12 @@ def _related(state: _State) -> Either[_State, SearchFailure]:
     return Ok(
         replace(
             state,
-            related_docs=rank.attach_related(heads, _paths(state.ordered), lists, RELATED_SNIPPET_CHARS),
+            related_docs=rank.attach_related(
+                [(scored.hit.id, scored.hit.source_path) for scored in heads],
+                _paths(state.ordered),
+                lists,
+                RELATED_SNIPPET_CHARS,
+            ),
         )
     )
 
@@ -244,7 +253,8 @@ def _documents(state: _State) -> list[Document]:
 
 @dataclass(frozen=True)
 class _Enrich:
-    """hit 옆에 붙는 표들 — attach 단계들이 state 에 채우고 _to_document 가 경로로 찾아 싣는다."""
+    """hit 옆에 붙는 표들 — attach 단계들이 state 에 채우고 _to_document 가 싣는다 (related 만
+    경로가 아니라 조각 id 로 찾는다 — 같은 문서의 조각 둘이 related 를 공유하지 않는다)."""
 
     consumption: dict[str, rank.Counts]
     said: dict[str, int]
@@ -267,7 +277,7 @@ def _to_document(scored, enrich: _Enrich) -> Document:
         "dist": hit.dist,
         "dist_kind": hit.dist_kind,
     }
-    related = enrich.related.get(hit.source_path)
+    related = enrich.related.get(hit.id)
     if related:
         metadata["related"] = related
     rows = enrich.declared.get(hit.source_path)

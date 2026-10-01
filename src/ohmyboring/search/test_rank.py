@@ -4,9 +4,9 @@
 Run: python3 ohmyboring/search/test_rank.py   (no pytest dependency)
 
 Mutation targets: FEEDBACK_STEP=0 변이, owner 필터 빼기 변이, rank_key 의 superseded 빼기 변이,
-merge_hits 의 판정 net 키 빼기 변이·판정 비교 방향 뒤집기 변이 각각 여기서 사망 확인. 픽스처는
-옳은/틀린 구현이 다른 답을 내는 값으로 고른다 — 점수 차가 정확히 한 step 이하인 두 노트(안
-그러면 넛지 없는 구현도 같은 순위를 낸다).
+merge_hits 의 판정 net 키 빼기 변이·판정 비교 방향 뒤집기 변이, attach_related 의 키를 source_path 로
+되돌리기 변이 각각 여기서 사망 확인. 픽스처는 옳은/틀린 구현이 다른 답을 내는 값으로 고른다 — 점수 차가
+정확히 한 step 이하인 두 노트(안 그러면 넛지 없는 구현도 같은 순위를 낸다).
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from ohmyboring.search.rank import (  # noqa: E402
     Hit,
     RankFacts,
     Scored,
+    attach_related,
     merge_hits,
     net_feedback,
     order_within_set,
@@ -248,6 +249,29 @@ class PoolTests(unittest.TestCase):
     def test_pool_is_four_k_at_least_twenty(self):
         self.assertEqual(pool_size(3), 20)
         self.assertEqual(pool_size(10), 40)
+
+
+class AttachRelatedTests(unittest.TestCase):
+    """(e) related 는 hit 마다 — 같은 문서의 두 조각이 머리에 같이 있어도 첫 조각만 받는다.
+
+    키를 source_path 로 잡는 변이에서는 두 조각이 한 리스트를 공유해 사망 — live 결함 E2c (wiki-2539):
+    engine 은 뒷 조각에 [] 를 줬는데 door 는 첫 조각의 related 를 그대로 얹었다.
+    """
+
+    def test_two_chunks_of_one_document_first_takes_the_candidate(self):
+        # 머리 둘이 같은 문서 wiki-0957.md 의 조각 — related_lists 는 같은 질의라 같은 후보 목록.
+        heads = [("wiki-0957.md#1", "wiki-0957.md"), ("wiki-0957.md#0", "wiki-0957.md")]
+        candidates = [[("wiki-0587.md", "older note")], [("wiki-0587.md", "older note")]]
+        out = attach_related(heads, ["wiki-0957.md"], candidates, 1200)
+        self.assertEqual(
+            out.get("wiki-0957.md#1"),
+            [{"source_path": "wiki-0587.md", "snippet": "older note"}],
+        )
+        self.assertEqual(
+            out.get("wiki-0957.md#0"),
+            [],
+            "뒷 조각은 새 related 가 없다 — 첫 조각이 이미 seen 에 넣었다 (http.rs:553-555)",
+        )
 
 
 if __name__ == "__main__":

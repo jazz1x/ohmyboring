@@ -180,19 +180,21 @@ def within_budget(merged: list[Scored], max_results: int, max_chars: int) -> lis
 
 
 def attach_related(
-    heads: list[str],
+    heads: list[tuple[str, str]],
     pool_paths: list[str],
     related_lists: list[list[tuple[str, str]]],
     snippet_chars: int,
 ) -> dict[str, list[dict[str, str]]]:
     """related 붙이기 — http.rs:543-561 의 순수 부분. seen 은 전체 hit 경로로 시작해, related 는
     머리 hit(heads)의 것만 받고 한 노트는 전 응답에서 한 번만 실린다 (seen 에 없는 것만 — 먼저 나온
-    머리가 가져간다). snippet 은 문자 단위로 snippet_chars 까지 — Rust 의
+    머리가 가져간다). 키는 source_path 가 아니라 조각 id — 같은 문서의 두 조각이 머리에 같이 있어도
+    각자 related 를 받는다 (뒷 조각은 전부 seen 이라 []). heads 한 칸은 (조각 id, 문서 경로).
+    snippet 은 문자 단위로 snippet_chars 까지 — Rust 의
     content.chars().take(RELATED_SNIPPET_CHARS) 와 같다."""
     seen = set(pool_paths)
     out: dict[str, list[dict[str, str]]] = {}
-    for head, docs in zip(heads, related_lists, strict=True):
-        notes = out.setdefault(head, [])
+    for (chunk_id, _source_path), docs in zip(heads, related_lists, strict=True):
+        notes = out.setdefault(chunk_id, [])
         for source_path, content in docs:
             if source_path in seen:
                 continue
