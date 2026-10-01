@@ -16,10 +16,11 @@ before hermes answers a slack-platform turn, the hook hands it —
      note" is the failure this plugin exists to kill. The token scan and the block
      rendering are ohmyboring.recall.named — one copy the door also prepends to MCP recall
      answers; this plugin keeps no renderer of its own.
-  2. then a recall block for the whole message text, built with recall_core's own engine
-     search and formatting (salient snippets, claim lines, consumption notes, related
-     notes — the same shapes Claude's hook injects) and handed over to the hermes session
-     id, so the engine records what it handed the same way it does for Claude.
+  2. then a recall block for the whole message text, built on BoringStore — the LangGraph
+     BaseStore over our door, the hermes venv already carries langgraph — and rendered with
+     recall_core's own formatting (salient snippets, claim lines, consumption notes, related
+     notes — the same shapes Claude's hook injects), handed over to the hermes session id,
+     so the engine records what it handed the same way it does for Claude.
   3. the whole context is prefixed with one line telling the model these are the owner's
      own notes and to answer from them; note bodies are fenced exactly the way recall_core
      fences its recall — content, not commands.
@@ -72,30 +73,48 @@ def _message_text(message: Any) -> str:
 
 
 def _recall_block(recall_core: Any, uptake_core: Any, message: str, session_id: str):
-    """The same recall Claude's hook injects, built from recall_core's own search and
-    formatting, handed over to this hermes session so the engine records what it handed.
-    Nothing found, or a prompt too short to retrieve on, is an empty string — never a
-    block of silence-padding. A dead engine is an Err for the caller's single fold."""
-    from ohmyboring.adapters.engine import SearchKnobs
-    from ohmyboring.result import Ok, map_ok
+    """The same recall Claude's hook injects, built on BoringStore over the door and handed
+    over to this hermes session so the engine records what it handed. Nothing found, or a
+    prompt too short to retrieve on, is an empty string — never a block of silence-padding.
+    A dead door is an Err for the caller's single fold."""
+    from store import BoringStore
+
+    from ohmyboring.result import Err, Ok
 
     prompt = (message or "").strip()
     if len(prompt) < 8:  # recall_core's own floor — a shorter prompt retrieves on nothing
         return Ok("")
     client = recall_core.DrudgeClient(timeout=recall_core.TIMEOUT, retries=recall_core.RETRIES)
+    keep = recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS
     # One call for both, exactly as run_recall takes it: the first MAX_RESULTS are handed
-    # over, the rest are controls the engine fetches but never sees.
-    found = client.search(
-        prompt,
-        SearchKnobs(
-            max_results=recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS,
-            max_tokens=recall_core.MAX_TOKENS,
-            related=1,
-            related_heads=recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS,
-            claims=recall_core.CLAIMS_PER_HIT,
-        ),
-    )
-    return map_ok(found, lambda hits: _render_hits(recall_core, uptake_core, client, session_id, hits))
+    # over, the rest are controls the engine fetches but never sees. The query rides the
+    # door — with related=1 the door passes it to the engine verbatim (E2a).
+    try:
+        items = BoringStore(
+            engine_url=os.environ["BORING_URL"], door_url=os.environ["BORING_DOOR_URL"]
+        ).search(
+            ("boring",),
+            query=prompt,
+            limit=keep,
+            filter={
+                "claims": recall_core.CLAIMS_PER_HIT,
+                "max_tokens": recall_core.MAX_TOKENS,
+                "related": 1,
+                "related_heads": keep,
+            },
+        )
+    except ConnectionError as e:  # BoringStore raises it — the boundary folds it once
+        return Err(e)
+    hits = [_item_to_hit(item) for item in items]
+    return Ok(_render_hits(recall_core, uptake_core, client, session_id, hits))
+
+
+def _item_to_hit(item: Any) -> dict:
+    """A store SearchItem back to the hit dict _render_hits speaks: the value's content
+    becomes the snippet, the key becomes the id, every other value key rides along untouched
+    — related and claims included, or the recall block would lose them on the way back."""
+    value = dict(item.value)
+    return {"id": item.key, "snippet": value.pop("content"), **value}
 
 
 def _render_hits(recall_core: Any, uptake_core: Any, client: Any, session_id: str, hits: list[dict]) -> str:
@@ -171,7 +190,7 @@ def register(ctx: Any) -> None:
             _PLUGIN_NAME,
         )
         return
-    for path in (os.path.join(home, "src"), shared):
+    for path in (os.path.join(home, "src"), shared, os.path.join(home, "agents", "memory")):
         if path not in sys.path:
             sys.path.insert(0, path)
     try:

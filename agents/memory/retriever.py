@@ -43,7 +43,9 @@ class BoringRetriever(BaseRetriever):
     BORING_DOOR_URL; here the caller passes the URL in). session_id is opt-in — set it
     and /search leaves a handed edge per hit for that session, so a later record_verdict
     has something to attach to. claims > 0 asks each hit to hand over that many of the
-    claims its note declares; they ride along in the Document's metadata.
+    claims its note declares; they ride along in the Document's metadata. max_tokens,
+    related and related_heads are the engine's remaining knob handles — each rides the
+    request body only when set (0 or None sends nothing), the same rule as claims.
     """
 
     base_url: str
@@ -51,6 +53,9 @@ class BoringRetriever(BaseRetriever):
     project: str | None = None
     session_id: str | None = None
     claims: int = 0
+    max_tokens: int | None = None
+    related: int = 0
+    related_heads: int = 0
 
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
@@ -60,6 +65,12 @@ class BoringRetriever(BaseRetriever):
             body["project"] = self.project
         if self.session_id is not None:
             body["session_id"] = self.session_id
+        if self.max_tokens:
+            body["max_tokens"] = self.max_tokens
+        if self.related > 0:
+            body["related"] = self.related
+        if self.related_heads > 0:
+            body["related_heads"] = self.related_heads
         if self.claims > 0:
             body["claims"] = self.claims
         # 엔진 호출은 어댑터 뒤로 — 실패는 Either 로 돌아오고, 여기서만 예외로 바꾼다.
@@ -142,7 +153,7 @@ def _hit_to_document(hit: dict[str, Any]) -> Document:
         "said_by_owner": hit["said_by_owner"],
         "superseded_by": hit.get("superseded_by", []),
     }
-    for key in ("dist", "dist_kind", "claims", "claims_total"):
+    for key in ("dist", "dist_kind", "claims", "claims_total", "related"):
         if key in hit:
             metadata[key] = hit[key]
     return Document(id=hit["id"], page_content=hit["snippet"], metadata=metadata)

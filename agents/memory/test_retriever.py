@@ -205,6 +205,39 @@ class RetrieverTest(unittest.TestCase):
         self.assertEqual(docs[0].metadata["claims"], self.server.hits[0]["claims"])
         self.assertEqual(docs[0].metadata["claims_total"], 4)
 
+    def test_knob_handles_ride_the_body_only_when_set(self) -> None:
+        """max_tokens·related·related_heads are the engine's knob handles: set means the body
+        carries them verbatim, 0/None means nothing is sent — the caller passes what it got,
+        this retriever invents no defaults."""
+        retriever = BoringRetriever(base_url=self.base_url, max_tokens=1500, related=1, related_heads=5)
+        retriever.invoke("q")
+        self.assertEqual(
+            self.server.last_body,
+            {"query": "q", "max_results": 5, "max_tokens": 1500, "related": 1, "related_heads": 5},
+        )
+        BoringRetriever(base_url=self.base_url).invoke("q")
+        self.assertEqual(
+            self.server.last_body,
+            {"query": "q", "max_results": 5},
+        )
+
+    def test_related_round_trips_into_metadata(self) -> None:
+        """A hit's related list is the recall block's concept-sharing notes — it must survive
+        into the Document metadata verbatim; a hit without the key leaves no related behind."""
+        related = [
+            {
+                "id": "wiki-0002",
+                "source_path": "/vault/wiki/wiki-0002.md",
+                "snippet": "옛 관련 노트",
+            }
+        ]
+        self.server.hits = [{**HITS[0], "related": related}]
+        docs = BoringRetriever(base_url=self.base_url).invoke("q")
+        self.assertEqual(docs[0].metadata["related"], related)
+        self.server.hits = [HITS[0]]
+        docs = BoringRetriever(base_url=self.base_url).invoke("q")
+        self.assertNotIn("related", docs[0].metadata)
+
 
 if __name__ == "__main__":
     unittest.main()
