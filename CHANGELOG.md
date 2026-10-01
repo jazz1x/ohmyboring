@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Fixed
+- **remember 도구 스키마가 claims[].kind·confidence 를 드러낸다** — 엔진은 `parse_claim` 에서 둘 다 받아 빈 kind 는 fact 로 저장하는데(`frontmatter::Claim::kind`), 스키마엔 subject/predicate/value 만 있어 손으로 남긴 next·blocked 가 전부 fact 로 저장돼 next_actions 레지스터에 안 떴다(2026-10-01 실측 — agent 노트 30개에 40건, 오늘 손으로 채움; 동료 세션이 wiki-2611 로 겪음). kind 는 엔진 레지스터가 읽는 일곱 값(fact·decision·next·blocked·risk·assumption·term — glossary 는 kind 가 아니라 term 이 받는 카드 칸 이름)의 enum 으로, 비어 있으면 fact·next/blocked 는 next_actions 를 먹는다고 적고 confidence 는 자유 문자열(빈 값은 unknown 으로 저장)임을 밝힌다. 계약 스냅샷(`contract-parity.py --snapshot`) 갱신 + 스키마에서 kind 를 빼면 붉어지는 시험(`quality_gate_remember_claims_item_advertises_kind_and_confidence`).
 - **카드의 「이름 맞추기」가 끝난 합침을 실패로 알리던 것** — 문(`POST /repairs/split-subjects`)은 행을 지우고 커밋한 뒤 엔진의 볼트 전체 다시 읽기(`/sync`)를 130초 한도로 기다렸다. 실측(2026-09-29) 다시 읽기는 그보다 길어서, 이미 합쳐진 세 묶음이 「✕ 합침 실패」로 뜨고 버튼이 되살아났다(엔진 목록은 2,341→2,338 로 실제로 줄어 있었다). 이제 문은 커밋 직후 202 로 답하고(`sync: "started"`, 남은 표기 수는 아직 모름 = null) 다시 읽기·재집계·`subject_merged` 기록은 뒤에서 이어 간다. 다시 읽기가 실패하면 문 로그에 주어와 이유 한 줄. 카드 문구는 「다시 읽는 노트 n」. 시험: 문이 다시 읽기를 기다리는 변이, 실패 줄에서 주어·이유를 빼는 변이 각각 사망 확인.
 
 ### Added
