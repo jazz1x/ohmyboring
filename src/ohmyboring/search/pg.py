@@ -13,7 +13,7 @@ from datetime import UTC
 import psycopg
 
 from ohmyboring.result import Either, Err, Ok
-from ohmyboring.search import rank
+from ohmyboring.search import rank, redact
 
 
 #: 문서 노드 id — store.rs doc_node_id (chunk id 의 '#' 꼬리는 뗀다).
@@ -391,7 +391,10 @@ def record_handover(
 
 
 def log_query(conn: psycopg.Connection, row: QueryLogRow) -> Either[None, PgError]:
-    """store.rs:2349 query_log — label-recall 의 표본 표. 쓰기는 여기서 커밋."""
+    """store.rs:2349 query_log — label-recall 의 표본 표. 쓰기는 여기서 커밋.
+
+    적기 전 query·answer_snippet 은 redact 로 가린다 — store.rs:2359 과 같은
+    누수 경계(query_log 은 백업·/query-log 으로 나간다)."""
 
     def run() -> None:
         with conn.cursor() as cur:
@@ -401,12 +404,12 @@ def log_query(conn: psycopg.Connection, row: QueryLogRow) -> Either[None, PgErro
                 " VALUES (%s, %s, %s, %s, %s, %s, %s, %s);",
                 (
                     row.endpoint,
-                    row.query,
+                    redact.redact(row.query),
                     [path for path, _, _ in row.logged_hits],
                     [dist for _, dist, _ in row.logged_hits],
                     [kind for _, _, kind in row.logged_hits],
                     row.sources,
-                    row.answer_snippet,
+                    redact.redact(row.answer_snippet),
                     row.latency_ms,
                 ),
             )

@@ -137,6 +137,7 @@ python3 src/ohmyboring/search/test_rank.py
 python3 src/ohmyboring/search/test_hits.py
 python3 src/ohmyboring/search/test_retriever.py
 python3 src/ohmyboring/search/test_pg.py
+python3 src/ohmyboring/search/test_redact.py
 echo "6) shell destructive-path guardrails (restore-db)…"
 sh scripts/test_restore_db.sh
 echo "7) shell readiness gate guardrails (doctor --strict)…"
