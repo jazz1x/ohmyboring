@@ -81,6 +81,16 @@ async fn count_claims(db: &Client, path: &str) -> i64 {
     .get(0)
 }
 
+async fn edge_first_seen_at(db: &Client, src: &str, dst: &str, kind: &str) -> Option<SystemTime> {
+    db.query_one(
+        "SELECT first_seen_at FROM edge WHERE src = $1 AND dst = $2 AND kind = $3;",
+        &[&src, &dst, &kind],
+    )
+    .await
+    .expect("select first_seen_at")
+    .get(0)
+}
+
 /// Ensure VACUUM/REINDEX CONCURRENTLY run outside a transaction block.
 #[tokio::test]
 async fn compact_succeeds_in_autocommit_mode() {
@@ -335,6 +345,137 @@ async fn the_relabel_moves_claim_edges_and_leaves_concept_edges() {
             .await
             .expect("cleanup");
     }
+}
+
+/// Every edge row written from now on carries the time it was first written; rows that already
+/// existed stay NULL because that time is unknown and is never invented. The migration splits the
+/// default from the ADD COLUMN for exactly this reason — written as one statement,
+/// `ADD COLUMN ... DEFAULT now()` would have back-filled every existing row with the migration
+/// time — so a pre-migration row has to read NULL after Store::open migrates it.
+#[allow(clippy::too_many_lines)] // one scenario: scratch DB → migrate → write → re-write; splitting would triple the setup.
+#[tokio::test]
+async fn edge_first_seen_at_marks_new_rows_and_leaves_existing_rows_null() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+
+    // The migration runs inside Store::open, so the pre-migration shape must live in a database
+    // no Store::open has touched yet — a scratch database created beside the shared one.
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let scratch = format!("edge_first_seen_{stamp}");
+    let dsn_with_db = |db: &str| {
+        let cut = dsn.rfind('/').expect("dsn carries a dbname segment");
+        format!("{}{db}", &dsn[..=cut])
+    };
+    let admin = connect(&dsn_with_db("postgres")).await;
+    admin
+        .execute(&format!("CREATE DATABASE {scratch};"), &[])
+        .await
+        .expect("create scratch database");
+
+    // The edge table exactly as it stood before first_seen_at existed.
+    let db = connect(&dsn_with_db(&scratch)).await;
+    db.batch_execute(
+        "CREATE TABLE edge (
+             src  text NOT NULL,
+             dst  text NOT NULL,
+             kind text NOT NULL,
+             PRIMARY KEY (src, dst, kind)
+         );
+         CREATE INDEX edge_src ON edge(src);
+         CREATE INDEX edge_dst ON edge(dst);
+         ALTER TABLE edge ADD COLUMN IF NOT EXISTS judge text;",
+    )
+    .await
+    .expect("create pre-migration edge table");
+    let legacy_src = format!("doc:legacy-src-{stamp}");
+    let legacy_dst = format!("doc:legacy-dst-{stamp}");
+    db.execute(
+        "INSERT INTO edge (src, dst, kind) VALUES ($1, $2, 'used');",
+        &[&legacy_src, &legacy_dst],
+    )
+    .await
+    .expect("seed legacy edge row");
+
+    // Opening the store migrates: the column appears with its default, the old row keeps NULL.
+    let store = Store::open(&dsn_with_db(&scratch), 1024)
+        .await
+        .expect("open store");
+    assert_eq!(
+        edge_first_seen_at(&db, &legacy_src, &legacy_dst, "used").await,
+        None,
+        "a row written before the migration keeps NULL — the first-write time is unknown"
+    );
+
+    // An edge written through the normal upsert path carries the write time.
+    let path = unique_path("edge-first-seen");
+    store
+        .upsert_document(
+            &dummy_frontmatter(&path),
+            "sha-edge-first-seen",
+            SystemTime::now(),
+        )
+        .await
+        .expect("upsert document");
+    let session = format!("edge-first-seen-{stamp}");
+    store
+        .record_consumption(
+            &session,
+            "2026-10-01T00:00:00Z",
+            std::slice::from_ref(&path),
+            &[],
+            &[],
+            Some("owner"),
+        )
+        .await
+        .expect("record consumption");
+    let new_src = format!("session:{session}");
+    let new_dst = format!("doc:{path}");
+    let seen = edge_first_seen_at(&db, &new_src, &new_dst, "used")
+        .await
+        .expect("a freshly written edge must carry first_seen_at");
+    let now = SystemTime::now();
+    assert!(
+        seen > now - Duration::from_mins(1) && seen <= now,
+        "first_seen_at must be the write time, within the last minute: {seen:?}"
+    );
+
+    // Re-writing the same (src, dst, kind) is ON CONFLICT DO NOTHING: the stamp must not move.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    store
+        .record_consumption(
+            &session,
+            "2026-10-01T00:00:00Z",
+            std::slice::from_ref(&path),
+            &[],
+            &[],
+            Some("owner"),
+        )
+        .await
+        .expect("re-record consumption");
+    assert_eq!(
+        edge_first_seen_at(&db, &new_src, &new_dst, "used").await,
+        Some(seen),
+        "a repeat upsert must not move first_seen_at"
+    );
+    assert_eq!(
+        edge_first_seen_at(&db, &legacy_src, &legacy_dst, "used").await,
+        None,
+        "the legacy row must still be NULL after new writes"
+    );
+
+    drop(store);
+    admin
+        .execute(
+            &format!("DROP DATABASE IF EXISTS {scratch} WITH (FORCE);"),
+            &[],
+        )
+        .await
+        .expect("drop scratch database");
 }
 
 /// The briefing decides whether a heading names a project by asking this list, so what it leaves
