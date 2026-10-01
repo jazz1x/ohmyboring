@@ -139,13 +139,22 @@ fn mcp_tools_list() -> Value {
                     "judge": {"type": "string", "description": "who judged the corrections named in supersedes, same values as author; carried on those edges (default = author)"},
                     "claims": {
                         "type": "array",
-                        "description": "durable facts/decisions as (subject,predicate,value) triples (a new value supersedes the old)",
+                        "description": "durable facts/decisions as (subject,predicate,value[,kind,confidence]) triples (a new value supersedes the old)",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "subject": {"type": "string"},
                                 "predicate": {"type": "string"},
-                                "value": {"type": "string"}
+                                "value": {"type": "string"},
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["fact", "decision", "next", "blocked", "risk", "assumption", "term"],
+                                    "description": "claim kind — empty is stored as fact; next/blocked feed the next_actions register, decision feeds decisions, risk/assumption feed risks, term feeds the glossary"
+                                },
+                                "confidence": {
+                                    "type": "string",
+                                    "description": "free-form confidence label (e.g. certain, likely, possible) — empty is stored as unknown"
+                                }
                             },
                             "required": ["subject", "predicate", "value"]
                         }
@@ -2852,6 +2861,47 @@ mod tests {
     #[test]
     fn quality_gate_mcp_tool_contract_is_explicit() {
         assert_eq!(actual_tool_names(), expected_tool_names());
+    }
+
+    /// The engine has always accepted claims[].kind/confidence (parse_claim → Claim), but the
+    /// schema advertised only subject/predicate/value — so hand-remembered next/blocked claims
+    /// were stored as fact and never reached the next_actions register. Both fields must be
+    /// advertised, with kind's enum covering every register-read kind. Removing `kind` from the
+    /// schema must turn this test red.
+    #[test]
+    fn quality_gate_remember_claims_item_advertises_kind_and_confidence() {
+        let tools = mcp_tools_list();
+        let remember = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some("remember"))
+            .expect("remember tool is listed");
+        let item = &remember["inputSchema"]["properties"]["claims"]["items"];
+        assert_eq!(item["required"], json!(["subject", "predicate", "value"]));
+        let kinds: Vec<&str> = item["properties"]["kind"]["enum"]
+            .as_array()
+            .expect("claims items advertise a kind enum")
+            .iter()
+            .map(|k| k.as_str().unwrap())
+            .collect();
+        for expected in ["fact", "next", "blocked"] {
+            assert!(
+                kinds.contains(&expected),
+                "kind enum lacks {expected}: {kinds:?}"
+            );
+        }
+        assert_eq!(item["properties"]["confidence"]["type"], json!("string"));
+        for optional in ["kind", "confidence"] {
+            assert!(
+                item["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|k| k.as_str() != Some(optional)),
+                "{optional} must not be required"
+            );
+        }
     }
 
     /// A tool description that only says what the tool does leaves the caller to guess when it is
