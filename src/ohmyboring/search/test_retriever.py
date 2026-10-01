@@ -194,6 +194,30 @@ class RetrieverPipelineTests(unittest.TestCase):
             case Ok(_):
                 self.fail("판정 읽기 실패는 Err — 조용한 폭락(판정 없는 순위)은 계약 밖이다")
 
+    def test_text_search_failure_short_circuits_and_closes_connection(self):
+        """어휘 질의 Err — 뒤 단계는 부르지 않고 접속은 닫는다 (단락 시험, wiki-2539)."""
+        conn = mock.MagicMock()
+        feedback = mock.MagicMock(return_value=Ok({}))
+        facts = mock.MagicMock(return_value=Ok({}))
+        consumption = mock.MagicMock(return_value=Ok({}))
+        with (
+            mock.patch.object(retriever.pg, "connect", return_value=Ok(conn)),
+            mock.patch.object(retriever.pg, "text_search", return_value=Err(pg.PgError("lex down"))),
+            mock.patch.object(retriever.pg, "ranking_feedback_counts", feedback),
+            mock.patch.object(retriever.pg, "rank_facts", facts),
+            mock.patch.object(retriever.pg, "consumption_counts", consumption),
+        ):
+            result = retriever.PgRetriever(dsn=DSN).search("q")
+        match result:
+            case Err(failure):
+                self.assertTrue(failure.detail.startswith("text: "), failure.detail)
+            case Ok(_):
+                self.fail("어휘 질의 실패는 Err — 뒤 단계로 흘러가면 안 된다")
+        feedback.assert_not_called()
+        facts.assert_not_called()
+        consumption.assert_not_called()
+        conn.close.assert_called_once_with()
+
     def test_clamps(self):
         r = retriever.PgRetriever(dsn=DSN, max_results=999, max_tokens=999_999, claims=99)
         match r.search("q"):

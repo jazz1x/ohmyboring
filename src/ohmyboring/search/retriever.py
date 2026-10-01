@@ -3,11 +3,12 @@
 질의 → list[Document]. metadata 키는 agents/memory/retriever.py:_hit_to_document 가 읽는
 이름과 같다 — 문 소비자(아침 카드 후보 기록·Deep Agent recall)가 바꿔 끼우지 않고 받는다.
 계산은 Either 값으로 흐른다. 단계는 모듈 함수 `state -> Either[state, SearchFailure]` 가
-replace 로 한 칸씩 채우고, 순서는 STEPS 한 자리에 펼쳐 있다 — search 는 임베딩·접속을
-연 뒤 `functools.reduce(bind, STEPS, ...)` 로 한 줄로 잇고 문서 목록은 마지막 map_ok
-에서 나온다. 실패 값은 _map_err 가 SearchFailure 로 바꾼다. match 로 접는 갈래는 search
-서두(임베딩·접속)와 BaseRetriever 계약(_get_relevant_documents) 두 자리뿐이다 (빈 목록이
-아니라 raise).
+replace 로 한 칸씩 채우고, 순서는 STEPS 한 자리에 펼쳐 있다 — 임베딩·접속도 첫 두 단계.
+search 는 ExitStack 을 열고 `functools.reduce(bind, STEPS, ...)` 로 한 줄로 잇고 문서
+목록은 마지막 map_ok 에서 나온다. 실패 값은 _map_err 가 SearchFailure 로 바꾼다. 접속은
+_connect 이 받은 stack 에 closing 을 등록해, 뒤 단계가 Err 로 끝나도 닫힌다. match 로
+접는 갈래는 BaseRetriever 계약(_get_relevant_documents) 한 자리뿐이다 (빈 목록이 아니라
+raise).
 """
 
 from __future__ import annotations
@@ -50,15 +51,17 @@ class _Plan:
 
 @dataclass(frozen=True)
 class _State:
-    """파이프라인이 한 줄로 끌고 가는 값 한 벌 — 각 단계가 replace 로 한 칸씩 채운다."""
+    """파이프라인이 한 줄로 끌고 가는 값 한 벌 — 앞줄은 입력, 뒷줄은 각 단계가 채운다."""
 
     query: str
-    vector: list[float]
-    conn: Any
+    dsn: str
     plan: _Plan
     project: str | None
     since_hours: int | None
     claims: int
+    stack: contextlib.ExitStack
+    vector: list[float] = field(default_factory=list)
+    conn: Any = None
     vec_hits: list[rank.Hit] = field(default_factory=list)
     txt_hits: list[rank.Hit] = field(default_factory=list)
     feedback: dict[str, rank.Counts] = field(default_factory=dict)
@@ -101,6 +104,23 @@ def _capture(
             return Err(failure)
         case Ok(value):
             return Ok(replace(state, **{name: value}))
+
+
+def _embed(state: _State) -> Either[_State, SearchFailure]:
+    match _map_err(embed_adapter.embed(state.query), _embed_failure):
+        case Err(failure):
+            return Err(failure)
+        case Ok(vector):
+            return Ok(replace(state, vector=vector))
+
+
+def _connect(state: _State) -> Either[_State, SearchFailure]:
+    match _map_err(pg.connect(state.dsn), _pg_failure("store")):
+        case Err(failure):
+            return Err(failure)
+        case Ok(conn):
+            state.stack.enter_context(contextlib.closing(conn))
+            return Ok(replace(state, conn=conn))
 
 
 def _vector_search(state: _State) -> Either[_State, SearchFailure]:
@@ -169,6 +189,8 @@ def _claims(state: _State) -> Either[_State, SearchFailure]:
 
 #: 파이프라인 순서 — 이 목록 읽는 순서가 실행 순서다. 단계는 서로를 부르지 않는다.
 STEPS: tuple[Callable[[_State], Either[_State, SearchFailure]], ...] = (
+    _embed,
+    _connect,
     _vector_search,
     _text_search,
     _feedback_counts,
@@ -225,7 +247,7 @@ class PgRetriever(BaseRetriever):
     claims: int = 0
 
     def search(self, query: str) -> Either[list[Document], SearchFailure]:
-        """임베딩 → 접속(어느 갈래로 끝나든 닫기) → STEPS 한 줄 → 문서 목록."""
+        """클램프 → ExitStack → STEPS 한 줄 → 문서 목록 (접속은 스택이 닫는다)."""
 
         max_results = min(max(self.max_results, 1), MCP_MAX_RESULTS)
         max_tokens = min(max(self.max_tokens, 1), MCP_MAX_TOKENS)
@@ -234,27 +256,25 @@ class PgRetriever(BaseRetriever):
             max_results=max_results,
             max_chars=max_tokens * 4,
         )
-        match _map_err(embed_adapter.embed(query), _embed_failure):
-            case Err(failure):
-                return Err(failure)
-            case Ok(vector):
-                pass
-        match _map_err(pg.connect(self.dsn), _pg_failure("store")):
-            case Err(failure):
-                return Err(failure)
-            case Ok(conn):
-                pass
-        state = _State(
-            query=query,
-            vector=vector,
-            conn=conn,
-            plan=plan,
-            project=self.project,
-            since_hours=self.since_hours,
-            claims=self.claims,
-        )
-        with contextlib.closing(conn):
-            return map_ok(functools.reduce(bind, STEPS, Ok(state)), _documents)
+        with contextlib.ExitStack() as stack:
+            return map_ok(
+                functools.reduce(
+                    bind,
+                    STEPS,
+                    Ok(
+                        _State(
+                            query=query,
+                            dsn=self.dsn,
+                            plan=plan,
+                            project=self.project,
+                            since_hours=self.since_hours,
+                            claims=self.claims,
+                            stack=stack,
+                        )
+                    ),
+                ),
+                _documents,
+            )
 
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
