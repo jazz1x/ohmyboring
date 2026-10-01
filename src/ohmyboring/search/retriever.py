@@ -2,14 +2,18 @@
 
 질의 → list[Document]. metadata 키는 agents/memory/retriever.py:_hit_to_document 가 읽는
 이름과 같다 — 문 소비자(아침 카드 후보 기록·Deep Agent recall)가 바꿔 끼우지 않고 받는다.
-계산은 Either 값으로 흐르고 bind 로 단계를 잇고, 실패 값은 _map_err 가 SearchFailure 로
-바꾼다 — match 로 접는 갈래는 BaseRetriever 계약(_get_relevant_documents) 한 자리뿐이다
-(빈 목록이 아니라 raise).
+계산은 Either 값으로 흐른다. 단계는 모듈 함수 `state -> Either[state, SearchFailure]` 가
+replace 로 한 칸씩 채우고, 순서는 STEPS 한 자리에 펼쳐 있다 — search 는 임베딩·접속을
+연 뒤 `functools.reduce(bind, STEPS, ...)` 로 한 줄로 잇고 문서 목록은 마지막 map_ok
+에서 나온다. 실패 값은 _map_err 가 SearchFailure 로 바꾼다. match 로 접는 갈래는 search
+서두(임베딩·접속)와 BaseRetriever 계약(_get_relevant_documents) 두 자리뿐이다 (빈 목록이
+아니라 raise).
 """
 
 from __future__ import annotations
 
 import contextlib
+import functools
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -19,7 +23,7 @@ from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 
 from ohmyboring.adapters import embed as embed_adapter
-from ohmyboring.result import Either, Err, Ok, bind
+from ohmyboring.result import Either, Err, Ok, bind, map_ok
 from ohmyboring.search import pg, rank
 
 #: drudge/src/serve.rs:1336-1340 — /search 의 고정 상한.
@@ -45,10 +49,20 @@ class _Plan:
 
 
 @dataclass(frozen=True)
-class _Attachment:
-    """attach 단계가 모으는 표시 한 벌 — ordered 는 출발 멤버, 나머지 칸은 bind 가 채운다."""
+class _State:
+    """파이프라인이 한 줄로 끌고 가는 값 한 벌 — 각 단계가 replace 로 한 칸씩 채운다."""
 
-    ordered: list[rank.Scored]
+    query: str
+    vector: list[float]
+    conn: Any
+    plan: _Plan
+    project: str | None
+    since_hours: int | None
+    claims: int
+    vec_hits: list[rank.Hit] = field(default_factory=list)
+    txt_hits: list[rank.Hit] = field(default_factory=list)
+    feedback: dict[str, rank.Counts] = field(default_factory=dict)
+    ordered: list[rank.Scored] = field(default_factory=list)
     consumption: dict[str, rank.Counts] = field(default_factory=dict)
     said: dict[str, int] = field(default_factory=dict)
     superseded: dict[str, list[str]] = field(default_factory=dict)
@@ -59,9 +73,7 @@ def _paths(ordered: list[rank.Scored]) -> list[str]:
     return [scored.hit.source_path for scored in ordered]
 
 
-def _map_err(
-    result: Either[Any, Any], to_failure: Callable[[Any], SearchFailure]
-) -> Either[Any, SearchFailure]:
+def _map_err(result: Either[Any, Any], to_failure: Callable[[Any], SearchFailure]) -> Either[Any, Any]:
     """Err 안의 실패 값만 SearchFailure 로 바꾼다 — 파이프라인의 실패 쪽 접는 자리는 이 한 곳."""
 
     if isinstance(result, Err):
@@ -77,6 +89,124 @@ def _pg_failure(prefix: str) -> Callable[[pg.PgError], SearchFailure]:
 
 def _embed_failure(failure: embed_adapter.EmbedFailure) -> SearchFailure:
     return SearchFailure(f"embed: {failure}")
+
+
+def _capture(
+    state: _State, result: Either[Any, Any], prefix: str, name: str
+) -> Either[_State, SearchFailure]:
+    """pg 계산의 공통 꼴 — 결과를 _map_err 로 접고, 성공 값은 지명한 state 칸에 담는다."""
+
+    match _map_err(result, _pg_failure(prefix)):
+        case Err(failure):
+            return Err(failure)
+        case Ok(value):
+            return Ok(replace(state, **{name: value}))
+
+
+def _vector_search(state: _State) -> Either[_State, SearchFailure]:
+    return _capture(
+        state,
+        pg.vector_search(state.conn, state.vector, state.plan.pool, state.project, state.since_hours),
+        "vector",
+        "vec_hits",
+    )
+
+
+def _text_search(state: _State) -> Either[_State, SearchFailure]:
+    return _capture(
+        state,
+        pg.text_search(state.conn, state.query, state.plan.pool, state.project, state.since_hours),
+        "text",
+        "txt_hits",
+    )
+
+
+def _feedback_counts(state: _State) -> Either[_State, SearchFailure]:
+    pool_paths = sorted({h.source_path for h in state.vec_hits + state.txt_hits})
+    return _capture(state, pg.ranking_feedback_counts(state.conn, pool_paths), "feedback", "feedback")
+
+
+def _score(state: _State) -> Either[_State, SearchFailure]:
+    scored = rank.within_budget(
+        rank.merge_hits(state.vec_hits, state.txt_hits, state.feedback),
+        state.plan.max_results,
+        state.plan.max_chars,
+    )
+    match _map_err(pg.rank_facts(state.conn, _paths(scored)), _pg_failure("rank_facts")):
+        case Err(failure):
+            return Err(failure)
+        case Ok(facts):
+            return Ok(replace(state, ordered=rank.order_within_set(scored, facts)))
+
+
+def _attach_consumption(state: _State) -> Either[_State, SearchFailure]:
+    return _capture(
+        state, pg.consumption_counts(state.conn, _paths(state.ordered)), "consumption", "consumption"
+    )
+
+
+def _said_by_owner(state: _State) -> Either[_State, SearchFailure]:
+    return _capture(
+        state, pg.said_by_owner_counts(state.conn, _paths(state.ordered)), "said_by_owner", "said"
+    )
+
+
+def _superseded(state: _State) -> Either[_State, SearchFailure]:
+    return _capture(state, pg.superseded_by(state.conn, _paths(state.ordered)), "superseded_by", "superseded")
+
+
+def _claims(state: _State) -> Either[_State, SearchFailure]:
+    per_hit = min(max(state.claims, 0), SEARCH_MAX_CLAIMS)
+    if per_hit <= 0:
+        return Ok(state)
+    return _capture(
+        state,
+        pg.declared_claims(state.conn, _paths(state.ordered), per_hit),
+        "claims",
+        "declared",
+    )
+
+
+#: 파이프라인 순서 — 이 목록 읽는 순서가 실행 순서다. 단계는 서로를 부르지 않는다.
+STEPS: tuple[Callable[[_State], Either[_State, SearchFailure]], ...] = (
+    _vector_search,
+    _text_search,
+    _feedback_counts,
+    _score,
+    _attach_consumption,
+    _said_by_owner,
+    _superseded,
+    _claims,
+)
+
+
+def _documents(state: _State) -> list[Document]:
+    return [
+        _to_document(scored, state.consumption, state.said, state.superseded, state.declared)
+        for scored in state.ordered
+    ]
+
+
+def _to_document(scored, consumption, said, superseded, declared) -> Document:
+    hit = scored.hit
+    counts = consumption.get(hit.source_path, rank.Counts())
+    metadata: dict[str, Any] = {
+        "source_path": hit.source_path,
+        "project": hit.project,
+        "origin": hit.origin,
+        "used_count": counts.used,
+        "contested_count": counts.contested,
+        "said_by_owner": said.get(hit.source_path, 0),
+        "superseded_by": superseded.get(hit.source_path, []),
+        "dist": hit.dist,
+        "dist_kind": hit.dist_kind,
+    }
+    rows = declared.get(hit.source_path)
+    if rows is not None:
+        if rows.rows:
+            metadata["claims"] = [row.as_dict() for row in rows.rows]
+        metadata["claims_total"] = rows.total_matching
+    return Document(id=hit.id, page_content=hit.content, metadata=metadata)
 
 
 class PgRetriever(BaseRetriever):
@@ -95,6 +225,8 @@ class PgRetriever(BaseRetriever):
     claims: int = 0
 
     def search(self, query: str) -> Either[list[Document], SearchFailure]:
+        """임베딩 → 접속(어느 갈래로 끝나든 닫기) → STEPS 한 줄 → 문서 목록."""
+
         max_results = min(max(self.max_results, 1), MCP_MAX_RESULTS)
         max_tokens = min(max(self.max_tokens, 1), MCP_MAX_TOKENS)
         plan = _Plan(
@@ -102,133 +234,27 @@ class PgRetriever(BaseRetriever):
             max_results=max_results,
             max_chars=max_tokens * 4,
         )
-        return bind(
-            _map_err(embed_adapter.embed(query), _embed_failure),
-            lambda vector: self._connected(query, vector, plan),
+        match _map_err(embed_adapter.embed(query), _embed_failure):
+            case Err(failure):
+                return Err(failure)
+            case Ok(vector):
+                pass
+        match _map_err(pg.connect(self.dsn), _pg_failure("store")):
+            case Err(failure):
+                return Err(failure)
+            case Ok(conn):
+                pass
+        state = _State(
+            query=query,
+            vector=vector,
+            conn=conn,
+            plan=plan,
+            project=self.project,
+            since_hours=self.since_hours,
+            claims=self.claims,
         )
-
-    def _connected(
-        self, query: str, vector: list[float], plan: _Plan
-    ) -> Either[list[Document], SearchFailure]:
-        """임베딩 뒤의 단계들 — 접속을 열고 파이프라인이 끝까지 달리게 한 뒤 무조건 닫는다."""
-        return bind(
-            _map_err(pg.connect(self.dsn), _pg_failure("store")),
-            lambda conn: self._run(conn, query, vector, plan),
-        )
-
-    def _run(
-        self, conn, query: str, vector: list[float], plan: _Plan
-    ) -> Either[list[Document], SearchFailure]:
         with contextlib.closing(conn):
-            return bind(
-                _map_err(
-                    pg.vector_search(conn, vector, plan.pool, self.project, self.since_hours),
-                    _pg_failure("vector"),
-                ),
-                lambda vec_hits: self._text(conn, query, vec_hits, plan),
-            )
-
-    def _text(
-        self, conn, query: str, vec_hits: list[rank.Hit], plan: _Plan
-    ) -> Either[list[Document], SearchFailure]:
-        return bind(
-            _map_err(
-                pg.text_search(conn, query, plan.pool, self.project, self.since_hours),
-                _pg_failure("text"),
-            ),
-            lambda txt_hits: self._feedback(conn, vec_hits, txt_hits, plan),
-        )
-
-    def _feedback(
-        self, conn, vec_hits: list[rank.Hit], txt_hits: list[rank.Hit], plan: _Plan
-    ) -> Either[list[Document], SearchFailure]:
-        pool_paths = sorted({h.source_path for h in vec_hits + txt_hits})
-        return bind(
-            _map_err(pg.ranking_feedback_counts(conn, pool_paths), _pg_failure("feedback")),
-            lambda feedback: self._score(conn, vec_hits, txt_hits, feedback, plan),
-        )
-
-    def _score(
-        self,
-        conn,
-        vec_hits: list[rank.Hit],
-        txt_hits: list[rank.Hit],
-        feedback: dict[str, rank.Counts],
-        plan: _Plan,
-    ) -> Either[list[Document], SearchFailure]:
-        scored = rank.within_budget(
-            rank.merge_hits(vec_hits, txt_hits, feedback),
-            plan.max_results,
-            plan.max_chars,
-        )
-        return bind(
-            _map_err(
-                pg.rank_facts(conn, _paths(scored)),
-                _pg_failure("rank_facts"),
-            ),
-            lambda facts: self._attach(conn, rank.order_within_set(scored, facts)),
-        )
-
-    def _attach(self, conn, ordered: list[rank.Scored]) -> Either[list[Document], SearchFailure]:
-        return bind(
-            _map_err(pg.consumption_counts(conn, _paths(ordered)), _pg_failure("consumption")),
-            lambda consumption: self._said(
-                conn, replace(_Attachment(ordered=ordered), consumption=consumption)
-            ),
-        )
-
-    def _said(self, conn, attachment: _Attachment) -> Either[list[Document], SearchFailure]:
-        return bind(
-            _map_err(pg.said_by_owner_counts(conn, _paths(attachment.ordered)), _pg_failure("said_by_owner")),
-            lambda said: self._superseded(conn, replace(attachment, said=said)),
-        )
-
-    def _superseded(self, conn, attachment: _Attachment) -> Either[list[Document], SearchFailure]:
-        return bind(
-            _map_err(pg.superseded_by(conn, _paths(attachment.ordered)), _pg_failure("superseded_by")),
-            lambda superseded: self._claims(conn, replace(attachment, superseded=superseded)),
-        )
-
-    def _claims(self, conn, attachment: _Attachment) -> Either[list[Document], SearchFailure]:
-        per_hit = min(max(self.claims, 0), SEARCH_MAX_CLAIMS)
-        if per_hit <= 0:
-            return Ok(self._documents(attachment))
-        return bind(
-            _map_err(
-                pg.declared_claims(conn, _paths(attachment.ordered), per_hit),
-                _pg_failure("claims"),
-            ),
-            lambda declared: Ok(self._documents(replace(attachment, declared=declared))),
-        )
-
-    def _documents(self, attachment: _Attachment) -> list[Document]:
-        return [
-            self._to_document(
-                scored, attachment.consumption, attachment.said, attachment.superseded, attachment.declared
-            )
-            for scored in attachment.ordered
-        ]
-
-    def _to_document(self, scored, consumption, said, superseded, declared) -> Document:
-        hit = scored.hit
-        counts = consumption.get(hit.source_path, rank.Counts())
-        metadata: dict[str, Any] = {
-            "source_path": hit.source_path,
-            "project": hit.project,
-            "origin": hit.origin,
-            "used_count": counts.used,
-            "contested_count": counts.contested,
-            "said_by_owner": said.get(hit.source_path, 0),
-            "superseded_by": superseded.get(hit.source_path, []),
-            "dist": hit.dist,
-            "dist_kind": hit.dist_kind,
-        }
-        rows = declared.get(hit.source_path)
-        if rows is not None:
-            if rows.rows:
-                metadata["claims"] = [row.as_dict() for row in rows.rows]
-            metadata["claims_total"] = rows.total_matching
-        return Document(id=hit.id, page_content=hit.content, metadata=metadata)
+            return map_ok(functools.reduce(bind, STEPS, Ok(state)), _documents)
 
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
