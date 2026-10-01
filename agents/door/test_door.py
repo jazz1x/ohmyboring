@@ -825,7 +825,9 @@ POST /remember 도 문을 지난다.
     def test_the_answer_does_not_wait_for_the_shadow(self):
         started = time.monotonic()
 
-        def slow_shadow(**_kwargs):
+        # run_shadow 는 ShadowRequest 하나를 위치 인자로 받는다 — 이 목도 그 모양을 따라야
+        # 진짜로 0.6s 자고, 응답 앞에서 그림자를 기다리는 변이가 이 단언으로 빨갛게 끝난다.
+        def slow_shadow(_request, **_kwargs):
             time.sleep(0.6)
             return door.remember_shadow.ShadowEvent("ok")
 
@@ -838,9 +840,10 @@ POST /remember 도 문을 지난다.
                 headers={"content-type": "application/json"},
             )
             elapsed = time.monotonic() - started
-            self._wait_for_shadow()
+            event = self._wait_for_shadow()
         self.assertEqual(status, 200)
         self.assertEqual(body, REMEMBER_MCP_BODY)
+        self.assertEqual(event["status"], "ok", "자고 난 그림자의 사건은 ok — 목 깨짐을 덮지 않는다")
         self.assertLess(elapsed, 0.6, "응답이 그림자를 기다리면 이 값이 0.6s 를 넘는다")
 
     def test_non_remember_calls_leave_no_shadow_event(self):
