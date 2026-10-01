@@ -85,8 +85,8 @@ def merge_hits(
     for rank, hit in enumerate(txt_hits, start=1):
         fused[hit.id] = fused.get(hit.id, 0.0) + rrf_term(rank)
         byid.setdefault(hit.id, hit)
-    for path, count in counts.items():
-        net = net_feedback(count.used, count.contested)
+    nets = {path: net_feedback(c.used, c.contested) for path, c in counts.items()}
+    for path, net in nets.items():
         if net == 0:
             continue
         for chunk_id, hit in byid.items():
@@ -97,7 +97,14 @@ def merge_hits(
         for chunk_id, score in fused.items()
         if (hit := byid[chunk_id]).origin not in exclude_origins
     ]
-    merged.sort(key=lambda scored: -scored.score)  # 안정 정렬 — 동점은 풀 목록 안 입장 순
+    # 한 표는 정확히 한 계단이라 점수 동점은 곧 판정이 만든 동점 — 판정 많은 쪽이 먼저, 그다음 id 오름차순.
+    merged.sort(
+        key=lambda scored: (
+            -scored.score,
+            -nets.get(scored.hit.source_path, 0),
+            scored.hit.id,
+        )
+    )
     return merged
 
 

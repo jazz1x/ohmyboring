@@ -3,9 +3,10 @@
 
 Run: python3 ohmyboring/search/test_rank.py   (no pytest dependency)
 
-Mutation targets: FEEDBACK_STEP=0 변이, owner 필터 빼기 변이, rank_key 의 superseded 빼기 변이
-각각 여기서 사망 확인. 픽스처는 옳은/틀린 구현이 다른 답을 내는 값으로 고른다 — 점수 차가
-정확히 한 step 이하인 두 노트(안 그러면 넛지 없는 구현도 같은 순위를 낸다).
+Mutation targets: FEEDBACK_STEP=0 변이, owner 필터 빼기 변이, rank_key 의 superseded 빼기 변이,
+merge_hits 의 판정 net 키 빼기 변이·판정 비교 방향 뒤집기 변이 각각 여기서 사망 확인. 픽스처는
+옳은/틀린 구현이 다른 답을 내는 값으로 고른다 — 점수 차가 정확히 한 step 이하인 두 노트(안
+그러면 넛지 없는 구현도 같은 순위를 낸다).
 """
 
 from __future__ import annotations
@@ -82,8 +83,9 @@ class FeedbackFlipTests(unittest.TestCase):
 
     def test_used_three_flips_the_pair(self):
         merged = self._fixture(3)
-        # 판정 없으면 [c, b, a] — b 가 a 보다 한 step 위. used 3 으로 a 가 맨 앞으로.
-        self.assertEqual(ids(merged), ["a#0", "c#0", "b#0"])
+        # 판정 없으면 [c, b, a] — b·c 는 1/61 로 동점(id 오름차순 → b 먼저), a 는 한 step 아래.
+        # used 3 으로 a 가 맨 앞으로 — b·c 동점은 그다음 id 오름차순.
+        self.assertEqual(ids(merged), ["a#0", "b#0", "c#0"])
         self.assertEqual(merged[0].score, rrf_term(2) + 3 * FEEDBACK_STEP)
 
     def test_net_four_equals_net_three_cap(self):
@@ -98,7 +100,30 @@ class FeedbackFlipTests(unittest.TestCase):
         vec = [hit("c#0", "/c.md"), hit("a#0", "/a.md")]
         txt = [hit("b#0", "/b.md")]
         merged = merge_hits(vec, txt, {})
-        self.assertEqual(ids(merged), ["c#0", "b#0", "a#0"], "판정 0 이면 점수 순 — 동점은 입장 순")
+        self.assertEqual(ids(merged), ["b#0", "c#0", "a#0"], "판정 0 이면 점수 순 — 동점은 id 오름차순")
+
+
+class VerdictTieTests(unittest.TestCase):
+    """(q3) 판정 한 표가 만든 동점 — 한 표 = 정확히 한 계단이라 vector 2위(used=1)는 vector 1위(판정 없음)와 동점."""
+
+    def _fixture(self, counts: dict[str, Counts]) -> list[Scored]:
+        # A: 벡터 1위 (판정 없음), B: 벡터 2위 — B 가 used 1 표를 얻으면 정확히 한 계단 올라 A 와 동점.
+        vec = [hit("a#0", "/a.md"), hit("b#0", "/b.md")]
+        return merge_hits(vec, [], counts)
+
+    def test_one_verdict_breaks_the_exact_tie_toward_the_verdict(self):
+        merged = self._fixture({"/b.md": Counts(used=1)})
+        scores = {item.hit.id: item.score for item in merged}
+        self.assertEqual(
+            scores["a#0"],
+            scores["b#0"],
+            "vector 2위 + 한 👍 은 vector 1위와 정확히 동점 (한 표 = 한 계단)",
+        )
+        self.assertEqual(ids(merged), ["b#0", "a#0"], "동점은 판정이 가른다 — B 가 먼저")
+
+    def test_no_verdicts_distinct_scores_keep_score_order(self):
+        merged = self._fixture({})
+        self.assertEqual(ids(merged), ["a#0", "b#0"], "대조군: 판정 없음 — 점수 순")
 
 
 class TallyFeedbackTests(unittest.TestCase):
