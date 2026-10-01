@@ -7,7 +7,8 @@ Cover:
   (c) 임베딩 Err → 502 JSON {error} — 빈 hits 200 금지
   (d) 판정 카운트 Err → 502 JSON
   (e) session_id → handover 호출, 그 실패도 502
-  (f) 클램프·400 — max_results 상한 50, 음수·문자열 400, query 없음 400
+  (f) 통과·400 — 문은 파싱만 하고 값을 그대로 리트리버에 넘긴다(클램프는 리트리버 몫,
+      test_retriever.py::test_clamps), 음수·문자열·bool 400, blank query 400
   (g) query_log 이 search 결과를 한 번 남긴다 (스텁이 받은 인자로 확인)
 """
 
@@ -193,11 +194,13 @@ class SearchRouteTests(unittest.TestCase):
         self.assertEqual(hits[0]["source_path"], "/w.md")
         self.assertEqual(hits[0]["dist"], 0.3)
 
-    def test_clamps_and_validation(self):
+    def test_passthrough_and_validation(self):
+        # 문은 경계 파싱만 하고 값을 그대로 리트리버에 넘긴다 — 상한 clamp(SSOT)는 리트리버
+        # 몫 (src/ohmyboring/search/test_retriever.py::RetrieverPipelineTests::test_clamps).
         self.post({"query": "q", "max_results": 999, "max_tokens": 999_999, "claims": 99})
-        self.assertEqual(self.made[-1]["max_results"], 50)
-        self.assertEqual(self.made[-1]["max_tokens"], 16_384)
-        self.assertEqual(self.made[-1]["claims"], 10)
+        self.assertEqual(self.made[-1]["max_results"], 999)
+        self.assertEqual(self.made[-1]["max_tokens"], 999_999)
+        self.assertEqual(self.made[-1]["claims"], 99)
         for bad in (-1, "3", True):
             response = self.post({"query": "q", "max_results": bad})
             self.assertEqual(response.status_code, 400, f"max_results={bad!r}")

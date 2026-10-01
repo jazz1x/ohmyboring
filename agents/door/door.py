@@ -78,7 +78,7 @@ from typing import Any
 import psycopg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, StrictInt, StrictStr, ValidationError, field_validator
 from slack_sdk.errors import SlackClientError
 
 from ohmyboring import config as boring_config
@@ -869,20 +869,27 @@ async def _repairs_split_subjects_post(request: Request) -> Response:
     return JSONResponse(result, status_code=202)
 
 
-#: /search 의 고정 상한 — drudge/src/serve.rs:1336-1340 (MCP_MAX_RESULTS·MCP_MAX_TOKENS·SEARCH_MAX_CLAIMS).
-_SEARCH_MAX_RESULTS = 50
-_SEARCH_MAX_TOKENS = 16_384
-_SEARCH_MAX_CLAIMS = 10
+class _SearchBody(BaseModel):
+    """POST /search 본문 — 경계에서 한 번 파싱한다. StrictInt: bool·문자열·실수는 정수가
+    아니고(옛 _search_int 계약과 같음), ge=0: 음수는 부호 없는 Rust 필드(usize/u32)와 어긋난다.
+    기본값 5/2000/0 은 이 모형이 갖고, 상한 클램프는 리트리버 몫(SSOT) — 문은 파싱된 값을
+    그대로 통과시킨다."""
 
+    query: StrictStr
+    max_results: StrictInt = Field(default=5, ge=0)
+    max_tokens: StrictInt = Field(default=2000, ge=0)
+    claims: StrictInt = Field(default=0, ge=0)
+    related: StrictInt = Field(default=0, ge=0)
+    since_hours: StrictInt | None = None
+    project: StrictStr | None = None
+    session_id: StrictStr | None = None
 
-def _search_int(value: Any, name: str) -> int | None:
-    """JSON 본문의 선택 정수 — bool 은 정수가 아니고, 음수는 부호 없는 Rust 필드(usize/u32)와
-    어긋나 400."""
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{name} must be an integer")
-    return value
+    @field_validator("query")
+    @classmethod
+    def _query_non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("query is required")
+        return value
 
 
 def _search_execute(retriever: search_retriever.PgRetriever, query: str):
@@ -905,39 +912,38 @@ def _search_handover(session_id: str, paths: list[str]) -> Either[search_pg.Hand
 
 def _search_log_query(query: str, hits: list[dict], started: float) -> None:
     """query_log 한 줄 — label-recall 이 표본으로 읽는 표 (store.rs:2349, 열 그대로).
-    실패는 stderr 한 줄로만 남긴다 — Rust spawn_query_log 의 eprintln 과 같은 자리."""
-    try:
-        latency_ms = int((time.monotonic() - started) * 1000)
-        logged = [(hit["source_path"], hit.get("dist"), hit.get("dist_kind")) for hit in hits]
-        snippet = hits[0]["snippet"][:200] if hits else ""
-        match search_pg.connect(os.environ["DOOR_PG_DSN"]):
-            case Err(failure):
-                print(f"[door] query_log failed: {failure.detail}", file=sys.stderr, flush=True)
-            case Ok(conn):
-                with contextlib.closing(conn):
-                    row = search_pg.QueryLogRow(
-                        endpoint="search",
-                        query=query,
-                        logged_hits=tuple(logged),
-                        sources=[],
-                        answer_snippet=snippet,
-                        latency_ms=latency_ms,
-                    )
-                    match search_pg.log_query(conn, row):
-                        case Err(failure):
-                            print(
-                                f"[door] query_log failed: {failure.detail}",
-                                file=sys.stderr,
-                                flush=True,
-                            )
-    except Exception as e:  # noqa: BLE001 — 기록은 부차적, 어떤 이유로 죽어도 검색 답은 산다
-        print(f"[door] query_log failed: {e}", file=sys.stderr, flush=True)
+    실패는 stderr 한 줄로만 남긴다 — Rust spawn_query_log 의 eprintln 과 같은 자리. connect 와
+    log_query 는 실패를 Either 값으로 돌려주니, 여기서 튀는 예외는 버그 — 남을 게 아니라 튄다."""
+    latency_ms = int((time.monotonic() - started) * 1000)
+    logged = [(hit["source_path"], hit.get("dist"), hit.get("dist_kind")) for hit in hits]
+    snippet = hits[0]["snippet"][:200] if hits else ""
+    match search_pg.connect(os.environ["DOOR_PG_DSN"]):
+        case Err(failure):
+            print(f"[door] query_log failed: {failure.detail}", file=sys.stderr, flush=True)
+        case Ok(conn):
+            with contextlib.closing(conn):
+                row = search_pg.QueryLogRow(
+                    endpoint="search",
+                    query=query,
+                    logged_hits=tuple(logged),
+                    sources=[],
+                    answer_snippet=snippet,
+                    latency_ms=latency_ms,
+                )
+                match search_pg.log_query(conn, row):
+                    case Err(failure):
+                        print(
+                            f"[door] query_log failed: {failure.detail}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
 
 
 async def _search(request: Request) -> Response:
     """POST /search — related > 0 만 드러지(:7700)로 넘기고, 나머지는 문이 파이썬 순위
     (ohmyboring.search — RRF 융합·판정 넛지·집합 안 순서·예산)로 직접 답한다. 응답엔
     x-boring-search: python 이 붙는다 — 프록시로 넘긴 경우엔 붙이지 않는다.
+    본문은 경계에서 _SearchBody 로 한 번 파싱한다(타입·부호·blank — 400 은 전부 거기서).
     임베딩·판정 읽기·handover 실패는 전부 502 JSON — drudge 가 조용히 넘어가던 자리를
     문은 보이게 접는다 (계약 divergence 목록)."""
     try:
@@ -947,49 +953,31 @@ async def _search(request: Request) -> Response:
     if not isinstance(body, dict):
         return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
     try:
-        related = _search_int(body.get("related"), "related")
-        max_results = _search_int(body.get("max_results"), "max_results")
-        max_tokens = _search_int(body.get("max_tokens"), "max_tokens")
-        since_hours = _search_int(body.get("since_hours"), "since_hours")
-        claims = _search_int(body.get("claims"), "claims")
-    except ValueError as e:
+        params = _SearchBody.model_validate(body)
+    except ValidationError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    if related is not None and related < 0:
-        return JSONResponse({"error": "related must be a non-negative integer"}, status_code=400)
     if (
-        related
+        params.related
     ):  # 명시 분긴 하나 — 그래프 확장(related_by_shared_ground)은 엔진 것, 문 소비자도 related>0 을 안 본다.
         return await _proxy(request)
-    for name, value in (("max_results", max_results), ("max_tokens", max_tokens), ("claims", claims)):
-        if value is not None and value < 0:
-            return JSONResponse({"error": f"{name} must be a non-negative integer"}, status_code=400)
-    query = body.get("query")
-    if not isinstance(query, str) or not query.strip():
-        return JSONResponse({"error": "query is required"}, status_code=400)
-    project = body.get("project")
-    if project is not None and not isinstance(project, str):
-        return JSONResponse({"error": "project must be a string"}, status_code=400)
-    session_id = body.get("session_id")
-    if session_id is not None and not isinstance(session_id, str):
-        return JSONResponse({"error": "session_id must be a string"}, status_code=400)
     if not os.environ.get("DOOR_PG_DSN"):
         return JSONResponse({"error": "store not configured"}, status_code=503)
     retriever = search_retriever.PgRetriever(
         dsn=os.environ["DOOR_PG_DSN"],
-        max_results=min(max(max_results if max_results is not None else 5, 1), _SEARCH_MAX_RESULTS),
-        max_tokens=min(max(max_tokens if max_tokens is not None else 2000, 1), _SEARCH_MAX_TOKENS),
-        project=project,
-        since_hours=since_hours,
-        claims=min(max(claims if claims is not None else 0, 0), _SEARCH_MAX_CLAIMS),
+        max_results=params.max_results,
+        max_tokens=params.max_tokens,
+        project=params.project,
+        since_hours=params.since_hours,
+        claims=params.claims,
     )
     started = time.monotonic()
-    match await asyncio.to_thread(_search_execute, retriever, query):
+    match await asyncio.to_thread(_search_execute, retriever, params.query):
         case Ok(documents):
-            want_claims = (claims if claims is not None else 0) > 0
+            want_claims = params.claims > 0
             hits = [search_hits.document_to_hit(doc, claims_requested=want_claims) for doc in documents]
         case Err(failure):
             return JSONResponse({"error": f"search failed: {failure.detail}"}, status_code=502)
-    session = session_id.strip() if session_id is not None else ""
+    session = params.session_id.strip() if params.session_id is not None else ""
     if session:
         paths = [hit["source_path"] for hit in hits]
         match await asyncio.to_thread(_search_handover, session, paths):
@@ -997,7 +985,7 @@ async def _search(request: Request) -> Response:
                 pass
             case Err(detail):
                 return JSONResponse({"error": f"handover failed: {detail}"}, status_code=502)
-    await asyncio.to_thread(_search_log_query, query, hits, started)
+    await asyncio.to_thread(_search_log_query, params.query, hits, started)
     return JSONResponse({"hits": hits}, headers={"x-boring-search": "python"})
 
 

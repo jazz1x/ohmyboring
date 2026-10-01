@@ -123,7 +123,7 @@ def tally_feedback(
 
 
 def rank_key(facts: RankFacts | None) -> tuple[bool, bool, float]:
-    """집합 안 순서 한 벌 — (대체失, owner 아님, owner 는 갱신 최신 먼저) 다음 점수.
+    """집합 안 순서 한 벌 — (대체되님, owner 아님, owner 는 갱신 최신 먼저) 다음 점수.
 
     세 번째 칸: owner 의 updated_at 은 클수록(최신) 앞에 와야 하니 부호를 뒤집고,
     owner 가 아니면 같은 칸의 어떤 시각보다 뒤(+inf)로 본다 — Rust 의 Reverse(Option) 규칙.
@@ -140,7 +140,7 @@ def rank_key(facts: RankFacts | None) -> tuple[bool, bool, float]:
 
 def order_within_set(scored: list[Scored], facts: dict[str, RankFacts]) -> list[Scored]:
     """멤버십은 점수로 이미 정해졌고, 돌려주는 모양만 rank_key 순으로 다시 정렬한다 —
-    대첸 노트는 밀리는(demote) 거지 짤리는(cut) 게 아니다."""
+    대체된 노트는 밀리는(demote) 거지 짤리는(cut) 게 아니다."""
     return sorted(
         scored,
         key=lambda scored_item: (
