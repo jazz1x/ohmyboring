@@ -718,6 +718,11 @@ impl Store {
                  -- written before the column existed, or a caller that brings no judge. The
                  -- engine stores the value verbatim and never interprets it.
                  ALTER TABLE edge ADD COLUMN IF NOT EXISTS judge text;
+                 -- First-written time of an edge row; NULL = written before the column existed (never
+                 -- back-filled — the time is unknown). The default arrives in its own statement: a
+                 -- DEFAULT on ADD COLUMN would back-fill every existing row with now().
+                 ALTER TABLE edge ADD COLUMN IF NOT EXISTS first_seen_at timestamptz;
+                 ALTER TABLE edge ALTER COLUMN first_seen_at SET DEFAULT now();
                  ALTER TABLE document ADD COLUMN IF NOT EXISTS extracted_sha text NOT NULL DEFAULT '';
                  ALTER TABLE document ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
                  ALTER TABLE document ADD COLUMN IF NOT EXISTS author text NOT NULL DEFAULT 'unknown';
