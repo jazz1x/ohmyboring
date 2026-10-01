@@ -120,6 +120,14 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.x"
+      # test_pg.py (DB gate suites) needs psycopg before it can even import; previously these installs
+      # lived in "start door", which runs after the DB gate suites — first CI run of the E2a steps died
+      # with ModuleNotFoundError. requirements.txt mirrors the door image; `pip install .` puts
+      # ohmyboring (src/) on the path.
+      - name: install python deps (door + search/pg.py)
+        run: |
+          pip install -r requirements.txt
+          pip install .
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -188,11 +196,8 @@ jobs:
           curl -sf -m3 http://127.0.0.1:7700/health
       # The door's own POST /search (python engine E2a) answers from the same DB the engine
       # synced — started here so eval-gate.sh can run the golden set through it afterwards.
-      # requirements.txt mirrors the door image; `pip install .` puts ohmyboring (src/) on the path.
       - name: start door (python /search path)
         run: |
-          pip install -r requirements.txt
-          pip install .
           DOOR_PG_DSN=postgresql://boring:boring@127.0.0.1:5432/boring \
           DOOR_UPSTREAM=http://127.0.0.1:7700 \
           BORING_LLM_BASE_URL=http://127.0.0.1:11434/v1 \
