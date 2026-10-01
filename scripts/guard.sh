@@ -92,6 +92,7 @@ python3 src/ohmyboring/adapters/test_slack.py
 python3 src/ohmyboring/adapters/test_workflow_contract.py
 python3 src/ohmyboring/test_result.py
 python3 agents/door/test_door.py
+python3 agents/door/test_door_search.py
 python3 agents/memory/test_retriever.py
 python3 agents/memory/test_store.py
 python3 agents/memory/test_deep_agent.py
@@ -132,6 +133,10 @@ python3 scripts/test_readme_locale_parity.py
 python3 scripts/test_package_skeleton.py
 python3 src/ohmyboring/recall/test_named.py
 python3 src/ohmyboring/entrypoints/http/test_mcp_recall.py
+python3 src/ohmyboring/search/test_rank.py
+python3 src/ohmyboring/search/test_hits.py
+python3 src/ohmyboring/search/test_retriever.py
+python3 src/ohmyboring/search/test_pg.py
 echo "6) shell destructive-path guardrails (restore-db)…"
 sh scripts/test_restore_db.sh
 echo "7) shell readiness gate guardrails (doctor --strict)…"

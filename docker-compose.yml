@@ -112,6 +112,10 @@ services:
       BORING_DOOR_URL: http://127.0.0.1:7710
       BORING_URL: http://boring-drudge:7700
       OLLAMA_HOST: http://host.docker.internal:11434
+      # E2a: the door's own POST /search embeds through ohmyboring.config, and the host-side
+      # host.docker.internal→localhost rewrite must not apply in-container — the same flag
+      # hermes carries (drudge_url/door_url resolve from explicit env here, so nothing else moves).
+      BORING_IN_CONTAINER: "1"
       BORING_VAULT_DIR: /vault
       BORING_CONFIG: /config/boring.json
     volumes:

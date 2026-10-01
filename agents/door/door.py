@@ -20,8 +20,11 @@ text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. An engine answer, 4xx
 included, passes through as-is; an engine that cannot be reached is a 502 JSON
-body, never a silent 200 with an empty one. Unregistered paths get FastAPI's
-404: this is a door, not a catch-all proxy. The door's own routes, registered
+body, never a silent 200 with an empty one. Unregistered paths get FastAPI's 404: this is a door, not a catch-all proxy. The one search route the
+door answers itself is POST /search (E2a): the python ranking pipeline (ohmyboring.search —
+RRF fusion, verdict feedback, budget, in-set order) answers directly and stamps the response
+x-boring-search: python — except when related > 0 asks for the graph expansion, which still
+travels to the engine through the proxy. The door's own routes, registered
 outside the engine's proxy table: GET /approved reads the graph store (what
 the morning card's 「해」 judged), GET /claim-source resolves a subject to its
 current claim's note path (GET /claim-sources: every subject's current claim for one
@@ -52,6 +55,7 @@ than post twice.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import enum
 import hmac
 import http.client
@@ -62,6 +66,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator
@@ -80,6 +85,10 @@ from ohmyboring import config as boring_config
 from ohmyboring.adapters import vault as vault_notes
 from ohmyboring.entrypoints.http import mcp_recall
 from ohmyboring.recall import named as recall_named
+from ohmyboring.result import Either, Err, Ok
+from ohmyboring.search import hits as search_hits
+from ohmyboring.search import pg as search_pg
+from ohmyboring.search import retriever as search_retriever
 
 from ..shared import vault_note
 from . import approved, claim_source, rules
@@ -860,6 +869,138 @@ async def _repairs_split_subjects_post(request: Request) -> Response:
     return JSONResponse(result, status_code=202)
 
 
+#: /search 의 고정 상한 — drudge/src/serve.rs:1336-1340 (MCP_MAX_RESULTS·MCP_MAX_TOKENS·SEARCH_MAX_CLAIMS).
+_SEARCH_MAX_RESULTS = 50
+_SEARCH_MAX_TOKENS = 16_384
+_SEARCH_MAX_CLAIMS = 10
+
+
+def _search_int(value: Any, name: str) -> int | None:
+    """JSON 본문의 선택 정수 — bool 은 정수가 아니고, 음수는 부호 없는 Rust 필드(usize/u32)와
+    어긋나 400."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    return value
+
+
+def _search_execute(retriever: search_retriever.PgRetriever, query: str):
+    """The seam the tests stub — Either 를 그대로 돌려준다."""
+    return retriever.search(query)
+
+
+def _search_handover(session_id: str, paths: list[str]) -> Either[search_pg.HandoverReport, str]:
+    """보여준 hit 마다 handed 간선 (store.rs:3028). 실패는 Err — 핸들러가 502 로 접는다.
+    Rust 는 여기서 eprintln 만 하고 성공 응답을 줬다 — E2a 가 일부러 닫은 자리(조용한
+    폭락 금지)라 주석이 아니라 코드가 갈라진다."""
+    observed_at = datetime.now(tz=UTC).isoformat()
+    match search_pg.connect(os.environ["DOOR_PG_DSN"]):
+        case Err(failure):
+            return Err(failure.detail)
+        case Ok(conn):
+            with contextlib.closing(conn):
+                return search_pg.record_handover(conn, session_id, observed_at, paths)
+
+
+def _search_log_query(query: str, hits: list[dict], started: float) -> None:
+    """query_log 한 줄 — label-recall 이 표본으로 읽는 표 (store.rs:2349, 열 그대로).
+    실패는 stderr 한 줄로만 남긴다 — Rust spawn_query_log 의 eprintln 과 같은 자리."""
+    try:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        logged = [(hit["source_path"], hit.get("dist"), hit.get("dist_kind")) for hit in hits]
+        snippet = hits[0]["snippet"][:200] if hits else ""
+        match search_pg.connect(os.environ["DOOR_PG_DSN"]):
+            case Err(failure):
+                print(f"[door] query_log failed: {failure.detail}", file=sys.stderr, flush=True)
+            case Ok(conn):
+                with contextlib.closing(conn):
+                    row = search_pg.QueryLogRow(
+                        endpoint="search",
+                        query=query,
+                        logged_hits=tuple(logged),
+                        sources=[],
+                        answer_snippet=snippet,
+                        latency_ms=latency_ms,
+                    )
+                    match search_pg.log_query(conn, row):
+                        case Err(failure):
+                            print(
+                                f"[door] query_log failed: {failure.detail}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+    except Exception as e:  # noqa: BLE001 — 기록은 부차적, 어떤 이유로 죽어도 검색 답은 산다
+        print(f"[door] query_log failed: {e}", file=sys.stderr, flush=True)
+
+
+async def _search(request: Request) -> Response:
+    """POST /search — related > 0 만 드러지(:7700)로 넘기고, 나머지는 문이 파이썬 순위
+    (ohmyboring.search — RRF 융합·판정 넛지·집합 안 순서·예산)로 직접 답한다. 응답엔
+    x-boring-search: python 이 붙는다 — 프록시로 넘긴 경우엔 붙이지 않는다.
+    임베딩·판정 읽기·handover 실패는 전부 502 JSON — drudge 가 조용히 넘어가던 자리를
+    문은 보이게 접는다 (계약 divergence 목록)."""
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+    try:
+        related = _search_int(body.get("related"), "related")
+        max_results = _search_int(body.get("max_results"), "max_results")
+        max_tokens = _search_int(body.get("max_tokens"), "max_tokens")
+        since_hours = _search_int(body.get("since_hours"), "since_hours")
+        claims = _search_int(body.get("claims"), "claims")
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if related is not None and related < 0:
+        return JSONResponse({"error": "related must be a non-negative integer"}, status_code=400)
+    if (
+        related
+    ):  # 명시 분긴 하나 — 그래프 확장(related_by_shared_ground)은 엔진 것, 문 소비자도 related>0 을 안 본다.
+        return await _proxy(request)
+    for name, value in (("max_results", max_results), ("max_tokens", max_tokens), ("claims", claims)):
+        if value is not None and value < 0:
+            return JSONResponse({"error": f"{name} must be a non-negative integer"}, status_code=400)
+    query = body.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return JSONResponse({"error": "query is required"}, status_code=400)
+    project = body.get("project")
+    if project is not None and not isinstance(project, str):
+        return JSONResponse({"error": "project must be a string"}, status_code=400)
+    session_id = body.get("session_id")
+    if session_id is not None and not isinstance(session_id, str):
+        return JSONResponse({"error": "session_id must be a string"}, status_code=400)
+    if not os.environ.get("DOOR_PG_DSN"):
+        return JSONResponse({"error": "store not configured"}, status_code=503)
+    retriever = search_retriever.PgRetriever(
+        dsn=os.environ["DOOR_PG_DSN"],
+        max_results=min(max(max_results if max_results is not None else 5, 1), _SEARCH_MAX_RESULTS),
+        max_tokens=min(max(max_tokens if max_tokens is not None else 2000, 1), _SEARCH_MAX_TOKENS),
+        project=project,
+        since_hours=since_hours,
+        claims=min(max(claims if claims is not None else 0, 0), _SEARCH_MAX_CLAIMS),
+    )
+    started = time.monotonic()
+    match await asyncio.to_thread(_search_execute, retriever, query):
+        case Ok(documents):
+            want_claims = (claims if claims is not None else 0) > 0
+            hits = [search_hits.document_to_hit(doc, claims_requested=want_claims) for doc in documents]
+        case Err(failure):
+            return JSONResponse({"error": f"search failed: {failure.detail}"}, status_code=502)
+    session = session_id.strip() if session_id is not None else ""
+    if session:
+        paths = [hit["source_path"] for hit in hits]
+        match await asyncio.to_thread(_search_handover, session, paths):
+            case Ok(_):
+                pass
+            case Err(detail):
+                return JSONResponse({"error": f"handover failed: {detail}"}, status_code=502)
+    await asyncio.to_thread(_search_log_query, query, hits, started)
+    return JSONResponse({"hits": hits}, headers={"x-boring-search": "python"})
+
+
 for _path, _methods in _load_routes().items():
     app.add_api_route(_path, _proxy, methods=_methods)
 
@@ -874,6 +1015,7 @@ _DOOR_HANDLERS = {
     "POST /repairs/split-subjects": _repairs_split_subjects_post,
     "POST /run/morning-card": _run_morning_card,
     "POST /run/weekly-card": _run_weekly_card,
+    "POST /search": _search,
     "GET /rules": _rules,
 }
 for _method, _path in _load_door_routes():

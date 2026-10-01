@@ -70,7 +70,8 @@
     "POST /repairs/split-subjects",
     "GET /rules",
     "POST /run/morning-card",
-    "POST /run/weekly-card"
+    "POST /run/weekly-card",
+    "POST /search"
   ],
   "http_routes": [
     "GET /audit",
