@@ -34,11 +34,19 @@ class RelatedSqlShapeTests(unittest.TestCase):
 
     def test_weights_kinds_and_older_than_are_ported(self):
         sql = pg._RELATED_BY_SHARED_GROUND_SQL
-        self.assertIn("2 AS weight", sql, "공유 claim 의 가중치는 2 — store.rs:1218")
-        self.assertIn("1 AS weight", sql, "공유 concept 의 가중치는 1 — store.rs:1223")
+        self.assertIn(
+            "2 AS weight FROM edge e JOIN self_claims",
+            sql,
+            "공유 claim 의 가중치는 2 — store.rs:1218 (가중치↔종류 결합까지 본다)",
+        )
+        self.assertIn(
+            "1 AS weight FROM edge e JOIN self_concepts",
+            sql,
+            "공유 concept 의 가중치는 1 — store.rs:1223",
+        )
         self.assertEqual(sql.count("kind = 'claims'"), 2)
         self.assertEqual(sql.count("kind = 'about'"), 2)
-        self.assertIn("dst LIKE 'concept:%'", sql)
+        self.assertIn("dst LIKE 'concept:%%'", sql)
         self.assertIn(
             "od.updated_at < (SELECT updated_at FROM document WHERE source_path = %s)",
             sql,

@@ -278,11 +278,12 @@ def superseded_by(conn: psycopg.Connection, paths: list[str]) -> Either[dict[str
 #: store.rs:1197-1250 related_by_shared_ground — 공유 claim 이 2, 공유 concept:% 가 1. 후보는 self
 #: 보다 updated_at 이 오래된 document 뿐 (선별 전에 ranking 하면 자기 자신이 먹통이 된다는 측정이
 #: 그 근거 — 주석 그대로 옮김). LIMIT 전에 doc_node ASC, 최종은 shared DESC 에 source_path ASC
-#: (Rust 에서 결정적이던 경우와 같은 전순서 — E2c 결정).
+#: (Rust 에서 결정적이던 경우와 같은 전순서 — E2c 결정). LIKE 의 % 는 psycopg 플레이스홀더와
+#: 겹치니 %% 로 이스케이프한다 — 안 그러면 관련>0 질의마다 psycopg 가 '%' placeholder 로 끊긴다.
 _RELATED_BY_SHARED_GROUND_SQL = (
     "WITH self_concepts AS ("
     " SELECT dst FROM edge WHERE src = %s AND kind = 'about'"
-    " AND dst LIKE 'concept:%'"
+    " AND dst LIKE 'concept:%%'"
     "), self_claims AS ("
     " SELECT dst FROM edge WHERE src = %s AND kind = 'claims'"
     "), shares AS ("
