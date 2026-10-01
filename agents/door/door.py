@@ -21,10 +21,10 @@ completion first, and the upstream socket is closed when the client goes away �
 an endless engine stream stays endless through the door. An engine answer, 4xx
 included, passes through as-is; an engine that cannot be reached is a 502 JSON
 body, never a silent 200 with an empty one. Unregistered paths get FastAPI's 404: this is a door, not a catch-all proxy. The one search route the
-door answers itself is POST /search (E2a): the python ranking pipeline (ohmyboring.search —
-RRF fusion, verdict feedback, budget, in-set order) answers directly and stamps the response
-x-boring-search: python — except when related > 0 asks for the graph expansion, which still
-travels to the engine through the proxy. The door's own routes, registered
+door answers itself is POST /search (E2a, E2c): the python ranking pipeline (ohmyboring.search —
+RRF fusion, verdict feedback, budget, in-set order, and the related graph expansion) answers directly
+and stamps the response x-boring-search: python — every /search answer, related or not. The door's
+own routes, registered
 outside the engine's proxy table: GET /approved reads the graph store (what
 the morning card's 「해」 judged), GET /claim-source resolves a subject to its
 current claim's note path (GET /claim-sources: every subject's current claim for one
@@ -872,14 +872,15 @@ async def _repairs_split_subjects_post(request: Request) -> Response:
 class _SearchBody(BaseModel):
     """POST /search 본문 — 경계에서 한 번 파싱한다. StrictInt: bool·문자열·실수는 정수가
     아니고(옛 _search_int 계약과 같음), ge=0: 음수는 부호 없는 Rust 필드(usize/u32)와 어긋난다.
-    기본값 5/2000/0 은 이 모형이 갖고, 상한 클램프는 리트리버 몫(SSOT) — 문은 파싱된 값을
-    그대로 통과시킨다."""
+    기본값 5/2000/0 은 이 모형이 갖고(related_heads 는 Rust serde 기본값 2 — serve.rs:809),
+    상한 클램프는 리트리버 몫(SSOT) — 문은 파싱된 값을 그대로 통과시킨다."""
 
     query: StrictStr
     max_results: StrictInt = Field(default=5, ge=0)
     max_tokens: StrictInt = Field(default=2000, ge=0)
     claims: StrictInt = Field(default=0, ge=0)
     related: StrictInt = Field(default=0, ge=0)
+    related_heads: StrictInt = Field(default=2, ge=0)
     since_hours: StrictInt | None = None
     project: StrictStr | None = None
     session_id: StrictStr | None = None
@@ -940,11 +941,10 @@ def _search_log_query(query: str, hits: list[dict], started: float) -> None:
 
 
 async def _search(request: Request) -> Response:
-    """POST /search — related > 0 만 드러지(:7700)로 넘기고, 나머지는 문이 파이썬 순위
-    (ohmyboring.search — RRF 융합·판정 넛지·집합 안 순서·예산)로 직접 답한다. 응답엔
-    x-boring-search: python 이 붙는다 — 프록시로 넘긴 경우엔 붙이지 않는다.
+    """POST /search — 문이 파이썬 순위(ohmyboring.search — RRF 융합·판정 넛지·집합 안 순서·
+    예산·related 그래프 확장)로 직접 답한다. 응답엔 늘 x-boring-search: python 이 붙는다.
     본문은 경계에서 _SearchBody 로 한 번 파싱한다(타입·부호·blank — 400 은 전부 거기서).
-    임베딩·판정 읽기·handover 실패는 전부 502 JSON — drudge 가 조용히 넘어가던 자리를
+    임베딩·판정·related 읽기·handover 실패는 전부 502 JSON — drudge 가 조용히 넘어가던 자리를
     문은 보이게 접는다 (계약 divergence 목록)."""
     try:
         body = await request.json()
@@ -956,10 +956,6 @@ async def _search(request: Request) -> Response:
         params = _SearchBody.model_validate(body)
     except ValidationError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    if (
-        params.related
-    ):  # 명시 분긴 하나 — 그래프 확장(related_by_shared_ground)은 엔진 것, 문 소비자도 related>0 을 안 본다.
-        return await _proxy(request)
     if not os.environ.get("DOOR_PG_DSN"):
         return JSONResponse({"error": "store not configured"}, status_code=503)
     retriever = search_retriever.PgRetriever(
@@ -969,6 +965,8 @@ async def _search(request: Request) -> Response:
         project=params.project,
         since_hours=params.since_hours,
         claims=params.claims,
+        related=params.related,
+        related_heads=params.related_heads,
     )
     started = time.monotonic()
     match await asyncio.to_thread(_search_execute, retriever, params.query):

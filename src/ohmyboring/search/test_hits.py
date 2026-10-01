@@ -61,6 +61,15 @@ class HitShapeTests(unittest.TestCase):
         hit = document_to_hit(doc(superseded_by=["/new.md"]), claims_requested=False)
         self.assertEqual(hit["superseded_by"], ["/new.md"])
 
+    def test_related_omitted_when_empty_and_placed_in_searchhit_field_order(self):
+        self.assertNotIn("related", document_to_hit(doc(), claims_requested=False))
+        related = [{"source_path": "/x.md", "snippet": "옛 관련 노트"}]
+        hit = document_to_hit(doc(related=related, superseded_by=["/new.md"]), claims_requested=False)
+        self.assertEqual(hit["related"], related)
+        keys = list(hit)
+        self.assertEqual(keys.index("related"), 7, "serve.rs SearchHit 필드 순 — dist_kind 뒤")
+        self.assertLess(keys.index("related"), keys.index("superseded_by"))
+
     def test_claims_requested_rules(self):
         # 요청 안 함 — 둘 다 생략.
         hit = document_to_hit(doc(claims_total=3), claims_requested=False)

@@ -177,3 +177,25 @@ def within_budget(merged: list[Scored], max_results: int, max_chars: int) -> lis
         budget -= len(cut)
         out.append(Scored(replace(item.hit, content=cut), item.score))
     return out
+
+
+def attach_related(
+    heads: list[str],
+    pool_paths: list[str],
+    related_lists: list[list[tuple[str, str]]],
+    snippet_chars: int,
+) -> dict[str, list[dict[str, str]]]:
+    """related 붙이기 — http.rs:543-561 의 순수 부분. seen 은 전체 hit 경로로 시작해, related 는
+    머리 hit(heads)의 것만 받고 한 노트는 전 응답에서 한 번만 실린다 (seen 에 없는 것만 — 먼저 나온
+    머리가 가져간다). snippet 은 문자 단위로 snippet_chars 까지 — Rust 의
+    content.chars().take(RELATED_SNIPPET_CHARS) 와 같다."""
+    seen = set(pool_paths)
+    out: dict[str, list[dict[str, str]]] = {}
+    for head, docs in zip(heads, related_lists, strict=True):
+        notes = out.setdefault(head, [])
+        for source_path, content in docs:
+            if source_path in seen:
+                continue
+            seen.add(source_path)
+            notes.append({"source_path": source_path, "snippet": content[:snippet_chars]})
+    return out

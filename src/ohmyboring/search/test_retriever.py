@@ -74,6 +74,7 @@ class RetrieverPipelineTests(unittest.TestCase):
             said_by_owner_counts=lambda conn, paths: Ok({"/a.md": 1}),
             superseded_by=lambda conn, paths: Ok({"/b.md": ["/b2.md"]}),
             declared_claims=self.declared,
+            related_by_shared_ground=lambda conn, path, limit: Ok([]),
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -173,6 +174,107 @@ class RetrieverPipelineTests(unittest.TestCase):
         self.assertNotIn("claims", documents[0].metadata)
         self.assertNotIn("claims_total", documents[0].metadata)
         self.assertEqual(self.declared.call_count, 1, "claims=0 이면 declared_claims 질의도 안 탄다")
+
+    def test_related_attaches_to_heads_only_with_seen_dedup(self):
+        """머리 hit related_heads 개 에만 related, seen(전체 hit 경로) 에 있는 노트는 안 실린다 — http.rs:543-561."""
+        per_path = {
+            "/a.md": Ok(
+                [
+                    pg.RelatedDoc(source_path="/x.md", project="omb", content="엑스", tags=[]),
+                    pg.RelatedDoc(source_path="/b.md", project="omb", content="이미 hit", tags=[]),
+                    pg.RelatedDoc(source_path="/y.md", project="omb", content="와이", tags=[]),
+                ]
+            ),
+            "/c.md": Ok(
+                [
+                    pg.RelatedDoc(source_path="/y.md", project="omb", content="와이", tags=[]),
+                    pg.RelatedDoc(source_path="/z.md", project="omb", content="제트", tags=[]),
+                ]
+            ),
+        }
+        with mock.patch.object(
+            retriever.pg, "related_by_shared_ground", side_effect=lambda conn, path, limit: per_path[path]
+        ):
+            match retriever.PgRetriever(dsn=DSN, related=2, related_heads=2).search("q"):
+                case Err(failure):
+                    self.fail(f"search: {failure}")
+                case Ok(documents):
+                    pass
+        # 순서 a#0, c#0, b#0 — related_heads=2 라 머리 둘에만 붙고, /b.md 는 seen(이미 hit) 에서
+        # 빠지고, /y.md 는 /a.md 가 먼저 가져가 /c.md 에선 빠진다.
+        self.assertEqual(
+            documents[0].metadata["related"],
+            [
+                {"source_path": "/x.md", "snippet": "엑스"},
+                {"source_path": "/y.md", "snippet": "와이"},
+            ],
+        )
+        self.assertEqual(
+            documents[1].metadata["related"],
+            [{"source_path": "/z.md", "snippet": "제트"}],
+        )
+        self.assertNotIn("related", documents[2].metadata, "머리 밖 hit 에는 related 가 없다")
+
+    def test_related_snippet_trimmed_to_1200_chars(self):
+        long_content = "가" * 1205
+        with mock.patch.object(
+            retriever.pg,
+            "related_by_shared_ground",
+            return_value=Ok(
+                [pg.RelatedDoc(source_path="/x.md", project="omb", content=long_content, tags=[])]
+            ),
+        ):
+            match retriever.PgRetriever(dsn=DSN, related=1, related_heads=1).search("q"):
+                case Err(failure):
+                    self.fail(f"search: {failure}")
+                case Ok(documents):
+                    pass
+        related = documents[0].metadata["related"]
+        self.assertEqual(related[0]["snippet"], "가" * 1200, "RELATED_SNIPPET_CHARS — 문자 단위 자름")
+
+    def test_related_zero_is_noop_without_query(self):
+        query = mock.MagicMock(return_value=Ok([]))
+        with mock.patch.object(retriever.pg, "related_by_shared_ground", query):
+            match retriever.PgRetriever(dsn=DSN).search("q"):
+                case Err(failure):
+                    self.fail(f"search: {failure}")
+                case Ok(documents):
+                    pass
+        query.assert_not_called()
+        for doc in documents:
+            self.assertNotIn("related", doc.metadata)
+
+    def test_related_failure_is_err_with_prefix(self):
+        with mock.patch.object(
+            retriever.pg,
+            "related_by_shared_ground",
+            return_value=Err(pg.PgError("related table gone")),
+        ):
+            result = retriever.PgRetriever(dsn=DSN, related=1, related_heads=1).search("q")
+        match result:
+            case Err(failure):
+                self.assertTrue(failure.detail.startswith("related: "), failure.detail)
+            case Ok(_):
+                self.fail("related 읽기 실패는 Err — 조용히 related 없이 답하지 않는다")
+
+    def test_related_clamps_to_three_and_heads_to_hit_count(self):
+        calls: list[tuple[str, int]] = []
+
+        def fake(conn, path, limit):
+            calls.append((path, limit))
+            return Ok([])
+
+        with mock.patch.object(retriever.pg, "related_by_shared_ground", side_effect=fake):
+            match retriever.PgRetriever(dsn=DSN, related=99, related_heads=99).search("q"):
+                case Err(failure):
+                    self.fail(f"search: {failure}")
+                case Ok(_):
+                    pass
+        self.assertEqual(
+            calls,
+            [("/a.md", 3), ("/c.md", 3), ("/b.md", 3)],
+            "related 는 3 으로, related_heads 는 max_results(기본 5) 안에서 — 실제 hit 세 개",
+        )
 
     def test_embed_failure_is_err(self):
         with mock.patch.object(retriever.embed_adapter, "embed", return_value=Err(_Failure("boom"))):

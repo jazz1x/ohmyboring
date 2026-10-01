@@ -24,6 +24,9 @@ def document_to_hit(document: Document, *, claims_requested: bool) -> dict[str, 
         "dist": metadata["dist"],
         "dist_kind": metadata["dist_kind"],
     }
+    related = metadata.get("related") or []
+    if related:
+        hit["related"] = related
     superseded_by = metadata.get("superseded_by") or []
     if superseded_by:
         hit["superseded_by"] = superseded_by

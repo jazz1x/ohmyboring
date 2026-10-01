@@ -28,6 +28,30 @@ DSN = os.environ.get("BORING_TEST_DATABASE_URL")
 DIM = 1024
 
 
+class RelatedSqlShapeTests(unittest.TestCase):
+    """SQL 모양 시험 — 살아있는 postgres 없이도 옮긴 규칙을 본다 (가중치 뒤집기·older-than
+    빼기 변이는 이 시험에서 사망 — 통합 시험은 CI postgres 있을 때만 돈다)."""
+
+    def test_weights_kinds_and_older_than_are_ported(self):
+        sql = pg._RELATED_BY_SHARED_GROUND_SQL
+        self.assertIn("2 AS weight", sql, "공유 claim 의 가중치는 2 — store.rs:1218")
+        self.assertIn("1 AS weight", sql, "공유 concept 의 가중치는 1 — store.rs:1223")
+        self.assertEqual(sql.count("kind = 'claims'"), 2)
+        self.assertEqual(sql.count("kind = 'about'"), 2)
+        self.assertIn("dst LIKE 'concept:%'", sql)
+        self.assertIn(
+            "od.updated_at < (SELECT updated_at FROM document WHERE source_path = %s)",
+            sql,
+            "후보는 self 보다 오래된 문서뿐 — store.rs:1241",
+        )
+
+    def test_final_order_is_shared_desc_then_source_path_asc(self):
+        sql = pg._RELATED_BY_SHARED_GROUND_SQL
+        self.assertIn("ORDER BY r.shared DESC, d.source_path ASC", sql)
+        ranked_at = sql.index("GROUP BY s.doc_node ORDER BY shared DESC")
+        self.assertLess(ranked_at, sql.index("LIMIT %s"), "LIMIT 전 doc_node ASC 는 ranked 단계")
+
+
 def vec(first: float, second: float = 0.0) -> list[float]:
     out = [0.0] * DIM
     out[0] = first
@@ -61,7 +85,8 @@ class PgIntegrationTests(unittest.TestCase):
                 " author text NOT NULL DEFAULT 'unknown',"
                 " project text NOT NULL DEFAULT '',"
                 " updated_at timestamptz NOT NULL DEFAULT now(),"
-                " sha text NOT NULL DEFAULT '');"
+                " sha text NOT NULL DEFAULT '',"
+                " tags text[] NOT NULL DEFAULT '{}');"
             )
             cur.execute(
                 "CREATE TABLE chunk ("
@@ -363,6 +388,127 @@ class PgIntegrationTests(unittest.TestCase):
                 pass
             case Ok(_):
                 self.fail("since_hours 가 문자면 psycopg 경계에서 Err 여야 한다")
+
+
+@unittest.skipIf(DSN is None, _skip_reason())
+class RelatedBySharedGroundTests(unittest.TestCase):
+    """related_by_shared_ground 고정 물 — PgIntegrationTests 와 스키마를 갈라 vector/text
+    시험의 행 수를 더럽히지 않는다."""
+
+    @classmethod
+    def setUpClass(cls):
+        import psycopg
+
+        cls.conn = psycopg.connect(DSN, autocommit=True)
+        with cls.conn.cursor() as cur:
+            cur.execute("DROP SCHEMA IF EXISTS omb_related_test CASCADE;")
+            cur.execute("CREATE SCHEMA omb_related_test;")
+            cur.execute("SET search_path TO omb_related_test, public;")
+            cur.execute(
+                "CREATE TABLE document ("
+                " source_path text PRIMARY KEY,"
+                " author text NOT NULL DEFAULT 'unknown',"
+                " project text NOT NULL DEFAULT '',"
+                " updated_at timestamptz NOT NULL DEFAULT now(),"
+                " sha text NOT NULL DEFAULT '',"
+                " tags text[] NOT NULL DEFAULT '{}');"
+            )
+            cur.execute(
+                "CREATE TABLE chunk ("
+                " id text PRIMARY KEY,"
+                " source_path text NOT NULL,"
+                " content text NOT NULL DEFAULT '',"
+                " chunk_idx integer NOT NULL DEFAULT 0);"
+            )
+            cur.execute(
+                "CREATE TABLE edge ("
+                " src text NOT NULL, dst text NOT NULL, kind text NOT NULL, judge text,"
+                " PRIMARY KEY (src, dst, kind));"
+            )
+            # self(09-20) 기준 — 더 오래된 것만 후보다.
+            cur.executemany(
+                "INSERT INTO document (source_path, updated_at, tags) VALUES (%s, %s, %s);",
+                [
+                    ("/rel-self.md", "2026-09-20T00:00:00+00:00", ["self"]),
+                    ("/rel-both.md", "2026-09-19T00:00:00+00:00", ["heavy"]),
+                    ("/rel-claim.md", "2026-09-18T00:00:00+00:00", []),
+                    ("/rel-concept.md", "2026-09-17T00:00:00+00:00", []),
+                    ("/rel-new.md", "2026-09-21T00:00:00+00:00", []),
+                    ("/rel-a.md", "2026-09-16T00:00:00+00:00", []),
+                    ("/rel-z.md", "2026-09-16T00:00:00+00:00", []),
+                ],
+            )
+            cur.executemany(
+                "INSERT INTO chunk (id, source_path, content, chunk_idx) VALUES (%s, %s, %s, %s);",
+                [
+                    ("/rel-self.md#0", "/rel-self.md", "자기 본문", 0),
+                    ("/rel-both.md#0", "/rel-both.md", "첫째", 0),
+                    ("/rel-both.md#1", "/rel-both.md", "둘째", 1),
+                    ("/rel-claim.md#0", "/rel-claim.md", "클 공유", 0),
+                    ("/rel-concept.md#0", "/rel-concept.md", "개 공유", 0),
+                    ("/rel-new.md#0", "/rel-new.md", "새 노트", 0),
+                    ("/rel-a.md#0", "/rel-a.md", "에이", 0),
+                    ("/rel-z.md#0", "/rel-z.md", "지", 0),
+                ],
+            )
+            cur.executemany(
+                "INSERT INTO edge (src, dst, kind) VALUES (%s, %s, %s);",
+                [
+                    ("doc:/rel-self.md", "claim:주제:공통", "claims"),
+                    ("doc:/rel-self.md", "concept:공통개념", "about"),
+                    ("doc:/rel-self.md", "concept:둘째개념", "about"),
+                    ("doc:/rel-both.md", "claim:주제:공통", "claims"),
+                    ("doc:/rel-both.md", "concept:공통개념", "about"),
+                    ("doc:/rel-claim.md", "claim:주제:공통", "claims"),
+                    ("doc:/rel-concept.md", "concept:공통개념", "about"),
+                    ("doc:/rel-new.md", "claim:주제:공통", "claims"),
+                    ("doc:/rel-a.md", "concept:둘째개념", "about"),
+                    ("doc:/rel-z.md", "concept:둘째개념", "about"),
+                ],
+            )
+
+    @classmethod
+    def tearDownClass(cls):
+        with cls.conn.cursor() as cur:
+            cur.execute("DROP SCHEMA IF EXISTS omb_related_test CASCADE;")
+        cls.conn.close()
+
+    def test_weights_older_only_and_final_order(self):
+        match pg.related_by_shared_ground(self.conn, "/rel-self.md", 10):
+            case Ok(docs):
+                self.assertEqual(
+                    [d.source_path for d in docs],
+                    ["/rel-both.md", "/rel-claim.md", "/rel-a.md", "/rel-concept.md", "/rel-z.md"],
+                    "shared DESC(claim 2 + concept 1 합산) 다음 source_path ASC — "
+                    "/rel-new 는 self 보다 새 노트라 빠진다",
+                )
+            case Err(e):
+                self.fail(f"related_by_shared_ground: {e}")
+
+    def test_content_is_chunks_joined_by_chunk_idx_and_tags(self):
+        match pg.related_by_shared_ground(self.conn, "/rel-self.md", 10):
+            case Ok(docs):
+                both = docs[0]
+                self.assertEqual(both.content, "첫째\n둘째", "chunk 를 chunk_idx 순으로 \\n 으로 잇는다")
+                self.assertEqual(both.tags, ["heavy"])
+            case Err(e):
+                self.fail(f"related_by_shared_ground: {e}")
+
+    def test_limit_applies_in_ranked_before_final_order(self):
+        match pg.related_by_shared_ground(self.conn, "/rel-self.md", 1):
+            case Ok(docs):
+                self.assertEqual([d.source_path for d in docs], ["/rel-both.md"])
+            case Err(e):
+                self.fail(f"related_by_shared_ground limit 1: {e}")
+        match pg.related_by_shared_ground(self.conn, "/rel-self.md", 3):
+            case Ok(docs):
+                self.assertEqual(
+                    [d.source_path for d in docs],
+                    ["/rel-both.md", "/rel-claim.md", "/rel-a.md"],
+                    "자르는 ranked(doc_node ASC) — 최종 source_path ASC 정렬은 자른 뒤에도 유지",
+                )
+            case Err(e):
+                self.fail(f"related_by_shared_ground limit 3: {e}")
 
 
 if __name__ == "__main__":

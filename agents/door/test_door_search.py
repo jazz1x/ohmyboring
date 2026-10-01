@@ -3,7 +3,7 @@
 
 Cover:
   (a) 정상 → 200, hit 모양(BoringRetriever 가 읽는 키), 헤더 x-boring-search: python
-  (b) related=1 → 기존 프록시로 넘김 (x-boring-search 없음), related=0 은 파이썬 경로
+  (b) related=1 → 프록시를 타지 않고 파이썬이 답한다(헤더 python, related 는 hit 에 실림)
   (c) 임베딩 Err → 502 JSON {error} — 빈 hits 200 금지
   (d) 판정 카운트 Err → 502 JSON
   (e) session_id → handover 호출, 그 실패도 502
@@ -130,17 +130,33 @@ class SearchRouteTests(unittest.TestCase):
         response = self.post({"query": "q"})
         self.assertNotIn("claims_total", response.json()["hits"][0])
 
-    def test_related_positive_proxies_without_header(self):
-        with mock.patch.object(door, "_proxy", new=mock.AsyncMock(return_value=door.Response(content=b"up"))):
+    def test_related_positive_answers_in_python_with_header(self):
+        """related=1 은 프록시를 타지 않고 파이썬이 답한다 — 옛 프록시 분기를 되살리는 변이에서 red."""
+        proxy = mock.AsyncMock(return_value=door.Response(content=b"up"))
+        with mock.patch.object(door, "_proxy", new=proxy):
             response = self.post({"query": "q", "related": 1})
         self.assertEqual(response.status_code, 200)
-        self.assertIsNone(response.headers.get("x-boring-search"), "프록시로 넘긴 경우엔 헤더가 없다")
-        self.assertEqual(self.made, [], "프록시 경로는 리트리버를 만들지 않는다")
+        self.assertEqual(response.headers.get("x-boring-search"), "python")
+        proxy.assert_not_called()
+        self.assertEqual(len(self.made), 1, "related=1 도 문 리트리버가 만든다")
+        self.assertEqual(self.made[-1]["related"], 1)
+        self.assertEqual(self.made[-1]["related_heads"], 2, "related_heads body 기본값 — serve.rs:809")
+
+    def test_related_rides_into_hit_when_present(self):
+        """related 메타를 든 Document 는 hit 의 related 가 되고, 없으면 키 자체가 생략된다."""
+        related = [{"source_path": "/x.md", "snippet": "옛 관련 노트"}]
+        with mock.patch.object(door, "_search_execute", return_value=Ok([document(related=related)])):
+            response = self.post({"query": "q", "related": 1})
+        self.assertEqual(response.json()["hits"][0]["related"], related)
+        with mock.patch.object(door, "_search_execute", return_value=Ok([document()])):
+            response = self.post({"query": "q"})
+        self.assertNotIn("related", response.json()["hits"][0])
 
     def test_related_zero_answers_in_python(self):
         response = self.post({"query": "q", "related": 0})
         self.assertEqual(response.headers.get("x-boring-search"), "python")
         self.assertEqual(len(self.made), 1)
+        self.assertEqual(self.made[-1]["related"], 0)
 
     def test_embed_failure_is_502_json_not_empty_200(self):
         with mock.patch.object(
@@ -201,6 +217,10 @@ class SearchRouteTests(unittest.TestCase):
         self.assertEqual(self.made[-1]["max_results"], 999)
         self.assertEqual(self.made[-1]["max_tokens"], 999_999)
         self.assertEqual(self.made[-1]["claims"], 99)
+        self.post({"query": "q", "related": 3, "related_heads": 5})
+        self.assertEqual(self.made[-1]["related"], 3)
+        self.assertEqual(self.made[-1]["related_heads"], 5)
+        self.assertEqual(self.post({"query": "q", "related_heads": -1}).status_code, 400)
         for bad in (-1, "3", True):
             response = self.post({"query": "q", "max_results": bad})
             self.assertEqual(response.status_code, 400, f"max_results={bad!r}")

@@ -67,6 +67,16 @@ class HandoverReport:
     unknown: int
 
 
+@dataclass(frozen=True)
+class RelatedDoc:
+    """related_by_shared_ground 한 행 — store.rs RecentDoc."""
+
+    source_path: str
+    project: str
+    content: str
+    tags: list[str]
+
+
 #: claim.kind() 대로 — 빈 kind 는 fact, (next|blocked) 가 작업 부정을 담으면 fact.
 _WORK_DENIALS = frozenset(
     {
@@ -261,6 +271,65 @@ def superseded_by(conn: psycopg.Connection, paths: list[str]) -> Either[dict[str
         ):
             out.setdefault(dst.removeprefix("doc:"), []).append(src.removeprefix("doc:"))
         return out
+
+    return _attempt(run)
+
+
+#: store.rs:1197-1250 related_by_shared_ground — 공유 claim 이 2, 공유 concept:% 가 1. 후보는 self
+#: 보다 updated_at 이 오래된 document 뿐 (선별 전에 ranking 하면 자기 자신이 먹통이 된다는 측정이
+#: 그 근거 — 주석 그대로 옮김). LIMIT 전에 doc_node ASC, 최종은 shared DESC 에 source_path ASC
+#: (Rust 에서 결정적이던 경우와 같은 전순서 — E2c 결정).
+_RELATED_BY_SHARED_GROUND_SQL = (
+    "WITH self_concepts AS ("
+    " SELECT dst FROM edge WHERE src = %s AND kind = 'about'"
+    " AND dst LIKE 'concept:%'"
+    "), self_claims AS ("
+    " SELECT dst FROM edge WHERE src = %s AND kind = 'claims'"
+    "), shares AS ("
+    " SELECT e.src AS doc_node, 2 AS weight"
+    " FROM edge e JOIN self_claims sl ON e.dst = sl.dst"
+    " WHERE e.src <> %s AND e.kind = 'claims'"
+    " UNION ALL"
+    " SELECT e.src AS doc_node, 1 AS weight"
+    " FROM edge e JOIN self_concepts sc ON e.dst = sc.dst"
+    " WHERE e.src <> %s AND e.kind = 'about'"
+    "), ranked AS ("
+    " SELECT s.doc_node, sum(s.weight) AS shared"
+    " FROM shares s"
+    " JOIN document od ON ('doc:' || od.source_path) = s.doc_node"
+    " WHERE od.updated_at < (SELECT updated_at FROM document WHERE source_path = %s)"
+    " GROUP BY s.doc_node ORDER BY shared DESC, s.doc_node ASC LIMIT %s"
+    ")"
+    " SELECT d.source_path, d.project, d.tags,"
+    " string_agg(c.content, E'\\n' ORDER BY c.chunk_idx) AS content"
+    " FROM ranked r"
+    " JOIN document d ON ('doc:' || d.source_path) = r.doc_node"
+    " JOIN chunk c ON c.source_path = d.source_path"
+    " GROUP BY d.source_path, d.project, d.tags, r.shared"
+    " ORDER BY r.shared DESC, d.source_path ASC;"
+)
+
+
+def related_by_shared_ground(
+    conn: psycopg.Connection, source_path: str, limit: int
+) -> Either[list[RelatedDoc], PgError]:
+    """store.rs:1187 — self 의 claims/concept:% 간선 dst 를 공유하는 더 오래된 문서들."""
+
+    def run() -> list[RelatedDoc]:
+        doc_id = doc_node_id(source_path)
+        return [
+            RelatedDoc(
+                source_path=row[0],
+                project=row[1],
+                tags=list(row[2] or []),
+                content=row[3] or "",
+            )
+            for row in _exec_fetchall(
+                conn,
+                _RELATED_BY_SHARED_GROUND_SQL,
+                (doc_id, doc_id, doc_id, doc_id, source_path, limit),
+            )
+        ]
 
     return _attempt(run)
 
