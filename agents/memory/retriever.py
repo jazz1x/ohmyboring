@@ -144,6 +144,8 @@ def _post_json(url: str, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _hit_to_document(hit: dict[str, Any]) -> Document:
+    # 엔진 hit 모양 그대로 — 없는 키는 지어내지 않는다(wiki-2732). 소비자는
+    # card_advice·recall_core 처럼 .get("superseded_by") or [] 로 받는다.
     metadata: dict[str, Any] = {
         "source_path": hit["source_path"],
         "project": hit["project"],
@@ -151,8 +153,9 @@ def _hit_to_document(hit: dict[str, Any]) -> Document:
         "used_count": hit["used_count"],
         "contested_count": hit["contested_count"],
         "said_by_owner": hit["said_by_owner"],
-        "superseded_by": hit.get("superseded_by", []),
     }
+    if "superseded_by" in hit:
+        metadata["superseded_by"] = hit["superseded_by"]
     for key in ("dist", "dist_kind", "claims", "claims_total", "related"):
         if key in hit:
             metadata[key] = hit[key]

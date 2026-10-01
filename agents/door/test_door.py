@@ -41,6 +41,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -610,13 +611,18 @@ date: 2026-09-29
 
 
 class RememberShadowTests(unittest.TestCase):
-    """E3a-1 — 문을 지난 remember 는 엔진 답을 바이트 그대로 돌려주고, 응답 뒤에 그림자가
-    엔진이 실제로 쓴 노트와 파이썬 렌더를 칸별 대조해 사건(remember_shadow) 한 줄을 남긴다.
+    """E3a-2 — 문을 지난 remember 는 엔진 답을 바이트 그대로 돌려주고, 응답 뒤에 그림자가
+    파이썬 쓰기 경로의 결정(PII 게이트·중복 문 갈래, 걸러진 것은 결정만)을 엔진 응답의
+    결정과 맞추고, 저장·대체에서는 실제 노트와 칸별 대조까지 해 사건(remember_shadow)
+    한 줄을 남긴다. 사건에는 어긋남을 가를 사유(decision/fields/pii-…)가 실린다.
 
     Pinned here:
       - POST /mcp tools/call remember 의 응답이 엔진 답과 바이트 같다(sha256)
       - POST /remember 의 응답이 엔진 답과 바이트 같다(sha256)
-      - 응답 뒤 그림자가 사건 한 줄을 남긴다 — status ok, source_path, omb_session_id
+      - 응답 뒤 그림자가 사건 한 줄을 남긴다 — status ok, source_path, omb_session_id,
+        결정 대조(decision/engine_decision)까지
+      - 볼트 rules/pii.yaml 이 있으면 문이 게이트를 불러 온다 — 가린 엔진 노트와 원문
+        요청은 이제 ok(옛 pii_not_ported 어긋남이 풀리는 사례)
       - 그림자가 예외를 던져도 응답은 그대로 — 사건 status=error, 로그 한 줄
       - 응답은 그림자를 기다리지 않는다
     """
@@ -720,6 +726,8 @@ POST /remember 도 문을 지난다.
 
     def setUp(self):
         vault = Path(self._tmp.name) / "vault"
+        if vault.exists():
+            shutil.rmtree(vault)
         (vault / "wiki").mkdir(parents=True, exist_ok=True)
         (vault / "wiki" / "wiki-2901.md").write_text(self._WIKI_2901, encoding="utf-8")
         (vault / "wiki" / "wiki-2902.md").write_text(self._WIKI_2902, encoding="utf-8")
@@ -792,6 +800,10 @@ POST /remember 도 문을 지난다.
         self.assertEqual(event["omb_session_id"], "sess-door-1")
         self.assertEqual(event["fields"], [])
         self.assertIn("excluded", event["relates_to"])
+        # DSN 이 없는 시험 환경이라 임베딩 갈래는 못 보고 「저장(미확인)」이지만,
+        # 결정 대조 자체는 engine stored 와 맞아 ok 다.
+        self.assertTrue(event["decision"].startswith("stored"), event["decision"])
+        self.assertEqual(event["engine_decision"], "stored:/vault/wiki/wiki-2901.md")
 
     def test_http_remember_leaves_one_shadow_event(self):
         _req(
@@ -804,6 +816,66 @@ POST /remember 도 문을 지난다.
         event = self._wait_for_shadow()
         self.assertEqual(event["status"], "ok")
         self.assertEqual(event["source_path"], "/vault/wiki/wiki-2902.md")
+
+    _PII_YAML = """---
+version: "1.0"
+rules:
+  - name: ipv4_any
+    regex: '\\b(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\b'
+    action: redact
+    replacement: "[IP]"
+    severity: warning
+    reason: IPv4
+"""
+
+    def test_vault_pii_rules_are_loaded_by_the_shadow(self):
+        # 볼트에 rules/pii.yaml 이 있으면 문이 그림자에 게이트를 싣는다. 엔진 노트의
+        # 본문만 가려져 있고(엔진이 게이트를 지난 흔적) 요청에는 원문이 있어도, 같은
+        # 규칙으로 가린 파이썬 렌더와 칸이 맞아 사건은 ok 다 — E3a-1 의 pii_not_ported
+        # 어긋남이 이 wiring 에서 풀리는 사례다.
+        vault = Path(os.environ["BORING_VAULT_DIR"])
+        rules = vault / "rules"
+        rules.mkdir(exist_ok=True)
+        (rules / "pii.yaml").write_text(self._PII_YAML, encoding="utf-8")
+        # 엔진이 실제로 쓴 것은 게이트를 지난 본문 — IP 가 가려진 채로 디스크에 있다.
+        note = self._WIKI_2901.replace(
+            "문을 지난 remember 는 엔진 답을 바이트 그대로 돌려준다.",
+            "문은 [IP] 에 묶인다.",
+        )
+        (vault / "wiki" / "wiki-2901.md").write_text(note, encoding="utf-8")
+        args = dict(self._MCP_ARGS)
+        args["body"] = "문은 10.1.2.3 에 묶인다."
+        _req(
+            self.door_port,
+            "POST",
+            "/mcp",
+            body=self._mcp_payload(args),
+            headers={"content-type": "application/json"},
+        )
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "ok", event.get("reason"))
+        self.assertTrue(event["decision"].startswith("stored"), event["decision"])
+
+    def test_shadow_event_reason_sorts_a_mismatch(self):
+        # 걸러둘 결정이 갈리면 사건 사유는 decision 으로 시작한다 — (가)/(나)/(다) 판별
+        # 재료가 사건 한 줄에 있는지를 문 wiring 에서도 본다. 엔진은 wiki-2901 로
+        # 저장했는데(답이 그러니) 같은 세션 노트 wiki-2999 가 볼트에 있으면 파이썬은
+        # 걸러둘 것이다 — 경로가 갈려 어긋남.
+        vault = Path(os.environ["BORING_VAULT_DIR"])
+        ghost = self._WIKI_2901.replace("wiki-2901", "wiki-2999")
+        (vault / "wiki" / "wiki-2999.md").write_text(ghost, encoding="utf-8")
+        _req(
+            self.door_port,
+            "POST",
+            "/mcp",
+            body=self._mcp_payload(self._MCP_ARGS),
+            headers={"content-type": "application/json"},
+        )
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "mismatch")
+        self.assertTrue(event["reason"].startswith("decision "), event.get("reason"))
+        self.assertIn("engine=stored", event["reason"])
+        self.assertIn("python=skipped", event["reason"])
 
     def test_a_raising_shadow_cannot_change_the_answer(self):
         payload = self._mcp_payload(self._MCP_ARGS)

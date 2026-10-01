@@ -93,6 +93,8 @@ python3 src/ohmyboring/adapters/test_workflow_contract.py
 python3 src/ohmyboring/remember/test_parse.py
 python3 src/ohmyboring/remember/test_render.py
 python3 src/ohmyboring/remember/test_shadow.py
+python3 src/ohmyboring/remember/test_pii.py
+python3 src/ohmyboring/remember/test_dedup.py
 python3 src/ohmyboring/test_result.py
 python3 agents/door/test_door.py
 python3 agents/door/test_door_search.py

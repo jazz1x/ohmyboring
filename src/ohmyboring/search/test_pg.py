@@ -2,7 +2,7 @@
 """pg.py 통합 시험 — 진짜 pgvector 에 물어 결과로 본다 (질의 문자열이 아니라).
 
 Run: BORING_TEST_DATABASE_URL=postgresql://… python3 ohmyboring/search/test_pg.py
-없으면 건颜色 — drudge DB 게이트 관례(BORING_TEST_DATABASE_URL) 그대로 따른다. 일회용 DB 를
+없으면 건너뛴다 — drudge DB 게이트 관례(BORING_TEST_DATABASE_URL) 그대로 따른다. 일회용 DB 를
 쓴다: 별도 스키마(omb_search_test)에 고정 물을 만들고 끝에 떨군다 — public 의 표는 손 안 탄다.
 
 Mutation targets: ranking 의 owner 필터를 빼는 변이(=tally 로 내리는 행 필터)는 여기서

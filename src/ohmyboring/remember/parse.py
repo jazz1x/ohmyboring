@@ -14,9 +14,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import yaml
+
 from ohmyboring import config as omb_env
 from ohmyboring.result import Either, Err, Ok
 from ohmyboring.search.redact import redact as _scrub
+
+#: str 로만 읽을 태그 — 아래 로더의 클래스 본체가 아니라 모듈에서 참조해야 한다(내포 함수는
+#: 클래스 속성을 보지 못한다 — ohmyboring.ingest.note 의 것과 같은 규약).
+_STR_ONLY = "tag:yaml.org,2002:str"
+
+
+class _StrOnlyLoader(yaml.SafeLoader):
+    """머리말 스칼라 전부를 str 로 읽는 로더 — ohmyboring.ingest.note 의 것과 같은 규칙
+    (serde_yaml 의 String 필드 규칙과 가깝게 — `date: 2026-10-01` 이 날짜가 아니라 글자로 온다)."""
+
+    yaml_implicit_resolvers = {
+        key: [(tag, regexp) for tag, regexp in resolvers if tag in (_STR_ONLY, "tag:yaml.org,2002:null")]
+        for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+    }
+
 
 #: 엔진이 받는 origin 어휘 — drudge config::Origin::FromStr 과 같은 넷.
 _ORIGINS = ("personal", "company", "mirror", "community")
@@ -223,6 +240,47 @@ def _parse_claims(args: dict[str, Any]) -> Either[tuple[Claim, ...], str]:
             case Err(reason):
                 return Err(reason)
     return Ok(tuple(claims))
+
+
+def normalize_supersedes_path(raw: str) -> str:
+    """교정 대상 경로의 여러 적법을 document 표 키 형태로 — mcp.rs:2054.
+
+    에이전트가 본 적법(`/vault/wiki/…`·`wiki/…`·맨바닥 `wiki-NNNN.md`)을 접고, 그
+    밖의 것은 그대로 둔다(그러면 unknown 으로 잡혀 응답이 이름을 밝힌다).
+    """
+    if raw.startswith("/vault/wiki/"):
+        return raw
+    if raw.startswith("wiki/"):
+        return f"/vault/{raw}"
+    if "/" not in raw:
+        return f"/vault/wiki/{raw}"
+    return raw
+
+
+def parse_supersedes(args: dict[str, Any]) -> Either[list[str], str]:
+    """supersedes 인자 하나 — mcp.rs:2026. 없으면 빈 목록, 모양이 다류면 -32602 사유."""
+    if "supersedes" not in args:
+        return Ok([])
+    raw = args["supersedes"]
+    if not isinstance(raw, list):
+        return Err("supersedes must be an array of source_path strings")
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            return Err("supersedes items must be strings (source_path of the note this one corrects)")
+        if item.strip():
+            out.append(normalize_supersedes_path(item.strip()))
+    return Ok(out)
+
+
+def parse_judge(args: dict[str, Any]) -> Either[str | None, str]:
+    """judge 인자 하나 — mcp.rs:2068 parse_person. 없으면 None, 어휘는 author 와 같다."""
+    if "judge" not in args:
+        return Ok(None)
+    raw = args["judge"]
+    if not isinstance(raw, str):
+        return Err("judge must be a string")
+    return parse_author(raw)
 
 
 def parse_remember_note(args: dict[str, Any]) -> Either[RememberNote, str]:

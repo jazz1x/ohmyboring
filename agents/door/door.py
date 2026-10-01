@@ -17,10 +17,16 @@ prepended (query 안의 wiki-NNNN 마다 볼트 노트 블록이 content 앞에 
 not exactly that gate — no numbers, another tool, isError, non-JSON, a stream —
 travels byte-for-byte. A POST /mcp tools/call `remember` (and POST /remember)
 also travels byte-for-byte — after the answer leaves, a background shadow runs
-the same request through the python write path without writing and compares
-note-by-note with the note the engine actually wrote, leaving one remember_shadow
-event (E3a-1; the response never waits on it and a shadow failure cannot change
-the answer — one log line and a status=error event). An answer whose content-type is
+the same request through the python write path without writing and asks whether
+python would make the same decision the engine made (PII gate block/mask, the
+duplicate gate's five branches and the replace scoring, owner refusal), then —
+only when a note was actually stored — compares that note field-by-field with
+the note the engine wrote, leaving one remember_shadow event whose every
+mismatch carries a reason that sorts it into python-defect / engine-difference /
+unknown (E3a-2; a skipped request is compared by decision only — nothing was
+written, so there are no fields to match; the response never waits on the shadow
+and a shadow failure cannot change the answer — one log line and a status=error
+event). An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. An engine answer, 4xx
@@ -87,10 +93,13 @@ from pydantic import BaseModel, Field, StrictInt, StrictStr, ValidationError, fi
 from slack_sdk.errors import SlackClientError
 
 from ohmyboring import config as boring_config
+from ohmyboring.adapters import embed as embed_adapter
 from ohmyboring.adapters import events as event_log
 from ohmyboring.adapters import vault as vault_notes
 from ohmyboring.entrypoints.http import mcp_recall
 from ohmyboring.recall import named as recall_named
+from ohmyboring.remember import dedup as remember_dedup
+from ohmyboring.remember import pii as remember_pii
 from ohmyboring.remember import shadow as remember_shadow
 from ohmyboring.result import Either, Err, Ok
 from ohmyboring.search import hits as search_hits
@@ -178,16 +187,26 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
         )
     if request.method == "POST" and request.url.path == "/mcp":
         response = _augment_mcp_recall(body, response)
-        # remember 는 회상과 달리 응답을 안 고친다 — 바이트 그대로 본 뒤 그림자만 태운다(E3a-1).
+        # remember 는 회상과 달리 응답을 안 고친다 — 바이트 그대로 본 뒤 그림자만 태운다(E3a-2).
         if not isinstance(response, StreamingResponse) and (arguments := _mcp_remember_arguments(body)):
             background_tasks.add_task(
-                _remember_shadow_task, "mcp", arguments, response.status_code, response.body
+                _remember_shadow_task,
+                "mcp",
+                arguments,
+                response.status_code,
+                response.body,
+                _standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
             )
         return response
     if request.method == "POST" and request.url.path == "/remember":
         if not isinstance(response, StreamingResponse) and (arguments := _http_remember_arguments(body)):
             background_tasks.add_task(
-                _remember_shadow_task, "remember", arguments, response.status_code, response.body
+                _remember_shadow_task,
+                "remember",
+                arguments,
+                response.status_code,
+                response.body,
+                _standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
             )
     return response
 
@@ -271,11 +290,80 @@ def _omb_session_id(arguments: dict) -> str | None:
     return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
 
-def _remember_shadow_task(route: str, arguments: dict, status: int, body: bytes) -> None:
+def _list_wiki_notes(vault_dir: str) -> list[str]:
+    """볼트 wiki 디렉토리의 note_id 목록 — 그림자의 중복 문 스캔이 읽는 것(쓰기 없음)."""
+    names = os.listdir(os.path.join(vault_dir, "wiki"))
+    return sorted(name[: -len(".md")] for name in names if name.endswith(".md"))
+
+
+#: 임베딩 갈래의 최근접 문서 질의 — drudge store.rs:2274 nearest_document 그대로(읽기 전용
+#: 세션). 엔진이 방금 쓴 새 노트는 그림자가 후보에서 빼게끔 exclude 경로를 받는다.
+_NEAREST_DOC_SQL = (
+    "SELECT d.source_path, MIN(c.embedding <=> %(vec)s)::float8 AS dist"
+    " FROM document d JOIN chunk c ON c.source_path = d.source_path"
+    " WHERE c.embedding IS NOT NULL AND d.source_path <> %(exclude)s"
+    " GROUP BY d.source_path"
+    " HAVING MIN(c.embedding <=> %(vec)s) <= %(max)s"
+    " ORDER BY dist ASC LIMIT 1"
+)
+_NEAREST_DOC_SQL_SELF = (
+    "SELECT d.source_path, MIN(c.embedding <=> %(vec)s)::float8 AS dist"
+    " FROM document d JOIN chunk c ON c.source_path = d.source_path"
+    " WHERE c.embedding IS NOT NULL"
+    " GROUP BY d.source_path"
+    " HAVING MIN(c.embedding <=> %(vec)s) <= %(max)s"
+    " ORDER BY dist ASC LIMIT 1"
+)
+
+
+def _nearest_document(text: str, exclude_path: str | None) -> Either[str | None, str]:
+    """제목+본문을 임베딩해 코사인 거리 0.07 이하의 최근접 문서를 읽는다(쓰기 없음).
+
+    DSN 이 없거나 임베딩 서버가 불응이면 Err — 그림자 사건이 그 사유를 남기고 결정 대조는
+    (다) 로 남는다. 실패가 요청에 영향을 주는 일은 없다(응답 뒤 백그라운드다)."""
+    dsn = os.environ.get("DOOR_PG_DSN")
+    if not dsn:
+        return Err("DOOR_PG_DSN unset — embedding branch unchecked")
+    match embed_adapter.embed(text):
+        case Err(failure):
+            return Err(f"embed: {failure}")
+        case Ok(vec):
+            pass
+    sql = _NEAREST_DOC_SQL if exclude_path else _NEAREST_DOC_SQL_SELF
+    params = {"vec": search_pg._vector_literal(vec), "max": remember_dedup.DUPLICATE_MAX_DIST}
+    if exclude_path:
+        params["exclude"] = exclude_path
+    try:
+        with (
+            psycopg.connect(dsn, options="-c default_transaction_read_only=on") as conn,
+            conn.cursor() as cur,
+        ):
+            cur.execute(sql, params)
+            row = cur.fetchone()
+    except psycopg.Error as e:
+        return Err(f"pg: {e}")
+    return Ok(row[0] if row else None)
+
+
+def _remember_shadow_task(route: str, arguments: dict, status: int, body: bytes, is_owner: bool) -> None:
     """응답을 본 뒤에 도는 그림자 — 같은 요청을 파이썬 쓰기 경로에 「쓰지 않고」 태워
-    엔진이 실제로 쓴 노트와 칸별로 대조하고 사건(remember_shadow) 한 줄을 남긴다(E3a-1).
-    실패는 전부 여기서 접는다: 문 로그 한 줄 + 사건 status=error — 응답은 이미 간 뒤라
-    어떤 예외도 클라이언트에 닿지 않는다."""
+    엔진이 한 결정(PII 게이트·중복 문의 걸러둘·대체·저장)과 같은 결정을 낼지, 저장·대체에
+    서는 실제 노트와 칸별로 대조하고 사건(remember_shadow) 한 줄을 남긴다(E3a-2). 걸러진
+    요청은 결정만 비교한다. 실패는 전부 여기서 접는다: 문 로그 한 줄 + 사건 status=error —
+    응답은 이미 간 뒤라 어떤 예외도 클라이언트에 닿지 않는다."""
+    vault_dir = _vault_dir()
+    match remember_pii.load_from_vault(vault_dir):
+        case Err(reason):
+            event_log.try_append_event(
+                "door",
+                remember_shadow.EVENT_NAME,
+                "error",
+                reason=f"pii rules: {reason}",
+                omb_session_id=_omb_session_id(arguments),
+            )
+            return
+        case Ok(scanner):
+            pass
     try:
         event = remember_shadow.run_shadow(
             remember_shadow.ShadowRequest(
@@ -283,9 +371,13 @@ def _remember_shadow_task(route: str, arguments: dict, status: int, body: bytes)
                 arguments=arguments,
                 engine_status=status,
                 engine_body=body,
-                vault_dir=_vault_dir(),
+                vault_dir=vault_dir,
                 read_note=vault_notes.read_note,
                 split_frontmatter=vault_note.split_frontmatter,
+                list_notes=lambda: _list_wiki_notes(vault_dir),
+                pii_scanner=scanner,
+                is_owner=is_owner,
+                nearest_document=_nearest_document,
             )
         )
     except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다

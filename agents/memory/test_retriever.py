@@ -124,8 +124,8 @@ class RetrieverTest(unittest.TestCase):
                 "used_count": 0,
                 "contested_count": 0,
                 "said_by_owner": 0,
-                "superseded_by": [],
             },
+            "엔진 hit 에 superseded_by 가 없으면 메타데이터에도 없다 — 모양을 지어내지 않는다(wiki-2732)",
         )
         self.assertEqual(
             self.server.last_body,
