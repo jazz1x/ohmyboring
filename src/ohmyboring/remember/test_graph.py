@@ -240,14 +240,21 @@ class PartialCloseTests(unittest.TestCase):
         )
         self.assertEqual((verdict.engine_only, verdict.python_only), (0, 0))
 
-    def test_wholesale_seal_intent_is_the_mutant_shape(self):
-        # 통째 봉인 변이의 모양 — 옛 노트 행을 전부 닫겠다고 목표를 세우면 engine_only 가 0이
-        # 되어 (나) 어긋남이 사라진다. 이 변이가 시험으로 사망하는 이유를 여기서 못 박는다.
-        rows = self._rows()
-        wholesale = [(row, True) for row in rows if row.source_path == "/vault/wiki/wiki-2757.md"]
-        wholesale += [(row, False) for row in rows if row.source_path == "/vault/wiki/wiki-2810.md"]
-        verdict = graph.compare_seals(wholesale, "/vault/wiki/wiki-2810.md")
-        self.assertEqual(verdict.engine_only, 0)
+    def test_a_restated_subject_keeps_its_other_predicates_alive(self):
+        rows = (
+            graph.ClaimRow("/vault/wiki/wiki-2757.md", "배포", "절차", "fact", True),
+            graph.ClaimRow("/vault/wiki/wiki-2757.md", "배포", "담당", "fact", False),
+        )
+        expected = dict(
+            ((row.subject, row.predicate), close)
+            for row, close in graph.expected_seal_states(
+                rows,
+                "/vault/wiki/wiki-2810.md",
+                frozenset({("배포", "절차")}),
+                frozenset({"/vault/wiki/wiki-2757.md"}),
+            )
+        )
+        self.assertEqual(expected, {("배포", "절차"): True, ("배포", "담당"): False})
 
     def test_unsealed_restated_slot_is_python_only(self):
         # 엔진이 다시 말한 슬롯마저 살린 채로 두면 python_only — 엔진이 목표보다 덜 닫은 것.
