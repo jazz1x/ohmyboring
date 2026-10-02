@@ -676,5 +676,46 @@ def _read_note(vault_dir: str, note_id: str) -> str | None:
         return None
 
 
+DSN = os.environ.get("BORING_TEST_DATABASE_URL")
+
+
+@unittest.skipIf(
+    DSN is None, "BORING_TEST_DATABASE_URL unset — DB integration test skipped (disposable DB only)"
+)
+class PartialSealSqlTests(unittest.TestCase):
+    """부분 닫기 SQL 을 실제 Postgres 에서 — 가짜 연결은 SQL 의 뜻을 못 본다."""
+
+    def test_only_the_superseded_notes_restated_slots_close(self):
+        import psycopg
+
+        rows = [
+            ("/vault/wiki/old.md", "배포", "절차"),
+            ("/vault/wiki/old.md", "배포", "담당"),
+            ("/vault/wiki/other.md", "배포", "절차"),
+            ("/vault/wiki/new.md", "배포", "절차"),
+        ]
+        with psycopg.connect(DSN, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute("DROP SCHEMA IF EXISTS omb_writer_test CASCADE;")
+            cur.execute("CREATE SCHEMA omb_writer_test;")
+            try:
+                cur.execute("SET search_path TO omb_writer_test;")
+                cur.execute(
+                    "CREATE TABLE claim (source_path text, subject text, predicate text,"
+                    " valid_from timestamptz NOT NULL DEFAULT now(), superseded_at timestamptz);"
+                )
+                cur.executemany(
+                    "INSERT INTO claim (source_path, subject, predicate) VALUES (%s, %s, %s);", rows
+                )
+                cur.execute(
+                    writer._PARTIAL_SEAL_SQL, {"new": "/vault/wiki/new.md", "old": "/vault/wiki/old.md"}
+                )
+                cur.execute(
+                    "SELECT source_path, predicate FROM claim WHERE superseded_at IS NOT NULL ORDER BY 1, 2;"
+                )
+                self.assertEqual(cur.fetchall(), [("/vault/wiki/old.md", "절차")])
+            finally:
+                cur.execute("DROP SCHEMA omb_writer_test CASCADE;")
+
+
 if __name__ == "__main__":
     unittest.main()

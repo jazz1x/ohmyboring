@@ -164,6 +164,12 @@ jobs:
             fail=1
           fi
           echo "::endgroup::"
+          echo "::group::python remember/writer.py integration"
+          if ! python3 src/ohmyboring/remember/test_writer.py; then
+            echo "FAILED: remember/test_writer.py"
+            fail=1
+          fi
+          echo "::endgroup::"
           exit "$fail"
       - name: reset DB (DB gate suites leave rows behind; drudge/eval-gate need a clean corpus)
         run: |
