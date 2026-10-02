@@ -221,11 +221,67 @@ REPAIRS_LIMIT = 3
 #: how many of the agent's session-end classifications the review lane shows.
 REVIEW_LIMIT = 3
 
+#: The held-pair (보류) window, hours — 이레, the same window as the advice lane's
+#: SUPPRESS_WINDOW_HOURS (card_verdicts): a pair the owner held comes back only after the
+#: window lets it go. card_live never imports card_verdicts, so the number lives here with
+#: that pointer rather than a cross-import.
+REVIEW_DEFER_WINDOW_HOURS = 168
+
+
+def _deferred_review_pairs() -> set[tuple[str, str]]:
+    """(note, kind) pairs the owner held (보류) within the 이레 window — read from the
+    verdict_reviewed 사건 a hold leaves (the review lane's write-only-until-now event).
+    Agree/flip/delegate rows are ignored: only a hold suppresses. A hold row missing the
+    note or its kind is malformed, same as a malformed proposal: raise (F5/ROP), never
+    skip — a dropped row here is exactly a held pair coming back unannounced."""
+    out: set[tuple[str, str]] = set()
+    for entry in _live_events("verdict_reviewed", REVIEW_DEFER_WINDOW_HOURS):
+        attrs = entry.get("attributes") or {}
+        if attrs.get("choice") != "defer":
+            continue
+        note, kind = attrs.get("note"), attrs.get("proposed_kind")
+        if not isinstance(note, str) or not note or kind not in ("used", "contested"):
+            raise ValueError(f"malformed verdict_reviewed hold row: {attrs!r}")
+        out.add((note, kind))
+    return out
+
+
+def _group_reviews(rows: list[ProposedVerdict]) -> list[ProposedVerdict]:
+    """같은 노트를 같은 판정으로 (작업만 다르게) 본 행을 한 줄로 묶는다 — 오너가 묶음을
+    고를 때 판정은 묶인 세션 전부에 가야 하니, 묶음 전체가 한 단추에 실린다. 첫 목격
+    (최신) 순서가 묶음 안에서도 그대로고, 이유는 묶음에서 첫 번째로 남은 근거 문장이다."""
+    order: list[tuple[str, str]] = []
+    groups: dict[tuple[str, str], list[ProposedVerdict]] = {}
+    for row in rows:
+        key = (row.note, row.kind)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(row)
+    out = []
+    for key in order:
+        members = groups[key]
+        first = members[0]
+        if len(members) == 1:
+            out.append(first)
+            continue
+        out.append(
+            first.model_copy(
+                update={
+                    "sessions": [m.session_id for m in members],
+                    "reason": next((m.reason for m in members if m.reason), ""),
+                }
+            )
+        )
+    return out
+
 
 def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
     """The review lane's rows: session-end verdict_proposed events, contested first, then
-    newest first, at most REVIEW_LIMIT. A row missing a field this value needs is malformed —
-    raise (F5/ROP), never skip: a dropped row here is a flip the owner was never shown."""
+    newest first, the same (note, kind) proposed by several sessions folded into one row,
+    pairs the owner held within the 이레 window left off, at most REVIEW_LIMIT. A row
+    missing a field this value needs is malformed — raise (F5/ROP), never skip: a dropped
+    row here is a judgment the owner was never shown."""
     parsed: list[ProposedVerdict] = []
     for entry in _live_events("verdict_proposed", since_hours):
         attrs = entry.get("attributes") or {}
@@ -236,6 +292,7 @@ def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
                     note=attrs["note"],
                     kind=attrs["kind"],
                     at=entry["observed_at"],
+                    reason=attrs.get("reason") or "",
                 )
             )
         except (KeyError, TypeError, ValidationError) as e:
@@ -245,12 +302,19 @@ def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
     # The same judgement can land twice (two SessionEnd hooks, 1ms apart — 2026-09-30).
     seen: set[tuple[str, str, str]] = set()
     unique = [p for p in parsed if (key := (p.session_id, p.note, p.kind)) not in seen and not seen.add(key)]
-    shown = unique[:REVIEW_LIMIT]
+    grouped = _group_reviews(unique)
+    if grouped:
+        deferred = _deferred_review_pairs()
+        grouped = [r for r in grouped if (r.note, r.kind) not in deferred]
+    shown = grouped[:REVIEW_LIMIT]
     works = _session_works() if shown else {}
-    return [
-        p.model_copy(update={"note_title": _note_title(p.note), "work": works.get(p.session_id, "")})
-        for p in shown
-    ]
+    out = []
+    for r in shown:
+        update: dict = {"note_title": _note_title(r.note), "work": works.get(r.session_id, "")}
+        if r.sessions:
+            update["works"] = [works.get(s, "") for s in r.sessions]
+        out.append(r.model_copy(update=update))
+    return out
 
 
 _FRONTMATTER_FIELD = re.compile(r"^(title|project|date|omb_session_id):[ \t]*(.*?)[ \t]*$", re.M)

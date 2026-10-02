@@ -46,7 +46,7 @@ CARD_REPAIR_TIMEOUT = float(os.environ.get("CARD_REPAIR_TIMEOUT") or "600")
 def run(
     effects: list[card_types.Effect],
     record: Callable[[str, dict], None],
-    consumption: Callable[[str, str, list[str]], None],
+    consumption: Callable[[str, str, list[str], str | None], None],
     execute_repair: Callable[[str], RepairDone | RepairFailed | RepairUnanswered],
 ) -> list[RepairDone | RepairFailed | RepairUnanswered]:
     """The one interpreter: a card_press.effects list in, applied in order. Each Effect tag
@@ -63,7 +63,7 @@ def run(
             if effect.effect == "record":
                 record(effect.event, effect.fields)
             elif effect.effect == "consumption":
-                consumption(effect.session, effect.kind, effect.paths)
+                consumption(effect.session, effect.kind, effect.paths, effect.judge)
             elif effect.effect == "execute_repair":
                 repairs.append(execute_repair(effect.subject))
             else:
@@ -81,12 +81,15 @@ def _live_record(event: str, fields: dict) -> None:
     event_log.append_event("slack-card", event, "ok", **fields)
 
 
-def _live_consumption(session: str, kind: str, paths: list[str]) -> dict:
+def _live_consumption(session: str, kind: str, paths: list[str], judge: str | None = None) -> dict:
     # Row-level, not session-level: a button judges the note its row cited, and only that one.
-    # judge=OWNER: a button press is the owner's hand, and the client carries the owner token
-    # the engine demands for that word.
+    # judge=None keeps the OWNER default: a button press is the owner's hand, and the client
+    # carries the owner token the engine demands for that word. An explicit judge (the review
+    # lane's 「맡길게요」, AGENT_DELEGATED) rides verbatim and travels bare — owner_headers only
+    # fires for the OWNER word, and the engine accepts agent:<name> with no token.
+    judge = OWNER if judge is None else judge
     at = datetime.now(UTC).isoformat()
-    marks = PathMarks(used=paths, judge=OWNER) if kind == "used" else PathMarks(contested=paths, judge=OWNER)
+    marks = PathMarks(used=paths, judge=judge) if kind == "used" else PathMarks(contested=paths, judge=judge)
     # Err→예외는 카드 그래프가 예외를 계약으로 삼는 동안의 임시 경계 — 조용한 걸기는 반만 일어난 프레스다.
     match DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(session, at, marks):
         case Ok(resp):

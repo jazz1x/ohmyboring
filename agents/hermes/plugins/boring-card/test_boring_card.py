@@ -242,7 +242,11 @@ def _patched_effects(calls, consumption=None, execute_repair=None):
             card_effects,
             "_live_consumption",
             side_effect=consumption
-            or (lambda session, kind, paths: calls.append(("consumption", session, kind, paths))),
+            or (
+                lambda session, kind, paths, judge=None: calls.append(
+                    ("consumption", session, kind, paths, judge)
+                )
+            ),
         ),
         mock.patch.object(
             card_effects,
@@ -350,7 +354,7 @@ def test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card():
     ]
     assert calls[2:4] == [
         ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 1, "choice": "do"}),
-        ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"]),
+        ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"], None),
     ]
     progress, final = _updates(calls)
     assert progress[1:3] == (CARD_CH, CARD_TS) and final[1:3] == (CARD_CH, CARD_TS)
@@ -358,6 +362,74 @@ def test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card():
     assert _status_at(progress[3], 1) == "⏳ 진행 중…"
     _assert_single_row_marked(BLOCKS, final[3], 1)
     assert f"✓ 채택 — <@{OWNER}>" in json.dumps(final[3], ensure_ascii=False)
+
+
+def test_an_owner_review_delegate_press_consumes_with_the_agent_judge():
+    """맡길게요: the agent's call stands — a consumption on the proposing session with the
+    proposed kind and judge agent:delegated (never owner), then the verdict_reviewed record,
+    and only then the row settles as delegated."""
+    ctx = _FakeCtx()
+    with _env():
+        _, handler = _register(ctx)[0]
+        calls = []
+        with _patched_effects(calls):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert [c if isinstance(c, str) else c[0] for c in calls] == [
+        "ack",
+        "chat_update",
+        "consumption",
+        "record",
+        "chat_update",
+    ]
+    assert calls[2:4] == [
+        ("consumption", "sess-agent-1", "used", ["/vault/wiki/wiki-0700.md"], "agent:delegated"),
+        (
+            "record",
+            "verdict_reviewed",
+            {
+                "session_id": "sess-agent-1",
+                "note": "/vault/wiki/wiki-0700.md",
+                "proposed_kind": "used",
+                "card_ts": CARD_TS,
+                "choice": "delegate",
+            },
+        ),
+    ]
+    progress, final = _updates(calls)
+    _assert_single_row_marked(BLOCKS, final[3], 3)
+    assert "✓ 맡김 — 에이전트 판정 그대로" in json.dumps(final[3], ensure_ascii=False)
+
+
+def test_an_owner_review_hold_press_leaves_no_edge_and_marks_the_row():
+    """보류: no consumption at all — one verdict_reviewed 사건 carrying the held sessions,
+    then the row settles as held. The 이레 re-raise is the read side's job (card_live)."""
+    ctx = _FakeCtx()
+    with _env():
+        _, handler = _register(ctx)[0]
+        calls = []
+        with _patched_effects(calls):
+            _run(handler, _body("card:3:defer", REVIEW_VALUE), calls)
+    assert [c if isinstance(c, str) else c[0] for c in calls] == [
+        "ack",
+        "chat_update",
+        "record",
+        "chat_update",
+    ]
+    assert calls[2] == (
+        "record",
+        "verdict_reviewed",
+        {
+            "session_id": "sess-agent-1",
+            "sessions": ["sess-agent-1"],
+            "note": "/vault/wiki/wiki-0700.md",
+            "proposed_kind": "used",
+            "card_ts": CARD_TS,
+            "choice": "defer",
+        },
+    )
+    progress, final = _updates(calls)
+    _assert_single_row_marked(BLOCKS, final[3], 3)
+    assert "⏸ 보류 — 이레 뒤에 다시 올려요" in json.dumps(final[3], ensure_ascii=False)
 
 
 def test_every_lane_shows_progress_first_and_only_that_row_changes():
@@ -412,7 +484,7 @@ def test_a_raising_effect_stops_the_fold_and_the_handler_survives():
     line names the press, the failed effect, and the one effect skipped; the handler
     itself returns, and the card is not touched."""
 
-    def boom(session, kind, paths):
+    def boom(session, kind, paths, judge=None):
         raise RuntimeError("engine down")
 
     ctx = _FakeCtx()
@@ -490,11 +562,11 @@ def test_a_failed_effect_shows_the_reason_on_the_row_and_releases_the_claim():
     card that still shows the buttons (a lost update) runs its effects again."""
     state = {"down": True}
 
-    def flaky(session, kind, paths):
+    def flaky(session, kind, paths, judge=None):
         if state["down"]:
             state["down"] = False
             raise RuntimeError("engine down")
-        calls.append(("consumption", session, kind, paths))
+        calls.append(("consumption", session, kind, paths, judge))
 
     ctx = _FakeCtx()
     with _env():
@@ -514,7 +586,7 @@ def test_a_failed_effect_shows_the_reason_on_the_row_and_releases_the_claim():
             assert _status_at(failed[3], 1) == "✕ 실패 — engine down"
             _assert_buttons_kept_under_the_reason(BLOCKS, failed[3], 1)
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
-    assert ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"]) in calls
+    assert ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"], None) in calls
     assert len(_updates(calls)) == 4
 
 
@@ -532,7 +604,7 @@ def test_a_failed_chat_update_is_one_log_line_and_keeps_the_claim():
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls, fail=True)
             assert calls[2:4] == [
                 ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 1, "choice": "do"}),
-                ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"]),
+                ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"], None),
             ]
             assert len(_updates(calls)) == 2, "progress and final are each attempted once"
             assert log.error.call_count == 2, "each failed update is one line, and the effects still ran"
@@ -609,11 +681,11 @@ def test_a_row_the_door_settled_mid_press_is_not_rolled_back():
     calls = []
     client = _FakeClient(calls)
 
-    def door_settles_row_0(session, kind, paths):
+    def door_settles_row_0(session, kind, paths, judge=None):
         client.current = card_view.mark_progress(
             client.current, 0, card_types.Done(text="✓ 완료 — door"), lang="ko"
         )
-        calls.append(("consumption", session, kind, paths))
+        calls.append(("consumption", session, kind, paths, judge))
 
     async def ack():
         calls.append("ack")
@@ -656,7 +728,7 @@ def _press_row_1_with(consumption, times):
 
 
 def test_the_same_failure_twice_keeps_the_row_and_its_buttons():
-    def down(session, kind, paths):
+    def down(session, kind, paths, judge=None):
         raise RuntimeError("engine unreachable")
 
     card = _press_row_1_with(down, 2).current
@@ -671,7 +743,7 @@ def test_the_same_failure_twice_keeps_the_row_and_its_buttons():
 def test_a_retry_that_succeeds_leaves_no_old_failure_line():
     state = {"down": True}
 
-    def flaky(session, kind, paths):
+    def flaky(session, kind, paths, judge=None):
         if state["down"]:
             state["down"] = False
             raise RuntimeError("engine down")
@@ -690,6 +762,8 @@ if __name__ == "__main__":
     test_the_handler_acks_before_any_effect()
     test_a_press_on_a_card_older_than_the_answerable_hours_runs_no_effect()
     test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card()
+    test_an_owner_review_delegate_press_consumes_with_the_agent_judge()
+    test_an_owner_review_hold_press_leaves_no_edge_and_marks_the_row()
     test_every_lane_shows_progress_first_and_only_that_row_changes()
     test_a_rejected_press_runs_no_effect()
     test_a_raising_effect_stops_the_fold_and_the_handler_survives()

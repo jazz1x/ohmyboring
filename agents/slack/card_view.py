@@ -353,38 +353,61 @@ def _mrkdwn_plain(text: str) -> str:
     return cut.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _review_work_line(review: ProposedVerdict, strings: dict[str, str]) -> str:
+    """One row's 작업 line. A grouped row names every grouped work (smaller ones inline);
+    past the second, the count folds into 「외 N건」 — the press still reaches every grouped
+    session, so nothing waits for the next card unseen."""
+    sessions = review.sessions or [review.session_id]
+    works = review.works or [review.work]
+    if len(sessions) == 1 and not works[0]:
+        return strings["review_work_unknown"].format(session=sessions[0][:8])
+    parts = []
+    for session, work in zip(sessions, works):
+        parts.append(
+            _mrkdwn_plain(work) if work else strings["review_work_session"].format(session=session[:8])
+        )
+    if len(parts) > 2:
+        parts = [*parts[:2], strings["review_work_more"].format(n=len(sessions) - 2)]
+    return strings["review_work"].format(work="; ".join(parts))
+
+
 def _review_tag_block(
     review: ProposedVerdict, strings: dict[str, str], note_links: tuple[NoteLink, ...] = ()
 ) -> dict:
-    """What the agent judged, on which note, from which piece of work — ids stand in when the
-    vault has no title or no session note."""
+    """What the agent judged, why, on which note, from which piece of work — ids stand in
+    when the vault has no title or no session note. `reason` is the sentence the session-end
+    scorer caught the mark in; a row proposed before reasons were stored shows the honest
+    근거 없음 line instead of inventing one."""
     label = note_label(review.note)
     note_line = (
         strings["review_note_titled"].format(title=_mrkdwn_plain(review.note_title), note=label)
         if review.note_title
         else strings["review_note_bare"].format(note=label)
     ) + note_links_text(label, note_links, strings)
-    work_line = (
-        strings["review_work"].format(work=_mrkdwn_plain(review.work))
-        if review.work
-        else strings["review_work_unknown"].format(session=review.session_id[:8])
+    reason_line = (
+        strings["review_reason"].format(reason=_mrkdwn_plain(review.reason))
+        if review.reason
+        else strings["review_reason_none"]
     )
-    text = "\n".join((strings[f"review_judged_{review.kind}"], note_line, work_line))
+    work_line = _review_work_line(review, strings)
+    text = "\n".join((strings[f"review_judged_{review.kind}"], reason_line, note_line, work_line))
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 
 def _review_actions_block(idx: int, review: ProposedVerdict, strings: dict[str, str]) -> dict:
-    # Agree (do) or flip (drop) only — no hold: not pressing is the hold, and it records
-    # nothing, so a hold button would promise a trace the run never leaves.
+    # 맞아요/아니에요는 오너 판정, 맡길게요는 에이전트 판정을 그대로 받는 맡긴 판정,
+    # 보류는 판정 없이 사건 한 줄 — 넷 다 묶인 세션 전부에 닿는다. 안 누르는 것도 여전히
+    # 아무 흔적 없는 보류다.
+    data = {"session": review.session_id, "kind": review.kind}
+    if review.sessions:
+        data["sessions"] = list(review.sessions)
     elements = []
-    for choice in ("do", "drop"):
+    for choice in ("do", "drop", "delegate", "defer"):
         button = {
             "type": "button",
             "text": {"type": "plain_text", "text": strings[f"review_button_{choice}"], "emoji": True},
             "action_id": f"card:{idx}:{choice}",
-            "value": _lane_value(
-                "review", {"session": review.session_id, "kind": review.kind}, note=review.note
-            ),
+            "value": _lane_value("review", data, note=review.note),
         }
         if choice == "do":
             button["style"] = "primary"
@@ -397,6 +420,10 @@ def _review_actions_block(idx: int, review: ProposedVerdict, strings: dict[str, 
 def _review_verdict_block(review: ProposedVerdict, verdict: ButtonVerdict, strings: dict[str, str]) -> dict:
     if verdict.choice == "do":
         text = strings["review_verdict_agree"]
+    elif verdict.choice == "delegate":
+        text = strings["review_verdict_delegate"]
+    elif verdict.choice == "defer":
+        text = strings["review_verdict_defer"]
     else:
         flipped = strings[f"review_kind_{'contested' if review.kind == 'used' else 'used'}"]
         text = strings["review_verdict_flip"].format(kind=flipped)
@@ -640,8 +667,9 @@ def build_blocks(
     then a 「짚어 둔 것」 header before the advice rows. Repair rows occupy button idx
     0..len(repairs)-1; advice rows continue from there — one shared space, repairs first.
     A review lane sits below the advice lane when `reviews` is non-empty — the agent's own
-    session-end classifications, one three-block row each, agree/flip buttons occupying the
-    idx slots after the advice rows, under the same 「에이전트가 가른 것」 header shape. It
+    session-end classifications, one three-block row each (the same note judged the same way
+    by several sessions rides as one grouped row), agree/flip/delegate/hold buttons occupying
+    the idx slots after the advice rows, under the same 「에이전트가 가른 것」 header shape. It
     shares the 50-block cap: the advice lane reserves the review lane's tail, and review
     rows that still do not fit are reported in an overflow line, not dropped. Empty
     `reviews` leaves the card exactly as it was —
@@ -717,8 +745,8 @@ def build_blocks(
 
     if reviews:
         # the review lane sits below the advice one — the agent's own session-end calls,
-        # which the owner may agree with or flip. No reviews, no header: a lane the agent
-        # never filled must not render as an empty promise.
+        # which the owner may agree with, flip, hand back, or hold. No reviews, no header:
+        # a lane the agent never filled must not render as an empty promise.
         blocks.append(_lane_header_block(strings["review_header"]))
         n_slots = n_repairs + total
         r_shown = 0

@@ -223,6 +223,17 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
             self.assertEqual((call.args[0], call.args[2]), ("distill", "ok"))
             self.assertEqual(call.kwargs["session_id"], "s1")
             self.assertEqual(call.kwargs["judge"], "inferred")
+        # 이유 한 줄: 판정을 만든 문장이 사건에 그대로 실린다 — used 는 이름을 울린 문장,
+        # contested 는 표지가 든 문장. 사건에 실리지 않는 변이는 이 단언이 잡는다.
+        reasons = {(c.kwargs["note"], c.kwargs["kind"]): c.kwargs["reason"] for c in proposals}
+        self.assertEqual(
+            reasons[("/vault/wiki/wiki-0007.md", "used")],
+            "per wiki-0007 instead of wiki-0003",
+        )
+        self.assertEqual(
+            reasons[("/vault/wiki/wiki-0007.md", "contested")],
+            "Even so, wiki-0007 is outdated now",
+        )
 
         append_event.reset_mock()
         with (

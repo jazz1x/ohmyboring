@@ -24,6 +24,16 @@ REGISTER_NAMES: tuple[str, ...] = ANSWER_REGISTERS + ("recurrences",)
 #: language table, so a Japanese-language card still accepts the same action_ids.
 CHOICES: tuple[str, ...] = ("do", "defer", "drop")
 
+#: The review lane's fourth button — 「맡길게요」 takes the agent's own call as-is. The wire
+#: admits it (parse_action_common), but only the review lane's buttons emit it and only its
+#: effects know what it means; every other lane refuses it in parse_press.
+DELEGATE: str = "delegate"
+
+#: The judge a delegated review writes on the edge — the engine's `agent:<name>` vocabulary
+#: (drudge/src/frontmatter.rs:53-61), accepted with no Rust change. Never `owner`: the owner
+#: handed this call back, so the 채점 줄 can tell the two apart.
+AGENT_DELEGATED: str = "agent:delegated"
+
 #: card_i18n.STRINGS keys this file's display-building functions may render.
 DISPLAY_LANGS: tuple[str, ...] = ("en", "ko", "ja")
 
@@ -229,10 +239,12 @@ class Confirmation(BaseModel):
 
 
 class ButtonVerdict(BaseModel):
-    """One button press, already judged trustworthy by parse_action."""
+    """One button press, already judged trustworthy by parse_action. `choice` admits the
+    review lane's delegate too: mark_pressed rebuilds the pressed row from this value, and
+    parse_action itself (the advice-era parser) still mints only do/defer/drop."""
 
     idx: int
-    choice: Choice
+    choice: Literal["do", "defer", "drop", "delegate"]
     user: str
     at: str
 
@@ -241,7 +253,11 @@ class ProposedVerdict(BaseModel):
     """One session-end classification the agent already made and proposed — not the owner's.
     `session_id` is the session that judged the note (the /consumption edge's own session),
     so an owner flip judges that same session, never the card's. The card's review lane shows
-    these; the owner may agree or flip, and silence records nothing."""
+    these; the owner may agree, flip, delegate, or hold. Rows whose (note, kind) matches
+    another session's proposal are grouped: `sessions`/`works` are the parallel lists of every
+    grouped session and its work line (`[]` on an ungrouped row), because one grouped row's
+    press fans out to all of them. `reason` is the sentence the session-end scorer caught the
+    mark in ("" for rows proposed before reasons were stored)."""
 
     session_id: str
     note: str
@@ -252,6 +268,12 @@ class ProposedVerdict(BaseModel):
     # has neither, and the row falls back to the ids.
     note_title: str = ""
     work: str = ""
+    # Grouped row: every session that judged this note this way, and their work lines, both
+    # in first-seen (newest-first) order, parallel to each other. Empty on an ungrouped row.
+    sessions: list[str] = []
+    works: list[str] = []
+    # Why the agent judged so — one assistant sentence, verbatim from the transcript.
+    reason: str = ""
 
 
 class Rejected(BaseModel):
@@ -288,10 +310,14 @@ class AdvicePress(CardPress):
 
 
 class ReviewPress(CardPress):
-    """The review lane's press — `session` is the proposing session a flip would judge."""
+    """The review lane's press — `session` is the proposing session a flip would judge;
+    `sessions` is every session the row grouped (the press fans out to all of them; empty
+    for an ungrouped row, where `session` alone is the list)."""
 
     lane: Literal["review"] = "review"
+    choice: Literal["do", "delegate", "defer", "drop"]
     session: str
+    sessions: list[str] = []
     note: str
     kind: Literal["used", "contested"]
 
@@ -309,12 +335,15 @@ class Record(BaseModel):
 
 
 class Consumption(BaseModel):
-    """One /consumption verdict — a used|contested edge onto a session."""
+    """One /consumption verdict — a used|contested edge onto a session. `judge` rides the
+    edge verbatim: None leaves the interpreter's owner default (a button press is the
+    owner's hand); AGENT_DELEGATED names the hand the owner handed the call back to."""
 
     effect: Literal["consumption"] = "consumption"
     session: str
     kind: Literal["used", "contested"]
     paths: list[str]
+    judge: str | None = None
 
 
 class ExecuteRepair(BaseModel):

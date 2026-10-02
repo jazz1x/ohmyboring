@@ -425,13 +425,44 @@ def replacements_named(sentence, path_by_name):
                 yield newer, older
 
 
-def consumption(records, transcript_text):
-    """`(used, contested, supersedes)` — what this session did with the notes it was handed."""
+#: The reason sentence rides the verdict_proposed event and shows on the card's review row
+#: (wiki-2539) — one assistant sentence, capped so no event grows past a card line.
+REASON_SENTENCE_MAX = 400
+
+
+def _reason_text(sentence):
+    """One display-ready reason: whitespace collapsed, capped with an ellipsis."""
+    text = " ".join((sentence or "").split())
+    return text if len(text) <= REASON_SENTENCE_MAX else text[: REASON_SENTENCE_MAX - 1] + "…"
+
+
+def _echoed_sentence(raw_sentences, sentences, hit, names):
+    """The first assistant sentence echoing the hit's source name — token-bounded, over the
+    normalized forms, returned as its raw text. That echo is what the used-mark rests on;
+    a stored phrase names the fallback sentence when the basename itself never appears."""
+    for raw, normalized in zip(raw_sentences, sentences):
+        if any(_contains(normalized, name) for name in names):
+            return _reason_text(raw)
+    for raw, normalized in zip(raw_sentences, sentences):
+        if any(_contains(normalized, " ".join(_words(p))) for p in hit.get("phrases") or []):
+            return _reason_text(raw)
+    return ""
+
+
+def consumption_detail(records, transcript_text):
+    """`(used, contested, supersedes, reasons)` — consumption plus WHY: per (kind, note path),
+    the raw assistant sentence that carried the mark (the sentence with the used/contested
+    표지). Keyed by kind because one note can be both used and contested, and each verdict
+    event carries the reason for its own kind. `reasons` may carry "" when the blob-level
+    used check found no single sentence to quote; the card then says 근거 없음, never fakes
+    one."""
     text = assistant_text(transcript_text)
     blob = " ".join(_words(text))
-    sentences = [" ".join(_words(s)) for s in _SENTENCE.split(text.lower()) if s.strip()]
+    raw_sentences = [s.strip() for s in _SENTENCE.split(text) if s.strip()]
+    sentences = [" ".join(_words(s)) for s in raw_sentences]
     path_by_name = {}
     used, contested, supersedes = [], [], []
+    reasons = {}
     for record in records or []:
         prompt_words = record.get("prompt_words") or []
         for hit in record.get("hits") or []:
@@ -441,12 +472,22 @@ def consumption(records, transcript_text):
                 path_by_name.setdefault(n, path)
             if hit_was_used(hit, blob, prompt_words) and path not in used:
                 used.append(path)
+                reasons[("used", path)] = _echoed_sentence(raw_sentences, sentences, hit, names)
             if path not in contested and any(argued_with(s, names) for s in sentences):
                 contested.append(path)
+                reasons[("contested", path)] = next(
+                    _reason_text(raw) for raw, s in zip(raw_sentences, sentences) if argued_with(s, names)
+                )
     for s in sentences:
         for pair in replacements_named(s, path_by_name):
             if pair not in supersedes:
                 supersedes.append(pair)
+    return used, contested, supersedes, reasons
+
+
+def consumption(records, transcript_text):
+    """`(used, contested, supersedes)` — what this session did with the notes it was handed."""
+    used, contested, supersedes, _ = consumption_detail(records, transcript_text)
     return used, contested, supersedes
 
 

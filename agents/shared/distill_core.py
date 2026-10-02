@@ -246,7 +246,7 @@ def write_consumption_to_graph(session_id, records, transcript_text):
     """Hand the graph what this session did with its notes. Spooled sink → no write; never raises."""
     if event_log._event_sink_mode() == "spool":
         return
-    used, contested, supersedes = uptake_core.consumption(records, transcript_text)
+    used, contested, supersedes, reasons = uptake_core.consumption_detail(records, transcript_text)
     if not (used or contested or supersedes):
         return
     observed_at = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
@@ -273,7 +273,9 @@ def write_consumption_to_graph(session_id, records, transcript_text):
     # owner can flip it on the morning card. One event per used/contested note — supersedes
     # pairs name no single note, so they propose nothing. Only a successful consumption write
     # may leave these: a failed write with proposed events would show the owner calls the
-    # graph never actually received.
+    # graph never actually received. Each carries the sentence the scorer caught the mark in
+    # (`reason`) — the review row's 이유 한 줄; rows proposed before this stored nothing, and
+    # the card says 근거 없음 for those rather than inventing one.
     for kind, notes in (("used", used), ("contested", contested)):
         for note in notes:
             try:
@@ -285,6 +287,7 @@ def write_consumption_to_graph(session_id, records, transcript_text):
                     note=note,
                     kind=kind,
                     judge="inferred",
+                    reason=reasons.get((kind, note), ""),
                 )
             except Exception as e:  # noqa: BLE001 — never raises, same as the write above
                 print(f"[distill-session] verdict_proposed event failed: {e}", file=sys.stderr)

@@ -17,10 +17,18 @@ import os
 import card_types
 import card_verdicts
 import card_view
-from card_types import AdvicePress, Press, Rejected, RepairPress, ReviewPress
+from card_types import CHOICES, DELEGATE, AdvicePress, Press, Rejected, RepairPress, ReviewPress
 
 #: 버튼 value의 lane → Press 모형 — parse_press가 여기서 모형을 고른다.
 _LANE_MODELS = {"repair": RepairPress, "advice": AdvicePress, "review": ReviewPress}
+
+#: 각 칸이 받는 선택 어휘 — 검토 칸만 맡길게요(DELEGATE)가 있다. execute·조언 칸의 버튼은
+#: 여전히 셋뿐이니, 칸 밖에서 지어낸 delegate 누름은 여기서 거절된다.
+_LANE_CHOICES = {
+    "repair": CHOICES,
+    "advice": CHOICES,
+    "review": (*CHOICES, DELEGATE),
+}
 
 #: 노트 라벨은 평탄한 /vault/wiki/<이름>.md 의 짧은 이름(예: wiki-0576) — "/" 가 들어간
 #: 라벨은 note_label이 낼 수 있는 모양이 아니니 경로 새는 구멍으로 본다.
@@ -51,9 +59,10 @@ def parse_press(payload: dict, owner_id: str | None) -> Press | Rejected:
     `container.channel_id`) and validates it against the lane model. Notes stay in the
     `wiki-NNNN` label form the card carried, and a label must look exactly like what
     note_label produces for a flat /vault/wiki/<name>.md note. Never raises: every
-    malformed shape — envelope, value, lane, label, missing ts or channel, a review lane
-    asked to defer, a non-owner — is a Rejected, because a press that cannot write a
-    trustworthy card_ts would orphan the next morning's join and refuse that card."""
+    malformed shape — envelope, value, lane, label, missing ts or channel, a choice the
+    lane's buttons never emitted (execute·조언 칸의 delegate), a non-owner — is a Rejected,
+    because a press that cannot write a trustworthy card_ts would orphan the next morning's
+    join and refuse that card."""
     common = card_verdicts.parse_action_common(payload, owner_id=owner_id)
     if isinstance(common, Rejected):
         return common
@@ -82,6 +91,8 @@ def parse_press(payload: dict, owner_id: str | None) -> Press | Rejected:
     model = _LANE_MODELS.get(lane)
     if model is None:
         return Rejected(reason=f"unknown lane {lane!r}")
+    if choice not in _LANE_CHOICES[lane]:
+        return Rejected(reason=f"{lane} lane has no {choice}")
     if lane in _NOTE_LANES:
         note = value.get("note")
         if not isinstance(note, str) or not note or "/" in note:
@@ -97,8 +108,6 @@ def parse_press(payload: dict, owner_id: str | None) -> Press | Rejected:
         )
     except (TypeError, ValueError):  # 모형 검증 실패 / value 키가 공통 필드를 덮음
         return Rejected(reason="malformed button value")
-    if isinstance(press, ReviewPress) and press.choice == "defer":
-        return Rejected(reason="review lane has no defer")
     return press
 
 
@@ -128,18 +137,50 @@ def effects(press: Press) -> list[card_types.Effect]:
             ),
         ]
     fields = {
-        "session_id": press.session,
         "note": card_view.note_path(press.note),
         "proposed_kind": press.kind,
         "card_ts": press.card_ts,
     }
-    if press.choice == "do":
-        return [card_types.Record(event="verdict_reviewed", fields={**fields, "choice": "agree"})]
-    return [
-        card_types.Consumption(
-            session=press.session,
-            kind="contested" if press.kind == "used" else "used",
-            paths=[card_view.note_path(press.note)],
-        ),
-        card_types.Record(event="verdict_reviewed", fields={**fields, "choice": "flip"}),
-    ]
+    sessions = list(press.sessions) or [press.session]
+    if press.choice == "defer":
+        # 보류: 판정을 남기지 않는다 — 간선 없이 사건 한 줄. 묶인 세션 전부가 이 한 줄에
+        # 실리고, card_live 가 이 사건을 읽어 이레 창(고른 짝은 이레 동안 다시 안 올라옴,
+        # card_verdicts.SUPPRESS_WINDOW_HOURS 와 같은 창) 동안 이 짝을 다시 올리지 않는다.
+        return [
+            card_types.Record(
+                event="verdict_reviewed",
+                fields={**fields, "session_id": press.session, "sessions": sessions, "choice": "defer"},
+            )
+        ]
+    out: list[card_types.Effect] = []
+    for sid in sessions:
+        row_fields = {**fields, "session_id": sid}
+        if press.choice == "do":
+            out.append(card_types.Record(event="verdict_reviewed", fields={**row_fields, "choice": "agree"}))
+        elif press.choice == "delegate":
+            # 맡긴다: 에이전트 판정 그대로 받는다 — 판정한 세션에 제안 판정을 그대로 놓되
+            # judge 는 agent:delegated. owner 가 아니다: 채점 줄이 오너 판정과 맡긴 판정을
+            # 가를 수 있어야 하니, 여기에 OWNER 가 들어가는 변이는 반드시 시험으로 잡힌다.
+            out.extend(
+                [
+                    card_types.Consumption(
+                        session=sid,
+                        kind=press.kind,
+                        paths=[card_view.note_path(press.note)],
+                        judge=card_types.AGENT_DELEGATED,
+                    ),
+                    card_types.Record(event="verdict_reviewed", fields={**row_fields, "choice": "delegate"}),
+                ]
+            )
+        else:
+            out.extend(
+                [
+                    card_types.Consumption(
+                        session=sid,
+                        kind="contested" if press.kind == "used" else "used",
+                        paths=[card_view.note_path(press.note)],
+                    ),
+                    card_types.Record(event="verdict_reviewed", fields={**row_fields, "choice": "flip"}),
+                ]
+            )
+    return out

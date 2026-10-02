@@ -484,9 +484,10 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertNotIn("오늘 할 일", _blocks_text(plain))
         self.assertNotIn("짚어 둔 것", _blocks_text(plain))
 
-    def test_review_lane_sits_below_the_advice_lane_with_agree_and_flip_only(self):
-        # 분류 칸: 조언 칸 아래 머리 + 행마다 kind_label · 짧은 노트 이름 + 맞음/뒤집기 두
-        # 버튼뿐. 비면 머리도 없다 — 0건 아침이 카드 모양을 바꾸면 안 된다(검증자 첫 질문).
+    def test_review_lane_sits_below_the_advice_lane_with_four_buttons(self):
+        # 분류 칸: 조언 칸 아래 머리 + 행마다 kind_label · 이유 한 줄(옛 판정은 근거 없음) ·
+        # 짧은 노트 이름 + 맞아요/아니에요/맡길게요/보류 네 버튼. 비면 머리도 없다 — 0건
+        # 아침이 카드 모양을 바꾸면 안 된다(검증자 첫 질문).
         proposal = self._proposal()
         reviews = [
             cc.ProposedVerdict(session_id="s1", note="/vault/wiki/wiki-0700.md", kind="contested", at="t-1"),
@@ -504,12 +505,26 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertEqual(len(action_rows), 3)  # one advice row + two review rows
         for row, expected_idx in zip(action_rows[1:], (1, 2)):
             buttons = {el["action_id"]: el for el in row["elements"]}
-            self.assertEqual(set(buttons), {f"card:{expected_idx}:do", f"card:{expected_idx}:drop"})
-        self.assertEqual([el["text"]["text"] for el in action_rows[1]["elements"]], ["맞아요", "아니에요"])
+            self.assertEqual(
+                set(buttons),
+                {
+                    f"card:{expected_idx}:do",
+                    f"card:{expected_idx}:drop",
+                    f"card:{expected_idx}:delegate",
+                    f"card:{expected_idx}:defer",
+                },
+            )
+        self.assertEqual(
+            [el["text"]["text"] for el in action_rows[1]["elements"]],
+            ["맞아요", "아니에요", "맡길게요", "보류"],
+        )
         tag = next(b for b in blocks if b["type"] == "section" and "wiki-0700" in _blocks_text([b]))
         self.assertEqual(
             tag["text"]["text"],
-            "에이전트는 *이 노트가 틀렸다*고 봤어요.\n노트: `wiki-0700` (제목 없음)\n작업: 세션 `s1` (세션 노트 없음)",
+            "에이전트는 *이 노트가 틀렸다*고 봤어요.\n"
+            "이유: 세션 끝 채점이 남긴 문장이 없어요 (옛 판정)\n"
+            "노트: `wiki-0700` (제목 없음)\n"
+            "작업: 세션 `s1` (세션 노트 없음)",
         )
         self.assertNotIn("/vault/", _blocks_text(blocks))
 
@@ -518,20 +533,89 @@ class CardV2ShapeTests(unittest.TestCase):
             [
                 cc.ButtonVerdict(idx=1, choice="do", user="U1", at="t"),
                 cc.ButtonVerdict(idx=2, choice="drop", user="U1", at="t"),
+                cc.ButtonVerdict(idx=3, choice="delegate", user="U1", at="t"),
+                cc.ButtonVerdict(idx=4, choice="defer", user="U1", at="t"),
             ],
-            reviews=reviews,
+            reviews=[
+                *reviews,
+                cc.ProposedVerdict(session_id="s3", note="/vault/wiki/wiki-0702.md", kind="used", at="t-3"),
+                cc.ProposedVerdict(
+                    session_id="s4", note="/vault/wiki/wiki-0703.md", kind="contested", at="t-4"
+                ),
+            ],
             lang="ko",
         )
         marks = [
             b
             for b in judged
-            if b["type"] == "context" and ("✓ 맞음" in _blocks_text([b]) or "↺" in _blocks_text([b]))
+            if b["type"] == "context" and any(k in _blocks_text([b]) for k in ("✓", "↺", "⏸"))
         ]
         self.assertEqual(marks[0]["elements"][0]["text"], "✓ 맞음")
         self.assertEqual(marks[1]["elements"][0]["text"], "↺ 뒤집음 — 소유자 판정으로 틀린 노트")
+        self.assertEqual(marks[2]["elements"][0]["text"], "✓ 맡김 — 에이전트 판정 그대로")
+        self.assertEqual(marks[3]["elements"][0]["text"], "⏸ 보류 — 이레 뒤에 다시 올려요")
 
         plain = cv.build_blocks([proposal], reviews=[], lang="ko")
         self.assertNotIn("에이전트가 가른 것", _blocks_text(plain))
+
+    def test_a_review_row_shows_the_reason_sentence_and_groups_its_works(self):
+        # 이유 한 줄: 채점기가 잡은 문장이 그대로 보인다(200자 자름). 묶인 줄: 작업을 나열하고
+        # 버튼 값은 묶인 세션 전부를 싣는다 — 판정은 전부에 간다. 근거 없는 옛 판정은 근거
+        # 없음 한 줄로 정직하게.
+        reasoned = cc.ProposedVerdict(
+            session_id="s1",
+            note="/vault/wiki/wiki-0700.md",
+            kind="contested",
+            at="t-1",
+            reason="wiki-0700 의 폴 접근이 낡았다고 봤어요 — 소켓을 닫고 재활용하니 그렇습니다.",
+        )
+        strings = card_i18n.STRINGS["ko"]
+        text = cv._review_tag_block(reasoned, strings)["text"]["text"]
+        self.assertIn(
+            strings["review_reason"].format(
+                reason="wiki-0700 의 폴 접근이 낡았다고 봤어요 — 소켓을 닫고 재활용하니 그렇습니다."
+            ),
+            text,
+        )
+
+        grouped = cc.ProposedVerdict(
+            session_id="s1",
+            note="/vault/wiki/wiki-2498.md",
+            kind="contested",
+            at="t-1",
+            reason="첫째 근거 문장입니다.",
+            sessions=["s1", "s2", "s3"],
+            works=["proj · 09-29 · 첫 작업", "", "proj · 09-30 · 셋째 작업"],
+        )
+        grouped_text = cv._review_tag_block(grouped, strings)["text"]["text"]
+        self.assertIn("이유: 첫째 근거 문장입니다.", grouped_text)
+        self.assertIn("작업: proj · 09-29 · 첫 작업; 세션 `s2` (세션 노트 없음); 외 1건", grouped_text)
+
+        blocks = cv.build_blocks([self._proposal()], reviews=[grouped], lang="ko")
+        row = next(
+            b
+            for b in blocks
+            if b["type"] == "actions"
+            and any(el.get("action_id", "").startswith("card:1:") for el in b["elements"])
+        )
+        value = json.loads(row["elements"][0]["value"])
+        self.assertEqual(
+            value,
+            {
+                "lane": "review",
+                "session": "s1",
+                "kind": "contested",
+                "sessions": ["s1", "s2", "s3"],
+                "note": "wiki-2498",
+            },
+        )
+
+        bare = cc.ProposedVerdict(
+            session_id="s1", note="/vault/wiki/wiki-0700.md", kind="contested", at="t-1"
+        )
+        bare_text = cv._review_tag_block(bare, strings)["text"]["text"]
+        self.assertIn(strings["review_reason_none"], bare_text)
+        self.assertIn("작업: 세션 `s1` (세션 노트 없음)", bare_text)
 
     def test_repair_and_review_buttons_carry_their_lane_values(self):
         # Every button's value is compact JSON naming its lane and what that lane needs —
@@ -618,7 +702,7 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertEqual(len(blocks), 47)
         self.assertLessEqual(len(blocks), cv.BLOCK_LIMIT)
         advice_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 3]
-        review_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 2]
+        review_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 4]
         self.assertEqual(len(advice_rows), 7)
         self.assertEqual(len(review_rows), 3)
         overflows = [
@@ -648,7 +732,7 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertEqual(len(blocks_full), 50)
         self.assertLessEqual(len(blocks_full), cv.BLOCK_LIMIT)
         self.assertIn("에이전트가 가른 것", _blocks_text(blocks_full))
-        review_rows_full = [b for b in blocks_full if b["type"] == "actions" and len(b["elements"]) == 2]
+        review_rows_full = [b for b in blocks_full if b["type"] == "actions" and len(b["elements"]) == 4]
         self.assertEqual(len(review_rows_full), 1)
         overflows_full = [
             b["elements"][0]["text"]
@@ -766,6 +850,8 @@ class MarkPressedParityTests(unittest.TestCase):
             ("advice", 3, "drop", None),
             ("review", 4, "do", None),
             ("review", 5, "drop", None),
+            ("review", 4, "delegate", None),
+            ("review", 5, "defer", None),
         ]
 
     def test_mark_pressed_equals_build_blocks_with_that_one_verdict(self):

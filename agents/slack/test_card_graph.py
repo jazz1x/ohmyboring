@@ -1587,11 +1587,18 @@ class LivePastVerdictsTests(unittest.TestCase):
 class LiveProposedTests(unittest.TestCase):
     """r3.1: the review lane's surviving mutations — the verdict_proposed rows come back
     contested first, newest first, capped at REVIEW_LIMIT. A mutant dropping the contested
-    sort, reversing the newest-first order, or removing the cap must each kill this."""
+    sort, reversing the newest-first order, or removing the cap must each kill this. The
+    rows now also carry the reason sentence, fold the same (note, kind) proposed by several
+    sessions into one grouped row, and leave a pair the owner held (보류) within the 이레
+    window off the card."""
 
     @staticmethod
-    def _events(rows: list[dict]):
+    def _events(rows: list[dict], held: list[dict] | None = None, seen: dict | None = None):
         def fake(event_name: str, since_hours: int):
+            if seen is not None:
+                seen[event_name] = since_hours
+            if event_name == "verdict_reviewed":
+                return held or []
             assert event_name == "verdict_proposed"
             return rows
 
@@ -1612,6 +1619,121 @@ class LiveProposedTests(unittest.TestCase):
             ["s-contested-5", "s-contested-4", "s-contested-2"],
         )
         self.assertEqual(len(out), card_live.REVIEW_LIMIT)
+
+    def test_the_hold_window_read_uses_the_ire_window(self):
+        seen: dict = {}
+        rows = [
+            {
+                "attributes": {"session_id": "s-1", "note": "/n1.md", "kind": "used"},
+                "observed_at": "2026-09-29T00:00:00+00:00",
+            }
+        ]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows, seen=seen)):
+            card_live._live_proposed(24)
+        self.assertEqual(seen, {"verdict_proposed": 24, "verdict_reviewed": 168})
+
+    def test_the_reason_sentence_rides_the_row_and_old_rows_say_none(self):
+        rows = [
+            {
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-0700.md",
+                    "kind": "contested",
+                    "reason": "채점기가 잡은 문장입니다.",
+                },
+                "observed_at": "2026-09-29T00:00:00+00:00",
+            },
+            {
+                "attributes": {"session_id": "s-2", "note": "/vault/wiki/wiki-0701.md", "kind": "used"},
+                "observed_at": "2026-09-28T00:00:00+00:00",
+            },
+        ]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows)):
+            out = card_live._live_proposed(24)
+        self.assertEqual(out[0].reason, "채점기가 잡은 문장입니다.")
+        self.assertEqual(out[1].reason, "")
+
+    def test_the_same_note_judged_the_same_way_folds_into_one_row(self):
+        rows = [
+            {
+                "attributes": {
+                    "session_id": "s-new",
+                    "note": "/vault/wiki/wiki-2498.md",
+                    "kind": "contested",
+                    "reason": "첫째 근거 문장입니다.",
+                },
+                "observed_at": "2026-09-30T00:00:00+00:00",
+            },
+            {
+                "attributes": {
+                    "session_id": "s-old",
+                    "note": "/vault/wiki/wiki-2498.md",
+                    "kind": "contested",
+                },
+                "observed_at": "2026-09-29T00:00:00+00:00",
+            },
+            {
+                "attributes": {"session_id": "s-other", "note": "/vault/wiki/wiki-2498.md", "kind": "used"},
+                "observed_at": "2026-09-28T00:00:00+00:00",
+            },
+        ]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows)):
+            out = card_live._live_proposed(24)
+        # contested가 머리고, 같은 (노트, 판정) 묶음이 한 줄 — 작업만 다륾던 두 줄이 사라졌다
+        self.assertEqual([p.session_id for p in out], ["s-new", "s-other"])
+        grouped = out[0]
+        self.assertEqual(grouped.sessions, ["s-new", "s-old"])
+        self.assertEqual(grouped.reason, "첫째 근거 문장입니다.")
+        ungrouped = out[1]
+        self.assertEqual(ungrouped.sessions, [])
+        self.assertEqual(ungrouped.reason, "")
+
+    def test_a_pair_held_within_the_ire_window_stays_off_the_card(self):
+        rows = [
+            {
+                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-2498.md", "kind": "contested"},
+                "observed_at": "2026-09-30T00:00:00+00:00",
+            },
+            {
+                "attributes": {"session_id": "s-2", "note": "/vault/wiki/wiki-2498.md", "kind": "used"},
+                "observed_at": "2026-09-29T00:00:00+00:00",
+            },
+        ]
+        held = [
+            {
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-2498.md",
+                    "proposed_kind": "contested",
+                    "card_ts": "1.0",
+                    "sessions": ["s-1"],
+                    "choice": "defer",
+                },
+                "observed_at": "2026-09-30T12:00:00+00:00",
+            }
+        ]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows, held=held)):
+            out = card_live._live_proposed(24)
+        # 보류한 짝(틀린 노트)만 빠지고, 다른 판정(쓴 노트)은 그대로 오른다
+        self.assertEqual([p.kind for p in out], ["used"])
+
+        # 판정을 남긴 줄(agree/flip/delegate)은 억제하지 않는다 — 보류 사걸만 본다
+        judged = [{**held[0], "attributes": {**held[0]["attributes"], "choice": "agree"}}]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows, held=judged)):
+            out = card_live._live_proposed(24)
+        self.assertEqual([p.kind for p in out], ["contested", "used"])
+
+    def test_a_malformed_hold_row_raises_not_skips(self):
+        rows = [
+            {
+                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-2498.md", "kind": "contested"},
+                "observed_at": "2026-09-30T00:00:00+00:00",
+            }
+        ]
+        held = [{"attributes": {"choice": "defer", "note": "/vault/wiki/wiki-2498.md"}}]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows, held=held)):
+            with self.assertRaises(ValueError):
+                card_live._live_proposed(24)
 
     def test_a_repeated_row_shows_once_with_the_note_title_and_the_session_note(self):
         with tempfile.TemporaryDirectory() as vault:
