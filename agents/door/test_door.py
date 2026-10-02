@@ -1120,6 +1120,274 @@ rules:
         self.assertEqual(self._shadow_events(), [], "회상·다른 도구엔 그림자가 따라붙지 않는다")
 
 
+class RememberWriterSwitchTests(unittest.TestCase):
+    """E3c-1 — remember 쓰기 주인 스위치 (DOOR_REMEMBER_WRITER).
+
+    기본(engine)이면 remember 는 프록시 그대로(엔진 답 바이트, 그림자까지 — RememberShadowTests).
+    python 이면 문이 엔진에 넘기지 않고 문 안의 쓰기 글(remember_writer.run_write)이 결정·쓰고
+    엔진 답 모양(JSON-RPC 봉투 / RememberResp 다섯 칸)으로 답한다. run_write 는 여기서 목으로
+    두고 선로(스위치·봉투·상태 부호)만 본다 — 진짜 쓰기 길은 remember/test_writer.py 와
+    scripts/e3c1-verify.py(일회용 스키마+엔진 동기 0 변경)가 본다.
+    """
+
+    _ARGS = {"title": "스위치 시험", "body": "본문", "omb_session_id": "sess-switch"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved = {
+            name: os.environ.get(name)
+            for name in (
+                "DOOR_UPSTREAM",
+                "DOOR_PG_DSN",
+                "DOOR_REMEMBER_WRITER",
+                "BORING_VAULT_DIR",
+                "BORING_EVENT_SINK",
+                "BORING_EVENT_LOG",
+                "BORING_OWNER_TOKEN",
+            )
+        }
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), StubHandler)
+        cls.stub_thread = threading.Thread(target=cls.stub.serve_forever, daemon=True)
+        cls.stub_thread.start()
+        os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{cls.stub.server_address[1]}"
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                status, _, _ = _req(cls.door_port, "GET", "/health")
+                if status == 200:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+        cls.stub.shutdown()
+        cls.stub.server_close()
+        cls._tmp.cleanup()
+        for name, value in cls._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def setUp(self):
+        vault = Path(self._tmp.name) / "vault"
+        if vault.exists():
+            shutil.rmtree(vault)
+        (vault / "wiki").mkdir(parents=True, exist_ok=True)
+        os.environ["BORING_VAULT_DIR"] = str(vault)
+        os.environ["BORING_EVENT_SINK"] = "spool"
+        os.environ["BORING_EVENT_LOG"] = str(Path(self._tmp.name) / f"events-{time.time_ns()}.ndjson")
+        os.environ["DOOR_PG_DSN"] = "postgresql://unused/unused"  # run_write 는 목으로 둔다
+        StubHandler.seen_bodies.clear()
+
+    def tearDown(self):
+        os.environ.pop("DOOR_REMEMBER_WRITER", None)
+
+    def _mcp_payload(self) -> bytes:
+        return json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "remember", "arguments": self._ARGS},
+            }
+        ).encode()
+
+    def _written(self):
+        return door.remember_writer.Written(
+            wiki_id="wiki-0001",
+            source_path="/vault/wiki/wiki-0001.md",
+            message="remembered → wiki/wiki-0001.md · chunks 1 · graph(tools 0 concepts 0 claims 0) — recallable now",
+            duplicate=None,
+            supersedes=0,
+            unknown=0,
+        )
+
+    def test_default_writer_is_engine_and_remember_proxies(self):
+        os.environ.pop("DOOR_REMEMBER_WRITER", None)
+        self.assertEqual(door._remember_writer(), "engine")
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/remember",
+            body=json.dumps(self._ARGS).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REMEMBER_HTTP_BODY, "기본은 엔진 답 바이트 그대로")
+        self.assertEqual(len(StubHandler.seen_bodies), 1, "기본은 엔진에 본문을 넘긴다")
+
+    def test_unknown_switch_value_falls_back_to_engine(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python2"
+        self.assertEqual(door._remember_writer(), "engine")
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/remember",
+            body=json.dumps(self._ARGS).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(body, REMEMBER_HTTP_BODY)
+
+    def test_python_writer_mcp_answers_without_upstream(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        with mock.patch.object(door.remember_writer, "run_write", return_value=self._written()) as run:
+            status, body, content_type = _req(
+                self.door_port,
+                "POST",
+                "/mcp",
+                body=self._mcp_payload(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(StubHandler.seen_bodies, [], "켜면 엔진에 remember 가 안 간다")
+        self.assertEqual(content_type, "application/json")
+        answer = json.loads(body)
+        self.assertEqual(answer["jsonrpc"], "2.0")
+        self.assertEqual(answer["id"], 7, "요청 id 를 그대로 돌려준다")
+        self.assertEqual(
+            answer["result"],
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "remembered → wiki/wiki-0001.md · chunks 1 · "
+                        "graph(tools 0 concepts 0 claims 0) — recallable now",
+                    }
+                ],
+                "isError": False,
+            },
+        )
+        request, deps = run.call_args.args
+        self.assertEqual(request.route, "mcp")
+        self.assertEqual(request.arguments["title"], "스위치 시험")
+        self.assertEqual(request.omb_session_id, "sess-switch")
+        self.assertFalse(deps.is_owner)
+
+    def test_python_writer_http_answers_remember_resp_shape(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        with mock.patch.object(door.remember_writer, "run_write", return_value=self._written()):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/remember",
+                body=json.dumps(self._ARGS).encode(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(StubHandler.seen_bodies, [])
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body),
+            {
+                "source_path": "/vault/wiki/wiki-0001.md",
+                "wiki_id": "wiki-0001",
+                "duplicate": None,
+                "supersedes": 0,
+                "unknown": 0,
+            },
+        )
+
+    def test_python_writer_skipped_duplicate_answer(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        skipped = door.remember_writer.Written(
+            wiki_id="wiki-0099",
+            source_path="/vault/wiki/wiki-0099.md",
+            message="skipped — duplicate of /vault/wiki/wiki-0099.md",
+            duplicate="/vault/wiki/wiki-0099.md",
+            supersedes=0,
+            unknown=0,
+        )
+        with mock.patch.object(door.remember_writer, "run_write", return_value=skipped):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/remember",
+                body=json.dumps(self._ARGS).encode(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body),
+            {
+                "source_path": "/vault/wiki/wiki-0099.md",
+                "wiki_id": "wiki-0099",
+                "duplicate": "/vault/wiki/wiki-0099.md",
+                "supersedes": 0,
+                "unknown": 0,
+            },
+        )
+
+    def test_python_writer_refused_maps_engine_error_shapes(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        refused = door.remember_writer.Refused(-32602, "missing argument: title")
+        with mock.patch.object(door.remember_writer, "run_write", return_value=refused):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/remember",
+                body=json.dumps(self._ARGS).encode(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(status, 400, "-32602 는 400 — serve/http.rs:690-696")
+        self.assertEqual(json.loads(body), {"error": "missing argument: title"})
+        with mock.patch.object(
+            door.remember_writer,
+            "run_write",
+            return_value=door.remember_writer.Refused(-32603, "PII gate blocked by rule 'x'"),
+        ):
+            mcp_status, mcp_body, _ = _req(
+                self.door_port,
+                "POST",
+                "/mcp",
+                body=self._mcp_payload(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(mcp_status, 200, "MCP 거절도 JSON-RPC 봉투로 200 — handle_mcp")
+        answer = json.loads(mcp_body)
+        self.assertEqual(answer["id"], 7)
+        self.assertEqual(answer["error"], {"code": -32603, "message": "PII gate blocked by rule 'x'"})
+        self.assertNotIn("result", answer)
+
+    def test_python_writer_raising_is_engine_error_never_silent_200(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        with mock.patch.object(door.remember_writer, "run_write", side_effect=RuntimeError("boom")):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/remember",
+                body=json.dumps(self._ARGS).encode(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(status, 500)
+        self.assertEqual(list(json.loads(body)), ["error"])
+
+    def test_python_writer_without_dsn_is_503(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        os.environ.pop("DOOR_PG_DSN", None)
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/remember",
+            body=json.dumps(self._ARGS).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body), {"error": "store not configured"})
+
+
 class ActiveProjectsRouteTests(unittest.TestCase):
     """GET /projects?active_days= through the real door app — stub rows, no DB (AC1)."""
 

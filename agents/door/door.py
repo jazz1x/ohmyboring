@@ -16,7 +16,7 @@ prepended (query 안의 wiki-NNNN 마다 볼트 노트 블록이 content 앞에 
 검색이라 번호를 못 풀어 문이 이름을 푼다; see _augment_mcp_recall). Anything that is
 not exactly that gate — no numbers, another tool, isError, non-JSON, a stream —
 travels byte-for-byte. A POST /mcp tools/call `remember` (and POST /remember)
-also travels byte-for-byte — after the answer leaves, a background shadow runs
+travels byte-for-byte — after the answer leaves, a background shadow runs
 the same request through the python write path without writing and asks whether
 python would make the same decision the engine made (PII gate block/mask, the
 duplicate gate's five branches and the replace scoring, owner refusal), then —
@@ -26,7 +26,11 @@ mismatch carries a reason that sorts it into python-defect / engine-difference /
 unknown (E3a-2; a skipped request is compared by decision only — nothing was
 written, so there are no fields to match; the response never waits on the shadow
 and a shadow failure cannot change the answer — one log line and a status=error
-event). The duplicate scan's vault read runs off an in-process note index
+event). The one switch on this behavior: DOOR_REMEMBER_WRITER=python hands the
+remember decision·write·answer to the python write path inside the door
+(E3c-1, ohmyboring.remember.writer — the same decision chain the shadow
+validates, writing for real through a writable DOOR_PG_DSN; default engine
+leaves every byte above untouched). The duplicate scan's vault read runs off an in-process note index
 (E3b-2): prefilled in the background at startup (the log line quotes how long
 the warm-up took), refreshed per write by a directory listing and stat only,
 re-reading and re-parsing just the changed notes; until the prefill finishes the
@@ -111,6 +115,7 @@ from ohmyboring.remember import graph as remember_graph
 from ohmyboring.remember import index as remember_index
 from ohmyboring.remember import pii as remember_pii
 from ohmyboring.remember import shadow as remember_shadow
+from ohmyboring.remember import writer as remember_writer
 from ohmyboring.result import Either, Err, Ok
 from ohmyboring.search import hits as search_hits
 from ohmyboring.search import pg as search_pg
@@ -223,6 +228,14 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
     query = request.url.query
     url = f"{_upstream()}{request.url.path}" + (f"?{query}" if query else "")
     body = await request.body()
+    # 쓰기 주인 스위치(E3c-1): python 이면 remember 는 엔진에 안 넘기고 문 안에서 결정·쓰고 답한다.
+    # 엔진(기본)이면 아래 분기는 통과해 바이트 그대로 프록시+그림자가 탄다.
+    if request.method == "POST" and request.url.path == "/mcp" and _remember_writer() == _WRITER_PYTHON:
+        if (arguments := _mcp_remember_arguments(body)) is not None:
+            return await _remember_python(request, body, arguments, "mcp")
+    if request.method == "POST" and request.url.path == "/remember" and _remember_writer() == _WRITER_PYTHON:
+        if (arguments := _http_remember_arguments(body)) is not None:
+            return await _remember_python(request, body, arguments, "remember")
     headers = {
         name: request.headers[name]
         for name in ("content-type", "accept", "mcp-session-id", "x-request-id", _OWNER_TOKEN_HEADER)
@@ -500,6 +513,105 @@ def _remember_shadow_task(route: str, arguments: dict, status: int, body: bytes,
     event_log.try_append_event(
         "door", remember_shadow.EVENT_NAME, event.status, **remember_shadow.event_payload(event)
     )
+
+
+#: remember 쓰기 주인 스위치(E3c-1) — engine(기본)이면 프록시+그림자 그대로, python 이면
+#: 문 안의 파이썬 쓰기 길(ohmyboring.remember.writer)이 결정·쓰고 답한다. 운영 기본은
+#: engine — 이 조각에서 켜지 않는다(켜기는 오케스트레이터가 검증 뒤에 한다).
+_REMEMBER_WRITER_ENV = "DOOR_REMEMBER_WRITER"
+_WRITER_PYTHON = "python"
+
+
+def _remember_writer() -> str:
+    """쓰기 주인 — python 만 켬, 그 밖의 값·부재는 전부 engine(실수로 켜지지 않게)."""
+    return _WRITER_PYTHON if os.environ.get(_REMEMBER_WRITER_ENV) == _WRITER_PYTHON else "engine"
+
+
+async def _remember_python(request: Request, body: bytes, arguments: dict, route: str) -> Response:
+    """스위치 켬 — remember 를 엔진에 넘기지 않고 파이썬이 결정·쓰고 엔진 답 모양으로 답한다.
+
+    쓰기 길은 응답을 기다리는 주 요청 안에서 돈다(그림자와 달리). 사건 기록 실패는 응답을
+    바꾸지 않는다 — 그림자와 같은 규약. PII 규칙을 못 읽으면 쓰지 않고 닫는다(엔진도 규칙
+    깨진 볼트에서는 서빙을 못 선다 — serve.rs:1351)."""
+    if not os.environ.get("DOOR_PG_DSN"):
+        return JSONResponse({"error": "store not configured"}, status_code=503)
+    vault_dir = _vault_dir()
+    match remember_pii.load_from_vault(vault_dir):
+        case Err(reason):
+            print(f"[door] remember writer: pii rules unreadable: {reason}", file=sys.stderr, flush=True)
+            outcome: remember_writer.WriteOutcome = remember_writer.Refused(-32603, f"pii rules: {reason}")
+        case Ok(scanner):
+            deps = _writer_deps(request, vault_dir, scanner)
+            try:
+                outcome = await asyncio.to_thread(
+                    remember_writer.run_write,
+                    remember_writer.WriteRequest(
+                        route=route, arguments=arguments, omb_session_id=_omb_session_id(arguments)
+                    ),
+                    deps,
+                )
+            except Exception as e:  # noqa: BLE001 — 예상 못한 고장도 응답은 준다(엔진 -32603 과 같이)
+                print(f"[door] remember writer failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                outcome = remember_writer.Refused(-32603, f"{type(e).__name__}: {e}")
+    return _remember_outcome_response(body, route, outcome)
+
+
+def _writer_deps(
+    request: Request, vault_dir: str, scanner: remember_pii.PiiScanner | None
+) -> remember_writer.WriterDeps:
+    """쓰기 길에 싣는 면 — 문의 진짜(쓰기 가능 DSN·어댑터·색인). 시험은 문 경계를 목으로 둔다."""
+    return remember_writer.WriterDeps(
+        vault_dir=vault_dir,
+        connect=lambda: psycopg.connect(os.environ["DOOR_PG_DSN"]),
+        read_note=vault_notes.read_note,
+        split_frontmatter=vault_note.split_frontmatter,
+        list_notes=lambda: _list_wiki_notes(vault_dir),
+        pii_scanner=scanner,
+        is_owner=_standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
+        nearest_document=_nearest_document,
+        embed=remember_writer.embed_via_adapter,
+        append_event=event_log.try_append_event,
+        note_index=getattr(app.state, "note_index", None),
+        embed_dim=boring_config.embed_dim(),
+    )
+
+
+def _remember_outcome_response(body: bytes, route: str, outcome: remember_writer.WriteOutcome) -> Response:
+    """쓰기 길의 값을 엔진 답 모양으로 입힌다 — MCP 는 JSON-RPC 봉투(HTTP 200), HTTP 는
+    RememberResp 다섯 칸(400/500 은 -32602/-32603 — serve/http.rs:682-704)."""
+    request_id = None
+    if route == "mcp":
+        try:
+            request_id = json.loads(body).get("id")  # 본문은 이미 tools/call remember 로 본 것
+        except (ValueError, UnicodeDecodeError, AttributeError):
+            request_id = None
+    if isinstance(outcome, remember_writer.Written):
+        if route == "mcp":
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {"content": [{"type": "text", "text": outcome.message}], "isError": False},
+                }
+            )
+        return JSONResponse(
+            {
+                "source_path": outcome.source_path,
+                "wiki_id": outcome.wiki_id,
+                "duplicate": outcome.duplicate,
+                "supersedes": outcome.supersedes,
+                "unknown": outcome.unknown,
+            }
+        )
+    if route == "mcp":
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": outcome.code, "message": outcome.message},
+            }
+        )
+    return JSONResponse({"error": outcome.message}, status_code=400 if outcome.code == -32602 else 500)
 
 
 def _load_routes() -> dict[str, list[str]]:

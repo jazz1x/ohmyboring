@@ -117,6 +117,17 @@ def embed_model() -> str:
     return "bge-m3"
 
 
+def embed_dim() -> int:
+    """Embedding vector width — the engine's policy SSOT (boring.json llm.embed_dim → 1024).
+
+    The door's python remember writer checks every embedding against this before it
+    reaches the vector(dim) columns (drudge store.rs checked_vector parity)."""
+    dim = _boring_llm().get("embed_dim")
+    if isinstance(dim, int) and not isinstance(dim, bool) and dim > 0:
+        return dim
+    return 1024
+
+
 def is_local_llm(url: str | None = None) -> bool:
     host = urlparse(url or llm_base_url()).hostname or ""
     return host.lower() in ("localhost", "127.0.0.1", "host.docker.internal")
