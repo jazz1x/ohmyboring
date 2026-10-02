@@ -1102,7 +1102,14 @@ class ElapsedFieldsTests(unittest.TestCase):
             graph=lambda paths: _snapshot(GRAPH_EXPECTED_EDGES, GRAPH_NEW_CLAIMS),
         )
         payload = event_payload(event)
-        for key in ("elapsed_total_s", "elapsed_embedding_s", "elapsed_db_s", "edges", "seal"):
+        for key in (
+            "elapsed_total_s",
+            "elapsed_embedding_s",
+            "elapsed_db_s",
+            "elapsed_vault_s",
+            "edges",
+            "seal",
+        ):
             self.assertIn(key, payload)
         self.assertEqual(payload["edges"], "ok")
         self.assertEqual(payload["seal"], "ok")

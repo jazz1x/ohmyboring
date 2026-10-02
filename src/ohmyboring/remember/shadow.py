@@ -40,8 +40,7 @@
   graph-unchecked (다): <사유>         — 그래프 조회 자체를 못 함(DSN 부재 등)
 
 사건에는 어긋남과 별개로 소요 시간이 항상 찍힌다 — elapsed_total_s·elapsed_embedding_s
-(프로브)·elapsed_db_s(그래프 조회)를 나눠 적는다(2026-10-02 문 수정 뒤 첫 운영 건: 응답
-0.67s, 그림자 5.7s — 어디서 쓰는지 미확인이던 것의 근거).
+(프로브)·elapsed_db_s(그래프 조회)·elapsed_vault_s(볼트 목록·노트 읽기)를 나눠 적는다.
 
 실패는 전부 값(ShadowEvent status=error 의 사유)으로 돌아오고, 예외는 문 핸들러 경계에서
 한 번 접는다.
@@ -161,6 +160,7 @@ class ShadowEvent:
     elapsed_total_s: float = 0.0
     elapsed_embedding_s: float = 0.0
     elapsed_db_s: float = 0.0
+    elapsed_vault_s: float = 0.0
 
 
 def wiki_stem(source_path: str) -> str | None:
@@ -864,6 +864,7 @@ def _field_compare(
 class _Timers:
     embedding: float = 0.0
     db: float = 0.0
+    vault: float = 0.0
 
 
 def _timed(fn: Callable[..., Any], timers: _Timers, attr: str) -> Callable[..., Any]:
@@ -1112,12 +1113,18 @@ def run_shadow(request: ShadowRequest) -> ShadowEvent:
         request = replace(request, nearest_document=_timed(request.nearest_document, timers, "embedding"))
     if request.read_graph is not None:
         request = replace(request, read_graph=_timed(request.read_graph, timers, "db"))
+    request = replace(
+        request,
+        read_note=_timed(request.read_note, timers, "vault"),
+        list_notes=_timed(request.list_notes, timers, "vault"),
+    )
     event = _run(request)
     return replace(
         event,
         elapsed_total_s=round(time.monotonic() - started, 3),
         elapsed_embedding_s=round(timers.embedding, 3),
         elapsed_db_s=round(timers.db, 3),
+        elapsed_vault_s=round(timers.vault, 3),
     )
 
 
@@ -1129,6 +1136,7 @@ def event_payload(event: ShadowEvent) -> dict[str, Any]:
         "elapsed_total_s": event.elapsed_total_s,
         "elapsed_embedding_s": event.elapsed_embedding_s,
         "elapsed_db_s": event.elapsed_db_s,
+        "elapsed_vault_s": event.elapsed_vault_s,
     }
     if event.source_path is not None:
         payload["source_path"] = event.source_path
