@@ -387,7 +387,7 @@ class RegisterParityTests(unittest.TestCase):
                 "other project decision stays out of the omb filter",
                 "decision",
                 "certain",
-                "2 days",
+                "2 days 6 hours",
                 False,
                 None,
             ),
@@ -487,6 +487,17 @@ class RegisterParityTests(unittest.TestCase):
                 "risk",
                 "likely",
                 "4 days 6 hours",
+                False,
+                "[1,0,0,0]",
+            ),
+            (
+                "wiki/wiki-0003.md",
+                "subj-rec-i",
+                "incident",
+                "short label",
+                "risk",
+                "likely",
+                "8 days",
                 False,
                 "[1,0,0,0]",
             ),
@@ -592,6 +603,15 @@ class RegisterParityTests(unittest.TestCase):
         )
         self.assertEqual(out.answer, expected)
         self.assertEqual(out.sources, sorted({row[0] for row in oracle_rows}))
+        # 렌더 계약 칸을 문자열 그대로 고정 — render_register 자체를 변이핧여도 잡히게
+        # (기대값을 같은 함수로 만들면 불리언 모양 같은 변이가 살아남는다).
+        self.assertEqual(
+            out.answer,
+            "Showing 2 of 2 matching claims (limit_applied=false).\n"
+            "* subj-dec — decided: migrated the register reads to python code (kind=decision, confidence=certain)\n"
+            "* subj-oth — decided: other project decision stays out of the omb filter (kind=decision, confidence=certain)",
+        )
+        self.assertEqual(out.sources, ["subj-dec", "subj-oth"])
 
     # ── risks / next_actions — 종류 필터 ─────────────────────────────────────
     def test_risks_kinds_filter_matches_oracle(self):
