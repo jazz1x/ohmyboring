@@ -14,6 +14,7 @@ Mutation targets: 바뀐 노트를 다시 읽지 않는 변이(옛 머리말로 
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -210,6 +211,16 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(changed.omb_session_id, "sess-9")
         self.assertGreater(result.parse_s, 0, "다시 파싱한 시간은 parse 칸에 잰다")
         self.assertGreater(result.read_s, 0, "다시 읽은 시간은 vault 칸에 잰다")
+
+    def test_sync_rereads_a_same_size_edit(self):
+        path = self.fx.wiki / "wiki-100.md"
+        before = path.stat()
+        _write(self.fx.wiki, "wiki-100", "배포 절차", "배포 본문", session="sess-2")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+        self.assertEqual(path.stat().st_size, before.st_size)
+        result = self.index.sync()
+        assert result is not None
+        self.assertEqual(dict(result.entries)["/vault/wiki/wiki-100.md"].omb_session_id, "sess-2")
 
     def test_sync_without_changes_rereads_nothing(self):
         first = self.index.sync()
