@@ -90,9 +90,7 @@ def _recall_block(recall_core: Any, uptake_core: Any, message: str, session_id: 
     # over, the rest are controls the engine fetches but never sees. The query rides the
     # door — with related=1 the door passes it to the engine verbatim (E2a).
     try:
-        items = BoringStore(
-            engine_url=os.environ["BORING_URL"], door_url=os.environ["BORING_DOOR_URL"]
-        ).search(
+        items = BoringStore(door_url=os.environ["BORING_DOOR_URL"]).search(
             ("boring",),
             query=prompt,
             limit=keep,

@@ -48,7 +48,7 @@ if [ "${BORING_WIRE:-1}" = 1 ]; then
        --install \
        --boring-home "$BORING_HOME" \
        --server-name ohmyboring \
-       --server-url "http://localhost:7700/mcp"; then
+       --server-url "http://localhost:7710/mcp"; then
     say "Adapters wired. Check .omb-bak files next to any updated agent settings."
   else
     warn "Could not wire some adapters automatically — add hooks/MCP settings manually (see README 'Agent adapters')."

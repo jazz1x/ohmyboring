@@ -59,7 +59,7 @@ if [ -n "${BORING_CORE_ONLY:-}" ] || ! docker image inspect "$HERMES_IMAGE" >/de
   ⓘ hermes-agent image not found — starting CORE ONLY (ohmyboring RAG engine). `make ask` works.
     The optional Slack/agent layer is third-party — build the `hermes-agent` image per its
     official docs (https://hermes-agent.org), point its ~/.hermes/config.yaml at ohmyboring's MCP
-    (http://boring-drudge:7700/mcp), then re-run `make up`. See README "Optional: hermes-agent".
+     (http://boring-door:7710/mcp), then re-run `make up`. See README "Optional: hermes-agent".
     Set BORING_CORE_ONLY=1 to skip this message intentionally.
 MSG
   fi
@@ -116,6 +116,6 @@ cat <<'EOF'
   make sync          deterministic re-ingest of the vault (embed→graph→relates_to)
   make logs          engine logs
   The core self-augmentation loop runs without hermes-agent. If built, hermes-agent can drive
-  ohmyboring over MCP (:7700/mcp) for advanced orchestration, recall, and skill creation.
+  ohmyboring over MCP (:7710/mcp) for advanced orchestration, recall, and skill creation.
   (To use Slack, fill in tokens in .env and run docker compose up -d hermes-agent)
 EOF

@@ -27,13 +27,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 import markers
 
 from ohmyboring import config as boring_config
-from ohmyboring import config as omb_env
 from ohmyboring.adapters import events as event_log
 from ohmyboring.adapters import workflow_contract
 from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
 from ohmyboring.result import Err, Ok
 
-BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")  # skip small sessions (distill would SKIP anyway)

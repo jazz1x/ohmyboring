@@ -51,7 +51,6 @@ from ohmyboring.adapters import workflow_contract
 from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
 from ohmyboring.result import Err, Ok
 
-BORING_URL = omb_env.drudge_url()
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")

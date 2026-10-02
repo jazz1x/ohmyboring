@@ -15,7 +15,7 @@ If you prefer to wire it yourself, create or edit `~/.cursor/mcp.json`:
   "mcpServers": {
     "ohmyboring": {
       "type": "http",
-      "url": "http://localhost:7700/mcp"
+      "url": "http://localhost:7710/mcp"
     }
   }
 }

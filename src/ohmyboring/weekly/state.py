@@ -44,7 +44,7 @@ class WeeklyState(TypedDict, total=False):
     deliver: bool
     fmt: str
     now: datetime
-    engine_url: str
+    door_url: str
     vault_dir: str
     split_frontmatter: Callable[[str], tuple[str, str] | None]
     days: list[tuple[str, Any]]

@@ -23,7 +23,6 @@ from ohmyboring.adapters import workflow_contract
 from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
 from ohmyboring.result import Err, Ok
 
-BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias
 KIMI_HOME = os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code")
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 HOOK = os.path.join(BORING_HOME, "agents", "kimi", "distill-session.py")

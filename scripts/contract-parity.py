@@ -33,6 +33,7 @@ SERVE_RS = os.path.join(ROOT, "drudge", "src", "serve.rs")
 GET_SHAPES = {
     "/health": ("build_sha", "compact_failure", "corpus_count", "db_healthy"),
     "/audit": (),
+    "/events": (),
     "/projects": (),
     "/recall-label-stats": (),
 }
@@ -56,12 +57,26 @@ def live_tools(base: str) -> dict:
 
 
 def routes_from_source() -> list[str]:
-    """`.route("/path", get(..).post(..))` → ["GET /path", "POST /path"]."""
+    """`.route("/path", get(..).post(..))` → ["GET /path", "POST /path"].
+
+    The router also declares multi-line routes (`.route(\n  "/events",\n  get(..).post(..),\n)`),
+    so this scans each `.route(` to its matching close paren instead of assuming one-line calls —
+    a regex on a single line silently dropped /events, /recall-labels and /otel-events (E4-α).
+    """
     text = open(SERVE_RS, encoding="utf-8").read()
     out = set()
-    for path, handlers in re.findall(r'\.route\("([^"]+)",\s*([^)]*\)(?:\.[a-z]+\([^)]*\))*)', text):
-        for method in re.findall(r"\b(get|post|put|delete|patch)\(", handlers):
-            out.add(f"{method.upper()} {path}")
+    for call in re.finditer(r"\.route\(", text):
+        depth, i = 1, call.end()
+        while depth and i < len(text):
+            depth += text[i] == "("
+            depth -= text[i] == ")"
+            i += 1
+        block = text[call.end() : i]
+        path = re.search(r'"([^"]+)"', block)
+        if path is None:
+            continue
+        for method in re.findall(r"\b(get|post|put|delete|patch)\(", block):
+            out.add(f"{method.upper()} {path.group(1)}")
     return sorted(out)
 
 
@@ -136,6 +151,14 @@ def main() -> int:
         snapshot["get_shapes"] = {
             p: {"required": s["required"], "optional": s["optional"]} for p, s in actual["get_shapes"].items()
         }
+        # door_routes names the door's own native handlers — the engine cannot report them.
+        # Carry the previous snapshot's list over so a re-snapshot never drops the door's table.
+        try:
+            previous = json.load(open(args.file, encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+        if "door_routes" in previous:
+            snapshot["door_routes"] = previous["door_routes"]
         with open(args.file, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False, indent=2, sort_keys=True)
             f.write("\n")

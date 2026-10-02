@@ -139,11 +139,12 @@ def read_note_text(note_path: str) -> str | None:
 
 
 def _live_events(event_name: str, since_hours: float) -> list[dict]:
-    """GET /events one name at a time — the engine's own route, the same read card_live
-    makes. A dead engine or a bad body is an empty list here: the caller turns the missing
+    """GET /events one name at a time — the same read card_live makes, through the door
+    like every other consumer (E4-α; /events is in the door's proxy table now). A dead
+    engine/door or a bad body is an empty list here: the caller turns the missing
     사건 into a DelegationFailed, so the press records the fact instead of crashing."""
     url = (
-        f"{omb_env.drudge_url()}/events?event={urllib.parse.quote(event_name)}"
+        f"{omb_env.door_url()}/events?event={urllib.parse.quote(event_name)}"
         f"&since_hours={since_hours}&limit={_EVENTS_LIMIT}"
     )
     try:

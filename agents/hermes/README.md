@@ -51,8 +51,8 @@ The briefing scripts use:
 Preview the exact Slack-bound message before a live briefing:
 
 ```bash
-BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
-BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/weekly-briefing.py
+python3 agents/hermes/briefing.py
+python3 agents/hermes/weekly-briefing.py
 ```
 
 Preview the exact Block Kit payload the weekly card posts (what `weekly_card.py` sends to Slack):
@@ -64,7 +64,7 @@ BORING_BRIEFING_FORMAT=blocks python3 agents/hermes/weekly-briefing.py
 Preview the future Block Kit payload for Slack's Block Kit Builder or a `blocks`-aware adapter:
 
 ```bash
-BORING_BRIEFING_FORMAT=blocks BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
+BORING_BRIEFING_FORMAT=blocks python3 agents/hermes/briefing.py
 ```
 
 ## Installation

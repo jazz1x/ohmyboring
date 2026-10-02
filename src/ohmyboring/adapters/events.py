@@ -20,7 +20,21 @@ from typing import Any
 DEFAULT_EVENT_LOG = "~/.cache/oh-my-boring/events.ndjson"
 DEFAULT_RECENT_HOURS = 24
 DEFAULT_SERVICE_NAMESPACE = "oh-my-boring"
-DEFAULT_ENGINE_URL = "http://127.0.0.1:7700"
+
+
+def _door_url() -> str:
+    """문(:7710) 주소 — ohmyboring.config.door_url 의 규칙을 그대로 옮긴 것.
+
+    이 모듈은 doctor 가 소스 트리에서 벌거벗은 파이썬으로 직접 실행한다(third-party ·
+    ohmyboring 패키지 임포트 불가). 규칙은 config.door_url 가 바뀌면 여기도 같이 —
+    adapters/test_events.py 의 door_url 대치 시험이 둘을 못 박는다(E4-α: 사건 싱크도
+    문 하나를 지난다 — 명시적 BORING_EVENT_SINK_URL 은 그대로 윗사람이다).
+    """
+    if os.environ.get("BORING_IN_CONTAINER", "").lower() in ("1", "true", "yes"):
+        default = "http://boring-door:7710"
+    else:
+        default = "http://localhost:7710"
+    return os.environ.get("BORING_DOOR_URL") or default
 
 
 def event_log_path() -> Path:
@@ -197,8 +211,7 @@ def _event_sink_url() -> str | None:
     explicit = os.environ.get("BORING_EVENT_SINK_URL")
     if explicit:
         return explicit
-    base = os.environ.get("BORING_URL") or DEFAULT_ENGINE_URL
-    return f"{base.rstrip('/')}/events"
+    return f"{_door_url().rstrip('/')}/events"
 
 
 def _event_sink_mode() -> str:

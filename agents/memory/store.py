@@ -29,7 +29,7 @@ Coverage on purpose, each a visible raise rather than a silent fallback:
   - delete / list_namespaces / ttl / index → refused or next wheel, never faked
 
 Run against the parity copy only: scripts/parity-harness.sh up, then
-BoringStore(engine_url="http://127.0.0.1:7701", door_url="http://127.0.0.1:7711").
+BoringStore(door_url="http://127.0.0.1:7711").
 """
 
 from __future__ import annotations
@@ -140,10 +140,15 @@ def _claim_source(door_url: str, subject: str) -> dict[str, Any] | None:
 
 
 class BoringStore(BaseStore):
-    """engine_url and door_url, no defaults — the caller names both ends explicitly."""
+    """door_url only, no default — the caller names the door.
 
-    def __init__(self, engine_url: str, door_url: str):
-        self.engine_url = engine_url.rstrip("/")
+    Every path here is a door path already (claim-source/claim-sources reads, /search via
+    BoringRetriever); the one write (put → /remember) joined them at E4-α — the door relays
+    the engine's answer byte-for-byte, so a store write wears the same owner-token and
+    duplicate rules through one face like every other remember (wiki-1736).
+    """
+
+    def __init__(self, door_url: str):
         self.door_url = door_url.rstrip("/")
 
     def batch(self, ops: Iterable[Op]) -> list[Result]:
@@ -208,7 +213,7 @@ class BoringStore(BaseStore):
         }
         if current_note is not None:
             body["supersedes"] = [current_note]
-        resp = _post_json(f"{self.engine_url}/remember", body)
+        resp = _post_json(f"{self.door_url}/remember", body)
         # Since r4.1 a corrected note always lands: the engine skips the duplicate gate
         # for anything that names what it supersedes. A duplicate answer here means the
         # gate fired anyway and the write was swallowed — that is a failure, not a quiet

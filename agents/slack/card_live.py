@@ -86,17 +86,14 @@ def _live_active_projects(active_days: int) -> list[str]:
 
 
 def _live_events(event_name: str, since_hours: int) -> list[dict[str, Any]]:
-    """GET /events, one event name at a time. §정정 (2026-09-22): the given assumed /events
-    sits among the door's proxied routes — measured false: `data/contract/engine-contract.json`
-    http_routes has 24 entries and /events is not one of them (`curl :7710/events` → 404),
-    while the engine answers it directly (`curl :7700/events?limit=3` → 200). /events is a
-    plain, non-DB-backed engine route, so this reads the engine directly (omb_env.drudge_url(),
-    the same resolution DrudgeClient uses) rather than adding a route to the door that the
-    door's own job (DB-backed answers the engine cannot give) never needed. maybe_truncated is
-    not a value to shrug at here: a clipped 7-day window would silently under-suppress (a
-    do/drop that should have hidden a repeat candidate falls outside the page handed back), so
-    it is raised, the same way an unreadable window is raised anywhere else in this file."""
-    url = f"{omb_env.drudge_url()}/events?event={urllib.parse.quote(event_name)}&since_hours={since_hours}&limit=1000"
+    """GET /events, one event name at a time. E4-α: /events 는 이제 문의 프록시 표에 있고
+    (계약 스냅샷 재생성 — 옛 측정(2026-09-22)이 404 로 찍었던 그 경로다), 문은 표에 있는
+    경로를 엔진에 바이트 그대로 넘기니 여기서도 omb_env.door_url() 하나로 읽는다. 문이
+    없던 경로를 엔진에 붙이던 임시 직행은 사라진다. maybe_truncated is not a value to shrug
+    at here: a clipped 7-day window would silently under-suppress (a do/drop that should
+    have hidden a repeat candidate falls outside the page handed back), so it is raised,
+    the same way an unreadable window is raised anywhere else in this file."""
+    url = f"{omb_env.door_url()}/events?event={urllib.parse.quote(event_name)}&since_hours={since_hours}&limit=1000"
     payload = _door_json(url)
     if payload.get("maybe_truncated"):
         raise OSError(

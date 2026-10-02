@@ -34,7 +34,10 @@ def initial_state(
         "deliver": deliver,
         "fmt": fmt,
         "now": now,
-        "engine_url": environ.get("BORING_URL") or environ.get("DRUDGE_URL", "http://boring-drudge:7700"),
+        # E4-α — /weekly 도 문 하나를 지난다. config.door_url 의 규칙을 environ 맵으로 옮긴 것
+        # (주간 그래프는 주입된 environ 만 읽는다): BORING_DOOR_URL → hermes·문 컨테이너의
+        # boring-door:7710. 문은 /weekly 를 엔진에 바이트 그대로 넘긴다.
+        "door_url": environ.get("BORING_DOOR_URL") or "http://boring-door:7710",
         "vault_dir": environ.get("BORING_VAULT_DIR") or os.path.join(home, "vault"),
         "split_frontmatter": split_frontmatter,
     }

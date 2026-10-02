@@ -107,9 +107,6 @@ DISTILL_MARK_DIR = (
 if _IN_CONTAINER:
     markers.set_mark_dir(DISTILL_MARK_DIR)
 MARK_DIR = DISTILL_MARK_DIR
-BORING_URL = (
-    omb_env.drudge_url()
-)  # BORING_URL canonical, BORING_URL deprecated alias; container-aware default
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 TRANSCRIPT_FORMAT = boring_config.agent_config("claude-code").get("format") or "claude-json"
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
@@ -256,7 +253,10 @@ def _door_reachable():
 
 
 def _reachable():
-    match check_drudge_writable(DrudgeClient(base_url=BORING_URL, timeout=15.0, retries=0)):
+    # 쓰기 주인이 파이썬(문)인 지금 이 게이트가 막아야 할 것: remember 의 새 출구(:7710)가
+    # 닫혀 있으면 그 틱의 LLM 패스를 태우지 않는다. /health 를 문에게 묻는다 — 문은 표에
+    # 있는 경로를 엔진에 바이트 그대로 넘기니 db_healthy 판정 규약은 그대로다(E4-α).
+    match check_drudge_writable(DrudgeClient(base_url=omb_env.door_url(), timeout=15.0, retries=0)):
         case Err(failure):
             return Err(str(failure))
         case Ok(_):

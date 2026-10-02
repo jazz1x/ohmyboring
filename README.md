@@ -73,7 +73,7 @@ Memory gets in four ways — after setup you rarely touch the automatic paths:
 ```bash
 python3 agents/shared/agent_wiring.py --install \
   --boring-home ~/oh-my-boring --server-name ohmyboring \
-  --server-url http://localhost:7700/mcp
+  --server-url http://localhost:7710/mcp
 ```
 
 This installs Claude/Kimi hooks, Cursor/Codex MCP entries, the Codex host worker, and Hermes cron workers when `hermes-agent` is enabled. Or edit `~/.claude/settings.json` by hand for Claude only: a `SessionEnd` hook running `python3 ~/oh-my-boring/hooks/distill-session.py`, plus a `UserPromptSubmit` hook running `recall.py`.
@@ -237,7 +237,7 @@ The model ids must match what LM Studio reports. `make verify-llm` also calls `/
 | `BORING_EVENT_LOG` | local NDJSON fallback spool; defaults to `~/.cache/oh-my-boring/events.ndjson` |
 | `BORING_EVENT_SINK` | event sink mode: `db` (default), `spool`, or `both`. `db` writes the engine DB first and spools only on failure |
 | `BORING_EVENT_SPOOL` | fallback spool policy: `on_failure` (default when DB is enabled), `always`, or `off` |
-| `BORING_EVENT_SINK_URL` | optional explicit DB event endpoint; defaults to `$BORING_URL/events` |
+| `BORING_EVENT_SINK_URL` | optional explicit DB event endpoint; defaults to the door's `/events` (`$BORING_DOOR_URL/events`) |
 | `BORING_EVENT_DB_MIRROR` | legacy compatibility alias; `0`/`false`/`off` means `BORING_EVENT_SINK=spool`, `1`/`true`/`on` means `both` |
 | `BORING_EVENT_RECENT_HOURS` | recent event window used by `make readiness`; defaults to `24` |
 | `BORING_READINESS_NOTE_MAX_HOURS` | newest-note freshness window for briefing readiness; defaults to `48` |
@@ -342,20 +342,20 @@ COLLECT_LIMIT=20 python3 agents/codex/collect-sessions.py
 
 ```bash
 # Structured context card for the start of a session (works with BORING_VECTOR=off)
-curl -s -X POST http://localhost:7700/context \
+curl -s -X POST http://localhost:7710/context \
   -H 'content-type: application/json' \
   -d '{"project":"omb","max_items":5}' | jq .
 
 # Weekly brief (requires BORING_VECTOR=on)
-curl -s -X POST http://localhost:7700/weekly \
+curl -s -X POST http://localhost:7710/weekly \
   -H 'content-type: application/json' \
   -d '{"project":"omb"}' | jq .
 
 # Preview the exact Slack-bound morning brief text
-BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
+python3 agents/hermes/briefing.py
 
 # Stalled register — things that have not moved in 7+ days (requires BORING_VECTOR=on)
-curl -s -X POST http://localhost:7700/stalled \
+curl -s -X POST http://localhost:7710/stalled \
   -H 'content-type: application/json' \
   -d '{"project":"omb","older_than_days":7}' | jq .
 ```
@@ -395,7 +395,7 @@ The Jira ticket PROJ-1234 <!-- pii-allow: internal-ticket --> is public.
 ### MCP tool call (raw JSON-RPC)
 
 ```bash
-curl -s -X POST http://localhost:7700/mcp \
+curl -s -X POST http://localhost:7710/mcp \
   -H 'content-type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -439,7 +439,7 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 
 ### Consumption endpoints
 
-Memory can be reached through HTTP endpoints or the MCP server (`http://localhost:7700/mcp`):
+Memory can be reached through HTTP endpoints or the MCP server (`http://localhost:7710/mcp`):
 
 | Endpoint / MCP tool | Purpose | Vector backend |
 |---|---|---|
@@ -476,7 +476,7 @@ Automatic retrieval can explode an agent's context window, so the retrieval surf
 Any MCP-capable agent can use ohmyboring. The repo ships a standard **`.mcp.json`** (root key `mcpServers`) that Claude Code, Cursor, Windsurf, and Claude Desktop read when it is placed in a project directory or user config path:
 
 ```json
-{ "mcpServers": { "ohmyboring": { "type": "http", "url": "http://localhost:7700/mcp" } } }
+{ "mcpServers": { "ohmyboring": { "type": "http", "url": "http://localhost:7710/mcp" } } }
 ```
 
 `install.sh` automatically wires:
@@ -486,7 +486,7 @@ Any MCP-capable agent can use ohmyboring. The repo ships a standard **`.mcp.json
 
 For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~/.claude/mcp.json` for Claude Desktop or `~/.kimi-code/mcp.json` for Kimi Code MCP) or use the agent's CLI to add the HTTP MCP server.
 
-(VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. Compose siblings reach it at `http://boring-drudge:7700/mcp`.)
+(VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring http://localhost:7710/mcp`. Compose siblings reach it at `http://boring-door:7710/mcp`.)
 
 Available tools (24): `recall`, `neighbors`, `claims` (memory retrieval) · `code_search`, `code_symbol`, `code_index_status` (separate AST code corpus) · `ask`, `brief`, `weekly_brief`, `project_status` (generative — run the LLM) · `decisions`, `risks`, `next_actions`, `stalled`, `recurrences` (registers — rows, no LLM) · `context`, `corpus_status`, `events`, `config_get` (structured / introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain) · `verdict` (thumbs-up/down on what a session was handed).
 
@@ -511,7 +511,7 @@ Structured tools (`neighbors`, `claims`, `corpus_status`, `events`, `config_get`
 Example MCP call (raw JSON-RPC over HTTP):
 
 ```bash
-curl -s -X POST http://localhost:7700/mcp \
+curl -s -X POST http://localhost:7710/mcp \
   -H 'content-type: application/json' \
   -d '{
     "jsonrpc": "2.0",

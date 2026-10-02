@@ -140,10 +140,15 @@ class EventLogTests(unittest.TestCase):
             seen["body"] = json.loads(req.data.decode("utf-8"))
             return FakeResponse()
 
-        with mock.patch.object(event_log.urllib.request, "urlopen", fake_urlopen):
+        with (
+            mock.patch.object(event_log.urllib.request, "urlopen", fake_urlopen),
+            mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.test:7710"}),
+        ):
             event_log.append_event("guard", "structural_guard", "failed", run_id="r1")
 
-        self.assertEqual(seen["url"], "http://127.0.0.1:7700/events")
+        # E4-α — the sink wears the door like every other consumer; the door relays to the
+        # engine byte-for-byte. 엔진 주소로 되돌리는 변이는 이 줄에서 빨갛게 끝난다.
+        self.assertEqual(seen["url"], "http://door.test:7710/events")
         self.assertEqual(seen["body"]["event"], "structural_guard")
         self.assertEqual(seen["body"]["otel"]["severity_text"], "ERROR")
         self.assertFalse(os.path.exists(os.environ["BORING_EVENT_LOG"]))
@@ -404,6 +409,39 @@ class SpoolReplayTests(unittest.TestCase):
                 counts = event_log.replay_spool()
             self.assertEqual(counts, {"replayed": 0, "kept": 1, "unparseable": 0})
             self.assertEqual(open(path, encoding="utf-8").read(), before)
+
+
+class DoorUrlParityTests(unittest.TestCase):
+    """events._door_url 은 ohmyboring.config.door_url 의 순수 이식이다 — 이 모듈은 doctor 가
+    패키지 없이 직접 실행하니 임포트 대신 규칙을 옮겼고, 이 시험이 둘의 갈림을 막는다."""
+
+    def _check(self, overrides):
+        from ohmyboring import config
+
+        base = {k: os.environ.get(k) for k in ("BORING_DOOR_URL", "BORING_IN_CONTAINER")}
+        try:
+            for key, value in base.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            os.environ.update(overrides)
+            self.assertEqual(event_log._door_url(), config.door_url())
+        finally:
+            for key, value in base.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_host_default_matches_config(self):
+        self._check({})
+
+    def test_env_override_matches_config(self):
+        self._check({"BORING_DOOR_URL": "http://door.test:7710"})
+
+    def test_container_default_matches_config(self):
+        self._check({"BORING_IN_CONTAINER": "1"})
 
 
 if __name__ == "__main__":

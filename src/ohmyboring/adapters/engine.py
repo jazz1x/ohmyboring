@@ -150,7 +150,13 @@ def _hits_or_empty(data: Any) -> list[dict[str, Any]]:
 
 
 class DrudgeClient:
-    """Minimal drudge HTTP client. Failures come home as values, left to callers to fold."""
+    """Minimal drudge HTTP client. Failures come home as values, left to callers to fold.
+
+    The default base is the door(:7710) — 얼굴이 몇 개든 문은 하나(E4-α): every consumer
+    (recall hook, secretary, card, distillation, collectors) names no URL and rides the door,
+    which relays the engine's route table byte-for-byte. `base_url` stays for callers that
+    must name an end themselves (tests, the parity copy, a caller-named door).
+    """
 
     def __init__(
         self,
@@ -158,7 +164,7 @@ class DrudgeClient:
         timeout: float = 5.0,
         retries: int = 1,
     ):
-        self.base_url = (base_url or os.environ.get("BORING_URL") or omb_env.drudge_url()).rstrip("/")
+        self.base_url = (base_url or omb_env.door_url()).rstrip("/")
         self.timeout = timeout
         self.retries = retries
 
@@ -190,8 +196,8 @@ class DrudgeClient:
 
         5xx·연결·타임아웃은 남은 재시도를 쓰고, 그래도 실패하면 `Refused`/`Unreachable` 로
         돌아온다. 소켓 끊김은 재시도 없이 `Unreachable`, 해독 실패는 `Malformed`. 재시도·타임아웃
-        값은 옛 `_retry` 와 같다. `base_url` 을 주면 그 주소로 본다 — remember 만 문(:7710)을
-        지나게 쓴다(E3a-1); 나머지 경로는 클라이언트의 base_url(엔진)이 기본이다.
+        값은 옛 `_retry` 와 같다. `base_url` 을 주면 그 주소로 본다 — 기본은 문(:7710)이고,
+        remember 만 history 때문에 문을 다시 명시한다(E3a-1·E4-α — 이제 둘 다 문이라 같은 주소다).
         """
         for attempt in range(self.retries + 1):
             try:
@@ -333,11 +339,12 @@ def check_drudge_writable(client: DrudgeClient | None = None) -> Either[None, No
     full LLM pass per session and per cycle: the marker went back to retry and the next
     run re-distilled the same input. This is the cheap check that stops that loop.
 
-    Reads GET /health. Blocks on an explicit ``db_healthy`` of false, or a ``degraded``
-    status. A response without ``db_healthy`` is an engine running wiki-first (or an
-    older build) and is allowed through — absence of the field is not evidence of
-    failure. An unreachable engine blocks, since nothing can be written to it either —
-    어떤 실패든 이 한 변형으로 좁힌다 (philosophy-parse: 경계에서 한 번 좁힌다).
+    Reads GET /health — with the default client that question rides the door(:7710), which
+    relays the engine's answer byte-for-byte (E4-α). Blocks on an explicit ``db_healthy``
+    of false, or a ``degraded`` status. A response without ``db_healthy`` is an engine
+    running wiki-first (or an older build) and is allowed through — absence of the field
+    is not evidence of failure. An unreachable engine blocks, since nothing can be written
+    to it either — 어떤 실패든 이 한 변형으로 좁힌다 (philosophy-parse: 경계에서 한 번 좁힌다).
     """
     client = client or DrudgeClient()
     match client.health():

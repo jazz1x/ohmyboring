@@ -105,11 +105,8 @@ class _Handler(BaseHTTPRequestHandler):
 class StoreTest(unittest.TestCase):
     def setUp(self) -> None:
         self.door = self._serve()
-        self.engine = self._serve()
-        self.store = BoringStore(
-            engine_url=f"http://127.0.0.1:{self.engine.server_port}",
-            door_url=f"http://127.0.0.1:{self.door.server_port}",
-        )
+        self.engine = self._serve()  # the witness: E4-α says nothing may arrive here
+        self.store = BoringStore(door_url=f"http://127.0.0.1:{self.door.server_port}")
 
     def _serve(self) -> ThreadingHTTPServer:
         server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
@@ -130,15 +127,17 @@ class StoreTest(unittest.TestCase):
         return server
 
     def _remember_bodies(self) -> list[dict]:
-        return [
-            body for method, path, body in self.engine.requests if method == "POST" and path == "/remember"
-        ]
+        # E4-α — a put's remember wears the door, never the engine direct.
+        return [body for method, path, body in self.door.requests if method == "POST" and path == "/remember"]
 
     def test_put_new_key_sends_remember_without_supersedes(self) -> None:
         before = datetime.now(UTC)
         self.assertIsNone(self.store.put(NS, "prefs", {"lang": "ko"}))
 
         (body,) = self._remember_bodies()
+        self.assertEqual(
+            self.engine.requests, [], "a put remembers through the door, never the engine direct"
+        )
         subject = _subject_for(NS, "prefs")
         self.assertEqual(body["title"], "langgraph store users/u1/memories/prefs")
         self.assertEqual(
@@ -210,11 +209,11 @@ class StoreTest(unittest.TestCase):
             "a re-put inherits created_at from the current value — get answers when the record was born",
         )
 
-    def test_put_raises_when_the_engine_answers_duplicate(self) -> None:
+    def test_put_raises_when_the_door_answers_duplicate(self) -> None:
         # Since r4.1 a corrected note always lands: the engine skips the duplicate gate
         # for anything with supersedes. A duplicate answer means the write was swallowed
         # and the caller's new value is NOT what get will answer — that is a failure.
-        self.engine.remember_response = {
+        self.door.remember_response = {
             "source_path": "/vault/wiki/wiki-9001.md",
             "wiki_id": "wiki-9001",
             "duplicate": "/vault/wiki/wiki-9001.md",

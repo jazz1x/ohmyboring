@@ -408,6 +408,48 @@ class RememberDoorRoutingTest(unittest.TestCase):
         self.assertEqual(req.full_url, "http://door.test:7710/mcp")
 
 
+class ClientBaseUrlRoutingTest(unittest.TestCase):
+    """E4-α — 얼굴이 몇 개든 문은 하나: DrudgeClient 의 기본 주소는 문(:7710)이다.
+
+    recall 훅·secretary·카드·증류가 이름 없이 부르는 이 클라이언트가 엔진 주소로
+    되돌아가는 변이는 이 시험에서 빨갛게 끝난다. BORING_URL(엔진 이름)은 더 이상
+    클라이언트를 훔쳐가지 못한다 — 문 프록시 표에 있는 경로를 바이트 그대로 넘기니
+    응답 바이트는 그대로다.
+    """
+
+    def test_default_client_addresses_the_door(self):
+        with mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.test:7710"}):
+            client = DrudgeClient(retries=0)
+        self.assertEqual(client.base_url, "http://door.test:7710")
+
+    def test_boring_url_no_longer_hijacks_the_default(self):
+        with mock.patch.dict(
+            os.environ,
+            {"BORING_URL": "http://engine.test:7700", "BORING_DOOR_URL": "http://door.test:7710"},
+        ):
+            client = DrudgeClient(retries=0)
+        self.assertEqual(client.base_url, "http://door.test:7710")
+
+    def test_a_default_request_reaches_the_door(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["url"] = req.full_url
+            return _FakeResponse()
+
+        with (
+            mock.patch.object(urllib.request, "urlopen", fake_urlopen),
+            mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.test:7710"}),
+        ):
+            result = DrudgeClient(retries=0).request("POST", "/handover", {"session_id": "s"})
+        self.assertEqual(captured["url"], "http://door.test:7710/handover")
+        match result:
+            case Ok(_):
+                pass
+            case other:
+                self.fail(f"expected Ok, got {other!r}")
+
+
 class _Reply:
     def __init__(self, text):
         self._body = json.dumps({"result": {"content": [{"type": "text", "text": text}]}}).encode("utf-8")

@@ -136,8 +136,7 @@ class _FakeBoringStore:
     down = False
     instances = []
 
-    def __init__(self, *, engine_url, door_url):
-        self.engine_url = engine_url
+    def __init__(self, *, door_url):
         self.door_url = door_url
         self.searches = []
         _FakeBoringStore.instances.append(self)
@@ -279,8 +278,10 @@ def test_the_recall_block_goes_through_the_store_with_the_knob_handles():
     assert "· [decision] morning-card-runner status: hermes cron 이 문을 통해 카드를 실행" in context
     assert recall_core.FENCE.splitlines()[0] in context
     store = _FakeBoringStore.instances[-1]
-    assert store.engine_url == "http://boring-drudge:7700"
     assert store.door_url == "http://boring-door:7710"
+    assert not hasattr(store, "engine_url"), (
+        "E4-α — BoringStore takes the door only; BORING_URL rides along unused"
+    )
     assert len(store.searches) == 1
     namespace, prompt, limit, knobs = store.searches[0]
     assert namespace == ("boring",)

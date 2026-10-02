@@ -78,7 +78,7 @@ verify-llm: ## Verify boring.json LLM config (reachability, model presence, embe
 ask: ## Single query   make ask Q="question"
 	@command -v jq >/dev/null 2>&1 || { echo 'jq not found — install: brew install jq / apt-get install jq'; exit 1; }
 	@[ -n "$(Q)" ] || { echo 'usage: make ask Q="question"'; exit 1; }
-	@code=$$(curl -s -m120 -o /tmp/omb-ask.$$$$ -w '%{http_code}' "$${BORING_URL:-http://127.0.0.1:7700}/ask" \
+	@code=$$(curl -s -m120 -o /tmp/omb-ask.$$$$ -w '%{http_code}' "$${BORING_DOOR_URL:-http://127.0.0.1:7710}/ask" \
 	  -H 'content-type: application/json' \
 	  -d "$$(jq -nc --arg q "$(Q)" '{question:$$q}')"); \
 	  jq -r '.answer // .error // "ask failed"' /tmp/omb-ask.$$$$ 2>/dev/null || cat /tmp/omb-ask.$$$$; rm -f /tmp/omb-ask.$$$$; \
@@ -86,12 +86,12 @@ ask: ## Single query   make ask Q="question"
 
 sync: ## Deterministic re-ingest of the vault (vault/wiki → embed → graph → relates_to)
 	@command -v jq >/dev/null 2>&1 || { echo 'jq not found — install: brew install jq / apt-get install jq'; exit 1; }
-	@curl -s -m600 -X POST "$${BORING_URL:-http://127.0.0.1:7700}/sync" | jq .
+	@curl -s -m600 -X POST "$${BORING_DOOR_URL:-http://127.0.0.1:7710}/sync" | jq .
 
 remember: ## Save + ingest a note immediately   make remember M="content" [T="title"]
 	@command -v jq >/dev/null 2>&1 || { echo 'jq not found — install: brew install jq / apt-get install jq'; exit 1; }
 	@[ -n "$(M)" ] || { echo 'usage: make remember M="content" [T="title"]'; exit 1; }
-	@curl -s -m600 -X POST "$${BORING_URL:-http://127.0.0.1:7700}/mcp" -H 'content-type: application/json' \
+	@curl -s -m600 -X POST "$${BORING_DOOR_URL:-http://127.0.0.1:7710}/mcp" -H 'content-type: application/json' \
 	  -d "$$(jq -nc --arg t "$${T:-$(M)}" --arg b "$(M)" \
 	    '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"remember",arguments:{title:$$t,body:$$b}}}')" \
 	  | jq -r '.result.content[0].text // .error.message'

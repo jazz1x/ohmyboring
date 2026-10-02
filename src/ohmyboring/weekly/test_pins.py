@@ -112,7 +112,7 @@ def run_script(script: Path, days, engine: dict, env: dict[str, str], extra: dic
             "PYTHONPATH": os.pathsep.join([str(FAKES), str(REPO / "src")]),
             "PIN_FAKES": json.dumps(fakes),
             "BORING_VAULT_DIR": str(root / "vault"),
-            "BORING_URL": "http://engine.invalid:7700",
+            "BORING_DOOR_URL": "http://door.invalid:7710",
             **env,
         }
         done = subprocess.run(
@@ -154,7 +154,9 @@ class BriefingPinTest(unittest.TestCase):
                 self.assertEqual(done.returncode, 0, (name, fmt, done.stderr))
                 self.assertEqual(sha(done.stdout), ENGINE_SHA[(name, fmt)], (name, fmt))
                 call = json.loads(seen["engine-call.json"])
-                self.assertEqual(call, {"url": "http://engine.invalid:7700/weekly", "timeout": 180})
+                # E4-α — the weekly asks the door, which relays /weekly to the engine
+                # byte-for-byte; an engine-address revert dies on this line.
+                self.assertEqual(call, {"url": "http://door.invalid:7710/weekly", "timeout": 180})
 
 
 class CardPinTest(unittest.TestCase):

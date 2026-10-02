@@ -12,7 +12,7 @@ from ohmyboring.weekly.stamp import header
 
 def engine(state):
     req = urllib.request.Request(
-        f"{state['engine_url']}/weekly",
+        f"{state['door_url']}/weekly",
         data=b"{}",
         headers={"content-type": "application/json"},
         method="POST",

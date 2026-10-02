@@ -115,6 +115,10 @@ REMEMBER_HTTP_BODY = (
     b'"supersedes": 0, "unknown": 0}'
 )
 
+#: 엔진 /events 응답의 실측 모양 — 고의로 비정형 바이트(이상한 공백·비아스키)로 만들어 문이
+#: 다시 직렬화하면 갈라지게 한다. E4-α 가 프록시 표에 넣은 경로가 바이트 그대로 가는지 본다.
+EVENTS_BODY = b'{"entries": [],  "maybe_truncated":false, "note":"\xec\x95\x88\xeb\x85\x95"}'
+
 
 class StubHandler(BaseHTTPRequestHandler):
     """The engine's stand-in: fixed /health, tools/list answer, otherwise echo.
@@ -134,6 +138,8 @@ class StubHandler(BaseHTTPRequestHandler):
         type(self).last_path = self.path
         if self.path == "/health":
             self._reply(200, HEALTH_BODY)
+        elif self.path.startswith("/events"):
+            self._reply(200, EVENTS_BODY)
         elif self.path == "/sse":
             self._sse()
         else:
@@ -339,7 +345,27 @@ class DoorTest(unittest.TestCase):
             expected.add((method, path))
         actual = {(method, route.path) for route in door.app.routes for method in route.methods}
         self.assertEqual(actual, expected)
-        self.assertEqual(len(contract["http_routes"]), 24)
+        self.assertEqual(len(contract["http_routes"]), 30)
+
+    def test_events_get_passes_through_byte_identical(self):
+        # E4-α — /events entered the proxy table with the contract re-snapshot; the door
+        # relays query and answer bytes untouched (this kills a " Events"→engine revert).
+        status, body, content_type = _req(self.door_port, "GET", "/events?limit=2&component=stub")
+        self.assertEqual(status, 200)
+        self.assertEqual(StubHandler.last_path, "/events?limit=2&component=stub")
+        self.assertEqual(body, EVENTS_BODY)
+        self.assertEqual(content_type, STUB_CONTENT_TYPE)
+
+    def test_events_post_body_passes_through_byte_identical(self):
+        payload = b'{"component":"stub","event":"probe","otel":{"attributes":{}}}'
+        status, body, content_type = _req(
+            self.door_port, "POST", "/events", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(StubHandler.seen_bodies[-1], payload)
+        self.assertEqual(StubHandler.last_path, "/events")
+        self.assertEqual(body, payload)
+        self.assertEqual(content_type, STUB_CONTENT_TYPE)
 
     def test_request_header_policy(self):
         payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode()
