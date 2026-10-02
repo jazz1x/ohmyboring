@@ -102,6 +102,7 @@ from ohmyboring.adapters import vault as vault_notes
 from ohmyboring.entrypoints.http import mcp_recall
 from ohmyboring.recall import named as recall_named
 from ohmyboring.remember import dedup as remember_dedup
+from ohmyboring.remember import graph as remember_graph
 from ohmyboring.remember import pii as remember_pii
 from ohmyboring.remember import shadow as remember_shadow
 from ohmyboring.result import Either, Err, Ok
@@ -353,10 +354,60 @@ def _nearest_document(text: str, exclude_path: str | None) -> Either[str | None,
     return Ok(row[0] if row else None)
 
 
+#: 그림자의 그래프 대조(E3b)가 읽는 세 장 — 문이 지난 노트가 실제로 남긴 간선·문서·claim
+#: 행의 끝 상태다. 전부 읽기 전용 세션(임베딩 프로브와 같은 연결 모양).
+_GRAPH_EDGES_SQL = (
+    "SELECT e.src, e.kind, e.dst FROM edge e"
+    " WHERE e.src = ANY(%(docs)s) OR e.dst = ANY(%(docs)s)"
+    "    OR e.src IN (SELECT dst FROM edge WHERE src = ANY(%(docs)s) AND kind = 'claims')"
+)
+_GRAPH_DOCUMENTS_SQL = "SELECT source_path FROM document WHERE source_path = ANY(%(paths)s)"
+_GRAPH_CLAIMS_SQL = (
+    "SELECT source_path, subject, predicate, kind, superseded_at IS NOT NULL"
+    " FROM claim WHERE source_path = ANY(%(paths)s)"
+)
+
+
+def _read_graph(paths: tuple[str, ...]) -> remember_graph.GraphSnapshot | None:
+    """그림자가 정한 문서 경로들의 그래프 끝 상태를 읽는다 — 읽기 전용, 쓰기 없음.
+
+    DSN 부재·pg 고장이면 None — 그림자 사건이 graph-unchecked (다) 로 남긴다. 임베딩
+    프로브와 마찬가지로 응답 뒤 백그라운드라, 실패가 요청에 닿는 일은 없다."""
+    dsn = os.environ.get("DOOR_PG_DSN")
+    if not dsn:
+        return None
+    docs = [f"doc:{path}" for path in paths]
+    try:
+        with (
+            psycopg.connect(dsn, options="-c default_transaction_read_only=on") as conn,
+            conn.cursor() as cur,
+        ):
+            cur.execute(_GRAPH_EDGES_SQL, {"docs": docs})
+            edges = frozenset((row[0], row[1], row[2]) for row in cur.fetchall())
+            cur.execute(_GRAPH_DOCUMENTS_SQL, {"paths": list(paths)})
+            documents = frozenset(row[0] for row in cur.fetchall())
+            cur.execute(_GRAPH_CLAIMS_SQL, {"paths": list(paths)})
+            claims = tuple(
+                remember_graph.ClaimRow(
+                    source_path=row[0],
+                    subject=row[1],
+                    predicate=row[2],
+                    kind=row[3],
+                    sealed=row[4],
+                )
+                for row in cur.fetchall()
+            )
+    except psycopg.Error as e:
+        print(f"[door] remember_shadow graph read failed: {e}", file=sys.stderr, flush=True)
+        return None
+    return remember_graph.GraphSnapshot(edges=edges, documents=documents, claims=claims)
+
+
 def _remember_shadow_task(route: str, arguments: dict, status: int, body: bytes, is_owner: bool) -> None:
     """응답을 본 뒤에 도는 그림자 — 같은 요청을 파이썬 쓰기 경로에 「쓰지 않고」 태워
-    엔진이 한 결정(PII 게이트·중복 문의 걸러둘·대체·저장)과 같은 결정을 낼지, 저장·대체에
-    서는 실제 노트와 칸별로 대조하고 사건(remember_shadow) 한 줄을 남긴다(E3a-2). 걸러진
+    엔진이 한 결정(PII 게이트·중복 문의 걸러둘·대체·저장, owner 자격 거절)과 같은 결정을
+    낼지, 저장·대체에서는 실제 노트와 칸별로, 읽기 전용 세션으로 실제 그래프의 간선·claim
+    봉인까지 대조하고 사건(remember_shadow) 한 줄을 남긴다(E3a-2, E3b). 걸러진
     요청은 결정만 비교한다. 실패는 전부 여기서 접는다: 문 로그 한 줄 + 사건 status=error —
     응답은 이미 간 뒤라 어떤 예외도 클라이언트에 닿지 않는다."""
     vault_dir = _vault_dir()
@@ -386,6 +437,7 @@ def _remember_shadow_task(route: str, arguments: dict, status: int, body: bytes,
                 pii_scanner=scanner,
                 is_owner=is_owner,
                 nearest_document=_nearest_document,
+                read_graph=_read_graph,
             )
         )
     except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다

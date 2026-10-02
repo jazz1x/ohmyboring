@@ -24,12 +24,28 @@ PII 게이트를 빼는 변이, 대체 점수 +8 을 빼는 변이, 엔진이 �
   빈틈이다. 지금은 칸 불일치면 언제나 사유를 붙인다(fields …).
   걸러둘 칸 대조 1 — dedup_decision skipped(probable_session) 요청을 기존 노트와 칸별로
   맞춘 것. 지금은 걸러진 요청은 결정만 비교해 ok 가 나온다(regression 사례).
+
+E3b — 세 번째 대조(그래프)와 사건의 소요 시간 칸:
+  간선 집합 — 실제 그래프가 노트의 투영(uses·about·claims·is_a·said·tagged·
+  in_project·claim_of_project·supersedes)과 같아야 ok — 하나 빠지거나 생기면
+  (가) 사유가 된다. 간선 하나를 빼는 변이는 여기서 빨갛게 끝난다.
+  claim 봉인 — 대체는 새 노트가 다시 말한 (subject, predicate) 슬롯만 닫는다
+  (wiki-2757/2758 모양: 옛 노트 사실 셋, 새 노트가 하나만 다시 말함). 엔진이 통째로
+  닫으면(store.rs:2898) 그 어긋남은 (나) 「의도한 차이 — 부분 닫기」로 남는다 —
+  통째 봉인으로 바꾸는 변이는 (나) 단언에서 빨갛게 끝난다.
+  owner 거절 — 오너가 쓴 노트를 오너 아닌 호출이 대체하려 하면 양쪽 다 거절
+  (owner.rs:64-80, 엔진 사건 owner_supersede_refused). 거절을 빼는 변이는 여기서
+  빨갛게 끝난다. 운영 DB 에 owner 작성 노트가 없으니(2026-10-02 document.author
+  확인) 이 갈래는 픽스처가 덮는다 — wiki-2877 기준의 「없으면 픽스처」다.
+  소요 시간 — elapsed_total_s·elapsed_embedding_s·elapsed_db_s 가 사건에 항상 찍힌다.
+  칸을 빼는 변이는 여기서 빨갛게 끝난다.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -41,6 +57,7 @@ for path in (ROOT / "src", ROOT / "agents" / "shared"):
 from vault_note import split_frontmatter  # noqa: E402
 
 from ohmyboring.remember import pii as remember_pii  # noqa: E402
+from ohmyboring.remember.graph import ClaimRow  # noqa: E402
 from ohmyboring.remember.shadow import (  # noqa: E402
     RELATES_TO_EXCLUDED,
     ShadowRequest,
@@ -203,7 +220,7 @@ def _skipped_answer(note_id: str):
 
 
 def _run(files: dict[str, str], answer, **options):
-    """그림자 한 번 — options: arguments·route·scanner·nearest·is_owner·status."""
+    """그림자 한 번 — options: arguments·route·scanner·nearest·is_owner·status·graph."""
     body = json.dumps(answer, ensure_ascii=False).encode()
     return run_shadow(
         ShadowRequest(
@@ -218,6 +235,7 @@ def _run(files: dict[str, str], answer, **options):
             pii_scanner=options.get("scanner"),
             is_owner=options.get("is_owner", False),
             nearest_document=options.get("nearest", _no_nearest),
+            read_graph=options.get("graph"),
         )
     )
 
@@ -646,6 +664,448 @@ class DedupBranchTests(unittest.TestCase):
         from ohmyboring.remember import dedup
 
         self.assertEqual(dedup.DUPLICATE_MAX_DIST, 0.07)
+
+
+#: E3b 그림자 시험용 엔진 노트 — 투영 부류가 고르게 든 노트. 그것을 낳은 요청은
+#: GRAPH_ARGUMENTS 이고 MCP 답은 GRAPH_MCP_ANSWER.
+GRAPH_NOTE = """---
+id: wiki-2810
+title: 배포 절차 정리
+kind: note
+origin: personal
+project: kb-agent
+date: 2026-10-02
+tags:
+- repo/kb-agent
+- deploy
+tools:
+- kubectl
+- Docker Compose
+concepts:
+- deploy pipeline
+claims:
+- subject: 배포
+  predicate: 절차
+  value: make deploy
+  kind: fact
+  confidence: certain
+- subject: 릴리스
+  predicate: 주기
+  value: 매주 목요일
+  kind: decision
+  confidence: likely
+  said_by: owner
+relates_to: []
+sources: []
+omb_session_id: sess-g1
+author: agent:claude
+---
+
+배포는 make deploy 로 한다.
+"""
+
+GRAPH_ARGUMENTS = {
+    "title": "배포 절차 정리",
+    "body": "배포는 make deploy 로 한다.",
+    "origin": "personal",
+    "repo": "kb-agent",
+    "tags": ["deploy"],
+    "tools": ["kubectl", "Docker Compose"],
+    "concepts": ["deploy pipeline"],
+    "claims": [
+        {
+            "subject": "배포",
+            "predicate": "절차",
+            "value": "make deploy",
+            "kind": "fact",
+            "confidence": "certain",
+        },
+        {
+            "subject": "릴리스",
+            "predicate": "주기",
+            "value": "매주 목요일",
+            "kind": "decision",
+            "confidence": "likely",
+            "said_by": "owner",
+        },
+    ],
+    "omb_session_id": "sess-g1",
+    "author": "agent:claude",
+}
+
+GRAPH_MCP_ANSWER = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+        "content": [
+            {
+                "type": "text",
+                "text": "remembered → wiki/wiki-2810.md · chunks 2 · graph(tools 2 concepts 1 claims 2) — recallable now",
+            }
+        ]
+    },
+}
+
+GRAPH_NEW_PATH = "/vault/wiki/wiki-2810.md"
+
+#: GRAPH_NOTE 의 투영 — 그래프 대조의 목표 간선 집합. 그래프 모듈을 다시 부르지 않고
+#: 여기에 글자로 박아 두니, 투영이 간선 하나를 빼먹는 변이는 어긋남으로 잡힌다.
+GRAPH_EXPECTED_EDGES = frozenset(
+    {
+        ("doc:/vault/wiki/wiki-2810.md", "in_project", "project:kb-agent"),
+        ("doc:/vault/wiki/wiki-2810.md", "tagged", "topic:repo/kb-agent"),
+        ("doc:/vault/wiki/wiki-2810.md", "tagged", "topic:deploy"),
+        ("doc:/vault/wiki/wiki-2810.md", "uses", "tool:kubectl"),
+        ("doc:/vault/wiki/wiki-2810.md", "uses", "tool:dockercompose"),
+        ("doc:/vault/wiki/wiki-2810.md", "about", "concept:deploypipeline"),
+        ("doc:/vault/wiki/wiki-2810.md", "claims", "claim:배포:절차"),
+        ("doc:/vault/wiki/wiki-2810.md", "claims", "claim:릴리스:주기"),
+        ("claim:릴리스:주기", "is_a", "decision:릴리스:주기"),
+        ("claim:배포:절차", "claim_of_project", "project:kb-agent"),
+        ("claim:릴리스:주기", "claim_of_project", "project:kb-agent"),
+        ("person:owner", "said", "doc:/vault/wiki/wiki-2810.md"),
+        ("person:owner", "said", "claim:릴리스:주기"),
+    }
+)
+
+#: 새 노트 두 claim 행(DB 가 canon 슬롯으로 쓴 모양) — 둘 다 살아 있어야 한다.
+GRAPH_NEW_CLAIMS = (
+    ClaimRow(GRAPH_NEW_PATH, "배포", "절차", "fact", False),
+    ClaimRow(GRAPH_NEW_PATH, "릴리스", "주기", "decision", False),
+)
+
+#: wiki-2757/2758 모양의 옛 노트 — 사실 셋, 새 노트(GRAPH_NOTE)는 그중 (배포,절차)만
+#: 다시 말한다. 대체 목표: 그 슬롯 하나만 닫히고 둘은 산다.
+OLD_NOTE = """---
+id: wiki-2757
+title: 배포 절차 초안
+kind: note
+origin: personal
+project: kb-agent
+date: 2026-09-28
+tags:
+- repo/kb-agent
+tools: []
+concepts: []
+claims:
+- subject: 배포
+  predicate: 절차
+  value: 수동으로 한다
+  kind: fact
+  confidence: certain
+- subject: 모니터링
+  predicate: 대상
+  value: 전 서비스
+  kind: fact
+  confidence: certain
+- subject: 알림
+  predicate: 채널
+  value: 슬랙
+  kind: fact
+  confidence: certain
+relates_to: []
+sources: []
+omb_session_id: sess-old
+author: agent:claude
+---
+
+배포는 수동으로 한다.
+"""
+
+OWNER_OLD_NOTE = OLD_NOTE.replace("author: agent:claude", "author: owner")
+
+OLD_PATH = "/vault/wiki/wiki-2757.md"
+OLD_CLAIMS_ALL_SEALED = (
+    ClaimRow(OLD_PATH, "배포", "절차", "fact", True),
+    ClaimRow(OLD_PATH, "모니터링", "대상", "fact", True),
+    ClaimRow(OLD_PATH, "알림", "채널", "fact", True),
+)
+
+
+def _supersede_answer():
+    """교정(인자 supersedes)이 성공한 엔진 답 — 답 본문에는 대체 접미사만 있다."""
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "content": [
+                {
+                    "type": "text",
+                    "text": "remembered → wiki/wiki-2810.md · chunks 2 · graph(tools 2 concepts 1 claims 2) — recallable now · supersedes linked 1",
+                }
+            ]
+        },
+    }
+
+
+def _snapshot(edges, claims, documents=None):
+    from ohmyboring.remember.graph import GraphSnapshot
+
+    return GraphSnapshot(
+        edges=frozenset(edges),
+        documents=frozenset(documents if documents is not None else {GRAPH_NEW_PATH}),
+        claims=tuple(claims),
+    )
+
+
+class GraphCompareTests(unittest.TestCase):
+    """E3b — 간선 집합 대조: 실제 그래프가 노트의 투영과 같아야 ok, 하나 빠지거나
+    생기면 (가) 사유. 간선 하나를 빼는 변이는 edges ok 단언에서 빨갛게 끝난다."""
+
+    def test_matching_graph_is_ok(self):
+        event = _run(
+            {"wiki-2810": GRAPH_NOTE},
+            GRAPH_MCP_ANSWER,
+            arguments=GRAPH_ARGUMENTS,
+            graph=lambda paths: _snapshot(GRAPH_EXPECTED_EDGES, GRAPH_NEW_CLAIMS),
+        )
+        self.assertEqual(event.status, "ok", event.reason)
+        self.assertEqual(event.edges, "ok")
+        self.assertEqual(event.seal, "ok")
+        self.assertIsNone(event.reason)
+
+    def test_unrelated_edges_are_out_of_scope(self):
+        # 함께 조회된 다른 노트의 잔여 간선·비투영 부류는 이 노트의 어긋남이 아니다.
+        stray = set(GRAPH_EXPECTED_EDGES)
+        stray.add(("doc:/vault/wiki/wiki-2700.md", "uses", "tool:stray"))
+        stray.add(("doc:/vault/wiki/wiki-2700.md", "handed", "doc:/vault/wiki/wiki-2810.md"))
+        stray.add(("doc:/vault/wiki/wiki-2700.md", "tagged", "topic:무관"))
+        event = _run(
+            {"wiki-2810": GRAPH_NOTE},
+            GRAPH_MCP_ANSWER,
+            arguments=GRAPH_ARGUMENTS,
+            graph=lambda paths: _snapshot(stray, GRAPH_NEW_CLAIMS),
+        )
+        self.assertEqual(event.status, "ok", event.reason)
+        self.assertEqual(event.edges, "ok")
+
+    def test_a_missing_edge_is_a_mismatch_named_by_kind(self):
+        broken = set(GRAPH_EXPECTED_EDGES)
+        broken.remove(("doc:/vault/wiki/wiki-2810.md", "uses", "tool:kubectl"))
+        event = _run(
+            {"wiki-2810": GRAPH_NOTE},
+            GRAPH_MCP_ANSWER,
+            arguments=GRAPH_ARGUMENTS,
+            graph=lambda paths: _snapshot(broken, GRAPH_NEW_CLAIMS),
+        )
+        self.assertEqual(event.status, "mismatch")
+        self.assertEqual(event.edges, "missing=uses:1")
+        self.assertIn("edges missing=uses:1 (가)", event.reason)
+
+    def test_an_extra_edge_is_a_mismatch(self):
+        # 투영이 is_a 를 빼먹는 변이의 모양 — 실제 그래프에만 is_a 가 있으면 extra 로 남는다.
+        bloated = set(GRAPH_EXPECTED_EDGES)
+        bloated.add(("doc:/vault/wiki/wiki-2810.md", "uses", "tool:helm"))
+        event = _run(
+            {"wiki-2810": GRAPH_NOTE},
+            GRAPH_MCP_ANSWER,
+            arguments=GRAPH_ARGUMENTS,
+            graph=lambda paths: _snapshot(bloated, GRAPH_NEW_CLAIMS),
+        )
+        self.assertEqual(event.status, "mismatch")
+        self.assertEqual(event.edges, "extra=uses:1")
+        self.assertIn("edges extra=uses:1 (가)", event.reason)
+
+    def test_unknown_supersedes_target_writes_no_edge(self):
+        # 문서 행이 없는 교정 대상은 엔진이 unknown 으로 세고 간선을 안 쓴다 — 그림자도
+        # 목표에서 빼야 어긋남이 안 난다.
+        args = dict(GRAPH_ARGUMENTS, supersedes=["wiki/wiki-2757.md", "wiki/wiki-2760.md"])
+        edges = set(GRAPH_EXPECTED_EDGES)
+        edges.add(("doc:/vault/wiki/wiki-2810.md", "supersedes", "doc:/vault/wiki/wiki-2757.md"))
+        event = _run(
+            {"wiki-2810": GRAPH_NOTE, "wiki-2757": OLD_NOTE},
+            _supersede_answer(),
+            arguments=args,
+            graph=lambda paths: _snapshot(
+                edges,
+                GRAPH_NEW_CLAIMS,
+                documents={GRAPH_NEW_PATH, OLD_PATH},
+            ),
+        )
+        self.assertEqual(event.status, "ok", event.reason)
+        self.assertEqual(event.edges, "ok")
+
+    def test_graph_read_failure_leaves_an_unchecked_reason(self):
+        # 조회 자체를 못 하면 (다) 사유만 남긴다 — 없는 걸 본 것처럼 속이지 않는다.
+        event = _run(
+            {"wiki-2810": GRAPH_NOTE},
+            GRAPH_MCP_ANSWER,
+            arguments=GRAPH_ARGUMENTS,
+            graph=lambda paths: None,
+        )
+        self.assertEqual(event.status, "ok", event.reason)
+        self.assertEqual(event.edges, "unchecked")
+        self.assertEqual(event.seal, "unchecked")
+        self.assertIn("graph-unchecked (다)", event.reason)
+
+    def test_no_reader_is_unchecked_too(self):
+        # read_graph 를 싣지 않은 환경(옛 문 wiring·단위 시험) — 칸만 unchecked 로 남긴다.
+        event = _run({"wiki-2810": GRAPH_NOTE}, GRAPH_MCP_ANSWER, arguments=GRAPH_ARGUMENTS)
+        self.assertEqual(event.status, "ok", event.reason)
+        self.assertEqual(event.edges, "unchecked")
+        self.assertEqual(event.seal, "unchecked")
+
+
+class SealCompareTests(unittest.TestCase):
+    """E3b — 대체 봉인 대조: 새 노트가 다시 말한 슬롯만 닫는 게 목표(부분 닫기).
+    엔진이 통째로 닫으면 그 어긋남은 (나) 「의도한 차이 — 부분 닫기」다(wiki-2855).
+    통째 봉인으로 바꾸는 변이는 (나) 단언에서 빨갛게 끝난다."""
+
+    def _supersede_run(self, claims, files=None, **options):
+        args = dict(GRAPH_ARGUMENTS, supersedes=["wiki/wiki-2757.md"])
+        files = files or {"wiki-2810": GRAPH_NOTE, "wiki-2757": OLD_NOTE}
+        edges = set(GRAPH_EXPECTED_EDGES)
+        edges.add(("doc:/vault/wiki/wiki-2810.md", "supersedes", f"doc:{OLD_PATH}"))
+        return _run(
+            files,
+            _supersede_answer(),
+            arguments=options.pop("arguments", args),
+            graph=options.pop("graph", lambda paths: _snapshot(edges, claims, {GRAPH_NEW_PATH, OLD_PATH})),
+            **options,
+        )
+
+    def test_wholesale_seal_is_the_intended_difference_reason_nah(self):
+        # 엔진이 옛 노트의 현재 claim 을 통째로 닫았다(store.rs:2898). 목표는 다시 말한
+        # (배포,절차) 하나뿐 — 모니터링·알림 둘은 산다. 어긋남 둘은 사유 (나)로 남는다.
+        claims = OLD_CLAIMS_ALL_SEALED + GRAPH_NEW_CLAIMS
+        event = self._supersede_run(claims)
+        self.assertEqual(event.status, "mismatch")
+        self.assertEqual(event.edges, "ok", "supersedes 간선은 목표에 있고 실제에도 있다")
+        self.assertEqual(event.seal, "engine-only=2")
+        self.assertIn("seal engine-only=2 (나 intended-diff partial-close)", event.reason)
+        self.assertNotIn("python-only", event.reason)
+
+    def test_partial_close_match_is_ok(self):
+        # 엔진이 (가능성은 희박하지만) 부분 닫기를 했다면 어긋남이 없다 — 대조 자체의 시험.
+        claims = (
+            ClaimRow(OLD_PATH, "배포", "절차", "fact", True),
+            ClaimRow(OLD_PATH, "모니터링", "대상", "fact", False),
+            ClaimRow(OLD_PATH, "알림", "채널", "fact", False),
+        ) + GRAPH_NEW_CLAIMS
+        event = self._supersede_run(claims)
+        self.assertEqual(event.status, "ok", event.reason)
+        self.assertEqual(event.seal, "ok")
+
+    def test_engine_leaving_a_restated_slot_open_is_python_only(self):
+        # 다시 말한 슬롯마저 엔진이 살린 것 — 목표보다 덜 닫은 것이라 사유 (가)다.
+        claims = (
+            ClaimRow(OLD_PATH, "배포", "절차", "fact", False),
+            ClaimRow(OLD_PATH, "모니터링", "대상", "fact", False),
+            ClaimRow(OLD_PATH, "알림", "채널", "fact", False),
+        ) + GRAPH_NEW_CLAIMS
+        event = self._supersede_run(claims)
+        self.assertEqual(event.status, "mismatch")
+        self.assertEqual(event.seal, "python-only=1")
+        self.assertIn("seal python-only=1 (가)", event.reason)
+
+    def test_fresh_note_rows_are_expected_alive(self):
+        # 대체가 아닌 저장 — 새 노트 행이 살아 있으면 봉인 대조는 ok.
+        event = _run(
+            {"wiki-2810": GRAPH_NOTE},
+            GRAPH_MCP_ANSWER,
+            arguments=GRAPH_ARGUMENTS,
+            graph=lambda paths: _snapshot(GRAPH_EXPECTED_EDGES, GRAPH_NEW_CLAIMS),
+        )
+        self.assertEqual(event.status, "ok", event.reason)
+        self.assertEqual(event.seal, "ok")
+
+
+class OwnerSupersedeRefusalTests(unittest.TestCase):
+    """E3b — 오너가 쓴 노트를 오너 아닌 호출이 대체하려 하면 양쪽 다 거절한다
+    (owner.rs:64-80; 엔진 사건 owner_supersede_refused). 운영 DB 에 owner 작성 노트가
+    없으니(2026-10-02 확인) 이 갈래는 픽스처가 덮는다 — wiki-2877 의 「없으면 픽스처」."""
+
+    def test_non_owner_superseding_an_owner_note_is_refused_on_both_sides(self):
+        args = dict(GRAPH_ARGUMENTS, supersedes=["wiki/wiki-2757.md"])
+        refused = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32602,
+                "message": "only the owner may supersede an owner-written note: /vault/wiki/wiki-2757.md",
+            },
+        }
+        files = {"wiki-2810": GRAPH_NOTE, "wiki-2757": OWNER_OLD_NOTE}
+        event = _run(files, refused, arguments=args)
+        self.assertEqual(event.status, "ok", event.reason)
+        self.assertEqual(
+            event.decision,
+            "refused:only the owner may supersede an owner-written note",
+        )
+        self.assertEqual(event.engine_decision, event.decision)
+
+    def test_owner_may_supersede_an_owner_note(self):
+        # 오너 호출은 오너 노트를 대체할 수 있다 — 게이트를 지나 저장으로 떨어진다.
+        args = dict(GRAPH_ARGUMENTS, supersedes=["wiki/wiki-2757.md"])
+        claims = (
+            ClaimRow(OLD_PATH, "배포", "절차", "fact", True),  # 다시 말한 슬롯만 닫힘
+            ClaimRow(OLD_PATH, "모니터링", "대상", "fact", False),
+            ClaimRow(OLD_PATH, "알림", "채널", "fact", False),
+        ) + GRAPH_NEW_CLAIMS
+        edges = set(GRAPH_EXPECTED_EDGES)
+        edges.add(("doc:/vault/wiki/wiki-2810.md", "supersedes", f"doc:{OLD_PATH}"))
+        files = {"wiki-2810": GRAPH_NOTE, "wiki-2757": OWNER_OLD_NOTE}
+        event = _run(
+            files,
+            _supersede_answer(),
+            arguments=args,
+            is_owner=True,
+            graph=lambda paths: _snapshot(edges, claims, {GRAPH_NEW_PATH, OLD_PATH}),
+        )
+        self.assertEqual(event.status, "ok", event.reason)
+        self.assertEqual(event.decision, "stored")
+        self.assertEqual(event.seal, "ok")
+
+    def test_refusal_direction_names_engine_and_python(self):
+        # 엔진은 저장했는데 그림자가 거절 — document.author 와 볼트 author 가 갈린 드리프트.
+        # 사유는 결정 어긋남으로 남고 어느 쪽이 거절인지 적힌다.
+        args = dict(GRAPH_ARGUMENTS, supersedes=["wiki/wiki-2757.md"])
+        files = {"wiki-2810": GRAPH_NOTE, "wiki-2757": OWNER_OLD_NOTE}
+        event = _run(files, GRAPH_MCP_ANSWER, arguments=args)
+        self.assertEqual(event.status, "mismatch")
+        self.assertIn("decision engine=stored", event.reason)
+        self.assertIn("python=refused", event.reason)
+
+
+class ElapsedFieldsTests(unittest.TestCase):
+    """E3b — 사건의 소요 시간 칸: 전체·임베딩·DB 읽기가 항상 찍힌다. 칸을 빼는 변이는
+    여기서 빨갛게 끝난다."""
+
+    def test_elapsed_fields_are_recorded(self):
+        def nearest(text: str, exclude: str | None):
+            time.sleep(0.02)
+            return Ok(None)
+
+        def read_graph(paths):
+            time.sleep(0.01)
+            return _snapshot(GRAPH_EXPECTED_EDGES, GRAPH_NEW_CLAIMS)
+
+        event = _run(
+            {"wiki-2810": GRAPH_NOTE},
+            GRAPH_MCP_ANSWER,
+            arguments=GRAPH_ARGUMENTS,
+            nearest=nearest,
+            graph=read_graph,
+        )
+        self.assertEqual(event.status, "ok", event.reason)
+        self.assertGreaterEqual(event.elapsed_embedding_s, 0.015)
+        self.assertGreaterEqual(event.elapsed_db_s, 0.005)
+        self.assertGreaterEqual(event.elapsed_total_s, event.elapsed_embedding_s + event.elapsed_db_s)
+
+    def test_payload_carries_elapsed_and_graph_fields(self):
+        from ohmyboring.remember.shadow import event_payload
+
+        event = _run(
+            {"wiki-2810": GRAPH_NOTE},
+            GRAPH_MCP_ANSWER,
+            arguments=GRAPH_ARGUMENTS,
+            graph=lambda paths: _snapshot(GRAPH_EXPECTED_EDGES, GRAPH_NEW_CLAIMS),
+        )
+        payload = event_payload(event)
+        for key in ("elapsed_total_s", "elapsed_embedding_s", "elapsed_db_s", "edges", "seal"):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["edges"], "ok")
+        self.assertEqual(payload["seal"], "ok")
 
 
 if __name__ == "__main__":

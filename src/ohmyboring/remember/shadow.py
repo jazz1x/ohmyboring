@@ -1,21 +1,32 @@
 """remember 그림자 — 같은 요청을 파이썬 쓰기 경로에 「쓰지 않고」 태워 「엔진이 한 결정과
-같은 결정을 했을지」를 사건 한 줄로 보여 준다 (E3a-2).
+같은 결정을 했을지」를 사건 한 줄로 보여 준다 (E3a-2, E3b).
 
 문이 remember 를 엔진으로 바이트 그대로 넘기고 응답까지 본 뒤에 이 모듈을 돌린다 — 그림자는
 응답에 영향이 없어야 한다. 쓰기 0: 볼트·DB·그래프에 손 대는 일 없이 사건(remember_shadow)
 한 줄의 재료만 만든다(기록은 문 핸들러가 adapters/events 에). 본문 원문은 사건에 싣지
 않는다(비밀 경계 — 칸 이름·경로·규칙 이름·사유만 싣는다).
 
-대조는 두 겹이다:
+대조는 세 겹이다:
 1. 결정 대조 — 파이썬이 같은 결정을 낼지: PII 게이트(pii.py, block 이면 거절)를 지나
    중복 문(dedup.py)의 갈래마다(same_session·probable_session·exact_title·embedding,
    대체는 점수 판정) 걸러서 stored | superseded | skipped | blocked | refused 를 내고
-   엔진 응답의 결정과 맞춘다. 걸러진 요청은 결정만 비교한다 — 기존 노트와 칸별 대조는
-   안 한다(요청을 쓴 것이 아니니 칸을 맞출 이유가 없다. E3a-1 은 여기서 어긋남 하나를
-   거짓으로 냈고, 그 사례가 걸러둘 결정만 비교한다는 단언으로 못 박혀 있다).
+   엔진 응답의 결정과 맞춘다. 거절은 owner 자격 두 갈래다 — owner 를 자처하는 호출이
+   토큰 없이 온 것, 그리고 (E3b) 오너가 쓴 노트를 오너 아닌 호출이 대체하려 한 것
+   (owner.rs:64-80 refused_supersedes, 엔진 사건 owner_supersede_refused 와 한 쌍).
+   걸러진 요청은 결정만 비교한다 — 기존 노트와 칸별 대조는 안 한다(요청을 쓴 것이
+   아니니 칸을 맞출 이유가 없다. E3a-1 은 여기서 어긋남 하나를 거짓으로 냈고, 그 사례가
+   걸러둘 결정만 비교한다는 단언으로 못 박혀 있다).
 2. 칸 대조(E3a-1) — stored/superseded 에서만: 엔진이 실제로 쓴 노트를 볼트(ro)에서 읽어
    파이썬 렌더와 칸별로 맞춘다. id·date 는 엔진 것을 그대로 받아 렌더에 넣고 relates_to
    는 그래프 투영이 다시 쓰므로 제외.
+3. 그래프 대조(E3b) — stored/superseded 에서만, 읽기 전용 세션으로 실제 그래프를 읽어
+   「그 노트가 그래프와 사실에 남긴 것」까지 목표(graph.py)와 맞춘다:
+   · 간선 집합 — uses·about·claims·is_a·said·tagged(+in_project·claim_of_project)
+     ·supersedes. 어긋남은 빠지거나 다른 간선이니 사유는 (가) python 결함 쪽이다.
+   · claim 봉인 — 새 노트가 쓴 행은 산다. 대체에서 옛 노트의 행은 새 노트가 다시 말한
+     (subject, predicate) 슬롯만 닫힌다(부분 닫기). 엔진이 통째로 닫으면(store.rs:2898
+     seal_superseded_claims) 그 어긋남은 사유 (나) 「의도한 차이 — 부분 닫기」
+     (판정 wiki-2855)다. 모델 호출 0 — 그래프 조회는 읽기 전용 DB 세션뿐이다.
 
 어긋남마다 사유를 남겨, 사걸만 보고 (가) 파이썬 결함 (나) 엔진이 틀렸거나 의도한 차이
 (다) 모름 셋 중 어디인지 가른다. 사유 어휘(한 줄, grep 가능):
@@ -23,6 +34,14 @@
   fields <칸,…>                        — 칸 불일치
   pii-rules <규칙,…>                   — 칸 차이를 설명하는 PII 규칙(가림 입력이 갈린 것)
   pii-gate-missing                     — 그림자에 규칙 파일이 없는데 엔진 노트에 pii-flag
+  edges missing=<부류:n,…> extra=<부류:n,…> — 간선 집합 어긋남 (가)
+  seal engine-only=<n> (나 intended-diff partial-close) — 대체 때 엔진이 목표보다 더 닫음
+  seal python-only=<n> (가)            — 목표는 닫았는데 실제로 산 행
+  graph-unchecked (다): <사유>         — 그래프 조회 자체를 못 함(DSN 부재 등)
+
+사건에는 어긋남과 별개로 소요 시간이 항상 찍힌다 — elapsed_total_s·elapsed_embedding_s
+(프로브)·elapsed_db_s(그래프 조회)를 나눠 적는다(2026-10-02 문 수정 뒤 첫 운영 건: 응답
+0.67s, 그림자 5.7s — 어디서 쓰는지 미확인이던 것의 근거).
 
 실패는 전부 값(ShadowEvent status=error 의 사유)으로 돌아오고, 예외는 문 핸들러 경계에서
 한 번 접는다.
@@ -32,6 +51,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
@@ -39,6 +59,7 @@ from typing import Any
 import yaml
 
 from ohmyboring.remember import dedup as _dedup
+from ohmyboring.remember import graph as _graph
 from ohmyboring.remember import pii as _pii
 from ohmyboring.remember.parse import (
     RememberNote,
@@ -121,7 +142,10 @@ class Decision:
 
 @dataclass(frozen=True)
 class ShadowEvent:
-    """사건 한 줄의 재료 — status ok(일치)·mismatch·error, 칸별 불일치 이름(fields)."""
+    """사건 한 줄의 재료 — status ok(일치)·mismatch·error, 칸별 불일치 이름(fields).
+
+    edges·seal 은 그래프 대조(E3b)의 요약 — 각각 "ok"·"unchecked"·어긋남 한 줄.
+    elapsed_* 는 어긋남과 별개로 항상 찍히는 소요 시간(초, 임베딩·DB 읽기·전체)."""
 
     status: str
     source_path: str | None = None
@@ -132,6 +156,11 @@ class ShadowEvent:
     decision: str | None = None  # 파이썬 결정 describe()
     engine_decision: str | None = None  # 엔진 결정 describe()
     branch: str | None = None  # 파이썬이 찾은 중복 갈래
+    edges: str | None = None  # 간선 집합 대조 요약 — ok / missing=… extra=… / unchecked
+    seal: str | None = None  # claim 봉인 대조 요약 — ok / engine-only=… (나…) / unchecked
+    elapsed_total_s: float = 0.0
+    elapsed_embedding_s: float = 0.0
+    elapsed_db_s: float = 0.0
 
 
 def wiki_stem(source_path: str) -> str | None:
@@ -403,10 +432,64 @@ class ShadowRequest:
     pii_scanner: _pii.PiiScanner | None  # 문이 볼트 rules 에서 불러 온 게이트 (없음 = 비활성)
     is_owner: bool = False  # owner token 검증 통과 여부 — 문이 헤더와 비교해 싣는다
     nearest_document: _dedup.NearestDocument | None = None  # 임베딩 갈래 (없음 = 그 갈래 못 봄)
+    read_graph: Callable[[tuple[str, ...]], _graph.GraphSnapshot | None] | None = None
+    # 문이 싣는 읽기 전용 그래프 조회(E3b) — 없음/None 반환 = 조회 못 함(사유 (다))
+
+
+def _owner_written_targets(request: ShadowRequest, targets: list[str]) -> list[str]:
+    """대체 대상 중 오너가 쓴 노트의 경로 — owner.rs:64-80 refused_supersedes 의 판정.
+
+    근거는 볼트 머리말 author(엔진이 document.author 에 넣은 것과 같다). 없는 노트는
+    엔진이 unknown 으로 세고 간선·거절 모두 안 하는 것이니 판정에서 빼고, wiki 가 아닌
+    경로는 읽을 수 없어 뺀다. 비오너 호출에서 이 목록이 비어 있지 않으면 거절이다."""
+    refused: list[str] = []
+    for target in targets:
+        stem = wiki_stem(target)
+        if stem is None:
+            continue
+        text = request.read_note(request.vault_dir, stem)
+        if text is None:
+            continue
+        match _parse_note_text(text, request.split_frontmatter):
+            case Err(_):
+                continue
+            case Ok((front, _)):
+                pass
+        if front.get("author") == "owner":
+            refused.append(target)
+    return refused
+
+
+def _owner_supersede_refusal(request: ShadowRequest, supersedes: list[str]) -> Decision | None:
+    """오너가 쓴 노트를 오너 아닌 호출이 대체하려 할 때의 거절 결정 — 아니면 None.
+
+    엔진과 같은 자리(PII 게이트 앞, mcp.rs:1355-1358)에서 같은 사유로 거절한다. 엔진은
+    이 때 owner_supersede_refused 사건을 남기고 -32602 로 끝낸다(owner.rs:64-92) —
+    사유 문구가 같아야 결정 describe 가 맞는다."""
+    if not supersedes or request.is_owner:
+        return None
+    if _owner_written_targets(request, supersedes):
+        return Decision(DECISION_REFUSED, detail="only the owner may supersede an owner-written note")
+    return None
+
+
+def _pii_gate_decision(request: ShadowRequest, note: RememberNote) -> tuple[Decision | None, RememberNote]:
+    """PII 게이트 — 규칙 파일이 없으면 비활성으로 그대로 통과, block 이면 거절 결정."""
+    if request.pii_scanner is None:
+        return (None, note)
+    match _pii.apply_pii_gate(request.pii_scanner, note):
+        case Err(reason):
+            # "PII gate blocked by rule '…' (…): …" — 규칙 이름은 detail 에.
+            detail = reason
+            if match := _PII_BLOCK_RE.search(reason):
+                detail = match.group(1)
+            return (Decision(DECISION_BLOCKED, detail=detail), note)
+        case Ok(gated):
+            return (None, gated)
 
 
 def _gate_decision(request: ShadowRequest, note: RememberNote) -> tuple[Decision | None, RememberNote, bool]:
-    """owner 자격 → supersedes 모양 → PII 게이트 — mcp.rs:1350-1364 순서 그대로.
+    """owner 자격 → supersedes 모양·대상 → PII 게이트 — mcp.rs:1346-1364 순서 그대로.
 
     결정이 났으면 (결정, 노트, False) — refused/blocked. 아니면 (None, 게이트를 지난
     노트, supersedes 여부)를 넘겨 중복 문으로 본다."""
@@ -425,18 +508,13 @@ def _gate_decision(request: ShadowRequest, note: RememberNote) -> tuple[Decision
         case Ok(supersedes):
             pass
 
-    if request.pii_scanner is None:
-        return (None, note, bool(supersedes))
-    match _pii.apply_pii_gate(request.pii_scanner, note):
-        case Err(reason):
-            # "PII gate blocked by rule '…' (…): …" — 규칙 이름은 detail 에.
-            detail = reason
-            if match := _PII_BLOCK_RE.search(reason):
-                detail = match.group(1)
-            return (Decision(DECISION_BLOCKED, detail=detail), note, False)
-        case Ok(gated):
-            pass
-    return (None, gated, bool(supersedes))
+    if refusal := _owner_supersede_refusal(request, supersedes):
+        return (refusal, note, False)
+
+    decision, note = _pii_gate_decision(request, note)
+    if decision is not None:
+        return (decision, note, False)
+    return (None, note, bool(supersedes))
 
 
 def _dedup_decision(request: ShadowRequest, note: RememberNote, exclude: frozenset[str]) -> Decision:
@@ -480,9 +558,9 @@ def _python_decision(
     if early is not None:
         return (early, note)
     if supersedes:
-        # 교정은 언제나 새 노트로 떨어진다(중복 문을 안 탄다 — mcp.rs:1367). owner 가
-        # 아닌 호출이 owner 노트를 교정 대상으로 명명하면 엔진은 -32602 로 거절하는데,
-        # 그 판정(owner_authored 조회)은 이식하지 않았다 — 사유가 필요하면 여기서 다름으로 뜬다.
+        # 교정은 언제나 새 노트로 떨어진다(중복 문을 안 탄다 — mcp.rs:1367 needs_dedup).
+        # 오너 노트를 오너 아닌 호출이 대상으로 명명한 거절은 이미 게이트(_gate_decision)에서
+        # 끝났다 — 여기까지 온 교정은 저장이 맞다.
         return (Decision(DECISION_STORED), note)
     return (_dedup_decision(request, note, exclude), note)
 
@@ -754,31 +832,248 @@ def _field_compare(
     extracted: Extracted,
     gated_note: RememberNote,
     ctx: _CompareCtx,
-) -> ShadowEvent:
-    """저장·대체의 칸 대조 — 읽기·렌더 각 단계의 실패는 error, 마지막에 칸별 대조."""
+) -> tuple[ShadowEvent, dict[str, Any] | None]:
+    """저장·대체의 칸 대조 — 읽기·렌더 각 단계의 실패는 (error, None), 성공은 (사건, 엔진 머리말).
+
+    엔진 머리말은 그래프 대조(E3b)에서 투영 입력으로 다시 쓴다 — 그래프 조회는 실제로 쓰인
+    노트를 기준으로 해야 렌더 어긋남과 섞이지 않는다."""
     match _read_inputs(request, extracted, ctx.omb_session_id):
         case Err(event):
-            return event
+            return (event, None)
         case Ok((engine_front, engine_note_body)):
             pass
     match _render_python(extracted, gated_note, engine_front, request.split_frontmatter, ctx.omb_session_id):
         case Err(event):
-            return event
+            return (event, None)
         case Ok((engine_view, py_view, py_body)):
             pass
-    return _compare(
-        extracted,
-        engine_view,
-        py_view,
-        (engine_note_body, py_body),
-        ctx,
+    return (
+        _compare(
+            extracted,
+            engine_view,
+            py_view,
+            (engine_note_body, py_body),
+            ctx,
+        ),
+        engine_front,
     )
 
 
-def run_shadow(request: ShadowRequest) -> ShadowEvent:
-    """파이썬 쓰기 경로를 「쓰지 않고」 태워 엔진과 결정·칸을 대조 — 사건 한 줄의 재료.
+#: 그래프 대조(E3b)의 시간을 재는 막대기 — run_shadow 가 입구에서 감싼다.
+@dataclass
+class _Timers:
+    embedding: float = 0.0
+    db: float = 0.0
 
-    읽기 쪽 실패(vault 파일 없음 등)는 값으로 돌아오고, 예외는 문 핸들러 경계에서 접는다."""
+
+def _timed(fn: Callable[..., Any], timers: _Timers, attr: str) -> Callable[..., Any]:
+    """호출 한 번마다 걸린 초를 timers 에 누적하는 같은 모양의 껍질."""
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        started = time.monotonic()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            setattr(timers, attr, getattr(timers, attr) + time.monotonic() - started)
+
+    return wrapper
+
+
+def _edge_summary(missing: dict[str, int], extra: dict[str, int]) -> str:
+    """간선 어긋남 한 줄 — missing=uses:1,about:1 extra=is_a:2 식. 둘 다 비면 ok."""
+    if not missing and not extra:
+        return "ok"
+    parts = []
+    if missing:
+        parts.append("missing=" + ",".join(f"{k}:{n}" for k, n in sorted(missing.items())))
+    if extra:
+        parts.append("extra=" + ",".join(f"{k}:{n}" for k, n in sorted(extra.items())))
+    return " ".join(parts)
+
+
+def _graph_section(
+    request: ShadowRequest,
+    extracted: Extracted,
+    engine_decision: Decision,
+    engine_front: dict[str, Any],
+    base: ShadowEvent,
+) -> ShadowEvent:
+    """그래프 대조(E3b) — 저장·대체에서만: 실제 그래프를 읽어 간선 집합과 claim 봉인을
+    목표(graph.py)와 맞추고, 어긋남을 사건에 얹는다. 조회 소요 시간은 run_shadow 가 싼
+    껍질이 재니 여기서는 안 본다.
+
+    조회 자체를 못 하면 칸에 unchecked 와 (다) 사유만 남기고 넘어간다 — 「모름」은 어긋남이
+    아니라 status 를 올리지 않는다. 그림자는 응답 뒤라 실패가 요청에 닿는 일은 없지만, 사건이
+    「못 봤다」를 속이지 않고 말해야 한다."""
+    match _front_view(engine_front):
+        case Err(reason):
+            return _attach_graph(
+                base,
+                edges="unchecked",
+                seal="unchecked",
+                clause=f"graph-unchecked (다): engine note: {reason}",
+            )
+        case Ok(engine_view):
+            pass
+    paths = _graph_paths(request, extracted, engine_decision)
+    if request.read_graph is None:
+        return _attach_graph(base, edges="unchecked", seal="unchecked", clause=None)
+    snapshot = request.read_graph(paths)
+    if snapshot is None:
+        return _attach_graph(
+            base, edges="unchecked", seal="unchecked", clause="graph-unchecked (다): read failed"
+        )
+    plan = _build_graph_plan(request, extracted, engine_decision, engine_view, snapshot)
+    return _graph_verdict(plan, snapshot.claims, extracted.source_path, base)
+
+
+def _graph_paths(request: ShadowRequest, extracted: Extracted, engine_decision: Decision) -> tuple[str, ...]:
+    """조회할 문서 경로 — 새 노트와 교정·대체 대상들(요청 인자 + 엔진 답)."""
+    paths = {extracted.source_path}
+    match parse_supersedes(request.arguments):
+        case Ok(targets):
+            paths.update(t for t in targets if t != extracted.source_path)
+        case Err(_):
+            pass
+    if engine_decision.outcome == DECISION_SUPERSEDED and engine_decision.existing_path:
+        paths.add(engine_decision.existing_path)
+    return tuple(sorted(paths))
+
+
+@dataclass(frozen=True)
+class _GraphPlan:
+    """그래프 대조 한 번의 재료 — 목표 간선·실제 간선·소속 노드·대상 경로·다시 말한 슬롯."""
+
+    expected: frozenset[tuple[str, str, str]]
+    actual: frozenset[tuple[str, str, str]]
+    new_nodes: frozenset[str]
+    superseded_paths: frozenset[str]
+    slots: frozenset[tuple[str, str]]
+
+
+def _valid_supersedes_targets(
+    request: ShadowRequest,
+    extracted: Extracted,
+    engine_decision: Decision,
+    documents: frozenset[str],
+) -> list[str]:
+    """교정·대체 대상 중 간선이 실제로 쓰일 경로 — 문서 행이 확인된 것만. 엔진이 unknown 으로
+    세고 안 쓰는 것과 같다(store.rs:2866-2876). 요청 인자의 대상 + 엔진 답이 말한 대체."""
+    match parse_supersedes(request.arguments):
+        case Ok(targets):
+            arg_targets = [t for t in targets if t != extracted.source_path]
+        case Err(_):
+            arg_targets = []
+    valid = [t for t in arg_targets if t in documents]
+    if engine_decision.outcome == DECISION_SUPERSEDED and engine_decision.existing_path:
+        if engine_decision.existing_path not in valid:
+            valid.append(engine_decision.existing_path)
+    return valid
+
+
+def _build_graph_plan(
+    request: ShadowRequest,
+    extracted: Extracted,
+    engine_decision: Decision,
+    engine_view: dict[str, Any],
+    snapshot: _graph.GraphSnapshot,
+) -> _GraphPlan:
+    """대조 재료 한 벌 — 목표 투영과 실제 그래프, 그리고 이 노트가 책임지는 노드 집합."""
+    targets = _valid_supersedes_targets(request, extracted, engine_decision, snapshot.documents)
+    expected = _graph.expected_edges(engine_view, extracted.source_path, tuple(targets))
+    actual = frozenset(e for e in snapshot.edges if e[1] in _graph.PROJECTION_KINDS)
+    # 이 노트가 책임지는 노드 — 새 문서 노드와 새 노트가 말한 claim 노드. 함께 조회된 옛
+    # 노트의 잔여 간선(is_a 등)은 이 노트의 것이 아니라 어긋남에 안 센다.
+    new_nodes = frozenset({f"doc:{extracted.source_path}"} | {dst for _, k, dst in expected if k == "claims"})
+    return _GraphPlan(
+        expected=expected,
+        actual=actual,
+        new_nodes=new_nodes,
+        superseded_paths=frozenset(targets),
+        slots=_graph.restated_slots(engine_view),
+    )
+
+
+def _edge_divergence(
+    expected: frozenset[tuple[str, str, str]],
+    actual: frozenset[tuple[str, str, str]],
+    new_nodes: frozenset[str],
+) -> tuple[dict[str, int], dict[str, int]]:
+    """목표와 실제의 차이를 부류별로 — 끝점 하나가 이 노트의 노드인 간선만 센다."""
+    missing: dict[str, int] = {}
+    extra: dict[str, int] = {}
+    for src, kind, dst in expected - actual:
+        if src in new_nodes or dst in new_nodes:
+            missing[kind] = missing.get(kind, 0) + 1
+    for src, kind, dst in actual - expected:
+        if src in new_nodes or dst in new_nodes:
+            extra[kind] = extra.get(kind, 0) + 1
+    return missing, extra
+
+
+def _graph_clauses(edges: str, verdict: _graph.SealVerdict) -> list[str]:
+    """어긋남 사유 절들 — 각각 (가)/(나) 를 겉에 두어 grep 으로 갈래를 가른다."""
+    clauses = []
+    if edges != "ok":
+        clauses.append(f"edges {edges} (가)")
+    if verdict.python_only:
+        clauses.append(f"seal python-only={verdict.python_only} (가)")
+    superseded_only = verdict.engine_only - verdict.engine_only_on_new_note
+    if superseded_only > 0:
+        # 대상 노트에서만 더 닫힌 행 — 통째 봉인 대 부분 닫기의 어긋남, 판정이 난 의도한 차이.
+        clauses.append(f"seal engine-only={superseded_only} (나 intended-diff partial-close)")
+    if verdict.engine_only_on_new_note:
+        clauses.append(f"seal engine-only-on-new={verdict.engine_only_on_new_note} (나)")
+    return clauses
+
+
+def _graph_verdict(
+    plan: _GraphPlan, claims: tuple[_graph.ClaimRow, ...], new_path: str, base: ShadowEvent
+) -> ShadowEvent:
+    """간선 집합과 봉인을 각각 목표와 맞춘다 — 어긋남이면 사유 절을 얹고 status 를 올린다."""
+    missing, extra = _edge_divergence(plan.expected, plan.actual, plan.new_nodes)
+    edges = _edge_summary(missing, extra)
+    verdict = _graph.compare_seals(
+        _graph.expected_seal_states(claims, new_path, plan.slots, plan.superseded_paths), new_path
+    )
+    seal = _seal_summary(verdict)
+    clauses = _graph_clauses(edges, verdict)
+    return _attach_graph(
+        base, edges=edges, seal=seal, clause="; ".join(clauses) or None, divergence=bool(clauses)
+    )
+
+
+def _seal_summary(verdict: _graph.SealVerdict) -> str:
+    """봉인 대조 요약 한 줄 — 어긋남이 없으면 ok."""
+    if verdict.engine_only == 0 and verdict.python_only == 0:
+        return "ok"
+    parts = []
+    if verdict.engine_only:
+        parts.append(f"engine-only={verdict.engine_only}")
+    if verdict.python_only:
+        parts.append(f"python-only={verdict.python_only}")
+    return " ".join(parts)
+
+
+def _attach_graph(
+    base: ShadowEvent, *, edges: str, seal: str, clause: str | None, divergence: bool = False
+) -> ShadowEvent:
+    """칸 대조 사건에 그래프 대조 결과를 얹는다 — 사유 절은 덧붙이고, 실제 어긋남이
+    있을 때만 status 를 mismatch 로 올린다(「모름」 사유는 status 에 영향 없음)."""
+    reason = base.reason
+    if clause:
+        reason = f"{reason}; {clause}" if reason else clause
+    return replace(
+        base,
+        status="mismatch" if divergence else base.status,
+        reason=reason,
+        edges=edges,
+        seal=seal,
+    )
+
+
+def _run(request: ShadowRequest) -> ShadowEvent:
+    """그림자의 몸통 — 입구부터 결정·칸·그래프 대조까지. 실패는 전부 값으로."""
     omb_session_id = _omb_session_id(request.arguments)
     match _open(request):
         case Err(event):
@@ -790,7 +1085,7 @@ def run_shadow(request: ShadowRequest) -> ShadowEvent:
     )
     if event := _early_event(extracted, omb_session_id, python_decision, engine_decision):
         return event
-    return _field_compare(
+    base, engine_front = _field_compare(
         request,
         extracted,
         gated_note,
@@ -801,11 +1096,40 @@ def run_shadow(request: ShadowRequest) -> ShadowEvent:
             engine_decision=engine_decision,
         ),
     )
+    if base.status == "error" or engine_front is None:
+        return base
+    return _graph_section(request, extracted, engine_decision, engine_front, base)
+
+
+def run_shadow(request: ShadowRequest) -> ShadowEvent:
+    """파이썬 쓰기 경로를 「쓰지 않고」 태워 엔진과 결정·칸·그래프를 대조 — 사건 한 줄의 재료.
+
+    읽기 쪽 실패(vault 파일 없음 등)는 값으로 돌아오고, 예외는 문 핸들러 경계에서 접는다.
+    어느 경로로 끝나든 소요 시간(전체·임베딩·DB)은 사건에 찍힌다."""
+    started = time.monotonic()
+    timers = _Timers()
+    if request.nearest_document is not None:
+        request = replace(request, nearest_document=_timed(request.nearest_document, timers, "embedding"))
+    if request.read_graph is not None:
+        request = replace(request, read_graph=_timed(request.read_graph, timers, "db"))
+    event = _run(request)
+    return replace(
+        event,
+        elapsed_total_s=round(time.monotonic() - started, 3),
+        elapsed_embedding_s=round(timers.embedding, 3),
+        elapsed_db_s=round(timers.db, 3),
+    )
 
 
 def event_payload(event: ShadowEvent) -> dict[str, Any]:
     """adapters/events 기록용 본문 — 본문 원문은 전부 빠진다(비밀 경계)."""
-    payload: dict[str, Any] = {"fields": list(event.fields), "relates_to": RELATES_TO_EXCLUDED}
+    payload: dict[str, Any] = {
+        "fields": list(event.fields),
+        "relates_to": RELATES_TO_EXCLUDED,
+        "elapsed_total_s": event.elapsed_total_s,
+        "elapsed_embedding_s": event.elapsed_embedding_s,
+        "elapsed_db_s": event.elapsed_db_s,
+    }
     if event.source_path is not None:
         payload["source_path"] = event.source_path
     if event.omb_session_id is not None:
@@ -820,4 +1144,8 @@ def event_payload(event: ShadowEvent) -> dict[str, Any]:
         payload["engine_decision"] = event.engine_decision
     if event.branch is not None:
         payload["branch"] = event.branch
+    if event.edges is not None:
+        payload["edges"] = event.edges
+    if event.seal is not None:
+        payload["seal"] = event.seal
     return payload
