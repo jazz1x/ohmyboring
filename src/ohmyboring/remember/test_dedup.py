@@ -283,6 +283,11 @@ class ParseExistingTests(unittest.TestCase):
         existing = parse_existing_note("/vault/wiki/wiki-1.md", text, split_frontmatter)
         self.assertEqual(existing.author, "owner")
 
+    def test_number_looking_scalars_stay_text(self):
+        text = "---\nid: wiki-1\ntitle: 2026\nomb_session_id: 20261002\ndate: 2026-10-02\n---\n\n본문\n"
+        existing = parse_existing_note("/vault/wiki/wiki-1.md", text, split_frontmatter)
+        self.assertEqual((existing.title, existing.omb_session_id), ("2026", "20261002"))
+
 
 class CheckDuplicateTests(unittest.TestCase):
     def test_same_session_match(self):
