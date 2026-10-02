@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -56,11 +57,14 @@ for path in (ROOT / "src", ROOT / "agents" / "shared"):
 
 from vault_note import split_frontmatter  # noqa: E402
 
+from ohmyboring.adapters import vault as vault_notes  # noqa: E402
 from ohmyboring.remember import pii as remember_pii  # noqa: E402
 from ohmyboring.remember.graph import ClaimRow  # noqa: E402
+from ohmyboring.remember.index import DiskSeams, NoteIndex  # noqa: E402
 from ohmyboring.remember.shadow import (  # noqa: E402
     RELATES_TO_EXCLUDED,
     ShadowRequest,
+    event_payload,
     extract_from_http_response,
     extract_from_mcp_text,
     run_shadow,
@@ -1107,12 +1111,138 @@ class ElapsedFieldsTests(unittest.TestCase):
             "elapsed_embedding_s",
             "elapsed_db_s",
             "elapsed_vault_s",
+            "elapsed_parse_s",
             "edges",
             "seal",
         ):
             self.assertIn(key, payload)
         self.assertEqual(payload["edges"], "ok")
         self.assertEqual(payload["seal"], "ok")
+
+
+class NoteIndexShadowTests(unittest.TestCase):
+    """E3b-2 — 문 안의 노트 색인이 중복 문의 볼트 스캔을 대신하는 계약.
+
+    같은 픽스처 볼트에서 색인 경로와 디스크 훑기 경로의 결정이 같고, 사건에는 파싱
+    칸(elapsed_parse_s)이 찍혀 전체가 칸들의 합으로 설명된다. 채우기가 끝나기 전에
+    들어온 쓰기는 디스크 훑기로 떨어지는데 — 그 결정이 엔진과 같은 결정이라는 계약은
+    색인 있음·없음 어느 쪽에서도 갈리지 않는다(엔진은 쓰기 순간 디스크를 훑는다).
+
+    Mutation targets: 채우기 도중의 sync 를 빈 색인으로 바꾸는 변이(걸러둘 결정이
+    저장으로 뒤집힘), 색인 경로에서 엔진 신규 노트 제외를 빼는 변이 각각 여기서
+    빨갛게 끝난다."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        wiki = Path(self._tmp.name) / "wiki"
+        wiki.mkdir()
+        # 엔진이 방금 쓴 노트 — 요청 ARGUMENTS 의 세션(sess-1)을 그대로 갖는다.
+        (wiki / "wiki-2811.md").write_text(ENGINE_NOTE.replace("wiki-2801", "wiki-2811"), encoding="utf-8")
+        # 다른 세션·다른 제목·다른 본문의 옛 노트 — 이 세션의 요청과는 갈래가 안 걸린다.
+        (wiki / "wiki-100.md").write_text(
+            """---
+id: wiki-100
+title: 옛날 노트
+kind: note
+origin: personal
+project: ''
+date: "2026-09-20"
+tags: []
+tools: []
+concepts: []
+claims: []
+relates_to: []
+sources: []
+omb_session_id: sess-old
+author: unknown
+---
+
+옛날 회의 내용을 적어 둔 노트다.
+""",
+            encoding="utf-8",
+        )
+        self.index = NoteIndex(
+            DiskSeams(
+                vault_dir=self._tmp.name,
+                list_notes=self._list_notes,
+                read_note=vault_notes.read_note,
+                split_frontmatter=split_frontmatter,
+            )
+        )
+
+    def _list_notes(self) -> list[str]:
+        return sorted(
+            p.name[: -len(".md")] for p in (Path(self._tmp.name) / "wiki").iterdir() if p.name.endswith(".md")
+        )
+
+    def _answer(self, note_id: str = "2811") -> dict:
+        answer = json.loads(json.dumps(MCP_ANSWER))
+        answer["result"]["content"][0]["text"] = (
+            f"remembered → wiki/wiki-{note_id}.md · chunks 3 · graph(tools 1 concepts 1 claims 1) — recallable now"
+        )
+        return answer
+
+    def _run(self, note_index=None, answer=None):
+        return run_shadow(
+            ShadowRequest(
+                route="mcp",
+                arguments=ARGUMENTS,
+                engine_status=200,
+                engine_body=json.dumps(
+                    answer if answer is not None else self._answer(), ensure_ascii=False
+                ).encode(),
+                vault_dir=self._tmp.name,
+                read_note=vault_notes.read_note,
+                split_frontmatter=split_frontmatter,
+                list_notes=self._list_notes,
+                pii_scanner=None,
+                is_owner=False,
+                nearest_document=_no_nearest,
+                read_graph=None,
+                note_index=note_index,
+            )
+        )
+
+    def test_indexed_shadow_agrees_with_disk_scan(self):
+        direct = self._run()
+        self.assertEqual(direct.status, "ok", direct.reason)
+        self.index.prefill()
+        self.assertTrue(self.index.usable)
+        indexed = self._run(note_index=self.index)
+        self.assertEqual(indexed.status, "ok", indexed.reason)
+        self.assertEqual(indexed.decision, direct.decision, "색인 있음·없음이 같은 결정")
+        self.assertEqual(indexed.fields, direct.fields)
+        self.assertEqual(indexed.engine_decision, direct.engine_decision)
+
+    def test_write_during_prefill_matches_disk_scan(self):
+        # 같은 세션의 옛 노트를 하나 더 놓으면 디스크 훑기는 걸러둘 결정을 내린다 —
+        # 채우기 도중(sync() → None)에 들어온 쓰기도 그 결정을 그대로 내야 한다.
+        wiki = Path(self._tmp.name) / "wiki"
+        (wiki / "wiki-2999.md").write_text(ENGINE_NOTE.replace("wiki-2801", "wiki-2999"), encoding="utf-8")
+        answer = _skipped_answer("wiki-2999")
+        before = self._run(answer=answer)
+        self.assertEqual(before.status, "ok", before.reason)
+        self.assertEqual(before.decision, "skipped:/vault/wiki/wiki-2999.md", before.decision)
+        self.index.prefill()
+        after = self._run(note_index=self.index, answer=answer)
+        self.assertEqual(after.status, "ok", after.reason)
+        self.assertEqual(after.decision, before.decision, "채운 뒤 색인 경로도 같은 걸러둘 결정")
+
+    def test_elapsed_parse_recorded_with_index(self):
+        self.index.prefill()
+        event = self._run(note_index=self.index)
+        payload = event_payload(event)
+        self.assertIn("elapsed_parse_s", payload)
+        # 칸들의 합이 전체를 넘을 수 없다 — 잰 것들은 전부 전체 안에 있다.
+        columns = (
+            event.elapsed_embedding_s + event.elapsed_db_s + event.elapsed_vault_s + event.elapsed_parse_s
+        )
+        self.assertGreaterEqual(
+            event.elapsed_total_s + 0.005, columns, "칸들의 합이 전체를 설명한다(반올림 여유 5ms)"
+        )
+        # 색인이 이미 채워져 있으니 중복 문 스캔은 파싱을 거의 안 한다.
+        self.assertLess(event.elapsed_parse_s, 0.5, "미리 채운 뒤에는 볼트 통째 파싱이 없다")
 
 
 if __name__ == "__main__":

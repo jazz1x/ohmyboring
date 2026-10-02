@@ -40,7 +40,14 @@
   graph-unchecked (다): <사유>         — 그래프 조회 자체를 못 함(DSN 부재 등)
 
 사건에는 어긋남과 별개로 소요 시간이 항상 찍힌다 — elapsed_total_s·elapsed_embedding_s
-(프로브)·elapsed_db_s(그래프 조회)·elapsed_vault_s(볼트 목록·노트 읽기)를 나눠 적는다.
+(프로브)·elapsed_db_s(그래프 조회)·elapsed_vault_s(볼트 목록·노트 읽기·색인 목록·
+stat)·elapsed_parse_s(머리말 파싱 — 디스크 노트·렌더·색인의 바뀐 노트)를 나눠 적어,
+전체가 칸들의 합으로 설명되게 한다.
+
+E3b-2 — 문 안의 노트 색인(index.py)이 있으면 중복 문의 볼트 스캔은 쓰기마다
+디렉터리 목록·stat 만 하고 바뀐 노트만 다시 읽고 파싱한 목록으로 대신한다. 색인이
+아직 채워지지 않았거나 실패했으면(sync() → None) 디스크 훑기 그대로다 — 그 결정이
+엔진(그 순간 디스크를 훑는다)과 같은 결정이라는 걸 바꾸지 않는다.
 
 실패는 전부 값(ShadowEvent status=error 의 사유)으로 돌아오고, 예외는 문 핸들러 경계에서
 한 번 접는다.
@@ -59,6 +66,7 @@ import yaml
 
 from ohmyboring.remember import dedup as _dedup
 from ohmyboring.remember import graph as _graph
+from ohmyboring.remember import index as _index
 from ohmyboring.remember import pii as _pii
 from ohmyboring.remember.parse import (
     RememberNote,
@@ -144,7 +152,8 @@ class ShadowEvent:
     """사건 한 줄의 재료 — status ok(일치)·mismatch·error, 칸별 불일치 이름(fields).
 
     edges·seal 은 그래프 대조(E3b)의 요약 — 각각 "ok"·"unchecked"·어긋남 한 줄.
-    elapsed_* 는 어긋남과 별개로 항상 찍히는 소요 시간(초, 임베딩·DB 읽기·전체)."""
+    elapsed_* 는 어긋남과 별개로 항상 찍히는 소요 시간(초, 전체·임베딩·DB 읽기·볼트
+    읽기·머리말 파싱)이다."""
 
     status: str
     source_path: str | None = None
@@ -161,6 +170,7 @@ class ShadowEvent:
     elapsed_embedding_s: float = 0.0
     elapsed_db_s: float = 0.0
     elapsed_vault_s: float = 0.0
+    elapsed_parse_s: float = 0.0  # 머리말 파싱 — 디스크 노트·렌더·색인의 바뀐 노트
 
 
 def wiki_stem(source_path: str) -> str | None:
@@ -434,6 +444,24 @@ class ShadowRequest:
     nearest_document: _dedup.NearestDocument | None = None  # 임베딩 갈래 (없음 = 그 갈래 못 봄)
     read_graph: Callable[[tuple[str, ...]], _graph.GraphSnapshot | None] | None = None
     # 문이 싣는 읽기 전용 그래프 조회(E3b) — 없음/None 반환 = 조회 못 함(사유 (다))
+    note_index: _index.NoteIndex | None = None  # 문 안의 노트 색인(E3b-2) — sync() 로 쓰기마다 재고
+    indexed_entries: tuple[tuple[str, _dedup.ExistingNote], ...] | None = None
+    # run_shadow 가 note_index.sync() 에서 채우는 후보 목록 — 호출자는 건드리지 않는다
+    parse_existing: (
+        Callable[[str, str, Callable[[str], tuple[str, str] | None]], _dedup.ExistingNote] | None
+    ) = None
+    # 디스크 훑기 길의 노트 파서(parse_existing_note 모양) — None 이면 run_shadow 가
+    # dedup.parse_existing_note 를 싣고 파싱 시간을 elapsed_parse_s 에 잰다
+    parse_text: Callable[[str], Either[tuple[dict[str, Any], str], str]] | None = None
+    # 노트 텍스트 → (머리말 맵, 본문) — None 이면 run_shadow 가 _parse_note_text 를 싣고
+    # 파싱 시간을 elapsed_parse_s 에 잰다
+
+
+def _parse(request: ShadowRequest, text: str) -> Either[tuple[dict[str, Any], str], str]:
+    """노트 텍스트를 (머리말 맵, 본문)으로 — run_shadow 가 싣는 파서(재는 껍질)를 쓴다."""
+    parse = request.parse_text
+    assert parse is not None, "run_shadow 가 parse_text 를 싣는다"
+    return parse(text)
 
 
 def _owner_written_targets(request: ShadowRequest, targets: list[str]) -> list[str]:
@@ -450,7 +478,7 @@ def _owner_written_targets(request: ShadowRequest, targets: list[str]) -> list[s
         text = request.read_note(request.vault_dir, stem)
         if text is None:
             continue
-        match _parse_note_text(text, request.split_frontmatter):
+        match _parse(request, text):
             case Err(_):
                 continue
             case Ok((front, _)):
@@ -529,6 +557,8 @@ def _dedup_decision(request: ShadowRequest, note: RememberNote, exclude: frozens
             read_note=request.read_note,
             split_frontmatter=request.split_frontmatter,
             vault_dir=request.vault_dir,
+            parse_note=request.parse_existing or _dedup.parse_existing_note,
+            parsed_entries=request.indexed_entries,
         ),
         nearest_document=request.nearest_document,
         exclude_paths=exclude,
@@ -594,7 +624,7 @@ def _read_inputs(
                 reason=f"note not in vault: {extracted.note_id}",
             )
         )
-    match _parse_note_text(note_text, request.split_frontmatter):
+    match _parse(request, note_text):
         case Err(reason):
             return Err(
                 ShadowEvent(
@@ -613,7 +643,7 @@ def _render_python(
     extracted: Extracted,
     note: RememberNote,
     engine_front: dict[str, Any],
-    split_frontmatter: Callable[[str], tuple[str, str] | None],
+    request: ShadowRequest,
     omb_session_id: str | None,
 ) -> Either[tuple[dict[str, Any], dict[str, Any], str], ShadowEvent]:
     """파이썬 렌더 한 벌 — id·date 는 엔진 것을 그대로 받아 렌더에 넣고(번호·날짜 대조는
@@ -627,7 +657,7 @@ def _render_python(
         front=replace(note.front, date=engine_date if isinstance(engine_date, str) else ""),
     )
     rendered = render_wiki_note(engine_id, py_note.front, py_note.body)
-    match _parse_note_text(rendered, split_frontmatter):
+    match _parse(request, rendered):
         case Err(reason):
             return Err(
                 ShadowEvent(
@@ -842,7 +872,7 @@ def _field_compare(
             return (event, None)
         case Ok((engine_front, engine_note_body)):
             pass
-    match _render_python(extracted, gated_note, engine_front, request.split_frontmatter, ctx.omb_session_id):
+    match _render_python(extracted, gated_note, engine_front, request, ctx.omb_session_id):
         case Err(event):
             return (event, None)
         case Ok((engine_view, py_view, py_body)):
@@ -865,6 +895,7 @@ class _Timers:
     embedding: float = 0.0
     db: float = 0.0
     vault: float = 0.0
+    parse: float = 0.0
 
 
 def _timed(fn: Callable[..., Any], timers: _Timers, attr: str) -> Callable[..., Any]:
@@ -1105,14 +1136,34 @@ def _run(request: ShadowRequest) -> ShadowEvent:
 def run_shadow(request: ShadowRequest) -> ShadowEvent:
     """파이썬 쓰기 경로를 「쓰지 않고」 태워 엔진과 결정·칸·그래프를 대조 — 사건 한 줄의 재료.
 
+    입구에서 문 안의 노트 색인을 먼저 재고(sync)한다 — 채우기가 끝난 색인이면 목록·stat
+    만으로 바뀐 노트를 다시 읽고 파싱한 후보 목록이 중복 문 스캔을 대신하고, 그 시간을
+    vault·parse 칸에 싣는다. 채우기 전이면 색인을 쓰지 않고 디스크 훑기 그대로다.
     읽기 쪽 실패(vault 파일 없음 등)는 값으로 돌아오고, 예외는 문 핸들러 경계에서 접는다.
-    어느 경로로 끝나든 소요 시간(전체·임베딩·DB)은 사건에 찍힌다."""
+    어느 경로로 끝나든 소요 시간(전체·임베딩·DB·볼트·파싱)은 사건에 찍힌다."""
     started = time.monotonic()
     timers = _Timers()
+    if request.note_index is not None:
+        match request.note_index.sync():
+            case None:
+                pass  # 채우기 전·실패 — 디스크 훑기 그대로(그 결정이 엔진과 같은 결정)
+            case synced:
+                timers.vault += synced.stat_s + synced.read_s
+                timers.parse += synced.parse_s
+                request = replace(request, indexed_entries=synced.entries)
     if request.nearest_document is not None:
         request = replace(request, nearest_document=_timed(request.nearest_document, timers, "embedding"))
     if request.read_graph is not None:
         request = replace(request, read_graph=_timed(request.read_graph, timers, "db"))
+    if request.parse_text is None:
+        request = replace(
+            request,
+            parse_text=lambda text: _parse_note_text(text, request.split_frontmatter),
+        )
+    request = replace(request, parse_text=_timed(request.parse_text, timers, "parse"))
+    if request.parse_existing is None:
+        request = replace(request, parse_existing=_dedup.parse_existing_note)
+    request = replace(request, parse_existing=_timed(request.parse_existing, timers, "parse"))
     request = replace(
         request,
         read_note=_timed(request.read_note, timers, "vault"),
@@ -1125,6 +1176,7 @@ def run_shadow(request: ShadowRequest) -> ShadowEvent:
         elapsed_embedding_s=round(timers.embedding, 3),
         elapsed_db_s=round(timers.db, 3),
         elapsed_vault_s=round(timers.vault, 3),
+        elapsed_parse_s=round(timers.parse, 3),
     )
 
 
@@ -1137,6 +1189,7 @@ def event_payload(event: ShadowEvent) -> dict[str, Any]:
         "elapsed_embedding_s": event.elapsed_embedding_s,
         "elapsed_db_s": event.elapsed_db_s,
         "elapsed_vault_s": event.elapsed_vault_s,
+        "elapsed_parse_s": event.elapsed_parse_s,
     }
     if event.source_path is not None:
         payload["source_path"] = event.source_path

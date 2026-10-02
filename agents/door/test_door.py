@@ -770,6 +770,8 @@ class RememberShadowTests(unittest.TestCase):
         요청은 이제 ok(옛 pii_not_ported 어긋남이 풀리는 사례)
       - 그림자가 예외를 던져도 응답은 그대로 — 사건 status=error, 로그 한 줄
       - 응답은 그림자를 기다리지 않는다
+      - 문 안의 노트 색인을 미리 채우면 그림자의 중복 문 스캔은 쓰기마다 목록·stat
+        만 하고 노트를 새로 읽지 않는다 — 결정은 여전히 ok (E3b-2)
     """
 
     _WIKI_2901 = """---
@@ -961,6 +963,50 @@ POST /remember 도 문을 지난다.
         event = self._wait_for_shadow()
         self.assertEqual(event["status"], "ok")
         self.assertEqual(event["source_path"], "/vault/wiki/wiki-2902.md")
+
+    def test_shadow_scans_through_the_prefilled_note_index(self):
+        """E3b-2 — 문 안의 노트 색인을 미리 채워 두면 그림자의 중복 문 스캔은 쓰기마다
+        디렉터리 목록·stat 만 보고 노트를 새로 읽지 않는다(읽기는 채우기 때 딱 한 바퀴).
+        결정은 디스크 훑기와 같아 사건은 ok — 색인이 판정을 바꾸거나 읽기를 새로 하는
+        변이가 이 단언에서 빨갛게 끝난다."""
+        vault = Path(os.environ["BORING_VAULT_DIR"])
+        reads: list[str] = []
+
+        def counting_read(vault_dir: str, note_id: str) -> str | None:
+            reads.append(note_id)
+            return door.vault_notes.read_note(vault_dir, note_id)
+
+        index = door.remember_index.NoteIndex(
+            door.remember_index.DiskSeams(
+                vault_dir=str(vault),
+                list_notes=lambda: door._list_wiki_notes(str(vault)),
+                read_note=counting_read,
+                split_frontmatter=door.vault_note.split_frontmatter,
+            )
+        )
+        index.prefill()
+        self.assertTrue(index.usable, "픽스처 볼트는 채울 수 있다")
+        reads.clear()
+        previous = getattr(door.app.state, "note_index", None)
+        door.app.state.note_index = index
+        try:
+            _req(
+                self.door_port,
+                "POST",
+                "/mcp",
+                body=self._mcp_payload(self._MCP_ARGS),
+                headers={"content-type": "application/json"},
+            )
+            event = self._wait_for_shadow()
+        finally:
+            door.app.state.note_index = previous
+        self.assertEqual(event["status"], "ok", event.get("reason"))
+        self.assertTrue(event["decision"].startswith("stored"), event["decision"])
+        self.assertEqual(
+            reads,
+            [],
+            f"색인이 채워져 있으니 쓰기의 재고는 목록·stat 만 — 노트를 새로 읽으면 안 된다: {reads}",
+        )
 
     _PII_YAML = """---
 version: "1.0"

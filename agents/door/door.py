@@ -26,7 +26,12 @@ mismatch carries a reason that sorts it into python-defect / engine-difference /
 unknown (E3a-2; a skipped request is compared by decision only — nothing was
 written, so there are no fields to match; the response never waits on the shadow
 and a shadow failure cannot change the answer — one log line and a status=error
-event). An answer whose content-type is
+event). The duplicate scan's vault read runs off an in-process note index
+(E3b-2): prefilled in the background at startup (the log line quotes how long
+the warm-up took), refreshed per write by a directory listing and stat only,
+re-reading and re-parsing just the changed notes; until the prefill finishes the
+shadow falls back to a full disk scan — the same decision either way, and the
+event's elapsed columns (total, embedding, DB, vault, parse) sum to the total). An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. The parked read behind
@@ -103,6 +108,7 @@ from ohmyboring.entrypoints.http import mcp_recall
 from ohmyboring.recall import named as recall_named
 from ohmyboring.remember import dedup as remember_dedup
 from ohmyboring.remember import graph as remember_graph
+from ohmyboring.remember import index as remember_index
 from ohmyboring.remember import pii as remember_pii
 from ohmyboring.remember import shadow as remember_shadow
 from ohmyboring.result import Either, Err, Ok
@@ -126,7 +132,43 @@ _STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=_STREAM_WORKERS, thread_name_p
 
 _CONTRACT = Path(__file__).resolve().parents[2] / "data" / "contract" / "engine-contract.json"
 
-app = FastAPI(title="oh-my-boring door", docs_url=None, redoc_url=None, openapi_url=None)
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """기동 시 노트 색인을 백그라운드에서 미리 채운다(E3b-2) — 문은 자주 재기동하므로
+    빈 색인으로 받은 첫 쓰기가 볼트 통째 파싱(수 초)을 그대로 낼 수 없다. 채우는 동안
+    들어온 그림자 쓰기는 디스크 훑기로 떨어지고(sync() → None), 그 결정이 엔진과 같은
+    결정이라는 계약은 그대로다. 응답은 채우기를 기다리지 않는다."""
+    index = remember_index.NoteIndex(
+        remember_index.DiskSeams(
+            vault_dir=_vault_dir(),
+            list_notes=lambda: _list_wiki_notes(_vault_dir()),
+            read_note=vault_notes.read_note,
+            split_frontmatter=vault_note.split_frontmatter,
+        )
+    )
+    threading.Thread(target=_prefill_note_index, args=(index,), name="note-index", daemon=True).start()
+    app.state.note_index = index
+    yield
+
+
+def _prefill_note_index(index: remember_index.NoteIndex) -> None:
+    index.prefill()
+    if index.usable:
+        print(
+            f"[door] note index prefilled: {index.prefill_count} notes in {index.prefill_s:.2f}s",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print(
+            "[door] note index prefill failed — shadow scans the vault directly",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+app = FastAPI(title="oh-my-boring door", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan)
 
 
 def _upstream() -> str:
@@ -438,6 +480,7 @@ def _remember_shadow_task(route: str, arguments: dict, status: int, body: bytes,
                 is_owner=is_owner,
                 nearest_document=_nearest_document,
                 read_graph=_read_graph,
+                note_index=getattr(app.state, "note_index", None),
             )
         )
     except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다

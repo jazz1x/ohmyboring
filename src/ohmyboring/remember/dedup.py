@@ -345,12 +345,22 @@ NearestDocument = Callable[[str, str | None], Either[str | None, str]]
 
 @dataclass(frozen=True)
 class VaultView:
-    """그림자가 보는 볼트의 읽기 면 — 문은 디스크 읽기만 싣고, 쓰기 면은 없다."""
+    """그림자가 보는 볼트의 읽기 면 — 문은 디스크 읽기만 싣고, 쓰기 면은 없다.
+
+    parsed_entries 를 싣으면 목록·읽기·파싱을 건 너고 색인이 미리 뽑아 둔 (경로,
+    ExistingNote) 목록이 후보가 된다(E3b-2 — 문 안의 노트 색인). 후보가 되는 노트의
+    집합과 파싱 결과는 디스크 훑기와 같아야 하니, 색인은 읽기를 줄일 뿐 판정을 바꾸지
+    않는다. parse_note 는 디스크 훑기 길이가 쓰는 파서 자리 — 그림자가 시간을 재는
+    껍질을 싸기 위해 주입받는다(정본은 parse_existing_note)."""
 
     list_notes: Callable[[], list[str]]
     read_note: Callable[[str, str], str | None]
     split_frontmatter: Callable[[str], tuple[str, str] | None]
     vault_dir: str
+    parse_note: Callable[[str, str, Callable[[str], tuple[str, str] | None]], ExistingNote] = (
+        parse_existing_note
+    )
+    parsed_entries: tuple[tuple[str, ExistingNote], ...] | None = None
 
 
 def _branch_for(note: RememberNote, existing: ExistingNote) -> str | None:
@@ -367,9 +377,9 @@ def _branch_for(note: RememberNote, existing: ExistingNote) -> str | None:
     return None
 
 
-def _scan_vault(note: RememberNote, vault: VaultView, exclude_paths: frozenset[str]) -> list[DuplicateMatch]:
-    """파일 세 갈래 스캔 — 디스크의 각 노트와 갈래를 맞춰 모은다(엔진의 read_dir 순회)."""
-    matches: list[DuplicateMatch] = []
+def _disk_entries(vault: VaultView, exclude_paths: frozenset[str]) -> list[tuple[str, ExistingNote]]:
+    """디스크 훑기 — 목록에서 하나씩 읽고 파싱해 후보를 모은다(mcp.rs:1718-1740 순회)."""
+    entries: list[tuple[str, ExistingNote]] = []
     for note_id in vault.list_notes():
         source_path = f"/vault/wiki/{note_id}.md"
         if source_path in exclude_paths:
@@ -377,7 +387,24 @@ def _scan_vault(note: RememberNote, vault: VaultView, exclude_paths: frozenset[s
         text = vault.read_note(vault.vault_dir, note_id)
         if text is None:
             continue
-        existing = parse_existing_note(source_path, text, vault.split_frontmatter)
+        entries.append((source_path, vault.parse_note(source_path, text, vault.split_frontmatter)))
+    return entries
+
+
+def _scan_vault(note: RememberNote, vault: VaultView, exclude_paths: frozenset[str]) -> list[DuplicateMatch]:
+    """파일 세 갈래 스캔 — 각 노트와 갈래를 맞춰 모은다(엔진의 read_dir 순회).
+
+    색인이 싣는 parsed_entries 가 있으면 읽기·파싱을 건 너고 그 목록으로 본다 — 후보
+    집합·파싱 결과가 디스크 훑기와 같다는 게 색인의 계약이다. exclude_paths(엔진이 방금
+    쓴 새 노트)는 두 갈래 모두에서 먼저 빠진다."""
+    if vault.parsed_entries is not None:
+        candidates = (
+            (path, existing) for path, existing in vault.parsed_entries if path not in exclude_paths
+        )
+    else:
+        candidates = _disk_entries(vault, exclude_paths)
+    matches: list[DuplicateMatch] = []
+    for source_path, existing in candidates:
         if branch := _branch_for(note, existing):
             matches.append(DuplicateMatch(source_path, branch, existing))
     return matches
