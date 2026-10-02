@@ -300,6 +300,9 @@ class _Ctx:
     request: WriteRequest
     timers: _Timers
     started: float
+    #: 저장 경로의 사건 재료 — 커밋을 지나 run_write 말미에 remember_written 을 남긴다.
+    #: 커밋 시간이 전체와 DB 칸 안에 잡혀야 칸 합이 전체를 설명한다(E3c-2).
+    stored: tuple | None = None
 
 
 @dataclass(frozen=True)
@@ -1199,7 +1202,9 @@ def _store_new_note(ctx: _Ctx, cur: Any, plan: _Plan) -> Written:
         supersedes=linked,
         unknown=unknown,
     )
-    _record_written(ctx, written, plan.payload["status"], plan.payload.get("reason"), stats)
+    # 사건은 커밋 뒤에 남긴다 — run_write 말미. 지금 남기면 커밋 시간이 전체에도 칸에도
+    # 못 들어가 잔차로 샌다(바쁜 PG 의 fsync 커밋이 바로 그 경우).
+    ctx.stored = (written, plan.payload["status"], plan.payload.get("reason"), stats)
     return written
 
 
@@ -1289,7 +1294,8 @@ def run_write(request: WriteRequest, deps: WriterDeps) -> WriteOutcome:
 
     게이트(자격·모양·PII) → 중복 문(걸러짐·대체·저장) → 번호·파일·사건 → 수집·그래프 →
     supersedes 간선·부분 닫기. 실패는 Refused 값 — 예상 못한 예외는 문 경계에서 접는다.
-    연결+커밋 시간은 DB 칸에, 사건 기록은 사건 칸에 같이 잰다(칸의 합 = 전체)."""
+    연결+커밋 시간은 DB 칸에, 사건 기록은 사건 칸에 같이 잰다(칸의 합 = 전체).
+    remember_written 사건은 커밋을 지나 말미에 남긴다 — 쓴 행이 확정된 뒤의 사실로."""
     ctx = _Ctx(deps=deps, request=request, timers=_Timers(), started=time.monotonic())
     seams = _TimedSeams(deps, ctx.timers)
     arguments = request.arguments
@@ -1313,6 +1319,9 @@ def run_write(request: WriteRequest, deps: WriterDeps) -> WriteOutcome:
             return refusal
         gated = _Gated(note=note, judge=judge, supersedes=supersedes, indexed=seams.sync_index())
         outcome = _decide_and_write(ctx, cur, seams, gated)
+    if ctx.stored is not None:
+        written, decision, branch, stats = ctx.stored
+        _record_written(ctx, written, decision, branch, stats)
     if isinstance(outcome, Written):
         seams.refresh_index()
     return outcome
