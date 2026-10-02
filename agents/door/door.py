@@ -30,11 +30,8 @@ event). An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. The parked read behind
-each open stream lives on a dedicated stream executor (DOOR_STREAM_WORKERS,
-default 64), never on asyncio's default pool — the default pool is
-min(32, cpu+4) workers that /health, /rules, /search and the proxy also draw
-from, and 22 open MCP streams once filled it so every short request queued
-6-8s behind them (2026-10-02; see _STREAM_EXECUTOR). An engine answer, 4xx
+each open stream lives on its own executor, never on asyncio's default pool
+that short requests draw from. An engine answer, 4xx
 included, passes through as-is; an engine that cannot be reached is a 502 JSON
 body, never a silent 200 with an empty one. Unregistered paths get FastAPI's 404: this is a door, not a catch-all proxy. The one search route the
 door answers itself is POST /search (E2a, E2c): the python ranking pipeline (ohmyboring.search —
@@ -122,11 +119,7 @@ import card_view  # noqa: E402
 
 _TIMEOUT = float(os.environ.get("DOOR_TIMEOUT", "130"))
 
-#: 스트림 전용 일꾼 풀 — 열린 GET /mcp 스트림마다 read1 이 데이터가 올 때까지 잠든다.
-#: 기본 풀(min(32, cpu+4) — 라이브 컨테이너 CPU 18이면 22)에서 자면 스트림 22개가 풀을
-#: 다 채워 /health·/rules·/search·프록시의 to_thread 가 전부 줄을 서고(2026-10-02 실측
-#: 6~8초, healthcheck unhealthy 깜빡임) 스트림 읽기만 전용 풀로 옮긴다. 잠든 읽기는 CPU 를
-#: 안 쓰니 풀은 크게 잡고, 기본 풀은 짧은 요청 몫으로 비워 둔다.
+# 라이브 기본 풀 22(CPU 18+4)를 MCP 스트림 22개가 다 채웠다(2026-10-02).
 _STREAM_WORKERS = int(os.environ.get("DOOR_STREAM_WORKERS", "64"))
 _STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=_STREAM_WORKERS, thread_name_prefix="door-stream")
 
@@ -147,8 +140,6 @@ def _pass_through(status: int, body: bytes, content_type: str | None) -> Respons
 async def _stream_chunks(upstream: http.client.HTTPResponse) -> AsyncIterator[bytes]:
     loop = asyncio.get_running_loop()
     try:
-        # read1 은 전용 스트림 풀에서 잔다 — 기본 풀에서 자면 열린 스트림 수만큼
-        # 짧은 요청이 쓰는 일꾼을 뺏는다(위 _STREAM_EXECUTOR 주석의 실측 참조).
         while chunk := await loop.run_in_executor(_STREAM_EXECUTOR, upstream.read1, 1024):
             yield chunk
     finally:
