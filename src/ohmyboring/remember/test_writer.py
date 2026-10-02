@@ -27,6 +27,7 @@ import time
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 for path in (ROOT / "src", ROOT / "agents" / "shared"):
@@ -35,6 +36,7 @@ for path in (ROOT / "src", ROOT / "agents" / "shared"):
 
 from vault_note import split_frontmatter  # noqa: E402
 
+from ohmyboring.remember import dedup as dedup_mod  # noqa: E402
 from ohmyboring.remember import writer  # noqa: E402
 from ohmyboring.remember.parse import Claim  # noqa: E402
 from ohmyboring.remember.render import render_wiki_note  # noqa: E402
@@ -493,6 +495,38 @@ class WriterCase(unittest.TestCase):
         )
         self.assertGreaterEqual(sleeps["nearest"], 1)
         self.assertGreaterEqual(sleeps["events"], 2, "dedup_decision + remember_written")
+
+    def test_duplicate_scan_counted_in_vault_box(self):
+        """중복 문 스캔(파일 갈래의 세션 추정 — 후보 본문 마다 토큰 집합 계산)이 볼트 칸에 잡힌다.
+
+        요청에 omb_session_id 가 있으면 세션 추정이 후보 본문을 토큰화한다 — 운영에서 이
+        시간이 칸 밖에 있어 잔차 0.6~0.7s 로 샜다(E3c-2, omb_session_id 유무와 잔차의
+        상관으로 확인). 스캔을 칸에서 빼는 변이에서 이 시험이 red 가 된다."""
+        self.seed_note("wiki-0001", "기존 하나", "본문 " * 50, omb_session_id="sess-a")
+        self.seed_note("wiki-0002", "기존 둘", "다른 본문 " * 50, omb_session_id="sess-b")
+        args = {**_WRITE_ARGS, "omb_session_id": "sess-c"}
+        real_token_set = dedup_mod.token_set
+
+        def sleepy_token_set(text):
+            time.sleep(0.02)
+            return real_token_set(text)
+
+        with mock.patch.object(dedup_mod, "token_set", sleepy_token_set):
+            self.write(args, self.deps())
+        event = self.events.by_event("remember_written")[0]
+        self.assertGreaterEqual(event["elapsed_vault_s"], 0.04, "중복 문 스캔이 볼트 칸에 잡힌다")
+        columns = sum(
+            event[key]
+            for key in (
+                "elapsed_embedding_s",
+                "elapsed_db_s",
+                "elapsed_vault_s",
+                "elapsed_parse_s",
+                "elapsed_nearest_s",
+                "elapsed_event_s",
+            )
+        )
+        self.assertLessEqual(event["elapsed_total_s"] - columns, 0.1, "칸 합이 전체를 설명")
 
     def test_disk_fallback_scan_parse_is_counted(self):
         """색인이 없어 중복 문 스캔이 디스크 훑기로 떨어질 때 — 노트 파싱이 파싱 칸에 잡힌다.

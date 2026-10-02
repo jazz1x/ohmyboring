@@ -39,8 +39,8 @@ re-reading and re-parsing just the changed notes; until the prefill finishes the
 shadow falls back to a full disk scan — the same decision either way, and the
 event's elapsed columns (total, embedding, DB, vault, parse, nearest, event)
 sum to the total — embedding covers chunk+claim embeds, DB covers connect+commit,
-vault covers numbering+file write, nearest is the whole nearest-document probe,
-event is the event-sink time). An answer whose content-type is
+vault covers numbering+file write+the duplicate scan, nearest is the whole
+nearest-document probe, event is the event-sink time). An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. The parked read behind

@@ -37,7 +37,8 @@ project_links 가 sync 마다 볼트의 「모든」 wiki 노트를 다시 계�
 스위치를 켠 뒤에도 대조가 남게, 쓰기·걸러짐·거절마다 문 사건 remember_written 한 줄에
 결정·경로·간선 수·claim 수·소요 시간을 남긴다. 시간 칸은 전체를 칸들의 합으로 설명하게
 나눈다 — 임베딩 칸은 chunk+claim 임베딩까지, DB 칸은 execute+연결+커밋까지, 볼트 칸은
-번호·파일 쓰기까지, 파싱 칸은 디스크 훑기의 노트 파싱까지, 근접문서 칸은
+번호·파일 쓰기·중복 문 스캔(파일 갈래의 세션 추정 — 색인 목록을 순회하며 토큰 집합을
+계산하는 순수 CPU)까지, 파싱 칸은 디스크 훑기의 노트 파싱까지, 근접문서 칸은
 nearest_document 한 건 전체(임베딩+읽기 전용 질의)를, 사건 칸은 append_event 들의 합을
 잰다(E3c-2). 사건에는 본문 원문을 싣지 않는다(그림자의 비밀 경계와 같다).
 
@@ -1244,23 +1245,31 @@ def _find_duplicate(
         finally:
             ctx.timers.nearest += time.monotonic() - started
 
-    match _dedup.check_duplicate(
-        note=gated.note,
-        vault=_dedup.VaultView(
-            list_notes=seams.list_notes,
-            read_note=seams.read_note,
-            split_frontmatter=deps.split_frontmatter,
-            vault_dir=deps.vault_dir,
-            parse_note=seams.parse_note,
-            parsed_entries=gated.indexed,
-        ),
-        nearest_document=nearest_timed,
-        exclude_paths=frozenset(),
-    ):
-        case Err(reason):
-            return Err(Refused(-32603, f"dedup check: {reason}"))
-        case Ok(found):
-            return Ok(found)
+    started = time.monotonic()
+    nearest_before = ctx.timers.nearest
+    try:
+        match _dedup.check_duplicate(
+            note=gated.note,
+            vault=_dedup.VaultView(
+                list_notes=seams.list_notes,
+                read_note=seams.read_note,
+                split_frontmatter=deps.split_frontmatter,
+                vault_dir=deps.vault_dir,
+                parse_note=seams.parse_note,
+                parsed_entries=gated.indexed,
+            ),
+            nearest_document=nearest_timed,
+            exclude_paths=frozenset(),
+        ):
+            case Err(reason):
+                return Err(Refused(-32603, f"dedup check: {reason}"))
+            case Ok(found):
+                return Ok(found)
+    finally:
+        # 중복 문 스캔(파일 갈래의 세션 추정 토큰 계산이 큼)은 볼트 칸에 잰다 —
+        # 근접문서 칸에 잡힌 프로브 시간은 빼서 두 칸이 겹치지 않게.
+        elapsed = time.monotonic() - started
+        ctx.timers.vault += elapsed - (ctx.timers.nearest - nearest_before)
 
 
 def _decide_and_write(ctx: _Ctx, cur: Any, seams: _TimedSeams, gated: _Gated) -> WriteOutcome:
