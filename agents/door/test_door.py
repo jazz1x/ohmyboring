@@ -1388,6 +1388,35 @@ class RememberWriterSwitchTests(unittest.TestCase):
         self.assertEqual(json.loads(body), {"error": "store not configured"})
 
 
+class WriterEventDispatchTests(unittest.TestCase):
+    """E3c-2 — 파이썬 쓰기 길의 사건 전달(dedup_decision·remember_written)이 응답을 기다리지
+    않는다. 느린 엔진 /events 싱크 앞에서도 인큐만 하고 돌아오고, 받은 순서대로 전달된다."""
+
+    def test_enqueue_returns_before_slow_sink_and_delivers_in_order(self):
+        delivered = []
+        done = threading.Event()
+
+        def slow_sink(component, event, status, **fields):
+            time.sleep(0.05)
+            delivered.append((component, event, status, fields))
+            if len(delivered) == 2:
+                done.set()
+            return True
+
+        with mock.patch.object(door.event_log, "try_append_event", side_effect=slow_sink):
+            started = time.monotonic()
+            self.assertTrue(door._enqueue_writer_event("door", "dedup_decision", "ok", a=1))
+            self.assertTrue(door._enqueue_writer_event("door", "remember_written", "ok", b=2))
+            queued = time.monotonic() - started
+            self.assertTrue(done.wait(5), "백그라운드가 두 사건을 다 전달")
+        self.assertLess(queued, 0.09, "두 사건의 인큐가 느린 싱크(50ms×2)를 기다리지 않는다")
+        self.assertEqual(
+            [(entry[0], entry[1]) for entry in delivered],
+            [("door", "dedup_decision"), ("door", "remember_written")],
+            "자료 순서 그대로 전달",
+        )
+
+
 class ActiveProjectsRouteTests(unittest.TestCase):
     """GET /projects?active_days= through the real door app — stub rows, no DB (AC1)."""
 

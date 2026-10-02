@@ -9,7 +9,11 @@ Run: python3 ohmyboring/remember/test_writer.py   (no pytest dependency)
 · PII 차단(쓰기 0) · owner 거절(쓰기 0, owner_supersede_refused 사건) · 응답 모양.
 
 Mutation targets: 기본값·max+1·부분 봉인·PII 게이트·owner 거절·응답 문장을 바꾸는 변이가
-각각 여기서 사망 확인. 문의 스위치 갈래(기본 engine)는 agents/door/test_door.py 가 본다.
+각각 여기서 사망 확인. E3c-2 시간 칸 — claim 임베딩·연결+커밋·근접 문서·사건 기록·디스크
+훑기 파싱을 칸에서 빼는 변이는 test_elapsed_boxes_sum_to_total·
+test_claim_embeds_counted_in_embedding_box·test_nearest_and_event_elapsed_boxes_recorded·
+test_disk_fallback_scan_parse_is_counted 에서 사망 확인. 문의 스위치 갈래(기본 engine)는
+agents/door/test_door.py 가 본다.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -114,6 +119,47 @@ def _embed(text: str):
     return Ok([0.001] * _DIM)
 
 
+#: E3c-2 시간 칸 시험들이 싣는 같은 모양의 쓰기 — 새 노트·claim 4개·조각 1개(운영 두 건과 같다).
+_WRITE_ARGS = {
+    "title": "E3c-2 시간 시험",
+    "body": "본문이다. " * 8,
+    "tags": ["e3c2"],
+    "tools": ["Python"],
+    "concepts": ["door"],
+    "claims": [
+        {
+            "subject": "Door",
+            "predicate": "times",
+            "value": "모든 구간",
+            "kind": "fact",
+            "confidence": "certain",
+        },
+        {
+            "subject": "Door",
+            "predicate": "counts",
+            "value": "claim 임베딩",
+            "kind": "fact",
+            "confidence": "certain",
+        },
+        {
+            "subject": "Door",
+            "predicate": "prefers",
+            "value": "일회용 장소",
+            "kind": "preference",
+            "confidence": "likely",
+        },
+        {
+            "subject": "Door",
+            "predicate": "avoids",
+            "value": "운영 기록",
+            "kind": "intent",
+            "confidence": "likely",
+        },
+    ],
+    "author": "agent:tester",
+}
+
+
 class _Events:
     def __init__(self) -> None:
         self.rows: list[tuple] = []
@@ -144,11 +190,23 @@ class WriterCase(unittest.TestCase):
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
-    def deps(self, handler=None, *, is_owner=False, scanner=None, embed=None, doc_paths=(), **handler_kw):
+    def deps(  # noqa: PLR0913
+        self,
+        handler=None,
+        *,
+        is_owner=False,
+        scanner=None,
+        embed=None,
+        nearest_document=None,
+        append_event=None,
+        connect=None,
+        doc_paths=(),
+        **handler_kw,
+    ):
         handler = handler or _handler(self.sql, doc_paths=doc_paths, **handler_kw)
         return writer.WriterDeps(
             vault_dir=self.vault,
-            connect=lambda: _FakeConn(handler, self.sql),
+            connect=connect or (lambda: _FakeConn(handler, self.sql)),
             read_note=lambda vault, note_id: _read_note(vault, note_id),
             split_frontmatter=split_frontmatter,
             list_notes=lambda: sorted(
@@ -158,9 +216,9 @@ class WriterCase(unittest.TestCase):
             ),
             pii_scanner=scanner,
             is_owner=is_owner,
-            nearest_document=lambda text, exclude: Ok(None),
+            nearest_document=nearest_document or (lambda text, exclude: Ok(None)),
             embed=embed or _embed,
-            append_event=self.events.append,
+            append_event=append_event or self.events.append,
             clock=lambda: datetime(2026, 10, 2, tzinfo=UTC),
         )
 
@@ -348,6 +406,116 @@ class WriterCase(unittest.TestCase):
             "elapsed_parse_s",
         ):
             self.assertIn(key, event)
+
+    def test_elapsed_boxes_sum_to_total(self):
+        """칸들의 합이 전체를 설명한다 — 잰 밖에 둔 구간이 남지 않는다(E3c-2).
+
+        각 면이 재기 쉽게 지연되는 목을 싣고, 사건 칸의 합과 전체의 차가 0.1s 를
+        넘지 않는지 본다. claim 임베딩·연결+커밋·근접 문서·사건 기록을 칸에서 빼는
+        변이에서 이 시험이 red 가 된다."""
+
+        def sleepy_embed(text):
+            time.sleep(0.03)
+            return Ok([0.001] * _DIM)
+
+        def sleepy_nearest(text, exclude):
+            time.sleep(0.04)
+            return Ok(None)
+
+        class _SleepyConn(_FakeConn):
+            def __exit__(self, *args):
+                time.sleep(0.02)  # commit/rollback 시간 — DB 칸에 잡혀야 한다
+                return super().__exit__(*args)
+
+        def sleepy_append(component, event, status, **fields):
+            time.sleep(0.004)
+            return self.events.append(component, event, status, **fields)
+
+        deps = self.deps(
+            embed=sleepy_embed,
+            nearest_document=sleepy_nearest,
+            append_event=sleepy_append,
+            connect=lambda: _SleepyConn(_handler(self.sql), self.sql),
+        )
+        outcome = self.write(_WRITE_ARGS, deps)
+        self.assertIsInstance(outcome, writer.Written)
+        event = self.events.by_event("remember_written")[0]
+        columns = sum(
+            event[key]
+            for key in (
+                "elapsed_embedding_s",
+                "elapsed_db_s",
+                "elapsed_vault_s",
+                "elapsed_parse_s",
+                "elapsed_nearest_s",
+                "elapsed_event_s",
+            )
+        )
+        gap = event["elapsed_total_s"] - columns
+        self.assertLessEqual(abs(gap), 0.1, f"칸 합({columns:.3f})이 전체({event['elapsed_total_s']})를 설명")
+
+    def test_claim_embeds_counted_in_embedding_box(self):
+        """임베딩 칸은 claim 임베딩까지 — claim 마다 따로 부르는 임베딩이 칸 밖에 있던 것을 본다."""
+
+        calls = {"n": 0}
+
+        def counting_sleepy_embed(text):
+            calls["n"] += 1
+            time.sleep(0.02)
+            return Ok([0.001] * _DIM)
+
+        self.write(_WRITE_ARGS, self.deps(embed=counting_sleepy_embed))
+        self.assertEqual(calls["n"], 5, "청크 1 + claim 4")
+        event = self.events.by_event("remember_written")[0]
+        self.assertGreaterEqual(
+            event["elapsed_embedding_s"], 0.07, "claim 4건의 임베딩(≥80ms)이 임베딩 칸에 잡힌다"
+        )
+
+    def test_nearest_and_event_elapsed_boxes_recorded(self):
+        """근접 문서 프로브와 사건 기록의 칸이 있고, 각각의 지연을 담는다."""
+        sleeps = {"nearest": 0.0, "events": 0}
+
+        def sleepy_nearest(text, exclude):
+            time.sleep(0.03)
+            sleeps["nearest"] += 1
+            return Ok(None)
+
+        def sleepy_append(component, event, status, **fields):
+            time.sleep(0.005)
+            sleeps["events"] += 1
+            return self.events.append(component, event, status, **fields)
+
+        self.write(_WRITE_ARGS, self.deps(nearest_document=sleepy_nearest, append_event=sleepy_append))
+        event = self.events.by_event("remember_written")[0]
+        self.assertGreaterEqual(event["elapsed_nearest_s"], 0.025)
+        self.assertGreaterEqual(
+            event["elapsed_event_s"], 0.004, "dedup_decision 기록 시간이 사건 칸에 잡힌다"
+        )
+        self.assertGreaterEqual(sleeps["nearest"], 1)
+        self.assertGreaterEqual(sleeps["events"], 2, "dedup_decision + remember_written")
+
+    def test_disk_fallback_scan_parse_is_counted(self):
+        """색인이 없어 중복 문 스캔이 디스크 훑기로 떨어질 때 — 노트 파싱이 파싱 칸에 잡힌다.
+
+        이 파싱이 칸 밖에 있어서 첫 운영 쓰기의 「재지 않은 2.3s」가 됐다(E3c-2). 파싱을
+        칸에서 빼는 변이에서 이 시험이 red 가 된다(색인 없음 = 이 시험의 갈래 전부)."""
+        for i in range(200):
+            self.seed_note(f"wiki-{i + 1:04}", f"제목 {i}", f"본문 {i} " + "내용 " * 20)
+        self.write({"title": "훑기 시험", "body": "본문"}, self.deps())
+        event = self.events.by_event("remember_written")[0]
+        self.assertGreater(event["elapsed_parse_s"], 0.004, "디스크 훑기의 노트 파싱이 파싱 칸에 잡힌다")
+        columns = sum(
+            event[key]
+            for key in (
+                "elapsed_embedding_s",
+                "elapsed_db_s",
+                "elapsed_vault_s",
+                "elapsed_parse_s",
+                "elapsed_nearest_s",
+                "elapsed_event_s",
+            )
+        )
+        self.assertLessEqual(event["elapsed_total_s"] - columns, 0.1, "칸 합이 전체를 설명")
 
     def test_wiki_number_is_max_plus_one_and_never_fills_gaps(self):
         # 디스크 1·2·4 + DB 만 있는 9 — 다음은 10이고 3·5의 빈칸은 채우지 않는다.

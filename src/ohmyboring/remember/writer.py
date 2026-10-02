@@ -35,8 +35,11 @@ project_links 가 sync 마다 볼트의 「모든」 wiki 노트를 다시 계�
 는 anchor 만 비교하니 이 갭이 sync 재쓰기를 일으키지는 않는다 — 보고의 근거로만 둔다).
 
 스위치를 켠 뒤에도 대조가 남게, 쓰기·걸러짐·거절마다 문 사건 remember_written 한 줄에
-결정·경로·간선 수·claim 수·소요 시간(전체·임베딩·DB·볼트·파싱)을 남긴다. 사건에는
-본문 원문을 싣지 않는다(그림자의 비밀 경계와 같다).
+결정·경로·간선 수·claim 수·소요 시간을 남긴다. 시간 칸은 전체를 칸들의 합으로 설명하게
+나눈다 — 임베딩 칸은 chunk+claim 임베딩까지, DB 칸은 execute+연결+커밋까지, 볼트 칸은
+번호·파일 쓰기까지, 파싱 칸은 디스크 훑기의 노트 파싱까지, 근접문서 칸은
+nearest_document 한 건 전체(임베딩+읽기 전용 질의)를, 사건 칸은 append_event 들의 합을
+잰다(E3c-2). 사건에는 본문 원문을 싣지 않는다(그림자의 비밀 경계와 같다).
 
 실패는 값으로 — 게이트 거절은 Refused(-32602 요청 모양·자격 / -32603 게이트·쓰기
 고장), 예상 못한 예외는 문 경계에서 접는다.
@@ -285,6 +288,8 @@ class _Timers:
     db: float = 0.0
     vault: float = 0.0
     parse: float = 0.0
+    nearest: float = 0.0
+    event: float = 0.0
 
 
 @dataclass
@@ -345,8 +350,36 @@ class _TimedCursor:
         return getattr(self._inner, name)
 
 
+class _TimedConn:
+    """연결 맥락 껍질 — commit/rollback(= with 탈출) 시간을 db 칸에 더한다.
+
+    문의 쓰기는 요청마다 새 연결을 열고 with 탈출에 커밋을 건다 — 이 두 시간은
+    execute 재기와는 따로 잰다(E3c-2: 연결+커밋이 재는 밖에 있어 잔차로 샜다)."""
+
+    def __init__(self, inner: Any, timers: _Timers) -> None:
+        self._inner = inner
+        self._timers = timers
+
+    def cursor(self) -> Any:
+        return self._inner.cursor()
+
+    def __enter__(self) -> Any:
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, *exc: Any) -> Any:
+        started = time.monotonic()
+        try:
+            return self._inner.__exit__(*exc)
+        finally:
+            self._timers.db += time.monotonic() - started
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class _TimedSeams:
-    """볼트 읽기·색인 재고에 시간을 재는 그림자 규약의 껍질."""
+    """볼트 읽기·색인 재고·파싱·사건 기록에 시간을 재는 그림자 규약의 껍질."""
 
     def __init__(self, deps: WriterDeps, timers: _Timers) -> None:
         self._deps = deps
@@ -365,6 +398,23 @@ class _TimedSeams:
             return self._deps.list_notes()
         finally:
             self._timers.vault += time.monotonic() - started
+
+    def parse_note(self, source_path: str, text: str, split_frontmatter: Any) -> Any:
+        """디스크 훑기의 노트 파싱 — 칸에 안 잡히던 바로 그 시간(E3c-2). 색인이 없어
+        중복 문 스캔이 디스크 훑기로 떨어질 때 claim 마다 이 껍질로 읽는다."""
+        started = time.monotonic()
+        try:
+            return _dedup.parse_existing_note(source_path, text, split_frontmatter)
+        finally:
+            self._timers.parse += time.monotonic() - started
+
+    def append_event(self, component: str, event: str, status: str, **fields: Any) -> bool:
+        """사건 기록 한 건 — 사건 칸에 잰다(싱크가 느려도 잔차로 새지 않게)."""
+        started = time.monotonic()
+        try:
+            return self._deps.append_event(component, event, status, **fields)
+        finally:
+            self._timers.event += time.monotonic() - started
 
     def sync_index(self) -> tuple[tuple[str, _dedup.ExistingNote], ...] | None:
         """문 안의 노트 색인 재고 — 채우기 전이면 None(디스크 훑기로, 그림자 규약)."""
@@ -644,7 +694,9 @@ def _owner_written_targets(cur: Any, paths: list[str]) -> list[str]:
     return sorted(row[0] for row in cur.fetchall())
 
 
-def _supersedes_gate(arguments: dict[str, Any], deps: WriterDeps, cur: Any) -> Either[list[str], Refused]:
+def _supersedes_gate(
+    arguments: dict[str, Any], deps: WriterDeps, cur: Any, seams: _TimedSeams
+) -> Either[list[str], Refused]:
     """supersedes 모양·대상 — 오너 노트를 오너 아닌 호출이 대체하려 하면 사건까지 남긴다."""
     match parse_supersedes(arguments):
         case Err(reason):
@@ -654,7 +706,9 @@ def _supersedes_gate(arguments: dict[str, Any], deps: WriterDeps, cur: Any) -> E
     if not deps.is_owner:
         refused = _owner_written_targets(cur, supersedes)
         if refused:
-            deps.append_event(_OWNER_COMPONENT, OWNER_REFUSED_EVENT, "warn", door="remember", targets=refused)
+            seams.append_event(
+                _OWNER_COMPONENT, OWNER_REFUSED_EVENT, "warn", door="remember", targets=refused
+            )
             return Err(
                 Refused(
                     -32602,
@@ -676,14 +730,14 @@ def _pii_gate(note: RememberNote, deps: WriterDeps) -> Either[RememberNote, Refu
 
 
 def _gate(
-    arguments: dict[str, Any], note: RememberNote, deps: WriterDeps, cur: Any
+    arguments: dict[str, Any], note: RememberNote, deps: WriterDeps, cur: Any, seams: _TimedSeams
 ) -> tuple[Refused | None, RememberNote, list[str]]:
     """자격 → supersedes 모양·대상 → PII 게이트 — shadow._gate_decision 순서 그대로.
 
     거절이면 (Refused, 노트, []) — 아니면 (None, 게이트를 지난 노트, 대상 목록)."""
     if refusal := _judge_refusal(arguments, note, deps):
         return (refusal, note, [])
-    match _supersedes_gate(arguments, deps, cur):
+    match _supersedes_gate(arguments, deps, cur, seams):
         case Err(refusal):
             return (refusal, note, [])
         case Ok(supersedes):
@@ -726,10 +780,10 @@ def _dedup_decision_payload(
     }
 
 
-def _log_dedup(deps: WriterDeps, payload: dict[str, Any]) -> None:
+def _log_dedup(ctx: _Ctx, payload: dict[str, Any]) -> None:
     """엔진 log_dedup_decision(mcp.rs:1901)처럼 — None 칸은 사건 싱크가 빼고 기록하고,
-    기록 실패는 sink 몫(거절은 아니다)."""
-    deps.append_event(
+    기록 실패는 sink 몫(거절은 아니다). 사건 기록 시간은 사건 칸에 잰다."""
+    _TimedSeams(ctx.deps, ctx.timers).append_event(
         payload["component"],
         payload["event"],
         payload["status"],
@@ -863,8 +917,10 @@ def _claim_slot(claim: Any) -> tuple[str, str] | None:
     return (subject, predicate)
 
 
-def _upsert_claim(cur: Any, deps: WriterDeps, job: _GraphJob, claim: Any, stats: _Stats) -> None:
-    """claim 행 하나 — unchanged 프로브·임베딩·upsert·봉인·said_by 거울·노드/간선."""
+def _upsert_claim(  # noqa: PLR0913
+    cur: Any, deps: WriterDeps, job: _GraphJob, claim: Any, stats: _Stats, timers: _Timers
+) -> None:
+    """claim 행 하나 — unchanged 프로브·임베딩(임베딩 칸에 잰다)·upsert·봉인·said_by 거울·노드/간선."""
     slot = _claim_slot(claim)
     if slot is None:
         return
@@ -887,11 +943,14 @@ def _upsert_claim(cur: Any, deps: WriterDeps, job: _GraphJob, claim: Any, stats:
         },
     )
     if cur.fetchone() is None:
+        started = time.monotonic()
         match deps.embed(f"{subject} {predicate} {value}"):
             case Err(reason):
+                timers.embedding += time.monotonic() - started
                 raise _WriteFailure(str(reason))
             case Ok(vec):
                 pass
+        timers.embedding += time.monotonic() - started
         cur.execute(
             _UPSERT_CLAIM_SQL,
             {
@@ -922,7 +981,7 @@ def _upsert_claim(cur: Any, deps: WriterDeps, job: _GraphJob, claim: Any, stats:
     stats.edges += _upsert_claim_node(cur, job.front.project, job.path, slot, claim)
 
 
-def _extract_graph(cur: Any, deps: WriterDeps, job: _GraphJob, stats: _Stats) -> None:
+def _extract_graph(cur: Any, deps: WriterDeps, job: _GraphJob, stats: _Stats, timers: _Timers) -> None:
     """FrontmatterGraphExtractor(ingest.rs:160-281) — 정해진 간선만 쓰고 봉인은 upsert 안에서."""
     doc = _doc_node_id(job.path)
     cur.execute(_CLEAR_SEMANTIC_SQL, {"doc": doc, "kinds": list(SEMANTIC_EDGE_KINDS)})
@@ -930,7 +989,7 @@ def _extract_graph(cur: Any, deps: WriterDeps, job: _GraphJob, stats: _Stats) ->
     _write_concept_edges(cur, doc, job.front.concepts, stats)
     job = replace(job, anchors=_from_note_body(job.front.project, job.body) if job.front.project else [])
     for claim in job.front.claims:
-        _upsert_claim(cur, deps, job, claim, stats)
+        _upsert_claim(cur, deps, job, claim, stats, timers)
 
 
 def _embed_chunks(deps: WriterDeps, pieces: list[str], timers: _Timers) -> list[tuple[str, list[float]]]:
@@ -966,7 +1025,7 @@ def _ingest(cur: Any, deps: WriterDeps, note: RememberNote, path: str, timers: _
     if prev is not None and prev[0] == sha:
         # 동일 내용 — chunk 재임베딩 없이 뒷시각만 밀고 그래프만 재건(엔진과 같은 자리).
         cur.execute(_SET_UPDATED_AT_SQL, {"path": path, "at": mtime})
-        _extract_graph(cur, deps, _GraphJob(front, note.body.strip(), path, mtime), stats)
+        _extract_graph(cur, deps, _GraphJob(front, note.body.strip(), path, mtime), stats, timers)
         return stats
     body = note.body.strip()
     pieces = fixed_chunks(body, 1500, 200)
@@ -991,7 +1050,7 @@ def _ingest(cur: Any, deps: WriterDeps, note: RememberNote, path: str, timers: _
         )
         stats.chunks += 1
     cur.execute(_PRUNE_CHUNKS_SQL, {"path": path, "from_idx": len(embedded)})
-    _extract_graph(cur, deps, _GraphJob(front, body, path, mtime), stats)
+    _extract_graph(cur, deps, _GraphJob(front, body, path, mtime), stats, timers)
     return stats
 
 
@@ -1038,36 +1097,45 @@ def _supersedes_suffix(targets: list[str], linked: int, unknown: int, unknown_pa
 
 
 def _record_written(ctx: _Ctx, written: Written, decision: str, branch: str | None, stats: _Stats) -> None:
-    """문 사건 remember_written — 스위치를 켜도 대조가 남게, 결정·경로·수·소요 시간을 남긴다."""
+    """문 사건 remember_written — 스위치를 켜도 대조가 남게, 결정·경로·수·소요 시간을 남긴다.
+
+    칸이 전체를 설명하게 한다 — 임베딩 칸은 chunk+claim 임베딩까지, DB 칸은 연결+커밋까지,
+    볼트 칸은 번호·파일 쓰기까지, 근접문서·사건 칸은 각각 nearest_document 한 건과
+    append_event 들의 합이다(E3c-2)."""
     timers = ctx.timers
-    ctx.deps.append_event(
-        "door",
-        EVENT_NAME,
-        "ok",
-        route=ctx.request.route,
-        decision=decision,
-        branch=branch,
-        source_path=written.source_path,
-        duplicate=True if written.duplicate else None,
-        supersedes=written.supersedes or None,
-        unknown=written.unknown or None,
-        chunks=stats.chunks or None,
-        edges=stats.edges or None,
-        claims=stats.claims or None,
-        omb_session_id=ctx.request.omb_session_id,
-        relates_to=RELATES_TO_DEFERRED,
-        elapsed_total_s=round(time.monotonic() - ctx.started, 3),
-        elapsed_embedding_s=round(timers.embedding, 3),
-        elapsed_db_s=round(timers.db, 3),
-        elapsed_vault_s=round(timers.vault, 3),
-        elapsed_parse_s=round(timers.parse, 3),
-    )
+    started = time.monotonic()
+    try:
+        ctx.deps.append_event(
+            "door",
+            EVENT_NAME,
+            "ok",
+            route=ctx.request.route,
+            decision=decision,
+            branch=branch,
+            source_path=written.source_path,
+            duplicate=True if written.duplicate else None,
+            supersedes=written.supersedes or None,
+            unknown=written.unknown or None,
+            chunks=stats.chunks or None,
+            edges=stats.edges or None,
+            claims=stats.claims or None,
+            omb_session_id=ctx.request.omb_session_id,
+            relates_to=RELATES_TO_DEFERRED,
+            elapsed_total_s=round(time.monotonic() - ctx.started, 3),
+            elapsed_embedding_s=round(timers.embedding, 3),
+            elapsed_db_s=round(timers.db, 3),
+            elapsed_vault_s=round(timers.vault, 3),
+            elapsed_parse_s=round(timers.parse, 3),
+            elapsed_nearest_s=round(timers.nearest, 3),
+            elapsed_event_s=round(timers.event, 3),
+        )
+    finally:
+        timers.event += time.monotonic() - started
 
 
 def _skipped_answer(ctx: _Ctx, match_: _dedup.DuplicateMatch, payload: dict[str, Any]) -> Written:
     """걸러진 중복 — 아무것도 안 쓰고 엔진 skipped_duplicate 모양으로만 답한다."""
-    deps = ctx.deps
-    _log_dedup(deps, payload)
+    _log_dedup(ctx, payload)
     written = Written(
         wiki_id=_wiki_stem(match_.source_path) or "",
         source_path=match_.source_path,
@@ -1090,18 +1158,22 @@ def _store_new_note(ctx: _Ctx, cur: Any, plan: _Plan) -> Written:
         doc_paths = [row[0] for row in cur.fetchall()]
     except Exception as failure:  # noqa: BLE001 — 엔진: "wiki id: cannot read existing document paths"
         raise _WriteFailure(f"wiki id: cannot read existing document paths: {failure}") from failure
+    started = time.monotonic()
     try:
-        wiki_id, path = allocate_wiki_path(wiki_dir, existing_wiki_ids(doc_paths))
-    except OSError as failure:
-        raise _WriteFailure(f"wiki id: {failure}") from failure
-    front = replace(note.front, date=deps.clock().date().isoformat())
-    content = render_wiki_note(wiki_id, front, note.body)
-    try:
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(content)
-    except OSError as failure:
-        raise _WriteFailure(f"wiki note write: {failure}") from failure
-    _log_dedup(deps, plan.payload)
+        try:
+            wiki_id, path = allocate_wiki_path(wiki_dir, existing_wiki_ids(doc_paths))
+        except OSError as failure:
+            raise _WriteFailure(f"wiki id: {failure}") from failure
+        front = replace(note.front, date=deps.clock().date().isoformat())
+        content = render_wiki_note(wiki_id, front, note.body)
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+        except OSError as failure:
+            raise _WriteFailure(f"wiki note write: {failure}") from failure
+    finally:
+        ctx.timers.vault += time.monotonic() - started
+    _log_dedup(ctx, plan.payload)
     try:
         stats = _ingest(cur, deps, replace(note, front=front), path, ctx.timers)
     except _WriteFailure as failure:
@@ -1158,6 +1230,15 @@ def _find_duplicate(
     if gated.supersedes:
         return Ok(None)
     deps = ctx.deps
+
+    def nearest_timed(text: str, exclude: str | None):
+        """근접 문서 프로브 한 건 전체(임베딩+읽기 전용 질의) — 근접문서 칸에 잰다."""
+        started = time.monotonic()
+        try:
+            return deps.nearest_document(text, exclude)
+        finally:
+            ctx.timers.nearest += time.monotonic() - started
+
     match _dedup.check_duplicate(
         note=gated.note,
         vault=_dedup.VaultView(
@@ -1165,9 +1246,10 @@ def _find_duplicate(
             read_note=seams.read_note,
             split_frontmatter=deps.split_frontmatter,
             vault_dir=deps.vault_dir,
+            parse_note=seams.parse_note,
             parsed_entries=gated.indexed,
         ),
-        nearest_document=deps.nearest_document,
+        nearest_document=nearest_timed,
         exclude_paths=frozenset(),
     ):
         case Err(reason):
@@ -1206,7 +1288,8 @@ def run_write(request: WriteRequest, deps: WriterDeps) -> WriteOutcome:
     """remember 하나를 결정·쓰고 응답 재료를 돌려준다 — 문 핸들러가 모양을 입힌다.
 
     게이트(자격·모양·PII) → 중복 문(걸러짐·대체·저장) → 번호·파일·사건 → 수집·그래프 →
-    supersedes 간선·부분 닫기. 실패는 Refused 값 — 예상 못한 예외는 문 경계에서 접는다."""
+    supersedes 간선·부분 닫기. 실패는 Refused 값 — 예상 못한 예외는 문 경계에서 접는다.
+    연결+커밋 시간은 DB 칸에, 사건 기록은 사건 칸에 같이 잰다(칸의 합 = 전체)."""
     ctx = _Ctx(deps=deps, request=request, timers=_Timers(), started=time.monotonic())
     seams = _TimedSeams(deps, ctx.timers)
     arguments = request.arguments
@@ -1220,9 +1303,12 @@ def run_write(request: WriteRequest, deps: WriterDeps) -> WriteOutcome:
             return Refused(-32602, reason)
         case Ok(judge):
             pass
-    with deps.connect() as conn, conn.cursor() as raw_cur:
+    connect_started = time.monotonic()
+    raw_conn = deps.connect()
+    ctx.timers.db += time.monotonic() - connect_started
+    with _TimedConn(raw_conn, ctx.timers) as conn, conn.cursor() as raw_cur:
         cur = _TimedCursor(raw_cur, ctx.timers)
-        refusal, note, supersedes = _gate(arguments, note, deps, cur)
+        refusal, note, supersedes = _gate(arguments, note, deps, cur, seams)
         if refusal is not None:
             return refusal
         gated = _Gated(note=note, judge=judge, supersedes=supersedes, indexed=seams.sync_index())

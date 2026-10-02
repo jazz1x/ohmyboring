@@ -30,12 +30,17 @@ event). The one switch on this behavior: DOOR_REMEMBER_WRITER=python hands the
 remember decision·write·answer to the python write path inside the door
 (E3c-1, ohmyboring.remember.writer — the same decision chain the shadow
 validates, writing for real through a writable DOOR_PG_DSN; default engine
-leaves every byte above untouched). The duplicate scan's vault read runs off an in-process note index
+leaves every byte above untouched; the python path hands its two events,
+dedup_decision·remember_written, to a background dispatcher in receive order so
+a slow engine /events sink never stretches the write — E3c-2). The duplicate scan's vault read runs off an in-process note index
 (E3b-2): prefilled in the background at startup (the log line quotes how long
 the warm-up took), refreshed per write by a directory listing and stat only,
 re-reading and re-parsing just the changed notes; until the prefill finishes the
 shadow falls back to a full disk scan — the same decision either way, and the
-event's elapsed columns (total, embedding, DB, vault, parse) sum to the total). An answer whose content-type is
+event's elapsed columns (total, embedding, DB, vault, parse, nearest, event)
+sum to the total — embedding covers chunk+claim embeds, DB covers connect+commit,
+vault covers numbering+file write, nearest is the whole nearest-document probe,
+event is the event-sink time). An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. The parked read behind
@@ -83,6 +88,7 @@ import hmac
 import http.client
 import json
 import os
+import queue
 import re
 import socket
 import subprocess
@@ -521,6 +527,35 @@ def _remember_shadow_task(route: str, arguments: dict, status: int, body: bytes,
 _REMEMBER_WRITER_ENV = "DOOR_REMEMBER_WRITER"
 _WRITER_PYTHON = "python"
 
+#: 파이썬 쓰기 길의 사건 전달 — dedup_decision·remember_written 을 응답을 기다리지 않게
+#: 자료 순서대로 백그라운드에서 싣는다(E3c-2). 쓰기 안의 사건 기록은 싱크가 느려도(엔진이
+#: 바쁘면 /events 가 0.5s 한도까지 미뤄진다) 쓰기 시간에 안 잡히게 — 칸은 여전히 사건
+#: 칸에 재며, 기록 자체의 실패 규약은 그대로다(싱크가 거부하면 spool 으로 떨어진다).
+_EVENT_SINK_LOCK = threading.Lock()
+_EVENT_SINK_QUEUE: queue.Queue | None = None
+
+
+def _enqueue_writer_event(component: str, event: str, status: str, **fields: Any) -> bool:
+    """사건 한 건을 자료 큐에 넣고 즉시 돌아온다 — 전달은 스레드 한 개가 순서대로 한다."""
+    global _EVENT_SINK_QUEUE
+    with _EVENT_SINK_LOCK:
+        if _EVENT_SINK_QUEUE is None:
+            _EVENT_SINK_QUEUE = queue.Queue()
+            threading.Thread(target=_dispatch_writer_events, name="event-sink", daemon=True).start()
+    _EVENT_SINK_QUEUE.put((component, event, status, fields))
+    return True
+
+
+def _dispatch_writer_events() -> None:
+    """자료 큐의 사건들을 받은 순서대로 진짜 싱크에 싣는다 — 실패는 싱크 몫(스레드는 산다)."""
+    assert _EVENT_SINK_QUEUE is not None
+    while True:
+        component, event, status, fields = _EVENT_SINK_QUEUE.get()
+        try:
+            event_log.try_append_event(component, event, status, **fields)
+        except Exception as e:  # noqa: BLE001 — try_append_event 이 못 잡는 고장도 큐를 막지 않는다
+            print(f"[door] writer event not dispatched ({event}): {e}", file=sys.stderr, flush=True)
+
 
 def _remember_writer() -> str:
     """쓰기 주인 — python 만 켬, 그 밖의 값·부재는 전부 engine(실수로 켜지지 않게)."""
@@ -559,7 +594,9 @@ async def _remember_python(request: Request, body: bytes, arguments: dict, route
 def _writer_deps(
     request: Request, vault_dir: str, scanner: remember_pii.PiiScanner | None
 ) -> remember_writer.WriterDeps:
-    """쓰기 길에 싣는 면 — 문의 진짜(쓰기 가능 DSN·어댑터·색인). 시험은 문 경계를 목으로 둔다."""
+    """쓰기 길에 싣는 면 — 문의 진짜(쓰기 가능 DSN·어댑터·색인). 사건 기록은 자료 큐에
+    넣는 껍질로 싣는다 — 싱크가 느려도 쓰기 시간이 불지 않게(E3c-2, 문서 위 함수 참조).
+    시험은 문 경계를 목으로 둔다."""
     return remember_writer.WriterDeps(
         vault_dir=vault_dir,
         connect=lambda: psycopg.connect(os.environ["DOOR_PG_DSN"]),
@@ -570,7 +607,7 @@ def _writer_deps(
         is_owner=_standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
         nearest_document=_nearest_document,
         embed=remember_writer.embed_via_adapter,
-        append_event=event_log.try_append_event,
+        append_event=_enqueue_writer_event,
         note_index=getattr(app.state, "note_index", None),
         embed_dim=boring_config.embed_dim(),
     )

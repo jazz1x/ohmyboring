@@ -24,14 +24,20 @@ from ohmyboring.search.redact import redact as _scrub
 #: 클래스 속성을 보지 못한다 — ohmyboring.ingest.note 의 것과 같은 규약).
 _STR_ONLY = "tag:yaml.org,2002:str"
 
+#: 바탕 로더 — libyaml 이 있으면 C 로더(CSafeLoader)를 쓴다. 스칼라 해석 규칙은 둘이 같고
+#: (SafeLoader 의 파서가 libyaml 의 순수 파이썬 이식이다), 아래의 리졸버 한정만 같이 적용되니
+#: 파싱 결과는 같다. 차이는 속도뿐 — 볼트 3,100장 통째 파싱이 7.7s → ~1s 로 줄어 문 기동
+#: 직후 채우기 창(E3c-2 — 이 창의 쓰기가 디스크 훑기로 떨어져 수 초를 냈었다)이 좁아진다.
+_StrOnlyBase = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
-class _StrOnlyLoader(yaml.SafeLoader):
+
+class _StrOnlyLoader(_StrOnlyBase):
     """머리말 스칼라 전부를 str 로 읽는 로더 — ohmyboring.ingest.note 의 것과 같은 규칙
     (serde_yaml 의 String 필드 규칙과 가깝게 — `date: 2026-10-01` 이 날짜가 아니라 글자로 온다)."""
 
     yaml_implicit_resolvers = {
         key: [(tag, regexp) for tag, regexp in resolvers if tag in (_STR_ONLY, "tag:yaml.org,2002:null")]
-        for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+        for key, resolvers in _StrOnlyBase.yaml_implicit_resolvers.items()
     }
 
 
