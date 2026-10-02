@@ -29,6 +29,10 @@ real door runs under uvicorn in a thread against it. Covers:
       query attached, a query-less request gets no "?" (AC4)
   (k) a client that disconnects mid-stream makes the door close the upstream —
       the stub sees the connection go away (AC6)
+  (m) streams never starve short requests: with more GET /mcp streams open
+      than the default thread pool has workers, /health (proxied) and a
+      door-native route still answer within a second — red against a mutant
+      that reads streams on the default pool again (the 2026-10-02 stall)
   (l) POST /mcp tools/call `remember` and POST /remember answer byte-for-byte
       (sha256 vs the stub body) and leave one remember_shadow event after the
       response — a raising shadow cannot change the answer (E3a-1)
@@ -36,6 +40,7 @@ real door runs under uvicorn in a thread against it. Covers:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import io
@@ -52,6 +57,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -427,6 +433,145 @@ class DoorTest(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertIn("closed", StubHandler.sse_events)
+
+
+class _CapDefaultExecutor:
+    """시험 장치 — 문 앱을 감싸 기본 스레드 풀을 작게 줄인다. 기본 풀을 쓰는 경로(프록시
+    _fetch·문 자체 경로)와 스트림 읽기가 같은 풀을 쓰는 옛 구현으로 되돌리는 변이에서는
+    열린 스트림이 줄인 풀을 메워 아래 클래스의 시험이 red 가 된다 — 호스트 CPU 수와 무관한
+    「스트림 수 > 기본 풀」 재현."""
+
+    def __init__(self, app, workers: int):
+        self._app = app
+        self._workers = workers
+        self._capped = False
+
+    async def __call__(self, scope, receive, send):
+        if not self._capped:
+            self._capped = True
+            asyncio.get_running_loop().set_default_executor(
+                ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="door-test-default")
+            )
+        await self._app(scope, receive, send)
+
+
+class HangStubHandler(StubHandler):
+    """GET /mcp 만 바꾼 그릇 — SSE 헤더와 첫 덩어리를 별도 없이 본 뒤 5초 잠든다.
+
+    문 쪽 read1 이 두 번째 덩어리를 기다리며 잠든 동안 문 자체 경로가 얼마나
+    빨리 답하는지 재는 시험의 그릇."""
+
+    def do_GET(self):
+        if self.path != "/mcp":
+            return super().do_GET()
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("cache-control", "no-cache")
+        self.end_headers()
+        try:
+            self.wfile.write(SSE_FIRST)
+            self.wfile.flush()
+            time.sleep(5.0)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+class StreamsNeverStarveShortRequestsTests(unittest.TestCase):
+    """스트림이 기본 풀보다 많이 열린 채로도 짧은 요청이 1초 안에 단다.
+
+    문 서버의 기본 풀을 고의로 4로 줄이고(GET /mcp 스트림 8개 — 어느 CPU 에서든
+    「스트림 수 > 기본 풀」) 스트림을 연 채 /health(프록시·to_thread)와 /approved
+    (문 자체 경로·to_thread)의 응답을 잰다. 스트림 읽기가 전용 풀에 있으면 기본
+    풀은 비어 있어 둘 다 1초 안에 오고, _stream_chunks 를 「기본 풀에서 read1」하는
+    옛 구현으로 되돌리는 변이에서는 잠든 읽기가 풀을 메워 /health 가 밀려 red."""
+
+    STREAMS = 8
+    POOL = 4
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved_upstream = os.environ.get("DOOR_UPSTREAM")
+        cls._saved_dsn = os.environ.get("DOOR_PG_DSN")
+        cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), HangStubHandler)
+        cls.stub_thread = threading.Thread(target=cls.stub.serve_forever, daemon=True)
+        cls.stub_thread.start()
+        os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{cls.stub.server_address[1]}"
+        # /approved 가 to_thread 까지 가게 하는 DSN — 닫힌 포트라 즉시 거절돼 502.
+        os.environ["DOOR_PG_DSN"] = f"postgresql://127.0.0.1:{_free_port()}/boring"
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(
+                _CapDefaultExecutor(door.app, cls.POOL),
+                host="127.0.0.1",
+                port=cls.door_port,
+                log_level="warning",
+            )
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                status, _, _ = _req(cls.door_port, "GET", "/health")
+                if status == 200:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+        cls.stub.shutdown()
+        cls.stub.server_close()
+        if cls._saved_upstream is None:
+            os.environ.pop("DOOR_UPSTREAM", None)
+        else:
+            os.environ["DOOR_UPSTREAM"] = cls._saved_upstream
+        if cls._saved_dsn is None:
+            os.environ.pop("DOOR_PG_DSN", None)
+        else:
+            os.environ["DOOR_PG_DSN"] = cls._saved_dsn
+
+    def _open_stream(self):
+        sock = socket.create_connection(("127.0.0.1", self.door_port), timeout=10)
+        sock.sendall(
+            b"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n"
+        )
+        wire = b""
+        while SSE_FIRST not in wire:
+            chunk = sock.recv(4096)
+            self.assertTrue(chunk, "stream ended before its first chunk")
+            wire += chunk
+        return sock
+
+    def test_many_open_streams_short_requests_answer_within_a_second(self):
+        self.assertGreater(self.STREAMS, self.POOL, "test must open more streams than the pool has workers")
+        streams = [self._open_stream() for _ in range(self.STREAMS)]
+        try:
+            started = time.monotonic()
+            status, body, _ = _req(self.door_port, "GET", "/health")
+            health_s = time.monotonic() - started
+            self.assertEqual(status, 200)
+            self.assertEqual(body, HEALTH_BODY)
+            self.assertLess(health_s, 1.0, f"/health took {health_s:.2f}s with {self.STREAMS} streams open")
+
+            started = time.monotonic()
+            status, body, _ = _req(self.door_port, "GET", "/approved")
+            approved_s = time.monotonic() - started
+            self.assertEqual(status, 502)
+            self.assertIn(b"store unreachable", body)
+            self.assertLess(
+                approved_s,
+                1.0,
+                f"/approved took {approved_s:.2f}s with {self.STREAMS} streams open",
+            )
+        finally:
+            for sock in streams:
+                sock.close()
 
 
 class McpRecallAugmentTests(unittest.TestCase):
