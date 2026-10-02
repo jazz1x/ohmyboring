@@ -874,6 +874,8 @@ class GraphCompareTests(unittest.TestCase):
         stray.add(("doc:/vault/wiki/wiki-2700.md", "uses", "tool:stray"))
         stray.add(("doc:/vault/wiki/wiki-2700.md", "handed", "doc:/vault/wiki/wiki-2810.md"))
         stray.add(("doc:/vault/wiki/wiki-2700.md", "tagged", "topic:무관"))
+        # 같은 슬롯을 말했던 다른 노트의 claims 간선 — claim 노드를 함께 쓸 뿐이다 (wiki-3016·3002).
+        stray.add(("doc:/vault/wiki/wiki-2700.md", "claims", "claim:배포:절차"))
         event = _run(
             {"wiki-2810": GRAPH_NOTE},
             GRAPH_MCP_ANSWER,

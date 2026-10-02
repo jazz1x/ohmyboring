@@ -1031,14 +1031,15 @@ def _edge_divergence(
     actual: frozenset[tuple[str, str, str]],
     new_nodes: frozenset[str],
 ) -> tuple[dict[str, int], dict[str, int]]:
-    """목표와 실제의 차이를 부류별로 — 끝점 하나가 이 노트의 노드인 간선만 센다."""
+    """목표와 실제의 차이를 부류별로 — 이 노트의 노드에서 나가는 간선만 센다. claim 노드는
+    같은 슬롯을 말한 노트끼리 함께 쓰므로, 들어오는 간선은 다른 노트의 몫일 수 있다."""
     missing: dict[str, int] = {}
     extra: dict[str, int] = {}
-    for src, kind, dst in expected - actual:
-        if src in new_nodes or dst in new_nodes:
+    for src, kind, _dst in expected - actual:
+        if src in new_nodes:
             missing[kind] = missing.get(kind, 0) + 1
-    for src, kind, dst in actual - expected:
-        if src in new_nodes or dst in new_nodes:
+    for src, kind, _dst in actual - expected:
+        if src in new_nodes:
             extra[kind] = extra.get(kind, 0) + 1
     return missing, extra
 
