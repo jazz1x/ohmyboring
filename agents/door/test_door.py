@@ -36,6 +36,13 @@ real door runs under uvicorn in a thread against it. Covers:
   (l) POST /mcp tools/call `remember` and POST /remember answer byte-for-byte
       (sha256 vs the stub body) and leave one remember_shadow event after the
       response — a raising shadow cannot change the answer (E3a-1)
+  (n) E4-1 — the seven register reads (HTTP POST /decisions·/risks·/next_actions·
+      /stalled·/recurrences·/context·/status and the MCP tools decisions·risks·
+      next_actions·stalled·recurrences·context·project_status) answer byte-for-byte
+      at the default reader (engine) and leave one read_shadow event per request —
+      mismatch/race/error classification, raising shadow cannot change the answer;
+      DOOR_REGISTER_READER=python answers from inside the door (AskResp /
+      Structured envelope / validation messages) without touching the stub
 """
 
 from __future__ import annotations
@@ -79,6 +86,15 @@ approved = importlib.import_module("agents.door.approved")
 claim_source = importlib.import_module("agents.door.claim_source")
 rules = importlib.import_module("agents.door.rules")
 
+# 그림자 사건(remember_shadow·read_shadow)이 시험 밖으로 새어 나가지 못하게 — 싱크 기본값을
+# spool 로 깔고 로그는 임시 파일로 보든다. 세션 사유: 이 두 값을 안 정한 채 띄운 문의 그림자가
+# 기본(db) 싱크로 localhost:7710 의 진짜 문에 POST 해 운영 event_log 를 더럽힌 일이 있다.
+# 각 시험 클래스의 setUp 이 이 값들을 정하면 그것이 우선(setdefault 라).
+os.environ.setdefault("BORING_EVENT_SINK", "spool")
+os.environ.setdefault(
+    "BORING_EVENT_LOG", os.path.join(tempfile.gettempdir(), f"door-test-events-{os.getpid()}.ndjson")
+)
+
 STUB_CONTENT_TYPE = "application/json; charset=utf-8"
 
 SSE_FIRST = b"event: first\ndata: one\n\n"
@@ -119,6 +135,106 @@ REMEMBER_HTTP_BODY = (
 #: 다시 직렬화하면 갈라지게 한다. E4-α 가 프록시 표에 넣은 경로가 바이트 그대로 가는지 본다.
 EVENTS_BODY = b'{"entries": [],  "maybe_truncated":false, "note":"\xec\x95\x88\xeb\x85\x95"}'
 
+#: 엔진 레지스터 답의 실측 모양(E4-1) — 읽기 그림자 시험이 고르는 canned 답. remember 와
+#: 같은 이유로 직렬화 비정형(공백·유니코드)을 넣어 문이 다시 직렬화하면 갈라지게 한다.
+REGISTER_HTTP_BODY = json.dumps(
+    {
+        "answer": (
+            "Showing 1 of 1 matching claims (limit_applied=false).\n"
+            "* subj — pred: a value with enough characters (kind=decision, confidence=certain)"
+        ),
+        "sources": ["subj"],
+    },
+    ensure_ascii=False,
+).encode()
+REGISTER_MCP_PAYLOAD = {
+    "answer": (
+        "Showing 1 of 1 matching claims (limit_applied=false).\n"
+        "* subj — pred: a value with enough characters (kind=risk, confidence=likely)"
+    ),
+    "sources": ["subj"],
+    "items": [
+        {
+            "node_id": "claim:subj:pred",
+            "subject": "subj",
+            "predicate": "pred",
+            "value": "a value with enough characters",
+            "kind": "risk",
+            "confidence": "likely",
+            "valid_from": "2026-09-30T01:23:45.123456Z",
+            "project": "omb",
+        }
+    ],
+    "limit_applied": False,
+    "total_matching": 1,
+}
+REGISTER_MCP_BODY = json.dumps(
+    {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "result": {
+            "content": [{"type": "text", "text": json.dumps(REGISTER_MCP_PAYLOAD, ensure_ascii=False)}],
+            "structuredContent": REGISTER_MCP_PAYLOAD,
+            "isError": False,
+        },
+    },
+    ensure_ascii=False,
+).encode()
+RECURRENCES_BODY = json.dumps(
+    {"rows": [], "days": 30, "max_distance": 0.2, "min_days_apart": 3}, ensure_ascii=False
+).encode()
+CONTEXT_BODY = json.dumps(
+    {
+        "decisions": [],
+        "risks": [],
+        "facts": [],
+        "glossary": [],
+        "next_actions": [],
+        "language": "ko",
+    },
+    ensure_ascii=False,
+).encode()
+STATUS_BODY = json.dumps(
+    {"answer": "No recent records or claims found for project 'omb'.", "sources": []}
+).encode()
+
+
+def _mcp_envelope(payload: dict) -> bytes:
+    """canned MCP 도구 답 봉투 — structuredContent 와 content[].text 둘 다 싣는 엔진 모양."""
+    return json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "result": {
+                "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+                "structuredContent": payload,
+                "isError": False,
+            },
+        },
+        ensure_ascii=False,
+    ).encode()
+
+
+#: register_mode 일 때 스텁이 고르는 canned 답의 룩업 — 경로·도구 이름 둘 다.
+_REGISTER_STUB_PATHS = {
+    "/decisions": REGISTER_HTTP_BODY,
+    "/risks": REGISTER_HTTP_BODY,
+    "/next_actions": REGISTER_HTTP_BODY,
+    "/stalled": REGISTER_HTTP_BODY,
+    "/recurrences": RECURRENCES_BODY,
+    "/context": CONTEXT_BODY,
+    "/status": STATUS_BODY,
+}
+_REGISTER_STUB_TOOLS = {
+    "decisions": REGISTER_MCP_BODY,
+    "risks": REGISTER_MCP_BODY,
+    "next_actions": REGISTER_MCP_BODY,
+    "stalled": REGISTER_MCP_BODY,
+    "recurrences": _mcp_envelope({"rows": [], "days": 30, "max_distance": 0.2, "min_days_apart": 3}),
+    "context": _mcp_envelope(json.loads(CONTEXT_BODY)),
+    "project_status": _mcp_envelope(json.loads(STATUS_BODY)),
+}
+
 
 class StubHandler(BaseHTTPRequestHandler):
     """The engine's stand-in: fixed /health, tools/list answer, otherwise echo.
@@ -133,6 +249,7 @@ class StubHandler(BaseHTTPRequestHandler):
     last_path: str | None = None
     sse_events: list[str] = []
     hits = 0
+    register_mode = False
 
     def do_GET(self):
         type(self).last_path = self.path
@@ -170,6 +287,15 @@ class StubHandler(BaseHTTPRequestHandler):
             self._reply(200, RECALL_ERROR_BODY if error else RECALL_BODY, respond_as)
         elif isinstance(parsed, dict) and parsed.get("method") == "tools/list":
             self._reply(200, TOOLS_LIST_BODY, respond_as)
+        elif type(self).register_mode and self.path in _REGISTER_STUB_PATHS:
+            # E4-1 읽기 그림자 시험의 canned 엔진 답 — 기본(거짓)이면 아래 echo 그대로.
+            self._reply(200, _REGISTER_STUB_PATHS[self.path], respond_as)
+        elif (
+            type(self).register_mode
+            and isinstance(params, dict)
+            and params.get("name") in _REGISTER_STUB_TOOLS
+        ):
+            self._reply(200, _REGISTER_STUB_TOOLS[params["name"]], respond_as)
         else:
             self._reply(200, body, respond_as)
 
@@ -2632,6 +2758,384 @@ class RereadSingleFlightTests(unittest.TestCase):
             second.join(10)
         self.assertEqual(self.syncs, 2)
         self.assertIsNone(door._REREAD_WORKER)
+
+
+class _RegisterTestHarness:
+    """E4-1 시험의 공통 바탕 — 스텁 엔진+문(uvicorn 스레드) 한 쌍과 환경 저장·복원.
+
+    RememberWriterSwitchTests 와 같은 모양이라 두 시험 다움에 붙인다(다중 상속은 안 쓴다 —
+    unittest setUpClass 훅을 그대로 따라가게 하나의 부모로)."""
+
+    _ENV_NAMES = (
+        "DOOR_UPSTREAM",
+        "DOOR_PG_DSN",
+        "DOOR_REGISTER_READER",
+        "BORING_EVENT_SINK",
+        "BORING_EVENT_LOG",
+    )
+
+    @classmethod
+    def _start(cls):
+        cls._saved = {name: os.environ.get(name) for name in cls._ENV_NAMES}
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), StubHandler)
+        cls.stub_thread = threading.Thread(target=cls.stub.serve_forever, daemon=True)
+        cls.stub_thread.start()
+        os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{cls.stub.server_address[1]}"
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                status, _, _ = _req(cls.door_port, "GET", "/health")
+                if status == 200:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def _stop(cls):
+        cls.door_server.should_exit = True
+        cls.stub.shutdown()
+        cls.stub.server_close()
+        cls._tmp.cleanup()
+        for name, value in cls._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def _setUp(self, register_mode: bool = False):
+        StubHandler.seen_bodies.clear()
+        StubHandler.hits = 0
+        StubHandler.register_mode = register_mode
+        os.environ["BORING_EVENT_SINK"] = "spool"
+        os.environ["BORING_EVENT_LOG"] = str(Path(self._tmp.name) / f"events-{time.time_ns()}.ndjson")
+        os.environ["DOOR_PG_DSN"] = "postgresql://unused/unused"  # 읽기 길은 목으로 둔다
+        # 그림자는 응답 뒤(백그라운드)에 돌아 — mock 은 _req 블록이 끝나기 전에 풀리면 안 된다.
+        # 테스트마다 덮어쓰는 self._shadow_query_impl 을 경유하게 핀다(지금 값이 아니라 호출 시점을 본다).
+        self._shadow_query_impl = lambda surface, transport, arguments: door.Ok({})
+        self._shadow_query_patch = mock.patch.object(
+            door,
+            "_register_shadow_query",
+            side_effect=lambda surface, transport, arguments: self._shadow_query_impl(
+                surface, transport, arguments
+            ),
+        )
+        self._shadow_query_patch.start()
+
+    def _tearDown(self):
+        self._shadow_query_patch.stop()
+        StubHandler.register_mode = False
+        os.environ.pop("DOOR_REGISTER_READER", None)
+
+    def _read_shadow_events(self) -> list[dict]:
+        path = Path(os.environ["BORING_EVENT_LOG"])
+        if not path.exists():
+            return []
+        return [
+            parsed
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and (parsed := json.loads(line)).get("event") == "read_shadow"
+        ]
+
+    def _wait_for_shadow(self, timeout: float = 5.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            events = self._read_shadow_events()
+            if events:
+                return events[-1]
+            time.sleep(0.05)
+        self.fail("read_shadow event not written within timeout")
+
+
+class RegisterShadowTests(_RegisterTestHarness, unittest.TestCase):
+    """E4-1 읽기 그림자 — 스위치 기본(engine)에서 일곱 레지스터 경로는 엔진 답 바이트
+    그대로 가고, 응답 뒤 그림자가 같은 요청을 파이썬 읽기 길에 태워 read_shadow 사건
+    한 줄을 남긴다. 사건의 사유는 (가)/(나)/(다) 갈래로 남는다."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+
+    def setUp(self):
+        self._setUp(register_mode=True)
+
+    def tearDown(self):
+        self._tearDown()
+
+    def _mcp_call(self, tool: str, arguments: dict, request_id: int = 5) -> bytes:
+        return json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {"name": tool, "arguments": arguments},
+            }
+        ).encode()
+
+    def test_http_register_answer_is_byte_identical_and_shadow_ok(self):
+        engine_payload = json.loads(REGISTER_HTTP_BODY)
+        self._shadow_query_impl = lambda surface, transport, arguments: door.Ok(engine_payload)
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/decisions",
+            body=json.dumps({"project": "omb"}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REGISTER_HTTP_BODY, "기본은 엔진 답 바이트 그대로")
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "ok")
+        self.assertEqual(event["event"], "read_shadow")
+        self.assertEqual(event["surface"], "decisions")
+        self.assertEqual(event["transport"], "http")
+
+    def test_mcp_register_tool_shadow_uses_structured_content(self):
+        self._shadow_query_impl = lambda surface, transport, arguments: door.Ok(REGISTER_MCP_PAYLOAD)
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/mcp",
+            body=self._mcp_call("risks", {"project": "omb", "limit": 5}),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REGISTER_MCP_BODY, "MCP 도구 답도 바이트 그대로")
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "ok")
+        self.assertEqual(event["surface"], "risks")
+        self.assertEqual(event["transport"], "mcp")
+        self.assertEqual(event["engine_rows"], 1)
+        self.assertEqual(event["python_rows"], 1)
+
+    def test_shadow_mismatch_is_classified_python_defect(self):
+        self._shadow_query_impl = lambda surface, transport, arguments: door.Ok(
+            {"answer": "No decisions recorded yet.", "sources": []}
+        )
+        _req(
+            self.door_port,
+            "POST",
+            "/decisions",
+            body=json.dumps({"project": "omb"}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "mismatch")
+        self.assertGreaterEqual(event["python_defect"], 1)
+        self.assertIn("(가)", event["reason"])
+
+    def test_shadow_race_rerun_match_stays_ok_with_unknown_reason(self):
+        first = {"answer": "No decisions recorded yet.", "sources": []}
+        calls = {"n": 0}
+
+        def racy(surface, transport, arguments):
+            calls["n"] += 1
+            return door.Ok(first if calls["n"] == 1 else json.loads(REGISTER_HTTP_BODY))
+
+        self._shadow_query_impl = racy
+        _req(
+            self.door_port,
+            "POST",
+            "/decisions",
+            body=json.dumps({"project": "omb"}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "ok")
+        self.assertGreaterEqual(event["unknown"], 1, "어긋난 칸마다 레이스 사유가 남는다")
+        self.assertIn("race (다)", event["reason"])
+
+    def test_shadow_raising_cannot_change_the_answer(self):
+        def boom(surface, transport, arguments):
+            raise RuntimeError("boom")
+
+        self._shadow_query_impl = boom
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/next_actions",
+            body=json.dumps({"project": ""}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REGISTER_HTTP_BODY)
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "error")
+        self.assertIn("RuntimeError", event["reason"])
+
+    def test_status_shadow_compares_sources_only_when_generated(self):
+        engine_payload = {
+            "answer": "## Status\n\n- Done: one thing\n- Next: another",
+            "sources": ["wiki/wiki-0001.md"],
+        }
+        original = _REGISTER_STUB_PATHS["/status"]
+        _REGISTER_STUB_PATHS["/status"] = json.dumps(engine_payload, ensure_ascii=False).encode()
+        try:
+            self._shadow_query_impl = lambda surface, transport, arguments: door.Ok(engine_payload)
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/status",
+                body=json.dumps({"project": "omb"}).encode(),
+                headers={"content-type": "application/json"},
+            )
+        finally:
+            _REGISTER_STUB_PATHS["/status"] = original
+        self.assertEqual(json.loads(body), engine_payload)
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "ok")
+        self.assertEqual(event["surface"], "status")
+        self.assertFalse(event["answer_compared"], "생성 답은 대조 안 함 — sources 만 맞춘다")
+
+
+class RegisterReaderSwitchTests(_RegisterTestHarness, unittest.TestCase):
+    """E4-1 읽기 주인 스위치 (DOOR_REGISTER_READER).
+
+    기본(engine)이면 일곱 읽기는 프록시 그대로(바이트+그림자). python 이면 문이 엔진에
+    넘기지 않고 문 안의 읽기 길로 답한다 — _register_answer 는 목으로 두고 선로(스위치·
+    봉투·상태 부호·거절 문구)만 본다. 진짜 읽기 길은 registers/test_pg.py 가 본다."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+
+    def setUp(self):
+        self._setUp()
+
+    def tearDown(self):
+        self._tearDown()
+
+    def test_default_reader_is_engine_and_register_proxies(self):
+        os.environ.pop("DOOR_REGISTER_READER", None)
+        self.assertEqual(door._register_reader(), "engine")
+        payload = json.dumps({"project": "omb"}).encode()
+        status, body, _ = _req(
+            self.door_port, "POST", "/decisions", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual((status, body), (200, payload), "기본은 스텁 엔진(echo) 답 바이트 그대로")
+
+    def test_unknown_switch_value_falls_back_to_engine(self):
+        os.environ["DOOR_REGISTER_READER"] = "python2"
+        self.assertEqual(door._register_reader(), "engine")
+
+    def test_python_reader_http_answers_askresp_shape_without_upstream(self):
+        os.environ["DOOR_REGISTER_READER"] = "python"
+        hits_before = StubHandler.hits
+        with mock.patch.object(
+            door, "_register_answer", return_value=door.Ok({"answer": "digest", "sources": ["subj"]})
+        ) as run:
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/decisions",
+                body=json.dumps({"project": "omb"}).encode(),
+                headers={"content-type": "application/json"},
+            )
+        run.assert_called_once()
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"answer": "digest", "sources": ["subj"]})
+        self.assertEqual(StubHandler.hits, hits_before, "python 이면 엔진을 건드리지 않는다")
+
+    def test_python_reader_mcp_structured_envelope_without_upstream(self):
+        os.environ["DOOR_REGISTER_READER"] = "python"
+        hits_before = StubHandler.hits
+        payload = {
+            "answer": "Showing 0 of 0 matching claims (limit_applied=false).",
+            "sources": [],
+            "items": [],
+            "limit_applied": False,
+            "total_matching": 0,
+        }
+        with mock.patch.object(door, "_register_answer", return_value=door.Ok(payload)):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/mcp",
+                body=json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 7,
+                        "method": "tools/call",
+                        "params": {"name": "decisions", "arguments": {"limit": 3}},
+                    }
+                ).encode(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(StubHandler.hits, hits_before)
+        self.assertEqual(status, 200)
+        wire = json.loads(body)
+        self.assertEqual(wire["id"], 7)
+        self.assertEqual(wire["result"]["structuredContent"], payload)
+        self.assertEqual(json.loads(wire["result"]["content"][0]["text"]), payload)
+        self.assertFalse(wire["result"]["isError"])
+
+    def test_python_reader_validation_rejection_matches_engine_message(self):
+        os.environ["DOOR_REGISTER_READER"] = "python"
+        hits_before = StubHandler.hits
+        with mock.patch.object(door, "_register_answer") as run:
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/decisions",
+                body=json.dumps({"limit": 0}).encode(),
+                headers={"content-type": "application/json"},
+            )
+        run.assert_not_called()
+        self.assertEqual(StubHandler.hits, hits_before)
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body), {"error": "limit must be an integer in 1..=50"})
+
+    def test_python_reader_project_status_requires_project(self):
+        os.environ["DOOR_REGISTER_READER"] = "python"
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/mcp",
+            body=json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {"name": "project_status", "arguments": {}},
+                }
+            ).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        wire = json.loads(body)
+        self.assertEqual(wire["error"]["code"], -32602)
+        self.assertEqual(wire["error"]["message"], "missing argument: project")
+
+    def test_python_reader_without_dsn_is_503(self):
+        os.environ["DOOR_REGISTER_READER"] = "python"
+        os.environ.pop("DOOR_PG_DSN", None)
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/decisions",
+            body=json.dumps({"project": "omb"}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body), {"error": "store not configured"})
 
 
 if __name__ == "__main__":

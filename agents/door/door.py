@@ -26,7 +26,23 @@ mismatch carries a reason that sorts it into python-defect / engine-difference /
 unknown (E3a-2; a skipped request is compared by decision only — nothing was
 written, so there are no fields to match; the response never waits on the shadow
 and a shadow failure cannot change the answer — one log line and a status=error
-event). The one switch on this behavior: DOOR_REMEMBER_WRITER=python hands the
+event). The seven register reads get the same treatment one migration step later
+(E4-1): POST /decisions·/risks·/next_actions·/stalled·/recurrences·/context·/status
+and the MCP tools decisions·risks·next_actions·stalled·recurrences·context·
+project_status pass through byte-for-byte as today — after the answer leaves, a
+read shadow recomputes the same request through the python read path
+(ohmyboring.registers, a read-only session) and compares the response field by
+field (register answer text·sources·items·totals, recurrence rows, the context
+card's five sections, status sources plus the empty-path message — the generated
+status text itself is not compared), leaving one read_shadow event per request
+whose every mismatch carries the remember vocabulary: (가) python-defect,
+(나) engine-differs-from-intent (today: plan-dependent tie order),
+(다) unknown (unreadable engine answer, python compute failure, or a race the
+one rerun confirms); the response never waits on the shadow. The register read
+switch: DOOR_REGISTER_READER=python hands these seven reads to the python read
+path inside the door (default engine leaves every byte untouched; turning it on
+is the orchestrator's call once production shadow numbers show 가=0·다=0). The
+one switch on this behavior: DOOR_REMEMBER_WRITER=python hands the
 remember decision·write·answer to the python write path inside the door
 (E3c-1, ohmyboring.remember.writer — the same decision chain the shadow
 validates, writing for real through a writable DOOR_PG_DSN; default engine
@@ -116,6 +132,8 @@ from ohmyboring.adapters import events as event_log
 from ohmyboring.adapters import vault as vault_notes
 from ohmyboring.entrypoints.http import mcp_recall
 from ohmyboring.recall import named as recall_named
+from ohmyboring.registers import pg as registers_pg
+from ohmyboring.registers import shadow as registers_shadow
 from ohmyboring.remember import dedup as remember_dedup
 from ohmyboring.remember import graph as remember_graph
 from ohmyboring.remember import index as remember_index
@@ -242,6 +260,19 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
     if request.method == "POST" and request.url.path == "/remember" and _remember_writer() == _WRITER_PYTHON:
         if (arguments := _http_remember_arguments(body)) is not None:
             return await _remember_python(request, body, arguments, "remember")
+    # 읽기 주인 스위치(E4-1): python 이면 일곱 레지스터 읽기를 엔진에 넘기지 않고 문 안에서 답한다.
+    if request.method == "POST" and _register_reader() == _READER_PYTHON:
+        if request.url.path in _REGISTER_HTTP_PATHS:
+            if (data := _http_json_object(body)) is not None:
+                return await _register_python(
+                    request, None, data, _REGISTER_HTTP_PATHS[request.url.path], "http"
+                )
+        elif request.url.path == "/mcp":
+            if (call := _mcp_tools_call(body)) is not None and call[0] in _REGISTER_MCP_TOOLS:
+                rpc = _http_json_object(body) or {}
+                return await _register_python(
+                    request, rpc.get("id"), call[1], _REGISTER_MCP_TOOLS[call[0]], "mcp"
+                )
     headers = {
         name: request.headers[name]
         for name in ("content-type", "accept", "mcp-session-id", "x-request-id", _OWNER_TOKEN_HEADER)
@@ -266,6 +297,28 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
                 response.status_code,
                 response.body,
                 _standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
+            )
+        # 일곱 레지스터 도구도 같은 규약 — 응답 뒤 읽기 그림자가 칸별 대조 사건을 남긴다(E4-1).
+        if not isinstance(response, StreamingResponse) and (call := _mcp_tools_call(body)) is not None:
+            if call[0] in _REGISTER_MCP_TOOLS:
+                background_tasks.add_task(
+                    _register_shadow_task,
+                    _REGISTER_MCP_TOOLS[call[0]],
+                    "mcp",
+                    call[1],
+                    response.status_code,
+                    response.body,
+                )
+        return response
+    if request.method == "POST" and request.url.path in _REGISTER_HTTP_PATHS:
+        if not isinstance(response, StreamingResponse) and (data := _http_json_object(body)) is not None:
+            background_tasks.add_task(
+                _register_shadow_task,
+                _REGISTER_HTTP_PATHS[request.url.path],
+                "http",
+                data,
+                response.status_code,
+                response.body,
             )
         return response
     if request.method == "POST" and request.url.path == "/remember":
@@ -649,6 +702,212 @@ def _remember_outcome_response(body: bytes, route: str, outcome: remember_writer
             }
         )
     return JSONResponse({"error": outcome.message}, status_code=400 if outcome.code == -32602 else 500)
+
+
+#: ── E4-1 일곱 레지스터 읽기 — 읽기 그림자 + 읽기 주인 스위치 ────────────────
+#: HTTP 경로 표면 → 표면 이름 / MCP 도구 이름 → 표면 이름. 문서(docstring) 위에도 쓴다.
+_REGISTER_HTTP_PATHS = {
+    "/decisions": "decisions",
+    "/risks": "risks",
+    "/next_actions": "next_actions",
+    "/stalled": "stalled",
+    "/recurrences": "recurrences",
+    "/context": "context",
+    "/status": "status",
+}
+_REGISTER_MCP_TOOLS = {
+    "decisions": "decisions",
+    "risks": "risks",
+    "next_actions": "next_actions",
+    "stalled": "stalled",
+    "recurrences": "recurrences",
+    "context": "context",
+    "project_status": "status",
+}
+
+#: 읽기 주인 스위치(E4-1) — engine(기본)이면 프록시+그림자 그대로, python 이면 문 안의 읽기
+#: 길(ohmyboring.registers)이 답한다. 켜기는 오케스트레이터가 운영 그림자 숫자를 보고 한다.
+_REGISTER_READER_ENV = "DOOR_REGISTER_READER"
+_READER_PYTHON = "python"
+
+
+def _register_reader() -> str:
+    """읽기 주인 — python 만 켬, 그 밖의 값·부재는 전부 engine(실수로 켜지지 않게)."""
+    return _READER_PYTHON if os.environ.get(_REGISTER_READER_ENV) == _READER_PYTHON else "engine"
+
+
+def _http_json_object(body: bytes) -> dict | None:
+    """POST 본문이 JSON 객천 것만 — 레지스터 그림자·스위치가 다루는 인자의 모양."""
+    try:
+        data = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _mcp_tools_call(body: bytes) -> tuple[str, dict] | None:
+    """POST /mcp 본문이 tools/call 이면 (도구 이름, 인자 dict), 아니면 None.
+
+    인자가 객체가 아니면 빈 dict — 엔진은 as_str/as_u64 로 필드를 읽으니 비객체 인자도
+    기본값으로 답하고, 파이썬 길의 mcp_args 가 똑같이 받는다."""
+    try:
+        data = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("method") != "tools/call":
+        return None
+    params = data.get("params")
+    if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+        return None
+    arguments = params.get("arguments")
+    return params["name"], arguments if isinstance(arguments, dict) else {}
+
+
+def _policy_origins() -> tuple[str, ...]:
+    """엔진 config.rs origins_excluded_by_policy — allow_company_origin 이면 빈 집합."""
+    return () if boring_config.load().get("allow_company_origin") else ("company",)
+
+
+def _embed_text(text: str):
+    match embed_adapter.embed(text):
+        case Ok(vec):
+            return Ok(vec)
+        case Err(failure):
+            return Err(str(failure))
+
+
+def _register_answer(args: dict, surface: str, transport: str) -> Either[dict, str]:
+    """읽기 길 한 바퀴 — 읽기 전용 연결(그림자·켬 응답 길 같음). 실패는 message 값으로."""
+    try:
+        conn = psycopg.connect(os.environ["DOOR_PG_DSN"], options="-c default_transaction_read_only=on")
+    except psycopg.Error as e:
+        return Err(f"pg connect: {e}")
+    with conn:
+        ctx = registers_pg.AnswerCtx(
+            policy_origins=_policy_origins(),
+            lang=boring_config.note_lang(),
+            embed=_embed_text,
+            transport=transport,
+        )
+        return registers_pg.answer(conn, surface, args, ctx)
+
+
+def _mcp_result(payload: dict, request_id: Any) -> Response:
+    """Structured 도구 답 봉투 — 엔진 ToolOut::Structured 모양(mcp.rs:494-509)."""
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return JSONResponse(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "content": [{"type": "text", "text": text}],
+                "structuredContent": payload,
+                "isError": False,
+            },
+        }
+    )
+
+
+def _mcp_error(request_id: Any, code: int, message: str) -> Response:
+    return JSONResponse({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}})
+
+
+def _register_rejection(request_id: Any, transport: str, message: str) -> Response:
+    """인자 거절 — HTTP 는 400(serde 422 계열은 422), MCP 는 -32602 봉투(HTTP 200)."""
+    if transport == "mcp":
+        return _mcp_error(request_id, -32602, message)
+    status = 422 if message == "unprocessable entity" else 400
+    return JSONResponse({"error": message}, status_code=status)
+
+
+def _register_failure(request_id: Any, transport: str, message: str) -> Response:
+    """계산 고장 — HTTP 는 500, MCP 는 -32603 봉투(엔진의 map_err 계열과 같다)."""
+    if transport == "mcp":
+        return _mcp_error(request_id, -32603, message)
+    return JSONResponse({"error": message}, status_code=500)
+
+
+async def _register_python(
+    request: Request, request_id: Any, arguments: dict, surface: str, transport: str
+) -> Response:
+    """스위치 켬 — 일곱 읽기를 엔진에 넘기지 않고 문 안의 읽기 길로 답한다.
+
+    켬 응답 길은 주 요청 안에서 돈다(그림자와 달리). 사건 기록은 없다 — 켬에서는 비교할
+    엔진 답이 없고, 답 자체는 읽기라 기록할 사건 이며: 응답은 엔진 모양 그대로 준다."""
+    if not os.environ.get("DOOR_PG_DSN"):
+        return JSONResponse({"error": "store not configured"}, status_code=503)
+    parse = registers_pg.http_args if transport == "http" else registers_pg.mcp_args
+    match parse(surface, arguments):
+        case Err(rejected):
+            return _register_rejection(request_id, transport, rejected.message)
+        case Ok(args):
+            pass
+    try:
+        result = await asyncio.to_thread(_register_answer, args, surface, transport)
+    except Exception as e:  # noqa: BLE001 — 예상 못한 고장도 엔진 -32603/500 과 같이
+        print(f"[door] register reader failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        result = Err(f"{type(e).__name__}: {e}")
+    match result:
+        case Err(message):
+            return _register_failure(request_id, transport, message)
+        case Ok(payload):
+            pass
+    if transport == "mcp":
+        return _mcp_result(payload, request_id)
+    return JSONResponse(payload)
+
+
+def _register_shadow_query(
+    surface: str, transport: str, arguments: dict
+) -> Either[dict, registers_shadow.PyFailure]:
+    """그림자의 파이썬 길 — 인자 거절은 대조 가능한 거절로, 계산 고장은 (다) 로 남긴다."""
+    parse = registers_pg.http_args if transport == "http" else registers_pg.mcp_args
+    match parse(surface, arguments):
+        case Err(rejected):
+            return Err(registers_shadow.PyFailure(rejected.message, rejection=True))
+        case Ok(args):
+            pass
+    match _register_answer(args, surface, transport):
+        case Err(message):
+            return Err(registers_shadow.PyFailure(message, rejection=False))
+        case Ok(payload):
+            return Ok(payload)
+
+
+def _register_shadow_task(surface: str, transport: str, arguments: dict, status: int, body: bytes) -> None:
+    """읽기 그림자(E4-1) — 응답을 본 뒤 같은 요청을 읽기 전용으로 다시 계산해 엔진 답과
+    칸별로 대조하고 read_shadow 사건 한 줄을 남긴다. 실패는 전부 여기서 접는다: 문 로그
+    한 줄 + 사건 status=error — 응답은 이미 간 뒤라 어떤 예외도 클라이언트에 닿지 않는다."""
+    try:
+        event = registers_shadow.run_shadow(
+            registers_shadow.ShadowRequest(
+                surface=surface,
+                transport=transport,
+                arguments=arguments,
+                engine_status=status,
+                engine_body=body,
+                query=lambda: _register_shadow_query(surface, transport, arguments),
+                rerun=lambda: _register_shadow_query(surface, transport, arguments),
+            )
+        )
+    except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
+        print(f"[door] read_shadow failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        event_log.try_append_event(
+            "door",
+            registers_shadow.EVENT_NAME,
+            "error",
+            surface=surface,
+            transport=transport,
+            reason=f"{type(e).__name__}: {e}",
+        )
+        return
+    event_log.try_append_event(
+        "door",
+        registers_shadow.EVENT_NAME,
+        event.status,
+        surface=surface,
+        **registers_shadow.event_payload(event),
+    )
 
 
 def _load_routes() -> dict[str, list[str]]:

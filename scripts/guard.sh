@@ -98,6 +98,7 @@ python3 src/ohmyboring/remember/test_pii.py
 python3 src/ohmyboring/remember/test_dedup.py
 python3 src/ohmyboring/remember/test_index.py
 python3 src/ohmyboring/remember/test_writer.py
+python3 src/ohmyboring/registers/test_shadow.py
 python3 src/ohmyboring/test_result.py
 python3 agents/door/test_door.py
 python3 agents/door/test_door_search.py
@@ -146,6 +147,7 @@ python3 src/ohmyboring/search/test_rank.py
 python3 src/ohmyboring/search/test_hits.py
 python3 src/ohmyboring/search/test_retriever.py
 python3 src/ohmyboring/search/test_pg.py
+python3 src/ohmyboring/registers/test_pg.py
 python3 src/ohmyboring/search/test_redact.py
 echo "6) shell destructive-path guardrails (restore-db)…"
 sh scripts/test_restore_db.sh

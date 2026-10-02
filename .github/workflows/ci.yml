@@ -170,6 +170,12 @@ jobs:
             fail=1
           fi
           echo "::endgroup::"
+          echo "::group::python registers read-path integration"
+          if ! python3 src/ohmyboring/registers/test_pg.py; then
+            echo "FAILED: registers/test_pg.py"
+            fail=1
+          fi
+          echo "::endgroup::"
           exit "$fail"
       - name: reset DB (DB gate suites leave rows behind; drudge/eval-gate need a clean corpus)
         run: |
