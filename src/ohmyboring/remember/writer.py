@@ -578,7 +578,7 @@ def allocate_wiki_path(wiki_dir: str, db_ids: set[int]) -> tuple[str, str]:
         wiki_id = f"wiki-{n:04}"
         path = os.path.join(wiki_dir, f"{wiki_id}.md")
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
             os.close(fd)
             return wiki_id, path
         except FileExistsError:

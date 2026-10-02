@@ -363,6 +363,12 @@ class WriterCase(unittest.TestCase):
             ["wiki-0001.md", "wiki-0002.md", "wiki-0004.md", "wiki-0010.md"],
         )
 
+    def test_a_new_note_file_is_not_executable(self):
+        outcome = self.write({"title": "권한 시험", "body": "본문"})
+        assert isinstance(outcome, writer.Written)
+        mode = os.stat(os.path.join(self.vault, "wiki", f"{outcome.wiki_id}.md")).st_mode
+        self.assertEqual(mode & 0o111, 0)
+
     def test_wiki_number_ignores_non_numeric_and_negative_stems(self):
         for name in ("wiki-abcd.md", "wiki--1.md", "notes.md"):
             with open(os.path.join(self.vault, "wiki", name), "w", encoding="utf-8") as handle:
