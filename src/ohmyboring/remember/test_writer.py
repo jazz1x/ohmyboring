@@ -424,7 +424,7 @@ class WriterCase(unittest.TestCase):
 
         class _SleepyConn(_FakeConn):
             def __exit__(self, *args):
-                time.sleep(0.02)  # commit/rollback 시간 — DB 칸에 잡혀야 한다
+                time.sleep(0.12)  # commit/rollback 시간 — DB 칸에 잡혀야 한다
                 return super().__exit__(*args)
 
         def sleepy_append(component, event, status, **fields):
