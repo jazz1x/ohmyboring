@@ -230,10 +230,11 @@ REVIEW_DEFER_WINDOW_HOURS = 168
 
 def _deferred_review_pairs() -> set[tuple[str, str]]:
     """(note, kind) pairs the owner held (보류) within the 이레 window — read from the
-    verdict_reviewed 사건 a hold leaves (the review lane's write-only-until-now event).
-    Agree/flip/delegate rows are ignored: only a hold suppresses. A hold row missing the
-    note or its kind is malformed, same as a malformed proposal: raise (F5/ROP), never
-    skip — a dropped row here is exactly a held pair coming back unannounced."""
+    verdict_reviewed 사건 a hold leaves. Agree/flip/delegate rows are ignored here: only a
+    hold suppresses (the delegate rows a successful judgment leaves are read by
+    _delegated_reasons, which runs before this filter). A hold row missing the note or its
+    kind is malformed, same as a malformed proposal: raise (F5/ROP), never skip — a dropped
+    row here is exactly a held pair coming back unannounced."""
     out: set[tuple[str, str]] = set()
     for entry in _live_events("verdict_reviewed", REVIEW_DEFER_WINDOW_HOURS):
         attrs = entry.get("attributes") or {}
@@ -243,6 +244,37 @@ def _deferred_review_pairs() -> set[tuple[str, str]]:
         if not isinstance(note, str) or not note or kind not in ("used", "contested"):
             raise ValueError(f"malformed verdict_reviewed hold row: {attrs!r}")
         out.add((note, kind))
+    return out
+
+
+def _delegated_reasons(since_hours: int) -> dict[tuple[str, str], tuple[str, str, str]]:
+    """(note, proposed_kind) → (judged kind, 이유, observed_at) for every successful
+    「맡길게요」 judgment — a verdict_reviewed delegate row that actually carries the model's
+    kind and reason. The word-flag stamps b300c46 wrote (choice=delegate with no kind or
+    reason) are not judgments: they are skipped, never mistaken for one. A failed delegation
+    (error field, no kind) leaves no judgment either — the row comes back unanswered."""
+    out: dict[tuple[str, str], tuple[str, str, str]] = {}
+    for entry in _live_events("verdict_reviewed", since_hours):
+        attrs = entry.get("attributes") or {}
+        if attrs.get("choice") != "delegate":
+            continue
+        note, proposed_kind = attrs.get("note"), attrs.get("proposed_kind")
+        kind, reason = attrs.get("kind"), attrs.get("reason")
+        if (
+            not isinstance(note, str)
+            or not note
+            or proposed_kind not in ("used", "contested")
+            or kind not in ("used", "contested")
+            or not isinstance(reason, str)
+            or not reason
+        ):
+            continue
+        observed_at = entry.get("observed_at")
+        if not isinstance(observed_at, str):
+            continue
+        key = (note, proposed_kind)
+        if key not in out or observed_at >= out[key][2]:
+            out[key] = (kind, reason, observed_at)
     return out
 
 
@@ -279,9 +311,11 @@ def _group_reviews(rows: list[ProposedVerdict]) -> list[ProposedVerdict]:
 def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
     """The review lane's rows: session-end verdict_proposed events, contested first, then
     newest first, the same (note, kind) proposed by several sessions folded into one row,
-    pairs the owner held within the 이레 window left off, at most REVIEW_LIMIT. A row
-    missing a field this value needs is malformed — raise (F5/ROP), never skip: a dropped
-    row here is a judgment the owner was never shown."""
+    a pair a successful 「맡길게요」 judged carrying the model's 이유 in place of the scorer's
+    sentence (the kind line itself stays the session's own claim), pairs the owner held
+    within the 이레 window left off, at most REVIEW_LIMIT. A row missing a field this value
+    needs is malformed — raise (F5/ROP), never skip: a dropped row here is a judgment the
+    owner was never shown."""
     parsed: list[ProposedVerdict] = []
     for entry in _live_events("verdict_proposed", since_hours):
         attrs = entry.get("attributes") or {}
@@ -304,6 +338,17 @@ def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
     unique = [p for p in parsed if (key := (p.session_id, p.note, p.kind)) not in seen and not seen.add(key)]
     grouped = _group_reviews(unique)
     if grouped:
+        delegated = _delegated_reasons(since_hours)
+        if delegated:
+            # 맡긴 판정이 있는 짝은 이유 한 줄을 그 판정의 것으로 바꾼다 — 다음 카드에 보이는
+            # 이유가 모델이 남긴 문장. 짝의 종류 줄은 세션이 말한 것을 그대로 말하는 문구라
+            # (「말이 나왔어요」) 판정에 따라 바뀌지 않는다: 뒤집힌 종류는 엔진 간선에만 실린다.
+            grouped = [
+                r.model_copy(update={"reason": delegated[(r.note, r.kind)][1]})
+                if (r.note, r.kind) in delegated
+                else r
+                for r in grouped
+            ]
         deferred = _deferred_review_pairs()
         grouped = [r for r in grouped if (r.note, r.kind) not in deferred]
     shown = grouped[:REVIEW_LIMIT]

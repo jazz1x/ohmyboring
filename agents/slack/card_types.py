@@ -326,6 +326,28 @@ class ReviewPress(CardPress):
 Press = Annotated[RepairPress | AdvicePress | ReviewPress, Field(discriminator="lane")]
 
 
+class DelegatedJudgment(BaseModel):
+    """One 「맡길게요」 press's model judgment — what the agent decided and why. `kind` is
+    the judged edge kind: the model answered right (제안 그대로) or wrong (뒤집은 판정),
+    and parse folded that into the engine's used|contested vocabulary before this value
+    ever reached the decision table. `reason` is the model's one line, already capped."""
+
+    kind: Literal["used", "contested"]
+    reason: str
+
+
+class DelegationFailed(BaseModel):
+    """The model could not judge — the note was unreadable, the proposal's 근거 사건 was
+    gone, the call died, or the answer was not the promised shape. No 판정 may be written
+    for this press; the decision table turns this into the 사건 one line that says so."""
+
+    reason: str
+
+
+#: What a delegate press carries into card_press.effects — the model's answer or its absence.
+Delegated = DelegatedJudgment | DelegationFailed
+
+
 class Record(BaseModel):
     """One engine event-log row to write."""
 

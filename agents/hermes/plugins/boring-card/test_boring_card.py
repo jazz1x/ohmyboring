@@ -22,6 +22,11 @@ The plugin is the second process that receives the morning card's button presses
     press the row again; a failed chat_update is one log line and releases the claim too
   - a repair the door answers with a non-done value is one error line, and the card row
     shows the door's own numbers (done, failed, unanswered each render their own mark)
+  - a review 「맡길게요」 press judges: the model is called exactly once (a fake LLM counts),
+    and the judged kind — not the proposed word flag — rides the agent:delegated edge; a
+    model that cannot answer (dead call, malformed JSON, no model seat, unreadable note)
+    leaves no consumption at all, records the 사건 one line with the reason, and the row
+    shows 「✕ 실패 — reason」 over its buttons with the claim released
   - register() without SECRETARY_OWNER_ID (or without BORING_HOME) registers nothing —
     a press nobody vetted must never reach an effect
   - the import path stays langchain-free, because the hermes venv has no langchain
@@ -53,6 +58,7 @@ for extra in (REPO / "agents" / "slack", REPO / "agents" / "shared", REPO / "src
     if str(extra) not in sys.path:
         sys.path.insert(0, str(extra))
 
+import card_delegate  # noqa: E402
 import card_effects  # noqa: E402
 import card_press  # noqa: E402
 import card_types  # noqa: E402
@@ -70,6 +76,13 @@ CARD_CH = "C1"
 PLUGIN.time = types.SimpleNamespace(time=lambda: float(CARD_TS) + 60)
 ADVICE_VALUE = {"lane": "advice", "note": "wiki-0576"}
 REVIEW_VALUE = {"lane": "review", "session": "sess-agent-1", "note": "wiki-0700", "kind": "used"}
+REVIEW_GROUPED_VALUE = {
+    "lane": "review",
+    "session": "sess-agent-1",
+    "sessions": ["sess-agent-1", "sess-agent-2"],
+    "note": "wiki-0700",
+    "kind": "used",
+}
 REPAIR_VALUE = {"lane": "repair", "subject": "foodspring-front"}
 
 #: The card as a press payload carries it — one repair, two advice, one review row, so
@@ -118,9 +131,26 @@ _CFG = Path(tempfile.mkdtemp(prefix="boring-card-test-")) / "boring.json"
 _CFG.write_text(json.dumps({"note_lang": "ko"}), encoding="utf-8")
 
 
+class _FakeLlm:
+    """The host's ctx.llm facade, scripted: a JSON answer or a raise, counting calls so a
+    press can never spend more than its one model call."""
+
+    def __init__(self, calls, *, answer=None, error=None):
+        self._calls = calls
+        self._answer = answer
+        self._error = error
+
+    async def acomplete(self, messages, **kwargs):
+        self._calls.append(("model", messages[0]["content"], kwargs))
+        if self._error is not None:
+            raise self._error
+        return types.SimpleNamespace(text=self._answer)
+
+
 class _FakeCtx:
-    def __init__(self):
+    def __init__(self, llm=None):
         self.handlers = []
+        self.llm = llm
 
     def register_slack_action_handler(self, action_id, callback):
         self.handlers.append((action_id, callback))
@@ -260,6 +290,29 @@ def _patched_effects(calls, consumption=None, execute_repair=None):
         yield
 
 
+@contextlib.contextmanager
+def _patched_delegate(
+    calls, note_text="---\ntitle: t\n---\n노트 본문입니다", evidence="채점이 잡은 문장입니다."
+):
+    """The judgment seat's live reads replaced by fakes — a press must never touch the
+    host vault or the engine's /events in these tests."""
+    with (
+        mock.patch.object(
+            card_delegate,
+            "read_note_text",
+            side_effect=lambda path: calls.append(("read_note", path)) or note_text,
+        ),
+        mock.patch.object(
+            card_delegate,
+            "proposal_evidence",
+            side_effect=lambda sessions, path, kind: (
+                calls.append(("read_evidence", tuple(sessions), path, kind)) or evidence
+            ),
+        ),
+    ):
+        yield
+
+
 def test_the_import_path_stays_langchain_free():
     """card_effects, and everything register() imports for the in-place edit, must stay
     importable in the hermes venv — the way back to langchain is card_live, so any of them
@@ -365,24 +418,30 @@ def test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card():
 
 
 def test_an_owner_review_delegate_press_consumes_with_the_agent_judge():
-    """맡길게요: the agent's call stands — a consumption on the proposing session with the
-    proposed kind and judge agent:delegated (never owner), then the verdict_reviewed record,
-    and only then the row settles as delegated."""
-    ctx = _FakeCtx()
+    """맡길게요: the model judges once and its call stands — REVIEW_VALUE proposes 'used';
+    the fake model answers wrong, so the judged edge is contested (never the word flag),
+    judge agent:delegated (never owner), the verdict_reviewed 사건 carries the judged kind
+    and the model's 이유, and only then the row settles as delegated. A mutant stamping the
+    proposed kind, or skipping the model call, goes red here."""
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer='{"verdict": "wrong", "reason": "본문과 맞지 않는 옛 기록"}'))
     with _env():
         _, handler = _register(ctx)[0]
-        calls = []
-        with _patched_effects(calls):
+        with _patched_effects(calls), _patched_delegate(calls):
             _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
     assert [c if isinstance(c, str) else c[0] for c in calls] == [
         "ack",
         "chat_update",
+        "read_note",
+        "read_evidence",
+        "model",
         "consumption",
         "record",
         "chat_update",
     ]
-    assert calls[2:4] == [
-        ("consumption", "sess-agent-1", "used", ["/vault/wiki/wiki-0700.md"], "agent:delegated"),
+    assert len([c for c in calls if isinstance(c, tuple) and c[0] == "model"]) == 1
+    assert calls[5:7] == [
+        ("consumption", "sess-agent-1", "contested", ["/vault/wiki/wiki-0700.md"], "agent:delegated"),
         (
             "record",
             "verdict_reviewed",
@@ -392,12 +451,120 @@ def test_an_owner_review_delegate_press_consumes_with_the_agent_judge():
                 "proposed_kind": "used",
                 "card_ts": CARD_TS,
                 "choice": "delegate",
+                "judge": "agent:delegated",
+                "kind": "contested",
+                "reason": "본문과 맞지 않는 옛 기록",
             },
         ),
     ]
     progress, final = _updates(calls)
     _assert_single_row_marked(BLOCKS, final[3], 3)
     assert "✓ 맡김 — 에이전트 판정 그대로" in json.dumps(final[3], ensure_ascii=False)
+
+
+def test_a_delegate_press_where_the_model_agrees_keeps_the_proposed_kind():
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer='{"verdict": "right", "reason": "본문 그대로입니다"}'))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_effects(calls), _patched_delegate(calls):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert ("consumption", "sess-agent-1", "used", ["/vault/wiki/wiki-0700.md"], "agent:delegated") in calls
+    record = next(c for c in calls if isinstance(c, tuple) and c[0] == "record")
+    assert record[2]["kind"] == "used" and record[2]["reason"] == "본문 그대로입니다"
+
+
+def test_a_grouped_delegate_press_calls_the_model_once_and_fans_out_the_judgment():
+    """묶인 줄의 한 누름에 모델 호출은 1회 — 판정은 묶인 세션 전부에 간다."""
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer='{"verdict": "wrong", "reason": "모델 이유"}'))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_effects(calls), _patched_delegate(calls):
+            _run(handler, _body("card:3:delegate", REVIEW_GROUPED_VALUE), calls)
+    assert len([c for c in calls if isinstance(c, tuple) and c[0] == "model"]) == 1
+    assert (
+        "consumption",
+        "sess-agent-1",
+        "contested",
+        ["/vault/wiki/wiki-0700.md"],
+        "agent:delegated",
+    ) in calls
+    assert (
+        "consumption",
+        "sess-agent-2",
+        "contested",
+        ["/vault/wiki/wiki-0700.md"],
+        "agent:delegated",
+    ) in calls
+    assert ("read_evidence", ("sess-agent-1", "sess-agent-2"), "/vault/wiki/wiki-0700.md", "used") in calls
+
+
+def test_a_model_failure_leaves_no_edge_and_records_the_fact():
+    """모델이 못 답하면(여기선 죽은 호출) 판정을 남기지 않는다: consumption 0, error 를 실은
+    사건 한 줄, 그리고 실패 줄은 이유와 함께 「✕ 실패」로 버튼을 살린 채 남는다 — 조용히
+    낱말 표지로 되돌아가는 변이(제안 kind 의 간선)는 이 시험이 잡는다. 클레임은 풀려
+    다시 누를 수 있고, 다시 누름에도 모델 호출은 누름당 정확히 1번이다."""
+    calls = []
+    llm = _FakeLlm(calls, error=RuntimeError("model unreachable"))
+    ctx = _FakeCtx(llm=llm)
+    with _env():
+        _, handler = _register(ctx)[0]
+        with (
+            _patched_effects(calls),
+            _patched_delegate(calls),
+            mock.patch.object(PLUGIN, "_LOG"),
+        ):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+            assert not [c for c in calls if isinstance(c, tuple) and c[0] == "consumption"]
+            record = next(c for c in calls if isinstance(c, tuple) and c[0] == "record")
+            assert record[1] == "verdict_reviewed"
+            assert record[2]["choice"] == "delegate" and "model unreachable" in record[2]["error"]
+            assert "kind" not in record[2] and "reason" not in record[2]
+            failed = _updates(calls)[-1][3]
+            assert _status_at(failed, 3).startswith("✕ 실패")
+            _assert_buttons_kept_under_the_reason(BLOCKS, failed, 3)
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert len([c for c in calls if isinstance(c, tuple) and c[0] == "model"]) == 2
+
+
+def test_a_malformed_model_answer_is_a_failure_not_a_verdict():
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer="맞는 것 같아요"))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_effects(calls), _patched_delegate(calls):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "consumption"]
+    record = next(c for c in calls if isinstance(c, tuple) and c[0] == "record")
+    assert "JSON" in record[2]["error"]
+
+
+def test_a_delegate_press_without_the_model_seat_leaves_the_fact_only():
+    """ctx.llm 이 없는 hermes에서도 누름은 살아 있다 — 판정 없이 사건 한 줄만 남긴다."""
+    ctx = _FakeCtx(llm=None)
+    with _env():
+        _, handler = _register(ctx)[0]
+        calls = []
+        with _patched_effects(calls), _patched_delegate(calls):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "consumption"]
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "model"]
+    record = next(c for c in calls if isinstance(c, tuple) and c[0] == "record")
+    assert "ctx.llm" in record[2]["error"]
+
+
+def test_a_delegate_press_with_an_unreadable_note_never_calls_the_model():
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer='{"verdict": "right", "reason": "x"}'))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_delegate(calls, note_text=None), _patched_effects(calls):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "model"]
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "consumption"]
+    record = next(c for c in calls if isinstance(c, tuple) and c[0] == "record")
+    assert "못 읽었다" in record[2]["error"]
 
 
 def test_an_owner_review_hold_press_leaves_no_edge_and_marks_the_row():
@@ -763,6 +930,12 @@ if __name__ == "__main__":
     test_a_press_on_a_card_older_than_the_answerable_hours_runs_no_effect()
     test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card()
     test_an_owner_review_delegate_press_consumes_with_the_agent_judge()
+    test_a_delegate_press_where_the_model_agrees_keeps_the_proposed_kind()
+    test_a_grouped_delegate_press_calls_the_model_once_and_fans_out_the_judgment()
+    test_a_model_failure_leaves_no_edge_and_records_the_fact()
+    test_a_malformed_model_answer_is_a_failure_not_a_verdict()
+    test_a_delegate_press_without_the_model_seat_leaves_the_fact_only()
+    test_a_delegate_press_with_an_unreadable_note_never_calls_the_model()
     test_an_owner_review_hold_press_leaves_no_edge_and_marks_the_row()
     test_every_lane_shows_progress_first_and_only_that_row_changes()
     test_a_rejected_press_runs_no_effect()

@@ -111,11 +111,18 @@ def parse_press(payload: dict, owner_id: str | None) -> Press | Rejected:
     return press
 
 
-def effects(press: Press) -> list[card_types.Effect]:
+def effects(press: Press, delegated: card_types.Delegated | None = None) -> list[card_types.Effect]:
     """The one decision table: press in, what it does out. Both processes that can receive
     the same press (card.py, the hermes plugin) fold this list through their own
     collaborators — the list's order is the execution order. Pure: no I/O, never raises.
-    Notes expand back to `/vault/wiki/...` paths here, never in the press itself."""
+    Notes expand back to `/vault/wiki/...` paths here, never in the press itself.
+
+    `delegated` is the model's judgment for a review-lane 「맡길게요」 press, judged before
+    the table runs (한 누름의 모델 호출 상한 1 — the call happens once, in the plugin's
+    judgment seat, and this pure table only carries the value). A delegate press without
+    it is a programming error, and a DelegationFailed value writes no 판정 edge — only the
+    사건 one line that says the model could not judge. judge on every delegated edge is
+    the agent lineage (AGENT_DELEGATED), never owner: the owner handed this call back."""
     if isinstance(press, RepairPress):
         if press.choice != "do":
             return []  # hold/reject leave no trace at all — nothing to suppress in this lane
@@ -152,26 +159,13 @@ def effects(press: Press) -> list[card_types.Effect]:
                 fields={**fields, "session_id": press.session, "sessions": sessions, "choice": "defer"},
             )
         ]
+    if press.choice == "delegate":
+        return _delegate_effects(press, fields, sessions, delegated)
     out: list[card_types.Effect] = []
     for sid in sessions:
         row_fields = {**fields, "session_id": sid}
         if press.choice == "do":
             out.append(card_types.Record(event="verdict_reviewed", fields={**row_fields, "choice": "agree"}))
-        elif press.choice == "delegate":
-            # 맡긴다: 에이전트 판정 그대로 받는다 — 판정한 세션에 제안 판정을 그대로 놓되
-            # judge 는 agent:delegated. owner 가 아니다: 채점 줄이 오너 판정과 맡긴 판정을
-            # 가를 수 있어야 하니, 여기에 OWNER 가 들어가는 변이는 반드시 시험으로 잡힌다.
-            out.extend(
-                [
-                    card_types.Consumption(
-                        session=sid,
-                        kind=press.kind,
-                        paths=[card_view.note_path(press.note)],
-                        judge=card_types.AGENT_DELEGATED,
-                    ),
-                    card_types.Record(event="verdict_reviewed", fields={**row_fields, "choice": "delegate"}),
-                ]
-            )
         else:
             out.extend(
                 [
@@ -183,4 +177,57 @@ def effects(press: Press) -> list[card_types.Effect]:
                     card_types.Record(event="verdict_reviewed", fields={**row_fields, "choice": "flip"}),
                 ]
             )
+    return out
+
+
+def _delegate_effects(
+    press: ReviewPress,
+    fields: dict,
+    sessions: list[str],
+    delegated: card_types.Delegated | None,
+) -> list[card_types.Effect]:
+    """맡긴다: 에이전트(모델) 판정을 받는다 — 낱말 표지를 그대로 도장 찍는 게 아니라
+    누를 때 모델이 내린 판정(kind)과 이유 한 줄(reason)이 그대로 실린다. judge 는 언제나
+    AGENT_DELEGATED: 오너 판정 계열(owner · None 의 기본값)과 섞이는 변이는 시험이 빨갛게
+    끝낸다. 모델이 못 답한 누름은 간선 없이 사건 한 줄 — proposed kind 을 도장 찍어 조용히
+    되돌아가는 변이를 허용하지 않는 게 이 분기다."""
+    if delegated is None:
+        raise ValueError("delegate press needs the delegated judgment")
+    if isinstance(delegated, card_types.DelegationFailed):
+        return [
+            card_types.Record(
+                event="verdict_reviewed",
+                fields={
+                    **fields,
+                    "session_id": press.session,
+                    "choice": "delegate",
+                    "judge": card_types.AGENT_DELEGATED,
+                    "error": delegated.reason,
+                },
+            )
+        ]
+    path = card_view.note_path(press.note)
+    out: list[card_types.Effect] = []
+    for sid in sessions:
+        row_fields = {**fields, "session_id": sid}
+        out.extend(
+            [
+                card_types.Consumption(
+                    session=sid,
+                    kind=delegated.kind,
+                    paths=[path],
+                    judge=card_types.AGENT_DELEGATED,
+                ),
+                card_types.Record(
+                    event="verdict_reviewed",
+                    fields={
+                        **row_fields,
+                        "choice": "delegate",
+                        "judge": card_types.AGENT_DELEGATED,
+                        "kind": delegated.kind,
+                        "reason": delegated.reason,
+                    },
+                ),
+            ]
+        )
     return out

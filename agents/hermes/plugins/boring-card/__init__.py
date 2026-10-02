@@ -14,6 +14,17 @@ the blocks the Slack payload carries, and chat_update swaps them in for the row 
 rebuild from its in-memory graph. The display language is the same resolution card.py builds
 its graph with (card_advice.resolve_lang(boring_config.note_lang())).
 
+A review-lane 「맡길게요」 press is the one press that judges: the owner hands the call back,
+so before the decision table folds, the handler reads the note body and the proposal's
+근거 사건 and asks the model once (the host's ctx.llm facade) whether the session's claim
+holds — judged kind + 이유 한 줄 ride the agent-lineage edge (judge agent:delegated, never
+owner), and the same 이유 shows on the next morning's row (card_live reads the 사건). The
+model call lives here and exactly here, once per press — the decision table and
+card_delegate stay pure, so 한 누름의 모델 호출 상한 1 is a structure, not a hope. A model
+that cannot answer (unreadable note, dead call, malformed JSON) writes no 판정 at all:
+the press leaves the 사건 one line that says so, and the row shows the failure — 조용히
+낱말 표지로 되돌아가지 않는다.
+
 register() refuses loudly instead of half-registering: without SECRETARY_OWNER_ID no
 handler is installed at all — a press from anyone must never reach an effect — and without
 BORING_HOME the repo's own modules cannot even be found. All module-level imports stay
@@ -21,7 +32,8 @@ stdlib so a broken repo aborts register(), not the plugin's import. The AsyncWeb
 chat_update needs is the plugin's own: hermes wraps plugin action handlers in
 (ack, body, action) with no client injected, so register() reads the bot token the gateway
 loaded from HERMES_HOME/.env into the environment (gateway/run.py:1611 at v2026.9.24) and
-builds one.
+builds one. Without ctx.llm (older hermes) the handler still registers — every other lane
+keeps working — but a delegate press leaves only the 사건 line naming the missing model seat.
 """
 
 from __future__ import annotations
@@ -52,6 +64,11 @@ _claimed: set[tuple[str, int]] = set()
 #: absent (one error line at register) — presses still take their effects, the card just
 #: keeps its buttons.
 _client: Any | None = None
+
+#: The delegate press's model call ceiling, seconds — a local model answers in tens of
+#: seconds; a press that outwaits this is a failed judgment (the 사건 line), not a
+#: hung row.
+DELEGATE_MODEL_TIMEOUT = float(os.environ.get("CARD_DELEGATE_TIMEOUT") or "120")
 
 
 def _repo_module_dirs() -> tuple[str, str, str] | None:
@@ -103,6 +120,7 @@ def register(ctx: Any) -> None:
         if path not in sys.path:
             sys.path.insert(0, path)
     import card_advice
+    import card_delegate
     import card_effects
     import card_press
     import card_types
@@ -119,6 +137,14 @@ def register(ctx: Any) -> None:
             _PLUGIN_NAME,
         )
 
+    llm = getattr(ctx, "llm", None)
+    if llm is None:
+        _LOG.error(
+            "%s: ctx.llm is not available — 맡길게요 presses will leave no 판정, only the "
+            "사건 line naming the missing model seat",
+            _PLUGIN_NAME,
+        )
+
     def _log_unrendered(press, reason) -> None:
         _LOG.error(
             "%s: press card_ts=%s idx=%s could not re-render the card — %s",
@@ -127,6 +153,32 @@ def register(ctx: Any) -> None:
             press.idx,
             reason,
         )
+
+    async def _judge(press) -> card_types.Delegated:
+        """One delegate press's judgment — the model call happens exactly here, exactly once.
+        Everything that keeps the model from answering (no LLM seat, unreadable note, missing
+        사건, dead call, malformed JSON) comes home as DelegationFailed: no 판정 edge, and the
+        decision table writes the 사건 one line that says so."""
+        if llm is None:
+            return card_types.DelegationFailed(reason="모델 호출 자리가 없다 (ctx.llm 없음)")
+        path = card_view.note_path(press.note)
+        text = card_delegate.read_note_text(path)
+        if text is None:
+            return card_types.DelegationFailed(reason=f"노트 {press.note} 본문을 못 읽었다")
+        sessions = list(press.sessions) or [press.session]
+        evidence = card_delegate.proposal_evidence(sessions, path, press.kind)
+        if evidence is None:
+            return card_types.DelegationFailed(reason=f"제안 사건(근거 문장)을 못 찾았다: {press.note}")
+        prompt = card_delegate.build_judge_prompt(path, text, press.kind, evidence)
+        try:
+            result = await llm.acomplete(
+                [{"role": "user", "content": prompt}],
+                timeout=DELEGATE_MODEL_TIMEOUT,
+                purpose="boring-card delegate judgment",
+            )
+        except Exception as e:  # noqa: BLE001 — a dead model is a value: the 사건 line
+            return card_types.DelegationFailed(reason=f"모델 호출 실패: {' '.join(str(e).split())}")
+        return card_delegate.parse_judgment(result.text, press.kind)
 
     async def _current_blocks(press, snapshot):
         """The card as Slack holds it now — the door may have settled another row since the
@@ -220,12 +272,17 @@ def register(ctx: Any) -> None:
             )
             return
         _claimed.add(key)
-        effects = card_press.effects(press)
         row = card_types.RowRef(channel=press.channel, card_ts=press.card_ts, idx=press.idx)
         snapshot = blocks or []
         await _push(
             press, snapshot, card_view.row_progress(snapshot, press.idx, card_types.Pending(), lang=lang)
         )
+        delegated = None
+        if isinstance(press, card_types.ReviewPress) and press.choice == card_types.DELEGATE:
+            # 맡길게요만 판다: 한 누름에 모델 호출 딱 1회, 진행 중 줄이 떠 있는 동안 — 판정
+            # 값이 없는 채 결정표를 부르는 일은 없다(effects 가 loud 하게 거절).
+            delegated = await _judge(press)
+        effects = card_press.effects(press, delegated=delegated)
 
         def _apply():
             # One fold over the whole list, in the thread: a failed engine call stops the
@@ -286,6 +343,18 @@ def register(ctx: Any) -> None:
                 # row itself when the reread ends, so the row stays "in progress" until then.
                 return
             case _:
+                if isinstance(delegated, card_types.DelegationFailed):
+                    # 모델이 못 답한 누름: 사건 한 줄은 이미 떴고 판정 간선은 없다 — 실패 줄을
+                    # 버튼 위에 얹고 클레임을 풀어, 소유자가 다시 누를 수 있게 한다.
+                    _claimed.discard(key)
+                    await _push(
+                        press,
+                        snapshot,
+                        card_view.row_progress(
+                            snapshot, press.idx, card_types.Failed(reason=delegated.reason), lang=lang
+                        ),
+                    )
+                    return
                 await _push(
                     press,
                     snapshot,

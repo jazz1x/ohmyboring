@@ -113,6 +113,7 @@ python3 agents/hermes/plugins/boring-memory/test_boring_memory.py
 python3 agents/slack/test_card_types.py
 python3 agents/slack/test_card_registers.py
 python3 agents/slack/test_card_advice.py
+python3 agents/slack/test_card_delegate.py
 python3 agents/slack/test_card_verdicts.py
 python3 agents/slack/test_card_view.py
 python3 agents/slack/test_card_press.py

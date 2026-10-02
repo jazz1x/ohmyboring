@@ -205,9 +205,9 @@ class EffectsTableTests(unittest.TestCase):
         )
 
     def test_review_lane_delegate_writes_the_agent_judge_never_owner(self):
-        # 맡길게요: 에이전트 판정을 그대로 받는다 — 제안 판정 그대로의 간선이되 judge 는
-        # agent:delegated. owner 를 쓰는 변이(judge=OWNER 고정·AGENT_DELEGATED 를 owner 로)
-        # 는 이 시험이 빨갛게 끝낸다.
+        # 맡길게요: 모델 판정을 그대로 받는다 — 판정한 세션에 모델이 정한 종류의 간선이되
+        # judge 는 agent:delegated, 사건에는 판정 종류와 이유 한 줄. owner 를 쓰는 변이와
+        # 낱말 표지(proposed kind)를 그대로 도장 찍는 변이는 이 시험이 빨갛게 끝낸다.
         press = cc.ReviewPress(
             idx=2,
             choice="delegate",
@@ -218,7 +218,8 @@ class EffectsTableTests(unittest.TestCase):
             note="wiki-0700",
             kind="contested",
         )
-        effects = cp.effects(press)
+        # 모델이 '맞다' — 판정 종류는 제안 그대로
+        effects = cp.effects(press, delegated=cc.DelegatedJudgment(kind="contested", reason="모델 이유"))
         self.assertEqual(
             effects,
             [
@@ -236,6 +237,9 @@ class EffectsTableTests(unittest.TestCase):
                         "proposed_kind": "contested",
                         "card_ts": CARD_TS,
                         "choice": "delegate",
+                        "judge": "agent:delegated",
+                        "kind": "contested",
+                        "reason": "모델 이유",
                     },
                 ),
             ],
@@ -243,6 +247,46 @@ class EffectsTableTests(unittest.TestCase):
         consumption = effects[0]
         self.assertEqual(consumption.judge, "agent:delegated")
         self.assertNotEqual(consumption.judge, "owner")
+        # 모델이 '틀리다' — proposed kind 과 다른 간선: proposed 를 도장 찍는 변이는 여기서 갈린다
+        flipped = cp.effects(press, delegated=cc.DelegatedJudgment(kind="used", reason="실제로는 쓰였다"))
+        self.assertEqual(flipped[0].kind, "used")
+        self.assertEqual(flipped[1].fields["kind"], "used")
+        # 판정 값 없는 delegate 누름은 표를 부르는 쪽의 버그 — loud 하게 거절
+        with self.assertRaises(ValueError):
+            cp.effects(press)
+
+    def test_review_lane_delegate_failure_leaves_no_edge_and_one_event(self):
+        # 모델이 못 답하면 판정을 남기지 않는다 — 간선 0, 사건 한 줄에 그 사실. 조용히
+        # 낱말 표지로 되돌아가는 변이(제안 종류의 간선을 놓는 변이)는 여기서 잡힌다.
+        press = cc.ReviewPress(
+            idx=2,
+            choice="delegate",
+            user=OWNER,
+            card_ts=CARD_TS,
+            channel=CARD_CH,
+            session="sess-agent-1",
+            note="wiki-0700",
+            kind="used",
+        )
+        effects = cp.effects(press, delegated=cc.DelegationFailed(reason="모델 답이 JSON 이 아니다"))
+        self.assertEqual(
+            effects,
+            [
+                cc.Record(
+                    event="verdict_reviewed",
+                    fields={
+                        "session_id": "sess-agent-1",
+                        "note": "/vault/wiki/wiki-0700.md",
+                        "proposed_kind": "used",
+                        "card_ts": CARD_TS,
+                        "choice": "delegate",
+                        "judge": "agent:delegated",
+                        "error": "모델 답이 JSON 이 아니다",
+                    },
+                )
+            ],
+        )
+        self.assertFalse(any(isinstance(e, cc.Consumption) for e in effects))
 
     def test_review_lane_hold_leaves_no_edge_and_one_event(self):
         # 보류: 판정을 남기지 않는다 — 간선 없이 사건 한 줄, 묶인 세션 전부가 그 한 줄에 실린다.
@@ -310,17 +354,33 @@ class EffectsTableTests(unittest.TestCase):
                 cc.Record(event="verdict_reviewed", fields={**fields2, "choice": "flip"}),
             ],
         )
+        # 맡긴 판정은 묶인 세션 전부에 가고, 판정 종류·이유는 모델의 것이 그대로다
+        judgment = cc.DelegatedJudgment(kind="used", reason="모델이 본 이유")
         self.assertEqual(
-            cp.effects(cc.ReviewPress(choice="delegate", **base)),
+            cp.effects(cc.ReviewPress(choice="delegate", **base), delegated=judgment),
             [
-                cc.Consumption(
-                    session="sess-agent-1", kind="contested", paths=[path], judge="agent:delegated"
+                cc.Consumption(session="sess-agent-1", kind="used", paths=[path], judge="agent:delegated"),
+                cc.Record(
+                    event="verdict_reviewed",
+                    fields={
+                        **fields1,
+                        "choice": "delegate",
+                        "judge": "agent:delegated",
+                        "kind": "used",
+                        "reason": "모델이 본 이유",
+                    },
                 ),
-                cc.Record(event="verdict_reviewed", fields={**fields1, "choice": "delegate"}),
-                cc.Consumption(
-                    session="sess-agent-2", kind="contested", paths=[path], judge="agent:delegated"
+                cc.Consumption(session="sess-agent-2", kind="used", paths=[path], judge="agent:delegated"),
+                cc.Record(
+                    event="verdict_reviewed",
+                    fields={
+                        **fields2,
+                        "choice": "delegate",
+                        "judge": "agent:delegated",
+                        "kind": "used",
+                        "reason": "모델이 본 이유",
+                    },
                 ),
-                cc.Record(event="verdict_reviewed", fields={**fields2, "choice": "delegate"}),
             ],
         )
         # 묶이지 않은 옛 값(세션 하나, sessions 없음)은 그대로 한 세션에만 간다.

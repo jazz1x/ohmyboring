@@ -521,7 +521,7 @@ class CardV2ShapeTests(unittest.TestCase):
         tag = next(b for b in blocks if b["type"] == "section" and "wiki-0700" in _blocks_text([b]))
         self.assertEqual(
             tag["text"]["text"],
-            "에이전트는 *이 노트가 틀렸다*고 봤어요.\n"
+            "이 세션에서 *이 노트가 틀렸다*는 말이 나왔어요.\n"
             "이유: 세션 끝 채점이 남긴 문장이 없어요 (옛 판정)\n"
             "노트: `wiki-0700` (제목 없음)\n"
             "작업: 세션 `s1` (세션 노트 없음)",
