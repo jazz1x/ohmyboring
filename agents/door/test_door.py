@@ -1013,7 +1013,10 @@ POST /remember 도 문을 지난다.
 
     @classmethod
     def tearDownClass(cls):
+        # The shadow write runs after the answer; restoring BORING_EVENT_LOG before the door has
+        # stopped sent late shadows into the real spool (6 sess-switch rows, 2026-10-02).
         cls.door_server.should_exit = True
+        cls.door_thread.join(timeout=10)
         cls.stub.shutdown()
         cls.stub.server_close()
         cls._tmp.cleanup()
@@ -1324,7 +1327,10 @@ class RememberWriterSwitchTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        # The shadow write runs after the answer; restoring BORING_EVENT_LOG before the door has
+        # stopped sent late shadows into the real spool (6 sess-switch rows, 2026-10-02).
         cls.door_server.should_exit = True
+        cls.door_thread.join(timeout=10)
         cls.stub.shutdown()
         cls.stub.server_close()
         cls._tmp.cleanup()
