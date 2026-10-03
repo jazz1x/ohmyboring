@@ -187,6 +187,24 @@ else
     fail "mutation: the run still finished with the abort in place — case (a) proves nothing"
 fi
 
+# (install) the plist carries a PATH that starts at the installer's python3 — launchd's own
+# PATH resolves python3 to Xcode's 3.9, and every nested python3 in run/doctor follows PATH.
+mkdir -p "$tmp/py/bin"
+printf '#!/bin/sh\n' > "$tmp/py/bin/python3"
+chmod +x "$tmp/py/bin/python3"
+printf '#!/bin/sh\n[ "${1:-}" = print ] && echo "program = $BORING_HOME"\nexit 0\n' > "$tmp/bin/launchctl"
+printf '#!/bin/sh\necho Darwin\n' > "$tmp/bin/uname"
+chmod +x "$tmp/bin/launchctl" "$tmp/bin/uname"
+rc=0
+out=$(env BORING_HOME="$home" HOME="$home" PATH="$tmp/py/bin:$tmp/bin:/usr/bin:/bin" \
+    sh "$SCRIPT_UNDER_TEST" install 2>&1) || rc=$?
+plist="$home/Library/LaunchAgents/com.ohmyboring.maintenance.plist"
+if [ "$rc" = "0" ] && grep -A1 '<key>PATH</key>' "$plist" | grep -qF "<string>$tmp/py/bin:"; then
+    pass "install: the plist's PATH starts at the installer's python3 directory"
+else
+    fail "install: no PATH starting at $tmp/py/bin in the plist (rc=$rc): $out"
+fi
+
 if [ "$fails" -eq 0 ]; then
     echo "nightly-maintenance scheduler guardrails: all passed, 0 failed."
     exit 0
