@@ -971,7 +971,7 @@ fi
 # Ran by hand on 2026-09-07 and nowhere else, which is the arrangement that fails on the day
 # nobody is at the keyboard — the same reason (d5d) is a daily line and not a verdict-day ritual.
 if [ -f "$ledger_probe" ] && [ "${BORING_SKIP_LEDGER_PROBE:-0}" != 1 ]; then
-    if check_out="$(python3 "$ledger_probe" --self-check 2>/dev/null)"; then
+    if check_out="$(python3 "$ledger_probe" --self-check 2>&1)"; then
         case "$check_out" in
             *uptake_self_check=ok*) ok "uptake self-check ran (${check_out#*cross=})" ;;
             *) warn "uptake self-check undetermined — $check_out. Not a fault; too few sessions or transcripts to pair." ;;

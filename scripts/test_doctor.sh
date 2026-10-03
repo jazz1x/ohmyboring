@@ -156,6 +156,10 @@ case "${1:-}" in
             echo "uptake_self_check=contaminated cross=40/100 rate=0.4000 treatment=45/100"
             exit 1
         fi
+        if [ "${DOCTOR_UPTAKE_SELF_CRASH:-0}" = 1 ]; then
+            echo "ImportError: cannot import name 'UTC' from 'datetime'" >&2
+            exit 1
+        fi
         if [ "${DOCTOR_UPTAKE_SELF_UNKNOWN:-0}" = 1 ]; then
             echo "uptake_self_check=unknown cross=0/0 reason=too_few_sessions_or_transcripts"
             exit 0
@@ -1047,6 +1051,16 @@ esac
       exit 1
   }
   echo "ok - a contaminated uptake self-check fails readiness"
+)
+
+( make_case "$TMP/uptake-crash" yes
+  DOCTOR_UPTAKE_SELF_CRASH=1 run_strict "$TMP/uptake-crash" "$TMP/uptake-crash.out" || true
+  grep -q "UPTAKE SELF-CHECK FAILED — ImportError: cannot import name 'UTC'" "$TMP/uptake-crash.out" || {
+      cat "$TMP/uptake-crash.out"
+      echo "FAIL: a crashed self-check must say why, not 'FAILED — .'" >&2
+      exit 1
+  }
+  echo "ok - a crashed uptake self-check names its error"
 )
 
 # "Could not run" is not "ran clean". Too few sessions to pair is a warning, because failing on it
