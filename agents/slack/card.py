@@ -177,6 +177,7 @@ class Collaborators(NamedTuple):
     repairs: Callable[[int], dict[str, Any]] = lambda limit: {"groups": [], "total_groups": 0}
     merged_yesterday: Callable[[], int | None] = lambda: None
     proposed: Callable[[int], list[card_types.ProposedVerdict]] = lambda since_hours: []
+    held_repairs: Callable[[], set[str]] = lambda: set()
 
 
 def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
@@ -197,14 +198,17 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             repairs=card_live._live_repairs,
             merged_yesterday=card_live._live_merged_yesterday,
             proposed=card_live._live_proposed,
+            held_repairs=card_live._held_repair_subjects,
         )
 
     def read_repairs(_: CardState) -> dict:
         """The execute lane's rows — the door's own top groups, plus yesterday's merged-row
         tally for the head line. A 5xx/unreachable door raises (same principle as /approved):
         a card that cannot read its own repair queue is the wrong card to send."""
-        payload = collabs.repairs(card_live.REPAIRS_LIMIT)
-        repairs = [card_types.Repair(**group) for group in payload["groups"]]
+        held = collabs.held_repairs()
+        payload = collabs.repairs(card_live.REPAIRS_LIMIT + len(held))
+        groups = [g for g in payload["groups"] if g["subject"] not in held]
+        repairs = [card_types.Repair(**group) for group in groups[: card_live.REPAIRS_LIMIT]]
         return {
             "repairs": repairs,
             "repairs_total_groups": payload["total_groups"],
@@ -549,6 +553,7 @@ def _run_dry() -> int:
         repairs=card_live._live_repairs,
         merged_yesterday=card_live._live_merged_yesterday,
         proposed=card_live._live_proposed,
+        held_repairs=card_live._held_repair_subjects,
     )
     graph = build_graph(collabs)
     state = graph.invoke({})

@@ -219,7 +219,9 @@ class Stubs:
         repairs_payload: dict | None = None,
         merged_yesterday_rows: int | None = None,
         proposed_items: list[cc.ProposedVerdict] | None = None,
+        held_repair_subjects: set[str] | None = None,
     ):
+        self.held_repair_subjects = held_repair_subjects or set()
         self.resolutions = resolutions if resolutions is not None else RESOLUTIONS
         self.approved_items = approved if approved is not None else PAST_APPROVED
         self.paths_resolve = paths_resolve
@@ -289,6 +291,9 @@ class Stubs:
     def merged_yesterday(self) -> int | None:
         return self.merged_yesterday_rows
 
+    def held_repairs(self) -> set[str]:
+        return self.held_repair_subjects
+
     def proposed(self, since_hours: int) -> list[cc.ProposedVerdict]:
         assert since_hours == card.REVIEW_SINCE_HOURS
         return self.proposed_items
@@ -323,6 +328,7 @@ class GraphTests(unittest.TestCase):
             repairs=stubs.repairs,
             merged_yesterday=stubs.merged_yesterday,
             proposed=stubs.proposed,
+            held_repairs=stubs.held_repairs,
         )
         return card.build_graph(collabs)
 
@@ -708,6 +714,20 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(out["projects"], ["proj-x", "proj-y", ""])
         self.assertEqual(set(out["per_project_candidates"]), {"proj-x"})
         self.assertEqual(out["per_project_candidates"]["proj-x"], 5)
+
+    def test_a_held_repair_stays_off_and_the_next_group_takes_its_seat(self):
+        groups = [
+            {"subject": s, "variants": [s.replace("-", " "), s], "rows": 10 - i, "notes": 1}
+            for i, s in enumerate(["next-step", "main-page", "make-check", "kb-agent", "test-suite"])
+        ]
+        for held, shown in (
+            (set(), ["next-step", "main-page", "make-check"]),
+            ({"next-step", "make-check"}, ["main-page", "kb-agent", "test-suite"]),
+        ):
+            stubs = Stubs(repairs_payload={"groups": groups, "total_groups": 5}, held_repair_subjects=held)
+            out = self._build(stubs).invoke({}, {"configurable": {"thread_id": f"test-held-{len(held)}"}})
+            self.assertEqual(stubs.repairs_calls, [card_live.REPAIRS_LIMIT + len(held)])
+            self.assertEqual([r.subject for r in out["repairs"]], shown)
 
     def test_read_repairs_populates_state_once_and_a_dead_door_refuses_the_card(self):
         # AC4: the door's GET is called exactly once, its groups land in state, and a

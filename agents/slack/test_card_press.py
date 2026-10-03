@@ -128,6 +128,13 @@ class ValueRoundTripTests(unittest.TestCase):
         self.assertEqual(cv.note_path(cv.note_label(path)), path)
 
 
+def _repair_reviewed(choice: str) -> cc.Record:
+    return cc.Record(
+        event="repair_reviewed",
+        fields={"card_ts": CARD_TS, "idx": 0, "choice": choice, "subject": "foodspring-front"},
+    )
+
+
 class EffectsTableTests(unittest.TestCase):
     """줄 × 선택 한 칸씩 — card.py와 다른 프로세스가 공유하는 표 전부가 여기 있다.
     used/contested 를 바꾸는 변이는 이 클래스의 시험이 잡는다."""
@@ -135,8 +142,8 @@ class EffectsTableTests(unittest.TestCase):
     def test_repair_lane(self):
         for choice, expected in (
             ("do", [cc.ExecuteRepair(subject="foodspring-front")]),
-            ("defer", []),
-            ("drop", []),
+            ("defer", [_repair_reviewed("defer")]),
+            ("drop", [_repair_reviewed("drop")]),
         ):
             press = cc.RepairPress(
                 idx=0,

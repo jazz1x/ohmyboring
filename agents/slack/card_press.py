@@ -125,7 +125,17 @@ def effects(press: Press, delegated: card_types.Delegated | None = None) -> list
     the agent lineage (AGENT_DELEGATED), never owner: the owner handed this call back."""
     if isinstance(press, RepairPress):
         if press.choice != "do":
-            return []  # hold/reject leave no trace at all — nothing to suppress in this lane
+            return [
+                card_types.Record(
+                    event="repair_reviewed",
+                    fields={
+                        "card_ts": press.card_ts,
+                        "idx": press.idx,
+                        "choice": press.choice,
+                        "subject": press.subject,
+                    },
+                )
+            ]
         return [card_types.ExecuteRepair(subject=press.subject)]
     if isinstance(press, AdvicePress):
         out = [

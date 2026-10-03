@@ -401,6 +401,17 @@ def _session_works() -> dict[str, str]:
     return works
 
 
+def _held_repair_subjects() -> set[str]:
+    """Subjects the owner held or dropped on the repair lane within the 이레 window."""
+    out: set[str] = set()
+    for entry in _live_events("repair_reviewed", REVIEW_DEFER_WINDOW_HOURS):
+        subject = (entry.get("attributes") or {}).get("subject")
+        if not isinstance(subject, str) or not subject:
+            raise ValueError(f"malformed repair_reviewed row: {entry!r}")
+        out.add(subject)
+    return out
+
+
 def _live_repairs(limit: int = REPAIRS_LIMIT) -> dict[str, Any]:
     url = f"{_door_url()}/repairs/split-subjects?limit={limit}"
     return _door_json(url)
