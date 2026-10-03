@@ -52,6 +52,7 @@ def _judged_attrs(subject: str, variants: list[str], verdict: str, reason: str =
         "verdict": verdict,
         "reason": reason,
         "judge": "agent:repair-judge",
+        "prompt_version": cc.REPAIR_JUDGE_PROMPT_VERSION,
     }
 
 
@@ -179,9 +180,18 @@ class ReadFoldTests(unittest.TestCase):
             self.assertEqual(out[key].reason, "뒤집은 판정")
             self.assertEqual(len(out), 1)
 
+    def test_a_judgment_asked_under_another_prompt_is_not_read(self):
+        current = _judged_attrs("kb-agent", ["kb-agent", "kb_agent"], "same_name")
+        old = {**_judged_attrs("next-step", ["next step", "next-step"], "same_name"), "prompt_version": 1}
+        unversioned = {k: v for k, v in old.items() if k != "prompt_version"}
+        out = crj.judged_map([_entry(a, "2026-10-03T00:00:00+00:00") for a in (current, old, unversioned)])
+        self.assertEqual(list(out), [("kb-agent", ("kb-agent", "kb_agent"))])
+
     def test_a_malformed_judged_row_raises(self):
         entries = [
-            _entry({"subject": "next-step", "variants": ["next step", "next-step"], "verdict": "dunno"})
+            _entry(
+                {**_judged_attrs("next-step", ["next step", "next-step"], "same_name"), "verdict": "dunno"}
+            )
         ]
         with self.assertRaises(ValueError):
             crj.judged_map(entries)

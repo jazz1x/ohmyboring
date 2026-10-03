@@ -636,6 +636,7 @@ _HERMES_ENTRY_SCRIPT_NAMES = (
     "ingest-worker.py",
     "run-morning-card.py",
     "run-weekly-card.py",
+    "run-repair-judge.py",
 )
 
 #: Entries with an installer of their own further down. Copying them here as well would run

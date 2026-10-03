@@ -38,6 +38,10 @@ AGENT_DELEGATED: str = "agent:delegated"
 #: lineage as AGENT_DELEGATED: the agent decided before the owner's card, never the owner.
 REPAIR_JUDGE: str = "agent:repair-judge"
 
+#: Bumped whenever the judge's question changes; judgments asked under another version are
+#: not read. v1 (2026-10-03) asked "same spelling?" and called 18/20 same_name, next step included.
+REPAIR_JUDGE_PROMPT_VERSION: int = 2
+
 #: card_i18n.STRINGS keys this file's display-building functions may render.
 DISPLAY_LANGS: tuple[str, ...] = ("en", "ko", "ja")
 
@@ -408,6 +412,7 @@ class RepairJudgment(BaseModel):
     verdict: Literal["same_name", "generic", "unsure"]
     reason: str
     judge: str = REPAIR_JUDGE
+    prompt_version: int = REPAIR_JUDGE_PROMPT_VERSION
 
 
 class RepairJudgeFailed(BaseModel):

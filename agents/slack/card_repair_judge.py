@@ -154,6 +154,8 @@ def judged_map(entries: list[dict[str, Any]]) -> dict[GroupKey, RepairJudgment]:
     newest: dict[GroupKey, str] = {}
     for entry in entries:
         attrs = entry.get("attributes") or {}
+        if attrs.get("prompt_version") != card_types.REPAIR_JUDGE_PROMPT_VERSION:
+            continue
         subject = attrs.get("subject")
         variants = attrs.get("variants")
         verdict = attrs.get("verdict")

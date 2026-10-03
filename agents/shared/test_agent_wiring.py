@@ -249,6 +249,7 @@ def test_wire_hermes_adds_hint_and_weekly():
         (scripts / "ingest-worker.py").write_text("# stub", encoding="utf-8")
         (scripts / "run-morning-card.py").write_text("# stub", encoding="utf-8")
         (scripts / "run-weekly-card.py").write_text("# stub", encoding="utf-8")
+        (scripts / "run-repair-judge.py").write_text("# stub", encoding="utf-8")
         card_plugin = scripts / "plugins" / "boring-card"
         card_plugin.mkdir(parents=True)
         (card_plugin / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
@@ -422,6 +423,7 @@ def test_wire_hermes_missing_slack_briefing_has_no_side_effects():
         (source_dir / "ingest-worker.py").write_text("# stub\n", encoding="utf-8")
         (source_dir / "run-morning-card.py").write_text("# stub\n", encoding="utf-8")
         (source_dir / "run-weekly-card.py").write_text("# stub\n", encoding="utf-8")
+        (source_dir / "run-repair-judge.py").write_text("# stub\n", encoding="utf-8")
         card_plugin = source_dir / "plugins" / "boring-card"
         card_plugin.mkdir(parents=True)
         (card_plugin / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
