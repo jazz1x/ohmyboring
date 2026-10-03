@@ -2500,6 +2500,30 @@ class RunCardRouteTests(unittest.TestCase):
             "the weekly route must execute the weekly poster, not the morning card",
         )
 
+    def test_the_repair_judge_route_runs_the_judge_program(self):
+        """POST /run/repair-judge — morning-card 와 같은 {ok, exit, tail} 모양으로 판정
+        실행을 돌린다. The mutation this kills: the route wired to the wrong program (or
+        folded into the card's own run) — the judge must run as its own subprocess."""
+        calls = []
+
+        def fake_run(script, timeout_s):
+            calls.append(script)
+            return subprocess.CompletedProcess(
+                ["x"], 0, stdout="[repair-judge] judged=2 failed=0\n", stderr=""
+            )
+
+        with mock.patch.object(door, "_run_card_subprocess", fake_run):
+            status, body, _ = _req(self.door_port, "POST", "/run/repair-judge")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["ok"], True)
+        self.assertEqual(payload["exit"], 0)
+        self.assertIn("judged=2", payload["tail"])
+        self.assertTrue(
+            str(calls[0]).endswith(os.path.join("agents", "slack", "card_repair_judge.py")),
+            "the repair-judge route must execute the judge, not the morning card",
+        )
+
     def test_a_nonzero_exit_is_ok_false_with_the_code_and_tail(self):
         """The mutation this kills: the route folding a failed card into ok:true — the exit
         code and the tool's own refusal line must reach the caller verbatim."""

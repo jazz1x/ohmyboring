@@ -761,6 +761,76 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertNotIn("어제", headline_no_merge)
 
 
+class RepairJudgmentBlockTests(unittest.TestCase):
+    """The agent's 판정 on a repair row: verdict label(같은 이름·못 가름) + 이유 한 줄 +
+    철자 목록 전부, in the card's own language. A row without a 판정 renders exactly as
+    before — no block. A mutant that drops the judgment block, or renders only the head
+    spelling, or pins one language's label for all three, must each kill these."""
+
+    def _repair(self, verdict="same_name", reason="같은 이름의 갈라진 철자입니다") -> cc.Repair:
+        return cc.Repair(
+            subject="foodspring-front",
+            variants=["foodspring front", "foodspring-front", "FoodspringFront"],
+            rows=3218,
+            notes=212,
+            judgment=cc.RepairJudgment(
+                subject="foodspring-front",
+                variants=["FoodspringFront", "foodspring front", "foodspring-front"],
+                verdict=verdict,
+                reason=reason,
+            ),
+        )
+
+    def _judgment_text(self, repair: cc.Repair, lang: str) -> str:
+        blocks = cv.build_blocks([], repairs=[repair], repairs_total_groups=1, lang=lang)
+        block = next(b for b in blocks if b["type"] == "context" and "🤖" in _blocks_text([b]))
+        return block["elements"][0]["text"]
+
+    def test_the_judgment_line_and_every_variant_show_in_each_language(self):
+        cases = {
+            "ko": (
+                "🤖 에이전트 판정: *같은 이름*",
+                "철자: `FoodspringFront`, `foodspring front`, `foodspring-front`",
+            ),
+            "en": (
+                "🤖 Agent judged: *Same name*",
+                "Spellings: `FoodspringFront`, `foodspring front`, `foodspring-front`",
+            ),
+            "ja": (
+                "🤖 エージェント判定: *同じ名前*",
+                "表記: `FoodspringFront`, `foodspring front`, `foodspring-front`",
+            ),
+        }
+        for lang, (line, variants_line) in cases.items():
+            text = self._judgment_text(self._repair(), lang)
+            self.assertIn(line, text, lang)
+            self.assertIn(
+                "같은 이름의 갈라진 철자입니다", text, lang
+            )  # 이유 한 줄 — the model's own sentence
+            self.assertIn(variants_line, text, lang)  # 철자 목록 전부 — never the head spelling only
+
+    def test_unsure_carries_its_own_label(self):
+        text = self._judgment_text(self._repair(verdict="unsure", reason="어느 쪽인지 못 가르겠습니다"), "ko")
+        self.assertIn("*못 가름*", text)
+        self.assertIn("어느 쪽인지 못 가르겠습니다", text)
+
+    def test_a_row_without_a_judgment_renders_unchanged(self):
+        repair = cc.Repair(
+            subject="foodspring-front", variants=["foodspring front", "foodspring-front"], rows=1, notes=1
+        )
+        blocks = cv.build_blocks([], repairs=[repair], repairs_total_groups=1, lang="ko")
+        self.assertFalse(any("🤖" in _blocks_text([b]) for b in blocks))
+
+    def test_mark_pressed_keeps_the_judgment_block_intact(self):
+        blocks = cv.build_blocks([], repairs=[self._repair()], repairs_total_groups=1, lang="ko")
+        press = cc.RepairPress(
+            idx=0, choice="do", user="U_OWNER", card_ts="1.0", channel="C1", subject="foodspring-front"
+        )
+        marked = cv.mark_pressed(blocks, press, lang="ko")
+        self.assertNotIsInstance(marked, cc.Rejected)
+        self.assertIn("🤖 에이전트 판정: *같은 이름*", _blocks_text(marked))
+
+
 class MarkPressedParityTests(unittest.TestCase):
     """The heart of slice ②: mark_pressed(blocks, press) on the no-verdict card must equal
     build_blocks with exactly that one verdict — for every lane and choice. The equality is

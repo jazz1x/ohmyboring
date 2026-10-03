@@ -5,9 +5,10 @@
     "GET /claim-sources",
     "GET /projects",
     "GET /repairs/split-subjects",
-    "POST /repairs/split-subjects",
     "GET /rules",
+    "POST /repairs/split-subjects",
     "POST /run/morning-card",
+    "POST /run/repair-judge",
     "POST /run/weekly-card",
     "POST /search"
   ],

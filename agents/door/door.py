@@ -1098,10 +1098,13 @@ async def _rules(request: Request) -> Response:
 #: purpose: the morning card's gemma4 calls and the weekly's own 300s child each fit inside.
 _RUN_CARD_TIMEOUT_S = float(os.environ.get("DOOR_RUN_CARD_TIMEOUT", "900"))
 
-#: The programs the two run routes execute — the same tools launchd used to fire, unchanged.
+#: The programs the run routes execute — the same tools launchd used to fire, unchanged,
+#: plus the 이름 맞추기 판정기: 판정과 합치기는 다른 실행이라 카드와 같은 {ok, exit, tail}
+#: 모양으로 문이 돌린다.
 _CARD_PROGRAMS = {
     "morning-card": Path(__file__).resolve().parents[2] / "agents" / "slack" / "card.py",
     "weekly-card": Path(__file__).resolve().parents[2] / "agents" / "slack" / "weekly_card.py",
+    "repair-judge": Path(__file__).resolve().parents[2] / "agents" / "slack" / "card_repair_judge.py",
 }
 
 #: One lock per route: a card takes minutes (model calls), and a second concurrent run is not
@@ -1161,6 +1164,10 @@ async def _run_card_route(request: Request, name: str) -> Response:
 
 async def _run_morning_card(request: Request) -> Response:
     return await _run_card_route(request, "morning-card")
+
+
+async def _run_repair_judge(request: Request) -> Response:
+    return await _run_card_route(request, "repair-judge")
 
 
 async def _run_weekly_card(request: Request) -> Response:
@@ -1689,6 +1696,7 @@ _DOOR_HANDLERS = {
     "GET /repairs/split-subjects": _repairs_split_subjects_get,
     "POST /repairs/split-subjects": _repairs_split_subjects_post,
     "POST /run/morning-card": _run_morning_card,
+    "POST /run/repair-judge": _run_repair_judge,
     "POST /run/weekly-card": _run_weekly_card,
     "POST /search": _search,
     "GET /rules": _rules,

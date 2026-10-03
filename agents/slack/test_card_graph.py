@@ -195,6 +195,16 @@ REPAIR_GROUPS = [
     }
 ]
 
+# The agent's 판정 for that group — the row only rises once a judgment exists.
+REPAIR_JUDGMENTS = {
+    ("foodspring-front", ("foodspring front", "foodspring-front")): cc.RepairJudgment(
+        subject="foodspring-front",
+        variants=["foodspring front", "foodspring-front"],
+        verdict="same_name",
+        reason="같은 서비스를 가리키는 갈라진 철자",
+    )
+}
+
 
 def _fetch(path: str, project: str = "") -> dict:
     return FETCH_DATA[path]
@@ -220,8 +230,10 @@ class Stubs:
         merged_yesterday_rows: int | None = None,
         proposed_items: list[cc.ProposedVerdict] | None = None,
         held_repair_subjects: set[str] | None = None,
+        repair_judgment_items: dict | None = None,
     ):
         self.held_repair_subjects = held_repair_subjects or set()
+        self.repair_judgment_items = repair_judgment_items or {}
         self.resolutions = resolutions if resolutions is not None else RESOLUTIONS
         self.approved_items = approved if approved is not None else PAST_APPROVED
         self.paths_resolve = paths_resolve
@@ -294,6 +306,9 @@ class Stubs:
     def held_repairs(self) -> set[str]:
         return self.held_repair_subjects
 
+    def repair_judgments(self) -> dict:
+        return self.repair_judgment_items
+
     def proposed(self, since_hours: int) -> list[cc.ProposedVerdict]:
         assert since_hours == card.REVIEW_SINCE_HOURS
         return self.proposed_items
@@ -329,6 +344,7 @@ class GraphTests(unittest.TestCase):
             merged_yesterday=stubs.merged_yesterday,
             proposed=stubs.proposed,
             held_repairs=stubs.held_repairs,
+            repair_judgments=stubs.repair_judgments,
         )
         return card.build_graph(collabs)
 
@@ -715,27 +731,68 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(set(out["per_project_candidates"]), {"proj-x"})
         self.assertEqual(out["per_project_candidates"]["proj-x"], 5)
 
-    def test_a_held_repair_stays_off_and_the_next_group_takes_its_seat(self):
+    def test_the_lane_keeps_judged_same_name_and_unsure_and_drops_the_rest(self):
+        # 판정 세계의 새 계약: generic·판정 없음·보류는 카드에 오르지 않고, 같은 이름·못 가름
+        # 만 오른다. 문에서는 상한(REPAIRS_SCAN_LIMIT)을 받아와 거른다 — 거른 뒤 3개가 안
+        # 차도 실패가 아니다.
         groups = [
             {"subject": s, "variants": [s.replace("-", " "), s], "rows": 10 - i, "notes": 1}
             for i, s in enumerate(["next-step", "main-page", "make-check", "kb-agent", "test-suite"])
         ]
+        judgments = {
+            ("next-step", ("next step", "next-step")): cc.RepairJudgment(
+                subject="next-step",
+                variants=["next step", "next-step"],
+                verdict="same_name",
+                reason="같은 이름",
+            ),
+            ("main-page", ("main page", "main-page")): cc.RepairJudgment(
+                subject="main-page", variants=["main page", "main-page"], verdict="unsure", reason="못 가름"
+            ),
+            ("make-check", ("make check", "make-check")): cc.RepairJudgment(
+                subject="make-check",
+                variants=["make check", "make-check"],
+                verdict="generic",
+                reason="흔한 말",
+            ),
+            # kb-agent · test-suite: 판정이 아직 없다 — 카드에 오르지 않는다.
+        }
         for held, shown in (
-            (set(), ["next-step", "main-page", "make-check"]),
-            ({"next-step", "make-check"}, ["main-page", "kb-agent", "test-suite"]),
+            (set(), ["next-step", "main-page"]),
+            ({"next-step"}, ["main-page"]),
         ):
-            stubs = Stubs(repairs_payload={"groups": groups, "total_groups": 5}, held_repair_subjects=held)
+            stubs = Stubs(
+                repairs_payload={"groups": groups, "total_groups": 5},
+                held_repair_subjects=held,
+                repair_judgment_items=judgments,
+            )
             out = self._build(stubs).invoke({}, {"configurable": {"thread_id": f"test-held-{len(held)}"}})
-            self.assertEqual(stubs.repairs_calls, [card_live.REPAIRS_LIMIT + len(held)])
+            self.assertEqual(stubs.repairs_calls, [card_live.REPAIRS_SCAN_LIMIT])
             self.assertEqual([r.subject for r in out["repairs"]], shown)
+
+    def test_the_judgment_rides_the_row_it_belongs_to(self):
+        stubs = Stubs(
+            repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 5},
+            repair_judgment_items=REPAIR_JUDGMENTS,
+        )
+        out = self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-judgment-rides"}})
+        (row,) = out["repairs"]
+        self.assertIsNotNone(row.judgment)
+        self.assertEqual(row.judgment.verdict, "same_name")
+        self.assertEqual(row.judgment.reason, "같은 서비스를 가리키는 갈라진 철자")
+        self.assertEqual(row.judgment.variants, ["foodspring front", "foodspring-front"])
 
     def test_read_repairs_populates_state_once_and_a_dead_door_refuses_the_card(self):
         # AC4: the door's GET is called exactly once, its groups land in state, and a
         # 5xx/unreachable door — same principle as /approved — refuses the card outright.
-        stubs = Stubs(repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 5}, merged_yesterday_rows=12)
+        stubs = Stubs(
+            repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 5},
+            merged_yesterday_rows=12,
+            repair_judgment_items=REPAIR_JUDGMENTS,
+        )
         graph = self._build(stubs)
         out = graph.invoke({}, {"configurable": {"thread_id": "test-read-repairs"}})
-        self.assertEqual(stubs.repairs_calls, [card_live.REPAIRS_LIMIT])
+        self.assertEqual(stubs.repairs_calls, [card_live.REPAIRS_SCAN_LIMIT])
         self.assertEqual(out["repairs_total_groups"], 5)
         self.assertEqual(out["merged_yesterday_rows"], 12)
         self.assertEqual([r.subject for r in out["repairs"]], ["foodspring-front"])
@@ -1223,6 +1280,7 @@ class DryRunWiringTests(unittest.TestCase):
                 card_live, "_live_repairs", side_effect=lambda limit: {"groups": [], "total_groups": 0}
             ),
             mock.patch.object(card_live, "_live_merged_yesterday", side_effect=lambda: None),
+            mock.patch.object(card_live, "_live_repair_judgments", side_effect=lambda: {}),
             mock.patch.object(card, "make_propose", return_value=stubs.propose),
             contextlib.redirect_stdout(buf),
         ):

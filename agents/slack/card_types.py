@@ -34,6 +34,10 @@ DELEGATE: str = "delegate"
 #: handed this call back, so the 채점 줄 can tell the two apart.
 AGENT_DELEGATED: str = "agent:delegated"
 
+#: The judge the 이름 맞추기 repair judgment names on its 사건 — the same `agent:<name>`
+#: lineage as AGENT_DELEGATED: the agent decided before the owner's card, never the owner.
+REPAIR_JUDGE: str = "agent:repair-judge"
+
 #: card_i18n.STRINGS keys this file's display-building functions may render.
 DISPLAY_LANGS: tuple[str, ...] = ("en", "ko", "ja")
 
@@ -386,16 +390,54 @@ class PostedCard(BaseModel):
     ts: str
 
 
+#: The repair judge's closed verdict vocabulary — same_name(같은 이름, 합칠 것) · generic(이름이
+#: 아닌 흔한 말, 카드에서 뺄 것) · unsure(못 가름). The wire vocabulary itself, like CHOICES:
+#: parse validates against this, never against a language table, so a Japanese-language
+#: run folds the same three words.
+REPAIR_JUDGE_VERDICTS: tuple[str, ...] = ("same_name", "generic", "unsure")
+
+
+class RepairJudgment(BaseModel):
+    """One 이름 맞추기 group's agent judgment — the verdict the repair-judge run left on a
+    repair_judged 사건 and the card rides on its row (이유 한 줄 + 철자 목록 전부). `judge`
+    names the deciding hand in the engine's agent:<name> vocabulary, like AGENT_DELEGATED —
+    the owner may flip a generic call later precisely because this line is never `owner`."""
+
+    subject: str
+    variants: list[str] = Field(min_length=2)
+    verdict: Literal["same_name", "generic", "unsure"]
+    reason: str
+    judge: str = REPAIR_JUDGE
+
+
+class RepairJudgeFailed(BaseModel):
+    """The repair-judge run could not judge this group — the model call died or the answer
+    was not the promised shape. A value, never an exception: the 사건 carries the fact and
+    the group simply is not judged, so the next day's run tries it again (a failure never
+    counts as a 판정 and never blocks the rest of the day's queue)."""
+
+    subject: str
+    variants: list[str] = Field(min_length=2)
+    reason: str
+
+
+#: What one judge call folds into — the judgment, or the recorded fact of its absence.
+RepairJudgeAnswer = RepairJudgment | RepairJudgeFailed
+
+
 class Repair(BaseModel):
     """One split-subject group from the door's GET /repairs/split-subjects — the execute
     lane's row shape, distinct from Proposal (the advice lane's). `variants` holds the raw
     spellings the engine's canon() folds into `subject`; `rows`/`notes` are the door's own
-    counts, shown as-is."""
+    counts, shown as-is. `judgment` is the agent's 판정 for exactly this (subject, variants)
+    pair — None while the repair-judge has not judged it, and the card only ever rises rows
+    that carry one (a raw engine candidate must not reach the owner)."""
 
     subject: str
     variants: list[str] = Field(min_length=2)
     rows: int
     notes: int
+    judgment: RepairJudgment | None = None
 
 
 class RepairDone(BaseModel):

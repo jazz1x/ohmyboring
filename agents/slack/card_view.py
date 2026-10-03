@@ -19,8 +19,9 @@ When the caller passes repair data (`repairs`/`repairs_total_groups`/`merged_yes
 — all optional, and off by default so every existing single-lane caller renders exactly as
 before), the card grows a second lane above the advice one: a head-line context block
 ("remaining groups n · merged yesterday m"), then, if `repairs` itself is non-empty, an
-「오늘 할 일」 header and one four-block row per repair group (divider, tag, section,
-actions-or-mark), then a 「짚어 둔 것」 header before the existing advice rows. Every lane
+「오늘 할 일」 header and one row per repair group (divider, tag, section, the agent's
+판정 block when the group carries one, actions-or-mark), then a 「짚어 둔 것」 header
+before the existing advice rows. Every lane
 titles itself with the same Slack `header` block — the single prominent title shape — so
 no lane title floats as a section among its own rows. A repair row's button idx shares one
 space with the advice rows — repairs first, 0..k-1 — so a button press can tell the two
@@ -53,6 +54,7 @@ from card_types import (  # noqa: E402
     Repair,
     RepairDone,
     RepairFailed,
+    RepairJudgment,
     RepairPress,
     RepairUnanswered,
     ReviewPress,
@@ -322,6 +324,21 @@ def _repair_section_block(repair: Repair, strings: dict[str, str]) -> dict:
     return {"type": "section", "text": {"type": "mrkdwn", "text": body}}
 
 
+def _repair_judgment_block(judgment: RepairJudgment, strings: dict[str, str]) -> dict:
+    """The agent's 판정 on this row — what the repair-judge run left before the card drew:
+    verdict label(같은 이름·못 가름) + 이유 한 줄 + 철자 목록 전부. generic 판정은 카드에
+    오르지 않으니 여기 그릴 일이 없다."""
+    label = strings[f"repair_judgment_{judgment.verdict}"]
+    variants = ", ".join(f"`{v}`" for v in judgment.variants)
+    text = "\n".join(
+        (
+            strings["repair_judgment_line"].format(verdict=label, reason=_mrkdwn_plain(judgment.reason)),
+            strings["repair_variants_line"].format(variants=variants),
+        )
+    )
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+
+
 def _repair_row(
     idx: int,
     total: int,
@@ -335,6 +352,8 @@ def _repair_row(
         _repair_tag_block(idx, total, repair, strings),
         _repair_section_block(repair, strings),
     ]
+    if repair.judgment is not None:
+        row.append(_repair_judgment_block(repair.judgment, strings))
     row.append(
         _repair_verdict_block(verdict, result, strings)
         if verdict is not None
