@@ -23,6 +23,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
@@ -211,7 +212,7 @@ class RunTests(unittest.TestCase):
             calls["n"] += 1
             prompts.append(prompt)
             if calls["n"] == 1:
-                raise OSError("ollama unreachable")
+                return "ollama said nothing useful"
             return json.dumps(
                 {"verdict": "same_name", "reason": "같은 이름의 갈라진 철자"}, ensure_ascii=False
             )
@@ -227,7 +228,6 @@ class RunTests(unittest.TestCase):
         # 실패 사건은 subject·variants·reason 을 갖는다 — 판정으로 안 세고 다음 날 다시 본다
         failed = next(fields for name, fields in records if name == "repair_judge_failed")
         self.assertEqual(failed["subject"], "subject-00")
-        self.assertIn("ollama unreachable", failed["reason"])
         self.assertNotIn("judge", failed)
         # 판정 사건은 judge='agent:repair-judge' 를 탄다 — 오너가 나중에 뒤집을 수 있게
         judged = next(fields for name, fields in records if name == "repair_judged")
@@ -260,6 +260,32 @@ class RunTests(unittest.TestCase):
 
         crj.run([GROUP], judged, {}, invoke, lambda e, f: None)
         self.assertEqual(calls["n"], 0)
+
+    def test_an_unreachable_model_stops_the_run_instead_of_stamping_failures(self):
+        records: list[tuple[str, dict]] = []
+
+        def invoke(prompt: str) -> str:
+            raise ConnectionError("ollama unreachable")
+
+        with self.assertRaises(ConnectionError):
+            crj.run([GROUP], {}, {}, invoke, lambda e, f: records.append((e, f)))
+        self.assertEqual(records, [])
+
+
+class MainExitTests(unittest.TestCase):
+    def _main(self, answer: str) -> int:
+        with (
+            mock.patch.dict("os.environ", {"BORING_DOOR_URL": "http://door.invalid"}),
+            mock.patch.object(crj, "_live_groups", return_value=[GROUP]),
+            mock.patch.object(crj, "_live_events", return_value=[]),
+            mock.patch.object(crj, "make_judge", return_value=lambda prompt: answer),
+            mock.patch.object(crj, "_live_record"),
+        ):
+            return crj.main()
+
+    def test_a_run_where_every_call_failed_exits_non_zero(self):
+        self.assertEqual(self._main("not json"), 4)
+        self.assertEqual(self._main('{"verdict": "generic", "reason": "흔한 말"}'), 0)
 
 
 if __name__ == "__main__":

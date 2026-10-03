@@ -27,6 +27,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+import card_repair_judge
 from card_effects import (  # noqa: F401
     ENGINE_TIMEOUT,
     _door_url,
@@ -37,7 +38,6 @@ from card_effects import (  # noqa: F401
 from card_press import CARD_ANSWERABLE_HOURS
 from card_types import (
     NO_CURRENT_CLAIM,
-    REPAIR_JUDGE_VERDICTS,
     PastApproved,
     PastCardHistory,
     PastUnansweredPair,
@@ -221,45 +221,9 @@ REPAIRS_LIMIT = 3
 #: 거른 뒤 REPAIRS_LIMIT 개를 앉힌다. 거른 뒤 3개가 안 차도 실패가 아니다.
 REPAIRS_SCAN_LIMIT = 50
 
-#: The repair-judgment window, hours — 한 달, 판정 세션이 정한 창. card_repair_judge 의
-#: JUDGED_WINDOW_HOURS 와 같아야 한다: 판정을 쓰는 쪽(카드)과 판정을 걸러 넘기는 쪽(판정
-#: 실행)이 같은 창을 봐야, 낡은 판정을 다시 내거나 두 번 쓰는 일이 없다.
-REPAIR_JUDGED_WINDOW_HOURS = 24 * 30
-
 
 def _live_repair_judgments() -> dict[tuple[str, tuple[str, ...]], RepairJudgment]:
-    """repair_judged 사건의 최신 판정 하나씩 — (subject, 정렬된 variants) 가리키는 줄.
-    같은 묶음의 판정이 창 안에 여러 개면 observed_at 최신 것 하나만 산다. 모양이 틀린 행은
-    ValueError(F5/ROP), 조용히 걸러내지 않는다: 빠진 판정 하나가 generic 묶음이 오너 카드에
-    오르는 문지방이다."""
-    out: dict[tuple[str, tuple[str, ...]], RepairJudgment] = {}
-    newest: dict[tuple[str, tuple[str, ...]], str] = {}
-    for entry in _live_events("repair_judged", REPAIR_JUDGED_WINDOW_HOURS):
-        attrs = entry.get("attributes") or {}
-        subject = attrs.get("subject")
-        variants = attrs.get("variants")
-        verdict = attrs.get("verdict")
-        reason = attrs.get("reason")
-        observed_at = entry.get("observed_at")
-        if (
-            not isinstance(subject, str)
-            or not subject
-            or not isinstance(variants, list)
-            or not variants
-            or not all(isinstance(v, str) for v in variants)
-            or verdict not in REPAIR_JUDGE_VERDICTS
-            or not isinstance(reason, str)
-            or not reason
-            or not isinstance(observed_at, str)
-        ):
-            raise ValueError(f"malformed repair_judged row: {attrs!r}")
-        key = (subject, tuple(sorted(variants)))
-        if key not in newest or observed_at >= newest[key]:
-            newest[key] = observed_at
-            out[key] = RepairJudgment(
-                subject=subject, variants=sorted(variants), verdict=verdict, reason=reason
-            )
-    return out
+    return card_repair_judge.judged_map(_live_events("repair_judged", card_repair_judge.JUDGED_WINDOW_HOURS))
 
 
 #: how many of the agent's session-end classifications the review lane shows.

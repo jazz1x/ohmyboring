@@ -737,9 +737,16 @@ class GraphTests(unittest.TestCase):
         # 차도 실패가 아니다.
         groups = [
             {"subject": s, "variants": [s.replace("-", " "), s], "rows": 10 - i, "notes": 1}
-            for i, s in enumerate(["next-step", "main-page", "make-check", "kb-agent", "test-suite"])
+            for i, s in enumerate(
+                ["next-step", "main-page", "make-check", "kb-agent", "test-suite", "spark-connect", "re-work"]
+            )
         ]
         judgments = {
+            (s, (s.replace("-", " "), s)): cc.RepairJudgment(
+                subject=s, variants=[s.replace("-", " "), s], verdict="same_name", reason="같은 이름"
+            )
+            for s in ("spark-connect", "re-work")
+        } | {
             ("next-step", ("next step", "next-step")): cc.RepairJudgment(
                 subject="next-step",
                 variants=["next step", "next-step"],
@@ -758,8 +765,8 @@ class GraphTests(unittest.TestCase):
             # kb-agent · test-suite: 판정이 아직 없다 — 카드에 오르지 않는다.
         }
         for held, shown in (
-            (set(), ["next-step", "main-page"]),
-            ({"next-step"}, ["main-page"]),
+            (set(), ["next-step", "main-page", "spark-connect"]),
+            ({"next-step"}, ["main-page", "spark-connect", "re-work"]),
         ):
             stubs = Stubs(
                 repairs_payload={"groups": groups, "total_groups": 5},

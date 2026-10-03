@@ -1,26 +1,8 @@
 #!/usr/bin/env python3
-"""「이름 맞추기」의 판정 자리 — 아침 카드가 그리기 전에 에이전트가 하루 한 번 스스로
-후보 묶음을 판정하는 일을 준비한다.
+"""「이름 맞추기」 판정 — 아침 카드보다 먼저, 하루 한 번 에이전트가 후보 묶음을 가른다.
 
-build_prompt shapes the one question a judgment call asks: the group's canon name, its
-spellings, its row/note counts, and the owner's past 보류·거절 on this subject. parse is the
-boundary that turns the completion into a RepairJudgeAnswer — never an exception, since a
-model that cannot answer is a fact about the group (a repair_judge_failed 사건), not a
-crash: 판정이 없는 묶음이 날것으로 카드에 오르는 변이를 막는 문지방이 parse 가 혼자 선다.
-pick is the day's queue: 문이 주는 행 수 순 그대로, 이미 같은 (subject, 정렬된 variants)
-판정이 있는 묶음은 걷어내고, 하루 상한(DAILY_JUDGE_CAP)만 남긴다. variants 가 바뀐 묶음은
-다른 묶음이라 다시 판정한다.
-
-The run itself (main) goes through the door like every other consumer: GET
-/repairs/split-subjects?limit=50 (the door's own 상한), reads repair_judged · repair_reviewed
-from /events, judges at most 20 groups, and writes one 사건 per group — repair_judged
-(subject, variants, verdict, reason, judge='agent:repair-judge') or repair_judge_failed
-(subject, variants, reason) — through card_effects._live_record, the one 사건-write path.
-It never touches POST /repairs/split-subjects: judging and merging stay separate runs, and
-the owner keeps the merge buttons. This module must stay importable inside the hermes venv,
-so its live reads are local urllib copies (the same reason card_delegate carries its own
-_live_events) — only the model seam imports langchain, lazily, exactly like card.py's
-make_propose.
+Never merges: a merge has no undo yet, so the owner keeps that button. Must stay importable
+inside the hermes venv — live reads are urllib, langchain is imported lazily in make_judge.
 """
 
 from __future__ import annotations
@@ -52,8 +34,7 @@ DAILY_JUDGE_CAP = 20
 #: 문 한 번에 주는 묶음 상한 — 문의 _MAX_REPAIR_LIMIT(50) 그 자체.
 DOOR_GROUP_LIMIT = 50
 
-#: 판정을 읽는 창 — 한 달. 카드가 판정을 쓰는 창(card_live.REPAIR_JUDGED_WINDOW_HOURS)과
-#: 같다: 쓰는 쪽과 걸러 넘기는 쪽이 같은 창을 봐야 낡은 판정을 다시 내는 일이 없다.
+#: 판정을 읽는 창 — 한 달. 카드도 이 값으로 읽는다.
 JUDGED_WINDOW_HOURS = 24 * 30
 
 #: 오너의 보류·거절 기록을 읽는 창 — 이레, 판정 세션이 정한 묶음 보류 창과 같은
@@ -224,25 +205,15 @@ def run(
     record: Callable[[str, dict[str, Any]], None],
     cap: int = DAILY_JUDGE_CAP,
 ) -> tuple[int, int]:
-    """One judge run's whole skeleton: 고르기 → 한 묶음씩 프롬프트·호출·접기 → 사건 한 줄씩.
-    (judged_n, failed_n) — 판정 세기와 실패 세기는 나뉜다: 실패는 판정이 아니니 다음 날 그
-    묶음을 다시 본다. 모델 호출이 죽어도 그 묶음만 사건으로 남고 줄은 이어진다 — 실패가
-    기록되는 한 조용하지 않다."""
+    """(judged_n, failed_n). A model that cannot be reached raises and stops the run — the
+    unjudged groups stay unjudged and come back tomorrow."""
     judged_n = 0
     failed_n = 0
     for group in pick(groups, judged, cap):
         subject = str(group["subject"])
         variants = sorted(str(v) for v in group["variants"])
-        try:
-            raw = invoke(build_prompt(group, reviews.get(subject, [])))
-        except Exception as e:  # noqa: BLE001 — 사건이 기록이니 조용한 삼키기가 아니다
-            answer: card_types.RepairJudgeAnswer = RepairJudgeFailed(
-                subject=subject,
-                variants=variants,
-                reason=_one_line(f"모델 호출 실패: {e}")[:JUDGE_REASON_MAX],
-            )
-        else:
-            answer = parse(raw, subject, variants)
+        prompt = build_prompt(group, reviews.get(subject, []))
+        answer = parse(invoke(prompt), subject, variants)
         if isinstance(answer, RepairJudgeFailed):
             record("repair_judge_failed", answer.model_dump())
             failed_n += 1
@@ -325,7 +296,7 @@ def main() -> int:
         print(f"[repair-judge] 판정 거부: {_one_line(e)}", file=sys.stderr)
         return 3
     print(f"[repair-judge] judged={judged_n} failed={failed_n}", flush=True)
-    return 0
+    return 4 if failed_n and not judged_n else 0
 
 
 if __name__ == "__main__":
