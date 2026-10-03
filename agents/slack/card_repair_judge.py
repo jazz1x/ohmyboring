@@ -59,19 +59,27 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL | re.IGNORECASE)
 GroupKey = tuple[str, tuple[str, ...]]
 
 
-def build_prompt(group: dict[str, Any], past_reviews: list[dict[str, Any]]) -> str:
-    """One judgment call's whole question: the group's canon name, every spelling, its
-    row/note counts, and the owner's past calls on this subject (보류·거절 — a rejection the
-    model should weigh, never override). The prompt is Korean, the same language
-    card_delegate builds its prompt in — the local model answers with one of three fixed
-    verdicts, never inventing a fourth."""
+def build_prompt(
+    group: dict[str, Any], past_reviews: list[dict[str, Any]], samples: list[dict[str, Any]]
+) -> str:
+    """Spelling alone cannot separate a name from a common phrase (v1 called 18/20 same_name),
+    so the question carries what the memory actually says under this subject."""
     variants = ", ".join(str(v) for v in group["variants"])
     lines = [
-        "이름 맞추기 후보 하나를 판정한다. 이 묶음이 같은 이름의 갈라진 철자인지, 아니면 이름이 아닌 흔한 말인지 고른다.",
+        "기억 속 사실들의 주제 하나를 판정한다. 철자 목록은 공백·하이픈·밑줄만 다르다 — 철자가 같은지는 묻지 않는다.",
+        "묻는 것: 이 주제가 특정한 하나(저장소·제품·도구·티켓·사람·파일·이름 붙은 부품)인가,",
+        "아니면 서로 무관한 여러 일에 붙은 흔한 말(할 일 칸, 상태 칸, 일반 작업 이름)인가.",
+        "아래 사실들이 한 대상의 성질을 말하면 특정한 하나다. 서로 다른 일들을 담는 칸이면 흔한 말이다.",
+        "주제가 일반 낱말로만 된 구(예: code review, home screen, release note)이면, 사실들이 이름 붙은 제품·저장소 하나를",
+        "설명할 때만 특정한 하나다. 시험·화면·대화 같은 일반 범주에 대한 사실이면 흔한 말이다.",
+        "티켓 번호·저장소 이름·약어가 든 주제는 특정한 하나 쪽이다. 술어의 철자 차이는 판정과 상관없다.",
         "",
-        f"정규화 이름: {group['subject']}",
+        f"주제: {group['subject']}",
         f"철자 목록: {variants}",
-        f"행 수: {group.get('rows')} · 노트 수: {group.get('notes')}",
+        f"사실 수: {group.get('rows')} · 노트 수: {group.get('notes')}",
+        "",
+        "이 주제로 남은 사실(술어 · 개수 · 값 하나):",
+        *(f"- {s['predicate']} · {s['rows']} · {s['value']}" for s in samples),
     ]
     if past_reviews:
         lines.append("")
@@ -84,15 +92,15 @@ def build_prompt(group: dict[str, Any], past_reviews: list[dict[str, Any]]) -> s
     lines += [
         "",
         "판정 셋:",
-        "- same_name: 갈라진 철자가 전부 같은 이름이다 — 합쳐도 된다.",
-        "- generic: 이름이 아니라 흔한 말이다 (예: 다음 단계, 메인 페이지, 확인) — 합치면 안 된다.",
-        "- unsure: 위 둘 중 무엇인지 못 가른다.",
+        "- same_name: 특정한 하나다 — 철자를 하나로 합쳐도 된다.",
+        "- generic: 흔한 말이다 — 합치면 무관한 일들이 한 이름으로 묶인다.",
+        "- unsure: 사실을 읽어도 둘 중 무엇인지 못 가른다.",
         "",
         "아래 JSON 하나만 출력하라:",
-        '{"verdict": "same_name", "reason": "왜 그렇게 판정하는지 한 문장"}',
+        '{"verdict": "generic", "reason": "왜 그렇게 판정하는지 한 문장"}',
         "",
         "규칙:",
-        "- 새로운 사실을 지어내지 마라. reason 은 철자 목록과 행 수에 근거해 써라.",
+        "- 새로운 사실을 지어내지 마라. reason 은 위 사실들에 근거해 써라.",
         f"- reason 은 한 문장, {JUDGE_REASON_MAX}자 이내로 써라.",
         '- verdict 는 "' + " · ".join(card_types.REPAIR_JUDGE_VERDICTS) + '" 셋 중 하나만 써라.',
     ]
@@ -205,6 +213,7 @@ def run(
     reviews: Mapping[str, list[dict[str, Any]]],
     invoke: Callable[[str], str],
     record: Callable[[str, dict[str, Any]], None],
+    samples: Callable[[list[str]], list[dict[str, Any]]],
     cap: int = DAILY_JUDGE_CAP,
 ) -> tuple[int, int]:
     """(judged_n, failed_n). A model that cannot be reached raises and stops the run — the
@@ -214,7 +223,7 @@ def run(
     for group in pick(groups, judged, cap):
         subject = str(group["subject"])
         variants = sorted(str(v) for v in group["variants"])
-        prompt = build_prompt(group, reviews.get(subject, []))
+        prompt = build_prompt(group, reviews.get(subject, []), samples(variants))
         answer = parse(invoke(prompt), subject, variants)
         if isinstance(answer, RepairJudgeFailed):
             record("repair_judge_failed", answer.model_dump())
@@ -267,6 +276,20 @@ def _live_groups(limit: int = DOOR_GROUP_LIMIT) -> list[dict[str, Any]]:
     return [g for g in groups if isinstance(g, dict)]
 
 
+def _live_samples(variants: list[str]) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode([("variant", v) for v in variants])
+    url = f"{omb_env.door_url()}/repairs/split-subjects/samples?{query}"
+    try:
+        with urllib.request.urlopen(url, timeout=_EVENTS_TIMEOUT) as r:
+            payload = json.loads(r.read().decode("utf-8"))
+    except (OSError, ValueError) as e:
+        raise OSError(f"{url}: {e}") from e
+    samples = payload.get("samples")
+    if not isinstance(samples, list):
+        raise OSError(f"{url}: samples 가 없다: {payload!r}")
+    return samples
+
+
 def make_judge(model: str = DEFAULT_MODEL) -> Callable[[str], str]:
     """The JSON-mode seam, card.py::make_propose 그대로의 쌍: 한 묶음의 프롬프트를 넣으면
     원문 답이 나온다. format='json' 이 문법을, parse 가 어휘를 지킨다 — 스키마 강제는
@@ -291,7 +314,7 @@ def main() -> int:
         groups = _live_groups()
         judged = judged_map(_live_events("repair_judged", JUDGED_WINDOW_HOURS))
         reviews = reviews_by_subject(_live_events("repair_reviewed", REVIEW_WINDOW_HOURS))
-        judged_n, failed_n = run(groups, judged, reviews, make_judge(), _live_record)
+        judged_n, failed_n = run(groups, judged, reviews, make_judge(), _live_record, _live_samples)
     except (ValueError, OSError) as e:
         # A dead door, a clipped events window, a malformed 사건 row — say why in one line
         # and stop: 판정 실행은 합치기를 손대지 않으니, 여기서 멈추는 것은 되돌릴 일이 없다.

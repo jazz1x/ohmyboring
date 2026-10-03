@@ -37,6 +37,10 @@ import card_types as cc  # noqa: E402
 GROUP = {"subject": "next-step", "variants": ["next step", "next-step"], "rows": 268, "notes": 34}
 
 
+def NO_SAMPLES(variants: list[str]) -> list[dict]:
+    return []
+
+
 def _group(subject: str, variants: list[str], rows: int = 10, notes: int = 1) -> dict:
     return {"subject": subject, "variants": variants, "rows": rows, "notes": notes}
 
@@ -62,20 +66,22 @@ class PromptTests(unittest.TestCase):
             {"choice": "defer", "card_ts": "1727480000.0001", "idx": 0, "subject": "next-step"},
             {"choice": "drop", "card_ts": "1727480000.0002", "idx": 1, "subject": "next-step"},
         ]
-        prompt = crj.build_prompt(GROUP, past)
-        self.assertIn("정규화 이름: next-step", prompt)
+        samples = [{"predicate": "action", "rows": 198, "value": "playwright 설치 확인"}]
+        prompt = crj.build_prompt(GROUP, past, samples)
+        self.assertIn("주제: next-step", prompt)
         self.assertIn("철자 목록: next step, next-step", prompt)
-        self.assertIn("행 수: 268 · 노트 수: 34", prompt)
+        self.assertIn("사실 수: 268 · 노트 수: 34", prompt)
+        self.assertIn("- action · 198 · playwright 설치 확인", prompt)
         # the owner's 보류·거절 ride into the prompt — the model weighs them, never overrides
         self.assertIn("소유자가 이 묶음에 남긴 기록", prompt)
         self.assertIn("- 보류 (카드 1727480000.0001, 줄 0)", prompt)
         self.assertIn("- 거절 (카드 1727480000.0002, 줄 1)", prompt)
         # the closed verdict vocabulary — the parse boundary's contract
-        self.assertIn('"verdict": "same_name"', prompt)
+        self.assertIn('"verdict": "generic"', prompt)
         self.assertIn('verdict 는 "same_name · generic · unsure" 셋 중 하나만 써라', prompt)
 
     def test_no_past_reviews_no_history_section(self):
-        prompt = crj.build_prompt(GROUP, [])
+        prompt = crj.build_prompt(GROUP, [], [])
         self.assertNotIn("소유자가 이 묶음에 남긴 기록", prompt)
 
 
@@ -228,7 +234,7 @@ class RunTests(unittest.TestCase):
                 {"verdict": "same_name", "reason": "같은 이름의 갈라진 철자"}, ensure_ascii=False
             )
 
-        judged_n, failed_n = crj.run(groups, {}, {}, invoke, lambda e, f: records.append((e, f)))
+        judged_n, failed_n = crj.run(groups, {}, {}, invoke, lambda e, f: records.append((e, f)), NO_SAMPLES)
         # 상한 20 — 25개 중 20개만 불렀다
         self.assertEqual(calls["n"], 20)
         self.assertEqual(judged_n, 19)
@@ -253,7 +259,7 @@ class RunTests(unittest.TestCase):
             prompts.append(prompt)
             return json.dumps({"verdict": "unsure", "reason": "모르겠습니다"}, ensure_ascii=False)
 
-        crj.run([GROUP], {}, reviews, invoke, lambda e, f: None)
+        crj.run([GROUP], {}, reviews, invoke, lambda e, f: None, NO_SAMPLES)
         self.assertEqual(len(prompts), 1)
         self.assertIn("- 거절 (카드 1.0, 줄 2)", prompts[0])
 
@@ -269,8 +275,26 @@ class RunTests(unittest.TestCase):
             calls["n"] += 1
             return '{"verdict": "same_name", "reason": "x"}'
 
-        crj.run([GROUP], judged, {}, invoke, lambda e, f: None)
+        crj.run([GROUP], judged, {}, invoke, lambda e, f: None, NO_SAMPLES)
         self.assertEqual(calls["n"], 0)
+
+    def test_each_judged_group_brings_its_own_facts_into_its_prompt(self):
+        asked: list[list[str]] = []
+        prompts: list[str] = []
+
+        def samples(variants: list[str]) -> list[dict]:
+            asked.append(variants)
+            return [{"predicate": "usage", "rows": 22, "value": f"{variants[0]} 의 쓰임"}]
+
+        def invoke(prompt: str) -> str:
+            prompts.append(prompt)
+            return '{"verdict": "same_name", "reason": "한 제품의 성질"}'
+
+        groups = [_group("spark-connect", ["spark-connect", "spark connect"]), GROUP]
+        crj.run(groups, {}, {}, invoke, lambda e, f: None, samples)
+        self.assertEqual(asked, [["spark connect", "spark-connect"], ["next step", "next-step"]])
+        self.assertIn("- usage · 22 · spark connect 의 쓰임", prompts[0])
+        self.assertIn("- usage · 22 · next step 의 쓰임", prompts[1])
 
     def test_an_unreachable_model_stops_the_run_instead_of_stamping_failures(self):
         records: list[tuple[str, dict]] = []
@@ -279,7 +303,7 @@ class RunTests(unittest.TestCase):
             raise ConnectionError("ollama unreachable")
 
         with self.assertRaises(ConnectionError):
-            crj.run([GROUP], {}, {}, invoke, lambda e, f: records.append((e, f)))
+            crj.run([GROUP], {}, {}, invoke, lambda e, f: records.append((e, f)), NO_SAMPLES)
         self.assertEqual(records, [])
 
 
@@ -293,6 +317,7 @@ class MainExitTests(unittest.TestCase):
             mock.patch.object(crj, "_live_events", return_value=[]),
             mock.patch.object(crj, "make_judge", return_value=lambda prompt: next(replies)),
             mock.patch.object(crj, "_live_record"),
+            mock.patch.object(crj, "_live_samples", return_value=[]),
         ):
             return crj.main()
 

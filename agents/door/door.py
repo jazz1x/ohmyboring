@@ -1180,6 +1180,37 @@ _MIN_REPAIR_LIMIT = 1
 _MAX_REPAIR_LIMIT = 50
 _DEFAULT_REPAIR_LIMIT = 3
 
+_SAMPLE_LIMIT = 5
+_SAMPLE_MAX_VARIANTS = 10
+_SAMPLE_VALUE_CHARS = 160
+_SPLIT_SAMPLES_SQL = (
+    "select predicate, count(*), (array_agg(left(value, %s) order by length(value) desc, value))[1] "
+    "from claim where subject = any(%s) "
+    "group by predicate order by 2 desc, 1 limit %s"
+)
+
+
+def _fetch_split_samples(variants: list[str]) -> list[tuple[str, int, str]]:
+    with _split_subjects_connect() as conn, conn.cursor() as cur:
+        cur.execute(_SPLIT_SAMPLES_SQL, (_SAMPLE_VALUE_CHARS, variants, _SAMPLE_LIMIT))
+        return cur.fetchall()
+
+
+async def _repairs_split_subjects_samples(request: Request) -> Response:
+    variants = [v for v in request.query_params.getlist("variant") if v.strip()]
+    if not 1 <= len(variants) <= _SAMPLE_MAX_VARIANTS:
+        return JSONResponse(
+            {"error": f"variant must be given 1..{_SAMPLE_MAX_VARIANTS} times"}, status_code=400
+        )
+    if not os.environ.get("DOOR_PG_DSN"):
+        return JSONResponse({"error": "store not configured"}, status_code=503)
+    try:
+        rows = await asyncio.to_thread(_fetch_split_samples, variants)
+    except psycopg.OperationalError as e:
+        return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
+    return JSONResponse({"samples": [{"predicate": p, "rows": n, "value": v} for p, n, v in rows]})
+
+
 _SPLIT_SUBJECTS_SQL = "select subject, source_path from claim"
 _SPLIT_DELETE_SQL = "delete from claim where subject = any(%s) and source_path = any(%s)"
 _SPLIT_UPDATE_SQL = "update document set sha = '' where source_path = any(%s)"
@@ -1694,6 +1725,7 @@ _DOOR_HANDLERS = {
     "GET /claim-sources": _claim_sources,
     "GET /projects": _projects,
     "GET /repairs/split-subjects": _repairs_split_subjects_get,
+    "GET /repairs/split-subjects/samples": _repairs_split_subjects_samples,
     "POST /repairs/split-subjects": _repairs_split_subjects_post,
     "POST /run/morning-card": _run_morning_card,
     "POST /run/repair-judge": _run_repair_judge,

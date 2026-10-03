@@ -5,6 +5,7 @@
     "GET /claim-sources",
     "GET /projects",
     "GET /repairs/split-subjects",
+    "GET /repairs/split-subjects/samples",
     "GET /rules",
     "POST /repairs/split-subjects",
     "POST /run/morning-card",

@@ -2073,6 +2073,26 @@ class SplitSubjectsGetRouteTests(unittest.TestCase):
             self.assertEqual(status, 400, f"limit={bad}")
             self.assertIn("limit", json.loads(body)["error"])
 
+    def test_samples_read_the_given_spellings(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        asked: list[list[str]] = []
+        orig = door._fetch_split_samples
+        door._fetch_split_samples = lambda variants: asked.append(variants) or [("action", 268, "design x")]
+        try:
+            status, body, _ = _req(
+                self.door_port, "GET", "/repairs/split-subjects/samples?variant=next%20step&variant=next-step"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                json.loads(body), {"samples": [{"predicate": "action", "rows": 268, "value": "design x"}]}
+            )
+            self.assertEqual(asked, [["next step", "next-step"]])
+            for query in ("", "?variant=", "?" + "&".join(f"variant=v{i}" for i in range(11))):
+                status, _, _ = _req(self.door_port, "GET", f"/repairs/split-subjects/samples{query}")
+                self.assertEqual(status, 400, query)
+        finally:
+            door._fetch_split_samples = orig
+
 
 class SplitSubjectsPostRouteTests(unittest.TestCase):
     """POST /repairs/split-subjects through the real door app — stub cursor + stub sync
