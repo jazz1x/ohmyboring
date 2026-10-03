@@ -172,11 +172,12 @@ class ReadFoldTests(unittest.TestCase):
                 "2026-10-01T00:00:00+00:00",
             ),
         ]
-        out = crj.judged_map(entries)
         key = ("next-step", ("next step", "next-step"))
-        self.assertEqual(out[key].verdict, "generic")
-        self.assertEqual(out[key].reason, "뒤집은 판정")
-        self.assertEqual(len(out), 1)
+        for order in (entries, entries[::-1]):
+            out = crj.judged_map(order)
+            self.assertEqual(out[key].verdict, "generic")
+            self.assertEqual(out[key].reason, "뒤집은 판정")
+            self.assertEqual(len(out), 1)
 
     def test_a_malformed_judged_row_raises(self):
         entries = [
@@ -273,19 +274,23 @@ class RunTests(unittest.TestCase):
 
 
 class MainExitTests(unittest.TestCase):
-    def _main(self, answer: str) -> int:
+    def _main(self, *answers: str) -> int:
+        groups = [_group(f"subject-{i}", [f"subject {i}", f"subject-{i}"]) for i in range(len(answers))]
+        replies = iter(answers)
         with (
             mock.patch.dict("os.environ", {"BORING_DOOR_URL": "http://door.invalid"}),
-            mock.patch.object(crj, "_live_groups", return_value=[GROUP]),
+            mock.patch.object(crj, "_live_groups", return_value=groups),
             mock.patch.object(crj, "_live_events", return_value=[]),
-            mock.patch.object(crj, "make_judge", return_value=lambda prompt: answer),
+            mock.patch.object(crj, "make_judge", return_value=lambda prompt: next(replies)),
             mock.patch.object(crj, "_live_record"),
         ):
             return crj.main()
 
-    def test_a_run_where_every_call_failed_exits_non_zero(self):
+    def test_only_a_run_where_every_call_failed_exits_non_zero(self):
+        judged = '{"verdict": "generic", "reason": "흔한 말"}'
         self.assertEqual(self._main("not json"), 4)
-        self.assertEqual(self._main('{"verdict": "generic", "reason": "흔한 말"}'), 0)
+        self.assertEqual(self._main(judged), 0)
+        self.assertEqual(self._main(judged, "not json"), 0)
 
 
 if __name__ == "__main__":
