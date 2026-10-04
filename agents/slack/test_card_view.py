@@ -766,7 +766,7 @@ class FailedStatusTests(unittest.TestCase):
         strings = card_i18n.STRINGS["ko"]
         text = cv.status_text(cc.Failed(reason="가" * 400), strings)
         self.assertEqual(
-            text, strings["progress_failed"].format(reason="가" * (cv.TEXT_MAX_STEPS[-1] - 1) + "…")
+            text, strings["progress_failed"].format(reason="가" * (cv.REVIEW_TEXT_MAX - 1) + "…")
         )
 
 

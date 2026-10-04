@@ -536,7 +536,7 @@ def status_text(outcome: Outcome, strings: dict[str, str]) -> str:
         case Done(text=text):
             return text
         case Failed(reason=reason):
-            return strings["progress_failed"].format(reason=_mrkdwn_plain(reason, TEXT_MAX_STEPS[-1]))
+            return strings["progress_failed"].format(reason=_mrkdwn_plain(reason))
         case _:
             assert_never(outcome)
 
