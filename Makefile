@@ -4,6 +4,10 @@
 # standalone `docker-compose` binary works. Fall back transparently.
 COMPOSE := $(shell if docker compose version 2>&1 | grep -q "Docker Compose"; then echo "docker compose"; else echo "docker-compose"; fi)
 
+# Scripts fall back to ~/oh-my-boring when BORING_HOME is unset; a make run from another checkout
+# (a worktree) would then drive that checkout's hooks. Default to this checkout.
+export BORING_HOME ?= $(CURDIR)
+
 help: ## List commands
 	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## / — /' | sort
 
@@ -13,7 +17,7 @@ up: ## Setup + start (check Ollama, pull models, build, start everything)
 ollama: ## Ensure Ollama is running (start it in the background if possible)
 	./scripts/ensure-ollama.sh
 
-HERMES_IMAGE := $(shell sed -n 's/^ *image: \(hermes-agent:[^ ]*\).*/\1/p' docker-compose.yml)
+HERMES_IMAGE := $(shell sed -n 's/^ *HERMES_BASE: \(hermes-agent:[^ ]*\).*/\1/p' docker-compose.yml)
 HERMES_TAG := $(lastword $(subst :, ,$(HERMES_IMAGE)))
 
 hermes-build: ## Clone/build the optional hermes-agent image at the tag docker-compose.yml pins
@@ -26,6 +30,7 @@ hermes-build: ## Clone/build the optional hermes-agent image at the tag docker-c
 		&& { git rev-parse -q --verify "refs/tags/$(HERMES_TAG)" >/dev/null \
 			|| git fetch --no-tags origin "refs/tags/$(HERMES_TAG):refs/tags/$(HERMES_TAG)"; } \
 		&& git archive "$(HERMES_TAG)" | docker build -t "$(HERMES_IMAGE)" -
+	$(COMPOSE) build boring-agent
 
 down: ## Stop the whole stack, including Postgres when vector mode was used (keeps ./data)
 	@case "$$(printf '%s' "$${BORING_VECTOR:-off}" | tr '[:upper:]' '[:lower:]')" in \
@@ -34,7 +39,7 @@ down: ## Stop the whole stack, including Postgres when vector mode was used (kee
 	esac
 
 build: ## Build the compose images (boring-drudge + boring-door) and the host CLI binary (doctor checks the engine build_sha and the host CLI stamp against the checkout)
-	BUILD_SHA=$$(git rev-parse HEAD 2>/dev/null || true) $(COMPOSE) build
+	BUILD_SHA=$$(git rev-parse HEAD 2>/dev/null || true) $(COMPOSE) build boring-drudge boring-door
 	cd drudge && cargo build --release
 
 logs: ## engine logs
@@ -44,10 +49,10 @@ agent-logs: ## boring-agent (hermes) logs (MCP connection diagnostics)
 	$(COMPOSE) logs -f boring-agent
 
 events: ## Show recent workflow events (engine DB first, file fallback)
-	@python3 agents/shared/event_log.py --tail --max "$${N:-20}"
+	@python3 src/ohmyboring/adapters/events.py --tail --max "$${N:-20}"
 
 events-replay: ## Hand spooled events to the engine (after an outage; doctor names the trapped rows)
-	@python3 agents/shared/event_log.py --replay-spool
+	@python3 src/ohmyboring/adapters/events.py --replay-spool
 
 secretary: ## Answer @mentions in Slack from memory (Socket Mode; needs SLACK_APP_TOKEN/SLACK_BOT_TOKEN in .env)
 	set -a; . ./.env; set +a; python3 agents/slack/secretary.py
@@ -73,7 +78,7 @@ verify-llm: ## Verify boring.json LLM config (reachability, model presence, embe
 ask: ## Single query   make ask Q="question"
 	@command -v jq >/dev/null 2>&1 || { echo 'jq not found — install: brew install jq / apt-get install jq'; exit 1; }
 	@[ -n "$(Q)" ] || { echo 'usage: make ask Q="question"'; exit 1; }
-	@code=$$(curl -s -m120 -o /tmp/omb-ask.$$$$ -w '%{http_code}' "$${BORING_URL:-http://127.0.0.1:7700}/ask" \
+	@code=$$(curl -s -m120 -o /tmp/omb-ask.$$$$ -w '%{http_code}' "$${BORING_DOOR_URL:-http://127.0.0.1:7710}/ask" \
 	  -H 'content-type: application/json' \
 	  -d "$$(jq -nc --arg q "$(Q)" '{question:$$q}')"); \
 	  jq -r '.answer // .error // "ask failed"' /tmp/omb-ask.$$$$ 2>/dev/null || cat /tmp/omb-ask.$$$$; rm -f /tmp/omb-ask.$$$$; \
@@ -81,12 +86,12 @@ ask: ## Single query   make ask Q="question"
 
 sync: ## Deterministic re-ingest of the vault (vault/wiki → embed → graph → relates_to)
 	@command -v jq >/dev/null 2>&1 || { echo 'jq not found — install: brew install jq / apt-get install jq'; exit 1; }
-	@curl -s -m600 -X POST "$${BORING_URL:-http://127.0.0.1:7700}/sync" | jq .
+	@curl -s -m600 -X POST "$${BORING_DOOR_URL:-http://127.0.0.1:7710}/sync" | jq .
 
 remember: ## Save + ingest a note immediately   make remember M="content" [T="title"]
 	@command -v jq >/dev/null 2>&1 || { echo 'jq not found — install: brew install jq / apt-get install jq'; exit 1; }
 	@[ -n "$(M)" ] || { echo 'usage: make remember M="content" [T="title"]'; exit 1; }
-	@curl -s -m600 -X POST "$${BORING_URL:-http://127.0.0.1:7700}/mcp" -H 'content-type: application/json' \
+	@curl -s -m600 -X POST "$${BORING_DOOR_URL:-http://127.0.0.1:7710}/mcp" -H 'content-type: application/json' \
 	  -d "$$(jq -nc --arg t "$${T:-$(M)}" --arg b "$(M)" \
 	    '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"remember",arguments:{title:$$t,body:$$b}}}')" \
 	  | jq -r '.result.content[0].text // .error.message'
@@ -94,8 +99,10 @@ remember: ## Save + ingest a note immediately   make remember M="content" [T="ti
 collect: ## Lazily collect past Claude Code sessions (one at a time)   make collect [N=1]
 	@COLLECT_LIMIT=$${N:-1} python3 agents/schedulers/collect-sessions.py
 
-distill-now: ## Distill the CURRENT session right now (no need to end it; re-runnable)   make distill-now
+distill-now: ## Queue the CURRENT session, then have hermes drain the queue right now (re-runnable)   make distill-now
 	@python3 agents/schedulers/collect-sessions.py --now
+	@docker exec -u "$$(id -u):$$(id -g)" boring-agent /opt/hermes/.venv/bin/python3 /opt/data/scripts/ingest-worker.py --drain-only >/dev/null \
+	  || { echo 'hermes (boring-agent) is not running — the session stays queued; it is distilled on the next hermes tick'; exit 1; }
 
 collect-kimi: ## Lazily collect past Kimi Code sessions (one at a time)   make collect-kimi [N=1]
 	@COLLECT_LIMIT=$${N:-1} python3 agents/schedulers/collect-kimi-sessions.py

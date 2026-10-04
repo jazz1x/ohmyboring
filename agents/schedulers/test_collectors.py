@@ -2,10 +2,12 @@
 """Network-free regression tests for session collector status semantics."""
 
 import importlib.util
+import io
 import json
 import os
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 from unittest import mock
@@ -25,6 +27,8 @@ def _load(name, filename):
 claude_collect = _load("claude_collect_sessions", "collect-sessions.py")
 kimi_collect = _load("kimi_collect_sessions", "collect-kimi-sessions.py")
 codex_collect = _load("codex_collect_sessions", "../codex/collect-sessions.py")
+
+from ohmyboring.result import Err, Ok  # noqa: E402, F401 — Err: 쓰기 문지기의 거절 경로
 
 
 def _last_event(path: Path) -> dict:
@@ -52,16 +56,16 @@ def test_claude_backfill_does_not_claim_to_be_a_session_end():
                 mock.patch.object(
                     claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]
                 ),
-                mock.patch.object(claude_collect, "_warm_llm"),
                 mock.patch.object(
                     claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)
                 ) as run,
-                mock.patch.object(claude_collect, "DrudgeClient"),
+                mock.patch.object(claude_collect, "DrudgeClient") as client,
                 mock.patch.dict(
                     os.environ,
                     {"BORING_EVENT_LOG": str(root / "events.ndjson"), "BORING_EVENT_SINK": "spool"},
                 ),
             ):
+                client.return_value.health.return_value = Ok({"status": "ok", "db_healthy": True})
                 claude_collect.main()
 
             payloads = [json.loads(c.kwargs["input"]) for c in run.call_args_list if "input" in c.kwargs]
@@ -106,11 +110,12 @@ def test_kimi_collector_fails_when_distill_fails():
                 mock.patch.object(kimi_collect, "_distill", return_value=False) as distill,
                 # Stub the client so the write-door preflight does not make this test depend on
                 # a reachable engine — it owns the distill-failure path, not readiness.
-                mock.patch.object(kimi_collect, "DrudgeClient"),
+                mock.patch.object(kimi_collect, "DrudgeClient") as client,
                 mock.patch.dict(
                     os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
                 ),
             ):
+                client.return_value.health.return_value = Ok({"status": "ok", "db_healthy": True})
                 rc = kimi_collect.main()
 
             assert rc == 1
@@ -127,6 +132,18 @@ def test_kimi_collector_fails_when_distill_fails():
         kimi_collect.KIMI_HOME = old_home
         kimi_collect.HOOK = old_hook
         kimi_collect.LIMIT = old_limit
+
+
+def test_claude_marked_respects_a_fresh_retry_marker():
+    old_mark_dir = claude_collect.markers.MARK_DIR
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            claude_collect.markers.set_mark_dir(d)
+            assert claude_collect._marked("s1") is False
+            claude_collect.markers.mark_retry("s1", reason="x")
+            assert claude_collect._marked("s1") is True
+    finally:
+        claude_collect.markers.set_mark_dir(old_mark_dir)
 
 
 def test_claude_marked_excludes_dead_lettered_session():
@@ -223,7 +240,6 @@ def test_claude_collector_run_makes_no_sync_request():
                 mock.patch.object(
                     claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]
                 ),
-                mock.patch.object(claude_collect, "_warm_llm"),
                 mock.patch.object(claude_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
                 mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
                 mock.patch.dict(
@@ -265,7 +281,6 @@ def test_claude_collector_fails_when_distill_fails():
                 mock.patch.object(
                     claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]
                 ),
-                mock.patch.object(claude_collect, "_warm_llm"),
                 mock.patch.object(claude_collect.subprocess, "run", return_value=mock.Mock(returncode=1)),
                 mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
                 mock.patch.dict(
@@ -407,9 +422,137 @@ def test_codex_collector_fails_when_distill_fails():
         codex_collect.LIMIT = old_limit
 
 
+class _NotJsonResponse(_FakeResponse):
+    def read(self):
+        return b"<html>bad gateway</html>"
+
+
+def _closed_door_cases() -> list[tuple[object, str]]:
+    """(urlopen 이 내놓는 실패, 옛 코드가 남기던 reason) — 옛 reason 은 str(옛 예외) 그대로다."""
+    not_json = json.JSONDecodeError("Expecting value", "<html>bad gateway</html>", 0)
+    reset = ConnectionResetError(104, "Connection reset by peer")
+    unavailable = urllib.error.HTTPError(
+        "http://drudge.test/health", 503, "Service Unavailable", {}, io.BytesIO(b"")
+    )
+    prefix = "drudge /health unreachable: "
+    return [
+        (_NotJsonResponse(), prefix + str(not_json)),
+        (reset, prefix + str(reset)),
+        (unavailable, prefix + str(unavailable)),
+    ]
+
+
+def _urlopen_failing_health(failure):
+    def fake_urlopen(req, timeout):
+        if isinstance(failure, BaseException):
+            raise failure
+        return failure
+
+    return fake_urlopen
+
+
+def _assert_write_door_closed(run_main, event_path: Path, stderr_label: str):
+    for failure, reason in _closed_door_cases():
+        with (
+            mock.patch.object(urllib.request, "urlopen", _urlopen_failing_health(failure)),
+            mock.patch.object(sys, "stderr", io.StringIO()) as err,
+        ):
+            rc = run_main()
+        assert rc == 1, (failure, rc)
+        assert f"[{stderr_label}] write door closed: {reason}" in err.getvalue(), err.getvalue()
+        event = _last_event(event_path)
+        assert event["status"] == "failed", event
+        assert event["reason"] == reason, event
+
+
+def test_claude_collector_exits_1_and_logs_failed_when_the_write_door_is_closed():
+    old_mark_dir = claude_collect.markers.MARK_DIR
+    old_min_kb = claude_collect.MIN_KB
+    old_limit = claude_collect.LIMIT
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _claude_fixture(root)
+            event_path = root / "events.ndjson"
+            claude_collect.markers.set_mark_dir(str(root / "markers"))
+            claude_collect.MIN_KB = 0
+            claude_collect.LIMIT = 1
+            with (
+                mock.patch.object(claude_collect.sys, "argv", ["collect-sessions.py"]),
+                mock.patch.object(
+                    claude_collect.boring_config, "source_dirs", return_value=[str(root / "claude")]
+                ),
+                mock.patch.dict(
+                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                ),
+            ):
+                _assert_write_door_closed(claude_collect.main, event_path, "claude-collect")
+    finally:
+        claude_collect.markers.set_mark_dir(old_mark_dir)
+        claude_collect.MIN_KB = old_min_kb
+        claude_collect.LIMIT = old_limit
+
+
+def test_kimi_collector_exits_1_and_logs_failed_when_the_write_door_is_closed():
+    old_home = kimi_collect.KIMI_HOME
+    old_hook = kimi_collect.HOOK
+    old_limit = kimi_collect.LIMIT
+    old_mark_dir = kimi_collect.markers.MARK_DIR
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _kimi_fixture(root)
+            event_path = root / "events.ndjson"
+            kimi_collect.KIMI_HOME = str(root)
+            kimi_collect.HOOK = str(root / "distill-session.py")
+            kimi_collect.LIMIT = 1
+            kimi_collect.markers.set_mark_dir(str(root / "markers"))
+            with mock.patch.dict(
+                os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+            ):
+                _assert_write_door_closed(kimi_collect.main, event_path, "collect-kimi")
+    finally:
+        kimi_collect.KIMI_HOME = old_home
+        kimi_collect.HOOK = old_hook
+        kimi_collect.LIMIT = old_limit
+        kimi_collect.markers.set_mark_dir(old_mark_dir)
+
+
+def test_codex_collector_exits_1_and_logs_failed_when_the_write_door_is_closed():
+    old_mark_dir = codex_collect.markers.MARK_DIR
+    old_min_kb = codex_collect.MIN_KB
+    old_stable_age = codex_collect.STABLE_AGE_S
+    old_limit = codex_collect.LIMIT
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _codex_fixture(root)
+            event_path = root / "events.ndjson"
+            codex_collect.markers.set_mark_dir(str(root / "markers"))
+            codex_collect.MIN_KB = 0
+            codex_collect.STABLE_AGE_S = 0
+            codex_collect.LIMIT = 1
+            with (
+                mock.patch.object(codex_collect, "_source_dir", return_value=str(root / "sessions")),
+                mock.patch.dict(
+                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
+                ),
+            ):
+                _assert_write_door_closed(lambda: codex_collect.main([]), event_path, "codex-collect")
+    finally:
+        codex_collect.markers.set_mark_dir(old_mark_dir)
+        codex_collect.MIN_KB = old_min_kb
+        codex_collect.STABLE_AGE_S = old_stable_age
+        codex_collect.LIMIT = old_limit
+
+
 if __name__ == "__main__":
+    test_claude_collector_exits_1_and_logs_failed_when_the_write_door_is_closed()
+    test_kimi_collector_exits_1_and_logs_failed_when_the_write_door_is_closed()
+    test_codex_collector_exits_1_and_logs_failed_when_the_write_door_is_closed()
     test_claude_backfill_does_not_claim_to_be_a_session_end()
     test_kimi_collector_fails_when_distill_fails()
+    test_claude_marked_respects_a_fresh_retry_marker()
     test_claude_marked_excludes_dead_lettered_session()
     test_kimi_marked_excludes_dead_lettered_session()
     test_claude_collector_run_makes_no_sync_request()

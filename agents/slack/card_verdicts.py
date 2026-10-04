@@ -16,6 +16,7 @@ from typing import Any
 
 from card_types import (
     CHOICES,
+    DELEGATE,
     NO_CURRENT_CLAIM,
     ButtonVerdict,
     Confirmation,
@@ -192,7 +193,9 @@ def parse_action_common(payload: dict, *, owner_id: str | None) -> tuple[tuple[i
     except ValueError:
         return Rejected(reason=f"unknown action_id {action_id!r}")
     choice = parts[2]
-    if choice not in CHOICES:
+    # DELEGATE rides the wire because the review lane's buttons emit it; which lane may use
+    # it is gated in card_press.parse_press, and the advice-era parse_action below refuses it.
+    if choice not in (*CHOICES, DELEGATE):
         return Rejected(reason=f"unknown choice {choice!r}")
     if idx < 0:
         return Rejected(reason=f"no proposal {idx}")
@@ -222,6 +225,10 @@ def parse_action(
     if isinstance(parsed, Rejected):
         return parsed
     (idx, choice), user = parsed
+    if choice not in CHOICES:
+        # DELEGATE reached the wire for the review lane's buttons; this advice-era verdict
+        # shape has no row that renders it.
+        return Rejected(reason=f"unknown choice {choice!r}")
     if idx >= n_total:
         return Rejected(reason=f"no proposal {idx}")
     return ButtonVerdict(idx=idx, choice=choice, user=user, at=at or datetime.now(UTC).isoformat())

@@ -135,10 +135,10 @@ def mark_retry(session_id: str, reason: str = "") -> int:
 
 
 def mark_pending(session_id: str) -> None:
-    """Write a plain pending marker and remove done/retry/dead markers."""
-    ts, pending, retry, dead = _paths(session_id)
+    """Write a plain pending marker and remove done/dead markers. A retry marker stays: it holds the attempt count."""
+    ts, pending, _retry, dead = _paths(session_id)
     _ensure_dir()
-    _transition_marker(pending, (ts, retry, dead), str(time.time()))
+    _transition_marker(pending, (ts, dead), str(time.time()))
 
 
 def is_done(session_id: str) -> bool:
@@ -184,40 +184,3 @@ def done_time(session_id: str) -> float | None:
         return os.path.getmtime(ts)
     except OSError:
         return None
-
-
-# ─────────────────────────────────────────────────────────────
-# hermes ingest-worker pending marker (carries extra metadata)
-# ─────────────────────────────────────────────────────────────
-
-
-def ingest_pending_path(session_id: str) -> str:
-    """Path to the ingest-worker's pending marker for ``session_id``."""
-    return _paths(session_id)[1]
-
-
-def write_ingest_pending(session_id: str, before: int, attempts: int) -> None:
-    """Write the ingest-worker's pending marker with ``(sid, before, attempts)``."""
-    ts, path, retry, _dead = _paths(session_id)
-    _ensure_dir()
-    _transition_marker(path, (ts, retry), f"{session_id}\n{before}\n{attempts}")
-
-
-def read_ingest_pending(session_id: str) -> tuple[str, int, int] | None:
-    """Parse the ingest-worker's pending marker. Return None if absent/corrupt."""
-    _, path, _, _ = _paths(session_id)
-    try:
-        with open(path, encoding="utf-8") as f:
-            parts = f.read().strip().split("\n")
-        sid = parts[0]
-        before = int(parts[1].strip())
-        attempts = int(parts[2].strip()) if len(parts) > 2 else 0
-        return sid, before, attempts
-    except Exception:
-        return None
-
-
-def remove_pending(session_id: str) -> None:
-    """Remove any pending marker for ``session_id``."""
-    _, path, _, _ = _paths(session_id)
-    _remove_marker(path)

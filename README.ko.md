@@ -64,7 +64,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 | **자동 (세션 종료 시)** | SessionEnd 훅 (`install.sh`가 설치) | 모든 Claude Code / Kimi 세션 — `hooks/distill-session.py`가 트랜스크립트를 증류해 `remember`합니다. 짝이 되는 `UserPromptSubmit` 훅(`recall.py`)이 관련 과거 메모리를 새 프롬프트에 자동 주입합니다. |
 | **자동 (Codex 워커)** | 호스트 launchd/cron 워커 (`install.sh`가 설치) | Codex에는 SessionEnd 훅이 없습니다. 호스트 워커가 20분마다 `~/.codex/sessions/**/*.jsonl`을 스캔하고, 아직 쓰이는 중인 transcript와 실제 subagent rollout은 건너뛰며, 적재 가능한 transcript를 같은 `remember` 경로로 저장합니다. `hermes-agent`가 켜져 있으면 `codex-memory-ingest-worker`도 함께 설치됩니다. 둘 다 `make doctor`로 확인합니다. |
 | **과거 세션 백필** | `make collect [N=20]` | 설치 직후, 비어 있는 vault를 `~/.claude/projects` 기록으로 채울 때. 최신순, 멱등(세션별 마커로 이미 증류한 건 건너뜀), 한 번에 `N`개만 처리해 CPU를 독점하지 않음. |
-| **지금 바로 (세션 안 끝내고)** | `make distill-now` · `make remember M="…"` | 세션을 끝내지 않고 즉시 적재할 때. `distill-now`는 **현재** 트랜스크립트를 그때그때 다시 증류하고 마커를 남기지 않으므로, 세션 종료 시의 정상 적재도 그대로 동작합니다(초기 노트 + 최종 노트가 함께 생길 수 있음). `remember`는 직접 작성한 노트를 저장합니다. |
+| **지금 바로 (세션 안 끝내고)** | `make distill-now` · `make remember M="…"` | 세션을 끝내지 않고 즉시 적재할 때. `distill-now`는 **현재** 트랜스크립트를 큐에 넣고 hermes(`boring-agent`)가 바로 비우게 하므로 hermes 가 떠 있어야 합니다. 세션 종료 시의 정상 적재도 그 뒤에 그대로 동작합니다(초기 노트 + 최종 노트가 함께 생길 수 있음). `remember`는 직접 작성한 노트를 저장합니다. |
 
 ### 훅 수동 연결
 
@@ -73,7 +73,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 ```bash
 python3 agents/shared/agent_wiring.py --install \
   --boring-home ~/oh-my-boring --server-name ohmyboring \
-  --server-url http://localhost:7700/mcp
+  --server-url http://localhost:7710/mcp
 ```
 
 이 명령은 Claude/Kimi 훅, Cursor/Codex MCP 항목, Codex 호스트 워커, 그리고 `hermes-agent`가 켜진 경우 Hermes cron 워커를 설정합니다. Claude만 직접 편집하려면 `~/.claude/settings.json`에 `python3 ~/oh-my-boring/hooks/distill-session.py`를 실행하는 `SessionEnd` 훅과 `recall.py`를 실행하는 `UserPromptSubmit` 훅을 추가합니다.
@@ -236,7 +236,7 @@ make readiness
 | `BORING_EVENT_LOG` | 로컬 NDJSON fallback 스풀; 기본값 `~/.cache/oh-my-boring/events.ndjson` |
 | `BORING_EVENT_SINK` | 이벤트 sink 모드: `db`(기본), `spool`, `both`. `db`는 엔진 DB에 먼저 쓰고 실패 시에만 스풀 |
 | `BORING_EVENT_SPOOL` | fallback 스풀 정책: `on_failure`(DB 사용 시 기본), `always`, `off` |
-| `BORING_EVENT_SINK_URL` | 선택적 DB 이벤트 엔드포인트; 기본값은 `$BORING_URL/events` |
+| `BORING_EVENT_SINK_URL` | 선택적 DB 이벤트 엔드포인트; 기본값은 문의 `/events`(`$BORING_DOOR_URL/events`) |
 | `BORING_EVENT_DB_MIRROR` | 레거시 호환 alias; `0`/`false`/`off`는 `BORING_EVENT_SINK=spool`, `1`/`true`/`on`은 `both` |
 | `BORING_EVENT_RECENT_HOURS` | `make readiness`가 보는 최근 이벤트 범위; 기본값 `24` |
 | `BORING_READINESS_NOTE_MAX_HOURS` | 브리핑 readiness가 허용하는 최신 노트 freshness 범위; 기본값 `48` |
@@ -341,20 +341,20 @@ COLLECT_LIMIT=20 python3 agents/codex/collect-sessions.py
 
 ```bash
 # 세션 시작용 구조화 컨텍스트 카드 (BORING_VECTOR=off에서도 동작)
-curl -s -X POST http://localhost:7700/context \
+curl -s -X POST http://localhost:7710/context \
   -H 'content-type: application/json' \
   -d '{"project":"omb","max_items":5}' | jq .
 
 # 주간 브리핑 (BORING_VECTOR=on 필요)
-curl -s -X POST http://localhost:7700/weekly \
+curl -s -X POST http://localhost:7710/weekly \
   -H 'content-type: application/json' \
   -d '{"project":"omb"}' | jq .
 
 # Slack으로 나갈 아침 브리핑 텍스트 미리보기
-BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
+python3 agents/hermes/briefing.py
 
 # Stalled register — 7일 이상 멈춘 항목 (BORING_VECTOR=on 필요)
-curl -s -X POST http://localhost:7700/stalled \
+curl -s -X POST http://localhost:7710/stalled \
   -H 'content-type: application/json' \
   -d '{"project":"omb","older_than_days":7}' | jq .
 ```
@@ -394,7 +394,7 @@ Jira 티켓 PROJ-1234 <!-- pii-allow: internal-ticket --> 는 공개입니다.
 ### MCP tool 호출 예시 (raw JSON-RPC)
 
 ```bash
-curl -s -X POST http://localhost:7700/mcp \
+curl -s -X POST http://localhost:7710/mcp \
   -H 'content-type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -432,12 +432,12 @@ curl -s -X POST http://localhost:7700/mcp \
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 적재 워커와 정기 브리핑 실행 |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 수동 | 오래된 Claude Code 세션 lazy 백필 |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 수동 | 오래된 Kimi Code 세션 lazy 백필 |
-| shared | `agents/shared/boring_config.py` | 어댑터 import | `boring.json` 정책 로더 |
+| shared | `src/ohmyboring/config.py` | 어댑터 import | `boring.json` 정책 로더 |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | 활성화된 에이전트의 hook/MCP 설정을 idempotent하게 구성 |
 
 ### 소비 엔드포인트
 
-메모리는 HTTP 엔드포인트나 MCP 서버(`http://localhost:7700/mcp`)로 접근할 수 있습니다:
+메모리는 HTTP 엔드포인트나 MCP 서버(`http://localhost:7710/mcp`)로 접근할 수 있습니다:
 
 | 엔드포인트 / MCP tool | 용도 | 벡터 백엔드 |
 |---|---|---|
@@ -476,7 +476,7 @@ curl -s -X POST http://localhost:7700/mcp \
 MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니다. 이 repo는 Claude Code, Cursor, Windsurf, Claude Desktop이 모두 읽는 표준 **`.mcp.json`**(root key `mcpServers`)을 제공합니다:
 
 ```json
-{ "mcpServers": { "ohmyboring": { "type": "http", "url": "http://localhost:7700/mcp" } } }
+{ "mcpServers": { "ohmyboring": { "type": "http", "url": "http://localhost:7710/mcp" } } }
 ```
 
 `install.sh`가 자동으로 배선하는 것:
@@ -486,7 +486,7 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 
 그 외 에이전트는 루트 `.mcp.json`을 알맞은 위치로 복사하거나(예: Claude Desktop은 `~/.claude/mcp.json`, Kimi Code MCP는 `~/.kimi-code/mcp.json`) 에이전트 CLI로 HTTP MCP 서버를 추가하면 됩니다.
 
-(VS Code Copilot은 root key `servers`를 쓰는 `.vscode/mcp.json`을 사용합니다. CLI 대안: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`. compose sibling 컨테이너는 `http://boring-drudge:7700/mcp`로 접근합니다.)
+(VS Code Copilot은 root key `servers`를 쓰는 `.vscode/mcp.json`을 사용합니다. CLI 대안: `claude mcp add --transport http --scope project ohmyboring http://localhost:7710/mcp`. compose sibling 컨테이너는 `http://boring-door:7710/mcp`로 접근합니다.)
 
 사용 가능한 tools (24개): `recall` · `neighbors` · `claims`(기억 검색) · `code_search` · `code_symbol` · `code_index_status`(별도 AST 코드 코퍼스) · `ask` · `brief` · `weekly_brief` · `project_status`(생성 — LLM 실행) · `decisions` · `risks` · `next_actions` · `stalled` · `recurrences`(레지스터 — 행 반환, LLM 없음) · `context` · `corpus_status` · `events` · `config_get`(구조화 / introspection) · `remember` · `forget` · `classify_repo` · `sync`(쓰기 / 유지보수) · `verdict`(걸어준 노트에 대한 판정).
 
@@ -511,7 +511,7 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 MCP 호출 예시 (HTTP 위의 raw JSON-RPC):
 
 ```bash
-curl -s -X POST http://localhost:7700/mcp \
+curl -s -X POST http://localhost:7710/mcp \
   -H 'content-type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -532,7 +532,7 @@ curl -s -X POST http://localhost:7700/mcp \
 
 [hermes-agent](https://hermes-agent.org)는 서드파티 자율 supervisor입니다. Slack, 오케스트레이션, cron 기반 백필을 ohmyboring의 MCP 백엔드로 구동할 수 있습니다. 이미지를 별도로 빌드하면 `make up`이 자동으로 감지합니다.
 
-설정은 hermes-agent 프로젝트의 **자체 문서** 기준입니다(여기서는 범위 밖) — `~/.hermes/config.yaml`을 ohmyboring의 MCP(`http://boring-drudge:7700/mcp`)로 향하게 하면 됩니다. ohmyboring이 제공하는 구성은 이를 Slack assistant로 연결하는 것까지이며, 그 이상으로 쓰려면 이미지를 직접 빌드하거나 수정하세요.
+설정은 hermes-agent 프로젝트의 **자체 문서** 기준입니다(여기서는 범위 밖) — `~/.hermes/config.yaml`을 ohmyboring의 MCP(`http://boring-door:7710/mcp`)로 향하게 하면 됩니다. ohmyboring이 제공하는 구성은 이를 Slack assistant로 연결하는 것까지이며, 그 이상으로 쓰려면 이미지를 직접 빌드하거나 수정하세요.
 
 ---
 

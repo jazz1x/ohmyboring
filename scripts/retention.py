@@ -28,7 +28,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared"))
-import boring_config  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "src"))
+from ohmyboring import config as boring_config  # noqa: E402
 
 DEFAULT_PROCESSED_DAYS = 30
 DEFAULT_UNPROCESSED_DAYS = 90

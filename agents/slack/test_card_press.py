@@ -128,6 +128,13 @@ class ValueRoundTripTests(unittest.TestCase):
         self.assertEqual(cv.note_path(cv.note_label(path)), path)
 
 
+def _repair_reviewed(choice: str) -> cc.Record:
+    return cc.Record(
+        event="repair_reviewed",
+        fields={"card_ts": CARD_TS, "idx": 0, "choice": choice, "subject": "foodspring-front"},
+    )
+
+
 class EffectsTableTests(unittest.TestCase):
     """줄 × 선택 한 칸씩 — card.py와 다른 프로세스가 공유하는 표 전부가 여기 있다.
     used/contested 를 바꾸는 변이는 이 클래스의 시험이 잡는다."""
@@ -135,8 +142,8 @@ class EffectsTableTests(unittest.TestCase):
     def test_repair_lane(self):
         for choice, expected in (
             ("do", [cc.ExecuteRepair(subject="foodspring-front")]),
-            ("defer", []),
-            ("drop", []),
+            ("defer", [_repair_reviewed("defer")]),
+            ("drop", [_repair_reviewed("drop")]),
         ):
             press = cc.RepairPress(
                 idx=0,
@@ -204,6 +211,201 @@ class EffectsTableTests(unittest.TestCase):
             cc.Consumption(session="sess-agent-1", kind="used", paths=["/vault/wiki/wiki-0700.md"]),
         )
 
+    def test_review_lane_delegate_writes_the_agent_judge_never_owner(self):
+        # 맡길게요: 모델 판정을 그대로 받는다 — 판정한 세션에 모델이 정한 종류의 간선이되
+        # judge 는 agent:delegated, 사건에는 판정 종류와 이유 한 줄. owner 를 쓰는 변이와
+        # 낱말 표지(proposed kind)를 그대로 도장 찍는 변이는 이 시험이 빨갛게 끝낸다.
+        press = cc.ReviewPress(
+            idx=2,
+            choice="delegate",
+            user=OWNER,
+            card_ts=CARD_TS,
+            channel=CARD_CH,
+            session="sess-agent-1",
+            note="wiki-0700",
+            kind="contested",
+        )
+        # 모델이 '맞다' — 판정 종류는 제안 그대로
+        effects = cp.effects(press, delegated=cc.DelegatedJudgment(kind="contested", reason="모델 이유"))
+        self.assertEqual(
+            effects,
+            [
+                cc.Consumption(
+                    session="sess-agent-1",
+                    kind="contested",
+                    paths=["/vault/wiki/wiki-0700.md"],
+                    judge="agent:delegated",
+                ),
+                cc.Record(
+                    event="verdict_reviewed",
+                    fields={
+                        "session_id": "sess-agent-1",
+                        "note": "/vault/wiki/wiki-0700.md",
+                        "proposed_kind": "contested",
+                        "card_ts": CARD_TS,
+                        "choice": "delegate",
+                        "judge": "agent:delegated",
+                        "kind": "contested",
+                        "reason": "모델 이유",
+                    },
+                ),
+            ],
+        )
+        consumption = effects[0]
+        self.assertEqual(consumption.judge, "agent:delegated")
+        self.assertNotEqual(consumption.judge, "owner")
+        # 모델이 '틀리다' — proposed kind 과 다른 간선: proposed 를 도장 찍는 변이는 여기서 갈린다
+        flipped = cp.effects(press, delegated=cc.DelegatedJudgment(kind="used", reason="실제로는 쓰였다"))
+        self.assertEqual(flipped[0].kind, "used")
+        self.assertEqual(flipped[1].fields["kind"], "used")
+        # 판정 값 없는 delegate 누름은 표를 부르는 쪽의 버그 — loud 하게 거절
+        with self.assertRaises(ValueError):
+            cp.effects(press)
+
+    def test_review_lane_delegate_failure_leaves_no_edge_and_one_event(self):
+        # 모델이 못 답하면 판정을 남기지 않는다 — 간선 0, 사건 한 줄에 그 사실. 조용히
+        # 낱말 표지로 되돌아가는 변이(제안 종류의 간선을 놓는 변이)는 여기서 잡힌다.
+        press = cc.ReviewPress(
+            idx=2,
+            choice="delegate",
+            user=OWNER,
+            card_ts=CARD_TS,
+            channel=CARD_CH,
+            session="sess-agent-1",
+            note="wiki-0700",
+            kind="used",
+        )
+        effects = cp.effects(press, delegated=cc.DelegationFailed(reason="모델 답이 JSON 이 아니다"))
+        self.assertEqual(
+            effects,
+            [
+                cc.Record(
+                    event="verdict_reviewed",
+                    fields={
+                        "session_id": "sess-agent-1",
+                        "note": "/vault/wiki/wiki-0700.md",
+                        "proposed_kind": "used",
+                        "card_ts": CARD_TS,
+                        "choice": "delegate",
+                        "judge": "agent:delegated",
+                        "error": "모델 답이 JSON 이 아니다",
+                    },
+                )
+            ],
+        )
+        self.assertFalse(any(isinstance(e, cc.Consumption) for e in effects))
+
+    def test_review_lane_hold_leaves_no_edge_and_one_event(self):
+        # 보류: 판정을 남기지 않는다 — 간선 없이 사건 한 줄, 묶인 세션 전부가 그 한 줄에 실린다.
+        press = cc.ReviewPress(
+            idx=2,
+            choice="defer",
+            user=OWNER,
+            card_ts=CARD_TS,
+            channel=CARD_CH,
+            session="sess-agent-1",
+            sessions=["sess-agent-1", "sess-agent-2"],
+            note="wiki-0700",
+            kind="used",
+        )
+        self.assertEqual(
+            cp.effects(press),
+            [
+                cc.Record(
+                    event="verdict_reviewed",
+                    fields={
+                        "session_id": "sess-agent-1",
+                        "sessions": ["sess-agent-1", "sess-agent-2"],
+                        "note": "/vault/wiki/wiki-0700.md",
+                        "proposed_kind": "used",
+                        "card_ts": CARD_TS,
+                        "choice": "defer",
+                    },
+                )
+            ],
+        )
+
+    def test_a_grouped_press_fans_out_to_every_session(self):
+        # 묶인 줄의 판정은 묶인 짝 전부에 간다 — 작으면 한 번에 같이 간다.
+        base = dict(
+            idx=2,
+            user=OWNER,
+            card_ts=CARD_TS,
+            channel=CARD_CH,
+            session="sess-agent-1",
+            sessions=["sess-agent-1", "sess-agent-2"],
+            note="wiki-2498",
+            kind="contested",
+        )
+        path = "/vault/wiki/wiki-2498.md"
+        fields1 = {
+            "session_id": "sess-agent-1",
+            "note": path,
+            "proposed_kind": "contested",
+            "card_ts": CARD_TS,
+        }
+        fields2 = {**fields1, "session_id": "sess-agent-2"}
+        self.assertEqual(
+            cp.effects(cc.ReviewPress(choice="do", **base)),
+            [
+                cc.Record(event="verdict_reviewed", fields={**fields1, "choice": "agree"}),
+                cc.Record(event="verdict_reviewed", fields={**fields2, "choice": "agree"}),
+            ],
+        )
+        self.assertEqual(
+            cp.effects(cc.ReviewPress(choice="drop", **base)),
+            [
+                cc.Consumption(session="sess-agent-1", kind="used", paths=[path]),
+                cc.Record(event="verdict_reviewed", fields={**fields1, "choice": "flip"}),
+                cc.Consumption(session="sess-agent-2", kind="used", paths=[path]),
+                cc.Record(event="verdict_reviewed", fields={**fields2, "choice": "flip"}),
+            ],
+        )
+        # 맡긴 판정은 묶인 세션 전부에 가고, 판정 종류·이유는 모델의 것이 그대로다
+        judgment = cc.DelegatedJudgment(kind="used", reason="모델이 본 이유")
+        self.assertEqual(
+            cp.effects(cc.ReviewPress(choice="delegate", **base), delegated=judgment),
+            [
+                cc.Consumption(session="sess-agent-1", kind="used", paths=[path], judge="agent:delegated"),
+                cc.Record(
+                    event="verdict_reviewed",
+                    fields={
+                        **fields1,
+                        "choice": "delegate",
+                        "judge": "agent:delegated",
+                        "kind": "used",
+                        "reason": "모델이 본 이유",
+                    },
+                ),
+                cc.Consumption(session="sess-agent-2", kind="used", paths=[path], judge="agent:delegated"),
+                cc.Record(
+                    event="verdict_reviewed",
+                    fields={
+                        **fields2,
+                        "choice": "delegate",
+                        "judge": "agent:delegated",
+                        "kind": "used",
+                        "reason": "모델이 본 이유",
+                    },
+                ),
+            ],
+        )
+        # 묶이지 않은 옛 값(세션 하나, sessions 없음)은 그대로 한 세션에만 간다.
+        legacy = cc.ReviewPress(
+            idx=2,
+            choice="do",
+            user=OWNER,
+            card_ts=CARD_TS,
+            channel=CARD_CH,
+            session="sess-agent-1",
+            note="wiki-2498",
+            kind="contested",
+        )
+        self.assertEqual(
+            cp.effects(legacy),
+            [cc.Record(event="verdict_reviewed", fields={**fields1, "choice": "agree"})],
+        )
+
 
 class RejectedTests(unittest.TestCase):
     """믿을 수 없는 누름은 언제나 값으로 돌아온다 — 예외는 없다. 주인 검사를 빼는
@@ -230,11 +432,18 @@ class RejectedTests(unittest.TestCase):
         self.assertIsInstance(out, cc.Rejected)
         self.assertIn("unknown lane", out.reason)
 
-    def test_a_review_lane_defer_is_rejected(self):
-        # 검토 칸엔 맞음/뒤집기 두 버튼뿐이니, defer 누름은 가짜다 — 실행하면 안 된다.
-        out = cp.parse_press(_payload("card:2:defer", self.values["card:2:do"]), owner_id=OWNER)
+    def test_a_delegate_press_is_refused_outside_the_review_lane(self):
+        # delegate 는 검토 칸의 넷째 버튼에서만 온다 — execute·조언 칸에서 지어낸 delegate
+        # 누름은 받지 않는다. 검토 칸의 defer(보류)는 온전한 누름이다.
+        out = cp.parse_press(_payload("card:1:delegate", self.values["card:1:do"]), owner_id=OWNER)
         self.assertIsInstance(out, cc.Rejected)
-        self.assertEqual(out.reason, "review lane has no defer")
+        self.assertEqual(out.reason, "advice lane has no delegate")
+        out = cp.parse_press(_payload("card:0:delegate", self.values["card:0:do"]), owner_id=OWNER)
+        self.assertIsInstance(out, cc.Rejected)
+        self.assertEqual(out.reason, "repair lane has no delegate")
+        out = cp.parse_press(_payload("card:2:defer", self.values["card:2:do"]), owner_id=OWNER)
+        self.assertIsInstance(out, cc.ReviewPress)
+        self.assertEqual(out.choice, "defer")
 
     def test_a_weird_envelope_is_rejected_not_raised(self):
         out = cp.parse_press({"type": "reaction_added"}, owner_id=OWNER)

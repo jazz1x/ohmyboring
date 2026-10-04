@@ -84,6 +84,13 @@ class ParseActionTests(unittest.TestCase):
         out = cv.parse_action(_payload("reaction:x"), owner_id=OWNER, n_total=3)
         self.assertIsInstance(out, cc.Rejected)
 
+    def test_delegate_is_refused_by_the_advice_era_parser(self):
+        # delegate 는 전선에서 검토 칸을 위해 열리지만, 이 조언 시대 판정 모양에는 그 줄이
+        # 없다 — 못 믿는 누름은 값으로 돌아온다.
+        out = cv.parse_action(_payload("card:1:delegate"), owner_id=OWNER, n_total=3)
+        self.assertIsInstance(out, cc.Rejected)
+        self.assertEqual(out.reason, "unknown choice 'delegate'")
+
     def test_missing_proposal_is_rejected(self):
         out = cv.parse_action(_payload("card:7:do"), owner_id=OWNER, n_total=3)
         self.assertIsInstance(out, cc.Rejected)

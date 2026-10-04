@@ -6,9 +6,14 @@ cd "$(dirname "$0")"
 
 [ -f .env ] || cp .env.example .env  # Slack tokens only — the core runs without .env
 chmod 600 .env 2>/dev/null || true
-# Create policy config from example if missing. User edits it to set language, repo rules, source dirs.
-[ -f boring.json ] || cp boring.example.json boring.json
-chmod 644 boring.json 2>/dev/null || true
+# Policy config lives in config/boring.json (edit that file) — the door and hermes mount the config/
+# folder, not the repo root. The root boring.json is a link to it for the engine and host tools.
+# An older install keeps a plain root file: it moves in once (mv keeps the inode a running engine holds).
+mkdir -p config
+if [ -f boring.json ] && [ ! -L boring.json ] && [ ! -e config/boring.json ]; then mv boring.json config/boring.json; fi
+[ -f config/boring.json ] || cp boring.example.json config/boring.json
+[ -L boring.json ] || ln -s config/boring.json boring.json
+chmod 644 config/boring.json 2>/dev/null || true
 # Source .env so that variables like BORING_VECTOR are visible to this script.
 set -a; . .env; set +a
 
@@ -46,7 +51,7 @@ fi
 # skip the agent on purpose.
 # Compose SERVICE name = boring-agent; the IMAGE it runs is the external `hermes-agent` build.
 AGENT="boring-agent"
-HERMES_IMAGE=$(sed -n 's/^ *image: \(hermes-agent:[^ ]*\).*/\1/p' docker-compose.yml)
+HERMES_IMAGE=$(sed -n 's/^ *HERMES_BASE: \(hermes-agent:[^ ]*\).*/\1/p' docker-compose.yml)
 if [ -n "${BORING_CORE_ONLY:-}" ] || ! docker image inspect "$HERMES_IMAGE" >/dev/null 2>&1; then
   AGENT=""
   if [ -z "${BORING_CORE_ONLY:-}" ]; then
@@ -54,7 +59,7 @@ if [ -n "${BORING_CORE_ONLY:-}" ] || ! docker image inspect "$HERMES_IMAGE" >/de
   ⓘ hermes-agent image not found — starting CORE ONLY (ohmyboring RAG engine). `make ask` works.
     The optional Slack/agent layer is third-party — build the `hermes-agent` image per its
     official docs (https://hermes-agent.org), point its ~/.hermes/config.yaml at ohmyboring's MCP
-    (http://boring-drudge:7700/mcp), then re-run `make up`. See README "Optional: hermes-agent".
+     (http://boring-door:7710/mcp), then re-run `make up`. See README "Optional: hermes-agent".
     Set BORING_CORE_ONLY=1 to skip this message intentionally.
 MSG
   fi
@@ -111,6 +116,6 @@ cat <<'EOF'
   make sync          deterministic re-ingest of the vault (embed→graph→relates_to)
   make logs          engine logs
   The core self-augmentation loop runs without hermes-agent. If built, hermes-agent can drive
-  ohmyboring over MCP (:7700/mcp) for advanced orchestration, recall, and skill creation.
+  ohmyboring over MCP (:7710/mcp) for advanced orchestration, recall, and skill creation.
   (To use Slack, fill in tokens in .env and run docker compose up -d hermes-agent)
 EOF

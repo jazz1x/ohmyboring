@@ -14,9 +14,12 @@ import urllib.request
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-import omb_env  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 from distill_core import repo_slug  # noqa: E402
-from drudge_client import DrudgeClient  # noqa: E402
+
+from ohmyboring import config as omb_env  # noqa: E402
+from ohmyboring.adapters.engine import DrudgeClient  # noqa: E402
+from ohmyboring.result import Err, Ok  # noqa: E402
 
 
 def _is_injection(data: dict) -> bool:
@@ -80,12 +83,14 @@ def main() -> None:
     project = repo_slug(cwd)
     client = DrudgeClient(timeout=8, retries=1)
 
-    try:
-        resp = client.context(project=project or None, max_items=5)
-    except Exception as e:
-        print(f"[omb-start-recall] context failed: {e}", file=sys.stderr)
-        return
+    match client.context(project=project or None, max_items=5):
+        case Ok(resp):
+            _emit(resp, project)
+        case Err(failure):
+            print(f"[omb-start-recall] context failed: {failure}", file=sys.stderr)
 
+
+def _emit(resp: dict[str, Any], project: str) -> None:
     sections: list[str] = []
     try:
         sections.append(_approved_section(omb_env.door_url().rstrip("/")))

@@ -18,15 +18,18 @@ Coverage on purpose, each a visible raise rather than a silent fallback:
              raises instead of passing for success. The first put stamps `created_at`
              (UTC ISO) into the claim value; a re-put inherits it from the current
              value, so get's created_at is when the record was born, not last written.
-  - search → with a query: ("boring", ...) only, over the engine's /search via
-             BoringRetriever (nothing re-implemented here); any other prefix is next wheel.
-             Without a query: door GET /claim-sources, the current records whose
+  - search → with a query: ("boring", ...) only, over the door's /search via
+             BoringRetriever (the door answers or proxies — the engine is never
+             addressed directly); a filter carries only the engine's knob handles
+             (claims·max_tokens·related·related_heads, non-negative ints) and anything
+             else raises before a request leaves. Without a query: door GET
+             /claim-sources, the current records whose
              namespace starts with the prefix, key order, offset/limit pages — what
              Deep Agents' StoreBackend calls for ls/grep/glob
   - delete / list_namespaces / ttl / index → refused or next wheel, never faked
 
 Run against the parity copy only: scripts/parity-harness.sh up, then
-BoringStore(engine_url="http://127.0.0.1:7701", door_url="http://127.0.0.1:7711").
+BoringStore(door_url="http://127.0.0.1:7711").
 """
 
 from __future__ import annotations
@@ -60,6 +63,26 @@ from retriever import BoringRetriever, _post_json  # noqa: E402
 
 _TIMEOUT = 30.0
 _PREDICATE = "langgraph-store-value"
+
+#: The only filter keys a query search accepts — the engine's own /search knob handles.
+_FILTER_KNOBS = frozenset(("claims", "max_tokens", "related", "related_heads"))
+
+
+def _search_knobs(filter: dict[str, Any] | None) -> dict[str, int]:
+    """A search filter is exactly the engine's knob handles — claims, max_tokens, related,
+    related_heads — each a non-negative int. Anything else is a caller bug and raises here,
+    before any request leaves, never dropped quietly. None means no knobs: the plain query
+    search of before, with nothing invented on the caller's behalf."""
+    if filter is None:
+        return {}
+    knobs: dict[str, int] = {}
+    for key, value in filter.items():
+        if key not in _FILTER_KNOBS:
+            raise ValueError(f"unknown search filter {key!r} — allowed: {sorted(_FILTER_KNOBS)}")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"search filter {key!r} must be a non-negative int, got {value!r}")
+        knobs[key] = value
+    return knobs
 
 
 def _subject_for(namespace: tuple[str, ...], key: str) -> str:
@@ -117,10 +140,15 @@ def _claim_source(door_url: str, subject: str) -> dict[str, Any] | None:
 
 
 class BoringStore(BaseStore):
-    """engine_url and door_url, no defaults — the caller names both ends explicitly."""
+    """door_url only, no default — the caller names the door.
 
-    def __init__(self, engine_url: str, door_url: str):
-        self.engine_url = engine_url.rstrip("/")
+    Every path here is a door path already (claim-source/claim-sources reads, /search via
+    BoringRetriever); the one write (put → /remember) joined them at E4-α — the door relays
+    the engine's answer byte-for-byte, so a store write wears the same owner-token and
+    duplicate rules through one face like every other remember (wiki-1736).
+    """
+
+    def __init__(self, door_url: str):
         self.door_url = door_url.rstrip("/")
 
     def batch(self, ops: Iterable[Op]) -> list[Result]:
@@ -185,7 +213,7 @@ class BoringStore(BaseStore):
         }
         if current_note is not None:
             body["supersedes"] = [current_note]
-        resp = _post_json(f"{self.engine_url}/remember", body)
+        resp = _post_json(f"{self.door_url}/remember", body)
         # Since r4.1 a corrected note always lands: the engine skips the duplicate gate
         # for anything that names what it supersedes. A duplicate answer here means the
         # gate fired anyway and the write was swallowed — that is a failure, not a quiet
@@ -195,8 +223,7 @@ class BoringStore(BaseStore):
         return None
 
     def _search(self, op: SearchOp) -> list[SearchItem]:
-        if op.filter is not None:
-            raise ValueError("search filters are not supported — next wheel")
+        knobs = _search_knobs(op.filter)
         if op.query is None and op.namespace_prefix[:1] == ("boring",):
             raise NotImplementedError("listing ('boring', ...) without a query is next wheel")
         if op.query is None:
@@ -208,7 +235,7 @@ class BoringStore(BaseStore):
         if op.offset:
             raise ValueError("search offset is not supported — next wheel")
         project = op.namespace_prefix[1] if len(op.namespace_prefix) > 1 else None
-        retriever = BoringRetriever(base_url=self.engine_url, max_results=op.limit, project=project)
+        retriever = BoringRetriever(base_url=self.door_url, max_results=op.limit, project=project, **knobs)
         docs = retriever.invoke(op.query)
         now = datetime.now(UTC)
         return [

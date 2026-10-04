@@ -12,23 +12,20 @@ import sys
 
 # Allow import of shared agent policy library regardless of how this script is invoked.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-import boring_config
-import event_log
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
+import distill_queue
 import transcript
-from distill_core import (  # noqa: F401
-    _build_prompt,
-    _call_llm,
-    _call_remember,
-    _distill_resolution,
-    _extract_json,
+from distill_core import (
     _mark,
-    _strip_trailing_metadata,
     _throttled,
-    distill_and_remember,
     git_remote_url,
-    log_skip_event,
     repo_slug,
 )
+
+from ohmyboring import config as boring_config
+from ohmyboring.adapters import events as event_log
+from ohmyboring.distill.resolution_event import log_skip_event
+from ohmyboring.distill.settings import distill_resolution as _distill_resolution
 
 TRANSCRIPT_FORMAT = "codex-jsonl"
 CLAMP = transcript.codex_distill_clamp()
@@ -156,14 +153,9 @@ def main() -> int:
         clamped=was_clamped,
     )
 
-    if distill_and_remember(text, origin, repo, session_id):
-        _mark(session_id)
-        print("[omb-distill-codex] remembered", file=sys.stderr)
-        return 0
-    else:
-        _mark(session_id, retry=True, reason="remember failed")
-        print("[omb-distill-codex] remember failed; marked for retry", file=sys.stderr)
-        return 1
+    distill_queue.enqueue(distill_queue.QueueItem(session_id, "codex", origin, repo, text))
+    print("[omb-distill-codex] queued for hermes", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":

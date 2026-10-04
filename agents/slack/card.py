@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """The morning card — one LangGraph run: read repairs+registers, advise, resolve, post.
 
-`make card` runs g_card once: post the card, print its ts, exit. read_repairs calls the door
-for its top split-subject groups (the execute lane's rows) and yesterday's merged-row count
-for the head line; read_registers calls the door for the active-project list (14d) plus the
-unassigned bucket and reads each one's four registers separately; cross_check checks the
-past 48h of past approvals against the union of today's registers for the card's confirmation
+`make card` runs g_card once: post the card, print its ts, exit. read_repairs scans the
+door's top split-subject groups and keeps only the ones the agent already judged 같은 이름
+or 못 가름 — generic, unjudged, and held groups never reach the owner — plus yesterday's
+merged-row count for the head line; read_registers calls the door for the active-project
+list (14d) plus the unassigned bucket and reads each one's four registers separately;
+cross_check checks the past 48h of past approvals against the union of today's registers
+for the card's confirmation
 line (a door failure leaves an approval unresolved — never a false "already handled"); advise
 walks the merged (project, subject) queue one candidate at a time — priority pairs first —
 searching each subject's past record, with a sufficiency check that refetches the candidate's
@@ -61,8 +63,8 @@ from typing import Any, NamedTuple, TypedDict
 _HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
+sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
 
-import boring_config  # noqa: E402
 import card_advice  # noqa: E402
 import card_live  # noqa: E402
 import card_press  # noqa: E402
@@ -70,10 +72,12 @@ import card_registers  # noqa: E402
 import card_types  # noqa: E402
 import card_verdicts  # noqa: E402
 import card_view  # noqa: E402
-import event_log  # noqa: E402
-import slack_post  # noqa: E402
 from langgraph.graph import START, StateGraph  # noqa: E402
 from langgraph.graph.state import CompiledStateGraph  # noqa: E402
+
+from ohmyboring import config as boring_config  # noqa: E402
+from ohmyboring.adapters import events as event_log  # noqa: E402
+from ohmyboring.adapters import slack as slack_post  # noqa: E402
 
 DEFAULT_MODEL = os.environ.get("CARD_MODEL") or "gemma4:12b"
 # The confirmation window on the card's head line — yesterday's and the day before's approvals.
@@ -171,10 +175,14 @@ class Collaborators(NamedTuple):
     # repair lane keeps working unchanged. repairs(limit) is the door's GET;
     # merged_yesterday is the head line's optional "merged m rows yesterday"; proposed is
     # the review lane's engine read — defaulting to none keeps every pre-lane caller
-    # rendering exactly the card it rendered before.
+    # rendering exactly the card it rendered before. repair_judgments is the lane's agent
+    # judgments keyed by (subject, 정렬된 variants) — defaulting to none renders an empty
+    # lane instead of crashing a caller that never heard of 판정.
     repairs: Callable[[int], dict[str, Any]] = lambda limit: {"groups": [], "total_groups": 0}
     merged_yesterday: Callable[[], int | None] = lambda: None
     proposed: Callable[[int], list[card_types.ProposedVerdict]] = lambda since_hours: []
+    held_repairs: Callable[[], set[str]] = lambda: set()
+    repair_judgments: Callable[[], dict[tuple[str, tuple[str, ...]], card_types.RepairJudgment]] = lambda: {}
 
 
 def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
@@ -195,14 +203,29 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             repairs=card_live._live_repairs,
             merged_yesterday=card_live._live_merged_yesterday,
             proposed=card_live._live_proposed,
+            held_repairs=card_live._held_repair_subjects,
+            repair_judgments=card_live._live_repair_judgments,
         )
 
     def read_repairs(_: CardState) -> dict:
-        """The execute lane's rows — the door's own top groups, plus yesterday's merged-row
-        tally for the head line. A 5xx/unreachable door raises (same principle as /approved):
-        a card that cannot read its own repair queue is the wrong card to send."""
-        payload = collabs.repairs(card_live.REPAIRS_LIMIT)
-        repairs = [card_types.Repair(**group) for group in payload["groups"]]
+        """The execute lane's rows — the door's 상한(REPAIRS_SCAN_LIMIT)만큼 받아 에이전트
+        판정으로 거른다: generic·판정 없음·보류(held)는 빠지고, 같은 이름·못 가름만 이유 한
+        줄과 철자 목록을 달고 오른다. 거른 뒤 3개가 안 차도 실패가 아니다 — 빈 칸이면 칸이
+        안 그려지는 기존 동작 그대로다. A 5xx/unreachable door raises (same principle as
+        /approved): a card that cannot read its own repair queue is the wrong card to send."""
+        held = collabs.held_repairs()
+        payload = collabs.repairs(card_live.REPAIRS_SCAN_LIMIT)
+        judged = collabs.repair_judgments()
+        repairs: list[card_types.Repair] = []
+        for group in payload["groups"]:
+            if len(repairs) >= card_live.REPAIRS_LIMIT:
+                break
+            if group["subject"] in held:
+                continue
+            judgment = judged.get((group["subject"], tuple(sorted(group["variants"]))))
+            if judgment is None or judgment.verdict == "generic":
+                continue
+            repairs.append(card_types.Repair(**group, judgment=judgment))
         return {
             "repairs": repairs,
             "repairs_total_groups": payload["total_groups"],
@@ -412,7 +435,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         lang = state["lang"]
         n_repairs = len(state["repairs"])
         message = collabs.send(
-            card_view.build_blocks(
+            card_view.fit_blocks(
                 state["proposals"],
                 confirmation=state["confirmation"],
                 repairs=state["repairs"],
@@ -420,6 +443,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 merged_yesterday_rows=state["merged_yesterday_rows"],
                 reviews=state["reviews"],
                 lang=lang,
+                note_links=boring_config.note_links(),
             )
         )
         card_ts = message.ts
@@ -546,6 +570,8 @@ def _run_dry() -> int:
         repairs=card_live._live_repairs,
         merged_yesterday=card_live._live_merged_yesterday,
         proposed=card_live._live_proposed,
+        held_repairs=card_live._held_repair_subjects,
+        repair_judgments=card_live._live_repair_judgments,
     )
     graph = build_graph(collabs)
     state = graph.invoke({})

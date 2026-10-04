@@ -18,6 +18,7 @@ reader that the dependency is load-bearing when it is not.
 import ast
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -41,7 +42,11 @@ def _tracked_python() -> list[Path]:
 
 
 def _local_module_names(files: list[Path]) -> set[str]:
-    return {p.stem for p in files} | {p.name.replace("-", "_") for p in files}
+    """A tracked file's stem is a local module, and so is every directory holding an
+    `__init__.py` — the repo's own packages (ohmyboring, ohmyboring_<framework>) are local,
+    not distributions requirements.txt should name."""
+    packages = {p.parent.name for p in files if p.name == "__init__.py"}
+    return {p.stem for p in files} | {p.name.replace("-", "_") for p in files} | packages
 
 
 def _imported_top_level(files: list[Path]) -> dict[str, list[str]]:
@@ -104,8 +109,13 @@ def _declared() -> set[str]:
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
-        declared.add(line.split("==")[0].split(">=")[0].split("[")[0].strip().lower())
-    return declared
+        declared.add(_distribution(line))
+    core = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+    return declared | {_distribution(spec) for spec in core}
+
+
+def _distribution(spec: str) -> str:
+    return spec.split("==")[0].split(">=")[0].split("[")[0].strip().lower()
 
 
 def test_every_third_party_import_is_declared():
@@ -121,7 +131,7 @@ def test_every_third_party_import_is_declared():
         if distribution not in declared:
             undeclared[name] = sorted(set(importers))[:3]
     assert not undeclared, (
-        f"imported but not in requirements.txt: {undeclared}. Declare it, or drop the import — "
+        f"imported but not in requirements.txt or pyproject.toml: {undeclared}. Declare it, or drop the import — "
         "a gate that passes only on a runner that happens to ship it is not passing."
     )
 
@@ -131,7 +141,7 @@ def test_nothing_is_declared_that_nothing_imports():
     imported = {IMPORT_TO_DISTRIBUTION.get(name, name).lower() for name in _imported_top_level(files)}
     unused = _declared() - imported
     assert not unused, (
-        f"declared in requirements.txt but imported nowhere: {sorted(unused)}. "
+        f"declared in requirements.txt or pyproject.toml but imported nowhere: {sorted(unused)}. "
         "A stale declaration reads as load-bearing to whoever installs it next."
     )
 

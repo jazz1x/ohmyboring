@@ -638,6 +638,50 @@ def test_consumption_names_what_was_used_and_what_was_argued_with():
     assert record["hits"][0]["path"] == "/vault/wiki/wiki-0007.md", "the ledger keeps the engine path"
 
 
+def test_consumption_detail_names_the_sentence_that_carried_each_mark():
+    """The review row's 이유 한 줄 is the sentence the scorer caught the mark in: for a used
+    note the sentence echoing its name, for a contested note the sentence holding the
+    contradiction marker. Raw text (not the normalized lowercase the matcher saw), collapsed
+    and capped."""
+    record = uptake_core.injection_record("s1", "why did the pool die", [_hit(), _hit(src="wiki-0099.md")], 3)
+    transcript = (
+        "[user] why did the pool die\n"
+        "[assistant] Let me look first. per wiki-0007 this is the recycled-socket case. "
+        "wiki-0099 is outdated — the pool no longer recycles. Nothing else here.\n"
+    )
+    used, contested, _, reasons = uptake_core.consumption_detail([record], transcript)
+    assert used == ["/vault/wiki/wiki-0007.md", "/vault/wiki/wiki-0099.md"], used
+    assert contested == ["/vault/wiki/wiki-0099.md"], contested
+    assert reasons[("used", "/vault/wiki/wiki-0007.md")] == "per wiki-0007 this is the recycled-socket case"
+    assert reasons[("contested", "/vault/wiki/wiki-0099.md")] == (
+        "wiki-0099 is outdated — the pool no longer recycles"
+    )
+
+    # 어휘가 아니라 표지가 든 문장 — 앞 문장의 낡음 표현은 wiki-0007 이야기가 아니다
+    fixed = "[user] why did the pool die\n[assistant] the outdated pool code was replaced, per wiki-0007.\n"
+    _, _, _, reasons = uptake_core.consumption_detail([record], fixed)
+    assert (
+        reasons[("used", "/vault/wiki/wiki-0007.md")] == "the outdated pool code was replaced, per wiki-0007"
+    )
+
+
+def test_consumption_detail_reason_is_capped_and_may_be_absent():
+    record = uptake_core.injection_record("s1", "why did the pool die", [_hit()], 3)
+    long_sentence = "per wiki-0007 " + "word " * 200 + "here."
+    transcript = f"[user] why did the pool die\n[assistant] {long_sentence}\n"
+    _, _, _, reasons = uptake_core.consumption_detail([record], transcript)
+    reason = reasons[("used", "/vault/wiki/wiki-0007.md")]
+    assert len(reason) <= uptake_core.REASON_SENTENCE_MAX
+    assert reason.endswith("…")
+
+    # 이름도 구문도 울림이 없으면 근거 문장이 없다 — 카드는 근거 없음 한 줄로 정직하게
+    echoless = "[user] why did the pool die\n[assistant] the pool died for its own reasons.\n"
+    assert uptake_core.consumption_detail([record], echoless)[3] == {}
+
+    # consumption() 은 여전히 셋만 돌려준다 — 옛 부르는 쪽 모양 그대로
+    assert len(uptake_core.consumption([record], transcript)) == 3
+
+
 def test_consumption_reads_which_note_replaced_which():
     """`superseded_by` is set on 0 of 1,342 notes because it waited for the distilling LLM to
     emit it. The agent says it in prose instead; English names the newer note first, Korean the

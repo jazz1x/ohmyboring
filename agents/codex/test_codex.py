@@ -183,19 +183,21 @@ def test_success_passes_session_id_to_shared_core():
             mock.patch.object(distill, "git_remote_url", return_value=""),
             mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
             mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
-            mock.patch.object(distill, "_mark") as mark,
-            mock.patch.object(distill, "distill_and_remember", return_value=True) as remember,
+            mock.patch.object(distill.distill_queue, "enqueue") as enqueue,
+            mock.patch("urllib.request.urlopen") as urlopen,
         ):
             rc = distill.main()
 
         assert rc == 0
-        remember.assert_called_once_with(
-            extracted,
+        urlopen.assert_not_called()
+        item = enqueue.call_args.args[0]
+        assert (item.session_id, item.agent, item.origin, item.repo, item.text) == (
+            "codex-abc",
+            "codex",
             "personal",
             "oh-my-boring",
-            "codex-abc",
+            extracted,
         )
-        mark.assert_called_once_with("codex-abc")
     finally:
         os.unlink(path)
 
@@ -230,13 +232,12 @@ def test_codex_distill_clamps_with_ingest_budget():
                     mock.patch.object(distill, "git_remote_url", return_value=""),
                     mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
                     mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
-                    mock.patch.object(distill, "_mark") as mark,
-                    mock.patch.object(distill, "distill_and_remember", return_value=True) as remember,
+                    mock.patch.object(distill.distill_queue, "enqueue") as remember,
                 ):
                     rc = distill.main()
 
                 assert rc == 0
-                remembered_text = remember.call_args.args[0]
+                remembered_text = remember.call_args.args[0].text
                 assert remembered_text.startswith("START-")
                 assert remembered_text.endswith("-END")
                 assert len(remembered_text) < len(extracted)
@@ -248,7 +249,6 @@ def test_codex_distill_clamps_with_ingest_budget():
                 assert event["emitted_chars"] == len(remembered_text)
                 assert event["distill_clamp"] == 80
                 assert event["clamped"] is True
-                mark.assert_called_once_with("codex-abc")
         finally:
             os.unlink(path)
     finally:
@@ -285,13 +285,12 @@ def test_codex_distill_respects_zero_payload_clamp_override():
                     mock.patch.object(distill, "git_remote_url", return_value=""),
                     mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
                     mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
-                    mock.patch.object(distill, "_mark"),
-                    mock.patch.object(distill, "distill_and_remember", return_value=True) as remember,
+                    mock.patch.object(distill.distill_queue, "enqueue") as remember,
                 ):
                     rc = distill.main()
 
                 assert rc == 0
-                assert remember.call_args.args[0] == extracted
+                assert remember.call_args.args[0].text == extracted
                 assert "transcript clamped" not in stderr.getvalue()
                 event = _read_last_event(event_path)
                 assert event["distill_clamp"] == 0
@@ -349,6 +348,18 @@ def test_collect_scan_classifies_queue_marked_rollout_and_subagent():
         collect.INCLUDE_SUBAGENTS = old_include
         collect.INCLUDE_ROLLOUTS = old_include_rollouts
         collect.STABLE_AGE_S = old_stable_age
+
+
+def test_codex_marked_respects_a_fresh_retry_marker():
+    old_mark_dir = collect.markers.MARK_DIR
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            collect.markers.set_mark_dir(d)
+            assert collect._marked("s1") is False
+            collect.markers.mark_retry("codex-s1", reason="x")
+            assert collect._marked("s1") is True
+    finally:
+        collect.markers.set_mark_dir(old_mark_dir)
 
 
 def test_collect_scan_excludes_dead_lettered_sessions_from_queue():
@@ -1050,6 +1061,7 @@ if __name__ == "__main__":
     test_codex_distill_clamps_with_ingest_budget()
     test_codex_distill_respects_zero_payload_clamp_override()
     test_collect_scan_classifies_queue_marked_rollout_and_subagent()
+    test_codex_marked_respects_a_fresh_retry_marker()
     test_collect_scan_excludes_dead_lettered_sessions_from_queue()
     test_collect_scan_can_include_rollouts_without_subagents()
     test_collect_scan_skips_unstable_recent_sessions()

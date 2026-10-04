@@ -156,6 +156,10 @@ case "${1:-}" in
             echo "uptake_self_check=contaminated cross=40/100 rate=0.4000 treatment=45/100"
             exit 1
         fi
+        if [ "${DOCTOR_UPTAKE_SELF_CRASH:-0}" = 1 ]; then
+            echo "ImportError: cannot import name 'UTC' from 'datetime'" >&2
+            exit 1
+        fi
         if [ "${DOCTOR_UPTAKE_SELF_UNKNOWN:-0}" = 1 ]; then
             echo "uptake_self_check=unknown cross=0/0 reason=too_few_sessions_or_transcripts"
             exit 0
@@ -190,7 +194,7 @@ case "${1:-}" in
     echo "fake python3: unmodelled agent_wiring call: $*" >&2
     exit 7
     ;;
-  */event_log.py)
+  */adapters/events.py)
     if [ "${2:-}" = --record ]; then
         if [ -n "${DOCTOR_EVENT_CALLS:-}" ]; then
             printf '%s %s %s\n' "${3:-}" "${4:-}" "${5:-}" >>"$DOCTOR_EVENT_CALLS"
@@ -209,7 +213,7 @@ case "${1:-}" in
         exit 0
     fi
     if [ "${2:-}" = --verdict-spool-loss ]; then
-        exec "${REAL_PY:-/usr/bin/python3}" "${ROOT:?}/agents/shared/event_log.py" --verdict-spool-loss
+        exec "${REAL_PY:-/usr/bin/python3}" "${ROOT:?}/src/ohmyboring/adapters/events.py" --verdict-spool-loss
     fi
     echo "resolution_quality recent_failures=0 log=/tmp/events.ndjson"
     exit 0
@@ -258,9 +262,9 @@ make_case() {
     home="$case_dir/home"
     boring="$case_dir/boring"
 
-    mkdir -p "$home/.claude" "$home/.cache/boring-distill" "$boring/vault/wiki" "$boring/agents/codex" "$boring/agents/shared" "$boring/scripts"
+    mkdir -p "$home/.claude" "$home/.cache/boring-distill" "$boring/vault/wiki" "$boring/agents/codex" "$boring/agents/shared" "$boring/src/ohmyboring/adapters" "$boring/scripts"
     touch "$boring/agents/codex/collect-sessions.py"
-    touch "$boring/agents/shared/event_log.py"
+    touch "$boring/src/ohmyboring/adapters/events.py"
     touch "$boring/agents/shared/agent_wiring.py"
     # Without this file doctor skips the ledger probe entirely, and a check no fixture can reach
     # is a check that can be deleted without a single test going red.
@@ -1047,6 +1051,16 @@ esac
       exit 1
   }
   echo "ok - a contaminated uptake self-check fails readiness"
+)
+
+( make_case "$TMP/uptake-crash" yes
+  DOCTOR_UPTAKE_SELF_CRASH=1 run_strict "$TMP/uptake-crash" "$TMP/uptake-crash.out" || true
+  grep -q "UPTAKE SELF-CHECK FAILED — ImportError: cannot import name 'UTC'" "$TMP/uptake-crash.out" || {
+      cat "$TMP/uptake-crash.out"
+      echo "FAIL: a crashed self-check must say why, not 'FAILED — .'" >&2
+      exit 1
+  }
+  echo "ok - a crashed uptake self-check names its error"
 )
 
 # "Could not run" is not "ran clean". Too few sessions to pair is a warning, because failing on it

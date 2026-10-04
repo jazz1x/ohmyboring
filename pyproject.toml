@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ohmyboring"
+version = "0.1.0"
+description = "ohmyboring core package — hexagonal outside (adapters/ · entrypoints/) over feature slices inside."
+requires-python = ">=3.11"
+dependencies = [
+  "langgraph>=1.2.10",
+  "langchain_core>=1.5.3",
+  "langchain_ollama>=1.1.0",
+  "pydantic>=2.13.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["ohmyboring*"]

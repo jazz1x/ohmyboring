@@ -17,14 +17,18 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import card_types
 from card_types import RepairDone, RepairFailed, RepairUnanswered
-from drudge_client import OWNER, DrudgeClient, owner_headers
+
+from ohmyboring.adapters.engine import OWNER, DrudgeClient, PathMarks, owner_headers
+from ohmyboring.result import Err, Ok
 
 # Register answers carry up to 50 claims each; the door timeout lesson (brief p95 77s) says the
 # point read is far cheaper, but a cold engine still earns more than a point-read default.
@@ -42,7 +46,7 @@ CARD_REPAIR_TIMEOUT = float(os.environ.get("CARD_REPAIR_TIMEOUT") or "600")
 def run(
     effects: list[card_types.Effect],
     record: Callable[[str, dict], None],
-    consumption: Callable[[str, str, list[str]], None],
+    consumption: Callable[[str, str, list[str], str | None], None],
     execute_repair: Callable[[str], RepairDone | RepairFailed | RepairUnanswered],
 ) -> list[RepairDone | RepairFailed | RepairUnanswered]:
     """The one interpreter: a card_press.effects list in, applied in order. Each Effect tag
@@ -59,7 +63,7 @@ def run(
             if effect.effect == "record":
                 record(effect.event, effect.fields)
             elif effect.effect == "consumption":
-                consumption(effect.session, effect.kind, effect.paths)
+                consumption(effect.session, effect.kind, effect.paths, effect.judge)
             elif effect.effect == "execute_repair":
                 repairs.append(execute_repair(effect.subject))
             else:
@@ -72,23 +76,26 @@ def run(
 
 
 def _live_record(event: str, fields: dict) -> None:
-    import event_log
+    from ohmyboring.adapters import events as event_log
 
     event_log.append_event("slack-card", event, "ok", **fields)
 
 
-def _live_consumption(session: str, kind: str, paths: list[str]) -> dict:
+def _live_consumption(session: str, kind: str, paths: list[str], judge: str | None = None) -> dict:
     # Row-level, not session-level: a button judges the note its row cited, and only that one.
-    # judge=OWNER: a button press is the owner's hand, and the client carries the owner token
-    # the engine demands for that word.
+    # judge=None keeps the OWNER default: a button press is the owner's hand, and the client
+    # carries the owner token the engine demands for that word. An explicit judge (the review
+    # lane's 「맡길게요」, AGENT_DELEGATED) rides verbatim and travels bare — owner_headers only
+    # fires for the OWNER word, and the engine accepts agent:<name> with no token.
+    judge = OWNER if judge is None else judge
     at = datetime.now(UTC).isoformat()
-    if kind == "used":
-        return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(
-            session, at, used=paths, judge=OWNER
-        )
-    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(
-        session, at, contested=paths, judge=OWNER
-    )
+    marks = PathMarks(used=paths, judge=judge) if kind == "used" else PathMarks(contested=paths, judge=judge)
+    # Err→예외는 카드 그래프가 예외를 계약으로 삼는 동안의 임시 경계 — 조용한 걸기는 반만 일어난 프레스다.
+    match DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).consumption(session, at, marks):
+        case Ok(resp):
+            return resp
+        case Err(failure):
+            raise OSError(str(failure))
 
 
 def _door_failure(subject: str, code: int, body: bytes) -> RepairFailed | RepairUnanswered:
@@ -122,15 +129,19 @@ def _door_failure(subject: str, code: int, body: bytes) -> RepairFailed | Repair
     )
 
 
-def _live_execute_repair(subject: str) -> RepairDone | RepairFailed | RepairUnanswered:
+def _live_execute_repair(
+    subject: str, row: card_types.RowRef | None = None
+) -> RepairDone | RepairFailed | RepairUnanswered:
     """POST the door's merge. The door commits DELETE+UPDATE before its sync, so a timeout
     or a count-less body may already have deleted the rows — a failure without reported
     counts is RepairUnanswered, never a fabricated 0 (F2). Never raised: a slow or failed
-    merge must not end the card's whole run over one button."""
+    merge must not end the card's whole run over one button. With `row`, the door settles
+    that card row itself once its reread has finished."""
     claim = {"subject": subject, "judge": OWNER}
+    body = claim if row is None else {**claim, "row": row.model_dump()}
     req = urllib.request.Request(
         f"{_door_url()}/repairs/split-subjects",
-        data=json.dumps(claim).encode(),
+        data=json.dumps(body).encode(),
         headers={"content-type": "application/json", **owner_headers(claim)},
         method="POST",
     )

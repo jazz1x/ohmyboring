@@ -14,13 +14,15 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-import event_log
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import markers
-import omb_env
-import workflow_contract
-from drudge_client import DrudgeClient, DrudgeNotWritableError, check_drudge_writable
 
-BORING_URL = omb_env.drudge_url()  # BORING_URL canonical, BORING_URL deprecated alias
+from ohmyboring import config as omb_env
+from ohmyboring.adapters import events as event_log
+from ohmyboring.adapters import workflow_contract
+from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
+from ohmyboring.result import Err, Ok
+
 KIMI_HOME = os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code")
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 HOOK = os.path.join(BORING_HOME, "agents", "kimi", "distill-session.py")
@@ -98,21 +100,22 @@ def main():
 
     # Same reason as the other collectors: distillation is the expensive half, and a
     # degraded write door would only send the session back to retry.
-    try:
-        check_drudge_writable(DrudgeClient())
-    except DrudgeNotWritableError as exc:
-        print(f"[collect-kimi] write door closed: {exc}", file=sys.stderr, flush=True)
-        event_log.try_append_event(
-            "kimi-collector",
-            "collector_run",
-            "failed",
-            run_id=run_id,
-            agent="kimi",
-            failed=0,
-            reason=str(exc),
-            **workflow_contract.collector_run_fields("failed", 0),
-        )
-        return 1
+    match check_drudge_writable(DrudgeClient()):
+        case Err(failure):
+            print(f"[collect-kimi] write door closed: {failure}", file=sys.stderr, flush=True)
+            event_log.try_append_event(
+                "kimi-collector",
+                "collector_run",
+                "failed",
+                run_id=run_id,
+                agent="kimi",
+                failed=0,
+                reason=str(failure),
+                **workflow_contract.collector_run_fields("failed", 0),
+            )
+            return 1
+        case Ok(_):
+            pass
 
     sessions = _load_index()
     eligible = 0

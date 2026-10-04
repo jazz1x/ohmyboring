@@ -99,6 +99,13 @@ escaped_boring_home() {
 install_macos() {
     plist="$HOME/Library/LaunchAgents/${LABEL}.plist"
     mkdir -p "$HOME/Library/LaunchAgents"
+    # launchd's PATH is /usr/bin:/bin:/usr/sbin:/sbin — python3 there is Xcode's 3.9, and
+    # every nested python3/rg/docker call in the run and in doctor resolves through it.
+    python3_bin="$(command -v python3 || true)"
+    if [ -z "$python3_bin" ]; then
+        echo "✗ no python3 on PATH — cannot resolve the interpreter the job should run"
+        exit 1
+    fi
     cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -112,6 +119,13 @@ install_macos() {
         <string>-c</string>
         <string>cd $(escaped_boring_home) &amp;&amp; ./scripts/schedule-maintenance.sh run</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>$(dirname "$python3_bin"):${PATH}</string>
+        <key>BORING_HOME</key>
+        <string>${BORING_HOME}</string>
+    </dict>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>

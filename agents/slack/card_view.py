@@ -19,8 +19,9 @@ When the caller passes repair data (`repairs`/`repairs_total_groups`/`merged_yes
 — all optional, and off by default so every existing single-lane caller renders exactly as
 before), the card grows a second lane above the advice one: a head-line context block
 ("remaining groups n · merged yesterday m"), then, if `repairs` itself is non-empty, an
-「오늘 할 일」 header and one four-block row per repair group (divider, tag, section,
-actions-or-mark), then a 「짚어 둔 것」 header before the existing advice rows. Every lane
+「오늘 할 일」 header and one row per repair group (divider, tag, section, the agent's
+판정 block when the group carries one, actions-or-mark), then a 「짚어 둔 것」 header
+before the existing advice rows. Every lane
 titles itself with the same Slack `header` block — the single prominent title shape — so
 no lane title floats as a section among its own rows. A repair row's button idx shares one
 space with the advice rows — repairs first, 0..k-1 — so a button press can tell the two
@@ -29,14 +30,23 @@ lanes apart by idx alone."""
 from __future__ import annotations
 
 import json
+import os
+import sys
 from collections.abc import Iterable
+from typing import assert_never
+from urllib.parse import quote
 
-import card_i18n
-from card_types import (
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
+
+from card_types import (  # noqa: E402
     CHOICES,
     ButtonVerdict,
     Confirmation,
+    Done,
     Evidence,
+    Failed,
+    Outcome,
+    Pending,
     Press,
     Proposal,
     ProposedVerdict,
@@ -44,10 +54,14 @@ from card_types import (
     Repair,
     RepairDone,
     RepairFailed,
+    RepairJudgment,
     RepairPress,
     RepairUnanswered,
     ReviewPress,
 )
+
+from ohmyboring.config import FileLink, NoteLink, ObsidianLink  # noqa: E402
+from ohmyboring.i18n import card as card_i18n  # noqa: E402
 
 #: Language-independent register glyphs — the words come from card_i18n.REGISTER_LABELS.
 REGISTER_ICONS: dict[str, str] = {
@@ -129,14 +143,36 @@ def _verdict_block(verdict: ButtonVerdict, strings: dict[str, str]) -> dict:
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": f"{mark} — <@{verdict.user}>"}]}
 
 
-def _tag_block(idx: int, total: int, proposal: Proposal, register_labels: dict[str, str]) -> dict:
+def _note_link_url(label: str, link: NoteLink) -> str:
+    match link:
+        case ObsidianLink(vault=vault, folder=folder):
+            target = f"{folder}/{label}" if folder else label
+            return f"obsidian://open?vault={quote(vault, safe='')}&file={quote(target, safe='')}"
+        case FileLink(folder=folder, editor=editor):
+            return f"{quote(editor, safe='')}://file{quote(f'{folder}/{label}.md', safe='/')}"
+
+
+def note_links_text(label: str, links: tuple[NoteLink, ...], strings: dict[str, str]) -> str:
+    """` · <obsidian://…|Obsidian 으로 열기> · <file://…|파일로 열기>` for the configured links,
+    or "" when boring.json names none."""
+    words = {ObsidianLink: strings["note_link_obsidian"], FileLink: strings["note_link_file"]}
+    return "".join(f" · <{_note_link_url(label, link)}|{words[type(link)]}>" for link in links)
+
+
+def _tag_block(
+    idx: int,
+    total: int,
+    proposal: Proposal,
+    register_labels: dict[str, str],
+    links_text: str = "",
+) -> dict:
     icon = REGISTER_ICONS[proposal.register_]
     label = register_labels[proposal.register_]
     note = note_label(proposal.note)
     parts = [f"{icon} *{label}*"]
     if proposal.project:
         parts.append(proposal.project)
-    parts.extend([f"`{note}`", f"{idx + 1}/{total}"])
+    parts.extend([f"`{note}`{links_text}", f"{idx + 1}/{total}"])
     text = " · ".join(parts)
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
@@ -175,13 +211,15 @@ def _proposal_row(
     register_labels: dict[str, str],
     *,
     action_idx: int,
+    note_links: tuple[NoteLink, ...] = (),
 ) -> list[dict]:
     """`idx`/`total` are the display position within the advice lane (unchanged by the repair
     lane's presence); `action_idx` is the shared button-idx space a press reads —
     n_repairs + idx once a repair lane exists, idx alone otherwise."""
+    links_text = note_links_text(note_label(proposal.note), note_links, strings)
     row = [
         {"type": "divider"},
-        _tag_block(idx, total, proposal, register_labels),
+        _tag_block(idx, total, proposal, register_labels, links_text),
         _section_block(proposal),
         _quote_block(proposal.evidence, strings),
     ]
@@ -286,6 +324,34 @@ def _repair_section_block(repair: Repair, strings: dict[str, str]) -> dict:
     return {"type": "section", "text": {"type": "mrkdwn", "text": body}}
 
 
+REVIEW_TEXT_MAX = 200
+
+#: Slack rejects a card past a total size it does not publish (msg_blocks_too_long). Measured
+#: 2026-10-04 on blocks JSON (ensure_ascii=False): 9,445 chars posted, 9,545 refused.
+CARD_CHARS_BUDGET = 9000
+
+#: Cut steps for the free-text lines (reasons, titles, works) when a card is over budget —
+#: rows and buttons stay, only their prose shortens.
+TEXT_MAX_STEPS = (REVIEW_TEXT_MAX, 120, 80, 40)
+
+
+def _repair_judgment_block(judgment: RepairJudgment, strings: dict[str, str], text_max: int) -> dict:
+    """The agent's 판정 on this row — what the repair-judge run left before the card drew:
+    verdict label(같은 이름·못 가름) + 이유 한 줄 + 철자 목록 전부. generic 판정은 카드에
+    오르지 않으니 여기 그릴 일이 없다."""
+    label = strings[f"repair_judgment_{judgment.verdict}"]
+    variants = ", ".join(f"`{v}`" for v in judgment.variants)
+    text = "\n".join(
+        (
+            strings["repair_judgment_line"].format(
+                verdict=label, reason=_mrkdwn_plain(judgment.reason, text_max)
+            ),
+            strings["repair_variants_line"].format(variants=variants),
+        )
+    )
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+
+
 def _repair_row(
     idx: int,
     total: int,
@@ -293,12 +359,15 @@ def _repair_row(
     verdict: ButtonVerdict | None,
     result: dict | None,
     strings: dict[str, str],
+    text_max: int = REVIEW_TEXT_MAX,
 ) -> list[dict]:
     row = [
         {"type": "divider"},
         _repair_tag_block(idx, total, repair, strings),
         _repair_section_block(repair, strings),
     ]
+    if repair.judgment is not None:
+        row.append(_repair_judgment_block(repair.judgment, strings, text_max))
     row.append(
         _repair_verdict_block(verdict, result, strings)
         if verdict is not None
@@ -307,23 +376,75 @@ def _repair_row(
     return row
 
 
-def _review_tag_block(review: ProposedVerdict, strings: dict[str, str]) -> dict:
-    text = f"{strings[f'review_kind_{review.kind}']} · {note_label(review.note)}"
-    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+def _mrkdwn_plain(text: str, limit: int = REVIEW_TEXT_MAX) -> str:
+    """A vault string shown as-is in mrkdwn, cut to `limit` — one row must stay well under
+    Slack's 3,000-char section limit, and the whole card under CARD_CHARS_BUDGET."""
+    cut = text if len(text) <= limit else text[: limit - 1] + "…"
+    return cut.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _review_work_line(
+    review: ProposedVerdict, strings: dict[str, str], text_max: int = REVIEW_TEXT_MAX
+) -> str:
+    """One row's 작업 line. A grouped row names every grouped work (smaller ones inline);
+    past the second, the count folds into 「외 N건」 — the press still reaches every grouped
+    session, so nothing waits for the next card unseen."""
+    sessions = review.sessions or [review.session_id]
+    works = review.works or [review.work]
+    if len(sessions) == 1 and not works[0]:
+        return strings["review_work_unknown"].format(session=sessions[0][:8])
+    parts = []
+    for session, work in zip(sessions, works):
+        parts.append(
+            _mrkdwn_plain(work, text_max)
+            if work
+            else strings["review_work_session"].format(session=session[:8])
+        )
+    if len(parts) > 2:
+        parts = [*parts[:2], strings["review_work_more"].format(n=len(sessions) - 2)]
+    return strings["review_work"].format(work="; ".join(parts))
+
+
+def _review_tag_block(
+    review: ProposedVerdict,
+    strings: dict[str, str],
+    note_links: tuple[NoteLink, ...] = (),
+    text_max: int = REVIEW_TEXT_MAX,
+) -> dict:
+    """What the agent judged, why, on which note, from which piece of work — ids stand in
+    when the vault has no title or no session note. `reason` is the sentence the session-end
+    scorer caught the mark in; a row proposed before reasons were stored shows the honest
+    근거 없음 line instead of inventing one."""
+    label = note_label(review.note)
+    note_line = (
+        strings["review_note_titled"].format(title=_mrkdwn_plain(review.note_title, text_max), note=label)
+        if review.note_title
+        else strings["review_note_bare"].format(note=label)
+    ) + note_links_text(label, note_links, strings)
+    reason_line = (
+        strings["review_reason"].format(reason=_mrkdwn_plain(review.reason, text_max))
+        if review.reason
+        else strings["review_reason_none"]
+    )
+    work_line = _review_work_line(review, strings, text_max)
+    text = "\n".join((strings[f"review_judged_{review.kind}"], reason_line, note_line, work_line))
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 
 def _review_actions_block(idx: int, review: ProposedVerdict, strings: dict[str, str]) -> dict:
-    # Agree (do) or flip (drop) only — no hold: not pressing is the hold, and it records
-    # nothing, so a hold button would promise a trace the run never leaves.
+    # 맞아요/아니에요는 오너 판정, 맡길게요는 에이전트 판정을 그대로 받는 맡긴 판정,
+    # 보류는 판정 없이 사건 한 줄 — 넷 다 묶인 세션 전부에 닿는다. 안 누르는 것도 여전히
+    # 아무 흔적 없는 보류다.
+    data = {"session": review.session_id, "kind": review.kind}
+    if review.sessions:
+        data["sessions"] = list(review.sessions)
     elements = []
-    for choice in ("do", "drop"):
+    for choice in ("do", "drop", "delegate", "defer"):
         button = {
             "type": "button",
             "text": {"type": "plain_text", "text": strings[f"review_button_{choice}"], "emoji": True},
             "action_id": f"card:{idx}:{choice}",
-            "value": _lane_value(
-                "review", {"session": review.session_id, "kind": review.kind}, note=review.note
-            ),
+            "value": _lane_value("review", data, note=review.note),
         }
         if choice == "do":
             button["style"] = "primary"
@@ -336,6 +457,10 @@ def _review_actions_block(idx: int, review: ProposedVerdict, strings: dict[str, 
 def _review_verdict_block(review: ProposedVerdict, verdict: ButtonVerdict, strings: dict[str, str]) -> dict:
     if verdict.choice == "do":
         text = strings["review_verdict_agree"]
+    elif verdict.choice == "delegate":
+        text = strings["review_verdict_delegate"]
+    elif verdict.choice == "defer":
+        text = strings["review_verdict_defer"]
     else:
         flipped = strings[f"review_kind_{'contested' if review.kind == 'used' else 'used'}"]
         text = strings["review_verdict_flip"].format(kind=flipped)
@@ -347,8 +472,10 @@ def _review_row(
     review: ProposedVerdict,
     verdict: ButtonVerdict | None,
     strings: dict[str, str],
+    note_links: tuple[NoteLink, ...] = (),
+    text_max: int = REVIEW_TEXT_MAX,
 ) -> list[dict]:
-    row = [{"type": "divider"}, _review_tag_block(review, strings)]
+    row = [{"type": "divider"}, _review_tag_block(review, strings, note_links, text_max)]
     row.append(
         _review_verdict_block(review, verdict, strings)
         if verdict is not None
@@ -398,6 +525,139 @@ def mark_pressed(
     return Rejected(reason=f"row {press.idx} is not pressable")
 
 
+def _status_id(idx: int) -> str:
+    return f"card:{idx}:status"
+
+
+def status_text(outcome: Outcome, strings: dict[str, str]) -> str:
+    match outcome:
+        case Pending():
+            return strings["progress_pending"]
+        case Done(text=text):
+            return text
+        case Failed(reason=reason):
+            return strings["progress_failed"].format(reason=_mrkdwn_plain(reason))
+        case _:
+            assert_never(outcome)
+
+
+def _is_row_actions(block: dict, idx: int) -> bool:
+    prefix = f"card:{idx}:"
+    return block.get("type") == "actions" and any(
+        isinstance(el, dict) and isinstance(el.get("action_id"), str) and el["action_id"].startswith(prefix)
+        for el in block.get("elements", [])
+    )
+
+
+def _row_at(blocks: list[dict], idx: int) -> int | None:
+    return next(
+        (
+            i
+            for i, block in enumerate(blocks)
+            if block.get("block_id") == _status_id(idx) or _is_row_actions(block, idx)
+        ),
+        None,
+    )
+
+
+def _status_instead(blocks: list[dict], idx: int, status: dict) -> list[dict] | Rejected:
+    """The row's buttons become the status line; an earlier status line of the row goes."""
+    kept = [block for block in blocks if block.get("block_id") != _status_id(idx)]
+    at = next((i for i, block in enumerate(kept) if _is_row_actions(block, idx)), None)
+    if at is not None:
+        return [*kept[:at], status, *kept[at + 1 :]]
+    at = _row_at(blocks, idx)
+    if at is None:
+        return Rejected(reason=f"row {idx} has no buttons or status to replace")
+    return [*blocks[:at], status, *blocks[at + 1 :]]
+
+
+def _status_above_buttons(blocks: list[dict], idx: int, status: dict) -> list[dict] | Rejected:
+    """A failure keeps the buttons so the owner can press again; the reason sits above them."""
+    kept = [block for block in blocks if block.get("block_id") != _status_id(idx)]
+    at = next((i for i, block in enumerate(kept) if _is_row_actions(block, idx)), None)
+    if at is None:
+        return _status_instead(blocks, idx, status)
+    return [*kept[:at], status, *kept[at:]]
+
+
+def _is_row_block(block: dict, idx: int) -> bool:
+    return block.get("block_id") == _status_id(idx) or _is_row_actions(block, idx)
+
+
+def _status_block(idx: int, outcome: Outcome, lang: str) -> dict:
+    return {
+        "type": "context",
+        "block_id": _status_id(idx),
+        "elements": [{"type": "mrkdwn", "text": status_text(outcome, card_i18n.STRINGS[lang])}],
+    }
+
+
+def row_progress(blocks: list[dict], idx: int, outcome: Outcome, *, lang: str) -> list[dict] | Rejected:
+    """Row `idx`'s own blocks once `outcome` shows: the status line alone, or — for a failure —
+    the status line above the row's buttons taken from `blocks`, so the owner can press again."""
+    actions = next((block for block in blocks if _is_row_actions(block, idx)), None)
+    if actions is None and not any(_is_row_block(block, idx) for block in blocks):
+        return Rejected(reason=f"row {idx} has no buttons or status to replace")
+    status = _status_block(idx, outcome, lang)
+    match outcome:
+        case Failed() if actions is not None:
+            return [status, actions]
+        case _:
+            return [status]
+
+
+def row_pressed(
+    blocks: list[dict],
+    press: Press,
+    *,
+    lang: str,
+    repair_result: RepairDone | RepairFailed | RepairUnanswered | None = None,
+) -> list[dict] | Rejected:
+    """Row `press.idx`'s judged block alone, as mark_pressed renders it in place of the buttons."""
+    marked = mark_pressed(blocks, press, lang=lang, repair_result=repair_result)
+    match marked:
+        case Rejected():
+            return marked
+    at = next(i for i, block in enumerate(blocks) if _is_row_actions(block, press.idx))
+    return [marked[at]]
+
+
+def replace_row(current: list[dict], idx: int, segment: list[dict]) -> list[dict] | Rejected:
+    """`current` — the message as Slack holds it now — with row `idx`'s blocks (its status
+    line, its buttons, or both) swapped for `segment`; every other row stays as it is now, so
+    a row another writer settled meanwhile is not rolled back to a stale snapshot."""
+    positions = [i for i, block in enumerate(current) if _is_row_block(block, idx)]
+    if not positions:
+        return Rejected(reason=f"row {idx} is not on the card any more")
+    kept = [block for i, block in enumerate(current) if i not in positions]
+    at = positions[0]
+    return [*kept[:at], *segment, *kept[at:]]
+
+
+def mark_progress(blocks: list[dict], idx: int, outcome: Outcome, *, lang: str) -> list[dict] | Rejected:
+    """Only row `idx` changes, and its status line's block_id names the row so a later writer
+    can find it again without knowing the buttons."""
+    status = _status_block(idx, outcome, lang)
+    match outcome:
+        case Failed():
+            return _status_above_buttons(blocks, idx, status)
+        case _:
+            return _status_instead(blocks, idx, status)
+
+
+def merged_outcome(done: RepairDone, *, lang: str) -> Done:
+    strings = card_i18n.STRINGS[lang]
+    text = strings["progress_merged"].format(
+        deleted=done.deleted_rows, reread=done.reread_notes
+    ) + _owner_held_suffix(done.owner_held, strings)
+    return Done(text=text)
+
+
+def reread_failed_outcome(error: object, *, lang: str) -> Failed:
+    return Failed(reason=card_i18n.STRINGS[lang]["reread_failed_reason"].format(error=error))
+
+
 def _project_groups(proposals: list[Proposal]) -> list[tuple[str, list[int]]]:
     """proposals grouped by `.project`, each project's rows kept together in display order —
     in first-seen order, so a priority (아직) pick from project B ahead of project A's own
@@ -426,6 +686,9 @@ def build_blocks(
     reviews: Iterable[ProposedVerdict] = (),
     *,
     lang: str,
+    note_links: tuple[NoteLink, ...] = (),
+    text_max: int = REVIEW_TEXT_MAX,
+    block_limit: int = BLOCK_LIMIT,
 ) -> list[dict]:
     """Block Kit for the card: the head line (past approvals cross-checked against today's
     registers — present only when there were any), then one five-block row per proposal,
@@ -444,8 +707,9 @@ def build_blocks(
     then a 「짚어 둔 것」 header before the advice rows. Repair rows occupy button idx
     0..len(repairs)-1; advice rows continue from there — one shared space, repairs first.
     A review lane sits below the advice lane when `reviews` is non-empty — the agent's own
-    session-end classifications, one three-block row each, agree/flip buttons occupying the
-    idx slots after the advice rows, under the same 「에이전트가 가른 것」 header shape. It
+    session-end classifications, one three-block row each (the same note judged the same way
+    by several sessions rides as one grouped row), agree/flip/delegate/hold buttons occupying
+    the idx slots after the advice rows, under the same 「에이전트가 가른 것」 header shape. It
     shares the 50-block cap: the advice lane reserves the review lane's tail, and review
     rows that still do not fit are reported in an overflow line, not dropped. Empty
     `reviews` leaves the card exactly as it was —
@@ -473,7 +737,9 @@ def build_blocks(
             blocks.append(_lane_header_block(strings["todo_header"]))
             for ridx, repair in enumerate(repairs):
                 blocks.extend(
-                    _repair_row(ridx, n_repairs, repair, by_idx.get(ridx), repair_results.get(ridx), strings)
+                    _repair_row(
+                        ridx, n_repairs, repair, by_idx.get(ridx), repair_results.get(ridx), strings, text_max
+                    )
                 )
         blocks.append(_lane_header_block(strings["advice_header"]))
 
@@ -497,11 +763,12 @@ def build_blocks(
                 strings,
                 register_labels,
                 action_idx=n_repairs + idx,
+                note_links=note_links,
             )
             addition = row
             remaining_after = total - shown - 1
             reserve = (1 if remaining_after > 0 else 0) + review_tail
-            if len(blocks) + len(addition) + reserve > BLOCK_LIMIT:
+            if len(blocks) + len(addition) + reserve > block_limit:
                 overflowed = True
                 break
             blocks.extend(addition)
@@ -520,17 +787,19 @@ def build_blocks(
 
     if reviews:
         # the review lane sits below the advice one — the agent's own session-end calls,
-        # which the owner may agree with or flip. No reviews, no header: a lane the agent
-        # never filled must not render as an empty promise.
+        # which the owner may agree with, flip, hand back, or hold. No reviews, no header:
+        # a lane the agent never filled must not render as an empty promise.
         blocks.append(_lane_header_block(strings["review_header"]))
         n_slots = n_repairs + total
         r_shown = 0
         r_overflowed = False
         for ridx, review in enumerate(reviews):
-            addition = _review_row(n_slots + ridx, review, by_idx.get(n_slots + ridx), strings)
+            addition = _review_row(
+                n_slots + ridx, review, by_idx.get(n_slots + ridx), strings, note_links, text_max
+            )
             remaining_after = len(reviews) - ridx - 1
             reserve = 1 if remaining_after > 0 else 0
-            if len(blocks) + len(addition) + reserve > BLOCK_LIMIT:
+            if len(blocks) + len(addition) + reserve > block_limit:
                 r_overflowed = True
                 break
             blocks.extend(addition)
@@ -548,3 +817,24 @@ def build_blocks(
                 }
             )
     return blocks
+
+
+def card_chars(blocks: list[dict]) -> int:
+    return len(json.dumps(blocks, ensure_ascii=False))
+
+
+def fit_blocks(*args, **kwargs) -> list[dict]:
+    """build_blocks under CARD_CHARS_BUDGET: first shorten the prose, then lower the block cap
+    so rows past it fall into the same overflow line the 50-block cap uses (counted, not
+    dropped). A card that still does not fit raises — a refused post must say why."""
+    for text_max in TEXT_MAX_STEPS:
+        blocks = build_blocks(*args, text_max=text_max, **kwargs)
+        if card_chars(blocks) <= CARD_CHARS_BUDGET:
+            return blocks
+    for block_limit in range(BLOCK_LIMIT - 1, 0, -1):
+        blocks = build_blocks(*args, text_max=TEXT_MAX_STEPS[-1], block_limit=block_limit, **kwargs)
+        if card_chars(blocks) <= CARD_CHARS_BUDGET:
+            return blocks
+    raise ValueError(
+        f"card is {card_chars(blocks)} chars at the smallest cut and cap, over {CARD_CHARS_BUDGET}"
+    )

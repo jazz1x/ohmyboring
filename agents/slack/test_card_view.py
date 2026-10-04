@@ -11,10 +11,12 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 
-import card_i18n  # noqa: E402
 import card_types as cc  # noqa: E402
 import card_view as cv  # noqa: E402
+
+from ohmyboring.i18n import card as card_i18n  # noqa: E402
 
 # The happy path's candidate order is: f64_risk (priority) → wiki-0536 → wiki-0576 →
 # essential_mode → draft_wiring (recurrence sources are sorted, so 0536 precedes 0576).
@@ -482,9 +484,10 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertNotIn("오늘 할 일", _blocks_text(plain))
         self.assertNotIn("짚어 둔 것", _blocks_text(plain))
 
-    def test_review_lane_sits_below_the_advice_lane_with_agree_and_flip_only(self):
-        # 분류 칸: 조언 칸 아래 머리 + 행마다 kind_label · 짧은 노트 이름 + 맞음/뒤집기 두
-        # 버튼뿐. 비면 머리도 없다 — 0건 아침이 카드 모양을 바꾸면 안 된다(검증자 첫 질문).
+    def test_review_lane_sits_below_the_advice_lane_with_four_buttons(self):
+        # 분류 칸: 조언 칸 아래 머리 + 행마다 kind_label · 이유 한 줄(옛 판정은 근거 없음) ·
+        # 짧은 노트 이름 + 맞아요/아니에요/맡길게요/보류 네 버튼. 비면 머리도 없다 — 0건
+        # 아침이 카드 모양을 바꾸면 안 된다(검증자 첫 질문).
         proposal = self._proposal()
         reviews = [
             cc.ProposedVerdict(session_id="s1", note="/vault/wiki/wiki-0700.md", kind="contested", at="t-1"),
@@ -502,10 +505,27 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertEqual(len(action_rows), 3)  # one advice row + two review rows
         for row, expected_idx in zip(action_rows[1:], (1, 2)):
             buttons = {el["action_id"]: el for el in row["elements"]}
-            self.assertEqual(set(buttons), {f"card:{expected_idx}:do", f"card:{expected_idx}:drop"})
-        self.assertEqual([el["text"]["text"] for el in action_rows[1]["elements"]], ["맞음", "뒤집기"])
-        tag = next(b for b in blocks if b["type"] == "context" and "wiki-0700" in _blocks_text([b]))
-        self.assertEqual(tag["elements"][0]["text"], "틀린 노트 · wiki-0700")
+            self.assertEqual(
+                set(buttons),
+                {
+                    f"card:{expected_idx}:do",
+                    f"card:{expected_idx}:drop",
+                    f"card:{expected_idx}:delegate",
+                    f"card:{expected_idx}:defer",
+                },
+            )
+        self.assertEqual(
+            [el["text"]["text"] for el in action_rows[1]["elements"]],
+            ["맞아요", "아니에요", "맡길게요", "보류"],
+        )
+        tag = next(b for b in blocks if b["type"] == "section" and "wiki-0700" in _blocks_text([b]))
+        self.assertEqual(
+            tag["text"]["text"],
+            "이 세션에서 *이 노트가 틀렸다*는 말이 나왔어요.\n"
+            "이유: 세션 끝 채점이 남긴 문장이 없어요 (옛 판정)\n"
+            "노트: `wiki-0700` (제목 없음)\n"
+            "작업: 세션 `s1` (세션 노트 없음)",
+        )
         self.assertNotIn("/vault/", _blocks_text(blocks))
 
         judged = cv.build_blocks(
@@ -513,20 +533,89 @@ class CardV2ShapeTests(unittest.TestCase):
             [
                 cc.ButtonVerdict(idx=1, choice="do", user="U1", at="t"),
                 cc.ButtonVerdict(idx=2, choice="drop", user="U1", at="t"),
+                cc.ButtonVerdict(idx=3, choice="delegate", user="U1", at="t"),
+                cc.ButtonVerdict(idx=4, choice="defer", user="U1", at="t"),
             ],
-            reviews=reviews,
+            reviews=[
+                *reviews,
+                cc.ProposedVerdict(session_id="s3", note="/vault/wiki/wiki-0702.md", kind="used", at="t-3"),
+                cc.ProposedVerdict(
+                    session_id="s4", note="/vault/wiki/wiki-0703.md", kind="contested", at="t-4"
+                ),
+            ],
             lang="ko",
         )
         marks = [
             b
             for b in judged
-            if b["type"] == "context" and ("✓ 맞음" in _blocks_text([b]) or "↺" in _blocks_text([b]))
+            if b["type"] == "context" and any(k in _blocks_text([b]) for k in ("✓", "↺", "⏸"))
         ]
         self.assertEqual(marks[0]["elements"][0]["text"], "✓ 맞음")
         self.assertEqual(marks[1]["elements"][0]["text"], "↺ 뒤집음 — 소유자 판정으로 틀린 노트")
+        self.assertEqual(marks[2]["elements"][0]["text"], "✓ 맡김 — 에이전트 판정 그대로")
+        self.assertEqual(marks[3]["elements"][0]["text"], "⏸ 보류 — 이레 뒤에 다시 올려요")
 
         plain = cv.build_blocks([proposal], reviews=[], lang="ko")
         self.assertNotIn("에이전트가 가른 것", _blocks_text(plain))
+
+    def test_a_review_row_shows_the_reason_sentence_and_groups_its_works(self):
+        # 이유 한 줄: 채점기가 잡은 문장이 그대로 보인다(200자 자름). 묶인 줄: 작업을 나열하고
+        # 버튼 값은 묶인 세션 전부를 싣는다 — 판정은 전부에 간다. 근거 없는 옛 판정은 근거
+        # 없음 한 줄로 정직하게.
+        reasoned = cc.ProposedVerdict(
+            session_id="s1",
+            note="/vault/wiki/wiki-0700.md",
+            kind="contested",
+            at="t-1",
+            reason="wiki-0700 의 폴 접근이 낡았다고 봤어요 — 소켓을 닫고 재활용하니 그렇습니다.",
+        )
+        strings = card_i18n.STRINGS["ko"]
+        text = cv._review_tag_block(reasoned, strings)["text"]["text"]
+        self.assertIn(
+            strings["review_reason"].format(
+                reason="wiki-0700 의 폴 접근이 낡았다고 봤어요 — 소켓을 닫고 재활용하니 그렇습니다."
+            ),
+            text,
+        )
+
+        grouped = cc.ProposedVerdict(
+            session_id="s1",
+            note="/vault/wiki/wiki-2498.md",
+            kind="contested",
+            at="t-1",
+            reason="첫째 근거 문장입니다.",
+            sessions=["s1", "s2", "s3"],
+            works=["proj · 09-29 · 첫 작업", "", "proj · 09-30 · 셋째 작업"],
+        )
+        grouped_text = cv._review_tag_block(grouped, strings)["text"]["text"]
+        self.assertIn("이유: 첫째 근거 문장입니다.", grouped_text)
+        self.assertIn("작업: proj · 09-29 · 첫 작업; 세션 `s2` (세션 노트 없음); 외 1건", grouped_text)
+
+        blocks = cv.build_blocks([self._proposal()], reviews=[grouped], lang="ko")
+        row = next(
+            b
+            for b in blocks
+            if b["type"] == "actions"
+            and any(el.get("action_id", "").startswith("card:1:") for el in b["elements"])
+        )
+        value = json.loads(row["elements"][0]["value"])
+        self.assertEqual(
+            value,
+            {
+                "lane": "review",
+                "session": "s1",
+                "kind": "contested",
+                "sessions": ["s1", "s2", "s3"],
+                "note": "wiki-2498",
+            },
+        )
+
+        bare = cc.ProposedVerdict(
+            session_id="s1", note="/vault/wiki/wiki-0700.md", kind="contested", at="t-1"
+        )
+        bare_text = cv._review_tag_block(bare, strings)["text"]["text"]
+        self.assertIn(strings["review_reason_none"], bare_text)
+        self.assertIn("작업: 세션 `s1` (세션 노트 없음)", bare_text)
 
     def test_repair_and_review_buttons_carry_their_lane_values(self):
         # Every button's value is compact JSON naming its lane and what that lane needs —
@@ -613,7 +702,7 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertEqual(len(blocks), 47)
         self.assertLessEqual(len(blocks), cv.BLOCK_LIMIT)
         advice_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 3]
-        review_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 2]
+        review_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 4]
         self.assertEqual(len(advice_rows), 7)
         self.assertEqual(len(review_rows), 3)
         overflows = [
@@ -621,7 +710,7 @@ class CardV2ShapeTests(unittest.TestCase):
             for b in blocks
             if b["type"] == "context" and "더 있음" in _blocks_text([b])
         ]
-        self.assertEqual(overflows, ["+5건 더 있음 (블록 50개 상한)"])
+        self.assertEqual(overflows, ["+5건 더 있음 (카드 상한)"])
         # shown advice rows + the overflow count == the lane's of-total: nothing double-
         # counted, nothing lost
         self.assertEqual(len(advice_rows) + 5, len(proposals))
@@ -643,7 +732,7 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertEqual(len(blocks_full), 50)
         self.assertLessEqual(len(blocks_full), cv.BLOCK_LIMIT)
         self.assertIn("에이전트가 가른 것", _blocks_text(blocks_full))
-        review_rows_full = [b for b in blocks_full if b["type"] == "actions" and len(b["elements"]) == 2]
+        review_rows_full = [b for b in blocks_full if b["type"] == "actions" and len(b["elements"]) == 4]
         self.assertEqual(len(review_rows_full), 1)
         overflows_full = [
             b["elements"][0]["text"]
@@ -652,7 +741,7 @@ class CardV2ShapeTests(unittest.TestCase):
         ]
         self.assertEqual(
             overflows_full,
-            ["+1건 더 있음 (블록 50개 상한)", "+2건 더 있음 (블록 50개 상한)"],
+            ["+1건 더 있음 (카드 상한)", "+2건 더 있음 (카드 상한)"],
         )
 
     def test_headline_shows_remaining_groups_and_optional_merged_yesterday(self):
@@ -670,6 +759,168 @@ class CardV2ShapeTests(unittest.TestCase):
         headline_no_merge = without_merge[1]["elements"][0]["text"]
         self.assertEqual(headline_no_merge, "남은 묶음 42")
         self.assertNotIn("어제", headline_no_merge)
+
+
+class FailedStatusTests(unittest.TestCase):
+    def test_a_long_failure_reason_is_cut_so_a_pressed_card_stays_in_budget(self):
+        strings = card_i18n.STRINGS["ko"]
+        text = cv.status_text(cc.Failed(reason="가" * 400), strings)
+        self.assertEqual(
+            text, strings["progress_failed"].format(reason="가" * (cv.REVIEW_TEXT_MAX - 1) + "…")
+        )
+
+
+class CardBudgetTests(unittest.TestCase):
+    """2026-10-04 08:00: a 35-block, 9,674-char card was refused (msg_blocks_too_long). Over
+    budget, the prose shortens; every row and button stays."""
+
+    def _reviews(self, n: int) -> list[cc.ProposedVerdict]:
+        long = "가" * 300
+        return [
+            cc.ProposedVerdict(
+                session_id=f"s{i}",
+                note=f"/vault/wiki/wiki-{700 + i:04d}.md",
+                kind="used",
+                at=f"t-{i}",
+                reason=long,
+                note_title=long,
+                work=long,
+            )
+            for i in range(n)
+        ]
+
+    def _actions(self, blocks) -> int:
+        return sum(1 for b in blocks if b["type"] == "actions")
+
+    def test_an_oversized_card_shortens_its_prose_and_keeps_every_row(self):
+        reviews = self._reviews(7)
+        full = cv.build_blocks([], reviews=reviews, lang="ko")
+        self.assertGreater(cv.card_chars(full), cv.CARD_CHARS_BUDGET)
+        fitted = cv.fit_blocks([], reviews=reviews, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted), cv.CARD_CHARS_BUDGET)
+        self.assertEqual(self._actions(fitted), self._actions(full))
+        self.assertEqual(self._actions(fitted), 7)
+
+    def test_rows_past_the_shortest_cut_are_counted_in_the_overflow_line(self):
+        reviews = self._reviews(12)
+        self.assertGreater(
+            cv.card_chars(cv.build_blocks([], reviews=reviews, lang="ko", text_max=cv.TEXT_MAX_STEPS[-1])),
+            cv.CARD_CHARS_BUDGET,
+        )
+        fitted = cv.fit_blocks([], reviews=reviews, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted), cv.CARD_CHARS_BUDGET)
+        shown = self._actions(fitted)
+        overflow = card_i18n.STRINGS["ko"]["overflow_line"].format(n=12 - shown)
+        self.assertLess(shown, 12)
+        self.assertIn(overflow, _blocks_text(fitted))
+
+    def test_an_advice_heavy_card_overflows_its_advice_rows_too(self):
+        long = "조언 " * 120
+        proposals = [
+            cc.Proposal(
+                subject=f"주어{i}",
+                note=f"/vault/wiki/wiki-{900 + i:04d}.md",
+                register="stalled",
+                bottleneck=long,
+                advice=long,
+                evidence=[
+                    cc.Evidence(
+                        note=f"/vault/wiki/wiki-{900 + i:04d}.md", quote="근거 인용문 열두자 이상", line=1
+                    )
+                ],
+            )
+            for i in range(12)
+        ]
+        fitted = cv.fit_blocks(proposals, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted), cv.CARD_CHARS_BUDGET)
+        shown = self._actions(fitted)
+        self.assertLess(shown, 12)
+        self.assertIn(card_i18n.STRINGS["ko"]["overflow_line"].format(n=12 - shown), _blocks_text(fitted))
+
+    def test_a_card_under_budget_is_left_as_built(self):
+        reviews = self._reviews(1)
+        self.assertEqual(
+            cv.fit_blocks([], reviews=reviews, lang="ko"), cv.build_blocks([], reviews=reviews, lang="ko")
+        )
+
+    def test_a_card_that_cannot_fit_raises(self):
+        orig = cv.CARD_CHARS_BUDGET
+        cv.CARD_CHARS_BUDGET = 100
+        try:
+            with self.assertRaises(ValueError):
+                cv.fit_blocks([], reviews=self._reviews(1), lang="ko")
+        finally:
+            cv.CARD_CHARS_BUDGET = orig
+
+
+class RepairJudgmentBlockTests(unittest.TestCase):
+    """The agent's 판정 on a repair row: verdict label(같은 이름·못 가름) + 이유 한 줄 +
+    철자 목록 전부, in the card's own language. A row without a 판정 renders exactly as
+    before — no block. A mutant that drops the judgment block, or renders only the head
+    spelling, or pins one language's label for all three, must each kill these."""
+
+    def _repair(self, verdict="same_name", reason="같은 이름의 갈라진 철자입니다") -> cc.Repair:
+        return cc.Repair(
+            subject="foodspring-front",
+            variants=["foodspring front", "foodspring-front", "FoodspringFront"],
+            rows=3218,
+            notes=212,
+            judgment=cc.RepairJudgment(
+                subject="foodspring-front",
+                variants=["FoodspringFront", "foodspring front", "foodspring-front"],
+                verdict=verdict,
+                reason=reason,
+            ),
+        )
+
+    def _judgment_text(self, repair: cc.Repair, lang: str) -> str:
+        blocks = cv.build_blocks([], repairs=[repair], repairs_total_groups=1, lang=lang)
+        block = next(b for b in blocks if b["type"] == "context" and "🤖" in _blocks_text([b]))
+        return block["elements"][0]["text"]
+
+    def test_the_judgment_line_and_every_variant_show_in_each_language(self):
+        cases = {
+            "ko": (
+                "🤖 에이전트 판정: *같은 이름*",
+                "철자: `FoodspringFront`, `foodspring front`, `foodspring-front`",
+            ),
+            "en": (
+                "🤖 Agent judged: *Same name*",
+                "Spellings: `FoodspringFront`, `foodspring front`, `foodspring-front`",
+            ),
+            "ja": (
+                "🤖 エージェント判定: *同じ名前*",
+                "表記: `FoodspringFront`, `foodspring front`, `foodspring-front`",
+            ),
+        }
+        for lang, (line, variants_line) in cases.items():
+            text = self._judgment_text(self._repair(), lang)
+            self.assertIn(line, text, lang)
+            self.assertIn(
+                "같은 이름의 갈라진 철자입니다", text, lang
+            )  # 이유 한 줄 — the model's own sentence
+            self.assertIn(variants_line, text, lang)  # 철자 목록 전부 — never the head spelling only
+
+    def test_unsure_carries_its_own_label(self):
+        text = self._judgment_text(self._repair(verdict="unsure", reason="어느 쪽인지 못 가르겠습니다"), "ko")
+        self.assertIn("*못 가름*", text)
+        self.assertIn("어느 쪽인지 못 가르겠습니다", text)
+
+    def test_a_row_without_a_judgment_renders_unchanged(self):
+        repair = cc.Repair(
+            subject="foodspring-front", variants=["foodspring front", "foodspring-front"], rows=1, notes=1
+        )
+        blocks = cv.build_blocks([], repairs=[repair], repairs_total_groups=1, lang="ko")
+        self.assertFalse(any("🤖" in _blocks_text([b]) for b in blocks))
+
+    def test_mark_pressed_keeps_the_judgment_block_intact(self):
+        blocks = cv.build_blocks([], repairs=[self._repair()], repairs_total_groups=1, lang="ko")
+        press = cc.RepairPress(
+            idx=0, choice="do", user="U_OWNER", card_ts="1.0", channel="C1", subject="foodspring-front"
+        )
+        marked = cv.mark_pressed(blocks, press, lang="ko")
+        self.assertNotIsInstance(marked, cc.Rejected)
+        self.assertIn("🤖 에이전트 판정: *같은 이름*", _blocks_text(marked))
 
 
 class MarkPressedParityTests(unittest.TestCase):
@@ -761,6 +1012,8 @@ class MarkPressedParityTests(unittest.TestCase):
             ("advice", 3, "drop", None),
             ("review", 4, "do", None),
             ("review", 5, "drop", None),
+            ("review", 4, "delegate", None),
+            ("review", 5, "defer", None),
         ]
 
     def test_mark_pressed_equals_build_blocks_with_that_one_verdict(self):
@@ -815,6 +1068,92 @@ class MarkPressedParityTests(unittest.TestCase):
             cv.mark_pressed(blocks, self._press("advice", 99, "do"), lang="ko"), cc.Rejected
         )
         self.assertIsInstance(cv.mark_pressed([], self._press("advice", 1, "do"), lang="ko"), cc.Rejected)
+
+    def test_progress_replaces_only_its_row_and_a_later_outcome_settles_over_it(self):
+        blocks = self._card()
+        for lang in ("ko", "en", "ja"):
+            pending = cv.mark_progress(blocks, 2, cc.Pending(), lang=lang)
+            changed = [i for i, (a, b) in enumerate(zip(blocks, pending)) if a != b]
+            self.assertEqual(len(pending), len(blocks))
+            self.assertEqual(len(changed), 1)
+            row = pending[changed[0]]
+            self.assertEqual(row["block_id"], "card:2:status")
+            self.assertEqual(row["elements"][0]["text"], card_i18n.STRINGS[lang]["progress_pending"])
+            failed = cv.mark_progress(pending, 2, cc.Failed(reason="boom"), lang=lang)
+            self.assertEqual(
+                failed[changed[0]]["elements"][0]["text"],
+                card_i18n.STRINGS[lang]["progress_failed"].format(reason="boom"),
+            )
+            self.assertEqual(failed[: changed[0]], blocks[: changed[0]])
+            self.assertEqual(failed[changed[0] + 1 :], blocks[changed[0] + 1 :])
+        self.assertIsInstance(cv.mark_progress(blocks, 99, cc.Pending(), lang="ko"), cc.Rejected)
+
+    def test_a_review_row_names_the_note_and_the_work_in_every_language(self):
+        review = cc.ProposedVerdict(
+            session_id="53e83281-ea21",
+            note="/vault/wiki/wiki-2216.md",
+            kind="used",
+            at="t",
+            note_title="폴더 관례 <조사>",
+            work="ohmyboring · 09-29 · 구조 개편 & 정리",
+        )
+        for lang in ("ko", "en", "ja"):
+            strings = card_i18n.STRINGS[lang]
+            text = cv._review_tag_block(review, strings)["text"]["text"]
+            self.assertIn(strings["review_judged_used"], text)
+            self.assertIn("폴더 관례 &lt;조사&gt;", text)
+            self.assertIn("`wiki-2216`", text)
+            self.assertIn("구조 개편 &amp; 정리", text)
+            self.assertNotIn("/vault/", text)
+
+    def test_a_huge_title_keeps_the_row_under_slacks_section_limit(self):
+        review = cc.ProposedVerdict(
+            session_id="s1",
+            note="/vault/wiki/wiki-0700.md",
+            kind="used",
+            at="t",
+            note_title="가" * 3100,
+            work="w" * 3100,
+        )
+        text = cv._review_tag_block(review, card_i18n.STRINGS["ko"])["text"]["text"]
+        self.assertLess(len(text), 3000)
+        self.assertIn("…", text)
+
+    def test_note_links_follow_the_setting_and_no_setting_leaves_the_card_as_it_was(self):
+        from ohmyboring.config import FileLink, ObsidianLink
+
+        proposal = self.proposals[0]
+        review = cc.ProposedVerdict(session_id="s1", note="/vault/wiki/wiki-0700.md", kind="used", at="t")
+        plain = cv.build_blocks([proposal], reviews=[review], lang="ko")
+        self.assertEqual(plain, cv.build_blocks([proposal], reviews=[review], lang="ko", note_links=()))
+        self.assertNotIn("obsidian://", _blocks_text(plain))
+        links = (ObsidianLink(vault="my vault", folder="vault/wiki"), FileLink(folder="/Users/me/notes"))
+        linked = _blocks_text(cv.build_blocks([proposal], reviews=[review], lang="ko", note_links=links))
+        self.assertIn(
+            "<obsidian://open?vault=my%20vault&file=vault%2Fwiki%2Fwiki-0700|Obsidian 으로 열기>", linked
+        )
+        self.assertIn("<vscode://file/Users/me/notes/wiki-0700.md|파일로 열기>", linked)
+        cursor = _blocks_text(
+            cv.build_blocks(
+                [proposal], reviews=[review], lang="ko", note_links=(FileLink(folder="/n", editor="cursor"),)
+            )
+        )
+        self.assertIn("<cursor://file/n/wiki-0700.md|파일로 열기>", cursor)
+        advice_note = cv.note_label(proposal.note)
+        self.assertIn(f"file=vault%2Fwiki%2F{advice_note}|", linked)
+
+    def test_a_failure_keeps_the_buttons_and_a_retry_leaves_one_status_line(self):
+        blocks = self._card()
+        actions_at = cv._row_at(blocks, 2)
+        failed = cv.mark_progress(blocks, 2, cc.Failed(reason="boom"), lang="ko")
+        self.assertEqual(failed[actions_at]["block_id"], "card:2:status")
+        self.assertEqual(failed[actions_at + 1 :], blocks[actions_at:])
+        retried = cv.mark_progress(failed, 2, cc.Pending(), lang="ko")
+        statuses = [b for b in retried if b.get("block_id") == "card:2:status"]
+        self.assertEqual(len(statuses), 1)
+        self.assertEqual(statuses[0]["elements"][0]["text"], card_i18n.STRINGS["ko"]["progress_pending"])
+        self.assertFalse(any(cv._is_row_actions(b, 2) for b in retried))
+        self.assertEqual(len(retried), len(blocks))
 
 
 if __name__ == "__main__":

@@ -664,7 +664,10 @@ mod tests {
 
     #[test]
     fn no_wikilinks_returns_empty() {
-        assert!(extract_wikilinks("body with no links").is_empty());
+        assert_eq!(
+            extract_wikilinks("body with no links"),
+            Vec::<String>::new()
+        );
     }
 
     // ── cross-layer wikilinks ──

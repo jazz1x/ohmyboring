@@ -11,6 +11,11 @@ COPY requirements.txt requirements.txt
 # requirements.txt names bare psycopg; the slim image has no libpq, so the door needs the binary wheel.
 RUN pip install --no-cache-dir -r requirements.txt "psycopg[binary]>=3.2"
 
+# The core ohmyboring package with its own dependencies (versions: pyproject.toml).
+COPY pyproject.toml pyproject.toml
+COPY src/ src/
+RUN pip install --no-cache-dir .
+
 COPY agents/door/ agents/door/
 COPY agents/slack/ agents/slack/
 COPY agents/shared/ agents/shared/

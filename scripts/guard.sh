@@ -19,7 +19,7 @@ export PYTHONPYCACHEPREFIX
 mkdir -p "$PYTHONPYCACHEPREFIX"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-EVENT_LOG="$ROOT/agents/shared/event_log.py"
+EVENT_LOG="$ROOT/src/ohmyboring/adapters/events.py"
 guard_run_id="guard-$(date +%Y%m%dT%H%M%S)-$$"
 guard_started_at="$(date +%s)"
 
@@ -62,21 +62,46 @@ command -v ruff >/dev/null 2>&1 || { echo "ruff not installed — pip install -r
 ruff check .
 ruff format --check .
 echo "5) python unit tests…"
-python3 agents/shared/test_boring_config.py
+python3 src/ohmyboring/test_config.py
+python3 src/ohmyboring/ingest/test_note.py
+python3 src/ohmyboring/ingest/test_chunk.py
+python3 src/ohmyboring/ingest/test_shadow.py
+python3 src/ohmyboring/distill/test_graph.py
+python3 src/ohmyboring/distill/test_prompts.py
+python3 src/ohmyboring/distill/test_run.py
+python3 src/ohmyboring/distill/test_resolution.py
+python3 src/ohmyboring/distill/test_polish.py
+python3 src/ohmyboring/weekly/test_graph.py
+python3 src/ohmyboring/weekly/test_run.py
+python3 src/ohmyboring/weekly/test_pins.py
 python3 agents/shared/test_agent_wiring.py
 python3 agents/shared/test_rules_core.py
 python3 agents/shared/test_distill_core.py
-python3 agents/shared/test_event_log.py
-python3 agents/shared/test_workflow_contract.py
+python3 agents/shared/test_distill_queue.py
 python3 agents/shared/test_markers.py
-python3 agents/shared/test_resolution_quality.py
 python3 agents/shared/test_transcript.py
 python3 agents/shared/test_recall_core.py
 python3 agents/shared/test_label_core.py
 python3 agents/shared/test_uptake_core.py
 python3 agents/shared/test_verdict_core.py
-python3 agents/shared/test_drudge_client.py
+python3 src/ohmyboring/adapters/test_embed.py
+python3 src/ohmyboring/adapters/test_engine.py
+python3 src/ohmyboring/adapters/test_events.py
+python3 src/ohmyboring/adapters/test_llm.py
+python3 src/ohmyboring/adapters/test_slack.py
+python3 src/ohmyboring/adapters/test_workflow_contract.py
+python3 src/ohmyboring/remember/test_parse.py
+python3 src/ohmyboring/remember/test_render.py
+python3 src/ohmyboring/remember/test_shadow.py
+python3 src/ohmyboring/remember/test_graph.py
+python3 src/ohmyboring/remember/test_pii.py
+python3 src/ohmyboring/remember/test_dedup.py
+python3 src/ohmyboring/remember/test_index.py
+python3 src/ohmyboring/remember/test_writer.py
+python3 src/ohmyboring/registers/test_shadow.py
+python3 src/ohmyboring/test_result.py
 python3 agents/door/test_door.py
+python3 agents/door/test_door_search.py
 python3 agents/memory/test_retriever.py
 python3 agents/memory/test_store.py
 python3 agents/memory/test_deep_agent.py
@@ -92,7 +117,9 @@ python3 agents/hermes/plugins/boring-memory/test_boring_memory.py
 python3 agents/slack/test_card_types.py
 python3 agents/slack/test_card_registers.py
 python3 agents/slack/test_card_advice.py
+python3 agents/slack/test_card_delegate.py
 python3 agents/slack/test_card_verdicts.py
+python3 agents/slack/test_card_repair_judge.py
 python3 agents/slack/test_card_view.py
 python3 agents/slack/test_card_press.py
 python3 agents/slack/test_card_graph.py
@@ -114,6 +141,15 @@ python3 scripts/test_retention.py
 python3 scripts/test_self_verify_contract.py
 python3 scripts/test_peek.py
 python3 scripts/test_readme_locale_parity.py
+python3 scripts/test_package_skeleton.py
+python3 src/ohmyboring/recall/test_named.py
+python3 src/ohmyboring/entrypoints/http/test_mcp_recall.py
+python3 src/ohmyboring/search/test_rank.py
+python3 src/ohmyboring/search/test_hits.py
+python3 src/ohmyboring/search/test_retriever.py
+python3 src/ohmyboring/search/test_pg.py
+python3 src/ohmyboring/registers/test_pg.py
+python3 src/ohmyboring/search/test_redact.py
 echo "6) shell destructive-path guardrails (restore-db)…"
 sh scripts/test_restore_db.sh
 echo "7) shell readiness gate guardrails (doctor --strict)…"

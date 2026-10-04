@@ -67,7 +67,7 @@ services:
       BORING_HTTP_ADDR: 0.0.0.0:7700
       PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring  # host = the boring-postgres service (compose DNS)
       BORING_OWNER_TOKEN: ${BORING_OWNER_TOKEN:-}  # unset = no caller can write as the owner
-      BORING_CONFIG: /app/boring.json     # policy: note language, repo rules, source dirs
+      BORING_CONFIG: /config/boring.json  # policy: note language, repo rules, source dirs
       BORING_VAULT_DIR: /vault                # remember target + sync corpus (/vault/wiki)
       BORING_VECTOR: ${BORING_VECTOR:-off} # off = wiki-first direct read. on = vector+graph (boring-postgres alongside via --profile vector)
       BORING_SYNC_HOURS: "4"
@@ -76,7 +76,10 @@ services:
     volumes:
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: drudge's source_dirs only reads ~/.claude/projects)
       - ./vault:/vault                    # self-augmentation vault (agent → remember → wiki)
-      - ./boring.json:/app/boring.json:rw # policy config (language, repo rules, source dirs) — rw so the agent's classify_repo can persist rules
+      # boring.json by folder, as for the door and hermes: a file bind pins the inode, so an edit
+      # that replaces the file left the engine reading a deleted copy (2026-10-04). rw so the
+      # agent's classify_repo can persist rules.
+      - ${BORING_CONFIG_DIR:-./config}:/config:rw
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -112,10 +115,19 @@ services:
       BORING_DOOR_URL: http://127.0.0.1:7710
       BORING_URL: http://boring-drudge:7700
       OLLAMA_HOST: http://host.docker.internal:11434
+      # E2a: the door's own POST /search embeds through ohmyboring.config, and the host-side
+      # host.docker.internal→localhost rewrite must not apply in-container — the same flag
+      # hermes carries (drudge_url/door_url resolve from explicit env here, so nothing else moves).
+      BORING_IN_CONTAINER: "1"
       BORING_VAULT_DIR: /vault
+      BORING_CONFIG: /config/boring.json
+      DOOR_REMEMBER_WRITER: ${DOOR_REMEMBER_WRITER:-engine}
     volumes:
-      - ./vault:/vault:ro                # the card's advise node verifies quotes against note text
-      - ./boring.json:/app/boring.json:ro # policy (note_lang) for the card programs' boring_config
+      - ./vault:/vault                   # remember writes notes here when DOOR_REMEMBER_WRITER=python
+      # The folder, not the file: an editor that saves by rename swaps the inode, and a file
+      # bind keeps showing the old one until the container is recreated. config/ holds only
+      # boring.json — the repo root would hand the door .env and .git.
+      - ${BORING_CONFIG_DIR:-./config}:/config:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"   # Mac/Linux: reach host Ollama (gemma4)
     ports:
@@ -134,7 +146,12 @@ services:
   # in the repo (external build) + depends on ~/.hermes: start.sh checks for the image and skips the agent
   # if absent, so the core loop works without it.
   boring-agent:
-    image: hermes-agent:v2026.9.24        # external build pinned to an upstream tag — `make hermes-build`
+    image: boring-agent:v2026.9.24        # derived from the external hermes build (`make hermes-build`) + the engine's dependencies
+    build:
+      context: .
+      dockerfile: agents/hermes/Dockerfile
+      args:
+        HERMES_BASE: hermes-agent:v2026.9.24
     container_name: boring-agent
     restart: unless-stopped
     environment:
@@ -146,12 +163,16 @@ services:
       # Legacy alias: some hermes-agent cron scripts (e.g. ~/.hermes/scripts/briefing.py)
       # still read DRUDGE_URL. Keep both names populated so existing scripts keep working.
       DRUDGE_URL: http://boring-drudge:7700
-      # The card cron jobs' trigger scripts reach the door by service name (omb_env.door_url
+      # The card cron jobs' trigger scripts reach the door by service name (config.door_url
       # reads this; the localhost default is wrong inside the container).
       BORING_DOOR_URL: http://boring-door:7710
       # Tell host-side adapters they are running inside the hermes container and where the repo is.
       BORING_IN_CONTAINER: "1"
       BORING_HOME: /host/oh-my-boring
+      BORING_CONFIG: /config/boring.json
+      # The repo root is mounted read-only at /host/oh-my-boring; put it on the import path so
+      # hermes cron scripts can `import ohmyboring` before the packaging slices install it.
+      PYTHONPATH: /host/oh-my-boring/src
       # The card-button plugin judges presses as the owner — the same token the engine and
       # door already receive (wiki-2069) — and refuses presses from anyone but the owner.
       BORING_OWNER_TOKEN: ${BORING_OWNER_TOKEN:-}
@@ -162,7 +183,7 @@ services:
       - ${HOME}/.codex:/host/.codex:ro      # Codex session transcripts for codex-memory-ingest-worker
       - ${HOME}/.cache/boring-distill:/host/.cache/boring-distill  # shared SessionEnd hook markers (visible to host and container)
       - ./vault:/vault:ro                   # read-only vault so ingest-worker can verify session-id markers in wiki notes
-      - ./boring.json:/host/boring.json:ro  # policy config for ingest-worker.py (note_lang, repo rules)
+      - ${BORING_CONFIG_DIR:-./config}:/config:ro  # boring.json by folder, as for the door
       - .:/host/oh-my-boring:ro             # repo root so hermes cron can run the canonical ingest-worker.py
     extra_hosts:
       - "host.docker.internal:host-gateway"   # Mac: reach host Ollama (gemma4)

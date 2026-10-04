@@ -14,10 +14,13 @@ import time
 from collections.abc import Callable
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 from datetime import UTC
 
 import uptake_core  # noqa: E402
-from drudge_client import DrudgeClient  # noqa: E402
+
+from ohmyboring.adapters.engine import DrudgeClient, SearchKnobs  # noqa: E402
+from ohmyboring.result import Err, Ok  # noqa: E402
 
 MAX_RESULTS = int(os.environ.get("RECALL_MAX_RESULTS") or "3")
 
@@ -136,12 +139,12 @@ def hand_over(client: DrudgeClient, session_id: str, hits: list[dict]) -> bool:
     paths = [h.get("source_path") for h in hits if h.get("source_path")]
     if not session_id or not paths:
         return False
-    try:
-        client.handover(session_id, _utc_now_iso(), paths)
-        return True
-    except Exception as e:  # noqa: BLE001 — fire-and-forget by contract
-        print(f"[omb-recall] handover failed: {e}", file=sys.stderr)
-        return False
+    match client.handover(session_id, _utc_now_iso(), paths):
+        case Ok(_):
+            return True
+        case Err(failure):
+            print(f"[omb-recall] handover failed: {failure}", file=sys.stderr)
+            return False
 
 
 def _utc_now_iso() -> str:
@@ -311,20 +314,24 @@ def run_recall(
         return
 
     client = DrudgeClient(timeout=TIMEOUT, retries=RETRIES)
-    try:
-        # One call for both: the first MAX_RESULTS are injected, the rest are controls.
-        hits = client.search(
-            prompt,
+    # One call for both: the first MAX_RESULTS are injected, the rest are controls.
+    match client.search(
+        prompt,
+        SearchKnobs(
             max_results=MAX_RESULTS + CONTROL_RESULTS,
             max_tokens=MAX_TOKENS,
             related=1,
             related_heads=MAX_RESULTS + CONTROL_RESULTS,
             claims=CLAIMS_PER_HIT,
-        )
-    except Exception as e:
-        print(f"[omb-recall] search failed after {RETRIES} retries: {e}", file=sys.stderr)
-        return  # engine down → no-op (graceful)
+        ),
+    ):
+        case Ok(hits):
+            _inject(data, prompt, client, hits)
+        case Err(failure):
+            print(f"[omb-recall] search failed after {RETRIES} retries: {failure}", file=sys.stderr)
 
+
+def _inject(data: dict, prompt: str, client: DrudgeClient, hits: list[dict]) -> None:
     if not hits:
         return
 

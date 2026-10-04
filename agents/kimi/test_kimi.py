@@ -15,6 +15,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 SHARED_DIR = HERE.parent / "shared"
 sys.path.insert(0, str(SHARED_DIR))
+sys.path.insert(0, str(HERE.parents[1] / "src"))
 
 # Neutralize ambient env so module-load + assertions are deterministic.
 for _var in (
@@ -51,8 +52,12 @@ def _load(name, filename):
 distill = _load("kimi_distill_session", "distill-session.py")
 recall = _load("kimi_recall", "recall.py")
 rules = _load("kimi_rules", "rules.py")
-import omb_env  # noqa: E402
 import recall_core  # noqa: E402
+
+from ohmyboring import config as omb_env  # noqa: E402
+from ohmyboring.adapters import llm as llm_adapter  # noqa: E402
+from ohmyboring.adapters.engine import Unreachable  # noqa: E402
+from ohmyboring.result import Err, Ok  # noqa: E402
 
 
 def test_work_dir_key_format():
@@ -130,7 +135,7 @@ def test_recall_formats_context():
                 )
             ),
         ),
-        mock.patch.object(recall_core.DrudgeClient, "search", return_value=hits),
+        mock.patch.object(recall_core.DrudgeClient, "search", return_value=Ok(hits)),
         mock.patch.object(recall.sys, "stdout", captured),
     ):
         recall.main()
@@ -158,7 +163,7 @@ def test_recall_failed_search_logs_to_stderr():
                     )
                 ),
             ),
-            mock.patch.object(recall_core.DrudgeClient, "search", side_effect=OSError("down")),
+            mock.patch.object(recall_core.DrudgeClient, "search", return_value=Err(Unreachable("down"))),
             mock.patch.object(recall.sys, "stdout", captured),
             mock.patch.object(recall.sys, "stderr", stderr),
         ):
@@ -215,7 +220,7 @@ def test_distill_short_transcript_logs_skip_and_marks_done():
         assert event["workflow_outcome"] == "skip"
 
 
-def test_distill_remember_failure_returns_nonzero_and_marks_retry():
+def test_distill_queues_session_without_calling_the_llm():
     with tempfile.TemporaryDirectory() as session_dir:
         captured = io.StringIO()
         stderr = io.StringIO()
@@ -229,15 +234,19 @@ def test_distill_remember_failure_returns_nonzero_and_marks_retry():
             mock.patch.object(distill, "git_remote_url", return_value=""),
             mock.patch.object(distill, "repo_slug", return_value="repo"),
             mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
-            mock.patch.object(distill, "distill_and_remember", return_value=False),
-            mock.patch.object(distill, "_mark") as mark,
+            mock.patch.object(llm_adapter, "call_llm") as llm,
+            mock.patch.object(distill.distill_queue, "enqueue") as enqueue,
+            mock.patch("urllib.request.urlopen") as urlopen,
         ):
             rc = distill.main()
 
     assert captured.getvalue() == ""
-    assert rc == 1
-    mark.assert_called_once_with("session_abc", retry=True, reason="remember failed")
-    assert "remember failed" in stderr.getvalue()
+    assert rc == 0
+    llm.assert_not_called()
+    urlopen.assert_not_called()
+    item = enqueue.call_args.args[0]
+    assert (item.session_id, item.agent, item.text) == ("session_abc", "kimi", "x" * 600)
+    assert "queued for hermes" in stderr.getvalue()
 
 
 def test_distill_run_returns_nonzero_on_crash():
@@ -422,7 +431,7 @@ if __name__ == "__main__":
     test_recall_failed_search_logs_to_stderr()
     test_distill_invalid_stdin_logs_error()
     test_distill_short_transcript_logs_skip_and_marks_done()
-    test_distill_remember_failure_returns_nonzero_and_marks_retry()
+    test_distill_queues_session_without_calling_the_llm()
     test_distill_run_returns_nonzero_on_crash()
     test_rules_user_prompt_with_trigger_fires()
     test_rules_no_door_url_uses_default_and_fires()

@@ -40,15 +40,17 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-import event_log
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import markers
-import omb_env
 import transcript
-import workflow_contract
-from drudge_client import DrudgeClient, DrudgeNotWritableError, check_drudge_writable
 from vault_note import frontmatter_text
 
-BORING_URL = omb_env.drudge_url()
+from ohmyboring import config as omb_env
+from ohmyboring.adapters import events as event_log
+from ohmyboring.adapters import workflow_contract
+from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
+from ohmyboring.result import Err, Ok
+
 WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
 MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
@@ -204,6 +206,7 @@ def _marked(session_id: str) -> bool:
     return (
         markers.is_done(prefixed)
         or markers.is_pending(prefixed, ttl=PENDING_TTL)
+        or markers.is_retry(prefixed, ttl=PENDING_TTL)
         or markers.is_dead(prefixed)
     )
 
@@ -771,26 +774,27 @@ def main(argv: list[str] | None = None):
         # Distilling costs a full LLM pass; remembering is what needs the DB. Check the write
         # door first so a degraded engine leaves the session pending instead of burning the model
         # on input that cannot be stored — that loop re-ran the same session every cycle.
-        try:
-            check_drudge_writable(DrudgeClient())
-        except DrudgeNotWritableError as exc:
-            print(f"[codex-collect] write door closed: {exc}", file=sys.stderr, flush=True)
-            event_log.try_append_event(
-                "codex-collector",
-                "collector_run",
-                "failed",
-                run_id=run_id,
-                agent="codex",
-                pending=len(todo),
-                batch=len(batch),
-                processed=0,
-                failed=0,
-                remaining=len(todo),
-                mode=label,
-                reason=str(exc),
-                **workflow_contract.collector_run_fields("failed", len(batch)),
-            )
-            return 1
+        match check_drudge_writable(DrudgeClient()):
+            case Err(failure):
+                print(f"[codex-collect] write door closed: {failure}", file=sys.stderr, flush=True)
+                event_log.try_append_event(
+                    "codex-collector",
+                    "collector_run",
+                    "failed",
+                    run_id=run_id,
+                    agent="codex",
+                    pending=len(todo),
+                    batch=len(batch),
+                    processed=0,
+                    failed=0,
+                    remaining=len(todo),
+                    mode=label,
+                    reason=str(failure),
+                    **workflow_contract.collector_run_fields("failed", len(batch)),
+                )
+                return 1
+            case Ok(_):
+                pass
 
         env = dict(os.environ)
         if args.now:

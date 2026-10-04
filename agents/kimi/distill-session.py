@@ -21,18 +21,20 @@ import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-import boring_config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
+import distill_queue
 import transcript
-from distill_core import (  # noqa: F401
-    _distill_resolution,
+from distill_core import (
     _mark,
     _throttled,
-    distill_and_remember,
     git_remote_url,
-    log_skip_event,
     log_uptake_event,
     repo_slug,
 )
+
+from ohmyboring import config as boring_config
+from ohmyboring.distill.resolution_event import log_skip_event
+from ohmyboring.distill.settings import distill_resolution as _distill_resolution
 
 KIMI_HOME = os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code")
 CLAMP = transcript.kimi_distill_clamp()
@@ -177,7 +179,7 @@ def main() -> int:
         return 2
 
     text = extract_session(session_dir)
-    # This path used to hand unbounded text to distill_and_remember and rely on a hardcoded
+    # This path used to hand unbounded text to the distiller and rely on a hardcoded
     # truncation inside it. Clamping here, with this path's own accessor, puts the decision
     # where the other two agents already make it — and makes KIMI_DISTILL_CLAMP mean something.
     text, was_clamped = transcript.clamp_text(text, CLAMP)
@@ -199,14 +201,9 @@ def main() -> int:
             _mark(session_id)
         return 0
 
-    if distill_and_remember(text, origin, repo, session_id):
-        _mark(session_id)
-        print("[omb-distill] remembered", file=sys.stderr)
-        return 0
-    else:
-        _mark(session_id, retry=True, reason="remember failed")
-        print("[omb-distill] remember failed; marked for retry", file=sys.stderr)
-        return 1
+    distill_queue.enqueue(distill_queue.QueueItem(session_id, "kimi", origin, repo, text))
+    print("[omb-distill] queued for hermes", file=sys.stderr)
+    return 0
 
 
 def run() -> int:

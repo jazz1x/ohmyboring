@@ -21,14 +21,13 @@ from store import BoringStore  # noqa: E402
 def boring_deep_agent(
     model: Any,
     *,
-    engine_url: str,
     door_url: str,
     agent_name: str,
     session_id: str,
     tools: Sequence[Any] = (),
     max_results: int = 5,
 ):
-    store = BoringStore(engine_url=engine_url, door_url=door_url)
+    store = BoringStore(door_url=door_url)
     backend = CompositeBackend(
         default=StateBackend(),
         routes={

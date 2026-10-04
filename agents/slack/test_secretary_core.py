@@ -4,14 +4,20 @@
 Run: python3 agents/slack/test_secretary_core.py
 """
 
+import json
 import os
 import sys
+import urllib.request
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 
-import drudge_client as dc  # noqa: E402
 import secretary_core as sc  # noqa: E402
+
+import ohmyboring.adapters.engine as dc  # noqa: E402
+from ohmyboring.result import Ok  # noqa: E402
 
 
 def _hit(src, text, claims=None, total=None):
@@ -41,13 +47,13 @@ def _handover_recorder():
 def _verdict_recorder(result=None):
     calls = []
 
-    def fake(session_id, observed_at, verdict=None, **kw):
-        assert not kw, f"a verdict travels without path lists, got unexpected {sorted(kw)}"
+    def fake(session_id, observed_at, marks):
+        assert isinstance(marks, dc.Verdict), "a verdict travels without path lists"
         calls.append(
             {
                 "session_id": session_id,
                 "observed_at": observed_at,
-                "verdict": verdict,
+                "verdict": marks.verdict,
             }
         )
         return result if result is not None else {"used": 1, "contested": 0, "unknown": []}
@@ -71,7 +77,7 @@ def test_the_answer_is_the_hooks_lines_with_the_claims_under_each():
             total=4,
         ),
     ]
-    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, **kw: hits)
+    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, knobs=None: hits)
     assert "*wiki-0435.md*" in out.text
     assert "[decision] ohmyboring branch-name: fix/..." in out.text
     assert "declared 4, handed over 1" in out.text, "the cut is stated to a person too"
@@ -80,8 +86,9 @@ def test_the_answer_is_the_hooks_lines_with_the_claims_under_each():
 def test_the_search_is_asked_for_claims_like_the_hook_is():
     seen = {}
 
-    def search(q, **kw):
-        seen.update(kw)
+    def search(q, knobs):
+        seen["claims"] = knobs.claims
+        seen["max_results"] = knobs.max_results
         return []
 
     sc.answer("아무 질문이나", search=search)
@@ -90,9 +97,9 @@ def test_the_search_is_asked_for_claims_like_the_hook_is():
 
 
 def test_nothing_found_and_engine_down_are_different_answers():
-    assert sc.answer("이 주제는 없다", search=lambda q, **kw: []).text == sc.NOTHING_FOUND
+    assert sc.answer("이 주제는 없다", search=lambda q, knobs=None: []).text == sc.NOTHING_FOUND
 
-    def down(q, **kw):
+    def down(q, knobs=None):
         raise ConnectionError("refused")
 
     assert sc.answer("엔진이 죽었다", search=down).text == sc.ENGINE_DOWN
@@ -101,7 +108,7 @@ def test_nothing_found_and_engine_down_are_different_answers():
 
 def test_a_question_too_short_to_search_asks_for_one():
     called = []
-    out = sc.answer("<@U1> 응", search=lambda q, **kw: called.append(q) or [])
+    out = sc.answer("<@U1> 응", search=lambda q, knobs=None: called.append(q) or [])
     assert called == [], "two characters are not a question; the engine is not consulted"
     assert out.hits == []
 
@@ -113,7 +120,7 @@ def test_hits_are_exactly_the_notes_the_reader_saw():
         _hit("wiki-1000.md", "the pool question came up again and was settled " * 3),
         _hit("wiki-1001.md", "the cron question came up again and was settled " * 3),
     ]
-    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, **kw: hits)
+    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, knobs=None: hits)
     assert [h["source_path"] for h in out.hits] == [
         "/vault/wiki/wiki-0435.md",
         "/vault/wiki/wiki-1000.md",
@@ -126,9 +133,9 @@ def test_hits_are_exactly_the_notes_the_reader_saw():
 
 
 def test_empty_and_failed_answers_carry_no_hits():
-    assert sc.answer("이 주제는 없다", search=lambda q, **kw: []).hits == []
+    assert sc.answer("이 주제는 없다", search=lambda q, knobs=None: []).hits == []
 
-    def down(q, **kw):
+    def down(q, knobs=None):
         raise ConnectionError("refused")
 
     assert sc.answer("엔진이 죽었다", search=down).hits == []
@@ -137,9 +144,9 @@ def test_empty_and_failed_answers_carry_no_hits():
 def test_the_client_hands_paths_over_under_the_sessions_own_name():
     client = dc.DrudgeClient(base_url="http://drudge.test", retries=0)
     sent = []
-    client._retry = lambda method, path, payload=None, timeout=None: (
+    client.request = lambda method, path, payload=None, timeout=None: (
         sent.append({"method": method, "path": path, "payload": payload})
-        or {"session": "s", "handed": 1, "unknown": []}
+        or Ok({"session": "s", "handed": 1, "unknown": []})
     )
     client.handover("s", "2026-09-21T00:00:00+00:00", ["/vault/wiki/wiki-0435.md"])
     assert sent[0]["method"] == "POST" and sent[0]["path"] == "/handover"
@@ -153,28 +160,26 @@ def test_the_client_hands_paths_over_under_the_sessions_own_name():
 def test_the_client_sends_a_verdict_without_path_lists():
     client = dc.DrudgeClient(base_url="http://drudge.test", retries=0)
     sent = []
-    client._retry = lambda method, path, payload=None, timeout=None: (
-        sent.append(payload) or {"used": 0, "contested": 0}
+    client.request = lambda method, path, payload=None, timeout=None: (
+        sent.append(payload) or Ok({"used": 0, "contested": 0})
     )
-    client.consumption("probe:e1b", "2026-09-21T00:00:00+00:00", verdict="used")
+    client.consumption("probe:e1b", "2026-09-21T00:00:00+00:00", dc.Verdict(verdict="used"))
     assert sent[0]["verdict"] == "used"
     assert "used" not in sent[0] and "contested" not in sent[0], (
         "paths beside a verdict are a 400; the verdict must travel alone"
     )
 
 
-def test_the_client_refuses_a_verdict_beside_path_lists():
-    # Silently dropping the lists would answer 200 for a request the engine never judged.
-    client = dc.DrudgeClient(base_url="http://drudge.test", retries=0)
-    sent = []
-    client._retry = lambda method, path, payload=None, timeout=None: sent.append(payload) or {}
-    try:
-        client.consumption("k", "2026-09-21T00:00:00+00:00", used=["/vault/wiki/a.md"], verdict="used")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("verdict beside paths must raise, not send")
-    assert sent == [], "nothing may reach the engine when the call is ambiguous"
+def test_the_marks_are_a_sum_type_verdict_or_paths():
+    # 옛 묶음이 ValueError 로 막던 "verdict 옆의 목록"은 호출 모양이 없어졌다 —
+    # ConsumptionMarks 는 Verdict | PathMarks 합 타입이라 타입이 구조적으로 막는다.
+    verdict = dc.Verdict(verdict="used")
+    assert verdict.judge is None
+    paths = dc.PathMarks(used=["/vault/wiki/a.md"], judge="owner")
+    assert paths.used == ["/vault/wiki/a.md"]
+    assert paths.contested is None and paths.supersedes is None
+    assert not hasattr(paths, "verdict"), "PathMarks 는 verdict 를 쓰지 않는다"
+    assert not hasattr(verdict, "used"), "Verdict 는 경로 목록을 쓰지 않는다"
 
 
 def test_remember_handed_hands_the_engine_paths():
@@ -257,7 +262,7 @@ def test_an_answer_numbers_its_notes_under_a_head():
         _hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3),
         _hit("wiki-1000.md", "the pool question came up again and was settled " * 3),
     ]
-    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, **kw: hits)
+    out = sc.answer("브랜치 이름 어떻게 정했더라", search=lambda q, knobs=None: hits)
     assert out.text.startswith("_기억에서 찾은 것 2개_"), (
         "the head names the count and marks the message as ours"
     )
@@ -276,13 +281,22 @@ def test_parse_correction_shapes():
 def _remember_recorder():
     calls = []
 
-    def fake(title, body, **kw):
-        calls.append({"title": title, "body": body, **kw})
+    def fake(title, body, provenance):
+        calls.append(
+            {
+                "title": title,
+                "body": body,
+                "tags": provenance.tags,
+                "supersedes": provenance.supersedes,
+                "author": provenance.author,
+                "judge": provenance.judge,
+            }
+        )
         return {
             "source_path": "/vault/wiki/wiki-1077.md",
             "wiki_id": "wiki-1077",
             "duplicate": None,
-            "supersedes": len(kw.get("supersedes") or []),
+            "supersedes": len(provenance.supersedes or []),
             "unknown": 0,
         }
 
@@ -349,6 +363,59 @@ def test_correct_survives_a_dead_engine():
 
     out = sc.correct("slack:C123:1.000", "질문", ["/vault/wiki/wiki-0435.md"], "정정: 무언가", remember=boom)
     assert out == {"error": "refused"}
+
+
+class _Wire:
+    def __init__(self, raw: bytes):
+        self._raw = raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._raw
+
+
+def _live(answer):
+    """live 경로(search=None 등)를 진짜 DrudgeClient 로 타게 한다 — urlopen 만 가짜."""
+
+    def fake(req, timeout):
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    return mock.patch.object(urllib.request, "urlopen", fake)
+
+
+def test_live_answer_folds_an_engine_reply_that_is_not_json_into_engine_down():
+    with _live(_Wire(b"<html>bad gateway</html>")):
+        assert sc.answer("엔진이 헛소리를 한다").text == sc.ENGINE_DOWN
+
+
+def test_live_answer_renders_the_hits_of_an_ok_reply():
+    hits = {"hits": [_hit("wiki-0435.md", "the branch naming question came up again and was settled " * 3)]}
+    with _live(_Wire(json.dumps(hits).encode())):
+        answer = sc.answer("브랜치 이름 규칙이 뭐였지")
+    assert [h["source_path"] for h in answer.hits] == ["/vault/wiki/wiki-0435.md"]
+
+
+def test_live_feedback_folds_a_reset_into_the_old_error_dict():
+    reset = ConnectionResetError(104, "Connection reset by peer")
+    with _live(reset):
+        assert sc.feedback("slack:C123:x", "used") == {"error": str(reset)}
+
+
+def test_live_feedback_reads_an_ok_reply_like_the_injected_path():
+    with _live(_Wire(json.dumps({"used": 0, "contested": 0, "unknown": []}).encode())):
+        assert sc.feedback("slack:C123:x", "used")["unknown_answer"] is True
+
+
+def test_live_remember_handed_survives_a_reply_that_is_not_json():
+    with _live(_Wire(b"oops")):
+        assert sc.remember_handed("slack:C123:x", "질문", [_hit("wiki-0435.md", "x y z")]) is False
 
 
 if __name__ == "__main__":

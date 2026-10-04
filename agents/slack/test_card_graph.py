@@ -20,6 +20,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from unittest import mock
@@ -30,6 +31,7 @@ import card  # noqa: E402
 import card_live  # noqa: E402
 import card_types as cc  # noqa: E402
 import card_verdicts  # noqa: E402
+import card_view  # noqa: E402
 
 OWNER = "U_OWNER"
 CARD_TS = "1.0"
@@ -194,6 +196,16 @@ REPAIR_GROUPS = [
     }
 ]
 
+# The agent's 판정 for that group — the row only rises once a judgment exists.
+REPAIR_JUDGMENTS = {
+    ("foodspring-front", ("foodspring front", "foodspring-front")): cc.RepairJudgment(
+        subject="foodspring-front",
+        variants=["foodspring front", "foodspring-front"],
+        verdict="same_name",
+        reason="같은 서비스를 가리키는 갈라진 철자",
+    )
+}
+
 
 def _fetch(path: str, project: str = "") -> dict:
     return FETCH_DATA[path]
@@ -218,7 +230,11 @@ class Stubs:
         repairs_payload: dict | None = None,
         merged_yesterday_rows: int | None = None,
         proposed_items: list[cc.ProposedVerdict] | None = None,
+        held_repair_subjects: set[str] | None = None,
+        repair_judgment_items: dict | None = None,
     ):
+        self.held_repair_subjects = held_repair_subjects or set()
+        self.repair_judgment_items = repair_judgment_items or {}
         self.resolutions = resolutions if resolutions is not None else RESOLUTIONS
         self.approved_items = approved if approved is not None else PAST_APPROVED
         self.paths_resolve = paths_resolve
@@ -288,6 +304,12 @@ class Stubs:
     def merged_yesterday(self) -> int | None:
         return self.merged_yesterday_rows
 
+    def held_repairs(self) -> set[str]:
+        return self.held_repair_subjects
+
+    def repair_judgments(self) -> dict:
+        return self.repair_judgment_items
+
     def proposed(self, since_hours: int) -> list[cc.ProposedVerdict]:
         assert since_hours == card.REVIEW_SINCE_HOURS
         return self.proposed_items
@@ -322,6 +344,8 @@ class GraphTests(unittest.TestCase):
             repairs=stubs.repairs,
             merged_yesterday=stubs.merged_yesterday,
             proposed=stubs.proposed,
+            held_repairs=stubs.held_repairs,
+            repair_judgments=stubs.repair_judgments,
         )
         return card.build_graph(collabs)
 
@@ -348,6 +372,13 @@ class GraphTests(unittest.TestCase):
                 "post_card",
             },
         )
+
+    def test_the_posted_card_carries_the_configured_note_links(self):
+        links = (card.boring_config.ObsidianLink(vault="v", folder="vault/wiki"),)
+        with mock.patch.object(card.boring_config, "note_links", return_value=links):
+            self.graph.invoke({}, self.cfg)
+        self.assertEqual(len(self.sends), 1)
+        self.assertIn("obsidian://open?vault=v&file=vault%2Fwiki%2F", _blocks_text(self.sends[0]))
 
     def test_advise_stops_after_three_successful_candidates(self):
         out = self.graph.invoke({}, self.cfg)
@@ -701,13 +732,94 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(set(out["per_project_candidates"]), {"proj-x"})
         self.assertEqual(out["per_project_candidates"]["proj-x"], 5)
 
+    def test_the_lane_keeps_judged_same_name_and_unsure_and_drops_the_rest(self):
+        # 판정 세계의 새 계약: generic·판정 없음·보류는 카드에 오르지 않고, 같은 이름·못 가름
+        # 만 오른다. 문에서는 상한(REPAIRS_SCAN_LIMIT)을 받아와 거른다 — 거른 뒤 3개가 안
+        # 차도 실패가 아니다.
+        groups = [
+            {"subject": s, "variants": [s.replace("-", " "), s], "rows": 10 - i, "notes": 1}
+            for i, s in enumerate(
+                ["next-step", "main-page", "make-check", "kb-agent", "test-suite", "spark-connect", "re-work"]
+            )
+        ]
+        judgments = {
+            (s, (s.replace("-", " "), s)): cc.RepairJudgment(
+                subject=s, variants=[s.replace("-", " "), s], verdict="same_name", reason="같은 이름"
+            )
+            for s in ("spark-connect", "re-work")
+        } | {
+            ("next-step", ("next step", "next-step")): cc.RepairJudgment(
+                subject="next-step",
+                variants=["next step", "next-step"],
+                verdict="same_name",
+                reason="같은 이름",
+            ),
+            ("main-page", ("main page", "main-page")): cc.RepairJudgment(
+                subject="main-page", variants=["main page", "main-page"], verdict="unsure", reason="못 가름"
+            ),
+            ("make-check", ("make check", "make-check")): cc.RepairJudgment(
+                subject="make-check",
+                variants=["make check", "make-check"],
+                verdict="generic",
+                reason="흔한 말",
+            ),
+            # kb-agent · test-suite: 판정이 아직 없다 — 카드에 오르지 않는다.
+        }
+        for held, shown in (
+            (set(), ["next-step", "main-page", "spark-connect"]),
+            ({"next-step"}, ["main-page", "spark-connect", "re-work"]),
+        ):
+            stubs = Stubs(
+                repairs_payload={"groups": groups, "total_groups": 5},
+                held_repair_subjects=held,
+                repair_judgment_items=judgments,
+            )
+            out = self._build(stubs).invoke({}, {"configurable": {"thread_id": f"test-held-{len(held)}"}})
+            self.assertEqual(stubs.repairs_calls, [card_live.REPAIRS_SCAN_LIMIT])
+            self.assertEqual([r.subject for r in out["repairs"]], shown)
+
+    def test_the_judgment_rides_the_row_it_belongs_to(self):
+        stubs = Stubs(
+            repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 5},
+            repair_judgment_items=REPAIR_JUDGMENTS,
+        )
+        out = self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-judgment-rides"}})
+        (row,) = out["repairs"]
+        self.assertIsNotNone(row.judgment)
+        self.assertEqual(row.judgment.verdict, "same_name")
+        self.assertEqual(row.judgment.reason, "같은 서비스를 가리키는 갈라진 철자")
+        self.assertEqual(row.judgment.variants, ["foodspring front", "foodspring-front"])
+
+    def test_the_posted_card_stays_inside_the_size_budget(self):
+        long = "가" * 300
+        reviews = [
+            cc.ProposedVerdict(
+                session_id=f"s{i}",
+                note=f"/vault/wiki/wiki-{700 + i:04d}.md",
+                kind="used",
+                at=f"t-{i}",
+                reason=long,
+                note_title=long,
+                work=long,
+            )
+            for i in range(7)
+        ]
+        built = card_view.build_blocks([], reviews=reviews, lang="ko")
+        self.assertGreater(card_view.card_chars(built), card_view.CARD_CHARS_BUDGET)
+        self._build(Stubs(proposed_items=reviews)).invoke({}, {"configurable": {"thread_id": "test-budget"}})
+        self.assertLessEqual(card_view.card_chars(self.sends[-1]), card_view.CARD_CHARS_BUDGET)
+
     def test_read_repairs_populates_state_once_and_a_dead_door_refuses_the_card(self):
         # AC4: the door's GET is called exactly once, its groups land in state, and a
         # 5xx/unreachable door — same principle as /approved — refuses the card outright.
-        stubs = Stubs(repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 5}, merged_yesterday_rows=12)
+        stubs = Stubs(
+            repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 5},
+            merged_yesterday_rows=12,
+            repair_judgment_items=REPAIR_JUDGMENTS,
+        )
         graph = self._build(stubs)
         out = graph.invoke({}, {"configurable": {"thread_id": "test-read-repairs"}})
-        self.assertEqual(stubs.repairs_calls, [card_live.REPAIRS_LIMIT])
+        self.assertEqual(stubs.repairs_calls, [card_live.REPAIRS_SCAN_LIMIT])
         self.assertEqual(out["repairs_total_groups"], 5)
         self.assertEqual(out["merged_yesterday_rows"], 12)
         self.assertEqual([r.subject for r in out["repairs"]], ["foodspring-front"])
@@ -1195,6 +1307,8 @@ class DryRunWiringTests(unittest.TestCase):
                 card_live, "_live_repairs", side_effect=lambda limit: {"groups": [], "total_groups": 0}
             ),
             mock.patch.object(card_live, "_live_merged_yesterday", side_effect=lambda: None),
+            mock.patch.object(card_live, "_live_repair_judgments", side_effect=lambda: {}),
+            mock.patch.object(card_live, "_held_repair_subjects", side_effect=set),
             mock.patch.object(card, "make_propose", return_value=stubs.propose),
             contextlib.redirect_stdout(buf),
         ):
@@ -1218,18 +1332,20 @@ class DryRunWiringTests(unittest.TestCase):
 
 class LiveFetchTests(unittest.TestCase):
     """M1: _live_fetch must send `project` in the POST body — a mutant that calls
-    `_retry("POST", path, {})` (project dropped) makes the whole project axis silently
-    degrade to identical unfiltered reads. Patches DrudgeClient._retry itself, not
+    `request("POST", path, {})` (project dropped) makes the whole project axis silently
+    degrade to identical unfiltered reads. Patches DrudgeClient.request itself, not
     _live_fetch, so it observes exactly what goes over the wire."""
 
     def test_project_is_always_sent_in_the_post_body(self):
+        from ohmyboring.result import Ok
+
         calls: list[tuple[str, str, dict]] = []
 
-        def fake_retry(self, method, path, payload=None, timeout=None):
+        def fake_request(self, method, path, payload=None, timeout=None):
             calls.append((method, path, payload))
-            return {"rows": []} if path == "/recurrences" else {"answer": "", "sources": []}
+            return Ok({"rows": []} if path == "/recurrences" else {"answer": "", "sources": []})
 
-        with mock.patch.object(card_live.DrudgeClient, "_retry", fake_retry):
+        with mock.patch.object(card_live.DrudgeClient, "request", fake_request):
             card_live._live_fetch("/risks", "proj-a")
             card_live._live_fetch("/recurrences", "")
         self.assertIn(("POST", "/risks", {"project": "proj-a"}), calls)
@@ -1577,11 +1693,20 @@ class LivePastVerdictsTests(unittest.TestCase):
 class LiveProposedTests(unittest.TestCase):
     """r3.1: the review lane's surviving mutations — the verdict_proposed rows come back
     contested first, newest first, capped at REVIEW_LIMIT. A mutant dropping the contested
-    sort, reversing the newest-first order, or removing the cap must each kill this."""
+    sort, reversing the newest-first order, or removing the cap must each kill this. The
+    rows now also carry the reason sentence, fold the same (note, kind) proposed by several
+    sessions into one grouped row, leave a pair the owner held (보류) within the 이레
+    window off the card, and carry a successful 「맡길게요」 judgment's 이유 in place of the
+    scorer's sentence (the kind line stays the session's own claim; word-flag stamps and
+    failure 사건 are not judgments and must not override anything)."""
 
     @staticmethod
-    def _events(rows: list[dict]):
+    def _events(rows: list[dict], held: list[dict] | None = None, seen: dict | None = None):
         def fake(event_name: str, since_hours: int):
+            if seen is not None:
+                seen[event_name] = since_hours
+            if event_name == "verdict_reviewed":
+                return held or []
             assert event_name == "verdict_proposed"
             return rows
 
@@ -1602,6 +1727,297 @@ class LiveProposedTests(unittest.TestCase):
             ["s-contested-5", "s-contested-4", "s-contested-2"],
         )
         self.assertEqual(len(out), card_live.REVIEW_LIMIT)
+
+    def test_the_hold_window_read_uses_the_ire_window(self):
+        seen: dict[str, list[int]] = {}
+        rows = [
+            {
+                "attributes": {"session_id": "s-1", "note": "/n1.md", "kind": "used"},
+                "observed_at": "2026-09-29T00:00:00+00:00",
+            }
+        ]
+
+        def fake(event_name: str, since_hours: int):
+            seen.setdefault(event_name, []).append(since_hours)
+            return rows if event_name == "verdict_proposed" else []
+
+        with mock.patch.object(card_live, "_live_events", side_effect=fake):
+            card_live._live_proposed(24)
+        # 보류 읽기는 이레 창, 맡긴 판정 읽기는 제안과 같은 창 — 각각 고정한다
+        self.assertEqual(seen["verdict_proposed"], [24])
+        self.assertEqual(sorted(seen["verdict_reviewed"]), [24, 168])
+
+    def test_the_reason_sentence_rides_the_row_and_old_rows_say_none(self):
+        rows = [
+            {
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-0700.md",
+                    "kind": "contested",
+                    "reason": "채점기가 잡은 문장입니다.",
+                },
+                "observed_at": "2026-09-29T00:00:00+00:00",
+            },
+            {
+                "attributes": {"session_id": "s-2", "note": "/vault/wiki/wiki-0701.md", "kind": "used"},
+                "observed_at": "2026-09-28T00:00:00+00:00",
+            },
+        ]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows)):
+            out = card_live._live_proposed(24)
+        self.assertEqual(out[0].reason, "채점기가 잡은 문장입니다.")
+        self.assertEqual(out[1].reason, "")
+
+    def test_the_same_note_judged_the_same_way_folds_into_one_row(self):
+        rows = [
+            {
+                "attributes": {
+                    "session_id": "s-new",
+                    "note": "/vault/wiki/wiki-2498.md",
+                    "kind": "contested",
+                    "reason": "첫째 근거 문장입니다.",
+                },
+                "observed_at": "2026-09-30T00:00:00+00:00",
+            },
+            {
+                "attributes": {
+                    "session_id": "s-old",
+                    "note": "/vault/wiki/wiki-2498.md",
+                    "kind": "contested",
+                },
+                "observed_at": "2026-09-29T00:00:00+00:00",
+            },
+            {
+                "attributes": {"session_id": "s-other", "note": "/vault/wiki/wiki-2498.md", "kind": "used"},
+                "observed_at": "2026-09-28T00:00:00+00:00",
+            },
+        ]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows)):
+            out = card_live._live_proposed(24)
+        # contested가 머리고, 같은 (노트, 판정) 묶음이 한 줄 — 작업만 다륾던 두 줄이 사라졌다
+        self.assertEqual([p.session_id for p in out], ["s-new", "s-other"])
+        grouped = out[0]
+        self.assertEqual(grouped.sessions, ["s-new", "s-old"])
+        self.assertEqual(grouped.reason, "첫째 근거 문장입니다.")
+        ungrouped = out[1]
+        self.assertEqual(ungrouped.sessions, [])
+        self.assertEqual(ungrouped.reason, "")
+
+    def test_a_pair_held_within_the_ire_window_stays_off_the_card(self):
+        rows = [
+            {
+                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-2498.md", "kind": "contested"},
+                "observed_at": "2026-09-30T00:00:00+00:00",
+            },
+            {
+                "attributes": {"session_id": "s-2", "note": "/vault/wiki/wiki-2498.md", "kind": "used"},
+                "observed_at": "2026-09-29T00:00:00+00:00",
+            },
+        ]
+        held = [
+            {
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-2498.md",
+                    "proposed_kind": "contested",
+                    "card_ts": "1.0",
+                    "sessions": ["s-1"],
+                    "choice": "defer",
+                },
+                "observed_at": "2026-09-30T12:00:00+00:00",
+            }
+        ]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows, held=held)):
+            out = card_live._live_proposed(24)
+        # 보류한 짝(틀린 노트)만 빠지고, 다른 판정(쓴 노트)은 그대로 오른다
+        self.assertEqual([p.kind for p in out], ["used"])
+
+        # 판정을 남긴 줄(agree/flip/delegate)은 억제하지 않는다 — 보류 사걸만 본다
+        judged = [{**held[0], "attributes": {**held[0]["attributes"], "choice": "agree"}}]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows, held=judged)):
+            out = card_live._live_proposed(24)
+        self.assertEqual([p.kind for p in out], ["contested", "used"])
+
+    def test_a_malformed_hold_row_raises_not_skips(self):
+        rows = [
+            {
+                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-2498.md", "kind": "contested"},
+                "observed_at": "2026-09-30T00:00:00+00:00",
+            }
+        ]
+        held = [{"attributes": {"choice": "defer", "note": "/vault/wiki/wiki-2498.md"}}]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows, held=held)):
+            with self.assertRaises(ValueError):
+                card_live._live_proposed(24)
+
+    def test_a_delegated_judgments_reason_replaces_the_rows_reason(self):
+        # 맡긴 판정의 이유 한 줄이 다음 카드에 보인다 — 짝의 종류 줄은 세션이 말한 것을
+        # 말하는 문구라 판정에 따라 바뀌지 않고, 판정 종류(뒤집힘 포함)는 엔진 간선에만 실린다
+        rows = [
+            {
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-2498.md",
+                    "kind": "contested",
+                    "reason": "채점이 잡은 옛 문장",
+                },
+                "observed_at": "2026-09-30T00:00:00+00:00",
+            },
+            {
+                "attributes": {"session_id": "s-2", "note": "/vault/wiki/wiki-2300.md", "kind": "used"},
+                "observed_at": "2026-09-29T00:00:00+00:00",
+            },
+        ]
+        delegated = [
+            {
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-2498.md",
+                    "proposed_kind": "contested",
+                    "card_ts": "1.0",
+                    "choice": "delegate",
+                    "judge": "agent:delegated",
+                    "kind": "used",  # 모델이 '틀리다' — 뒤집힌 판정
+                    "reason": "모델이 본 이유",
+                },
+                "observed_at": "2026-09-30T12:00:00+00:00",
+            }
+        ]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows, held=delegated)):
+            out = card_live._live_proposed(24)
+        self.assertEqual(
+            [(p.note, p.kind) for p in out],
+            [
+                ("/vault/wiki/wiki-2498.md", "contested"),
+                ("/vault/wiki/wiki-2300.md", "used"),
+            ],
+        )
+        self.assertEqual(out[0].reason, "모델이 본 이유")
+        self.assertEqual(out[1].reason, "")
+
+    def test_delegate_stamps_and_failures_are_not_judgments(self):
+        # b300c46 가 찍던 옛 도장 사건(choice=delegate 인데 kind·reason 이 없음)과 실패
+        # 사건(error)은 판정이 아니다 — 행의 이유를 덮지 않는다. 덮는 변이가 이 시험으로 사망
+        rows = [
+            {
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-2498.md",
+                    "kind": "contested",
+                    "reason": "원래 근거 문장",
+                },
+                "observed_at": "2026-09-30T00:00:00+00:00",
+            }
+        ]
+        base = {
+            "session_id": "s-1",
+            "note": "/vault/wiki/wiki-2498.md",
+            "proposed_kind": "contested",
+            "card_ts": "1.0",
+            "choice": "delegate",
+            "judge": "agent:delegated",
+        }
+        old_stamp = [{**base, "attributes": dict(base)}]
+        old_stamp[0]["attributes"].pop("judge")
+        failure = [
+            {
+                "attributes": {**base, "error": "모델 답이 JSON 이 아니다"},
+                "observed_at": "2026-09-30T12:00:00+00:00",
+            }
+        ]
+        old_stamp[0]["observed_at"] = "2026-09-30T11:00:00+00:00"
+        for reviewed in (old_stamp, failure):
+            with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows, held=reviewed)):
+                out = card_live._live_proposed(24)
+            self.assertEqual(out[0].reason, "원래 근거 문장")
+
+    def test_the_newest_delegated_judgment_wins(self):
+        rows = [
+            {
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-2498.md",
+                    "kind": "contested",
+                    "reason": "원래 근거 문장",
+                },
+                "observed_at": "2026-09-30T00:00:00+00:00",
+            }
+        ]
+        delegated = [
+            {
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-2498.md",
+                    "proposed_kind": "contested",
+                    "card_ts": "1.0",
+                    "choice": "delegate",
+                    "kind": "contested",
+                    "reason": "첫째 판정 이유",
+                },
+                "observed_at": "2026-09-30T11:00:00+00:00",
+            },
+            {
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-2498.md",
+                    "proposed_kind": "contested",
+                    "card_ts": "2.0",
+                    "choice": "delegate",
+                    "kind": "used",
+                    "reason": "둘째 판정 이유",
+                },
+                "observed_at": "2026-09-30T12:00:00+00:00",
+            },
+        ]
+        with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows, held=delegated)):
+            out = card_live._live_proposed(24)
+        self.assertEqual(out[0].reason, "둘째 판정 이유")
+
+    def test_a_repeated_row_shows_once_with_the_note_title_and_the_session_note(self):
+        with tempfile.TemporaryDirectory() as vault:
+            wiki = os.path.join(vault, "wiki")
+            os.makedirs(wiki)
+            with open(os.path.join(wiki, "wiki-2216.md"), "w", encoding="utf-8") as f:
+                f.write("---\nid: wiki-2216\ntitle: '폴더 관례'\nproject: ohmyboring\n---\nbody\n")
+            with open(os.path.join(wiki, "wiki-2300.md"), "w", encoding="utf-8") as f:
+                f.write(
+                    "---\nid: wiki-2300\ntitle: 구조 개편 조각 3d\nproject: ohmyboring\n"
+                    "date: 2026-09-29\nomb_session_id: s-1\n---\nbody\n"
+                )
+            row = {
+                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-2216.md", "kind": "used"},
+                "observed_at": "2026-09-29T23:54:47+00:00",
+            }
+            with (
+                mock.patch.dict(os.environ, {"BORING_VAULT_DIR": vault}),
+                mock.patch.object(card_live, "_live_events", side_effect=self._events([row, dict(row)])),
+            ):
+                out = card_live._live_proposed(24)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].note_title, "폴더 관례")
+        self.assertEqual(out[0].work, "ohmyboring · 09-29 · 구조 개편 조각 3d")
+
+    def test_a_non_utf8_note_and_a_second_session_note_do_not_change_the_row(self):
+        with tempfile.TemporaryDirectory() as vault:
+            wiki = os.path.join(vault, "wiki")
+            os.makedirs(wiki)
+            with open(os.path.join(wiki, "wiki-0100.md"), "w", encoding="utf-8") as f:
+                f.write("---\ntitle: 첫 노트\nproject: p\ndate: 2026-09-01\nomb_session_id: s-1\n---\nb\n")
+            with open(os.path.join(wiki, "wiki-0200.md"), "w", encoding="utf-8") as f:
+                f.write("---\ntitle: 둘째 노트\nproject: p\ndate: 2026-09-02\nomb_session_id: s-1\n---\nb\n")
+            with open(os.path.join(wiki, "wiki-0300.md"), "wb") as f:
+                f.write(b"---\ntitle: \xff\xfe broken\n---\n")
+            row = {
+                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-0300.md", "kind": "used"},
+                "observed_at": "2026-09-29T23:54:47+00:00",
+            }
+            with (
+                mock.patch.dict(os.environ, {"BORING_VAULT_DIR": vault}),
+                mock.patch.object(card_live, "_live_events", side_effect=self._events([row])),
+            ):
+                out = card_live._live_proposed(24)
+        self.assertEqual(out[0].work, "p · 09-01 · 첫 노트", "the session's first note names it, every run")
+        self.assertIn("broken", out[0].note_title)
 
 
 class MainTests(unittest.TestCase):

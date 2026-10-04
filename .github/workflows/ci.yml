@@ -32,7 +32,7 @@ jobs:
       # installed it and the job was green because the runner image ships it — an accident, not a
       # gate. scripts/test_python_deps.py fails if this list and the imports drift apart.
       - name: install the declared Python dependency
-        run: python3 -m pip install --quiet -r requirements.txt -r requirements-dev.txt
+        run: python3 -m pip install --quiet -r requirements.txt -r requirements-dev.txt .
       # scripts/guard.sh = rustfmt --check + clippy -D warnings + test (스택-프리).
       - name: structural gate (guard.sh)
         run: ./scripts/guard.sh
@@ -120,6 +120,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.x"
+      # before the DB gate suites: search/test_pg.py imports psycopg
+      - name: install python deps (door + search/pg.py)
+        run: |
+          pip install -r requirements.txt
+          pip install .
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -136,7 +141,7 @@ jobs:
       # short-circuited) because `cargo test` refuses to start a later test binary once an earlier
       # one has failed — running them as one invocation would silently hide every suite after the
       # first failure.
-      - name: DB gate suites (every drudge/tests/*.rs)
+      - name: DB gate suites (every drudge/tests/*.rs + search/pg.py integration)
         env:
           BORING_TEST_DATABASE_URL: postgresql://boring:boring@127.0.0.1:5432/boring
         run: |
@@ -150,6 +155,27 @@ jobs:
             fi
             echo "::endgroup::"
           done
+          cd "$GITHUB_WORKSPACE"
+          # The door's python /search store queries (search/pg.py) — same disposable-DB
+          # convention: a separate schema, dropped afterwards. Skips without the URL.
+          echo "::group::python search/pg.py integration"
+          if ! python3 src/ohmyboring/search/test_pg.py; then
+            echo "FAILED: search/test_pg.py"
+            fail=1
+          fi
+          echo "::endgroup::"
+          echo "::group::python remember/writer.py integration"
+          if ! python3 src/ohmyboring/remember/test_writer.py; then
+            echo "FAILED: remember/test_writer.py"
+            fail=1
+          fi
+          echo "::endgroup::"
+          echo "::group::python registers read-path integration"
+          if ! python3 src/ohmyboring/registers/test_pg.py; then
+            echo "FAILED: registers/test_pg.py"
+            fail=1
+          fi
+          echo "::endgroup::"
           exit "$fail"
       - name: reset DB (DB gate suites leave rows behind; drudge/eval-gate need a clean corpus)
         run: |
@@ -177,15 +203,27 @@ jobs:
           docker compose --profile vector up -d --build boring-drudge boring-postgres
           for _ in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:7700/health >/dev/null 2>&1 && break; sleep 3; done
           curl -sf -m3 http://127.0.0.1:7700/health
+      # The door's own POST /search (python engine E2a) answers from the same DB the engine
+      # synced — started here so eval-gate.sh can run the golden set through it afterwards.
+      - name: start door (python /search path)
+        run: |
+          DOOR_PG_DSN=postgresql://boring:boring@127.0.0.1:5432/boring \
+          DOOR_UPSTREAM=http://127.0.0.1:7700 \
+          BORING_LLM_BASE_URL=http://127.0.0.1:11434/v1 \
+          python3 -m uvicorn agents.door.door:app --host 127.0.0.1 --port 7710 &
+          for _ in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:7710/health >/dev/null 2>&1 && break; sleep 1; done
+          curl -sf -m3 http://127.0.0.1:7710/health
       # A DB upgraded from the shipped schema must equal one built fresh. Every other DB suite
       # starts from an empty container, so "the migration was never written" is invisible to
       # them — and it already shipped once.
       - name: schema parity (upgraded DB == fresh DB)
         run: ./scripts/test_schema_parity.sh
 
-      - name: behavioral gate (eval-gate.sh)
+      - name: behavioral gate (eval-gate.sh — drudge + door python /search)
         env:
           BORING_URL: http://127.0.0.1:7700
+          # The same golden run through the door's python /search (E2a); both must be 22/22.
+          BORING_EVAL_EXTRA_URL: http://127.0.0.1:7710
         run: ./scripts/eval-gate.sh
       - name: engine contract parity (MCP tools · HTTP routes · GET shapes == data/contract snapshot)
         env:

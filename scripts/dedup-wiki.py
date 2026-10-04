@@ -16,8 +16,10 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "agents", "shared"))
-import omb_env  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "src"))
 from vault_note import split_frontmatter  # noqa: E402
+
+from ohmyboring import config as omb_env  # noqa: E402
 
 DEFAULT_THRESHOLD = 0.93
 

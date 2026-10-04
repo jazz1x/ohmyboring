@@ -1771,10 +1771,9 @@ async fn said_by_owner_writes_said_edges_that_sync_rebuilds_from_the_file() {
     let doc_said = format!("doc:{path_said}");
     assert_eq!(said_edges(&db, &doc_said).await, vec![None]);
     assert_eq!(said_edges(&db, &claim_node).await, vec![None]);
-    assert!(
-        said_edges(&db, &format!("doc:{path_plain}"))
-            .await
-            .is_empty()
+    assert_eq!(
+        said_edges(&db, &format!("doc:{path_plain}")).await,
+        Vec::<Option<String>>::new()
     );
     assert_eq!(author_of(&db, &path_said).await, "unknown");
     assert_eq!(author_of(&db, &path_plain).await, "unknown");
@@ -1796,10 +1795,9 @@ async fn said_by_owner_writes_said_edges_that_sync_rebuilds_from_the_file() {
     }
     assert_eq!(said_edges(&db, &doc_said).await, vec![None]);
     assert_eq!(said_edges(&db, &claim_node).await, vec![None]);
-    assert!(
-        said_edges(&db, &format!("doc:{path_plain}"))
-            .await
-            .is_empty()
+    assert_eq!(
+        said_edges(&db, &format!("doc:{path_plain}")).await,
+        Vec::<Option<String>>::new()
     );
     assert_eq!(
         row_said_by(&db, &subject).await,

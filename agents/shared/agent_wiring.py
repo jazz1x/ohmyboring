@@ -22,7 +22,8 @@ from pathlib import Path
 
 # Allow import of shared agent policy library regardless of how this script is invoked.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
-import boring_config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
+from ohmyboring import config as boring_config
 
 BORING_HOME = os.environ.get("BORING_HOME") or os.path.expanduser("~/oh-my-boring")
 
@@ -64,7 +65,7 @@ AGENTS = {
 
 DEFAULT_MCP_SERVER = {
     "type": "http",
-    "url": "http://localhost:7700/mcp",
+    "url": "http://localhost:7710/mcp",
 }
 
 CODEX_HOST_WORKER_LABEL = "com.ohmyboring.codex-ingest"
@@ -109,6 +110,43 @@ def _backup(path: Path) -> Path:
 
 _SCRIPT_TOKEN = re.compile(r"\S+\.(?:py|sh|mjs|js)\b")
 
+#: Repo-relative scripts wire_claude_code owns, one role each. A hook registration is "ours,
+#: role R" when its script token names <checkout>/<R> and <checkout> really is an oh-my-boring
+#: checkout — every checkout carries agents/shared/agent_wiring.py, and requiring that marker
+#: keeps a stranger's unrelated hooks/recall.py out of our hands.
+_CLAUDE_CODE_ROLE_SCRIPTS = (
+    "hooks/distill-session.py",
+    "hooks/recall.py",
+    "hooks/rules.py",
+    "agents/claude-code/session-start-recall.py",
+)
+_CHECKOUT_MARKER = ("agents", "shared", "agent_wiring.py")
+
+
+def _command_roles(command: str) -> set[tuple[Path, str]]:
+    """(resolved checkout root, owned role) pairs for a command's raw script tokens.
+
+    The token is `~`-expanded but its file is NOT resolved: in a real checkout hooks/*.py are
+    symlinks into agents/claude-code/, so a resolved path ends in the link target and the role
+    suffix never matches. Measured 2026-10-01 against a copy of the real settings.json: only
+    session-start-recall.py — the one real file — was repointed; the three symlinked roles
+    survived. The root is resolved only after the suffix strip, so a checkout reached through
+    a symlinked home directory still compares equal to BORING_HOME.
+    """
+    out = set()
+    for token in _SCRIPT_TOKEN.findall(command or ""):
+        try:
+            parts = Path(token).expanduser().parts
+        except (OSError, RuntimeError):
+            continue
+        for role in _CLAUDE_CODE_ROLE_SCRIPTS:
+            role_parts = Path(role).parts
+            if len(parts) > len(role_parts) and parts[-len(role_parts) :] == role_parts:
+                root = Path(*parts[: -len(role_parts)])
+                if (root / Path(*_CHECKOUT_MARKER)).exists():
+                    out.add((root.resolve(), role))
+    return out
+
 
 def _hook_scripts(command: str) -> set:
     """The real files a hook command runs, resolved through `~` and symlinks.
@@ -132,12 +170,16 @@ def _hook_scripts(command: str) -> set:
 
 
 def _already_wired(settings: dict, command: str) -> bool:
-    """True when some registered hook already runs the same script this command runs.
+    """True when the current checkout already registers the role this command installs.
 
-    Falls back to the old substring comparison for commands that name no script file, so hooks
-    that are pure shell keep the behaviour they had.
+    The same role from another checkout is a different file and does not count — saying it
+    does would leave settings pointing at a checkout that may be stale. Falls back to the old
+    substring comparison for commands that name no script file, so hooks that are pure shell
+    keep the behaviour they had.
     """
     wanted = _hook_scripts(command)
+    current = Path(BORING_HOME).resolve()
+    wanted_roles = {role for root, role in _command_roles(command) if root == current}
     for group in settings.get("hooks", {}).values():
         if not isinstance(group, list):
             continue
@@ -152,21 +194,32 @@ def _already_wired(settings: dict, command: str) -> bool:
                     return True
                 if not wanted and command in existing:
                     return True
+                if wanted_roles and any(
+                    root == current and role in wanted_roles for root, role in _command_roles(existing)
+                ):
+                    return True
     return False
 
 
 def _drop_duplicate_hooks(settings: dict, commands) -> int:
-    """Keep one registration per script we own; report how many were removed.
+    """Keep one registration per hook role, rooted at this checkout; report removals.
 
     The installer created these before it could see past path spellings, and they stay until
     something takes them out -- an install that only stops adding duplicates leaves every
-    machine that already ran it injecting twice.
+    machine that already ran it injecting twice. Comparing resolved script files fixed two
+    spellings of one checkout, but two checkouts are two files: the same role registered from
+    the other checkout looked like a different hook and stayed. Measured 2026-10-01 in
+    ~/.claude/settings.json: every role registered once per checkout (main and migration), so
+    every session got recall injected twice and was distilled twice (2026-09-30 e1c7377b).
+    Roles are matched from the raw script token, not the resolved file, because the checkout's
+    hooks/*.py are symlinks whose targets match no role (_command_roles).
     """
     ours = set()
     for command in commands:
         ours |= _hook_scripts(command)
     if not ours:
         return 0
+    current = Path(BORING_HOME).resolve()
     seen = set()
     removed = 0
     for groups in settings.get("hooks", {}).values():
@@ -177,11 +230,18 @@ def _drop_duplicate_hooks(settings: dict, commands) -> int:
                 continue
             kept = []
             for h in entry["hooks"]:
-                scripts = _hook_scripts(h.get("command") or "") & ours if isinstance(h, dict) else set()
-                if scripts and scripts & seen:
+                if not isinstance(h, dict):
+                    kept.append(h)
+                    continue
+                existing = h.get("command") or ""
+                if any(root != current for root, _ in _command_roles(existing)):
                     removed += 1
                     continue
-                seen |= scripts
+                own = _hook_scripts(existing) & ours
+                if own and own & seen:
+                    removed += 1
+                    continue
+                seen |= own
                 kept.append(h)
             entry["hooks"] = kept
     for key, groups in list(settings.get("hooks", {}).items()):
@@ -576,6 +636,7 @@ _HERMES_ENTRY_SCRIPT_NAMES = (
     "ingest-worker.py",
     "run-morning-card.py",
     "run-weekly-card.py",
+    "run-repair-judge.py",
 )
 
 #: Entries with an installer of their own further down. Copying them here as well would run
@@ -623,6 +684,12 @@ def _local_module_deps(script: Path, search_dirs: tuple[Path, ...] = ()) -> set[
             else:
                 continue
             for name in names:
+                if name == "ohmyboring":
+                    # The hermes container puts the repo root on PYTHONPATH, so the package
+                    # imports without copying; a flat copy would land its modules nowhere
+                    # Python looks for a package. Skipping here is the copy list keeping the
+                    # same guarantee — everything else still has to resolve or abort.
+                    continue
                 found = next((d / f"{name}.py" for d in dirs if (d / f"{name}.py").exists()), None)
                 if found is None:
                     if name not in sys.stdlib_module_names:
@@ -745,27 +812,6 @@ def _default_hermes_deliver(jobs: list[dict]) -> str:
         if j.get("name") == "morning-briefing":
             return j.get("deliver", "local")
     return "local"
-
-
-def _install_hermes_skills(boring_home: str | None = None) -> None:
-    """Install oh-my-boring managed hermes-agent skills into ~/.hermes/skills/."""
-    home = boring_home if boring_home is not None else BORING_HOME
-    src_dir = Path(home) / "agents" / "hermes" / "skills"
-    if not src_dir.exists():
-        return
-    dst_root = Path(os.path.expanduser("~/.hermes/skills"))
-    dst_root.mkdir(parents=True, exist_ok=True)
-    for skill_dir in src_dir.iterdir():
-        if not skill_dir.is_dir():
-            continue
-        dst = dst_root / skill_dir.name
-        dst.mkdir(parents=True, exist_ok=True)
-        legacy_nested = dst / skill_dir.name
-        if legacy_nested.is_dir():
-            shutil.rmtree(legacy_nested)
-        for src_file in skill_dir.iterdir():
-            if src_file.is_file():
-                shutil.copy2(src_file, dst / src_file.name)
 
 
 #: The plugins hermes loads — the checkout is the source of truth; the installed copies
@@ -983,6 +1029,10 @@ def _ensure_memory_ingest_worker(
     """Ensure the autonomous 20-minute session-ingestion worker job exists and points to the
     canonical repo script. This job is intentionally not exposed in boring.json hermes_cron_jobs
     because it is infrastructure, not user scheduling.
+
+    The job runs `no_agent: true` with no skill: the script offers eligible sessions to the
+    shared distill queue and drains it through the LangGraph engine itself, so hermes must
+    never call a model for it — not even when the script exits non-zero.
     """
     script = "ingest-worker.py"
     desired_schedule = {"kind": "interval", "minutes": 20, "display": "every 20m"}
@@ -992,8 +1042,9 @@ def _ensure_memory_ingest_worker(
             existing.get("script") != script
             or existing.get("schedule") != desired_schedule
             or not existing.get("enabled", True)
-            or existing.get("skill") != "memory-ingest"
-            or existing.get("no_agent", True) is not False
+            or existing.get("skill") is not None
+            or existing.get("skills") != []
+            or existing.get("no_agent") is not True
         )
         if not needs_update:
             return False
@@ -1002,9 +1053,9 @@ def _ensure_memory_ingest_worker(
         existing["schedule_display"] = "every 20m"
         existing["enabled"] = True
         existing["state"] = "scheduled"
-        existing["skills"] = ["memory-ingest"]
-        existing["skill"] = "memory-ingest"
-        existing["no_agent"] = False
+        existing["skills"] = []
+        existing["skill"] = None
+        existing["no_agent"] = True
         existing["next_run_at"] = (now + datetime.timedelta(minutes=1)).isoformat()
         existing["paused_at"] = None
         existing["paused_reason"] = None
@@ -1015,13 +1066,13 @@ def _ensure_memory_ingest_worker(
             "id": secrets.token_hex(8),
             "name": "memory-ingest-worker",
             "prompt": "",
-            "skills": ["memory-ingest"],
-            "skill": "memory-ingest",
+            "skills": [],
+            "skill": None,
             "model": None,
             "provider": None,
             "base_url": None,
             "script": script,
-            "no_agent": False,
+            "no_agent": True,
             "context_from": None,
             "schedule": desired_schedule,
             "schedule_display": "every 20m",
@@ -1112,7 +1163,7 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
     _backup(path)
 
     server_name = "ohmyboring"
-    url = "http://boring-drudge:7700/mcp"
+    url = "http://boring-door:7710/mcp"
     transport = "http"
 
     text = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -1130,7 +1181,6 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
         _install_hermes_briefing(briefing_sources)
         _install_hermes_weekly_briefing(boring_home)
         _install_hermes_codex_collector(boring_home)
-        _install_hermes_skills(boring_home)
         _install_hermes_plugins(boring_home)
         cron_result = _sync_hermes_cron_jobs()
         return {
@@ -1172,7 +1222,6 @@ def wire_hermes(path: Path | None = None, boring_home: str | None = None) -> dic
     _install_hermes_briefing(briefing_sources)
     _install_hermes_weekly_briefing(boring_home)
     _install_hermes_codex_collector(boring_home)
-    _install_hermes_skills(boring_home)
     _install_hermes_plugins(boring_home)
     cron_result = _sync_hermes_cron_jobs()
     changed = changed or cron_result["changed"]
@@ -1265,7 +1314,13 @@ def _report_duplicate_registrations():
             continue
         checked += 1
         counts = {}
+        role_roots = {}
         for command in _registered_commands(path):
+            # The script count below only sees files under this checkout; the same role
+            # registered from two checkouts is two different files and walks past it, so count
+            # roles across checkout roots on their own.
+            for root, role in _command_roles(command):
+                role_roots.setdefault(role, set()).add(root)
             for script in _hook_scripts(command):
                 # Only hooks that live in this checkout are ours to count. Somebody else's tool
                 # registered twice is their business, and a checker that reports it teaches the
@@ -1291,6 +1346,15 @@ def _report_duplicate_registrations():
                     f"hook_registered_twice agent={agent_id} count={count} script={script}",
                     file=sys.stderr,
                 )
+        for role in sorted(role_roots):
+            roots = role_roots[role]
+            if len(roots) > 1:
+                duplicates += 1
+                joined = ",".join(sorted(str(root) for root in roots))
+                print(
+                    f"hook_registered_twice agent={agent_id} count={len(roots)} role={role} roots={joined}",
+                    file=sys.stderr,
+                )
     print(f"hook_registrations checked_configs={checked} duplicates={duplicates}")
     return 1 if duplicates else 0
 
@@ -1310,7 +1374,7 @@ def main():
         help="Report hooks of ours registered more than once across every agent config",
     )
     parser.add_argument("--server-name", default="ohmyboring")
-    parser.add_argument("--server-url", default="http://localhost:7700/mcp")
+    parser.add_argument("--server-url", default="http://localhost:7710/mcp")
     parser.add_argument("--boring-home", default=BORING_HOME)
     args = parser.parse_args()
 

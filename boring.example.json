@@ -3,6 +3,12 @@
   "schema_version": 2,
   "note_lang": "auto",
   "checkout_roots": ["~/src"],
+  "card": {
+    "note_links": {
+      "obsidian": {"vault": "my-vault", "folder": "vault/wiki"},
+      "file": {"folder": "/Users/you/src/oh-my-boring/vault/wiki", "editor": "vscode"}
+    }
+  },
   "llm": {
     "provider": "ollama",
     "base_url": "http://host.docker.internal:11434/v1",

@@ -62,7 +62,7 @@ DOCTOR_LIB_DIR="$(cd "$(dirname "$0")/lib" && pwd)"
 # shellcheck source=lib/drudge_health_readiness.sh
 . "$DOCTOR_LIB_DIR/drudge_health_readiness.sh"
 
-EVENT_LOG="$BORING_HOME/agents/shared/event_log.py"
+EVENT_LOG="$BORING_HOME/src/ohmyboring/adapters/events.py"
 doctor_run_id="doctor-$(date +%Y%m%dT%H%M%S)-$$"
 doctor_started_at="$(date +%s)"
 
@@ -614,7 +614,7 @@ fi
 
 # (d4) Recent resolution quality failures — these mean the write-door is reachable but
 # the distilled note was too shallow even after the one repair attempt.
-event_log_probe="$BORING_HOME/agents/shared/event_log.py"
+event_log_probe="$BORING_HOME/src/ohmyboring/adapters/events.py"
 if [ -f "$event_log_probe" ]; then
     if BORING_EVENT_LOG="${BORING_EVENT_LOG:-$HOME/.cache/oh-my-boring/events.ndjson}" python3 "$event_log_probe" --recent-resolution-failures --max 3; then
         ok "no recent resolution quality failures"
@@ -971,7 +971,7 @@ fi
 # Ran by hand on 2026-09-07 and nowhere else, which is the arrangement that fails on the day
 # nobody is at the keyboard — the same reason (d5d) is a daily line and not a verdict-day ritual.
 if [ -f "$ledger_probe" ] && [ "${BORING_SKIP_LEDGER_PROBE:-0}" != 1 ]; then
-    if check_out="$(python3 "$ledger_probe" --self-check 2>/dev/null)"; then
+    if check_out="$(python3 "$ledger_probe" --self-check 2>&1)"; then
         case "$check_out" in
             *uptake_self_check=ok*) ok "uptake self-check ran (${check_out#*cross=})" ;;
             *) warn "uptake self-check undetermined — $check_out. Not a fault; too few sessions or transcripts to pair." ;;

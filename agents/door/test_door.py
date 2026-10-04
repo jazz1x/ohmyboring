@@ -29,30 +29,49 @@ real door runs under uvicorn in a thread against it. Covers:
       query attached, a query-less request gets no "?" (AC4)
   (k) a client that disconnects mid-stream makes the door close the upstream —
       the stub sees the connection go away (AC6)
+  (m) streams never starve short requests: with more GET /mcp streams open
+      than the default thread pool has workers, /health (proxied) and a
+      door-native route still answer within a second — red against a mutant
+      that reads streams on the default pool again (the 2026-10-02 stall)
+  (l) POST /mcp tools/call `remember` and POST /remember answer byte-for-byte
+      (sha256 vs the stub body) and leave one remember_shadow event after the
+      response — a raising shadow cannot change the answer (E3a-1)
+  (n) E4-1 — the seven register reads (HTTP POST /decisions·/risks·/next_actions·
+      /stalled·/recurrences·/context·/status and the MCP tools decisions·risks·
+      next_actions·stalled·recurrences·context·project_status) answer byte-for-byte
+      at the default reader (engine) and leave one read_shadow event per request —
+      mismatch/race/error classification, raising shadow cannot change the answer;
+      DOOR_REGISTER_READER=python answers from inside the door (AskResp /
+      Structured envelope / validation messages) without touching the stub
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest import mock
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, _ROOT)
+sys.path[:0] = [_ROOT, os.path.join(_ROOT, "src")]
 
 # Loaded as a package (the way uvicorn and the container load it) because door.py
 # imports its sibling with `from . import approved`; test_python_deps.py has no
@@ -66,6 +85,15 @@ door = importlib.import_module("agents.door.door")
 approved = importlib.import_module("agents.door.approved")
 claim_source = importlib.import_module("agents.door.claim_source")
 rules = importlib.import_module("agents.door.rules")
+
+# 그림자 사건(remember_shadow·read_shadow)이 시험 밖으로 새어 나가지 못하게 — 싱크 기본값을
+# spool 로 깔고 로그는 임시 파일로 보든다. 세션 사유: 이 두 값을 안 정한 채 띄운 문의 그림자가
+# 기본(db) 싱크로 localhost:7710 의 진짜 문에 POST 해 운영 event_log 를 더럽힌 일이 있다.
+# 각 시험 클래스의 setUp 이 이 값들을 정하면 그것이 우선(setdefault 라).
+os.environ.setdefault("BORING_EVENT_SINK", "spool")
+os.environ.setdefault(
+    "BORING_EVENT_LOG", os.path.join(tempfile.gettempdir(), f"door-test-events-{os.getpid()}.ndjson")
+)
 
 STUB_CONTENT_TYPE = "application/json; charset=utf-8"
 
@@ -84,6 +112,129 @@ TOOLS_LIST_BODY = (
     b'{"name":"gamma","inputSchema":{"type":"object"}}]}}'
 )
 
+#: 엔진 recall 응답의 실측 모양(content-type application/json) — 문이 번호 블록을 앞에
+#: 붙이는 대상. "boom" 이 들어간 query 면 isError 답을 준다(통제군).
+RECALL_BODY = b'{"id":2,"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"- [wiki-2229.md] ..."}],"isError":false}}'
+RECALL_ERROR_BODY = (
+    b'{"id":2,"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"-32000 boom"}],"isError":true}}'
+)
+
+#: 엔진 remember 답의 실측 모양 — 고의로 비정형 바이트(이상한 공백·비아스키)로 만들어
+#: 문이 다시 직렬화하면 sha256 이 갈라지게 한다. 화살표·중점·대시는 UTF-8 이스케이프.
+REMEMBER_MCP_BODY = (
+    b'{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "remembered '
+    b"\xe2\x86\x92 wiki/wiki-2901.md \xc2\xb7 chunks 2 \xc2\xb7 graph(tools 0 concepts 0 claims 0) "
+    b'\xe2\x80\x94 recallable now"}]}}'
+)
+REMEMBER_HTTP_BODY = (
+    b'{"source_path": "/vault/wiki/wiki-2902.md", "wiki_id": "wiki-2902", "duplicate": null, '
+    b'"supersedes": 0, "unknown": 0}'
+)
+
+#: 엔진 /events 응답의 실측 모양 — 고의로 비정형 바이트(이상한 공백·비아스키)로 만들어 문이
+#: 다시 직렬화하면 갈라지게 한다. E4-α 가 프록시 표에 넣은 경로가 바이트 그대로 가는지 본다.
+EVENTS_BODY = b'{"entries": [],  "maybe_truncated":false, "note":"\xec\x95\x88\xeb\x85\x95"}'
+
+#: 엔진 레지스터 답의 실측 모양(E4-1) — 읽기 그림자 시험이 고르는 canned 답. remember 와
+#: 같은 이유로 직렬화 비정형(공백·유니코드)을 넣어 문이 다시 직렬화하면 갈라지게 한다.
+REGISTER_HTTP_BODY = json.dumps(
+    {
+        "answer": (
+            "Showing 1 of 1 matching claims (limit_applied=false).\n"
+            "* subj — pred: a value with enough characters (kind=decision, confidence=certain)"
+        ),
+        "sources": ["subj"],
+    },
+    ensure_ascii=False,
+).encode()
+REGISTER_MCP_PAYLOAD = {
+    "answer": (
+        "Showing 1 of 1 matching claims (limit_applied=false).\n"
+        "* subj — pred: a value with enough characters (kind=risk, confidence=likely)"
+    ),
+    "sources": ["subj"],
+    "items": [
+        {
+            "node_id": "claim:subj:pred",
+            "subject": "subj",
+            "predicate": "pred",
+            "value": "a value with enough characters",
+            "kind": "risk",
+            "confidence": "likely",
+            "valid_from": "2026-09-30T01:23:45.123456Z",
+            "project": "omb",
+        }
+    ],
+    "limit_applied": False,
+    "total_matching": 1,
+}
+REGISTER_MCP_BODY = json.dumps(
+    {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "result": {
+            "content": [{"type": "text", "text": json.dumps(REGISTER_MCP_PAYLOAD, ensure_ascii=False)}],
+            "structuredContent": REGISTER_MCP_PAYLOAD,
+            "isError": False,
+        },
+    },
+    ensure_ascii=False,
+).encode()
+RECURRENCES_BODY = json.dumps(
+    {"rows": [], "days": 30, "max_distance": 0.2, "min_days_apart": 3}, ensure_ascii=False
+).encode()
+CONTEXT_BODY = json.dumps(
+    {
+        "decisions": [],
+        "risks": [],
+        "facts": [],
+        "glossary": [],
+        "next_actions": [],
+        "language": "ko",
+    },
+    ensure_ascii=False,
+).encode()
+STATUS_BODY = json.dumps(
+    {"answer": "No recent records or claims found for project 'omb'.", "sources": []}
+).encode()
+
+
+def _mcp_envelope(payload: dict) -> bytes:
+    """canned MCP 도구 답 봉투 — structuredContent 와 content[].text 둘 다 싣는 엔진 모양."""
+    return json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "result": {
+                "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+                "structuredContent": payload,
+                "isError": False,
+            },
+        },
+        ensure_ascii=False,
+    ).encode()
+
+
+#: register_mode 일 때 스텁이 고르는 canned 답의 룩업 — 경로·도구 이름 둘 다.
+_REGISTER_STUB_PATHS = {
+    "/decisions": REGISTER_HTTP_BODY,
+    "/risks": REGISTER_HTTP_BODY,
+    "/next_actions": REGISTER_HTTP_BODY,
+    "/stalled": REGISTER_HTTP_BODY,
+    "/recurrences": RECURRENCES_BODY,
+    "/context": CONTEXT_BODY,
+    "/status": STATUS_BODY,
+}
+_REGISTER_STUB_TOOLS = {
+    "decisions": REGISTER_MCP_BODY,
+    "risks": REGISTER_MCP_BODY,
+    "next_actions": REGISTER_MCP_BODY,
+    "stalled": REGISTER_MCP_BODY,
+    "recurrences": _mcp_envelope({"rows": [], "days": 30, "max_distance": 0.2, "min_days_apart": 3}),
+    "context": _mcp_envelope(json.loads(CONTEXT_BODY)),
+    "project_status": _mcp_envelope(json.loads(STATUS_BODY)),
+}
+
 
 class StubHandler(BaseHTTPRequestHandler):
     """The engine's stand-in: fixed /health, tools/list answer, otherwise echo.
@@ -98,11 +249,14 @@ class StubHandler(BaseHTTPRequestHandler):
     last_path: str | None = None
     sse_events: list[str] = []
     hits = 0
+    register_mode = False
 
     def do_GET(self):
         type(self).last_path = self.path
         if self.path == "/health":
             self._reply(200, HEALTH_BODY)
+        elif self.path.startswith("/events"):
+            self._reply(200, EVENTS_BODY)
         elif self.path == "/sse":
             self._sse()
         else:
@@ -121,8 +275,27 @@ class StubHandler(BaseHTTPRequestHandler):
         respond_as = STUB_CONTENT_TYPE
         if isinstance(parsed, dict) and "respond_as" in parsed:
             respond_as = parsed["respond_as"]
-        if isinstance(parsed, dict) and parsed.get("method") == "tools/list":
+        params = parsed.get("params") if isinstance(parsed, dict) else None
+        if isinstance(params, dict) and params.get("name") == "remember":
+            # The engine's tools/call remember answer — the shadow reads this path.
+            self._reply(200, REMEMBER_MCP_BODY, respond_as)
+        elif self.path == "/remember":
+            self._reply(200, REMEMBER_HTTP_BODY, respond_as)
+        elif isinstance(params, dict) and params.get("name") == "recall":
+            # The engine's tools/call recall answer: fixed body, "boom" in the query → isError.
+            error = "boom" in str(params.get("arguments", {}))
+            self._reply(200, RECALL_ERROR_BODY if error else RECALL_BODY, respond_as)
+        elif isinstance(parsed, dict) and parsed.get("method") == "tools/list":
             self._reply(200, TOOLS_LIST_BODY, respond_as)
+        elif type(self).register_mode and self.path in _REGISTER_STUB_PATHS:
+            # E4-1 읽기 그림자 시험의 canned 엔진 답 — 기본(거짓)이면 아래 echo 그대로.
+            self._reply(200, _REGISTER_STUB_PATHS[self.path], respond_as)
+        elif (
+            type(self).register_mode
+            and isinstance(params, dict)
+            and params.get("name") in _REGISTER_STUB_TOOLS
+        ):
+            self._reply(200, _REGISTER_STUB_TOOLS[params["name"]], respond_as)
         else:
             self._reply(200, body, respond_as)
 
@@ -298,7 +471,27 @@ class DoorTest(unittest.TestCase):
             expected.add((method, path))
         actual = {(method, route.path) for route in door.app.routes for method in route.methods}
         self.assertEqual(actual, expected)
-        self.assertEqual(len(contract["http_routes"]), 24)
+        self.assertEqual(len(contract["http_routes"]), 30)
+
+    def test_events_get_passes_through_byte_identical(self):
+        # E4-α — /events entered the proxy table with the contract re-snapshot; the door
+        # relays query and answer bytes untouched (this kills a " Events"→engine revert).
+        status, body, content_type = _req(self.door_port, "GET", "/events?limit=2&component=stub")
+        self.assertEqual(status, 200)
+        self.assertEqual(StubHandler.last_path, "/events?limit=2&component=stub")
+        self.assertEqual(body, EVENTS_BODY)
+        self.assertEqual(content_type, STUB_CONTENT_TYPE)
+
+    def test_events_post_body_passes_through_byte_identical(self):
+        payload = b'{"component":"stub","event":"probe","otel":{"attributes":{}}}'
+        status, body, content_type = _req(
+            self.door_port, "POST", "/events", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(StubHandler.seen_bodies[-1], payload)
+        self.assertEqual(StubHandler.last_path, "/events")
+        self.assertEqual(body, payload)
+        self.assertEqual(content_type, STUB_CONTENT_TYPE)
 
     def test_request_header_policy(self):
         payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode()
@@ -392,6 +585,994 @@ class DoorTest(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertIn("closed", StubHandler.sse_events)
+
+
+class _CapDefaultExecutor:
+    """시험 장치 — 문 앱을 감싸 기본 스레드 풀을 작게 줄인다. 기본 풀을 쓰는 경로(프록시
+    _fetch·문 자체 경로)와 스트림 읽기가 같은 풀을 쓰는 옛 구현으로 되돌리는 변이에서는
+    열린 스트림이 줄인 풀을 메워 아래 클래스의 시험이 red 가 된다 — 호스트 CPU 수와 무관한
+    「스트림 수 > 기본 풀」 재현."""
+
+    def __init__(self, app, workers: int):
+        self._app = app
+        self._workers = workers
+        self._capped = False
+
+    async def __call__(self, scope, receive, send):
+        if not self._capped:
+            self._capped = True
+            asyncio.get_running_loop().set_default_executor(
+                ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="door-test-default")
+            )
+        await self._app(scope, receive, send)
+
+
+class HangStubHandler(StubHandler):
+    """GET /mcp 만 바꾼 그릇 — SSE 헤더와 첫 덩어리를 별도 없이 본 뒤 5초 잠든다.
+
+    문 쪽 read1 이 두 번째 덩어리를 기다리며 잠든 동안 문 자체 경로가 얼마나
+    빨리 답하는지 재는 시험의 그릇."""
+
+    def do_GET(self):
+        if self.path != "/mcp":
+            return super().do_GET()
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("cache-control", "no-cache")
+        self.end_headers()
+        try:
+            self.wfile.write(SSE_FIRST)
+            self.wfile.flush()
+            time.sleep(5.0)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+class StreamsNeverStarveShortRequestsTests(unittest.TestCase):
+    """스트림이 기본 풀보다 많이 열린 채로도 짧은 요청이 1초 안에 단다.
+
+    문 서버의 기본 풀을 고의로 4로 줄이고(GET /mcp 스트림 8개 — 어느 CPU 에서든
+    「스트림 수 > 기본 풀」) 스트림을 연 채 /health(프록시·to_thread)와 /approved
+    (문 자체 경로·to_thread)의 응답을 잰다. 스트림 읽기가 전용 풀에 있으면 기본
+    풀은 비어 있어 둘 다 1초 안에 오고, _stream_chunks 를 「기본 풀에서 read1」하는
+    옛 구현으로 되돌리는 변이에서는 잠든 읽기가 풀을 메워 /health 가 밀려 red."""
+
+    STREAMS = 8
+    POOL = 4
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved_upstream = os.environ.get("DOOR_UPSTREAM")
+        cls._saved_dsn = os.environ.get("DOOR_PG_DSN")
+        cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), HangStubHandler)
+        cls.stub_thread = threading.Thread(target=cls.stub.serve_forever, daemon=True)
+        cls.stub_thread.start()
+        os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{cls.stub.server_address[1]}"
+        # /approved 가 to_thread 까지 가게 하는 DSN — 닫힌 포트라 즉시 거절돼 502.
+        os.environ["DOOR_PG_DSN"] = f"postgresql://127.0.0.1:{_free_port()}/boring"
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(
+                _CapDefaultExecutor(door.app, cls.POOL),
+                host="127.0.0.1",
+                port=cls.door_port,
+                log_level="warning",
+            )
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                status, _, _ = _req(cls.door_port, "GET", "/health")
+                if status == 200:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+        cls.stub.shutdown()
+        cls.stub.server_close()
+        if cls._saved_upstream is None:
+            os.environ.pop("DOOR_UPSTREAM", None)
+        else:
+            os.environ["DOOR_UPSTREAM"] = cls._saved_upstream
+        if cls._saved_dsn is None:
+            os.environ.pop("DOOR_PG_DSN", None)
+        else:
+            os.environ["DOOR_PG_DSN"] = cls._saved_dsn
+
+    def _open_stream(self):
+        sock = socket.create_connection(("127.0.0.1", self.door_port), timeout=10)
+        sock.sendall(
+            b"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n"
+        )
+        wire = b""
+        while SSE_FIRST not in wire:
+            chunk = sock.recv(4096)
+            self.assertTrue(chunk, "stream ended before its first chunk")
+            wire += chunk
+        return sock
+
+    def test_many_open_streams_short_requests_answer_within_a_second(self):
+        self.assertGreater(self.STREAMS, self.POOL, "test must open more streams than the pool has workers")
+        streams = [self._open_stream() for _ in range(self.STREAMS)]
+        try:
+            started = time.monotonic()
+            status, body, _ = _req(self.door_port, "GET", "/health")
+            health_s = time.monotonic() - started
+            self.assertEqual(status, 200)
+            self.assertEqual(body, HEALTH_BODY)
+            self.assertLess(health_s, 1.0, f"/health took {health_s:.2f}s with {self.STREAMS} streams open")
+
+            started = time.monotonic()
+            status, body, _ = _req(self.door_port, "GET", "/approved")
+            approved_s = time.monotonic() - started
+            self.assertEqual(status, 502)
+            self.assertIn(b"store unreachable", body)
+            self.assertLess(
+                approved_s,
+                1.0,
+                f"/approved took {approved_s:.2f}s with {self.STREAMS} streams open",
+            )
+        finally:
+            for sock in streams:
+                sock.close()
+
+
+class McpRecallAugmentTests(unittest.TestCase):
+    """POST /mcp tools/call recall — the door prepends numbered-note blocks (wiki-NNNN) to a
+    2xx application/json engine answer, read from the vault at BORING_VAULT_DIR. Pinned here:
+      - a numbered recall answers with 「- 노트 wiki-NNNN — <title>」 first, engine text after
+      - a missing number is said (「은 볼트에 없음」), engine answer still follows
+      - controls — recall without numbers, a non-recall tool, an isError answer, a non-JSON
+        upstream answer — travel byte-for-byte (the exact stub bytes come back)
+      - an unreadable vault costs one stderr line and the engine answer unchanged,
+        never a dead recall
+    """
+
+    _WIKI_2226 = """---
+id: wiki-2226
+title: '문이 회상 앞에 번호 노트를 붙인다'
+kind: note
+origin: personal
+date: 2026-09-29
+---
+
+첫째 문단 — 엔진 recall 은 검색이라 번호를 못 푼다.
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved_upstream = os.environ.get("DOOR_UPSTREAM")
+        cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), StubHandler)
+        cls.stub_thread = threading.Thread(target=cls.stub.serve_forever, daemon=True)
+        cls.stub_thread.start()
+        os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{cls.stub.server_address[1]}"
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                status, _, _ = _req(cls.door_port, "GET", "/health")
+                if status == 200:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+        cls.stub.shutdown()
+        cls.stub.server_close()
+        if cls._saved_upstream is None:
+            os.environ.pop("DOOR_UPSTREAM", None)
+        else:
+            os.environ["DOOR_UPSTREAM"] = cls._saved_upstream
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        vault = Path(self._tmp.name) / "vault"
+        (vault / "wiki").mkdir(parents=True)
+        (vault / "wiki" / "wiki-2226.md").write_text(self._WIKI_2226, encoding="utf-8")
+        self._saved_vault = os.environ.get("BORING_VAULT_DIR")
+        os.environ["BORING_VAULT_DIR"] = str(vault)
+        self.addCleanup(self._restore_vault)
+
+    def _restore_vault(self):
+        if self._saved_vault is None:
+            os.environ.pop("BORING_VAULT_DIR", None)
+        else:
+            os.environ["BORING_VAULT_DIR"] = self._saved_vault
+
+    def _recall(self, query: str):
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "recall", "arguments": {"query": query}},
+            }
+        ).encode()
+        return _req(
+            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+        )
+
+    def test_a_numbered_recall_leads_with_the_note_block(self):
+        status, body, content_type = self._recall("wiki-2226 봐")
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, STUB_CONTENT_TYPE)
+        text = json.loads(body)["result"]["content"][0]["text"]
+        self.assertTrue(
+            text.startswith("- 노트 wiki-2226 — 문이 회상 앞에 번호 노트를 붙인다\n  날짜: 2026-09-29"),
+            text[:120],
+        )
+        self.assertIn("첫째 문단 — 엔진 recall 은 검색이라 번호를 못 푼다.", text)
+        self.assertTrue(text.endswith("- [wiki-2229.md] ..."), "엔진 본문이 그 뒤에 그대로 와야 한다")
+
+    def test_a_missing_number_is_said_and_the_engine_answer_follows(self):
+        status, body, _ = self._recall("wiki-9999 봐")
+        self.assertEqual(status, 200)
+        text = json.loads(body)["result"]["content"][0]["text"]
+        self.assertTrue(text.startswith("- wiki-9999 은 볼트에 없음\n\n- [wiki-2229.md] ..."), text[:120])
+
+    def test_several_numbers_join_in_order(self):
+        _, body, _ = self._recall("wiki-9999 와 wiki-2226")
+        text = json.loads(body)["result"]["content"][0]["text"]
+        self.assertTrue(
+            text.startswith("- wiki-9999 은 볼트에 없음\n\n- 노트 wiki-2226 — 문이 회상 앞에"),
+            text[:160],
+        )
+
+    def test_a_recall_without_numbers_is_byte_identical(self):
+        status, body, content_type = self._recall("그냥 검색해줘")
+        self.assertEqual((status, body, content_type), (200, RECALL_BODY, STUB_CONTENT_TYPE))
+
+    def test_a_numbered_recall_on_another_route_is_byte_identical(self):
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "recall", "arguments": {"query": "wiki-2226 봐"}},
+            }
+        ).encode()
+        status, body, _ = _req(
+            self.door_port, "POST", "/context", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual((status, body), (200, RECALL_BODY), "only POST /mcp is decorated")
+
+    def test_a_non_recall_tool_is_byte_identical(self):
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "search", "arguments": {"query": "wiki-2226"}},
+            }
+        ).encode()
+        status, body, _ = _req(
+            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, payload, "다른 도구의 답은 요청 바이트를 그대로 돌려받는다(에코 통제군)")
+
+    def test_an_error_answer_is_byte_identical(self):
+        status, body, _ = self._recall("boom wiki-2226")
+        self.assertEqual((status, body), (200, RECALL_ERROR_BODY))
+
+    def test_a_non_json_upstream_answer_is_byte_identical(self):
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "recall", "arguments": {"query": "wiki-2226"}},
+                "respond_as": "text/plain; charset=utf-8",
+            }
+        ).encode()
+        status, body, content_type = _req(
+            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, RECALL_BODY)
+        self.assertEqual(content_type, "text/plain; charset=utf-8")
+
+    def test_an_unreadable_vault_passes_the_answer_and_costs_one_log_line(self):
+        def boom(note_id):
+            raise OSError("vault mount gone")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf), mock.patch.object(door, "_note_block_for", boom):
+            status, body, _ = self._recall("wiki-2226")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, RECALL_BODY, "볼트 불응은 recall 을 죽이지 않는다 — 엔진 답 그대로")
+        lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 1, f"로그는 정확히 한 줄이어야 한다: {lines}")
+        self.assertIn("vault", lines[0])
+
+
+class RememberShadowTests(unittest.TestCase):
+    """E3a-2 — 문을 지난 remember 는 엔진 답을 바이트 그대로 돌려주고, 응답 뒤에 그림자가
+    파이썬 쓰기 경로의 결정(PII 게이트·중복 문 갈래, 걸러진 것은 결정만)을 엔진 응답의
+    결정과 맞추고, 저장·대체에서는 실제 노트와 칸별 대조까지 해 사건(remember_shadow)
+    한 줄을 남긴다. 사건에는 어긋남을 가를 사유(decision/fields/pii-…)가 실린다.
+
+    Pinned here:
+      - POST /mcp tools/call remember 의 응답이 엔진 답과 바이트 같다(sha256)
+      - POST /remember 의 응답이 엔진 답과 바이트 같다(sha256)
+      - 응답 뒤 그림자가 사건 한 줄을 남긴다 — status ok, source_path, omb_session_id,
+        결정 대조(decision/engine_decision)까지
+      - 볼트 rules/pii.yaml 이 있으면 문이 게이트를 불러 온다 — 가린 엔진 노트와 원문
+        요청은 이제 ok(옛 pii_not_ported 어긋남이 풀리는 사례)
+      - 그림자가 예외를 던져도 응답은 그대로 — 사건 status=error, 로그 한 줄
+      - 응답은 그림자를 기다리지 않는다
+      - 문 안의 노트 색인을 미리 채우면 그림자의 중복 문 스캔은 쓰기마다 목록·stat
+        만 하고 노트를 새로 읽지 않는다 — 결정은 여전히 ok (E3b-2)
+    """
+
+    _WIKI_2901 = """---
+id: wiki-2901
+title: 문 그림자 시험
+kind: note
+origin: personal
+project: ''
+date: "2026-10-01"
+tags:
+- door
+- shadow
+tools: []
+concepts: []
+claims: []
+relates_to: []
+sources: []
+omb_session_id: sess-door-1
+author: unknown
+---
+
+문을 지난 remember 는 엔진 답을 바이트 그대로 돌려준다.
+"""
+
+    _WIKI_2902 = """---
+id: wiki-2902
+title: HTTP remember 그림자 시험
+kind: note
+origin: personal
+project: ''
+date: "2026-10-01"
+tags: []
+tools: []
+concepts: []
+claims: []
+relates_to: []
+sources: []
+author: inferred
+---
+
+POST /remember 도 문을 지난다.
+"""
+
+    _MCP_ARGS = {
+        "title": "문 그림자 시험",
+        "body": "문을 지난 remember 는 엔진 답을 바이트 그대로 돌려준다.",
+        "origin": "personal",
+        "tags": ["door", "shadow"],
+        "omb_session_id": "sess-door-1",
+    }
+    _HTTP_ARGS = {
+        "title": "HTTP remember 그림자 시험",
+        "body": "POST /remember 도 문을 지난다.",
+        "origin": "personal",
+        "author": "inferred",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved = {
+            name: os.environ.get(name)
+            for name in ("DOOR_UPSTREAM", "BORING_VAULT_DIR", "BORING_EVENT_SINK", "BORING_EVENT_LOG")
+        }
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), StubHandler)
+        cls.stub_thread = threading.Thread(target=cls.stub.serve_forever, daemon=True)
+        cls.stub_thread.start()
+        os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{cls.stub.server_address[1]}"
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                status, _, _ = _req(cls.door_port, "GET", "/health")
+                if status == 200:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        # The shadow write runs after the answer; restoring BORING_EVENT_LOG before the door has
+        # stopped sent late shadows into the real spool (6 sess-switch rows, 2026-10-02).
+        cls.door_server.should_exit = True
+        cls.door_thread.join(timeout=10)
+        cls.stub.shutdown()
+        cls.stub.server_close()
+        cls._tmp.cleanup()
+        for name, value in cls._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def setUp(self):
+        vault = Path(self._tmp.name) / "vault"
+        if vault.exists():
+            shutil.rmtree(vault)
+        (vault / "wiki").mkdir(parents=True, exist_ok=True)
+        (vault / "wiki" / "wiki-2901.md").write_text(self._WIKI_2901, encoding="utf-8")
+        (vault / "wiki" / "wiki-2902.md").write_text(self._WIKI_2902, encoding="utf-8")
+        os.environ["BORING_VAULT_DIR"] = str(vault)
+        os.environ["BORING_EVENT_SINK"] = "spool"
+        os.environ["BORING_EVENT_LOG"] = str(Path(self._tmp.name) / f"events-{time.time_ns()}.ndjson")
+
+    def _mcp_payload(self, arguments: dict) -> bytes:
+        return json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "remember", "arguments": arguments},
+            }
+        ).encode()
+
+    def _shadow_events(self) -> list[dict]:
+        path = Path(os.environ["BORING_EVENT_LOG"])
+        if not path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and json.loads(line).get("event") == "remember_shadow"
+        ]
+
+    def _wait_for_shadow(self, timeout: float = 5.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            events = self._shadow_events()
+            if events:
+                return events[-1]
+            time.sleep(0.05)
+        self.fail(f"remember_shadow event did not land in {os.environ['BORING_EVENT_LOG']}")
+
+    def test_mcp_remember_answer_is_byte_identical(self):
+        payload = self._mcp_payload(self._MCP_ARGS)
+        status, body, content_type = _req(
+            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REMEMBER_MCP_BODY)
+        self.assertEqual(hashlib.sha256(body).hexdigest(), hashlib.sha256(REMEMBER_MCP_BODY).hexdigest())
+        self.assertEqual(content_type, STUB_CONTENT_TYPE)
+        self.assertEqual(StubHandler.seen_bodies[-1], payload, "엔진에 간 본문도 바이트 그대로")
+
+    def test_http_remember_answer_is_byte_identical(self):
+        payload = json.dumps(self._HTTP_ARGS).encode()
+        status, body, content_type = _req(
+            self.door_port, "POST", "/remember", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REMEMBER_HTTP_BODY)
+        self.assertEqual(hashlib.sha256(body).hexdigest(), hashlib.sha256(REMEMBER_HTTP_BODY).hexdigest())
+        self.assertEqual(content_type, STUB_CONTENT_TYPE)
+
+    def test_mcp_remember_leaves_one_shadow_event(self):
+        _req(
+            self.door_port,
+            "POST",
+            "/mcp",
+            body=self._mcp_payload(self._MCP_ARGS),
+            headers={"content-type": "application/json"},
+        )
+        event = self._wait_for_shadow()
+        self.assertEqual(event["component"], "door")
+        self.assertEqual(event["status"], "ok")
+        self.assertEqual(event["source_path"], "/vault/wiki/wiki-2901.md")
+        self.assertEqual(event["omb_session_id"], "sess-door-1")
+        self.assertEqual(event["fields"], [])
+        self.assertIn("excluded", event["relates_to"])
+        # DSN 이 없는 시험 환경이라 임베딩 갈래는 못 보고 「저장(미확인)」이지만,
+        # 결정 대조 자체는 engine stored 와 맞아 ok 다.
+        self.assertTrue(event["decision"].startswith("stored"), event["decision"])
+        self.assertEqual(event["engine_decision"], "stored:/vault/wiki/wiki-2901.md")
+
+    def test_http_remember_leaves_one_shadow_event(self):
+        _req(
+            self.door_port,
+            "POST",
+            "/remember",
+            body=json.dumps(self._HTTP_ARGS).encode(),
+            headers={"content-type": "application/json"},
+        )
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "ok")
+        self.assertEqual(event["source_path"], "/vault/wiki/wiki-2902.md")
+
+    def test_shadow_scans_through_the_prefilled_note_index(self):
+        """E3b-2 — 문 안의 노트 색인을 미리 채워 두면 그림자의 중복 문 스캔은 쓰기마다
+        디렉터리 목록·stat 만 보고 노트를 새로 읽지 않는다(읽기는 채우기 때 딱 한 바퀴).
+        결정은 디스크 훑기와 같아 사건은 ok — 색인이 판정을 바꾸거나 읽기를 새로 하는
+        변이가 이 단언에서 빨갛게 끝난다."""
+        vault = Path(os.environ["BORING_VAULT_DIR"])
+        reads: list[str] = []
+
+        def counting_read(vault_dir: str, note_id: str) -> str | None:
+            reads.append(note_id)
+            return door.vault_notes.read_note(vault_dir, note_id)
+
+        index = door.remember_index.NoteIndex(
+            door.remember_index.DiskSeams(
+                vault_dir=str(vault),
+                list_notes=lambda: door._list_wiki_notes(str(vault)),
+                read_note=counting_read,
+                split_frontmatter=door.vault_note.split_frontmatter,
+            )
+        )
+        index.prefill()
+        self.assertTrue(index.usable, "픽스처 볼트는 채울 수 있다")
+        reads.clear()
+        previous = getattr(door.app.state, "note_index", None)
+        door.app.state.note_index = index
+        try:
+            _req(
+                self.door_port,
+                "POST",
+                "/mcp",
+                body=self._mcp_payload(self._MCP_ARGS),
+                headers={"content-type": "application/json"},
+            )
+            event = self._wait_for_shadow()
+        finally:
+            door.app.state.note_index = previous
+        self.assertEqual(event["status"], "ok", event.get("reason"))
+        self.assertTrue(event["decision"].startswith("stored"), event["decision"])
+        self.assertEqual(
+            reads,
+            [],
+            f"색인이 채워져 있으니 쓰기의 재고는 목록·stat 만 — 노트를 새로 읽으면 안 된다: {reads}",
+        )
+
+    _PII_YAML = """---
+version: "1.0"
+rules:
+  - name: ipv4_any
+    regex: '\\b(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\b'
+    action: redact
+    replacement: "[IP]"
+    severity: warning
+    reason: IPv4
+"""
+
+    def test_vault_pii_rules_are_loaded_by_the_shadow(self):
+        # 볼트에 rules/pii.yaml 이 있으면 문이 그림자에 게이트를 싣는다. 엔진 노트의
+        # 본문만 가려져 있고(엔진이 게이트를 지난 흔적) 요청에는 원문이 있어도, 같은
+        # 규칙으로 가린 파이썬 렌더와 칸이 맞아 사건은 ok 다 — E3a-1 의 pii_not_ported
+        # 어긋남이 이 wiring 에서 풀리는 사례다.
+        vault = Path(os.environ["BORING_VAULT_DIR"])
+        rules = vault / "rules"
+        rules.mkdir(exist_ok=True)
+        (rules / "pii.yaml").write_text(self._PII_YAML, encoding="utf-8")
+        # 엔진이 실제로 쓴 것은 게이트를 지난 본문 — IP 가 가려진 채로 디스크에 있다.
+        note = self._WIKI_2901.replace(
+            "문을 지난 remember 는 엔진 답을 바이트 그대로 돌려준다.",
+            "문은 [IP] 에 묶인다.",
+        )
+        (vault / "wiki" / "wiki-2901.md").write_text(note, encoding="utf-8")
+        args = dict(self._MCP_ARGS)
+        args["body"] = "문은 10.1.2.3 에 묶인다."
+        _req(
+            self.door_port,
+            "POST",
+            "/mcp",
+            body=self._mcp_payload(args),
+            headers={"content-type": "application/json"},
+        )
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "ok", event.get("reason"))
+        self.assertTrue(event["decision"].startswith("stored"), event["decision"])
+
+    def test_shadow_event_reason_sorts_a_mismatch(self):
+        # 걸러둘 결정이 갈리면 사건 사유는 decision 으로 시작한다 — (가)/(나)/(다) 판별
+        # 재료가 사건 한 줄에 있는지를 문 wiring 에서도 본다. 엔진은 wiki-2901 로
+        # 저장했는데(답이 그러니) 같은 세션 노트 wiki-2999 가 볼트에 있으면 파이썬은
+        # 걸러둘 것이다 — 경로가 갈려 어긋남.
+        vault = Path(os.environ["BORING_VAULT_DIR"])
+        ghost = self._WIKI_2901.replace("wiki-2901", "wiki-2999")
+        (vault / "wiki" / "wiki-2999.md").write_text(ghost, encoding="utf-8")
+        _req(
+            self.door_port,
+            "POST",
+            "/mcp",
+            body=self._mcp_payload(self._MCP_ARGS),
+            headers={"content-type": "application/json"},
+        )
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "mismatch")
+        self.assertTrue(event["reason"].startswith("decision "), event.get("reason"))
+        self.assertIn("engine=stored", event["reason"])
+        self.assertIn("python=skipped", event["reason"])
+
+    def test_a_raising_shadow_cannot_change_the_answer(self):
+        payload = self._mcp_payload(self._MCP_ARGS)
+        # 그림자는 응답 뒤에 도니, 패치·stderr 갈무리는 사건이 뜰 때까지 살아 있어야 한다.
+        with mock.patch.object(door.remember_shadow, "run_shadow", side_effect=RuntimeError("boom")):
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                status, body, _ = _req(
+                    self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+                )
+                event = self._wait_for_shadow()
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REMEMBER_MCP_BODY, "그림자 예외는 응답을 바꾸지 못한다")
+        self.assertEqual(len([ln for ln in buf.getvalue().splitlines() if ln.strip()]), 1)
+        self.assertEqual(event["status"], "error")
+        self.assertIn("RuntimeError", event["reason"])
+        self.assertEqual(event["omb_session_id"], "sess-door-1")
+
+    def test_the_answer_does_not_wait_for_the_shadow(self):
+        started = time.monotonic()
+
+        # run_shadow 는 ShadowRequest 하나를 위치 인자로 받는다 — 이 목도 그 모양을 따라야
+        # 진짜로 0.6s 자고, 응답 앞에서 그림자를 기다리는 변이가 이 단언으로 빨갛게 끝난다.
+        def slow_shadow(_request, **_kwargs):
+            time.sleep(0.6)
+            return door.remember_shadow.ShadowEvent("ok")
+
+        with mock.patch.object(door.remember_shadow, "run_shadow", slow_shadow):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/mcp",
+                body=self._mcp_payload(self._MCP_ARGS),
+                headers={"content-type": "application/json"},
+            )
+            elapsed = time.monotonic() - started
+            event = self._wait_for_shadow()
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REMEMBER_MCP_BODY)
+        self.assertEqual(event["status"], "ok", "자고 난 그림자의 사건은 ok — 목 깨짐을 덮지 않는다")
+        self.assertLess(elapsed, 0.6, "응답이 그림자를 기다리면 이 값이 0.6s 를 넘는다")
+
+    def test_non_remember_calls_leave_no_shadow_event(self):
+        payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode()
+        status, body, _ = _req(
+            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, TOOLS_LIST_BODY)
+        time.sleep(0.3)
+        self.assertEqual(self._shadow_events(), [], "회상·다른 도구엔 그림자가 따라붙지 않는다")
+
+
+class RememberWriterSwitchTests(unittest.TestCase):
+    """E3c-1 — remember 쓰기 주인 스위치 (DOOR_REMEMBER_WRITER).
+
+    기본(engine)이면 remember 는 프록시 그대로(엔진 답 바이트, 그림자까지 — RememberShadowTests).
+    python 이면 문이 엔진에 넘기지 않고 문 안의 쓰기 글(remember_writer.run_write)이 결정·쓰고
+    엔진 답 모양(JSON-RPC 봉투 / RememberResp 다섯 칸)으로 답한다. run_write 는 여기서 목으로
+    두고 선로(스위치·봉투·상태 부호)만 본다 — 진짜 쓰기 길은 remember/test_writer.py 와
+    scripts/e3c1-verify.py(일회용 스키마+엔진 동기 0 변경)가 본다.
+    """
+
+    _ARGS = {"title": "스위치 시험", "body": "본문", "omb_session_id": "sess-switch"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved = {
+            name: os.environ.get(name)
+            for name in (
+                "DOOR_UPSTREAM",
+                "DOOR_PG_DSN",
+                "DOOR_REMEMBER_WRITER",
+                "BORING_VAULT_DIR",
+                "BORING_EVENT_SINK",
+                "BORING_EVENT_LOG",
+                "BORING_OWNER_TOKEN",
+            )
+        }
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), StubHandler)
+        cls.stub_thread = threading.Thread(target=cls.stub.serve_forever, daemon=True)
+        cls.stub_thread.start()
+        os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{cls.stub.server_address[1]}"
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                status, _, _ = _req(cls.door_port, "GET", "/health")
+                if status == 200:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        # The shadow write runs after the answer; restoring BORING_EVENT_LOG before the door has
+        # stopped sent late shadows into the real spool (6 sess-switch rows, 2026-10-02).
+        cls.door_server.should_exit = True
+        cls.door_thread.join(timeout=10)
+        cls.stub.shutdown()
+        cls.stub.server_close()
+        cls._tmp.cleanup()
+        for name, value in cls._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def setUp(self):
+        vault = Path(self._tmp.name) / "vault"
+        if vault.exists():
+            shutil.rmtree(vault)
+        (vault / "wiki").mkdir(parents=True, exist_ok=True)
+        os.environ["BORING_VAULT_DIR"] = str(vault)
+        os.environ["BORING_EVENT_SINK"] = "spool"
+        os.environ["BORING_EVENT_LOG"] = str(Path(self._tmp.name) / f"events-{time.time_ns()}.ndjson")
+        os.environ["DOOR_PG_DSN"] = "postgresql://unused/unused"  # run_write 는 목으로 둔다
+        StubHandler.seen_bodies.clear()
+
+    def tearDown(self):
+        os.environ.pop("DOOR_REMEMBER_WRITER", None)
+
+    def _mcp_payload(self) -> bytes:
+        return json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "remember", "arguments": self._ARGS},
+            }
+        ).encode()
+
+    def _written(self):
+        return door.remember_writer.Written(
+            wiki_id="wiki-0001",
+            source_path="/vault/wiki/wiki-0001.md",
+            message="remembered → wiki/wiki-0001.md · chunks 1 · graph(tools 0 concepts 0 claims 0) — recallable now",
+            duplicate=None,
+            supersedes=0,
+            unknown=0,
+        )
+
+    def test_default_writer_is_engine_and_remember_proxies(self):
+        os.environ.pop("DOOR_REMEMBER_WRITER", None)
+        self.assertEqual(door._remember_writer(), "engine")
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/remember",
+            body=json.dumps(self._ARGS).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REMEMBER_HTTP_BODY, "기본은 엔진 답 바이트 그대로")
+        self.assertEqual(len(StubHandler.seen_bodies), 1, "기본은 엔진에 본문을 넘긴다")
+
+    def test_unknown_switch_value_falls_back_to_engine(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python2"
+        self.assertEqual(door._remember_writer(), "engine")
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/remember",
+            body=json.dumps(self._ARGS).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(body, REMEMBER_HTTP_BODY)
+
+    def test_python_writer_mcp_answers_without_upstream(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        with mock.patch.object(door.remember_writer, "run_write", return_value=self._written()) as run:
+            status, body, content_type = _req(
+                self.door_port,
+                "POST",
+                "/mcp",
+                body=self._mcp_payload(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(StubHandler.seen_bodies, [], "켜면 엔진에 remember 가 안 간다")
+        self.assertEqual(content_type, "application/json")
+        answer = json.loads(body)
+        self.assertEqual(answer["jsonrpc"], "2.0")
+        self.assertEqual(answer["id"], 7, "요청 id 를 그대로 돌려준다")
+        self.assertEqual(
+            answer["result"],
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "remembered → wiki/wiki-0001.md · chunks 1 · "
+                        "graph(tools 0 concepts 0 claims 0) — recallable now",
+                    }
+                ],
+                "isError": False,
+            },
+        )
+        request, deps = run.call_args.args
+        self.assertEqual(request.route, "mcp")
+        self.assertEqual(request.arguments["title"], "스위치 시험")
+        self.assertEqual(request.omb_session_id, "sess-switch")
+        self.assertFalse(deps.is_owner)
+
+    def test_python_writer_http_answers_remember_resp_shape(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        with mock.patch.object(door.remember_writer, "run_write", return_value=self._written()):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/remember",
+                body=json.dumps(self._ARGS).encode(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(StubHandler.seen_bodies, [])
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body),
+            {
+                "source_path": "/vault/wiki/wiki-0001.md",
+                "wiki_id": "wiki-0001",
+                "duplicate": None,
+                "supersedes": 0,
+                "unknown": 0,
+            },
+        )
+
+    def test_python_writer_skipped_duplicate_answer(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        skipped = door.remember_writer.Written(
+            wiki_id="wiki-0099",
+            source_path="/vault/wiki/wiki-0099.md",
+            message="skipped — duplicate of /vault/wiki/wiki-0099.md",
+            duplicate="/vault/wiki/wiki-0099.md",
+            supersedes=0,
+            unknown=0,
+        )
+        with mock.patch.object(door.remember_writer, "run_write", return_value=skipped):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/remember",
+                body=json.dumps(self._ARGS).encode(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body),
+            {
+                "source_path": "/vault/wiki/wiki-0099.md",
+                "wiki_id": "wiki-0099",
+                "duplicate": "/vault/wiki/wiki-0099.md",
+                "supersedes": 0,
+                "unknown": 0,
+            },
+        )
+
+    def test_python_writer_refused_maps_engine_error_shapes(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        refused = door.remember_writer.Refused(-32602, "missing argument: title")
+        with mock.patch.object(door.remember_writer, "run_write", return_value=refused):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/remember",
+                body=json.dumps(self._ARGS).encode(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(status, 400, "-32602 는 400 — serve/http.rs:690-696")
+        self.assertEqual(json.loads(body), {"error": "missing argument: title"})
+        with mock.patch.object(
+            door.remember_writer,
+            "run_write",
+            return_value=door.remember_writer.Refused(-32603, "PII gate blocked by rule 'x'"),
+        ):
+            mcp_status, mcp_body, _ = _req(
+                self.door_port,
+                "POST",
+                "/mcp",
+                body=self._mcp_payload(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(mcp_status, 200, "MCP 거절도 JSON-RPC 봉투로 200 — handle_mcp")
+        answer = json.loads(mcp_body)
+        self.assertEqual(answer["id"], 7)
+        self.assertEqual(answer["error"], {"code": -32603, "message": "PII gate blocked by rule 'x'"})
+        self.assertNotIn("result", answer)
+
+    def test_python_writer_raising_is_engine_error_never_silent_200(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        with mock.patch.object(door.remember_writer, "run_write", side_effect=RuntimeError("boom")):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/remember",
+                body=json.dumps(self._ARGS).encode(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(status, 500)
+        self.assertEqual(list(json.loads(body)), ["error"])
+
+    def test_python_writer_without_dsn_is_503(self):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        os.environ.pop("DOOR_PG_DSN", None)
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/remember",
+            body=json.dumps(self._ARGS).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body), {"error": "store not configured"})
+
+
+class WriterEventDispatchTests(unittest.TestCase):
+    """E3c-2 — 파이썬 쓰기 길의 사건 전달(dedup_decision·remember_written)이 응답을 기다리지
+    않는다. 느린 엔진 /events 싱크 앞에서도 인큐만 하고 돌아오고, 받은 순서대로 전달된다."""
+
+    def test_enqueue_returns_before_slow_sink_and_delivers_in_order(self):
+        delivered = []
+        done = threading.Event()
+
+        def slow_sink(component, event, status, **fields):
+            time.sleep(0.05)
+            delivered.append((component, event, status, fields))
+            if len(delivered) == 2:
+                done.set()
+            return True
+
+        with mock.patch.object(door.event_log, "try_append_event", side_effect=slow_sink):
+            started = time.monotonic()
+            self.assertTrue(door._enqueue_writer_event("door", "dedup_decision", "ok", a=1))
+            self.assertTrue(door._enqueue_writer_event("door", "remember_written", "ok", b=2))
+            queued = time.monotonic() - started
+            self.assertTrue(done.wait(5), "백그라운드가 두 사건을 다 전달")
+        self.assertLess(queued, 0.09, "두 사건의 인큐가 느린 싱크(50ms×2)를 기다리지 않는다")
+        self.assertEqual(
+            [(entry[0], entry[1]) for entry in delivered],
+            [("door", "dedup_decision"), ("door", "remember_written")],
+            "자료 순서 그대로 전달",
+        )
 
 
 class ActiveProjectsRouteTests(unittest.TestCase):
@@ -898,6 +2079,26 @@ class SplitSubjectsGetRouteTests(unittest.TestCase):
             self.assertEqual(status, 400, f"limit={bad}")
             self.assertIn("limit", json.loads(body)["error"])
 
+    def test_samples_read_the_given_spellings(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        asked: list[list[str]] = []
+        orig = door._fetch_split_samples
+        door._fetch_split_samples = lambda variants: asked.append(variants) or [("action", 268, "design x")]
+        try:
+            status, body, _ = _req(
+                self.door_port, "GET", "/repairs/split-subjects/samples?variant=next%20step&variant=next-step"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                json.loads(body), {"samples": [{"predicate": "action", "rows": 268, "value": "design x"}]}
+            )
+            self.assertEqual(asked, [["next step", "next-step"]])
+            for query in ("", "?variant=", "?" + "&".join(f"variant=v{i}" for i in range(11))):
+                status, _, _ = _req(self.door_port, "GET", f"/repairs/split-subjects/samples{query}")
+                self.assertEqual(status, 400, query)
+        finally:
+            door._fetch_split_samples = orig
+
 
 class SplitSubjectsPostRouteTests(unittest.TestCase):
     """POST /repairs/split-subjects through the real door app — stub cursor + stub sync
@@ -996,9 +2197,15 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
             touched["event_owner_held"] = owner_held
             return "delivered"
 
-        def fake_reread_in_background(subject, deleted_rows, reread_notes, owner_held):
+        def fake_reread_in_background(merged):
             order.append("reread-started")
-            touched["reread_args"] = [subject, deleted_rows, reread_notes, owner_held]
+            touched["reread_args"] = [
+                merged.subject,
+                merged.deleted_rows,
+                merged.reread_notes,
+                merged.owner_held,
+            ]
+            touched["reread_row"] = merged.row
 
         self._sync_result = {"ok": True, "summary": {"ingest_new": 0, "ingest_repaired": 2}}
         self._orig_reread = door._reread_in_background
@@ -1022,8 +2229,8 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
         if self._saved_token is not None:
             os.environ["BORING_OWNER_TOKEN"] = self._saved_token
 
-    def _post(self, subject: str, token: str | None = None):
-        payload = json.dumps({"subject": subject}).encode()
+    def _post(self, subject: str, token: str | None = None, row=None):
+        payload = json.dumps({"subject": subject, **({} if row is None else {"row": row})}).encode()
         headers = {"content-type": "application/json"}
         if token is not None:
             headers["X-Boring-Owner-Token"] = token
@@ -1081,16 +2288,28 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
         self.assertEqual(self.touched["delete"], ["/a.md", "/b.md"])
         self.assertEqual(out["owner_held"], [])
 
+    def test_the_card_row_rides_to_the_reread_and_a_malformed_one_is_a_400(self):
+        row = {"channel": "C1", "card_ts": "1.0", "idx": 2}
+        status, _, _ = self._post("foodspring-front", row=row)
+        self.assertEqual(status, 202)
+        self.assertEqual(self.touched["reread_row"], door.card_types.RowRef(**row))
+
+        self.order.clear()
+        status, _, _ = self._post("foodspring-front", row={"channel": "C1"})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.order, [], "a malformed row touches nothing")
+
     def test_reread_recounts_and_records_or_says_it_failed(self):
         self._fetch_calls = 1
-        door._reread_after_merge("foodspring-front", 2, 2, [])
+        merged = door._Merged("foodspring-front", 2, 2, [], None)
+        door._reread_batch([merged])
         self.assertEqual(self.order, ["sync", "event"])
 
         self.order.clear()
         self._sync_result = {"ok": False, "error": "engine unreachable: timed out"}
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            door._reread_after_merge("foodspring-front", 2, 2, [])
+            door._reread_batch([merged])
         self.assertEqual(self.order, ["sync"], "no subject_merged event for a reread that did not happen")
         self.assertIn("foodspring-front", buf.getvalue())
         self.assertIn("timed out", buf.getvalue())
@@ -1307,6 +2526,30 @@ class RunCardRouteTests(unittest.TestCase):
             "the weekly route must execute the weekly poster, not the morning card",
         )
 
+    def test_the_repair_judge_route_runs_the_judge_program(self):
+        """POST /run/repair-judge — morning-card 와 같은 {ok, exit, tail} 모양으로 판정
+        실행을 돌린다. The mutation this kills: the route wired to the wrong program (or
+        folded into the card's own run) — the judge must run as its own subprocess."""
+        calls = []
+
+        def fake_run(script, timeout_s):
+            calls.append(script)
+            return subprocess.CompletedProcess(
+                ["x"], 0, stdout="[repair-judge] judged=2 failed=0\n", stderr=""
+            )
+
+        with mock.patch.object(door, "_run_card_subprocess", fake_run):
+            status, body, _ = _req(self.door_port, "POST", "/run/repair-judge")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["ok"], True)
+        self.assertEqual(payload["exit"], 0)
+        self.assertIn("judged=2", payload["tail"])
+        self.assertTrue(
+            str(calls[0]).endswith(os.path.join("agents", "slack", "card_repair_judge.py")),
+            "the repair-judge route must execute the judge, not the morning card",
+        )
+
     def test_a_nonzero_exit_is_ok_false_with_the_code_and_tail(self):
         """The mutation this kills: the route folding a failed card into ok:true — the exit
         code and the tool's own refusal line must reach the caller verbatim."""
@@ -1387,6 +2630,562 @@ class RunCardRouteTests(unittest.TestCase):
         self.assertEqual(by_status[409], {"error": "morning-card already running"})
         self.assertEqual(by_status[200]["ok"], True)
         self.assertEqual(by_status[200]["posted_ts"], "3.0")
+
+
+class _FakeWeb:
+    """A Slack message the door reads and rewrites — history returns it as it stands now."""
+
+    def __init__(self, blocks):
+        self.blocks = blocks
+        self.updates = []
+
+    def conversations_history(self, **kw):
+        return {"messages": [{"ts": "1.0", "blocks": self.blocks}]}
+
+    def chat_update(self, *, channel, ts, blocks):
+        self.updates.append((channel, ts))
+        self.blocks = blocks
+
+
+def _card_with_pending_rows(n):
+    repairs = [
+        door.card_types.Repair(subject=f"subj-{i}", variants=[f"subj {i}", f"subj-{i}"], rows=3, notes=2)
+        for i in range(n)
+    ]
+    blocks = door.card_view.build_blocks([], repairs=repairs, repairs_total_groups=n, lang="ko")
+    for i in range(n):
+        blocks = door.card_view.mark_progress(blocks, i, door.card_types.Pending(), lang="ko")
+    return blocks
+
+
+class RereadSingleFlightTests(unittest.TestCase):
+    """Three merges landing while a reread runs must not start three /sync passes (2026-09-30
+    08:04: three overlapped, two timed out), and each merge's card row settles only once the
+    reread that covered it has ended."""
+
+    def setUp(self):
+        self.syncs = 0
+        self.running = 0
+        self.peak = 0
+        self.count_lock = threading.Lock()
+        self.sync_result = {"ok": True, "summary": {}}
+        self.gate = threading.Event()
+        self.first_entered = threading.Event()
+        self.second_entered = threading.Event()
+        self.events = []
+        self.web = _FakeWeb(_card_with_pending_rows(3))
+        self.patches = [
+            mock.patch.object(door, "_call_engine_sync", self._sync),
+            mock.patch.object(door, "_fetch_split_subject_rows", lambda: [("subj-0", "/a.md")]),
+            mock.patch.object(door, "_emit_subject_merged_event", self._emit),
+            mock.patch.object(door, "_slack_client", lambda: self.web),
+            mock.patch.object(door.boring_config, "note_lang", lambda: "ko"),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        self.gate.set()
+        worker = door._REREAD_WORKER
+        if worker is not None:
+            worker.join(10)
+        for p in self.patches:
+            p.stop()
+
+    def _sync(self):
+        with self.count_lock:
+            self.syncs += 1
+            self.running += 1
+            self.peak = max(self.peak, self.running)
+            if self.running > 1:
+                self.second_entered.set()
+        self.first_entered.set()
+        self.gate.wait(10)
+        with self.count_lock:
+            self.running -= 1
+        return self.sync_result
+
+    def _emit(self, subject, *rest):
+        self.events.append(subject)
+        return "delivered"
+
+    def _merge(self, idx):
+        row = door.card_types.RowRef(channel="C1", card_ts="1.0", idx=idx)
+        door._reread_in_background(door._Merged(f"subj-{idx}", 3, 2, [], row))
+
+    def _run_three(self):
+        self._merge(0)
+        self.assertTrue(self.first_entered.wait(10))
+        self._merge(1)
+        self._merge(2)
+        # A second /sync starting while the first is held is the defect; give it the chance to.
+        self.second_entered.wait(0.5)
+        worker = door._REREAD_WORKER
+        self.gate.set()
+        worker.join(10)
+        self.assertFalse(worker.is_alive())
+
+    def _texts(self):
+        return [
+            b["elements"][0]["text"]
+            for b in self.web.blocks
+            if str(b.get("block_id", "")).endswith(":status")
+        ]
+
+    def test_three_merges_run_at_most_two_syncs_and_settle_all_three_rows(self):
+        self._run_three()
+        self.assertEqual(self.peak, 1, "two /sync passes overlapped")
+        self.assertLessEqual(self.syncs, 2)
+        self.assertEqual(
+            self.syncs, 2, "control: the merges queued behind the first still get their own reread"
+        )
+        self.assertEqual(sorted(self.events), ["subj-0", "subj-1", "subj-2"])
+        texts = self._texts()
+        self.assertEqual(len(texts), 3)
+        self.assertTrue(all(t.startswith("✓ 완료") for t in texts), texts)
+
+    def test_a_failed_reread_fails_every_row_it_covered_and_records_no_merge(self):
+        self.sync_result = {"ok": False, "error": "engine unreachable: timed out"}
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self._run_three()
+        texts = self._texts()
+        self.assertEqual(len(texts), 3)
+        self.assertTrue(all(t.startswith("✕ 실패") and "timed out" in t for t in texts), texts)
+        self.assertEqual(self.events, [])
+
+    def test_a_batch_that_raises_fails_its_rows_and_the_queue_behind_it_still_rereads(self):
+        calls = iter([ValueError("recount exploded"), self.sync_result])
+
+        def sync():
+            with self.count_lock:
+                self.syncs += 1
+            self.first_entered.set()
+            self.gate.wait(10)
+            result = next(calls)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        buf = io.StringIO()
+        with mock.patch.object(door, "_call_engine_sync", sync), contextlib.redirect_stderr(buf):
+            self._merge(0)
+            self.assertTrue(self.first_entered.wait(10))
+            self._merge(1)
+            worker = door._REREAD_WORKER
+            self.gate.set()
+            worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertIsNone(door._REREAD_WORKER)
+        texts = {
+            b["block_id"]: b["elements"][0]["text"]
+            for b in self.web.blocks
+            if str(b.get("block_id", "")).endswith(":status")
+        }
+        self.assertTrue(texts["card:0:status"].startswith("✕ 실패"), texts)
+        self.assertTrue(texts["card:1:status"].startswith("✓ 완료"), texts)
+        self.assertEqual(self.events, ["subj-1"])
+
+    def test_settling_one_row_leaves_every_other_block_as_slack_holds_it(self):
+        before = self.web.blocks
+        outcome = door.card_types.Done(text="✓ 완료 — x")
+        door._show_row(door.card_types.RowRef(channel="C1", card_ts="1.0", idx=1), outcome, "ko")
+        changed = [i for i, (a, b) in enumerate(zip(before, self.web.blocks)) if a != b]
+        self.assertEqual(len(before), len(self.web.blocks))
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(self.web.blocks[changed[0]]["block_id"], "card:1:status")
+        self.assertEqual(self.web.blocks[changed[0]]["elements"][0]["text"], "✓ 완료 — x")
+
+    def test_a_merge_after_the_worker_drained_starts_a_fresh_one(self):
+        self.gate.set()
+        self._merge(0)
+        first = door._REREAD_WORKER
+        if first is not None:
+            first.join(10)
+        self._merge(1)
+        second = door._REREAD_WORKER
+        if second is not None:
+            second.join(10)
+        self.assertEqual(self.syncs, 2)
+        self.assertIsNone(door._REREAD_WORKER)
+
+
+class _RegisterTestHarness:
+    """E4-1 시험의 공통 바탕 — 스텁 엔진+문(uvicorn 스레드) 한 쌍과 환경 저장·복원.
+
+    RememberWriterSwitchTests 와 같은 모양이라 두 시험 다움에 붙인다(다중 상속은 안 쓴다 —
+    unittest setUpClass 훅을 그대로 따라가게 하나의 부모로)."""
+
+    _ENV_NAMES = (
+        "DOOR_UPSTREAM",
+        "DOOR_PG_DSN",
+        "DOOR_REGISTER_READER",
+        "BORING_EVENT_SINK",
+        "BORING_EVENT_LOG",
+    )
+
+    @classmethod
+    def _start(cls):
+        cls._saved = {name: os.environ.get(name) for name in cls._ENV_NAMES}
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), StubHandler)
+        cls.stub_thread = threading.Thread(target=cls.stub.serve_forever, daemon=True)
+        cls.stub_thread.start()
+        os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{cls.stub.server_address[1]}"
+        cls.door_port = _free_port()
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                status, _, _ = _req(cls.door_port, "GET", "/health")
+                if status == 200:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def _stop(cls):
+        cls.door_server.should_exit = True
+        cls.stub.shutdown()
+        cls.stub.server_close()
+        cls._tmp.cleanup()
+        for name, value in cls._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def _setUp(self, register_mode: bool = False):
+        StubHandler.seen_bodies.clear()
+        StubHandler.hits = 0
+        StubHandler.register_mode = register_mode
+        os.environ["BORING_EVENT_SINK"] = "spool"
+        os.environ["BORING_EVENT_LOG"] = str(Path(self._tmp.name) / f"events-{time.time_ns()}.ndjson")
+        os.environ["DOOR_PG_DSN"] = "postgresql://unused/unused"  # 읽기 길은 목으로 둔다
+        # 그림자는 응답 뒤(백그라운드)에 돌아 — mock 은 _req 블록이 끝나기 전에 풀리면 안 된다.
+        # 테스트마다 덮어쓰는 self._shadow_query_impl 을 경유하게 핀다(지금 값이 아니라 호출 시점을 본다).
+        self._shadow_query_impl = lambda surface, transport, arguments: door.Ok({})
+        self._shadow_query_patch = mock.patch.object(
+            door,
+            "_register_shadow_query",
+            side_effect=lambda surface, transport, arguments: self._shadow_query_impl(
+                surface, transport, arguments
+            ),
+        )
+        self._shadow_query_patch.start()
+
+    def _tearDown(self):
+        self._shadow_query_patch.stop()
+        StubHandler.register_mode = False
+        os.environ.pop("DOOR_REGISTER_READER", None)
+
+    def _read_shadow_events(self) -> list[dict]:
+        path = Path(os.environ["BORING_EVENT_LOG"])
+        if not path.exists():
+            return []
+        return [
+            parsed
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and (parsed := json.loads(line)).get("event") == "read_shadow"
+        ]
+
+    def _wait_for_shadow(self, timeout: float = 5.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            events = self._read_shadow_events()
+            if events:
+                return events[-1]
+            time.sleep(0.05)
+        self.fail("read_shadow event not written within timeout")
+
+
+class RegisterShadowTests(_RegisterTestHarness, unittest.TestCase):
+    """E4-1 읽기 그림자 — 스위치 기본(engine)에서 일곱 레지스터 경로는 엔진 답 바이트
+    그대로 가고, 응답 뒤 그림자가 같은 요청을 파이썬 읽기 길에 태워 read_shadow 사건
+    한 줄을 남긴다. 사건의 사유는 (가)/(나)/(다) 갈래로 남는다."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+
+    def setUp(self):
+        self._setUp(register_mode=True)
+
+    def tearDown(self):
+        self._tearDown()
+
+    def _mcp_call(self, tool: str, arguments: dict, request_id: int = 5) -> bytes:
+        return json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {"name": tool, "arguments": arguments},
+            }
+        ).encode()
+
+    def test_http_register_answer_is_byte_identical_and_shadow_ok(self):
+        engine_payload = json.loads(REGISTER_HTTP_BODY)
+        self._shadow_query_impl = lambda surface, transport, arguments: door.Ok(engine_payload)
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/decisions",
+            body=json.dumps({"project": "omb"}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REGISTER_HTTP_BODY, "기본은 엔진 답 바이트 그대로")
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "ok")
+        self.assertEqual(event["event"], "read_shadow")
+        self.assertEqual(event["surface"], "decisions")
+        self.assertEqual(event["transport"], "http")
+
+    def test_mcp_register_tool_shadow_uses_structured_content(self):
+        self._shadow_query_impl = lambda surface, transport, arguments: door.Ok(REGISTER_MCP_PAYLOAD)
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/mcp",
+            body=self._mcp_call("risks", {"project": "omb", "limit": 5}),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REGISTER_MCP_BODY, "MCP 도구 답도 바이트 그대로")
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "ok")
+        self.assertEqual(event["surface"], "risks")
+        self.assertEqual(event["transport"], "mcp")
+        self.assertEqual(event["engine_rows"], 1)
+        self.assertEqual(event["python_rows"], 1)
+
+    def test_shadow_mismatch_is_classified_python_defect(self):
+        self._shadow_query_impl = lambda surface, transport, arguments: door.Ok(
+            {"answer": "No decisions recorded yet.", "sources": []}
+        )
+        _req(
+            self.door_port,
+            "POST",
+            "/decisions",
+            body=json.dumps({"project": "omb"}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "mismatch")
+        self.assertGreaterEqual(event["python_defect"], 1)
+        self.assertIn("(가)", event["reason"])
+
+    def test_shadow_race_rerun_match_stays_ok_with_unknown_reason(self):
+        first = {"answer": "No decisions recorded yet.", "sources": []}
+        calls = {"n": 0}
+
+        def racy(surface, transport, arguments):
+            calls["n"] += 1
+            return door.Ok(first if calls["n"] == 1 else json.loads(REGISTER_HTTP_BODY))
+
+        self._shadow_query_impl = racy
+        _req(
+            self.door_port,
+            "POST",
+            "/decisions",
+            body=json.dumps({"project": "omb"}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "ok")
+        self.assertGreaterEqual(event["unknown"], 1, "어긋난 칸마다 레이스 사유가 남는다")
+        self.assertIn("race (다)", event["reason"])
+
+    def test_shadow_raising_cannot_change_the_answer(self):
+        def boom(surface, transport, arguments):
+            raise RuntimeError("boom")
+
+        self._shadow_query_impl = boom
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/next_actions",
+            body=json.dumps({"project": ""}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, REGISTER_HTTP_BODY)
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "error")
+        self.assertIn("RuntimeError", event["reason"])
+
+    def test_status_shadow_compares_sources_only_when_generated(self):
+        engine_payload = {
+            "answer": "## Status\n\n- Done: one thing\n- Next: another",
+            "sources": ["wiki/wiki-0001.md"],
+        }
+        original = _REGISTER_STUB_PATHS["/status"]
+        _REGISTER_STUB_PATHS["/status"] = json.dumps(engine_payload, ensure_ascii=False).encode()
+        try:
+            self._shadow_query_impl = lambda surface, transport, arguments: door.Ok(engine_payload)
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/status",
+                body=json.dumps({"project": "omb"}).encode(),
+                headers={"content-type": "application/json"},
+            )
+        finally:
+            _REGISTER_STUB_PATHS["/status"] = original
+        self.assertEqual(json.loads(body), engine_payload)
+        event = self._wait_for_shadow()
+        self.assertEqual(event["status"], "ok")
+        self.assertEqual(event["surface"], "status")
+        self.assertFalse(event["answer_compared"], "생성 답은 대조 안 함 — sources 만 맞춘다")
+
+
+class RegisterReaderSwitchTests(_RegisterTestHarness, unittest.TestCase):
+    """E4-1 읽기 주인 스위치 (DOOR_REGISTER_READER).
+
+    기본(engine)이면 일곱 읽기는 프록시 그대로(바이트+그림자). python 이면 문이 엔진에
+    넘기지 않고 문 안의 읽기 길로 답한다 — _register_answer 는 목으로 두고 선로(스위치·
+    봉투·상태 부호·거절 문구)만 본다. 진짜 읽기 길은 registers/test_pg.py 가 본다."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+
+    def setUp(self):
+        self._setUp()
+
+    def tearDown(self):
+        self._tearDown()
+
+    def test_default_reader_is_engine_and_register_proxies(self):
+        os.environ.pop("DOOR_REGISTER_READER", None)
+        self.assertEqual(door._register_reader(), "engine")
+        payload = json.dumps({"project": "omb"}).encode()
+        status, body, _ = _req(
+            self.door_port, "POST", "/decisions", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual((status, body), (200, payload), "기본은 스텁 엔진(echo) 답 바이트 그대로")
+
+    def test_unknown_switch_value_falls_back_to_engine(self):
+        os.environ["DOOR_REGISTER_READER"] = "python2"
+        self.assertEqual(door._register_reader(), "engine")
+
+    def test_python_reader_http_answers_askresp_shape_without_upstream(self):
+        os.environ["DOOR_REGISTER_READER"] = "python"
+        hits_before = StubHandler.hits
+        with mock.patch.object(
+            door, "_register_answer", return_value=door.Ok({"answer": "digest", "sources": ["subj"]})
+        ) as run:
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/decisions",
+                body=json.dumps({"project": "omb"}).encode(),
+                headers={"content-type": "application/json"},
+            )
+        run.assert_called_once()
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"answer": "digest", "sources": ["subj"]})
+        self.assertEqual(StubHandler.hits, hits_before, "python 이면 엔진을 건드리지 않는다")
+
+    def test_python_reader_mcp_structured_envelope_without_upstream(self):
+        os.environ["DOOR_REGISTER_READER"] = "python"
+        hits_before = StubHandler.hits
+        payload = {
+            "answer": "Showing 0 of 0 matching claims (limit_applied=false).",
+            "sources": [],
+            "items": [],
+            "limit_applied": False,
+            "total_matching": 0,
+        }
+        with mock.patch.object(door, "_register_answer", return_value=door.Ok(payload)):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/mcp",
+                body=json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 7,
+                        "method": "tools/call",
+                        "params": {"name": "decisions", "arguments": {"limit": 3}},
+                    }
+                ).encode(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(StubHandler.hits, hits_before)
+        self.assertEqual(status, 200)
+        wire = json.loads(body)
+        self.assertEqual(wire["id"], 7)
+        self.assertEqual(wire["result"]["structuredContent"], payload)
+        self.assertEqual(json.loads(wire["result"]["content"][0]["text"]), payload)
+        self.assertFalse(wire["result"]["isError"])
+
+    def test_python_reader_validation_rejection_matches_engine_message(self):
+        os.environ["DOOR_REGISTER_READER"] = "python"
+        hits_before = StubHandler.hits
+        with mock.patch.object(door, "_register_answer") as run:
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/decisions",
+                body=json.dumps({"limit": 0}).encode(),
+                headers={"content-type": "application/json"},
+            )
+        run.assert_not_called()
+        self.assertEqual(StubHandler.hits, hits_before)
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body), {"error": "limit must be an integer in 1..=50"})
+
+    def test_python_reader_project_status_requires_project(self):
+        os.environ["DOOR_REGISTER_READER"] = "python"
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/mcp",
+            body=json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {"name": "project_status", "arguments": {}},
+                }
+            ).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        wire = json.loads(body)
+        self.assertEqual(wire["error"]["code"], -32602)
+        self.assertEqual(wire["error"]["message"], "missing argument: project")
+
+    def test_python_reader_without_dsn_is_503(self):
+        os.environ["DOOR_REGISTER_READER"] = "python"
+        os.environ.pop("DOOR_PG_DSN", None)
+        status, body, _ = _req(
+            self.door_port,
+            "POST",
+            "/decisions",
+            body=json.dumps({"project": "omb"}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body), {"error": "store not configured"})
 
 
 if __name__ == "__main__":

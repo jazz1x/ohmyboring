@@ -310,21 +310,27 @@ mod tests {
 
     #[test]
     fn t1_requires_slash_or_source_extension() {
-        assert!(anchor("value: 10").is_empty());
-        assert!(anchor("foo:10").is_empty());
-        assert!(anchor("key: value").is_empty());
+        assert_eq!(anchor("value: 10"), Vec::<Anchor>::new());
+        assert_eq!(anchor("foo:10"), Vec::<Anchor>::new());
+        assert_eq!(anchor("key: value"), Vec::<Anchor>::new());
     }
 
     #[test]
     fn t1_ignores_urls() {
-        assert!(anchor("https://github.com/org/repo/blob/main/x.py:12").is_empty());
-        assert!(anchor("see http://example.com/a/b.md:3 now").is_empty());
+        assert_eq!(
+            anchor("https://github.com/org/repo/blob/main/x.py:12"),
+            Vec::<Anchor>::new()
+        );
+        assert_eq!(
+            anchor("see http://example.com/a/b.md:3 now"),
+            Vec::<Anchor>::new()
+        );
     }
 
     #[test]
     fn t1_ignores_tmp_and_home_paths() {
-        assert!(anchor("/tmp/scratch/x.py:5").is_empty());
-        assert!(anchor("~/notes/plan.md:9").is_empty());
+        assert_eq!(anchor("/tmp/scratch/x.py:5"), Vec::<Anchor>::new());
+        assert_eq!(anchor("~/notes/plan.md:9"), Vec::<Anchor>::new());
     }
 
     #[test]
@@ -339,12 +345,18 @@ mod tests {
 
     #[test]
     fn t1b_requires_a_slash() {
-        assert!(anchor("see uptake_core.py for details").is_empty());
+        assert_eq!(
+            anchor("see uptake_core.py for details"),
+            Vec::<Anchor>::new()
+        );
     }
 
     #[test]
     fn t1b_requires_a_source_extension() {
-        assert!(anchor("config in dir/settings.json is ignored").is_empty());
+        assert_eq!(
+            anchor("config in dir/settings.json is ignored"),
+            Vec::<Anchor>::new()
+        );
     }
 
     #[test]
@@ -355,9 +367,12 @@ mod tests {
 
     #[test]
     fn t1b_ignores_urls_tmp_and_home() {
-        assert!(anchor("https://github.com/org/repo/blob/main/a/b.py").is_empty());
-        assert!(anchor("/tmp/scratch/x.py").is_empty());
-        assert!(anchor("~/notes/plan.md").is_empty());
+        assert_eq!(
+            anchor("https://github.com/org/repo/blob/main/a/b.py"),
+            Vec::<Anchor>::new()
+        );
+        assert_eq!(anchor("/tmp/scratch/x.py"), Vec::<Anchor>::new());
+        assert_eq!(anchor("~/notes/plan.md"), Vec::<Anchor>::new());
     }
 
     #[test]

@@ -5,17 +5,14 @@ Run: python3 agents/claude-code/test_hooks.py   (no pytest dependency; unittest-
  or: python3 -m pytest agents/claude-code/test_hooks.py
 
 Covers the PURE, no-network helpers in distill-session.py and recall.py:
-  - distill-session._extract_json         — LLM-JSON extraction (fences + trailing prose)
-  - distill-session._strip_trailing_metadata — drop trailing tags/tools/concepts blocks
-  - distill-session._build_prompt         — prompt assembly (JSON skeleton + transcript)
-  - markers.safe_id                       — throttle-marker id sanitization
+  - markers.safe_id                      — throttle-marker id sanitization
   - distill-session.repo_slug             — folder-name fallback (no git remote needed)
   - distill-session.extract               — JSONL transcript → "[role] text" (file I/O only)
   - recall.main                           — context-injection formatting (urlopen mocked)
 
-The two hook modules live in agents/claude-code/ and sys.path-insert ../shared to import
-boring_config (test_boring_config.py guards that resolver). We load them by file path with
-importlib the same way, after neutralizing ambient policy env so the run is deterministic.
+The two hook modules live in agents/claude-code/ and sys.path-insert ../shared and <repo>/src
+to import ohmyboring.config (src/ohmyboring/test_config.py guards that resolver). We load them
+by file path with importlib, after neutralizing ambient policy env so the run is deterministic.
 HTTP is never touched: the pure helpers don't call out, and recall.main's urlopen is mocked.
 """
 
@@ -29,15 +26,17 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
 HERE = Path(__file__).resolve().parent
-# Import boring_config the way the hooks do (insert agents/shared on sys.path). distill-session
-# evaluates NOTE_LANG = boring_config.note_lang() at import time, so the dep must resolve.
+# Same sys.path the hooks set up. distill-session evaluates NOTE_LANG = config.note_lang() at
+# import time, so ohmyboring.config must resolve.
 SHARED_DIR = HERE.parent / "shared"
 sys.path.insert(0, str(SHARED_DIR))
+sys.path.insert(0, str(HERE.parents[1] / "src"))
 
 # Neutralize ambient policy/endpoint env so module-load + assertions are deterministic.
 for _var in (
@@ -78,7 +77,8 @@ distill = _load("distill_session_hook", "distill-session.py")
 recall = _load("recall_hook", "recall.py")
 rules_hook = _load("rules_hook", "rules.py")
 import distill_core  # noqa: E402
-import omb_env  # noqa: E402
+
+from ohmyboring import config as omb_env  # noqa: E402
 
 # The recall tests drive the real injection path, which appends to the injection ledger.
 # Redirect it before import or the suite writes into the owner's live cache.
@@ -86,65 +86,10 @@ os.environ["BORING_INJECTION_LEDGER"] = str(Path(tempfile.mkdtemp()) / "injectio
 import markers  # noqa: E402
 import recall_core  # noqa: E402
 
-
-class ExtractJsonTests(unittest.TestCase):
-    def test_plain_object(self):
-        self.assertEqual(distill._extract_json('{"a": 1}'), {"a": 1})
-
-    def test_markdown_fenced(self):
-        text = '```json\n{"title": "x", "body": "y"}\n```'
-        self.assertEqual(distill._extract_json(text), {"title": "x", "body": "y"})
-
-    def test_trailing_prose_ignored(self):
-        # raw_decode stops at the first complete object; trailing garbage is dropped.
-        text = '{"skip": true}\nHere is why I skipped it.'
-        self.assertEqual(distill._extract_json(text), {"skip": True})
-
-    def test_leading_prose_before_object(self):
-        text = 'Sure! Here is the JSON:\n{"k": "v"}'
-        self.assertEqual(distill._extract_json(text), {"k": "v"})
-
-    def test_no_object_returns_none(self):
-        self.assertIsNone(distill._extract_json("no json here at all"))
-
-    def test_malformed_returns_none(self):
-        self.assertIsNone(distill._extract_json('{"a": '))
-
-
-class StripTrailingMetadataTests(unittest.TestCase):
-    def test_strips_trailing_block(self):
-        body = "## 결과\nfixed it.\n\ntags: [a, b]\ntools: [git]\nconcepts: [x]"
-        self.assertEqual(distill._strip_trailing_metadata(body), "## 결과\nfixed it.")
-
-    def test_keeps_clean_body(self):
-        body = "## 배경\nproblem\n\n## 결과\nsolved"
-        self.assertEqual(distill._strip_trailing_metadata(body), body.rstrip())
-
-    def test_does_not_strip_midbody_mention(self):
-        # A "tools:" line in the MIDDLE (not the trailing run) must be preserved.
-        body = "intro\ntools: relevant here\nmore prose"
-        self.assertEqual(distill._strip_trailing_metadata(body), body.rstrip())
-
-
-class BuildPromptTests(unittest.TestCase):
-    def test_contains_json_skeleton_and_transcript(self):
-        prompt = distill._build_prompt("[user] hello world", "personal", "org/repo")
-        self.assertIn('"title"', prompt)
-        self.assertIn('"claims"', prompt)
-        self.assertIn("=== SESSION TRANSCRIPT ===", prompt)
-        self.assertIn("[user] hello world", prompt)
-
-    def test_repo_and_origin_hints(self):
-        with_repo = distill._build_prompt("t", "company", "org/repo")
-        self.assertIn("repo='org/repo'", with_repo)
-        self.assertIn("origin='company'", with_repo)
-        no_repo = distill._build_prompt("t", "personal", "")
-        self.assertNotIn("repo='", no_repo)
-        self.assertIn("origin='personal'", no_repo)
-
-    def test_skip_contract_present(self):
-        # The prompt must teach the {"skip": true} escape hatch that distill_and_remember honors.
-        self.assertIn('"skip": true', distill._build_prompt("t", "personal", ""))
+from ohmyboring.adapters import engine  # noqa: E402
+from ohmyboring.adapters import llm as llm_adapter  # noqa: E402
+from ohmyboring.adapters.engine import Unreachable  # noqa: E402
+from ohmyboring.result import Err, Ok  # noqa: E402
 
 
 class MarkPathTests(unittest.TestCase):
@@ -270,8 +215,8 @@ class SessionStartRecallTests(unittest.TestCase):
 
         def fake_context(_self, project=None, max_items=5):
             if side_effect is not None:
-                raise side_effect
-            return context_resp
+                return Err(Unreachable(str(side_effect)))
+            return Ok(context_resp)
 
         module = _load("session_start_recall", "session-start-recall.py")
         with (
@@ -391,13 +336,15 @@ class DoorApprovedSectionTests(unittest.TestCase):
             mock.patch.object(
                 module.DrudgeClient,
                 "context",
-                lambda _s, project=None, max_items=5: {
-                    "decisions": [],
-                    "risks": [],
-                    "facts": [],
-                    "glossary": [],
-                    "language": "ko",
-                },
+                lambda _s, project=None, max_items=5: Ok(
+                    {
+                        "decisions": [],
+                        "risks": [],
+                        "facts": [],
+                        "glossary": [],
+                        "language": "ko",
+                    }
+                ),
             ),
             mock.patch.dict(os.environ, env, clear=True),
             mock.patch.object(module.urllib.request, "urlopen", urlopen),
@@ -511,7 +458,7 @@ class DistillExitCodeTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_remember_failure_returns_nonzero_and_marks_retry(self):
+    def test_session_is_queued_without_calling_the_llm(self):
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
             f.write("{}\n")
             path = f.name
@@ -530,14 +477,23 @@ class DistillExitCodeTests(unittest.TestCase):
                 mock.patch.object(distill, "git_remote_url", return_value=""),
                 mock.patch.object(distill, "repo_slug", return_value="oh-my-boring"),
                 mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
-                mock.patch.object(distill, "distill_and_remember", return_value=False),
-                mock.patch.object(distill, "_mark") as mark,
+                mock.patch.object(llm_adapter, "call_llm") as llm,
+                mock.patch.object(engine, "call_remember") as remember,
+                tempfile.TemporaryDirectory() as mark_dir,
+                mock.patch.object(distill.distill_queue.markers, "MARK_DIR", mark_dir),
+                mock.patch("urllib.request.urlopen") as urlopen,
             ):
                 rc = distill.main()
+                queued = distill.distill_queue.drain()
 
-            self.assertEqual(rc, 1)
-            mark.assert_called_once_with("abc", retry=True, reason="remember failed")
-            self.assertIn("remember failed", stderr.getvalue())
+            self.assertEqual(rc, 0)
+            llm.assert_not_called()
+            urlopen.assert_not_called()
+            remember.assert_not_called()
+            self.assertEqual(
+                [(i.session_id, i.agent, i.text) for i in queued], [("abc", "claude-code", "x" * 600)]
+            )
+            self.assertIn("queued for hermes", stderr.getvalue())
         finally:
             os.unlink(path)
 
@@ -560,12 +516,12 @@ class RecallFormattingTests(unittest.TestCase):
         captured = io.StringIO()
         stderr = io.StringIO()
         if search_side_effect is None:
-            search_mock = mock.MagicMock(return_value=hits)
+            search_mock = mock.MagicMock(return_value=Ok(hits))
         else:
             search_mock = mock.MagicMock(side_effect=search_side_effect)
         # The engine's handover door is a network call; it is mocked here so the tests never
         # reach it, and so a test can look at what was handed.
-        handover_mock = handover or mock.MagicMock(return_value={"handed": 0, "unknown": 0})
+        handover_mock = handover or mock.MagicMock(return_value=Ok({"handed": 0, "unknown": 0}))
         stdin = {"prompt": prompt}
         if session_id:
             stdin["session_id"] = session_id
@@ -588,7 +544,7 @@ class RecallFormattingTests(unittest.TestCase):
             {"source_path": f"/vault/wiki/wiki-{i:04d}.md", "snippet": f"note {i} body text"}
             for i in range(recall_core.MAX_RESULTS + recall_core.CONTROL_RESULTS)
         ]
-        handover = mock.MagicMock(return_value={"handed": recall_core.MAX_RESULTS, "unknown": 0})
+        handover = mock.MagicMock(return_value=Ok({"handed": recall_core.MAX_RESULTS, "unknown": 0}))
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.dict(os.environ, {"BORING_INJECTION_LEDGER": os.path.join(tmp, "l.jsonl")}),
@@ -617,7 +573,7 @@ class RecallFormattingTests(unittest.TestCase):
         handover.assert_not_called()
 
     def test_a_dead_handover_door_does_not_cost_the_prompt(self):
-        handover = mock.MagicMock(side_effect=OSError("refused"))
+        handover = mock.MagicMock(return_value=Err(Unreachable("refused")))
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.dict(os.environ, {"BORING_INJECTION_LEDGER": os.path.join(tmp, "l.jsonl")}),
@@ -630,6 +586,76 @@ class RecallFormattingTests(unittest.TestCase):
             )
         self.assertIn("additionalContext", out, "the context still reaches the prompt")
         self.assertIn("[omb-recall] handover failed", err)
+
+    # ── 엔진이 200 비JSON 이나 소켓 끊김으로 답해도 옛 줄 그대로, 훅은 죽지 않는다 ──────────
+    def _run_main_over_wire(self, engine_answers):
+        """진짜 DrudgeClient 로 돌린다 — urlopen 만 가짜. `engine_answers(path)` 가 응답 객체를
+        내놓거나 예외 객체를 내놓는다(예외면 던진다)."""
+
+        def fake_urlopen(req, timeout):
+            answer = engine_answers(req.full_url.rsplit("/", 1)[-1])
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        captured, stderr = io.StringIO(), io.StringIO()
+        stdin = {"prompt": "a sufficiently long prompt", "session_id": "s-wire"}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"BORING_INJECTION_LEDGER": os.path.join(tmp, "l.jsonl")}),
+            mock.patch.object(recall.sys, "stdin", io.StringIO(json.dumps(stdin))),
+            mock.patch.object(urllib.request, "urlopen", fake_urlopen),
+            mock.patch.object(recall.sys, "stdout", captured),
+            mock.patch.object(recall.sys, "stderr", stderr),
+            mock.patch.object(recall_core.sys, "stderr", stderr),
+        ):
+            recall.main()
+        return captured.getvalue(), stderr.getvalue()
+
+    class _Body:
+        def __init__(self, raw: bytes):
+            self._raw = raw
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return self._raw
+
+    def _hits_then(self, handover_answer):
+        hits = {"hits": [{"source_path": "/vault/wiki/wiki-0001.md", "snippet": "x y z"}]}
+
+        def answers(path):
+            return self._Body(json.dumps(hits).encode()) if path == "search" else handover_answer
+
+        return answers
+
+    def test_a_handover_answered_with_non_json_keeps_the_context_and_the_old_line(self):
+        old = json.JSONDecodeError("Expecting value", "<html>", 0)
+        out, err = self._run_main_over_wire(self._hits_then(self._Body(b"<html>bad gateway</html>")))
+        self.assertIn("additionalContext", out)
+        self.assertIn(f"[omb-recall] handover failed: {old}", err)
+
+    def test_a_handover_reset_by_the_peer_keeps_the_context_and_the_old_line(self):
+        reset = ConnectionResetError(104, "Connection reset by peer")
+        out, err = self._run_main_over_wire(self._hits_then(reset))
+        self.assertIn("additionalContext", out)
+        self.assertIn(f"[omb-recall] handover failed: {reset}", err)
+
+    def test_a_search_answered_with_non_json_is_a_silent_noop_with_the_old_line(self):
+        old = json.JSONDecodeError("Expecting value", "<html>", 0)
+        out, err = self._run_main_over_wire(lambda _path: self._Body(b"<html>bad gateway</html>"))
+        self.assertEqual(out, "")
+        self.assertIn(f"[omb-recall] search failed after {recall_core.RETRIES} retries: {old}", err)
+
+    def test_a_search_reset_by_the_peer_is_a_silent_noop_with_the_old_line(self):
+        reset = ConnectionResetError(104, "Connection reset by peer")
+        out, err = self._run_main_over_wire(lambda _path: reset)
+        self.assertEqual(out, "")
+        self.assertIn(f"[omb-recall] search failed after {recall_core.RETRIES} retries: {reset}", err)
 
     def test_short_prompt_is_noop(self):
         # < 8 chars → recall is meaningless → no output, urlopen never reached.
@@ -747,7 +773,9 @@ class RecallFormattingTests(unittest.TestCase):
         # search keeps raising → after retries main logs the failure to stderr and exits gracefully.
         recall_core.RETRIES = 0  # one attempt only for deterministic test
         try:
-            out, err = self._run_main("a sufficiently long prompt", [], search_side_effect=OSError("down"))
+            out, err = self._run_main(
+                "a sufficiently long prompt", [], search_side_effect=[Err(Unreachable("down"))]
+            )
             self.assertEqual(out, "")
             self.assertIn("[omb-recall] search failed", err)
         finally:

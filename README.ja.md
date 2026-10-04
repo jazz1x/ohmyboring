@@ -64,7 +64,7 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 | **自動（セッション終了時）** | SessionEnd フック（`install.sh` が設定） | すべての Claude Code / Kimi セッション — `hooks/distill-session.py` がトランスクリプトを蒸留し `remember` します。対になる `UserPromptSubmit` フック（`recall.py`）が関連する過去のメモリを新しいプロンプトへ自動注入します。 |
 | **自動（Codex ワーカー）** | ホスト launchd/cron ワーカー（`install.sh` が設定） | Codex には SessionEnd フックがありません。ホストワーカーが 20 分ごとに `~/.codex/sessions/**/*.jsonl` をスキャンし、まだ書き込み中のトランスクリプトと実際の subagent rollout はスキップし、取り込み可能なトランスクリプトを同じ `remember` 経路で保存します。`hermes-agent` が有効なら `codex-memory-ingest-worker` も設定されます。どちらも `make doctor` で確認します。 |
 | **過去セッションのバックフィル** | `make collect [N=20]` | インストール直後、空の vault を `~/.claude/projects` の履歴で埋めるとき。新しい順・冪等（セッションごとのマーカーで蒸留済みはスキップ）、1 回に `N` 件だけ処理し CPU を占有しません。 |
-| **今すぐ（セッションを終えずに）** | `make distill-now` · `make remember M="…"` | セッションを終了せずに即座に取り込みたいとき。`distill-now` は**現在の**トランスクリプトをその都度再蒸留し、マーカーを残さないため、セッション終了時の通常の取り込みもそのまま動作します（初期ノート + 最終ノートの両方ができる場合あり）。`remember` は自分で書いたノートを保存します。 |
+| **今すぐ（セッションを終えずに）** | `make distill-now` · `make remember M="…"` | セッションを終了せずに即座に取り込みたいとき。`distill-now` は**現在の**トランスクリプトをキューに入れ、hermes（`boring-agent`）にその場で処理させるため、hermes が起動している必要があります。セッション終了時の通常の取り込みもその後そのまま動作します（初期ノート + 最終ノートの両方ができる場合あり）。`remember` は自分で書いたノートを保存します。 |
 
 ### フックを手動で設定
 
@@ -73,7 +73,7 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 ```bash
 python3 agents/shared/agent_wiring.py --install \
   --boring-home ~/oh-my-boring --server-name ohmyboring \
-  --server-url http://localhost:7700/mcp
+  --server-url http://localhost:7710/mcp
 ```
 
 このコマンドは Claude/Kimi フック、Cursor/Codex MCP エントリ、Codex ホストワーカー、そして `hermes-agent` が有効な場合は Hermes cron ワーカーを設定します。Claude だけを手で編集する場合は、`~/.claude/settings.json` に `python3 ~/oh-my-boring/hooks/distill-session.py` を実行する `SessionEnd` フックと、`recall.py` を実行する `UserPromptSubmit` フックを追加します。
@@ -236,7 +236,7 @@ make readiness
 | `BORING_EVENT_LOG` | ローカル NDJSON fallback スプール。デフォルトは `~/.cache/oh-my-boring/events.ndjson` |
 | `BORING_EVENT_SINK` | イベント sink モード: `db`(デフォルト)、`spool`、`both`。`db` はエンジン DB に先に書き、失敗時だけスプールします |
 | `BORING_EVENT_SPOOL` | fallback スプールポリシー: `on_failure`(DB 利用時のデフォルト)、`always`、`off` |
-| `BORING_EVENT_SINK_URL` | 任意の DB イベント endpoint。デフォルトは `$BORING_URL/events` |
+| `BORING_EVENT_SINK_URL` | 任意の DB イベント endpoint。デフォルトはドアの `/events`(`$BORING_DOOR_URL/events`) |
 | `BORING_EVENT_DB_MIRROR` | legacy 互換 alias。`0`/`false`/`off` は `BORING_EVENT_SINK=spool`、`1`/`true`/`on` は `both` |
 | `BORING_EVENT_RECENT_HOURS` | `make readiness` が見る最近イベントの範囲。デフォルトは `24` |
 | `BORING_READINESS_NOTE_MAX_HOURS` | ブリーフィング readiness が許容する最新ノート freshness 範囲。デフォルトは `48` |
@@ -349,20 +349,20 @@ COLLECT_LIMIT=20 python3 agents/codex/collect-sessions.py
 
 ```bash
 # セッション開始用の構造化コンテキストカード（BORING_VECTOR=off でも動作）
-curl -s -X POST http://localhost:7700/context \
+curl -s -X POST http://localhost:7710/context \
   -H 'content-type: application/json' \
   -d '{"project":"omb","max_items":5}' | jq .
 
 # 週次ブリーフィング（BORING_VECTOR=on が必要）
-curl -s -X POST http://localhost:7700/weekly \
+curl -s -X POST http://localhost:7710/weekly \
   -H 'content-type: application/json' \
   -d '{"project":"omb"}' | jq .
 
 # Slack に送られる朝のブリーフィング本文をプレビュー
-BORING_URL=http://127.0.0.1:7700 python3 agents/hermes/briefing.py
+python3 agents/hermes/briefing.py
 
 # Stalled register — 7日以上動いていない項目（BORING_VECTOR=on が必要）
-curl -s -X POST http://localhost:7700/stalled \
+curl -s -X POST http://localhost:7710/stalled \
   -H 'content-type: application/json' \
   -d '{"project":"omb","older_than_days":7}' | jq .
 ```
@@ -402,7 +402,7 @@ Jira チケット PROJ-1234 <!-- pii-allow: internal-ticket --> は公開情報�
 ### MCP tool 呼び出し例（raw JSON-RPC）
 
 ```bash
-curl -s -X POST http://localhost:7700/mcp \
+curl -s -X POST http://localhost:7710/mcp \
   -H 'content-type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -440,12 +440,12 @@ curl -s -X POST http://localhost:7700/mcp \
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 取り込みワーカーと定期ブリーフィングを実行 |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 手動 | 古い Claude Code セッションの lazy バックフィル |
 | scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 手動 | 古い Kimi Code セッションの lazy バックフィル |
-| shared | `agents/shared/boring_config.py` | アダプター import | `boring.json` ポリシーローダー |
+| shared | `src/ohmyboring/config.py` | アダプター import | `boring.json` ポリシーローダー |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | 有効なエージェントの hook/MCP 設定を idempotent に構成 |
 
 ### 消費エンドポイント
 
-メモリは HTTP エンドポイントまたは MCP サーバー(`http://localhost:7700/mcp`)から利用できます:
+メモリは HTTP エンドポイントまたは MCP サーバー(`http://localhost:7710/mcp`)から利用できます:
 
 | エンドポイント / MCP tool | 用途 | ベクトルバックエンド |
 |---|---|---|
@@ -484,7 +484,7 @@ curl -s -X POST http://localhost:7700/mcp \
 MCP に対応したエージェントならどれも ohmyboring を利用できます。この repo は Claude Code、Cursor、Windsurf、Claude Desktop がすべて読み込む標準の **`.mcp.json`**（root key `mcpServers`）を同梱しています:
 
 ```json
-{ "mcpServers": { "ohmyboring": { "type": "http", "url": "http://localhost:7700/mcp" } } }
+{ "mcpServers": { "ohmyboring": { "type": "http", "url": "http://localhost:7710/mcp" } } }
 ```
 
 `install.sh` が自動で配線するもの:
@@ -494,7 +494,7 @@ MCP に対応したエージェントならどれも ohmyboring を利用でき�
 
 その他のエージェントは、ルートの `.mcp.json` を適切な場所へコピーするか（例: Claude Desktop は `~/.claude/mcp.json`、Kimi Code MCP は `~/.kimi-code/mcp.json`）、エージェントの CLI で HTTP MCP サーバーを追加してください。
 
-（VS Code Copilot は root key `servers` を使う `.vscode/mcp.json` を使用します。CLI 代替: `claude mcp add --transport http --scope project ohmyboring http://localhost:7700/mcp`。compose の sibling コンテナは `http://boring-drudge:7700/mcp` でアクセスします。）
+（VS Code Copilot は root key `servers` を使う `.vscode/mcp.json` を使用します。CLI 代替: `claude mcp add --transport http --scope project ohmyboring http://localhost:7710/mcp`。compose の sibling コンテナは `http://boring-door:7710/mcp` でアクセスします。）
 
 利用可能な tools（24個）: `recall` · `neighbors` · `claims`（記憶検索）· `code_search` · `code_symbol` · `code_index_status`（独立した AST コードコーパス）· `ask` · `brief` · `weekly_brief` · `project_status`（生成 — LLM 実行）· `decisions` · `risks` · `next_actions` · `stalled` · `recurrences`（レジスタ — 行を返す、LLM なし）· `context` · `corpus_status` · `events` · `config_get`（構造化 / introspection）· `remember` · `forget` · `classify_repo` · `sync`（書き込み / メンテナンス）· `verdict`（渡されたノートへの判定）。
 
@@ -519,7 +519,7 @@ MCP に対応したエージェントならどれも ohmyboring を利用でき�
 MCP 呼び出し例（HTTP 上の raw JSON-RPC）:
 
 ```bash
-curl -s -X POST http://localhost:7700/mcp \
+curl -s -X POST http://localhost:7710/mcp \
   -H 'content-type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -540,7 +540,7 @@ curl -s -X POST http://localhost:7700/mcp \
 
 [hermes-agent](https://hermes-agent.org) はサードパーティの自律 supervisor です。Slack、オーケストレーション、cron ベースのバックフィルを ohmyboring の MCP バックエンド経由で動かせます。イメージを別途ビルドすれば `make up` が自動的に検出します。
 
-設定は hermes-agent プロジェクト**自身のドキュメント**に従います（ここでは対象外）— `~/.hermes/config.yaml` を ohmyboring の MCP（`http://boring-drudge:7700/mcp`）に向けてください。ohmyboring が同梱するのはこれを Slack assistant として配線するところまでで、それ以上に使うにはイメージを自分でビルドまたは改変してください。
+設定は hermes-agent プロジェクト**自身のドキュメント**に従います（ここでは対象外）— `~/.hermes/config.yaml` を ohmyboring の MCP（`http://boring-door:7710/mcp`）に向けてください。ohmyboring が同梱するのはこれを Slack assistant として配線するところまでで、それ以上に使うにはイメージを自分でビルドまたは改変してください。
 
 ---
 

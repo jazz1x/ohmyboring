@@ -16,16 +16,18 @@ import argparse
 import json
 import os
 import sys
-import urllib.error
 from pathlib import Path
 
 SHARED = Path(__file__).resolve().parents[1] / "agents" / "shared"
 sys.path.insert(0, str(SHARED))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import label_core  # noqa: E402
-import omb_env  # noqa: E402
-from drudge_client import DrudgeClient  # noqa: E402
 from vault_note import split_frontmatter  # noqa: E402
+
+from ohmyboring import config as omb_env  # noqa: E402
+from ohmyboring.adapters.engine import DrudgeClient  # noqa: E402
+from ohmyboring.result import Err, Ok, bind  # noqa: E402
 
 #: How much of a note the judge sees. Long enough to decide, short enough that a local model
 #: answers in seconds; the note's own opening carries its subject.
@@ -89,11 +91,12 @@ def call_judge(prompt, base_url, model, api_key, timeout=90):
 
 
 def fetch(client, path, limit):
-    return client._retry("GET", f"{path}?limit={limit}")  # noqa: SLF001 — same package's client
+    """GET 한 번 — Either 로 답한다. 실패의 접기는 부르는 한 자리에서 한다."""
+    return client.request("GET", f"{path}?limit={limit}")
 
 
 def record(client, sample, judge, verdict, model, note):
-    client._retry(  # noqa: SLF001
+    return client.request(
         "POST",
         "/recall-labels",
         {
@@ -108,9 +111,20 @@ def record(client, sample, judge, verdict, model, note):
 
 
 def load(client, scan):
-    entries = (fetch(client, "/query-log", scan) or {}).get("entries") or []
-    labels = (fetch(client, "/recall-labels", 5000) or {}).get("entries") or []
-    return entries, labels
+    entries = fetch(client, "/query-log", scan)
+    labels = fetch(client, "/recall-labels", 5000)
+    match (entries, labels):
+        case (Ok(entries_raw), Ok(labels_raw)):
+            return Ok(
+                (
+                    (entries_raw or {}).get("entries") or [],
+                    (labels_raw or {}).get("entries") or [],
+                )
+            )
+        case (Err(failure), _):
+            return Err(failure)
+        case (Ok(_), Err(failure)):
+            return Err(failure)
 
 
 def audited_keys(labels):
@@ -130,9 +144,16 @@ def audit_scan_depth(client, requested):
     The rows that need a person are already known: they carry an LLM verdict and no human one.
     Their ids say how far back the window must go, so the depth is derived rather than guessed.
     Returns `requested` unchanged when nothing is outstanding or the ids cannot be read -- a
-    depth this function invented would be a number with no evidence behind it.
+    depth this function invented would be a number with no evidence behind it. Engine
+    failures ride Err back to main's single fold.
     """
-    labels = (fetch(client, "/recall-labels", 5000) or {}).get("entries") or []
+    return bind(
+        fetch(client, "/recall-labels", 5000),
+        lambda labels_raw: _depth_for_labels(client, requested, (labels_raw or {}).get("entries") or []),
+    )
+
+
+def _depth_for_labels(client, requested, labels):
     judged = {
         (row.get("query_log_id"), row.get("hit_index"))
         for row in labels
@@ -145,22 +166,33 @@ def audit_scan_depth(client, requested):
     }
     outstanding = [qid for qid, _ in (judged - audited) if isinstance(qid, int)]
     if not outstanding:
-        return requested
-    newest = (fetch(client, "/query-log", 1) or {}).get("entries") or []
+        return Ok(requested)
+    return bind(
+        fetch(client, "/query-log", 1),
+        lambda newest_raw: Ok(
+            _depth_reaching(requested, min(outstanding), (newest_raw or {}).get("entries") or [])
+        ),
+    )
+
+
+def _depth_reaching(requested, oldest_outstanding, newest):
     newest_id = newest[0].get("id") if newest else None
     if not isinstance(newest_id, int):
         return requested
-    return max(requested, newest_id - min(outstanding) + 1)
+    return max(requested, newest_id - oldest_outstanding + 1)
 
 
 def run_judge(client, args):
-    entries, labels = load(client, args.scan)
+    return bind(load(client, args.scan), lambda loaded: _judge(client, args, *loaded))
+
+
+def _judge(client, args, entries, labels):
     samples = label_core.select_samples(
         entries, labels, judge=label_core.JUDGE_LLM, max_queries=args.queries, max_hits=args.hits
     )
     if not samples:
         print("[label-recall] nothing unlabelled in the scanned window")
-        return 0
+        return Ok(0)
     base_url, model, api_key = omb_env.llm_base_url(), omb_env.llm_model(), omb_env.llm_api_key()
     stored = skipped = 0
     for sample in samples:
@@ -181,21 +213,30 @@ def run_judge(client, args):
         if args.dry_run:
             print(f"  would label q{sample['query_log_id']}#{sample['hit_index']} -> {verdict}")
             continue
-        record(client, sample, label_core.JUDGE_LLM, verdict, model, why)
-        stored += 1
+        match record(client, sample, label_core.JUDGE_LLM, verdict, model, why):
+            case Ok(_):
+                stored += 1
+            case Err(failure):
+                return Err(failure)
     # Sampling deliberately bounds work per run; say what was left rather than implying coverage.
     print(
         f"[label-recall] judged {stored}, skipped {skipped}, sampled {len(samples)} "
         f"(cap {args.queries} queries x {args.hits} hits of {len(entries)} scanned)"
     )
-    return 0
+    return Ok(0)
 
 
 def run_audit(client, args):
-    depth = audit_scan_depth(client, args.scan)
+    return bind(audit_scan_depth(client, args.scan), lambda depth: _audit_at(client, args, depth))
+
+
+def _audit_at(client, args, depth):
     if depth > args.scan:
         print(f"[label-recall] scanning {depth} rows to reach the oldest hit awaiting a person")
-    entries, labels = load(client, depth)
+    return bind(load(client, depth), lambda loaded: _audit(client, args, *loaded))
+
+
+def _audit(client, args, entries, labels):
     llm_verdicts = {
         (row["query_log_id"], row["hit_index"]): row["verdict"]
         for row in labels
@@ -221,7 +262,7 @@ def run_audit(client, args):
     candidates = label_core.audit_candidates(pending, llm_verdicts)
     if not candidates:
         print("[label-recall] nothing to audit (run --judge first, or no borderline hits)")
-        return 0
+        return Ok(0)
     # Say what this sitting can and cannot finish. "3 candidates" reads as done when the floor
     # still wants 17, and a silent shortfall is how a window closes with no verdict in it.
     print(f"[label-recall] 후보 {len(candidates)}건 · 하한까지 {owed}건 남음")
@@ -253,19 +294,25 @@ def run_audit(client, args):
         }.get(answer)
         if verdict is None:
             continue
-        record(client, sample, label_core.JUDGE_HUMAN, verdict, "human", "")
-        done += 1
+        match record(client, sample, label_core.JUDGE_HUMAN, verdict, "human", ""):
+            case Ok(_):
+                done += 1
+            case Err(failure):
+                return Err(failure)
         machine = llm_verdicts.get(key)
         mark = "일치" if machine == verdict else "불일치"
         print(f"  recorded {verdict}  ·  llm={machine} ({mark})  ·  dist={dist}")
-    return 0
+    return Ok(0)
 
 
 def run_report(client, _args):
-    stats = client._retry("GET", "/recall-label-stats")  # noqa: SLF001
-    for line in label_core.format_report(stats or {}):
-        print(line)
-    return 0
+    match client.request("GET", "/recall-label-stats"):
+        case Ok(stats):
+            for line in label_core.format_report(stats or {}):
+                print(line)
+            return Ok(0)
+        case Err(failure):
+            return Err(failure)
 
 
 def main(argv=None):
@@ -281,15 +328,18 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     client = DrudgeClient(timeout=10.0, retries=1)
-    try:
-        if args.judge:
-            return run_judge(client, args)
-        if args.audit:
-            return run_audit(client, args)
-        return run_report(client, args)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
-        print(f"[label-recall] engine unreachable: {e}", file=sys.stderr)
-        return 1
+    if args.judge:
+        result = run_judge(client, args)
+    elif args.audit:
+        result = run_audit(client, args)
+    else:
+        result = run_report(client, args)
+    match result:
+        case Ok(code):
+            return code
+        case Err(failure):
+            print(f"[label-recall] engine unreachable: {failure}", file=sys.stderr)
+            return 1
 
 
 if __name__ == "__main__":

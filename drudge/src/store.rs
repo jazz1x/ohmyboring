@@ -3736,7 +3736,7 @@ mod tests {
         ];
         let (valid, skipped) = super::split_supersedes(&pairs);
         assert_eq!(valid.len(), 2);
-        assert!(skipped.is_empty());
+        assert_eq!(skipped, Vec::<&str>::new());
     }
 
     /// The recency and claim surfaces feed the briefing, and the briefing writes notes into the

@@ -13,18 +13,22 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-# After slack_briefing on purpose: in ~/.hermes/scripts every module sits flat and the order is
-# irrelevant, but running from the repo it is slack_briefing that puts agents/shared on the path.
-import verdict_core  # noqa: E402
-from slack_briefing import (
-    maybe_print_blocks_json,
-    render_body_mrkdwn,
-    render_message_mrkdwn,
-)
+_HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
+sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
+import label_core  # noqa: F401 — notices.py imports it lazily; naming it here ships it to ~/.hermes/scripts
+import verdict_core
 
-# BORING_URL is the canonical env var used throughout oh-my-boring.
-# DRUDGE_URL is kept as a fallback for legacy scripts only.
-HERMES_URL = os.environ.get("BORING_URL") or os.environ.get("DRUDGE_URL", "http://boring-drudge:7700")
+from ohmyboring import config as omb_env
+from ohmyboring.briefing.blocks import maybe_print_blocks_json
+from ohmyboring.briefing.mrkdwn import render_body_mrkdwn, render_message_mrkdwn
+
+# E4-α — 아침 브리핑도 문(:7710) 하나를 지난다: door_url() 이 그 해석(BORING_DOOR_URL →
+# hermes 컨테이너에선 boring-door:7710, 호스트에선 localhost:7710)이고, 엔진 주소 환경변수는
+# 더 이상 여기를 훔쳐가지 못한다. 문은 /recall-label-stats·/projects·/events·/brief 를
+# 엔진에 바이트 그대로 넘긴다.
+HERMES_URL = omb_env.door_url()
 KST = timezone(timedelta(hours=9))
 DATE = datetime.now(KST).strftime("%Y-%m-%d %a")
 TITLE = "☀️ 아침 브리핑"

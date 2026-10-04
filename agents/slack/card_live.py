@@ -16,16 +16,18 @@ join whole."""
 
 from __future__ import annotations
 
+import glob
 import json
 import math
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
 
-import omb_env
+import card_repair_judge
 from card_effects import (  # noqa: F401
     ENGINE_TIMEOUT,
     _door_url,
@@ -41,21 +43,32 @@ from card_types import (
     PastUnansweredPair,
     PastVerdictPair,
     ProposedVerdict,
+    RepairJudgment,
     ResolvedNote,
     Unresolved,
 )
-from drudge_client import DrudgeClient
 from pydantic import ValidationError
+
+from ohmyboring import config as omb_env
+from ohmyboring.adapters.engine import DrudgeClient
+from ohmyboring.result import Err, Ok
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "memory"))
 from retriever import BoringRetriever  # noqa: E402
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+import vault_note  # noqa: E402
+
 
 def _live_fetch(path: str, project: str) -> dict[str, Any]:
-    # DrudgeClient has no public raw-POST door; _retry is the one that speaks JSON both ways.
     # project is always sent, even "" — the engine's own filter treats an explicit empty
     # string as "unassigned documents only", not "no filter" (measured 2026-09-22).
-    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0)._retry("POST", path, {"project": project})
+    # Err→예외는 카드 그래프가 예외를 계약으로 삼는 동안의 임시 경계(card.py 의 except 가 주인).
+    match DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).request("POST", path, {"project": project}):
+        case Ok(payload):
+            return payload
+        case Err(failure):
+            raise OSError(str(failure))
 
 
 def _door_json(url: str) -> Any:
@@ -75,17 +88,14 @@ def _live_active_projects(active_days: int) -> list[str]:
 
 
 def _live_events(event_name: str, since_hours: int) -> list[dict[str, Any]]:
-    """GET /events, one event name at a time. §정정 (2026-09-22): the given assumed /events
-    sits among the door's proxied routes — measured false: `data/contract/engine-contract.json`
-    http_routes has 24 entries and /events is not one of them (`curl :7710/events` → 404),
-    while the engine answers it directly (`curl :7700/events?limit=3` → 200). /events is a
-    plain, non-DB-backed engine route, so this reads the engine directly (omb_env.drudge_url(),
-    the same resolution DrudgeClient uses) rather than adding a route to the door that the
-    door's own job (DB-backed answers the engine cannot give) never needed. maybe_truncated is
-    not a value to shrug at here: a clipped 7-day window would silently under-suppress (a
-    do/drop that should have hidden a repeat candidate falls outside the page handed back), so
-    it is raised, the same way an unreadable window is raised anywhere else in this file."""
-    url = f"{omb_env.drudge_url()}/events?event={urllib.parse.quote(event_name)}&since_hours={since_hours}&limit=1000"
+    """GET /events, one event name at a time. E4-α: /events 는 이제 문의 프록시 표에 있고
+    (계약 스냅샷 재생성 — 옛 측정(2026-09-22)이 404 로 찍었던 그 경로다), 문은 표에 있는
+    경로를 엔진에 바이트 그대로 넘기니 여기서도 omb_env.door_url() 하나로 읽는다. 문이
+    없던 경로를 엔진에 붙이던 임시 직행은 사라진다. maybe_truncated is not a value to shrug
+    at here: a clipped 7-day window would silently under-suppress (a do/drop that should
+    have hidden a repeat candidate falls outside the page handed back), so it is raised,
+    the same way an unreadable window is raised anywhere else in this file."""
+    url = f"{omb_env.door_url()}/events?event={urllib.parse.quote(event_name)}&since_hours={since_hours}&limit=1000"
     payload = _door_json(url)
     if payload.get("maybe_truncated"):
         raise OSError(
@@ -165,7 +175,12 @@ def _live_past_verdicts(since_hours: int) -> PastCardHistory:
 
 
 def _live_handover(session: str, at: str, paths: list[str]) -> dict:
-    return DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).handover(session, at, paths)
+    # Err→예외는 카드 그래프가 예외를 계약으로 삼는 동안의 임시 경계 — 실패한 카드는 게시되지 않는다.
+    match DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).handover(session, at, paths):
+        case Ok(resp):
+            return resp
+        case Err(failure):
+            raise OSError(str(failure))
 
 
 def _live_resolve(subject: str, register: str) -> ResolvedNote | Unresolved:
@@ -202,14 +217,113 @@ def _live_approved(since_hours: int) -> list[PastApproved]:
 #: how many split-subject groups the "오늘 할 일" lane shows — the door's own default too.
 REPAIRS_LIMIT = 3
 
+#: The repair lane's scan width — 문 한 번에 주는 상한(문 _MAX_REPAIR_LIMIT)만큼 받아 판정으로
+#: 거른 뒤 REPAIRS_LIMIT 개를 앉힌다. 거른 뒤 3개가 안 차도 실패가 아니다.
+REPAIRS_SCAN_LIMIT = 50
+
+
+def _live_repair_judgments() -> dict[tuple[str, tuple[str, ...]], RepairJudgment]:
+    return card_repair_judge.judged_map(_live_events("repair_judged", card_repair_judge.JUDGED_WINDOW_HOURS))
+
+
 #: how many of the agent's session-end classifications the review lane shows.
 REVIEW_LIMIT = 3
+
+#: The held-pair (보류) window, hours — 이레, the same window as the advice lane's
+#: SUPPRESS_WINDOW_HOURS (card_verdicts): a pair the owner held comes back only after the
+#: window lets it go. card_live never imports card_verdicts, so the number lives here with
+#: that pointer rather than a cross-import.
+REVIEW_DEFER_WINDOW_HOURS = 168
+
+
+def _deferred_review_pairs() -> set[tuple[str, str]]:
+    """(note, kind) pairs the owner held (보류) within the 이레 window — read from the
+    verdict_reviewed 사건 a hold leaves. Agree/flip/delegate rows are ignored here: only a
+    hold suppresses (the delegate rows a successful judgment leaves are read by
+    _delegated_reasons, which runs before this filter). A hold row missing the note or its
+    kind is malformed, same as a malformed proposal: raise (F5/ROP), never skip — a dropped
+    row here is exactly a held pair coming back unannounced."""
+    out: set[tuple[str, str]] = set()
+    for entry in _live_events("verdict_reviewed", REVIEW_DEFER_WINDOW_HOURS):
+        attrs = entry.get("attributes") or {}
+        if attrs.get("choice") != "defer":
+            continue
+        note, kind = attrs.get("note"), attrs.get("proposed_kind")
+        if not isinstance(note, str) or not note or kind not in ("used", "contested"):
+            raise ValueError(f"malformed verdict_reviewed hold row: {attrs!r}")
+        out.add((note, kind))
+    return out
+
+
+def _delegated_reasons(since_hours: int) -> dict[tuple[str, str], tuple[str, str, str]]:
+    """(note, proposed_kind) → (judged kind, 이유, observed_at) for every successful
+    「맡길게요」 judgment — a verdict_reviewed delegate row that actually carries the model's
+    kind and reason. The word-flag stamps b300c46 wrote (choice=delegate with no kind or
+    reason) are not judgments: they are skipped, never mistaken for one. A failed delegation
+    (error field, no kind) leaves no judgment either — the row comes back unanswered."""
+    out: dict[tuple[str, str], tuple[str, str, str]] = {}
+    for entry in _live_events("verdict_reviewed", since_hours):
+        attrs = entry.get("attributes") or {}
+        if attrs.get("choice") != "delegate":
+            continue
+        note, proposed_kind = attrs.get("note"), attrs.get("proposed_kind")
+        kind, reason = attrs.get("kind"), attrs.get("reason")
+        if (
+            not isinstance(note, str)
+            or not note
+            or proposed_kind not in ("used", "contested")
+            or kind not in ("used", "contested")
+            or not isinstance(reason, str)
+            or not reason
+        ):
+            continue
+        observed_at = entry.get("observed_at")
+        if not isinstance(observed_at, str):
+            continue
+        key = (note, proposed_kind)
+        if key not in out or observed_at >= out[key][2]:
+            out[key] = (kind, reason, observed_at)
+    return out
+
+
+def _group_reviews(rows: list[ProposedVerdict]) -> list[ProposedVerdict]:
+    """같은 노트를 같은 판정으로 (작업만 다르게) 본 행을 한 줄로 묶는다 — 오너가 묶음을
+    고를 때 판정은 묶인 세션 전부에 가야 하니, 묶음 전체가 한 단추에 실린다. 첫 목격
+    (최신) 순서가 묶음 안에서도 그대로고, 이유는 묶음에서 첫 번째로 남은 근거 문장이다."""
+    order: list[tuple[str, str]] = []
+    groups: dict[tuple[str, str], list[ProposedVerdict]] = {}
+    for row in rows:
+        key = (row.note, row.kind)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(row)
+    out = []
+    for key in order:
+        members = groups[key]
+        first = members[0]
+        if len(members) == 1:
+            out.append(first)
+            continue
+        out.append(
+            first.model_copy(
+                update={
+                    "sessions": [m.session_id for m in members],
+                    "reason": next((m.reason for m in members if m.reason), ""),
+                }
+            )
+        )
+    return out
 
 
 def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
     """The review lane's rows: session-end verdict_proposed events, contested first, then
-    newest first, at most REVIEW_LIMIT. A row missing a field this value needs is malformed —
-    raise (F5/ROP), never skip: a dropped row here is a flip the owner was never shown."""
+    newest first, the same (note, kind) proposed by several sessions folded into one row,
+    a pair a successful 「맡길게요」 judged carrying the model's 이유 in place of the scorer's
+    sentence (the kind line itself stays the session's own claim), pairs the owner held
+    within the 이레 window left off, at most REVIEW_LIMIT. A row missing a field this value
+    needs is malformed — raise (F5/ROP), never skip: a dropped row here is a judgment the
+    owner was never shown."""
     parsed: list[ProposedVerdict] = []
     for entry in _live_events("verdict_proposed", since_hours):
         attrs = entry.get("attributes") or {}
@@ -220,13 +334,93 @@ def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
                     note=attrs["note"],
                     kind=attrs["kind"],
                     at=entry["observed_at"],
+                    reason=attrs.get("reason") or "",
                 )
             )
         except (KeyError, TypeError, ValidationError) as e:
             raise ValueError(f"malformed verdict_proposed row: {attrs!r}: {e}") from e
     parsed.sort(key=lambda p: p.at, reverse=True)  # newest first
     parsed.sort(key=lambda p: p.kind != "contested")  # stable: contested keeps the head
-    return parsed[:REVIEW_LIMIT]
+    # The same judgement can land twice (two SessionEnd hooks, 1ms apart — 2026-09-30).
+    seen: set[tuple[str, str, str]] = set()
+    unique = [p for p in parsed if (key := (p.session_id, p.note, p.kind)) not in seen and not seen.add(key)]
+    grouped = _group_reviews(unique)
+    if grouped:
+        delegated = _delegated_reasons(since_hours)
+        if delegated:
+            # 맡긴 판정이 있는 짝은 이유 한 줄을 그 판정의 것으로 바꾼다 — 다음 카드에 보이는
+            # 이유가 모델이 남긴 문장. 짝의 종류 줄은 세션이 말한 것을 그대로 말하는 문구라
+            # (「말이 나왔어요」) 판정에 따라 바뀌지 않는다: 뒤집힌 종류는 엔진 간선에만 실린다.
+            grouped = [
+                r.model_copy(update={"reason": delegated[(r.note, r.kind)][1]})
+                if (r.note, r.kind) in delegated
+                else r
+                for r in grouped
+            ]
+        deferred = _deferred_review_pairs()
+        grouped = [r for r in grouped if (r.note, r.kind) not in deferred]
+    shown = grouped[:REVIEW_LIMIT]
+    works = _session_works() if shown else {}
+    out = []
+    for r in shown:
+        update: dict = {"note_title": _note_title(r.note), "work": works.get(r.session_id, "")}
+        if r.sessions:
+            update["works"] = [works.get(s, "") for s in r.sessions]
+        out.append(r.model_copy(update=update))
+    return out
+
+
+_FRONTMATTER_FIELD = re.compile(r"^(title|project|date|omb_session_id):[ \t]*(.*?)[ \t]*$", re.M)
+
+
+def _frontmatter_fields(text: str) -> dict[str, str]:
+    return {
+        key: value.strip("'\"")
+        for key, value in _FRONTMATTER_FIELD.findall(vault_note.frontmatter_text(text))
+    }
+
+
+def _note_title(note: str) -> str:
+    text = _live_read_note(note)
+    return _frontmatter_fields(text).get("title", "") if text is not None else ""
+
+
+def _work_line(fields: dict[str, str]) -> str:
+    date = fields.get("date", "")
+    parts = (fields.get("project", ""), date[5:10] if len(date) >= 10 else date, fields.get("title", ""))
+    return " · ".join(part for part in parts if part)
+
+
+def _session_works() -> dict[str, str]:
+    """omb_session_id → the work line of the note that session left, over the whole vault. A
+    session with more than one note (21 of 1,650 on 2026-09-30) names its first by file name —
+    the note it left first — so the card says the same thing on every run."""
+    works: dict[str, str] = {}
+    unreadable = 0
+    for path in sorted(glob.glob(os.path.join(_vault_dir(), "wiki", "*.md"))):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                head = f.read(4096)
+        except OSError:
+            unreadable += 1
+            continue
+        fields = _frontmatter_fields(head)
+        if (session := fields.get("omb_session_id")) and session not in works:
+            works[session] = _work_line(fields)
+    if unreadable:
+        print(f"[card] {unreadable} vault note(s) unreadable — their sessions show by id", file=sys.stderr)
+    return works
+
+
+def _held_repair_subjects() -> set[str]:
+    """Subjects the owner held or dropped on the repair lane within the 이레 window."""
+    out: set[str] = set()
+    for entry in _live_events("repair_reviewed", REVIEW_DEFER_WINDOW_HOURS):
+        subject = (entry.get("attributes") or {}).get("subject")
+        if not isinstance(subject, str) or not subject:
+            raise ValueError(f"malformed repair_reviewed row: {entry!r}")
+        out.add(subject)
+    return out
 
 
 def _live_repairs(limit: int = REPAIRS_LIMIT) -> dict[str, Any]:
@@ -265,7 +459,7 @@ def _live_read_note(note: str) -> str | None:
     relative = note.removeprefix("/vault/") if note.startswith("/vault/") else note.lstrip("/")
     path = os.path.join(_vault_dir(), relative)
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             return f.read()
     except OSError:
         return None

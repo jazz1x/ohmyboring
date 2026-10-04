@@ -111,7 +111,6 @@ class DeepAgentTest(unittest.TestCase):
         )
         agent = boring_deep_agent(
             _ScriptedModel(messages=script),
-            engine_url=f"http://127.0.0.1:{self.engine.server_port}",
             door_url=f"http://127.0.0.1:{self.door.server_port}",
             agent_name=AGENT,
             session_id=SESSION,
@@ -135,7 +134,8 @@ class DeepAgentTest(unittest.TestCase):
 
     def test_memories_write_is_one_remember_and_reads_back(self) -> None:
         self.assertIn("/tmp/scratch.md", self._tool_answer("call-3"))
-        (body,) = self._posts(self.engine, "/remember")
+        (body,) = self._posts(self.door, "/remember")
+        self.assertEqual(self._posts(self.engine, "/remember"), [], "E4-α — the write wears the door")
         self.assertIn("langgraph-store", body["tags"])
         self.assertEqual(
             body["claims"][0]["subject"], _subject_for(("agent", AGENT, "memories"), "/learned.md")

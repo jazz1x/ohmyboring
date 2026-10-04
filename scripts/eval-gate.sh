@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 URL="${BORING_URL:-http://localhost:7700}"
-EVENT_LOG="$ROOT/agents/shared/event_log.py"
+EVENT_LOG="$ROOT/src/ohmyboring/adapters/events.py"
 eval_run_id="eval-$(date +%Y%m%dT%H%M%S)-$$"
 eval_started_at="$(date +%s)"
 eval_fixtures_copied=0
@@ -79,3 +79,11 @@ curl -s -m600 -X POST "$URL/sync" >/dev/null
 
 echo "▶ Running eval …"
 python3 data/eval/run_eval.py
+
+# BORING_EVAL_EXTRA_URL (set: the door's python /search) — the same golden run, once more
+# against that URL, before cleanup drops the fixtures. Both runs must pass 22/22.
+# Unset: nothing below runs and the script is byte-identical to before.
+if [ -n "${BORING_EVAL_EXTRA_URL:-}" ]; then
+  echo "▶ Running eval against $BORING_EVAL_EXTRA_URL (door python /search) …"
+  BORING_URL="$BORING_EVAL_EXTRA_URL" python3 data/eval/run_eval.py
+fi

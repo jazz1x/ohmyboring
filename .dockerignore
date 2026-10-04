@@ -17,5 +17,8 @@
 !data/contract
 !data/contract/**
 !requirements.txt
+!pyproject.toml
+!src
+!src/**
 agents/door/Dockerfile
 **/__pycache__

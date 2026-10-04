@@ -11,6 +11,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT.parent / "shared"))
+sys.path.insert(0, str(ROOT.parents[1] / "src"))
+
+import label_core  # noqa: E402
+import verdict_core  # noqa: E402
+
+from ohmyboring.briefing import blocks, mrkdwn, notices, parse, weekly_render, zones  # noqa: E402
+from ohmyboring.briefing import text as text_module  # noqa: E402
+from ohmyboring.weekly import trend as weekly_trend_module  # noqa: E402
 
 
 def load_module(name: str, path: Path):
@@ -22,10 +31,30 @@ def load_module(name: str, path: Path):
     return module
 
 
+class _Briefing:
+    """The renderer's modules under the one namespace the assertions below were written against."""
+
+    verdict_core = verdict_core
+    label_core = label_core
+
+    def __getattr__(self, name):
+        for module in (parse, zones, text_module, notices, mrkdwn, blocks, weekly_render):
+            if hasattr(module, name):
+                return getattr(module, name)
+        raise AttributeError(name)
+
+
+def briefing_api():
+    return _Briefing()
+
+
+def trend_api():
+    return weekly_trend_module
+
+
 def test_slack_mrkdwn_uses_flat_readable_bullets():
     briefing = load_module("briefing", ROOT / "briefing.py")
-    weekly = load_module("weekly_briefing", ROOT / "weekly-briefing.py")
-    slack_briefing = load_module("slack_briefing_test", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     answer = """# oh-my-boring
 
@@ -46,7 +75,6 @@ Blocked:
 _→ `recall("…", "oh-my-boring")` · `next_actions("oh-my-boring")`_"""
 
     assert briefing.slack_mrkdwn(answer) == expected
-    assert weekly.slack_mrkdwn(answer) == expected
 
     # The shortlist half of this test needs a briefing big enough to warrant one: below the
     # threshold the whole message fits on a screen and a summary would only restate it.
@@ -93,7 +121,7 @@ def test_the_reference_zone_stands_aside_on_the_mornings_with_the_most_work():
     items behind "외 N개 항목" while the reference zone under it printed 351. On those mornings
     reference collapses to its counts and the room goes to the work.
     """
-    slack_briefing = load_module("slack_briefing_budget", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     quiet = "# proj\n" + "\n".join(
         [f"- Next: action {i}" for i in range(3)] + [f"- Risks: risk {i}" for i in range(3)]
@@ -128,7 +156,7 @@ def test_the_reference_zone_stands_aside_on_the_mornings_with_the_most_work():
 
 
 def test_blocked_is_never_truncated_and_both_renderers_agree():
-    slack_briefing = load_module("slack_briefing_limits", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     # Eight blockers and thirty next-actions: past the busy budget, which is what the action zone
     # gets once the reference zone stands aside. The cap has to actually fire or this test asserts
@@ -156,7 +184,7 @@ def test_blocked_is_never_truncated_and_both_renderers_agree():
 
 
 def test_done_does_not_push_blockers_off_the_first_screen():
-    slack_briefing = load_module("slack_briefing_done", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     answer = "\n".join(
         ["# proj", "- Blocked: the one blocker"] + [f"- Done: finished {i}" for i in range(10)]
@@ -176,7 +204,7 @@ def test_done_does_not_push_blockers_off_the_first_screen():
 
 
 def test_long_text_is_cut_at_a_boundary_and_says_so():
-    slack_briefing = load_module("slack_briefing_trim", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     # A bare slice cuts mid-sentence with no sign it happened, which is how a reader ends up
     # trusting a sentence that was never finished.
@@ -192,12 +220,12 @@ def test_long_text_is_cut_at_a_boundary_and_says_so():
 
 def _week(days_spec):
     """[(date, brief_markdown)] -> [(date, BriefDocument)] using the real parser."""
-    slack_briefing = load_module("slack_briefing_week", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
     return [(d, slack_briefing.parse_brief(text)) for d, text in days_spec]
 
 
 def test_weekly_reports_persistence_not_closure():
-    trend = load_module("weekly_trend_persist", ROOT / "weekly_trend.py")
+    trend = trend_api()
 
     # The same project blocked all week, worded differently every day — which is what actually
     # happens, because each daily is re-synthesised by the model (measured: 252 items over a
@@ -218,7 +246,7 @@ def test_weekly_reports_persistence_not_closure():
 
 
 def test_weekly_never_sums_label_counts_across_days():
-    trend = load_module("weekly_trend_sum", ROOT / "weekly_trend.py")
+    trend = trend_api()
 
     days = _week(
         [
@@ -234,7 +262,7 @@ def test_weekly_never_sums_label_counts_across_days():
 
 
 def test_weekly_quotes_the_latest_daily_rather_than_resummarising():
-    trend = load_module("weekly_trend_quote", ROOT / "weekly_trend.py")
+    trend = trend_api()
 
     days = _week(
         [
@@ -254,8 +282,8 @@ def test_the_weekly_text_carries_what_the_blocks_carry():
     which production does not set — so every Monday sent a re-synthesised `/weekly` instead,
     the exact thing this weekly exists to replace.
     """
-    slack_briefing = load_module("slack_briefing_wtext", ROOT / "slack_briefing.py")
-    weekly_trend = load_module("weekly_trend_wtext", ROOT / "weekly_trend.py")
+    slack_briefing = briefing_api()
+    weekly_trend = trend_api()
 
     week = weekly_trend.ProjectWeek(name="kb-rag-bot")
     week.days = {"2026-08-25", "2026-08-26", "2026-08-27"}
@@ -278,8 +306,8 @@ def test_the_weekly_text_carries_what_the_blocks_carry():
 
 
 def test_weekly_blocks_carry_the_not_a_closure_rate_caveat():
-    slack_briefing = load_module("slack_briefing_caveat", ROOT / "slack_briefing.py")
-    trend = load_module("weekly_trend_caveat", ROOT / "weekly_trend.py")
+    slack_briefing = briefing_api()
+    trend = trend_api()
 
     days = _week([(f"2026-08-2{i}", f"# p\n- Blocked: x{i}\n") for i in range(3)])
     projects = trend.collect_week(days)
@@ -301,7 +329,7 @@ def test_weekly_blocks_carry_the_not_a_closure_rate_caveat():
 
 
 def test_slack_mrkdwn_handles_adversarial_inputs():
-    slack_briefing = load_module("slack_briefing_test2", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     # Empty answer falls back to the empty message.
     assert slack_briefing.render_body_mrkdwn("") == ""
@@ -355,7 +383,7 @@ Blocked:
 
 
 def test_slack_mrkdwn_dedups_duplicate_bullets_across_project_sections():
-    slack_briefing = load_module("slack_briefing_test3", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     answer = """## kb-rag-bot
 - Done: README 최신화
@@ -378,7 +406,7 @@ def test_slack_mrkdwn_dedups_duplicate_bullets_across_project_sections():
 
 
 def test_slack_mrkdwn_filters_placeholders_and_noise():
-    slack_briefing = load_module("slack_briefing_test4", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     answer = """## kb-rag-bot
 - Done: 게이트 4단계 구현
@@ -408,7 +436,7 @@ def test_done_is_counted_once_and_never_bulleted():
     위키". Measured on the 8 briefings actually sent, the two numbers were identical in all 7 that
     had any Done items, and on 09-02 the repeat was the whole body.
     """
-    slack_briefing = load_module("slack_briefing_test5", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     answer = "## kb-rag-bot\n" + "\n".join(f"- Done: task {i}" for i in range(10))
     body = slack_briefing.render_body_mrkdwn(answer)
@@ -419,7 +447,7 @@ def test_done_is_counted_once_and_never_bulleted():
 
 
 def test_singular_labels_are_not_dumped_into_the_unlabelled_bucket():
-    slack_briefing = load_module("slack_briefing_alias", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     # The engine writes these in the singular. The alias table only had the plurals, so eight
     # labelled items a day were reported as "기타" — the category was not missing, the alias was.
@@ -432,7 +460,7 @@ def test_singular_labels_are_not_dumped_into_the_unlabelled_bucket():
 
 
 def test_the_engines_default_claim_kind_is_a_category_not_a_leftover():
-    slack_briefing = load_module("slack_briefing_fact", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     # `fact` is what a claim is unless it says otherwise, so it is the biggest thing the
     # distiller emits -- and it was landing in the unlabelled bucket, the same defect the
@@ -450,7 +478,7 @@ def test_the_engines_default_claim_kind_is_a_category_not_a_leftover():
 
 
 def test_the_window_sample_is_named_in_both_renderings_and_falls_silent_when_met():
-    slack_briefing = load_module("slack_briefing_window", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
     V = slack_briefing.verdict_core
 
     # The verdict's counts only move when a session *ends*, and sessions here run for days. The
@@ -496,7 +524,7 @@ def test_a_heading_becomes_a_project_label_only_if_it_looks_like_one():
     The rejected half matters as much as the accepted half: `1.95.3-stage-검증` is a real project
     whose name opens with a version number, and an earlier version of the pattern cut it.
     """
-    slack_briefing = load_module("slack_briefing_heading", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     for real in (
         "foodspring-front",
@@ -528,7 +556,7 @@ def test_nothing_in_the_message_names_the_unattributed_group_as_a_project():
     after a project that does not exist. Nearly half of all items land in this bucket (944 of 2016
     across the 62 briefings in the vault), so none of these is an edge case.
     """
-    slack_briefing = load_module("slack_briefing_orphan_render", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
     answer = "\n".join(f"## 다른 프로젝트\n- Blocked: 막힌 항목 {n}" for n in range(1, 8))
     rendered = slack_briefing.render_message_mrkdwn(
         "*brief*", "2026-09-03", answer, [], "없음", None, None, ["foodspring-front"]
@@ -547,7 +575,7 @@ def test_the_action_zone_and_the_shortlist_agree_on_what_comes_first():
     shortlist while the action zone underneath it still opened with items that had not moved in a
     week -- the same briefing telling the reader two different things about what matters.
     """
-    slack_briefing = load_module("slack_briefing_zones", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
     action_zone = dict(slack_briefing.ZONES)["행동"]
     assert tuple(action_zone) == tuple(slack_briefing.ACTIONABLE), (
         f"the action zone has its own order again: {action_zone}"
@@ -561,7 +589,7 @@ def test_the_shortlist_meets_today_before_it_meets_last_week():
     the same few items recurring. Ordered after Next it holds 7 (5%) and Next gains 27, which
     changes the opening line of 18 of those briefings.
     """
-    slack_briefing = load_module("slack_briefing_order", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
     assert slack_briefing.ACTIONABLE.index("Next") < slack_briefing.ACTIONABLE.index("Stalled")
     assert slack_briefing.ACTIONABLE.index("Blocked") == 0, "a blocker still opens the message"
 
@@ -586,7 +614,7 @@ def test_the_rendered_briefing_actually_uses_the_project_list():
     hops and every heading-level test still passes while the cron -- which delivers through the
     mrkdwn path -- silently stops checking membership. This walks the whole chain.
     """
-    slack_briefing = load_module("slack_briefing_wired", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
     answer = (
         "## foodspring-front\n- Next: ship the thing\n"
         "## 다른 프로젝트\n- Next: something under a section title\n"
@@ -616,7 +644,7 @@ def test_each_shape_rule_rejects_something_no_other_rule_catches():
     heading was cut, and deleting any of them changed nothing. Each case below is written to be
     caught by exactly one rule.
     """
-    slack_briefing = load_module("slack_briefing_rules", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     assert not slack_briefing._is_project_heading("3. 남은 일")  # outline number alone
     assert not slack_briefing._is_project_heading("**남은 일**")  # bold alone
@@ -639,7 +667,7 @@ def test_a_project_the_corpus_knows_is_not_cut_for_being_long():
     membership list threw those away and no test noticed, because the cap was only ever exercised
     against strings that were prose anyway.
     """
-    slack_briefing = load_module("slack_briefing_long", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
     long_name = "feature-FDS-16742-softnav-remainder"
     assert len(long_name) > slack_briefing._PROJECT_HEADING_MAX
 
@@ -704,7 +732,7 @@ def test_orphans_from_separate_stretches_share_one_unattributed_group():
     project, then another section title. Appending a fresh group each time renders "Brief" twice
     in the same briefing with different items under each.
     """
-    slack_briefing = load_module("slack_briefing_orphan_merge", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
     doc = slack_briefing.parse_brief(
         "## Risk\n- Next: first orphan\n"
         "## foodspring-front\n- Next: a real one\n"
@@ -723,7 +751,7 @@ def test_a_name_shaped_heading_the_corpus_never_heard_of_is_not_a_project():
     corpus knows. `다른 프로젝트` is the rest of them: short, no prose, no outline number -- nothing
     in the string says it is a section title rather than a name. Only membership does.
     """
-    slack_briefing = load_module("slack_briefing_known", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
     corpus = ["foodspring-front", "scenario-compiler", "1.95.3-stage-검증"]
 
     assert slack_briefing._is_project_heading("foodspring-front", corpus)
@@ -744,7 +772,7 @@ def test_an_unreachable_engine_does_not_read_as_a_corpus_with_no_projects():
     fail membership and every item would lose its label -- a total outage rendered as a tidy,
     plausible briefing. Absence of an answer falls back to the shape test instead.
     """
-    slack_briefing = load_module("slack_briefing_absent", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     assert slack_briefing._is_project_heading("foodspring-front", None), (
         "an unavailable project list must not strip the label off a real project"
@@ -771,7 +799,7 @@ def test_items_under_a_non_project_heading_lose_the_label_rather_than_borrow_one
     They go unattributed instead, so the reader is never handed a project they can look up when
     there is none.
     """
-    slack_briefing = load_module("slack_briefing_orphan", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
     doc = slack_briefing.parse_brief(
         "## foodspring-front\n"
         "- Next: ship the thing\n"
@@ -855,7 +883,7 @@ def test_the_midpoint_warning_rides_the_one_channel_that_reaches_a_person():
     """
     import os
 
-    slack_briefing = load_module("slack_briefing_midpoint", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
     V = slack_briefing.verdict_core
     short = {"sessions": 3, "total_prompts": 31}
     floor = V.MIDPOINT_MIN_SCORED
@@ -888,7 +916,7 @@ def test_the_midpoint_warning_rides_the_one_channel_that_reaches_a_person():
 def test_the_audit_backlog_is_named_in_both_renderings_and_falls_silent_when_met():
     import os
 
-    slack_briefing = load_module("slack_briefing_audit", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     # The LLM judge accrues 24 a night on its own; the human side only moves when a person
     # sits down, and until it does the agreement figure -- the one the verdict contract
@@ -953,7 +981,7 @@ def test_the_audit_backlog_is_named_in_both_renderings_and_falls_silent_when_met
 
 
 def test_the_text_fallback_carries_the_shortlist_too():
-    slack_briefing = load_module("slack_briefing_fb", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     answer = "# p\n- Blocked: the blocker\n" + "\n".join(f"- Next: action {i}" for i in range(6))
     body = slack_briefing.render_body_mrkdwn(answer)
@@ -972,7 +1000,7 @@ def test_the_text_fallback_carries_the_shortlist_too():
 
 
 def test_zones_replace_status_headings_but_keep_the_status():
-    slack_briefing = load_module("slack_briefing_zone", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     answer = (
         "# p\n- Blocked: cannot start\n- Stalled: sitting a week\n- Next: do the thing\n- Risk: might break\n"
@@ -1000,7 +1028,7 @@ def test_zones_replace_status_headings_but_keep_the_status():
 
 
 def test_each_zone_names_the_call_that_digs_into_it():
-    slack_briefing = load_module("slack_briefing_follow", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     answer = "# kb-rag-bot\n- Blocked: a\n- Next: b\n- Risk: c\n## other\n- Next: d\n"
     body = slack_briefing.render_body_mrkdwn(answer)
@@ -1019,7 +1047,7 @@ def test_each_zone_names_the_call_that_digs_into_it():
 
 
 def test_endings_are_shaved_not_truncated():
-    slack_briefing = load_module("slack_briefing_shave", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     # Korean puts the verb last, so cutting from the front deletes the action and leaves the
     # object. The tail is shaved instead and the verb stem stays.
@@ -1041,7 +1069,7 @@ def test_no_renderer_names_a_source_file_the_reader_cannot_open():
     that many. A number that cannot change is not a signal, and Slack has no URL for a vault
     file, so the filename bought nothing either.
     """
-    slack_briefing = load_module("slack_briefing_src", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
     sources = [f"/vault/wiki/wiki-{i:04d}.md" for i in range(5)]
 
     text = slack_briefing.render_message_mrkdwn(
@@ -1053,7 +1081,7 @@ def test_no_renderer_names_a_source_file_the_reader_cannot_open():
 
 
 def test_repeated_project_names_are_written_once():
-    slack_briefing = load_module("slack_briefing_group", ROOT / "slack_briefing.py")
+    slack_briefing = briefing_api()
 
     answer = "# omcr\n" + "\n".join(f"- Next: action {i}" for i in range(4))
     body = slack_briefing.render_body_mrkdwn(answer)

@@ -22,6 +22,11 @@ The plugin is the second process that receives the morning card's button presses
     press the row again; a failed chat_update is one log line and releases the claim too
   - a repair the door answers with a non-done value is one error line, and the card row
     shows the door's own numbers (done, failed, unanswered each render their own mark)
+  - a review 「맡길게요」 press judges: the model is called exactly once (a fake LLM counts),
+    and the judged kind — not the proposed word flag — rides the agent:delegated edge; a
+    model that cannot answer (dead call, malformed JSON, no model seat, unreadable note)
+    leaves no consumption at all, records the 사건 one line with the reason, and the row
+    shows 「✕ 실패 — reason」 over its buttons with the claim released
   - register() without SECRETARY_OWNER_ID (or without BORING_HOME) registers nothing —
     a press nobody vetted must never reach an effect
   - the import path stays langchain-free, because the hermes venv has no langchain
@@ -49,10 +54,11 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[3]
-for extra in (REPO / "agents" / "slack", REPO / "agents" / "shared"):
+for extra in (REPO / "agents" / "slack", REPO / "agents" / "shared", REPO / "src"):
     if str(extra) not in sys.path:
         sys.path.insert(0, str(extra))
 
+import card_delegate  # noqa: E402
 import card_effects  # noqa: E402
 import card_press  # noqa: E402
 import card_types  # noqa: E402
@@ -70,6 +76,13 @@ CARD_CH = "C1"
 PLUGIN.time = types.SimpleNamespace(time=lambda: float(CARD_TS) + 60)
 ADVICE_VALUE = {"lane": "advice", "note": "wiki-0576"}
 REVIEW_VALUE = {"lane": "review", "session": "sess-agent-1", "note": "wiki-0700", "kind": "used"}
+REVIEW_GROUPED_VALUE = {
+    "lane": "review",
+    "session": "sess-agent-1",
+    "sessions": ["sess-agent-1", "sess-agent-2"],
+    "note": "wiki-0700",
+    "kind": "used",
+}
 REPAIR_VALUE = {"lane": "repair", "subject": "foodspring-front"}
 
 #: The card as a press payload carries it — one repair, two advice, one review row, so
@@ -118,9 +131,26 @@ _CFG = Path(tempfile.mkdtemp(prefix="boring-card-test-")) / "boring.json"
 _CFG.write_text(json.dumps({"note_lang": "ko"}), encoding="utf-8")
 
 
+class _FakeLlm:
+    """The host's ctx.llm facade, scripted: a JSON answer or a raise, counting calls so a
+    press can never spend more than its one model call."""
+
+    def __init__(self, calls, *, answer=None, error=None):
+        self._calls = calls
+        self._answer = answer
+        self._error = error
+
+    async def acomplete(self, messages, **kwargs):
+        self._calls.append(("model", messages[0]["content"], kwargs))
+        if self._error is not None:
+            raise self._error
+        return types.SimpleNamespace(text=self._answer)
+
+
 class _FakeCtx:
-    def __init__(self):
+    def __init__(self, llm=None):
         self.handlers = []
+        self.llm = llm
 
     def register_slack_action_handler(self, action_id, callback):
         self.handlers.append((action_id, callback))
@@ -129,14 +159,20 @@ class _FakeCtx:
 class _FakeClient:
     """Records chat_update calls; raises when asked, to rehearse a dead Slack API."""
 
-    def __init__(self, calls, *, fail=False):
+    def __init__(self, calls, *, fail=False, current=None):
         self._calls = calls
         self._fail = fail
+        # What Slack holds for the card: the last chat_update that landed, or the posted card.
+        self.current = current if current is not None else BLOCKS
+
+    async def conversations_history(self, *, channel, latest, inclusive, limit):
+        return {"messages": [{"ts": latest, "blocks": self.current}]}
 
     async def chat_update(self, *, channel, ts, blocks):
         self._calls.append(("chat_update", channel, ts, blocks))
         if self._fail:
             raise RuntimeError("slack unreachable")
+        self.current = blocks
 
 
 @contextlib.contextmanager
@@ -184,6 +220,17 @@ def _updates(calls):
     return [c for c in calls if isinstance(c, tuple) and c[0] == "chat_update"]
 
 
+def _without_updates(calls):
+    return [c for c in calls if not (isinstance(c, tuple) and c[0] == "chat_update")]
+
+
+def _status_at(blocks, idx):
+    for b in blocks:
+        if b.get("block_id") == f"card:{idx}:status":
+            return b["elements"][0]["text"]
+    return None
+
+
 def _assert_single_row_marked(blocks, updated, idx):
     """Exactly one block differs from the card as shown — the row's actions block, now its
     judged block — and the row count is unchanged."""
@@ -196,6 +243,20 @@ def _assert_single_row_marked(blocks, updated, idx):
     assert updated != blocks
     assert len(updated) == len(blocks)
     assert [i for i, (a, b) in enumerate(zip(blocks, updated)) if a != b] == [actions_at]
+
+
+def _assert_buttons_kept_under_the_reason(blocks, updated, idx):
+    """A failed press leaves the card as shown plus one status line right above the row's
+    buttons, so the owner can press again."""
+    prefix = f"card:{idx}:"
+    actions_at = next(
+        i
+        for i, b in enumerate(blocks)
+        if b["type"] == "actions" and any(el.get("action_id", "").startswith(prefix) for el in b["elements"])
+    )
+    assert updated[:actions_at] == blocks[:actions_at]
+    assert updated[actions_at]["block_id"] == f"card:{idx}:status"
+    assert updated[actions_at + 1 :] == blocks[actions_at:]
 
 
 @contextlib.contextmanager
@@ -211,12 +272,16 @@ def _patched_effects(calls, consumption=None, execute_repair=None):
             card_effects,
             "_live_consumption",
             side_effect=consumption
-            or (lambda session, kind, paths: calls.append(("consumption", session, kind, paths))),
+            or (
+                lambda session, kind, paths, judge=None: calls.append(
+                    ("consumption", session, kind, paths, judge)
+                )
+            ),
         ),
         mock.patch.object(
             card_effects,
             "_live_execute_repair",
-            side_effect=execute_repair or (lambda subject: calls.append(("repair", subject))),
+            side_effect=execute_repair or (lambda subject, row=None: calls.append(("repair", subject, row))),
         ),
     )
     with contextlib.ExitStack() as stack:
@@ -225,14 +290,38 @@ def _patched_effects(calls, consumption=None, execute_repair=None):
         yield
 
 
+@contextlib.contextmanager
+def _patched_delegate(
+    calls, note_text="---\ntitle: t\n---\n노트 본문입니다", evidence="채점이 잡은 문장입니다."
+):
+    """The judgment seat's live reads replaced by fakes — a press must never touch the
+    host vault or the engine's /events in these tests."""
+    with (
+        mock.patch.object(
+            card_delegate,
+            "read_note_text",
+            side_effect=lambda path: calls.append(("read_note", path)) or note_text,
+        ),
+        mock.patch.object(
+            card_delegate,
+            "proposal_evidence",
+            side_effect=lambda sessions, path, kind: (
+                calls.append(("read_evidence", tuple(sessions), path, kind)) or evidence
+            ),
+        ),
+    ):
+        yield
+
+
 def test_the_import_path_stays_langchain_free():
     """card_effects, and everything register() imports for the in-place edit, must stay
     importable in the hermes venv — the way back to langchain is card_live, so any of them
     pulling card_live in is the hole this test names."""
-    import boring_config  # noqa: F401
     import card_advice  # noqa: F401
     import card_press  # noqa: F401
     import card_view  # noqa: F401
+
+    from ohmyboring import config as boring_config  # noqa: F401
 
     assert "card_live" not in sys.modules, (
         "the plugin's imports must not import card_live (it pulls langchain)"
@@ -309,17 +398,236 @@ def test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card():
         calls = []
         with _patched_effects(calls):
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
-    assert calls[:3] == [
+    assert [c if isinstance(c, str) else c[0] for c in calls] == [
         "ack",
-        ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 1, "choice": "do"}),
-        ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"]),
+        "chat_update",
+        "record",
+        "consumption",
+        "chat_update",
     ]
-    updates = _updates(calls)
-    assert len(updates) == 1
-    _, channel, ts, updated = updates[0]
-    assert (channel, ts) == (CARD_CH, CARD_TS)
-    _assert_single_row_marked(BLOCKS, updated, 1)
-    assert f"✓ 채택 — <@{OWNER}>" in json.dumps(updated, ensure_ascii=False)
+    assert calls[2:4] == [
+        ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 1, "choice": "do"}),
+        ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"], None),
+    ]
+    progress, final = _updates(calls)
+    assert progress[1:3] == (CARD_CH, CARD_TS) and final[1:3] == (CARD_CH, CARD_TS)
+    _assert_single_row_marked(BLOCKS, progress[3], 1)
+    assert _status_at(progress[3], 1) == "⏳ 진행 중…"
+    _assert_single_row_marked(BLOCKS, final[3], 1)
+    assert f"✓ 채택 — <@{OWNER}>" in json.dumps(final[3], ensure_ascii=False)
+
+
+def test_an_owner_review_delegate_press_consumes_with_the_agent_judge():
+    """맡길게요: the model judges once and its call stands — REVIEW_VALUE proposes 'used';
+    the fake model answers wrong, so the judged edge is contested (never the word flag),
+    judge agent:delegated (never owner), the verdict_reviewed 사건 carries the judged kind
+    and the model's 이유, and only then the row settles as delegated. A mutant stamping the
+    proposed kind, or skipping the model call, goes red here."""
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer='{"verdict": "wrong", "reason": "본문과 맞지 않는 옛 기록"}'))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_effects(calls), _patched_delegate(calls):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert [c if isinstance(c, str) else c[0] for c in calls] == [
+        "ack",
+        "chat_update",
+        "read_note",
+        "read_evidence",
+        "model",
+        "consumption",
+        "record",
+        "chat_update",
+    ]
+    assert len([c for c in calls if isinstance(c, tuple) and c[0] == "model"]) == 1
+    assert calls[5:7] == [
+        ("consumption", "sess-agent-1", "contested", ["/vault/wiki/wiki-0700.md"], "agent:delegated"),
+        (
+            "record",
+            "verdict_reviewed",
+            {
+                "session_id": "sess-agent-1",
+                "note": "/vault/wiki/wiki-0700.md",
+                "proposed_kind": "used",
+                "card_ts": CARD_TS,
+                "choice": "delegate",
+                "judge": "agent:delegated",
+                "kind": "contested",
+                "reason": "본문과 맞지 않는 옛 기록",
+            },
+        ),
+    ]
+    progress, final = _updates(calls)
+    _assert_single_row_marked(BLOCKS, final[3], 3)
+    assert "✓ 맡김 — 에이전트 판정 그대로" in json.dumps(final[3], ensure_ascii=False)
+
+
+def test_a_delegate_press_where_the_model_agrees_keeps_the_proposed_kind():
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer='{"verdict": "right", "reason": "본문 그대로입니다"}'))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_effects(calls), _patched_delegate(calls):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert ("consumption", "sess-agent-1", "used", ["/vault/wiki/wiki-0700.md"], "agent:delegated") in calls
+    record = next(c for c in calls if isinstance(c, tuple) and c[0] == "record")
+    assert record[2]["kind"] == "used" and record[2]["reason"] == "본문 그대로입니다"
+
+
+def test_a_grouped_delegate_press_calls_the_model_once_and_fans_out_the_judgment():
+    """묶인 줄의 한 누름에 모델 호출은 1회 — 판정은 묶인 세션 전부에 간다."""
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer='{"verdict": "wrong", "reason": "모델 이유"}'))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_effects(calls), _patched_delegate(calls):
+            _run(handler, _body("card:3:delegate", REVIEW_GROUPED_VALUE), calls)
+    assert len([c for c in calls if isinstance(c, tuple) and c[0] == "model"]) == 1
+    assert (
+        "consumption",
+        "sess-agent-1",
+        "contested",
+        ["/vault/wiki/wiki-0700.md"],
+        "agent:delegated",
+    ) in calls
+    assert (
+        "consumption",
+        "sess-agent-2",
+        "contested",
+        ["/vault/wiki/wiki-0700.md"],
+        "agent:delegated",
+    ) in calls
+    assert ("read_evidence", ("sess-agent-1", "sess-agent-2"), "/vault/wiki/wiki-0700.md", "used") in calls
+
+
+def test_a_model_failure_leaves_no_edge_and_records_the_fact():
+    """모델이 못 답하면(여기선 죽은 호출) 판정을 남기지 않는다: consumption 0, error 를 실은
+    사건 한 줄, 그리고 실패 줄은 이유와 함께 「✕ 실패」로 버튼을 살린 채 남는다 — 조용히
+    낱말 표지로 되돌아가는 변이(제안 kind 의 간선)는 이 시험이 잡는다. 클레임은 풀려
+    다시 누를 수 있고, 다시 누름에도 모델 호출은 누름당 정확히 1번이다."""
+    calls = []
+    llm = _FakeLlm(calls, error=RuntimeError("model unreachable"))
+    ctx = _FakeCtx(llm=llm)
+    with _env():
+        _, handler = _register(ctx)[0]
+        with (
+            _patched_effects(calls),
+            _patched_delegate(calls),
+            mock.patch.object(PLUGIN, "_LOG"),
+        ):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+            assert not [c for c in calls if isinstance(c, tuple) and c[0] == "consumption"]
+            record = next(c for c in calls if isinstance(c, tuple) and c[0] == "record")
+            assert record[1] == "verdict_reviewed"
+            assert record[2]["choice"] == "delegate" and "model unreachable" in record[2]["error"]
+            assert "kind" not in record[2] and "reason" not in record[2]
+            failed = _updates(calls)[-1][3]
+            assert _status_at(failed, 3).startswith("✕ 실패")
+            _assert_buttons_kept_under_the_reason(BLOCKS, failed, 3)
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert len([c for c in calls if isinstance(c, tuple) and c[0] == "model"]) == 2
+
+
+def test_a_malformed_model_answer_is_a_failure_not_a_verdict():
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer="맞는 것 같아요"))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_effects(calls), _patched_delegate(calls):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "consumption"]
+    record = next(c for c in calls if isinstance(c, tuple) and c[0] == "record")
+    assert "JSON" in record[2]["error"]
+
+
+def test_a_delegate_press_without_the_model_seat_leaves_the_fact_only():
+    """ctx.llm 이 없는 hermes에서도 누름은 살아 있다 — 판정 없이 사건 한 줄만 남긴다."""
+    ctx = _FakeCtx(llm=None)
+    with _env():
+        _, handler = _register(ctx)[0]
+        calls = []
+        with _patched_effects(calls), _patched_delegate(calls):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "consumption"]
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "model"]
+    record = next(c for c in calls if isinstance(c, tuple) and c[0] == "record")
+    assert "ctx.llm" in record[2]["error"]
+
+
+def test_a_delegate_press_with_an_unreadable_note_never_calls_the_model():
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer='{"verdict": "right", "reason": "x"}'))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_delegate(calls, note_text=None), _patched_effects(calls):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "model"]
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "consumption"]
+    record = next(c for c in calls if isinstance(c, tuple) and c[0] == "record")
+    assert "못 읽었다" in record[2]["error"]
+
+
+def test_an_owner_review_hold_press_leaves_no_edge_and_marks_the_row():
+    """보류: no consumption at all — one verdict_reviewed 사건 carrying the held sessions,
+    then the row settles as held. The 이레 re-raise is the read side's job (card_live)."""
+    ctx = _FakeCtx()
+    with _env():
+        _, handler = _register(ctx)[0]
+        calls = []
+        with _patched_effects(calls):
+            _run(handler, _body("card:3:defer", REVIEW_VALUE), calls)
+    assert [c if isinstance(c, str) else c[0] for c in calls] == [
+        "ack",
+        "chat_update",
+        "record",
+        "chat_update",
+    ]
+    assert calls[2] == (
+        "record",
+        "verdict_reviewed",
+        {
+            "session_id": "sess-agent-1",
+            "sessions": ["sess-agent-1"],
+            "note": "/vault/wiki/wiki-0700.md",
+            "proposed_kind": "used",
+            "card_ts": CARD_TS,
+            "choice": "defer",
+        },
+    )
+    progress, final = _updates(calls)
+    _assert_single_row_marked(BLOCKS, final[3], 3)
+    assert "⏸ 보류 — 이레 뒤에 다시 올려요" in json.dumps(final[3], ensure_ascii=False)
+
+
+def test_every_lane_shows_progress_first_and_only_that_row_changes():
+    """Advice, review and repair-hold presses each: the first chat_update turns just the pressed
+    row into 「진행 중」 before any effect ran; the last one settles the same row."""
+    cases = [
+        ("card:1:do", ADVICE_VALUE, 1),
+        ("card:3:drop", REVIEW_VALUE, 3),
+        ("card:0:defer", REPAIR_VALUE, 0),
+    ]
+    for action_id, value, idx in cases:
+        ctx = _FakeCtx()
+        with _env():
+            _, handler = _register(ctx)[0]
+            calls = []
+            with _patched_effects(calls):
+                _run(handler, _body(action_id, value), calls)
+        progress, final = _updates(calls)
+        first_effect = min(
+            (i for i, c in enumerate(calls) if isinstance(c, tuple) and c[0] in ("record", "consumption")),
+            default=len(calls),
+        )
+        assert calls.index(progress) < first_effect, (
+            f"{action_id}: progress must land before the first effect"
+        )
+        _assert_single_row_marked(BLOCKS, progress[3], idx)
+        assert _status_at(progress[3], idx) == "⏳ 진행 중…"
+        _assert_single_row_marked(BLOCKS, final[3], idx)
+        assert _status_at(final[3], idx) is None, (
+            f"{action_id}: the settled row is a verdict, not the progress line"
+        )
 
 
 def test_a_rejected_press_runs_no_effect():
@@ -343,7 +651,7 @@ def test_a_raising_effect_stops_the_fold_and_the_handler_survives():
     line names the press, the failed effect, and the one effect skipped; the handler
     itself returns, and the card is not touched."""
 
-    def boom(session, kind, paths):
+    def boom(session, kind, paths, judge=None):
         raise RuntimeError("engine down")
 
     ctx = _FakeCtx()
@@ -355,7 +663,8 @@ def test_a_raising_effect_stops_the_fold_and_the_handler_survives():
             mock.patch.object(PLUGIN, "_LOG") as log,
         ):
             _run(handler, _body("card:3:drop", REVIEW_VALUE), calls)
-    assert calls == ["ack"], "the record behind the dead engine call must never run"
+    assert _without_updates(calls) == ["ack"], "the record behind the dead engine call must never run"
+    assert _status_at(_updates(calls)[-1][3], 3) == "✕ 실패 — engine down"
     log.error.assert_called_once()
     logged = log.error.call_args.args
     assert CARD_TS in logged and 3 in logged and "consumption" in logged
@@ -407,24 +716,24 @@ def test_a_racing_second_press_is_refused_while_the_card_still_shows_buttons():
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
     assert calls[first:] == ["ack"], "the racing press must not re-run effects or chat_update"
     assert log.info.called, "the refusal is one log line"
-    assert len(_updates(calls)) == 1
+    assert len(_updates(calls)) == 2, "one press = its progress and its final; the refused press adds none"
     verdict_records = [
         c for c in calls if c == ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 1, "choice": "do"})
     ]
     assert len(verdict_records) == 1
 
 
-def test_a_failed_effect_leaves_the_card_and_releases_the_claim():
-    """A dead engine call stops the press where card.py would stop it: no chat_update, and
-    the (card_ts, idx) claim is released — the card still shows the row's buttons, so the
-    owner's next press on that row must run its effects again."""
+def test_a_failed_effect_shows_the_reason_on_the_row_and_releases_the_claim():
+    """A dead engine call stops the press where card.py would stop it: the row goes from
+    「진행 중」 to 「✕ 실패 — reason」, and the (card_ts, idx) claim is released, so a press on a
+    card that still shows the buttons (a lost update) runs its effects again."""
     state = {"down": True}
 
-    def flaky(session, kind, paths):
+    def flaky(session, kind, paths, judge=None):
         if state["down"]:
             state["down"] = False
             raise RuntimeError("engine down")
-        calls.append(("consumption", session, kind, paths))
+        calls.append(("consumption", session, kind, paths, judge))
 
     ctx = _FakeCtx()
     with _env():
@@ -435,14 +744,17 @@ def test_a_failed_effect_leaves_the_card_and_releases_the_claim():
             mock.patch.object(PLUGIN, "_LOG"),
         ):
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
-            assert calls == [
+            assert _without_updates(calls) == [
                 "ack",
                 ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 1, "choice": "do"}),
             ]
-            assert not _updates(calls), "a failed effect must leave the card untouched"
+            progress, failed = _updates(calls)
+            assert _status_at(progress[3], 1) == "⏳ 진행 중…"
+            assert _status_at(failed[3], 1) == "✕ 실패 — engine down"
+            _assert_buttons_kept_under_the_reason(BLOCKS, failed[3], 1)
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
-    assert ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"]) in calls
-    assert len(_updates(calls)) == 1
+    assert ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"], None) in calls
+    assert len(_updates(calls)) == 4
 
 
 def test_a_failed_chat_update_is_one_log_line_and_keeps_the_claim():
@@ -457,26 +769,25 @@ def test_a_failed_chat_update_is_one_log_line_and_keeps_the_claim():
             mock.patch.object(PLUGIN, "_LOG") as log,
         ):
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls, fail=True)
-            assert calls[:3] == [
-                "ack",
+            assert calls[2:4] == [
                 ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 1, "choice": "do"}),
-                ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"]),
+                ("consumption", "slack:C1:1.0", "used", ["/vault/wiki/wiki-0576.md"], None),
             ]
-            assert len(_updates(calls)) == 1, "the failed update is still attempted once"
-            log.error.assert_called_once()
+            assert len(_updates(calls)) == 2, "progress and final are each attempted once"
+            assert log.error.call_count == 2, "each failed update is one line, and the effects still ran"
             logged = log.error.call_args.args
             assert CARD_TS in logged and 1 in logged
             assert any("chat_update" in str(a) for a in logged)
             _run(handler, _body("card:1:do", ADVICE_VALUE), calls)
-    assert calls[4:] == ["ack"], "the re-press must not repeat the effects"
-    assert len(_updates(calls)) == 1
+    assert calls[5:] == ["ack"], "the re-press must not repeat the effects"
+    assert len(_updates(calls)) == 2
 
 
 def test_a_repair_answered_with_a_non_done_value_is_one_log_line_and_marks_the_row():
     """The door answers a failed merge with a value (F2), not a raise — one error line, and
     the row shows the door's own numbers: never the plain ✓ 채택 mark, never silence."""
 
-    def merge_fails(subject):
+    def merge_fails(subject, row=None):
         calls.append(("repair", subject))
         return card_types.RepairFailed(
             subject=subject,
@@ -500,32 +811,114 @@ def test_a_repair_answered_with_a_non_done_value_is_one_log_line_and_marks_the_r
     logged = log.error.call_args.args
     assert CARD_TS in logged and 0 in logged and "RepairFailed" in logged
     updates = _updates(calls)
-    assert len(updates) == 1
-    _, channel, ts, updated = updates[0]
+    assert len(updates) == 2
+    _, channel, ts, updated = updates[-1]
     assert (channel, ts) == (CARD_CH, CARD_TS)
     _assert_single_row_marked(BLOCKS, updated, 0)
     rendered = json.dumps(updated, ensure_ascii=False)
     assert "✕ 합침 실패" in rendered and "지운 행 5" in rendered
 
 
-def test_a_repair_done_value_marks_the_row_with_the_doors_numbers():
+def test_an_accepted_merge_stays_in_progress_and_hands_the_door_its_row():
+    """The door answered 202 and rereads in the background: the plugin writes no final mark —
+    the door settles the row when the reread ends — and it names the row in the request."""
     done = card_types.RepairDone(subject="foodspring-front", deleted_rows=5, reread_notes=2)
+    seen = []
     ctx = _FakeCtx()
     with _env():
         _, handler = _register(ctx)[0]
         calls = []
         with (
-            _patched_effects(calls, execute_repair=lambda subject: done),
+            _patched_effects(calls, execute_repair=lambda subject, row=None: seen.append(row) or done),
             mock.patch.object(PLUGIN, "_LOG") as log,
         ):
             _run(handler, _body("card:0:do", REPAIR_VALUE), calls)
     assert not log.error.called
-    updates = _updates(calls)
-    assert len(updates) == 1
-    _, channel, ts, updated = updates[0]
-    assert (channel, ts) == (CARD_CH, CARD_TS)
-    _assert_single_row_marked(BLOCKS, updated, 0)
-    assert "✓ 합침 — 지운 행 5 · 다시 읽는 노트 2" in json.dumps(updated, ensure_ascii=False)
+    assert seen == [card_types.RowRef(channel=CARD_CH, card_ts=CARD_TS, idx=0)]
+    (progress,) = _updates(calls)
+    _assert_single_row_marked(BLOCKS, progress[3], 0)
+    assert _status_at(progress[3], 0) == "⏳ 진행 중…"
+
+
+def test_a_row_the_door_settled_mid_press_is_not_rolled_back():
+    """The door settles row 0 while row 1's effects run; row 1's final update is built from
+    the card as Slack holds it then, so row 0 keeps the door's mark instead of the click's
+    snapshot putting it back."""
+    ctx = _FakeCtx()
+    calls = []
+    client = _FakeClient(calls)
+
+    def door_settles_row_0(session, kind, paths, judge=None):
+        client.current = card_view.mark_progress(
+            client.current, 0, card_types.Done(text="✓ 완료 — door"), lang="ko"
+        )
+        calls.append(("consumption", session, kind, paths, judge))
+
+    async def ack():
+        calls.append("ack")
+
+    with _env():
+        _, handler = _register(ctx)[0]
+        with (
+            _patched_effects(calls, consumption=door_settles_row_0),
+            mock.patch.object(PLUGIN, "_client", client),
+        ):
+            asyncio.run(handler(ack, _body("card:1:do", ADVICE_VALUE), {}))
+    final = _updates(calls)[-1][3]
+    assert _status_at(final, 0) == "✓ 완료 — door"
+    assert _status_at(final, 1) is None, "row 1 is judged, not in progress"
+
+
+def _press_row_1_with(consumption, times):
+    """Press row 1 `times` times through the real handler against one fake Slack that keeps
+    the last card it was sent — a re-press carries that card, as Slack's payload would."""
+    ctx = _FakeCtx()
+    calls = []
+    client = _FakeClient(calls)
+
+    async def ack():
+        calls.append("ack")
+
+    with _env():
+        _, handler = _register(ctx)[0]
+        with (
+            _patched_effects(calls, consumption=consumption),
+            mock.patch.object(PLUGIN, "_client", client),
+            mock.patch.object(PLUGIN, "_LOG"),
+        ):
+            for _ in range(times):
+                asyncio.run(handler(ack, _body("card:1:do", ADVICE_VALUE, blocks=client.current), {}))
+    for update in _updates(calls):
+        ids = [b.get("block_id") for b in update[3] if b.get("block_id")]
+        assert len(ids) == len(set(ids)), f"duplicate block_id in an update (Slack refuses it): {ids}"
+    return client
+
+
+def test_the_same_failure_twice_keeps_the_row_and_its_buttons():
+    def down(session, kind, paths, judge=None):
+        raise RuntimeError("engine unreachable")
+
+    card = _press_row_1_with(down, 2).current
+    assert len(card) == len(BLOCKS) + 1, "one reason line added above the buttons, nothing lost"
+    assert _status_at(card, 1) == "✕ 실패 — engine unreachable"
+    assert any(
+        b["type"] == "actions" and any(el.get("action_id", "").startswith("card:1:") for el in b["elements"])
+        for b in card
+    )
+
+
+def test_a_retry_that_succeeds_leaves_no_old_failure_line():
+    state = {"down": True}
+
+    def flaky(session, kind, paths, judge=None):
+        if state["down"]:
+            state["down"] = False
+            raise RuntimeError("engine down")
+
+    card = _press_row_1_with(flaky, 2).current
+    assert _status_at(card, 1) is None
+    assert len(card) == len(BLOCKS)
+    assert not any("✕ 실패" in json.dumps(b, ensure_ascii=False) for b in card)
 
 
 if __name__ == "__main__":
@@ -536,12 +929,24 @@ if __name__ == "__main__":
     test_the_handler_acks_before_any_effect()
     test_a_press_on_a_card_older_than_the_answerable_hours_runs_no_effect()
     test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card()
+    test_an_owner_review_delegate_press_consumes_with_the_agent_judge()
+    test_a_delegate_press_where_the_model_agrees_keeps_the_proposed_kind()
+    test_a_grouped_delegate_press_calls_the_model_once_and_fans_out_the_judgment()
+    test_a_model_failure_leaves_no_edge_and_records_the_fact()
+    test_a_malformed_model_answer_is_a_failure_not_a_verdict()
+    test_a_delegate_press_without_the_model_seat_leaves_the_fact_only()
+    test_a_delegate_press_with_an_unreadable_note_never_calls_the_model()
+    test_an_owner_review_hold_press_leaves_no_edge_and_marks_the_row()
+    test_every_lane_shows_progress_first_and_only_that_row_changes()
     test_a_rejected_press_runs_no_effect()
     test_a_raising_effect_stops_the_fold_and_the_handler_survives()
     test_an_already_judged_row_is_refused_with_one_log_line()
     test_a_racing_second_press_is_refused_while_the_card_still_shows_buttons()
-    test_a_failed_effect_leaves_the_card_and_releases_the_claim()
+    test_a_failed_effect_shows_the_reason_on_the_row_and_releases_the_claim()
     test_a_failed_chat_update_is_one_log_line_and_keeps_the_claim()
     test_a_repair_answered_with_a_non_done_value_is_one_log_line_and_marks_the_row()
-    test_a_repair_done_value_marks_the_row_with_the_doors_numbers()
+    test_an_accepted_merge_stays_in_progress_and_hands_the_door_its_row()
+    test_a_row_the_door_settled_mid_press_is_not_rolled_back()
+    test_the_same_failure_twice_keeps_the_row_and_its_buttons()
+    test_a_retry_that_succeeds_leaves_no_old_failure_line()
     print("ok - boring-card plugin: ack-first, in-place mark, double-press refused, loud refusals")

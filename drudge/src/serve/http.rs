@@ -1217,7 +1217,7 @@ mod tests {
         std::fs::write(&path, format!("---\ndate: {today}\n---\n\nbody only\n")).expect("w");
         let (body, sources) = super::todays_brief_note(Some(&dir)).expect("still readable");
         assert_eq!(body, "body only");
-        assert!(sources.is_empty());
+        assert_eq!(sources, Vec::<String>::new());
 
         // An empty body is not a brief. Generating one is better than serving a blank page.
         std::fs::write(&path, format!("---\ndate: {today}\n---\n\n")).expect("w");

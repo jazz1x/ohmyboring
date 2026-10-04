@@ -16,14 +16,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# `omb_env` lives in agents/shared — the installer lands it flat beside this file in
-# ~/.hermes/scripts, where the plain import resolves; running from the repo they are
-# siblings through the parent dir, so add that first (the slack_briefing pattern).
-_SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
-if _SHARED_DIR.is_dir() and str(_SHARED_DIR) not in sys.path:
-    sys.path.insert(0, str(_SHARED_DIR))
+# `ohmyboring` is on PYTHONPATH in ~/.hermes/scripts (the hermes container); running from
+# the repo it sits at <repo>/src, so add that first.
+_SRC_DIR = Path(__file__).resolve().parents[2] / "src"
+if _SRC_DIR.is_dir() and str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
-import omb_env  # noqa: E402
+from ohmyboring import config as omb_env  # noqa: E402
 
 #: The door waits out the card itself (DOOR_RUN_CARD_TIMEOUT inside the door); the script
 #: must outwait the door so a slow card comes back as the door's own timeout answer rather

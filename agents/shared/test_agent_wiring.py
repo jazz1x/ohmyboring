@@ -9,12 +9,14 @@ Guards the installer surface that is otherwise only exercised at install time:
 """
 
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import time
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import TestCase, mock
 
@@ -100,6 +102,26 @@ def test_default_path_when_no_override():
     """When settings_path is absent, the per-agent default is used."""
     with mock.patch.object(agent_wiring.boring_config, "load", return_value={}):
         assert agent_wiring._agent_path("claude-code") == Path(os.path.expanduser("~/.claude/settings.json"))
+
+
+def test_install_default_addresses_point_at_the_door():
+    """Slice 2 — every MCP address the installer defaults to is the door (:7710), never the
+    engine's direct port (:7700): the host default server and the --server-url fallback
+    (hermes' own URL is pinned in test_wire_hermes_installs_the_plugins_and_enables_them)."""
+    assert agent_wiring.DEFAULT_MCP_SERVER == {"type": "http", "url": "http://localhost:7710/mcp"}
+    captured = {}
+
+    def fake_install(enabled_agents, server_name, server_config, boring_home=None):
+        captured["server"] = server_config
+        return [], False
+
+    with (
+        mock.patch.object(agent_wiring.boring_config, "load", return_value={"agents": []}),
+        mock.patch.object(agent_wiring, "install", fake_install),
+        mock.patch.object(sys, "argv", ["agent_wiring.py", "--install"]),
+    ):
+        agent_wiring.main()
+    assert captured["server"] == {"type": "http", "url": "http://localhost:7710/mcp"}
 
 
 def test_wire_claude_code_adds_session_start():
@@ -227,6 +249,7 @@ def test_wire_hermes_adds_hint_and_weekly():
         (scripts / "ingest-worker.py").write_text("# stub", encoding="utf-8")
         (scripts / "run-morning-card.py").write_text("# stub", encoding="utf-8")
         (scripts / "run-weekly-card.py").write_text("# stub", encoding="utf-8")
+        (scripts / "run-repair-judge.py").write_text("# stub", encoding="utf-8")
         card_plugin = scripts / "plugins" / "boring-card"
         card_plugin.mkdir(parents=True)
         (card_plugin / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
@@ -319,6 +342,16 @@ def test_real_hermes_entry_scripts_ship_every_module_they_import():
             )
 
 
+def test_hermes_scripts_ship_the_measurement_modules_the_briefing_notices_import_lazily():
+    """ohmyboring.briefing.notices imports label_core and verdict_core inside its functions, and the
+    dependency scan skips the ohmyboring package — so a briefing entry that stops naming them
+    would ship a ~/.hermes/scripts where the morning notice dies on ImportError."""
+    repo = HERE.parent.parent
+    shipped = {src.name for src in agent_wiring._hermes_briefing_sources(str(repo))}
+    assert {"label_core.py", "verdict_core.py", "vault_note.py"} <= shipped, shipped
+    assert not {"slack_briefing.py", "weekly_trend.py", "slack_post.py"} & shipped, shipped
+
+
 def test_local_deps_are_transitive_and_reach_the_shared_dir():
     """Deps of deps ship; a shared-dir module ships; stdlib does not; a vanished one raises."""
     with tempfile.TemporaryDirectory() as d:
@@ -352,6 +385,31 @@ def test_local_deps_are_transitive_and_reach_the_shared_dir():
             raise AssertionError("a missing module must abort the install")
 
 
+def test_local_deps_skip_the_ohmyboring_package_but_still_raise_for_missing_flat_modules():
+    """hermes scripts reach the engine client through the ohmyboring package now: the container's
+    PYTHONPATH provides it, so the collector must not try to copy it flat — while a genuinely
+    missing flat module still aborts the install (the control the old guarantee depends on)."""
+    with tempfile.TemporaryDirectory() as d:
+        src_dir = Path(d) / "hermes"
+        shared_dir = Path(d) / "shared"
+        src_dir.mkdir()
+        shared_dir.mkdir()
+        (src_dir / "entry.py").write_text(
+            "import json\nfrom ohmyboring.adapters.engine import DrudgeClient\n",
+            encoding="utf-8",
+        )
+
+        assert agent_wiring._local_module_deps(src_dir / "entry.py", (shared_dir,)) == set()
+
+        (src_dir / "entry.py").write_text("import vanished\n", encoding="utf-8")
+        try:
+            agent_wiring._local_module_deps(src_dir / "entry.py", (shared_dir,))
+        except FileNotFoundError as exc:
+            assert "vanished.py" in str(exc), exc
+        else:
+            raise AssertionError("a missing flat module must still abort the install")
+
+
 def test_wire_hermes_missing_slack_briefing_has_no_side_effects():
     """Missing slack_briefing aborts before config backup or script installation."""
     with tempfile.TemporaryDirectory() as d:
@@ -365,6 +423,7 @@ def test_wire_hermes_missing_slack_briefing_has_no_side_effects():
         (source_dir / "ingest-worker.py").write_text("# stub\n", encoding="utf-8")
         (source_dir / "run-morning-card.py").write_text("# stub\n", encoding="utf-8")
         (source_dir / "run-weekly-card.py").write_text("# stub\n", encoding="utf-8")
+        (source_dir / "run-repair-judge.py").write_text("# stub\n", encoding="utf-8")
         card_plugin = source_dir / "plugins" / "boring-card"
         card_plugin.mkdir(parents=True)
         (card_plugin / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
@@ -387,34 +446,6 @@ def test_wire_hermes_missing_slack_briefing_has_no_side_effects():
         assert cfg.read_bytes() == original
         assert not Path(str(cfg) + ".omb-bak").exists()
         assert not (fake_home / ".hermes" / "scripts").exists()
-
-
-def test_install_hermes_skills_removes_legacy_nested_duplicate():
-    """Old installs could leave memory-ingest/memory-ingest/SKILL.md and confuse Hermes."""
-    with tempfile.TemporaryDirectory() as d:
-        fake_home = Path(d) / "home"
-        omb = Path(d) / "omb"
-        src = omb / "agents" / "hermes" / "skills" / "memory-ingest"
-        src.mkdir(parents=True)
-        (src / "SKILL.md").write_text("name: memory-ingest\n", encoding="utf-8")
-
-        dst = fake_home / ".hermes" / "skills" / "memory-ingest"
-        nested = dst / "memory-ingest"
-        nested.mkdir(parents=True)
-        (nested / "SKILL.md").write_text("stale duplicate\n", encoding="utf-8")
-
-        def fake_expanduser(value):
-            if value == "~":
-                return str(fake_home)
-            if value.startswith("~/"):
-                return str(fake_home / value[2:])
-            return value
-
-        with mock.patch.object(agent_wiring.os.path, "expanduser", side_effect=fake_expanduser):
-            agent_wiring._install_hermes_skills(str(omb))
-
-        assert (dst / "SKILL.md").exists()
-        assert not nested.exists()
 
 
 def test_enable_hermes_plugin_appends_to_the_enabled_list():
@@ -524,6 +555,8 @@ def test_wire_hermes_installs_the_plugins_and_enables_them():
         # both plugins land in the enabled list, in HERMES_PLUGINS order after what was there
         assert "    - orca-status\n    - boring-card\n    - boring-memory\n" in text
         assert "pirate: 'Arrr!'" in text
+        # the MCP address this config gains is the door's, not the engine's direct port
+        assert "    url: http://boring-door:7710/mcp\n" in text
 
 
 def test_install_hermes_plugin_sweeps_the_first_generation_leftovers():
@@ -664,8 +697,12 @@ def test_sync_hermes_cron_jobs_adds_managed_job():
         worker = next(j for j in saved["jobs"] if j["name"] == "memory-ingest-worker")
         assert worker["script"] == "ingest-worker.py"
         assert worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
-        assert worker["skill"] == "memory-ingest"
-        assert [j["name"] for j in saved["jobs"] if j["name"] == "codex-memory-ingest-worker"] == [], (
+        assert worker["skill"] is None
+        assert worker["skills"] == []
+        assert worker["no_agent"] is True, (
+            "the script drives the engine queue itself; hermes must never call a model for it"
+        )
+        assert [j for j in saved["jobs"] if j["name"] == "codex-memory-ingest-worker"] == [], (
             "the host worker already runs the collector every 20m; a hermes job is a second owner"
         )
 
@@ -795,7 +832,10 @@ def test_install_places_ingest_worker_and_job_uses_relative_script():
 
 def test_installed_ingest_worker_imports_resolve_from_the_scripts_dir():
     """Whatever the worker imports at runtime must be present beside the installed copy —
-    asserted by importing, the way the briefing install's test does."""
+    asserted by importing, the way the briefing install's test does. The engine client
+    moved into the ohmyboring package with this migration: hermes provides it on PYTHONPATH
+    (the container mounts the repo root), so the subprocess runs under the same contract
+    while the flat shared modules must still resolve beside the installed copy."""
     repo = HERE.parent.parent
     with (
         tempfile.TemporaryDirectory() as d,
@@ -818,7 +858,6 @@ def test_installed_ingest_worker_imports_resolve_from_the_scripts_dir():
         imported = subprocess.run(
             [
                 sys.executable,
-                "-I",
                 "-c",
                 "import pathlib, runpy, sys; "
                 "ns = runpy.run_path(sys.argv[1], run_name='ingest_worker'); "
@@ -827,7 +866,16 @@ def test_installed_ingest_worker_imports_resolve_from_the_scripts_dir():
             ],
             capture_output=True,
             text=True,
-            env={**os.environ, "BORING_HOME": str(repo), "BORING_IN_CONTAINER": "0"},
+            # The container contract this worker ships under: the repo root on PYTHONPATH
+            # (hermes sets it), cwd somewhere neutral. -I 는 PYTHONPATH 까지 무시해 빼고,
+            # 대신 cwd 를 tmp 로 옮겨 체크아웃에서 우연히 풀리는 import 를 막는다.
+            cwd=str(Path(d)),
+            env={
+                **os.environ,
+                "BORING_HOME": str(repo),
+                "BORING_IN_CONTAINER": "0",
+                "PYTHONPATH": str(repo / "src"),
+            },
         )
         assert imported.returncode == 0, imported.stderr
         assert Path(imported.stdout.strip()) == installed_scripts / "distill_core.py"
@@ -894,7 +942,9 @@ def test_sync_hermes_cron_jobs_repairs_blocked_absolute_worker_path():
         worker = next(j for j in saved["jobs"] if j["name"] == "memory-ingest-worker")
         assert worker["script"] == "ingest-worker.py"
         assert worker["schedule"] == {"kind": "interval", "minutes": 20, "display": "every 20m"}
-        assert worker["skill"] == "memory-ingest"
+        assert worker["skill"] is None
+        assert worker["skills"] == []
+        assert worker["no_agent"] is True
         assert worker["enabled"] is True
 
 
@@ -1073,6 +1123,256 @@ def test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3():
         assert recall_commands == [original]
 
 
+def _fake_checkout(root: Path) -> Path:
+    """A fake oh-my-boring checkout mirroring the real repo's layout.
+
+    hooks/distill-session.py, hooks/recall.py and hooks/rules.py are symlinks into
+    agents/claude-code/ (real files there); agents/claude-code/session-start-recall.py is a
+    real file. The old fixture wrote real files at hooks/*.py, which is exactly why the
+    resolved-path detection passed its test while failing on the real repo.
+    """
+    claude_dir = root / "agents" / "claude-code"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    hooks_dir = root / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("distill-session.py", "recall.py", "rules.py"):
+        (claude_dir / name).write_text("# stub\n", encoding="utf-8")
+        (hooks_dir / name).symlink_to(Path("..") / "agents" / "claude-code" / name)
+    (claude_dir / "session-start-recall.py").write_text("# stub\n", encoding="utf-8")
+    marker = root / "agents" / "shared" / "agent_wiring.py"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("# stub\n", encoding="utf-8")
+    return root
+
+
+def test_wire_claude_code_repoints_roles_registered_from_another_checkout():
+    """Every role registered once, pointing at the current checkout — the other checkout's
+    registrations go, however their commands spell the script.
+
+    Measured 2026-10-01: ~/.claude/settings.json carried all four roles from both the main
+    checkout and this one, so every session got recall injected twice and was distilled twice
+    (2026-09-30 e1c7377b). Two checkouts are two files, so the old resolved-file comparison
+    never saw the duplication — and the first fix still missed the three symlinked roles,
+    because resolving hooks/recall.py lands on agents/claude-code/recall.py, which matches no
+    role; only the real file session-start-recall.py was repointed (independent verification,
+    2026-10-01). Here checkout B's distill rides in the nohup shell wrapper the old installer
+    wrote, through a `~` symlink, so the wrapper's script token has to count.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        checkout_a = _fake_checkout(base / "a")
+        checkout_b = _fake_checkout(base / "b")
+        fake_home = base / "home"
+        fake_home.mkdir()
+        (fake_home / "oh-my-boring").symlink_to(checkout_b)
+
+        py = sys.executable
+
+        def cmd(root: Path, role: str) -> str:
+            return f"{py} {root}/{role}"
+
+        wrapped_distill = (
+            'f=$(mktemp); cat >"$f"; nohup sh -c \''
+            'python3 ~/oh-my-boring/hooks/distill-session.py < "$0"; '
+            'rm -f "$0"\' "$f" >/dev/null 2>&1 &'
+        )
+
+        settings = Path(d) / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionEnd": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": cmd(checkout_a, "hooks/distill-session.py"),
+                                        "timeout": 130,
+                                        "async": True,
+                                    }
+                                ],
+                            },
+                            {"matcher": "", "hooks": [{"type": "command", "command": wrapped_distill}]},
+                        ],
+                        "UserPromptSubmit": [
+                            {
+                                "matcher": "",
+                                "hooks": [{"type": "command", "command": cmd(r, role), "timeout": 10}],
+                            }
+                            for r in (checkout_a, checkout_b)
+                            for role in ("hooks/recall.py", "hooks/rules.py")
+                        ],
+                        "SessionStart": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": cmd(r, "agents/claude-code/session-start-recall.py"),
+                                        "timeout": 15,
+                                        "async": True,
+                                    }
+                                ],
+                            }
+                            for r in (checkout_a, checkout_b)
+                        ],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)),
+            mock.patch.dict(os.environ, {"HOME": str(fake_home)}),
+        ):
+            result = agent_wiring.wire_claude_code(settings)
+            second = agent_wiring.wire_claude_code(settings)
+
+        assert result["changed"] is True
+        assert second["changed"] is False, "a second run must add nothing"
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = [
+            h["command"] for groups in data["hooks"].values() for group in groups for h in group["hooks"]
+        ]
+        assert len(commands) == 4, commands
+        for role in agent_wiring._CLAUDE_CODE_ROLE_SCRIPTS:
+            assert [c for c in commands if c.endswith(f"/{role}")] == [cmd(checkout_a, role)], (
+                role,
+                commands,
+            )
+
+
+def test_wire_claude_code_leaves_a_strangers_recall_hook_untouched():
+    """Role matching must not claim a hooks/recall.py that is not inside a checkout.
+
+    The checkout test for "ours" is the agent_wiring.py beside the scripts; a directory that
+    lacks it is a stranger's, and its registrations — even of a path that spells like our
+    role — survive the drop pass and do not satisfy _already_wired.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        checkout_a = _fake_checkout(Path(d) / "a")
+        stranger = Path(d) / "stranger"
+        (stranger / "hooks").mkdir(parents=True)
+        (stranger / "hooks" / "recall.py").write_text("# not ours\n", encoding="utf-8")
+        original = f"{sys.executable} {stranger}/hooks/recall.py"
+
+        settings = Path(d) / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {"matcher": "", "hooks": [{"type": "command", "command": original}]}
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)):
+            agent_wiring.wire_claude_code(settings)
+
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = [h["command"] for group in data["hooks"]["UserPromptSubmit"] for h in group["hooks"]]
+        assert commands.count(original) == 1, commands
+        assert f"{sys.executable} {checkout_a}/hooks/recall.py" in commands
+
+
+def test_duplicate_registrations_count_the_same_role_from_two_checkouts():
+    """A role registered once per checkout is invisible to the per-script count: the two
+    commands resolve to different files, and only files under BORING_HOME are counted anyway,
+    so every role sat in ~/.claude/settings.json twice (main and migration) while doctor (d5e)
+    printed duplicates=0. The role pass has to see it — this test dies on a scratch copy
+    without the role counting.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        checkout_a = _fake_checkout(base / "a")
+        checkout_b = _fake_checkout(base / "b")
+
+        settings = base / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": f"{sys.executable} {root}/hooks/recall.py",
+                                    }
+                                    for root in (checkout_a, checkout_b)
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = io.StringIO()
+        err = io.StringIO()
+        with (
+            mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)),
+            mock.patch.object(agent_wiring, "_REGISTRATION_FILES", (("claude-code", str(settings)),)),
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
+            rc = agent_wiring._report_duplicate_registrations()
+
+        assert rc != 0
+        assert "role=hooks/recall.py" in err.getvalue(), err.getvalue()
+        assert str(checkout_a.resolve()) in err.getvalue()
+        assert str(checkout_b.resolve()) in err.getvalue()
+
+
+def test_duplicate_registrations_pass_when_every_role_is_registered_once():
+    with tempfile.TemporaryDirectory() as d:
+        checkout_a = _fake_checkout(Path(d) / "a")
+
+        settings = Path(d) / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": f"{sys.executable} {checkout_a}/{role}",
+                                    }
+                                    for role in agent_wiring._CLAUDE_CODE_ROLE_SCRIPTS
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = io.StringIO()
+        err = io.StringIO()
+        with (
+            mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)),
+            mock.patch.object(agent_wiring, "_REGISTRATION_FILES", (("claude-code", str(settings)),)),
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
+            rc = agent_wiring._report_duplicate_registrations()
+
+        assert rc == 0, err.getvalue()
+
+
 if __name__ == "__main__":
     test_install_reports_failure()
     test_install_returns_success_when_ok()
@@ -1088,6 +1388,7 @@ if __name__ == "__main__":
     test_install_hermes_briefing_backs_up_existing_scripts()
     test_wire_hermes_missing_slack_briefing_has_no_side_effects()
     test_real_hermes_entry_scripts_ship_every_module_they_import()
+    test_hermes_scripts_ship_the_measurement_modules_the_briefing_notices_import_lazily()
     test_kimi_hooks_are_deduped_across_path_spellings()
     test_claude_code_hook_commands_pin_the_installing_interpreter()
     test_kimi_hook_commands_pin_the_installing_interpreter()
@@ -1096,7 +1397,7 @@ if __name__ == "__main__":
     test_wire_kimi_adds_only_the_missing_rules_block()
     test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3()
     test_local_deps_are_transitive_and_reach_the_shared_dir()
-    test_install_hermes_skills_removes_legacy_nested_duplicate()
+    test_local_deps_skip_the_ohmyboring_package_but_still_raise_for_missing_flat_modules()
     test_enable_hermes_plugin_appends_to_the_enabled_list()
     test_enable_hermes_plugin_is_idempotent()
     test_enable_hermes_plugin_leaves_everything_outside_the_list_byte_identical()
@@ -1115,4 +1416,8 @@ if __name__ == "__main__":
     test_install_removes_a_hermes_codex_job_left_by_an_older_install()
     test_sync_hermes_cron_jobs_a_declared_deliver_sticks_and_repairs_drift()
     test_sync_hermes_cron_jobs_creates_with_the_declared_deliver()
+    test_wire_claude_code_repoints_roles_registered_from_another_checkout()
+    test_wire_claude_code_leaves_a_strangers_recall_hook_untouched()
+    test_duplicate_registrations_count_the_same_role_from_two_checkouts()
+    test_duplicate_registrations_pass_when_every_role_is_registered_once()
     print("ok - agent_wiring failure propagation + hermes wiring + settings_path")

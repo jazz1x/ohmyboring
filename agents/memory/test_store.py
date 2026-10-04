@@ -105,11 +105,8 @@ class _Handler(BaseHTTPRequestHandler):
 class StoreTest(unittest.TestCase):
     def setUp(self) -> None:
         self.door = self._serve()
-        self.engine = self._serve()
-        self.store = BoringStore(
-            engine_url=f"http://127.0.0.1:{self.engine.server_port}",
-            door_url=f"http://127.0.0.1:{self.door.server_port}",
-        )
+        self.engine = self._serve()  # the witness: E4-α says nothing may arrive here
+        self.store = BoringStore(door_url=f"http://127.0.0.1:{self.door.server_port}")
 
     def _serve(self) -> ThreadingHTTPServer:
         server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
@@ -130,15 +127,17 @@ class StoreTest(unittest.TestCase):
         return server
 
     def _remember_bodies(self) -> list[dict]:
-        return [
-            body for method, path, body in self.engine.requests if method == "POST" and path == "/remember"
-        ]
+        # E4-α — a put's remember wears the door, never the engine direct.
+        return [body for method, path, body in self.door.requests if method == "POST" and path == "/remember"]
 
     def test_put_new_key_sends_remember_without_supersedes(self) -> None:
         before = datetime.now(UTC)
         self.assertIsNone(self.store.put(NS, "prefs", {"lang": "ko"}))
 
         (body,) = self._remember_bodies()
+        self.assertEqual(
+            self.engine.requests, [], "a put remembers through the door, never the engine direct"
+        )
         subject = _subject_for(NS, "prefs")
         self.assertEqual(body["title"], "langgraph store users/u1/memories/prefs")
         self.assertEqual(
@@ -210,11 +209,11 @@ class StoreTest(unittest.TestCase):
             "a re-put inherits created_at from the current value — get answers when the record was born",
         )
 
-    def test_put_raises_when_the_engine_answers_duplicate(self) -> None:
+    def test_put_raises_when_the_door_answers_duplicate(self) -> None:
         # Since r4.1 a corrected note always lands: the engine skips the duplicate gate
         # for anything with supersedes. A duplicate answer means the write was swallowed
         # and the caller's new value is NOT what get will answer — that is a failure.
-        self.engine.remember_response = {
+        self.door.remember_response = {
             "source_path": "/vault/wiki/wiki-9001.md",
             "wiki_id": "wiki-9001",
             "duplicate": "/vault/wiki/wiki-9001.md",
@@ -279,7 +278,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(self.door.requests + self.engine.requests, [], "a refused op must send nothing")
 
     def test_search_boring_prefix_maps_hits_and_anything_else_is_next_wheel(self) -> None:
-        self.engine.hits = [HIT]
+        self.door.hits = [HIT]
         items = self.store.search(("boring",), query="문서 정리")
         (item,) = items
         self.assertEqual(item.namespace, ("boring", "omb"))
@@ -287,7 +286,8 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(item.value["content"], "문서 정리 원칙 노트")
         self.assertEqual(item.value["source_path"], "/vault/wiki/wiki-0001.md")
         self.assertIsNone(item.score)
-        self.assertEqual(self.engine.requests[-1][2], {"query": "문서 정리", "max_results": 10})
+        self.assertEqual(self.door.requests[-1][2], {"query": "문서 정리", "max_results": 10})
+        self.assertEqual(self.engine.requests, [], "a query search goes to the door, never the engine direct")
 
         for bad_prefix in (("agents",), ("boring-agent",)):
             with self.assertRaises(NotImplementedError):
@@ -302,6 +302,62 @@ class StoreTest(unittest.TestCase):
             self.store.search(("boring",), query="q", filter={"k": "v"})
         with self.assertRaises(NotImplementedError):
             self.store.batch([ListNamespacesOp()])
+
+    def test_search_sends_the_filter_knobs_to_the_door_verbatim(self) -> None:
+        """The filter is the engine's knob handles — claims·max_tokens·related·related_heads —
+        and what the caller passes is what the door's body carries, nothing dropped, nothing
+        invented. related rides back on the item so the recall block can render it."""
+        related = [{"id": "wiki-0002", "source_path": "/vault/wiki/wiki-0002.md", "snippet": "옛 노트"}]
+        self.door.hits = [
+            {
+                **HIT,
+                "dist": 0.31,
+                "dist_kind": "vector_cosine",
+                "claims": [{"subject": "omb", "predicate": "status", "value": "migrating"}],
+                "claims_total": 1,
+                "related": related,
+            }
+        ]
+        items = self.store.search(
+            ("boring",),
+            query="문서 정리",
+            filter={"claims": 2, "max_tokens": 1500, "related": 1, "related_heads": 5},
+        )
+        (item,) = items
+        self.assertEqual(
+            self.door.requests[-1][2],
+            {
+                "query": "문서 정리",
+                "max_results": 10,
+                "claims": 2,
+                "max_tokens": 1500,
+                "related": 1,
+                "related_heads": 5,
+            },
+        )
+        self.assertEqual(self.engine.requests, [])
+        self.assertEqual(item.value["related"], related)
+        self.assertEqual(item.value["claims"], self.door.hits[0]["claims"])
+
+    def test_search_filter_is_an_allowlist_of_non_negative_ints(self) -> None:
+        """A filter key outside the knob allowlist, or a value that is not a non-negative int,
+        is a caller bug — it raises before any request leaves, never vanishes into a quiet
+        default. None stays the plain search of before."""
+        cases = [
+            ({"k": "v"}, "unknown search filter"),
+            ({"claims": "2"}, "non-negative int"),
+            ({"claims": -1}, "non-negative int"),
+            ({"claims": True}, "non-negative int"),
+            ({"max_tokens": 1.5}, "non-negative int"),
+            ({"related": None}, "non-negative int"),
+        ]
+        for bad_filter, message in cases:
+            with self.assertRaisesRegex(ValueError, message):
+                self.store.search(("boring",), query="q", filter=bad_filter)
+        self.assertEqual(self.door.requests + self.engine.requests, [], "a refused filter must send nothing")
+        self.door.hits = [HIT]
+        self.store.search(("boring",), query="q")
+        self.assertEqual(self.door.requests[-1][2], {"query": "q", "max_results": 10})
 
     def test_search_without_query_lists_the_prefix_in_key_order_and_pages(self) -> None:
         listed = [

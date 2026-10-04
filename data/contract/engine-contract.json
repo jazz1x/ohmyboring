@@ -5,10 +5,13 @@
     "GET /claim-sources",
     "GET /projects",
     "GET /repairs/split-subjects",
-    "POST /repairs/split-subjects",
+    "GET /repairs/split-subjects/samples",
     "GET /rules",
+    "POST /repairs/split-subjects",
     "POST /run/morning-card",
-    "POST /run/weekly-card"
+    "POST /run/repair-judge",
+    "POST /run/weekly-card",
+    "POST /search"
   ],
   "get_shapes": {
     "/audit": {
@@ -44,6 +47,14 @@
         "total_files"
       ]
     },
+    "/events": {
+      "optional": [],
+      "required": [
+        "entries",
+        "limit_applied",
+        "maybe_truncated"
+      ]
+    },
     "/health": {
       "optional": [
         "build_sha",
@@ -74,21 +85,27 @@
   },
   "http_routes": [
     "GET /audit",
+    "GET /events",
     "GET /health",
     "GET /mcp",
+    "GET /otel-events",
     "GET /projects",
     "GET /query-log",
     "GET /recall-label-stats",
+    "GET /recall-labels",
     "POST /ask",
     "POST /brief",
     "POST /compact",
     "POST /consumption",
     "POST /context",
     "POST /decisions",
+    "POST /events",
     "POST /graph",
     "POST /handover",
     "POST /mcp",
     "POST /next_actions",
+    "POST /otel-events",
+    "POST /recall-labels",
     "POST /recurrences",
     "POST /remember",
     "POST /risks",

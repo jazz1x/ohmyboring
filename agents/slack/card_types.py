@@ -24,6 +24,24 @@ REGISTER_NAMES: tuple[str, ...] = ANSWER_REGISTERS + ("recurrences",)
 #: language table, so a Japanese-language card still accepts the same action_ids.
 CHOICES: tuple[str, ...] = ("do", "defer", "drop")
 
+#: The review lane's fourth button — 「맡길게요」 takes the agent's own call as-is. The wire
+#: admits it (parse_action_common), but only the review lane's buttons emit it and only its
+#: effects know what it means; every other lane refuses it in parse_press.
+DELEGATE: str = "delegate"
+
+#: The judge a delegated review writes on the edge — the engine's `agent:<name>` vocabulary
+#: (drudge/src/frontmatter.rs:53-61), accepted with no Rust change. Never `owner`: the owner
+#: handed this call back, so the 채점 줄 can tell the two apart.
+AGENT_DELEGATED: str = "agent:delegated"
+
+#: The judge the 이름 맞추기 repair judgment names on its 사건 — the same `agent:<name>`
+#: lineage as AGENT_DELEGATED: the agent decided before the owner's card, never the owner.
+REPAIR_JUDGE: str = "agent:repair-judge"
+
+#: Bumped whenever the judge's question changes; judgments asked under another version are
+#: not read. v1 (2026-10-03) asked "same spelling?" and called 18/20 same_name, next step included.
+REPAIR_JUDGE_PROMPT_VERSION: int = 2
+
 #: card_i18n.STRINGS keys this file's display-building functions may render.
 DISPLAY_LANGS: tuple[str, ...] = ("en", "ko", "ja")
 
@@ -229,10 +247,12 @@ class Confirmation(BaseModel):
 
 
 class ButtonVerdict(BaseModel):
-    """One button press, already judged trustworthy by parse_action."""
+    """One button press, already judged trustworthy by parse_action. `choice` admits the
+    review lane's delegate too: mark_pressed rebuilds the pressed row from this value, and
+    parse_action itself (the advice-era parser) still mints only do/defer/drop."""
 
     idx: int
-    choice: Choice
+    choice: Literal["do", "defer", "drop", "delegate"]
     user: str
     at: str
 
@@ -241,12 +261,27 @@ class ProposedVerdict(BaseModel):
     """One session-end classification the agent already made and proposed — not the owner's.
     `session_id` is the session that judged the note (the /consumption edge's own session),
     so an owner flip judges that same session, never the card's. The card's review lane shows
-    these; the owner may agree or flip, and silence records nothing."""
+    these; the owner may agree, flip, delegate, or hold. Rows whose (note, kind) matches
+    another session's proposal are grouped: `sessions`/`works` are the parallel lists of every
+    grouped session and its work line (`[]` on an ungrouped row), because one grouped row's
+    press fans out to all of them. `reason` is the sentence the session-end scorer caught the
+    mark in ("" for rows proposed before reasons were stored)."""
 
     session_id: str
     note: str
     kind: Literal["used", "contested"]
     at: str
+    # What the owner reads to know which note and which piece of work this is: the note's own
+    # title and the judging session's note ("project · MM-DD · title"); empty when the vault
+    # has neither, and the row falls back to the ids.
+    note_title: str = ""
+    work: str = ""
+    # Grouped row: every session that judged this note this way, and their work lines, both
+    # in first-seen (newest-first) order, parallel to each other. Empty on an ungrouped row.
+    sessions: list[str] = []
+    works: list[str] = []
+    # Why the agent judged so — one assistant sentence, verbatim from the transcript.
+    reason: str = ""
 
 
 class Rejected(BaseModel):
@@ -283,16 +318,42 @@ class AdvicePress(CardPress):
 
 
 class ReviewPress(CardPress):
-    """The review lane's press — `session` is the proposing session a flip would judge."""
+    """The review lane's press — `session` is the proposing session a flip would judge;
+    `sessions` is every session the row grouped (the press fans out to all of them; empty
+    for an ungrouped row, where `session` alone is the list)."""
 
     lane: Literal["review"] = "review"
+    choice: Literal["do", "delegate", "defer", "drop"]
     session: str
+    sessions: list[str] = []
     note: str
     kind: Literal["used", "contested"]
 
 
 #: parse_press's success return — discriminated on the value's own lane tag.
 Press = Annotated[RepairPress | AdvicePress | ReviewPress, Field(discriminator="lane")]
+
+
+class DelegatedJudgment(BaseModel):
+    """One 「맡길게요」 press's model judgment — what the agent decided and why. `kind` is
+    the judged edge kind: the model answered right (제안 그대로) or wrong (뒤집은 판정),
+    and parse folded that into the engine's used|contested vocabulary before this value
+    ever reached the decision table. `reason` is the model's one line, already capped."""
+
+    kind: Literal["used", "contested"]
+    reason: str
+
+
+class DelegationFailed(BaseModel):
+    """The model could not judge — the note was unreadable, the proposal's 근거 사건 was
+    gone, the call died, or the answer was not the promised shape. No 판정 may be written
+    for this press; the decision table turns this into the 사건 one line that says so."""
+
+    reason: str
+
+
+#: What a delegate press carries into card_press.effects — the model's answer or its absence.
+Delegated = DelegatedJudgment | DelegationFailed
 
 
 class Record(BaseModel):
@@ -304,12 +365,15 @@ class Record(BaseModel):
 
 
 class Consumption(BaseModel):
-    """One /consumption verdict — a used|contested edge onto a session."""
+    """One /consumption verdict — a used|contested edge onto a session. `judge` rides the
+    edge verbatim: None leaves the interpreter's owner default (a button press is the
+    owner's hand); AGENT_DELEGATED names the hand the owner handed the call back to."""
 
     effect: Literal["consumption"] = "consumption"
     session: str
     kind: Literal["used", "contested"]
     paths: list[str]
+    judge: str | None = None
 
 
 class ExecuteRepair(BaseModel):
@@ -330,16 +394,55 @@ class PostedCard(BaseModel):
     ts: str
 
 
+#: The repair judge's closed verdict vocabulary — same_name(같은 이름, 합칠 것) · generic(이름이
+#: 아닌 흔한 말, 카드에서 뺄 것) · unsure(못 가름). The wire vocabulary itself, like CHOICES:
+#: parse validates against this, never against a language table, so a Japanese-language
+#: run folds the same three words.
+REPAIR_JUDGE_VERDICTS: tuple[str, ...] = ("same_name", "generic", "unsure")
+
+
+class RepairJudgment(BaseModel):
+    """One 이름 맞추기 group's agent judgment — the verdict the repair-judge run left on a
+    repair_judged 사건 and the card rides on its row (이유 한 줄 + 철자 목록 전부). `judge`
+    names the deciding hand in the engine's agent:<name> vocabulary, like AGENT_DELEGATED —
+    the owner may flip a generic call later precisely because this line is never `owner`."""
+
+    subject: str
+    variants: list[str] = Field(min_length=2)
+    verdict: Literal["same_name", "generic", "unsure"]
+    reason: str
+    judge: str = REPAIR_JUDGE
+    prompt_version: int = REPAIR_JUDGE_PROMPT_VERSION
+
+
+class RepairJudgeFailed(BaseModel):
+    """The repair-judge run could not judge this group — the model call died or the answer
+    was not the promised shape. A value, never an exception: the 사건 carries the fact and
+    the group simply is not judged, so the next day's run tries it again (a failure never
+    counts as a 판정 and never blocks the rest of the day's queue)."""
+
+    subject: str
+    variants: list[str] = Field(min_length=2)
+    reason: str
+
+
+#: What one judge call folds into — the judgment, or the recorded fact of its absence.
+RepairJudgeAnswer = RepairJudgment | RepairJudgeFailed
+
+
 class Repair(BaseModel):
     """One split-subject group from the door's GET /repairs/split-subjects — the execute
     lane's row shape, distinct from Proposal (the advice lane's). `variants` holds the raw
     spellings the engine's canon() folds into `subject`; `rows`/`notes` are the door's own
-    counts, shown as-is."""
+    counts, shown as-is. `judgment` is the agent's 판정 for exactly this (subject, variants)
+    pair — None while the repair-judge has not judged it, and the card only ever rises rows
+    that carry one (a raw engine candidate must not reach the owner)."""
 
     subject: str
     variants: list[str] = Field(min_length=2)
     rows: int
     notes: int
+    judgment: RepairJudgment | None = None
 
 
 class RepairDone(BaseModel):
@@ -373,6 +476,37 @@ class RepairUnanswered(BaseModel):
 
     subject: str
     reason: str
+
+
+class RowRef(BaseModel):
+    """Where one card row lives: the message and the button idx — what the door needs to
+    settle a merge row itself once its reread has finished."""
+
+    channel: str
+    card_ts: str
+    idx: int
+
+
+class Pending(BaseModel):
+    """A pressed row whose work has not finished."""
+
+    outcome: Literal["pending"] = "pending"
+
+
+class Done(BaseModel):
+    """A pressed row whose work finished; `text` is the whole mark the row shows."""
+
+    outcome: Literal["done"] = "done"
+    text: str
+
+
+class Failed(BaseModel):
+    outcome: Literal["failed"] = "failed"
+    reason: str
+
+
+#: What a pressed row shows — folded into a status block in one place (card_view.status_text).
+Outcome = Annotated[Pending | Done | Failed, Field(discriminator="outcome")]
 
 
 class Registers(BaseModel):
