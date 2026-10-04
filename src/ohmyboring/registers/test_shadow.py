@@ -12,6 +12,7 @@ import os
 import sys
 import unittest
 from datetime import UTC, datetime
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
@@ -330,6 +331,14 @@ class RenderHelperTests(unittest.TestCase):
             case other:
                 self.fail(f"expected rejection, got {other!r}")
         self.assertEqual(registers_pg.http_args("status", {"project": ""}).value, {"project": ""})
+
+    def test_answer_dispatches_status(self):
+        ctx = registers_pg.AnswerCtx(
+            policy_origins=(), lang="ko", embed=lambda _t: Err("down"), transport="mcp"
+        )
+        with mock.patch.object(registers_pg, "status_docs", return_value=Ok([])):
+            result = registers_pg.answer(None, "status", {"project": "omb"}, ctx)
+        self.assertEqual(result, Err("embed: down"))
 
     def test_mcp_args_coerce_garbage_to_defaults(self):
         self.assertEqual(

@@ -1016,7 +1016,7 @@ def _answer_payload(conn: psycopg.Connection, surface: str, args: dict, ctx: Ans
             return Ok(payload)
 
 
-def _answer_status(conn: psycopg.Connection, args: dict, ctx: AnswerCtx) -> Either[dict, str]:
+def _answer_status(conn: psycopg.Connection, _surface: str, args: dict, ctx: AnswerCtx) -> Either[dict, str]:
     match status_docs(conn, args["project"]):
         case Err(e):
             return Err(str(e))
