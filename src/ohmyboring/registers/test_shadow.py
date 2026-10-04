@@ -340,6 +340,10 @@ class RenderHelperTests(unittest.TestCase):
             result = registers_pg.answer(None, "status", {"project": "omb"}, ctx)
         self.assertEqual(result, Err("embed: down"))
 
+    def test_mcp_context_max_items_defaults_to_five(self):
+        self.assertEqual(registers_pg.mcp_args("context", {}).value["max_items"], 5)
+        self.assertEqual(registers_pg.mcp_args("context", {"max_items": 80}).value["max_items"], 50)
+
     def test_mcp_args_coerce_garbage_to_defaults(self):
         self.assertEqual(
             registers_pg.mcp_args("stalled", {"older_than_days": -1}).value,

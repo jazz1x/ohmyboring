@@ -924,7 +924,7 @@ def _mcp_recurrences_args(args: dict) -> Either[dict, Rejected]:
 def _mcp_context_args(args: dict) -> Either[dict, Rejected]:
     raw = args.get("max_items")
     max_items = raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else None
-    value = MCP_CONTEXT_MAX_ITEMS if max_items is None else max_items
+    value = CONTEXT_DEFAULT_MAX_ITEMS if max_items is None else max_items
     project = args.get("project")
     return Ok(
         {
