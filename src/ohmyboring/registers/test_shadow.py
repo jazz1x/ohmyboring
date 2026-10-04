@@ -302,15 +302,15 @@ class RenderHelperTests(unittest.TestCase):
     def test_rfc3339_chrono_autosi(self):
         self.assertEqual(
             registers_pg.rfc3339(datetime(2026, 9, 30, 1, 2, 3, tzinfo=UTC)),
-            "2026-09-30T01:02:03Z",
+            "2026-09-30T01:02:03+00:00",
         )
         self.assertEqual(
             registers_pg.rfc3339(datetime(2026, 9, 30, 1, 2, 3, 123000, tzinfo=UTC)),
-            "2026-09-30T01:02:03.123Z",
+            "2026-09-30T01:02:03.123+00:00",
         )
         self.assertEqual(
             registers_pg.rfc3339(datetime(2026, 9, 30, 1, 2, 3, 123456, tzinfo=UTC)),
-            "2026-09-30T01:02:03.123456Z",
+            "2026-09-30T01:02:03.123456+00:00",
         )
 
     def test_register_limit_rules(self):

@@ -313,7 +313,7 @@ def rfc3339(dt: datetime) -> str:
         frac = f".{micros // 1000:03d}"
     else:
         frac = f".{micros:06d}"
-    return f"{dt:%Y-%m-%dT%H:%M:%S}{frac}Z"
+    return f"{dt:%Y-%m-%dT%H:%M:%S}{frac}+00:00"
 
 
 def _f32_shortest(value: float) -> str:
