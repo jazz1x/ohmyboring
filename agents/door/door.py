@@ -131,6 +131,8 @@ from ohmyboring.adapters import embed as embed_adapter
 from ohmyboring.adapters import events as event_log
 from ohmyboring.adapters import vault as vault_notes
 from ohmyboring.entrypoints.http import mcp_recall
+from ohmyboring.gap import parse as gap_parse
+from ohmyboring.gap import pg as gap_pg
 from ohmyboring.recall import named as recall_named
 from ohmyboring.registers import pg as registers_pg
 from ohmyboring.registers import shadow as registers_shadow
@@ -260,6 +262,11 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
     if request.method == "POST" and request.url.path == "/remember" and _remember_writer() == _WRITER_PYTHON:
         if (arguments := _http_remember_arguments(body)) is not None:
             return await _remember_python(request, body, arguments, "remember")
+    # 빈자리 도구는 스위치와 무관하게 늘 문 안에서 답한다 — 엔진엔 gap 이 없다.
+    if request.method == "POST" and request.url.path == "/mcp":
+        if (call := _mcp_tools_call(body)) is not None and call[0] == gap_parse.TOOL["name"]:
+            rpc = _http_json_object(body) or {}
+            return await _gap_python(rpc.get("id"), call[1], "mcp")
     # 읽기 주인 스위치(E4-1): python 이면 일곱 레지스터 읽기를 엔진에 넘기지 않고 문 안에서 답한다.
     if request.method == "POST" and _register_reader() == _READER_PYTHON:
         if request.url.path in _REGISTER_HTTP_PATHS:
@@ -288,6 +295,7 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
         )
     if request.method == "POST" and request.url.path == "/mcp":
         response = _augment_mcp_recall(body, response)
+        response = _augment_tools_list(body, response)
         # remember 는 회상과 달리 응답을 안 고친다 — 바이트 그대로 본 뒤 그림자만 태운다(E3a-2).
         if not isinstance(response, StreamingResponse) and (arguments := _mcp_remember_arguments(body)):
             background_tasks.add_task(
@@ -378,6 +386,32 @@ def _augment_mcp_recall(body: bytes, response: Response) -> Response:
         return response
     return _pass_through(
         response.status_code, json.dumps(augmented, ensure_ascii=False).encode("utf-8"), content_type
+    )
+
+
+def _augment_tools_list(body: bytes, response: Response) -> Response:
+    """POST /mcp 의 tools/list 가 엔진 2xx application/json 이면 gap 도구를 맨 끝에 덧붙인다.
+    엔진 도구는 그대로 두고, 그 밖의 모양(다른 메서드·비 2xx·JSON 아님·tools 목록 없음)은
+    받은 바이트 그대로."""
+    if not 200 <= response.status_code < 300:
+        return response
+    content_type = response.headers.get("content-type")
+    if content_type is None or not content_type.startswith("application/json"):
+        return response
+    try:
+        request_json = json.loads(body)
+        response_json = json.loads(response.body)
+    except (ValueError, UnicodeDecodeError):
+        return response
+    if not isinstance(request_json, dict) or request_json.get("method") != "tools/list":
+        return response
+    result = response_json.get("result") if isinstance(response_json, dict) else None
+    tools = result.get("tools") if isinstance(result, dict) else None
+    if not isinstance(tools, list):
+        return response
+    result["tools"] = [*tools, gap_parse.TOOL]
+    return _pass_through(
+        response.status_code, json.dumps(response_json, ensure_ascii=False).encode("utf-8"), content_type
     )
 
 
@@ -1638,6 +1672,53 @@ def _search_handover(session_id: str, paths: list[str]) -> Either[search_pg.Hand
                 return search_pg.record_handover(conn, session_id, observed_at, paths)
 
 
+def _gap_record(args: gap_parse.GapArgs) -> Either[gap_pg.GapReport, str]:
+    """The seam the tests stub — 연결·쓰기 실패는 Err 값 하나로."""
+    observed_at = datetime.now(tz=UTC).isoformat()
+    match search_pg.connect(os.environ["DOOR_PG_DSN"]):
+        case Err(failure):
+            return Err(failure.detail)
+        case Ok(conn):
+            with contextlib.closing(conn):
+                match gap_pg.record_gap(conn, args, observed_at):
+                    case Err(failure):
+                        return Err(failure.detail)
+                    case Ok(report):
+                        return Ok(report)
+
+
+async def _gap_python(request_id: Any, arguments: dict, transport: str) -> Response:
+    """빈자리 한 건 기록 — HTTP·MCP 가 같은 인자·같은 저장 호출. 거절 400/-32602, 저장 실패 502/-32603."""
+    if not os.environ.get("DOOR_PG_DSN"):
+        if transport == "mcp":
+            return _mcp_error(request_id, -32603, "store not configured")
+        return JSONResponse({"error": "store not configured"}, status_code=503)
+    match gap_parse.parse(arguments):
+        case Err(rejected):
+            return _register_rejection(request_id, transport, rejected.message)
+        case Ok(args):
+            pass
+    match await asyncio.to_thread(_gap_record, args):
+        case Err(detail):
+            message = f"gap failed: {detail}"
+            if transport == "mcp":
+                return _mcp_error(request_id, -32603, message)
+            return JSONResponse({"error": message}, status_code=502)
+        case Ok(report):
+            pass
+    if transport == "mcp":
+        return _mcp_result(report.payload(), request_id)
+    return JSONResponse(report.payload())
+
+
+async def _gap(request: Request) -> Response:
+    """POST /gap — 본문은 JSON 객체여야 한다."""
+    data = _http_json_object(await request.body())
+    if data is None:
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+    return await _gap_python(None, data, "http")
+
+
 def _search_log_query(query: str, hits: list[dict], started: float) -> None:
     """query_log 한 줄 — label-recall 이 표본으로 읽는 표 (store.rs:2349, 열 그대로).
     실패는 stderr 한 줄로만 남긴다 — Rust spawn_query_log 의 eprintln 과 같은 자리. connect 와
@@ -1726,6 +1807,7 @@ _DOOR_HANDLERS = {
     "GET /projects": _projects,
     "GET /repairs/split-subjects": _repairs_split_subjects_get,
     "GET /repairs/split-subjects/samples": _repairs_split_subjects_samples,
+    "POST /gap": _gap,
     "POST /repairs/split-subjects": _repairs_split_subjects_post,
     "POST /run/morning-card": _run_morning_card,
     "POST /run/repair-judge": _run_repair_judge,
