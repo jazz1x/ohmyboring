@@ -34,6 +34,10 @@ DAILY_JUDGE_CAP = 20
 #: 문 한 번에 주는 묶음 상한 — 문의 _MAX_REPAIR_LIMIT(50) 그 자체.
 DOOR_GROUP_LIMIT = 50
 
+#: No facts under the subject means nothing to judge — the model guessed same_name from the
+#: spelling alone (2026-10-04 control), so this answer is decided without it.
+NO_FACTS_REASON = "이 주제로 남은 사실이 없어 가를 근거가 없다"
+
 #: 판정을 읽는 창 — 한 달. 카드도 이 값으로 읽는다.
 JUDGED_WINDOW_HOURS = 24 * 30
 
@@ -223,8 +227,12 @@ def run(
     for group in pick(groups, judged, cap):
         subject = str(group["subject"])
         variants = sorted(str(v) for v in group["variants"])
-        prompt = build_prompt(group, reviews.get(subject, []), samples(variants))
-        answer = parse(invoke(prompt), subject, variants)
+        facts = samples(variants)
+        answer = (
+            parse(invoke(build_prompt(group, reviews.get(subject, []), facts)), subject, variants)
+            if facts
+            else RepairJudgment(subject=subject, variants=variants, verdict="unsure", reason=NO_FACTS_REASON)
+        )
         if isinstance(answer, RepairJudgeFailed):
             record("repair_judge_failed", answer.model_dump())
             failed_n += 1

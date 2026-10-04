@@ -37,8 +37,8 @@ import card_types as cc  # noqa: E402
 GROUP = {"subject": "next-step", "variants": ["next step", "next-step"], "rows": 268, "notes": 34}
 
 
-def NO_SAMPLES(variants: list[str]) -> list[dict]:
-    return []
+def ONE_FACT(variants: list[str]) -> list[dict]:
+    return [{"predicate": "usage", "rows": 1, "value": "한 줄"}]
 
 
 def _group(subject: str, variants: list[str], rows: int = 10, notes: int = 1) -> dict:
@@ -234,7 +234,7 @@ class RunTests(unittest.TestCase):
                 {"verdict": "same_name", "reason": "같은 이름의 갈라진 철자"}, ensure_ascii=False
             )
 
-        judged_n, failed_n = crj.run(groups, {}, {}, invoke, lambda e, f: records.append((e, f)), NO_SAMPLES)
+        judged_n, failed_n = crj.run(groups, {}, {}, invoke, lambda e, f: records.append((e, f)), ONE_FACT)
         # 상한 20 — 25개 중 20개만 불렀다
         self.assertEqual(calls["n"], 20)
         self.assertEqual(judged_n, 19)
@@ -259,7 +259,7 @@ class RunTests(unittest.TestCase):
             prompts.append(prompt)
             return json.dumps({"verdict": "unsure", "reason": "모르겠습니다"}, ensure_ascii=False)
 
-        crj.run([GROUP], {}, reviews, invoke, lambda e, f: None, NO_SAMPLES)
+        crj.run([GROUP], {}, reviews, invoke, lambda e, f: None, ONE_FACT)
         self.assertEqual(len(prompts), 1)
         self.assertIn("- 거절 (카드 1.0, 줄 2)", prompts[0])
 
@@ -275,7 +275,7 @@ class RunTests(unittest.TestCase):
             calls["n"] += 1
             return '{"verdict": "same_name", "reason": "x"}'
 
-        crj.run([GROUP], judged, {}, invoke, lambda e, f: None, NO_SAMPLES)
+        crj.run([GROUP], judged, {}, invoke, lambda e, f: None, ONE_FACT)
         self.assertEqual(calls["n"], 0)
 
     def test_each_judged_group_brings_its_own_facts_into_its_prompt(self):
@@ -296,6 +296,30 @@ class RunTests(unittest.TestCase):
         self.assertIn("- usage · 22 · spark connect 의 쓰임", prompts[0])
         self.assertIn("- usage · 22 · next step 의 쓰임", prompts[1])
 
+    def test_a_group_with_no_facts_is_unsure_without_asking_the_model(self):
+        records: list[tuple[str, dict]] = []
+        calls = {"n": 0}
+
+        def invoke(prompt: str) -> str:
+            calls["n"] += 1
+            return '{"verdict": "same_name", "reason": "철자로 추측"}'
+
+        with_facts = _group("spark-connect", ["spark connect", "spark-connect"])
+        crj.run(
+            [GROUP, with_facts],
+            {},
+            {},
+            invoke,
+            lambda e, f: records.append((e, f)),
+            lambda v: (
+                [] if v == ["next step", "next-step"] else [{"predicate": "usage", "rows": 1, "value": "x"}]
+            ),
+        )
+        self.assertEqual(calls["n"], 1)
+        verdicts = {f["subject"]: (f["verdict"], f["reason"]) for _, f in records}
+        self.assertEqual(verdicts["next-step"], ("unsure", crj.NO_FACTS_REASON))
+        self.assertEqual(verdicts["spark-connect"][0], "same_name")
+
     def test_an_unreachable_model_stops_the_run_instead_of_stamping_failures(self):
         records: list[tuple[str, dict]] = []
 
@@ -303,7 +327,7 @@ class RunTests(unittest.TestCase):
             raise ConnectionError("ollama unreachable")
 
         with self.assertRaises(ConnectionError):
-            crj.run([GROUP], {}, {}, invoke, lambda e, f: records.append((e, f)), NO_SAMPLES)
+            crj.run([GROUP], {}, {}, invoke, lambda e, f: records.append((e, f)), ONE_FACT)
         self.assertEqual(records, [])
 
 
@@ -317,7 +341,7 @@ class MainExitTests(unittest.TestCase):
             mock.patch.object(crj, "_live_events", return_value=[]),
             mock.patch.object(crj, "make_judge", return_value=lambda prompt: next(replies)),
             mock.patch.object(crj, "_live_record"),
-            mock.patch.object(crj, "_live_samples", return_value=[]),
+            mock.patch.object(crj, "_live_samples", side_effect=ONE_FACT),
         ):
             return crj.main()
 
