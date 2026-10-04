@@ -31,6 +31,7 @@ import card  # noqa: E402
 import card_live  # noqa: E402
 import card_types as cc  # noqa: E402
 import card_verdicts  # noqa: E402
+import card_view  # noqa: E402
 
 OWNER = "U_OWNER"
 CARD_TS = "1.0"
@@ -788,6 +789,25 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(row.judgment.verdict, "same_name")
         self.assertEqual(row.judgment.reason, "같은 서비스를 가리키는 갈라진 철자")
         self.assertEqual(row.judgment.variants, ["foodspring front", "foodspring-front"])
+
+    def test_the_posted_card_stays_inside_the_size_budget(self):
+        long = "가" * 300
+        reviews = [
+            cc.ProposedVerdict(
+                session_id=f"s{i}",
+                note=f"/vault/wiki/wiki-{700 + i:04d}.md",
+                kind="used",
+                at=f"t-{i}",
+                reason=long,
+                note_title=long,
+                work=long,
+            )
+            for i in range(7)
+        ]
+        built = card_view.build_blocks([], reviews=reviews, lang="ko")
+        self.assertGreater(card_view.card_chars(built), card_view.CARD_CHARS_BUDGET)
+        self._build(Stubs(proposed_items=reviews)).invoke({}, {"configurable": {"thread_id": "test-budget"}})
+        self.assertLessEqual(card_view.card_chars(self.sends[-1]), card_view.CARD_CHARS_BUDGET)
 
     def test_read_repairs_populates_state_once_and_a_dead_door_refuses_the_card(self):
         # AC4: the door's GET is called exactly once, its groups land in state, and a

@@ -9,6 +9,6 @@ ARG HERMES_GID=20
 
 COPY pyproject.toml /tmp/ohmyboring/pyproject.toml
 RUN cd /opt/hermes && uv pip install --python /opt/hermes/.venv/bin/python3 -r /tmp/ohmyboring/pyproject.toml
-RUN usermod -u "${HERMES_UID}" -g "${HERMES_GID}" hermes
+RUN groupmod -o -g "${HERMES_GID}" hermes && usermod -u "${HERMES_UID}" -g "${HERMES_GID}" hermes
 
 USER hermes

@@ -196,7 +196,7 @@ printf '#!/bin/sh\n[ "${1:-}" = print ] && echo "program = $BORING_HOME"\nexit 0
 printf '#!/bin/sh\necho Darwin\n' > "$tmp/bin/uname"
 chmod +x "$tmp/bin/launchctl" "$tmp/bin/uname"
 rc=0
-out=$(env BORING_HOME="$home" HOME="$home" PATH="$tmp/py/bin:$tmp/bin:/usr/bin:/bin" \
+out=$(env BORING_HOME="$home" HOME="$home" PATH="$tmp/bin:$tmp/py/bin:/usr/bin:/bin" \
     sh "$SCRIPT_UNDER_TEST" install 2>&1) || rc=$?
 plist="$home/Library/LaunchAgents/com.ohmyboring.maintenance.plist"
 if [ "$rc" = "0" ] && grep -A1 '<key>PATH</key>' "$plist" | grep -qF "<string>$tmp/py/bin:"; then

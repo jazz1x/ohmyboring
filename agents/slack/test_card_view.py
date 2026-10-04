@@ -761,6 +761,15 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertNotIn("어제", headline_no_merge)
 
 
+class FailedStatusTests(unittest.TestCase):
+    def test_a_long_failure_reason_is_cut_so_a_pressed_card_stays_in_budget(self):
+        strings = card_i18n.STRINGS["ko"]
+        text = cv.status_text(cc.Failed(reason="가" * 400), strings)
+        self.assertEqual(
+            text, strings["progress_failed"].format(reason="가" * (cv.TEXT_MAX_STEPS[-1] - 1) + "…")
+        )
+
+
 class CardBudgetTests(unittest.TestCase):
     """2026-10-04 08:00: a 35-block, 9,674-char card was refused (msg_blocks_too_long). Over
     budget, the prose shortens; every row and button stays."""
@@ -804,6 +813,29 @@ class CardBudgetTests(unittest.TestCase):
         overflow = card_i18n.STRINGS["ko"]["overflow_line"].format(n=12 - shown)
         self.assertLess(shown, 12)
         self.assertIn(overflow, _blocks_text(fitted))
+
+    def test_an_advice_heavy_card_overflows_its_advice_rows_too(self):
+        long = "조언 " * 120
+        proposals = [
+            cc.Proposal(
+                subject=f"주어{i}",
+                note=f"/vault/wiki/wiki-{900 + i:04d}.md",
+                register="stalled",
+                bottleneck=long,
+                advice=long,
+                evidence=[
+                    cc.Evidence(
+                        note=f"/vault/wiki/wiki-{900 + i:04d}.md", quote="근거 인용문 열두자 이상", line=1
+                    )
+                ],
+            )
+            for i in range(12)
+        ]
+        fitted = cv.fit_blocks(proposals, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted), cv.CARD_CHARS_BUDGET)
+        shown = self._actions(fitted)
+        self.assertLess(shown, 12)
+        self.assertIn(card_i18n.STRINGS["ko"]["overflow_line"].format(n=12 - shown), _blocks_text(fitted))
 
     def test_a_card_under_budget_is_left_as_built(self):
         reviews = self._reviews(1)
