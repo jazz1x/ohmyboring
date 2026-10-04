@@ -161,7 +161,7 @@ REGISTER_MCP_PAYLOAD = {
             "value": "a value with enough characters",
             "kind": "risk",
             "confidence": "likely",
-            "valid_from": "2026-09-30T01:23:45.123456Z",
+            "valid_from": "2026-09-30T01:23:45.123456+00:00",
             "project": "omb",
         }
     ],
