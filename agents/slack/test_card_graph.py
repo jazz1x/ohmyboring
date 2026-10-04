@@ -1308,6 +1308,7 @@ class DryRunWiringTests(unittest.TestCase):
             ),
             mock.patch.object(card_live, "_live_merged_yesterday", side_effect=lambda: None),
             mock.patch.object(card_live, "_live_repair_judgments", side_effect=lambda: {}),
+            mock.patch.object(card_live, "_held_repair_subjects", side_effect=set),
             mock.patch.object(card, "make_propose", return_value=stubs.propose),
             contextlib.redirect_stdout(buf),
         ):
