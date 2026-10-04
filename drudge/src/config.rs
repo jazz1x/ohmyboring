@@ -765,8 +765,8 @@ mod tests {
             .expect("missing file should return defaults");
         assert_eq!(cfg.schema_version, 2);
         assert_eq!(cfg.note_lang, NoteLang::Auto);
-        assert!(cfg.repos.is_empty());
-        assert!(cfg.agents.is_empty());
+        assert_eq!(cfg.repos, Vec::<RepoRule>::new());
+        assert_eq!(cfg.agents, Vec::<AgentSource>::new());
     }
 
     #[test]

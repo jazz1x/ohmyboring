@@ -1320,7 +1320,7 @@ mod tests {
         ] {
             let out = super::RegisterOut::empty(message);
             assert_eq!(out.answer, message);
-            assert!(out.sources.is_empty());
+            assert_eq!(out.sources, Vec::<String>::new());
             assert!(out.items.is_empty());
             assert!(!out.limit_applied);
             assert_eq!(out.total_matching, 0);

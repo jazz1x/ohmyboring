@@ -224,7 +224,7 @@ fn recheck_anchor(sources: &[CodeIndexSource], row: &AnchorCheckRow) -> Recheck 
             let Some(stored_symbol) = row.anchor_symbol.as_deref() else {
                 return Recheck::NoEvidence;
             };
-            let covering = resolve_covering(&symbols, span).map(&probe);
+            let covering = resolve_covering(&symbols, span).map(probe);
             let same_name: Vec<SymbolProbe> = symbols
                 .iter()
                 .filter(|symbol| symbol.qualified_name == stored_symbol)
