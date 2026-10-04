@@ -67,7 +67,7 @@ services:
       BORING_HTTP_ADDR: 0.0.0.0:7700
       PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring  # host = the boring-postgres service (compose DNS)
       BORING_OWNER_TOKEN: ${BORING_OWNER_TOKEN:-}  # unset = no caller can write as the owner
-      BORING_CONFIG: /app/boring.json     # policy: note language, repo rules, source dirs
+      BORING_CONFIG: /config/boring.json  # policy: note language, repo rules, source dirs
       BORING_VAULT_DIR: /vault                # remember target + sync corpus (/vault/wiki)
       BORING_VECTOR: ${BORING_VECTOR:-off} # off = wiki-first direct read. on = vector+graph (boring-postgres alongside via --profile vector)
       BORING_SYNC_HOURS: "4"
@@ -76,7 +76,10 @@ services:
     volumes:
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: drudge's source_dirs only reads ~/.claude/projects)
       - ./vault:/vault                    # self-augmentation vault (agent → remember → wiki)
-      - ./boring.json:/app/boring.json:rw # policy config (language, repo rules, source dirs) — rw so the agent's classify_repo can persist rules
+      # boring.json by folder, as for the door and hermes: a file bind pins the inode, so an edit
+      # that replaces the file left the engine reading a deleted copy (2026-10-04). rw so the
+      # agent's classify_repo can persist rules.
+      - ${BORING_CONFIG_DIR:-./config}:/config:rw
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
