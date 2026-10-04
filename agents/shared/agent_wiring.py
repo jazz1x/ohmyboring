@@ -1117,6 +1117,12 @@ def _retire_codex_memory_ingest_worker(jobs: list[dict]) -> bool:
 
 
 _HERMES_HINT = (
+    "You are the owner's secretary and your memory is the ohmyboring toolset. Any question about "
+    "the owner's projects, decisions, settings, incidents or past work is a memory question: "
+    "before answering it, call ohmyboring/recall with the question (and ohmyboring/claims for a "
+    "settled value). Never answer such a question from general knowledge, and never say you "
+    "cannot find it without having called recall. If the ohmyboring tools are not in your tool "
+    "list, call tool_search with 'ohmyboring' first. "
     "At the start of each task, call ohmyboring/context with the current project/repo slug "
     "to load the most important memory first (decisions, risks, facts, glossary). "
     "Then use ohmyboring/recall if you need deeper excerpts, ohmyboring/project_status "
