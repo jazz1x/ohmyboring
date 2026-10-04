@@ -688,6 +688,7 @@ def build_blocks(
     lang: str,
     note_links: tuple[NoteLink, ...] = (),
     text_max: int = REVIEW_TEXT_MAX,
+    block_limit: int = BLOCK_LIMIT,
 ) -> list[dict]:
     """Block Kit for the card: the head line (past approvals cross-checked against today's
     registers — present only when there were any), then one five-block row per proposal,
@@ -767,7 +768,7 @@ def build_blocks(
             addition = row
             remaining_after = total - shown - 1
             reserve = (1 if remaining_after > 0 else 0) + review_tail
-            if len(blocks) + len(addition) + reserve > BLOCK_LIMIT:
+            if len(blocks) + len(addition) + reserve > block_limit:
                 overflowed = True
                 break
             blocks.extend(addition)
@@ -798,7 +799,7 @@ def build_blocks(
             )
             remaining_after = len(reviews) - ridx - 1
             reserve = 1 if remaining_after > 0 else 0
-            if len(blocks) + len(addition) + reserve > BLOCK_LIMIT:
+            if len(blocks) + len(addition) + reserve > block_limit:
                 r_overflowed = True
                 break
             blocks.extend(addition)
@@ -823,12 +824,17 @@ def card_chars(blocks: list[dict]) -> int:
 
 
 def fit_blocks(*args, **kwargs) -> list[dict]:
-    """build_blocks at the longest free-text cut that keeps the card under CARD_CHARS_BUDGET.
-    A card that is still over at the shortest cut raises — a refused post must say why."""
+    """build_blocks under CARD_CHARS_BUDGET: first shorten the prose, then lower the block cap
+    so rows past it fall into the same overflow line the 50-block cap uses (counted, not
+    dropped). A card that still does not fit raises — a refused post must say why."""
     for text_max in TEXT_MAX_STEPS:
         blocks = build_blocks(*args, text_max=text_max, **kwargs)
         if card_chars(blocks) <= CARD_CHARS_BUDGET:
             return blocks
+    for block_limit in range(BLOCK_LIMIT - 1, 0, -1):
+        blocks = build_blocks(*args, text_max=TEXT_MAX_STEPS[-1], block_limit=block_limit, **kwargs)
+        if card_chars(blocks) <= CARD_CHARS_BUDGET:
+            return blocks
     raise ValueError(
-        f"card is {card_chars(blocks)} chars at text_max={TEXT_MAX_STEPS[-1]}, over {CARD_CHARS_BUDGET}"
+        f"card is {card_chars(blocks)} chars at the smallest cut and cap, over {CARD_CHARS_BUDGET}"
     )

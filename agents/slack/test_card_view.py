@@ -792,6 +792,19 @@ class CardBudgetTests(unittest.TestCase):
         self.assertEqual(self._actions(fitted), self._actions(full))
         self.assertEqual(self._actions(fitted), 7)
 
+    def test_rows_past_the_shortest_cut_are_counted_in_the_overflow_line(self):
+        reviews = self._reviews(12)
+        self.assertGreater(
+            cv.card_chars(cv.build_blocks([], reviews=reviews, lang="ko", text_max=cv.TEXT_MAX_STEPS[-1])),
+            cv.CARD_CHARS_BUDGET,
+        )
+        fitted = cv.fit_blocks([], reviews=reviews, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted), cv.CARD_CHARS_BUDGET)
+        shown = self._actions(fitted)
+        overflow = card_i18n.STRINGS["ko"]["overflow_line"].format(n=12 - shown)
+        self.assertLess(shown, 12)
+        self.assertIn(overflow, _blocks_text(fitted))
+
     def test_a_card_under_budget_is_left_as_built(self):
         reviews = self._reviews(1)
         self.assertEqual(
