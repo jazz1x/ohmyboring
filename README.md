@@ -447,7 +447,7 @@ Memory can be reached through HTTP endpoints or the MCP server (`http://localhos
 | `POST /next_actions` / `next_actions` | Next-action register: explicit next steps + active blockers | required |
 | `POST /stalled` / `stalled` | Stalled register: old next steps and blockers | required |
 | `POST /recurrences` / `recurrences` | Recurrence register: recent risk/blocked claims repeating an older one | required |
-| `POST /status` / `project_status` | 30-day project status (Done/Next/Blocked/Decisions/Risks) | required |
+| `POST /status` / `project_status` | 30 days of a project's notes and nearest current claims — material, not a summary | required |
 | `POST /weekly` / `weekly_brief` | Last 7 days across projects | required |
 | `POST /decisions` / `decisions` | Decision claims for a project | required |
 | `POST /risks` / `risks` | Risk/assumption/blocked claims for a project | required |
@@ -488,7 +488,7 @@ For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~
 
 (VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring http://localhost:7710/mcp`. Compose siblings reach it at `http://boring-door:7710/mcp`.)
 
-Available tools (24): `recall`, `neighbors`, `claims` (memory retrieval) · `code_search`, `code_symbol`, `code_index_status` (separate AST code corpus) · `ask`, `brief`, `weekly_brief`, `project_status` (generative — run the LLM) · `decisions`, `risks`, `next_actions`, `stalled`, `recurrences` (registers — rows, no LLM) · `context`, `corpus_status`, `events`, `config_get` (structured / introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain) · `verdict` (thumbs-up/down on what a session was handed).
+Available tools (24): `recall`, `neighbors`, `claims` (memory retrieval) · `code_search`, `code_symbol`, `code_index_status` (separate AST code corpus) · `ask`, `brief`, `weekly_brief` (generative — run the LLM) · `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `project_status` (registers — rows and material, no LLM) · `context`, `corpus_status`, `events`, `config_get` (structured / introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain) · `verdict` (thumbs-up/down on what a session was handed).
 
 In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency/vector ordering, the graph, or the local event DB return JSON-RPC `-32603` until you set `BORING_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `events`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `verdict`. `recall` and `ask` read `vault/wiki` directly; `context` is callable but returns an empty claim card without the store; `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `code_search`, `code_symbol`, and `code_index_status` do not require vector mode. The three code tools require an enabled `code_index` source and a prior `code-sync`.
 
@@ -501,7 +501,8 @@ In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency
 - `claims` *(requires `BORING_VECTOR=on`)* — top-k current (non-superseded) `{subject, predicate, value}` decisions near a query.
 - `corpus_status` *(requires `BORING_VECTOR=on`)* — KB health snapshot (file/chunk counts, by origin/kind/project, contamination, graph/semantic nodes+edges).
 - `events` *(requires `BORING_VECTOR=on`)* — recent workflow/adapter events stored in the DB as OpenTelemetry-shaped records. Filter by component, event, status, run_id, workflow, or since_hours.
-- `ask` / `brief` / `weekly_brief` / `project_status` — LLM-running tools. `ask` answers a question with cited sources and works in wiki-first mode; the three briefings require `BORING_VECTOR=on`.
+- `ask` / `brief` / `weekly_brief` — LLM-running tools. `ask` answers a question with cited sources and works in wiki-first mode; the two briefings require `BORING_VECTOR=on`.
+- `project_status` *(requires `BORING_VECTOR=on`)* — a project's last 30 days of notes plus the current claims nearest to it, laid out as-is. It is material, not a summary: the caller summarizes. Set `DOOR_REGISTER_READER=engine` to get the engine's LLM summary back.
 - `decisions` / `risks` / `next_actions` / `stalled` / `recurrences` — registers. They return the claim rows themselves, with no LLM in the path: same question, same answer, measured at 0.02s against 119.6s when they still synthesised prose. They require `BORING_VECTOR=on`. When the result is cut, the response says so (`limit_applied`).
 - `forget` — closed during the migration: every call is refused and nothing is deleted. Correct a note with `remember` + `supersedes` instead.
   Sync's prune and `scripts/dedup-wiki.py --apply` are stopped too.

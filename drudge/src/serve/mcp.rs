@@ -358,10 +358,11 @@ fn mcp_tools_list() -> Value {
         },
         {
             "name": "project_status",
-            "description": "Status summary for a single project over the last 30 days: Done/Next/Blocked bullets grounded in notes and current claims. \
+            "description": "Material for a single project over the last 30 days: its recent notes and the current claims nearest to it. \
+                            This is raw material, not a summary — summarize it yourself before passing it on. \
                             CALL THIS when picking up a project that has been idle, or when the owner asks where a specific \
                             project stands. Thirty days is deliberately longer than a week — it catches work that paused and resumed. \
-                            Generative (runs the LLM), so it is slow. Requires the vector backend.",
+                            Requires the vector backend.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
