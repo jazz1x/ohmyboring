@@ -112,6 +112,10 @@ TOOLS_LIST_BODY = (
     b'{"name":"gamma","inputSchema":{"type":"object"}}]}}'
 )
 
+#: 문이 tools/list 에 gap 을 덧붙인 뒤의 기대 — 엔진 도구는 앞에 그대로, gap 은 맨 끝.
+TOOLS_LIST_WITH_GAP = json.loads(TOOLS_LIST_BODY)
+TOOLS_LIST_WITH_GAP["result"]["tools"].append(door.gap_parse.TOOL)
+
 #: 엔진 recall 응답의 실측 모양(content-type application/json) — 문이 번호 블록을 앞에
 #: 붙이는 대상. "boom" 이 들어간 query 면 isError 답을 준다(통제군).
 RECALL_BODY = b'{"id":2,"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"- [wiki-2229.md] ..."}],"isError":false}}'
@@ -430,10 +434,24 @@ class DoorTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(StubHandler.seen_bodies[-1], payload)
         self.assertEqual(StubHandler.seen_content_types[-1], "application/json")
-        self.assertEqual(body, TOOLS_LIST_BODY)
+        self.assertEqual(json.loads(body), TOOLS_LIST_WITH_GAP)
         self.assertEqual(content_type, STUB_CONTENT_TYPE)
         names = [t["name"] for t in json.loads(body)["result"]["tools"]]
-        self.assertEqual(names, ["alpha", "beta", "gamma"])
+        self.assertEqual(
+            names, ["alpha", "beta", "gamma", "gap"], "엔진 도구는 순서 그대로 앞에, gap 은 끝에"
+        )
+        engine_tools = json.loads(TOOLS_LIST_BODY)["result"]["tools"]
+        self.assertEqual(json.loads(body)["result"]["tools"][:3], engine_tools)
+
+    def test_tools_list_non_2xx_and_non_list_answers_pass_through_untouched(self):
+        payload = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}, "respond_as": "text/plain"}
+        ).encode()
+        status, body, content_type = _req(
+            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+        )
+        self.assertEqual((status, content_type), (200, "text/plain"))
+        self.assertEqual(body, TOOLS_LIST_BODY, "JSON 아닌 답은 gap 을 안 덧붙이고 바이트 그대로")
 
     def test_engine_down_returns_502_json(self):
         dead_port = _free_port()
@@ -1270,7 +1288,7 @@ rules:
             self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
         )
         self.assertEqual(status, 200)
-        self.assertEqual(body, TOOLS_LIST_BODY)
+        self.assertEqual(json.loads(body), TOOLS_LIST_WITH_GAP)
         time.sleep(0.3)
         self.assertEqual(self._shadow_events(), [], "회상·다른 도구엔 그림자가 따라붙지 않는다")
 
@@ -3186,6 +3204,101 @@ class RegisterReaderSwitchTests(_RegisterTestHarness, unittest.TestCase):
         )
         self.assertEqual(status, 503)
         self.assertEqual(json.loads(body), {"error": "store not configured"})
+
+
+class GapRouteTests(unittest.TestCase):
+    """빈자리 문 — HTTP POST /gap 와 MCP tools/call gap 은 같은 인자에 같은 저장 호출을 낸다.
+    저장은 문 경계(_gap_record)를 스텁해 받은 인자로 본다. 엔진 스텁은 안 쓴다 — gap 은 늘 문 안."""
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+
+        self._saved_dsn = os.environ.get("DOOR_PG_DSN")
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:9/none"
+        self.client = TestClient(door.app)
+        self.recorded: list = []
+        self.outcome = lambda args: door.Ok(door.gap_pg.GapReport("gap:abc", args.kind.value, 1, 1))
+
+        def record(args):
+            self.recorded.append(args)
+            return self.outcome(args)
+
+        patcher = mock.patch.object(door, "_gap_record", side_effect=record)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        if self._saved_dsn is None:
+            os.environ.pop("DOOR_PG_DSN", None)
+        else:
+            os.environ["DOOR_PG_DSN"] = self._saved_dsn
+
+    def http(self, arguments):
+        return self.client.post("/gap", json=arguments)
+
+    def mcp(self, arguments):
+        return self.client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "gap", "arguments": arguments},
+            },
+        )
+
+    ARGS = {"session_id": "s-1", "query": "how do we deploy", "kind": "stale", "handed": ["/a.md"]}
+
+    def test_http_and_mcp_make_the_same_store_call_and_answer(self):
+        http = self.http(self.ARGS)
+        mcp = self.mcp(self.ARGS)
+        self.assertEqual(http.status_code, 200)
+        self.assertEqual(len(self.recorded), 2)
+        self.assertEqual(self.recorded[0], self.recorded[1], "같은 인자 → 같은 저장 호출")
+        answer = {"gap": "gap:abc", "kind": "stale", "handed": 1, "unknown": 1}
+        self.assertEqual(http.json(), answer)
+        wire = mcp.json()
+        self.assertEqual(wire["id"], 7)
+        self.assertEqual(wire["result"]["structuredContent"], answer)
+        self.assertFalse(wire["result"]["isError"])
+
+    def test_mcp_gap_never_reaches_the_engine(self):
+        with mock.patch.object(door, "_fetch") as fetch:
+            self.mcp(self.ARGS)
+        fetch.assert_not_called()
+
+    def test_rejections_are_400_and_minus_32602_and_never_store(self):
+        cases = [
+            ({**self.ARGS, "kind": "gone"}, "kind must be one of missing, stale, broken"),
+            ({**self.ARGS, "handed": []}, "stale gap needs handed notes"),
+            ({**self.ARGS, "session_id": " "}, "session_id is required"),
+            ({**self.ARGS, "query": ""}, "query is required"),
+        ]
+        for arguments, message in cases:
+            http = self.http(arguments)
+            self.assertEqual((http.status_code, http.json()), (400, {"error": message}))
+            error = self.mcp(arguments).json()["error"]
+            self.assertEqual((error["code"], error["message"]), (-32602, message))
+        self.assertEqual(self.recorded, [])
+
+    def test_non_object_http_body_is_400(self):
+        response = self.client.post("/gap", content=b"[1]", headers={"content-type": "application/json"})
+        self.assertEqual(
+            (response.status_code, response.json()), (400, {"error": "body must be a JSON object"})
+        )
+
+    def test_store_failure_is_visible_502_and_minus_32603(self):
+        self.outcome = lambda args: door.Err("disk full")
+        http = self.http(self.ARGS)
+        self.assertEqual((http.status_code, http.json()), (502, {"error": "gap failed: disk full"}))
+        error = self.mcp(self.ARGS).json()["error"]
+        self.assertEqual((error["code"], error["message"]), (-32603, "gap failed: disk full"))
+
+    def test_without_dsn_it_says_so(self):
+        os.environ.pop("DOOR_PG_DSN", None)
+        self.assertEqual(self.http(self.ARGS).status_code, 503)
+        self.assertEqual(self.mcp(self.ARGS).json()["error"]["code"], -32603)
+        self.assertEqual(self.recorded, [])
 
 
 if __name__ == "__main__":

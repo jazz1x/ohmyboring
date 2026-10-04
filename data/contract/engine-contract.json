@@ -7,6 +7,7 @@
     "GET /repairs/split-subjects",
     "GET /repairs/split-subjects/samples",
     "GET /rules",
+    "POST /gap",
     "POST /repairs/split-subjects",
     "POST /run/morning-card",
     "POST /run/repair-judge",

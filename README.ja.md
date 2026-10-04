@@ -460,8 +460,9 @@ curl -s -X POST http://localhost:7710/mcp \
 | `POST /ask` / `ask` | メモリから直接答える質問 | 不要 |
 | `POST /search` / `recall` | 生のメモリ抜粋。各 hit は、配信経路に比較可能な数値がある場合に `dist` と `dist_kind`(`vector_cosine` または `text_rank`)を伴います。wiki-recall フォールバックでは、比較できない第三の尺度のスコアを報告する代わりに両方を省きます | 不要。セマンティック検索は有効時にベクトルを使用 |
 | `/remember` / `remember` | 整えたノートを保存 | — |
+| `POST /gap` / `gap` | 欠落を記録 — `session_id`、`query`、`kind`(`missing`・`stale`・`broken`)、`handed`(ノートの source_path、`stale` は必須)。ドアは記録のみで判断しません | 不要 |
 
-ドア（`127.0.0.1:7710`）はエンジンのルート表を中継し（起動時に契約スナップショットから読んでエンジンに従う）、独自のルート `GET /approved`・`GET /claim-source`・`GET /claim-sources`・`GET /projects?active_days=`・`GET`/`POST /repairs/split-subjects` には自ら答える。未登録のパスは 404 — 万能プロキシではない。
+ドア（`127.0.0.1:7710`）はエンジンのルート表を中継し（起動時に契約スナップショットから読んでエンジンに従う）、独自のルート `GET /approved`・`GET /claim-source`・`GET /claim-sources`・`GET /projects?active_days=`・`GET`/`POST /repairs/split-subjects`・`POST /gap` には自ら答える。未登録のパスは 404 — 万能プロキシではない。
 
 ### トークン予算
 

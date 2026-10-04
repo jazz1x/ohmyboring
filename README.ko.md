@@ -452,8 +452,9 @@ curl -s -X POST http://localhost:7710/mcp \
 | `POST /ask` / `ask` | 메모리에서 바로 답하는 직접 질문 | 불필요 |
 | `POST /search` / `recall` | 가공하지 않은 메모리 발췌. 각 hit은 서빙 경로에 비교 가능한 수치가 있을 때 `dist`와 `dist_kind`(`vector_cosine` 또는 `text_rank`)를 함께 냅니다. wiki-recall 폴백에서는 세 번째 비교 불가능한 척도의 점수를 보고하는 대신 둘 다 생략합니다 | 불필요. 시맨틱 검색은 활성화 시 벡터 사용 |
 | `/remember` / `remember` | 정제된 노트 저장 | — |
+| `POST /gap` / `gap` | 빈자리 기록 — `session_id`, `query`, `kind`(`missing`·`stale`·`broken`), `handed`(노트 source_path, `stale` 은 필수). 문은 기록만 하고 판단하지 않습니다 | 불필요 |
 
-문(`127.0.0.1:7710`)은 엔진의 경로 표를 대신 전달하고(기동 때 계약 스냅샷에서 읽어 엔진을 따라간다), 자기 경로 `GET /approved`·`GET /claim-source`·`GET /claim-sources`·`GET /projects?active_days=`·`GET`/`POST /repairs/split-subjects` 는 스스로 답한다. 등록되지 않은 경로는 404 — 만능 프록시가 아니다.
+문(`127.0.0.1:7710`)은 엔진의 경로 표를 대신 전달하고(기동 때 계약 스냅샷에서 읽어 엔진을 따라간다), 자기 경로 `GET /approved`·`GET /claim-source`·`GET /claim-sources`·`GET /projects?active_days=`·`GET`/`POST /repairs/split-subjects`·`POST /gap` 는 스스로 답한다. 등록되지 않은 경로는 404 — 만능 프록시가 아니다.
 
 ### 토큰 예산
 

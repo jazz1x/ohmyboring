@@ -99,6 +99,7 @@ python3 src/ohmyboring/remember/test_dedup.py
 python3 src/ohmyboring/remember/test_index.py
 python3 src/ohmyboring/remember/test_writer.py
 python3 src/ohmyboring/registers/test_shadow.py
+python3 src/ohmyboring/gap/test_gap.py
 python3 src/ohmyboring/test_result.py
 python3 agents/door/test_door.py
 python3 agents/door/test_door_search.py

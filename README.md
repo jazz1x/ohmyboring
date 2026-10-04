@@ -454,8 +454,9 @@ Memory can be reached through HTTP endpoints or the MCP server (`http://localhos
 | `POST /ask` / `ask` | Direct question answered from memory | not required |
 | `POST /search` / `recall` | Raw memory excerpts. Each hit carries `dist` and `dist_kind` (`vector_cosine` or `text_rank`) when the serving path has a comparable number; both are absent on the wiki-recall fallback rather than reporting a score from a third, incomparable scale | not required; semantic search uses vector when enabled |
 | `/remember` / `remember` | Store a curated note | — |
+| `POST /gap` / `gap` | Record a gap — `session_id`, `query`, `kind` (`missing`·`stale`·`broken`), `handed` (note source_paths; required for `stale`). The door only records, never judges | not required |
 
-The door at `127.0.0.1:7710` relays the engine's route table (read at startup from the contract snapshot, so it follows the engine) and answers routes of its own: `GET /approved`, `GET /claim-source`, `GET /claim-sources`, `GET /projects?active_days=`, and `GET`/`POST /repairs/split-subjects`. Unregistered paths get a 404 — a door, not a catch-all proxy.
+The door at `127.0.0.1:7710` relays the engine's route table (read at startup from the contract snapshot, so it follows the engine) and answers routes of its own: `GET /approved`, `GET /claim-source`, `GET /claim-sources`, `GET /projects?active_days=`, `GET`/`POST /repairs/split-subjects`, and `POST /gap`. Unregistered paths get a 404 — a door, not a catch-all proxy.
 
 ### Token budget
 
