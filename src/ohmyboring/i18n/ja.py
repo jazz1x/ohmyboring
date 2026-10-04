@@ -13,7 +13,7 @@ STRINGS: dict[str, str] = {
     "verdict_delegate": "✓ 委任",
     "confirmation_line": "過去の承認 {total} · 完了 {done} · 保留 {pending}",
     "confirmation_unknown": " · 不明 {unknown}",
-    "overflow_line": "他{n}件（50ブロック上限）",
+    "overflow_line": "他{n}件（カード上限）",
     "todo_header": "今日やること",
     "advice_header": "気になった点",
     "repairs_headline": "残りグループ{remaining}",

@@ -13,7 +13,7 @@ STRINGS: dict[str, str] = {
     "verdict_delegate": "✓ Delegated",
     "confirmation_line": "Past approvals {total} · Done {done} · Pending {pending}",
     "confirmation_unknown": " · Unknown {unknown}",
-    "overflow_line": "+{n} more not shown (50-block limit)",
+    "overflow_line": "+{n} more not shown (card limit)",
     "todo_header": "To-do today",
     "advice_header": "Flagged for you",
     "repairs_headline": "Remaining groups {remaining}",

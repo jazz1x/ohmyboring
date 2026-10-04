@@ -13,7 +13,7 @@ STRINGS: dict[str, str] = {
     "verdict_delegate": "✓ 맡김",
     "confirmation_line": "지난 승인 {total} · 했다 {done} · 아직 {pending}",
     "confirmation_unknown": " · 확인불가 {unknown}",
-    "overflow_line": "+{n}건 더 있음 (블록 50개 상한)",
+    "overflow_line": "+{n}건 더 있음 (카드 상한)",
     "todo_header": "오늘 할 일",
     "advice_header": "짚어 둔 것",
     "repairs_headline": "남은 묶음 {remaining}",

@@ -710,7 +710,7 @@ class CardV2ShapeTests(unittest.TestCase):
             for b in blocks
             if b["type"] == "context" and "더 있음" in _blocks_text([b])
         ]
-        self.assertEqual(overflows, ["+5건 더 있음 (블록 50개 상한)"])
+        self.assertEqual(overflows, ["+5건 더 있음 (카드 상한)"])
         # shown advice rows + the overflow count == the lane's of-total: nothing double-
         # counted, nothing lost
         self.assertEqual(len(advice_rows) + 5, len(proposals))
@@ -741,7 +741,7 @@ class CardV2ShapeTests(unittest.TestCase):
         ]
         self.assertEqual(
             overflows_full,
-            ["+1건 더 있음 (블록 50개 상한)", "+2건 더 있음 (블록 50개 상한)"],
+            ["+1건 더 있음 (카드 상한)", "+2건 더 있음 (카드 상한)"],
         )
 
     def test_headline_shows_remaining_groups_and_optional_merged_yesterday(self):
