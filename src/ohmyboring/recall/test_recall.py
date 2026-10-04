@@ -9,7 +9,9 @@ Run: python3 src/ohmyboring/recall/test_recall.py   (no pytest dependency)
 Mutation targets: 제목 가중을 1 로 바꾸면 title_weighted 가 빨개진다; project 가 있을 때
 since_hours 도 거르게 하면 project_overrides 가 빨개진다; 캐시를 항상 다시 읽으면 mtime 캐시
 시험이 빨개진다; wiki 가 있어도 벡터를 부르면 wiki_first 가 빨개진다; order_within_set 을 빼면
-demoted 시험이 빨개진다; 보강 뒤 텍스트로 대조하는 변이는 문 시험(test_door)이 잡는다.
+demoted 시험이 빨개진다; 보강 뒤 텍스트로 대조하는 변이는 문 시험(test_door)이 잡는다;
+동점 비교기가 열쇠 순서를 안 보거나(shadow._tie_only 가 늘 참) 늘 tie 를 내면
+shadow_v1·shadow_tie 시험이 빨개진다.
 """
 
 from __future__ import annotations
@@ -23,14 +25,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-if str(ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src"))
+for _path in (ROOT / "src", ROOT / "agents" / "shared"):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+import vault_note  # noqa: E402 — the one frontmatter splitter, handed in as the port
 
 from ohmyboring.recall import answer, shadow, wiki  # noqa: E402
 from ohmyboring.result import Err, Ok  # noqa: E402
 from ohmyboring.search import rank  # noqa: E402
 
 HOUR_NS = 3600 * 10**9
+_split = vault_note.split_frontmatter
+
+
+def _index(read_text=None) -> wiki.WikiIndex:
+    return wiki.WikiIndex(_split) if read_text is None else wiki.WikiIndex(_split, read_text)
 
 
 def _write(directory: Path, name: str, text: str, mtime_ns: int | None = None) -> Path:
@@ -41,17 +51,13 @@ def _write(directory: Path, name: str, text: str, mtime_ns: int | None = None) -
     return path
 
 
-def _recall(index: wiki.WikiIndex, directory: Path, query: str, *, now_ns=None, k=5, **filters):
+def _recall(index: wiki.WikiIndex, directory: Path, query: str, *, now_ns=None, **filters):
     now = now_ns if now_ns is not None else time.time_ns()
-    return index.recall(directory, wiki.Ask(query, k, **filters), now)
+    return index.recall(directory, wiki.Ask(query, **filters), now)
 
 
-def _ids(result) -> list[str]:
-    match result:
-        case Ok(hits):
-            return [h.id for h in hits]
-        case Err(failure):
-            raise AssertionError(f"recall failed: {failure}")
+def _ids(result: wiki.WikiResult, k: int = 5) -> list[str]:
+    return [h.id for h in result.hits[:k]]
 
 
 # ── wiki.py (wiki_recall.rs) ────────────────────────────────────────────────
@@ -82,11 +88,14 @@ def test_title_weighted_and_zero_is_none():
 
 def test_title_from_frontmatter_then_heading_then_stem():
     # wiki_recall::tests::extract_title_from_frontmatter_then_heading_then_stem
-    assert wiki.extract_title_body("---\nid: wiki-0001\ntitle: 제목A\n---\n본문", "wiki-0001")[0] == "제목A"
-    assert wiki.extract_title_body('---\ntitle: "따옴표"\n---\n본문', "s")[0] == "따옴표"
-    assert wiki.extract_title_body("# 헤딩B\n본문", "wiki-0002")[0] == "헤딩B"
-    assert wiki.extract_title_body("프런트매터 없음", "wiki-0003")[0] == "wiki-0003"
-    empty_title = wiki.extract_title_body("---\ntitle:\ntitle: 둘째\n---\n# 헤딩", "s")[0]
+    def title(content: str, stem: str) -> str:
+        return wiki.extract_title_body(content, stem, _split)[0]
+
+    assert title("---\nid: wiki-0001\ntitle: 제목A\n---\n본문", "wiki-0001") == "제목A"
+    assert title('---\ntitle: "따옴표"\n---\n본문', "s") == "따옴표"
+    assert title("# 헤딩B\n본문", "wiki-0002") == "헤딩B"
+    assert title("프런트매터 없음", "wiki-0003") == "wiki-0003"
+    empty_title = title("---\ntitle:\ntitle: 둘째\n---\n# 헤딩", "s")
     assert empty_title == "헤딩", "빈 title 은 첫 title 줄에서 멈춘다 — 둘째 줄을 보지 않는다"
 
 
@@ -113,7 +122,7 @@ def test_project_filter():
         d = Path(tmp)
         _write(d, "wiki-0001.md", "---\ntitle: docker cache\nproject: omb\n---\nlayer caching tips")
         _write(d, "wiki-0002.md", "---\ntitle: pg pool\nproject: kb-rag-bot\n---\ntoo many clients fix")
-        index = wiki.WikiIndex()
+        index = _index()
         assert _ids(_recall(index, d, "tips", project="omb")) == ["wiki-0001"]
         assert _ids(_recall(index, d, "tips", project="kb-rag-bot")) == []
 
@@ -125,7 +134,7 @@ def test_since_hours_filters_by_mtime_and_project_overrides_it():
         d = Path(tmp)
         _write(d, "wiki-0001.md", "---\ntitle: recent\nproject: omb\n---\nrecent content", now)
         _write(d, "wiki-0002.md", "---\ntitle: old\nproject: omb\n---\nold content", now - 48 * HOUR_NS)
-        index = wiki.WikiIndex()
+        index = _index()
         assert _ids(_recall(index, d, "content", since_hours=24, now_ns=now)) == ["wiki-0001"]
         both = _ids(_recall(index, d, "content", project="omb", since_hours=24, now_ns=now))
         assert sorted(both) == ["wiki-0001", "wiki-0002"], "project 가 있으면 since_hours 는 무시된다"
@@ -140,7 +149,9 @@ def test_hits_are_cut_to_k_by_score_descending():
         _write(d, "wiki-0001.md", "---\ntitle: a\n---\nneedle")
         _write(d, "wiki-0002.md", "---\ntitle: b\n---\nneedle needle needle")
         _write(d, "wiki-0003.md", "---\ntitle: c\n---\nneedle needle")
-        assert _ids(_recall(wiki.WikiIndex(), d, "needle", k=2)) == ["wiki-0002", "wiki-0003"]
+        result = _recall(_index(), d, "needle")
+        assert _ids(result, k=2) == ["wiki-0002", "wiki-0003"]
+        assert _ids(result) == ["wiki-0002", "wiki-0003", "wiki-0001"], "검색은 맞은 노트 전부를 점수순으로"
 
 
 def test_index_skips_unchanged_files_and_stays_honest_about_edits_and_removals():
@@ -156,7 +167,7 @@ def test_index_skips_unchanged_files_and_stays_honest_about_edits_and_removals()
         d = Path(tmp)
         _write(d, "wiki-0001.md", "---\ntitle: docker cache\n---\nlayer caching tips", now)
         _write(d, "wiki-0002.md", "---\ntitle: pg pool\n---\ntoo many clients fix", now)
-        index = wiki.WikiIndex(counting_read)
+        index = _index(counting_read)
         assert _ids(_recall(index, d, "docker layer")) == ["wiki-0001"]
         assert sorted(reads) == ["wiki-0001.md", "wiki-0002.md"]
 
@@ -175,26 +186,69 @@ def test_index_skips_unchanged_files_and_stays_honest_about_edits_and_removals()
         assert _ids(_recall(index, d, "clients")) == [], "사라진 노트는 회상되지 않는다"
 
 
-def test_missing_wiki_dir_is_an_empty_recall_but_an_unreadable_note_is_a_failure_value():
+def test_missing_wiki_dir_is_an_empty_recall_with_nothing_skipped():
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
-        assert _ids(_recall(wiki.WikiIndex(), d / "none", "needle")) == []
+        assert _recall(_index(), d / "none", "needle") == wiki.WikiResult([], 0)
         (d / "ignored.txt").write_text("needle")
-        assert _ids(_recall(wiki.WikiIndex(), d, "needle")) == [], "md 만 색인한다"
+        assert _recall(_index(), d, "needle") == wiki.WikiResult([], 0), "md 만 색인한다"
+
+
+def test_unreadable_notes_are_skipped_like_the_engine_and_counted():
+    # wiki_recall.rs::refresh — read_to_string 실패는 건너뜀. 파이썬은 건너뛴 수를 값으로 싣는다.
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        _write(d, "wiki-0001.md", "---\ntitle: ok\n---\nneedle")
         (d / "wiki-0009.md").write_bytes(b"\xff\xfe needle")
-        match _recall(wiki.WikiIndex(), d, "needle"):
-            case Err(failure):
-                assert "wiki-0009.md" in failure.detail
-            case Ok(_):
-                raise AssertionError("a vault read failure must come back as Err, not an empty recall")
+        (d / "wiki-0010.md").mkdir()
+        result = _recall(_index(), d, "needle")
+        assert _ids(result) == ["wiki-0001"] and result.skipped == 2
+
+        def read_denied(path: Path) -> str:
+            if path.name == "wiki-0001.md":
+                raise PermissionError(13, "denied")
+            return path.read_bytes().decode("utf-8")
+
+        _write(d, "wiki-0002.md", "needle needle")
+        denied = _recall(_index(read_denied), d, "needle")
+        assert _ids(denied) == ["wiki-0002"] and denied.skipped == 3
+
+
+def test_stat_failure_skips_the_note_and_a_dead_wiki_dir_is_an_empty_recall_counted_once():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        _write(d, "wiki-0001.md", "needle")
+        (d / "wiki-0002.md").symlink_to(d / "nowhere.md")
+        result = _recall(_index(), d, "needle")
+        assert _ids(result) == ["wiki-0001"] and result.skipped == 1, "끊긴 심볼릭 링크는 stat 실패"
+        locked = d / "locked"
+        locked.mkdir()
+        _write(locked, "wiki-0003.md", "needle")
+        locked.chmod(0o000)
+        try:
+            assert _recall(_index(), locked, "needle") == wiki.WikiResult([], 1)
+        finally:
+            locked.chmod(0o700)
+
+
+def test_a_note_that_goes_unreadable_keeps_its_cached_body_as_in_the_engine():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        _write(d, "wiki-0001.md", "needle first", 10 * HOUR_NS)
+        index = _index()
+        assert _ids(_recall(index, d, "needle")) == ["wiki-0001"]
+        (d / "wiki-0001.md").write_bytes(b"\xff\xfe")
+        os.utime(d / "wiki-0001.md", ns=(30 * HOUR_NS, 30 * HOUR_NS))
+        result = _recall(index, d, "needle")
+        assert _ids(result) == ["wiki-0001"] and result.skipped == 1
 
 
 def test_source_path_is_the_absolute_file_path():
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
         _write(d, "wiki-0001.md", "needle")
-        match _recall(wiki.WikiIndex(), d, "needle"):
-            case Ok([hit]):
+        match _recall(_index(), d, "needle").hits:
+            case [hit]:
                 assert hit.source_path == str(d / "wiki-0001.md") and hit.id == "wiki-0001"
             case other:
                 raise AssertionError(other)
@@ -214,6 +268,7 @@ def _hit(name: str, score: float, snippet: str = "s") -> wiki.WikiHit:
 
 class _Seams:
     def __init__(self, wiki_hits=(), facts=None, vector=(), superseded=None, rank_err=None):
+        self.skipped = 0
         self.calls: list[str] = []
         self.rank_seen: list[list[str]] = []
         self._wiki_hits, self._facts, self._vector = list(wiki_hits), facts or {}, list(vector)
@@ -224,7 +279,8 @@ class _Seams:
 
     def _wiki(self, args):
         self.calls.append("wiki")
-        return Ok(self._wiki_hits)
+        hits = sorted(self._wiki_hits, key=lambda h: (-h.score, h.source_path))
+        return wiki.WikiResult(hits, self.skipped)
 
     def _rank(self, paths):
         self.calls.append("rank")
@@ -286,7 +342,7 @@ def test_empty_result_is_the_exact_engine_phrase_and_asks_the_vector_path_once()
 def test_wiki_first_the_vector_path_is_not_asked_when_the_wiki_answers():
     stub = _Seams(wiki_hits=[_hit("wiki-0001", 3.0, "본문")], vector=[("/vault/wiki/other.md", "x")])
     recalled = _text(answer.answer(_args(), stub.seams()))
-    assert recalled == answer.Recalled("- [wiki-0001.md] 본문", "wiki")
+    assert (recalled.text, recalled.path) == ("- [wiki-0001.md] 본문", "wiki")
     assert "vector" not in stub.calls
     stub = _Seams(vector=[("/vault/wiki/v.md", "벡터 본문")])
     assert _text(answer.answer(_args(), stub.seams())) == answer.Recalled("- [v.md] 벡터 본문", "vector")
@@ -350,7 +406,7 @@ def test_failed_rank_facts_lookup_fails_the_recall():
 
 def test_run_rejects_before_connecting_and_reports_a_dead_store_as_a_value():
     with tempfile.TemporaryDirectory() as tmp:
-        common = {"wiki_dir": Path(tmp), "index": wiki.WikiIndex(), "now_ns": 0}
+        common = {"wiki_dir": Path(tmp), "index": _index(), "now_ns": 0}
         dead = "postgresql://u:p@127.0.0.1:9/none"
         assert answer.run({"query": " "}, dsn=dead, **common) == Err(
             answer.Rejected("missing argument: query")
@@ -395,7 +451,7 @@ def test_shadow_event_payload_never_carries_the_query():
     event = shadow.compare(200, _engine("엔진 줄"), _py("파이썬 줄"))
     payload = shadow.event_payload(event)
     assert secret not in json.dumps(payload, ensure_ascii=False)
-    assert set(payload) == {"path", "engine_lines", "python_lines", "first_diff", "reason"}
+    assert set(payload) == {"path", "engine_lines", "python_lines", "skipped", "first_diff", "reason"}
     assert payload["first_diff"] == {"line": 1, "engine": "엔진 줄", "python": "파이썬 줄"}
 
 
@@ -421,6 +477,89 @@ def test_shadow_error_and_rejection_branches():
     )
 
 
+def _wiki_names(*names: str) -> list[wiki.WikiHit]:
+    return [_hit(n, float(s), f"본문 {n}") for n, s in (x.split(":") for x in names)]
+
+
+def _line(name: str, superseded: dict[str, list[str]] | None = None) -> str:
+    return answer.recall_line(f"/vault/wiki/{name}.md", f"본문 {name}", superseded or {})
+
+
+def _py_answer(names: list[str], k: int = 5, skipped: int = 0, **seam_kwargs) -> answer.Recalled:
+    stub = _Seams(wiki_hits=_wiki_names(*names), **seam_kwargs)
+    stub.skipped = skipped
+    return _text(answer.answer(_args(max_results=k), stub.seams()))
+
+
+def _verdict(python: answer.Recalled, *engine_lines: str) -> str:
+    return shadow.compare(200, _engine("\n\n".join(engine_lines)), Ok(python)).status
+
+
+def test_shadow_tie_only_difference_is_tie_and_identical_text_is_ok():
+    python = _py_answer(["a:3", "b:3", "c:3"])
+    assert [ln.split("]")[0] for ln in python.text.split("\n\n")] == ["- [a.md", "- [b.md", "- [c.md"]
+    assert _verdict(python, _line("a"), _line("b"), _line("c")) == "ok"
+    event = shadow.compare(200, _engine("\n\n".join([_line("c"), _line("a"), _line("b")])), Ok(python))
+    assert event.status == "tie" and event.first_diff is not None and event.path == "wiki"
+
+
+def test_shadow_v1_swapping_two_notes_with_different_keys_is_a_mismatch():
+    # 점수가 다른 두 노트: 엔진이 뒤집어 냈다면 동점으로 설명되지 않는다.
+    python = _py_answer(["x:5", "y:4"])
+    assert _verdict(python, _line("y"), _line("x")) == "mismatch"
+    # 점수는 같아도 순서 열쇠(owner)가 다르면 열쇠 순서를 어긴 것이다.
+    owner = rank.RankFacts(superseded=False, owner=True, updated_at=datetime.fromtimestamp(10, UTC))
+    python = _py_answer(["a:3", "b:3"], facts=_facts(b=owner))
+    assert [ln.split("]")[0] for ln in python.text.split("\n\n")] == ["- [b.md", "- [a.md"]
+    assert _verdict(python, _line("a"), _line("b")) == "mismatch"
+    assert _verdict(python, _line("b"), _line("a")) == "ok"
+    demoted = _py_answer(["a:3", "b:3"], facts=_facts(a=_other(True)))
+    assert _verdict(demoted, _line("a"), _line("b")) == "mismatch", "대체된 노트는 같은 점수여도 뒤로 간다"
+
+
+def test_shadow_tie_at_the_k_boundary_is_a_tie_but_a_note_outside_the_tied_group_is_a_mismatch():
+    python = _py_answer(["a:5", "b:3", "c:3", "d:3"], k=2)
+    assert _verdict(python, _line("a"), _line("b")) == "ok"
+    assert _verdict(python, _line("a"), _line("c")) == "tie"
+    assert _verdict(python, _line("a"), _line("d")) == "tie"
+    assert _verdict(python, _line("a"), _line("zzz")) == "mismatch", "묶음 밖(후보에 없는) 노트가 들었다"
+    assert _verdict(python, _line("c"), _line("b")) == "mismatch", "점수 5 의 a 가 빠졌다"
+    assert _verdict(python, _line("c"), _line("a")) == "mismatch", "열쇠 순서를 어겼다(점수 3 이 5 앞)"
+    assert _verdict(python, _line("a")) == "mismatch", "줄 수가 다르다"
+    assert _verdict(python, _line("a"), _line("a")) == "mismatch", "같은 노트 두 번"
+    below = _py_answer(["a:5", "b:3", "c:3", "e:2"], k=2)
+    assert _verdict(below, _line("a"), _line("e")) == "mismatch", "컷 아래 점수의 노트가 올라왔다"
+
+
+def test_shadow_tied_notes_must_carry_the_same_line_text():
+    newer = {"/vault/wiki/b.md": ["/vault/wiki/n.md"]}
+    python = _py_answer(["a:3", "b:3"], superseded=newer)
+    assert python.text.endswith("- [b.md (superseded by n.md)] 본문 b")
+    assert _verdict(python, _line("b", newer), _line("a")) == "tie"
+    assert _verdict(python, _line("b"), _line("a")) == "mismatch", "대체 표시가 빠졌다"
+    other_body = answer.recall_line("/vault/wiki/a.md", "다른 발췌", {})
+    plain = _py_answer(["a:3", "b:3"])
+    assert _verdict(plain, _line("b"), other_body) == "mismatch", "동점 노트의 발췌가 다르다"
+
+
+def test_shadow_vector_path_has_no_tie_allowance():
+    stub = _Seams(vector=[("/vault/wiki/a.md", "x"), ("/vault/wiki/b.md", "y")])
+    python = _text(answer.answer(_args(), stub.seams()))
+    assert python.path == "vector" and python.pool is None
+    assert _verdict(python, "- [b.md] y", "- [a.md] x") == "mismatch"
+
+
+def test_shadow_counts_skipped_wiki_files_in_the_event():
+    python = _py_answer(["a:3"], skipped=2)
+    event = shadow.compare(200, _engine(_line("a")), Ok(python))
+    assert event.status == "ok" and event.skipped == 2
+    assert shadow.event_payload(event)["skipped"] == 2
+    none = _Seams()
+    none.skipped = 4
+    empty = _text(answer.answer(_args(), none.seams()))
+    assert empty.skipped == 4 and empty.text == "(no experience recalled)"
+
+
 def test_run_shadow_lets_a_python_exception_out_for_the_door_to_fold():
     def boom():
         raise RuntimeError("boom")
@@ -443,7 +582,10 @@ if __name__ == "__main__":
     test_since_hours_filters_by_mtime_and_project_overrides_it()
     test_hits_are_cut_to_k_by_score_descending()
     test_index_skips_unchanged_files_and_stays_honest_about_edits_and_removals()
-    test_missing_wiki_dir_is_an_empty_recall_but_an_unreadable_note_is_a_failure_value()
+    test_missing_wiki_dir_is_an_empty_recall_with_nothing_skipped()
+    test_unreadable_notes_are_skipped_like_the_engine_and_counted()
+    test_stat_failure_skips_the_note_and_a_dead_wiki_dir_is_an_empty_recall_counted_once()
+    test_a_note_that_goes_unreadable_keeps_its_cached_body_as_in_the_engine()
     test_source_path_is_the_absolute_file_path()
     test_parse_args_clamps_and_narrows_at_the_boundary()
     test_missing_query_is_rejected_with_the_engine_message()
@@ -458,5 +600,11 @@ if __name__ == "__main__":
     test_shadow_mismatch_names_the_first_differing_line_with_80_chars_of_each()
     test_shadow_event_payload_never_carries_the_query()
     test_shadow_error_and_rejection_branches()
+    test_shadow_tie_only_difference_is_tie_and_identical_text_is_ok()
+    test_shadow_v1_swapping_two_notes_with_different_keys_is_a_mismatch()
+    test_shadow_tie_at_the_k_boundary_is_a_tie_but_a_note_outside_the_tied_group_is_a_mismatch()
+    test_shadow_tied_notes_must_carry_the_same_line_text()
+    test_shadow_vector_path_has_no_tie_allowance()
+    test_shadow_counts_skipped_wiki_files_in_the_event()
     test_run_shadow_lets_a_python_exception_out_for_the_door_to_fold()
     print("ok - recall: wiki 직독(항·점수·snippet·필터·mtime 캐시)·경로 선택·렌더·그림자 대조")

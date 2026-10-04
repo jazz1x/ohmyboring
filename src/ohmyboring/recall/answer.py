@@ -52,15 +52,38 @@ class Failed:
     detail: str
 
 
+OrderKey = tuple[tuple[bool, bool, float], float]
+
+
+@dataclass(frozen=True)
+class PoolEntry:
+    """wiki 길에서 점수로 뽑힐 수 있었던 노트 하나 — 엔진이 같은 자리에서 낼 수 있는 줄과 순서 열쇠."""
+
+    path: str
+    line: str
+    score: float
+    key: OrderKey
+
+
+@dataclass(frozen=True)
+class WikiPool:
+    """점수 내림차순(동점은 경로순) 후보 중 k 번째 점수 이상 전부. size 개가 뽑혔다."""
+
+    entries: tuple[PoolEntry, ...]
+    size: int
+
+
 @dataclass(frozen=True)
 class Recalled:
     text: str
     path: str  # wiki | vector — 어느 길이 줄을 냈나
+    skipped: int = 0  # 읽지 못해 건너뛴 wiki 파일 수
+    pool: WikiPool | None = None  # wiki 길만
 
 
 @dataclass(frozen=True)
 class Seams:
-    wiki: Callable[[Args], Either[list[wiki.WikiHit], str]]
+    wiki: Callable[[Args], wiki.WikiResult]
     rank_facts: Callable[[list[str]], Either[dict[str, rank.RankFacts], str]]
     vector: Callable[[Args], Either[list[Line], str]]
     superseded_by: Callable[[list[str]], Either[dict[str, list[str]], str]]
@@ -99,59 +122,95 @@ def _basename(path: str) -> str:
     return path.rsplit("/", 1)[-1]
 
 
+def recall_line(path: str, body: str, superseded: dict[str, list[str]]) -> str:
+    newer = superseded.get(path)
+    label = _basename(path)
+    if newer:
+        label = f"{label} (superseded by {', '.join(_basename(p) for p in newer)})"
+    return f"- [{label}] {body}"
+
+
 def recall_text(lines: list[Line], superseded: dict[str, list[str]]) -> str:
-    def label(path: str) -> str:
-        newer = superseded.get(path)
-        if not newer:
-            return _basename(path)
-        return f"{_basename(path)} (superseded by {', '.join(_basename(p) for p in newer)})"
-
-    return "\n\n".join(f"- [{label(path)}] {body}" for path, body in lines)
+    return "\n\n".join(recall_line(path, body, superseded) for path, body in lines)
 
 
-def _wiki_lines(hits: list[wiki.WikiHit], seams: Seams) -> Either[list[Line], Failed]:
-    scored = [
-        rank.Scored(rank.Hit(hit.id, hit.snippet, "", "", hit.source_path, 0.0, "wiki"), hit.score)
-        for hit in hits
-    ]
-    match seams.rank_facts(sorted({hit.source_path for hit in hits})):
+@dataclass(frozen=True)
+class _Candidate:
+    hit: wiki.WikiHit
+    key: OrderKey
+
+
+@dataclass(frozen=True)
+class _Selected:
+    path: str
+    lines: list[Line]
+    skipped: int
+    pool: tuple[_Candidate, ...] = ()
+    size: int = 0
+
+
+def _wiki_selected(result: wiki.WikiResult, args: Args, seams: Seams) -> Either[_Selected, Failed]:
+    size = min(args.max_results, len(result.hits))
+    threshold = result.hits[size - 1].score
+    pool_hits = [hit for hit in result.hits if hit.score >= threshold]
+    match seams.rank_facts(sorted({hit.source_path for hit in pool_hits})):
         case Err(detail):
             return Err(Failed(f"wiki recall order: rank: rank facts lookup: {detail}"))
         case Ok(facts):
+            pool = tuple(
+                _Candidate(hit, (rank.rank_key(facts.get(hit.source_path)), -hit.score)) for hit in pool_hits
+            )
+            scored = [
+                rank.Scored(
+                    rank.Hit(c.hit.id, c.hit.snippet, "", "", c.hit.source_path, 0.0, "wiki"), c.hit.score
+                )
+                for c in pool[:size]
+            ]
             ordered = rank.order_within_set(scored, facts)
-            return Ok([(item.hit.source_path, item.hit.content) for item in ordered])
+            lines = [(item.hit.source_path, item.hit.content) for item in ordered]
+            return Ok(_Selected("wiki", lines, result.skipped, pool, size))
 
 
-def _select(args: Args, seams: Seams) -> Either[tuple[str, list[Line]], Failed]:
-    match seams.wiki(args):
+def _select(args: Args, seams: Seams) -> Either[_Selected, Failed]:
+    result = seams.wiki(args)
+    if result.hits:
+        return _wiki_selected(result, args, seams)
+    match seams.vector(args):
         case Err(detail):
-            return Err(Failed(f"wiki recall: {detail}"))
-        case Ok([]):
-            match seams.vector(args):
-                case Err(detail):
-                    return Err(Failed(f"retrieve: {detail}"))
-                case Ok(lines):
-                    return Ok(("vector", lines))
-        case Ok(hits):
-            match _wiki_lines(hits, seams):
-                case Err(failure):
-                    return Err(failure)
-                case Ok(lines):
-                    return Ok(("wiki", lines))
+            return Err(Failed(f"retrieve: {detail}"))
+        case Ok(lines):
+            return Ok(_Selected("vector", lines, result.skipped))
+
+
+def _pool_of(selected: _Selected, superseded: dict[str, list[str]]) -> WikiPool | None:
+    if not selected.pool:
+        return None
+    entries = tuple(
+        PoolEntry(
+            c.hit.source_path,
+            recall_line(c.hit.source_path, c.hit.snippet, superseded),
+            c.hit.score,
+            c.key,
+        )
+        for c in selected.pool
+    )
+    return WikiPool(entries, selected.size)
 
 
 def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
     match _select(args, seams):
         case Err(failure):
             return Err(failure)
-        case Ok((path, [])):
-            return Ok(Recalled(NO_EXPERIENCE, path))
-        case Ok((path, lines)):
-            match seams.superseded_by([line[0] for line in lines]):
+        case Ok(selected) if not selected.lines:
+            return Ok(Recalled(NO_EXPERIENCE, selected.path, selected.skipped))
+        case Ok(selected):
+            paths = [c.hit.source_path for c in selected.pool] or [line[0] for line in selected.lines]
+            match seams.superseded_by(paths):
                 case Err(detail):
                     return Err(Failed(f"recall superseded: {detail}"))
                 case Ok(superseded):
-                    return Ok(Recalled(recall_text(lines, superseded), path))
+                    text = recall_text(selected.lines, superseded)
+                    return Ok(Recalled(text, selected.path, selected.skipped, _pool_of(selected, superseded)))
 
 
 def _detail(result: Either[Any, Any]) -> Either[Any, str]:
@@ -201,9 +260,7 @@ def run(
         case Ok(conn):
             pass
     seams = Seams(
-        wiki=lambda a: _detail(
-            index.recall(wiki_dir, wiki.Ask(a.query, a.max_results, a.project, a.since_hours), now_ns)
-        ),
+        wiki=lambda a: index.recall(wiki_dir, wiki.Ask(a.query, a.project, a.since_hours), now_ns),
         rank_facts=lambda paths: _detail(pg.rank_facts(conn, paths)),
         vector=lambda a: _vector_lines(read_only_dsn, a),
         superseded_by=lambda paths: _detail(pg.superseded_by(conn, paths)),

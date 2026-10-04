@@ -60,8 +60,8 @@ nearest-document probe, event is the event-sink time). The recall answer gets a
 shadow too (E4-2): after the answer leaves, ohmyboring.recall recomputes the same
 recall (wiki first, vector only when the wiki is empty, read-only session) and
 compares its text with the engine text as it was before the numbered-note blocks
-were prepended, leaving one recall_shadow event (status, path, line counts, first
-differing line — never the query); the answer stays the engine's. An answer whose content-type is
+were prepended, leaving one recall_shadow event (status ok|tie|mismatch|error, path,
+line counts, first differing line, skipped wiki files — never the query); the answer stays the engine's. An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. The parked read behind
@@ -959,7 +959,7 @@ def _register_shadow_task(surface: str, transport: str, arguments: dict, status:
     )
 
 
-_RECALL_WIKI_INDEX = recall_wiki.WikiIndex()
+_RECALL_WIKI_INDEX = recall_wiki.WikiIndex(vault_note.split_frontmatter)
 
 
 def _recall_python(arguments: dict) -> recall_shadow.PythonAnswer:

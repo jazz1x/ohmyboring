@@ -4,6 +4,7 @@
 project 가 있으면 since_hours 는 무시되고, snippet 은 소문자 본문에서 떠 오며, 첫 적중 위치는
 점수가 가장 높은 항이 아니라 질의 항 순서상 본문에 처음 나오는 항의 것이다. 점수 동점의 순서는
 엔진에서 HashMap 순회 순서(비결정)라 여기서는 경로 오름차순으로 고정한다.
+읽을 수 없는 노트는 엔진처럼 건너뛰되, 건너뛴 수는 결과 값에 싣는다.
 """
 
 from __future__ import annotations
@@ -15,12 +16,12 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ohmyboring.result import Either, Err, Ok
-
 _SNIPPET_BEFORE = 40
 _SNIPPET_LEN = 200
 _HOUR_NS = 3600 * 10**9
 _ALNUM_SPAN = re.compile(r"[^\W_](?:.*[^\W_])?", re.DOTALL)
+
+SplitFrontmatter = Callable[[str], tuple[str, str] | None]
 
 
 @dataclass(frozen=True)
@@ -33,8 +34,11 @@ class WikiHit:
 
 
 @dataclass(frozen=True)
-class WikiFailure:
-    detail: str
+class WikiResult:
+    """질의에 맞은 노트 전부(점수 내림차순·동점은 경로순) + 읽지 못해 건너뛴 파일 수."""
+
+    hits: list[WikiHit]
+    skipped: int
 
 
 @dataclass(frozen=True)
@@ -78,16 +82,6 @@ def score_lower(title_lower: str, body_lower: str, terms: list[str]) -> tuple[fl
     return float(score + coverage), snippet_around(body_lower, first_hit or 0)
 
 
-def split_frontmatter(content: str) -> tuple[str, str] | None:
-    if not content.startswith("---\n"):
-        return None
-    rest = content[4:]
-    end = rest.find("\n---\n")
-    if end < 0:
-        return None
-    return rest[:end], rest[end + 5 :]
-
-
 def _lines(text: str) -> list[str]:
     return [line.removesuffix("\r") for line in text.split("\n")]
 
@@ -96,8 +90,8 @@ def _scalar(line: str) -> str:
     return line.partition(":")[2].strip().strip('"')
 
 
-def extract_title_body(content: str, stem: str) -> tuple[str, str]:
-    yaml, body = split_frontmatter(content) or ("", content)
+def extract_title_body(content: str, stem: str, split: SplitFrontmatter) -> tuple[str, str]:
+    yaml, body = split(content) or ("", content)
     declared = next((line for line in _lines(yaml) if line.lstrip().startswith("title:")), None)
     if declared is not None and (title := _scalar(declared)):
         return title, body
@@ -107,19 +101,19 @@ def extract_title_body(content: str, stem: str) -> tuple[str, str]:
     return stem, body
 
 
-def extract_project(content: str) -> str:
-    yaml = (split_frontmatter(content) or ("", ""))[0]
+def extract_project(content: str, split: SplitFrontmatter) -> str:
+    yaml = (split(content) or ("", ""))[0]
     declared = next((line for line in _lines(yaml) if line.lstrip().startswith("project:")), None)
     return "" if declared is None else _scalar(declared)
 
 
-def _doc_of(path: Path, content: str, mtime_ns: int) -> _Doc:
-    title, body = extract_title_body(content, path.stem)
+def _doc_of(path: Path, content: str, mtime_ns: int, split: SplitFrontmatter) -> _Doc:
+    title, body = extract_title_body(content, path.stem, split)
     return _Doc(
         id=path.stem,
         title=title,
         source_path=str(path),
-        project=extract_project(content),
+        project=extract_project(content, split),
         title_lower=title.lower(),
         body_lower=body.lower(),
         mtime_ns=mtime_ns,
@@ -129,7 +123,6 @@ def _doc_of(path: Path, content: str, mtime_ns: int) -> _Doc:
 @dataclass(frozen=True)
 class Ask:
     query: str
-    k: int
     project: str | None = None
     since_hours: int | None = None
 
@@ -151,7 +144,7 @@ def search(docs: Iterable[_Doc], ask: Ask, now_ns: int) -> list[WikiHit]:
         if kept(doc) and (scored := score_lower(doc.title_lower, doc.body_lower, terms)) is not None
     ]
     hits.sort(key=lambda hit: (-hit.score, hit.source_path))
-    return hits[: ask.k]
+    return hits
 
 
 def _read_utf8(path: Path) -> str:
@@ -160,47 +153,52 @@ def _read_utf8(path: Path) -> str:
 
 class WikiIndex:
     """볼트 wiki/ 의 mtime 캐시 — 바뀐 파일만 다시 읽고 사라진 파일은 버린다. 호출마다 디렉터리만
-    다시 stat 한다(엔진 WikiIndex::refresh 와 같다). 문은 한 프로세스에 하나를 들고 스레드에서 부른다."""
+    다시 stat 한다(엔진 WikiIndex::refresh 와 같다). 문은 한 프로세스에 하나를 들고 스레드에서 부른다.
 
-    def __init__(self, read_text: Callable[[Path], str] = _read_utf8) -> None:
+    엔진처럼 못 읽는 노트(비UTF-8·권한·디렉터리 이름이 .md·stat 실패)는 건너뛰고 — 이미 캐시에 있던
+    노트는 옛 내용을 그대로 둔다 — 건너뛴 수를 센다. wiki 디렉터리가 없으면 정상(빈 회상), 있는데
+    못 열면 빈 회상이되 1 로 센다."""
+
+    def __init__(self, split: SplitFrontmatter, read_text: Callable[[Path], str] = _read_utf8) -> None:
+        self._split = split
         self._read_text = read_text
         self._docs: dict[str, _Doc] = {}
         self._lock = threading.Lock()
 
-    def recall(self, wiki_dir: Path, ask: Ask, now_ns: int) -> Either[list[WikiHit], WikiFailure]:
+    def recall(self, wiki_dir: Path, ask: Ask, now_ns: int) -> WikiResult:
         with self._lock:
-            match self._refresh(wiki_dir):
-                case Err(failure):
-                    return Err(failure)
-                case Ok(_):
-                    return Ok(search(self._docs.values(), ask, now_ns))
+            skipped = self._refresh(wiki_dir)
+            return WikiResult(search(self._docs.values(), ask, now_ns), skipped)
 
-    def _refresh(self, wiki_dir: Path) -> Either[None, WikiFailure]:
+    def _refresh(self, wiki_dir: Path) -> int:
         try:
             names = os.listdir(wiki_dir)
         except (FileNotFoundError, NotADirectoryError):
             self._docs = {}
-            return Ok(None)
-        except OSError as e:
-            return Err(WikiFailure(f"wiki dir {wiki_dir}: {e}"))
+            return 0
+        except OSError:
+            self._docs = {}
+            return 1
         fresh: dict[str, _Doc] = {}
+        skipped = 0
         for name in sorted(names):
             path = wiki_dir / name
             if path.suffix != ".md":
                 continue
-            match self._load(path, self._docs.get(str(path))):
-                case Err(failure):
-                    return Err(failure)
-                case Ok(doc):
-                    fresh[str(path)] = doc
+            cached = self._docs.get(str(path))
+            doc = self._load(path, cached)
+            if doc is None:
+                skipped += 1
+            if (kept := doc or cached) is not None:
+                fresh[str(path)] = kept
         self._docs = fresh
-        return Ok(None)
+        return skipped
 
-    def _load(self, path: Path, cached: _Doc | None) -> Either[_Doc, WikiFailure]:
+    def _load(self, path: Path, cached: _Doc | None) -> _Doc | None:
         try:
             mtime_ns = path.stat().st_mtime_ns
             if cached is not None and cached.mtime_ns == mtime_ns:
-                return Ok(cached)
-            return Ok(_doc_of(path, self._read_text(path), mtime_ns))
-        except (OSError, UnicodeDecodeError) as e:
-            return Err(WikiFailure(f"wiki note {path}: {e}"))
+                return cached
+            return _doc_of(path, self._read_text(path), mtime_ns, self._split)
+        except (OSError, UnicodeDecodeError):
+            return None
