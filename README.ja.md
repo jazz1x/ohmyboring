@@ -462,7 +462,7 @@ curl -s -X POST http://localhost:7710/mcp \
 | `/remember` / `remember` | 整えたノートを保存 | — |
 | `POST /gap` / `gap` | 欠落を記録 — `session_id`、`query`、`kind`(`missing`・`stale`・`broken`)、`handed`(ノートの source_path、`stale` は必須)。ドアは記録のみで判断しません | 不要 |
 
-ドア（`127.0.0.1:7710`）はエンジンのルート表を中継し（起動時に契約スナップショットから読んでエンジンに従う）、独自のルート `GET /approved`・`GET /claim-source`・`GET /claim-sources`・`GET /projects?active_days=`・`GET`/`POST /repairs/split-subjects` には自ら答える。未登録のパスは 404 — 万能プロキシではない。
+ドア（`127.0.0.1:7710`）はエンジンのルート表を中継し（起動時に契約スナップショットから読んでエンジンに従う）、独自のルート `GET /approved`・`GET /claim-source`・`GET /claim-sources`・`GET /projects?active_days=`・`GET`/`POST /repairs/split-subjects`・`POST /gap` には自ら答える。未登録のパスは 404 — 万能プロキシではない。
 
 ### トークン予算
 

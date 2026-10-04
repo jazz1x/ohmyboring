@@ -454,7 +454,7 @@ curl -s -X POST http://localhost:7710/mcp \
 | `/remember` / `remember` | 정제된 노트 저장 | — |
 | `POST /gap` / `gap` | 빈자리 기록 — `session_id`, `query`, `kind`(`missing`·`stale`·`broken`), `handed`(노트 source_path, `stale` 은 필수). 문은 기록만 하고 판단하지 않습니다 | 불필요 |
 
-문(`127.0.0.1:7710`)은 엔진의 경로 표를 대신 전달하고(기동 때 계약 스냅샷에서 읽어 엔진을 따라간다), 자기 경로 `GET /approved`·`GET /claim-source`·`GET /claim-sources`·`GET /projects?active_days=`·`GET`/`POST /repairs/split-subjects` 는 스스로 답한다. 등록되지 않은 경로는 404 — 만능 프록시가 아니다.
+문(`127.0.0.1:7710`)은 엔진의 경로 표를 대신 전달하고(기동 때 계약 스냅샷에서 읽어 엔진을 따라간다), 자기 경로 `GET /approved`·`GET /claim-source`·`GET /claim-sources`·`GET /projects?active_days=`·`GET`/`POST /repairs/split-subjects`·`POST /gap` 는 스스로 답한다. 등록되지 않은 경로는 404 — 만능 프록시가 아니다.
 
 ### 토큰 예산
 
