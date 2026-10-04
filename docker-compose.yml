@@ -122,6 +122,7 @@ services:
       BORING_VAULT_DIR: /vault
       BORING_CONFIG: /config/boring.json
       DOOR_REMEMBER_WRITER: ${DOOR_REMEMBER_WRITER:-engine}
+      DOOR_REGISTER_READER: ${DOOR_REGISTER_READER:-python}
     volumes:
       - ./vault:/vault                   # remember writes notes here when DOOR_REMEMBER_WRITER=python
       # The folder, not the file: an editor that saves by rename swaps the inode, and a file

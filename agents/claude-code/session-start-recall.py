@@ -2,8 +2,8 @@
 """Claude Code SessionStart hook — inject recent project context at session open.
 
 Reads the session-start payload, guesses the project from cwd/git remote, then
-pulls either /status (when a project is known) or /brief (fallback) and prints
-the result as additionalContext.
+pulls the /context card (project-filtered when one is known) and prints it as
+additionalContext.
 """
 
 import json

@@ -453,7 +453,7 @@ curl -s -X POST http://localhost:7710/mcp \
 | `POST /next_actions` / `next_actions` | 次アクション台帳: 明示された次の一手 + 有効な blocker | 必要 |
 | `POST /stalled` / `stalled` | 停滞台帳: 古い次の一手と blocker | 必要 |
 | `POST /recurrences` / `recurrences` | 再発台帳: 過去の失敗を繰り返す最近の risk/blocked claim | 必要 |
-| `POST /status` / `project_status` | 30 日分のプロジェクト状況 (Done/Next/Blocked/Decisions/Risks) | 必要 |
+| `POST /status` / `project_status` | プロジェクトの 30 日分のノートと近い現行 claim — 要約ではなく素材 | 必要 |
 | `POST /weekly` / `weekly_brief` | プロジェクト横断の直近 7 日 | 必要 |
 | `POST /decisions` / `decisions` | プロジェクトの decision claim | 必要 |
 | `POST /risks` / `risks` | プロジェクトの risk/assumption/blocked claim | 必要 |
@@ -496,7 +496,7 @@ MCP に対応したエージェントならどれも ohmyboring を利用でき�
 
 （VS Code Copilot は root key `servers` を使う `.vscode/mcp.json` を使用します。CLI 代替: `claude mcp add --transport http --scope project ohmyboring http://localhost:7710/mcp`。compose の sibling コンテナは `http://boring-door:7710/mcp` でアクセスします。）
 
-利用可能な tools（24個）: `recall` · `neighbors` · `claims`（記憶検索）· `code_search` · `code_symbol` · `code_index_status`（独立した AST コードコーパス）· `ask` · `brief` · `weekly_brief` · `project_status`（生成 — LLM 実行）· `decisions` · `risks` · `next_actions` · `stalled` · `recurrences`（レジスタ — 行を返す、LLM なし）· `context` · `corpus_status` · `events` · `config_get`（構造化 / introspection）· `remember` · `forget` · `classify_repo` · `sync`（書き込み / メンテナンス）· `verdict`（渡されたノートへの判定）。
+利用可能な tools（24個）: `recall` · `neighbors` · `claims`（記憶検索）· `code_search` · `code_symbol` · `code_index_status`（独立した AST コードコーパス）· `ask` · `brief` · `weekly_brief`（生成 — LLM 実行）· `decisions` · `risks` · `next_actions` · `stalled` · `recurrences` · `project_status`（レジスタ — 行・素材を返す、LLM なし）· `context` · `corpus_status` · `events` · `config_get`（構造化 / introspection）· `remember` · `forget` · `classify_repo` · `sync`（書き込み / メンテナンス）· `verdict`（渡されたノートへの判定）。
 
 デフォルトの wiki-first モード（`BORING_VECTOR=off`）では、recency/vector 順序、グラフ、ローカルイベント DB に依存する tool が pgvector バックエンドを必要とし、`BORING_VECTOR=on` を設定するまで JSON-RPC `-32603` を返します: `neighbors`、`claims`、`corpus_status`、`events`、`brief`、`weekly_brief`、`project_status`、`decisions`、`risks`、`next_actions`、`stalled`、`recurrences`、`verdict`。`recall` と `ask` は `vault/wiki` を直接読み、`context` は呼び出し可能ですが store がない場合は空の claim card を返します。`remember`、`forget`、`sync`、`config_get`、`classify_repo`、`code_search`、`code_symbol`、`code_index_status` は vector モードを必要としません。3 つのコード tool には有効な `code_index` source と事前の `code-sync` が必要です。
 
@@ -509,7 +509,8 @@ MCP に対応したエージェントならどれも ohmyboring を利用でき�
 - `claims` *(`BORING_VECTOR=on` が必要)* — クエリ近傍の現在（未置換）の `{subject, predicate, value}` 決定の top-k。
 - `corpus_status` *(`BORING_VECTOR=on` が必要)* — KB ヘルスのスナップショット（ファイル/チャンク数、origin/kind/project 別、汚染度、graph/semantic のノード+エッジ）。
 - `events` *(`BORING_VECTOR=on` が必要)* — DB に OpenTelemetry 形式で保存された最近の workflow/adapter イベントを返します。component、event、status、run_id、workflow、since_hours でフィルタできます。
-- `ask` / `brief` / `weekly_brief` / `project_status` — LLM を実行する tool。`ask` は出典を引用して答え wiki-first モードでも動作し、ブリーフィング三つは `BORING_VECTOR=on` が必要です。
+- `ask` / `brief` / `weekly_brief` — LLM を実行する tool。`ask` は出典を引用して答え wiki-first モードでも動作し、ブリーフィング二つは `BORING_VECTOR=on` が必要です。
+- `project_status` *(`BORING_VECTOR=on` が必要)* — プロジェクトの直近 30 日のノートと最も近い現行 claim を編集せずに並べます。要約ではなく素材で、要約は呼び出し側が行います。エンジンの LLM 要約に戻すには `DOOR_REGISTER_READER=engine`。
 - `decisions` / `risks` / `next_actions` / `stalled` / `recurrences` — レジスタ。claim の行をそのまま返し、経路に LLM がありません: 同じ問いに同じ答えで、散文を生成していた頃の 119.6 秒に対し 0.02 秒と実測されました。`BORING_VECTOR=on` が必要で、結果が切られた場合は応答がそう述べます（`limit_applied`）。
 - `forget` — 移行期間中は閉じられています — 全コールが拒否され、何も削除されません。ノートの訂正は `remember` + `supersedes` で行います。
   同期の prune と `scripts/dedup-wiki.py --apply` も止まっています。
