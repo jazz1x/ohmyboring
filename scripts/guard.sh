@@ -144,6 +144,7 @@ python3 scripts/test_peek.py
 python3 scripts/test_readme_locale_parity.py
 python3 scripts/test_package_skeleton.py
 python3 src/ohmyboring/recall/test_named.py
+python3 src/ohmyboring/recall/test_recall.py
 python3 src/ohmyboring/entrypoints/http/test_mcp_recall.py
 python3 src/ohmyboring/search/test_rank.py
 python3 src/ohmyboring/search/test_hits.py

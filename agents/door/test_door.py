@@ -3206,6 +3206,150 @@ class RegisterReaderSwitchTests(_RegisterTestHarness, unittest.TestCase):
         self.assertEqual(json.loads(body), {"error": "store not configured"})
 
 
+class RecallShadowTests(_RegisterTestHarness, unittest.TestCase):
+    """E4-2 회상 그림자 — MCP recall 은 엔진 답 바이트(번호 보강만 예외) 그대로 가고, 응답 뒤
+    파이썬 회상이 같은 인자로 돌아 recall_shadow 사건 한 줄을 남긴다. 파이썬 길(_recall_python)은
+    목으로 두고 선로(대조 시점·응답 비대기·예외 접기)만 본다. 진짜 길은 recall/test_recall.py."""
+
+    ENGINE_TEXT = "- [wiki-2229.md] ..."
+
+    @classmethod
+    def setUpClass(cls):
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+
+    def setUp(self):
+        self._setUp()
+        self._python_impl = lambda arguments: door.Ok(door.recall_answer.Recalled(self.ENGINE_TEXT, "wiki"))
+        self.python_calls: list[dict] = []
+
+        def python(arguments):
+            self.python_calls.append(arguments)
+            return self._python_impl(arguments)
+
+        self._python_patch = mock.patch.object(door, "_recall_python", side_effect=python)
+        self._python_patch.start()
+
+    def tearDown(self):
+        self._python_patch.stop()
+        self._tearDown()
+
+    def _recall(self, query: str, **extra) -> tuple[int, bytes, str | None]:
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "recall", "arguments": {"query": query, **extra}},
+            }
+        ).encode()
+        return _req(
+            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
+        )
+
+    def _events(self) -> list[dict]:
+        path = Path(os.environ["BORING_EVENT_LOG"])
+        if not path.exists():
+            return []
+        rows = (json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+        return [row for row in rows if row.get("event") == "recall_shadow"]
+
+    def _wait_for_event(self, timeout: float = 5.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if events := self._events():
+                return events[-1]
+            time.sleep(0.05)
+        self.fail("recall_shadow event not written within timeout")
+
+    def test_same_text_is_ok_and_the_answer_is_the_engines_bytes(self):
+        status, body, _ = self._recall("그냥 검색해줘", project="omb")
+        self.assertEqual((status, body), (200, RECALL_BODY))
+        event = self._wait_for_event()
+        self.assertEqual((event["status"], event["path"]), ("ok", "wiki"))
+        self.assertEqual(event["engine_lines"], 1)
+        self.assertEqual(
+            self.python_calls, [{"query": "그냥 검색해줘", "project": "omb"}], "인자는 요청 그대로"
+        )
+
+    def test_a_different_text_is_a_mismatch_with_the_first_differing_line(self):
+        self._python_impl = lambda arguments: door.Ok(
+            door.recall_answer.Recalled("- [other.md] 다름", "vector")
+        )
+        status, body, _ = self._recall("그냥 검색해줘")
+        self.assertEqual((status, body), (200, RECALL_BODY), "어긋나도 응답은 엔진 그대로")
+        event = self._wait_for_event()
+        self.assertEqual((event["status"], event["path"]), ("mismatch", "vector"))
+        self.assertEqual(
+            event["first_diff"], {"line": 1, "engine": self.ENGINE_TEXT, "python": "- [other.md] 다름"}
+        )
+        self.assertNotIn("그냥 검색해줘", json.dumps(event, ensure_ascii=False), "사건에 질의를 싣지 않는다")
+
+    def test_a_raising_shadow_costs_one_log_line_and_an_error_event_and_never_the_answer(self):
+        def boom(arguments):
+            raise RuntimeError("boom")
+
+        self._python_impl = boom
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            status, body, _ = self._recall("그냥 검색해줘")
+            event = self._wait_for_event()
+        self.assertEqual((status, body), (200, RECALL_BODY))
+        self.assertEqual(event["status"], "error")
+        self.assertIn("RuntimeError", event["reason"])
+        lines = [ln for ln in buf.getvalue().splitlines() if "recall_shadow" in ln]
+        self.assertEqual(len(lines), 1, buf.getvalue())
+
+    def test_the_answer_does_not_wait_for_the_shadow(self):
+        def slow(arguments):
+            time.sleep(0.6)
+            return door.Ok(door.recall_answer.Recalled(self.ENGINE_TEXT, "wiki"))
+
+        self._python_impl = slow
+        started = time.monotonic()
+        status, body, _ = self._recall("그냥 검색해줘")
+        elapsed = time.monotonic() - started
+        event = self._wait_for_event()
+        self.assertEqual((status, body), (200, RECALL_BODY))
+        self.assertEqual(event["status"], "ok", "자고 난 그림자의 사건은 ok — 목 깨짐을 덮지 않는다")
+        self.assertLess(elapsed, 0.6, "응답이 그림자를 기다리면 이 값이 0.6s 를 넘는다")
+
+    def test_the_shadow_compares_the_engine_text_from_before_the_note_blocks_were_prepended(self):
+        with tempfile.TemporaryDirectory() as vault, mock.patch.dict(os.environ, {"BORING_VAULT_DIR": vault}):
+            status, body, _ = self._recall("wiki-2229 봐")
+        text = json.loads(body)["result"]["content"][0]["text"]
+        self.assertEqual(status, 200)
+        self.assertTrue(text.startswith("- wiki-2229 은 볼트에 없음\n\n"), "통제군: 응답은 보강된다")
+        self.assertTrue(text.endswith(self.ENGINE_TEXT))
+        event = self._wait_for_event()
+        self.assertEqual(event["status"], "ok", "보강 뒤 텍스트로 대조하면 줄 수가 달라 mismatch 가 된다")
+        self.assertEqual(event["engine_lines"], 1)
+
+    def test_an_engine_error_answer_leaves_an_error_event_and_the_same_bytes(self):
+        status, body, _ = self._recall("boom")
+        self.assertEqual((status, body), (200, RECALL_ERROR_BODY))
+        event = self._wait_for_event()
+        self.assertEqual(event["status"], "error")
+        self.assertIn("engine unreadable", event["reason"])
+
+    def test_other_tools_leave_no_recall_shadow(self):
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "search", "arguments": {"query": "x"}},
+            }
+        ).encode()
+        _req(self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"})
+        time.sleep(0.3)
+        self.assertEqual(self._events(), [])
+        self.assertEqual(self.python_calls, [])
+
+
 class GapRouteTests(unittest.TestCase):
     """빈자리 문 — HTTP POST /gap 와 MCP tools/call gap 은 같은 인자에 같은 저장 호출을 낸다.
     저장은 문 경계(_gap_record)를 스텁해 받은 인자로 본다. 엔진 스텁은 안 쓴다 — gap 은 늘 문 안."""

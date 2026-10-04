@@ -56,7 +56,12 @@ shadow falls back to a full disk scan — the same decision either way, and the
 event's elapsed columns (total, embedding, DB, vault, parse, nearest, event)
 sum to the total — embedding covers chunk+claim embeds, DB covers connect+commit,
 vault covers numbering+file write+the duplicate scan, nearest is the whole
-nearest-document probe, event is the event-sink time). An answer whose content-type is
+nearest-document probe, event is the event-sink time). The recall answer gets a
+shadow too (E4-2): after the answer leaves, ohmyboring.recall recomputes the same
+recall (wiki first, vector only when the wiki is empty, read-only session) and
+compares its text with the engine text as it was before the numbered-note blocks
+were prepended, leaving one recall_shadow event (status, path, line counts, first
+differing line — never the query); the answer stays the engine's. An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. The parked read behind
@@ -133,7 +138,10 @@ from ohmyboring.adapters import vault as vault_notes
 from ohmyboring.entrypoints.http import mcp_recall
 from ohmyboring.gap import parse as gap_parse
 from ohmyboring.gap import pg as gap_pg
+from ohmyboring.recall import answer as recall_answer
 from ohmyboring.recall import named as recall_named
+from ohmyboring.recall import shadow as recall_shadow
+from ohmyboring.recall import wiki as recall_wiki
 from ohmyboring.registers import pg as registers_pg
 from ohmyboring.registers import shadow as registers_shadow
 from ohmyboring.remember import dedup as remember_dedup
@@ -294,8 +302,15 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
             status_code=502,
         )
     if request.method == "POST" and request.url.path == "/mcp":
+        engine_response = response
         response = _augment_mcp_recall(body, response)
         response = _augment_tools_list(body, response)
+        # 회상 그림자는 번호 블록을 붙이기 전의 엔진 텍스트와 대조한다(E4-2).
+        if not isinstance(engine_response, StreamingResponse) and (call := _mcp_tools_call(body)) is not None:
+            if call[0] == "recall":
+                background_tasks.add_task(
+                    _recall_shadow_task, call[1], engine_response.status_code, engine_response.body
+                )
         # remember 는 회상과 달리 응답을 안 고친다 — 바이트 그대로 본 뒤 그림자만 태운다(E3a-2).
         if not isinstance(response, StreamingResponse) and (arguments := _mcp_remember_arguments(body)):
             background_tasks.add_task(
@@ -941,6 +956,39 @@ def _register_shadow_task(surface: str, transport: str, arguments: dict, status:
         event.status,
         surface=surface,
         **registers_shadow.event_payload(event),
+    )
+
+
+_RECALL_WIKI_INDEX = recall_wiki.WikiIndex()
+
+
+def _recall_python(arguments: dict) -> recall_shadow.PythonAnswer:
+    """그림자의 파이썬 길 — 읽기 전용 연결, 볼트는 엔진과 같은 /vault/wiki. 연결 못 정하면 값으로."""
+    dsn = os.environ.get("DOOR_PG_DSN")
+    if not dsn:
+        return Err(recall_answer.Failed("DOOR_PG_DSN not set"))
+    return recall_answer.run(
+        arguments,
+        dsn=dsn,
+        wiki_dir=Path(_vault_dir()) / "wiki",
+        index=_RECALL_WIKI_INDEX,
+        now_ns=time.time_ns(),
+    )
+
+
+def _recall_shadow_task(arguments: dict, status: int, body: bytes) -> None:
+    """회상 그림자(E4-2) — 응답이 간 뒤 같은 인자로 파이썬 회상을 계산해 엔진 텍스트와 대조하고
+    recall_shadow 사건 한 줄을 남긴다. 예외는 여기서 문 로그 한 줄 + 사건 status=error 로 접는다."""
+    try:
+        event = recall_shadow.run_shadow(status, body, lambda: _recall_python(arguments))
+    except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
+        print(f"[door] recall_shadow failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        event_log.try_append_event(
+            "door", recall_shadow.EVENT_NAME, "error", reason=f"{type(e).__name__}: {e}"
+        )
+        return
+    event_log.try_append_event(
+        "door", recall_shadow.EVENT_NAME, event.status, **recall_shadow.event_payload(event)
     )
 
 
