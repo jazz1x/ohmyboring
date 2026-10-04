@@ -435,7 +435,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         lang = state["lang"]
         n_repairs = len(state["repairs"])
         message = collabs.send(
-            card_view.build_blocks(
+            card_view.fit_blocks(
                 state["proposals"],
                 confirmation=state["confirmation"],
                 repairs=state["repairs"],

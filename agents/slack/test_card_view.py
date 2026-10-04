@@ -761,6 +761,53 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertNotIn("어제", headline_no_merge)
 
 
+class CardBudgetTests(unittest.TestCase):
+    """2026-10-04 08:00: a 35-block, 9,674-char card was refused (msg_blocks_too_long). Over
+    budget, the prose shortens; every row and button stays."""
+
+    def _reviews(self, n: int) -> list[cc.ProposedVerdict]:
+        long = "가" * 300
+        return [
+            cc.ProposedVerdict(
+                session_id=f"s{i}",
+                note=f"/vault/wiki/wiki-{700 + i:04d}.md",
+                kind="used",
+                at=f"t-{i}",
+                reason=long,
+                note_title=long,
+                work=long,
+            )
+            for i in range(n)
+        ]
+
+    def _actions(self, blocks) -> int:
+        return sum(1 for b in blocks if b["type"] == "actions")
+
+    def test_an_oversized_card_shortens_its_prose_and_keeps_every_row(self):
+        reviews = self._reviews(7)
+        full = cv.build_blocks([], reviews=reviews, lang="ko")
+        self.assertGreater(cv.card_chars(full), cv.CARD_CHARS_BUDGET)
+        fitted = cv.fit_blocks([], reviews=reviews, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted), cv.CARD_CHARS_BUDGET)
+        self.assertEqual(self._actions(fitted), self._actions(full))
+        self.assertEqual(self._actions(fitted), 7)
+
+    def test_a_card_under_budget_is_left_as_built(self):
+        reviews = self._reviews(1)
+        self.assertEqual(
+            cv.fit_blocks([], reviews=reviews, lang="ko"), cv.build_blocks([], reviews=reviews, lang="ko")
+        )
+
+    def test_a_card_that_cannot_fit_raises(self):
+        orig = cv.CARD_CHARS_BUDGET
+        cv.CARD_CHARS_BUDGET = 100
+        try:
+            with self.assertRaises(ValueError):
+                cv.fit_blocks([], reviews=self._reviews(1), lang="ko")
+        finally:
+            cv.CARD_CHARS_BUDGET = orig
+
+
 class RepairJudgmentBlockTests(unittest.TestCase):
     """The agent's 판정 on a repair row: verdict label(같은 이름·못 가름) + 이유 한 줄 +
     철자 목록 전부, in the card's own language. A row without a 판정 renders exactly as

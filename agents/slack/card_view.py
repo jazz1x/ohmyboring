@@ -324,7 +324,18 @@ def _repair_section_block(repair: Repair, strings: dict[str, str]) -> dict:
     return {"type": "section", "text": {"type": "mrkdwn", "text": body}}
 
 
-def _repair_judgment_block(judgment: RepairJudgment, strings: dict[str, str]) -> dict:
+REVIEW_TEXT_MAX = 200
+
+#: Slack rejects a card past a total size it does not publish (msg_blocks_too_long). Measured
+#: 2026-10-04 on blocks JSON (ensure_ascii=False): 9,445 chars posted, 9,545 refused.
+CARD_CHARS_BUDGET = 9000
+
+#: Cut steps for the free-text lines (reasons, titles, works) when a card is over budget —
+#: rows and buttons stay, only their prose shortens.
+TEXT_MAX_STEPS = (REVIEW_TEXT_MAX, 120, 80, 40)
+
+
+def _repair_judgment_block(judgment: RepairJudgment, strings: dict[str, str], text_max: int) -> dict:
     """The agent's 판정 on this row — what the repair-judge run left before the card drew:
     verdict label(같은 이름·못 가름) + 이유 한 줄 + 철자 목록 전부. generic 판정은 카드에
     오르지 않으니 여기 그릴 일이 없다."""
@@ -332,7 +343,9 @@ def _repair_judgment_block(judgment: RepairJudgment, strings: dict[str, str]) ->
     variants = ", ".join(f"`{v}`" for v in judgment.variants)
     text = "\n".join(
         (
-            strings["repair_judgment_line"].format(verdict=label, reason=_mrkdwn_plain(judgment.reason)),
+            strings["repair_judgment_line"].format(
+                verdict=label, reason=_mrkdwn_plain(judgment.reason, text_max)
+            ),
             strings["repair_variants_line"].format(variants=variants),
         )
     )
@@ -346,6 +359,7 @@ def _repair_row(
     verdict: ButtonVerdict | None,
     result: dict | None,
     strings: dict[str, str],
+    text_max: int = REVIEW_TEXT_MAX,
 ) -> list[dict]:
     row = [
         {"type": "divider"},
@@ -353,7 +367,7 @@ def _repair_row(
         _repair_section_block(repair, strings),
     ]
     if repair.judgment is not None:
-        row.append(_repair_judgment_block(repair.judgment, strings))
+        row.append(_repair_judgment_block(repair.judgment, strings, text_max))
     row.append(
         _repair_verdict_block(verdict, result, strings)
         if verdict is not None
@@ -362,17 +376,16 @@ def _repair_row(
     return row
 
 
-REVIEW_TEXT_MAX = 200
-
-
-def _mrkdwn_plain(text: str) -> str:
-    """A vault string shown as-is in mrkdwn, cut to REVIEW_TEXT_MAX — one row must stay well
-    under Slack's 3,000-char section limit, or Slack refuses the whole card."""
-    cut = text if len(text) <= REVIEW_TEXT_MAX else text[: REVIEW_TEXT_MAX - 1] + "…"
+def _mrkdwn_plain(text: str, limit: int = REVIEW_TEXT_MAX) -> str:
+    """A vault string shown as-is in mrkdwn, cut to `limit` — one row must stay well under
+    Slack's 3,000-char section limit, and the whole card under CARD_CHARS_BUDGET."""
+    cut = text if len(text) <= limit else text[: limit - 1] + "…"
     return cut.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _review_work_line(review: ProposedVerdict, strings: dict[str, str]) -> str:
+def _review_work_line(
+    review: ProposedVerdict, strings: dict[str, str], text_max: int = REVIEW_TEXT_MAX
+) -> str:
     """One row's 작업 line. A grouped row names every grouped work (smaller ones inline);
     past the second, the count folds into 「외 N건」 — the press still reaches every grouped
     session, so nothing waits for the next card unseen."""
@@ -383,7 +396,9 @@ def _review_work_line(review: ProposedVerdict, strings: dict[str, str]) -> str:
     parts = []
     for session, work in zip(sessions, works):
         parts.append(
-            _mrkdwn_plain(work) if work else strings["review_work_session"].format(session=session[:8])
+            _mrkdwn_plain(work, text_max)
+            if work
+            else strings["review_work_session"].format(session=session[:8])
         )
     if len(parts) > 2:
         parts = [*parts[:2], strings["review_work_more"].format(n=len(sessions) - 2)]
@@ -391,7 +406,10 @@ def _review_work_line(review: ProposedVerdict, strings: dict[str, str]) -> str:
 
 
 def _review_tag_block(
-    review: ProposedVerdict, strings: dict[str, str], note_links: tuple[NoteLink, ...] = ()
+    review: ProposedVerdict,
+    strings: dict[str, str],
+    note_links: tuple[NoteLink, ...] = (),
+    text_max: int = REVIEW_TEXT_MAX,
 ) -> dict:
     """What the agent judged, why, on which note, from which piece of work — ids stand in
     when the vault has no title or no session note. `reason` is the sentence the session-end
@@ -399,16 +417,16 @@ def _review_tag_block(
     근거 없음 line instead of inventing one."""
     label = note_label(review.note)
     note_line = (
-        strings["review_note_titled"].format(title=_mrkdwn_plain(review.note_title), note=label)
+        strings["review_note_titled"].format(title=_mrkdwn_plain(review.note_title, text_max), note=label)
         if review.note_title
         else strings["review_note_bare"].format(note=label)
     ) + note_links_text(label, note_links, strings)
     reason_line = (
-        strings["review_reason"].format(reason=_mrkdwn_plain(review.reason))
+        strings["review_reason"].format(reason=_mrkdwn_plain(review.reason, text_max))
         if review.reason
         else strings["review_reason_none"]
     )
-    work_line = _review_work_line(review, strings)
+    work_line = _review_work_line(review, strings, text_max)
     text = "\n".join((strings[f"review_judged_{review.kind}"], reason_line, note_line, work_line))
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
@@ -455,8 +473,9 @@ def _review_row(
     verdict: ButtonVerdict | None,
     strings: dict[str, str],
     note_links: tuple[NoteLink, ...] = (),
+    text_max: int = REVIEW_TEXT_MAX,
 ) -> list[dict]:
-    row = [{"type": "divider"}, _review_tag_block(review, strings, note_links)]
+    row = [{"type": "divider"}, _review_tag_block(review, strings, note_links, text_max)]
     row.append(
         _review_verdict_block(review, verdict, strings)
         if verdict is not None
@@ -668,6 +687,7 @@ def build_blocks(
     *,
     lang: str,
     note_links: tuple[NoteLink, ...] = (),
+    text_max: int = REVIEW_TEXT_MAX,
 ) -> list[dict]:
     """Block Kit for the card: the head line (past approvals cross-checked against today's
     registers — present only when there were any), then one five-block row per proposal,
@@ -716,7 +736,9 @@ def build_blocks(
             blocks.append(_lane_header_block(strings["todo_header"]))
             for ridx, repair in enumerate(repairs):
                 blocks.extend(
-                    _repair_row(ridx, n_repairs, repair, by_idx.get(ridx), repair_results.get(ridx), strings)
+                    _repair_row(
+                        ridx, n_repairs, repair, by_idx.get(ridx), repair_results.get(ridx), strings, text_max
+                    )
                 )
         blocks.append(_lane_header_block(strings["advice_header"]))
 
@@ -771,7 +793,9 @@ def build_blocks(
         r_shown = 0
         r_overflowed = False
         for ridx, review in enumerate(reviews):
-            addition = _review_row(n_slots + ridx, review, by_idx.get(n_slots + ridx), strings, note_links)
+            addition = _review_row(
+                n_slots + ridx, review, by_idx.get(n_slots + ridx), strings, note_links, text_max
+            )
             remaining_after = len(reviews) - ridx - 1
             reserve = 1 if remaining_after > 0 else 0
             if len(blocks) + len(addition) + reserve > BLOCK_LIMIT:
@@ -792,3 +816,19 @@ def build_blocks(
                 }
             )
     return blocks
+
+
+def card_chars(blocks: list[dict]) -> int:
+    return len(json.dumps(blocks, ensure_ascii=False))
+
+
+def fit_blocks(*args, **kwargs) -> list[dict]:
+    """build_blocks at the longest free-text cut that keeps the card under CARD_CHARS_BUDGET.
+    A card that is still over at the shortest cut raises — a refused post must say why."""
+    for text_max in TEXT_MAX_STEPS:
+        blocks = build_blocks(*args, text_max=text_max, **kwargs)
+        if card_chars(blocks) <= CARD_CHARS_BUDGET:
+            return blocks
+    raise ValueError(
+        f"card is {card_chars(blocks)} chars at text_max={TEXT_MAX_STEPS[-1]}, over {CARD_CHARS_BUDGET}"
+    )
