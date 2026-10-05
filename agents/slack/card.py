@@ -97,9 +97,10 @@ REVIEW_SINCE_HOURS = 24
 _KST = timezone(timedelta(hours=9))
 
 #: The card's own ledger: a posted card leaves card_confirmation (one per card, naming its
-#: card_ts) plus a card_proposal per advice row. The once-a-day guard reads exactly these —
-#: no new state file.
-_CARD_LEDGER_EVENTS = ("card_proposal", "card_confirmation")
+#: card_ts) plus a card_proposal per advice row, and a verdict_sample_shown per 확인용 표본 —
+#: the only trace a quiet card with samples leaves. The once-a-day guard reads exactly
+#: these — no new state file.
+_CARD_LEDGER_EVENTS = ("card_proposal", "card_confirmation", "verdict_sample_shown")
 
 
 def _parse_event_ts(raw: Any) -> datetime | None:
@@ -467,6 +468,16 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             )
         message = collabs.send(blocks)
         card_ts = message.ts
+        for sample in samples_shown:
+            collabs.record(
+                "verdict_sample_shown",
+                {
+                    "session_id": sample.session_id,
+                    "note": sample.note,
+                    "proposed_kind": sample.kind,
+                    "card_ts": card_ts,
+                },
+            )
         collabs.handover(
             card_press.session_name(message.channel, message.ts),
             datetime.now(UTC).isoformat(),
@@ -477,16 +488,6 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             # same idx, and _live_past_verdicts joins the two events on it.
             collabs.record(
                 "card_proposal", card_verdicts.proposal_event_fields(proposal, lang, card_ts, n_repairs + idx)
-            )
-        for sample in samples_shown:
-            collabs.record(
-                "verdict_sample_shown",
-                {
-                    "session_id": sample.session_id,
-                    "note": sample.note,
-                    "proposed_kind": sample.kind,
-                    "card_ts": card_ts,
-                },
             )
         confirmation = state["confirmation"]
         if confirmation is not None:

@@ -843,6 +843,31 @@ class GraphTests(unittest.TestCase):
             ],
         )
 
+    def test_shown_records_are_written_before_handover_and_proposal_records(self):
+        stubs = Stubs(
+            score_reading=cc.ScoreReading(score=cc.Scored(agreed=2, compared=3), samples=[self._sample(1)])
+        )
+        order: list[str] = []
+        stubs.record = lambda event, fields: order.append(event)
+        real_handover = self._handover
+        self._handover = lambda *a: order.append("handover") or real_handover(*a)
+        self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-shown-first"}})
+        self.assertEqual(order[0], "verdict_sample_shown")
+        self.assertLess(order.index("verdict_sample_shown"), order.index("handover"))
+
+    def test_a_failed_send_records_no_shown_sample(self):
+        stubs = Stubs(
+            score_reading=cc.ScoreReading(score=cc.Scored(agreed=2, compared=3), samples=[self._sample(1)])
+        )
+
+        def boom(blocks):
+            raise RuntimeError("slack down")
+
+        self._send = boom
+        with self.assertRaises(RuntimeError):
+            self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-send-fail"}})
+        self.assertEqual(stubs.records, [])
+
     def test_samples_over_the_budget_are_dropped_with_a_log_line_and_no_shown_record(self):
         long = "가" * 300
         reviews = [
@@ -1356,7 +1381,7 @@ class DryRunWiringTests(unittest.TestCase):
         stubs = Stubs(responses=[NOT_WORTH_JSON] * 8)
         buf = io.StringIO()
 
-        with (
+        patches = [
             mock.patch.object(card, "_env_send", side_effect=fake_env_send),
             mock.patch.object(card_live, "_live_handover", side_effect=fake_live_handover),
             mock.patch.object(card_live, "_live_record", side_effect=fake_live_record),
@@ -1379,8 +1404,11 @@ class DryRunWiringTests(unittest.TestCase):
             mock.patch.object(card_live, "_live_repair_judgments", side_effect=lambda: {}),
             mock.patch.object(card_live, "_held_repair_subjects", side_effect=set),
             mock.patch.object(card, "make_propose", return_value=stubs.propose),
-            contextlib.redirect_stdout(buf),
-        ):
+        ]
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            stack.enter_context(contextlib.redirect_stdout(buf))
             rc = card._run_dry()
 
         self.assertEqual(rc, 0)
@@ -2151,7 +2179,9 @@ class PostedTodayGuardTests(unittest.TestCase):
 
     def _run_main(self, events, graph_side_effect="default"):
         fake_event_log = mock.Mock()
-        fake_event_log.recent_events.return_value = events
+        fake_event_log.recent_events.side_effect = lambda limit, event_name: [
+            e for e in events if e.get("event") == event_name
+        ]
         web_module = mock.MagicMock()
         fake_graph = mock.Mock()
         fake_graph.invoke.return_value = {"message": cc.PostedCard(channel=CARD_CH, ts=CARD_TS)}
@@ -2180,8 +2210,16 @@ class PostedTodayGuardTests(unittest.TestCase):
         self.assertEqual(out.strip().count("\n"), 0, "one line, said so")
         self.assertEqual(
             {c.kwargs["event_name"] for c in fake_event_log.recent_events.call_args_list},
-            {"card_proposal", "card_confirmation"},
+            {"card_proposal", "card_confirmation", "verdict_sample_shown"},
         )
+
+    def test_a_quiet_card_with_samples_blocks_a_second_run_the_same_day(self):
+        """A card with no proposals and no approvals leaves only verdict_sample_shown;
+        the guard must still see it, or a second run draws two more samples."""
+        events = [self._today_event(name="verdict_sample_shown")]
+        rc, out, _ = self._run_main(events, graph_side_effect=AssertionError("the graph must not run"))
+        self.assertEqual(rc, 0)
+        self.assertIn("[card] already posted today (ts=1727480000.000100)", out)
 
     def test_main_runs_when_yesterdays_card_is_the_newest(self):
         yesterday = (datetime.now(UTC) - timedelta(days=1)).isoformat()
@@ -2240,6 +2278,9 @@ class ScoreAndSampleTests(unittest.TestCase):
     def _picked(self, population=None, **kw) -> list[str]:
         args = {"excluded": set(), "day": self.DAY, "compared": 3, **kw}
         return [p.session_id for p in card_live.pick_confirm_samples(population or self.POP, **args)]
+
+    def test_a_shown_record_outlives_the_population_it_was_drawn_from(self):
+        self.assertGreaterEqual(card_live.SAMPLE_SHOWN_WINDOW_HOURS, card_live.SAMPLE_POPULATION_HOURS)
 
     def test_the_tally_counts_agree_and_flip_once_per_pair_last_press_wins(self):
         rows = [
