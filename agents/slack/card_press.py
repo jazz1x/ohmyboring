@@ -34,6 +34,9 @@ _LANE_CHOICES = {
 #: 라벨은 note_label이 낼 수 있는 모양이 아니니 경로 새는 구멍으로 본다.
 _NOTE_LANES = ("advice", "review")
 
+#: 확인용 표본 줄이 받는 선택 — card_view.SAMPLE_CHOICES 와 같은 둘.
+_SAMPLE_CHOICES = ("do", "drop")
+
 
 #: How long a posted card's buttons are answered. The next card reads its past proposals
 #: this much wider than its verdict window, so a press older than this would leave a verdict
@@ -93,6 +96,9 @@ def parse_press(payload: dict, owner_id: str | None) -> Press | Rejected:
         return Rejected(reason=f"unknown lane {lane!r}")
     if choice not in _LANE_CHOICES[lane]:
         return Rejected(reason=f"{lane} lane has no {choice}")
+    if value.get("sample") is not None and (lane != "review" or choice not in _SAMPLE_CHOICES):
+        # 확인 표본 줄의 버튼은 맞아요/아니에요뿐 — 맡길게요·보류는 오너 표본이 아니다
+        return Rejected(reason=f"sample row has no {choice}")
     if lane in _NOTE_LANES:
         note = value.get("note")
         if not isinstance(note, str) or not note or "/" in note:
@@ -159,6 +165,8 @@ def effects(press: Press, delegated: card_types.Delegated | None = None) -> list
         "card_ts": press.card_ts,
     }
     sessions = list(press.sessions) or [press.session]
+    if press.sample is not None:
+        fields = {**fields, "sample": press.sample}
     if press.choice == "defer":
         # 보류: 판정을 남기지 않는다 — 간선 없이 사건 한 줄. 묶인 세션 전부가 이 한 줄에
         # 실리고, card_live 가 이 사건을 읽어 이레 창(고른 짝은 이레 동안 다시 안 올라옴,

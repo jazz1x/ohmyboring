@@ -20,11 +20,13 @@ import glob
 import json
 import math
 import os
+import random
 import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import date
 from typing import Any
 
 import card_repair_judge
@@ -45,6 +47,9 @@ from card_types import (
     ProposedVerdict,
     RepairJudgment,
     ResolvedNote,
+    Scored,
+    ScoreReading,
+    ScoreUnreadable,
     Unresolved,
 )
 from pydantic import ValidationError
@@ -57,6 +62,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 from retriever import BoringRetriever  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
+import label_core  # noqa: E402
 import vault_note  # noqa: E402
 
 
@@ -316,14 +322,9 @@ def _group_reviews(rows: list[ProposedVerdict]) -> list[ProposedVerdict]:
     return out
 
 
-def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
-    """The review lane's rows: session-end verdict_proposed events, contested first, then
-    newest first, the same (note, kind) proposed by several sessions folded into one row,
-    a pair a successful 「맡길게요」 judged carrying the model's 이유 in place of the scorer's
-    sentence (the kind line itself stays the session's own claim), pairs the owner held
-    within the 이레 window left off, at most REVIEW_LIMIT. A row missing a field this value
-    needs is malformed — raise (F5/ROP), never skip: a dropped row here is a judgment the
-    owner was never shown."""
+def _proposed_rows(since_hours: int) -> list[ProposedVerdict]:
+    """Every session-end verdict_proposed event as a value, event order. A row missing a
+    field this value needs is malformed — raise (F5/ROP), never skip."""
     parsed: list[ProposedVerdict] = []
     for entry in _live_events("verdict_proposed", since_hours):
         attrs = entry.get("attributes") or {}
@@ -339,6 +340,29 @@ def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
             )
         except (KeyError, TypeError, ValidationError) as e:
             raise ValueError(f"malformed verdict_proposed row: {attrs!r}: {e}") from e
+    return parsed
+
+
+def _with_titles_and_works(rows: list[ProposedVerdict]) -> list[ProposedVerdict]:
+    works = _session_works() if rows else {}
+    out = []
+    for r in rows:
+        update: dict = {"note_title": _note_title(r.note), "work": works.get(r.session_id, "")}
+        if r.sessions:
+            update["works"] = [works.get(s, "") for s in r.sessions]
+        out.append(r.model_copy(update=update))
+    return out
+
+
+def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
+    """The review lane's rows: session-end verdict_proposed events, contested first, then
+    newest first, the same (note, kind) proposed by several sessions folded into one row,
+    a pair a successful 「맡길게요」 judged carrying the model's 이유 in place of the scorer's
+    sentence (the kind line itself stays the session's own claim), pairs the owner held
+    within the 이레 window left off, at most REVIEW_LIMIT. A row missing a field this value
+    needs is malformed — raise (F5/ROP), never skip: a dropped row here is a judgment the
+    owner was never shown."""
+    parsed = _proposed_rows(since_hours)
     parsed.sort(key=lambda p: p.at, reverse=True)  # newest first
     parsed.sort(key=lambda p: p.kind != "contested")  # stable: contested keeps the head
     # The same judgement can land twice (two SessionEnd hooks, 1ms apart — 2026-09-30).
@@ -359,15 +383,109 @@ def _live_proposed(since_hours: int) -> list[ProposedVerdict]:
             ]
         deferred = _deferred_review_pairs()
         grouped = [r for r in grouped if (r.note, r.kind) not in deferred]
-    shown = grouped[:REVIEW_LIMIT]
-    works = _session_works() if shown else {}
-    out = []
-    for r in shown:
-        update: dict = {"note_title": _note_title(r.note), "work": works.get(r.session_id, "")}
-        if r.sessions:
-            update["works"] = [works.get(s, "") for s in r.sessions]
-        out.append(r.model_copy(update=update))
-    return out
+    return _with_titles_and_works(grouped[:REVIEW_LIMIT])
+
+
+#: The 채점 줄's reach — every owner press since the review lane began, not the card's window.
+SCORE_WINDOW_HOURS = 24 * 90
+
+#: The 확인용 표본's population: session-end calls this recent. Held to three days so a
+#: day's draw stays inside /events' 1,000-row page and the owner can still place the work.
+SAMPLE_POPULATION_HOURS = 72
+
+#: How far back a 「보인」 record keeps a pair from being asked again.
+SAMPLE_SHOWN_WINDOW_HOURS = REVIEW_DEFER_WINDOW_HOURS
+
+#: At most this many 확인용 표본 a day.
+CONFIRM_SAMPLE_MAX = 2
+
+Pair = tuple[str, str]  # (session id, note path)
+
+
+def _row_pairs(attrs: dict[str, Any]) -> list[Pair]:
+    """The (session, note) pairs one verdict_reviewed row speaks for — a hold or delegate
+    row carries every grouped session in `sessions`, an agree/flip row one `session_id`.
+    A row naming no note or no session names no pair."""
+    note = attrs.get("note")
+    sessions = attrs.get("sessions") or [attrs.get("session_id")]
+    if not isinstance(note, str) or not note:
+        return []
+    return [(s, note) for s in sessions if isinstance(s, str) and s]
+
+
+def tally(reviewed: list[dict[str, Any]]) -> Scored:
+    """agree/flip presses folded to one per (session, note) — the last press wins. delegate
+    rows are the agent's own hand and a hold is 「안 물어봄」: neither enters the pair. An
+    agree/flip row naming no session or note is malformed — raise, never skip."""
+    last: dict[Pair, tuple[str, str]] = {}
+    for entry in reviewed:
+        attrs = entry.get("attributes") or {}
+        choice = attrs.get("choice")
+        if choice not in ("agree", "flip"):
+            continue
+        pairs = _row_pairs(attrs)
+        at = entry.get("observed_at")
+        if len(pairs) != 1 or not isinstance(at, str):
+            raise ValueError(f"malformed verdict_reviewed {choice} row: {attrs!r}")
+        key = pairs[0]
+        if key not in last or at >= last[key][0]:
+            last[key] = (at, choice)
+    return Scored(agreed=sum(1 for _, c in last.values() if c == "agree"), compared=len(last))
+
+
+def pressed_pairs(reviewed: list[dict[str, Any]]) -> set[Pair]:
+    return {pair for entry in reviewed for pair in _row_pairs(entry.get("attributes") or {})}
+
+
+def pick_confirm_samples(
+    population: list[ProposedVerdict],
+    *,
+    excluded: set[Pair],
+    day: date,
+    compared: int,
+) -> list[ProposedVerdict]:
+    """The day's 확인용 무작위 표본: calls the owner has not pressed, not seen as a sample,
+    and not on today's review lane — at most CONFIRM_SAMPLE_MAX, drawn by a generator
+    seeded with the KST date so a second run the same day draws the same ones. The pool is
+    ordered by (session, note) before the draw, so event order never moves the pick. Once
+    `compared` reaches label_core.MIN_COMPARED the draw is empty: the loop stops on its own."""
+    if compared >= label_core.MIN_COMPARED:
+        return []
+    pool: dict[Pair, ProposedVerdict] = {}
+    for row in population:
+        key = (row.session_id, row.note)
+        if key not in excluded and key not in pool:
+            pool[key] = row
+    ordered = [pool[key] for key in sorted(pool)]
+    return random.Random(day.isoformat()).sample(ordered, min(CONFIRM_SAMPLE_MAX, len(ordered)))
+
+
+def _live_score(reviews: list[ProposedVerdict], day: date) -> ScoreReading:
+    """The tally of the owner's presses, and the day's 확인용 표본. A tally that cannot be
+    read is a ScoreUnreadable value the card prints as such — never a number, never a
+    skipped line; a sample pool that cannot be read draws nothing and says why on stderr."""
+    try:
+        reviewed = _live_events("verdict_reviewed", SCORE_WINDOW_HOURS)
+        score = tally(reviewed)
+    except (OSError, ValueError) as e:
+        return ScoreReading(score=ScoreUnreadable(reason=" ".join(str(e).split())))
+    try:
+        shown = {
+            pair
+            for entry in _live_events("verdict_sample_shown", SAMPLE_SHOWN_WINDOW_HOURS)
+            for pair in _row_pairs(entry.get("attributes") or {})
+        }
+        on_lane = {(s, r.note) for r in reviews for s in (r.sessions or [r.session_id])}
+        samples = pick_confirm_samples(
+            _proposed_rows(SAMPLE_POPULATION_HOURS),
+            excluded=pressed_pairs(reviewed) | shown | on_lane,
+            day=day,
+            compared=score.compared,
+        )
+    except (OSError, ValueError) as e:
+        print(f"[card] 확인 표본을 못 뽑았다: {' '.join(str(e).split())}", file=sys.stderr)
+        return ScoreReading(score=score)
+    return ScoreReading(score=score, samples=_with_titles_and_works(samples))
 
 
 _FRONTMATTER_FIELD = re.compile(r"^(title|project|date|omb_session_id):[ \t]*(.*?)[ \t]*$", re.M)

@@ -58,6 +58,10 @@ STRINGS: dict[str, str] = {
     "review_verdict_flip": "↺ 反転 — 所有者の判定で{kind}",
     "review_verdict_delegate": "✓ 委任 — エージェントの判定のまま",
     "review_verdict_defer": "… 保留 — 七日後にもう一度上げます",
+    "score_line_short": "採点 · セッション終了時の判定: サンプル不足 {compared}/{min}",
+    "score_line": "採点 · セッション終了時の判定: 一致 {agreed}/{compared} ({pct}%) · 基準 {floor}%",
+    "score_line_unreadable": "採点 · 読み取り失敗",
+    "sample_header": "確認用ランダムサンプル — エージェントはこう見ました",
     "superseded_label": "置換済み",
 }
 

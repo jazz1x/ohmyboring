@@ -58,6 +58,10 @@ STRINGS: dict[str, str] = {
     "review_verdict_flip": "↺ 뒤집음 — 소유자 판정으로 {kind}",
     "review_verdict_delegate": "✓ 맡김 — 에이전트 판정 그대로",
     "review_verdict_defer": "⏸ 보류 — 이레 뒤에 다시 올려요",
+    "score_line_short": "채점 · 세션 끝 판정: 표본 부족 {compared}/{min}",
+    "score_line": "채점 · 세션 끝 판정: 일치 {agreed}/{compared} ({pct}%) · 문턱 {floor}%",
+    "score_line_unreadable": "채점 · 읽기 실패",
+    "sample_header": "확인용 무작위 표본 — 에이전트가 이렇게 봤어요",
     "superseded_label": "대체됨",
 }
 

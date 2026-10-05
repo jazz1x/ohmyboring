@@ -58,6 +58,10 @@ STRINGS: dict[str, str] = {
     "review_verdict_flip": "↺ Flipped — owner judged {kind}",
     "review_verdict_delegate": "✓ Delegated — the agent's call stands",
     "review_verdict_defer": "… Held — back after seven days",
+    "score_line_short": "Scoring · session-end calls: too few samples {compared}/{min}",
+    "score_line": "Scoring · session-end calls: agreed {agreed}/{compared} ({pct}%) · bar {floor}%",
+    "score_line_unreadable": "Scoring · read failed",
+    "sample_header": "Random spot check — this is how the agent saw it",
     "superseded_label": "superseded",
 }
 

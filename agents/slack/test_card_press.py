@@ -53,6 +53,10 @@ def _card_values() -> dict[str, str]:
     return {el["action_id"]: el["value"] for b in blocks if b["type"] == "actions" for el in b["elements"]}
 
 
+def _card_values_with(blocks: list[dict]) -> dict[str, str]:
+    return {el["action_id"]: el["value"] for b in blocks if b["type"] == "actions" for el in b["elements"]}
+
+
 def _payload(action_id: str, value, user: str = OWNER) -> dict:
     return {
         "type": "block_actions",
@@ -492,6 +496,49 @@ class RejectedTests(unittest.TestCase):
         self.assertEqual(out.reason, "no proposal -5")
         out = card_verdicts.parse_action(_payload("card:-5:do", value), owner_id=OWNER, n_total=3)
         self.assertIsInstance(out, cc.Rejected)
+
+    def test_a_confirm_sample_press_leaves_sample_confirm_on_the_same_events(self):
+        sample = cc.ProposedVerdict(
+            session_id="sess-s", note="/vault/wiki/wiki-0800.md", kind="used", at="t-1"
+        )
+        blocks = cv.build_blocks([], reviews=[REVIEW], samples=[sample], lang="ko")
+        values = {
+            el["action_id"]: el["value"] for b in blocks if b["type"] == "actions" for el in b["elements"]
+        }
+        fields = {
+            "session_id": "sess-s",
+            "note": "/vault/wiki/wiki-0800.md",
+            "proposed_kind": "used",
+            "card_ts": CARD_TS,
+            "sample": "confirm",
+        }
+        agree = _press("card:1:do", values["card:1:do"])
+        self.assertEqual(
+            cp.effects(agree), [cc.Record(event="verdict_reviewed", fields={**fields, "choice": "agree"})]
+        )
+        flip = cp.effects(_press("card:1:drop", values["card:1:drop"]))
+        self.assertEqual(
+            flip,
+            [
+                cc.Consumption(session="sess-s", kind="contested", paths=["/vault/wiki/wiki-0800.md"]),
+                cc.Record(event="verdict_reviewed", fields={**fields, "choice": "flip"}),
+            ],
+        )
+        ordinary = cp.effects(_press("card:0:do", _card_values_with(blocks)["card:0:do"]))
+        self.assertNotIn("sample", ordinary[0].fields)
+
+    def test_a_sample_press_has_no_delegate_and_no_defer(self):
+        sample = cc.ProposedVerdict(
+            session_id="sess-s", note="/vault/wiki/wiki-0800.md", kind="used", at="t-1"
+        )
+        blocks = cv.build_blocks([], samples=[sample], lang="ko")
+        value = _card_values_with(blocks)["card:0:do"]
+        for choice in ("delegate", "defer"):
+            out = cp.parse_press(_payload(f"card:0:{choice}", value), owner_id=OWNER)
+            self.assertIsInstance(out, cc.Rejected)
+            self.assertEqual(out.reason, f"sample row has no {choice}")
+        advice = json.dumps({"lane": "advice", "note": "wiki-0576", "sample": "confirm"})
+        self.assertIsInstance(cp.parse_press(_payload("card:0:do", advice), owner_id=OWNER), cc.Rejected)
 
     def test_a_note_label_with_a_slash_is_rejected(self):
         # 라벨에 "/" 가 들어가면 note_label이 낼 수 있는 모양이 아니다 — 경로 새는

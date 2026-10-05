@@ -57,7 +57,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any, NamedTuple, TypedDict
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
@@ -78,6 +78,7 @@ from langgraph.graph.state import CompiledStateGraph  # noqa: E402
 from ohmyboring import config as boring_config  # noqa: E402
 from ohmyboring.adapters import events as event_log  # noqa: E402
 from ohmyboring.adapters import slack as slack_post  # noqa: E402
+from ohmyboring.i18n import card as card_i18n  # noqa: E402
 
 DEFAULT_MODEL = os.environ.get("CARD_MODEL") or "gemma4:12b"
 # The confirmation window on the card's head line — yesterday's and the day before's approvals.
@@ -147,6 +148,8 @@ class CardState(TypedDict):
     repairs_total_groups: int  # read_repairs' full count, for the head line
     merged_yesterday_rows: int | None  # None when nothing merged in the last 24h
     reviews: list[card_types.ProposedVerdict]  # review lane's rows — the agent's own calls
+    score: card_types.Score | None  # 채점 줄 — None when the collaborator was never asked
+    samples: list[card_types.ProposedVerdict]  # today's 확인용 무작위 표본, before the size budget
     message: card_types.PostedCard | None
     confirmation: card_types.Confirmation | None
     priority_subjects: list[tuple[str, str]]  # (project, subject)
@@ -183,6 +186,11 @@ class Collaborators(NamedTuple):
     proposed: Callable[[int], list[card_types.ProposedVerdict]] = lambda since_hours: []
     held_repairs: Callable[[], set[str]] = lambda: set()
     repair_judgments: Callable[[], dict[tuple[str, tuple[str, ...]], card_types.RepairJudgment]] = lambda: {}
+    # (today's review rows, today KST) → the owner-press tally and the day's 확인용 표본;
+    # defaulting to "nobody asked" draws no 채점 줄 and no sample.
+    score: Callable[[list[card_types.ProposedVerdict], date], card_types.ScoreReading] = lambda reviews, day: (
+        card_types.ScoreReading()
+    )
 
 
 def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
@@ -205,6 +213,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             proposed=card_live._live_proposed,
             held_repairs=card_live._held_repair_subjects,
             repair_judgments=card_live._live_repair_judgments,
+            score=card_live._live_score,
         )
 
     def read_repairs(_: CardState) -> dict:
@@ -236,8 +245,12 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         """The review lane's rows — what the agent classified at session end over the last
         day. A dead engine raises here the same way an unreadable judged history does in
         resolve: a card that cannot read the proposals it would ask the owner to flip is
-        the wrong card to send."""
-        return {"reviews": collabs.proposed(REVIEW_SINCE_HOURS)}
+        the wrong card to send. The 채점 줄 and the 확인용 표본 ride the same read: the sample
+        draw needs today's review rows to leave them out, and an unreadable tally is a value
+        the card prints, not a reason to hold the card."""
+        reviews = collabs.proposed(REVIEW_SINCE_HOURS)
+        reading = collabs.score(reviews, datetime.now(_KST).date())
+        return {"reviews": reviews, "score": reading.score, "samples": reading.samples}
 
     def read_registers(_: CardState) -> dict:
         active = collabs.active_projects(PROJECT_ACTIVE_DAYS)
@@ -434,18 +447,25 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     def post_card(state: CardState) -> dict:
         lang = state["lang"]
         n_repairs = len(state["repairs"])
-        message = collabs.send(
-            card_view.fit_blocks(
-                state["proposals"],
-                confirmation=state["confirmation"],
-                repairs=state["repairs"],
-                repairs_total_groups=state["repairs_total_groups"],
-                merged_yesterday_rows=state["merged_yesterday_rows"],
-                reviews=state["reviews"],
-                lang=lang,
-                note_links=boring_config.note_links(),
-            )
+        blocks, samples_shown = card_view.fit_card(
+            state["proposals"],
+            confirmation=state["confirmation"],
+            repairs=state["repairs"],
+            repairs_total_groups=state["repairs_total_groups"],
+            merged_yesterday_rows=state["merged_yesterday_rows"],
+            reviews=state["reviews"],
+            lang=lang,
+            note_links=boring_config.note_links(),
+            score=state["score"],
+            samples=state["samples"],
         )
+        if state["samples"] and not samples_shown:
+            print(
+                f"[card] 확인 표본 {len(state['samples'])}건을 뺐다 — 카드가 크기 예산 "
+                f"{card_view.CARD_CHARS_BUDGET}자(또는 블록 상한) 밖",
+                file=sys.stderr,
+            )
+        message = collabs.send(blocks)
         card_ts = message.ts
         collabs.handover(
             card_press.session_name(message.channel, message.ts),
@@ -457,6 +477,16 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             # same idx, and _live_past_verdicts joins the two events on it.
             collabs.record(
                 "card_proposal", card_verdicts.proposal_event_fields(proposal, lang, card_ts, n_repairs + idx)
+            )
+        for sample in samples_shown:
+            collabs.record(
+                "verdict_sample_shown",
+                {
+                    "session_id": sample.session_id,
+                    "note": sample.note,
+                    "proposed_kind": sample.kind,
+                    "card_ts": card_ts,
+                },
             )
         confirmation = state["confirmation"]
         if confirmation is not None:
@@ -554,24 +584,32 @@ def _run_dry() -> int:
     past_verdicts stay live: both are reads (GET /projects, GET /events), not writes, so
     the dry run's projects_called and suppression numbers are the real ones the next live
     card would see."""
+    sent: list[list[dict]] = []
+
+    def send(blocks: list[dict]) -> card_types.PostedCard:
+        sent.append(blocks)
+        return _dry_send(blocks)
+
+    lang = card_advice.resolve_lang(boring_config.note_lang())
     collabs = Collaborators(
         fetch=card_live._live_fetch,
         search=card_live._live_search,
         read_note=card_live._live_read_note,
         propose=make_propose(),
-        send=_dry_send,
+        send=send,
         handover=_dry_handover,
         resolve=card_live._live_resolve,
         approved=card_live._live_approved,
         record=_dry_record,
         active_projects=card_live._live_active_projects,
         past_verdicts=card_live._live_past_verdicts,
-        lang=card_advice.resolve_lang(boring_config.note_lang()),
+        lang=lang,
         repairs=card_live._live_repairs,
         merged_yesterday=card_live._live_merged_yesterday,
         proposed=card_live._live_proposed,
         held_repairs=card_live._held_repair_subjects,
         repair_judgments=card_live._live_repair_judgments,
+        score=card_live._live_score,
     )
     graph = build_graph(collabs)
     state = graph.invoke({})
@@ -595,6 +633,16 @@ def _run_dry() -> int:
                 "sufficiency_reasons": stats.sufficiency_reasons,
                 "ungrounded_reasons": stats.ungrounded_reasons,
                 "suppressed": state["suppressed_count"],
+                "score": state["score"].model_dump() if state["score"] else None,
+                "scoreline": (
+                    card_view.scoreline_text(state["score"], card_i18n.STRINGS[lang])
+                    if state["score"]
+                    else None
+                ),
+                "confirm_samples": [
+                    {"session_id": s.session_id, "note": s.note, "kind": s.kind} for s in state["samples"]
+                ],
+                "card_chars": card_view.card_chars(sent[0]),
             },
             ensure_ascii=False,
             indent=2,

@@ -1156,5 +1156,132 @@ class MarkPressedParityTests(unittest.TestCase):
         self.assertEqual(len(retried), len(blocks))
 
 
+def _context_texts(blocks) -> list[str]:
+    return [
+        el["text"] for b in blocks if b["type"] == "context" for el in b["elements"] if el["type"] == "mrkdwn"
+    ]
+
+
+class ScorelineTests(unittest.TestCase):
+    def _line(self, score) -> str:
+        blocks = cv.build_blocks([], lang="ko", score=score)
+        return next(t for t in _context_texts(blocks) if t.startswith("채점"))
+
+    def test_under_the_floor_it_shows_the_sample_count_and_no_numerator_or_rate(self):
+        line = self._line(cc.Scored(agreed=2, compared=3))
+        self.assertEqual(line, "채점 · 세션 끝 판정: 표본 부족 3/20")
+        self.assertNotIn("%", line)
+
+    def test_at_the_floor_it_shows_agreement_and_the_bar(self):
+        self.assertEqual(
+            self._line(cc.Scored(agreed=17, compared=20)), "채점 · 세션 끝 판정: 일치 17/20 (85%) · 문턱 80%"
+        )
+
+    def test_an_unreadable_log_says_so(self):
+        self.assertEqual(self._line(cc.ScoreUnreadable(reason="boom")), "채점 · 읽기 실패")
+
+    def test_no_score_leaves_the_card_as_it_was(self):
+        self.assertEqual(cv.build_blocks([], lang="ko"), cv.build_blocks([], lang="ko", score=None))
+        self.assertFalse(any(t.startswith("채점") for t in _context_texts(cv.build_blocks([], lang="ko"))))
+
+
+class ConfirmSampleRowTests(unittest.TestCase):
+    REVIEW = cc.ProposedVerdict(session_id="sr", note="/vault/wiki/wiki-0700.md", kind="used", at="t-1")
+    SAMPLES = [
+        cc.ProposedVerdict(session_id="sa", note="/vault/wiki/wiki-0801.md", kind="used", at="t-2"),
+        cc.ProposedVerdict(session_id="sb", note="/vault/wiki/wiki-0802.md", kind="contested", at="t-3"),
+    ]
+
+    def _blocks(self, **kw):
+        return cv.build_blocks([], reviews=[self.REVIEW], lang="ko", samples=self.SAMPLES, **kw)
+
+    def test_a_sample_row_has_exactly_right_and_wrong_buttons_carrying_the_sample_tag(self):
+        blocks = self._blocks()
+        review_actions, *sample_actions = [b for b in blocks if b["type"] == "actions"]
+        self.assertEqual(len(review_actions["elements"]), 4)
+        self.assertEqual(len(sample_actions), 2)
+        for slot, actions in zip((1, 2), sample_actions):
+            self.assertEqual(
+                [el["action_id"] for el in actions["elements"]], [f"card:{slot}:do", f"card:{slot}:drop"]
+            )
+            self.assertEqual([el["text"]["text"] for el in actions["elements"]], ["맞아요", "아니에요"])
+            for el in actions["elements"]:
+                self.assertEqual(json.loads(el["value"])["sample"], "confirm")
+        self.assertNotIn("sample", json.loads(review_actions["elements"][0]["value"]))
+
+    def test_the_header_precedes_the_rows_and_names_the_draw(self):
+        blocks = self._blocks()
+        header_at = next(i for i, b in enumerate(blocks) if b.get("block_id") == cv.SAMPLES_BLOCK_ID)
+        self.assertEqual(
+            blocks[header_at]["elements"][0]["text"], "*확인용 무작위 표본 — 에이전트가 이렇게 봤어요*"
+        )
+        self.assertEqual(
+            [b["type"] for b in blocks[header_at + 1 : header_at + 4]], ["divider", "section", "actions"]
+        )
+
+    def test_the_samples_add_one_header_and_three_blocks_per_row_and_nothing_else(self):
+        without = cv.build_blocks([], reviews=[self.REVIEW], lang="ko")
+        with_samples = self._blocks()
+        self.assertEqual(with_samples[: len(without)], without)
+        self.assertEqual(len(with_samples) - len(without), 1 + 3 * len(self.SAMPLES))
+
+    def test_a_sample_press_marks_its_row_like_any_review_row(self):
+        blocks = self._blocks()
+        press = cc.ReviewPress(
+            idx=2,
+            choice="drop",
+            user="U",
+            card_ts="1",
+            channel="C",
+            session="sb",
+            note="wiki-0802",
+            kind="contested",
+            sample="confirm",
+        )
+        marked = cv.mark_pressed(blocks, press, lang="ko")
+        self.assertFalse(isinstance(marked, cc.Rejected))
+        self.assertFalse(any(cv._is_row_actions(b, 2) for b in marked))
+        self.assertTrue(any(cv._is_row_actions(b, 1) for b in marked))
+
+    def test_over_budget_samples_go_first_and_the_score_and_reviews_stay(self):
+        long = "가" * 300
+        reviews = [
+            cc.ProposedVerdict(
+                session_id=f"s{i}",
+                note=f"/vault/wiki/wiki-{700 + i:04d}.md",
+                kind="used",
+                at=f"t-{i}",
+                reason=long,
+                note_title=long,
+                work=long,
+            )
+            for i in range(5)
+        ]
+        samples = [
+            cc.ProposedVerdict(
+                session_id=f"x{i}",
+                note=f"/vault/wiki/wiki-{900 + i:04d}.md",
+                kind="used",
+                at=f"t-{i}",
+                reason=long,
+                note_title=long,
+                work=long,
+            )
+            for i in range(2)
+        ]
+        score = cc.Scored(agreed=2, compared=3)
+        full = cv.build_blocks([], reviews=reviews, samples=samples, score=score, lang="ko")
+        self.assertGreater(cv.card_chars(full), cv.CARD_CHARS_BUDGET)
+        blocks, carried = cv.fit_card([], reviews=reviews, samples=samples, score=score, lang="ko")
+        self.assertEqual(carried, [])
+        self.assertFalse(any(b.get("block_id") == cv.SAMPLES_BLOCK_ID for b in blocks))
+        self.assertLessEqual(cv.card_chars(blocks), cv.CARD_CHARS_BUDGET)
+        self.assertEqual(sum(1 for b in blocks if b["type"] == "actions"), 5)
+        self.assertTrue(any(t.startswith("채점") for t in _context_texts(blocks)))
+        small, carried = cv.fit_card([], reviews=reviews[:1], samples=samples, score=score, lang="ko")
+        self.assertEqual(carried, samples)
+        self.assertTrue(any(b.get("block_id") == cv.SAMPLES_BLOCK_ID for b in small))
+
+
 if __name__ == "__main__":
     unittest.main()

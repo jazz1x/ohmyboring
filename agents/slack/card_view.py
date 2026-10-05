@@ -37,9 +37,12 @@ from typing import assert_never
 from urllib.parse import quote
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 
+import label_core  # noqa: E402
 from card_types import (  # noqa: E402
     CHOICES,
+    SAMPLE_CONFIRM,
     ButtonVerdict,
     Confirmation,
     Done,
@@ -58,6 +61,8 @@ from card_types import (  # noqa: E402
     RepairPress,
     RepairUnanswered,
     ReviewPress,
+    Score,
+    Scored,
 )
 
 from ohmyboring.config import FileLink, NoteLink, ObsidianLink  # noqa: E402
@@ -431,15 +436,24 @@ def _review_tag_block(
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 
-def _review_actions_block(idx: int, review: ProposedVerdict, strings: dict[str, str]) -> dict:
+#: 확인용 표본 줄의 버튼 — 오너 판정 둘뿐. 맡길게요는 오너 표본이 아니게 되고, 보류는
+#: 안 누른 것과 같다.
+SAMPLE_CHOICES = ("do", "drop")
+
+
+def _review_actions_block(
+    idx: int, review: ProposedVerdict, strings: dict[str, str], *, sample: bool = False
+) -> dict:
     # 맞아요/아니에요는 오너 판정, 맡길게요는 에이전트 판정을 그대로 받는 맡긴 판정,
     # 보류는 판정 없이 사건 한 줄 — 넷 다 묶인 세션 전부에 닿는다. 안 누르는 것도 여전히
     # 아무 흔적 없는 보류다.
     data = {"session": review.session_id, "kind": review.kind}
     if review.sessions:
         data["sessions"] = list(review.sessions)
+    if sample:
+        data["sample"] = SAMPLE_CONFIRM
     elements = []
-    for choice in ("do", "drop", "delegate", "defer"):
+    for choice in SAMPLE_CHOICES if sample else ("do", "drop", "delegate", "defer"):
         button = {
             "type": "button",
             "text": {"type": "plain_text", "text": strings[f"review_button_{choice}"], "emoji": True},
@@ -474,14 +488,53 @@ def _review_row(
     strings: dict[str, str],
     note_links: tuple[NoteLink, ...] = (),
     text_max: int = REVIEW_TEXT_MAX,
+    *,
+    sample: bool = False,
 ) -> list[dict]:
     row = [{"type": "divider"}, _review_tag_block(review, strings, note_links, text_max)]
     row.append(
         _review_verdict_block(review, verdict, strings)
         if verdict is not None
-        else _review_actions_block(idx, review, strings)
+        else _review_actions_block(idx, review, strings, sample=sample)
     )
     return row
+
+
+def scoreline_text(score: Score, strings: dict[str, str]) -> str:
+    """채점 줄 — 세션 끝 판정의 기계 대 오너 일치. 표본이 label_core.MIN_COMPARED 아래면 분자도
+    비율도 쓰지 않는다(숫자가 근거처럼 읽히므로). 읽지 못했으면 읽지 못했다고 쓴다."""
+    match score:
+        case Scored(agreed=agreed, compared=compared):
+            rate = label_core.agreement(agreed, compared)
+            text = (
+                strings["score_line_short"].format(compared=compared, min=label_core.MIN_COMPARED)
+                if rate is None
+                else strings["score_line"].format(
+                    agreed=agreed,
+                    compared=compared,
+                    pct=round(rate * 100),
+                    floor=round(label_core.AGREEMENT_FLOOR * 100),
+                )
+            )
+        case _:
+            text = strings["score_line_unreadable"]
+    return text
+
+
+def _scoreline_block(score: Score, strings: dict[str, str]) -> dict:
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": scoreline_text(score, strings)}]}
+
+
+#: 확인용 표본 머리 블록의 이름 — 카드에 표본이 실렸는지 그리기 밖에서 읽는 표지.
+SAMPLES_BLOCK_ID = "card:samples"
+
+
+def _samples_header_block(strings: dict[str, str]) -> dict:
+    return {
+        "type": "context",
+        "block_id": SAMPLES_BLOCK_ID,
+        "elements": [{"type": "mrkdwn", "text": f"*{strings['sample_header']}*"}],
+    }
 
 
 def mark_pressed(
@@ -689,6 +742,8 @@ def build_blocks(
     note_links: tuple[NoteLink, ...] = (),
     text_max: int = REVIEW_TEXT_MAX,
     block_limit: int = BLOCK_LIMIT,
+    score: Score | None = None,
+    samples: Iterable[ProposedVerdict] = (),
 ) -> list[dict]:
     """Block Kit for the card: the head line (past approvals cross-checked against today's
     registers — present only when there were any), then one five-block row per proposal,
@@ -713,7 +768,10 @@ def build_blocks(
     shares the 50-block cap: the advice lane reserves the review lane's tail, and review
     rows that still do not fit are reported in an overflow line, not dropped. Empty
     `reviews` leaves the card exactly as it was —
-    a zero-proposal morning must not change the card's shape."""
+    a zero-proposal morning must not change the card's shape.
+    `score` adds the 채점 줄 right under the head lines; `samples` adds the 확인용 무작위 표본
+    below the review lane — all or none (it is the lowest-priority block, so a card with no
+    room for every sample row shows none), 맞아요/아니에요 only, idx slots after the reviews."""
     strings = card_i18n.STRINGS[lang]
     register_labels = card_i18n.REGISTER_LABELS[lang]
     repair_results = repair_results or {}
@@ -731,6 +789,8 @@ def build_blocks(
         blocks.append(_repairs_headline_block(repairs_total_groups, merged_yesterday_rows, strings))
     if confirmation is not None and confirmation.total > 0:
         blocks.append(_confirmation_block(confirmation, strings))
+    if score is not None:
+        blocks.append(_scoreline_block(score, strings))
 
     if show_lanes:
         if repairs:
@@ -816,6 +876,22 @@ def build_blocks(
                     ],
                 }
             )
+    samples = list(samples)
+    if samples and len(blocks) + 1 + 3 * len(samples) <= block_limit:
+        first_slot = n_repairs + total + len(reviews)
+        blocks.append(_samples_header_block(strings))
+        for sidx, sample in enumerate(samples):
+            blocks.extend(
+                _review_row(
+                    first_slot + sidx,
+                    sample,
+                    by_idx.get(first_slot + sidx),
+                    strings,
+                    note_links,
+                    text_max,
+                    sample=True,
+                )
+            )
     return blocks
 
 
@@ -838,3 +914,18 @@ def fit_blocks(*args, **kwargs) -> list[dict]:
     raise ValueError(
         f"card is {card_chars(blocks)} chars at the smallest cut and cap, over {CARD_CHARS_BUDGET}"
     )
+
+
+def fit_card(
+    *args, samples: Iterable[ProposedVerdict] = (), **kwargs
+) -> tuple[list[dict], list[ProposedVerdict]]:
+    """The card and the 확인용 표본 it actually carries. A card whose samples would not fit
+    CARD_CHARS_BUDGET at full text (or the 50-block cap) ships without them — they go first,
+    the 채점 줄 and the review rows stay and fit_blocks shortens those as it always did."""
+    samples = list(samples)
+    if samples:
+        full = build_blocks(*args, samples=samples, text_max=REVIEW_TEXT_MAX, **kwargs)
+        carried = any(block.get("block_id") == SAMPLES_BLOCK_ID for block in full)
+        if carried and card_chars(full) <= CARD_CHARS_BUDGET:
+            return full, samples
+    return fit_blocks(*args, **kwargs), []
