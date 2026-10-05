@@ -168,6 +168,8 @@ class RegisterParityTests(unittest.TestCase):
             cur.execute(f"CREATE SCHEMA {SCHEMA};")
             # 고정값 나이(「4 days 6 hours」)와 질의 창이 같은 now() 를 봐야 날짜 차가 실행 시각에 안 흔들린다.
             # 실시계면 UTC 06시 전에 rec-h 의 날짜가 하루 넘어가 co 와 apart 3 이 됐다(2026-10-05 CI).
+            # ::date 는 세션 시간대로 자르니 시간대도 고정한다(PGTZ=Asia/Seoul 이면 같은 두 실패).
+            cur.execute("SET TIME ZONE 'UTC';")
             cur.execute(
                 f"CREATE FUNCTION {SCHEMA}.now() RETURNS timestamptz LANGUAGE sql IMMUTABLE"
                 f" AS $$ SELECT timestamptz '{FROZEN_NOW}' $$;"
