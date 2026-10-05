@@ -117,9 +117,10 @@ def _posted_today_ts(now: datetime | None = None) -> str | None:
     """The ts of the card already posted today (KST), from the card's own events — or None
     when this morning is still unposted. launchd and the hermes cron both fire the same tool
     during the handover; whichever runner goes second sees this and exits 0 instead of
-    posting a second card. A morning with zero proposals and zero approvals in the window
-    leaves neither event by design (a quiet card is still a posted card the guard cannot
-    see — test_no_past_approvals_means_no_line), and an unreadable event log is never a
+    posting a second card. A morning with zero proposals, zero approvals and zero confirm
+    samples leaves no ledger event by design (that quiet card is still a posted card the guard
+    cannot see — test_no_past_approvals_means_no_line); a card that showed samples leaves
+    verdict_sample_shown, so the daily sample cap holds. An unreadable event log is never a
     reason to skip a morning: the graph's own reads refuse loudly when the engine is
     truly down, so a dead read here just means the guard stays blind, silent, and out of
     the way."""
