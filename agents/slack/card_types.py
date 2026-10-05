@@ -317,10 +317,16 @@ class AdvicePress(CardPress):
     note: str
 
 
+#: The `sample` value a 확인용 무작위 표본 row's buttons carry — verdict_reviewed repeats it so
+#: the 채점 줄 can tell which owner presses came from a random draw.
+SAMPLE_CONFIRM: str = "confirm"
+
+
 class ReviewPress(CardPress):
     """The review lane's press — `session` is the proposing session a flip would judge;
     `sessions` is every session the row grouped (the press fans out to all of them; empty
-    for an ungrouped row, where `session` alone is the list)."""
+    for an ungrouped row, where `session` alone is the list). `sample` is set only on a
+    확인용 무작위 표본 row, whose buttons are 맞아요/아니에요 alone."""
 
     lane: Literal["review"] = "review"
     choice: Literal["do", "delegate", "defer", "drop"]
@@ -328,6 +334,32 @@ class ReviewPress(CardPress):
     sessions: list[str] = []
     note: str
     kind: Literal["used", "contested"]
+    sample: Literal["confirm"] | None = None
+
+
+class Scored(BaseModel):
+    """The 세션 끝 판정 pair's tally — agree and flip presses, the last one per (session,
+    note). Not a rate: label_core.agreement decides whether `compared` is enough to be one."""
+
+    agreed: int
+    compared: int
+
+
+class ScoreUnreadable(BaseModel):
+    """The event log could not be read — the 채점 줄 says so instead of a number."""
+
+    reason: str
+
+
+Score = Scored | ScoreUnreadable
+
+
+class ScoreReading(BaseModel):
+    """What one read of the owner's presses yields: the tally (None when nobody asked) and
+    the 확인용 표본 drawn from it (always empty when the tally could not be read)."""
+
+    score: Score | None = None
+    samples: list[ProposedVerdict] = []
 
 
 #: parse_press's success return — discriminated on the value's own lane tag.

@@ -232,7 +232,10 @@ class Stubs:
         proposed_items: list[cc.ProposedVerdict] | None = None,
         held_repair_subjects: set[str] | None = None,
         repair_judgment_items: dict | None = None,
+        score_reading: cc.ScoreReading | None = None,
     ):
+        self.score_reading = score_reading or cc.ScoreReading()
+        self.score_calls: list[tuple[list[cc.ProposedVerdict], object]] = []
         self.held_repair_subjects = held_repair_subjects or set()
         self.repair_judgment_items = repair_judgment_items or {}
         self.resolutions = resolutions if resolutions is not None else RESOLUTIONS
@@ -314,6 +317,10 @@ class Stubs:
         assert since_hours == card.REVIEW_SINCE_HOURS
         return self.proposed_items
 
+    def score(self, reviews: list[cc.ProposedVerdict], day) -> cc.ScoreReading:
+        self.score_calls.append((reviews, day))
+        return self.score_reading
+
 
 def _blocks_text(blocks) -> str:
     return json.dumps(blocks, ensure_ascii=False)
@@ -346,6 +353,7 @@ class GraphTests(unittest.TestCase):
             proposed=stubs.proposed,
             held_repairs=stubs.held_repairs,
             repair_judgments=stubs.repair_judgments,
+            score=stubs.score,
         )
         return card.build_graph(collabs)
 
@@ -808,6 +816,91 @@ class GraphTests(unittest.TestCase):
         self.assertGreater(card_view.card_chars(built), card_view.CARD_CHARS_BUDGET)
         self._build(Stubs(proposed_items=reviews)).invoke({}, {"configurable": {"thread_id": "test-budget"}})
         self.assertLessEqual(card_view.card_chars(self.sends[-1]), card_view.CARD_CHARS_BUDGET)
+
+    def _sample(self, i: int) -> cc.ProposedVerdict:
+        return cc.ProposedVerdict(
+            session_id=f"x{i}", note=f"/vault/wiki/wiki-{900 + i:04d}.md", kind="used", at=f"t-{i}"
+        )
+
+    def test_the_scoreline_and_samples_ride_the_card_and_each_shown_sample_is_recorded(self):
+        samples = [self._sample(1), self._sample(2)]
+        review = cc.ProposedVerdict(session_id="sr", note="/vault/wiki/wiki-0700.md", kind="used", at="t-0")
+        stubs = Stubs(
+            proposed_items=[review],
+            score_reading=cc.ScoreReading(score=cc.Scored(agreed=2, compared=3), samples=samples),
+        )
+        self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-score"}})
+        text = _blocks_text(self.sends[-1])
+        self.assertIn("채점 · 세션 끝 판정: 표본 부족 3/20", text)
+        self.assertIn("확인용 무작위 표본", text)
+        self.assertEqual(stubs.score_calls[0][0], [review])
+        shown = [fields for event, fields in stubs.records if event == "verdict_sample_shown"]
+        self.assertEqual(
+            shown,
+            [
+                {"session_id": s.session_id, "note": s.note, "proposed_kind": "used", "card_ts": CARD_TS}
+                for s in samples
+            ],
+        )
+
+    def test_shown_records_are_written_before_handover_and_proposal_records(self):
+        stubs = Stubs(
+            score_reading=cc.ScoreReading(score=cc.Scored(agreed=2, compared=3), samples=[self._sample(1)])
+        )
+        order: list[str] = []
+        stubs.record = lambda event, fields: order.append(event)
+        real_handover = self._handover
+        self._handover = lambda *a: order.append("handover") or real_handover(*a)
+        self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-shown-first"}})
+        self.assertEqual(order[0], "verdict_sample_shown")
+        self.assertLess(order.index("verdict_sample_shown"), order.index("handover"))
+
+    def test_a_failed_send_records_no_shown_sample(self):
+        stubs = Stubs(
+            score_reading=cc.ScoreReading(score=cc.Scored(agreed=2, compared=3), samples=[self._sample(1)])
+        )
+
+        def boom(blocks):
+            raise RuntimeError("slack down")
+
+        self._send = boom
+        with self.assertRaises(RuntimeError):
+            self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-send-fail"}})
+        self.assertEqual(stubs.records, [])
+
+    def test_samples_over_the_budget_are_dropped_with_a_log_line_and_no_shown_record(self):
+        long = "가" * 300
+        reviews = [
+            cc.ProposedVerdict(
+                session_id=f"s{i}",
+                note=f"/vault/wiki/wiki-{700 + i:04d}.md",
+                kind="used",
+                at=f"t-{i}",
+                reason=long,
+                note_title=long,
+                work=long,
+            )
+            for i in range(5)
+        ]
+        stubs = Stubs(
+            proposed_items=reviews,
+            score_reading=cc.ScoreReading(score=cc.Scored(agreed=2, compared=3), samples=[self._sample(1)]),
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-score-budget"}})
+        text = _blocks_text(self.sends[-1])
+        self.assertIn("채점 · 세션 끝 판정", text)
+        self.assertNotIn("확인용 무작위 표본", text)
+        self.assertIn("확인 표본 1건을 뺐다", err.getvalue())
+        self.assertEqual([e for e, _ in stubs.records if e == "verdict_sample_shown"], [])
+
+    def test_an_unread_tally_prints_as_unreadable_and_nobody_asked_prints_nothing(self):
+        failed = Stubs(score_reading=cc.ScoreReading(score=cc.ScoreUnreadable(reason="boom")))
+        self._build(failed).invoke({}, {"configurable": {"thread_id": "test-score-fail"}})
+        self.assertIn("채점 · 읽기 실패", _blocks_text(self.sends[-1]))
+        self._build(Stubs()).invoke({}, {"configurable": {"thread_id": "test-score-none"}})
+        self.assertNotIn("채점", _blocks_text(self.sends[-1]))
 
     def test_read_repairs_populates_state_once_and_a_dead_door_refuses_the_card(self):
         # AC4: the door's GET is called exactly once, its groups land in state, and a
@@ -1288,7 +1381,7 @@ class DryRunWiringTests(unittest.TestCase):
         stubs = Stubs(responses=[NOT_WORTH_JSON] * 8)
         buf = io.StringIO()
 
-        with (
+        patches = [
             mock.patch.object(card, "_env_send", side_effect=fake_env_send),
             mock.patch.object(card_live, "_live_handover", side_effect=fake_live_handover),
             mock.patch.object(card_live, "_live_record", side_effect=fake_live_record),
@@ -1303,6 +1396,7 @@ class DryRunWiringTests(unittest.TestCase):
             mock.patch.object(card_live, "_live_active_projects", side_effect=stubs.active_projects),
             mock.patch.object(card_live, "_live_past_verdicts", side_effect=stubs.past_verdicts),
             mock.patch.object(card_live, "_live_proposed", side_effect=stubs.proposed),
+            mock.patch.object(card_live, "_live_score", side_effect=stubs.score),
             mock.patch.object(
                 card_live, "_live_repairs", side_effect=lambda limit: {"groups": [], "total_groups": 0}
             ),
@@ -1310,8 +1404,11 @@ class DryRunWiringTests(unittest.TestCase):
             mock.patch.object(card_live, "_live_repair_judgments", side_effect=lambda: {}),
             mock.patch.object(card_live, "_held_repair_subjects", side_effect=set),
             mock.patch.object(card, "make_propose", return_value=stubs.propose),
-            contextlib.redirect_stdout(buf),
-        ):
+        ]
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            stack.enter_context(contextlib.redirect_stdout(buf))
             rc = card._run_dry()
 
         self.assertEqual(rc, 0)
@@ -2082,7 +2179,9 @@ class PostedTodayGuardTests(unittest.TestCase):
 
     def _run_main(self, events, graph_side_effect="default"):
         fake_event_log = mock.Mock()
-        fake_event_log.recent_events.return_value = events
+        fake_event_log.recent_events.side_effect = lambda limit, event_name: [
+            e for e in events if e.get("event") == event_name
+        ]
         web_module = mock.MagicMock()
         fake_graph = mock.Mock()
         fake_graph.invoke.return_value = {"message": cc.PostedCard(channel=CARD_CH, ts=CARD_TS)}
@@ -2111,8 +2210,16 @@ class PostedTodayGuardTests(unittest.TestCase):
         self.assertEqual(out.strip().count("\n"), 0, "one line, said so")
         self.assertEqual(
             {c.kwargs["event_name"] for c in fake_event_log.recent_events.call_args_list},
-            {"card_proposal", "card_confirmation"},
+            {"card_proposal", "card_confirmation", "verdict_sample_shown"},
         )
+
+    def test_a_quiet_card_with_samples_blocks_a_second_run_the_same_day(self):
+        """A card with no proposals and no approvals leaves only verdict_sample_shown;
+        the guard must still see it, or a second run draws two more samples."""
+        events = [self._today_event(name="verdict_sample_shown")]
+        rc, out, _ = self._run_main(events, graph_side_effect=AssertionError("the graph must not run"))
+        self.assertEqual(rc, 0)
+        self.assertIn("[card] already posted today (ts=1727480000.000100)", out)
 
     def test_main_runs_when_yesterdays_card_is_the_newest(self):
         yesterday = (datetime.now(UTC) - timedelta(days=1)).isoformat()
@@ -2146,6 +2253,128 @@ class PostedTodayGuardTests(unittest.TestCase):
         ]
         with mock.patch.object(card, "event_log", fake_event_log):
             self.assertIsNone(card._posted_today_ts())
+
+
+def _event(at: str, **attrs) -> dict:
+    return {"observed_at": at, "attributes": attrs}
+
+
+def _pressed(at: str, choice: str, session: str, note: str, **extra) -> dict:
+    return _event(at, choice=choice, session_id=session, note=note, proposed_kind="used", **extra)
+
+
+class ScoreAndSampleTests(unittest.TestCase):
+    POP = [
+        cc.ProposedVerdict(
+            session_id=f"s{i}",
+            note=f"/vault/wiki/wiki-{100 + i}.md",
+            kind="used",
+            at=f"2026-10-0{i + 1}T00:00:00+00:00",
+        )
+        for i in range(8)
+    ]
+    DAY = datetime(2026, 10, 6).date()
+
+    def _picked(self, population=None, **kw) -> list[str]:
+        args = {"excluded": set(), "day": self.DAY, "compared": 3, **kw}
+        return [p.session_id for p in card_live.pick_confirm_samples(population or self.POP, **args)]
+
+    def test_a_shown_record_outlives_the_population_it_was_drawn_from(self):
+        self.assertGreaterEqual(card_live.SAMPLE_SHOWN_WINDOW_HOURS, card_live.SAMPLE_POPULATION_HOURS)
+
+    def test_the_tally_counts_agree_and_flip_once_per_pair_last_press_wins(self):
+        rows = [
+            _pressed("t1", "agree", "s1", "/vault/wiki/a.md"),
+            _pressed("t2", "agree", "s2", "/vault/wiki/a.md"),
+            _pressed("t3", "flip", "s3", "/vault/wiki/b.md"),
+            _pressed("t4", "flip", "s1", "/vault/wiki/a.md"),  # s1 changed its mind
+            _pressed("t5", "defer", "s9", "/vault/wiki/c.md", sessions=["s9", "s8"]),
+            _pressed("t6", "delegate", "s7", "/vault/wiki/d.md", judge="agent:delegated"),
+        ]
+        self.assertEqual(card_live.tally(rows), cc.Scored(agreed=1, compared=3))
+        with self.assertRaises(ValueError):
+            card_live.tally([_event("t", choice="agree", note="/vault/wiki/a.md")])
+
+    def test_the_draw_is_the_same_for_the_same_date_and_capped_at_two(self):
+        self.assertEqual(self._picked(), ["s2", "s0"])
+        self.assertEqual(self._picked(), self._picked(list(reversed(self.POP))))
+        self.assertEqual(len(self._picked()), card_live.CONFIRM_SAMPLE_MAX)
+        other_day = [
+            p.session_id
+            for p in card_live.pick_confirm_samples(
+                self.POP, excluded=set(), day=datetime(2026, 10, 7).date(), compared=3
+            )
+        ]
+        self.assertNotEqual(other_day, self._picked())
+
+    def test_the_draw_is_random_not_newest_first(self):
+        newest_two = [p.session_id for p in sorted(self.POP, key=lambda p: p.at, reverse=True)[:2]]
+        self.assertNotEqual(self._picked(), newest_two)
+
+    def test_at_the_floor_the_draw_stops_by_itself(self):
+        self.assertEqual(self._picked(compared=card_live.label_core.MIN_COMPARED - 1), ["s2", "s0"])
+        self.assertEqual(self._picked(compared=card_live.label_core.MIN_COMPARED), [])
+
+    def test_excluded_pairs_never_come_back(self):
+        taken = {(p.session_id, p.note) for p in self.POP if p.session_id in ("s2", "s0")}
+        self.assertNotIn("s2", self._picked(excluded=taken))
+        self.assertNotIn("s0", self._picked(excluded=taken))
+        self.assertEqual(self._picked(excluded={(p.session_id, p.note) for p in self.POP}), [])
+
+    def _score(self, reviewed, shown=(), population=None, reviews=()):
+        def fake(name, since_hours):
+            return {
+                "verdict_reviewed": reviewed,
+                "verdict_sample_shown": list(shown),
+                "verdict_proposed": [
+                    _event(p.at, session_id=p.session_id, note=p.note, kind=p.kind)
+                    for p in (population or self.POP)
+                ],
+            }[name]
+
+        with tempfile.TemporaryDirectory() as vault, mock.patch.dict(os.environ, {"BORING_VAULT_DIR": vault}):
+            with mock.patch.object(card_live, "_live_events", side_effect=fake):
+                return card_live._live_score(list(reviews), self.DAY)
+
+    def test_a_confirm_press_raises_compared_by_one_and_leaves_the_pool(self):
+        owner_rows = [
+            _pressed("t1", "agree", "s5", "/vault/wiki/wiki-105.md"),
+            _pressed("t2", "agree", "s6", "/vault/wiki/wiki-106.md"),
+            _pressed("t3", "flip", "s4", "/vault/wiki/wiki-104.md"),
+        ]
+        before = self._score(owner_rows)
+        self.assertEqual(before.score, cc.Scored(agreed=2, compared=3))
+        self.assertEqual(len(before.samples), 2)
+        drawn = before.samples[0]
+        confirm = _pressed("t4", "agree", drawn.session_id, drawn.note, sample="confirm")
+        after = self._score([*owner_rows, confirm])
+        self.assertEqual(after.score, cc.Scored(agreed=3, compared=4))
+        self.assertNotIn(drawn.session_id, [s.session_id for s in after.samples])
+        self.assertEqual(len(after.samples), 2)
+
+    def test_shown_pairs_and_todays_review_rows_are_left_out(self):
+        shown = [_event("t", session_id="s2", note="/vault/wiki/wiki-102.md", proposed_kind="used")]
+        on_lane = [cc.ProposedVerdict(session_id="s0", note="/vault/wiki/wiki-100.md", kind="used", at="t")]
+        out = self._score([], shown=shown, reviews=on_lane)
+        self.assertEqual(out.score, cc.Scored(agreed=0, compared=0))
+        self.assertTrue({"s2", "s0"}.isdisjoint(s.session_id for s in out.samples))
+        self.assertEqual(len(out.samples), 2)
+
+    def test_an_unreadable_log_is_a_value_and_a_dead_sample_pool_keeps_the_tally(self):
+        with mock.patch.object(card_live, "_live_events", side_effect=OSError("door down")):
+            out = card_live._live_score([], self.DAY)
+        self.assertEqual(out, cc.ScoreReading(score=cc.ScoreUnreadable(reason="door down")))
+
+        def fake(name, since_hours):
+            if name == "verdict_reviewed":
+                return []
+            raise OSError("pool down")
+
+        err = io.StringIO()
+        with mock.patch.object(card_live, "_live_events", side_effect=fake), contextlib.redirect_stderr(err):
+            out = card_live._live_score([], self.DAY)
+        self.assertEqual(out, cc.ScoreReading(score=cc.Scored(agreed=0, compared=0)))
+        self.assertIn("확인 표본을 못 뽑았다", err.getvalue())
 
 
 if __name__ == "__main__":
