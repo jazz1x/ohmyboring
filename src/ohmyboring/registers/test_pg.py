@@ -21,6 +21,7 @@ from ohmyboring.registers import pg as registers_pg  # noqa: E402
 
 DSN = os.environ.get("BORING_TEST_DATABASE_URL")
 SCHEMA = "omb_registers_test"
+FROZEN_NOW = "2026-10-04 17:00:00+00"
 
 #: ── 엔진 SQL 정본 (drudge/src/store.rs — 이 시험의 오라클. $n 을 %s 로만 옮겼다) ──
 ORACLE_RECENT_REGISTER_ROWS = (
@@ -165,7 +166,15 @@ class RegisterParityTests(unittest.TestCase):
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
             cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE;")
             cur.execute(f"CREATE SCHEMA {SCHEMA};")
-            cur.execute(f"SET search_path TO {SCHEMA}, public;")
+            # 고정값 나이(「4 days 6 hours」)와 질의 창이 같은 now() 를 봐야 날짜 차가 실행 시각에 안 흔들린다.
+            # 실시계면 UTC 06시 전에 rec-h 의 날짜가 하루 넘어가 co 와 apart 3 이 됐다(2026-10-05 CI).
+            # ::date 는 세션 시간대로 자르니 시간대도 고정한다(PGTZ=Asia/Seoul 이면 같은 두 실패).
+            cur.execute("SET TIME ZONE 'UTC';")
+            cur.execute(
+                f"CREATE FUNCTION {SCHEMA}.now() RETURNS timestamptz LANGUAGE sql IMMUTABLE"
+                f" AS $$ SELECT timestamptz '{FROZEN_NOW}' $$;"
+            )
+            cur.execute(f"SET search_path TO {SCHEMA}, pg_catalog, public;")
             cur.execute(
                 "CREATE TABLE document ("
                 " source_path text PRIMARY KEY,"
