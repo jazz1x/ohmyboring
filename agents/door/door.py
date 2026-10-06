@@ -60,8 +60,12 @@ nearest-document probe, event is the event-sink time). The recall answer gets a
 shadow too (E4-2): after the answer leaves, ohmyboring.recall recomputes the same
 recall (wiki first, vector only when the wiki is empty, read-only session) and
 compares its text with the engine text as it was before the numbered-note blocks
-were prepended, leaving one recall_shadow event (status ok|tie|mismatch|error, path,
-line counts, first differing line, skipped wiki files — never the query); the answer stays the engine's. An answer whose content-type is
+were prepended, leaving one recall_shadow event (status ok|tie|mismatch|error, reader, path,
+line counts, first differing line, skipped wiki files — never the query); the answer stays the engine's.
+The recall read switch: DOOR_RECALL_READER=python (compose default) answers POST /mcp tools/call
+recall from inside the door — same numbered-note blocks, the engine's JSON-RPC errors (-32602/-32603),
+and the session_id handover written once by the python path; the shadow then runs the other way, a
+background call to the engine without session_id, event reader=python (engine = rollback). An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. The parked read behind
@@ -258,6 +262,14 @@ def _fetch(url: str, body: bytes, headers: dict[str, str], method: str) -> Respo
 _OWNER_TOKEN_HEADER = "x-boring-owner-token"
 
 
+def _engine_headers(request: Request) -> dict[str, str]:
+    return {
+        name: request.headers[name]
+        for name in ("content-type", "accept", "mcp-session-id", "x-request-id", _OWNER_TOKEN_HEADER)
+        if name in request.headers
+    }
+
+
 async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Response:
     query = request.url.query
     url = f"{_upstream()}{request.url.path}" + (f"?{query}" if query else "")
@@ -288,11 +300,12 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
                 return await _register_python(
                     request, rpc.get("id"), call[1], _REGISTER_MCP_TOOLS[call[0]], "mcp"
                 )
-    headers = {
-        name: request.headers[name]
-        for name in ("content-type", "accept", "mcp-session-id", "x-request-id", _OWNER_TOKEN_HEADER)
-        if name in request.headers
-    }
+    headers = _engine_headers(request)
+    # 회상 읽기 주인 스위치(E4-2): python 이면 recall 은 엔진에 안 넘기고 문 안에서 답한다.
+    if request.method == "POST" and request.url.path == "/mcp" and _recall_reader() == _READER_PYTHON:
+        if (call := _mcp_tools_call(body)) is not None and call[0] == "recall":
+            rpc = _http_json_object(body) or {}
+            return await _recall_answer(rpc, call[1], url, headers, body, background_tasks)
     try:
         response = await asyncio.to_thread(_fetch, url, body, headers, request.method)
     except OSError:
@@ -976,7 +989,7 @@ def _recall_python(arguments: dict) -> recall_shadow.PythonAnswer:
     )
 
 
-def _recall_shadow_task(arguments: dict, status: int, body: bytes) -> None:
+def _recall_shadow_task(arguments: dict, status: int, body: bytes, reader: str = "engine") -> None:
     """회상 그림자(E4-2) — 응답이 간 뒤 같은 인자로 파이썬 회상을 계산해 엔진 텍스트와 대조하고
     recall_shadow 사건 한 줄을 남긴다. 예외는 여기서 문 로그 한 줄 + 사건 status=error 로 접는다."""
     try:
@@ -984,12 +997,126 @@ def _recall_shadow_task(arguments: dict, status: int, body: bytes) -> None:
     except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
         print(f"[door] recall_shadow failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         event_log.try_append_event(
-            "door", recall_shadow.EVENT_NAME, "error", reason=f"{type(e).__name__}: {e}"
+            "door", recall_shadow.EVENT_NAME, "error", reader=reader, reason=f"{type(e).__name__}: {e}"
         )
         return
     event_log.try_append_event(
-        "door", recall_shadow.EVENT_NAME, event.status, **recall_shadow.event_payload(event)
+        "door", recall_shadow.EVENT_NAME, event.status, reader=reader, **recall_shadow.event_payload(event)
     )
+
+
+_RECALL_READER_ENV = "DOOR_RECALL_READER"
+
+
+def _recall_reader() -> str:
+    """회상 읽기 주인 — python 만 켬, 그 밖의 값·부재는 전부 engine(실수로 켜지지 않게)."""
+    return _READER_PYTHON if os.environ.get(_RECALL_READER_ENV) == _READER_PYTHON else "engine"
+
+
+def _recall_session_id(arguments: dict) -> str | None:
+    session = arguments.get("session_id")
+    return session.strip() or None if isinstance(session, str) else None
+
+
+def _recall_handover(session_id: str, recalled: recall_answer.Recalled) -> None:
+    """엔진 mcp_recall 과 같은 정책 — 쓰기 실패는 문 로그 한 줄이고 회상은 성공한다."""
+    if not recalled.shown:
+        return
+    match _search_handover(session_id, list(recalled.shown)):
+        case Err(detail):
+            print(
+                f"[door] recall handover for session {session_id} failed: {detail}",
+                file=sys.stderr,
+                flush=True,
+            )
+        case Ok(_):
+            pass
+
+
+def _recall_answer_text(arguments: dict) -> recall_shadow.PythonAnswer:
+    """파이썬 회상 한 번 + (session_id 가 오면) handover 한 벌. 예상 못한 고장은 Failed 값으로."""
+    try:
+        answered = _recall_python(arguments)
+        session = _recall_session_id(arguments)
+        match answered:
+            case Ok(recalled) if session is not None:
+                _recall_handover(session, recalled)
+            case _:
+                pass
+    except Exception as e:  # noqa: BLE001 — 엔진 -32603 과 같이 한 자리에서 값으로 접는다
+        print(f"[door] recall reader failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return Err(recall_answer.Failed(f"{type(e).__name__}: {e}"))
+    return answered
+
+
+def _recall_without_session(body: bytes) -> bytes:
+    """엔진 그림자 호출 본문 — handover 는 파이썬 길이 이미 썼으니 session_id 를 뺀다(한 벌)."""
+    rpc = json.loads(body)
+    rpc["params"]["arguments"] = {k: v for k, v in rpc["params"]["arguments"].items() if k != "session_id"}
+    return json.dumps(rpc, ensure_ascii=False).encode("utf-8")
+
+
+def _recall_reverse_shadow_task(
+    url: str, headers: dict[str, str], body: bytes, answered: recall_shadow.PythonAnswer
+) -> None:
+    """켠 동안의 그림자 — 파이썬이 답한 뒤 같은 호출을 엔진에 보내 텍스트를 대조하고
+    recall_shadow 사건(reader=python)을 남긴다. 엔진 불통·예외는 문 로그 한 줄 + status=error."""
+    try:
+        engine = _fetch(url, _recall_without_session(body), headers, "POST")
+        event = recall_shadow.compare(engine.status_code, engine.body, answered)
+    except OSError as e:
+        print(f"[door] recall_shadow engine unreachable: {e}", file=sys.stderr, flush=True)
+        event_log.try_append_event(
+            "door", recall_shadow.EVENT_NAME, "error", reader=_READER_PYTHON, reason="engine unreachable"
+        )
+        return
+    except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
+        print(f"[door] recall_shadow failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        event_log.try_append_event(
+            "door",
+            recall_shadow.EVENT_NAME,
+            "error",
+            reader=_READER_PYTHON,
+            reason=f"{type(e).__name__}: {e}",
+        )
+        return
+    event_log.try_append_event(
+        "door",
+        recall_shadow.EVENT_NAME,
+        event.status,
+        reader=_READER_PYTHON,
+        **recall_shadow.event_payload(event),
+    )
+
+
+async def _recall_answer(
+    rpc: dict,
+    arguments: dict,
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    background_tasks: BackgroundTasks,
+) -> Response:
+    """스위치 켬 — recall 을 엔진에 넘기지 않고 문 안에서 답한다. 번호 노트 블록은 엔진 답과
+    같은 함수(_augment_mcp_recall)를 지난다. 답 뒤 배경에서 엔진에 같은 호출을 보내 대조한다."""
+    answered = await asyncio.to_thread(_recall_answer_text, arguments)
+    background_tasks.add_task(_recall_reverse_shadow_task, url, headers, body, answered)
+    request_id = rpc.get("id")
+    match answered:
+        case Err(recall_answer.Rejected(message)):
+            return _mcp_error(request_id, -32602, message)
+        case Err(recall_answer.Failed(detail)):
+            return _mcp_error(request_id, -32603, detail)
+        case Ok(recalled):
+            envelope = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"content": [{"type": "text", "text": recalled.text}], "isError": False},
+            }
+            response = _pass_through(
+                200, json.dumps(envelope, ensure_ascii=False).encode("utf-8"), "application/json"
+            )
+            return _augment_mcp_recall(body, response)
 
 
 def _load_routes() -> dict[str, list[str]]:

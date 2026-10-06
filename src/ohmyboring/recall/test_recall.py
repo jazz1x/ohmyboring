@@ -344,8 +344,11 @@ def test_wiki_first_the_vector_path_is_not_asked_when_the_wiki_answers():
     recalled = _text(answer.answer(_args(), stub.seams()))
     assert (recalled.text, recalled.path) == ("- [wiki-0001.md] 본문", "wiki")
     assert "vector" not in stub.calls
+    assert [p.rsplit("/", 1)[-1] for p in recalled.shown] == ["wiki-0001.md"], "보인 경로 = 답에 실린 줄"
     stub = _Seams(vector=[("/vault/wiki/v.md", "벡터 본문")])
-    assert _text(answer.answer(_args(), stub.seams())) == answer.Recalled("- [v.md] 벡터 본문", "vector")
+    assert _text(answer.answer(_args(), stub.seams())) == answer.Recalled(
+        "- [v.md] 벡터 본문", "vector", shown=("/vault/wiki/v.md",)
+    )
 
 
 def test_superseded_label_names_the_newer_notes_and_lines_join_with_a_blank_line():
