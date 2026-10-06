@@ -930,6 +930,30 @@ class CardBudgetTests(unittest.TestCase):
         self.assertEqual(fitted.report.left_out.reviews, 0)
         self.assertEqual(self._actions(fitted.blocks), 5 + 1)
 
+    def _sample_rows(self, blocks) -> int:
+        return sum(1 for b in blocks if b["type"] == "actions" and "sample" in b["elements"][0]["value"])
+
+    def test_the_block_cap_drops_the_second_sample_before_a_review_row(self):
+        reviews, samples = self._tight(3)
+        both = cv.build_card([], reviews=reviews, samples=samples, lang="ko")
+        self.assertEqual(self._sample_rows(both.blocks), 2)
+        capped = cv.build_card(
+            [], reviews=reviews, samples=samples, lang="ko", block_limit=len(both.blocks) - 1
+        )
+        self.assertEqual(self._sample_rows(capped.blocks), 1)
+        self.assertEqual(capped.left_out.reviews, 0)
+
+    def test_eleven_repair_rows_still_leave_room_for_one_sample(self):
+        _reviews, samples = self._tight(0)
+        repairs = [
+            cc.Repair(subject=f"split-{i}", variants=[f"split {i}", f"split-{i}"], rows=10 + i, notes=3)
+            for i in range(11)
+        ]
+        built = cv.build_card([], repairs=repairs, repairs_total_groups=11, samples=samples, lang="ko")
+        self.assertLessEqual(len(built.blocks), cv.BLOCK_LIMIT)
+        self.assertEqual(self._sample_rows(built.blocks), 1)
+        self.assertGreater(built.left_out.repairs, 0)
+
     def test_one_sample_rides_even_when_every_review_row_has_gone(self):
         reviews, samples = self._tight(12)
         fitted = cv.fit_card([], reviews=reviews, samples=samples, lang="ko")
@@ -1404,13 +1428,37 @@ class ReadableReviewRowTests(unittest.TestCase):
             reason="md` (section ch1) and ohmyboring (wiki-",
         )
         self.assertNotIn("근거:", cv._review_tag_block(review, strings)["text"]["text"])
-        whole = review.model_copy(update={"reason": "이 문장은 온전해서 짧아도 근거로 보입니다 정말로."})
+        whole = review.model_copy(update={"reason": "그 문장은 온전해서 짧아도 근거로 보입니다 정말로."})
         self.assertLess(len(cv.evidence_excerpt(whole.reason)), cv.TEXT_FLOOR)
-        self.assertIn("근거: 「이 문장은 온전해서", cv._review_tag_block(whole, strings)["text"]["text"])
+        self.assertIn("근거: 「그 문장은 온전해서", cv._review_tag_block(whole, strings)["text"]["text"])
         clipped_short = review.model_copy(update={"reason": "ng.md` 앞뒤가 잘린 짧은 문장 잘린낱…"})
         self.assertNotIn("근거:", cv._review_tag_block(clipped_short, strings)["text"]["text"])
         long = review.model_copy(update={"reason": clipped})
         self.assertIn("근거: 「이 문장은 단어 경계에서", cv._review_tag_block(long, strings)["text"]["text"])
+
+    def test_only_a_sentence_with_both_ends_intact_shows_below_the_floor(self):
+        strings = card_i18n.STRINGS["ko"]
+
+        def shows(reason: str) -> bool:
+            row = cc.ProposedVerdict(
+                session_id="s", note="/vault/wiki/wiki-1.md", kind="used", at="t", reason=reason
+            )
+            return "근거:" in cv._review_tag_block(row, strings)["text"]["text"]
+
+        for fragment in (
+            "ction about the router config was wrong.",
+            "는 문장이 중간부터 저장됐다",
+            "and then the",
+            "x",
+            "The router config was wrong because the",
+        ):
+            self.assertFalse(shows(fragment), fragment)
+        for whole in (
+            "이전 증류에서 근거 없이 단정한 것이 틀렸다는 교훈이 있습니다",
+            "This works.",
+            "Done (see wiki-12).",
+        ):
+            self.assertTrue(shows(whole), whole)
 
     def test_a_cut_line_ends_on_a_word(self):
         text = "foodspring-front · 09-24 · FDS-18094 뒤로가기 시 스크롤 위치 복구 및 성능 개선 작업 전체"
