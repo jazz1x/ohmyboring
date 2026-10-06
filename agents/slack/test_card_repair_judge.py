@@ -331,6 +331,101 @@ class RunTests(unittest.TestCase):
         self.assertEqual(records, [])
 
 
+class OwnerCommentTests(unittest.TestCase):
+    """The owner's comments on a group reach its next judgment, which names their ids.
+    Mutation targets: a run or build_prompt that never reads the comments kills the prompt
+    and ids tests; a pick that never reopens a commented group kills the reopen tests."""
+
+    COMMENTS = [
+        cc.OwnerComment(
+            id=41, at="2026-10-06T03:00:00+00:00", text="이건 우리 제품 이름이 맞아요\n합쳐 주세요"
+        ),
+        cc.OwnerComment(id=40, at="2026-10-06T02:00:00+00:00", text="먼저 남긴 말"),
+    ]
+
+    def test_the_prompt_carries_the_owners_words_verbatim_newest_first(self):
+        prompt = crj.build_prompt(GROUP, [], ONE_FACT([]), self.COMMENTS)
+        self.assertIn("소유자가 이 묶음에 직접 남긴 말", prompt)
+        self.assertIn("- 이건 우리 제품 이름이 맞아요\n  합쳐 주세요\n- 먼저 남긴 말", prompt)
+        self.assertLess(prompt.index("이 주제로 남은 사실"), prompt.index("소유자가 이 묶음에 직접"))
+        self.assertLess(prompt.index("소유자가 이 묶음에 직접"), prompt.index("판정 셋"))
+        self.assertNotIn("소유자가 이 묶음에 직접", crj.build_prompt(GROUP, [], ONE_FACT([])))
+
+    def test_a_judgment_that_read_comments_records_their_ids(self):
+        records: list[tuple[str, dict]] = []
+        prompts: list[str] = []
+
+        def invoke(prompt: str) -> str:
+            prompts.append(prompt)
+            return '{"verdict": "same_name", "reason": "오너가 제품 이름이라고 했다"}'
+
+        crj.run(
+            [GROUP],
+            {},
+            {},
+            invoke,
+            lambda e, f: records.append((e, f)),
+            ONE_FACT,
+            comments={"next-step": self.COMMENTS, "other": [cc.OwnerComment(id=99, at="t", text="남의 말")]},
+        )
+        self.assertIn("이건 우리 제품 이름이 맞아요", prompts[0])
+        self.assertNotIn("남의 말", prompts[0])
+        ((name, fields),) = records
+        self.assertEqual((name, fields["comment_ids"]), ("repair_judged", [41, 40]))
+
+    def test_a_judged_group_the_owner_commented_on_afterwards_is_judged_again(self):
+        key = ("next-step", ("next step", "next-step"))
+        entries = [
+            _entry(
+                _judged_attrs("next-step", ["next step", "next-step"], "generic"), "2026-10-06T01:00:00+00:00"
+            )
+        ]
+        judged = crj.judged_map(entries)
+        judged_at = crj.judged_times(entries)
+        self.assertEqual(judged_at, {key: "2026-10-06T01:00:00+00:00"})
+        later = {"next-step": [cc.OwnerComment(id=5, at="2026-10-06T02:00:00+00:00", text="아니에요")]}
+        earlier = {"next-step": [cc.OwnerComment(id=4, at="2026-10-06T00:30:00+00:00", text="전에 한 말")]}
+        self.assertEqual(crj.reopened_groups(judged_at, later), frozenset({key}))
+        self.assertEqual(crj.reopened_groups(judged_at, earlier), frozenset())
+        self.assertEqual(crj.reopened_groups(judged_at, {"other": later["next-step"]}), frozenset())
+        self.assertEqual(crj.pick([GROUP], judged), [])
+        self.assertEqual(crj.pick([GROUP], judged, reopened=frozenset({key})), [GROUP])
+        calls = {"n": 0}
+
+        def invoke(prompt: str) -> str:
+            calls["n"] += 1
+            return '{"verdict": "same_name", "reason": "오너 말대로다"}'
+
+        crj.run(
+            [GROUP],
+            judged,
+            {},
+            invoke,
+            lambda e, f: None,
+            ONE_FACT,
+            comments=later,
+            reopened=frozenset({key}),
+        )
+        self.assertEqual(calls["n"], 1)
+
+    def test_comments_by_subject_reads_the_owners_repair_comments_of_todays_groups(self):
+        def comment(ident, subject, judge="owner", lane="repair"):
+            return {
+                "id": ident,
+                "observed_at": f"2026-10-06T0{ident}:00:00+00:00",
+                "attributes": {"judge": judge, "lane": lane, "subject": subject, "text": f"글 {ident}"},
+            }
+
+        entries = [
+            comment(1, "next-step"),
+            comment(2, "next-step", judge="agent:x"),
+            comment(3, "next-step", lane="review"),
+            comment(4, "elsewhere"),
+        ]
+        got = crj.comments_by_subject(entries, [GROUP])
+        self.assertEqual({k: [c.id for c in v] for k, v in got.items()}, {"next-step": [1]})
+
+
 class MainExitTests(unittest.TestCase):
     def _main(self, *answers: str) -> int:
         groups = [_group(f"subject-{i}", [f"subject {i}", f"subject-{i}"]) for i in range(len(answers))]
@@ -344,6 +439,51 @@ class MainExitTests(unittest.TestCase):
             mock.patch.object(crj, "_live_samples", side_effect=ONE_FACT),
         ):
             return crj.main()
+
+    def test_main_feeds_a_comment_left_after_the_judgment_into_the_next_one_and_records_its_id(self):
+        # the whole path: card_comment 사건 read by name → the judged group reopened → the
+        # prompt carries the owner's words → the repair_judged 사건 names the 사건 id
+        by_name = {
+            "repair_judged": [
+                {
+                    "id": 1,
+                    "observed_at": "2026-10-06T01:00:00+00:00",
+                    "attributes": _judged_attrs("next-step", ["next step", "next-step"], "same_name"),
+                }
+            ],
+            "card_comment": [
+                {
+                    "id": 77,
+                    "observed_at": "2026-10-06T02:00:00+00:00",
+                    "attributes": {
+                        "judge": "owner",
+                        "lane": "repair",
+                        "subject": "next-step",
+                        "text": "이건 흔한 말이라 합치면 안 돼요",
+                    },
+                }
+            ],
+        }
+        prompts: list[str] = []
+        recorded: list[tuple[str, dict]] = []
+
+        def judge(prompt: str) -> str:
+            prompts.append(prompt)
+            return '{"verdict": "generic", "reason": "오너가 흔한 말이라고 했다"}'
+
+        with (
+            mock.patch.dict("os.environ", {"BORING_DOOR_URL": "http://door.invalid"}),
+            mock.patch.object(crj, "_live_groups", return_value=[GROUP]),
+            mock.patch.object(crj, "_live_events", side_effect=lambda name, hours: by_name.get(name, [])),
+            mock.patch.object(crj, "make_judge", return_value=judge),
+            mock.patch.object(crj, "_live_record", side_effect=lambda e, f: recorded.append((e, f))),
+            mock.patch.object(crj, "_live_samples", side_effect=ONE_FACT),
+        ):
+            self.assertEqual(crj.main(), 0)
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("이건 흔한 말이라 합치면 안 돼요", prompts[0])
+        ((name, fields),) = recorded
+        self.assertEqual((name, fields["verdict"], fields["comment_ids"]), ("repair_judged", "generic", [77]))
 
     def test_only_a_run_where_every_call_failed_exits_non_zero(self):
         judged = '{"verdict": "generic", "reason": "흔한 말"}'

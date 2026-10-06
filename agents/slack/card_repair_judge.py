@@ -21,9 +21,16 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
 
+import card_press  # noqa: E402
 import card_types  # noqa: E402
 from card_effects import _live_record  # noqa: E402
-from card_types import RepairJudgeFailed, RepairJudgment  # noqa: E402
+from card_types import (  # noqa: E402
+    COMMENT_WINDOW_HOURS,
+    COMMENTS_IN_PROMPT,
+    OwnerComment,
+    RepairJudgeFailed,
+    RepairJudgment,
+)
 
 from ohmyboring import config as omb_env  # noqa: E402
 
@@ -64,10 +71,14 @@ GroupKey = tuple[str, tuple[str, ...]]
 
 
 def build_prompt(
-    group: dict[str, Any], past_reviews: list[dict[str, Any]], samples: list[dict[str, Any]]
+    group: dict[str, Any],
+    past_reviews: list[dict[str, Any]],
+    samples: list[dict[str, Any]],
+    comments: list[OwnerComment] = (),
 ) -> str:
     """Spelling alone cannot separate a name from a common phrase (v1 called 18/20 same_name),
-    so the question carries what the memory actually says under this subject."""
+    so the question carries what the memory actually says under this subject — and the
+    owner's own comments on the group, verbatim, newest first (at most COMMENTS_IN_PROMPT)."""
     variants = ", ".join(str(v) for v in group["variants"])
     lines = [
         "기억 속 사실들의 주제 하나를 판정한다. 철자 목록은 공백·하이픈·밑줄만 다르다 — 철자가 같은지는 묻지 않는다.",
@@ -93,6 +104,10 @@ def build_prompt(
                 str(review.get("choice")), str(review.get("choice"))
             )
             lines.append(f"- {label} (카드 {review.get('card_ts')}, 줄 {review.get('idx')})")
+    lines += card_press.comment_prompt_lines(
+        list(comments)[:COMMENTS_IN_PROMPT],
+        "소유자가 이 묶음에 직접 남긴 말 (최근 순, 원문 — 판정에 반영해라):",
+    )
     lines += [
         "",
         "판정 셋:",
@@ -142,16 +157,19 @@ def pick(
     groups: list[dict[str, Any]],
     judged: Mapping[GroupKey, RepairJudgment],
     cap: int = DAILY_JUDGE_CAP,
+    reopened: frozenset[GroupKey] = frozenset(),
 ) -> list[dict[str, Any]]:
     """The day's queue: 문이 주는 순서(행 수 내림차순) 그대로, 이미 같은 (subject, 정렬된
     variants) 판정이 있는 묶음은 걷어내고 cap개까지만 남긴다. variants 가 바뀐 묶음은 다른
-    묶음이므로 다시 판정한다 — 판정은 그 묶음의 철자 목록에 대해 남긴 말이다."""
+    묶음이므로 다시 판정한다 — 판정은 그 묶음의 철자 목록에 대해 남긴 말이다. `reopened` 는
+    판정 뒤에 오너 코멘트가 달린 묶음 — 카드에 오르는 건 판정이 난 줄뿐이라, 걷어내면 줄에
+    남긴 말이 영영 판정에 안 닿는다."""
     out: list[dict[str, Any]] = []
     for group in groups:
         if len(out) >= cap:
             break
         key = (str(group["subject"]), tuple(sorted(str(v) for v in group["variants"])))
-        if key in judged:
+        if key in judged and key not in reopened:
             continue
         out.append(group)
     return out
@@ -194,6 +212,41 @@ def judged_map(entries: list[dict[str, Any]]) -> dict[GroupKey, RepairJudgment]:
     return out
 
 
+def judged_times(entries: list[dict[str, Any]]) -> dict[GroupKey, str]:
+    """When each group was last judged — the same rows judged_map reads (and the same
+    ValueError on a malformed one), newest observed_at per (subject, 정렬된 variants)."""
+    judged_map(entries)
+    newest: dict[GroupKey, str] = {}
+    for entry in entries:
+        attrs = entry.get("attributes") or {}
+        if attrs.get("prompt_version") != card_types.REPAIR_JUDGE_PROMPT_VERSION:
+            continue
+        key = (attrs["subject"], tuple(sorted(attrs["variants"])))
+        if key not in newest or entry["observed_at"] >= newest[key]:
+            newest[key] = entry["observed_at"]
+    return newest
+
+
+def reopened_groups(
+    judged_at: Mapping[GroupKey, str], comments: Mapping[str, list[OwnerComment]]
+) -> frozenset[GroupKey]:
+    """Judged groups the owner commented on after the judgment — judged again, so the comment
+    is read by a judgment that is newer than it."""
+    return frozenset(
+        key for key, at in judged_at.items() if any(comment.at > at for comment in comments.get(key[0], ()))
+    )
+
+
+def comments_by_subject(
+    entries: list[dict[str, Any]], groups: list[dict[str, Any]]
+) -> dict[str, list[OwnerComment]]:
+    """card_comment 사건 → 오늘 후보 묶음의 subject 마다 오너의 이름 맞추기 코멘트(최근 순)."""
+    return {
+        subject: card_press.owner_comments(entries, "repair", subject=subject)
+        for subject in {str(group["subject"]) for group in groups}
+    }
+
+
 def reviews_by_subject(entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """repair_reviewed 사건 rows → subject 가리키는 보류·거절 기록들. 판정 프롬프트의 입력.
     subject 가 없는 행은 ValueError — _held_repair_subjects 가 세우던 문지방 그대로."""
@@ -219,20 +272,27 @@ def run(
     record: Callable[[str, dict[str, Any]], None],
     samples: Callable[[list[str]], list[dict[str, Any]]],
     cap: int = DAILY_JUDGE_CAP,
+    comments: Mapping[str, list[OwnerComment]] | None = None,
+    reopened: frozenset[GroupKey] = frozenset(),
 ) -> tuple[int, int]:
     """(judged_n, failed_n). A model that cannot be reached raises and stops the run — the
-    unjudged groups stay unjudged and come back tomorrow."""
+    unjudged groups stay unjudged and come back tomorrow. The owner's comments on a group
+    ride its prompt, and the judgment 사건 names the 사건 ids it was given (`comment_ids`)."""
+    comments = comments or {}
     judged_n = 0
     failed_n = 0
-    for group in pick(groups, judged, cap):
+    for group in pick(groups, judged, cap, reopened):
         subject = str(group["subject"])
         variants = sorted(str(v) for v in group["variants"])
         facts = samples(variants)
+        read = comments.get(subject, [])[:COMMENTS_IN_PROMPT]
         answer = (
-            parse(invoke(build_prompt(group, reviews.get(subject, []), facts)), subject, variants)
+            parse(invoke(build_prompt(group, reviews.get(subject, []), facts, read)), subject, variants)
             if facts
             else RepairJudgment(subject=subject, variants=variants, verdict="unsure", reason=NO_FACTS_REASON)
         )
+        if isinstance(answer, RepairJudgment) and facts:
+            answer = answer.model_copy(update={"comment_ids": [comment.id for comment in read]})
         if isinstance(answer, RepairJudgeFailed):
             record("repair_judge_failed", answer.model_dump())
             failed_n += 1
@@ -320,9 +380,21 @@ def main() -> int:
         return 2
     try:
         groups = _live_groups()
-        judged = judged_map(_live_events("repair_judged", JUDGED_WINDOW_HOURS))
+        judged_entries = _live_events("repair_judged", JUDGED_WINDOW_HOURS)
+        judged = judged_map(judged_entries)
         reviews = reviews_by_subject(_live_events("repair_reviewed", REVIEW_WINDOW_HOURS))
-        judged_n, failed_n = run(groups, judged, reviews, make_judge(), _live_record, _live_samples)
+        comments = comments_by_subject(_live_events("card_comment", COMMENT_WINDOW_HOURS), groups)
+        reopened = reopened_groups(judged_times(judged_entries), comments)
+        judged_n, failed_n = run(
+            groups,
+            judged,
+            reviews,
+            make_judge(),
+            _live_record,
+            _live_samples,
+            comments=comments,
+            reopened=reopened,
+        )
     except (ValueError, OSError) as e:
         # A dead door, a clipped events window, a malformed 사건 row — say why in one line
         # and stop: 판정 실행은 합치기를 손대지 않으니, 여기서 멈추는 것은 되돌릴 일이 없다.

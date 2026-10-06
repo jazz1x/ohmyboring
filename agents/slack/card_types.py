@@ -29,6 +29,27 @@ CHOICES: tuple[str, ...] = ("do", "defer", "drop")
 #: effects know what it means; every other lane refuses it in parse_press.
 DELEGATE: str = "delegate"
 
+#: The sixth word an action_id may end in — 「💬 코멘트」 opens a modal instead of judging, so it
+#: is never a Choice and no lane's press table has it: the hermes plugin routes it before
+#: parse_press ever sees the payload.
+COMMENT: str = "comment"
+
+#: The one callback_id the comment modal carries — bolt's `app.view` listens on exactly this.
+COMMENT_CALLBACK_ID: str = "card:comment"
+
+#: The modal's one input — where card_view puts it and where card_press reads it back.
+COMMENT_BLOCK_ID: str = "comment"
+COMMENT_ACTION_ID: str = "text"
+
+#: How many of the newest owner comments a judge's prompt carries (its own context is small).
+COMMENTS_IN_PROMPT: int = 5
+
+#: The longest comment the modal takes (Slack's own max_length on the input).
+COMMENT_MAX_CHARS: int = 1000
+
+#: How far back a judge reads the owner's comments — 이레, the same window as 보류.
+COMMENT_WINDOW_HOURS: int = 168
+
 #: The judge a delegated review writes on the edge — the engine's `agent:<name>` vocabulary
 #: (drudge/src/frontmatter.rs:53-61), accepted with no Rust change. Never `owner`: the owner
 #: handed this call back, so the 채점 줄 can tell the two apart.
@@ -374,6 +395,7 @@ class DelegatedJudgment(BaseModel):
 
     kind: Literal["used", "contested"]
     reason: str
+    comment_ids: list[int] = []
 
 
 class DelegationFailed(BaseModel):
@@ -445,6 +467,7 @@ class RepairJudgment(BaseModel):
     reason: str
     judge: str = REPAIR_JUDGE
     prompt_version: int = REPAIR_JUDGE_PROMPT_VERSION
+    comment_ids: list[int] = []
 
 
 class RepairJudgeFailed(BaseModel):
@@ -537,8 +560,76 @@ class Failed(BaseModel):
     reason: str
 
 
+class Received(BaseModel):
+    """A row whose owner comment arrived: the 받았어요 line shows above the buttons, which stay
+    — the comment is not a judgment, the owner still answers the row. `head` is the comment's
+    first characters, already cut."""
+
+    outcome: Literal["received"] = "received"
+    head: str
+
+
 #: What a pressed row shows — folded into a status block in one place (card_view.status_text).
-Outcome = Annotated[Pending | Done | Failed, Field(discriminator="outcome")]
+Outcome = Annotated[Pending | Done | Failed | Received, Field(discriminator="outcome")]
+
+
+class CardRow(BaseModel):
+    """What one posted button row stands for — the values its buttons used to carry each.
+    card.post_card writes it once as the card_row 사건 and every press and comment reads it
+    back by (card_ts, idx). `value` is the old button value, lane included."""
+
+    idx: int
+    lane: Literal["repair", "review"]
+    value: dict
+
+
+class NeedsRow(BaseModel):
+    """A press whose button carries no value (the card_row shape): the press itself is
+    trustworthy, its row has to be read by (card_ts, idx) before parse_press can finish."""
+
+    idx: int
+    choice: str
+    user: str
+    card_ts: str
+    channel: str
+
+
+class RowUnread(BaseModel):
+    """card_row could not be read for (card_ts, idx): the read failed, or no such row was
+    ever written. The row shows 「✕ 실패 — 줄 정보를 못 읽었어요」 and keeps its buttons."""
+
+    reason: str
+
+
+class CommentOpen(BaseModel):
+    """A 「💬 코멘트」 press, trusted — the modal opens on `trigger_id`, and the row's key
+    rides the modal as private_metadata."""
+
+    idx: int
+    user: str
+    card_ts: str
+    channel: str
+    trigger_id: str
+
+
+class CommentSubmit(BaseModel):
+    """A comment modal's submission, trusted: who, which row of which card, and the text
+    as typed (only surrounding whitespace trimmed)."""
+
+    idx: int
+    user: str
+    card_ts: str
+    channel: str
+    text: str
+
+
+class OwnerComment(BaseModel):
+    """One owner comment as a judge reads it back: the 사건 id (what a judgment event cites
+    as its input), when it was left, and the text verbatim."""
+
+    id: int
+    at: str
+    text: str
 
 
 class Registers(BaseModel):

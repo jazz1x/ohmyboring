@@ -7,6 +7,12 @@
 hermes가 전부 받는다). parse_press는 슬랙 페이로드를 Press 값으로, effects는 Press를
 Effect 값의 목록으로 바꾼다 — 둘 다 순수하고, 못 믿는 누름은 언제나 Rejected 값이다.
 이상한 페이로드(모양이 이상한 message·channel·actions)도 예외가 아니라 거절이다.
+
+이름 맞추기·검토 줄의 버튼은 value 를 들지 않는다 — 줄 값은 게시 때 card_row 사건 한 줄로
+남고, 누름은 (card_ts, idx)로 그것을 읽어(row_from_entries) parse_press 에 다시 넣는다.
+value 를 든 옛 카드의 버튼과 조언·표본 줄은 이전 그대로 value 를 읽는다. 「💬 코멘트」는
+판정이 아니라 모달을 여는 누름이라 이 표 밖(parse_comment_open·parse_comment_submit·
+comment_fields)이고, 판정이 그 글을 읽는 자리(owner_comments·comment_prompt_lines)도 여기다.
 """
 
 from __future__ import annotations
@@ -17,7 +23,27 @@ import os
 import card_types
 import card_verdicts
 import card_view
-from card_types import CHOICES, DELEGATE, AdvicePress, Press, Rejected, RepairPress, ReviewPress
+from card_types import (
+    CHOICES,
+    COMMENT,
+    COMMENT_ACTION_ID,
+    COMMENT_BLOCK_ID,
+    COMMENT_CALLBACK_ID,
+    COMMENT_MAX_CHARS,
+    DELEGATE,
+    AdvicePress,
+    CommentOpen,
+    CommentSubmit,
+    NeedsRow,
+    OwnerComment,
+    Press,
+    Rejected,
+    RepairPress,
+    ReviewPress,
+    RowUnread,
+)
+
+from ohmyboring.adapters.engine import OWNER
 
 #: 버튼 value의 lane → Press 모형 — parse_press가 여기서 모형을 고른다.
 _LANE_MODELS = {"repair": RepairPress, "advice": AdvicePress, "review": ReviewPress}
@@ -55,11 +81,31 @@ def session_name(channel: str, ts: str) -> str:
     return f"slack:{channel}:{ts}"
 
 
-def parse_press(payload: dict, owner_id: str | None) -> Press | Rejected:
+def _card_where(payload: dict) -> tuple[str, str] | Rejected:
+    """(card_ts, channel id) of the card a block_actions payload came from — `message.ts` and
+    `channel.id`, else `container.channel_id`. A press that cannot name both would orphan the
+    next morning's join (짝 없는 card_verdict 가 남으면 다음 날 카드가 나가지 못한다)."""
+    message = payload.get("message")
+    card_ts = message.get("ts") if isinstance(message, dict) else None
+    if not isinstance(card_ts, str) or not card_ts:
+        return Rejected(reason="no card ts")
+    channel = payload.get("channel")
+    channel_id = channel.get("id") if isinstance(channel, dict) else None
+    if not channel_id:
+        container = payload.get("container")
+        channel_id = container.get("channel_id") if isinstance(container, dict) else None
+    if not isinstance(channel_id, str) or not channel_id:
+        return Rejected(reason="no channel")
+    return card_ts, channel_id
+
+
+def parse_press(payload: dict, owner_id: str | None, row: dict | None = None) -> Press | NeedsRow | Rejected:
     """A block_actions payload in, one press out — or Rejected with the reason. The shared
     envelope/owner checks live in card_verdicts.parse_action_common; this layer reads the
-    button value (`message.ts` as card_ts, the channel id — `channel.id`, else
-    `container.channel_id`) and validates it against the lane model. Notes stay in the
+    row's value and validates it against the lane model. The value is the button's own when
+    it carries one (a card posted before card_row: the old way), else `row` — the card_row
+    value the caller read by (card_ts, idx); a valueless button with no `row` yet is
+    NeedsRow, the one answer that says "read the row, then ask again". Notes stay in the
     `wiki-NNNN` label form the card carried, and a label must look exactly like what
     note_label produces for a flat /vault/wiki/<name>.md note. Never raises: every
     malformed shape — envelope, value, lane, label, missing ts or channel, a choice the
@@ -70,22 +116,20 @@ def parse_press(payload: dict, owner_id: str | None) -> Press | Rejected:
     if isinstance(common, Rejected):
         return common
     (idx, choice), user = common
-    message = payload.get("message")
-    card_ts = message.get("ts") if isinstance(message, dict) else None
-    if not isinstance(card_ts, str) or not card_ts:
-        # 짝 없는 card_verdict 가 남으면 다음 날 카드가 나가지 못한다
-        return Rejected(reason="no card ts")
-    channel = payload.get("channel")
-    channel_id = channel.get("id") if isinstance(channel, dict) else None
-    if not channel_id:
-        container = payload.get("container")
-        channel_id = container.get("channel_id") if isinstance(container, dict) else None
-    if not isinstance(channel_id, str) or not channel_id:
-        return Rejected(reason="no channel")
-    try:
-        value = json.loads(payload["actions"][0].get("value"))
-    except (TypeError, ValueError):
-        return Rejected(reason="malformed button value")
+    where = _card_where(payload)
+    if isinstance(where, Rejected):
+        return where
+    card_ts, channel_id = where
+    raw = payload["actions"][0].get("value")
+    if raw is None or raw == "":
+        if row is None:
+            return NeedsRow(idx=idx, choice=choice, user=user, card_ts=card_ts, channel=channel_id)
+        value = row
+    else:
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            return Rejected(reason="malformed button value")
     if not isinstance(value, dict):
         return Rejected(reason="malformed button value")
     lane = value.get("lane")
@@ -115,6 +159,176 @@ def parse_press(payload: dict, owner_id: str | None) -> Press | Rejected:
     except (TypeError, ValueError):  # 모형 검증 실패 / value 키가 공통 필드를 덮음
         return Rejected(reason="malformed button value")
     return press
+
+
+def is_comment_action(payload: dict) -> bool:
+    """Whether a block_actions payload is a 「💬 코멘트」 press — by its action_id's last word."""
+    actions = payload.get("actions")
+    first = actions[0] if isinstance(actions, list) and actions else None
+    action_id = first.get("action_id") if isinstance(first, dict) else None
+    return isinstance(action_id, str) and action_id.endswith(f":{COMMENT}")
+
+
+def _owner_user(payload: dict, owner_id: str | None) -> str | Rejected:
+    user_obj = payload.get("user")
+    user = user_obj.get("id") if isinstance(user_obj, dict) else None
+    if not isinstance(user, str) or not user:
+        return Rejected(reason="no user")
+    if owner_id is not None and user != owner_id:
+        return Rejected(reason=f"user {user} is not the owner")
+    return user
+
+
+def parse_comment_open(payload: dict, owner_id: str | None) -> CommentOpen | Rejected:
+    """A 「💬 코멘트」 press in, the modal's order out — or Rejected. Needs only the row's key
+    and the click's trigger_id: the row itself is read when the text comes back."""
+    if payload.get("type") != "block_actions":
+        return Rejected(reason="not block_actions")
+    actions = payload.get("actions")
+    if not isinstance(actions, list) or len(actions) != 1 or not isinstance(actions[0], dict):
+        return Rejected(reason="not exactly one action")
+    action_id = str(actions[0].get("action_id"))
+    parts = action_id.split(":")
+    if len(parts) != 3 or parts[0] != "card" or parts[2] != COMMENT or not parts[1].isdigit():
+        return Rejected(reason=f"unknown action_id {action_id!r}")
+    user = _owner_user(payload, owner_id)
+    if isinstance(user, Rejected):
+        return user
+    where = _card_where(payload)
+    if isinstance(where, Rejected):
+        return where
+    trigger_id = payload.get("trigger_id")
+    if not isinstance(trigger_id, str) or not trigger_id:
+        return Rejected(reason="no trigger_id")
+    return CommentOpen(
+        idx=int(parts[1]), user=user, card_ts=where[0], channel=where[1], trigger_id=trigger_id
+    )
+
+
+def comment_metadata(opened: CommentOpen) -> str:
+    """The modal's private_metadata — the row's key, nothing else."""
+    return json.dumps({"card_ts": opened.card_ts, "channel": opened.channel, "idx": opened.idx})
+
+
+def parse_comment_submit(payload: dict, owner_id: str | None) -> CommentSubmit | Rejected:
+    """A view_submission payload in, the owner's comment out — or Rejected. The row's key
+    comes back from private_metadata, the text from the modal's one input."""
+    if payload.get("type") != "view_submission":
+        return Rejected(reason="not view_submission")
+    view = payload.get("view")
+    if not isinstance(view, dict) or view.get("callback_id") != COMMENT_CALLBACK_ID:
+        return Rejected(reason="not the comment modal")
+    user = _owner_user(payload, owner_id)
+    if isinstance(user, Rejected):
+        return user
+    try:
+        meta = json.loads(view.get("private_metadata"))
+        card_ts, channel, idx = meta["card_ts"], meta["channel"], meta["idx"]
+        text = view["state"]["values"][COMMENT_BLOCK_ID][COMMENT_ACTION_ID]["value"]
+    except (TypeError, ValueError, KeyError):
+        return Rejected(reason="malformed comment modal")
+    if not (isinstance(card_ts, str) and card_ts and isinstance(channel, str) and channel):
+        return Rejected(reason="malformed comment modal")
+    if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0 or not isinstance(text, str):
+        return Rejected(reason="malformed comment modal")
+    text = text.strip()
+    if not text:
+        return Rejected(reason="empty comment")
+    if len(text) > COMMENT_MAX_CHARS:
+        return Rejected(reason=f"comment over {COMMENT_MAX_CHARS} chars")
+    return CommentSubmit(idx=idx, user=user, card_ts=card_ts, channel=channel, text=text)
+
+
+def row_from_entries(entries: list[dict], card_ts: str, idx: int) -> dict | RowUnread:
+    """The card_row value for (card_ts, idx) out of /events entries — the newest one when a
+    row was written twice. No such row, or a row whose value is no object, is RowUnread: the
+    caller shows the failure instead of guessing a lane."""
+    found = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and isinstance(entry.get("attributes"), dict)
+        and entry["attributes"].get("card_ts") == card_ts
+        and entry["attributes"].get("idx") == idx
+    ]
+    if not found:
+        return RowUnread(reason=f"card_row 가 없다: card_ts={card_ts} idx={idx}")
+    value = max(found, key=lambda entry: str(entry.get("observed_at")))["attributes"].get("value")
+    if not isinstance(value, dict):
+        return RowUnread(reason=f"card_row 의 value 가 객체가 아니다: card_ts={card_ts} idx={idx}")
+    return value
+
+
+def comment_fields(submit: CommentSubmit, row: dict) -> dict | Rejected:
+    """The card_comment 사건's fields for one submission on `row` (a card_row value). The
+    owner is the judge — this is the one place the word is written. Lane keys: a review row
+    names its session(s) and note, an 이름 맞추기 row its subject and spellings; any other
+    lane has no comment path."""
+    base = {"judge": OWNER, "card_ts": submit.card_ts, "idx": submit.idx, "text": submit.text}
+    lane = row.get("lane")
+    if lane == "review":
+        note, session = row.get("note"), row.get("session")
+        if (
+            not isinstance(note, str)
+            or not note
+            or "/" in note
+            or not isinstance(session, str)
+            or not session
+        ):
+            return Rejected(reason="review row without session or note")
+        sessions = row.get("sessions")
+        return {
+            **base,
+            "lane": "review",
+            "session_id": session,
+            "sessions": list(sessions) if isinstance(sessions, list) and sessions else [session],
+            "note": card_view.note_path(note),
+            "proposed_kind": row.get("kind"),
+        }
+    if lane == "repair":
+        subject = row.get("subject")
+        if not isinstance(subject, str) or not subject:
+            return Rejected(reason="repair row without subject")
+        variants = row.get("variants")
+        return {
+            **base,
+            "lane": "repair",
+            "subject": subject,
+            "variants": variants if isinstance(variants, list) else [],
+        }
+    return Rejected(reason=f"{lane!r} rows take no comment")
+
+
+def owner_comments(entries: list[dict], lane: str, **key: object) -> list[OwnerComment]:
+    """The owner's comments on one lane whose 사건 fields equal `key` (note=… / subject=…),
+    newest first — what a judge reads before it judges. Only judge=owner rows count: nothing
+    else may speak in the owner's voice. A matching row missing its id, time or text raises
+    ValueError (a dropped comment would be an owner's word silently unread)."""
+    out: list[OwnerComment] = []
+    for entry in entries:
+        attrs = entry.get("attributes") if isinstance(entry, dict) else None
+        if not isinstance(attrs, dict) or attrs.get("judge") != OWNER or attrs.get("lane") != lane:
+            continue
+        if any(attrs.get(name) != want for name, want in key.items()):
+            continue
+        ident, at, text = entry.get("id"), entry.get("observed_at"), attrs.get("text")
+        if not isinstance(ident, int) or not isinstance(at, str) or not isinstance(text, str) or not text:
+            raise ValueError(f"malformed card_comment row: {entry!r}")
+        out.append(OwnerComment(id=ident, at=at, text=text))
+    return sorted(out, key=lambda comment: comment.at, reverse=True)
+
+
+def comment_prompt_lines(comments: list[OwnerComment], header: str) -> list[str]:
+    """The owner's words as prompt lines under `header`: verbatim, newest first, a multi-line
+    comment indented under its dash. No comments, no lines — the prompt stays what it was."""
+    if not comments:
+        return []
+    lines = ["", header]
+    for comment in comments:
+        first, *rest = comment.text.split("\n")
+        lines.append(f"- {first}")
+        lines.extend(f"  {line}" for line in rest)
+    return lines
 
 
 def effects(press: Press, delegated: card_types.Delegated | None = None) -> list[card_types.Effect]:
@@ -244,6 +458,7 @@ def _delegate_effects(
                         "judge": card_types.AGENT_DELEGATED,
                         "kind": delegated.kind,
                         "reason": delegated.reason,
+                        "comment_ids": delegated.comment_ids,
                     },
                 ),
             ]
