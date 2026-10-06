@@ -685,6 +685,27 @@ class GraphTests(unittest.TestCase):
         self.assertEqual({p["idx"] for p in proposals}, set(range(len(proposals))))
         self.assertEqual(len(self.handovers[-1][2]), len(all_paths) - fit["left_out_advice"])
 
+    def test_a_card_with_every_advice_row_left_out_still_leaves_a_ledger_event_the_guard_reads(self):
+        stubs = Stubs()
+        with mock.patch.object(card_view, "CARD_CHARS_BUDGET", 1000):
+            self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-all-left-out"}})
+        (fit,) = [f for e, f in stubs.records if e == "card_fit"]
+        self.assertEqual(fit["left_out_advice"], 3)
+        self.assertEqual(fit["samples_shown"], 0)
+        self.assertNotIn("card_proposal", [e for e, _ in stubs.records])
+        # the confirmation line is dropped from the ledger so card_fit is the card's only trace
+        events = [
+            {"event": e, **f, "ts": datetime.now(UTC).isoformat()}
+            for e, f in stubs.records
+            if e == "card_fit"
+        ]
+        fake_event_log = mock.Mock()
+        fake_event_log.recent_events.side_effect = lambda limit, event_name: [
+            e for e in events if e["event"] == event_name
+        ]
+        with mock.patch.object(card, "event_log", fake_event_log):
+            self.assertEqual(card._posted_today_ts(), CARD_TS)
+
     def test_a_recently_judged_note_is_skipped_before_any_model_call(self):
         past = [
             cc.PastVerdictPair(
@@ -2323,13 +2344,19 @@ class PostedTodayGuardTests(unittest.TestCase):
         self.assertEqual(out.strip().count("\n"), 0, "one line, said so")
         self.assertEqual(
             {c.kwargs["event_name"] for c in fake_event_log.recent_events.call_args_list},
-            {"card_proposal", "card_confirmation", "verdict_sample_shown"},
+            {"card_proposal", "card_confirmation", "verdict_sample_shown", "card_fit"},
         )
 
     def test_a_quiet_card_with_samples_blocks_a_second_run_the_same_day(self):
         """A card with no proposals and no approvals leaves only verdict_sample_shown;
         the guard must still see it, or a second run draws two more samples."""
         events = [self._today_event(name="verdict_sample_shown")]
+        rc, out, _ = self._run_main(events, graph_side_effect=AssertionError("the graph must not run"))
+        self.assertEqual(rc, 0)
+        self.assertIn("[card] already posted today (ts=1727480000.000100)", out)
+
+    def test_a_card_with_only_card_fit_blocks_a_second_run_the_same_day(self):
+        events = [self._today_event(name="card_fit")]
         rc, out, _ = self._run_main(events, graph_side_effect=AssertionError("the graph must not run"))
         self.assertEqual(rc, 0)
         self.assertIn("[card] already posted today (ts=1727480000.000100)", out)

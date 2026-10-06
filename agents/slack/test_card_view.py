@@ -820,6 +820,34 @@ class CardBudgetTests(unittest.TestCase):
         ]
         self.assertTrue(all(len(line) > cv.TEXT_FLOOR for line in notes))
 
+    def test_every_shortened_line_stays_at_least_70_chars_and_ends_on_a_word(self):
+        words = [f"단어{i:03d}" for i in range(60)]
+        long = " ".join(words)
+        reviews = [
+            cc.ProposedVerdict(
+                session_id=f"s{i}",
+                note=f"/vault/wiki/wiki-{700 + i:04d}.md",
+                kind="used",
+                at=f"t-{i}",
+                reason=long,
+                note_title=long,
+                work=long,
+            )
+            for i in range(12)
+        ]
+        fitted = cv.fit_card([], reviews=reviews, lang="ko")
+        lines = [
+            line
+            for b in fitted.blocks
+            for el in (b.get("elements") or [b.get("text") or {}])
+            for line in str(el.get("text", "")).split("\n")
+            if "…" in line
+        ]
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertGreaterEqual(len(line), 70, line)
+            self.assertIn(re.search(r"(\S+)…", line).group(1).lstrip("「*`_"), words, line)
+
     def test_lanes_give_up_rows_advice_first_then_repairs_then_reviews_from_the_bottom(self):
         self.assertEqual(
             list(cv._fit_attempts(cv.RowCaps(repairs=2, advice=2, reviews=2)))[len(cv.TEXT_MAX_STEPS) :],

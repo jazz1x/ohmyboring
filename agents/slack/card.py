@@ -22,7 +22,7 @@ resolve turns each surviving proposal's subject into its note path via
 the last 7 days or was shown but never judged in the last 3 days (`card_verdicts.suppressed`)
 — reading that history is not optional: a card that cannot read it does not ship. post_card
 sends the Block Kit card (repair rows above the advice rows, each grouped and labeled its own
-way), records a card_proposal event per surviving proposal, and ends the run. The verdict's
+way), records a card_proposal event per advice row the card showed (plus card_fit), and ends the run. The verdict's
 idx spans all three lanes, repair rows first, then advice rows, then the review rows; the
 button press carrying it never reaches this process — hermes owns the only socket (wiki-2049)
 and its boring-card plugin answers the press: card_press.parse_press parses it,
@@ -43,8 +43,8 @@ reads and prints its blocks and size, writing nothing and never reaching /search
 model — the way to see a card's layout without polluting what the card measures.
 
 During the launchd→hermes handover both schedulers fire the same tool for a while: the
-second runner of one KST morning reads the first card's own events (card_confirmation /
-card_proposal — no new state file) and exits 0 with one line, "already posted today
+second runner of one KST morning reads the first card's own events (card_fit /
+card_confirmation / card_proposal / verdict_sample_shown — no new state file) and exits 0 with one line, "already posted today
 (ts=…)", instead of posting a second card.
 
 The socket lives in hermes, not here. Everything decided lives in
@@ -99,10 +99,11 @@ REVIEW_SINCE_HOURS = 24
 _KST = timezone(timedelta(hours=9))
 
 #: The card's own ledger: a posted card leaves card_confirmation (one per card, naming its
-#: card_ts) plus a card_proposal per advice row, and a verdict_sample_shown per 확인용 표본 —
-#: the only trace a quiet card with samples leaves. The once-a-day guard reads exactly
-#: these — no new state file.
-_CARD_LEDGER_EVENTS = ("card_proposal", "card_confirmation", "verdict_sample_shown")
+#: card_ts), a card_fit (one per card, always — the only trace a card whose advice rows were
+#: all left out for size leaves when it also had no samples or confirmation), a card_proposal
+#: per advice row it showed, and a verdict_sample_shown per 확인용 표본. The once-a-day guard
+#: reads exactly these — no new state file.
+_CARD_LEDGER_EVENTS = ("card_proposal", "card_confirmation", "verdict_sample_shown", "card_fit")
 
 
 def _parse_event_ts(raw: Any) -> datetime | None:
@@ -119,10 +120,9 @@ def _posted_today_ts(now: datetime | None = None) -> str | None:
     """The ts of the card already posted today (KST), from the card's own events — or None
     when this morning is still unposted. launchd and the hermes cron both fire the same tool
     during the handover; whichever runner goes second sees this and exits 0 instead of
-    posting a second card. A morning with zero proposals, zero approvals and zero confirm
-    samples leaves no ledger event by design (that quiet card is still a posted card the guard
-    cannot see — test_no_past_approvals_means_no_line); a card that showed samples leaves
-    verdict_sample_shown, so the daily sample cap holds. An unreadable event log is never a
+    posting a second card. Every posted card records card_fit with its card_ts, so even one
+    with no advice rows, no confirmation and no samples is seen; a card that showed samples
+    also leaves verdict_sample_shown, so the daily sample cap holds. An unreadable event log is never a
     reason to skip a morning: the graph's own reads refuse loudly when the engine is
     truly down, so a dead read here just means the guard stays blind, silent, and out of
     the way."""
