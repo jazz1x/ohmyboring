@@ -71,6 +71,8 @@ _SPEC.loader.exec_module(PLUGIN)
 OWNER = f"U_{secrets.token_hex(4)}"
 OTHER = f"U_{secrets.token_hex(4)}"
 CARD_TS = "1.0"
+#: The ts Slack gives the [더보기] page a press posts.
+PAGE_TS = "2.0"
 CARD_CH = "C1"
 # The plugin reads the clock to refuse presses on old cards; tests press a minute after posting.
 PLUGIN.time = types.SimpleNamespace(time=lambda: float(CARD_TS) + 60)
@@ -187,10 +189,11 @@ class _FakeApp:
 class _FakeClient:
     """Records chat_update calls; raises when asked, to rehearse a dead Slack API."""
 
-    def __init__(self, calls, *, fail=False, current=None, open_fail=False):
+    def __init__(self, calls, *, fail=False, current=None, open_fail=False, post_fail=False):
         self._calls = calls
         self._fail = fail
         self._open_fail = open_fail
+        self._post_fail = post_fail
         # What Slack holds for the card: the last chat_update that landed, or the posted card.
         self.current = current if current is not None else BLOCKS
 
@@ -201,6 +204,12 @@ class _FakeClient:
         self._calls.append(("views_open", trigger_id, view))
         if self._open_fail:
             raise RuntimeError("trigger_id expired")
+
+    async def chat_postMessage(self, **kwargs):
+        self._calls.append(("post", kwargs))
+        if self._post_fail:
+            raise RuntimeError("slack down")
+        return {"ts": PAGE_TS}
 
     async def chat_update(self, *, channel, ts, blocks):
         self._calls.append(("chat_update", channel, ts, blocks))
@@ -226,6 +235,7 @@ def _register(ctx):
     """register() the way the container runs it. The in-process claim table resets per test
     so one test's presses never refuse as another test's leftovers."""
     PLUGIN._claimed.clear()
+    PLUGIN._more_claimed.clear()
     PLUGIN.register(ctx)
     return ctx.handlers
 
@@ -240,11 +250,11 @@ def _body(action_id, value, user=OWNER, blocks=BLOCKS):
     }
 
 
-def _run(handler, body, calls, *, fail=False, open_fail=False):
+def _run(handler, body, calls, *, fail=False, open_fail=False, post_fail=False, current=None):
     async def ack():
         calls.append("ack")
 
-    client = _FakeClient(calls, fail=fail, open_fail=open_fail)
+    client = _FakeClient(calls, fail=fail, open_fail=open_fail, post_fail=post_fail, current=current)
     with mock.patch.object(PLUGIN, "_client", client):
         asyncio.run(handler(ack, body, {}))
     return client
@@ -316,6 +326,11 @@ def _patched_effects(calls, consumption=None, execute_repair=None):
             card_effects,
             "_live_execute_repair",
             side_effect=execute_repair or (lambda subject, row=None: calls.append(("repair", subject, row))),
+        ),
+        mock.patch.object(
+            card_effects,
+            "_live_handover",
+            side_effect=lambda session, at, paths: calls.append(("handover", session, paths)),
         ),
     )
     with contextlib.ExitStack() as stack:
@@ -1262,7 +1277,319 @@ def test_a_delegate_press_that_cannot_read_the_owners_comments_does_not_judge_as
     assert "✕ 실패" in json.dumps(_updates(calls)[-1][3], ensure_ascii=False)
 
 
+#: A card that left rows out of every lane (repairs 0-1, advice 2-4, reviews 5-7, samples 8-9):
+#: the second repair, the last two advice rows, the third review and the second sample stay in
+#: card_row for the [더보기] pages.
+_MORE_PROPOSALS = [
+    *_PROPOSALS,
+    _PROPOSALS[0].model_copy(update={"subject": "주어 셋", "note": "/vault/wiki/wiki-0950.md"}),
+]
+_MORE_REVIEWS = [
+    card_types.ProposedVerdict(
+        session_id=f"sess-agent-{i}", note=f"/vault/wiki/wiki-07{i:02d}.md", kind="used", at=f"t-{i}"
+    )
+    for i in range(3)
+]
+_MORE_SAMPLES = [
+    card_types.ProposedVerdict(
+        session_id=f"sx{i}", note=f"/vault/wiki/wiki-08{i:02d}.md", kind="used", at=f"u-{i}"
+    )
+    for i in range(2)
+]
+_MORE_BUILT = card_view.build_card(
+    _MORE_PROPOSALS,
+    repairs=[_REPAIR, _REPAIR.model_copy(update={"subject": "other-subject", "variants": ["o s", "o-s"]})],
+    repairs_total_groups=2,
+    reviews=_MORE_REVIEWS,
+    samples=_MORE_SAMPLES[:1],
+    samples_hidden=_MORE_SAMPLES[1:],
+    caps=card_view.RowCaps(repairs=1, advice=1, reviews=2),
+    lang="ko",
+)
+MORE_BLOCKS = _MORE_BUILT.blocks
+
+
+def _as_entries(rows, card_ts=CARD_TS):
+    """card_row rows as /events returns them."""
+    return [
+        {"id": 500 + i, "observed_at": "2026-10-06T00:00:00+00:00", "attributes": row.fields(card_ts)}
+        for i, row in enumerate(rows)
+    ]
+
+
+def _more_body(lane, blocks=MORE_BLOCKS, user=OWNER):
+    return {
+        "type": "block_actions",
+        "actions": [{"action_id": f"card:more:{lane}"}],
+        "user": {"id": user},
+        "message": {"ts": CARD_TS, "blocks": blocks},
+        "channel": {"id": CARD_CH},
+    }
+
+
+@contextlib.contextmanager
+def _more_events(rows=None, sent=(), error=None):
+    """card_row and card_more as the door's /events would answer them — or a dead door."""
+
+    def fetch(name, hours):
+        if error is not None:
+            raise error
+        return (
+            list(_as_entries(_MORE_BUILT.rows) if rows is None else rows)
+            if name == "card_row"
+            else list(sent)
+        )
+
+    with mock.patch.object(card_delegate, "fetch_events", side_effect=fetch):
+        yield
+
+
+def _posts(calls):
+    return [c[1] for c in calls if isinstance(c, tuple) and c[0] == "post"]
+
+
+def _more_press(lane, calls, *, blocks=MORE_BLOCKS, ctx=None, **run_kw):
+    with _env():
+        _, handler = _register(ctx or _FakeCtx())[0]
+        with _patched_effects(calls), mock.patch.object(PLUGIN, "_LOG"):
+            return _run(handler, _more_body(lane, blocks), calls, current=blocks, **run_kw)
+
+
+def _page_entries(calls):
+    return [
+        {"id": 700 + i, "observed_at": "2026-10-06T01:00:00+00:00", "attributes": c[2]}
+        for i, c in enumerate(_records(calls))
+        if c[1] == "card_row"
+    ]
+
+
+def test_a_more_press_sends_one_new_message_in_the_same_dm_never_a_thread_and_marks_that_line():
+    calls = []
+    llm_calls = []
+    with _more_events():
+        _more_press("advice", calls, ctx=_FakeCtx(llm=_FakeLlm(llm_calls, answer="{}")))
+    (post,) = _posts(calls)
+    assert post["channel"] == CARD_CH
+    assert "thread_ts" not in post and "reply_broadcast" not in post
+    buttons = [el for b in post["blocks"] if b["type"] == "actions" for el in b["elements"]]
+    assert {el["action_id"] for el in buttons} == {
+        f"card:{i}:{c}" for i in (3, 4) for c in ("do", "defer", "drop")
+    }
+    (update,) = _updates(calls)
+    assert (update[1], update[2]) == (CARD_CH, CARD_TS)
+    assert [i for i, (a, b) in enumerate(zip(MORE_BLOCKS, update[3])) if a != b] == [
+        next(i for i, b in enumerate(MORE_BLOCKS) if b.get("block_id") == "card:more:advice")
+    ]
+    sent = next(b for b in update[3] if b.get("block_id") == "card:more:advice")
+    assert sent["elements"][0]["text"] == "↓ 이어서 보냈어요 (2건)"
+    assert len(update[3]) == len(MORE_BLOCKS)
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "model"] and not llm_calls
+
+
+def test_a_more_press_records_the_page_then_the_proposals_it_showed_and_hands_over_their_notes():
+    calls = []
+    with _more_events():
+        _more_press("advice", calls)
+    names = [c[1] if c[0] == "record" else c[0] for c in calls if isinstance(c, tuple)]
+    assert names == ["post", "card_more", "handover", "card_proposal", "card_proposal", "chat_update"]
+    more = next(c for c in _records(calls) if c[1] == "card_more")
+    assert more[2] == {"card_ts": CARD_TS, "lane": "advice", "ts": PAGE_TS, "n": 2}
+    proposals = [c[2] for c in _records(calls) if c[1] == "card_proposal"]
+    assert [(p["card_ts"], p["idx"], p["more_of"]) for p in proposals] == [
+        (PAGE_TS, 3, CARD_TS),
+        (PAGE_TS, 4, CARD_TS),
+    ]
+    (handover,) = [c for c in calls if isinstance(c, tuple) and c[0] == "handover"]
+    assert handover[1] == f"slack:{CARD_CH}:{PAGE_TS}"
+    assert "/vault/wiki/wiki-0900.md" in handover[2]
+
+
+def test_a_second_more_press_on_the_same_lane_sends_nothing_more():
+    calls = []
+    with _more_events():
+        with _env():
+            _, handler = _register(_FakeCtx())[0]
+            with _patched_effects(calls), mock.patch.object(PLUGIN, "_LOG"):
+                _run(handler, _more_body("advice"), calls, current=MORE_BLOCKS)
+                _run(handler, _more_body("advice"), calls, current=MORE_BLOCKS)  # a press from the stale card
+    assert len(_posts(calls)) == 1
+    assert len(_updates(calls)) == 1
+    # after a restart the claim is gone; the lane's card_more 사건 still answers
+    sent = [
+        {
+            "id": 9,
+            "observed_at": "2026-10-06T00:00:00+00:00",
+            "attributes": next(c[2] for c in _records(calls) if c[1] == "card_more"),
+        }
+    ]
+    again = []
+    with _more_events(sent=sent):
+        _more_press("advice", again)
+    assert not _posts(again) and not _records(again)
+    (update,) = _updates(again)
+    assert any(b.get("block_id") == "card:more:advice" and b["type"] == "context" for b in update[3])
+    assert "(2건)" in json.dumps(update[3], ensure_ascii=False)
+
+
+def test_a_more_press_for_each_lane_sends_that_lanes_rows_and_only_those():
+    for lane, idxs in (("repair", {1}), ("review", {7}), ("sample", {9})):
+        calls = []
+        with _more_events():
+            _more_press(lane, calls)
+        (post,) = _posts(calls)
+        buttons = [el["action_id"] for b in post["blocks"] if b["type"] == "actions" for el in b["elements"]]
+        assert {int(a.split(":")[1]) for a in buttons} == idxs, lane
+
+
+def test_a_page_rows_buttons_comment_and_press_work_as_on_the_first_card():
+    calls = []
+    with _more_events():
+        _more_press("review", calls)
+    (post,) = _posts(calls)
+    page = post["blocks"]
+    page_rows = _page_entries(calls)
+    assert [
+        (e["attributes"]["idx"], e["attributes"]["card_ts"], e["attributes"]["shown"]) for e in page_rows
+    ] == [(7, PAGE_TS, True)]
+
+    def on_page(body):
+        return {**body, "message": {"ts": PAGE_TS, "blocks": page}}
+
+    # the 맞아요/보류 press reads the page's own card_row and lands as the first card's would
+    press_calls = []
+    with _env():
+        _, handler = _register(_FakeCtx())[0]
+        with _patched_effects(press_calls), _rows(entries=page_rows):
+            _run(handler, on_page(_bare_body("card:7:defer")), press_calls, current=page)
+    (record,) = _records(press_calls)
+    assert record[1] == "verdict_reviewed"
+    assert record[2]["card_ts"] == PAGE_TS and record[2]["session_id"] == "sess-agent-2"
+    # the 💬 코멘트 opens the modal keyed to the page
+    comment_calls = []
+    with _env():
+        _, handler = _register(_FakeCtx())[0]
+        with _patched_effects(comment_calls):
+            _run(handler, on_page(_bare_body("card:7:comment")), comment_calls, current=page)
+    (opened,) = [c for c in comment_calls if isinstance(c, tuple) and c[0] == "views_open"]
+    assert json.loads(opened[2]["private_metadata"]) == {"card_ts": PAGE_TS, "channel": CARD_CH, "idx": 7}
+
+
+def test_an_advice_page_row_is_judged_against_the_pages_own_session():
+    calls = []
+    with _more_events():
+        _more_press("advice", calls)
+    (post,) = _posts(calls)
+    value = next(
+        el["value"]
+        for b in post["blocks"]
+        if b["type"] == "actions"
+        for el in b["elements"]
+        if el["action_id"] == "card:3:do"
+    )
+    press_calls = []
+    body = {**_body("card:3:do", json.loads(value)), "message": {"ts": PAGE_TS, "blocks": post["blocks"]}}
+    with _env():
+        _, handler = _register(_FakeCtx())[0]
+        with _patched_effects(press_calls):
+            _run(handler, body, press_calls, current=post["blocks"])
+    verdict = next(c for c in _records(press_calls) if c[1] == "card_verdict")
+    assert verdict[2] == {"card_ts": PAGE_TS, "idx": 3, "choice": "do"}
+    (consumption,) = [c for c in press_calls if isinstance(c, tuple) and c[0] == "consumption"]
+    assert consumption[1] == f"slack:{CARD_CH}:{PAGE_TS}"
+
+
+def test_a_page_that_still_overflows_carries_its_own_more_button_and_keeps_the_rest_in_card_row():
+    left = card_view.page_rows(
+        "advice",
+        [(r.idx, r.detail) for r in _MORE_BUILT.rows if not r.shown and r.lane == "advice"],
+    )
+    two_rows = card_view.card_chars(card_view.build_page("advice", left, lang="ko", cap=1).blocks)
+    calls = []
+    with _more_events(), mock.patch.object(card_view, "CARD_CHARS_BUDGET", two_rows):
+        _more_press("advice", calls)
+    (post,) = _posts(calls)
+    (line,) = [b for b in post["blocks"] if "accessory" in b]
+    assert line["accessory"]["action_id"] == "card:more:advice" and "+1건" in line["text"]["text"]
+    rows = [e["attributes"] for e in _page_entries(calls)]
+    assert [(r["idx"], r["card_ts"], r["shown"]) for r in rows] == [(4, PAGE_TS, False)]
+    assert next(c for c in _records(calls) if c[1] == "card_more")[2]["n"] == 1
+    assert "(1건)" in json.dumps(_updates(calls)[-1][3], ensure_ascii=False)
+
+
+def test_a_page_the_card_left_unopened_leaves_nothing_that_says_it_was_seen():
+    calls = []
+    with _more_events():
+        _more_press("review", calls)
+    assert [c[1] for c in _records(calls)] == ["card_more", "card_row"]
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "handover"]
+
+
+def test_a_sample_page_records_the_sample_as_shown_on_the_new_message():
+    calls = []
+    with _more_events():
+        _more_press("sample", calls)
+    shown = [c[2] for c in _records(calls) if c[1] == "verdict_sample_shown"]
+    assert [(s["session_id"], s["card_ts"]) for s in shown] == [("sx1", PAGE_TS)]
+
+
+def test_a_more_press_whose_rows_cannot_be_read_shows_the_failure_over_the_button_and_can_be_pressed_again():
+    for events in (_more_events(rows=[]), _more_events(error=OSError("door down"))):
+        calls = []
+        with events:
+            client = _more_press("advice", calls)
+        assert not _posts(calls) and not _records(calls)
+        (update,) = _updates(calls)
+        status = next(b for b in update[3] if b.get("block_id") == "card:more:advice:status")
+        assert status["elements"][0]["text"] == "✕ 실패 — 줄 정보를 못 읽었어요"
+        assert any(b.get("accessory", {}).get("action_id") == "card:more:advice" for b in update[3])
+        assert not PLUGIN._more_claimed
+        again = []
+        with _more_events(), _env():
+            _, handler = _register(_FakeCtx())[0]
+            with _patched_effects(again), mock.patch.object(PLUGIN, "_LOG"):
+                _run(handler, _more_body("advice", client.current), again, current=client.current)
+        assert len(_posts(again)) == 1
+
+
+def test_a_page_that_slack_refuses_records_nothing_and_leaves_the_button_pressable():
+    calls = []
+    with _more_events():
+        _more_press("advice", calls, post_fail=True)
+    assert not _records(calls) and not PLUGIN._more_claimed
+    (update,) = _updates(calls)
+    assert "✕ 실패 — slack down" in json.dumps(update[3], ensure_ascii=False)
+    assert any(b.get("accessory", {}).get("action_id") == "card:more:advice" for b in update[3])
+
+
+def test_a_more_press_by_anyone_but_the_owner_or_on_an_old_card_does_nothing():
+    calls = []
+    with _env():
+        _, handler = _register(_FakeCtx())[0]
+        with (
+            _patched_effects(calls),
+            mock.patch.object(card_delegate, "fetch_events", side_effect=AssertionError("no read")),
+        ):
+            _run(handler, _more_body("advice", user=OTHER), calls)
+            with mock.patch.object(
+                PLUGIN, "time", types.SimpleNamespace(time=lambda: float(CARD_TS) + 24 * 3600)
+            ):
+                _run(handler, _more_body("advice"), calls)
+    assert not _posts(calls) and not _records(calls) and not _updates(calls)
+
+
 if __name__ == "__main__":
+    test_a_more_press_sends_one_new_message_in_the_same_dm_never_a_thread_and_marks_that_line()
+    test_a_more_press_records_the_page_then_the_proposals_it_showed_and_hands_over_their_notes()
+    test_a_second_more_press_on_the_same_lane_sends_nothing_more()
+    test_a_more_press_for_each_lane_sends_that_lanes_rows_and_only_those()
+    test_a_page_rows_buttons_comment_and_press_work_as_on_the_first_card()
+    test_an_advice_page_row_is_judged_against_the_pages_own_session()
+    test_a_page_that_still_overflows_carries_its_own_more_button_and_keeps_the_rest_in_card_row()
+    test_a_page_the_card_left_unopened_leaves_nothing_that_says_it_was_seen()
+    test_a_sample_page_records_the_sample_as_shown_on_the_new_message()
+    test_a_more_press_whose_rows_cannot_be_read_shows_the_failure_over_the_button_and_can_be_pressed_again()
+    test_a_page_that_slack_refuses_records_nothing_and_leaves_the_button_pressable()
+    test_a_more_press_by_anyone_but_the_owner_or_on_an_old_card_does_nothing()
     test_the_import_path_stays_langchain_free()
     test_register_without_secretary_owner_id_registers_nothing()
     test_register_without_boring_home_registers_nothing()

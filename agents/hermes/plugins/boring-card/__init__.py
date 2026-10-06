@@ -33,6 +33,16 @@ trigger_id (views_open); the submission arrives through the Slack app's view han
 the platform-handler factory register() hands ctx.register_platform_handler, and becomes one
 card_comment 사건 (judge owner) plus 「💬 받았어요」 over the row — the buttons stay.
 
+A lane's [더보기] (`card:more:<lane>`, no value) sends the rows the card left out as one new
+message in the same DM — no thread, no model: the rows come back from card_row (shown False,
+the whole row in `detail`), card_view.fit_page draws them with the card's own row functions,
+and the page's rows are recorded under its new ts (card_row for repair/review rows, and — as
+the rows are seen only now — card_proposal + handover for advice, verdict_sample_shown for
+표본) so every button, comment and press on it runs the first card's path. The pressed line
+becomes 「↓ 이어서 보냈어요 (N건)」; a lane's card_more 사건 (card_ts, lane, new ts) answers a
+second press with the same line and sends nothing. A failure before the page is out shows
+「✕ 실패」 over the button, which stays.
+
 register() refuses loudly instead of half-registering: without SECRETARY_OWNER_ID no
 handler is installed at all — a press from anyone must never reach an effect — and without
 BORING_HOME the repo's own modules cannot even be found. All module-level imports stay
@@ -53,6 +63,7 @@ import os
 import re
 import sys
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 _LOG = logging.getLogger(__name__)
@@ -68,6 +79,11 @@ _PLUGIN_NAME = "boring-card"
 #: the owner can press again. Once the effects ran the claim stays, even if chat_update
 #: fails and the buttons are still showing: a re-press would run them twice.
 _claimed: set[tuple[str, int]] = set()
+
+#: [더보기] presses already taken, as (card_ts, lane): a lane is continued at most once. Claimed
+#: before the page goes out, released only when nothing went out; after that the lane's
+#: card_more 사건 answers a repeat.
+_more_claimed: set[tuple[str, str]] = set()
 
 #: The chat_update client built by register(); None when slack_sdk or the bot token is
 #: absent (one error line at register) — presses still take their effects, the card just
@@ -370,8 +386,147 @@ def register(ctx: Any) -> None:
     def _wire_comment_modal(native, adapter) -> None:
         native.view(card_types.COMMENT_CALLBACK_ID)(_view_handler)
 
+    async def _settle_more(press, outcome, lang: str, snapshot) -> None:
+        """The lane's [더보기] line on the card as Slack holds it now, settled: only that block
+        changes. The page itself is already out (or the press failed before it); this is the
+        owner's view of it."""
+        if _client is None:
+            _LOG.error(
+                "%s: card_ts=%s lane=%s has no client — cannot settle the [더보기] line",
+                _PLUGIN_NAME,
+                press.card_ts,
+                press.lane,
+            )
+            return
+        current = await _current_blocks(press, snapshot)
+        blocks = card_view.more_progress(current, press.lane, outcome, lang=lang)
+        match blocks:
+            case card_types.Rejected(reason=reason):
+                _LOG.error(
+                    "%s: card_ts=%s lane=%s [더보기] line not settled — %s",
+                    _PLUGIN_NAME,
+                    press.card_ts,
+                    press.lane,
+                    reason,
+                )
+                return
+        try:
+            await _client.chat_update(channel=press.channel, ts=press.card_ts, blocks=blocks)
+        except Exception as e:  # noqa: BLE001 — the page is out; a line that did not update is one log line
+            _LOG.error(
+                "%s: card_ts=%s lane=%s [더보기] chat_update failed — %s",
+                _PLUGIN_NAME,
+                press.card_ts,
+                press.lane,
+                e,
+            )
+
+    def _read_more_inputs(press) -> card_types.MoreSent | list[card_view.PageRow] | card_types.RowUnread:
+        """What a [더보기] press needs from the event log: the lane's card_more (already
+        continued → its MoreSent) or else its left-out card_row details as page rows. A dead
+        door, a missing row and a row that does not rebuild all come home as RowUnread."""
+        try:
+            sent = card_press.sent_from_entries(
+                card_delegate.fetch_events("card_more", ROW_WINDOW_HOURS), press.card_ts, press.lane
+            )
+            if sent is not None:
+                return sent
+            left = card_press.left_out_from_entries(
+                card_delegate.fetch_events("card_row", ROW_WINDOW_HOURS), press.card_ts, press.lane
+            )
+        except OSError as e:
+            return card_types.RowUnread(reason=" ".join(str(e).split()))
+        if isinstance(left, card_types.RowUnread):
+            return left
+        rows = card_view.page_rows(press.lane, left)
+        if isinstance(rows, card_types.Rejected):
+            return card_types.RowUnread(reason=rows.reason)
+        return rows
+
+    def _write_page(writes, session: str) -> None:
+        """The page's records in their order — the handover between the two groups, as card.py
+        writes it, so the page's advice rows can be answered by a verdict on its session."""
+        for record in writes.before:
+            card_effects._live_record(record.event, record.fields)
+        if writes.paths:
+            card_effects._live_handover(session, datetime.now(UTC).isoformat(), writes.paths)
+        for record in writes.after:
+            card_effects._live_record(record.event, record.fields)
+
+    async def _more(body) -> None:
+        """[더보기]: the lane's left-out rows go out as one new message in the same DM (no
+        thread), drawn from their card_row by the card's own drawing functions — no model. The
+        pressed line becomes 「↓ 이어서 보냈어요 (N건)」; a lane already continued is answered with
+        the same line and sends nothing. A failure before the page is out shows its reason over
+        the button, which stays pressable."""
+        press = card_press.parse_more(body, owner_id=owner_id)
+        if isinstance(press, card_types.Rejected):
+            _LOG.info("%s: more press rejected — %s", _PLUGIN_NAME, press.reason)
+            return
+        if not card_press.answerable(press.card_ts, time.time()):
+            _LOG.info(
+                "%s: more press card_ts=%s lane=%s refused — the card is older than %sh",
+                _PLUGIN_NAME,
+                press.card_ts,
+                press.lane,
+                card_press.CARD_ANSWERABLE_HOURS,
+            )
+            return
+        key = (press.card_ts, press.lane)
+        if key in _more_claimed:
+            _LOG.info("%s: more press card_ts=%s lane=%s refused — already taken", _PLUGIN_NAME, *key)
+            return
+        _more_claimed.add(key)
+        lang = card_advice.resolve_lang(boring_config.note_lang())
+        message = body.get("message")
+        snapshot = (message.get("blocks") if isinstance(message, dict) else None) or []
+
+        async def fail(reason: str) -> None:
+            _more_claimed.discard(key)
+            await _settle_more(press, card_types.Failed(reason=reason), lang, snapshot)
+
+        read = await asyncio.to_thread(_read_more_inputs, press)
+        match read:
+            case card_types.MoreSent():
+                await _settle_more(press, read, lang, snapshot)
+                return
+            case card_types.RowUnread(reason=reason):
+                _LOG.error("%s: more card_ts=%s lane=%s rows unread — %s", _PLUGIN_NAME, *key, reason)
+                await fail(card_i18n.STRINGS[lang]["row_unread_reason"])
+                return
+        try:
+            page = card_view.fit_page(press.lane, read, lang=lang, note_links=boring_config.note_links())
+        except ValueError as e:
+            _LOG.error("%s: more card_ts=%s lane=%s page refused — %s", _PLUGIN_NAME, *key, e)
+            await fail(" ".join(str(e).split()))
+            return
+        if _client is None:
+            _LOG.error("%s: more card_ts=%s lane=%s has no client — cannot post the page", _PLUGIN_NAME, *key)
+            _more_claimed.discard(key)
+            return
+        try:
+            posted = await _client.chat_postMessage(
+                channel=press.channel, blocks=page.blocks, text=card_view.page_title(press.lane, lang)
+            )
+        except Exception as e:  # noqa: BLE001 — a page that did not go out is the row's failure mark, and the press can be repeated
+            _LOG.error("%s: more card_ts=%s lane=%s post failed — %s", _PLUGIN_NAME, *key, e)
+            await fail(" ".join(str(e).split()) or type(e).__name__)
+            return
+        new_ts = posted["ts"]
+        writes = card_press.more_writes(page, press, new_ts, lang)
+        try:
+            await asyncio.to_thread(_write_page, writes, card_press.session_name(press.channel, new_ts))
+        except Exception as e:  # noqa: BLE001 — the page is out and cannot be un-sent; its rows will say they are unreadable
+            _LOG.error(
+                "%s: more card_ts=%s lane=%s page %s records failed — %s", _PLUGIN_NAME, *key, new_ts, e
+            )
+        await _settle_more(press, card_types.MoreSent(ts=new_ts, n=len(page.shown)), lang, snapshot)
+
     async def _handler(ack, body, action) -> None:
         await ack()
+        if card_press.is_more_action(body):
+            await _more(body)
+            return
         if card_press.is_comment_action(body):
             await _open_comment(body)
             return

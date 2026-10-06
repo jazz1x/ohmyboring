@@ -14,6 +14,8 @@ STRINGS: dict[str, str] = {
     "confirmation_line": "過去の承認 {total} · 完了 {done} · 保留 {pending}",
     "confirmation_unknown": " · 不明 {unknown}",
     "overflow_line": "他{n}件（カード上限）",
+    "more_button": "もっと見る",
+    "more_sent": "↓ 続きを送りました（{n}件）",
     "todo_header": "今日やること",
     "advice_header": "気になった点",
     "repairs_headline": "残りグループ{remaining}",

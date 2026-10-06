@@ -23,6 +23,7 @@ from card_types import (
     PastApproved,
     PastCardHistory,
     Proposal,
+    ProposedVerdict,
     Rejected,
 )
 
@@ -115,6 +116,16 @@ def proposal_event_fields(proposal: Proposal, lang: str, card_ts: str, idx: int)
         "lang": lang,
         "card_ts": card_ts,
         "idx": idx,
+    }
+
+
+def sample_shown_fields(sample: ProposedVerdict, card_ts: str) -> dict[str, Any]:
+    """The verdict_sample_shown event's fields — the one record that says a 확인용 표본 was seen."""
+    return {
+        "session_id": sample.session_id,
+        "note": sample.note,
+        "proposed_kind": sample.kind,
+        "card_ts": card_ts,
     }
 
 

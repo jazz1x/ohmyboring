@@ -915,6 +915,7 @@ class GraphTests(unittest.TestCase):
                     "card_ts": CARD_TS,
                     "idx": 0,
                     "lane": "repair",
+                    "shown": True,
                     "value": {
                         "lane": "repair",
                         "subject": "foodspring-front",
@@ -925,6 +926,7 @@ class GraphTests(unittest.TestCase):
                     "card_ts": CARD_TS,
                     "idx": 1 + n_advice,
                     "lane": "review",
+                    "shown": True,
                     "value": {"lane": "review", "session": "sr", "kind": "used", "note": "wiki-0700"},
                 },
             ],
@@ -938,6 +940,45 @@ class GraphTests(unittest.TestCase):
         stubs = Stubs()
         self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-no-card-row"}})
         self.assertNotIn("card_row", [e for e, _ in stubs.records])
+
+    def test_every_row_the_card_left_out_leaves_one_whole_card_row_and_no_record_that_it_was_seen(self):
+        # 4,500 chars leaves a row out of every lane: the repair, all three advice rows, the
+        # third review, the second sample. Each is kept whole in card_row (shown False) so the
+        # [더보기] page can draw it; "seen" records (card_proposal, verdict_sample_shown, the
+        # handover's paths) exist only for what rode, so a row nobody opened is tomorrow's candidate.
+        reviews = [
+            cc.ProposedVerdict(
+                session_id=f"sr{i}", note=f"/vault/wiki/wiki-07{i:02d}.md", kind="used", at=f"t-{i}"
+            )
+            for i in range(3)
+        ]
+        stubs = Stubs(
+            repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 5},
+            repair_judgment_items=REPAIR_JUDGMENTS,
+            proposed_items=reviews,
+            score_reading=cc.ScoreReading(samples=[self._sample(1), self._sample(2)]),
+        )
+        with mock.patch.object(card_view, "CARD_CHARS_BUDGET", 4500):
+            self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-left-out-rows"}})
+        left = [f for e, f in stubs.records if e == "card_row" and f["shown"] is False]
+        self.assertEqual(
+            [(f["idx"], f["lane"]) for f in left],
+            [(0, "repair"), (1, "advice"), (2, "advice"), (3, "advice"), (6, "review"), (8, "sample")],
+        )
+        self.assertEqual({f["card_ts"] for f in left}, {CARD_TS})
+        self.assertTrue(all(f["detail"]["item"] and "total" in f["detail"] for f in left))
+        self.assertEqual(
+            [f["detail"]["item"]["session_id"] for f in left if f["lane"] in ("review", "sample")],
+            ["sr2", self._sample(2).session_id],
+        )
+        self.assertNotIn("card_proposal", [e for e, _ in stubs.records])
+        self.assertEqual(self.handovers[-1][2], [])
+        seen = [f["session_id"] for e, f in stubs.records if e == "verdict_sample_shown"]
+        self.assertEqual(seen, [self._sample(1).session_id])
+        lines = [b["block_id"] for b in self.sends[-1] if b["type"] == "section" and "accessory" in b]
+        self.assertEqual(
+            lines, ["card:more:repair", "card:more:advice", "card:more:review", "card:more:sample"]
+        )
 
     def test_a_failed_send_records_no_shown_sample(self):
         stubs = Stubs(
@@ -1955,6 +1996,39 @@ class LivePastVerdictsTests(unittest.TestCase):
             [("/n.md", "/e.md", 4, "2026-09-25T08:23:00+00:00")],
         )
 
+    def test_a_left_out_advice_row_is_no_shown_proposal(self):
+        # card_row (shown False) holds the advice row for [더보기]; the 72h rest and the 7-day
+        # suppression read card_proposal — a reader that asks for card_row fails here.
+        def fake(event_name: str, since_hours: int):
+            assert event_name != "card_row", "no reader of 「보임」 reads card_row"
+            return []
+
+        with mock.patch.object(card_live, "_live_events", side_effect=fake):
+            self.assertEqual(card_live._live_past_verdicts(168), cc.PastCardHistory())
+
+    def test_the_posted_card_ignores_the_pages_rows_a_more_press_wrote(self):
+        attrs = {
+            "register": "stalled",
+            "project": "",
+            "subject": "s",
+            "note": "/vault/wiki/wiki-0576.md",
+            "bottleneck": "병목 열자 이상 문장입니다",
+            "advice": "조언 열자 이상 문장입니다",
+            "evidence": [{"note": "/vault/wiki/wiki-0576.md", "quote": "근거 인용문 열자 이상", "line": 1}],
+            "card_ts": "1.0",
+            "idx": 0,
+        }
+        now = datetime.now(UTC)
+        later = (now + timedelta(seconds=1)).isoformat()
+        entries = [
+            {"observed_at": now.isoformat(), "attributes": attrs},
+            {"observed_at": later, "attributes": {**attrs, "card_ts": "2.0", "more_of": "1.0", "idx": 1}},
+        ]
+        with mock.patch.object(card_live, "_live_events", return_value=entries):
+            self.assertEqual(
+                [p.note for p in card_live._live_posted_proposals()], ["/vault/wiki/wiki-0576.md"]
+            )
+
     def test_proposal_window_is_wider_than_the_verdict_window(self):
         seen: dict[str, int] = {}
 
@@ -2402,6 +2476,14 @@ class PostedTodayGuardTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("[card] already posted today (ts=1727480000.000100)", out)
 
+    def test_a_card_row_the_card_left_out_is_no_posted_card_on_the_ledger(self):
+        rc, out, fake_event_log = self._run_main([self._today_event(name="card_row")])
+        self.assertEqual(rc, 0)
+        self.assertIn(f"[card] posted ts={CARD_TS}", out)
+        self.assertNotIn(
+            "card_row", {c.kwargs["event_name"] for c in fake_event_log.recent_events.call_args_list}
+        )
+
     def test_a_card_with_only_card_fit_blocks_a_second_run_the_same_day(self):
         events = [self._today_event(name="card_fit")]
         rc, out, _ = self._run_main(events, graph_side_effect=AssertionError("the graph must not run"))
@@ -2546,6 +2628,14 @@ class ScoreAndSampleTests(unittest.TestCase):
         self.assertEqual(out.score, cc.Scored(agreed=0, compared=0))
         self.assertTrue({"s2", "s0"}.isdisjoint(s.session_id for s in out.samples))
         self.assertEqual(len(out.samples), 2)
+
+    def test_a_left_out_sample_or_review_row_is_neither_shown_nor_pressed(self):
+        # a left-out row lives in card_row only. The 표본 exclusion reads verdict_sample_shown and
+        # the 채점 줄 reads verdict_reviewed: _score's fake answers only those names, so a reader
+        # that reached for card_row would KeyError here, and the pool stays whole.
+        out = self._score([])
+        self.assertEqual(out.score, cc.Scored(agreed=0, compared=0))
+        self.assertEqual([s.session_id for s in out.samples], ["s2", "s0"])
 
     def test_an_unreadable_log_is_a_value_and_a_dead_sample_pool_keeps_the_tally(self):
         with mock.patch.object(card_live, "_live_events", side_effect=OSError("door down")):

@@ -35,6 +35,7 @@ from card_effects import (  # noqa: F401
     _door_url,
     _live_consumption,
     _live_execute_repair,
+    _live_handover,
     _live_record,
 )
 from card_press import CARD_ANSWERABLE_HOURS
@@ -116,13 +117,15 @@ def _live_posted_proposals() -> list[Proposal]:
     """The advice rows of the card already posted today (KST), rebuilt from its card_proposal
     events in idx order — what a render-only run puts in the advice lane instead of asking
     the model again. No card today, no rows. A row that does not rebuild is malformed:
-    raised, never skipped."""
+    raised, never skipped. A [더보기] page's rows (`more_of`) are not the card: counted in,
+    the newest page would stand in for the whole card."""
     kst = timezone(timedelta(hours=9))
     today = datetime.now(kst).date()
     entries = [
         entry
         for entry in _live_events("card_proposal", 24)
         if datetime.fromisoformat(entry["observed_at"].replace("Z", "+00:00")).astimezone(kst).date() == today
+        and "more_of" not in entry["attributes"]
     ]
     if not entries:
         return []
@@ -211,15 +214,6 @@ def _live_past_verdicts(since_hours: int) -> PastCardHistory:
         except (KeyError, TypeError, ValueError, ValidationError) as e:
             raise ValueError(f"malformed card_proposal {key!r}: {e}") from e
     return PastCardHistory(judged=judged, unanswered=unanswered)
-
-
-def _live_handover(session: str, at: str, paths: list[str]) -> dict:
-    # Err→예외는 카드 그래프가 예외를 계약으로 삼는 동안의 임시 경계 — 실패한 카드는 게시되지 않는다.
-    match DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).handover(session, at, paths):
-        case Ok(resp):
-            return resp
-        case Err(failure):
-            raise OSError(str(failure))
 
 
 def _live_resolve(subject: str, register: str) -> ResolvedNote | Unresolved:

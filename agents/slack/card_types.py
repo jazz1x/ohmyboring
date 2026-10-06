@@ -574,13 +574,45 @@ Outcome = Annotated[Pending | Done | Failed | Received, Field(discriminator="out
 
 
 class CardRow(BaseModel):
-    """What one posted button row stands for — the values its buttons used to carry each.
-    card.post_card writes it once as the card_row 사건 and every press and comment reads it
-    back by (card_ts, idx). `value` is the old button value, lane included."""
+    """What one card row stands for — the values its buttons used to carry each. card.post_card
+    writes it once as the card_row 사건 and every press and comment reads it back by
+    (card_ts, idx). `value` is the old button value, lane included. A row the card left out
+    (`shown` False) carries `detail` too — the whole row, so the [더보기] page can draw it
+    later from this 사건 alone; a row that rode has no detail."""
 
     idx: int
-    lane: Literal["repair", "review"]
+    lane: Literal["repair", "advice", "review", "sample"]
     value: dict
+    shown: bool = True
+    detail: dict | None = None
+
+    def fields(self, card_ts: str) -> dict:
+        return {"card_ts": card_ts, **self.model_dump(exclude_none=True)}
+
+
+#: The lanes a [더보기] button can open — the card's four columns of rows.
+MORE_LANES: tuple[str, ...] = ("repair", "advice", "review", "sample")
+
+#: The prefix of a [더보기] button's action_id — `card:more:<lane>`. Its second word is never
+#: a number, so no row press (`card:<idx>:<choice>`) can be mistaken for it.
+MORE_ACTION_PREFIX: str = "card:more:"
+
+
+class MorePress(BaseModel):
+    """A [더보기] press, trusted: which lane of which card the owner asked to continue."""
+
+    lane: Literal["repair", "advice", "review", "sample"]
+    user: str
+    card_ts: str
+    channel: str
+
+
+class MoreSent(BaseModel):
+    """What the card_more 사건 says about a lane already continued: the new message's ts and
+    how many rows it carried."""
+
+    ts: str
+    n: int
 
 
 class NeedsRow(BaseModel):

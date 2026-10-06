@@ -81,6 +81,15 @@ def _live_record(event: str, fields: dict) -> None:
     event_log.append_event("slack-card", event, "ok", **fields)
 
 
+def _live_handover(session: str, at: str, paths: list[str]) -> dict:
+    # Err→예외는 카드 그래프가 예외를 계약으로 삼는 동안의 임시 경계 — 실패한 카드는 게시되지 않는다.
+    match DrudgeClient(timeout=ENGINE_TIMEOUT, retries=0).handover(session, at, paths):
+        case Ok(resp):
+            return resp
+        case Err(failure):
+            raise OSError(str(failure))
+
+
 def _live_consumption(session: str, kind: str, paths: list[str], judge: str | None = None) -> dict:
     # Row-level, not session-level: a button judges the note its row cited, and only that one.
     # judge=None keeps the OWNER default: a button press is the owner's hand, and the client

@@ -14,6 +14,8 @@ STRINGS: dict[str, str] = {
     "confirmation_line": "Past approvals {total} · Done {done} · Pending {pending}",
     "confirmation_unknown": " · Unknown {unknown}",
     "overflow_line": "+{n} more not shown (card limit)",
+    "more_button": "Show more",
+    "more_sent": "↓ Sent the rest below ({n})",
     "todo_header": "To-do today",
     "advice_header": "Flagged for you",
     "repairs_headline": "Remaining groups {remaining}",
