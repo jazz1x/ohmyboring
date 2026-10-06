@@ -1428,9 +1428,9 @@ class ReadableReviewRowTests(unittest.TestCase):
             reason="md` (section ch1) and ohmyboring (wiki-",
         )
         self.assertNotIn("근거:", cv._review_tag_block(review, strings)["text"]["text"])
-        whole = review.model_copy(update={"reason": "그 문장은 온전해서 짧아도 근거로 보입니다 정말로."})
+        whole = review.model_copy(update={"reason": "이 문장은 온전해서 짧아도 근거로 보입니다 정말로."})
         self.assertLess(len(cv.evidence_excerpt(whole.reason)), cv.TEXT_FLOOR)
-        self.assertIn("근거: 「그 문장은 온전해서", cv._review_tag_block(whole, strings)["text"]["text"])
+        self.assertIn("근거: 「이 문장은 온전해서", cv._review_tag_block(whole, strings)["text"]["text"])
         clipped_short = review.model_copy(update={"reason": "ng.md` 앞뒤가 잘린 짧은 문장 잘린낱…"})
         self.assertNotIn("근거:", cv._review_tag_block(clipped_short, strings)["text"]["text"])
         long = review.model_copy(update={"reason": clipped})

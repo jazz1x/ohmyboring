@@ -455,7 +455,8 @@ def evidence_excerpt(reason: str) -> str:
     return text[: _unclosed_from(text)].rstrip(" ,;:·-—")
 
 
-_PARTICLES = frozenset("은는이가을를의에로와과도만")
+#: 「이」 is left out: standing alone at a sentence head it is the demonstrative (「이 노트는…」).
+_PARTICLES = frozenset("은는가을를의에로와과도만")
 _SENTENCE_END = re.compile(r"(?:[.!?。]|[다요죠까음함됨임])[\"'”’)\]」』.!?。]*$")
 
 
