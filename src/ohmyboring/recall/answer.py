@@ -2,8 +2,9 @@
 
 wiki 직독이 먼저, 한 건도 없을 때만 벡터+어휘(PgRetriever)로 간다. wiki 길의 집합 안 순서는
 retrieve.rs::order_wiki_hits(= rank.order_within_set), 렌더는 recall_text 그대로 — 줄은 빈 줄로
-잇고 대체된 노트는 라벨에 새 노트 이름이 붙는다. handover(session_id)는 하지 않는다 — 그림자는
-쓰지 않는다. wiki 길엔 max_tokens 예산이 걸리지 않는다(엔진 그대로).
+잇고 대체된 노트는 라벨에 새 노트 이름이 붙는다. 이 모듈은 handover(session_id)를 쓰지 않는다 —
+보인 경로를 Recalled.shown 으로 돌려줄 뿐, 쓰기는 문(DOOR_RECALL_READER=python)이 한다.
+wiki 길엔 max_tokens 예산이 걸리지 않는다(엔진 그대로).
 """
 
 from __future__ import annotations
@@ -79,6 +80,7 @@ class Recalled:
     path: str  # wiki | vector — 어느 길이 줄을 냈나
     skipped: int = 0  # 읽지 못해 건너뛴 wiki 파일 수
     pool: WikiPool | None = None  # wiki 길만
+    shown: tuple[str, ...] = ()  # 답에 실린 줄의 경로 — handover 가 쓸 목록(엔진 mcp_recall 의 paths)
 
 
 @dataclass(frozen=True)
@@ -210,7 +212,10 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
                     return Err(Failed(f"recall superseded: {detail}"))
                 case Ok(superseded):
                     text = recall_text(selected.lines, superseded)
-                    return Ok(Recalled(text, selected.path, selected.skipped, _pool_of(selected, superseded)))
+                    shown = tuple(path for path, _ in selected.lines)
+                    return Ok(
+                        Recalled(text, selected.path, selected.skipped, _pool_of(selected, superseded), shown)
+                    )
 
 
 def _detail(result: Either[Any, Any]) -> Either[Any, str]:

@@ -2838,6 +2838,7 @@ class _RegisterTestHarness:
         "DOOR_UPSTREAM",
         "DOOR_PG_DSN",
         "DOOR_REGISTER_READER",
+        "DOOR_RECALL_READER",
         "BORING_EVENT_SINK",
         "BORING_EVENT_LOG",
     )
@@ -2904,6 +2905,7 @@ class _RegisterTestHarness:
         self._shadow_query_patch.stop()
         StubHandler.register_mode = False
         os.environ.pop("DOOR_REGISTER_READER", None)
+        os.environ.pop("DOOR_RECALL_READER", None)
 
     def _read_shadow_events(self) -> list[dict]:
         path = Path(os.environ["BORING_EVENT_LOG"])
@@ -3206,10 +3208,8 @@ class RegisterReaderSwitchTests(_RegisterTestHarness, unittest.TestCase):
         self.assertEqual(json.loads(body), {"error": "store not configured"})
 
 
-class RecallShadowTests(_RegisterTestHarness, unittest.TestCase):
-    """E4-2 회상 그림자 — MCP recall 은 엔진 답 바이트(번호 보강만 예외) 그대로 가고, 응답 뒤
-    파이썬 회상이 같은 인자로 돌아 recall_shadow 사건 한 줄을 남긴다. 파이썬 길(_recall_python)은
-    목으로 두고 선로(대조 시점·응답 비대기·예외 접기)만 본다. 진짜 길은 recall/test_recall.py."""
+class _RecallTestBase(_RegisterTestHarness):
+    """회상 시험의 공통 바탕 — 엔진 스텁+문 한 쌍, 파이썬 길(_recall_python) 목, 사건 읽기."""
 
     ENGINE_TEXT = "- [wiki-2229.md] ..."
 
@@ -3264,6 +3264,12 @@ class RecallShadowTests(_RegisterTestHarness, unittest.TestCase):
                 return events[-1]
             time.sleep(0.05)
         self.fail("recall_shadow event not written within timeout")
+
+
+class RecallShadowTests(_RecallTestBase, unittest.TestCase):
+    """E4-2 회상 그림자 — MCP recall 은 엔진 답 바이트(번호 보강만 예외) 그대로 가고, 응답 뒤
+    파이썬 회상이 같은 인자로 돌아 recall_shadow 사건 한 줄을 남긴다. 파이썬 길(_recall_python)은
+    목으로 두고 선로(대조 시점·응답 비대기·예외 접기)만 본다. 진짜 길은 recall/test_recall.py."""
 
     def test_same_text_is_ok_and_the_answer_is_the_engines_bytes(self):
         status, body, _ = self._recall("그냥 검색해줘", project="omb")
@@ -3348,6 +3354,127 @@ class RecallShadowTests(_RegisterTestHarness, unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(self._events(), [])
         self.assertEqual(self.python_calls, [])
+
+
+_REAL_RECALL_PYTHON = door._recall_python
+
+
+class RecallReaderSwitchTests(_RecallTestBase, unittest.TestCase):
+    """E4-2 회상 읽기 스위치 (DOOR_RECALL_READER). python 이면 recall 을 문이 답하고(번호 노트 블록·
+    JSON-RPC 오류 봉투·session_id handover 한 벌), 엔진은 배경 그림자로만 불린다 — session_id 는 뺀다.
+    _recall_python·_search_handover 는 목: 선로만 본다. 진짜 길은 recall/test_recall.py·search/test_pg.py."""
+
+    PYTHON_TEXT = "- [wiki-0001.md] 파이썬 답"
+
+    def setUp(self):
+        super().setUp()
+        self._python_impl = lambda arguments: door.Ok(
+            door.recall_answer.Recalled(self.PYTHON_TEXT, "wiki", shown=("wiki/wiki-0001.md",))
+        )
+        self.handovers: list[tuple[str, list[str]]] = []
+        self.handover_outcome = lambda: door.Ok(None)
+
+        def handover(session_id, paths):
+            self.handovers.append((session_id, paths))
+            return self.handover_outcome()
+
+        self._handover_patch = mock.patch.object(door, "_search_handover", side_effect=handover)
+        self._handover_patch.start()
+        os.environ["DOOR_RECALL_READER"] = "python"
+
+    def tearDown(self):
+        self._handover_patch.stop()
+        super().tearDown()
+
+    def _text(self, body: bytes) -> str:
+        return json.loads(body)["result"]["content"][0]["text"]
+
+    def test_one_handover_per_session_and_the_engine_shadow_gets_no_session_id(self):
+        status, body, _ = self._recall("그냥 검색해줘", session_id="sess-1", project="omb")
+        event = self._wait_for_event()
+        self.assertEqual(self.handovers, [("sess-1", ["wiki/wiki-0001.md"])], "한 벌 — 2 를 막는 선")
+        self.assertEqual(status, 200)
+        self.assertEqual(self._text(body), self.PYTHON_TEXT)
+        self.assertEqual(len(StubHandler.seen_bodies), 1, "엔진은 그림자 호출 한 번만 받는다")
+        shadow_call = json.loads(StubHandler.seen_bodies[0])
+        self.assertEqual(shadow_call["params"]["arguments"], {"query": "그냥 검색해줘", "project": "omb"})
+        self.assertEqual(event["reader"], "python")
+
+    def test_python_reader_answers_from_the_door_and_the_event_says_so(self):
+        status, body, _ = self._recall("그냥 검색해줘")
+        event = self._wait_for_event()
+        self.assertEqual((status, self._text(body)), (200, self.PYTHON_TEXT), "엔진 답(RECALL_BODY)이 아니다")
+        self.assertEqual(json.loads(body)["id"], 2)
+        self.assertFalse(json.loads(body)["result"]["isError"])
+        self.assertEqual((event["reader"], event["status"]), ("python", "mismatch"))
+        self.assertEqual(self.handovers, [], "session_id 가 없으면 handover 도 없다")
+
+    def test_agreeing_texts_are_ok_under_the_python_reader(self):
+        self._python_impl = lambda arguments: door.Ok(door.recall_answer.Recalled(self.ENGINE_TEXT, "wiki"))
+        self._recall("그냥 검색해줘")
+        event = self._wait_for_event()
+        self.assertEqual((event["reader"], event["status"]), ("python", "ok"))
+
+    def test_default_and_unknown_values_leave_the_answer_to_the_engine(self):
+        for value in (None, "engine", "python2"):
+            with self.subTest(value=value):
+                os.environ.pop("DOOR_RECALL_READER", None)
+                if value is not None:
+                    os.environ["DOOR_RECALL_READER"] = value
+                self.assertEqual(door._recall_reader(), "engine")
+                status, body, _ = self._recall("그냥 검색해줘", session_id="sess-1")
+                event = self._wait_for_event()
+                self.assertEqual((status, body), (200, RECALL_BODY))
+                self.assertEqual(event["reader"], "engine")
+                self.assertEqual(self.handovers, [], "엔진이 답하면 문은 handover 를 안 쓴다")
+                Path(os.environ["BORING_EVENT_LOG"]).unlink()
+
+    def test_empty_query_is_the_engines_32602(self):
+        self._python_impl = _REAL_RECALL_PYTHON
+        status, body, _ = self._recall("   ")
+        self._wait_for_event()
+        wire = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(wire["id"], 2)
+        self.assertEqual(wire["error"], {"code": -32602, "message": "missing argument: query"})
+
+    def test_a_failed_python_recall_is_32603_and_the_event_is_an_error(self):
+        self._python_impl = lambda arguments: door.Err(door.recall_answer.Failed("retrieve: pg down"))
+        status, body, _ = self._recall("그냥 검색해줘", session_id="sess-1")
+        event = self._wait_for_event()
+        self.assertEqual(json.loads(body)["error"], {"code": -32603, "message": "retrieve: pg down"})
+        self.assertEqual((event["reader"], event["status"]), ("python", "error"))
+        self.assertEqual(self.handovers, [])
+
+    def test_a_failing_handover_costs_one_log_line_and_never_the_answer(self):
+        self.handover_outcome = lambda: door.Err("db down")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            status, body, _ = self._recall("그냥 검색해줘", session_id="sess-1")
+            self._wait_for_event()
+        self.assertEqual((status, self._text(body)), (200, self.PYTHON_TEXT))
+        lines = [ln for ln in buf.getvalue().splitlines() if "handover" in ln]
+        self.assertEqual(len(lines), 1, buf.getvalue())
+        self.assertEqual(len(self.handovers), 1)
+
+    def test_the_python_answer_gets_the_numbered_note_blocks(self):
+        with tempfile.TemporaryDirectory() as vault, mock.patch.dict(os.environ, {"BORING_VAULT_DIR": vault}):
+            status, body, _ = self._recall("wiki-2229 봐")
+            self._wait_for_event()
+        text = self._text(body)
+        self.assertEqual(status, 200)
+        self.assertTrue(text.startswith("- wiki-2229 은 볼트에 없음\n\n"), text)
+        self.assertTrue(text.endswith(self.PYTHON_TEXT))
+
+    def test_an_unreachable_engine_leaves_an_error_event_and_the_python_answer(self):
+        os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{_free_port()}"
+        try:
+            status, body, _ = self._recall("그냥 검색해줘")
+            event = self._wait_for_event()
+        finally:
+            os.environ["DOOR_UPSTREAM"] = f"http://127.0.0.1:{self.stub.server_address[1]}"
+        self.assertEqual((status, self._text(body)), (200, self.PYTHON_TEXT))
+        self.assertEqual((event["reader"], event["status"]), ("python", "error"))
 
 
 class GapRouteTests(unittest.TestCase):
