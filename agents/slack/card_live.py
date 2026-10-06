@@ -26,7 +26,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import card_repair_judge
@@ -44,6 +44,7 @@ from card_types import (
     PastCardHistory,
     PastUnansweredPair,
     PastVerdictPair,
+    Proposal,
     ProposedVerdict,
     RepairJudgment,
     ResolvedNote,
@@ -109,6 +110,38 @@ def _live_events(event_name: str, since_hours: int) -> list[dict[str, Any]]:
             "a clipped judged-history window cannot ground 판정 suppression"
         )
     return payload["entries"]
+
+
+def _live_posted_proposals() -> list[Proposal]:
+    """The advice rows of the card already posted today (KST), rebuilt from its card_proposal
+    events in idx order — what a render-only run puts in the advice lane instead of asking
+    the model again. No card today, no rows. A row that does not rebuild is malformed:
+    raised, never skipped."""
+    kst = timezone(timedelta(hours=9))
+    today = datetime.now(kst).date()
+    entries = [
+        entry
+        for entry in _live_events("card_proposal", 24)
+        if datetime.fromisoformat(entry["observed_at"].replace("Z", "+00:00")).astimezone(kst).date() == today
+    ]
+    if not entries:
+        return []
+    newest = max(entries, key=lambda e: e["observed_at"])["attributes"]["card_ts"]
+    todays = sorted(
+        (e["attributes"] for e in entries if e["attributes"]["card_ts"] == newest), key=lambda a: a["idx"]
+    )
+    try:
+        return [
+            Proposal.model_validate(
+                {
+                    key: attrs[key]
+                    for key in ("register", "project", "subject", "note", "bottleneck", "advice", "evidence")
+                }
+            )
+            for attrs in todays
+        ]
+    except (KeyError, TypeError, ValidationError) as e:
+        raise ValueError(f"malformed card_proposal row for card {newest}: {e}") from e
 
 
 def _live_past_verdicts(since_hours: int) -> PastCardHistory:

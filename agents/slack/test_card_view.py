@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -521,7 +522,7 @@ class CardV2ShapeTests(unittest.TestCase):
         tag = next(b for b in blocks if b["type"] == "section" and "wiki-0700" in _blocks_text([b]))
         self.assertEqual(
             tag["text"]["text"],
-            "이 세션에서 *이 노트가 틀렸다*는 말이 나왔어요.\n"
+            "이 세션에서 나온 말 — *이 노트가 틀렸다*\n"
             "이유: 세션 끝 채점이 남긴 문장이 없어요 (옛 판정)\n"
             "노트: `wiki-0700` (제목 없음)\n"
             "작업: 세션 `s1` (세션 노트 없음)",
@@ -558,25 +559,18 @@ class CardV2ShapeTests(unittest.TestCase):
         plain = cv.build_blocks([proposal], reviews=[], lang="ko")
         self.assertNotIn("에이전트가 가른 것", _blocks_text(plain))
 
-    def test_a_review_row_shows_the_reason_sentence_and_groups_its_works(self):
-        # 이유 한 줄: 채점기가 잡은 문장이 그대로 보인다(200자 자름). 묶인 줄: 작업을 나열하고
-        # 버튼 값은 묶인 세션 전부를 싣는다 — 판정은 전부에 간다. 근거 없는 옛 판정은 근거
-        # 없음 한 줄로 정직하게.
+    def test_a_review_row_shows_the_plain_reason_and_groups_its_works(self):
+        # 이유 한 줄은 판정 종류별 쉬운 문구. 채점기 문장은 근거 줄로 따로 — 길이가 TEXT_FLOOR
+        # 이상일 때만. 묶인 줄: 작업을 나열하고 버튼 값은 묶인 세션 전부를 싣는다 — 판정은
+        # 전부에 간다. 근거 없는 옛 판정은 근거 없음 한 줄로 정직하게.
+        sentence = "wiki-0700 의 폴 접근이 낡았다고 봤어요 — 소켓을 닫고 재활용하니 그렇습니다. " * 2
         reasoned = cc.ProposedVerdict(
-            session_id="s1",
-            note="/vault/wiki/wiki-0700.md",
-            kind="contested",
-            at="t-1",
-            reason="wiki-0700 의 폴 접근이 낡았다고 봤어요 — 소켓을 닫고 재활용하니 그렇습니다.",
+            session_id="s1", note="/vault/wiki/wiki-0700.md", kind="contested", at="t-1", reason=sentence
         )
         strings = card_i18n.STRINGS["ko"]
         text = cv._review_tag_block(reasoned, strings)["text"]["text"]
-        self.assertIn(
-            strings["review_reason"].format(
-                reason="wiki-0700 의 폴 접근이 낡았다고 봤어요 — 소켓을 닫고 재활용하니 그렇습니다."
-            ),
-            text,
-        )
+        self.assertIn(strings["review_reason_contested"], text)
+        self.assertIn(strings["review_evidence"].format(quote=" ".join(sentence.split())), text)
 
         grouped = cc.ProposedVerdict(
             session_id="s1",
@@ -588,7 +582,8 @@ class CardV2ShapeTests(unittest.TestCase):
             works=["proj · 09-29 · 첫 작업", "", "proj · 09-30 · 셋째 작업"],
         )
         grouped_text = cv._review_tag_block(grouped, strings)["text"]["text"]
-        self.assertIn("이유: 첫째 근거 문장입니다.", grouped_text)
+        self.assertIn(strings["review_reason_contested"], grouped_text)
+        self.assertNotIn("근거:", grouped_text)
         self.assertIn("작업: proj · 09-29 · 첫 작업; 세션 `s2` (세션 노트 없음); 외 1건", grouped_text)
 
         blocks = cv.build_blocks([self._proposal()], reviews=[grouped], lang="ko")
@@ -793,26 +788,81 @@ class CardBudgetTests(unittest.TestCase):
         return sum(1 for b in blocks if b["type"] == "actions")
 
     def test_an_oversized_card_shortens_its_prose_and_keeps_every_row(self):
-        reviews = self._reviews(7)
+        reviews = self._reviews(6)
         full = cv.build_blocks([], reviews=reviews, lang="ko")
         self.assertGreater(cv.card_chars(full), cv.CARD_CHARS_BUDGET)
-        fitted = cv.fit_blocks([], reviews=reviews, lang="ko")
-        self.assertLessEqual(cv.card_chars(fitted), cv.CARD_CHARS_BUDGET)
-        self.assertEqual(self._actions(fitted), self._actions(full))
-        self.assertEqual(self._actions(fitted), 7)
+        fitted = cv.fit_card([], reviews=reviews, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted.blocks), cv.CARD_CHARS_BUDGET)
+        self.assertEqual(self._actions(fitted.blocks), 6)
+        self.assertEqual(fitted.report.left_out, cv.RowCaps(repairs=0, advice=0, reviews=0))
 
-    def test_rows_past_the_shortest_cut_are_counted_in_the_overflow_line(self):
+    def test_rows_past_the_floor_are_counted_in_the_overflow_line_never_cut_below_it(self):
         reviews = self._reviews(12)
         self.assertGreater(
-            cv.card_chars(cv.build_blocks([], reviews=reviews, lang="ko", text_max=cv.TEXT_MAX_STEPS[-1])),
+            cv.card_chars(cv.build_blocks([], reviews=reviews, lang="ko", text_max=cv.TEXT_FLOOR)),
             cv.CARD_CHARS_BUDGET,
         )
-        fitted = cv.fit_blocks([], reviews=reviews, lang="ko")
-        self.assertLessEqual(cv.card_chars(fitted), cv.CARD_CHARS_BUDGET)
-        shown = self._actions(fitted)
-        overflow = card_i18n.STRINGS["ko"]["overflow_line"].format(n=12 - shown)
+        fitted = cv.fit_card([], reviews=reviews, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted.blocks), cv.CARD_CHARS_BUDGET)
+        shown = self._actions(fitted.blocks)
         self.assertLess(shown, 12)
-        self.assertIn(overflow, _blocks_text(fitted))
+        self.assertEqual(fitted.report.left_out.reviews, 12 - shown)
+        self.assertIn(
+            card_i18n.STRINGS["ko"]["overflow_line"].format(n=12 - shown), _blocks_text(fitted.blocks)
+        )
+        self.assertEqual(fitted.report.text_max, cv.TEXT_FLOOR)
+        notes = [
+            line
+            for b in fitted.blocks
+            if b["type"] == "section"
+            for line in b["text"]["text"].split("\n")
+            if line.startswith("노트: ")
+        ]
+        self.assertTrue(all(len(line) > cv.TEXT_FLOOR for line in notes))
+
+    def test_every_shortened_line_stays_at_least_70_chars_and_ends_on_a_word(self):
+        words = [f"단어{i:03d}" for i in range(60)]
+        long = " ".join(words)
+        reviews = [
+            cc.ProposedVerdict(
+                session_id=f"s{i}",
+                note=f"/vault/wiki/wiki-{700 + i:04d}.md",
+                kind="used",
+                at=f"t-{i}",
+                reason=long,
+                note_title=long,
+                work=long,
+            )
+            for i in range(12)
+        ]
+        fitted = cv.fit_card([], reviews=reviews, lang="ko")
+        lines = [
+            line
+            for b in fitted.blocks
+            for el in (b.get("elements") or [b.get("text") or {}])
+            for line in str(el.get("text", "")).split("\n")
+            if "…" in line
+        ]
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertGreaterEqual(len(line), 70, line)
+            self.assertIn(re.search(r"(\S+)…", line).group(1).lstrip("「*`_"), words, line)
+
+    def test_lanes_give_up_rows_advice_first_then_repairs_then_reviews_from_the_bottom(self):
+        self.assertEqual(
+            list(cv._fit_attempts(cv.RowCaps(repairs=2, advice=2, reviews=2)))[len(cv.TEXT_MAX_STEPS) :],
+            [
+                (cv.TEXT_FLOOR, caps)
+                for caps in (
+                    cv.RowCaps(advice=1),
+                    cv.RowCaps(advice=0),
+                    cv.RowCaps(advice=0, repairs=1),
+                    cv.RowCaps(advice=0, repairs=0),
+                    cv.RowCaps(advice=0, repairs=0, reviews=1),
+                    cv.RowCaps(advice=0, repairs=0, reviews=0),
+                )
+            ],
+        )
 
     def test_an_advice_heavy_card_overflows_its_advice_rows_too(self):
         long = "조언 " * 120
@@ -831,24 +881,27 @@ class CardBudgetTests(unittest.TestCase):
             )
             for i in range(12)
         ]
-        fitted = cv.fit_blocks(proposals, lang="ko")
-        self.assertLessEqual(cv.card_chars(fitted), cv.CARD_CHARS_BUDGET)
-        shown = self._actions(fitted)
+        fitted = cv.fit_card(proposals, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted.blocks), cv.CARD_CHARS_BUDGET)
+        shown = self._actions(fitted.blocks)
         self.assertLess(shown, 12)
-        self.assertIn(card_i18n.STRINGS["ko"]["overflow_line"].format(n=12 - shown), _blocks_text(fitted))
+        self.assertEqual(fitted.report.left_out.advice, 12 - shown)
+        self.assertIn(
+            card_i18n.STRINGS["ko"]["overflow_line"].format(n=12 - shown), _blocks_text(fitted.blocks)
+        )
 
     def test_a_card_under_budget_is_left_as_built(self):
         reviews = self._reviews(1)
-        self.assertEqual(
-            cv.fit_blocks([], reviews=reviews, lang="ko"), cv.build_blocks([], reviews=reviews, lang="ko")
-        )
+        fitted = cv.fit_card([], reviews=reviews, lang="ko")
+        self.assertEqual(fitted.blocks, cv.build_blocks([], reviews=reviews, lang="ko"))
+        self.assertEqual(fitted.report.text_max, cv.REVIEW_TEXT_MAX)
 
     def test_a_card_that_cannot_fit_raises(self):
         orig = cv.CARD_CHARS_BUDGET
         cv.CARD_CHARS_BUDGET = 100
         try:
             with self.assertRaises(ValueError):
-                cv.fit_blocks([], reviews=self._reviews(1), lang="ko")
+                cv.fit_card([], reviews=self._reviews(1), lang="ko")
         finally:
             cv.CARD_CHARS_BUDGET = orig
 
@@ -1243,7 +1296,7 @@ class ConfirmSampleRowTests(unittest.TestCase):
         self.assertFalse(any(cv._is_row_actions(b, 2) for b in marked))
         self.assertTrue(any(cv._is_row_actions(b, 1) for b in marked))
 
-    def test_over_budget_samples_go_first_and_the_score_and_reviews_stay(self):
+    def test_over_budget_reviews_give_way_while_the_samples_and_the_score_stay(self):
         long = "가" * 300
         reviews = [
             cc.ProposedVerdict(
@@ -1272,15 +1325,88 @@ class ConfirmSampleRowTests(unittest.TestCase):
         score = cc.Scored(agreed=2, compared=3)
         full = cv.build_blocks([], reviews=reviews, samples=samples, score=score, lang="ko")
         self.assertGreater(cv.card_chars(full), cv.CARD_CHARS_BUDGET)
-        blocks, carried = cv.fit_card([], reviews=reviews, samples=samples, score=score, lang="ko")
-        self.assertEqual(carried, [])
-        self.assertFalse(any(b.get("block_id") == cv.SAMPLES_BLOCK_ID for b in blocks))
-        self.assertLessEqual(cv.card_chars(blocks), cv.CARD_CHARS_BUDGET)
-        self.assertEqual(sum(1 for b in blocks if b["type"] == "actions"), 5)
-        self.assertTrue(any(t.startswith("채점") for t in _context_texts(blocks)))
-        small, carried = cv.fit_card([], reviews=reviews[:1], samples=samples, score=score, lang="ko")
-        self.assertEqual(carried, samples)
-        self.assertTrue(any(b.get("block_id") == cv.SAMPLES_BLOCK_ID for b in small))
+        fitted = cv.fit_card([], reviews=reviews, samples=samples, score=score, lang="ko")
+        self.assertEqual(fitted.samples, samples)
+        self.assertTrue(any(b.get("block_id") == cv.SAMPLES_BLOCK_ID for b in fitted.blocks))
+        self.assertLessEqual(cv.card_chars(fitted.blocks), cv.CARD_CHARS_BUDGET)
+        self.assertTrue(any(t.startswith("채점") for t in _context_texts(fitted.blocks)))
+        self.assertEqual(
+            sum(1 for b in fitted.blocks if b["type"] == "actions"),
+            5 - fitted.report.left_out.reviews + len(samples),
+        )
+
+
+class ReadableReviewRowTests(unittest.TestCase):
+    """2026-10-06: the 이유 줄 began mid-word, the 굵게 never closed, the same 작업 줄 ran three
+    times, and the 표본 fell off the card."""
+
+    def test_every_bold_span_in_every_language_opens_and_closes_beside_a_space_or_punctuation(self):
+        def edge(ch: str) -> bool:
+            return ch == "" or ch.isspace() or unicodedata.category(ch).startswith("P")
+
+        spans = [
+            (lang, key, m)
+            for lang, table in card_i18n.STRINGS.items()
+            for key, text in table.items()
+            for m in re.finditer(r"\*[^*\n]+\*", text)
+        ]
+        self.assertGreater(len(spans), 10)
+        for lang, key, m in spans:
+            text = card_i18n.STRINGS[lang][key]
+            before = text[m.start() - 1] if m.start() else ""
+            after = text[m.end()] if m.end() < len(text) else ""
+            self.assertTrue(edge(before) and edge(after), f"{lang}.{key}: {text!r}")
+
+    def test_an_excerpt_starts_and_ends_on_a_whole_word_and_a_short_one_shows_no_quote_line(self):
+        self.assertEqual(
+            cv.evidence_excerpt("md` (section ch1) and ohmyboring (wiki-"), "(section ch1) and ohmyboring"
+        )
+        body = "이 문장은 단어 경계에서 시작해야 하고 끝도 단어 경계여야 해서 그 사이만 근거로 보입니다 그리고 마지막 낱말은 따로 버립니다 꼭 그렇게"
+        clipped = f"ng.md` {body} 잘린낱…"
+        self.assertEqual(cv.evidence_excerpt(clipped), body)
+        strings = card_i18n.STRINGS["ko"]
+        review = cc.ProposedVerdict(
+            session_id="s1",
+            note="/vault/wiki/wiki-3023.md",
+            kind="used",
+            at="t",
+            reason="md` (section ch1) and ohmyboring (wiki-",
+        )
+        self.assertNotIn("근거:", cv._review_tag_block(review, strings)["text"]["text"])
+        long = review.model_copy(update={"reason": clipped})
+        self.assertIn("근거: 「이 문장은 단어 경계에서", cv._review_tag_block(long, strings)["text"]["text"])
+
+    def test_a_cut_line_ends_on_a_word(self):
+        text = "foodspring-front · 09-24 · FDS-18094 뒤로가기 시 스크롤 위치 복구 및 성능 개선 작업 전체"
+        for limit in range(20, len(text)):
+            cut = cv._cut_words(text, limit)
+            self.assertLessEqual(len(cut), limit)
+            self.assertIn(cut.removesuffix("…"), {" ".join(text.split()[:n]) for n in range(1, 30)})
+
+    def test_consecutive_rows_of_one_session_say_the_work_once_at_the_head_of_the_run(self):
+        def row(i: int, session: str) -> cc.ProposedVerdict:
+            return cc.ProposedVerdict(
+                session_id=session,
+                note=f"/vault/wiki/wiki-{3000 + i}.md",
+                kind="used",
+                at=f"t-{i}",
+                work=f"proj · 09-24 · 작업 {session}",
+            )
+
+        reviews = [row(0, "sa"), row(1, "sa"), row(2, "sb"), row(3, "sa")]
+        blocks = cv.build_blocks([], reviews=reviews, lang="ko")
+        works = [
+            line
+            for b in blocks
+            if b["type"] == "section"
+            for line in b["text"]["text"].split("\n")
+            if line.startswith("작업: ")
+        ]
+        self.assertEqual(
+            works,
+            ["작업: proj · 09-24 · 작업 sa", "작업: proj · 09-24 · 작업 sb", "작업: proj · 09-24 · 작업 sa"],
+        )
+        self.assertEqual(sum(1 for b in blocks if b["type"] == "actions"), 4)
 
 
 if __name__ == "__main__":
