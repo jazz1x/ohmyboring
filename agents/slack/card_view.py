@@ -43,8 +43,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 import label_core  # noqa: E402
 from card_types import (  # noqa: E402
     CHOICES,
+    COMMENT,
+    COMMENT_ACTION_ID,
+    COMMENT_BLOCK_ID,
+    COMMENT_CALLBACK_ID,
+    COMMENT_MAX_CHARS,
     SAMPLE_CONFIRM,
     ButtonVerdict,
+    CardRow,
     Confirmation,
     Done,
     Evidence,
@@ -54,6 +60,7 @@ from card_types import (  # noqa: E402
     Press,
     Proposal,
     ProposedVerdict,
+    Received,
     Rejected,
     Repair,
     RepairDone,
@@ -115,8 +122,8 @@ def _button_value(data: dict) -> str:
     return value
 
 
-def _lane_value(lane: str, data: dict, *, note: str | None = None) -> str:
-    """Lane name + the lane's own data as a button value. A note must be a flat
+def _lane_data(lane: str, data: dict, *, note: str | None = None) -> dict:
+    """Lane name + the lane's own data — the value a row stands for. A note must be a flat
     `/vault/wiki/<name>.md` — a subfolder or a `.md`-less name cannot round-trip through
     the label, so the card is refused instead of shipping a button it cannot answer."""
     if note is not None:
@@ -124,7 +131,12 @@ def _lane_value(lane: str, data: dict, *, note: str | None = None) -> str:
         if name == note or "/" in name or not name.endswith(".md") or name == ".md":
             raise ValueError(f"note {note!r} is not a flat /vault/wiki/<name>.md note")
         data = {**data, "note": note_label(note)}
-    return _button_value({"lane": lane, **data})
+    return {"lane": lane, **data}
+
+
+def _lane_value(lane: str, data: dict, *, note: str | None = None) -> str:
+    """A row's value as a button's `value` — the shape the advice and 표본 rows still carry."""
+    return _button_value(_lane_data(lane, data, note=note))
 
 
 def _actions_block(idx: int, proposal: Proposal, strings: dict[str, str]) -> dict:
@@ -270,20 +282,28 @@ def _repairs_headline_block(
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
 
-def _repair_actions_block(idx: int, repair: Repair, strings: dict[str, str]) -> dict:
-    elements = []
-    for choice in CHOICES:
-        button = {
-            "type": "button",
-            "text": {"type": "plain_text", "text": strings[f"repair_button_{choice}"], "emoji": True},
-            "action_id": f"card:{idx}:{choice}",
-            "value": _lane_value("repair", {"subject": repair.subject}),
-        }
-        if choice == "do":
-            button["style"] = "primary"
-        elif choice == "drop":
-            button["style"] = "danger"
-        elements.append(button)
+def _repair_row_value(repair: Repair) -> dict:
+    return _lane_data("repair", {"subject": repair.subject, "variants": list(repair.variants)})
+
+
+def _bare_button(idx: int, choice: str, label: str) -> dict:
+    """A button that carries nothing but its action_id — the row's values live in card_row,
+    read back by (card_ts, idx)."""
+    button = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": label, "emoji": True},
+        "action_id": f"card:{idx}:{choice}",
+    }
+    if choice == "do":
+        button["style"] = "primary"
+    elif choice == "drop":
+        button["style"] = "danger"
+    return button
+
+
+def _repair_actions_block(idx: int, strings: dict[str, str]) -> dict:
+    elements = [_bare_button(idx, choice, strings[f"repair_button_{choice}"]) for choice in CHOICES]
+    elements.append(_bare_button(idx, COMMENT, strings["repair_button_comment"]))
     return {"type": "actions", "elements": elements}
 
 
@@ -380,7 +400,7 @@ def _repair_row(
     row.append(
         _repair_verdict_block(verdict, result, strings)
         if verdict is not None
-        else _repair_actions_block(idx, repair, strings)
+        else _repair_actions_block(idx, strings)
     )
     return row
 
@@ -536,25 +556,34 @@ def _review_actions_block(
     # 맞아요/아니에요는 오너 판정, 맡길게요는 에이전트 판정을 그대로 받는 맡긴 판정,
     # 보류는 판정 없이 사건 한 줄 — 넷 다 묶인 세션 전부에 닿는다. 안 누르는 것도 여전히
     # 아무 흔적 없는 보류다.
+    if sample:
+        # 표본 줄은 값을 자기 버튼에 그대로 들고, 코멘트 단추도 없다 — 오너 표본 계약은 그대로다.
+        value = _lane_value(
+            "review", {**_review_row_data(review), "sample": SAMPLE_CONFIRM}, note=review.note
+        )
+        elements = []
+        for choice in SAMPLE_CHOICES:
+            button = _bare_button(idx, choice, strings[f"review_button_{choice}"])
+            button["value"] = value
+            elements.append(button)
+        return {"type": "actions", "elements": elements}
+    elements = [
+        _bare_button(idx, choice, strings[f"review_button_{choice}"])
+        for choice in ("do", "drop", "delegate", "defer")
+    ]
+    elements.append(_bare_button(idx, COMMENT, strings["review_button_comment"]))
+    return {"type": "actions", "elements": elements}
+
+
+def _review_row_data(review: ProposedVerdict) -> dict:
     data = {"session": review.session_id, "kind": review.kind}
     if review.sessions:
         data["sessions"] = list(review.sessions)
-    if sample:
-        data["sample"] = SAMPLE_CONFIRM
-    elements = []
-    for choice in SAMPLE_CHOICES if sample else ("do", "drop", "delegate", "defer"):
-        button = {
-            "type": "button",
-            "text": {"type": "plain_text", "text": strings[f"review_button_{choice}"], "emoji": True},
-            "action_id": f"card:{idx}:{choice}",
-            "value": _lane_value("review", data, note=review.note),
-        }
-        if choice == "do":
-            button["style"] = "primary"
-        elif choice == "drop":
-            button["style"] = "danger"
-        elements.append(button)
-    return {"type": "actions", "elements": elements}
+    return data
+
+
+def _review_row_value(review: ProposedVerdict) -> dict:
+    return _lane_data("review", _review_row_data(review), note=review.note)
 
 
 def _review_verdict_block(review: ProposedVerdict, verdict: ButtonVerdict, strings: dict[str, str]) -> dict:
@@ -694,6 +723,8 @@ def status_text(outcome: Outcome, strings: dict[str, str]) -> str:
             return text
         case Failed(reason=reason):
             return strings["progress_failed"].format(reason=_mrkdwn_plain(reason))
+        case Received(head=head):
+            return strings["comment_received"].format(head=head)
         case _:
             assert_never(outcome)
 
@@ -758,7 +789,7 @@ def row_progress(blocks: list[dict], idx: int, outcome: Outcome, *, lang: str) -
         return Rejected(reason=f"row {idx} has no buttons or status to replace")
     status = _status_block(idx, outcome, lang)
     match outcome:
-        case Failed() if actions is not None:
+        case Failed() | Received() if actions is not None:
             return [status, actions]
         case _:
             return [status]
@@ -797,10 +828,50 @@ def mark_progress(blocks: list[dict], idx: int, outcome: Outcome, *, lang: str) 
     can find it again without knowing the buttons."""
     status = _status_block(idx, outcome, lang)
     match outcome:
-        case Failed():
+        case Failed() | Received():
             return _status_above_buttons(blocks, idx, status)
         case _:
             return _status_instead(blocks, idx, status)
+
+
+#: How much of a comment the 받았어요 line quotes.
+COMMENT_HEAD_CHARS = 30
+
+
+def received_outcome(text: str) -> Received:
+    """The 받았어요 mark for a comment: its first COMMENT_HEAD_CHARS characters on one line,
+    mrkdwn-escaped, with 「…」 when there was more."""
+    one_line = " ".join(text.split())
+    head = (
+        one_line[:COMMENT_HEAD_CHARS].rstrip().replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    return Received(head=head + ("…" if len(one_line) > COMMENT_HEAD_CHARS else ""))
+
+
+def comment_modal(metadata: str, *, lang: str) -> dict:
+    """The comment modal: one multi-line input, the row's key as private_metadata."""
+    strings = card_i18n.STRINGS[lang]
+    return {
+        "type": "modal",
+        "callback_id": COMMENT_CALLBACK_ID,
+        "private_metadata": metadata,
+        "title": {"type": "plain_text", "text": strings["comment_modal_title"]},
+        "submit": {"type": "plain_text", "text": strings["comment_modal_submit"]},
+        "close": {"type": "plain_text", "text": strings["comment_modal_close"]},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": COMMENT_BLOCK_ID,
+                "label": {"type": "plain_text", "text": strings["comment_modal_label"]},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": COMMENT_ACTION_ID,
+                    "multiline": True,
+                    "max_length": COMMENT_MAX_CHARS,
+                },
+            }
+        ],
+    }
 
 
 def merged_outcome(done: RepairDone, *, lang: str) -> Done:
@@ -848,6 +919,7 @@ class Built(NamedTuple):
     blocks: list[dict]
     left_out: RowCaps
     advice_shown: tuple[int, ...] = ()
+    rows: tuple[CardRow, ...] = ()
 
 
 def build_blocks(*args, **kwargs) -> list[dict]:
@@ -928,6 +1000,7 @@ def build_card(
     samples = list(samples)
     sample_tail = (1 + 3 * min(len(samples), SAMPLES_KEPT)) if samples else 0
     repairs_shown = 0
+    card_rows: list[CardRow] = []
     if show_lanes:
         if repairs:
             blocks.append(_lane_header_block(strings["todo_header"]))
@@ -938,6 +1011,7 @@ def build_card(
                 if len(blocks) + len(row) + 2 + sample_tail > block_limit:
                     break
                 blocks.extend(row)
+                card_rows.append(CardRow(idx=ridx, lane="repair", value=_repair_row_value(repair)))
                 repairs_shown += 1
             if repairs_shown < n_repairs:
                 blocks.append(_overflow_block(n_repairs - repairs_shown, strings))
@@ -1012,6 +1086,7 @@ def build_card(
                 r_overflowed = True
                 break
             blocks.extend(addition)
+            card_rows.append(CardRow(idx=n_slots + ridx, lane="review", value=_review_row_value(review)))
             r_shown += 1
         if r_overflowed:
             blocks.append(_overflow_block(len(reviews) - r_shown, strings))
@@ -1037,6 +1112,7 @@ def build_card(
         blocks,
         RowCaps(repairs=n_repairs - repairs_shown, advice=total - shown, reviews=len(reviews) - r_shown),
         tuple(advice_shown),
+        tuple(card_rows),
     )
 
 
@@ -1058,6 +1134,7 @@ class FitReport(NamedTuple):
     left_out: RowCaps
     samples_shown: bool
     advice_shown: tuple[int, ...]
+    rows: tuple[CardRow, ...] = ()
 
 
 class Fitted(NamedTuple):
@@ -1105,6 +1182,7 @@ def fit_card(proposals: list[Proposal], *, samples: Iterable[ProposedVerdict] = 
                 left_out=built.left_out,
                 samples_shown=carried,
                 advice_shown=built.advice_shown,
+                rows=built.rows,
             )
             return Fitted(built.blocks, kept if carried else [], report)
     raise ValueError(f"card is {last} chars with every row left out, over {CARD_CHARS_BUDGET}")

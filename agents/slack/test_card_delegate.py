@@ -178,5 +178,87 @@ class ProposalEvidenceTests(unittest.TestCase):
             self.assertIsNone(cd.proposal_evidence(["sess-agent-1"], NOTE, "used"))
 
 
+class OwnerCommentTests(unittest.TestCase):
+    """The owner's words on a note ride the 맡길게요 prompt verbatim, and the judgment names the
+    사건 ids it was given. Mutation targets: a prompt that drops the comments, or a
+    parse_judgment that forgets the ids, kills these."""
+
+    COMMENTS = [
+        cc.OwnerComment(
+            id=31, at="2026-10-06T02:00:00+00:00", text="이 노트는 옛 접근이 맞아요\n그래서 틀렸다고 봐요"
+        ),
+        cc.OwnerComment(id=30, at="2026-10-06T01:00:00+00:00", text="처음 남긴 말"),
+    ]
+
+    def test_the_prompt_carries_the_owners_words_verbatim_newest_first(self):
+        prompt = cd.build_judge_prompt(NOTE, "본문", "used", "근거", self.COMMENTS)
+        self.assertIn("소유자가 이 노트에 직접 남긴 말", prompt)
+        self.assertIn("- 이 노트는 옛 접근이 맞아요\n  그래서 틀렸다고 봐요\n- 처음 남긴 말", prompt)
+        self.assertLess(prompt.index("노트 경로"), prompt.index("소유자가 이 노트에"))
+        self.assertLess(prompt.index("소유자가 이 노트에"), prompt.index("주장이 맞으면"))
+
+    def test_without_comments_the_prompt_is_the_one_it_always_was(self):
+        self.assertEqual(
+            cd.build_judge_prompt(NOTE, "본문", "used", "근거"),
+            cd.build_judge_prompt(NOTE, "본문", "used", "근거", []),
+        )
+        self.assertNotIn("소유자가 이 노트에", cd.build_judge_prompt(NOTE, "본문", "used", "근거"))
+
+    def test_only_the_newest_few_comments_enter_the_prompt(self):
+        many = [
+            cc.OwnerComment(id=i, at=f"2026-10-06T{i:02d}:00:00+00:00", text=f"말 {i}")
+            for i in range(20, 0, -1)
+        ]
+        prompt = cd.build_judge_prompt(NOTE, "본문", "used", "근거", many)
+        self.assertEqual(prompt.count("\n- 말 "), cc.COMMENTS_IN_PROMPT)
+        self.assertIn("- 말 20", prompt)
+        self.assertNotIn("- 말 1\n", prompt)
+
+    def test_the_judgment_names_the_comment_ids_it_was_given(self):
+        raw = '{"verdict": "wrong", "reason": "오너 말대로 옛 접근이다"}'
+        judged = cd.parse_judgment(raw, "used", [31, 30])
+        self.assertEqual((judged.kind, judged.comment_ids), ("contested", [31, 30]))
+        self.assertEqual(cd.parse_judgment(raw, "used").comment_ids, [])
+
+    def test_comments_for_note_reads_the_owners_review_comments_of_that_note_only(self):
+        def comment(ident, note, judge="owner"):
+            return {
+                "id": ident,
+                "observed_at": f"2026-10-06T0{ident}:00:00+00:00",
+                "attributes": {"judge": judge, "lane": "review", "note": note, "text": f"글 {ident}"},
+            }
+
+        rows = [comment(1, NOTE), comment(2, "/vault/wiki/wiki-0701.md"), comment(3, NOTE, judge="agent:x")]
+        with mock.patch.object(cd, "fetch_events", return_value=rows) as fetch:
+            got = cd.comments_for_note(NOTE)
+        fetch.assert_called_once_with("card_comment", cc.COMMENT_WINDOW_HOURS)
+        self.assertEqual([c.id for c in got], [1])
+
+    def test_a_dead_door_or_a_clipped_page_is_an_error_not_an_empty_list(self):
+        with mock.patch.object(cd.urllib.request, "urlopen", side_effect=OSError("refused")):
+            with self.assertRaises(OSError):
+                cd.fetch_events("card_comment", 168)
+
+        class Page:
+            def __init__(self, body):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps(self.body).encode()
+
+        for body in ({"entries": [], "maybe_truncated": True}, {"nothing": 1}):
+            with mock.patch.object(cd.urllib.request, "urlopen", return_value=Page(body)):
+                with self.assertRaises(OSError):
+                    cd.fetch_events("card_comment", 168)
+        with mock.patch.object(cd.urllib.request, "urlopen", return_value=Page({"entries": [{"id": 1}]})):
+            self.assertEqual(cd.fetch_events("card_comment", 168), [{"id": 1}])
+
+
 if __name__ == "__main__":
     unittest.main()

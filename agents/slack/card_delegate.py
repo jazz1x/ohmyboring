@@ -30,8 +30,16 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 
+import card_press  # noqa: E402
 import vault_note  # noqa: E402
-from card_types import Delegated, DelegatedJudgment, DelegationFailed  # noqa: E402
+from card_types import (  # noqa: E402
+    COMMENT_WINDOW_HOURS,
+    COMMENTS_IN_PROMPT,
+    Delegated,
+    DelegatedJudgment,
+    DelegationFailed,
+    OwnerComment,
+)
 
 from ohmyboring import config as omb_env  # noqa: E402
 
@@ -61,20 +69,35 @@ _KIND_CLAIM = {
 }
 
 
-def build_judge_prompt(note_path: str, note_text: str, proposed_kind: str, evidence: str) -> str:
+def build_judge_prompt(
+    note_path: str,
+    note_text: str,
+    proposed_kind: str,
+    evidence: str,
+    comments: list[OwnerComment] = (),
+) -> str:
     """One delegate press's whole question: the claim, the sentence the session-end scorer
-    caught it in, and the note's own text. The prompt is Korean, the same language
-    card_advice builds its prompt in — the local model answers right/wrong about the claim,
-    never picking an engine kind itself (that fold is parse_judgment's job)."""
+    caught it in, the note's own text, and — when the owner left any on this note — the
+    owner's own words verbatim, newest first (at most COMMENTS_IN_PROMPT). The prompt is
+    Korean, the same language card_advice builds its prompt in — the local model answers
+    right/wrong about the claim, never picking an engine kind itself (that fold is
+    parse_judgment's job)."""
     split = vault_note.split_frontmatter(note_text)
     body = (split[1] if split is not None else note_text).strip()
     if len(body) > NOTE_TEXT_PROMPT_MAX:
         body = f"{body[: NOTE_TEXT_PROMPT_MAX - 1]}… (앞부분만)"
     evidence_line = evidence.strip() if evidence.strip() else "(채점이 남긴 문장 없음)"
+    owner_words = "".join(
+        f"\n{line}"
+        for line in card_press.comment_prompt_lines(
+            list(comments)[:COMMENTS_IN_PROMPT],
+            "소유자가 이 노트에 직접 남긴 말(최근 순, 원문 — 판정에 반영해라):",
+        )
+    )
     return (
         f"검토할 주장: {_KIND_CLAIM[proposed_kind]}. 이 주장이 아래 근거 문장과 노트 본문에 맞는지 판정한다.\n\n"
         f"근거 문장(세션에서 실제로 나온 문장):\n{evidence_line}\n\n"
-        f"노트 경로: {note_path}\n{body}\n\n"
+        f"노트 경로: {note_path}\n{body}{owner_words}\n\n"
         "주장이 맞으면 아래 JSON 하나만 출력해라:\n"
         '{"verdict": "right", "reason": "왜 맞는지 한 문장"}\n\n'
         "주장이 틀리면:\n"
@@ -86,7 +109,7 @@ def build_judge_prompt(note_path: str, note_text: str, proposed_kind: str, evide
     )
 
 
-def parse_judgment(raw: str, proposed_kind: str) -> Delegated:
+def parse_judgment(raw: str, proposed_kind: str, comment_ids: list[int] = ()) -> Delegated:
     """One model completion in, the delegated value out — never an exception. JSON이 아니거나
     verdict 어휘가 아니거나 이유가 없는 답은 전부 DelegationFailed: 모델이 못 답한 사실을
     사건으로 남길 뿐 판정을 찍지 않는다(조용히 낱말 표지로 되돌아가는 변이의 문지방)."""
@@ -110,7 +133,7 @@ def parse_judgment(raw: str, proposed_kind: str) -> Delegated:
         reason = f"{reason[: DELEGATE_REASON_MAX - 1]}…"
     # 맞다 = 제안 그대로, 틀리다 = 뒤집은 판정 — used↔contested 접기는 이 경계 한 곳.
     kind = proposed_kind if verdict == "right" else ("contested" if proposed_kind == "used" else "used")
-    return DelegatedJudgment(kind=kind, reason=reason)
+    return DelegatedJudgment(kind=kind, reason=reason, comment_ids=list(comment_ids))
 
 
 #: The vault path: the boring-agent container mounts it read-only at /vault (boring-memory's
@@ -154,6 +177,37 @@ def _live_events(event_name: str, since_hours: float) -> list[dict]:
         return []
     entries = payload.get("entries") if isinstance(payload, dict) else None
     return entries if isinstance(entries, list) else []
+
+
+def fetch_events(event_name: str, since_hours: float) -> list[dict]:
+    """GET /events one name at a time, and loud about it: a dead door, a bad body or a clipped
+    page is an OSError, never an empty list. The reads that can leave an owner's words out of
+    a judgment (card_comment) or turn a press into a guess (card_row) must say they failed —
+    unlike _live_events, whose empty answer already means 「no proposal」 to its one caller."""
+    url = (
+        f"{omb_env.door_url()}/events?event={urllib.parse.quote(event_name)}"
+        f"&since_hours={since_hours}&limit={_EVENTS_LIMIT}"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=_EVENTS_TIMEOUT) as r:
+            payload = json.loads(r.read().decode("utf-8"))
+    except (OSError, ValueError) as e:
+        raise OSError(f"{url}: {e}") from e
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise OSError(f"{url}: entries 가 없다")
+    if payload.get("maybe_truncated"):
+        raise OSError(f"{url}: maybe_truncated=true — a clipped page cannot be read as the whole")
+    return entries
+
+
+def comments_for_note(note_path: str) -> list[OwnerComment]:
+    """The owner's comments on this note's review rows, newest first. OSError when the 사건
+    cannot be read, ValueError for a malformed comment row — the press then fails visibly
+    instead of judging as if the owner had said nothing."""
+    return card_press.owner_comments(
+        fetch_events("card_comment", COMMENT_WINDOW_HOURS), "review", note=note_path
+    )
 
 
 def proposal_evidence(sessions: list[str], note_path: str, kind: str) -> str | None:

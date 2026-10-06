@@ -892,6 +892,53 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(order[0], "verdict_sample_shown")
         self.assertLess(order.index("verdict_sample_shown"), order.index("handover"))
 
+    def test_every_repair_and_review_row_on_the_card_leaves_one_card_row_before_anything_else(self):
+        # the buttons carry only their action_id; the row's values live in card_row, written
+        # right after the send so a press that comes at once can read them
+        review = cc.ProposedVerdict(session_id="sr", note="/vault/wiki/wiki-0700.md", kind="used", at="t-0")
+        stubs = Stubs(
+            repairs_payload={"groups": REPAIR_GROUPS, "total_groups": 5},
+            repair_judgment_items=REPAIR_JUDGMENTS,
+            proposed_items=[review],
+            score_reading=cc.ScoreReading(samples=[self._sample(1)]),
+        )
+        self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-card-row"}})
+        names = [e for e, _ in stubs.records]
+        self.assertEqual(names[:2], ["card_row", "card_row"])
+        rows = [f for e, f in stubs.records if e == "card_row"]
+        self.assertEqual(len(rows), 2)  # one repair + one review: advice and 표본 rows carry their own value
+        n_advice = len([f for e, f in stubs.records if e == "card_proposal"])
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "card_ts": CARD_TS,
+                    "idx": 0,
+                    "lane": "repair",
+                    "value": {
+                        "lane": "repair",
+                        "subject": "foodspring-front",
+                        "variants": ["foodspring front", "foodspring-front"],
+                    },
+                },
+                {
+                    "card_ts": CARD_TS,
+                    "idx": 1 + n_advice,
+                    "lane": "review",
+                    "value": {"lane": "review", "session": "sr", "kind": "used", "note": "wiki-0700"},
+                },
+            ],
+        )
+        # and the card's buttons really carry none of it
+        buttons = [el for b in self.sends[-1] if b["type"] == "actions" for el in b["elements"]]
+        self.assertTrue(any(el["action_id"] == "card:0:comment" for el in buttons))
+        self.assertTrue(all("value" not in el for el in buttons if el["action_id"].startswith("card:0:")))
+
+    def test_a_card_with_no_repair_or_review_row_writes_no_card_row(self):
+        stubs = Stubs()
+        self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-no-card-row"}})
+        self.assertNotIn("card_row", [e for e, _ in stubs.records])
+
     def test_a_failed_send_records_no_shown_sample(self):
         stubs = Stubs(
             score_reading=cc.ScoreReading(score=cc.Scored(agreed=2, compared=3), samples=[self._sample(1)])

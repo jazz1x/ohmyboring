@@ -22,7 +22,9 @@ resolve turns each surviving proposal's subject into its note path via
 the last 7 days or was shown but never judged in the last 3 days (`card_verdicts.suppressed`)
 — reading that history is not optional: a card that cannot read it does not ship. post_card
 sends the Block Kit card (repair rows above the advice rows, each grouped and labeled its own
-way), records a card_proposal event per advice row the card showed (plus card_fit), and ends the run. The verdict's
+way), records a card_proposal event per advice row the card showed (plus card_fit, and a card_row per
+repair or review row it showed — those rows' buttons carry only their action_id, and a press or a
+💬 코멘트 reads the row's values back by (card_ts, idx)), and ends the run. The verdict's
 idx spans all three lanes, repair rows first, then advice rows, then the review rows; the
 button press carrying it never reaches this process — hermes owns the only socket (wiki-2049)
 and its boring-card plugin answers the press: card_press.parse_press parses it,
@@ -468,6 +470,13 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
         )
         message = collabs.send(fitted.blocks)
         card_ts = message.ts
+        for row in fitted.report.rows:
+            # The buttons carry only their action_id; every press and comment reads this
+            # row back by (card_ts, idx). Written first: the card is answerable the moment it
+            # is posted, so the sooner this lands the shorter the window a press cannot read it.
+            collabs.record(
+                "card_row", {"card_ts": card_ts, "idx": row.idx, "lane": row.lane, "value": row.value}
+            )
         for sample in fitted.samples:
             collabs.record(
                 "verdict_sample_shown",

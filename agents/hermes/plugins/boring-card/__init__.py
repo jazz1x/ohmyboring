@@ -25,6 +25,14 @@ that cannot answer (unreadable note, dead call, malformed JSON) writes no 판정
 the press leaves the 사건 one line that says so, and the row shows the failure — 조용히
 낱말 표지로 되돌아가지 않는다.
 
+A repair or review row's buttons carry no value: the handler reads the row's card_row 사건 by
+(card_ts, idx) and parses the press with it, and a row it cannot read shows 「✕ 실패 — 줄 정보를
+못 읽었어요」 over its buttons without taking the press (a button that still holds its value, from
+a card posted before card_row, is pressed as before). 「💬 코멘트」 opens a modal on the click's
+trigger_id (views_open); the submission arrives through the Slack app's view handler, wired by
+the platform-handler factory register() hands ctx.register_platform_handler, and becomes one
+card_comment 사건 (judge owner) plus 「💬 받았어요」 over the row — the buttons stay.
+
 register() refuses loudly instead of half-registering: without SECRETARY_OWNER_ID no
 handler is installed at all — a press from anyone must never reach an effect — and without
 BORING_HOME the repo's own modules cannot even be found. All module-level imports stay
@@ -40,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import sys
@@ -127,6 +136,10 @@ def register(ctx: Any) -> None:
     import card_view
 
     from ohmyboring import config as boring_config
+    from ohmyboring.i18n import card as card_i18n
+
+    #: card_row is read over the answerable window (plus the hour it may have posted in).
+    ROW_WINDOW_HOURS = math.ceil(card_press.CARD_ANSWERABLE_HOURS) + 1
 
     global _client
     _client = _make_client()
@@ -169,7 +182,16 @@ def register(ctx: Any) -> None:
         evidence = card_delegate.proposal_evidence(sessions, path, press.kind)
         if evidence is None:
             return card_types.DelegationFailed(reason=f"제안 사건(근거 문장)을 못 찾았다: {press.note}")
-        prompt = card_delegate.build_judge_prompt(path, text, press.kind, evidence)
+        try:
+            comments = (await asyncio.to_thread(card_delegate.comments_for_note, path))[
+                : card_types.COMMENTS_IN_PROMPT
+            ]
+        except (
+            OSError,
+            ValueError,
+        ) as e:  # an unread comment is a failed judgment, never a judgment as if the owner were silent
+            return card_types.DelegationFailed(reason=f"오너 코멘트를 못 읽었다: {' '.join(str(e).split())}")
+        prompt = card_delegate.build_judge_prompt(path, text, press.kind, evidence, comments)
         try:
             result = await llm.acomplete(
                 [{"role": "user", "content": prompt}],
@@ -178,7 +200,7 @@ def register(ctx: Any) -> None:
             )
         except Exception as e:  # noqa: BLE001 — a dead model is a value: the 사건 line
             return card_types.DelegationFailed(reason=f"모델 호출 실패: {' '.join(str(e).split())}")
-        return card_delegate.parse_judgment(result.text, press.kind)
+        return card_delegate.parse_judgment(result.text, press.kind, [comment.id for comment in comments])
 
     async def _current_blocks(press, snapshot):
         """The card as Slack holds it now — the door may have settled another row since the
@@ -217,7 +239,9 @@ def register(ctx: Any) -> None:
                 return
         if _client is None:
             return
-        current = await _current_blocks(press, snapshot)
+        await _put(press, await _current_blocks(press, snapshot), row)
+
+    async def _put(press, current, row) -> None:
         blocks = card_view.replace_row(current, press.idx, row)
         match blocks:
             case card_types.Rejected(reason=reason):
@@ -234,21 +258,159 @@ def register(ctx: Any) -> None:
                 e,
             )
 
-    async def _handler(ack, body, action) -> None:
-        await ack()
-        press = card_press.parse_press(body, owner_id=owner_id)
-        if isinstance(press, card_types.Rejected):
-            _LOG.info("%s: press rejected — %s", _PLUGIN_NAME, press.reason)
-            return
-        if not card_press.answerable(press.card_ts, time.time()):
-            _LOG.info(
-                "%s: press card_ts=%s idx=%s refused — the card is older than %sh",
+    def _read_row(card_ts: str, idx: int) -> dict | card_types.RowUnread:
+        """card_row for (card_ts, idx), read through the door. A dead door and a missing row
+        both come home as RowUnread — the row shows it, the press is not taken."""
+        try:
+            entries = card_delegate.fetch_events("card_row", ROW_WINDOW_HOURS)
+        except OSError as e:
+            return card_types.RowUnread(reason=" ".join(str(e).split()))
+        return card_press.row_from_entries(entries, card_ts, idx)
+
+    async def _show(ref, outcome, lang: str) -> None:
+        """One outcome on one row of the card as Slack holds it now — the row keeps its
+        buttons for a failure or a received comment (card_view.row_progress)."""
+        if _client is None:
+            _LOG.error(
+                "%s: card_ts=%s idx=%s has no client — cannot show the row's outcome",
                 _PLUGIN_NAME,
-                press.card_ts,
-                press.idx,
+                ref.card_ts,
+                ref.idx,
+            )
+            return
+        current = await _current_blocks(ref, [])
+        row = card_view.row_progress(current, ref.idx, outcome, lang=lang)
+        match row:
+            case card_types.Rejected(reason=reason):
+                _log_unrendered(ref, reason)
+            case _:
+                await _put(ref, current, row)
+
+    async def _open_comment(body) -> None:
+        opened = card_press.parse_comment_open(body, owner_id=owner_id)
+        if isinstance(opened, card_types.Rejected):
+            _LOG.info("%s: comment press rejected — %s", _PLUGIN_NAME, opened.reason)
+            return
+        if not card_press.answerable(opened.card_ts, time.time()):
+            _LOG.info(
+                "%s: comment press card_ts=%s idx=%s refused — the card is older than %sh",
+                _PLUGIN_NAME,
+                opened.card_ts,
+                opened.idx,
                 card_press.CARD_ANSWERABLE_HOURS,
             )
             return
+        lang = card_advice.resolve_lang(boring_config.note_lang())
+        view = card_view.comment_modal(card_press.comment_metadata(opened), lang=lang)
+        try:
+            await _client.views_open(trigger_id=opened.trigger_id, view=view)
+        except Exception as e:  # noqa: BLE001 — a modal that would not open is one line and the row's failure mark
+            _LOG.error(
+                "%s: comment card_ts=%s idx=%s views_open failed — %s",
+                _PLUGIN_NAME,
+                opened.card_ts,
+                opened.idx,
+                e,
+            )
+            reason = card_i18n.STRINGS[lang]["comment_open_failed_reason"]
+            await _show(opened, card_types.Failed(reason=reason), lang)
+
+    async def _view_handler(ack, body) -> None:
+        """The comment modal's submission: the text, the row it belongs to (card_row, by the
+        key the modal carried), one card_comment 사건 with the owner as judge, then the row's
+        「💬 받았어요」. Whatever cannot be read or written shows on the row as a failure — and
+        the buttons stay."""
+        await ack()
+        submit = card_press.parse_comment_submit(body, owner_id=owner_id)
+        if isinstance(submit, card_types.Rejected):
+            _LOG.info("%s: comment rejected — %s", _PLUGIN_NAME, submit.reason)
+            return
+        if not card_press.answerable(submit.card_ts, time.time()):
+            _LOG.info(
+                "%s: comment card_ts=%s idx=%s refused — the card is older than %sh",
+                _PLUGIN_NAME,
+                submit.card_ts,
+                submit.idx,
+                card_press.CARD_ANSWERABLE_HOURS,
+            )
+            return
+        lang = card_advice.resolve_lang(boring_config.note_lang())
+        row = await asyncio.to_thread(_read_row, submit.card_ts, submit.idx)
+        if isinstance(row, card_types.RowUnread):
+            _LOG.error(
+                "%s: comment card_ts=%s idx=%s row unread — %s",
+                _PLUGIN_NAME,
+                submit.card_ts,
+                submit.idx,
+                row.reason,
+            )
+            await _show(submit, card_types.Failed(reason=card_i18n.STRINGS[lang]["row_unread_reason"]), lang)
+            return
+        fields = card_press.comment_fields(submit, row)
+        if isinstance(fields, card_types.Rejected):
+            _LOG.error(
+                "%s: comment card_ts=%s idx=%s refused — %s",
+                _PLUGIN_NAME,
+                submit.card_ts,
+                submit.idx,
+                fields.reason,
+            )
+            await _show(submit, card_types.Failed(reason=fields.reason), lang)
+            return
+        try:
+            await asyncio.to_thread(card_effects._live_record, "card_comment", fields)
+        except Exception as e:  # noqa: BLE001 — a comment that was not stored must not look received
+            _LOG.error(
+                "%s: comment card_ts=%s idx=%s not recorded — %s", _PLUGIN_NAME, submit.card_ts, submit.idx, e
+            )
+            await _show(submit, card_types.Failed(reason=" ".join(str(e).split()) or type(e).__name__), lang)
+            return
+        await _show(submit, card_view.received_outcome(submit.text), lang)
+
+    def _wire_comment_modal(native, adapter) -> None:
+        native.view(card_types.COMMENT_CALLBACK_ID)(_view_handler)
+
+    async def _handler(ack, body, action) -> None:
+        await ack()
+        if card_press.is_comment_action(body):
+            await _open_comment(body)
+            return
+        parsed = card_press.parse_press(body, owner_id=owner_id)
+        if isinstance(parsed, card_types.Rejected):
+            _LOG.info("%s: press rejected — %s", _PLUGIN_NAME, parsed.reason)
+            return
+        if not card_press.answerable(parsed.card_ts, time.time()):
+            _LOG.info(
+                "%s: press card_ts=%s idx=%s refused — the card is older than %sh",
+                _PLUGIN_NAME,
+                parsed.card_ts,
+                parsed.idx,
+                card_press.CARD_ANSWERABLE_HOURS,
+            )
+            return
+        message = body.get("message")
+        blocks = message.get("blocks") if isinstance(message, dict) else None
+        lang = card_advice.resolve_lang(boring_config.note_lang())
+        press = parsed
+        if isinstance(parsed, card_types.NeedsRow):
+            row = await asyncio.to_thread(_read_row, parsed.card_ts, parsed.idx)
+            if isinstance(row, card_types.RowUnread):
+                _LOG.error(
+                    "%s: press card_ts=%s idx=%s row unread — %s",
+                    _PLUGIN_NAME,
+                    parsed.card_ts,
+                    parsed.idx,
+                    row.reason,
+                )
+                failed = card_types.Failed(reason=card_i18n.STRINGS[lang]["row_unread_reason"])
+                await _push(
+                    parsed, blocks or [], card_view.row_progress(blocks or [], parsed.idx, failed, lang=lang)
+                )
+                return
+            press = card_press.parse_press(body, owner_id=owner_id, row=row)
+            if isinstance(press, card_types.Rejected):
+                _LOG.info("%s: press rejected — %s", _PLUGIN_NAME, press.reason)
+                return
         key = (press.card_ts, press.idx)
         if key in _claimed:
             _LOG.info(
@@ -258,9 +420,6 @@ def register(ctx: Any) -> None:
                 press.idx,
             )
             return
-        message = body.get("message")
-        blocks = message.get("blocks") if isinstance(message, dict) else None
-        lang = card_advice.resolve_lang(boring_config.note_lang())
         marked = card_view.mark_pressed(blocks or [], press, lang=lang)
         if isinstance(marked, card_types.Rejected):
             _LOG.info(
@@ -362,4 +521,13 @@ def register(ctx: Any) -> None:
                 )
 
     ctx.register_slack_action_handler(_ACTION_ID, _handler)
+    register_platform_handler = getattr(ctx, "register_platform_handler", None)
+    if register_platform_handler is None:
+        _LOG.error(
+            "%s: ctx.register_platform_handler is not available — the 💬 코멘트 modal opens but "
+            "its submission cannot be received",
+            _PLUGIN_NAME,
+        )
+    else:
+        register_platform_handler("slack", _wire_comment_modal)
     _LOG.info("%s: card button handler registered (owner %s)", _PLUGIN_NAME, owner_id)

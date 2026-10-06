@@ -121,9 +121,19 @@ _REVIEWS = [
         session_id="sess-agent-1", note="/vault/wiki/wiki-0700.md", kind="used", at="t-1"
     ),
 ]
-BLOCKS = card_view.build_blocks(
+_BUILT = card_view.build_card(
     _PROPOSALS, repairs=[_REPAIR], repairs_total_groups=1, reviews=_REVIEWS, lang="ko"
 )
+BLOCKS = _BUILT.blocks
+#: The card_row 사건 entries card.post_card would have written for BLOCKS, as /events returns them.
+ROW_ENTRIES = [
+    {
+        "id": 100 + row.idx,
+        "observed_at": "2026-10-06T00:00:00+00:00",
+        "attributes": {"card_ts": CARD_TS, "idx": row.idx, "lane": row.lane, "value": row.value},
+    }
+    for row in _BUILT.rows
+]
 
 #: boring.json pinning the card's display language to Korean, the language BLOCKS render in —
 #: the handler resolves the language per press, the way card.py resolves it per run.
@@ -150,23 +160,47 @@ class _FakeLlm:
 class _FakeCtx:
     def __init__(self, llm=None):
         self.handlers = []
+        self.platform_factories = []
         self.llm = llm
 
     def register_slack_action_handler(self, action_id, callback):
         self.handlers.append((action_id, callback))
 
+    def register_platform_handler(self, platform, factory):
+        self.platform_factories.append((platform, factory))
+
+
+class _FakeApp:
+    """The slack_bolt AsyncApp a platform-handler factory receives: records `app.view(id)(fn)`."""
+
+    def __init__(self):
+        self.views = {}
+
+    def view(self, callback_id):
+        def wire(fn):
+            self.views[callback_id] = fn
+            return fn
+
+        return wire
+
 
 class _FakeClient:
     """Records chat_update calls; raises when asked, to rehearse a dead Slack API."""
 
-    def __init__(self, calls, *, fail=False, current=None):
+    def __init__(self, calls, *, fail=False, current=None, open_fail=False):
         self._calls = calls
         self._fail = fail
+        self._open_fail = open_fail
         # What Slack holds for the card: the last chat_update that landed, or the posted card.
         self.current = current if current is not None else BLOCKS
 
     async def conversations_history(self, *, channel, latest, inclusive, limit):
         return {"messages": [{"ts": latest, "blocks": self.current}]}
+
+    async def views_open(self, *, trigger_id, view):
+        self._calls.append(("views_open", trigger_id, view))
+        if self._open_fail:
+            raise RuntimeError("trigger_id expired")
 
     async def chat_update(self, *, channel, ts, blocks):
         self._calls.append(("chat_update", channel, ts, blocks))
@@ -206,11 +240,11 @@ def _body(action_id, value, user=OWNER, blocks=BLOCKS):
     }
 
 
-def _run(handler, body, calls, *, fail=False):
+def _run(handler, body, calls, *, fail=False, open_fail=False):
     async def ack():
         calls.append("ack")
 
-    client = _FakeClient(calls, fail=fail)
+    client = _FakeClient(calls, fail=fail, open_fail=open_fail)
     with mock.patch.object(PLUGIN, "_client", client):
         asyncio.run(handler(ack, body, {}))
     return client
@@ -292,11 +326,19 @@ def _patched_effects(calls, consumption=None, execute_repair=None):
 
 @contextlib.contextmanager
 def _patched_delegate(
-    calls, note_text="---\ntitle: t\n---\n노트 본문입니다", evidence="채점이 잡은 문장입니다."
+    calls, note_text="---\ntitle: t\n---\n노트 본문입니다", evidence="채점이 잡은 문장입니다.", comments=None
 ):
     """The judgment seat's live reads replaced by fakes — a press must never touch the
-    host vault or the engine's /events in these tests."""
+    host vault or the engine's /events in these tests. `comments` is what the owner left on
+    the note: a list of OwnerComment, or an exception to raise."""
+
+    def read_comments(path):
+        if isinstance(comments, Exception):
+            raise comments
+        return list(comments or [])
+
     with (
+        mock.patch.object(card_delegate, "comments_for_note", side_effect=read_comments),
         mock.patch.object(
             card_delegate,
             "read_note_text",
@@ -454,6 +496,7 @@ def test_an_owner_review_delegate_press_consumes_with_the_agent_judge():
                 "judge": "agent:delegated",
                 "kind": "contested",
                 "reason": "본문과 맞지 않는 옛 기록",
+                "comment_ids": [],
             },
         ),
     ]
@@ -921,6 +964,304 @@ def test_a_retry_that_succeeds_leaves_no_old_failure_line():
     assert not any("✕ 실패" in json.dumps(b, ensure_ascii=False) for b in card)
 
 
+def _bare_body(action_id, user=OWNER, blocks=BLOCKS):
+    """A press on a button that carries no value — the card_row shape."""
+    return {
+        "type": "block_actions",
+        "actions": [{"action_id": action_id}],
+        "user": {"id": user},
+        "message": {"ts": CARD_TS, "blocks": blocks},
+        "channel": {"id": CARD_CH},
+        "trigger_id": "trig-1",
+    }
+
+
+@contextlib.contextmanager
+def _rows(entries=None, error=None):
+    """card_row as the door's /events would answer it — or a dead door."""
+
+    def fetch(name, hours):
+        assert name == "card_row", name
+        if error is not None:
+            raise error
+        return list(ROW_ENTRIES if entries is None else entries)
+
+    with mock.patch.object(card_delegate, "fetch_events", side_effect=fetch):
+        yield
+
+
+def _records(calls):
+    return [c for c in calls if isinstance(c, tuple) and c[0] == "record"]
+
+
+def test_a_bare_button_press_reads_its_card_row_and_does_what_the_old_value_did():
+    """The review row's buttons carry no value now: the plugin reads card_row by (card_ts, idx)
+    and the press lands exactly as the same press on a button holding its value."""
+    old, new = [], []
+    with _env():
+        for calls, body in ((old, _body("card:3:defer", REVIEW_VALUE)), (new, _bare_body("card:3:defer"))):
+            _, handler = _register(_FakeCtx())[0]
+            with _patched_effects(calls), _rows():
+                _run(handler, body, calls)
+    assert _records(new) and _records(new) == _records(old)
+    (record,) = _records(new)
+    assert record[1:] == (
+        "verdict_reviewed",
+        {
+            "note": "/vault/wiki/wiki-0700.md",
+            "proposed_kind": "used",
+            "card_ts": CARD_TS,
+            "session_id": "sess-agent-1",
+            "sessions": ["sess-agent-1"],
+            "choice": "defer",
+        },
+    )
+
+
+def test_an_old_card_button_still_holding_its_value_is_pressed_without_reading_any_row():
+    calls = []
+    with _env():
+        _, handler = _register(_FakeCtx())[0]
+        with (
+            _patched_effects(calls),
+            mock.patch.object(
+                card_delegate,
+                "fetch_events",
+                side_effect=AssertionError("no card_row read for an old button"),
+            ),
+        ):
+            _run(handler, _body("card:3:defer", REVIEW_VALUE), calls)
+    assert len(_records(calls)) == 1
+
+
+def test_a_card_row_that_cannot_be_read_shows_the_failure_keeps_the_buttons_and_does_not_take_the_press():
+    """Nothing in the row's key reaches an effect on a guess: no card_row (none written, wrong
+    idx), or no way to read it (dead door), is 「✕ 실패 — 줄 정보를 못 읽었어요」 over the row's
+    buttons, and the next press — once the row can be read — goes through."""
+    for rows in (
+        _rows(entries=[]),
+        _rows(entries=[e for e in ROW_ENTRIES if e["attributes"]["idx"] != 3]),
+        _rows(error=OSError("door down")),
+    ):
+        calls = []
+        with _env():
+            _, handler = _register(_FakeCtx())[0]
+            with _patched_effects(calls), mock.patch.object(PLUGIN, "_LOG"):
+                with rows:
+                    client = _run(handler, _bare_body("card:3:defer"), calls)
+                assert not _records(calls) and not [c for c in calls if c[0] == "consumption"]
+                (update,) = _updates(calls)
+                assert _status_at(update[3], 3) == "✕ 실패 — 줄 정보를 못 읽었어요"
+                _assert_buttons_kept_under_the_reason(BLOCKS, update[3], 3)
+                assert (CARD_CH, CARD_TS) == (update[1], update[2])
+                assert not PLUGIN._claimed
+                with _rows():
+                    _run(handler, _bare_body("card:3:defer", blocks=client.current), calls)
+                assert len(_records(calls)) == 1
+
+
+def test_the_comment_button_opens_the_modal_with_the_rows_key_and_runs_no_effect():
+    calls = []
+    with _env():
+        _, handler = _register(_FakeCtx())[0]
+        with _patched_effects(calls):
+            _run(handler, _bare_body("card:3:comment"), calls)
+    assert [c if isinstance(c, str) else c[0] for c in calls] == ["ack", "views_open"]
+    _, trigger_id, view = calls[1]
+    assert trigger_id == "trig-1"
+    assert view["callback_id"] == "card:comment"
+    assert json.loads(view["private_metadata"]) == {"card_ts": CARD_TS, "channel": CARD_CH, "idx": 3}
+    assert not PLUGIN._claimed
+
+
+def test_a_comment_press_by_anyone_but_the_owner_opens_nothing():
+    calls = []
+    with _env():
+        _, handler = _register(_FakeCtx())[0]
+        with _patched_effects(calls):
+            _run(handler, _bare_body("card:3:comment", user=OTHER), calls)
+    assert calls == ["ack"]
+
+
+def test_a_modal_that_will_not_open_shows_the_failure_over_the_buttons():
+    calls = []
+    with _env():
+        _, handler = _register(_FakeCtx())[0]
+        with _patched_effects(calls), mock.patch.object(PLUGIN, "_LOG"):
+            _run(handler, _bare_body("card:3:comment"), calls, open_fail=True)
+    (update,) = _updates(calls)
+    assert _status_at(update[3], 3) == "✕ 실패 — 코멘트 창을 못 열었어요"
+    _assert_buttons_kept_under_the_reason(BLOCKS, update[3], 3)
+
+
+def _submit_body(text, user=OWNER, idx=3, card_ts=CARD_TS):
+    return {
+        "type": "view_submission",
+        "user": {"id": user},
+        "view": {
+            "callback_id": "card:comment",
+            "private_metadata": json.dumps({"card_ts": card_ts, "channel": CARD_CH, "idx": idx}),
+            "state": {"values": {"comment": {"text": {"type": "plain_text_input", "value": text}}}},
+        },
+    }
+
+
+def _submit(body, calls, *, rows=None, effects_calls=None, **effects_kw):
+    """register() the plugin, let it wire its modal onto a fake bolt app the way hermes's
+    adapter does, and submit `body` to the handler it put there."""
+    ctx = _FakeCtx()
+    with _env():
+        _register(ctx)
+        assert [p for p, _ in ctx.platform_factories] == ["slack"]
+        app = _FakeApp()
+        ctx.platform_factories[0][1](app, None)
+        view_handler = app.views["card:comment"]
+
+        async def ack():
+            calls.append("ack")
+
+        client = _FakeClient(calls)
+        with (
+            mock.patch.object(PLUGIN, "_client", client),
+            mock.patch.object(PLUGIN, "_LOG"),
+            _patched_effects(calls, **effects_kw),
+            rows or _rows(),
+        ):
+            asyncio.run(view_handler(ack, body))
+    return client
+
+
+def test_a_submitted_comment_becomes_an_owner_event_and_the_row_says_it_got_it():
+    """The whole path from the modal: ack, the row read back by the modal's key, one card_comment
+    사건 with judge=owner and the row's session/note, then 「💬 받았어요」 over the row, buttons
+    kept. A mutant that skips the 받았어요 or the event goes red here."""
+    calls = []
+    _submit(_submit_body("이 노트는 지금도 맞는 말이에요\n다음 판정에서 참고해 주세요"), calls)
+    assert calls[0] == "ack"
+    (record,) = _records(calls)
+    assert record[1] == "card_comment"
+    assert record[2] == {
+        "judge": "owner",
+        "card_ts": CARD_TS,
+        "idx": 3,
+        "text": "이 노트는 지금도 맞는 말이에요\n다음 판정에서 참고해 주세요",
+        "lane": "review",
+        "session_id": "sess-agent-1",
+        "sessions": ["sess-agent-1"],
+        "note": "/vault/wiki/wiki-0700.md",
+        "proposed_kind": "used",
+    }
+    (update,) = _updates(calls)
+    assert _status_at(update[3], 3) == "💬 받았어요 — 이 노트는 지금도 맞는 말이에요 다음 판정에서 참고해…"
+    _assert_buttons_kept_under_the_reason(BLOCKS, update[3], 3)
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] in ("consumption", "repair")]
+
+
+def test_a_comment_on_a_name_repair_row_names_its_subject_and_spellings():
+    calls = []
+    _submit(_submit_body("이건 합치면 안 돼요", idx=0), calls)
+    (record,) = _records(calls)
+    assert record[2]["lane"] == "repair"
+    assert (record[2]["subject"], record[2]["variants"]) == (
+        "foodspring-front",
+        ["foodspring front", "foodspring-front"],
+    )
+    assert record[2]["judge"] == "owner"
+    (update,) = _updates(calls)
+    assert _status_at(update[3], 0) == "💬 받았어요 — 이건 합치면 안 돼요"
+
+
+def test_a_submission_whose_card_row_cannot_be_read_records_nothing_and_says_so_on_the_row():
+    calls = []
+    _submit(_submit_body("글"), calls, rows=_rows(error=OSError("door down")))
+    assert not _records(calls)
+    (update,) = _updates(calls)
+    assert _status_at(update[3], 3) == "✕ 실패 — 줄 정보를 못 읽었어요"
+    _assert_buttons_kept_under_the_reason(BLOCKS, update[3], 3)
+    calls = []
+    _submit(_submit_body("글"), calls, rows=_rows(entries=[]))
+    assert not _records(calls) and "줄 정보를 못 읽었어요" in _status_at(_updates(calls)[0][3], 3)
+
+
+def test_a_comment_that_could_not_be_stored_is_never_shown_as_received():
+    calls = []
+
+    def boom(event, fields):
+        raise RuntimeError("event sink down")
+
+    with mock.patch.object(card_effects, "_live_record", side_effect=boom):
+        ctx = _FakeCtx()
+        with _env():
+            _register(ctx)
+            app = _FakeApp()
+            ctx.platform_factories[0][1](app, None)
+
+            async def ack():
+                calls.append("ack")
+
+            client = _FakeClient(calls)
+            with mock.patch.object(PLUGIN, "_client", client), mock.patch.object(PLUGIN, "_LOG"), _rows():
+                asyncio.run(app.views["card:comment"](ack, _submit_body("글")))
+    (update,) = _updates(calls)
+    assert _status_at(update[3], 3) == "✕ 실패 — event sink down"
+    assert "받았어요" not in json.dumps(update[3], ensure_ascii=False)
+
+
+def test_a_submission_nobody_may_make_runs_nothing():
+    for body in (_submit_body("글", user=OTHER), _submit_body("   ")):
+        calls = []
+        _submit(body, calls)
+        assert calls == ["ack"], calls
+
+
+def test_a_submission_on_a_card_past_its_answerable_hours_runs_nothing():
+    calls = []
+    PLUGIN.time = types.SimpleNamespace(time=lambda: float(CARD_TS) + 24 * 3600)
+    try:
+        _submit(_submit_body("글"), calls)
+    finally:
+        PLUGIN.time = types.SimpleNamespace(time=lambda: float(CARD_TS) + 60)
+    assert calls == ["ack"], calls
+
+
+def test_a_delegate_press_reads_the_owners_comments_into_its_prompt_and_names_their_ids():
+    """맡길게요 reads what the owner said about the note: the comment is in the one model call's
+    prompt, and the verdict_reviewed 사건 names the 사건 id it was given. A judge that never
+    reads the comments goes red here."""
+    calls = []
+    comments = [
+        card_types.OwnerComment(id=31, at="2026-10-06T02:00:00+00:00", text="이 노트는 옛 접근이라 틀렸어요"),
+    ]
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer='{"verdict": "wrong", "reason": "오너가 옛 접근이라 했다"}'))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_effects(calls), _patched_delegate(calls, comments=comments):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    (model,) = [c for c in calls if isinstance(c, tuple) and c[0] == "model"]
+    assert "소유자가 이 노트에 직접 남긴 말" in model[1]
+    assert "- 이 노트는 옛 접근이라 틀렸어요" in model[1]
+    (record,) = _records(calls)
+    assert record[2]["comment_ids"] == [31]
+    assert record[2]["judge"] == "agent:delegated"
+
+
+def test_a_delegate_press_that_cannot_read_the_owners_comments_does_not_judge_as_if_they_were_silent():
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer='{"verdict": "right", "reason": "x"}'))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with (
+            _patched_effects(calls),
+            _patched_delegate(calls, comments=OSError("events unreadable")),
+            mock.patch.object(PLUGIN, "_LOG"),
+        ):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] in ("model", "consumption")]
+    (record,) = _records(calls)
+    assert "오너 코멘트를 못 읽었다" in record[2]["error"]
+    assert "✕ 실패" in json.dumps(_updates(calls)[-1][3], ensure_ascii=False)
+
+
 if __name__ == "__main__":
     test_the_import_path_stays_langchain_free()
     test_register_without_secretary_owner_id_registers_nothing()
@@ -949,4 +1290,18 @@ if __name__ == "__main__":
     test_a_row_the_door_settled_mid_press_is_not_rolled_back()
     test_the_same_failure_twice_keeps_the_row_and_its_buttons()
     test_a_retry_that_succeeds_leaves_no_old_failure_line()
+    test_a_bare_button_press_reads_its_card_row_and_does_what_the_old_value_did()
+    test_an_old_card_button_still_holding_its_value_is_pressed_without_reading_any_row()
+    test_a_card_row_that_cannot_be_read_shows_the_failure_keeps_the_buttons_and_does_not_take_the_press()
+    test_the_comment_button_opens_the_modal_with_the_rows_key_and_runs_no_effect()
+    test_a_comment_press_by_anyone_but_the_owner_opens_nothing()
+    test_a_modal_that_will_not_open_shows_the_failure_over_the_buttons()
+    test_a_submitted_comment_becomes_an_owner_event_and_the_row_says_it_got_it()
+    test_a_comment_on_a_name_repair_row_names_its_subject_and_spellings()
+    test_a_submission_whose_card_row_cannot_be_read_records_nothing_and_says_so_on_the_row()
+    test_a_comment_that_could_not_be_stored_is_never_shown_as_received()
+    test_a_submission_nobody_may_make_runs_nothing()
+    test_a_submission_on_a_card_past_its_answerable_hours_runs_nothing()
+    test_a_delegate_press_reads_the_owners_comments_into_its_prompt_and_names_their_ids()
+    test_a_delegate_press_that_cannot_read_the_owners_comments_does_not_judge_as_if_they_were_silent()
     print("ok - boring-card plugin: ack-first, in-place mark, double-press refused, loud refusals")

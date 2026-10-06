@@ -45,16 +45,26 @@ PROPOSAL = cc.Proposal(
 REVIEW = cc.ProposedVerdict(session_id="sess-agent-1", note="/vault/wiki/wiki-0700.md", kind="used", at="t-1")
 
 
+def _values_of(built: cv.Built) -> dict[str, str]:
+    """Every action_id → the value its row stood for: the button's own (advice·표본 rows, and
+    every row of a card posted before card_row) or, for a bare button, the card_row value —
+    the old button value, byte for byte."""
+    rows = {row.idx: row for row in built.rows}
+    out = {}
+    for block in built.blocks:
+        if block["type"] != "actions":
+            continue
+        for el in block["elements"]:
+            idx = int(el["action_id"].split(":")[1])
+            out[el["action_id"]] = el.get("value") or json.dumps(rows[idx].value, ensure_ascii=False)
+    return out
+
+
 def _card_values() -> dict[str, str]:
     """One card per lane, every action_id → its button value."""
-    blocks = cv.build_blocks(
-        [PROPOSAL], repairs=[REPAIR], repairs_total_groups=1, reviews=[REVIEW], lang="ko"
+    return _values_of(
+        cv.build_card([PROPOSAL], repairs=[REPAIR], repairs_total_groups=1, reviews=[REVIEW], lang="ko")
     )
-    return {el["action_id"]: el["value"] for b in blocks if b["type"] == "actions" for el in b["elements"]}
-
-
-def _card_values_with(blocks: list[dict]) -> dict[str, str]:
-    return {el["action_id"]: el["value"] for b in blocks if b["type"] == "actions" for el in b["elements"]}
 
 
 def _payload(action_id: str, value, user: str = OWNER) -> dict:
@@ -251,6 +261,7 @@ class EffectsTableTests(unittest.TestCase):
                         "judge": "agent:delegated",
                         "kind": "contested",
                         "reason": "모델 이유",
+                        "comment_ids": [],
                     },
                 ),
             ],
@@ -379,6 +390,7 @@ class EffectsTableTests(unittest.TestCase):
                         "judge": "agent:delegated",
                         "kind": "used",
                         "reason": "모델이 본 이유",
+                        "comment_ids": [],
                     },
                 ),
                 cc.Consumption(session="sess-agent-2", kind="used", paths=[path], judge="agent:delegated"),
@@ -390,6 +402,7 @@ class EffectsTableTests(unittest.TestCase):
                         "judge": "agent:delegated",
                         "kind": "used",
                         "reason": "모델이 본 이유",
+                        "comment_ids": [],
                     },
                 ),
             ],
@@ -501,10 +514,7 @@ class RejectedTests(unittest.TestCase):
         sample = cc.ProposedVerdict(
             session_id="sess-s", note="/vault/wiki/wiki-0800.md", kind="used", at="t-1"
         )
-        blocks = cv.build_blocks([], reviews=[REVIEW], samples=[sample], lang="ko")
-        values = {
-            el["action_id"]: el["value"] for b in blocks if b["type"] == "actions" for el in b["elements"]
-        }
+        values = _values_of(cv.build_card([], reviews=[REVIEW], samples=[sample], lang="ko"))
         fields = {
             "session_id": "sess-s",
             "note": "/vault/wiki/wiki-0800.md",
@@ -524,15 +534,14 @@ class RejectedTests(unittest.TestCase):
                 cc.Record(event="verdict_reviewed", fields={**fields, "choice": "flip"}),
             ],
         )
-        ordinary = cp.effects(_press("card:0:do", _card_values_with(blocks)["card:0:do"]))
+        ordinary = cp.effects(_press("card:0:do", values["card:0:do"]))
         self.assertNotIn("sample", ordinary[0].fields)
 
     def test_a_sample_press_has_no_delegate_and_no_defer(self):
         sample = cc.ProposedVerdict(
             session_id="sess-s", note="/vault/wiki/wiki-0800.md", kind="used", at="t-1"
         )
-        blocks = cv.build_blocks([], samples=[sample], lang="ko")
-        value = _card_values_with(blocks)["card:0:do"]
+        value = _values_of(cv.build_card([], samples=[sample], lang="ko"))["card:0:do"]
         for choice in ("delegate", "defer"):
             out = cp.parse_press(_payload(f"card:0:{choice}", value), owner_id=OWNER)
             self.assertIsInstance(out, cc.Rejected)
@@ -548,6 +557,212 @@ class RejectedTests(unittest.TestCase):
             out = cp.parse_press(_payload("card:1:do", value), owner_id=OWNER)
             self.assertIsInstance(out, cc.Rejected)
             self.assertIn("malformed note label", out.reason)
+
+
+def _bare_payload(action_id: str) -> dict:
+    """A press on a button that carries no value (the card_row shape)."""
+    return {
+        "type": "block_actions",
+        "actions": [{"action_id": action_id}],
+        "user": {"id": OWNER},
+        "message": {"ts": CARD_TS},
+        "channel": {"id": CARD_CH},
+        "trigger_id": "trig-1",
+    }
+
+
+def _row_entry(
+    idx: int, value, observed_at: str = "2026-10-06T00:00:00+00:00", card_ts: str = CARD_TS
+) -> dict:
+    return {
+        "id": 1,
+        "observed_at": observed_at,
+        "attributes": {"card_ts": card_ts, "idx": idx, "value": value},
+    }
+
+
+class CardRowPressTests(unittest.TestCase):
+    """A bare button is answered from its card_row; a button that still carries its value (a
+    card posted before card_row) is answered exactly as before."""
+
+    def setUp(self):
+        built = cv.build_card(
+            [PROPOSAL], repairs=[REPAIR], repairs_total_groups=1, reviews=[REVIEW], lang="ko"
+        )
+        self.rows = {row.idx: row.value for row in built.rows}
+
+    def test_a_bare_button_needs_its_row_and_then_presses_like_the_old_value_did(self):
+        needs = cp.parse_press(_bare_payload("card:2:do"), owner_id=OWNER)
+        self.assertEqual(needs, cc.NeedsRow(idx=2, choice="do", user=OWNER, card_ts=CARD_TS, channel=CARD_CH))
+        new_way = cp.parse_press(_bare_payload("card:2:do"), owner_id=OWNER, row=self.rows[2])
+        old_way = _press("card:2:do", json.dumps(self.rows[2]))
+        self.assertEqual(new_way, old_way)
+        self.assertEqual(new_way.session, "sess-agent-1")
+        repair = cp.parse_press(_bare_payload("card:0:do"), owner_id=OWNER, row=self.rows[0])
+        self.assertEqual(repair.subject, "foodspring-front")
+
+    def test_an_old_card_button_with_its_value_never_asks_for_a_row(self):
+        old = cp.parse_press(_payload("card:2:drop", json.dumps(self.rows[2])), owner_id=OWNER)
+        self.assertIsInstance(old, cc.ReviewPress)
+        self.assertEqual(old.choice, "drop")
+        # the button's own value wins over a row that disagrees
+        other = {"lane": "repair", "subject": "elsewhere"}
+        self.assertIsInstance(
+            cp.parse_press(_payload("card:2:drop", json.dumps(self.rows[2])), owner_id=OWNER, row=other),
+            cc.ReviewPress,
+        )
+
+    def test_a_row_that_is_not_a_known_lane_value_is_rejected_not_guessed(self):
+        out = cp.parse_press(_bare_payload("card:2:do"), owner_id=OWNER, row={"lane": "nonsense"})
+        self.assertIsInstance(out, cc.Rejected)
+
+    def test_row_from_entries_takes_the_newest_row_of_the_key_and_says_when_there_is_none(self):
+        entries = [
+            _row_entry(2, {"lane": "review", "v": "old"}, "2026-10-06T01:00:00+00:00"),
+            _row_entry(2, {"lane": "review", "v": "new"}, "2026-10-06T02:00:00+00:00"),
+            _row_entry(3, {"lane": "review", "v": "other idx"}),
+            _row_entry(2, {"lane": "review", "v": "other card"}, card_ts="9.9"),
+        ]
+        self.assertEqual(cp.row_from_entries(entries, CARD_TS, 2), {"lane": "review", "v": "new"})
+        self.assertIsInstance(cp.row_from_entries(entries, CARD_TS, 7), cc.RowUnread)
+        self.assertIsInstance(cp.row_from_entries([], CARD_TS, 2), cc.RowUnread)
+        self.assertIsInstance(cp.row_from_entries([_row_entry(2, "not an object")], CARD_TS, 2), cc.RowUnread)
+
+
+class CommentParseTests(unittest.TestCase):
+    def _submit_payload(self, text, *, user=OWNER, meta=None, callback="card:comment") -> dict:
+        meta = meta if meta is not None else {"card_ts": CARD_TS, "channel": CARD_CH, "idx": 2}
+        return {
+            "type": "view_submission",
+            "user": {"id": user},
+            "view": {
+                "callback_id": callback,
+                "private_metadata": json.dumps(meta),
+                "state": {"values": {"comment": {"text": {"type": "plain_text_input", "value": text}}}},
+            },
+        }
+
+    def test_the_comment_press_is_told_apart_and_parsed_into_a_modal_order(self):
+        payload = _bare_payload("card:2:comment")
+        self.assertTrue(cp.is_comment_action(payload))
+        self.assertFalse(cp.is_comment_action(_bare_payload("card:2:do")))
+        opened = cp.parse_comment_open(payload, owner_id=OWNER)
+        self.assertEqual(
+            opened, cc.CommentOpen(idx=2, user=OWNER, card_ts=CARD_TS, channel=CARD_CH, trigger_id="trig-1")
+        )
+        self.assertEqual(
+            json.loads(cp.comment_metadata(opened)), {"card_ts": CARD_TS, "channel": CARD_CH, "idx": 2}
+        )
+        self.assertIsInstance(
+            cp.parse_comment_open(_bare_payload("card:2:comment") | {"user": {"id": OTHER}}, owner_id=OWNER),
+            cc.Rejected,
+        )
+        self.assertIsInstance(
+            cp.parse_comment_open({k: v for k, v in payload.items() if k != "trigger_id"}, owner_id=OWNER),
+            cc.Rejected,
+        )
+        # comment is no verdict: the press parser never accepts it as one
+        self.assertIsInstance(cp.parse_press(payload, owner_id=OWNER, row={"lane": "review"}), cc.Rejected)
+
+    def test_a_submission_carries_its_row_key_and_its_text(self):
+        submit = cp.parse_comment_submit(
+            self._submit_payload("  이건 철자만 다른 게 아니에요\n둘째 줄 "), owner_id=OWNER
+        )
+        self.assertEqual(
+            submit,
+            cc.CommentSubmit(
+                idx=2,
+                user=OWNER,
+                card_ts=CARD_TS,
+                channel=CARD_CH,
+                text="이건 철자만 다른 게 아니에요\n둘째 줄",
+            ),
+        )
+
+    def test_a_submission_nobody_may_make_is_rejected(self):
+        for payload in (
+            self._submit_payload("x", user=OTHER),
+            self._submit_payload("x", callback="something-else"),
+            self._submit_payload("   "),
+            self._submit_payload("x" * (cc.COMMENT_MAX_CHARS + 1)),
+            self._submit_payload("x", meta={"card_ts": CARD_TS, "channel": CARD_CH}),
+            self._submit_payload("x", meta={"card_ts": CARD_TS, "channel": CARD_CH, "idx": "2"}),
+            {"type": "block_actions"},
+        ):
+            self.assertIsInstance(cp.parse_comment_submit(payload, owner_id=OWNER), cc.Rejected)
+
+    def test_the_comment_event_names_the_owner_and_the_rows_own_keys(self):
+        submit = cc.CommentSubmit(idx=2, user=OWNER, card_ts=CARD_TS, channel=CARD_CH, text="글")
+        review = cp.comment_fields(
+            submit,
+            {
+                "lane": "review",
+                "session": "s1",
+                "sessions": ["s1", "s2"],
+                "kind": "used",
+                "note": "wiki-0700",
+            },
+        )
+        self.assertEqual(
+            review,
+            {
+                "judge": "owner",
+                "card_ts": CARD_TS,
+                "idx": 2,
+                "text": "글",
+                "lane": "review",
+                "session_id": "s1",
+                "sessions": ["s1", "s2"],
+                "note": "/vault/wiki/wiki-0700.md",
+                "proposed_kind": "used",
+            },
+        )
+        repair = cp.comment_fields(
+            submit, {"lane": "repair", "subject": "foodspring-front", "variants": ["a b", "a-b"]}
+        )
+        self.assertEqual(
+            (repair["lane"], repair["subject"], repair["variants"], repair["judge"]),
+            ("repair", "foodspring-front", ["a b", "a-b"], "owner"),
+        )
+        for row in (
+            {"lane": "advice", "note": "wiki-1"},
+            {"lane": "review", "note": "wiki-1"},
+            {"lane": "repair"},
+        ):
+            self.assertIsInstance(cp.comment_fields(submit, row), cc.Rejected)
+
+    def test_a_judge_reads_only_the_owners_comments_of_its_lane_and_key_newest_first(self):
+        def entry(ident, at, **attrs):
+            return {
+                "id": ident,
+                "observed_at": at,
+                "attributes": {"judge": "owner", "lane": "repair", **attrs},
+            }
+
+        entries = [
+            entry(1, "2026-10-06T01:00:00+00:00", subject="s", text="먼저"),
+            entry(2, "2026-10-06T03:00:00+00:00", subject="s", text="나중\n둘째 줄"),
+            entry(3, "2026-10-06T02:00:00+00:00", subject="other", text="남의 묶음"),
+            entry(4, "2026-10-06T04:00:00+00:00", subject="s", text="오너 아님", judge="agent:x"),
+            entry(5, "2026-10-06T05:00:00+00:00", subject="s", text="다른 레인", lane="review"),
+        ]
+        got = cp.owner_comments(entries, "repair", subject="s")
+        self.assertEqual([(c.id, c.text) for c in got], [(2, "나중\n둘째 줄"), (1, "먼저")])
+        with self.assertRaises(ValueError):
+            cp.owner_comments([entry(6, "2026-10-06T06:00:00+00:00", subject="s")], "repair", subject="s")
+        lines = cp.comment_prompt_lines(got, "머리")
+        self.assertEqual(lines, ["", "머리", "- 나중", "  둘째 줄", "- 먼저"])
+        self.assertEqual(cp.comment_prompt_lines([], "머리"), [])
+
+    def test_a_delegate_judgment_that_read_comments_names_their_ids_on_the_event(self):
+        press = cc.ReviewPress(
+            idx=2, choice="delegate", user=OWNER, card_ts=CARD_TS, channel=CARD_CH,
+            session="s1", note="wiki-0700", kind="used",
+        )  # fmt: skip
+        effects = cp.effects(
+            press, delegated=cc.DelegatedJudgment(kind="used", reason="r", comment_ids=[7, 9])
+        )
+        self.assertEqual(effects[1].fields["comment_ids"], [7, 9])
 
 
 if __name__ == "__main__":
