@@ -825,6 +825,7 @@ UNCAPPED = RowCaps()
 class Built(NamedTuple):
     blocks: list[dict]
     left_out: RowCaps
+    advice_shown: tuple[int, ...] = ()
 
 
 def build_blocks(*args, **kwargs) -> list[dict]:
@@ -916,6 +917,7 @@ def build_card(
         blocks.append(_lane_header_block(strings["advice_header"]))
 
     shown = 0
+    advice_shown: list[int] = []
     overflowed = False
     reviews = list(reviews)
     samples = list(samples)
@@ -950,6 +952,7 @@ def build_card(
                 overflowed = True
                 break
             blocks.extend(addition)
+            advice_shown.append(idx)
             shown += 1
         if overflowed:
             break
@@ -1008,6 +1011,7 @@ def build_card(
     return Built(
         blocks,
         RowCaps(repairs=n_repairs - repairs_shown, advice=total - shown, reviews=len(reviews) - r_shown),
+        tuple(advice_shown),
     )
 
 
@@ -1028,6 +1032,7 @@ class FitReport(NamedTuple):
     text_max: int
     left_out: RowCaps
     samples_shown: bool
+    advice_shown: tuple[int, ...]
 
 
 class Fitted(NamedTuple):
@@ -1066,6 +1071,12 @@ def fit_card(proposals: list[Proposal], *, samples: Iterable[ProposedVerdict] = 
         last = card_chars(built.blocks)
         if last <= CARD_CHARS_BUDGET:
             carried = any(block.get("block_id") == SAMPLES_BLOCK_ID for block in built.blocks)
-            report = FitReport(chars=last, text_max=text_max, left_out=built.left_out, samples_shown=carried)
+            report = FitReport(
+                chars=last,
+                text_max=text_max,
+                left_out=built.left_out,
+                samples_shown=carried,
+                advice_shown=built.advice_shown,
+            )
             return Fitted(built.blocks, samples if carried else [], report)
     raise ValueError(f"card is {last} chars with every row left out, over {CARD_CHARS_BUDGET}")

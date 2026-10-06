@@ -492,14 +492,16 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                 "samples_shown": len(fitted.samples),
             },
         )
+        shown = [(idx, state["proposals"][idx]) for idx in sorted(fitted.report.advice_shown)]
         collabs.handover(
             card_press.session_name(message.channel, message.ts),
             datetime.now(UTC).isoformat(),
-            card_verdicts.handover_paths(state["proposals"]),
+            card_verdicts.handover_paths([proposal for _, proposal in shown]),
         )
-        for idx, proposal in enumerate(state["proposals"]):
+        for idx, proposal in shown:
             # global idx (repairs first) — the button press's card_verdict event carries the
-            # same idx, and _live_past_verdicts joins the two events on it.
+            # same idx, and _live_past_verdicts joins the two events on it. A row the card
+            # left out is not "shown and unpressed": it gets no event, only card_fit's count.
             collabs.record(
                 "card_proposal", card_verdicts.proposal_event_fields(proposal, lang, card_ts, n_repairs + idx)
             )

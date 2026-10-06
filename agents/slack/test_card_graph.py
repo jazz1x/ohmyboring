@@ -671,6 +671,20 @@ class GraphTests(unittest.TestCase):
         self.assertEqual([p["idx"] for p in proposal_fields], [0, 1, 2])
         self.assertEqual({p["card_ts"] for p in proposal_fields}, {CARD_TS})
 
+    def test_an_advice_row_the_card_left_out_leaves_no_card_proposal_and_no_handover_path(self):
+        self.graph.invoke({}, self.cfg)
+        full_chars = card_view.card_chars(self.sends[-1])
+        all_paths = self.handovers[-1][2]
+        stubs = Stubs()
+        with mock.patch.object(card_view, "CARD_CHARS_BUDGET", full_chars - 1):
+            self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-left-out"}})
+        (fit,) = [f for e, f in stubs.records if e == "card_fit"]
+        self.assertGreater(fit["left_out_advice"], 0)
+        proposals = [f for e, f in stubs.records if e == "card_proposal"]
+        self.assertEqual(len(proposals), 3 - fit["left_out_advice"])
+        self.assertEqual({p["idx"] for p in proposals}, set(range(len(proposals))))
+        self.assertEqual(len(self.handovers[-1][2]), len(all_paths) - fit["left_out_advice"])
+
     def test_a_recently_judged_note_is_skipped_before_any_model_call(self):
         past = [
             cc.PastVerdictPair(
