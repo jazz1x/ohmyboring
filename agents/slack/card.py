@@ -38,7 +38,9 @@ answerable for card_press.CARD_ANSWERABLE_HOURS: the hermes plugin refuses an ol
 and _live_past_verdicts widens its proposal read by the same hours so every press it
 accepted still joins its proposal.
 CARD_DRY_RUN=1 stops right after post_card and prints the proposals instead of touching
-Slack, handover, or the event log.
+Slack, handover, or the event log. CARD_RENDER_ONLY=1 draws today's card from the same
+reads and prints its blocks and size, writing nothing and never reaching /search or the
+model — the way to see a card's layout without polluting what the card measures.
 
 During the launchd→hermes handover both schedulers fire the same tool for a while: the
 second runner of one KST morning reads the first card's own events (card_confirmation /
@@ -193,6 +195,9 @@ class Collaborators(NamedTuple):
     score: Callable[[list[card_types.ProposedVerdict], date], card_types.ScoreReading] = lambda reviews, day: (
         card_types.ScoreReading()
     )
+    # CARD_RENDER_ONLY: when set, the advice lane is today's already-posted proposals — no
+    # search, no model call, no suppression — instead of a fresh advise → resolve.
+    posted_proposals: Callable[[], list[card_types.Proposal]] | None = None
 
 
 def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
@@ -449,7 +454,7 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     def post_card(state: CardState) -> dict:
         lang = state["lang"]
         n_repairs = len(state["repairs"])
-        blocks, samples_shown = card_view.fit_card(
+        fitted = card_view.fit_card(
             state["proposals"],
             confirmation=state["confirmation"],
             repairs=state["repairs"],
@@ -461,15 +466,9 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             score=state["score"],
             samples=state["samples"],
         )
-        if state["samples"] and not samples_shown:
-            print(
-                f"[card] 확인 표본 {len(state['samples'])}건을 뺐다 — 카드가 크기 예산 "
-                f"{card_view.CARD_CHARS_BUDGET}자(또는 블록 상한) 밖",
-                file=sys.stderr,
-            )
-        message = collabs.send(blocks)
+        message = collabs.send(fitted.blocks)
         card_ts = message.ts
-        for sample in samples_shown:
+        for sample in fitted.samples:
             collabs.record(
                 "verdict_sample_shown",
                 {
@@ -479,6 +478,20 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
                     "card_ts": card_ts,
                 },
             )
+        left_out = fitted.report.left_out
+        collabs.record(
+            "card_fit",
+            {
+                "card_ts": card_ts,
+                "chars": fitted.report.chars,
+                "text_max": fitted.report.text_max,
+                "left_out_advice": left_out.advice,
+                "left_out_repairs": left_out.repairs,
+                "left_out_reviews": left_out.reviews,
+                "samples_asked": len(state["samples"]),
+                "samples_shown": len(fitted.samples),
+            },
+        )
         collabs.handover(
             card_press.session_name(message.channel, message.ts),
             datetime.now(UTC).isoformat(),
@@ -511,8 +524,9 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     graph.add_node("read_registers", read_registers)
     graph.add_node("cross_check", cross_check)
     graph.add_node("read_history", read_history)
-    graph.add_node("advise", advise)
-    graph.add_node("resolve", resolve)
+    replay = collabs.posted_proposals
+    graph.add_node("advise", advise if replay is None else _replay_advise(replay))
+    graph.add_node("resolve", resolve if replay is None else _replay_resolve)
     graph.add_node("post_card", post_card)
     graph.add_edge(START, "read_repairs")
     graph.add_edge("read_repairs", "read_proposed")
@@ -523,6 +537,23 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
     graph.add_edge("advise", "resolve")
     graph.add_edge("resolve", "post_card")
     return graph.compile()
+
+
+def _replay_advise(posted: Callable[[], list[card_types.Proposal]]) -> Callable[[CardState], dict]:
+    def advise(_: CardState) -> dict:
+        return {
+            "proposals": posted(),
+            "per_project_candidates": {},
+            "advise_stats": card_types.AdviseStats(
+                calls=0, proposals_passed=0, not_worth=0, ungrounded=0, skipped_resting=0
+            ),
+        }
+
+    return advise
+
+
+def _replay_resolve(state: CardState) -> dict:
+    return {"proposals": state["proposals"], "suppressed_count": 0}
 
 
 def _note_texts_for_hits(
@@ -653,11 +684,65 @@ def _run_dry() -> int:
     return 0
 
 
+def _never(what: str) -> Callable[..., Any]:
+    def refuse(*_: Any) -> Any:
+        raise ValueError(f"CARD_RENDER_ONLY never calls {what}")
+
+    return refuse
+
+
+def _run_render_only() -> int:
+    """CARD_RENDER_ONLY=1: draw today's card from live reads and write nothing — no Slack, no
+    handover, no event, and no /search or model call (the advice lane is today's already-posted
+    proposals, or empty). Prints the blocks and their size as one JSON object."""
+    sent: list[list[dict]] = []
+    fit: list[dict] = []
+
+    def send(blocks: list[dict]) -> card_types.PostedCard:
+        sent.append(blocks)
+        return _dry_send(blocks)
+
+    def record(event: str, fields: dict) -> None:
+        if event == "card_fit":
+            fit.append(fields)
+
+    collabs = Collaborators(
+        fetch=card_live._live_fetch,
+        search=_never("search"),
+        read_note=card_live._live_read_note,
+        propose=_never("the model"),
+        send=send,
+        handover=_dry_handover,
+        resolve=card_live._live_resolve,
+        approved=card_live._live_approved,
+        record=record,
+        active_projects=card_live._live_active_projects,
+        past_verdicts=card_live._live_past_verdicts,
+        lang=card_advice.resolve_lang(boring_config.note_lang()),
+        repairs=card_live._live_repairs,
+        merged_yesterday=card_live._live_merged_yesterday,
+        proposed=card_live._live_proposed,
+        held_repairs=card_live._held_repair_subjects,
+        repair_judgments=card_live._live_repair_judgments,
+        score=card_live._live_score,
+        posted_proposals=card_live._live_posted_proposals,
+    )
+    build_graph(collabs).invoke({})
+    print(
+        json.dumps(
+            {"card_chars": card_view.card_chars(sent[0]), "fit": fit[0], "blocks": sent[0]},
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
 def main() -> int:
-    if not os.environ.get("SLACK_BOT_TOKEN"):
+    render_only = bool(os.environ.get("CARD_RENDER_ONLY"))
+    if not render_only and not os.environ.get("SLACK_BOT_TOKEN"):
         print("[card] SLACK_BOT_TOKEN must be set (see .env.example)", file=sys.stderr)
         return 2
-    if not os.environ.get("SLACK_CARD_CHANNEL"):
+    if not render_only and not os.environ.get("SLACK_CARD_CHANNEL"):
         print(
             "[card] SLACK_CARD_CHANNEL must be set — the channel id the morning card posts to "
             "(see .env.example)",
@@ -673,6 +758,8 @@ def main() -> int:
         )
         return 2
 
+    if render_only:
+        return _run_render_only()
     if os.environ.get("CARD_DRY_RUN"):
         return _run_dry()
 

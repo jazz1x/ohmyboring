@@ -657,14 +657,16 @@ class GraphTests(unittest.TestCase):
 
     def test_card_proposal_and_confirmation_events_fire_for_every_row(self):
         # AC4: 3 proposals ship → 3 card_proposal events plus the existing
-        # card_confirmation — 4 record calls, none dropped or duplicated. The press-side
-        # card_verdict event is the plugin's fold of card_press.effects, tested in
-        # test_card_press (the decision table) and test_boring_card (the fold).
+        # card_confirmation and the card's card_fit — 5 record calls, none dropped or
+        # duplicated. The press-side card_verdict event is the plugin's fold of
+        # card_press.effects, tested in test_card_press (the decision table) and
+        # test_boring_card (the fold).
         self.graph.invoke({}, self.cfg)
         names = [name for name, _ in self.stubs.records]
         self.assertEqual(names.count("card_proposal"), 3)
         self.assertEqual(names.count("card_confirmation"), 1)
-        self.assertEqual(len(self.stubs.records), 4)
+        self.assertEqual(names.count("card_fit"), 1)
+        self.assertEqual(len(self.stubs.records), 5)
         proposal_fields = [fields for name, fields in self.stubs.records if name == "card_proposal"]
         self.assertEqual([p["idx"] for p in proposal_fields], [0, 1, 2])
         self.assertEqual({p["card_ts"] for p in proposal_fields}, {CARD_TS})
@@ -868,7 +870,7 @@ class GraphTests(unittest.TestCase):
             self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-send-fail"}})
         self.assertEqual(stubs.records, [])
 
-    def test_samples_over_the_budget_are_dropped_with_a_log_line_and_no_shown_record(self):
+    def test_an_over_budget_card_leaves_rows_out_keeps_the_samples_and_says_so_in_card_fit(self):
         long = "가" * 300
         reviews = [
             cc.ProposedVerdict(
@@ -886,14 +888,21 @@ class GraphTests(unittest.TestCase):
             proposed_items=reviews,
             score_reading=cc.ScoreReading(score=cc.Scored(agreed=2, compared=3), samples=[self._sample(1)]),
         )
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-score-budget"}})
+        self._build(stubs).invoke({}, {"configurable": {"thread_id": "test-score-budget"}})
         text = _blocks_text(self.sends[-1])
         self.assertIn("채점 · 세션 끝 판정", text)
-        self.assertNotIn("확인용 무작위 표본", text)
-        self.assertIn("확인 표본 1건을 뺐다", err.getvalue())
-        self.assertEqual([e for e, _ in stubs.records if e == "verdict_sample_shown"], [])
+        self.assertIn("확인용 무작위 표본", text)
+        self.assertEqual(
+            [f["note"] for e, f in stubs.records if e == "verdict_sample_shown"],
+            ["/vault/wiki/wiki-0901.md"],
+        )
+        (fit,) = [f for e, f in stubs.records if e == "card_fit"]
+        self.assertEqual(fit["card_ts"], CARD_TS)
+        self.assertEqual(fit["chars"], card_view.card_chars(self.sends[-1]))
+        self.assertLessEqual(fit["chars"], card_view.CARD_CHARS_BUDGET)
+        self.assertEqual(fit["text_max"], card_view.TEXT_FLOOR)
+        self.assertGreater(fit["left_out_advice"] + fit["left_out_repairs"] + fit["left_out_reviews"], 0)
+        self.assertEqual((fit["samples_asked"], fit["samples_shown"]), (1, 1))
 
     def test_an_unread_tally_prints_as_unreadable_and_nobody_asked_prints_nothing(self):
         failed = Stubs(score_reading=cc.ScoreReading(score=cc.ScoreUnreadable(reason="boom")))
@@ -1415,7 +1424,7 @@ class DryRunWiringTests(unittest.TestCase):
         self.assertEqual(calls, {"live_send": 0, "live_handover": 0, "live_record": 0})
         self.assertEqual(dry_calls["send"], 1)
         self.assertEqual(dry_calls["handover"], 1)
-        self.assertEqual(dry_calls["record"], 1)  # PAST_APPROVED is non-empty → one confirmation event
+        self.assertEqual(dry_calls["record"], 2)  # PAST_APPROVED is non-empty → confirmation + card_fit
 
         # AC5 telemetry: the dry-run JSON also carries the counters the contract asks the
         # executor to be able to quote back.
@@ -1425,6 +1434,96 @@ class DryRunWiringTests(unittest.TestCase):
         self.assertEqual(payload["not_worth"], 5)
         self.assertEqual(payload["ungrounded"], 0)
         self.assertEqual(len(payload["not_worth_reasons"]), 5)
+
+
+class RenderOnlyTests(unittest.TestCase):
+    """CARD_RENDER_ONLY draws a card and writes nothing: every write seam (Slack send, handover,
+    event log, the engine sink) and every measured read (/search, the model) raises if reached."""
+
+    PROPOSAL = cc.Proposal(
+        subject="f64_risk",
+        note="/vault/wiki/wiki-0900.md",
+        register="risks",
+        bottleneck="이미 올라간 병목 설명 열자 이상",
+        advice="이미 올라간 오늘 할 일 열자 이상",
+        evidence=[
+            cc.Evidence(note="/vault/wiki/wiki-0900.md", quote="근거 인용문 열두자 이상입니다", line=2)
+        ],
+    )
+
+    def _run(self, posted):
+        def forbidden(name):
+            return mock.patch.object(card_live, name, side_effect=AssertionError(f"{name} reached"))
+
+        stubs = Stubs()
+        buf = io.StringIO()
+        patches = [
+            forbidden("_live_search"),
+            forbidden("_live_record"),
+            forbidden("_live_handover"),
+            mock.patch.object(card, "_env_send", side_effect=AssertionError("Slack send reached")),
+            mock.patch.object(card, "make_propose", side_effect=AssertionError("model reached")),
+            mock.patch.object(card.boring_config, "note_lang", return_value="ko"),
+            mock.patch.object(
+                card.event_log, "append_event", side_effect=AssertionError("event sink reached")
+            ),
+            mock.patch.object(card_live, "_live_fetch", side_effect=_fetch),
+            mock.patch.object(card_live, "_live_read_note", side_effect=stubs.read_note),
+            mock.patch.object(card_live, "_live_resolve", side_effect=stubs.resolve),
+            mock.patch.object(card_live, "_live_approved", side_effect=stubs.approved),
+            mock.patch.object(card_live, "_live_active_projects", side_effect=stubs.active_projects),
+            mock.patch.object(card_live, "_live_past_verdicts", side_effect=stubs.past_verdicts),
+            mock.patch.object(card_live, "_live_proposed", side_effect=stubs.proposed),
+            mock.patch.object(card_live, "_live_score", side_effect=stubs.score),
+            mock.patch.object(
+                card_live, "_live_repairs", side_effect=lambda limit: {"groups": [], "total_groups": 0}
+            ),
+            mock.patch.object(card_live, "_live_merged_yesterday", side_effect=lambda: None),
+            mock.patch.object(card_live, "_live_repair_judgments", side_effect=lambda: {}),
+            mock.patch.object(card_live, "_held_repair_subjects", side_effect=set),
+            mock.patch.object(card_live, "_live_posted_proposals", side_effect=lambda: posted),
+        ]
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            stack.enter_context(contextlib.redirect_stdout(buf))
+            rc = card._run_render_only()
+        return rc, json.loads(buf.getvalue())
+
+    def test_it_prints_the_card_and_its_size_with_the_posted_advice_and_touches_no_write_seam(self):
+        rc, out = self._run([self.PROPOSAL])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["card_chars"], card_view.card_chars(out["blocks"]))
+        self.assertIn("이미 올라간 오늘 할 일 열자 이상", _blocks_text(out["blocks"]))
+        self.assertEqual(out["fit"]["chars"], out["card_chars"])
+
+    def test_posted_proposals_are_todays_newest_card_in_idx_order(self):
+        now = datetime.now(UTC)
+
+        def event(card_ts, idx, subject, at):
+            attrs = {
+                **card_verdicts.proposal_event_fields(
+                    self.PROPOSAL.model_copy(update={"subject": subject}), "ko", card_ts, idx
+                ),
+                "ts": at.isoformat(),
+            }
+            return {"observed_at": at.isoformat(), "attributes": attrs}
+
+        entries = [
+            event("old", 0, "어제 카드", now - timedelta(days=2)),
+            event("new", 4, "둘째", now),
+            event("new", 3, "첫째", now),
+        ]
+        with mock.patch.object(card_live, "_live_events", return_value=entries):
+            self.assertEqual([p.subject for p in card_live._live_posted_proposals()], ["첫째", "둘째"])
+        with mock.patch.object(card_live, "_live_events", return_value=entries[:1]):
+            self.assertEqual(card_live._live_posted_proposals(), [])
+
+    def test_no_posted_card_today_means_an_empty_advice_lane_not_a_model_call(self):
+        rc, out = self._run([])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("이미 올라간", _blocks_text(out["blocks"]))
+        self.assertEqual(out["blocks"][0]["text"]["text"], "☀️ 오늘 제안 0")
 
 
 class LiveFetchTests(unittest.TestCase):
