@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections.abc import Iterable
 from typing import NamedTuple, assert_never
@@ -454,6 +455,22 @@ def evidence_excerpt(reason: str) -> str:
     return text[: _unclosed_from(text)].rstrip(" ,;:·-—")
 
 
+#: 「이」 is left out: standing alone at a sentence head it is the demonstrative (「이 노트는…」).
+_PARTICLES = frozenset("은는가을를의에로와과도만")
+_SENTENCE_END = re.compile(r"(?:[.!?。]|[다요죠까음함됨임])[\"'”’)\]」』.!?。]*$")
+
+
+def _is_whole_sentence(reason: str, excerpt: str) -> bool:
+    """The excerpt is the stored sentence itself and it reads as one: nothing was trimmed by
+    evidence_excerpt, it does not open on a lowercase letter or a bare particle (the tail of
+    a longer sentence), and it ends on a terminator or a Korean closing ending. Such a
+    sentence is a quote at any length."""
+    text = " ".join(reason.split())
+    first = text.split(" ", 1)[0]
+    opens_mid_sentence = first[:1].islower() and first[:1].isascii() or first in _PARTICLES
+    return excerpt == text and not opens_mid_sentence and bool(_SENTENCE_END.search(text))
+
+
 def _review_work_line(
     review: ProposedVerdict, strings: dict[str, str], text_max: int = REVIEW_TEXT_MAX
 ) -> str:
@@ -487,7 +504,8 @@ def _review_tag_block(
     """What the agent judged, why, on which note, from which piece of work — ids stand in
     when the vault has no title or no session note. The reason is a plain line per kind; the
     scorer's own sentence rides under it as a 근거 quote only when it still reads as one
-    after evidence_excerpt (at least TEXT_FLOOR chars). A row proposed before reasons were
+    after evidence_excerpt (a whole sentence at any length, a clipped one only at TEXT_FLOOR
+    chars or more). A row proposed before reasons were
     stored shows the honest 근거 없음 line instead of inventing one. `show_work` is off for
     a row that follows another of the same session — the head of the run says it once."""
     label = note_label(review.note)
@@ -500,7 +518,7 @@ def _review_tag_block(
         strings[f"review_reason_{review.kind}"] if review.reason else strings["review_reason_none"]
     ]
     quote = evidence_excerpt(review.reason)
-    if len(quote) >= TEXT_FLOOR:
+    if quote and (_is_whole_sentence(review.reason, quote) or len(quote) >= TEXT_FLOOR):
         reason_lines.append(strings["review_evidence"].format(quote=_mrkdwn_plain(quote, text_max)))
     work_lines = [_review_work_line(review, strings, text_max)] if show_work else []
     text = "\n".join((strings[f"review_judged_{review.kind}"], *reason_lines, note_line, *work_lines))
@@ -609,6 +627,10 @@ def _scoreline_block(score: Score, strings: dict[str, str]) -> dict:
 
 #: 확인용 표본 머리 블록의 이름 — 카드에 표본이 실렸는지 그리기 밖에서 읽는 표지.
 SAMPLES_BLOCK_ID = "card:samples"
+
+#: Samples the card keeps through every give-up: one. Naming is a call only the owner can make;
+#: a sample is an optional press, so its second row is the first thing to go.
+SAMPLES_KEPT = 1
 
 
 def _samples_header_block(strings: dict[str, str]) -> dict:
@@ -876,7 +898,8 @@ def build_card(
     a zero-proposal morning must not change the card's shape.
     `score` adds the 채점 줄 right under the head lines; `samples` adds the 확인용 무작위 표본
     below the review lane, 맞아요/아니에요 only, idx slots after the reviews. The score line
-    and the samples never give way: the lanes above reserve the samples' blocks, and `caps`
+    and the first sample never give way: the lanes above reserve that sample's blocks (a
+    second one rides only in what is left under the 50-block cap), and `caps`
     (the first n rows of a lane) is how a caller makes room — what a lane left out, by cap
     or by the 50-block limit, comes back in `Built.left_out`, each counted in its overflow
     line. Button idx slots are numbered from the full lists, so a hidden row never moves
@@ -901,16 +924,20 @@ def build_card(
     if score is not None:
         blocks.append(_scoreline_block(score, strings))
 
+    reviews = list(reviews)
+    samples = list(samples)
+    sample_tail = (1 + 3 * min(len(samples), SAMPLES_KEPT)) if samples else 0
     repairs_shown = 0
     if show_lanes:
         if repairs:
             blocks.append(_lane_header_block(strings["todo_header"]))
             for ridx, repair in list(enumerate(repairs))[: caps.repairs]:
-                blocks.extend(
-                    _repair_row(
-                        ridx, n_repairs, repair, by_idx.get(ridx), repair_results.get(ridx), strings, text_max
-                    )
+                row = _repair_row(
+                    ridx, n_repairs, repair, by_idx.get(ridx), repair_results.get(ridx), strings, text_max
                 )
+                if len(blocks) + len(row) + 2 + sample_tail > block_limit:
+                    break
+                blocks.extend(row)
                 repairs_shown += 1
             if repairs_shown < n_repairs:
                 blocks.append(_overflow_block(n_repairs - repairs_shown, strings))
@@ -919,15 +946,12 @@ def build_card(
     shown = 0
     advice_shown: list[int] = []
     overflowed = False
-    reviews = list(reviews)
-    samples = list(samples)
     # the review lane below must fit inside the same 50-block cap: the advice loop
     # reserves its whole tail (header + one 3-block row per review), and the review loop
     # reserves its own overflow line — an unshown row is counted there, never dropped
     # silently. A card that filled all 50 blocks with advice rows used to push the
-    # review header past the cap. The samples' blocks are reserved the same way: they
-    # never give way.
-    sample_tail = (1 + 3 * len(samples)) if samples else 0
+    # review header past the cap. The first sample's blocks are reserved the same way: it
+    # never gives way; the second rides only in what is left.
     review_tail = ((1 + 3 * len(reviews)) if reviews else 0) + sample_tail
     for _project, indices in _project_groups(proposals):
         for idx in indices:
@@ -996,18 +1020,19 @@ def build_card(
         blocks.append(_samples_header_block(strings))
         say_work = _works_once(samples)
         for sidx, sample in enumerate(samples):
-            blocks.extend(
-                _review_row(
-                    first_slot + sidx,
-                    sample,
-                    by_idx.get(first_slot + sidx),
-                    strings,
-                    note_links,
-                    text_max,
-                    sample=True,
-                    show_work=say_work[sidx],
-                )
+            row = _review_row(
+                first_slot + sidx,
+                sample,
+                by_idx.get(first_slot + sidx),
+                strings,
+                note_links,
+                text_max,
+                sample=True,
+                show_work=say_work[sidx],
             )
+            if sidx >= SAMPLES_KEPT and len(blocks) + len(row) > block_limit:
+                break
+            blocks.extend(row)
     return Built(
         blocks,
         RowCaps(repairs=n_repairs - repairs_shown, advice=total - shown, reviews=len(reviews) - r_shown),
@@ -1041,33 +1066,36 @@ class Fitted(NamedTuple):
     report: FitReport
 
 
-def _fit_attempts(n: RowCaps) -> Iterable[tuple[int, RowCaps]]:
-    """Cheapest give-up first: shorter prose down to the floor, then rows — the advice lane's
-    bottom rows, then the repair lane's, then the review lane's. The score line and the
-    samples are never on this list."""
+def _fit_attempts(n: RowCaps, n_samples: int = 0) -> Iterable[tuple[int, RowCaps, int]]:
+    """Cheapest give-up first: shorter prose down to the floor, then the samples past the
+    first, then rows — the advice lane's bottom rows, the repair lane's, the review lane's.
+    The score line and the first sample are never on this list."""
     for text_max in TEXT_MAX_STEPS:
-        yield text_max, RowCaps()
+        yield text_max, RowCaps(), n_samples
     floor = TEXT_MAX_STEPS[-1]
+    kept = min(n_samples, SAMPLES_KEPT)
+    if kept < n_samples:
+        yield floor, RowCaps(), kept
     for k in range(n.advice - 1, -1, -1):
-        yield floor, RowCaps(advice=k)
+        yield floor, RowCaps(advice=k), kept
     for k in range(n.repairs - 1, -1, -1):
-        yield floor, RowCaps(advice=0, repairs=k)
+        yield floor, RowCaps(advice=0, repairs=k), kept
     for k in range(n.reviews - 1, -1, -1):
-        yield floor, RowCaps(advice=0, repairs=0, reviews=k)
+        yield floor, RowCaps(advice=0, repairs=0, reviews=k), kept
 
 
 def fit_card(proposals: list[Proposal], *, samples: Iterable[ProposedVerdict] = (), **kwargs) -> Fitted:
     """build_card under CARD_CHARS_BUDGET. The prose shortens to TEXT_FLOOR and no further; past
-    that, whole rows go into the lane's overflow line (counted, not dropped). The 채점 줄 and
-    the 확인 표본 stay. A card that still does not fit raises — a refused post must say why."""
+    that, the second 확인 표본 goes first, then whole rows into the lane's overflow line (counted,
+    not dropped). The 채점 줄 and the first 표본 stay. A card that still does not fit raises — a
+    refused post must say why."""
     samples = list(samples)
     reviews = list(kwargs.pop("reviews", ()))
     n = RowCaps(repairs=len(kwargs.get("repairs") or ()), advice=len(proposals), reviews=len(reviews))
     last = 0
-    for text_max, caps in _fit_attempts(n):
-        built = build_card(
-            proposals, reviews=reviews, samples=samples, text_max=text_max, caps=caps, **kwargs
-        )
+    for text_max, caps, n_samples in _fit_attempts(n, len(samples)):
+        kept = samples[:n_samples]
+        built = build_card(proposals, reviews=reviews, samples=kept, text_max=text_max, caps=caps, **kwargs)
         last = card_chars(built.blocks)
         if last <= CARD_CHARS_BUDGET:
             carried = any(block.get("block_id") == SAMPLES_BLOCK_ID for block in built.blocks)
@@ -1078,5 +1106,5 @@ def fit_card(proposals: list[Proposal], *, samples: Iterable[ProposedVerdict] = 
                 samples_shown=carried,
                 advice_shown=built.advice_shown,
             )
-            return Fitted(built.blocks, samples if carried else [], report)
+            return Fitted(built.blocks, kept if carried else [], report)
     raise ValueError(f"card is {last} chars with every row left out, over {CARD_CHARS_BUDGET}")
