@@ -765,5 +765,185 @@ class CommentParseTests(unittest.TestCase):
         self.assertEqual(effects[1].fields["comment_ids"], [7, 9])
 
 
+def _more_body(lane, user=OWNER, action_id=None):
+    return {
+        "type": "block_actions",
+        "actions": [{"action_id": action_id or f"card:more:{lane}"}],
+        "user": {"id": user},
+        "message": {"ts": CARD_TS},
+        "channel": {"id": CARD_CH},
+    }
+
+
+def _entry(ts, idx, lane, *, shown, at="2026-10-06T00:00:00+00:00", card_ts=CARD_TS, detail=None):
+    attrs = {"card_ts": card_ts, "idx": idx, "lane": lane, "value": {}, "shown": shown}
+    if detail is not None:
+        attrs["detail"] = detail
+    return {"id": ts, "observed_at": at, "attributes": attrs}
+
+
+class MoreTests(unittest.TestCase):
+    """[더보기]: the press parses to (lane, card), the left-out rows come back out of card_row
+    and the card_more 사건, and a page's records say it was sent and which rows were seen."""
+
+    def _capped(self):
+        proposals = [PROPOSAL.model_copy(update={"note": f"/vault/wiki/wiki-05{i:02d}.md"}) for i in range(3)]
+        samples = [
+            REVIEW.model_copy(update={"session_id": f"sx{i}", "note": f"/vault/wiki/wiki-08{i:02d}.md"})
+            for i in range(2)
+        ]
+        return (
+            proposals,
+            samples,
+            cv.build_card(
+                proposals,
+                repairs=[REPAIR, REPAIR.model_copy(update={"subject": "other", "variants": ["o 1", "o-1"]})],
+                repairs_total_groups=2,
+                reviews=[REVIEW],
+                samples=samples[:1],
+                samples_hidden=samples[1:],
+                caps=cv.RowCaps(repairs=1, advice=1),
+                lang="ko",
+            ),
+        )
+
+    def _entries(self, built, card_ts=CARD_TS):
+        return [
+            {"id": 100 + i, "observed_at": "2026-10-06T00:00:00+00:00", "attributes": row.fields(card_ts)}
+            for i, row in enumerate(built.rows)
+        ]
+
+    def test_a_more_press_parses_to_its_lane_and_card(self):
+        press = cp.parse_more(_more_body("advice"), OWNER)
+        self.assertEqual(press, cc.MorePress(lane="advice", user=OWNER, card_ts=CARD_TS, channel=CARD_CH))
+        self.assertTrue(cp.is_more_action(_more_body("sample")))
+        self.assertFalse(cp.is_more_action(_more_body("x", action_id="card:3:do")))
+
+    def test_a_more_press_nobody_may_make_or_no_lane_has_is_rejected(self):
+        for body in (
+            _more_body("advice", user=OTHER),
+            _more_body("nope"),
+            _more_body("x", action_id="card:more:"),
+            {**_more_body("advice"), "type": "view_submission"},
+            {**_more_body("advice"), "message": {}},
+        ):
+            self.assertIsInstance(cp.parse_more(body, OWNER), cc.Rejected, body)
+
+    def test_a_row_press_is_never_a_more_press_and_a_more_press_is_never_a_row_press(self):
+        self.assertIsInstance(cp.parse_press(_more_body("advice"), OWNER), cc.Rejected)
+        self.assertIsInstance(cp.parse_more(_more_body("x", action_id="card:3:do"), OWNER), cc.Rejected)
+
+    def test_the_left_out_rows_of_one_lane_come_back_in_idx_order_with_their_detail(self):
+        _, _, built = self._capped()
+        entries = self._entries(built)
+        got = cp.left_out_from_entries(entries, CARD_TS, "advice")
+        self.assertEqual([idx for idx, _ in got], [3, 4])
+        self.assertEqual([d["item"]["subject"] for _, d in got], ["주어", "주어"])
+        self.assertEqual([idx for idx, _ in cp.left_out_from_entries(entries, CARD_TS, "sample")], [7])
+
+    def test_rows_that_rode_other_cards_and_other_lanes_are_not_left_out_rows(self):
+        entries = [
+            _entry(1, 1, "review", shown=True),
+            _entry(2, 2, "review", shown=False, card_ts="9.0", detail={}),
+            _entry(3, 3, "advice", shown=False, detail={}),
+        ]
+        self.assertIsInstance(cp.left_out_from_entries(entries, CARD_TS, "review"), cc.RowUnread)
+        self.assertEqual(cp.left_out_from_entries(entries, CARD_TS, "advice"), [(3, {})])
+
+    def test_a_left_out_row_without_its_detail_is_unread_not_skipped(self):
+        entries = [_entry(1, 3, "advice", shown=False, detail={}), _entry(2, 4, "advice", shown=False)]
+        self.assertIsInstance(cp.left_out_from_entries(entries, CARD_TS, "advice"), cc.RowUnread)
+        self.assertIsInstance(cp.left_out_from_entries([], CARD_TS, "advice"), cc.RowUnread)
+
+    def test_the_newest_card_more_for_the_lane_says_it_was_sent(self):
+        def more(ts, at, lane="advice", card_ts=CARD_TS, n=2, new="2.0"):
+            return {
+                "id": ts,
+                "observed_at": at,
+                "attributes": {"card_ts": card_ts, "lane": lane, "ts": new, "n": n},
+            }
+
+        entries = [
+            more(1, "2026-10-06T00:00:00+00:00", new="2.0"),
+            more(2, "2026-10-06T01:00:00+00:00", new="3.0", n=1),
+        ]
+        self.assertEqual(cp.sent_from_entries(entries, CARD_TS, "advice"), cc.MoreSent(ts="3.0", n=1))
+        self.assertIsNone(cp.sent_from_entries(entries, CARD_TS, "review"))
+        self.assertIsNone(cp.sent_from_entries(entries, "9.0", "advice"))
+        self.assertIsNone(
+            cp.sent_from_entries([more(3, "2026-10-06T00:00:00+00:00", n=True)], CARD_TS, "advice")
+        )
+
+    def test_an_advice_page_writes_proposals_only_for_the_rows_it_carries_and_hands_over_their_notes(self):
+        proposals, _, built = self._capped()
+        rows = cv.page_rows("advice", cp.left_out_from_entries(self._entries(built), CARD_TS, "advice"))
+        page = cv.build_page("advice", rows, lang="ko", cap=1)
+        press = cc.MorePress(lane="advice", user=OWNER, card_ts=CARD_TS, channel=CARD_CH)
+        writes = cp.more_writes(page, press, "2.0", "ko")
+        self.assertEqual([r.event for r in writes.before], ["card_more", "card_row"])
+        self.assertEqual(writes.before[0].fields, {"card_ts": CARD_TS, "lane": "advice", "ts": "2.0", "n": 1})
+        (left,) = [r.fields for r in writes.before[1:]]
+        self.assertEqual((left["card_ts"], left["idx"], left["shown"]), ("2.0", 4, False))
+        (seen,) = writes.after
+        self.assertEqual(seen.event, "card_proposal")
+        self.assertEqual(
+            (seen.fields["card_ts"], seen.fields["idx"], seen.fields["more_of"]), ("2.0", 3, CARD_TS)
+        )
+        self.assertEqual(seen.fields["note"], proposals[1].note)
+        self.assertEqual(writes.paths, card_verdicts.handover_paths([proposals[1]]))
+
+    def test_a_sample_page_writes_verdict_sample_shown_for_its_rows_and_a_repair_page_writes_no_seen_record(
+        self,
+    ):
+        _, samples, built = self._capped()
+        entries = self._entries(built)
+        sample_page = cv.fit_page(
+            "sample", cv.page_rows("sample", cp.left_out_from_entries(entries, CARD_TS, "sample")), lang="ko"
+        )
+        press = cc.MorePress(lane="sample", user=OWNER, card_ts=CARD_TS, channel=CARD_CH)
+        writes = cp.more_writes(sample_page, press, "2.0", "ko")
+        shown = [r for r in writes.before if r.event == "verdict_sample_shown"]
+        self.assertEqual([r.fields["session_id"] for r in shown], ["sx1"])
+        self.assertEqual(shown[0].fields["card_ts"], "2.0")
+        self.assertEqual((writes.after, writes.paths), ([], []))
+        repair_page = cv.fit_page(
+            "repair", cv.page_rows("repair", cp.left_out_from_entries(entries, CARD_TS, "repair")), lang="ko"
+        )
+        repair = cp.more_writes(
+            repair_page,
+            cc.MorePress(lane="repair", user=OWNER, card_ts=CARD_TS, channel=CARD_CH),
+            "2.0",
+            "ko",
+        )
+        self.assertEqual([r.event for r in repair.before], ["card_more", "card_row"])
+        self.assertEqual((repair.after, repair.paths), ([], []))
+        self.assertEqual(repair.before[1].fields["shown"], True)
+
+    def test_a_page_row_reads_back_through_the_same_path_as_a_first_card_row(self):
+        _, _, built = self._capped()
+        entries = self._entries(built)
+        review_page = cv.fit_page(
+            "review",
+            cv.page_rows("review", [(5, {"item": REVIEW.model_dump(), "pos": 0, "total": 1})]),
+            lang="ko",
+        )
+        writes = cp.more_writes(
+            review_page,
+            cc.MorePress(lane="review", user=OWNER, card_ts=CARD_TS, channel=CARD_CH),
+            "2.0",
+            "ko",
+        )
+        page_entries = [
+            {"id": i, "observed_at": "2026-10-06T00:00:00+00:00", "attributes": r.fields}
+            for i, r in enumerate(writes.before)
+            if r.event == "card_row"
+        ]
+        value = cp.row_from_entries(page_entries, "2.0", 5)
+        self.assertEqual(
+            value, {"lane": "review", "session": "sess-agent-1", "kind": "used", "note": "wiki-0700"}
+        )
+        self.assertIsInstance(cp.row_from_entries(entries, "2.0", 5), cc.RowUnread)
+
+
 if __name__ == "__main__":
     unittest.main()

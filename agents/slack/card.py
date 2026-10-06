@@ -24,7 +24,9 @@ the last 7 days or was shown but never judged in the last 3 days (`card_verdicts
 sends the Block Kit card (repair rows above the advice rows, each grouped and labeled its own
 way), records a card_proposal event per advice row the card showed (plus card_fit, and a card_row per
 repair or review row it showed — those rows' buttons carry only their action_id, and a press or a
-💬 코멘트 reads the row's values back by (card_ts, idx)), and ends the run. The verdict's
+💬 코멘트 reads the row's values back by (card_ts, idx). A row it left out gets a card_row too, shown
+False with the whole row in `detail`, and nothing else: it is seen only when the lane's [더보기]
+sends it — see the boring-card plugin), and ends the run. The verdict's
 idx spans all three lanes, repair rows first, then advice rows, then the review rows; the
 button press carrying it never reaches this process — hermes owns the only socket (wiki-2049)
 and its boring-card plugin answers the press: card_press.parse_press parses it,
@@ -474,19 +476,9 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             # The buttons carry only their action_id; every press and comment reads this
             # row back by (card_ts, idx). Written first: the card is answerable the moment it
             # is posted, so the sooner this lands the shorter the window a press cannot read it.
-            collabs.record(
-                "card_row", {"card_ts": card_ts, "idx": row.idx, "lane": row.lane, "value": row.value}
-            )
+            collabs.record("card_row", row.fields(card_ts))
         for sample in fitted.samples:
-            collabs.record(
-                "verdict_sample_shown",
-                {
-                    "session_id": sample.session_id,
-                    "note": sample.note,
-                    "proposed_kind": sample.kind,
-                    "card_ts": card_ts,
-                },
-            )
+            collabs.record("verdict_sample_shown", card_verdicts.sample_shown_fields(sample, card_ts))
         left_out = fitted.report.left_out
         collabs.record(
             "card_fit",
@@ -708,6 +700,7 @@ def _run_render_only() -> int:
     proposals, or empty). Prints the blocks and their size as one JSON object."""
     sent: list[list[dict]] = []
     fit: list[dict] = []
+    left_out: list[dict] = []
 
     def send(blocks: list[dict]) -> card_types.PostedCard:
         sent.append(blocks)
@@ -716,6 +709,8 @@ def _run_render_only() -> int:
     def record(event: str, fields: dict) -> None:
         if event == "card_fit":
             fit.append(fields)
+        if event == "card_row" and fields["shown"] is False:
+            left_out.append({"idx": fields["idx"], "lane": fields["lane"]})
 
     collabs = Collaborators(
         fetch=card_live._live_fetch,
@@ -741,7 +736,12 @@ def _run_render_only() -> int:
     build_graph(collabs).invoke({})
     print(
         json.dumps(
-            {"card_chars": card_view.card_chars(sent[0]), "fit": fit[0], "blocks": sent[0]},
+            {
+                "card_chars": card_view.card_chars(sent[0]),
+                "fit": fit[0],
+                "left_out_rows": left_out,
+                "blocks": sent[0],
+            },
             ensure_ascii=False,
         )
     )

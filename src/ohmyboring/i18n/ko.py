@@ -14,6 +14,8 @@ STRINGS: dict[str, str] = {
     "confirmation_line": "지난 승인 {total} · 했다 {done} · 아직 {pending}",
     "confirmation_unknown": " · 확인불가 {unknown}",
     "overflow_line": "+{n}건 더 있음 (카드 상한)",
+    "more_button": "더보기",
+    "more_sent": "↓ 이어서 보냈어요 ({n}건)",
     "todo_header": "오늘 할 일",
     "advice_header": "짚어 둔 것",
     "repairs_headline": "남은 묶음 {remaining}",

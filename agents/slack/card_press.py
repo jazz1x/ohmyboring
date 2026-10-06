@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+from typing import NamedTuple
 
 import card_types
 import card_verdicts
@@ -31,9 +32,13 @@ from card_types import (
     COMMENT_CALLBACK_ID,
     COMMENT_MAX_CHARS,
     DELEGATE,
+    MORE_ACTION_PREFIX,
+    MORE_LANES,
     AdvicePress,
     CommentOpen,
     CommentSubmit,
+    MorePress,
+    MoreSent,
     NeedsRow,
     OwnerComment,
     Press,
@@ -257,6 +262,131 @@ def row_from_entries(entries: list[dict], card_ts: str, idx: int) -> dict | RowU
     if not isinstance(value, dict):
         return RowUnread(reason=f"card_row 의 value 가 객체가 아니다: card_ts={card_ts} idx={idx}")
     return value
+
+
+def is_more_action(payload: dict) -> bool:
+    """Whether a block_actions payload is a [더보기] press — by its action_id's prefix."""
+    actions = payload.get("actions")
+    first = actions[0] if isinstance(actions, list) and actions else None
+    action_id = first.get("action_id") if isinstance(first, dict) else None
+    return isinstance(action_id, str) and action_id.startswith(MORE_ACTION_PREFIX)
+
+
+def parse_more(payload: dict, owner_id: str | None) -> MorePress | Rejected:
+    """A [더보기] press in, which lane of which card out — or Rejected. The button carries no
+    value: the left-out rows are read back by (card_ts, lane)."""
+    if payload.get("type") != "block_actions":
+        return Rejected(reason="not block_actions")
+    actions = payload.get("actions")
+    if not isinstance(actions, list) or len(actions) != 1 or not isinstance(actions[0], dict):
+        return Rejected(reason="not exactly one action")
+    action_id = str(actions[0].get("action_id"))
+    lane = action_id.removeprefix(MORE_ACTION_PREFIX)
+    if lane == action_id or lane not in MORE_LANES:
+        return Rejected(reason=f"unknown action_id {action_id!r}")
+    user = _owner_user(payload, owner_id)
+    if isinstance(user, Rejected):
+        return user
+    where = _card_where(payload)
+    if isinstance(where, Rejected):
+        return where
+    return MorePress(lane=lane, user=user, card_ts=where[0], channel=where[1])
+
+
+def _newest_by_idx(entries: list[dict], card_ts: str, lane: str) -> dict[int, dict]:
+    newest: dict[int, dict] = {}
+    for entry in entries:
+        attrs = entry.get("attributes") if isinstance(entry, dict) else None
+        if not isinstance(attrs, dict) or attrs.get("card_ts") != card_ts or attrs.get("lane") != lane:
+            continue
+        idx = attrs.get("idx")
+        if isinstance(idx, int) and (
+            idx not in newest or str(entry.get("observed_at")) >= str(newest[idx].get("observed_at"))
+        ):
+            newest[idx] = entry
+    return newest
+
+
+def left_out_from_entries(entries: list[dict], card_ts: str, lane: str) -> list[tuple[int, dict]] | RowUnread:
+    """The rows `lane` of the card at `card_ts` left out, as (idx, detail) in idx order, out of
+    card_row /events entries — only rows written with shown False. None found, or one without
+    its detail, is RowUnread: the press shows the failure and can be pressed again."""
+    left = [
+        (idx, entry["attributes"])
+        for idx, entry in sorted(_newest_by_idx(entries, card_ts, lane).items())
+        if entry["attributes"].get("shown") is False
+    ]
+    if not left:
+        return RowUnread(reason=f"넘긴 줄이 없다: card_ts={card_ts} lane={lane}")
+    if not all(isinstance(attrs.get("detail"), dict) for _, attrs in left):
+        return RowUnread(reason=f"넘긴 줄에 detail 이 없다: card_ts={card_ts} lane={lane}")
+    return [(idx, attrs["detail"]) for idx, attrs in left]
+
+
+def sent_from_entries(entries: list[dict], card_ts: str, lane: str) -> MoreSent | None:
+    """The card_more 사건 for (card_ts, lane), when that lane was already continued — the
+    newest one. A 사건 whose ts or n is not what the writer wrote is not a sent record."""
+    found = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and isinstance(entry.get("attributes"), dict)
+        and entry["attributes"].get("card_ts") == card_ts
+        and entry["attributes"].get("lane") == lane
+    ]
+    if not found:
+        return None
+    attrs = max(found, key=lambda entry: str(entry.get("observed_at")))["attributes"]
+    ts, n = attrs.get("ts"), attrs.get("n")
+    if not isinstance(ts, str) or not ts or not isinstance(n, int) or isinstance(n, bool):
+        return None
+    return MoreSent(ts=ts, n=n)
+
+
+class MoreWrites(NamedTuple):
+    """Everything a continued page leaves behind, in the order it is written: `before` (what
+    makes the page answerable and the lane's \"already sent\" answer), the handover's note
+    paths (empty unless the page carried 조언 rows), then `after` (the records that say its
+    rows were seen — a row not on the page has none)."""
+
+    before: list[card_types.Record]
+    paths: list[str]
+    after: list[card_types.Record]
+
+
+def more_writes(page: card_view.Page, press: MorePress, new_ts: str, lang: str) -> MoreWrites:
+    """The records one [더보기] page writes once it is posted at `new_ts`. The rows it carries
+    are \"seen\" from this moment — and only these: the rows it leaves for a further
+    [더보기] get card_row (shown False) and nothing that says they were seen."""
+    rec = card_types.Record
+    before = [
+        rec(
+            event="card_more",
+            fields={"card_ts": press.card_ts, "lane": press.lane, "ts": new_ts, "n": len(page.shown)},
+        ),
+        *(rec(event="card_row", fields=row.fields(new_ts)) for row in page.rows),
+    ]
+    after: list[card_types.Record] = []
+    paths: list[str] = []
+    if press.lane == "advice":
+        proposals = [row.item for row in page.shown]
+        paths = card_verdicts.handover_paths(proposals)
+        after = [
+            rec(
+                event="card_proposal",
+                fields={
+                    **card_verdicts.proposal_event_fields(row.item, lang, new_ts, row.idx),
+                    "more_of": press.card_ts,
+                },
+            )
+            for row in page.shown
+        ]
+    if press.lane == "sample":
+        before += [
+            rec(event="verdict_sample_shown", fields=card_verdicts.sample_shown_fields(row.item, new_ts))
+            for row in page.shown
+        ]
+    return MoreWrites(before, paths, after)
 
 
 def comment_fields(submit: CommentSubmit, row: dict) -> dict | Rejected:

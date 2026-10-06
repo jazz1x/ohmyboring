@@ -29,6 +29,11 @@ def _blocks_text(blocks) -> str:
     return json.dumps(blocks, ensure_ascii=False)
 
 
+def _overflows(blocks) -> list[dict]:
+    """The lanes' 「N건 더 있음」 lines — a section with the lane's one [더보기] accessory."""
+    return [b for b in blocks if b["type"] == "section" and b.get("block_id", "").startswith("card:more:")]
+
+
 class BuildBlocksTests(unittest.TestCase):
     def setUp(self):
         self.proposals = [
@@ -362,8 +367,8 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertLessEqual(len(blocks), cv.BLOCK_LIMIT)
         shown = len([b for b in blocks if b["type"] == "actions"])
         self.assertLess(shown, 12)
-        overflow = next(b for b in blocks if b["type"] == "context" and "더 있음" in _blocks_text([b]))
-        self.assertIn(str(12 - shown), overflow["elements"][0]["text"])
+        (overflow,) = _overflows(blocks)
+        self.assertIn(str(12 - shown), overflow["text"]["text"])
 
     def test_repair_lane_sits_above_the_advice_lane_and_shares_its_idx_space(self):
         # AC6: a mutant moving 「짚어 둔 것」 ahead of the repair rows, or one that leaves the
@@ -704,11 +709,7 @@ class CardV2ShapeTests(unittest.TestCase):
         review_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 5]
         self.assertEqual(len(advice_rows), 7)
         self.assertEqual(len(review_rows), 3)
-        overflows = [
-            b["elements"][0]["text"]
-            for b in blocks
-            if b["type"] == "context" and "더 있음" in _blocks_text([b])
-        ]
+        overflows = [b["text"]["text"] for b in _overflows(blocks)]
         self.assertEqual(overflows, ["+5건 더 있음 (카드 상한)"])
         # shown advice rows + the overflow count == the lane's of-total: nothing double-
         # counted, nothing lost
@@ -733,11 +734,7 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertIn("에이전트가 가른 것", _blocks_text(blocks_full))
         review_rows_full = [b for b in blocks_full if b["type"] == "actions" and len(b["elements"]) == 5]
         self.assertEqual(len(review_rows_full), 1)
-        overflows_full = [
-            b["elements"][0]["text"]
-            for b in blocks_full
-            if b["type"] == "context" and "더 있음" in _blocks_text([b])
-        ]
+        overflows_full = [b["text"]["text"] for b in _overflows(blocks_full)]
         self.assertEqual(
             overflows_full,
             ["+1건 더 있음 (카드 상한)", "+2건 더 있음 (카드 상한)"],
@@ -922,7 +919,7 @@ class CardBudgetTests(unittest.TestCase):
         reviews, samples = self._tight(5)
         floor = dict(reviews=reviews, lang="ko", text_max=cv.TEXT_FLOOR)
         both = cv.card_chars(cv.build_blocks([], samples=samples, **floor))
-        one = cv.card_chars(cv.build_blocks([], samples=samples[:1], **floor))
+        one = cv.card_chars(cv.build_blocks([], samples=samples[:1], samples_hidden=samples[1:], **floor))
         self.assertLess(one, both)
         orig = cv.CARD_CHARS_BUDGET
         cv.CARD_CHARS_BUDGET = one
@@ -1548,7 +1545,9 @@ class CommentRowTests(unittest.TestCase):
             lang="ko",
             caps=cv.RowCaps(repairs=0, reviews=0),
         )
-        self.assertEqual(capped.rows, ())
+        self.assertEqual(
+            [(r.idx, r.lane, r.shown) for r in capped.rows], [(0, "repair", False), (2, "review", False)]
+        )
 
     def test_a_received_comment_shows_above_the_buttons_which_stay(self):
         blocks = self._built().blocks
@@ -1587,6 +1586,184 @@ class CommentRowTests(unittest.TestCase):
         status, actions = cv.row_progress(blocks, 2, failed, lang="ko")
         self.assertEqual(status["elements"][0]["text"], "✕ 실패 — 줄 정보를 못 읽었어요")
         self.assertEqual(actions["elements"][-1]["action_id"], "card:2:comment")
+
+
+class MorePageTests(unittest.TestCase):
+    """[더보기]: every lane that left rows out has one button with no value, the left-out rows
+    stay whole in card_row, and the next page draws them with the card's own row functions."""
+
+    def _material(self):
+        proposals = [
+            cc.Proposal(
+                subject=f"주어 {i}",
+                note=f"/vault/wiki/wiki-{500 + i}.md",
+                register="stalled",
+                bottleneck=f"병목 문장 열자 이상입니다 {i}",
+                advice=f"조언 문장 열자 이상입니다 {i}",
+                evidence=[
+                    cc.Evidence(
+                        note=f"/vault/wiki/wiki-{500 + i}.md", quote="근거 인용문 열두자 이상", line=i + 1
+                    )
+                ],
+            )
+            for i in range(3)
+        ]
+        repairs = [
+            cc.Repair(subject=f"split-{i}", variants=[f"split {i}", f"split-{i}"], rows=10 + i, notes=2)
+            for i in range(2)
+        ]
+        reviews = [
+            cc.ProposedVerdict(
+                session_id=f"sr{i}", note=f"/vault/wiki/wiki-07{i:02d}.md", kind="used", at=f"t-{i}"
+            )
+            for i in range(3)
+        ]
+        samples = [
+            cc.ProposedVerdict(
+                session_id=f"sx{i}", note=f"/vault/wiki/wiki-08{i:02d}.md", kind="used", at=f"u-{i}"
+            )
+            for i in range(2)
+        ]
+        return proposals, repairs, reviews, samples
+
+    def _cards(self):
+        proposals, repairs, reviews, samples = self._material()
+        kwargs = dict(repairs=repairs, repairs_total_groups=2, reviews=reviews, lang="ko")
+        full = cv.build_card(proposals, samples=samples, **kwargs)
+        capped = cv.build_card(
+            proposals,
+            samples=samples[:1],
+            samples_hidden=samples[1:],
+            caps=cv.RowCaps(repairs=1, advice=1, reviews=2),
+            **kwargs,
+        )
+        return full, capped
+
+    def _left(self, built):
+        return [r for r in built.rows if not r.shown]
+
+    def test_each_lane_that_left_rows_out_has_one_button_without_a_value(self):
+        _, capped = self._cards()
+        lines = [b for b in capped.blocks if b["type"] == "section" and "accessory" in b]
+        self.assertEqual(
+            [b["accessory"]["action_id"] for b in lines],
+            ["card:more:repair", "card:more:advice", "card:more:review", "card:more:sample"],
+        )
+        self.assertTrue(all("value" not in b["accessory"] for b in lines))
+        self.assertTrue(all(b["accessory"]["text"]["text"] == "더보기" for b in lines))
+        self.assertEqual(
+            [b["text"]["text"] for b in lines],
+            [
+                "+1건 더 있음 (카드 상한)",
+                "+2건 더 있음 (카드 상한)",
+                "+1건 더 있음 (카드 상한)",
+                "+1건 더 있음 (카드 상한)",
+            ],
+        )
+
+    def test_a_card_that_left_nothing_out_has_no_more_button(self):
+        full, _ = self._cards()
+        self.assertFalse([b for b in full.blocks if "accessory" in b])
+        self.assertFalse(self._left(full))
+
+    def test_every_row_left_out_is_kept_whole_in_card_row_at_its_own_idx(self):
+        _, capped = self._cards()
+        left = self._left(capped)
+        # idx space: repairs 0-1, advice 2-4, reviews 5-7, samples 8-9
+        self.assertEqual(
+            [(r.idx, r.lane) for r in left],
+            [(1, "repair"), (3, "advice"), (4, "advice"), (7, "review"), (9, "sample")],
+        )
+        self.assertTrue(all(r.detail["item"] and "pos" in r.detail and "total" in r.detail for r in left))
+        self.assertEqual(
+            [r.detail["item"]["session_id"] for r in left if r.lane in ("review", "sample")], ["sr2", "sx1"]
+        )
+        # the rows that rode keep the old card_row (repair, review) and say they rode
+        rode = [r for r in capped.rows if r.shown]
+        self.assertEqual([(r.idx, r.lane) for r in rode], [(0, "repair"), (5, "review"), (6, "review")])
+        self.assertTrue(all(r.detail is None for r in rode))
+
+    def _page(self, capped, lane):
+        left = [(r.idx, r.detail) for r in capped.rows if not r.shown and r.lane == lane]
+        rows = cv.page_rows(lane, left)
+        self.assertNotIsInstance(rows, cc.Rejected)
+        return rows
+
+    def test_a_page_draws_a_left_out_row_exactly_as_the_card_would_have(self):
+        full, capped = self._cards()
+        for lane in ("repair", "advice", "review"):
+            page = cv.fit_page(lane, self._page(capped, lane), lang="ko")
+            drawn = page.blocks[1:]
+            # every block of the page's rows is a block the uncapped card has, in the same order
+            at = full.blocks.index(drawn[1]) - 1
+            self.assertEqual(full.blocks[at : at + len(drawn)], drawn, lane)
+
+    def test_a_page_keeps_the_values_the_card_kept_and_gives_the_rows_that_rode_a_card_row(self):
+        _, capped = self._cards()
+        advice = cv.fit_page("advice", self._page(capped, "advice"), lang="ko")
+        buttons = [el for b in advice.blocks if b["type"] == "actions" for el in b["elements"]]
+        self.assertEqual(
+            {el["action_id"] for el in buttons},
+            {f"card:{i}:{c}" for i in (3, 4) for c in ("do", "defer", "drop")},
+        )
+        self.assertTrue(all(json.loads(el["value"])["lane"] == "advice" for el in buttons))
+        self.assertEqual(advice.rows, ())  # advice·표본 rows carry their value; none left over
+        review = cv.fit_page("review", self._page(capped, "review"), lang="ko")
+        self.assertEqual([(r.idx, r.lane, r.shown) for r in review.rows], [(7, "review", True)])
+        buttons = [el for b in review.blocks if b["type"] == "actions" for el in b["elements"]]
+        self.assertTrue(all("value" not in el for el in buttons))
+        self.assertIn("card:7:comment", {el["action_id"] for el in buttons})
+
+    def test_a_page_that_still_overflows_gets_its_own_more_button_and_keeps_the_rest_whole(self):
+        _, capped = self._cards()
+        proposals_rows = self._page(capped, "advice")
+        page = cv.build_page("advice", proposals_rows, lang="ko", cap=1)
+        self.assertEqual(len(page.shown), 1)
+        (line,) = [b for b in page.blocks if "accessory" in b]
+        self.assertEqual(line["accessory"]["action_id"], "card:more:advice")
+        self.assertEqual(line["text"]["text"], "+1건 더 있음 (카드 상한)")
+        self.assertEqual([(r.idx, r.shown) for r in page.rows], [(4, False)])
+        self.assertEqual(page.rows[0].detail["pos"], 2)
+
+    def test_the_sample_page_draws_confirm_buttons_and_the_sample_header(self):
+        _, capped = self._cards()
+        page = cv.fit_page("sample", self._page(capped, "sample"), lang="ko")
+        self.assertEqual(page.blocks[0]["block_id"], cv.SAMPLES_BLOCK_ID)
+        buttons = [el for b in page.blocks if b["type"] == "actions" for el in b["elements"]]
+        self.assertEqual([el["action_id"] for el in buttons], ["card:9:do", "card:9:drop"])
+        self.assertEqual(json.loads(buttons[0]["value"])["sample"], "confirm")
+
+    def test_a_row_that_does_not_rebuild_is_rejected_not_skipped(self):
+        rows = cv.page_rows("review", [(7, {"item": {"session_id": "x"}, "pos": 0, "total": 1})])
+        self.assertIsInstance(rows, cc.Rejected)
+
+    def test_more_progress_settles_only_that_line(self):
+        _, capped = self._cards()
+        sent = cv.more_progress(capped.blocks, "advice", cc.MoreSent(ts="2.0", n=2), lang="ko")
+        changed = [i for i, (a, b) in enumerate(zip(capped.blocks, sent)) if a != b]
+        self.assertEqual(len(sent), len(capped.blocks))
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(sent[changed[0]]["elements"][0]["text"], "↓ 이어서 보냈어요 (2건)")
+        self.assertEqual(sent[changed[0]]["block_id"], "card:more:advice")
+        self.assertEqual(len([b for b in sent if b.get("accessory")]), 3)
+
+    def test_a_failure_goes_above_the_button_which_stays_and_repeats_without_piling_up(self):
+        _, capped = self._cards()
+        failed = cc.Failed(reason=card_i18n.STRINGS["ko"]["row_unread_reason"])
+        once = cv.more_progress(capped.blocks, "review", failed, lang="ko")
+        twice = cv.more_progress(once, "review", failed, lang="ko")
+        self.assertEqual(once, twice)
+        self.assertEqual(len(once), len(capped.blocks) + 1)
+        at = next(i for i, b in enumerate(once) if b.get("block_id") == "card:more:review:status")
+        self.assertEqual(once[at]["elements"][0]["text"], "✕ 실패 — 줄 정보를 못 읽었어요")
+        self.assertEqual(once[at + 1]["accessory"]["action_id"], "card:more:review")
+
+    def test_a_line_already_continued_or_missing_is_rejected(self):
+        _, capped = self._cards()
+        sent = cv.more_progress(capped.blocks, "advice", cc.MoreSent(ts="2.0", n=2), lang="ko")
+        failed = cc.Failed(reason="x")
+        self.assertIsInstance(cv.more_progress(sent, "advice", failed, lang="ko"), cc.Rejected)
+        self.assertIsInstance(cv.more_progress(capped.blocks, "nope", failed, lang="ko"), cc.Rejected)
 
 
 if __name__ == "__main__":

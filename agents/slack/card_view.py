@@ -48,6 +48,7 @@ from card_types import (  # noqa: E402
     COMMENT_BLOCK_ID,
     COMMENT_CALLBACK_ID,
     COMMENT_MAX_CHARS,
+    MORE_ACTION_PREFIX,
     SAMPLE_CONFIRM,
     ButtonVerdict,
     CardRow,
@@ -55,6 +56,7 @@ from card_types import (  # noqa: E402
     Done,
     Evidence,
     Failed,
+    MoreSent,
     Outcome,
     Pending,
     Press,
@@ -558,9 +560,7 @@ def _review_actions_block(
     # 아무 흔적 없는 보류다.
     if sample:
         # 표본 줄은 값을 자기 버튼에 그대로 들고, 코멘트 단추도 없다 — 오너 표본 계약은 그대로다.
-        value = _lane_value(
-            "review", {**_review_row_data(review), "sample": SAMPLE_CONFIRM}, note=review.note
-        )
+        value = _button_value(_sample_row_value(review))
         elements = []
         for choice in SAMPLE_CHOICES:
             button = _bare_button(idx, choice, strings[f"review_button_{choice}"])
@@ -584,6 +584,28 @@ def _review_row_data(review: ProposedVerdict) -> dict:
 
 def _review_row_value(review: ProposedVerdict) -> dict:
     return _lane_data("review", _review_row_data(review), note=review.note)
+
+
+def _sample_row_value(review: ProposedVerdict) -> dict:
+    return _lane_data("review", {**_review_row_data(review), "sample": SAMPLE_CONFIRM}, note=review.note)
+
+
+def _advice_row_value(proposal: Proposal) -> dict:
+    return _lane_data("advice", {}, note=proposal.note)
+
+
+def _left_out_row(
+    idx: int, lane: str, value: dict, item: Proposal | Repair | ProposedVerdict, pos: int, total: int
+) -> CardRow:
+    """A row the card left out, kept whole: the [더보기] page draws it from this alone.
+    `pos`/`total` are where the row sat in its lane — the 「k/N」 tag."""
+    return CardRow(
+        idx=idx,
+        lane=lane,
+        value=value,
+        shown=False,
+        detail={"item": item.model_dump(by_alias=True), "pos": pos, "total": total},
+    )
 
 
 def _review_verdict_block(review: ProposedVerdict, verdict: ButtonVerdict, strings: dict[str, str]) -> dict:
@@ -920,6 +942,7 @@ class Built(NamedTuple):
     left_out: RowCaps
     advice_shown: tuple[int, ...] = ()
     rows: tuple[CardRow, ...] = ()
+    samples_shown: int = 0
 
 
 def build_blocks(*args, **kwargs) -> list[dict]:
@@ -943,6 +966,7 @@ def build_card(
     score: Score | None = None,
     samples: Iterable[ProposedVerdict] = (),
     caps: RowCaps = UNCAPPED,
+    samples_hidden: Iterable[ProposedVerdict] = (),
 ) -> Built:
     """Block Kit for the card: the head line (past approvals cross-checked against today's
     registers — present only when there were any), then one five-block row per proposal,
@@ -974,8 +998,10 @@ def build_card(
     second one rides only in what is left under the 50-block cap), and `caps`
     (the first n rows of a lane) is how a caller makes room — what a lane left out, by cap
     or by the 50-block limit, comes back in `Built.left_out`, each counted in its overflow
-    line. Button idx slots are numbered from the full lists, so a hidden row never moves
-    another row's idx."""
+    line, which carries the lane's one [더보기] button. Button idx slots are numbered from
+    the full lists, so a hidden row never moves another row's idx. Every row left out comes
+    back in `Built.rows` as a card_row with `shown` False and the whole row in `detail`;
+    `samples_hidden` is the 표본 the caller already dropped before asking."""
     strings = card_i18n.STRINGS[lang]
     register_labels = card_i18n.REGISTER_LABELS[lang]
     repair_results = repair_results or {}
@@ -998,7 +1024,9 @@ def build_card(
 
     reviews = list(reviews)
     samples = list(samples)
-    sample_tail = (1 + 3 * min(len(samples), SAMPLES_KEPT)) if samples else 0
+    samples_hidden = list(samples_hidden)
+    sample_more = 1 if samples_hidden or len(samples) > SAMPLES_KEPT else 0
+    sample_tail = (1 + 3 * min(len(samples), SAMPLES_KEPT) + sample_more) if samples else 0
     repairs_shown = 0
     card_rows: list[CardRow] = []
     if show_lanes:
@@ -1014,7 +1042,18 @@ def build_card(
                 card_rows.append(CardRow(idx=ridx, lane="repair", value=_repair_row_value(repair)))
                 repairs_shown += 1
             if repairs_shown < n_repairs:
-                blocks.append(_overflow_block(n_repairs - repairs_shown, strings))
+                blocks.append(_overflow_block(n_repairs - repairs_shown, strings, "repair"))
+                card_rows.extend(
+                    _left_out_row(
+                        ridx,
+                        "repair",
+                        _repair_row_value(repairs[ridx]),
+                        repairs[ridx],
+                        pos=ridx,
+                        total=n_repairs,
+                    )
+                    for ridx in range(repairs_shown, n_repairs)
+                )
         blocks.append(_lane_header_block(strings["advice_header"]))
 
     shown = 0
@@ -1056,7 +1095,19 @@ def build_card(
             break
 
     if overflowed:
-        blocks.append(_overflow_block(total - shown, strings))
+        blocks.append(_overflow_block(total - shown, strings, "advice"))
+        card_rows.extend(
+            _left_out_row(
+                n_repairs + idx,
+                "advice",
+                _advice_row_value(proposals[idx]),
+                proposals[idx],
+                pos=idx,
+                total=total,
+            )
+            for idx in range(total)
+            if idx not in advice_shown
+        )
 
     r_shown = 0
     if reviews:
@@ -1089,9 +1140,21 @@ def build_card(
             card_rows.append(CardRow(idx=n_slots + ridx, lane="review", value=_review_row_value(review)))
             r_shown += 1
         if r_overflowed:
-            blocks.append(_overflow_block(len(reviews) - r_shown, strings))
+            blocks.append(_overflow_block(len(reviews) - r_shown, strings, "review"))
+            card_rows.extend(
+                _left_out_row(
+                    n_slots + ridx,
+                    "review",
+                    _review_row_value(reviews[ridx]),
+                    reviews[ridx],
+                    ridx,
+                    len(reviews),
+                )
+                for ridx in range(r_shown, len(reviews))
+            )
+    s_shown = 0
+    first_slot = n_repairs + total + len(reviews)
     if samples and len(blocks) + sample_tail <= block_limit:
-        first_slot = n_repairs + total + len(reviews)
         blocks.append(_samples_header_block(strings))
         say_work = _works_once(samples)
         for sidx, sample in enumerate(samples):
@@ -1105,19 +1168,98 @@ def build_card(
                 sample=True,
                 show_work=say_work[sidx],
             )
-            if sidx >= SAMPLES_KEPT and len(blocks) + len(row) > block_limit:
+            more_after = 1 if sidx < len(samples) - 1 or samples_hidden else 0
+            if sidx >= SAMPLES_KEPT and len(blocks) + len(row) + more_after > block_limit:
                 break
             blocks.extend(row)
+            s_shown += 1
+    s_left = [*samples[s_shown:], *samples_hidden]
+    if s_left:
+        if s_shown:
+            blocks.append(_overflow_block(len(s_left), strings, "sample"))
+        card_rows.extend(
+            _left_out_row(
+                first_slot + s_shown + k,
+                "sample",
+                _sample_row_value(sample),
+                sample,
+                s_shown + k,
+                len(s_left) + s_shown,
+            )
+            for k, sample in enumerate(s_left)
+        )
     return Built(
         blocks,
         RowCaps(repairs=n_repairs - repairs_shown, advice=total - shown, reviews=len(reviews) - r_shown),
         tuple(advice_shown),
         tuple(card_rows),
+        s_shown,
     )
 
 
-def _overflow_block(n: int, strings: dict[str, str]) -> dict:
-    return {"type": "context", "elements": [{"type": "mrkdwn", "text": strings["overflow_line"].format(n=n)}]}
+def _more_id(lane: str) -> str:
+    return f"{MORE_ACTION_PREFIX}{lane}"
+
+
+def _overflow_block(n: int, strings: dict[str, str], lane: str) -> dict:
+    """The lane's 「N건 더 있음」 line with its one [더보기] button — a section, so the button
+    costs no block of its own. The button carries no value: the left-out rows are read back
+    by (card_ts, lane) from card_row."""
+    return {
+        "type": "section",
+        "block_id": _more_id(lane),
+        "text": {"type": "mrkdwn", "text": strings["overflow_line"].format(n=n)},
+        "accessory": {
+            "type": "button",
+            "text": {"type": "plain_text", "text": strings["more_button"], "emoji": True},
+            "action_id": _more_id(lane),
+        },
+    }
+
+
+def _more_sent_block(lane: str, n: int, strings: dict[str, str]) -> dict:
+    return {
+        "type": "context",
+        "block_id": _more_id(lane),
+        "elements": [{"type": "mrkdwn", "text": strings["more_sent"].format(n=n)}],
+    }
+
+
+def _more_status_id(lane: str) -> str:
+    return f"{_more_id(lane)}:status"
+
+
+def more_progress(
+    blocks: list[dict], lane: str, outcome: MoreSent | Failed, *, lang: str
+) -> list[dict] | Rejected:
+    """`blocks` — the message as Slack holds it now — with the lane's [더보기] line settled:
+    sent turns the line into 「↓ 이어서 보냈어요 (N건)」 (no button left); a failure puts its
+    reason above the line and keeps the button, so the owner can press again. Only that
+    block changes. A message with no such line is Rejected."""
+    strings = card_i18n.STRINGS[lang]
+    kept = [block for block in blocks if block.get("block_id") != _more_status_id(lane)]
+    at = next((i for i, block in enumerate(kept) if block.get("block_id") == _more_id(lane)), None)
+    if at is None:
+        return Rejected(reason=f"lane {lane} has no more line")
+    match outcome:
+        case MoreSent(n=n):
+            return [*kept[:at], _more_sent_block(lane, n, strings), *kept[at + 1 :]]
+        case Failed(reason=reason):
+            status = {
+                "type": "context",
+                "block_id": _more_status_id(lane),
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": strings["progress_failed"].format(reason=_mrkdwn_plain(reason)),
+                    }
+                ],
+            }
+            if kept[at]["type"] != "section":
+                return Rejected(reason=f"lane {lane} was already continued")
+            return [*kept[:at], status, *kept[at:]]
+        case _:
+            assert_never(outcome)
 
 
 def card_chars(blocks: list[dict]) -> int:
@@ -1172,7 +1314,15 @@ def fit_card(proposals: list[Proposal], *, samples: Iterable[ProposedVerdict] = 
     last = 0
     for text_max, caps, n_samples in _fit_attempts(n, len(samples)):
         kept = samples[:n_samples]
-        built = build_card(proposals, reviews=reviews, samples=kept, text_max=text_max, caps=caps, **kwargs)
+        built = build_card(
+            proposals,
+            reviews=reviews,
+            samples=kept,
+            samples_hidden=samples[n_samples:],
+            text_max=text_max,
+            caps=caps,
+            **kwargs,
+        )
         last = card_chars(built.blocks)
         if last <= CARD_CHARS_BUDGET:
             carried = any(block.get("block_id") == SAMPLES_BLOCK_ID for block in built.blocks)
@@ -1184,5 +1334,170 @@ def fit_card(proposals: list[Proposal], *, samples: Iterable[ProposedVerdict] = 
                 advice_shown=built.advice_shown,
                 rows=built.rows,
             )
-            return Fitted(built.blocks, kept if carried else [], report)
+            return Fitted(built.blocks, kept[: built.samples_shown], report)
     raise ValueError(f"card is {last} chars with every row left out, over {CARD_CHARS_BUDGET}")
+
+
+class PageRow(NamedTuple):
+    """One left-out row as the [더보기] page draws it: `idx` the button slot it always had,
+    `pos`/`total` its 「k/N」 place in its lane, `item` the row itself."""
+
+    idx: int
+    pos: int
+    total: int
+    item: Proposal | Repair | ProposedVerdict
+
+
+class Page(NamedTuple):
+    """The next message of one lane: its blocks, the rows it carries, the rows it leaves for
+    a further [더보기], and the card_row for each of them (the carried repair/review rows with
+    their values, the left-out rows whole)."""
+
+    blocks: list[dict]
+    shown: tuple[PageRow, ...]
+    left: tuple[PageRow, ...]
+    rows: tuple[CardRow, ...]
+
+
+_LANE_ITEMS: dict[str, type[Proposal] | type[Repair] | type[ProposedVerdict]] = {
+    "repair": Repair,
+    "advice": Proposal,
+    "review": ProposedVerdict,
+    "sample": ProposedVerdict,
+}
+
+
+def page_rows(lane: str, details: list[tuple[int, dict]]) -> list[PageRow] | Rejected:
+    """The left-out rows' `detail` values (with their idx) back as page rows. A detail that
+    does not rebuild is Rejected, never skipped — a lane page missing a row would hide it again."""
+    model = _LANE_ITEMS[lane]
+    out: list[PageRow] = []
+    for idx, detail in details:
+        try:
+            out.append(
+                PageRow(idx, int(detail["pos"]), int(detail["total"]), model.model_validate(detail["item"]))
+            )
+        except (KeyError, TypeError, ValueError) as e:
+            return Rejected(reason=f"{lane} row {idx} does not rebuild: {e}")
+    return out
+
+
+_LANE_TITLES = {
+    "repair": "todo_header",
+    "advice": "advice_header",
+    "review": "review_header",
+    "sample": "sample_header",
+}
+
+
+def page_title(lane: str, lang: str) -> str:
+    """The lane's own title — a page's header block, and the text its message notifies with."""
+    return card_i18n.STRINGS[lang][_LANE_TITLES[lane]]
+
+
+def _page_row_blocks(
+    lane: str,
+    row: PageRow,
+    strings: dict[str, str],
+    register_labels: dict[str, str],
+    note_links: tuple[NoteLink, ...],
+    text_max: int,
+    show_work: bool,
+) -> list[dict]:
+    match lane:
+        case "repair":
+            return _repair_row(row.idx, row.total, row.item, None, None, strings, text_max)
+        case "advice":
+            return _proposal_row(
+                row.pos,
+                row.total,
+                row.item,
+                None,
+                strings,
+                register_labels,
+                action_idx=row.idx,
+                note_links=note_links,
+            )
+        case "review":
+            return _review_row(row.idx, row.item, None, strings, note_links, text_max, show_work=show_work)
+        case "sample":
+            return _review_row(
+                row.idx, row.item, None, strings, note_links, text_max, sample=True, show_work=show_work
+            )
+        case _:
+            raise ValueError(f"no such lane {lane!r}")
+
+
+_ROW_VALUES = {
+    "repair": _repair_row_value,
+    "advice": _advice_row_value,
+    "review": _review_row_value,
+    "sample": _sample_row_value,
+}
+
+#: The lanes whose buttons carry no value — only their rows that rode have a card_row. The
+#: advice and 표본 rows still carry their value in the button, as on the first card.
+_VALUELESS_LANES = ("repair", "review")
+
+
+def _page_card_rows(lane: str, shown: Iterable[PageRow], left: Iterable[PageRow]) -> list[CardRow]:
+    value = _ROW_VALUES[lane]
+    rode = (
+        [CardRow(idx=r.idx, lane=lane, value=value(r.item)) for r in shown]
+        if lane in _VALUELESS_LANES
+        else []
+    )
+    kept = [_left_out_row(r.idx, lane, value(r.item), r.item, r.pos, r.total) for r in left]
+    return [*rode, *kept]
+
+
+def build_page(
+    lane: str,
+    rows: list[PageRow],
+    *,
+    lang: str,
+    note_links: tuple[NoteLink, ...] = (),
+    text_max: int = REVIEW_TEXT_MAX,
+    cap: int = sys.maxsize,
+    block_limit: int = BLOCK_LIMIT,
+) -> Page:
+    """The lane's next message: its header, then the rows drawn by the very functions that drew
+    them on the card, buttons and all (the same slot idx, so a press or a comment reads its
+    card_row by the new message's ts like any card's). What does not fit the block cap or
+    `cap` is counted in the lane's overflow line with its own [더보기]."""
+    strings = card_i18n.STRINGS[lang]
+    blocks = [
+        _samples_header_block(strings) if lane == "sample" else _lane_header_block(page_title(lane, lang))
+    ]
+    say_work = _works_once([row.item for row in rows]) if lane in ("review", "sample") else [True] * len(rows)
+    shown: list[PageRow] = []
+    for i, row in enumerate(rows):
+        if i >= cap:
+            break
+        segment = _page_row_blocks(
+            lane, row, strings, card_i18n.REGISTER_LABELS[lang], note_links, text_max, say_work[i]
+        )
+        more_after = 1 if i < len(rows) - 1 else 0
+        if i > 0 and len(blocks) + len(segment) + more_after > block_limit:
+            break
+        blocks.extend(segment)
+        shown.append(row)
+    left = rows[len(shown) :]
+    if left:
+        blocks.append(_overflow_block(len(left), strings, lane))
+    return Page(blocks, tuple(shown), tuple(left), tuple(_page_card_rows(lane, shown, left)))
+
+
+def fit_page(lane: str, rows: list[PageRow], *, lang: str, note_links: tuple[NoteLink, ...] = ()) -> Page:
+    """build_page under CARD_CHARS_BUDGET, giving up the way the card does: shorter prose down to
+    TEXT_FLOOR first, then rows from the bottom — never the first. A page that still does not
+    fit raises: a refused post must say why."""
+    last = 0
+    attempts = [(text_max, sys.maxsize) for text_max in TEXT_MAX_STEPS]
+    attempts += [(TEXT_MAX_STEPS[-1], k) for k in range(len(rows) - 1, 0, -1)]
+    for text_max, cap in attempts:
+        page = build_page(lane, rows, lang=lang, note_links=note_links, text_max=text_max, cap=cap)
+        last = card_chars(page.blocks)
+        if last <= CARD_CHARS_BUDGET:
+            return page
+    raise ValueError(f"{lane} page is {last} chars with one row, over {CARD_CHARS_BUDGET}")
