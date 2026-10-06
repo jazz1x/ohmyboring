@@ -3400,6 +3400,21 @@ class RecallReaderSwitchTests(_RecallTestBase, unittest.TestCase):
         self.assertEqual(shadow_call["params"]["arguments"], {"query": "그냥 검색해줘", "project": "omb"})
         self.assertEqual(event["reader"], "python")
 
+    def test_an_empty_recall_writes_no_handover_even_with_a_session_id(self):
+        self._python_impl = lambda arguments: door.Ok(
+            door.recall_answer.Recalled(door.recall_answer.NO_EXPERIENCE, "vector")
+        )
+        status, body, _ = self._recall("그냥 검색해줘", session_id="sess-1")
+        self._wait_for_event()
+        self.assertEqual((status, self._text(body)), (200, "(no experience recalled)"))
+        self.assertEqual(self.handovers, [])
+
+    def test_a_blank_session_id_writes_no_handover(self):
+        status, body, _ = self._recall("그냥 검색해줘", session_id="  ")
+        self._wait_for_event()
+        self.assertEqual((status, self._text(body)), (200, self.PYTHON_TEXT))
+        self.assertEqual(self.handovers, [])
+
     def test_python_reader_answers_from_the_door_and_the_event_says_so(self):
         status, body, _ = self._recall("그냥 검색해줘")
         event = self._wait_for_event()
