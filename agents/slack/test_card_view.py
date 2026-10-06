@@ -1455,7 +1455,7 @@ class ReadableReviewRowTests(unittest.TestCase):
     def test_a_whole_evidence_sentence_is_never_cut_but_a_clipped_quote_still_is(self):
         strings = card_i18n.STRINGS["ko"]
         whole = (
-            "이 노트의 결정은 그대로 쓰였고 소켓을 닫고 재활용하는 접근이 낡았다는 점도 끝까지 확인했습니다. "
+            "이 노트의 결정은 그대로 쓰였고 소켓을 닫고 & 재활용하는 접근이 낡았다는 점도 끝까지 확인했습니다. "
             * 2
         )
         whole = whole.strip()
@@ -1472,7 +1472,7 @@ class ReadableReviewRowTests(unittest.TestCase):
             text_max=cv.TEXT_FLOOR,
         )["text"]["text"]
         self.assertGreater(len(whole), cv.TEXT_FLOOR)
-        self.assertIn(strings["review_evidence"].format(quote=whole), shown(whole))
+        self.assertIn(strings["review_evidence"].format(quote=whole.replace("&", "&amp;")), shown(whole))
         self.assertNotIn(whole[:-1] + "…", shown(whole))
         control = shown(clipped)
         self.assertIn("근거:", control)
