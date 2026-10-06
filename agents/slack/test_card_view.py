@@ -1017,6 +1017,19 @@ class RepairJudgmentBlockTests(unittest.TestCase):
         self.assertIn("*못 가름*", text)
         self.assertIn("어느 쪽인지 못 가르겠습니다", text)
 
+    def test_a_long_reason_shows_whole_at_the_floor_but_still_escapes(self):
+        reason = "이름 철자가 갈라졌지만 같은 대상을 가리킵니다 & <근거> " * 4
+        self.assertGreater(len(reason), cv.TEXT_FLOOR)
+        repair = self._repair(reason=reason)
+        blocks = cv.build_blocks(
+            [], repairs=[repair], repairs_total_groups=1, lang="ko", text_max=cv.TEXT_FLOOR
+        )
+        text = next(b for b in blocks if b["type"] == "context" and "🤖" in _blocks_text([b]))["elements"][0][
+            "text"
+        ]
+        self.assertIn(reason.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"), text)
+        self.assertNotIn("…", text)
+
     def test_a_row_without_a_judgment_renders_unchanged(self):
         repair = cc.Repair(
             subject="foodspring-front", variants=["foodspring front", "foodspring-front"], rows=1, notes=1
@@ -1438,6 +1451,33 @@ class ReadableReviewRowTests(unittest.TestCase):
         self.assertNotIn("근거:", cv._review_tag_block(clipped_short, strings)["text"]["text"])
         long = review.model_copy(update={"reason": clipped})
         self.assertIn("근거: 「이 문장은 단어 경계에서", cv._review_tag_block(long, strings)["text"]["text"])
+
+    def test_a_whole_evidence_sentence_is_never_cut_but_a_clipped_quote_still_is(self):
+        strings = card_i18n.STRINGS["ko"]
+        whole = (
+            "이 노트의 결정은 그대로 쓰였고 소켓을 닫고 & 재활용하는 접근이 낡았다는 점도 끝까지 확인했습니다. "
+            * 2
+        )
+        whole = whole.strip()
+        clipped = (
+            "ng.md` "
+            + "이 문장은 단어 경계에서 시작해야 하고 끝도 단어 경계여야 해서 그 사이만 근거로 보입니다 " * 3
+            + "잘린낱…"
+        )
+        shown = lambda reason: cv._review_tag_block(  # noqa: E731
+            cc.ProposedVerdict(
+                session_id="s", note="/vault/wiki/wiki-1.md", kind="used", at="t", reason=reason
+            ),
+            strings,
+            text_max=cv.TEXT_FLOOR,
+        )["text"]["text"]
+        self.assertGreater(len(whole), cv.TEXT_FLOOR)
+        self.assertIn(strings["review_evidence"].format(quote=whole.replace("&", "&amp;")), shown(whole))
+        self.assertNotIn(whole[:-1] + "…", shown(whole))
+        control = shown(clipped)
+        self.assertIn("근거:", control)
+        self.assertIn("…", control)
+        self.assertNotIn("잘린낱", control)
 
     def test_only_a_sentence_with_both_ends_intact_shows_below_the_floor(self):
         strings = card_i18n.STRINGS["ko"]

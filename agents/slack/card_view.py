@@ -374,9 +374,7 @@ def _repair_judgment_block(judgment: RepairJudgment, strings: dict[str, str], te
     variants = ", ".join(f"`{v}`" for v in judgment.variants)
     text = "\n".join(
         (
-            strings["repair_judgment_line"].format(
-                verdict=label, reason=_mrkdwn_plain(judgment.reason, text_max)
-            ),
+            strings["repair_judgment_line"].format(verdict=label, reason=_escape_mrkdwn(judgment.reason)),
             strings["repair_variants_line"].format(variants=variants),
         )
     )
@@ -410,7 +408,11 @@ def _repair_row(
 def _mrkdwn_plain(text: str, limit: int = REVIEW_TEXT_MAX) -> str:
     """A vault string shown as-is in mrkdwn, cut to `limit` — one row must stay well under
     Slack's 3,000-char section limit, and the whole card under CARD_CHARS_BUDGET."""
-    return _cut_words(text, limit).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return _escape_mrkdwn(_cut_words(text, limit))
+
+
+def _escape_mrkdwn(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _cut_words(text: str, limit: int) -> str:
@@ -540,8 +542,10 @@ def _review_tag_block(
         strings[f"review_reason_{review.kind}"] if review.reason else strings["review_reason_none"]
     ]
     quote = evidence_excerpt(review.reason)
-    if quote and (_is_whole_sentence(review.reason, quote) or len(quote) >= TEXT_FLOOR):
-        reason_lines.append(strings["review_evidence"].format(quote=_mrkdwn_plain(quote, text_max)))
+    whole = bool(quote) and _is_whole_sentence(review.reason, quote)
+    if quote and (whole or len(quote) >= TEXT_FLOOR):
+        shown = _escape_mrkdwn(quote) if whole else _mrkdwn_plain(quote, text_max)
+        reason_lines.append(strings["review_evidence"].format(quote=shown))
     work_lines = [_review_work_line(review, strings, text_max)] if show_work else []
     text = "\n".join((strings[f"review_judged_{review.kind}"], *reason_lines, note_line, *work_lines))
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
