@@ -454,6 +454,12 @@ def evidence_excerpt(reason: str) -> str:
     return text[: _unclosed_from(text)].rstrip(" ,;:·-—")
 
 
+def _is_whole_sentence(reason: str, excerpt: str) -> bool:
+    """The excerpt is the stored sentence itself — nothing was clipped off either end — so it
+    reads as a quote at any length."""
+    return excerpt == " ".join(reason.split()) and not reason.rstrip().endswith("…")
+
+
 def _review_work_line(
     review: ProposedVerdict, strings: dict[str, str], text_max: int = REVIEW_TEXT_MAX
 ) -> str:
@@ -487,7 +493,7 @@ def _review_tag_block(
     """What the agent judged, why, on which note, from which piece of work — ids stand in
     when the vault has no title or no session note. The reason is a plain line per kind; the
     scorer's own sentence rides under it as a 근거 quote only when it still reads as one
-    after evidence_excerpt (at least TEXT_FLOOR chars). A row proposed before reasons were
+    after evidence_excerpt (a whole sentence at any length, a clipped one only at TEXT_FLOOR chars or more). A row proposed before reasons were
     stored shows the honest 근거 없음 line instead of inventing one. `show_work` is off for
     a row that follows another of the same session — the head of the run says it once."""
     label = note_label(review.note)
@@ -500,7 +506,7 @@ def _review_tag_block(
         strings[f"review_reason_{review.kind}"] if review.reason else strings["review_reason_none"]
     ]
     quote = evidence_excerpt(review.reason)
-    if len(quote) >= TEXT_FLOOR:
+    if quote and (_is_whole_sentence(review.reason, quote) or len(quote) >= TEXT_FLOOR):
         reason_lines.append(strings["review_evidence"].format(quote=_mrkdwn_plain(quote, text_max)))
     work_lines = [_review_work_line(review, strings, text_max)] if show_work else []
     text = "\n".join((strings[f"review_judged_{review.kind}"], *reason_lines, note_line, *work_lines))
@@ -1041,33 +1047,41 @@ class Fitted(NamedTuple):
     report: FitReport
 
 
-def _fit_attempts(n: RowCaps) -> Iterable[tuple[int, RowCaps]]:
-    """Cheapest give-up first: shorter prose down to the floor, then rows — the advice lane's
-    bottom rows, then the repair lane's, then the review lane's. The score line and the
-    samples are never on this list."""
+#: Samples the card keeps through every give-up: one. Naming is a call only the owner can make;
+#: a sample is an optional press, so its second row is the first thing to go.
+SAMPLES_KEPT = 1
+
+
+def _fit_attempts(n: RowCaps, n_samples: int = 0) -> Iterable[tuple[int, RowCaps, int]]:
+    """Cheapest give-up first: shorter prose down to the floor, then the samples past the
+    first, then rows — the advice lane's bottom rows, the repair lane's, the review lane's.
+    The score line and the first sample are never on this list."""
     for text_max in TEXT_MAX_STEPS:
-        yield text_max, RowCaps()
+        yield text_max, RowCaps(), n_samples
     floor = TEXT_MAX_STEPS[-1]
+    kept = min(n_samples, SAMPLES_KEPT)
+    if kept < n_samples:
+        yield floor, RowCaps(), kept
     for k in range(n.advice - 1, -1, -1):
-        yield floor, RowCaps(advice=k)
+        yield floor, RowCaps(advice=k), kept
     for k in range(n.repairs - 1, -1, -1):
-        yield floor, RowCaps(advice=0, repairs=k)
+        yield floor, RowCaps(advice=0, repairs=k), kept
     for k in range(n.reviews - 1, -1, -1):
-        yield floor, RowCaps(advice=0, repairs=0, reviews=k)
+        yield floor, RowCaps(advice=0, repairs=0, reviews=k), kept
 
 
 def fit_card(proposals: list[Proposal], *, samples: Iterable[ProposedVerdict] = (), **kwargs) -> Fitted:
     """build_card under CARD_CHARS_BUDGET. The prose shortens to TEXT_FLOOR and no further; past
-    that, whole rows go into the lane's overflow line (counted, not dropped). The 채점 줄 and
-    the 확인 표본 stay. A card that still does not fit raises — a refused post must say why."""
+    that, the second 확인 표본 goes first, then whole rows into the lane's overflow line (counted,
+    not dropped). The 채점 줄 and the first 표본 stay. A card that still does not fit raises — a
+    refused post must say why."""
     samples = list(samples)
     reviews = list(kwargs.pop("reviews", ()))
     n = RowCaps(repairs=len(kwargs.get("repairs") or ()), advice=len(proposals), reviews=len(reviews))
     last = 0
-    for text_max, caps in _fit_attempts(n):
-        built = build_card(
-            proposals, reviews=reviews, samples=samples, text_max=text_max, caps=caps, **kwargs
-        )
+    for text_max, caps, n_samples in _fit_attempts(n, len(samples)):
+        kept = samples[:n_samples]
+        built = build_card(proposals, reviews=reviews, samples=kept, text_max=text_max, caps=caps, **kwargs)
         last = card_chars(built.blocks)
         if last <= CARD_CHARS_BUDGET:
             carried = any(block.get("block_id") == SAMPLES_BLOCK_ID for block in built.blocks)
@@ -1078,5 +1092,5 @@ def fit_card(proposals: list[Proposal], *, samples: Iterable[ProposedVerdict] = 
                 samples_shown=carried,
                 advice_shown=built.advice_shown,
             )
-            return Fitted(built.blocks, samples if carried else [], report)
+            return Fitted(built.blocks, kept if carried else [], report)
     raise ValueError(f"card is {last} chars with every row left out, over {CARD_CHARS_BUDGET}")

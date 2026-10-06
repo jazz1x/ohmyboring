@@ -577,7 +577,7 @@ class CardV2ShapeTests(unittest.TestCase):
             note="/vault/wiki/wiki-2498.md",
             kind="contested",
             at="t-1",
-            reason="첫째 근거 문장입니다.",
+            reason="ng.md` 첫째 근거 문장 잘린낱…",
             sessions=["s1", "s2", "s3"],
             works=["proj · 09-29 · 첫 작업", "", "proj · 09-30 · 셋째 작업"],
         )
@@ -848,12 +848,13 @@ class CardBudgetTests(unittest.TestCase):
             self.assertGreaterEqual(len(line), 70, line)
             self.assertIn(re.search(r"(\S+)…", line).group(1).lstrip("「*`_"), words, line)
 
-    def test_lanes_give_up_rows_advice_first_then_repairs_then_reviews_from_the_bottom(self):
+    def test_lanes_give_up_the_second_sample_then_rows_advice_first_then_repairs_then_reviews(self):
         self.assertEqual(
-            list(cv._fit_attempts(cv.RowCaps(repairs=2, advice=2, reviews=2)))[len(cv.TEXT_MAX_STEPS) :],
+            list(cv._fit_attempts(cv.RowCaps(repairs=2, advice=2, reviews=2), 2))[len(cv.TEXT_MAX_STEPS) :],
             [
-                (cv.TEXT_FLOOR, caps)
+                (cv.TEXT_FLOOR, caps, 1)
                 for caps in (
+                    cv.RowCaps(),
                     cv.RowCaps(advice=1),
                     cv.RowCaps(advice=0),
                     cv.RowCaps(advice=0, repairs=1),
@@ -904,6 +905,36 @@ class CardBudgetTests(unittest.TestCase):
                 cv.fit_card([], reviews=self._reviews(1), lang="ko")
         finally:
             cv.CARD_CHARS_BUDGET = orig
+
+    def _tight(self, n_reviews: int):
+        reviews = self._reviews(n_reviews)
+        samples = [
+            r.model_copy(update={"session_id": f"x{i}", "note": f"/vault/wiki/wiki-{900 + i:04d}.md"})
+            for i, r in enumerate(self._reviews(2))
+        ]
+        return reviews, samples
+
+    def test_a_tight_card_gives_up_the_second_sample_before_any_review_row(self):
+        reviews, samples = self._tight(5)
+        floor = dict(reviews=reviews, lang="ko", text_max=cv.TEXT_FLOOR)
+        both = cv.card_chars(cv.build_blocks([], samples=samples, **floor))
+        one = cv.card_chars(cv.build_blocks([], samples=samples[:1], **floor))
+        self.assertLess(one, both)
+        orig = cv.CARD_CHARS_BUDGET
+        cv.CARD_CHARS_BUDGET = one
+        try:
+            fitted = cv.fit_card([], reviews=reviews, samples=samples, lang="ko")
+        finally:
+            cv.CARD_CHARS_BUDGET = orig
+        self.assertEqual(fitted.samples, samples[:1])
+        self.assertEqual(fitted.report.left_out.reviews, 0)
+        self.assertEqual(self._actions(fitted.blocks), 5 + 1)
+
+    def test_one_sample_rides_even_when_every_review_row_has_gone(self):
+        reviews, samples = self._tight(12)
+        fitted = cv.fit_card([], reviews=reviews, samples=samples, lang="ko")
+        self.assertGreater(fitted.report.left_out.reviews, 0)
+        self.assertEqual(fitted.samples, samples[:1])
 
 
 class RepairJudgmentBlockTests(unittest.TestCase):
@@ -1373,6 +1404,11 @@ class ReadableReviewRowTests(unittest.TestCase):
             reason="md` (section ch1) and ohmyboring (wiki-",
         )
         self.assertNotIn("근거:", cv._review_tag_block(review, strings)["text"]["text"])
+        whole = review.model_copy(update={"reason": "이 문장은 온전해서 짧아도 근거로 보입니다 정말로."})
+        self.assertLess(len(cv.evidence_excerpt(whole.reason)), cv.TEXT_FLOOR)
+        self.assertIn("근거: 「이 문장은 온전해서", cv._review_tag_block(whole, strings)["text"]["text"])
+        clipped_short = review.model_copy(update={"reason": "ng.md` 앞뒤가 잘린 짧은 문장 잘린낱…"})
+        self.assertNotIn("근거:", cv._review_tag_block(clipped_short, strings)["text"]["text"])
         long = review.model_copy(update={"reason": clipped})
         self.assertIn("근거: 「이 문장은 단어 경계에서", cv._review_tag_block(long, strings)["text"]["text"])
 
