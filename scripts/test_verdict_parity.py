@@ -90,7 +90,66 @@ class BatchTest(unittest.TestCase):
         self.assertGreater(len(batch), len(set(map(repr, batch))), "같은 요청 반복이 있다")
         self.assertTrue(any("/o1.md" in r.body.get("supersedes", [[]])[0] and not r.owner for r in batch))
         self.assertTrue(any(r.label.startswith("400") for r in batch))
-        self.assertIn(vp.BOOM, vp.midway_request(vp.pick_docs(self.ROWS)).body["used"])
+        self.assertIn(vp.BOOM, vp.midway_request("/p1.md", "/p2.md").body["used"])
+
+
+class ShapeBatchTest(unittest.TestCase):
+    SHAPES = vp.Shapes(
+        handed=(("session:a", ("/p1.md", "/p2.md")),),
+        inferred=(("session:b", ("/p1.md",), ("/p2.md",)),),
+        verdict_only=(("session:c", "contested", ("/p3.md",)),),
+        owner=(("session:d", ("/p4.md",), ()),),
+        supersedes=((("/p2.md"), "/p1.md", None), ("/o2.md", "/o1.md", "owner")),
+    )
+    DERIVED = vp.Derived("/o1.md", "/p1.md", "/p2.md")
+
+    def test_every_core_shape_and_surface_is_present_with_fresh_session_ids(self):
+        batch = vp.build_batch_from_shapes(self.SHAPES, self.DERIVED)
+        self.assertTrue(set(vp.CORE_SHAPES) <= set(vp.shape_counts(batch)))
+        self.assertTrue(all(n > 0 for n in vp.surface_counts(batch).values()))
+        sessions = {r.body["session_id"] for r in batch if r.body.get("session_id", " ").strip()}
+        self.assertTrue(all(s.startswith("parity-") for s in sessions), "원본 세션 id 를 안 쓴다")
+        self.assertTrue(all("session:" not in repr(r.body) for r in batch))
+
+    def test_verdict_only_hands_a_fresh_session_first_and_owner_travels_with_the_token(self):
+        batch = vp.build_batch_from_shapes(self.SHAPES, self.DERIVED)
+        labels = [r.label for r in batch]
+        self.assertLess(labels.index("verdict-only #0c hand"), labels.index("verdict-only #0c"))
+        self.assertLess(labels.index("verdict-only #0m hand"), labels.index("verdict-only #0m"))
+        owner = [r for r in batch if r.shape in ("used·contested/owner",)]
+        self.assertTrue(owner and all(r.owner for r in owner))
+        self.assertTrue(next(r for r in batch if r.label == "supersedes #1").owner)
+        self.assertFalse(next(r for r in batch if r.label == "supersedes #0").owner)
+
+    def test_repeat_and_refusal_and_validation_are_in_the_batch(self):
+        batch = vp.build_batch_from_shapes(self.SHAPES, self.DERIVED)
+        self.assertGreater(len(batch), len(set(map(repr, batch))))
+        self.assertTrue(any("(refused)" in r.label for r in batch))
+        self.assertGreaterEqual(sum(r.label.startswith("400") for r in batch), 5)
+
+    def test_pick_derived_needs_one_owner_and_two_plain(self):
+        rows = [("/o.md", "owner", 0), ("/a.md", "unknown", 0), ("/b.md", "inferred", 0)]
+        self.assertEqual(vp.pick_derived(rows), vp.Derived("/o.md", "/a.md", "/b.md"))
+        self.assertIsNone(vp.pick_derived(rows[:2]))
+
+
+class AnswersMatchTest(unittest.TestCase):
+    def a(self, status, body):
+        return vp.Answer(status, body)
+
+    def test_failure_rows_compare_shape_not_message(self):
+        engine = self.a(500, b'{"error":"db error: sqlx"}')
+        python = self.a(500, b'{"error":"connection refused"}')
+        self.assertTrue(vp.answers_match(engine, python))
+        rpc_e = self.a(200, b'{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"verdict: x"}}')
+        rpc_p = self.a(200, b'{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"verdict: y"}}')
+        self.assertTrue(vp.answers_match(rpc_e, rpc_p))
+
+    def test_validation_400_and_success_stay_byte_exact_and_a_one_sided_failure_differs(self):
+        self.assertFalse(vp.answers_match(self.a(400, b'{"error":"a"}'), self.a(400, b'{"error":"b"}')))
+        self.assertFalse(vp.answers_match(self.a(200, b'{"used":1}'), self.a(200, b'{"used":2}')))
+        self.assertFalse(vp.answers_match(self.a(500, b'{"error":"x"}'), self.a(200, b'{"used":1}')))
+        self.assertTrue(vp.answers_match(self.a(200, b'{"used":1}'), self.a(200, b'{"used":1}')))
 
 
 class DecideTest(unittest.TestCase):

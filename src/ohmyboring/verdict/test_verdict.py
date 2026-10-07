@@ -173,6 +173,23 @@ class OwnerStandingTests(unittest.TestCase):
                 self.fail(f"expected a 400 rejection, got {other!r}")
 
 
+class StoreOffTests(unittest.TestCase):
+    def test_no_store_is_the_engines_sentence_and_comes_after_the_owner_check(self):
+        deps = verdict_run.Deps(None, lambda *a, **k: None, is_owner=False, now=lambda: T0)
+        match verdict_run.consume(consumption(used=["/a.md"]).value, deps):
+            case Err(verdict_run.StoreOff(message)):
+                self.assertEqual(
+                    message,
+                    "BORING_VECTOR=off — this feature requires the vector backend (pgvector). "
+                    "Set BORING_VECTOR=on and start Postgres.",
+                )
+            case other:
+                self.fail(f"expected StoreOff, got {other!r}")
+        self.assertIsInstance(
+            verdict_run.consume(consumption(judge="owner").value, deps).error, verdict_parse.Rejected
+        )
+
+
 class SqlShapeTests(unittest.TestCase):
     """살아 있는 postgres 없이도 옮긴 규칙을 본다 — 변이 (a)(b)(c) 는 여기서도 사망."""
 

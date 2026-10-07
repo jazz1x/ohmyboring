@@ -799,8 +799,9 @@ def _verdict_writer() -> str:
 
 
 def _verdict_deps(request: Request) -> verdict_run.Deps:
+    dsn = os.environ.get("DOOR_PG_DSN")
     return verdict_run.Deps(
-        connect=lambda: psycopg.connect(os.environ["DOOR_PG_DSN"]),
+        connect=(lambda: psycopg.connect(dsn)) if dsn else None,
         append_event=_enqueue_writer_event,
         is_owner=_standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
         now=lambda: datetime.now(tz=UTC).isoformat(),
@@ -809,7 +810,7 @@ def _verdict_deps(request: Request) -> verdict_run.Deps:
 
 async def _verdict_run(
     run: Any, req: Any, request: Request
-) -> Either[Any, verdict_parse.Rejected | verdict_run.Failed]:
+) -> Either[Any, verdict_parse.Rejected | verdict_run.Failed | verdict_run.StoreOff]:
     """쓰기 길 한 바퀴 — 예상 못한 고장도 Failed 값으로(엔진 500 / -32603 과 같이)."""
     try:
         return await asyncio.to_thread(run, req, _verdict_deps(request))
@@ -818,11 +819,13 @@ async def _verdict_run(
         return Err(verdict_run.Failed(f"{type(e).__name__}: {e}"))
 
 
-def _verdict_http_failure(failure: verdict_parse.Rejected | verdict_run.Failed) -> Response:
+def _verdict_http_failure(
+    failure: verdict_parse.Rejected | verdict_run.Failed | verdict_run.StoreOff,
+) -> Response:
     match failure:
         case verdict_parse.Rejected(message, status):
             return JSONResponse({"error": message}, status_code=status)
-        case verdict_run.Failed(message):
+        case verdict_run.Failed(message) | verdict_run.StoreOff(message):
             return JSONResponse({"error": message}, status_code=500)
 
 
@@ -833,8 +836,6 @@ async def _verdict_http(path: str, data: dict, request: Request) -> Response:
             return _verdict_http_failure(rejected)
         case Ok(req):
             pass
-    if not os.environ.get("DOOR_PG_DSN"):
-        return JSONResponse({"error": "store not configured"}, status_code=503)
     match await _verdict_run(run, req, request):
         case Err(failure):
             return _verdict_http_failure(failure)
@@ -848,9 +849,9 @@ async def _verdict_mcp(request_id: Any, arguments: dict, request: Request) -> Re
             return _mcp_error(request_id, -32602, rejected.message)
         case Ok(call):
             pass
-    if not os.environ.get("DOOR_PG_DSN"):
-        return _mcp_error(request_id, -32603, "store not configured")
     match await _verdict_run(verdict_run.verdict, call, request):
+        case Err(verdict_run.StoreOff(message)):
+            return _mcp_error(request_id, -32603, message)
         case Err(failure):
             return _mcp_error(request_id, -32603, f"verdict: {failure.message}")
         case Ok(payload):

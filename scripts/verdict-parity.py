@@ -11,12 +11,22 @@ E4-5a 계약 §② (가). 켜기(E4-5b) 전에 한 번 돌린다 — CI 가 아�
 운영 DB·운영 엔진·운영 문은 모른다. 시작에 두 DSN 이 운영 DSN 과 다름을 단언하고 그 줄을 찍는다(2026-09-04
 간선 5,222건 사고) — 단언이 깨지면 아무것도 치지 않고 종료코드 2.
 
-요청 묶음은 세 면의 실제 호출 모양에서 뽑는다(경로는 사본 A 의 document 에서 읽는다 — 지어낸 경로가 아니다):
-  handover     recall_core.hand_over · card_effects._live_handover → {session_id, observed_at, paths}
-  consumption  distill_core.write_consumption_to_graph(judge=inferred, supersedes 쌍) ·
-               memory.retriever.record_verdict(verdict+judge) · card_effects._live_consumption(judge=owner + 토큰)
-  mcp.verdict  MCP tools/call verdict {session_id, verdict}
-  + 같은 요청 반복 · 검증 400 · 비오너의 오너 노트 supersedes(거절 사건 한 줄).
+요청 묶음은 운영 호출의 흔적에서 뽑는다. 이 세 면에는 요청 로그가 없고, 사본이 운영 스냅숏이라 그 간선이
+곧 호출 모양이다 — 사본 A 의 session 간선을 세션별로 묶어 모양마다 최대 --sample 건(기본 5)을 결정적으로
+(md5 순) 뽑아 다시 친다:
+  handed/NULL                → POST /handover        (세션이 건넨 경로 그대로)
+  used·contested/inferred    → POST /consumption judge=inferred (그 세션의 used·contested 목록 그대로)
+  used·contested/NULL        → 건넨 간선이 있는 세션에 verdict-only POST /consumption 과 MCP verdict
+  used·contested/owner       → POST /consumption judge=owner + 오너 토큰
+  supersedes doc→doc         → [newer, older] 쌍과 그 간선의 judge 로 POST /consumption
+  + 같은 요청 반복 · 검증 400 · 비오너의 오너 노트 supersedes(거절 사건 한 줄 — 사본의 실제 오너 노트를 겨눈
+    파생 요청) · 중간 실패.
+다시 칠 때는 새 세션 id(parity-<모양><번호>)로 친다 — 사본에 이미 있는 세션의 간선이면 두 번째 쓰기가 전부
+ON CONFLICT 로 무동작이 돼 쓰기 길을 못 잰다. verdict-only 는 새 세션에 같은 경로를 먼저 건네 둔다. supersedes
+쌍은 간선이 쌍 열쇠라 그대로 다시 쳐 「이미 있는 간선도 센다」 경로를 잰다. 지어낸 고정 묶음은
+--fixture 로만(기본 꺼짐, 경로를 사본 document 에서 읽는다):
+  handover recall_core.hand_over · card_effects._live_handover / consumption distill_core(judge=inferred) ·
+  memory.retriever.record_verdict · card_effects._live_consumption(owner + 토큰) / mcp.verdict.
 
 대조: node·edge·claim·event_log 행 수와 내용 + 응답(상태·바이트). 원래 다른 칸은 이름으로 뺀다 —
   node.label            observed_at(MCP verdict 는 now())
@@ -28,7 +38,9 @@ E4-5a 계약 §② (가). 켜기(E4-5b) 전에 한 번 돌린다 — CI 가 아�
 
 중간 실패는 묶음과 따로 친다: 두 사본에 같은 트리거(경로 하나에서 간선 쓰기를 터뜨림)를 임시로 깔고
 엔진은 반쯤 쓰고(자동 커밋) 파이썬은 0 행이어야 한다 — 의도한 차이(한 요청 = 한 트랜잭션)라 따로 적는다.
-422(serde 칸 종류) 본문은 엔진이 axum 평문이고 문은 JSON 이라 바이트가 다르다 — 상태만 대조하고 따로 적는다.
+422(serde 칸 종류) 본문은 엔진이 axum 평문이고 문은 JSON 이라 바이트가 다르다 — 상태만 대조하고 「expected
+difference」로 따로 적는다. 실패 행(HTTP 500 {"error"} · MCP -32603)은 상태·`error` 칸 존재만 대조하고 메시지
+글자는 뺀다(psycopg 대 sqlx 문구) — 검증 400 과 성공 행은 바이트 그대로다.
 
 종료코드: 0 PASS · 1 차이 있음 · 2 잰 게 아니다(DSN 단언·씨앗 불일치·장비 불통).
 """
@@ -53,6 +65,13 @@ OWNER_TOKEN_HEADER = "x-boring-owner-token"
 GHOST = "/vault/wiki/__parity_ghost__.md"
 BOOM = "/vault/wiki/__parity_boom__.md"
 SURFACES = ("handover", "consumption", "mcp.verdict")
+CORE_SHAPES = (
+    "handed/NULL",
+    "used·contested/inferred",
+    "used·contested/NULL",
+    "used·contested/owner",
+    "supersedes",
+)
 NOW_MARK = "NOW"
 OBSERVED_AT = "2026-10-07T01:02:03+09:00"
 PRODUCTION_DSN_ENVS = ("DOOR_PG_DSN", "PG_DSN", "BORING_PG_DSN", "BORING_DATABASE_URL")
@@ -70,6 +89,7 @@ EXCLUDED_COLUMNS = (
     "event_log.id",
     "event_log.observed_at",
     "event_log.time_unix_nano",
+    "응답 error 메시지 글자 (실패 행만: HTTP 5xx · MCP -32603)",
 )
 
 
@@ -163,6 +183,7 @@ class Req:
     path: str
     body: dict
     owner: bool = False
+    shape: str = ""
 
 
 def build_batch(d: Docs) -> list[Req]:
@@ -260,8 +281,8 @@ def build_batch(d: Docs) -> list[Req]:
     ]
 
 
-def midway_request(d: Docs) -> Req:
-    """경로 하나(BOOM)에서 간선 쓰기가 터지는 요청 — 앞의 d.old_a 간선과 session 노드는 이미 쓰였다."""
+def midway_request(first: str, last: str) -> Req:
+    """경로 하나(BOOM)에서 간선 쓰기가 터지는 요청 — 앞의 first 간선과 session 노드는 이미 쓰였다."""
     return Req(
         "consumption",
         "mid-way failure",
@@ -270,9 +291,202 @@ def midway_request(d: Docs) -> Req:
             "session_id": "parity-midway",
             "observed_at": OBSERVED_AT,
             "judge": "inferred",
-            "used": [d.old_a, BOOM, d.old_b],
+            "used": [first, BOOM, last],
         },
+        shape="mid-way",
     )
+
+
+# ── 운영 간선에서 뽑은 묶음 ─────────────────────────────────────────────────
+
+MAX_LIST = 200  # 엔진 상한 — 더 긴 세션 목록은 앞 200 개만 다시 친다
+
+
+@dataclass(frozen=True)
+class Shapes:
+    """사본 A 의 간선에서 읽은 호출 모양 — 세션 id 는 원본, 경로는 `doc:` 를 뗀 source_path."""
+
+    handed: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    inferred: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = ()
+    verdict_only: tuple[tuple[str, str, tuple[str, ...]], ...] = ()  # (세션, used|contested, 건넨 경로)
+    owner: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = ()
+    supersedes: tuple[tuple[str, str, str | None], ...] = ()  # (newer, older, judge)
+
+
+@dataclass(frozen=True)
+class Derived:
+    owner_doc: str
+    plain_a: str
+    plain_b: str
+
+
+def pick_derived(rows: list[tuple[str, str, int]]) -> Derived | None:
+    """파생 요청(오너 노트 거절·검증 400·중간 실패)이 겨눌 실제 문서 — 오너 하나, 비오너 둘."""
+    owners = [r[0] for r in rows if r[1] == "owner"]
+    plain = [r[0] for r in rows if r[1] != "owner"]
+    return Derived(owners[0], plain[0], plain[1]) if owners and len(plain) >= 2 else None
+
+
+def _paths(items: tuple[str, ...]) -> list[str]:
+    return list(items[:MAX_LIST])
+
+
+def _stamp(body: dict) -> dict:
+    return {"observed_at": OBSERVED_AT, **body}
+
+
+def _shape_requests(shapes: Shapes) -> list[Req]:
+    reqs: list[Req] = []
+    for i, (_, paths) in enumerate(shapes.handed):
+        body = {"session_id": f"parity-h{i}", "paths": _paths(paths)}
+        reqs.append(Req("handover", f"handed/NULL #{i}", "/handover", _stamp(body), shape="handed/NULL"))
+    for i, (_, used, contested) in enumerate(shapes.inferred):
+        body = {
+            "session_id": f"parity-i{i}",
+            "judge": "inferred",
+            "used": _paths(used),
+            "contested": _paths(contested),
+        }
+        reqs.append(
+            Req(
+                "consumption", f"inferred #{i}", "/consumption", _stamp(body), shape="used·contested/inferred"
+            )
+        )
+    for i, (_, verdict, handed) in enumerate(shapes.verdict_only):
+        for suffix, surface, path in (("c", "consumption", "/consumption"), ("m", "mcp.verdict", "/mcp")):
+            sid = f"parity-v{i}{suffix}"
+            hand = {"session_id": sid, "paths": _paths(handed)}
+            reqs.append(
+                Req(
+                    "handover",
+                    f"verdict-only #{i}{suffix} hand",
+                    "/handover",
+                    _stamp(hand),
+                    shape="handed/NULL",
+                )
+            )
+            body = {"session_id": sid, "verdict": verdict}
+            body = _stamp(body) if surface == "consumption" else body
+            reqs.append(Req(surface, f"verdict-only #{i}{suffix}", path, body, shape="used·contested/NULL"))
+    for i, (_, used, contested) in enumerate(shapes.owner):
+        body = {
+            "session_id": f"parity-o{i}",
+            "judge": "owner",
+            "used": _paths(used),
+            "contested": _paths(contested),
+        }
+        reqs.append(
+            Req(
+                "consumption",
+                f"owner #{i}",
+                "/consumption",
+                _stamp(body),
+                owner=True,
+                shape="used·contested/owner",
+            )
+        )
+    for i, (newer, older, judge) in enumerate(shapes.supersedes):
+        body = {
+            "session_id": f"parity-p{i}",
+            "supersedes": [[newer, older]],
+            **({"judge": judge} if judge else {}),
+        }
+        reqs.append(
+            Req(
+                "consumption",
+                f"supersedes #{i}",
+                "/consumption",
+                _stamp(body),
+                owner=judge == "owner",
+                shape="supersedes",
+            )
+        )
+    return reqs
+
+
+def _derived_requests(d: Derived) -> list[Req]:
+    base = {"observed_at": OBSERVED_AT}
+    return [
+        Req(
+            "consumption",
+            "non-owner supersedes owner note (refused)",
+            "/consumption",
+            {
+                **base,
+                "session_id": "parity-d1",
+                "contested": [d.plain_b],
+                "supersedes": [[d.plain_b, d.owner_doc], [d.plain_b, d.plain_a]],
+            },
+            shape="derived",
+        ),
+        Req(
+            "consumption",
+            "400 verdict + paths",
+            "/consumption",
+            {**base, "session_id": "parity-d2", "verdict": "used", "used": [d.plain_a]},
+            shape="derived",
+        ),
+        Req(
+            "consumption",
+            "400 observed_at",
+            "/consumption",
+            {"session_id": "parity-d2", "observed_at": "yesterday", "used": [d.plain_a]},
+            shape="derived",
+        ),
+        Req(
+            "consumption",
+            "400 judge owner without token",
+            "/consumption",
+            {**base, "session_id": "parity-d2", "judge": "owner", "used": [d.plain_a]},
+            shape="derived",
+        ),
+        Req(
+            "consumption",
+            "400 too many paths",
+            "/consumption",
+            {**base, "session_id": "parity-d2", "contested": [d.plain_a] * 201},
+            shape="derived",
+        ),
+        Req(
+            "handover",
+            "400 blank session",
+            "/handover",
+            {**base, "session_id": " ", "paths": [d.plain_a]},
+            shape="derived",
+        ),
+        Req("mcp.verdict", "400 missing argument", "/mcp", {"session_id": "parity-d2"}, shape="derived"),
+    ]
+
+
+def build_batch_from_shapes(shapes: Shapes, d: Derived) -> list[Req]:
+    """운영 간선 모양 + 파생 요청. 첫 요청을 한 번 더 쳐 「같은 요청 반복」을 넣는다(시도 수 카운터)."""
+    reqs = _shape_requests(shapes) + _derived_requests(d)
+    repeat = next((r for r in reqs if r.shape in ("used·contested/inferred", "handed/NULL")), None)
+    return reqs + ([repeat] if repeat is not None else [])
+
+
+def shape_counts(requests: list[Req]) -> dict[str, int]:
+    return dict(Counter(r.shape or "fixture" for r in requests))
+
+
+def failure_kind(answer: Answer) -> tuple | None:
+    """실패 행의 모양 — (http, status) 또는 (rpc, code). 실패가 아니면 None. 메시지 글자는 안 본다."""
+    try:
+        data = json.loads(answer.body)
+    except ValueError:
+        return None
+    if answer.status >= 500 and isinstance(data, dict) and "error" in data:
+        return ("http", answer.status)
+    error = data.get("error") if isinstance(data, dict) else None
+    if isinstance(error, dict) and error.get("code") == -32603:
+        return ("rpc", -32603)
+    return None
+
+
+def answers_match(engine: Answer, python: Answer) -> bool:
+    """성공·검증 400 은 바이트 그대로, 양쪽이 모두 실패 행이면 모양(상태·error 칸)만."""
+    kinds = (failure_kind(engine), failure_kind(python))
+    return kinds[0] == kinds[1] if all(kinds) else engine == python
 
 
 def as_rpc(req: Req) -> dict:
@@ -311,6 +525,7 @@ class Midway:
 class Result:
     counts: dict[str, int]
     answered: dict[str, int]
+    shapes: dict[str, int] = field(default_factory=dict)
     response_diffs: list[tuple[str, Answer, Answer]] = field(default_factory=list)
     table_diffs: dict[str, tuple[list, list]] = field(default_factory=dict)
     midway: Midway | None = None
@@ -403,6 +618,77 @@ def read_docs(dsn: str) -> list[tuple[str, str, int]]:
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(sql)
         return [(r[0], r[1], int(r[2])) for r in cur.fetchall()]
+
+
+_SESSION_SAMPLE_SQL = (
+    "SELECT src FROM edge WHERE src LIKE 'session:%%' AND kind = ANY(%s) AND {judge}"
+    " GROUP BY src ORDER BY md5(src) LIMIT %s"
+)
+_JUDGE_CLAUSES = {
+    "inferred": "judge = 'inferred'",
+    "owner": "judge = 'owner'",
+    "null": "judge IS NULL AND EXISTS (SELECT 1 FROM edge h WHERE h.src = edge.src AND h.kind = 'handed')",
+}
+
+
+def _strip(dst: str) -> str:
+    return dst.removeprefix("doc:")
+
+
+def _edge_lists(
+    cur, sessions: list[str], kinds: list[str], judge_clause: str
+) -> dict[str, dict[str, tuple[str, ...]]]:
+    cur.execute(
+        "SELECT src, kind, array_agg(DISTINCT dst ORDER BY dst) FROM edge"
+        f" WHERE src = ANY(%s) AND kind = ANY(%s) AND {judge_clause} GROUP BY src, kind",
+        (sessions, kinds),
+    )
+    out: dict[str, dict[str, tuple[str, ...]]] = {}
+    for src, kind, dsts in cur.fetchall():
+        out.setdefault(src, {})[kind] = tuple(_strip(d) for d in dsts)
+    return out
+
+
+def read_shapes(dsn: str, sample: int) -> Shapes:
+    """사본 A 의 간선을 세션별로 묶어 모양마다 최대 sample 건(md5 순 — 두 번 읽어도 같다). 읽기 전용."""
+    import psycopg
+
+    judged = ["used", "contested"]
+    with psycopg.connect(dsn, autocommit=True, options="-c default_transaction_read_only=on") as conn:
+        with conn.cursor() as cur:
+            cur.execute(_SESSION_SAMPLE_SQL.format(judge="judge IS NULL"), (["handed"], sample))
+            handed_ids = [r[0] for r in cur.fetchall()]
+            handed = _edge_lists(cur, handed_ids, ["handed"], "judge IS NULL")
+
+            def sampled(key: str) -> dict[str, dict[str, tuple[str, ...]]]:
+                clause = _JUDGE_CLAUSES[key]
+                cur.execute(_SESSION_SAMPLE_SQL.format(judge=clause), (judged, sample))
+                ids = [r[0] for r in cur.fetchall()]
+                return _edge_lists(cur, ids, judged, clause.split(" AND ")[0])
+
+            inferred, owner = sampled("inferred"), sampled("owner")
+            null_judged = sampled("null")
+            null_handed = _edge_lists(cur, sorted(null_judged), ["handed"], "judge IS NULL")
+            cur.execute(
+                "SELECT src, dst, judge FROM edge WHERE kind = 'supersedes' ORDER BY md5(src || dst) LIMIT %s",
+                (sample,),
+            )
+            pairs = [(_strip(s), _strip(d), j) for s, d, j in cur.fetchall()]
+
+    def listed(group: dict[str, dict[str, tuple[str, ...]]]) -> tuple:
+        return tuple((s, g.get("used", ()), g.get("contested", ())) for s, g in sorted(group.items()))
+
+    return Shapes(
+        handed=tuple((s, g["handed"]) for s, g in sorted(handed.items())),
+        inferred=listed(inferred),
+        verdict_only=tuple(
+            (s, "used" if "used" in g else "contested", null_handed[s]["handed"])
+            for s, g in sorted(null_judged.items())
+            if s in null_handed
+        ),
+        owner=listed(owner),
+        supersedes=tuple(pairs),
+    )
 
 
 @contextlib.contextmanager
@@ -502,30 +788,29 @@ def run_parity(args) -> tuple[Result, list[str]]:
         raise Unmeasured(
             "seed copies differ: document set (path, author, current claims) is not the same on A and B"
         )
-    docs = pick_docs(rows_a)
-    if docs is None:
-        raise Unmeasured("seed copy too small: need 2 owner notes and 4 non-owner notes")
+    batch, midway_paths = batch_for(args, rows_a)
     event_a, start_a = marks(args.dsn_a)
     event_b, start_b = marks(args.dsn_b)
     before_a, before_b = snapshot(args.dsn_a, event_a, start_a), snapshot(args.dsn_b, event_b, start_b)
     if any(Counter(before_a[name]) != Counter(before_b[name]) for name in before_a):
         raise Unmeasured("seed copies differ before the batch: node/edge/claim rows are not identical")
-    batch = build_batch(docs)
-    result = Result(counts=surface_counts(batch), answered=dict.fromkeys(SURFACES, 0))
+    result = Result(
+        counts=surface_counts(batch), answered=dict.fromkeys(SURFACES, 0), shapes=shape_counts(batch)
+    )
     with tempfile.TemporaryDirectory() as tmp:
         client = open_door(args.dsn_b, args.sink_url_b, args.owner_token, str(Path(tmp) / "events.ndjson"))
         for req in batch:
             engine = engine_answer(args.engine_url, req, args.owner_token)
             python = door_answer(client, req, args.owner_token)
             result.answered[req.surface] += 1
-            if engine != python:
+            if not answers_match(engine, python):
                 result.response_diffs.append((req.label, engine, python))
         after_a = snapshot(args.dsn_a, event_a, start_a)
         wait_for_events(args.dsn_b, event_b, len(after_a["event_log"]), args.event_wait)
         after_b = snapshot(args.dsn_b, event_b, start_b)
         result.table_diffs = {name: diff_rows(after_a[name], after_b[name]) for name in after_a}
         result.midway = run_midway(
-            args, client, docs, (event_a, start_a), (event_b, start_b), after_a, after_b
+            args, client, midway_paths, (event_a, start_a), (event_b, start_b), (after_a, after_b)
         )
         probe = Req(
             "consumption",
@@ -538,13 +823,28 @@ def run_parity(args) -> tuple[Result, list[str]]:
             door_answer(client, probe, args.owner_token),
         )
         notes.append(
-            f"expected difference (422 body): engine {engine.status} {engine.body[:70]!r} / python {python.status} {python.body[:70]!r}"
+            f"expected difference (422 serde, status-only compare, status {'same' if engine.status == python.status else 'DIFFERENT'}): engine {engine.status} {engine.body[:70]!r} / python {python.status} {python.body[:70]!r}"
         )
     return result, notes
 
 
-def run_midway(args, client, docs, mark_a, mark_b, base_a, base_b) -> Midway:
-    req = midway_request(docs)
+def batch_for(args, rows: list[tuple[str, str, int]]) -> tuple[list[Req], tuple[str, str]]:
+    """(묶음, 중간 실패가 쓸 두 문서). 기본은 사본 A 의 간선에서, --fixture 면 고정 묶음."""
+    if args.fixture:
+        docs = pick_docs(rows)
+        if docs is None:
+            raise Unmeasured("seed copy too small: need 2 owner notes and 4 non-owner notes")
+        return build_batch(docs), (docs.old_a, docs.old_b)
+    derived = pick_derived(rows)
+    if derived is None:
+        raise Unmeasured("seed copy too small: need 1 owner note and 2 non-owner notes")
+    shapes = read_shapes(args.dsn_a, args.sample)
+    return build_batch_from_shapes(shapes, derived), (derived.plain_a, derived.plain_b)
+
+
+def run_midway(args, client, paths, mark_a, mark_b, bases) -> Midway:
+    base_a, base_b = bases
+    req = midway_request(*paths)
     with boom_installed((args.dsn_a, args.dsn_b)):
         engine = engine_answer(args.engine_url, req, args.owner_token)
         python = door_answer(client, req, args.owner_token)
@@ -561,6 +861,11 @@ def render(result: Result, notes: list[str]) -> list[str]:
     lines = [
         "surface counts (requests built / answered on both sides): "
         + ", ".join(f"{s}={result.counts[s]}/{result.answered[s]}" for s in SURFACES),
+        "shape counts (requests): "
+        + ", ".join(f"{name}={n}" for name, n in sorted(result.shapes.items()))
+        + "".join(f", {name}=0 (none in copy A)" for name in CORE_SHAPES if name not in result.shapes),
+        "replayed under fresh session ids (parity-<shape><n>) so sessions already in copy A never turn a "
+        "replay into an ON CONFLICT no-op; supersedes pairs replay as-is (edge exists → attempt counted)",
         "excluded by name: " + "; ".join(EXCLUDED_COLUMNS),
     ]
     for name, (only_a, only_b) in result.table_diffs.items():
@@ -599,6 +904,12 @@ def main(argv: list[str] | None = None) -> int:
         "--owner-token",
         default="verdict-parity-token",
         help="두 엔진·문이 같이 쓰는 오너 토큰 (엔진 BORING_OWNER_TOKEN 과 같아야 한다)",
+    )
+    ap.add_argument(
+        "--sample", type=int, default=5, help="모양마다 사본 A 에서 다시 칠 실제 세션·쌍 수 (기본 5)"
+    )
+    ap.add_argument(
+        "--fixture", action="store_true", help="대체 경로: 간선에서 안 뽑고 고정 묶음을 쓴다 (기본 꺼짐)"
     )
     ap.add_argument("--event-wait", type=float, default=10.0, help="B 의 사건이 도착하길 기다리는 초")
     args = ap.parse_args(argv)

@@ -3769,9 +3769,20 @@ class VerdictWriterSwitchTests(unittest.TestCase):
         with mock.patch.object(door.verdict_run, "verdict", return_value=failed):
             wire = self.mcp(self.VERDICT).json()
         self.assertEqual(wire["error"], {"code": -32603, "message": "verdict: disk full"})
+        # 저장소 없음 — 엔진 vector_disabled(): 같은 500·같은 문장, MCP 는 prefix 없는 -32603.
         os.environ.pop("DOOR_PG_DSN")
-        self.assertEqual(self.client.post("/handover", json=self.HANDOVER).status_code, 503)
-        self.assertEqual(self.mcp(self.VERDICT).json()["error"]["code"], -32603)
+        off = (
+            "BORING_VECTOR=off — this feature requires the vector backend (pgvector). "
+            "Set BORING_VECTOR=on and start Postgres."
+        )
+        for path, body in (("/handover", self.HANDOVER), ("/consumption", self.CONSUMPTION)):
+            response = self.client.post(path, json=body)
+            self.assertEqual((response.status_code, response.json()), (500, {"error": off}), path)
+        self.assertEqual(self.mcp(self.VERDICT).json()["error"], {"code": -32603, "message": off})
+        # 검증·자격이 저장소 확인보다 먼저다(엔진 순서) — 저장소가 없어도 400.
+        refused = self.client.post("/consumption", json={**self.CONSUMPTION, "judge": "owner"})
+        self.assertEqual(refused.status_code, 400)
+        self.assertEqual(self.client.post("/consumption", json={"session_id": " "}).status_code, 422)
 
 
 if __name__ == "__main__":
