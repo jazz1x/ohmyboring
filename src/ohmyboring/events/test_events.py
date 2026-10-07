@@ -545,13 +545,13 @@ class EventsDbTests(unittest.TestCase):
             {"component": "boom", "event": "e"},
             {"component": "ok2", "event": "e"},
         ]
-        match events_run.ingest(batch, self.deps()):
+        match events_run.ingest({"events": batch}, self.deps()):
             case Err(events_run.Failed(message)):
                 self.assertIn("boom", message)
             case other:
                 self.fail(f"expected Failed, got {other!r}")
         self.assertEqual(self.q("SELECT count(*) FROM event_log;")[0][0], 0, "한 요청 = 한 트랜잭션")
-        ok = events_run.ingest([batch[0], batch[2]], self.deps())
+        ok = events_run.ingest({"events": [batch[0], batch[2]]}, self.deps())
         self.assertIsInstance(ok, Ok, "대조군: boom 이 없으면 같은 묶음이 쓰인다")
         self.assertEqual(self.q("SELECT count(*) FROM event_log;")[0][0], 2)
 

@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from psycopg.types.json import Jsonb
+
 from ohmyboring.search.redact import redact_json_value
 
 #: store.rs:2608 log_event — 칸 순서는 엔진 INSERT 그대로(id·observed_at 은 표 기본값).
@@ -187,6 +189,7 @@ def log_event(cur: Any, event: Any) -> None:
     resource = _otel_or(
         otel, "resource", {"attributes": {"service.name": component, "service.namespace": "oh-my-boring"}}
     )
+    # jsonb 칸은 dict 그대로면 cannot adapt — Jsonb 로 감싸 psycopg 3 의 직렬화에 맡긴다.
     cur.execute(
         _INSERT_SQL,
         {
@@ -204,9 +207,9 @@ def log_event(cur: Any, event: Any) -> None:
             "workflow": _text_field(event, "workflow"),
             "workflow_node": _text_field(event, "workflow_node"),
             "workflow_outcome": _text_field(event, "workflow_outcome"),
-            "body": body,
-            "attributes": attributes,
-            "resource": resource,
+            "body": Jsonb(body),
+            "attributes": Jsonb(attributes),
+            "resource": Jsonb(resource),
         },
     )
 
