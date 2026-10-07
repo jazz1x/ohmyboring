@@ -155,6 +155,16 @@ class QueryParseTests(unittest.TestCase):
             "Failed to deserialize query string: limit: number too large to fit in target type",
         )
 
+    def test_a_declared_field_twice_is_a_duplicate_field_400_and_unknown_fields_are_ignored(self):
+        # 2026-10-08 사본 엔진(:7791) 실측 문장 그대로.
+        for query, want in (
+            ("limit=1&limit=2", "Failed to deserialize query string: duplicate field `limit`"),
+            ("event=a&event=b", "Failed to deserialize query string: duplicate field `event`"),
+            ("limit=abc&limit=2", "Failed to deserialize query string: limit: invalid digit found in string"),
+        ):
+            self.assertEqual(rejected_message(events_parse.parse_event_query(query)), want, query)
+        self.assertIsInstance(events_parse.parse_event_query("foo=1&foo=2"), Ok)
+
     def test_serde_400_wording_is_rust_parse_int_display(self):
         """serde_urlencoded 는 str::parse 의 ParseIntError 문장을 그대로 낸다(de::Error::custom)."""
         for raw, want in (

@@ -27,6 +27,10 @@ _I64_MAX = 2**63 - 1
 _I32_MIN = -(2**31)
 _I32_MAX = 2**31 - 1
 
+#: serve.rs EventLogReq 의 칸 — 이 밖의 쿼리 칸은 serde 가 무시한다.
+_QUERY_FIELDS = ("limit", "component", "event", "status", "run_id", "workflow", "since_hours")
+_INT_FIELDS = {"limit": (_I64_MIN, _I64_MAX), "since_hours": (_I32_MIN, _I32_MAX)}
+
 
 def _rust_parse_int(raw: str, lo: int, hi: int) -> Either[int, str]:
     """Rust str::parse 의 정수 규약 — 양옆 공백·밑줄은 invalid digit, 빈 칸(부호만도)은 empty,
@@ -86,15 +90,21 @@ def event_batch(body: Any) -> Either[list[Any], Rejected]:
 
 
 def _query_fields(query: str) -> Either[dict[str, Any], Rejected]:
-    """쿼리 문자열 → 칸 dict(중복은 마지막 값). 비정수 limit·since_hours 는 엔진 serde 400.
+    """쿼리 문자열 → 칸 dict. serde 처럼 앞에서부터 한 칸씩 — 선언된 칸이 두 번 오면 400
+    `duplicate field` (2026-10-08 사본 엔진 실측), 정수 칸은 그 자리에서 파싱.
 
     limit 은 i64·since_hours 는 i32 라 칸마다 범위를 본다(serve.rs EventLogReq) — 문장은
     serde_urlencoded 가 낸 ParseIntError 를 axum 이 `field: ` 경로와 함께 싼 것."""
-    fields: dict[str, Any] = dict(parse_qsl(query, keep_blank_values=True))
-    for key, lo, hi in (("limit", _I64_MIN, _I64_MAX), ("since_hours", _I32_MIN, _I32_MAX)):
-        if key not in fields:
+    fields: dict[str, Any] = {}
+    for key, raw in parse_qsl(query, keep_blank_values=True):
+        if key not in _QUERY_FIELDS:
             continue
-        match _rust_parse_int(fields[key], lo, hi):
+        if key in fields:
+            return Err(Rejected(f"Failed to deserialize query string: duplicate field `{key}`"))
+        if (bounds := _INT_FIELDS.get(key)) is None:
+            fields[key] = raw
+            continue
+        match _rust_parse_int(raw, *bounds):
             case Ok(value):
                 fields[key] = value
             case Err(msg):
