@@ -3587,5 +3587,209 @@ class GapRouteTests(unittest.TestCase):
         self.assertEqual(self.recorded, [])
 
 
+class VerdictWriterSwitchTests(unittest.TestCase):
+    """E4-5a — 판정 쓰기 주인 스위치 (DOOR_VERDICT_WRITER).
+
+    기본·엉뚱한 값이면 /handover·/consumption·MCP verdict 는 엔진으로 그대로 간다. python 이면 문이
+    엔진을 안 부르고 답한다. 쓰기 길(verdict_run)은 목으로 두고 선로(스위치·검증 400·봉투)만 본다 —
+    진짜 쓰기는 ohmyboring/verdict/test_verdict.py(일회용 스키마)와 scripts/verdict-parity.py 가 본다.
+    """
+
+    ENGINE = b'{"from":"engine"}'
+    NOW = "2026-10-07T01:02:03+09:00"
+    CONSUMPTION = {"session_id": "s-1", "observed_at": NOW, "used": ["/a.md"]}
+    HANDOVER = {"session_id": "s-1", "observed_at": NOW, "paths": ["/a.md"]}
+    VERDICT = {"session_id": "s-1", "verdict": "used"}
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+
+        names = (
+            "DOOR_VERDICT_WRITER",
+            "DOOR_PG_DSN",
+            "BORING_OWNER_TOKEN",
+            "BORING_EVENT_SINK",
+            "BORING_EVENT_LOG",
+        )
+        self._saved = {name: os.environ.get(name) for name in names}
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:9/none"
+        os.environ["BORING_OWNER_TOKEN"] = "tok"
+        os.environ["BORING_EVENT_SINK"] = "spool"
+        os.environ["BORING_EVENT_LOG"] = str(Path(self._tmp.name) / "events.ndjson")
+        os.environ.pop("DOOR_VERDICT_WRITER", None)
+        self.client = TestClient(door.app)
+        fetch = mock.patch.object(
+            door, "_fetch", return_value=door._pass_through(200, self.ENGINE, "application/json")
+        )
+        self.fetch = fetch.start()
+        self.addCleanup(fetch.stop)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def surfaces(self):
+        return (
+            self.client.post("/consumption", json=self.CONSUMPTION),
+            self.client.post("/handover", json=self.HANDOVER),
+            self.mcp(self.VERDICT),
+        )
+
+    def mcp(self, arguments, name="verdict"):
+        return self.client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+        )
+
+    def patched_runs(self):
+        patches = [
+            mock.patch.object(door.verdict_run, name, return_value=door.Ok({"stub": name}))
+            for name in ("consume", "hand_over", "verdict")
+        ]
+        runs = [p.start() for p in patches]
+        for p in patches:
+            self.addCleanup(p.stop)
+        return runs
+
+    def test_default_and_garbage_values_proxy_all_three_surfaces(self):
+        runs = self.patched_runs()
+        for value in (None, "engine", "python2", "Python", "1", ""):
+            if value is None:
+                os.environ.pop("DOOR_VERDICT_WRITER", None)
+            else:
+                os.environ["DOOR_VERDICT_WRITER"] = value
+            self.assertEqual(door._verdict_writer(), "engine", value)
+            self.fetch.reset_mock()
+            for response in self.surfaces():
+                self.assertEqual(response.content, self.ENGINE, f"{value!r}: 엔진 답 바이트 그대로")
+            self.assertEqual(self.fetch.call_count, 3, f"{value!r}: 세 면 모두 엔진으로")
+        for run in runs:
+            run.assert_not_called()
+
+    def test_python_answers_the_three_surfaces_without_the_engine(self):
+        os.environ["DOOR_VERDICT_WRITER"] = "python"
+        consume, hand_over, verdict = self.patched_runs()
+        consumption, handover, mcp = self.surfaces()
+        self.fetch.assert_not_called()
+        self.assertEqual(consumption.content, b'{"stub":"consume"}')
+        self.assertEqual(handover.content, b'{"stub":"hand_over"}')
+        self.assertEqual(
+            mcp.content,
+            b'{"id":9,"jsonrpc":"2.0","result":{"content":[{"text":"{\\"stub\\":\\"verdict\\"}","type":"text"}],'
+            b'"isError":false,"structuredContent":{"stub":"verdict"}}}',
+            "엔진 serde_json 처럼 키 정렬 — 응답 바이트 대조",
+        )
+        wire = mcp.json()
+        self.assertEqual(wire["id"], 9)
+        self.assertEqual(wire["result"]["structuredContent"], {"stub": "verdict"})
+        self.assertFalse(wire["result"]["isError"])
+        req, deps = consume.call_args.args
+        self.assertEqual((req.session_id, req.basis.used, req.judge), ("s-1", ("/a.md",), None))
+        self.assertFalse(deps.is_owner)
+        self.assertEqual(hand_over.call_args.args[0].paths, ("/a.md",))
+        self.assertEqual(verdict.call_args.args[0].verdict, door.verdict_parse.Verdict.USED)
+
+    def test_python_leaves_other_tools_and_non_object_bodies_to_the_engine(self):
+        os.environ["DOOR_VERDICT_WRITER"] = "python"
+        self.patched_runs()
+        self.mcp({"query": "x"}, name="recall")
+        self.client.post("/consumption", content=b"[1]", headers={"content-type": "application/json"})
+        self.assertEqual(self.fetch.call_count, 2)
+
+    def test_validation_errors_are_the_engines_400s_and_never_reach_a_write(self):
+        os.environ["DOOR_VERDICT_WRITER"] = "python"
+        runs = self.patched_runs()
+        base = {"session_id": "s", "observed_at": self.NOW}
+        cases = (
+            ("/consumption", {**base, "session_id": " "}, "session_id must not be empty"),
+            ("/consumption", {**base, "observed_at": "now"}, 'observed_at must be RFC 3339, got "now"'),
+            ("/consumption", {**base, "verdict": "meh"}, 'verdict must be "used" or "contested", got "meh"'),
+            (
+                "/consumption",
+                {**base, "verdict": "used", "used": ["/a.md"]},
+                "verdict applies to what was handed; do not also list paths",
+            ),
+            (
+                "/consumption",
+                {**base, "judge": "boss"},
+                'judge: author must be owner | inferred | unknown | agent:<name>, got "boss"',
+            ),
+            ("/consumption", {**base, "contested": ["/x"] * 201}, "contested: at most 200 paths, got 201"),
+            ("/handover", {**base, "paths": ["/x"] * 201}, "paths: at most 200 paths, got 201"),
+        )
+        for path, body, message in cases:
+            response = self.client.post(path, json=body)
+            self.assertEqual((response.status_code, response.json()), (400, {"error": message}), message)
+        self.assertEqual(self.client.post("/consumption", json={**base, "used": "/a.md"}).status_code, 422)
+        for run in runs:
+            run.assert_not_called()
+        self.fetch.assert_not_called()
+
+    def test_judge_owner_needs_the_token_and_the_token_reaches_the_write(self):
+        os.environ["DOOR_VERDICT_WRITER"] = "python"
+        body = {**self.CONSUMPTION, "judge": "owner"}
+        down = mock.patch.object(door.psycopg, "connect", side_effect=door.psycopg.OperationalError("down"))
+        with down as connect:
+            refused = self.client.post("/consumption", json=body)
+            self.assertEqual(refused.status_code, 400)
+            self.assertEqual(
+                refused.json(),
+                {"error": "owner (as author or judge) needs the owner door token in x-boring-owner-token"},
+            )
+            connect.assert_not_called()
+            allowed = self.client.post("/consumption", json=body, headers={"x-boring-owner-token": "tok"})
+            self.assertEqual((allowed.status_code, allowed.json()), (500, {"error": "down"}))
+            connect.assert_called_once()
+        self.fetch.assert_not_called()
+
+    def test_mcp_verdict_missing_arguments_is_minus_32602(self):
+        os.environ["DOOR_VERDICT_WRITER"] = "python"
+        runs = self.patched_runs()
+        for arguments, message in (
+            ({}, "missing argument: session_id"),
+            ({"session_id": "s"}, "missing argument: verdict"),
+            ({"session_id": "s", "verdict": "meh"}, 'verdict must be "used" or "contested", got "meh"'),
+        ):
+            wire = self.mcp(arguments).json()
+            self.assertEqual(wire["id"], 9)
+            self.assertEqual(wire["error"], {"code": -32602, "message": message})
+        for run in runs:
+            run.assert_not_called()
+
+    def test_write_failure_and_missing_store_keep_the_engines_failure_shapes(self):
+        os.environ["DOOR_VERDICT_WRITER"] = "python"
+        failed = door.Err(door.verdict_run.Failed("disk full"))
+        with mock.patch.object(door.verdict_run, "consume", return_value=failed):
+            response = self.client.post("/consumption", json=self.CONSUMPTION)
+        self.assertEqual((response.status_code, response.json()), (500, {"error": "disk full"}))
+        with mock.patch.object(door.verdict_run, "verdict", return_value=failed):
+            wire = self.mcp(self.VERDICT).json()
+        self.assertEqual(wire["error"], {"code": -32603, "message": "verdict: disk full"})
+        # 저장소 없음 — 엔진 vector_disabled(): 같은 500·같은 문장, MCP 는 prefix 없는 -32603.
+        os.environ.pop("DOOR_PG_DSN")
+        off = (
+            "BORING_VECTOR=off — this feature requires the vector backend (pgvector). "
+            "Set BORING_VECTOR=on and start Postgres."
+        )
+        for path, body in (("/handover", self.HANDOVER), ("/consumption", self.CONSUMPTION)):
+            response = self.client.post(path, json=body)
+            self.assertEqual((response.status_code, response.json()), (500, {"error": off}), path)
+        self.assertEqual(self.mcp(self.VERDICT).json()["error"], {"code": -32603, "message": off})
+        # 검증·자격이 저장소 확인보다 먼저다(엔진 순서) — 저장소가 없어도 400.
+        refused = self.client.post("/consumption", json={**self.CONSUMPTION, "judge": "owner"})
+        self.assertEqual(refused.status_code, 400)
+        self.assertEqual(self.client.post("/consumption", json={"session_id": " "}).status_code, 422)
+
+
 if __name__ == "__main__":
     unittest.main()

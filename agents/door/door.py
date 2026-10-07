@@ -65,7 +65,12 @@ line counts, first differing line, skipped wiki files — never the query); the 
 The recall read switch: DOOR_RECALL_READER=python (compose default) answers POST /mcp tools/call
 recall from inside the door — same numbered-note blocks, the engine's JSON-RPC errors (-32602/-32603),
 and the session_id handover written once by the python path; the shadow then runs the other way, a
-background call to the engine without session_id, event reader=python (engine = rollback). An answer whose content-type is
+background call to the engine without session_id, event reader=python (engine = rollback).
+The verdict write switch: DOOR_VERDICT_WRITER=python (compose default engine) answers POST /handover, POST
+/consumption and MCP tools/call verdict from inside the door (E4-5, ohmyboring.verdict) — the engine's validation
+wording and status codes, response field order and counters, one DB transaction per request, the owner
+supersede refusal as one owner_supersede_refused event; a body that is not a JSON object still goes to the engine
+(engine = rollback). An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. The parked read behind
@@ -158,6 +163,8 @@ from ohmyboring.result import Either, Err, Ok
 from ohmyboring.search import hits as search_hits
 from ohmyboring.search import pg as search_pg
 from ohmyboring.search import retriever as search_retriever
+from ohmyboring.verdict import parse as verdict_parse
+from ohmyboring.verdict import run as verdict_run
 
 from ..shared import vault_note
 from . import approved, claim_source, rules
@@ -282,6 +289,10 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
     if request.method == "POST" and request.url.path == "/remember" and _remember_writer() == _WRITER_PYTHON:
         if (arguments := _http_remember_arguments(body)) is not None:
             return await _remember_python(request, body, arguments, "remember")
+    # 판정 쓰기 주인 스위치(E4-5): python 이면 /handover·/consumption·MCP verdict 를 문 안에서 쓰고 답한다.
+    if request.method == "POST" and _verdict_writer() == _WRITER_PYTHON:
+        if (answered := await _verdict_python(request, body)) is not None:
+            return answered
     # 빈자리 도구는 스위치와 무관하게 늘 문 안에서 답한다 — 엔진엔 gap 이 없다.
     if request.method == "POST" and request.url.path == "/mcp":
         if (call := _mcp_tools_call(body)) is not None and call[0] == gap_parse.TOOL["name"]:
@@ -764,6 +775,119 @@ def _remember_outcome_response(body: bytes, route: str, outcome: remember_writer
             }
         )
     return JSONResponse({"error": outcome.message}, status_code=400 if outcome.code == -32602 else 500)
+
+
+#: 판정 쓰기 주인 스위치(E4-5) — engine(기본)이면 프록시 그대로, python 이면 문 안의 판정 쓰기 길
+#: (ohmyboring.verdict)이 POST /handover·POST /consumption·MCP tools/call verdict 를 한 트랜잭션으로 쓰고
+#: 엔진 답 모양으로 답한다. 운영 기본은 engine — 켜기는 사본 DB 대조(scripts/verdict-parity.py) 뒤 오케스트레이터가 한다.
+_VERDICT_WRITER_ENV = "DOOR_VERDICT_WRITER"
+_VERDICT_HTTP_PATHS = ("/consumption", "/handover")
+
+
+def _verdict_route(path: str) -> tuple[Any, Any]:
+    """HTTP 경로 → (본문 파서, 쓰기 길) — 부를 때 풀어서 시험이 목으로 바꿔 끼울 수 있다."""
+    match path:
+        case "/consumption":
+            return verdict_parse.parse_consumption, verdict_run.consume
+        case _:
+            return verdict_parse.parse_handover, verdict_run.hand_over
+
+
+def _verdict_writer() -> str:
+    """판정 쓰기 주인 — python 만 켬, 그 밖의 값·부재는 전부 engine(실수로 켜지지 않게)."""
+    return _WRITER_PYTHON if os.environ.get(_VERDICT_WRITER_ENV) == _WRITER_PYTHON else "engine"
+
+
+def _verdict_deps(request: Request) -> verdict_run.Deps:
+    dsn = os.environ.get("DOOR_PG_DSN")
+    return verdict_run.Deps(
+        connect=(lambda: psycopg.connect(dsn)) if dsn else None,
+        append_event=_enqueue_writer_event,
+        is_owner=_standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
+        now=lambda: datetime.now(tz=UTC).isoformat(),
+    )
+
+
+async def _verdict_run(
+    run: Any, req: Any, request: Request
+) -> Either[Any, verdict_parse.Rejected | verdict_run.Failed | verdict_run.StoreOff]:
+    """쓰기 길 한 바퀴 — 예상 못한 고장도 Failed 값으로(엔진 500 / -32603 과 같이)."""
+    try:
+        return await asyncio.to_thread(run, req, _verdict_deps(request))
+    except Exception as e:  # noqa: BLE001 — 한 자리에서 값으로 접는다
+        print(f"[door] verdict writer failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return Err(verdict_run.Failed(f"{type(e).__name__}: {e}"))
+
+
+def _verdict_http_failure(
+    failure: verdict_parse.Rejected | verdict_run.Failed | verdict_run.StoreOff,
+) -> Response:
+    match failure:
+        case verdict_parse.Rejected(message, status):
+            return JSONResponse({"error": message}, status_code=status)
+        case verdict_run.Failed(message) | verdict_run.StoreOff(message):
+            return JSONResponse({"error": message}, status_code=500)
+
+
+async def _verdict_http(path: str, data: dict, request: Request) -> Response:
+    parse, run = _verdict_route(path)
+    match parse(data):
+        case Err(rejected):
+            return _verdict_http_failure(rejected)
+        case Ok(req):
+            pass
+    match await _verdict_run(run, req, request):
+        case Err(failure):
+            return _verdict_http_failure(failure)
+        case Ok(payload):
+            return JSONResponse(payload)
+
+
+class _KeySortedJSON(JSONResponse):
+    """엔진 serde_json Value 는 키를 정렬해 낸다 — 판정 쓰기 MCP 답은 응답 바이트까지 대조한다."""
+
+    def render(self, content: Any) -> bytes:
+        return json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _verdict_mcp_result(payload: dict, request_id: Any) -> Response:
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    result = {"content": [{"type": "text", "text": text}], "structuredContent": payload, "isError": False}
+    return _KeySortedJSON({"jsonrpc": "2.0", "id": request_id, "result": result})
+
+
+def _verdict_mcp_error(request_id: Any, code: int, message: str) -> Response:
+    return _KeySortedJSON({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}})
+
+
+async def _verdict_mcp(request_id: Any, arguments: dict, request: Request) -> Response:
+    match verdict_parse.parse_verdict_call(arguments):
+        case Err(rejected):
+            return _verdict_mcp_error(request_id, -32602, rejected.message)
+        case Ok(call):
+            pass
+    match await _verdict_run(verdict_run.verdict, call, request):
+        case Err(verdict_run.StoreOff(message)):
+            return _verdict_mcp_error(request_id, -32603, message)
+        case Err(failure):
+            return _verdict_mcp_error(request_id, -32603, f"verdict: {failure.message}")
+        case Ok(payload):
+            return _verdict_mcp_result(payload, request_id)
+
+
+async def _verdict_python(request: Request, body: bytes) -> Response | None:
+    """스위치 켬 — 이 요청이 판정 쓰기 면이면 문이 답하고, 아니면 None(그대로 프록시 길로).
+
+    본문이 JSON 객체가 아니면 None: 엔진이 자기 말로 거절한다(레지스터·remember 스위치와 같은 규약)."""
+    path = request.url.path
+    if path == "/mcp":
+        if (call := _mcp_tools_call(body)) is None or call[0] != "verdict":
+            return None
+        rpc = _http_json_object(body) or {}
+        return await _verdict_mcp(rpc.get("id"), call[1], request)
+    if path not in _VERDICT_HTTP_PATHS or (data := _http_json_object(body)) is None:
+        return None
+    return await _verdict_http(path, data, request)
 
 
 #: ── E4-1 일곱 레지스터 읽기 — 읽기 그림자 + 읽기 주인 스위치 ────────────────
