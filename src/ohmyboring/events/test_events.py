@@ -161,6 +161,8 @@ class QueryParseTests(unittest.TestCase):
             ("limit=1&limit=2", "Failed to deserialize query string: duplicate field `limit`"),
             ("event=a&event=b", "Failed to deserialize query string: duplicate field `event`"),
             ("limit=abc&limit=2", "Failed to deserialize query string: limit: invalid digit found in string"),
+            ("limit=-", "Failed to deserialize query string: limit: invalid digit found in string"),
+            ("limit=%2B", "Failed to deserialize query string: limit: invalid digit found in string"),
         ):
             self.assertEqual(rejected_message(events_parse.parse_event_query(query)), want, query)
         self.assertIsInstance(events_parse.parse_event_query("foo=1&foo=2"), Ok)

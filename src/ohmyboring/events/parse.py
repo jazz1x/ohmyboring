@@ -33,13 +33,15 @@ _INT_FIELDS = {"limit": (_I64_MIN, _I64_MAX), "since_hours": (_I32_MIN, _I32_MAX
 
 
 def _rust_parse_int(raw: str, lo: int, hi: int) -> Either[int, str]:
-    """Rust str::parse 의 정수 규약 — 양옆 공백·밑줄은 invalid digit, 빈 칸(부호만도)은 empty,
+    """Rust str::parse 의 정수 규약 — 양옆 공백·밑줄·부호만은 invalid digit, 빈 칸만 empty,
     누적이 넘치면 too large/small(음수는 크기로 비교). 성공은 Ok(값), 실패는 Err(문장)."""
+    if not raw:
+        return Err("cannot parse integer from empty string")
     negative = raw.startswith("-")
     if raw.startswith(("-", "+")):
         raw = raw[1:]
     if not raw:
-        return Err("cannot parse integer from empty string")
+        return Err("invalid digit found in string")
     limit = -lo if negative else hi
     overflow = (
         "number too small to fit in target type" if negative else "number too large to fit in target type"
