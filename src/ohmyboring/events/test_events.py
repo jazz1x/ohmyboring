@@ -131,11 +131,11 @@ class QueryParseTests(unittest.TestCase):
     def test_non_integer_query_fields_are_serde_400s(self):
         self.assertEqual(
             rejected_message(events_parse.parse_event_query("limit=abc")),
-            events_parse.QUERY_DESERIALIZE,
+            "Failed to deserialize query string: limit: invalid digit found in string",
         )
         self.assertEqual(
             rejected_message(events_parse.parse_event_query("since_hours=1.5")),
-            events_parse.QUERY_DESERIALIZE,
+            "Failed to deserialize query string: since_hours: invalid digit found in string",
         )
 
     def test_filters_map_event_to_event_name_and_keep_strings_untrimmed(self):

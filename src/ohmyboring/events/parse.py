@@ -21,15 +21,15 @@ EVENT_INGEST_MAX_BATCH = 100
 EVENT_LOG_MAX_LIMIT = 1000
 DEFAULT_LIMIT = 50
 
-#: axum Query<serde_urlencoded> 가 내는 400 문장 — 비정수 쿼리 칸(엔진은 serde 가 먼저 본다).
-QUERY_DESERIALIZE = "Failed to deserialize query string: invalid digit found in string"
 
-
-def _query_deserialize(raw: str) -> Rejected:
-    """serde 가 i32/i64 를 못 읽을 때의 Display — 숫자 모양이면 invalid value, 아니면 invalid digit."""
+def _query_deserialize(key: str, raw: str) -> Rejected:
+    """axum Query 400 문장 — 칸 이름을 앞에 단다(2026-10-08 사본 대조: 엔진 `limit: invalid digit …`).
+    숫자 모양이면 invalid value, 아니면 invalid digit."""
     if raw.lstrip("-").isdigit():
-        return Rejected(f"Failed to deserialize query string: invalid value: integer `{raw}`, expected i64")
-    return Rejected(QUERY_DESERIALIZE)
+        return Rejected(
+            f"Failed to deserialize query string: {key}: invalid value: integer `{raw}`, expected i64"
+        )
+    return Rejected(f"Failed to deserialize query string: {key}: invalid digit found in string")
 
 
 _I32_MAX = 2_147_483_647
@@ -79,9 +79,9 @@ def _query_fields(query: str) -> Either[dict[str, str], Rejected]:
             try:
                 value = int(raw)
             except ValueError:
-                return Err(_query_deserialize(raw))
+                return Err(_query_deserialize(key, raw))
             if value > _I32_MAX or value < -_I32_MAX - 1:
-                return Err(_query_deserialize(raw))
+                return Err(_query_deserialize(key, raw))
             fields[key] = value
     return Ok(fields)
 

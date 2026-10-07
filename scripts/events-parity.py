@@ -61,7 +61,7 @@ EXCLUDED = (
 )
 
 SEED_SQL = (
-    "SELECT id, observed_at, time_unix_nano, severity_text, severity_number, service_name,"
+    "SELECT id, time_unix_nano, severity_text, severity_number, service_name,"
     " component, event_name, status, trace_id, span_id, run_id, session_id, workflow,"
     " workflow_node, workflow_outcome, body::text, attributes::text, resource::text"
     " FROM event_log ORDER BY id;"

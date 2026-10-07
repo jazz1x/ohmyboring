@@ -3933,7 +3933,7 @@ class EventsOwnerSwitchTests(unittest.TestCase):
             self.assertEqual(response.headers["content-type"].split(";")[0], "text/plain")
             self.assertEqual(
                 response.text,
-                "Failed to deserialize query string: invalid digit found in string",
+                "Failed to deserialize query string: limit: invalid digit found in string",
                 "axum Query 거절은 평문 — JSON 봉투가 아니다",
             )
             connect.assert_not_called()
