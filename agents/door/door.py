@@ -843,19 +843,36 @@ async def _verdict_http(path: str, data: dict, request: Request) -> Response:
             return JSONResponse(payload)
 
 
+class _KeySortedJSON(JSONResponse):
+    """엔진 serde_json Value 는 키를 정렬해 낸다 — 판정 쓰기 MCP 답은 응답 바이트까지 대조한다."""
+
+    def render(self, content: Any) -> bytes:
+        return json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _verdict_mcp_result(payload: dict, request_id: Any) -> Response:
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    result = {"content": [{"type": "text", "text": text}], "structuredContent": payload, "isError": False}
+    return _KeySortedJSON({"jsonrpc": "2.0", "id": request_id, "result": result})
+
+
+def _verdict_mcp_error(request_id: Any, code: int, message: str) -> Response:
+    return _KeySortedJSON({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}})
+
+
 async def _verdict_mcp(request_id: Any, arguments: dict, request: Request) -> Response:
     match verdict_parse.parse_verdict_call(arguments):
         case Err(rejected):
-            return _mcp_error(request_id, -32602, rejected.message)
+            return _verdict_mcp_error(request_id, -32602, rejected.message)
         case Ok(call):
             pass
     match await _verdict_run(verdict_run.verdict, call, request):
         case Err(verdict_run.StoreOff(message)):
-            return _mcp_error(request_id, -32603, message)
+            return _verdict_mcp_error(request_id, -32603, message)
         case Err(failure):
-            return _mcp_error(request_id, -32603, f"verdict: {failure.message}")
+            return _verdict_mcp_error(request_id, -32603, f"verdict: {failure.message}")
         case Ok(payload):
-            return _mcp_result(payload, request_id)
+            return _verdict_mcp_result(payload, request_id)
 
 
 async def _verdict_python(request: Request, body: bytes) -> Response | None:

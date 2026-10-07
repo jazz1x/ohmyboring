@@ -3683,6 +3683,12 @@ class VerdictWriterSwitchTests(unittest.TestCase):
         self.fetch.assert_not_called()
         self.assertEqual(consumption.content, b'{"stub":"consume"}')
         self.assertEqual(handover.content, b'{"stub":"hand_over"}')
+        self.assertEqual(
+            mcp.content,
+            b'{"id":9,"jsonrpc":"2.0","result":{"content":[{"text":"{\\"stub\\":\\"verdict\\"}","type":"text"}],'
+            b'"isError":false,"structuredContent":{"stub":"verdict"}}}',
+            "엔진 serde_json 처럼 키 정렬 — 응답 바이트 대조",
+        )
         wire = mcp.json()
         self.assertEqual(wire["id"], 9)
         self.assertEqual(wire["result"]["structuredContent"], {"stub": "verdict"})
