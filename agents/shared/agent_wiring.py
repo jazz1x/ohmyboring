@@ -120,18 +120,35 @@ _CLAUDE_CODE_ROLE_SCRIPTS = (
     "hooks/rules.py",
     "agents/claude-code/session-start-recall.py",
 )
+
+#: The same contract for Kimi (wire_kimi). Kimi's config.toml kept [[hooks]] blocks pointing
+#: at a deleted checkout because the resolved-file comparison could never see them as ours —
+#: measured 2026-10-07: three reinstalls appended the current block next to the dead one, and
+#: the dead path made Kimi refuse every prompt ("Prompt hook blocked the request.").
+_KIMI_ROLE_SCRIPTS = (
+    "hooks/kimi-distill-session.py",
+    "hooks/kimi-recall.py",
+    "hooks/kimi-rules.py",
+)
 _CHECKOUT_MARKER = ("agents", "shared", "agent_wiring.py")
 
 
-def _command_roles(command: str) -> set[tuple[Path, str]]:
+def _command_roles(command: str, roles) -> set[tuple[Path, str]]:
     """(resolved checkout root, owned role) pairs for a command's raw script tokens.
 
+    `roles` is the per-agent role tuple (_CLAUDE_CODE_ROLE_SCRIPTS or _KIMI_ROLE_SCRIPTS).
     The token is `~`-expanded but its file is NOT resolved: in a real checkout hooks/*.py are
     symlinks into agents/claude-code/, so a resolved path ends in the link target and the role
     suffix never matches. Measured 2026-10-01 against a copy of the real settings.json: only
     session-start-recall.py — the one real file — was repointed; the three symlinked roles
     survived. The root is resolved only after the suffix strip, so a checkout reached through
     a symlinked home directory still compares equal to BORING_HOME.
+
+    A root is accepted when the checkout marker sits under it (a live checkout) OR when the
+    root no longer exists at all: a registration pointing into a deleted checkout is a dead
+    registration — the file can never run, and leaving it in place only blocks the agent
+    (Kimi refused every prompt with a dead hook path, 2026-10-07). A root that exists but
+    carries no marker is still NOT ours: a stranger's hooks/recall.py stays in their hands.
     """
     out = set()
     for token in _SCRIPT_TOKEN.findall(command or ""):
@@ -139,11 +156,11 @@ def _command_roles(command: str) -> set[tuple[Path, str]]:
             parts = Path(token).expanduser().parts
         except (OSError, RuntimeError):
             continue
-        for role in _CLAUDE_CODE_ROLE_SCRIPTS:
+        for role in roles:
             role_parts = Path(role).parts
             if len(parts) > len(role_parts) and parts[-len(role_parts) :] == role_parts:
                 root = Path(*parts[: -len(role_parts)])
-                if (root / Path(*_CHECKOUT_MARKER)).exists():
+                if (root / Path(*_CHECKOUT_MARKER)).exists() or not root.exists():
                     out.add((root.resolve(), role))
     return out
 
@@ -179,7 +196,9 @@ def _already_wired(settings: dict, command: str) -> bool:
     """
     wanted = _hook_scripts(command)
     current = Path(BORING_HOME).resolve()
-    wanted_roles = {role for root, role in _command_roles(command) if root == current}
+    wanted_roles = {
+        role for root, role in _command_roles(command, _CLAUDE_CODE_ROLE_SCRIPTS) if root == current
+    }
     for group in settings.get("hooks", {}).values():
         if not isinstance(group, list):
             continue
@@ -195,7 +214,8 @@ def _already_wired(settings: dict, command: str) -> bool:
                 if not wanted and command in existing:
                     return True
                 if wanted_roles and any(
-                    root == current and role in wanted_roles for root, role in _command_roles(existing)
+                    root == current and role in wanted_roles
+                    for root, role in _command_roles(existing, _CLAUDE_CODE_ROLE_SCRIPTS)
                 ):
                     return True
     return False
@@ -234,7 +254,7 @@ def _drop_duplicate_hooks(settings: dict, commands) -> int:
                     kept.append(h)
                     continue
                 existing = h.get("command") or ""
-                if any(root != current for root, _ in _command_roles(existing)):
+                if any(root != current for root, _ in _command_roles(existing, _CLAUDE_CODE_ROLE_SCRIPTS)):
                     removed += 1
                     continue
                 own = _hook_scripts(existing) & ours
@@ -346,27 +366,32 @@ def wire_kimi(path: Path | None = None) -> dict:
         ("UserPromptSubmit", rules, 10),
     ]
 
-    existing = path.read_text(encoding="utf-8") if path.exists() else ""
     changed = False
 
-    # Resolved files, not command strings. `BORING_HOME` is `~/oh-my-boring` on one run and the
-    # symlink's target on the next, so a substring test appended a second identical hook — the
-    # same double-registration #245 fixed for Claude Code, which was never delivered here because
-    # each adapter reimplements its own "is this already wired". Measured 2026-09-02: kimi's
-    # config carried both spellings of both hooks.
-    installed = set()
-    for line in existing.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("command"):
-            installed |= _hook_scripts(stripped.split("=", 1)[-1].strip().strip("\"'"))
     wanted = set()
     for _, command, _ in kimi_hooks:
         wanted |= _hook_scripts(command)
 
     removed = _drop_duplicate_kimi_hooks(path, wanted) if path.exists() else 0
     if removed:
-        existing = path.read_text(encoding="utf-8")
         changed = True
+
+    # Resolved files, not command strings. `BORING_HOME` is `~/oh-my-boring` on one run and the
+    # symlink's target on the next, so a substring test appended a second identical hook — the
+    # same double-registration #245 fixed for Claude Code, which was never delivered here because
+    # each adapter reimplements its own "is this already wired". Measured 2026-09-02: kimi's
+    # config carried both spellings of both hooks.
+    #
+    # `installed` is read from the post-drop text: a block removed above (another checkout's
+    # registration of the same role, live or deleted) must not count as installed, or the
+    # current checkout's block would never be appended — the reinstall-appends-next-to-the-
+    # dead-block loop measured 2026-10-07.
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    installed = set()
+    for line in existing.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("command"):
+            installed |= _hook_scripts(stripped.split("=", 1)[-1].strip().strip("\"'"))
 
     # Append only the hooks that are missing; the blocks already wired stay byte-identical,
     # so a half-wired install gains the absent ones and loses nothing it has.
@@ -393,29 +418,64 @@ def _drop_duplicate_kimi_hooks(path: Path, ours: set) -> int:
     injecting twice, which is what turned a 200-prompt sample floor into 100 (docs/PRD.md §8 D1).
     TOML is edited as text here for the same reason the writer appends text: round-tripping the
     user's whole config to delete two blocks risks more than it fixes.
+
+    Two kinds of block go. The first is the old one-block-per-script duplicate. The second is a
+    block whose command names one of our Kimi roles rooted anywhere but this checkout: a live
+    other checkout is the same role installed twice, and a deleted checkout is a dead
+    registration that can only block the agent (Kimi refused every prompt with a dead hook path,
+    2026-10-07). Lines between the Orca managed markers (`# >>> orca-managed-kimi-hooks` and the
+    matching `# <<<`) and blocks that name no Kimi role are never touched.
     """
     if not ours:
         return 0
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    blocks, current = [], None
+
+    # Orca manages its own Kimi hooks between these markers; whatever they point at is not
+    # ours to delete, so those line ranges are excluded from every pass below.
+    protected = set()
+    managed_start = None
     for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "# >>> orca-managed-kimi-hooks":
+            managed_start = index
+        elif stripped.startswith("# <<<") and managed_start is not None:
+            protected.update(range(managed_start, index + 1))
+            managed_start = None
+
+    blocks, current_block = [], None
+    for index, line in enumerate(lines):
+        if index in protected:
+            continue
         if line.strip() == "[[hooks]]":
-            if current is not None:
-                blocks.append(current)
-            current = {"start": index, "end": index, "scripts": set()}
-        elif current is not None:
+            if current_block is not None:
+                blocks.append(current_block)
+            current_block = {"start": index, "end": index, "scripts": set(), "commands": []}
+        elif current_block is not None:
             if line.strip().startswith("[") and not line.strip().startswith("[["):
-                blocks.append(current)
-                current = None
+                blocks.append(current_block)
+                current_block = None
                 continue
             if line.strip().startswith("command"):
-                current["scripts"] |= _hook_scripts(line.strip().split("=", 1)[-1].strip().strip("\"'"))
-            current["end"] = index
-    if current is not None:
-        blocks.append(current)
+                command = line.strip().split("=", 1)[-1].strip().strip("\"'")
+                current_block["commands"].append(command)
+                current_block["scripts"] |= _hook_scripts(command)
+            current_block["end"] = index
+    if current_block is not None:
+        blocks.append(current_block)
 
+    current = Path(BORING_HOME).resolve()
     seen, drop = set(), []
     for block in blocks:
+        if protected & set(range(block["start"], block["end"] + 1)):
+            continue
+        foreign = any(
+            root != current
+            for command in block["commands"]
+            for root, _ in _command_roles(command, _KIMI_ROLE_SCRIPTS)
+        )
+        if foreign:
+            drop.append(block)
+            continue
         mine = block["scripts"] & ours
         if not mine:
             continue
@@ -1328,7 +1388,7 @@ def _report_duplicate_registrations():
             # The script count below only sees files under this checkout; the same role
             # registered from two checkouts is two different files and walks past it, so count
             # roles across checkout roots on their own.
-            for root, role in _command_roles(command):
+            for root, role in _command_roles(command, _CLAUDE_CODE_ROLE_SCRIPTS):
                 role_roots.setdefault(role, set()).add(root)
             for script in _hook_scripts(command):
                 # Only hooks that live in this checkout are ours to count. Somebody else's tool
