@@ -435,29 +435,37 @@ def record_handover(
     """store.rs:3028 — session 노드 upsert + 알려진 경로 마다 handed 간선. 쓰기는 여기서 커밋."""
 
     def run() -> HandoverReport:
-        session_node = f"session:{session_id}"
         with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO node (id, kind, label, outcome) VALUES (%s, 'session', %s, NULL)"
-                " ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label, outcome = EXCLUDED.outcome;",
-                (session_node, observed_at),
-            )
-            cur.execute("SELECT source_path FROM document WHERE source_path = ANY(%s);", (paths,))
-            known = {row[0] for row in cur.fetchall()}
-            handed = 0
-            for path in paths:
-                if path not in known:
-                    continue
-                cur.execute(
-                    "INSERT INTO edge (src, dst, kind, judge) VALUES (%s, %s, 'handed', NULL)"
-                    " ON CONFLICT DO NOTHING;",
-                    (session_node, doc_node_id(path)),
-                )
-                handed += 1
+            report = write_handover(cur, session_id, observed_at, paths)
         conn.commit()
-        return HandoverReport(handed=handed, unknown=len(paths) - handed)
+        return report
 
     return _attempt(run)
+
+
+def write_handover(
+    cur: psycopg.Cursor, session_id: str, observed_at: str, paths: list[str]
+) -> HandoverReport:
+    """record_handover 의 쓰기 본체 — 커밋은 부르는 쪽 몫(한 요청 = 한 트랜잭션을 쓰는 길이 있다)."""
+    session_node = f"session:{session_id}"
+    cur.execute(
+        "INSERT INTO node (id, kind, label, outcome) VALUES (%s, 'session', %s, NULL)"
+        " ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label, outcome = EXCLUDED.outcome;",
+        (session_node, observed_at),
+    )
+    cur.execute("SELECT source_path FROM document WHERE source_path = ANY(%s);", (paths,))
+    known = {row[0] for row in cur.fetchall()}
+    handed = 0
+    for path in paths:
+        if path not in known:
+            continue
+        cur.execute(
+            "INSERT INTO edge (src, dst, kind, judge) VALUES (%s, %s, 'handed', NULL)"
+            " ON CONFLICT DO NOTHING;",
+            (session_node, doc_node_id(path)),
+        )
+        handed += 1
+    return HandoverReport(handed=handed, unknown=len(paths) - handed)
 
 
 def log_query(conn: psycopg.Connection, row: QueryLogRow) -> Either[None, PgError]:
