@@ -409,6 +409,19 @@ def _derived_requests(d: Derived) -> list[Req]:
     return [
         Req(
             "consumption",
+            "token without judge=owner supersedes owner note (refused)",
+            "/consumption",
+            {
+                **base,
+                "session_id": "parity-d3",
+                "judge": "inferred",
+                "supersedes": [[d.plain_b, d.owner_doc]],
+            },
+            owner=True,
+            shape="derived",
+        ),
+        Req(
+            "consumption",
             "non-owner supersedes owner note (refused)",
             "/consumption",
             {
@@ -846,6 +859,13 @@ def run_parity(args) -> tuple[Result, list[str]]:
         wait_for_events(args.dsn_b, event_b, len(after_a["event_log"]), args.event_wait)
         after_b = snapshot(args.dsn_b, event_b, start_b)
         result.table_diffs = {name: diff_rows(after_a[name], after_b[name]) for name in after_a}
+        refusals = [
+            sum(1 for row in after["event_log"] if row[1] == "owner_supersede_refused")
+            for after in (after_a, after_b)
+        ]
+        notes.append(
+            f"refusal path exercised: owner_supersede_refused events A={refusals[0]} B={refusals[1]}"
+        )
         result.midway = run_midway(
             args, client, midway_paths, (event_a, start_a), (event_b, start_b), (after_a, after_b)
         )

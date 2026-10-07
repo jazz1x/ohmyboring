@@ -457,8 +457,19 @@ class VerdictDbTests(unittest.TestCase):
             ],
         )
         self.events.clear()
+        token_only = verdict_run.consume(
+            consumption(session_id="s-2", judge="inferred", supersedes=[[newer, owned]]).value,
+            self.deps(is_owner=True),
+        ).value
+        self.assertEqual(
+            (token_only["supersedes"], token_only["refused"]),
+            (0, 1),
+            "토큰만 있고 judge 가 오너가 아니면 비오너",
+        )
+        self.events.clear()
         owner_resp = verdict_run.consume(
-            consumption(supersedes=[[newer, owned]]).value, self.deps(is_owner=True)
+            consumption(session_id="s-3", judge="owner", supersedes=[[newer, owned]]).value,
+            self.deps(is_owner=True),
         ).value
         self.assertEqual(
             (owner_resp["supersedes"], owner_resp["refused"]), (1, 0), "대조군: 오너는 못 막는다"

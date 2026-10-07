@@ -108,9 +108,12 @@ def _by_verdict(verdict: Verdict, handed: tuple[str, ...]) -> tuple[tuple[str, .
 
 
 def _kept_pairs(cur: Any, req: Consumption, deps: Deps) -> tuple[tuple[tuple[str, str], ...], int]:
-    """비오너의 supersedes 중 오너가 쓴 옛 노트를 겨눈 쌍은 버린다 — (남은 쌍, 버린 쌍 수)."""
+    """비오너의 supersedes 중 오너가 쓴 옛 노트를 겨눈 쌍은 버린다 — (남은 쌍, 버린 쌍 수).
+
+    오너 자격은 judge=owner 이고 토큰이 맞을 때뿐이다(owner.rs standing) — 토큰만으로는 비오너."""
+    owner_standing = deps.is_owner and req.judge == "owner"
     refused: list[str] = (
-        [] if deps.is_owner else verdict_pg.owner_authored(cur, tuple(old for _, old in req.supersedes))
+        [] if owner_standing else verdict_pg.owner_authored(cur, tuple(old for _, old in req.supersedes))
     )
     if refused:
         deps.append_event(_OWNER_COMPONENT, OWNER_REFUSED_EVENT, "warn", door=REFUSED_DOOR, targets=refused)
