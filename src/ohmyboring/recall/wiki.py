@@ -143,8 +143,15 @@ def search(docs: Iterable[_Doc], ask: Ask, now_ns: int) -> list[WikiHit]:
         for doc in docs
         if kept(doc) and (scored := score_lower(doc.title_lower, doc.body_lower, terms)) is not None
     ]
-    hits.sort(key=lambda hit: (-hit.score, hit.source_path))
+    hits.sort(key=lambda hit: (-hit.score, -_creation_order(hit.id), hit.source_path))
     return hits
+
+
+def _creation_order(note_id: str) -> int:
+    """wiki-N 의 N — 엔진(remember.rs next_wiki_id)·파이썬(writer) 모두 max+1 로 매겨 생성 순서다.
+    date: 는 하루 단위, mtime 은 sync 가 relates_to 를 다시 쓰며 바꾼다. 번호 없는 이름은 맨 뒤."""
+    number = note_id.removeprefix("wiki-")
+    return int(number) if number.isdigit() else -1
 
 
 def _read_utf8(path: Path) -> str:

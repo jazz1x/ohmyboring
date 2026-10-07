@@ -116,6 +116,17 @@ def test_snippet_comes_from_the_lowercased_body_at_the_first_term_in_query_order
     assert upper is not None and upper[1] == "abc", "snippet 은 소문자 본문"
 
 
+def test_tied_score_puts_the_newer_note_first_but_score_still_leads():
+    # 2026-10-07 「ds-governance 판정 인계」: wiki-2760(10-01)·wiki-3834(10-07) 둘 다 20점, 경로순이면 2760 이 1위.
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        same = "---\ntitle: 판정 인계\n---\n판정 인계 본문"
+        _write(d, "wiki-2760.md", same)
+        _write(d, "wiki-3834.md", same)
+        _write(d, "wiki-0100.md", "---\ntitle: 판정 인계 판정\n---\n판정 인계 판정 본문")
+        assert _ids(_recall(_index(), d, "판정 인계")) == ["wiki-0100", "wiki-3834", "wiki-2760"]
+
+
 def test_project_filter():
     # wiki_recall::tests::search_filters_by_project
     with tempfile.TemporaryDirectory() as tmp:
@@ -581,6 +592,7 @@ if __name__ == "__main__":
     test_title_from_frontmatter_then_heading_then_stem()
     test_snippet_has_leading_ellipsis_only_when_cut_from_inside_the_text()
     test_snippet_comes_from_the_lowercased_body_at_the_first_term_in_query_order()
+    test_tied_score_puts_the_newer_note_first_but_score_still_leads()
     test_project_filter()
     test_since_hours_filters_by_mtime_and_project_overrides_it()
     test_hits_are_cut_to_k_by_score_descending()
