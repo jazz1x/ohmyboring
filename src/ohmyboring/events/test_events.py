@@ -398,9 +398,9 @@ class EventsDbTests(unittest.TestCase):
                 " workflow text,"
                 " workflow_node text,"
                 " workflow_outcome text,"
-                " body jsonb NOT NULL DEFAULT '{{}}'::jsonb,"
-                " attributes jsonb NOT NULL DEFAULT '{{}}'::jsonb,"
-                " resource jsonb NOT NULL DEFAULT '{{}}'::jsonb);"
+                " body jsonb NOT NULL DEFAULT '{}'::jsonb,"
+                " attributes jsonb NOT NULL DEFAULT '{}'::jsonb,"
+                " resource jsonb NOT NULL DEFAULT '{}'::jsonb);"
             )
             cur.execute(
                 "CREATE FUNCTION fail_on_boom() RETURNS trigger LANGUAGE plpgsql AS $$"
