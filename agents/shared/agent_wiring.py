@@ -423,22 +423,30 @@ def _drop_duplicate_kimi_hooks(path: Path, ours: set) -> int:
     block whose command names one of our Kimi roles rooted anywhere but this checkout: a live
     other checkout is the same role installed twice, and a deleted checkout is a dead
     registration that can only block the agent (Kimi refused every prompt with a dead hook path,
-    2026-10-07). Lines between the Orca managed markers (`# >>> orca-managed-kimi-hooks` and the
-    matching `# <<<`) and blocks that name no Kimi role are never touched.
+    2026-10-07). Lines between the Orca managed markers (a `# >>> orca-managed-kimi-hooks` header
+    and the matching `# <<< orca-managed-kimi-hooks` end — both matched by prefix, because the
+    real header carries an annotation, `… (managed by Orca; do not edit) >>>`) and blocks that
+    name no Kimi role are never touched. A dropped block's range stops at its last key line:
+    comment and blank lines after it belong to no block, so dropping one never takes a following
+    comment down with it — the Orca header itself once died that way, swallowed as the tail of
+    the preceding block's range (2026-10-07).
     """
     if not ours:
         return 0
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
 
     # Orca manages its own Kimi hooks between these markers; whatever they point at is not
-    # ours to delete, so those line ranges are excluded from every pass below.
+    # ours to delete, so those line ranges are excluded from every pass below. The real
+    # header carries an annotation (`# >>> orca-managed-kimi-hooks (managed by Orca; do not
+    # edit) >>>`), so the markers are prefix-matched. An end marker with no open start (the
+    # real file had one, 2026-10-07) protects nothing and is not an error.
     protected = set()
     managed_start = None
     for index, line in enumerate(lines):
         stripped = line.strip()
-        if stripped == "# >>> orca-managed-kimi-hooks":
+        if stripped.startswith("# >>> orca-managed-kimi-hooks"):
             managed_start = index
-        elif stripped.startswith("# <<<") and managed_start is not None:
+        elif stripped.startswith("# <<< orca-managed-kimi-hooks") and managed_start is not None:
             protected.update(range(managed_start, index + 1))
             managed_start = None
 
@@ -451,15 +459,17 @@ def _drop_duplicate_kimi_hooks(path: Path, ours: set) -> int:
                 blocks.append(current_block)
             current_block = {"start": index, "end": index, "scripts": set(), "commands": []}
         elif current_block is not None:
-            if line.strip().startswith("[") and not line.strip().startswith("[["):
+            stripped = line.strip()
+            if stripped.startswith("[") and not stripped.startswith("[["):
                 blocks.append(current_block)
                 current_block = None
                 continue
-            if line.strip().startswith("command"):
-                command = line.strip().split("=", 1)[-1].strip().strip("\"'")
+            if stripped.startswith("command"):
+                command = stripped.split("=", 1)[-1].strip().strip("\"'")
                 current_block["commands"].append(command)
                 current_block["scripts"] |= _hook_scripts(command)
-            current_block["end"] = index
+            if stripped and not stripped.startswith("#"):
+                current_block["end"] = index
     if current_block is not None:
         blocks.append(current_block)
 
