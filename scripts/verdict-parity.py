@@ -607,6 +607,43 @@ def marks(dsn: str) -> tuple[int, object]:
         return int(row[0]), row[1]
 
 
+#: 봉인·승격이 실제로 행을 옮기는 옛 노트 x — 사실 칸을 두 노트(x 가 현재, y 가 봉인됨)만 갖고 둘 다
+#: 비오너·은퇴 전. x 를 은퇴시키면 x 의 현재 행이 봉인되고 y 의 행이 승격된다.
+_PROMOTE_PAIR_SQL = (
+    "WITH two AS (SELECT subject, predicate FROM claim WHERE kind = 'fact'"
+    "             GROUP BY 1, 2 HAVING count(DISTINCT source_path) = 2),"
+    " pair AS (SELECT cx.source_path AS x, cy.source_path AS y FROM two"
+    "          JOIN claim cx ON (cx.subject, cx.predicate) = (two.subject, two.predicate)"
+    "               AND cx.kind = 'fact' AND cx.superseded_at IS NULL"
+    "          JOIN claim cy ON (cy.subject, cy.predicate) = (two.subject, two.predicate)"
+    "               AND cy.source_path <> cx.source_path AND cy.superseded_at IS NOT NULL)"
+    " SELECT x, y FROM pair"
+    " JOIN document dx ON dx.source_path = x AND dx.author <> 'owner'"
+    " JOIN document dy ON dy.source_path = y AND dy.author <> 'owner'"
+    " WHERE NOT EXISTS (SELECT 1 FROM edge e WHERE e.kind = 'supersedes' AND e.dst IN ('doc:' || x, 'doc:' || y))"
+    " ORDER BY md5(x || y) LIMIT 1"
+)
+
+
+def read_promote_pair(dsn: str) -> tuple[str, str] | None:
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(_PROMOTE_PAIR_SQL)
+        row = cur.fetchone()
+        return (row[0], row[1]) if row else None
+
+
+def promote_request(newer: str, older: str) -> Req:
+    return Req(
+        "consumption",
+        "fresh supersede (seal + promote move rows)",
+        "/consumption",
+        {"observed_at": OBSERVED_AT, "session_id": "parity-sp", "supersedes": [[newer, older]]},
+        shape="derived",
+    )
+
+
 def read_docs(dsn: str) -> list[tuple[str, str, int]]:
     import psycopg
 
@@ -838,8 +875,15 @@ def batch_for(args, rows: list[tuple[str, str, int]]) -> tuple[list[Req], tuple[
     derived = pick_derived(rows)
     if derived is None:
         raise Unmeasured("seed copy too small: need 1 owner note and 2 non-owner notes")
+    pair = read_promote_pair(args.dsn_a)
+    if pair is None:
+        raise Unmeasured("seed copy has no fact slot where a fresh supersede would seal and promote rows")
+    older, reopened = pair
+    newer = next(p for p in (derived.plain_b, derived.plain_a) if p not in pair)
+    print(f"seal+promote probe: {newer} supersedes {older} (seals its current fact rows, reopens {reopened})")
     shapes = read_shapes(args.dsn_a, args.sample)
-    return build_batch_from_shapes(shapes, derived), (derived.plain_a, derived.plain_b)
+    batch = build_batch_from_shapes(shapes, derived) + [promote_request(newer, older)]
+    return batch, (derived.plain_a, derived.plain_b)
 
 
 def run_midway(args, client, paths, mark_a, mark_b, bases) -> Midway:
