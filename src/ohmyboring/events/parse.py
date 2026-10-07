@@ -22,17 +22,32 @@ EVENT_LOG_MAX_LIMIT = 1000
 DEFAULT_LIMIT = 50
 
 
-def _query_deserialize(key: str, raw: str) -> Rejected:
-    """axum Query 400 문장 — 칸 이름을 앞에 단다(2026-10-08 사본 대조: 엔진 `limit: invalid digit …`).
-    숫자 모양이면 invalid value, 아니면 invalid digit."""
-    if raw.lstrip("-").isdigit():
-        return Rejected(
-            f"Failed to deserialize query string: {key}: invalid value: integer `{raw}`, expected i64"
-        )
-    return Rejected(f"Failed to deserialize query string: {key}: invalid digit found in string")
+_I64_MIN = -(2**63)
+_I64_MAX = 2**63 - 1
+_I32_MIN = -(2**31)
+_I32_MAX = 2**31 - 1
 
 
-_I32_MAX = 2_147_483_647
+def _rust_parse_int(raw: str, lo: int, hi: int) -> Either[int, str]:
+    """Rust str::parse 의 정수 규약 — 양옆 공백·밑줄은 invalid digit, 빈 칸(부호만도)은 empty,
+    누적이 넘치면 too large/small(음수는 크기로 비교). 성공은 Ok(값), 실패는 Err(문장)."""
+    negative = raw.startswith("-")
+    if raw.startswith(("-", "+")):
+        raw = raw[1:]
+    if not raw:
+        return Err("cannot parse integer from empty string")
+    limit = -lo if negative else hi
+    overflow = (
+        "number too small to fit in target type" if negative else "number too large to fit in target type"
+    )
+    value = 0
+    for ch in raw:
+        if not "0" <= ch <= "9":
+            return Err("invalid digit found in string")
+        value = value * 10 + ord(ch) - ord("0")
+        if value > limit:
+            return Err(overflow)
+    return Ok(-value if negative else value)
 
 
 @dataclass(frozen=True)
@@ -70,19 +85,20 @@ def event_batch(body: Any) -> Either[list[Any], Rejected]:
     return Ok([body])
 
 
-def _query_fields(query: str) -> Either[dict[str, str], Rejected]:
-    """쿼리 문자열 → 칸 dict(중복은 마지막 값). 비정수 limit·since_hours 는 엔진 serde 400."""
-    fields = dict(parse_qsl(query, keep_blank_values=True))
-    for key in ("limit", "since_hours"):
-        if key in fields:
-            raw = fields[key]
-            try:
-                value = int(raw)
-            except ValueError:
-                return Err(_query_deserialize(key, raw))
-            if value > _I32_MAX or value < -_I32_MAX - 1:
-                return Err(_query_deserialize(key, raw))
-            fields[key] = value
+def _query_fields(query: str) -> Either[dict[str, Any], Rejected]:
+    """쿼리 문자열 → 칸 dict(중복은 마지막 값). 비정수 limit·since_hours 는 엔진 serde 400.
+
+    limit 은 i64·since_hours 는 i32 라 칸마다 범위를 본다(serve.rs EventLogReq) — 문장은
+    serde_urlencoded 가 낸 ParseIntError 를 axum 이 `field: ` 경로와 함께 싼 것."""
+    fields: dict[str, Any] = dict(parse_qsl(query, keep_blank_values=True))
+    for key, lo, hi in (("limit", _I64_MIN, _I64_MAX), ("since_hours", _I32_MIN, _I32_MAX)):
+        if key not in fields:
+            continue
+        match _rust_parse_int(fields[key], lo, hi):
+            case Ok(value):
+                fields[key] = value
+            case Err(msg):
+                return Err(Rejected(f"Failed to deserialize query string: {key}: {msg}"))
     return Ok(fields)
 
 

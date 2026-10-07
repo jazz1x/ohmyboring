@@ -973,7 +973,7 @@ async def _events_mcp(request_id: Any, arguments: dict, request: Request) -> Res
 async def _events_python(request: Request, body: bytes) -> Response | None:
     """스위치 켬 — 이 요청이 사건 길이면 문이 답하고, 아니면 None(그대로 프록시 길로).
 
-    엔진은 어떤 JSON 값이든 사건 본문으로 받으니 POST 는 객첿에만 국한하지 않는다. 본문이 JSON
+    엔진은 어떤 JSON 값이든 사건 본문으로 받으니 POST 는 객체에만 국한하지 않는다. 본문이 JSON
     이 아니면 None: 엔진이 자기 말로 거절한다(판정 스위치와 같은 규약)."""
     path = request.url.path
     if path == "/mcp":

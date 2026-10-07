@@ -2,7 +2,7 @@
 
 엔진 http.rs handle_event_ingest·handle_events 와 mcp.rs mcp_events 의 순서를 옮긴다:
 저장소 확인(500 · -32603) → 검증(400 · -32602) → 질의. 엔진과 달리 쓰기 전체가 한 커밋이라
-중간 실패면 아무것도 안 남는다(엔진은 사걸마다 자동 커밋 — 의도한 차이). 문(door)만 부른다.
+중간 실패면 아무것도 안 남는다(엔진은 행마다 자동 커밋 — 의도한 차이). 문(door)만 부른다.
 """
 
 from __future__ import annotations

@@ -143,8 +143,12 @@ def _otel_or(otel: dict[str, Any] | None, key: str, default: Any) -> Any:
 
 
 def _event_name(event: Any, otel: dict[str, Any] | None) -> str:
-    """store.rs — otel.event_name 이 문자열이면 트림 없이 그대로, 아니면 트림된 event 칸."""
-    return _otel_str(otel, "event_name") or _text_field(event, "event") or ""
+    """store.rs — otel.event_name 이 문자열이면 트림 없이 그대로, 빈 문자열조차 그 값 그대로.
+    아니면 트림된 event 칸."""
+    raw = _otel_str(otel, "event_name")
+    if raw is not None:
+        return raw
+    return _text_field(event, "event") or ""
 
 
 def _severity(otel: dict[str, Any] | None, status: str) -> tuple[str, int]:

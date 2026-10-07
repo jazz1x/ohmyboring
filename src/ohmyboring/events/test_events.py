@@ -138,6 +138,53 @@ class QueryParseTests(unittest.TestCase):
             "Failed to deserialize query string: since_hours: invalid digit found in string",
         )
 
+    def test_limit_range_is_i64_and_clamps(self):
+        """serve.rs EventLogReq — limit 은 i64: 2^31 을 넘어도 받고(검증 통과) 클램프만 1000."""
+        match events_parse.parse_event_query("limit=3000000000"):
+            case Ok(q):
+                self.assertEqual(q.limit, 1000)
+            case other:
+                self.fail(f"expected Ok, got {other!r}")
+        match events_parse.parse_event_query("limit=%2B5"):
+            case Ok(q):
+                self.assertEqual(q.limit, 5, "Rust str::parse 는 선행 + 를 받는다")
+            case other:
+                self.fail(f"expected Ok, got {other!r}")
+        self.assertEqual(
+            rejected_message(events_parse.parse_event_query("limit=9223372036854775808")),
+            "Failed to deserialize query string: limit: number too large to fit in target type",
+        )
+
+    def test_serde_400_wording_is_rust_parse_int_display(self):
+        """serde_urlencoded 는 str::parse 의 ParseIntError 문장을 그대로 낸다(de::Error::custom)."""
+        for raw, want in (
+            (
+                "limit=",
+                "Failed to deserialize query string: limit: cannot parse integer from empty string",
+            ),
+            (
+                "limit=1_0",
+                "Failed to deserialize query string: limit: invalid digit found in string",
+            ),
+            (
+                "limit=%205",
+                "Failed to deserialize query string: limit: invalid digit found in string",
+            ),
+            (
+                "since_hours=99999999999",
+                "Failed to deserialize query string: since_hours: number too large to fit in target type",
+            ),
+            (
+                "since_hours=-99999999999",
+                "Failed to deserialize query string: since_hours: number too small to fit in target type",
+            ),
+            (
+                "since_hours=3000000000",
+                "Failed to deserialize query string: since_hours: number too large to fit in target type",
+            ),
+        ):
+            self.assertEqual(rejected_message(events_parse.parse_event_query(raw)), want, raw)
+
     def test_filters_map_event_to_event_name_and_keep_strings_untrimmed(self):
         match events_parse.parse_event_query(
             "component=door&event=recall_shadow&status=ok&run_id=r1&workflow=wf"
@@ -233,6 +280,13 @@ class OrderTests(unittest.TestCase):
             "BORING_VECTOR=off — this feature requires the vector backend (pgvector). "
             "Set BORING_VECTOR=on and start Postgres.",
         )
+
+
+class EventNameTests(unittest.TestCase):
+    """store.rs log_event 의 event_name — otel.event_name 이 문자열이면 빈 문자열까지 그대로."""
+
+    def test_empty_otel_event_name_wins_over_the_event_field(self):
+        self.assertEqual(events_pg._event_name({"event": "x"}, {"event_name": ""}), "")
 
 
 class SeverityTableTests(unittest.TestCase):
@@ -513,6 +567,12 @@ class EventsDbTests(unittest.TestCase):
         events_run.ingest(with_otel_time, self.deps())
         self.assertEqual(self.row("c2")["time_unix_nano"], 999)
 
+    def test_empty_otel_event_name_is_stored_empty(self):
+        """store.rs 는 otel.event_name = "" 을 "" 그대로 둔다 — 대체는 칸 값이 없을 때만 튄다."""
+        body = {"component": "c", "event": "x", "otel": {"event_name": ""}}
+        self.assertEqual(events_run.ingest(body, self.deps()).value, {"accepted": 1})
+        self.assertEqual(self.row("c")["event_name"], "")
+
     def test_severity_number_falls_back_when_otel_value_is_not_an_i32(self):
         base = {"component": "c", "event": "e", "status": "ok"}
         too_big = {**base, "component": "big", "otel": {"severity_number": 2**31}}
@@ -574,6 +634,11 @@ class EventsDbTests(unittest.TestCase):
         self.assertEqual(
             (payload["limit_applied"], len(payload["entries"]), payload["maybe_truncated"]), (1000, 3, False)
         )
+        match events_run.read("limit=3000000000", self.deps()):
+            case Ok(payload):
+                self.assertEqual(payload["limit_applied"], 1000, "i64 라 받고 1000 에 클램프")
+            case other:
+                self.fail(f"expected Ok, got {other!r}")
         payload = events_run.read("event=recall_shadow", self.deps()).value
         self.assertEqual([e["event"] for e in payload["entries"]], ["recall_shadow"])
         payload = events_run.read("component=door&run_id=r2", self.deps()).value
