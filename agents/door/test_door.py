@@ -3791,5 +3791,281 @@ class VerdictWriterSwitchTests(unittest.TestCase):
         self.assertEqual(self.client.post("/consumption", json={"session_id": " "}).status_code, 422)
 
 
+class EventsOwnerSwitchTests(unittest.TestCase):
+    """E4-6a — 사건 주인 스위치 (DOOR_EVENTS_OWNER).
+
+    기본·엉뚱한 값이면 POST·GET /events 와 MCP events 는 엔진으로 그대로 간다. python 이면 문이
+    엔진을 안 부르고 답한다. 사건 길(events_run)은 목으로 두고 선로(스위치·검증 400·봉투)만 본다 —
+    진짜 쓰기·읽기는 ohmyboring/events/test_events.py(일회용 스키마)와 scripts/events-parity.py 가 본다.
+    """
+
+    ENGINE = b'{"from":"engine"}'
+    OFF = (
+        "BORING_VECTOR=off — this feature requires the vector backend (pgvector). "
+        "Set BORING_VECTOR=on and start Postgres."
+    )
+    EVENT = {"component": "door", "event": "recall_shadow", "status": "ok"}
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+
+        names = (
+            "DOOR_EVENTS_OWNER",
+            "DOOR_PG_DSN",
+            "BORING_OWNER_TOKEN",
+            "BORING_EVENT_SINK",
+            "BORING_EVENT_LOG",
+        )
+        self._saved = {name: os.environ.get(name) for name in names}
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:9/none"
+        os.environ["BORING_OWNER_TOKEN"] = "tok"
+        os.environ["BORING_EVENT_SINK"] = "spool"
+        os.environ["BORING_EVENT_LOG"] = str(Path(self._tmp.name) / "events.ndjson")
+        os.environ.pop("DOOR_EVENTS_OWNER", None)
+        self.client = TestClient(door.app)
+        fetch = mock.patch.object(
+            door, "_fetch", return_value=door._pass_through(200, self.ENGINE, "application/json")
+        )
+        self.fetch = fetch.start()
+        self.addCleanup(fetch.stop)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def surfaces(self):
+        return (
+            self.client.post("/events", json=self.EVENT),
+            self.client.get("/events"),
+            self.mcp({"limit": 5}),
+        )
+
+    def mcp(self, arguments, name="events"):
+        return self.client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+        )
+
+    def patched_runs(self):
+        patches = [
+            mock.patch.object(door.events_run, name, return_value=door.Ok({"stub": name}))
+            for name in ("ingest", "read", "mcp_read")
+        ]
+        runs = [p.start() for p in patches]
+        for p in patches:
+            self.addCleanup(p.stop)
+        return runs
+
+    def test_default_and_garbage_values_proxy_all_three_surfaces(self):
+        runs = self.patched_runs()
+        for value in (None, "engine", "python2", "Python", "1", ""):
+            if value is None:
+                os.environ.pop("DOOR_EVENTS_OWNER", None)
+            else:
+                os.environ["DOOR_EVENTS_OWNER"] = value
+            self.assertEqual(door._events_owner(), "engine", value)
+            self.fetch.reset_mock()
+            for response in self.surfaces():
+                self.assertEqual(response.content, self.ENGINE, f"{value!r}: 엔진 답 바이트 그대로")
+            self.assertEqual(self.fetch.call_count, 3, f"{value!r}: 세 면 모두 엔진으로")
+        for run in runs:
+            run.assert_not_called()
+
+    def test_python_answers_the_three_surfaces_without_the_engine(self):
+        os.environ["DOOR_EVENTS_OWNER"] = "python"
+        ingest, read, mcp_read = self.patched_runs()
+        post, get, mcp = self.surfaces()
+        self.fetch.assert_not_called()
+        self.assertEqual(post.content, b'{"stub":"ingest"}')
+        self.assertEqual(get.content, b'{"stub":"read"}')
+        self.assertEqual(
+            mcp.content,
+            b'{"id":9,"jsonrpc":"2.0","result":{"content":[{"text":"{\\"stub\\":\\"mcp_read\\"}","type":"text"}],'
+            b'"isError":false,"structuredContent":{"stub":"mcp_read"}}}',
+            "엔진 serde_json 처럼 키 정렬 — 응답 바이트 대조",
+        )
+        self.assertEqual(ingest.call_args.args[0], self.EVENT, "본문을 그대로 사건 길에 싣는다")
+        self.assertEqual(read.call_args.args[0], "", "GET 은 쿼리 문자열을 그대로 싣는다")
+        self.assertEqual(mcp_read.call_args.args[0], {"limit": 5})
+
+    def test_python_passes_the_query_string_untouched(self):
+        os.environ["DOOR_EVENTS_OWNER"] = "python"
+        read = mock.patch.object(door.events_run, "read", return_value=door.Ok({"stub": "read"}))
+        with read as patched:
+            self.client.get("/events?limit=2&component=door&event=recall_shadow")
+        self.assertEqual(patched.call_args.args[0], "limit=2&component=door&event=recall_shadow")
+
+    def test_python_leaves_other_tools_and_non_json_bodies_to_the_engine(self):
+        os.environ["DOOR_EVENTS_OWNER"] = "python"
+        runs = self.patched_runs()
+        self.mcp({"query": "x"}, name="recall")
+        self.client.post("/events", content=b"[broken", headers={"content-type": "application/json"})
+        self.assertEqual(self.fetch.call_count, 2)
+        for run in runs:
+            run.assert_not_called()
+
+    def test_validation_errors_are_the_engines_400s_and_never_reach_the_engine(self):
+        """검증은 events_run 안(엔진 순서 — 저장소 확인 뒤)이지만, 연결은 검증이 막는다."""
+        os.environ["DOOR_EVENTS_OWNER"] = "python"
+        down = mock.patch.object(door.psycopg, "connect", side_effect=AssertionError("검증이 먼저다"))
+        with down as connect:
+            oversized = {"events": [{"event": "x", "i": i} for i in range(101)]}
+            response = self.client.post("/events", json=oversized)
+            self.assertEqual(
+                (response.status_code, response.json()), (400, {"error": "events batch too large: max 100"})
+            )
+            response = self.client.get("/events?since_hours=-1")
+            self.assertEqual(
+                (response.status_code, response.json()), (400, {"error": "since_hours must be >= 0"})
+            )
+            response = self.client.get("/events?limit=abc")
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.headers["content-type"].split(";")[0], "text/plain")
+            self.assertEqual(
+                response.text,
+                "Failed to deserialize query string: limit: invalid digit found in string",
+                "axum Query 거절은 평문 — JSON 봉투가 아니다",
+            )
+            connect.assert_not_called()
+        self.fetch.assert_not_called()
+
+    def test_empty_batch_is_accepted_zero_without_touching_the_store(self):
+        """엔진은 사건 루프를 안 돌아 표를 안 만진다 — 저장소 확인은 여전히 먼저다."""
+        os.environ["DOOR_EVENTS_OWNER"] = "python"
+        response = self.client.post("/events", json={"events": []})
+        self.assertEqual((response.status_code, response.json()), (200, {"accepted": 0}))
+        os.environ.pop("DOOR_PG_DSN")
+        response = self.client.post("/events", json={"events": []})
+        self.assertEqual((response.status_code, response.json()), (500, {"error": self.OFF}))
+
+    def test_mcp_events_argument_errors_are_minus_32602(self):
+        os.environ["DOOR_EVENTS_OWNER"] = "python"
+        wire = self.mcp({"since_hours": -1}).json()
+        self.assertEqual(wire["error"], {"code": -32602, "message": "since_hours must be >= 0"})
+        wire = self.mcp({"since_hours": 2**31}).json()
+        self.assertEqual(wire["error"], {"code": -32602, "message": "since_hours is too large"})
+
+    def test_store_off_and_failure_keep_the_engines_failure_shapes(self):
+        os.environ["DOOR_EVENTS_OWNER"] = "python"
+        os.environ.pop("DOOR_PG_DSN")
+        for response in (self.client.post("/events", json=self.EVENT), self.client.get("/events")):
+            self.assertEqual((response.status_code, response.json()), (500, {"error": self.OFF}))
+        self.assertEqual(
+            self.mcp({"limit": 5}).json()["error"], {"code": -32603, "message": self.OFF}, "prefix 없음"
+        )
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:9/none"
+        failed = door.Err(door.events_run.Failed("disk full"))
+        with mock.patch.object(door.events_run, "ingest", return_value=failed):
+            response = self.client.post("/events", json=self.EVENT)
+        self.assertEqual((response.status_code, response.json()), (500, {"error": "disk full"}))
+        with mock.patch.object(door.events_run, "read", return_value=failed):
+            response = self.client.get("/events")
+        self.assertEqual((response.status_code, response.json()), (500, {"error": "disk full"}))
+        with mock.patch.object(door.events_run, "mcp_read", return_value=failed):
+            wire = self.mcp({"limit": 5}).json()
+        self.assertEqual(wire["error"], {"code": -32603, "message": "events: disk full"})
+
+    def test_mcp_events_structured_result_shape(self):
+        os.environ["DOOR_EVENTS_OWNER"] = "python"
+        payload = {"entries": [{"b": 1, "a": 2}]}
+        with mock.patch.object(door.events_run, "mcp_read", return_value=door.Ok(payload)):
+            mcp = self.mcp({"limit": 5})
+        self.assertEqual(
+            mcp.content,
+            b'{"id":9,"jsonrpc":"2.0","result":{"content":[{"text":"{\\"entries\\":[{\\"a\\":2,\\"b\\":1}]}","type":"text"}],'
+            b'"isError":false,"structuredContent":{"entries":[{"a":2,"b":1}]}}}',
+        )
+        wire = mcp.json()
+        self.assertEqual(wire["result"]["structuredContent"], payload)
+        self.assertFalse(wire["result"]["isError"])
+
+
+class EventsOwnerSelfQueueTests(unittest.TestCase):
+    """E4-6a — 스위치 켬에서 문이 자기 사건(recall_shadow 등)을 자기 /events 로 돌려 본낼 때
+
+    막히지 않는다(교착 없음): 쓰기 큐 스레드가 문의 POST /events 를 맞고, 문은 DB 일을
+    asyncio.to_thread 로 떠넘겨 이벤트 루프를 차지 않는다. 진짜 서버(uvicorn) + 진짜 싱크로 본다."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved = {
+            name: os.environ.get(name)
+            for name in (
+                "DOOR_EVENTS_OWNER",
+                "DOOR_PG_DSN",
+                "BORING_DOOR_URL",
+                "BORING_EVENT_SINK",
+                "BORING_EVENT_LOG",
+                "BORING_OWNER_TOKEN",
+            )
+        }
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.door_port = _free_port()
+        os.environ.update(
+            DOOR_EVENTS_OWNER="python",
+            DOOR_PG_DSN="postgresql://boring:boring@127.0.0.1:9/none",
+            BORING_DOOR_URL=f"http://127.0.0.1:{cls.door_port}",
+            BORING_EVENT_SINK="db",
+            BORING_EVENT_LOG=str(Path(cls._tmp.name) / "events.ndjson"),
+            BORING_OWNER_TOKEN="tok",
+        )
+        cls.door_server = uvicorn.Server(
+            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
+        )
+        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
+        cls.door_thread.start()
+        deadline = 10.0
+        while deadline > 0:
+            try:
+                with socket.create_connection(("127.0.0.1", cls.door_port), timeout=1):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+            deadline -= 0.05
+        else:
+            raise RuntimeError("door did not come up within 10s")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.door_server.should_exit = True
+        cls._tmp.cleanup()
+        for name, value in cls._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def test_the_door_accepts_its_own_queued_event_without_deadlock(self):
+        accepted = threading.Event()
+
+        def fake_ingest(body, deps):
+            accepted.set()
+            return door.Ok({"accepted": 1})
+
+        with mock.patch.object(door.events_run, "ingest", side_effect=fake_ingest) as ingest:
+            self.assertTrue(door._enqueue_writer_event("door", "recall_shadow", "ok", session_id="s1"))
+            self.assertTrue(accepted.wait(5), "문이 자기 /events 를 맞아 사건 길까지 도착(교착 없음)")
+        payload = ingest.call_args.args[0]
+        self.assertEqual(
+            (payload["component"], payload["event"], payload["status"]), ("door", "recall_shadow", "ok")
+        )
+        self.assertEqual(payload["session_id"], "s1")
+        self.assertFalse(
+            Path(os.environ["BORING_EVENT_LOG"]).exists(),
+            "싱크가 200 을 받았다 — 스풀로 떨어지지 않는다",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

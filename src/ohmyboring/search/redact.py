@@ -9,6 +9,7 @@ query_log 은 백업과 /query-log 으로 나가므로, 사용자가 질문·답
 from __future__ import annotations
 
 import re
+from typing import Any
 
 #: drudge/src/redact.rs:16 SECRET_PATTERN 과 대안·길이·대소문자 규약이 같다.
 SECRET_PATTERN = (
@@ -31,3 +32,14 @@ _SECRET_RE = re.compile(SECRET_PATTERN)
 def redact(text: str) -> str:
     """아는 토큰 형식을 전부 ‹REDACTED› 로 바꾼 문자열 — 순수."""
     return _SECRET_RE.sub("‹REDACTED›", text)
+
+
+def redact_json_value(value: Any) -> Any:
+    """store.rs redact_json_value — 문자열 값만 가리고 재귀로 날린다(키는 손 안 댄다)."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [redact_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_json_value(item) for key, item in value.items()}
+    return value

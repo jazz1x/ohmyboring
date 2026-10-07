@@ -70,7 +70,15 @@ The verdict write switch: DOOR_VERDICT_WRITER=python (compose default engine) an
 /consumption and MCP tools/call verdict from inside the door (E4-5, ohmyboring.verdict) — the engine's validation
 wording and status codes, response field order and counters, one DB transaction per request, the owner
 supersede refusal as one owner_supersede_refused event; a body that is not a JSON object still goes to the engine
-(engine = rollback). An answer whose content-type is
+(engine = rollback). The events owner switch: DOOR_EVENTS_OWNER=python (compose default engine) answers
+POST /events, GET /events and MCP tools/call events from inside the door (E4-6a, ohmyboring.events) — the
+engine's batch limit (100, exact wording) and empty-batch acceptance, the EventLogReq filters and limit clamp,
+entry field order with key-sorted nested otel objects and chrono-style observed_at, MCP's trimmed/ignored
+argument rules and -32602/-32603 envelope, one DB transaction per request (the engine auto-commits per event);
+the door's own writer events (recall_shadow, read_shadow, remember_shadow, owner_supersede_refused) loop back
+into the door's own /events through the background writer queue — DB work runs via asyncio.to_thread so the
+event loop never blocks on its own event; a body that is not JSON still goes to the engine (engine = rollback).
+An answer whose content-type is
 text/event-stream is relayed chunk by chunk as it arrives, never read to
 completion first, and the upstream socket is closed when the client goes away —
 an endless engine stream stays endless through the door. The parked read behind
@@ -136,7 +144,7 @@ from typing import Any
 
 import psycopg
 from fastapi import BackgroundTasks, FastAPI, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictInt, StrictStr, ValidationError, field_validator
 from slack_sdk.errors import SlackClientError
 
@@ -145,6 +153,8 @@ from ohmyboring.adapters import embed as embed_adapter
 from ohmyboring.adapters import events as event_log
 from ohmyboring.adapters import vault as vault_notes
 from ohmyboring.entrypoints.http import mcp_recall
+from ohmyboring.events import parse as events_parse
+from ohmyboring.events import run as events_run
 from ohmyboring.gap import parse as gap_parse
 from ohmyboring.gap import pg as gap_pg
 from ohmyboring.recall import answer as recall_answer
@@ -292,6 +302,10 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
     # 판정 쓰기 주인 스위치(E4-5): python 이면 /handover·/consumption·MCP verdict 를 문 안에서 쓰고 답한다.
     if request.method == "POST" and _verdict_writer() == _WRITER_PYTHON:
         if (answered := await _verdict_python(request, body)) is not None:
+            return answered
+    # 사건 주인 스위치(E4-6a): python 이면 POST·GET /events 와 MCP tools/call events 를 문 안에서 쓰고 답한다.
+    if request.method in ("GET", "POST") and _events_owner() == _WRITER_PYTHON:
+        if (answered := await _events_python(request, body)) is not None:
             return answered
     # 빈자리 도구는 스위치와 무관하게 늘 문 안에서 답한다 — 엔진엔 gap 이 없다.
     if request.method == "POST" and request.url.path == "/mcp":
@@ -888,6 +902,93 @@ async def _verdict_python(request: Request, body: bytes) -> Response | None:
     if path not in _VERDICT_HTTP_PATHS or (data := _http_json_object(body)) is None:
         return None
     return await _verdict_http(path, data, request)
+
+
+#: 사건 주인 스위치(E4-6a) — engine(기본)이면 프록시 그대로, python 이면 문 안의 사건 길
+#: (ohmyboring.events)이 POST·GET /events 와 MCP tools/call events 를 한 트랜잭션으로 쓰고 읽고
+#: 엔진 답 모양으로 답한다. 운영 기본은 engine — 켜기는 사본 DB 대조(scripts/events-parity.py) 뒤
+#: 오케스트레이터가 한다.
+_EVENTS_OWNER_ENV = "DOOR_EVENTS_OWNER"
+
+
+def _events_owner() -> str:
+    """사건 주인 — python 만 켬, 그 밖의 값·부재는 전부 engine(실수로 켜지지 않게)."""
+    return _WRITER_PYTHON if os.environ.get(_EVENTS_OWNER_ENV) == _WRITER_PYTHON else "engine"
+
+
+def _events_deps(request: Request) -> events_run.Deps:
+    dsn = os.environ.get("DOOR_PG_DSN")
+    return events_run.Deps(connect=(lambda: psycopg.connect(dsn)) if dsn else None)
+
+
+async def _events_run(
+    run: Any, arg: Any, request: Request
+) -> Either[Any, events_parse.Rejected | events_run.Failed | events_run.StoreOff]:
+    """사건 길 한 바퀴 — 예상 못한 고장도 Failed 값으로(엔진 500 / -32603 과 같이). DB 는
+    스레드에서 — 문이 자기 /events 로 자기 사건을 돌려 본낼 때 이벤트 루프를 막지 않는다."""
+    try:
+        return await asyncio.to_thread(run, arg, _events_deps(request))
+    except Exception as e:  # noqa: BLE001 — 한 자리에서 값으로 접는다
+        print(f"[door] events owner failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return Err(events_run.Failed(f"{type(e).__name__}: {e}"))
+
+
+def _events_http_failure(
+    failure: events_parse.Rejected | events_run.Failed | events_run.StoreOff,
+) -> Response:
+    match failure:
+        case events_parse.Rejected(message, status):
+            if message.startswith("Failed to deserialize query string"):
+                # axum Query<serde_urlencoded> 거절은 JSON 이 아니라 평문 — 쿼리 모양 400 만 이렇다.
+                return PlainTextResponse(message, status_code=status)
+            return JSONResponse({"error": message}, status_code=status)
+        case events_run.Failed(message) | events_run.StoreOff(message):
+            return JSONResponse({"error": message}, status_code=500)
+
+
+async def _events_http(request: Request, body: bytes) -> Response:
+    if request.method == "GET":
+        result = await _events_run(events_run.read, request.url.query, request)
+    else:
+        result = await _events_run(events_run.ingest, json.loads(body), request)
+    match result:
+        case Err(failure):
+            return _events_http_failure(failure)
+        case Ok(payload):
+            return JSONResponse(payload)
+
+
+async def _events_mcp(request_id: Any, arguments: dict, request: Request) -> Response:
+    match await _events_run(events_run.mcp_read, arguments, request):
+        case Err(events_run.StoreOff(message)):
+            return _verdict_mcp_error(request_id, -32603, message)
+        case Err(events_parse.Rejected(message, _)):
+            return _verdict_mcp_error(request_id, -32602, message)
+        case Err(failure):
+            return _verdict_mcp_error(request_id, -32603, f"events: {failure.message}")
+        case Ok(payload):
+            return _verdict_mcp_result(payload, request_id)
+
+
+async def _events_python(request: Request, body: bytes) -> Response | None:
+    """스위치 켬 — 이 요청이 사건 길이면 문이 답하고, 아니면 None(그대로 프록시 길로).
+
+    엔진은 어떤 JSON 값이든 사건 본문으로 받으니 POST 는 객체에만 국한하지 않는다. 본문이 JSON
+    이 아니면 None: 엔진이 자기 말로 거절한다(판정 스위치와 같은 규약)."""
+    path = request.url.path
+    if path == "/mcp":
+        if (call := _mcp_tools_call(body)) is None or call[0] != "events":
+            return None
+        rpc = _http_json_object(body) or {}
+        return await _events_mcp(rpc.get("id"), call[1], request)
+    if path != "/events" or request.method not in ("GET", "POST"):
+        return None
+    if request.method == "POST":
+        try:
+            json.loads(body)
+        except (ValueError, UnicodeDecodeError):
+            return None
+    return await _events_http(request, body)
 
 
 #: ── E4-1 일곱 레지스터 읽기 — 읽기 그림자 + 읽기 주인 스위치 ────────────────
