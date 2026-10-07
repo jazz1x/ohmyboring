@@ -153,6 +153,8 @@ python3 src/ohmyboring/search/test_pg.py
 python3 src/ohmyboring/registers/test_pg.py
 python3 src/ohmyboring/verdict/test_verdict.py
 python3 scripts/test_verdict_parity.py
+python3 src/ohmyboring/events/test_events.py
+python3 scripts/test_events_parity.py
 python3 src/ohmyboring/search/test_redact.py
 echo "6) shell destructive-path guardrails (restore-db)…"
 sh scripts/test_restore_db.sh

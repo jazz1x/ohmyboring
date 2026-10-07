@@ -59,6 +59,19 @@ class BatchTests(unittest.TestCase):
             case other:
                 self.fail(f"expected Ok, got {other!r}")
 
+    def test_empty_batch_never_touches_the_store_but_still_needs_one(self):
+        """엔진은 사건 루프를 안 돌아 표를 안 만지지만, 저장소 확인 자체는 먼저다."""
+        match events_run.ingest({"events": []}, events_run.Deps(None)):
+            case Err(events_run.StoreOff()):
+                pass
+            case other:
+                self.fail(f"expected StoreOff, got {other!r}")
+        match events_run.ingest({"events": []}, self.deps()):
+            case Ok(payload):
+                self.assertEqual(payload, {"accepted": 0})
+            case other:
+                self.fail(f"expected Ok, got {other!r}")
+
     def test_single_object_body_is_one_event(self):
         match events_parse.event_batch({"component": "door", "event": "recall_shadow"}):
             case Ok(events):

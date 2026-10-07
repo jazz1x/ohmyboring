@@ -58,7 +58,10 @@ def _transact(deps: Deps, work: Callable[[Any], Any]) -> Either[Any, Failed | St
 
 
 def ingest(body: Any, deps: Deps) -> Either[dict[str, Any], events_parse.Rejected | Failed | StoreOff]:
-    """POST /events — 저장소 확인(엔진 먼저) → 묶음 검사 → 한 트랜잭션으로 전부 적는다."""
+    """POST /events — 저장소 확인(엔진 먼저) → 묶음 검사 → 한 트랜잭션으로 전부 적는다.
+
+    빈 묶음은 표를 안 만진다 — 엔진은 사건 루프를 한 바퀴도 안 돌아 저장소 호출 없이
+    {"accepted": 0} 만 낸다."""
     if deps.connect is None:
         return Err(StoreOff())
     match events_parse.event_batch(body):
@@ -66,6 +69,8 @@ def ingest(body: Any, deps: Deps) -> Either[dict[str, Any], events_parse.Rejecte
             return Err(rejected)
         case Ok(events):
             pass
+    if not events:
+        return Ok({"accepted": 0})
 
     def work(cur: Any) -> dict[str, Any]:
         for event in events:

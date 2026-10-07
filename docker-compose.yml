@@ -125,6 +125,7 @@ services:
       DOOR_REGISTER_READER: ${DOOR_REGISTER_READER:-python}
       DOOR_RECALL_READER: ${DOOR_RECALL_READER:-python}
       DOOR_VERDICT_WRITER: ${DOOR_VERDICT_WRITER:-engine}
+      DOOR_EVENTS_OWNER: ${DOOR_EVENTS_OWNER:-engine}
     volumes:
       - ./vault:/vault                   # remember writes notes here when DOOR_REMEMBER_WRITER=python
       # The folder, not the file: an editor that saves by rename swaps the inode, and a file
