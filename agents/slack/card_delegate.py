@@ -75,10 +75,14 @@ def build_judge_prompt(
     proposed_kind: str,
     evidence: str,
     comments: list[OwnerComment] = (),
+    *,
+    unclear: bool = False,
 ) -> str:
     """One delegate press's whole question: the claim, the sentence the session-end scorer
     caught it in, the note's own text, and — when the owner left any on this note — the
-    owner's own words verbatim, newest first (at most COMMENTS_IN_PROMPT). The prompt is
+    owner's own words verbatim, newest first (at most COMMENTS_IN_PROMPT). `unclear` is the
+    owner's 「모르겠음」 on this note's review rows: the prompt then carries the one-line
+    signal telling the model to write easier. The prompt is
     Korean, the same language card_advice builds its prompt in — the local model answers
     right/wrong about the claim, never picking an engine kind itself (that fold is
     parse_judgment's job)."""
@@ -97,7 +101,9 @@ def build_judge_prompt(
     return (
         f"검토할 주장: {_KIND_CLAIM[proposed_kind]}. 이 주장이 아래 근거 문장과 노트 본문에 맞는지 판정한다.\n\n"
         f"근거 문장(세션에서 실제로 나온 문장):\n{evidence_line}\n\n"
-        f"노트 경로: {note_path}\n{body}{owner_words}\n\n"
+        f"노트 경로: {note_path}\n{body}{owner_words}"
+        + (f"\n{card_press.UNCLEAR_SIGNAL}" if unclear else "")
+        + "\n\n"
         "주장이 맞으면 아래 JSON 하나만 출력해라:\n"
         '{"verdict": "right", "reason": "왜 맞는지 한 문장"}\n\n'
         "주장이 틀리면:\n"
@@ -207,6 +213,15 @@ def comments_for_note(note_path: str) -> list[OwnerComment]:
     instead of judging as if the owner had said nothing."""
     return card_press.owner_comments(
         fetch_events("card_comment", COMMENT_WINDOW_HOURS), "review", note=note_path
+    )
+
+
+def unclear_for_note(note_path: str) -> bool:
+    """Whether the owner pressed 「모르겠음」 on this note's review rows — the delegate prompt
+    then carries the one-line signal. OSError when the 사건 cannot be read: a dead read must
+    fail the judgment, never judge as if the owner had pressed nothing."""
+    return card_press.owner_unclear(
+        fetch_events("card_unclear", COMMENT_WINDOW_HOURS), "review", note=note_path
     )
 
 

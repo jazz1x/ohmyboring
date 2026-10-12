@@ -565,17 +565,17 @@ class CardV2ShapeTests(unittest.TestCase):
         plain = cv.build_blocks([proposal], reviews=[], lang="ko")
         self.assertNotIn("에이전트가 가른 것", _blocks_text(plain))
 
-    def test_a_review_row_shows_the_plain_reason_and_groups_its_works(self):
-        # 이유 한 줄은 판정 종류별 쉬운 문구. 채점기 문장은 근거 줄로 따로 — 길이가 TEXT_FLOOR
-        # 이상일 때만. 묶인 줄: 작업을 나열하고 버튼 값은 묶인 세션 전부를 싣는다 — 판정은
-        # 전부에 간다. 근거 없는 옛 판정은 근거 없음 한 줄로 정직하게.
+    def test_a_review_row_shows_a_whole_korean_sentence_as_its_evidence_and_groups_its_works(self):
+        # 고정 이유 문구는 없다 — 채점기 문장은 온전한 한국어 문장일 때만 근거 줄로 오른다.
+        # 묶인 줄: 작업을 나열하고 버튼 값은 묶인 세션 전부를 싣는다 — 판정은 전부에 간다.
+        # 근거 없는 옛 판정은 근거 줄 없이 그대로.
         sentence = "wiki-0700 의 폴 접근이 낡았다고 봤어요 — 소켓을 닫고 재활용하니 그렇습니다. " * 2
         reasoned = cc.ProposedVerdict(
             session_id="s1", note="/vault/wiki/wiki-0700.md", kind="contested", at="t-1", reason=sentence
         )
         strings = card_i18n.STRINGS["ko"]
         text = cv._review_tag_block(reasoned, strings)["text"]["text"]
-        self.assertIn(strings["review_reason_contested"], text)
+        self.assertNotIn("이유:", text)
         self.assertIn(strings["review_evidence"].format(quote=" ".join(sentence.split())), text)
 
         grouped = cc.ProposedVerdict(
@@ -588,7 +588,7 @@ class CardV2ShapeTests(unittest.TestCase):
             works=["proj · 09-29 · 첫 작업", "", "proj · 09-30 · 셋째 작업"],
         )
         grouped_text = cv._review_tag_block(grouped, strings)["text"]["text"]
-        self.assertIn(strings["review_reason_contested"], grouped_text)
+        self.assertNotIn("이유:", grouped_text)
         self.assertNotIn("근거:", grouped_text)
         self.assertIn("작업: proj · 09-29 · 첫 작업; 세션 `s2` (세션 노트 없음); 외 1건", grouped_text)
 
@@ -603,6 +603,7 @@ class CardV2ShapeTests(unittest.TestCase):
                 "kind": "contested",
                 "sessions": ["s1", "s2", "s3"],
                 "note": "wiki-2498",
+                "slot": "judge_reason",
             },
         )
 
@@ -610,7 +611,8 @@ class CardV2ShapeTests(unittest.TestCase):
             session_id="s1", note="/vault/wiki/wiki-0700.md", kind="contested", at="t-1"
         )
         bare_text = cv._review_tag_block(bare, strings)["text"]["text"]
-        self.assertIn(strings["review_reason_none"], bare_text)
+        self.assertNotIn("이유:", bare_text)
+        self.assertNotIn("근거:", bare_text)
         self.assertIn("작업: 세션 `s1` (세션 노트 없음)", bare_text)
 
     def test_repair_and_review_rows_carry_their_values_in_card_row_and_advice_keeps_its_own(self):
@@ -652,9 +654,20 @@ class CardV2ShapeTests(unittest.TestCase):
                         "lane": "repair",
                         "subject": "foodspring-front",
                         "variants": ["foodspring front", "foodspring-front"],
+                        "slot": "advice",
                     },
                 ),
-                (2, "review", {"lane": "review", "session": "s1", "kind": "contested", "note": "wiki-0700"}),
+                (
+                    2,
+                    "review",
+                    {
+                        "lane": "review",
+                        "session": "s1",
+                        "kind": "contested",
+                        "note": "wiki-0700",
+                        "slot": "judge_reason",
+                    },
+                ),
             ],
         )
 

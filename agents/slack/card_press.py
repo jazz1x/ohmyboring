@@ -46,6 +46,7 @@ from card_types import (
     RepairPress,
     ReviewPress,
     RowUnread,
+    UNCLEAR,
 )
 
 from ohmyboring.adapters.engine import OWNER
@@ -174,6 +175,14 @@ def is_comment_action(payload: dict) -> bool:
     return isinstance(action_id, str) and action_id.endswith(f":{COMMENT}")
 
 
+def is_unclear_action(payload: dict) -> bool:
+    """Whether a block_actions payload is a 「모르겠음」 press — by its action_id's last word."""
+    actions = payload.get("actions")
+    first = actions[0] if isinstance(actions, list) and actions else None
+    action_id = first.get("action_id") if isinstance(first, dict) else None
+    return isinstance(action_id, str) and action_id.endswith(f":{UNCLEAR}")
+
+
 def _owner_user(payload: dict, owner_id: str | None) -> str | Rejected:
     user_obj = payload.get("user")
     user = user_obj.get("id") if isinstance(user_obj, dict) else None
@@ -207,6 +216,29 @@ def parse_comment_open(payload: dict, owner_id: str | None) -> CommentOpen | Rej
         return Rejected(reason="no trigger_id")
     return CommentOpen(
         idx=int(parts[1]), user=user, card_ts=where[0], channel=where[1], trigger_id=trigger_id
+    )
+
+
+def parse_unclear(payload: dict, owner_id: str | None) -> NeedsRow | Rejected:
+    """A 「모르겠음」 press in, the row's key out — or Rejected. No modal, no value: the row
+    is read back by (card_ts, idx) like the comment path; `choice` rides the UNCLEAR word."""
+    if payload.get("type") != "block_actions":
+        return Rejected(reason="not block_actions")
+    actions = payload.get("actions")
+    if not isinstance(actions, list) or len(actions) != 1 or not isinstance(actions[0], dict):
+        return Rejected(reason="not exactly one action")
+    action_id = str(actions[0].get("action_id"))
+    parts = action_id.split(":")
+    if len(parts) != 3 or parts[0] != "card" or parts[2] != UNCLEAR or not parts[1].isdigit():
+        return Rejected(reason=f"unknown action_id {action_id!r}")
+    user = _owner_user(payload, owner_id)
+    if isinstance(user, Rejected):
+        return user
+    where = _card_where(payload)
+    if isinstance(where, Rejected):
+        return where
+    return NeedsRow(
+        idx=int(parts[1]), choice=UNCLEAR, user=user, card_ts=where[0], channel=where[1]
     )
 
 
@@ -427,6 +459,66 @@ def comment_fields(submit: CommentSubmit, row: dict) -> dict | Rejected:
             "variants": variants if isinstance(variants, list) else [],
         }
     return Rejected(reason=f"{lane!r} rows take no comment")
+
+
+def unclear_fields(press: NeedsRow, row: dict) -> dict | Rejected:
+    """The card_unclear 사건's fields for one 「모르겠음」 press on `row` (a card_row value).
+    judge is owner, like a comment — this is the owner's word too. `slot` names which prose
+    the row showed (the card_row carries it from build time; an old row without one falls
+    back to its lane's prose). Only the repair and review lanes take the press."""
+    base = {"judge": OWNER, "card_ts": press.card_ts, "idx": press.idx}
+    lane = row.get("lane")
+    if lane == "review":
+        note, session = row.get("note"), row.get("session")
+        if (
+            not isinstance(note, str)
+            or not note
+            or "/" in note
+            or not isinstance(session, str)
+            or not session
+        ):
+            return Rejected(reason="review row without session or note")
+        sessions = row.get("sessions")
+        return {
+            **base,
+            "lane": "review",
+            "session_id": session,
+            "sessions": list(sessions) if isinstance(sessions, list) and sessions else [session],
+            "note": card_view.note_path(note),
+            "proposed_kind": row.get("kind"),
+            "slot": row.get("slot") if isinstance(row.get("slot"), str) else "judge_reason",
+        }
+    if lane == "repair":
+        subject = row.get("subject")
+        if not isinstance(subject, str) or not subject:
+            return Rejected(reason="repair row without subject")
+        variants = row.get("variants")
+        return {
+            **base,
+            "lane": "repair",
+            "subject": subject,
+            "variants": variants if isinstance(variants, list) else [],
+            "slot": row.get("slot") if isinstance(row.get("slot"), str) else "advice",
+        }
+    return Rejected(reason=f"{lane!r} rows take no unclear press")
+
+
+#: The one-line signal a judge's prompt carries when the owner pressed 「모르겠음」 on the row —
+#: every reader renders this sentence verbatim, never a paraphrase.
+UNCLEAR_SIGNAL = "오너가 이 줄의 지난 글을 이해하지 못했다 — 더 쉽게 써라"
+
+
+def owner_unclear(entries: list[dict], lane: str, **key: object) -> bool:
+    """Whether the owner pressed 「모르겠음」 on a row of `lane` whose 사건 fields equal `key`
+    (note=… / subject=…) — what a judge reads before it writes. Only judge=owner rows count."""
+    for entry in entries:
+        attrs = entry.get("attributes") if isinstance(entry, dict) else None
+        if not isinstance(attrs, dict) or attrs.get("judge") != OWNER or attrs.get("lane") != lane:
+            continue
+        if any(attrs.get(name) != want for name, want in key.items()):
+            continue
+        return True
+    return False
 
 
 def owner_comments(entries: list[dict], lane: str, **key: object) -> list[OwnerComment]:

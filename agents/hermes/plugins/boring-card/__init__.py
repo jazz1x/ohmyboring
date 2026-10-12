@@ -207,7 +207,13 @@ def register(ctx: Any) -> None:
             ValueError,
         ) as e:  # an unread comment is a failed judgment, never a judgment as if the owner were silent
             return card_types.DelegationFailed(reason=f"오너 코멘트를 못 읽었다: {' '.join(str(e).split())}")
-        prompt = card_delegate.build_judge_prompt(path, text, press.kind, evidence, comments)
+        try:
+            unclear = await asyncio.to_thread(card_delegate.unclear_for_note, path)
+        except OSError as e:
+            return card_types.DelegationFailed(reason=f"오너 모르겠음 기록을 못 읽었다: {' '.join(str(e).split())}")
+        prompt = card_delegate.build_judge_prompt(
+            path, text, press.kind, evidence, comments, unclear=unclear
+        )
         try:
             result = await llm.acomplete(
                 [{"role": "user", "content": prompt}],
@@ -301,6 +307,57 @@ def register(ctx: Any) -> None:
                 _log_unrendered(ref, reason)
             case _:
                 await _put(ref, current, row)
+
+    async def _unclear(body) -> None:
+        """A 「모르겠음」 press: no modal, no model — the row read back by (card_ts, idx), one
+        card_unclear 사건 with judge=owner and the row's identity, then the row's 「받았어요」
+        over its buttons, which stay. Whatever cannot be read or written shows on the row
+        as a failure — and the buttons stay."""
+        parsed = card_press.parse_unclear(body, owner_id=owner_id)
+        if isinstance(parsed, card_types.Rejected):
+            _LOG.info("%s: unclear press rejected — %s", _PLUGIN_NAME, parsed.reason)
+            return
+        if not card_press.answerable(parsed.card_ts, time.time()):
+            _LOG.info(
+                "%s: unclear press card_ts=%s idx=%s refused — the card is older than %sh",
+                _PLUGIN_NAME,
+                parsed.card_ts,
+                parsed.idx,
+                card_press.CARD_ANSWERABLE_HOURS,
+            )
+            return
+        lang = card_advice.resolve_lang(boring_config.note_lang())
+        row = await asyncio.to_thread(_read_row, parsed.card_ts, parsed.idx)
+        if isinstance(row, card_types.RowUnread):
+            _LOG.error(
+                "%s: unclear card_ts=%s idx=%s row unread — %s",
+                _PLUGIN_NAME,
+                parsed.card_ts,
+                parsed.idx,
+                row.reason,
+            )
+            await _show(parsed, card_types.Failed(reason=card_i18n.STRINGS[lang]["row_unread_reason"]), lang)
+            return
+        fields = card_press.unclear_fields(parsed, row)
+        if isinstance(fields, card_types.Rejected):
+            _LOG.error(
+                "%s: unclear card_ts=%s idx=%s refused — %s",
+                _PLUGIN_NAME,
+                parsed.card_ts,
+                parsed.idx,
+                fields.reason,
+            )
+            await _show(parsed, card_types.Failed(reason=fields.reason), lang)
+            return
+        try:
+            await asyncio.to_thread(card_effects._live_record, "card_unclear", fields)
+        except Exception as e:  # noqa: BLE001 — a press that was not stored must not look received
+            _LOG.error(
+                "%s: unclear card_ts=%s idx=%s not recorded — %s", _PLUGIN_NAME, parsed.card_ts, parsed.idx, e
+            )
+            await _show(parsed, card_types.Failed(reason=" ".join(str(e).split()) or type(e).__name__), lang)
+            return
+        await _show(parsed, card_view.received_outcome(card_i18n.STRINGS[lang]["button_unclear"]), lang)
 
     async def _open_comment(body) -> None:
         opened = card_press.parse_comment_open(body, owner_id=owner_id)
@@ -529,6 +586,9 @@ def register(ctx: Any) -> None:
             return
         if card_press.is_comment_action(body):
             await _open_comment(body)
+            return
+        if card_press.is_unclear_action(body):
+            await _unclear(body)
             return
         parsed = card_press.parse_press(body, owner_id=owner_id)
         if isinstance(parsed, card_types.Rejected):
