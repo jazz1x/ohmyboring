@@ -436,17 +436,36 @@ def _reason_text(sentence):
     return text if len(text) <= REASON_SENTENCE_MAX else text[: REASON_SENTENCE_MAX - 1] + "…"
 
 
-def _echoed_sentence(raw_sentences, sentences, hit, names):
-    """The first assistant sentence echoing the hit's source name — token-bounded, over the
-    normalized forms, returned as its raw text. That echo is what the used-mark rests on;
-    a stored phrase names the fallback sentence when the basename itself never appears."""
-    for raw, normalized in zip(raw_sentences, sentences):
-        if any(_contains(normalized, name) for name in names):
-            return _reason_text(raw)
-    for raw, normalized in zip(raw_sentences, sentences):
-        if any(_contains(normalized, " ".join(_words(p))) for p in hit.get("phrases") or []):
-            return _reason_text(raw)
-    return ""
+_RECORD_VERB = re.compile(
+    r"남기|남겼|남겨|기록하|기록했|저장하|저장했|적어 ?두|적어 ?뒀|적었|메모로|써 ?두"
+    r"|\b(?:remembered|recorded|saved|wrote|stored|logged|noted)\b",
+    re.IGNORECASE,
+)
+_RECORD_TARGET = re.compile(r"노트|위키|wiki|ohmyboring|\bnote\b|메모|볼트|\bvault\b", re.IGNORECASE)
+
+
+def is_recorded_sentence(sentence):
+    """The sentence reports writing a note down, not using one. Only the session-end proposal
+    path asks this; `hit_was_used` (the frozen PRD §2 scorer) never does."""
+    return bool(_RECORD_VERB.search(sentence) and _RECORD_TARGET.search(sentence))
+
+
+def _echoing_sentences(raw_sentences, sentences, hit, names):
+    """Every assistant sentence echoing the hit's source name — token-bounded, over the
+    normalized forms, returned as raw text. A stored phrase names the fallback sentences
+    when the basename itself never appears."""
+    by_name = [
+        _reason_text(raw)
+        for raw, normalized in zip(raw_sentences, sentences)
+        if any(_contains(normalized, name) for name in names)
+    ]
+    if by_name:
+        return by_name
+    return [
+        _reason_text(raw)
+        for raw, normalized in zip(raw_sentences, sentences)
+        if any(_contains(normalized, " ".join(_words(p))) for p in hit.get("phrases") or [])
+    ]
 
 
 def consumption_detail(records, transcript_text):
@@ -471,8 +490,11 @@ def consumption_detail(records, transcript_text):
             for n in names:
                 path_by_name.setdefault(n, path)
             if hit_was_used(hit, blob, prompt_words) and path not in used:
-                used.append(path)
-                reasons[("used", path)] = _echoed_sentence(raw_sentences, sentences, hit, names)
+                echoes = _echoing_sentences(raw_sentences, sentences, hit, names)
+                in_work = [e for e in echoes if not is_recorded_sentence(e)]
+                if in_work or not echoes:
+                    used.append(path)
+                    reasons[("used", path)] = in_work[0] if in_work else ""
             if path not in contested and any(argued_with(s, names) for s in sentences):
                 contested.append(path)
                 reasons[("contested", path)] = next(

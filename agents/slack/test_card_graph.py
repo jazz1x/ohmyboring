@@ -2374,8 +2374,64 @@ class LiveProposedTests(unittest.TestCase):
                 mock.patch.object(card_live, "_live_events", side_effect=self._events([row])),
             ):
                 out = card_live._live_proposed(24)
-        self.assertEqual(out[0].work, "p · 09-01 · 첫 노트", "the session's first note names it, every run")
+        self.assertEqual(out[0].work, "p · 09-02 · 둘째 노트", "the latest note on or before the proposal")
         self.assertIn("broken", out[0].note_title)
+
+    def test_the_work_line_is_the_session_note_latest_at_or_before_the_proposal(self):
+        def work_at(observed_at: str) -> str:
+            with tempfile.TemporaryDirectory() as vault:
+                wiki = os.path.join(vault, "wiki")
+                os.makedirs(wiki)
+                for n, day, title in (("0100", "2026-09-24", "초기"), ("0200", "2026-10-07", "후기")):
+                    with open(os.path.join(wiki, f"wiki-{n}.md"), "w", encoding="utf-8") as f:
+                        f.write(
+                            f"---\ntitle: {title}\nproject: p\ndate: {day}\nomb_session_id: s-1\n---\nb\n"
+                        )
+                row = {
+                    "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-0900.md", "kind": "used"},
+                    "observed_at": observed_at,
+                }
+                with (
+                    mock.patch.dict(os.environ, {"BORING_VAULT_DIR": vault}),
+                    mock.patch.object(card_live, "_live_events", side_effect=self._events([row])),
+                ):
+                    return card_live._live_proposed(24)[0].work
+
+        self.assertEqual(work_at("2026-10-12T03:00:00+00:00"), "p · 10-07 · 후기")
+        self.assertEqual(work_at("2026-09-30T03:00:00+00:00"), "p · 09-24 · 초기")
+        self.assertEqual(
+            work_at("2026-09-20T03:00:00+00:00"), "p · 09-24 · 초기", "none yet → the first note"
+        )
+
+    def test_a_used_proposal_whose_reason_reports_writing_the_note_is_hidden_and_counted(self):
+        def row(session: str, note: str, kind: str, reason: str) -> dict:
+            return {
+                "attributes": {"session_id": session, "note": note, "kind": kind, "reason": reason},
+                "observed_at": "2026-10-12T03:00:00+00:00",
+            }
+
+        rows = [
+            row("s-1", "/vault/wiki/wiki-1.md", "used", "ohmyboring(wiki-3868)에도 남겼어요"),
+            row("s-2", "/vault/wiki/wiki-2.md", "used", "per wiki-2 this is the recycled-socket case"),
+            row("s-3", "/vault/wiki/wiki-3.md", "contested", "wiki-3 is outdated, 노트에 남겼어요"),
+        ]
+        err = io.StringIO()
+        with (
+            mock.patch.object(card_live, "_live_events", side_effect=self._events(rows)),
+            mock.patch.object(card_live, "_session_works", return_value={}),
+            contextlib.redirect_stderr(err),
+        ):
+            out = card_live._live_proposed(24)
+        self.assertEqual(sorted(r.session_id for r in out), ["s-2", "s-3"])
+        self.assertIn("[card] 1 used proposal(s) hidden", err.getvalue())
+
+        with (
+            mock.patch.object(card_live, "_live_events", side_effect=self._events(rows[1:])),
+            mock.patch.object(card_live, "_session_works", return_value={}),
+            contextlib.redirect_stderr(err := io.StringIO()),
+        ):
+            card_live._live_proposed(24)
+        self.assertNotIn("hidden", err.getvalue())
 
 
 class MainTests(unittest.TestCase):

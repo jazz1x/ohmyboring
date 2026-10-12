@@ -858,6 +858,48 @@ def test_the_claim_text_never_enters_the_ledger():
     assert "SECRETVALUE" not in json.dumps(row)
 
 
+def _recorded_record():
+    return uptake_core.injection_record("s1", "why did the pool die", [_hit()], 3)
+
+
+def test_the_frozen_scorer_still_counts_a_sentence_that_only_records_the_note():
+    record = _recorded_record()
+    transcript = "[user] why did the pool die\n[assistant] I saved the fix to wiki-0007 in ohmyboring.\n"
+    blob = " ".join(uptake_core._words(uptake_core.assistant_text(transcript)))
+    assert uptake_core.hit_was_used(record["hits"][0], blob, record["prompt_words"]) is True
+    assert uptake_core.session_uptake([record], transcript)._asdict() == {
+        "used_hits": 1,
+        "total_hits": 1,
+        "used_prompts": 1,
+        "total_prompts": 1,
+        "used_controls": 0,
+        "total_controls": 0,
+        "used_control_prompts": 0,
+    }
+
+
+def test_consumption_detail_does_not_mark_a_note_used_for_a_sentence_that_records_it():
+    record = _recorded_record()
+    path = "/vault/wiki/wiki-0007.md"
+
+    ko = "[user] why did the pool die\n[assistant] 이 내용은 ohmyboring(wiki-0007)에도 남겼어요.\n"
+    assert uptake_core.consumption_detail([record], ko)[0] == []
+
+    en = "[user] why did the pool die\n[assistant] I saved the fix to wiki-0007.\n"
+    assert uptake_core.consumption_detail([record], en)[0] == []
+
+    both = (
+        "[user] why did the pool die\n"
+        "[assistant] I saved the fix to wiki-0007. per wiki-0007 this is the recycled-socket case.\n"
+    )
+    used, _, _, reasons = uptake_core.consumption_detail([record], both)
+    assert used == [path]
+    assert reasons[("used", path)] == "per wiki-0007 this is the recycled-socket case"
+
+    plain = "[user] why did the pool die\n[assistant] wiki-0007 explains the recycled socket.\n"
+    assert uptake_core.consumption_detail([record], plain)[0] == [path]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
