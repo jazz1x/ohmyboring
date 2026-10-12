@@ -65,6 +65,7 @@ from retriever import BoringRetriever  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import label_core  # noqa: E402
+import uptake_core  # noqa: E402
 import vault_note  # noqa: E402
 
 
@@ -353,20 +354,28 @@ def _proposed_rows(since_hours: int) -> list[ProposedVerdict]:
     """Every session-end verdict_proposed event as a value, event order. A row missing a
     field this value needs is malformed — raise (F5/ROP), never skip."""
     parsed: list[ProposedVerdict] = []
+    hidden = 0
     for entry in _live_events("verdict_proposed", since_hours):
         attrs = entry.get("attributes") or {}
         try:
-            parsed.append(
-                ProposedVerdict(
-                    session_id=attrs["session_id"],
-                    note=attrs["note"],
-                    kind=attrs["kind"],
-                    at=entry["observed_at"],
-                    reason=attrs.get("reason") or "",
-                )
+            row = ProposedVerdict(
+                session_id=attrs["session_id"],
+                note=attrs["note"],
+                kind=attrs["kind"],
+                at=entry["observed_at"],
+                reason=attrs.get("reason") or "",
             )
         except (KeyError, TypeError, ValidationError) as e:
             raise ValueError(f"malformed verdict_proposed row: {attrs!r}: {e}") from e
+        if row.kind == "used" and uptake_core.is_recorded_sentence(row.reason):
+            hidden += 1
+        else:
+            parsed.append(row)
+    if hidden:
+        print(
+            f"[card] {hidden} used proposal(s) hidden — the sentence reports writing the note, not using it",
+            file=sys.stderr,
+        )
     return parsed
 
 
@@ -374,9 +383,10 @@ def _with_titles_and_works(rows: list[ProposedVerdict]) -> list[ProposedVerdict]
     works = _session_works() if rows else {}
     out = []
     for r in rows:
-        update: dict = {"note_title": _note_title(r.note), "work": works.get(r.session_id, "")}
+        day = _proposal_day(r.at)
+        update: dict = {"note_title": _note_title(r.note), "work": _work_at(works.get(r.session_id, []), day)}
         if r.sessions:
-            update["works"] = [works.get(s, "") for s in r.sessions]
+            update["works"] = [_work_at(works.get(s, []), day) for s in r.sessions]
         out.append(r.model_copy(update=update))
     return out
 
@@ -536,11 +546,14 @@ def _work_line(fields: dict[str, str]) -> str:
     return " · ".join(part for part in parts if part)
 
 
-def _session_works() -> dict[str, str]:
-    """omb_session_id → the work line of the note that session left, over the whole vault. A
-    session with more than one note (21 of 1,650 on 2026-09-30) names its first by file name —
-    the note it left first — so the card says the same thing on every run."""
-    works: dict[str, str] = {}
+_WIKI_NUMBER = re.compile(r"wiki-(\d+)\.md$")
+
+
+def _session_works() -> dict[str, list[tuple[int, str, str]]]:
+    """omb_session_id → `(wiki number, date, work line)` of every note that session left, in
+    file-name order, over the whole vault. A long session spans weeks, so which note names
+    its work depends on the proposal's time (`_work_at`)."""
+    works: dict[str, list[tuple[int, str, str]]] = {}
     unreadable = 0
     for path in sorted(glob.glob(os.path.join(_vault_dir(), "wiki", "*.md"))):
         try:
@@ -550,11 +563,26 @@ def _session_works() -> dict[str, str]:
             unreadable += 1
             continue
         fields = _frontmatter_fields(head)
-        if (session := fields.get("omb_session_id")) and session not in works:
-            works[session] = _work_line(fields)
+        if session := fields.get("omb_session_id"):
+            number = int(m.group(1)) if (m := _WIKI_NUMBER.search(path)) else 0
+            works.setdefault(session, []).append((number, fields.get("date", "")[:10], _work_line(fields)))
     if unreadable:
         print(f"[card] {unreadable} vault note(s) unreadable — their sessions show by id", file=sys.stderr)
     return works
+
+
+def _work_at(notes: list[tuple[int, str, str]], proposal_day: str) -> str:
+    """The latest note (highest wiki number) the session left on or before the proposal's day;
+    none that early → the session's first note."""
+    if not notes:
+        return ""
+    before = [n for n in notes if n[1] and n[1] <= proposal_day]
+    return max(before, key=lambda n: n[0])[2] if before else notes[0][2]
+
+
+def _proposal_day(at: str) -> str:
+    kst = timezone(timedelta(hours=9))
+    return datetime.fromisoformat(at.replace("Z", "+00:00")).astimezone(kst).date().isoformat()
 
 
 def _held_repair_subjects() -> set[str]:
