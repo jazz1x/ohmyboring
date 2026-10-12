@@ -75,10 +75,14 @@ def build_prompt(
     past_reviews: list[dict[str, Any]],
     samples: list[dict[str, Any]],
     comments: list[OwnerComment] = (),
+    *,
+    unclear: bool = False,
 ) -> str:
     """Spelling alone cannot separate a name from a common phrase (v1 called 18/20 same_name),
     so the question carries what the memory actually says under this subject — and the
-    owner's own comments on the group, verbatim, newest first (at most COMMENTS_IN_PROMPT)."""
+    owner's own comments on the group, verbatim, newest first (at most COMMENTS_IN_PROMPT).
+    `unclear` is the owner's 「모르겠음」 on the group's rows: the prompt then carries the
+    one-line signal telling the model to write easier."""
     variants = ", ".join(str(v) for v in group["variants"])
     lines = [
         "기억 속 사실들의 주제 하나를 판정한다. 철자 목록은 공백·하이픈·밑줄만 다르다 — 철자가 같은지는 묻지 않는다.",
@@ -108,6 +112,8 @@ def build_prompt(
         list(comments)[:COMMENTS_IN_PROMPT],
         "소유자가 이 묶음에 직접 남긴 말 (최근 순, 원문 — 판정에 반영해라):",
     )
+    if unclear:
+        lines += ["", card_press.UNCLEAR_SIGNAL]
     lines += [
         "",
         "판정 셋:",
@@ -247,6 +253,15 @@ def comments_by_subject(
     }
 
 
+def unclear_by_subject(entries: list[dict[str, Any]], groups: list[dict[str, Any]]) -> dict[str, bool]:
+    """card_unclear 사건 → 오늘 후보 묶음의 subject 마다 오너의 「모르겠음」 여부. 판정
+    프롬프트의 입력 — 참이면 프롬프트에 더 쉽게 쓰라는 신호 한 줄이 실린다."""
+    return {
+        subject: card_press.owner_unclear(entries, "repair", subject=subject)
+        for subject in {str(group["subject"]) for group in groups}
+    }
+
+
 def reviews_by_subject(entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """repair_reviewed 사건 rows → subject 가리키는 보류·거절 기록들. 판정 프롬프트의 입력.
     subject 가 없는 행은 ValueError — _held_repair_subjects 가 세우던 문지방 그대로."""
@@ -274,11 +289,15 @@ def run(
     cap: int = DAILY_JUDGE_CAP,
     comments: Mapping[str, list[OwnerComment]] | None = None,
     reopened: frozenset[GroupKey] = frozenset(),
+    unclear: Mapping[str, bool] | None = None,
 ) -> tuple[int, int]:
     """(judged_n, failed_n). A model that cannot be reached raises and stops the run — the
     unjudged groups stay unjudged and come back tomorrow. The owner's comments on a group
-    ride its prompt, and the judgment 사건 names the 사건 ids it was given (`comment_ids`)."""
+    ride its prompt, and the judgment 사건 names the 사건 ids it was given (`comment_ids`).
+    `unclear` marks groups the owner could not read: their prompts carry the one-line
+    write-easier signal."""
     comments = comments or {}
+    unclear = unclear or {}
     judged_n = 0
     failed_n = 0
     for group in pick(groups, judged, cap, reopened):
@@ -287,7 +306,15 @@ def run(
         facts = samples(variants)
         read = comments.get(subject, [])[:COMMENTS_IN_PROMPT]
         answer = (
-            parse(invoke(build_prompt(group, reviews.get(subject, []), facts, read)), subject, variants)
+            parse(
+                invoke(
+                    build_prompt(
+                        group, reviews.get(subject, []), facts, read, unclear=unclear.get(subject, False)
+                    )
+                ),
+                subject,
+                variants,
+            )
             if facts
             else RepairJudgment(subject=subject, variants=variants, verdict="unsure", reason=NO_FACTS_REASON)
         )
@@ -384,6 +411,7 @@ def main() -> int:
         judged = judged_map(judged_entries)
         reviews = reviews_by_subject(_live_events("repair_reviewed", REVIEW_WINDOW_HOURS))
         comments = comments_by_subject(_live_events("card_comment", COMMENT_WINDOW_HOURS), groups)
+        unclear = unclear_by_subject(_live_events("card_unclear", COMMENT_WINDOW_HOURS), groups)
         reopened = reopened_groups(judged_times(judged_entries), comments)
         judged_n, failed_n = run(
             groups,
@@ -394,6 +422,7 @@ def main() -> int:
             _live_samples,
             comments=comments,
             reopened=reopened,
+            unclear=unclear,
         )
     except (ValueError, OSError) as e:
         # A dead door, a clipped events window, a malformed 사건 row — say why in one line

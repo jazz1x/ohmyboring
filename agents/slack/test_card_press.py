@@ -754,6 +754,68 @@ class CommentParseTests(unittest.TestCase):
         self.assertEqual(lines, ["", "머리", "- 나중", "  둘째 줄", "- 먼저"])
         self.assertEqual(cp.comment_prompt_lines([], "머리"), [])
 
+    def test_the_unclear_press_is_told_apart_and_parsed_into_a_row_key(self):
+        payload = _bare_payload("card:2:unclear")
+        self.assertTrue(cp.is_unclear_action(payload))
+        self.assertFalse(cp.is_unclear_action(_bare_payload("card:2:comment")))
+        self.assertEqual(
+            cp.parse_unclear(payload, owner_id=OWNER),
+            cc.NeedsRow(idx=2, choice=cc.UNCLEAR, user=OWNER, card_ts=CARD_TS, channel=CARD_CH),
+        )
+        self.assertIsInstance(
+            cp.parse_unclear(payload | {"user": {"id": OTHER}}, owner_id=OWNER), cc.Rejected
+        )
+        self.assertIsInstance(cp.parse_unclear(_bare_payload("card:x:unclear"), owner_id=OWNER), cc.Rejected)
+        self.assertIsInstance(cp.parse_press(payload, owner_id=OWNER, row={"lane": "review"}), cc.Rejected)
+
+    def test_the_unclear_event_names_the_owner_the_row_and_the_prose_it_showed(self):
+        press = cc.NeedsRow(idx=2, choice=cc.UNCLEAR, user=OWNER, card_ts=CARD_TS, channel=CARD_CH)
+        review = {
+            "lane": "review",
+            "session": "s1",
+            "sessions": ["s1", "s2"],
+            "kind": "used",
+            "note": "wiki-0700",
+            "slot": "evidence",
+        }
+        self.assertEqual(
+            cp.unclear_fields(press, review),
+            {
+                "judge": "owner",
+                "card_ts": CARD_TS,
+                "idx": 2,
+                "lane": "review",
+                "session_id": "s1",
+                "sessions": ["s1", "s2"],
+                "note": "/vault/wiki/wiki-0700.md",
+                "proposed_kind": "used",
+                "slot": "evidence",
+            },
+        )
+        repair = cp.unclear_fields(
+            press, {"lane": "repair", "subject": "foodspring-front", "variants": ["a b", "a-b"]}
+        )
+        self.assertEqual(
+            (repair["lane"], repair["subject"], repair["variants"], repair["slot"], repair["judge"]),
+            ("repair", "foodspring-front", ["a b", "a-b"], "judge_reason", "owner"),
+        )
+        for row in (
+            {"lane": "advice", "note": "wiki-1"},
+            {"lane": "review", "note": "wiki-1"},
+            {"lane": "repair"},
+        ):
+            self.assertIsInstance(cp.unclear_fields(press, row), cc.Rejected)
+
+    def test_owner_unclear_counts_only_the_owners_press_of_its_lane_and_key(self):
+        def entry(**attrs):
+            return {"id": 1, "attributes": {"judge": "owner", "lane": "repair", **attrs}}
+
+        self.assertTrue(cp.owner_unclear([entry(subject="s")], "repair", subject="s"))
+        self.assertFalse(cp.owner_unclear([entry(subject="t")], "repair", subject="s"))
+        self.assertFalse(cp.owner_unclear([entry(subject="s", judge="agent:x")], "repair", subject="s"))
+        self.assertFalse(cp.owner_unclear([entry(subject="s", lane="review")], "repair", subject="s"))
+        self.assertFalse(cp.owner_unclear([], "repair", subject="s"))
+
     def test_a_delegate_judgment_that_read_comments_names_their_ids_on_the_event(self):
         press = cc.ReviewPress(
             idx=2, choice="delegate", user=OWNER, card_ts=CARD_TS, channel=CARD_CH,
@@ -940,7 +1002,14 @@ class MoreTests(unittest.TestCase):
         ]
         value = cp.row_from_entries(page_entries, "2.0", 5)
         self.assertEqual(
-            value, {"lane": "review", "session": "sess-agent-1", "kind": "used", "note": "wiki-0700"}
+            value,
+            {
+                "lane": "review",
+                "session": "sess-agent-1",
+                "kind": "used",
+                "note": "wiki-0700",
+                "slot": "judge_reason",
+            },
         )
         self.assertIsInstance(cp.row_from_entries(entries, "2.0", 5), cc.RowUnread)
 

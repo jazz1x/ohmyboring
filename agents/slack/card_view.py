@@ -50,6 +50,7 @@ from card_types import (  # noqa: E402
     COMMENT_MAX_CHARS,
     MORE_ACTION_PREFIX,
     SAMPLE_CONFIRM,
+    UNCLEAR,
     ButtonVerdict,
     CardRow,
     Confirmation,
@@ -306,6 +307,7 @@ def _bare_button(idx: int, choice: str, label: str) -> dict:
 def _repair_actions_block(idx: int, strings: dict[str, str]) -> dict:
     elements = [_bare_button(idx, choice, strings[f"repair_button_{choice}"]) for choice in CHOICES]
     elements.append(_bare_button(idx, COMMENT, strings["repair_button_comment"]))
+    elements.append(_bare_button(idx, UNCLEAR, strings["button_unclear"]))
     return {"type": "actions", "elements": elements}
 
 
@@ -495,6 +497,28 @@ def _is_whole_sentence(reason: str, excerpt: str) -> bool:
     return excerpt == text and not opens_mid_sentence and bool(_SENTENCE_END.search(text))
 
 
+def _is_korean(text: str) -> bool:
+    """한국어 판정: 한글 음절이 글자(한글+라틴)의 절반 이상. 오너가 읽을 문장만
+    근거 줄에 실린다 — 영어 문장이나 낱말 조각은 안 올라간다."""
+    hangul = sum(1 for ch in text if "가" <= ch <= "힣")
+    latin = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+    letters = hangul + latin
+    return letters > 0 and hangul * 2 >= letters
+
+
+def _review_evidence_shown(review: ProposedVerdict) -> bool:
+    """The 근거 quote rides the row only when the stored sentence is one whole Korean
+    sentence — English or a cut fragment reads as noise to this owner, so no line."""
+    quote = evidence_excerpt(review.reason)
+    return bool(quote) and _is_whole_sentence(review.reason, quote) and _is_korean(quote)
+
+
+def _review_row_slot(review: ProposedVerdict) -> str:
+    """Which prose the row showed — the 모르겠음 사건 names it: 「evidence」 when the 근거
+    quote rode, else the judged sentence line (「judge_reason」)."""
+    return "evidence" if _review_evidence_shown(review) else "judge_reason"
+
+
 def _review_work_line(
     review: ProposedVerdict, strings: dict[str, str], text_max: int = REVIEW_TEXT_MAX
 ) -> str:
@@ -525,27 +549,23 @@ def _review_tag_block(
     *,
     show_work: bool = True,
 ) -> dict:
-    """What the agent judged, why, on which note, from which piece of work — ids stand in
-    when the vault has no title or no session note. The reason is a plain line per kind; the
-    scorer's own sentence rides under it as a 근거 quote only when it still reads as one
-    after evidence_excerpt (a whole sentence at any length, a clipped one only at TEXT_FLOOR
-    chars or more). A row proposed before reasons were
-    stored shows the honest 근거 없음 line instead of inventing one. `show_work` is off for
-    a row that follows another of the same session — the head of the run says it once."""
+    """What the agent judged, on which note, from which piece of work — ids stand in
+    when the vault has no title or no session note. No fixed 이유 line: the scorer's own
+    sentence rides as a 근거 quote only when it still reads as one whole Korean sentence
+    after evidence_excerpt (a clipped fragment or an English sentence shows no 근거 line
+    at all). `show_work` is off for a row that follows another of the same session —
+    the head of the run says it once."""
     label = note_label(review.note)
     note_line = (
         strings["review_note_titled"].format(title=_mrkdwn_plain(review.note_title, text_max), note=label)
         if review.note_title
         else strings["review_note_bare"].format(note=label)
     ) + note_links_text(label, note_links, strings)
-    reason_lines = [
-        strings[f"review_reason_{review.kind}"] if review.reason else strings["review_reason_none"]
-    ]
-    quote = evidence_excerpt(review.reason)
-    whole = bool(quote) and _is_whole_sentence(review.reason, quote)
-    if quote and (whole or len(quote) >= TEXT_FLOOR):
-        shown = _escape_mrkdwn(quote) if whole else _mrkdwn_plain(quote, text_max)
-        reason_lines.append(strings["review_evidence"].format(quote=shown))
+    reason_lines: list[str] = []
+    if _review_evidence_shown(review):
+        reason_lines.append(
+            strings["review_evidence"].format(quote=_escape_mrkdwn(evidence_excerpt(review.reason)))
+        )
     work_lines = [_review_work_line(review, strings, text_max)] if show_work else []
     text = "\n".join((strings[f"review_judged_{review.kind}"], *reason_lines, note_line, *work_lines))
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
@@ -576,6 +596,7 @@ def _review_actions_block(
         for choice in ("do", "drop", "delegate", "defer")
     ]
     elements.append(_bare_button(idx, COMMENT, strings["review_button_comment"]))
+    elements.append(_bare_button(idx, UNCLEAR, strings["button_unclear"]))
     return {"type": "actions", "elements": elements}
 
 
@@ -587,7 +608,10 @@ def _review_row_data(review: ProposedVerdict) -> dict:
 
 
 def _review_row_value(review: ProposedVerdict) -> dict:
-    return _lane_data("review", _review_row_data(review), note=review.note)
+    return {
+        **_lane_data("review", _review_row_data(review), note=review.note),
+        "slot": _review_row_slot(review),
+    }
 
 
 def _sample_row_value(review: ProposedVerdict) -> dict:

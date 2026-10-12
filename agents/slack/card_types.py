@@ -34,6 +34,11 @@ DELEGATE: str = "delegate"
 #: parse_press ever sees the payload.
 COMMENT: str = "comment"
 
+#: The seventh word an action_id may end in — 「모르겠음」 records that the owner could not
+#: read the row's prose, like COMMENT it is never a Choice: the hermes plugin routes it
+#: before parse_press and writes one card_unclear 사건, no modal, no model call.
+UNCLEAR: str = "unclear"
+
 #: The one callback_id the comment modal carries — bolt's `app.view` listens on exactly this.
 COMMENT_CALLBACK_ID: str = "card:comment"
 

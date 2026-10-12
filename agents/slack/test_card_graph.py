@@ -927,7 +927,13 @@ class GraphTests(unittest.TestCase):
                     "idx": 1 + n_advice,
                     "lane": "review",
                     "shown": True,
-                    "value": {"lane": "review", "session": "sr", "kind": "used", "note": "wiki-0700"},
+                    "value": {
+                        "lane": "review",
+                        "session": "sr",
+                        "kind": "used",
+                        "note": "wiki-0700",
+                        "slot": "judge_reason",
+                    },
                 },
             ],
         )

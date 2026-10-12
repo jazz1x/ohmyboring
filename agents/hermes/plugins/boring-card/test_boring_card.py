@@ -341,11 +341,16 @@ def _patched_effects(calls, consumption=None, execute_repair=None):
 
 @contextlib.contextmanager
 def _patched_delegate(
-    calls, note_text="---\ntitle: t\n---\n노트 본문입니다", evidence="채점이 잡은 문장입니다.", comments=None
+    calls,
+    note_text="---\ntitle: t\n---\n노트 본문입니다",
+    evidence="채점이 잡은 문장입니다.",
+    comments=None,
+    unclear=False,
 ):
     """The judgment seat's live reads replaced by fakes — a press must never touch the
     host vault or the engine's /events in these tests. `comments` is what the owner left on
-    the note: a list of OwnerComment, or an exception to raise."""
+    the note: a list of OwnerComment, or an exception to raise. `unclear` is whether the owner
+    pressed 「모르겠음」 on the note's rows."""
 
     def read_comments(path):
         if isinstance(comments, Exception):
@@ -354,6 +359,7 @@ def _patched_delegate(
 
     with (
         mock.patch.object(card_delegate, "comments_for_note", side_effect=read_comments),
+        mock.patch.object(card_delegate, "unclear_for_note", side_effect=lambda path: unclear),
         mock.patch.object(
             card_delegate,
             "read_note_text",
@@ -1239,6 +1245,100 @@ def test_a_submission_on_a_card_past_its_answerable_hours_runs_nothing():
     assert calls == ["ack"], calls
 
 
+def test_an_unclear_press_writes_one_owner_event_names_the_row_and_makes_no_model_call():
+    """「모르겠음」: no modal, no model — one card_unclear 사건 with judge=owner and the row's
+    session/note/slot, then 「받았어요」 over the row, buttons kept. A handler that writes no
+    event goes red here."""
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer='{"verdict": "right", "reason": "x"}'))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_effects(calls), _rows(), mock.patch.object(PLUGIN, "_LOG"):
+            _run(handler, _bare_body("card:3:unclear"), calls)
+    (record,) = _records(calls)
+    assert record[1] == "card_unclear"
+    assert record[2] == {
+        "judge": "owner",
+        "card_ts": CARD_TS,
+        "idx": 3,
+        "lane": "review",
+        "session_id": "sess-agent-1",
+        "sessions": ["sess-agent-1"],
+        "note": "/vault/wiki/wiki-0700.md",
+        "proposed_kind": "used",
+        "slot": "judge_reason",
+    }
+    (update,) = _updates(calls)
+    assert _status_at(update[3], 3) == "💬 받았어요 — 모르겠음"
+    _assert_buttons_kept_under_the_reason(BLOCKS, update[3], 3)
+    assert not [
+        c for c in calls if isinstance(c, tuple) and c[0] in ("model", "consumption", "repair", "views_open")
+    ]
+
+
+def test_an_unclear_press_on_a_name_repair_row_names_its_subject():
+    calls = []
+    with _env():
+        _, handler = _register(_FakeCtx())[0]
+        with _patched_effects(calls), _rows(), mock.patch.object(PLUGIN, "_LOG"):
+            _run(handler, _bare_body("card:0:unclear"), calls)
+    (record,) = _records(calls)
+    assert record[1] == "card_unclear"
+    assert (record[2]["lane"], record[2]["subject"], record[2]["judge"]) == (
+        "repair",
+        "foodspring-front",
+        "owner",
+    )
+
+
+def test_an_unclear_press_on_a_row_that_cannot_be_read_records_nothing_and_says_so():
+    for rows in (_rows(error=OSError("door down")), _rows(entries=[])):
+        calls = []
+        with _env():
+            _, handler = _register(_FakeCtx())[0]
+            with _patched_effects(calls), rows, mock.patch.object(PLUGIN, "_LOG"):
+                _run(handler, _bare_body("card:3:unclear"), calls)
+        assert not _records(calls)
+        (update,) = _updates(calls)
+        assert _status_at(update[3], 3) == "✕ 실패 — 줄 정보를 못 읽었어요"
+        _assert_buttons_kept_under_the_reason(BLOCKS, update[3], 3)
+
+
+def test_an_unclear_press_by_anyone_but_the_owner_runs_nothing():
+    calls = []
+    with _env():
+        _, handler = _register(_FakeCtx())[0]
+        with _patched_effects(calls), _rows(), mock.patch.object(PLUGIN, "_LOG"):
+            _run(handler, _bare_body("card:3:unclear", user=OTHER), calls)
+    assert calls == ["ack"], calls
+
+
+def test_an_unclear_press_that_could_not_be_stored_is_never_shown_as_received():
+    calls = []
+
+    def boom(event, fields):
+        raise RuntimeError("event sink down")
+
+    with mock.patch.object(card_effects, "_live_record", side_effect=boom):
+        with _env():
+            _, handler = _register(_FakeCtx())[0]
+            with _rows(), mock.patch.object(PLUGIN, "_LOG"):
+                _run(handler, _bare_body("card:3:unclear"), calls)
+    (update,) = _updates(calls)
+    assert _status_at(update[3], 3) == "✕ 실패 — event sink down"
+
+
+def test_a_delegate_press_on_a_note_the_owner_could_not_read_puts_the_one_line_signal_in_its_prompt():
+    calls = []
+    ctx = _FakeCtx(llm=_FakeLlm(calls, answer='{"verdict": "right", "reason": "x"}'))
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_effects(calls), _patched_delegate(calls, unclear=True):
+            _run(handler, _body("card:3:delegate", REVIEW_VALUE), calls)
+    (model,) = [c for c in calls if isinstance(c, tuple) and c[0] == "model"]
+    assert "오너가 이 줄의 지난 글을 이해하지 못했다 — 더 쉽게 써라" in model[1]
+
+
 def test_a_delegate_press_reads_the_owners_comments_into_its_prompt_and_names_their_ids():
     """맡길게요 reads what the owner said about the note: the comment is in the one model call's
     prompt, and the verdict_reviewed 사건 names the 사건 id it was given. A judge that never
@@ -1629,6 +1729,12 @@ if __name__ == "__main__":
     test_a_comment_that_could_not_be_stored_is_never_shown_as_received()
     test_a_submission_nobody_may_make_runs_nothing()
     test_a_submission_on_a_card_past_its_answerable_hours_runs_nothing()
+    test_an_unclear_press_writes_one_owner_event_names_the_row_and_makes_no_model_call()
+    test_an_unclear_press_on_a_name_repair_row_names_its_subject()
+    test_an_unclear_press_on_a_row_that_cannot_be_read_records_nothing_and_says_so()
+    test_an_unclear_press_by_anyone_but_the_owner_runs_nothing()
+    test_an_unclear_press_that_could_not_be_stored_is_never_shown_as_received()
+    test_a_delegate_press_on_a_note_the_owner_could_not_read_puts_the_one_line_signal_in_its_prompt()
     test_a_delegate_press_reads_the_owners_comments_into_its_prompt_and_names_their_ids()
     test_a_delegate_press_that_cannot_read_the_owners_comments_does_not_judge_as_if_they_were_silent()
     print("ok - boring-card plugin: ack-first, in-place mark, double-press refused, loud refusals")
