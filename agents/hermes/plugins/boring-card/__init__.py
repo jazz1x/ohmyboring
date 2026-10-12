@@ -210,10 +210,10 @@ def register(ctx: Any) -> None:
         try:
             unclear = await asyncio.to_thread(card_delegate.unclear_for_note, path)
         except OSError as e:
-            return card_types.DelegationFailed(reason=f"오너 모르겠음 기록을 못 읽었다: {' '.join(str(e).split())}")
-        prompt = card_delegate.build_judge_prompt(
-            path, text, press.kind, evidence, comments, unclear=unclear
-        )
+            return card_types.DelegationFailed(
+                reason=f"오너 모르겠음 기록을 못 읽었다: {' '.join(str(e).split())}"
+            )
+        prompt = card_delegate.build_judge_prompt(path, text, press.kind, evidence, comments, unclear=unclear)
         try:
             result = await llm.acomplete(
                 [{"role": "user", "content": prompt}],

@@ -286,7 +286,7 @@ def _repairs_headline_block(
 
 
 def _repair_row_value(repair: Repair) -> dict:
-    return {**_lane_data("repair", {"subject": repair.subject, "variants": list(repair.variants)}), "slot": "advice"}
+    return _lane_data("repair", {"subject": repair.subject, "variants": list(repair.variants)})
 
 
 def _bare_button(idx: int, choice: str, label: str) -> dict:
@@ -500,7 +500,7 @@ def _is_whole_sentence(reason: str, excerpt: str) -> bool:
 def _is_korean(text: str) -> bool:
     """한국어 판정: 한글 음절이 글자(한글+라틴)의 절반 이상. 오너가 읽을 문장만
     근거 줄에 실린다 — 영어 문장이나 낱말 조각은 안 올라간다."""
-    hangul = sum(1 for ch in text if "가" <= ch <= "힣" or "ㄱ" <= ch <= "ㅣ")
+    hangul = sum(1 for ch in text if "가" <= ch <= "힣")
     latin = sum(1 for ch in text if ch.isascii() and ch.isalpha())
     letters = hangul + latin
     return letters > 0 and hangul * 2 >= letters

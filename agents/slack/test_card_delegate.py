@@ -220,6 +220,29 @@ class OwnerCommentTests(unittest.TestCase):
         self.assertEqual((judged.kind, judged.comment_ids), ("contested", [31, 30]))
         self.assertEqual(cd.parse_judgment(raw, "used").comment_ids, [])
 
+    def test_an_unclear_note_puts_the_one_line_signal_in_the_prompt_and_a_clear_one_does_not(self):
+        signal = "오너가 이 줄의 지난 글을 이해하지 못했다 — 더 쉽게 써라"
+        prompt = cd.build_judge_prompt(NOTE, "본문", "used", "근거", unclear=True)
+        self.assertIn(signal, prompt)
+        self.assertLess(prompt.index("노트 경로"), prompt.index(signal))
+        self.assertLess(prompt.index(signal), prompt.index("주장이 맞으면"))
+        self.assertNotIn(signal, cd.build_judge_prompt(NOTE, "본문", "used", "근거"))
+
+    def test_unclear_for_note_reads_the_owners_unclear_press_of_that_note_only(self):
+        def press(note, judge="owner", lane="review"):
+            return {"id": 1, "attributes": {"judge": judge, "lane": lane, "note": note}}
+
+        for rows, want in (
+            ([press(NOTE)], True),
+            ([press("/vault/wiki/wiki-0701.md")], False),
+            ([press(NOTE, judge="agent:x")], False),
+            ([press(NOTE, lane="repair")], False),
+            ([], False),
+        ):
+            with mock.patch.object(cd, "fetch_events", return_value=rows) as fetch:
+                self.assertIs(cd.unclear_for_note(NOTE), want)
+            fetch.assert_called_once_with("card_unclear", cc.COMMENT_WINDOW_HOURS)
+
     def test_comments_for_note_reads_the_owners_review_comments_of_that_note_only(self):
         def comment(ident, note, judge="owner"):
             return {

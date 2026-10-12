@@ -426,6 +426,53 @@ class OwnerCommentTests(unittest.TestCase):
         self.assertEqual({k: [c.id for c in v] for k, v in got.items()}, {"next-step": [1]})
 
 
+class UnclearSignalTests(unittest.TestCase):
+    """The owner's 「모르겠음」 on a group's rows reaches its next prompt as one line.
+    Mutation target: a reader that ignores card_unclear kills the main test."""
+
+    SIGNAL = "오너가 이 줄의 지난 글을 이해하지 못했다 — 더 쉽게 써라"
+
+    def test_the_prompt_carries_the_signal_only_when_asked(self):
+        self.assertIn(self.SIGNAL, crj.build_prompt(GROUP, [], ONE_FACT([]), unclear=True))
+        self.assertNotIn(self.SIGNAL, crj.build_prompt(GROUP, [], ONE_FACT([])))
+
+    def test_unclear_by_subject_reads_the_owners_repair_presses_of_todays_groups(self):
+        def press(subject, judge="owner", lane="repair"):
+            return {"id": 1, "attributes": {"judge": judge, "lane": lane, "subject": subject}}
+
+        entries = [press("next-step"), press("other", judge="agent:x"), press("elsewhere", lane="review")]
+        self.assertEqual(crj.unclear_by_subject(entries, [GROUP]), {"next-step": True})
+        self.assertEqual(crj.unclear_by_subject([], [GROUP]), {"next-step": False})
+
+    def test_main_feeds_an_unclear_press_into_the_prompt(self):
+        by_name = {
+            "card_unclear": [
+                {
+                    "id": 5,
+                    "observed_at": "2026-10-06T02:00:00+00:00",
+                    "attributes": {"judge": "owner", "lane": "repair", "subject": "next-step"},
+                }
+            ]
+        }
+        prompts: list[str] = []
+
+        def judge(prompt: str) -> str:
+            prompts.append(prompt)
+            return '{"verdict": "generic", "reason": "흔한 말"}'
+
+        with (
+            mock.patch.dict("os.environ", {"BORING_DOOR_URL": "http://door.invalid"}),
+            mock.patch.object(crj, "_live_groups", return_value=[GROUP]),
+            mock.patch.object(crj, "_live_events", side_effect=lambda name, hours: by_name.get(name, [])),
+            mock.patch.object(crj, "make_judge", return_value=judge),
+            mock.patch.object(crj, "_live_record"),
+            mock.patch.object(crj, "_live_samples", side_effect=ONE_FACT),
+        ):
+            self.assertEqual(crj.main(), 0)
+        (prompt,) = prompts
+        self.assertIn(self.SIGNAL, prompt)
+
+
 class MainExitTests(unittest.TestCase):
     def _main(self, *answers: str) -> int:
         groups = [_group(f"subject-{i}", [f"subject {i}", f"subject-{i}"]) for i in range(len(answers))]

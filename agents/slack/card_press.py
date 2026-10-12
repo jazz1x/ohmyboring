@@ -34,6 +34,7 @@ from card_types import (
     DELEGATE,
     MORE_ACTION_PREFIX,
     MORE_LANES,
+    UNCLEAR,
     AdvicePress,
     CommentOpen,
     CommentSubmit,
@@ -46,7 +47,6 @@ from card_types import (
     RepairPress,
     ReviewPress,
     RowUnread,
-    UNCLEAR,
 )
 
 from ohmyboring.adapters.engine import OWNER
@@ -237,9 +237,7 @@ def parse_unclear(payload: dict, owner_id: str | None) -> NeedsRow | Rejected:
     where = _card_where(payload)
     if isinstance(where, Rejected):
         return where
-    return NeedsRow(
-        idx=int(parts[1]), choice=UNCLEAR, user=user, card_ts=where[0], channel=where[1]
-    )
+    return NeedsRow(idx=int(parts[1]), choice=UNCLEAR, user=user, card_ts=where[0], channel=where[1])
 
 
 def comment_metadata(opened: CommentOpen) -> str:
@@ -498,7 +496,7 @@ def unclear_fields(press: NeedsRow, row: dict) -> dict | Rejected:
             "lane": "repair",
             "subject": subject,
             "variants": variants if isinstance(variants, list) else [],
-            "slot": row.get("slot") if isinstance(row.get("slot"), str) else "advice",
+            "slot": "judge_reason",
         }
     return Rejected(reason=f"{lane!r} rows take no unclear press")
 

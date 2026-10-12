@@ -402,7 +402,7 @@ class CardV2ShapeTests(unittest.TestCase):
         repair_action_row = next(b for b in blocks if b["type"] == "actions")
         self.assertEqual(
             {el["action_id"] for el in repair_action_row["elements"]},
-            {"card:0:do", "card:0:defer", "card:0:drop", "card:0:comment"},
+            {"card:0:do", "card:0:defer", "card:0:drop", "card:0:comment", "card:0:unclear"},
         )
         labels = {el["action_id"]: el["text"]["text"] for el in repair_action_row["elements"]}
         self.assertEqual(labels["card:0:do"], "실행")
@@ -519,17 +519,17 @@ class CardV2ShapeTests(unittest.TestCase):
                     f"card:{expected_idx}:delegate",
                     f"card:{expected_idx}:defer",
                     f"card:{expected_idx}:comment",
+                    f"card:{expected_idx}:unclear",
                 },
             )
         self.assertEqual(
             [el["text"]["text"] for el in action_rows[1]["elements"]],
-            ["맞아요", "아니에요", "맡길게요", "보류", "💬 코멘트"],
+            ["맞아요", "아니에요", "맡길게요", "보류", "💬 코멘트", "모르겠음"],
         )
         tag = next(b for b in blocks if b["type"] == "section" and "wiki-0700" in _blocks_text([b]))
         self.assertEqual(
             tag["text"]["text"],
             "이 세션에서 나온 말 — *이 노트가 틀렸다*\n"
-            "이유: 세션 끝 채점이 남긴 문장이 없어요 (옛 판정)\n"
             "노트: `wiki-0700` (제목 없음)\n"
             "작업: 세션 `s1` (세션 노트 없음)",
         )
@@ -569,7 +569,7 @@ class CardV2ShapeTests(unittest.TestCase):
         # 고정 이유 문구는 없다 — 채점기 문장은 온전한 한국어 문장일 때만 근거 줄로 오른다.
         # 묶인 줄: 작업을 나열하고 버튼 값은 묶인 세션 전부를 싣는다 — 판정은 전부에 간다.
         # 근거 없는 옛 판정은 근거 줄 없이 그대로.
-        sentence = "wiki-0700 의 폴 접근이 낡았다고 봤어요 — 소켓을 닫고 재활용하니 그렇습니다. " * 2
+        sentence = "이 노트의 폴 접근이 낡았다고 봤어요 — 소켓을 닫고 재활용하니 그렇습니다. " * 2
         reasoned = cc.ProposedVerdict(
             session_id="s1", note="/vault/wiki/wiki-0700.md", kind="contested", at="t-1", reason=sentence
         )
@@ -654,7 +654,6 @@ class CardV2ShapeTests(unittest.TestCase):
                         "lane": "repair",
                         "subject": "foodspring-front",
                         "variants": ["foodspring front", "foodspring-front"],
-                        "slot": "advice",
                     },
                 ),
                 (
@@ -719,7 +718,7 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertEqual(len(blocks), 47)
         self.assertLessEqual(len(blocks), cv.BLOCK_LIMIT)
         advice_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 3]
-        review_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 5]
+        review_rows = [b for b in blocks if b["type"] == "actions" and len(b["elements"]) == 6]
         self.assertEqual(len(advice_rows), 7)
         self.assertEqual(len(review_rows), 3)
         overflows = [b["text"]["text"] for b in _overflows(blocks)]
@@ -745,7 +744,7 @@ class CardV2ShapeTests(unittest.TestCase):
         self.assertEqual(len(blocks_full), 50)
         self.assertLessEqual(len(blocks_full), cv.BLOCK_LIMIT)
         self.assertIn("에이전트가 가른 것", _blocks_text(blocks_full))
-        review_rows_full = [b for b in blocks_full if b["type"] == "actions" and len(b["elements"]) == 5]
+        review_rows_full = [b for b in blocks_full if b["type"] == "actions" and len(b["elements"]) == 6]
         self.assertEqual(len(review_rows_full), 1)
         overflows_full = [b["text"]["text"] for b in _overflows(blocks_full)]
         self.assertEqual(
@@ -1335,7 +1334,7 @@ class ConfirmSampleRowTests(unittest.TestCase):
     def test_a_sample_row_has_exactly_right_and_wrong_buttons_carrying_the_sample_tag(self):
         blocks = self._blocks()
         review_actions, *sample_actions = [b for b in blocks if b["type"] == "actions"]
-        self.assertEqual(len(review_actions["elements"]), 5)
+        self.assertEqual(len(review_actions["elements"]), 6)
         self.assertEqual(len(sample_actions), 2)
         for slot, actions in zip((1, 2), sample_actions):
             self.assertEqual(
@@ -1382,13 +1381,14 @@ class ConfirmSampleRowTests(unittest.TestCase):
 
     def test_over_budget_reviews_give_way_while_the_samples_and_the_score_stay(self):
         long = "가" * 300
+        sentence = "가" * 100 + " 입니다."
         reviews = [
             cc.ProposedVerdict(
                 session_id=f"s{i}",
                 note=f"/vault/wiki/wiki-{700 + i:04d}.md",
                 kind="used",
                 at=f"t-{i}",
-                reason=long,
+                reason=sentence,
                 note_title=long,
                 work=long,
             )
@@ -1400,7 +1400,7 @@ class ConfirmSampleRowTests(unittest.TestCase):
                 note=f"/vault/wiki/wiki-{900 + i:04d}.md",
                 kind="used",
                 at=f"t-{i}",
-                reason=long,
+                reason=sentence,
                 note_title=long,
                 work=long,
             )
@@ -1463,9 +1463,9 @@ class ReadableReviewRowTests(unittest.TestCase):
         clipped_short = review.model_copy(update={"reason": "ng.md` 앞뒤가 잘린 짧은 문장 잘린낱…"})
         self.assertNotIn("근거:", cv._review_tag_block(clipped_short, strings)["text"]["text"])
         long = review.model_copy(update={"reason": clipped})
-        self.assertIn("근거: 「이 문장은 단어 경계에서", cv._review_tag_block(long, strings)["text"]["text"])
+        self.assertNotIn("근거:", cv._review_tag_block(long, strings)["text"]["text"])
 
-    def test_a_whole_evidence_sentence_is_never_cut_but_a_clipped_quote_still_is(self):
+    def test_a_whole_evidence_sentence_is_never_cut_and_a_clipped_quote_is_never_shown(self):
         strings = card_i18n.STRINGS["ko"]
         whole = (
             "이 노트의 결정은 그대로 쓰였고 소켓을 닫고 & 재활용하는 접근이 낡았다는 점도 끝까지 확인했습니다. "
@@ -1487,10 +1487,7 @@ class ReadableReviewRowTests(unittest.TestCase):
         self.assertGreater(len(whole), cv.TEXT_FLOOR)
         self.assertIn(strings["review_evidence"].format(quote=whole.replace("&", "&amp;")), shown(whole))
         self.assertNotIn(whole[:-1] + "…", shown(whole))
-        control = shown(clipped)
-        self.assertIn("근거:", control)
-        self.assertIn("…", control)
-        self.assertNotIn("잘린낱", control)
+        self.assertNotIn("근거:", shown(clipped))
 
     def test_only_a_sentence_with_both_ends_intact_shows_below_the_floor(self):
         strings = card_i18n.STRINGS["ko"]
@@ -1507,14 +1504,48 @@ class ReadableReviewRowTests(unittest.TestCase):
             "and then the",
             "x",
             "The router config was wrong because the",
+            "소켓을 닫고 재활용하는 접근이 낡았다는 점을 확인하는 중에 다른 문제도 같이 보게 되어서 그 부분까지 정리하느라",
         ):
             self.assertFalse(shows(fragment), fragment)
-        for whole in (
-            "이전 증류에서 근거 없이 단정한 것이 틀렸다는 교훈이 있습니다",
+        for english in (
             "This works.",
             "Done (see wiki-12).",
+            "The router config was wrong because the socket was never closed.",
         ):
-            self.assertTrue(shows(whole), whole)
+            self.assertFalse(shows(english), english)
+        self.assertTrue(shows("이전 증류에서 근거 없이 단정한 것이 틀렸다는 교훈이 있습니다"))
+        self.assertTrue(shows("이 router 설정이 틀렸다고 봤습니다."))
+
+    def test_no_review_row_carries_a_fixed_reason_line_in_any_language(self):
+        for lang, strings in card_i18n.STRINGS.items():
+            self.assertFalse([k for k in strings if k.startswith("review_reason_")], lang)
+            for kind, reason in (("used", "이 노트가 쓰였습니다."), ("contested", ""), ("used", "")):
+                row = cc.ProposedVerdict(
+                    session_id="s", note="/vault/wiki/wiki-1.md", kind=kind, at="t", reason=reason
+                )
+                lines = cv._review_tag_block(row, strings)["text"]["text"].split("\n")
+                self.assertEqual(lines[0], strings[f"review_judged_{kind}"], lang)
+                self.assertFalse([ln for ln in lines if ln.startswith(("이유", "Why", "理由"))], lang)
+
+    def test_only_a_whole_korean_sentence_rides_as_evidence_and_the_row_names_the_slot_it_showed(self):
+        def row(reason):
+            return cc.ProposedVerdict(
+                session_id="s", note="/vault/wiki/wiki-1.md", kind="used", at="t", reason=reason
+            )
+
+        strings = card_i18n.STRINGS["ko"]
+        korean = row("이 노트의 결정은 그대로 쓰였습니다.")
+        english = row("The router config was wrong because the socket was never closed.")
+        fragment = row(
+            "노트의 결정은 그대로 쓰였고 소켓을 닫는 접근이 낡았다는 점을 확인하는 중에 다른 문제를"
+        )
+        self.assertIn("근거: 「이 노트의 결정은", cv._review_tag_block(korean, strings)["text"]["text"])
+        for other in (english, fragment):
+            self.assertNotIn("근거:", cv._review_tag_block(other, strings)["text"]["text"])
+        self.assertEqual(
+            [cv._review_row_value(r)["slot"] for r in (korean, english, fragment)],
+            ["evidence", "judge_reason", "judge_reason"],
+        )
 
     def test_a_cut_line_ends_on_a_word(self):
         text = "foodspring-front · 09-24 · FDS-18094 뒤로가기 시 스크롤 위치 복구 및 성능 개선 작업 전체"
@@ -1584,8 +1615,10 @@ class CommentRowTests(unittest.TestCase):
         self.assertEqual(
             [has_comment(r) for r in (repair, advice, review, sample)], [True, False, True, False]
         )
-        self.assertEqual(review["elements"][-1]["text"]["text"], "💬 코멘트")
-        self.assertEqual(review["elements"][-1]["action_id"], "card:2:comment")
+        self.assertEqual(review["elements"][-2]["text"]["text"], "💬 코멘트")
+        self.assertEqual(review["elements"][-2]["action_id"], "card:2:comment")
+        self.assertEqual(review["elements"][-1]["text"]["text"], "모르겠음")
+        self.assertEqual(review["elements"][-1]["action_id"], "card:2:unclear")
 
     def test_the_card_rows_name_only_the_rows_that_went_on_the_card(self):
         built = self._built()
@@ -1638,7 +1671,7 @@ class CommentRowTests(unittest.TestCase):
         failed = cc.Failed(reason=card_i18n.STRINGS["ko"]["row_unread_reason"])
         status, actions = cv.row_progress(blocks, 2, failed, lang="ko")
         self.assertEqual(status["elements"][0]["text"], "✕ 실패 — 줄 정보를 못 읽었어요")
-        self.assertEqual(actions["elements"][-1]["action_id"], "card:2:comment")
+        self.assertEqual(actions["elements"][-2]["action_id"], "card:2:comment")
 
 
 class MorePageTests(unittest.TestCase):
