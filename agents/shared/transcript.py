@@ -115,20 +115,6 @@ def claude_distill_clamp() -> int:
     return int(raw) if raw else CLAUDE_CLAMP_DEFAULT
 
 
-# The kimi path had no clamp accessor and no clamp call at all: `agents/kimi/distill-session.py`
-# handed extract_session() straight to distill_and_remember(), whose own hardcoded truncation was
-# the only bound in the chain. That made the inner bound load-bearing for one path and dead for
-# the other two, which is why it could not simply be deleted. Same ceiling as the other two so
-# the three paths share one number rather than three.
-KIMI_CLAMP_DEFAULT = 12000
-
-
-def kimi_distill_clamp() -> int:
-    """Resolve the kimi-wire clamp limit, honouring the same env knobs as the other paths."""
-    raw = os.environ.get("KIMI_DISTILL_CLAMP") or os.environ.get("INGEST_CLAMP")
-    return int(raw) if raw else KIMI_CLAMP_DEFAULT
-
-
 # Guard against *unbounded* input reaching the model when a caller forgot to clamp — deliberately
 # well above the three per-path defaults so a raised clamp passes through untouched. A guard set at
 # the same value as the knob it guards is a second, hidden knob: the previous one sat at 12000 and
@@ -178,64 +164,6 @@ def _extract_claude_jsonl(path: str) -> str:
                 sig = _claude_tool_call_text(name, b.get("input"))
                 if sig:
                     out.append(f"[tool] {name} {sig}")
-    return "\n".join(out)
-
-
-def _extract_kimi_wire(path: str) -> str:
-    """Extract user/assistant text from a Kimi Code CLI wire.jsonl transcript.
-
-    Mirrors the parser in agents/kimi/distill-session.py so the scheduler and
-    hook can share the same transcript representation.
-    """
-    out = []
-
-    def _text(content):
-        if isinstance(content, str):
-            return content
-        if isinstance(content, dict):
-            if content.get("type") == "text":
-                return content.get("text", "")
-            if content.get("type") == "tool_use" and content.get("name"):
-                return f"<tool:{content['name']}>"
-            return ""
-        if isinstance(content, list):
-            return " ".join(_text(part) for part in content if _text(part))
-        return ""
-
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            t = obj.get("type")
-            if t == "turn.prompt":
-                inp = obj.get("input") or []
-                text = " ".join(_text(part) for part in inp).strip()
-                if text:
-                    out.append(f"[user] {text}")
-            elif t == "context.append_message":
-                msg = obj.get("message") or {}
-                role = msg.get("role")
-                if role == "user":
-                    origin = msg.get("origin") or {}
-                    if isinstance(origin, dict) and origin.get("kind") != "user":
-                        continue
-                    text = _text(msg.get("content"))
-                    if text:
-                        out.append(f"[user] {text}")
-                elif role == "assistant":
-                    text = _text(msg.get("content"))
-                    if text:
-                        out.append(f"[assistant] {text}")
-            elif t == "context.append_loop_event":
-                ev = obj.get("event") or {}
-                if ev.get("type") == "content.part":
-                    part = ev.get("part") or {}
-                    if part.get("type") == "text":
-                        text = part.get("text", "").strip()
-                        if text:
-                            out.append(f"[assistant] {text}")
     return "\n".join(out)
 
 
@@ -392,8 +320,6 @@ def extract(path: str, fmt: str = "claude-json") -> str:
     """
     if fmt == "claude-json":
         return _extract_claude_jsonl(path)
-    if fmt == "kimi-wire":
-        return _extract_kimi_wire(path)
     if fmt == "codex-jsonl":
         return _extract_codex_jsonl(path)
     print(f"[transcript] unsupported format '{fmt}' for {path} — skipping", file=sys.stderr)

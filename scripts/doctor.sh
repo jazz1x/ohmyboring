@@ -523,10 +523,10 @@ fi
 # a successful remember). A fresh note but a stale marker (or vice-versa) localizes the break.
 mark=$(newest_session_marker "$MARK_DIR/*.ts")
 if [ -n "$mark" ]; then
-    ok "newest Claude/Kimi SessionEnd hook marker: $(mtime_human "$mark") ($(days_since "$mark") days ago)"
+    ok "newest Claude SessionEnd hook marker: $(mtime_human "$mark") ($(days_since "$mark") days ago)"
     echo "    $mark"
 else
-    bad "no Claude/Kimi hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"; failed_marker=1
+    bad "no Claude hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"; failed_marker=1
 fi
 
 # (d2b) Marker dir and stale marker health — proof the queue can still progress.
@@ -909,9 +909,7 @@ fi
 
 # (d5e) The same hook registered twice, read from the configs rather than from the damage.
 # (d5c) below finds a hook that FIRED twice, which means it only speaks after the duplicate has
-# written rows, and it stays silent forever for an adapter registered twice that never runs. Kimi
-# was in exactly that state on 2026-09-02 — both hooks under two spellings of the same path, and
-# no ledger evidence at all because kimi had produced no sessions.
+# written rows, and it stays silent forever for an adapter registered twice that never runs.
 if [ -f "$wiring" ]; then
     if reg_out="$(python3 "$wiring" --check-registrations --boring-home "$BORING_HOME" 2>&1)"; then
         ok "no hook of ours is registered twice (${reg_out##*checked_configs=})"

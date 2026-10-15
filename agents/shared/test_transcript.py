@@ -217,45 +217,6 @@ def test_claude_distill_clamp_default_and_env_override():
                 os.environ.pop(k, None)
 
 
-def test_extract_kimi_wire_user_and_assistant():
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-        _write(
-            f.name,
-            [
-                {"type": "metadata", "protocol_version": "1.4"},
-                {"type": "turn.prompt", "input": [{"type": "text", "text": "fix the build"}]},
-                {
-                    "type": "context.append_message",
-                    "message": {
-                        "role": "user",
-                        "origin": {"kind": "user"},
-                        "content": [{"type": "text", "text": "fix the build"}],
-                    },
-                },
-                {
-                    "type": "context.append_loop_event",
-                    "event": {"type": "content.part", "part": {"type": "text", "text": "done"}},
-                },
-                {
-                    "type": "context.append_message",
-                    "message": {
-                        "role": "user",
-                        "origin": {"kind": "injection"},
-                        "content": [{"type": "text", "text": "system reminder"}],
-                    },
-                },
-            ],
-        )
-        path = f.name
-    try:
-        out = transcript.extract(path, "kimi-wire")
-        assert "[user] fix the build" in out
-        assert "[assistant] done" in out
-        assert "system reminder" not in out
-    finally:
-        os.unlink(path)
-
-
 def test_extract_codex_jsonl_user_and_assistant():
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         _write(
@@ -401,19 +362,6 @@ def test_clamp_text_snaps_to_newline_not_mid_line():
         assert line == "" or line in lines
 
 
-def test_kimi_distill_clamp_default_and_env_override():
-    """The kimi path had no accessor at all; its absence is what made the inner backstop
-    load-bearing for one path and dead for the others."""
-    for var in ("KIMI_DISTILL_CLAMP", "INGEST_CLAMP"):
-        os.environ.pop(var, None)
-    assert transcript.kimi_distill_clamp() == transcript.KIMI_CLAMP_DEFAULT
-    os.environ["KIMI_DISTILL_CLAMP"] = "7777"
-    try:
-        assert transcript.kimi_distill_clamp() == 7777
-    finally:
-        os.environ.pop("KIMI_DISTILL_CLAMP", None)
-
-
 def test_codex_distill_clamp_default_and_env_override():
     saved = {k: os.environ.pop(k, None) for k in ("CODEX_DISTILL_CLAMP", "INGEST_CLAMP")}
     try:
@@ -436,7 +384,6 @@ if __name__ == "__main__":
     test_extract_claude_jsonl_drops_unknown_tool_calls()
     test_extract_claude_jsonl_user_lines_are_only_what_the_owner_typed()
     test_claude_distill_clamp_default_and_env_override()
-    test_extract_kimi_wire_user_and_assistant()
     test_extract_codex_jsonl_user_and_assistant()
     test_extract_codex_jsonl_includes_allowlisted_tool_calls()
     test_extract_unknown_format_raises()
@@ -444,5 +391,4 @@ if __name__ == "__main__":
     test_clamp_text_keeps_short_input()
     test_clamp_text_snaps_to_newline_not_mid_line()
     test_codex_distill_clamp_default_and_env_override()
-    test_kimi_distill_clamp_default_and_env_override()
     print("ok - transcript parser")

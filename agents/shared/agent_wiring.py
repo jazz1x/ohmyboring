@@ -33,10 +33,6 @@ AGENTS = {
         "kind": "hooks",
         "path": "{HOME}/.claude/settings.json",
     },
-    "kimi": {
-        "kind": "kimi-hooks",
-        "path": "{HOME}/.kimi-code/config.toml",
-    },
     "cursor": {
         "kind": "mcp",
         "path": "{HOME}/.cursor/mcp.json",
@@ -121,22 +117,13 @@ _CLAUDE_CODE_ROLE_SCRIPTS = (
     "agents/claude-code/session-start-recall.py",
 )
 
-#: The same contract for Kimi (wire_kimi). Kimi's config.toml kept [[hooks]] blocks pointing
-#: at a deleted checkout because the resolved-file comparison could never see them as ours —
-#: measured 2026-10-07: three reinstalls appended the current block next to the dead one, and
-#: the dead path made Kimi refuse every prompt ("Prompt hook blocked the request.").
-_KIMI_ROLE_SCRIPTS = (
-    "hooks/kimi-distill-session.py",
-    "hooks/kimi-recall.py",
-    "hooks/kimi-rules.py",
-)
 _CHECKOUT_MARKER = ("agents", "shared", "agent_wiring.py")
 
 
 def _command_roles(command: str, roles) -> set[tuple[Path, str]]:
     """(resolved checkout root, owned role) pairs for a command's raw script tokens.
 
-    `roles` is the per-agent role tuple (_CLAUDE_CODE_ROLE_SCRIPTS or _KIMI_ROLE_SCRIPTS).
+    `roles` is the per-agent role tuple (_CLAUDE_CODE_ROLE_SCRIPTS).
     The token is `~`-expanded but its file is NOT resolved: in a real checkout hooks/*.py are
     symlinks into agents/claude-code/, so a resolved path ends in the link target and the role
     suffix never matches. Measured 2026-10-01 against a copy of the real settings.json: only
@@ -147,7 +134,7 @@ def _command_roles(command: str, roles) -> set[tuple[Path, str]]:
     A root is accepted when the checkout marker sits under it (a live checkout) OR when the
     root no longer exists at all: a registration pointing into a deleted checkout is a dead
     registration — the file can never run, and leaving it in place only blocks the agent
-    (Kimi refused every prompt with a dead hook path, 2026-10-07). A root that exists but
+    (a dead hook path made an agent refuse every prompt, 2026-10-07). A root that exists but
     carries no marker is still NOT ours: a stranger's hooks/recall.py stays in their hands.
     """
     out = set()
@@ -346,161 +333,6 @@ def wire_claude_code(path: Path | None = None) -> dict:
         _save_json(path, settings)
 
     return {"agent": "claude-code", "path": str(path), "changed": changed}
-
-
-def wire_kimi(path: Path | None = None) -> dict:
-    """Idempotently wire Kimi Code SessionEnd/UserPromptSubmit hooks in config.toml.
-
-    Kimi uses TOML [[hooks]] tables rather than JSON, so we append simple blocks
-    instead of round-tripping the full document. A .omb-bak copy is preserved.
-    """
-    path = path if path is not None else _agent_path("kimi")
-    _backup(path)
-
-    distill = _hook_command("hooks/kimi-distill-session.py")
-    recall = _hook_command("hooks/kimi-recall.py")
-    rules = _hook_command("hooks/kimi-rules.py")
-    kimi_hooks = [
-        ("SessionEnd", distill, 130),
-        ("UserPromptSubmit", recall, 10),
-        ("UserPromptSubmit", rules, 10),
-    ]
-
-    changed = False
-
-    wanted = set()
-    for _, command, _ in kimi_hooks:
-        wanted |= _hook_scripts(command)
-
-    removed = _drop_duplicate_kimi_hooks(path, wanted) if path.exists() else 0
-    if removed:
-        changed = True
-
-    # Resolved files, not command strings. `BORING_HOME` is `~/oh-my-boring` on one run and the
-    # symlink's target on the next, so a substring test appended a second identical hook — the
-    # same double-registration #245 fixed for Claude Code, which was never delivered here because
-    # each adapter reimplements its own "is this already wired". Measured 2026-09-02: kimi's
-    # config carried both spellings of both hooks.
-    #
-    # `installed` is read from the post-drop text: a block removed above (another checkout's
-    # registration of the same role, live or deleted) must not count as installed, or the
-    # current checkout's block would never be appended — the reinstall-appends-next-to-the-
-    # dead-block loop measured 2026-10-07.
-    existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    installed = set()
-    for line in existing.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("command"):
-            installed |= _hook_scripts(stripped.split("=", 1)[-1].strip().strip("\"'"))
-
-    # Append only the hooks that are missing; the blocks already wired stay byte-identical,
-    # so a half-wired install gains the absent ones and loses nothing it has.
-    missing = [spec for spec in kimi_hooks if not (_hook_scripts(spec[1]) & installed)]
-    if missing:
-        snippet = "".join(
-            f'\n[[hooks]]\nevent = "{event}"\ncommand = "{command}"\ntimeout = {timeout}\n'
-            for event, command, timeout in missing
-        )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            if existing and not existing.endswith("\n"):
-                f.write("\n")
-            f.write(snippet)
-        changed = True
-
-    return {"agent": "kimi", "path": str(path), "changed": changed, "removed": removed}
-
-
-def _drop_duplicate_kimi_hooks(path: Path, ours: set) -> int:
-    """Keep one `[[hooks]]` block per script we own; return how many were removed.
-
-    An install that merely stops adding duplicates leaves every machine that already ran it
-    injecting twice, which is what turned a 200-prompt sample floor into 100 (docs/PRD.md §8 D1).
-    TOML is edited as text here for the same reason the writer appends text: round-tripping the
-    user's whole config to delete two blocks risks more than it fixes.
-
-    Two kinds of block go. The first is the old one-block-per-script duplicate. The second is a
-    block whose command names one of our Kimi roles rooted anywhere but this checkout: a live
-    other checkout is the same role installed twice, and a deleted checkout is a dead
-    registration that can only block the agent (Kimi refused every prompt with a dead hook path,
-    2026-10-07). Lines between the Orca managed markers (a `# >>> orca-managed-kimi-hooks` header
-    and the matching `# <<< orca-managed-kimi-hooks` end — both matched by prefix, because the
-    real header carries an annotation, `… (managed by Orca; do not edit) >>>`) and blocks that
-    name no Kimi role are never touched. A dropped block's range stops at its last key line:
-    comment and blank lines after it belong to no block, so dropping one never takes a following
-    comment down with it — the Orca header itself once died that way, swallowed as the tail of
-    the preceding block's range (2026-10-07).
-    """
-    if not ours:
-        return 0
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-
-    # Orca manages its own Kimi hooks between these markers; whatever they point at is not
-    # ours to delete, so those line ranges are excluded from every pass below. The real
-    # header carries an annotation (`# >>> orca-managed-kimi-hooks (managed by Orca; do not
-    # edit) >>>`), so the markers are prefix-matched. An end marker with no open start (the
-    # real file had one, 2026-10-07) protects nothing and is not an error.
-    protected = set()
-    managed_start = None
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("# >>> orca-managed-kimi-hooks"):
-            managed_start = index
-        elif stripped.startswith("# <<< orca-managed-kimi-hooks") and managed_start is not None:
-            protected.update(range(managed_start, index + 1))
-            managed_start = None
-
-    blocks, current_block = [], None
-    for index, line in enumerate(lines):
-        if index in protected:
-            continue
-        if line.strip() == "[[hooks]]":
-            if current_block is not None:
-                blocks.append(current_block)
-            current_block = {"start": index, "end": index, "scripts": set(), "commands": []}
-        elif current_block is not None:
-            stripped = line.strip()
-            if stripped.startswith("[") and not stripped.startswith("[["):
-                blocks.append(current_block)
-                current_block = None
-                continue
-            if stripped.startswith("command"):
-                command = stripped.split("=", 1)[-1].strip().strip("\"'")
-                current_block["commands"].append(command)
-                current_block["scripts"] |= _hook_scripts(command)
-            if stripped and not stripped.startswith("#"):
-                current_block["end"] = index
-    if current_block is not None:
-        blocks.append(current_block)
-
-    current = Path(BORING_HOME).resolve()
-    seen, drop = set(), []
-    for block in blocks:
-        if protected & set(range(block["start"], block["end"] + 1)):
-            continue
-        foreign = any(
-            root != current
-            for command in block["commands"]
-            for root, _ in _command_roles(command, _KIMI_ROLE_SCRIPTS)
-        )
-        if foreign:
-            drop.append(block)
-            continue
-        mine = block["scripts"] & ours
-        if not mine:
-            continue
-        key = frozenset(mine)
-        if key in seen:
-            drop.append(block)
-        else:
-            seen.add(key)
-    if not drop:
-        return 0
-    kill = set()
-    for block in drop:
-        kill.update(range(block["start"], block["end"] + 1))
-    path.write_text("".join(line for i, line in enumerate(lines) if i not in kill), encoding="utf-8")
-    return len(drop)
 
 
 def wire_mcp_agent(agent_id: str, server_name: str, server_config: dict, path: Path | None = None) -> dict:
@@ -1326,8 +1158,6 @@ def install(enabled_agents, server_name, server_config, boring_home: str | None 
         try:
             if agent_id == "claude-code":
                 results.append(wire_claude_code())
-            elif agent_id == "kimi":
-                results.append(wire_kimi())
             elif agent_id == "hermes-agent":
                 results.append(wire_hermes(boring_home=boring_home))
             elif agent_id == "codex":
@@ -1342,45 +1172,35 @@ def install(enabled_agents, server_name, server_config, boring_home: str | None 
 
 #: Where a hook of ours can be registered. The ledger check `doctor (d5c)` finds a hook that
 #: fired twice, which means it only speaks after the duplicate has already written rows — and it
-#: is silent forever for an adapter that is registered twice but never runs. Kimi was in exactly
-#: that state on 2026-09-02: two spellings of both hooks, no ledger evidence at all, because kimi
-#: had produced no sessions. Reading the configs catches it before there is anything to clean up.
-_REGISTRATION_FILES = (
-    ("claude-code", "~/.claude/settings.json"),
-    ("kimi", "~/.kimi-code/config.toml"),
-)
+#: is silent forever for an adapter that is registered twice but never runs. Reading the configs
+#: catches it before there is anything to clean up.
+_REGISTRATION_FILES = (("claude-code", "~/.claude/settings.json"),)
 
 
 def _registered_commands(path: Path):
-    """Every hook command string in a config, whatever its format."""
+    """Every hook command string in a JSON config."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return []
-    if path.suffix == ".json":
-        try:
-            data = json.loads(text)
-        except ValueError:
-            return []
-        out = []
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    out = []
 
-        def walk(node):
-            if isinstance(node, dict):
-                if isinstance(node.get("command"), str):
-                    out.append(node["command"])
-                for value in node.values():
-                    walk(value)
-            elif isinstance(node, list):
-                for value in node:
-                    walk(value)
+    def walk(node):
+        if isinstance(node, dict):
+            if isinstance(node.get("command"), str):
+                out.append(node["command"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
 
-        walk(data)
-        return out
-    return [
-        line.split("=", 1)[-1].strip().strip("\"'")
-        for line in text.splitlines()
-        if line.strip().startswith("command")
-    ]
+    walk(data)
+    return out
 
 
 def _report_duplicate_registrations():

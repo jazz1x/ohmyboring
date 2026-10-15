@@ -184,7 +184,7 @@ case "${1:-}" in
     # is still caught.
     if [ "${2:-}" = --check-registrations ]; then
         if [ "${DOCTOR_DUPLICATE_HOOKS:-0}" = 1 ]; then
-            echo "hook_registered_twice agent=kimi count=2 script=/x/agents/kimi/recall.py" >&2
+            echo "hook_registered_twice agent=claude-code count=2 script=/x/hooks/recall.py" >&2
             echo "hook_registrations checked_configs=2 duplicates=1"
             exit 1
         fi

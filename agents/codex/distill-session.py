@@ -111,7 +111,7 @@ def main() -> int:
         return 2
 
     raw_session_id = data.get("session_id") or ""
-    # Prefix the marker id so Codex session ids never collide with Claude/Kimi ids.
+    # Prefix the marker id so Codex session ids never collide with Claude ids.
     session_id = f"codex-{raw_session_id}" if raw_session_id else ""
     is_final = (data.get("hook_event_name") or "") == "SessionEnd"
     if not is_final and _throttled(session_id):

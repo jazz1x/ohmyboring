@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![local LLM](https://img.shields.io/badge/local%20LLM-Ollama%20%7C%20LM%20Studio-000)
 
-**ohmyboring은 내가 어떻게 풀었는지를 기억합니다.** Claude Code / Kimi Code 세션과 적재 가능한 Codex 트랜스크립트를 로컬의 사람이 읽는 위키로 바꾸고, *"전에 이거 어떻게 했더라"* 싶을 때 다시 꺼내줍니다 — 어떻게 풀었는지를 담아 두는 것이고, 회수 정밀도는 공개적으로 재는 중입니다(`make peek`). **클라우드 0 · 로컬 LLM 친화.**
+**ohmyboring은 내가 어떻게 풀었는지를 기억합니다.** Claude Code 세션과 적재 가능한 Codex 트랜스크립트를 로컬의 사람이 읽는 위키로 바꾸고, *"전에 이거 어떻게 했더라"* 싶을 때 다시 꺼내줍니다 — 어떻게 풀었는지를 담아 두는 것이고, 회수 정밀도는 공개적으로 재는 중입니다(`make peek`). **클라우드 0 · 로컬 LLM 친화.**
 
 ```bash
 # 가장 빠름 — 원라이너: ~/oh-my-boring에 클론, 빌드, 훅/MCP/워커까지 연결.
@@ -27,7 +27,7 @@ make collect N=20   # 과거 Claude Code 세션으로 vault 채우기 (새 클�
 make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 ```
 
-> 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 Claude 과거 기록을 채우고 나면, 이후 Claude/Kimi 세션은 자동 축적되고 Codex는 적재 가능한 트랜스크립트를 워커가 처리합니다([적재하기](#적재하기-ingestion) 참고).
+> 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 Claude 과거 기록을 채우고 나면, 이후 Claude 세션은 자동 축적되고 Codex는 적재 가능한 트랜스크립트를 워커가 처리합니다([적재하기](#적재하기-ingestion) 참고).
 
 > **Docker**, **Python 3**, **jq**, **curl**, **git**, **make**, 그리고 로컬 LLM 서버 — **Ollama** 또는 **LM Studio** (또는 다른 OpenAI-compatible 엔드포인트)가 필요합니다.
 
@@ -61,7 +61,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 
 | 방법 | 명령 | 언제 |
 | --- | --- | --- |
-| **자동 (세션 종료 시)** | SessionEnd 훅 (`install.sh`가 설치) | 모든 Claude Code / Kimi 세션 — `hooks/distill-session.py`가 트랜스크립트를 증류해 `remember`합니다. 짝이 되는 `UserPromptSubmit` 훅(`recall.py`)이 관련 과거 메모리를 새 프롬프트에 자동 주입합니다. |
+| **자동 (세션 종료 시)** | SessionEnd 훅 (`install.sh`가 설치) | 모든 Claude Code 세션 — `hooks/distill-session.py`가 트랜스크립트를 증류해 `remember`합니다. 짝이 되는 `UserPromptSubmit` 훅(`recall.py`)이 관련 과거 메모리를 새 프롬프트에 자동 주입합니다. |
 | **자동 (Codex 워커)** | 호스트 launchd/cron 워커 (`install.sh`가 설치) | Codex에는 SessionEnd 훅이 없습니다. 호스트 워커가 20분마다 `~/.codex/sessions/**/*.jsonl`을 스캔하고, 아직 쓰이는 중인 transcript와 실제 subagent rollout은 건너뛰며, 적재 가능한 transcript를 같은 `remember` 경로로 저장합니다. `hermes-agent`가 켜져 있으면 `codex-memory-ingest-worker`도 함께 설치됩니다. 둘 다 `make doctor`로 확인합니다. |
 | **과거 세션 백필** | `make collect [N=20]` | 설치 직후, 비어 있는 vault를 `~/.claude/projects` 기록으로 채울 때. 최신순, 멱등(세션별 마커로 이미 증류한 건 건너뜀), 한 번에 `N`개만 처리해 CPU를 독점하지 않음. |
 | **지금 바로 (세션 안 끝내고)** | `make distill-now` · `make remember M="…"` | 세션을 끝내지 않고 즉시 적재할 때. `distill-now`는 **현재** 트랜스크립트를 큐에 넣고 hermes(`boring-agent`)가 바로 비우게 하므로 hermes 가 떠 있어야 합니다. 세션 종료 시의 정상 적재도 그 뒤에 그대로 동작합니다(초기 노트 + 최종 노트가 함께 생길 수 있음). `remember`는 직접 작성한 노트를 저장합니다. |
@@ -76,7 +76,7 @@ python3 agents/shared/agent_wiring.py --install \
   --server-url http://localhost:7710/mcp
 ```
 
-이 명령은 Claude/Kimi 훅, Cursor/Codex MCP 항목, Codex 호스트 워커, 그리고 `hermes-agent`가 켜진 경우 Hermes cron 워커를 설정합니다. Claude만 직접 편집하려면 `~/.claude/settings.json`에 `python3 ~/oh-my-boring/hooks/distill-session.py`를 실행하는 `SessionEnd` 훅과 `recall.py`를 실행하는 `UserPromptSubmit` 훅을 추가합니다.
+이 명령은 Claude 훅, Cursor/Codex MCP 항목, Codex 호스트 워커, 그리고 `hermes-agent`가 켜진 경우 Hermes cron 워커를 설정합니다. Claude만 직접 편집하려면 `~/.claude/settings.json`에 `python3 ~/oh-my-boring/hooks/distill-session.py`를 실행하는 `SessionEnd` 훅과 `recall.py`를 실행하는 `UserPromptSubmit` 훅을 추가합니다.
 
 ---
 
@@ -229,7 +229,6 @@ make readiness
 | `BORING_DISTILL_RESOLUTION` | 적재 해상도 계약: `compact`, `standard`, `evidence`(기본), `forensic`; 검증 실패 시 한 번 보강하고 그래도 실패하면 `remember` 차단 |
 | `DISTILL_CLAMP` | Claude Code hook이 distill LLM에 보내는 최대 문자 수; `INGEST_CLAMP`, 그다음 `12000` 순으로 결정됩니다 |
 | `CODEX_DISTILL_CLAMP` | Codex 세션에 대한 동일한 값; `INGEST_CLAMP`, 그다음 `12000` |
-| `KIMI_DISTILL_CLAMP` | Kimi Code 세션에 대한 동일한 값; `INGEST_CLAMP`, 그다음 `12000` |
 | `DISTILL_BACKSTOP_CLAMP` | 호출자가 clamp 하지 않고 넘긴 경우에만 걸리는 최후 상한(`48000`). 위 세 기본값보다 의도적으로 높게 두어, 그중 하나를 올렸을 때 조용히 되잘리지 않게 합니다. 여기 걸리면 어느 노브를 올려야 하는지 로그로 알려줍니다 |
 | `RECALL_CLAIMS_PER_HIT` | 주입되는 스니펫마다 함께 실어 보낼 claim 개수(`2`). claim은 무엇을 정했고 다음이 무엇이며 무엇에 물렸는지입니다 — 스니펫이 그 노트가 무엇에 관한 것인지 말한다면, claim은 그것이 무엇으로 끝났는지 말합니다. 실제 한 주 주입으로 실측: 1개면 히트당 59자, 2개면 102자이고 스니펫 세 개가 이미 쓰는 840자 옆입니다. 히트의 54.4%가 두 번째 claim을 가지고 있습니다. `0`이면 인계를 끕니다 |
 | `RECALL_RELEVANCE_MAX_DIST` | 회수된 hit이 주제에서 얼마나 벗어났는지를 *측정*하는 cosine 거리 상한(`0.514`). 이 값으로 버리는 일은 없습니다 — 스칼라 하나로는 두 부류가 갈리지 않습니다(`data/eval` 밴드가 겹치고, `0.514`는 라이브 주입 23건 중 47.8%를 버렸을 값입니다). 그래서 비용을 지불하는 대신 보고만 합니다. `vector_cosine`만 비교하며, `text_rank` hit이나 거리가 없는 hit은 이 값으로 판정하지 않습니다 |
@@ -310,7 +309,6 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 | `make vault-cleanup-fix` | `vault/wiki` 백업 후 안전한 steward 수정 적용 및 재검증 |
 | `make remember M="text"` | 한 줄 노트 작성 |
 | `make collect [N=1]` | 과거 Claude Code 세션 lazy 백필 |
-| `make collect-kimi [N=1]` | 과거 Kimi Code 세션 lazy 백필 |
 | `make hermes-build` | 선택적 hermes-agent 이미지 클론/빌드 |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | 엔진 로그 |
@@ -328,9 +326,6 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 ```bash
 # Claude Code (기본 make collect)
 make collect N=20
-
-# Kimi Code
-make collect-kimi N=20
 
 # GitHub Codex (평소에는 Hermes 워커가 처리)
 make doctor
@@ -425,13 +420,10 @@ curl -s -X POST http://localhost:7710/mcp \
 |---|---|---|---|---|
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | 세션을 요약해 `remember` 호출 |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | 관련 snippet을 가져와 프롬프트 context 주입 |
-| Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Kimi 세션을 요약해 `remember` 호출 |
-| Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | 관련 snippet을 가져와 프롬프트 context 주입 |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring`를 MCP 서버로 노출 |
 | Codex | `agents/codex/README.md` | MCP + 호스트 워커 백필 | `~/.codex/mcp.json` / launchd 또는 cron / `collect-sessions.py` | `ohmyboring`를 MCP 서버로 노출하고 적재 가능한 Codex 세션을 백필. 설치된 워커는 안정화된 rollout transcript를 수확하고 실제 subagent는 건너뜀 |
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 적재 워커와 정기 브리핑 실행 |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 수동 | 오래된 Claude Code 세션 lazy 백필 |
-| scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 수동 | 오래된 Kimi Code 세션 lazy 백필 |
 | shared | `src/ohmyboring/config.py` | 어댑터 import | `boring.json` 정책 로더 |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | 활성화된 에이전트의 hook/MCP 설정을 idempotent하게 구성 |
 
@@ -482,10 +474,9 @@ MCP를 지원하는 어떤 에이전트도 ohmyboring를 사용할 수 있습니
 
 `install.sh`가 자동으로 배선하는 것:
 - Claude Code 훅 → `~/.claude/settings.json`
-- Kimi Code 훅 → `~/.kimi-code/config.toml`
 - `boring.json`에서 Cursor·Codex가 활성화되어 있으면 Cursor의 `~/.cursor/mcp.json`과 Codex의 `~/.codex/mcp.json`
 
-그 외 에이전트는 루트 `.mcp.json`을 알맞은 위치로 복사하거나(예: Claude Desktop은 `~/.claude/mcp.json`, Kimi Code MCP는 `~/.kimi-code/mcp.json`) 에이전트 CLI로 HTTP MCP 서버를 추가하면 됩니다.
+그 외 에이전트는 루트 `.mcp.json`을 알맞은 위치로 복사하거나(예: Claude Desktop은 `~/.claude/mcp.json`) 에이전트 CLI로 HTTP MCP 서버를 추가하면 됩니다.
 
 (VS Code Copilot은 root key `servers`를 쓰는 `.vscode/mcp.json`을 사용합니다. CLI 대안: `claude mcp add --transport http --scope project ohmyboring http://localhost:7710/mcp`. compose sibling 컨테이너는 `http://boring-door:7710/mcp`로 접근합니다.)
 
@@ -614,7 +605,6 @@ oh-my-boring/
 ├─ agents/                  # 호스트측 에이전트 어댑터
 │  ├─ claude-code/          # Claude Code hooks
 │  ├─ hermes/               # hermes-agent cron
-│  ├─ kimi/                 # Kimi Code hooks
 │  ├─ schedulers/           # cron/launchd 백필
 │  └─ shared/               # 정책/설정 라이브러리
 ├─ hooks/                   # backward-compatible symlink → agents/

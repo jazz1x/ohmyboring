@@ -93,7 +93,6 @@ def _agent_for_dir(source_dir):
     for marker, agent in (
         (".claude/", "claude-code"),
         (".codex/", "codex"),
-        (".kimi", "kimi"),
     ):
         if marker in d:
             return agent

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shared rules logic for agent UserPromptSubmit hooks.
 
-Agent-specific entry points (Claude Code, Kimi, …) are thin wrappers that only supply
+Agent-specific entry points (Claude Code, …) are thin wrappers that only supply
 their injection filter and then delegate to `run_rules`. The trigger-word matcher below
 is pure: rules + prompt in, firing rules out.
 """

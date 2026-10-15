@@ -485,7 +485,6 @@ class BackstopClampTests(unittest.TestCase):
         for accessor in (
             transcript.claude_distill_clamp,
             transcript.codex_distill_clamp,
-            transcript.kimi_distill_clamp,
         ):
             self.assertGreater(ingest_worker.BACKSTOP_CLAMP, accessor())
 

@@ -82,6 +82,22 @@ def test_unsupported_agent_is_skipped_without_failure():
     assert results == []
 
 
+def test_kimi_in_enabled_agents_writes_nothing_and_does_not_fail():
+    """A leftover "kimi" in boring.json is skipped: no ~/.kimi-code written, install not failed.
+    Control: claude-code in the same call is still wired."""
+    with tempfile.TemporaryDirectory() as home:
+        with (
+            mock.patch.dict(os.environ, {"HOME": home}),
+            mock.patch.object(agent_wiring.boring_config, "load", return_value={}),
+            redirect_stderr(io.StringIO()),
+        ):
+            results, failed = agent_wiring.install(["kimi", "claude-code"], "ohmyboring", {})
+        assert failed is False
+        assert [r["agent"] for r in results] == ["claude-code"]
+        assert not (Path(home) / ".kimi-code").exists()
+        assert (Path(home) / ".claude" / "settings.json").exists(), "claude-code must still be wired"
+
+
 def test_settings_path_override():
     """boring.json settings_path wins over the hardcoded default."""
     custom = Path(os.path.expanduser("~/custom-claude-settings.json"))
@@ -948,58 +964,6 @@ def test_sync_hermes_cron_jobs_repairs_blocked_absolute_worker_path():
         assert worker["enabled"] is True
 
 
-def test_kimi_hooks_are_deduped_across_path_spellings():
-    """One registration per script, whichever way the path was spelled when it was written.
-
-    Two spellings of the same file — through the `~/oh-my-boring` symlink and through its target —
-    both passed the old substring test, so a second `[[hooks]]` block was appended and the recall
-    hook fired twice on every prompt. That does not move the uptake rate (numerator and
-    denominator both double) but it halves the evidence behind a pre-registered sample floor
-    (docs/PRD.md §8 D1). Measured on the real config 2026-09-02: four registrations of two hooks.
-
-    Also asserts the blocks the installer does not own are left alone. A deduper that tidies away
-    somebody else's hook is worse than the duplicate.
-    """
-    with tempfile.TemporaryDirectory() as d:
-        home = Path(d) / "oh-my-boring"
-        (home / "hooks").mkdir(parents=True)
-        for name in ("kimi-recall.py", "kimi-distill-session.py"):
-            (home / "hooks" / name).write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        link = Path(d) / "linked"
-        link.symlink_to(home)
-
-        config = Path(d) / "config.toml"
-        config.write_text(
-            '[model]\nname = "kimi"\n'
-            '\n[[hooks]]\nevent = "UserPromptSubmit"\n'
-            f'command = "python3 {home}/hooks/kimi-recall.py"\ntimeout = 10\n'
-            '\n[[hooks]]\nevent = "UserPromptSubmit"\n'
-            f'command = "python3 {link}/hooks/kimi-recall.py"\ntimeout = 10\n'
-            '\n[[hooks]]\nevent = "SessionEnd"\n'
-            f'command = "python3 {home}/hooks/kimi-distill-session.py"\ntimeout = 130\n'
-            # Twice on purpose. With one copy, "a foreign hook survives" is true even for a
-            # deduper that removes every duplicate it finds regardless of owner — the assertion
-            # passes because there was nothing to delete. Duplicated, it fails.
-            '\n[[hooks]]\nevent = "SessionEnd"\n'
-            'command = "python3 /somebody/elses/hook.py"\ntimeout = 5\n'
-            '\n[[hooks]]\nevent = "SessionEnd"\n'
-            'command = "python3 /somebody/elses/hook.py"\ntimeout = 5\n',
-            encoding="utf-8",
-        )
-
-        with mock.patch.object(agent_wiring, "BORING_HOME", str(home)):
-            agent_wiring.wire_kimi(config)
-
-        text = config.read_text(encoding="utf-8")
-        assert text.count("kimi-recall.py") == 1, text
-        assert text.count("kimi-distill-session.py") == 1, text
-        assert text.count("/somebody/elses/hook.py") == 2, (
-            "a hook we do not own must survive untouched — including its own duplicates, which"
-            " are not ours to tidy away"
-        )
-        assert 'name = "kimi"' in text, "the rest of the config must survive"
-
-
 def test_claude_code_hook_commands_pin_the_installing_interpreter():
     """The hook shell's PATH may front /usr/bin, where bare `python3` is Xcode's 3.9."""
     with tempfile.TemporaryDirectory() as d:
@@ -1014,19 +978,6 @@ def test_claude_code_hook_commands_pin_the_installing_interpreter():
             assert command.split(" ", 1)[0] == sys.executable
         assert os.path.isabs(sys.executable)
         assert not any(command.startswith("python3 ") for command in commands)
-
-
-def test_kimi_hook_commands_pin_the_installing_interpreter():
-    with tempfile.TemporaryDirectory() as d:
-        config = Path(d) / "config.toml"
-        agent_wiring.wire_kimi(config)
-        lines = [
-            line for line in config.read_text(encoding="utf-8").splitlines() if line.startswith('command = "')
-        ]
-        assert len(lines) == 3
-        for line in lines:
-            assert line.startswith(f'command = "{sys.executable} ')
-        assert not any(line.startswith('command = "python3 ') for line in lines)
 
 
 def test_wire_claude_code_adds_the_rules_hook_beside_recall():
@@ -1045,44 +996,6 @@ def test_wire_claude_code_adds_the_rules_hook_beside_recall():
         data = json.loads(settings.read_text(encoding="utf-8"))
         commands = [h["command"] for group in data["hooks"]["UserPromptSubmit"] for h in group["hooks"]]
         assert len(commands) == 2
-
-
-def test_wire_kimi_adds_the_rules_hook_and_is_idempotent():
-    with tempfile.TemporaryDirectory() as d:
-        config = Path(d) / "config.toml"
-        result = agent_wiring.wire_kimi(config)
-        assert result["changed"] is True
-        assert config.read_text(encoding="utf-8").count("hooks/kimi-rules.py") == 1
-        second = agent_wiring.wire_kimi(config)
-        assert second["changed"] is False
-        assert config.read_text(encoding="utf-8").count("hooks/kimi-rules.py") == 1
-
-
-def test_wire_kimi_adds_only_the_missing_rules_block():
-    """A machine wired before rules existed keeps both hooks and gains exactly one block —
-    the old append shape rewrote every block once any one was missing and left the deduper
-    to collapse the copies afterwards."""
-    with tempfile.TemporaryDirectory() as d:
-        home = Path(d) / "oh-my-boring"
-        (home / "hooks").mkdir(parents=True)
-        for name in ("kimi-recall.py", "kimi-distill-session.py", "kimi-rules.py"):
-            (home / "hooks" / name).write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        config = Path(d) / "config.toml"
-        config.write_text(
-            '[model]\nname = "kimi"\n'
-            '\n[[hooks]]\nevent = "SessionEnd"\n'
-            f'command = "{sys.executable} {home}/hooks/kimi-distill-session.py"\ntimeout = 130\n'
-            '\n[[hooks]]\nevent = "UserPromptSubmit"\n'
-            f'command = "{sys.executable} {home}/hooks/kimi-recall.py"\ntimeout = 10\n',
-            encoding="utf-8",
-        )
-        with mock.patch.object(agent_wiring, "BORING_HOME", str(home)):
-            agent_wiring.wire_kimi(config)
-        text = config.read_text(encoding="utf-8")
-        assert text.count("kimi-distill-session.py") == 1, text
-        assert text.count("kimi-recall.py") == 1, text
-        assert text.count("hooks/kimi-rules.py") == 1, text
-        assert "hooks/rules.py" not in text, "Kimi must not get Claude Code's rules entry"
 
 
 def test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3():
@@ -1373,125 +1286,6 @@ def test_duplicate_registrations_pass_when_every_role_is_registered_once():
         assert rc == 0, err.getvalue()
 
 
-def _fake_kimi_checkout(root: Path) -> Path:
-    """A minimal oh-my-boring checkout for Kimi role matching: the checkout marker
-    (agents/shared/agent_wiring.py) is what makes a root "ours" in _command_roles."""
-    marker = root / "agents" / "shared" / "agent_wiring.py"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text("# stub\n", encoding="utf-8")
-    return root
-
-
-def _kimi_block(root: Path, role: str, event: str, timeout: int) -> str:
-    return (
-        f'\n[[hooks]]\nevent = "{event}"\ncommand = "{sys.executable} {root}/{role}"\ntimeout = {timeout}\n'
-    )
-
-
-#: The real ~/.kimi-code/config.toml markers (2026-10-07). The header carries Orca's
-#: annotation, which is exactly what the old exact-equality match never saw.
-_ORCA_HEADER = "# >>> orca-managed-kimi-hooks (managed by Orca; do not edit) >>>"
-_ORCA_FOOTER = "# <<< orca-managed-kimi-hooks <<<"
-
-
-def _kimi_config_with_foreign_checkout(other: Path, extra: str = "") -> str:
-    """A config carrying all three Kimi roles registered from checkout `other`, plus
-    whatever `extra` text (managed region, unrelated hook) the caller wants in front."""
-    return (
-        '[model]\nname = "kimi"\n'
-        + extra
-        + "".join(
-            _kimi_block(other, role, event, timeout)
-            for role, event, timeout in (
-                ("hooks/kimi-distill-session.py", "SessionEnd", 130),
-                ("hooks/kimi-recall.py", "UserPromptSubmit", 10),
-                ("hooks/kimi-rules.py", "UserPromptSubmit", 10),
-            )
-        )
-    )
-
-
-def test_wire_kimi_repoints_roles_registered_from_another_checkout():
-    """Kimi never got the role-based drop Claude Code got 2026-10-01: config.toml kept
-    [[hooks]] blocks from another checkout, and every reinstall appended the current
-    block next to them (measured 2026-10-07 — three blocks deep).
-
-    Here the other checkout is still live: its blocks must go, the Orca managed region
-    and the unrelated hook survive byte-identical, and exactly one block per role lands
-    under BORING_HOME.
-    """
-    with tempfile.TemporaryDirectory() as d:
-        base = Path(d)
-        checkout_a = _fake_kimi_checkout(base / "a")
-        checkout_b = _fake_kimi_checkout(base / "b")
-        orca_block = (
-            "# >>> orca-managed-kimi-hooks\n"
-            "[[hooks]]\n"
-            'event = "UserPromptSubmit"\n'
-            f'command = "{sys.executable} {base}/orca/hooks/kimi-rules.py"\ntimeout = 10\n'
-            f"{_ORCA_FOOTER}\n"
-        )
-        unrelated = '\n[[hooks]]\nevent = "UserPromptSubmit"\ncommand = "/other/unrelated.py"\ntimeout = 5\n'
-        config = base / "config.toml"
-        config.write_text(
-            _kimi_config_with_foreign_checkout(checkout_b, orca_block + unrelated), encoding="utf-8"
-        )
-
-        with mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)):
-            result = agent_wiring.wire_kimi(config)
-
-        assert result["changed"] is True
-        text = config.read_text(encoding="utf-8")
-        assert str(checkout_b) not in text, text
-        for role in agent_wiring._KIMI_ROLE_SCRIPTS:
-            assert text.count(f"{checkout_a}/{role}") == 1, (role, text)
-        assert orca_block in text, "the Orca managed region must survive byte-identical"
-        assert unrelated in text, "a hook naming no Kimi role must survive byte-identical"
-
-
-def test_wire_kimi_repoints_roles_registered_from_a_deleted_checkout():
-    """The 2026-10-07 failure: the other checkout no longer exists, so its file resolves
-    to nothing and the old dedupe never saw the block as ours. A dead registration can
-    only block the agent — it must be dropped like a live other checkout's."""
-    with tempfile.TemporaryDirectory() as d:
-        base = Path(d)
-        checkout_a = _fake_kimi_checkout(base / "a")
-        gone = base / "deleted-checkout"  # never created
-        config = base / "config.toml"
-        config.write_text(_kimi_config_with_foreign_checkout(gone), encoding="utf-8")
-
-        with mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)):
-            result = agent_wiring.wire_kimi(config)
-
-        assert result["changed"] is True
-        text = config.read_text(encoding="utf-8")
-        assert str(gone) not in text, text
-        for role in agent_wiring._KIMI_ROLE_SCRIPTS:
-            assert text.count(f"{checkout_a}/{role}") == 1, (role, text)
-
-
-def test_wire_kimi_leaves_a_strangers_rules_hook_untouched():
-    """A root that exists but carries no checkout marker is a stranger's, even when the
-    script is spelled exactly like our role — the marker rule that protects Claude Code's
-    hooks/recall.py protects a stranger's hooks/kimi-rules.py too."""
-    with tempfile.TemporaryDirectory() as d:
-        base = Path(d)
-        checkout_a = _fake_kimi_checkout(base / "a")
-        stranger = base / "stranger"
-        (stranger / "hooks").mkdir(parents=True)
-        (stranger / "hooks" / "kimi-rules.py").write_text("# not ours\n", encoding="utf-8")
-        foreign = _kimi_block(stranger, "hooks/kimi-rules.py", "UserPromptSubmit", 10)
-        config = base / "config.toml"
-        config.write_text('[model]\nname = "kimi"\n' + foreign, encoding="utf-8")
-
-        with mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)):
-            agent_wiring.wire_kimi(config)
-
-        text = config.read_text(encoding="utf-8")
-        assert f"{stranger}/hooks/kimi-rules.py" in text, text
-        assert text.count(f"{checkout_a}/hooks/kimi-rules.py") == 1, text
-
-
 def test_drop_duplicate_hooks_removes_a_role_registered_from_a_deleted_checkout():
     """Claude settings have the same hole: a role rooted at a checkout that no longer
     exists matched no role at all, so it survived every install."""
@@ -1517,120 +1311,13 @@ def test_drop_duplicate_hooks_removes_a_role_registered_from_a_deleted_checkout(
         assert dead not in commands, commands
 
 
-def test_wire_kimi_second_run_adds_nothing_after_repointing():
-    """The reported loop: reinstalling appended the current block next to the foreign ones
-    every time, because a dropped block still counted as installed. The second run must
-    change nothing."""
-    with tempfile.TemporaryDirectory() as d:
-        base = Path(d)
-        checkout_a = _fake_kimi_checkout(base / "a")
-        checkout_b = _fake_kimi_checkout(base / "b")
-        config = base / "config.toml"
-        config.write_text(_kimi_config_with_foreign_checkout(checkout_b), encoding="utf-8")
-
-        with mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)):
-            first = agent_wiring.wire_kimi(config)
-            second = agent_wiring.wire_kimi(config)
-
-        assert first["changed"] is True
-        assert second["changed"] is False, config.read_text(encoding="utf-8")
-        text = config.read_text(encoding="utf-8")
-        for role in agent_wiring._KIMI_ROLE_SCRIPTS:
-            assert text.count(f"{checkout_a}/{role}") == 1, (role, text)
-
-
-def test_wire_kimi_keeps_the_real_orca_section_byte_identical():
-    """The real header line is annotated — `# >>> orca-managed-kimi-hooks (managed by Orca;
-    do not edit) >>>` — so the old exact-equality match never fired, the managed section sat
-    unprotected, and a foreign block inside it was treated as ours to drop. Whatever sits
-    between the real markers must survive wire_kimi byte-for-byte.
-    """
-    with tempfile.TemporaryDirectory() as d:
-        base = Path(d)
-        checkout_a = _fake_kimi_checkout(base / "a")
-        section = (
-            f"{_ORCA_HEADER}\n"
-            + _kimi_block(base / "gone", "hooks/kimi-rules.py", "UserPromptSubmit", 10)
-            + f"{_ORCA_FOOTER}\n"
-        )
-        config = base / "config.toml"
-        config.write_text('[model]\nname = "kimi"\n' + section, encoding="utf-8")
-
-        with mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)):
-            agent_wiring.wire_kimi(config)
-
-        text = config.read_text(encoding="utf-8")
-        start = text.index(_ORCA_HEADER)
-        end = text.index(_ORCA_FOOTER) + len(_ORCA_FOOTER)
-        assert text[start:end] == section.rstrip("\n"), text
-        assert text.count(_ORCA_HEADER) == 1
-        for role in agent_wiring._KIMI_ROLE_SCRIPTS:
-            assert text.count(f"{checkout_a}/{role}") == 1, (role, text)
-
-
-def test_wire_kimi_dropped_block_does_not_swallow_the_orca_header():
-    """A dropped block's line range used to run to the last line before the next block —
-    comments and blanks included — so a foreign block sitting right in front of the Orca
-    header took the header down with it (measured on a copy of the real config, 2026-10-07).
-    The header line must survive the drop. No footer here: an unclosed header protects
-    nothing, but a comment is still nobody's block line.
-    """
-    with tempfile.TemporaryDirectory() as d:
-        base = Path(d)
-        checkout_a = _fake_kimi_checkout(base / "a")
-        config = base / "config.toml"
-        config.write_text(
-            '[model]\nname = "kimi"\n'
-            + _kimi_block(base / "gone", "hooks/kimi-recall.py", "UserPromptSubmit", 10)
-            + f"{_ORCA_HEADER}\n",
-            encoding="utf-8",
-        )
-        before = config.read_text(encoding="utf-8")
-        assert before.count("orca-managed-kimi-hooks") == 1
-
-        with mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)):
-            agent_wiring.wire_kimi(config)
-
-        text = config.read_text(encoding="utf-8")
-        assert text.count("orca-managed-kimi-hooks") == 1, text
-        assert _ORCA_HEADER in text, text
-        assert str(base / "gone") not in text, text
-
-
-def test_wire_kimi_ignores_a_stray_orca_end_marker():
-    """The real config carried a `# <<<` line with no opening `# >>>` before it (line 75,
-    2026-10-07). A stray end marker protects nothing and must not break the pass: foreign
-    blocks before and after it still drop, and this checkout still gets wired.
-    """
-    with tempfile.TemporaryDirectory() as d:
-        base = Path(d)
-        checkout_a = _fake_kimi_checkout(base / "a")
-        config = base / "config.toml"
-        config.write_text(
-            '[model]\nname = "kimi"\n'
-            + _kimi_block(base / "gone", "hooks/kimi-rules.py", "UserPromptSubmit", 10)
-            + f"{_ORCA_FOOTER}\n"
-            + _kimi_block(base / "gone", "hooks/kimi-recall.py", "UserPromptSubmit", 10),
-            encoding="utf-8",
-        )
-
-        with mock.patch.object(agent_wiring, "BORING_HOME", str(checkout_a)):
-            result = agent_wiring.wire_kimi(config)
-
-        assert result["changed"] is True
-        text = config.read_text(encoding="utf-8")
-        assert str(base / "gone") not in text, text
-        assert text.count(f"{checkout_a}/hooks/kimi-rules.py") == 1, text
-        assert text.count(f"{checkout_a}/hooks/kimi-recall.py") == 1, text
-        assert _ORCA_FOOTER in text, text
-
-
 if __name__ == "__main__":
     test_install_reports_failure()
     test_install_returns_success_when_ok()
     test_hermes_agent_calls_wire_hermes()
     test_codex_calls_wire_codex()
     test_unsupported_agent_is_skipped_without_failure()
+    test_kimi_in_enabled_agents_writes_nothing_and_does_not_fail()
     test_settings_path_override()
     test_default_path_when_no_override()
     test_wire_claude_code_adds_session_start()
@@ -1641,20 +1328,9 @@ if __name__ == "__main__":
     test_wire_hermes_missing_slack_briefing_has_no_side_effects()
     test_real_hermes_entry_scripts_ship_every_module_they_import()
     test_hermes_scripts_ship_the_measurement_modules_the_briefing_notices_import_lazily()
-    test_kimi_hooks_are_deduped_across_path_spellings()
     test_claude_code_hook_commands_pin_the_installing_interpreter()
-    test_kimi_hook_commands_pin_the_installing_interpreter()
     test_wire_claude_code_adds_the_rules_hook_beside_recall()
-    test_wire_kimi_adds_the_rules_hook_and_is_idempotent()
-    test_wire_kimi_adds_only_the_missing_rules_block()
-    test_wire_kimi_repoints_roles_registered_from_another_checkout()
-    test_wire_kimi_repoints_roles_registered_from_a_deleted_checkout()
-    test_wire_kimi_leaves_a_strangers_rules_hook_untouched()
     test_drop_duplicate_hooks_removes_a_role_registered_from_a_deleted_checkout()
-    test_wire_kimi_second_run_adds_nothing_after_repointing()
-    test_wire_kimi_keeps_the_real_orca_section_byte_identical()
-    test_wire_kimi_dropped_block_does_not_swallow_the_orca_header()
-    test_wire_kimi_ignores_a_stray_orca_end_marker()
     test_pinning_does_not_re_register_a_hook_already_wired_with_bare_python3()
     test_local_deps_are_transitive_and_reach_the_shared_dir()
     test_local_deps_skip_the_ohmyboring_package_but_still_raise_for_missing_flat_modules()

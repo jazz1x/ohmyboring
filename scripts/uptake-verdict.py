@@ -12,8 +12,8 @@ Reads the ENGINE's event store over HTTP, not `~/.cache/oh-my-boring/events.ndjs
 a spool the writer fills only when the DB sink fails, so on a healthy install it is empty — and an
 empty spool reads exactly like an instrument that never fired. It cost this project a false alarm.
 
-Rates are reported per agent, never pooled: Claude Code injects on every prompt while Kimi
-throttles to once per session, so a combined rate answers neither product's question.
+Rates are reported per agent, never pooled: adapters run different products, so a combined
+rate answers neither product's question.
 """
 
 import argparse
