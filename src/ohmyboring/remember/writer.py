@@ -236,6 +236,14 @@ class Refused:
 
 WriteOutcome = Written | Refused
 
+MCP_ROUTE = "mcp"
+
+#: MCP remember 가 project·claims 둘 다 빈 노트에 내는 문구 — drudge/src/serve/mcp.rs 와 바이트 같게.
+EMPTY_NOTE_REFUSAL = (
+    "refused: this note has no project and no claims — add the next step or decision it leaves"
+    " as claims (kind=next or kind=decision), or pass repo"
+)
+
 
 @dataclass(frozen=True)
 class WriteRequest:
@@ -1313,6 +1321,8 @@ def run_write(request: WriteRequest, deps: WriterDeps) -> WriteOutcome:
             return Refused(-32602, reason)
         case Ok(note):
             pass
+    if request.route == MCP_ROUTE and not note.front.project and not note.front.claims:
+        return Refused(-32602, EMPTY_NOTE_REFUSAL)
     match parse_judge(arguments):
         case Err(reason):
             return Refused(-32602, reason)

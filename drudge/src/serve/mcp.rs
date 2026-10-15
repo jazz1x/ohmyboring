@@ -1326,8 +1326,15 @@ async fn mcp_remember(
     caller: Caller,
     args: Option<&Value>,
 ) -> Result<String, (i32, String)> {
+    let parsed = parse_remember_note(args, &s.cfg)?;
+    if parsed.front.project.is_empty() && parsed.front.claims.is_empty() {
+        return Err((-32602, EMPTY_NOTE_REFUSAL.to_owned()));
+    }
     Ok(remember_note(s, caller, args).await?.message)
 }
+
+/// Same bytes as `EMPTY_NOTE_REFUSAL` in `src/ohmyboring/remember/writer.py`.
+const EMPTY_NOTE_REFUSAL: &str = "refused: this note has no project and no claims — add the next step or decision it leaves as claims (kind=next or kind=decision), or pass repo";
 
 /// The write door both MCP `remember` and `POST /remember` go through: one parser, one write
 /// path, one dedup policy. `supersedes` (optional) names the notes this one corrects; after the
@@ -2280,11 +2287,11 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote, ToolCallError,
-        ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_tools_list,
-        needs_dedup, parse_remember_note, parse_supersedes, pick_duplicate,
-        probable_session_duplicate, remember_note, should_replace_duplicate, supersedes_suffix,
-        tool_outcome_snippet, tool_query_arg,
+        DedupOutcome, DuplicateMatch, DuplicateReason, EMPTY_NOTE_REFUSAL, MCP_TOOL_NAMES,
+        RememberNote, ToolCallError, ToolOut, apply_pii_gate, dedup_decision_event,
+        mcp_endpoint_tag, mcp_remember, mcp_tools_list, needs_dedup, parse_remember_note,
+        parse_supersedes, pick_duplicate, probable_session_duplicate, remember_note,
+        should_replace_duplicate, supersedes_suffix, tool_outcome_snippet, tool_query_arg,
     };
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
@@ -2493,6 +2500,44 @@ mod tests {
         .unwrap();
         assert_eq!(fix.duplicate, None, "a correction skips the gate");
         assert_ne!(fix.source_path, first.source_path);
+    }
+
+    #[tokio::test]
+    async fn mcp_remember_refuses_a_note_with_no_project_and_no_claims() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let claim =
+            json!([{"subject": "door", "predicate": "decides", "value": "x", "kind": "decision"}]);
+
+        let empty = json!({"title": "t", "body": "b", "omb_session_id": "s1"});
+        let err = mcp_remember(&s, Caller::Unverified, Some(&empty))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, -32602);
+        assert_eq!(
+            err.1,
+            "refused: this note has no project and no claims — add the next step or decision it leaves as claims (kind=next or kind=decision), or pass repo"
+        );
+        assert_eq!(err.1, EMPTY_NOTE_REFUSAL);
+        assert_eq!(wiki_notes(tmp.path()), 0, "a refused note writes nothing");
+
+        let with_claim =
+            json!({"title": "t1", "body": "b1", "omb_session_id": "s2", "claims": claim});
+        mcp_remember(&s, Caller::Unverified, Some(&with_claim))
+            .await
+            .unwrap();
+        let repo_only =
+            json!({"title": "t2", "body": "b2", "omb_session_id": "s3", "repo": "some-repo"});
+        mcp_remember(&s, Caller::Unverified, Some(&repo_only))
+            .await
+            .unwrap();
+        assert_eq!(wiki_notes(tmp.path()), 2);
+
+        // POST /remember shares remember_note and stays out of scope.
+        let http = json!({"title": "t3", "body": "b3", "omb_session_id": "s4"});
+        remember_note(&s, Caller::Unverified, Some(&http))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
