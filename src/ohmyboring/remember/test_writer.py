@@ -224,9 +224,9 @@ class WriterCase(unittest.TestCase):
             clock=lambda: datetime(2026, 10, 2, tzinfo=UTC),
         )
 
-    def write(self, arguments, deps=None):
+    def write(self, arguments, deps=None, route="remember"):
         request = writer.WriteRequest(
-            route="remember", arguments=arguments, omb_session_id=arguments.get("omb_session_id")
+            route=route, arguments=arguments, omb_session_id=arguments.get("omb_session_id")
         )
         return writer.run_write(request, deps or self.deps())
 
@@ -682,6 +682,33 @@ class WriterCase(unittest.TestCase):
         dedup = self.events.by_event("dedup_decision")[0]
         self.assertEqual(dedup["status"], "stored")
         self.assertNotIn("reason", dedup)
+
+    # ── 빈 노트 거절 (MCP 길만) ──────────────────────────────────────────────
+
+    def test_mcp_refuses_note_with_no_project_and_no_claims(self):
+        outcome = self.write({"title": "빈 노트", "body": "본문"}, route="mcp")
+        self.assertIsInstance(outcome, writer.Refused)
+        assert isinstance(outcome, writer.Refused)
+        self.assertEqual(outcome.code, -32602)
+        self.assertEqual(
+            outcome.message,
+            "refused: this note has no project and no claims — add the next step or decision it"
+            " leaves as claims (kind=next or kind=decision), or pass repo",
+        )
+        self.assertEqual(self.written_files(), [])
+
+    def test_mcp_accepts_note_with_one_claim(self):
+        claim = {"subject": "door", "predicate": "decides", "value": "x", "kind": "decision"}
+        outcome = self.write({"title": "claim 노트", "body": "본문", "claims": [claim]}, route="mcp")
+        self.assertIsInstance(outcome, writer.Written)
+
+    def test_mcp_accepts_repo_only_note(self):
+        outcome = self.write({"title": "repo 노트", "body": "본문", "repo": "some-repo"}, route="mcp")
+        self.assertIsInstance(outcome, writer.Written)
+
+    def test_http_route_still_accepts_empty_note(self):
+        outcome = self.write({"title": "정정 문", "body": "본문"}, route="remember")
+        self.assertIsInstance(outcome, writer.Written)
 
     # ── PII 차단 ─────────────────────────────────────────────────────────────
 
