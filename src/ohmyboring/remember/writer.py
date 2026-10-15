@@ -206,8 +206,16 @@ _PARTIAL_SEAL_SQL = (
     "UPDATE claim c SET superseded_at = COALESCE("
     "        (SELECT max(valid_from) FROM claim WHERE source_path = %(new)s), now())"
     " WHERE c.source_path = %(old)s AND c.superseded_at IS NULL"
-    "   AND (c.subject, c.predicate) IN (SELECT subject, predicate FROM claim WHERE source_path = %(new)s)"
-    " RETURNING c.subject, c.predicate;"
+    "   AND (c.subject, c.predicate) IN (SELECT subject, predicate FROM claim WHERE source_path = %(new)s);"
+)
+#: 이번 쓰기로 닫힌 옛 노트 claims — 새 노트 claim 을 쓰는 중 최신-이김 닫기(_FACT_SEAL_SQL)가
+#: 먼저 닫아 부분 닫기의 RETURNING 은 언제나 0행이었다. 어느 규칙이 닫았든 봉인 시각이
+#: 새 노트의 max(valid_from) 과 같은 행이 이번 쓰기에서 닫힌 것이다.
+_RETIRED_READ_SQL = (
+    "SELECT c.subject, c.predicate FROM claim c"
+    " WHERE c.source_path = %(old)s"
+    "   AND c.superseded_at = (SELECT max(valid_from) FROM claim WHERE source_path = %(new)s)"
+    " ORDER BY c.subject, c.predicate;"
 )
 
 
@@ -1073,7 +1081,7 @@ def _record_supersedes(
     """supersedes 간선 + 부분 닫기 — record_supersedes(store.rs:2855-2888)의 봉인만 갈라진다.
 
     없는 문서를 이름한 쌍은 unknown 으로 세고 간선·봉인을 안 쓴다(엔진과 같다).
-    넷째 값은 이 호출이 닫은 (subject, predicate) — 대상 순서, 중복 제거."""
+    넷째 값은 이번 쓰기로 닫힌 (subject, predicate) — 봉인 뒤에 읽고, 대상 순서, 중복 제거."""
     linked = 0
     unknown = 0
     unknown_paths: list[str] = []
@@ -1099,6 +1107,7 @@ def _record_supersedes(
         )
         linked += 1
         cur.execute(_PARTIAL_SEAL_SQL, {"new": new_path, "old": old})
+        cur.execute(_RETIRED_READ_SQL, {"new": new_path, "old": old})
         for subject, predicate in cur.fetchall():
             retired[(subject, predicate)] = None
     return linked, unknown, unknown_paths, list(retired)
