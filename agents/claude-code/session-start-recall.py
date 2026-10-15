@@ -15,6 +15,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
+import distill_core  # noqa: E402
 from distill_core import repo_slug  # noqa: E402
 
 from ohmyboring import config as omb_env  # noqa: E402
@@ -69,6 +70,16 @@ def _approved_section(door_url: str) -> str:
     return "\n".join(lines)
 
 
+def _record_repo(cwd: str) -> None:
+    """Side effect only: the ingest worker's container cannot run git on cwd, so leave it the answer."""
+    if not cwd:
+        return
+    try:
+        distill_core.record_repo(cwd)
+    except OSError as e:
+        print(f"[omb-start-recall] repo table write failed: {e}", file=sys.stderr)
+
+
 def main() -> None:
     try:
         data = json.load(sys.stdin)
@@ -81,6 +92,7 @@ def main() -> None:
 
     cwd = data.get("cwd") or ""
     project = repo_slug(cwd)
+    _record_repo(cwd)
     client = DrudgeClient(timeout=8, retries=1)
 
     match client.context(project=project or None, max_items=5):

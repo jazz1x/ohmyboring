@@ -24,6 +24,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import markers  # noqa: E402
+import repo_table  # noqa: E402
 import transcript  # noqa: E402
 import uptake_core  # noqa: E402
 
@@ -142,6 +143,19 @@ def repo_slug(cwd):
     if main:
         return boring_config.canonical_repo(os.path.basename(main.rstrip("/")))
     return ""
+
+
+def record_repo(cwd):
+    """Compute (origin, repo) for cwd on the host and write it to the repo table, newest wins.
+
+    The ingest worker runs in a container with no path to cwd, so it reads this entry instead of
+    asking git. Same classify call as distill-session.py. Raises OSError if the table cannot be
+    written; hooks catch it and keep their output.
+    """
+    origin, _rule = boring_config.classify(cwd, git_remote_url(cwd) or None)
+    repo = repo_slug(cwd)
+    repo_table.write(cwd, origin, repo)
+    return origin, repo
 
 
 #: Openings that mark a transcript as a tool running itself rather than a person working. These

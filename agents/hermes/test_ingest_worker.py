@@ -118,6 +118,24 @@ class IngestWorkerTest(unittest.TestCase):
         drained = [e for e in self._events() if e["event"] == "ingest_queue" and e.get("session_id") == "s1"]
         self.assertEqual(drained[-1]["status"], "ok")
 
+    def test_the_worker_takes_origin_and_repo_from_the_host_table(self):
+        self._write_session("s-host")
+        ingest_worker.repo_table.write(self.tmp.name, "company", "ds-governance")
+        _stdout, run = self._run_main()
+        _text, origin, repo, _sid = run.call_args.args
+        self.assertEqual((origin, repo), ("company", "ds-governance"))
+        offer = self._offer_events("s-host")[0]
+        self.assertEqual(
+            (offer["origin"], offer["repo"], offer["repo_source"]), ("company", "ds-governance", "host")
+        )
+
+    def test_a_cwd_missing_from_the_table_falls_back_to_the_container_and_says_so(self):
+        self._write_session("s-cont")
+        _stdout, run = self._run_main()
+        _text, origin, repo, _sid = run.call_args.args
+        self.assertEqual((origin, repo), ("personal", ""))
+        self.assertEqual(self._offer_events("s-cont")[0]["repo_source"], "container")
+
     def test_already_done_session_is_not_reoffered(self):
         self._write_session("s-done")
         ingest_worker.markers.mark_done("s-done")

@@ -85,6 +85,10 @@ from ohmyboring import config as omb_env  # noqa: E402
 os.environ["BORING_INJECTION_LEDGER"] = str(Path(tempfile.mkdtemp()) / "injections.jsonl")
 import markers  # noqa: E402
 import recall_core  # noqa: E402
+import repo_table  # noqa: E402
+
+# Both hooks now leave a cwd -> repo entry under MARK_DIR; keep every test off the owner's live cache.
+markers.set_mark_dir(tempfile.mkdtemp(prefix="omb-hooks-mark-"))
 
 from ohmyboring.adapters import engine  # noqa: E402
 from ohmyboring.adapters import llm as llm_adapter  # noqa: E402
@@ -297,6 +301,19 @@ class SessionStartRecallTests(unittest.TestCase):
         )
         self.assertEqual(out, "")
         self.assertIn("context failed", _err)
+
+    def test_session_start_records_the_repo_for_the_ingest_worker(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            subprocess.run(["git", "-C", cwd, "init", "-q"], check=True)
+            subprocess.run(
+                ["git", "-C", cwd, "remote", "add", "origin", "git@github.com:jazz1x/ohmyboring.git"],
+                check=True,
+            )
+            self.assertIsNone(repo_table.read(cwd))
+            self._run_main({"hook_event_name": "SessionStart", "cwd": cwd})
+            entry = repo_table.read(cwd)
+        self.assertIsNotNone(entry)
+        self.assertIn("ohmyboring", entry[1])
 
 
 class DoorApprovedSectionTests(unittest.TestCase):
@@ -512,7 +529,7 @@ class DistillExitCodeTests(unittest.TestCase):
 class RecallFormattingTests(unittest.TestCase):
     """recall.main reads stdin + posts to /search; we mock urlopen so NO network happens."""
 
-    def _run_main(self, prompt, hits, search_side_effect=None, session_id=None, handover=None):
+    def _run_main(self, prompt, hits, search_side_effect=None, session_id=None, handover=None, cwd=None):
         captured = io.StringIO()
         stderr = io.StringIO()
         if search_side_effect is None:
@@ -525,6 +542,8 @@ class RecallFormattingTests(unittest.TestCase):
         stdin = {"prompt": prompt}
         if session_id:
             stdin["session_id"] = session_id
+        if cwd:
+            stdin["cwd"] = cwd
         # recall_core writes its own diagnostics through its own `sys`, so both modules' stderr
         # must be captured or the over-ceiling report escapes the assertion.
         with (
@@ -537,6 +556,31 @@ class RecallFormattingTests(unittest.TestCase):
         ):
             recall.main()
         return captured.getvalue(), stderr.getvalue()
+
+    # ── the repo table: filled once per cwd, never rewritten from the prompt path ──
+    def test_recall_fills_a_missing_repo_table_entry(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            self.assertIsNone(repo_table.read(cwd))
+            self._run_main("a sufficiently long prompt", [], cwd=cwd)
+            self.assertIsNotNone(repo_table.read(cwd))
+
+    def test_recall_leaves_an_existing_repo_table_entry_alone(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            repo_table.write(cwd, "company", "kept-by-session-start")
+            with mock.patch.object(distill_core, "record_repo") as record:
+                self._run_main("a sufficiently long prompt", [], cwd=cwd)
+            record.assert_not_called()
+            self.assertEqual(repo_table.read(cwd), ("company", "kept-by-session-start"))
+
+    def test_a_failed_repo_table_write_keeps_the_hook_output(self):
+        hits = [{"source_path": "/vault/wiki/wiki-0001.md", "snippet": "note body text"}]
+        with (
+            tempfile.TemporaryDirectory() as cwd,
+            mock.patch.object(distill_core, "record_repo", side_effect=OSError("disk full")),
+        ):
+            out, err = self._run_main("a sufficiently long prompt", hits, cwd=cwd)
+        self.assertIn("additionalContext", out)
+        self.assertIn("repo table write failed", err)
 
     # ── the engine learns what was handed, not what was fetched ─────────────────────
     def test_injected_notes_are_handed_to_the_engine_under_the_session(self):
