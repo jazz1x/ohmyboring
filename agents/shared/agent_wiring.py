@@ -1178,35 +1178,29 @@ _REGISTRATION_FILES = (("claude-code", "~/.claude/settings.json"),)
 
 
 def _registered_commands(path: Path):
-    """Every hook command string in a config, whatever its format."""
+    """Every hook command string in a JSON config."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return []
-    if path.suffix == ".json":
-        try:
-            data = json.loads(text)
-        except ValueError:
-            return []
-        out = []
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    out = []
 
-        def walk(node):
-            if isinstance(node, dict):
-                if isinstance(node.get("command"), str):
-                    out.append(node["command"])
-                for value in node.values():
-                    walk(value)
-            elif isinstance(node, list):
-                for value in node:
-                    walk(value)
+    def walk(node):
+        if isinstance(node, dict):
+            if isinstance(node.get("command"), str):
+                out.append(node["command"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
 
-        walk(data)
-        return out
-    return [
-        line.split("=", 1)[-1].strip().strip("\"'")
-        for line in text.splitlines()
-        if line.strip().startswith("command")
-    ]
+    walk(data)
+    return out
 
 
 def _report_duplicate_registrations():
