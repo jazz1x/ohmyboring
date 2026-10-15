@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shared recall logic for agent UserPromptSubmit hooks.
 
-Agent-specific entry points (Claude Code, Kimi, etc.) become thin wrappers that
+Agent-specific entry points (Claude Code, etc.) become thin wrappers that
 only supply their injection-filter, if any, and then delegate here.
 """
 
@@ -299,7 +299,7 @@ def run_recall(
 ) -> None:
     """Recall relevant notes via drudge /search and print the hook output.
 
-    `is_injection` is an optional agent-specific filter (e.g. Kimi skips
+    `is_injection` is an optional agent-specific filter (e.g. skipping
     system-reminder payloads). Failures are silent no-ops so a down engine never
     blocks the prompt.
     """

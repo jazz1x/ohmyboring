@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![local LLM](https://img.shields.io/badge/local%20LLM-Ollama%20%7C%20LM%20Studio-000)
 
-**ohmyboring は、自分がどう解いたかを覚えておくための道具です。** Claude Code / Kimi Code のセッションと、取り込み可能な Codex トランスクリプトをローカルの読める wiki に変換し、*"前これどうやったっけ？"* と思ったときに呼び戻します — どう解いたかを残すものであり、想起の精度は公開で測定中です（`make peek`）。**クラウド 0 · ローカル LLM に優しい設計。**
+**ohmyboring は、自分がどう解いたかを覚えておくための道具です。** Claude Code のセッションと、取り込み可能な Codex トランスクリプトをローカルの読める wiki に変換し、*"前これどうやったっけ？"* と思ったときに呼び戻します — どう解いたかを残すものであり、想起の精度は公開で測定中です（`make peek`）。**クラウド 0 · ローカル LLM に優しい設計。**
 
 ```bash
 # 最速 — ワンライナー: ~/oh-my-boring にクローン、ビルド、フック/MCP/ワーカーまで連携。
@@ -27,7 +27,7 @@ make collect N=20   # 過去の Claude Code セッションで vault を埋め�
 make ask Q="docker build cache の問題、どう直したっけ？"
 ```
 
-> 新規クローンは **vault が空** なので、初日の `make ask` は何も見つけられません。`make collect` で Claude の過去記録を埋めれば、以降の Claude/Kimi セッションは自動蓄積され、Codex は取り込み可能なトランスクリプトをワーカーが処理します（[取り込み](#取り込み-ingestion)参照）。
+> 新規クローンは **vault が空** なので、初日の `make ask` は何も見つけられません。`make collect` で Claude の過去記録を埋めれば、以降の Claude セッションは自動蓄積され、Codex は取り込み可能なトランスクリプトをワーカーが処理します（[取り込み](#取り込み-ingestion)参照）。
 
 > **Docker**、**Python 3**、**jq**、**curl**、**git**、**make**、およびローカル LLM サーバー — **Ollama** または **LM Studio** (または別の OpenAI-compatible エンドポイント)が必要です。
 
@@ -61,7 +61,7 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 
 | 方法 | コマンド | タイミング |
 | --- | --- | --- |
-| **自動（セッション終了時）** | SessionEnd フック（`install.sh` が設定） | すべての Claude Code / Kimi セッション — `hooks/distill-session.py` がトランスクリプトを蒸留し `remember` します。対になる `UserPromptSubmit` フック（`recall.py`）が関連する過去のメモリを新しいプロンプトへ自動注入します。 |
+| **自動（セッション終了時）** | SessionEnd フック（`install.sh` が設定） | すべての Claude Code セッション — `hooks/distill-session.py` がトランスクリプトを蒸留し `remember` します。対になる `UserPromptSubmit` フック（`recall.py`）が関連する過去のメモリを新しいプロンプトへ自動注入します。 |
 | **自動（Codex ワーカー）** | ホスト launchd/cron ワーカー（`install.sh` が設定） | Codex には SessionEnd フックがありません。ホストワーカーが 20 分ごとに `~/.codex/sessions/**/*.jsonl` をスキャンし、まだ書き込み中のトランスクリプトと実際の subagent rollout はスキップし、取り込み可能なトランスクリプトを同じ `remember` 経路で保存します。`hermes-agent` が有効なら `codex-memory-ingest-worker` も設定されます。どちらも `make doctor` で確認します。 |
 | **過去セッションのバックフィル** | `make collect [N=20]` | インストール直後、空の vault を `~/.claude/projects` の履歴で埋めるとき。新しい順・冪等（セッションごとのマーカーで蒸留済みはスキップ）、1 回に `N` 件だけ処理し CPU を占有しません。 |
 | **今すぐ（セッションを終えずに）** | `make distill-now` · `make remember M="…"` | セッションを終了せずに即座に取り込みたいとき。`distill-now` は**現在の**トランスクリプトをキューに入れ、hermes（`boring-agent`）にその場で処理させるため、hermes が起動している必要があります。セッション終了時の通常の取り込みもその後そのまま動作します（初期ノート + 最終ノートの両方ができる場合あり）。`remember` は自分で書いたノートを保存します。 |
@@ -76,7 +76,7 @@ python3 agents/shared/agent_wiring.py --install \
   --server-url http://localhost:7710/mcp
 ```
 
-このコマンドは Claude/Kimi フック、Cursor/Codex MCP エントリ、Codex ホストワーカー、そして `hermes-agent` が有効な場合は Hermes cron ワーカーを設定します。Claude だけを手で編集する場合は、`~/.claude/settings.json` に `python3 ~/oh-my-boring/hooks/distill-session.py` を実行する `SessionEnd` フックと、`recall.py` を実行する `UserPromptSubmit` フックを追加します。
+このコマンドは Claude フック、Cursor/Codex MCP エントリ、Codex ホストワーカー、そして `hermes-agent` が有効な場合は Hermes cron ワーカーを設定します。Claude だけを手で編集する場合は、`~/.claude/settings.json` に `python3 ~/oh-my-boring/hooks/distill-session.py` を実行する `SessionEnd` フックと、`recall.py` を実行する `UserPromptSubmit` フックを追加します。
 
 ---
 
@@ -229,7 +229,6 @@ make readiness
 | `BORING_DISTILL_RESOLUTION` | 取り込み解像度の契約: `compact`, `standard`, `evidence`（デフォルト）, `forensic`; 検証失敗時は 1 回だけ補強し、それでも失敗したら `remember` をブロック |
 | `DISTILL_CLAMP` | Claude Code hook が distill LLM に送る最大文字数。`INGEST_CLAMP`、次に `12000` の順で決まります |
 | `CODEX_DISTILL_CLAMP` | Codex セッション向けの同じ値。`INGEST_CLAMP`、次に `12000` |
-| `KIMI_DISTILL_CLAMP` | Kimi Code セッション向けの同じ値。`INGEST_CLAMP`、次に `12000` |
 | `DISTILL_BACKSTOP_CLAMP` | 呼び出し側が clamp せずに渡した場合だけ効く最終上限（`48000`）。上の 3 つのデフォルトより意図的に高く置き、そのいずれかを上げたときに黙って切り戻されないようにしています。ここに掛かった場合はどのノブを上げるべきかをログに出します |
 | `RECALL_CLAIMS_PER_HIT` | 注入されるスニペットごとに同送する claim の数（`2`）。claim は何を決め、次に何をし、何に噛まれたかです — スニペットがそのノートが何についてかを言うなら、claim はそれが何に落ち着いたかを言います。実際の一週間の注入で実測: 1 個ならヒットあたり 59 文字、2 個なら 102 文字で、スニペット三つが既に使う 840 文字の隣です。ヒットの 54.4% が二つ目の claim を持ちます。`0` で同送を止めます |
 | `RECALL_RELEVANCE_MAX_DIST` | 取得した hit が主題からどれだけ外れているかを*測る*ための cosine 距離の上限（`0.514`）。この値で破棄することはありません — スカラー 1 つでは 2 つのクラスを分離できません（`data/eval` のバンドが重なり、`0.514` はライブ注入 23 件のうち 47.8% を捨てる値でした）。よって支払う代わりに報告だけします。`vector_cosine` のみを比較し、`text_rank` の hit や距離を持たない hit はこの値で判定しません |
@@ -318,7 +317,6 @@ make bench-embed
 | `make vault-cleanup-fix` | `vault/wiki` をバックアップし、安全な steward 修正を適用して再検証 |
 | `make remember M="text"` | 1 行ノートを書き込み |
 | `make collect [N=1]` | 過去 Claude Code セッションの lazy バックフィル |
-| `make collect-kimi [N=1]` | 過去 Kimi Code セッションの lazy バックフィル |
 | `make hermes-build` | オプション hermes-agent イメージの clone/build |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | エンジンログ |
@@ -336,9 +334,6 @@ make bench-embed
 ```bash
 # Claude Code（デフォルトの make collect）
 make collect N=20
-
-# Kimi Code
-make collect-kimi N=20
 
 # GitHub Codex（通常は Hermes ワーカーが処理）
 make doctor
@@ -433,13 +428,10 @@ curl -s -X POST http://localhost:7710/mcp \
 |---|---|---|---|---|
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | セッションを要約し `remember` を呼び出す |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | 関連 snippet を取得しプロンプト context に注入 |
-| Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Kimi セッションを要約し `remember` を呼び出す |
-| Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | 関連 snippet を取得しプロンプト context に注入 |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring` を MCP サーバーとして公開 |
 | Codex | `agents/codex/README.md` | MCP + ホストワーカーのバックフィル | `~/.codex/mcp.json` / launchd または cron / `collect-sessions.py` | `ohmyboring` を MCP サーバーとして公開し、取り込み可能な Codex セッションをバックフィル。設定済みワーカーは安定した rollout トランスクリプトを取り込み、実際の subagent はスキップ |
 | hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 取り込みワーカーと定期ブリーフィングを実行 |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 手動 | 古い Claude Code セッションの lazy バックフィル |
-| scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / 手動 | 古い Kimi Code セッションの lazy バックフィル |
 | shared | `src/ohmyboring/config.py` | アダプター import | `boring.json` ポリシーローダー |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | 有効なエージェントの hook/MCP 設定を idempotent に構成 |
 
@@ -490,10 +482,9 @@ MCP に対応したエージェントならどれも ohmyboring を利用でき�
 
 `install.sh` が自動で配線するもの:
 - Claude Code フック → `~/.claude/settings.json`
-- Kimi Code フック → `~/.kimi-code/config.toml`
 - `boring.json` で Cursor・Codex が有効な場合、Cursor の `~/.cursor/mcp.json` と Codex の `~/.codex/mcp.json`
 
-その他のエージェントは、ルートの `.mcp.json` を適切な場所へコピーするか（例: Claude Desktop は `~/.claude/mcp.json`、Kimi Code MCP は `~/.kimi-code/mcp.json`）、エージェントの CLI で HTTP MCP サーバーを追加してください。
+その他のエージェントは、ルートの `.mcp.json` を適切な場所へコピーするか（例: Claude Desktop は `~/.claude/mcp.json`）、エージェントの CLI で HTTP MCP サーバーを追加してください。
 
 （VS Code Copilot は root key `servers` を使う `.vscode/mcp.json` を使用します。CLI 代替: `claude mcp add --transport http --scope project ohmyboring http://localhost:7710/mcp`。compose の sibling コンテナは `http://boring-door:7710/mcp` でアクセスします。）
 
@@ -622,7 +613,6 @@ oh-my-boring/
 ├─ agents/                  # ホスト側エージェントアダプター
 │  ├─ claude-code/          # Claude Code hooks
 │  ├─ hermes/               # hermes-agent cron
-│  ├─ kimi/                 # Kimi Code hooks
 │  ├─ schedulers/           # cron/launchd バックフィル
 │  └─ shared/               # ポリシー/設定ライブラリ
 ├─ hooks/                   # backward-compatible symlink → agents/

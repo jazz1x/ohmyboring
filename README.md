@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![local LLM](https://img.shields.io/badge/local%20LLM-Ollama%20%7C%20LM%20Studio-000)
 
-**ohmyboring remembers how you solved things.** It turns Claude Code / Kimi Code sessions and eligible Codex transcripts into a local, human-readable wiki and brings them back when you ask *"how did I do this last time?"* — it captures how you solved things; recall precision is being measured in the open (`make peek`). **Zero cloud · local LLM friendly.**
+**ohmyboring remembers how you solved things.** It turns Claude Code sessions and eligible Codex transcripts into a local, human-readable wiki and brings them back when you ask *"how did I do this last time?"* — it captures how you solved things; recall precision is being measured in the open (`make peek`). **Zero cloud · local LLM friendly.**
 
 ```bash
 # Fastest — one-liner: clones to ~/oh-my-boring, builds, wires hooks/MCP/workers.
@@ -27,7 +27,7 @@ make collect N=20   # seed the vault from your past Claude Code sessions (fresh 
 make ask Q="how did I fix the docker build cache problem?"
 ```
 
-> A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your Claude history; after that, Claude/Kimi sessions auto-accumulate and Codex is picked up by its worker when eligible (see [Feeding it](#feeding-it-ingestion)).
+> A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your Claude history; after that, Claude sessions auto-accumulate and Codex is picked up by its worker when eligible (see [Feeding it](#feeding-it-ingestion)).
 
 > Requires **Docker**, **Python 3**, **jq**, **curl**, **git**, **make**, and a local LLM server — **Ollama** or **LM Studio** (or another OpenAI-compatible endpoint).
 
@@ -61,7 +61,7 @@ Memory gets in four ways — after setup you rarely touch the automatic paths:
 
 | How | Command | When |
 | --- | --- | --- |
-| **Automatic, on session end** | SessionEnd hook (wired by `install.sh`) | every Claude Code / Kimi session — `hooks/distill-session.py` distills the transcript and `remember`s it. The paired `UserPromptSubmit` hook (`recall.py`) auto-injects relevant past memory into new prompts: up to three snippets, each carrying the claims its note settled (`RECALL_CLAIMS_PER_HIT`). |
+| **Automatic, on session end** | SessionEnd hook (wired by `install.sh`) | every Claude Code session — `hooks/distill-session.py` distills the transcript and `remember`s it. The paired `UserPromptSubmit` hook (`recall.py`) auto-injects relevant past memory into new prompts: up to three snippets, each carrying the claims its note settled (`RECALL_CLAIMS_PER_HIT`). |
 | **Automatic, Codex worker** | host launchd/cron worker (wired by `install.sh`) | Codex has no SessionEnd hook. A host worker scans `~/.codex/sessions/**/*.jsonl` every 20 minutes, skips transcripts still being written, keeps true subagent rollouts out, and stores eligible transcripts through the same `remember` path. If `hermes-agent` is enabled, it also gets a `codex-memory-ingest-worker`. Check both with `make doctor`. |
 | **Backfill past sessions** | `make collect [N=20]` | once after install, to seed an otherwise-empty vault from your `~/.claude/projects` history. Newest-first, idempotent (a per-session marker skips already-distilled ones), `N` per run so it never hogs CPU. |
 | **Right now, mid-session** | `make distill-now` · `make remember M="…"` | capture something immediately *without* ending the session. `distill-now` queues the **current** transcript and has hermes (`boring-agent`) drain the queue right away, so it needs hermes running; the end-of-session capture still runs afterwards (you may get an early note plus the final one). `remember` saves an explicit note you write yourself. |
@@ -76,7 +76,7 @@ python3 agents/shared/agent_wiring.py --install \
   --server-url http://localhost:7710/mcp
 ```
 
-This installs Claude/Kimi hooks, Cursor/Codex MCP entries, the Codex host worker, and Hermes cron workers when `hermes-agent` is enabled. Or edit `~/.claude/settings.json` by hand for Claude only: a `SessionEnd` hook running `python3 ~/oh-my-boring/hooks/distill-session.py`, plus a `UserPromptSubmit` hook running `recall.py`.
+This installs Claude hooks, Cursor/Codex MCP entries, the Codex host worker, and Hermes cron workers when `hermes-agent` is enabled. Or edit `~/.claude/settings.json` by hand for Claude only: a `SessionEnd` hook running `python3 ~/oh-my-boring/hooks/distill-session.py`, plus a `UserPromptSubmit` hook running `recall.py`.
 
 ---
 
@@ -230,7 +230,6 @@ The model ids must match what LM Studio reports. `make verify-llm` also calls `/
 | `BORING_DISTILL_RESOLUTION` | distillation detail contract: `compact`, `standard`, `evidence` (default), or `forensic`; verifier failures repair once, then block `remember` |
 | `DISTILL_CLAMP` | max characters the Claude Code hook sends to the distill LLM; falls back to `INGEST_CLAMP`, then `12000` |
 | `CODEX_DISTILL_CLAMP` | same, for Codex sessions; falls back to `INGEST_CLAMP`, then `12000` |
-| `KIMI_DISTILL_CLAMP` | same, for Kimi Code sessions; falls back to `INGEST_CLAMP`, then `12000` |
 | `DISTILL_BACKSTOP_CLAMP` | last-resort ceiling (`48000`) applied only when a caller passes unclamped text. It sits well above the three defaults on purpose, so raising one of them is not silently undone; hitting it logs which knob to raise instead |
 | `RECALL_CLAIMS_PER_HIT` | how many settled claims ride along with each injected snippet (`2`). A claim is what was decided, what is next, or what bit you — the snippet says what the note is about, these say what it concluded. Measured on a week of real injections: one claim costs 59 characters per hit and two cost 102, against the 840 three snippets already spend, and 54.4% of hits have a second claim to give. `0` turns the handover off |
 | `RECALL_RELEVANCE_MAX_DIST` | cosine-distance ceiling used to *measure* how off-topic a recalled hit is (`0.514`). Nothing is ever discarded on it — a scalar cannot separate the two classes (the `data/eval` bands overlap, and `0.514` would have discarded 47.8% of 23 live injections), so recall reports the cost instead of paying it. Only compares `vector_cosine` distances; a `text_rank` hit or one with no distance is never judged by it |
@@ -311,7 +310,6 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 | `make vault-cleanup-fix` | backup `vault/wiki`, apply safe steward repairs, then verify |
 | `make remember M="text"` | write a one-line note |
 | `make collect [N=1]` | lazy backfill of past Claude Code sessions |
-| `make collect-kimi [N=1]` | lazy backfill of past Kimi Code sessions |
 | `make hermes-build` | clone/build the optional hermes-agent image |
 | `make smoke` | end-to-end smoke test |
 | `make logs` | engine logs |
@@ -329,9 +327,6 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 ```bash
 # Claude Code (default make collect)
 make collect N=20
-
-# Kimi Code
-make collect-kimi N=20
 
 # GitHub Codex (normally handled by the Hermes worker)
 make doctor
@@ -427,13 +422,10 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | Distills a session and calls `remember` |
 | Claude Code | `agents/claude-code/session-start-recall.py` | `SessionStart` hook | Loads structured context (`/context`) before the first turn |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
-| Kimi Code | `agents/kimi/distill-session.py` | `SessionEnd` hook | Distills a Kimi session and calls `remember` |
-| Kimi Code | `agents/kimi/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring` as an MCP server |
 | Codex | `agents/codex/README.md` | MCP + host worker backfill | `~/.codex/mcp.json` / launchd or cron / `collect-sessions.py` | Exposes `ohmyboring` as an MCP server and backfills eligible Codex sessions; installed workers harvest stable rollout transcripts but skip true subagents |
 | hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`briefing`, `morning-card`, `weekly-card`) + serial backfill workers (`ingest-worker.py`, Codex collector). The two card jobs ask the door to run the card programs (`POST /run/morning-card` · `/run/weekly-card`, delivery `local` — the tools post to Slack themselves); the launchd registrations (`scripts/schedule-card.sh`) stay until hermes has run one morning successfully, and the tools' own once-per-day/week guard keeps the overlap from double-posting |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older Claude Code sessions |
-| scheduler | `agents/schedulers/collect-kimi-sessions.py` | cron / launchd / manual | Lazy backfill of older Kimi Code sessions |
 | shared | `src/ohmyboring/config.py` | imported by adapters | `boring.json` policy loader |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | Idempotently configures hooks/MCP for enabled agents |
 
@@ -482,10 +474,9 @@ Any MCP-capable agent can use ohmyboring. The repo ships a standard **`.mcp.json
 
 `install.sh` automatically wires:
 - Claude Code hooks in `~/.claude/settings.json`
-- Kimi Code hooks in `~/.kimi-code/config.toml`
 - Cursor's `~/.cursor/mcp.json` and Codex's `~/.codex/mcp.json` when those agents are enabled in `boring.json`
 
-For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~/.claude/mcp.json` for Claude Desktop or `~/.kimi-code/mcp.json` for Kimi Code MCP) or use the agent's CLI to add the HTTP MCP server.
+For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~/.claude/mcp.json` for Claude Desktop) or use the agent's CLI to add the HTTP MCP server.
 
 (VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring http://localhost:7710/mcp`. Compose siblings reach it at `http://boring-door:7710/mcp`.)
 
@@ -632,7 +623,6 @@ oh-my-boring/
 ├─ agents/                  # host-side agent adapters
 │  ├─ claude-code/          # Claude Code hooks
 │  ├─ hermes/               # hermes-agent cron
-│  ├─ kimi/                 # Kimi Code hooks
 │  ├─ schedulers/           # cron/launchd backfill
 │  └─ shared/               # policy/config library
 ├─ hooks/                   # backward-compatible symlinks → agents/

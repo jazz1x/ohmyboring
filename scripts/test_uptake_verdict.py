@@ -163,13 +163,13 @@ class Midpoint(unittest.TestCase):
         """Summing adapters would clear a gate neither of them clears."""
         rows = [_event("a", 0, 10) for _ in range(8)]
         rows += [
-            dict(_event("k", 0, 10), attributes={**_event("k", 0, 10)["attributes"], "agent": "kimi"})
+            dict(_event("k", 0, 10), attributes={**_event("k", 0, 10)["attributes"], "agent": "codex"})
             for _ in range(3)
         ]
         code, out = self._cli(rows, uv.verdict_core.MIDPOINT)
         self.assertEqual(code, uv.MIDPOINT_SHORT, out)
         self.assertIn("claude-code", out)
-        self.assertIn("kimi", out)
+        self.assertIn("codex", out)
 
     def test_json_and_midpoint_refuse_each_other(self):
         """One answers with a payload, the other with an exit code; dropping either is silent."""

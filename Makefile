@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now collect-kimi smoke e2e doctor readiness heal verify-llm door-build door-up maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary card door
+.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now smoke e2e doctor readiness heal verify-llm door-build door-up maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary card door
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -103,9 +103,6 @@ distill-now: ## Queue the CURRENT session, then have hermes drain the queue righ
 	@python3 agents/schedulers/collect-sessions.py --now
 	@docker exec -u "$$(id -u):$$(id -g)" boring-agent /opt/hermes/.venv/bin/python3 /opt/data/scripts/ingest-worker.py --drain-only >/dev/null \
 	  || { echo 'hermes (boring-agent) is not running — the session stays queued; it is distilled on the next hermes tick'; exit 1; }
-
-collect-kimi: ## Lazily collect past Kimi Code sessions (one at a time)   make collect-kimi [N=1]
-	@COLLECT_LIMIT=$${N:-1} python3 agents/schedulers/collect-kimi-sessions.py
 
 smoke: ## end-to-end smoke test
 	./scripts/smoke.sh

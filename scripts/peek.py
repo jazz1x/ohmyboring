@@ -468,9 +468,8 @@ def window_block(rows, notes):
             " 채점기가 만든 것이라 같은 계기의 값이 아니다 — PRD §8 D9."
         )
 
-    # Per agent, never pooled: Claude Code injects on every prompt while Kimi throttles to once a
-    # session (`verdict_core` / `distill_core.log_uptake_event`), so a pooled rate answers neither
-    # product's question. When more than one adapter reported, the largest sample is the one shown
+    # Per agent, never pooled (`verdict_core` / `distill_core.log_uptake_event`): a pooled rate
+    # answers no adapter's question. When more than one adapter reported, the largest sample is the one shown
     # and the others are named in `notes` — summing them would fabricate a rate nobody registered.
     if per_agent:
         agent, counts = max(per_agent.items(), key=lambda kv: kv[1]["total_prompts"])

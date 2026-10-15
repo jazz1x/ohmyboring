@@ -26,7 +26,7 @@ _HARNESS_PREFIXES = ("<task-notification>", "Another Claude session sent a messa
 def _is_injection(data: dict) -> bool:
     """Skip recall for text the harness injected rather than text the user typed.
 
-    Claude Code's payload has no `origin` field (Kimi's does), so the test has to be
+    Claude Code's payload has no `origin` field, so the test has to be
     structural: what the harness wraps in its own tags, and prompts that are only image
     placeholders. Both were measured over 7 days of `query_log` — task notifications are
     695 of 2,178 firings (31.9%) and image-only prompts 14 more, and each firing injects

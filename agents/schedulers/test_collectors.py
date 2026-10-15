@@ -25,7 +25,6 @@ def _load(name, filename):
 
 
 claude_collect = _load("claude_collect_sessions", "collect-sessions.py")
-kimi_collect = _load("kimi_collect_sessions", "collect-kimi-sessions.py")
 codex_collect = _load("codex_collect_sessions", "../codex/collect-sessions.py")
 
 from ohmyboring.result import Err, Ok  # noqa: E402, F401 — Err: 쓰기 문지기의 거절 경로
@@ -77,63 +76,6 @@ def test_claude_backfill_does_not_claim_to_be_a_session_end():
         claude_collect.LIMIT = old_limit
 
 
-def test_kimi_collector_fails_when_distill_fails():
-    old_home = kimi_collect.KIMI_HOME
-    old_hook = kimi_collect.HOOK
-    old_limit = kimi_collect.LIMIT
-    try:
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            session_dir = root / "session"
-            session_dir.mkdir()
-            second_session_dir = root / "session-2"
-            second_session_dir.mkdir()
-            index = root / "session_index.jsonl"
-            index.write_text(
-                json.dumps({"sessionId": "k1", "sessionDir": str(session_dir), "workDir": "/work/repo"})
-                + "\n"
-                + json.dumps(
-                    {"sessionId": "k2", "sessionDir": str(second_session_dir), "workDir": "/work/repo"}
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            hook = root / "distill-session.py"
-            hook.write_text("# stub\n", encoding="utf-8")
-            event_path = root / "events.ndjson"
-
-            kimi_collect.KIMI_HOME = str(root)
-            kimi_collect.HOOK = str(hook)
-            kimi_collect.LIMIT = 1
-
-            with (
-                mock.patch.object(kimi_collect, "_distill", return_value=False) as distill,
-                # Stub the client so the write-door preflight does not make this test depend on
-                # a reachable engine — it owns the distill-failure path, not readiness.
-                mock.patch.object(kimi_collect, "DrudgeClient") as client,
-                mock.patch.dict(
-                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
-                ),
-            ):
-                client.return_value.health.return_value = Ok({"status": "ok", "db_healthy": True})
-                rc = kimi_collect.main()
-
-            assert rc == 1
-            assert distill.call_count == 1
-            event = _last_event(event_path)
-            assert event["component"] == "kimi-collector"
-            assert event["status"] == "failed"
-            assert event["attempted"] == 1
-            assert event["failed"] == 1
-            assert event["workflow"] == "memory_ingest"
-            assert event["workflow_node"] == "retry_marked"
-            assert event["workflow_outcome"] == "fail"
-    finally:
-        kimi_collect.KIMI_HOME = old_home
-        kimi_collect.HOOK = old_hook
-        kimi_collect.LIMIT = old_limit
-
-
 def test_claude_marked_respects_a_fresh_retry_marker():
     old_mark_dir = claude_collect.markers.MARK_DIR
     try:
@@ -158,20 +100,6 @@ def test_claude_marked_excludes_dead_lettered_session():
             assert claude_collect._marked("s1") is True
     finally:
         claude_collect.markers.set_mark_dir(old_mark_dir)
-
-
-def test_kimi_marked_excludes_dead_lettered_session():
-    old_mark_dir = kimi_collect.markers.MARK_DIR
-    try:
-        with tempfile.TemporaryDirectory() as d:
-            kimi_collect.markers.set_mark_dir(d)
-            with mock.patch.dict(os.environ, {"MARKER_RETRY_MAX_ATTEMPTS": "1"}):
-                kimi_collect.markers.mark_retry("k1", reason="resolution gate failed")
-
-            assert kimi_collect.markers.is_dead("k1")
-            assert kimi_collect._marked("k1") is True
-    finally:
-        kimi_collect.markers.set_mark_dir(old_mark_dir)
 
 
 class _FakeResponse:
@@ -205,17 +133,6 @@ def _codex_fixture(root: Path) -> Path:
     source.mkdir(parents=True)
     (source / "todo.jsonl").write_text(json.dumps({"payload": {}}) + "\nbody\n", encoding="utf-8")
     return source
-
-
-def _kimi_fixture(root: Path) -> None:
-    session_dir = root / "session"
-    session_dir.mkdir()
-    (root / "session_index.jsonl").write_text(
-        json.dumps({"sessionId": "k1", "sessionDir": str(session_dir), "workDir": "/work/repo"}) + "\n",
-        encoding="utf-8",
-    )
-    hook = root / "distill-session.py"
-    hook.write_text("# stub\n", encoding="utf-8")
 
 
 def test_claude_collector_run_makes_no_sync_request():
@@ -299,46 +216,6 @@ def test_claude_collector_fails_when_distill_fails():
         claude_collect.markers.set_mark_dir(old_mark_dir)
         claude_collect.MIN_KB = old_min_kb
         claude_collect.LIMIT = old_limit
-
-
-def test_kimi_collector_run_makes_no_sync_request():
-    old_home = kimi_collect.KIMI_HOME
-    old_hook = kimi_collect.HOOK
-    old_limit = kimi_collect.LIMIT
-    old_mark_dir = kimi_collect.markers.MARK_DIR
-    try:
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            _kimi_fixture(root)
-            event_path = root / "events.ndjson"
-            calls = []
-
-            kimi_collect.KIMI_HOME = str(root)
-            kimi_collect.HOOK = str(root / "distill-session.py")
-            kimi_collect.LIMIT = 1
-            kimi_collect.markers.set_mark_dir(str(root / "markers"))
-
-            with (
-                mock.patch.object(kimi_collect.subprocess, "run", return_value=mock.Mock(returncode=0)),
-                mock.patch.object(urllib.request, "urlopen", _recording_urlopen(calls)),
-                mock.patch.dict(
-                    os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
-                ),
-            ):
-                rc = kimi_collect.main()
-
-            assert rc == 0
-            assert not [url for (url, _t) in calls if url.endswith("/sync")], calls
-            event = _last_event(event_path)
-            assert event["status"] == "ok"
-            assert event["processed"] == 1
-            assert event["failed"] == 0
-            assert "sync_status" not in event
-    finally:
-        kimi_collect.KIMI_HOME = old_home
-        kimi_collect.HOOK = old_hook
-        kimi_collect.LIMIT = old_limit
-        kimi_collect.markers.set_mark_dir(old_mark_dir)
 
 
 def test_codex_collector_run_makes_no_sync_request():
@@ -493,31 +370,6 @@ def test_claude_collector_exits_1_and_logs_failed_when_the_write_door_is_closed(
         claude_collect.LIMIT = old_limit
 
 
-def test_kimi_collector_exits_1_and_logs_failed_when_the_write_door_is_closed():
-    old_home = kimi_collect.KIMI_HOME
-    old_hook = kimi_collect.HOOK
-    old_limit = kimi_collect.LIMIT
-    old_mark_dir = kimi_collect.markers.MARK_DIR
-    try:
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            _kimi_fixture(root)
-            event_path = root / "events.ndjson"
-            kimi_collect.KIMI_HOME = str(root)
-            kimi_collect.HOOK = str(root / "distill-session.py")
-            kimi_collect.LIMIT = 1
-            kimi_collect.markers.set_mark_dir(str(root / "markers"))
-            with mock.patch.dict(
-                os.environ, {"BORING_EVENT_LOG": str(event_path), "BORING_EVENT_SINK": "spool"}
-            ):
-                _assert_write_door_closed(kimi_collect.main, event_path, "collect-kimi")
-    finally:
-        kimi_collect.KIMI_HOME = old_home
-        kimi_collect.HOOK = old_hook
-        kimi_collect.LIMIT = old_limit
-        kimi_collect.markers.set_mark_dir(old_mark_dir)
-
-
 def test_codex_collector_exits_1_and_logs_failed_when_the_write_door_is_closed():
     old_mark_dir = codex_collect.markers.MARK_DIR
     old_min_kb = codex_collect.MIN_KB
@@ -548,16 +400,12 @@ def test_codex_collector_exits_1_and_logs_failed_when_the_write_door_is_closed()
 
 if __name__ == "__main__":
     test_claude_collector_exits_1_and_logs_failed_when_the_write_door_is_closed()
-    test_kimi_collector_exits_1_and_logs_failed_when_the_write_door_is_closed()
     test_codex_collector_exits_1_and_logs_failed_when_the_write_door_is_closed()
     test_claude_backfill_does_not_claim_to_be_a_session_end()
-    test_kimi_collector_fails_when_distill_fails()
     test_claude_marked_respects_a_fresh_retry_marker()
     test_claude_marked_excludes_dead_lettered_session()
-    test_kimi_marked_excludes_dead_lettered_session()
     test_claude_collector_run_makes_no_sync_request()
     test_claude_collector_fails_when_distill_fails()
-    test_kimi_collector_run_makes_no_sync_request()
     test_codex_collector_run_makes_no_sync_request()
     test_codex_collector_fails_when_distill_fails()
     print("ok - scheduler collectors")

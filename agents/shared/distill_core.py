@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared distillation core for session-end hooks (Claude Code, Kimi, etc.).
+"""Shared distillation core for session-end hooks (Claude Code, Codex, etc.).
 
 Hosts the pure, agent-agnostic pieces the host hooks need — standard library only:
   - marker throttle/retry bookkeeping
@@ -319,10 +319,9 @@ def log_uptake_event(session_id, repo, transcript_text, agent):
     when uptake is zero — a session where nothing landed is the observation, and dropping those
     rows would leave a ledger that only ever reports success.
 
-    `agent` is required, not inferred: Claude Code injects on every prompt while Kimi throttles to
-    once per session (`agents/kimi/recall.py`), so the two adapters are running different products
-    and a pooled rate would answer neither. The verdict this measurement exists to settle has to
-    be readable per adapter.
+    `agent` is required, not inferred: adapters run different products and a pooled rate would
+    answer none of them. The verdict this measurement exists to settle has to be readable per
+    adapter.
 
     Never raises and never blocks distillation: uptake is a measurement of the product, not part
     of the write door.

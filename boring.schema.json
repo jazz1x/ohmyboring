@@ -224,8 +224,7 @@
               "codex",
               "windsurf",
               "claude-desktop",
-              "hermes-agent",
-              "kimi"
+              "hermes-agent"
             ]
           },
           "enabled": { "type": "boolean", "default": true },

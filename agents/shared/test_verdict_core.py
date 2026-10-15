@@ -104,24 +104,23 @@ def test_events_predating_the_control_counter_are_excluded_not_zeroed():
 
 
 def test_rows_are_not_pooled_across_adapters():
-    """Claude Code injects every prompt; Kimi throttles to once a session. One rate answers
-    neither, so the two never share a denominator."""
-    rows = [_event(agent="claude-code"), _event(agent="kimi"), _event(agent="kimi")]
+    """One pooled rate would answer for no adapter, so adapters never share a denominator."""
+    rows = [_event(agent="claude-code"), _event(agent="codex"), _event(agent="codex")]
 
     per_agent, _ = V.collect(rows)
 
-    assert set(per_agent) == {"claude-code", "kimi"}
-    assert per_agent["kimi"]["sessions"] == 2
+    assert set(per_agent) == {"claude-code", "codex"}
+    assert per_agent["codex"]["sessions"] == 2
 
 
 def test_since_and_agent_narrow_the_window():
-    rows = [_event(when="2026-08-20"), _event(when="2026-09-02"), _event(agent="kimi")]
+    rows = [_event(when="2026-08-20"), _event(when="2026-09-02"), _event(agent="codex")]
 
     recent, _ = V.collect(rows, since="2026-09-01")
     assert recent["claude-code"]["sessions"] == 1
 
-    only, _ = V.collect(rows, agent="kimi")
-    assert set(only) == {"kimi"}
+    only, _ = V.collect(rows, agent="codex")
+    assert set(only) == {"codex"}
 
 
 def test_counters_are_read_from_attributes_when_that_is_where_they_are():

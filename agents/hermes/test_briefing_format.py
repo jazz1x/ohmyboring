@@ -853,7 +853,7 @@ def test_the_briefing_counts_the_verdicts_population_not_a_neighbouring_one():
     after = (repair + datetime.timedelta(days=1)).isoformat()
     rows = [row(f"old{i}", "claude-code", before, 10) for i in range(6)]
     rows += [row(f"new{i}", "claude-code", after, 10) for i in range(3)]
-    rows += [row(f"k{i}", "kimi", after, 10) for i in range(4)]
+    rows += [row(f"k{i}", "codex", after, 10) for i in range(4)]
 
     class _Resp:
         def __enter__(self):
