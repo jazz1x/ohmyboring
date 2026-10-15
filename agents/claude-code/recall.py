@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import recall_core  # noqa: E402
+import repo_table  # noqa: E402
 
 # A prompt that is nothing but image placeholders carries no words to retrieve on.
 _IMAGE_PLACEHOLDER = re.compile(r"\[Image #\d+\]")
@@ -49,6 +50,23 @@ def main() -> None:
         print(f"[omb-recall] invalid stdin JSON: {e}", file=sys.stderr)
         return
     recall_core.run_recall(data, is_injection=_is_injection)
+    _fill_repo_table(data.get("cwd") or "")
+
+
+def _fill_repo_table(cwd: str) -> None:
+    """Side effect after the output: a session already running gets its cwd into the repo table.
+
+    Present entry = one stat and done. distill_core is imported only on a miss so the common
+    prompt does not pay for its import.
+    """
+    if not cwd or repo_table.has(cwd):
+        return
+    try:
+        import distill_core  # noqa: PLC0415 — deferred on purpose, see docstring
+
+        distill_core.record_repo(cwd)
+    except OSError as e:
+        print(f"[omb-recall] repo table write failed: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

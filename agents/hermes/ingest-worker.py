@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
 import distill_core
 import distill_queue
 import markers
+import repo_table
 import transcript
 
 from ohmyboring import config as boring_config
@@ -125,6 +126,17 @@ QUEUE_PER_TICK = int(os.environ.get("BORING_QUEUE_PER_TICK") or "3")
 def _repo_slug(cwd):
     """Category axis: canonical repo slug from git remote or cwd basename."""
     return distill_core.repo_slug(cwd)
+
+
+def _origin_repo(cwd):
+    """(origin, repo, source). The host hooks leave the answer in the repo table; the container
+    cannot run git on a host cwd, so asking git here is the fallback and yields '' for repo."""
+    host = repo_table.read(cwd)
+    if host is not None:
+        origin, repo = host
+        return origin, repo, "host"
+    origin, _name = boring_config.classify(cwd, distill_core.git_remote_url(cwd))
+    return origin, _repo_slug(cwd), "container"
 
 
 def _log_worker_event(event, status, agent="claude-code", **fields):
@@ -332,9 +344,7 @@ def main(argv=None):
             continue
         text, was_clamped = transcript.clamp_text(text, CLAMP)
         cwd = transcript_cwd(p)
-        remote_url = distill_core.git_remote_url(cwd)
-        origin, _name = boring_config.classify(cwd, remote_url)
-        repo = _repo_slug(cwd)
+        origin, repo, repo_source = _origin_repo(cwd)
         # The shared queue replaces the old printed prompt: enqueue() marks the session pending,
         # and the drain below runs it through the engine in the same tick.
         distill_queue.enqueue(distill_queue.QueueItem(sid, agent, origin, repo, text))
@@ -346,6 +356,7 @@ def main(argv=None):
             session_id=sid,
             origin=origin,
             repo=repo,
+            repo_source=repo_source,
             source_chars=original_text_chars,
             emitted_chars=len(text),
             clamped=was_clamped,

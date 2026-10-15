@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 import markers
+import repo_table
 
 
 class MarkerReliabilityTests(unittest.TestCase):
@@ -20,6 +21,19 @@ class MarkerReliabilityTests(unittest.TestCase):
 
     def tearDown(self):
         markers.set_mark_dir(self.old_mark_dir)
+
+    def test_repo_table_roundtrip_overwrite_and_absence(self):
+        with tempfile.TemporaryDirectory() as d:
+            markers.set_mark_dir(d)
+            self.assertIsNone(repo_table.read("/Users/a/x"))
+            self.assertFalse(repo_table.has("/Users/a/x"))
+            repo_table.write("/Users/a/x", "company", "ds-governance")
+            self.assertTrue(repo_table.has("/Users/a/x"))
+            self.assertEqual(repo_table.read("/Users/a/x"), ("company", "ds-governance"))
+            self.assertIsNone(repo_table.read("/Users/a/y"))  # control: another cwd is another file
+            repo_table.write("/Users/a/x", "personal", "ohmyboring")  # the newest value wins
+            self.assertEqual(repo_table.read("/Users/a/x"), ("personal", "ohmyboring"))
+            self.assertEqual([p for p in os.listdir(d) if p.endswith(".tmp")], [])
 
     def test_mark_done_writes_done_and_cleans_pending_retry(self):
         with tempfile.TemporaryDirectory() as d:
