@@ -238,7 +238,7 @@ WriteOutcome = Written | Refused
 
 MCP_ROUTE = "mcp"
 
-#: MCP remember 가 project·claims 둘 다 빈 노트에 내는 문구 — drudge/src/serve/mcp.rs 와 바이트 같게.
+#: MCP remember 가 project·claims 둘 다 빈 노트에 내는 문구. 문에만 있는 규칙이다 — 엔진에는 없다.
 EMPTY_NOTE_REFUSAL = (
     "refused: this note has no project and no claims — add the next step or decision it leaves"
     " as claims (kind=next or kind=decision), or pass repo"
