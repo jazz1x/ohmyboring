@@ -35,6 +35,44 @@ class MarkerReliabilityTests(unittest.TestCase):
             self.assertEqual(repo_table.read("/Users/a/x"), ("personal", "ohmyboring"))
             self.assertEqual([p for p in os.listdir(d) if p.endswith(".tmp")], [])
 
+    def test_read_nearest_exact_prefix_longest_boundary_and_sibling(self):
+        with tempfile.TemporaryDirectory() as d:
+            markers.set_mark_dir(d)
+            repo_table.write("/u/a/b", "personal", "root")
+            repo_table.write("/u/a/b/sub", "personal", "inner")
+            repo_table.write("/u/a/bc", "company", "other")
+            self.assertEqual(repo_table.read_nearest("/u/a/b"), ("personal", "root"))  # exact
+            self.assertEqual(
+                repo_table.read_nearest("/u/a/b/.claude/worktrees/agent-1"), ("personal", "root")
+            )  # prefix
+            self.assertEqual(repo_table.read_nearest("/u/a/b/sub/deep"), ("personal", "inner"))
+            self.assertEqual(repo_table.read_nearest("/u/a/bc/x"), ("company", "other"))
+            self.assertIsNone(repo_table.read_nearest("/u/a/bd/x"))  # boundary control
+            self.assertIsNone(repo_table.read_nearest("/u/a/b.worktrees/c21"))  # sibling folder
+            self.assertIsNone(repo_table.read_nearest(""))
+
+    def test_record_repo_from_worktree_also_writes_main_root(self):
+        import subprocess
+
+        import distill_core
+
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as tbl:
+            markers.set_mark_dir(tbl)
+            main = os.path.realpath(os.path.join(d, "proj"))
+            wt = os.path.join(main, ".claude", "worktrees", "agent-1")
+            git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+            os.makedirs(main)
+            subprocess.run([*git, "-C", main, "init", "-q"], check=True)
+            subprocess.run([*git, "-C", main, "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+            subprocess.run([*git, "-C", main, "worktree", "add", "-q", wt], check=True)
+            wt = os.path.realpath(wt)
+            origin, repo = distill_core.record_repo(wt)
+            self.assertEqual(repo_table.read(wt), (origin, repo))
+            self.assertEqual(repo_table.read(main), (origin, repo))
+            before = sorted(os.listdir(tbl))
+            distill_core.record_repo(main)  # control: root == cwd writes one entry, no extra
+            self.assertEqual(sorted(os.listdir(tbl)), before)
+
     def test_mark_done_writes_done_and_cleans_pending_retry(self):
         with tempfile.TemporaryDirectory() as d:
             markers.set_mark_dir(d)
