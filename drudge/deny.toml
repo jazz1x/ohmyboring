@@ -7,6 +7,11 @@ all-features = true # 모든 feature 의존 그래프를 봐야 라이선스/취
 [advisories]
 # RUSTSEC 권고 DB 기준. yanked crate = deny. 알려진 취약점은 기본 deny.
 yanked = "deny"
+ignore = [
+  # unmaintained only, no known vuln, no fixed release. Pulled in by serde_yaml 0.9; the engine
+  # is being retired (E5), so swapping the YAML crate is not worth it. Owner call 2026-10-16.
+  { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml unmaintained via serde_yaml; engine retiring (E5)" },
+]
 
 [bans]
 multiple-versions = "warn" # 같은 crate 다중 버전 = 경고(빌드 비대, 강제는 아님).
