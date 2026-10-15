@@ -102,11 +102,11 @@ def _sha_rows(log, params, sha_by_path) -> list:
 def _handler(  # noqa: PLR0913
     log, doc_paths=(), sha_by_path=None, owner_paths=(), claim_rows=(), seal_rows=()
 ):
-    """SELECT 별 정해진 답 — 나머지는 영향 없는 빈 결과. seal_rows 는 부분 닫기가 RETURNING 으로 돌려줄 행."""
+    """SELECT 별 정해진 답 — 나머지는 영향 없는 빈 결과. seal_rows 는 봉인 뒤 은퇴 목록 읽기가 돌려줄 행."""
 
     def handle(sql, params):
         rows: list = []
-        if "RETURNING c.subject, c.predicate" in sql:
+        if "ORDER BY c.subject, c.predicate" in sql:
             rows = list(seal_rows)
         elif "AND author = 'owner'" in sql:
             rows = [(p,) for p in owner_paths]
@@ -630,7 +630,7 @@ class WriterCase(unittest.TestCase):
                 {"subject": "slot c", "predicate": "state", "value": "new-c"},
             ],
         }
-        # 가짜 커서: 부분 닫기가 (slot a, state) 하나만 닫았다고 돌려준다 — slot b 는 다시 안 말했다.
+        # 가짜 커서: 봉인 뒤 읽기가 (slot a, state) 하나만 닫혔다고 돌려준다 — slot b 는 다시 안 말했다.
         outcome = self.write(args, self.deps(sha_by_path={old: "sha"}, seal_rows=[("slot a", "state")]))
         self.assertIsInstance(outcome, writer.Written)
         assert isinstance(outcome, writer.Written)
@@ -982,6 +982,73 @@ class PartialSealSqlTests(unittest.TestCase):
                 self.assertEqual(cur.fetchall(), [("/vault/wiki/old.md", "절차")])
             finally:
                 cur.execute("DROP SCHEMA omb_writer_test CASCADE;")
+
+
+@unittest.skipIf(
+    DSN is None, "BORING_TEST_DATABASE_URL unset — DB integration test skipped (disposable DB only)"
+)
+class RetiredListRealOrderTests(unittest.TestCase):
+    """은퇴 목록 — 진짜 쓰기 순서(claim 쓰기 중 최신-이김 닫기 → _record_supersedes)를 실제 Postgres 에서."""
+
+    OLD = "/vault/wiki/old.md"
+    NEW = "/vault/wiki/new.md"
+
+    def run_order(self, restated):
+        """옛 노트 slot-a·slot-b 를 넣고, 새 노트가 restated 슬롯을 다시 말한 뒤 supersedes 를 돈다."""
+        import psycopg
+
+        with psycopg.connect(DSN, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute("DROP SCHEMA IF EXISTS omb_writer_test CASCADE;")
+            cur.execute("CREATE SCHEMA omb_writer_test;")
+            try:
+                cur.execute("SET search_path TO omb_writer_test;")
+                cur.execute(
+                    "CREATE TABLE claim (source_path text, subject text, predicate text,"
+                    " valid_from timestamptz NOT NULL, superseded_at timestamptz);"
+                    "CREATE TABLE document (source_path text, sha text, author text);"
+                    "CREATE TABLE edge (src text, dst text, kind text, judge text,"
+                    " UNIQUE (src, dst, kind));"
+                )
+                cur.execute(
+                    "INSERT INTO document (source_path, sha, author) VALUES (%s, 's', 'agent'), (%s, 's', 'agent');",
+                    (self.OLD, self.NEW),
+                )
+                cur.execute(
+                    "INSERT INTO claim (source_path, subject, predicate, valid_from) VALUES"
+                    " (%s, 'probe', 'slot-a', '2026-10-14 00:00+00'),"
+                    " (%s, 'probe', 'slot-b', '2026-10-14 00:00+00');",
+                    (self.OLD, self.OLD),
+                )
+                for predicate in restated:
+                    cur.execute(
+                        "INSERT INTO claim (source_path, subject, predicate, valid_from)"
+                        " VALUES (%s, 'probe', %s, '2026-10-15 16:07:02.813001+00');",
+                        (self.NEW, predicate),
+                    )
+                    # _upsert_claim 이 새 claim 을 쓴 직후 도는 닫기 — 부분 닫기보다 앞선다.
+                    cur.execute(writer._FACT_SEAL_SQL, {"subject": "probe", "predicate": predicate})
+                _linked, _unknown, _paths, retired = writer._record_supersedes(
+                    cur, self.NEW, [self.OLD], None
+                )
+                cur.execute(
+                    "SELECT predicate FROM claim WHERE source_path = %s AND superseded_at IS NULL"
+                    " ORDER BY predicate;",
+                    (self.OLD,),
+                )
+                still_open = [row[0] for row in cur.fetchall()]
+                return retired, still_open
+            finally:
+                cur.execute("DROP SCHEMA omb_writer_test CASCADE;")
+
+    def test_slot_closed_by_latest_wins_before_supersedes_is_listed(self):
+        retired, still_open = self.run_order(["slot-a"])
+        self.assertEqual(retired, [("probe", "slot-a")])
+        self.assertEqual(still_open, ["slot-b"])
+
+    def test_control_new_note_restates_nothing_lists_none(self):
+        retired, still_open = self.run_order([])
+        self.assertEqual(retired, [])
+        self.assertEqual(still_open, ["slot-a", "slot-b"])
 
 
 if __name__ == "__main__":
