@@ -99,12 +99,16 @@ def _sha_rows(log, params, sha_by_path) -> list:
     return []
 
 
-def _handler(log, doc_paths=(), sha_by_path=None, owner_paths=(), claim_rows=()):
-    """SELECT 별 정해진 답 — 나머지는 영향 없는 빈 결과."""
+def _handler(  # noqa: PLR0913
+    log, doc_paths=(), sha_by_path=None, owner_paths=(), claim_rows=(), seal_rows=()
+):
+    """SELECT 별 정해진 답 — 나머지는 영향 없는 빈 결과. seal_rows 는 부분 닫기가 RETURNING 으로 돌려줄 행."""
 
     def handle(sql, params):
         rows: list = []
-        if "AND author = 'owner'" in sql:
+        if "RETURNING c.subject, c.predicate" in sql:
+            rows = list(seal_rows)
+        elif "AND author = 'owner'" in sql:
             rows = [(p,) for p in owner_paths]
         elif sql.startswith("SELECT source_path FROM document"):
             rows = [(p,) for p in doc_paths]
@@ -626,7 +630,8 @@ class WriterCase(unittest.TestCase):
                 {"subject": "slot c", "predicate": "state", "value": "new-c"},
             ],
         }
-        outcome = self.write(args, self.deps(sha_by_path={old: "sha"}))
+        # 가짜 커서: 부분 닫기가 (slot a, state) 하나만 닫았다고 돌려준다 — slot b 는 다시 안 말했다.
+        outcome = self.write(args, self.deps(sha_by_path={old: "sha"}, seal_rows=[("slot a", "state")]))
         self.assertIsInstance(outcome, writer.Written)
         assert isinstance(outcome, writer.Written)
         self.assertEqual(outcome.wiki_id, "wiki-0002")
@@ -635,7 +640,8 @@ class WriterCase(unittest.TestCase):
         self.assertEqual(
             outcome.message,
             "remembered → wiki/wiki-0002.md (supersedes wiki/wiki-0001.md) · chunks 1 · "
-            "graph(tools 0 concepts 0 claims 2) — recallable now · supersedes linked 1",
+            "graph(tools 0 concepts 0 claims 2) — recallable now · supersedes linked 1"
+            " · retired claims: slot a/state",
         )
         edges = [p for (_s, p) in self.sql_with("INSERT INTO edge")]
         super_edges = [e for e in edges if e["kind"] == "supersedes"]
@@ -677,11 +683,37 @@ class WriterCase(unittest.TestCase):
         self.assertEqual(
             outcome.message,
             "remembered → wiki/wiki-0002.md · chunks 1 · graph(tools 0 concepts 0 claims 0)"
-            " — recallable now · supersedes linked 1, not found 1 (/vault/wiki/wiki-9999.md)",
+            " — recallable now · supersedes linked 1, not found 1 (/vault/wiki/wiki-9999.md)"
+            " · retired claims: none",
         )
         dedup = self.events.by_event("dedup_decision")[0]
         self.assertEqual(dedup["status"], "stored")
         self.assertNotIn("reason", dedup)
+
+    def test_retired_list_dedups_and_keeps_target_order(self):
+        # 대상 둘이 같은 슬롯을 각자 닫아도 한 번만, 대상 순서대로.
+        cur = _FakeCursor(
+            _handler(
+                self.sql,
+                sha_by_path={"/vault/wiki/new.md": "s", "/vault/wiki/a.md": "s", "/vault/wiki/b.md": "s"},
+                seal_rows=[("x", "p"), ("y", "q")],
+            ),
+            self.sql,
+        )
+        _linked, _unknown, _paths, retired = writer._record_supersedes(
+            cur, "/vault/wiki/new.md", ["/vault/wiki/a.md", "/vault/wiki/b.md"], None
+        )
+        self.assertEqual(retired, [("x", "p"), ("y", "q")])
+
+    def test_no_supersedes_message_has_no_retired_clause(self):
+        # 통제군: supersedes 가 없는 remember 의 문장은 그대로다.
+        outcome = self.write(
+            {"title": "평범", "body": "본문", "claims": [{"subject": "s", "predicate": "p", "value": "v"}]}
+        )
+        self.assertIsInstance(outcome, writer.Written)
+        assert isinstance(outcome, writer.Written)
+        self.assertNotIn("retired claims", outcome.message)
+        self.assertNotIn("supersedes linked", outcome.message)
 
     # ── 빈 노트 거절 (MCP 길만) ──────────────────────────────────────────────
 
@@ -873,10 +905,10 @@ class WriterCase(unittest.TestCase):
     def test_same_path_supersedes_pair_counts_unknown(self):
         # 자기 자신을 가리키는 쌍은 간선·봉인 없이 unknown — split_supersedes(store.rs:153-164).
         cur = _FakeCursor(_handler(self.sql), self.sql)
-        linked, unknown, paths = writer._record_supersedes(
+        linked, unknown, paths, retired = writer._record_supersedes(
             cur, "/vault/wiki/wiki-0003.md", ["/vault/wiki/wiki-0003.md"], None
         )
-        self.assertEqual((linked, unknown, paths), (0, 1, ["/vault/wiki/wiki-0003.md"]))
+        self.assertEqual((linked, unknown, paths, retired), (0, 1, ["/vault/wiki/wiki-0003.md"], []))
         self.assertEqual(self.sql, [])
 
     def test_said_by_owner_writes_said_edges(self):
