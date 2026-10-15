@@ -206,7 +206,8 @@ _PARTIAL_SEAL_SQL = (
     "UPDATE claim c SET superseded_at = COALESCE("
     "        (SELECT max(valid_from) FROM claim WHERE source_path = %(new)s), now())"
     " WHERE c.source_path = %(old)s AND c.superseded_at IS NULL"
-    "   AND (c.subject, c.predicate) IN (SELECT subject, predicate FROM claim WHERE source_path = %(new)s);"
+    "   AND (c.subject, c.predicate) IN (SELECT subject, predicate FROM claim WHERE source_path = %(new)s)"
+    " RETURNING c.subject, c.predicate;"
 )
 
 
@@ -1068,13 +1069,15 @@ def _ingest(cur: Any, deps: WriterDeps, note: RememberNote, path: str, timers: _
 
 def _record_supersedes(
     cur: Any, new_path: str, targets: list[str], judge: str | None
-) -> tuple[int, int, list[str]]:
+) -> tuple[int, int, list[str], list[tuple[str, str]]]:
     """supersedes 간선 + 부분 닫기 — record_supersedes(store.rs:2855-2888)의 봉인만 갈라진다.
 
-    없는 문서를 이름한 쌍은 unknown 으로 세고 간선·봉인을 안 쓴다(엔진과 같다)."""
+    없는 문서를 이름한 쌍은 unknown 으로 세고 간선·봉인을 안 쓴다(엔진과 같다).
+    넷째 값은 이 호출이 닫은 (subject, predicate) — 대상 순서, 중복 제거."""
     linked = 0
     unknown = 0
     unknown_paths: list[str] = []
+    retired: dict[tuple[str, str], None] = {}
     for old in targets:
         if old == new_path:
             unknown += 1
@@ -1096,16 +1099,29 @@ def _record_supersedes(
         )
         linked += 1
         cur.execute(_PARTIAL_SEAL_SQL, {"new": new_path, "old": old})
-    return linked, unknown, unknown_paths
+        for subject, predicate in cur.fetchall():
+            retired[(subject, predicate)] = None
+    return linked, unknown, unknown_paths, list(retired)
 
 
-def _supersedes_suffix(targets: list[str], linked: int, unknown: int, unknown_paths: list[str]) -> str:
-    """mcp.rs:1547-1565 supersedes_suffix — 이름한 교정이 다 이어졌는지 말해 준다."""
+def _supersedes_suffix(
+    targets: list[str],
+    linked: int,
+    unknown: int,
+    unknown_paths: list[str],
+    retired: list[tuple[str, str]],
+) -> str:
+    """mcp.rs:1547-1565 supersedes_suffix — 이름한 교정이 다 이어졌는지, 무엇이 닫혔는지 말해 준다.
+
+    뒷부분 `retired claims` 는 문의 덧붙임(엔진 문장엔 없다) — 쓰는 쪽이 죽은 것을 그 자리에서 본다."""
     if not targets:
         return ""
     if unknown == 0:
-        return f" · supersedes linked {linked}"
-    return f" · supersedes linked {linked}, not found {unknown} ({', '.join(unknown_paths)})"
+        head = f" · supersedes linked {linked}"
+    else:
+        head = f" · supersedes linked {linked}, not found {unknown} ({', '.join(unknown_paths)})"
+    names = ", ".join(f"{subject}/{predicate}" for subject, predicate in retired) or "none"
+    return f"{head} · retired claims: {names}"
 
 
 def _record_written(ctx: _Ctx, written: Written, decision: str, branch: str | None, stats: _Stats) -> None:
@@ -1193,7 +1209,7 @@ def _store_new_note(ctx: _Ctx, cur: Any, plan: _Plan) -> Written:
     except Exception as failure:  # noqa: BLE001 — 엔진도 수집 고장은 -32603 하나로 접는다
         raise _WriteFailure(f"ingest: {failure}") from failure
     try:
-        linked, unknown, unknown_paths = _record_supersedes(cur, path, plan.targets, plan.judge)
+        linked, unknown, unknown_paths, retired = _record_supersedes(cur, path, plan.targets, plan.judge)
     except Exception as failure:  # noqa: BLE001
         raise _WriteFailure(f"supersedes edges: {failure}") from failure
     stem = _wiki_stem(plan.duplicate)
@@ -1202,7 +1218,7 @@ def _store_new_note(ctx: _Ctx, cur: Any, plan: _Plan) -> Written:
         f"remembered → {label} · chunks {stats.chunks} · "
         f"graph(tools {stats.tools} concepts {stats.concepts} claims {stats.claims}) — recallable now"
     )
-    message += _supersedes_suffix(plan.targets, linked, unknown, unknown_paths)
+    message += _supersedes_suffix(plan.targets, linked, unknown, unknown_paths, retired)
     written = Written(
         wiki_id=wiki_id,
         source_path=path,
