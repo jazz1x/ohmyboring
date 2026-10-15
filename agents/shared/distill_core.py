@@ -155,6 +155,11 @@ def record_repo(cwd):
     origin, _rule = boring_config.classify(cwd, git_remote_url(cwd) or None)
     repo = repo_slug(cwd)
     repo_table.write(cwd, origin, repo)
+    # A worktree or subfolder cwd also gets its main root's entry: subagent worktrees are born
+    # mid-session where no host hook runs, and the worker finds them by the root's prefix.
+    root = git_main_worktree(cwd)
+    if root and root != cwd.rstrip("/"):
+        repo_table.write(root, origin, repo)
     return origin, repo
 
 

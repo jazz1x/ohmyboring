@@ -131,7 +131,7 @@ def _repo_slug(cwd):
 def _origin_repo(cwd):
     """(origin, repo, source). The host hooks leave the answer in the repo table; the container
     cannot run git on a host cwd, so asking git here is the fallback and yields '' for repo."""
-    host = repo_table.read(cwd)
+    host = repo_table.read_nearest(cwd)
     if host is not None:
         origin, repo = host
         return origin, repo, "host"

@@ -34,6 +34,40 @@ def write(cwd: str, origin: str, repo: str) -> None:
     os.replace(tmp, _path(cwd))
 
 
+def read_nearest(cwd: str) -> tuple[str, str] | None:
+    """Exact entry for cwd, else the entry of the longest table folder that cwd sits under.
+
+    A subagent worktree (`<root>/.claude/worktrees/agent-…`) appears mid-session and no host hook
+    runs inside it, so only its main root is in the table. Match is on path components: `/a/b`
+    is not a prefix of `/a/bc`. Sibling worktree folders (`x.worktrees/c21`) are not under the
+    root and stay unmatched.
+    """
+    if not cwd:
+        return None
+    exact = read(cwd)
+    if exact is not None:
+        return exact
+    best_len = -1
+    best: tuple[str, str] | None = None
+    try:
+        names = os.listdir(markers.MARK_DIR)
+    except OSError:
+        return None
+    for name in names:
+        if not (name.startswith("repo-") and name.endswith(".json")):
+            continue
+        try:
+            with open(os.path.join(markers.MARK_DIR, name), encoding="utf-8") as f:
+                entry = json.load(f)
+            folder = str(entry["cwd"]).rstrip("/")
+            found = (str(entry["origin"]), str(entry["repo"]))
+        except (OSError, ValueError, KeyError):
+            continue
+        if folder and cwd.startswith(folder + "/") and len(folder) > best_len:
+            best_len, best = len(folder), found
+    return best
+
+
 def read(cwd: str) -> tuple[str, str] | None:
     """(origin, repo) for cwd, or None when the table has no entry (or an unreadable one)."""
     if not cwd:

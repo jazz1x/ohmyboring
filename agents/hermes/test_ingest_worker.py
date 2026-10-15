@@ -129,6 +129,14 @@ class IngestWorkerTest(unittest.TestCase):
             (offer["origin"], offer["repo"], offer["repo_source"]), ("company", "ds-governance", "host")
         )
 
+    def test_a_cwd_under_a_table_folder_takes_that_folders_repo_as_host(self):
+        self._write_session("s-sub")
+        ingest_worker.repo_table.write(os.path.dirname(self.tmp.name), "personal", "ohmyboring")
+        _stdout, run = self._run_main()
+        _text, origin, repo, _sid = run.call_args.args
+        self.assertEqual((origin, repo), ("personal", "ohmyboring"))
+        self.assertEqual(self._offer_events("s-sub")[0]["repo_source"], "host")
+
     def test_a_cwd_missing_from_the_table_falls_back_to_the_container_and_says_so(self):
         self._write_session("s-cont")
         _stdout, run = self._run_main()
