@@ -1336,7 +1336,7 @@ async def _recall_answer(
             envelope = {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "result": {"content": [{"type": "text", "text": recalled.text}], "isError": False},
+                "result": {"content": [{"type": "text", "text": recalled.refined}], "isError": False},
             }
             response = _pass_through(
                 200, json.dumps(envelope, ensure_ascii=False).encode("utf-8"), "application/json"
