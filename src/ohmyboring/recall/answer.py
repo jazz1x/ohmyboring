@@ -316,7 +316,7 @@ def run(
         rank_facts=lambda paths: _detail(pg.rank_facts(conn, paths)),
         vector=lambda a: _vector_lines(read_only_dsn, a),
         superseded_by=lambda paths: _detail(pg.superseded_by(conn, paths)),
-        current_claims=lambda paths: _detail(pg.declared_claims(conn, paths, _CLAIMS_PER_NOTE)),
+        current_claims=lambda paths: _detail(pg.current_claims(conn, paths, _CLAIMS_PER_NOTE)),
     )
     with contextlib.closing(conn):
         return answer(args, seams)
