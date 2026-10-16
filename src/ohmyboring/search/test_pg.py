@@ -334,6 +334,19 @@ class PgIntegrationTests(unittest.TestCase):
             case Err(e):
                 self.fail(f"declared_claims per_doc: {e}")
 
+    def test_current_claims_keeps_facts_and_drops_closed_rows(self):
+        match pg.current_claims(self.conn, ["/own.md"], 10):
+            case Ok(out):
+                rows = out["/own.md"]
+                self.assertEqual(
+                    [r.predicate for r in rows.rows],
+                    ["판정", "다음", "위험", "사실"],
+                    "회상은 fact 도 싣는다(등록부와 다른 점), tier 순",
+                )
+                self.assertEqual(rows.total_matching, 4, "닫힌 행(옛것)만 빠진 전수")
+            case Err(e):
+                self.fail(f"current_claims: {e}")
+
     def test_record_handover_inserts_and_counts_unknown(self):
         match pg.record_handover(self.conn, "s-1", "2026-10-01T00:00:00+00:00", ["/own.md", "/ghost.md"]):
             case Ok(report):

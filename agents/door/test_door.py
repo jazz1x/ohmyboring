@@ -3223,7 +3223,9 @@ class _RecallTestBase(_RegisterTestHarness):
 
     def setUp(self):
         self._setUp()
-        self._python_impl = lambda arguments: door.Ok(door.recall_answer.Recalled(self.ENGINE_TEXT, "wiki"))
+        self._python_impl = lambda arguments: door.Ok(
+            door.recall_answer.Recalled(self.ENGINE_TEXT, "wiki", self.ENGINE_TEXT)
+        )
         self.python_calls: list[dict] = []
 
         def python(arguments):
@@ -3283,7 +3285,7 @@ class RecallShadowTests(_RecallTestBase, unittest.TestCase):
 
     def test_a_different_text_is_a_mismatch_with_the_first_differing_line(self):
         self._python_impl = lambda arguments: door.Ok(
-            door.recall_answer.Recalled("- [other.md] 다름", "vector")
+            door.recall_answer.Recalled("- [other.md] 다름", "vector", "- [other.md] 다름")
         )
         status, body, _ = self._recall("그냥 검색해줘")
         self.assertEqual((status, body), (200, RECALL_BODY), "어긋나도 응답은 엔진 그대로")
@@ -3312,7 +3314,7 @@ class RecallShadowTests(_RecallTestBase, unittest.TestCase):
     def test_the_answer_does_not_wait_for_the_shadow(self):
         def slow(arguments):
             time.sleep(0.6)
-            return door.Ok(door.recall_answer.Recalled(self.ENGINE_TEXT, "wiki"))
+            return door.Ok(door.recall_answer.Recalled(self.ENGINE_TEXT, "wiki", self.ENGINE_TEXT))
 
         self._python_impl = slow
         started = time.monotonic()
@@ -3364,12 +3366,16 @@ class RecallReaderSwitchTests(_RecallTestBase, unittest.TestCase):
     JSON-RPC 오류 봉투·session_id handover 한 벌), 엔진은 배경 그림자로만 불린다 — session_id 는 뺀다.
     _recall_python·_search_handover 는 목: 선로만 본다. 진짜 길은 recall/test_recall.py·search/test_pg.py."""
 
-    PYTHON_TEXT = "- [wiki-0001.md] 파이썬 답"
+    PYTHON_TEXT = "- [wiki-0001.md] 파이썬 답\n  · decision a/b: c"
+    #: 엔진 그림자가 대조하는 옛 모양 — 답으로 나가면 안 된다
+    SHADOW_TEXT = "- [wiki-0001.md] 파이썬 답"
 
     def setUp(self):
         super().setUp()
         self._python_impl = lambda arguments: door.Ok(
-            door.recall_answer.Recalled(self.PYTHON_TEXT, "wiki", shown=("wiki/wiki-0001.md",))
+            door.recall_answer.Recalled(
+                self.SHADOW_TEXT, "wiki", self.PYTHON_TEXT, shown=("wiki/wiki-0001.md",)
+            )
         )
         self.handovers: list[tuple[str, list[str]]] = []
         self.handover_outcome = lambda: door.Ok(None)
@@ -3402,7 +3408,9 @@ class RecallReaderSwitchTests(_RecallTestBase, unittest.TestCase):
 
     def test_an_empty_recall_writes_no_handover_even_with_a_session_id(self):
         self._python_impl = lambda arguments: door.Ok(
-            door.recall_answer.Recalled(door.recall_answer.NO_EXPERIENCE, "vector")
+            door.recall_answer.Recalled(
+                door.recall_answer.NO_EXPERIENCE, "vector", door.recall_answer.NO_EXPERIENCE
+            )
         )
         status, body, _ = self._recall("그냥 검색해줘", session_id="sess-1")
         self._wait_for_event()
@@ -3425,7 +3433,9 @@ class RecallReaderSwitchTests(_RecallTestBase, unittest.TestCase):
         self.assertEqual(self.handovers, [], "session_id 가 없으면 handover 도 없다")
 
     def test_agreeing_texts_are_ok_under_the_python_reader(self):
-        self._python_impl = lambda arguments: door.Ok(door.recall_answer.Recalled(self.ENGINE_TEXT, "wiki"))
+        self._python_impl = lambda arguments: door.Ok(
+            door.recall_answer.Recalled(self.ENGINE_TEXT, "wiki", self.ENGINE_TEXT)
+        )
         self._recall("그냥 검색해줘")
         event = self._wait_for_event()
         self.assertEqual((event["reader"], event["status"]), ("python", "ok"))

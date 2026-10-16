@@ -33,7 +33,7 @@ import vault_note  # noqa: E402 — the one frontmatter splitter, handed in as t
 
 from ohmyboring.recall import answer, shadow, wiki  # noqa: E402
 from ohmyboring.result import Err, Ok  # noqa: E402
-from ohmyboring.search import rank  # noqa: E402
+from ohmyboring.search import pg, rank  # noqa: E402
 
 HOUR_NS = 3600 * 10**9
 _split = vault_note.split_frontmatter
@@ -278,7 +278,17 @@ def _hit(name: str, score: float, snippet: str = "s") -> wiki.WikiHit:
 
 
 class _Seams:
-    def __init__(self, wiki_hits=(), facts=None, vector=(), superseded=None, rank_err=None):
+    def __init__(  # noqa: PLR0913
+        self,
+        wiki_hits=(),
+        facts=None,
+        vector=(),
+        superseded=None,
+        rank_err=None,
+        claims=None,
+        claims_err=None,
+    ):
+        self._claims, self._claims_err = claims or {}, claims_err
         self.skipped = 0
         self.calls: list[str] = []
         self.rank_seen: list[list[str]] = []
@@ -286,7 +296,15 @@ class _Seams:
         self._superseded, self._rank_err = superseded or {}, rank_err
 
     def seams(self) -> answer.Seams:
-        return answer.Seams(self._wiki, self._rank, self._vec, self._sup)
+        return answer.Seams(self._wiki, self._rank, self._vec, self._sup, self._claims_of)
+
+    def _claims_of(self, paths):
+        self.calls.append("claims")
+        return (
+            Err(self._claims_err)
+            if self._claims_err
+            else Ok({p: v for p, v in self._claims.items() if p in paths})
+        )
 
     def _wiki(self, args):
         self.calls.append("wiki")
@@ -346,8 +364,10 @@ def test_missing_query_is_rejected_with_the_engine_message():
 def test_empty_result_is_the_exact_engine_phrase_and_asks_the_vector_path_once():
     stub = _Seams()
     recalled = _text(answer.answer(_args(), stub.seams()))
-    assert recalled == answer.Recalled("(no experience recalled)", "vector")
-    assert stub.calls == ["wiki", "vector"], "빈 결과에는 superseded 를 묻지 않는다"
+    assert recalled == answer.Recalled(
+        "(no experience recalled)", "vector", refined="(no experience recalled)"
+    )
+    assert stub.calls == ["wiki", "vector"], "빈 결과에는 superseded·claims 를 묻지 않는다"
 
 
 def test_wiki_first_the_vector_path_is_not_asked_when_the_wiki_answers():
@@ -358,7 +378,7 @@ def test_wiki_first_the_vector_path_is_not_asked_when_the_wiki_answers():
     assert [p.rsplit("/", 1)[-1] for p in recalled.shown] == ["wiki-0001.md"], "보인 경로 = 답에 실린 줄"
     stub = _Seams(vector=[("/vault/wiki/v.md", "벡터 본문")])
     assert _text(answer.answer(_args(), stub.seams())) == answer.Recalled(
-        "- [v.md] 벡터 본문", "vector", shown=("/vault/wiki/v.md",)
+        "- [v.md] 벡터 본문", "vector", shown=("/vault/wiki/v.md",), refined="- [v.md] 벡터 본문"
     )
 
 
@@ -371,6 +391,80 @@ def test_superseded_label_names_the_newer_notes_and_lines_join_with_a_blank_line
     recalled = _text(answer.answer(_args(), stub.seams()))
     assert recalled.text == "- [old.md (superseded by n1.md, n2.md)] 옛\n\n- [live.md] 새", recalled.text
     assert answer.recall_text([("/a/b.md", "x")], {}) == "- [b.md] x"
+
+
+def _claim_row(subject: str, predicate: str, value: str, kind: str = "decision") -> pg.RegisterRow:
+    return pg.RegisterRow(
+        f"claim:{subject}:{predicate}",
+        subject,
+        predicate,
+        value,
+        kind,
+        "high",
+        "2026-10-01T00:00:00+00:00",
+        "p",
+    )
+
+
+def _register(*rows: pg.RegisterRow, total: int | None = None) -> pg.RegisterRows:
+    return pg.RegisterRows(rows, len(rows) if total is None else total)
+
+
+_OLD, _LIVE = "/vault/wiki/old.md", "/vault/wiki/live.md"
+
+
+def _refined_stub(**over) -> _Seams:
+    base = {
+        "wiki_hits": [
+            wiki.WikiHit("old", "옛 결정", _OLD, "옛 본문", 5.0),
+            wiki.WikiHit("live", "새 결정", _LIVE, "새 본문", 4.0),
+        ],
+        "claims": {_OLD: _register(_claim_row("recall", "ranking", "점수식 고정"))},
+    }
+    return _Seams(**{**base, **over})
+
+
+def test_refined_note_with_claims_shows_head_title_and_claims_instead_of_the_body():
+    recalled = _text(answer.answer(_args(), _refined_stub().seams()))
+    assert recalled.refined.splitlines()[:2] == [
+        "- [old.md] 옛 결정",
+        "  · decision recall/ranking: 점수식 고정",
+    ]
+    assert "옛 본문" not in recalled.refined
+    assert recalled.refined.endswith(answer.FULL_BODY_HINT), "본문 전체를 받는 길을 끝줄이 가리킨다"
+
+
+def test_refined_note_without_claims_keeps_todays_line():
+    recalled = _text(answer.answer(_args(), _refined_stub().seams()))
+    assert "- [live.md] 새 본문" in recalled.refined.split("\n\n"), (
+        "통제군: claims 없는 노트는 지금 줄 그대로"
+    )
+    nothing = _text(answer.answer(_args(), _refined_stub(claims={}).seams()))
+    assert nothing.refined == nothing.text, "claims 가 하나도 없으면 안내줄도 없다"
+
+
+def test_refined_superseded_note_keeps_the_label_and_its_claims_and_hides_overflow():
+    stub = _refined_stub(
+        superseded={_OLD: ["/vault/wiki/n1.md"]},
+        claims={_OLD: _register(_claim_row("a", "b", "c"), total=4)},
+    )
+    refined = _text(answer.answer(_args(), stub.seams())).refined
+    assert refined.splitlines()[:3] == [
+        "- [old.md (superseded by n1.md)] 옛 결정",
+        "  · decision a/b: c",
+        "  · … +3 more",
+    ]
+
+
+def test_text_stays_what_the_engine_shadow_compares_against():
+    recalled = _text(answer.answer(_args(), _refined_stub().seams()))
+    assert recalled.text == "- [old.md] 옛 본문\n\n- [live.md] 새 본문"
+    assert recalled.refined != recalled.text
+
+
+def test_failed_claims_lookup_fails_the_recall():
+    stub = _refined_stub(claims_err="db down")
+    assert answer.answer(_args(), stub.seams()) == Err(answer.Failed("recall claims: db down"))
 
 
 def _facts(**rows: rank.RankFacts) -> dict[str, rank.RankFacts]:
@@ -441,7 +535,7 @@ def _engine(text: str, *, is_error=False) -> bytes:
 
 
 def _py(text: str, path="wiki"):
-    return Ok(answer.Recalled(text, path))
+    return Ok(answer.Recalled(text, path, text))
 
 
 def test_shadow_same_text_is_ok_and_carries_path_and_line_counts():
@@ -610,6 +704,11 @@ if __name__ == "__main__":
     test_superseded_top_scorer_is_demoted_not_cut()
     test_owner_notes_lead_newest_first_and_nothing_outside_the_cut_is_pulled_in()
     test_failed_rank_facts_lookup_fails_the_recall()
+    test_refined_note_with_claims_shows_head_title_and_claims_instead_of_the_body()
+    test_refined_note_without_claims_keeps_todays_line()
+    test_refined_superseded_note_keeps_the_label_and_its_claims_and_hides_overflow()
+    test_text_stays_what_the_engine_shadow_compares_against()
+    test_failed_claims_lookup_fails_the_recall()
     test_run_rejects_before_connecting_and_reports_a_dead_store_as_a_value()
     test_shadow_same_text_is_ok_and_carries_path_and_line_counts()
     test_shadow_mismatch_names_the_first_differing_line_with_80_chars_of_each()
