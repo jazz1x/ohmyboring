@@ -535,7 +535,7 @@ def _engine(text: str, *, is_error=False) -> bytes:
 
 
 def _py(text: str, path="wiki"):
-    return Ok(answer.Recalled(text, path))
+    return Ok(answer.Recalled(text, path, text))
 
 
 def test_shadow_same_text_is_ok_and_carries_path_and_line_counts():

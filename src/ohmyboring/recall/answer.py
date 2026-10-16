@@ -80,12 +80,12 @@ class WikiPool:
 class Recalled:
     text: str
     path: str  # wiki | vector — 어느 길이 줄을 냈나
+    refined: (
+        str  # MCP 답으로 나가는 모양 — claims 있는 노트는 머리줄+현재 claims. text 는 엔진 대조용이라 그대로
+    )
     skipped: int = 0  # 읽지 못해 건너뛴 wiki 파일 수
     pool: WikiPool | None = None  # wiki 길만
     shown: tuple[str, ...] = ()  # 답에 실린 줄의 경로 — handover 가 쓸 목록(엔진 mcp_recall 의 paths)
-    refined: str = (
-        ""  # MCP 답으로 나가는 모양 — claims 있는 노트는 머리줄+현재 claims. text 는 엔진 대조용이라 그대로
-    )
 
 
 @dataclass(frozen=True)
@@ -247,7 +247,7 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
         case Err(failure):
             return Err(failure)
         case Ok(selected) if not selected.lines:
-            return Ok(Recalled(NO_EXPERIENCE, selected.path, selected.skipped, refined=NO_EXPERIENCE))
+            return Ok(Recalled(NO_EXPERIENCE, selected.path, NO_EXPERIENCE, selected.skipped))
         case Ok(selected):
             paths = [c.hit.source_path for c in selected.pool] or [line[0] for line in selected.lines]
             match seams.superseded_by(paths):
@@ -262,7 +262,7 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
                             text = recall_text(selected.lines, superseded)
                             refined = refined_text(selected.lines, superseded, claims, dict(selected.titles))
                             pool = _pool_of(selected, superseded)
-                            return Ok(Recalled(text, selected.path, selected.skipped, pool, shown, refined))
+                            return Ok(Recalled(text, selected.path, refined, selected.skipped, pool, shown))
 
 
 def _detail(result: Either[Any, Any]) -> Either[Any, str]:
