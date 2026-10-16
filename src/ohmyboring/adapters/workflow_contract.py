@@ -68,7 +68,7 @@ def resolution_fields(verifier_status: str, remember_status: str) -> dict[str, s
             return fields(Node.REMEMBER_REQUESTED, Outcome.PASS)
         if remember_status == "duplicate":
             return fields(Node.REMEMBER_REQUESTED, Outcome.DUPLICATE)
-        if remember_status == "failed":
+        if remember_status in {"failed", "refused"}:
             return fields(Node.REMEMBER_REQUESTED, Outcome.FAIL)
     if verifier_status == "failed" and remember_status == "not_called":
         return fields(Node.RESOLUTION_REPAIRED, Outcome.FAIL)

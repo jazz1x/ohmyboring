@@ -714,7 +714,7 @@ async def _remember_python(request: Request, body: bytes, arguments: dict, route
     match remember_pii.load_from_vault(vault_dir):
         case Err(reason):
             print(f"[door] remember writer: pii rules unreadable: {reason}", file=sys.stderr, flush=True)
-            outcome: remember_writer.WriteOutcome = remember_writer.Refused(-32603, f"pii rules: {reason}")
+            outcome: remember_writer.WriteOutcome = remember_writer.Failed(-32603, f"pii rules: {reason}")
         case Ok(scanner):
             deps = _writer_deps(request, vault_dir, scanner)
             try:
@@ -727,7 +727,7 @@ async def _remember_python(request: Request, body: bytes, arguments: dict, route
                 )
             except Exception as e:  # noqa: BLE001 — 예상 못한 고장도 응답은 준다(엔진 -32603 과 같이)
                 print(f"[door] remember writer failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-                outcome = remember_writer.Refused(-32603, f"{type(e).__name__}: {e}")
+                outcome = remember_writer.Failed(-32603, f"{type(e).__name__}: {e}")
     return _remember_outcome_response(body, route, outcome)
 
 
@@ -781,13 +781,11 @@ def _remember_outcome_response(body: bytes, route: str, outcome: remember_writer
             }
         )
     if route == "mcp":
-        return JSONResponse(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": outcome.code, "message": outcome.message},
-            }
-        )
+        error: dict = {"code": outcome.code, "message": outcome.message}
+        if isinstance(outcome, remember_writer.Refused):
+            # JSON-RPC 2.0 data 칸 — 클라이언트가 게이트 거절과 고장을 가른다(증류 사건 remember_status).
+            error["data"] = {"outcome": "refused"}
+        return JSONResponse({"jsonrpc": "2.0", "id": request_id, "error": error})
     return JSONResponse({"error": outcome.message}, status_code=400 if outcome.code == -32602 else 500)
 
 

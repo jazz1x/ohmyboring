@@ -847,8 +847,8 @@ class WriterCase(unittest.TestCase):
             {"title": "차원 시험", "body": "본문"},
             self.deps(embed=lambda text: Ok([0.0] * 512)),
         )
-        self.assertIsInstance(outcome, writer.Refused)
-        assert isinstance(outcome, writer.Refused)
+        self.assertIsInstance(outcome, writer.Failed, "쓰기 고장은 거절이 아니다")
+        assert isinstance(outcome, writer.Failed)
         self.assertEqual(outcome.code, -32603)
         self.assertTrue(
             outcome.message.startswith("ingest: embedding dim mismatch: got 512, expected 1024."),
@@ -860,8 +860,8 @@ class WriterCase(unittest.TestCase):
             {"title": "임베딩 불응", "body": "본문"},
             self.deps(embed=lambda text: Err("connect refused")),
         )
-        self.assertIsInstance(outcome, writer.Refused)
-        assert isinstance(outcome, writer.Refused)
+        self.assertIsInstance(outcome, writer.Failed)
+        assert isinstance(outcome, writer.Failed)
         self.assertEqual(outcome.code, -32603)
         self.assertEqual(outcome.message, "ingest: connect refused")
 

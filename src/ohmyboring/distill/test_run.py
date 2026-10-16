@@ -534,6 +534,29 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertEqual(event["workflow_node"], "remember_requested")
         self.assertEqual(event["workflow_outcome"], "fail")
 
+    def test_remember_refusal_logs_refused_status(self):
+        with (
+            mock.patch.object(llm_adapter, "call_llm", return_value=RICH_NOTE),
+            mock.patch.object(
+                engine,
+                "call_remember",
+                return_value=engine.RememberOutcome(False, "refused"),
+            ),
+        ):
+            ok = run.distill_and_remember(
+                "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
+                "personal",
+                "oh-my-boring",
+                "s4r",
+            )
+
+        self.assertFalse(ok)
+        event = _read_last_event()
+        self.assertEqual(event["status"], "failed")
+        self.assertEqual(event["remember_status"], "refused")
+        self.assertEqual(event["workflow_node"], "remember_requested")
+        self.assertEqual(event["workflow_outcome"], "fail")
+
     def test_event_log_write_failure_does_not_override_remember_success(self):
         stderr = io.StringIO()
         with (

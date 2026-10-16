@@ -237,13 +237,22 @@ class Written:
 
 @dataclass(frozen=True)
 class Refused:
-    """게이트·쓰기 거절 — code 는 엔진과 같다(-32602 요청 모양·자격 / -32603 게이트·쓰기)."""
+    """게이트 판단으로 받지 않음(모양·자격·judge·빈 노트·PII 차단) — code 는 엔진과 같다
+    (-32602 요청 모양·자격 / -32603 PII 차단)."""
 
     code: int
     message: str
 
 
-WriteOutcome = Written | Refused
+@dataclass(frozen=True)
+class Failed:
+    """쓰기·DB·예외·규칙 로드 고장 — 노트가 틀린 게 아니라 쓰지 못했다. code 는 -32603."""
+
+    code: int
+    message: str
+
+
+WriteOutcome = Written | Refused | Failed
 
 MCP_ROUTE = "mcp"
 
@@ -1264,7 +1273,7 @@ class _Gated:
 
 def _find_duplicate(
     ctx: _Ctx, seams: _TimedSeams, gated: _Gated
-) -> Either[Refused, _dedup.DuplicateMatch | None]:
+) -> Either[Failed, _dedup.DuplicateMatch | None]:
     """중복 문 — 교정은 언제나 새 노트(mcp.rs:1631 needs_dedup)라 중복 문을 안 탄다."""
     if gated.supersedes:
         return Ok(None)
@@ -1295,7 +1304,7 @@ def _find_duplicate(
             exclude_paths=frozenset(),
         ):
             case Err(reason):
-                return Err(Refused(-32603, f"dedup check: {reason}"))
+                return Err(Failed(-32603, f"dedup check: {reason}"))
             case Ok(found):
                 return Ok(found)
     finally:
@@ -1328,7 +1337,7 @@ def _decide_and_write(ctx: _Ctx, cur: Any, seams: _TimedSeams, gated: _Gated) ->
     try:
         return _store_new_note(ctx, cur, plan)
     except _WriteFailure as failure:
-        return Refused(-32603, failure.message)
+        return Failed(-32603, failure.message)
 
 
 def run_write(request: WriteRequest, deps: WriterDeps) -> WriteOutcome:
