@@ -5,6 +5,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ## [Unreleased]
 
+### Fixed
+- **증류 사건의 `remember_status` 가 문의 거절을 `refused` 로, 전송·쓰기 고장을 `failed` 로 갈라 남긴다** — 문 쓰기 길의 `WriteOutcome` 이 `Written | Refused | Failed` 가 됐다(게이트 판단 -32602 전부·PII 차단은 Refused, dedup 확인·쓰기·예외·PII 규칙 로드 실패는 Failed). 거절 봉투만 JSON-RPC `error.data = {"outcome":"refused"}` 를 싣고(code·message 불변), 클라이언트는 그 칸을 경계에서 한 번 읽는다. 사건 종류·Outcome 은 새로 안 만들고(`refused` → `remember_requested`/`fail`), 사건 `status` 는 여전히 `failed` 라 doctor 의 resolution 실패 탐지는 거절도 그대로 센다.
+
 ### Added
 - **MCP `recall` 답(문 파이썬 길)이 노트마다 현재 claims 를 싣는다 — claims 있는 노트는 `- [label] 제목` 머리줄 + `  · kind subject/predicate: value` 줄들(노트당 5, 넘치면 `… +N more`), 없는 노트는 지금 줄 그대로, 끝에 `wiki-NNNN` 으로 본문 전체를 받는 길 한 줄 (회상 구조 조각 3)** — `Recalled.refined` 가 MCP 답으로 나가고 `text` 는 엔진 그림자 대조용으로 그대로다. claims 는 `pg.current_claims`(등록부 `declared_claims` 와 같은 SQL 에서 fact 제외만 뺀 것 — 볼트 claims 의 약 절반이 fact)로 닫힌 행 빼고 kind 무관하게 읽는다. 등록부·순위·훅 경로(`/search`)·drudge 불변.
 - **워크트리·하위 폴더 세션도 저장소 이름을 갖는다 — 호스트는 cwd 와 함께 메인 워크트리 루트 항목도 적고, 워커는 정확 일치가 없으면 표에서 cwd 의 가장 긴 앞부분 폴더(경로 구분자 경계)를 쓴다** — 서브에이전트 워크트리(`.claude/worktrees/agent-…`)는 세션 도중 생겨 호스트 훅이 안 돌아 container('') 로 떨어졌다(라이브 1시간 offer 8건 중 5건). `repo_table.read_nearest`, `distill_core.record_repo` 가 루트(`git_main_worktree`)가 cwd 와 다르면 같은 origin·repo 로 한 항목 더 적는다. `x.worktrees/*` 형제 폴더는 앞부분이 아니라 쫓지 않는다. 마운트·compose·drudge 변경 없음.

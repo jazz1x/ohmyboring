@@ -1534,8 +1534,41 @@ class RememberWriterSwitchTests(unittest.TestCase):
         self.assertEqual(mcp_status, 200, "MCP 거절도 JSON-RPC 봉투로 200 — handle_mcp")
         answer = json.loads(mcp_body)
         self.assertEqual(answer["id"], 7)
-        self.assertEqual(answer["error"], {"code": -32603, "message": "PII gate blocked by rule 'x'"})
+        self.assertEqual(
+            answer["error"],
+            {"code": -32603, "message": "PII gate blocked by rule 'x'", "data": {"outcome": "refused"}},
+        )
         self.assertNotIn("result", answer)
+
+    def _mcp_error(self, run_write_kwargs):
+        os.environ["DOOR_REMEMBER_WRITER"] = "python"
+        with mock.patch.object(door.remember_writer, "run_write", **run_write_kwargs):
+            status, body, _ = _req(
+                self.door_port,
+                "POST",
+                "/mcp",
+                body=self._mcp_payload(),
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(status, 200)
+        return json.loads(body)["error"]
+
+    def test_python_writer_empty_note_refusal_carries_refused_outcome(self):
+        error = self._mcp_error(
+            {"return_value": door.remember_writer.Refused(-32602, door.remember_writer.EMPTY_NOTE_REFUSAL)}
+        )
+        self.assertEqual(error["code"], -32602)
+        self.assertEqual(error["data"], {"outcome": "refused"})
+
+    def test_python_writer_failure_carries_no_outcome_data(self):
+        """통제군 — 쓰기 고장(Failed 값·예외)은 data 칸이 없다."""
+        failed = self._mcp_error(
+            {"return_value": door.remember_writer.Failed(-32603, "dedup check: db down")}
+        )
+        self.assertEqual(failed, {"code": -32603, "message": "dedup check: db down"})
+        raised = self._mcp_error({"side_effect": RuntimeError("boom")})
+        self.assertEqual(raised["code"], -32603)
+        self.assertNotIn("data", raised)
 
     def test_python_writer_raising_is_engine_error_never_silent_200(self):
         os.environ["DOOR_REMEMBER_WRITER"] = "python"

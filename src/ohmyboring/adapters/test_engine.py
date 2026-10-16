@@ -452,7 +452,10 @@ class ClientBaseUrlRoutingTest(unittest.TestCase):
 
 class _Reply:
     def __init__(self, text):
-        self._body = json.dumps({"result": {"content": [{"type": "text", "text": text}]}}).encode("utf-8")
+        envelope = (
+            text if isinstance(text, dict) else {"result": {"content": [{"type": "text", "text": text}]}}
+        )
+        self._body = json.dumps(envelope).encode("utf-8")
 
     def __enter__(self):
         return self
@@ -500,6 +503,28 @@ class CallRememberTest(unittest.TestCase):
         result, calls, sleeps = self._call([_http_error(400)])
         self.assertEqual(result, engine.RememberOutcome(False, "failed"))
         self.assertEqual((sleeps, len(calls)), ([], 1))
+
+    def test_a_door_refusal_is_refused_and_not_retried(self):
+        envelope = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32602, "message": "empty", "data": {"outcome": "refused"}},
+        }
+        result, calls, sleeps = self._call([_Reply(envelope)])
+        self.assertEqual(result, engine.RememberOutcome(False, "refused"))
+        self.assertEqual((sleeps, len(calls)), ([], 1))
+
+    def test_an_error_without_refused_data_is_failed(self):
+        """통제군 — data 없는 error 는 고장이다."""
+        envelope = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "db down"}}
+        result, _calls, _sleeps = self._call([_Reply(envelope)])
+        self.assertEqual(result, engine.RememberOutcome(False, "failed"))
+
+    def test_exhausted_transport_failures_are_failed_not_refused(self):
+        boom = urllib.error.URLError("refused")
+        result, calls, _sleeps = self._call([boom, boom, boom])
+        self.assertEqual(result, engine.RememberOutcome(False, "failed"))
+        self.assertEqual(len(calls), 3)
 
     def test_a_duplicate_is_a_success(self):
         result, _calls, _sleeps = self._call([_Reply("skipped — duplicate of wiki-3")])

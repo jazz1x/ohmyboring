@@ -27,6 +27,12 @@ def test_resolution_fields_follow_memory_ingest_graph():
         "workflow_outcome": "pass",
     }
     assert workflow.resolution_fields("pass", "duplicate")["workflow_outcome"] == "duplicate"
+    assert workflow.resolution_fields("pass", "refused") == workflow.resolution_fields("pass", "failed")
+    assert workflow.resolution_fields("repaired", "refused") == {
+        "workflow": "memory_ingest",
+        "workflow_node": "remember_requested",
+        "workflow_outcome": "fail",
+    }
     assert workflow.resolution_fields("failed", "not_called") == {
         "workflow": "memory_ingest",
         "workflow_node": "resolution_repaired",

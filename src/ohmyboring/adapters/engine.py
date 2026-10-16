@@ -420,9 +420,12 @@ def _post_remember(req: urllib.request.Request, timeout: int, attempt: int, max_
 
 
 def _read_remember_reply(data: Any) -> RememberOutcome:
-    if data.get("error"):
-        print(f"[distill-session] remember error: {data['error']}", file=sys.stderr)
-        return RememberOutcome(False, "failed")
+    error = data.get("error")
+    if error:
+        print(f"[distill-session] remember error: {error}", file=sys.stderr)
+        error_data = error.get("data") if isinstance(error, dict) else None
+        refused = isinstance(error_data, dict) and error_data.get("outcome") == "refused"
+        return RememberOutcome(False, "refused" if refused else "failed")
 
     result = data.get("result", {})
     content = result.get("content", [])
