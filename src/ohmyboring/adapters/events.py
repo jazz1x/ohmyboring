@@ -8,11 +8,14 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -317,6 +320,116 @@ def recent_events(
     return events[-limit:]
 
 
+#: The eval gate runs in CI on every push; a gate that stops is indistinguishable from a gate
+#: that passes (`eval_graphrag_gate` emitted twenty `ok` rows, vanished five weeks, and its stale
+#: rows were later read as proof the graph was covered). The local event log only sees a
+#: hand-run `make eval-gate`, so freshness is read from the newest finished ci.yml run on main
+#: (page of 20) whose job named `eval-gate` succeeded or failed — not the workflow conclusion,
+#: which other jobs fail, and not a run cancelled by a newer push.
+GATE_STALE_DAYS = int(os.environ.get("BORING_GATE_STALE_DAYS") or "7")
+GATE_WORKFLOW = "ci.yml"
+GATE_JOB = "eval-gate"
+_GH_RUNS = f"repos/{{owner}}/{{repo}}/actions/workflows/{GATE_WORKFLOW}/runs?branch=main&status=completed&per_page=20"
+
+
+@dataclass(frozen=True)
+class GateFresh:
+    days: int
+
+
+@dataclass(frozen=True)
+class GateStale:
+    days: int
+
+
+@dataclass(frozen=True)
+class GateFailed:
+    conclusion: str
+    days: int
+
+
+@dataclass(frozen=True)
+class GateUnmeasurable:
+    reason: str
+
+
+GateState = GateFresh | GateStale | GateFailed | GateUnmeasurable
+
+#: `gh` argv tail -> (returncode, output). The seam tests replace; production shells out.
+GhCall = Callable[[list[str]], tuple[int, str]]
+
+
+def _run_gh(args: list[str]) -> tuple[int, str]:
+    try:
+        done = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 127, f"{type(exc).__name__}: {exc}"
+    return done.returncode, done.stdout if done.returncode == 0 else done.stderr.strip()
+
+
+def _gh_json(gh: GhCall, args: list[str]) -> tuple[Any, str | None]:
+    code, out = gh(args)
+    if code != 0:
+        return None, f"gh failed ({code}): {out[:120]}"
+    try:
+        return json.loads(out), None
+    except json.JSONDecodeError:
+        return None, "gh output is not JSON"
+
+
+#: A job that ended any other way (cancelled by a newer push's concurrency group, skipped) is a
+#: superseded run, not a gate result — the walk passes over it to an older run.
+_DECISIVE = ("success", "failure")
+
+
+def _parse_gate_job(jobs: Any, now: datetime, limit: int) -> GateState | None:
+    """None = this run says nothing about the gate; keep walking."""
+    listed = jobs.get("jobs") if isinstance(jobs, dict) else None
+    rows = [j for j in listed or [] if isinstance(j, dict) and j.get("name") == GATE_JOB]
+    if not rows or str(rows[0].get("conclusion") or "") not in _DECISIVE:
+        return None
+    done = _parse_ts(str(rows[0].get("completed_at") or ""))
+    if done is None:
+        return GateUnmeasurable(f"job {GATE_JOB} has no completed_at")
+    days = (now - done).days
+    if rows[0]["conclusion"] != "success":
+        return GateFailed(rows[0]["conclusion"], days)
+    return GateStale(days) if days > limit else GateFresh(days)
+
+
+def eval_gate_state(
+    gh: GhCall = _run_gh, now: datetime | None = None, max_days: int | None = None
+) -> GateState:
+    """Newest finished ci.yml runs on main -> first whose `eval-gate` job succeeded or failed."""
+    limit = GATE_STALE_DAYS if max_days is None else max_days
+    runs, err = _gh_json(gh, ["api", _GH_RUNS])
+    if err is not None:
+        return GateUnmeasurable(err)
+    found = runs.get("workflow_runs") if isinstance(runs, dict) else None
+    ids = [r["id"] for r in found or [] if isinstance(r, dict) and r.get("id")]
+    for run_id in ids:
+        jobs, err = _gh_json(gh, ["api", f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/jobs"])
+        if err is not None:
+            return GateUnmeasurable(err)
+        state = _parse_gate_job(jobs, now or datetime.now(UTC), limit)
+        if state is not None:
+            return state
+    return GateUnmeasurable(f"no run of the last {len(ids)} has a finished {GATE_JOB} job")
+
+
+def gate_line(state: GateState) -> tuple[bool, str]:
+    """Fold a GateState into (ok, line)."""
+    match state:
+        case GateFresh(days):
+            return True, f"gate={GATE_JOB} fresh ({days}d ago, <= {GATE_STALE_DAYS}d)"
+        case GateStale(days):
+            return False, f"gate={GATE_JOB} stale: last success {days}d ago (> {GATE_STALE_DAYS}d)"
+        case GateFailed(conclusion, days):
+            return False, f"gate={GATE_JOB} {conclusion} in latest main run ({days}d ago)"
+        case GateUnmeasurable(reason):
+            return False, f"gate={GATE_JOB} 못 잼 (unmeasurable): {reason}"
+
+
 def recent_resolution_failures(limit: int = 3, hours: int | None = None) -> list[dict[str, Any]]:
     if hours is None:
         raw_hours = os.environ.get("BORING_EVENT_RECENT_HOURS") or str(DEFAULT_RECENT_HOURS)
@@ -464,6 +577,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sink-mode", action="store_true")
     parser.add_argument("--verdict-spool-loss", action="store_true")
     parser.add_argument("--recent-resolution-failures", action="store_true")
+    parser.add_argument("--stale-gates", action="store_true")
     parser.add_argument(
         "--replay-spool",
         action="store_true",
@@ -516,6 +630,12 @@ def _print_tail(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_stale_gates(_args: argparse.Namespace) -> int:
+    ok, line = gate_line(eval_gate_state())
+    print(line)
+    return 0 if ok else 1
+
+
 def _print_replay_spool(_args: argparse.Namespace) -> int:
     counts = replay_spool()
     print(
@@ -548,6 +668,7 @@ _COMMANDS = (
     ("verdict_spool_loss", _print_verdict_spool_loss),
     ("record", _record),
     ("tail", _print_tail),
+    ("stale_gates", _print_stale_gates),
     ("replay_spool", _print_replay_spool),
     ("recent_resolution_failures", _print_recent_resolution_failures),
 )

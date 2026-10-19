@@ -1,4 +1,4 @@
-# ohmyboring pre-commit — 커밋 전 게이트. 린트(fmt·clippy·ruff)와 바뀐 시험 파일만. CI 는 시험을 안 돌린다.
+# ohmyboring pre-commit — 커밋 전 게이트. 린트(fmt·clippy·ruff)와 바뀐 시험 파일만. 전체 묶음은 CI(rust-gate)가 돈다.
 # 설치: pre-commit install   (요건: pre-commit, cargo+clippy+rustfmt)
 default_install_hook_types: [pre-commit]
 default_stages: [pre-commit]
