@@ -968,14 +968,16 @@ def build_state(offset=0):
         dup = uptake_core.duplicate_injections(ledger_file)
         if dup["extra_in"]:
             notes.append(
-                f"원장에 창 [{dup['since']}, {dup['until']}) 안에서 한 프롬프트를 두 번 기록한 행"
-                f" {dup['extra_in']}/{dup['total_in']} (세션 {dup['sessions_in']}) — 비율은"
-                " 그대로지만 표본 하한(주입 프롬프트 수)이 부풀어 보인다."
+                f"원장에 판정 창 [{dup['since']}, {dup['until']}) 안에서 한 프롬프트를 두 번 기록한 행"
+                f" {dup['extra_in']}/{dup['total_in']} (세션 {dup['sessions_in']}) — 판정 창은"
+                " 닫혀 있어 이 숫자는 기록이다. 비율은 그대로지만 그 창의 표본 하한(주입 프롬프트 수)이"
+                " 부풀어 보였다. 지금의 이중 기록 경보는 doctor d5c 가 최근 7일 창으로 잡는다."
             )
         elif dup["extra_out"]:
             notes.append(
                 f"원장에 한 프롬프트를 두 번 기록한 행 {dup['extra_out']}건이 있지만"
-                f" {dup['since']} 이전 것이라 지금 열린 창의 표본 하한을 움직이지 못한다."
+                f" 판정 창({dup['since']}~) 밖의 것이다 — 닫힌 창의 표본 하한은 움직이지 않는다."
+                " 최근 7일의 이중 기록은 doctor d5c 가 빨강으로 낸다."
             )
 
     prompts_out = prompt_rows(ledger, echoes, notes, page, offset=offset)
