@@ -14,6 +14,7 @@ import sys
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
@@ -21,6 +22,7 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
 
+import card_advice_write  # noqa: E402
 import card_press  # noqa: E402
 import card_types  # noqa: E402
 from card_effects import _live_record  # noqa: E402
@@ -64,6 +66,12 @@ _EVENTS_TIMEOUT = float(os.environ.get("CARD_ENGINE_TIMEOUT") or "30")
 _EVENTS_LIMIT = 1000
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL | re.IGNORECASE)
+
+#: One goal, one line — the same two the advice step's rewrite carries (card_advice_write).
+GOAL_LINE = "목표: 처음 읽는 사람이 한 번에 이해한다."
+LINE_LINE = "선: 내부 이름·영어 식별자·wiki 번호·파일 경로·커밋 해시를 쓰지 않는다."
+
+REVISE_HEAD = "아래 판정 이유 한 문장을 다시 쓴다."
 
 #: The key both the judge and the card compute for one group — (subject, 정렬된 variants).
 #: 정렬이 키의 일부다: variants 가 바뀐 묶음은 다른 묶음이어서 다시 판정한다.
@@ -125,6 +133,8 @@ def build_prompt(
         '{"verdict": "generic", "reason": "왜 그렇게 판정하는지 한 문장"}',
         "",
         "규칙:",
+        GOAL_LINE,
+        LINE_LINE,
         "- 새로운 사실을 지어내지 마라. reason 은 위 사실들에 근거해 써라.",
         f"- reason 은 한 문장, {JUDGE_REASON_MAX}자 이내로 써라.",
         '- verdict 는 "' + " · ".join(card_types.REPAIR_JUDGE_VERDICTS) + '" 셋 중 하나만 써라.',
@@ -157,6 +167,67 @@ def parse(raw: str, subject: str, variants: list[str]) -> card_types.RepairJudge
     if len(reason) > JUDGE_REASON_MAX:
         reason = f"{reason[: JUDGE_REASON_MAX - 1]}…"
     return RepairJudgment(subject=subject, variants=variants, verdict=verdict, reason=reason)
+
+
+@dataclass(frozen=True)
+class RevisedReason:
+    reason: str
+    revise: str
+
+
+def _inside_talk(text: str, subject: str, variants: list[str]) -> list[str]:
+    """card_advice_write.internal_names of `text`, the group's own spellings taken out first:
+    the card row names them, so a reason naming them is not inside talk."""
+    plain = text
+    for name in sorted({subject, *variants}, key=len, reverse=True):
+        plain = plain.replace(name, " ")
+    return card_advice_write.internal_names(plain)
+
+
+def build_revise_prompt(reason: str, flagged: list[str]) -> str:
+    return "\n".join(
+        [
+            REVISE_HEAD,
+            GOAL_LINE,
+            LINE_LINE,
+            f"이 낱말이 걸렸다: {', '.join(flagged)}",
+            "",
+            f"판정 이유: {reason}",
+            "",
+            '아래 JSON 하나만 출력하라: {"reason": "..."}',
+            f"숫자와 사실은 그대로 두고, 한 문장, {JUDGE_REASON_MAX}자 이내로 써라.",
+        ]
+    )
+
+
+def _parse_reason(raw: str) -> str | None:
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    reason = data.get("reason") if isinstance(data, dict) else None
+    if not isinstance(reason, str):
+        return None
+    return " ".join(reason.split()) or None
+
+
+def revise_reason(
+    reason: str, subject: str, variants: list[str], invoke: Callable[[str], str]
+) -> RevisedReason:
+    """The same revision line C2-1 gave the advice: code checks the reason, and only a flagged
+    one is asked for one rewrite. The original stays when the rewrite cannot be parsed, loses
+    a number, or is still flagged — the model proposes, this function decides."""
+    flagged = _inside_talk(reason, subject, variants)
+    if not flagged:
+        return RevisedReason(reason, "clean")
+    parsed = _parse_reason(invoke(build_revise_prompt(reason, flagged)))
+    if parsed is None:
+        return RevisedReason(reason, "unusable")
+    if card_advice_write.facts_to_keep(reason) - card_advice_write.polish.facts(parsed):
+        return RevisedReason(reason, "lost_facts")
+    if _inside_talk(parsed, subject, variants):
+        return RevisedReason(reason, "kept_original")
+    return RevisedReason(parsed[:JUDGE_REASON_MAX], "rewritten")
 
 
 def pick(
@@ -319,7 +390,14 @@ def run(
             else RepairJudgment(subject=subject, variants=variants, verdict="unsure", reason=NO_FACTS_REASON)
         )
         if isinstance(answer, RepairJudgment) and facts:
-            answer = answer.model_copy(update={"comment_ids": [comment.id for comment in read]})
+            revised = revise_reason(answer.reason, subject, variants, invoke)
+            answer = answer.model_copy(
+                update={
+                    "comment_ids": [comment.id for comment in read],
+                    "reason": revised.reason,
+                    "revise": revised.revise,
+                }
+            )
         if isinstance(answer, RepairJudgeFailed):
             record("repair_judge_failed", answer.model_dump())
             failed_n += 1

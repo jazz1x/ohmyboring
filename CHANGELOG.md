@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Changed
+- **「이름 맞추기」 판정 이유도 목표 하나·선 하나로 퇴고한다 — C2-1 과 같은 기계 검사 (카드 퇴고 C2-2)** — `card_repair_judge.py` 의 프롬프트에 같은 목표·선을 싣고, 나온 이유를 `card_advice_write.internal_names` 로 검사한다(묶음 자신의 철자는 제외). 걸리면 한 번 다시 쓰고, 그래도 걸리면 원문을 싣고 `revise=kept_original`, 숫자를 잃으면 원문과 `lost_facts`. `REPAIR_JUDGE_PROMPT_VERSION` 2→3 이라 옛 판정은 현재 판정으로 읽히지 않는다(하루 상한 안에서 다시 판정). 카드 실행의 모델 호출 0 은 그대로.
 - **doctor d5c 는 이중 기록을 최근 7일 창에서 잡는다 — 닫힌 판정 창은 정보 줄로** — 판정 창(2026-09-18~10-02)은 닫혔는데(`prd-section2-window`) 거기에 묶여 있어 창 밖의 새 이중 발화는 경고로만 보였다. 이제 최근 7일의 중복이 빨강이고(읽을 때 `ts` 로 거른다), 원장을 못 읽거나 7일 분모가 0행이면 「측정 불가」 빨강이다. 닫힌 창은 숫자 그대로 한 줄(`closed window [...) duplicates 2/98`).
 - **아침 카드의 「짚어 둔 것」 글을 카드 앞 cron 단계(`advice-write`)가 미리 쓴다 — 08:00 카드 실행은 모델을 부르지 않는다 (카드 퇴고 C2-1)** — `card_advice_write.py` 가 조언을 쓰고 목표 하나·선 하나로 한 번 다시 쓴 뒤 `card_advice_written` 사건으로 남기고, 카드는 그 사건을 읽기만 한다(없으면 조언 칸을 비운다). 다시 쓴 글이 기계 검사(내부 이름·영문 식별자·wiki 번호·경로·해시)에 두 번 걸리면 원문을 싣고 `revise=kept_original`, 숫자를 잃으면 원문과 `lost_facts`. 문 `POST /run/advice-write`, 출입구 `agents/hermes/run-advice-write.py`.
 
