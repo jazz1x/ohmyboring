@@ -5,6 +5,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ## [Unreleased]
 
+### Changed
+- **아침 카드의 「짚어 둔 것」 글을 카드 앞 cron 단계(`advice-write`)가 미리 쓴다 — 08:00 카드 실행은 모델을 부르지 않는다 (카드 퇴고 C2-1)** — `card_advice_write.py` 가 조언을 쓰고 목표 하나·선 하나로 한 번 다시 쓴 뒤 `card_advice_written` 사건으로 남기고, 카드는 그 사건을 읽기만 한다(없으면 조언 칸을 비운다). 다시 쓴 글이 기계 검사(내부 이름·영문 식별자·wiki 번호·경로·해시)에 두 번 걸리면 원문을 싣고 `revise=kept_original`, 숫자를 잃으면 원문과 `lost_facts`. 문 `POST /run/advice-write`, 출입구 `agents/hermes/run-advice-write.py`.
+
 ### Fixed
 - **증류 사건의 `remember_status` 가 문의 거절을 `refused` 로, 전송·쓰기 고장을 `failed` 로 갈라 남긴다** — 문 쓰기 길의 `WriteOutcome` 이 `Written | Refused | Failed` 가 됐다(게이트 판단 -32602 전부·PII 차단은 Refused, dedup 확인·쓰기·예외·PII 규칙 로드 실패는 Failed). 거절 봉투만 JSON-RPC `error.data = {"outcome":"refused"}` 를 싣고(code·message 불변), 클라이언트는 그 칸을 경계에서 한 번 읽는다. 사건 종류·Outcome 은 새로 안 만들고(`refused` → `remember_requested`/`fail`), 사건 `status` 는 여전히 `failed` 라 doctor 의 resolution 실패 탐지는 거절도 그대로 센다.
 
