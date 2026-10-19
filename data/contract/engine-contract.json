@@ -9,6 +9,7 @@
     "GET /rules",
     "POST /gap",
     "POST /repairs/split-subjects",
+    "POST /run/advice-write",
     "POST /run/morning-card",
     "POST /run/repair-judge",
     "POST /run/weekly-card",

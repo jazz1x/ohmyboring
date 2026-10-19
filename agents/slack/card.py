@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""The morning card — one LangGraph run: read repairs+registers, advise, resolve, post.
+"""The morning card — one LangGraph run: read repairs+registers, read the stored advice, resolve, post.
+
+The 08:00 run makes no model call. The advice is written ahead by a separate cron step
+(card_advice_write.py → build_advice_graph: registers → advise → resolve → rewrite-and-store as
+`card_advice_written` 사건), and read_advice only reads it back; with none stored the advice lane
+is empty. Everything below about advise describes that earlier step's node.
 
 `make card` runs g_card once: post the card, print its ts, exit. read_repairs scans the
 door's top split-subject groups and keeps only the ones the agent already judged 같은 이름
@@ -72,6 +77,7 @@ sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
 
 import card_advice  # noqa: E402
+import card_advice_write  # noqa: E402
 import card_live  # noqa: E402
 import card_press  # noqa: E402
 import card_registers  # noqa: E402
@@ -164,6 +170,9 @@ class CardState(TypedDict):
     past_verdicts: card_types.PastCardHistory  # read once in read_history, shared by advise and resolve
     advise_stats: card_types.AdviseStats
     suppressed_count: int
+    advice_revisions: list[
+        str
+    ]  # the advice step's store_advice: one card_advice_written `revise` tag per row
 
 
 class Collaborators(NamedTuple):
@@ -173,7 +182,10 @@ class Collaborators(NamedTuple):
     fetch: Callable[[str, str], dict[str, Any]]  # register path, project → engine JSON
     search: Callable[[str], list[dict[str, Any]]]  # subject → past hits (claims included)
     read_note: Callable[[str], str | None]  # note path → its own text, or None if unreadable
-    propose: Callable[[str], str]  # prompt → advised JSON text (one candidate)
+    propose: Callable[[str], str]  # prompt → advised JSON text — the advice step's seam, never the card's
+    advice_written: Callable[
+        [], list[card_types.Proposal]
+    ]  # today's advice, stored ahead — the card's only read
     send: Callable[[list[dict]], card_types.PostedCard]  # Block Kit → posted card
     handover: Callable[[str, str, list[str]], dict]  # session, at, note paths
     resolve: Callable[[str, str], card_types.ResolvedNote | card_types.Unresolved]
@@ -204,28 +216,34 @@ class Collaborators(NamedTuple):
     posted_proposals: Callable[[], list[card_types.Proposal]] | None = None
 
 
-def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
-    if collabs is None:
-        collabs = Collaborators(
-            fetch=card_live._live_fetch,
-            search=card_live._live_search,
-            read_note=card_live._live_read_note,
-            propose=make_propose(),
-            send=_env_send,
-            handover=card_live._live_handover,
-            resolve=card_live._live_resolve,
-            approved=card_live._live_approved,
-            record=card_live._live_record,
-            active_projects=card_live._live_active_projects,
-            past_verdicts=card_live._live_past_verdicts,
-            lang=card_advice.resolve_lang(boring_config.note_lang()),
-            repairs=card_live._live_repairs,
-            merged_yesterday=card_live._live_merged_yesterday,
-            proposed=card_live._live_proposed,
-            held_repairs=card_live._held_repair_subjects,
-            repair_judgments=card_live._live_repair_judgments,
-            score=card_live._live_score,
-        )
+def _live_collaborators() -> Collaborators:
+    return Collaborators(
+        fetch=card_live._live_fetch,
+        search=card_live._live_search,
+        read_note=card_live._live_read_note,
+        propose=make_propose(),
+        advice_written=card_live._live_advice_written,
+        send=_env_send,
+        handover=card_live._live_handover,
+        resolve=card_live._live_resolve,
+        approved=card_live._live_approved,
+        record=card_live._live_record,
+        active_projects=card_live._live_active_projects,
+        past_verdicts=card_live._live_past_verdicts,
+        lang=card_advice.resolve_lang(boring_config.note_lang()),
+        repairs=card_live._live_repairs,
+        merged_yesterday=card_live._live_merged_yesterday,
+        proposed=card_live._live_proposed,
+        held_repairs=card_live._held_repair_subjects,
+        repair_judgments=card_live._live_repair_judgments,
+        score=card_live._live_score,
+    )
+
+
+def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
+    """Every node either graph wires. The card graph and the advice graph are two wirings of
+    the same reads and the same advise → resolve, so the 07:xx step picks exactly what the
+    card's advise used to pick."""
 
     def read_repairs(_: CardState) -> dict:
         """The execute lane's rows — the door's 상한(REPAIRS_SCAN_LIMIT)만큼 받아 에이전트
@@ -521,38 +539,92 @@ def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
             collabs.record("card_confirmation", fields)
         return {"message": message}
 
-    graph = StateGraph(CardState)
-    graph.add_node("read_repairs", read_repairs)
-    graph.add_node("read_proposed", read_proposed)
-    graph.add_node("read_registers", read_registers)
-    graph.add_node("cross_check", cross_check)
-    graph.add_node("read_history", read_history)
+    def read_advice(_: CardState) -> dict:
+        """The card's advice lane: what the advice step stored this morning, read back as it
+        was written. No stored advice leaves the lane empty — the card never writes it itself,
+        and a card that reaches for the model here is the defect. An unreadable log raises
+        like every other read (a card that cannot tell 'none' from 'unreadable' must not ship)."""
+        proposals = collabs.advice_written()
+        if not proposals:
+            print("[card] 오늘 미리 쓴 조언이 없다 — 조언 칸을 비운다", file=sys.stderr)
+        return {"proposals": proposals}
+
+    def store_advice(state: CardState) -> dict:
+        """The advice step's last node: each proposal that survived advise → resolve is
+        rewritten once for a first-time reader (card_advice_write.revise) and stored as one
+        card_advice_written 사건, rank in the order the card will show them. The run stamp
+        groups one run's rows, so a second run the same morning replaces the first."""
+        run = datetime.now(UTC).isoformat()
+        day = card_advice_write.today_kst()
+        revisions: list[str] = []
+        for rank, proposal in enumerate(state["proposals"]):
+            revised = card_advice_write.revise(proposal, collabs.propose, state["lang"])
+            revisions.append(revised.revise)
+            collabs.record(
+                card_advice_write.EVENT,
+                card_advice_write.event_fields(
+                    revised.proposal, day=day, run=run, rank=rank, revise=revised.revise
+                ),
+            )
+        return {"advice_revisions": revisions}
+
+    return {
+        "read_repairs": read_repairs,
+        "read_proposed": read_proposed,
+        "read_registers": read_registers,
+        "cross_check": cross_check,
+        "read_history": read_history,
+        "advise": advise,
+        "resolve": resolve,
+        "read_advice": read_advice,
+        "store_advice": store_advice,
+        "post_card": post_card,
+    }
+
+
+def build_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
+    """The 08:00 card: reads, then the stored advice, then resolve and post. No model call —
+    `collabs.propose` is the advice step's seam and this graph never reaches it."""
+    collabs = _live_collaborators() if collabs is None else collabs
+    nodes = _nodes(collabs)
     replay = collabs.posted_proposals
-    graph.add_node("advise", advise if replay is None else _replay_advise(replay))
-    graph.add_node("resolve", resolve if replay is None else _replay_resolve)
-    graph.add_node("post_card", post_card)
+    graph = StateGraph(CardState)
+    for name in ("read_repairs", "read_proposed", "read_registers", "cross_check", "read_history"):
+        graph.add_node(name, nodes[name])
+    graph.add_node("read_advice", nodes["read_advice"] if replay is None else _replay_advice(replay))
+    graph.add_node("resolve", nodes["resolve"] if replay is None else _replay_resolve)
+    graph.add_node("post_card", nodes["post_card"])
     graph.add_edge(START, "read_repairs")
     graph.add_edge("read_repairs", "read_proposed")
     graph.add_edge("read_proposed", "read_registers")
     graph.add_edge("read_registers", "cross_check")
     graph.add_edge("cross_check", "read_history")
-    graph.add_edge("read_history", "advise")
-    graph.add_edge("advise", "resolve")
+    graph.add_edge("read_history", "read_advice")
+    graph.add_edge("read_advice", "resolve")
     graph.add_edge("resolve", "post_card")
     return graph.compile()
 
 
-def _replay_advise(posted: Callable[[], list[card_types.Proposal]]) -> Callable[[CardState], dict]:
-    def advise(_: CardState) -> dict:
-        return {
-            "proposals": posted(),
-            "per_project_candidates": {},
-            "advise_stats": card_types.AdviseStats(
-                calls=0, proposals_passed=0, not_worth=0, ungrounded=0, skipped_resting=0
-            ),
-        }
+def build_advice_graph(collabs: Collaborators | None = None) -> CompiledStateGraph:
+    """The pre-card advice step: the registers and history the card reads, advise (the model
+    calls), resolve, then rewrite-and-store. It posts nothing and hands nothing over."""
+    collabs = _live_collaborators() if collabs is None else collabs
+    nodes = _nodes(collabs)
+    graph = StateGraph(CardState)
+    order = ("read_registers", "cross_check", "read_history", "advise", "resolve", "store_advice")
+    for name in order:
+        graph.add_node(name, nodes[name])
+    graph.add_edge(START, order[0])
+    for before, after in zip(order, order[1:], strict=False):
+        graph.add_edge(before, after)
+    return graph.compile()
 
-    return advise
+
+def _replay_advice(posted: Callable[[], list[card_types.Proposal]]) -> Callable[[CardState], dict]:
+    def read_advice(_: CardState) -> dict:
+        return {"proposals": posted()}
+
+    return read_advice
 
 
 def _replay_resolve(state: CardState) -> dict:
@@ -632,6 +704,7 @@ def _run_dry() -> int:
         search=card_live._live_search,
         read_note=card_live._live_read_note,
         propose=make_propose(),
+        advice_written=_never("the advice step's store"),
         send=send,
         handover=_dry_handover,
         resolve=card_live._live_resolve,
@@ -647,8 +720,20 @@ def _run_dry() -> int:
         repair_judgments=card_live._live_repair_judgments,
         score=card_live._live_score,
     )
-    graph = build_graph(collabs)
-    state = graph.invoke({})
+    # The two crons in one process: the advice step writes into a list instead of the event
+    # log, and the card reads that list back. Only a dry run ever calls the model for a card.
+    written: list[dict[str, Any]] = []
+
+    def capture(event: str, fields: dict) -> None:
+        if event == card_advice_write.EVENT:
+            written.append({"attributes": fields})
+
+    ahead = build_advice_graph(collabs._replace(record=capture)).invoke({})
+    day = card_advice_write.today_kst()
+    graph = build_graph(
+        collabs._replace(advice_written=lambda: card_advice_write.written_proposals(written, day))
+    )
+    state = {**ahead, **graph.invoke({})}
     confirmation = state["confirmation"]
     stats = state["advise_stats"]
     print(
@@ -668,7 +753,7 @@ def _run_dry() -> int:
                 "not_worth_reasons": stats.not_worth_reasons,
                 "sufficiency_reasons": stats.sufficiency_reasons,
                 "ungrounded_reasons": stats.ungrounded_reasons,
-                "suppressed": state["suppressed_count"],
+                "suppressed": ahead["suppressed_count"],
                 "score": state["score"].model_dump() if state["score"] else None,
                 "scoreline": (
                     card_view.scoreline_text(state["score"], card_i18n.STRINGS[lang])
@@ -717,6 +802,7 @@ def _run_render_only() -> int:
         search=_never("search"),
         read_note=card_live._live_read_note,
         propose=_never("the model"),
+        advice_written=_never("the advice step's store"),
         send=send,
         handover=_dry_handover,
         resolve=card_live._live_resolve,
