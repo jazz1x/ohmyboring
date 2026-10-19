@@ -176,12 +176,10 @@ class RevisedReason:
 
 
 def _inside_talk(text: str, subject: str, variants: list[str]) -> list[str]:
-    """card_advice_write.internal_names of `text`, the group's own spellings taken out first:
-    the card row names them, so a reason naming them is not inside talk."""
-    plain = text
-    for name in sorted({subject, *variants}, key=len, reverse=True):
-        plain = plain.replace(name, " ")
-    return card_advice_write.internal_names(plain)
+    """card_advice_write.internal_names of `text` minus tokens EXACTLY equal to the group's own
+    spellings: the card row names them. A token that merely contains one stays flagged."""
+    own = {subject, *variants}
+    return [token for token in card_advice_write.internal_names(text) if token not in own]
 
 
 def build_revise_prompt(reason: str, flagged: list[str]) -> str:

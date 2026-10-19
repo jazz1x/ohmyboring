@@ -517,6 +517,27 @@ class ReasonReviseTests(unittest.TestCase):
         out = crj.revise_reason(reason, SUBJ, VARS, invoke)
         self.assertEqual((out.reason, out.revise), (reason, "clean"))
 
+    def test_only_the_exact_spelling_is_excluded_other_inside_talk_still_flags(self):
+        cases = [
+            "next-step 은 wiki-1234 와 같다",
+            "next-step 은 card_repair_judge 가 가른 묶음이다",
+            "next-step 은 agents/slack/card.py 에 있다",
+        ]
+        for reason in cases:
+            invoke = _scripted(_reason(CLEAN))
+            out = crj.revise_reason(reason, SUBJ, VARS, invoke)
+            self.assertEqual((out.revise, len(invoke.prompts)), ("rewritten", 1), reason)
+
+    def test_a_near_miss_containing_the_subject_is_still_flagged(self):
+        invoke = _scripted(_reason(CLEAN))
+        out = crj.revise_reason(
+            "spark-connect-v2 는 흔한 말이 아니다",
+            "spark-connect",
+            ["spark connect", "spark-connect"],
+            invoke,
+        )
+        self.assertEqual((out.reason, out.revise), (CLEAN, "rewritten"))
+
     def test_still_flagged_after_the_one_rewrite_keeps_the_original_and_says_so(self):
         still = "card_repair_judge 의 판정이라 합치지 않는다"
         invoke = _scripted(_reason(still))
