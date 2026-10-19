@@ -14,9 +14,17 @@ description: oh-my-boring 저장소에서 변경을 머지 뒤 소비자 쪽(~/.
 | Python · 훅 · `~/.hermes/scripts` 로 복사되는 것 | `python3 agents/shared/agent_wiring.py --install --boring-home "$PWD"` | `sh scripts/doctor.sh` 에 `DEPLOY DRIFT` 줄이 없다 |
 | Rust (`drudge/`) | `make build` 후 컨테이너 재기동 | `make build` 가 compose 이미지(엔진·문)와 호스트 CLI 바이너리를 함께 만든다. doctor 가 engine build_sha 와 호스트 CLI 스탬프를 체크아웃과 대조한다 |
 | 문 이미지가 COPY 하는 경로 전부: `src/`, `agents/door/`, `agents/slack/`, `agents/shared/`, `agents/memory/`, `agents/hermes/`, `pyproject.toml`, `requirements.txt`, `data/contract/engine-contract.json` | 위 `agent_wiring --install` **에 더해** `make door-build && make door-up` | 출력에 `Recreated` |
+| hermes cron 작업 추가·수정·삭제 | `docker exec boring-agent hermes cron create …` (`edit` · `pause` · `resume` · `remove` 도 같은 CLI) | 한 주기 뒤 `docker exec boring-agent hermes cron list` 재확인 |
 
 문 이미지 경로는 `agents/door/**` 만이 아니다. 목록의 정본은 `agents/door/Dockerfile` 의 `COPY` 줄이다 — 목록과 다르면 Dockerfile 이 이긴다. `agents/shared/`·`agents/hermes/`·`src/` 를 고치고 `door-build` 를 빼먹기 쉽다.
-| hermes cron 작업 추가·수정·삭제 | `docker exec boring-agent hermes cron create …` (`edit` · `pause` · `resume` · `remove` 도 같은 CLI) | 한 주기 뒤 `docker exec boring-agent hermes cron list` 재확인 |
+
+hermes cron 등록 예(스크립트는 `~/.hermes/scripts/` 안 이름, 모델 없이 스크립트만 돌림):
+
+```sh
+docker exec boring-agent sh -c 'hermes cron create --name advice-write --no-agent --script run-advice-write.py --deliver local --failure-deliver slack:<DM> "45 7 * * *"'
+```
+
+한 번만 울리는 알림은 `--repeat 1` 과 날짜를 박은 식(`"12 8 20 10 *"`)을 쓴다. 출력의 `Next run:` 을 인용한다.
 
 - hermes 는 외부 이미지(`make hermes-build`)다. `make build` 에 들어 있지 않다.
 - `~/.hermes/cron/jobs.json` 은 손으로 고치지 않는다. 데몬이 되돌린다.
