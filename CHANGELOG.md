@@ -9,6 +9,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 - **아침 카드의 「짚어 둔 것」 글을 카드 앞 cron 단계(`advice-write`)가 미리 쓴다 — 08:00 카드 실행은 모델을 부르지 않는다 (카드 퇴고 C2-1)** — `card_advice_write.py` 가 조언을 쓰고 목표 하나·선 하나로 한 번 다시 쓴 뒤 `card_advice_written` 사건으로 남기고, 카드는 그 사건을 읽기만 한다(없으면 조언 칸을 비운다). 다시 쓴 글이 기계 검사(내부 이름·영문 식별자·wiki 번호·경로·해시)에 두 번 걸리면 원문을 싣고 `revise=kept_original`, 숫자를 잃으면 원문과 `lost_facts`. 문 `POST /run/advice-write`, 출입구 `agents/hermes/run-advice-write.py`.
 
 ### Fixed
+- **doctor 의 eval_gate 신선도가 로컬 사건 로그 대신 GitHub Actions 를 읽는다** — main 의 최근 완료된 `ci.yml` 실행 20개를 새것부터 훑어 `eval-gate` 잡(워크플로 전체 결론 아님)이 `success`/`failure` 로 끝난 첫 실행을 쓴다(동시성으로 취소된 실행·skipped 는 건너뜀, 전부 그러면 못 잼). 그 잡이 7일 안에 `success` 면 초록. 잡 실패·7일 초과는 나이와 함께 빨강, `gh` 없음·미인증·호출 실패는 「못 잼」으로 빨강(통과 아님). 손으로 `make eval-gate` 를 돌릴 때만 행이 생기던 로컬 로그 경로는 지웠다(`WATCHED_GATES`·`stale_gates`).
 - **doctor 가 판정이 끝난 dead 표지를 빨강 대신 「known losses N (근거)」 정보 줄로 낸다** — 목록은 `data/contract/known-losses.tsv`(세션 id TAB 근거, `DOCTOR_KNOWN_LOSSES` 로 덮어씀). 목록에 없는 새 dead 표지는 그대로 빨강이다. 첫 항목은 dc9c4b2f(근거 등급 claims:min:4 5회 실패, 판정 2026-10-19). 표지 파일은 건드리지 않는다.
 - **증류 사건의 `remember_status` 가 문의 거절을 `refused` 로, 전송·쓰기 고장을 `failed` 로 갈라 남긴다** — 문 쓰기 길의 `WriteOutcome` 이 `Written | Refused | Failed` 가 됐다(게이트 판단 -32602 전부·PII 차단은 Refused, dedup 확인·쓰기·예외·PII 규칙 로드 실패는 Failed). 거절 봉투만 JSON-RPC `error.data = {"outcome":"refused"}` 를 싣고(code·message 불변), 클라이언트는 그 칸을 경계에서 한 번 읽는다. 사건 종류·Outcome 은 새로 안 만들고(`refused` → `remember_requested`/`fail`), 사건 `status` 는 여전히 `failed` 라 doctor 의 resolution 실패 탐지는 거절도 그대로 센다.
 
