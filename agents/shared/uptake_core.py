@@ -800,6 +800,49 @@ def duplicate_injections(path=None, window=DUPLICATE_WINDOW_S):
     return report
 
 
+#: Doctor's double-fire alarm reads this many trailing days. The PRD verdict window is closed
+#: (decision prd-section2-window, 2026-10-12), so a window pinned to it would file every new
+#: double-fire as "old" and the check would stop catching the thing it exists for.
+RECENT_DAYS = 7
+
+
+def recent_duplicates(path=None, now=None, days=RECENT_DAYS, window=DUPLICATE_WINDOW_S):
+    """Duplicate rows among the ledger rows of the last `days` days.
+
+    The bound is applied while reading, so rows older than it are never held. `readable` False
+    (ledger missing or unopenable) and `rows` 0 both mean "cannot measure" — never a clean pass.
+    Rows without a numeric `ts` cannot be placed in the window and are left out.
+    """
+    cutoff = (time.time() if now is None else now) - days * 86400
+    report = {"readable": True, "rows": 0, "extra": 0, "sessions": 0, "days": days}
+    recent = []
+    try:
+        with open(path or ledger_path(), encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                ts = row.get("ts") if isinstance(row, dict) else None
+                if isinstance(ts, (int, float)) and ts >= cutoff:
+                    recent.append(row)
+    except OSError:
+        return dict(report, readable=False)
+    report["rows"] = len(recent)
+    sessions = set()
+    seen = {}
+    for row in sorted(recent, key=lambda r: (r.get("session_id") or "", r["ts"])):
+        key = (row.get("session_id"), tuple(row.get("prompt_words") or []))
+        previous = seen.get(key)
+        if previous is None or (row["ts"] - previous) > window:
+            seen[key] = row["ts"]
+            continue
+        report["extra"] += 1
+        sessions.add(row.get("session_id"))
+    report["sessions"] = len(sessions)
+    return report
+
+
 def _probe_main(rest):
     """Run the sensitivity probe against the newest real session in the ledger."""
     by_session = {}
@@ -1054,7 +1097,7 @@ def _consumption_main(rest, write):
     return 0
 
 
-def _main(argv):
+def _main(argv, now=None):
     rest = [a for a in argv if not a.startswith("--")]
     if "--consumption" in argv:
         return _consumption_main(rest, "--write" in argv)
@@ -1072,9 +1115,16 @@ def _main(argv):
             file=sys.stderr,
         )
         return 2
-    report = duplicate_injections(rest[0] if rest else None)
+    target = rest[0] if rest else None
+    recent = recent_duplicates(target, now=now)
+    report = duplicate_injections(target)
     print(
         "injection_ledger"
+        f" readable={int(recent['readable'])}"
+        f" recent_days={recent['days']}"
+        f" recent_duplicates={recent['extra']}"
+        f" recent_rows={recent['rows']}"
+        f" recent_sessions={recent['sessions']}"
         f" in_window_duplicates={report['extra_in']}"
         f" in_window_rows={report['total_in']}"
         f" in_window_sessions={report['sessions_in']}"
@@ -1083,7 +1133,10 @@ def _main(argv):
         f" oldest_out={report['oldest_out'] or '-'}"
         f" since={report['since']} until={report['until']}"
     )
-    if report["extra_in"]:
+    if not recent["readable"] or recent["rows"] == 0:
+        print("  cannot measure: ledger unreadable or no rows in the recent window", file=sys.stderr)
+        return 1
+    if recent["extra"]:
         print(
             "  a prompt recorded twice means the recall hook fired twice; the uptake rate looks"
             " unchanged while the sample floor counts double",

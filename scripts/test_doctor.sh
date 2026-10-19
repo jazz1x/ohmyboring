@@ -113,15 +113,13 @@ case "${1:-}" in
     # doctor asks the ledger whether one prompt was recorded twice — a hook that fires twice
     # leaves the uptake rate unchanged and doubles a pre-registered sample floor.
     if [ "${2:-}" = --duplicate-injections ]; then
-        if [ "${DOCTOR_LEDGER_DUPES:-0}" = 1 ]; then
-            echo "injection_ledger in_window_duplicates=42 in_window_rows=100 in_window_sessions=3 out_of_window_duplicates=0 out_of_window_rows=0 oldest_out=- since=2026-09-18 until=2026-10-02"
-            exit 1
-        fi
-        if [ "${DOCTOR_LEDGER_DUPES_BEFORE_WINDOW:-0}" = 1 ]; then
-            echo "injection_ledger in_window_duplicates=0 in_window_rows=100 in_window_sessions=0 out_of_window_duplicates=7 out_of_window_rows=900 oldest_out=2026-09-10T14:15:09+09:00 since=2026-09-18 until=2026-10-02"
-            exit 0
-        fi
-        echo "injection_ledger in_window_duplicates=0 in_window_rows=100 in_window_sessions=0 out_of_window_duplicates=0 out_of_window_rows=0 oldest_out=- since=2026-09-18 until=2026-10-02"
+        tail="in_window_duplicates=2 in_window_rows=98 in_window_sessions=1 out_of_window_duplicates=0 out_of_window_rows=0 oldest_out=- since=2026-09-18 until=2026-10-02"
+        case "${DOCTOR_LEDGER:-clean}" in
+            recent_dupes) echo "injection_ledger readable=1 recent_days=7 recent_duplicates=3 recent_rows=40 recent_sessions=1 $tail"; exit 1 ;;
+            unreadable) echo "injection_ledger readable=0 recent_days=7 recent_duplicates=0 recent_rows=0 recent_sessions=0 $tail"; exit 1 ;;
+            empty_week) echo "injection_ledger readable=1 recent_days=7 recent_duplicates=0 recent_rows=0 recent_sessions=0 $tail"; exit 1 ;;
+        esac
+        echo "injection_ledger readable=1 recent_days=7 recent_duplicates=0 recent_rows=40 recent_sessions=0 $tail"
         exit 0
     fi
     # doctor asks whether the uptake detector can still see a use handed to it verbatim. A zero
@@ -1135,7 +1133,7 @@ esac
   } ) || exit 1
 
 ( make_case "$TMP/ledger-dupes" yes
-  if DOCTOR_LEDGER_DUPES=1 run_strict "$TMP/ledger-dupes" "$TMP/ledger-dupes.out"; then
+  if DOCTOR_LEDGER=recent_dupes run_strict "$TMP/ledger-dupes" "$TMP/ledger-dupes.out"; then
       cat "$TMP/ledger-dupes.out"
       echo "FAIL: double-recorded injections must fail strict" >&2
       exit 1
@@ -1147,22 +1145,41 @@ esac
       cat "$TMP/ledger-dupes.out"
       echo "FAIL: the duplicate must be reported as a failure, not a warning" >&2
       exit 1
+  }
+  grep -q "3 duplicate row(s) of 40 in the last 7 days" "$TMP/ledger-dupes.out" || {
+      cat "$TMP/ledger-dupes.out"
+      echo "FAIL: the failure must carry the 7-day denominator" >&2
+      exit 1
   } ) || exit 1
 
-# The control for the case above: the same defect, dated before the window the verdict is counted
-# over. It cannot inflate that sample floor, so it must be said and not failed on — otherwise one
-# old row holds doctor red for the rest of the window and the check stops being read.
-( make_case "$TMP/ledger-dupes-old" yes
-  if ! DOCTOR_LEDGER_DUPES_BEFORE_WINDOW=1 run_strict "$TMP/ledger-dupes-old" "$TMP/ledger-dupes-old.out"; then
-      cat "$TMP/ledger-dupes-old.out"
-      echo "FAIL: duplicates older than the window must not fail strict" >&2
+# The control: the closed verdict window still holds 2/98 duplicates but the recent week is
+# clean with rows > 0. It passes, and the closed window is one informational line.
+( make_case "$TMP/ledger-closed-only" yes
+  if ! run_strict "$TMP/ledger-closed-only" "$TMP/ledger-closed-only.out"; then
+      cat "$TMP/ledger-closed-only.out"
+      echo "FAIL: closed-window duplicates must not fail strict" >&2
       exit 1
   fi
-  grep -q "! double-recorded injections before the window" "$TMP/ledger-dupes-old.out" || {
-      cat "$TMP/ledger-dupes-old.out"
-      echo "FAIL: pre-window duplicates must still be named, as a warning" >&2
+  grep -q "closed window \[2026-09-18, 2026-10-02) duplicates 2/98 — verdict closed (prd-section2-window)" "$TMP/ledger-closed-only.out" || {
+      cat "$TMP/ledger-closed-only.out"
+      echo "FAIL: the closed window must be an info line with its numbers" >&2
       exit 1
   } ) || exit 1
+
+# Cannot measure is red, never a pass: an unreadable ledger and an empty week (denominator 0).
+for mode in unreadable empty_week; do
+  ( make_case "$TMP/ledger-$mode" yes
+    if DOCTOR_LEDGER=$mode run_strict "$TMP/ledger-$mode" "$TMP/ledger-$mode.out"; then
+        cat "$TMP/ledger-$mode.out"
+        echo "FAIL: $mode must fail strict" >&2
+        exit 1
+    fi
+    grep -q "✗ injection ledger CANNOT BE MEASURED" "$TMP/ledger-$mode.out" || {
+        cat "$TMP/ledger-$mode.out"
+        echo "FAIL: $mode must be red, not a skipped warning" >&2
+        exit 1
+    } ) || exit 1
+done
 
 ( make_case "$TMP/spool-clean" yes
   if ! run_strict "$TMP/spool-clean" "$TMP/spool-clean.out"; then

@@ -760,31 +760,42 @@ fi
 ledger_probe="$BORING_HOME/agents/shared/uptake_core.py"
 if [ -f "$ledger_probe" ] && [ "${BORING_SKIP_LEDGER_PROBE:-0}" != 1 ]; then
     dup_split="$(python3 "$ledger_probe" --duplicate-injections 2>/dev/null || true)"
+    # Red is the rolling recent week. The PRD verdict window is closed (prd-section2-window,
+    # 2026-10-12), so it is reported as information only.
+    readable=0
+    rec_days=7
+    rec_dup=0
+    rec_rows=0
     dup_in=0
-    dup_out=0
     total_in=0
-    oldest_out=""
     since_day=""
     until_day=""
     for kv in $dup_split; do
         case "$kv" in
+            readable=*) readable="${kv#readable=}" ;;
+            recent_days=*) rec_days="${kv#recent_days=}" ;;
+            recent_duplicates=*) rec_dup="${kv#recent_duplicates=}" ;;
+            recent_rows=*) rec_rows="${kv#recent_rows=}" ;;
             in_window_duplicates=*) dup_in="${kv#in_window_duplicates=}" ;;
-            out_of_window_duplicates=*) dup_out="${kv#out_of_window_duplicates=}" ;;
             in_window_rows=*) total_in="${kv#in_window_rows=}" ;;
-            oldest_out=*) oldest_out="${kv#oldest_out=}" ;;
             since=*) since_day="${kv#since=}" ;;
             until=*) until_day="${kv#until=}" ;;
         esac
     done
-    if [ -z "$dup_split" ]; then
-        warn "injection-ledger duplicate split unreadable — the double-recording check was skipped, not passed"
-    elif [ "$dup_in" -gt 0 ]; then
-        bad "DOUBLE-RECORDED INJECTIONS — $dup_in duplicate row(s) inside the window [$since_day, $until_day) across $total_in row(s). One prompt logged twice means the recall hook fired twice; the uptake rate hides it while the sample floor counts double."
+    if [ -z "$dup_split" ] || [ "$readable" != 1 ]; then
+        bad "injection ledger CANNOT BE MEASURED — unreadable, so double-recording over the last $rec_days days is unknown (not zero)"
         failed_hooks=1
-    elif [ "$dup_out" -gt 0 ]; then
-        warn "double-recorded injections before the window — $dup_out duplicate row(s) older than $since_day, oldest $oldest_out. The open verdict's sample floor is counted from $since_day, so these cannot inflate it; inside [$since_day, $until_day) there are $dup_in across $total_in row(s)"
+    elif [ "$rec_rows" -eq 0 ]; then
+        bad "injection ledger CANNOT BE MEASURED — 0 rows in the last $rec_days days, so no denominator for the double-recording check (not a pass)"
+        failed_hooks=1
+    elif [ "$rec_dup" -gt 0 ]; then
+        bad "DOUBLE-RECORDED INJECTIONS — $rec_dup duplicate row(s) of $rec_rows in the last $rec_days days. One prompt logged twice means the recall hook fired twice; the uptake rate hides it while the sample floor counts double."
+        failed_hooks=1
     else
-        ok "injection ledger has no double-recorded prompts in the window ($total_in rows in [$since_day, $until_day))"
+        ok "injection ledger has no double-recorded prompts in the last $rec_days days ($rec_dup/$rec_rows rows)"
+    fi
+    if [ -n "$dup_split" ] && [ "$readable" = 1 ]; then
+        echo "  closed window [$since_day, $until_day) duplicates $dup_in/$total_in — verdict closed (prd-section2-window)"
     fi
 fi
 

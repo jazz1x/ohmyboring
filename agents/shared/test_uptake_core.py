@@ -366,10 +366,10 @@ def _write_rows(tmp, rows):
     return target
 
 
-def _run_duplicate_probe(path):
+def _run_duplicate_probe(path, now=None):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        code = uptake_core._main(["--duplicate-injections", path])
+        code = uptake_core._main(["--duplicate-injections", path], now=now)
     return code, buf.getvalue()
 
 
@@ -490,20 +490,58 @@ def test_a_row_with_no_usable_timestamp_is_still_counted():
         assert report["extra_out"] == 0
 
 
-def test_the_probe_exits_one_only_for_in_window_duplicates():
-    with tempfile.TemporaryDirectory() as d:
-        base = _window_open()
-        stale = _stamped_record("s1", "old news", base - timedelta(days=7))
-        stale_twin = dict(stale, ts=(base - timedelta(days=7) + timedelta(seconds=0.25)).timestamp())
-        old_code, old_out = _run_duplicate_probe(_write_rows(d, [stale, stale_twin]))
-        live = _stamped_record("s1", "live wire", base + timedelta(minutes=5))
-        live_twin = dict(live, ts=(base + timedelta(minutes=5, seconds=0.25)).timestamp())
-        new_code, new_out = _run_duplicate_probe(_write_rows(d, [live, live_twin]))
+#: Fixed clock for the rolling-window tests: well after the closed verdict window.
+NOW = datetime(2026, 10, 20, 12, 0, tzinfo=verdict_core.WINDOW_TZ)
 
-        assert old_code == 0, "out-of-window duplicates cannot fail the gate"
-        assert "out_of_window_duplicates=1" in old_out
-        assert new_code == 1, "only in-window duplicates fail the gate"
-        assert "in_window_duplicates=1" in new_out
+
+def _twin(row):
+    return dict(row, ts=row["ts"] + 0.25)
+
+
+def test_a_duplicate_in_the_last_seven_days_is_red():
+    with tempfile.TemporaryDirectory() as d:
+        first = _stamped_record("s1", "fresh", NOW - timedelta(days=2))
+        report = uptake_core.recent_duplicates(_write_rows(d, [first, _twin(first)]), now=NOW.timestamp())
+        code, out = _run_duplicate_probe(_write_rows(d, [first, _twin(first)]), now=NOW.timestamp())
+
+        assert (report["readable"], report["rows"], report["extra"]) == (True, 2, 1)
+        assert code == 1
+        assert "recent_duplicates=1 recent_rows=2" in out
+
+
+def test_closed_window_duplicates_do_not_fail_when_the_recent_week_is_clean():
+    with tempfile.TemporaryDirectory() as d:
+        old = _stamped_record("s1", "closed", _window_open() + timedelta(minutes=10))
+        live = _stamped_record("s2", "clean", NOW - timedelta(days=1))
+        rows = [old, _twin(old), live]
+        report = uptake_core.recent_duplicates(_write_rows(d, rows), now=NOW.timestamp())
+        code, out = _run_duplicate_probe(_write_rows(d, rows), now=NOW.timestamp())
+
+        assert (report["readable"], report["rows"], report["extra"]) == (True, 1, 0)
+        assert code == 0
+        assert "in_window_duplicates=1 in_window_rows=2" in out, "the closed-window numbers stay"
+
+
+def test_an_unreadable_ledger_cannot_be_measured():
+    code, out = _run_duplicate_probe("/nonexistent/injections.jsonl", now=NOW.timestamp())
+
+    assert (
+        uptake_core.recent_duplicates("/nonexistent/injections.jsonl", now=NOW.timestamp())["readable"]
+        is False
+    )
+    assert code == 1
+    assert "readable=0" in out
+
+
+def test_a_recent_week_with_no_rows_cannot_be_measured():
+    with tempfile.TemporaryDirectory() as d:
+        stale = _stamped_record("s1", "old", NOW - timedelta(days=30))
+        path = _write_rows(d, [stale, _twin(stale)])
+        code, out = _run_duplicate_probe(path, now=NOW.timestamp())
+
+        assert uptake_core.recent_duplicates(path, now=NOW.timestamp())["rows"] == 0
+        assert code == 1, "a zero denominator is not a pass"
+        assert "recent_rows=0" in out
 
 
 #: The longest session span measured in the live ledger on 2026-09-02 was 177h (7.4 days), with a
