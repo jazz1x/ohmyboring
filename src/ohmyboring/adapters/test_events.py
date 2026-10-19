@@ -493,6 +493,42 @@ class EvalGateStateTests(unittest.TestCase):
         state = self._state(self._gh(workflow="failure", conclusion="success"))
         self.assertEqual(state, event_log.GateFresh(1))
 
+    def _gh_runs(self, runs):
+        """runs: newest first, [(run_id, eval-gate job conclusion, age in days)]."""
+        by_id = {
+            rid: {
+                "jobs": [
+                    {
+                        "name": "eval-gate",
+                        "conclusion": conclusion,
+                        "completed_at": (self.NOW - timedelta(days=age)).isoformat(),
+                    }
+                ]
+            }
+            for rid, conclusion, age in runs
+        }
+
+        def gh(args):
+            if "/jobs" not in args[1]:
+                return 0, json.dumps({"workflow_runs": [{"id": rid} for rid, _, _ in runs]})
+            rid = int(args[1].split("/runs/")[1].split("/")[0])
+            return 0, json.dumps(by_id[rid])
+
+        return gh
+
+    def test_cancelled_latest_run_is_skipped_for_older_success(self):
+        state = self._state(self._gh_runs([(2, "cancelled", 0), (1, "success", 1)]))
+        self.assertEqual(state, event_log.GateFresh(1))
+
+    def test_latest_failure_is_still_red_after_skipping_cancelled(self):
+        state = self._state(self._gh_runs([(3, "cancelled", 0), (2, "failure", 0), (1, "success", 1)]))
+        self.assertEqual(state, event_log.GateFailed("failure", 0))
+
+    def test_every_run_cancelled_is_unmeasurable(self):
+        state = self._state(self._gh_runs([(2, "cancelled", 0), (1, "skipped", 1)]))
+        self.assertIsInstance(state, event_log.GateUnmeasurable)
+        self.assertFalse(event_log.gate_line(state)[0])
+
     def test_missing_job_is_unmeasurable(self):
         def gh(args):
             if "/jobs" in args[1]:

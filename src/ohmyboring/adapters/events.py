@@ -324,13 +324,12 @@ def recent_events(
 #: that passes (`eval_graphrag_gate` emitted twenty `ok` rows, vanished five weeks, and its stale
 #: rows were later read as proof the graph was covered). The local event log only sees a
 #: hand-run `make eval-gate`, so freshness is read from the newest finished ci.yml run on main
-#: and, inside it, the job named `eval-gate` — not the workflow conclusion, which other jobs fail.
+#: (page of 20) whose job named `eval-gate` succeeded or failed — not the workflow conclusion,
+#: which other jobs fail, and not a run cancelled by a newer push.
 GATE_STALE_DAYS = int(os.environ.get("BORING_GATE_STALE_DAYS") or "7")
 GATE_WORKFLOW = "ci.yml"
 GATE_JOB = "eval-gate"
-_GH_RUNS = (
-    f"repos/{{owner}}/{{repo}}/actions/workflows/{GATE_WORKFLOW}/runs?branch=main&status=completed&per_page=1"
-)
+_GH_RUNS = f"repos/{{owner}}/{{repo}}/actions/workflows/{GATE_WORKFLOW}/runs?branch=main&status=completed&per_page=20"
 
 
 @dataclass(frozen=True)
@@ -378,36 +377,44 @@ def _gh_json(gh: GhCall, args: list[str]) -> tuple[Any, str | None]:
         return None, "gh output is not JSON"
 
 
-def _parse_gate_job(jobs: Any, now: datetime, limit: int) -> GateState:
+#: A job that ended any other way (cancelled by a newer push's concurrency group, skipped) is a
+#: superseded run, not a gate result — the walk passes over it to an older run.
+_DECISIVE = ("success", "failure")
+
+
+def _parse_gate_job(jobs: Any, now: datetime, limit: int) -> GateState | None:
+    """None = this run says nothing about the gate; keep walking."""
     listed = jobs.get("jobs") if isinstance(jobs, dict) else None
     rows = [j for j in listed or [] if isinstance(j, dict) and j.get("name") == GATE_JOB]
-    if not rows:
-        return GateUnmeasurable(f"no job named {GATE_JOB} in the latest run")
+    if not rows or str(rows[0].get("conclusion") or "") not in _DECISIVE:
+        return None
     done = _parse_ts(str(rows[0].get("completed_at") or ""))
     if done is None:
         return GateUnmeasurable(f"job {GATE_JOB} has no completed_at")
     days = (now - done).days
-    conclusion = str(rows[0].get("conclusion") or "")
-    if conclusion != "success":
-        return GateFailed(conclusion or "none", days)
+    if rows[0]["conclusion"] != "success":
+        return GateFailed(rows[0]["conclusion"], days)
     return GateStale(days) if days > limit else GateFresh(days)
 
 
 def eval_gate_state(
     gh: GhCall = _run_gh, now: datetime | None = None, max_days: int | None = None
 ) -> GateState:
-    """Newest finished ci.yml run on main -> its `eval-gate` job -> one GateState."""
+    """Newest finished ci.yml runs on main -> first whose `eval-gate` job succeeded or failed."""
     limit = GATE_STALE_DAYS if max_days is None else max_days
     runs, err = _gh_json(gh, ["api", _GH_RUNS])
     if err is not None:
         return GateUnmeasurable(err)
     found = runs.get("workflow_runs") if isinstance(runs, dict) else None
-    if not found or not isinstance(found[0], dict) or not found[0].get("id"):
-        return GateUnmeasurable("no finished ci.yml run on main")
-    jobs, err = _gh_json(gh, ["api", f"repos/{{owner}}/{{repo}}/actions/runs/{found[0]['id']}/jobs"])
-    if err is not None:
-        return GateUnmeasurable(err)
-    return _parse_gate_job(jobs, now or datetime.now(UTC), limit)
+    ids = [r["id"] for r in found or [] if isinstance(r, dict) and r.get("id")]
+    for run_id in ids:
+        jobs, err = _gh_json(gh, ["api", f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/jobs"])
+        if err is not None:
+            return GateUnmeasurable(err)
+        state = _parse_gate_job(jobs, now or datetime.now(UTC), limit)
+        if state is not None:
+            return state
+    return GateUnmeasurable(f"no run of the last {len(ids)} has a finished {GATE_JOB} job")
 
 
 def gate_line(state: GateState) -> tuple[bool, str]:
