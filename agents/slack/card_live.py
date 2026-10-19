@@ -29,6 +29,7 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+import card_advice_write
 import card_repair_judge
 from card_effects import (  # noqa: F401
     ENGINE_TIMEOUT,
@@ -112,6 +113,15 @@ def _live_events(event_name: str, since_hours: int) -> list[dict[str, Any]]:
             "a clipped judged-history window cannot ground 판정 suppression"
         )
     return payload["entries"]
+
+
+def _live_advice_written() -> list[Proposal]:
+    """Today's advice (KST) as the advice step stored it — the card's whole advice read. An
+    unreadable log or a malformed row raises (ValueError / OSError); nothing stored is [] and
+    the card draws its advice lane empty."""
+    return card_advice_write.written_proposals(
+        _live_events(card_advice_write.EVENT, card_advice_write.WINDOW_HOURS), card_advice_write.today_kst()
+    )
 
 
 def _live_posted_proposals() -> list[Proposal]:

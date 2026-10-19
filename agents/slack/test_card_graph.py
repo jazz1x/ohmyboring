@@ -19,6 +19,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -28,6 +29,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 import card  # noqa: E402
+import card_advice_write as aw  # noqa: E402
 import card_live  # noqa: E402
 import card_types as cc  # noqa: E402
 import card_verdicts  # noqa: E402
@@ -211,6 +213,48 @@ def _fetch(path: str, project: str = "") -> dict:
     return FETCH_DATA[path]
 
 
+def _echo_revision(prompt: str) -> str:
+    """A clean rewrite answer: the two sentences the revise prompt carries, with every
+    identifier-shaped run (names, paths, wiki numbers) said as 「이것」."""
+    lines = {line.split(": ", 1)[0]: line.split(": ", 1)[1] for line in prompt.splitlines() if ": " in line}
+    plain = {key: re.sub(r"[A-Za-z0-9_./\-]+", "이것", lines[key]) for key in ("병목", "오늘 할 것")}
+    return json.dumps({"bottleneck": plain["병목"], "advice": plain["오늘 할 것"]}, ensure_ascii=False)
+
+
+class TwoStep:
+    """What the two crons do in a morning: the advice step (07:xx) writes, the card (08:00)
+    reads. `collabs.propose` serves the advice step only — the card graph is built on a
+    propose that must never be called, so a card that reached for the model would fail here
+    in every test that goes through this helper."""
+
+    def __init__(self, collabs: "card.Collaborators"):
+        self.events: list[tuple[str, dict]] = []
+
+        def never(prompt: str) -> str:
+            raise AssertionError(f"the card called the model: {prompt[:60]!r}")
+
+        written = collabs._replace(record=lambda name, fields: self.events.append((name, fields)))
+        self.advice_graph = card.build_advice_graph(written)
+        self.card_graph = card.build_graph(collabs._replace(propose=never, advice_written=self.read))
+
+    def read(self) -> list[cc.Proposal]:
+        entries = [{"attributes": fields} for name, fields in self.events if name == aw.EVENT]
+        return aw.written_proposals(entries, aw.today_kst())
+
+    def get_graph(self):
+        return self.card_graph.get_graph()
+
+    def invoke(self, state, config=None):
+        ahead = self.advice_graph.invoke({}, config)
+        out = self.card_graph.invoke(state, config)
+        keep = ("advise_stats", "per_project_candidates", "suppressed_count")
+        return {**out, **{key: ahead[key] for key in keep if key in ahead}}
+
+
+def two_step(collabs: "card.Collaborators") -> TwoStep:
+    return TwoStep(collabs)
+
+
 class Stubs:
     """The stub collaborators, recording every call. `failures` maps a subject to the
     Unresolved reason the door would have returned (5xx, unreachable). `responses` is the
@@ -254,6 +298,7 @@ class Stubs:
         self.merged_yesterday_rows = merged_yesterday_rows
         self.proposed_items = proposed_items if proposed_items is not None else []
         self.propose_calls: list[str] = []
+        self.revise_calls: list[str] = []
         self.search_calls: list[str] = []
         self.resolve_calls: list[tuple[str, str]] = []
         self.past_verdicts_calls: list[int] = []
@@ -268,6 +313,11 @@ class Stubs:
         return NOTE_TEXTS.get(note)
 
     def propose(self, prompt: str) -> str:
+        if aw.is_revise_prompt(prompt):
+            # The pre-card rewrite pass: hand the two sentences back unchanged — a clean,
+            # fact-keeping rewrite — so the tests below read the same text they always did.
+            self.revise_calls.append(prompt)
+            return _echo_revision(prompt)
         self.propose_calls.append(prompt)
         idx = len(self.propose_calls) - 1
         return self.responses[idx] if idx < len(self.responses) else NOT_WORTH_JSON
@@ -340,6 +390,7 @@ class GraphTests(unittest.TestCase):
             search=stubs.search,
             read_note=stubs.read_note,
             propose=stubs.propose,
+            advice_written=lambda: [],
             send=self._send,
             handover=self._handover,
             resolve=stubs.resolve,
@@ -355,7 +406,7 @@ class GraphTests(unittest.TestCase):
             repair_judgments=stubs.repair_judgments,
             score=stubs.score,
         )
-        return card.build_graph(collabs)
+        return two_step(collabs)
 
     def _send(self, blocks):
         self.sends.append(blocks)
@@ -375,7 +426,7 @@ class GraphTests(unittest.TestCase):
                 "read_registers",
                 "cross_check",
                 "read_history",
-                "advise",
+                "read_advice",
                 "resolve",
                 "post_card",
             },
@@ -607,6 +658,7 @@ class GraphTests(unittest.TestCase):
             search=stubs.search,
             read_note=stubs.read_note,
             propose=stubs.propose,
+            advice_written=lambda: [],
             send=self._send,
             handover=self._handover,
             resolve=stubs.resolve,
@@ -616,7 +668,7 @@ class GraphTests(unittest.TestCase):
             past_verdicts=stubs.past_verdicts,
             lang="ko",
         )
-        graph = card.build_graph(collabs)
+        graph = two_step(collabs)
         with self.assertRaises(OSError):
             graph.invoke({}, {"configurable": {"thread_id": "test-card-dead"}})
         self.assertEqual(self.sends, [])
@@ -633,6 +685,7 @@ class GraphTests(unittest.TestCase):
             search=stubs.search,
             read_note=stubs.read_note,
             propose=stubs.propose,
+            advice_written=lambda: [],
             send=dead_slack,
             handover=self._handover,
             resolve=stubs.resolve,
@@ -642,7 +695,7 @@ class GraphTests(unittest.TestCase):
             past_verdicts=stubs.past_verdicts,
             lang="ko",
         )
-        graph = card.build_graph(collabs)
+        graph = two_step(collabs)
         with self.assertRaises(OSError):
             graph.invoke({}, {"configurable": {"thread_id": "test-card-nosend"}})
         self.assertEqual(stubs.records, [])  # the card never went out — no confirmation log
@@ -719,6 +772,8 @@ class GraphTests(unittest.TestCase):
         stubs = Stubs(past_verdict_pairs=past)
 
         def propose(prompt: str) -> str:
+            if aw.is_revise_prompt(prompt):
+                return _echo_revision(prompt)
             stubs.propose_calls.append(prompt)
             return _propose_by_subject(prompt)
 
@@ -735,7 +790,8 @@ class GraphTests(unittest.TestCase):
         self.assertIn("wiki-0536", stubs.propose_calls[0])
         self.assertEqual(out["advise_stats"].skipped_resting, 1)
         self.assertEqual(out["suppressed_count"], 0)
-        self.assertEqual(stubs.past_verdicts_calls, [card_verdicts.SUPPRESS_WINDOW_HOURS])
+        # one read per cron run: the advice step's, then the card's own
+        self.assertEqual(stubs.past_verdicts_calls, [card_verdicts.SUPPRESS_WINDOW_HOURS] * 2)
 
     def test_past_verdicts_failure_stops_the_run_before_any_send(self):
         # AC5: a card that cannot read its own judged history must not ship — mirrors
@@ -751,6 +807,7 @@ class GraphTests(unittest.TestCase):
             search=stubs.search,
             read_note=stubs.read_note,
             propose=stubs.propose,
+            advice_written=lambda: [],
             send=self._send,
             handover=self._handover,
             resolve=stubs.resolve,
@@ -760,7 +817,7 @@ class GraphTests(unittest.TestCase):
             past_verdicts=dead_events,
             lang="ko",
         )
-        graph = card.build_graph(collabs)
+        graph = two_step(collabs)
         with self.assertRaises(OSError):
             graph.invoke({}, {"configurable": {"thread_id": "test-card-dead-events"}})
         self.assertEqual(self.sends, [])
@@ -1064,6 +1121,7 @@ class GraphTests(unittest.TestCase):
             search=dead_stubs.search,
             read_note=dead_stubs.read_note,
             propose=dead_stubs.propose,
+            advice_written=lambda: [],
             send=self._send,
             handover=self._handover,
             resolve=dead_stubs.resolve,
@@ -1075,7 +1133,7 @@ class GraphTests(unittest.TestCase):
             repairs=dead_repairs,
             merged_yesterday=dead_stubs.merged_yesterday,
         )
-        graph = card.build_graph(collabs)
+        graph = two_step(collabs)
         sends_before = len(self.sends)
         with self.assertRaises(OSError):
             graph.invoke({}, {"configurable": {"thread_id": "test-read-repairs-dead"}})
@@ -1104,6 +1162,7 @@ class RestingNoteSkipTests(unittest.TestCase):
             search=stubs.search,
             read_note=stubs.read_note,
             propose=stubs.propose,
+            advice_written=lambda: [],
             send=lambda blocks: (self.sends.append(blocks), cc.PostedCard(channel=CARD_CH, ts=CARD_TS))[1],
             handover=lambda session, at, paths: {},
             resolve=stubs.resolve,
@@ -1116,12 +1175,14 @@ class RestingNoteSkipTests(unittest.TestCase):
             merged_yesterday=stubs.merged_yesterday,
             proposed=stubs.proposed,
         )
-        return card.build_graph(collabs)
+        return two_step(collabs)
 
     def _stubs(self, **kwargs) -> SkipStubs:
         stubs = SkipStubs(resolutions=SKIP_RESOLUTIONS, approved=[], **kwargs)
 
         def propose(prompt: str) -> str:
+            if aw.is_revise_prompt(prompt):
+                return _echo_revision(prompt)
             stubs.propose_calls.append(prompt)
             return _approve_everything(prompt)
 
@@ -1156,7 +1217,8 @@ class RestingNoteSkipTests(unittest.TestCase):
         self.assertIn("gamma_subj", stubs.propose_calls[0])
         self.assertEqual([p.note for p in out["proposals"]], ["/vault/wiki/note-gamma.md"])
         self.assertEqual(out["advise_stats"].skipped_resting, 2)
-        self.assertEqual(stubs.past_verdicts_calls, [card_verdicts.SUPPRESS_WINDOW_HOURS])
+        # one read per cron run: the advice step's, then the card's own
+        self.assertEqual(stubs.past_verdicts_calls, [card_verdicts.SUPPRESS_WINDOW_HOURS] * 2)
 
     def test_a_deferred_note_is_not_skipped(self):
         # 미뤄 판정이 있는 노트는 쉬지 않는다 — alpha 는 그대로 호출된다.
@@ -1286,6 +1348,9 @@ class SufficiencyStubs(Stubs):
         return self.note_texts.get(note)
 
     def propose(self, prompt: str) -> str:
+        if aw.is_revise_prompt(prompt):
+            self.revise_calls.append(prompt)
+            return _echo_revision(prompt)
         self.propose_calls.append(prompt)
         if "wiki-0697" in prompt:
             return _advice_json(
@@ -1313,6 +1378,7 @@ class SufficiencyTests(unittest.TestCase):
             search=stubs.search,
             read_note=stubs.read_note,
             propose=stubs.propose,
+            advice_written=lambda: [],
             send=lambda blocks: (self.sends.append(blocks), cc.PostedCard(channel=CARD_CH, ts=CARD_TS))[1],
             handover=lambda session, at, paths: {},
             resolve=stubs.resolve,
@@ -1325,7 +1391,7 @@ class SufficiencyTests(unittest.TestCase):
             merged_yesterday=stubs.merged_yesterday,
             proposed=stubs.proposed,
         )
-        return card.build_graph(collabs)
+        return two_step(collabs)
 
     def test_a_recurrence_candidate_is_grounded_on_its_own_note(self):
         # The path search would answer unrelated notes (PATH_SEARCH_HITS). The card skips
@@ -1414,6 +1480,9 @@ class TopicSufficiencyStubs(SufficiencyStubs):
         return [dict(h) for h in TOPIC_OTHER_HITS]
 
     def propose(self, prompt: str) -> str:
+        if aw.is_revise_prompt(prompt):
+            self.revise_calls.append(prompt)
+            return _echo_revision(prompt)
         self.propose_calls.append(prompt)
         if TOPIC_SUBJECT in prompt:
             return _advice_json(
@@ -1440,6 +1509,7 @@ class OwnNoteFirstTests(unittest.TestCase):
             search=stubs.search,
             read_note=stubs.read_note,
             propose=stubs.propose,
+            advice_written=lambda: [],
             send=lambda blocks: (self.sends.append(blocks), cc.PostedCard(channel=CARD_CH, ts=CARD_TS))[1],
             handover=lambda session, at, paths: {},
             resolve=stubs.resolve,
@@ -1452,7 +1522,7 @@ class OwnNoteFirstTests(unittest.TestCase):
             merged_yesterday=stubs.merged_yesterday,
             proposed=stubs.proposed,
         )
-        return card.build_graph(collabs)
+        return two_step(collabs)
 
     def test_a_topic_candidates_refetched_own_note_rides_first_past_three_other_hits(self):
         stubs = TopicSufficiencyStubs(TOPIC_NOTE_TEXTS, resolutions={TOPIC_SUBJECT: TOPIC_RISK_NOTE})
@@ -2714,6 +2784,134 @@ class ScoreAndSampleTests(unittest.TestCase):
             out = card_live._live_score([], self.DAY)
         self.assertEqual(out, cc.ScoreReading(score=cc.Scored(agreed=0, compared=0)))
         self.assertIn("확인 표본을 못 뽑았다", err.getvalue())
+
+
+class AdviceAheadTests(unittest.TestCase):
+    """The advice moved out of the 08:00 run: a step before the card writes it, the card only
+    reads what was stored."""
+
+    def setUp(self):
+        self.sends: list = []
+        self.handovers: list = []
+
+    def _collabs(self, stubs: Stubs, propose=None, advice_written=None) -> "card.Collaborators":
+        def send(blocks):
+            self.sends.append(blocks)
+            return cc.PostedCard(channel=CARD_CH, ts=CARD_TS)
+
+        def handover(session, at, paths):
+            self.handovers.append((session, at, paths))
+            return {}
+
+        return card.Collaborators(
+            fetch=_fetch,
+            search=stubs.search,
+            read_note=stubs.read_note,
+            propose=propose or stubs.propose,
+            advice_written=advice_written or (lambda: []),
+            send=send,
+            handover=handover,
+            resolve=stubs.resolve,
+            approved=stubs.approved,
+            record=stubs.record,
+            active_projects=stubs.active_projects,
+            past_verdicts=stubs.past_verdicts,
+            lang="ko",
+            repairs=stubs.repairs,
+            merged_yesterday=stubs.merged_yesterday,
+            proposed=stubs.proposed,
+            held_repairs=stubs.held_repairs,
+            repair_judgments=stubs.repair_judgments,
+            score=stubs.score,
+        )
+
+    def _stored(self, subject: str, note: str) -> cc.Proposal:
+        return cc.Proposal(
+            subject=subject,
+            note=note,
+            project="",
+            register="risks",
+            bottleneck=f"{subject} 병목 한 문장 열자 이상",
+            advice=f"{subject} 오늘 할 일 열자 이상",
+            evidence=[cc.Evidence(note=note, quote=NOTE_TEXTS[note].splitlines()[1], line=2)],
+        )
+
+    def _boom(self, prompt: str) -> str:
+        raise AssertionError(f"the 08:00 card called the model: {prompt[:60]!r}")
+
+    def test_the_card_run_makes_zero_model_calls(self):
+        stored = [self._stored("f64_risk", "/vault/wiki/wiki-0900.md")]
+        collabs = self._collabs(Stubs(), propose=self._boom, advice_written=lambda: stored)
+        out = card.build_graph(collabs).invoke({}, {"configurable": {"thread_id": "t"}})
+        self.assertEqual(len(self.sends), 1)
+        self.assertEqual([p.subject for p in out["proposals"]], ["f64_risk"])
+        self.assertIn("f64_risk 병목", _blocks_text(self.sends[0]))
+
+    def test_no_stored_advice_leaves_the_advice_section_empty_instead_of_writing_it(self):
+        stubs = Stubs()
+        collabs = self._collabs(stubs, propose=self._boom, advice_written=lambda: [])
+        out = card.build_graph(collabs).invoke({}, {"configurable": {"thread_id": "t"}})
+        self.assertEqual(out["proposals"], [])
+        self.assertEqual(len(self.sends), 1)
+        self.assertEqual(self.sends[0][0]["text"]["text"], "☀️ 오늘 제안 0")
+        self.assertEqual(stubs.search_calls, [])
+
+    def test_the_advice_step_stores_one_event_per_proposal_and_posts_nothing(self):
+        stubs = Stubs()
+        events: list[tuple[str, dict]] = []
+        collabs = self._collabs(stubs)._replace(record=lambda name, fields: events.append((name, fields)))
+        card.build_advice_graph(collabs).invoke({}, {"configurable": {"thread_id": "t"}})
+        written = [fields for name, fields in events if name == aw.EVENT]
+        self.assertEqual([f["rank"] for f in written], [0, 1, 2])
+        self.assertEqual({f["revise"] for f in written}, {"rewritten"})
+        self.assertEqual({f["day"] for f in written}, {aw.today_kst()})
+        self.assertEqual(len(stubs.revise_calls), 3)
+        self.assertEqual(len(stubs.propose_calls), 3)
+        self.assertEqual(self.sends, [])
+        self.assertEqual(self.handovers, [])
+        self.assertEqual([name for name, _ in events if name != aw.EVENT], [])
+
+    def test_a_still_flagged_rewrite_is_stored_as_the_original_and_marked(self):
+        stubs = Stubs()
+
+        def flagged_rewrite(prompt: str) -> str:
+            if aw.is_revise_prompt(prompt):
+                return json.dumps(
+                    {
+                        "bottleneck": "advise_stats 가 비어 있다는 걸 알았다",
+                        "advice": "오늘 할 일은 열자 이상이다",
+                    },
+                    ensure_ascii=False,
+                )
+            return stubs.propose(prompt)
+
+        events: list[tuple[str, dict]] = []
+        collabs = self._collabs(stubs, propose=flagged_rewrite)._replace(
+            record=lambda name, fields: events.append((name, fields))
+        )
+        card.build_advice_graph(collabs).invoke({}, {"configurable": {"thread_id": "t"}})
+        written = [fields for name, fields in events if name == aw.EVENT]
+        self.assertEqual({f["revise"] for f in written}, {"kept_original"})
+        self.assertEqual(written[0]["bottleneck"], "f64_risk 병목 한 문장 열자 이상")
+
+    def test_the_card_reads_what_the_advice_step_stored_through_the_live_reader(self):
+        stored = aw.event_fields(
+            self._stored("f64_risk", "/vault/wiki/wiki-0900.md"),
+            day=aw.today_kst(),
+            run="r1",
+            rank=0,
+            revise="rewritten",
+        )
+        asked: list[tuple[str, int]] = []
+
+        def fake_events(name, since_hours):
+            asked.append((name, since_hours))
+            return [{"observed_at": "2026-10-19T00:00:00Z", "attributes": stored}]
+
+        with mock.patch.object(card_live, "_live_events", side_effect=fake_events):
+            got = card_live._live_advice_written()
+        self.assertEqual([p.subject for p in got], ["f64_risk"])
+        self.assertEqual(asked, [(aw.EVENT, aw.WINDOW_HOURS)])
 
 
 if __name__ == "__main__":

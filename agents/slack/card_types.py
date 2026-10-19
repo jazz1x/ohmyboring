@@ -68,6 +68,10 @@ REPAIR_JUDGE: str = "agent:repair-judge"
 #: not read. v1 (2026-10-03) asked "same spelling?" and called 18/20 same_name, next step included.
 REPAIR_JUDGE_PROMPT_VERSION: int = 2
 
+#: Bumped whenever the advice step's question or rewrite line changes; advice written under
+#: another version is not read by the card.
+ADVICE_WRITTEN_PROMPT_VERSION: int = 1
+
 #: card_i18n.STRINGS keys this file's display-building functions may render.
 DISPLAY_LANGS: tuple[str, ...] = ("en", "ko", "ja")
 

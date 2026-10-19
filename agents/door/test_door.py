@@ -2601,6 +2601,28 @@ class RunCardRouteTests(unittest.TestCase):
             "the repair-judge route must execute the judge, not the morning card",
         )
 
+    def test_the_advice_write_route_runs_the_advice_program(self):
+        """POST /run/advice-write — the pre-card advice step runs as its own subprocess, not
+        inside the morning card (whose run must make no model call) and not as the judge."""
+        calls = []
+
+        def fake_run(script, timeout_s):
+            calls.append(script)
+            return subprocess.CompletedProcess(
+                ["x"], 0, stdout="[advice-write] written=2 rewritten=2\n", stderr=""
+            )
+
+        with mock.patch.object(door, "_run_card_subprocess", fake_run):
+            status, body, _ = _req(self.door_port, "POST", "/run/advice-write")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["ok"], True)
+        self.assertIn("written=2", payload["tail"])
+        self.assertTrue(
+            str(calls[0]).endswith(os.path.join("agents", "slack", "card_advice_write.py")),
+            "the advice-write route must execute the advice step, not the morning card",
+        )
+
     def test_a_nonzero_exit_is_ok_false_with_the_code_and_tail(self):
         """The mutation this kills: the route folding a failed card into ok:true — the exit
         code and the tool's own refusal line must reach the caller verbatim."""
