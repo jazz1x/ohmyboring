@@ -1,6 +1,5 @@
-# ohmyboring pre-commit — 커밋 전 fast 게이트(~수초). CI 의 앞단 방어.
+# ohmyboring pre-commit — 커밋 전 게이트. 린트(fmt·clippy·ruff)와 바뀐 시험 파일만. CI 는 시험을 안 돌린다.
 # 설치: pre-commit install   (요건: pre-commit, cargo+clippy+rustfmt)
-# clippy/fmt/test = 구조 게이트(== scripts/guard.sh == CI rust-gate). cargo-deny(공급망)는 무거워 CI 전용.
 default_install_hook_types: [pre-commit]
 default_stages: [pre-commit]
 fail_fast: true
@@ -51,12 +50,13 @@ repos:
         pass_filenames: false
         files: \.(rs|toml)$
 
-      - id: cargo-test
-        name: cargo test (drudge, stack-free)
-        entry: cargo test --quiet --manifest-path drudge/Cargo.toml
+      # 시험은 바뀐 시험 파일만 돈다. 전체 묶음은 어디서도 돌리지 않는다 (오너 10-19).
+      - id: changed-tests
+        name: "바뀐 시험 파일만 (test_*.py · scripts/test_*.sh)"
+        # 커밋 중 git 이 넘기는 GIT_INDEX_FILE 이 시험 안의 임시 저장소 git 을 본 저장소로 끌고 간다.
+        entry: env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE sh -c 'for f; do case "$f" in *.py) python3 "$f" ;; *.sh) sh "$f" ;; esac || exit 1; done' --
         language: system
-        pass_filenames: false
-        files: \.rs$
+        files: (^|/)test_[^/]*\.(py|sh)$
 
       - id: py-compile
         name: "python compile (agent adapters + scripts + eval — syntax gate)"

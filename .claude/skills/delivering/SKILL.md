@@ -52,12 +52,16 @@ docker exec boring-agent sh -c 'hermes cron create --name advice-write --no-agen
 3. 판정:
    - patch-id 같음 → 재검증하지 않는다.
    - 다름 → 달라진 부분만 재검증한다.
-4. 두 경우 모두 **새 head** 에서 CI 가 초록인 뒤에만 머지한다.
+4. 두 경우 모두 **새 head** 에서 CI(gitleaks — 시험은 돌지 않는다)가 초록인 뒤에만 머지한다.
 
 ## 4. CHANGELOG
 
-`feat(...)`·`fix(...)` 커밋이 있는 브랜치는 `CHANGELOG.md` 의 `## [Unreleased]` 아래에 줄이 있어야 한다 (`scripts/test_changelog.py`, `scripts/guard.sh` 와 CI rust-gate 가 돌린다). `docs`·`chore`·`test`·`refactor`·`ci` 는 요구하지 않는다.
+`feat(...)`·`fix(...)` 커밋이 있는 브랜치는 `CHANGELOG.md` 의 `## [Unreleased]` 아래에 줄이 있어야 한다. CI 는 이것을 막지 않는다 — 머지 전에 `python3 scripts/test_changelog.py` 를 한 번 돌린다. `docs`·`chore`·`test`·`refactor`·`ci` 는 요구하지 않는다.
 
-## 5. 머지 명령
+## 5. 공급망 검사
+
+`drudge/Cargo.lock` 이 바뀐 커밋에서만 로컬로 `cargo deny --manifest-path drudge/Cargo.toml check --all-features` 를 돌린다. CI 에는 없다.
+
+## 6. 머지 명령
 
 머지 명령(`gh pr merge …`)은 **자기 줄 하나로만** 친다. 다른 명령과 `&&`·`;`·파이프로 잇지 않는다 (저장소 훅이 막는다). 머지 뒤 정리는 `~/.claude/teardown.md` 를 따른다.

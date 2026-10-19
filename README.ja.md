@@ -553,7 +553,7 @@ curl -s -X POST http://localhost:7710/mcp \
 - SSOT ドキュメント: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
 - `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test`
 - `make quality` = MCP tool、vector モード文書、削除済み危険 surface のリリース受け入れ drift ゲート
-- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy`
+- CI (テストなし): PR `gitleaks` · main `gitleaks` · `docker-build` · `trivy`
 - `unsafe_code = "forbid"`
 
 ---

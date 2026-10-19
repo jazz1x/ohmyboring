@@ -17,15 +17,14 @@ description: drudge → Python 스트랭글러 이전의 슬라이스 하나를 
 2. preflight: `origin/feat/migration-python` 이 baseline 과 같아야 dispatch. 아니면 PARK.
 3. 구현: `kimi -m kimi-code/kimi-for-coding -p "$(cat 계약)"` 헤드리스. 커밋 정확히 1개, amend·push 금지.
 4. 검증: 계약을 쓴 세션이 아닌 독립 컨텍스트(Opus). 입력은 계약·diff·구현 보고·게이트 출력만. 변이는 사본(`cp`)에서, `__pycache__` 비우고. 판정 필드 `verdict / contract_defects / edge_necessity / mutants_run`.
-5. PASS 면 오케스트레이터가 push → #396 CI(계약 파리티 + eval-gate). 빨강이면 게이트가 맞는지 먼저 본다(사이클 1: 게이트가 맞았고 계약이 틀렸다).
+5. PASS 면 오케스트레이터가 push 한다. CI 는 시험을 돌리지 않는다(gitleaks 만). 게이트가 빨강이면 게이트가 맞는지 먼저 본다(사이클 1: 게이트가 맞았고 계약이 틀렸다).
 6. 배달까지가 사이클이다 — 계약의 마지막 work_item 은 `delivering` 스킬대로 배달하고 소비자 산출물을 인용하는 것.
 7. 카드 뜻은 각서 6장이 정본이다 — 「해」는 승인(학습 신호 아님), 제안은 실행할 것/짚어 둔 것 두 칸, 「미뤄」는 실행 칸에만·순위에 안 들어감, 제안은 문제지로 기록. 계약에 옮겨 적지 말고 가리킨다.
 8. ◇C16·◇C17 앞에서는 멈추고 숫자를 들고 소유자에게 간다.
 
 ## 게이트 (있는 것만 쓴다, 새로 세우지 않는다)
-- `make guard` — fmt/clippy/test + py-compile + Python 단위 + changelog·deps 게이트 + **ruff check / format --check**
+- pre-commit — fmt·clippy·ruff + 바뀐 시험 파일만. 전체 묶음(`make guard`)은 돌리지 않는다(오너 10-19).
 - `DRUDGE_URL=http://127.0.0.1:<door> python3 scripts/contract-parity.py --check` — 24 tools · 24 routes · GET 4 shapes
-- CI eval-gate — recall@3 15/15 + 계약 파리티
 - 새 게이트가 떠오르면 먼저 "스킬 한 줄로 되나". 도구는 같은 부류 실수가 반복 관측된 뒤에만.
 
 compose 규칙(워크트리에서 건드릴 수 있는 것)은 `delivering` 스킬 §1.
