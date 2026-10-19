@@ -1081,6 +1081,52 @@ for hermes_plugin in boring-card boring-memory; do
     fi
 done
 
+# (d5d) The door image. It COPYs src/, agents/* and the contract at build time, so a merged change
+# under any of those paths is not live until `make door-build && make door-up`. The COPY list is
+# read from the Dockerfile at run time — the Dockerfile is the source of truth, a copy here would
+# fall behind the same way the hermes list did. Compare creation time with the last commit that
+# touched those paths; anything we cannot measure is red, because "no reading" must never look
+# like "fresh". Checked only when the checkout carries the Dockerfile (a wiki-first install has no door).
+door_dockerfile="$BORING_HOME/agents/door/Dockerfile"
+door_epoch() {
+    python3 -c 'import sys,re,datetime as d; s=re.sub(r"\.\d+","",sys.argv[1]).replace("Z","+00:00"); print(int(d.datetime.fromisoformat(s).timestamp()))' "$1" 2>/dev/null
+}
+if [ -f "$door_dockerfile" ]; then
+    door_paths="$(awk '$1 == "COPY" { for (i = 2; i < NF; i++) if ($i !~ /^--/) print $i }' "$door_dockerfile")"
+    door_why=""
+    door_created=""
+    door_commit=""
+    if [ -z "$door_paths" ]; then
+        door_why="no COPY lines in $door_dockerfile"
+    elif ! door_docker="$(resolve_docker)"; then
+        door_why="docker not found"
+    elif ! door_created="$("$door_docker" inspect -f '{{.Created}}' boring-door 2>&1)"; then
+        door_why="docker inspect boring-door failed: $door_created"
+    elif ! door_commit="$(set -f; git -C "$BORING_HOME" log -1 --format='%cI %h' -- $door_paths 2>&1)"; then
+        door_why="git log failed: $door_commit"
+    elif [ -z "$door_commit" ]; then
+        door_why="no commit touches the COPY paths"
+    fi
+    if [ -z "$door_why" ]; then
+        door_commit_time="${door_commit%% *}"
+        door_commit_sha="${door_commit##* }"
+        door_created_epoch="$(door_epoch "$door_created")"
+        door_commit_epoch="$(door_epoch "$door_commit_time")"
+        if [ -z "$door_created_epoch" ] || [ -z "$door_commit_epoch" ]; then
+            door_why="cannot parse times (container '$door_created', commit '$door_commit_time')"
+        fi
+    fi
+    if [ -n "$door_why" ]; then
+        bad "cannot measure door image freshness — $door_why"
+        failed_containers=1
+    elif [ "$door_created_epoch" -ge "$door_commit_epoch" ]; then
+        ok "door image ${door_created%%.*}Z vs last COPY-path commit $door_commit_time ($door_commit_sha)"
+    else
+        bad "DEPLOY DRIFT — door image ${door_created%%.*}Z vs last COPY-path commit $door_commit_time ($door_commit_sha). Merging is not deploying; run 'make door-build && make door-up'."
+        failed_containers=1
+    fi
+fi
+
 if [ "$FIX" -eq 1 ]; then
     echo
     echo "Applying fixes..."

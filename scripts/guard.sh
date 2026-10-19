@@ -163,6 +163,7 @@ sh scripts/test_doctor.sh
 sh scripts/test_drudge_health_readiness.sh
 sh scripts/test_doctor_maintenance.sh
 sh scripts/test_doctor_card.sh
+sh scripts/test_doctor_door.sh
 echo "8) shell LLM/provider guardrails (verify-llm)…"
 sh scripts/test_verify_llm.sh
 echo "9) shell morning-card guardrails (failure notice)…"
