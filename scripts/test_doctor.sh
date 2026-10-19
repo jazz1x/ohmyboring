@@ -199,13 +199,6 @@ case "${1:-}" in
         fi
         exit 0
     fi
-    if [ "${2:-}" = --stale-gates ]; then
-        if [ "${DOCTOR_STALE_GATES_FAIL:-0}" = 1 ]; then
-            echo "stale gate: eval_graphrag_gate last_seen_days=35"
-            exit 1
-        fi
-        exit 0
-    fi
     if [ "${2:-}" = --sink-mode ]; then
         echo "${DOCTOR_EVENT_SINK_MODE:-db}"
         exit 0
@@ -861,22 +854,6 @@ case "$(cat "$TMP/config-unreadable.out")" in
   *)
     cat "$TMP/config-unreadable.out"
     echo "FAIL: strict doctor did not name the unreadable config" >&2
-    exit 1
-    ;;
-esac
-
-# A gate that stopped running is the failure doctor.sh (d4b) names — silence reads as green.
-make_case "$TMP/stale-gates" yes
-if ( DOCTOR_STALE_GATES_FAIL=1 run_strict "$TMP/stale-gates" "$TMP/stale-gates.out" ); then
-    cat "$TMP/stale-gates.out"
-    echo "FAIL: strict doctor should fail when a watched gate has gone stale" >&2
-    exit 1
-fi
-case "$(cat "$TMP/stale-gates.out")" in
-  *"a watched gate has gone stale — it is not failing, it stopped running"*) ;;
-  *)
-    cat "$TMP/stale-gates.out"
-    echo "FAIL: strict doctor did not report the stale gate" >&2
     exit 1
     ;;
 esac

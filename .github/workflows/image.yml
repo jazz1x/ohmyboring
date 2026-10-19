@@ -1,0 +1,40 @@
+name: image
+
+# main push·태그에서만: 이미지 빌드 + 저장소 쪽 취약점·설정 검사. PR 에서는 돌지 않는다 (ci.yml 머리말).
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # broad security scan — filesystem vulns + IaC/Dockerfile misconfig + secrets.
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0, SHA-pinned (was @master — unpinned = non-repro/supply-chain risk)
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml # redactor-test fake tokens (parallels gitleaks allowlist)
+          exit-code: "1" # fail the job on CRITICAL/HIGH findings
+
+  # Ensure the images still build from a clean checkout.
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: build drudge image
+        run: make build

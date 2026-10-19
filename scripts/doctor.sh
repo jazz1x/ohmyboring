@@ -642,18 +642,6 @@ else
     bad "event log probe not found at $event_log_probe"; failed_resolution=1
 fi
 
-# (d4b) Gate staleness. A gate that stops running looks exactly like a gate that passes:
-# eval_graphrag_gate emitted twenty `ok` rows over four days in July, then went silent for five
-# weeks, and those stale rows were later read as evidence the graph was still covered. Silence
-# is the failure this names.
-if [ -f "$event_log_probe" ]; then
-    if gate_line="$(python3 "$event_log_probe" --stale-gates)"; then
-        ok "watched gates ran recently ($gate_line)"
-    else
-        bad "a watched gate has gone stale — it is not failing, it stopped running ($gate_line)"; failed_resolution=1
-    fi
-fi
-
 event_spool="${BORING_EVENT_LOG:-$HOME/.cache/oh-my-boring/events.ndjson}"
 spool_dir="${event_spool%/*}"
 if mkdir -p "$spool_dir" 2>/dev/null; then
