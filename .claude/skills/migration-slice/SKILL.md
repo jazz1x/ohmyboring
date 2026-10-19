@@ -18,7 +18,7 @@ description: drudge → Python 스트랭글러 이전의 슬라이스 하나를 
 3. 구현: `kimi -m kimi-code/kimi-for-coding -p "$(cat 계약)"` 헤드리스. 커밋 정확히 1개, amend·push 금지.
 4. 검증: 계약을 쓴 세션이 아닌 독립 컨텍스트(Opus). 입력은 계약·diff·구현 보고·게이트 출력만. 변이는 사본(`cp`)에서, `__pycache__` 비우고. 판정 필드 `verdict / contract_defects / edge_necessity / mutants_run`.
 5. PASS 면 오케스트레이터가 push → #396 CI(계약 파리티 + eval-gate). 빨강이면 게이트가 맞는지 먼저 본다(사이클 1: 게이트가 맞았고 계약이 틀렸다).
-6. **배달까지가 사이클이다.** 계약의 마지막 work_item 은 언제나 소비자 쪽 설치·기동(`agent_wiring.py --install`, 크론 등록, `make build`+재기동)과 **그 소비자가 낸 산출물 인용**(카드 ts, 크론 output 파일, 훅 주입 줄). `~/.hermes/scripts`·크론·호스트 바이너리는 레포와 별도 아티팩트라 머지가 곧 배달이 아니다. 인용이 없으면 사이클은 열려 있다.
+6. 배달까지가 사이클이다 — 계약의 마지막 work_item 은 `delivering` 스킬대로 배달하고 소비자 산출물을 인용하는 것.
 7. 카드 뜻은 각서 6장이 정본이다 — 「해」는 승인(학습 신호 아님), 제안은 실행할 것/짚어 둔 것 두 칸, 「미뤄」는 실행 칸에만·순위에 안 들어감, 제안은 문제지로 기록. 계약에 옮겨 적지 말고 가리킨다.
 8. ◇C16·◇C17 앞에서는 멈추고 숫자를 들고 소유자에게 간다.
 
@@ -28,9 +28,7 @@ description: drudge → Python 스트랭글러 이전의 슬라이스 하나를 
 - CI eval-gate — recall@3 15/15 + 계약 파리티
 - 새 게이트가 떠오르면 먼저 "스킬 한 줄로 되나". 도구는 같은 부류 실수가 반복 관측된 뒤에만.
 
-## compose 규칙
-- `up`/`build` 전량은 정본 체크아웃(/Users/jongyun/Development/mine/oh-my-boring)에서만 친다. 워크트리에서는 `make door-build`·`make door-up`(--no-deps) 만.
-- 엔진 이미지·컨테이너(boring-drudge/boring-postgres/boring-agent)는 워크트리에서 절대 건드리지 않는다. compose 는 `name: oh-my-boring` 고정이라 어느 디렉터리에서 쳐도 같은 프로젝트다. 문만 다룰 때도 언제나 `--no-deps` 로 — depends_on 수렴이 엔진을 재생성했다(사이클 4 사고).
+compose 규칙(워크트리에서 건드릴 수 있는 것)은 `delivering` 스킬 §1.
 
 ## 코드 규율
 - 주석은 드물게. 0 이 아니라 과다 경계 — 「왜」는 커밋 본문·PR 에. 이름과 구조로 말하고, 주석은 코드가 말 못 하는 것(외부 제약·좌표)만.
