@@ -132,7 +132,7 @@ def parse_revision(raw: str) -> tuple[str, str] | None:
     return bottleneck, advice
 
 
-def _facts_to_keep(original: str) -> set[str]:
+def facts_to_keep(original: str) -> set[str]:
     """polish.facts of the original with the inside talk taken out first: a wiki number, a path
     or a hash is what the line removes on purpose, and the digits inside it go with it — that
     is the rewrite doing its job, not losing a fact."""
@@ -147,7 +147,7 @@ def revise(proposal: Proposal, invoke: Callable[[str], str], lang: str) -> Revis
     rewrite). The original stays when a rewrite loses a number, cannot be parsed, or is still
     flagged after the second pass — the model proposes, this function decides."""
     original = f"{proposal.bottleneck}\n{proposal.advice}"
-    keep = _facts_to_keep(original)
+    keep = facts_to_keep(original)
     bottleneck, advice = proposal.bottleneck, proposal.advice
     flagged: list[str] = []
     for _ in range(REWRITE_PASSES):

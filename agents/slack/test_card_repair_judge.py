@@ -473,6 +473,123 @@ class UnclearSignalTests(unittest.TestCase):
         self.assertIn(self.SIGNAL, prompt)
 
 
+FLAGGED = "wiki-4509 결정에 따라 card_repair_judge 가 가른 묶음이다"
+CLEAN = "서로 다른 일에 붙은 흔한 말이라 합치지 않는다"
+SUBJ, VARS = "next-step", ["next step", "next-step"]
+
+
+def _scripted(*replies: str):
+    """An invoke that answers the given completions in order and records every prompt."""
+    prompts: list[str] = []
+    queue = iter(replies)
+
+    def invoke(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(queue)
+
+    invoke.prompts = prompts  # type: ignore[attr-defined]
+    return invoke
+
+
+def _reason(text: str) -> str:
+    return json.dumps({"reason": text}, ensure_ascii=False)
+
+
+class ReasonReviseTests(unittest.TestCase):
+    def test_a_flagged_reason_is_rewritten_once_and_the_clean_rewrite_is_stored(self):
+        invoke = _scripted(_reason(CLEAN))
+        out = crj.revise_reason(FLAGGED, SUBJ, VARS, invoke)
+        self.assertEqual((out.reason, out.revise), (CLEAN, "rewritten"))
+        self.assertEqual(len(invoke.prompts), 1)
+        self.assertIn("목표:", invoke.prompts[0])
+        self.assertIn("선:", invoke.prompts[0])
+        self.assertIn(FLAGGED, invoke.prompts[0])
+
+    def test_a_clean_reason_costs_no_second_call(self):
+        invoke = _scripted()
+        out = crj.revise_reason(CLEAN, SUBJ, VARS, invoke)
+        self.assertEqual((out.reason, out.revise), (CLEAN, "clean"))
+        self.assertEqual(invoke.prompts, [])
+
+    def test_the_groups_own_name_is_not_inside_talk(self):
+        reason = "next-step 은 서로 다른 일에 붙은 흔한 말이다"
+        invoke = _scripted()
+        out = crj.revise_reason(reason, SUBJ, VARS, invoke)
+        self.assertEqual((out.reason, out.revise), (reason, "clean"))
+
+    def test_only_the_exact_spelling_is_excluded_other_inside_talk_still_flags(self):
+        cases = [
+            "next-step 은 wiki-1234 와 같다",
+            "next-step 은 card_repair_judge 가 가른 묶음이다",
+            "next-step 은 agents/slack/card.py 에 있다",
+        ]
+        for reason in cases:
+            invoke = _scripted(_reason(CLEAN))
+            out = crj.revise_reason(reason, SUBJ, VARS, invoke)
+            self.assertEqual((out.revise, len(invoke.prompts)), ("rewritten", 1), reason)
+
+    def test_a_near_miss_containing_the_subject_is_still_flagged(self):
+        invoke = _scripted(_reason(CLEAN))
+        out = crj.revise_reason(
+            "spark-connect-v2 는 흔한 말이 아니다",
+            "spark-connect",
+            ["spark connect", "spark-connect"],
+            invoke,
+        )
+        self.assertEqual((out.reason, out.revise), (CLEAN, "rewritten"))
+
+    def test_still_flagged_after_the_one_rewrite_keeps_the_original_and_says_so(self):
+        still = "card_repair_judge 의 판정이라 합치지 않는다"
+        invoke = _scripted(_reason(still))
+        out = crj.revise_reason(FLAGGED, SUBJ, VARS, invoke)
+        self.assertEqual((out.reason, out.revise), (FLAGGED, "kept_original"))
+        self.assertEqual(len(invoke.prompts), 1)
+
+    def test_a_rewrite_that_drops_a_number_keeps_the_original(self):
+        original = "wiki-4509 에서 268 개 사실이 서로 다른 일에 붙었다"
+        invoke = _scripted(_reason("서로 다른 일에 붙은 흔한 말이라 합치지 않는다"))
+        out = crj.revise_reason(original, SUBJ, VARS, invoke)
+        self.assertEqual((out.reason, out.revise), (original, "lost_facts"))
+
+    def test_a_rewrite_that_keeps_the_number_passes(self):
+        original = "wiki-4509 에서 268 개 사실이 서로 다른 일에 붙었다"
+        invoke = _scripted(_reason("268 개 사실이 서로 다른 일에 붙은 흔한 말이다"))
+        out = crj.revise_reason(original, SUBJ, VARS, invoke)
+        self.assertEqual(out.revise, "rewritten")
+
+    def test_an_unreadable_rewrite_keeps_the_original(self):
+        out = crj.revise_reason(FLAGGED, SUBJ, VARS, _scripted("not json"))
+        self.assertEqual((out.reason, out.revise), (FLAGGED, "unusable"))
+
+    def test_run_stores_the_rewritten_reason_and_the_marker_on_the_event(self):
+        judged = json.dumps({"verdict": "generic", "reason": FLAGGED}, ensure_ascii=False)
+        invoke = _scripted(judged, _reason(CLEAN))
+        records: list[tuple[str, dict]] = []
+        crj.run([GROUP], {}, {}, invoke, lambda e, f: records.append((e, f)), ONE_FACT)
+        ((name, fields),) = records
+        self.assertEqual((name, fields["reason"], fields["revise"]), ("repair_judged", CLEAN, "rewritten"))
+
+    def test_run_stores_the_original_and_the_marker_when_the_rewrite_is_still_flagged(self):
+        judged = json.dumps({"verdict": "generic", "reason": FLAGGED}, ensure_ascii=False)
+        invoke = _scripted(judged, _reason(FLAGGED))
+        records: list[tuple[str, dict]] = []
+        crj.run([GROUP], {}, {}, invoke, lambda e, f: records.append((e, f)), ONE_FACT)
+        ((_, fields),) = records
+        self.assertEqual((fields["reason"], fields["revise"]), (FLAGGED, "kept_original"))
+
+    def test_the_judge_prompt_states_one_goal_and_one_line(self):
+        prompt = crj.build_prompt(GROUP, [], [])
+        self.assertIn("목표: 처음 읽는 사람이 한 번에 이해한다.", prompt)
+        self.assertIn("선: 내부 이름·영어 식별자·wiki 번호·파일 경로·커밋 해시를 쓰지 않는다.", prompt)
+
+    def test_a_judgment_from_the_previous_prompt_version_is_not_read(self):
+        # v2 judged reasons before the revision line; it must not be read as current
+        old = {**_judged_attrs(SUBJ, VARS, "same_name"), "prompt_version": 2}
+        out = crj.judged_map([_entry(old)])
+        self.assertEqual(out, {})
+        self.assertGreater(cc.REPAIR_JUDGE_PROMPT_VERSION, 2)
+
+
 class MainExitTests(unittest.TestCase):
     def _main(self, *answers: str) -> int:
         groups = [_group(f"subject-{i}", [f"subject {i}", f"subject-{i}"]) for i in range(len(answers))]

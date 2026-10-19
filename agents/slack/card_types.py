@@ -66,7 +66,8 @@ REPAIR_JUDGE: str = "agent:repair-judge"
 
 #: Bumped whenever the judge's question changes; judgments asked under another version are
 #: not read. v1 (2026-10-03) asked "same spelling?" and called 18/20 same_name, next step included.
-REPAIR_JUDGE_PROMPT_VERSION: int = 2
+#: v3 (2026-10-19) added the one-goal one-line rule and the reason revision (C2-2).
+REPAIR_JUDGE_PROMPT_VERSION: int = 3
 
 #: Bumped whenever the advice step's question or rewrite line changes; advice written under
 #: another version is not read by the card.
@@ -477,6 +478,9 @@ class RepairJudgment(BaseModel):
     judge: str = REPAIR_JUDGE
     prompt_version: int = REPAIR_JUDGE_PROMPT_VERSION
     comment_ids: list[int] = []
+    #: What the reason's revision did: clean (nothing flagged) · rewritten · kept_original ·
+    #: lost_facts · unusable — card_repair_judge.revise_reason decides, the 사건 carries it.
+    revise: str = "clean"
 
 
 class RepairJudgeFailed(BaseModel):
