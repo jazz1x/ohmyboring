@@ -562,6 +562,10 @@ now_s="$(date +%s)"
 stale_pending=0
 stale_retry=0
 dead_letter=0
+# Reviewed losses (session id <TAB> note ref): a dead marker listed here is informational.
+known_losses_file="${DOCTOR_KNOWN_LOSSES:-$BORING_HOME/data/contract/known-losses.tsv}"
+known_losses=0
+known_refs=""
 
 for marker_file in "$MARK_DIR"/*.pending; do
     [ -e "$marker_file" ] || continue
@@ -584,10 +588,22 @@ done
 for marker_file in "$MARK_DIR"/*.dead "$MARK_DIR"/*.dead-letter; do
     [ -e "$marker_file" ] || continue
     is_ignored_marker "$marker_file" && continue
+    dead_name="${marker_file##*/}"
+    dead_id="${dead_name%.dead-letter}"
+    dead_id="${dead_id%.dead}"
+    dead_ref=$(awk -F'\t' -v id="$dead_id" '$1 == id { print $2; exit }' "$known_losses_file" 2>/dev/null)
+    if [ -n "$dead_ref" ]; then
+        known_losses=$((known_losses + 1))
+        known_refs="${known_refs:+$known_refs, }$dead_ref"
+        continue
+    fi
     dead_letter=$((dead_letter + 1))
 done
 
 echo "marker_health writable=$marker_writable stale_pending=$stale_pending stale_retry=$stale_retry dead_letter=$dead_letter pending_ttl_s=$pending_ttl retry_ttl_s=$retry_ttl dir=$MARK_DIR"
+if [ "$known_losses" -gt 0 ]; then
+    echo "    known losses $known_losses ($known_refs)"
+fi
 if [ "$marker_writable" -ne 1 ]; then
     bad "marker dir is not writable — autonomous ingest cannot persist queue state"; failed_marker=1
 fi
