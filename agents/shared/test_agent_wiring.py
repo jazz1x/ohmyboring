@@ -266,6 +266,7 @@ def test_wire_hermes_adds_hint_and_weekly():
         (scripts / "run-morning-card.py").write_text("# stub", encoding="utf-8")
         (scripts / "run-weekly-card.py").write_text("# stub", encoding="utf-8")
         (scripts / "run-repair-judge.py").write_text("# stub", encoding="utf-8")
+        (scripts / "run-advice-write.py").write_text("# stub", encoding="utf-8")
         card_plugin = scripts / "plugins" / "boring-card"
         card_plugin.mkdir(parents=True)
         (card_plugin / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")
@@ -304,6 +305,7 @@ def test_wire_hermes_adds_hint_and_weekly():
         assert (fake_home / ".hermes" / "scripts" / "codex-collect-sessions.py").exists()
         assert (fake_home / ".hermes" / "scripts" / "run-morning-card.py").exists()
         assert (fake_home / ".hermes" / "scripts" / "run-weekly-card.py").exists()
+        assert (fake_home / ".hermes" / "scripts" / "run-advice-write.py").exists()
         assert mock_cron.called is True
 
 
@@ -440,6 +442,7 @@ def test_wire_hermes_missing_slack_briefing_has_no_side_effects():
         (source_dir / "run-morning-card.py").write_text("# stub\n", encoding="utf-8")
         (source_dir / "run-weekly-card.py").write_text("# stub\n", encoding="utf-8")
         (source_dir / "run-repair-judge.py").write_text("# stub\n", encoding="utf-8")
+        (source_dir / "run-advice-write.py").write_text("# stub\n", encoding="utf-8")
         card_plugin = source_dir / "plugins" / "boring-card"
         card_plugin.mkdir(parents=True)
         (card_plugin / "plugin.yaml").write_text("name: boring-card\n", encoding="utf-8")

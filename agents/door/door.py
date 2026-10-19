@@ -1537,6 +1537,7 @@ _CARD_PROGRAMS = {
     "morning-card": Path(__file__).resolve().parents[2] / "agents" / "slack" / "card.py",
     "weekly-card": Path(__file__).resolve().parents[2] / "agents" / "slack" / "weekly_card.py",
     "repair-judge": Path(__file__).resolve().parents[2] / "agents" / "slack" / "card_repair_judge.py",
+    "advice-write": Path(__file__).resolve().parents[2] / "agents" / "slack" / "card_advice_write.py",
 }
 
 #: One lock per route: a card takes minutes (model calls), and a second concurrent run is not
@@ -1600,6 +1601,10 @@ async def _run_morning_card(request: Request) -> Response:
 
 async def _run_repair_judge(request: Request) -> Response:
     return await _run_card_route(request, "repair-judge")
+
+
+async def _run_advice_write(request: Request) -> Response:
+    return await _run_card_route(request, "advice-write")
 
 
 async def _run_weekly_card(request: Request) -> Response:
@@ -2207,6 +2212,7 @@ _DOOR_HANDLERS = {
     "GET /repairs/split-subjects/samples": _repairs_split_subjects_samples,
     "POST /gap": _gap,
     "POST /repairs/split-subjects": _repairs_split_subjects_post,
+    "POST /run/advice-write": _run_advice_write,
     "POST /run/morning-card": _run_morning_card,
     "POST /run/repair-judge": _run_repair_judge,
     "POST /run/weekly-card": _run_weekly_card,
