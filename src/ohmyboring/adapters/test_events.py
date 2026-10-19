@@ -520,6 +520,11 @@ class EvalGateStateTests(unittest.TestCase):
         state = self._state(self._gh_runs([(2, "cancelled", 0), (1, "success", 1)]))
         self.assertEqual(state, event_log.GateFresh(1))
 
+    def test_age_limit_applies_to_run_picked_after_skipping_cancelled(self):
+        state = self._state(self._gh_runs([(2, "cancelled", 0), (1, "success", 8)]))
+        self.assertEqual(state, event_log.GateStale(8))
+        self.assertFalse(event_log.gate_line(state)[0])
+
     def test_latest_failure_is_still_red_after_skipping_cancelled(self):
         state = self._state(self._gh_runs([(3, "cancelled", 0), (2, "failure", 0), (1, "success", 1)]))
         self.assertEqual(state, event_log.GateFailed("failure", 0))
