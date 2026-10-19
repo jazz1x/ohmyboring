@@ -39,6 +39,11 @@ commit_at 2026-10-19T05:00:00Z "touch non-COPY path"
 
 cat > "$tmp/fakebin/docker" <<'SH'
 #!/bin/sh
+case "${1:-} ${2:-}" in
+  "compose version") echo "Docker Compose version v2.27.0"; exit 0 ;;
+  "compose ps") echo "boring-drudge Up"; exit 0 ;;
+  "compose exec") exit 0 ;;
+esac
 if [ "${1:-}" = inspect ]; then
     [ -n "${FAKE_INSPECT_FAIL:-}" ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
     echo "$FAKE_CREATED"
@@ -83,6 +88,60 @@ case "$line" in
 esac
 
 # Mutants run on copies of doctor.sh; both must flip a verdict above.
+# 4. door drift + --fix: the operator gets the command, and no make target runs.
+cat > "$tmp/fakebin/make" <<'SH'
+#!/bin/sh
+echo "make $*" >> "$MAKE_LOG"
+exit 0
+SH
+chmod +x "$tmp/fakebin/make"
+make_log="$tmp/make.log"
+: > "$make_log"
+# A healthy engine, so no other failure triggers make: whatever make logs is the door's doing.
+python3 "$ROOT/scripts/lib/health_stub.py" '{"status":"ok","vector":true,"sync":"idle","corpus_count":5,"db_healthy":true}' 7866 &
+stub_pid=$!
+trap 'kill "$stub_pid" 2>/dev/null; rm -rf "$tmp"' EXIT
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    curl -sf -m1 "http://127.0.0.1:7866/health" >/dev/null 2>&1 && break
+    sleep 0.3
+done
+run_fix() { # <doctor.sh> — stale door, healthy engine, --fix
+    : > "$make_log"
+    env HOME="$tmp/home" BORING_HOME="$boring" BORING_URL="http://127.0.0.1:7866" \
+        DOOR_URL="http://127.0.0.1:1" PATH="$tmp/fakebin:$PATH" DOCKER_BIN="$tmp/fakebin/docker" \
+        BORING_SKIP_LEDGER_PROBE=1 BORING_SKIP_CONFIG_PROBE=1 MAKE_LOG="$make_log" \
+        FAKE_CREATED=2026-10-19T03:00:00Z FAKE_INSPECT_FAIL="" \
+        sh "$1" --fix 2>&1 || true
+}
+out="$(run_fix "$ROOT/scripts/doctor.sh")"
+if [ ! -s "$make_log" ]; then
+    pass "4 --fix with a stale door runs no make target"
+else
+    fail "4 --fix invoked make: $(cat "$make_log")"
+fi
+hint="$(printf '%s\n' "$out" | rg -c "run 'make door-build && make door-up' yourself" || true)"
+if [ "$hint" -ge 1 ]; then
+    pass "4 --fix prints the door-build hint"
+else
+    fail "4 --fix hint missing"
+fi
+# The hint's command must be the one the delivering skill states, one wording.
+if rg -qF 'make door-build && make door-up' "$ROOT/.claude/skills/delivering/SKILL.md"; then
+    pass "4 hint command matches delivering/SKILL.md"
+else
+    fail "4 delivering/SKILL.md no longer states 'make door-build && make door-up'"
+fi
+
+# Mutant C: door drift routed through the generic container fix -> case 4 must see make run.
+cp "$ROOT/scripts/doctor.sh" "$tmp/mut/doctor.sh"
+sd -F 'failed_door_image=1' 'failed_containers=1' "$tmp/mut/doctor.sh"
+run_fix "$tmp/mut/doctor.sh" > /dev/null
+if [ -s "$make_log" ]; then
+    pass "mutation C: door drift via failed_containers makes --fix run make"
+else
+    fail "mutation C: door drift via failed_containers still ran no make — case 4 proves nothing"
+fi
+
 # Mutant A: cannot-measure rendered as ok -> case 3 must stop being red.
 cp "$ROOT/scripts/doctor.sh" "$tmp/mut/doctor.sh"
 sd 'bad "cannot measure door image' 'ok "cannot measure door image' "$tmp/mut/doctor.sh"

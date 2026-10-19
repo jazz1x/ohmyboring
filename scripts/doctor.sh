@@ -83,6 +83,7 @@ failed_freshness=0
 failed_maintenance=0
 failed_card=0
 failed_eventlog=0
+failed_door_image=0   # --fix never rebuilds the door; it only prints the command
 
 ok()   { echo "✓ $1"; }
 bad()  { echo "✗ $1"; }
@@ -1118,12 +1119,12 @@ if [ -f "$door_dockerfile" ]; then
     fi
     if [ -n "$door_why" ]; then
         bad "cannot measure door image freshness — $door_why"
-        failed_containers=1
+        failed_door_image=1
     elif [ "$door_created_epoch" -ge "$door_commit_epoch" ]; then
         ok "door image ${door_created%%.*}Z vs last COPY-path commit $door_commit_time ($door_commit_sha)"
     else
         bad "DEPLOY DRIFT — door image ${door_created%%.*}Z vs last COPY-path commit $door_commit_time ($door_commit_sha). Merging is not deploying; run 'make door-build && make door-up'."
-        failed_containers=1
+        failed_door_image=1
     fi
 fi
 
@@ -1135,6 +1136,9 @@ if [ "$FIX" -eq 1 ]; then
     [ "$failed_engine" -eq 1 ] && fix_engine
     [ "$failed_ollama" -eq 1 ] && fix_ollama
     [ "$failed_containers" -eq 1 ] && fix_containers
+    # The door is built from the worktree the operator is in; a rebuild here would bake whatever
+    # is checked out, so --fix only names the command.
+    [ "$failed_door_image" -eq 1 ] && echo "  → door image is stale or unmeasurable: run 'make door-build && make door-up' yourself (--fix does not rebuild it)"
     echo
     echo "Re-running doctor to verify..."
     if [ "$STRICT" -eq 1 ]; then
@@ -1145,8 +1149,8 @@ fi
 
 echo
 if [ "$STRICT" -eq 1 ]; then
-    failures="${failed_env}${failed_hooks}${failed_hookprobe}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}${failed_midpoint}${failed_maintenance}${failed_card}${failed_eventlog}"
-    if [ "$failures" = "000000000000000" ]; then
+    failures="${failed_env}${failed_hooks}${failed_hookprobe}${failed_engine}${failed_ollama}${failed_containers}${failed_note}${failed_marker}${failed_codex}${failed_resolution}${failed_freshness}${failed_midpoint}${failed_maintenance}${failed_card}${failed_eventlog}${failed_door_image}"
+    if [ "$failures" = "0000000000000000" ]; then
         ok "readiness: all doctor checks passed — briefing/write-door dependencies are ready."
         log_doctor_event ok
         exit 0
