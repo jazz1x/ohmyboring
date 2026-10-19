@@ -61,7 +61,9 @@ run_doctor() { # <created> <fail-flag> [doctor.sh]
         FAKE_CREATED="$1" FAKE_INSPECT_FAIL="$2" \
         sh "$script" 2>&1 || true
 }
-door_line() { printf '%s\n' "$1" | rg 'door image|cannot measure door' || true; }
+door_line() { printf '%s\n' "$1" | grep -E 'door image|cannot measure door' || true; }
+# POSIX in-place substitute for the mutants (CI has no sd): subst <file> <sed-script>
+subst() { sed "$2" "$1" > "$1.new" && mv "$1.new" "$1"; }
 
 # 1. violation: a COPY-path commit (03:04:51Z) is newer than the container (03:00:00Z).
 out="$(run_doctor 2026-10-19T03:00:00.123456789Z "")"
@@ -119,14 +121,14 @@ if [ ! -s "$make_log" ]; then
 else
     fail "4 --fix invoked make: $(cat "$make_log")"
 fi
-hint="$(printf '%s\n' "$out" | rg -c "run 'make door-build && make door-up' yourself" || true)"
+hint="$(printf '%s\n' "$out" | grep -cF "run 'make door-build && make door-up' yourself" || true)"
 if [ "$hint" -ge 1 ]; then
     pass "4 --fix prints the door-build hint"
 else
     fail "4 --fix hint missing"
 fi
 # The hint's command must be the one the delivering skill states, one wording.
-if rg -qF 'make door-build && make door-up' "$ROOT/.claude/skills/delivering/SKILL.md"; then
+if grep -qF 'make door-build && make door-up' "$ROOT/.claude/skills/delivering/SKILL.md"; then
     pass "4 hint command matches delivering/SKILL.md"
 else
     fail "4 delivering/SKILL.md no longer states 'make door-build && make door-up'"
@@ -134,7 +136,7 @@ fi
 
 # Mutant C: door drift routed through the generic container fix -> case 4 must see make run.
 cp "$ROOT/scripts/doctor.sh" "$tmp/mut/doctor.sh"
-sd -F 'failed_door_image=1' 'failed_containers=1' "$tmp/mut/doctor.sh"
+subst "$tmp/mut/doctor.sh" 's/failed_door_image=1/failed_containers=1/'
 run_fix "$tmp/mut/doctor.sh" > /dev/null
 if [ -s "$make_log" ]; then
     pass "mutation C: door drift via failed_containers makes --fix run make"
@@ -144,7 +146,7 @@ fi
 
 # Mutant A: cannot-measure rendered as ok -> case 3 must stop being red.
 cp "$ROOT/scripts/doctor.sh" "$tmp/mut/doctor.sh"
-sd 'bad "cannot measure door image' 'ok "cannot measure door image' "$tmp/mut/doctor.sh"
+subst "$tmp/mut/doctor.sh" 's/bad "cannot measure door image/ok "cannot measure door image/'
 out="$(run_doctor "" 1 "$tmp/mut/doctor.sh")"
 case "$(door_line "$out")" in
     "✓ cannot measure door image"*) pass "mutation A: cannot-measure as ok turns case 3 non-red" ;;
@@ -153,8 +155,7 @@ esac
 
 # Mutant B: last commit of ANY path instead of COPY paths -> case 2 must turn red.
 cp "$ROOT/scripts/doctor.sh" "$tmp/mut/doctor.sh"
-sd -F "'%cI %h' -- \$door_paths" "'%cI %h'" "$tmp/mut/doctor.sh" \
-    || echo "mutation B: sd failed (rc=$?)"
+subst "$tmp/mut/doctor.sh" "s/'%cI %h' -- \$door_paths/'%cI %h'/"
 cmp -s "$ROOT/scripts/doctor.sh" "$tmp/mut/doctor.sh" && echo "mutation B: not applied"
 out="$(run_doctor 2026-10-19T04:00:00.5Z "" "$tmp/mut/doctor.sh")"
 case "$(door_line "$out")" in
