@@ -28,8 +28,8 @@
 | borrow-first / `&str`·`&[T]` · clone restraint | clippy `ptr_arg` in part + **review** | `drudge/src/retrieve.rs` · `drudge/src/ingest.rs` | partly mechanical |
 | pedantic idioms (semicolon · needless, etc.) | **clippy pedantic (deny)** | `drudge/Cargo.toml:45-46` | nursery excluded (time bomb) |
 | formatting | **`cargo fmt --check`** (pre-commit) | `scripts/guard.sh` · `.pre-commit-config.yaml` | — |
-| behavioral non-regression (recall/answer quality) | **eval-gate.sh** (`data/eval/run_eval.py`) — by hand, `make eval` on a live stack (not in CI) | `data/eval/run_eval.py` · `scripts/eval-gate.sh` | Recall@3 target = 1.00 on `data/eval/golden.json` |
-| release acceptance drift (MCP contract ↔ docs ↔ removed danger surface) | **quality-gate** (`make quality`) — stack-free, by hand (not in CI) | `drudge/src/serve/mcp.rs` tests · `Makefile` | Fails if tool inventory/vector-mode docs drift or the removed `renumber` surface returns |
+| behavioral non-regression (recall/answer quality) | **eval-gate.sh** (`data/eval/run_eval.py`) — **CI-enforced** (`eval-gate` job, offline recorded-embedding replay) + local `make eval` on a live stack | `data/eval/run_eval.py` · `scripts/eval-gate.sh` · `.github/workflows/ci.yml` | Recall@3 target = 1.00 on `data/eval/golden.json` |
+| release acceptance drift (MCP contract ↔ docs ↔ removed danger surface) | **quality-gate** (`make quality`) — stack-free, CI-enforced | `drudge/src/serve/mcp.rs` tests · `Makefile` · `.github/workflows/ci.yml` | Fails if tool inventory/vector-mode docs drift or the removed `renumber` surface returns |
 | `--no-verify` bypass | **forbidden (policy)** | `.pre-commit-config.yaml` | on failure, fix the root cause |
 
 ### Cross-reference to design decisions
@@ -49,10 +49,9 @@
 **§E no guessing**: if naming/APIs are unclear, *no guessing from memory* — check the Rust API Guidelines / std, and if you can't, say so and stay conservative. (On conflict, naming/style is won by the §0 official source, design philosophy by §C this document.)
 
 ## Gates
-- **pre-commit** = `.pre-commit-config.yaml`: `cargo fmt --check` → `cargo clippy --all-targets -D warnings` → ruff → changed test files only. Install: `pre-commit install`.
-- **CI** runs no tests (owner 2026-10-19): `gitleaks` on PRs; `docker-build` + `trivy` on main pushes and tags.
-- **release acceptance** = `make quality` (by hand): MCP tool inventory, vector-mode support docs, and removed dangerous CLI surfaces stay synchronized.
-- **pre-deploy** = `scripts/eval-gate.sh` (by hand, `make eval`): confirm drudge is up → copy `data/eval/fixtures/` into the vault → `/sync` → `run_eval.py` recall floor. Without a GPU, `data/eval/stub_embedder.py` replays real bge-m3 vectors recorded by `record_embeddings.py`. Recall@3 < 1.00 → non-zero.
+- **pre-commit** = `scripts/guard.sh` (stack-free): `cargo fmt --check` → `cargo clippy --all-targets -D warnings` → `cargo test`. Install: `git config core.hooksPath .githooks`.
+- **release acceptance / CI** = `make quality`: MCP tool inventory, vector-mode support docs, and removed dangerous CLI surfaces stay synchronized.
+- **pre-deploy / CI** = `scripts/eval-gate.sh`: confirm drudge is up → copy `data/eval/fixtures/` into the vault → `/sync` → `run_eval.py` recall floor. The harness is committed (`data/eval/run_eval.py` + `golden.json` + 7 fixtures). CI runs it without a GPU via `data/eval/stub_embedder.py` (replays real bge-m3 vectors recorded by `record_embeddings.py` into `recorded_embeddings.json`) — so CI recall == real recall. Recall@3 < 1.00 → non-zero → merge/deploy halted. Locally, `make eval` runs the same gate against a live LLM.
 
 ## Gates assert their own preconditions
 

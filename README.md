@@ -563,7 +563,7 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 - SSOT docs: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
 - `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test`
 - `make quality` = release acceptance drift gate for MCP tools, vector-mode docs, and removed dangerous surfaces
-- CI (no tests): PR `gitleaks` · main `gitleaks` · `docker-build` · `trivy`
+- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy`
 - `unsafe_code = "forbid"`
 
 ---
