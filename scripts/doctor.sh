@@ -646,10 +646,10 @@ fi
 # weeks, and those stale rows were later read as evidence the graph was still covered. Silence
 # is the failure this names.
 if [ -f "$event_log_probe" ]; then
-    if BORING_EVENT_LOG="${BORING_EVENT_LOG:-$HOME/.cache/oh-my-boring/events.ndjson}" python3 "$event_log_probe" --stale-gates; then
-        ok "watched gates ran recently"
+    if gate_line="$(python3 "$event_log_probe" --stale-gates)"; then
+        ok "watched gates ran recently ($gate_line)"
     else
-        bad "a watched gate has gone stale — it is not failing, it stopped running"; failed_resolution=1
+        bad "a watched gate has gone stale — it is not failing, it stopped running ($gate_line)"; failed_resolution=1
     fi
 fi
 

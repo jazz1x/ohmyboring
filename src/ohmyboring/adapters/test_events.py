@@ -444,5 +444,63 @@ class DoorUrlParityTests(unittest.TestCase):
         self._check({"BORING_IN_CONTAINER": "1"})
 
 
+class EvalGateStateTests(unittest.TestCase):
+    NOW = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
+
+    def _gh(self, *, job_age_days=1, conclusion="success", workflow="success", code=0):
+        done = (self.NOW - timedelta(days=job_age_days)).isoformat()
+        jobs = {
+            "jobs": [
+                {"name": "rust-gate", "conclusion": "success", "completed_at": done},
+                {"name": "eval-gate", "conclusion": conclusion, "completed_at": done},
+            ]
+        }
+        runs = {"workflow_runs": [{"id": 7, "conclusion": workflow}]}
+
+        def gh(args):
+            if code != 0:
+                return code, "gh: not logged in"
+            return 0, json.dumps(jobs if "/jobs" in args[1] else runs)
+
+        return gh
+
+    def _state(self, gh):
+        return event_log.eval_gate_state(gh, now=self.NOW, max_days=7)
+
+    def test_success_eight_days_ago_is_stale(self):
+        state = self._state(self._gh(job_age_days=8))
+        self.assertEqual(state, event_log.GateStale(8))
+        self.assertFalse(event_log.gate_line(state)[0])
+
+    def test_success_one_day_ago_is_fresh(self):
+        state = self._state(self._gh(job_age_days=1))
+        self.assertEqual(state, event_log.GateFresh(1))
+        self.assertTrue(event_log.gate_line(state)[0])
+
+    def test_gh_unavailable_is_unmeasurable_and_red(self):
+        state = self._state(self._gh(code=127))
+        self.assertIsInstance(state, event_log.GateUnmeasurable)
+        ok, line = event_log.gate_line(state)
+        self.assertFalse(ok)
+        self.assertIn("못 잼", line)
+
+    def test_workflow_green_but_eval_gate_job_failed_is_red(self):
+        state = self._state(self._gh(workflow="success", conclusion="failure"))
+        self.assertEqual(state, event_log.GateFailed("failure", 1))
+        self.assertFalse(event_log.gate_line(state)[0])
+
+    def test_workflow_red_but_eval_gate_job_green_is_fresh(self):
+        state = self._state(self._gh(workflow="failure", conclusion="success"))
+        self.assertEqual(state, event_log.GateFresh(1))
+
+    def test_missing_job_is_unmeasurable(self):
+        def gh(args):
+            if "/jobs" in args[1]:
+                return 0, json.dumps({"jobs": []})
+            return 0, json.dumps({"workflow_runs": [{"id": 7}]})
+
+        self.assertIsInstance(self._state(gh), event_log.GateUnmeasurable)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
