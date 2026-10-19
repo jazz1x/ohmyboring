@@ -467,6 +467,53 @@ case "$(cat "$TMP/stale-marker.out")" in
     ;;
 esac
 
+# (d2b) dead markers vs the reviewed known-losses list (data/contract/known-losses.tsv:
+# session id <TAB> note ref). Listed = informational line; unlisted = red.
+write_known_losses() {
+    mkdir -p "$1/boring/data/contract"
+    printf 'aaaaaaaa-0000-0000-0000-000000000001\tdecision-test-1\n' >"$1/boring/data/contract/known-losses.tsv"
+}
+
+make_case "$TMP/dead-unlisted" yes
+write_known_losses "$TMP/dead-unlisted"
+touch "$TMP/dead-unlisted/home/.cache/boring-distill/bbbbbbbb-0000-0000-0000-000000000002.dead"
+if run_strict "$TMP/dead-unlisted" "$TMP/dead-unlisted.out"; then
+    cat "$TMP/dead-unlisted.out"
+    echo "FAIL: an unlisted dead marker must turn strict doctor red" >&2
+    exit 1
+fi
+case "$(cat "$TMP/dead-unlisted.out")" in
+  *"✗ marker health failed"*) ;;
+  *) cat "$TMP/dead-unlisted.out"; echo "FAIL: unlisted dead marker not reported as marker health failure" >&2; exit 1 ;;
+esac
+
+make_case "$TMP/dead-listed" yes
+write_known_losses "$TMP/dead-listed"
+touch "$TMP/dead-listed/home/.cache/boring-distill/aaaaaaaa-0000-0000-0000-000000000001.dead"
+if ! run_strict "$TMP/dead-listed" "$TMP/dead-listed.out"; then
+    cat "$TMP/dead-listed.out"
+    echo "FAIL: a listed dead marker must not turn strict doctor red" >&2
+    exit 1
+fi
+case "$(cat "$TMP/dead-listed.out")" in
+  *"known losses 1 (decision-test-1)"*) ;;
+  *) cat "$TMP/dead-listed.out"; echo "FAIL: listed dead marker not shown as 'known losses 1 (decision-test-1)'" >&2; exit 1 ;;
+esac
+
+make_case "$TMP/dead-mixed" yes
+write_known_losses "$TMP/dead-mixed"
+touch "$TMP/dead-mixed/home/.cache/boring-distill/aaaaaaaa-0000-0000-0000-000000000001.dead"
+touch "$TMP/dead-mixed/home/.cache/boring-distill/bbbbbbbb-0000-0000-0000-000000000002.dead"
+if run_strict "$TMP/dead-mixed" "$TMP/dead-mixed.out"; then
+    cat "$TMP/dead-mixed.out"
+    echo "FAIL: a listed plus an unlisted dead marker must still be red" >&2
+    exit 1
+fi
+case "$(cat "$TMP/dead-mixed.out")" in
+  *"dead_letter=1 "*"✗ marker health failed"*|*"✗ marker health failed"*) ;;
+  *) cat "$TMP/dead-mixed.out"; echo "FAIL: mixed case not reported red" >&2; exit 1 ;;
+esac
+
 make_case "$TMP/invalid-ttl" yes
 if ( BORING_READINESS_PENDING_TTL=abc run_strict "$TMP/invalid-ttl" "$TMP/invalid-ttl.out" ); then
     cat "$TMP/invalid-ttl.out"
