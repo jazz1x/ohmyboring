@@ -196,7 +196,8 @@ class _Selected:
 def _wiki_selected(result: wiki.WikiResult, args: Args, seams: Seams) -> Either[_Selected, Failed]:
     size = min(args.max_results, len(result.hits))
     threshold = result.hits[size - 1].score
-    pool_hits = [hit for hit in result.hits if hit.score >= threshold]
+    pool_hits = [hit for hit in result.hits if hit.exact_title or hit.score >= threshold]
+    lifted = max(hit.score for hit in pool_hits) + 1
     match seams.rank_facts(sorted({hit.source_path for hit in pool_hits})):
         case Err(detail):
             return Err(Failed(f"wiki recall order: rank: rank facts lookup: {detail}"))
@@ -206,7 +207,8 @@ def _wiki_selected(result: wiki.WikiResult, args: Args, seams: Seams) -> Either[
             )
             scored = [
                 rank.Scored(
-                    rank.Hit(c.hit.id, c.hit.snippet, "", "", c.hit.source_path, 0.0, "wiki"), c.hit.score
+                    rank.Hit(c.hit.id, c.hit.snippet, "", "", c.hit.source_path, 0.0, "wiki"),
+                    lifted if c.hit.exact_title else c.hit.score,
                 )
                 for c in pool[:size]
             ]

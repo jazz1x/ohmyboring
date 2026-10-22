@@ -12,6 +12,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 - **아침 카드의 「짚어 둔 것」 글을 카드 앞 cron 단계(`advice-write`)가 미리 쓴다 — 08:00 카드 실행은 모델을 부르지 않는다 (카드 퇴고 C2-1)** — `card_advice_write.py` 가 조언을 쓰고 목표 하나·선 하나로 한 번 다시 쓴 뒤 `card_advice_written` 사건으로 남기고, 카드는 그 사건을 읽기만 한다(없으면 조언 칸을 비운다). 다시 쓴 글이 기계 검사(내부 이름·영문 식별자·wiki 번호·경로·해시)에 두 번 걸리면 원문을 싣고 `revise=kept_original`, 숫자를 잃으면 원문과 `lost_facts`. 문 `POST /run/advice-write`, 출입구 `agents/hermes/run-advice-write.py`.
 
 ### Fixed
+- **MCP recall 질의가 노트 제목과 같으면 그 노트가 1위다** — wiki 직독 점수(본문 출현 + 3·제목 출현 + 맞은 항 수)에서 본문 빈도가 제목 일치를 이겨, 「global-judge 판정 인계 2026-10-23 새벽」 질의에 그 제목의 wiki-7115(27점)가 본문에 「판정」 24번인 노트(31점)에 밀려 k=3 밖으로 빠졌다. `WikiHit.exact_title`(질의·제목을 casefold·공백 접기로 비교)이 정렬 키 맨 앞이고, `_wiki_selected` 는 그 노트를 점수 컷과 무관하게 후보에 넣고 `order_within_set` 에 넘기는 점수만 후보 최고점+1 로 올린다 — 표시 점수는 그대로, 대체된 노트는 여전히 밀린다. 엔진(wiki_recall.rs)은 옛 순서라 이런 질의의 `recall_shadow` 는 `mismatch` 로 남는다(의도한 차이, 읽기는 #458 부터 파이썬).
 - **MCP recall 에 번호(wiki-NNNN)를 넣으면 그 노트 본문이 끝까지 붙는다** — 끝줄 안내(「노트 전체 블록이 앞에 붙는다」)와 달리 `named.note_block` 이 본문을 800자에서 잘랐다. `note_block` 에 기본값 없는 `body_chars` 를 두고 문은 `None`(전체), hermes 슬랙 플러그인은 `800`(출력 그대로)을 넘긴다.
 - **drudge TLS 의존성 보안 권고 두 건 대응 (RUSTSEC-2026-0382·0383)** — `rustls-webpki` 0.103.15→0.103.16, `webpki-root-certs` 1.0.9→1.0.10. 신뢰가 철회된 중간 인증서를 받아들일 수 있던 문제. `Cargo.lock` 만 바뀌고 다른 crate 변화는 없다.
 - **peek 의 이중 기록 메모가 닫힌 판정 창을 「기록」으로, 지금의 경보를 doctor d5c(최근 7일)로 가리킨다** — 반환 키(`extra_in`·`extra_out` 등)와 숫자는 그대로, 메모 문구만 doctor d5c 와 맞췄다. 닫힌 창 밖의 중복을 「지금 열린 창」으로 읽던 표현을 없앴다.

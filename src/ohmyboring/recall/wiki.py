@@ -31,6 +31,7 @@ class WikiHit:
     source_path: str
     snippet: str
     score: float
+    exact_title: bool = False
 
 
 @dataclass(frozen=True)
@@ -138,13 +139,18 @@ def search(docs: Iterable[_Doc], ask: Ask, now_ns: int) -> list[WikiHit]:
             return doc.project == ask.project
         return cutoff is None or doc.mtime_ns >= cutoff
 
+    asked = _normalized(ask.query)
     hits = [
-        WikiHit(doc.id, doc.title, doc.source_path, scored[1], scored[0])
+        WikiHit(doc.id, doc.title, doc.source_path, scored[1], scored[0], _normalized(doc.title) == asked)
         for doc in docs
         if kept(doc) and (scored := score_lower(doc.title_lower, doc.body_lower, terms)) is not None
     ]
-    hits.sort(key=lambda hit: (-hit.score, -_creation_order(hit.id), hit.source_path))
+    hits.sort(key=lambda hit: (not hit.exact_title, -hit.score, -_creation_order(hit.id), hit.source_path))
     return hits
+
+
+def _normalized(text: str) -> str:
+    return " ".join(text.casefold().split())
 
 
 def _creation_order(note_id: str) -> int:
