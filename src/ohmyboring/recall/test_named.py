@@ -60,18 +60,28 @@ def test_named_ids_in_order_without_duplicates():
 
 
 def test_note_block_renders_title_date_and_body_head():
-    block = named.note_block("wiki-2121", _NOTE, _split)
+    block = named.note_block("wiki-2121", _NOTE, _split, body_chars=800)
     assert block.startswith("- 노트 wiki-2121 — 카드·주간 브리핑을 hermes 가 실행\n")
     assert "날짜: 2026-09-28" in block
     assert "첫째 문단 — 카드와 주간 브리핑을 hermes 가 실행하게 했다." in block
 
 
+def test_note_block_body_chars_none_gives_the_whole_body():
+    # 문은 FULL_BODY_HINT 로 「노트 전체 블록」을 약속한다 — 800자 넘는 본문이 끝까지 나와야 한다.
+    tail = "끝줄 — 여기까지 와야 전체다."
+    long_note = _NOTE + "가" * 1500 + "\n" + tail + "\n"
+    whole = named.note_block("wiki-2121", long_note, _split, body_chars=None)
+    assert whole.endswith(tail), whole[-60:]
+    slack = named.note_block("wiki-2121", long_note, _split, body_chars=800)
+    assert len(slack.splitlines()[-1]) == 2 + 800, "슬랙은 앞 800자 그대로"
+
+
 def test_note_block_says_missing_out_loud():
-    assert named.note_block("wiki-9999", None, _split) == "- wiki-9999 은 볼트에 없음"
+    assert named.note_block("wiki-9999", None, _split, body_chars=800) == "- wiki-9999 은 볼트에 없음"
 
 
 def test_note_block_tolerates_no_frontmatter():
-    block = named.note_block("wiki-0001", "머리말 없는 본문", _split)
+    block = named.note_block("wiki-0001", "머리말 없는 본문", _split, body_chars=800)
     assert block.startswith("- 노트 wiki-0001 — (제목 없음)\n")
     assert "머리말 없는 본문" in block
 
@@ -99,6 +109,7 @@ def test_read_note_returns_text_and_none_only_for_missing():
 if __name__ == "__main__":
     test_named_ids_in_order_without_duplicates()
     test_note_block_renders_title_date_and_body_head()
+    test_note_block_body_chars_none_gives_the_whole_body()
     test_note_block_says_missing_out_loud()
     test_note_block_tolerates_no_frontmatter()
     test_read_note_returns_text_and_none_only_for_missing()

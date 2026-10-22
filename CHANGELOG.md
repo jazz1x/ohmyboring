@@ -11,6 +11,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 - **아침 카드의 「짚어 둔 것」 글을 카드 앞 cron 단계(`advice-write`)가 미리 쓴다 — 08:00 카드 실행은 모델을 부르지 않는다 (카드 퇴고 C2-1)** — `card_advice_write.py` 가 조언을 쓰고 목표 하나·선 하나로 한 번 다시 쓴 뒤 `card_advice_written` 사건으로 남기고, 카드는 그 사건을 읽기만 한다(없으면 조언 칸을 비운다). 다시 쓴 글이 기계 검사(내부 이름·영문 식별자·wiki 번호·경로·해시)에 두 번 걸리면 원문을 싣고 `revise=kept_original`, 숫자를 잃으면 원문과 `lost_facts`. 문 `POST /run/advice-write`, 출입구 `agents/hermes/run-advice-write.py`.
 
 ### Fixed
+- **MCP recall 에 번호(wiki-NNNN)를 넣으면 그 노트 본문이 끝까지 붙는다** — 끝줄 안내(「노트 전체 블록이 앞에 붙는다」)와 달리 `named.note_block` 이 본문을 800자에서 잘랐다. `note_block` 에 기본값 없는 `body_chars` 를 두고 문은 `None`(전체), hermes 슬랙 플러그인은 `800`(출력 그대로)을 넘긴다.
 - **drudge TLS 의존성 보안 권고 두 건 대응 (RUSTSEC-2026-0382·0383)** — `rustls-webpki` 0.103.15→0.103.16, `webpki-root-certs` 1.0.9→1.0.10. 신뢰가 철회된 중간 인증서를 받아들일 수 있던 문제. `Cargo.lock` 만 바뀌고 다른 crate 변화는 없다.
 - **peek 의 이중 기록 메모가 닫힌 판정 창을 「기록」으로, 지금의 경보를 doctor d5c(최근 7일)로 가리킨다** — 반환 키(`extra_in`·`extra_out` 등)와 숫자는 그대로, 메모 문구만 doctor d5c 와 맞췄다. 닫힌 창 밖의 중복을 「지금 열린 창」으로 읽던 표현을 없앴다.
 - **doctor 가 문(door) 이미지가 COPY 경로의 마지막 커밋보다 옛것이면 DEPLOY DRIFT 빨강을 낸다 (d5d)** — COPY 경로는 `agents/door/Dockerfile` 의 `COPY` 줄에서 실행 때 읽고, 컨테이너 `boring-door` 의 `.Created` 와 그 경로들의 마지막 커밋 시각(`git log -1 -- <경로>`)을 줄에 같이 찍는다. docker 없음·컨테이너 없음·inspect/git 실패·시각 파싱 실패는 「측정 불가」 빨강이다(통과 아님). `door-build` 를 빼먹은 머지가 초록으로 보이던 구멍. 실패 플래그는 별도(`failed_door_image`)이고 `--fix` 는 문을 다시 짓지 않고 `make door-build && make door-up` 한 줄만 안내한다.

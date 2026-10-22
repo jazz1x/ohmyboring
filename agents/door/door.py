@@ -409,7 +409,7 @@ def _note_block_for(note_id: str) -> str:
     """번호 하나의 블록 — 볼트에서 노트 텍스트를 읽어(없으면 None) 공용 블록 렌더에 넘긴다.
     볼트를 못 읽는 OSError 는 여기서 삼키지 않는다 — 호출자가 회상 자체를 죽이지 않게 받는다."""
     text = vault_notes.read_note(_vault_dir(), note_id)
-    return recall_named.note_block(note_id, text, vault_note.split_frontmatter)
+    return recall_named.note_block(note_id, text, vault_note.split_frontmatter, body_chars=None)
 
 
 def _augment_mcp_recall(body: bytes, response: Response) -> Response:
