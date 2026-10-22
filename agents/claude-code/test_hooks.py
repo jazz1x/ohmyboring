@@ -520,6 +520,41 @@ class DistillExitCodeTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def _pending_after_session_end(self, env):
+        """One SessionEnd through the real queue into a scratch marker dir; the .pending files left."""
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write("{}\n")
+            path = f.name
+        payload = {
+            "transcript_path": path,
+            "session_id": "abc",
+            "cwd": "/work/x",
+            "hook_event_name": "SessionEnd",
+        }
+        try:
+            with (
+                tempfile.TemporaryDirectory() as mark_dir,
+                mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "spool", **env}),
+                mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
+                mock.patch.object(distill.sys, "stderr", io.StringIO()),
+                mock.patch.object(distill, "extract", return_value="x" * 600),
+                mock.patch.object(distill, "git_remote_url", return_value=""),
+                mock.patch.object(distill, "repo_slug", return_value="x"),
+                mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
+                mock.patch.object(distill.distill_queue.markers, "MARK_DIR", mark_dir),
+            ):
+                self.assertEqual(distill.main(), 0)
+                return sorted(p.name for p in Path(mark_dir).glob("*.pending"))
+        finally:
+            os.unlink(path)
+
+    def test_distill_skip_1_leaves_no_pending(self):
+        self.assertEqual(self._pending_after_session_end({"BORING_DISTILL_SKIP": "1"}), [])
+
+    def test_without_distill_skip_the_session_is_pending(self):
+        os.environ.pop("BORING_DISTILL_SKIP", None)
+        self.assertEqual(self._pending_after_session_end({}), ["abc.pending"])
+
     def test_run_returns_nonzero_on_crash(self):
         stderr = io.StringIO()
         with (
