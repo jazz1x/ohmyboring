@@ -294,6 +294,12 @@ class SessionStartRecallTests(unittest.TestCase):
         out, _err = self._run_main({"hook_event_name": "UserPromptSubmit", "cwd": "/x"})
         self.assertEqual(out, "")
 
+    def test_recall_max_results_zero_prints_nothing(self):
+        # RECALL_MAX_RESULTS=0 은 매 턴 회상을 끈다 — 시작 블록도 같이 꺼져야 한다(0바이트).
+        with mock.patch.object(recall_core, "MAX_RESULTS", 0):
+            out, _err = self._run_main({"hook_event_name": "SessionStart", "cwd": "/tmp/my-project"})
+        self.assertEqual(out, "")
+
     def test_failed_context_is_silent(self):
         out, _err = self._run_main(
             {"hook_event_name": "SessionStart", "cwd": "/x"},
