@@ -145,7 +145,14 @@ def search(docs: Iterable[_Doc], ask: Ask, now_ns: int) -> list[WikiHit]:
         for doc in docs
         if kept(doc) and (scored := score_lower(doc.title_lower, doc.body_lower, terms)) is not None
     ]
-    hits.sort(key=lambda hit: (not hit.exact_title, -hit.score, -_creation_order(hit.id), hit.source_path))
+    hits.sort(
+        key=lambda hit: (
+            not hit.exact_title,
+            0.0 if hit.exact_title else -hit.score,
+            -_creation_order(hit.id),
+            hit.source_path,
+        )
+    )
     return hits
 
 
