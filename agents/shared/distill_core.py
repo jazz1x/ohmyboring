@@ -312,7 +312,7 @@ def write_consumption_to_graph(session_id, records, transcript_text):
                 print(f"[distill-session] verdict_proposed event failed: {e}", file=sys.stderr)
 
 
-def log_uptake_event(session_id, repo, transcript_text, agent):
+def log_uptake_event(session_id, repo, transcript_text, agent, *, distill_skipped):
     """Record whether the agent used any of what was injected into this session.
 
     Runs at SessionEnd because that is the first moment the whole conversation exists. Emits even
@@ -341,6 +341,9 @@ def log_uptake_event(session_id, repo, transcript_text, agent):
             repo=repo,
             agent=agent,
             injected_prompts=len(records),
+            # The launcher asked for no distillation (BORING_DISTILL_SKIP=1) — said here, on the
+            # row that says the session ended, so the missing queue entry is not a silent drop.
+            distill_skipped=distill_skipped,
         )
         if not records:
             return

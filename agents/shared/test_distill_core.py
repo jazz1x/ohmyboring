@@ -292,7 +292,9 @@ class SessionEndIsRecorded(unittest.TestCase):
     def test_a_session_with_no_injections_still_says_it_ended(self):
         """The session that received nothing is exactly the one the old early return erased, and
         it belongs in the denominator: the channel could have reached it and did not."""
-        distill_core.log_uptake_event("s-empty", "repo", "[assistant] hi\n", "claude-code")
+        distill_core.log_uptake_event(
+            "s-empty", "repo", "[assistant] hi\n", "claude-code", distill_skipped=False
+        )
         events = self._events()
         kinds = [e["event"] for e in events]
         self.assertIn("session_end", kinds)
@@ -311,7 +313,9 @@ class SessionEndIsRecorded(unittest.TestCase):
             }
         ]
         uptake_core.append_record(uptake_core.injection_record("s-scored", "why", hits, 3))
-        distill_core.log_uptake_event("s-scored", "repo", "[assistant] per wiki-0007.\n", "claude-code")
+        distill_core.log_uptake_event(
+            "s-scored", "repo", "[assistant] per wiki-0007.\n", "claude-code", distill_skipped=False
+        )
         kinds = [e["event"] for e in self._events()]
         self.assertIn("session_end", kinds)
         self.assertIn("injection_uptake", kinds)
