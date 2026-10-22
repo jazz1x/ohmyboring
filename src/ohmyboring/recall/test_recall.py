@@ -116,15 +116,18 @@ def test_snippet_comes_from_the_lowercased_body_at_the_first_term_in_query_order
     assert upper is not None and upper[1] == "abc", "snippet 은 소문자 본문"
 
 
-def test_tied_score_puts_the_newer_note_first_but_score_still_leads():
+def test_same_titled_notes_matching_the_query_lead_newest_first_whatever_their_body_scores():
     # 2026-10-07 「ds-governance 판정 인계」: wiki-2760(10-01)·wiki-3834(10-07) 둘 다 20점, 경로순이면 2760 이 1위.
+    # 제목이 질의와 같은 인계 노트끼리는 본문 점수가 아니라 새 노트가 앞이다 (2026-10-23 wiki-7115).
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
         same = "---\ntitle: 판정 인계\n---\n판정 인계 본문"
         _write(d, "wiki-2760.md", same)
         _write(d, "wiki-3834.md", same)
         _write(d, "wiki-0100.md", "---\ntitle: 판정 인계 판정\n---\n판정 인계 판정 본문")
-        assert _ids(_recall(_index(), d, "판정 인계")) == ["wiki-0100", "wiki-3834", "wiki-2760"]
+        assert _ids(_recall(_index(), d, "판정 인계")) == ["wiki-3834", "wiki-2760", "wiki-0100"]
+        _write(d, "wiki-2760.md", "---\ntitle: 판정 인계\n---\n판정 인계 본문 " + "판정 " * 10)
+        assert _ids(_recall(_index(), d, "판정 인계")) == ["wiki-3834", "wiki-2760", "wiki-0100"]
 
 
 def test_project_filter():
@@ -502,6 +505,38 @@ def test_owner_notes_lead_newest_first_and_nothing_outside_the_cut_is_pulled_in(
     assert stub.rank_seen == [["/vault/wiki/old.md"]], "rank_facts 는 컷 안의 경로만 정렬·중복 없이 묻는다"
 
 
+def test_a_query_equal_to_a_title_puts_that_note_first_unless_it_is_superseded():
+    # 2026-10-23 「global-judge 판정 인계 2026-10-23 새벽」: wiki-7115(제목 일치) 27점이 본문에 「판정」 24번인
+    # wiki-6885 31점에 밀려 k=3 밖으로 빠졌다.
+    title = "global-judge 판정 인계 2026-10-23 새벽"
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        _write(d, "wiki-7115.md", f"---\ntitle: {title}\n---\n# 인계\nglobal-judge 판정 인계 2026-10-23 새벽")
+        _write(d, "wiki-6885.md", "---\ntitle: kb 인계\n---\n" + "판정 " * 24)
+        _write(d, "wiki-7110.md", "---\ntitle: omcr 인계 2026-10-23\n---\n" + "인계 2026-10-23 " * 12)
+        _write(d, "wiki-6602.md", "---\ntitle: global-judge 판정 인계 2026-10-21\n---\n" + "판정 인계 " * 10)
+        index = _index()
+
+        def first_three(facts) -> list[str]:
+            seams = answer.Seams(
+                wiki=lambda a: index.recall(d, wiki.Ask(a.query, a.project, a.since_hours), time.time_ns()),
+                rank_facts=lambda paths: Ok(facts),
+                vector=lambda a: Ok([]),
+                superseded_by=lambda paths: Ok({}),
+                current_claims=lambda paths: Ok({}),
+            )
+            recalled = _text(answer.answer(_args(query=f"  {title.upper()} ", max_results=3), seams))
+            return [
+                line.split("]")[0].removeprefix("- [").removesuffix(".md")
+                for line in recalled.text.split("\n\n")
+            ]
+
+        assert first_three({})[0] == "wiki-7115", first_three({})
+        superseded = {str(d / "wiki-7115.md"): _other(True), str(d / "wiki-6885.md"): _other(False)}
+        demoted = first_three(superseded)
+        assert demoted[-1] == "wiki-7115", f"대체된 제목 일치 노트는 밀리되 잘리지 않는다: {demoted}"
+
+
 def test_failed_rank_facts_lookup_fails_the_recall():
     # retrieve::tests::failed_rank_facts_lookup_fails_the_retrieval
     stub = _Seams(wiki_hits=[_hit("a", 1.0)], rank_err="db down")
@@ -686,7 +721,7 @@ if __name__ == "__main__":
     test_title_from_frontmatter_then_heading_then_stem()
     test_snippet_has_leading_ellipsis_only_when_cut_from_inside_the_text()
     test_snippet_comes_from_the_lowercased_body_at_the_first_term_in_query_order()
-    test_tied_score_puts_the_newer_note_first_but_score_still_leads()
+    test_same_titled_notes_matching_the_query_lead_newest_first_whatever_their_body_scores()
     test_project_filter()
     test_since_hours_filters_by_mtime_and_project_overrides_it()
     test_hits_are_cut_to_k_by_score_descending()
@@ -709,6 +744,7 @@ if __name__ == "__main__":
     test_refined_superseded_note_keeps_the_label_and_its_claims_and_hides_overflow()
     test_text_stays_what_the_engine_shadow_compares_against()
     test_failed_claims_lookup_fails_the_recall()
+    test_a_query_equal_to_a_title_puts_that_note_first_unless_it_is_superseded()
     test_run_rejects_before_connecting_and_reports_a_dead_store_as_a_value()
     test_shadow_same_text_is_ok_and_carries_path_and_line_counts()
     test_shadow_mismatch_names_the_first_differing_line_with_80_chars_of_each()
