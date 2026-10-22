@@ -204,7 +204,7 @@ def register(ctx: Any) -> None:
 
     def _block_for(token: str) -> str:
         text = vault_notes.read_note(_vault_dir(), token)
-        return recall_named.note_block(token, text, vault_note.split_frontmatter)
+        return recall_named.note_block(token, text, vault_note.split_frontmatter, body_chars=800)
 
     def _note_blocks(message: str) -> list[str]:
         """One block per wiki-NNNN the message names — the shared renderer
