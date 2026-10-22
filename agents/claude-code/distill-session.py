@@ -50,6 +50,9 @@ def main() -> int:
     except Exception as e:
         print(f"[omb-distill] invalid stdin JSON: {e}", file=sys.stderr)
         return 2
+    # Set by whoever launches the session (a scripted `claude -p` loop): the session still ends on
+    # the ledger, but nothing is queued for distillation.
+    distill_skipped = os.environ.get("BORING_DISTILL_SKIP") == "1"
 
     # Two log lines in the same second are either two sessions or one payload fired
     # twice, and only the id tells those apart.
@@ -76,7 +79,10 @@ def main() -> int:
     if is_final:
         # Before the length gate on purpose: a session too short to be worth distilling still
         # received injections, and whether the agent used them is the same measurement.
-        log_uptake_event(session_id, repo, text, "claude-code")
+        log_uptake_event(session_id, repo, text, "claude-code", distill_skipped=distill_skipped)
+    if distill_skipped:
+        print("[omb-distill] BORING_DISTILL_SKIP=1; not queued", file=sys.stderr)
+        return 0
     if is_automated_run(text):
         # It ended like a session and it distils like one, which is how a scripted review became a
         # quarter of the corpus. Named in the ledger rather than dropped in silence: a skip nobody
