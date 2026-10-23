@@ -22,12 +22,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 EVENT_LOG="$ROOT/src/ohmyboring/adapters/events.py"
 guard_run_id="guard-$(date +%Y%m%dT%H%M%S)-$$"
 guard_started_at="$(date +%s)"
+# Test events go to this temp file, never the live sink. The guard's own result event still
+# goes to the real sink (log_guard_event unsets the variable), then the file is removed.
+export BORING_EVENT_ISOLATED_LOG="$(mktemp -t boring-guard-events.XXXXXX)"
 
 log_guard_event() {
   status="$1"
   shift
   if [ -f "$EVENT_LOG" ]; then
-    if ! python3 "$EVENT_LOG" --record guard structural_guard "$status" \
+    if ! env -u BORING_EVENT_ISOLATED_LOG python3 "$EVENT_LOG" --record guard structural_guard "$status" \
       --field "run_id=$guard_run_id" "$@"; then
       echo "⚠ guard event log write failed" >&2
     fi
@@ -42,6 +45,7 @@ finish_guard_event() {
   else
     log_guard_event failed --field "duration_s=$duration_s" --field "exit_code=$rc"
   fi
+  rm -f "$BORING_EVENT_ISOLATED_LOG"
   exit "$rc"
 }
 
