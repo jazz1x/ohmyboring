@@ -10,6 +10,7 @@ class DistillState(TypedDict, total=False):
     origin: str
     repo: str
     session_id: str
+    session_since: float | None
     resolution: str
     prompt: str
     parsed: dict[str, Any] | None

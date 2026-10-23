@@ -75,11 +75,17 @@ def _transition_marker(target: str, cleanup: tuple[str, ...], text: str) -> None
         _remove_marker(p)
 
 
-def mark_done(session_id: str) -> None:
-    """Write a done marker and clean up any pending/retry/dead markers."""
+def mark_done(session_id: str, upto: float | None = None) -> None:
+    """Write a done marker and clean up any pending/retry/dead markers.
+
+    `upto` is when the distilled text was taken from the transcript; the marker's mtime is set
+    to it so `done_time` says how far the session is already in memory, not when the worker ran.
+    """
     ts, pending, retry, dead = _paths(session_id)
     _ensure_dir()
     _transition_marker(ts, (pending, retry, dead), str(time.time()))
+    if upto is not None:
+        os.utime(ts, (upto, upto))
 
 
 def _read_retry_count(retry_path: str) -> int:

@@ -37,6 +37,15 @@ class DistillQueueTests(unittest.TestCase):
         distill_queue.enqueue(_item("s1", 2.0, "new"))
         self.assertEqual([i.text for i in distill_queue.drain()], ["new"])
 
+    def test_a_continuation_that_failed_keeps_its_since_for_the_next_end(self):
+        markers.mark_done("s1", upto=10.0)
+        since = distill_queue.resume_since("s1")
+        distill_queue.enqueue(
+            distill_queue.QueueItem("s1", "claude-code", "personal", "repo", "뒤", 20.0, since)
+        )
+        markers.mark_retry("s1", reason="queue distill failed")
+        self.assertEqual(distill_queue.resume_since("s1"), 10.0)
+
     def test_drain_is_oldest_first_and_limited(self):
         distill_queue.enqueue(_item("b", 2.0))
         distill_queue.enqueue(_item("a", 1.0))

@@ -96,6 +96,7 @@ class ExistingNote:
     omb_session_id: str | None = None
     author: str = "unknown"
     body: str = ""
+    omb_session_since: int | None = None
 
     @classmethod
     def empty(cls, source_path: str) -> ExistingNote:
@@ -313,6 +314,7 @@ def parse_existing_note(
 
     title = front.get("title")
     omb = front.get("omb_session_id")
+    since = front.get("omb_session_since")
     author = front.get("author")
     claims: list[tuple[str, str, str]] = []
     raw_claims = front.get("claims")
@@ -336,6 +338,7 @@ def parse_existing_note(
         omb_session_id=omb.strip() if isinstance(omb, str) and omb.strip() else None,
         author=author if isinstance(author, str) and author == "owner" else "unknown",
         body=body,
+        omb_session_since=int(since) if isinstance(since, str) and since.isdigit() else None,
     )
 
 
@@ -363,11 +366,25 @@ class VaultView:
     parsed_entries: tuple[tuple[str, ExistingNote], ...] | None = None
 
 
+def _continues_after(incoming_since: int | None, existing_since: int | None) -> bool:
+    """들어온 노트가 기존 노트보다 뒤의 대화를 담았는가 — None 은 세션 처음부터라 가장 이르다.
+
+    엔진 mcp.rs 에는 없는 갈래 조건이다: 이어 쓴 세션의 뒷부분이 같은 세션 노트에 걸려
+    버려지던 것(2026-10-23 측정 4/12 증류)을 막는다. 같은 since 는 지금처럼 걸러진다."""
+    if incoming_since is None:
+        return False
+    return existing_since is None or incoming_since > existing_since
+
+
 def _branch_for(note: RememberNote, existing: ExistingNote) -> str | None:
     """노트 하나에 걸리는 갈래 — mcp.rs:1730-1739 (same_session → probable → exact_title)."""
     target_session = note.front.omb_session_id
     target_title = note.front.title.strip().lower()
-    same_session = target_session is not None and existing.omb_session_id == target_session
+    same_session = (
+        target_session is not None
+        and existing.omb_session_id == target_session
+        and not _continues_after(note.front.omb_session_since, existing.omb_session_since)
+    )
     if same_session:
         return BRANCH_SAME_SESSION
     if probable_session_duplicate(note, existing):

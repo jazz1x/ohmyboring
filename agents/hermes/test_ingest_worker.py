@@ -100,7 +100,7 @@ class IngestWorkerTest(unittest.TestCase):
         self.assertTrue(ingest_worker.markers.is_done("s1"))
         self.assertFalse(ingest_worker.distill_queue.is_queued("s1"))
         run.assert_called_once()
-        text, origin, repo, sid = run.call_args.args
+        text, origin, repo, sid, _since = run.call_args.args
         self.assertEqual((sid, origin, repo), ("s1", "personal", ""))
         self.assertIn("y" * 600, text)  # the clamped transcript is what the engine receives
         # the offer is recorded as queued with the same fields the old pending offer carried
@@ -122,7 +122,7 @@ class IngestWorkerTest(unittest.TestCase):
         self._write_session("s-host")
         ingest_worker.repo_table.write(self.tmp.name, "company", "ds-governance")
         _stdout, run = self._run_main()
-        _text, origin, repo, _sid = run.call_args.args
+        _text, origin, repo, _sid, _since = run.call_args.args
         self.assertEqual((origin, repo), ("company", "ds-governance"))
         offer = self._offer_events("s-host")[0]
         self.assertEqual(
@@ -133,14 +133,14 @@ class IngestWorkerTest(unittest.TestCase):
         self._write_session("s-sub")
         ingest_worker.repo_table.write(os.path.dirname(self.tmp.name), "personal", "ohmyboring")
         _stdout, run = self._run_main()
-        _text, origin, repo, _sid = run.call_args.args
+        _text, origin, repo, _sid, _since = run.call_args.args
         self.assertEqual((origin, repo), ("personal", "ohmyboring"))
         self.assertEqual(self._offer_events("s-sub")[0]["repo_source"], "host")
 
     def test_a_cwd_missing_from_the_table_falls_back_to_the_container_and_says_so(self):
         self._write_session("s-cont")
         _stdout, run = self._run_main()
-        _text, origin, repo, _sid = run.call_args.args
+        _text, origin, repo, _sid, _since = run.call_args.args
         self.assertEqual((origin, repo), ("personal", ""))
         self.assertEqual(self._offer_events("s-cont")[0]["repo_source"], "container")
 
@@ -165,7 +165,7 @@ class IngestWorkerTest(unittest.TestCase):
         os.utime(pending, (stale, stale))
         stdout, run = self._run_main()
         # the drain ran the pre-queued item; the scan did not overwrite it
-        run.assert_called_once_with("preset-text", "personal", "repo", "s-q")
+        run.assert_called_once_with("preset-text", "personal", "repo", "s-q", None)
         self.assertEqual(self._offer_events("s-q"), [])
 
     def test_scan_tops_up_queue_to_one_ticks_worth(self):
@@ -353,7 +353,7 @@ class IngestWorkerTest(unittest.TestCase):
         self._queue("q-a-boom")
         self._queue("q-b-good")
 
-        def graph(text, origin, repo, sid):
+        def graph(text, origin, repo, sid, since):
             if sid == "q-a-boom":
                 raise TypeError("expected string or bytes-like object, got 'int'")
             return True
@@ -431,7 +431,7 @@ class IngestWorkerTest(unittest.TestCase):
     def test_queue_success_marks_done_and_removes_file(self):
         self._queue("q-ok")
         run = self._drain_with(True)
-        run.assert_called_once_with("text", "personal", "repo", "q-ok")
+        run.assert_called_once_with("text", "personal", "repo", "q-ok", None)
         self.assertTrue(self._done_exists("q-ok"))
         self.assertFalse(ingest_worker.distill_queue.is_queued("q-ok"))
         self.assertEqual(self._last_event()["status"], "ok")

@@ -5,7 +5,7 @@ from __future__ import annotations
 from ohmyboring.distill.graph import graph
 
 
-def distill_and_remember(text, origin, repo, session_id=""):
+def distill_and_remember(text, origin, repo, session_id="", session_since=None):
     """Distill the transcript text via local LLM and write it through ohmyboring's remember tool."""
     final = graph.invoke(
         {
@@ -13,6 +13,7 @@ def distill_and_remember(text, origin, repo, session_id=""):
             "origin": origin,
             "repo": repo,
             "session_id": session_id,
+            "session_since": session_since,
             "verifier_status": "pass",
             "ok": False,
         }

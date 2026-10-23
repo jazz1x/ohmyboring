@@ -214,7 +214,7 @@ def _within_backstop(text):
 
 def _distill(item):
     return distill_run.distill_and_remember(
-        _within_backstop(item.text), item.origin, item.repo, item.session_id
+        _within_backstop(item.text), item.origin, item.repo, item.session_id, item.since
     )
 
 
@@ -232,7 +232,7 @@ def _drain_one(item):
         return Drain("skipped", "already_done")
     attempt = _attempt(item)
     if attempt.status == "ok":
-        markers.mark_done(item.session_id)
+        markers.mark_done(item.session_id, upto=item.enqueued_at)
         distill_queue.remove(item.session_id)
         return attempt
     markers.mark_retry(item.session_id, reason=attempt.reason)

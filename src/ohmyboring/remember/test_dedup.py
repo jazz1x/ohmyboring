@@ -75,6 +75,7 @@ def _note(title: str, body: str, **fields) -> RememberNote:
         sources=fields.get("sources", ()),
         omb_session_id=fields.get("session"),
         author=fields.get("author", "unknown"),
+        omb_session_since=fields.get("since"),
     )
     return RememberNote(front=front, body=body)
 
@@ -299,6 +300,15 @@ class CheckDuplicateTests(unittest.TestCase):
                 self.assertEqual(found.source_path, "/vault/wiki/wiki-100.md")
             case other:
                 self.fail(f"expected Ok, got {other!r}")
+
+    def test_continuation_of_same_session_is_not_its_duplicate(self):
+        files = {"wiki-100": _note_text("wiki-100", "다른 제목", "다른 본문", session="sess-1")}
+        note = _note("배포", "배포 본문", session="sess-1", since=1792713141)
+        match check_duplicate(note=note, vault=_vault(files), nearest_document=None):
+            case Ok(found):
+                self.assertIsNone(found, "첫 노트 뒤 대화만 담은 노트는 같은 세션 중복이 아니다")
+            case other:
+                self.fail(f"expected Ok(None), got {other!r}")
 
     def test_exact_title_without_session(self):
         files = {"wiki-100": _note_text("wiki-100", "배포 절차", "전혀 다른 본문")}
