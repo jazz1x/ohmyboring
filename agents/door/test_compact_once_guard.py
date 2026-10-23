@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import io
 import os
 import sys
@@ -13,7 +14,7 @@ from unittest import mock
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path[:0] = [_ROOT, os.path.join(_ROOT, "src")]
 
-from agents.door import compact_once  # noqa: E402
+compact_once = importlib.import_module("agents.door.compact_once")
 
 COPY_DSN = "postgresql://scratch/copy"
 LIVE_DSN = "postgresql://live/boring"
