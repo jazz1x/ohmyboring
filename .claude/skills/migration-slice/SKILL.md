@@ -16,7 +16,7 @@ description: drudge → Python 스트랭글러 이전의 슬라이스 하나를 
 1. 계약은 `data/loop/cycle-N.yaml` (gitignore, 레포 밖 취급). 형식은 직전 cycle 파일을 복사해 시작한다. 적어도 goal · non_goals · baseline{sha, expiry} · constraints · acceptance_criteria · work_items[{id, objective, expected_files, validation_commands}] · routing{execution_model, reviewer_model} 을 담는다. `baseline.sha` = 트렁크 HEAD, `given` 에 워커가 뒤질 필요 없는 사실을 심볼 단위로 — **한 줄마다 그 주장을 만든 명령 출력이 같은 턴에 있어야 적는다**(사이클 2·3 의 given 이 틀려 워커가 30분씩 헤맸다).
 2. preflight: `origin/feat/migration-python` 이 baseline 과 같아야 dispatch. 아니면 PARK.
 3. 구현: 계약을 새 맥락의 Sonnet 워커에 넘긴다(워크트리). 커밋 정확히 1개, amend·push 금지.
-4. 검증: 계약을 쓴 세션이 아닌 독립 컨텍스트(Opus). 입력은 계약·diff·구현 보고·게이트 출력만. 변이는 사본(`cp`)에서, `__pycache__` 비우고. 판정 필드 `verdict / contract_defects / edge_necessity / mutants_run`.
+4. 검증: 계약을 쓴 세션이 아닌 독립 컨텍스트(Opus). 입력은 계약·diff·구현 보고·게이트 출력만. 변이는 사본(`cp`)에서, `__pycache__` 비우고. 판정 필드 `verdict / contract_defects / edge_necessity / mutants_run`. 사본 DB 로 도는 실행(`--dsn` 등)은 사건도 사본 쪽에 둔다: `BORING_EVENT_SINK=spool BORING_EVENT_LOG=<임시 경로>` 로 띄운다(기본 spool 은 `replay_spool` 이 라이브로 올린다. measuring-windows 42행과 같은 스위치다). 10-23 `compact_once --dsn` 이 라이브 event_log 에 compact_run 1행을 남겼다.
 5. PASS 면 오케스트레이터가 push → #396 CI(계약 파리티 + eval-gate). 빨강이면 게이트가 맞는지 먼저 본다(사이클 1: 게이트가 맞았고 계약이 틀렸다).
 6. 배달까지가 사이클이다 — 계약의 마지막 work_item 은 `delivering` 스킬대로 배달하고 소비자 산출물을 인용하는 것.
 7. 카드 뜻은 각서 6장이 정본이다 — 「해」는 승인(학습 신호 아님), 제안은 실행할 것/짚어 둔 것 두 칸, 「미뤄」는 실행 칸에만·순위에 안 들어감, 제안은 문제지로 기록. 계약에 옮겨 적지 말고 가리킨다.
