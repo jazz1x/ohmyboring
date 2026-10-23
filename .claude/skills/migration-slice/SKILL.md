@@ -13,9 +13,9 @@ description: drudge → Python 스트랭글러 이전의 슬라이스 하나를 
 - 그 한 줄은 **소유자 손에 닿는 곳**을 가리켜야 한다 — 슬랙에 온 카드, 크론이 낸 산출물, 훅이 주입한 줄. 「브랜치에 있다」는 닿은 것이 아니다(사이클 1~11: 초록 16커밋, 건넨 것 0 — 재고는 단계형 개발의 산물이다).
 
 ## 절차
-1. 계약은 `data/loop/cycle-N.yaml` (gitignore, 레포 밖 취급). 형식·필수 필드는 `~/.claude/orca-model-routing.md` §1 Contract Map. `baseline.sha` = 트렁크 HEAD, `given` 에 워커가 뒤질 필요 없는 사실을 심볼 단위로 — **한 줄마다 그 주장을 만든 명령 출력이 같은 턴에 있어야 적는다**(사이클 2·3 의 given 이 틀려 워커가 30분씩 헤맸다).
+1. 계약은 `data/loop/cycle-N.yaml` (gitignore, 레포 밖 취급). 형식은 직전 cycle 파일을 복사해 시작한다. 적어도 goal · non_goals · baseline{sha, expiry} · constraints · acceptance_criteria · work_items[{id, objective, expected_files, validation_commands}] · routing{execution_model, reviewer_model} 을 담는다. `baseline.sha` = 트렁크 HEAD, `given` 에 워커가 뒤질 필요 없는 사실을 심볼 단위로 — **한 줄마다 그 주장을 만든 명령 출력이 같은 턴에 있어야 적는다**(사이클 2·3 의 given 이 틀려 워커가 30분씩 헤맸다).
 2. preflight: `origin/feat/migration-python` 이 baseline 과 같아야 dispatch. 아니면 PARK.
-3. 구현: `kimi -m kimi-code/kimi-for-coding -p "$(cat 계약)"` 헤드리스. 커밋 정확히 1개, amend·push 금지.
+3. 구현: 계약을 새 맥락의 Sonnet 워커에 넘긴다(워크트리). 커밋 정확히 1개, amend·push 금지.
 4. 검증: 계약을 쓴 세션이 아닌 독립 컨텍스트(Opus). 입력은 계약·diff·구현 보고·게이트 출력만. 변이는 사본(`cp`)에서, `__pycache__` 비우고. 판정 필드 `verdict / contract_defects / edge_necessity / mutants_run`.
 5. PASS 면 오케스트레이터가 push → #396 CI(계약 파리티 + eval-gate). 빨강이면 게이트가 맞는지 먼저 본다(사이클 1: 게이트가 맞았고 계약이 틀렸다).
 6. 배달까지가 사이클이다 — 계약의 마지막 work_item 은 `delivering` 스킬대로 배달하고 소비자 산출물을 인용하는 것.
