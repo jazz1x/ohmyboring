@@ -28,10 +28,14 @@ def parse_hours(raw: str | None) -> Either[float, str]:
 
 
 def run_once(deps: SyncDeps) -> None:
-    """한 회차 — 회차 전체의 DB·파일 고장은 오류 사건으로 남기고 스레드는 다음 회차를 기다린다."""
+    """한 회차 — 어떤 예외든 오류 사건(종류·메시지)과 stderr 한 줄로 남기고 스레드는 다음 회차를 기다린다.
+
+    넓게 잡는 곳은 회차 경계 하나뿐이다(소유자 결정, Rust scheduler.rs run_sync 와 같은 계약) —
+    노트별 코드 안에서는 잡지 않는다. 스레드가 말없이 죽어 sync_run 사건이 끊기던 것을 막는다.
+    """
     try:
         run_sync(deps)
-    except (OSError, *deps.db_errors) as e:
+    except Exception as e:
         print(f"[door-sync] run failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         deps.append_event(COMPONENT, EVENT, "error", reason=f"{type(e).__name__}: {e}")
 

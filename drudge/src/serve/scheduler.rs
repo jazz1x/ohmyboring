@@ -296,6 +296,9 @@ pub(crate) fn spawn_scheduler(
         .max(1);
     let sync_interval = Duration::from_secs(sync_hours * 3600);
 
+    // Explicit sync-off: only the vault sync is skipped; compact and the brief keep running.
+    let sync_disabled = config::env_set("BORING_SYNC_DISABLED").as_deref() == Some("1");
+
     let compact_hours: u64 = config::env_set("BORING_COMPACT_HOURS")
         .and_then(|v| v.parse().ok())
         .unwrap_or(24)
@@ -306,11 +309,13 @@ pub(crate) fn spawn_scheduler(
         let store_ref = store.as_deref();
         // run once immediately at startup (compile only if vector off — refreshes wiki).
         // Lock serializes with HTTP /sync so callers wait for the startup baseline.
-        eprintln!(
-            "[scheduler] startup sync (interval={sync_hours}h, compact={compact_hours}h, vector={})",
-            store.is_some()
-        );
-        {
+        if sync_disabled {
+            eprintln!("[scheduler] sync off (BORING_SYNC_DISABLED=1)");
+        } else {
+            eprintln!(
+                "[scheduler] startup sync (interval={sync_hours}h, compact={compact_hours}h, vector={})",
+                store.is_some()
+            );
             let _guard = sync_lock.lock().await;
             run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
         }
@@ -339,10 +344,12 @@ pub(crate) fn spawn_scheduler(
         sync_ticker.tick().await; // the first tick is immediate — discard it (already ran above)
         loop {
             sync_ticker.tick().await;
-            eprintln!("[scheduler] periodic sync");
             {
                 let _guard = sync_lock.lock().await;
-                run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
+                if !sync_disabled {
+                    eprintln!("[scheduler] periodic sync");
+                    run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
+                }
 
                 // Auto-compact at the next sync after the compact interval has passed.
                 // This keeps maintenance aligned with write load rather than running on a fixed clock.

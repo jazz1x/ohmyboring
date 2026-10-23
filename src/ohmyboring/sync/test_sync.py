@@ -25,7 +25,7 @@ for path in (ROOT / "src", ROOT / "agents" / "shared"):
 from vault_note import split_frontmatter  # noqa: E402
 
 from ohmyboring.result import Ok  # noqa: E402
-from ohmyboring.sync import run  # noqa: E402
+from ohmyboring.sync import run, schedule  # noqa: E402
 from ohmyboring.sync.hash import content_hash  # noqa: E402
 
 _DIM = 3
@@ -119,6 +119,42 @@ class SyncHashTests(unittest.TestCase):
             _report, log, _embedded = _sync(wiki, db_shas)
         cleared = {params["doc"] for sql, params in log if sql == _CLEAR_EDGES}
         self.assertEqual(cleared, {f"doc:{edited}"})
+
+
+class _TwoRounds:
+    """stop.wait 자리 — 첫 대기는 다음 회차로 넘기고 두 번째 대기에서 멈춘다. 진짜 잠을 자지 않는다."""
+
+    def __init__(self) -> None:
+        self.waits = 0
+
+    def wait(self, _interval_s: float) -> bool:
+        self.waits += 1
+        return self.waits >= 2
+
+
+class SyncThreadSurvivalTests(unittest.TestCase):
+    def test_unexpected_error_is_recorded_and_next_round_runs(self):
+        events: list = []
+        rounds: list[int] = []
+
+        def connect():
+            rounds.append(1)
+            raise ValueError("bad embed payload")
+
+        deps = run.SyncDeps(
+            wiki_dir="/nonexistent",
+            connect=connect,
+            embed=lambda _text: Ok([0.0] * _DIM),
+            embed_dim=_DIM,
+            split_frontmatter=split_frontmatter,
+            classify_origin=lambda _path: "personal",
+            append_event=lambda *args, **fields: events.append((args, fields)) or True,
+        )
+        schedule.loop(deps, 1.0, _TwoRounds())
+        self.assertEqual(len(rounds), 2)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0][0][2], "error")
+        self.assertEqual(events[0][1]["reason"], "ValueError: bad embed payload")
 
 
 if __name__ == "__main__":

@@ -71,6 +71,7 @@ services:
       BORING_VAULT_DIR: /vault                # remember target + sync corpus (/vault/wiki)
       BORING_VECTOR: ${BORING_VECTOR:-off} # off = wiki-first direct read. on = vector+graph (boring-postgres alongside via --profile vector)
       BORING_SYNC_HOURS: "4"
+      BORING_SYNC_DISABLED: ${BORING_SYNC_DISABLED:-0}  # 1 = the engine skips the vault sync (startup + periodic); compact and the brief keep running
       BORING_BRIEF_HOUR: "8"               # local time (TZ) when the engine writes vault/wiki/daily-brief-YYYY-MM-DD.md
       TZ: Asia/Seoul
     volumes:
