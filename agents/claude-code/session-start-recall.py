@@ -113,6 +113,9 @@ def _emit(resp: dict[str, Any], project: str) -> None:
     except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
         print(f"[omb-start-recall] approved fetch failed: {e}", file=sys.stderr)
 
+    # 2026-10-16~23: 저장소 cwd 의 recall 251/569 가 project 없이 불렸고, project 를 주면 놓친 12/21 이 top5 에 들었다
+    if project:
+        sections.append(f'recall·next_actions·decisions 를 부를 때 project="{project}" 를 넘겨라.')
     sections.append(_format_context(resp, project or "recent work"))
     ctx = "\n\n".join(sections)
     if not ctx.strip():
