@@ -23,6 +23,8 @@ from typing import Any
 DEFAULT_EVENT_LOG = "~/.cache/oh-my-boring/events.ndjson"
 DEFAULT_RECENT_HOURS = 24
 DEFAULT_SERVICE_NAMESPACE = "oh-my-boring"
+# Read at import so a test that clears os.environ later cannot re-open the live sink.
+_ISOLATED_LOG = os.environ.get("BORING_EVENT_ISOLATED_LOG", "")
 
 
 def _door_url() -> str:
@@ -47,6 +49,11 @@ def event_log_path() -> Path:
 
 def append_event(component: str, event: str, status: str, **fields: Any) -> None:
     payload = _event_payload(component, event, status, **fields)
+    if _ISOLATED_LOG:
+        with Path(_ISOLATED_LOG).open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            f.write("\n")
+        return
     db_enabled = _event_sink_url() is not None
     stored_in_db = _try_store_in_engine(payload)
     spool_mode = _event_spool_mode(db_enabled)
