@@ -39,6 +39,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.shadow:
         return _shadow(args.dsn)
+    refusal = event_log.foreign_dsn_refusal(args.dsn, os.environ)
+    if refusal is not None:
+        print(f"[compact] {refusal}", file=sys.stderr)
+        return 2
     deps = run.CompactDeps(
         connect=lambda: psycopg.connect(args.dsn, autocommit=True),
         append_event=event_log.try_append_event,
