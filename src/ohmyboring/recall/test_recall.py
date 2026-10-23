@@ -290,8 +290,10 @@ class _Seams:
         rank_err=None,
         claims=None,
         claims_err=None,
+        vector_err=None,
     ):
         self._claims, self._claims_err = claims or {}, claims_err
+        self._vector_err = vector_err
         self.skipped = 0
         self.calls: list[str] = []
         self.rank_seen: list[list[str]] = []
@@ -321,7 +323,7 @@ class _Seams:
 
     def _vec(self, args):
         self.calls.append("vector")
-        return Ok(self._vector)
+        return Err(self._vector_err) if self._vector_err else Ok(self._vector)
 
     def _sup(self, paths):
         self.calls.append("superseded")
@@ -373,16 +375,46 @@ def test_empty_result_is_the_exact_engine_phrase_and_asks_the_vector_path_once()
     assert stub.calls == ["wiki", "vector"], "빈 결과에는 superseded·claims 를 묻지 않는다"
 
 
-def test_wiki_first_the_vector_path_is_not_asked_when_the_wiki_answers():
-    stub = _Seams(wiki_hits=[_hit("wiki-0001", 3.0, "본문")], vector=[("/vault/wiki/other.md", "x")])
+def _shown(recalled: answer.Recalled) -> list[str]:
+    return [p.rsplit("/", 1)[-1].removesuffix(".md") for p in recalled.shown]
+
+
+def test_a_note_the_wiki_misses_but_the_vector_finds_enters_the_merged_top5():
+    # 2026-10-23 82 질의 측정: 낱말이 하나라도 걸리면 벡터를 안 물어 wiki 밖·벡터 안인 노트가 13개 빠졌다.
+    wiki_hits = [_hit(f"w{i}", 10.0 - i, f"낱말{i}") for i in range(5)]
+    stub = _Seams(
+        wiki_hits=wiki_hits, vector=[("/vault/wiki/x.md", "벡터 본문"), ("/vault/wiki/w0.md", "조각")]
+    )
     recalled = _text(answer.answer(_args(), stub.seams()))
-    assert (recalled.text, recalled.path) == ("- [wiki-0001.md] 본문", "wiki")
-    assert "vector" not in stub.calls
-    assert [p.rsplit("/", 1)[-1] for p in recalled.shown] == ["wiki-0001.md"], "보인 경로 = 답에 실린 줄"
+    assert _shown(recalled) == ["w0", "x", "w1", "w2", "w3"], _shown(recalled)
+    assert recalled.path == "wiki+vector"
+    assert "- [w0.md] 낱말0" in recalled.text, "두 길에 다 있는 노트는 wiki 줄을 보인다"
     stub = _Seams(vector=[("/vault/wiki/v.md", "벡터 본문")])
     assert _text(answer.answer(_args(), stub.seams())) == answer.Recalled(
         "- [v.md] 벡터 본문", "vector", shown=("/vault/wiki/v.md",), refined="- [v.md] 벡터 본문"
     )
+
+
+def test_a_title_match_stays_first_even_when_the_vector_brings_five_other_notes():
+    # #491 은 vector=Ok([]) 로만 쟀다 — 합친 뒤에도 제목 일치가 1위인지
+    hits = [
+        _hit("body-heavy", 31.0),
+        wiki.WikiHit("title", "t", "/vault/wiki/title.md", "s", 27.0, exact_title=True),
+    ]
+    # 벡터 1위가 body-heavy 라 점수만 합치면 body-heavy(1/62+1/61) 가 title(1/61) 을 앞선다
+    vector = [("/vault/wiki/body-heavy.md", "벡터"), *((f"/vault/wiki/v{i}.md", "벡터") for i in range(4))]
+    recalled = _text(answer.answer(_args(), _Seams(wiki_hits=hits, vector=vector).seams()))
+    assert _shown(recalled)[0] == "title", _shown(recalled)
+
+
+def test_a_failed_vector_path_keeps_the_wiki_answer_and_says_which_path_failed():
+    stub = _Seams(wiki_hits=[_hit("w0", 3.0, "본문")], vector_err="embed: refused")
+    recalled = _text(answer.answer(_args(), stub.seams()))
+    assert (recalled.path, recalled.failed) == ("wiki", (("vector", "embed: refused"),))
+    assert recalled.refined.endswith("(vector 길 실패: embed: refused)"), recalled.refined
+    assert recalled.text == "- [w0.md] 본문", "엔진 대조용 text 에는 붙이지 않는다"
+    empty = _text(answer.answer(_args(max_results=0), stub.seams()))  # 낱말 hit 은 있는데 보일 줄이 0
+    assert empty.failed and empty.refined.endswith("(vector 길 실패: embed: refused)"), empty
 
 
 def test_superseded_label_names_the_newer_notes_and_lines_join_with_a_blank_line():
@@ -734,7 +766,9 @@ if __name__ == "__main__":
     test_parse_args_clamps_and_narrows_at_the_boundary()
     test_missing_query_is_rejected_with_the_engine_message()
     test_empty_result_is_the_exact_engine_phrase_and_asks_the_vector_path_once()
-    test_wiki_first_the_vector_path_is_not_asked_when_the_wiki_answers()
+    test_a_note_the_wiki_misses_but_the_vector_finds_enters_the_merged_top5()
+    test_a_title_match_stays_first_even_when_the_vector_brings_five_other_notes()
+    test_a_failed_vector_path_keeps_the_wiki_answer_and_says_which_path_failed()
     test_superseded_label_names_the_newer_notes_and_lines_join_with_a_blank_line()
     test_superseded_top_scorer_is_demoted_not_cut()
     test_owner_notes_lead_newest_first_and_nothing_outside_the_cut_is_pulled_in()
