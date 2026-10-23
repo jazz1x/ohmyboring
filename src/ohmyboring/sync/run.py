@@ -1,8 +1,8 @@
 """4시간 볼트 재색인 — drudge scheduler.rs do_sync → ingest::run + gc_orphans 의 파이썬 이식.
 
 순서: 볼트 wiki 훑기(노트별 판정) → 바뀐 노트만 writer.ingest_changed(remember 와 같은 단계) →
-사라진 파일은 지우지 않고 prune_skipped 사건 → gc_orphans → sync_run 사건 한 줄.
-project_links·audit·anchor 는 이 슬라이스 밖이다(슬라이스 1b).
+사라진 파일은 지우지 않고 prune_skipped 사건 → gc_orphans → project_links(links.py) → audit 집계 →
+sync_run 사건 한 줄. anchor 재고정은 옮기지 않았다(c2 계약 non_goals).
 
 엔진과 다른 두 곳(오너 판정): 해시가 파생 칸을 뺀다, 해시가 같은 노트는 updated_at 도 간선도
 건드리지 않고 건너뛴다. 볼트 파일은 쓰지 않는다 — 엔진의 머리말 자동 수선은 실패로 세고 경로를
@@ -28,6 +28,7 @@ from ohmyboring.remember.writer import (
     ingest_changed,
 )
 from ohmyboring.result import Either, Err, Ok
+from ohmyboring.sync import audit, links
 from ohmyboring.sync.classify import Different, LegacySame, NoRow, Same, judge_sha
 from ohmyboring.sync.note import ClassifyOrigin, SplitFrontmatter, parse_vault_note
 
@@ -72,6 +73,8 @@ class SyncDeps:
     classify_origin: ClassifyOrigin
     append_event: Callable[..., bool]
     db_errors: tuple[type[Exception], ...] = ()
+    #: 엔진 cfg.allow_company_origin — audit 의 clean 판정에만 쓴다.
+    allow_company: bool = False
 
 
 # ── 노트별 판정 ──────────────────────────────────────────────────────────────
@@ -217,15 +220,36 @@ class GcStats:
 
 
 @dataclass(frozen=True)
+class Tail:
+    """gc 뒤 단계의 값 — 투영 개수와 위생 집계. 단계가 DB 고장으로 멈추면 error 에 사유가 남는다."""
+
+    link_report: links.LinksReport = field(default_factory=links.LinksReport)
+    audit_stats: audit.AuditStats | None = None
+    links_error: str | None = None
+    audit_error: str | None = None
+
+
+@dataclass(frozen=True)
 class Report:
     counts: Counts
     gc: GcStats
     elapsed_s: float
+    tail: Tail = field(default_factory=Tail)
+
+
+def _tail_fields(tail: Tail) -> dict[str, Any]:
+    fields = tail.link_report.event_fields()
+    fields["links_error"] = tail.links_error
+    fields["audit_error"] = tail.audit_error
+    if tail.audit_stats is not None:
+        fields.update(tail.audit_stats.event_fields())
+    return fields
 
 
 def _event_fields(report: Report) -> dict[str, Any]:
     c = report.counts
     return {
+        **_tail_fields(report.tail),
         "scanned": c.scanned,
         "new": c.new,
         "changed": c.changed,
@@ -318,6 +342,26 @@ def _doc_shas(deps: SyncDeps) -> dict[str, str]:
         return dict(cur.fetchall())
 
 
+def _run_tail(deps: SyncDeps) -> Tail:
+    """gc 뒤 단계 — 읽기 전용 질의로 relates_to 를 투영하고(파일 쓰기), 위생 집계를 센다. 단계마다 연결을
+    따로 써서 한쪽의 DB 고장이 다른 쪽을 막지 않고, 고장은 사건 칸에 사유로 남는다."""
+    link_report = links.LinksReport()
+    links_error: str | None = None
+    try:
+        with deps.connect() as conn, conn.cursor() as cur:
+            link_report = links.run_links(cur, deps.wiki_dir)
+    except deps.db_errors as e:
+        links_error = f"{type(e).__name__}: {e}"
+    audit_stats: audit.AuditStats | None = None
+    audit_error: str | None = None
+    try:
+        with deps.connect() as conn, conn.cursor() as cur:
+            audit_stats = audit.stats(cur, deps.allow_company)
+    except deps.db_errors as e:
+        audit_error = f"{type(e).__name__}: {e}"
+    return Tail(link_report, audit_stats, links_error, audit_error)
+
+
 def run_sync(deps: SyncDeps) -> Report:
     """한 회차. 연결을 못 여는 것 같은 회차 전체의 고장은 그대로 올라간다 — 부르는 쪽이 사건에 남긴다."""
     started = time.monotonic()
@@ -340,8 +384,12 @@ def run_sync(deps: SyncDeps) -> Report:
         )
     with deps.connect() as conn, conn.cursor() as cur:
         gc = gc_apply(cur)
-    report = Report(counts, gc, time.monotonic() - started)
-    deps.append_event(COMPONENT, EVENT, "ok" if counts.failed == 0 else "warn", **_event_fields(report))
+    tail = _run_tail(deps)
+    report = Report(counts, gc, time.monotonic() - started, tail)
+    clean = counts.failed == 0 and tail.link_report.failed == 0 and tail.links_error is None
+    deps.append_event(
+        COMPONENT, EVENT, "ok" if clean and tail.audit_error is None else "warn", **_event_fields(report)
+    )
     return report
 
 
@@ -396,7 +444,8 @@ def shadow_report(
                 counts.changed += 1
                 counts.chunks += len(verdict.pieces)
     counts.kept_vanished = len(vanished_paths(wiki_dir, db_shas, seen))
-    return Report(counts, gc_preview(cur), time.monotonic() - started)
+    tail = Tail(link_report=links.preview_links(cur, wiki_dir))
+    return Report(counts, gc_preview(cur), time.monotonic() - started, tail)
 
 
 def shadow_json(report: Report, session_read_only: str) -> dict[str, Any]:
@@ -420,5 +469,10 @@ def shadow_json(report: Report, session_read_only: str) -> dict[str, Any]:
             "claim_nodes": report.gc.claim_nodes,
         },
         "failed_paths": c.failed_paths,
+        "links_would_update": report.tail.link_report.would_update,
+        "links_unchanged": report.tail.link_report.unchanged,
+        "links_skipped_seed": report.tail.link_report.skipped_seed,
+        "links_empty": report.tail.link_report.empty,
+        "links_failed": report.tail.link_report.failed,
         "elapsed_s": round(report.elapsed_s, 3),
     }

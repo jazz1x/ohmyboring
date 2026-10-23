@@ -25,7 +25,7 @@ for path in (ROOT / "src", ROOT / "agents" / "shared"):
 from vault_note import split_frontmatter  # noqa: E402
 
 from ohmyboring.result import Ok  # noqa: E402
-from ohmyboring.sync import run, schedule  # noqa: E402
+from ohmyboring.sync import links, run, schedule  # noqa: E402
 from ohmyboring.sync.hash import content_hash  # noqa: E402
 
 _DIM = 3
@@ -37,20 +37,35 @@ def _note(relates_to: str, body: str = "본문 하나") -> str:
     return f'---\ntitle: t\norigin: personal\nkind: note\nrelates_to:\n- "[[{relates_to}]]"\n---\n{body}\n'
 
 
+def _zero_row(sql: str) -> tuple:
+    """집계 질의의 빈 DB 답 — 열 수만 맞춘다(audit 가 풀어 쓰는 두 모양)."""
+    if sql.startswith("SELECT count(*), count(DISTINCT"):
+        return (0, 0)
+    if "FILTER" in sql:
+        return (0, 0, 0, 0)
+    return (0,)
+
+
 class _Cursor:
-    def __init__(self, db_shas: dict[str, str], log: list) -> None:
+    def __init__(self, db_shas: dict[str, str], log: list, answers: dict | None = None) -> None:
         self._db_shas = db_shas
         self._log = log
+        self._answers = answers or {}
         self._rows: list = []
+        self._sql = ""
         self.rowcount = 0
 
     def execute(self, sql, params=None):
         self._log.append((sql, params))
-        self._rows = list(self._db_shas.items()) if sql == _DOC_SHAS else []
+        self._sql = sql
+        if sql == _DOC_SHAS:
+            self._rows = list(self._db_shas.items())
+        else:
+            self._rows = self._answers.get(sql, lambda _params: [])(params)
         return self
 
     def fetchone(self):
-        return self._rows[0] if self._rows else None
+        return self._rows[0] if self._rows else _zero_row(self._sql)
 
     def fetchall(self):
         return list(self._rows)
@@ -63,12 +78,13 @@ class _Cursor:
 
 
 class _Conn:
-    def __init__(self, db_shas: dict[str, str], log: list) -> None:
+    def __init__(self, db_shas: dict[str, str], log: list, answers: dict | None = None) -> None:
         self._db_shas = db_shas
         self._log = log
+        self._answers = answers
 
     def cursor(self):
-        return _Cursor(self._db_shas, self._log)
+        return _Cursor(self._db_shas, self._log, self._answers)
 
     def __enter__(self):
         return self
@@ -77,7 +93,7 @@ class _Conn:
         return False
 
 
-def _sync(wiki: Path, db_shas: dict[str, str]):
+def _sync(wiki: Path, db_shas: dict[str, str], answers: dict | None = None, events: list | None = None):
     log: list = []
     embedded: list[str] = []
 
@@ -87,12 +103,12 @@ def _sync(wiki: Path, db_shas: dict[str, str]):
 
     deps = run.SyncDeps(
         wiki_dir=str(wiki),
-        connect=lambda: _Conn(db_shas, log),
+        connect=lambda: _Conn(db_shas, log, answers),
         embed=embed,
         embed_dim=_DIM,
         split_frontmatter=split_frontmatter,
         classify_origin=lambda _path: "personal",
-        append_event=lambda *args, **fields: True,
+        append_event=lambda *args, **fields: events is None or events.append((args, fields)) or True,
     )
     return run.run_sync(deps), log, embedded
 
@@ -119,6 +135,26 @@ class SyncHashTests(unittest.TestCase):
             _report, log, _embedded = _sync(wiki, db_shas)
         cleared = {params["doc"] for sql, params in log if sql == _CLEAR_EDGES}
         self.assertEqual(cleared, {f"doc:{edited}"})
+
+
+class SyncLinksTests(unittest.TestCase):
+    def test_round_projects_links_after_gc_and_reports_them_in_the_event(self):
+        events: list = []
+        answers = {links.RELATED_DOCS_SQL: lambda _p: [("doc:/vault/wiki/wiki-0002.md", 2)]}
+        with tempfile.TemporaryDirectory() as tmp:
+            wiki = Path(tmp)
+            note = wiki / "wiki-0001.md"
+            note.write_text(_note("wiki-0009"), encoding="utf-8")
+            db_shas = {str(note): content_hash(_note("wiki-0009"))}
+            _report, log, embedded = _sync(wiki, db_shas, answers, events)
+            written = note.read_text(encoding="utf-8")
+        self.assertIn('- "[[wiki-0002]]"', written)
+        self.assertEqual(embedded, [])
+        sqls = [sql for sql, _ in log]
+        self.assertGreater(sqls.index(links.RELATED_DOCS_SQL), sqls.index(run._GC_DOOMED_SQL))
+        fields = events[-1][1]
+        self.assertEqual((fields["links_updated"], fields["links_empty"]), (1, 0))
+        self.assertIn("audit_total_chunks", fields)
 
 
 class _TwoRounds:

@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Changed
+- **문의 파이썬 sync 회차가 끝에서 wiki 노트의 `relates_to` 를 다시 계산하고 위생 집계를 `sync_run` 사건에 싣는다** — `BORING_SYNC_DISABLED=1` 전환(2026-10-23 07:42Z) 뒤 엔진의 `project_links`·`audit::stats` 가 멈춰 새 노트의 `relates_to` 가 비어 있던 것(07:42Z 뒤 쓰인 wiki 25개 모두). gc 뒤에 `projection.rs` 와 같은 SQL 셋·병합·머리말 고쳐 쓰기로 한 번 돌고(링크 0 이면 안 건드림, seed 노트 건너뜀, 같은 내용이면 안 씀), 사건에 `links_*`·`audit_*` 칸이 붙는다. `--shadow` 는 `links_would_update` 를 센다(쓰기 0). `DOOR_SYNC_OWNER=engine` 이면 그대로다.
 - **문의 파이썬 sync 스레드는 어떤 예외에도 죽지 않고, 엔진은 `BORING_SYNC_DISABLED=1` 로 볼트 sync 만 끈다** — 파이썬 회차에서 `OSError`·DB 오류 밖의 예외(`ValueError` 등)가 나면 스레드가 `sync_run` 사건 없이 조용히 끝나던 것을, 회차 경계에서 종류·메시지를 사건과 stderr 에 남기고 다음 회차에 다시 돌게 했다(Rust `run_sync` 와 같은 계약). 엔진 쪽 새 스위치는 기동·주기 sync 만 건너뛰고 compact·08:00 브리핑은 그대로 돌며, 기본값 0, `BORING_SYNC_HOURS=0` 은 여전히 1 로 올린다.
 - **세션 시작 블록이 저장소 cwd 에서 `project="<slug>"` 를 넘기라고 한 줄 알린다** — 저장소 cwd 의 recall 251/569 가 project 없이 불리던 것. 저장소가 아닌 cwd 에는 줄을 넣지 않는다(자리 이름을 정할 규칙이 없다).
 - **`recall` 도구가 낱말 길과 벡터 길을 둘 다 물어 RRF(k=60)로 합친다** — 낱말이 하나라도 걸리면 벡터를 안 묻던 것. 제목 일치 노트는 맨 앞에 고정된다. 벡터 길이 실패하면 낱말 결과는 그대로 나가고 답 끝에 `(vector 길 실패: …)` 한 줄이 붙는다. 프롬프트 훅의 `/search` 는 그대로다.

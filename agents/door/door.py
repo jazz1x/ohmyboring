@@ -780,6 +780,7 @@ def _sync_deps() -> sync_run.SyncDeps:
         classify_origin=lambda path: boring_config.classify(path)[0],
         append_event=_enqueue_writer_event,
         db_errors=(psycopg.Error,),
+        allow_company=bool(boring_config.load().get("allow_company_origin")),
     )
 
 
