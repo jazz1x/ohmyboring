@@ -4118,7 +4118,10 @@ class EventsOwnerSelfQueueTests(unittest.TestCase):
             accepted.set()
             return door.Ok({"accepted": 1})
 
-        with mock.patch.object(door.events_run, "ingest", side_effect=fake_ingest) as ingest:
+        with (
+            mock.patch.object(door.events_run, "ingest", side_effect=fake_ingest) as ingest,
+            mock.patch.object(door.event_log, "_ISOLATED_LOG", ""),  # this test is the sink path
+        ):
             self.assertTrue(door._enqueue_writer_event("door", "recall_shadow", "ok", session_id="s1"))
             self.assertTrue(accepted.wait(5), "문이 자기 /events 를 맞아 사건 길까지 도착(교착 없음)")
         payload = ingest.call_args.args[0]

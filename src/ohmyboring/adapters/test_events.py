@@ -142,6 +142,7 @@ class EventLogTests(unittest.TestCase):
 
         with (
             mock.patch.object(event_log.urllib.request, "urlopen", fake_urlopen),
+            mock.patch.object(event_log, "_ISOLATED_LOG", ""),  # urlopen is faked; this test is the sink path
             mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.test:7710"}),
         ):
             event_log.append_event("guard", "structural_guard", "failed", run_id="r1")

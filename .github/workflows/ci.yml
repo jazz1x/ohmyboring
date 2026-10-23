@@ -144,6 +144,7 @@ jobs:
       - name: DB gate suites (every drudge/tests/*.rs + search/pg.py integration)
         env:
           BORING_TEST_DATABASE_URL: postgresql://boring:boring@127.0.0.1:5432/boring
+          BORING_EVENT_ISOLATED_LOG: /tmp/boring-ci-events.ndjson
         run: |
           cd drudge
           fail=0
