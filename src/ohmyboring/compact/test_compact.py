@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -26,6 +27,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from ohmyboring.compact import run  # noqa: E402
+from ohmyboring.sync import schedule  # noqa: E402
 
 _ADMIN_DSN = os.environ.get("COMPACT_TEST_ADMIN_DSN", "")
 _DB = "compact_test"
@@ -93,6 +95,25 @@ class CompactOnRealPostgres(unittest.TestCase):
         dropped = run.drop_invalid_indexes(self.cur, "claim")
         self.cur.execute(_CCNEW)
         self.assertEqual((2, 0), (dropped, self.cur.fetchone()[0]))
+
+    def test_compact_waits_while_another_connection_holds_the_run_lock(self) -> None:
+        deps = run.CompactDeps(
+            connect=lambda: psycopg.connect(self.dsn, autocommit=True), append_event=lambda *a, **k: True
+        )
+        started, finished = threading.Event(), threading.Event()
+
+        def compact_round() -> None:
+            started.set()
+            run.run_compact(deps)
+            finished.set()
+
+        with schedule.run_lock(lambda: psycopg.connect(self.dsn)):
+            worker = threading.Thread(target=compact_round, daemon=True)
+            worker.start()
+            self.assertTrue(started.wait(5))
+            self.assertFalse(finished.wait(1.5), "잠금을 쥔 동안 다른 연결의 compact 가 돌면 안 된다")
+        self.assertTrue(finished.wait(30), "잠금이 풀리면 compact 가 이어서 돌아야 한다")
+        worker.join(5)
 
 
 if __name__ == "__main__":

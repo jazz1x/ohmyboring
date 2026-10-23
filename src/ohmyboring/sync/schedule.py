@@ -7,13 +7,31 @@ from __future__ import annotations
 
 import sys
 import threading
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
+from typing import Any
 
 from ohmyboring.result import Either, Err, Ok
 from ohmyboring.sync.run import COMPONENT, EVENT, SyncDeps, run_sync
 
 DEFAULT_HOURS = 4.0
-#: 문 배경 작업(sync·compact)이 한 번에 하나만 돌게 하는 잠금 — Rust scheduler 의 sync_lock 과 같은 자리.
-RUN_LOCK = threading.Lock()
+#: sync·compact 가 프로세스를 넘어 한 번에 하나만 돌게 하는 PostgreSQL advisory 잠금 키 — Rust scheduler 의
+#: sync_lock 과 같은 자리. 문 스레드와 `docker exec` 로 뜨는 compact_once 는 별개 프로세스라 DB 가 잠가야 한다.
+RUN_LOCK_KEY = 0x6F6D6272756E  # "ombrun"
+
+
+@contextmanager
+def run_lock(connect: Callable[[], AbstractContextManager[Any]]) -> Iterator[None]:
+    """세션 수준 advisory 잠금을 전용 연결 하나에 쥔다. 기다리는 쪽이 막힌다(엔진이 한 틱 루프에서 sync 뒤에
+    compact 를 돌리는 것과 같다). 정상·예외 경로 모두 명시로 풀고 연결을 닫으면 서버가 어차피 푼다 —
+    DB 가 안 닿으면 connect 가 올리는 예외가 그대로 그 회차의 실패다."""
+    with connect() as conn:
+        conn.autocommit = True
+        conn.execute("SELECT pg_advisory_lock(%s)", (RUN_LOCK_KEY,))
+        try:
+            yield
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (RUN_LOCK_KEY,))
 
 
 def parse_hours(raw: str | None) -> Either[float, str]:
@@ -36,7 +54,7 @@ def run_once(deps: SyncDeps) -> None:
     노트별 코드 안에서는 잡지 않는다. 스레드가 말없이 죽어 sync_run 사건이 끊기던 것을 막는다.
     """
     try:
-        with RUN_LOCK:
+        with run_lock(deps.connect):
             run_sync(deps)
     except Exception as e:
         print(f"[door-sync] run failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)

@@ -19,7 +19,7 @@ from typing import Any
 from ohmyboring.remember.writer import _RETIRED_NOTE
 from ohmyboring.result import Either, Err, Ok
 from ohmyboring.sync.run import GcStats, gc_apply, gc_preview
-from ohmyboring.sync.schedule import RUN_LOCK
+from ohmyboring.sync.schedule import run_lock
 
 COMPONENT = "door-compact"
 EVENT = "compact_run"
@@ -209,8 +209,8 @@ class CompactDeps:
 
 
 def run_compact(deps: CompactDeps) -> CompactReport:
-    """한 회차 — sync 스레드와 같은 잠금 아래서. 고장은 그대로 올라간다(부르는 쪽이 사건에 남긴다)."""
-    with RUN_LOCK, deps.connect() as conn, conn.cursor() as cur:
+    """한 회차 — sync 와 같은 DB advisory 잠금 아래서(프로세스 넘어). 고장은 그대로 올라간다(부르는 쪽이 사건에 남긴다)."""
+    with run_lock(deps.connect), deps.connect() as conn, conn.cursor() as cur:
         report = compact(cur)
     deps.append_event(COMPONENT, EVENT, "ok", **report.event_fields())
     return report
