@@ -48,13 +48,12 @@ nearest_document 한 건 전체(임베딩+읽기 전용 질의)를, 사건 칸�
 
 from __future__ import annotations
 
-import hashlib
 import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from ohmyboring.ingest.chunk import fixed_chunks
 from ohmyboring.remember import dedup as _dedup
@@ -68,6 +67,7 @@ from ohmyboring.remember.parse import (
 )
 from ohmyboring.remember.render import render_wiki_note
 from ohmyboring.result import Either, Err, Ok
+from ohmyboring.sync.hash import legacy_sha
 
 #: 스위치가 켜도 대조가 남게 남기는 문 사건 한 줄.
 EVENT_NAME = "remember_written"
@@ -294,6 +294,16 @@ class WriterDeps:
     note_index: Any | None = None
     embed_dim: int = 1024
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
+    #: document.sha 로 저장할 해시 — 기본은 파일 전체 sha256(엔진과 같다). 문이
+    #: DOOR_SYNC_OWNER=python 일 때만 파생 칸을 뺀 새 해시(ohmyboring.sync.hash)를 싣는다.
+    content_hash: Callable[[str], str] = field(default=legacy_sha)
+
+
+class EmbedSeam(Protocol):
+    """그래프·조각 단계가 쓰는 면 — 임베딩과 차원뿐. WriterDeps 도 sync 의 면도 만족한다."""
+
+    embed: Callable[[str], Either[list[float], str]]
+    embed_dim: int
 
 
 @dataclass
@@ -948,7 +958,7 @@ def _claim_slot(claim: Any) -> tuple[str, str] | None:
 
 
 def _upsert_claim(  # noqa: PLR0913
-    cur: Any, deps: WriterDeps, job: _GraphJob, claim: Any, stats: _Stats, timers: _Timers
+    cur: Any, deps: EmbedSeam, job: _GraphJob, claim: Any, stats: _Stats, timers: _Timers
 ) -> None:
     """claim 행 하나 — unchanged 프로브·임베딩(임베딩 칸에 잰다)·upsert·봉인·said_by 거울·노드/간선."""
     slot = _claim_slot(claim)
@@ -1011,7 +1021,7 @@ def _upsert_claim(  # noqa: PLR0913
     stats.edges += _upsert_claim_node(cur, job.front.project, job.path, slot, claim)
 
 
-def _extract_graph(cur: Any, deps: WriterDeps, job: _GraphJob, stats: _Stats, timers: _Timers) -> None:
+def _extract_graph(cur: Any, deps: EmbedSeam, job: _GraphJob, stats: _Stats, timers: _Timers) -> None:
     """FrontmatterGraphExtractor(ingest.rs:160-281) — 정해진 간선만 쓰고 봉인은 upsert 안에서."""
     doc = _doc_node_id(job.path)
     cur.execute(_CLEAR_SEMANTIC_SQL, {"doc": doc, "kinds": list(SEMANTIC_EDGE_KINDS)})
@@ -1022,7 +1032,7 @@ def _extract_graph(cur: Any, deps: WriterDeps, job: _GraphJob, stats: _Stats, ti
         _upsert_claim(cur, deps, job, claim, stats, timers)
 
 
-def _embed_chunks(deps: WriterDeps, pieces: list[str], timers: _Timers) -> list[tuple[str, list[float]]]:
+def _embed_chunks(deps: EmbedSeam, pieces: list[str], timers: _Timers) -> list[tuple[str, list[float]]]:
     """chunk 임베딩 — 첫 오류에서 단축(엔진의 try_collect 과 같고, 순서는 유지)."""
     embedded: list[tuple[str, list[float]]] = []
     for piece in pieces:
@@ -1043,11 +1053,8 @@ def _ingest(cur: Any, deps: WriterDeps, note: RememberNote, path: str, timers: _
     with open(path, encoding="utf-8") as handle:
         data = handle.read()
     data = data.replace("\x00", "")
-    sha = hashlib.sha256(data.encode("utf-8")).hexdigest()
-    st = os.stat(path)
-    # 뒷시각 = 파일 mtime. 엔진은 SystemTime→timestamptz 를 「잘라내기」로 바꾸니(초+subsec_micros)
-    # 파이썬도 나노초를 밑으로 깎아 같은 값을 내야 sync 의 set_updated_at 이 0 변경으로 선다.
-    mtime = datetime.fromtimestamp(0, tz=UTC) + timedelta(microseconds=st.st_mtime_ns // 1000)
+    sha = deps.content_hash(data)
+    mtime = file_mtime(path)
     front = note.front
     stats = _Stats()
     cur.execute(_GET_DOC_SHA_SQL, {"path": path})
@@ -1057,7 +1064,21 @@ def _ingest(cur: Any, deps: WriterDeps, note: RememberNote, path: str, timers: _
         cur.execute(_SET_UPDATED_AT_SQL, {"path": path, "at": mtime})
         _extract_graph(cur, deps, _GraphJob(front, note.body.strip(), path, mtime), stats, timers)
         return stats
-    body = note.body.strip()
+    return ingest_changed(cur, deps, front, note.body.strip(), path, sha, mtime, timers)
+
+
+def file_mtime(path: str) -> datetime:
+    """뒷시각 = 파일 mtime. 엔진은 SystemTime→timestamptz 를 「잘라내기」로 바꾸니(초+subsec_micros)
+    파이썬도 나노초를 밑으로 깎아 같은 값을 내야 sync 의 set_updated_at 이 0 변경으로 선다."""
+    return datetime.fromtimestamp(0, tz=UTC) + timedelta(microseconds=os.stat(path).st_mtime_ns // 1000)
+
+
+def ingest_changed(  # noqa: PLR0913
+    cur: Any, deps: EmbedSeam, front: Any, body: str, path: str, sha: str, mtime: datetime, timers: _Timers
+) -> _Stats:
+    """바뀐(또는 새) 노트 한 장 — 조각 임베딩 → document upsert → chunk upsert → 꼬리 prune → 그래프.
+    remember 와 4시간 sync 가 같이 쓴다(ingest.rs:437-481)."""
+    stats = _Stats()
     pieces = fixed_chunks(body, 1500, 200)
     if all(not piece.strip() for piece in pieces):
         stats.skipped = True
@@ -1082,6 +1103,12 @@ def _ingest(cur: Any, deps: WriterDeps, note: RememberNote, path: str, timers: _
     cur.execute(_PRUNE_CHUNKS_SQL, {"path": path, "from_idx": len(embedded)})
     _extract_graph(cur, deps, _GraphJob(front, body, path, mtime), stats, timers)
     return stats
+
+
+#: sync 가 ingest_changed 의 인자·반환·고장을 이름 붙여 쓰는 면.
+IngestStats = _Stats
+IngestTimers = _Timers
+IngestFailure = _WriteFailure
 
 
 def _record_supersedes(

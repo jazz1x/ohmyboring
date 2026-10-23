@@ -173,6 +173,9 @@ from ohmyboring.result import Either, Err, Ok
 from ohmyboring.search import hits as search_hits
 from ohmyboring.search import pg as search_pg
 from ohmyboring.search import retriever as search_retriever
+from ohmyboring.sync import hash as sync_hash
+from ohmyboring.sync import run as sync_run
+from ohmyboring.sync import schedule as sync_schedule
 from ohmyboring.verdict import parse as verdict_parse
 from ohmyboring.verdict import run as verdict_run
 
@@ -209,6 +212,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     )
     threading.Thread(target=_prefill_note_index, args=(index,), name="note-index", daemon=True).start()
     app.state.note_index = index
+    _start_sync_if_owner()
     yield
 
 
@@ -750,7 +754,52 @@ def _writer_deps(
         append_event=_enqueue_writer_event,
         note_index=getattr(app.state, "note_index", None),
         embed_dim=boring_config.embed_dim(),
+        content_hash=sync_hash.content_hash if _sync_owner() == _SYNC_PYTHON else sync_hash.legacy_sha,
     )
+
+
+#: 4시간 sync 주인 스위치 — engine(기본)이면 스레드 없음·기록기 해시 그대로, python 이면 문 배경
+#: 스레드(ohmyboring.sync)가 기동 1회 + BORING_SYNC_HOURS(기본 4)마다 볼트를 다시 색인하고
+#: remember 기록기도 파생 칸을 뺀 새 해시를 저장한다. 켜기는 오케스트레이터가 판정 뒤에 한다.
+_SYNC_OWNER_ENV = "DOOR_SYNC_OWNER"
+_SYNC_PYTHON = "python"
+
+
+def _sync_owner() -> str:
+    """python 만 켬, 그 밖의 값·부재는 전부 engine(실수로 켜지지 않게)."""
+    return _SYNC_PYTHON if os.environ.get(_SYNC_OWNER_ENV) == _SYNC_PYTHON else "engine"
+
+
+def _sync_deps() -> sync_run.SyncDeps:
+    return sync_run.SyncDeps(
+        wiki_dir=os.path.join(_vault_dir(), "wiki"),
+        connect=lambda: psycopg.connect(os.environ["DOOR_PG_DSN"]),
+        embed=remember_writer.embed_via_adapter,
+        embed_dim=boring_config.embed_dim(),
+        split_frontmatter=vault_note.split_frontmatter,
+        classify_origin=lambda path: boring_config.classify(path)[0],
+        append_event=_enqueue_writer_event,
+        db_errors=(psycopg.Error,),
+    )
+
+
+def _start_sync_if_owner() -> None:
+    """DOOR_SYNC_OWNER=python 이고 DSN·주기가 맞을 때만 배경 스레드를 띄운다. 못 띄우면 이유를 찍는다."""
+    if _sync_owner() != _SYNC_PYTHON:
+        return
+    if not os.environ.get("DOOR_PG_DSN"):
+        print(
+            "[door] sync owner=python but DOOR_PG_DSN is empty — sync thread not started",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    match sync_schedule.parse_hours(os.environ.get("BORING_SYNC_HOURS")):
+        case Err(reason):
+            print(f"[door] sync thread not started: {reason}", file=sys.stderr, flush=True)
+        case Ok(hours):
+            sync_schedule.start(_sync_deps(), hours)
+            print(f"[door] sync thread started: every {hours}h", file=sys.stderr, flush=True)
 
 
 def _remember_outcome_response(body: bytes, route: str, outcome: remember_writer.WriteOutcome) -> Response:

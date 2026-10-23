@@ -98,6 +98,7 @@ python3 src/ohmyboring/remember/test_pii.py
 python3 src/ohmyboring/remember/test_dedup.py
 python3 src/ohmyboring/remember/test_index.py
 python3 src/ohmyboring/remember/test_writer.py
+python3 src/ohmyboring/sync/test_sync.py
 python3 src/ohmyboring/registers/test_shadow.py
 python3 src/ohmyboring/gap/test_gap.py
 python3 src/ohmyboring/test_result.py
