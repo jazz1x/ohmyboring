@@ -305,6 +305,9 @@ pub(crate) fn spawn_scheduler(
         .max(1);
     let compact_interval = Duration::from_secs(compact_hours * 3600);
 
+    // Explicit compact-off: only the tick loop's compact is skipped; sync and the brief keep running.
+    let compact_disabled = config::env_set("BORING_COMPACT_DISABLED").as_deref() == Some("1");
+
     tokio::spawn(async move {
         let store_ref = store.as_deref();
         // run once immediately at startup (compile only if vector off — refreshes wiki).
@@ -318,6 +321,10 @@ pub(crate) fn spawn_scheduler(
             );
             let _guard = sync_lock.lock().await;
             run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
+        }
+
+        if compact_disabled {
+            eprintln!("[scheduler] compact off (BORING_COMPACT_DISABLED=1)");
         }
 
         // Daily briefing scheduler: runs once at BORING_BRIEF_HOUR local time.
@@ -354,7 +361,7 @@ pub(crate) fn spawn_scheduler(
                 // Auto-compact at the next sync after the compact interval has passed.
                 // This keeps maintenance aligned with write load rather than running on a fixed clock.
                 let mut last = last_compact.lock().await;
-                if last.is_none_or(|t| t.elapsed() >= compact_interval) {
+                if !compact_disabled && last.is_none_or(|t| t.elapsed() >= compact_interval) {
                     // Only a run that finished resets the window. Stamping the clock on failure
                     // made a compact that never once succeeded look like one on schedule.
                     if run_compact(store_ref, &compact_failure).await {

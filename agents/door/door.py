@@ -152,6 +152,8 @@ from ohmyboring import config as boring_config
 from ohmyboring.adapters import embed as embed_adapter
 from ohmyboring.adapters import events as event_log
 from ohmyboring.adapters import vault as vault_notes
+from ohmyboring.compact import run as compact_run
+from ohmyboring.compact import schedule as compact_schedule
 from ohmyboring.entrypoints.http import mcp_recall
 from ohmyboring.events import parse as events_parse
 from ohmyboring.events import run as events_run
@@ -213,6 +215,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     threading.Thread(target=_prefill_note_index, args=(index,), name="note-index", daemon=True).start()
     app.state.note_index = index
     _start_sync_if_owner()
+    _start_compact_if_owner()
     yield
 
 
@@ -801,6 +804,40 @@ def _start_sync_if_owner() -> None:
         case Ok(hours):
             sync_schedule.start(_sync_deps(), hours)
             print(f"[door] sync thread started: every {hours}h", file=sys.stderr, flush=True)
+
+
+#: 하루 1회 DB 정리 주인 스위치 — engine(기본)이면 스레드 없음, python 이면 문 배경 스레드가
+#: BORING_COMPACT_HOURS(기본 24)마다 sync 와 같은 잠금 아래 compact 를 돈다. 켜기 전에 엔진에
+#: BORING_COMPACT_DISABLED=1 을 먼저 줘야 둘이 겹치지 않는다(오케스트레이터 몫).
+_COMPACT_OWNER_ENV = "DOOR_COMPACT_OWNER"
+
+
+def _compact_owner() -> str:
+    """python 만 켬, 그 밖의 값·부재는 전부 engine(실수로 켜지지 않게)."""
+    return _SYNC_PYTHON if os.environ.get(_COMPACT_OWNER_ENV) == _SYNC_PYTHON else "engine"
+
+
+def _start_compact_if_owner() -> None:
+    if _compact_owner() != _SYNC_PYTHON:
+        return
+    dsn = os.environ.get("DOOR_PG_DSN")
+    if not dsn:
+        print(
+            "[door] compact owner=python but DOOR_PG_DSN is empty — compact thread not started",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    match compact_schedule.parse_hours(os.environ.get("BORING_COMPACT_HOURS")):
+        case Err(reason):
+            print(f"[door] compact thread not started: {reason}", file=sys.stderr, flush=True)
+        case Ok(hours):
+            deps = compact_run.CompactDeps(
+                connect=lambda: psycopg.connect(dsn, autocommit=True),
+                append_event=_enqueue_writer_event,
+            )
+            compact_schedule.start(deps, hours)
+            print(f"[door] compact thread started: every {hours}h", file=sys.stderr, flush=True)
 
 
 def _remember_outcome_response(body: bytes, route: str, outcome: remember_writer.WriteOutcome) -> Response:

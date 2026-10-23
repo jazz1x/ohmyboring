@@ -12,6 +12,8 @@ from ohmyboring.result import Either, Err, Ok
 from ohmyboring.sync.run import COMPONENT, EVENT, SyncDeps, run_sync
 
 DEFAULT_HOURS = 4.0
+#: 문 배경 작업(sync·compact)이 한 번에 하나만 돌게 하는 잠금 — Rust scheduler 의 sync_lock 과 같은 자리.
+RUN_LOCK = threading.Lock()
 
 
 def parse_hours(raw: str | None) -> Either[float, str]:
@@ -34,7 +36,8 @@ def run_once(deps: SyncDeps) -> None:
     노트별 코드 안에서는 잡지 않는다. 스레드가 말없이 죽어 sync_run 사건이 끊기던 것을 막는다.
     """
     try:
-        run_sync(deps)
+        with RUN_LOCK:
+            run_sync(deps)
     except Exception as e:
         print(f"[door-sync] run failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         deps.append_event(COMPONENT, EVENT, "error", reason=f"{type(e).__name__}: {e}")

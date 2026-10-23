@@ -72,6 +72,7 @@ services:
       BORING_VECTOR: ${BORING_VECTOR:-off} # off = wiki-first direct read. on = vector+graph (boring-postgres alongside via --profile vector)
       BORING_SYNC_HOURS: "4"
       BORING_SYNC_DISABLED: ${BORING_SYNC_DISABLED:-0}  # 1 = the engine skips the vault sync (startup + periodic); compact and the brief keep running
+      BORING_COMPACT_DISABLED: ${BORING_COMPACT_DISABLED:-0}  # 1 = the engine skips the tick-loop compact; sync and the brief keep running
       BORING_BRIEF_HOUR: "8"               # local time (TZ) when the engine writes vault/wiki/daily-brief-YYYY-MM-DD.md
       TZ: Asia/Seoul
     volumes:
@@ -129,6 +130,8 @@ services:
       DOOR_EVENTS_OWNER: ${DOOR_EVENTS_OWNER:-engine}
       DOOR_SYNC_OWNER: ${DOOR_SYNC_OWNER:-engine} # python = door thread re-ingests the vault every BORING_SYNC_HOURS (engine sync clock stays on until the engine is stopped)
       BORING_SYNC_HOURS: ${BORING_SYNC_HOURS:-4}
+      DOOR_COMPACT_OWNER: ${DOOR_COMPACT_OWNER:-engine} # python = door thread runs compact every BORING_COMPACT_HOURS (set BORING_COMPACT_DISABLED=1 on the engine first)
+      BORING_COMPACT_HOURS: ${BORING_COMPACT_HOURS:-24}
     volumes:
       - ./vault:/vault                   # remember writes notes here when DOOR_REMEMBER_WRITER=python
       # The folder, not the file: an editor that saves by rename swaps the inode, and a file
