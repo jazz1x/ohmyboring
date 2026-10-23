@@ -256,7 +256,7 @@ class BatchTest(unittest.TestCase):
     def test_batch_covers_all_three_surfaces_and_the_fixed_shapes(self):
         batch = ep.build_batch([ROW])
         counts = ep.surface_counts(batch)
-        self.assertEqual(counts, {"post": 6, "get": 10, "mcp": 6})
+        self.assertEqual(counts, {"post": 7, "get": 10, "mcp": 6})
         labels = [r.label for r in batch]
         for want in (
             "101 batch (400)",
@@ -264,6 +264,7 @@ class BatchTest(unittest.TestCase):
             "single object body",
             "non-array events value",
             "redaction probe",
+            "owner_supersede_refused probe",
             "get since_hours=-1 (400)",
             "mcp since_hours=-1 (-32602)",
         ):
