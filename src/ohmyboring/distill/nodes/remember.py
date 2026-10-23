@@ -18,6 +18,7 @@ def remember(state):
         note["concepts"],
         note["claims"],
         state["session_id"],
+        session_since=state.get("session_since"),
     )
     resolution_event.log_resolution_event(
         state["session_id"],

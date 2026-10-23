@@ -442,7 +442,9 @@ def _read_remember_reply(data: Any) -> RememberOutcome:
     return RememberOutcome(False, "failed")
 
 
-def call_remember(title, body, origin, repo, tags, tools, concepts, claims, session_id="", sources=None):  # noqa: PLR0913
+def call_remember(  # noqa: PLR0913
+    title, body, origin, repo, tags, tools, concepts, claims, session_id="", sources=None, session_since=None
+):
     """Call ohmyboring's remember MCP tool.
 
     Retries transient failures (5xx, connection errors, timeouts) a bounded number of times
@@ -463,6 +465,8 @@ def call_remember(title, body, origin, repo, tags, tools, concepts, claims, sess
         arguments["sources"] = sources
     if session_id:
         arguments["omb_session_id"] = session_id
+    if session_since is not None:
+        arguments["omb_session_since"] = str(int(session_since))
     req = _remember_request(arguments)
 
     max_retries = int(os.environ.get("DISTILL_REMEMBER_RETRIES") or "2")

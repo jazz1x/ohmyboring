@@ -422,5 +422,6 @@ def apply_pii_gate(scanner: PiiScanner, note: RememberNote) -> Either[RememberNo
         sources=tuple(sources_raw),
         omb_session_id=note.front.omb_session_id,
         author=note.front.author,
+        omb_session_since=note.front.omb_session_since,
     )
     return Ok(RememberNote(front=front, body=values[1]))

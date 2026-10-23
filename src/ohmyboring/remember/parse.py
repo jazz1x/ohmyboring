@@ -76,6 +76,8 @@ class FrontMatter:
     sources: tuple[str, ...]
     omb_session_id: str | None
     author: str
+    # 이어 쓴 세션 노트: 이 시각(epoch 초) 뒤 대화만 담았다. None 은 세션 처음부터.
+    omb_session_since: int | None = None
 
 
 @dataclass(frozen=True)
@@ -289,6 +291,18 @@ def parse_judge(args: dict[str, Any]) -> Either[str | None, str]:
     return parse_author(raw)
 
 
+def _parse_provenance(args: dict[str, Any]) -> Either[tuple[str, int | None], str]:
+    """누가 썼나(author)와 이어 쓴 세션 노트의 기준 시각(omb_session_since, epoch 초 숫자 글자)."""
+    since = _get_str(args, "omb_session_since")
+    if since and not since.isdigit():
+        return Err(f"invalid omb_session_since: {since}")
+    match parse_author(args.get("author")):
+        case Ok(author):
+            return Ok((author, int(since) if since else None))
+        case Err(reason):
+            return Err(reason)
+
+
 def parse_remember_note(args: dict[str, Any]) -> Either[RememberNote, str]:
     """remember 인자 하나를 RememberNote 로 — mcp.rs:2087 의 순서 그대로.
 
@@ -326,8 +340,8 @@ def parse_remember_note(args: dict[str, Any]) -> Either[RememberNote, str]:
         case Err(reason):
             return Err(reason)
 
-    match parse_author(args.get("author")):
-        case Ok(author):
+    match _parse_provenance(args):
+        case Ok((author, omb_session_since)):
             pass
         case Err(reason):
             return Err(reason)
@@ -345,5 +359,6 @@ def parse_remember_note(args: dict[str, Any]) -> Either[RememberNote, str]:
         sources=tuple(_scrub(s) for s in _get_arr(args, "sources")),
         omb_session_id=omb_session_id,
         author=author,
+        omb_session_since=omb_session_since,
     )
     return Ok(RememberNote(front, body))

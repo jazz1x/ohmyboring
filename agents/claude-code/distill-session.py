@@ -93,6 +93,18 @@ def main() -> int:
             _mark(session_id)
         return 0
 
+    # A resumed session: memory already holds it up to `since`, and the door would drop a
+    # second note of the same session as its duplicate. Send only the turns after that point,
+    # labelled with it. No such turns → the whole text as before, which the door still drops.
+    since = (
+        distill_queue.resume_since(session_id) if session_id and TRANSCRIPT_FORMAT == "claude-json" else None
+    )
+    tail = transcript.extract_since(transcript_path, since) if since is not None else ""
+    if tail:
+        text = tail
+    else:
+        since = None
+
     if len(text) < 500:
         print("[omb-distill] transcript too short; skipping", file=sys.stderr)
         log_skip_event(session_id, origin, repo, _distill_resolution(), "too_short")
@@ -103,7 +115,7 @@ def main() -> int:
     if was_clamped:
         print(f"[omb-distill] transcript clamped to {len(text)} chars", file=sys.stderr)
 
-    distill_queue.enqueue(distill_queue.QueueItem(session_id, "claude-code", origin, repo, text))
+    distill_queue.enqueue(distill_queue.QueueItem(session_id, "claude-code", origin, repo, text, since=since))
     print("[omb-distill] queued for hermes", file=sys.stderr)
     return 0
 

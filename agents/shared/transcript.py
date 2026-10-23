@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime
 
 
 def _env_int(name: str, default: int) -> int:
@@ -129,14 +130,30 @@ def distill_backstop_clamp() -> int:
     return _env_int("DISTILL_BACKSTOP_CLAMP", BACKSTOP_CLAMP_DEFAULT)
 
 
-def _extract_claude_jsonl(path: str) -> str:
-    """Extract user/assistant text and allowlisted tool actions from a Claude Code JSONL transcript."""
+def _after(obj: dict, since: float) -> bool:
+    ts = obj.get("timestamp")
+    if not isinstance(ts, str):
+        return False
+    try:
+        return datetime.fromisoformat(ts).timestamp() > since
+    except ValueError:
+        return False
+
+
+def _extract_claude_jsonl(path: str, since: float | None = None) -> str:
+    """Extract user/assistant text and allowlisted tool actions from a Claude Code JSONL transcript.
+
+    With `since`, only rows stamped after that epoch time — the part of a resumed session that
+    is not in memory yet.
+    """
     out = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if since is not None and not _after(obj, since):
                 continue
             msg = obj.get("message") or {}
             role = msg.get("role") or obj.get("type") or ""
@@ -302,6 +319,11 @@ def _extract_codex_jsonl(path: str) -> str:
                     if isinstance(last, str) and last.strip():
                         out.append(f"[assistant] {last.strip()}")
     return "\n".join(out)
+
+
+def extract_since(path: str, since: float) -> str:
+    """Claude Code transcript text stamped after `since` (epoch seconds); '' when nothing is."""
+    return _extract_claude_jsonl(path, since)
 
 
 def extract(path: str, fmt: str = "claude-json") -> str:

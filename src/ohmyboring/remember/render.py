@@ -48,6 +48,8 @@ def render_wiki_note(wiki_id: str, front: FrontMatter, body: str) -> str:
     }
     if front.omb_session_id is not None:
         fm["omb_session_id"] = front.omb_session_id
+    if front.omb_session_since is not None:
+        fm["omb_session_since"] = str(front.omb_session_since)
     fm["author"] = front.author
     yaml_text = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False, width=float("inf"))
     return f"---\n{yaml_text}---\n{body.rstrip()}\n"

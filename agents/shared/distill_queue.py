@@ -26,6 +26,8 @@ class QueueItem:
     repo: str
     text: str
     enqueued_at: float = field(default_factory=time.time)
+    # text holds only the turns after this transcript time; None means from the session start.
+    since: float | None = None
 
 
 def queue_dir() -> str:
@@ -55,6 +57,20 @@ def enqueue(item: QueueItem) -> None:
     finally:
         Path(tmp).unlink(missing_ok=True)
     markers.mark_pending(item.session_id)
+
+
+def resume_since(session_id: str) -> float | None:
+    """Transcript time after which this session is not yet in memory.
+
+    A queued item (still waiting, or kept after a failed try) has not reached memory, so its
+    own start carries over; otherwise the done marker says how far memory goes. Reading only the
+    marker loses the tail after a failure, because enqueue clears the marker.
+    """
+    if is_queued(session_id):
+        queued = _parse(item_path(session_id))
+        if queued is not None:
+            return queued.since
+    return markers.done_time(session_id)
 
 
 def remove(session_id: str) -> None:
