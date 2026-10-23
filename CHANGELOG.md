@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Changed
+- **세션 시작 블록이 저장소 cwd 에서 `project="<slug>"` 를 넘기라고 한 줄 알린다** — 저장소 cwd 의 recall 251/569 가 project 없이 불리던 것. 저장소가 아닌 cwd 에는 줄을 넣지 않는다(자리 이름을 정할 규칙이 없다).
 - **`recall` 도구가 낱말 길과 벡터 길을 둘 다 물어 RRF(k=60)로 합친다** — 낱말이 하나라도 걸리면 벡터를 안 묻던 것. 제목 일치 노트는 맨 앞에 고정된다. 벡터 길이 실패하면 낱말 결과는 그대로 나가고 답 끝에 `(vector 길 실패: …)` 한 줄이 붙는다. 프롬프트 훅의 `/search` 는 그대로다.
 - **`RECALL_MAX_RESULTS=0` 이면 세션 시작 회상 블록도 나오지 않는다** — 매 턴 회상만 꺼지고 시작 블록(`session-start-recall.py`)은 그대로 실리던 것. 값은 `recall_core.MAX_RESULTS` 를 그대로 읽는다. 변수가 없을 때의 출력은 그대로다.
 - **pre-commit 은 바뀐 시험 파일만 돌린다** — 전체 `cargo test` 대신 `changed-tests` 가 바뀐 `test_*.py`·`test_*.sh` 만 돌린다(커밋 중 넘어오는 `GIT_*` 는 지운다). CI 잡은 #484 이전 그대로 돈다.
