@@ -59,7 +59,7 @@ def foreign_dsn_refusal(dsn: str, env: Mapping[str, str]) -> str | None:
     log = env.get("BORING_EVENT_LOG", "")
     if not log:
         return "사본 DB(--dsn)는 BORING_EVENT_LOG 를 임시 파일로 줘야 돈다."
-    if Path(os.path.expanduser(log)) == Path(os.path.expanduser(DEFAULT_EVENT_LOG)):
+    if Path(os.path.expanduser(log)).resolve() == Path(os.path.expanduser(DEFAULT_EVENT_LOG)).resolve():
         return "BORING_EVENT_LOG 가 기본 spool 경로다 — 임시 파일을 줘야 한다."
     return None
 

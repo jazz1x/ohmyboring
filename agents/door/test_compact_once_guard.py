@@ -23,9 +23,11 @@ class ForeignDsnRefusedBeforeWork(unittest.TestCase):
     def _run(self, env: dict[str, str]) -> tuple[int, str, mock.Mock]:
         err = io.StringIO()
         connect = mock.Mock(side_effect=RuntimeError("stop after the guard"))
+        # 거부 분기를 지운 변이에서도 사건이 문 /events(라이브)로 가지 않게 싱크를 막는다 — 10-23 에 두 번 샜다.
         with (
             mock.patch.dict(os.environ, env, clear=True),
             mock.patch.object(compact_once.psycopg, "connect", connect),
+            mock.patch.object(compact_once.event_log, "try_append_event", mock.Mock(return_value=True)),
             contextlib.redirect_stderr(err),
         ):
             code = compact_once.main(["--dsn", COPY_DSN])
