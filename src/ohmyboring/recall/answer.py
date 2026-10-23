@@ -284,12 +284,19 @@ def _pool_of(selected: _Selected, superseded: dict[str, list[str]]) -> WikiPool 
     return WikiPool(entries, selected.size)
 
 
+def _failed_tail(failed: tuple[tuple[str, str], ...]) -> str:
+    return "".join(f"\n\n({name} 길 실패: {why})" for name, why in failed)
+
+
 def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
     match _select(args, seams):
         case Err(failure):
             return Err(failure)
         case Ok(selected) if not selected.lines:
-            return Ok(Recalled(NO_EXPERIENCE, selected.path, NO_EXPERIENCE, selected.skipped))
+            refined = NO_EXPERIENCE + _failed_tail(selected.failed)
+            return Ok(
+                Recalled(NO_EXPERIENCE, selected.path, refined, selected.skipped, failed=selected.failed)
+            )
         case Ok(selected):
             paths = list(
                 dict.fromkeys([*(c.hit.source_path for c in selected.pool), *(p for p, _ in selected.lines)])
@@ -305,9 +312,7 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
                         case Ok(claims):
                             text = recall_text(selected.lines, superseded)
                             refined = refined_text(selected.lines, superseded, claims, dict(selected.titles))
-                            refined += "".join(
-                                f"\n\n({name} 길 실패: {why})" for name, why in selected.failed
-                            )
+                            refined += _failed_tail(selected.failed)
                             pool = _pool_of(selected, superseded)
                             return Ok(
                                 Recalled(

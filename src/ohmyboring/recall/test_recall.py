@@ -413,6 +413,8 @@ def test_a_failed_vector_path_keeps_the_wiki_answer_and_says_which_path_failed()
     assert (recalled.path, recalled.failed) == ("wiki", (("vector", "embed: refused"),))
     assert recalled.refined.endswith("(vector 길 실패: embed: refused)"), recalled.refined
     assert recalled.text == "- [w0.md] 본문", "엔진 대조용 text 에는 붙이지 않는다"
+    empty = _text(answer.answer(_args(max_results=0), stub.seams()))  # 낱말 hit 은 있는데 보일 줄이 0
+    assert empty.failed and empty.refined.endswith("(vector 길 실패: embed: refused)"), empty
 
 
 def test_superseded_label_names_the_newer_notes_and_lines_join_with_a_blank_line():
