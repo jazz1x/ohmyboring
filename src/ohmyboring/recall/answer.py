@@ -1,6 +1,6 @@
 """MCP recall 의 파이썬 이식 (E4-2) — drudge/src/serve/mcp.rs::mcp_recall + recall_text.
 
-wiki 직독이 먼저, 한 건도 없을 때만 벡터+어휘(PgRetriever)로 간다. wiki 길의 집합 안 순서는
+wiki 직독과 벡터+어휘(PgRetriever)를 둘 다 묻고 RRF 로 합친다(wiki 가 0건이면 벡터만). wiki 길의 집합 안 순서는
 retrieve.rs::order_wiki_hits(= rank.order_within_set), 렌더는 recall_text 그대로 — 줄은 빈 줄로
 잇고 대체된 노트는 라벨에 새 노트 이름이 붙는다. 이 모듈은 handover(session_id)를 쓰지 않는다 —
 보인 경로를 Recalled.shown 으로 돌려줄 뿐, 쓰기는 문(DOOR_RECALL_READER=python)이 한다.
@@ -10,8 +10,9 @@ wiki 길엔 max_tokens 예산이 걸리지 않는다(엔진 그대로).
 from __future__ import annotations
 
 import contextlib
+import itertools
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,8 @@ READ_ONLY_OPTIONS = "-c default_transaction_read_only=on"
 _DEFAULT_RESULTS = 5
 _DEFAULT_TOKENS = 2000
 _CLAIMS_PER_NOTE = 5
+#: 2026-10-23 모의(82 질의): wiki 단독 밖 37/82 → wiki+벡터 RRF 26/82, 제목 일치 wiki-7115 1위 유지
+RRF_K = 60
 FULL_BODY_HINT = "(본문 전체: query 에 wiki-NNNN 을 넣으면 그 노트 전체 블록이 앞에 붙는다)"
 _U64_LIMIT = 2**64
 _I32_MIN, _I32_MAX = -(2**31), 2**31 - 1
@@ -79,13 +82,14 @@ class WikiPool:
 @dataclass(frozen=True)
 class Recalled:
     text: str
-    path: str  # wiki | vector — 어느 길이 줄을 냈나
+    path: str  # 줄을 낸 길 — wiki | vector | wiki+vector
     refined: (
         str  # MCP 답으로 나가는 모양 — claims 있는 노트는 머리줄+현재 claims. text 는 엔진 대조용이라 그대로
     )
     skipped: int = 0  # 읽지 못해 건너뛴 wiki 파일 수
     pool: WikiPool | None = None  # wiki 길만
     shown: tuple[str, ...] = ()  # 답에 실린 줄의 경로 — handover 가 쓸 목록(엔진 mcp_recall 의 paths)
+    failed: tuple[tuple[str, str], ...] = ()  # (길, 사유) — wiki 가 답했는데 벡터가 실패한 경우
 
 
 @dataclass(frozen=True)
@@ -191,6 +195,7 @@ class _Selected:
     pool: tuple[_Candidate, ...] = ()
     size: int = 0
     titles: tuple[tuple[str, str], ...] = ()  # (경로, 제목) — wiki 길만, 머리줄에 붙는다
+    failed: tuple[tuple[str, str], ...] = ()
 
 
 def _wiki_selected(result: wiki.WikiResult, args: Args, seams: Seams) -> Either[_Selected, Failed]:
@@ -218,15 +223,50 @@ def _wiki_selected(result: wiki.WikiResult, args: Args, seams: Seams) -> Either[
             return Ok(_Selected("wiki", lines, result.skipped, pool, size, titles))
 
 
+def _fused(selected: _Selected, vector: list[Line], max_results: int) -> _Selected:
+    """wiki 줄과 벡터 줄을 RRF(k=60)로 합친다 — 제목 일치로 앞에 선 wiki 줄은 그 자리에 고정(#491).
+    같은 노트가 두 길에 다 있으면 점수를 더하고 wiki 줄(스니펫)을 보인다. 동점은 wiki 순위 → 벡터 순위."""
+    exact = {c.hit.source_path for c in selected.pool if c.hit.exact_title}
+    pinned = list(itertools.takewhile(lambda line: line[0] in exact, selected.lines))
+    pinned_paths = {path for path, _ in pinned}
+    wiki_at = {path: i for i, (path, _) in enumerate(selected.lines)}
+    vector_at: dict[str, int] = {}
+    for i, (path, _) in enumerate(vector):
+        vector_at.setdefault(path, i)
+    body = dict(reversed(vector)) | dict(selected.lines)
+    absent = len(selected.lines) + len(vector)
+
+    def score(path: str) -> tuple[float, int, int]:
+        ranks = [at[path] for at in (wiki_at, vector_at) if path in at]
+        return (
+            -sum(1 / (RRF_K + i + 1) for i in ranks),
+            wiki_at.get(path, absent),
+            vector_at.get(path, absent),
+        )
+
+    rest = sorted((path for path in body if path not in pinned_paths), key=score)
+    lines = [*pinned, *((path, body[path]) for path in rest)][:max_results]
+    shown = {path for path, _ in lines}
+    contributed = [name for name, at in (("wiki", wiki_at), ("vector", vector_at)) if shown & at.keys()]
+    return replace(selected, path="+".join(contributed), lines=lines)
+
+
 def _select(args: Args, seams: Seams) -> Either[_Selected, Failed]:
     result = seams.wiki(args)
-    if result.hits:
-        return _wiki_selected(result, args, seams)
-    match seams.vector(args):
-        case Err(detail):
-            return Err(Failed(f"retrieve: {detail}"))
-        case Ok(lines):
-            return Ok(_Selected("vector", lines, result.skipped))
+    vector = seams.vector(args)
+    if not result.hits:
+        match vector:
+            case Err(detail):
+                return Err(Failed(f"retrieve: {detail}"))
+            case Ok(lines):
+                return Ok(_Selected("vector", lines, result.skipped))
+    match _wiki_selected(result, args, seams), vector:
+        case Err(failure), _:
+            return Err(failure)
+        case Ok(selected), Err(detail):
+            return Ok(replace(selected, failed=(("vector", detail),)))
+        case Ok(selected), Ok(lines):
+            return Ok(_fused(selected, lines, args.max_results))
 
 
 def _pool_of(selected: _Selected, superseded: dict[str, list[str]]) -> WikiPool | None:
@@ -251,7 +291,9 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
         case Ok(selected) if not selected.lines:
             return Ok(Recalled(NO_EXPERIENCE, selected.path, NO_EXPERIENCE, selected.skipped))
         case Ok(selected):
-            paths = [c.hit.source_path for c in selected.pool] or [line[0] for line in selected.lines]
+            paths = list(
+                dict.fromkeys([*(c.hit.source_path for c in selected.pool), *(p for p, _ in selected.lines)])
+            )
             match seams.superseded_by(paths):
                 case Err(detail):
                     return Err(Failed(f"recall superseded: {detail}"))
@@ -263,8 +305,21 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
                         case Ok(claims):
                             text = recall_text(selected.lines, superseded)
                             refined = refined_text(selected.lines, superseded, claims, dict(selected.titles))
+                            refined += "".join(
+                                f"\n\n({name} 길 실패: {why})" for name, why in selected.failed
+                            )
                             pool = _pool_of(selected, superseded)
-                            return Ok(Recalled(text, selected.path, refined, selected.skipped, pool, shown))
+                            return Ok(
+                                Recalled(
+                                    text,
+                                    selected.path,
+                                    refined,
+                                    selected.skipped,
+                                    pool,
+                                    shown,
+                                    selected.failed,
+                                )
+                            )
 
 
 def _detail(result: Either[Any, Any]) -> Either[Any, str]:
