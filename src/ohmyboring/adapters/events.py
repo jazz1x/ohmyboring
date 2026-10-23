@@ -50,7 +50,12 @@ def event_log_path() -> Path:
 def append_event(component: str, event: str, status: str, **fields: Any) -> None:
     payload = _event_payload(component, event, status, **fields)
     if _ISOLATED_LOG:
-        with Path(_ISOLATED_LOG).open("a", encoding="utf-8") as f:
+        # A test that points BORING_EVENT_LOG at its own temp file reads its events back from there
+        # (distill/test_run.py); only the default spool is swapped for the isolated file.
+        own = event_log_path()
+        default = Path(os.path.expanduser(DEFAULT_EVENT_LOG))
+        target = own if own.resolve() != default.resolve() else Path(_ISOLATED_LOG)
+        with target.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             f.write("\n")
         return
