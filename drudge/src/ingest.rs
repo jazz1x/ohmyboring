@@ -214,17 +214,10 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                 crate::anchor::from_note_body(&front.project, body)
             };
             for cl in &front.claims {
-                let subject = canon(&cl.subject);
-                let predicate = canon(&cl.predicate);
-                let value = cl.value.trim();
-                if subject.is_empty()
-                    || predicate.is_empty()
-                    || value.is_empty()
-                    || has_han(&subject)
-                    || has_han(value)
-                {
+                let Some((subject, predicate)) = claim_key(cl) else {
                     continue;
-                }
+                };
+                let value = cl.value.trim();
                 let anchor = crate::anchor::anchor_for_claim(&note_anchors, &subject, value);
                 let anchor_db = anchor.as_ref().map(crate::anchor::Anchor::to_db_string);
                 // Nothing changed for this axis, so there is nothing to embed and nothing to
@@ -278,6 +271,35 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         }
         Ok(())
     }
+}
+
+/// Canonical `(subject, predicate)` of a claim the graph may hold; `None` for one it skips.
+fn claim_key(cl: &frontmatter::Claim) -> Option<(String, String)> {
+    let subject = canon(&cl.subject);
+    let predicate = canon(&cl.predicate);
+    let value = cl.value.trim();
+    let skip = subject.is_empty()
+        || predicate.is_empty()
+        || value.is_empty()
+        || has_han(&subject)
+        || has_han(value);
+    (!skip).then_some((subject, predicate))
+}
+
+/// Heal for an unchanged note: write only the claim nodes/edges that are missing (#360).
+/// Insert-only (`ON CONFLICT DO NOTHING`) — existing edges are never deleted, so their
+/// `first_seen_at` survives; no embedding, no claim-row write.
+async fn heal_claim_edges(store: &Store, front: &FrontMatter, stats: &mut Stats) -> Result<()> {
+    let path = &front.source_path;
+    for cl in &front.claims {
+        let Some((subject, predicate)) = claim_key(cl) else {
+            continue;
+        };
+        stats.edges += store
+            .upsert_claim_node(path, &front.project, &subject, &predicate, cl)
+            .await?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -493,13 +515,10 @@ pub async fn ingest_file_with<C: Chunker, G: GraphExtractor, E: Embed>(
         return Ok(FileOutcome::Unchanged);
     }
     if verdict == ShaVerdict::Same {
-        // Content identical — chunk re-embedding is skipped, but the deterministic graph still
-        // rebuilds: "graph already built" holds only for notes ingested after the graph code
-        // that wrote their edges, and the rebuild embeds nothing for claims whose row exists.
-        store.set_updated_at(path, mtime).await?;
-        G::default()
-            .extract(store, llm, cfg, &front, &body, stats)
-            .await?;
+        // Content identical — no `updated_at` write and no `clear_semantic_edges` (it deletes and
+        // reinserts every edge, resetting each edge's `first_seen_at` on every sync). Edges are
+        // cleared only for changed notes (below); here only missing claim edges are inserted.
+        heal_claim_edges(store, &front, stats).await?;
         stats.unchanged += 1;
         return Ok(FileOutcome::Unchanged);
     }

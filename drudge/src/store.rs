@@ -1032,21 +1032,6 @@ impl Store {
         Ok(())
     }
 
-    /// Update only the recency of documents whose content is unchanged (same sha) — mtime backfill without re-embedding.
-    /// Ensures the recency-first sort key (`updated_at`) is also populated for existing documents.
-    pub async fn set_updated_at(&self, path: &str, updated_at: SystemTime) -> Result<()> {
-        self.db()
-            .await?
-            .execute(
-                "UPDATE document SET updated_at = $2
-                 WHERE source_path = $1 AND updated_at IS DISTINCT FROM $2;",
-                &[&path, &updated_at],
-            )
-            .await
-            .context("touch updated_at")?;
-        Ok(())
-    }
-
     /// Top-N documents by recency — full body (chunks joined). Retrieval for the recency-first/supersede briefing.
     /// Ordered by `updated_at` descending rather than semantic similarity = "most recently changed knowledge on top".
     /// If `since_hours` is Some, only documents updated within that window are returned.

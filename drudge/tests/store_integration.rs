@@ -3980,6 +3980,109 @@ async fn unchanged_note_reingest_repairs_claim_edge_without_embedding() {
         .expect("cleanup document");
 }
 
+async fn document_updated_at(db: &Client, path: &str) -> SystemTime {
+    db.query_one(
+        "SELECT updated_at FROM document WHERE source_path = $1;",
+        &[&path],
+    )
+    .await
+    .expect("read updated_at")
+    .get(0)
+}
+
+/// A byte-identical re-ingest never deletes edges and never writes `updated_at`: a
+/// `clear_semantic_edges` there would reset every edge's `first_seen_at` to the sync time on
+/// every run. The edge's `first_seen_at` is pinned to the past, so a delete+reinsert moves it
+/// to now(). (The heal's insert-only writes still report edges in `stats.edges`, so that count
+/// is not asserted here.)
+#[tokio::test]
+async fn unchanged_note_reingest_leaves_edges_and_updated_at_alone() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = unique_subject("keep");
+    let dir = tempdir().expect("tempdir");
+    let note_path = dir.path().join(format!("{subject}.md"));
+    fs::write(
+        &note_path,
+        format!(
+            "---\norigin: personal\nproject: \"\"\nkind: note\nclaims:\n  - subject: {subject}\n    predicate: axis\n    value: v1\n    kind: fact\n    confidence: certain\n---\n\nbody\n"
+        ),
+    )
+    .expect("write note");
+    let note_path_str = note_path.to_string_lossy().into_owned();
+    let cfg = BoringConfig::default();
+
+    let mut stats = Stats::default();
+    let embedder = CountingEmbed::lenient();
+    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+        &store,
+        &embedder,
+        &cfg,
+        &note_path_str,
+        &mut stats,
+    )
+    .await
+    .expect("first ingest");
+    assert_eq!(outcome, FileOutcome::New);
+
+    let claim_dst = format!("claim:{subject}:axis");
+    let doc_src = format!("doc:{note_path_str}");
+    let seen_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    db.execute(
+        "UPDATE edge SET first_seen_at = $3 WHERE src = $1 AND dst = $2 AND kind = 'claims';",
+        &[&doc_src, &claim_dst, &seen_at],
+    )
+    .await
+    .expect("pin first_seen_at");
+    let updated_at_before = document_updated_at(&db, &note_path_str).await;
+    let touched = SystemTime::now() + std::time::Duration::from_hours(1);
+    fs::File::options()
+        .write(true)
+        .open(&note_path)
+        .and_then(|f| f.set_modified(touched))
+        .expect("touch mtime");
+
+    let mut stats = Stats::default();
+    let strict = CountingEmbed::strict();
+    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+        &store,
+        &strict,
+        &cfg,
+        &note_path_str,
+        &mut stats,
+    )
+    .await
+    .expect("second ingest");
+    assert_eq!(outcome, FileOutcome::Unchanged);
+    assert_eq!(
+        edge_first_seen_at(&db, &doc_src, &claim_dst, "claims").await,
+        Some(seen_at),
+        "an unchanged note keeps its edges' first_seen_at"
+    );
+    assert_eq!(
+        document_updated_at(&db, &note_path_str).await,
+        updated_at_before,
+        "an unchanged note does not move updated_at"
+    );
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+    db.execute("DELETE FROM edge WHERE dst = $1;", &[&claim_dst])
+        .await
+        .expect("cleanup claim edges");
+    db.execute("DELETE FROM node WHERE id = $1;", &[&claim_dst])
+        .await
+        .expect("cleanup claim node");
+    store
+        .delete_document(&note_path_str)
+        .await
+        .expect("cleanup document");
+}
+
 /// The missing-node mechanism: the claim row is keyed by `canon(subject)` while the graph node
 /// was assembled from the raw frontmatter spelling, so a claim whose subject is not already
 /// canonical was written as a node under a spelling no row uses — and `gc_orphans` deleted that
