@@ -119,8 +119,10 @@ def main() -> int:
     if was_clamped:
         print(f"[omb-distill] transcript clamped to {len(text)} chars", file=sys.stderr)
 
-    distill_queue.enqueue(distill_queue.QueueItem(session_id, "claude-code", origin, repo, text, since=since))
-    print("[omb-distill] queued for hermes", file=sys.stderr)
+    if distill_queue.enqueue(
+        distill_queue.QueueItem(session_id, "claude-code", origin, repo, text, since=since)
+    ):
+        print("[omb-distill] queued for hermes", file=sys.stderr)
     return 0
 
 
