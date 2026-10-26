@@ -400,11 +400,20 @@ if [ "$(curl -s -o /dev/null -w '%{http_code}' -m5 "$BORING_URL/health" 2>/dev/n
         # engine down on 2026-08-25, days after the edit. Ask the running binary to parse what is
         # on disk now, while it is still up and can be asked.
         if [ -n "${DOCTOR_COMPOSE:-$(command -v docker)}" ] && [ "${BORING_SKIP_CONFIG_PROBE:-0}" != 1 ]; then
-            if docker compose exec -T boring-drudge drudge audit >/dev/null 2>&1; then
+            # One run, output and exit together. `main` returns anyhow::Result, so a config load
+            # failure prints `Error: <context>` where every context in BoringConfig::load
+            # (drudge/src/config.rs:439,503,509,535) names boring.json. `[config] warning:` lines
+            # print on success too, so they say nothing about why a run failed.
+            audit_out="$(docker compose exec -T boring-drudge drudge audit 2>&1)"; audit_rc=$?
+            if [ "$audit_rc" -eq 0 ]; then
                 ok "running engine can parse the config on disk"
-            else
-                config_err="$(docker compose exec -T boring-drudge drudge audit 2>&1 | head -2 | tr '\n' ' ')"
+            elif printf '%s\n' "$audit_out" | grep -q '^Error: .*boring\.json'; then
+                config_err="$(printf '%s\n' "$audit_out" | head -2 | tr '\n' ' ')"
                 bad "the running engine CANNOT parse boring.json — the next restart will crash-loop, not start: $config_err"
+                failed_engine=1
+            else
+                audit_err="$(printf '%s\n' "$audit_out" | grep -v '^\[config\] warning:' | head -3 | tr '\n' ' ')"
+                bad "drudge audit failed for a reason other than parsing (exit $audit_rc) — config parse not measured: $audit_err"
                 failed_engine=1
             fi
         fi

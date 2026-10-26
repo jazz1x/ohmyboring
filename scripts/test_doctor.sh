@@ -76,6 +76,13 @@ if [ "${1:-}" = compose ] && [ "${2:-}" = exec ]; then
         echo "    unknown variant \`cobol\`, expected one of \`rust\`, \`python\`, \`shell\`" >&2
         exit 1
     fi
+    # Real engine: unknown-field warnings go to stderr on every run, success or not.
+    echo "[config] warning: unknown top-level field 'zzz' in boring.json" >&2
+    echo "[config] warning: unknown top-level field 'yyy' in boring.json" >&2
+    if [ "${DOCTOR_AUDIT_LOCKED:-0}" = 1 ]; then
+        echo "Error: canceling statement due to lock timeout" >&2
+        exit 1
+    fi
     exit 0
 fi
 if [ "${1:-}" = logs ]; then
@@ -861,6 +868,47 @@ case "$(cat "$TMP/config-unreadable.out")" in
   *)
     cat "$TMP/config-unreadable.out"
     echo "FAIL: strict doctor did not name the unreadable config" >&2
+    exit 1
+    ;;
+esac
+
+# Violation: audit fails for a reason that is not parsing (the door's sync transaction held a
+# Postgres lock, 2026-10-26). Only the harmless config warnings precede the real error line.
+make_case "$TMP/audit-locked" yes
+if ( DOCTOR_AUDIT_LOCKED=1 run_strict "$TMP/audit-locked" "$TMP/audit-locked.out" ); then
+    cat "$TMP/audit-locked.out"
+    echo "FAIL: an audit that cannot run must still fail readiness (cannot measure is red)" >&2
+    exit 1
+fi
+case "$(cat "$TMP/audit-locked.out")" in
+  *"CANNOT parse"*)
+    cat "$TMP/audit-locked.out"
+    echo "FAIL: a lock failure was mislabeled as a config parse failure" >&2
+    exit 1
+    ;;
+esac
+case "$(cat "$TMP/audit-locked.out")" in
+  *"failed for a reason other than parsing"*"lock timeout"*) ;;
+  *)
+    cat "$TMP/audit-locked.out"
+    echo "FAIL: strict doctor did not report the real audit error" >&2
+    exit 1
+    ;;
+esac
+if grep -q '\[config\] warning' "$TMP/audit-locked.out" 2>/dev/null \
+   && grep '✗' "$TMP/audit-locked.out" | grep -q '\[config\] warning'; then
+    echo "FAIL: the audit failure line carries the harmless [config] warning lines" >&2
+    exit 1
+fi
+
+# Control: audit exits 0 while printing the same warnings — the config parses.
+make_case "$TMP/audit-warn-ok" yes
+( run_strict "$TMP/audit-warn-ok" "$TMP/audit-warn-ok.out" ) || true
+case "$(cat "$TMP/audit-warn-ok.out")" in
+  *"running engine can parse the config on disk"*) ;;
+  *)
+    cat "$TMP/audit-warn-ok.out"
+    echo "FAIL: audit exit 0 with warnings must read as a parseable config" >&2
     exit 1
     ;;
 esac
