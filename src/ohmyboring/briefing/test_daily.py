@@ -10,11 +10,11 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
-for p in (ROOT / "src", ROOT / "agents"):
+for p in (ROOT / "src", ROOT / "agents" / "shared"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from shared.vault_note import split_frontmatter  # noqa: E402
+from vault_note import split_frontmatter  # noqa: E402
 
 from ohmyboring.briefing import daily, generate  # noqa: E402
 from ohmyboring.result import Err, Ok  # noqa: E402
