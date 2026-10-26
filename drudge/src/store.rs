@@ -1019,6 +1019,19 @@ impl Store {
             .map_or_else(SystemTime::now, |r| r.get::<_, SystemTime>(0)))
     }
 
+    /// Move only the stored change-detection sha (old whole-file sha → content hash); nothing else is touched.
+    pub async fn set_doc_sha(&self, path: &str, sha: &str) -> Result<()> {
+        self.db()
+            .await?
+            .execute(
+                "UPDATE document SET sha = $2 WHERE source_path = $1;",
+                &[&path, &sha],
+            )
+            .await
+            .context("set document sha")?;
+        Ok(())
+    }
+
     /// Update only the recency of documents whose content is unchanged (same sha) — mtime backfill without re-embedding.
     /// Ensures the recency-first sort key (`updated_at`) is also populated for existing documents.
     pub async fn set_updated_at(&self, path: &str, updated_at: SystemTime) -> Result<()> {

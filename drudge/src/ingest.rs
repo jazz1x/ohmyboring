@@ -314,6 +314,67 @@ fn sha256(data: &str) -> String {
     hex::encode(Sha256::digest(data.as_bytes()))
 }
 
+/// Frontmatter keys the engine rewrites itself (`project_links`), so they are not a content change.
+/// Same set as the Python sync (`src/ohmyboring/sync/hash.py` DERIVED_KEYS).
+const DERIVED_KEYS: [&str; 1] = ["relates_to:"];
+
+/// Drop the derived keys (key line plus the `-` list lines right after it) from the frontmatter.
+/// Same bytes as Python `strip_derived`; text without a frontmatter block is returned as is.
+fn strip_derived(text: &str) -> String {
+    let (bom, rest) = text
+        .strip_prefix('\u{feff}')
+        .map_or(("", text), |r| ("\u{feff}", r));
+    let Some((yaml, body)) = crate::vault::split_frontmatter(rest) else {
+        return text.to_owned();
+    };
+    let mut out = format!("{bom}---\n");
+    let mut skipping_list = false;
+    for line in yaml.split('\n') {
+        if skipping_list && line.trim_start().starts_with('-') {
+            continue;
+        }
+        skipping_list = DERIVED_KEYS.iter().any(|k| line.starts_with(k));
+        if !skipping_list {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str("---\n");
+    out.push_str(body);
+    out
+}
+
+/// Change-detection hash: sha256 of the text without the derived frontmatter keys.
+fn content_sha(data: &str) -> String {
+    sha256(&strip_derived(data))
+}
+
+/// How the stored `document.sha` relates to the file on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShaVerdict {
+    /// No document row yet.
+    NoRow,
+    /// Stored sha equals the content hash — nothing changed.
+    Same,
+    /// Stored sha is the old whole-file sha and the file is unchanged: only the sha column moves.
+    LegacySame(String),
+    /// Content changed.
+    Different,
+}
+
+fn judge_sha(stored: Option<&str>, data: &str) -> ShaVerdict {
+    let Some(stored) = stored else {
+        return ShaVerdict::NoRow;
+    };
+    if stored == content_sha(data) {
+        return ShaVerdict::Same;
+    }
+    if stored == sha256(data) {
+        return ShaVerdict::LegacySame(content_sha(data));
+    }
+    ShaVerdict::Different
+}
+
 /// Detect whether the string contains CJK Unified Ideographs (U+4E00..=U+9FFF) — filters model drift
 /// into Chinese in agent-curated tags/tools/concepts. Korean uses Hangul, not Han ideographs.
 fn has_han(s: &str) -> bool {
@@ -421,9 +482,17 @@ pub async fn ingest_file_with<C: Chunker, G: GraphExtractor, E: Embed>(
 
     let (front, body) = frontmatter::parse(&data, path, cfg)?;
 
-    let sha = sha256(&data);
+    let sha = content_sha(&data);
     let prev = store.get_doc_sha(path).await?;
-    if prev.as_deref() == Some(sha.as_str()) {
+    let verdict = judge_sha(prev.as_deref(), &data);
+    if let ShaVerdict::LegacySame(new_sha) = &verdict {
+        // Transition: the stored sha is the old whole-file one and the file did not change.
+        // Move the sha column only — no re-embed, no edge rewrite.
+        store.set_doc_sha(path, new_sha).await?;
+        stats.unchanged += 1;
+        return Ok(FileOutcome::Unchanged);
+    }
+    if verdict == ShaVerdict::Same {
         // Content identical — chunk re-embedding is skipped, but the deterministic graph still
         // rebuilds: "graph already built" holds only for notes ingested after the graph code
         // that wrote their edges, and the rebuild embeds nothing for claims whose row exists.
@@ -598,8 +667,32 @@ fn is_managed_path(path: &Path, managed_dirs: &[PathBuf]) -> bool {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use super::{canon, collect_target_paths, has_han, is_managed_path, slugify, strip_nul};
+    use super::{
+        ShaVerdict, canon, collect_target_paths, content_sha, has_han, is_managed_path, judge_sha,
+        sha256, slugify, strip_nul,
+    };
     use std::path::{Path, PathBuf};
+
+    fn note(relates_to: &str) -> String {
+        format!("---\ntitle: t\nkind: note\nrelates_to:\n- \"[[{relates_to}]]\"\n---\n본문\n")
+    }
+
+    #[test]
+    fn relates_to_only_change_is_not_a_change() {
+        let stored = content_sha(&note("wiki-0002"));
+        let rewritten = note("wiki-0009");
+        assert_eq!(judge_sha(Some(&stored), &rewritten), ShaVerdict::Same);
+    }
+
+    #[test]
+    fn stored_whole_file_sha_only_moves_the_sha_column() {
+        let file = note("wiki-0002");
+        let stored = sha256(&file);
+        assert_eq!(
+            judge_sha(Some(&stored), &file),
+            ShaVerdict::LegacySame(content_sha(&file))
+        );
+    }
 
     #[test]
     fn strip_nul_removes_null_bytes() {
