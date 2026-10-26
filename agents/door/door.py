@@ -152,6 +152,9 @@ from ohmyboring import config as boring_config
 from ohmyboring.adapters import embed as embed_adapter
 from ohmyboring.adapters import events as event_log
 from ohmyboring.adapters import vault as vault_notes
+from ohmyboring.briefing import daily as brief_daily
+from ohmyboring.briefing import generate as brief_generate
+from ohmyboring.briefing import schedule as brief_schedule
 from ohmyboring.compact import run as compact_run
 from ohmyboring.compact import schedule as compact_schedule
 from ohmyboring.entrypoints.http import mcp_recall
@@ -216,6 +219,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     app.state.note_index = index
     _start_sync_if_owner()
     _start_compact_if_owner()
+    _start_brief_if_owner()
     yield
 
 
@@ -838,6 +842,43 @@ def _start_compact_if_owner() -> None:
             )
             compact_schedule.start(deps, hours)
             print(f"[door] compact thread started: every {hours}h", file=sys.stderr, flush=True)
+
+
+#: 일일 브리프 노트 주인 스위치 — engine(기본)이면 스레드 없음, python 이면 문 배경 스레드가
+#: BORING_BRIEF_HOUR(로컬, 기본 8)에 vault/wiki/daily-brief-<날짜>.md 를 쓴다. 켜기 전에 엔진의
+#: BORING_BRIEF_HOUR 를 범위 밖(예 99)으로 둬야 둘이 겹치지 않는다 — 빈 값은 엔진에서 기본 8 이다.
+_BRIEF_OWNER_ENV = "DOOR_BRIEF_OWNER"
+
+
+def _brief_owner() -> str:
+    return _SYNC_PYTHON if os.environ.get(_BRIEF_OWNER_ENV) == _SYNC_PYTHON else "engine"
+
+
+def _start_brief_if_owner() -> None:
+    if _brief_owner() != _SYNC_PYTHON:
+        return
+    dsn = os.environ.get("DOOR_PG_DSN")
+    if not dsn:
+        print(
+            "[door] brief owner=python but DOOR_PG_DSN is empty — brief thread not started",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    match brief_schedule.parse_hour(os.environ.get("BORING_BRIEF_HOUR")):
+        case Err(reason):
+            print(f"[door] brief thread not started: {reason}", file=sys.stderr, flush=True)
+        case Ok(hour):
+            deps = brief_daily.BriefDeps(
+                connect=lambda: psycopg.connect(dsn, autocommit=True),
+                generate=brief_generate.llm_generate,
+                lang=boring_config.note_lang(),
+                wiki_dir=os.path.join(_vault_dir(), "wiki"),
+                append_event=_enqueue_writer_event,
+                clock=lambda: datetime.now().astimezone(),
+            )
+            brief_schedule.start(deps, hour)
+            print(f"[door] brief thread started: daily at {hour}:00 local", file=sys.stderr, flush=True)
 
 
 def _remember_outcome_response(body: bytes, route: str, outcome: remember_writer.WriteOutcome) -> Response:
