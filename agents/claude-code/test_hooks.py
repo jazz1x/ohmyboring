@@ -565,8 +565,15 @@ class DistillExitCodeTests(unittest.TestCase):
             stamp = datetime.fromtimestamp(at, UTC).isoformat()
             return json.dumps({"timestamp": stamp, "message": {"role": role, "content": text}})
 
-        def session_end(rows):
-            """One SessionEnd of a dead session `abc`; the queued items and the event reasons it left."""
+        def dead(marks):
+            distill.distill_queue.markers.mark_retry("abc", reason="x")
+            os.utime(os.path.join(marks, "abc.dead"), (dead_at, dead_at))
+
+        def done(marks):
+            distill.distill_queue.markers.mark_done("abc", upto=dead_at)
+
+        def session_end(rows, mark=dead):
+            """One SessionEnd of session `abc` marked by `mark`; the queued items and the event reasons it left."""
             with tempfile.TemporaryDirectory() as d:
                 path = os.path.join(d, "t.jsonl")
                 Path(path).write_text("\n".join(rows), encoding="utf-8")
@@ -590,8 +597,7 @@ class DistillExitCodeTests(unittest.TestCase):
                         os.environ, {"MARKER_RETRY_MAX_ATTEMPTS": "1", "BORING_EVENT_LOG": event_path}
                     ),
                 ):
-                    distill.distill_queue.markers.mark_retry("abc", reason="x")
-                    os.utime(os.path.join(d, "marks", "abc.dead"), (dead_at, dead_at))
+                    mark(os.path.join(d, "marks"))
                     self.assertEqual(distill.main(), 0)
                     queued = [i.text for i in distill.distill_queue.drain()]
                 rows = [json.loads(ln) for ln in Path(event_path).read_text().splitlines()]
@@ -603,8 +609,12 @@ class DistillExitCodeTests(unittest.TestCase):
         self.assertEqual(
             ([t.startswith("[user] dead 이후") for t in queued], reasons), ([True], ["dead_requeued_tail"])
         )
-        queued, reasons = session_end([before, row("assistant", dead_at + 60, "dead 이후 답 " + "y" * 600)])
+        answer_only = row("assistant", dead_at + 60, "dead 이후 답 " + "y" * 600)
+        queued, reasons = session_end([before, answer_only])
         self.assertEqual((queued, reasons), ([], ["dead_no_new_turns"]))
+        # A live resumed session (#492) still sends an assistant-only tail, as on main.
+        queued, reasons = session_end([before, answer_only], mark=done)
+        self.assertEqual(([t.startswith("[assistant] dead 이후") for t in queued], reasons), ([True], []))
 
     def test_run_returns_nonzero_on_crash(self):
         stderr = io.StringIO()

@@ -14,6 +14,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import distill_queue
+import markers
 import transcript
 from distill_core import (
     _mark,
@@ -100,7 +101,10 @@ def main() -> int:
         distill_queue.resume_since(session_id) if session_id and TRANSCRIPT_FORMAT == "claude-json" else None
     )
     tail = transcript.extract_since(transcript_path, since) if since is not None else ""
-    if tail and transcript.has_user_turn(tail):
+    # Only a dead session needs a new user turn: an assistant-only tail after its death is not
+    # new work. A live resumed session keeps sending whatever came after `since` (#492).
+    dead = bool(session_id) and markers.dead_time(session_id) is not None
+    if tail and (not dead or transcript.has_user_turn(tail)):
         text = tail
     else:
         since = None
