@@ -603,7 +603,7 @@ class DistillExitCodeTests(unittest.TestCase):
         self.assertEqual(
             ([t.startswith("[user] dead 이후") for t in queued], reasons), ([True], ["dead_requeued_tail"])
         )
-        queued, reasons = session_end([before])
+        queued, reasons = session_end([before, row("assistant", dead_at + 60, "dead 이후 답 " + "y" * 600)])
         self.assertEqual((queued, reasons), ([], ["dead_no_new_turns"]))
 
     def test_run_returns_nonzero_on_crash(self):

@@ -100,7 +100,7 @@ def main() -> int:
         distill_queue.resume_since(session_id) if session_id and TRANSCRIPT_FORMAT == "claude-json" else None
     )
     tail = transcript.extract_since(transcript_path, since) if since is not None else ""
-    if tail:
+    if tail and transcript.has_user_turn(tail):
         text = tail
     else:
         since = None
