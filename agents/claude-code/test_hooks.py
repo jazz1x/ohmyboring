@@ -573,7 +573,9 @@ class DistillExitCodeTests(unittest.TestCase):
             distill.distill_queue.markers.mark_done("abc", upto=dead_at)
 
         def session_end(rows, mark=dead):
-            """One SessionEnd of session `abc` marked by `mark`; the queued items and the event reasons it left."""
+            """One SessionEnd of session `abc` marked by `mark`: queued items, event reasons, and whether
+            the hook said it queued."""
+            stderr = io.StringIO()
             with tempfile.TemporaryDirectory() as d:
                 path = os.path.join(d, "t.jsonl")
                 Path(path).write_text("\n".join(rows), encoding="utf-8")
@@ -588,7 +590,7 @@ class DistillExitCodeTests(unittest.TestCase):
                     mock.patch.object(distill.distill_queue.markers, "MARK_DIR", os.path.join(d, "marks")),
                     mock.patch.object(event_log, "_ISOLATED_LOG", event_path),
                     mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
-                    mock.patch.object(distill.sys, "stderr", io.StringIO()),
+                    mock.patch.object(distill.sys, "stderr", stderr),
                     mock.patch.object(distill, "extract", return_value="x" * 600),
                     mock.patch.object(distill, "git_remote_url", return_value=""),
                     mock.patch.object(distill, "repo_slug", return_value="x"),
@@ -601,20 +603,23 @@ class DistillExitCodeTests(unittest.TestCase):
                     self.assertEqual(distill.main(), 0)
                     queued = [i.text for i in distill.distill_queue.drain()]
                 rows = [json.loads(ln) for ln in Path(event_path).read_text().splitlines()]
-                return queued, [r["reason"] for r in rows if r["event"] == "distill_queue_dead"]
+                reasons = [r["reason"] for r in rows if r["event"] == "distill_queue_dead"]
+                return queued, reasons, "queued for hermes" in stderr.getvalue()
 
         before = row("user", dead_at - 3600, "dead 이전 턴")
         after = row("user", dead_at + 60, "dead 이후 턴 " + "y" * 600)
-        queued, reasons = session_end([before, after])
+        queued, reasons, said = session_end([before, after])
         self.assertEqual(
-            ([t.startswith("[user] dead 이후") for t in queued], reasons), ([True], ["dead_requeued_tail"])
+            ([t.startswith("[user] dead 이후") for t in queued], reasons, said),
+            ([True], ["dead_requeued_tail"], True),
         )
         answer_only = row("assistant", dead_at + 60, "dead 이후 답 " + "y" * 600)
-        queued, reasons = session_end([before, answer_only])
-        self.assertEqual((queued, reasons), ([], ["dead_no_new_turns"]))
+        self.assertEqual(session_end([before, answer_only]), ([], ["dead_no_new_turns"], False))
         # A live resumed session (#492) still sends an assistant-only tail, as on main.
-        queued, reasons = session_end([before, answer_only], mark=done)
-        self.assertEqual(([t.startswith("[assistant] dead 이후") for t in queued], reasons), ([True], []))
+        queued, reasons, said = session_end([before, answer_only], mark=done)
+        self.assertEqual(
+            ([t.startswith("[assistant] dead 이후") for t in queued], reasons, said), ([True], [], True)
+        )
 
     def test_run_returns_nonzero_on_crash(self):
         stderr = io.StringIO()
