@@ -24,9 +24,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -91,6 +93,7 @@ import repo_table  # noqa: E402
 markers.set_mark_dir(tempfile.mkdtemp(prefix="omb-hooks-mark-"))
 
 from ohmyboring.adapters import engine  # noqa: E402
+from ohmyboring.adapters import events as event_log  # noqa: E402
 from ohmyboring.adapters import llm as llm_adapter  # noqa: E402
 from ohmyboring.adapters.engine import Unreachable  # noqa: E402
 from ohmyboring.result import Err, Ok  # noqa: E402
@@ -554,6 +557,54 @@ class DistillExitCodeTests(unittest.TestCase):
     def test_without_distill_skip_the_session_is_pending(self):
         os.environ.pop("BORING_DISTILL_SKIP", None)
         self.assertEqual(self._pending_after_session_end({}), ["abc.pending"])
+
+    def test_a_dead_session_queues_only_the_turns_after_its_death(self):
+        dead_at = time.time()
+
+        def row(role, at, text):
+            stamp = datetime.fromtimestamp(at, UTC).isoformat()
+            return json.dumps({"timestamp": stamp, "message": {"role": role, "content": text}})
+
+        def session_end(rows):
+            """One SessionEnd of a dead session `abc`; the queued items and the event reasons it left."""
+            with tempfile.TemporaryDirectory() as d:
+                path = os.path.join(d, "t.jsonl")
+                Path(path).write_text("\n".join(rows), encoding="utf-8")
+                event_path = os.path.join(d, "events.ndjson")
+                payload = {
+                    "transcript_path": path,
+                    "session_id": "abc",
+                    "cwd": "/work/x",
+                    "hook_event_name": "SessionEnd",
+                }
+                with (
+                    mock.patch.object(distill.distill_queue.markers, "MARK_DIR", os.path.join(d, "marks")),
+                    mock.patch.object(event_log, "_ISOLATED_LOG", event_path),
+                    mock.patch.object(distill.sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(distill.sys, "stderr", io.StringIO()),
+                    mock.patch.object(distill, "extract", return_value="x" * 600),
+                    mock.patch.object(distill, "git_remote_url", return_value=""),
+                    mock.patch.object(distill, "repo_slug", return_value="x"),
+                    mock.patch.object(distill.boring_config, "classify", return_value=("personal", None)),
+                    mock.patch.dict(
+                        os.environ, {"MARKER_RETRY_MAX_ATTEMPTS": "1", "BORING_EVENT_LOG": event_path}
+                    ),
+                ):
+                    distill.distill_queue.markers.mark_retry("abc", reason="x")
+                    os.utime(os.path.join(d, "marks", "abc.dead"), (dead_at, dead_at))
+                    self.assertEqual(distill.main(), 0)
+                    queued = [i.text for i in distill.distill_queue.drain()]
+                rows = [json.loads(ln) for ln in Path(event_path).read_text().splitlines()]
+                return queued, [r["reason"] for r in rows if r["event"] == "distill_queue_dead"]
+
+        before = row("user", dead_at - 3600, "dead 이전 턴")
+        after = row("user", dead_at + 60, "dead 이후 턴 " + "y" * 600)
+        queued, reasons = session_end([before, after])
+        self.assertEqual(
+            ([t.startswith("[user] dead 이후") for t in queued], reasons), ([True], ["dead_requeued_tail"])
+        )
+        queued, reasons = session_end([before])
+        self.assertEqual((queued, reasons), ([], ["dead_no_new_turns"]))
 
     def test_run_returns_nonzero_on_crash(self):
         stderr = io.StringIO()
