@@ -846,7 +846,7 @@ def _start_compact_if_owner() -> None:
 
 #: 일일 브리프 노트 주인 스위치 — engine(기본)이면 스레드 없음, python 이면 문 배경 스레드가
 #: BORING_BRIEF_HOUR(로컬, 기본 8)에 vault/wiki/daily-brief-<날짜>.md 를 쓴다. 켜기 전에 엔진의
-#: BORING_BRIEF_HOUR 를 범위 밖(예 99)으로 둬야 둘이 겹치지 않는다 — 빈 값은 엔진에서 기본 8 이다.
+#: BORING_BRIEF_HOUR 를 시각이 아닌 값(`off`)으로 둬야 둘이 겹치지 않는다 — 빈 값은 엔진에서 기본 8 이다.
 _BRIEF_OWNER_ENV = "DOOR_BRIEF_OWNER"
 
 
