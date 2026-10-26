@@ -17,6 +17,9 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import markers  # noqa: E402
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
+from ohmyboring.adapters import events  # noqa: E402  (standard library only, like this module)
+
 
 @dataclass(frozen=True)
 class QueueItem:
@@ -42,11 +45,29 @@ def is_queued(session_id: str) -> bool:
     return os.path.exists(item_path(session_id))
 
 
+def _dead_event(item: QueueItem, status: str, reason: str) -> None:
+    events.try_append_event(
+        "distill-queue",
+        "distill_queue_dead",
+        status,
+        reason=reason,
+        agent=item.agent,
+        session_id=item.session_id,
+    )
+
+
 def enqueue(item: QueueItem) -> None:
     """Write `item` atomically, replacing any earlier item of the same session, and mark it pending."""
     if markers.is_dead(item.session_id):
-        print(f"[distill-queue] dead session not queued: {item.session_id}", file=sys.stderr)
-        return
+        # A dead session is re-offered only with a tail that starts after its death (`since`, from
+        # resume_since); mark_pending below clears the marker and the retry count starts again.
+        # Anything else is the content that already failed, so it is not queued.
+        if item.since is None:
+            _dead_event(item, "skipped", "dead_no_new_turns")
+            print(f"[distill-queue] dead session not queued: {item.session_id}", file=sys.stderr)
+            return
+        _dead_event(item, "requeued", "dead_requeued_tail")
+        print(f"[distill-queue] dead session re-queued with its tail: {item.session_id}", file=sys.stderr)
     os.makedirs(queue_dir(), exist_ok=True)
     path = item_path(item.session_id)
     fd, tmp = tempfile.mkstemp(dir=queue_dir(), suffix=".tmp")
@@ -65,7 +86,11 @@ def resume_since(session_id: str) -> float | None:
     A queued item (still waiting, or kept after a failed try) has not reached memory, so its
     own start carries over; otherwise the done marker says how far memory goes. Reading only the
     marker loses the tail after a failure, because enqueue clears the marker.
+    A dead session resumes after its death: what failed before is not offered again.
     """
+    dead = markers.dead_time(session_id)
+    if dead is not None:
+        return dead
     if is_queued(session_id):
         queued = _parse(item_path(session_id))
         if queued is not None:

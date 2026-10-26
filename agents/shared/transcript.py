@@ -326,6 +326,11 @@ def extract_since(path: str, since: float) -> str:
     return _extract_claude_jsonl(path, since)
 
 
+def has_user_turn(text: str) -> bool:
+    """True when extracted transcript text holds at least one `[user] ` turn."""
+    return text.startswith("[user] ") or "\n[user] " in text
+
+
 def extract(path: str, fmt: str = "claude-json") -> str:
     """Parse a session transcript at `path` using format `fmt`.
 
