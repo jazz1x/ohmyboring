@@ -2770,6 +2770,25 @@ impl Store {
             .collect())
     }
 
+    /// Card-session edges for `GET /approved` (SQL copied from the Python door). Row order is
+    /// not fixed; the caller sorts.
+    pub async fn approved_edges(&self) -> Result<Vec<crate::approved::EdgeRow>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::approved::SQL, &[])
+            .await
+            .context("approved edges")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::approved::EdgeRow {
+                src: r.get(0),
+                dst: r.get(1),
+                kind: r.get(2),
+            })
+            .collect())
+    }
+
     /// Per-judge verdict counts, plus how often the two judges agreed on hits both of them
     /// labelled. `unsure` is counted, never folded into either side — an abstention is not a vote.
     pub async fn recall_label_stats(&self) -> Result<(Vec<RecallLabelStats>, i64, i64)> {

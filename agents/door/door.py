@@ -1535,19 +1535,10 @@ def _fetch_edges() -> list[tuple[str, str, str]]:
 
 
 def _approved_payload(since_hours: int) -> dict:
-    rows = _fetch_edges()
-    selection = approved.select_approved(rows, since_hours, datetime.now(tz=approved.SEOUL))
-    return {
-        "since_hours": since_hours,
-        "approved": [
-            {"session": item.session, "note": item.note, "at": item.at.isoformat(timespec="seconds")}
-            for item in selection.approved
-        ],
-        "contested": [
-            {"session": item.session, "note": item.note, "at": item.at.isoformat(timespec="seconds")}
-            for item in selection.contested
-        ],
-    }
+    selection = approved.select_approved(_fetch_edges(), since_hours, datetime.now(tz=approved.SEOUL))
+    for item in selection.skipped:
+        print(f"[door] approved skipped {item.session}: {item.reason}", file=sys.stderr, flush=True)
+    return approved.payload(selection, since_hours)
 
 
 async def _approved(request: Request) -> Response:

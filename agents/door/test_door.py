@@ -1816,6 +1816,54 @@ class ApprovedSelectTests(unittest.TestCase):
         self.assertIsNone(approved.parse_session_ts("session:ff8b2f41-uuid"))
 
 
+class ApprovedContractTests(unittest.TestCase):
+    """Tie order, unconvertible ts, and the skipped rows in the payload (C-PORT5)."""
+
+    NOW = datetime(2026, 9, 22, 12, 0, 0, tzinfo=approved.SEOUL)
+
+    def test_ties_sort_session_then_note_ascending_whatever_the_input_order(self):
+        ts = self.NOW.timestamp() - 3600
+        rows = [
+            (f"session:slack:C2:{ts}", "/b.md", "used"),
+            (f"session:slack:C1:{ts}", "/z.md", "used"),
+            (f"session:slack:C1:{ts}", "/a.md", "used"),
+            (f"session:slack:C2:{ts}", "/a.md", "contested"),
+            (f"session:slack:C1:{ts}", "/a.md", "contested"),
+        ]
+        for order in (rows, rows[::-1]):
+            sel = approved.select_approved(order, since_hours=24, now=self.NOW)
+            self.assertEqual(
+                [(a.session[:8], a.note) for a in sel.approved],
+                [("slack:C1", "/a.md"), ("slack:C1", "/z.md"), ("slack:C2", "/b.md")],
+            )
+            self.assertEqual(
+                [(a.session[:8], a.note) for a in sel.contested],
+                [("slack:C1", "/a.md"), ("slack:C2", "/a.md")],
+            )
+
+    def test_unconvertible_ts_is_skipped_not_raised(self):
+        for tail in ("inf", "-inf", "nan", "1e400", "1e20", "-1e20"):
+            src = f"session:slack:C1:{tail}"
+            sel = approved.select_approved([(src, "/a.md", "used")], since_hours=24, now=self.NOW)
+            self.assertEqual(sel.approved, [], tail)
+            self.assertEqual(sel.skipped, [approved.Skipped(src, "session ts out of range")], tail)
+
+    def test_payload_carries_skipped_count_only(self):
+        ts = self.NOW.timestamp() - 60
+        rows = [
+            ("session:uuid-b", "/x.md", "used"),
+            ("session:slack:C1:inf", "/x.md", "used"),
+            ("session:slack:C1", "/x.md", "used"),
+            ("session:uuid-b", "/y.md", "used"),
+            (f"session:slack:C1:{ts}", "/a.md", "used"),
+        ]
+        selection = approved.select_approved(rows, 24, self.NOW)
+        out = approved.payload(selection, 24)
+        self.assertEqual(list(out), ["since_hours", "approved", "contested", "skipped_rows"])
+        self.assertEqual(out["skipped_rows"], 4)
+        self.assertEqual(out["approved"][0]["at"], "2026-09-22T11:59:00+09:00")
+
+
 class ApprovedRouteTests(unittest.TestCase):
     """GET /approved through the real door app — stub rows, no DB (AC2)."""
 

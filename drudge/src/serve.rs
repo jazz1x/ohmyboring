@@ -419,6 +419,68 @@ mod tests {
         }
     }
 
+    // Expected values: Python door `_approved` + Starlette JSONResponse, 2026-10-28.
+    // PG paths (200/502) are unverified: the Docker VM is down.
+    #[tokio::test]
+    async fn approved_400_and_503_have_python_bodies() {
+        use tower::ServiceExt;
+        let cfg = crate::config::BoringConfig::default();
+        let state = super::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(None),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+            owner_token: std::sync::Arc::new(None),
+        };
+        let router = super::build_router(state);
+        let bad = br#"{"error":"since_hours must be an integer in [1, 8760]"}"#;
+        let no_store = br#"{"error":"store not configured"}"#;
+        let cases: [(&str, StatusCode, &[u8]); 8] = [
+            ("/approved?since_hours=abc", StatusCode::BAD_REQUEST, bad),
+            ("/approved?since_hours=", StatusCode::BAD_REQUEST, bad),
+            ("/approved?since_hours=8761", StatusCode::BAD_REQUEST, bad),
+            (
+                "/approved?since_hours=1&since_hours=0",
+                StatusCode::BAD_REQUEST,
+                bad,
+            ),
+            ("/approved", StatusCode::SERVICE_UNAVAILABLE, no_store),
+            (
+                "/approved?since_hours=%2024%20",
+                StatusCode::SERVICE_UNAVAILABLE,
+                no_store,
+            ),
+            (
+                "/approved?since_hours=0&since_hours=%EF%BC%92%EF%BC%94",
+                StatusCode::SERVICE_UNAVAILABLE,
+                no_store,
+            ),
+            (
+                "/approved?other=x",
+                StatusCode::SERVICE_UNAVAILABLE,
+                no_store,
+            ),
+        ];
+        for (uri, status, want) in cases {
+            let req = axum::extract::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let res = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), status, "{uri}");
+            let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+            assert_eq!(&body[..], want, "{uri}");
+        }
+    }
+
     #[test]
     fn recurrences_days_defaults_to_30() {
         assert_eq!(recurrences_days(None), 30);
@@ -1725,6 +1787,7 @@ pub(crate) fn build_router(state: AppState) -> axum::Router {
         .route("/rules", get(http::handle_rules))
         .route("/claim-source", get(http::handle_claim_source))
         .route("/claim-sources", get(http::handle_claim_sources))
+        .route("/approved", get(http::handle_approved))
         .route("/recall-label-stats", get(http::handle_recall_label_stats))
         .route(
             "/events",

@@ -7,6 +7,7 @@
 //! other kernel contracts directly against a live Postgres backend.
 pub mod anchor;
 pub mod anchor_hash;
+pub mod approved;
 pub mod ask;
 pub mod audit;
 pub mod claim_source;

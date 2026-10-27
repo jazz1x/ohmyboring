@@ -1055,6 +1055,47 @@ pub(crate) async fn handle_claim_sources(
     }
 }
 
+/// What the card sessions approved or contested — same wire as the Python door's `GET /approved`:
+/// 400 `{error}` for a bad `since_hours` (checked before the store), 503 without a store, 502
+/// `{error, detail}` when it can't be reached, else 200. Skipped rows are logged, only counted on the wire.
+pub(crate) async fn handle_approved(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let since_hours = match crate::approved::check_since_hours(uri.query()) {
+        Ok(hours) => hours,
+        Err(message) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": message}))).into_response();
+        }
+    };
+    let Some(store) = s.store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "store not configured"})),
+        )
+            .into_response();
+    };
+    match store.approved_edges().await {
+        Ok(rows) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+            let selection = crate::approved::select_approved(&rows, since_hours, now);
+            for item in &selection.skipped {
+                eprintln!("[approved] skipped {}: {}", item.session, item.reason);
+            }
+            Json(selection.payload).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "store unreachable", "detail": format!("{e:#}")})),
+        )
+            .into_response(),
+    }
+}
+
 /// Per-judge counts, per-judge precision, and llm/human agreement over hits both decided.
 pub(crate) async fn handle_recall_label_stats(
     State(s): State<AppState>,

@@ -43,7 +43,7 @@ pub enum SubjectCheck {
 }
 
 /// Python `str.isspace()` — Unicode White_Space plus U+001C..U+001F, which `strip()` also eats.
-fn is_py_space(c: char) -> bool {
+pub(crate) fn is_py_space(c: char) -> bool {
     c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 
@@ -80,7 +80,8 @@ fn decode_component(raw: &str) -> String {
 
 /// Starlette `request.query_params.get(name, "")`: `parse_qsl(keep_blank_values=True)`,
 /// empty pairs skipped, a pair without `=` has an empty value, the last duplicate wins.
-fn last_param(raw_query: Option<&str>, name: &str) -> String {
+/// `None` when the key is absent, so a caller can tell "missing" from "empty".
+pub(crate) fn last_param_opt(raw_query: Option<&str>, name: &str) -> Option<String> {
     raw_query
         .unwrap_or("")
         .split('&')
@@ -90,7 +91,10 @@ fn last_param(raw_query: Option<&str>, name: &str) -> String {
             (decode_component(key) == name).then(|| decode_component(value))
         })
         .next_back()
-        .unwrap_or_default()
+}
+
+fn last_param(raw_query: Option<&str>, name: &str) -> String {
+    last_param_opt(raw_query, name).unwrap_or_default()
 }
 
 pub fn check_subject(raw_query: Option<&str>) -> SubjectCheck {
