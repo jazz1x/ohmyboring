@@ -69,9 +69,9 @@ fn note_paths(wiki_dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-#[allow(dead_code)]
 impl NoteIndex {
-    /// How many notes were read and parsed so far (test seam and startup log).
+    /// How many notes were read and parsed so far (test seam).
+    #[cfg(test)]
     pub(crate) fn parse_count(&self) -> usize {
         self.parses.load(Ordering::SeqCst)
     }
@@ -126,7 +126,7 @@ impl NoteIndex {
                 continue;
             };
             match old.remove(&path) {
-                Some(entry) if entry.marker == (marker.0, marker.1 + 1) => {
+                Some(entry) if entry.marker == marker => {
                     live.insert(path, entry);
                 }
                 _ => {

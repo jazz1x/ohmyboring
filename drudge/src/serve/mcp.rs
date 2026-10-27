@@ -1665,6 +1665,10 @@ async fn remember_on(
     // fix of a long note still embeds within DUPLICATE_MAX_DIST, so a corrected note that
     // went through the gate would be skipped as "too similar" and the wrong fact would
     // stay live. Only unmarked notes go through the duplicate gate.
+    // The duplicate check and the note write it guards must be one step: without this two
+    // identical requests both see "no duplicate" and both land. Held to the end of the request
+    // (before `sync_lock`, which `finish_remembered_note` takes; nothing takes them the other way).
+    let _remember_turn = s.remember_gate.lock().await;
     let found = if needs_dedup(&supersedes) {
         check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir, &s.note_index)
             .await

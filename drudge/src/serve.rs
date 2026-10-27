@@ -63,7 +63,6 @@ pub struct AppState {
     pub(crate) cfg_path: Arc<Option<PathBuf>>,
     pub(crate) sync_lock: Arc<Mutex<()>>,
     /// Orders remembers so a duplicate check and the note write it guards are one step.
-    #[allow(dead_code)]
     pub(crate) remember_gate: Arc<Mutex<()>>,
     pub(crate) note_index: Arc<note_index::NoteIndex>,
     pub(crate) wiki_index: Arc<std::sync::Mutex<wiki_recall::WikiIndex>>,
@@ -1833,6 +1832,8 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         Arc::clone(&compact_failure),
     );
 
+    spawn_note_index_prefill(&state);
+
     let router = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -1843,6 +1844,25 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
     axum::serve(listener, router)
         .await
         .map_err(|e| anyhow::anyhow!("axum serve: {e}"))
+}
+
+/// Fill the remember duplicate-gate index in the background so startup is not blocked; a
+/// remember arriving before it finishes scans the disk as before. The log line is the fill time.
+fn spawn_note_index_prefill(state: &AppState) {
+    let Some(wiki_dir) = state.wiki_dir() else {
+        return;
+    };
+    let index = Arc::clone(&state.note_index);
+    tokio::task::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        match index.prefill(&wiki_dir) {
+            Ok(count) => eprintln!(
+                "[serve] note index ready: {count} notes in {:.3}s",
+                started.elapsed().as_secs_f64()
+            ),
+            Err(e) => eprintln!("[serve] note index prefill failed (remember scans the disk): {e}"),
+        }
+    });
 }
 
 /// 서버가 쓰는 라우트 표. 테스트가 같은 표를 라우터로 호출한다.
