@@ -75,6 +75,11 @@ class NoteProvenance:
     author: str | None = None
     judge: str | None = None
     concepts: list[str] | None = None
+    tools: list[str] | None = None
+    claims: list[dict[str, Any]] | None = None
+    sources: list[str] | None = None
+    session_id: str | None = None
+    session_since: float | None = None
 
 
 @dataclass(frozen=True)
@@ -282,14 +287,20 @@ class DrudgeClient:
         supersede edges; absent, the engine records the note as `unknown`. Same body the MCP
         `remember` tool sends; the response is `{source_path, wiki_id, duplicate, supersedes, unknown}`."""
         payload: dict[str, Any] = {"title": title, "body": body, "origin": provenance.origin}
-        if provenance.tags:
-            payload["tags"] = provenance.tags
-        if provenance.supersedes:
-            payload["supersedes"] = provenance.supersedes
-        if provenance.repo:
-            payload["repo"] = provenance.repo
-        if provenance.concepts:
-            payload["concepts"] = provenance.concepts
+        # Absent and empty are the same to the engine, so only filled fields travel.
+        optional = {
+            "tags": provenance.tags,
+            "supersedes": provenance.supersedes,
+            "repo": provenance.repo,
+            "concepts": provenance.concepts,
+            "tools": provenance.tools,
+            "claims": provenance.claims,
+            "sources": provenance.sources,
+            "omb_session_id": provenance.session_id,
+        }
+        payload.update({key: value for key, value in optional.items() if value})
+        if provenance.session_since is not None:
+            payload["omb_session_since"] = str(int(provenance.session_since))
         if provenance.author is not None:
             payload["author"] = provenance.author
         if provenance.judge is not None:
@@ -363,128 +374,47 @@ class RememberOutcome:
     status: str
 
 
-@dataclass(frozen=True)
-class _Retry:
-    """한 번의 시도가 일시 실패로 끝나 이미 기다렸다 — 다음 시도로 간다."""
-
-
-def _remember_request(arguments: dict[str, Any]) -> urllib.request.Request:
-    """문(:7710)의 POST /mcp 로 가는 remember 요청 한 개 — 얼굴이 몇 개든 문은 하나(E3a-1)."""
-    payload = json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "remember", "arguments": arguments},
-        }
-    ).encode("utf-8")
-    return urllib.request.Request(
-        f"{omb_env.door_url().rstrip('/')}/mcp",
-        data=payload,
-        headers={"content-type": "application/json"},
-        method="POST",
-    )
-
-
-def _wait_then_retry(attempt: int) -> _Retry:
-    time.sleep(1 << attempt)
-    return _Retry()
-
-
-def _post_remember(req: urllib.request.Request, timeout: int, attempt: int, max_retries: int) -> Any:
-    """The decoded reply, `_Retry` after a transient failure, or the final failed outcome."""
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        if 500 <= e.code < 600 and attempt < max_retries:
-            print(
-                f"[distill-session] remember attempt {attempt + 1} got HTTP {e.code}, retrying...",
-                file=sys.stderr,
-            )
-            return _wait_then_retry(attempt)
-        print(f"[distill-session] remember call failed: {e}", file=sys.stderr)
-        return RememberOutcome(False, "failed")
-    except (urllib.error.URLError, TimeoutError) as e:
-        if attempt < max_retries:
-            print(
-                f"[distill-session] remember attempt {attempt + 1} failed transiently ({e}), retrying...",
-                file=sys.stderr,
-            )
-            return _wait_then_retry(attempt)
-        print(
-            f"[distill-session] remember call failed after {max_retries + 1} attempts: {e}",
-            file=sys.stderr,
-        )
-        return RememberOutcome(False, "failed")
-    except Exception as e:
-        print(f"[distill-session] remember call failed: {e}", file=sys.stderr)
-        return RememberOutcome(False, "failed")
-
-
-def _read_remember_reply(data: Any) -> RememberOutcome:
-    error = data.get("error")
-    if error:
-        print(f"[distill-session] remember error: {error}", file=sys.stderr)
-        error_data = error.get("data") if isinstance(error, dict) else None
-        refused = isinstance(error_data, dict) and error_data.get("outcome") == "refused"
-        return RememberOutcome(False, "refused" if refused else "failed")
-
-    result = data.get("result", {})
-    content = result.get("content", [])
-    text = ""
-    for item in content if isinstance(content, list) else []:
-        if isinstance(item, dict) and item.get("type") == "text":
-            text += item.get("text", "")
-    print(f"[distill-session] {text}", file=sys.stderr)
-    # A duplicate skip is a successful deterministic outcome, not a transient failure.
-    if "skipped — duplicate" in text:
-        return RememberOutcome(True, "duplicate")
-    if "remembered" in text:
-        return RememberOutcome(True, "remembered")
-    return RememberOutcome(False, "failed")
+def _remember_outcome(result: Either[dict[str, Any], EngineFailure]) -> RememberOutcome:
+    """POST /remember 의 답을 증류기가 아는 두 칸으로 접는다 — 400 은 엔진이 노트를 거절한 것이다."""
+    match result:
+        case Ok(data):
+            print(f"[distill-session] remember: {data}", file=sys.stderr)
+            # A duplicate skip is a successful deterministic outcome, not a transient failure.
+            duplicate = isinstance(data, dict) and data.get("duplicate")
+            return RememberOutcome(True, "duplicate" if duplicate else "remembered")
+        case Err(Refused(400, _, _) as refusal):
+            print(f"[distill-session] remember refused: {refusal.body}", file=sys.stderr)
+            return RememberOutcome(False, "refused")
+        case Err(failure):
+            print(f"[distill-session] remember call failed: {failure}", file=sys.stderr)
+            return RememberOutcome(False, "failed")
 
 
 def call_remember(  # noqa: PLR0913
     title, body, origin, repo, tags, tools, concepts, claims, session_id="", sources=None, session_since=None
 ):
-    """Call ohmyboring's remember MCP tool.
+    """POST the distiller's note to the door's /remember — the route the secretary and agents use.
 
-    Retries transient failures (5xx, connection errors, timeouts) a bounded number of times
-    so a momentary engine hiccup does not drop the session. Permanent failures (4xx, MCP
-    error, missing "remembered" ack) are not retried.
+    The client retries transient failures (5xx, connection errors, timeouts) a bounded number
+    of times so a momentary engine hiccup does not drop the session. Permanent failures (4xx
+    other than the 400 refusal) are not retried.
     """
-    arguments = {
-        "title": title,
-        "body": body,
-        "origin": origin,
-        "repo": repo,
-        "tags": tags,
-        "tools": tools,
-        "concepts": concepts,
-        "claims": claims,
-    }
-    if sources:
-        arguments["sources"] = sources
-    if session_id:
-        arguments["omb_session_id"] = session_id
-    if session_since is not None:
-        arguments["omb_session_since"] = str(int(session_since))
-    req = _remember_request(arguments)
-
-    max_retries = int(os.environ.get("DISTILL_REMEMBER_RETRIES") or "2")
-    timeout = int(os.environ.get("DISTILL_REMEMBER_TIMEOUT") or "45")
-
-    for attempt in range(max_retries + 1):
-        match _post_remember(req, timeout, attempt, max_retries):
-            case _Retry():
-                continue
-            case RememberOutcome() as outcome:
-                return outcome
-            case reply:
-                return _read_remember_reply(reply)
-
-    return RememberOutcome(False, "failed")
+    provenance = NoteProvenance(
+        tags=tags,
+        origin=origin,
+        repo=repo,
+        concepts=concepts,
+        tools=tools,
+        claims=claims,
+        sources=sources,
+        session_id=session_id or None,
+        session_since=session_since,
+    )
+    client = DrudgeClient(
+        retries=int(os.environ.get("DISTILL_REMEMBER_RETRIES") or "2"),
+        timeout=int(os.environ.get("DISTILL_REMEMBER_TIMEOUT") or "45"),
+    )
+    return _remember_outcome(client.remember(title, body, provenance))
 
 
 def _judge_health(health: dict[str, Any]) -> Either[None, NotWritable]:

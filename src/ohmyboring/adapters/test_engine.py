@@ -390,7 +390,7 @@ class RememberWireTest(unittest.TestCase):
 class RememberDoorRoutingTest(unittest.TestCase):
     """E3a-1 — 모든 운영 remember 는 문(:7710) 하나를 지난다.
 
-    DrudgeClient.remember 와 call_remember 가 쓰는 요청 작성자(_remember_request) 둘 다
+    DrudgeClient.remember(증류기의 call_remember 도 이 메서드를 부른다)는
     door_url() 로 향한다. 엔진 직행으로 돌아가는 변이는 이 시험에서 빨갛게 끝난다.
     """
 
@@ -401,11 +401,6 @@ class RememberDoorRoutingTest(unittest.TestCase):
             client.remember("제목", "본문")
         self.assertEqual(wire.sent[0]["base"], "http://door.test:7710")
         self.assertEqual(wire.sent[0]["path"], "/remember")
-
-    def test_remember_request_builder_uses_the_door(self):
-        with mock.patch.dict(os.environ, {"BORING_DOOR_URL": "http://door.test:7710"}):
-            req = engine._remember_request({"title": "t"})
-        self.assertEqual(req.full_url, "http://door.test:7710/mcp")
 
 
 class ClientBaseUrlRoutingTest(unittest.TestCase):
@@ -476,8 +471,10 @@ class CallRememberTest(unittest.TestCase):
         """Run call_remember against a scripted sequence of urlopen outcomes; return (result, calls, sleeps)."""
         script = list(outcomes)
         calls, sleeps = [], []
+        self.urls = []
 
         def fake_urlopen(req, timeout):
+            self.urls.append(req.full_url)
             calls.append((json.loads(req.data), timeout))
             outcome = script.pop(0)
             if isinstance(outcome, Exception):
@@ -494,31 +491,21 @@ class CallRememberTest(unittest.TestCase):
         return result, calls, sleeps
 
     def test_transient_server_errors_are_retried_with_doubling_waits(self):
-        result, calls, sleeps = self._call([_http_error(503), _http_error(502), _Reply("remembered wiki-1")])
+        written = {"source_path": "/vault/wiki/wiki-1.md", "wiki_id": "wiki-1", "duplicate": None}
+        result, calls, sleeps = self._call([_http_error(503), _http_error(502), _Reply(written)])
         self.assertEqual(result, engine.RememberOutcome(True, "remembered"))
         self.assertEqual(sleeps, [1, 2])
         self.assertEqual(len(calls), 3)
 
     def test_a_client_error_is_final_and_not_retried(self):
-        result, calls, sleeps = self._call([_http_error(400)])
+        result, calls, sleeps = self._call([_http_error(404)])
         self.assertEqual(result, engine.RememberOutcome(False, "failed"))
         self.assertEqual((sleeps, len(calls)), ([], 1))
 
-    def test_a_door_refusal_is_refused_and_not_retried(self):
-        envelope = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "error": {"code": -32602, "message": "empty", "data": {"outcome": "refused"}},
-        }
-        result, calls, sleeps = self._call([_Reply(envelope)])
+    def test_a_400_from_the_engine_is_refused_and_not_retried(self):
+        result, calls, sleeps = self._call([_http_error(400)])
         self.assertEqual(result, engine.RememberOutcome(False, "refused"))
         self.assertEqual((sleeps, len(calls)), ([], 1))
-
-    def test_an_error_without_refused_data_is_failed(self):
-        """통제군 — data 없는 error 는 고장이다."""
-        envelope = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "db down"}}
-        result, _calls, _sleeps = self._call([_Reply(envelope)])
-        self.assertEqual(result, engine.RememberOutcome(False, "failed"))
 
     def test_exhausted_transport_failures_are_failed_not_refused(self):
         boom = urllib.error.URLError("refused")
@@ -526,15 +513,24 @@ class CallRememberTest(unittest.TestCase):
         self.assertEqual(result, engine.RememberOutcome(False, "failed"))
         self.assertEqual(len(calls), 3)
 
-    def test_a_duplicate_is_a_success(self):
-        result, _calls, _sleeps = self._call([_Reply("skipped — duplicate of wiki-3")])
-        self.assertEqual(result, engine.RememberOutcome(True, "duplicate"))
+    def test_the_distiller_posts_to_http_remember_and_keeps_its_outcome_shape(self):
+        written = {"source_path": "/vault/wiki/wiki-1.md", "wiki_id": "wiki-1", "duplicate": None}
+        duplicate = {**written, "duplicate": "/vault/wiki/wiki-0.md"}
+        for reply, expected in (
+            (written, engine.RememberOutcome(True, "remembered")),
+            (duplicate, engine.RememberOutcome(True, "duplicate")),
+        ):
+            with self.subTest(duplicate=reply["duplicate"]):
+                result, calls, _sleeps = self._call([_Reply(reply)])
+                self.assertEqual(result, expected)
+                self.assertTrue(self.urls[0].endswith("/remember"), self.urls[0])
+                self.assertEqual(calls[0][0]["omb_session_id"], "sid")
 
-    def test_the_request_names_the_session_and_the_tool(self):
-        _result, calls, _sleeps = self._call([_Reply("remembered wiki-1")])
+    def test_the_request_carries_the_session_and_the_distiller_timeout(self):
+        written = {"source_path": "/vault/wiki/wiki-1.md", "wiki_id": "wiki-1", "duplicate": None}
+        _result, calls, _sleeps = self._call([_Reply(written)])
         payload, timeout = calls[0]
-        self.assertEqual(payload["params"]["name"], "remember")
-        self.assertEqual(payload["params"]["arguments"]["omb_session_id"], "sid")
+        self.assertEqual(payload["omb_session_id"], "sid")
         self.assertEqual(timeout, 45)
 
 
