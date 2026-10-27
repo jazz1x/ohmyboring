@@ -320,6 +320,26 @@ class SessionEndIsRecorded(unittest.TestCase):
         self.assertIn("session_end", kinds)
         self.assertIn("injection_uptake", kinds)
 
+    def test_the_session_event_carries_per_note_use_capped_at_fifty(self):
+        """The ledger rows are deleted at session end, so the per-note answer has to ride the event
+        or it is gone: 60 notes handed, one named by the agent -> 50 entries, the used one first,
+        and the handed count says 60 so the cut is visible."""
+        import uptake_core
+
+        snippet = "the pool died because deadpool recycled a closed socket " * 3
+        hits = [{"source_path": f"/vault/wiki/wiki-{n:04d}.md", "snippet": snippet} for n in range(1, 61)]
+        uptake_core.append_record(uptake_core.injection_record("s-many", "why", hits, 60))
+        distill_core.log_uptake_event(
+            "s-many", "repo", "[assistant] per wiki-0060.\n", "claude-code", distill_skipped=False
+        )
+        event = next(e for e in self._events() if e["event"] == "injection_uptake")
+        self.assertEqual(len(event["notes"]), 50)
+        self.assertEqual(event["notes_handed"], 60)
+        self.assertEqual(event["notes"][0]["note"], "/vault/wiki/wiki-0060.md")
+        self.assertTrue(event["notes"][0]["used"])
+        self.assertFalse(event["notes"][1]["used"])
+        self.assertIsInstance(event["notes"][0]["handed_ts"], float)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

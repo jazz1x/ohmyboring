@@ -55,6 +55,56 @@ def _event(session, used, total, when=IN_WINDOW):
     }
 
 
+class PerNoteDetailLeavesTheVerdictAlone(unittest.TestCase):
+    """The per-note list rides the same event the verdict reads; the verdict must not move."""
+
+    def test_sums_and_verdict_output_are_the_same_with_and_without_the_list(self):
+        import tempfile
+
+        import uptake_core
+
+        snippet = "the pool died because deadpool recycled a closed socket " * 3
+        hits = [{"source_path": f"/vault/wiki/wiki-{n:04d}.md", "snippet": snippet} for n in (7, 8)]
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "BORING_EVENT_LOG": os.path.join(tmp, "events.ndjson"),
+                "BORING_EVENT_SINK": "spool",
+                "BORING_INJECTION_LEDGER": os.path.join(tmp, "ledger.jsonl"),
+            }
+            with mock.patch.dict(os.environ, env):
+                record = uptake_core.injection_record("s-verdict", "why", hits, 3)
+                uptake_core.append_record(record)
+                text = "[assistant] per wiki-0007.\n"
+                expected = uptake_core.session_uptake([record], text)
+                uv.distill_core.log_uptake_event(
+                    "s-verdict", "repo", text, "claude-code", distill_skipped=False
+                )
+                with open(env["BORING_EVENT_LOG"], encoding="utf-8") as handle:
+                    logged = [json.loads(line) for line in handle if line.strip()]
+        event = next(e for e in logged if e["event"] == "injection_uptake")
+        self.assertEqual((event["used_hits"], event["total_hits"]), (expected.used_hits, expected.total_hits))
+        self.assertEqual(len(event["notes"]), 2, "the list is on the event the verdict reads")
+
+        def row(attributes):
+            return {
+                "event": "injection_uptake",
+                "observed_at": IN_WINDOW,
+                "session_id": "s-verdict",
+                "attributes": attributes,
+            }
+
+        plain = {k: v for k, v in event.items() if k not in ("ts", "component", "event", "status", "otel")}
+        without = {k: v for k, v in plain.items() if k not in ("notes", "notes_handed")}
+        outputs = []
+        for attributes in (plain, without):
+            out = io.StringIO()
+            with mock.patch.object(uv, "fetch_events", return_value=[row(attributes)]):
+                with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                    uv.main(["--json"])
+            outputs.append(out.getvalue())
+        self.assertEqual(outputs[0], outputs[1])
+
+
 class JsonMode(unittest.TestCase):
     def _run(self, rows, argv=("--json",)):
         out, err = io.StringIO(), io.StringIO()
