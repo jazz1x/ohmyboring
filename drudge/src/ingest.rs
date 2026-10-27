@@ -544,8 +544,8 @@ pub async fn ingest_file_with<C: Chunker, G: GraphExtractor, E: Embed>(
     outcome.map(|o| (o, stats))
 }
 
-/// What [`ingest_file_with`] did, plus the counters this one file raised **even when it failed** —
-/// a note that errors after its tools/edges were written still contributed them to the run total.
+/// What [`ingest_file_with`] did, plus the counters this one file raised. After a failure they
+/// describe rolled-back rows; the run total folds them in only when the attempt succeeded.
 /// `stats` is owned here and handed out by value; the `&mut` below never leaves this module.
 ///
 /// One transaction per file: a failure at any step rolls back every row the file wrote, its
@@ -736,14 +736,15 @@ pub async fn run_with<C: Chunker, G: GraphExtractor, E: Embed>(
         // that YAML reads as a sequence) and re-ingest; only if THAT still fails do we skip + log.
         // Either way the rest of the corpus keeps syncing.
         let (file_stats, outcome) = ingest_file_counted::<C, G, E>(store, llm, cfg, &pstr).await;
-        stats.absorb(&file_stats);
         match outcome {
-            Ok(_) => {}
+            Ok(_) => stats.absorb(&file_stats),
             Err(e) => {
+                // A failed attempt was rolled back whole, so its counters describe rows that
+                // do not exist; only an attempt that committed adds to the total.
                 let (retry_stats, repaired) =
                     repair_and_reingest::<C, G, E>(store, llm, cfg, &pstr).await;
-                stats.absorb(&retry_stats);
                 if repaired {
+                    stats.absorb(&retry_stats);
                     eprintln!("[ingest] auto-repaired malformed frontmatter + re-ingested {pstr}");
                     stats.repaired += 1;
                 } else {
