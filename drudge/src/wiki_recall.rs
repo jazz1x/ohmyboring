@@ -146,6 +146,7 @@ fn extract_project(content: &str) -> String {
 }
 
 /// One parsed wiki note, cached in lowercased form for scoring. `mtime` keys incremental refresh.
+#[derive(Debug)]
 struct CachedDoc {
     id: String,
     title: String, // raw (for display); lowercased forms below are what scoring reads
@@ -161,7 +162,7 @@ struct CachedDoc {
 /// index is **honest, not stale**: `refresh()` re-stats the dir each call and re-reads only files whose
 /// mtime changed (catching out-of-band edits, e.g. Obsidian), and drops vanished files. Reading bodies
 /// — the expensive part — happens only on first sight or change. (Layer 1 honesty kept; Layer 3 cost cut.)
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct WikiIndex {
     docs: HashMap<PathBuf, CachedDoc>,
 }

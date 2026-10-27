@@ -366,8 +366,13 @@ impl Origin {
     }
 }
 
+/// `Origin::from_str` rejected a value that names no origin; carries the trimmed input.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid origin: {0}")]
+pub struct ParseOriginError(String);
+
 impl std::str::FromStr for Origin {
-    type Err = String;
+    type Err = ParseOriginError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim() {
@@ -375,7 +380,7 @@ impl std::str::FromStr for Origin {
             "company" => Ok(Self::Company),
             "mirror" => Ok(Self::Mirror),
             "community" => Ok(Self::Community),
-            other => Err(format!("invalid origin: {other}")),
+            other => Err(ParseOriginError(other.to_owned())),
         }
     }
 }

@@ -16,6 +16,13 @@ pub struct CodeIndexStore {
     pool: Pool,
 }
 
+/// Hand-written: `pool` holds the parsed DSN (user and password), which must never reach a log.
+impl std::fmt::Debug for CodeIndexStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeIndexStore").finish_non_exhaustive()
+    }
+}
+
 /// I/O-boundary timeout for pool wait/create/recycle. Prevents infinite hangs on DB loss;
 /// drudge/CLAUDE.md treats this as a graceful boundary, distinct from defensive `{timeout:200}` bounds.
 const POOL_TIMEOUT_SECONDS: u64 = 5;

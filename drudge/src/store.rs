@@ -26,6 +26,7 @@ use tokio_postgres::{Client, Config as PgConfig, NoTls};
 use crate::frontmatter::{Claim, FrontMatter};
 
 /// Ingest input (one chunk).
+#[derive(Debug)]
 pub struct Doc {
     pub id: String, // "{source_path}#{idx}"
     pub content: String,
@@ -283,6 +284,7 @@ pub struct EventLogRow {
 }
 
 /// Read filter for the queryable event log.
+#[derive(Debug)]
 pub struct EventLogFilter<'a> {
     pub limit: i64,
     pub component: Option<&'a str>,
@@ -334,6 +336,15 @@ pub struct Store {
     /// Embedding dimension (= `boring.json` `embed_dim`; bge-m3 = 1024). Enforced at every embedding
     /// upsert via `checked_vector` and mirrored by the `vector(dim)` DDL columns created in `open`.
     dim: usize,
+}
+
+/// Hand-written: `pool` holds the parsed DSN (user and password), which must never reach a log.
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store")
+            .field("dim", &self.dim)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Semantic edge kinds (doc→entity) — the SSOT shared by clear/stats.
@@ -487,13 +498,6 @@ pub struct AnchoredClaim {
     pub era: String,
     pub stale_at: Option<SystemTime>,
     pub stale_reason: Option<String>,
-}
-
-impl std::ops::Deref for AnchoredClaim {
-    type Target = Claim;
-    fn deref(&self) -> &Claim {
-        &self.claim
-    }
 }
 
 #[derive(Debug, Default)]

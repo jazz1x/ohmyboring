@@ -21,6 +21,7 @@ If an item isn't in memory, say so or omit it (do not make up plausible names/pl
 [General knowledge] Help with pure general-knowledge questions, but note in one line that it's general knowledge. \
 Do not guess-fill the user's projects, to-dos, decisions, or facts from general knowledge.";
 
+#[derive(Debug)]
 pub struct AnswerOut {
     pub answer: String,
     pub sources: Vec<String>,
@@ -131,11 +132,11 @@ pub async fn answer(
         let _ = writeln!(
             claim_ctx,
             "- [{}|{}] {} {} {}",
-            cl.kind(),
-            cl.confidence(),
-            defang(&cl.subject).trim_end(),
-            defang(&cl.predicate).trim_end(),
-            defang(&cl.value).trim_end()
+            cl.claim.kind(),
+            cl.claim.confidence(),
+            defang(&cl.claim.subject).trim_end(),
+            defang(&cl.claim.predicate).trim_end(),
+            defang(&cl.claim.value).trim_end()
         );
     }
 
@@ -746,11 +747,11 @@ pub async fn project_status(
         let _ = writeln!(
             claim_ctx,
             "- [{}|{}] {} {} {}",
-            cl.kind(),
-            cl.confidence(),
-            defang(&cl.subject).trim_end(),
-            defang(&cl.predicate).trim_end(),
-            defang(&cl.value).trim_end()
+            cl.claim.kind(),
+            cl.claim.confidence(),
+            defang(&cl.claim.subject).trim_end(),
+            defang(&cl.claim.predicate).trim_end(),
+            defang(&cl.claim.value).trim_end()
         );
     }
 

@@ -601,7 +601,7 @@ pub(crate) async fn handle_consumption(
     let caller = owner::Caller::from_headers((*s.owner_token).as_deref(), &headers);
     let standing = owner::standing(caller, judge == Some(crate::frontmatter::Author::Owner))
         .map_err(AppError::bad_request)?;
-    let judge = judge.and_then(|j| j.as_judge());
+    let judge = judge.and_then(|j| j.to_judge());
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
     let old_paths: Vec<String> = req.supersedes.iter().map(|[_, old]| old.clone()).collect();
     let refused =

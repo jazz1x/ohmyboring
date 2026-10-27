@@ -2936,11 +2936,14 @@ async fn current_claims_filters_by_anchor_path() {
         .await
         .expect("claims filtered by anchor_path");
     assert!(
-        hits.iter().any(|c| c.subject == subject),
+        hits.iter().any(|c| c.claim.subject == subject),
         "the anchored claim must match anchor_path a/b.rs"
     );
     assert_eq!(
-        hits.iter().find(|c| c.subject == subject).unwrap().era,
+        hits.iter()
+            .find(|c| c.claim.subject == subject)
+            .unwrap()
+            .era,
         "anchored"
     );
     let misses = store
@@ -2956,7 +2959,7 @@ async fn current_claims_filters_by_anchor_path() {
         .await
         .expect("claims filtered by missing anchor_path");
     assert!(
-        !misses.iter().any(|c| c.subject == subject),
+        !misses.iter().any(|c| c.claim.subject == subject),
         "a non-matching anchor_path must drop the claim"
     );
     let suffix = store
@@ -2964,7 +2967,7 @@ async fn current_claims_filters_by_anchor_path() {
         .await
         .expect("claims filtered by path suffix");
     assert!(
-        !suffix.iter().any(|c| c.subject == subject),
+        !suffix.iter().any(|c| c.claim.subject == subject),
         "a path suffix is not an anchor prefix and must not match"
     );
     let prefix = store
@@ -2972,7 +2975,7 @@ async fn current_claims_filters_by_anchor_path() {
         .await
         .expect("claims filtered by path prefix");
     assert!(
-        prefix.iter().any(|c| c.subject == subject),
+        prefix.iter().any(|c| c.claim.subject == subject),
         "a path prefix must match"
     );
     let unfiltered = store
@@ -2980,7 +2983,7 @@ async fn current_claims_filters_by_anchor_path() {
         .await
         .expect("claims unfiltered");
     assert!(
-        unfiltered.iter().any(|c| c.subject == subject),
+        unfiltered.iter().any(|c| c.claim.subject == subject),
         "the filter absent must keep default behaviour"
     );
 
@@ -3184,7 +3187,7 @@ async fn anchor_hash_marks_edited_bodies_stale_and_current_claims_hides_them() {
         .await
         .expect("claims default");
     assert!(
-        !hidden.iter().any(|c| c.subject == fixture.subject),
+        !hidden.iter().any(|c| c.claim.subject == fixture.subject),
         "a stale claim must be hidden by default"
     );
     let shown = store
@@ -3193,7 +3196,7 @@ async fn anchor_hash_marks_edited_bodies_stale_and_current_claims_hides_them() {
         .expect("claims include_stale");
     let stale_row = shown
         .iter()
-        .find(|c| c.subject == fixture.subject)
+        .find(|c| c.claim.subject == fixture.subject)
         .expect("include_stale must surface the stale claim");
     assert!(stale_row.stale_at.is_some());
     assert_eq!(
@@ -3919,14 +3922,12 @@ async fn unchanged_note_reingest_repairs_claim_edge_without_embedding() {
     let note_path_str = note_path.to_string_lossy().into_owned();
     let cfg = BoringConfig::default();
 
-    let mut stats = Stats::default();
     let embedder = CountingEmbed::lenient();
-    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+    let (outcome, _) = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
         &store,
         &embedder,
         &cfg,
         &note_path_str,
-        &mut stats,
     )
     .await
     .expect("first ingest");
@@ -3936,14 +3937,12 @@ async fn unchanged_note_reingest_repairs_claim_edge_without_embedding() {
 
     delete_claims_edge(&db, &subject).await;
 
-    let mut stats = Stats::default();
     let strict = CountingEmbed::strict();
-    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+    let (outcome, stats) = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
         &store,
         &strict,
         &cfg,
         &note_path_str,
-        &mut stats,
     )
     .await
     .expect("second ingest");
@@ -4016,14 +4015,12 @@ async fn unchanged_note_reingest_leaves_edges_and_updated_at_alone() {
     let note_path_str = note_path.to_string_lossy().into_owned();
     let cfg = BoringConfig::default();
 
-    let mut stats = Stats::default();
     let embedder = CountingEmbed::lenient();
-    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+    let (outcome, _) = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
         &store,
         &embedder,
         &cfg,
         &note_path_str,
-        &mut stats,
     )
     .await
     .expect("first ingest");
@@ -4046,14 +4043,12 @@ async fn unchanged_note_reingest_leaves_edges_and_updated_at_alone() {
         .and_then(|f| f.set_modified(touched))
         .expect("touch mtime");
 
-    let mut stats = Stats::default();
     let strict = CountingEmbed::strict();
-    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+    let (outcome, _) = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
         &store,
         &strict,
         &cfg,
         &note_path_str,
-        &mut stats,
     )
     .await
     .expect("second ingest");
@@ -4233,14 +4228,12 @@ async fn undeclared_claim_row_and_node_outlive_their_edge() {
     let note_path_str = note_path.to_string_lossy().into_owned();
     let cfg = BoringConfig::default();
 
-    let mut stats = Stats::default();
     let embedder = CountingEmbed::lenient();
-    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+    let (outcome, _) = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
         &store,
         &embedder,
         &cfg,
         &note_path_str,
-        &mut stats,
     )
     .await
     .expect("first ingest");
@@ -4249,13 +4242,11 @@ async fn undeclared_claim_row_and_node_outlive_their_edge() {
     assert_eq!(claims_edge_count(&db, &note_path_str, &subject_x).await, 1);
 
     fs::write(&note_path, note(&claim_yaml(&subject_y))).expect("write note v2");
-    let mut stats = Stats::default();
-    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+    let (outcome, _) = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
         &store,
         &embedder,
         &cfg,
         &note_path_str,
-        &mut stats,
     )
     .await
     .expect("second ingest");
@@ -6073,4 +6064,65 @@ async fn fact_promotion_compares_slots_by_canon_so_an_old_spelling_row_stays_sea
             .expect("cleanup claims");
         store.delete_document(path).await.expect("cleanup document");
     }
+}
+
+/// Raises counters, then fails — the shape of a note that errors after part of its graph was written.
+#[derive(Default)]
+struct FailsAfterCounting;
+
+impl GraphExtractor for FailsAfterCounting {
+    async fn extract<E: Embed>(
+        &self,
+        _store: &Store,
+        _llm: &E,
+        _cfg: &BoringConfig,
+        _front: &FrontMatter,
+        _body: &str,
+        stats: &mut Stats,
+    ) -> anyhow::Result<()> {
+        stats.tools += 3;
+        stats.edges += 5;
+        Err(anyhow::anyhow!("extract failed midway"))
+    }
+}
+
+/// A note that fails after raising counters still contributes them to the run total.
+#[tokio::test]
+async fn run_total_keeps_the_counters_a_failed_note_raised() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let vault = tempdir().expect("vault dir");
+    let dirs = vec![vault.path().to_string_lossy().into_owned()];
+    let note_path = vault
+        .path()
+        .join(format!("{}.md", unique_subject("failcount")));
+    fs::write(
+        &note_path,
+        "---\norigin: personal\nproject: \"\"\nkind: note\n---\n\nbody\n",
+    )
+    .expect("write note");
+    let path = note_path.to_string_lossy().into_owned();
+
+    let stats = run_with::<DefaultChunker, FailsAfterCounting, _>(
+        &store,
+        &CountingEmbed::lenient(),
+        &BoringConfig::default(),
+        &dirs,
+    )
+    .await
+    .expect("run survives a failing note");
+
+    store
+        .delete_document(&path)
+        .await
+        .expect("cleanup document");
+    assert_eq!(stats.failed, 1, "the note is counted as failed");
+    assert_eq!(
+        (stats.tools, stats.edges),
+        (3, 5),
+        "its partial counters stay"
+    );
 }

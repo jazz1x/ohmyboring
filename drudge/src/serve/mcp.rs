@@ -1051,11 +1051,11 @@ async fn mcp_claims(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, S
         .into_iter()
         .map(|c| {
             json!({
-                "subject": c.subject,
-                "predicate": c.predicate,
-                "value": c.value,
-                "kind": c.kind(),
-                "confidence": c.confidence(),
+                "subject": c.claim.subject,
+                "predicate": c.claim.predicate,
+                "value": c.claim.value,
+                "kind": c.claim.kind(),
+                "confidence": c.claim.confidence(),
                 "anchor": c.anchor,
                 "era": c.era,
                 "stale_at": c.stale_at.map(system_time_rfc3339),
@@ -1356,7 +1356,7 @@ pub(crate) async fn remember_note(
         note.front.author == Author::Owner || judge == Some(Author::Owner),
     )
     .map_err(|m| (-32602_i32, m))?;
-    let edge_judge = judge.as_ref().unwrap_or(&note.front.author).as_judge();
+    let edge_judge = judge.as_ref().unwrap_or(&note.front.author).to_judge();
     let refused = owner::refused_supersedes(s.store.as_deref(), standing, &supersedes, "remember")
         .await
         .map_err(|e| (-32603_i32, format!("owner guard: {e:#}")))?;
@@ -1578,8 +1578,7 @@ async fn finish_remembered_note(
     };
 
     let _guard = s.sync_lock.lock().await;
-    let mut stats = ingest::Stats::default();
-    ingest::ingest_file(store, &s.llm, &s.cfg, &front.source_path, &mut stats)
+    let (_, stats) = ingest::ingest_file(store, &s.llm, &s.cfg, &front.source_path)
         .await
         .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
     let relates = match vault::project_note(store, path, 6).await {
@@ -2131,7 +2130,7 @@ fn parse_remember_note(
     } else {
         origin_in
             .parse::<config::Origin>()
-            .map_err(|e| (-32602_i32, e))?
+            .map_err(|e| (-32602_i32, e.to_string()))?
     }
     .as_str()
     .to_owned();
@@ -2225,7 +2224,7 @@ fn mcp_classify_repo(s: &AppState, args: Option<&Value>) -> Result<String, (i32,
         .ok_or((-32602, "missing argument: origin".to_owned()))?;
     let origin = origin
         .parse::<config::Origin>()
-        .map_err(|e| (-32602_i32, e))?
+        .map_err(|e| (-32602_i32, e.to_string()))?
         .as_str();
     let name = g("name").filter(|v| !v.is_empty());
 

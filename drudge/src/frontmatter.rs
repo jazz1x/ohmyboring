@@ -36,7 +36,7 @@ pub enum Author {
 impl Author {
     /// The judge a write by this author carries onto its edges; `unknown` names nobody.
     #[must_use]
-    pub fn as_judge(&self) -> Option<String> {
+    pub fn to_judge(&self) -> Option<String> {
         match self {
             Self::Unknown => None,
             known => Some(String::from(known.clone())),
@@ -294,10 +294,10 @@ mod tests {
             assert!(author_of(bad).is_err(), "{bad:?} must be refused");
         }
         assert_eq!(
-            Author::Agent("hermes".to_owned()).as_judge().as_deref(),
+            Author::Agent("hermes".to_owned()).to_judge().as_deref(),
             Some("agent:hermes")
         );
-        assert_eq!(Author::Unknown.as_judge(), None);
+        assert_eq!(Author::Unknown.to_judge(), None);
     }
 
     #[test]

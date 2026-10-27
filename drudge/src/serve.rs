@@ -67,6 +67,21 @@ pub struct AppState {
     pub(crate) owner_token: Arc<Option<String>>,
 }
 
+/// Hand-written: `owner_token` is a secret and `llm`/`store` reach keys and the DSN.
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("store", &self.store)
+            .field("code_index", &self.code_index)
+            .field("llm", &self.llm)
+            .field(
+                "owner_token",
+                &self.owner_token.as_ref().as_ref().map(|_| "***"),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl AppState {
     pub(crate) fn wiki_dir(&self) -> Option<PathBuf> {
         (*self.vault_dir).as_ref().map(|v| v.join("wiki"))

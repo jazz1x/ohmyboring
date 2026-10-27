@@ -323,6 +323,45 @@ pub struct Stats {
     pub edges: usize,
 }
 
+impl Stats {
+    /// Fold one file's counts into the run total. Every field is destructured so a new counter
+    /// that is not summed here fails to compile instead of silently reading 0.
+    pub fn absorb(&mut self, other: &Self) {
+        let Self {
+            scanned,
+            new,
+            updated,
+            unchanged,
+            deleted,
+            kept_vanished,
+            skipped,
+            failed,
+            repaired,
+            chunks,
+            tools,
+            concepts,
+            claims,
+            claims_unchanged,
+            edges,
+        } = *other;
+        self.scanned += scanned;
+        self.new += new;
+        self.updated += updated;
+        self.unchanged += unchanged;
+        self.deleted += deleted;
+        self.kept_vanished += kept_vanished;
+        self.skipped += skipped;
+        self.failed += failed;
+        self.repaired += repaired;
+        self.chunks += chunks;
+        self.tools += tools;
+        self.concepts += concepts;
+        self.claims += claims;
+        self.claims_unchanged += claims_unchanged;
+        self.edges += edges;
+    }
+}
+
 /// Per-file ingest verdict — what `ingest_file` did with one note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileOutcome {
@@ -460,7 +499,8 @@ fn is_target(path: &Path, exclude: &[String]) -> bool {
 
 /// Ingest one note file into the vector store + deterministic graph. The SSOT per-file pipeline.
 /// Reads `path` from disk, parses frontmatter, chunks, embeds, upserts, and rebuilds the
-/// semantic graph from the frontmatter. Accumulates into `stats`. Returns the verdict.
+/// semantic graph from the frontmatter. Returns the verdict with the counts this one file
+/// contributed; the caller folds them with [`Stats::absorb`].
 ///
 /// Uses the default chunker and frontmatter graph extractor. For custom strategies see
 /// [`ingest_file_with`].
@@ -469,14 +509,36 @@ pub async fn ingest_file(
     llm: &Llm,
     cfg: &config::BoringConfig,
     path: &str,
-    stats: &mut Stats,
-) -> Result<FileOutcome> {
-    ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, Llm>(store, llm, cfg, path, stats)
-        .await
+) -> Result<(FileOutcome, Stats)> {
+    ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, Llm>(store, llm, cfg, path).await
 }
 
 /// Same as [`ingest_file`], but with injectable `Chunker`, `GraphExtractor`, and `Embed` strategies.
 pub async fn ingest_file_with<C: Chunker, G: GraphExtractor, E: Embed>(
+    store: &Store,
+    llm: &E,
+    cfg: &config::BoringConfig,
+    path: &str,
+) -> Result<(FileOutcome, Stats)> {
+    let (stats, outcome) = ingest_file_counted::<C, G, E>(store, llm, cfg, path).await;
+    outcome.map(|o| (o, stats))
+}
+
+/// What [`ingest_file_with`] did, plus the counters this one file raised **even when it failed** —
+/// a note that errors after its tools/edges were written still contributed them to the run total.
+/// `stats` is owned here and handed out by value; the `&mut` below never leaves this module.
+async fn ingest_file_counted<C: Chunker, G: GraphExtractor, E: Embed>(
+    store: &Store,
+    llm: &E,
+    cfg: &config::BoringConfig,
+    path: &str,
+) -> (Stats, Result<FileOutcome>) {
+    let mut stats = Stats::default();
+    let outcome = ingest_steps::<C, G, E>(store, llm, cfg, path, &mut stats).await;
+    (stats, outcome)
+}
+
+async fn ingest_steps<C: Chunker, G: GraphExtractor, E: Embed>(
     store: &Store,
     llm: &E,
     cfg: &config::BoringConfig,
@@ -612,21 +674,21 @@ pub async fn run_with<C: Chunker, G: GraphExtractor, E: Embed>(
         // autonomous repair (quote unsafe scalar frontmatter, e.g. an unquoted `title: [FEDEV-97] …`
         // that YAML reads as a sequence) and re-ingest; only if THAT still fails do we skip + log.
         // Either way the rest of the corpus keeps syncing.
-        if let Err(e) = ingest_file_with::<C, G, E>(store, llm, cfg, &pstr, &mut stats).await {
-            if let Some(fixed) = std::fs::read_to_string(&pstr)
-                .ok()
-                .and_then(|c| crate::vault::repair_note_frontmatter(&c))
-                && frontmatter::parse(&fixed, &pstr, cfg).is_ok()
-                && std::fs::write(&pstr, &fixed).is_ok()
-                && ingest_file_with::<C, G, E>(store, llm, cfg, &pstr, &mut stats)
-                    .await
-                    .is_ok()
-            {
-                eprintln!("[ingest] auto-repaired malformed frontmatter + re-ingested {pstr}");
-                stats.repaired += 1;
-            } else {
-                eprintln!("[ingest] skipped malformed note {pstr}: {e:#}");
-                stats.failed += 1;
+        let (file_stats, outcome) = ingest_file_counted::<C, G, E>(store, llm, cfg, &pstr).await;
+        stats.absorb(&file_stats);
+        match outcome {
+            Ok(_) => {}
+            Err(e) => {
+                let (retry_stats, repaired) =
+                    repair_and_reingest::<C, G, E>(store, llm, cfg, &pstr).await;
+                stats.absorb(&retry_stats);
+                if repaired {
+                    eprintln!("[ingest] auto-repaired malformed frontmatter + re-ingested {pstr}");
+                    stats.repaired += 1;
+                } else {
+                    eprintln!("[ingest] skipped malformed note {pstr}: {e:#}");
+                    stats.failed += 1;
+                }
             }
         }
     }
@@ -643,6 +705,27 @@ pub async fn run_with<C: Chunker, G: GraphExtractor, E: Embed>(
         record_prune_skipped(store, &vanished).await?;
     }
     Ok(stats)
+}
+
+/// Quote unsafe frontmatter in place and ingest again. Returns the retry's counters (even if the
+/// retry failed) and whether the note now ingested.
+async fn repair_and_reingest<C: Chunker, G: GraphExtractor, E: Embed>(
+    store: &Store,
+    llm: &E,
+    cfg: &config::BoringConfig,
+    path: &str,
+) -> (Stats, bool) {
+    if let Some(fixed) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|c| crate::vault::repair_note_frontmatter(&c))
+        && frontmatter::parse(&fixed, path, cfg).is_ok()
+        && std::fs::write(path, &fixed).is_ok()
+    {
+        let (stats, outcome) = ingest_file_counted::<C, G, E>(store, llm, cfg, path).await;
+        (stats, outcome.is_ok())
+    } else {
+        (Stats::default(), false)
+    }
 }
 
 /// Owner decision 2026-09-24 (「적어도 마이그레이션 시점인 지금은 아니라는거임」): prune deletes
