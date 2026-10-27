@@ -1184,6 +1184,8 @@ mod tests {
             cfg: std::sync::Arc::new(cfg),
             cfg_path: std::sync::Arc::new(None),
             sync_lock: std::sync::Arc::default(),
+            remember_gate: std::sync::Arc::default(),
+            note_index: std::sync::Arc::default(),
             wiki_index: std::sync::Arc::default(),
             last_compact: std::sync::Arc::default(),
             compact_failure: std::sync::Arc::default(),
