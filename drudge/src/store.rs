@@ -2989,6 +2989,10 @@ impl Store {
         report
             .unknown_paths
             .extend(skipped.iter().map(|p| (*p).to_owned()));
+        // Known pairs are picked in request order (so `unknown_paths` keeps it), then written
+        // sorted by (older, newer): two requests touching the same older notes take the seal's
+        // row locks in the same order, so opposite-order requests wait instead of deadlocking.
+        let mut known = Vec::new();
         for pair in pairs {
             if Self::get_doc_sha_on(tx, &pair[0]).await?.is_none() {
                 report.unknown += 1;
@@ -3000,6 +3004,10 @@ impl Store {
                 report.unknown_paths.push(pair[1].clone());
                 continue;
             }
+            known.push(pair);
+        }
+        known.sort_by(|a, b| (&a[1], &a[0]).cmp(&(&b[1], &b[0])));
+        for pair in known {
             Self::upsert_edge_on(
                 tx,
                 &doc_node_id(&pair[0]),

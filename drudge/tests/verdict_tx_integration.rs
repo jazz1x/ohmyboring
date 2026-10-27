@@ -303,6 +303,12 @@ async fn concurrent_opposite_order_requests_are_all_or_nothing() {
         "half_written {}/{ITERATIONS} (requests erroring: {})",
         tally.half_written, tally.other_errors
     );
+    assert_eq!(
+        tally.other_errors,
+        0,
+        "erroring n/{} requests (a deadlock fails a request whole)",
+        ITERATIONS * 2
+    );
     assert_eq!(tally.half_written, 0, "half_written n/{ITERATIONS}");
 }
 
