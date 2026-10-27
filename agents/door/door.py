@@ -2198,7 +2198,7 @@ class _SearchBody(BaseModel):
     claims: StrictInt = Field(default=0, ge=0)
     related: StrictInt = Field(default=0, ge=0)
     related_heads: StrictInt = Field(default=2, ge=0)
-    since_hours: StrictInt | None = None
+    since_hours: StrictInt | None = Field(default=None, le=2147483647)
     project: StrictStr | None = None
     session_id: StrictStr | None = None
 

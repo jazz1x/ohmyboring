@@ -230,6 +230,18 @@ class SearchRouteTests(unittest.TestCase):
         self.assertEqual(self.post({"query": "q", "related": -1}).status_code, 400)
         self.assertEqual(self.post({"query": "q", "project": 5}).status_code, 400)
 
+    def test_since_hours_above_i32_is_400(self):
+        self.post({"query": "q", "since_hours": 2**31 - 1})
+        self.assertEqual(self.made[-1]["since_hours"], 2**31 - 1)
+        response = self.post({"query": "q", "since_hours": 2**31})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            "1 validation error for _SearchBody\nsince_hours\n"
+            "  Input should be less than or equal to 2147483647 [type=less_than_equal,"
+            " input_value=2147483648, input_type=int]\n",
+            response.json()["error"],
+        )
+
     def test_no_dsn_is_503(self):
         os.environ.pop("DOOR_PG_DSN", None)
         response = self.post({"query": "q"})
