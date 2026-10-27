@@ -1750,7 +1750,7 @@ _SAMPLE_MAX_VARIANTS = 10
 _SAMPLE_VALUE_CHARS = 160
 _SPLIT_SAMPLES_SQL = (
     "select predicate, count(*), (array_agg(left(value, %s) order by length(value) desc, value))[1] "
-    "from claim where subject = any(%s) "
+    "from claim where subject = any(%s) and superseded_at is null "
     "group by predicate order by 2 desc, 1 limit %s"
 )
 
@@ -1776,8 +1776,10 @@ async def _repairs_split_subjects_samples(request: Request) -> Response:
     return JSONResponse({"samples": [{"predicate": p, "rows": n, "value": v} for p, n, v in rows]})
 
 
-_SPLIT_SUBJECTS_SQL = "select subject, source_path from claim"
-_SPLIT_DELETE_SQL = "delete from claim where subject = any(%s) and source_path = any(%s)"
+_SPLIT_SUBJECTS_SQL = "select subject, source_path from claim where superseded_at is null"
+_SPLIT_DELETE_SQL = (
+    "delete from claim where subject = any(%s) and source_path = any(%s) and superseded_at is null"
+)
 _SPLIT_UPDATE_SQL = "update document set sha = '' where source_path = any(%s)"
 _OWNER_NOTES_SQL = "select source_path from document where author = 'owner' and source_path = any(%s)"
 
