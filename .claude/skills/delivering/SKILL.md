@@ -28,8 +28,9 @@ docker exec boring-agent sh -c 'hermes cron create --name advice-write --no-agen
 
 - hermes 는 외부 이미지(`make hermes-build`)다. `make build` 에 들어 있지 않다.
 - `~/.hermes/cron/jobs.json` 은 손으로 고치지 않는다. 데몬이 되돌린다.
-- `up`/`build` 전량은 정본 체크아웃(`/Users/jongyun/Development/mine/oh-my-boring`)에서만 친다.
+- `up` 전량은 정본 체크아웃(`/Users/jongyun/Development/mine/oh-my-boring`)에서만 친다. 워크트리에서는 `make door-build`·`make door-up` 만 친다. 단 이전 중 엔진 이미지는 트렁크 워크트리에서 `make build` 로 짓는다. compose build 에 `--project-directory <정본>` 을 붙이면 빌드 소스가 정본 체크아웃으로 풀리고 BUILD_SHA 라벨만 트렁크로 붙는다. 라벨은 증거가 아니다: 넘기기 전에 이미지 안 바이너리에서 그 커밋에만 있는 문자열을 찾는다.
 - 문 빌드·기동(`make door-build`·`make door-up`)은 워크트리에서도 친다. 빌드는 지금 폴더의 코드로 짓고, 기동은 Makefile 이 compose 프로젝트 폴더와 `.env` 를 정본 체크아웃으로 고정한다. 고정이 없으면 compose 가 지금 폴더를 잡아 빈 vault·기본 설정으로 뜬다.
+- 되돌릴 태그는 새 이미지를 빌드하기 전에 `docker image inspect` 로 얻은 전체 sha256 으로 달고, 태그가 조회되는지 본 뒤에 빌드한다. 빌드가 이름을 옮기면 옛 이미지는 이름을 잃고, containerd 이미지 저장소에서는 짧은 ID 로도 태그가 안 된다.
 - 엔진·DB·agent 컨테이너(`boring-drudge`·`boring-postgres`·`boring-agent`)는 워크트리에서 건드리지 않는다. 문만 다룰 때는 `--no-deps` 를 빼지 않는다 (`depends_on` 수렴이 엔진을 재생성한다. `door-up` 은 이미 `--no-deps`).
 - 이전 트렁크(`feat/migration-python`) 위 슬라이스의 배달 시점은 `migration-slice` 가 정한다.
 
