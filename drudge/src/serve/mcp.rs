@@ -797,11 +797,11 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         .wiki_recall_ranked(query, project, since_hours)
         .map_err(|e| (-32603_i32, format!("wiki recall: {e:#}")))?;
     let wiki_hits = crate::wiki_recall::select_for_order(ranked, max_results);
-    let wiki_hits = match s.store.as_ref() {
+    let (wiki_hits, facts) = match s.store.as_ref() {
         Some(store) if !wiki_hits.is_empty() => crate::retrieve::order_wiki_hits(store, wiki_hits)
             .await
             .map_err(|e| (-32603_i32, format!("wiki recall order: {e:#}")))?,
-        _ => wiki_hits,
+        _ => (wiki_hits, HashMap::new()),
     };
     let vector = match s.store.as_ref() {
         Some(store) => crate::retrieve::retrieve_budget(
@@ -822,7 +822,7 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         }),
         None => Ok(Vec::new()),
     };
-    let sunk = sunk_paths(s.store.as_deref(), &wiki_hits, vector.as_ref().ok()).await?;
+    let sunk = sunk_in(s.store.as_deref(), &wiki_hits, &facts, vector.as_ref().ok()).await?;
     let (lines, failed_tail) = choose_lines(wiki_hits, vector, max_results, &sunk)?;
     if lines.is_empty() {
         return Ok("(no experience recalled)".to_owned());
@@ -856,33 +856,64 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     Ok(recall_text(&lines, &superseded, &concepts) + &failed_tail)
 }
 
-/// Superseded paths among the wiki hits and the vector lines (Python `_fused` `sunk`); nothing
-/// to fuse (no store, no wiki hits, vector failed) means nothing sunk.
-async fn sunk_paths(
+/// `sunk_paths` against the store's `rank_facts`; no store means nothing to fuse, nothing sunk.
+async fn sunk_in(
     store: Option<&crate::store::Store>,
     wiki_hits: &[crate::wiki_recall::WikiHit],
+    wiki_facts: &HashMap<String, crate::store::RankFacts>,
     vector: Option<&Vec<(String, String)>>,
 ) -> Result<std::collections::HashSet<String>, (i32, String)> {
-    let (Some(store), Some(lines), false) = (store, vector, wiki_hits.is_empty()) else {
+    match store {
+        Some(store) => {
+            sunk_paths(wiki_hits, wiki_facts, vector, |paths| async move {
+                store.rank_facts(&paths).await
+            })
+            .await
+        }
+        None => Ok(std::collections::HashSet::new()),
+    }
+}
+
+/// Superseded paths among the wiki hits and the vector lines (Python `_fused` `sunk`); nothing
+/// to fuse (no wiki hits, vector failed) means nothing sunk.
+async fn sunk_paths<F, Fut>(
+    wiki_hits: &[crate::wiki_recall::WikiHit],
+    wiki_facts: &HashMap<String, crate::store::RankFacts>,
+    vector: Option<&Vec<(String, String)>>,
+    lookup: F,
+) -> Result<std::collections::HashSet<String>, (i32, String)>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<HashMap<String, crate::store::RankFacts>>>,
+{
+    let (Some(lines), false) = (vector, wiki_hits.is_empty()) else {
         return Ok(std::collections::HashSet::new());
     };
-    let mut paths: Vec<String> = wiki_hits
+    let wiki_paths: std::collections::HashSet<&str> =
+        wiki_hits.iter().map(|h| h.source_path.as_str()).collect();
+    let mut vector_only: Vec<String> = lines
         .iter()
-        .map(|h| h.source_path.clone())
-        .chain(lines.iter().map(|(path, _)| path.clone()))
+        .map(|(path, _)| path.as_str())
+        .filter(|path| !wiki_paths.contains(path))
+        .map(str::to_owned)
         .collect();
-    paths.sort();
-    paths.dedup();
-    let facts = store.rank_facts(&paths).await.map_err(|e| {
-        (
-            -32603_i32,
-            format!("wiki recall order: rank: rank facts lookup: {e:#}"),
-        )
-    })?;
-    Ok(facts
-        .into_iter()
+    vector_only.sort();
+    vector_only.dedup();
+    let vector_facts = if vector_only.is_empty() {
+        HashMap::new()
+    } else {
+        lookup(vector_only).await.map_err(|e| {
+            (
+                -32603_i32,
+                format!("wiki recall order: rank: rank facts lookup: {e:#}"),
+            )
+        })?
+    };
+    Ok(wiki_facts
+        .iter()
+        .chain(vector_facts.iter())
         .filter(|(_, f)| f.superseded)
-        .map(|(path, _)| path)
+        .map(|(path, _)| path.clone())
         .collect())
 }
 
@@ -2588,6 +2619,79 @@ mod tests {
         supersedes_suffix, tool_outcome_snippet, tool_query_arg, verdict_label,
         wiki_path_spellings,
     };
+
+    fn wiki_hit(path: &str) -> crate::wiki_recall::WikiHit {
+        crate::wiki_recall::WikiHit {
+            id: path.to_owned(),
+            title: String::new(),
+            source_path: path.to_owned(),
+            snippet: String::new(),
+            score: 1.0,
+            exact_title: false,
+        }
+    }
+
+    fn facts(superseded: bool) -> crate::store::RankFacts {
+        crate::store::RankFacts {
+            superseded,
+            authorship: crate::store::Authorship::Other,
+        }
+    }
+
+    fn vector_lines(paths: &[&str]) -> Vec<(String, String)> {
+        paths
+            .iter()
+            .map(|p| ((*p).to_owned(), String::new()))
+            .collect()
+    }
+
+    // Counts lookups and records the paths each one asked for.
+    async fn run_sunk(
+        wiki: &[&str],
+        wiki_superseded: &[&str],
+        vector: &[&str],
+        answer: &[(&str, bool)],
+    ) -> (std::collections::HashSet<String>, Vec<Vec<String>>) {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let hits: Vec<_> = wiki.iter().map(|p| wiki_hit(p)).collect();
+        let wiki_facts: HashMap<String, crate::store::RankFacts> = wiki
+            .iter()
+            .map(|p| ((*p).to_owned(), facts(wiki_superseded.contains(p))))
+            .collect();
+        let answer: HashMap<String, crate::store::RankFacts> = answer
+            .iter()
+            .map(|(p, s)| ((*p).to_owned(), facts(*s)))
+            .collect();
+        let sunk = super::sunk_paths(&hits, &wiki_facts, Some(&vector_lines(vector)), |paths| {
+            calls.borrow_mut().push(paths);
+            async move { Ok(answer) }
+        })
+        .await
+        .unwrap();
+        (sunk, calls.into_inner())
+    }
+
+    #[tokio::test]
+    async fn sunk_lookup_is_skipped_when_every_vector_path_is_a_wiki_path() {
+        let (sunk, calls) = run_sunk(&["a", "b"], &["a"], &["b", "a"], &[]).await;
+        assert!(calls.is_empty(), "lookups: {calls:?}");
+        assert_eq!(sunk, ["a".to_owned()].into());
+        let (_, calls) = run_sunk(&["a"], &[], &[], &[]).await;
+        assert!(calls.is_empty(), "lookups: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn sunk_lookup_asks_once_for_vector_only_paths() {
+        let (sunk, calls) = run_sunk(
+            &["a", "b"],
+            &["a"],
+            &["b", "v2", "v1"],
+            &[("v1", true), ("v2", false)],
+        )
+        .await;
+        assert_eq!(calls, vec![vec!["v1".to_owned(), "v2".to_owned()]]);
+        assert_eq!(sunk, ["a".to_owned(), "v1".to_owned()].into());
+    }
 
     // Same instants and same strings as agents/door/test_door.py VerdictLabelTests.
     #[test]

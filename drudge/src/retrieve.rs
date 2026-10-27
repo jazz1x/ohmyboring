@@ -185,7 +185,20 @@ impl InSet for WikiHit {
 
 /// Membership is decided by score first; only then is the returned set ordered by `rank_key`.
 /// A note outside the cut is never pulled in, and a superseded note is demoted, never cut.
-async fn order_within_set<T, F, Fut>(mut set: Vec<T>, lookup: F) -> Result<Vec<T>>
+async fn order_within_set<T, F, Fut>(set: Vec<T>, lookup: F) -> Result<Vec<T>>
+where
+    T: InSet,
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<HashMap<String, RankFacts>>>,
+{
+    Ok(order_with_facts(set, lookup).await?.0)
+}
+
+/// `order_within_set`, also returning the facts it read so a caller needs no second lookup.
+async fn order_with_facts<T, F, Fut>(
+    mut set: Vec<T>,
+    lookup: F,
+) -> Result<(Vec<T>, HashMap<String, RankFacts>)>
 where
     T: InSet,
     F: FnOnce(Vec<String>) -> Fut,
@@ -200,12 +213,16 @@ where
             .cmp(&rank_key(facts.get(b.path())))
             .then_with(|| b.score().total_cmp(&a.score()))
     });
-    Ok(set)
+    Ok((set, facts))
 }
 
-/// The wiki recall set, already cut by word overlap, in the same in-set order as `retrieve`.
-pub async fn order_wiki_hits(store: &Store, hits: Vec<WikiHit>) -> Result<Vec<WikiHit>> {
-    order_within_set(hits, |paths| async move { store.rank_facts(&paths).await }).await
+/// The wiki recall set, already cut by word overlap, in the same in-set order as `retrieve`,
+/// with the rank facts it read.
+pub async fn order_wiki_hits(
+    store: &Store,
+    hits: Vec<WikiHit>,
+) -> Result<(Vec<WikiHit>, HashMap<String, RankFacts>)> {
+    order_with_facts(hits, |paths| async move { store.rank_facts(&paths).await }).await
 }
 
 async fn top_k_ranked<F, Fut>(mut merged: Vec<Scored>, top_k: usize, lookup: F) -> Result<Vec<Hit>>
