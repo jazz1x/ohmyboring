@@ -180,7 +180,7 @@ newest() {
 # distillation mints one.
 newest_minted() {
     # shellcheck disable=SC2086
-    ls $1 2>/dev/null | sort | tail -n 1
+    ls $1 2>/dev/null | sort -V | tail -n 1
 }
 
 days_since() {

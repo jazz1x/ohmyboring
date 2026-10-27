@@ -80,6 +80,10 @@ class InternalNamesTests(unittest.TestCase):
             with self.subTest(label):
                 self.assertTrue(aw.internal_names(text), text)
 
+    def test_a_wiki_number_is_flagged_whole_at_five_and_six_digits(self):
+        self.assertEqual(aw.internal_names("wiki-10001 노트를 본다"), ["wiki-10001"])
+        self.assertEqual(aw.internal_names("wiki-100012 노트를 본다"), ["wiki-100012"])
+
     def test_plain_korean_with_numbers_and_dates_is_clean(self):
         text = "2026-10-19 아침에 3218건 중 212건을 다시 읽었다 (95%)"
         self.assertEqual(aw.internal_names(text), [])

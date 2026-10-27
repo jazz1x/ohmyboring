@@ -56,7 +56,7 @@ REVISE_HEAD = "아래 두 문장을 다시 쓴다."
 _L = r"(?<![A-Za-z0-9_\-])"
 _R = r"(?![A-Za-z0-9_\-])"
 _PATTERNS = (
-    re.compile(rf"{_L}wiki-\d{{3,4}}"),
+    re.compile(rf"{_L}wiki-\d{{3,}}"),
     re.compile(r"(?:^|[\s(\"'])(?:/[\w.\-]+){2,}"),
     re.compile(rf"{_L}[\w\-]+(?:/[\w.\-]+)+\.[A-Za-z]{{1,5}}{_R}"),
     re.compile(rf"{_L}[\w\-]+\.(?:py|rs|md|json|toml|sh|ts|yml|yaml){_R}"),
