@@ -2521,6 +2521,92 @@ mod tests {
         }
     }
 
+    fn body<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> crate::serve::RegisterJson<T> {
+        crate::serve::RegisterJson(serde_json::from_value(v).unwrap())
+    }
+
+    async fn query_log_count(store: &crate::store::Store, endpoint: &str) -> usize {
+        store
+            .recent_queries(1_000_000)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.endpoint == endpoint)
+            .count()
+    }
+
+    /// Register reads (HTTP and MCP) write no query_log row; a non-register MCP call still does.
+    /// The logger is fire-and-forget, so the non-register row is awaited first — the register
+    /// calls were spawned before it.
+    #[tokio::test]
+    async fn register_reads_write_no_query_log_row() {
+        use crate::serve::http;
+        use axum::extract::State;
+
+        let Some(dsn) = std::env::var("BORING_TEST_DATABASE_URL").ok() else {
+            eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+            return;
+        };
+        let store = std::sync::Arc::new(crate::store::Store::open(&dsn, 1024).await.unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = vault_state(tmp.path());
+        s.store = Some(std::sync::Arc::clone(&store));
+
+        let mcp_tools = [
+            "decisions",
+            "risks",
+            "next_actions",
+            "stalled",
+            "recurrences",
+            "context",
+            "project_status",
+        ];
+        let mut tags: Vec<String> = mcp_tools.iter().map(|t| format!("mcp.{t}")).collect();
+        tags.extend(
+            [
+                "decisions",
+                "risks",
+                "next_actions",
+                "stalled",
+                "recurrences",
+                "status",
+            ]
+            .map(str::to_owned),
+        );
+        let mut before = Vec::new();
+        for tag in &tags {
+            before.push(query_log_count(&store, tag).await);
+        }
+        let probe_before = query_log_count(&store, "mcp.corpus_status").await;
+
+        for tool in mcp_tools {
+            let req =
+                json!({"params": {"name": tool, "arguments": {"project": "p", "query": "q"}}});
+            let _ = super::mcp_call(&s, Caller::Unverified, &req).await;
+        }
+        let _ = http::handle_decisions(State(s.clone()), body(json!({}))).await;
+        let _ = http::handle_risks(State(s.clone()), body(json!({}))).await;
+        let _ = http::handle_next_actions(State(s.clone()), body(json!({}))).await;
+        let _ = http::handle_stalled(State(s.clone()), body(json!({}))).await;
+        let _ = http::handle_recurrences(State(s.clone()), body(json!({}))).await;
+        let _ = http::handle_project_status(State(s.clone()), body(json!({"project": "p"}))).await;
+
+        let probe = json!({"params": {"name": "corpus_status", "arguments": {}}});
+        super::mcp_call(&s, Caller::Unverified, &probe)
+            .await
+            .unwrap();
+        let mut waited = 0;
+        while query_log_count(&store, "mcp.corpus_status").await == probe_before {
+            waited += 1;
+            assert!(waited < 500, "non-register call never reached query_log");
+            tokio::task::yield_now().await;
+        }
+
+        for (tag, was) in tags.iter().zip(before) {
+            assert_eq!(query_log_count(&store, tag).await, was, "{tag} logged");
+        }
+    }
+
     const DOOR_TOKEN: &str = "door-7f3a";
 
     fn caller_with(configured: Option<&str>, presented: Option<&str>) -> Caller {

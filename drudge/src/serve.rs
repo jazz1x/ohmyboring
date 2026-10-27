@@ -176,7 +176,7 @@ fn transition_log(prev: DbHealthState, next: DbHealthState, error: Option<&str>)
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::panic)]
 
     use super::{
         Author, CompactFailure, DbHealthState, HealthResp, RecurrencesResp, SyncState,
@@ -185,6 +185,21 @@ mod tests {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
+    #[tokio::test]
+    async fn register_json_missing_field_is_422_with_json_body() {
+        use axum::extract::FromRequest;
+        let req = axum::extract::Request::builder()
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from("{}"))
+            .unwrap();
+        let Err(err) = super::RegisterJson::<super::StatusReq>::from_request(req, &()).await else {
+            panic!("body without project should be rejected");
+        };
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], br#"{"error":"unprocessable entity"}"#);
+    }
     #[test]
     fn recurrences_days_defaults_to_30() {
         assert_eq!(recurrences_days(None), 30);
@@ -687,6 +702,24 @@ mod tests {
     }
 }
 
+/// Register reads (HTTP tag, then `mcp.` tag) leave no query_log row, as on the door.
+const UNLOGGED_REGISTER_READS: [&str; 14] = [
+    "decisions",
+    "risks",
+    "next_actions",
+    "stalled",
+    "recurrences",
+    "context",
+    "status",
+    "mcp.decisions",
+    "mcp.risks",
+    "mcp.next_actions",
+    "mcp.stalled",
+    "mcp.recurrences",
+    "mcp.context",
+    "mcp.project_status",
+];
+
 #[allow(clippy::needless_borrow)]
 pub(crate) fn spawn_query_log(
     store: Option<Arc<Store>>,
@@ -701,6 +734,9 @@ pub(crate) fn spawn_query_log(
         return;
     };
     let endpoint = endpoint.into();
+    if UNLOGGED_REGISTER_READS.contains(&endpoint.as_str()) {
+        return;
+    }
     tokio::spawn(async move {
         let latency_ms = i32::try_from(elapsed.as_millis()).ok();
         if let Err(e) = store
@@ -731,6 +767,30 @@ impl AppError {
             status: StatusCode::BAD_REQUEST,
             error: anyhow::anyhow!(message.into()),
         }
+    }
+
+    fn unprocessable() -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            error: anyhow::anyhow!("unprocessable entity"),
+        }
+    }
+}
+
+/// Body extractor of the register routes: a body that does not parse into `T` answers 422
+/// `{"error":"unprocessable entity"}`, the door's wording (agents/door/door.py `_reject`).
+pub(crate) struct RegisterJson<T>(pub(crate) T);
+
+impl<S: Send + Sync, T: serde::de::DeserializeOwned> axum::extract::FromRequest<S>
+    for RegisterJson<T>
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, AppError> {
+        Json::<T>::from_request(req, state)
+            .await
+            .map(|Json(body)| Self(body))
+            .map_err(|_| AppError::unprocessable())
     }
 }
 

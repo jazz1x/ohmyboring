@@ -196,7 +196,7 @@ pub(crate) async fn handle_weekly(
 /// Project status — last 30 days for a single project.
 pub(crate) async fn handle_project_status(
     State(s): State<AppState>,
-    Json(req): Json<crate::serve::StatusReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::StatusReq>,
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -221,7 +221,7 @@ pub(crate) async fn handle_project_status(
 /// Decision register — recent decision claims.
 pub(crate) async fn handle_decisions(
     State(s): State<AppState>,
-    Json(req): Json<crate::serve::DecisionsReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::DecisionsReq>,
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -252,7 +252,7 @@ pub(crate) async fn handle_decisions(
 /// Risk register — recent risk/assumption/blocked claims.
 pub(crate) async fn handle_risks(
     State(s): State<AppState>,
-    Json(req): Json<crate::serve::RisksReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::RisksReq>,
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -283,7 +283,7 @@ pub(crate) async fn handle_risks(
 /// Next-action register — recent `next` claims plus active `blocked` claims.
 pub(crate) async fn handle_next_actions(
     State(s): State<AppState>,
-    Json(req): Json<crate::serve::NextActionsReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::NextActionsReq>,
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -314,7 +314,7 @@ pub(crate) async fn handle_next_actions(
 /// Stalled register — `next`/`blocked` claims older than N days (default 7).
 pub(crate) async fn handle_stalled(
     State(s): State<AppState>,
-    Json(req): Json<StalledReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<StalledReq>,
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -347,7 +347,7 @@ pub(crate) async fn handle_stalled(
 /// from a different note ("the same mistake again"). Rows only, no LLM.
 pub(crate) async fn handle_recurrences(
     State(s): State<AppState>,
-    Json(req): Json<RecurrencesReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<RecurrencesReq>,
 ) -> Result<Json<RecurrencesResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -377,7 +377,7 @@ pub(crate) async fn handle_recurrences(
 /// Uses recency ordering (no vector search), so it works when BORING_VECTOR=off.
 pub(crate) async fn handle_context(
     State(s): State<AppState>,
-    Json(req): Json<crate::serve::ContextReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::ContextReq>,
 ) -> Result<Json<ask::ContextCard>, AppError> {
     // Context can be served from the vault even when the vector backend is off, because it only
     // needs current claims by recency. Fall back to an empty card if no store is available.
