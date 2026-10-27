@@ -5937,3 +5937,140 @@ async fn record_supersedes_names_the_paths_it_could_not_link() {
     store.delete_document(&path_a).await.expect("cleanup A");
     store.delete_document(&path_b).await.expect("cleanup B");
 }
+
+/// The startup unseal compares slots by the canon spelling. A row stored under an old spelling
+/// (`Foo_Bar`) sits beside its canon-spelled partner (`foo-bar`) in the same note: the partner
+/// outranks it, so the old-spelling row keeps its seal. The canon-spelled row, alone at the top
+/// of its slot with no later row, is the one that comes back.
+#[tokio::test]
+async fn startup_unseal_compares_slots_by_canon_so_an_old_spelling_row_stays_sealed() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let scratch = format!("revive1_unseal_{stamp}");
+    let dsn_with_db = |db: &str| {
+        let cut = dsn.rfind('/').expect("dsn carries a dbname segment");
+        format!("{}{db}", &dsn[..=cut])
+    };
+    let admin = connect(&dsn_with_db("postgres")).await;
+    admin
+        .execute(&format!("CREATE DATABASE {scratch};"), &[])
+        .await
+        .expect("create scratch database");
+    let scratch_dsn = dsn_with_db(&scratch);
+    let first = Store::open(&scratch_dsn, 1024).await.expect("open store");
+    drop(first);
+
+    let db = connect(&scratch_dsn).await;
+    db.batch_execute(
+        "INSERT INTO claim (subject, predicate, value, source_path, valid_from, superseded_at, kind) VALUES
+           ('foo-bar', 'next-action', 'canon', '/w/n.md', '2026-10-01T00:00Z', '2026-10-01T00:09Z', 'next'),
+           ('Foo_Bar', 'Next_Action', 'old spelling', '/w/n.md', '2026-10-01T00:01Z', '2026-10-01T00:09Z', 'next');",
+    )
+    .await
+    .expect("seed sealed rows");
+
+    let reopened = Store::open(&scratch_dsn, 1024).await.expect("reopen store");
+    drop(reopened);
+    let rows = db
+        .query(
+            "SELECT value, superseded_at IS NOT NULL FROM claim ORDER BY valid_from;",
+            &[],
+        )
+        .await
+        .expect("read back");
+    let sealed: Vec<(String, bool)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+    assert_eq!(
+        sealed,
+        vec![
+            ("canon".to_owned(), false),
+            ("old spelling".to_owned(), true)
+        ],
+        "the canon-spelled row unseals; the old-spelling row stays sealed"
+    );
+
+    drop(db);
+    admin
+        .execute(
+            &format!("DROP DATABASE IF EXISTS {scratch} WITH (FORCE);"),
+            &[],
+        )
+        .await
+        .expect("drop scratch database");
+}
+
+/// Handing a retired note's fact slot to the next live row compares slots by the canon spelling.
+/// The retired note wrote `Foo_Bar`; the live note holds `foo-bar` (earlier) and `Foo_Bar`
+/// (later, old spelling). The canon-spelled row is the slot's latest, so it is the one promoted
+/// and the old-spelling row stays sealed.
+#[tokio::test]
+async fn fact_promotion_compares_slots_by_canon_so_an_old_spelling_row_stays_sealed() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let tag = unique_subject("canon-promote");
+    let canon_subject = format!("foo-bar-{tag}");
+    let old_subject = format!("Foo_Bar-{tag}");
+    let path_a = unique_path("canon-promote-a");
+    let path_b = unique_path("canon-promote-b");
+    let path_c = unique_path("canon-promote-c");
+    let t = whole_second_now();
+    for (path, sha) in [(&path_a, "sha-a"), (&path_b, "sha-b"), (&path_c, "sha-c")] {
+        store
+            .upsert_document(&dummy_frontmatter(path), sha, t)
+            .await
+            .expect("upsert document");
+    }
+    for (subject, value, path, minute, sealed) in [
+        (&old_subject, "retired", &path_a, 0, false),
+        (&canon_subject, "canon", &path_c, 1, true),
+        (&old_subject, "old spelling", &path_c, 2, true),
+        (&format!("b-{tag}"), "b item", &path_b, 3, false),
+    ] {
+        db.execute(
+            "INSERT INTO claim (subject, predicate, value, source_path, valid_from, superseded_at, kind)
+             VALUES ($1, 'status', $2, $3,
+                     '2026-10-01T00:00Z'::timestamptz + make_interval(mins => $4),
+                     CASE WHEN $5 THEN '2026-10-01T00:09Z'::timestamptz END, 'fact');",
+            &[subject, &value, path, &minute, &sealed],
+        )
+        .await
+        .expect("seed claim");
+    }
+
+    store
+        .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+
+    let rows = db
+        .query(
+            "SELECT value FROM claim
+             WHERE subject IN ($1, $2) AND superseded_at IS NULL ORDER BY valid_from;",
+            &[&canon_subject, &old_subject],
+        )
+        .await
+        .expect("read back");
+    let current: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+    assert_eq!(
+        current,
+        vec!["canon".to_owned()],
+        "the slot's one current row is the canon-spelled one"
+    );
+
+    for path in [&path_a, &path_b, &path_c] {
+        db.execute("DELETE FROM claim WHERE source_path = $1;", &[path])
+            .await
+            .expect("cleanup claims");
+        store.delete_document(path).await.expect("cleanup document");
+    }
+}

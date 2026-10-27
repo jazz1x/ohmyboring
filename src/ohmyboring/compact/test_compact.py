@@ -96,6 +96,31 @@ class CompactOnRealPostgres(unittest.TestCase):
         self.cur.execute(_CCNEW)
         self.assertEqual((2, 0), (dropped, self.cur.fetchone()[0]))
 
+    def test_promote_compares_slots_by_canon_so_an_old_spelling_row_stays_sealed(self) -> None:
+        # baseline.sql 에는 document.author 가 없다 — RETIRED_NOTE 가 읽는 열을 시험 DB 에만 더한다.
+        self.cur.execute(
+            "ALTER TABLE document ADD COLUMN IF NOT EXISTS author text NOT NULL DEFAULT 'unknown'"
+        )
+        self.cur.execute("DELETE FROM claim")
+        self.cur.execute("DELETE FROM document")
+        self.cur.execute("DELETE FROM edge")
+        self.cur.execute("INSERT INTO document (source_path) VALUES ('/w/a.md'), ('/w/b.md'), ('/w/c.md')")
+        self.cur.execute(
+            "INSERT INTO edge (src, dst, kind) VALUES ('doc:/w/b.md', 'doc:/w/a.md', 'supersedes')"
+        )
+        self.cur.execute(
+            "INSERT INTO claim (subject, predicate, value, source_path, valid_from, superseded_at, kind) VALUES"
+            " ('Foo_Bar', 'status', 'a-old', '/w/a.md', '2026-10-01T00:00Z', NULL, 'fact'),"
+            " ('foo-bar', 'status', 'c-canon', '/w/c.md', '2026-10-01T00:01Z', '2026-10-01T00:05Z', 'fact'),"
+            " ('Foo_Bar', 'status', 'c-old-spelling', '/w/c.md', '2026-10-01T00:02Z', '2026-10-01T00:05Z', 'fact'),"
+            " ('b-item', 'next_action', 'y', '/w/b.md', '2026-10-01T00:03Z', NULL, 'next')"
+        )
+        run.seal_superseded_claims(self.cur, "/w/b.md", "/w/a.md")
+        self.cur.execute(
+            "SELECT subject, value FROM claim WHERE predicate = 'status' AND superseded_at IS NULL"
+        )
+        self.assertEqual([("foo-bar", "c-canon")], self.cur.fetchall())
+
     def test_compact_waits_while_another_connection_holds_the_run_lock(self) -> None:
         deps = run.CompactDeps(
             connect=lambda: psycopg.connect(self.dsn, autocommit=True), append_event=lambda *a, **k: True

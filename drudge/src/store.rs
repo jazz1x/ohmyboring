@@ -361,6 +361,24 @@ const RETIRED_NOTE: &str = "EXISTS (SELECT 1 FROM edge e \
        AND (n.author = 'owner' OR NOT EXISTS (SELECT 1 FROM document o \
                                              WHERE o.source_path = c.source_path \
                                                AND o.author = 'owner')))";
+
+/// `ingest::canon` in SQL. The class lists Rust's White_Space code points because `\s` follows the
+/// server locale. Measured equal to `ingest::canon` on 12 inputs; `lower()` differs from
+/// `to_lowercase()` only on special casing (`İ`, final sigma).
+const CANON_SEP: &str = r"[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000_-]+";
+
+fn canon_sql(col: &str) -> String {
+    format!("btrim(regexp_replace(lower({col}), '{CANON_SEP}', '-', 'g'), '-')")
+}
+
+/// A claim row is canon-spelled when its stored subject and predicate already equal their canon.
+/// Inside one canon slot such a row outranks every old-spelling row, whatever their `valid_from`.
+fn is_canon_sql(alias: &str) -> String {
+    let subject = canon_sql(&format!("{alias}.subject"));
+    let predicate = canon_sql(&format!("{alias}.predicate"));
+    format!("({alias}.subject = {subject} AND {alias}.predicate = {predicate})")
+}
+
 /// Not user memory, though both live in the vault and stay searchable elsewhere.
 ///
 /// - `eval-*.md`: internal fixtures, which must remain searchable while `make eval` runs.
@@ -670,6 +688,13 @@ impl Store {
             .await
             .context("get connection for schema initialization")?;
 
+        let ranked_subject = canon_sql("k.subject");
+        let ranked_predicate = canon_sql("k.predicate");
+        let is_canon_k = is_canon_sql("k");
+        let claim_subject = canon_sql("c.subject");
+        let claim_predicate = canon_sql("c.predicate");
+        let is_canon_c = is_canon_sql("c");
+
         // DDL parameterized by the embedding dim (`embed_dim`). `vector({dim})` is the only interpolation;
         // dim is a parsed integer (no injection surface). `'{{}}'` escapes the literal empty-array default.
         obj
@@ -854,11 +879,24 @@ impl Store {
                       AND NOT EXISTS (SELECT 1 FROM claim l
                                        WHERE l.subject = claim.subject AND l.predicate = claim.predicate
                                          AND l.source_path = claim.source_path AND l.valid_from > claim.valid_from);
+                 -- Slots compare by canon spelling: rows kept under an old spelling were sealed
+                 -- beside their canon-spelled partner in the same note, and by raw spelling each
+                 -- sat alone in its slot and came back. In a canon slot the canon-spelled row
+                 -- ranks first, then `valid_from`; a row is unsealed only when nothing outranks it.
+                 WITH ranked AS (
+                     SELECT {ranked_subject} AS cs, {ranked_predicate} AS cp, k.source_path,
+                            k.valid_from, {is_canon_k} AS is_canon
+                       FROM claim k),
+                 top AS (
+                     SELECT DISTINCT ON (cs, cp, source_path) cs, cp, source_path, is_canon, valid_from
+                       FROM ranked
+                      ORDER BY cs, cp, source_path, is_canon DESC, valid_from DESC)
                  UPDATE claim c SET superseded_at = NULL
+                   FROM top t
                   WHERE c.kind <> 'fact' AND c.superseded_at IS NOT NULL
-                    AND NOT EXISTS (SELECT 1 FROM claim l
-                                     WHERE l.subject = c.subject AND l.predicate = c.predicate
-                                       AND l.source_path = c.source_path AND l.valid_from > c.valid_from)
+                    AND {claim_subject} = t.cs AND {claim_predicate} = t.cp
+                    AND c.source_path = t.source_path AND c.valid_from = t.valid_from
+                    AND {is_canon_c} = t.is_canon
                     AND NOT {RETIRED_NOTE};
                  CREATE TABLE IF NOT EXISTS node_gc_backup_20260917 AS
                    SELECT * FROM node WHERE {STALE_CLAIM_MIRROR_NODES};
@@ -2913,20 +2951,30 @@ impl Store {
         // slot's max is taken over live rows only (`NOT {RETIRED_NOTE}`), so the latest
         // among them becomes current. A slot with no live row left stays empty — all its
         // rows are the retired note's, sealed above.
+        // The slot is the canon spelling; its latest is the canon-spelled row first, then
+        // `valid_from`, so an old-spelling row never outranks a canon-spelled one.
+        let canon_subject = canon_sql("c.subject");
+        let canon_predicate = canon_sql("c.predicate");
+        let canon_touched_subject = canon_sql("subject");
+        let canon_touched_predicate = canon_sql("predicate");
+        let is_canon = is_canon_sql("c");
         self.db()
             .await?
             .execute(
                 &format!(
                     "UPDATE claim c SET superseded_at = NULL
-                     FROM (SELECT c.subject, c.predicate, max(c.valid_from) AS mx
-                           FROM claim c
-                           WHERE (c.subject, c.predicate) IN (SELECT subject, predicate FROM claim
-                                                              WHERE source_path = $1 AND kind = 'fact')
-                             AND NOT {RETIRED_NOTE}
-                           GROUP BY c.subject, c.predicate) m
+                     FROM (SELECT DISTINCT ON (cs, cp) cs, cp, is_canon, valid_from
+                           FROM (SELECT {canon_subject} AS cs, {canon_predicate} AS cp,
+                                        {is_canon} AS is_canon, c.valid_from
+                                 FROM claim c
+                                 WHERE ({canon_subject}, {canon_predicate}) IN
+                                       (SELECT {canon_touched_subject}, {canon_touched_predicate} FROM claim
+                                        WHERE source_path = $1 AND kind = 'fact')
+                                   AND NOT {RETIRED_NOTE}) r
+                           ORDER BY cs, cp, is_canon DESC, valid_from DESC) m
                      WHERE c.kind = 'fact' AND c.superseded_at IS NOT NULL
-                       AND c.subject = m.subject AND c.predicate = m.predicate
-                       AND c.valid_from = m.mx;",
+                       AND {canon_subject} = m.cs AND {canon_predicate} = m.cp
+                       AND {is_canon} = m.is_canon AND c.valid_from = m.valid_from;",
                 ),
                 &[&older],
             )

@@ -16,6 +16,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any
 
+from ohmyboring.remember.graph import canon_sql, is_canon_sql
 from ohmyboring.remember.writer import _RETIRED_NOTE
 from ohmyboring.result import Either, Err, Ok
 from ohmyboring.sync.run import GcStats, gc_apply, gc_preview
@@ -47,16 +48,21 @@ _SEAL_SQL = (
     " (SELECT max(valid_from) FROM claim WHERE source_path = %(newer)s), now())"
     f" WHERE c.source_path = %(older)s AND c.superseded_at IS NULL AND {_RETIRED_NOTE};"
 )
+#: 칸은 canon 철자 — 칸의 최신은 canon 철자 행이 먼저, 그다음 valid_from (옛 철자 행이 앞서지 않는다).
 _PROMOTE_SQL = (
     "UPDATE claim c SET superseded_at = NULL"
-    " FROM (SELECT c.subject, c.predicate, max(c.valid_from) AS mx FROM claim c"
-    "       WHERE (c.subject, c.predicate) IN (SELECT subject, predicate FROM claim"
-    "                                          WHERE source_path = %(older)s AND kind = 'fact')"
-    f"        AND NOT {_RETIRED_NOTE}"
-    "       GROUP BY c.subject, c.predicate) m"
+    " FROM (SELECT DISTINCT ON (cs, cp) cs, cp, is_canon, valid_from"
+    f"       FROM (SELECT {canon_sql('c.subject')} AS cs, {canon_sql('c.predicate')} AS cp,"
+    f"                    {is_canon_sql('c')} AS is_canon, c.valid_from"
+    "             FROM claim c"
+    f"             WHERE ({canon_sql('c.subject')}, {canon_sql('c.predicate')}) IN"
+    f"                   (SELECT {canon_sql('subject')}, {canon_sql('predicate')} FROM claim"
+    "                    WHERE source_path = %(older)s AND kind = 'fact')"
+    f"               AND NOT {_RETIRED_NOTE}) r"
+    "       ORDER BY cs, cp, is_canon DESC, valid_from DESC) m"
     " WHERE c.kind = 'fact' AND c.superseded_at IS NOT NULL"
-    "   AND c.subject = m.subject AND c.predicate = m.predicate"
-    "   AND c.valid_from = m.mx;"
+    f"   AND {canon_sql('c.subject')} = m.cs AND {canon_sql('c.predicate')} = m.cp"
+    f"   AND {is_canon_sql('c')} = m.is_canon AND c.valid_from = m.valid_from;"
 )
 _SEAL_CANDIDATES_SQL = f"SELECT count(*) FROM claim c WHERE c.superseded_at IS NULL AND {_RETIRED_NOTE};"
 _DOC_PREFIX = "doc:"

@@ -111,6 +111,20 @@ def canon(text: str) -> str:
     return "".join(out)
 
 
+#: Rust 의 char::is_whitespace(White_Space 코드포인트)를 풀어 쓴 클래스 — `\s` 는 서버 로캘을 따른다.
+_CANON_SEP = r"[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000_-]+"
+
+
+def canon_sql(column: str) -> str:
+    """canon 의 SQL 짝 (store.rs canon_sql). lower() 는 İ·끝 시그마 특수 대소문자에서만 canon 과 다르다."""
+    return f"btrim(regexp_replace(lower({column}), '{_CANON_SEP}', '-', 'g'), '-')"
+
+
+def is_canon_sql(alias: str) -> str:
+    """저장된 subject·predicate 가 이미 canon 철자인 행 — canon 칸 안에서 옛 철자 행보다 앞선다."""
+    return f"({alias}.subject = {canon_sql(f'{alias}.subject')} AND {alias}.predicate = {canon_sql(f'{alias}.predicate')})"
+
+
 def denies_work(value: str) -> bool:
     """value 가 「할 일 없음」 계열인지 — frontmatter.rs:174-181."""
     v = value.strip().rstrip(".。").strip().lower()
