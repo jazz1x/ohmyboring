@@ -18,6 +18,10 @@ pub struct FrontMatter {
     pub claims: Vec<Claim>,
     pub sources: Vec<String>,
     pub omb_session_id: Option<String>,
+    /// Epoch seconds after which a continued session's note starts (a later pass over the same
+    /// session): only the part of the conversation past this moment is in the note.
+    #[serde(skip)]
+    pub omb_session_since: Option<u64>,
     pub author: Author,
 }
 

@@ -2366,6 +2366,7 @@ fn parse_remember_note(
         sources: get_arr("sources").iter().map(|s| scrub(s.trim())).collect(),
         claims,
         omb_session_id,
+        omb_session_since: None,
         author: parse_author(args)?,
     };
     Ok(RememberNote { front, body })
@@ -3083,6 +3084,134 @@ mod tests {
             second.message.contains("(supersedes wiki/"),
             "{}",
             second.message
+        );
+    }
+
+    // Python: parse.py:296-298 — a non-numeric omb_session_since is a refused request (-32602).
+    #[tokio::test]
+    async fn mcp_remember_refuses_a_non_numeric_omb_session_since() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        for bad in ["abc", "12x", "-5", "1.5"] {
+            let reply = mcp_remember_reply(
+                &s,
+                json!({"title": "t", "body": "b", "repo": "p", "omb_session_since": bad}),
+            )
+            .await;
+            assert_eq!(
+                reply["error"],
+                json!({"code": -32602, "message": format!("invalid omb_session_since: {bad}"), "data": {"outcome": "refused"}}),
+                "{bad}"
+            );
+        }
+        assert_eq!(wiki_notes(tmp.path()), 0);
+    }
+
+    // Python: parse.py:299-301 (digits → int) and render.py:51-52 (written as a quoted string,
+    // between omb_session_id and author).
+    #[tokio::test]
+    async fn omb_session_since_is_written_to_the_frontmatter_as_a_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let got = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&json!({"title": "t", "body": "b", "repo": "p", "omb_session_id": "sess-1", "omb_session_since": " 0001792713141 "})),
+        )
+        .await
+        .unwrap();
+        let text = std::fs::read_to_string(&got.source_path).unwrap();
+        assert!(
+            text.contains(
+                "omb_session_id: sess-1\nomb_session_since: '1792713141'\nauthor: unknown\n"
+            ),
+            "{text}"
+        );
+        let plain = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&json!({"title": "t2", "body": "b2", "repo": "p"})),
+        )
+        .await
+        .unwrap();
+        let text = std::fs::read_to_string(&plain.source_path).unwrap();
+        assert!(!text.contains("omb_session_since"), "{text}");
+    }
+
+    /// Writes one existing note carrying session `sess-1` (and `since` when given), then asks the
+    /// duplicate gate about an incoming note of the same session — its reason, or none.
+    async fn dedup_reason(
+        existing_since: Option<&str>,
+        incoming_since: Option<u64>,
+        same_title: bool,
+    ) -> Option<DuplicateReason> {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        let since_line = existing_since
+            .map(|v| format!("omb_session_since: '{v}'\n"))
+            .unwrap_or_default();
+        std::fs::write(
+            wiki.join("wiki-0100.md"),
+            format!(
+                "---\nid: wiki-0100\ntitle: 다른 제목\nkind: note\norigin: personal\nproject: ''\ndate: '2026-10-01'\ntags: []\ntools: []\nconcepts: []\nclaims: []\nrelates_to: []\nsources: []\nomb_session_id: sess-1\n{since_line}author: unknown\n---\n다른 본문\n"
+            ),
+        )
+        .unwrap();
+        let cfg = BoringConfig::default();
+        let note = super::RememberNote {
+            front: FrontMatter {
+                title: Some(
+                    if same_title {
+                        "다른 제목"
+                    } else {
+                        "배포"
+                    }
+                    .to_owned(),
+                ),
+                kind: "note".to_owned(),
+                origin: "personal".to_owned(),
+                omb_session_id: Some("sess-1".to_owned()),
+                omb_session_since: incoming_since,
+                ..FrontMatter::default()
+            },
+            body: "배포 본문".to_owned(),
+        };
+        let llm = crate::llm::Llm::from_config(&cfg);
+        super::check_duplicate(None, &llm, &note, &wiki)
+            .await
+            .unwrap()
+            .map(|m| m.reason)
+    }
+
+    // Python: test_dedup.py:304 (continuation_of_same_session_is_not_its_duplicate) and
+    // dedup.py:369-376 `_continues_after` — same input, same decision and reason.
+    #[tokio::test]
+    async fn a_continued_session_note_is_not_a_same_session_duplicate() {
+        use DuplicateReason::{ExactTitle, SameSession};
+        // incoming has no since: from the session start, so same_session as before.
+        assert_eq!(dedup_reason(None, None, false).await, Some(SameSession));
+        assert_eq!(
+            dedup_reason(Some("100"), None, false).await,
+            Some(SameSession)
+        );
+        // incoming since, existing none: the existing note is the session start, so this continues it.
+        assert_eq!(dedup_reason(None, Some(1_792_713_141), false).await, None);
+        // later since than the existing note's: continues it.
+        assert_eq!(dedup_reason(Some("100"), Some(200), false).await, None);
+        // same or earlier since: filtered as before.
+        assert_eq!(
+            dedup_reason(Some("200"), Some(200), false).await,
+            Some(SameSession)
+        );
+        assert_eq!(
+            dedup_reason(Some("200"), Some(100), false).await,
+            Some(SameSession)
+        );
+        // a continuation still falls through to the title branch.
+        assert_eq!(
+            dedup_reason(None, Some(1_792_713_141), true).await,
+            Some(ExactTitle)
         );
     }
 
