@@ -465,11 +465,11 @@ case "$(cat "$TMP/stale-marker.out")" in
     ;;
 esac
 
-# (d2b) dead markers vs the reviewed known-losses list (data/contract/known-losses.tsv:
+# (d2b) dead markers vs the reviewed known-losses list (data/local/known-losses.tsv, gitignored:
 # session id <TAB> note ref). Listed = informational line; unlisted = red.
 write_known_losses() {
-    mkdir -p "$1/boring/data/contract"
-    printf 'aaaaaaaa-0000-0000-0000-000000000001\tdecision-test-1\n' >"$1/boring/data/contract/known-losses.tsv"
+    mkdir -p "$1/boring/data/local"
+    printf 'aaaaaaaa-0000-0000-0000-000000000001\tdecision-test-1\n' >"$1/boring/data/local/known-losses.tsv"
 }
 
 make_case "$TMP/dead-unlisted" yes
@@ -496,6 +496,19 @@ fi
 case "$(cat "$TMP/dead-listed.out")" in
   *"known losses 1 (decision-test-1)"*) ;;
   *) cat "$TMP/dead-listed.out"; echo "FAIL: listed dead marker not shown as 'known losses 1 (decision-test-1)'" >&2; exit 1 ;;
+esac
+
+# List file absent while a dead marker exists: a separate red line, not the "unlisted" one.
+make_case "$TMP/dead-nolist" yes
+touch "$TMP/dead-nolist/home/.cache/boring-distill/aaaaaaaa-0000-0000-0000-000000000001.dead"
+if run_strict "$TMP/dead-nolist" "$TMP/dead-nolist.out"; then
+    cat "$TMP/dead-nolist.out"
+    echo "FAIL: a missing known-losses list must turn strict doctor red" >&2
+    exit 1
+fi
+case "$(cat "$TMP/dead-nolist.out")" in
+  *"✗ known-losses list missing — cannot measure dead markers"*"data/local/known-losses.tsv"*) ;;
+  *) cat "$TMP/dead-nolist.out"; echo "FAIL: missing known-losses list not reported as cannot-measure" >&2; exit 1 ;;
 esac
 
 make_case "$TMP/dead-mixed" yes

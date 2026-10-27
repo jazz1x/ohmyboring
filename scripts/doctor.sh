@@ -564,7 +564,10 @@ stale_pending=0
 stale_retry=0
 dead_letter=0
 # Reviewed losses (session id <TAB> note ref): a dead marker listed here is informational.
-known_losses_file="${DOCTOR_KNOWN_LOSSES:-$BORING_HOME/data/contract/known-losses.tsv}"
+known_losses_file="${DOCTOR_KNOWN_LOSSES:-$BORING_HOME/data/local/known-losses.tsv}"
+known_losses_readable=1
+[ -r "$known_losses_file" ] || known_losses_readable=0
+dead_seen=0
 known_losses=0
 known_refs=""
 
@@ -592,7 +595,11 @@ for marker_file in "$MARK_DIR"/*.dead "$MARK_DIR"/*.dead-letter; do
     dead_name="${marker_file##*/}"
     dead_id="${dead_name%.dead-letter}"
     dead_id="${dead_id%.dead}"
-    dead_ref=$(awk -F'\t' -v id="$dead_id" '$1 == id { print $2; exit }' "$known_losses_file" 2>/dev/null)
+    dead_seen=$((dead_seen + 1))
+    dead_ref=""
+    if [ "$known_losses_readable" -eq 1 ]; then
+        dead_ref=$(awk -F'\t' -v id="$dead_id" '$1 == id { print $2; exit }' "$known_losses_file")
+    fi
     if [ -n "$dead_ref" ]; then
         known_losses=$((known_losses + 1))
         known_refs="${known_refs:+$known_refs, }$dead_ref"
@@ -607,6 +614,9 @@ if [ "$known_losses" -gt 0 ]; then
 fi
 if [ "$marker_writable" -ne 1 ]; then
     bad "marker dir is not writable — autonomous ingest cannot persist queue state"; failed_marker=1
+fi
+if [ "$dead_seen" -gt 0 ] && [ "$known_losses_readable" -eq 0 ]; then
+    bad "known-losses list missing — cannot measure dead markers against reviewed losses ($known_losses_file)"; failed_marker=1
 fi
 if [ "$stale_pending" -gt 0 ] || [ "$stale_retry" -gt 0 ] || [ "$dead_letter" -gt 0 ]; then
     bad "marker health failed — stale pending/retry or dead-letter markers need attention"; failed_marker=1
