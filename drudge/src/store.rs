@@ -3122,6 +3122,7 @@ impl Store {
     /// stay live, and nothing is handed on to a next-latest row. Same owner rule as the whole
     /// seal (`{RETIRED_NOTE}`).
     async fn seal_restated_slots(tx: &Transaction<'_>, newer: &str, older: &str) -> Result<()> {
+        Self::lock_claim_slots_of(tx, newer).await?;
         tx.execute(
             &format!(
                 "UPDATE claim c SET superseded_at = COALESCE(
@@ -3167,6 +3168,32 @@ impl Store {
         Ok(())
     }
 
+    /// Lock every claim row in the canon slots `source_path` touches, slot by slot. Ingest takes
+    /// a slot's rows in `sorted_claims` order (byte order of the canon subject, then predicate);
+    /// the seals below would otherwise take them in table scan order, and two requests on the
+    /// same slots then wait on each other in a cycle. `"C"` collation is Rust's `str` order.
+    async fn lock_claim_slots_of(tx: &Transaction<'_>, source_path: &str) -> Result<()> {
+        let canon_subject = canon_sql("c.subject");
+        let canon_predicate = canon_sql("c.predicate");
+        let touched_subject = canon_sql("subject");
+        let touched_predicate = canon_sql("predicate");
+        tx.execute(
+            &format!(
+                "SELECT 1 FROM claim c
+                 WHERE ({canon_subject}, {canon_predicate}) IN
+                       (SELECT {touched_subject}, {touched_predicate} FROM claim
+                        WHERE source_path = $1)
+                 ORDER BY ({canon_subject}) COLLATE \"C\", ({canon_predicate}) COLLATE \"C\",
+                          c.valid_from
+                 FOR UPDATE OF c;"
+            ),
+            &[&source_path],
+        )
+        .await
+        .context("lock claim slots in slot order")?;
+        Ok(())
+    }
+
     /// Seal every current claim of the superseded note: `superseded_at` = the newer note's
     /// latest claim `valid_from`, falling back to `now()` when the newer note asserts nothing.
     /// Only `superseded_at IS NULL` rows move, so a repeat call — and a later `compact` over the
@@ -3180,6 +3207,7 @@ impl Store {
         newer: &str,
         older: &str,
     ) -> Result<usize> {
+        Self::lock_claim_slots_of(tx, older).await?;
         let sealed = tx
             .execute(
                 &format!(
