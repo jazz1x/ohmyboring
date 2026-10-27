@@ -1865,7 +1865,7 @@ def _group_split_subjects(rows: list[tuple[str, str]]) -> list[dict[str, Any]]:
         for norm, bucket in buckets.items()
         if len(bucket["variant_rows"]) >= 2
     ]
-    groups.sort(key=lambda g: g["rows"], reverse=True)
+    groups.sort(key=lambda g: (-g["rows"], g["subject"]))
     return groups
 
 

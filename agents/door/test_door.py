@@ -2152,6 +2152,21 @@ class ClaimSourceRouteTests(unittest.TestCase):
         self.assertEqual(json.loads(body), {"error": "predicate must not contain NUL"})
 
 
+class SplitSubjectsGroupOrderTests(unittest.TestCase):
+    def test_rows_desc_then_canon_code_point(self):
+        rows = [
+            ("Éclair", "n1"),
+            ("éclair", "n2"),
+            ("Zeta", "n3"),
+            ("zeta", "n4"),
+            ("Mid", "n5"),
+            ("mid", "n6"),
+            ("MID", "n7"),
+        ]
+        subjects = [g["subject"] for g in door._group_split_subjects(rows)]
+        self.assertEqual(subjects, ["mid", "zeta", "éclair"])
+
+
 class SplitSubjectsGetRouteTests(unittest.TestCase):
     """GET /repairs/split-subjects through the real door app — stub rows, no DB (AC2).
     One test: shape, rows-desc sort, limit application, out-of-range limit, missing DSN."""
