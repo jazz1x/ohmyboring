@@ -17,7 +17,9 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime, Timeouts};
+use deadpool_postgres::{
+    GenericClient, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime, Timeouts, Transaction,
+};
 use pgvector::Vector;
 use serde_json::{Value, json};
 use tokio_postgres::types::Json as PgJson;
@@ -1040,9 +1042,12 @@ impl Store {
     // ── document ─────────────────────────────────────────────────────────────
 
     pub async fn get_doc_sha(&self, path: &str) -> Result<Option<String>> {
-        let rows = self
-            .db()
-            .await?
+        Self::get_doc_sha_on(&self.db().await?, path).await
+    }
+
+    /// `get_doc_sha` on a caller-held connection or transaction handle.
+    async fn get_doc_sha_on(c: &impl GenericClient, path: &str) -> Result<Option<String>> {
+        let rows = c
             .query("SELECT sha FROM document WHERE source_path = $1;", &[&path])
             .await?;
         Ok(rows.first().map(|r| r.get::<_, String>(0)))
@@ -2912,8 +2917,17 @@ impl Store {
         label: &str,
         outcome: Option<&str>,
     ) -> Result<()> {
-        self.db().await?
-            .execute(
+        Self::upsert_node_on(&self.db().await?, id, kind, label, outcome).await
+    }
+
+    async fn upsert_node_on(
+        c: &impl GenericClient,
+        id: &str,
+        kind: &str,
+        label: &str,
+        outcome: Option<&str>,
+    ) -> Result<()> {
+        c.execute(
                 "INSERT INTO node (id, kind, label, outcome) VALUES ($1, $2, $3, $4)
                  ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label, outcome = EXCLUDED.outcome;",
                 &[&id, &kind, &label, &outcome],
@@ -2930,9 +2944,17 @@ impl Store {
         kind: &str,
         judge: Option<&str>,
     ) -> Result<()> {
-        self.db()
-            .await?
-            .execute(
+        Self::upsert_edge_on(&self.db().await?, src, dst, kind, judge).await
+    }
+
+    async fn upsert_edge_on(
+        c: &impl GenericClient,
+        src: &str,
+        dst: &str,
+        kind: &str,
+        judge: Option<&str>,
+    ) -> Result<()> {
+        c.execute(
                 "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING;",
                 &[&src, &dst, &kind, &judge],
             )
@@ -2954,8 +2976,10 @@ impl Store {
     /// retired note touched passes to the latest remaining live row. Whether the edge retires
     /// at all is `{RETIRED_NOTE}` — an owner-written older note yields only to an owner-written
     /// newer one, the store-side half of the door's refusal.
+    ///
+    /// Runs on the request's transaction handle `tx`; the caller opens and commits it.
     pub async fn record_supersedes(
-        &self,
+        tx: &Transaction<'_>,
         pairs: &[[String; 2]],
         judge: Option<&str>,
     ) -> Result<SupersedesReport> {
@@ -2966,17 +2990,18 @@ impl Store {
             .unknown_paths
             .extend(skipped.iter().map(|p| (*p).to_owned()));
         for pair in pairs {
-            if self.get_doc_sha(&pair[0]).await?.is_none() {
+            if Self::get_doc_sha_on(tx, &pair[0]).await?.is_none() {
                 report.unknown += 1;
                 report.unknown_paths.push(pair[0].clone());
                 continue;
             }
-            if self.get_doc_sha(&pair[1]).await?.is_none() {
+            if Self::get_doc_sha_on(tx, &pair[1]).await?.is_none() {
                 report.unknown += 1;
                 report.unknown_paths.push(pair[1].clone());
                 continue;
             }
-            self.upsert_edge(
+            Self::upsert_edge_on(
+                tx,
                 &doc_node_id(&pair[0]),
                 &doc_node_id(&pair[1]),
                 "supersedes",
@@ -2984,7 +3009,7 @@ impl Store {
             )
             .await?;
             report.supersedes += 1;
-            self.seal_superseded_claims(&pair[0], &pair[1]).await?;
+            Self::seal_superseded_claims(tx, &pair[0], &pair[1]).await?;
         }
         Ok(report)
     }
@@ -2997,10 +3022,12 @@ impl Store {
     /// After the seal, each fact slot the retired note touched is handed to the next-latest
     /// live row: with the retired note out of the competition the latest remaining live row
     /// becomes current, instead of the slot ending with none.
-    async fn seal_superseded_claims(&self, newer: &str, older: &str) -> Result<usize> {
-        let sealed = self
-            .db()
-            .await?
+    async fn seal_superseded_claims(
+        tx: &Transaction<'_>,
+        newer: &str,
+        older: &str,
+    ) -> Result<usize> {
+        let sealed = tx
             .execute(
                 &format!(
                     "UPDATE claim c SET superseded_at = COALESCE(
@@ -3024,9 +3051,7 @@ impl Store {
         let canon_touched_subject = canon_sql("subject");
         let canon_touched_predicate = canon_sql("predicate");
         let is_canon = is_canon_sql("c");
-        self.db()
-            .await?
-            .execute(
+        tx.execute(
                 &format!(
                     "UPDATE claim c SET superseded_at = NULL
                      FROM (SELECT DISTINCT ON (cs, cp) cs, cp, is_canon, valid_from
@@ -3069,19 +3094,27 @@ impl Store {
             ) else {
                 continue;
             };
-            total += self.seal_superseded_claims(&newer, &older).await?;
+            // One transaction per edge: a failure at edge N keeps the seals of edges before it.
+            let mut conn = self.db().await?;
+            let tx = conn.transaction().await.context("begin seal transaction")?;
+            total += Self::seal_superseded_claims(&tx, &newer, &older).await?;
+            tx.commit().await.context("commit seal transaction")?;
         }
         Ok(total)
     }
 
+    /// A pooled connection for a caller that opens its own request transaction
+    /// (`conn.transaction()`) and passes the handle to the `&Transaction` functions below.
+    pub async fn conn(&self) -> Result<deadpool_postgres::Object> {
+        self.db().await
+    }
+
     /// Which of `paths` the owner wrote (`document.author = 'owner'`).
-    pub async fn owner_authored(&self, paths: &[String]) -> Result<Vec<String>> {
+    pub async fn owner_authored(tx: &Transaction<'_>, paths: &[String]) -> Result<Vec<String>> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = self
-            .db()
-            .await?
+        let rows = tx
             .query(
                 "SELECT source_path FROM document WHERE source_path = ANY($1) AND author = 'owner' ORDER BY source_path;",
                 &[&paths],
@@ -3098,8 +3131,11 @@ impl Store {
     /// overwrite, so the first judgement to name an edge stays on it. Idempotent — a repeat call
     /// updates the label and adds edges, never deletes. Paths with no `document` row are skipped
     /// and counted in the report, not errored.
+    ///
+    /// Runs on the request's transaction handle `tx`; the caller opens and commits it, so a
+    /// failure anywhere leaves none of the request's rows.
     pub async fn record_consumption(
-        &self,
+        tx: &Transaction<'_>,
         session_id: &str,
         observed_at: &str,
         used: &[String],
@@ -3108,29 +3144,26 @@ impl Store {
         judge: Option<&str>,
     ) -> Result<ConsumptionReport> {
         let session_node = format!("session:{session_id}");
-        self.upsert_node(&session_node, "session", observed_at, None)
-            .await?;
+        Self::upsert_node_on(tx, &session_node, "session", observed_at, None).await?;
 
         let mut report = ConsumptionReport::default();
         for path in used {
-            if self.get_doc_sha(path).await?.is_none() {
+            if Self::get_doc_sha_on(tx, path).await?.is_none() {
                 report.unknown += 1;
                 continue;
             }
-            self.upsert_edge(&session_node, &doc_node_id(path), "used", judge)
-                .await?;
+            Self::upsert_edge_on(tx, &session_node, &doc_node_id(path), "used", judge).await?;
             report.used += 1;
         }
         for path in contested {
-            if self.get_doc_sha(path).await?.is_none() {
+            if Self::get_doc_sha_on(tx, path).await?.is_none() {
                 report.unknown += 1;
                 continue;
             }
-            self.upsert_edge(&session_node, &doc_node_id(path), "contested", judge)
-                .await?;
+            Self::upsert_edge_on(tx, &session_node, &doc_node_id(path), "contested", judge).await?;
             report.contested += 1;
         }
-        let supersedes_report = self.record_supersedes(supersedes, judge).await?;
+        let supersedes_report = Self::record_supersedes(tx, supersedes, judge).await?;
         report.supersedes += supersedes_report.supersedes;
         report.unknown += supersedes_report.unknown;
         Ok(report)
@@ -3142,26 +3175,59 @@ impl Store {
     /// edges are deliberately invisible to `consumption_counts`: being handed is not being
     /// consumed. Idempotent — a repeat call updates the label and adds no duplicate edges. Paths
     /// with no `document` row are counted in `unknown`, not errored.
+    ///
+    /// Runs on the request's transaction handle `tx`; the caller opens and commits it.
     pub async fn record_handover(
-        &self,
+        tx: &Transaction<'_>,
         session_id: &str,
         observed_at: &str,
         paths: &[String],
     ) -> Result<HandoverReport> {
         let session_node = format!("session:{session_id}");
-        self.upsert_node(&session_node, "session", observed_at, None)
-            .await?;
+        Self::upsert_node_on(tx, &session_node, "session", observed_at, None).await?;
 
         let mut report = HandoverReport::default();
         for path in paths {
-            if self.get_doc_sha(path).await?.is_none() {
+            if Self::get_doc_sha_on(tx, path).await?.is_none() {
                 report.unknown += 1;
                 continue;
             }
-            self.upsert_edge(&session_node, &doc_node_id(path), "handed", None)
-                .await?;
+            Self::upsert_edge_on(tx, &session_node, &doc_node_id(path), "handed", None).await?;
             report.handed += 1;
         }
+        Ok(report)
+    }
+
+    /// `record_handover` in its own transaction — for a caller whose request is that one call.
+    pub async fn handover_in_tx(
+        &self,
+        session_id: &str,
+        observed_at: &str,
+        paths: &[String],
+    ) -> Result<HandoverReport> {
+        let mut conn = self.db().await?;
+        let tx = conn
+            .transaction()
+            .await
+            .context("begin handover transaction")?;
+        let report = Self::record_handover(&tx, session_id, observed_at, paths).await?;
+        tx.commit().await.context("commit handover transaction")?;
+        Ok(report)
+    }
+
+    /// `record_supersedes` in its own transaction — for a caller whose request is that one call.
+    pub async fn supersedes_in_tx(
+        &self,
+        pairs: &[[String; 2]],
+        judge: Option<&str>,
+    ) -> Result<SupersedesReport> {
+        let mut conn = self.db().await?;
+        let tx = conn
+            .transaction()
+            .await
+            .context("begin supersedes transaction")?;
+        let report = Self::record_supersedes(&tx, pairs, judge).await?;
+        tx.commit().await.context("commit supersedes transaction")?;
         Ok(report)
     }
 
@@ -3274,10 +3340,8 @@ impl Store {
     /// reach, distinct, in path order. This is what a bare `{session_id, verdict}` `/consumption`
     /// applies the verdict to: the engine already knows what was handed, the caller only brings
     /// the thumbs-up/down. An unknown session hands nothing — an empty read, not an error.
-    pub async fn handed_paths(&self, session_id: &str) -> Result<Vec<String>> {
-        let rows = self
-            .db()
-            .await?
+    pub async fn handed_paths(tx: &Transaction<'_>, session_id: &str) -> Result<Vec<String>> {
+        let rows = tx
             .query(
                 "SELECT DISTINCT dst FROM edge WHERE src = $1 AND kind = 'handed' ORDER BY dst;",
                 &[&format!("session:{session_id}")],

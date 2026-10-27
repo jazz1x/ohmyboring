@@ -7,6 +7,10 @@
 //! (the same guard `store_integration.rs` / `code_index_integration.rs` use).
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+#[path = "support/tx_store.rs"]
+mod tx_store;
+use tx_store::StoreTx as _;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use drudge::frontmatter::FrontMatter;

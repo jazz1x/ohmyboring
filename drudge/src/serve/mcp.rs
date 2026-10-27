@@ -18,7 +18,7 @@ use crate::ingest;
 use crate::redact;
 use crate::serve::owner::{self, Caller};
 use crate::serve::{AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, register_limit, vec_off_rpc};
-use crate::store::{EventLogFilter, SupersedesReport};
+use crate::store::{EventLogFilter, Store, SupersedesReport};
 use crate::vault;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -784,10 +784,7 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         && let Some(store) = s.store.as_ref()
     {
         let observed_at = chrono::Utc::now().to_rfc3339();
-        if let Err(error) = store
-            .record_handover(session_id, &observed_at, &paths)
-            .await
-        {
+        if let Err(error) = store.handover_in_tx(session_id, &observed_at, &paths).await {
             eprintln!("[mcp] handover for session {session_id} failed: {error:#}");
         }
     }
@@ -864,8 +861,16 @@ async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
     // The verdict applies to exactly what was handed to this session — the caller brings only
     // the thumbs-up/down. An unknown session handed nothing: an empty verdict is a normal
     // response, not an error.
-    let handed = store
-        .handed_paths(session_id)
+    // One request = one transaction: the handed read and the verdict write share the handle.
+    let mut conn = store
+        .conn()
+        .await
+        .map_err(|e| (-32603, format!("verdict: {e:#}")))?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| (-32603, format!("verdict: {e}")))?;
+    let handed = Store::handed_paths(&tx, session_id)
         .await
         .map_err(|e| (-32603, format!("handed paths: {e:#}")))?;
     let empty: Vec<String> = Vec::new();
@@ -874,17 +879,20 @@ async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
     } else {
         (&empty, &handed)
     };
-    let report = store
-        .record_consumption(
-            session_id,
-            &verdict_label(chrono::Utc::now()),
-            used,
-            contested,
-            &[],
-            None,
-        )
+    let report = Store::record_consumption(
+        &tx,
+        session_id,
+        &verdict_label(chrono::Utc::now()),
+        used,
+        contested,
+        &[],
+        None,
+    )
+    .await
+    .map_err(|e| (-32603, format!("verdict: {e:#}")))?;
+    tx.commit()
         .await
-        .map_err(|e| (-32603, format!("verdict: {e:#}")))?;
+        .map_err(|e| (-32603, format!("verdict: {e}")))?;
     Ok(json!({
         "session": format!("session:{session_id}"),
         "used": report.used,
@@ -1384,9 +1392,10 @@ pub(crate) async fn remember_note(
     )
     .map_err(|m| (-32602_i32, m))?;
     let edge_judge = judge.as_ref().unwrap_or(&note.front.author).to_judge();
-    let refused = owner::refused_supersedes(s.store.as_deref(), standing, &supersedes, "remember")
-        .await
-        .map_err(|e| (-32603_i32, format!("owner guard: {e:#}")))?;
+    let refused =
+        owner::refused_supersedes_logged(s.store.as_deref(), standing, &supersedes, "remember")
+            .await
+            .map_err(|e| (-32603_i32, format!("owner guard: {e:#}")))?;
     owner::none_refused(&refused).map_err(|m| (-32602_i32, m))?;
 
     apply_pii_gate(s.pii.as_ref().as_ref(), &mut note)?;
@@ -1570,7 +1579,7 @@ async fn write_supersedes_edges(
         pairs.push([new_path.to_owned(), resolved]);
     }
     store
-        .record_supersedes(&pairs, judge)
+        .supersedes_in_tx(&pairs, judge)
         .await
         .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))
 }

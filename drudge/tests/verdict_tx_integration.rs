@@ -8,6 +8,10 @@
 //! Needs a Postgres instance reachable via `BORING_TEST_DATABASE_URL`; without it the tests skip.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+#[path = "support/tx_store.rs"]
+mod tx_store;
+use tx_store::StoreTx as _;
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drudge::frontmatter::FrontMatter;
@@ -366,11 +370,32 @@ async fn refusal_event_stands_once_while_a_failed_verdict_writes_nothing() {
     let session = unique_id("tx-s");
     let pairs = [pair(&newer, &owned), pair(&newer, &plain)];
     let old_paths: Vec<String> = pairs.iter().map(|[_, old]| old.clone()).collect();
-    let refused = store
-        .owner_authored(&old_paths)
+    // The request's transaction: owner lookup and verdict write on one handle.
+    let mut conn = store.conn().await.expect("conn");
+    let tx = conn.transaction().await.expect("begin");
+    let refused = Store::owner_authored(&tx, &old_paths)
         .await
         .expect("owner_authored");
     assert_eq!(refused, vec![owned.clone()], "the owner's note is refused");
+    let kept: Vec<[String; 2]> = pairs
+        .iter()
+        .filter(|[_, old]| !refused.contains(old))
+        .cloned()
+        .collect();
+    let result = Store::record_consumption(
+        &tx,
+        &session,
+        "2026-01-01",
+        &[ok, BOOM_PATH.to_string()],
+        &[],
+        &kept,
+        None,
+    )
+    .await;
+    assert!(result.is_err(), "boom edge must fail the verdict write");
+    // The handle is released (rolled back) before the event is written — never on the tx.
+    drop(tx);
+    drop(conn);
     store
         .log_event(&serde_json::json!({
             "component": "drudge.owner",
@@ -381,22 +406,6 @@ async fn refusal_event_stands_once_while_a_failed_verdict_writes_nothing() {
         }))
         .await
         .expect("log refusal");
-    let kept: Vec<[String; 2]> = pairs
-        .iter()
-        .filter(|[_, old]| !refused.contains(old))
-        .cloned()
-        .collect();
-    let result = store
-        .record_consumption(
-            &session,
-            "2026-01-01",
-            &[ok, BOOM_PATH.to_string()],
-            &[],
-            &kept,
-            None,
-        )
-        .await;
-    assert!(result.is_err(), "boom edge must fail the verdict write");
 
     let events: i64 = db
         .query_one(

@@ -532,10 +532,7 @@ pub(crate) async fn handle_search(
     {
         let paths: Vec<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
         let observed_at = chrono::Utc::now().to_rfc3339();
-        if let Err(error) = store
-            .record_handover(session_id, &observed_at, &paths)
-            .await
-        {
+        if let Err(error) = store.handover_in_tx(session_id, &observed_at, &paths).await {
             eprintln!("[search] handover for session {session_id} failed: {error:#}");
         }
     }
@@ -596,20 +593,22 @@ fn log_search_query(
     );
 }
 
-pub(crate) async fn handle_consumption(
-    State(s): State<AppState>,
-    headers: HeaderMap,
-    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::ConsumptionReq>,
-) -> Result<Json<crate::serve::ConsumptionResp>, AppError> {
-    let judge = crate::serve::validate_consumption_req(&req)?;
-    let caller = owner::Caller::from_headers((*s.owner_token).as_deref(), &headers);
-    let standing = owner::standing(caller, judge == Some(crate::frontmatter::Author::Owner))
-        .map_err(AppError::bad_request)?;
-    let judge = judge.and_then(|j| j.to_judge());
-    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+/// One `/consumption` request = one transaction: the owner-authored lookup, the bare-verdict
+/// `handed_paths` read and the verdict write all run on the same handle. `refused` is filled as
+/// soon as it is read so the caller can record the refusal after the handle is released, whether
+/// the transaction commits or rolls back. Returns the report and the pairs that were kept.
+async fn consume_in_tx(
+    store: &crate::store::Store,
+    req: &crate::serve::ConsumptionReq,
+    standing: owner::Standing,
+    judge: Option<&str>,
+    refused: &mut Vec<String>,
+) -> anyhow::Result<(crate::store::ConsumptionReport, Vec<[String; 2]>)> {
+    use crate::store::Store;
+    let mut conn = store.conn().await?;
+    let tx = conn.transaction().await?;
     let old_paths: Vec<String> = req.supersedes.iter().map(|[_, old]| old.clone()).collect();
-    let refused =
-        owner::refused_supersedes(Some(store), standing, &old_paths, "consumption").await?;
+    *refused = owner::refused_supersedes(&tx, standing, &old_paths).await?;
     let kept_pairs: Vec<[String; 2]> = req
         .supersedes
         .iter()
@@ -621,37 +620,58 @@ pub(crate) async fn handle_consumption(
     // nothing: empty verdict list, normal response — not an error.
     let report = match req.verdict() {
         Some(verdict) => {
-            let handed = store.handed_paths(&req.session_id).await?;
+            let handed = Store::handed_paths(&tx, &req.session_id).await?;
             let empty: Vec<String> = Vec::new();
             let (used, contested) = if verdict == "used" {
                 (&handed, &empty)
             } else {
                 (&empty, &handed)
             };
-            store
-                .record_consumption(
-                    &req.session_id,
-                    &req.observed_at,
-                    used,
-                    contested,
-                    &kept_pairs,
-                    judge.as_deref(),
-                )
-                .await?
+            Store::record_consumption(
+                &tx,
+                &req.session_id,
+                &req.observed_at,
+                used,
+                contested,
+                &kept_pairs,
+                judge,
+            )
+            .await?
         }
         None => {
-            store
-                .record_consumption(
-                    &req.session_id,
-                    &req.observed_at,
-                    &req.used,
-                    &req.contested,
-                    &kept_pairs,
-                    judge.as_deref(),
-                )
-                .await?
+            Store::record_consumption(
+                &tx,
+                &req.session_id,
+                &req.observed_at,
+                &req.used,
+                &req.contested,
+                &kept_pairs,
+                judge,
+            )
+            .await?
         }
     };
+    tx.commit().await?;
+    Ok((report, kept_pairs))
+}
+
+pub(crate) async fn handle_consumption(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::ConsumptionReq>,
+) -> Result<Json<crate::serve::ConsumptionResp>, AppError> {
+    let judge = crate::serve::validate_consumption_req(&req)?;
+    let caller = owner::Caller::from_headers((*s.owner_token).as_deref(), &headers);
+    let standing = owner::standing(caller, judge == Some(crate::frontmatter::Author::Owner))
+        .map_err(AppError::bad_request)?;
+    let judge = judge.and_then(|j| j.to_judge());
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let mut refused: Vec<String> = Vec::new();
+    let outcome = consume_in_tx(store, &req, standing, judge.as_deref(), &mut refused).await;
+    // The transaction handle is gone here, committed or rolled back: the refusal event is its
+    // own fact and stands either way.
+    owner::record_supersede_refusals(Some(store), &refused, "consumption").await;
+    let (report, kept_pairs) = outcome?;
     Ok(Json(crate::serve::ConsumptionResp {
         session: format!("session:{}", req.session_id),
         used: report.used,
@@ -669,7 +689,7 @@ pub(crate) async fn handle_handover(
     crate::serve::validate_handover_req(&req)?;
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
     let report = store
-        .record_handover(&req.session_id, &req.observed_at, &req.paths)
+        .handover_in_tx(&req.session_id, &req.observed_at, &req.paths)
         .await?;
     Ok(Json(crate::serve::HandoverResp {
         session: format!("session:{}", req.session_id),

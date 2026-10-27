@@ -9,7 +9,11 @@
 //! which conflicts with other tests' open connections under the default parallel runner):
 //!   `BORING_TEST_DATABASE_URL=postgresql://boring:boring@localhost:5432/boring_test \`
 //!   `  cargo test -p drudge --test store_integration -- --test-threads=1`
-#![allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail fast on setup errors
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
+#[path = "support/tx_store.rs"]
+mod tx_store;
+use tx_store::StoreTx as _; // tests may fail fast on setup errors
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
