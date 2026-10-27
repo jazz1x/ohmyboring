@@ -20,6 +20,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 - **아침 카드의 「짚어 둔 것」 글을 카드 앞 cron 단계(`advice-write`)가 미리 쓴다 — 08:00 카드 실행은 모델을 부르지 않는다 (카드 퇴고 C2-1)** — `card_advice_write.py` 가 조언을 쓰고 목표 하나·선 하나로 한 번 다시 쓴 뒤 `card_advice_written` 사건으로 남기고, 카드는 그 사건을 읽기만 한다(없으면 조언 칸을 비운다). 다시 쓴 글이 기계 검사(내부 이름·영문 식별자·wiki 번호·경로·해시)에 두 번 걸리면 원문을 싣고 `revise=kept_original`, 숫자를 잃으면 원문과 `lost_facts`. 문 `POST /run/advice-write`, 출입구 `agents/hermes/run-advice-write.py`.
 
 ### Fixed
+- **`drudge version` 이 Store::open 전에 답한다** — `BORING_VECTOR=on` 이면 버전만 물어도 시작 스키마 묶음(봉인 해제 UPDATE 포함)이 라이브 DB 에 돌았다. doctor.sh:378 이 매일 밤 부르는 `version` 한 번이 봉인 행 1,450개를 되살렸다. 출력은 그대로다.
 - **시험이 `os.environ` 을 비워도 사건이 라이브 `event_log` 에 가짜 행을 남기지 않는다** — 환경이 비면 싱크가 라이브 문 `/events` 로 떨어져 10-23 에 세 번 났다. `BORING_EVENT_ISOLATED_LOG` 가 켜진 동안 `append_event` 는 그 파일에만 쓰고 DB·스풀로 가지 않는다(모듈 import 시 한 번 읽는다). guard.sh 와 CI 의 DB 게이트 단계가 켠다.
 - **drudge 의존성 보안 권고 대응 (RUSTSEC-2026-0386)** — `tokio` 1.53.1→1.54.1. `AsyncFd::new` 가 unsound 하던 문제. `Cargo.lock` 만 바뀐다. 같이 바뀐 `windows-sys` 0.61.2→0.52.0 여섯 줄은 Windows 대상에서만 쓰이는 의존성을 cargo 가 다시 고른 것이다.
 - **drudge 의존성 보안 권고 대응 (RUSTSEC-2026-0385)** — `ctutils` 0.4.2→0.4.4. 마스크 생성·`u128` 비교가 상수 시간이 아니라 분기할 수 있던 문제. `Cargo.lock` 만 바뀌고 다른 crate 변화는 없다.
