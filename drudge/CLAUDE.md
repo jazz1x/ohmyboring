@@ -9,7 +9,7 @@
 > ([`PRINCIPLES.md`](./PRINCIPLES.md) is the earlier summary — the three documents above are the SSOT.) Below are supplementary guardrails.
 
 ## Enforcement (gated in code — Cargo.toml `[lints]` is the SSOT)
-- `unsafe_code = "forbid"` · clippy `all` / `pedantic` / `nursery` = **deny**.
+- `unsafe_code = "forbid"` · clippy `all` / `pedantic` = **deny**; `nursery` stays out (its lints are unstable and break on toolchain bumps). Levels and exceptions: `[lints]`.
   → **If `cargo clippy -- -D warnings` doesn't pass, no merging.** For new code this gate is the default.
 - edition **2024** · toolchain **stable** + clippy + rustfmt pinned (`rust-toolchain.toml`).
 - Code/file search via `rg` / `fd`. No `grep -r` / `find -name`.
