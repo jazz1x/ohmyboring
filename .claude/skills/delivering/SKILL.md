@@ -28,7 +28,8 @@ docker exec boring-agent sh -c 'hermes cron create --name advice-write --no-agen
 
 - hermes 는 외부 이미지(`make hermes-build`)다. `make build` 에 들어 있지 않다.
 - `~/.hermes/cron/jobs.json` 은 손으로 고치지 않는다. 데몬이 되돌린다.
-- `up`/`build` 전량은 정본 체크아웃(`/Users/jongyun/Development/mine/oh-my-boring`)에서만 친다. 워크트리에서는 `make door-build`·`make door-up` 만 친다.
+- `up`/`build` 전량은 정본 체크아웃(`/Users/jongyun/Development/mine/oh-my-boring`)에서만 친다.
+- 문 빌드·기동(`make door-build`·`make door-up`)은 워크트리에서도 친다. 빌드는 지금 폴더의 코드로 짓고, 기동은 Makefile 이 compose 프로젝트 폴더와 `.env` 를 정본 체크아웃으로 고정한다. 고정이 없으면 compose 가 지금 폴더를 잡아 빈 vault·기본 설정으로 뜬다.
 - 엔진·DB·agent 컨테이너(`boring-drudge`·`boring-postgres`·`boring-agent`)는 워크트리에서 건드리지 않는다. 문만 다룰 때는 `--no-deps` 를 빼지 않는다 (`depends_on` 수렴이 엔진을 재생성한다. `door-up` 은 이미 `--no-deps`).
 - 이전 트렁크(`feat/migration-python`) 위 슬라이스의 배달 시점은 `migration-slice` 가 정한다.
 
@@ -39,6 +40,7 @@ docker exec boring-agent sh -c 'hermes cron create --name advice-write --no-agen
 1. 컨테이너 생성 시각이 머지 시각보다 뒤다. `Recreated` 만으로는 부족하다.
    - `docker inspect -f '{{.Created}}' <컨테이너>` (문은 `boring-door`, 엔진은 `boring-drudge`)
    - `gh pr view <N> --json mergedAt`
+   - 문을 다시 띄운 뒤 마운트(`.Mounts`)가 정본 vault·config 인지, `_WRITER` 로 끝나는 설정이 정본 `.env` 값과 같은지 그 줄만 인용한다. 설정 전체는 인용하지 않는다(비밀값).
 2. 소비자 쪽에서 한 번 돌려 값을 인용한다. 카드 ts, 크론 output 파일(`~/.hermes/cron/output/<job-id>/`), 훅이 주입한 줄, `/health` 필드처럼 소비자가 낸 산출물이다. 인용이 없으면 배달은 열려 있다.
 3. `sh scripts/doctor.sh` 가 ✗ 0.
 
