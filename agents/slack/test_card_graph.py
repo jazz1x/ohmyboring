@@ -2914,5 +2914,12 @@ class AdviceAheadTests(unittest.TestCase):
         self.assertEqual(asked, [(aw.EVENT, aw.WINDOW_HOURS)])
 
 
+class WorkAtFallbackTests(unittest.TestCase):
+    def test_no_note_by_proposal_day_names_the_smallest_wiki_number(self) -> None:
+        # `_session_works` is string-sorted, so wiki-10000 comes ahead of wiki-9999.
+        notes = [(10000, "2026-11-02", "work 10000"), (9999, "2026-11-01", "work 9999")]
+        self.assertEqual(card_live._work_at(notes, "2026-10-01"), "work 9999")
+
+
 if __name__ == "__main__":
     unittest.main()

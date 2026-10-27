@@ -587,7 +587,7 @@ def _work_at(notes: list[tuple[int, str, str]], proposal_day: str) -> str:
     if not notes:
         return ""
     before = [n for n in notes if n[1] and n[1] <= proposal_day]
-    return max(before, key=lambda n: n[0])[2] if before else notes[0][2]
+    return max(before, key=lambda n: n[0])[2] if before else min(notes, key=lambda n: n[0])[2]
 
 
 def _proposal_day(at: str) -> str:

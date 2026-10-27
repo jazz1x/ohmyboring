@@ -36,6 +36,7 @@ import transcript  # noqa: E402
 import uptake_core  # noqa: E402
 
 from ohmyboring import config as boring_config  # noqa: E402
+from ohmyboring.remember.dedup import wiki_number  # noqa: E402
 
 #: Phrases from one note a turn must carry before it counts as having reproduced that note. One
 #: is a coincidence between two documents about the same subject; the scorer's own control arm
@@ -61,10 +62,16 @@ def transcripts(days):
     return sorted(out, key=lambda p: p.stat().st_mtime)
 
 
+def _note_order(path):
+    """Wiki number, not file-name string order (wiki-10000 sorts before wiki-2000); non-wiki first."""
+    number = wiki_number(path.name)
+    return (number is not None, number or 0, path.name)
+
+
 def vault_phrases(vault):
     """`{phrase: note}` over the wiki, and the set of note names, both read straight off disk."""
     by_phrase, names = {}, set()
-    for path in sorted(Path(vault).glob("*.md")):
+    for path in sorted(Path(vault).glob("*.md"), key=_note_order):
         body = path.read_text(encoding="utf-8", errors="replace")
         if len(body) < MIN_NOTE_CHARS:
             continue
