@@ -228,7 +228,7 @@ def _wiki_selected(result: wiki.WikiResult, args: Args, seams: Seams) -> Either[
 def _fused(selected: _Selected, vector: list[Line], args: Args, seams: Seams) -> Either[_Selected, Failed]:
     """wiki 줄과 벡터 줄을 RRF(k=60)로 합친다 — 제목 일치로 앞에 선 wiki 줄은 그 자리에 고정(#491).
     같은 노트가 두 길에 다 있으면 점수를 더하고 wiki 줄(스니펫)을 보인다. 동점은 wiki 순위 → 벡터 순위.
-    대체된 노트는 RRF 합과 무관하게 산 노트 뒤로 가라앉는다 — 빼지 않는다."""
+    누가 드는지는 RRF 순으로 먼저 정하고, 든 줄 안에서만 대체된 노트를 뒤로 민다 — 밀리되 잘리지 않는다."""
     vector_only = sorted({path for path, _ in vector} - {path for path, _ in selected.lines})
     match seams.rank_facts(vector_only) if vector_only else Ok({}):
         case Err(detail):
@@ -245,17 +245,18 @@ def _fused(selected: _Selected, vector: list[Line], args: Args, seams: Seams) ->
     body = dict(reversed(vector)) | dict(selected.lines)
     absent = len(selected.lines) + len(vector)
 
-    def score(path: str) -> tuple[bool, float, int, int]:
+    def score(path: str) -> tuple[float, int, int]:
         ranks = [at[path] for at in (wiki_at, vector_at) if path in at]
         return (
-            path in sunk,
             -sum(1 / (RRF_K + i + 1) for i in ranks),
             wiki_at.get(path, absent),
             vector_at.get(path, absent),
         )
 
     rest = sorted((path for path in body if path not in pinned_paths), key=score)
-    lines = [*pinned, *((path, body[path]) for path in rest)][: args.max_results]
+    admitted = rest[: max(args.max_results - len(pinned), 0)]
+    settled = sorted(admitted, key=lambda path: (path in sunk, score(path)))
+    lines = [*pinned, *((path, body[path]) for path in settled)][: args.max_results]
     shown = {path for path, _ in lines}
     contributed = [name for name, at in (("wiki", wiki_at), ("vector", vector_at)) if shown & at.keys()]
     return Ok(replace(selected, path="+".join(contributed), lines=lines))

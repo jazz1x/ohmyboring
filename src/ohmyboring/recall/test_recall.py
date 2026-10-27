@@ -580,6 +580,8 @@ def test_a_superseded_note_that_leads_by_rrf_sum_sinks_below_the_live_notes_afte
     )
     recalled = _text(answer.answer(_args(), stub.seams()))
     assert _shown(recalled) == ["a", "b", "s"], _shown(recalled)
+    cut = _text(answer.answer(_args(max_results=2), stub.seams()))
+    assert _shown(cut) == ["a", "s"], f"RRF 로 컷 안에 든 대체 노트는 밀리되 잘리지 않는다: {_shown(cut)}"
     vector_only = _Seams(
         wiki_hits=[_hit("a", 5.0), _hit("b", 4.0)],
         facts=_facts(v=_other(True), a=_other(False), b=_other(False)),
