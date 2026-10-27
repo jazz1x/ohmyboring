@@ -756,6 +756,9 @@ async fn mcp_code_index_status(s: &AppState, args: Option<&Value>) -> Result<Val
     Ok(json!({"repositories": repositories}))
 }
 
+/// Python `answer._CLAIMS_PER_NOTE`.
+const CLAIMS_PER_NOTE: i64 = 5;
+
 async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let query = args
         .and_then(|a| a.get("query"))
@@ -822,6 +825,10 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         }),
         None => Ok(Vec::new()),
     };
+    let titles: HashMap<String, String> = wiki_hits
+        .iter()
+        .map(|h| (h.source_path.clone(), h.title.clone()))
+        .collect();
     let sunk = sunk_in(s.store.as_deref(), &wiki_hits, &facts, vector.as_ref().ok()).await?;
     let (lines, failed_tail) = choose_lines(wiki_hits, vector, max_results, &sunk)?;
     if lines.is_empty() {
@@ -846,14 +853,32 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             eprintln!("[mcp] handover for session {session_id} failed: {error:#}");
         }
     }
-    let concepts = match s.store.as_ref() {
-        Some(store) => store
-            .concepts_of(&paths)
-            .await
-            .map_err(|e| (-32603_i32, format!("recall concepts: {e:#}")))?,
-        None => HashMap::new(),
+    let (claims, concepts) = claims_and_concepts(s.store.as_deref(), &paths).await?;
+    Ok(refined_text(&lines, &superseded, &claims, &titles, &concepts) + &failed_tail)
+}
+
+type ClaimsAndConcepts = (
+    HashMap<String, crate::store::RegisterRows>,
+    HashMap<String, Vec<String>>,
+);
+
+/// The recall's per-note materials; no store means none.
+async fn claims_and_concepts(
+    store: Option<&crate::store::Store>,
+    paths: &[String],
+) -> Result<ClaimsAndConcepts, (i32, String)> {
+    let Some(store) = store else {
+        return Ok((HashMap::new(), HashMap::new()));
     };
-    Ok(recall_text(&lines, &superseded, &concepts) + &failed_tail)
+    let concepts = store
+        .concepts_of(paths)
+        .await
+        .map_err(|e| (-32603_i32, format!("recall concepts: {e:#}")))?;
+    let claims = store
+        .declared_claims(paths, CLAIMS_PER_NOTE)
+        .await
+        .map_err(|e| (-32603_i32, format!("recall claims: {e:#}")))?;
+    Ok((claims, concepts))
 }
 
 /// `sunk_paths` against the store's `rank_facts`; no store means nothing to fuse, nothing sunk.
@@ -944,34 +969,105 @@ fn choose_lines(
     }
 }
 
-fn recall_text(
-    lines: &[(String, String)],
+/// Python `answer.FULL_BODY_HINT`.
+const FULL_BODY_HINT: &str =
+    "(본문 전체: query 에 wiki-NNNN 을 넣으면 그 노트 전체 블록이 앞에 붙는다)";
+
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Python `answer.concepts_line`: `\n  concepts: a, b` (at most 6), nothing when empty.
+fn concepts_line(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<&str> = names.iter().take(6).map(String::as_str).collect();
+    format!("\n  concepts: {}", shown.join(", "))
+}
+
+/// Python `answer.recall_line`.
+fn recall_line(
+    path: &str,
+    body: &str,
     superseded: &HashMap<String, Vec<String>>,
     concepts: &HashMap<String, Vec<String>>,
 ) -> String {
-    let file_name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_owned();
-    lines
+    let label = match superseded.get(path) {
+        Some(newer) if !newer.is_empty() => {
+            let newer: Vec<&str> = newer.iter().map(|p| file_name(p)).collect();
+            format!("{} (superseded by {})", file_name(path), newer.join(", "))
+        }
+        _ => file_name(path).to_owned(),
+    };
+    let names = concepts.get(path).map_or(&[][..], Vec::as_slice);
+    format!("- [{label}] {body}{}", concepts_line(names))
+}
+
+/// Python `answer._refined_entry`: a note with claims becomes head (+title), concepts, claim
+/// lines, `+N more`; a note without keeps its plain block. The bool says "has claims".
+fn refined_entry(
+    path: &str,
+    body: &str,
+    superseded: &HashMap<String, Vec<String>>,
+    claims: &HashMap<String, crate::store::RegisterRows>,
+    titles: &HashMap<String, String>,
+    concepts: &HashMap<String, Vec<String>>,
+) -> (String, bool) {
+    let register = claims.get(path).filter(|r| !r.rows.is_empty());
+    let Some(register) = register else {
+        return (recall_line(path, body, superseded, concepts), false);
+    };
+    let head = recall_line(path, "", superseded, &HashMap::new())
+        .trim_end()
+        .to_owned();
+    let head = match titles.get(path).filter(|t| !t.is_empty()) {
+        Some(title) => format!("{head} {title}"),
+        None => head,
+    };
+    let names = concepts.get(path).map_or(&[][..], Vec::as_slice);
+    let mut out = vec![head];
+    out.extend(
+        concepts_line(names)
+            .trim_start_matches('\n')
+            .lines()
+            .map(str::to_owned),
+    );
+    out.extend(
+        register
+            .rows
+            .iter()
+            .map(|r| format!("  · {} {}/{}: {}", r.kind, r.subject, r.predicate, r.value)),
+    );
+    let hidden = register.total_matching - i64::try_from(register.rows.len()).unwrap_or(i64::MAX);
+    if hidden > 0 {
+        out.push(format!("  · … +{hidden} more"));
+    }
+    (out.join("\n"), true)
+}
+
+/// Python `answer.refined_text`: what the door hands the agent as the recall text.
+fn refined_text(
+    lines: &[(String, String)],
+    superseded: &HashMap<String, Vec<String>>,
+    claims: &HashMap<String, crate::store::RegisterRows>,
+    titles: &HashMap<String, String>,
+    concepts: &HashMap<String, Vec<String>>,
+) -> String {
+    let entries: Vec<(String, bool)> = lines
         .iter()
-        .map(|(path, body)| {
-            let src = file_name(path);
-            let label = superseded
-                .get(path)
-                .map(|newer| {
-                    let newer: Vec<String> = newer.iter().map(|p| file_name(p)).collect();
-                    format!("{src} (superseded by {})", newer.join(", "))
-                })
-                .unwrap_or(src);
-            let names = concepts.get(path).map_or(&[][..], Vec::as_slice);
-            let line = if names.is_empty() {
-                String::new()
-            } else {
-                let shown: Vec<&str> = names.iter().take(6).map(String::as_str).collect();
-                format!("\n  concepts: {}", shown.join(", "))
-            };
-            format!("- [{label}] {body}{line}")
-        })
+        .map(|(path, body)| refined_entry(path, body, superseded, claims, titles, concepts))
+        .collect();
+    let text = entries
+        .iter()
+        .map(|(entry, _)| entry.as_str())
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+    if entries.iter().any(|(_, has)| *has) {
+        format!("{text}\n\n{FULL_BODY_HINT}")
+    } else {
+        text
+    }
 }
 
 /// The session node's label for an MCP verdict — always six fractional digits, the door's
@@ -2615,7 +2711,7 @@ mod tests {
         DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote, ToolCallError,
         ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_remember,
         mcp_tools_list, needs_dedup, parse_remember_note, parse_supersedes, pick_duplicate,
-        probable_session_duplicate, recall_text, remember_note, should_replace_duplicate,
+        probable_session_duplicate, refined_text, remember_note, should_replace_duplicate,
         supersedes_suffix, tool_outcome_snippet, tool_query_arg, verdict_label,
         wiki_path_spellings,
     };
@@ -3004,37 +3100,121 @@ mod tests {
         assert_ne!(fix.source_path, first.source_path);
     }
 
+    fn register(rows: &[(&str, &str, &str, &str)], total: i64) -> crate::store::RegisterRows {
+        crate::store::RegisterRows {
+            rows: rows
+                .iter()
+                .map(|(kind, subject, predicate, value)| {
+                    crate::store::RegisterRow::new(
+                        (*subject).to_owned(),
+                        (*predicate).to_owned(),
+                        (*value).to_owned(),
+                        (*kind).to_owned(),
+                        "high".to_owned(),
+                        std::time::SystemTime::UNIX_EPOCH,
+                        "p".to_owned(),
+                    )
+                })
+                .collect(),
+            total_matching: total,
+        }
+    }
+
+    // Expected values: Python answer.refined_text (python3 -I, same inputs), 2026-10-28.
     #[test]
-    fn recall_text_gives_each_note_one_concepts_line_of_at_most_six() {
-        let lines = vec![
-            ("/vault/wiki/a.md".to_owned(), "첫 본문".to_owned()),
-            ("/vault/wiki/b.md".to_owned(), "둘째 본문".to_owned()),
-            ("/vault/wiki/c.md".to_owned(), "셋째 본문".to_owned()),
-        ];
-        let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        let concepts = HashMap::from([
-            (
-                "/vault/wiki/a.md".to_owned(),
-                names(&[
-                    "mutation-testing",
-                    "single-source-of-truth",
-                    "rop",
-                    "fold",
-                    "adt",
-                    "slugify",
-                    "dropped-7th",
-                ]),
-            ),
-            ("/vault/wiki/b.md".to_owned(), names(&["rop"])),
-        ]);
-        let text = recall_text(&lines, &HashMap::new(), &concepts);
-        let notes: Vec<&str> = text.split("\n\n").collect();
-        assert_eq!(
-            notes[0],
-            "- [a.md] 첫 본문\n  concepts: mutation-testing, single-source-of-truth, rop, fold, adt, slugify"
+    fn refined_text_matches_python_refined_text() {
+        const HINT: &str =
+            "(본문 전체: query 에 wiki-NNNN 을 넣으면 그 노트 전체 블록이 앞에 붙는다)";
+        let (a, b, c, d) = (
+            "/vault/wiki/a.md".to_owned(),
+            "/vault/wiki/b.md".to_owned(),
+            "/vault/wiki/c.md".to_owned(),
+            "/vault/wiki/d.md".to_owned(),
         );
-        assert_eq!(notes[1], "- [b.md] 둘째 본문\n  concepts: rop");
-        assert_eq!(notes[2], "- [c.md] 셋째 본문", "no concepts, no line");
+        let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let claims_a = || {
+            register(
+                &[
+                    ("decision", "rop", "fold", "접는다"),
+                    ("fact", "db", "engine", "pg"),
+                ],
+                4,
+            )
+        };
+        let claims_c = || register(&[("risk", "x", "y", "z")], 1);
+        let none = HashMap::new();
+        let sup_c = HashMap::from([(c.clone(), vec![d.clone()])]);
+
+        // claims + title + concepts + hidden count
+        let got = refined_text(
+            &[(a.clone(), "본문A".to_owned())],
+            &none,
+            &HashMap::from([(a.clone(), claims_a())]),
+            &HashMap::from([(a.clone(), "노트 A".to_owned())]),
+            &HashMap::from([(a.clone(), names(&["rop", "fold"]))]),
+        );
+        assert_eq!(
+            got,
+            format!(
+                "- [a.md] 노트 A\n  concepts: rop, fold\n  · decision rop/fold: 접는다\n  · fact db/engine: pg\n  · … +2 more\n\n{HINT}"
+            )
+        );
+
+        // no claims anywhere: plain block, no hint
+        let got = refined_text(
+            &[(b.clone(), "본문B".to_owned())],
+            &none,
+            &HashMap::new(),
+            &HashMap::from([(b.clone(), "노트 B".to_owned())]),
+            &HashMap::from([(b.clone(), names(&["rop"]))]),
+        );
+        assert_eq!(got, "- [b.md] 본문B\n  concepts: rop");
+
+        // superseded label in head, no title, no concepts
+        let got = refined_text(
+            &[(c.clone(), "본문C".to_owned())],
+            &sup_c,
+            &HashMap::from([(c.clone(), claims_c())]),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            got,
+            format!("- [c.md (superseded by d.md)]\n  · risk x/y: z\n\n{HINT}")
+        );
+
+        // mixed: plain, refined, superseded; hint once at the end
+        let got = refined_text(
+            &[
+                (b.clone(), "본문B".to_owned()),
+                (a.clone(), "본문A".to_owned()),
+                (c.clone(), "본문C".to_owned()),
+            ],
+            &sup_c,
+            &HashMap::from([(a.clone(), claims_a()), (c.clone(), claims_c())]),
+            &HashMap::from([(a.clone(), "노트 A".to_owned())]),
+            &HashMap::from([(a.clone(), names(&["rop"])), (b.clone(), names(&["q"]))]),
+        );
+        assert_eq!(
+            got,
+            format!(
+                "- [b.md] 본문B\n  concepts: q\n\n- [a.md] 노트 A\n  concepts: rop\n  · decision rop/fold: 접는다\n  · fact db/engine: pg\n  · … +2 more\n\n- [c.md (superseded by d.md)]\n  · risk x/y: z\n\n{HINT}"
+            )
+        );
+    }
+
+    #[test]
+    fn refined_text_caps_concepts_at_six() {
+        let a = "/vault/wiki/a.md".to_owned();
+        let seven: Vec<String> = (1..=7).map(|n| format!("c{n}")).collect();
+        let got = refined_text(
+            &[(a.clone(), "본문".to_owned())],
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::from([(a, seven)]),
+        );
+        assert_eq!(got, "- [a.md] 본문\n  concepts: c1, c2, c3, c4, c5, c6");
     }
 
     #[test]
