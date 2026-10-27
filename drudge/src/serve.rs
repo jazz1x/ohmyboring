@@ -105,6 +105,24 @@ impl AppState {
         Ok(idx.search(query, k, project, since_hours))
     }
 
+    /// Every matching wiki note in Python order, uncut — the MCP recall picks its own pool.
+    pub(crate) fn wiki_recall_ranked(
+        &self,
+        query: &str,
+        project: Option<&str>,
+        since_hours: Option<i32>,
+    ) -> Result<Vec<wiki_recall::WikiHit>> {
+        let Some(dir) = self.wiki_dir() else {
+            return Ok(Vec::new());
+        };
+        let mut idx = self
+            .wiki_index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        idx.refresh(&dir)?;
+        Ok(idx.search_ranked(query, project, since_hours))
+    }
+
     pub(crate) async fn probe_db_health(&self) -> (Option<bool>, Option<String>) {
         let mut errors = Vec::new();
 

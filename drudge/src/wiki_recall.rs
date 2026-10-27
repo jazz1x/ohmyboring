@@ -22,6 +22,8 @@ pub struct WikiHit {
     pub source_path: String,
     pub snippet: String,
     pub score: f32,
+    /// Title equals the query after case-fold and whitespace collapse (Python `wiki.py` `exact_title`).
+    pub exact_title: bool,
 }
 
 /// Split the query into search terms — whitespace split + 2+ chars + lowercase. Pure.
@@ -226,6 +228,20 @@ impl WikiIndex {
         project: Option<&str>,
         since_hours: Option<i32>,
     ) -> Vec<WikiHit> {
+        let mut hits = self.search_ranked(query, project, since_hours);
+        hits.truncate(k);
+        hits
+    }
+
+    /// Every matching note in Python `wiki.py` `search()` order — callers cut, this does not.
+    #[must_use]
+    pub fn search_ranked(
+        &self,
+        query: &str,
+        project: Option<&str>,
+        since_hours: Option<i32>,
+    ) -> Vec<WikiHit> {
+        let asked = normalized(query);
         let terms = query_terms(query);
         if terms.is_empty() {
             return Vec::new();
@@ -254,17 +270,67 @@ impl WikiIndex {
                     source_path: d.source_path.clone(),
                     snippet,
                     score,
+                    exact_title: normalized(&d.title) == asked,
                 })
             })
             .collect();
+        // Python key: exact titles first; then score desc; then newer `wiki-N` first; then path.
         hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.exact_title
+                .cmp(&a.exact_title)
+                .then_with(|| {
+                    if a.exact_title {
+                        std::cmp::Ordering::Equal
+                    } else {
+                        b.score.total_cmp(&a.score)
+                    }
+                })
+                .then_with(|| creation_order(&b.id).cmp(&creation_order(&a.id)))
+                .then_with(|| a.source_path.cmp(&b.source_path))
         });
-        hits.truncate(k);
         hits
     }
+}
+
+/// `wiki-N` -> N (engine and Python both number notes max+1); unnumbered names are -1 (last).
+fn creation_order(id: &str) -> i64 {
+    id.strip_prefix("wiki-")
+        .unwrap_or(id)
+        .parse::<u32>()
+        .map_or(-1, i64::from)
+}
+
+/// Python `answer._wiki_selected`: from the full ranked list take `size = min(k, len)`, the pool is
+/// every exact-title note plus every note scoring at least the size-th hit (ties at the cut stay),
+/// and the first `size` pool members go on to ordering with exact-title notes carrying
+/// `max(pool score) + 1`. Pure.
+#[must_use]
+pub fn select_for_order(hits: Vec<WikiHit>, k: usize) -> Vec<WikiHit> {
+    let size = k.min(hits.len());
+    let Some(threshold) = size.checked_sub(1).map(|i| hits[i].score) else {
+        return Vec::new();
+    };
+    let pool: Vec<WikiHit> = hits
+        .into_iter()
+        .filter(|h| h.exact_title || h.score >= threshold)
+        .collect();
+    let lifted = pool.iter().map(|h| h.score).fold(f32::MIN, f32::max) + 1.0;
+    pool.into_iter()
+        .take(size)
+        .map(|mut h| {
+            if h.exact_title {
+                h.score = lifted;
+            }
+            h
+        })
+        .collect()
+}
+
+fn normalized(text: &str) -> String {
+    text.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// One-shot recall (CLI / non-cached callers): build a fresh index, refresh, search. The resident
@@ -290,7 +356,58 @@ mod tests {
         clippy::panic,
         clippy::float_cmp
     )]
-    use super::{WikiIndex, count_occurrences, extract_title_body, query_terms, score_doc};
+    use super::{
+        WikiIndex, count_occurrences, extract_title_body, query_terms, score_doc, select_for_order,
+    };
+
+    fn note(dir: &std::path::Path, id: &str, title: &str, repeat: usize) {
+        let body = "zebra ".repeat(repeat);
+        std::fs::write(
+            dir.join(format!("{id}.md")),
+            format!("---\ntitle: {title}\n---\n{body}"),
+        )
+        .unwrap();
+    }
+
+    fn picked(dir: &std::path::Path, k: usize) -> Vec<(String, f32)> {
+        let mut idx = WikiIndex::default();
+        idx.refresh(dir).unwrap();
+        select_for_order(idx.search_ranked("zebra", None, None), k)
+            .into_iter()
+            .map(|h| (h.id, h.score))
+            .collect()
+    }
+
+    // Expected values: Python wiki.search + answer._wiki_selected on the same notes.
+    #[test]
+    fn recall_picks_like_python_ties_creation_order_and_exact_lift() {
+        let dir = tempfile::tempdir().unwrap();
+        note(dir.path(), "wiki-0001", "zebra", 0);
+        note(dir.path(), "wiki-0006", "Zebra", 0);
+        note(dir.path(), "wiki-0004", "t4", 9);
+        for id in ["wiki-0005", "wiki-0003", "wiki-0002", "zz-b", "zz-a"] {
+            note(dir.path(), id, "tt", 5);
+        }
+        let want: Vec<(String, f32)> = [
+            ("wiki-0006", 11.0),
+            ("wiki-0001", 11.0),
+            ("wiki-0004", 10.0),
+            ("wiki-0005", 6.0),
+        ]
+        .map(|(i, s)| (i.to_owned(), s))
+        .to_vec();
+        assert_eq!(picked(dir.path(), 4), want);
+        assert_eq!(picked(dir.path(), 1), vec![("wiki-0006".to_owned(), 11.0)]);
+    }
+
+    #[test]
+    fn exact_title_beyond_k_still_lifts_the_pool_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        note(dir.path(), "wiki-0009", "zebra", 0);
+        note(dir.path(), "wiki-0001", "zebra", 16);
+        note(dir.path(), "wiki-0004", "t4", 9);
+        assert_eq!(picked(dir.path(), 1), vec![("wiki-0009".to_owned(), 21.0)]);
+    }
 
     #[test]
     fn wiki_index_refresh_is_incremental_and_honest() {
