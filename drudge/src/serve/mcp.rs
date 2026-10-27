@@ -1339,14 +1339,52 @@ pub(crate) struct Remembered {
     pub(crate) message: String,
 }
 
-/// Sentence the `remember` tool schema appends to its `concepts` description.
+/// The one sentence the Python door's `remember` repeats word for word.
 const CONCEPTS_HINT: &str = "이미 쓰던 개념 이름을 먼저 쓴다(recall·neighbors 결과의 concepts). 영어 slug(예: mutation-testing).";
+
+/// MCP `remember` only: the graph keeps a concept when its slug is non-empty and it has no Han
+/// (ingest.rs:177-198), so a note whose concepts all fail that lands with no concept edge.
+/// Refuse it here, with the fix in the text; `POST /remember` (distiller, secretary) skips this.
+fn require_concepts(args: Option<&Value>) -> Result<(), (i32, String)> {
+    let refuse = |why: &str| {
+        Err((
+            -32602,
+            format!(
+                "refused: {why} Pass `concepts`: 1-6 English slugs, e.g. [\"mutation-testing\"]. {CONCEPTS_HINT}"
+            ),
+        ))
+    };
+    let Some(items) = args
+        .and_then(|a| a.get("concepts"))
+        .and_then(Value::as_array)
+    else {
+        return refuse("`concepts` is missing.");
+    };
+    if items.is_empty() || items.len() > 6 {
+        return refuse(&format!(
+            "`concepts` has {} entries (need 1-6).",
+            items.len()
+        ));
+    }
+    let usable = items.iter().filter_map(Value::as_str).any(|c| {
+        let c = c.trim();
+        !ingest::has_han(c) && !ingest::slugify(c).is_empty()
+    });
+    if usable {
+        Ok(())
+    } else {
+        refuse(
+            "no entry of `concepts` has any ASCII letters or digits (Korean-only names are dropped).",
+        )
+    }
+}
 
 async fn mcp_remember(
     s: &AppState,
     caller: Caller,
     args: Option<&Value>,
 ) -> Result<String, (i32, String)> {
+    require_concepts(args)?;
     Ok(remember_note(s, caller, args).await?.message)
 }
 
@@ -2340,11 +2378,12 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote, ToolCallError,
-        ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_remember,
-        mcp_tools_list, needs_dedup, parse_remember_note, parse_supersedes, pick_duplicate,
-        probable_session_duplicate, recall_text, remember_note, should_replace_duplicate,
-        supersedes_suffix, tool_outcome_snippet, tool_query_arg, wiki_path_spellings,
+        CONCEPTS_HINT, DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote,
+        ToolCallError, ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag,
+        mcp_remember, mcp_tools_list, needs_dedup, parse_remember_note, parse_supersedes,
+        pick_duplicate, probable_session_duplicate, recall_text, remember_note,
+        should_replace_duplicate, supersedes_suffix, tool_outcome_snippet, tool_query_arg,
+        wiki_path_spellings,
     };
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
@@ -2589,23 +2628,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_remember_still_accepts_missing_empty_and_korean_only_concepts() {
-        // The live distiller calls `tools/call remember` without the tool schema; refusing any
-        // of these would drop its notes. The schema says required, the server does not enforce.
+    async fn mcp_remember_requires_usable_english_concepts() {
         let tmp = tempfile::tempdir().unwrap();
         let s = vault_state(tmp.path());
-        for (n, concepts) in [None, Some(json!([])), Some(json!(["테스트", "개념"]))]
-            .into_iter()
-            .enumerate()
-        {
-            let mut args =
-                json!({"title": format!("t{n}"), "body": format!("b{n}"), "omb_session_id": "s1"});
+        let with = |concepts: Option<Value>| {
+            let mut a = json!({"title": "t", "body": "b", "omb_session_id": "s1"});
             if let Some(c) = concepts {
-                args["concepts"] = c;
+                a["concepts"] = c;
             }
-            let out = mcp_remember(&s, Caller::Unverified, Some(&args)).await;
-            assert!(out.is_ok(), "case {n} must be accepted: {out:?}");
+            a
+        };
+        let refused = |msg: &str| {
+            assert!(msg.contains("concepts"), "names the field: {msg}");
+            assert!(msg.contains("mutation-testing"), "shows a fix: {msg}");
+            assert!(msg.contains(CONCEPTS_HINT), "carries the hint: {msg}");
+        };
+        for bad in [
+            None,
+            Some(json!([])),
+            Some(json!(["테스트", "개념"])),
+            Some(json!(["a", "b", "c", "d", "e", "f", "g"])),
+        ] {
+            let err = mcp_remember(&s, Caller::Unverified, Some(&with(bad.clone())))
+                .await
+                .expect_err(&format!("{bad:?} must be refused"));
+            assert_eq!(err.0, -32602);
+            refused(&err.1);
         }
+        let ok = mcp_remember(
+            &s,
+            Caller::Unverified,
+            Some(&with(Some(json!(["mutation-testing"])))),
+        )
+        .await;
+        assert!(ok.is_ok(), "one English slug passes: {ok:?}");
+        let http = remember_note(&s, Caller::Unverified, Some(&with(None))).await;
+        assert!(http.is_ok(), "the HTTP door is unchanged");
     }
 
     #[tokio::test]

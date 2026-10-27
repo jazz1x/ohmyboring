@@ -264,6 +264,12 @@ EMPTY_NOTE_REFUSAL = (
 )
 
 
+#: 엔진 mcp.rs CONCEPTS_HINT 와 같은 문장 — 거부 문구 끝에 붙는다.
+CONCEPTS_HINT = (
+    "이미 쓰던 개념 이름을 먼저 쓴다(recall·neighbors 결과의 concepts). 영어 slug(예: mutation-testing)."
+)
+
+
 @dataclass(frozen=True)
 class WriteRequest:
     """문이 싣는 remember 요청 하나 — route 는 사건 기록용 식별."""
@@ -1399,6 +1405,25 @@ def _decide_and_write(ctx: _Ctx, cur: Any, seams: _TimedSeams, gated: _Gated) ->
         return Failed(-32603, failure.message)
 
 
+def _concepts_refusal(arguments: dict[str, Any]) -> str | None:
+    """MCP remember 의 concepts 규칙(엔진 mcp.rs require_concepts 와 같다) — 어긋나면 고칠 문구, 아니면 None.
+
+    그래프는 slug 가 비지 않고 한자가 없는 개념만 간선으로 쓴다(graph.py slugify·has_han)."""
+    raw = arguments.get("concepts")
+    items = raw if isinstance(raw, list) else None
+    if items is None:
+        why = "`concepts` is missing."
+    elif not 1 <= len(items) <= 6:
+        why = f"`concepts` has {len(items)} entries (need 1-6)."
+    elif not any(
+        isinstance(c, str) and not _graph.has_han(c.strip()) and _graph.slugify(c.strip()) for c in items
+    ):
+        why = "no entry of `concepts` has any ASCII letters or digits (Korean-only names are dropped)."
+    else:
+        return None
+    return f'refused: {why} Pass `concepts`: 1-6 English slugs, e.g. ["mutation-testing"]. {CONCEPTS_HINT}'
+
+
 def run_write(request: WriteRequest, deps: WriterDeps) -> WriteOutcome:
     """remember 하나를 결정·쓰고 응답 재료를 돌려준다 — 문 핸들러가 모양을 입힌다.
 
@@ -1414,6 +1439,8 @@ def run_write(request: WriteRequest, deps: WriterDeps) -> WriteOutcome:
             return Refused(-32602, reason)
         case Ok(note):
             pass
+    if request.route == MCP_ROUTE and (why := _concepts_refusal(arguments)) is not None:
+        return Refused(-32602, why)
     if request.route == MCP_ROUTE and not note.front.project and not note.front.claims:
         return Refused(-32602, EMPTY_NOTE_REFUSAL)
     match parse_judge(arguments):

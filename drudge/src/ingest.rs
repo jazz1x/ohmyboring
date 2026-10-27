@@ -438,13 +438,13 @@ fn judge_sha(stored: Option<&str>, data: &str) -> ShaVerdict {
 
 /// Detect whether the string contains CJK Unified Ideographs (U+4E00..=U+9FFF) — filters model drift
 /// into Chinese in agent-curated tags/tools/concepts. Korean uses Hangul, not Han ideographs.
-fn has_han(s: &str) -> bool {
+pub(crate) fn has_han(s: &str) -> bool {
     s.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c))
 }
 
 /// Slug: lowercase + keep only `[a-z0-9]` (remove all separators) → prevents variant-spelling collisions.
 /// Alias map: `c++`→`cpp`, `c#`→`csharp`, `.net`→`dotnet` (left as-is they would collapse and collide).
-fn slugify(s: &str) -> String {
+pub(crate) fn slugify(s: &str) -> String {
     let lower = s.to_lowercase();
     let normalized = lower
         .replace("c++", "cpp")

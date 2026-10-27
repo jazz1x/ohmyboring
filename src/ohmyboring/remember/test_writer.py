@@ -732,7 +732,7 @@ class WriterCase(unittest.TestCase):
     # ── 빈 노트 거절 (MCP 길만) ──────────────────────────────────────────────
 
     def test_mcp_refuses_note_with_no_project_and_no_claims(self):
-        outcome = self.write({"title": "빈 노트", "body": "본문"}, route="mcp")
+        outcome = self.write({"title": "빈 노트", "body": "본문", "concepts": ["door"]}, route="mcp")
         self.assertIsInstance(outcome, writer.Refused)
         assert isinstance(outcome, writer.Refused)
         self.assertEqual(outcome.code, -32602)
@@ -745,12 +745,35 @@ class WriterCase(unittest.TestCase):
 
     def test_mcp_accepts_note_with_one_claim(self):
         claim = {"subject": "door", "predicate": "decides", "value": "x", "kind": "decision"}
-        outcome = self.write({"title": "claim 노트", "body": "본문", "claims": [claim]}, route="mcp")
+        outcome = self.write(
+            {"title": "claim 노트", "body": "본문", "claims": [claim], "concepts": ["door"]}, route="mcp"
+        )
         self.assertIsInstance(outcome, writer.Written)
 
     def test_mcp_accepts_repo_only_note(self):
-        outcome = self.write({"title": "repo 노트", "body": "본문", "repo": "some-repo"}, route="mcp")
+        outcome = self.write(
+            {"title": "repo 노트", "body": "본문", "repo": "some-repo", "concepts": ["door"]}, route="mcp"
+        )
         self.assertIsInstance(outcome, writer.Written)
+
+    def test_mcp_requires_usable_english_concepts(self):
+        base = {"title": "개념 노트", "body": "본문", "repo": "some-repo"}
+        for bad in (
+            {},
+            {"concepts": []},
+            {"concepts": ["테스트", "개념"]},
+            {"concepts": list("abcdefg")},
+        ):
+            with self.subTest(bad=bad):
+                outcome = self.write({**base, **bad}, route="mcp")
+                self.assertIsInstance(outcome, writer.Refused)
+                assert isinstance(outcome, writer.Refused)
+                self.assertEqual(outcome.code, -32602)
+                self.assertIn("mutation-testing", outcome.message)
+                self.assertIn(writer.CONCEPTS_HINT, outcome.message)
+        self.assertEqual(self.written_files(), [])
+        ok = self.write({**base, "concepts": ["mutation-testing"]}, route="mcp")
+        self.assertIsInstance(ok, writer.Written)
 
     def test_http_route_still_accepts_empty_note(self):
         outcome = self.write({"title": "정정 문", "body": "본문"}, route="remember")
