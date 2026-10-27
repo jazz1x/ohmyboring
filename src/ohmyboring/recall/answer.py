@@ -196,6 +196,7 @@ class _Selected:
     size: int = 0
     titles: tuple[tuple[str, str], ...] = ()  # (경로, 제목) — wiki 길만, 머리줄에 붙는다
     failed: tuple[tuple[str, str], ...] = ()
+    superseded: frozenset[str] = frozenset()  # wiki 길이 이미 물은 대체 여부
 
 
 def _wiki_selected(result: wiki.WikiResult, args: Args, seams: Seams) -> Either[_Selected, Failed]:
@@ -220,12 +221,20 @@ def _wiki_selected(result: wiki.WikiResult, args: Args, seams: Seams) -> Either[
             ordered = rank.order_within_set(scored, facts)
             lines = [(item.hit.source_path, item.hit.content) for item in ordered]
             titles = tuple((hit.source_path, hit.title) for hit in pool_hits)
-            return Ok(_Selected("wiki", lines, result.skipped, pool, size, titles))
+            sunk = frozenset(path for path, f in facts.items() if f.superseded)
+            return Ok(_Selected("wiki", lines, result.skipped, pool, size, titles, superseded=sunk))
 
 
-def _fused(selected: _Selected, vector: list[Line], max_results: int) -> _Selected:
+def _fused(selected: _Selected, vector: list[Line], args: Args, seams: Seams) -> Either[_Selected, Failed]:
     """wiki 줄과 벡터 줄을 RRF(k=60)로 합친다 — 제목 일치로 앞에 선 wiki 줄은 그 자리에 고정(#491).
-    같은 노트가 두 길에 다 있으면 점수를 더하고 wiki 줄(스니펫)을 보인다. 동점은 wiki 순위 → 벡터 순위."""
+    같은 노트가 두 길에 다 있으면 점수를 더하고 wiki 줄(스니펫)을 보인다. 동점은 wiki 순위 → 벡터 순위.
+    대체된 노트는 RRF 합과 무관하게 산 노트 뒤로 가라앉는다 — 빼지 않는다."""
+    vector_only = sorted({path for path, _ in vector} - {path for path, _ in selected.lines})
+    match seams.rank_facts(vector_only) if vector_only else Ok({}):
+        case Err(detail):
+            return Err(Failed(f"wiki recall order: rank: rank facts lookup: {detail}"))
+        case Ok(facts):
+            sunk = selected.superseded | {path for path, f in facts.items() if f.superseded}
     exact = {c.hit.source_path for c in selected.pool if c.hit.exact_title}
     pinned = list(itertools.takewhile(lambda line: line[0] in exact, selected.lines))
     pinned_paths = {path for path, _ in pinned}
@@ -236,19 +245,20 @@ def _fused(selected: _Selected, vector: list[Line], max_results: int) -> _Select
     body = dict(reversed(vector)) | dict(selected.lines)
     absent = len(selected.lines) + len(vector)
 
-    def score(path: str) -> tuple[float, int, int]:
+    def score(path: str) -> tuple[bool, float, int, int]:
         ranks = [at[path] for at in (wiki_at, vector_at) if path in at]
         return (
+            path in sunk,
             -sum(1 / (RRF_K + i + 1) for i in ranks),
             wiki_at.get(path, absent),
             vector_at.get(path, absent),
         )
 
     rest = sorted((path for path in body if path not in pinned_paths), key=score)
-    lines = [*pinned, *((path, body[path]) for path in rest)][:max_results]
+    lines = [*pinned, *((path, body[path]) for path in rest)][: args.max_results]
     shown = {path for path, _ in lines}
     contributed = [name for name, at in (("wiki", wiki_at), ("vector", vector_at)) if shown & at.keys()]
-    return replace(selected, path="+".join(contributed), lines=lines)
+    return Ok(replace(selected, path="+".join(contributed), lines=lines))
 
 
 def _select(args: Args, seams: Seams) -> Either[_Selected, Failed]:
@@ -266,7 +276,7 @@ def _select(args: Args, seams: Seams) -> Either[_Selected, Failed]:
         case Ok(selected), Err(detail):
             return Ok(replace(selected, failed=(("vector", detail),)))
         case Ok(selected), Ok(lines):
-            return Ok(_fused(selected, lines, args.max_results))
+            return _fused(selected, lines, args, seams)
 
 
 def _pool_of(selected: _Selected, superseded: dict[str, list[str]]) -> WikiPool | None:

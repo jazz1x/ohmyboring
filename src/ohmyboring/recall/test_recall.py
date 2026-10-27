@@ -569,6 +569,26 @@ def test_a_query_equal_to_a_title_puts_that_note_first_unless_it_is_superseded()
         assert demoted[-1] == "wiki-7115", f"대체된 제목 일치 노트는 밀리되 잘리지 않는다: {demoted}"
 
 
+def test_a_superseded_note_that_leads_by_rrf_sum_sinks_below_the_live_notes_after_fusion():
+    # 벡터 1위·wiki 3위라 RRF 합은 s 가 가장 크다 — 합치고도 대체된 노트는 산 노트 뒤
+    hits = [_hit("a", 5.0), _hit("b", 4.0), _hit("s", 3.0)]
+    stub = _Seams(
+        wiki_hits=hits,
+        facts=_facts(s=_other(True), a=_other(False), b=_other(False)),
+        vector=[("/vault/wiki/s.md", "벡터")],
+    )
+    recalled = _text(answer.answer(_args(), stub.seams()))
+    assert _shown(recalled) == ["a", "b", "s"], _shown(recalled)
+    vector_only = _Seams(
+        wiki_hits=[_hit("a", 5.0), _hit("b", 4.0)],
+        facts=_facts(v=_other(True), a=_other(False), b=_other(False)),
+        vector=[("/vault/wiki/v.md", "벡터")],
+    )
+    assert _shown(_text(answer.answer(_args(), vector_only.seams())))[-1] == "v", (
+        "벡터에서만 온 줄도 가라앉는다"
+    )
+
+
 def test_failed_rank_facts_lookup_fails_the_recall():
     # retrieve::tests::failed_rank_facts_lookup_fails_the_retrieval
     stub = _Seams(wiki_hits=[_hit("a", 1.0)], rank_err="db down")
