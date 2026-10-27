@@ -1579,6 +1579,7 @@ async fn store_new_note(
     edge_judge: Option<&str>,
     telemetry: &Value,
 ) -> Result<Remembered, (i32, String)> {
+    let resolved = resolve_supersedes(s.store.as_deref(), supersedes).await?;
     let db_ids = existing_wiki_ids(s).await?;
     let (wiki_id, path) = vault::allocate_wiki_path(wiki_dir, Some(&db_ids))
         .map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
@@ -1596,7 +1597,7 @@ async fn store_new_note(
         .unwrap_or_default();
     let label = format!("wiki/{wiki_id}.md{dup_suffix}");
     let (message, supersedes_report) =
-        finish_remembered_note(s, &path, &label, &front, supersedes, edge_judge).await?;
+        finish_remembered_note(s, &path, &label, &front, &resolved, edge_judge).await?;
     let message = format!(
         "{}{}",
         message,
@@ -1725,11 +1726,10 @@ async fn finish_remembered_note(
         ));
     };
 
-    let pairs = resolve_supersedes(Some(store), supersedes)
-        .await?
-        .into_iter()
-        .map(|old| [front.source_path.clone(), old])
-        .collect::<Vec<_>>();
+    let pairs: Vec<[String; 2]> = supersedes
+        .iter()
+        .map(|old| [front.source_path.clone(), old.clone()])
+        .collect();
     let _guard = s.sync_lock.lock().await;
     let mut conn = store
         .conn()
