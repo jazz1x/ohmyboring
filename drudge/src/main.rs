@@ -187,6 +187,17 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
+        Cmd::Version => {
+            // Empty means the build could not resolve a commit (no .git, no BUILD_SHA), which is
+            // a different statement from a stale sha and must not be dressed up as one.
+            let stamp = env!("BORING_BUILT_FROM");
+            if stamp.is_empty() {
+                println!("unstamped");
+            } else {
+                println!("{stamp}");
+            }
+            return Ok(());
+        }
         command => command,
     };
 
@@ -201,17 +212,6 @@ async fn main() -> Result<()> {
     };
 
     match cmd {
-        Cmd::Version => {
-            // Empty means the build could not resolve a commit (no .git, no BUILD_SHA), which is
-            // a different statement from a stale sha and must not be dressed up as one.
-            let stamp = env!("BORING_BUILT_FROM");
-            if stamp.is_empty() {
-                println!("unstamped");
-            } else {
-                println!("{stamp}");
-            }
-            return Ok(());
-        }
         Cmd::Selftest => {
             let store = store.as_ref().context(VEC_OFF)?;
             let ol = llm::Llm::from_config(&cfg);
@@ -363,7 +363,7 @@ async fn main() -> Result<()> {
                 ss.tools, ss.concepts, ss.uses, ss.about
             );
         }
-        Cmd::CodeSync { .. } | Cmd::CodeStatus { .. } => {}
+        Cmd::CodeSync { .. } | Cmd::CodeStatus { .. } | Cmd::Version => {}
         Cmd::Link { vault } => {
             let store = store.as_ref().context(VEC_OFF)?;
             let vault_root = vault
