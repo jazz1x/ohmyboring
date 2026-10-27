@@ -9,7 +9,9 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use drudge::config::BoringConfig;
-use drudge::ingest::{DefaultChunker, Embed, FrontmatterGraphExtractor, run_with};
+use drudge::ingest::{
+    DefaultChunker, Embed, FrontmatterGraphExtractor, ingest_file_with, run_with,
+};
 use drudge::store::Store;
 use tempfile::tempdir;
 use tokio_postgres::{Client, NoTls};
@@ -192,4 +194,120 @@ async fn the_next_sync_ingests_a_failed_file_like_a_clean_one() {
         "document, chunk, claim, node, edge rows: failed-then-resynced vs clean (chunks must not stay 0)"
     );
     assert_eq!(again.new, 1, "the retry counts as a new file");
+}
+
+/// A note naming `shared` as tags, tools and concepts, in the order given, and one claim per
+/// `(subject, said_by_owner)` entry of `claims`.
+fn shared_note(shared: &[String], claims: &[(String, bool)], body: &str) -> String {
+    let list = |names: &[String]| {
+        names
+            .iter()
+            .map(|n| format!("  - {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let claims = claims
+        .iter()
+        .map(|(subject, said)| {
+            let said = if *said { "\n    said_by: owner" } else { "" };
+            format!(
+                "  - subject: {subject}\n    predicate: axis\n    value: v1\n    kind: fact\n    confidence: certain{said}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let names = list(shared);
+    let claims = if claims.is_empty() {
+        "[]".to_owned()
+    } else {
+        format!("\n{claims}")
+    };
+    let names = if shared.is_empty() {
+        "[]".to_owned()
+    } else {
+        format!("\n{names}")
+    };
+    format!(
+        "---\norigin: personal\nproject: \"\"\nkind: note\ntags: {names}\ntools: {names}\nconcepts: {names}\nclaims: {claims}\n---\n\n{body}\n"
+    )
+}
+
+/// Ingests two files at once, 40 rounds, each round on rows no other round shares. Returns how
+/// many rounds one of the two was aborted by Postgres (`deadlock detected`).
+async fn aborted_rounds(make: impl Fn(&[String]) -> (String, String)) -> usize {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return 0;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let cfg = BoringConfig::default();
+    let embedder = FaultyEmbed { broken: false };
+    let mut aborted = 0;
+    for round in 0..40 {
+        let dir = tempdir().expect("vault dir");
+        let names: Vec<String> = (0..6).map(|i| format!("{}x{i}", token("p3bdl"))).collect();
+        let (first, second) = make(&names);
+        let first_path = dir.path().join("first.md");
+        let second_path = dir.path().join("second.md");
+        fs::write(&first_path, first).expect("write first");
+        fs::write(&second_path, second).expect("write second");
+        let (first, second) = (
+            first_path.to_string_lossy().into_owned(),
+            second_path.to_string_lossy().into_owned(),
+        );
+        let (a, b) = tokio::join!(
+            ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+                &store, &embedder, &cfg, &first
+            ),
+            ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+                &store, &embedder, &cfg, &second
+            ),
+        );
+        if let Err(e) = a.as_ref().and(b.as_ref()) {
+            eprintln!("round {round}: {e:#}");
+            aborted += 1;
+        }
+    }
+    aborted
+}
+
+/// One transaction per file holds the shared tag, tool, concept and claim rows it has touched
+/// until it commits, so two files naming the same rows in opposite order wait on each other
+/// unless every file takes them in one sorted order.
+#[tokio::test]
+async fn files_naming_shared_rows_in_opposite_order_do_not_deadlock() {
+    let aborted = aborted_rounds(|names| {
+        let reversed: Vec<String> = names.iter().rev().cloned().collect();
+        let claims =
+            |order: &[String]| order.iter().map(|n| (n.clone(), false)).collect::<Vec<_>>();
+        (
+            shared_note(names, &claims(names), "forward body"),
+            shared_note(&reversed, &claims(&reversed), "backward body"),
+        )
+    })
+    .await;
+    assert_eq!(aborted, 0, "rounds (of 40) where one ingest was aborted");
+}
+
+/// The speaker node is written when a claim with `said_by` is reached. If that is a different
+/// place in each file's order, one file holds a claim row and wants the speaker while the other
+/// holds the speaker and wants that claim.
+#[tokio::test]
+async fn the_speaker_node_is_taken_at_one_place_in_every_files_order() {
+    let aborted = aborted_rounds(|names| {
+        (
+            shared_note(
+                &[],
+                &[(names[3].clone(), false), (names[5].clone(), true)],
+                "speaks last",
+            ),
+            shared_note(
+                &[],
+                &[(names[0].clone(), true), (names[3].clone(), false)],
+                "speaks first",
+            ),
+        )
+    })
+    .await;
+    assert_eq!(aborted, 0, "rounds (of 40) where one ingest was aborted");
 }
