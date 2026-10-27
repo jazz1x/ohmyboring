@@ -42,6 +42,7 @@ tree-sitter-bash = "=0.25.1"
 
 [dev-dependencies]
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
 
 # 철학 강제 (upstream 상속) — cargo clippy -D warnings 게이트
 [lints.rust]

@@ -200,6 +200,49 @@ mod tests {
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         assert_eq!(&body[..], br#"{"error":"unprocessable entity"}"#);
     }
+
+    #[tokio::test]
+    async fn register_routes_reject_bad_json_with_422_json_body() {
+        use tower::ServiceExt;
+        let cfg = crate::config::BoringConfig::default();
+        let state = super::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(None),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+            owner_token: std::sync::Arc::new(None),
+        };
+        let router = super::build_router(state);
+        let paths = [
+            "/status",
+            "/decisions",
+            "/risks",
+            "/next_actions",
+            "/stalled",
+            "/recurrences",
+            "/context",
+        ];
+        for path in paths {
+            let req = axum::extract::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from("{"))
+                .unwrap();
+            let res = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+            let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+            assert_eq!(&body[..], br#"{"error":"unprocessable entity"}"#, "{path}");
+        }
+    }
     #[test]
     fn recurrences_days_defaults_to_30() {
         assert_eq!(recurrences_days(None), 30);
@@ -1465,7 +1508,21 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         Arc::clone(&compact_failure),
     );
 
-    let router = axum::Router::new()
+    let router = build_router(state);
+
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("bind {addr}: {e}"))?;
+    eprintln!("[serve] listening on {addr}");
+
+    axum::serve(listener, router)
+        .await
+        .map_err(|e| anyhow::anyhow!("axum serve: {e}"))
+}
+
+/// 서버가 쓰는 라우트 표. 테스트가 같은 표를 라우터로 호출한다.
+pub(crate) fn build_router(state: AppState) -> axum::Router {
+    axum::Router::new()
         .route("/health", get(http::health))
         .route("/ask", post(http::handle_ask))
         .route("/brief", post(http::handle_brief))
@@ -1501,14 +1558,5 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .route("/sync", post(http::handle_sync))
         .route("/compact", post(http::handle_compact))
         .route("/mcp", get(mcp::handle_mcp_get).post(mcp::handle_mcp))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("bind {addr}: {e}"))?;
-    eprintln!("[serve] listening on {addr}");
-
-    axum::serve(listener, router)
-        .await
-        .map_err(|e| anyhow::anyhow!("axum serve: {e}"))
+        .with_state(state)
 }
