@@ -377,8 +377,7 @@ def rank_facts(conn: psycopg.Connection, paths: list[str]) -> Either[dict[str, r
     return _attempt(run)
 
 
-#: {kinds} 자리: 등록부(declared_claims)는 fact 를 빼고, 회상(current_claims)은 kind 를 가리지
-#: 않는다 — 볼트 claims 15,395 중 fact 7,642(판정 wiki-5375).
+#: kind 를 가리지 않는다 — 볼트 claims 15,395 중 fact 7,642(판정 wiki-5375).
 _CLAIMS_SQL = (
     "WITH asked AS ("
     " SELECT unnest(%s::text[]) AS doc_id, unnest(%s::text[]) AS path"
@@ -395,7 +394,6 @@ _CLAIMS_SQL = (
     " JOIN document dm ON dm.source_path = c.source_path"
     " WHERE e.kind = 'claims'"
     " AND c.superseded_at IS NULL"
-    "{kinds}"
     "), ranked AS ("
     " SELECT doc_path, subject, predicate, value, kind, confidence, valid_from, project,"
     " CASE kind WHEN 'decision' THEN 0"
@@ -418,22 +416,14 @@ _CLAIMS_SQL = (
     " WHERE rn <= %s"
     " ORDER BY doc_path, rn;"
 )
-_DECLARED_CLAIMS_SQL = _CLAIMS_SQL.format(kinds=" AND c.kind <> 'fact'")
-_CURRENT_CLAIMS_SQL = _CLAIMS_SQL.format(kinds="")
-
-
-def declared_claims(
-    conn: psycopg.Connection, paths: list[str], per_doc: int
-) -> Either[dict[str, RegisterRows], PgError]:
-    """store.rs:1773 — 현재 claims→claim 간선이 잇는 행만(fact 제외), tier·최신 순, 한 문서당 per_doc."""
-    return _claims_by_doc(conn, _DECLARED_CLAIMS_SQL, paths, per_doc)
 
 
 def current_claims(
     conn: psycopg.Connection, paths: list[str], per_doc: int
 ) -> Either[dict[str, RegisterRows], PgError]:
-    """회상용 — declared_claims 와 같되 kind 를 가리지 않는다(fact 포함). 닫힌 claim 은 뺀다."""
-    return _claims_by_doc(conn, _CURRENT_CLAIMS_SQL, paths, per_doc)
+    """/search·회상용 — 현재 claims→claim 간선이 잇는 행(fact 포함), tier·최신 순, 한 문서당 per_doc.
+    등록부(registers/pg.py)는 자기 SQL 로 fact 를 뺀다."""
+    return _claims_by_doc(conn, _CLAIMS_SQL, paths, per_doc)
 
 
 def _claims_by_doc(

@@ -73,7 +73,7 @@ class RetrieverPipelineTests(unittest.TestCase):
             consumption_counts=lambda conn, paths: Ok({"/a.md": rank.Counts(used=1, contested=2)}),
             said_by_owner_counts=lambda conn, paths: Ok({"/a.md": 1}),
             superseded_by=lambda conn, paths: Ok({"/b.md": ["/b2.md"]}),
-            declared_claims=self.declared,
+            current_claims=self.declared,
             related_by_shared_ground=lambda conn, path, limit, **_: Ok([]),
         )
         patcher.start()
@@ -173,7 +173,7 @@ class RetrieverPipelineTests(unittest.TestCase):
                 self.fail(f"search: {failure}")
         self.assertNotIn("claims", documents[0].metadata)
         self.assertNotIn("claims_total", documents[0].metadata)
-        self.assertEqual(self.declared.call_count, 1, "claims=0 이면 declared_claims 질의도 안 탄다")
+        self.assertEqual(self.declared.call_count, 1, "claims=0 이면 current_claims 질의도 안 탄다")
 
     def test_related_attaches_to_heads_only_with_seen_dedup(self):
         """머리 hit related_heads 개 에만 related, seen(전체 hit 경로) 에 있는 노트는 안 실린다 — http.rs:543-561."""

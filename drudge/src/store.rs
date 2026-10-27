@@ -585,6 +585,14 @@ impl RegisterRow {
     }
 }
 
+/// Whether `declared_claims` hands over `fact` claims. The registers answer "what was solved"
+/// and drop them; `/search` shows a note's refined claims whatever their kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactClaims {
+    Exclude,
+    Include,
+}
+
 #[derive(Debug)]
 pub struct RegisterRows {
     pub rows: Vec<RegisterRow>,
@@ -1868,16 +1876,19 @@ impl Store {
     /// register row shape, so a hit's claims and a register entry serialize identically.
     /// "Currently declare" is the `doc —claims→ claim` edge, not the `source_path` column: a
     /// rewritten note keeps its old rows alive, but only edge-reachable claims are handed over.
-    /// Current rows only, `fact` excluded (facts are context, not the record of a solve), most
-    /// solving kind first (`decision`, then `next`/`blocked`, then `risk`), newest `valid_from`
-    /// first within a kind, at most `per_doc` rows per document, with the full qualifying count
-    /// in `total_matching` so a cut is stated, not silent.
+    /// Current rows only; `fact` is dropped for `FactClaims::Exclude` (the registers: facts are
+    /// context, not the record of a solve) and kept for `Include` (`/search`, wiki-5375).
+    /// Most solving kind first (`decision`, then `next`/`blocked`, then `risk`, then the rest),
+    /// newest `valid_from` first within a kind, at most `per_doc` rows per document, with the
+    /// full qualifying count in `total_matching` so a cut is stated, not silent.
     pub async fn declared_claims(
         &self,
         paths: &[String],
         per_doc: i64,
+        facts: FactClaims,
     ) -> Result<HashMap<String, RegisterRows>> {
         let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
+        let include_fact = facts == FactClaims::Include;
         let rows = self
             .db()
             .await?
@@ -1899,7 +1910,7 @@ impl Store {
                      JOIN document dm ON dm.source_path = c.source_path
                      WHERE e.kind = 'claims'
                        AND c.superseded_at IS NULL
-                       AND c.kind <> 'fact'
+                       AND ($4 OR c.kind <> 'fact')
                  ),
                  ranked AS (
                      SELECT doc_path, subject, predicate, value, kind, confidence, valid_from, project,
@@ -1923,7 +1934,7 @@ impl Store {
                  FROM picked
                  WHERE rn <= $3
                  ORDER BY doc_path, rn;",
-                &[&doc_ids, &paths, &per_doc],
+                &[&doc_ids, &paths, &per_doc, &include_fact],
             )
             .await
             .context("declared claims")?;

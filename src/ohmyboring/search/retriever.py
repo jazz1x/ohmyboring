@@ -189,9 +189,10 @@ def _claims(state: _State) -> Either[_State, SearchFailure]:
     per_hit = min(max(state.claims, 0), SEARCH_MAX_CLAIMS)
     if per_hit <= 0:
         return Ok(state)
+    # /search 도 fact 포함: fact 전용 노트 105개가 claim 줄 0 이던 것(C-DSHAPE2-1, 10-27), wiki-5375 와 같은 이유
     return _capture(
         state,
-        pg.declared_claims(state.conn, _paths(state.ordered), per_hit),
+        pg.current_claims(state.conn, _paths(state.ordered), per_hit),
         "claims",
         "declared",
     )

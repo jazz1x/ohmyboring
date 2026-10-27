@@ -26,7 +26,7 @@ use crate::serve::{
     count_wiki_notes, recurrences_days, recurrences_limit, register_limit, spawn_query_log,
     vector_disabled,
 };
-use crate::store::{EventLogFilter, LoggedHit, Store};
+use crate::store::{EventLogFilter, FactClaims, LoggedHit, Store};
 use std::collections::HashSet;
 
 const EVENT_LOG_MAX_LIMIT: i64 = 1000;
@@ -437,7 +437,10 @@ async fn attach_claims(
         return Ok(());
     }
     let paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
-    let declared = store.declared_claims(&paths, i64::from(per_hit)).await?;
+    // /search 도 fact 포함: fact 전용 노트 105개가 claim 줄 0 이던 것(C-DSHAPE2-1, 10-27), wiki-5375 와 같은 이유
+    let declared = store
+        .declared_claims(&paths, i64::from(per_hit), FactClaims::Include)
+        .await?;
     for hit in hits.iter_mut() {
         let rows = declared.get(&hit.source_path);
         hit.claims_total = Some(rows.map_or(0, |r| r.total_matching));
@@ -1167,6 +1170,66 @@ mod tests {
             !without.contains("\"claims\":") && !without.contains("claims_total"),
             "the frozen response carries no claim payload: {without}"
         );
+        assert_fact_only_note_gets_a_claim(&store).await;
+
+        store.delete_document(&path).await.expect("cleanup");
+    }
+
+    /// C-DSHAPE2: a note whose only live claim is a `fact` still gets a claim line on /search,
+    /// and attaching claims leaves the hit itself (path, id) as it was.
+    /// Called from the freeze test below, which already owns the one store a parallel run may
+    /// open (two `Store::open` at once deadlock on the schema DDL).
+    async fn assert_fact_only_note_gets_a_claim(store: &super::Store) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = format!("/vault/wiki/fact-only-{ts}.md");
+        let (subject, predicate) = (format!("fact-subject-{ts}"), "stack".to_owned());
+        let front = crate::frontmatter::FrontMatter {
+            origin: "personal".to_owned(),
+            project: format!("fact-project-{ts}"),
+            kind: "note".to_owned(),
+            source_path: path.clone(),
+            ..Default::default()
+        };
+        store
+            .upsert_document(&front, "sha-fact-only", std::time::SystemTime::now())
+            .await
+            .expect("upsert document");
+        let claim = crate::frontmatter::Claim {
+            subject: subject.clone(),
+            predicate: predicate.clone(),
+            value: "runs on pgvector".to_owned(),
+            kind: "fact".to_owned(),
+            confidence: "high".to_owned(),
+            said_by: None,
+        };
+        let embedding = vec![0.0_f32; 1024];
+        let now = std::time::SystemTime::now();
+        store
+            .upsert_claim(
+                &subject,
+                &predicate,
+                &claim.value,
+                &path,
+                now,
+                &embedding,
+                "fact",
+                "high",
+            )
+            .await
+            .expect("upsert claim");
+        store
+            .upsert_claim_node(&path, &front.project, &subject, &predicate, &claim)
+            .await
+            .expect("upsert claim node");
+
+        let body = search_response(store, r#"{"query":"x","claims":1}"#, &path).await;
+        let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(resp["hits"][0]["source_path"], path.as_str());
+        assert_eq!(resp["hits"][0]["claims"][0]["kind"], "fact", "{body}");
+        assert_eq!(resp["hits"][0]["claims_total"], 1);
 
         store.delete_document(&path).await.expect("cleanup");
     }
