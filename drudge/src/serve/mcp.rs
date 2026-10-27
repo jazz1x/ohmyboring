@@ -1700,6 +1700,8 @@ const SESSION_DUP_TITLE_MIN: (usize, usize) = (1, 5);
 const SESSION_DUP_BODY_MIN: (usize, usize) = (1, 5);
 const SESSION_DUP_SEMANTIC_MIN: (usize, usize) = (9, 20);
 const DUPLICATE_REPLACE_MIN_DELTA: usize = 8;
+/// Incoming claims carried on `dedup_decision` — same cap as the distiller (C-DEDUPKEEP1).
+const DEDUP_EVENT_MAX_CLAIMS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DuplicateReason {
@@ -1914,6 +1916,12 @@ fn dedup_decision_event(
         "replace_min_delta": DUPLICATE_REPLACE_MIN_DELTA,
         "omb_session_id": note.front.omb_session_id.as_deref(),
         "existing_source_path": existing.map(|m| m.source_path.as_str()),
+        "incoming_title": note.front.title.as_deref(),
+        "incoming_claims": note.front.claims.iter().take(DEDUP_EVENT_MAX_CLAIMS)
+            .map(|c| json!({"subject": c.subject, "predicate": c.predicate, "value": c.value}))
+            .collect::<Vec<_>>(),
+        "incoming_claim_count": note.front.claims.len(),
+        "claims_truncated": note.front.claims.len() > DEDUP_EVENT_MAX_CLAIMS,
     })
 }
 
@@ -3700,6 +3708,20 @@ mod tests {
 
         assert_eq!(event["status"], "skipped");
         assert_eq!(event["reason"], "probable_session");
+        assert_eq!(
+            event["incoming_title"],
+            note.front.title.as_deref().unwrap()
+        );
+        assert_eq!(
+            event["incoming_claims"],
+            json!([{
+                "subject": note.front.claims[0].subject,
+                "predicate": note.front.claims[0].predicate,
+                "value": note.front.claims[0].value,
+            }])
+        );
+        assert_eq!(event["incoming_claim_count"], 1);
+        assert_eq!(event["claims_truncated"], false);
         assert!(event["incoming_score"].is_u64());
         assert!(event["existing_score"].is_u64());
         assert!(event["score_delta"].is_i64());

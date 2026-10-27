@@ -82,6 +82,8 @@ RELATES_TO_DEFERRED = (
 #: 엔진 사건 이름·모양 — mcp.rs:1878 dedup_decision_event, owner.rs:94-115
 #: record_refusal 과 같은 이름과 칸으로 기록한다(기록은 문의 사건 sink).
 DEDUP_DECISION_EVENT = "dedup_decision"
+#: 들어온 노트 claims 를 사건에 싣는 상한 — 증류기 상한과 같다 (C-DEDUPKEEP1 0단계 재료).
+DEDUP_EVENT_MAX_CLAIMS = 8
 OWNER_REFUSED_EVENT = "owner_supersede_refused"
 _DEDUP_COMPONENT = "drudge.mcp.remember"
 _OWNER_COMPONENT = "drudge.owner"
@@ -849,6 +851,13 @@ def _dedup_decision_payload(
         "replace_min_delta": _dedup.DUPLICATE_REPLACE_MIN_DELTA,
         "omb_session_id": note.front.omb_session_id,
         "existing_source_path": match_.source_path if match_ is not None else None,
+        "incoming_title": note.front.title,
+        "incoming_claims": [
+            {"subject": c.subject, "predicate": c.predicate, "value": c.value}
+            for c in note.front.claims[:DEDUP_EVENT_MAX_CLAIMS]
+        ],
+        "incoming_claim_count": len(note.front.claims),
+        "claims_truncated": len(note.front.claims) > DEDUP_EVENT_MAX_CLAIMS,
     }
 
 

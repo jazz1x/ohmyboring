@@ -620,6 +620,23 @@ class WriterCase(unittest.TestCase):
         self.assertEqual(dedup[0]["existing_source_path"], existing)
         self.assertEqual(self.events.by_event("remember_written")[0]["decision"], "skipped")
 
+    def test_skip_event_carries_incoming_title_and_claims_capped(self):
+        self.seed_note("wiki-0001", "같은 제목", "옛 본문")
+        claims = [
+            {"subject": f"slot {n}", "predicate": "state", "value": f"v{n}", "kind": "fact"}
+            for n in range(10)
+        ]
+        self.write({"title": "같은 제목", "body": "새로운 본문이다. 충분히 다르다.", "claims": claims})
+        dedup = self.events.by_event("dedup_decision")[0]
+        self.assertEqual(dedup["status"], "skipped")
+        self.assertEqual(dedup["incoming_title"], "같은 제목")
+        self.assertEqual(
+            dedup["incoming_claims"],
+            [{"subject": f"slot {n}", "predicate": "state", "value": f"v{n}"} for n in range(8)],
+        )
+        self.assertEqual(dedup["incoming_claim_count"], 10)
+        self.assertTrue(dedup["claims_truncated"])
+
     # ── 대체(중복 문 판정) ────────────────────────────────────────────────────
 
     def test_dedup_supersede_links_edge_and_partial_seal_only(self):
