@@ -305,19 +305,13 @@ fn creation_order(id: &str) -> i64 {
 /// and the first `size` pool members go on to ordering with exact-title notes carrying
 /// `max(pool score) + 1`. Pure.
 #[must_use]
-pub fn select_for_order(hits: Vec<WikiHit>, k: usize) -> Vec<WikiHit> {
-    let size = k.min(hits.len());
-    let Some(threshold) = size.checked_sub(1).map(|i| hits[i].score) else {
-        return Vec::new();
-    };
-    let pool: Vec<WikiHit> = hits
-        .into_iter()
-        .filter(|h| h.exact_title || h.score >= threshold)
-        .collect();
+pub fn select_for_order(hits: &[WikiHit], k: usize) -> Vec<WikiHit> {
+    let pool = pool(hits, k);
     let lifted = pool.iter().map(|h| h.score).fold(f32::MIN, f32::max) + 1.0;
     pool.into_iter()
-        .take(size)
-        .map(|mut h| {
+        .take(k.min(hits.len()))
+        .map(|h| {
+            let mut h = h.clone();
             if h.exact_title {
                 h.score = lifted;
             }
@@ -329,12 +323,20 @@ pub fn select_for_order(hits: Vec<WikiHit>, k: usize) -> Vec<WikiHit> {
 /// Python `_Selected.titles`: (path -> title) of the whole pool `select_for_order` cuts from.
 #[must_use]
 pub fn pool_titles(hits: &[WikiHit], k: usize) -> HashMap<String, String> {
+    pool(hits, k)
+        .into_iter()
+        .map(|h| (h.source_path.clone(), h.title.clone()))
+        .collect()
+}
+
+/// Python `pool_hits`: every exact-title note plus every note scoring at least the
+/// `min(k, len)`-th hit (ties at the cut stay).
+fn pool(hits: &[WikiHit], k: usize) -> Vec<&WikiHit> {
     let Some(threshold) = k.min(hits.len()).checked_sub(1).map(|i| hits[i].score) else {
-        return HashMap::new();
+        return Vec::new();
     };
     hits.iter()
         .filter(|h| h.exact_title || h.score >= threshold)
-        .map(|h| (h.source_path.clone(), h.title.clone()))
         .collect()
 }
 
@@ -452,7 +454,7 @@ mod tests {
     fn picked(dir: &std::path::Path, k: usize) -> Vec<(String, f32)> {
         let mut idx = WikiIndex::default();
         idx.refresh(dir).unwrap();
-        select_for_order(idx.search_ranked("zebra", None, None), k)
+        select_for_order(&idx.search_ranked("zebra", None, None), k)
             .into_iter()
             .map(|h| (h.id, h.score))
             .collect()
@@ -517,7 +519,7 @@ mod tests {
         got.sort_unstable();
         // threshold = 2nd hit (w2, 3.0): w3 is in the pool but outside select_for_order's take(2).
         assert_eq!(got, vec!["w1.md", "w2.md", "w3.md"]);
-        assert_eq!(select_for_order(ranked[1..].to_vec(), 2).len(), 2);
+        assert_eq!(select_for_order(&ranked[1..], 2).len(), 2);
     }
 
     fn vector_lines(paths: &[&str]) -> Vec<(String, String)> {

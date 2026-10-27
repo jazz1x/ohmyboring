@@ -800,7 +800,7 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         .wiki_recall_ranked(query, project, since_hours)
         .map_err(|e| (-32603_i32, format!("wiki recall: {e:#}")))?;
     let titles = crate::wiki_recall::pool_titles(&ranked, max_results);
-    let wiki_hits = crate::wiki_recall::select_for_order(ranked, max_results);
+    let wiki_hits = crate::wiki_recall::select_for_order(&ranked, max_results);
     let (wiki_hits, facts) = match s.store.as_ref() {
         Some(store) if !wiki_hits.is_empty() => crate::retrieve::order_wiki_hits(store, wiki_hits)
             .await
