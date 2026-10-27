@@ -1666,7 +1666,7 @@ async fn remember_on(
     // went through the gate would be skipped as "too similar" and the wrong fact would
     // stay live. Only unmarked notes go through the duplicate gate.
     let found = if needs_dedup(&supersedes) {
-        check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir)
+        check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir, &s.note_index)
             .await
             .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
     } else {
@@ -2054,42 +2054,17 @@ async fn check_duplicate(
     llm: &crate::llm::Llm,
     note: &RememberNote,
     wiki_dir: &std::path::Path,
+    index: &super::note_index::NoteIndex,
 ) -> anyhow::Result<Option<DuplicateMatch>> {
-    let target_session = note.front.omb_session_id.as_deref();
-    let target_title = note
-        .front
-        .title
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-
-    let mut matches = Vec::new();
-    for entry in std::fs::read_dir(wiki_dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let (yaml, existing_body) = crate::vault::split_frontmatter(&content).unwrap_or(("", ""));
-        let fm: crate::frontmatter::FrontMatter = serde_yaml::from_str(yaml).unwrap_or_default();
-        let same_session = target_session.is_some()
-            && fm.omb_session_id.as_deref() == target_session
-            && !continues_after(note.front.omb_session_since, fm.omb_session_since);
-        let same_title = !target_title.is_empty()
-            && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title;
-        let reason = match (
-            same_session,
-            probable_session_duplicate(note, &fm, existing_body),
-            same_title,
-        ) {
-            (true, _, _) => Some(DuplicateReason::SameSession),
-            (false, true, _) => Some(DuplicateReason::ProbableSession),
-            (false, false, true) => Some(DuplicateReason::ExactTitle),
-            (false, false, false) => None,
-        };
-        matches.extend(reason.map(|r| duplicate_match(&path, r, fm, existing_body)));
-    }
+    let indexed = index.with_synced(wiki_dir, |notes| {
+        notes
+            .filter_map(|(path, n)| file_duplicate(note, path, &n.front, &n.body))
+            .collect::<Vec<_>>()
+    })?;
+    let matches = match indexed {
+        Some(found) => found,
+        None => scan_duplicates(note, wiki_dir)?,
+    };
     if let Some(found) = pick_duplicate(matches) {
         return Ok(Some(found));
     }
@@ -2110,6 +2085,57 @@ async fn check_duplicate(
     }
 
     Ok(None)
+}
+
+/// The old way, kept for the moments the index is not ready: read and parse every note.
+fn scan_duplicates(
+    note: &RememberNote,
+    wiki_dir: &std::path::Path,
+) -> anyhow::Result<Vec<DuplicateMatch>> {
+    let mut matches = Vec::new();
+    for entry in std::fs::read_dir(wiki_dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let parsed = super::note_index::parse_note(&content);
+        matches.extend(file_duplicate(note, &path, &parsed.front, &parsed.body));
+    }
+    Ok(matches)
+}
+
+/// Does one existing note duplicate the incoming one, and why.
+fn file_duplicate(
+    note: &RememberNote,
+    path: &std::path::Path,
+    fm: &FrontMatter,
+    existing_body: &str,
+) -> Option<DuplicateMatch> {
+    let target_session = note.front.omb_session_id.as_deref();
+    let target_title = note
+        .front
+        .title
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let same_session = target_session.is_some()
+        && fm.omb_session_id.as_deref() == target_session
+        && !continues_after(note.front.omb_session_since, fm.omb_session_since);
+    let same_title = !target_title.is_empty()
+        && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title;
+    let reason = match (
+        same_session,
+        probable_session_duplicate(note, fm, existing_body),
+        same_title,
+    ) {
+        (true, _, _) => Some(DuplicateReason::SameSession),
+        (false, true, _) => Some(DuplicateReason::ProbableSession),
+        (false, false, true) => Some(DuplicateReason::ExactTitle),
+        (false, false, false) => None,
+    };
+    reason.map(|r| duplicate_match(path, r, fm.clone(), existing_body))
 }
 
 /// Does the incoming note hold conversation past what the existing note of the same session
@@ -2958,6 +2984,8 @@ mod tests {
             cfg: std::sync::Arc::new(cfg),
             cfg_path: std::sync::Arc::new(None),
             sync_lock: std::sync::Arc::default(),
+            remember_gate: std::sync::Arc::default(),
+            note_index: std::sync::Arc::default(),
             wiki_index: std::sync::Arc::default(),
             last_compact: std::sync::Arc::default(),
             compact_failure: std::sync::Arc::default(),
@@ -3576,10 +3604,291 @@ mod tests {
             body: "배포 본문".to_owned(),
         };
         let llm = crate::llm::Llm::from_config(&cfg);
-        super::check_duplicate(None, &llm, &note, &wiki)
+        super::check_duplicate(
+            None,
+            &llm,
+            &note,
+            &wiki,
+            &crate::serve::note_index::NoteIndex::default(),
+        )
+        .await
+        .unwrap()
+        .map(|m| m.reason)
+    }
+
+    fn note_text(
+        id: &str,
+        title: &str,
+        session: Option<&str>,
+        since: Option<&str>,
+        body: &str,
+    ) -> String {
+        let session_line = session
+            .map(|v| format!("omb_session_id: {v}\n"))
+            .unwrap_or_default();
+        let since_line = since
+            .map(|v| format!("omb_session_since: '{v}'\n"))
+            .unwrap_or_default();
+        format!(
+            "---\nid: {id}\ntitle: {title}\nkind: note\norigin: personal\nproject: ''\ndate: '2026-10-01'\ntags: []\ntools: []\nconcepts: []\nclaims: []\nrelates_to: []\nsources: []\n{session_line}{since_line}author: unknown\n---\n{body}\n"
+        )
+    }
+
+    fn incoming(
+        title: &str,
+        session: Option<&str>,
+        since: Option<u64>,
+        body: &str,
+    ) -> super::RememberNote {
+        super::RememberNote {
+            front: FrontMatter {
+                title: Some(title.to_owned()),
+                kind: "note".to_owned(),
+                origin: "personal".to_owned(),
+                omb_session_id: session.map(str::to_owned),
+                omb_session_since: since,
+                ..FrontMatter::default()
+            },
+            body: body.to_owned(),
+        }
+    }
+
+    /// What the decision is, as a comparable value: which note, why.
+    fn verdict(found: Option<DuplicateMatch>) -> Option<(String, DuplicateReason)> {
+        found.map(|m| (m.source_path, m.reason))
+    }
+
+    async fn decide_both_ways(
+        note: &super::RememberNote,
+        wiki: &std::path::Path,
+        index: &crate::serve::note_index::NoteIndex,
+    ) -> (
+        Option<(String, DuplicateReason)>,
+        Option<(String, DuplicateReason)>,
+    ) {
+        let llm = crate::llm::Llm::from_config(&BoringConfig::default());
+        let indexed = super::check_duplicate(None, &llm, note, wiki, index)
             .await
-            .unwrap()
-            .map(|m| m.reason)
+            .unwrap();
+        let scanned = super::check_duplicate(
+            None,
+            &llm,
+            note,
+            wiki,
+            &crate::serve::note_index::NoteIndex::default(),
+        )
+        .await
+        .unwrap();
+        (verdict(indexed), verdict(scanned))
+    }
+
+    fn fixture_notes() -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "wiki-0001",
+                note_text(
+                    "wiki-0001",
+                    "배포 점검",
+                    Some("sess-a"),
+                    None,
+                    "배포 점검 본문",
+                ),
+            ),
+            (
+                "wiki-0002",
+                note_text(
+                    "wiki-0002",
+                    "다른 제목",
+                    Some("sess-b"),
+                    Some("100"),
+                    "세션 b 본문 하나 둘 셋",
+                ),
+            ),
+            (
+                "wiki-0003",
+                note_text("wiki-0003", "Exact Title", None, None, "정확한 제목 본문"),
+            ),
+            (
+                "wiki-0004",
+                note_text("wiki-0004", "무관", None, None, "관계 없는 내용"),
+            ),
+        ]
+    }
+
+    fn incoming_cases() -> Vec<super::RememberNote> {
+        vec![
+            incoming("새 제목", Some("sess-a"), None, "다른 본문"),
+            incoming("배포 점검", Some("sess-x"), None, "배포 점검 본문"),
+            incoming("exact title", None, None, "전혀 다른"),
+            incoming("후속", Some("sess-b"), Some(200), "이어진 본문"),
+            incoming("후속", Some("sess-b"), Some(100), "같은 시점"),
+            incoming("아무와도 안 겹침", None, None, "유일한 본문"),
+        ]
+    }
+
+    /// The index never changes a decision: for same_session, probable_session, exact_title,
+    /// continued-session and no-match cases, a note changed on disk between two writes, and a
+    /// deleted note, the indexed answer is the full scan's answer.
+    #[tokio::test]
+    async fn indexed_duplicate_decision_equals_the_full_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        for (id, text) in fixture_notes() {
+            std::fs::write(wiki.join(format!("{id}.md")), text).unwrap();
+        }
+        let index = crate::serve::note_index::NoteIndex::default();
+        index.prefill(&wiki).unwrap();
+        let mut seen = 0;
+        for round in 0..3 {
+            if round == 1 {
+                // changed between two writes: same title, now a longer body and new session
+                std::fs::write(
+                    wiki.join("wiki-0004.md"),
+                    note_text(
+                        "wiki-0004",
+                        "배포 점검 2",
+                        Some("sess-x"),
+                        None,
+                        "바뀐 뒤 더 긴 본문입니다",
+                    ),
+                )
+                .unwrap();
+            }
+            if round == 2 {
+                std::fs::remove_file(wiki.join("wiki-0001.md")).unwrap();
+            }
+            for case in incoming_cases() {
+                let (indexed, scanned) = decide_both_ways(&case, &wiki, &index).await;
+                assert_eq!(
+                    indexed, scanned,
+                    "round {round}, incoming {:?}",
+                    case.front.title
+                );
+                seen += usize::from(scanned.is_some());
+            }
+        }
+        assert!(seen >= 6, "fixture must hit duplicates, saw {seen}");
+    }
+
+    /// The point of the index: a write re-reads only notes that changed or are new.
+    #[tokio::test]
+    async fn indexed_path_reads_only_changed_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        for (id, text) in fixture_notes() {
+            std::fs::write(wiki.join(format!("{id}.md")), text).unwrap();
+        }
+        let index = crate::serve::note_index::NoteIndex::default();
+        index.prefill(&wiki).unwrap();
+        assert_eq!(index.parse_count(), 4);
+        let llm = crate::llm::Llm::from_config(&BoringConfig::default());
+        let case = incoming("없음", None, None, "없음");
+        super::check_duplicate(None, &llm, &case, &wiki, &index)
+            .await
+            .unwrap();
+        assert_eq!(index.parse_count(), 4, "unchanged vault: nothing re-read");
+        std::fs::write(
+            wiki.join("wiki-0004.md"),
+            note_text("wiki-0004", "무관", None, None, "바뀐 본문이 더 깁니다"),
+        )
+        .unwrap();
+        std::fs::write(
+            wiki.join("wiki-0005.md"),
+            note_text("wiki-0005", "새", None, None, "새 노트"),
+        )
+        .unwrap();
+        super::check_duplicate(None, &llm, &case, &wiki, &index)
+            .await
+            .unwrap();
+        assert_eq!(
+            index.parse_count(),
+            6,
+            "one changed + one new note re-read, no more"
+        );
+    }
+
+    /// While the index is still filling, a write takes the old disk read and decides the same.
+    #[tokio::test]
+    async fn requests_during_prefill_fall_back_to_the_disk_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        for (id, text) in fixture_notes() {
+            std::fs::write(wiki.join(format!("{id}.md")), text).unwrap();
+        }
+        let index = crate::serve::note_index::NoteIndex::default();
+        assert!(!index.is_ready());
+        for case in incoming_cases() {
+            let (during, scanned) = decide_both_ways(&case, &wiki, &index).await;
+            assert_eq!(during, scanned, "{:?}", case.front.title);
+        }
+        assert_eq!(
+            index.parse_count(),
+            0,
+            "not-ready index reads nothing itself"
+        );
+        assert!(index.with_synced(&wiki, |_| ()).unwrap().is_none());
+        index.prefill(&wiki).unwrap();
+        assert!(index.is_ready());
+        assert!(index.with_synced(&wiki, |_| ()).unwrap().is_some());
+    }
+
+    /// Overlapping remembers while the index refreshes: the same note sent twice at once lands
+    /// once (one of the two is the duplicate), and the distinct notes beside it all land.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn overlapping_remembers_keep_the_full_scan_decision() {
+        const ROUNDS: usize = 50;
+        let mut pair_caught = 0;
+        for round in 0..ROUNDS {
+            let tmp = tempfile::tempdir().unwrap();
+            let s = vault_state(tmp.path());
+            for (id, text) in fixture_notes() {
+                std::fs::write(tmp.path().join("wiki").join(format!("{id}.md")), text).unwrap();
+            }
+            s.note_index.prefill(&tmp.path().join("wiki")).unwrap();
+            let send = |title: &'static str| {
+                let s = s.clone();
+                tokio::spawn(async move {
+                    remember_note(
+                        &s,
+                        Caller::Unverified,
+                        Some(
+                            &json!({"title": title, "body": format!("{title} 본문"), "repo": "p"}),
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                })
+            };
+            let tasks = [
+                send("겹침"),
+                send("겹침"),
+                send("따로 하나"),
+                send("따로 둘"),
+            ];
+            let mut got = Vec::new();
+            for t in tasks {
+                got.push(t.await.unwrap());
+            }
+            let skipped_pair = got[..2].iter().filter(|r| r.duplicate.is_some()).count();
+            assert_eq!(
+                skipped_pair, 1,
+                "round {round}: exactly one of the pair is the duplicate"
+            );
+            assert!(
+                got[2..].iter().all(|r| r.duplicate.is_none()),
+                "round {round}"
+            );
+            assert_eq!(
+                wiki_notes(tmp.path()),
+                fixture_notes().len() + 3,
+                "round {round}"
+            );
+            pair_caught += skipped_pair;
+        }
+        assert_eq!(pair_caught, ROUNDS);
     }
 
     // Python: test_dedup.py:304 (continuation_of_same_session_is_not_its_duplicate) and

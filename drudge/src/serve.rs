@@ -22,6 +22,7 @@ use crate::wiki_recall;
 
 mod http;
 mod mcp;
+mod note_index;
 mod owner;
 mod scheduler;
 mod search_route;
@@ -61,6 +62,10 @@ pub struct AppState {
     pub(crate) cfg: Arc<config::BoringConfig>,
     pub(crate) cfg_path: Arc<Option<PathBuf>>,
     pub(crate) sync_lock: Arc<Mutex<()>>,
+    /// Orders remembers so a duplicate check and the note write it guards are one step.
+    #[allow(dead_code)]
+    pub(crate) remember_gate: Arc<Mutex<()>>,
+    pub(crate) note_index: Arc<note_index::NoteIndex>,
     pub(crate) wiki_index: Arc<std::sync::Mutex<wiki_recall::WikiIndex>>,
     pub(crate) last_compact: Arc<Mutex<Option<std::time::Instant>>>,
     pub(crate) compact_failure: Arc<Mutex<Option<CompactFailure>>>,
@@ -215,6 +220,8 @@ mod tests {
             cfg: std::sync::Arc::new(cfg),
             cfg_path: std::sync::Arc::new(None),
             sync_lock: std::sync::Arc::default(),
+            remember_gate: std::sync::Arc::default(),
+            note_index: std::sync::Arc::default(),
             wiki_index: std::sync::Arc::default(),
             last_compact: std::sync::Arc::default(),
             compact_failure: std::sync::Arc::default(),
@@ -1807,6 +1814,8 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         cfg: Arc::new(cfg),
         cfg_path: Arc::new(cfg_path),
         sync_lock: Arc::new(Mutex::new(())),
+        remember_gate: Arc::new(Mutex::new(())),
+        note_index: Arc::default(),
         last_compact: Arc::clone(&last_compact),
         compact_failure: Arc::clone(&compact_failure),
         wiki_index: Arc::new(std::sync::Mutex::new(wiki_recall::WikiIndex::default())),
