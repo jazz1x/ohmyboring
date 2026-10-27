@@ -1595,9 +1595,8 @@ async fn store_new_note(
         .map(|old| format!(" (supersedes wiki/{old}.md)"))
         .unwrap_or_default();
     let label = format!("wiki/{wiki_id}.md{dup_suffix}");
-    let message = finish_remembered_note(s, &path, &label, &front).await?;
-    let supersedes_report =
-        write_supersedes_edges(s, &front.source_path, supersedes, edge_judge).await?;
+    let (message, supersedes_report) =
+        finish_remembered_note(s, &path, &label, &front, supersedes, edge_judge).await?;
     let message = format!(
         "{}{}",
         message,
@@ -1636,26 +1635,25 @@ async fn existing_wiki_ids(s: &AppState) -> Result<HashSet<u64>, (i32, String)> 
     Ok(db_ids)
 }
 
-/// After the note is on disk and ingested, one `supersedes` edge per corrected path. Vector off
-/// (no store): nothing can be written — the whole list reports as `unknown` with the paths
-/// named, and that is not a failure; the wiki note itself is already recallable.
-async fn write_supersedes_edges(
-    s: &AppState,
+/// Vector off (no store): no `supersedes` edge can be written — the whole list reports as
+/// `unknown` with the paths named, and that is not a failure; the wiki note itself is already
+/// recallable.
+fn supersedes_unwritten(supersedes: &[String]) -> SupersedesReport {
+    SupersedesReport {
+        supersedes: 0,
+        unknown: supersedes.len(),
+        unknown_paths: supersedes.to_vec(),
+        retired: Vec::new(),
+    }
+}
+
+/// The `(new, old)` pairs one `supersedes` list names, each old path folded to the spelling the
+/// `document` table keys.
+async fn supersedes_pairs(
+    store: &Store,
     new_path: &str,
     supersedes: &[String],
-    judge: Option<&str>,
-) -> Result<SupersedesReport, (i32, String)> {
-    if supersedes.is_empty() {
-        return Ok(SupersedesReport::default());
-    }
-    let Some(store) = s.store.as_ref() else {
-        return Ok(SupersedesReport {
-            supersedes: 0,
-            unknown: supersedes.len(),
-            unknown_paths: supersedes.to_vec(),
-            retired: Vec::new(),
-        });
-    };
+) -> Result<Vec<[String; 2]>, (i32, String)> {
     let mut pairs: Vec<[String; 2]> = Vec::with_capacity(supersedes.len());
     for old in supersedes {
         let resolved = resolve_document_path(store, old)
@@ -1663,10 +1661,7 @@ async fn write_supersedes_edges(
             .map_err(|e| (-32603_i32, format!("supersedes lookup: {e:#}")))?;
         pairs.push([new_path.to_owned(), resolved]);
     }
-    store
-        .remember_supersedes_in_tx(&pairs, judge)
-        .await
-        .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))
+    Ok(pairs)
 }
 
 /// The `remember` text says when a named correction did not link — a bare "remembered" line
@@ -1701,22 +1696,54 @@ fn supersedes_suffix(supersedes: &[String], report: &SupersedesReport) -> String
     format!("{head} · retired claims: {closed}")
 }
 
+/// Ingest the note just written and link the notes it corrects — one transaction for the whole
+/// request, so a failure anywhere leaves no document, chunk, claim, node or edge row (the note
+/// file stays on disk and the next sync ingests it, as after a failed Python `run_write`).
+/// `relates_to` is projected after the commit: it reads committed rows and rewrites only the file.
 async fn finish_remembered_note(
     s: &AppState,
     path: &std::path::Path,
     label: &str,
     front: &FrontMatter,
-) -> Result<String, (i32, String)> {
+    supersedes: &[String],
+    edge_judge: Option<&str>,
+) -> Result<(String, SupersedesReport), (i32, String)> {
     let Some(store) = s.store.as_ref() else {
-        return Ok(format!(
-            "remembered → {label} (vector off — wiki is first-class memory; recallable now)"
+        return Ok((
+            format!(
+                "remembered → {label} (vector off — wiki is first-class memory; recallable now)"
+            ),
+            if supersedes.is_empty() {
+                SupersedesReport::default()
+            } else {
+                supersedes_unwritten(supersedes)
+            },
         ));
     };
 
+    let pairs = supersedes_pairs(store, &front.source_path, supersedes).await?;
     let _guard = s.sync_lock.lock().await;
-    let (_, stats) = ingest::ingest_file(store, &s.llm, &s.cfg, &front.source_path)
+    let mut conn = store
+        .conn()
         .await
         .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| (-32603_i32, format!("begin remember transaction: {e:#}")))?;
+    let (_, stats) = ingest::ingest_file_in_tx(store, &tx, &s.llm, &s.cfg, &front.source_path)
+        .await
+        .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
+    let report = if pairs.is_empty() {
+        SupersedesReport::default()
+    } else {
+        Store::remember_supersedes(&tx, &pairs, edge_judge)
+            .await
+            .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))?
+    };
+    tx.commit()
+        .await
+        .map_err(|e| (-32603_i32, format!("commit remember transaction: {e:#}")))?;
     let relates = match vault::project_note(store, path, 6).await {
         Ok(_) => "",
         Err(e) => {
@@ -1724,10 +1751,11 @@ async fn finish_remembered_note(
             " · relates_to deferred to next sync"
         }
     };
-    Ok(format!(
+    let message = format!(
         "remembered → {label} · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
         stats.chunks, stats.tools, stats.concepts, stats.claims
-    ))
+    );
+    Ok((message, report))
 }
 
 fn apply_pii_gate(

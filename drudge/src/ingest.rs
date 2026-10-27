@@ -6,8 +6,9 @@
 //!     migration (`prune_skipped` event).
 //!   - **Graph is deterministic** (kernel A): semantic nodes/edges (tool·concept·claim) come from the
 //!     note's frontmatter — agent-curated — NOT from an LLM extraction pass. drudge only embeds (bge-m3)
-//!     and links. `ingest_file` is the SSOT per-file pipeline shared by `run` (walk) and `remember` (one file).
-use anyhow::Result;
+//!     and links. `ingest_steps` is the SSOT per-file pipeline shared by `run` (walk) and `remember` (one file).
+use anyhow::{Context, Result};
+use deadpool_postgres::Transaction;
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -114,10 +115,13 @@ impl Embed for Llm {
 // ─────────────────────────────────────────────────────────────
 
 /// Strategy for extracting the semantic graph (tools/concepts/claims) from a parsed note.
+/// Writes go through `tx`, the file's transaction — `store` only lends its dimension guard.
 pub trait GraphExtractor: Send + Sync + Default {
+    #[allow(clippy::too_many_arguments)]
     fn extract<'a, E: Embed>(
         &'a self,
         store: &'a Store,
+        tx: &'a Transaction<'_>,
         llm: &'a E,
         cfg: &'a config::BoringConfig,
         front: &'a FrontMatter,
@@ -161,6 +165,7 @@ impl GraphExtractor for FrontmatterGraphExtractor {
     async fn extract<E: Embed>(
         &self,
         store: &Store,
+        tx: &Transaction<'_>,
         llm: &E,
         cfg: &config::BoringConfig,
         front: &FrontMatter,
@@ -168,7 +173,7 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         stats: &mut Stats,
     ) -> Result<()> {
         let path = &front.source_path;
-        store.clear_semantic_edges(path).await?;
+        Store::clear_semantic_edges_on(tx, path).await?;
 
         // tool nodes + uses edges (Han drift filter + slug dedup + cap)
         let mut seen_tool = HashSet::new();
@@ -181,8 +186,8 @@ impl GraphExtractor for FrontmatterGraphExtractor {
             if slug.is_empty() || !seen_tool.insert(slug.clone()) {
                 continue;
             }
-            store.upsert_tool(&slug, t).await?;
-            store.relate_doc_tool(path, &slug).await?;
+            Store::upsert_tool_on(tx, &slug, t).await?;
+            Store::relate_doc_tool_on(tx, path, &slug).await?;
             stats.tools += 1;
             stats.edges += 1;
         }
@@ -198,8 +203,8 @@ impl GraphExtractor for FrontmatterGraphExtractor {
             if slug.is_empty() || !seen_concept.insert(slug.clone()) {
                 continue;
             }
-            store.upsert_concept(&slug, c).await?;
-            store.relate_doc_concept(path, &slug).await?;
+            Store::upsert_concept_on(tx, &slug, c).await?;
+            Store::relate_doc_concept_on(tx, path, &slug).await?;
             stats.concepts += 1;
             stats.edges += 1;
         }
@@ -207,7 +212,7 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         // temporal-fact claims — (subject,predicate)→value, a new value supersedes the old.
         // valid_from = document mtime (chronological ordering). value embedding via bge-m3 (no generation).
         if !front.claims.is_empty() {
-            let valid_from = store.doc_updated_at(path).await?;
+            let valid_from = Store::doc_updated_at_on(tx, path).await?;
             let note_anchors = if front.project.is_empty() {
                 Vec::new()
             } else {
@@ -226,17 +231,17 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                 // row. Leaving the existing row alone also keeps its `valid_from`, which is
                 // the first time this value was true rather than the last time the note was
                 // touched — the more honest of the two.
-                if store
-                    .claim_is_unchanged(
-                        &subject,
-                        &predicate,
-                        value,
-                        path,
-                        cl.kind(),
-                        cl.confidence(),
-                        anchor_db.as_deref(),
-                    )
-                    .await?
+                if Store::claim_is_unchanged_on(
+                    tx,
+                    &subject,
+                    &predicate,
+                    value,
+                    path,
+                    cl.kind(),
+                    cl.confidence(),
+                    anchor_db.as_deref(),
+                )
+                .await?
                 {
                     stats.claims_unchanged += 1;
                 } else {
@@ -245,7 +250,8 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                         crate::anchor_hash::hash_for_anchor(a, &cfg.code_index.sources)
                     });
                     store
-                        .upsert_claim_with_anchor(
+                        .upsert_claim_with_anchor_on(
+                            tx,
                             &subject,
                             &predicate,
                             value,
@@ -261,12 +267,10 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                         .await?;
                     stats.claims += 1;
                 }
-                store
-                    .mirror_claim_said_by(&subject, &predicate, path, cl.said_by)
-                    .await?;
-                stats.edges += store
-                    .upsert_claim_node(path, &front.project, &subject, &predicate, cl)
-                    .await?;
+                Store::mirror_claim_said_by_on(tx, &subject, &predicate, path, cl.said_by).await?;
+                stats.edges +=
+                    Store::upsert_claim_node_on(tx, path, &front.project, &subject, &predicate, cl)
+                        .await?;
             }
         }
         Ok(())
@@ -289,15 +293,18 @@ fn claim_key(cl: &frontmatter::Claim) -> Option<(String, String)> {
 /// Heal for an unchanged note: write only the claim nodes/edges that are missing (#360).
 /// Insert-only (`ON CONFLICT DO NOTHING`) — existing edges are never deleted, so their
 /// `first_seen_at` survives; no embedding, no claim-row write.
-async fn heal_claim_edges(store: &Store, front: &FrontMatter, stats: &mut Stats) -> Result<()> {
+async fn heal_claim_edges(
+    tx: &Transaction<'_>,
+    front: &FrontMatter,
+    stats: &mut Stats,
+) -> Result<()> {
     let path = &front.source_path;
     for cl in &front.claims {
         let Some((subject, predicate)) = claim_key(cl) else {
             continue;
         };
-        stats.edges += store
-            .upsert_claim_node(path, &front.project, &subject, &predicate, cl)
-            .await?;
+        stats.edges +=
+            Store::upsert_claim_node_on(tx, path, &front.project, &subject, &predicate, cl).await?;
     }
     Ok(())
 }
@@ -362,7 +369,7 @@ impl Stats {
     }
 }
 
-/// Per-file ingest verdict — what `ingest_file` did with one note.
+/// Per-file ingest verdict — what `ingest_steps` did with one note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileOutcome {
     New,
@@ -497,23 +504,11 @@ fn is_target(path: &Path, exclude: &[String]) -> bool {
     ext_ok && !exclude.iter().any(|s| pstr.contains(s))
 }
 
-/// Ingest one note file into the vector store + deterministic graph. The SSOT per-file pipeline.
-/// Reads `path` from disk, parses frontmatter, chunks, embeds, upserts, and rebuilds the
-/// semantic graph from the frontmatter. Returns the verdict with the counts this one file
-/// contributed; the caller folds them with [`Stats::absorb`].
-///
-/// Uses the default chunker and frontmatter graph extractor. For custom strategies see
-/// [`ingest_file_with`].
-pub async fn ingest_file(
-    store: &Store,
-    llm: &Llm,
-    cfg: &config::BoringConfig,
-    path: &str,
-) -> Result<(FileOutcome, Stats)> {
-    ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, Llm>(store, llm, cfg, path).await
-}
-
-/// Same as [`ingest_file`], but with injectable `Chunker`, `GraphExtractor`, and `Embed` strategies.
+/// Ingest one note file into the vector store + deterministic graph, in its own transaction.
+/// The SSOT per-file pipeline. Reads `path` from disk, parses frontmatter, chunks, embeds,
+/// upserts, and rebuilds the semantic graph from the frontmatter. Returns the verdict with the
+/// counts this one file contributed; the caller folds them with [`Stats::absorb`]. The chunker,
+/// graph extractor and embedder are injectable; `remember` uses [`ingest_file_in_tx`].
 pub async fn ingest_file_with<C: Chunker, G: GraphExtractor, E: Embed>(
     store: &Store,
     llm: &E,
@@ -527,6 +522,9 @@ pub async fn ingest_file_with<C: Chunker, G: GraphExtractor, E: Embed>(
 /// What [`ingest_file_with`] did, plus the counters this one file raised **even when it failed** —
 /// a note that errors after its tools/edges were written still contributed them to the run total.
 /// `stats` is owned here and handed out by value; the `&mut` below never leaves this module.
+///
+/// One transaction per file: a failure at any step rolls back every row the file wrote, its
+/// document row (and the sha it carries) included, so the next sync ingests it from scratch.
 async fn ingest_file_counted<C: Chunker, G: GraphExtractor, E: Embed>(
     store: &Store,
     llm: &E,
@@ -534,12 +532,47 @@ async fn ingest_file_counted<C: Chunker, G: GraphExtractor, E: Embed>(
     path: &str,
 ) -> (Stats, Result<FileOutcome>) {
     let mut stats = Stats::default();
-    let outcome = ingest_steps::<C, G, E>(store, llm, cfg, path, &mut stats).await;
+    let outcome = ingest_in_own_tx::<C, G, E>(store, llm, cfg, path, &mut stats).await;
     (stats, outcome)
+}
+
+async fn ingest_in_own_tx<C: Chunker, G: GraphExtractor, E: Embed>(
+    store: &Store,
+    llm: &E,
+    cfg: &config::BoringConfig,
+    path: &str,
+    stats: &mut Stats,
+) -> Result<FileOutcome> {
+    let mut conn = store.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .context("begin ingest transaction")?;
+    let outcome = ingest_steps::<C, G, E>(store, &tx, llm, cfg, path, stats).await?;
+    tx.commit().await.context("commit ingest transaction")?;
+    Ok(outcome)
+}
+
+/// The default pipeline on the caller's transaction: `remember` ingests the note and writes its
+/// `supersedes` edges in one request transaction, so the caller opens and commits it.
+pub async fn ingest_file_in_tx(
+    store: &Store,
+    tx: &Transaction<'_>,
+    llm: &Llm,
+    cfg: &config::BoringConfig,
+    path: &str,
+) -> Result<(FileOutcome, Stats)> {
+    let mut stats = Stats::default();
+    let outcome = ingest_steps::<DefaultChunker, FrontmatterGraphExtractor, Llm>(
+        store, tx, llm, cfg, path, &mut stats,
+    )
+    .await?;
+    Ok((outcome, stats))
 }
 
 async fn ingest_steps<C: Chunker, G: GraphExtractor, E: Embed>(
     store: &Store,
+    tx: &Transaction<'_>,
     llm: &E,
     cfg: &config::BoringConfig,
     path: &str,
@@ -567,12 +600,12 @@ async fn ingest_steps<C: Chunker, G: GraphExtractor, E: Embed>(
     let (front, body) = frontmatter::parse(&data, path, cfg)?;
 
     let sha = content_sha(&data);
-    let prev = store.get_doc_sha(path).await?;
+    let prev = Store::get_doc_sha_on(tx, path).await?;
     let verdict = judge_sha(prev.as_deref(), &data);
     if let ShaVerdict::LegacySame(new_sha) = &verdict {
         // Transition: the stored sha is the old whole-file one and the file did not change.
         // Move the sha column only — no re-embed, no edge rewrite.
-        store.set_doc_sha(path, new_sha).await?;
+        Store::set_doc_sha_on(tx, path, new_sha).await?;
         stats.unchanged += 1;
         return Ok(FileOutcome::Unchanged);
     }
@@ -580,7 +613,7 @@ async fn ingest_steps<C: Chunker, G: GraphExtractor, E: Embed>(
         // Content identical — no `updated_at` write and no `clear_semantic_edges` (it deletes and
         // reinserts every edge, resetting each edge's `first_seen_at` on every sync). Edges are
         // cleared only for changed notes (below); here only missing claim edges are inserted.
-        heal_claim_edges(store, &front, stats).await?;
+        heal_claim_edges(tx, &front, stats).await?;
         stats.unchanged += 1;
         return Ok(FileOutcome::Unchanged);
     }
@@ -610,24 +643,27 @@ async fn ingest_steps<C: Chunker, G: GraphExtractor, E: Embed>(
     // DO UPDATE, so overwriting them in place keeps the document with a full chunk set throughout —
     // a concurrent ask/recall never sees an empty/half-deleted window during a re-ingest. The stale
     // tail (when the new version has fewer chunks) is pruned only AFTER the new chunks are in place.
-    store.upsert_document(&front, &sha, mtime).await?;
+    Store::upsert_document_on(tx, &front, &sha, mtime).await?;
     for (i, (content, embedding)) in embedded.into_iter().enumerate() {
         store
-            .upsert_chunk(&Doc {
-                id: format!("{path}#{i}"),
-                content,
-                embedding,
-                front: front.clone(),
-                chunk_idx: i,
-            })
+            .upsert_chunk_on(
+                tx,
+                &Doc {
+                    id: format!("{path}#{i}"),
+                    content,
+                    embedding,
+                    front: front.clone(),
+                    chunk_idx: i,
+                },
+            )
             .await?;
     }
-    store.prune_chunks_from(path, pieces.len()).await?;
+    Store::prune_chunks_from_on(tx, path, pieces.len()).await?;
     stats.chunks += pieces.len();
 
     // deterministic semantic graph from frontmatter (no LLM extraction).
     G::default()
-        .extract(store, llm, cfg, &front, &body, stats)
+        .extract(store, tx, llm, cfg, &front, &body, stats)
         .await?;
 
     if prev.is_some() {

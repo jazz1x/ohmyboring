@@ -1058,7 +1058,7 @@ impl Store {
     }
 
     /// `get_doc_sha` on a caller-held connection or transaction handle.
-    async fn get_doc_sha_on(c: &impl GenericClient, path: &str) -> Result<Option<String>> {
+    pub async fn get_doc_sha_on(c: &impl GenericClient, path: &str) -> Result<Option<String>> {
         let rows = c
             .query("SELECT sha FROM document WHERE source_path = $1;", &[&path])
             .await?;
@@ -1076,9 +1076,12 @@ impl Store {
 
     /// Document mtime — the `valid_from` of a claim (temporal sort key). Falls back to now() if absent (graceful).
     pub async fn doc_updated_at(&self, path: &str) -> Result<SystemTime> {
-        let rows = self
-            .db()
-            .await?
+        Self::doc_updated_at_on(&self.db().await?, path).await
+    }
+
+    /// `doc_updated_at` on a caller-held connection or transaction handle.
+    pub async fn doc_updated_at_on(c: &impl GenericClient, path: &str) -> Result<SystemTime> {
+        let rows = c
             .query(
                 "SELECT updated_at FROM document WHERE source_path = $1;",
                 &[&path],
@@ -1091,14 +1094,17 @@ impl Store {
 
     /// Move only the stored change-detection sha (old whole-file sha → content hash); nothing else is touched.
     pub async fn set_doc_sha(&self, path: &str, sha: &str) -> Result<()> {
-        self.db()
-            .await?
-            .execute(
-                "UPDATE document SET sha = $2 WHERE source_path = $1;",
-                &[&path, &sha],
-            )
-            .await
-            .context("set document sha")?;
+        Self::set_doc_sha_on(&self.db().await?, path, sha).await
+    }
+
+    /// `set_doc_sha` on a caller-held connection or transaction handle.
+    pub async fn set_doc_sha_on(c: &impl GenericClient, path: &str, sha: &str) -> Result<()> {
+        c.execute(
+            "UPDATE document SET sha = $2 WHERE source_path = $1;",
+            &[&path, &sha],
+        )
+        .await
+        .context("set document sha")?;
         Ok(())
     }
 
@@ -1425,9 +1431,32 @@ impl Store {
         confidence: &str,
         anchor: Option<&str>,
     ) -> Result<bool> {
-        let rows = self
-            .db()
-            .await?
+        Self::claim_is_unchanged_on(
+            &self.db().await?,
+            subject,
+            predicate,
+            value,
+            source_path,
+            kind,
+            confidence,
+            anchor,
+        )
+        .await
+    }
+
+    /// `claim_is_unchanged` on a caller-held connection or transaction handle.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_is_unchanged_on(
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+        value: &str,
+        source_path: &str,
+        kind: &str,
+        confidence: &str,
+        anchor: Option<&str>,
+    ) -> Result<bool> {
+        let rows = c
             .query(
                 "SELECT 1 FROM claim
                  WHERE subject = $1 AND predicate = $2 AND source_path = $4
@@ -1500,9 +1529,42 @@ impl Store {
         anchor_hash: Option<&str>,
         anchor_symbol: Option<&str>,
     ) -> Result<()> {
+        self.upsert_claim_with_anchor_on(
+            &self.db().await?,
+            subject,
+            predicate,
+            value,
+            source_path,
+            valid_from,
+            embedding,
+            kind,
+            confidence,
+            anchor,
+            anchor_hash,
+            anchor_symbol,
+        )
+        .await
+    }
+
+    /// `upsert_claim_with_anchor` on a caller-held connection or transaction handle.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_claim_with_anchor_on(
+        &self,
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+        value: &str,
+        source_path: &str,
+        valid_from: SystemTime,
+        embedding: &[f32],
+        kind: &str,
+        confidence: &str,
+        anchor: Option<&str>,
+        anchor_hash: Option<&str>,
+        anchor_symbol: Option<&str>,
+    ) -> Result<()> {
         let vec = self.checked_vector(embedding)?; // dim guard (shared with upsert_chunk)
-        self.db().await?
-            .execute(
+        c.execute(
                 "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence, anchor, anchor_hash, anchor_symbol, era)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text, $10::text, $11::text,
                          CASE WHEN $9::text IS NULL THEN 'unanchored' ELSE 'anchored' END)
@@ -1541,9 +1603,7 @@ impl Store {
         // guard — (subject, predicate, valid_from) is the primary key, so a row equalling
         // the live race's max is a race row itself and cannot be retired.
         if kind == "fact" {
-            self.db()
-                .await?
-                .execute(
+            c.execute(
                     &format!(
                         "UPDATE claim c SET superseded_at = m.mx
                          FROM (SELECT c.subject, c.predicate, max(c.valid_from) AS mx FROM claim c
@@ -1561,51 +1621,45 @@ impl Store {
                 )
                 .await
                 .context("seal old claims")?;
-            self.db()
-                .await?
-                .execute(
-                    &format!(
-                        "UPDATE claim c SET superseded_at = NULL
+            c.execute(
+                &format!(
+                    "UPDATE claim c SET superseded_at = NULL
                          WHERE c.subject = $1 AND c.predicate = $2 AND c.superseded_at IS NOT NULL
                            AND c.valid_from = (SELECT max(c.valid_from) FROM claim c
                                                WHERE c.subject = $1 AND c.predicate = $2
                                                  AND NOT {RETIRED_NOTE});"
-                    ),
-                    &[&subject, &predicate],
-                )
-                .await
-                .context("unseal latest claim")?;
+                ),
+                &[&subject, &predicate],
+            )
+            .await
+            .context("unseal latest claim")?;
         } else {
-            self.db()
-                .await?
-                .execute(
-                    "UPDATE claim c SET superseded_at = m.mx
+            c.execute(
+                "UPDATE claim c SET superseded_at = m.mx
                      FROM (SELECT subject, predicate, source_path, max(valid_from) AS mx FROM claim
                            WHERE subject = $1 AND predicate = $2 AND source_path = $3
                            GROUP BY subject, predicate, source_path) m
                      WHERE c.subject = m.subject AND c.predicate = m.predicate
                        AND c.source_path = m.source_path
                        AND c.valid_from < m.mx AND c.superseded_at IS DISTINCT FROM m.mx;",
-                    &[&subject, &predicate, &source_path],
-                )
-                .await
-                .context("seal old claims")?;
-            self.db()
-                .await?
-                .execute(
-                    &format!(
-                        "UPDATE claim c SET superseded_at = NULL
+                &[&subject, &predicate, &source_path],
+            )
+            .await
+            .context("seal old claims")?;
+            c.execute(
+                &format!(
+                    "UPDATE claim c SET superseded_at = NULL
                          WHERE c.subject = $1 AND c.predicate = $2 AND c.source_path = $3
                            AND c.superseded_at IS NOT NULL
                            AND c.valid_from = (SELECT max(valid_from) FROM claim
                                              WHERE subject = $1 AND predicate = $2
                                                AND source_path = $3)
                            AND NOT {RETIRED_NOTE};"
-                    ),
-                    &[&subject, &predicate, &source_path],
-                )
-                .await
-                .context("unseal latest claim")?;
+                ),
+                &[&subject, &predicate, &source_path],
+            )
+            .await
+            .context("unseal latest claim")?;
         }
         Ok(())
     }
@@ -1624,37 +1678,47 @@ impl Store {
         predicate: &str,
         claim: &crate::frontmatter::Claim,
     ) -> Result<usize> {
+        Self::upsert_claim_node_on(&self.db().await?, path, project, subject, predicate, claim)
+            .await
+    }
+
+    /// `upsert_claim_node` on a caller-held connection or transaction handle.
+    pub async fn upsert_claim_node_on(
+        c: &impl GenericClient,
+        path: &str,
+        project: &str,
+        subject: &str,
+        predicate: &str,
+        claim: &crate::frontmatter::Claim,
+    ) -> Result<usize> {
         let claim_id = format!("claim:{subject}:{predicate}");
         let label = format!("{predicate}: {}", claim.value);
         let kind = claim.kind();
         let confidence = claim.confidence();
 
         // claim node
-        self.upsert_node(&claim_id, "claim", &label, Some(kind))
-            .await?;
+        Self::upsert_node_on(c, &claim_id, "claim", &label, Some(kind)).await?;
 
         // typed node for decisions/risks/etc.
         if kind != "fact" {
             let typed_id = format!("{kind}:{subject}:{predicate}");
             let typed_label = format!("{subject} — {}", claim.value);
-            self.upsert_node(&typed_id, kind, &typed_label, Some(confidence))
-                .await?;
-            self.upsert_edge(&claim_id, &typed_id, "is_a", None).await?;
+            Self::upsert_node_on(c, &typed_id, kind, &typed_label, Some(confidence)).await?;
+            Self::upsert_edge_on(c, &claim_id, &typed_id, "is_a", None).await?;
         }
 
         // doc -> claim edge
         let doc_id = doc_node_id(path);
-        self.upsert_edge(&doc_id, &claim_id, "claims", None).await?;
+        Self::upsert_edge_on(c, &doc_id, &claim_id, "claims", None).await?;
 
         // claim -> project edge
         if !project.is_empty() {
             let project_id = format!("project:{project}");
-            self.upsert_edge(&claim_id, &project_id, "claim_of_project", None)
-                .await?;
+            Self::upsert_edge_on(c, &claim_id, &project_id, "claim_of_project", None).await?;
         }
 
         if let Some(said_by) = claim.said_by {
-            self.relate_said(said_by, path, subject, predicate).await?;
+            Self::relate_said_on(c, said_by, path, subject, predicate).await?;
         }
 
         Ok(1 + usize::from(kind != "fact")
@@ -2205,11 +2269,20 @@ impl Store {
         sha: &str,
         updated_at: SystemTime,
     ) -> Result<()> {
+        Self::upsert_document_on(&self.db().await?, front, sha, updated_at).await
+    }
+
+    /// `upsert_document` on a caller-held connection or transaction handle.
+    pub async fn upsert_document_on(
+        c: &impl GenericClient,
+        front: &FrontMatter,
+        sha: &str,
+        updated_at: SystemTime,
+    ) -> Result<()> {
         let path = &front.source_path;
         let title_ref: Option<&str> = front.title.as_deref();
         let author = String::from(front.author.clone());
-        self.db().await?
-            .execute(
+        c.execute(
                 "INSERT INTO document (source_path, origin, project, kind, title, tags, sha, updated_at, author)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT (source_path) DO UPDATE SET
@@ -2236,23 +2309,20 @@ impl Store {
         // project node + in_project edge
         if !front.project.is_empty() {
             let pid = format!("project:{}", front.project);
-            self.upsert_node(&pid, "project", &front.project, None)
-                .await?;
-            self.upsert_edge(&doc_id, &pid, "in_project", None).await?;
+            Self::upsert_node_on(c, &pid, "project", &front.project, None).await?;
+            Self::upsert_edge_on(c, &doc_id, &pid, "in_project", None).await?;
         }
 
         // tagged: remove existing then regenerate (idempotent)
-        self.db()
-            .await?
-            .execute(
-                "DELETE FROM edge WHERE src = $1 AND kind = 'tagged';",
-                &[&doc_id],
-            )
-            .await?;
+        c.execute(
+            "DELETE FROM edge WHERE src = $1 AND kind = 'tagged';",
+            &[&doc_id],
+        )
+        .await?;
         for tag in &front.tags {
             let tid = format!("topic:{tag}");
-            self.upsert_node(&tid, "topic", tag, None).await?;
-            self.upsert_edge(&doc_id, &tid, "tagged", None).await?;
+            Self::upsert_node_on(c, &tid, "topic", tag, None).await?;
+            Self::upsert_edge_on(c, &doc_id, &tid, "tagged", None).await?;
         }
         Ok(())
     }
@@ -2261,14 +2331,21 @@ impl Store {
     /// note has FEWER chunks than before. Used by the upsert-then-prune re-ingest so a reader never
     /// sees an empty/half-deleted chunk set (no delete-first window). `from_idx == new chunk count`.
     pub async fn prune_chunks_from(&self, path: &str, from_idx: usize) -> Result<()> {
+        Self::prune_chunks_from_on(&self.db().await?, path, from_idx).await
+    }
+
+    /// `prune_chunks_from` on a caller-held connection or transaction handle.
+    pub async fn prune_chunks_from_on(
+        c: &impl GenericClient,
+        path: &str,
+        from_idx: usize,
+    ) -> Result<()> {
         let from = i32::try_from(from_idx).unwrap_or(i32::MAX);
-        self.db()
-            .await?
-            .execute(
-                "DELETE FROM chunk WHERE source_path = $1 AND chunk_idx >= $2;",
-                &[&path, &from],
-            )
-            .await?;
+        c.execute(
+            "DELETE FROM chunk WHERE source_path = $1 AND chunk_idx >= $2;",
+            &[&path, &from],
+        )
+        .await?;
         Ok(())
     }
 
@@ -2300,10 +2377,14 @@ impl Store {
     // ── chunk (embedding) ─────────────────────────────────────────────────────
 
     pub async fn upsert_chunk(&self, d: &Doc) -> Result<()> {
+        self.upsert_chunk_on(&self.db().await?, d).await
+    }
+
+    /// `upsert_chunk` on a caller-held connection or transaction handle.
+    pub async fn upsert_chunk_on(&self, c: &impl GenericClient, d: &Doc) -> Result<()> {
         let vec = self.checked_vector(&d.embedding)?; // dim guard (shared with upsert_claim)
         let idx = i32::try_from(d.chunk_idx).unwrap_or(i32::MAX);
-        self.db().await?
-            .execute(
+        c.execute(
                 "INSERT INTO chunk (id, source_path, content, embedding, origin, project, kind, chunk_idx)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                  ON CONFLICT (id) DO UPDATE SET
@@ -2922,16 +3003,6 @@ impl Store {
 
     // ── graph helpers (node/edge upsert) ───────────────────────────────────────
 
-    async fn upsert_node(
-        &self,
-        id: &str,
-        kind: &str,
-        label: &str,
-        outcome: Option<&str>,
-    ) -> Result<()> {
-        Self::upsert_node_on(&self.db().await?, id, kind, label, outcome).await
-    }
-
     async fn upsert_node_on(
         c: &impl GenericClient,
         id: &str,
@@ -2947,16 +3018,6 @@ impl Store {
             .await
             .context("upsert node")?;
         Ok(())
-    }
-
-    async fn upsert_edge(
-        &self,
-        src: &str,
-        dst: &str,
-        kind: &str,
-        judge: Option<&str>,
-    ) -> Result<()> {
-        Self::upsert_edge_on(&self.db().await?, src, dst, kind, judge).await
     }
 
     async fn upsert_edge_on(
@@ -3331,10 +3392,19 @@ impl Store {
             .transaction()
             .await
             .context("begin supersedes transaction")?;
-        let report =
-            Self::record_supersedes_sealing(&tx, pairs, judge, SealRule::RestatedSlots).await?;
+        let report = Self::remember_supersedes(&tx, pairs, judge).await?;
         tx.commit().await.context("commit supersedes transaction")?;
         Ok(report)
+    }
+
+    /// `remember_supersedes_in_tx` on the request's transaction handle: the caller opens and
+    /// commits it, so the edges commit or roll back with the note they came from.
+    pub async fn remember_supersedes(
+        tx: &Transaction<'_>,
+        pairs: &[[String; 2]],
+        judge: Option<&str>,
+    ) -> Result<SupersedesReport> {
+        Self::record_supersedes_sealing(tx, pairs, judge, SealRule::RestatedSlots).await
     }
 
     /// Consumption counts (`used`/`contested` edges) per document — one query for all hits of a
@@ -3426,19 +3496,29 @@ impl Store {
         source_path: &str,
         said_by: Option<crate::frontmatter::SaidBy>,
     ) -> Result<()> {
+        Self::mirror_claim_said_by_on(&self.db().await?, subject, predicate, source_path, said_by)
+            .await
+    }
+
+    /// `mirror_claim_said_by` on a caller-held connection or transaction handle.
+    pub async fn mirror_claim_said_by_on(
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+        source_path: &str,
+        said_by: Option<crate::frontmatter::SaidBy>,
+    ) -> Result<()> {
         let said_by = said_by.map(String::from);
-        self.db()
-            .await?
-            .execute(
-                "UPDATE claim SET said_by = $4
+        c.execute(
+            "UPDATE claim SET said_by = $4
                  WHERE subject = $1 AND predicate = $2 AND source_path = $3
                    AND said_by IS DISTINCT FROM $4
                    AND valid_from = (SELECT max(valid_from) FROM claim
                                       WHERE subject = $1 AND predicate = $2 AND source_path = $3);",
-                &[&subject, &predicate, &source_path, &said_by],
-            )
-            .await
-            .context("mirror claim said_by")?;
+            &[&subject, &predicate, &source_path, &said_by],
+        )
+        .await
+        .context("mirror claim said_by")?;
         Ok(())
     }
 
@@ -3614,32 +3694,45 @@ impl Store {
     // ── semantic nodes ──────────────────────────────────────────────────────────
 
     pub async fn upsert_tool(&self, slug: &str, text: &str) -> Result<()> {
-        self.upsert_node(&format!("tool:{slug}"), "tool", text, None)
-            .await
+        Self::upsert_tool_on(&self.db().await?, slug, text).await
+    }
+    pub async fn upsert_tool_on(c: &impl GenericClient, slug: &str, text: &str) -> Result<()> {
+        Self::upsert_node_on(c, &format!("tool:{slug}"), "tool", text, None).await
     }
     pub async fn upsert_concept(&self, slug: &str, text: &str) -> Result<()> {
-        self.upsert_node(&format!("concept:{slug}"), "concept", text, None)
-            .await
+        Self::upsert_concept_on(&self.db().await?, slug, text).await
+    }
+    pub async fn upsert_concept_on(c: &impl GenericClient, slug: &str, text: &str) -> Result<()> {
+        Self::upsert_node_on(c, &format!("concept:{slug}"), "concept", text, None).await
     }
 
     /// Remove this document's semantic edges (uses/about) — makes the deterministic graph rebuild idempotent.
     pub async fn clear_semantic_edges(&self, doc_path: &str) -> Result<()> {
+        Self::clear_semantic_edges_on(&self.db().await?, doc_path).await
+    }
+    pub async fn clear_semantic_edges_on(c: &impl GenericClient, doc_path: &str) -> Result<()> {
         let doc_id = doc_node_id(doc_path);
         let kinds: Vec<&str> = SEMANTIC_EDGE_KINDS.to_vec();
-        self.db()
-            .await?
-            .execute(
-                "DELETE FROM edge WHERE src = $1 AND kind = ANY($2);",
-                &[&doc_id, &kinds],
-            )
-            .await?;
+        c.execute(
+            "DELETE FROM edge WHERE src = $1 AND kind = ANY($2);",
+            &[&doc_id, &kinds],
+        )
+        .await?;
         Ok(())
     }
 
     // ── semantic edges (doc → entity) ───────────────────────────────────────────
 
     pub async fn relate_doc_tool(&self, doc_path: &str, slug: &str) -> Result<()> {
-        self.upsert_edge(
+        Self::relate_doc_tool_on(&self.db().await?, doc_path, slug).await
+    }
+    pub async fn relate_doc_tool_on(
+        c: &impl GenericClient,
+        doc_path: &str,
+        slug: &str,
+    ) -> Result<()> {
+        Self::upsert_edge_on(
+            c,
             &doc_node_id(doc_path),
             &format!("tool:{slug}"),
             "uses",
@@ -3648,7 +3741,15 @@ impl Store {
         .await
     }
     pub async fn relate_doc_concept(&self, doc_path: &str, slug: &str) -> Result<()> {
-        self.upsert_edge(
+        Self::relate_doc_concept_on(&self.db().await?, doc_path, slug).await
+    }
+    pub async fn relate_doc_concept_on(
+        c: &impl GenericClient,
+        doc_path: &str,
+        slug: &str,
+    ) -> Result<()> {
+        Self::upsert_edge_on(
+            c,
             &doc_node_id(doc_path),
             &format!("concept:{slug}"),
             "about",
@@ -3666,14 +3767,22 @@ impl Store {
         subject: &str,
         predicate: &str,
     ) -> Result<()> {
+        Self::relate_said_on(&self.db().await?, said_by, doc_path, subject, predicate).await
+    }
+    pub async fn relate_said_on(
+        c: &impl GenericClient,
+        said_by: crate::frontmatter::SaidBy,
+        doc_path: &str,
+        subject: &str,
+        predicate: &str,
+    ) -> Result<()> {
         let speaker = match said_by {
             crate::frontmatter::SaidBy::Owner => OWNER_SPEAKER_NODE,
         };
-        self.upsert_node(speaker, "person", &String::from(said_by), None)
-            .await?;
-        self.upsert_edge(speaker, &doc_node_id(doc_path), "said", None)
-            .await?;
-        self.upsert_edge(
+        Self::upsert_node_on(c, speaker, "person", &String::from(said_by), None).await?;
+        Self::upsert_edge_on(c, speaker, &doc_node_id(doc_path), "said", None).await?;
+        Self::upsert_edge_on(
+            c,
             speaker,
             &format!("claim:{subject}:{predicate}"),
             "said",

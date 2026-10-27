@@ -3620,10 +3620,13 @@ fn claim_note(path: &str, subject: &str) -> FrontMatter {
 async fn extract_note_graph(store: &Store, llm: &impl Embed, front: &FrontMatter) -> Stats {
     let cfg = BoringConfig::default();
     let mut stats = Stats::default();
+    let mut conn = store.conn().await.expect("connection");
+    let tx = conn.transaction().await.expect("begin");
     FrontmatterGraphExtractor::new()
-        .extract(store, llm, &cfg, front, "body", &mut stats)
+        .extract(store, &tx, llm, &cfg, front, "body", &mut stats)
         .await
         .expect("graph extract");
+    tx.commit().await.expect("commit");
     stats
 }
 
@@ -6086,6 +6089,7 @@ impl GraphExtractor for FailsAfterCounting {
     async fn extract<E: Embed>(
         &self,
         _store: &Store,
+        _tx: &deadpool_postgres::Transaction<'_>,
         _llm: &E,
         _cfg: &BoringConfig,
         _front: &FrontMatter,
