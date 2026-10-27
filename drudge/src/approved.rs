@@ -553,6 +553,19 @@ mod tests {
         }
     }
 
+    // 1/128 s = 7812.5 µs is an exact f64 tie. Half-even gives 7812 (<= now, inside); half-up
+    // gives 7813 (> now, outside). Expected bytes from Python approved.payload(), 2026-10-28.
+    #[test]
+    fn half_microsecond_tie_rounds_to_even_at_the_window_end() {
+        let raw = [("session:slack:C1:1793156400.0078125", "/tie.md", "used")];
+        let now = 1_793_156_400_007_812;
+        let got = select_approved(&rows(&raw), 24, now).payload;
+        assert_eq!(
+            serde_json::to_string(&got).unwrap(),
+            r#"{"since_hours":24,"approved":[{"session":"slack:C1:1793156400.0078125","note":"/tie.md","at":"2026-10-28T12:00:00+09:00"}],"contested":[],"skipped_rows":0}"#
+        );
+    }
+
     #[test]
     fn skipped_rows_are_reported_with_reasons() {
         let raw = [
