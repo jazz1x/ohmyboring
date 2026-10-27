@@ -650,7 +650,7 @@ def existing_wiki_ids(doc_paths: list[str]) -> set[int]:
 
 
 def allocate_wiki_path(wiki_dir: str, db_ids: set[int]) -> tuple[str, str]:
-    """다음 wiki-NNNNNNNNNNN 을 O_EXCL 로 만들고 (id, 절대 경로)를 돌려준다 — 경합은 재시정."""
+    """다음 wiki-NNNN 을 O_EXCL 로 만들고 (id, 절대 경로)를 돌려준다 — 경합은 재시정."""
     os.makedirs(wiki_dir, exist_ok=True)
     used = set(db_ids)
     for name in os.listdir(wiki_dir):
@@ -666,7 +666,7 @@ def allocate_wiki_path(wiki_dir: str, db_ids: set[int]) -> tuple[str, str]:
                 used.add(n)
     n = max(used) + 1 if used else 1
     while True:
-        wiki_id = f"wiki-{n:011}"
+        wiki_id = f"wiki-{n:04}"
         path = os.path.join(wiki_dir, f"{wiki_id}.md")
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
