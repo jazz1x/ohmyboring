@@ -23,6 +23,15 @@ const PY_INT_MAX_DIGITS: usize = 4300;
 pub const ACTIVE_PROJECTS_SQL: &str = "select project, count(*) from document where project <> '' \
 and updated_at > now() - make_interval(days => $1) group by 1 order by 2 desc, 1";
 
+/// The 200 body for `ActiveDays` — door `_active_projects_payload`.
+pub fn active_payload(rows: Vec<(String, i64)>, active_days: i32) -> serde_json::Value {
+    let projects: Vec<_> = rows
+        .into_iter()
+        .map(|(project, documents)| serde_json::json!({"project": project, "documents": documents}))
+        .collect();
+    serde_json::json!({"projects": projects, "active_days": active_days})
+}
+
 /// Parse the query once. Starlette `query_params.get`: the last duplicate wins, a bare key is "".
 pub fn parse_query(raw_query: Option<&str>) -> ProjectsQuery {
     match crate::claim_source::last_param_opt(raw_query, "active_days") {
@@ -83,6 +92,16 @@ mod tests {
         assert_eq!(
             ACTIVE_PROJECTS_SQL,
             "select project, count(*) from document where project <> '' and updated_at > now() - make_interval(days => $1) group by 1 order by 2 desc, 1"
+        );
+    }
+
+    // Door bytes: Starlette JSONResponse of `_active_projects_payload(7)` with these rows.
+    #[test]
+    fn active_payload_keeps_the_door_key_order() {
+        let rows = vec![("omb".to_owned(), 12), ("ç\"x".to_owned(), 1)];
+        assert_eq!(
+            serde_json::to_string(&active_payload(rows, 7)).unwrap(),
+            r#"{"projects":[{"project":"omb","documents":12},{"project":"ç\"x","documents":1}],"active_days":7}"#
         );
     }
 

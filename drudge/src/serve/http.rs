@@ -962,15 +962,7 @@ pub(crate) async fn handle_projects(
                     .into_response();
             };
             match store.active_project_counts(days).await {
-                Ok(rows) => {
-                    let projects: Vec<_> = rows
-                        .into_iter()
-                        .map(|(project, documents)| {
-                            json!({"project": project, "documents": documents})
-                        })
-                        .collect();
-                    Json(json!({"projects": projects, "active_days": days})).into_response()
-                }
+                Ok(rows) => Json(crate::projects::active_payload(rows, days)).into_response(),
                 Err(e) => (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({"error": "store unreachable", "detail": format!("{e:#}")})),
