@@ -149,6 +149,9 @@ pub struct SupersedesReport {
     /// The skipped paths themselves, in input order — the door echoes them to the caller, which
     /// otherwise learns "1 unknown" without learning which of its names missed.
     pub unknown_paths: Vec<String>,
+    /// The `(subject, predicate)` slots of the older notes this write closed, read after the
+    /// seal, in input order, each once.
+    pub retired: Vec<(String, String)>,
 }
 
 /// Splits `supersedes` pairs into edge-worthy ones and the skipped paths — a pair that names the

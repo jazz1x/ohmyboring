@@ -1653,6 +1653,7 @@ async fn write_supersedes_edges(
             supersedes: 0,
             unknown: supersedes.len(),
             unknown_paths: supersedes.to_vec(),
+            retired: Vec::new(),
         });
     };
     let mut pairs: Vec<[String; 2]> = Vec::with_capacity(supersedes.len());
@@ -2584,22 +2585,27 @@ mod tests {
         let none: Vec<String> = Vec::new();
         assert_eq!(supersedes_suffix(&none, &SupersedesReport::default()), "");
 
+        // Python test_writer.py:675 and :718 — the tail names the closed slots, or says none.
         let all_linked = SupersedesReport {
             supersedes: 2,
             ..SupersedesReport::default()
         };
         assert_eq!(
             supersedes_suffix(&["/vault/wiki/a.md".to_owned()], &all_linked),
-            " · supersedes linked 2"
+            " · supersedes linked 2 · retired claims: none"
         );
         let missed = SupersedesReport {
             supersedes: 1,
             unknown: 1,
             unknown_paths: vec!["/vault/wiki/ghost.md".to_owned()],
+            retired: vec![
+                ("slot a".to_owned(), "state".to_owned()),
+                ("slot b".to_owned(), "state".to_owned()),
+            ],
         };
         assert_eq!(
             supersedes_suffix(&["/vault/wiki/a.md".to_owned()], &missed),
-            " · supersedes linked 1, not found 1 (/vault/wiki/ghost.md)"
+            " · supersedes linked 1, not found 1 (/vault/wiki/ghost.md) · retired claims: slot a/state, slot b/state"
         );
     }
 
