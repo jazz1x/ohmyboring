@@ -2319,7 +2319,11 @@ impl Store {
             &[&doc_id],
         )
         .await?;
-        for tag in &front.tags {
+        // Topic nodes are shared between notes: take them in tag order for every file, so two
+        // files in flight wait on each other instead of deadlocking.
+        let mut tags: Vec<&String> = front.tags.iter().collect();
+        tags.sort();
+        for tag in tags {
             let tid = format!("topic:{tag}");
             Self::upsert_node_on(c, &tid, "topic", tag, None).await?;
             Self::upsert_edge_on(c, &doc_id, &tid, "tagged", None).await?;
@@ -3769,6 +3773,17 @@ impl Store {
     ) -> Result<()> {
         Self::relate_said_on(&self.db().await?, said_by, doc_path, subject, predicate).await
     }
+    /// The `person:` node a `said_by` names, upserted; returns its id.
+    pub async fn upsert_speaker_on(
+        c: &impl GenericClient,
+        said_by: crate::frontmatter::SaidBy,
+    ) -> Result<&'static str> {
+        let speaker = match said_by {
+            crate::frontmatter::SaidBy::Owner => OWNER_SPEAKER_NODE,
+        };
+        Self::upsert_node_on(c, speaker, "person", &String::from(said_by), None).await?;
+        Ok(speaker)
+    }
     pub async fn relate_said_on(
         c: &impl GenericClient,
         said_by: crate::frontmatter::SaidBy,
@@ -3776,10 +3791,7 @@ impl Store {
         subject: &str,
         predicate: &str,
     ) -> Result<()> {
-        let speaker = match said_by {
-            crate::frontmatter::SaidBy::Owner => OWNER_SPEAKER_NODE,
-        };
-        Self::upsert_node_on(c, speaker, "person", &String::from(said_by), None).await?;
+        let speaker = Self::upsert_speaker_on(c, said_by).await?;
         Self::upsert_edge_on(c, speaker, &doc_node_id(doc_path), "said", None).await?;
         Self::upsert_edge_on(
             c,

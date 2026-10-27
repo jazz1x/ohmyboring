@@ -175,17 +175,11 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         let path = &front.source_path;
         Store::clear_semantic_edges_on(tx, path).await?;
 
+        // Rows shared between notes (tool, concept, claim and speaker nodes) are locked in one
+        // order for every file — tools, concepts, speaker, then claims by slot, each sorted — so
+        // two files in flight wait on each other instead of deadlocking.
         // tool nodes + uses edges (Han drift filter + slug dedup + cap)
-        let mut seen_tool = HashSet::new();
-        for t in front.tools.iter().take(self.cap) {
-            let t = t.trim();
-            if t.is_empty() || has_han(t) {
-                continue;
-            }
-            let slug = slugify(t);
-            if slug.is_empty() || !seen_tool.insert(slug.clone()) {
-                continue;
-            }
+        for (slug, t) in named_slugs(&front.tools, self.cap) {
             Store::upsert_tool_on(tx, &slug, t).await?;
             Store::relate_doc_tool_on(tx, path, &slug).await?;
             stats.tools += 1;
@@ -193,16 +187,7 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         }
 
         // concept nodes + about edges
-        let mut seen_concept = HashSet::new();
-        for c in front.concepts.iter().take(self.cap) {
-            let c = c.trim();
-            if c.is_empty() || has_han(c) {
-                continue;
-            }
-            let slug = slugify(c);
-            if slug.is_empty() || !seen_concept.insert(slug.clone()) {
-                continue;
-            }
+        for (slug, c) in named_slugs(&front.concepts, self.cap) {
             Store::upsert_concept_on(tx, &slug, c).await?;
             Store::relate_doc_concept_on(tx, path, &slug).await?;
             stats.concepts += 1;
@@ -218,10 +203,8 @@ impl GraphExtractor for FrontmatterGraphExtractor {
             } else {
                 crate::anchor::from_note_body(&front.project, body)
             };
-            for cl in &front.claims {
-                let Some((subject, predicate)) = claim_key(cl) else {
-                    continue;
-                };
+            lock_speaker_node(tx, front).await?;
+            for ((subject, predicate), cl) in sorted_claims(front) {
                 let value = cl.value.trim();
                 let anchor = crate::anchor::anchor_for_claim(&note_anchors, &subject, value);
                 let anchor_db = anchor.as_ref().map(crate::anchor::Anchor::to_db_string);
@@ -290,6 +273,50 @@ fn claim_key(cl: &frontmatter::Claim) -> Option<(String, String)> {
     (!skip).then_some((subject, predicate))
 }
 
+/// The claims the graph holds, as `((subject, predicate), claim)`, in slot order — the order
+/// every file takes its claim rows in.
+fn sorted_claims(front: &FrontMatter) -> Vec<((String, String), &frontmatter::Claim)> {
+    let mut keyed: Vec<_> = front
+        .claims
+        .iter()
+        .filter_map(|cl| claim_key(cl).map(|key| (key, cl)))
+        .collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    keyed
+}
+
+/// Up to `cap` names with a usable slug, one per slug (the first spelling wins), in slug order.
+/// Han-script names are drift the graph drops.
+fn named_slugs(names: &[String], cap: usize) -> Vec<(String, &str)> {
+    let mut seen = HashSet::new();
+    let mut picked = Vec::new();
+    for name in names.iter().take(cap) {
+        let name = name.trim();
+        if name.is_empty() || has_han(name) {
+            continue;
+        }
+        let slug = slugify(name);
+        if slug.is_empty() || !seen.insert(slug.clone()) {
+            continue;
+        }
+        picked.push((slug, name));
+    }
+    picked.sort_by(|a, b| a.0.cmp(&b.0));
+    picked
+}
+
+/// Take the speaker node before the first claim, not at whichever claim names a speaker: the node
+/// is shared by every note with a `said_by`, so its place in the lock order must be the same in all.
+async fn lock_speaker_node(tx: &Transaction<'_>, front: &FrontMatter) -> Result<()> {
+    let speaker = sorted_claims(front)
+        .into_iter()
+        .find_map(|(_, cl)| cl.said_by);
+    match speaker {
+        Some(said_by) => Store::upsert_speaker_on(tx, said_by).await.map(|_| ()),
+        None => Ok(()),
+    }
+}
+
 /// Heal for an unchanged note: write only the claim nodes/edges that are missing (#360).
 /// Insert-only (`ON CONFLICT DO NOTHING`) — existing edges are never deleted, so their
 /// `first_seen_at` survives; no embedding, no claim-row write.
@@ -299,10 +326,8 @@ async fn heal_claim_edges(
     stats: &mut Stats,
 ) -> Result<()> {
     let path = &front.source_path;
-    for cl in &front.claims {
-        let Some((subject, predicate)) = claim_key(cl) else {
-            continue;
-        };
+    lock_speaker_node(tx, front).await?;
+    for ((subject, predicate), cl) in sorted_claims(front) {
         stats.edges +=
             Store::upsert_claim_node_on(tx, path, &front.project, &subject, &predicate, cl).await?;
     }
