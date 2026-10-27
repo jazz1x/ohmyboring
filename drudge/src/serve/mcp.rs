@@ -1647,21 +1647,25 @@ fn supersedes_unwritten(supersedes: &[String]) -> SupersedesReport {
     }
 }
 
-/// The `(new, old)` pairs one `supersedes` list names, each old path folded to the spelling the
-/// `document` table keys.
-async fn supersedes_pairs(
-    store: &Store,
-    new_path: &str,
+/// Each old path of one `supersedes` list folded to the spelling the `document` table keys.
+/// Runs before a number is taken or a file is written (Python's `_gate` order), so a failing
+/// lookup leaves nothing behind. Without a store the list passes through untouched.
+async fn resolve_supersedes(
+    store: Option<&Store>,
     supersedes: &[String],
-) -> Result<Vec<[String; 2]>, (i32, String)> {
-    let mut pairs: Vec<[String; 2]> = Vec::with_capacity(supersedes.len());
+) -> Result<Vec<String>, (i32, String)> {
+    let Some(store) = store else {
+        return Ok(supersedes.to_vec());
+    };
+    let mut resolved = Vec::with_capacity(supersedes.len());
     for old in supersedes {
-        let resolved = resolve_document_path(store, old)
-            .await
-            .map_err(|e| (-32603_i32, format!("supersedes lookup: {e:#}")))?;
-        pairs.push([new_path.to_owned(), resolved]);
+        resolved.push(
+            resolve_document_path(store, old)
+                .await
+                .map_err(|e| (-32603_i32, format!("supersedes lookup: {e:#}")))?,
+        );
     }
-    Ok(pairs)
+    Ok(resolved)
 }
 
 /// The `remember` text says when a named correction did not link — a bare "remembered" line
@@ -1721,7 +1725,11 @@ async fn finish_remembered_note(
         ));
     };
 
-    let pairs = supersedes_pairs(store, &front.source_path, supersedes).await?;
+    let pairs = resolve_supersedes(Some(store), supersedes)
+        .await?
+        .into_iter()
+        .map(|old| [front.source_path.clone(), old])
+        .collect::<Vec<_>>();
     let _guard = s.sync_lock.lock().await;
     let mut conn = store
         .conn()
@@ -3512,6 +3520,77 @@ mod tests {
             note_rows(&store, &files[0], &token).await,
             [0; 5],
             "document, chunk, claim, node, edge rows of the failed remember"
+        );
+    }
+
+    /// C-PORT3b: Python resolves `supersedes` before it takes a number or writes the file
+    /// (`writer.py` `_gate` then `_store_new_note`), so a failing lookup leaves no note file and no
+    /// rows. A NUL in the path makes Postgres reject the `get_doc_sha` parameter: the lookup fails
+    /// and nothing else does. The owner caller skips the owner guard, which would fail first.
+    #[tokio::test]
+    async fn a_remember_whose_supersedes_lookup_fails_writes_no_file() {
+        let Some(dsn) = std::env::var("BORING_TEST_DATABASE_URL").ok() else {
+            eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+            return;
+        };
+        let store = std::sync::Arc::new(crate::store::Store::open(&dsn, 1024).await.unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = vault_state(tmp.path());
+        let mut cfg = BoringConfig::default();
+        cfg.llm.base_url = embeddings_stub().await;
+        s.llm = std::sync::Arc::new(crate::llm::Llm::from_config(&cfg));
+        s.cfg = std::sync::Arc::new(cfg);
+        s.store = Some(std::sync::Arc::clone(&store));
+        let token = format!(
+            "p3dlook{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let args = json!({
+            "title": "lookup", "body": "an ordinary body", "author": "owner",
+            "tools": [token], "concepts": [token], "tags": [token],
+            "claims": [{"subject": token, "predicate": "axis", "value": "a plain value"}],
+            "supersedes": ["/vault/wiki/bad\u{0}path.md"],
+        });
+
+        let failed = remember_note(&s, Caller::Owner, Some(&args))
+            .await
+            .expect_err("the supersedes lookup failed");
+
+        assert_eq!(failed.code, -32603);
+        assert!(
+            failed.message.starts_with("supersedes lookup:"),
+            "{}",
+            failed.message
+        );
+        assert!(
+            failed.body().get("data").is_none(),
+            "a failure, not a refusal"
+        );
+        let files: Vec<_> = std::fs::read_dir(tmp.path().join("wiki"))
+            .unwrap()
+            .map(|e| e.unwrap().path().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files.len(), 0, "no note file before the lookup succeeded");
+        let like = format!("%{token}%");
+        let rows = store
+            .conn()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT (SELECT count(*) FROM document WHERE source_path LIKE '%/wiki/wiki-%' AND title = 'lookup'),
+                        (SELECT count(*) FROM node WHERE id LIKE $1),
+                        (SELECT count(*) FROM edge WHERE src LIKE $1 OR dst LIKE $1);",
+                &[&like],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            [0, 1, 2].map(|i| rows.get::<_, i64>(i)),
+            [0; 3],
+            "document, node, edge rows"
         );
     }
 
