@@ -193,6 +193,9 @@ pub fn render_wiki_note(wiki_id: &str, front: &FrontMatter, body: &str) -> Resul
         /// notes and manual remembers → skipped, keeping their frontmatter unchanged.
         #[serde(skip_serializing_if = "Option::is_none")]
         omb_session_id: Option<&'a str>,
+        /// Written as a quoted digit string, like the Python writer, after `omb_session_id`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        omb_session_since: Option<String>,
         author: &'a crate::frontmatter::Author,
     }
     let title = front.title.as_deref().unwrap_or(wiki_id);
@@ -215,6 +218,7 @@ pub fn render_wiki_note(wiki_id: &str, front: &FrontMatter, body: &str) -> Resul
         relates_to: Vec::new(),
         sources: &front.sources,
         omb_session_id: front.omb_session_id.as_deref(),
+        omb_session_since: front.omb_session_since.map(|n| n.to_string()),
         author: &front.author,
     };
     let yaml = serde_yaml::to_string(&fm).context("failed to serialize wiki frontmatter YAML")?;

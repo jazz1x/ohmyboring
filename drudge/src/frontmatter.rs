@@ -20,9 +20,39 @@ pub struct FrontMatter {
     pub omb_session_id: Option<String>,
     /// Epoch seconds after which a continued session's note starts (a later pass over the same
     /// session): only the part of the conversation past this moment is in the note.
-    #[serde(skip)]
+    #[serde(
+        deserialize_with = "session_since_from_yaml",
+        serialize_with = "session_since_as_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub omb_session_since: Option<u64>,
     pub author: Author,
+}
+
+/// Notes carry the moment as a quoted string of digits; anything else (a bare number, text)
+/// reads as absent, so a hand-edited note never fails the whole front matter.
+fn session_since_from_yaml<'de, D>(de: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_yaml::Value>::deserialize(de)?;
+    Ok(match raw {
+        Some(serde_yaml::Value::String(s)) if s.bytes().all(|b| b.is_ascii_digit()) => {
+            s.parse().ok()
+        }
+        _ => None,
+    })
+}
+
+#[allow(clippy::ref_option)]
+fn session_since_as_string<S>(v: &Option<u64>, ser: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match v {
+        Some(n) => ser.serialize_str(&n.to_string()),
+        None => ser.serialize_none(),
+    }
 }
 
 /// Who wrote a note — the same vocabulary as an edge's `judge`, plus `unknown` for every note

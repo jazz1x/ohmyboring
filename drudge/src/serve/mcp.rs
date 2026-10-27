@@ -1861,8 +1861,9 @@ async fn check_duplicate(
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let (yaml, existing_body) = crate::vault::split_frontmatter(&content).unwrap_or(("", ""));
         let fm: crate::frontmatter::FrontMatter = serde_yaml::from_str(yaml).unwrap_or_default();
-        let same_session =
-            target_session.is_some() && fm.omb_session_id.as_deref() == target_session;
+        let same_session = target_session.is_some()
+            && fm.omb_session_id.as_deref() == target_session
+            && !continues_after(note.front.omb_session_since, fm.omb_session_since);
         let same_title = !target_title.is_empty()
             && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title;
         let reason = match (
@@ -1897,6 +1898,19 @@ async fn check_duplicate(
     }
 
     Ok(None)
+}
+
+/// Does the incoming note hold conversation past what the existing note of the same session
+/// covers? No `since` on the incoming note means it starts at the session start, so no; an
+/// existing note without one is the session start, so any `since` continues it. An equal
+/// `since` is filtered as before. Without this a re-run of a finished session is dropped as a
+/// duplicate of its own first note.
+fn continues_after(incoming: Option<u64>, existing: Option<u64>) -> bool {
+    match (incoming, existing) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(i), Some(e)) => i > e,
+    }
 }
 
 fn duplicate_match(
@@ -2353,6 +2367,9 @@ fn parse_remember_note(
         })
         .collect();
 
+    let omb_session_since = parse_session_since(&get_str("omb_session_since"))?;
+    let author = parse_author(args)?;
+
     let front = FrontMatter {
         origin,
         project: repo,
@@ -2366,10 +2383,22 @@ fn parse_remember_note(
         sources: get_arr("sources").iter().map(|s| scrub(s.trim())).collect(),
         claims,
         omb_session_id,
-        omb_session_since: None,
-        author: parse_author(args)?,
+        omb_session_since,
+        author,
     };
     Ok(RememberNote { front, body })
+}
+
+/// The moment a continued session's note starts, epoch seconds as digits; empty means absent.
+fn parse_session_since(raw: &str) -> Result<Option<u64>, (i32, String)> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let invalid = || (-32602, format!("invalid omb_session_since: {raw}"));
+    if !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    raw.parse().map(Some).map_err(|_| invalid())
 }
 
 fn parse_claim(v: &Value) -> Result<Option<Claim>, (i32, String)> {
