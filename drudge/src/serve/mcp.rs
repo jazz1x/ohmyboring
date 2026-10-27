@@ -160,7 +160,7 @@ fn mcp_tools_list() -> Value {
                         }
                     }
                 },
-                "required": ["title", "body"]
+                "required": ["title", "body", "concepts"]
             }
         },
         {
@@ -2625,6 +2625,21 @@ mod tests {
         );
         assert_eq!(notes[1], "- [b.md] 둘째 본문\n  concepts: rop");
         assert_eq!(notes[2], "- [c.md] 셋째 본문", "no concepts, no line");
+    }
+
+    #[test]
+    fn remember_tool_schema_lists_concepts_as_required_one_to_six() {
+        let tools = super::mcp_tools_list();
+        let remember = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "remember")
+            .unwrap();
+        let schema = &remember["inputSchema"];
+        assert_eq!(schema["required"], json!(["title", "body", "concepts"]));
+        assert_eq!(schema["properties"]["concepts"]["minItems"], 1);
+        assert_eq!(schema["properties"]["concepts"]["maxItems"], 6);
     }
 
     #[tokio::test]
