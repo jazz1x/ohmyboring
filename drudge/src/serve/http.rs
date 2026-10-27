@@ -1011,6 +1011,50 @@ pub(crate) async fn handle_claim_source(
     }
 }
 
+/// Every subject's current claim under one predicate — same wire as the Python door's
+/// `GET /claim-sources`: 400 for a blank or NUL-bearing predicate (checked before the store),
+/// 503 without a store, 502 `{error, detail}` when it can't be reached, 200 even with no rows.
+pub(crate) async fn handle_claim_sources(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use crate::claim_source::{SubjectCheck, check_param, group_current};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let predicate = match check_param(uri.query(), "predicate") {
+        SubjectCheck::Blank => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "predicate query param is required"})),
+            )
+                .into_response();
+        }
+        SubjectCheck::Nul => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "predicate must not contain NUL"})),
+            )
+                .into_response();
+        }
+        SubjectCheck::Valid(predicate) => predicate,
+    };
+    let Some(store) = s.store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "store not configured"})),
+        )
+            .into_response();
+    };
+    match store.claim_source_list_rows(&predicate).await {
+        Ok(rows) => Json(group_current(&predicate, rows)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "store unreachable", "detail": format!("{e:#}")})),
+        )
+            .into_response(),
+    }
+}
+
 /// Per-judge counts, per-judge precision, and llm/human agreement over hits both decided.
 pub(crate) async fn handle_recall_label_stats(
     State(s): State<AppState>,

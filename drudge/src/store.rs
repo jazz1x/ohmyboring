@@ -2743,6 +2743,33 @@ impl Store {
             .collect())
     }
 
+    /// Current claims of one predicate for `GET /claim-sources` (SQL copied from the Python door).
+    /// Same UTC-vs-connection-TimeZone caveat as `claim_source_rows`.
+    pub async fn claim_source_list_rows(
+        &self,
+        predicate: &str,
+    ) -> Result<Vec<crate::claim_source::ListRow>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::claim_source::LIST_SQL, &[&predicate])
+            .await
+            .context("claim source list")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::claim_source::ListRow {
+                subject: r.get(0),
+                row: crate::claim_source::ClaimRow {
+                    source_path: r.get(1),
+                    valid_from: chrono::DateTime::<chrono::Utc>::from(r.get::<_, SystemTime>(2))
+                        .fixed_offset(),
+                    value: r.get(3),
+                    author: r.get(4),
+                },
+            })
+            .collect())
+    }
+
     /// Per-judge verdict counts, plus how often the two judges agreed on hits both of them
     /// labelled. `unsure` is counted, never folded into either side — an abstention is not a vote.
     pub async fn recall_label_stats(&self) -> Result<(Vec<RecallLabelStats>, i64, i64)> {

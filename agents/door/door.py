@@ -1656,6 +1656,8 @@ async def _claim_sources(request: Request) -> Response:
     predicate = request.query_params.get("predicate", "")
     if not predicate.strip():
         return JSONResponse({"error": "predicate query param is required"}, status_code=400)
+    if "\x00" in predicate:
+        return JSONResponse({"error": "predicate must not contain NUL"}, status_code=400)
     if not os.environ.get("DOOR_PG_DSN"):
         return JSONResponse({"error": "store not configured"}, status_code=503)
     try:

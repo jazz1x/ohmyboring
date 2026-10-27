@@ -78,29 +78,34 @@ fn decode_component(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Starlette `request.query_params.get("subject", "")`: `parse_qsl(keep_blank_values=True)`,
+/// Starlette `request.query_params.get(name, "")`: `parse_qsl(keep_blank_values=True)`,
 /// empty pairs skipped, a pair without `=` has an empty value, the last duplicate wins.
-fn last_subject(raw_query: Option<&str>) -> String {
+fn last_param(raw_query: Option<&str>, name: &str) -> String {
     raw_query
         .unwrap_or("")
         .split('&')
         .filter(|pair| !pair.is_empty())
         .filter_map(|pair| {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            (decode_component(key) == "subject").then(|| decode_component(value))
+            (decode_component(key) == name).then(|| decode_component(value))
         })
         .next_back()
         .unwrap_or_default()
 }
 
 pub fn check_subject(raw_query: Option<&str>) -> SubjectCheck {
-    let subject = last_subject(raw_query);
-    if subject.trim_matches(is_py_space).is_empty() {
+    check_param(raw_query, "subject")
+}
+
+/// Same verdicts for any single-valued query param (`subject`, `predicate`).
+pub fn check_param(raw_query: Option<&str>, name: &str) -> SubjectCheck {
+    let value = last_param(raw_query, name);
+    if value.trim_matches(is_py_space).is_empty() {
         SubjectCheck::Blank
-    } else if subject.contains('\0') {
+    } else if value.contains('\0') {
         SubjectCheck::Nul
     } else {
-        SubjectCheck::Valid(subject)
+        SubjectCheck::Valid(value)
     }
 }
 
@@ -134,6 +139,41 @@ pub fn pick_current(subject: &str, mut rows: Vec<ClaimRow>) -> Option<ClaimSourc
         value: win.value,
         candidates,
     })
+}
+
+/// Verbatim from `agents/door/claim_source.py::LIST_SQL` (`%s` -> `$1`).
+pub const LIST_SQL: &str = "select c.subject, c.source_path, c.valid_from, c.value, coalesce(d.author, 'unknown') from claim c \
+    left join document d on d.source_path = c.source_path \
+    where c.predicate = $1 and c.superseded_at is null \
+    order by c.valid_from desc";
+
+#[derive(Debug, Clone)]
+pub struct ListRow {
+    pub subject: String,
+    pub row: ClaimRow,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ClaimList {
+    pub predicate: String,
+    pub claims: Vec<ClaimSource>,
+}
+
+/// One `pick_current` per subject, subjects in code-point order (a `BTreeMap<String, _>` sorts
+/// by UTF-8 bytes, which is code-point order) — never the SQL collation.
+pub fn group_current(predicate: &str, rows: Vec<ListRow>) -> ClaimList {
+    let mut by_subject: std::collections::BTreeMap<String, Vec<ClaimRow>> =
+        std::collections::BTreeMap::default();
+    for r in rows {
+        by_subject.entry(r.subject).or_default().push(r.row);
+    }
+    ClaimList {
+        predicate: predicate.to_string(),
+        claims: by_subject
+            .into_iter()
+            .filter_map(|(subject, rows)| pick_current(&subject, rows))
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -291,5 +331,69 @@ mod tests {
     fn nul_is_its_own_verdict() {
         assert_eq!(check_subject(Some("subject=a%00b")), SubjectCheck::Nul);
         assert_eq!(check_subject(Some("subject=%00")), SubjectCheck::Nul);
+    }
+
+    fn lrow(
+        subject: &str,
+        path: &str,
+        valid_from: DateTime<FixedOffset>,
+        value: &str,
+        author: &str,
+    ) -> ListRow {
+        ListRow {
+            subject: subject.into(),
+            row: row(path, valid_from, value, author),
+        }
+    }
+
+    fn list_body(predicate: &str, rows: Vec<ListRow>) -> String {
+        serde_json::to_string(&group_current(predicate, rows)).unwrap()
+    }
+
+    // Expected values: Python claim_source.group_current + Starlette JSONResponse, `python -I`, 2026-10-28.
+    #[test]
+    fn subjects_come_out_in_code_point_order_one_pick_each() {
+        let t = at(2026, 9, 1, 0, 0, 0);
+        let frac = at(2026, 9, 3, 1, 2, 3) + chrono::Duration::microseconds(999_999);
+        let rows = vec![
+            lrow("b", "/b1.md", t, "vb", "unknown"),
+            lrow("B", "/B1.md", at(2026, 9, 2, 0, 0, 0), "vB", "unknown"),
+            lrow("가", "/g.md", t, "vg", "unknown"),
+            lrow("a b", "/ab.md", frac, "vab", "unknown"),
+            lrow("_x", "/x.md", t, "vx", "unknown"),
+            lrow("b", "/b0.md", t, "vb0", "unknown"),
+            lrow("a b", "/ab2.md", t, "mine", "owner"),
+        ];
+        let want = r#"{"predicate":"p","claims":[{"subject":"B","note":"/B1.md","valid_from":"2026-09-02T00:00:00+00:00","value":"vB","candidates":[{"note":"/B1.md","valid_from":"2026-09-02T00:00:00+00:00"}]},{"subject":"_x","note":"/x.md","valid_from":"2026-09-01T00:00:00+00:00","value":"vx","candidates":[{"note":"/x.md","valid_from":"2026-09-01T00:00:00+00:00"}]},{"subject":"a b","note":"/ab2.md","valid_from":"2026-09-01T00:00:00+00:00","value":"mine","candidates":[{"note":"/ab2.md","valid_from":"2026-09-01T00:00:00+00:00"},{"note":"/ab.md","valid_from":"2026-09-03T01:02:03+00:00"}]},{"subject":"b","note":"/b0.md","valid_from":"2026-09-01T00:00:00+00:00","value":"vb0","candidates":[{"note":"/b0.md","valid_from":"2026-09-01T00:00:00+00:00"},{"note":"/b1.md","valid_from":"2026-09-01T00:00:00+00:00"}]},{"subject":"가","note":"/g.md","valid_from":"2026-09-01T00:00:00+00:00","value":"vg","candidates":[{"note":"/g.md","valid_from":"2026-09-01T00:00:00+00:00"}]}]}"#;
+        let mut rev = rows.clone();
+        rev.reverse();
+        assert_eq!(list_body("p", rows), want);
+        assert_eq!(list_body("p", rev), want);
+    }
+
+    #[test]
+    fn predicate_is_echoed_raw_and_no_rows_is_an_empty_list() {
+        let rows = vec![lrow("s", "/a.md", at(2026, 9, 1, 0, 0, 0), "v", "unknown")];
+        assert_eq!(
+            list_body("한 글+%", rows),
+            r#"{"predicate":"한 글+%","claims":[{"subject":"s","note":"/a.md","valid_from":"2026-09-01T00:00:00+00:00","value":"v","candidates":[{"note":"/a.md","valid_from":"2026-09-01T00:00:00+00:00"}]}]}"#
+        );
+        assert_eq!(list_body("p", vec![]), r#"{"predicate":"p","claims":[]}"#);
+    }
+
+    #[test]
+    fn predicate_query_uses_the_same_decoding() {
+        assert_eq!(
+            check_param(Some("predicate=%ED%95%9C+%EA%B8%80%2B%25"), "predicate"),
+            valid("한 글+%")
+        );
+        assert_eq!(
+            check_param(Some("subject=a"), "predicate"),
+            SubjectCheck::Blank
+        );
+        assert_eq!(
+            check_param(Some("predicate=a%00"), "predicate"),
+            SubjectCheck::Nul
+        );
     }
 }

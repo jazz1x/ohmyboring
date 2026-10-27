@@ -2096,6 +2096,13 @@ class ClaimSourceRouteTests(unittest.TestCase):
         self.assertEqual(payload["predicate"], "p")
         self.assertEqual([c["subject"] for c in payload["claims"]], ["s-a", "s-b"])
 
+    def test_nul_in_predicate_is_400_before_the_store(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = [("s", "/a.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "v", "unknown")]
+        status, body, _ = _req(self.door_port, "GET", "/claim-sources?predicate=a%00b")
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body), {"error": "predicate must not contain NUL"})
+
 
 class SplitSubjectsGetRouteTests(unittest.TestCase):
     """GET /repairs/split-subjects through the real door app — stub rows, no DB (AC2).
