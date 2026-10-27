@@ -3286,6 +3286,33 @@ impl Store {
             .collect())
     }
 
+    /// The concept names written on each document (`about` edges to `concept:` nodes), as the
+    /// note spelled them — what `recall` shows so a writer reuses a name instead of coining one.
+    /// Same query as the Python door's `pg.concepts_by_doc`.
+    pub async fn concepts_of(&self, paths: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT e.src, n.label FROM edge e JOIN node n ON n.id = e.dst
+                 WHERE e.src = ANY($1) AND e.kind = 'about' AND n.kind = 'concept'
+                 ORDER BY e.src, n.label;",
+                &[&doc_ids],
+            )
+            .await
+            .context("concepts of")?;
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for row in rows {
+            let src: String = row.get(0);
+            let label: String = row.get(1);
+            map.entry(src.strip_prefix("doc:").unwrap_or(&src).to_owned())
+                .or_default()
+                .push(label);
+        }
+        Ok(map)
+    }
+
     /// `supersedes` edges pointing at these documents — the `source_path`s of the newer docs that
     /// replaced each one, i.e. `superseded_by` for every hit of a `/search` response in one query.
     pub async fn superseded_by(&self, paths: &[String]) -> Result<HashMap<String, Vec<String>>> {

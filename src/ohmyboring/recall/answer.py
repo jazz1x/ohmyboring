@@ -30,6 +30,7 @@ READ_ONLY_OPTIONS = "-c default_transaction_read_only=on"
 _DEFAULT_RESULTS = 5
 _DEFAULT_TOKENS = 2000
 _CLAIMS_PER_NOTE = 5
+MAX_CONCEPTS = 6
 #: 2026-10-23 모의(82 질의): wiki 단독 밖 37/82 → wiki+벡터 RRF 26/82, 제목 일치 wiki-7115 1위 유지
 RRF_K = 60
 FULL_BODY_HINT = "(본문 전체: query 에 wiki-NNNN 을 넣으면 그 노트 전체 블록이 앞에 붙는다)"
@@ -99,6 +100,7 @@ class Seams:
     vector: Callable[[Args], Either[list[Line], str]]
     superseded_by: Callable[[list[str]], Either[dict[str, list[str]], str]]
     current_claims: Callable[[list[str]], Either[dict[str, pg.RegisterRows], str]]
+    concepts: Callable[[list[str]], Either[dict[str, list[str]], str]]
 
 
 def _trimmed(value: Any) -> str | None:
@@ -134,36 +136,50 @@ def _basename(path: str) -> str:
     return path.rsplit("/", 1)[-1]
 
 
-def recall_line(path: str, body: str, superseded: dict[str, list[str]]) -> str:
+def concepts_line(names: list[str]) -> str:
+    """노트 한 줄 밑의 `  concepts: a, b` — 최대 6개, 없으면 줄 없음. 엔진 mcp.rs concepts_line 과 같은 모양."""
+    return f"\n  concepts: {', '.join(names[:MAX_CONCEPTS])}" if names else ""
+
+
+def recall_line(
+    path: str, body: str, superseded: dict[str, list[str]], concepts: dict[str, list[str]] | None = None
+) -> str:
     newer = superseded.get(path)
     label = _basename(path)
     if newer:
         label = f"{label} (superseded by {', '.join(_basename(p) for p in newer)})"
-    return f"- [{label}] {body}"
+    return f"- [{label}] {body}" + concepts_line((concepts or {}).get(path, []))
 
 
-def recall_text(lines: list[Line], superseded: dict[str, list[str]]) -> str:
-    return "\n\n".join(recall_line(path, body, superseded) for path, body in lines)
+def recall_text(
+    lines: list[Line], superseded: dict[str, list[str]], concepts: dict[str, list[str]] | None = None
+) -> str:
+    return "\n\n".join(recall_line(path, body, superseded, concepts) for path, body in lines)
 
 
 def _claim_line(row: pg.RegisterRow) -> str:
     return f"  · {row.kind} {row.subject}/{row.predicate}: {row.value}"
 
 
-def _refined_entry(
+def _refined_entry(  # noqa: PLR0913
     path: str,
     body: str,
     superseded: dict[str, list[str]],
     claims: dict[str, pg.RegisterRows],
     titles: dict[str, str],
+    concepts: dict[str, list[str]],
 ) -> tuple[str, bool]:
     register = claims.get(path)
     if register is None or not register.rows:
-        return recall_line(path, body, superseded), False
+        return recall_line(path, body, superseded, concepts), False
     head = recall_line(path, "", superseded).rstrip()
     title = titles.get(path, "")
     head = f"{head} {title}" if title else head
-    lines = [head, *(_claim_line(row) for row in register.rows)]
+    lines = [
+        head,
+        *concepts_line(concepts.get(path, [])).lstrip("\n").splitlines(),
+        *(_claim_line(row) for row in register.rows),
+    ]
     hidden = register.total_matching - len(register.rows)
     if hidden > 0:
         lines.append(f"  · … +{hidden} more")
@@ -175,8 +191,9 @@ def refined_text(
     superseded: dict[str, list[str]],
     claims: dict[str, pg.RegisterRows],
     titles: dict[str, str],
+    concepts: dict[str, list[str]],
 ) -> str:
-    entries = [_refined_entry(path, body, superseded, claims, titles) for path, body in lines]
+    entries = [_refined_entry(path, body, superseded, claims, titles, concepts) for path, body in lines]
     text = "\n\n".join(entry for entry, _ in entries)
     return f"{text}\n\n{FULL_BODY_HINT}" if any(has for _, has in entries) else text
 
@@ -280,13 +297,15 @@ def _select(args: Args, seams: Seams) -> Either[_Selected, Failed]:
             return _fused(selected, lines, args, seams)
 
 
-def _pool_of(selected: _Selected, superseded: dict[str, list[str]]) -> WikiPool | None:
+def _pool_of(
+    selected: _Selected, superseded: dict[str, list[str]], concepts: dict[str, list[str]]
+) -> WikiPool | None:
     if not selected.pool:
         return None
     entries = tuple(
         PoolEntry(
             c.hit.source_path,
-            recall_line(c.hit.source_path, c.hit.snippet, superseded),
+            recall_line(c.hit.source_path, c.hit.snippet, superseded, concepts),
             c.hit.score,
             c.key,
         )
@@ -317,14 +336,18 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
                     return Err(Failed(f"recall superseded: {detail}"))
                 case Ok(superseded):
                     shown = tuple(path for path, _ in selected.lines)
-                    match seams.current_claims(list(shown)):
-                        case Err(detail):
+                    match seams.current_claims(list(shown)), seams.concepts(paths):
+                        case Err(detail), _:
                             return Err(Failed(f"recall claims: {detail}"))
-                        case Ok(claims):
-                            text = recall_text(selected.lines, superseded)
-                            refined = refined_text(selected.lines, superseded, claims, dict(selected.titles))
+                        case _, Err(detail):
+                            return Err(Failed(f"recall concepts: {detail}"))
+                        case Ok(claims), Ok(concepts):
+                            text = recall_text(selected.lines, superseded, concepts)
+                            refined = refined_text(
+                                selected.lines, superseded, claims, dict(selected.titles), concepts
+                            )
                             refined += _failed_tail(selected.failed)
-                            pool = _pool_of(selected, superseded)
+                            pool = _pool_of(selected, superseded, concepts)
                             return Ok(
                                 Recalled(
                                     text,
@@ -390,6 +413,7 @@ def run(
         vector=lambda a: _vector_lines(read_only_dsn, a),
         superseded_by=lambda paths: _detail(pg.superseded_by(conn, paths)),
         current_claims=lambda paths: _detail(pg.current_claims(conn, paths, _CLAIMS_PER_NOTE)),
+        concepts=lambda paths: _detail(pg.concepts_by_doc(conn, paths)),
     )
     with contextlib.closing(conn):
         return answer(args, seams)

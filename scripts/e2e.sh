@@ -67,7 +67,7 @@ CLAIMS='[{"subject":"e2e-throwaway","predicate":"follow-up","value":"verify next
 # --- 1) remember ----------------------------------------------------------------
 echo "1) remember (MCP tools/call remember)…"
 req=$(jq -nc --arg t "$TITLE" --arg b "$BODY" --argjson claims "$CLAIMS" \
-  '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"remember",arguments:{title:$t,body:$b,origin:"personal",repo:"e2e-throwaway",claims:$claims}}}')
+  '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"remember",arguments:{title:$t,body:$b,origin:"personal",repo:"e2e-throwaway",concepts:["e2e-probe"],claims:$claims}}}')
 resp=$(curl -sf -m120 "$MCP" -H 'content-type: application/json' -d "$req") \
   || fail "remember call failed (curl)"
 err=$(printf '%s' "$resp" | jq -r '.error.message // empty')

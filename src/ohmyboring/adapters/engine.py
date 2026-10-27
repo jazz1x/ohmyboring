@@ -74,6 +74,7 @@ class NoteProvenance:
     repo: str | None = None
     author: str | None = None
     judge: str | None = None
+    concepts: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -287,6 +288,8 @@ class DrudgeClient:
             payload["supersedes"] = provenance.supersedes
         if provenance.repo:
             payload["repo"] = provenance.repo
+        if provenance.concepts:
+            payload["concepts"] = provenance.concepts
         if provenance.author is not None:
             payload["author"] = provenance.author
         if provenance.judge is not None:

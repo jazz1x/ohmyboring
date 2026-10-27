@@ -260,6 +260,27 @@ def said_by_owner_counts(conn: psycopg.Connection, paths: list[str]) -> Either[d
     )
 
 
+#: 회상 한 줄에 싣는 개념 — about 간선의 concept 노드 label(적힌 그대로의 이름). neighbors 가 보여 주는
+#: 것과 같은 간선이라 「이미 쓰던 이름」을 여기서 읽는다. store.rs concepts_of 와 같은 질의.
+_CONCEPTS_SQL = (
+    "SELECT e.src, n.label FROM edge e JOIN node n ON n.id = e.dst"
+    " WHERE e.src = ANY(%s) AND e.kind = 'about' AND n.kind = 'concept'"
+    " ORDER BY e.src, n.label;"
+)
+
+
+def concepts_by_doc(conn: psycopg.Connection, paths: list[str]) -> Either[dict[str, list[str]], PgError]:
+    doc_ids = [doc_node_id(path) for path in paths]
+
+    def run() -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for src, label in _exec_fetchall(conn, _CONCEPTS_SQL, (doc_ids,)):
+            out.setdefault(src.removeprefix("doc:"), []).append(label)
+        return out
+
+    return _attempt(run)
+
+
 def superseded_by(conn: psycopg.Connection, paths: list[str]) -> Either[dict[str, list[str]], PgError]:
     """store.rs:3181 — supersedes 간선의 대상(옛 노트) 마다 새 노트 경로."""
     doc_ids = [doc_node_id(path) for path in paths]

@@ -98,7 +98,7 @@ remember: ## Save + ingest a note immediately   make remember M="content" [T="ti
 	@[ -n "$(M)" ] || { echo 'usage: make remember M="content" [T="title"]'; exit 1; }
 	@curl -s -m600 -X POST "$${BORING_DOOR_URL:-http://127.0.0.1:7710}/mcp" -H 'content-type: application/json' \
 	  -d "$$(jq -nc --arg t "$${T:-$(M)}" --arg b "$(M)" \
-	    '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"remember",arguments:{title:$$t,body:$$b}}}')" \
+	    '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"remember",arguments:{title:$$t,body:$$b,concepts:["manual-note"]}}}')" \
 	  | jq -r '.result.content[0].text // .error.message'
 
 collect: ## Lazily collect past Claude Code sessions (one at a time)   make collect [N=1]

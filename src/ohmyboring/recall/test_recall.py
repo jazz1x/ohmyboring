@@ -292,7 +292,9 @@ class _Seams:
         claims=None,
         claims_err=None,
         vector_err=None,
+        concepts=None,
     ):
+        self._concepts = concepts or {}
         self._claims, self._claims_err = claims or {}, claims_err
         self._vector_err = vector_err
         self.skipped = 0
@@ -302,7 +304,11 @@ class _Seams:
         self._superseded, self._rank_err = superseded or {}, rank_err
 
     def seams(self) -> answer.Seams:
-        return answer.Seams(self._wiki, self._rank, self._vec, self._sup, self._claims_of)
+        return answer.Seams(self._wiki, self._rank, self._vec, self._sup, self._claims_of, self._concepts_of)
+
+    def _concepts_of(self, paths):
+        self.calls.append("concepts")
+        return Ok({p: v for p, v in self._concepts.items() if p in paths})
 
     def _claims_of(self, paths):
         self.calls.append("claims")
@@ -427,6 +433,21 @@ def test_superseded_label_names_the_newer_notes_and_lines_join_with_a_blank_line
     recalled = _text(answer.answer(_args(), stub.seams()))
     assert recalled.text == "- [old.md (superseded by n1.md, n2.md)] 옛\n\n- [live.md] 새", recalled.text
     assert answer.recall_text([("/a/b.md", "x")], {}) == "- [b.md] x"
+
+
+def test_each_note_carries_one_concepts_line_of_at_most_six_and_the_length_cost_is_small():
+    hits = [_hit("a", 5.0, "첫 본문"), _hit("b", 4.0, "둘째 본문"), _hit("c", 3.0, "셋째 본문")]
+    names = ["mutation-testing", "single-source-of-truth", "rop", "fold", "adt", "slugify", "dropped-7th"]
+    concepts = {"/vault/wiki/a.md": names, "/vault/wiki/b.md": ["rop"]}
+    plain = _text(answer.answer(_args(), _Seams(wiki_hits=hits).seams()))
+    rich = _text(answer.answer(_args(), _Seams(wiki_hits=hits, concepts=concepts).seams()))
+    first = "- [a.md] 첫 본문\n  concepts: mutation-testing, single-source-of-truth, rop, fold, adt, slugify"
+    assert rich.text.split("\n\n")[0] == first, rich.text
+    assert "dropped-7th" not in rich.text
+    assert rich.text.split("\n\n")[1] == "- [b.md] 둘째 본문\n  concepts: rop"
+    assert rich.text.split("\n\n")[2] == "- [c.md] 셋째 본문", "no concepts → no line"
+    assert rich.refined.count("concepts:") == 2
+    assert len(rich.text) > len(plain.text)
 
 
 def _claim_row(subject: str, predicate: str, value: str, kind: str = "decision") -> pg.RegisterRow:
@@ -557,6 +578,7 @@ def test_a_query_equal_to_a_title_puts_that_note_first_unless_it_is_superseded()
                 vector=lambda a: Ok([]),
                 superseded_by=lambda paths: Ok({}),
                 current_claims=lambda paths: Ok({}),
+                concepts=lambda paths: Ok({}),
             )
             recalled = _text(answer.answer(_args(query=f"  {title.upper()} ", max_results=3), seams))
             return [

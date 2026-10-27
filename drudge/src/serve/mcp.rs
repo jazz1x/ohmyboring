@@ -129,7 +129,7 @@ fn mcp_tools_list() -> Value {
                     "body": {"type": "string", "description": "the curated note body (markdown problem-solving narrative)"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "topical tags (≤6), lowercase, no CJK"},
                     "tools": {"type": "array", "items": {"type": "string"}, "description": "software tools/libraries used (≤6), short canonical names"},
-                    "concepts": {"type": "array", "items": {"type": "string"}, "description": "key technical concepts/patterns (≤6)"},
+                    "concepts": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 6, "description": format!("key technical concepts/patterns (1-6, required). {CONCEPTS_HINT}")},
                     "origin": {"type": "string", "enum": ["personal", "company", "mirror", "community"], "description": "default personal"},
                     "repo": {"type": "string", "description": "optional repo slug → becomes the project + a repo/<slug> tag"},
                     "sources": {"type": "array", "items": {"type": "string"}, "description": "optional vault-local evidence paths for this note, e.g. raw/<file>.md"},
@@ -791,10 +791,21 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             eprintln!("[mcp] handover for session {session_id} failed: {error:#}");
         }
     }
-    Ok(recall_text(&lines, &superseded))
+    let concepts = match s.store.as_ref() {
+        Some(store) => store
+            .concepts_of(&paths)
+            .await
+            .map_err(|e| (-32603_i32, format!("recall concepts: {e:#}")))?,
+        None => HashMap::new(),
+    };
+    Ok(recall_text(&lines, &superseded, &concepts))
 }
 
-fn recall_text(lines: &[(String, String)], superseded: &HashMap<String, Vec<String>>) -> String {
+fn recall_text(
+    lines: &[(String, String)],
+    superseded: &HashMap<String, Vec<String>>,
+    concepts: &HashMap<String, Vec<String>>,
+) -> String {
     let file_name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_owned();
     lines
         .iter()
@@ -807,7 +818,14 @@ fn recall_text(lines: &[(String, String)], superseded: &HashMap<String, Vec<Stri
                     format!("{src} (superseded by {})", newer.join(", "))
                 })
                 .unwrap_or(src);
-            format!("- [{label}] {body}")
+            let names = concepts.get(path).map_or(&[][..], Vec::as_slice);
+            let line = if names.is_empty() {
+                String::new()
+            } else {
+                let shown: Vec<&str> = names.iter().take(6).map(String::as_str).collect();
+                format!("\n  concepts: {}", shown.join(", "))
+            };
+            format!("- [{label}] {body}{line}")
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -1320,6 +1338,9 @@ pub(crate) struct Remembered {
     /// The exact text MCP `remember` has always answered with.
     pub(crate) message: String,
 }
+
+/// Sentence the `remember` tool schema appends to its `concepts` description.
+const CONCEPTS_HINT: &str = "이미 쓰던 개념 이름을 먼저 쓴다(recall·neighbors 결과의 concepts). 영어 slug(예: mutation-testing).";
 
 async fn mcp_remember(
     s: &AppState,
@@ -2315,14 +2336,15 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     use super::{
         DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote, ToolCallError,
-        ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_tools_list,
-        needs_dedup, parse_remember_note, parse_supersedes, pick_duplicate,
-        probable_session_duplicate, remember_note, should_replace_duplicate, supersedes_suffix,
-        tool_outcome_snippet, tool_query_arg, wiki_path_spellings,
+        ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_remember,
+        mcp_tools_list, needs_dedup, parse_remember_note, parse_supersedes, pick_duplicate,
+        probable_session_duplicate, recall_text, remember_note, should_replace_duplicate,
+        supersedes_suffix, tool_outcome_snippet, tool_query_arg, wiki_path_spellings,
     };
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
@@ -2531,6 +2553,59 @@ mod tests {
         .unwrap();
         assert_eq!(fix.duplicate, None, "a correction skips the gate");
         assert_ne!(fix.source_path, first.source_path);
+    }
+
+    #[test]
+    fn recall_text_gives_each_note_one_concepts_line_of_at_most_six() {
+        let lines = vec![
+            ("/vault/wiki/a.md".to_owned(), "첫 본문".to_owned()),
+            ("/vault/wiki/b.md".to_owned(), "둘째 본문".to_owned()),
+            ("/vault/wiki/c.md".to_owned(), "셋째 본문".to_owned()),
+        ];
+        let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let concepts = HashMap::from([
+            (
+                "/vault/wiki/a.md".to_owned(),
+                names(&[
+                    "mutation-testing",
+                    "single-source-of-truth",
+                    "rop",
+                    "fold",
+                    "adt",
+                    "slugify",
+                    "dropped-7th",
+                ]),
+            ),
+            ("/vault/wiki/b.md".to_owned(), names(&["rop"])),
+        ]);
+        let text = recall_text(&lines, &HashMap::new(), &concepts);
+        let notes: Vec<&str> = text.split("\n\n").collect();
+        assert_eq!(
+            notes[0],
+            "- [a.md] 첫 본문\n  concepts: mutation-testing, single-source-of-truth, rop, fold, adt, slugify"
+        );
+        assert_eq!(notes[1], "- [b.md] 둘째 본문\n  concepts: rop");
+        assert_eq!(notes[2], "- [c.md] 셋째 본문", "no concepts, no line");
+    }
+
+    #[tokio::test]
+    async fn mcp_remember_still_accepts_missing_empty_and_korean_only_concepts() {
+        // The live distiller calls `tools/call remember` without the tool schema; refusing any
+        // of these would drop its notes. The schema says required, the server does not enforce.
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        for (n, concepts) in [None, Some(json!([])), Some(json!(["테스트", "개념"]))]
+            .into_iter()
+            .enumerate()
+        {
+            let mut args =
+                json!({"title": format!("t{n}"), "body": format!("b{n}"), "omb_session_id": "s1"});
+            if let Some(c) = concepts {
+                args["concepts"] = c;
+            }
+            let out = mcp_remember(&s, Caller::Unverified, Some(&args)).await;
+            assert!(out.is_ok(), "case {n} must be accepted: {out:?}");
+        }
     }
 
     #[tokio::test]
