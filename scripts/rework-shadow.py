@@ -63,9 +63,9 @@ def transcripts(days):
 
 
 def _note_order(path):
-    """Wiki number, not file-name string order (wiki-10000 sorts before wiki-2000); non-wiki first."""
+    """Wiki number, not file-name string order (wiki-10000 sorts before wiki-2000); non-wiki last, by name."""
     number = wiki_number(path.name)
-    return (number is not None, number or 0, path.name)
+    return (number is None, number or 0, path.name)
 
 
 def vault_phrases(vault):
