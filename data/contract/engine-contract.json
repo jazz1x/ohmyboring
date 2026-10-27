@@ -462,10 +462,12 @@
           "type": "array"
         },
         "concepts": {
-          "description": "key technical concepts/patterns (≤6)",
+          "description": "key technical concepts/patterns (1-6, required). 이미 쓰던 개념 이름을 먼저 쓴다(recall·neighbors 결과의 concepts). 영어 slug(예: mutation-testing).",
           "items": {
             "type": "string"
           },
+          "maxItems": 6,
+          "minItems": 1,
           "type": "array"
         },
         "judge": {
@@ -525,7 +527,8 @@
       },
       "required": [
         "title",
-        "body"
+        "body",
+        "concepts"
       ],
       "type": "object"
     },
