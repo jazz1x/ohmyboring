@@ -139,6 +139,15 @@ pub struct HandoverReport {
     pub unknown: usize,
 }
 
+/// What a `supersedes` edge closes in the older note's claims.
+#[derive(Debug, Clone, Copy)]
+enum SealRule {
+    /// Every current claim of the older note (verdict writes, `compact`).
+    WholeNote,
+    /// Only the slots the newer note re-states (`remember`).
+    RestatedSlots,
+}
+
 /// Result of a supersedes write: how many `supersedes` edges were written and how many pairs were
 /// skipped — a pair naming the same path twice, or one naming a path with no `document` row.
 #[derive(Debug, Default)]
@@ -2986,6 +2995,16 @@ impl Store {
         pairs: &[[String; 2]],
         judge: Option<&str>,
     ) -> Result<SupersedesReport> {
+        Self::record_supersedes_sealing(tx, pairs, judge, SealRule::WholeNote).await
+    }
+
+    /// `record_supersedes` with the seal rule named by the caller.
+    async fn record_supersedes_sealing(
+        tx: &Transaction<'_>,
+        pairs: &[[String; 2]],
+        judge: Option<&str>,
+        rule: SealRule,
+    ) -> Result<SupersedesReport> {
         let mut report = SupersedesReport::default();
         let (pairs, skipped) = split_supersedes(pairs);
         report.unknown += skipped.len();
@@ -3020,10 +3039,39 @@ impl Store {
             )
             .await?;
             report.supersedes += 1;
-            Self::seal_superseded_claims(tx, &pair[0], &pair[1]).await?;
+            match rule {
+                SealRule::WholeNote => {
+                    Self::seal_superseded_claims(tx, &pair[0], &pair[1]).await?;
+                }
+                SealRule::RestatedSlots => {
+                    Self::seal_restated_slots(tx, &pair[0], &pair[1]).await?;
+                }
+            }
             Self::note_retired_slots(tx, &pair[0], &pair[1], &mut report.retired).await?;
         }
         Ok(report)
+    }
+
+    /// Owner decision, as the Python writer does it: close only the `(subject, predicate)` slots
+    /// the newer note re-states, stamped like the whole-note seal. The older note's other facts
+    /// stay live, and nothing is handed on to a next-latest row. Same owner rule as the whole
+    /// seal (`{RETIRED_NOTE}`).
+    async fn seal_restated_slots(tx: &Transaction<'_>, newer: &str, older: &str) -> Result<()> {
+        tx.execute(
+            &format!(
+                "UPDATE claim c SET superseded_at = COALESCE(
+                        (SELECT max(valid_from) FROM claim WHERE source_path = $1),
+                        now())
+                 WHERE c.source_path = $2 AND c.superseded_at IS NULL
+                   AND (c.subject, c.predicate) IN
+                       (SELECT subject, predicate FROM claim WHERE source_path = $1)
+                   AND {RETIRED_NOTE};",
+            ),
+            &[&newer, &older],
+        )
+        .await
+        .context("seal re-stated slots of the superseded note")?;
+        Ok(())
     }
 
     /// Appends the older note's slots closed by this write to `retired`, each once. Read after
@@ -3271,13 +3319,22 @@ impl Store {
         Ok(report)
     }
 
-    /// The supersedes write of a `remember` request, in its own transaction.
+    /// The supersedes write of a `remember` request, in its own transaction: it closes only the
+    /// slots the new note re-states. `compact` and verdict writes keep the whole-note seal.
     pub async fn remember_supersedes_in_tx(
         &self,
         pairs: &[[String; 2]],
         judge: Option<&str>,
     ) -> Result<SupersedesReport> {
-        self.supersedes_in_tx(pairs, judge).await
+        let mut conn = self.db().await?;
+        let tx = conn
+            .transaction()
+            .await
+            .context("begin supersedes transaction")?;
+        let report =
+            Self::record_supersedes_sealing(&tx, pairs, judge, SealRule::RestatedSlots).await?;
+        tx.commit().await.context("commit supersedes transaction")?;
+        Ok(report)
     }
 
     /// Consumption counts (`used`/`contested` edges) per document — one query for all hits of a
