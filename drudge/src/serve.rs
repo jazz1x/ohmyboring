@@ -464,6 +464,101 @@ mod tests {
         }
     }
 
+    // Expected values: Python door `_projects` via Starlette TestClient with no store configured,
+    // 2026-10-28. The names branch (no `active_days`) is the engine's own answer, pinned as it was.
+    // PG paths (200/502) are unverified: the Docker VM is down.
+    #[tokio::test]
+    async fn projects_active_days_400_and_503_have_python_bodies() {
+        use tower::ServiceExt;
+        let cfg = crate::config::BoringConfig::default();
+        let state = super::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(None),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+            owner_token: std::sync::Arc::new(None),
+        };
+        let router = super::build_router(state);
+        let int_msg = r#"{"error":"active_days must be an integer 1..365"}"#.to_string();
+        let no_store = r#"{"error":"store not configured"}"#.to_string();
+        let range = |got: &str| format!(r#"{{"error":"active_days must be 1..365, got {got}"}}"#);
+        let bad = StatusCode::BAD_REQUEST;
+        let off = StatusCode::SERVICE_UNAVAILABLE;
+        let names_off = StatusCode::INTERNAL_SERVER_ERROR;
+        let names_msg = r#"{"error":"BORING_VECTOR=off — this feature requires the vector backend (pgvector). Set BORING_VECTOR=on and start Postgres."}"#.to_string();
+        let cases: Vec<(String, StatusCode, String)> = vec![
+            ("/projects?active_days=14".into(), off, no_store.clone()),
+            ("/projects?active_days=%2014".into(), off, no_store.clone()),
+            ("/projects?active_days=+14".into(), off, no_store.clone()),
+            ("/projects?active_days=%2B14".into(), off, no_store.clone()),
+            ("/projects?active_days=1_0".into(), off, no_store.clone()),
+            ("/projects?active_days=0".into(), bad, range("0")),
+            ("/projects?active_days=366".into(), bad, range("366")),
+            ("/projects?active_days=-1".into(), bad, range("-1")),
+            ("/projects?active_days=abc".into(), bad, int_msg.clone()),
+            ("/projects?active_days=".into(), bad, int_msg.clone()),
+            ("/projects?active_days=1.5".into(), bad, int_msg.clone()),
+            (
+                "/projects?active_days=%EF%BC%91%EF%BC%94".into(),
+                off,
+                no_store.clone(),
+            ),
+            (
+                format!("/projects?active_days={}", "9".repeat(4301)),
+                bad,
+                int_msg.clone(),
+            ),
+            (
+                format!("/projects?active_days={}", "1".repeat(4300)),
+                bad,
+                range(&"1".repeat(4300)),
+            ),
+            (
+                "/projects?active_days=1&active_days=2".into(),
+                off,
+                no_store.clone(),
+            ),
+            (
+                "/projects?active_days=0&active_days=2".into(),
+                off,
+                no_store.clone(),
+            ),
+            (
+                "/projects?active_days=2&active_days=0".into(),
+                bad,
+                range("0"),
+            ),
+            (
+                "/projects?foo=1&active_days=7".into(),
+                off,
+                no_store.clone(),
+            ),
+            ("/projects?foo=1".into(), names_off, names_msg.clone()),
+            ("/projects".into(), names_off, names_msg),
+        ];
+        for (uri, status, want) in cases {
+            let req = axum::extract::Request::builder()
+                .uri(&uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let res = router.clone().oneshot(req).await.unwrap();
+            let shown = &uri[..uri.len().min(48)];
+            assert_eq!(res.status(), status, "{shown}");
+            let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            assert_eq!(&body[..], want.as_bytes(), "{shown}");
+        }
+    }
+
     #[test]
     fn recurrences_days_defaults_to_30() {
         assert_eq!(recurrences_days(None), 30);

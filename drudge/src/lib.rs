@@ -18,6 +18,7 @@ pub mod graph;
 pub mod ingest;
 pub mod llm;
 pub mod pii;
+pub mod projects;
 pub mod redact;
 pub mod retrieve;
 pub mod rules;
