@@ -1,7 +1,8 @@
 """회상 그림자 (E4-2) — 문이 엔진 recall 답을 그대로 돌려준 뒤, 같은 요청을 파이썬 회상 길에
 읽기 전용으로 태워 엔진 텍스트와 글자 단위로 대조해 recall_shadow 사건 한 줄을 만든다.
 
-대조 대상은 문이 번호 노트 블록을 붙이기 전의 엔진 텍스트다. 사건에는 질의 원문을 싣지 않는다 —
+대조 대상은 문이 실제로 내보내는 refined 텍스트다 — 엔진 블록(번호 노트 블록 붙이기 전)에도 파이썬 쪽과
+같은 refine(claims·제목·힌트·실패 꼬리)을 태워 견준다(compared="refined"). error 는 cause(embed|engine|python)를 단다. 사건에는 질의 원문을 싣지 않는다 —
 길(wiki|vector)·두 쪽 줄 수·처음 갈린 줄(번호와 두 줄의 앞 80자)·사유·건너뛴 wiki 파일 수(skipped)뿐이다.
 status 는 ok(글자까지 같음)·tie(점수 동점 때문에만 다름 — 엔진은 동점을 HashMap 순서로 가르고 파이썬은
 경로순으로 고정한다)·mismatch·error.
@@ -15,13 +16,18 @@ from dataclasses import dataclass
 from itertools import zip_longest
 from typing import Any
 
+from ohmyboring.recall import answer
 from ohmyboring.recall.answer import Failed, Recalled, Rejected, WikiPool
 from ohmyboring.result import Either, Err, Ok
+from ohmyboring.search import pg
 
 EVENT_NAME = "recall_shadow"
+COMPARED = "refined"
+CAUSE_EMBED, CAUSE_ENGINE, CAUSE_PYTHON = "embed", "engine", "python"
 _DIFF_CHARS = 80
 
 PythonAnswer = Either[Recalled, Rejected | Failed]
+ClaimsFor = Callable[[list[str]], Either[dict[str, pg.RegisterRows], str]]
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,9 @@ class ShadowEvent:
     first_diff: FirstDiff | None = None
     reason: str | None = None
     skipped: int = 0
+    cause: str | None = None  # error 만 — embed|engine|python
+    superseded_hit: bool = False  # 답에 실린 노트 중 대체된 노트가 있었나
+    compared: str = COMPARED  # 무엇끼리 견줬나 — 옛 text 기준 숫자와 섞이지 않게
 
 
 @dataclass(frozen=True)
@@ -113,13 +122,47 @@ def _tie_only(engine: str, pool: WikiPool) -> bool:
     return all(a <= b for a, b in zip(keys, keys[1:]))
 
 
-def _compare_text(engine: str, python: Recalled) -> ShadowEvent:
-    engine_lines = engine.split("\n")
-    python_lines = python.text.split("\n")
-    same = engine == python.text
-    tie = not same and python.pool is not None and _tie_only(engine, python.pool)
+def _cause_of(detail: str) -> str:
+    return CAUSE_EMBED if "embed:" in detail else CAUSE_PYTHON
+
+
+def _engine_refined(engine: str, python: Recalled, claims: dict[str, pg.RegisterRows]) -> str:
+    """엔진 블록에 문이 내보낼 때와 같은 refine 을 태운다 — 경로는 파이썬 후보 블록에서 되찾는다."""
+    context = python.context
+    paths = dict(context.block_paths) if context is not None else {}
+    blocks = [(paths.get(block, ""), block) for block in engine.split("\n\n")]
+    superseded, titles, concepts = (
+        (context.superseded, context.titles, context.concepts) if context is not None else ({}, {}, {})
+    )
+    return answer.refine_blocks(blocks, superseded, claims, titles, concepts) + answer.failed_tail(
+        python.failed
+    )
+
+
+def _shared_entries_agree(engine_refined: str, python_refined: str) -> bool:
+    """동점으로 엔진이 다른 노트를 골랐을 수 있다 — 양쪽에 다 든 노트(`- [이름]` 머리)는 refine 된 모양이 같아야 한다."""
+
+    def by_head(text: str) -> dict[str, str]:
+        return {entry.split("]")[0]: entry for entry in text.split("\n\n")}
+
+    engine, python = by_head(engine_refined), by_head(python_refined)
+    return all(engine[head] == python[head] for head in engine.keys() & python.keys())
+
+
+def _compare_text(engine: str, python: Recalled, claims: dict[str, pg.RegisterRows]) -> ShadowEvent:
+    engine_refined = _engine_refined(engine, python, claims)
+    engine_lines = engine_refined.split("\n")
+    python_lines = python.refined.split("\n")
+    same_text = engine == python.text
+    same = engine_refined == python.refined
+    tie_text = not same_text and python.pool is not None and _tie_only(engine, python.pool)
+    tie = tie_text and _shared_entries_agree(engine_refined, python.refined)
     status, reason = (
-        ("ok", None) if same else ("tie", "tie-only difference") if tie else ("mismatch", "text differs")
+        ("ok", None)
+        if same
+        else ("tie", "tie-only difference")
+        if tie
+        else ("mismatch", "refined differs" if same_text or tie_text else "text differs")
     )
     return ShadowEvent(
         status,
@@ -129,15 +172,37 @@ def _compare_text(engine: str, python: Recalled) -> ShadowEvent:
         first_diff=None if same else _first_diff(engine_lines, python_lines),
         reason=reason,
         skipped=python.skipped,
+        superseded_hit=_superseded_hit(python),
     )
 
 
-def compare(engine_status: int, engine_body: bytes, python: PythonAnswer) -> ShadowEvent:
+def _superseded_hit(python: Recalled) -> bool:
+    context = python.context
+    return context is not None and any(path in context.superseded for path in python.shown)
+
+
+def _engine_paths(engine: str, python: Recalled) -> list[str]:
+    paths = dict(python.context.block_paths) if python.context is not None else {}
+    return sorted({paths[block] for block in engine.split("\n\n") if block in paths})
+
+
+def _compare_with_claims(engine: str, python: Recalled, claims_for: ClaimsFor) -> ShadowEvent:
+    paths = _engine_paths(engine, python)
+    match claims_for(paths) if paths else Ok({}):
+        case Err(detail):
+            return ShadowEvent("error", reason=f"python claims lookup failed: {detail}", cause=CAUSE_PYTHON)
+        case Ok(claims):
+            return _compare_text(engine, python, claims)
+
+
+def compare(
+    engine_status: int, engine_body: bytes, python: PythonAnswer, claims_for: ClaimsFor
+) -> ShadowEvent:
     match (_engine_side(engine_status, engine_body), python):
         case (_EngineUnreadable(reason), _):
-            return ShadowEvent("error", reason=f"engine unreadable: {reason}")
+            return ShadowEvent("error", reason=f"engine unreadable: {reason}", cause=CAUSE_ENGINE)
         case (_, Err(Failed(detail))):
-            return ShadowEvent("error", reason=f"python failed: {detail}")
+            return ShadowEvent("error", reason=f"python failed: {detail}", cause=_cause_of(detail))
         case (_EngineRejection(message), Err(Rejected(python_message))):
             same = message == python_message
             return ShadowEvent(
@@ -151,15 +216,19 @@ def compare(engine_status: int, engine_body: bytes, python: PythonAnswer) -> Sha
         case (_EngineText(_), Err(Rejected(python_message))):
             return ShadowEvent("mismatch", reason=f"python rejected {python_message!r}, engine answered")
         case (_EngineText(text), Ok(recalled)):
-            return _compare_text(text, recalled)
+            return _compare_with_claims(text, recalled, claims_for)
 
 
-def run_shadow(engine_status: int, engine_body: bytes, python: Callable[[], PythonAnswer]) -> ShadowEvent:
-    return compare(engine_status, engine_body, python())
+def run_shadow(
+    engine_status: int, engine_body: bytes, python: Callable[[], PythonAnswer], claims_for: ClaimsFor
+) -> ShadowEvent:
+    return compare(engine_status, engine_body, python(), claims_for)
 
 
 def event_payload(event: ShadowEvent) -> dict[str, Any]:
     payload: dict[str, Any] = {
+        "compared": event.compared,
+        "superseded_hit": event.superseded_hit,
         "path": event.path,
         "engine_lines": event.engine_lines,
         "python_lines": event.python_lines,
@@ -173,4 +242,6 @@ def event_payload(event: ShadowEvent) -> dict[str, Any]:
         }
     if event.reason is not None:
         payload["reason"] = event.reason
+    if event.cause is not None:
+        payload["cause"] = event.cause
     return payload

@@ -12,7 +12,7 @@ from __future__ import annotations
 import contextlib
 import itertools
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +81,16 @@ class WikiPool:
 
 
 @dataclass(frozen=True)
+class RefineContext:
+    """refined 를 다시 짤 python 쪽 재료 — block_paths 는 (recall_line 블록, 경로) 후보 전부."""
+
+    superseded: dict[str, list[str]]
+    titles: dict[str, str]
+    concepts: dict[str, list[str]]
+    block_paths: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class Recalled:
     text: str
     path: str  # 줄을 낸 길 — wiki | vector | wiki+vector
@@ -91,6 +101,9 @@ class Recalled:
     pool: WikiPool | None = None  # wiki 길만
     shown: tuple[str, ...] = ()  # 답에 실린 줄의 경로 — handover 가 쓸 목록(엔진 mcp_recall 의 paths)
     failed: tuple[tuple[str, str], ...] = ()  # (길, 사유) — wiki 가 답했는데 벡터가 실패한 경우
+    context: RefineContext | None = field(
+        default=None, compare=False
+    )  # 그림자 전용 — 엔진 블록에 같은 refine 을 태울 재료
 
 
 @dataclass(frozen=True)
@@ -163,7 +176,7 @@ def _claim_line(row: pg.RegisterRow) -> str:
 
 def _refined_entry(  # noqa: PLR0913
     path: str,
-    body: str,
+    block: str,
     superseded: dict[str, list[str]],
     claims: dict[str, pg.RegisterRows],
     titles: dict[str, str],
@@ -171,7 +184,7 @@ def _refined_entry(  # noqa: PLR0913
 ) -> tuple[str, bool]:
     register = claims.get(path)
     if register is None or not register.rows:
-        return recall_line(path, body, superseded, concepts), False
+        return block, False
     head = recall_line(path, "", superseded).rstrip()
     title = titles.get(path, "")
     head = f"{head} {title}" if title else head
@@ -186,6 +199,19 @@ def _refined_entry(  # noqa: PLR0913
     return "\n".join(lines), True
 
 
+def refine_blocks(
+    blocks: list[tuple[str, str]],
+    superseded: dict[str, list[str]],
+    claims: dict[str, pg.RegisterRows],
+    titles: dict[str, str],
+    concepts: dict[str, list[str]],
+) -> str:
+    """(경로, recall_line 블록) 을 문이 내보내는 모양으로 — 그림자가 엔진 쪽 블록에도 같은 걸음을 태운다."""
+    entries = [_refined_entry(path, block, superseded, claims, titles, concepts) for path, block in blocks]
+    text = "\n\n".join(entry for entry, _ in entries)
+    return f"{text}\n\n{FULL_BODY_HINT}" if any(has for _, has in entries) else text
+
+
 def refined_text(
     lines: list[Line],
     superseded: dict[str, list[str]],
@@ -193,9 +219,8 @@ def refined_text(
     titles: dict[str, str],
     concepts: dict[str, list[str]],
 ) -> str:
-    entries = [_refined_entry(path, body, superseded, claims, titles, concepts) for path, body in lines]
-    text = "\n\n".join(entry for entry, _ in entries)
-    return f"{text}\n\n{FULL_BODY_HINT}" if any(has for _, has in entries) else text
+    blocks = [(path, recall_line(path, body, superseded, concepts)) for path, body in lines]
+    return refine_blocks(blocks, superseded, claims, titles, concepts)
 
 
 @dataclass(frozen=True)
@@ -314,7 +339,7 @@ def _pool_of(
     return WikiPool(entries, selected.size)
 
 
-def _failed_tail(failed: tuple[tuple[str, str], ...]) -> str:
+def failed_tail(failed: tuple[tuple[str, str], ...]) -> str:
     return "".join(f"\n\n({name} 길 실패: {why})" for name, why in failed)
 
 
@@ -323,7 +348,7 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
         case Err(failure):
             return Err(failure)
         case Ok(selected) if not selected.lines:
-            refined = NO_EXPERIENCE + _failed_tail(selected.failed)
+            refined = NO_EXPERIENCE + failed_tail(selected.failed)
             return Ok(
                 Recalled(NO_EXPERIENCE, selected.path, refined, selected.skipped, failed=selected.failed)
             )
@@ -346,8 +371,18 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
                             refined = refined_text(
                                 selected.lines, superseded, claims, dict(selected.titles), concepts
                             )
-                            refined += _failed_tail(selected.failed)
+                            refined += failed_tail(selected.failed)
                             pool = _pool_of(selected, superseded, concepts)
+                            candidates = [
+                                *((p, recall_line(p, b, superseded, concepts)) for p, b in selected.lines),
+                                *((e.path, e.line) for e in (pool.entries if pool else ())),
+                            ]
+                            context = RefineContext(
+                                superseded,
+                                dict(selected.titles),
+                                concepts,
+                                tuple((block, path) for path, block in dict.fromkeys(candidates)),
+                            )
                             return Ok(
                                 Recalled(
                                     text,
@@ -357,6 +392,7 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
                                     pool,
                                     shown,
                                     selected.failed,
+                                    context,
                                 )
                             )
 
@@ -382,6 +418,21 @@ def _vector_lines(read_only_dsn: str, args: Args) -> Either[list[Line], str]:
             return Err(detail)
         case Ok(documents):
             return Ok([(doc.metadata["source_path"], doc.page_content) for doc in documents])
+
+
+def claims_of(dsn: str, paths: list[str]) -> Either[dict[str, pg.RegisterRows], str]:
+    """읽기 전용 연결로 경로들의 현재 claims 를 한 번 읽는다 — 그림자가 엔진이 고른 노트에 쓴다."""
+    try:
+        read_only_dsn = make_conninfo(dsn, options=READ_ONLY_OPTIONS)
+    except psycopg.Error as e:
+        return Err(f"pg dsn: {e}")
+    match pg.connect(read_only_dsn):
+        case Err(failure):
+            return Err(f"pg connect: {failure.detail}")
+        case Ok(conn):
+            pass
+    with contextlib.closing(conn):
+        return _detail(pg.current_claims(conn, paths, _CLAIMS_PER_NOTE))
 
 
 def run(

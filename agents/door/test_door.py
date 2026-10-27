@@ -3373,6 +3373,7 @@ class RecallShadowTests(_RecallTestBase, unittest.TestCase):
             event = self._wait_for_event()
         self.assertEqual((status, body), (200, RECALL_BODY))
         self.assertEqual(event["status"], "error")
+        self.assertEqual((event["cause"], event["compared"]), ("python", "refined"))
         self.assertIn("RuntimeError", event["reason"])
         lines = [ln for ln in buf.getvalue().splitlines() if "recall_shadow" in ln]
         self.assertEqual(len(lines), 1, buf.getvalue())
@@ -3406,7 +3407,7 @@ class RecallShadowTests(_RecallTestBase, unittest.TestCase):
         status, body, _ = self._recall("boom")
         self.assertEqual((status, body), (200, RECALL_ERROR_BODY))
         event = self._wait_for_event()
-        self.assertEqual(event["status"], "error")
+        self.assertEqual((event["status"], event["cause"]), ("error", "engine"))
         self.assertIn("engine unreadable", event["reason"])
 
     def test_other_tools_leave_no_recall_shadow(self):

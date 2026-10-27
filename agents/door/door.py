@@ -1344,15 +1344,31 @@ def _recall_python(arguments: dict) -> recall_shadow.PythonAnswer:
     )
 
 
+def _recall_engine_claims(paths: list[str]) -> Either[dict, str]:
+    """그림자가 엔진이 고른 노트에 refine 을 태울 때 쓰는 현재 claims — 파이썬 길과 같은 읽기 전용 연결."""
+    dsn = os.environ.get("DOOR_PG_DSN")
+    if not dsn:
+        return Err("DOOR_PG_DSN not set")
+    return recall_answer.claims_of(dsn, paths)
+
+
 def _recall_shadow_task(arguments: dict, status: int, body: bytes, reader: str = "engine") -> None:
     """회상 그림자(E4-2) — 응답이 간 뒤 같은 인자로 파이썬 회상을 계산해 엔진 텍스트와 대조하고
     recall_shadow 사건 한 줄을 남긴다. 예외는 여기서 문 로그 한 줄 + 사건 status=error 로 접는다."""
     try:
-        event = recall_shadow.run_shadow(status, body, lambda: _recall_python(arguments))
+        event = recall_shadow.run_shadow(
+            status, body, lambda: _recall_python(arguments), _recall_engine_claims
+        )
     except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
         print(f"[door] recall_shadow failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         event_log.try_append_event(
-            "door", recall_shadow.EVENT_NAME, "error", reader=reader, reason=f"{type(e).__name__}: {e}"
+            "door",
+            recall_shadow.EVENT_NAME,
+            "error",
+            reader=reader,
+            reason=f"{type(e).__name__}: {e}",
+            cause=recall_shadow.CAUSE_PYTHON,
+            compared=recall_shadow.COMPARED,
         )
         return
     event_log.try_append_event(
@@ -1418,11 +1434,17 @@ def _recall_reverse_shadow_task(
     recall_shadow 사건(reader=python)을 남긴다. 엔진 불통·예외는 문 로그 한 줄 + status=error."""
     try:
         engine = _fetch(url, _recall_without_session(body), headers, "POST")
-        event = recall_shadow.compare(engine.status_code, engine.body, answered)
+        event = recall_shadow.compare(engine.status_code, engine.body, answered, _recall_engine_claims)
     except OSError as e:
         print(f"[door] recall_shadow engine unreachable: {e}", file=sys.stderr, flush=True)
         event_log.try_append_event(
-            "door", recall_shadow.EVENT_NAME, "error", reader=_READER_PYTHON, reason="engine unreachable"
+            "door",
+            recall_shadow.EVENT_NAME,
+            "error",
+            reader=_READER_PYTHON,
+            reason="engine unreachable",
+            cause=recall_shadow.CAUSE_ENGINE,
+            compared=recall_shadow.COMPARED,
         )
         return
     except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
@@ -1433,6 +1455,8 @@ def _recall_reverse_shadow_task(
             "error",
             reader=_READER_PYTHON,
             reason=f"{type(e).__name__}: {e}",
+            cause=recall_shadow.CAUSE_PYTHON,
+            compared=recall_shadow.COMPARED,
         )
         return
     event_log.try_append_event(

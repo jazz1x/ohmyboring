@@ -652,51 +652,65 @@ def _py(text: str, path="wiki"):
     return Ok(answer.Recalled(text, path, text))
 
 
+def _engine_claims(claims):
+    return lambda paths: Ok({p: v for p, v in claims.items() if p in paths})
+
+
+def _compare(status, body, python, claims_for=None):
+    return shadow.compare(status, body, python, claims_for or _engine_claims({}))
+
+
 def test_shadow_same_text_is_ok_and_carries_path_and_line_counts():
-    event = shadow.compare(200, _engine("- [a.md] x\n\n- [b.md] y"), _py("- [a.md] x\n\n- [b.md] y"))
+    event = _compare(200, _engine("- [a.md] x\n\n- [b.md] y"), _py("- [a.md] x\n\n- [b.md] y"))
     assert event == shadow.ShadowEvent("ok", "wiki", 3, 3)
 
 
 def test_shadow_mismatch_names_the_first_differing_line_with_80_chars_of_each():
     engine = "- [a.md] x\n\n" + "e" * 120
     python = "- [a.md] x\n\n" + "p" * 120 + "\n\nextra"
-    event = shadow.compare(200, _engine(engine), _py(python, "vector"))
+    event = _compare(200, _engine(engine), _py(python, "vector"))
     assert event.status == "mismatch" and event.path == "vector"
     assert (event.engine_lines, event.python_lines) == (3, 5)
     assert event.first_diff == shadow.FirstDiff(3, "e" * 80, "p" * 80)
-    longer = shadow.compare(200, _engine("a"), _py("a\nb"))
+    longer = _compare(200, _engine("a"), _py("a\nb"))
     assert longer.first_diff == shadow.FirstDiff(2, "", "b"), "한쪽이 더 길면 빈 줄과 견준다"
 
 
 def test_shadow_event_payload_never_carries_the_query():
     secret = "sk-PRIVATE-QUERY"
-    event = shadow.compare(200, _engine("엔진 줄"), _py("파이썬 줄"))
+    event = _compare(200, _engine("엔진 줄"), _py("파이썬 줄"))
     payload = shadow.event_payload(event)
     assert secret not in json.dumps(payload, ensure_ascii=False)
-    assert set(payload) == {"path", "engine_lines", "python_lines", "skipped", "first_diff", "reason"}
+    assert set(payload) == {
+        "path",
+        "engine_lines",
+        "python_lines",
+        "skipped",
+        "first_diff",
+        "reason",
+        "compared",
+        "superseded_hit",
+    }
     assert payload["first_diff"] == {"line": 1, "engine": "엔진 줄", "python": "파이썬 줄"}
 
 
 def test_shadow_error_and_rejection_branches():
-    unreadable = shadow.compare(200, _engine("x", is_error=True), _py("x"))
+    unreadable = _compare(200, _engine("x", is_error=True), _py("x"))
     assert unreadable.status == "error" and "engine unreadable" in (unreadable.reason or "")
-    assert shadow.compare(502, b"{}", _py("x")).status == "error"
-    assert shadow.compare(200, b"not json", _py("x")).status == "error"
-    failed = shadow.compare(200, _engine("x"), Err(answer.Failed("pg connect: down")))
+    assert _compare(502, b"{}", _py("x")).status == "error"
+    assert _compare(200, b"not json", _py("x")).status == "error"
+    failed = _compare(200, _engine("x"), Err(answer.Failed("pg connect: down")))
     assert failed.status == "error" and "pg connect: down" in (failed.reason or "")
 
     rpc = json.dumps(
         {"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "missing argument: query"}}
     )
-    same = shadow.compare(200, rpc.encode(), Err(answer.Rejected("missing argument: query")))
+    same = _compare(200, rpc.encode(), Err(answer.Rejected("missing argument: query")))
     assert same.status == "ok" and same.reason == "both rejected identically"
-    other = shadow.compare(200, rpc.encode(), Err(answer.Rejected("other")))
+    other = _compare(200, rpc.encode(), Err(answer.Rejected("other")))
     assert other.status == "mismatch"
-    assert shadow.compare(200, rpc.encode(), _py("x")).status == "mismatch"
-    assert (
-        shadow.compare(200, _engine("x"), Err(answer.Rejected("missing argument: query"))).status
-        == "mismatch"
-    )
+    assert _compare(200, rpc.encode(), _py("x")).status == "mismatch"
+    assert _compare(200, _engine("x"), Err(answer.Rejected("missing argument: query"))).status == "mismatch"
 
 
 def _wiki_names(*names: str) -> list[wiki.WikiHit]:
@@ -714,14 +728,14 @@ def _py_answer(names: list[str], k: int = 5, skipped: int = 0, **seam_kwargs) ->
 
 
 def _verdict(python: answer.Recalled, *engine_lines: str) -> str:
-    return shadow.compare(200, _engine("\n\n".join(engine_lines)), Ok(python)).status
+    return _compare(200, _engine("\n\n".join(engine_lines)), Ok(python)).status
 
 
 def test_shadow_tie_only_difference_is_tie_and_identical_text_is_ok():
     python = _py_answer(["a:3", "b:3", "c:3"])
     assert [ln.split("]")[0] for ln in python.text.split("\n\n")] == ["- [a.md", "- [b.md", "- [c.md"]
     assert _verdict(python, _line("a"), _line("b"), _line("c")) == "ok"
-    event = shadow.compare(200, _engine("\n\n".join([_line("c"), _line("a"), _line("b")])), Ok(python))
+    event = _compare(200, _engine("\n\n".join([_line("c"), _line("a"), _line("b")])), Ok(python))
     assert event.status == "tie" and event.first_diff is not None and event.path == "wiki"
 
 
@@ -773,7 +787,7 @@ def test_shadow_vector_path_has_no_tie_allowance():
 
 def test_shadow_counts_skipped_wiki_files_in_the_event():
     python = _py_answer(["a:3"], skipped=2)
-    event = shadow.compare(200, _engine(_line("a")), Ok(python))
+    event = _compare(200, _engine(_line("a")), Ok(python))
     assert event.status == "ok" and event.skipped == 2
     assert shadow.event_payload(event)["skipped"] == 2
     none = _Seams()
@@ -787,13 +801,60 @@ def test_run_shadow_lets_a_python_exception_out_for_the_door_to_fold():
         raise RuntimeError("boom")
 
     try:
-        shadow.run_shadow(200, _engine("x"), boom)
+        shadow.run_shadow(200, _engine("x"), boom, _engine_claims({}))
     except RuntimeError:
         return
     raise AssertionError("run_shadow must not swallow the python path's exception")
 
 
+def test_shadow_compares_refined_text_so_a_claim_line_difference_is_a_mismatch():
+    stub = _refined_stub()
+    python = _text(answer.answer(_args(), stub.seams()))
+    body = _engine(python.text)
+    same = _compare(200, body, Ok(python), _engine_claims(stub._claims))
+    assert (same.status, same.compared) == ("ok", "refined"), "통제군: 같은 claims 면 ok"
+    other = {_OLD: _register(_claim_row("recall", "ranking", "점수식 바뀜"))}
+    event = _compare(200, body, Ok(python), _engine_claims(other))
+    assert event.status == "mismatch" and event.first_diff is not None, event
+    assert "점수식 고정" in event.first_diff.python and "점수식 바뀜" in event.first_diff.engine
+
+
+def test_shadow_ties_stay_ties_under_the_refined_comparison():
+    python = _py_answer(["a:3", "b:3", "c:3"])
+    shuffled = _engine("\n\n".join([_line("c"), _line("a"), _line("b")]))
+    event = _compare(200, shuffled, Ok(python), _engine_claims({}))
+    assert (event.status, event.compared) == ("tie", "refined")
+
+
+def test_shadow_error_names_its_cause_and_an_embed_outage_is_not_the_engine():
+    ok_py = _py("x")
+    outage = _compare(
+        200, _engine("x"), Err(answer.Failed("retrieve: embed: Connection refused")), _engine_claims({})
+    )
+    assert (outage.status, outage.cause) == ("error", "embed"), outage
+    pg_down = _compare(200, _engine("x"), Err(answer.Failed("pg connect: down")), _engine_claims({}))
+    assert pg_down.cause == "python"
+    engine_down = _compare(502, b"{}", ok_py, _engine_claims({}))
+    assert engine_down.cause == "engine"
+    assert shadow.event_payload(outage)["cause"] == "embed"
+    assert shadow.event_payload(outage)["compared"] == "refined"
+
+
+def test_shadow_says_when_a_superseded_note_was_hit():
+    newer = {"/vault/wiki/b.md": ["/vault/wiki/n.md"]}
+    python = _py_answer(["a:3", "b:3"], superseded=newer)
+    hit = _compare(200, _engine(python.text), Ok(python), _engine_claims({}))
+    assert shadow.event_payload(hit)["superseded_hit"] is True
+    plain = _py_answer(["a:3", "b:3"])
+    miss = _compare(200, _engine(plain.text), Ok(plain), _engine_claims({}))
+    assert shadow.event_payload(miss)["superseded_hit"] is False
+
+
 if __name__ == "__main__":
+    test_shadow_compares_refined_text_so_a_claim_line_difference_is_a_mismatch()
+    test_shadow_ties_stay_ties_under_the_refined_comparison()
+    test_shadow_error_names_its_cause_and_an_embed_outage_is_not_the_engine()
+    test_shadow_says_when_a_superseded_note_was_hit()
     test_query_terms_splits_and_filters()
     test_substring_match_handles_korean_josa()
     test_title_weighted_and_zero_is_none()
