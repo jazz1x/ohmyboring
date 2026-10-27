@@ -1678,15 +1678,27 @@ fn supersedes_suffix(supersedes: &[String], report: &SupersedesReport) -> String
     if supersedes.is_empty() {
         return String::new();
     }
-    if report.unknown == 0 {
-        return format!(" · supersedes linked {}", report.supersedes);
-    }
-    format!(
-        " · supersedes linked {}, not found {} ({})",
-        report.supersedes,
-        report.unknown,
-        report.unknown_paths.join(", ")
-    )
+    let head = if report.unknown == 0 {
+        format!(" · supersedes linked {}", report.supersedes)
+    } else {
+        format!(
+            " · supersedes linked {}, not found {} ({})",
+            report.supersedes,
+            report.unknown,
+            report.unknown_paths.join(", ")
+        )
+    };
+    let slots: Vec<String> = report
+        .retired
+        .iter()
+        .map(|(subject, predicate)| format!("{subject}/{predicate}"))
+        .collect();
+    let closed = if slots.is_empty() {
+        "none".to_owned()
+    } else {
+        slots.join(", ")
+    };
+    format!("{head} · retired claims: {closed}")
 }
 
 async fn finish_remembered_note(

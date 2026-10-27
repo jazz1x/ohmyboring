@@ -3021,8 +3021,37 @@ impl Store {
             .await?;
             report.supersedes += 1;
             Self::seal_superseded_claims(tx, &pair[0], &pair[1]).await?;
+            Self::note_retired_slots(tx, &pair[0], &pair[1], &mut report.retired).await?;
         }
         Ok(report)
+    }
+
+    /// Appends the older note's slots closed by this write to `retired`, each once. Read after
+    /// the seal: whichever rule closed a row (the claim write's latest-wins or the seal), a row
+    /// of the older note stamped with the newer note's latest `valid_from` was closed by it.
+    async fn note_retired_slots(
+        tx: &Transaction<'_>,
+        newer: &str,
+        older: &str,
+        retired: &mut Vec<(String, String)>,
+    ) -> Result<()> {
+        let rows = tx
+            .query(
+                "SELECT c.subject, c.predicate FROM claim c
+                  WHERE c.source_path = $2
+                    AND c.superseded_at = (SELECT max(valid_from) FROM claim WHERE source_path = $1)
+                  ORDER BY c.subject, c.predicate;",
+                &[&newer, &older],
+            )
+            .await
+            .context("read retired claims")?;
+        for row in rows {
+            let slot: (String, String) = (row.get(0), row.get(1));
+            if !retired.contains(&slot) {
+                retired.push(slot);
+            }
+        }
+        Ok(())
     }
 
     /// Seal every current claim of the superseded note: `superseded_at` = the newer note's

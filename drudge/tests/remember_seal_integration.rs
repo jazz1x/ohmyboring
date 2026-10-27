@@ -141,8 +141,8 @@ fn skip() -> bool {
     false
 }
 
-/// Python `test_dedup_supersede_links_edge_and_partial_seal_only` (test_writer.py:643) and
-/// `test_named_supersedes_skips_gate_and_counts_unknown` (:696): the answer lists the slots this
+/// Python `test_dedup_supersede_links_edge_and_partial_seal_only` (test_writer.py:642) and
+/// `test_named_supersedes_skips_gate_and_counts_unknown` (:700): the answer lists the slots this
 /// write closed, read after the seal, and says `none` when it closed nothing.
 #[tokio::test]
 async fn the_report_names_the_slots_this_write_closed() {
