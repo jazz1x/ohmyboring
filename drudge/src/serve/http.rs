@@ -26,7 +26,7 @@ use crate::serve::{
     count_wiki_notes, recurrences_days, recurrences_limit, register_limit, spawn_query_log,
     vector_disabled,
 };
-use crate::store::{EventLogFilter, FactClaims, LoggedHit, Store};
+use crate::store::{EventLogFilter, LoggedHit, Store};
 use std::collections::HashSet;
 
 const EVENT_LOG_MAX_LIMIT: i64 = 1000;
@@ -438,9 +438,7 @@ async fn attach_claims(
     }
     let paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
     // /search 도 fact 포함: fact 전용 노트 105개가 claim 줄 0 이던 것(C-DSHAPE2-1, 10-27), wiki-5375 와 같은 이유
-    let declared = store
-        .declared_claims(&paths, i64::from(per_hit), FactClaims::Include)
-        .await?;
+    let declared = store.declared_claims(&paths, i64::from(per_hit)).await?;
     for hit in hits.iter_mut() {
         let rows = declared.get(&hit.source_path);
         hit.claims_total = Some(rows.map_or(0, |r| r.total_matching));

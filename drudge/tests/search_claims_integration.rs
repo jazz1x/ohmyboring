@@ -14,7 +14,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drudge::frontmatter::{Claim, FrontMatter};
-use drudge::store::{FactClaims, Store};
+use drudge::store::Store;
 
 fn test_dsn() -> Option<String> {
     std::env::var("BORING_TEST_DATABASE_URL").ok()
@@ -113,7 +113,7 @@ async fn declared_claims_returns_newest_first_and_states_the_cut() {
     }
 
     let mut declared = store
-        .declared_claims(std::slice::from_ref(&path), 2, FactClaims::Include)
+        .declared_claims(std::slice::from_ref(&path), 2)
         .await
         .expect("declared claims");
     let rows = declared.remove(&path).expect("the hit's claims");
@@ -199,7 +199,7 @@ async fn declared_claims_skips_rows_without_claims_edge() {
     .await;
 
     let mut declared = store
-        .declared_claims(std::slice::from_ref(&path), 10, FactClaims::Include)
+        .declared_claims(std::slice::from_ref(&path), 10)
         .await
         .expect("declared claims");
     let rows = declared.remove(&path).expect("the hit's claims");
@@ -224,7 +224,7 @@ async fn declared_claims_skips_rows_without_claims_edge() {
 }
 
 #[tokio::test]
-async fn register_claims_never_return_fact_claims() {
+async fn search_claims_hand_over_a_fact_only_note() {
     let Some(dsn) = test_dsn() else {
         eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
         return;
@@ -251,18 +251,9 @@ async fn register_claims_never_return_fact_claims() {
     )
     .await;
 
-    let declared = store
-        .declared_claims(std::slice::from_ref(&path), 10, FactClaims::Exclude)
-        .await
-        .expect("declared claims");
-    assert!(
-        !declared.contains_key(&path),
-        "a fact-only note hands over nothing on the register path, even when nothing else qualifies"
-    );
-
     // /search keeps it (C-DSHAPE2): the note's only live claim is the fact.
     let included = store
-        .declared_claims(std::slice::from_ref(&path), 10, FactClaims::Include)
+        .declared_claims(std::slice::from_ref(&path), 10)
         .await
         .expect("declared claims");
     let rows = included.get(&path).expect("search hands the fact over");
@@ -312,7 +303,7 @@ async fn search_claims_prefer_a_decision_over_a_fact_at_one_per_hit() {
     .await;
 
     let declared = store
-        .declared_claims(std::slice::from_ref(&path), 1, FactClaims::Include)
+        .declared_claims(std::slice::from_ref(&path), 1)
         .await
         .expect("declared claims");
     let rows = declared.get(&path).expect("claims");
@@ -353,7 +344,7 @@ async fn declared_claims_node_id_is_canonical() {
     .await;
 
     let mut declared = store
-        .declared_claims(std::slice::from_ref(&path), 10, FactClaims::Include)
+        .declared_claims(std::slice::from_ref(&path), 10)
         .await
         .expect("declared claims");
     let rows = declared.remove(&path).expect("the hit's claims");
@@ -428,7 +419,7 @@ async fn declared_claims_prefers_decisions_then_next_then_risk() {
     .await;
 
     let mut declared = store
-        .declared_claims(std::slice::from_ref(&path), 10, FactClaims::Include)
+        .declared_claims(std::slice::from_ref(&path), 10)
         .await
         .expect("declared claims");
     let rows = declared.remove(&path).expect("the hit's claims");
