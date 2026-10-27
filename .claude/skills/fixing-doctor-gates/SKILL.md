@@ -33,7 +33,7 @@ description: oh-my-boring 저장소에서 doctor 점검(scripts/doctor.sh)이나
 - `scripts/doctor.sh` d5c: `closed window [$since_day, $until_day) duplicates $dup_in/$total_in — verdict closed (prd-section2-window)`.
 - `scripts/peek.py` 의 `duplicate_injections` 메모도 같은 구분을 쓴다 (창 안 = 기록, 최근 7일 경보 = doctor d5c).
 
-죽은 표지 같은 판정 끝난 항목도 같은 모양이다: 빨강 대신 「known losses N (근거)」 정보 줄 (`data/contract/known-losses.tsv`).
+죽은 표지 같은 판정 끝난 항목도 같은 모양이다: 빨강 대신 「known losses N (근거)」 정보 줄 (`data/local/known-losses.tsv`).
 
 ## 4. 「가장 최근 X」는 결과 아닌 것을 건너뛴다
 
