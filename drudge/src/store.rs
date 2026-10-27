@@ -1691,6 +1691,56 @@ impl Store {
             .collect())
     }
 
+    pub const NORTH_STAR_PREDICATES: [&'static str; 2] = ["goal", "check"];
+
+    pub fn north_star_subject(project: &str) -> String {
+        format!("north-star:{project}")
+    }
+
+    /// Current `decision` claims stored as a repository's north star: subject
+    /// `north-star:<project>`, predicate `goal` / `check`, newest `valid_from` per predicate.
+    /// Fetch only — the card puts them first (`ask::with_north_star`).
+    pub async fn north_star_claims(
+        &self,
+        project: &str,
+        exclude_origins: &[String],
+    ) -> Result<Vec<Claim>> {
+        let subject = Self::north_star_subject(project);
+        let predicates: Vec<String> = Self::NORTH_STAR_PREDICATES
+            .iter()
+            .map(|p| (*p).to_owned())
+            .collect();
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT DISTINCT ON (c.predicate) c.subject, c.predicate, c.value, c.kind, c.confidence
+                 FROM claim c
+                 JOIN document d ON d.source_path = c.source_path
+                 WHERE c.superseded_at IS NULL
+                   AND c.kind = 'decision'
+                   AND c.subject = $1
+                   AND c.predicate = ANY($2)
+                   AND NOT (d.origin = ANY($3))
+                   AND d.source_path !~ $4
+                 ORDER BY c.predicate, c.valid_from DESC;",
+                &[&subject, &predicates, &exclude_origins, &NOT_USER_MEMORY_RE],
+            )
+            .await
+            .context("north star claims")?;
+        Ok(rows
+            .iter()
+            .map(|r| Claim {
+                subject: r.get(0),
+                predicate: r.get(1),
+                value: r.get(2),
+                kind: r.get(3),
+                confidence: r.get(4),
+                said_by: None,
+            })
+            .collect())
+    }
+
     /// Stalled claims: current claims whose valid_from is older than `older_than_days`.
     /// Ordered oldest-first so the longest-frozen items surface first.
     pub async fn stalled_claims(

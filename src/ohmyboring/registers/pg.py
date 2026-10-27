@@ -157,6 +157,20 @@ _RECENT_CLAIMS_SQL = (
     " LIMIT %(limit)s"
 )
 
+# 북극성 — subject=north-star:<project>, predicate goal·check 의 현재 decision. 술어별 최신 한 줄.
+_NORTH_STAR_SQL = (
+    "SELECT DISTINCT ON (c.predicate) c.subject, c.predicate, c.value, c.kind, c.confidence"
+    " FROM claim c"
+    " JOIN document d ON d.source_path = c.source_path"
+    " WHERE c.superseded_at IS NULL"
+    " AND c.kind = 'decision'"
+    " AND c.subject = %(subject)s"
+    " AND c.predicate = ANY(%(predicates)s)"
+    " AND NOT (d.origin = ANY(%(exclude_origins)s))"
+    " AND d.source_path !~ %(not_user_memory)s"
+    " ORDER BY c.predicate, c.valid_from DESC"
+)
+
 _STATUS_DOCS_SQL = (
     "SELECT d.source_path, d.project, d.tags,"
     " string_agg(c.content, E'\\n' ORDER BY c.chunk_idx) AS content"
@@ -495,6 +509,56 @@ def recent_claims(
     )
 
 
+NORTH_STAR_PREDICATES = ("goal", "check")
+NORTH_STAR_NONE = "북극성 없음"
+
+
+def north_star_subject(project: str) -> str:
+    return f"north-star:{project}"
+
+
+def north_star_claims(
+    conn: psycopg.Connection, project: str, exclude_origins: Iterable[str]
+) -> Either[tuple[RegisterRow, ...], PgError]:
+    """store.rs north_star_claims — 북극성 claim 만 읽어 온다 (순서·중복 제거는 with_north_star)."""
+    params = {
+        "subject": north_star_subject(project),
+        "predicates": list(NORTH_STAR_PREDICATES),
+        "exclude_origins": list(exclude_origins),
+        "not_user_memory": NOT_USER_MEMORY_RE,
+    }
+    match _attempt(lambda: _exec(conn, _NORTH_STAR_SQL, params)):
+        case Err(e):
+            return Err(e)
+        case Ok(rows):
+            pass
+    return Ok(tuple(RegisterRow(row[0], row[1], row[2], row[3], row[4]) for row in rows))
+
+
+def with_north_star(
+    project: str | None,
+    found: tuple[RegisterRow, ...],
+    decisions: tuple[RegisterRow, ...],
+) -> tuple[RegisterRow, ...]:
+    """ask.rs with_north_star — project 가 있으면 goal, check 순으로 맨 앞에 놓고 같은 행은 뒤에서 뺀다.
+
+    북극성 행이 없으면 카드에만 「북극성 없음」 한 줄 (저장 안 함). project 없으면 그대로.
+    decisions 는 max_items 보다 최대 2 길어질 수 있다."""
+    if not project:
+        return decisions
+    front = tuple(
+        row
+        for predicate in NORTH_STAR_PREDICATES
+        for row in tuple(r for r in found if r.predicate == predicate)[:1]
+    )
+    if not front:
+        none = RegisterRow(north_star_subject(project), "goal", NORTH_STAR_NONE, "decision", "certain")
+        return (none, *decisions)
+    seen = {(r.subject, r.predicate, r.value) for r in front}
+    rest = tuple(r for r in decisions if (r.subject, r.predicate, r.value) not in seen)
+    return (*front, *rest)
+
+
 def status_docs(
     conn: psycopg.Connection, project: str, exclude_origins: Iterable[str] = ()
 ) -> Either[tuple[StatusDoc, ...], PgError]:
@@ -692,9 +756,17 @@ def context_payload(
                 return Err(e)
             case Ok(rows):
                 sections[name] = rows
+    found: tuple[RegisterRow, ...] = ()
+    if project:
+        match north_star_claims(conn, project, exclude_origins):
+            case Err(e):
+                return Err(e)
+            case Ok(rows):
+                found = rows
+    decisions = with_north_star(project, found, sections["decisions"])
     return Ok(
         {
-            "decisions": [row.as_context_item() for row in sections["decisions"]],
+            "decisions": [row.as_context_item() for row in decisions],
             "risks": [row.as_context_item() for row in sections["risks"]],
             "facts": [row.as_context_item() for row in sections["facts"]],
             "glossary": [row.as_context_item() for row in sections["glossary"]],

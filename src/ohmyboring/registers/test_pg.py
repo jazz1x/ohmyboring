@@ -955,5 +955,34 @@ class RegisterParityTests(unittest.TestCase):
         self.assertIn("- [decision|certain] subj pred value with enough characters", payload["answer"])
 
 
+class NorthStarFrontTests(unittest.TestCase):
+    """with_north_star — 북극성(goal·check)이 decisions 맨 앞, 없으면 「북극성 없음」 한 줄, project 없으면 그대로."""
+
+    @staticmethod
+    def _row(subject, predicate, value):
+        return registers_pg.RegisterRow(subject, predicate, value, "decision", "certain")
+
+    def test_front_absent_and_no_project(self):
+        row = self._row
+        other = (row("x", "y", "다른 결정"), row("north-star:p", "goal", "목표"))
+        found = (row("north-star:p", "check", "검증"), row("north-star:p", "goal", "목표"))
+        got = registers_pg.with_north_star("p", found, other)
+        self.assertEqual(
+            [(r.predicate, r.value) for r in got], [("goal", "목표"), ("check", "검증"), ("y", "다른 결정")]
+        )
+
+        got = registers_pg.with_north_star("p", (), other[:1])
+        self.assertEqual(
+            [(r.subject, r.predicate, r.value, r.kind, r.confidence) for r in got],
+            [
+                ("north-star:p", "goal", "북극성 없음", "decision", "certain"),
+                ("x", "y", "다른 결정", "decision", "certain"),
+            ],
+        )
+
+        self.assertEqual(registers_pg.with_north_star(None, found, other), other)
+        self.assertEqual(registers_pg.with_north_star("", found, other), other)
+
+
 if __name__ == "__main__":
     unittest.main()

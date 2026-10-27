@@ -956,6 +956,42 @@ pub struct ContextCard {
     pub language: String,
 }
 
+const NORTH_STAR_NONE: &str = "북극성 없음";
+
+/// Puts the project's north star (`goal`, then `check`) in front of the decisions and drops the
+/// same rows from the tail, so the list can run up to 2 longer than `max_items`. A project with
+/// no stored north star gets one card-only `북극성 없음` line (never stored). No project: unchanged.
+fn with_north_star(
+    project: Option<&str>,
+    found: &[crate::frontmatter::Claim],
+    decisions: Vec<crate::frontmatter::Claim>,
+) -> Vec<crate::frontmatter::Claim> {
+    let Some(project) = project.filter(|p| !p.is_empty()) else {
+        return decisions;
+    };
+    let front: Vec<crate::frontmatter::Claim> = Store::NORTH_STAR_PREDICATES
+        .iter()
+        .filter_map(|p| found.iter().find(|c| c.predicate == *p).cloned())
+        .collect();
+    if front.is_empty() {
+        let none = crate::frontmatter::Claim {
+            subject: Store::north_star_subject(project),
+            predicate: "goal".to_owned(),
+            value: NORTH_STAR_NONE.to_owned(),
+            kind: "decision".to_owned(),
+            confidence: "certain".to_owned(),
+            said_by: None,
+        };
+        return std::iter::once(none).chain(decisions).collect();
+    }
+    let rest = decisions.into_iter().filter(|d| {
+        !front
+            .iter()
+            .any(|f| f.subject == d.subject && f.predicate == d.predicate && f.value == d.value)
+    });
+    front.iter().cloned().chain(rest).collect()
+}
+
 pub async fn context_card(
     store: &Store,
     project: Option<&str>,
@@ -967,6 +1003,11 @@ pub async fn context_card(
     let decisions = store
         .recent_claims(k, project, Some(&["decision".to_owned()]), exclude_origins)
         .await?;
+    let found = match project.filter(|p| !p.is_empty()) {
+        Some(p) => store.north_star_claims(p, exclude_origins).await?,
+        None => Vec::new(),
+    };
+    let decisions = with_north_star(project, &found, decisions);
     let risks = store
         .recent_claims(
             k,
@@ -1025,6 +1066,55 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
+    fn dec(subject: &str, predicate: &str, value: &str) -> crate::frontmatter::Claim {
+        crate::frontmatter::Claim {
+            subject: subject.to_owned(),
+            predicate: predicate.to_owned(),
+            value: value.to_owned(),
+            kind: "decision".to_owned(),
+            confidence: "certain".to_owned(),
+            said_by: None,
+        }
+    }
+
+    #[test]
+    fn north_star_goes_first_or_says_none_or_stays_out() {
+        let other = vec![
+            dec("x", "y", "다른 결정"),
+            dec("north-star:p", "goal", "목표"),
+        ];
+        let found = vec![
+            dec("north-star:p", "check", "검증"),
+            dec("north-star:p", "goal", "목표"),
+        ];
+        let got = super::with_north_star(Some("p"), &found, other.clone());
+        let got: Vec<(&str, &str)> = got
+            .iter()
+            .map(|c| (c.predicate.as_str(), c.value.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [("goal", "목표"), ("check", "검증"), ("y", "다른 결정")]
+        );
+
+        let got = super::with_north_star(Some("p"), &[], other[..1].to_vec());
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (
+                got[0].subject.as_str(),
+                got[0].predicate.as_str(),
+                got[0].value.as_str()
+            ),
+            ("north-star:p", "goal", "북극성 없음")
+        );
+        assert_eq!(
+            (got[0].kind.as_str(), got[0].confidence.as_str()),
+            ("decision", "certain")
+        );
+
+        assert_eq!(super::with_north_star(None, &found, other.clone()).len(), 2);
+        assert_eq!(super::with_north_star(Some(""), &found, other).len(), 2);
+    }
 
     fn doc(path: &str, project: &str, content: &str) -> crate::store::RecentDoc {
         crate::store::RecentDoc {
