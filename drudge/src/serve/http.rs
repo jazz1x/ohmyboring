@@ -599,7 +599,7 @@ fn log_search_query(
 pub(crate) async fn handle_consumption(
     State(s): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<crate::serve::ConsumptionReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::ConsumptionReq>,
 ) -> Result<Json<crate::serve::ConsumptionResp>, AppError> {
     let judge = crate::serve::validate_consumption_req(&req)?;
     let caller = owner::Caller::from_headers((*s.owner_token).as_deref(), &headers);
@@ -664,7 +664,7 @@ pub(crate) async fn handle_consumption(
 
 pub(crate) async fn handle_handover(
     State(s): State<AppState>,
-    Json(req): Json<crate::serve::HandoverReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::HandoverReq>,
 ) -> Result<Json<crate::serve::HandoverResp>, AppError> {
     crate::serve::validate_handover_req(&req)?;
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;

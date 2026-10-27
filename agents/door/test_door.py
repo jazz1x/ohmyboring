@@ -65,7 +65,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -923,6 +923,17 @@ date: 2026-09-29
         lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
         self.assertEqual(len(lines), 1, f"로그는 정확히 한 줄이어야 한다: {lines}")
         self.assertIn("vault", lines[0])
+
+
+class VerdictLabelTests(unittest.TestCase):
+    """MCP verdict 의 세션 node.label — 엔진 mcp.rs verdict_label 시험과 같은 시각, 같은 글자."""
+
+    def test_six_fractional_digits(self):
+        whole = datetime(2026, 10, 27, 13, 53, 56, tzinfo=UTC)
+        self.assertEqual(door._verdict_label(whole), "2026-10-27T13:53:56.000000+00:00")
+        self.assertEqual(
+            door._verdict_label(whole.replace(microsecond=123456)), "2026-10-27T13:53:56.123456+00:00"
+        )
 
 
 class RememberShadowTests(unittest.TestCase):

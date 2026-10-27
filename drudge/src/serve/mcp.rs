@@ -831,6 +831,12 @@ fn recall_text(
         .join("\n\n")
 }
 
+/// The session node's label for an MCP verdict — always six fractional digits, the door's
+/// `isoformat(timespec="microseconds")` spelling, so either writer leaves the same text.
+fn verdict_label(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+}
+
 async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
     let session_id = args
         .and_then(|a| a.get("session_id"))
@@ -871,7 +877,7 @@ async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
     let report = store
         .record_consumption(
             session_id,
-            &chrono::Utc::now().to_rfc3339(),
+            &verdict_label(chrono::Utc::now()),
             used,
             contested,
             &[],
@@ -2352,8 +2358,21 @@ mod tests {
         ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_remember,
         mcp_tools_list, needs_dedup, parse_remember_note, parse_supersedes, pick_duplicate,
         probable_session_duplicate, recall_text, remember_note, should_replace_duplicate,
-        supersedes_suffix, tool_outcome_snippet, tool_query_arg, wiki_path_spellings,
+        supersedes_suffix, tool_outcome_snippet, tool_query_arg, verdict_label,
+        wiki_path_spellings,
     };
+
+    // Same instants and same strings as agents/door/test_door.py VerdictLabelTests.
+    #[test]
+    fn verdict_label_has_six_fractional_digits() {
+        use chrono::TimeZone;
+        let whole = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 27, 13, 53, 56)
+            .unwrap();
+        assert_eq!(verdict_label(whole), "2026-10-27T13:53:56.000000+00:00");
+        let nanos = whole + chrono::Duration::nanoseconds(123_456_789);
+        assert_eq!(verdict_label(nanos), "2026-10-27T13:53:56.123456+00:00");
+    }
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
     use crate::serve::owner::{self, Caller};

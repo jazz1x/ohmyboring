@@ -229,6 +229,8 @@ mod tests {
             "/stalled",
             "/recurrences",
             "/context",
+            "/consumption",
+            "/handover",
         ];
         for path in paths {
             let req = axum::extract::Request::builder()

@@ -938,13 +938,17 @@ def _verdict_writer() -> str:
     return _WRITER_PYTHON if os.environ.get(_VERDICT_WRITER_ENV) == _WRITER_PYTHON else "engine"
 
 
+def _verdict_label(at: datetime) -> str:
+    return at.isoformat(timespec="microseconds")
+
+
 def _verdict_deps(request: Request) -> verdict_run.Deps:
     dsn = os.environ.get("DOOR_PG_DSN")
     return verdict_run.Deps(
         connect=(lambda: psycopg.connect(dsn)) if dsn else None,
         append_event=_enqueue_writer_event,
         is_owner=_standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
-        now=lambda: datetime.now(tz=UTC).isoformat(),
+        now=lambda: _verdict_label(datetime.now(tz=UTC)),
     )
 
 
