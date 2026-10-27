@@ -390,26 +390,17 @@ fn format_problems(problems: &[Problem]) -> String {
     )
 }
 
-/// 큰 정수는 u128 로 포화 — 문은 임의 정밀도 int 를 리트리버에 넘기고 리트리버가 깎으므로
+/// ge=0 필드의 큰 정수는 u128 로 포화 — 문은 임의 정밀도 int 를 리트리버에 넘기고 리트리버가 깎으므로
 /// 포화해도 깎인 값은 같다.
-struct Int {
-    negative: bool,
-    magnitude: u128,
-}
+struct Count(u128);
 
-impl Int {
+impl Count {
     fn usize(&self) -> usize {
-        usize::try_from(self.magnitude).unwrap_or(usize::MAX)
+        usize::try_from(self.0).unwrap_or(usize::MAX)
     }
 
     fn u32(&self) -> u32 {
-        u32::try_from(self.magnitude).unwrap_or(u32::MAX)
-    }
-
-    fn i32(&self) -> i32 {
-        let magnitude = i64::try_from(self.magnitude).unwrap_or(i64::MAX);
-        let signed = if self.negative { -magnitude } else { magnitude };
-        i32::try_from(signed).unwrap_or(if self.negative { i32::MIN } else { i32::MAX })
+        u32::try_from(self.0).unwrap_or(u32::MAX)
     }
 }
 
@@ -417,61 +408,63 @@ fn lookup<'a>(entries: &'a [Entry], key: &str) -> Option<&'a str> {
     entries.iter().find(|(k, _)| k == key).map(|(_, v)| v.get())
 }
 
-/// 문 `_SearchBody` 의 `Field(ge=0)` / `Field(ge=-2147483648, le=2147483647)`.
-#[derive(Clone, Copy)]
-enum Bound {
-    AtLeastZero,
-    I32,
-}
-
-/// StrictInt + `bound`. 없으면 `Ok(None)`, `nullable` 이면 null 도 `Ok(None)`.
-fn int_field(
-    entries: &[Entry],
+/// StrictInt 의 (원문, 음수, 숫자열). 없으면 `Ok(None)`, `nullable` 이면 null 도 `Ok(None)`.
+fn int_literal_field<'a>(
+    entries: &'a [Entry],
     field: &'static str,
-    bound: Bound,
     nullable: bool,
-) -> Result<Option<Int>, Problem> {
+) -> Result<Option<(&'a str, bool, &'a str)>, Problem> {
     match lookup(entries, field) {
         None => Ok(None),
         Some("null") if nullable => Ok(None),
-        Some(raw) => match int_literal(raw).map(|(negative, digits)| Int {
-            negative,
-            magnitude: digits.parse::<u128>().unwrap_or(u128::MAX),
-        }) {
-            None => Err(Problem::on_raw(
-                field,
-                "Input should be a valid integer",
-                "int_type",
-                raw,
-            )),
-            Some(int) => match bound {
-                Bound::AtLeastZero if int.negative => Err(Problem::on_raw(
+        Some(raw) => int_literal(raw)
+            .map(|(negative, digits)| Some((raw, negative, digits)))
+            .ok_or_else(|| {
+                Problem::on_raw(field, "Input should be a valid integer", "int_type", raw)
+            }),
+    }
+}
+
+/// 문 `Field(ge=0)`.
+fn count_field(entries: &[Entry], field: &'static str) -> Result<Option<Count>, Problem> {
+    match int_literal_field(entries, field, false)? {
+        None => Ok(None),
+        Some((raw, true, _)) => Err(Problem::on_raw(
+            field,
+            "Input should be greater than or equal to 0",
+            "greater_than_equal",
+            raw,
+        )),
+        Some((_, false, digits)) => Ok(Some(Count(digits.parse::<u128>().unwrap_or(u128::MAX)))),
+    }
+}
+
+/// 문 `Field(ge=-2147483648, le=2147483647)`, null 허용.
+fn i32_field(entries: &[Entry], field: &'static str) -> Result<Option<i32>, Problem> {
+    match int_literal_field(entries, field, true)? {
+        None => Ok(None),
+        Some((raw, negative, digits)) => {
+            let signed = if negative {
+                format!("-{digits}")
+            } else {
+                digits.to_owned()
+            };
+            match (signed.parse::<i32>(), negative) {
+                (Ok(value), _) => Ok(Some(value)),
+                (Err(_), true) => Err(Problem::on_raw(
                     field,
-                    "Input should be greater than or equal to 0",
+                    "Input should be greater than or equal to -2147483648",
                     "greater_than_equal",
                     raw,
                 )),
-                Bound::I32
-                    if int.negative && int.magnitude > u128::from(i32::MIN.unsigned_abs()) =>
-                {
-                    Err(Problem::on_raw(
-                        field,
-                        "Input should be greater than or equal to -2147483648",
-                        "greater_than_equal",
-                        raw,
-                    ))
-                }
-                Bound::I32 if !int.negative && int.magnitude > i32::MAX as u128 => {
-                    Err(Problem::on_raw(
-                        field,
-                        "Input should be less than or equal to 2147483647",
-                        "less_than_equal",
-                        raw,
-                    ))
-                }
-                _ => Ok(Some(int)),
-            },
-        },
+                (Err(_), false) => Err(Problem::on_raw(
+                    field,
+                    "Input should be less than or equal to 2147483647",
+                    "less_than_equal",
+                    raw,
+                )),
+            }
+        }
     }
 }
 
@@ -562,12 +555,12 @@ fn body_entries(body: &[u8]) -> Result<Vec<Entry>, String> {
 pub(crate) fn parse_search_body(body: &[u8]) -> Result<SearchReq, String> {
     let entries = body_entries(body)?;
     let query = query_field(&entries);
-    let max_results = int_field(&entries, "max_results", Bound::AtLeastZero, false);
-    let max_tokens = int_field(&entries, "max_tokens", Bound::AtLeastZero, false);
-    let claims = int_field(&entries, "claims", Bound::AtLeastZero, false);
-    let related = int_field(&entries, "related", Bound::AtLeastZero, false);
-    let related_heads = int_field(&entries, "related_heads", Bound::AtLeastZero, false);
-    let since_hours = int_field(&entries, "since_hours", Bound::I32, true);
+    let max_results = count_field(&entries, "max_results");
+    let max_tokens = count_field(&entries, "max_tokens");
+    let claims = count_field(&entries, "claims");
+    let related = count_field(&entries, "related");
+    let related_heads = count_field(&entries, "related_heads");
+    let since_hours = i32_field(&entries, "since_hours");
     let project = str_field(&entries, "project", true);
     let session_id = str_field(&entries, "session_id", true);
     match (
@@ -596,7 +589,7 @@ pub(crate) fn parse_search_body(body: &[u8]) -> Result<SearchReq, String> {
             max_results: max_results.map_or(5, |v| v.usize()),
             max_tokens: max_tokens.map_or(2000, |v| v.usize()),
             project,
-            since_hours: since_hours.map(|v| v.i32()),
+            since_hours,
             related: related.map_or(0, |v| v.usize()),
             related_heads: related_heads.map_or(2, |v| v.usize()),
             claims: claims.map(|v| v.u32()),
