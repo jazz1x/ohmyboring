@@ -105,6 +105,27 @@ async fn rows(db: &Client, path: &str, token: &str) -> [i64; 5] {
     ]
 }
 
+/// Remove what a test wrote so the shared test database stays small: the documents (chunks go
+/// with them), their edges and claims, and every node or edge carrying the test's token.
+async fn forget(store: &Store, db: &Client, paths: &[&str], token: &str) {
+    let like = format!("%{token}%");
+    for path in paths {
+        store.delete_document(path).await.expect("delete document");
+    }
+    db.execute(
+        "DELETE FROM edge WHERE src LIKE $1 OR dst LIKE $1;",
+        &[&like],
+    )
+    .await
+    .expect("delete edges");
+    db.execute("DELETE FROM claim WHERE subject LIKE $1;", &[&like])
+        .await
+        .expect("delete claims");
+    db.execute("DELETE FROM node WHERE id LIKE $1;", &[&like])
+        .await
+        .expect("delete nodes");
+}
+
 struct Vault {
     _dir: tempfile::TempDir,
     dirs: Vec<String>,
@@ -163,6 +184,8 @@ async fn a_file_that_fails_at_the_chunk_step_leaves_no_rows() {
         "document, chunk, claim, node, edge rows of the failed file"
     );
     let ok = rows(&db, &v.ok_path, &v.ok_token).await;
+    forget(&store, &db, &[&v.bad_path], &v.bad_token).await;
+    forget(&store, &db, &[&v.ok_path], &v.ok_token).await;
     assert!(
         ok.iter().all(|n| *n > 0),
         "control: the other file ingested fully: {ok:?}"
@@ -185,6 +208,8 @@ async fn the_next_sync_ingests_a_failed_file_like_a_clean_one() {
 
     let healed = rows(&db, &v.bad_path, &v.bad_token).await;
     let clean = rows(&db, &v.ok_path, &v.ok_token).await;
+    forget(&store, &db, &[&v.bad_path], &v.bad_token).await;
+    forget(&store, &db, &[&v.ok_path], &v.ok_token).await;
     assert!(
         clean.iter().all(|n| *n > 0),
         "control: a clean ingest wrote every kind of row: {clean:?}"
@@ -240,12 +265,14 @@ async fn aborted_rounds(make: impl Fn(&[String]) -> (String, String)) -> usize {
         return 0;
     };
     let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
     let cfg = BoringConfig::default();
     let embedder = FaultyEmbed { broken: false };
     let mut aborted = 0;
     for round in 0..40 {
         let dir = tempdir().expect("vault dir");
-        let names: Vec<String> = (0..6).map(|i| format!("{}x{i}", token("p3bdl"))).collect();
+        let round_token = token("p3bdl");
+        let names: Vec<String> = (0..6).map(|i| format!("{round_token}x{i}")).collect();
         let (first, second) = make(&names);
         let first_path = dir.path().join("first.md");
         let second_path = dir.path().join("second.md");
@@ -267,6 +294,7 @@ async fn aborted_rounds(make: impl Fn(&[String]) -> (String, String)) -> usize {
             eprintln!("round {round}: {e:#}");
             aborted += 1;
         }
+        forget(&store, &db, &[&first, &second], &round_token).await;
     }
     aborted
 }
