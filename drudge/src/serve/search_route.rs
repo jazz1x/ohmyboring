@@ -417,11 +417,11 @@ fn lookup<'a>(entries: &'a [Entry], key: &str) -> Option<&'a str> {
     entries.iter().find(|(k, _)| k == key).map(|(_, v)| v.get())
 }
 
-/// 문 `_SearchBody` 의 `Field(ge=0)` / `Field(le=2147483647)`.
+/// 문 `_SearchBody` 의 `Field(ge=0)` / `Field(ge=-2147483648, le=2147483647)`.
 #[derive(Clone, Copy)]
 enum Bound {
     AtLeastZero,
-    AtMostI32Max,
+    I32,
 }
 
 /// StrictInt + `bound`. 없으면 `Ok(None)`, `nullable` 이면 null 도 `Ok(None)`.
@@ -451,7 +451,17 @@ fn int_field(
                     "greater_than_equal",
                     raw,
                 )),
-                Bound::AtMostI32Max if !int.negative && int.magnitude > i32::MAX as u128 => {
+                Bound::I32
+                    if int.negative && int.magnitude > u128::from(i32::MIN.unsigned_abs()) =>
+                {
+                    Err(Problem::on_raw(
+                        field,
+                        "Input should be greater than or equal to -2147483648",
+                        "greater_than_equal",
+                        raw,
+                    ))
+                }
+                Bound::I32 if !int.negative && int.magnitude > i32::MAX as u128 => {
                     Err(Problem::on_raw(
                         field,
                         "Input should be less than or equal to 2147483647",
@@ -557,7 +567,7 @@ pub(crate) fn parse_search_body(body: &[u8]) -> Result<SearchReq, String> {
     let claims = int_field(&entries, "claims", Bound::AtLeastZero, false);
     let related = int_field(&entries, "related", Bound::AtLeastZero, false);
     let related_heads = int_field(&entries, "related_heads", Bound::AtLeastZero, false);
-    let since_hours = int_field(&entries, "since_hours", Bound::AtMostI32Max, true);
+    let since_hours = int_field(&entries, "since_hours", Bound::I32, true);
     let project = str_field(&entries, "project", true);
     let session_id = str_field(&entries, "session_id", true);
     match (
