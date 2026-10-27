@@ -2049,11 +2049,6 @@ fn parse_supersedes(args: Option<&Value>) -> Result<Vec<String>, (i32, String)> 
     Ok(out)
 }
 
-/// One spelling of the note being corrected, folded to the canonical `/vault/wiki/…` form the
-/// `document` table keys — agents pass what they saw (`wiki/wiki-1759.md`, sometimes bare
-/// `wiki-1759.md`), and the lookup keys on this exact form. Anything that is not one of these
-/// spellings passes through untouched and then counts as unknown, which the answer says out
-/// loud.
 /// A note is its number; the name's width is notation (4-digit before the renumbering, 11-digit
 /// after). The path as given first, then the other widths of the same number.
 fn wiki_path_spellings(path: &str) -> Vec<String> {
@@ -2090,6 +2085,11 @@ async fn resolve_document_path(store: &crate::store::Store, path: &str) -> anyho
     Ok(path.to_owned())
 }
 
+/// One spelling of the note being corrected, folded to the canonical `/vault/wiki/…` form the
+/// `document` table keys — agents pass what they saw (`wiki/wiki-1759.md`, sometimes bare
+/// `wiki-1759.md`), and the lookup keys on this exact form. Anything that is not one of these
+/// spellings passes through untouched and then counts as unknown, which the answer says out
+/// loud.
 fn normalize_supersedes_path(raw: &str) -> String {
     if let Some(rest) = raw
         .strip_prefix("/vault/wiki/")

@@ -618,7 +618,7 @@ mod tests {
     fn test_schema() -> Schema {
         Schema {
             page_id: PageIdSchema {
-                pattern: r"^wiki-(\d{4}|\d{11})$".to_owned(),
+                pattern: r"^wiki-(\d{4,5}|\d{11})$".to_owned(),
             },
             sources: SourcesSchema {
                 allowed_prefixes: vec!["raw/".to_owned(), "meta/".to_owned(), ".rules/".to_owned()],
@@ -825,5 +825,28 @@ mod tests {
         assert_eq!(normalize_link_id("\"[[wiki-0002|alias]]\""), "wiki-0002");
         assert_eq!(normalize_link_id("[[wiki-0002]]"), "wiki-0002");
         assert_eq!(normalize_link_id("wiki-0002"), "wiki-0002");
+    }
+
+    #[test]
+    fn vault_page_id_pattern_takes_four_five_and_eleven_digits_during_the_renumbering() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../vault/.rules/schema.yaml");
+        let schema = crate::vault::load_schema(&path).expect("vault schema.yaml loads");
+        let re = regex::Regex::new(&schema.page_id.pattern).expect("pattern compiles");
+        for ok in ["wiki-9999", "wiki-10000", "wiki-00000010000"] {
+            assert!(
+                re.is_match(ok),
+                "{ok} should match {}",
+                schema.page_id.pattern
+            );
+        }
+        for bad in ["wiki-123", "wiki-100000", "wiki-000000100000"] {
+            assert!(
+                !re.is_match(bad),
+                "{bad} should not match {}",
+                schema.page_id.pattern
+            );
+        }
+        assert_eq!(schema.page_id.pattern, test_schema().page_id.pattern);
     }
 }
