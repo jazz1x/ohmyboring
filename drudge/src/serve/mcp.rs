@@ -3403,6 +3403,90 @@ mod tests {
         assert_eq!(std::fs::read(&b.source_path).unwrap(), b_bytes);
     }
 
+    /// Embeddings stub: 1024 zeros, or 3 for any input carrying `BREAKS` — the claim upsert's
+    /// dimension guard rejects that after the note's document, chunks and tool/concept edges
+    /// are already written.
+    async fn embeddings_stub() -> String {
+        use axum::{Json, Router, routing::post};
+        async fn embed(Json(req): Json<Value>) -> Json<Value> {
+            let breaks = req["input"].as_str().is_some_and(|t| t.contains("BREAKS"));
+            let dim = if breaks { 3 } else { 1024 };
+            Json(json!({"data": [{"embedding": vec![0.0_f32; dim]}]}))
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route("/embeddings", post(embed));
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        url
+    }
+
+    /// document, chunk, claim, node, edge rows that one note (path + token) owns.
+    async fn note_rows(store: &crate::store::Store, path: &str, token: &str) -> [i64; 5] {
+        let like = format!("%{token}%");
+        let row = store
+            .conn()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT (SELECT count(*) FROM document WHERE source_path = $1),
+                        (SELECT count(*) FROM chunk WHERE source_path = $1),
+                        (SELECT count(*) FROM claim WHERE source_path = $1),
+                        (SELECT count(*) FROM node WHERE id LIKE $2),
+                        (SELECT count(*) FROM edge WHERE src = $3 OR src LIKE $2 OR dst LIKE $2);",
+                &[&path, &like, &format!("doc:{path}")],
+            )
+            .await
+            .unwrap();
+        [0, 1, 2, 3, 4].map(|i| row.get::<_, i64>(i))
+    }
+
+    /// C-PORT3b: a remember that fails after part of its rows are written leaves none of them —
+    /// document row included. The note file stays on disk, as Python's writer leaves it
+    /// (`writer.py` unlinks nothing); the next sync ingests it.
+    #[tokio::test]
+    async fn a_remember_that_fails_midway_leaves_no_rows() {
+        let Some(dsn) = std::env::var("BORING_TEST_DATABASE_URL").ok() else {
+            eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+            return;
+        };
+        let store = std::sync::Arc::new(crate::store::Store::open(&dsn, 1024).await.unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = vault_state(tmp.path());
+        let mut cfg = BoringConfig::default();
+        cfg.llm.base_url = embeddings_stub().await;
+        s.llm = std::sync::Arc::new(crate::llm::Llm::from_config(&cfg));
+        s.cfg = std::sync::Arc::new(cfg);
+        s.store = Some(std::sync::Arc::clone(&store));
+        let token = format!(
+            "p3brem{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let args = json!({
+            "title": "midway", "body": "an ordinary body",
+            "tools": [token], "concepts": [token], "tags": [token],
+            "claims": [{"subject": token, "predicate": "axis", "value": "BREAKS the claim step"}],
+            // a correction skips the duplicate gate, which would embed the title and fail first
+            "supersedes": ["/vault/wiki/ghost.md"],
+        });
+
+        let failed = remember_note(&s, Caller::Unverified, Some(&args)).await;
+
+        assert!(failed.is_err(), "the claim step failed");
+        let files: Vec<_> = std::fs::read_dir(tmp.path().join("wiki"))
+            .unwrap()
+            .map(|e| e.unwrap().path().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files.len(), 1, "the note file stays on disk");
+        assert_eq!(
+            note_rows(&store, &files[0], &token).await,
+            [0; 5],
+            "document, chunk, claim, node, edge rows of the failed remember"
+        );
+    }
+
     #[test]
     fn quality_gate_mcp_tool_contract_is_explicit() {
         assert_eq!(actual_tool_names(), expected_tool_names());
