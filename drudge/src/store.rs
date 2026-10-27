@@ -634,8 +634,13 @@ impl Store {
 
     /// PostgreSQL connect + pgvector + node/edge graph schema initialization.
     /// `dim` = the embedding dimension (`boring.json` `embed_dim`) → the `vector(dim)` columns.
-    #[allow(clippy::too_many_lines)] // schema DDL grows with features; splitting only obscures the one migration block.
     pub async fn open(dsn: &str, dim: usize) -> Result<Self> {
+        Self::open_with_pool_size(dsn, dim, deadpool_postgres::PoolConfig::default().max_size).await
+    }
+
+    /// `open` with an explicit pool `max_size` — the one code path `open` delegates to.
+    #[allow(clippy::too_many_lines)] // schema DDL grows with features; splitting only obscures the one migration block.
+    pub async fn open_with_pool_size(dsn: &str, dim: usize, pool_size: usize) -> Result<Self> {
         let pg_config: PgConfig = dsn.parse().context("parse postgres connection string")?;
         let manager = Manager::from_config(
             pg_config,
@@ -646,6 +651,7 @@ impl Store {
         );
         let pool = Pool::builder(manager)
             .runtime(Runtime::Tokio1)
+            .max_size(pool_size)
             .timeouts(POOL_TIMEOUTS)
             .build()
             .context("build postgres connection pool")?;
