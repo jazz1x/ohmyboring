@@ -21,6 +21,7 @@ import os
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -584,9 +585,11 @@ def test_a_superseded_note_that_leads_by_rrf_sum_sinks_below_the_live_notes_afte
         facts=_facts(v=_other(True), a=_other(False), b=_other(False)),
         vector=[("/vault/wiki/v.md", "벡터")],
     )
-    assert _shown(_text(answer.answer(_args(), vector_only.seams())))[-1] == "v", (
-        "벡터에서만 온 줄도 가라앉는다"
-    )
+    asked_only = replace(
+        vector_only.seams(),
+        rank_facts=lambda paths: Ok({p: f for p, f in vector_only._facts.items() if p in paths}),
+    )  # 묻힌 경로만 돌려준다 — v 의 대체 여부는 벡터 전용 질의로만 들어온다
+    assert _shown(_text(answer.answer(_args(), asked_only)))[-1] == "v", "벡터에서만 온 줄도 가라앉는다"
 
 
 def test_failed_rank_facts_lookup_fails_the_recall():
