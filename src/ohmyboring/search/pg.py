@@ -320,7 +320,8 @@ _RELATED_BY_SHARED_GROUND_SQL = (
     " FROM shares s"
     " JOIN document od ON ('doc:' || od.source_path) = s.doc_node"
     " WHERE od.updated_at < (SELECT updated_at FROM document WHERE source_path = %s)"
-    " GROUP BY s.doc_node ORDER BY shared DESC, s.doc_node ASC LIMIT %s"
+    " GROUP BY s.doc_node HAVING sum(s.weight) >= %s"
+    " ORDER BY shared DESC, s.doc_node ASC LIMIT %s"
     ")"
     " SELECT d.source_path, d.project, d.tags,"
     " string_agg(c.content, E'\\n' ORDER BY c.chunk_idx) AS content"
@@ -333,9 +334,10 @@ _RELATED_BY_SHARED_GROUND_SQL = (
 
 
 def related_by_shared_ground(
-    conn: psycopg.Connection, source_path: str, limit: int
+    conn: psycopg.Connection, source_path: str, limit: int, min_shared: int = 1
 ) -> Either[list[RelatedDoc], PgError]:
-    """store.rs:1187 — self 의 claims/concept:% 간선 dst 를 공유하는 더 오래된 문서들."""
+    """store.rs:1187 — self 의 claims/concept:% 간선 dst 를 공유하는 더 오래된 문서들.
+    공유 점수 합이 min_shared 미만인 후보는 빠진다."""
 
     def run() -> list[RelatedDoc]:
         doc_id = doc_node_id(source_path)
@@ -349,7 +351,7 @@ def related_by_shared_ground(
             for row in _exec_fetchall(
                 conn,
                 _RELATED_BY_SHARED_GROUND_SQL,
-                (doc_id, doc_id, doc_id, doc_id, source_path, limit),
+                (doc_id, doc_id, doc_id, doc_id, source_path, min_shared, limit),
             )
         ]
 

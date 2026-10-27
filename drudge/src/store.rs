@@ -1238,6 +1238,7 @@ impl Store {
         &self,
         source_path: &str,
         limit: i64,
+        min_shared: i64,
     ) -> Result<Vec<RecentDoc>> {
         let doc_id = doc_node_id(source_path);
         let rows = self
@@ -1289,7 +1290,8 @@ impl Store {
                      FROM shares s
                      JOIN document od ON ('doc:' || od.source_path) = s.doc_node
                      WHERE od.updated_at < (SELECT updated_at FROM document WHERE source_path = $3)
-                     GROUP BY s.doc_node ORDER BY shared DESC, s.doc_node ASC LIMIT $2
+                     GROUP BY s.doc_node HAVING sum(s.weight) >= $4
+                     ORDER BY shared DESC, s.doc_node ASC LIMIT $2
                  )
                  SELECT d.source_path, d.project, d.tags,
                         string_agg(c.content, E'\n' ORDER BY c.chunk_idx) AS content
@@ -1298,7 +1300,7 @@ impl Store {
                  JOIN chunk c ON c.source_path = d.source_path
                  GROUP BY d.source_path, d.project, d.tags, r.shared
                  ORDER BY r.shared DESC;",
-                &[&doc_id, &limit, &source_path],
+                &[&doc_id, &limit, &source_path, &min_shared],
             )
             .await
             .context("related by shared ground")?;

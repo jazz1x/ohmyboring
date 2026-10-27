@@ -33,6 +33,8 @@ const EVENT_LOG_MAX_LIMIT: i64 = 1000;
 const EVENT_INGEST_MAX_BATCH: usize = 100;
 /// Same cap `ask` uses for graph context — enough of an older note to recognise the thread.
 const RELATED_SNIPPET_CHARS: usize = 1200;
+/// /search is 2: score-1 related were used 1/1,300 (C-RELATED0, 10-27). The briefing keeps 1 for its old reason.
+const SEARCH_RELATED_MIN_SHARED: i64 = 2;
 
 pub(crate) async fn health(State(state): State<AppState>) -> Json<HealthResp> {
     // Non-blocking: try_lock reveals whether a sync is mid-flight without ever waiting on it. The
@@ -544,10 +546,11 @@ pub(crate) async fn handle_search(
         && let Some(store) = s.store.as_ref()
     {
         let mut seen: HashSet<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
+        // `related()` clamps to 0..=3, so the conversion cannot wrap.
+        let per_head = i64::try_from(related).unwrap_or(3);
         for hit in mapped.iter_mut().take(req.related_heads(max_results)) {
             for older in store
-                // `related()` clamps to 0..=3, so the conversion cannot wrap.
-                .related_by_shared_ground(&hit.source_path, i64::try_from(related).unwrap_or(3))
+                .related_by_shared_ground(&hit.source_path, per_head, SEARCH_RELATED_MIN_SHARED)
                 .await?
             {
                 if !seen.insert(older.source_path.clone()) {

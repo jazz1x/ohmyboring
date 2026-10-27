@@ -56,7 +56,7 @@ class RelatedSqlShapeTests(unittest.TestCase):
     def test_final_order_is_shared_desc_then_source_path_asc(self):
         sql = pg._RELATED_BY_SHARED_GROUND_SQL
         self.assertIn("ORDER BY r.shared DESC, d.source_path ASC", sql)
-        ranked_at = sql.index("GROUP BY s.doc_node ORDER BY shared DESC")
+        ranked_at = sql.index("ORDER BY shared DESC, s.doc_node ASC")
         self.assertLess(ranked_at, sql.index("LIMIT %s"), "LIMIT 전 doc_node ASC 는 ranked 단계")
 
 
@@ -505,6 +505,17 @@ class RelatedBySharedGroundTests(unittest.TestCase):
                 )
             case Err(e):
                 self.fail(f"related_by_shared_ground: {e}")
+
+    def test_min_shared_two_drops_single_concept_candidates(self):
+        match pg.related_by_shared_ground(self.conn, "/rel-self.md", 10, min_shared=2):
+            case Ok(docs):
+                self.assertEqual(
+                    [d.source_path for d in docs],
+                    ["/rel-both.md", "/rel-claim.md"],
+                    "점수 1(공유 concept 하나)인 /rel-a·/rel-concept·/rel-z 는 빠지고 2 이상만 남는다",
+                )
+            case Err(e):
+                self.fail(f"related_by_shared_ground min_shared=2: {e}")
 
     def test_content_is_chunks_joined_by_chunk_idx_and_tags(self):
         match pg.related_by_shared_ground(self.conn, "/rel-self.md", 10):

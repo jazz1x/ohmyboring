@@ -1143,9 +1143,17 @@ async fn related_follows_a_shared_claim_with_no_shared_concept() {
         .expect("newer claim node");
 
     let related = store
-        .related_by_shared_ground(&newer_path, 5)
+        .related_by_shared_ground(&newer_path, 5, 2)
         .await
         .expect("related by shared ground");
+    let above_shared = store
+        .related_by_shared_ground(&newer_path, 5, 3)
+        .await
+        .expect("related by shared ground, min_shared 3");
+    assert!(
+        above_shared.iter().all(|d| d.source_path != older_path),
+        "one shared claim scores 2 — a min_shared of 3 must drop it"
+    );
 
     assert!(
         related.iter().any(|d| d.source_path == older_path),

@@ -33,6 +33,8 @@ MCP_MAX_TOKENS = 16_384
 SEARCH_MAX_CLAIMS = 10
 #: serve.rs:785-787 — related 는 머리 hit 하나당 이 값까지만 (req.related().min(3)).
 SEARCH_MAX_RELATED = 3
+#: http.rs SEARCH_RELATED_MIN_SHARED — /search 의 related 는 공유 점수(claim 2 · concept 1) 합 2 이상만.
+SEARCH_RELATED_MIN_SHARED = 2
 #: drudge/src/serve/http.rs:35 — RELATED_SNIPPET_CHARS.
 RELATED_SNIPPET_CHARS = 1200
 
@@ -204,7 +206,10 @@ def _related(state: _State) -> Either[_State, SearchFailure]:
     lists: list[list[tuple[str, str]]] = []
     for scored in heads:
         match _map_err(
-            pg.related_by_shared_ground(state.conn, scored.hit.source_path, state.related),
+            # /search 는 2: 점수 1 사용 1/1,300 (C-RELATED0, 10-27). 브리프는 옛 이유로 1
+            pg.related_by_shared_ground(
+                state.conn, scored.hit.source_path, state.related, min_shared=SEARCH_RELATED_MIN_SHARED
+            ),
             _pg_failure("related"),
         ):
             case Err(failure):
