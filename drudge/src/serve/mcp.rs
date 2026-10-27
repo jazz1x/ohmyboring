@@ -3958,4 +3958,109 @@ rules:
         assert_eq!(note.front.claims[0].value, "ABC-123");
         assert!(note.front.tags.contains(&"pii-flag".to_owned()));
     }
+
+    // --- remember 거절 갈래: error.data.outcome 은 거절에만 (Python door.py:781-788) ---
+
+    async fn mcp_remember_reply(s: &crate::serve::AppState, args: Value) -> Value {
+        let req = json!({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": "remember", "arguments": args},
+        });
+        let res = super::handle_mcp(
+            axum::extract::State(s.clone()),
+            axum::http::HeaderMap::new(),
+            axum::Json(req),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn pii_state(root: &std::path::Path) -> crate::serve::AppState {
+        let rules = root.join("pii.yaml");
+        std::fs::write(
+            &rules,
+            r#"
+version: "1.0"
+rules:
+  - name: rrn
+    regex: '\b\d{6}-[1-4]\d{6}\b'
+    action: block
+    severity: critical
+    reason: resident registration number
+"#,
+        )
+        .unwrap();
+        let mut s = vault_state(root);
+        let scanner = crate::pii::PiiScanner::load(Some(&rules), None)
+            .unwrap()
+            .unwrap();
+        s.pii = std::sync::Arc::new(Some(scanner));
+        s
+    }
+
+    const PII_TAG_REFUSAL: &str = "PII gate blocked by rule 'rrn' (critical): resident registration number — matched sensitive text omitted";
+    const EMPTY_NOTE_REFUSAL: &str = "refused: this note has no project and no claims — add the next step or decision it leaves as claims (kind=next or kind=decision), or pass repo";
+
+    // Python: test_writer.py:778 (PII block = Refused -32603), test_door.py:1550 (refused flag).
+    #[tokio::test]
+    async fn mcp_remember_refuses_pii_that_sits_only_in_a_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = pii_state(tmp.path());
+        let reply = mcp_remember_reply(
+            &s,
+            json!({"title": "t", "body": "b", "project": "p", "tags": ["900101-1234567"]}),
+        )
+        .await;
+        assert_eq!(
+            reply["error"],
+            json!({"code": -32603, "message": PII_TAG_REFUSAL, "data": {"outcome": "refused"}})
+        );
+        assert_eq!(wiki_notes(tmp.path()), 0);
+    }
+
+    // Python: test_writer.py:754 (empty note refused on mcp), test_door.py:1567 (refused flag).
+    #[tokio::test]
+    async fn mcp_remember_refuses_a_note_with_no_project_and_no_claims() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let reply = mcp_remember_reply(&s, json!({"title": "t", "body": "b"})).await;
+        assert_eq!(
+            reply["error"],
+            json!({"code": -32602, "message": EMPTY_NOTE_REFUSAL, "data": {"outcome": "refused"}})
+        );
+        assert_eq!(wiki_notes(tmp.path()), 0);
+    }
+
+    // Control — Python: test_writer.py:772. HTTP /remember shares remember_note and keeps accepting.
+    #[tokio::test]
+    async fn http_remember_still_accepts_a_note_with_no_project_and_no_claims() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let out = crate::serve::http::handle_remember(
+            axum::extract::State(s),
+            axum::http::HeaderMap::new(),
+            axum::Json(json!({"title": "t", "body": "b"})),
+        )
+        .await;
+        assert!(out.is_ok(), "HTTP route must accept an empty note");
+        assert_eq!(wiki_notes(tmp.path()), 1);
+    }
+
+    // Control — Python: test_door.py:1580 (a write failure carries no data field).
+    #[tokio::test]
+    async fn mcp_remember_write_failure_carries_no_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = vault_state(tmp.path());
+        s.vault_dir = std::sync::Arc::new(None);
+        let reply =
+            mcp_remember_reply(&s, json!({"title": "t", "body": "b", "project": "p"})).await;
+        assert_eq!(reply["error"]["code"], -32603);
+        assert!(
+            reply["error"].get("data").is_none(),
+            "a failure must not claim to be a refusal: {reply}"
+        );
+    }
 }
