@@ -896,6 +896,14 @@ mod tests {
             r#"{"error":"1 validation error for _SearchBody\nquery\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"}"#,
         ),
         (
+            r#"{"query":"q","since_hours":2147483648}"#,
+            r#"{"error":"1 validation error for _SearchBody\nsince_hours\n  Input should be less than or equal to 2147483647 [type=less_than_equal, input_value=2147483648, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/less_than_equal"}"#,
+        ),
+        (
+            r#"{"query":"q","since_hours":1000000000000000000000000000000}"#,
+            r#"{"error":"1 validation error for _SearchBody\nsince_hours\n  Input should be less than or equal to 2147483647 [type=less_than_equal, input_value=1000000000000000000000000000000, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/less_than_equal"}"#,
+        ),
+        (
             r#"{"max_results":-1,"query":"q","max_results":-2}"#,
             r#"{"error":"1 validation error for _SearchBody\nmax_results\n  Input should be greater than or equal to 0 [type=greater_than_equal, input_value=-2, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/greater_than_equal"}"#,
         ),
@@ -943,6 +951,10 @@ mod tests {
         assert_eq!(
             parse(r#"{"query":"q","since_hours":null}"#).since_hours,
             None
+        );
+        assert_eq!(
+            parse(r#"{"query":"q","since_hours":2147483647}"#).since_hours,
+            Some(i32::MAX)
         );
         assert_eq!(
             parse(r#"{"query":"q","session_id":"  "}"#).session_id(),
