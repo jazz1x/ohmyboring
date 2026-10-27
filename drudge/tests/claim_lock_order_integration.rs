@@ -133,10 +133,18 @@ async fn shared_slot_rows(db: &Client, round_token: &str, old: &str, new: &str) 
     .get(0)
 }
 
+#[derive(Clone, Copy)]
+enum Judge {
+    /// `record_consumption` with a supersedes pair: seals the whole older note.
+    Verdict,
+    /// `remember_supersedes_in_tx`: seals only the slots the newer note re-states.
+    Remember,
+}
+
 /// A request ingesting a new note over the old note's slots while a judge write retires the old
 /// note, 40 rounds. The old note's rows were written back half first (slots 6..11, then 0..5), so
 /// its scan order is not slot order. Returns rounds in which a request was aborted.
-async fn aborted_rounds() -> usize {
+async fn aborted_rounds(judge: Judge) -> usize {
     let Some(dsn) = test_dsn() else {
         eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
         return 0;
@@ -165,11 +173,20 @@ async fn aborted_rounds() -> usize {
             .into_owned();
         let back_half: Vec<usize> = (SLOTS / 2..SLOTS).collect();
         let all: Vec<usize> = (0..SLOTS).collect();
+        // The judge's note goes in first so the old note's rows are the later ones in every slot
+        // and stay live: a judge note ingested after them would already have sealed them.
+        match judge {
+            Judge::Verdict => seed_doc(&store, &judge_note).await,
+            Judge::Remember => {
+                fs::write(&judge_note, note(&t, &all, "the note that supersedes"))
+                    .expect("write judge note");
+                ingest(&store, &judge_note).await.expect("seed judge note");
+            }
+        }
         fs::write(&older, note(&t, &back_half, "first half")).expect("write old");
         ingest(&store, &older).await.expect("seed old, back half");
         fs::write(&older, note(&t, &all, "all slots")).expect("rewrite old");
         ingest(&store, &older).await.expect("seed old, all slots");
-        seed_doc(&store, &judge_note).await;
         fs::write(&newer, note(&t, &all, "new note")).expect("write new");
 
         let session = format!("s-{t}");
@@ -179,9 +196,16 @@ async fn aborted_rounds() -> usize {
         let delay = std::time::Duration::from_millis((round % 8) as u64);
         let (a, b) = tokio::join!(ingest(&store, &newer), async {
             tokio::time::sleep(delay).await;
-            store
-                .record_consumption(&session, "2026-10-28", &[], &[], &pairs, None)
-                .await
+            match judge {
+                Judge::Verdict => store
+                    .record_consumption(&session, "2026-10-28", &[], &[], &pairs, None)
+                    .await
+                    .map(|_| ()),
+                Judge::Remember => store
+                    .remember_supersedes_in_tx(&pairs, None)
+                    .await
+                    .map(|_| ()),
+            }
         });
         let overlap = shared_slot_rows(&db, &t, &older, &newer).await;
         overlap_total += overlap;
@@ -203,8 +227,17 @@ async fn aborted_rounds() -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ingest_and_remembers_supersedes_seal_lock_one_slots_rows_in_one_order() {
+    let aborted = aborted_rounds(Judge::Remember).await;
+    assert_eq!(
+        aborted, 0,
+        "rounds (of {ROUNDS}) where a request was aborted"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ingest_and_the_verdict_seal_lock_one_slots_rows_in_one_order() {
-    let aborted = aborted_rounds().await;
+    let aborted = aborted_rounds(Judge::Verdict).await;
     assert_eq!(
         aborted, 0,
         "rounds (of {ROUNDS}) where a request was aborted"
