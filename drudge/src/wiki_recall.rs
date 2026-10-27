@@ -326,17 +326,14 @@ pub fn select_for_order(hits: Vec<WikiHit>, k: usize) -> Vec<WikiHit> {
         .collect()
 }
 
-/// The fused recall answer: lines to show and the lists that contributed to them.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Fused {
-    pub lines: Vec<(String, String)>,
-    pub path: String,
-}
-
 /// Python `answer._fused`: wiki and vector lines merged by RRF (k=60). Leading exact-title wiki
 /// lines stay pinned; the rest sort by summed RRF, ties by wiki rank then vector rank; a note in
 /// both lists shows its wiki body, a repeated vector path counts at its first rank. Pure.
-pub fn fuse(wiki: &[WikiHit], vector: &[(String, String)], k: usize) -> Result<Fused> {
+pub fn fuse(
+    wiki: &[WikiHit],
+    vector: &[(String, String)],
+    k: usize,
+) -> Result<Vec<(String, String)>> {
     let pinned: Vec<&WikiHit> = wiki.iter().take_while(|h| h.exact_title).collect();
     let pinned_paths: HashSet<&str> = pinned.iter().map(|h| h.source_path.as_str()).collect();
     let mut wiki_at: HashMap<&str, usize> = HashMap::new();
@@ -378,7 +375,7 @@ pub fn fuse(wiki: &[WikiHit], vector: &[(String, String)], k: usize) -> Result<F
             .then_with(|| a.3.cmp(&b.3))
     });
     let room = k.saturating_sub(pinned.len());
-    let lines: Vec<(String, String)> = pinned
+    Ok(pinned
         .iter()
         .map(|h| (h.source_path.clone(), h.snippet.clone()))
         .chain(
@@ -388,15 +385,7 @@ pub fn fuse(wiki: &[WikiHit], vector: &[(String, String)], k: usize) -> Result<F
                 .map(|(path, ..)| ((*path).to_owned(), body[path].to_owned())),
         )
         .take(k)
-        .collect();
-    let shown: HashSet<&str> = lines.iter().map(|(path, _)| path.as_str()).collect();
-    let path = [("wiki", &wiki_at), ("vector", &vector_at)]
-        .into_iter()
-        .filter(|(_, at)| shown.iter().any(|p| at.contains_key(p)))
-        .map(|(name, _)| name)
-        .collect::<Vec<_>>()
-        .join("+");
-    Ok(Fused { lines, path })
+        .collect())
 }
 
 fn normalized(text: &str) -> String {
@@ -492,10 +481,9 @@ mod tests {
             .collect()
     }
 
-    fn fused(wiki: &[(&str, bool)], vector: &[&str], k: usize) -> (Vec<(String, String)>, String) {
+    fn fused(wiki: &[(&str, bool)], vector: &[&str], k: usize) -> Vec<(String, String)> {
         let wiki: Vec<_> = wiki.iter().map(|(p, e)| wiki_hit(p, *e)).collect();
-        let out = super::fuse(&wiki, &vector_lines(vector), k).unwrap();
-        (out.lines, out.path)
+        super::fuse(&wiki, &vector_lines(vector), k).unwrap()
     }
 
     fn shown(lines: &[(String, String)]) -> Vec<(&str, &str)> {
@@ -509,8 +497,7 @@ mod tests {
     #[test]
     fn fuse_matches_python_rrf_pin_ties_and_duplicates() {
         let wiki = [("e", true), ("a", false), ("b", false)];
-        let (lines, path) = fused(&wiki, &["v1", "b", "a", "v2", "v2"], 5);
-        assert_eq!(path, "wiki+vector");
+        let lines = fused(&wiki, &["v1", "b", "a", "v2", "v2"], 5);
         assert_eq!(
             shown(&lines),
             [
@@ -522,22 +509,16 @@ mod tests {
             ]
         );
 
-        let (lines, _) = fused(&wiki, &["v1", "a", "v2"], 3);
+        let lines = fused(&wiki, &["v1", "a", "v2"], 3);
         assert_eq!(shown(&lines), [("e", "W:e"), ("a", "W:a"), ("v1", "V:v10")]);
 
-        let (lines, path) = fused(&[("a", false)], &["b"], 2);
-        assert_eq!(
-            (shown(&lines), path.as_str()),
-            ([("a", "W:a"), ("b", "V:b0")].to_vec(), "wiki+vector")
-        );
+        let lines = fused(&[("a", false)], &["b"], 2);
+        assert_eq!(shown(&lines), [("a", "W:a"), ("b", "V:b0")]);
 
-        let (lines, path) = fused(&[("a", false)], &["b"], 1);
-        assert_eq!(
-            (shown(&lines), path.as_str()),
-            ([("a", "W:a")].to_vec(), "wiki")
-        );
+        let lines = fused(&[("a", false)], &["b"], 1);
+        assert_eq!(shown(&lines), [("a", "W:a")]);
 
-        let (lines, _) = fused(&[("a", false)], &["v1", "v2", "v3"], 4);
+        let lines = fused(&[("a", false)], &["v1", "v2", "v3"], 4);
         assert_eq!(
             shown(&lines),
             [
@@ -548,14 +529,11 @@ mod tests {
             ]
         );
 
-        let (lines, _) = fused(&[("x", false), ("e", true)], &["v1"], 3);
+        let lines = fused(&[("x", false), ("e", true)], &["v1"], 3);
         assert_eq!(shown(&lines), [("x", "W:x"), ("v1", "V:v10"), ("e", "W:e")]);
 
-        let (lines, path) = fused(&[("a", false), ("b", false)], &["v1"], 1);
-        assert_eq!(
-            (shown(&lines), path.as_str()),
-            ([("a", "W:a")].to_vec(), "wiki")
-        );
+        let lines = fused(&[("a", false), ("b", false)], &["v1"], 1);
+        assert_eq!(shown(&lines), [("a", "W:a")]);
     }
 
     #[test]

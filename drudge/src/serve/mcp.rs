@@ -869,7 +869,7 @@ fn choose_lines(
         (true, Err(e)) => Err((-32603, format!("retrieve: {e:#}"))),
         (true, Ok(lines)) => Ok((lines, String::new())),
         (false, Ok(lines)) => crate::wiki_recall::fuse(&wiki_hits, &lines, max_results)
-            .map(|fused| (fused.lines, String::new()))
+            .map(|fused| (fused, String::new()))
             .map_err(|e| (-32603, format!("wiki recall fuse: {e:#}"))),
         (false, Err(e)) => Ok((
             wiki_hits
