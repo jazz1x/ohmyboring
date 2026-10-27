@@ -6102,9 +6102,10 @@ impl GraphExtractor for FailsAfterCounting {
     }
 }
 
-/// A note that fails after raising counters still contributes them to the run total.
+/// A note that fails after raising counters is rolled back, so the run total does not count
+/// what it raised: the report and the rows agree.
 #[tokio::test]
-async fn run_total_keeps_the_counters_a_failed_note_raised() {
+async fn run_total_drops_the_counters_a_failed_note_raised() {
     let Some(dsn) = test_dsn() else {
         eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
         return;
@@ -6138,7 +6139,7 @@ async fn run_total_keeps_the_counters_a_failed_note_raised() {
     assert_eq!(stats.failed, 1, "the note is counted as failed");
     assert_eq!(
         (stats.tools, stats.edges),
-        (3, 5),
-        "its partial counters stay"
+        (0, 0),
+        "its rolled-back counters are not in the total"
     );
 }
