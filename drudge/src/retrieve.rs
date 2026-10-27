@@ -25,7 +25,7 @@ const FEEDBACK_STEP: f64 = 1.0 / (RRF_K + 1.0) - 1.0 / (RRF_K + 2.0);
 const FEEDBACK_NET_MAX: i64 = 3;
 
 /// Compute an RRF term. rank is 1-based (0 not allowed). Err if usize → f64 conversion fails.
-fn rrf_term(rank: usize) -> Result<f64> {
+pub(crate) fn rrf_term(rank: usize) -> Result<f64> {
     // pool is at most a few hundred — exceeding u32 range is practically impossible, but the type must be the evidence.
     let r = f64::from(u32::try_from(rank).context("rrf rank to u32")?);
     Ok(1.0 / (RRF_K + r))

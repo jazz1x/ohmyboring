@@ -326,6 +326,79 @@ pub fn select_for_order(hits: Vec<WikiHit>, k: usize) -> Vec<WikiHit> {
         .collect()
 }
 
+/// The fused recall answer: lines to show and the lists that contributed to them.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Fused {
+    pub lines: Vec<(String, String)>,
+    pub path: String,
+}
+
+/// Python `answer._fused`: wiki and vector lines merged by RRF (k=60). Leading exact-title wiki
+/// lines stay pinned; the rest sort by summed RRF, ties by wiki rank then vector rank; a note in
+/// both lists shows its wiki body, a repeated vector path counts at its first rank. Pure.
+pub fn fuse(wiki: &[WikiHit], vector: &[(String, String)], k: usize) -> Result<Fused> {
+    let pinned: Vec<&WikiHit> = wiki.iter().take_while(|h| h.exact_title).collect();
+    let pinned_paths: HashSet<&str> = pinned.iter().map(|h| h.source_path.as_str()).collect();
+    let mut wiki_at: HashMap<&str, usize> = HashMap::new();
+    let mut body: HashMap<&str, &str> = HashMap::new();
+    for (i, h) in wiki.iter().enumerate() {
+        wiki_at.insert(h.source_path.as_str(), i);
+    }
+    let mut vector_at: HashMap<&str, usize> = HashMap::new();
+    for (i, (path, text)) in vector.iter().enumerate() {
+        vector_at.entry(path.as_str()).or_insert(i);
+        body.entry(path.as_str()).or_insert(text.as_str());
+    }
+    for h in wiki {
+        body.insert(h.source_path.as_str(), h.snippet.as_str());
+    }
+    let absent = wiki.len() + vector.len();
+    let mut scored: Vec<(&str, f64, usize, usize)> = body
+        .keys()
+        .filter(|path| !pinned_paths.contains(**path))
+        .map(|path| {
+            let mut sum = 0.0;
+            for rank in [wiki_at.get(path), vector_at.get(path)]
+                .into_iter()
+                .flatten()
+            {
+                sum += crate::retrieve::rrf_term(rank + 1)?;
+            }
+            Ok((
+                *path,
+                -sum,
+                wiki_at.get(path).copied().unwrap_or(absent),
+                vector_at.get(path).copied().unwrap_or(absent),
+            ))
+        })
+        .collect::<Result<_>>()?;
+    scored.sort_by(|a, b| {
+        a.1.total_cmp(&b.1)
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.3.cmp(&b.3))
+    });
+    let room = k.saturating_sub(pinned.len());
+    let lines: Vec<(String, String)> = pinned
+        .iter()
+        .map(|h| (h.source_path.clone(), h.snippet.clone()))
+        .chain(
+            scored
+                .iter()
+                .take(room)
+                .map(|(path, ..)| ((*path).to_owned(), body[path].to_owned())),
+        )
+        .take(k)
+        .collect();
+    let shown: HashSet<&str> = lines.iter().map(|(path, _)| path.as_str()).collect();
+    let path = [("wiki", &wiki_at), ("vector", &vector_at)]
+        .into_iter()
+        .filter(|(_, at)| shown.iter().any(|p| at.contains_key(p)))
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>()
+        .join("+");
+    Ok(Fused { lines, path })
+}
+
 fn normalized(text: &str) -> String {
     text.to_lowercase()
         .split_whitespace()
@@ -398,6 +471,91 @@ mod tests {
         .to_vec();
         assert_eq!(picked(dir.path(), 4), want);
         assert_eq!(picked(dir.path(), 1), vec![("wiki-0006".to_owned(), 11.0)]);
+    }
+
+    fn wiki_hit(path: &str, exact: bool) -> super::WikiHit {
+        super::WikiHit {
+            id: path.to_owned(),
+            title: path.to_owned(),
+            source_path: path.to_owned(),
+            snippet: format!("W:{path}"),
+            score: 1.0,
+            exact_title: exact,
+        }
+    }
+
+    fn vector_lines(paths: &[&str]) -> Vec<(String, String)> {
+        paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| ((*p).to_owned(), format!("V:{p}{i}")))
+            .collect()
+    }
+
+    fn fused(wiki: &[(&str, bool)], vector: &[&str], k: usize) -> (Vec<(String, String)>, String) {
+        let wiki: Vec<_> = wiki.iter().map(|(p, e)| wiki_hit(p, *e)).collect();
+        let out = super::fuse(&wiki, &vector_lines(vector), k).unwrap();
+        (out.lines, out.path)
+    }
+
+    fn shown(lines: &[(String, String)]) -> Vec<(&str, &str)> {
+        lines
+            .iter()
+            .map(|(p, b)| (p.as_str(), b.as_str()))
+            .collect()
+    }
+
+    // Expected values: Python answer._fused on the same inputs (Seams.rank_facts -> {}).
+    #[test]
+    fn fuse_matches_python_rrf_pin_ties_and_duplicates() {
+        let wiki = [("e", true), ("a", false), ("b", false)];
+        let (lines, path) = fused(&wiki, &["v1", "b", "a", "v2", "v2"], 5);
+        assert_eq!(path, "wiki+vector");
+        assert_eq!(
+            shown(&lines),
+            [
+                ("e", "W:e"),
+                ("a", "W:a"),
+                ("b", "W:b"),
+                ("v1", "V:v10"),
+                ("v2", "V:v23")
+            ]
+        );
+
+        let (lines, _) = fused(&wiki, &["v1", "a", "v2"], 3);
+        assert_eq!(shown(&lines), [("e", "W:e"), ("a", "W:a"), ("v1", "V:v10")]);
+
+        let (lines, path) = fused(&[("a", false)], &["b"], 2);
+        assert_eq!(
+            (shown(&lines), path.as_str()),
+            ([("a", "W:a"), ("b", "V:b0")].to_vec(), "wiki+vector")
+        );
+
+        let (lines, path) = fused(&[("a", false)], &["b"], 1);
+        assert_eq!(
+            (shown(&lines), path.as_str()),
+            ([("a", "W:a")].to_vec(), "wiki")
+        );
+
+        let (lines, _) = fused(&[("a", false)], &["v1", "v2", "v3"], 4);
+        assert_eq!(
+            shown(&lines),
+            [
+                ("a", "W:a"),
+                ("v1", "V:v10"),
+                ("v2", "V:v21"),
+                ("v3", "V:v32")
+            ]
+        );
+
+        let (lines, _) = fused(&[("x", false), ("e", true)], &["v1"], 3);
+        assert_eq!(shown(&lines), [("x", "W:x"), ("v1", "V:v10"), ("e", "W:e")]);
+
+        let (lines, path) = fused(&[("a", false), ("b", false)], &["v1"], 1);
+        assert_eq!(
+            (shown(&lines), path.as_str()),
+            ([("a", "W:a")].to_vec(), "wiki")
+        );
     }
 
     #[test]

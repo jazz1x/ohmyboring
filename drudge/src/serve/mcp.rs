@@ -803,13 +803,8 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             .map_err(|e| (-32603_i32, format!("wiki recall order: {e:#}")))?,
         _ => wiki_hits,
     };
-    let lines: Vec<(String, String)> = if !wiki_hits.is_empty() {
-        wiki_hits
-            .into_iter()
-            .map(|h| (h.source_path, h.snippet))
-            .collect()
-    } else if let Some(store) = s.store.as_ref() {
-        crate::retrieve::retrieve_budget(
+    let vector = match s.store.as_ref() {
+        Some(store) => crate::retrieve::retrieve_budget(
             store,
             &s.llm,
             query,
@@ -820,13 +815,14 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             since_hours,
         )
         .await
-        .map_err(|e| (-32603_i32, format!("retrieve: {e:#}")))?
-        .into_iter()
-        .map(|h| (h.source_path, h.content))
-        .collect()
-    } else {
-        Vec::new()
+        .map(|hits| {
+            hits.into_iter()
+                .map(|h| (h.source_path, h.content))
+                .collect::<Vec<_>>()
+        }),
+        None => Ok(Vec::new()),
     };
+    let (lines, failed_tail) = choose_lines(wiki_hits, vector, max_results)?;
     if lines.is_empty() {
         return Ok("(no experience recalled)".to_owned());
     }
@@ -856,7 +852,33 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             .map_err(|e| (-32603_i32, format!("recall concepts: {e:#}")))?,
         None => HashMap::new(),
     };
-    Ok(recall_text(&lines, &superseded, &concepts))
+    Ok(recall_text(&lines, &superseded, &concepts) + &failed_tail)
+}
+
+/// Lines to show and the failure tail to append.
+type ChosenLines = (Vec<(String, String)>, String);
+
+/// Python `answer._select`: no wiki hits -> vector only (its failure fails the recall); wiki hits
+/// -> RRF fuse with vector, and a vector failure keeps the wiki answer plus a failure tail.
+fn choose_lines(
+    wiki_hits: Vec<crate::wiki_recall::WikiHit>,
+    vector: anyhow::Result<Vec<(String, String)>>,
+    max_results: usize,
+) -> Result<ChosenLines, (i32, String)> {
+    match (wiki_hits.is_empty(), vector) {
+        (true, Err(e)) => Err((-32603, format!("retrieve: {e:#}"))),
+        (true, Ok(lines)) => Ok((lines, String::new())),
+        (false, Ok(lines)) => crate::wiki_recall::fuse(&wiki_hits, &lines, max_results)
+            .map(|fused| (fused.lines, String::new()))
+            .map_err(|e| (-32603, format!("wiki recall fuse: {e:#}"))),
+        (false, Err(e)) => Ok((
+            wiki_hits
+                .into_iter()
+                .map(|h| (h.source_path, h.snippet))
+                .collect(),
+            format!("\n\n(vector 길 실패: {e:#})"),
+        )),
+    }
 }
 
 fn recall_text(
