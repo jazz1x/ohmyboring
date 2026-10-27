@@ -822,7 +822,8 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         }),
         None => Ok(Vec::new()),
     };
-    let (lines, failed_tail) = choose_lines(wiki_hits, vector, max_results)?;
+    let sunk = sunk_paths(s.store.as_deref(), &wiki_hits, vector.as_ref().ok()).await?;
+    let (lines, failed_tail) = choose_lines(wiki_hits, vector, max_results, &sunk)?;
     if lines.is_empty() {
         return Ok("(no experience recalled)".to_owned());
     }
@@ -855,6 +856,36 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     Ok(recall_text(&lines, &superseded, &concepts) + &failed_tail)
 }
 
+/// Superseded paths among the wiki hits and the vector lines (Python `_fused` `sunk`); nothing
+/// to fuse (no store, no wiki hits, vector failed) means nothing sunk.
+async fn sunk_paths(
+    store: Option<&crate::store::Store>,
+    wiki_hits: &[crate::wiki_recall::WikiHit],
+    vector: Option<&Vec<(String, String)>>,
+) -> Result<std::collections::HashSet<String>, (i32, String)> {
+    let (Some(store), Some(lines), false) = (store, vector, wiki_hits.is_empty()) else {
+        return Ok(std::collections::HashSet::new());
+    };
+    let mut paths: Vec<String> = wiki_hits
+        .iter()
+        .map(|h| h.source_path.clone())
+        .chain(lines.iter().map(|(path, _)| path.clone()))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let facts = store.rank_facts(&paths).await.map_err(|e| {
+        (
+            -32603_i32,
+            format!("wiki recall order: rank: rank facts lookup: {e:#}"),
+        )
+    })?;
+    Ok(facts
+        .into_iter()
+        .filter(|(_, f)| f.superseded)
+        .map(|(path, _)| path)
+        .collect())
+}
+
 /// Lines to show and the failure tail to append.
 type ChosenLines = (Vec<(String, String)>, String);
 
@@ -864,11 +895,12 @@ fn choose_lines(
     wiki_hits: Vec<crate::wiki_recall::WikiHit>,
     vector: anyhow::Result<Vec<(String, String)>>,
     max_results: usize,
+    sunk: &std::collections::HashSet<String>,
 ) -> Result<ChosenLines, (i32, String)> {
     match (wiki_hits.is_empty(), vector) {
         (true, Err(e)) => Err((-32603, format!("retrieve: {e:#}"))),
         (true, Ok(lines)) => Ok((lines, String::new())),
-        (false, Ok(lines)) => crate::wiki_recall::fuse(&wiki_hits, &lines, max_results)
+        (false, Ok(lines)) => crate::wiki_recall::fuse(&wiki_hits, &lines, max_results, sunk)
             .map(|fused| (fused, String::new()))
             .map_err(|e| (-32603, format!("wiki recall fuse: {e:#}"))),
         (false, Err(e)) => Ok((

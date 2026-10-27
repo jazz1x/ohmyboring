@@ -328,11 +328,14 @@ pub fn select_for_order(hits: Vec<WikiHit>, k: usize) -> Vec<WikiHit> {
 
 /// Python `answer._fused`: wiki and vector lines merged by RRF (k=60). Leading exact-title wiki
 /// lines stay pinned; the rest sort by summed RRF, ties by wiki rank then vector rank; a note in
-/// both lists shows its wiki body, a repeated vector path counts at its first rank. Pure.
+/// both lists shows its wiki body, a repeated vector path counts at its first rank. Membership is
+/// decided by RRF first; then `sunk` (superseded) notes move behind the rest inside the cut, never
+/// out of it, and pinned lines stay put. Pure.
 pub fn fuse(
     wiki: &[WikiHit],
     vector: &[(String, String)],
     k: usize,
+    sunk: &HashSet<String>,
 ) -> Result<Vec<(String, String)>> {
     let pinned: Vec<&WikiHit> = wiki.iter().take_while(|h| h.exact_title).collect();
     let pinned_paths: HashSet<&str> = pinned.iter().map(|h| h.source_path.as_str()).collect();
@@ -375,14 +378,15 @@ pub fn fuse(
             .then_with(|| a.3.cmp(&b.3))
     });
     let room = k.saturating_sub(pinned.len());
+    let mut admitted: Vec<&str> = scored.iter().take(room).map(|(path, ..)| *path).collect();
+    admitted.sort_by_key(|path| sunk.contains(*path));
     Ok(pinned
         .iter()
         .map(|h| (h.source_path.clone(), h.snippet.clone()))
         .chain(
-            scored
+            admitted
                 .iter()
-                .take(room)
-                .map(|(path, ..)| ((*path).to_owned(), body[path].to_owned())),
+                .map(|path| ((*path).to_owned(), body[path].to_owned())),
         )
         .take(k)
         .collect())
@@ -418,6 +422,8 @@ mod tests {
         clippy::panic,
         clippy::float_cmp
     )]
+    use std::collections::HashSet;
+
     use super::{
         WikiIndex, count_occurrences, extract_title_body, query_terms, score_doc, select_for_order,
     };
@@ -483,7 +489,41 @@ mod tests {
 
     fn fused(wiki: &[(&str, bool)], vector: &[&str], k: usize) -> Vec<(String, String)> {
         let wiki: Vec<_> = wiki.iter().map(|(p, e)| wiki_hit(p, *e)).collect();
-        super::fuse(&wiki, &vector_lines(vector), k).unwrap()
+        super::fuse(&wiki, &vector_lines(vector), k, &HashSet::new()).unwrap()
+    }
+
+    fn fused_sunk(
+        wiki: &[(&str, bool)],
+        vector: &[&str],
+        k: usize,
+        sunk: &[&str],
+    ) -> Vec<(String, String)> {
+        let wiki: Vec<_> = wiki.iter().map(|(p, e)| wiki_hit(p, *e)).collect();
+        let sunk: HashSet<String> = sunk.iter().map(|p| (*p).to_owned()).collect();
+        super::fuse(&wiki, &vector_lines(vector), k, &sunk).unwrap()
+    }
+
+    // Expected values: Python answer._fused with rank_facts marking `sunk` superseded.
+    #[test]
+    fn fuse_sinks_superseded_inside_the_cut_without_cutting_more() {
+        let w = [("a", false), ("b", false), ("c", false)];
+        let lines = fused_sunk(&w, &["v1", "v2"], 4, &["a"]);
+        assert_eq!(
+            shown(&lines),
+            [("v1", "V:v10"), ("b", "W:b"), ("v2", "V:v21"), ("a", "W:a")]
+        );
+        let lines = fused_sunk(&w, &["v1", "v2"], 3, &["v2"]);
+        assert_eq!(shown(&lines), [("a", "W:a"), ("v1", "V:v10"), ("b", "W:b")]);
+        let lines = fused_sunk(&w, &["v1", "v2"], 4, &["v1"]);
+        assert_eq!(
+            shown(&lines),
+            [("a", "W:a"), ("b", "W:b"), ("v2", "V:v21"), ("v1", "V:v10")]
+        );
+        let pinned = [("e", true), ("a", false), ("b", false), ("c", false)];
+        let lines = fused_sunk(&pinned, &["v1"], 3, &["a", "e"]);
+        assert_eq!(shown(&lines), [("e", "W:e"), ("v1", "V:v10"), ("a", "W:a")]);
+        let lines = fused_sunk(&w, &["v1", "v2"], 2, &["c"]);
+        assert_eq!(shown(&lines), [("a", "W:a"), ("v1", "V:v10")]);
     }
 
     fn shown(lines: &[(String, String)]) -> Vec<(&str, &str)> {
