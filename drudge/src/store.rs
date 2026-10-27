@@ -694,6 +694,8 @@ impl Store {
         let claim_subject = canon_sql("c.subject");
         let claim_predicate = canon_sql("c.predicate");
         let is_canon_c = is_canon_sql("c");
+        let slot_subject = canon_sql("subject");
+        let slot_predicate = canon_sql("predicate");
 
         // DDL parameterized by the embedding dim (`embed_dim`). `vector({dim})` is the only interpolation;
         // dim is a parsed integer (no injection surface). `'{{}}'` escapes the literal empty-array default.
@@ -804,6 +806,9 @@ impl Store {
                      WHERE superseded_at IS NULL;
                  CREATE INDEX IF NOT EXISTS claim_kind ON claim(kind)
                      WHERE superseded_at IS NULL;
+                 -- The canon slot the startup and promote joins compare on; the planner matches
+                 -- the expression text, so it comes from the same `canon_sql` the queries use.
+                 CREATE INDEX IF NOT EXISTS claim_canon_slot ON claim(({slot_subject}), ({slot_predicate}));
                  -- A claim that there is no next step is not a next step. The distiller has
                  -- been writing `next-step: none` / `남은작업: 없음` as `kind: next` since the
                  -- beginning, so the stalled register reported work that was already finished
