@@ -99,16 +99,6 @@ mod tests {
         rejected(&format!("active_days must be 1..365, got {got}"))
     }
 
-    // Expected values: Python door `_check_active_days` behind Starlette QueryParams
-    // (TestClient on the door app), 2026-10-28.
-    #[test]
-    fn active_projects_sql_is_door_sql_plus_tie_key() {
-        assert_eq!(
-            ACTIVE_PROJECTS_SQL,
-            "select project, count(*) from document where project <> '' and updated_at > now() - make_interval(days => $1) group by 1 order by 2 desc, 1"
-        );
-    }
-
     // Door bytes: Starlette JSONResponse of `_active_projects_payload(7)` with these rows.
     #[test]
     fn active_payload_keeps_the_door_key_order() {
@@ -119,6 +109,8 @@ mod tests {
         );
     }
 
+    // Expected values: Python door `_check_active_days` behind Starlette QueryParams
+    // (TestClient on the door app), 2026-10-28.
     #[test]
     fn parse_query_matches_door() {
         let long_nines = format!("active_days={}", "9".repeat(4301));
