@@ -339,6 +339,7 @@ class Rig:
         self.reuse = Path(args.reuse).resolve() if args.reuse else None
         self.work = self.reuse or Path(tempfile.mkdtemp(prefix="p3p-", dir=args.work_root or None))
         self.dsn: dict[str, str] = {}
+        self.built: list[str] = []
         self.llm_url: dict[
             str, str
         ] = {}  # --timing: 쪽마다 임베딩 시간 재는 프록시 주소 (없으면 OLLAMA 곧장)
@@ -507,9 +508,14 @@ class Rig:
         return p
 
     def build_images(self) -> None:
-        """이 워크트리 HEAD 로 엔진·문 이미지를 만든다(없을 때만) — 운영 이미지·컨테이너는 건드리지 않는다."""
+        """이 워크트리 HEAD 로 엔진·문 이미지를 만든다(없을 때만) — 운영 이미지·컨테이너는 건드리지 않는다.
+        --engine-image/--door-image 로 받은 태그는 빌드하지 않고 쓴다. 지우는 것은 이 실행이 빌드한 것뿐(built)."""
         sha = run(["git", "-C", str(REPO_ROOT), "rev-parse", "--short", "HEAD"]).stdout.strip()
-        self.engine_image, self.door_image = f"{PREFIX}-engine:{sha}", f"{PREFIX}-door:{sha}"
+        self.engine_image = self.args.engine_image or f"{PREFIX}-engine:{sha}"
+        self.door_image = self.args.door_image or f"{PREFIX}-door:{sha}"
+        for given in (self.args.engine_image, self.args.door_image):
+            if given and run(["docker", "image", "inspect", given]).returncode != 0:
+                raise Unmeasured(f"given image {given} does not exist")
         if run(["docker", "image", "inspect", self.engine_image]).returncode != 0:
             log(f"building {self.engine_image} (drudge release build)")
             r = run(
@@ -525,6 +531,7 @@ class Rig:
             )
             if r.returncode != 0:
                 raise Unmeasured(f"engine image build failed: {r.stderr[-300:]}")
+            self.built.append(self.engine_image)
         if run(["docker", "image", "inspect", self.door_image]).returncode != 0:
             log(f"building {self.door_image}")
             r = run(
@@ -540,6 +547,7 @@ class Rig:
             )
             if r.returncode != 0:
                 raise Unmeasured(f"door image build failed: {r.stderr[-300:]}")
+            self.built.append(self.door_image)
 
     def wait_health(self, port: int, vector: bool | None = None) -> None:
         for _ in range(300):
@@ -650,9 +658,8 @@ class Rig:
         for name in (ENGINE, f"{ENGINE}-b", DOOR, *NAMES.values()):
             run(["docker", "rm", "-f", name])
         run(["docker", "network", "rm", NETWORK])
-        for image in (getattr(self, "engine_image", None), getattr(self, "door_image", None)):
-            if image:
-                run(["docker", "rmi", image])
+        for image in self.built:
+            run(["docker", "rmi", image])
         shutil.rmtree(self.work, ignore_errors=True)
 
 
@@ -1124,6 +1131,12 @@ def main(argv: list[str] | None = None) -> int:
         "--timing",
         default=None,
         help="요청 한 건의 시간을 임베딩·DB·파일·나머지로 쪼개 이 TSV 에 쓴다 (프록시·pg 로그로 밖에서 잰다)",
+    )
+    ap.add_argument(
+        "--engine-image", default=None, help="빌드하지 않고 쓸 엔진 이미지 태그 (끝나도 지우지 않는다)"
+    )
+    ap.add_argument(
+        "--door-image", default=None, help="빌드하지 않고 쓸 문 이미지 태그 (끝나도 지우지 않는다)"
     )
     ap.add_argument("--prefix", default="p3p", help="컨테이너·네트워크·이미지 이름 앞가지 (기본 p3p)")
     args = ap.parse_args(argv)
