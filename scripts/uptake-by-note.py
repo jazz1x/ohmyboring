@@ -365,35 +365,47 @@ def main():
     null_time = [p for p in scored_pairs if p[2] is None]
     no_note = [p for p in pairs if p[4] is None]
     timed = [p for p in scored_pairs if p[2] is not None]
-    moved = []
-    kept = []
-    for p in timed:
-        sid, path, t, u, used = p
-        changed = u is not None and u > t
-        replaced = any(s is not None and s > t for s in superseded.get(path, []))
-        (moved if changed or replaced else kept).append(p)
-    undated = [p for p in kept if notes[p[1]].born is None]
-    tabled = [p for p in kept if notes[p[1]].born is not None]
+    undated = [p for p in timed if notes[p[1]].born is None]
+    full = [p for p in timed if notes[p[1]].born is not None]
+    replaced = [p for p in full if any(s is not None and s > p[2] for s in superseded.get(p[1], []))]
+    replaced_ids = {id(p) for p in replaced}
+    unreplaced = [p for p in full if id(p) not in replaced_ids]
+    mtime_moved = [p for p in timed if p[3] is not None and p[3] > p[2]]
 
-    cells = defaultdict(lambda: [0, 0])
-    kind_cells = defaultdict(lambda: [0, 0])
-    for sid, path, t, _u, used in tabled:
-        note = notes[path]
-        key = (
-            note.kind,
-            age_bin(t, note.born),
-            "yes" if note.project and note.project == events[sid][0] else "no",
-        )
-        for target in (cells[key], kind_cells[key[0]]):
-            target[0] += bool(used)
-            target[1] += 1
+    def fill(rows):
+        cells = defaultdict(lambda: [0, 0])
+        kind_cells = defaultdict(lambda: [0, 0])
+        for sid, path, t, _u, used in rows:
+            note = notes[path]
+            key = (
+                note.kind,
+                age_bin(t, note.born),
+                "yes" if note.project and note.project == events[sid][0] else "no",
+            )
+            for target in (cells[key], kind_cells[key[0]]):
+                target[0] += bool(used)
+                target[1] += 1
+        return cells, kind_cells
 
-    judged_kinds = [
-        (kind_cells[k][0] / kind_cells[k][1], k) for k in KINDS[:3] if kind_cells[k][1] >= CELL_FLOOR
-    ]
-    worst = min(judged_kinds)[1] if judged_kinds else "아직"
+    def kind_order(kind_cells):
+        return [
+            k
+            for _r, k in sorted(
+                (kind_cells[k][0] / kind_cells[k][1], k) for k in KINDS[:3] if kind_cells[k][1] >= CELL_FLOOR
+            )
+        ]
 
-    out.append(f"노트별 사용 표(근사) — 가장 안 쓰이는 종류 {worst}")
+    cells_1, kinds_1 = fill(full)
+    cells_2, kinds_2 = fill(unreplaced)
+    order_1, order_2 = kind_order(kinds_1), kind_order(kinds_2)
+    if not order_1 or not order_2:
+        headline = "가장 안 쓰이는 종류 아직"
+    elif order_1 == order_2:
+        headline = f"가장 안 쓰이는 종류 {order_1[0]}"
+    else:
+        headline = f"종류 순위 갈림 — ① {' < '.join(order_1)} · ② {' < '.join(order_2)} (판정에 넘김)"
+
+    out.append(f"노트별 사용 표(근사) — {headline}")
     out.append("훅 길만, recall 도구 길 제외")
     out.append(match_line)
     out.append(
@@ -413,47 +425,54 @@ def main():
             f"(원장 있는 세션 {ledger_sessions}, 전사 못 찾음 {ledger_unreadable})"
         )
 
-    changed_notes = {p[1] for p in moved}
-    handed_notes = {p[1] for p in timed}
     out.append(
-        f"b) 건넨 뒤 본문(document.updated_at=파일 mtime)이 바뀌었거나 supersedes 로 대체된 노트 "
-        f"{len(changed_notes)} / 건넨 노트 {len(handed_notes)}, 쌍 {len(moved)} / {len(timed)} — 표 칸에서 뺌"
+        f"b) 건넨 뒤 supersedes 로 대체된 노트 {len({p[1] for p in replaced})} / 건넨 노트 {len({p[1] for p in full})}, "
+        f"쌍 {len(replaced)} / {len(full)} — ② 에서만 뺌"
+    )
+    out.append(
+        f"버린 기준: 파일 mtime 「바뀜」 쌍 {len(mtime_moved)} / {len(timed)} — sync 가 머리말만 다시 써도 mtime 이 움직여 본문 바뀜을 못 가름"
     )
     null_all, total_all = null_edges_overall()
     out.append(
         f"NULL first_seen_at: 창 세션 쌍 {len(null_time)} / {a_total} (표에서 뺌, 0 이 아니라 시각 모름) · "
         f"전체 handed 간선 {null_all} / {total_all}"
     )
-    moved_used = sum(1 for p in moved if p[4])
     out.append(
-        f"표 밖에 둔 쌍의 used (뺀 것이 결과를 바꾸는지 보라고): 바뀜·대체 {pct(moved_used, len(moved))}"
-        f" · 표 {pct(sum(1 for p in tabled if p[4]), len(tabled))}"
+        f"대체 쌍의 used (② 에서 뺀 것이 결과를 바꾸는지 보라고): 대체 {pct(sum(1 for p in replaced if p[4]), len(replaced))}"
+        f" · ② {pct(sum(1 for p in unreplaced if p[4]), len(unreplaced))}"
     )
     out.append(
-        f"쌍 장부: 건넴 {a_total} = 표 {len(tabled)} + 바뀜·대체 {len(moved)} + NULL {len(null_time)}"
-        f" + 날짜 없음 {len(undated)} + 노트 파일 없음 {len(no_note)}; 전사 없는 세션의 간선 {len(no_session)} 은 장부 밖, {window}"
+        f"쌍 장부: 건넴 {a_total} = ① {len(full)} + NULL {len(null_time)} + 날짜 없음 {len(undated)}"
+        f" + 노트 파일 없음 {len(no_note)}; ① {len(full)} = ② {len(unreplaced)} + 대체 {len(replaced)};"
+        f" 전사 없는 세션의 간선 {len(no_session)} 은 장부 밖, {window}"
     )
     out.append("")
-    out.append("종류별 used/handed (표 칸만, 건넴 100 미만은 「아직」)")
+    out.append("종류별 used/handed — ① 전체 · ② 대체 뺌 (건넴 100 미만은 「아직」)")
     for kind in KINDS:
-        a, b = kind_cells[kind]
-        out.append(f"  {kind:<10} {pct(a, b) if b >= CELL_FLOOR else f'아직 (건넴 {b})'}")
+        shown = []
+        for kind_cells in (kinds_1, kinds_2):
+            a, b = kind_cells[kind]
+            shown.append(pct(a, b) if b >= CELL_FLOOR else f"아직 (건넴 {b})")
+        out.append(f"  {kind:<10} ① {shown[0]} · ② {shown[1]}")
     out.append("")
-    out.append("종류 × 나이 × project 일치 — used/handed")
-    lowest = []
+    out.append("종류 × 나이 × project 일치 — used/handed, ① 전체 · ② 대체 뺌")
+    lowest = ([], [])
     for kind in KINDS:
         for age in AGES:
             for match in ("yes", "no"):
-                a, b = cells[(kind, age, match)]
-                shown = pct(a, b) if b >= CELL_FLOOR else f"아직 (건넴 {b})"
-                out.append(f"  {kind:<10} {age:<4} project={match:<3} {shown}")
-                if b >= CELL_FLOOR:
-                    lowest.append((a / b, kind, age, match, a, b))
+                shown = []
+                for side, cells in enumerate((cells_1, cells_2)):
+                    a, b = cells[(kind, age, match)]
+                    shown.append(pct(a, b) if b >= CELL_FLOOR else f"아직 (건넴 {b})")
+                    if b >= CELL_FLOOR:
+                        lowest[side].append((a / b, kind, age, match, a, b))
+                out.append(f"  {kind:<10} {age:<4} project={match:<3} ① {shown[0]} · ② {shown[1]}")
     out.append("")
-    out.append(
-        "가장 낮은 칸 3개 (건넴 100 이상): "
-        + " | ".join(f"{k} {ag} project={m} {a}/{b}" for _r, k, ag, m, a, b in sorted(lowest)[:3])
-    )
+    for mark, rows in zip("①②", lowest):
+        out.append(
+            f"가장 낮은 칸 3개 {mark} (건넴 100 이상): "
+            + " | ".join(f"{k} {ag} project={m} {a}/{b}" for _r, k, ag, m, a, b in sorted(rows)[:3])
+        )
     out.append(f"명령: .venv/bin/python scripts/uptake-by-note.py --since {z(since)} --until {z(until)}")
     out.append(
         "값은 근사: phrases 를 지금 노트 본문에서 다시 만들었고, 프롬프트 차감은 세션 전체 user 글 기준"
