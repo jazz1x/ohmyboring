@@ -13,8 +13,52 @@ pub enum ProjectsQuery {
     Rejected(String),
 }
 
-pub fn parse_query(_raw_query: Option<&str>) -> ProjectsQuery {
-    ProjectsQuery::Names
+const MIN_ACTIVE_DAYS: i32 = 1;
+const MAX_ACTIVE_DAYS: i32 = 365;
+const NOT_AN_INTEGER: &str = "active_days must be an integer 1..365";
+/// CPython refuses `int()` on more digits than this (leading zeros count).
+const PY_INT_MAX_DIGITS: usize = 4300;
+
+/// Door SQL (`_ACTIVE_PROJECTS_SQL`) plus a `, 1` tie key so equal counts come back in a fixed order.
+pub const ACTIVE_PROJECTS_SQL: &str = "select project, count(*) from document where project <> '' \
+and updated_at > now() - make_interval(days => $1) group by 1 order by 2 desc, 1";
+
+/// Parse the query once. Starlette `query_params.get`: the last duplicate wins, a bare key is "".
+pub fn parse_query(raw_query: Option<&str>) -> ProjectsQuery {
+    match crate::claim_source::last_param_opt(raw_query, "active_days") {
+        None => ProjectsQuery::Names,
+        Some(raw) => match check_active_days(&raw) {
+            Ok(days) => ProjectsQuery::ActiveDays(days),
+            Err(message) => ProjectsQuery::Rejected(message),
+        },
+    }
+}
+
+/// The door's `_check_active_days`: Python `int()` then 1..=365, messages verbatim.
+fn check_active_days(raw: &str) -> Result<i32, String> {
+    crate::approved::py_int(raw).ok_or_else(|| NOT_AN_INTEGER.to_string())?;
+    // `py_int` accepted the text, so it is only whitespace, one sign, digits and underscores.
+    let digits: String = raw
+        .chars()
+        .filter_map(crate::approved::decimal_value)
+        .filter_map(|d| char::from_digit(d, 10))
+        .collect();
+    if digits.len() > PY_INT_MAX_DIGITS {
+        return Err(NOT_AN_INTEGER.to_string());
+    }
+    let magnitude = digits.trim_start_matches('0');
+    let shown = match (magnitude.is_empty(), raw.contains('-')) {
+        (true, _) => "0".to_string(),
+        (false, true) => format!("-{magnitude}"),
+        (false, false) => magnitude.to_string(),
+    };
+    shown
+        .parse::<i32>()
+        .ok()
+        .filter(|days| (MIN_ACTIVE_DAYS..=MAX_ACTIVE_DAYS).contains(days))
+        .ok_or_else(|| {
+            format!("active_days must be {MIN_ACTIVE_DAYS}..{MAX_ACTIVE_DAYS}, got {shown}")
+        })
 }
 
 #[cfg(test)]
@@ -34,6 +78,14 @@ mod tests {
 
     // Expected values: Python door `_check_active_days` behind Starlette QueryParams
     // (TestClient on the door app), 2026-10-28.
+    #[test]
+    fn active_projects_sql_is_door_sql_plus_tie_key() {
+        assert_eq!(
+            ACTIVE_PROJECTS_SQL,
+            "select project, count(*) from document where project <> '' and updated_at > now() - make_interval(days => $1) group by 1 order by 2 desc, 1"
+        );
+    }
+
     #[test]
     fn parse_query_matches_door() {
         let long_nines = format!("active_days={}", "9".repeat(4301));

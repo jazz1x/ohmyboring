@@ -43,7 +43,7 @@ const DIGIT_ZEROS: [u32; 76] = [
 ];
 
 /// Python `unicodedata.decimal(c)`: the value of a Unicode decimal digit, if it is one.
-fn decimal_value(c: char) -> Option<u32> {
+pub(crate) fn decimal_value(c: char) -> Option<u32> {
     let cp = u32::from(c);
     DIGIT_ZEROS
         .iter()

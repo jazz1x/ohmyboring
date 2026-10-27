@@ -931,13 +931,54 @@ pub(crate) async fn handle_recall_labels(
 ///
 /// Read-only and unfiltered on purpose: the caller is asking "is this string a project we know",
 /// and a filtered answer would make a real project look invented.
-pub(crate) async fn handle_projects(
-    State(s): State<AppState>,
-) -> Result<Json<ProjectsResp>, AppError> {
+async fn project_names_response(s: &AppState) -> Result<Json<ProjectsResp>, AppError> {
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
     Ok(Json(ProjectsResp {
         projects: store.project_names().await?,
     }))
+}
+
+/// `GET /projects` — same wire as the Python door's `_projects`. The query is parsed once; no
+/// `active_days` key keeps the plain name list. With `active_days`: 400 `{error}` (checked before
+/// the store), 503 without a store, 502 `{error, detail}` when it can't be reached, else 200.
+pub(crate) async fn handle_projects(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use crate::projects::ProjectsQuery;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    match crate::projects::parse_query(uri.query()) {
+        ProjectsQuery::Names => project_names_response(&s).await.into_response(),
+        ProjectsQuery::Rejected(message) => {
+            (StatusCode::BAD_REQUEST, Json(json!({"error": message}))).into_response()
+        }
+        ProjectsQuery::ActiveDays(days) => {
+            let Some(store) = s.store.as_ref() else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error": "store not configured"})),
+                )
+                    .into_response();
+            };
+            match store.active_project_counts(days).await {
+                Ok(rows) => {
+                    let projects: Vec<_> = rows
+                        .into_iter()
+                        .map(|(project, documents)| {
+                            json!({"project": project, "documents": documents})
+                        })
+                        .collect();
+                    Json(json!({"projects": projects, "active_days": days})).into_response()
+                }
+                Err(e) => (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": "store unreachable", "detail": format!("{e:#}")})),
+                )
+                    .into_response(),
+            }
+        }
+    }
 }
 
 /// The owner's standing corrections, grouped for the trigger hook — same wire as the Python

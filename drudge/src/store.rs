@@ -2699,6 +2699,20 @@ impl Store {
         Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
+    /// Projects with a document touched within `days`, busiest first (ties by name) — `GET /projects?active_days=`.
+    pub async fn active_project_counts(&self, days: i32) -> Result<Vec<(String, i64)>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::projects::ACTIVE_PROJECTS_SQL, &[&days])
+            .await
+            .context("active project counts")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1)))
+            .collect())
+    }
+
     /// Current `rule` claims for `GET /rules` (SQL copied from the Python door).
     pub async fn rule_rows(&self) -> Result<Vec<crate::rules::RuleRow>> {
         let rows = self
