@@ -960,6 +960,57 @@ pub(crate) async fn handle_rules(State(s): State<AppState>) -> axum::response::R
     }
 }
 
+/// A subject's current claim — same wire as the Python door's `GET /claim-source`: 400 for a
+/// blank or NUL-bearing subject (checked before the store), 503 without a store, 502
+/// `{error, detail}` when it can't be reached, 404 when no claim is current.
+pub(crate) async fn handle_claim_source(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use crate::claim_source::{SubjectCheck, check_subject, pick_current};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let subject = match check_subject(uri.query()) {
+        SubjectCheck::Blank => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "subject query param is required"})),
+            )
+                .into_response();
+        }
+        SubjectCheck::Nul => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "subject must not contain NUL"})),
+            )
+                .into_response();
+        }
+        SubjectCheck::Valid(subject) => subject,
+    };
+    let Some(store) = s.store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "store not configured"})),
+        )
+            .into_response();
+    };
+    match store.claim_source_rows(&subject).await {
+        Ok(rows) => match pick_current(&subject, rows) {
+            Some(found) => Json(found).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "no current claim for subject"})),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "store unreachable", "detail": format!("{e:#}")})),
+        )
+            .into_response(),
+    }
+}
+
 /// Per-judge counts, per-judge precision, and llm/human agreement over hits both decided.
 pub(crate) async fn handle_recall_label_stats(
     State(s): State<AppState>,

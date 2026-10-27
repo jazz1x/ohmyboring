@@ -1638,6 +1638,8 @@ async def _claim_source(request: Request) -> Response:
     subject = request.query_params.get("subject", "")
     if not subject.strip():
         return JSONResponse({"error": "subject query param is required"}, status_code=400)
+    if "\x00" in subject:
+        return JSONResponse({"error": "subject must not contain NUL"}, status_code=400)
     if not os.environ.get("DOOR_PG_DSN"):
         return JSONResponse({"error": "store not configured"}, status_code=503)
     try:

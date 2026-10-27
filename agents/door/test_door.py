@@ -1952,6 +1952,27 @@ class ClaimSourcePureTests(unittest.TestCase):
         out = claim_source.pick_current("배포 요일", rows)
         self.assertEqual((out["note"], out["value"]), ("/vault/wiki/wiki-1001.md", "not friday"))
 
+    def test_ties_break_by_source_path_ascending_whatever_the_input_order(self):
+        at = datetime(2026, 9, 1, tzinfo=approved.SEOUL)
+        rows = [
+            ("/vault/wiki/b.md", at, "vb", "unknown"),
+            ("/vault/wiki/a.md", at, "va", "unknown"),
+            ("/vault/wiki/c.md", at, "vc", "unknown"),
+        ]
+        for order in (rows, rows[::-1], [rows[1], rows[2], rows[0]]):
+            out = claim_source.pick_current("동률", order)
+            self.assertEqual(out["note"], "/vault/wiki/a.md")
+            self.assertEqual(
+                [c["note"] for c in out["candidates"]],
+                ["/vault/wiki/a.md", "/vault/wiki/b.md", "/vault/wiki/c.md"],
+            )
+
+    def test_owner_ties_also_break_by_path(self):
+        at = datetime(2026, 9, 1, tzinfo=approved.SEOUL)
+        rows = [("/z.md", at, "vz", "owner"), ("/y.md", at, "vy", "owner"), ("/a.md", at, "va", "x")]
+        out = claim_source.pick_current("s", rows)
+        self.assertEqual([c["note"] for c in out["candidates"]], ["/y.md", "/z.md", "/a.md"])
+
     def test_empty_rows_is_none_the_doors_404(self):
         self.assertIsNone(claim_source.pick_current("없는 주어", []))
 
@@ -2027,6 +2048,13 @@ class ClaimSourceRouteTests(unittest.TestCase):
             status, body, _ = _req(self.door_port, "GET", path)
             self.assertEqual(status, 400, path)
             self.assertIn("subject", json.loads(body)["error"])
+
+    def test_nul_in_subject_is_400_before_the_store(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = [("/a.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "v", "unknown")]
+        status, body, _ = _req(self.door_port, "GET", "/claim-source?subject=a%00b")
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body), {"error": "subject must not contain NUL"})
 
     def test_unknown_subject_is_404_json(self):
         os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"

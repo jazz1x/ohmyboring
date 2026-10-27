@@ -2718,6 +2718,31 @@ impl Store {
             .collect())
     }
 
+    /// Current claims of one subject for `GET /claim-source` (SQL copied from the Python door).
+    /// `valid_from` is rendered in UTC; the Python door renders in the psycopg connection's
+    /// TimeZone, which is unverified.
+    pub async fn claim_source_rows(
+        &self,
+        subject: &str,
+    ) -> Result<Vec<crate::claim_source::ClaimRow>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::claim_source::SQL, &[&subject])
+            .await
+            .context("claim source")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::claim_source::ClaimRow {
+                source_path: r.get(0),
+                valid_from: chrono::DateTime::<chrono::Utc>::from(r.get::<_, SystemTime>(1))
+                    .fixed_offset(),
+                value: r.get(2),
+                author: r.get(3),
+            })
+            .collect())
+    }
+
     /// Per-judge verdict counts, plus how often the two judges agreed on hits both of them
     /// labelled. `unsure` is counted, never folded into either side — an abstention is not a vote.
     pub async fn recall_label_stats(&self) -> Result<(Vec<RecallLabelStats>, i64, i64)> {

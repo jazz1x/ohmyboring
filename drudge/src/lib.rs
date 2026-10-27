@@ -9,6 +9,7 @@ pub mod anchor;
 pub mod anchor_hash;
 pub mod ask;
 pub mod audit;
+pub mod claim_source;
 pub mod code_index;
 pub mod config;
 pub mod frontmatter;

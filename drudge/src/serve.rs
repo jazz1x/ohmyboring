@@ -292,6 +292,72 @@ mod tests {
         assert_eq!(&body[..], br#"{"error":"store not configured"}"#);
     }
 
+    // Expected values: Python door `_claim_source` + Starlette JSONResponse, 2026-10-28.
+    // PG paths (200/404/502) are unverified: the Docker VM is down.
+    #[tokio::test]
+    async fn claim_source_400_and_503_have_python_bodies() {
+        use tower::ServiceExt;
+        let cfg = crate::config::BoringConfig::default();
+        let state = super::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(None),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+            owner_token: std::sync::Arc::new(None),
+        };
+        let router = super::build_router(state);
+        let cases: [(&str, StatusCode, &[u8]); 6] = [
+            (
+                "/claim-source",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"subject query param is required"}"#,
+            ),
+            (
+                "/claim-source?subject=%1F",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"subject query param is required"}"#,
+            ),
+            (
+                "/claim-source?subject=a&subject=",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"subject query param is required"}"#,
+            ),
+            (
+                "/claim-source?subject=a%00b",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"subject must not contain NUL"}"#,
+            ),
+            (
+                "/claim-source?subject=%EB%B0%B0%ED%8F%AC",
+                StatusCode::SERVICE_UNAVAILABLE,
+                br#"{"error":"store not configured"}"#,
+            ),
+            (
+                "/claim-source?subject=x&subject=y",
+                StatusCode::SERVICE_UNAVAILABLE,
+                br#"{"error":"store not configured"}"#,
+            ),
+        ];
+        for (uri, status, want) in cases {
+            let req = axum::extract::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let res = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), status, "{uri}");
+            let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+            assert_eq!(&body[..], want, "{uri}");
+        }
+    }
+
     #[test]
     fn recurrences_days_defaults_to_30() {
         assert_eq!(recurrences_days(None), 30);
@@ -1596,6 +1662,7 @@ pub(crate) fn build_router(state: AppState) -> axum::Router {
         )
         .route("/projects", get(http::handle_projects))
         .route("/rules", get(http::handle_rules))
+        .route("/claim-source", get(http::handle_claim_source))
         .route("/recall-label-stats", get(http::handle_recall_label_stats))
         .route(
             "/events",
