@@ -6,10 +6,12 @@ use std::time::SystemTime;
 
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::Response;
 use serde_json::{Value, json};
 
 use crate::serve::owner;
+use crate::serve::search_route;
 
 use crate::ask;
 use crate::audit;
@@ -22,9 +24,8 @@ use crate::serve::{
     EventLogResp, GraphReq, GraphResp, HealthResp, MCP_MAX_RESULTS, MCP_MAX_TOKENS, ProjectsResp,
     QueryLogEntry, QueryLogReq, QueryLogResp, RecallLabelEntry, RecallLabelJudgeStats,
     RecallLabelReq, RecallLabelStatsResp, RecallLabelsReq, RecallLabelsResp, RecurrencesReq,
-    RecurrencesResp, RelatedNote, SearchHit, SearchResp, StalledReq, SyncResp, SyncState,
-    count_wiki_notes, recurrences_days, recurrences_limit, register_limit, spawn_query_log,
-    vector_disabled,
+    RecurrencesResp, RelatedNote, SearchHit, StalledReq, SyncResp, SyncState, count_wiki_notes,
+    recurrences_days, recurrences_limit, register_limit, spawn_query_log, vector_disabled,
 };
 use crate::store::{EventLogFilter, LoggedHit, Store};
 use std::collections::HashSet;
@@ -449,100 +450,66 @@ async fn attach_claims(
     Ok(())
 }
 
-pub(crate) async fn handle_search(
-    State(s): State<AppState>,
-    Json(req): Json<crate::serve::SearchReq>,
-) -> Result<Json<SearchResp>, AppError> {
-    let started = Instant::now();
+/// Everything between "the body parsed and the store exists" and the response rows: retrieval,
+/// the per-hit enrichments and the opt-in related walk. Any failure here is a search failure.
+async fn search_hits(
+    store: &Store,
+    s: &AppState,
+    req: &crate::serve::SearchReq,
+) -> Result<Vec<SearchHit>, String> {
+    search_hits_inner(store, s, req)
+        .await
+        .map_err(|e| format!("{:#}", e.error))
+}
+
+async fn search_hits_inner(
+    store: &Store,
+    s: &AppState,
+    req: &crate::serve::SearchReq,
+) -> Result<Vec<SearchHit>, AppError> {
     let max_results = req.max_results.clamp(1, MCP_MAX_RESULTS);
     let max_tokens = req.max_tokens.clamp(1, MCP_MAX_TOKENS);
     let max_chars = max_tokens.saturating_mul(4);
-    let project = req.project.as_deref();
-    let since_hours = req.since_hours;
-    // vector-first: /search is the external accuracy contract (eval gate). Use the strongest
-    // retriever when available; fall back to direct wiki reads only when vector is off.
-    let related = req.related();
-    let mut mapped: Vec<SearchHit> = if let Some(store) = s.store.as_ref() {
-        retrieve::retrieve_budget(
-            store,
-            &s.llm,
-            &req.query,
-            max_results,
-            max_chars,
-            &[],
-            project,
-            since_hours,
-        )
-        .await?
-        .into_iter()
-        .map(|h| SearchHit {
-            id: h.id,
-            origin: h.origin,
-            project: h.project,
-            source_path: h.source_path,
-            snippet: h.content,
-            dist: Some(h.dist),
-            dist_kind: Some(h.dist_kind),
-            related: Vec::new(),
-            superseded_by: Vec::new(),
-            used_count: 0,
-            contested_count: 0,
-            said_by_owner: 0,
-            claims: Vec::new(),
-            claims_total: None,
-        })
-        .collect()
-    } else {
-        // wiki-recall's WikiHit.score is a term-overlap heuristic (higher-is-better, unbounded) —
-        // a third, incomparable scale on top of vector cosine distance and text ts_rank. Rather than
-        // pretend it fits the same dist/dist_kind contract, this path honestly reports "no comparable
-        // relevance signal" and leaves filtering to the caller's own judgment.
-        s.wiki_recall(&req.query, max_results, project, since_hours)?
-            .into_iter()
-            .map(|h| SearchHit {
-                id: h.id,
-                origin: String::new(),
-                project: String::new(),
-                source_path: h.source_path,
-                snippet: h.snippet,
-                dist: None,
-                dist_kind: None,
-                related: Vec::new(),
-                superseded_by: Vec::new(),
-                used_count: 0,
-                contested_count: 0,
-                said_by_owner: 0,
-                claims: Vec::new(),
-                claims_total: None,
-            })
-            .collect()
-    };
+    // vector-first: /search is the external accuracy contract (eval gate).
+    let mut mapped: Vec<SearchHit> = retrieve::retrieve_budget(
+        store,
+        &s.llm,
+        &req.query,
+        max_results,
+        max_chars,
+        &[],
+        req.project.as_deref(),
+        req.since_hours,
+    )
+    .await?
+    .into_iter()
+    .map(|h| SearchHit {
+        id: h.id,
+        origin: h.origin,
+        project: h.project,
+        source_path: h.source_path,
+        snippet: h.content,
+        dist: Some(h.dist),
+        dist_kind: Some(h.dist_kind),
+        related: Vec::new(),
+        superseded_by: Vec::new(),
+        used_count: 0,
+        contested_count: 0,
+        said_by_owner: 0,
+        claims: Vec::new(),
+        claims_total: None,
+    })
+    .collect();
     // Graph-backed enrichments beside every hit — one grouped query each (consumption counts,
-    // and the opt-in claims handover). Both no-op where the graph cannot speak: no store, or `claims=0` — the §5-R6 frozen shape.
-    if let Some(store) = s.store.as_ref() {
-        attach_consumption(store, &mut mapped).await?;
-        attach_claims(store, &mut mapped, req.claims()).await?;
-    }
-    // Opt-in handover: name the session and everything /search just showed is recorded as handed
-    // to it (`session:<id>` -[handed]-> doc) — the write side of the feedback door. A failure
-    // must never fail the search: a lost handover only means a later bare verdict has nothing
-    // to apply to.
-    if let Some(session_id) = req.session_id()
-        && let Some(store) = s.store.as_ref()
-    {
-        let paths: Vec<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
-        let observed_at = chrono::Utc::now().to_rfc3339();
-        if let Err(error) = store.handover_in_tx(session_id, &observed_at, &paths).await {
-            eprintln!("[search] handover for session {session_id} failed: {error:#}");
-        }
-    }
+    // and the opt-in claims handover). `claims=0` is the §5-R6 frozen shape: no query runs.
+    attach_consumption(store, &mut mapped).await?;
+    attach_claims(store, &mut mapped, req.claims()).await?;
     // Opt-in graph read: beside each of the first `related_heads` hits, the older notes that
     // share a concept with it. The concept walk, not the shared-node walk — measured 2026-09-10,
     // shared nodes between recent notes are almost all `tool:*`, so the node walk links everything
-    // to everything. No store (wiki-recall fallback): hits keep empty `related`, no error.
-    if related > 0
-        && let Some(store) = s.store.as_ref()
-    {
+    // to everything.
+    let related = req.related();
+    if related > 0 {
         let mut seen: HashSet<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
         // `related()` clamps to 0..=3, so the conversion cannot wrap.
         let per_head = i64::try_from(related).unwrap_or(3);
@@ -561,36 +528,71 @@ pub(crate) async fn handle_search(
             }
         }
     }
-    log_search_query(&s, &req, &mapped, started);
-    Ok(Json(SearchResp { hits: mapped }))
+    Ok(mapped)
 }
 
-/// Query-log row for a finished /search: one line per hit, best snippet as the answer preview.
-fn log_search_query(
-    s: &AppState,
+/// POST /search — answers like the Python door (`_search`): the body is parsed once at the
+/// boundary (400), no store is 503, a failed search or handover is 502, and the query_log row is
+/// written before the response and only for a search that fully succeeded.
+pub(crate) async fn handle_search(State(s): State<AppState>, body: axum::body::Bytes) -> Response {
+    match search_route::parse_search_body(&body) {
+        Err(message) => search_route::error_response(StatusCode::BAD_REQUEST, &message),
+        Ok(req) => match s.store.as_deref() {
+            None => search_route::error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "store not configured",
+            ),
+            Some(store) => run_search(&s, store, &req).await,
+        },
+    }
+}
+
+async fn run_search(s: &AppState, store: &Store, req: &crate::serve::SearchReq) -> Response {
+    let started = Instant::now();
+    let outcome = search_route::search_flow(
+        req.session_id(),
+        search_hits(store, s, req),
+        // Opt-in handover: everything /search just showed is recorded as handed to the session —
+        // the write side of the feedback door. A failure fails the request (the door's 502).
+        |session, paths| async move {
+            let observed_at = chrono::Utc::now().to_rfc3339();
+            store
+                .handover_in_tx(&session, &observed_at, &paths)
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"))
+        },
+        |row| write_search_log(store, req, row, started),
+    )
+    .await;
+    match outcome {
+        Ok(hits) => search_route::search_ok_response(hits),
+        Err(failure) => search_route::error_response(StatusCode::BAD_GATEWAY, &failure.message()),
+    }
+}
+
+/// The query_log row, awaited before the response. A logging failure is reported on stderr and
+/// does not fail the search, the way the door's `_search_log_query` does.
+async fn write_search_log(
+    store: &Store,
     req: &crate::serve::SearchReq,
-    mapped: &[SearchHit],
+    row: search_route::LogRow,
     started: Instant,
 ) {
-    let hits: Vec<LoggedHit> = mapped
-        .iter()
-        .map(|h| match (h.dist, h.dist_kind) {
-            (Some(dist), Some(kind)) => LoggedHit::with_distance(h.source_path.clone(), dist, kind),
-            _ => LoggedHit::without_distance(h.source_path.clone()),
-        })
-        .collect();
-    spawn_query_log(
-        s.store.clone(),
-        "search",
-        req.query.clone(),
-        hits,
-        vec![],
-        mapped
-            .first()
-            .map(|h| h.snippet.chars().take(200).collect())
-            .unwrap_or_default(),
-        started.elapsed(),
-    );
+    let latency_ms = i32::try_from(started.elapsed().as_millis()).ok();
+    if let Err(e) = store
+        .log_query(
+            "search",
+            &req.query,
+            &row.hits,
+            &[],
+            &row.answer_snippet,
+            latency_ms,
+        )
+        .await
+    {
+        eprintln!("[query_log] {e:#}");
+    }
 }
 
 /// One `/consumption` request = one transaction: the owner-authored lookup, the bare-verdict

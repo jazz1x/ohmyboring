@@ -88,24 +88,6 @@ impl AppState {
         (*self.vault_dir).as_ref().map(|v| v.join("wiki"))
     }
 
-    pub(crate) fn wiki_recall(
-        &self,
-        query: &str,
-        k: usize,
-        project: Option<&str>,
-        since_hours: Option<i32>,
-    ) -> Result<Vec<wiki_recall::WikiHit>> {
-        let Some(dir) = self.wiki_dir() else {
-            return Ok(Vec::new());
-        };
-        let mut idx = self
-            .wiki_index
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        idx.refresh(&dir)?;
-        Ok(idx.search(query, k, project, since_hours))
-    }
-
     /// Every matching wiki note in Python order, uncut — the MCP recall picks its own pool.
     pub(crate) fn wiki_recall_ranked(
         &self,
@@ -1158,7 +1140,7 @@ impl SearchReq {
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session_id
             .as_deref()
-            .map(str::trim)
+            .map(search_route::py_strip)
             .filter(|s| !s.is_empty())
     }
 }
