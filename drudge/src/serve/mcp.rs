@@ -799,6 +799,7 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
     let ranked = s
         .wiki_recall_ranked(query, project, since_hours)
         .map_err(|e| (-32603_i32, format!("wiki recall: {e:#}")))?;
+    let titles = crate::wiki_recall::pool_titles(&ranked, max_results);
     let wiki_hits = crate::wiki_recall::select_for_order(ranked, max_results);
     let (wiki_hits, facts) = match s.store.as_ref() {
         Some(store) if !wiki_hits.is_empty() => crate::retrieve::order_wiki_hits(store, wiki_hits)
@@ -825,10 +826,6 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         }),
         None => Ok(Vec::new()),
     };
-    let titles: HashMap<String, String> = wiki_hits
-        .iter()
-        .map(|h| (h.source_path.clone(), h.title.clone()))
-        .collect();
     let sunk = sunk_in(s.store.as_deref(), &wiki_hits, &facts, vector.as_ref().ok()).await?;
     let (lines, failed_tail) = choose_lines(wiki_hits, vector, max_results, &sunk)?;
     if lines.is_empty() {
@@ -870,14 +867,11 @@ async fn claims_and_concepts(
     let Some(store) = store else {
         return Ok((HashMap::new(), HashMap::new()));
     };
-    let concepts = store
-        .concepts_of(paths)
-        .await
-        .map_err(|e| (-32603_i32, format!("recall concepts: {e:#}")))?;
-    let claims = store
-        .declared_claims(paths, CLAIMS_PER_NOTE)
-        .await
-        .map_err(|e| (-32603_i32, format!("recall claims: {e:#}")))?;
+    // Python answer.py: both are read, and a claims failure is reported before a concepts one.
+    let claims = store.declared_claims(paths, CLAIMS_PER_NOTE).await;
+    let concepts = store.concepts_of(paths).await;
+    let claims = claims.map_err(|e| (-32603_i32, format!("recall claims: {e:#}")))?;
+    let concepts = concepts.map_err(|e| (-32603_i32, format!("recall concepts: {e:#}")))?;
     Ok((claims, concepts))
 }
 

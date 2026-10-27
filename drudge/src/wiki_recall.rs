@@ -326,6 +326,18 @@ pub fn select_for_order(hits: Vec<WikiHit>, k: usize) -> Vec<WikiHit> {
         .collect()
 }
 
+/// Python `_Selected.titles`: (path -> title) of the whole pool `select_for_order` cuts from.
+#[must_use]
+pub fn pool_titles(hits: &[WikiHit], k: usize) -> HashMap<String, String> {
+    let Some(threshold) = k.min(hits.len()).checked_sub(1).map(|i| hits[i].score) else {
+        return HashMap::new();
+    };
+    hits.iter()
+        .filter(|h| h.exact_title || h.score >= threshold)
+        .map(|h| (h.source_path.clone(), h.title.clone()))
+        .collect()
+}
+
 /// Python `answer._fused`: wiki and vector lines merged by RRF (k=60). Leading exact-title wiki
 /// lines stay pinned; the rest sort by summed RRF, ties by wiki rank then vector rank; a note in
 /// both lists shows its wiki body, a repeated vector path counts at its first rank. Membership is
@@ -477,6 +489,35 @@ mod tests {
             score: 1.0,
             exact_title: exact,
         }
+    }
+
+    // Python answer._wiki_selected: titles ride the whole pool (ties at the cut + exact titles),
+    // not just the first `size` that go on to ordering.
+    #[test]
+    fn pool_titles_cover_the_pool_beyond_size() {
+        let hit = |p: &str, score: f32, exact: bool| super::WikiHit {
+            score,
+            exact_title: exact,
+            ..wiki_hit(p, exact)
+        };
+        let ranked = vec![
+            hit("e.md", 0.0, true),
+            hit("w1.md", 5.0, false),
+            hit("w2.md", 3.0, false),
+            hit("w3.md", 3.0, false),
+            hit("w4.md", 1.0, false),
+        ];
+        let titles = super::pool_titles(&ranked, 2);
+        let mut got: Vec<&str> = titles.keys().map(String::as_str).collect();
+        got.sort_unstable();
+        // size 2 -> threshold = 2nd hit (w1, 5.0): pool = exact e + w1 only; w3 ties w2 at 3.0 < 5.0.
+        assert_eq!(got, vec!["e.md", "w1.md"]);
+        let titles = super::pool_titles(&ranked[1..], 2);
+        let mut got: Vec<&str> = titles.keys().map(String::as_str).collect();
+        got.sort_unstable();
+        // threshold = 2nd hit (w2, 3.0): w3 is in the pool but outside select_for_order's take(2).
+        assert_eq!(got, vec!["w1.md", "w2.md", "w3.md"]);
+        assert_eq!(select_for_order(ranked[1..].to_vec(), 2).len(), 2);
     }
 
     fn vector_lines(paths: &[&str]) -> Vec<(String, String)> {
