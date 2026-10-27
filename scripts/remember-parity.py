@@ -36,11 +36,13 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OWNER_TOKEN = "p3p-owner-token"
 OWNER_HEADER = "x-boring-owner-token"
+PREFIX = "p3p"  # --prefix 로 바꾼다 (컨테이너·네트워크·이미지 이름)
 NAMES = {"a": "p3p-a", "b": "p3p-b"}
 ENGINE, DOOR, NETWORK = "p3p-eng", "p3p-door", "p3p-net"
 OLLAMA = "http://host.docker.internal:11434/v1"
@@ -286,6 +288,10 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+#: --timing: 요청마다 (base, case id, 시작 epoch, 끝 epoch, 상태). 한 번에 하나씩 순서대로 친다.
+WINDOWS: list[tuple[str, str, float, float, int]] = []
+
+
 def http_call(base: str, case: Case, args: object, rpc_id: int, owner: bool) -> tuple[int, bytes, float]:
     headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
     if owner:
@@ -303,7 +309,7 @@ def http_call(base: str, case: Case, args: object, rpc_id: int, owner: bool) -> 
         }
         url, data = base + "/mcp", json.dumps(rpc).encode()
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    t0 = time.perf_counter()
+    t0, w0 = time.perf_counter(), time.time()
     try:
         with urllib.request.urlopen(req, timeout=300) as r:
             body, status = r.read(), r.status
@@ -311,6 +317,7 @@ def http_call(base: str, case: Case, args: object, rpc_id: int, owner: bool) -> 
         body, status = e.read(), e.code
     except OSError as e:
         raise Unmeasured(f"{base} unreachable: {e}") from e
+    WINDOWS.append((base, case.cid, w0, time.time(), status))
     return status, body, time.perf_counter() - t0
 
 
@@ -332,6 +339,9 @@ class Rig:
         self.reuse = Path(args.reuse).resolve() if args.reuse else None
         self.work = self.reuse or Path(tempfile.mkdtemp(prefix="p3p-", dir=args.work_root or None))
         self.dsn: dict[str, str] = {}
+        self.llm_url: dict[
+            str, str
+        ] = {}  # --timing: 쪽마다 임베딩 시간 재는 프록시 주소 (없으면 OLLAMA 곧장)
 
     # 컨테이너 ---------------------------------------------------------------
     def psql(self, side: str, sql: str, db: str = "postgres") -> subprocess.CompletedProcess:
@@ -474,14 +484,16 @@ class Rig:
             raise Unmeasured("seed copies differ")
 
     # 컨테이너 ---------------------------------------------------------------
-    def config(self) -> Path:
-        p = self.work / "boring.json"
+    def config(self, url: str | None = None) -> Path:
+        p = self.work / (
+            "boring.json" if url is None else f"boring-{hashlib.md5(url.encode()).hexdigest()[:8]}.json"
+        )
         p.write_text(
             json.dumps(
                 {
                     "schema_version": 2,
                     "llm": {
-                        "base_url": OLLAMA,
+                        "base_url": url or OLLAMA,
                         "embed_model": "bge-m3",
                         "embed_dim": 1024,
                         "model": "gemma4:12b",
@@ -497,7 +509,7 @@ class Rig:
     def build_images(self) -> None:
         """이 워크트리 HEAD 로 엔진·문 이미지를 만든다(없을 때만) — 운영 이미지·컨테이너는 건드리지 않는다."""
         sha = run(["git", "-C", str(REPO_ROOT), "rev-parse", "--short", "HEAD"]).stdout.strip()
-        self.engine_image, self.door_image = f"p3p-engine:{sha}", f"p3p-door:{sha}"
+        self.engine_image, self.door_image = f"{PREFIX}-engine:{sha}", f"{PREFIX}-door:{sha}"
         if run(["docker", "image", "inspect", self.engine_image]).returncode != 0:
             log(f"building {self.engine_image} (drudge release build)")
             r = run(
@@ -585,14 +597,17 @@ class Rig:
             "BORING_HTTP_ADDR": "0.0.0.0:7700",
             "BORING_VAULT_DIR": "/vault",
             "BORING_CONFIG": "/config/boring.json",
-            "BORING_LLM_BASE_URL": OLLAMA,
+            "BORING_LLM_BASE_URL": self.llm_url.get(side, OLLAMA),
             "BORING_OWNER_TOKEN": OWNER_TOKEN,
             "BORING_SYNC_DISABLED": "1",
             "BORING_COMPACT_DISABLED": "1",
             "BORING_BRIEF_HOUR": "99",
             "TZ": "UTC",
         }
-        mounts = [f"{self.work / f'vault-{side}'}:/vault", f"{self.config()}:/config/boring.json:ro"]
+        mounts = [
+            f"{self.work / f'vault-{side}'}:/vault",
+            f"{self.config(self.llm_url.get(side))}:/config/boring.json:ro",
+        ]
         return self.start_container(name, self.engine_image, env, mounts, 7700, True)
 
     def stop_engine_b(self) -> None:
@@ -613,7 +628,7 @@ class Rig:
             "BORING_URL": f"http://{upstream_name}:7700",
             "BORING_EVENT_SINK": "spool",
             "BORING_EVENT_LOG": "/spool/events.ndjson",
-            "BORING_LLM_BASE_URL": OLLAMA,
+            "BORING_LLM_BASE_URL": self.llm_url.get("b", OLLAMA),
             "BORING_OWNER_TOKEN": OWNER_TOKEN,
             "DOOR_PORT": "7710",
             "BORING_IN_CONTAINER": "1",
@@ -621,12 +636,14 @@ class Rig:
         }
         mounts = [
             f"{self.work / 'vault-b'}:/vault",
-            f"{self.config()}:/config/boring.json:ro",
+            f"{self.config(self.llm_url.get('b'))}:/config/boring.json:ro",
             f"{spool}:/spool",
         ]
         return self.start_container(DOOR, self.door_image, env, mounts, 7710, None)
 
     def teardown(self) -> None:
+        for proxy in getattr(self, "proxies", {}).values():
+            proxy.stop()
         if self.args.keep:
             log(f"--keep: containers and {self.work} left in place")
             return
@@ -773,6 +790,314 @@ def same_response(a: tuple, b: tuple) -> bool:
         return a[1] == b[1]
 
 
+# ── --timing: 요청 한 건을 밖에서 쪼갠다 ─────────────────────────────────────
+# 엔진·문 코드는 건드리지 않는다. 임베딩은 쪽마다 하나씩 둔 시간 재는 프록시(호출 수·ms·입력 해시),
+# DB 는 사본 postgres 의 log_min_duration_statement=0 (BEGIN→COMMIT 와 문장 시간), 파일은 볼트 파일 mtime,
+# 문 안쪽 시계는 문이 이미 남기는 remember_written 의 elapsed_* 칸을 쓴다.
+
+BASELINE = "live python 7d baseline p50 1.058s / p95 3.905s (port3-stage0.tsv)"
+PG_LOG = re.compile(
+    r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+) \S+ \[(\d+)\] LOG:\s+duration: ([\d.]+) ms\s+"
+    r"(?:statement|execute \S*|parse \S*|bind \S*): (.*)$"
+)
+
+
+class EmbedProxy:
+    """OpenAI 모양 /embeddings 를 그대로 ollama 로 넘기며 (시작, 끝, 입력 해시, 입력 수) 를 쌓는다."""
+
+    def __init__(self, upstream: str = "http://127.0.0.1:11434") -> None:
+        import http.server
+        import threading
+
+        self.calls: list[dict] = []
+        calls = self.calls
+        up = upstream
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                body = self.rfile.read(int(self.headers.get("content-length", 0)))
+                t0 = time.time()
+                req = urllib.request.Request(
+                    up + self.path, data=body, headers={"content-type": "application/json"}, method="POST"
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=300) as r:
+                        out, status = r.read(), r.status
+                except urllib.error.HTTPError as e:
+                    out, status = e.read(), e.code
+                t1 = time.time()
+                try:
+                    inp = json.loads(body).get("input")
+                except ValueError:
+                    inp = None
+                items = inp if isinstance(inp, list) else [inp]
+                calls.append(
+                    {
+                        "t0": t0,
+                        "t1": t1,
+                        "path": self.path,
+                        "status": status,
+                        "n": len(items),
+                        "hash": hashlib.md5(json.dumps(inp, ensure_ascii=False).encode()).hexdigest()[:10],
+                        "chars": sum(len(x or "") for x in items if isinstance(x, str)),
+                    }
+                )
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+            def log_message(self, *a) -> None:
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def union_ms(spans: list[tuple[float, float]]) -> float:
+    """겹치는 구간을 한 번만 센 합 (초)."""
+    total, cur_end = 0.0, None
+    for a, b in sorted(spans):
+        if cur_end is None or a > cur_end:
+            total += b - a
+            cur_end = b
+        elif b > cur_end:
+            total += b - cur_end
+            cur_end = b
+    return total
+
+
+def overlap(spans: list[tuple[float, float]], lo: float, hi: float) -> float:
+    return union_ms([(max(a, lo), min(b, hi)) for a, b in spans if min(b, hi) > max(a, lo)])
+
+
+def pg_events(rig: Rig, side: str, offset: float) -> list[dict]:
+    """사본 postgres 로그 → 끝 시각(호스트 시계)·pid·길이·문장. offset = 호스트 시계 − pg 시계."""
+    r = run(["docker", "logs", NAMES[side]])
+    rows = []
+    for line in (r.stdout + r.stderr).splitlines():
+        m = PG_LOG.match(line)
+        if m:
+            ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=UTC).timestamp()
+            rows.append(
+                {"t": ts + offset, "pid": m.group(2), "dur": float(m.group(3)) / 1000, "sql": m.group(4)}
+            )
+    return rows
+
+
+def write_txs(rows: list[dict]) -> list[tuple[float, float, str]]:
+    """INSERT 를 품은 트랜잭션만 (시작, 끝, pid) — 쓰기 길의 DB 구간."""
+    open_tx: dict[str, dict] = {}
+    out = []
+    for r in rows:
+        sql = r["sql"].strip().upper()
+        if sql.startswith(
+            ("BEGIN", "START TRANSACTION")
+        ):  # 문(psycopg)은 BEGIN, 엔진(tokio-postgres)은 START TRANSACTION
+            open_tx[r["pid"]] = {"start": r["t"] - r["dur"], "writes": False}
+        elif sql.startswith(("COMMIT", "ROLLBACK", "END")) and r["pid"] in open_tx:
+            tx = open_tx.pop(r["pid"])
+            if tx["writes"]:
+                out.append((tx["start"], r["t"], r["pid"]))
+        elif r["pid"] in open_tx and sql.startswith(("INSERT", "UPDATE")) and "EVENT_LOG" not in sql:
+            open_tx[r["pid"]]["writes"] = True
+    return out
+
+
+def timing_report(
+    rig: Rig,
+    args: argparse.Namespace,
+    bases: dict[str, str],
+    proxies: dict[str, EmbedProxy],
+    offsets: dict[str, float],
+    outs: dict[str, Out],
+) -> None:
+    vault = {"a": rig.work / "vault-a", "b": rig.work / "vault-b"}
+    per: dict[str, list[dict]] = {"a": [], "b": []}
+    for side in ("a", "b"):
+        pgrows = pg_events(rig, side, offsets[side])
+        txs = write_txs(pgrows)
+        for base, cid, w0, w1, status in WINDOWS:
+            if base != bases[side] or status != 200:
+                continue
+            calls = sorted(
+                (
+                    c
+                    for c in proxies[side].calls
+                    if c["t0"] >= w0 - 0.02 and c["t1"] <= w1 + 0.02 and "embeddings" in c["path"]
+                ),
+                key=lambda c: c["t0"],
+            )
+            spans = [(c["t0"], c["t1"]) for c in calls]
+            hashes = Counter(c["hash"] for c in calls)
+            mytx = [t for t in txs if w0 - 0.05 <= t[1] <= w1 + 0.05]
+            tx_s = sum(b - a for a, b, _ in mytx)
+            emb_in_tx = sum(overlap(spans, a, b) for a, b, _ in mytx)
+            outside = sum(
+                r["dur"]
+                for r in pgrows
+                if w0 <= r["t"] <= w1
+                and not any(a <= r["t"] <= b for a, b, _ in mytx)
+                and "event_log" not in r["sql"].lower()
+            )
+            emb_wall = union_ms(spans)
+            total = w1 - w0
+            o = outs[cid]
+            wp = getattr(o, f"path_{side}")
+            mt = None
+            if wp:
+                f = vault[side] / "wiki" / os.path.basename(wp)
+                if f.exists() and w0 <= f.stat().st_mtime <= w1 + 0.05:
+                    mt = w1 - f.stat().st_mtime
+            per[side].append(
+                {
+                    "cid": cid,
+                    "total": total,
+                    "emb_n": len(calls),
+                    "emb_wall": emb_wall,
+                    "emb_sum": sum(b - a for a, b in spans),
+                    "emb_first": (spans[0][1] - spans[0][0]) if spans else 0.0,
+                    "emb_dup": sum(v - 1 for v in hashes.values()),
+                    "tx": tx_s,
+                    "emb_in_tx": emb_in_tx,
+                    "db_outside": outside,
+                    "other": total - emb_wall - (tx_s - emb_in_tx) - outside,
+                    "file_tail": mt,
+                }
+            )
+
+    def q(xs: list[float], p: int) -> str:
+        return (
+            f"{statistics.quantiles(xs, n=100, method='inclusive')[p - 1] * 1000:.0f}" if len(xs) > 1 else "-"
+        )
+
+    names = {"a": "A engine", "b": "B python door"}
+    segs = [
+        ("total_client", "total", "client wall time"),
+        ("embedding_wall", "emb_wall", "union of embedding calls (overlap counted once)"),
+        ("embedding_sum", "emb_sum", "sum of embedding call durations (parallel calls add up)"),
+        (
+            "embedding_first_call",
+            "emb_first",
+            "first embedding call of the request (dedup probe when present)",
+        ),
+        ("db_write_tx", "tx", "BEGIN..COMMIT of the INSERT transaction (pg log)"),
+        ("embedding_inside_tx", "emb_in_tx", "embedding wall time that falls inside the write transaction"),
+        (
+            "db_outside_tx",
+            "db_outside",
+            "sum of statement durations outside the write tx (nearest, ids, supersedes)",
+        ),
+        (
+            "other_residual",
+            "other",
+            "total - embedding_wall - (tx - embedding_in_tx) - db_outside: http, parse, file write, event emit, project_note, db-client overhead",
+        ),
+        (
+            "file_last_write_before_end",
+            "file_tail",
+            "ms from the note file's last mtime to response end (engine rewrites relates_to after commit); only requests that wrote a file",
+        ),
+    ]
+    lines = [
+        "\t".join(
+            [
+                f"measured: HTTP remember on throwaway copies, n={len(per['a'])} A / {len(per['b'])} B (status 200 only), "
+                "same inputs sent A then B one at a time; embedding via per-side timing proxy to ollama bge-m3, "
+                "DB via postgres log_min_duration_statement=0 (write tx = BEGIN..COMMIT containing an INSERT), "
+                "file via vault mtime, door internal via its remember_written elapsed_* columns; no engine/door code touched",
+                BASELINE,
+            ]
+        ),
+        "\t".join(["side", "segment", "n", "p50_ms", "p95_ms", "note"]),
+    ]
+    for side in ("a", "b"):
+        for label, key, note in segs:
+            xs = sorted(r[key] for r in per[side] if r[key] is not None)
+            lines.append("\t".join([names[side], label, str(len(xs)), q(xs, 50), q(xs, 95), note]))
+    lines += ["", "\t".join(["side", "embed_calls_per_request", "requests", "p50_total_ms", "p95_total_ms"])]
+    for side in ("a", "b"):
+        for n in sorted({r["emb_n"] for r in per[side]}):
+            xs = sorted(r["total"] for r in per[side] if r["emb_n"] == n)
+            lines.append("\t".join([names[side], str(n), str(len(xs)), q(xs, 50), q(xs, 95)]))
+    for side in ("a", "b"):
+        dist = Counter(r["emb_n"] for r in per[side])
+        dup = sum(r["emb_dup"] for r in per[side])
+        lines.append(
+            "\t".join(
+                [
+                    names[side],
+                    "distribution",
+                    ";".join(f"{k}:{v}" for k, v in sorted(dist.items())),
+                    f"duplicate_input_calls={dup}",
+                    f"total_calls={sum(r['emb_n'] for r in per[side])}",
+                ]
+            )
+        )
+    # 문 안쪽 시계
+    ev = []
+    if rig.spool.exists():
+        for line in rig.spool.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("event") == "remember_written":
+                    ev.append(row)
+    lines += ["", "\t".join(["door internal (remember_written)", "n", "p50_ms", "p95_ms"])]
+    for col in ("total", "embedding", "db", "vault", "parse", "nearest", "event"):
+        xs = sorted(float(e[f"elapsed_{col}_s"]) for e in ev if f"elapsed_{col}_s" in e)
+        lines.append("\t".join([f"elapsed_{col}", str(len(xs)), q(xs, 50), q(xs, 95)]))
+    lines += [
+        "",
+        "\t".join(
+            [
+                "case",
+                "side",
+                "total_ms",
+                "embed_n",
+                "embed_wall_ms",
+                "embed_sum_ms",
+                "dup_inputs",
+                "tx_ms",
+                "embed_in_tx_ms",
+                "db_outside_ms",
+                "other_ms",
+            ]
+        ),
+    ]
+    for side in ("a", "b"):
+        for r in per[side]:
+            lines.append(
+                "\t".join(
+                    [
+                        r["cid"],
+                        names[side],
+                        f"{r['total'] * 1000:.0f}",
+                        str(r["emb_n"]),
+                        f"{r['emb_wall'] * 1000:.0f}",
+                        f"{r['emb_sum'] * 1000:.0f}",
+                        str(r["emb_dup"]),
+                        f"{r['tx'] * 1000:.0f}",
+                        f"{r['emb_in_tx'] * 1000:.0f}",
+                        f"{r['db_outside'] * 1000:.0f}",
+                        f"{r['other'] * 1000:.0f}",
+                    ]
+                )
+            )
+    out = Path(args.timing)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    log(f"timing table → {out}")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="remember 쓰기 대조 (C-PORT3 2단계) — 엔진(A) 대 문의 파이썬 길(B)"
@@ -795,7 +1120,17 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="--keep 으로 남긴 디렉터리 — 덤프·복원을 건너뛰고 boring_seed 틀에서 다시 시작",
     )
+    ap.add_argument(
+        "--timing",
+        default=None,
+        help="요청 한 건의 시간을 임베딩·DB·파일·나머지로 쪼개 이 TSV 에 쓴다 (프록시·pg 로그로 밖에서 잰다)",
+    )
+    ap.add_argument("--prefix", default="p3p", help="컨테이너·네트워크·이미지 이름 앞가지 (기본 p3p)")
     args = ap.parse_args(argv)
+    global PREFIX, NAMES, ENGINE, DOOR, NETWORK
+    PREFIX = args.prefix
+    NAMES = {"a": f"{PREFIX}-a", "b": f"{PREFIX}-b"}
+    ENGINE, DOOR, NETWORK = f"{PREFIX}-eng", f"{PREFIX}-door", f"{PREFIX}-net"
     if not args.reuse and not args.live_vault:
         ap.error("--live-vault (or PARITY_LIVE_VAULT) is required")
 
@@ -813,7 +1148,16 @@ def measure(rig: Rig, args: argparse.Namespace) -> int:
     for side in NAMES:
         rig.start_db(side)
     rig.assert_scratch()
-    rig.build_images()
+    proxies: dict[str, EmbedProxy] = {}
+    offsets: dict[str, float] = {}
+    if args.timing:
+        for side in NAMES:
+            proxies[side] = EmbedProxy()
+            rig.llm_url[side] = f"http://host.docker.internal:{proxies[side].port}/v1"
+            rig.proxies = proxies
+            rig.psql(side, "ALTER SYSTEM SET log_min_duration_statement = 0")
+            rig.psql(side, "ALTER SYSTEM SET log_line_prefix = '%m [%p] '")
+            rig.psql(side, "SELECT pg_reload_conf()")
     rig.build_images()
     rig.seed()
     # 엔진은 기동할 때 스키마 이전(claim 되살림 등)을 돈다 — 라이브 엔진이 옛 빌드면 덤프에는 그 이전이 안 돼 있어
@@ -841,6 +1185,12 @@ def measure(rig: Rig, args: argparse.Namespace) -> int:
             f"seed copies differ before the batch: {differing} {str({k: (v[0][:2], v[1][:2]) for k, v in sample.items()})[:600]}"
         )
 
+    if args.timing:
+        for side in NAMES:  # 호스트 시계 − pg 시계 (도커 VM 시계 어긋남 보정)
+            h0 = time.time()
+            pg_now = float(rig.psql(side, "SELECT extract(epoch FROM clock_timestamp())").stdout.strip())
+            offsets[side] = (h0 + time.time()) / 2 - pg_now
+        WINDOWS.clear()
     cases = build_cases()
     outs: dict[str, Out] = {}
     for i, case in enumerate(cases, 1):
@@ -864,6 +1214,9 @@ def measure(rig: Rig, args: argparse.Namespace) -> int:
                 f"response: A {out.a[0]} {out.a[1].decode(errors='replace')[:160]!r} / "
                 f"B {out.b[0]} {out.b[1].decode(errors='replace')[:160]!r}"
             )
+
+    if args.timing:
+        timing_report(rig, args, {"a": base_a, "b": base_b}, proxies, offsets, outs)
 
     # 문의 사건은 백그라운드 큐라 A 가 낸 개수에 닿을 때까지 읽는다.
     ev_a = engine_events(rig.dsn["a"], mark_a)
