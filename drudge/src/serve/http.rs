@@ -938,6 +938,28 @@ pub(crate) async fn handle_projects(
     }))
 }
 
+/// The owner's standing corrections, grouped for the trigger hook — same wire as the Python
+/// door's `GET /rules`: 503 without a store, 502 `{error, detail}` when it can't be reached.
+pub(crate) async fn handle_rules(State(s): State<AppState>) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let Some(store) = s.store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "store not configured"})),
+        )
+            .into_response();
+    };
+    match store.rule_rows().await {
+        Ok(rows) => Json(crate::rules::group_rules(rows)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "store unreachable", "detail": format!("{e:#}")})),
+        )
+            .into_response(),
+    }
+}
+
 /// Per-judge counts, per-judge precision, and llm/human agreement over hits both decided.
 pub(crate) async fn handle_recall_label_stats(
     State(s): State<AppState>,

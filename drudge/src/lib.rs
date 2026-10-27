@@ -18,6 +18,7 @@ pub mod llm;
 pub mod pii;
 pub mod redact;
 pub mod retrieve;
+pub mod rules;
 pub mod serve;
 pub mod store;
 pub mod vault;

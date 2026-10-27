@@ -263,6 +263,35 @@ mod tests {
             assert_eq!(&body[..], br#"{"error":"unprocessable entity"}"#, "{path}");
         }
     }
+    #[tokio::test]
+    async fn rules_without_store_is_503_with_python_body() {
+        use tower::ServiceExt;
+        let cfg = crate::config::BoringConfig::default();
+        let state = super::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(None),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+            owner_token: std::sync::Arc::new(None),
+        };
+        let req = axum::extract::Request::builder()
+            .uri("/rules")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = super::build_router(state).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], br#"{"error":"store not configured"}"#);
+    }
+
     #[test]
     fn recurrences_days_defaults_to_30() {
         assert_eq!(recurrences_days(None), 30);
@@ -1566,6 +1595,7 @@ pub(crate) fn build_router(state: AppState) -> axum::Router {
             get(http::handle_recall_labels).post(http::handle_recall_label_record),
         )
         .route("/projects", get(http::handle_projects))
+        .route("/rules", get(http::handle_rules))
         .route("/recall-label-stats", get(http::handle_recall_label_stats))
         .route(
             "/events",

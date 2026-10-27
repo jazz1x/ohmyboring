@@ -2699,6 +2699,25 @@ impl Store {
         Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
+    /// Current `rule` claims for `GET /rules` (SQL copied from the Python door).
+    pub async fn rule_rows(&self) -> Result<Vec<crate::rules::RuleRow>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::rules::SQL, &[&"rule"])
+            .await
+            .context("rule claims")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::rules::RuleRow {
+                subject: r.get(0),
+                predicate: r.get(1),
+                value: r.get(2),
+                source_path: r.get(3),
+            })
+            .collect())
+    }
+
     /// Per-judge verdict counts, plus how often the two judges agreed on hits both of them
     /// labelled. `unsure` is counted, never folded into either side — an abstention is not a vote.
     pub async fn recall_label_stats(&self) -> Result<(Vec<RecallLabelStats>, i64, i64)> {
