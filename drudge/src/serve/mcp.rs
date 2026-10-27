@@ -58,18 +58,16 @@ pub(crate) async fn handle_mcp(
     if method.starts_with("notifications/") {
         return StatusCode::ACCEPTED.into_response();
     }
-    let outcome = match method {
+    let outcome: Result<Value, RpcError> = match method {
         "initialize" => Ok(mcp_initialize(&req)),
         "tools/list" => Ok(mcp_tools_list()),
         "ping" => Ok(json!({})),
         "tools/call" => mcp_call(&s, caller, &req).await,
-        other => Err((-32601_i32, format!("method not found: {other}"))),
+        other => Err((-32601_i32, format!("method not found: {other}")).into()),
     };
     let body = match outcome {
         Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-        Err((code, message)) => {
-            json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
-        }
+        Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": e.body()}),
     };
     Json(body).into_response()
 }
@@ -537,14 +535,71 @@ const MCP_TOOL_NAMES: [&str; 24] = [
     "weekly_brief",
 ];
 
+/// Why a call did not produce its answer. A refusal is a gate's verdict on the request (shape,
+/// standing, PII, empty note) — retrying the same call cannot change it; a failure is the write
+/// or the store breaking. The MCP error carries `data.outcome = "refused"` for refusals only,
+/// the way Python's door does (door.py:781-788); the consumer retries anything without it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fault {
+    Refused,
+    Failed,
+}
+
+#[derive(Debug)]
+pub(crate) struct RpcError {
+    pub(crate) code: i32,
+    pub(crate) message: String,
+    pub(crate) fault: Fault,
+}
+
+impl RpcError {
+    fn refused((code, message): (i32, String)) -> Self {
+        Self {
+            code,
+            message,
+            fault: Fault::Refused,
+        }
+    }
+
+    fn body(&self) -> Value {
+        match self.fault {
+            Fault::Refused => {
+                json!({"code": self.code, "message": self.message, "data": {"outcome": "refused"}})
+            }
+            Fault::Failed => json!({"code": self.code, "message": self.message}),
+        }
+    }
+}
+
+/// A bare `(code, message)` is a failure; a refusal must say so with `RpcError::refused`.
+impl From<(i32, String)> for RpcError {
+    fn from((code, message): (i32, String)) -> Self {
+        Self {
+            code,
+            message,
+            fault: Fault::Failed,
+        }
+    }
+}
+
 enum ToolCallError {
     UnknownTool(String),
     Failed(i32, String),
+    Refused(i32, String),
 }
 
 impl From<(i32, String)> for ToolCallError {
     fn from((code, message): (i32, String)) -> Self {
         Self::Failed(code, message)
+    }
+}
+
+impl From<RpcError> for ToolCallError {
+    fn from(e: RpcError) -> Self {
+        match e.fault {
+            Fault::Refused => Self::Refused(e.code, e.message),
+            Fault::Failed => Self::Failed(e.code, e.message),
+        }
     }
 }
 
@@ -572,12 +627,14 @@ fn tool_outcome_snippet(out: &Result<ToolOut, ToolCallError>) -> String {
         Ok(ToolOut::Text(text)) => text.clone(),
         Ok(ToolOut::Structured(value)) => serde_json::to_string(value).unwrap_or_default(),
         Err(ToolCallError::UnknownTool(name)) => format!("unknown tool: {name}"),
-        Err(ToolCallError::Failed(code, message)) => format!("error {code}: {message}"),
+        Err(ToolCallError::Failed(code, message) | ToolCallError::Refused(code, message)) => {
+            format!("error {code}: {message}")
+        }
     };
     raw.chars().take(500).collect()
 }
 
-async fn mcp_call(s: &AppState, caller: Caller, req: &Value) -> Result<Value, (i32, String)> {
+async fn mcp_call(s: &AppState, caller: Caller, req: &Value) -> Result<Value, RpcError> {
     let started = std::time::Instant::now();
     let params = req.get("params");
     let name = params.and_then(|p| p.get("name")).and_then(Value::as_str);
@@ -594,8 +651,11 @@ async fn mcp_call(s: &AppState, caller: Caller, req: &Value) -> Result<Value, (i
     );
     match out {
         Ok(out) => Ok(out.into_result()),
-        Err(ToolCallError::UnknownTool(other)) => Err((-32602, format!("unknown tool: {other}"))),
-        Err(ToolCallError::Failed(code, message)) => Err((code, message)),
+        Err(ToolCallError::UnknownTool(other)) => {
+            Err((-32602, format!("unknown tool: {other}")).into())
+        }
+        Err(ToolCallError::Failed(code, message)) => Err((code, message).into()),
+        Err(ToolCallError::Refused(code, message)) => Err(RpcError::refused((code, message))),
     }
 }
 
@@ -1360,9 +1420,19 @@ async fn mcp_remember(
     s: &AppState,
     caller: Caller,
     args: Option<&Value>,
-) -> Result<String, (i32, String)> {
-    Ok(remember_note(s, caller, args).await?.message)
+) -> Result<String, RpcError> {
+    Ok(remember_on(s, caller, args, Route::Mcp).await?.message)
 }
+
+/// Which door a remember came through. Only MCP refuses a note that leaves neither a project nor
+/// a claim (Python writer.py:1426); HTTP `POST /remember` carries corrections that have neither.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Http,
+    Mcp,
+}
+
+const EMPTY_NOTE_REFUSAL: &str = "refused: this note has no project and no claims — add the next step or decision it leaves as claims (kind=next or kind=decision), or pass repo";
 
 /// The write door both MCP `remember` and `POST /remember` go through: one parser, one write
 /// path, one dedup policy. `supersedes` (optional) names the notes this one corrects; after the
@@ -1376,29 +1446,43 @@ pub(crate) async fn remember_note(
     s: &AppState,
     caller: Caller,
     args: Option<&Value>,
-) -> Result<Remembered, (i32, String)> {
+) -> Result<Remembered, RpcError> {
+    remember_on(s, caller, args, Route::Http).await
+}
+
+async fn remember_on(
+    s: &AppState,
+    caller: Caller,
+    args: Option<&Value>,
+    route: Route,
+) -> Result<Remembered, RpcError> {
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
         return Err((
             -32603,
             "BORING_VAULT_DIR not set — no target to write remember notes to".to_owned(),
-        ));
+        )
+            .into());
     };
-    let supersedes = parse_supersedes(args)?;
-    let judge = parse_judge(args)?;
-    let mut note = parse_remember_note(args, &s.cfg)?;
+    // Python's order (writer.py:1423-1430): note, empty-note refusal, judge, then supersedes.
+    let mut note = parse_remember_note(args, &s.cfg).map_err(RpcError::refused)?;
+    if route == Route::Mcp && note.front.project.is_empty() && note.front.claims.is_empty() {
+        return Err(RpcError::refused((-32602, EMPTY_NOTE_REFUSAL.to_owned())));
+    }
+    let judge = parse_judge(args).map_err(RpcError::refused)?;
+    let supersedes = parse_supersedes(args).map_err(RpcError::refused)?;
     let standing = owner::standing(
         caller,
         note.front.author == Author::Owner || judge == Some(Author::Owner),
     )
-    .map_err(|m| (-32602_i32, m))?;
+    .map_err(|m| RpcError::refused((-32602_i32, m)))?;
     let edge_judge = judge.as_ref().unwrap_or(&note.front.author).to_judge();
     let refused =
         owner::refused_supersedes_logged(s.store.as_deref(), standing, &supersedes, "remember")
             .await
             .map_err(|e| (-32603_i32, format!("owner guard: {e:#}")))?;
-    owner::none_refused(&refused).map_err(|m| (-32602_i32, m))?;
+    owner::none_refused(&refused).map_err(|m| RpcError::refused((-32602_i32, m)))?;
 
-    apply_pii_gate(s.pii.as_ref().as_ref(), &mut note)?;
+    apply_pii_gate(s.pii.as_ref().as_ref(), &mut note).map_err(RpcError::refused)?;
 
     let wiki_dir = vault_root.join("wiki");
     // A correction (supersedes names what it fixes) must land as a new note: a one-word
@@ -1423,10 +1507,10 @@ pub(crate) async fn remember_note(
         DedupGate::Supersede(existing) => {
             let old = [existing.source_path.clone()];
             let duplicate = Some(existing.source_path);
-            store_new_note(s, &wiki_dir, note, &old, duplicate, judge, &telemetry).await
+            Ok(store_new_note(s, &wiki_dir, note, &old, duplicate, judge, &telemetry).await?)
         }
         DedupGate::Fresh => {
-            store_new_note(s, &wiki_dir, note, &supersedes, None, judge, &telemetry).await
+            Ok(store_new_note(s, &wiki_dir, note, &supersedes, None, judge, &telemetry).await?)
         }
     }
 }
@@ -2735,8 +2819,7 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            let mut args =
-                json!({"title": format!("t{n}"), "body": format!("b{n}"), "omb_session_id": "s1"});
+            let mut args = json!({"title": format!("t{n}"), "body": format!("b{n}"), "omb_session_id": "s1", "repo": "p"});
             if let Some(c) = concepts {
                 args["concepts"] = c;
             }
@@ -2816,7 +2899,7 @@ mod tests {
         ] {
             let err = remember_note(&s, caller, Some(args)).await.unwrap_err();
             assert_eq!(
-                err.0, -32602,
+                err.code, -32602,
                 "{label}: owner without the door token is a 400"
             );
         }
@@ -4011,7 +4094,7 @@ rules:
         let s = pii_state(tmp.path());
         let reply = mcp_remember_reply(
             &s,
-            json!({"title": "t", "body": "b", "project": "p", "tags": ["900101-1234567"]}),
+            json!({"title": "t", "body": "b", "repo": "p", "tags": ["900101-1234567"]}),
         )
         .await;
         assert_eq!(
@@ -4055,8 +4138,7 @@ rules:
         let tmp = tempfile::tempdir().unwrap();
         let mut s = vault_state(tmp.path());
         s.vault_dir = std::sync::Arc::new(None);
-        let reply =
-            mcp_remember_reply(&s, json!({"title": "t", "body": "b", "project": "p"})).await;
+        let reply = mcp_remember_reply(&s, json!({"title": "t", "body": "b", "repo": "p"})).await;
         assert_eq!(reply["error"]["code"], -32603);
         assert!(
             reply["error"].get("data").is_none(),

@@ -711,11 +711,11 @@ pub(crate) async fn handle_remember(
     let caller = owner::Caller::from_headers((*s.owner_token).as_deref(), &headers);
     let remembered = crate::serve::mcp::remember_note(&s, caller, Some(&req))
         .await
-        .map_err(|(code, msg)| {
-            if code == -32602 {
-                AppError::bad_request(msg)
+        .map_err(|e| {
+            if e.code == -32602 {
+                AppError::bad_request(e.message)
             } else {
-                AppError::from(anyhow::anyhow!(msg))
+                AppError::from(anyhow::anyhow!(e.message))
             }
         })?;
     Ok(Json(crate::serve::RememberResp {
