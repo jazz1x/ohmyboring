@@ -23,13 +23,27 @@ const PY_INT_MAX_DIGITS: usize = 4300;
 pub const ACTIVE_PROJECTS_SQL: &str = "select project, count(*) from document where project <> '' \
 and updated_at > now() - make_interval(days => $1) group by 1 order by 2 desc, 1";
 
-/// The 200 body for `ActiveDays` — door `_active_projects_payload`.
-pub fn active_payload(rows: Vec<(String, i64)>, active_days: i32) -> serde_json::Value {
-    let projects: Vec<_> = rows
-        .into_iter()
-        .map(|(project, documents)| serde_json::json!({"project": project, "documents": documents}))
-        .collect();
-    serde_json::json!({"projects": projects, "active_days": active_days})
+/// The 200 body for `ActiveDays` — door `_active_projects_payload`, keys in the door's order.
+#[derive(serde::Serialize)]
+pub struct ActivePayload {
+    projects: Vec<ActiveProject>,
+    active_days: i32,
+}
+
+#[derive(serde::Serialize)]
+struct ActiveProject {
+    project: String,
+    documents: i64,
+}
+
+pub fn active_payload(rows: Vec<(String, i64)>, active_days: i32) -> ActivePayload {
+    ActivePayload {
+        projects: rows
+            .into_iter()
+            .map(|(project, documents)| ActiveProject { project, documents })
+            .collect(),
+        active_days,
+    }
 }
 
 /// Parse the query once. Starlette `query_params.get`: the last duplicate wins, a bare key is "".
