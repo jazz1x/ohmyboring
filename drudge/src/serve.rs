@@ -24,6 +24,7 @@ mod http;
 mod mcp;
 mod owner;
 mod scheduler;
+mod search_route;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DbHealthState {
