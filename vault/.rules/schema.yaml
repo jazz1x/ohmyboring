@@ -5,7 +5,7 @@
 
 page_id:
   # Page ID regex. Both the wiki/<id>.md filename and the frontmatter id must satisfy it.
-  pattern: "^wiki-\\d{4,5}$"
+  pattern: "^wiki-(\\d{4}|\\d{11})$"
 
 sources:
   # Allowed prefixes for paths in the sources field.

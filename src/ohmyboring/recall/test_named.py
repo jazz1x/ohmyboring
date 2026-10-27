@@ -126,7 +126,23 @@ def test_read_note_returns_text_and_none_only_for_missing():
             os.chmod(root / "wiki", 0o755)
 
 
+def test_a_note_is_found_by_its_number_whatever_the_name_width():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "wiki").mkdir()
+        (root / "wiki" / "wiki-00000009572.md").write_text(_NOTE, encoding="utf-8")
+        (root / "wiki" / "wiki-9573.md").write_text(_NOTE, encoding="utf-8")
+        assert vault.read_note(str(root), "wiki-9572") == _NOTE
+        assert vault.read_note(str(root), "wiki-00000009572") == _NOTE
+        assert vault.read_note(str(root), "wiki-00000009573") == _NOTE
+        assert vault.read_note(str(root), "wiki-9574") is None
+        # 같은 번호의 두 표기는 한 노트 — 블록도 한 번만.
+        assert named.named_ids("wiki-9572 과 wiki-00000009572") == ["wiki-9572"]
+        assert named.named_ids("wiki-00000009572 과 wiki-9572") == ["wiki-00000009572"]
+
+
 if __name__ == "__main__":
+    test_a_note_is_found_by_its_number_whatever_the_name_width()
     test_named_ids_in_order_without_duplicates()
     test_four_and_five_digit_names_each_read_their_own_note()
     test_note_block_renders_title_date_and_body_head()

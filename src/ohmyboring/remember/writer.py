@@ -49,6 +49,7 @@ nearest_document 한 건 전체(임베딩+읽기 전용 질의)를, 사건 칸�
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -643,13 +644,13 @@ def existing_wiki_ids(doc_paths: list[str]) -> set[int]:
                 n = int(stem[5:])
             except ValueError:
                 continue
-            if 0 <= n <= 0xFFFFFFFF:
+            if n >= 0:
                 out.add(n)
     return out
 
 
 def allocate_wiki_path(wiki_dir: str, db_ids: set[int]) -> tuple[str, str]:
-    """다음 wiki-NNNN 을 O_EXCL 로 만들고 (id, 절대 경로)를 돌려준다 — 경합은 재시정."""
+    """다음 wiki-NNNNNNNNNNN 을 O_EXCL 로 만들고 (id, 절대 경로)를 돌려준다 — 경합은 재시정."""
     os.makedirs(wiki_dir, exist_ok=True)
     used = set(db_ids)
     for name in os.listdir(wiki_dir):
@@ -661,11 +662,11 @@ def allocate_wiki_path(wiki_dir: str, db_ids: set[int]) -> tuple[str, str]:
                 n = int(stem[5:])
             except ValueError:
                 continue
-            if 0 <= n <= 0xFFFFFFFF:
+            if n >= 0:
                 used.add(n)
     n = max(used) + 1 if used else 1
     while True:
-        wiki_id = f"wiki-{n:04}"
+        wiki_id = f"wiki-{n:011}"
         path = os.path.join(wiki_dir, f"{wiki_id}.md")
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
@@ -726,6 +727,37 @@ def _judge_refusal(arguments: dict[str, Any], note: RememberNote, deps: WriterDe
     return None
 
 
+_WIKI_FILE_RE = re.compile(r"^(?P<dir>.*/)?wiki-(?P<digits>\d+)\.md$")
+
+
+def wiki_path_spellings(path: str) -> list[str]:
+    """한 노트는 번호다 — 이름의 자릿수는 표기. 받은 경로 먼저, 같은 번호의 4자리·11자리 표기가 뒤."""
+    match = _WIKI_FILE_RE.match(path)
+    if match is None:
+        return [path]
+    head, number = match.group("dir") or "", int(match.group("digits"))
+    out = [path]
+    for width in (4, 11):
+        candidate = f"{head}wiki-{number:0{width}d}.md"
+        if candidate not in out:
+            out.append(candidate)
+    return out
+
+
+def _resolve_document_paths(cur: Any, paths: list[str]) -> list[str]:
+    """이름한 경로마다 document 에 있는 표기로 — 어느 표기도 없으면 받은 그대로(unknown 으로 센다)."""
+    resolved: list[str] = []
+    for path in paths:
+        found = path
+        for candidate in wiki_path_spellings(path):
+            cur.execute(_GET_DOC_SHA_SQL, {"path": candidate})
+            if cur.fetchone() is not None:
+                found = candidate
+                break
+        resolved.append(found)
+    return resolved
+
+
 def _owner_written_targets(cur: Any, paths: list[str]) -> list[str]:
     """대상 중 오너가 쓴 것(document.author='owner') — owner.rs:64-80 refused_supersedes."""
     if not paths:
@@ -741,8 +773,8 @@ def _supersedes_gate(
     match parse_supersedes(arguments):
         case Err(reason):
             return Err(Refused(-32602, reason))
-        case Ok(supersedes):
-            pass
+        case Ok(named):
+            supersedes = _resolve_document_paths(cur, named)
     if not deps.is_owner:
         refused = _owner_written_targets(cur, supersedes)
         if refused:

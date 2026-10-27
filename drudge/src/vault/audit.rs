@@ -618,7 +618,7 @@ mod tests {
     fn test_schema() -> Schema {
         Schema {
             page_id: PageIdSchema {
-                pattern: r"^wiki-\d{4,5}$".to_owned(),
+                pattern: r"^wiki-(\d{4}|\d{11})$".to_owned(),
             },
             sources: SourcesSchema {
                 allowed_prefixes: vec!["raw/".to_owned(), "meta/".to_owned(), ".rules/".to_owned()],

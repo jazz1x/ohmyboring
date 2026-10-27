@@ -1495,7 +1495,7 @@ async fn store_new_note(
 
 /// Wiki ids already taken, on disk and in the vector store — `allocate_wiki_path` picks the
 /// next free `wiki-NNNN` from the union.
-async fn existing_wiki_ids(s: &AppState) -> Result<HashSet<u32>, (i32, String)> {
+async fn existing_wiki_ids(s: &AppState) -> Result<HashSet<u64>, (i32, String)> {
     let mut db_ids = HashSet::new();
     if let Some(store) = s.store.as_ref() {
         for p in store.all_doc_paths().await.map_err(|e| {
@@ -1507,7 +1507,7 @@ async fn existing_wiki_ids(s: &AppState) -> Result<HashSet<u32>, (i32, String)> 
             if let Some(stem) = crate::vault::wiki_stem(&p)
                 && let Some(n) = stem
                     .strip_prefix("wiki-")
-                    .and_then(|s| s.parse::<u32>().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
             {
                 db_ids.insert(n);
             }
@@ -1535,10 +1535,13 @@ async fn write_supersedes_edges(
             unknown_paths: supersedes.to_vec(),
         });
     };
-    let pairs: Vec<[String; 2]> = supersedes
-        .iter()
-        .map(|old| [new_path.to_owned(), old.clone()])
-        .collect();
+    let mut pairs: Vec<[String; 2]> = Vec::with_capacity(supersedes.len());
+    for old in supersedes {
+        let resolved = resolve_document_path(store, old)
+            .await
+            .map_err(|e| (-32603_i32, format!("supersedes lookup: {e:#}")))?;
+        pairs.push([new_path.to_owned(), resolved]);
+    }
     store
         .record_supersedes(&pairs, judge)
         .await
@@ -1790,7 +1793,7 @@ fn newest_match(matches: Vec<DuplicateMatch>) -> Option<DuplicateMatch> {
         .max_by_key(|m| wiki_number(&m.source_path))
 }
 
-fn wiki_number(source_path: &str) -> Option<u32> {
+fn wiki_number(source_path: &str) -> Option<u64> {
     crate::vault::wiki_stem(source_path)?
         .strip_prefix("wiki-")?
         .parse()
@@ -2051,6 +2054,42 @@ fn parse_supersedes(args: Option<&Value>) -> Result<Vec<String>, (i32, String)> 
 /// `wiki-1759.md`), and the lookup keys on this exact form. Anything that is not one of these
 /// spellings passes through untouched and then counts as unknown, which the answer says out
 /// loud.
+/// A note is its number; the name's width is notation (4-digit before the renumbering, 11-digit
+/// after). The path as given first, then the other widths of the same number.
+fn wiki_path_spellings(path: &str) -> Vec<String> {
+    let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let number = name
+        .strip_prefix("wiki-")
+        .and_then(|s| s.strip_suffix(".md"))
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|digits| digits.parse::<u64>().ok());
+    let mut out = vec![path.to_owned()];
+    if let Some(n) = number {
+        for spelled in [format!("wiki-{n:04}.md"), format!("wiki-{n:011}.md")] {
+            let candidate = if dir.is_empty() {
+                spelled
+            } else {
+                format!("{dir}/{spelled}")
+            };
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+    }
+    out
+}
+
+/// The `document` key a `supersedes` entry names: the spelling that exists, else the entry as
+/// given (it then counts as unknown, which the answer says).
+async fn resolve_document_path(store: &crate::store::Store, path: &str) -> anyhow::Result<String> {
+    for candidate in wiki_path_spellings(path) {
+        if store.get_doc_sha(&candidate).await?.is_some() {
+            return Ok(candidate);
+        }
+    }
+    Ok(path.to_owned())
+}
+
 fn normalize_supersedes_path(raw: &str) -> String {
     if let Some(rest) = raw
         .strip_prefix("/vault/wiki/")
@@ -2283,7 +2322,7 @@ mod tests {
         ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_tools_list,
         needs_dedup, parse_remember_note, parse_supersedes, pick_duplicate,
         probable_session_duplicate, remember_note, should_replace_duplicate, supersedes_suffix,
-        tool_outcome_snippet, tool_query_arg,
+        tool_outcome_snippet, tool_query_arg, wiki_path_spellings,
     };
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
@@ -2756,6 +2795,41 @@ mod tests {
                 assert_eq!(found.source_path, b, "{reason:?} {order:?}");
             }
         }
+    }
+
+    #[test]
+    fn newest_match_compares_wiki_numbers_by_value_past_u32() {
+        let small = "/v/wiki/wiki-0002.md";
+        let big = "/v/wiki/wiki-05000000000.md";
+        let found = pick_duplicate(
+            [small, big]
+                .map(|p| dup_match(p, DuplicateReason::SameSession))
+                .into(),
+        )
+        .unwrap();
+        assert_eq!(found.source_path, big);
+    }
+
+    #[test]
+    fn wiki_path_spellings_cover_four_and_eleven_digit_names_of_one_number() {
+        assert_eq!(
+            wiki_path_spellings("/vault/wiki/wiki-9572.md"),
+            vec![
+                "/vault/wiki/wiki-9572.md".to_owned(),
+                "/vault/wiki/wiki-00000009572.md".to_owned()
+            ]
+        );
+        assert_eq!(
+            wiki_path_spellings("/vault/wiki/wiki-00000009572.md"),
+            vec![
+                "/vault/wiki/wiki-00000009572.md".to_owned(),
+                "/vault/wiki/wiki-9572.md".to_owned()
+            ]
+        );
+        assert_eq!(
+            wiki_path_spellings("/vault/wiki/ghost-note.md"),
+            vec!["/vault/wiki/ghost-note.md".to_owned()]
+        );
     }
 
     #[test]

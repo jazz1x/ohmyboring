@@ -102,11 +102,11 @@ pub fn normalize_body(body: &str) -> String {
     strip_trailing_empty_heading(out.trim()).trim().to_owned()
 }
 
-/// Scan vault/wiki (and optional DB-derived ids) for the next `wiki-NNNN` id.
+/// Scan vault/wiki (and optional DB-derived ids) for the next `wiki-NNNNNNNNNNN` id.
 /// Does NOT fill gaps: ids are monotonically increasing so a number, once used,
 /// never refers to a different note later. `wiki-0000` is reserved for the seed note.
-fn next_wiki_id(wiki_dir: &Path, db_ids: Option<&HashSet<u32>>) -> Result<u32> {
-    let mut used: HashSet<u32> = HashSet::new();
+fn next_wiki_id(wiki_dir: &Path, db_ids: Option<&HashSet<u64>>) -> Result<u64> {
+    let mut used: HashSet<u64> = HashSet::new();
     if wiki_dir.exists() {
         for entry in std::fs::read_dir(wiki_dir)
             .with_context(|| format!("failed to read wiki dir: {}", wiki_dir.display()))?
@@ -116,7 +116,7 @@ fn next_wiki_id(wiki_dir: &Path, db_ids: Option<&HashSet<u32>>) -> Result<u32> {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .and_then(|s| s.strip_prefix("wiki-"))
-                .and_then(|s| s.parse::<u32>().ok())
+                .and_then(|s| s.parse::<u64>().ok())
             {
                 used.insert(n);
             }
@@ -141,13 +141,13 @@ fn next_wiki_id(wiki_dir: &Path, db_ids: Option<&HashSet<u32>>) -> Result<u32> {
 /// its wiki file is temporarily missing.
 pub fn allocate_wiki_path(
     wiki_dir: &Path,
-    db_ids: Option<&HashSet<u32>>,
+    db_ids: Option<&HashSet<u64>>,
 ) -> Result<(String, PathBuf)> {
     std::fs::create_dir_all(wiki_dir)
         .with_context(|| format!("failed to create wiki dir: {}", wiki_dir.display()))?;
     let mut n = next_wiki_id(wiki_dir, db_ids)?;
     loop {
-        let id = format!("wiki-{n:04}");
+        let id = format!("wiki-{n:011}");
         let path = wiki_dir.join(format!("{id}.md"));
         match std::fs::OpenOptions::new()
             .create_new(true)
@@ -408,8 +408,31 @@ mod tests {
         std::fs::create_dir(&wiki).unwrap();
         std::fs::File::create(wiki.join("wiki-0001.md")).unwrap();
         std::fs::File::create(wiki.join("wiki-0002.md")).unwrap();
-        let db_ids: std::collections::HashSet<u32> = [5, 7].into_iter().collect();
+        let db_ids: std::collections::HashSet<u64> = [5, 7].into_iter().collect();
         // max is 7 (from DB), so next is 8 even though files only go up to 2.
         assert_eq!(super::next_wiki_id(&wiki, Some(&db_ids)).unwrap(), 8);
+    }
+
+    #[test]
+    fn allocation_passes_u32_and_names_eleven_digits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir(&wiki).unwrap();
+        std::fs::File::create(wiki.join("wiki-0000.md")).unwrap();
+        std::fs::File::create(wiki.join("wiki-05000000000.md")).unwrap();
+        let (id, path) = super::allocate_wiki_path(&wiki, None).unwrap();
+        assert_eq!(id, "wiki-05000000001");
+        assert!(path.ends_with("wiki-05000000001.md"));
+    }
+
+    #[test]
+    fn allocation_reads_four_and_eleven_digit_names_by_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir(&wiki).unwrap();
+        std::fs::File::create(wiki.join("wiki-9800.md")).unwrap();
+        std::fs::File::create(wiki.join("wiki-00000009801.md")).unwrap();
+        let (id, _) = super::allocate_wiki_path(&wiki, None).unwrap();
+        assert_eq!(id, "wiki-00000009802");
     }
 }
