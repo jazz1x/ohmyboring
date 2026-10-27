@@ -3271,6 +3271,15 @@ impl Store {
         Ok(report)
     }
 
+    /// The supersedes write of a `remember` request, in its own transaction.
+    pub async fn remember_supersedes_in_tx(
+        &self,
+        pairs: &[[String; 2]],
+        judge: Option<&str>,
+    ) -> Result<SupersedesReport> {
+        self.supersedes_in_tx(pairs, judge).await
+    }
+
     /// Consumption counts (`used`/`contested` edges) per document — one query for all hits of a
     /// `/search` response. Keyed by `source_path`; documents with no consumption edges are absent.
     /// `handed` edges never count here: being handed is not being consumed.

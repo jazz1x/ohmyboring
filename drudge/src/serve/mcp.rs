@@ -1664,7 +1664,7 @@ async fn write_supersedes_edges(
         pairs.push([new_path.to_owned(), resolved]);
     }
     store
-        .supersedes_in_tx(&pairs, judge)
+        .remember_supersedes_in_tx(&pairs, judge)
         .await
         .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))
 }

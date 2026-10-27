@@ -183,3 +183,59 @@ async fn a_note_with_no_claims_retires_none() {
     p.store.delete_document(&p.new).await.ok();
     let _ = live_subjects;
 }
+
+/// Owner decision (C-PORT3 item 5; Python `writer.py` top docstring, `_PARTIAL_SEAL_SQL`,
+/// test_writer.py:642): a remember closes only the slots the new note re-states. The old note's
+/// other facts stay live, and the report names only what this write closed.
+#[tokio::test]
+async fn remember_closes_only_the_slots_the_new_note_restates() {
+    if skip() {
+        return;
+    }
+    let dsn = test_dsn().unwrap();
+    let p = pair(&dsn, true, true).await;
+    let report = p
+        .store
+        .remember_supersedes_in_tx(&[[p.new.clone(), p.old.clone()]], None)
+        .await
+        .expect("supersedes");
+    assert_eq!(
+        live_subjects(&p.db, &p.old).await,
+        vec![p.slot_b.clone()],
+        "slot b was not re-stated, so it stays live"
+    );
+    assert_eq!(report.retired, vec![(p.slot_a.clone(), "state".to_owned())]);
+    assert_eq!(report.supersedes, 1);
+    p.store.delete_document(&p.old).await.ok();
+    p.store.delete_document(&p.new).await.ok();
+}
+
+/// A new note that re-states nothing of the old one closes nothing, though the edge is written.
+#[tokio::test]
+async fn remember_closes_nothing_when_no_slot_is_restated() {
+    if skip() {
+        return;
+    }
+    let dsn = test_dsn().unwrap();
+    let p = pair(&dsn, false, true).await;
+    seed_fact(
+        &p.store,
+        &p.new,
+        &format!("other-{}", p.slot_a),
+        "x",
+        p.t_new,
+    )
+    .await;
+    let report = p
+        .store
+        .remember_supersedes_in_tx(&[[p.new.clone(), p.old.clone()]], None)
+        .await
+        .expect("supersedes");
+    let mut both = vec![p.slot_a.clone(), p.slot_b.clone()];
+    both.sort();
+    assert_eq!(live_subjects(&p.db, &p.old).await, both);
+    assert!(report.retired.is_empty(), "{:?}", report.retired);
+    assert_eq!(report.supersedes, 1);
+    p.store.delete_document(&p.old).await.ok();
+    p.store.delete_document(&p.new).await.ok();
+}
