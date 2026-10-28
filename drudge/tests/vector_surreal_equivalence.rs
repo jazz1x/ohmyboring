@@ -85,14 +85,15 @@ fn nearest<T>(rows: Vec<(f64, T)>, k: usize) -> Vec<T> {
     rows.into_iter().take(k).map(|(_, t)| t).collect()
 }
 
+// Run (throwaway pg and surreal, at most 7 runs on one pg DB to stay under the 40-candidate window):
+//   BORING_TEST_DATABASE_URL=postgresql://boring:boring@127.0.0.1:<pg-port>/boring \
+//   BORING_TEST_SURREAL_URL=http://127.0.0.1:<surreal-port> BORING_SURREAL_PASSWORD=root \
+//   cargo test --test vector_surreal_equivalence -- --ignored
 #[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command above this test"]
 async fn five_methods_match_exact_brute_force() {
-    let (Some(dsn), Some(surreal_url)) = (
-        std::env::var("BORING_TEST_DATABASE_URL").ok(),
-        std::env::var("BORING_TEST_SURREAL_URL").ok(),
-    ) else {
-        return;
-    };
+    let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
+    let surreal_url = std::env::var("BORING_TEST_SURREAL_URL").expect("BORING_TEST_SURREAL_URL");
     let config: SurrealConfig = serde_json::from_value(json!({
         "url": surreal_url, "namespace": "equiv", "database": "equiv"
     }))

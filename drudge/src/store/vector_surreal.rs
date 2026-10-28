@@ -197,28 +197,50 @@ fn drift(what: &str, missing: &[String]) -> anyhow::Error {
     )
 }
 
+/// A dropped row is a visible event, not a silent filter: the answer is shorter than asked.
+fn report_dropped(what: &str, dropped: usize) {
+    if dropped > 0 {
+        eprintln!("[vector] surreal: pg 재확인이 {what} {dropped}개를 뺌 (채운 뒤 바뀜)");
+    }
+}
+
 impl SurrealView<'_> {
-    async fn hydrate_hits(&self, near: Vec<NearChunk>) -> Result<Vec<Hit>> {
+    /// The Surreal copy is frozen at fill time and pgvector is the source, so every key Surreal
+    /// returns is re-checked here against the live pg row with the same predicates the pg path
+    /// applies (the #121 origin boundary: an origin or project changed after the fill must not
+    /// leak through a stale copy). A row that fails is dropped, not replaced — the answer may come
+    /// back shorter than `k`. A key pg no longer has is drift and an error.
+    async fn hydrate_hits(
+        &self,
+        near: Vec<NearChunk>,
+        project: Option<&str>,
+        since_hours: Option<i32>,
+    ) -> Result<Vec<Hit>> {
         let ids: Vec<String> = near.iter().map(|n| n.cid.clone()).collect();
         let rows = self
             .pg
             .db()
             .await?
             .query(
-                "SELECT id, content, origin, project, source_path FROM chunk WHERE id = ANY($1);",
-                &[&ids],
+                "SELECT c.id, c.content, c.origin, c.project, c.source_path,
+                        (($2::text IS NULL OR c.project = $2)
+                         AND ($3::int IS NULL OR d.updated_at >= now() - make_interval(hours => $3)))
+                 FROM chunk c JOIN document d ON d.source_path = c.source_path
+                 WHERE c.id = ANY($1);",
+                &[&ids, &project, &since_hours],
             )
             .await
             .context("hydrate chunk hits")?;
-        let mut by_id: HashMap<String, (String, String, String, String)> = rows
+        let mut by_id: HashMap<String, (String, String, String, String, bool)> = rows
             .iter()
-            .map(|r| (r.get(0), (r.get(1), r.get(2), r.get(3), r.get(4))))
+            .map(|r| (r.get(0), (r.get(1), r.get(2), r.get(3), r.get(4), r.get(5))))
             .collect();
         let mut missing = Vec::new();
+        let mut dropped = 0_usize;
         let mut hits = Vec::with_capacity(near.len());
         for n in near {
             match by_id.remove(&n.cid) {
-                Some((content, origin, project, source_path)) => hits.push(Hit {
+                Some((content, origin, project, source_path, true)) => hits.push(Hit {
                     id: n.cid,
                     content,
                     origin,
@@ -228,14 +250,22 @@ impl SurrealView<'_> {
                     dist: n.d as f32,
                     dist_kind: DistKind::VectorCosine,
                 }),
+                Some((.., false)) => dropped += 1,
                 None => missing.push(n.cid),
             }
         }
         ensure!(missing.is_empty(), drift("chunk", &missing));
+        report_dropped("chunk", dropped);
         Ok(hits)
     }
 
-    async fn chunk_knn(&self, sql: &str, k: usize) -> Result<Vec<Hit>> {
+    async fn chunk_knn(
+        &self,
+        sql: &str,
+        k: usize,
+        project: Option<&str>,
+        since_hours: Option<i32>,
+    ) -> Result<Vec<Hit>> {
         let mut near: Vec<NearChunk> = self
             .client
             .rows(sql)
@@ -244,7 +274,7 @@ impl SurrealView<'_> {
             .next()
             .unwrap_or_default();
         near.truncate(k);
-        self.hydrate_hits(near).await
+        self.hydrate_hits(near, project, since_hours).await
     }
 }
 
@@ -308,6 +338,7 @@ impl VectorIndex for SurrealView<'_> {
         ))
     }
 
+    #[allow(clippy::too_many_lines)] // Surreal filter, pg re-check, drift: one linear read path
     async fn current_claims(
         &self,
         query_emb: &[f32],
@@ -369,48 +400,72 @@ impl VectorIndex for SurrealView<'_> {
             .query(
                 "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.anchor, c.era,
                         c.stale_at, c.stale_reason,
-                        (extract(epoch from c.valid_from) * 1000000)::bigint
+                        (extract(epoch from c.valid_from) * 1000000)::bigint,
+                        (NOT (d.origin = ANY($4))
+                         AND ($5::text IS NULL OR d.project = $5)
+                         AND ($6::text[] IS NULL OR c.kind = ANY($6))
+                         AND d.source_path !~ $7
+                         AND ($8::text IS NULL OR split_part(c.anchor, ':', 2) LIKE replace(replace($8, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\')
+                         AND ($9::bool OR c.stale_at IS NULL))
                  FROM claim c
+                 JOIN document d ON d.source_path = c.source_path
                  JOIN unnest($1::text[], $2::text[], $3::bigint[]) AS k(s, p, v)
                    ON c.subject = k.s AND c.predicate = k.p
                   AND (extract(epoch from c.valid_from) * 1000000)::bigint = k.v
                  WHERE c.superseded_at IS NULL;",
-                &[&subjects, &predicates, &froms],
+                &[
+                    &subjects,
+                    &predicates,
+                    &froms,
+                    &exclude_origins,
+                    &project,
+                    &kinds,
+                    &NOT_USER_MEMORY_RE,
+                    &anchor_path,
+                    &include_stale,
+                ],
             )
             .await
             .context("hydrate claims")?;
-        let mut by_key: HashMap<(String, String, i64), AnchoredClaim> = rows
+        // Same re-check as `hydrate_hits`: the copy is frozen, pg is the source.
+        let mut by_key: HashMap<(String, String, i64), (bool, AnchoredClaim)> = rows
             .iter()
             .map(|r| {
                 (
                     (r.get(0), r.get(1), r.get(9)),
-                    AnchoredClaim {
-                        claim: Claim {
-                            subject: r.get(0),
-                            predicate: r.get(1),
-                            value: r.get(2),
-                            kind: r.get(3),
-                            confidence: r.get(4),
-                            said_by: None,
+                    (
+                        r.get::<_, bool>(10),
+                        AnchoredClaim {
+                            claim: Claim {
+                                subject: r.get(0),
+                                predicate: r.get(1),
+                                value: r.get(2),
+                                kind: r.get(3),
+                                confidence: r.get(4),
+                                said_by: None,
+                            },
+                            anchor: r.get(5),
+                            era: r.get(6),
+                            stale_at: r.get(7),
+                            stale_reason: r.get(8),
                         },
-                        anchor: r.get(5),
-                        era: r.get(6),
-                        stale_at: r.get(7),
-                        stale_reason: r.get(8),
-                    },
+                    ),
                 )
             })
             .collect();
         let mut missing = Vec::new();
+        let mut dropped = 0_usize;
         let mut out = Vec::with_capacity(near.len());
         for n in near {
             let key = (n.subject, n.predicate, n.valid_from_us);
             match by_key.remove(&key) {
-                Some(claim) => out.push(claim),
+                Some((true, claim)) => out.push(claim),
+                Some((false, _)) => dropped += 1,
                 None => missing.push(format!("{}:{}", key.0, key.1)),
             }
         }
         ensure!(missing.is_empty(), drift("claim", &missing));
+        report_dropped("claim", dropped);
         Ok(out)
     }
 
@@ -421,7 +476,7 @@ impl VectorIndex for SurrealView<'_> {
             k.max(1),
             floats(vec)
         );
-        self.chunk_knn(&sql, k).await
+        self.chunk_knn(&sql, k, None, None).await
     }
 
     async fn vector_search_filtered(
@@ -445,7 +500,7 @@ impl VectorIndex for SurrealView<'_> {
             "SELECT cid, vector::distance::knn() AS d FROM chunk WHERE {} ORDER BY d ASC;",
             conds.join(" AND ")
         );
-        self.chunk_knn(&sql, k).await
+        self.chunk_knn(&sql, k, project, since_hours).await
     }
 
     async fn nearest_document(&self, vec: &[f32], max_dist: f64) -> Result<Option<(String, f64)>> {
