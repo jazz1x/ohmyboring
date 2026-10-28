@@ -229,7 +229,24 @@ fi
 exit 1
 SH
 
-    chmod +x "$fakebin/curl" "$fakebin/docker" "$fakebin/jq" "$fakebin/python3"
+    # doctor runs the host interpreter as `uv run --locked --project <dir> python <args…>`;
+    # strip that prefix and hand the rest to the python3 fake above.
+    cat >"$fakebin/uv" <<'SH'
+#!/bin/sh
+[ "${1:-}" = run ] || exit 1
+shift
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --locked) shift ;;
+        --project) shift 2 ;;
+        python) shift; break ;;
+        *) exit 1 ;;
+    esac
+done
+exec python3 "$@"
+SH
+
+    chmod +x "$fakebin/curl" "$fakebin/docker" "$fakebin/jq" "$fakebin/python3" "$fakebin/uv"
 }
 
 window_ts() {
