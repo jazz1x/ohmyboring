@@ -61,7 +61,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 
 | 방법 | 명령 | 언제 |
 | --- | --- | --- |
-| **자동 (세션 종료 시)** | SessionEnd 훅 (`install.sh`가 설치) | 모든 Claude Code 세션 — `hooks/distill-session.py`가 트랜스크립트를 증류해 `remember`합니다. 짝이 되는 `UserPromptSubmit` 훅(`recall.py`)이 관련 과거 메모리를 새 프롬프트에 자동 주입합니다. |
+| **자동 (세션 종료 시)** | SessionEnd 훅 (`install.sh`가 설치) | 모든 Claude Code 세션 — `hooks/distill-session.py`가 트랜스크립트를 증류해 `remember`합니다. 짝이 되는 `UserPromptSubmit` 훅(`recall.py`)이 관련 과거 메모리를 새 프롬프트에 자동 주입합니다: 최대 세 개의 스니펫이며, 각각 그 노트가 정한 claim을 함께 싣습니다(`RECALL_CLAIMS_PER_HIT`). |
 | **자동 (Codex 워커)** | 호스트 launchd/cron 워커 (`install.sh`가 설치) | Codex에는 SessionEnd 훅이 없습니다. 호스트 워커가 20분마다 `~/.codex/sessions/**/*.jsonl`을 스캔하고, 아직 쓰이는 중인 transcript와 실제 subagent rollout은 건너뛰며, 적재 가능한 transcript를 같은 `remember` 경로로 저장합니다. `hermes-agent`가 켜져 있으면 `codex-memory-ingest-worker`도 함께 설치됩니다. 둘 다 `make doctor`로 확인합니다. |
 | **과거 세션 백필** | `make collect [N=20]` | 설치 직후, 비어 있는 vault를 `~/.claude/projects` 기록으로 채울 때. 최신순, 멱등(세션별 마커로 이미 증류한 건 건너뜀), 한 번에 `N`개만 처리해 CPU를 독점하지 않음. |
 | **지금 바로 (세션 안 끝내고)** | `make distill-now` · `make remember M="…"` | 세션을 끝내지 않고 즉시 적재할 때. `distill-now`는 **현재** 트랜스크립트를 큐에 넣고 hermes(`boring-agent`)가 바로 비우게 하므로 hermes 가 떠 있어야 합니다. 세션 종료 시의 정상 적재도 그 뒤에 그대로 동작합니다(초기 노트 + 최종 노트가 함께 생길 수 있음). `remember`는 직접 작성한 노트를 저장합니다. |
@@ -419,10 +419,11 @@ curl -s -X POST http://localhost:7710/mcp \
 | 어댑터 | 경로 | 소비 주체 | 진입점 | 역할 |
 |---|---|---|---|---|
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | 세션을 요약해 `remember` 호출 |
+| Claude Code | `agents/claude-code/session-start-recall.py` | `SessionStart` hook | 첫 턴 전에 구조화된 context(`/context`)를 불러옴 |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | 관련 snippet을 가져와 프롬프트 context 주입 |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring`를 MCP 서버로 노출 |
 | Codex | `agents/codex/README.md` | MCP + 호스트 워커 백필 | `~/.codex/mcp.json` / launchd 또는 cron / `collect-sessions.py` | `ohmyboring`를 MCP 서버로 노출하고 적재 가능한 Codex 세션을 백필. 설치된 워커는 안정화된 rollout transcript를 수확하고 실제 subagent는 건너뜀 |
-| hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 적재 워커와 정기 브리핑 실행 |
+| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | 설정 기반 cron(`briefing`, `morning-card`, `weekly-card`) + 직렬 백필 워커(`ingest-worker.py`, Codex 수집기). 카드 job은 `card_runner.py`로 카드 프로그램을 실행합니다(전달은 `local` — 도구가 Slack에 직접 게시). 카드 스케줄은 hermes cron이 맡습니다(launchd `com.ohmyboring.morning-card` job은 2026-09-28에 제거) |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 수동 | 오래된 Claude Code 세션 lazy 백필 |
 | shared | `src/ohmyboring/config.py` | 어댑터 import | `boring.json` 정책 로더 |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | 활성화된 에이전트의 hook/MCP 설정을 idempotent하게 구성 |
@@ -444,9 +445,9 @@ curl -s -X POST http://localhost:7710/mcp \
 | `POST /ask` / `ask` | 메모리에서 바로 답하는 직접 질문 | 불필요 |
 | `POST /search` / `recall` | 가공하지 않은 메모리 발췌. 각 hit은 서빙 경로에 비교 가능한 수치가 있을 때 `dist`와 `dist_kind`(`vector_cosine` 또는 `text_rank`)를 함께 냅니다. wiki-recall 폴백에서는 세 번째 비교 불가능한 척도의 점수를 보고하는 대신 둘 다 생략합니다 | 불필요. 시맨틱 검색은 활성화 시 벡터 사용 |
 | `/remember` / `remember` | 정제된 노트 저장 | — |
-| `POST /gap` / `gap` | 빈자리 기록 — `session_id`, `query`, `kind`(`missing`·`stale`·`broken`), `handed`(노트 source_path, `stale` 은 필수). 문은 기록만 하고 판단하지 않습니다 | 불필요 |
+| `POST /gap` / `gap` | 빈자리 기록 — `session_id`, `query`, `kind`(`missing`·`stale`·`broken`), `handed`(노트 source_path, `stale` 은 필수). 기록만 하고 판단하지 않습니다. `DOOR_LINK_WRITER=engine`(compose 기본값)이면 엔진이, `python`이면 문이 답합니다 | 불필요 |
 
-문(`127.0.0.1:7710`)은 엔진의 경로 표를 대신 전달하고(기동 때 계약 스냅샷에서 읽어 엔진을 따라간다), 자기 경로 `GET /approved`·`GET /claim-source`·`GET /claim-sources`·`GET /projects?active_days=`·`GET`/`POST /repairs/split-subjects`·`POST /gap` 는 스스로 답한다. 등록되지 않은 경로는 404 — 만능 프록시가 아니다.
+문(`127.0.0.1:7710`)은 엔진의 경로 표를 대신 전달하고(기동 때 계약 스냅샷에서 읽어 엔진을 따라간다), 일부 경로는 `docker-compose.yml`의 `DOOR_*` 스위치(11개)에 따라 스스로 답한다(`engine`은 경로를 엔진에 넘기고 문은 프록시, `python`은 문이 답한다). `DOOR_LINK_WRITER=engine`이면 `GET`/`POST /repairs/split-subjects`와 `POST /gap`을 엔진이 답하고, 문은 POST split의 row 검증·다시 읽기·카드 행 정리만 맡는다. `DOOR_MEMORY_READER`는 `GET /approved`·`/claim-source`·`/claim-sources`·`/rules`를, `DOOR_SEARCH_READER`는 `/projects`와 `/search`를 가른다. `GET /projects?active_days=`는 문 자신의 DB 기반 변형이다. 운영에서는 11개 스위치가 모두 `engine`이다. 문에는 `/run/*` 경로가 없다 — 카드 프로그램은 hermes cron이 직접 실행한다. 등록되지 않은 경로는 404 — 만능 프록시가 아니다.
 
 ### 토큰 예산
 
@@ -525,7 +526,23 @@ curl -s -X POST http://localhost:7710/mcp \
 
 [hermes-agent](https://hermes-agent.org)는 서드파티 자율 supervisor입니다. Slack, 오케스트레이션, cron 기반 백필을 ohmyboring의 MCP 백엔드로 구동할 수 있습니다. 이미지를 별도로 빌드하면 `make up`이 자동으로 감지합니다.
 
-설정은 hermes-agent 프로젝트의 **자체 문서** 기준입니다(여기서는 범위 밖) — `~/.hermes/config.yaml`을 ohmyboring의 MCP(`http://boring-door:7710/mcp`)로 향하게 하면 됩니다. ohmyboring이 제공하는 구성은 이를 Slack assistant로 연결하는 것까지이며, 그 이상으로 쓰려면 이미지를 직접 빌드하거나 수정하세요.
+`boring.json`에서 hermes-agent를 켜면 `make up`이 자동으로 연결합니다:
+
+- `~/.hermes/config.yaml`에 `mcp_servers.ohmyboring`를 추가
+- 정본 `~/.hermes/scripts/briefing.py`를 설치(문에는 `door_url()`, 즉 `BORING_DOOR_URL`로 접근)
+- `make smoke`에서 연결을 검증
+
+`boring.json`에서 켭니다:
+
+```json
+{
+  "id": "hermes-agent",
+  "enabled": true,
+  "adapter": "cron"
+}
+```
+
+`~/.hermes/config.yaml`이나 `~/.hermes/scripts/briefing.py`를 직접 수정했다면 먼저 백업하세요. `make up`은 덮어쓰기 전에 `.omb-bak` 사본을 남깁니다.
 
 ---
 
@@ -543,9 +560,9 @@ curl -s -X POST http://localhost:7710/mcp \
 ## 개발 · 가드레일
 
 - SSOT 문서: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
-- `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test`
+- `make guard` = fmt + clippy + test + py-compile + py-unit-tests(`scripts/guard.sh`), 이어서 vault 데이터 위생 dry-run
 - `make quality` = MCP tool, vector 모드 문서, 제거된 위험 surface의 릴리즈 수용성 drift 게이트
-- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy`
+- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy` · `compose-config` · `docker-build` · `eval-gate`
 - `unsafe_code = "forbid"`
 
 ---
@@ -602,13 +619,22 @@ make sync
 ```text
 oh-my-boring/
 ├─ drudge/                  # Rust 엔진
+├─ src/ohmyboring/          # Python 패키지 (엔진 이식, 문 로직)
+├─ integrations/            # LangChain · LangGraph · Deep Agents 패키지
 ├─ agents/                  # 호스트측 에이전트 어댑터
 │  ├─ claude-code/          # Claude Code hooks
-│  ├─ hermes/               # hermes-agent cron
+│  ├─ codex/                # Codex 어댑터
+│  ├─ cursor/               # Cursor 어댑터
+│  ├─ door/                 # 문 (:7710)
+│  ├─ hermes/               # hermes-agent cron + card_runner.py
+│  ├─ memory/               # Deep Agents 메모리 스토어
 │  ├─ schedulers/           # cron/launchd 백필
-│  └─ shared/               # 정책/설정 라이브러리
+│  ├─ shared/               # 정책/설정 라이브러리
+│  └─ slack/                # 카드 프로그램
 ├─ hooks/                   # backward-compatible symlink → agents/
-├─ scripts/                 # guard.sh · smoke.sh
+├─ scripts/                 # guard.sh · smoke.sh · doctor.sh · …
+├─ docs/                    # PRD · RUNBOOK · reports
+├─ config/                  # (비어 있음, .gitkeep)
 ├─ vault/                   # raw → wiki 메모리
 ├─ data/                    # Postgres 데이터 (gitignored)
 ├─ docker-compose.yml

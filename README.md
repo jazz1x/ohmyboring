@@ -424,7 +424,7 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring` as an MCP server |
 | Codex | `agents/codex/README.md` | MCP + host worker backfill | `~/.codex/mcp.json` / launchd or cron / `collect-sessions.py` | Exposes `ohmyboring` as an MCP server and backfills eligible Codex sessions; installed workers harvest stable rollout transcripts but skip true subagents |
-| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`briefing`, `morning-card`, `weekly-card`) + serial backfill workers (`ingest-worker.py`, Codex collector). The card jobs run the card programs through `card_runner.py` (delivery `local` — the tools post to Slack themselves); the launchd registrations (`scripts/schedule-card.sh`) stay until hermes has run one morning successfully, and the tools' own once-per-day/week guard keeps the overlap from double-posting |
+| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`briefing`, `morning-card`, `weekly-card`) + serial backfill workers (`ingest-worker.py`, Codex collector). The card jobs run the card programs through `card_runner.py` (delivery `local` — the tools post to Slack themselves); hermes cron owns the card schedule (the launchd `com.ohmyboring.morning-card` job was removed on 2026-09-28) |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older Claude Code sessions |
 | shared | `src/ohmyboring/config.py` | imported by adapters | `boring.json` policy loader |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | Idempotently configures hooks/MCP for enabled agents |
@@ -446,9 +446,9 @@ Memory can be reached through HTTP endpoints or the MCP server (`http://localhos
 | `POST /ask` / `ask` | Direct question answered from memory | not required |
 | `POST /search` / `recall` | Raw memory excerpts. Each hit carries `dist` and `dist_kind` (`vector_cosine` or `text_rank`) when the serving path has a comparable number; both are absent on the wiki-recall fallback rather than reporting a score from a third, incomparable scale | not required; semantic search uses vector when enabled |
 | `/remember` / `remember` | Store a curated note | — |
-| `POST /gap` / `gap` | Record a gap — `session_id`, `query`, `kind` (`missing`·`stale`·`broken`), `handed` (note source_paths; required for `stale`). The door only records, never judges | not required |
+| `POST /gap` / `gap` | Record a gap — `session_id`, `query`, `kind` (`missing`·`stale`·`broken`), `handed` (note source_paths; required for `stale`). Records only, never judges; answered by the engine when `DOOR_LINK_WRITER=engine` (the compose default), by the door when `python` | not required |
 
-The door at `127.0.0.1:7710` relays the engine's route table (read at startup from the contract snapshot, so it follows the engine) and answers routes of its own: `GET /approved`, `GET /claim-source`, `GET /claim-sources`, `GET /projects?active_days=`, `GET`/`POST /repairs/split-subjects`, and `POST /gap`. Unregistered paths get a 404 — a door, not a catch-all proxy.
+The door at `127.0.0.1:7710` relays the engine's route table (read at startup from the contract snapshot, so it follows the engine) and answers some routes itself, depending on the `DOOR_*` switches in `docker-compose.yml` (11 of them; `engine` hands a route to the engine and the door proxies it, `python` makes the door answer). With `DOOR_LINK_WRITER=engine` the engine answers `GET`/`POST /repairs/split-subjects` and `POST /gap`, and the door keeps only POST split's row check, reread, and card-row bookkeeping. `DOOR_MEMORY_READER` covers `GET /approved`, `/claim-source`, `/claim-sources`, `/rules`; `DOOR_SEARCH_READER` covers `/projects` and `/search`. `GET /projects?active_days=` is the door's own DB-backed variant. All 11 switches are `engine` in production. The door has no `/run/*` routes — hermes cron runs the card programs itself. Unregistered paths get a 404 — a door, not a catch-all proxy.
 
 ### Token budget
 
@@ -530,7 +530,7 @@ curl -s -X POST http://localhost:7710/mcp \
 When hermes-agent is enabled in `boring.json`, `make up` wires it automatically:
 
 - Adds `mcp_servers.ohmyboring` to `~/.hermes/config.yaml`
-- Installs the canonical `~/.hermes/scripts/briefing.py` (uses `BORING_URL`, with `DRUDGE_URL` as a legacy fallback)
+- Installs the canonical `~/.hermes/scripts/briefing.py` (reaches the door through `door_url()`, i.e. `BORING_DOOR_URL`)
 - Validates the connection in `make smoke`
 
 Enable it in `boring.json`:
@@ -561,9 +561,9 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 ## Development · guardrails
 
 - SSOT docs: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
-- `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test`
+- `make guard` = fmt + clippy + test + py-compile + py-unit-tests (`scripts/guard.sh`), then a vault data hygiene dry-run
 - `make quality` = release acceptance drift gate for MCP tools, vector-mode docs, and removed dangerous surfaces
-- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy`
+- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy` · `compose-config` · `docker-build` · `eval-gate`
 - `unsafe_code = "forbid"`
 
 ---
@@ -620,13 +620,22 @@ For automatic periodic sync, add a cron job:
 ```text
 oh-my-boring/
 ├─ drudge/                  # Rust engine
+├─ src/ohmyboring/          # Python package (engine ports, door logic)
+├─ integrations/            # LangChain · LangGraph · Deep Agents packages
 ├─ agents/                  # host-side agent adapters
 │  ├─ claude-code/          # Claude Code hooks
-│  ├─ hermes/               # hermes-agent cron
+│  ├─ codex/                # Codex adapter
+│  ├─ cursor/               # Cursor adapter
+│  ├─ door/                 # the door (:7710)
+│  ├─ hermes/               # hermes-agent cron + card_runner.py
+│  ├─ memory/               # Deep Agents memory store
 │  ├─ schedulers/           # cron/launchd backfill
-│  └─ shared/               # policy/config library
+│  ├─ shared/               # policy/config library
+│  └─ slack/                # card programs
 ├─ hooks/                   # backward-compatible symlinks → agents/
-├─ scripts/                 # guard.sh · smoke.sh
+├─ scripts/                 # guard.sh · smoke.sh · doctor.sh · …
+├─ docs/                    # PRD · RUNBOOK · reports
+├─ config/                  # (empty, .gitkeep)
 ├─ vault/                   # raw → wiki memory
 ├─ data/                    # Postgres persistence (gitignored)
 ├─ docker-compose.yml

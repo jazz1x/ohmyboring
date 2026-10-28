@@ -61,7 +61,7 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 
 | 方法 | コマンド | タイミング |
 | --- | --- | --- |
-| **自動（セッション終了時）** | SessionEnd フック（`install.sh` が設定） | すべての Claude Code セッション — `hooks/distill-session.py` がトランスクリプトを蒸留し `remember` します。対になる `UserPromptSubmit` フック（`recall.py`）が関連する過去のメモリを新しいプロンプトへ自動注入します。 |
+| **自動（セッション終了時）** | SessionEnd フック（`install.sh` が設定） | すべての Claude Code セッション — `hooks/distill-session.py` がトランスクリプトを蒸留し `remember` します。対になる `UserPromptSubmit` フック（`recall.py`）が関連する過去のメモリを新しいプロンプトへ自動注入します。最大 3 つのスニペットで、それぞれそのノートが決めた claim を同送します（`RECALL_CLAIMS_PER_HIT`）。 |
 | **自動（Codex ワーカー）** | ホスト launchd/cron ワーカー（`install.sh` が設定） | Codex には SessionEnd フックがありません。ホストワーカーが 20 分ごとに `~/.codex/sessions/**/*.jsonl` をスキャンし、まだ書き込み中のトランスクリプトと実際の subagent rollout はスキップし、取り込み可能なトランスクリプトを同じ `remember` 経路で保存します。`hermes-agent` が有効なら `codex-memory-ingest-worker` も設定されます。どちらも `make doctor` で確認します。 |
 | **過去セッションのバックフィル** | `make collect [N=20]` | インストール直後、空の vault を `~/.claude/projects` の履歴で埋めるとき。新しい順・冪等（セッションごとのマーカーで蒸留済みはスキップ）、1 回に `N` 件だけ処理し CPU を占有しません。 |
 | **今すぐ（セッションを終えずに）** | `make distill-now` · `make remember M="…"` | セッションを終了せずに即座に取り込みたいとき。`distill-now` は**現在の**トランスクリプトをキューに入れ、hermes（`boring-agent`）にその場で処理させるため、hermes が起動している必要があります。セッション終了時の通常の取り込みもその後そのまま動作します（初期ノート + 最終ノートの両方ができる場合あり）。`remember` は自分で書いたノートを保存します。 |
@@ -427,10 +427,11 @@ curl -s -X POST http://localhost:7710/mcp \
 | アダプター | パス | 消費主体 | エントリポイント | 役割 |
 |---|---|---|---|---|
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | セッションを要約し `remember` を呼び出す |
+| Claude Code | `agents/claude-code/session-start-recall.py` | `SessionStart` hook | 最初のターンの前に構造化 context（`/context`）を読み込む |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | 関連 snippet を取得しプロンプト context に注入 |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring` を MCP サーバーとして公開 |
 | Codex | `agents/codex/README.md` | MCP + ホストワーカーのバックフィル | `~/.codex/mcp.json` / launchd または cron / `collect-sessions.py` | `ohmyboring` を MCP サーバーとして公開し、取り込み可能な Codex セッションをバックフィル。設定済みワーカーは安定した rollout トランスクリプトを取り込み、実際の subagent はスキップ |
-| hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 取り込みワーカーと定期ブリーフィングを実行 |
+| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | 設定駆動の cron（`briefing`、`morning-card`、`weekly-card`）+ 直列のバックフィルワーカー（`ingest-worker.py`、Codex コレクター）。カード job は `card_runner.py` 経由でカードプログラムを実行します（配信は `local` — ツールが Slack に直接投稿）。カードのスケジュールは hermes cron が持ちます（launchd の `com.ohmyboring.morning-card` job は 2026-09-28 に削除） |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 手動 | 古い Claude Code セッションの lazy バックフィル |
 | shared | `src/ohmyboring/config.py` | アダプター import | `boring.json` ポリシーローダー |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | 有効なエージェントの hook/MCP 設定を idempotent に構成 |
@@ -452,9 +453,9 @@ curl -s -X POST http://localhost:7710/mcp \
 | `POST /ask` / `ask` | メモリから直接答える質問 | 不要 |
 | `POST /search` / `recall` | 生のメモリ抜粋。各 hit は、配信経路に比較可能な数値がある場合に `dist` と `dist_kind`(`vector_cosine` または `text_rank`)を伴います。wiki-recall フォールバックでは、比較できない第三の尺度のスコアを報告する代わりに両方を省きます | 不要。セマンティック検索は有効時にベクトルを使用 |
 | `/remember` / `remember` | 整えたノートを保存 | — |
-| `POST /gap` / `gap` | 欠落を記録 — `session_id`、`query`、`kind`(`missing`・`stale`・`broken`)、`handed`(ノートの source_path、`stale` は必須)。ドアは記録のみで判断しません | 不要 |
+| `POST /gap` / `gap` | 欠落を記録 — `session_id`、`query`、`kind`(`missing`・`stale`・`broken`)、`handed`(ノートの source_path、`stale` は必須)。記録のみで判断しません。`DOOR_LINK_WRITER=engine`（compose の既定）ならエンジンが、`python` ならドアが答えます | 不要 |
 
-ドア（`127.0.0.1:7710`）はエンジンのルート表を中継し（起動時に契約スナップショットから読んでエンジンに従う）、独自のルート `GET /approved`・`GET /claim-source`・`GET /claim-sources`・`GET /projects?active_days=`・`GET`/`POST /repairs/split-subjects`・`POST /gap` には自ら答える。未登録のパスは 404 — 万能プロキシではない。
+ドア（`127.0.0.1:7710`）はエンジンのルート表を中継し（起動時に契約スナップショットから読んでエンジンに従う）、一部のルートは `docker-compose.yml` の `DOOR_*` スイッチ（11 個）に応じて自ら答える（`engine` はルートをエンジンに渡してドアはプロキシ、`python` はドアが答える）。`DOOR_LINK_WRITER=engine` なら `GET`/`POST /repairs/split-subjects` と `POST /gap` はエンジンが答え、ドアは POST split の row 検証・再読み込み・カード行の後始末だけを担う。`DOOR_MEMORY_READER` は `GET /approved`・`/claim-source`・`/claim-sources`・`/rules` を、`DOOR_SEARCH_READER` は `/projects` と `/search` を振り分ける。`GET /projects?active_days=` はドア自身の DB ベースの変種である。本番では 11 個のスイッチがすべて `engine` である。ドアに `/run/*` ルートはない — カードプログラムは hermes cron が直接実行する。未登録のパスは 404 — 万能プロキシではない。
 
 ### トークン予算
 
@@ -533,7 +534,23 @@ curl -s -X POST http://localhost:7710/mcp \
 
 [hermes-agent](https://hermes-agent.org) はサードパーティの自律 supervisor です。Slack、オーケストレーション、cron ベースのバックフィルを ohmyboring の MCP バックエンド経由で動かせます。イメージを別途ビルドすれば `make up` が自動的に検出します。
 
-設定は hermes-agent プロジェクト**自身のドキュメント**に従います（ここでは対象外）— `~/.hermes/config.yaml` を ohmyboring の MCP（`http://boring-door:7710/mcp`）に向けてください。ohmyboring が同梱するのはこれを Slack assistant として配線するところまでで、それ以上に使うにはイメージを自分でビルドまたは改変してください。
+`boring.json` で hermes-agent を有効にすると、`make up` が自動で配線します:
+
+- `~/.hermes/config.yaml` に `mcp_servers.ohmyboring` を追加
+- 正本の `~/.hermes/scripts/briefing.py` をインストール（ドアへは `door_url()`、つまり `BORING_DOOR_URL` で到達）
+- `make smoke` で接続を検証
+
+`boring.json` で有効にします:
+
+```json
+{
+  "id": "hermes-agent",
+  "enabled": true,
+  "adapter": "cron"
+}
+```
+
+`~/.hermes/config.yaml` や `~/.hermes/scripts/briefing.py` を自分で変更している場合は先にバックアップしてください。`make up` は上書きの前に `.omb-bak` のコピーを残します。
 
 ---
 
@@ -551,9 +568,9 @@ curl -s -X POST http://localhost:7710/mcp \
 ## 開発 · ガードレール
 
 - SSOT ドキュメント: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
-- `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test`
+- `make guard` = fmt + clippy + test + py-compile + py-unit-tests（`scripts/guard.sh`）、続いて vault データ衛生の dry-run
 - `make quality` = MCP tool、vector モード文書、削除済み危険 surface のリリース受け入れ drift ゲート
-- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy`
+- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy` · `compose-config` · `docker-build` · `eval-gate`
 - `unsafe_code = "forbid"`
 
 ---
@@ -610,13 +627,22 @@ make sync
 ```text
 oh-my-boring/
 ├─ drudge/                  # Rust エンジン
+├─ src/ohmyboring/          # Python パッケージ (エンジン移植、ドアのロジック)
+├─ integrations/            # LangChain · LangGraph · Deep Agents パッケージ
 ├─ agents/                  # ホスト側エージェントアダプター
 │  ├─ claude-code/          # Claude Code hooks
-│  ├─ hermes/               # hermes-agent cron
+│  ├─ codex/                # Codex アダプター
+│  ├─ cursor/               # Cursor アダプター
+│  ├─ door/                 # ドア (:7710)
+│  ├─ hermes/               # hermes-agent cron + card_runner.py
+│  ├─ memory/               # Deep Agents メモリストア
 │  ├─ schedulers/           # cron/launchd バックフィル
-│  └─ shared/               # ポリシー/設定ライブラリ
+│  ├─ shared/               # ポリシー/設定ライブラリ
+│  └─ slack/                # カードプログラム
 ├─ hooks/                   # backward-compatible symlink → agents/
-├─ scripts/                 # guard.sh · smoke.sh
+├─ scripts/                 # guard.sh · smoke.sh · doctor.sh · …
+├─ docs/                    # PRD · RUNBOOK · reports
+├─ config/                  # (空、.gitkeep)
 ├─ vault/                   # raw → wiki メモリ
 ├─ data/                    # Postgres データ (gitignored)
 ├─ docker-compose.yml
