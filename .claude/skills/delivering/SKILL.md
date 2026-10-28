@@ -14,7 +14,7 @@ description: oh-my-boring 저장소에서 변경을 머지 뒤 소비자 쪽(~/.
 | Python · 훅 · `~/.hermes/scripts` 로 복사되는 것 | `python3 agents/shared/agent_wiring.py --install --boring-home "$PWD"` | `sh scripts/doctor.sh` 에 `DEPLOY DRIFT` 줄이 없다 |
 | Rust (`drudge/`) | `make build` 후 컨테이너 재기동 | `make build` 가 compose 이미지(엔진·문)와 호스트 CLI 바이너리를 함께 만든다. doctor 가 engine build_sha 와 호스트 CLI 스탬프를 체크아웃과 대조한다 |
 | 문 이미지가 COPY 하는 경로 전부: `src/`, `agents/door/`, `agents/slack/`, `agents/shared/`, `agents/memory/`, `agents/hermes/`, `pyproject.toml`, `requirements.txt`, `data/contract/engine-contract.json` | 위 `agent_wiring --install` **에 더해** `make door-build && make door-up` | 출력에 `Recreated` |
-| hermes cron 작업 추가·수정·삭제 | `docker exec boring-agent hermes cron create …` (`edit` · `pause` · `resume` · `remove` 도 같은 CLI) | 한 주기 뒤 `docker exec boring-agent hermes cron list` 재확인 |
+| hermes cron 작업 추가·수정·삭제 | 저장소의 크론 작업은 `agent_wiring --install` 이 맞춘다. 그 밖의 추가·수정은 `docker exec boring-agent hermes cron create …` (`edit` · `pause` · `resume` · `remove` 도 같은 CLI) | 한 주기 뒤 `docker exec boring-agent hermes cron list` 재확인 |
 
 문 이미지 경로는 `agents/door/**` 만이 아니다. 목록의 정본은 `agents/door/Dockerfile` 의 `COPY` 줄이다 — 목록과 다르면 Dockerfile 이 이긴다. `agents/shared/`·`agents/hermes/`·`src/` 를 고치고 `door-build` 를 빼먹기 쉽다.
 
@@ -27,7 +27,7 @@ docker exec boring-agent sh -c 'hermes cron create --name advice-write --no-agen
 한 번만 울리는 알림은 `--repeat 1` 과 날짜를 박은 식(`"12 8 20 10 *"`)을 쓴다. 출력의 `Next run:` 을 인용한다.
 
 - hermes 는 외부 이미지(`make hermes-build`)다. `make build` 에 들어 있지 않다.
-- `~/.hermes/cron/jobs.json` 은 손으로 고치지 않는다. 데몬이 되돌린다.
+- `~/.hermes/cron/jobs.json` 은 손으로 고치지 않는다. 데몬이 되돌린다. 저장소의 크론 작업은 `agent_wiring --install` 이 맞추고, 추가·수정은 hermes cron CLI 로 한다.
 - `up` 전량은 정본 체크아웃(`/Users/jongyun/Development/mine/oh-my-boring`)에서만 친다. 워크트리에서는 `make door-build`·`make door-up` 만 친다. 단 이전 중 엔진 이미지는 트렁크 워크트리에서 `make build` 로 짓는다. compose build 에 `--project-directory <정본>` 을 붙이면 빌드 소스가 정본 체크아웃으로 풀리고 BUILD_SHA 라벨만 트렁크로 붙는다. 라벨은 증거가 아니다: 넘기기 전에 이미지 안 바이너리에서 그 커밋에만 있는 문자열을 찾는다.
 - 문 빌드·기동(`make door-build`·`make door-up`)은 워크트리에서도 친다. 빌드는 지금 폴더의 코드로 짓고, 기동은 Makefile 이 compose 프로젝트 폴더와 `.env` 를 정본 체크아웃으로 고정한다. 고정이 없으면 compose 가 지금 폴더를 잡아 빈 vault·기본 설정으로 뜬다.
 - 되돌릴 태그는 새 이미지를 빌드하기 전에 `docker image inspect` 로 얻은 전체 sha256 으로 달고, 태그가 조회되는지 본 뒤에 빌드한다. 빌드가 이름을 옮기면 옛 이미지는 이름을 잃고, containerd 이미지 저장소에서는 짧은 ID 로도 태그가 안 된다.
@@ -41,7 +41,7 @@ docker exec boring-agent sh -c 'hermes cron create --name advice-write --no-agen
 1. 컨테이너 생성 시각이 머지 시각보다 뒤다. `Recreated` 만으로는 부족하다.
    - `docker inspect -f '{{.Created}}' <컨테이너>` (문은 `boring-door`, 엔진은 `boring-drudge`)
    - `gh pr view <N> --json mergedAt`
-   - 문을 다시 띄운 뒤 마운트(`.Mounts`)가 정본 vault·config 인지, `_WRITER` 로 끝나는 설정이 정본 `.env` 값과 같은지 그 줄만 인용한다. 설정 전체는 인용하지 않는다(비밀값).
+   - 문을 다시 띄운 뒤 마운트(`.Mounts`)가 정본 vault·config 인지, `_WRITER`·`_READER`·`_OWNER` 로 끝나는 설정이 정본 `.env` 값과 같은지 그 줄만 인용한다. 설정 전체는 인용하지 않는다(비밀값).
 2. 소비자 쪽에서 한 번 돌려 값을 인용한다. 카드 ts, 크론 output 파일(`~/.hermes/cron/output/<job-id>/`), 훅이 주입한 줄, `/health` 필드처럼 소비자가 낸 산출물이다. 인용이 없으면 배달은 열려 있다.
 3. `sh scripts/doctor.sh` 가 ✗ 0.
 
