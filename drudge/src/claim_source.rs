@@ -78,10 +78,9 @@ fn decode_component(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Starlette `request.query_params.get(name, "")`: `parse_qsl(keep_blank_values=True)`,
-/// empty pairs skipped, a pair without `=` has an empty value, the last duplicate wins.
-/// `None` when the key is absent, so a caller can tell "missing" from "empty".
-pub(crate) fn last_param_opt(raw_query: Option<&str>, name: &str) -> Option<String> {
+/// Starlette `request.query_params.getlist(name)`: `parse_qsl(keep_blank_values=True)`, empty
+/// pairs skipped, a pair without `=` has an empty value, every repeat kept in order.
+pub(crate) fn all_params(raw_query: Option<&str>, name: &str) -> Vec<String> {
     raw_query
         .unwrap_or("")
         .split('&')
@@ -90,7 +89,13 @@ pub(crate) fn last_param_opt(raw_query: Option<&str>, name: &str) -> Option<Stri
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
             (decode_component(key) == name).then(|| decode_component(value))
         })
-        .next_back()
+        .collect()
+}
+
+/// Starlette `request.query_params.get(name)`: the last duplicate wins.
+/// `None` when the key is absent, so a caller can tell "missing" from "empty".
+pub(crate) fn last_param_opt(raw_query: Option<&str>, name: &str) -> Option<String> {
+    all_params(raw_query, name).pop()
 }
 
 fn last_param(raw_query: Option<&str>, name: &str) -> String {

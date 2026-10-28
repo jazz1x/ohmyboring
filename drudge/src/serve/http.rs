@@ -1117,6 +1117,83 @@ pub(crate) async fn handle_claim_sources(
     }
 }
 
+fn json_response(status: StatusCode, body: Value) -> Response {
+    use axum::response::IntoResponse;
+    (status, Json(body)).into_response()
+}
+
+fn no_store() -> Response {
+    json_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({"error": "store not configured"}),
+    )
+}
+
+fn store_unreachable(e: &anyhow::Error) -> Response {
+    json_response(
+        StatusCode::BAD_GATEWAY,
+        json!({"error": "store unreachable", "detail": format!("{e:#}")}),
+    )
+}
+
+/// `GET /repairs/split-subjects` — same wire as the Python door: 400 for a bad `limit` (before the
+/// store), 503 without a store, 502 `{error, detail}` when it can't be reached, else 200.
+pub(crate) async fn handle_split_subjects(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> Response {
+    use axum::response::IntoResponse;
+    let limit = match crate::split_subjects::parse_limit(uri.query()) {
+        Ok(limit) => limit,
+        Err(message) => return json_response(StatusCode::BAD_REQUEST, json!({"error": message})),
+    };
+    let Some(store) = s.store.as_ref() else {
+        return no_store();
+    };
+    match store.split_subject_rows().await {
+        Ok(rows) => {
+            let groups = crate::split_subjects::group_split_subjects(&rows);
+            Json(crate::split_subjects::page(groups, limit)).into_response()
+        }
+        Err(e) => store_unreachable(&e),
+    }
+}
+
+/// `GET /repairs/split-subjects/samples` — 400 unless 1..=10 non-blank `variant`s, 503 without a
+/// store, 502 when it can't be reached. A NUL in a variant is what the Python door crashes on
+/// (psycopg refuses the string): its bare 500 text is kept so the bytes stay the same.
+pub(crate) async fn handle_split_samples(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> Response {
+    use crate::split_subjects::{Samples, VARIANT_ERROR, Variants, parse_variants};
+    use axum::response::IntoResponse;
+    let variants = match parse_variants(uri.query()) {
+        Variants::Valid(variants) => variants,
+        Variants::WrongCount => {
+            return json_response(StatusCode::BAD_REQUEST, json!({"error": VARIANT_ERROR}));
+        }
+        Variants::Nul => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
+                "Internal Server Error",
+            )
+                .into_response();
+        }
+    };
+    let Some(store) = s.store.as_ref() else {
+        return no_store();
+    };
+    match store.split_samples(&variants).await {
+        Ok(samples) => Json(Samples { samples }).into_response(),
+        Err(e) => store_unreachable(&e),
+    }
+}
+
 /// What the card sessions approved or contested — same wire as the Python door's `GET /approved`:
 /// 400 `{error}` for a bad `since_hours` (checked before the store), 503 without a store, 502
 /// `{error, detail}` when it can't be reached, else 200. Skipped rows are logged, only counted on the wire.

@@ -3007,6 +3007,47 @@ impl Store {
             .collect())
     }
 
+    /// Every live claim's `(subject, source_path)` for `GET /repairs/split-subjects`. No ORDER BY:
+    /// the grouping sorts, so row order changes nothing.
+    pub async fn split_subject_rows(&self) -> Result<Vec<(String, String)>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::split_subjects::SUBJECTS_SQL, &[])
+            .await
+            .context("split subject rows")?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
+    /// Per-predicate row counts and the longest value of the given spellings, for
+    /// `GET /repairs/split-subjects/samples`.
+    pub async fn split_samples(
+        &self,
+        variants: &[String],
+    ) -> Result<Vec<crate::split_subjects::Sample>> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                crate::split_subjects::SAMPLES_SQL,
+                &[
+                    &crate::split_subjects::SAMPLE_VALUE_CHARS,
+                    &variants,
+                    &crate::split_subjects::SAMPLE_LIMIT,
+                ],
+            )
+            .await
+            .context("split samples")?;
+        Ok(rows
+            .iter()
+            .map(|r| crate::split_subjects::Sample {
+                predicate: r.get(0),
+                rows: r.get(1),
+                value: r.get(2),
+            })
+            .collect())
+    }
+
     /// Card-session edges for `GET /approved` (SQL copied from the Python door). Row order is
     /// not fixed; the caller sorts.
     pub async fn approved_edges(&self) -> Result<Vec<crate::approved::EdgeRow>> {

@@ -28,6 +28,8 @@ mod owner;
 mod pg_failure_tests;
 mod scheduler;
 mod search_route;
+#[cfg(test)]
+mod split_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DbHealthState {
@@ -1907,6 +1909,11 @@ pub(crate) fn build_router(state: AppState) -> axum::Router {
         .route("/claim-source", get(http::handle_claim_source))
         .route("/claim-sources", get(http::handle_claim_sources))
         .route("/approved", get(http::handle_approved))
+        .route("/repairs/split-subjects", get(http::handle_split_subjects))
+        .route(
+            "/repairs/split-subjects/samples",
+            get(http::handle_split_samples),
+        )
         .route("/recall-label-stats", get(http::handle_recall_label_stats))
         .route(
             "/events",

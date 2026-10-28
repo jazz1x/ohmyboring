@@ -491,7 +491,7 @@ fn slugify(s: &str) -> String {
 /// claim subject/predicate normalization — lowercase, collapse whitespace/`_`/`-` runs into one
 /// `-` (matches repo-slug convention), trim leading/trailing `-`. Prevents "foo bar" and "foo-bar"
 /// from landing as distinct claim subjects.
-fn canon(s: &str) -> String {
+pub(crate) fn canon(s: &str) -> String {
     let lower = s.to_lowercase();
     let mut out = String::with_capacity(lower.len());
     let mut prev_sep = false;
