@@ -91,8 +91,7 @@ services:
   # Same FastAPI app as `make door`, packaged to stand next to the engine: the image
   # (agents/door/Dockerfile, uid 10001, no code mounts) reads the engine by compose service
   # name. /health relays the engine's, so the door goes unhealthy with the engine.
-  # The door also RUNS the two card programs (POST /run/morning-card · /run/weekly-card —
-  # the tools launchd used to fire): same image, same requirements.txt, with the env below.
+  # The card programs run in hermes cron now (agents/hermes/card_runner.py), not in the door.
   boring-door:
     build:
       context: .
@@ -106,11 +105,10 @@ services:
       DOOR_UPSTREAM: http://boring-drudge:7700
       DOOR_PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring
       BORING_OWNER_TOKEN: ${BORING_OWNER_TOKEN:-}
-      # The card programs post with the bot token and need the target channel; both arrive
-      # from .env like they do for the secretary. SECRETARY_OWNER_ID rides along for the
+      # The door rewrites a card row after a merge (door.py _slack_client) with the bot token,
+      # from .env like the secretary. SECRETARY_OWNER_ID rides along for the
       # same card surface (the button plugin refuses presses without it).
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
-      SLACK_CARD_CHANNEL: ${SLACK_CARD_CHANNEL:-}
       SECRETARY_OWNER_ID: ${SECRETARY_OWNER_ID:-}
       # The tools call back into the door itself (127.0.0.1:7710) for /claim-source·/approved·
       # /repairs and reach the engine by service name; the ollama client honors OLLAMA_HOST.

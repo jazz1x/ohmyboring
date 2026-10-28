@@ -1,10 +1,5 @@
 {
-  "door_routes": [
-    "POST /run/advice-write",
-    "POST /run/morning-card",
-    "POST /run/repair-judge",
-    "POST /run/weekly-card"
-  ],
+  "door_routes": [],
   "get_shapes": {
     "/audit": {
       "optional": [],

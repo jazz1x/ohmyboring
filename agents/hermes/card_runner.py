@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Run a card program directly from hermes — the door's /run/* wrapper, moved here (C-PORT8).
 
-`run_card(name, label)` replaces `card_door.trigger(route, label)`: same exit code (0 only when
-the card exited 0), same one stdout/stderr line. The lock, the timeout and the {ok, exit,
-posted_ts?, tail} answer are the door's (door.py `_run_card_route`), so the fold below reads the
-same answer shape the old trigger did.
+`run_card(name, label)` runs one card program: exit code 0 only when the card exited 0, one
+stdout/stderr line. It holds the lock and the timeout and reads the {ok, exit, posted_ts?, tail}
+answer shape the door's retired /run/* routes used to give.
 
 Two kinds of function: `execute` runs the card and returns an Answer (effects); `fold` turns an
 Answer into (exit code, stream, line) (decision). `run_card` is the only one that prints.
@@ -155,7 +154,7 @@ def execute(
 
 
 def fold(label: str, answer: Answer) -> tuple[int, str, str]:
-    """(exit code, 'stdout'|'stderr', line) — the lines card_door.trigger printed for the same answer."""
+    """(exit code, 'stdout'|'stderr', line) — the line printed for this answer."""
     body = answer.body
     if answer.status != 200:
         detail = one_line(json.dumps(body, separators=(",", ":"), ensure_ascii=False))[:200]
@@ -170,7 +169,7 @@ def fold(label: str, answer: Answer) -> tuple[int, str, str]:
 
 
 def run_card(name: str, label: str) -> int:
-    """Drop-in for card_door.trigger: run the card, print one line, return the cron exit code."""
+    """Run the card, print one line, return the cron exit code."""
     code, stream, line = fold(label, execute(name))
     print(line, file=sys.stderr if stream == "stderr" else sys.stdout)
     return code
