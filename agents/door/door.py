@@ -778,7 +778,7 @@ def _writer_deps(
 
 
 #: 4시간 sync 주인 스위치 — engine(기본)이면 스레드 없음·기록기 해시 그대로, python 이면 문 배경
-#: 스레드(ohmyboring.sync)가 기동 1회 + BORING_SYNC_HOURS(기본 4)마다 볼트를 다시 색인하고
+#: 스레드(ohmyboring.sync)가 기동 1회 + schedule.sync_hours 마다 볼트를 다시 색인하고
 #: remember 기록기도 파생 칸을 뺀 새 해시를 저장한다. 켜기는 오케스트레이터가 판정 뒤에 한다.
 _SYNC_OWNER_ENV = "DOOR_SYNC_OWNER"
 _SYNC_PYTHON = "python"
@@ -823,7 +823,7 @@ def _start_sync_if_owner() -> None:
 
 
 #: 하루 1회 DB 정리 주인 스위치 — engine(기본)이면 스레드 없음, python 이면 문 배경 스레드가
-#: BORING_COMPACT_HOURS(기본 24)마다 sync 와 같은 잠금 아래 compact 를 돈다. 켜기 전에 엔진에
+#: schedule.compact_hours 마다 sync 와 같은 잠금 아래 compact 를 돈다. 켜기 전에 엔진에
 #: BORING_COMPACT_DISABLED=1 을 먼저 줘야 둘이 겹치지 않는다(오케스트레이터 몫).
 _COMPACT_OWNER_ENV = "DOOR_COMPACT_OWNER"
 
@@ -859,8 +859,8 @@ def _start_compact_if_owner() -> None:
 
 
 #: 일일 브리프 노트 주인 스위치 — engine(기본)이면 스레드 없음, python 이면 문 배경 스레드가
-#: BORING_BRIEF_HOUR(로컬, 기본 8)에 vault/wiki/daily-brief-<날짜>.md 를 쓴다. 켜기 전에 엔진의
-#: BORING_BRIEF_HOUR 를 시각이 아닌 값(`off`)으로 둬야 둘이 겹치지 않는다 — 빈 값은 엔진에서 기본 8 이다.
+#: schedule.brief_hour(로컬)에 vault/wiki/daily-brief-<날짜>.md 를 쓴다. 켜기 전에 엔진의
+#: BORING_BRIEF_HOUR 를 시각이 아닌 값(`off`)으로 둬야 둘이 겹치지 않는다 — 빈 값은 엔진에서 boring.json 값이다.
 _BRIEF_OWNER_ENV = "DOOR_BRIEF_OWNER"
 
 
