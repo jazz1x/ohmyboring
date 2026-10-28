@@ -647,8 +647,13 @@ struct Slot {
     predicate: String,
 }
 
-fn first_statement<T>(statements: Vec<Vec<T>>) -> Vec<T> {
-    statements.into_iter().next().unwrap_or_default()
+/// Surreal answers one statement per statement sent; none at all is a broken reply, and reading it
+/// as "no rows" would make `mirror` skip the deletes of stale keys.
+fn first_statement<T>(query: &str, statements: Vec<Vec<T>>) -> Result<Vec<T>> {
+    statements
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("surreal answered no statement to: {query}"))
 }
 
 fn chunk_select(tail: &str) -> String {
@@ -795,13 +800,14 @@ impl SurrealClient {
             .await
             .context("read the written notes' chunks from pgvector")?;
         let wanted: Vec<(String, String)> = rows.iter().map(chunk_literal).collect();
-        let existing: Vec<String> = first_statement(
-            self.rows::<String>(&format!(
-                "SELECT VALUE cid FROM chunk WHERE source_path INSIDE {};",
-                texts(paths)
-            ))
-            .await?,
+        let existing_chunks = format!(
+            "SELECT VALUE cid FROM chunk WHERE source_path INSIDE {};",
+            texts(paths)
         );
+        let existing: Vec<String> = first_statement(
+            &existing_chunks,
+            self.rows::<String>(&existing_chunks).await?,
+        )?;
         self.reconcile("chunk", wanted, existing).await
     }
 
@@ -814,13 +820,12 @@ impl SurrealClient {
             )
             .await
             .context("read the written notes' claim slots from pgvector")?;
-        let surreal_slots: Vec<Slot> = first_statement(
-            self.rows::<Slot>(&format!(
-                "SELECT subject, predicate FROM claim WHERE source_path INSIDE {};",
-                texts(&scope.paths)
-            ))
-            .await?,
+        let slots_query = format!(
+            "SELECT subject, predicate FROM claim WHERE source_path INSIDE {};",
+            texts(&scope.paths)
         );
+        let surreal_slots: Vec<Slot> =
+            first_statement(&slots_query, self.rows::<Slot>(&slots_query).await?)?;
         let mut slots: Vec<(String, String)> = scope.slots.clone();
         slots.extend(pg_slots.iter().map(|r| (r.get(0), r.get(1))));
         slots.extend(surreal_slots.into_iter().map(|s| (s.subject, s.predicate)));
@@ -845,19 +850,22 @@ impl SurrealClient {
                 .iter()
                 .map(|(s, p)| format!("(subject = {} AND predicate = {})", text(s), text(p))),
         );
-        let existing: Vec<String> = first_statement(
-            self.rows::<String>(&format!(
-                "SELECT VALUE cid FROM claim WHERE {};",
-                in_scope.join(" OR ")
-            ))
-            .await?,
+        let existing_claims = format!(
+            "SELECT VALUE cid FROM claim WHERE {};",
+            in_scope.join(" OR ")
         );
+        let existing: Vec<String> = first_statement(
+            &existing_claims,
+            self.rows::<String>(&existing_claims).await?,
+        )?;
         self.reconcile("claim", wanted, existing).await
     }
 
     async fn surreal_keys(&self) -> Result<(Vec<String>, Vec<String>)> {
-        let chunks = first_statement(self.rows::<String>("SELECT VALUE cid FROM chunk;").await?);
-        let claims = first_statement(self.rows::<String>("SELECT VALUE cid FROM claim;").await?);
+        let chunk_query = "SELECT VALUE cid FROM chunk;";
+        let chunks = first_statement(chunk_query, self.rows::<String>(chunk_query).await?)?;
+        let claim_query = "SELECT VALUE cid FROM claim;";
+        let claims = first_statement(claim_query, self.rows::<String>(claim_query).await?)?;
         Ok((chunks, claims))
     }
 
