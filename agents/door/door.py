@@ -1575,7 +1575,7 @@ _MAX_ACTIVE_DAYS = 365
 
 _ACTIVE_PROJECTS_SQL = (
     "select project, count(*) from document where project <> '' "
-    "and updated_at > now() - make_interval(days => %s) group by 1 order by 2 desc"
+    "and updated_at > now() - make_interval(days => %s) group by 1 order by 2 desc, 1"
 )
 
 

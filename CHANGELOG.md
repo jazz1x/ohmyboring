@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Changed
+- **문 `GET /projects?active_days=` 의 문서 수 동률을 project 사전순으로 (C-PORT7 5항)** — 문 SQL 이 `order by 2 desc` 만 걸어 동률 순서가 정해지지 않았다. 엔진과 같게 `order by 2 desc, 1` 로 DB 정렬에 맡긴다(파이썬 정렬은 codepoint 순이라 엔진 본문과 바이트가 다르다). 사본 DB 대조로 본문 바이트 일치 확인.
 - **카드 실행의 잠금·시간 초과·출력 꼴을 hermes 쪽 한 함수(`agents/hermes/card_runner.py`)로 (C-PORT8 2단계)** — 문 `/run/*` 가 하던 카드별 잠금(동시 두 번째는 409 꼴 거부)·시간 초과(`DOOR_RUN_CARD_TIMEOUT`, 900초)·`{ok, exit, posted_ts?, tail}` 를 옮겼다. 크론 실행은 프로세스마다 따로라 잠금은 `$HERMES_HOME/card-locks` 의 파일 잠금이다. `run_card` 는 `card_door.trigger` 와 같은 종료 코드·줄을 낸다(답 7종 대조). 호출부 교체와 문 경로 제거는 5단계.
 - **엔진이 DB 를 열 때 이미 있는 컬럼·색인에 ALTER·CREATE INDEX 를 보내지 않는다** — `Store::open` 의 시작 스키마 묶음이 있는 컬럼에도 표 잠금을 잡아, 문 remember 의 document→edge 쓰기와 교착했다(10-27 23:28:34Z). 카탈로그를 먼저 읽고 빠진 것만 보낸다(36개 문장). 빈 DB 스키마는 그대로다. (699a3d9 에 빠졌던 줄)
 - **fix(doctor): known-losses 목록을 추적하지 않는 로컬 경로로** — 실제 세션 id 가 든 `data/contract/known-losses.tsv` 를 추적에서 빼고 doctor 가 `data/local/known-losses.tsv`(gitignored, `DOCTOR_KNOWN_LOSSES` 로 덮어씀)를 읽는다. dead 표지가 있는데 목록 파일이 없으면 「cannot measure」 별도 ✗ 줄.
