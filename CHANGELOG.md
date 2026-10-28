@@ -6,6 +6,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **위키 verdict 이동 단위를 어휘 점수로 (C-VERDICT-1 3단계)** — `lift_by_nets` 가 순위 한 칸이 아니라 `score + net` 내림차순(동점은 원래 순서)으로 정렬한다. net 1 = 어휘 점수 1점: 1점 차는 뒤집고 2점 차는 못 뒤집는다.
+
 - **엔진 `GET /repairs/split-subjects`·`/samples` (C-PORT4 1단계)** — 문과 같은 묶음 규칙(`ingest::canon`, rows 내림 → canon 코드포인트 순)·입력 읽기(limit `" 3 "`·`+3`·`٣`, 반복 `variant`, 공백 variant, NUL)·본문 바이트. 사본 DB 에서 문이 낸 30건과 대조(빨강 30/30 → 0). 문 쪽 스위치(`DOOR_LINK_WRITER`)는 같은 단계의 뒤 커밋.
 
 - **엔진 `POST /repairs/split-subjects` (C-PORT4 1단계)** — 주인 판정은 `Caller::from_headers`(토큰 한 곳), 한 트랜잭션에서 그룹 claim 행을 `lock_claim_slots_of` 와 같은 슬롯 순서(canon COLLATE "C" + valid_from)로 `FOR UPDATE` 한 뒤 같은 트랜잭션에서 그룹을 다시 읽고 지운다(문의 읽기·삭제 틈은 엔진에서 닫힘). 잠금 없는 첫 구현에서 ingest 와 맞붙이면 40회 중 14회 교착, 잠금 뒤 0. 중간 실패(document UPDATE 예외) 시 행 0 변경. 응답 몸 `subject·deleted_rows·reread_notes·owner_held`(202).

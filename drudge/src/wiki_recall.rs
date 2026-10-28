@@ -292,8 +292,8 @@ impl WikiIndex {
     }
 }
 
-/// Move each note by its verdict net, in the unit `/search` uses: one net step = one rank step
-/// (`retrieve::FEEDBACK_STEP` is exactly one RRF rank gap). Runs on the whole uncut ranked list,
+/// Move each note by its verdict net: one net step = one lexical point (the smallest unit of
+/// `score_lower`), so a note sorts by `score + net`, ties keeping order. Runs on the whole uncut ranked list,
 /// so the pool cut that follows already sees the verdicts and a note just outside `k` can enter.
 /// Exact-title notes stay pinned in front. The score slots of the unpinned notes keep their
 /// order and values and are handed to the notes in their new order, so the list stays
@@ -304,12 +304,12 @@ pub fn lift_by_nets(ranked: Vec<WikiHit>, nets: &HashMap<String, i64>) -> Vec<Wi
     let mut rest = ranked;
     let tail = rest.split_off(pinned);
     let slots: Vec<f32> = tail.iter().map(|h| h.score).collect();
-    let net = |h: &WikiHit| nets.get(&h.source_path).copied().unwrap_or(0);
+    let lifted = |h: &WikiHit| {
+        let net = nets.get(&h.source_path).copied().unwrap_or(0);
+        f64::from(h.score) + f64::from(i32::try_from(net).unwrap_or(i32::MAX))
+    };
     let mut moved: Vec<(usize, WikiHit)> = tail.into_iter().enumerate().collect();
-    moved.sort_by_key(|(i, h)| {
-        let at = i64::try_from(*i).unwrap_or(i64::MAX);
-        (at - net(h), std::cmp::Reverse(net(h)), *i)
-    });
+    moved.sort_by(|(i, a), (j, b)| lifted(b).total_cmp(&lifted(a)).then(i.cmp(j)));
     rest.extend(moved.into_iter().zip(slots).map(|((_, mut h), score)| {
         h.score = score;
         h
@@ -516,6 +516,35 @@ mod tests {
             score: 1.0,
             exact_title: exact,
         }
+    }
+
+    #[test]
+    fn one_net_step_is_one_lexical_point() {
+        let scored = |p: &str, score: f32| super::WikiHit {
+            score,
+            ..wiki_hit(p, false)
+        };
+        let ranked = || vec![scored("a", 6.0), scored("b", 5.0), scored("c", 4.0)];
+        let order = |nets: &[(&str, i64)]| {
+            let nets = nets.iter().map(|(p, n)| ((*p).to_owned(), *n)).collect();
+            super::lift_by_nets(ranked(), &nets)
+                .into_iter()
+                .map(|h| (h.source_path, h.score))
+                .collect::<Vec<_>>()
+        };
+        let want = |v: &[(&str, f32)]| -> Vec<(String, f32)> {
+            v.iter().map(|(p, s)| ((*p).to_owned(), *s)).collect()
+        };
+        // c 4+1 = 5 only ties b (b stays first); a rank step would have put c above b.
+        assert_eq!(
+            order(&[("c", 1)]),
+            want(&[("a", 6.0), ("b", 5.0), ("c", 4.0)])
+        );
+        // c 4+2 = 6 ties a (a stays first) and passes b; the score slots stay descending.
+        assert_eq!(
+            order(&[("c", 2)]),
+            want(&[("a", 6.0), ("c", 5.0), ("b", 4.0)])
+        );
     }
 
     // Python answer._wiki_selected: titles ride the whole pool (ties at the cut + exact titles),
