@@ -29,7 +29,7 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 
 > 新規クローンは **vault が空** なので、初日の `make ask` は何も見つけられません。`make collect` で Claude の過去記録を埋めれば、以降の Claude セッションは自動蓄積され、Codex は取り込み可能なトランスクリプトをワーカーが処理します（[取り込み](#取り込み-ingestion)参照）。
 
-> **Docker**、**uv**、**jq**、**curl**、**git**、**make**、およびローカル LLM サーバー — **Ollama** または **LM Studio** (または別の OpenAI-compatible エンドポイント)が必要です。Python のバージョンは uv が `pyproject.toml` のとおりに取得するため、システムの `python3` は関係ありません。
+> **Docker**、**uv**、**jq**、**curl**、**git**、**make**、およびローカル LLM サーバー — **Ollama** または **LM Studio** (または別の OpenAI-compatible エンドポイント)が必要です。Python のバージョンは uv が `pyproject.toml` のとおりに取得するため、システムの Python は関係ありません。
 >
 > 同じ Mac 上の 2 つ目のクローンは、コンテナ名とポートが固定のため 1 つ目と衝突します。[トラブルシューティング](#トラブルシューティング)の表を参照してください。
 
@@ -339,7 +339,7 @@ make collect N=20
 
 # GitHub Codex（通常は Hermes ワーカーが処理）
 make doctor
-COLLECT_LIMIT=20 python3 agents/codex/collect-sessions.py
+COLLECT_LIMIT=20 uv run --locked python agents/codex/collect-sessions.py
 ```
 
 ### 日次/週次の消費
@@ -356,7 +356,7 @@ curl -s -X POST http://localhost:7710/weekly \
   -d '{"project":"omb"}' | jq .
 
 # Slack に送られる朝のブリーフィング本文をプレビュー
-python3 agents/hermes/briefing.py
+uv run --locked python agents/hermes/briefing.py
 
 # Stalled register — 7日以上動いていない項目（BORING_VECTOR=on が必要）
 curl -s -X POST http://localhost:7710/stalled \
@@ -365,6 +365,12 @@ curl -s -X POST http://localhost:7710/stalled \
 ```
 
 Hermes cron はブリーフィングスクリプトの stdout を Slack `mrkdwn` テキストとして送信します。`make eval` の fixture ノートはゲート実行中は検索に使われますが、終了後に prune され、recency/claim ブリーフィング surface からも除外されるため、日次/週次ブリーフィングには混ざりません。
+
+記録の残し方の案内 (ブロックではなく推奨です):
+
+- 契約・引き継ぎ・判定などの記録は、ローカルの `.md` ファイルではなく `remember` で残します。
+- 新しい版は `supersedes` で前の版を指します。
+- `remember` がタイムアウトしたように見えたら、書き直す前にボールトでタイトルから保存済みかを確認します: `rg -l --no-ignore '<タイトルの一部>' vault/wiki`。
 
 ### PII / 機密データゲート
 

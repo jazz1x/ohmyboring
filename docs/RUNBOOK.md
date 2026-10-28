@@ -136,7 +136,7 @@ ls -t ~/.hermes/cron/output/cc33a556631a/ | head -3   # memory-ingest-worker
 
 ```bash
 curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker' \
-  | python3 -c 'import json,sys; [print(e["observed_at"], e["event"], e["status"]) for e in json.load(sys.stdin)["entries"]]'
+  | jq -r '.entries[] | "\(.observed_at) \(.event) \(.status)"'
 ```
 
 응답의 최상위 키는 `entries` 다. `events` 로 읽으면 언제나 빈손이고, 그건 계기가 죽은 것처럼
@@ -155,10 +155,16 @@ tail -20 /tmp/com.ohmyboring.codex-ingest.log
 ```bash
 echo '{"prompt":"어떻게 했더라, 다시 하기 전에","session_id":"probe"}' \
   | BORING_INJECTION_LEDGER=/tmp/probe-ledger.jsonl BORING_EVENT_SINK=spool \
-    RECALL_SESSION_THROTTLE_SECONDS=0 python3 hooks/recall.py
+    RECALL_SESSION_THROTTLE_SECONDS=0 uv run --locked python hooks/recall.py
 ```
 
 끝나면 `/tmp/probe-ledger.jsonl` 을 지운다.
+
+**기록 방식 안내** (차단이 아니라 권유):
+
+- 계약·인계·판정 같은 기록은 로컬 `.md` 파일 대신 `remember` 로 남긴다.
+- 새 판은 `supersedes` 로 앞 판을 가리킨다.
+- `remember` 가 시간 초과로 보이면, 다시 쓰기 전에 볼트에서 제목으로 저장 여부를 본다: `rg -l --no-ignore '<제목 일부>' vault/wiki`.
 
 ---
 

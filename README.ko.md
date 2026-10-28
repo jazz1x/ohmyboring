@@ -29,7 +29,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 
 > 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 Claude 과거 기록을 채우고 나면, 이후 Claude 세션은 자동 축적되고 Codex는 적재 가능한 트랜스크립트를 워커가 처리합니다([적재하기](#적재하기-ingestion) 참고).
 
-> **Docker**, **uv**, **jq**, **curl**, **git**, **make**, 그리고 로컬 LLM 서버 — **Ollama** 또는 **LM Studio** (또는 다른 OpenAI-compatible 엔드포인트)가 필요합니다. Python 버전은 uv가 `pyproject.toml` 대로 받으므로 시스템 `python3` 는 상관없습니다.
+> **Docker**, **uv**, **jq**, **curl**, **git**, **make**, 그리고 로컬 LLM 서버 — **Ollama** 또는 **LM Studio** (또는 다른 OpenAI-compatible 엔드포인트)가 필요합니다. Python 버전은 uv가 `pyproject.toml` 대로 받으므로 시스템 Python 은 상관없습니다.
 >
 > 같은 맥에서 두 번째 클론은 컨테이너 이름과 포트가 고정이라 첫 번째와 충돌합니다. [문제 해결](#문제-해결) 표를 보세요.
 
@@ -331,7 +331,7 @@ make collect N=20
 
 # GitHub Codex (평소에는 Hermes 워커가 처리)
 make doctor
-COLLECT_LIMIT=20 python3 agents/codex/collect-sessions.py
+COLLECT_LIMIT=20 uv run --locked python agents/codex/collect-sessions.py
 ```
 
 ### 일간/주간 소비
@@ -348,7 +348,7 @@ curl -s -X POST http://localhost:7710/weekly \
   -d '{"project":"omb"}' | jq .
 
 # Slack으로 나갈 아침 브리핑 텍스트 미리보기
-python3 agents/hermes/briefing.py
+uv run --locked python agents/hermes/briefing.py
 
 # Stalled register — 7일 이상 멈춘 항목 (BORING_VECTOR=on 필요)
 curl -s -X POST http://localhost:7710/stalled \
@@ -357,6 +357,12 @@ curl -s -X POST http://localhost:7710/stalled \
 ```
 
 Hermes cron은 브리핑 스크립트의 stdout을 Slack `mrkdwn` 텍스트로 보냅니다. `make eval` fixture 노트는 게이트 실행 중 검색에는 쓰이지만, 종료 후 prune되며 recency/claim 브리핑 surface에서도 제외되어 일간/주간 브리핑에 섞이지 않습니다.
+
+기록 방식 안내 (차단이 아니라 권유입니다):
+
+- 계약·인계·판정 같은 기록은 로컬 `.md` 파일 대신 `remember` 로 남깁니다.
+- 새 판은 `supersedes` 로 앞 판을 가리킵니다.
+- `remember` 가 시간 초과로 보이면, 다시 쓰기 전에 볼트에서 제목으로 저장 여부를 먼저 봅니다: `rg -l --no-ignore '<제목 일부>' vault/wiki`.
 
 ### PII / 민감 데이터 게이트
 

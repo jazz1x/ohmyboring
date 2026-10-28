@@ -29,7 +29,7 @@ make ask Q="how did I fix the docker build cache problem?"
 
 > A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your Claude history; after that, Claude sessions auto-accumulate and Codex is picked up by its worker when eligible (see [Feeding it](#feeding-it-ingestion)).
 
-> Requires **Docker**, **uv**, **jq**, **curl**, **git**, **make**, and a local LLM server — **Ollama** or **LM Studio** (or another OpenAI-compatible endpoint). uv fetches the Python version `pyproject.toml` asks for, so the system `python3` does not matter.
+> Requires **Docker**, **uv**, **jq**, **curl**, **git**, **make**, and a local LLM server — **Ollama** or **LM Studio** (or another OpenAI-compatible endpoint). uv fetches the Python version `pyproject.toml` asks for, so the system Python does not matter.
 >
 > A second clone on the same Mac collides with the first: container names and ports are fixed. See the [Troubleshooting](#troubleshooting) table.
 
@@ -332,7 +332,7 @@ make collect N=20
 
 # GitHub Codex (normally handled by the Hermes worker)
 make doctor
-COLLECT_LIMIT=20 python3 agents/codex/collect-sessions.py
+COLLECT_LIMIT=20 uv run --locked python agents/codex/collect-sessions.py
 ```
 
 ### Daily/weekly consumption
@@ -349,7 +349,7 @@ curl -s -X POST http://localhost:7710/weekly \
   -d '{"project":"omb"}' | jq .
 
 # Preview the exact Slack-bound morning brief text
-python3 agents/hermes/briefing.py
+uv run --locked python agents/hermes/briefing.py
 
 # Stalled register — things that have not moved in 7+ days (requires BORING_VECTOR=on)
 curl -s -X POST http://localhost:7710/stalled \
@@ -358,6 +358,12 @@ curl -s -X POST http://localhost:7710/stalled \
 ```
 
 Hermes cron sends briefing script stdout as Slack `mrkdwn` text. `make eval` fixture notes are searchable during the gate but are pruned afterward and excluded from recency/claim briefing surfaces so test corpus entries do not appear in daily or weekly digests.
+
+Keeping records (a suggestion, not a gate):
+
+- Contracts, handoffs and verdicts: save them with `remember` instead of a local `.md` file.
+- A new version points at the one before it through `supersedes`.
+- If `remember` looks timed out, check the vault for the title before writing again: `rg -l --no-ignore '<part of the title>' vault/wiki`.
 
 ### PII / sensitive-data gate
 
