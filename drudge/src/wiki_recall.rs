@@ -292,6 +292,31 @@ impl WikiIndex {
     }
 }
 
+/// Move each note by its verdict net, in the unit `/search` uses: one net step = one rank step
+/// (`retrieve::FEEDBACK_STEP` is exactly one RRF rank gap). Runs on the whole uncut ranked list,
+/// so the pool cut that follows already sees the verdicts and a note just outside `k` can enter.
+/// Exact-title notes stay pinned in front. The score slots of the unpinned notes keep their
+/// order and values and are handed to the notes in their new order, so the list stays
+/// score-descending and the score-tie pool and `order_wiki_hits` read it unchanged. Pure.
+#[must_use]
+pub fn lift_by_nets(ranked: Vec<WikiHit>, nets: &HashMap<String, i64>) -> Vec<WikiHit> {
+    let pinned = ranked.iter().take_while(|h| h.exact_title).count();
+    let mut rest = ranked;
+    let tail = rest.split_off(pinned);
+    let slots: Vec<f32> = tail.iter().map(|h| h.score).collect();
+    let net = |h: &WikiHit| nets.get(&h.source_path).copied().unwrap_or(0);
+    let mut moved: Vec<(usize, WikiHit)> = tail.into_iter().enumerate().collect();
+    moved.sort_by_key(|(i, h)| {
+        let at = i64::try_from(*i).unwrap_or(i64::MAX);
+        (at - net(h), std::cmp::Reverse(net(h)), *i)
+    });
+    rest.extend(moved.into_iter().zip(slots).map(|((_, mut h), score)| {
+        h.score = score;
+        h
+    }));
+    rest
+}
+
 /// `wiki-N` -> N (engine and Python both number notes max+1); unnumbered names are -1 (last).
 fn creation_order(id: &str) -> i64 {
     id.strip_prefix("wiki-")

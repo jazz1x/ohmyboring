@@ -98,10 +98,9 @@ fn fold_feedback(
             return Ok(nets);
         }
     };
-    for (path, c) in &counts {
-        let net = net_feedback(c.used, c.contested);
-        apply_net(fused, byid, path, net);
-        nets.insert(path.clone(), net);
+    for (path, net) in nets_of(&counts) {
+        apply_net(fused, byid, &path, net);
+        nets.insert(path, net);
     }
     Ok(nets)
 }
@@ -235,6 +234,36 @@ where
             .then_with(|| b.score().total_cmp(&a.score()))
     });
     Ok((set, facts))
+}
+
+/// The MCP recall's wiki list with the same verdict nets `/search` ranks by: the same count
+/// read (`ranking_feedback_counts`) and the same `net_feedback` clamp, every judge weighted
+/// alike. Applied to the uncut list, before the pool is chosen.
+pub async fn net_ranked_wiki(store: &Store, ranked: Vec<WikiHit>) -> Result<Vec<WikiHit>> {
+    lift_with_counts(ranked, |paths| async move {
+        store.ranking_feedback_counts(&paths).await
+    })
+    .await
+}
+
+async fn lift_with_counts<F, Fut>(ranked: Vec<WikiHit>, lookup: F) -> Result<Vec<WikiHit>>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<HashMap<String, ConsumptionCounts>>>,
+{
+    let mut paths: Vec<String> = ranked.iter().map(|h| h.source_path.clone()).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    let counts = lookup(paths).await.context("wiki recall: verdict counts")?;
+    Ok(crate::wiki_recall::lift_by_nets(ranked, &nets_of(&counts)))
+}
+
+/// Per-document nets from raw counts — the one place counts become a net, for both paths.
+fn nets_of(counts: &HashMap<String, ConsumptionCounts>) -> HashMap<String, i64> {
+    counts
+        .iter()
+        .map(|(path, c)| (path.clone(), net_feedback(c.used, c.contested)))
+        .collect()
 }
 
 /// The wiki recall set, already cut by word overlap, in the same in-set order as `retrieve`,
@@ -447,6 +476,71 @@ mod tests {
         assert_eq!(
             FEEDBACK_STEP, step,
             "one 👍 = one rank step in a single list"
+        );
+    }
+
+    fn wiki(n: usize, exact: bool) -> WikiHit {
+        WikiHit {
+            id: format!("wiki-{n}"),
+            title: format!("t{n}"),
+            source_path: format!("/vault/wiki/wiki-{n}.md"),
+            snippet: String::new(),
+            score: f32::from(u8::try_from(10 - n).unwrap()),
+            exact_title: exact,
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_wiki_recall_reads_the_same_nets_as_search_and_a_used_note_just_outside_k_enters() {
+        let counts = || -> HashMap<String, ConsumptionCounts> {
+            HashMap::from([
+                (
+                    "/vault/wiki/wiki-2.md".to_owned(),
+                    ConsumptionCounts {
+                        used: 9,
+                        contested: 0,
+                    },
+                ),
+                (
+                    "/vault/wiki/wiki-1.md".to_owned(),
+                    ConsumptionCounts {
+                        used: 0,
+                        contested: 1,
+                    },
+                ),
+            ])
+        };
+        let search_nets = fold_feedback(
+            Ok(counts()),
+            FeedbackRead::Strict,
+            &mut HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(nets_of(&counts()), search_nets, "one count-to-net function");
+        assert_eq!(
+            search_nets["/vault/wiki/wiki-2.md"], 3,
+            "clamped like /search"
+        );
+
+        // exact-title note 0 pinned; 1, 2, 3 by score; k = 2 cuts after the pinned note + one.
+        let ranked = vec![
+            wiki(0, true),
+            wiki(1, false),
+            wiki(2, false),
+            wiki(3, false),
+        ];
+        let plain = crate::wiki_recall::select_for_order(&ranked, 2);
+        assert_eq!(plain[1].id, "wiki-1");
+        let lifted = lift_with_counts(ranked, |_| async { Ok(counts()) })
+            .await
+            .unwrap();
+        let picked = crate::wiki_recall::select_for_order(&lifted, 2);
+        let got: Vec<&str> = picked.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(
+            got,
+            ["wiki-0", "wiki-2"],
+            "pin stays first; net +3 note enters the cut"
         );
     }
 
