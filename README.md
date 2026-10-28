@@ -29,7 +29,9 @@ make ask Q="how did I fix the docker build cache problem?"
 
 > A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your Claude history; after that, Claude sessions auto-accumulate and Codex is picked up by its worker when eligible (see [Feeding it](#feeding-it-ingestion)).
 
-> Requires **Docker**, **Python 3**, **jq**, **curl**, **git**, **make**, and a local LLM server — **Ollama** or **LM Studio** (or another OpenAI-compatible endpoint).
+> Requires **Docker**, **uv**, **jq**, **curl**, **git**, **make**, and a local LLM server — **Ollama** or **LM Studio** (or another OpenAI-compatible endpoint). uv fetches the Python version `pyproject.toml` asks for, so the system `python3` does not matter.
+>
+> A second clone on the same Mac collides with the first: container names and ports are fixed. See the [Troubleshooting](#troubleshooting) table.
 
 **Pick a local LLM backend:**
 
@@ -71,7 +73,7 @@ Memory gets in four ways — after setup you rarely touch the automatic paths:
 `install.sh` does this for you. To redo it (or if you ran with `BORING_WIRE=0`):
 
 ```bash
-python3 agents/shared/agent_wiring.py --install \
+uv run --locked python agents/shared/agent_wiring.py --install \
   --boring-home ~/oh-my-boring --server-name ohmyboring \
   --server-url http://localhost:7710/mcp
 ```

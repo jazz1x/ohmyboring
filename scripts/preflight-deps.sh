@@ -27,12 +27,12 @@ command -v jq >/dev/null 2>&1 || missing "jq" \
 command -v curl >/dev/null 2>&1 || missing "curl" \
     "Install curl: macOS 'brew install curl' · Debian/Ubuntu 'sudo apt-get install curl' · Fedora 'sudo dnf install curl'"
 
-command -v python3 >/dev/null 2>&1 || missing "python3" \
-    "Install Python 3: macOS 'brew install python3' · Debian/Ubuntu 'sudo apt-get install python3' · Fedora 'sudo dnf install python3' · https://www.python.org/downloads/"
+command -v uv >/dev/null 2>&1 || missing "uv" \
+    "Install uv (it fetches the Python version pyproject.toml asks for): macOS 'brew install uv' · Linux/macOS 'curl -LsSf https://astral.sh/uv/install.sh | sh' · https://docs.astral.sh/uv/getting-started/installation/"
 
 # `make` drives the whole stack (make up → start.sh → this script); a fresh box without it
 # otherwise dies with a cryptic 'make: command not found' before any of these checks run.
 command -v make >/dev/null 2>&1 || missing "make" \
     "Install make: macOS 'xcode-select --install' (or 'brew install make') · Debian/Ubuntu 'sudo apt-get install make' · Fedora 'sudo dnf install make'"
 
-echo "✓ Dependencies OK (docker + daemon, jq, curl, python3, make)"
+echo "✓ Dependencies OK (docker + daemon, jq, curl, uv, make)"

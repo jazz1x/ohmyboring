@@ -29,7 +29,9 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 
 > 新規クローンは **vault が空** なので、初日の `make ask` は何も見つけられません。`make collect` で Claude の過去記録を埋めれば、以降の Claude セッションは自動蓄積され、Codex は取り込み可能なトランスクリプトをワーカーが処理します（[取り込み](#取り込み-ingestion)参照）。
 
-> **Docker**、**Python 3**、**jq**、**curl**、**git**、**make**、およびローカル LLM サーバー — **Ollama** または **LM Studio** (または別の OpenAI-compatible エンドポイント)が必要です。
+> **Docker**、**uv**、**jq**、**curl**、**git**、**make**、およびローカル LLM サーバー — **Ollama** または **LM Studio** (または別の OpenAI-compatible エンドポイント)が必要です。Python のバージョンは uv が `pyproject.toml` のとおりに取得するため、システムの `python3` は関係ありません。
+>
+> 同じ Mac 上の 2 つ目のクローンは、コンテナ名とポートが固定のため 1 つ目と衝突します。[トラブルシューティング](#トラブルシューティング)の表を参照してください。
 
 **ローカル LLM バックエンドを選ぶ:**
 
@@ -71,7 +73,7 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 `install.sh` が自動で行います。やり直す場合（または `BORING_WIRE=0` で実行した場合）：
 
 ```bash
-python3 agents/shared/agent_wiring.py --install \
+uv run --locked python agents/shared/agent_wiring.py --install \
   --boring-home ~/oh-my-boring --server-name ohmyboring \
   --server-url http://localhost:7710/mcp
 ```

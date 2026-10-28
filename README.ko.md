@@ -29,7 +29,9 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 
 > 새로 클론하면 **vault가 비어 있어** 첫날 `make ask`는 찾을 게 없습니다. `make collect`로 Claude 과거 기록을 채우고 나면, 이후 Claude 세션은 자동 축적되고 Codex는 적재 가능한 트랜스크립트를 워커가 처리합니다([적재하기](#적재하기-ingestion) 참고).
 
-> **Docker**, **Python 3**, **jq**, **curl**, **git**, **make**, 그리고 로컬 LLM 서버 — **Ollama** 또는 **LM Studio** (또는 다른 OpenAI-compatible 엔드포인트)가 필요합니다.
+> **Docker**, **uv**, **jq**, **curl**, **git**, **make**, 그리고 로컬 LLM 서버 — **Ollama** 또는 **LM Studio** (또는 다른 OpenAI-compatible 엔드포인트)가 필요합니다. Python 버전은 uv가 `pyproject.toml` 대로 받으므로 시스템 `python3` 는 상관없습니다.
+>
+> 같은 맥에서 두 번째 클론은 컨테이너 이름과 포트가 고정이라 첫 번째와 충돌합니다. [문제 해결](#문제-해결) 표를 보세요.
 
 **로컬 LLM 백엔드 선택:**
 
@@ -71,7 +73,7 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 `install.sh`가 자동으로 해줍니다. 다시 하려면(또는 `BORING_WIRE=0`로 실행했다면):
 
 ```bash
-python3 agents/shared/agent_wiring.py --install \
+uv run --locked python agents/shared/agent_wiring.py --install \
   --boring-home ~/oh-my-boring --server-name ohmyboring \
   --server-url http://localhost:7710/mcp
 ```
