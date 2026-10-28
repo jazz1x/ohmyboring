@@ -489,7 +489,7 @@ class DoorTest(unittest.TestCase):
             expected.add((method, path))
         actual = {(method, route.path) for route in door.app.routes for method in route.methods}
         self.assertEqual(actual, expected)
-        self.assertEqual(len(contract["http_routes"]), 30)
+        self.assertEqual(len(contract["http_routes"]), 34)
 
     def test_events_get_passes_through_byte_identical(self):
         # E4-α — /events entered the proxy table with the contract re-snapshot; the door
@@ -4243,6 +4243,97 @@ class EventsOwnerSelfQueueTests(unittest.TestCase):
             Path(os.environ["BORING_EVENT_LOG"]).exists(),
             "싱크가 200 을 받았다 — 스풀로 떨어지지 않는다",
         )
+
+
+_REAL_FETCH = door._fetch
+
+
+class HandoverSwitchTest(unittest.TestCase):
+    """1차 넘김 — DOOR_MEMORY_READER(/approved·/claim-source·/claim-sources·/rules)와
+    DOOR_SEARCH_READER(/projects·/search 함께). 값이 정확히 engine 일 때만 엔진(프록시)으로,
+    그 밖(없음·python·오타)은 문 Python 이 답한다. 엔진 이음매(_fetch)는 목, 저장소는 꺼 둔다."""
+
+    ENGINE = b'{"from":"engine"}'
+    MEMORY = (
+        ("GET", "/approved", None),
+        ("GET", "/claim-source?subject=s", None),
+        ("GET", "/claim-sources?predicate=p", None),
+        ("GET", "/rules", None),
+    )
+    SEARCH = (
+        ("GET", "/projects?active_days=7", None),
+        ("POST", "/search", {"query": "q"}),
+    )
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+
+        names = ("DOOR_MEMORY_READER", "DOOR_SEARCH_READER", "DOOR_PG_DSN")
+        self._saved = {name: os.environ.get(name) for name in names}
+        for name in names:
+            os.environ.pop(name, None)
+        self.client = TestClient(door.app)
+        fetch = mock.patch.object(
+            door, "_fetch", return_value=door._pass_through(200, self.ENGINE, "application/json")
+        )
+        self.fetch = fetch.start()
+        self.addCleanup(fetch.stop)
+
+    def tearDown(self):
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def check_switch(self, env, requests):
+        os.environ[env] = "engine"
+        for method, path, body in requests:
+            self.fetch.reset_mock()
+            response = self.client.request(method, path, json=body)
+            self.assertEqual(response.content, self.ENGINE, f"{env}=engine {path}")
+            self.assertEqual(self.fetch.call_count, 1, f"{env}=engine {path}")
+        for value in (None, "python", "Engine", "engin", ""):
+            if value is None:
+                os.environ.pop(env, None)
+            else:
+                os.environ[env] = value
+            for method, path, body in requests:
+                self.fetch.reset_mock()
+                response = self.client.request(method, path, json=body)
+                self.assertNotEqual(response.content, self.ENGINE, f"{env}={value!r} {path}")
+                self.fetch.assert_not_called()
+
+    def test_memory_reader_engine_only_when_exactly_engine(self):
+        self.check_switch("DOOR_MEMORY_READER", self.MEMORY)
+
+    def test_search_reader_engine_only_when_exactly_engine(self):
+        self.check_switch("DOOR_SEARCH_READER", self.SEARCH)
+
+    def test_the_two_switches_do_not_cross(self):
+        os.environ["DOOR_MEMORY_READER"] = "engine"
+        for method, path, body in self.SEARCH:
+            self.client.request(method, path, json=body)
+        self.fetch.assert_not_called()
+        os.environ.pop("DOOR_MEMORY_READER")
+        os.environ["DOOR_SEARCH_READER"] = "engine"
+        for method, path, body in self.MEMORY:
+            self.client.request(method, path, json=body)
+        self.fetch.assert_not_called()
+
+    def test_engine_search_header_survives_the_proxy(self):
+        os.environ["DOOR_SEARCH_READER"] = "engine"
+        upstream = mock.MagicMock()
+        upstream.__enter__.return_value = upstream
+        upstream.status = 200
+        upstream.read.return_value = self.ENGINE
+        upstream.headers = {"content-type": "application/json", "x-boring-search": "engine"}
+        with (
+            mock.patch.object(door, "_fetch", _REAL_FETCH),
+            mock.patch.object(door.urllib.request, "urlopen", return_value=upstream),
+        ):
+            response = self.client.post("/search", json={"query": "q"})
+        self.assertEqual(response.headers.get("x-boring-search"), "engine")
 
 
 if __name__ == "__main__":

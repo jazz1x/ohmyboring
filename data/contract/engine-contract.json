@@ -1,19 +1,13 @@
 {
   "door_routes": [
-    "GET /approved",
-    "GET /claim-source",
-    "GET /claim-sources",
-    "GET /projects",
     "GET /repairs/split-subjects",
     "GET /repairs/split-subjects/samples",
-    "GET /rules",
     "POST /gap",
     "POST /repairs/split-subjects",
     "POST /run/advice-write",
     "POST /run/morning-card",
     "POST /run/repair-judge",
-    "POST /run/weekly-card",
-    "POST /search"
+    "POST /run/weekly-card"
   ],
   "get_shapes": {
     "/audit": {
@@ -86,7 +80,10 @@
     }
   },
   "http_routes": [
+    "GET /approved",
     "GET /audit",
+    "GET /claim-source",
+    "GET /claim-sources",
     "GET /events",
     "GET /health",
     "GET /mcp",
@@ -95,6 +92,7 @@
     "GET /query-log",
     "GET /recall-label-stats",
     "GET /recall-labels",
+    "GET /rules",
     "POST /ask",
     "POST /brief",
     "POST /compact",

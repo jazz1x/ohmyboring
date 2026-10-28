@@ -269,13 +269,23 @@ async def _stream_chunks(upstream: http.client.HTTPResponse) -> AsyncIterator[by
         upstream.close()
 
 
+_SEARCH_HEADER = "x-boring-search"
+
+
+def _with_search_header(response: Response, upstream_headers: Any) -> Response:
+    """엔진 /search 의 x-boring-search(값 engine)를 프록시가 그대로 싣는다 — 누가 답했는지 호출자가 본다."""
+    if (value := upstream_headers.get(_SEARCH_HEADER)) is not None:
+        response.headers[_SEARCH_HEADER] = value
+    return response
+
+
 def _fetch(url: str, body: bytes, headers: dict[str, str], method: str) -> Response:
     upstream_req = urllib.request.Request(url, data=body if body else None, headers=headers, method=method)
     try:
         upstream = urllib.request.urlopen(upstream_req, timeout=_TIMEOUT)
     except urllib.error.HTTPError as e:
         # The engine answered; it just said no. A faithful door passes that through.
-        return _pass_through(e.code, e.read(), e.headers.get("content-type"))
+        return _with_search_header(_pass_through(e.code, e.read(), e.headers.get("content-type")), e.headers)
     content_type = upstream.headers.get("content-type")
     if content_type is not None and content_type.startswith("text/event-stream"):
         return StreamingResponse(
@@ -284,7 +294,9 @@ def _fetch(url: str, body: bytes, headers: dict[str, str], method: str) -> Respo
             headers={"content-type": content_type},
         )
     with upstream:
-        return _pass_through(upstream.status, upstream.read(), content_type)
+        return _with_search_header(
+            _pass_through(upstream.status, upstream.read(), content_type), upstream.headers
+        )
 
 
 _OWNER_TOKEN_HEADER = "x-boring-owner-token"
@@ -2355,16 +2367,40 @@ async def _search(request: Request) -> Response:
     return JSONResponse({"hits": hits}, headers={"x-boring-search": "python"})
 
 
+#: 1차 넘김 스위치 — 엔진이 답하는 표(http_routes)에 있는 여섯 경로를 문 Python 도 답할 수 있다.
+#: 값이 정확히 engine 일 때만 엔진(프록시)으로 가고, 그 밖(없음·python·오타)은 문 Python 이 답한다.
+_MEMORY_READER_ENV = "DOOR_MEMORY_READER"
+_SEARCH_READER_ENV = "DOOR_SEARCH_READER"
+_HANDOVER_ENGINE = "engine"
+_HANDED_OVER_PATHS = {
+    "/approved": (_MEMORY_READER_ENV, _approved),
+    "/claim-source": (_MEMORY_READER_ENV, _claim_source),
+    "/claim-sources": (_MEMORY_READER_ENV, _claim_sources),
+    "/rules": (_MEMORY_READER_ENV, _rules),
+    "/projects": (_SEARCH_READER_ENV, _projects),
+    "/search": (_SEARCH_READER_ENV, _search),
+}
+
+
+def _handover_route(env: str, native: Any) -> Any:
+    async def handler(request: Request, background_tasks: BackgroundTasks) -> Response:
+        if os.environ.get(env) == _HANDOVER_ENGINE:
+            return await _proxy(request, background_tasks)
+        return await native(request)
+
+    return handler
+
+
 for _path, _methods in _load_routes().items():
-    app.add_api_route(_path, _proxy, methods=_methods)
+    if _path in _HANDED_OVER_PATHS:
+        _env, _native = _HANDED_OVER_PATHS[_path]
+        app.add_api_route(_path, _handover_route(_env, _native), methods=_methods)
+    else:
+        app.add_api_route(_path, _proxy, methods=_methods)
 
 # The door's own routes, driven by the snapshot's door_routes key. A snapshot
 # entry without a native handler here is a KeyError at startup, not a proxy hole.
 _DOOR_HANDLERS = {
-    "GET /approved": _approved,
-    "GET /claim-source": _claim_source,
-    "GET /claim-sources": _claim_sources,
-    "GET /projects": _projects,
     "GET /repairs/split-subjects": _repairs_split_subjects_get,
     "GET /repairs/split-subjects/samples": _repairs_split_subjects_samples,
     "POST /gap": _gap,
@@ -2373,8 +2409,6 @@ _DOOR_HANDLERS = {
     "POST /run/morning-card": _run_morning_card,
     "POST /run/repair-judge": _run_repair_judge,
     "POST /run/weekly-card": _run_weekly_card,
-    "POST /search": _search,
-    "GET /rules": _rules,
 }
 for _method, _path in _load_door_routes():
     app.add_api_route(_path, _DOOR_HANDLERS[f"{_method} {_path}"], methods=[_method])
