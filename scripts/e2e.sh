@@ -175,13 +175,21 @@ fi
 
 # --- 5) next_actions (mode-specific contract) -----------------------------------
 if [ "$VEC" = 0 ]; then
-  echo "5) next_actions (HTTP /next_actions — assert vector-off error)…"
-  resp=$(curl -sf -m30 "$URL/next_actions" -H 'content-type: application/json' -d '{"project":"e2e-throwaway"}') \
-    || fail "next_actions call failed (curl)"
+  echo "5) next_actions (HTTP 500 + MCP -32603 — assert vector-off error)…"
+  resp=$(curl -s -m30 -w '\n%{http_code}' "$URL/next_actions" -H 'content-type: application/json' -d '{"project":"e2e-throwaway"}') \
+    || fail "next_actions HTTP call failed (curl)"
+  status=$(printf '%s' "$resp" | tail -n1)
+  msg=$(printf '%s' "$resp" | sed '$d' | jq -r '.error // empty')
+  [ "$status" = "500" ] && case "$msg" in "BORING_VECTOR=off"*) true ;; *) false ;; esac \
+    || fail "expected HTTP 500 {\"error\":\"BORING_VECTOR=off …\"} for next_actions in wiki mode, got: $resp"
+  req=$(jq -nc \
+    '{jsonrpc:"2.0",id:5,method:"tools/call",params:{name:"next_actions",arguments:{project:"e2e-throwaway"}}}')
+  resp=$(curl -sf -m30 "$MCP" -H 'content-type: application/json' -d "$req") \
+    || fail "next_actions MCP call failed (curl)"
   code=$(printf '%s' "$resp" | jq -r '.error.code // empty')
   [ "$code" = "-32603" ] \
-    || fail "expected JSON-RPC-style error -32603 for next_actions in wiki mode, got: $resp"
-  echo "   → next_actions correctly rejected with -32603"
+    || fail "expected JSON-RPC error -32603 for MCP next_actions in wiki mode, got: $resp"
+  echo "   → next_actions rejected: HTTP 500, MCP -32603"
 else
   echo "5) next_actions (HTTP /next_actions + MCP — assert claim round-trip)…"
   resp=$(curl -sf -m30 "$URL/next_actions" -H 'content-type: application/json' -d '{"project":"e2e-throwaway"}') \

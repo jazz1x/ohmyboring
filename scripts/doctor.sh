@@ -15,11 +15,12 @@
 # POSIX sh (dash) has no pipefail → every check reports its own result explicitly.
 set -u
 
-# Defaults mirror the hook (distill-session.py): BORING_URL + BORING_HOME + the marker dir,
-# so the diagnostic inspects exactly what the hook writes to.
+# Defaults mirror the hook (distill-session.py): BORING_URL + the marker dir, so the diagnostic
+# inspects exactly what the hook writes to. BORING_HOME defaults to the checkout this script
+# lives in, so a clone outside ~/oh-my-boring needs no override.
 BORING_URL="${BORING_URL:-http://127.0.0.1:7700}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-BORING_HOME="${BORING_HOME:-$HOME/oh-my-boring}"
+BORING_HOME="${BORING_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 MARK_DIR="${HOME}/.cache/boring-distill"
 # (d0b) How much of a container's log tail to read, and how many failures in it mean the process
 # is looping rather than having had a bad minute.

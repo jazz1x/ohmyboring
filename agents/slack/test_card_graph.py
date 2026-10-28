@@ -378,6 +378,11 @@ def _blocks_text(blocks) -> str:
 
 class GraphTests(unittest.TestCase):
     def setUp(self):
+        # card.py reads note_links from the host boring.json; boring.example.json ships links,
+        # which lengthen every row and move the char-budget cut on a fresh clone.
+        links = mock.patch.object(card.boring_config, "note_links", return_value=())
+        links.start()
+        self.addCleanup(links.stop)
         self.sends = []
         self.handovers = []
         self.stubs = Stubs()
