@@ -668,7 +668,7 @@ def allocate_wiki_path(wiki_dir: str, db_ids: set[int]) -> tuple[str, str]:
                 used.add(n)
     n = max(used) + 1 if used else 1
     while True:
-        wiki_id = f"wiki-{n:04}"
+        wiki_id = f"wiki-{n:011}"
         path = os.path.join(wiki_dir, f"{wiki_id}.md")
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)

@@ -147,7 +147,7 @@ pub fn allocate_wiki_path(
         .with_context(|| format!("failed to create wiki dir: {}", wiki_dir.display()))?;
     let mut n = next_wiki_id(wiki_dir, db_ids)?;
     loop {
-        let id = format!("wiki-{n:04}");
+        let id = format!("wiki-{n:011}");
         let path = wiki_dir.join(format!("{id}.md"));
         match std::fs::OpenOptions::new()
             .create_new(true)
@@ -425,19 +425,19 @@ mod tests {
         std::fs::File::create(wiki.join("wiki-0000.md")).unwrap();
         std::fs::File::create(wiki.join("wiki-05000000000.md")).unwrap();
         let (id, path) = super::allocate_wiki_path(&wiki, None).unwrap();
-        assert_eq!(id, "wiki-5000000001");
-        assert!(path.ends_with("wiki-5000000001.md"));
+        assert_eq!(id, "wiki-05000000001");
+        assert!(path.ends_with("wiki-05000000001.md"));
     }
 
     #[test]
-    fn after_wiki_9999_comes_wiki_10000() {
+    fn after_wiki_9999_comes_wiki_00000010000_in_eleven_digits() {
         let tmp = tempfile::tempdir().unwrap();
         let wiki = tmp.path().join("wiki");
         std::fs::create_dir(&wiki).unwrap();
         std::fs::File::create(wiki.join("wiki-9999.md")).unwrap();
         let (id, path) = super::allocate_wiki_path(&wiki, None).unwrap();
-        assert_eq!(id, "wiki-10000");
-        assert!(path.ends_with("wiki-10000.md"));
+        assert_eq!(id, "wiki-00000010000");
+        assert!(path.ends_with("wiki-00000010000.md"));
     }
 
     #[test]
@@ -448,6 +448,6 @@ mod tests {
         std::fs::File::create(wiki.join("wiki-9800.md")).unwrap();
         std::fs::File::create(wiki.join("wiki-00000009801.md")).unwrap();
         let (id, _) = super::allocate_wiki_path(&wiki, None).unwrap();
-        assert_eq!(id, "wiki-9802");
+        assert_eq!(id, "wiki-00000009802");
     }
 }
