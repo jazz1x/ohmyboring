@@ -72,7 +72,7 @@ door-up: ## Start only the boring-door container (--no-deps; never recreates the
 	gd=$$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); \
 	test -n "$$gd" || { echo "door-up: cannot find the canonical checkout (git common dir empty)" >&2; exit 1; }; \
 	canon=$$(dirname "$$gd"); \
-	$(COMPOSE) -f docker-compose.yml --project-directory "$$canon" --env-file "$$canon/.env" up -d --no-deps boring-door
+	$(COMPOSE) -f docker-compose.yml --project-directory "$$canon" --env-file "$$canon/.env" up -d --no-deps --no-build boring-door
 
 models: ## Pull Ollama models (DRUDGE_LLM_MODEL + DRUDGE_EMBED_MODEL, defaults gemma4:12b + bge-m3)
 	ollama pull "${DRUDGE_LLM_MODEL:-gemma4:12b}" && ollama pull "${DRUDGE_EMBED_MODEL:-bge-m3}"
