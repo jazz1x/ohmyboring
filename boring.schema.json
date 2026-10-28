@@ -172,6 +172,14 @@
         "queue_per_tick": {"type": "integer", "minimum": 1, "default": 3, "description": "Sessions distilled per ingest tick. Env BORING_QUEUE_PER_TICK."}
       }
     },
+    "vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Vector index backend of the Rust engine.",
+      "properties": {
+        "backend": {"type": "string", "enum": ["pgvector"], "default": "pgvector", "description": "Only pgvector is implemented. Any other value does not stop the engine: it runs on pgvector and config_get / the startup log say so."}
+      }
+    },
     "collect": {
       "type": "object",
       "additionalProperties": false,

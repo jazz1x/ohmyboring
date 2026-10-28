@@ -29,6 +29,7 @@ use crate::serve::{
     recurrences_days, recurrences_limit, register_limit, spawn_query_log, vector_disabled,
 };
 use crate::store::{EventLogFilter, LoggedHit, Store};
+use crate::vector::VectorIndex;
 use std::collections::HashSet;
 
 const EVENT_LOG_MAX_LIMIT: i64 = 1000;

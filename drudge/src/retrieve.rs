@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use crate::llm::Llm;
 use crate::pg_detail::{Staged, stage};
 use crate::store::{Authorship, ConsumptionCounts, Hit, RankFacts, Store};
+use crate::vector::VectorIndex;
 use crate::wiki_recall::WikiHit;
 
 const RRF_K: f64 = 60.0; // RRF denominator constant (de facto standard)

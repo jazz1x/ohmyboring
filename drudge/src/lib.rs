@@ -28,5 +28,6 @@ pub mod serve;
 pub mod split_subjects;
 pub mod store;
 pub mod vault;
+pub mod vector;
 pub mod wiki_recall;
 pub mod workflow;

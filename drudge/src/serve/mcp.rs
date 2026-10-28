@@ -24,6 +24,7 @@ use crate::serve::{
 };
 use crate::store::{EventLogFilter, Store, SupersedesReport};
 use crate::vault;
+use crate::vector::VectorIndex;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 

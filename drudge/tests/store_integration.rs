@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drudge::frontmatter::{Author, Claim, FrontMatter};
 use drudge::store::{DistKind, Doc, EventLogFilter, LoggedHit, Store};
+use drudge::vector::VectorIndex;
 use serde_json::json;
 use tokio_postgres::{Client, NoTls};
 

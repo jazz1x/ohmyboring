@@ -16,6 +16,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "llm",
     "code_index",
     "schedule",
+    "vector",
     "collect",
     "hermes_cron_jobs",
     "checkout_roots",
@@ -28,6 +29,7 @@ const SCHEDULE_FIELDS: &[&str] = &[
     "ingest_tick_minutes",
     "queue_per_tick",
 ];
+const VECTOR_FIELDS: &[&str] = &["backend"];
 const COLLECT_FIELDS: &[&str] = &[
     "window_hours",
     "min_bytes",
@@ -70,6 +72,7 @@ pub struct BoringConfig {
     pub llm: LlmConfig,
     pub code_index: CodeIndexConfig,
     pub schedule: ScheduleConfig,
+    pub vector: VectorConfig,
     pub collect: CollectConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hermes_cron_jobs: Option<serde_json::Value>,
@@ -88,6 +91,7 @@ impl Default for BoringConfig {
             llm: LlmConfig::default(),
             code_index: CodeIndexConfig::default(),
             schedule: ScheduleConfig::default(),
+            vector: VectorConfig::default(),
             collect: CollectConfig::default(),
             hermes_cron_jobs: None,
         }
@@ -210,6 +214,82 @@ pub struct ScheduleEffective {
     pub value: ScheduleConfig,
     pub overrides: Vec<EnvOverride>,
     pub brief_hour_error: Option<String>,
+}
+
+/// boring.json `vector.backend`, parsed once at the boundary. Only `pgvector` is implemented; any
+/// other value is kept as `Unsupported` so config_get and the startup log can name it, and the
+/// engine runs on pgvector regardless (an invalid value must not take the engine down).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VectorBackend {
+    Pgvector,
+    Unsupported(String),
+}
+
+impl VectorBackend {
+    fn parse(raw: &str) -> Self {
+        match raw {
+            "pgvector" => Self::Pgvector,
+            other => Self::Unsupported(other.to_owned()),
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Pgvector => "pgvector",
+            Self::Unsupported(raw) => raw,
+        }
+    }
+}
+
+impl Serialize for VectorBackend {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for VectorBackend {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(|raw| Self::parse(&raw))
+    }
+}
+
+/// boring.json `vector`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VectorConfig {
+    pub backend: VectorBackend,
+}
+
+impl Default for VectorConfig {
+    fn default() -> Self {
+        Self {
+            backend: VectorBackend::Pgvector,
+        }
+    }
+}
+
+/// `VectorConfig::effective`: the backend the process runs on, and the notice shown when the
+/// file asked for one that is not implemented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorEffective {
+    pub backend: VectorBackend,
+    pub backend_error: Option<String>,
+}
+
+impl VectorConfig {
+    #[must_use]
+    pub fn effective(&self) -> VectorEffective {
+        let backend_error = match &self.backend {
+            VectorBackend::Pgvector => None,
+            VectorBackend::Unsupported(raw) => {
+                Some(format!("vector.backend={raw} 미지원, pgvector 로 돎"))
+            }
+        };
+        VectorEffective {
+            backend: VectorBackend::Pgvector,
+            backend_error,
+        }
+    }
 }
 
 /// boring.json `collect` (session collectors; read by the Python side, shown here by config_get).
@@ -827,7 +907,11 @@ impl BoringConfig {
             }
         }
 
-        for (block, fields) in [("schedule", SCHEDULE_FIELDS), ("collect", COLLECT_FIELDS)] {
+        for (block, fields) in [
+            ("schedule", SCHEDULE_FIELDS),
+            ("vector", VECTOR_FIELDS),
+            ("collect", COLLECT_FIELDS),
+        ] {
             let Some(inner) = value.get(block).and_then(serde_json::Value::as_object) else {
                 continue;
             };
@@ -878,6 +962,15 @@ impl BoringConfig {
             "file": serde_json::to_value(self.schedule)?,
             "effective": schedule_effective,
             "overridden_by_env": overrides_json(&schedule.overrides),
+        });
+        let vector = self.vector.effective();
+        let mut vector_effective = serde_json::json!({"backend": vector.backend});
+        if let Some(reason) = &vector.backend_error {
+            vector_effective["backend_error"] = serde_json::Value::from(reason.as_str());
+        }
+        view["vector"] = serde_json::json!({
+            "file": serde_json::to_value(&self.vector)?,
+            "effective": vector_effective,
         });
         view["collect"] = serde_json::json!({
             "file": serde_json::to_value(self.collect)?,

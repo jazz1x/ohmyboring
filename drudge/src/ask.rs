@@ -10,6 +10,7 @@ use std::path::Path;
 use crate::llm::Llm;
 use crate::retrieve;
 use crate::store::{RegisterRow, Store};
+use crate::vector::VectorIndex;
 use crate::wiki_recall;
 
 const SYSTEM: &str = "You are the user's personal assistant. Reply in the same language as the user's question.\n\

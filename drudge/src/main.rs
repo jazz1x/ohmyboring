@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use drudge::{
     ask, audit, code_index, config, frontmatter, graph, ingest, llm, retrieve, serve, store, vault,
+    vector::VectorIndex,
 };
 use std::path::PathBuf;
 
@@ -121,6 +122,9 @@ async fn main() -> Result<()> {
     // BORING_VECTOR: default off = wiki first-class (no Postgres connection, simple). Turn on to enable pgvector (vector+graph).
     // unset/off → don't open Store → start engine/CLI without Postgres. (aligned with the wiki-primary trend)
     let cfg = config::BoringConfig::load(None)?;
+    if let Some(notice) = cfg.vector.effective().backend_error {
+        eprintln!("[config] {notice}");
+    }
 
     let cmd = match cli.cmd {
         Cmd::CodeSync { repository } => {
