@@ -26,7 +26,7 @@ DEFAULT_ORIGIN = "personal"
 DEFAULT_NOTE_LANG = "auto"
 
 # The cards used to fire from host launchd (scripts/schedule-card.sh); hermes cron owns the
-# schedule now and asks the door to run the same programs (POST /run/{morning,weekly}-card).
+# schedule now and runs the same programs itself (run-*-card.py -> agents/hermes/card_runner.py).
 # Delivery stays local — the card programs post to Slack themselves, so hermes has nothing
 # to deliver. The old weekly-briefing job stays paused (#425): the weekly card posts itself.
 DEFAULT_HERMES_CRON_JOBS = {
