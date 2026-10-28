@@ -99,6 +99,14 @@ pub fn parse(arguments: &Map<String, Value>) -> Result<GapArgs, String> {
     })
 }
 
+/// What psycopg says before it sends a string holding a NUL byte; Postgres would answer with an
+/// encoding error instead. Every string the write binds is checked: session id, query, handed paths.
+pub fn nul_refusal(args: &GapArgs) -> Option<&'static str> {
+    let has_nul = |text: &String| text.contains('\0');
+    let any = has_nul(&args.session_id) || has_nul(&args.query) || args.handed.iter().any(has_nul);
+    any.then_some("PostgreSQL text fields cannot contain NUL (0x00) bytes")
+}
+
 /// `gap:` plus the first 16 hex digits of sha256(`session_id`, newline, `query`).
 pub fn gap_node_id(session_id: &str, query: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -194,5 +202,22 @@ mod tests {
     #[test]
     fn node_id_is_the_python_digest() {
         assert_eq!(gap_node_id("s1", "q"), "gap:d3e3705e24d6f7de");
+    }
+
+    #[test]
+    fn a_nul_anywhere_is_refused_in_the_drivers_words() {
+        let door = "PostgreSQL text fields cannot contain NUL (0x00) bytes";
+        for input in [
+            json!({"session_id": "s", "query": "a\u{0}b", "kind": "missing"}),
+            json!({"session_id": "a\u{0}", "query": "q", "kind": "missing"}),
+            json!({"session_id": "s", "query": "q", "kind": "missing", "handed": ["x\u{0}y"]}),
+        ] {
+            let parsed = parse(&args(&input)).unwrap();
+            assert_eq!(nul_refusal(&parsed), Some(door), "{input}");
+        }
+        let clean = parse(&args(
+            &json!({"session_id": "s", "query": "q", "kind": "missing"}),
+        ));
+        assert_eq!(nul_refusal(&clean.unwrap()), None);
     }
 }

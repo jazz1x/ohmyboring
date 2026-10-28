@@ -6,6 +6,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use serde_json::value::RawValue;
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
 
@@ -65,11 +66,105 @@ pub(crate) async fn handle_mcp(
         "tools/call" => mcp_call(&s, caller, &req).await,
         other => Err((-32601_i32, format!("method not found: {other}")).into()),
     };
+    if is_gap_call(&req) {
+        return gap_response(&id, &outcome);
+    }
     let body = match outcome {
         Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
         Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": e.body()}),
     };
     Json(body).into_response()
+}
+
+fn is_gap_call(req: &Value) -> bool {
+    req.get("method").and_then(Value::as_str) == Some("tools/call")
+        && req.pointer("/params/name").and_then(Value::as_str) == Some("gap")
+}
+
+/// The Python door writes a gap answer with its keys in insertion order (`door.py` `_mcp_result`,
+/// `_mcp_error`), where a `Value` sorts them. Only gap answers are written this way: the other
+/// tools' doors sort, and their bytes already match.
+fn gap_response(id: &Value, outcome: &Result<Value, RpcError>) -> Response {
+    let payload = outcome.as_ref().map(|result| {
+        result
+            .pointer("/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    });
+    let wire = gap_wire(id, payload.map_err(|e| (e.code, e.message.as_str())));
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        wire,
+    )
+        .into_response()
+}
+
+/// `payload` is the report's JSON text, already in the report's own key order.
+fn gap_wire(id: &Value, outcome: Result<&str, (i32, &str)>) -> String {
+    #[derive(serde::Serialize)]
+    struct Text<'a> {
+        r#type: &'static str,
+        text: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Answer<'a> {
+        content: [Text<'a>; 1],
+        structured_content: &'a RawValue,
+        is_error: bool,
+    }
+    #[derive(serde::Serialize)]
+    struct Fault<'a> {
+        code: i32,
+        message: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct Reply<'a> {
+        jsonrpc: &'static str,
+        id: &'a Value,
+        result: Answer<'a>,
+    }
+    #[derive(serde::Serialize)]
+    struct Failure<'a> {
+        jsonrpc: &'static str,
+        id: &'a Value,
+        error: Fault<'a>,
+    }
+    match outcome {
+        Ok(text) => match RawValue::from_string(text.to_owned()) {
+            Ok(raw) => serde_json::to_string(&Reply {
+                jsonrpc: "2.0",
+                id,
+                result: Answer {
+                    content: [Text {
+                        r#type: "text",
+                        text,
+                    }],
+                    structured_content: &raw,
+                    is_error: false,
+                },
+            }),
+            Err(e) => serde_json::to_string(&Failure {
+                jsonrpc: "2.0",
+                id,
+                error: Fault {
+                    code: -32603,
+                    message: &format!("gap: {e}"),
+                },
+            }),
+        },
+        Err((code, message)) => serde_json::to_string(&Failure {
+            jsonrpc: "2.0",
+            id,
+            error: Fault { code, message },
+        }),
+    }
+    .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn gap_wire_for_test(id: &Value, outcome: Result<&str, (i32, &str)>) -> String {
+    gap_wire(id, outcome)
 }
 
 fn mcp_initialize(req: &Value) -> Value {
@@ -1097,6 +1192,9 @@ pub(crate) async fn record_gap(
         return Err(GapFault::NoStore);
     };
     let parsed = crate::gap::parse(arguments).map_err(GapFault::Rejected)?;
+    if let Some(refusal) = crate::gap::nul_refusal(&parsed) {
+        return Err(GapFault::Failed(format!("gap failed: {refusal}")));
+    }
     store
         .record_gap_in_tx(&parsed, &verdict_label(chrono::Utc::now()))
         .await

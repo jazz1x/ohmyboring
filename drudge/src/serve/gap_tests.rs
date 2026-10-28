@@ -23,26 +23,6 @@ async fn fresh_router(dsn: &str) -> axum::Router {
     build_router(state_with(Some(store), None))
 }
 
-/// NUL is refused by Postgres; the text of that refusal is the driver's, so only its frame is compared.
-fn same_answer(got: &Value, want: &Value) -> bool {
-    let frame = |v: &Value| -> Value {
-        match v.pointer("/error/message").or_else(|| v.pointer("/error")) {
-            Some(Value::String(m)) if m.starts_with("gap failed:") => {
-                let mut v = v.clone();
-                let slot = v
-                    .pointer_mut("/error/message")
-                    .map(|s| *s = json!("gap failed:"));
-                if slot.is_none() {
-                    v["error"] = json!("gap failed:");
-                }
-                v
-            }
-            _ => v.clone(),
-        }
-    };
-    frame(got) == frame(want)
-}
-
 #[tokio::test]
 async fn gap_answers_and_writes_like_the_python_door() {
     let Some(dsn) = dsn() else {
@@ -58,16 +38,9 @@ async fn gap_answers_and_writes_like_the_python_door() {
         let path = if case[1] == "http" { "/gap" } else { "/mcp" };
         let (status, body) = call(&router, "POST", path, &[], case[2].as_str().unwrap()).await;
         let want_status = case[3].as_u64().unwrap();
-        let got: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        let want: Value = serde_json::from_str(case[4].as_str().unwrap()).unwrap();
-        // HTTP answers are compared as bytes, MCP envelopes as values (the engine's tool results
-        // print their keys sorted).
-        let same = if case[1] == "http" && !case[4].as_str().unwrap().contains("gap failed:") {
-            body == case[4].as_str().unwrap().as_bytes()
-        } else {
-            same_answer(&got, &want)
-        };
-        if u64::from(status.as_u16()) != want_status || !same {
+        let want = case[4].as_str().unwrap();
+        // Every answer, HTTP and MCP, is compared as the door's bytes.
+        if u64::from(status.as_u16()) != want_status || body != want.as_bytes() {
             wrong.push(format!(
                 "{name}: got {status} {} want {want_status} {want}",
                 String::from_utf8_lossy(&body)
@@ -184,4 +157,43 @@ async fn tools_list_shows_gap_exactly_once_as_the_python_tool() {
     let python: Value =
         serde_json::from_str(include_str!("../../tests/fixtures/gap_tool_python.json")).unwrap();
     assert_eq!(gaps, [&python]);
+}
+
+/// The door's MCP answers, byte for byte (`agents/door/door.py` `_mcp_result` / `_mcp_error`):
+/// keys in the order the door writes them, not sorted.
+#[test]
+fn gap_mcp_envelopes_are_the_doors_bytes() {
+    use crate::serve::mcp::gap_wire_for_test;
+    let ok = gap_wire_for_test(
+        &json!(7),
+        Ok(r#"{"gap":"gap:ba59c36419069660","kind":"missing","handed":0,"unknown":0}"#),
+    );
+    assert_eq!(
+        ok,
+        r#"{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"{\"gap\":\"gap:ba59c36419069660\",\"kind\":\"missing\",\"handed\":0,\"unknown\":0}"}],"structuredContent":{"gap":"gap:ba59c36419069660","kind":"missing","handed":0,"unknown":0},"isError":false}}"#
+    );
+    let err = gap_wire_for_test(&json!(7), Err((-32602, "session_id is required")));
+    assert_eq!(
+        err,
+        r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"session_id is required"}}"#
+    );
+}
+
+/// The same through the router: a gap call's error leads with `jsonrpc`, then `id`, then `error`.
+#[tokio::test]
+async fn gap_call_error_reaches_the_wire_in_the_doors_key_order() {
+    let router = build_router(state_with(None, None));
+    let (_, body) = call(
+        &router,
+        "POST",
+        "/mcp",
+        &[],
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"gap","arguments":{}}}"#,
+    )
+    .await;
+    let text = String::from_utf8(body.clone()).unwrap();
+    assert!(
+        text.starts_with(r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32603,"message":"#),
+        "{text}"
+    );
 }
