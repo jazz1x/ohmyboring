@@ -31,6 +31,7 @@ from ohmyboring.result import Err, Ok  # noqa: E402
 from ohmyboring.search import retriever as search_retriever  # noqa: E402
 
 door = importlib.import_module("agents.door.door")
+_REAL_SEARCH_HANDOVER = door._search_handover
 
 
 def document(doc_id: str = "/w.md#0", path: str = "/w.md", **metadata_overrides):
@@ -195,6 +196,21 @@ class SearchRouteTests(unittest.TestCase):
             response = self.post({"query": "q", "session_id": "s-1"})
         self.assertEqual(response.status_code, 502)
         self.assertIn("handover", response.json()["error"])
+
+    def test_real_handover_failure_surfaces_the_detail_string_not_the_pgerror_repr(self):
+        # 진짜 _search_handover 를 탄다: record_handover 의 Err(PgError) 가 detail 문자열로 접혀야 한다.
+        detail = "parity forced handover failure\nCONTEXT:  PL/pgSQL function parity_fail() line 1 at RAISE"
+        conn = mock.MagicMock()
+        with (
+            mock.patch.object(door, "_search_handover", _REAL_SEARCH_HANDOVER),
+            mock.patch.object(door.search_pg, "connect", return_value=Ok(conn)),
+            mock.patch.object(
+                door.search_pg, "record_handover", return_value=Err(door.search_pg.PgError(detail))
+            ),
+        ):
+            response = self.post({"query": "q", "session_id": "s-1"})
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json(), {"error": f"handover failed: {detail}"})
 
     def test_blank_session_id_skips_handover(self):
         with mock.patch.object(door, "_search_handover") as handover:

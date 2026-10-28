@@ -2225,7 +2225,11 @@ def _search_handover(session_id: str, paths: list[str]) -> Either[search_pg.Hand
             return Err(failure.detail)
         case Ok(conn):
             with contextlib.closing(conn):
-                return search_pg.record_handover(conn, session_id, observed_at, paths)
+                match search_pg.record_handover(conn, session_id, observed_at, paths):
+                    case Err(failure):
+                        return Err(failure.detail)
+                    case Ok(report):
+                        return Ok(report)
 
 
 def _gap_record(args: gap_parse.GapArgs) -> Either[gap_pg.GapReport, str]:
