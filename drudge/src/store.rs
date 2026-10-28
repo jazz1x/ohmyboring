@@ -643,6 +643,268 @@ fn register_row(r: &tokio_postgres::Row) -> RegisterRow {
     )
 }
 
+/// What a schema step leaves behind. `ALTER TABLE … IF NOT EXISTS` and `CREATE INDEX … IF NOT
+/// EXISTS` still take a table lock (AccessExclusive / Share) before noticing the object exists,
+/// which deadlocked `Store::open` against a concurrent writer — so the catalog is read first and
+/// the DDL is only sent when this effect is missing.
+enum Effect {
+    Column {
+        table: &'static str,
+        column: &'static str,
+    },
+    ColumnDefault {
+        table: &'static str,
+        column: &'static str,
+    },
+    Index(&'static str),
+}
+
+struct SchemaStep {
+    effect: Effect,
+    ddl: String,
+}
+
+fn step(effect: Effect, ddl: &str) -> SchemaStep {
+    SchemaStep {
+        effect,
+        ddl: ddl.to_owned(),
+    }
+}
+
+fn column(table: &'static str, column: &'static str, ddl: &str) -> SchemaStep {
+    step(Effect::Column { table, column }, ddl)
+}
+
+fn index(name: &'static str, ddl: &str) -> SchemaStep {
+    step(Effect::Index(name), ddl)
+}
+
+/// Every ALTER / CREATE INDEX of the schema path, in dependency order.
+#[allow(clippy::too_many_lines)] // a flat list of declarations; splitting only obscures the migration order.
+fn schema_steps(slot_subject: &str, slot_predicate: &str) -> Vec<SchemaStep> {
+    vec![
+        index(
+            "chunk_hnsw",
+            "CREATE INDEX IF NOT EXISTS chunk_hnsw ON chunk USING hnsw (embedding vector_cosine_ops)",
+        ),
+        index(
+            "chunk_gin",
+            "CREATE INDEX IF NOT EXISTS chunk_gin ON chunk USING gin (tsv)",
+        ),
+        index(
+            "edge_src",
+            "CREATE INDEX IF NOT EXISTS edge_src ON edge(src)",
+        ),
+        index(
+            "edge_dst",
+            "CREATE INDEX IF NOT EXISTS edge_dst ON edge(dst)",
+        ),
+        // Who judged this edge: 'owner', 'inferred', 'agent:<name>'; NULL = written before the
+        // column existed. Stored verbatim, never interpreted.
+        column(
+            "edge",
+            "judge",
+            "ALTER TABLE edge ADD COLUMN IF NOT EXISTS judge text",
+        ),
+        // NULL = written before the column existed (never back-filled — the time is unknown). The
+        // default is its own step: a DEFAULT on ADD COLUMN would back-fill every row with now().
+        column(
+            "edge",
+            "first_seen_at",
+            "ALTER TABLE edge ADD COLUMN IF NOT EXISTS first_seen_at timestamptz",
+        ),
+        step(
+            Effect::ColumnDefault {
+                table: "edge",
+                column: "first_seen_at",
+            },
+            "ALTER TABLE edge ALTER COLUMN first_seen_at SET DEFAULT now()",
+        ),
+        column(
+            "document",
+            "extracted_sha",
+            "ALTER TABLE document ADD COLUMN IF NOT EXISTS extracted_sha text NOT NULL DEFAULT ''",
+        ),
+        column(
+            "document",
+            "updated_at",
+            "ALTER TABLE document ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()",
+        ),
+        column(
+            "document",
+            "author",
+            "ALTER TABLE document ADD COLUMN IF NOT EXISTS author text NOT NULL DEFAULT 'unknown'",
+        ),
+        index(
+            "document_updated",
+            "CREATE INDEX IF NOT EXISTS document_updated ON document(updated_at DESC)",
+        ),
+        column(
+            "claim",
+            "kind",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'fact'",
+        ),
+        column(
+            "claim",
+            "confidence",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS confidence text NOT NULL DEFAULT 'certain'",
+        ),
+        // D2 step 1 (PRD §8): `anchor` = `project:path[:span]`; `era` is the D3 legacy marker
+        // (existing rows keep 'pre-anchor').
+        column(
+            "claim",
+            "anchor",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor text",
+        ),
+        column(
+            "claim",
+            "stale_at",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS stale_at timestamptz",
+        ),
+        column(
+            "claim",
+            "stale_reason",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS stale_reason text",
+        ),
+        column(
+            "claim",
+            "era",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS era text NOT NULL DEFAULT 'pre-anchor'",
+        ),
+        // D2 step 2: `anchor_hash` = sha256 of the covering symbol's body; `anchor_symbol` = the
+        // key the sync-time re-pin looks the hash up by after a move.
+        column(
+            "claim",
+            "anchor_hash",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_hash text",
+        ),
+        column(
+            "claim",
+            "anchor_symbol",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_symbol text",
+        ),
+        column(
+            "claim",
+            "said_by",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS said_by text",
+        ),
+        index(
+            "claim_anchor",
+            "CREATE INDEX IF NOT EXISTS claim_anchor ON claim(anchor) WHERE anchor IS NOT NULL",
+        ),
+        index(
+            "claim_current",
+            "CREATE INDEX IF NOT EXISTS claim_current ON claim(subject, predicate) WHERE superseded_at IS NULL",
+        ),
+        index(
+            "claim_kind",
+            "CREATE INDEX IF NOT EXISTS claim_kind ON claim(kind) WHERE superseded_at IS NULL",
+        ),
+        // The planner matches the expression text, so it comes from the same `canon_sql` the queries use.
+        index(
+            "claim_canon_slot",
+            &format!(
+                "CREATE INDEX IF NOT EXISTS claim_canon_slot ON claim(({slot_subject}), ({slot_predicate}))"
+            ),
+        ),
+        index(
+            "claim_hnsw",
+            "CREATE INDEX IF NOT EXISTS claim_hnsw ON claim USING hnsw (embedding vector_cosine_ops) WHERE superseded_at IS NULL",
+        ),
+        column(
+            "query_log",
+            "hit_dists",
+            "ALTER TABLE query_log ADD COLUMN IF NOT EXISTS hit_dists real[] NOT NULL DEFAULT '{}'",
+        ),
+        column(
+            "query_log",
+            "hit_dist_kinds",
+            "ALTER TABLE query_log ADD COLUMN IF NOT EXISTS hit_dist_kinds text[] NOT NULL DEFAULT '{}'",
+        ),
+        index(
+            "query_log_created",
+            "CREATE INDEX IF NOT EXISTS query_log_created ON query_log(created_at DESC)",
+        ),
+        index(
+            "recall_label_created",
+            "CREATE INDEX IF NOT EXISTS recall_label_created ON recall_label(created_at DESC)",
+        ),
+        index(
+            "event_log_observed",
+            "CREATE INDEX IF NOT EXISTS event_log_observed ON event_log(observed_at DESC, id DESC)",
+        ),
+        index(
+            "event_log_component",
+            "CREATE INDEX IF NOT EXISTS event_log_component ON event_log(component, observed_at DESC)",
+        ),
+        index(
+            "event_log_event",
+            "CREATE INDEX IF NOT EXISTS event_log_event ON event_log(event_name, observed_at DESC)",
+        ),
+        index(
+            "event_log_status",
+            "CREATE INDEX IF NOT EXISTS event_log_status ON event_log(status, observed_at DESC)",
+        ),
+        index(
+            "event_log_run_id",
+            "CREATE INDEX IF NOT EXISTS event_log_run_id ON event_log(run_id, observed_at DESC)",
+        ),
+        // Rows from when the watermark was a bare timestamp read the '' pair — it sorts before
+        // every real key, so the sweep re-checks that timestamp's group once, which is correct.
+        column(
+            "sync_state",
+            "value_subject",
+            "ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS value_subject text NOT NULL DEFAULT ''",
+        ),
+        column(
+            "sync_state",
+            "value_predicate",
+            "ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS value_predicate text NOT NULL DEFAULT ''",
+        ),
+    ]
+}
+
+/// Decision: is this step's effect already in the catalog? Reads only; takes no table lock.
+async fn effect_present(db: &Client, effect: &Effect) -> Result<bool> {
+    let row = match effect {
+        Effect::Column { table, column } => {
+            db.query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                                 WHERE table_schema = current_schema()
+                                   AND table_name = $1 AND column_name = $2)",
+                &[table, column],
+            )
+            .await
+        }
+        Effect::ColumnDefault { table, column } => {
+            db.query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_attribute
+                                 WHERE attrelid = to_regclass($1) AND attname = $2 AND atthasdef)",
+                &[table, column],
+            )
+            .await
+        }
+        Effect::Index(name) => {
+            db.query_one("SELECT to_regclass($1) IS NOT NULL", &[name])
+                .await
+        }
+    }
+    .context("read catalog for schema step")?;
+    Ok(row.get(0))
+}
+
+/// Effect: send only the DDL whose effect is missing.
+async fn apply_missing_ddl(db: &Client, steps: &[SchemaStep]) -> Result<()> {
+    for s in steps {
+        if !effect_present(db, &s.effect).await? {
+            db.batch_execute(&s.ddl)
+                .await
+                .with_context(|| format!("schema step: {}", s.ddl))?;
+        }
+    }
+    Ok(())
+}
+
 impl Store {
     // ── connect + ensure schema ───────────────────────────────────────────────
 
@@ -748,8 +1010,6 @@ impl Store {
                      chunk_idx   int  NOT NULL DEFAULT 0,
                      tsv         tsvector GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED
                  );
-                 CREATE INDEX IF NOT EXISTS chunk_hnsw ON chunk USING hnsw (embedding vector_cosine_ops);
-                 CREATE INDEX IF NOT EXISTS chunk_gin  ON chunk USING gin (tsv);
                  CREATE TABLE IF NOT EXISTS node (
                      id      text PRIMARY KEY,
                      kind    text NOT NULL,
@@ -762,22 +1022,6 @@ impl Store {
                      kind text NOT NULL,
                      PRIMARY KEY (src, dst, kind)
                  );
-                 CREATE INDEX IF NOT EXISTS edge_src ON edge(src);
-                 CREATE INDEX IF NOT EXISTS edge_dst ON edge(dst);
-                 -- Who judged this edge: 'owner' (card button), 'inferred' (session-end
-                 -- distillation), 'agent:<name>' (an autonomous caller naming itself). NULL =
-                 -- written before the column existed, or a caller that brings no judge. The
-                 -- engine stores the value verbatim and never interprets it.
-                 ALTER TABLE edge ADD COLUMN IF NOT EXISTS judge text;
-                 -- First-written time of an edge row; NULL = written before the column existed (never
-                 -- back-filled — the time is unknown). The default arrives in its own statement: a
-                 -- DEFAULT on ADD COLUMN would back-fill every existing row with now().
-                 ALTER TABLE edge ADD COLUMN IF NOT EXISTS first_seen_at timestamptz;
-                 ALTER TABLE edge ALTER COLUMN first_seen_at SET DEFAULT now();
-                 ALTER TABLE document ADD COLUMN IF NOT EXISTS extracted_sha text NOT NULL DEFAULT '';
-                 ALTER TABLE document ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
-                 ALTER TABLE document ADD COLUMN IF NOT EXISTS author text NOT NULL DEFAULT 'unknown';
-                 CREATE INDEX IF NOT EXISTS document_updated ON document(updated_at DESC);
                  -- claim: temporal fact authority (Graphiti-style invalidation, scaled down for personal use).
                  --   current value of (subject,predicate) = superseded_at IS NULL. A new value seals the old.
                  CREATE TABLE IF NOT EXISTS claim (
@@ -798,7 +1042,75 @@ impl Store {
                      anchor_symbol text,
                      PRIMARY KEY (subject, predicate, valid_from)
                  );
-                 -- `about` was carrying two different relations under one name: a claim
+                 CREATE TABLE IF NOT EXISTS query_log (
+                     id            serial PRIMARY KEY,
+                     created_at    timestamptz NOT NULL DEFAULT now(),
+                     endpoint      text NOT NULL,
+                     query         text NOT NULL DEFAULT '',
+                     hit_paths     text[] NOT NULL DEFAULT '{{}}',
+                     sources       text[] NOT NULL DEFAULT '{{}}',
+                     answer_snippet text NOT NULL DEFAULT '',
+                     latency_ms    int
+                 );
+                 -- recall_label: the correctness label query_log cannot carry. A distance says how
+                 --   far a hit was, never whether it was worth injecting, so precision was
+                 --   unmeasurable and every relevance threshold was argued from distances alone.
+                 --   One row per (query_log row, hit position, judge): `llm` and `human` verdicts
+                 --   are stored SIDE BY SIDE, never overwriting each other, so their agreement rate
+                 --   is itself a measurement — an LLM judge nobody has checked
+                 --   is a biased instrument until that rate says otherwise.
+                 CREATE TABLE IF NOT EXISTS recall_label (
+                     query_log_id int NOT NULL REFERENCES query_log(id) ON DELETE CASCADE,
+                     hit_index    int NOT NULL,
+                     judge        text NOT NULL,
+                     verdict      text NOT NULL,
+                     model        text NOT NULL DEFAULT '',
+                     note         text NOT NULL DEFAULT '',
+                     created_at   timestamptz NOT NULL DEFAULT now(),
+                     PRIMARY KEY (query_log_id, hit_index, judge)
+                 );
+                 CREATE TABLE IF NOT EXISTS event_log (
+                     id               bigserial PRIMARY KEY,
+                     observed_at      timestamptz NOT NULL DEFAULT now(),
+                     time_unix_nano   bigint,
+                     severity_text    text NOT NULL DEFAULT 'INFO',
+                     severity_number  int NOT NULL DEFAULT 9,
+                     service_name     text NOT NULL DEFAULT '',
+                     component        text NOT NULL DEFAULT '',
+                     event_name       text NOT NULL DEFAULT '',
+                     status           text NOT NULL DEFAULT '',
+                     trace_id         text,
+                     span_id          text,
+                     run_id           text,
+                     session_id       text,
+                     workflow         text,
+                     workflow_node    text,
+                     workflow_outcome text,
+                     body             jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                     attributes       jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                     resource         jsonb NOT NULL DEFAULT '{{}}'::jsonb
+                 );
+                 -- Round-robin watermark for the D2 step-2 anchor staleness sweep: each sync takes
+                 -- the next batch of hashed claims after this position (wrapping to the corpus
+                 -- head), so a full pass is bounded per sync instead of growing with the corpus.
+                 -- The watermark is the WHOLE (valid_from, subject, predicate) sort key, not just
+                 -- the timestamp: claims distilled from one note share a valid_from, and a
+                 -- timestamp-only resume made a batch boundary inside such a group skip the rest
+                 -- of the group for a whole cycle.
+                 CREATE TABLE IF NOT EXISTS sync_state (
+                     key   text PRIMARY KEY,
+                     value timestamptz NOT NULL
+                 );
+                 "
+            ))
+            .await
+            .context("pgvector + graph schema")?;
+
+        apply_missing_ddl(&obj, &schema_steps(&slot_subject, &slot_predicate)).await?;
+
+        // Data migrations: they only touch rows, and need the columns added above.
+        obj.batch_execute(&format!(
+            "                 -- `about` was carrying two different relations under one name: a claim
                  -- belonging to a project (8,485 rows) and a document mentioning a concept
                  -- (5,148). Only the second is semantic, and `semantic_stats.about` -- which sits
                  -- beside `tools`, `concepts` and `uses` -- was counting both, so that number was
@@ -806,33 +1118,6 @@ impl Store {
                  -- nothing once the rows carry their own name.
                  UPDATE edge SET kind = 'claim_of_project'
                   WHERE kind = 'about' AND src LIKE 'claim:%' AND dst LIKE 'project:%';
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'fact';
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS confidence text NOT NULL DEFAULT 'certain';
-                 -- D2 step 1 (PRD §8): a claim anchors to the code its note cites. `anchor` is
-                 -- `project:path[:span]`; `stale_at`/`stale_reason` belong to step 2 (stale
-                 -- detection) and are written by nothing yet; `era` is the D3 legacy marker —
-                 -- rows written after this lands are 'anchored'/'unanchored' per the resolver,
-                 -- existing rows keep the default 'pre-anchor' (marker only, no rewrite).
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor text;
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS stale_at timestamptz;
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS stale_reason text;
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS era text NOT NULL DEFAULT 'pre-anchor';
-                 -- D2 step 2 (PRD §8): first-pass staleness is a symbol-span hash, not a
-                 -- line-range hash — a line-range hash breaks on moves too. `anchor_hash` is
-                 -- sha256 of the covering symbol's body, set only when the anchor's project is
-                 -- registered in code_index; `anchor_symbol` is that symbol's qualified name,
-                 -- the key the sync-time re-pin looks the hash up by after a move.
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_hash text;
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_symbol text;
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS said_by text;
-                 CREATE INDEX IF NOT EXISTS claim_anchor ON claim(anchor) WHERE anchor IS NOT NULL;
-                 CREATE INDEX IF NOT EXISTS claim_current ON claim(subject, predicate)
-                     WHERE superseded_at IS NULL;
-                 CREATE INDEX IF NOT EXISTS claim_kind ON claim(kind)
-                     WHERE superseded_at IS NULL;
-                 -- The canon slot the startup and promote joins compare on; the planner matches
-                 -- the expression text, so it comes from the same `canon_sql` the queries use.
-                 CREATE INDEX IF NOT EXISTS claim_canon_slot ON claim(({slot_subject}), ({slot_predicate}));
                  -- A claim that there is no next step is not a next step. The distiller has
                  -- been writing `next-step: none` / `남은작업: 없음` as `kind: next` since the
                  -- beginning, so the stalled register reported work that was already finished
@@ -933,85 +1218,10 @@ impl Store {
                    SELECT * FROM edge
                     WHERE src IN (SELECT id FROM node WHERE {STALE_CLAIM_MIRROR_NODES})
                        OR dst IN (SELECT id FROM node WHERE {STALE_CLAIM_MIRROR_NODES});
-                 CREATE INDEX IF NOT EXISTS claim_hnsw ON claim USING hnsw (embedding vector_cosine_ops)
-                     WHERE superseded_at IS NULL;
-                 CREATE TABLE IF NOT EXISTS query_log (
-                     id            serial PRIMARY KEY,
-                     created_at    timestamptz NOT NULL DEFAULT now(),
-                     endpoint      text NOT NULL,
-                     query         text NOT NULL DEFAULT '',
-                     hit_paths     text[] NOT NULL DEFAULT '{{}}',
-                     sources       text[] NOT NULL DEFAULT '{{}}',
-                     answer_snippet text NOT NULL DEFAULT '',
-                     latency_ms    int
-                 );
-                 ALTER TABLE query_log ADD COLUMN IF NOT EXISTS hit_dists real[] NOT NULL DEFAULT '{{}}';
-                 ALTER TABLE query_log ADD COLUMN IF NOT EXISTS hit_dist_kinds text[] NOT NULL DEFAULT '{{}}';
-                 CREATE INDEX IF NOT EXISTS query_log_created ON query_log(created_at DESC);
-                 -- recall_label: the correctness label query_log cannot carry. A distance says how
-                 --   far a hit was, never whether it was worth injecting, so precision was
-                 --   unmeasurable and every relevance threshold was argued from distances alone.
-                 --   One row per (query_log row, hit position, judge): `llm` and `human` verdicts
-                 --   are stored SIDE BY SIDE, never overwriting each other, so their agreement rate
-                 --   is itself a measurement — an LLM judge nobody has checked
-                 --   is a biased instrument until that rate says otherwise.
-                 CREATE TABLE IF NOT EXISTS recall_label (
-                     query_log_id int NOT NULL REFERENCES query_log(id) ON DELETE CASCADE,
-                     hit_index    int NOT NULL,
-                     judge        text NOT NULL,
-                     verdict      text NOT NULL,
-                     model        text NOT NULL DEFAULT '',
-                     note         text NOT NULL DEFAULT '',
-                     created_at   timestamptz NOT NULL DEFAULT now(),
-                     PRIMARY KEY (query_log_id, hit_index, judge)
-                 );
-                 CREATE INDEX IF NOT EXISTS recall_label_created ON recall_label(created_at DESC);
-                 CREATE TABLE IF NOT EXISTS event_log (
-                     id               bigserial PRIMARY KEY,
-                     observed_at      timestamptz NOT NULL DEFAULT now(),
-                     time_unix_nano   bigint,
-                     severity_text    text NOT NULL DEFAULT 'INFO',
-                     severity_number  int NOT NULL DEFAULT 9,
-                     service_name     text NOT NULL DEFAULT '',
-                     component        text NOT NULL DEFAULT '',
-                     event_name       text NOT NULL DEFAULT '',
-                     status           text NOT NULL DEFAULT '',
-                     trace_id         text,
-                     span_id          text,
-                     run_id           text,
-                     session_id       text,
-                     workflow         text,
-                     workflow_node    text,
-                     workflow_outcome text,
-                     body             jsonb NOT NULL DEFAULT '{{}}'::jsonb,
-                     attributes       jsonb NOT NULL DEFAULT '{{}}'::jsonb,
-                     resource         jsonb NOT NULL DEFAULT '{{}}'::jsonb
-                 );
-                 CREATE INDEX IF NOT EXISTS event_log_observed ON event_log(observed_at DESC, id DESC);
-                 CREATE INDEX IF NOT EXISTS event_log_component ON event_log(component, observed_at DESC);
-                 CREATE INDEX IF NOT EXISTS event_log_event ON event_log(event_name, observed_at DESC);
-                 CREATE INDEX IF NOT EXISTS event_log_status ON event_log(status, observed_at DESC);
-                 CREATE INDEX IF NOT EXISTS event_log_run_id ON event_log(run_id, observed_at DESC);
-                 -- Round-robin watermark for the D2 step-2 anchor staleness sweep: each sync takes
-                 -- the next batch of hashed claims after this position (wrapping to the corpus
-                 -- head), so a full pass is bounded per sync instead of growing with the corpus.
-                 -- The watermark is the WHOLE (valid_from, subject, predicate) sort key, not just
-                 -- the timestamp: claims distilled from one note share a valid_from, and a
-                 -- timestamp-only resume made a batch boundary inside such a group skip the rest
-                 -- of the group for a whole cycle.
-                 CREATE TABLE IF NOT EXISTS sync_state (
-                     key   text PRIMARY KEY,
-                     value timestamptz NOT NULL
-                 );
-                 -- Rows written when the watermark was a bare timestamp read the NOT NULL DEFAULT
-                 -- '' pair — empty strings sort before every real key, so the sweep re-checks that
-                 -- timestamp's group once, which is correct, not a skip.
-                 ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS value_subject text NOT NULL DEFAULT '';
-                 ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS value_predicate text NOT NULL DEFAULT '';"
+                 "
             ))
             .await
-            .context("pgvector + graph schema")?;
-
+            .context("claim/graph data migrations")?;
         Ok(Self { pool, dim })
     }
     /// Acquire a connection from the pool. Kept as a method (not direct field access) so every
