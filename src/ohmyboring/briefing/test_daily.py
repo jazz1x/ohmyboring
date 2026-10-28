@@ -66,6 +66,9 @@ class DailyBrief(unittest.TestCase):
             self.assertEqual([d for d, _ in days], ["2026-10-23"])
             self.assertTrue(days[0][1])
 
+    def test_ja_briefing_gets_a_language_instruction(self) -> None:
+        self.assertNotEqual(generate._lang_rule("ja"), "")
+
 
 if __name__ == "__main__":
     unittest.main()

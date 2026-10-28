@@ -20,10 +20,13 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import get_args
 from urllib.parse import urlparse
 
+from ohmyboring.i18n.card import Lang
+
 DEFAULT_ORIGIN = "personal"
-DEFAULT_NOTE_LANG = "auto"
+DEFAULT_NOTE_LANG: Lang = "auto"
 
 # The cards used to fire from host launchd (scripts/schedule-card.sh); hermes cron owns the
 # schedule now and runs the same programs itself (run-*-card.py -> agents/hermes/card_runner.py).
@@ -183,10 +186,20 @@ def load() -> dict:
         return {}
 
 
-def note_lang() -> str:
-    """Return the configured note language (auto/ko/en)."""
-    cfg = load()
-    return cfg.get("note_lang") or DEFAULT_NOTE_LANG
+_NOTE_LANGS: tuple[Lang, ...] = get_args(Lang)
+
+
+def note_lang() -> Lang:
+    """Return the configured note language (auto/ko/en/ja). An unknown value warns on stderr
+    and reads as auto, the same way load() treats a corrupt file."""
+    raw = load().get("note_lang") or DEFAULT_NOTE_LANG
+    if raw in _NOTE_LANGS:
+        return raw
+    print(
+        f"[boring_config] note_lang {raw!r} is not one of {'/'.join(_NOTE_LANGS)} — using auto",
+        file=sys.stderr,
+    )
+    return DEFAULT_NOTE_LANG
 
 
 @dataclass(frozen=True)

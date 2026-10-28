@@ -17,6 +17,7 @@ from typing import Any
 import psycopg
 
 from ohmyboring import config as omb_env
+from ohmyboring.i18n.card import Lang
 from ohmyboring.registers import pg as register_pg
 from ohmyboring.result import Either, Err, Ok
 from ohmyboring.search import pg as search_pg
@@ -338,11 +339,16 @@ def _prompt(docs: list, claim_ctx: str, continuity: str, reuse: str) -> str:
     return prompt
 
 
-def _lang_rule(lang: str) -> str:
-    return {
-        "ko": " ALWAYS write the briefing in Korean (한국어), regardless of the records' language.",
-        "en": " ALWAYS write the briefing in English.",
-    }.get(lang, "")
+def _lang_rule(lang: Lang) -> str:
+    match lang:
+        case "ko":
+            return " ALWAYS write the briefing in Korean (한국어), regardless of the records' language."
+        case "en":
+            return " ALWAYS write the briefing in English."
+        case "ja":
+            return " ALWAYS write the briefing in Japanese (日本語), regardless of the records' language."
+        case "auto":
+            return ""
 
 
 def _materials(conn: psycopg.Connection, docs: list[search_pg.RelatedDoc]) -> Either[str, str]:
@@ -363,7 +369,7 @@ def _materials(conn: psycopg.Connection, docs: list[search_pg.RelatedDoc]) -> Ei
             return Ok(_prompt(docs, claim_ctx, continuity, reuse))
 
 
-def brief(conn: psycopg.Connection, generate: Generate, lang: str, as_of: datetime) -> Either[BriefOut, str]:
+def brief(conn: psycopg.Connection, generate: Generate, lang: Lang, as_of: datetime) -> Either[BriefOut, str]:
     match pick_window(conn, as_of):
         case Err(reason):
             return Err(reason)

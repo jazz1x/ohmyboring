@@ -14,7 +14,7 @@ from typing import Literal
 
 from ohmyboring.i18n import en, ja, ko
 
-Lang = Literal["en", "ko", "ja"]
+Lang = Literal["en", "ko", "ja", "auto"]
 
 STRINGS: dict[Lang, dict[str, str]] = {"en": en.STRINGS, "ko": ko.STRINGS, "ja": ja.STRINGS}
 
