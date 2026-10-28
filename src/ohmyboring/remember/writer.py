@@ -17,7 +17,7 @@ owner_supersede_refused 는 엔진과 같은 이름·모양, 기록은 문의 �
 대체 봉인만 엔진과 일부러 다르다 — 판정 wiki-2855·2856(오너 확정): 엔진
 (store.rs:2898 seal_superseded_claims)은 옛 노트의 현재 claim 을 통째로 닫지만, 여기서는
 새 노트가 다시 말한 (subject, predicate) 슬롯만 닫고 새 노트가 말하지 않은 옛 사실은
-산다(그래프 그림자의 목표(graph.expected_seal_states)가 정하는 부분 닫기를 실제로 쓴다).
+산다.
 슬롯 명단은 새 노트의 claim 행(캐논화된 슬롯)에서 읽는다. 승계(슬롯을 다음 살아 있는
 행으로)는 없다 — 부분 닫기는 노트를 은퇴시키지 않는다. 엔진 sync 가 이 봉인을 다시
 통째로 닫지 않는다(동일 sha 재수집은 claim_is_unchanged 로 건 너뛰어 봉인 UPDATE 를

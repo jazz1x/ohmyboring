@@ -1,17 +1,10 @@
-"""그래프 규칙 — 슬러그·canon·한자·claim kind 와 대체 봉인의 목표 상태 (E3b).
+"""그래프 규칙 — 슬러그·canon·한자·claim kind (E3b).
 
 포트 출처 — drudge/src/ingest.rs(슬러그·canon·한자), frontmatter.rs(kind 기본값·WORK_DENIALS).
 순수 계산이라 그래프·DB 에 쓰는 일이 없다.
-
-대체 봉인만 엔진과 일부러 다르다. 엔진(store.rs:2898 seal_superseded_claims)은 옛 노트의
-현재 claim 을 통째로 봉인하지만, 여기서 정하는 목표는 부분 닫기다 — 새 노트가 다시 말한
-(subject, predicate) 슬롯만 닫고, 새 노트가 말하지 않은 옛 사실은 산다(판정 wiki-2855,
-의도한 차이).
 """
 
 from __future__ import annotations
-
-from dataclasses import dataclass
 
 #: 한 노트의 tool/concept 투영 상한 — ingest.rs:150 (FrontmatterGraphExtractor::new 의 cap 6).
 PROJECT_CAP = 6
@@ -45,17 +38,6 @@ WORK_DENIALS = frozenset(
         "該当なし",
     )
 )
-
-
-@dataclass(frozen=True)
-class ClaimRow:
-    """claim 테이블 한 행의 대조용 뷰 — 슬롯은 이미 canon 형태(DB 가 그렇게 쓴다)."""
-
-    source_path: str
-    subject: str
-    predicate: str
-    kind: str
-    sealed: bool  # superseded_at IS NOT NULL
 
 
 def has_han(text: str) -> bool:
@@ -116,24 +98,3 @@ def claim_kind(raw_kind: str, value: str) -> str:
     if kind in ("next", "blocked") and denies_work(value):
         return "fact"
     return kind
-
-
-def expected_seal_states(
-    claims: tuple[ClaimRow, ...],
-    new_path: str,
-    new_slots: frozenset[tuple[str, str]],
-    superseded_paths: frozenset[str],
-) -> list[tuple[ClaimRow, bool]]:
-    """각 claim 행의 목표 봉인 상태 — 부분 닫기 의도.
-
-    새 노트가 쓴 행은 산다. 대첻된 옛 노트의 행은 새 노트가 다시 말한 슬롯만 닫힌다 —
-    엔진의 통째 봉인(store.rs:2898)과의 어긋남이 여기서 나오고, 그림자는 그걸 사유 (나)로
-    남긴다. 두 노트 모두 아닌 행(함께 조회된 다른 대상 등)은 대상이 아니라 비교에 안 낸다.
-    """
-    out: list[tuple[ClaimRow, bool]] = []
-    for row in claims:
-        if row.source_path == new_path:
-            out.append((row, False))
-        elif row.source_path in superseded_paths:
-            out.append((row, (row.subject, row.predicate) in new_slots))
-    return out
