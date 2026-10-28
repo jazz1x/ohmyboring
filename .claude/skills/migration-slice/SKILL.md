@@ -24,8 +24,8 @@ description: drudge → Python 스트랭글러 이전의 슬라이스 하나를 
 
 ## 게이트 (있는 것만 쓴다, 새로 세우지 않는다)
 - `make guard` — fmt/clippy/test + py-compile + Python 단위 + changelog·deps 게이트 + **ruff check / format --check**
-- `DRUDGE_URL=http://127.0.0.1:<door> python3 scripts/contract-parity.py --check` — 25 tools · 38 routes · GET 5 shapes
-- CI eval-gate — recall@3 15/15 + 계약 파리티
+- `DRUDGE_URL=http://127.0.0.1:<door> python3 scripts/contract-parity.py --check` — 통과는 종료 코드 0. 실패하면 출력된 diff 줄을 본다
+- CI eval-gate — `data/eval/golden.json` 의 recall@3 전부 + 계약 파리티
 - 새 게이트가 떠오르면 먼저 "스킬 한 줄로 되나". 도구는 같은 부류 실수가 반복 관측된 뒤에만.
 
 compose 규칙(워크트리에서 건드릴 수 있는 것)은 `delivering` 스킬 §1.
