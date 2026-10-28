@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Run a card program directly from hermes — the door's /run/* wrapper, moved here (C-PORT8).
+
+`run_card(name, label)` replaces `card_door.trigger(route, label)`: same exit code (0 only when
+the card exited 0), same one stdout/stderr line. The lock, the timeout and the {ok, exit,
+posted_ts?, tail} answer are the door's (door.py `_run_card_route`), so the fold below reads the
+same answer shape the old trigger did.
+
+Two kinds of function: `execute` runs the card and returns an Answer (effects); `fold` turns an
+Answer into (exit code, stream, line) (decision). `run_card` is the only one that prints.
+
+Each cron run is its own process, so the one-at-a-time lock is a non-blocking flock on a file
+per card; it is dropped by the kernel when the process dies, so a crashed run cannot wedge it.
+The card scripts sit at ../slack/ relative to this file — the scripts are mounted read-only in
+the hermes container, so the lock files live in the hermes data dir instead.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: how long one card run may take before it is given up on (the door's DOOR_RUN_CARD_TIMEOUT).
+RUN_CARD_TIMEOUT_S = float(os.environ.get("DOOR_RUN_CARD_TIMEOUT", "900"))
+
+CARD_PROGRAMS = {
+    "morning-card": _REPO_ROOT / "agents" / "slack" / "card.py",
+    "weekly-card": _REPO_ROOT / "agents" / "slack" / "weekly_card.py",
+    "repair-judge": _REPO_ROOT / "agents" / "slack" / "card_repair_judge.py",
+    "advice-write": _REPO_ROOT / "agents" / "slack" / "card_advice_write.py",
+}
+
+#: the tool prints "[card] posted ts=<slack ts>"; the newest match on stdout is posted_ts.
+_POSTED_TS_RE = re.compile(r"ts=([0-9]+\.[0-9]+)")
+
+
+def default_lock_dir() -> Path:
+    """Under the hermes data dir (HERMES_HOME, else ~/.hermes) — writable where the card mount is not."""
+    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "card-locks"
+
+
+@dataclass(frozen=True)
+class Answer:
+    """What the door would have answered: its HTTP status and JSON body."""
+
+    status: int
+    body: dict[str, Any]
+
+
+def one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _card_run_body(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    merged = "\n".join(part for part in (completed.stderr.strip(), completed.stdout.strip()) if part)
+    tail = "\n".join(merged.splitlines()[-5:])[-1000:]
+    body: dict[str, Any] = {"ok": completed.returncode == 0, "exit": completed.returncode, "tail": tail}
+    matches = _POSTED_TS_RE.findall(completed.stdout)
+    if matches:
+        body["posted_ts"] = matches[-1]
+    return body
+
+
+def _failed(error: str) -> Answer:
+    return Answer(200, {"ok": False, "exit": None, "tail": "", "error": error})
+
+
+def _run_locked(script: Path, timeout_s: float) -> Answer:
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=str(_REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return _failed(f"timeout after {timeout_s:.0f}s")
+    except OSError as e:
+        return _failed(f"spawn failed: {e}")
+    return Answer(200, _card_run_body(completed))
+
+
+def execute(
+    name: str,
+    *,
+    programs: dict[str, Path] = CARD_PROGRAMS,
+    lock_dir: Path | None = None,
+    timeout_s: float = RUN_CARD_TIMEOUT_S,
+) -> Answer:
+    """Run one card under its per-card lock. A second concurrent caller gets the door's 409."""
+    script = programs.get(name)
+    if script is None:
+        return Answer(404, {"error": f"unknown card {name}"})
+    directory = lock_dir if lock_dir is not None else default_lock_dir()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        handle = open(directory / f"{name}.lock", "a")
+    except OSError as e:
+        return _failed(f"lock unavailable: {e}")
+    with handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return Answer(409, {"error": f"{name} already running"})
+        except OSError as e:
+            return _failed(f"lock unavailable: {e}")
+        return _run_locked(script, timeout_s)
+
+
+def fold(label: str, answer: Answer) -> tuple[int, str, str]:
+    """(exit code, 'stdout'|'stderr', line) — the lines card_door.trigger printed for the same answer."""
+    body = answer.body
+    if answer.status != 200:
+        detail = one_line(json.dumps(body, separators=(",", ":"), ensure_ascii=False))[:200]
+        return 1, "stderr", f"{label} FAILED: door answered HTTP {answer.status} {detail}".rstrip()
+    if body.get("ok"):
+        suffix = f" posted_ts={body['posted_ts']}" if body.get("posted_ts") else ""
+        return 0, "stdout", f"{label} ok exit={body.get('exit')}{suffix}"
+    exit_code = body.get("exit")
+    where = f"exit={exit_code}" if exit_code is not None else str(body.get("error") or "no exit code")
+    tail = one_line(str(body.get("tail") or ""))[:200]
+    return 1, "stderr", f"{label} FAILED: {where} tail={tail}"
+
+
+def run_card(name: str, label: str) -> int:
+    """Drop-in for card_door.trigger: run the card, print one line, return the cron exit code."""
+    code, stream, line = fold(label, execute(name))
+    print(line, file=sys.stderr if stream == "stderr" else sys.stdout)
+    return code
