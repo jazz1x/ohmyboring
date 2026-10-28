@@ -188,7 +188,7 @@ else
 fi
 
 # (install) the plist carries a PATH that starts at the installer's uv — launchd's own
-# PATH resolves python3 to Xcode's 3.9, and the run's `uv run --locked python` follows PATH.
+# PATH resolves the system python to Xcode's 3.9, and the run's `uv run --locked python` follows PATH.
 mkdir -p "$tmp/py/bin"
 printf '#!/bin/sh\n' > "$tmp/py/bin/uv"
 chmod +x "$tmp/py/bin/uv"
