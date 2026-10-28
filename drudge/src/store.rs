@@ -1710,6 +1710,31 @@ impl Store {
             .await
     }
 
+    /// Lock every claim row of one canon slot, in the order `lock_claim_slots_of` takes them.
+    async fn lock_claim_slot_on(
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+    ) -> Result<()> {
+        let canon_subject = canon_sql("c.subject");
+        let canon_predicate = canon_sql("c.predicate");
+        let slot_subject = canon_sql("$1::text");
+        let slot_predicate = canon_sql("$2::text");
+        c.execute(
+            &format!(
+                "SELECT 1 FROM claim c
+                 WHERE {canon_subject} = {slot_subject} AND {canon_predicate} = {slot_predicate}
+                 ORDER BY ({canon_subject}) COLLATE \"C\", ({canon_predicate}) COLLATE \"C\",
+                          c.valid_from, c.subject COLLATE \"C\", c.predicate COLLATE \"C\"
+                 FOR UPDATE OF c;"
+            ),
+            &[&subject, &predicate],
+        )
+        .await
+        .context("lock claim slot in slot order")?;
+        Ok(())
+    }
+
     /// `upsert_claim_with_anchor` on a caller-held connection or transaction handle.
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_claim_with_anchor_on(
@@ -1728,6 +1753,12 @@ impl Store {
         anchor_symbol: Option<&str>,
     ) -> Result<()> {
         let vec = self.checked_vector(embedding)?; // dim guard (shared with upsert_chunk)
+        // Take the slot's rows in the order `lock_claim_slots_of` takes them, before the upsert
+        // and the seals below touch any of them: the seals lock rows in scan order, so a
+        // supersede holding one row of the slot while waiting on another meets this request in
+        // a cycle. `c` is the request's transaction (`ingest_in_own_tx`), so the locks last to
+        // its commit.
+        Self::lock_claim_slot_on(c, subject, predicate).await?;
         c.execute(
                 "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence, anchor, anchor_hash, anchor_symbol, era)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text, $10::text, $11::text,
@@ -3314,7 +3345,7 @@ impl Store {
                        (SELECT {touched_subject}, {touched_predicate} FROM claim
                         WHERE source_path = $1)
                  ORDER BY ({canon_subject}) COLLATE \"C\", ({canon_predicate}) COLLATE \"C\",
-                          c.valid_from
+                          c.valid_from, c.subject COLLATE \"C\", c.predicate COLLATE \"C\"
                  FOR UPDATE OF c;"
             ),
             &[&source_path],
@@ -3335,7 +3366,7 @@ impl Store {
                 "SELECT 1 FROM claim c
                  WHERE c.subject = ANY($1)
                  ORDER BY ({canon_subject}) COLLATE \"C\", ({canon_predicate}) COLLATE \"C\",
-                          c.valid_from
+                          c.valid_from, c.subject COLLATE \"C\", c.predicate COLLATE \"C\"
                  FOR UPDATE OF c;"
             ),
             &[&spellings],

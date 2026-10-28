@@ -53,20 +53,22 @@ async fn seed_doc(store: &Store, path: &str) {
         .expect("upsert doc");
 }
 
-/// Waits until a backend running a statement that starts with `prefix` waits on a lock.
-async fn wait_lock_wait(db: &Client, prefix: &str) {
-    let like = format!("{prefix}%");
+/// Waits until `waiting` backends sit on a lock inside a claim-row lock query (the supersede's
+/// and the ingest's slot lock) or the ingest's seal statement.
+async fn wait_lock_wait(db: &Client, waiting: i64) {
     loop {
         let n: i64 = db
             .query_one(
                 "SELECT count(*) FROM pg_stat_activity
-                  WHERE wait_event_type = 'Lock' AND query LIKE $1;",
-                &[&like],
+                  WHERE wait_event_type = 'Lock'
+                    AND (query LIKE 'SELECT 1 FROM claim c%'
+                         OR query LIKE 'UPDATE claim c SET superseded_at = m.mx%');",
+                &[],
             )
             .await
             .expect("read pg_stat_activity")
             .get(0);
-        if n > 0 {
+        if n >= waiting {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -130,12 +132,12 @@ async fn remembers_supersede_and_ingest_take_one_slots_rows_in_one_order() {
     let pairs = [[judge.clone(), older.clone()]];
     let cfg = BoringConfig::default();
     let (remember, ingest) = tokio::join!(store.remember_supersedes_in_tx(&pairs, None), async {
-        wait_lock_wait(&db, "SELECT 1 FROM claim c").await;
+        wait_lock_wait(&db, 1).await;
         let ingest = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
             &store, &ZeroEmbed, &cfg, &newer,
         );
         let release = async {
-            wait_lock_wait(&db, "UPDATE claim c SET superseded_at = m.mx").await;
+            wait_lock_wait(&db, 2).await;
             hold.batch_execute("ROLLBACK;")
                 .await
                 .expect("release row X");
