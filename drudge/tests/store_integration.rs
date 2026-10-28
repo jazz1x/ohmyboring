@@ -6096,6 +6096,7 @@ impl GraphExtractor for FailsAfterCounting {
         _body: &str,
         stats: &mut Stats,
     ) -> anyhow::Result<()> {
+        std::future::ready(()).await;
         stats.tools += 3;
         stats.edges += 5;
         Err(anyhow::anyhow!("extract failed midway"))

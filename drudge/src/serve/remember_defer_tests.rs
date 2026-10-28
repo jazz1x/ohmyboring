@@ -345,7 +345,7 @@ async fn the_owner_can_supersede_their_own_note_that_is_still_waiting() {
     drained(&fx.s).await;
 
     assert_eq!(count(&fx.db, EDGES_INTO, &a.source_path).await, 1);
-    assert!(refusals(&fx.s).await.is_empty());
+    assert_eq!(refusals(&fx.s).await, Vec::<Value>::new());
 }
 
 /// The worker's own check, with the request-time one out of the way: A is waiting as a plain
