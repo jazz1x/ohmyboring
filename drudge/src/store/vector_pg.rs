@@ -260,21 +260,55 @@ impl VectorIndex for Pg<'_> {
     ) -> Result<Vec<Hit>> {
         let qvec = Vector::from(vec.to_vec());
         let k_i64 = i64::try_from(k).unwrap_or(i64::MAX);
-        let rows = self
-            .db()
-            .await?
+        let mut conn = self.db().await?;
+        let filtered = project.is_some() || since_hours.is_some();
+        if !filtered {
+            let rows = conn
+                .query(
+                    "SELECT c.id, c.content, c.origin, c.project, c.source_path,
+                            (c.embedding <=> $1)::float4 AS dist
+                     FROM chunk c
+                     JOIN document d ON d.source_path = c.source_path
+                     WHERE ($3::text IS NULL OR c.project = $3)
+                       AND ($4::int IS NULL OR d.updated_at >= now() - make_interval(hours => $4))
+                     ORDER BY c.embedding <=> $1
+                     LIMIT $2;",
+                    &[&qvec, &k_i64, &project, &since_hours],
+                )
+                .await?;
+            return Ok(rows
+                .iter()
+                .map(|r| row_to_hit(r, DistKind::VectorCosine))
+                .collect());
+        }
+        // The HNSW index returns only ef_search candidates and the filter runs after it, so a
+        // filter whose rows are all farther than those candidates got none back. relaxed_order
+        // keeps scanning until the pool fills (pgvector 0.8.2 README, "Iterative index scans");
+        // it may return rows slightly out of order, so the outer SELECT sorts again.
+        let tx = conn.transaction().await?;
+        tx.batch_execute("SET LOCAL hnsw.iterative_scan = relaxed_order;")
+            .await?;
+        let mode: String = tx.query_one("SHOW hnsw.iterative_scan;", &[]).await?.get(0);
+        anyhow::ensure!(
+            mode == "relaxed_order",
+            "hnsw.iterative_scan reads {mode:?} after SET LOCAL, expected relaxed_order"
+        );
+        let rows = tx
             .query(
-                "SELECT c.id, c.content, c.origin, c.project, c.source_path,
-                        (c.embedding <=> $1)::float4 AS dist
-                 FROM chunk c
-                 JOIN document d ON d.source_path = c.source_path
-                 WHERE ($3::text IS NULL OR c.project = $3)
-                   AND ($4::int IS NULL OR d.updated_at >= now() - make_interval(hours => $4))
-                 ORDER BY c.embedding <=> $1
-                 LIMIT $2;",
+                "SELECT id, content, origin, project, source_path, dist FROM (
+                     SELECT c.id, c.content, c.origin, c.project, c.source_path,
+                            (c.embedding <=> $1)::float4 AS dist
+                     FROM chunk c
+                     JOIN document d ON d.source_path = c.source_path
+                     WHERE ($3::text IS NULL OR c.project = $3)
+                       AND ($4::int IS NULL OR d.updated_at >= now() - make_interval(hours => $4))
+                     ORDER BY c.embedding <=> $1
+                     LIMIT $2
+                 ) s ORDER BY dist LIMIT $2;",
                 &[&qvec, &k_i64, &project, &since_hours],
             )
             .await?;
+        tx.commit().await?;
         Ok(rows
             .iter()
             .map(|r| row_to_hit(r, DistKind::VectorCosine))
