@@ -350,6 +350,7 @@ pub struct Store {
     /// Embedding dimension (= `boring.json` `embed_dim`; bge-m3 = 1024). Enforced at every embedding
     /// upsert via `checked_vector` and mirrored by the `vector(dim)` DDL columns created in `open`.
     dim: usize,
+    target: crate::pg_detail::ConnectTarget,
 }
 
 /// Hand-written: `pool` holds the parsed DSN (user and password), which must never reach a log.
@@ -918,6 +919,7 @@ impl Store {
     #[allow(clippy::too_many_lines)] // schema DDL grows with features; splitting only obscures the one migration block.
     pub async fn open_with_pool_size(dsn: &str, dim: usize, pool_size: usize) -> Result<Self> {
         let pg_config: PgConfig = dsn.parse().context("parse postgres connection string")?;
+        let target = crate::pg_detail::ConnectTarget::from_config(&pg_config);
         let manager = Manager::from_config(
             pg_config,
             NoTls,
@@ -1222,8 +1224,19 @@ impl Store {
             ))
             .await
             .context("claim/graph data migrations")?;
-        Ok(Self { pool, dim })
+        Ok(Self { pool, dim, target })
     }
+
+    /// The door wording of a failure that came out of this store (see `pg_detail`).
+    pub fn door_detail(&self, e: &anyhow::Error) -> String {
+        crate::pg_detail::door_detail(&self.target, e)
+    }
+
+    /// `prefix: detail` for a stage-tagged failure.
+    pub fn door_staged(&self, e: &crate::pg_detail::Staged) -> String {
+        e.door_text(&self.target)
+    }
+
     /// Acquire a connection from the pool. Kept as a method (not direct field access) so every
     /// call site is a single point to instrument and so callers can reuse one object across a
     /// multi-statement logical unit (e.g. stats/compact) rather than holding several connections.

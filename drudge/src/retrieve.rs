@@ -11,6 +11,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 
 use crate::llm::Llm;
+use crate::pg_detail::{Staged, stage};
 use crate::store::{Authorship, Hit, RankFacts, Store};
 use crate::wiki_recall::WikiHit;
 
@@ -318,22 +319,53 @@ pub async fn retrieve_budget(
     project: Option<&str>,
     since_hours: Option<i32>,
 ) -> Result<Vec<Hit>> {
+    retrieve_budget_staged(
+        store,
+        llm,
+        query,
+        max_results,
+        max_chars,
+        exclude_origins,
+        project,
+        since_hours,
+    )
+    .await
+    .map_err(|staged| staged.error)
+}
+
+#[allow(clippy::too_many_arguments)] // same surface as `retrieve_budget`.
+/// `retrieve_budget` whose failure says which stage failed — the door's `/search` 502 names it.
+pub async fn retrieve_budget_staged(
+    store: &Store,
+    llm: &Llm,
+    query: &str,
+    max_results: usize,
+    max_chars: usize,
+    exclude_origins: &[String],
+    project: Option<&str>,
+    since_hours: Option<i32>,
+) -> Result<Vec<Hit>, Staged> {
     if max_results == 0 || max_chars == 0 {
         return Ok(Vec::new());
     }
     let pool = (max_results * 4).max(20);
-    let qe = llm.embed(query).await?;
+    let qe = llm.embed(query).await.map_err(stage("embed"))?;
     let vec_hits = store
         .vector_search_filtered(&qe, pool, project, since_hours)
-        .await?;
+        .await
+        .map_err(stage("vector"))?;
     let txt_hits = store
         .text_search_filtered(query, pool, project, since_hours)
-        .await?;
-    let merged = merge_hits(store, vec_hits, txt_hits, exclude_origins).await?;
+        .await
+        .map_err(stage("text"))?;
+    let merged = merge_hits(store, vec_hits, txt_hits, exclude_origins)
+        .await
+        .map_err(stage("feedback"))?;
     budget_ranked(merged, max_results, max_chars, |paths| async move {
         store.rank_facts(&paths).await
     })
     .await
+    .map_err(stage("rank_facts"))
 }
 
 #[cfg(test)]

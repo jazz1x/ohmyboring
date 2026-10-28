@@ -18,6 +18,7 @@ use crate::audit;
 use crate::graph;
 use std::path::PathBuf;
 
+use crate::pg_detail::{Staged, stage};
 use crate::retrieve;
 use crate::serve::{
     AppError, AppState, AskReq, AskResp, CompactResp, EventIngestResp, EventLogEntry, EventLogReq,
@@ -407,11 +408,20 @@ pub(crate) async fn handle_context(
 /// Consumption counts beside every hit — `used`/`contested` edges and `superseded_by` (the newer
 /// docs that declared themselves the replacement) and `said_by_owner`, three grouped queries for
 /// the whole response, never one per hit.
-async fn attach_consumption(store: &Store, hits: &mut [SearchHit]) -> Result<(), AppError> {
+async fn attach_consumption(store: &Store, hits: &mut [SearchHit]) -> Result<(), Staged> {
     let paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
-    let counts = store.consumption_counts(&paths).await?;
-    let said = store.said_by_owner_counts(&paths).await?;
-    let superseded = store.superseded_by(&paths).await?;
+    let counts = store
+        .consumption_counts(&paths)
+        .await
+        .map_err(stage("consumption"))?;
+    let said = store
+        .said_by_owner_counts(&paths)
+        .await
+        .map_err(stage("said_by_owner"))?;
+    let superseded = store
+        .superseded_by(&paths)
+        .await
+        .map_err(stage("superseded_by"))?;
     for hit in hits.iter_mut() {
         let c = counts.get(&hit.source_path).copied().unwrap_or_default();
         hit.used_count = c.used;
@@ -429,17 +439,16 @@ async fn attach_consumption(store: &Store, hits: &mut [SearchHit]) -> Result<(),
 /// for the whole response, never one per hit. At `0` — absent or explicit — nothing is attached
 /// and no query runs: the response stays byte-identical to what the freeze window measures.
 /// No store (wiki-recall fallback): hits keep empty `claims`, no error — same contract as `related`.
-async fn attach_claims(
-    store: &Store,
-    hits: &mut [SearchHit],
-    per_hit: u32,
-) -> Result<(), AppError> {
+async fn attach_claims(store: &Store, hits: &mut [SearchHit], per_hit: u32) -> Result<(), Staged> {
     if per_hit == 0 {
         return Ok(());
     }
     let paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
     // /search 도 fact 포함: fact 전용 노트 105개가 claim 줄 0 이던 것(C-DSHAPE2-1, 10-27), wiki-5375 와 같은 이유
-    let declared = store.declared_claims(&paths, i64::from(per_hit)).await?;
+    let declared = store
+        .declared_claims(&paths, i64::from(per_hit))
+        .await
+        .map_err(stage("claims"))?;
     for hit in hits.iter_mut() {
         let rows = declared.get(&hit.source_path);
         hit.claims_total = Some(rows.map_or(0, |r| r.total_matching));
@@ -459,19 +468,19 @@ async fn search_hits(
 ) -> Result<Vec<SearchHit>, String> {
     search_hits_inner(store, s, req)
         .await
-        .map_err(|e| format!("{:#}", e.error))
+        .map_err(|staged| store.door_staged(&staged))
 }
 
 async fn search_hits_inner(
     store: &Store,
     s: &AppState,
     req: &crate::serve::SearchReq,
-) -> Result<Vec<SearchHit>, AppError> {
+) -> Result<Vec<SearchHit>, Staged> {
     let max_results = req.max_results.clamp(1, MCP_MAX_RESULTS);
     let max_tokens = req.max_tokens.clamp(1, MCP_MAX_TOKENS);
     let max_chars = max_tokens.saturating_mul(4);
     // vector-first: /search is the external accuracy contract (eval gate).
-    let mut mapped: Vec<SearchHit> = retrieve::retrieve_budget(
+    let mut mapped: Vec<SearchHit> = retrieve::retrieve_budget_staged(
         store,
         &s.llm,
         &req.query,
@@ -516,7 +525,8 @@ async fn search_hits_inner(
         for hit in mapped.iter_mut().take(req.related_heads(max_results)) {
             for older in store
                 .related_by_shared_ground(&hit.source_path, per_head, SEARCH_RELATED_MIN_SHARED)
-                .await?
+                .await
+                .map_err(stage("related"))?
             {
                 if !seen.insert(older.source_path.clone()) {
                     continue;
@@ -529,6 +539,23 @@ async fn search_hits_inner(
         }
     }
     Ok(mapped)
+}
+
+/// 502 body of the read routes. Field order is the wire order (`error` then `detail`, the door's
+/// JSONResponse); `json!` sorts keys, so the order lives in this struct.
+#[derive(serde::Serialize)]
+struct StoreUnreachable {
+    error: &'static str,
+    detail: String,
+}
+
+impl StoreUnreachable {
+    fn of(store: &Store, e: &anyhow::Error) -> Self {
+        Self {
+            error: "store unreachable",
+            detail: store.door_detail(e),
+        }
+    }
 }
 
 /// POST /search — answers like the Python door (`_search`): the body is parsed once at the
@@ -560,7 +587,7 @@ async fn run_search(s: &AppState, store: &Store, req: &crate::serve::SearchReq) 
                 .handover_in_tx(&session, &observed_at, &paths)
                 .await
                 .map(|_| ())
-                .map_err(|e| format!("{e:#}"))
+                .map_err(|e| store.door_detail(&e))
         },
         |row| write_search_log(store, req, row, started),
     )
@@ -965,7 +992,7 @@ pub(crate) async fn handle_projects(
                 Ok(rows) => Json(crate::projects::active_payload(rows, days)).into_response(),
                 Err(e) => (
                     StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": "store unreachable", "detail": format!("{e:#}")})),
+                    Json(StoreUnreachable::of(store, &e)),
                 )
                     .into_response(),
             }
@@ -989,7 +1016,7 @@ pub(crate) async fn handle_rules(State(s): State<AppState>) -> axum::response::R
         Ok(rows) => Json(crate::rules::group_rules(rows)).into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": "store unreachable", "detail": format!("{e:#}")})),
+            Json(StoreUnreachable::of(store, &e)),
         )
             .into_response(),
     }
@@ -1040,7 +1067,7 @@ pub(crate) async fn handle_claim_source(
         },
         Err(e) => (
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": "store unreachable", "detail": format!("{e:#}")})),
+            Json(StoreUnreachable::of(store, &e)),
         )
             .into_response(),
     }
@@ -1084,7 +1111,7 @@ pub(crate) async fn handle_claim_sources(
         Ok(rows) => Json(group_current(&predicate, rows)).into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": "store unreachable", "detail": format!("{e:#}")})),
+            Json(StoreUnreachable::of(store, &e)),
         )
             .into_response(),
     }
@@ -1125,7 +1152,7 @@ pub(crate) async fn handle_approved(
         }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": "store unreachable", "detail": format!("{e:#}")})),
+            Json(StoreUnreachable::of(store, &e)),
         )
             .into_response(),
     }

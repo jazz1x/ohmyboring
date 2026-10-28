@@ -17,6 +17,7 @@ pub mod frontmatter;
 pub mod graph;
 pub mod ingest;
 pub mod llm;
+pub mod pg_detail;
 pub mod pii;
 pub mod projects;
 pub mod redact;

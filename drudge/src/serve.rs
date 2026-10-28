@@ -24,6 +24,8 @@ mod http;
 mod mcp;
 mod note_index;
 mod owner;
+#[cfg(test)]
+mod pg_failure_tests;
 mod scheduler;
 mod search_route;
 
