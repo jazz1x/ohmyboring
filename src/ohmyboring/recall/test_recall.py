@@ -796,17 +796,6 @@ def test_shadow_counts_skipped_wiki_files_in_the_event():
     assert empty.skipped == 4 and empty.text == "(no experience recalled)"
 
 
-def test_run_shadow_lets_a_python_exception_out_for_the_door_to_fold():
-    def boom():
-        raise RuntimeError("boom")
-
-    try:
-        shadow.run_shadow(200, _engine("x"), boom, _engine_claims({}))
-    except RuntimeError:
-        return
-    raise AssertionError("run_shadow must not swallow the python path's exception")
-
-
 def test_shadow_compares_refined_text_so_a_claim_line_difference_is_a_mismatch():
     stub = _refined_stub()
     python = _text(answer.answer(_args(), stub.seams()))
@@ -898,5 +887,4 @@ if __name__ == "__main__":
     test_shadow_tied_notes_must_carry_the_same_line_text()
     test_shadow_vector_path_has_no_tie_allowance()
     test_shadow_counts_skipped_wiki_files_in_the_event()
-    test_run_shadow_lets_a_python_exception_out_for_the_door_to_fold()
     print("ok - recall: wiki 직독(항·점수·snippet·필터·mtime 캐시)·경로 선택·렌더·그림자 대조")

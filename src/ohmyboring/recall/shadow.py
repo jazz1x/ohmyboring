@@ -219,12 +219,6 @@ def compare(
             return _compare_with_claims(text, recalled, claims_for)
 
 
-def run_shadow(
-    engine_status: int, engine_body: bytes, python: Callable[[], PythonAnswer], claims_for: ClaimsFor
-) -> ShadowEvent:
-    return compare(engine_status, engine_body, python(), claims_for)
-
-
 def event_payload(event: ShadowEvent) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "compared": event.compared,

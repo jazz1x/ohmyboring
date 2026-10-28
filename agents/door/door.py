@@ -158,12 +158,10 @@ from ohmyboring.recall import named as recall_named
 from ohmyboring.recall import shadow as recall_shadow
 from ohmyboring.recall import wiki as recall_wiki
 from ohmyboring.registers import pg as registers_pg
-from ohmyboring.registers import shadow as registers_shadow
 from ohmyboring.remember import dedup as remember_dedup
 from ohmyboring.remember import graph as remember_graph
 from ohmyboring.remember import index as remember_index
 from ohmyboring.remember import pii as remember_pii
-from ohmyboring.remember import shadow as remember_shadow
 from ohmyboring.remember import writer as remember_writer
 from ohmyboring.result import Either, Err, Ok
 from ohmyboring.search import hits as search_hits
@@ -361,59 +359,9 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
             status_code=502,
         )
     if request.method == "POST" and request.url.path == "/mcp":
-        engine_response = response
         response = _augment_mcp_recall(body, response)
         if _link_writer() == _WRITER_PYTHON:
             response = _augment_tools_list(body, response)
-        # 회상 그림자는 번호 블록을 붙이기 전의 엔진 텍스트와 대조한다(E4-2).
-        if not isinstance(engine_response, StreamingResponse) and (call := _mcp_tools_call(body)) is not None:
-            if call[0] == "recall":
-                background_tasks.add_task(
-                    _recall_shadow_task, call[1], engine_response.status_code, engine_response.body
-                )
-        # remember 는 회상과 달리 응답을 안 고친다 — 바이트 그대로 본 뒤 그림자만 태운다(E3a-2).
-        if not isinstance(response, StreamingResponse) and (arguments := _mcp_remember_arguments(body)):
-            background_tasks.add_task(
-                _remember_shadow_task,
-                "mcp",
-                arguments,
-                response.status_code,
-                response.body,
-                _standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
-            )
-        # 일곱 레지스터 도구도 같은 규약 — 응답 뒤 읽기 그림자가 칸별 대조 사건을 남긴다(E4-1).
-        if not isinstance(response, StreamingResponse) and (call := _mcp_tools_call(body)) is not None:
-            if call[0] in _REGISTER_MCP_TOOLS:
-                background_tasks.add_task(
-                    _register_shadow_task,
-                    _REGISTER_MCP_TOOLS[call[0]],
-                    "mcp",
-                    call[1],
-                    response.status_code,
-                    response.body,
-                )
-        return response
-    if request.method == "POST" and request.url.path in _REGISTER_HTTP_PATHS:
-        if not isinstance(response, StreamingResponse) and (data := _http_json_object(body)) is not None:
-            background_tasks.add_task(
-                _register_shadow_task,
-                _REGISTER_HTTP_PATHS[request.url.path],
-                "http",
-                data,
-                response.status_code,
-                response.body,
-            )
-        return response
-    if request.method == "POST" and request.url.path == "/remember":
-        if not isinstance(response, StreamingResponse) and (arguments := _http_remember_arguments(body)):
-            background_tasks.add_task(
-                _remember_shadow_task,
-                "remember",
-                arguments,
-                response.status_code,
-                response.body,
-                _standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
-            )
     return response
 
 
@@ -625,63 +573,6 @@ def _read_graph(paths: tuple[str, ...]) -> remember_graph.GraphSnapshot | None:
         print(f"[door] remember_shadow graph read failed: {e}", file=sys.stderr, flush=True)
         return None
     return remember_graph.GraphSnapshot(edges=edges, documents=documents, claims=claims)
-
-
-def _remember_shadow_task(route: str, arguments: dict, status: int, body: bytes, is_owner: bool) -> None:
-    """응답을 본 뒤에 도는 그림자 — 같은 요청을 파이썬 쓰기 경로에 「쓰지 않고」 태워
-    엔진이 한 결정(PII 게이트·중복 문의 걸러둘·대체·저장, owner 자격 거절)과 같은 결정을
-    낼지, 저장·대체에서는 실제 노트와 칸별로, 읽기 전용 세션으로 실제 그래프의 간선·claim
-    봉인까지 대조하고 사건(remember_shadow) 한 줄을 남긴다(E3a-2, E3b). 걸러진
-    요청은 결정만 비교한다. 실패는 전부 여기서 접는다: 문 로그 한 줄 + 사건 status=error —
-    응답은 이미 간 뒤라 어떤 예외도 클라이언트에 닿지 않는다."""
-    vault_dir = _vault_dir()
-    match remember_pii.load_from_vault(vault_dir):
-        case Err(reason):
-            event_log.try_append_event(
-                "door",
-                remember_shadow.EVENT_NAME,
-                "error",
-                reason=f"pii rules: {reason}",
-                omb_session_id=_omb_session_id(arguments),
-            )
-            return
-        case Ok(scanner):
-            pass
-    try:
-        event = remember_shadow.run_shadow(
-            remember_shadow.ShadowRequest(
-                route=route,
-                arguments=arguments,
-                engine_status=status,
-                engine_body=body,
-                vault_dir=vault_dir,
-                read_note=vault_notes.read_note,
-                split_frontmatter=vault_note.split_frontmatter,
-                list_notes=lambda: _list_wiki_notes(vault_dir),
-                pii_scanner=scanner,
-                is_owner=is_owner,
-                nearest_document=_nearest_document,
-                read_graph=_read_graph,
-                note_index=getattr(app.state, "note_index", None),
-            )
-        )
-    except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
-        print(
-            f"[door] remember_shadow failed: {type(e).__name__}: {e}",
-            file=sys.stderr,
-            flush=True,
-        )
-        event_log.try_append_event(
-            "door",
-            remember_shadow.EVENT_NAME,
-            "error",
-            reason=f"{type(e).__name__}: {e}",
-            omb_session_id=_omb_session_id(arguments),
-        )
-        return
-    event_log.try_append_event(
-        "door", remember_shadow.EVENT_NAME, event.status, **remember_shadow.event_payload(event)
-    )
 
 
 #: remember 쓰기 주인 스위치(E3c-1) — engine(기본)이면 프록시+그림자 그대로, python 이면
@@ -1292,59 +1183,6 @@ async def _register_python(
     return JSONResponse(payload)
 
 
-def _register_shadow_query(
-    surface: str, transport: str, arguments: dict
-) -> Either[dict, registers_shadow.PyFailure]:
-    """그림자의 파이썬 길 — 인자 거절은 대조 가능한 거절로, 계산 고장은 (다) 로 남긴다."""
-    parse = registers_pg.http_args if transport == "http" else registers_pg.mcp_args
-    match parse(surface, arguments):
-        case Err(rejected):
-            return Err(registers_shadow.PyFailure(rejected.message, rejection=True))
-        case Ok(args):
-            pass
-    match _register_answer(args, surface, transport):
-        case Err(message):
-            return Err(registers_shadow.PyFailure(message, rejection=False))
-        case Ok(payload):
-            return Ok(payload)
-
-
-def _register_shadow_task(surface: str, transport: str, arguments: dict, status: int, body: bytes) -> None:
-    """읽기 그림자(E4-1) — 응답을 본 뒤 같은 요청을 읽기 전용으로 다시 계산해 엔진 답과
-    칸별로 대조하고 read_shadow 사건 한 줄을 남긴다. 실패는 전부 여기서 접는다: 문 로그
-    한 줄 + 사건 status=error — 응답은 이미 간 뒤라 어떤 예외도 클라이언트에 닿지 않는다."""
-    try:
-        event = registers_shadow.run_shadow(
-            registers_shadow.ShadowRequest(
-                surface=surface,
-                transport=transport,
-                arguments=arguments,
-                engine_status=status,
-                engine_body=body,
-                query=lambda: _register_shadow_query(surface, transport, arguments),
-                rerun=lambda: _register_shadow_query(surface, transport, arguments),
-            )
-        )
-    except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
-        print(f"[door] read_shadow failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        event_log.try_append_event(
-            "door",
-            registers_shadow.EVENT_NAME,
-            "error",
-            surface=surface,
-            transport=transport,
-            reason=f"{type(e).__name__}: {e}",
-        )
-        return
-    event_log.try_append_event(
-        "door",
-        registers_shadow.EVENT_NAME,
-        event.status,
-        surface=surface,
-        **registers_shadow.event_payload(event),
-    )
-
-
 _RECALL_WIKI_INDEX = recall_wiki.WikiIndex(vault_note.split_frontmatter)
 
 
@@ -1368,30 +1206,6 @@ def _recall_engine_claims(paths: list[str]) -> Either[dict, str]:
     if not dsn:
         return Err("DOOR_PG_DSN not set")
     return recall_answer.claims_of(dsn, paths)
-
-
-def _recall_shadow_task(arguments: dict, status: int, body: bytes, reader: str = "engine") -> None:
-    """회상 그림자(E4-2) — 응답이 간 뒤 같은 인자로 파이썬 회상을 계산해 엔진 텍스트와 대조하고
-    recall_shadow 사건 한 줄을 남긴다. 예외는 여기서 문 로그 한 줄 + 사건 status=error 로 접는다."""
-    try:
-        event = recall_shadow.run_shadow(
-            status, body, lambda: _recall_python(arguments), _recall_engine_claims
-        )
-    except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
-        print(f"[door] recall_shadow failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        event_log.try_append_event(
-            "door",
-            recall_shadow.EVENT_NAME,
-            "error",
-            reader=reader,
-            reason=f"{type(e).__name__}: {e}",
-            cause=recall_shadow.CAUSE_PYTHON,
-            compared=recall_shadow.COMPARED,
-        )
-        return
-    event_log.try_append_event(
-        "door", recall_shadow.EVENT_NAME, event.status, reader=reader, **recall_shadow.event_payload(event)
-    )
 
 
 _RECALL_READER_ENV = "DOOR_RECALL_READER"

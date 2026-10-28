@@ -95,14 +95,12 @@ uv run --locked python src/ohmyboring/adapters/test_slack.py
 uv run --locked python src/ohmyboring/adapters/test_workflow_contract.py
 uv run --locked python src/ohmyboring/remember/test_parse.py
 uv run --locked python src/ohmyboring/remember/test_render.py
-uv run --locked python src/ohmyboring/remember/test_shadow.py
 uv run --locked python src/ohmyboring/remember/test_graph.py
 uv run --locked python src/ohmyboring/remember/test_pii.py
 uv run --locked python src/ohmyboring/remember/test_dedup.py
 uv run --locked python src/ohmyboring/remember/test_index.py
 uv run --locked python src/ohmyboring/remember/test_writer.py
 uv run --locked python src/ohmyboring/sync/test_sync.py
-uv run --locked python src/ohmyboring/registers/test_shadow.py
 uv run --locked python src/ohmyboring/gap/test_gap.py
 uv run --locked python src/ohmyboring/test_result.py
 uv run --locked python agents/door/test_door.py
