@@ -78,13 +78,24 @@ uv run --locked python agents/shared/agent_wiring.py --install \
   --server-url http://localhost:7710/mcp
 ```
 
-이 명령은 Claude 훅, Cursor/Codex MCP 항목, Codex 호스트 워커, 그리고 `hermes-agent`가 켜진 경우 Hermes cron 워커를 설정합니다. Claude만 직접 편집하려면 `~/.claude/settings.json`에 `python3 ~/oh-my-boring/hooks/distill-session.py`를 실행하는 `SessionEnd` 훅과 `recall.py`를 실행하는 `UserPromptSubmit` 훅을 추가합니다.
+이 명령은 Claude 훅, Cursor/Codex MCP 항목, Codex 호스트 워커, 그리고 `hermes-agent`가 켜진 경우 Hermes cron 워커를 설정합니다. Claude만 직접 편집하려면 `~/.claude/settings.json`에 `python3 ~/oh-my-boring/hooks/distill-session.py`를 실행하는 `SessionEnd` 훅과 아래의 `UserPromptSubmit`·`SessionStart` 훅을 추가합니다.
+
+Claude Code 훅이 부르는 것(`agents/shared/agent_wiring.py`가 정확히 이 네 개를 설치합니다):
+
+| 훅 이벤트 | 부르는 것 | 하는 일 |
+| --- | --- | --- |
+| `SessionStart` | `agents/claude-code/session-start-recall.py` | 연 프로젝트(cwd / git remote 로 추정)의 최근 맥락 카드를 주입 |
+| `UserPromptSubmit` | `hooks/recall.py` | 관련 과거 노트를 프롬프트에 주입 |
+| `UserPromptSubmit` | `hooks/rules.py` | 내가 정한 상시 규칙을 트리거 단어가 나올 때 띄움 |
+| `SessionEnd` | `hooks/distill-session.py` | 트랜스크립트를 증류해 `remember`로 저장 |
+
+에이전트 자체의 메모리 폴더에 `.md`를 흩어 두는 대신 `remember` / `recall`로 기억하세요. 계약·결정·인계는 `remember`로 쓰고 `recall`로 읽습니다. 세션이 맥락 한도에 닿기 전에 `remember`로 인계 노트를 남기면, 새 세션이 `SessionStart` 또는 직접 `recall`로 받아 이어 갑니다.
 
 ---
 
 ## 내 메모리 보기
 
-노트는 그냥 마크다운이므로, **`vault/` 폴더를 [Obsidian](https://obsidian.md) 보관함(vault)으로 열면** 그래프 뷰, 백링크, 태그, 전문 검색을 그대로 쓸 수 있습니다. 컴파일된 노트에는 이미 Obsidian-safe `tags`와 `[[wiki-NNNN]]` `relates_to` 링크가 들어 있어, 그래프 뷰가 메모리의 연결 관계를 바로 그려 줍니다(`BORING_VECTOR=on`일 때 GraphRAG 그래프가 이 링크로 투영되어 가장 풍부합니다). 별도 UI를 만들 필요가 없습니다. Obsidian이 만드는 `.obsidian/` 작업 폴더는 gitignore 처리되어, 내 레이아웃이 로컬에만 남고 git에 새지 않습니다.
+노트는 그냥 마크다운이므로, **`vault/` 폴더를 [Obsidian](https://obsidian.md) 보관함(vault)으로 열면** 그래프 뷰, 백링크, 태그, 전문 검색을 그대로 쓸 수 있습니다. 컴파일된 노트에는 이미 Obsidian-safe `tags`와 `[[wiki-00000000001]]` `relates_to` 링크가 들어 있어, 그래프 뷰가 메모리의 연결 관계를 바로 그려 줍니다(`BORING_VECTOR=on`일 때 GraphRAG 그래프가 이 링크로 투영되어 가장 풍부합니다). 별도 UI를 만들 필요가 없습니다. Obsidian이 만드는 `.obsidian/` 작업 폴더는 gitignore 처리되어, 내 레이아웃이 로컬에만 남고 git에 새지 않습니다.
 
 Obsidian은 코퍼스가 무엇을 **담고 있는지** 보여 줍니다. 코퍼스가 실제로 무엇을 **하는지** — 회수 훅이
 어떤 노트를 세션에 주입했는지, 검색기가 그 노트를 찾기까지 얼마나 멀리 뻗었는지, 측정 창이 계획대로
@@ -123,7 +134,12 @@ flowchart LR
 
 - **Read door** — 빠르고 LLM 불필요. `make ask`, `recall.py`, MCP `recall`이 `vault/wiki`를 직접 읽습니다.
 - **Write door** — gated. `distill-session.py`가 로컬 LLM을 호출하고 ohmyboring의 `remember` MCP tool로 기록합니다.
-- **Duplicate gate** — 중복 노트는 기본적으로 건너뜁니다. 같은 세션이나 강한 rollout 복제에서 더 충실한 노트가 들어오면 `remember`가 같은 `wiki-NNNN.md`를 다시 쓰고 재적재합니다.
+- **Duplicate gate** — 중복 노트는 기본적으로 건너뜁니다. 같은 세션이나 강한 rollout 복제에서 더 충실한 노트가 들어오면 `remember`가 같은 `wiki-00000000001.md`를 다시 쓰고 재적재합니다.
+
+**역할 나눔(엔진·도구·에이전트).** 나눔의 근거는 `drudge/PHILOSOPHY.md`입니다. 가장 적은 구조로 가장 많은 틀린 상태를 막고(Layer 3, 54행), 나쁜 입력은 안쪽 깊이가 아니라 경계에서 거부합니다(Layer 2, 47행).
+- **엔진**(`drudge`) — 결정론, LLM 없음: 게이트·중복 제거·검색·상한과 정지는 프롬프트가 아니라 코드에 있습니다.
+- **도구**(MCP) — 둘 사이의 계약: 25개 도구(`remember`, `recall` …)가 에이전트가 부르는 것입니다.
+- **에이전트** — 판단: 무엇을 쓰고 무엇을 물을지 정해 도구를 부르고, 넘긴 것은 엔진이 검사합니다.
 
 ### 작업 흐름 그래프 계약
 
@@ -169,6 +185,11 @@ flowchart LR
 | `repos[]` | 경로/remote 규칙 → `origin=personal/company/mirror/community` |
 | `code_index.sources[]` | 별도 AST 코드 코퍼스에 명시적으로 넣을 소스 루트. 현재 Rust/Tree-sitter만 지원하며 opt-in 전에는 비활성 |
 | `agents[]` | 에이전트 세션 대화 기록·어댑터 설정(원시 저장소·코드베이스 적재 아님) |
+| `allow_company_origin` | boolean, 기본 `false`. `true` = `origin:company` 노트(회사 업무의 세션 경험)를 받아들인 코퍼스로 보고 감사 "clean" 표시를 뒤집지 않음. `false` 는 검토 대상으로 표시. 세션 경험에만 적용 — 회사 KB 원본은 계속 정책 밖 |
+| `checkout_roots` | git 체크아웃이 들어 있는 디렉터리 목록(`~` 확장, 깊이 ≤ 3). 야간 위생 점검이 원격 저장소 이름 대신 체크아웃 폴더 이름으로 잡힌 프로젝트를 보고. 미설정 = 점검을 돌리지 않음(0 이 아니라 "스캔 안 함"으로 보고) |
+| `card.note_links` | 아침 카드에서 노트 id 옆에 표시할 링크(순서대로). 키를 빼면 그 링크는 숨김. `obsidian`(`vault`, 선택 `folder`) · `file`(`folder` = 호스트 절대 경로, `~` 불가; `editor` URL 스킴, 기본 `vscode`) |
+| `embed_model` / `embed_dim` (최상위) | 폐기 예정 v1 키(기본 `bge-m3` / `1024`). `llm.embed_model` / `llm.embed_dim` 이 없을 때만 대체값으로 읽음 — `llm.*` 키를 쓰세요 |
+| `vector.backend` | 엔진의 벡터 인덱스 백엔드. 기본값이자 유일하게 받는 값은 `pgvector`. 다른 값을 줘도 엔진은 멈추지 않고 `pgvector` 로 돌며, `config_get` 과 시작 로그가 그 사실을 알림 |
 
 코드는 `vault/wiki`에 복사하지 않습니다. `boring.example.json`을 참고해 source를 활성화한 뒤 `cargo run --manifest-path drudge/Cargo.toml -- code-sync --repository <id>`로 적재하고, `code-status` 또는 MCP의 `code_search`, `code_symbol`, `code_index_status`로 조회합니다. Tree-sitter는 구문과 파싱 오류만 기록하며, 호출·import·reference의 대상 문자열은 semantic resolver를 붙이기 전까지 미해결 상태로 둡니다.
 
@@ -388,11 +409,17 @@ rules:
     reason: "Staging credential"
 ```
 
+기본 정책은 `vault/rules/pii.yaml`(주민번호 등)로 제공되고, `pii.local.yaml`이 그 위에 병합됩니다. 규칙에 `action`이 없는데 `default_action`도 생략하면 `flag`가 됩니다.
+
 `block` 규칙은 `remember` 시점에 노트를 거부하고, `redact` 규칙은 저장 전 마스킹하며, `flag` 규칙은 노트를 저장하면서 `pii-flag` 태그를 붙입니다. 특정 줄의 flag 규칙을 한 번만 통과시키려면 해당 줄에 면제 마커를 추가하세요:
 
 ```markdown
 Jira 티켓 PROJ-1234 <!-- pii-allow: internal-ticket --> 는 공개입니다.
 ```
+
+**비밀값 가리기(사용자 설정 없음).** PII 규칙과 별개로 `remember`는 노트 제목·본문의 알려진 자격 증명 모양을 `‹REDACTED›`로 바꾸고, 쿼리 로그도 같은 방식으로 가립니다. 대상은 Slack 토큰, `sk-` / `sk-ant-` API 키, AWS `AKIA…` 키, GitHub 토큰, Google `AIza…` 키, JWT, `-----BEGIN … PRIVATE KEY-----` 헤더, 값이 12자 이상인 `api_key` / `secret` / `token` / `password` / `bearer` 대입입니다. 이 목록은 설정이 아니라 코드의 상수(`drudge/src/redact.rs`)입니다. 끄거나 늘리는 설정 키·파일이 없습니다. 가리는 범위를 바꾸려면 `redact.rs`를 고쳐 다시 빌드해야 하고, 자기만의 모양은 위의 PII 규칙을 쓰세요.
+
+**회사 정보 가르기.** `allow_company_origin`(gitignore 된 `boring.json`, 기본 `false`)은 감사가 `origin:company` 노트(회사 업무의 세션 경험)를 어떻게 다룰지 정합니다. `false`: 검토 대상으로 표시되고 감사 "clean" 표시가 뒤집힙니다. `true`: 받아들인 코퍼스로 보고 표시를 유지합니다. 바뀌는 것은 이 감사 표시뿐이며 쓰기를 막지는 않습니다. 어떤 노트가 `company`인지는 설정 표의 `repos[]` 규칙이 정합니다.
 
 ### MCP tool 호출 예시 (raw JSON-RPC)
 
@@ -651,6 +678,6 @@ oh-my-boring/
 └─ Makefile
 ```
 
-> **vault/wiki ID 안내:** `wiki-0000.md`는 repo에 포함된 샘플 노트입니다. 개인 노트는 `wiki-0001.md`부터 시작하며 gitignore 처리되어 private 내용이 git에 섞이지 않습니다.
+> **vault/wiki ID 안내:** `wiki-0000.md`는 repo에 포함된 샘플 노트이며 ID가 네 자리인 유일한 노트입니다. 개인 노트는 열한 자리 ID로 `wiki-00000000001.md`부터 시작하며 gitignore 처리되어 private 내용이 git에 섞이지 않습니다.
 >
 > **플랫폼 안내:** macOS와 Linux에서 테스트되었습니다. `hooks/`가 backward-compatible symlink를 사용하므로 Windows는 아직 공식 지원하지 않습니다.

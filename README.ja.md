@@ -78,13 +78,24 @@ uv run --locked python agents/shared/agent_wiring.py --install \
   --server-url http://localhost:7710/mcp
 ```
 
-このコマンドは Claude フック、Cursor/Codex MCP エントリ、Codex ホストワーカー、そして `hermes-agent` が有効な場合は Hermes cron ワーカーを設定します。Claude だけを手で編集する場合は、`~/.claude/settings.json` に `python3 ~/oh-my-boring/hooks/distill-session.py` を実行する `SessionEnd` フックと、`recall.py` を実行する `UserPromptSubmit` フックを追加します。
+このコマンドは Claude フック、Cursor/Codex MCP エントリ、Codex ホストワーカー、そして `hermes-agent` が有効な場合は Hermes cron ワーカーを設定します。Claude だけを手で編集する場合は、`~/.claude/settings.json` に `python3 ~/oh-my-boring/hooks/distill-session.py` を実行する `SessionEnd` フックと、下記の `UserPromptSubmit`・`SessionStart` フックを追加します。
+
+Claude Code のフックが呼ぶもの（`agents/shared/agent_wiring.py` がちょうどこの 4 つを設定します）:
+
+| フックイベント | 呼ぶもの | 内容 |
+| --- | --- | --- |
+| `SessionStart` | `agents/claude-code/session-start-recall.py` | 開いたプロジェクト（cwd / git remote から推定）の直近コンテキストカードを注入 |
+| `UserPromptSubmit` | `hooks/recall.py` | 関連する過去ノートをプロンプトへ注入 |
+| `UserPromptSubmit` | `hooks/rules.py` | 自分で決めた常設ルールを、トリガー語が出たときに提示 |
+| `SessionEnd` | `hooks/distill-session.py` | トランスクリプトを蒸留し `remember` で保存 |
+
+エージェント自身のメモリフォルダに `.md` を散らす代わりに、`remember` / `recall` で記憶してください。契約・決定・引き継ぎは `remember` で書き、`recall` で読み戻します。セッションがコンテキスト上限に達する前に `remember` で引き継ぎノートを残せば、次のセッションが `SessionStart` または明示的な `recall` で受け取って続けられます。
 
 ---
 
 ## メモリを見る
 
-ノートはただのマークダウンなので、**`vault/` フォルダを [Obsidian](https://obsidian.md) のvault（保管庫）として開く** だけで、グラフビュー・バックリンク・タグ・全文検索がそのまま使えます。コンパイル済みノートには Obsidian-safe な `tags` と `[[wiki-NNNN]]` の `relates_to` リンクが既に入っているため、グラフビューがメモリのつながりをそのまま描画します（`BORING_VECTOR=on` のとき GraphRAG グラフがこのリンクに投影され最も豊かになります）。専用 UI を作る必要はありません。Obsidian が作る `.obsidian/` ワークスペースフォルダは gitignore されているので、レイアウトはローカルに留まり git に漏れません。
+ノートはただのマークダウンなので、**`vault/` フォルダを [Obsidian](https://obsidian.md) のvault（保管庫）として開く** だけで、グラフビュー・バックリンク・タグ・全文検索がそのまま使えます。コンパイル済みノートには Obsidian-safe な `tags` と `[[wiki-00000000001]]` の `relates_to` リンクが既に入っているため、グラフビューがメモリのつながりをそのまま描画します（`BORING_VECTOR=on` のとき GraphRAG グラフがこのリンクに投影され最も豊かになります）。専用 UI を作る必要はありません。Obsidian が作る `.obsidian/` ワークスペースフォルダは gitignore されているので、レイアウトはローカルに留まり git に漏れません。
 
 Obsidian はコーパスが何を **持っているか** を見せます。コーパスが実際に何を **しているか** — recall
 フックがどのノートをセッションに注入したか、リトリーバがそれを見つけるまでどこまで手を伸ばしたか、
@@ -123,7 +134,12 @@ flowchart LR
 
 - **Read door** — 高速、LLM 不要。`make ask`、`recall.py`、MCP `recall` が `vault/wiki` を直接読みます。
 - **Write door** — gated。`distill-session.py` がローカル LLM を呼び出し、ohmyboring の `remember` MCP tool で書き込みます。
-- **Duplicate gate** — 重複ノートは通常スキップします。同じセッションまたは強い rollout コピーから、より内容の濃いノートが来た場合は、`remember` が同じ `wiki-NNNN.md` を書き換えて再取り込みします。
+- **Duplicate gate** — 重複ノートは通常スキップします。同じセッションまたは強い rollout コピーから、より内容の濃いノートが来た場合は、`remember` が同じ `wiki-00000000001.md` を書き換えて再取り込みします。
+
+**役割分担（エンジン・ツール・エージェント）。** 分担の根拠は `drudge/PHILOSOPHY.md` です。最小の構造で最も多くの誤った状態を防ぎ（Layer 3、54 行）、悪い入力は内側の奥ではなく境界で拒否します（Layer 2、47 行）。
+- **エンジン**（`drudge`）— 決定論的で LLM を使わない: ゲート・重複排除・検索・上限と停止はプロンプトではなくコードにあります。
+- **ツール**（MCP）— 両者の契約: 25 個のツール（`remember`、`recall` …）がエージェントの呼ぶものです。
+- **エージェント** — 判断: 何を書き何を尋ねるかを決めてツールを呼び、渡したものはエンジンが検査します。
 
 ### ワークフローグラフ契約
 
@@ -169,6 +185,11 @@ flowchart LR
 | `repos[]` | パス/remote ルール → `origin=personal/company/mirror/community` |
 | `code_index.sources[]` | 独立した AST コードコーパスへ明示的に追加するソースルート。現在は Rust/Tree-sitter のみで、opt-in するまで無効 |
 | `agents[]` | エージェントのセッション対話記録・アダプター設定（生のリポジトリ・コードベース取り込み用ではない） |
+| `allow_company_origin` | boolean、既定 `false`。`true` = `origin:company` ノート（会社業務のセッション経験）を受け入れ済みコーパスとして扱い、監査の "clean" 表示を反転させない。`false` はレビュー対象としてフラグ。セッション経験のみ対象 — 会社 KB の原本は引き続きポリシー外 |
+| `checkout_roots` | git チェックアウトを置くディレクトリの一覧（`~` 展開、深さ ≤ 3）。夜間の衛生チェックが、リモートのリポジトリ名ではなくチェックアウトのフォルダ名で付いたプロジェクトを報告。未設定 = チェックを実行しない（0 ではなく「スキャンなし」と報告） |
+| `card.note_links` | 朝のカードでノート id の横に出すリンク（順番どおり）。キーを省くとそのリンクは非表示。`obsidian`（`vault`、任意で `folder`）· `file`（`folder` = ホストの絶対パス、`~` 不可；`editor` は URL スキーム、既定 `vscode`） |
+| `embed_model` / `embed_dim`（最上位） | 非推奨の v1 キー（既定 `bge-m3` / `1024`）。`llm.embed_model` / `llm.embed_dim` が未設定のときだけ代替として読む — `llm.*` キーを使ってください |
+| `vector.backend` | エンジンのベクトルインデックスのバックエンド。既定かつ唯一受け付ける値は `pgvector`。他の値でもエンジンは止まらず `pgvector` で動き、`config_get` と起動ログがそれを知らせる |
 
 コードは `vault/wiki` にコピーしません。`boring.example.json` を参考に source を有効化し、`cargo run --manifest-path drudge/Cargo.toml -- code-sync --repository <id>` で取り込み、`code-status` または MCP の `code_search`、`code_symbol`、`code_index_status` で照会します。Tree-sitter は構文とパースエラーだけを記録し、call・import・reference の対象文字列は semantic resolver を追加するまで未解決のまま保持します。
 
@@ -396,11 +417,17 @@ rules:
     reason: "Staging credential"
 ```
 
+既定のポリシーは `vault/rules/pii.yaml`（住民番号など）として同梱され、`pii.local.yaml` がその上にマージされます。ルールに `action` がなく `default_action` も省略した場合は `flag` になります。
+
 `block` ルールは `remember` 時にノートを拒否、`redact` ルールは保存前にマスク、`flag` ルールはノートを保存しつつ `pii-flag` タグを付けます。特定の行だけ flag ルールを通したい場合は、その行に免除マーカーを追加してください:
 
 ```markdown
 Jira チケット PROJ-1234 <!-- pii-allow: internal-ticket --> は公開情報です。
 ```
+
+**シークレットのマスク（ユーザー設定なし）。** PII ルールとは別に、`remember` はノートのタイトルと本文にある既知の認証情報の形を `‹REDACTED›` に置き換え、クエリログにも同じマスクをかけます。対象は Slack トークン、`sk-` / `sk-ant-` API キー、AWS `AKIA…` キー、GitHub トークン、Google `AIza…` キー、JWT、`-----BEGIN … PRIVATE KEY-----` ヘッダー、値が 12 文字以上の `api_key` / `secret` / `token` / `password` / `bearer` の代入です。このリストは設定ではなくコード内の定数（`drudge/src/redact.rs`）で、オフにしたり拡張したりする設定キーやファイルはありません。マスク範囲を変えるには `redact.rs` を直して再ビルドしてください。独自の形には上の PII ルールを使います。
+
+**会社情報の切り分け。** `allow_company_origin`（gitignore された `boring.json`、既定 `false`）は、監査が `origin:company` ノート（会社業務のセッション経験）をどう扱うかを決めます。`false`: レビュー対象としてフラグされ、監査の "clean" 表示が反転します。`true`: 受け入れ済みコーパスとして扱い、表示は維持されます。変わるのはこの監査表示だけで、書き込みは止めません。どのノートが `company` になるかは、設定表の `repos[]` ルールが決めます。
 
 ### MCP tool 呼び出し例（raw JSON-RPC）
 
@@ -659,6 +686,6 @@ oh-my-boring/
 └─ Makefile
 ```
 
-> **vault/wiki ID について:** `wiki-0000.md` は repo に含まれるサンプルノートです。個人ノートは `wiki-0001.md` から始まり gitignore されているため、private な内容が git に混ざることはありません。
+> **vault/wiki ID について:** `wiki-0000.md` は repo に含まれるサンプルノートで、ID が 4 桁の唯一のノートです。個人ノートは 11 桁の ID で `wiki-00000000001.md` から始まり gitignore されているため、private な内容が git に混ざることはありません。
 >
 > **プラットフォームについて:** macOS と Linux でテストされています。`hooks/` が backward-compatible な symlink を使用しているため、Windows はまだ公式にサポートされていません。

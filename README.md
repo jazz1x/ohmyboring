@@ -78,13 +78,24 @@ uv run --locked python agents/shared/agent_wiring.py --install \
   --server-url http://localhost:7710/mcp
 ```
 
-This installs Claude hooks, Cursor/Codex MCP entries, the Codex host worker, and Hermes cron workers when `hermes-agent` is enabled. Or edit `~/.claude/settings.json` by hand for Claude only: a `SessionEnd` hook running `python3 ~/oh-my-boring/hooks/distill-session.py`, plus a `UserPromptSubmit` hook running `recall.py`.
+This installs Claude hooks, Cursor/Codex MCP entries, the Codex host worker, and Hermes cron workers when `hermes-agent` is enabled. Or edit `~/.claude/settings.json` by hand for Claude only: a `SessionEnd` hook running `python3 ~/oh-my-boring/hooks/distill-session.py`, plus the `UserPromptSubmit` and `SessionStart` hooks below.
+
+What the Claude Code hooks call (`agents/shared/agent_wiring.py` installs exactly these four):
+
+| Hook event | Calls | What it does |
+| --- | --- | --- |
+| `SessionStart` | `agents/claude-code/session-start-recall.py` | injects the recent-context card for the project you opened (guessed from cwd / git remote) |
+| `UserPromptSubmit` | `hooks/recall.py` | injects relevant past notes into the prompt |
+| `UserPromptSubmit` | `hooks/rules.py` | surfaces your standing rules when their trigger words appear |
+| `SessionEnd` | `hooks/distill-session.py` | distills the transcript and saves it with `remember` |
+
+Use `remember` / `recall` as your memory instead of loose `.md` files in the agent's own memory folder: write contracts, decisions and handoffs with `remember`, read them back with `recall`. Before a session runs out of context, save a handoff note with `remember`; the next session gets it back through `SessionStart` or an explicit `recall`.
 
 ---
 
 ## Viewing your memory
 
-The notes are just markdown, so **open the `vault/` folder as an [Obsidian](https://obsidian.md) vault** — graph view, backlinks, tags, and full-text search come for free. The compiled notes already carry Obsidian-safe `tags` and `[[wiki-NNNN]]` `relates_to` links, so the graph view draws your memory's connections directly (richest with `BORING_VECTOR=on`, which projects the GraphRAG graph into those links). No custom UI to build. Obsidian's own `.obsidian/` workspace folder is gitignored, so your layout stays local and never leaks into git.
+The notes are just markdown, so **open the `vault/` folder as an [Obsidian](https://obsidian.md) vault** — graph view, backlinks, tags, and full-text search come for free. The compiled notes already carry Obsidian-safe `tags` and `[[wiki-00000000001]]` `relates_to` links, so the graph view draws your memory's connections directly (richest with `BORING_VECTOR=on`, which projects the GraphRAG graph into those links). No custom UI to build. Obsidian's own `.obsidian/` workspace folder is gitignored, so your layout stays local and never leaks into git.
 
 Obsidian shows you what the corpus *holds*. To see what it actually **does** — which notes the
 recall hook injected into your sessions, how far the retriever reached to find them, and whether
@@ -124,7 +135,12 @@ flowchart LR
 
 - **Read door** — fast, no LLM. `make ask`, `recall.py`, MCP `recall` read `vault/wiki` directly.
 - **Write door** — gated. `distill-session.py` calls the local LLM and writes through ohmyboring's deterministic `remember` MCP tool.
-- **Duplicate gate** — duplicate notes are normally skipped; if the same session or a strong rollout copy produces a richer note, `remember` rewrites the same `wiki-NNNN.md` and re-ingests it.
+- **Duplicate gate** — duplicate notes are normally skipped; if the same session or a strong rollout copy produces a richer note, `remember` rewrites the same `wiki-00000000001.md` and re-ingests it.
+
+**Who does what (engine, tool, agent).** The split follows `drudge/PHILOSOPHY.md`: block the most wrong states with the least structure (Layer 3, line 54), and reject bad input at the boundary, not deep inside (Layer 2, line 47).
+- **Engine** (`drudge`) — deterministic, no LLM: gates, dedup, search, caps and stops live in code, not in a prompt.
+- **Tool** (MCP) — the contract between the two: the 25 tools (`remember`, `recall`, …) are what an agent calls.
+- **Agent** — judgment: it decides what to write and what to ask, then calls the tools; whatever it hands over is checked by the engine.
 
 ### Workflow graph contract
 
@@ -170,6 +186,11 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 | `repos[]` | path/remote rules → `origin=personal/company/mirror/community` |
 | `code_index.sources[]` | explicit source roots for the separate AST code corpus; currently Rust/Tree-sitter, disabled unless opted in |
 | `agents[]` | agent session transcript and adapter configuration; not raw repository/codebase ingestion |
+| `allow_company_origin` | boolean, default `false`. `true` = `origin:company` notes (session experience from company work) count as accepted corpus and do not flip the audit "clean" flag; `false` flags them for review. Session experience only — company KB originals stay off-policy |
+| `checkout_roots` | list of directories (`~` expanded, depth ≤ 3) holding your git checkouts. The nightly hygiene pass reports projects named after a checkout folder instead of its remote repo. Unset = the check is not run (reported as not scanned, never as zero) |
+| `card.note_links` | links shown beside a note id on the morning card, in order; leave a key out to hide it. `obsidian` (`vault`, optional `folder`) · `file` (`folder` = absolute host path, no `~`; `editor` URL scheme, default `vscode`) |
+| `embed_model` / `embed_dim` (top level) | deprecated v1 keys (defaults `bge-m3` / `1024`), still honored as a fallback when `llm.embed_model` / `llm.embed_dim` are unset — use the `llm.*` keys |
+| `vector.backend` | vector index backend of the engine; default and only accepted value `pgvector`. Any other value does not stop the engine: it runs on `pgvector`, and `config_get` and the startup log say so |
 
 Code is never copied into `vault/wiki`. After enabling a source from `boring.example.json`, run `cargo run --manifest-path drudge/Cargo.toml -- code-sync --repository <id>` and inspect it with `code-status` or the `code_search`, `code_symbol`, and `code_index_status` MCP tools. Tree-sitter records syntax and parse errors; call/import/reference target text remains unresolved until a semantic resolver is added.
 
@@ -389,11 +410,17 @@ rules:
     reason: "Staging credential"
 ```
 
+The default policy ships as `vault/rules/pii.yaml` (national-ID numbers and similar shapes); `pii.local.yaml` is merged on top of it. If a rule has no `action` and `default_action` is omitted, the action is `flag`.
+
 A `block` rule rejects the note at `remember` time; a `redact` rule masks matches before saving; a `flag` rule saves the note and adds a `pii-flag` tag. To let a flagged shape through on one line, add the exemption marker on that line:
 
 ```markdown
 The Jira ticket PROJ-1234 <!-- pii-allow: internal-ticket --> is public.
 ```
+
+**Secret scrub (no user setting).** Separately from PII rules, `remember` replaces known credential shapes in a note's title and body with `‹REDACTED›`, and the query log gets the same scrub. It covers Slack tokens, `sk-` / `sk-ant-` API keys, AWS `AKIA…` keys, GitHub tokens, Google `AIza…` keys, JWTs, `-----BEGIN … PRIVATE KEY-----` headers, and `api_key` / `secret` / `token` / `password` / `bearer` assignments with a 12+ character value. The list is a constant in the code (`drudge/src/redact.rs`), not a setting: no config key or file turns it off or extends it. To change what it masks, edit `redact.rs` and rebuild. For shapes of your own, use a PII rule above.
+
+**Company-origin split.** `allow_company_origin` (in the gitignored `boring.json`, default `false`) decides what the audit does with `origin:company` notes — session experience from company work. `false`: they are flagged for review and the audit "clean" flag flips. `true`: they count as accepted corpus and the flag stays. It only changes that audit flag; it does not block writes. Which notes are `company` comes from the `repos[]` rules in the settings table.
 
 ### MCP tool call (raw JSON-RPC)
 
@@ -652,6 +679,6 @@ oh-my-boring/
 └─ Makefile
 ```
 
-> **Note on vault/wiki IDs:** `wiki-0000.md` is the tracked sample note (shipped with the repo). Personal notes start at `wiki-0001.md` and are gitignored, so your private content never leaks into git.
+> **Note on vault/wiki IDs:** `wiki-0000.md` is the tracked sample note (shipped with the repo) and the only note with a four-digit ID. Your own notes get eleven-digit IDs, starting at `wiki-00000000001.md`, and are gitignored, so your private content never leaks into git.
 >
 > **Platform note:** Tested on macOS and Linux. Windows is not officially supported yet because `hooks/` uses symlinks for backward compatibility.
