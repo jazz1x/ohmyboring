@@ -70,7 +70,7 @@ make maintenance                     # 지금 한 번 돌린다
 
 | 바꾼 것 | 해야 하는 것 |
 |---|---|
-| Python·훅·hermes 스크립트 | `python3 agents/shared/agent_wiring.py --install --boring-home "$PWD"` |
+| Python·훅·hermes 스크립트 | `uv run --locked --project "$PWD" python agents/shared/agent_wiring.py --install --boring-home "$PWD"` |
 | Rust | `make build` 후 `docker compose up -d` |
 | 둘 다 | 위 둘 다, 순서 무관 |
 

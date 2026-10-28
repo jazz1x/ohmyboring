@@ -11,7 +11,7 @@ description: oh-my-boring 저장소에서 변경을 머지 뒤 소비자 쪽(~/.
 
 | 바뀐 것 | 명령 | 통과 조건 |
 |---|---|---|
-| Python · 훅 · `~/.hermes/scripts` 로 복사되는 것 | `python3 agents/shared/agent_wiring.py --install --boring-home "$PWD"` | `sh scripts/doctor.sh` 에 `DEPLOY DRIFT` 줄이 없다 |
+| Python · 훅 · `~/.hermes/scripts` 로 복사되는 것 | `uv run --locked --project "$PWD" python agents/shared/agent_wiring.py --install --boring-home "$PWD"` | `sh scripts/doctor.sh` 에 `DEPLOY DRIFT` 줄이 없다 |
 | Rust (`drudge/`) | `make build` 후 컨테이너 재기동 | `make build` 가 compose 이미지(엔진·문)와 호스트 CLI 바이너리를 함께 만든다. doctor 가 engine build_sha 와 호스트 CLI 스탬프를 체크아웃과 대조한다 |
 | 문 이미지가 COPY 하는 경로 전부: `src/`, `agents/door/`, `agents/slack/`, `agents/shared/`, `agents/memory/`, `agents/hermes/`, `pyproject.toml`, `requirements.txt`, `data/contract/engine-contract.json` | 위 `agent_wiring --install` **에 더해** `make door-build && make door-up` | 출력에 `Recreated` |
 | hermes cron 작업 추가·수정·삭제 | 저장소의 크론 작업은 `agent_wiring --install` 이 맞춘다. 그 밖의 추가·수정은 `docker exec boring-agent hermes cron create …` (`edit` · `pause` · `resume` · `remove` 도 같은 CLI) | 한 주기 뒤 `docker exec boring-agent hermes cron list` 재확인 |
