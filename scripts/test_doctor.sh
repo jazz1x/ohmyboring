@@ -454,6 +454,28 @@ case "$(cat "$TMP/stale-note.out")" in
     ;;
 esac
 
+# Ids pass four digits at wiki-10000: a text sort puts wiki-9999 last, so freshness read the
+# old note and went red while wiki-10000 was minutes old.
+make_case "$TMP/five-digit-id" yes
+five_wiki="$TMP/five-digit-id/boring/vault/wiki"
+touch "$five_wiki/wiki-9999.md" "$five_wiki/wiki-10000.md"
+python3 -c 'import os, sys; os.utime(sys.argv[1], (int(sys.argv[2]), int(sys.argv[2])))' "$five_wiki/wiki-0001.md" "$old_epoch"
+python3 -c 'import os, sys; os.utime(sys.argv[1], (int(sys.argv[2]), int(sys.argv[2])))' "$five_wiki/wiki-9999.md" "$old_epoch"
+( BORING_READINESS_NOTE_MAX_HOURS=1 run_strict "$TMP/five-digit-id" "$TMP/five-digit-id.out" ) || true
+case "$(cat "$TMP/five-digit-id.out")" in
+  *"newest note is stale"*|*"path=$five_wiki/wiki-9999.md"*)
+    cat "$TMP/five-digit-id.out"
+    echo "FAIL: doctor picked wiki-9999 over wiki-10000 as the newest note" >&2
+    exit 1
+    ;;
+  *"note_freshness age_s="*"path=$five_wiki/wiki-10000.md"*) ;;
+  *)
+    cat "$TMP/five-digit-id.out"
+    echo "FAIL: doctor did not report note freshness for wiki-10000" >&2
+    exit 1
+    ;;
+esac
+
 make_case "$TMP/stale-marker" yes
 touch "$TMP/stale-marker/home/.cache/boring-distill/stale.pending"
 old_marker_epoch=$(( $(date +%s) - 7200 ))
