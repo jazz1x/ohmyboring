@@ -23,7 +23,7 @@ use crate::wiki_recall;
 mod http;
 mod mcp;
 mod note_index;
-mod owner;
+pub(crate) mod owner;
 #[cfg(test)]
 mod pg_failure_tests;
 mod scheduler;
@@ -1909,7 +1909,10 @@ pub(crate) fn build_router(state: AppState) -> axum::Router {
         .route("/claim-source", get(http::handle_claim_source))
         .route("/claim-sources", get(http::handle_claim_sources))
         .route("/approved", get(http::handle_approved))
-        .route("/repairs/split-subjects", get(http::handle_split_subjects))
+        .route(
+            "/repairs/split-subjects",
+            get(http::handle_split_subjects).post(http::handle_split_merge),
+        )
         .route(
             "/repairs/split-subjects/samples",
             get(http::handle_split_samples),

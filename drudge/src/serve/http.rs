@@ -1194,6 +1194,56 @@ pub(crate) async fn handle_split_samples(
     }
 }
 
+/// `POST /repairs/split-subjects` — same wire as the Python door minus what the door adds: 400 for a
+/// body that is not JSON or has no usable `subject`, 503 without a store, 404 when no group has
+/// that subject, 502 when the store fails, else 202. Only the owner token keeps the owner's own
+/// notes in the merge; the `row` the door validates is none of the engine's business.
+pub(crate) async fn handle_split_merge(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    use axum::response::IntoResponse;
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "body must be JSON"}),
+        );
+    };
+    let subject = match crate::split_subjects::parse_subject(&body) {
+        crate::split_subjects::Subject::Missing => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                json!({"error": "subject is required"}),
+            );
+        }
+        crate::split_subjects::Subject::Text(text) => Some(text),
+        crate::split_subjects::Subject::NotText => None,
+    };
+    let Some(store) = s.store.as_ref() else {
+        return no_store();
+    };
+    let Some(subject) = subject else {
+        return no_group();
+    };
+    let standing = match owner::Caller::from_headers((*s.owner_token).as_deref(), &headers) {
+        owner::Caller::Owner => owner::Standing::Owner,
+        owner::Caller::Unverified => owner::Standing::NotOwner,
+    };
+    match store.merge_split_subject(&subject, standing).await {
+        Ok(Some(merged)) => (StatusCode::ACCEPTED, Json(merged)).into_response(),
+        Ok(None) => no_group(),
+        Err(e) => store_unreachable(&e),
+    }
+}
+
+fn no_group() -> Response {
+    json_response(
+        StatusCode::NOT_FOUND,
+        json!({"error": "no split-subject group for that subject"}),
+    )
+}
+
 /// What the card sessions approved or contested — same wire as the Python door's `GET /approved`:
 /// 400 `{error}` for a bad `since_hours` (checked before the store), 503 without a store, 502
 /// `{error, detail}` when it can't be reached, else 200. Skipped rows are logged, only counted on the wire.

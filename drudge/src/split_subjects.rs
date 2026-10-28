@@ -54,6 +54,57 @@ pub struct Samples {
     pub samples: Vec<Sample>,
 }
 
+/// The 202 body of `POST /repairs/split-subjects`. The door adds `remaining_variants` and `sync`.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct Merged {
+    pub subject: String,
+    pub deleted_rows: u64,
+    pub reread_notes: u64,
+    pub owner_held: Vec<String>,
+}
+
+pub const DELETE_SQL: &str =
+    "delete from claim where subject = any($1) and source_path = any($2) and superseded_at is null";
+pub const BLANK_SHA_SQL: &str = "update document set sha = '' where source_path = any($1)";
+
+/// The `subject` of a POST body as Python's `body.get("subject")` truthiness reads it: anything
+/// falsy (or a body that is no object) is missing; a truthy non-string names no group.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Subject {
+    Missing,
+    Text(String),
+    NotText,
+}
+
+pub fn parse_subject(body: &serde_json::Value) -> Subject {
+    use serde_json::Value;
+    match body.get("subject") {
+        None | Some(Value::Null | Value::Bool(false)) => Subject::Missing,
+        Some(Value::String(text)) if text.is_empty() => Subject::Missing,
+        Some(Value::String(text)) => Subject::Text(text.clone()),
+        Some(Value::Number(n)) if n.as_f64() == Some(0.0) => Subject::Missing,
+        Some(Value::Array(items)) if items.is_empty() => Subject::Missing,
+        Some(Value::Object(fields)) if fields.is_empty() => Subject::Missing,
+        Some(_) => Subject::NotText,
+    }
+}
+
+/// The group `subject` names and the notes whose claims carry one of its spellings (sorted).
+pub fn find_group(rows: &[(String, String)], subject: &str) -> Option<(Vec<String>, Vec<String>)> {
+    let group = group_split_subjects(rows)
+        .into_iter()
+        .find(|g| g.subject == subject)?;
+    let notes: BTreeSet<&str> = rows
+        .iter()
+        .filter(|(spelling, _)| group.variants.contains(spelling))
+        .map(|(_, path)| path.as_str())
+        .collect();
+    Some((
+        group.variants,
+        notes.into_iter().map(str::to_owned).collect(),
+    ))
+}
+
 /// What the `variant` query values turned out to be.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Variants {

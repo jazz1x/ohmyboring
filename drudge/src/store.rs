@@ -3048,6 +3048,71 @@ impl Store {
             .collect())
     }
 
+    /// The group `subject` names, read on the request's transaction.
+    async fn split_group_on(
+        tx: &Transaction<'_>,
+        subject: &str,
+    ) -> Result<Option<(Vec<String>, Vec<String>)>> {
+        let rows = tx
+            .query(crate::split_subjects::SUBJECTS_SQL, &[])
+            .await
+            .context("split subject rows")?;
+        let rows: Vec<(String, String)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+        Ok(crate::split_subjects::find_group(&rows, subject))
+    }
+
+    /// `POST /repairs/split-subjects`: delete the claim rows of one group's other spellings and
+    /// blank the affected notes' sha so the next sync re-reads them, in one transaction. Without
+    /// the owner's standing the owner-written notes are left as they are and named in
+    /// `owner_held`. `None` means `subject` names no live group.
+    pub(crate) async fn merge_split_subject(
+        &self,
+        subject: &str,
+        standing: crate::serve::owner::Standing,
+    ) -> Result<Option<crate::split_subjects::Merged>> {
+        use crate::serve::owner::Standing;
+        let mut conn = self.db().await?;
+        let tx = conn
+            .transaction()
+            .await
+            .context("begin split merge transaction")?;
+        // The first read only names the spellings to lock. The rows the merge acts on are read
+        // again once the slots are held, on the same transaction: a row an ingest or a seal
+        // committed in between is seen, and no other writer can change them until we commit.
+        let Some((spellings, _)) = Self::split_group_on(&tx, subject).await? else {
+            return Ok(None);
+        };
+        Self::lock_split_slots(&tx, &spellings).await?;
+        let Some((variants, notes)) = Self::split_group_on(&tx, subject).await? else {
+            return Ok(None);
+        };
+        let owner_held = match standing {
+            Standing::Owner => Vec::new(),
+            Standing::NotOwner => Self::owner_authored(&tx, &notes).await?,
+        };
+        let touched: Vec<String> = notes
+            .into_iter()
+            .filter(|path| !owner_held.contains(path))
+            .collect();
+        let deleted_rows = tx
+            .execute(crate::split_subjects::DELETE_SQL, &[&variants, &touched])
+            .await
+            .context("delete split claim rows")?;
+        let reread_notes = tx
+            .execute(crate::split_subjects::BLANK_SHA_SQL, &[&touched])
+            .await
+            .context("blank split notes' sha")?;
+        tx.commit()
+            .await
+            .context("commit split merge transaction")?;
+        Ok(Some(crate::split_subjects::Merged {
+            subject: subject.to_owned(),
+            deleted_rows,
+            reread_notes,
+            owner_held,
+        }))
+    }
+
     /// Card-session edges for `GET /approved` (SQL copied from the Python door). Row order is
     /// not fixed; the caller sorts.
     pub async fn approved_edges(&self) -> Result<Vec<crate::approved::EdgeRow>> {
@@ -3559,6 +3624,27 @@ impl Store {
         )
         .await
         .context("lock claim slots in slot order")?;
+        Ok(())
+    }
+
+    /// Lock every claim row carrying one of `spellings`, in the order `lock_claim_slots_of` takes
+    /// a slot's rows (canon subject, canon predicate in `"C"` collation, then `valid_from`), so a
+    /// merge and an ingest or seal on the same slots wait on each other instead of in a cycle.
+    async fn lock_split_slots(tx: &Transaction<'_>, spellings: &[String]) -> Result<()> {
+        let canon_subject = canon_sql("c.subject");
+        let canon_predicate = canon_sql("c.predicate");
+        tx.execute(
+            &format!(
+                "SELECT 1 FROM claim c
+                 WHERE c.subject = ANY($1)
+                 ORDER BY ({canon_subject}) COLLATE \"C\", ({canon_predicate}) COLLATE \"C\",
+                          c.valid_from
+                 FOR UPDATE OF c;"
+            ),
+            &[&spellings],
+        )
+        .await
+        .context("lock split slots in slot order")?;
         Ok(())
     }
 
