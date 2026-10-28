@@ -83,7 +83,30 @@ def test_missing_token_fails_before_the_card_starts() -> None:
     assert line == "[x] FAILED: fake-card: SLACK_BOT_TOKEN 없음 tail="
 
 
+def test_card_root_without_slack_dir_fails_before_the_card_starts() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        marker = Path(tmp) / "started"
+        fake = Path(tmp) / "fake_card.py"
+        fake.write_text(f"open({str(marker)!r}, 'w').close()\n", encoding="utf-8")
+        env_file = Path(tmp) / ".env"
+        env_file.write_text(f"SLACK_BOT_TOKEN={FAKE_TOKEN}\n", encoding="utf-8")
+        root = Path(tmp) / "no-card-root"
+        answer = card_runner.execute(
+            "fake-card",
+            programs={"fake-card": fake},
+            lock_dir=Path(tmp) / "locks",
+            env_file=env_file,
+            card_root=root,
+        )
+        started = marker.exists()
+    code, stream, line = card_runner.fold("[x]", answer)
+    assert not started
+    assert (code, stream) == (1, "stderr")
+    assert line == f"[x] FAILED: fake-card: 카드 뿌리 없음: {root} tail="
+
+
 if __name__ == "__main__":
+    test_card_root_without_slack_dir_fails_before_the_card_starts()
     test_missing_token_fails_before_the_card_starts()
     test_second_concurrent_run_is_rejected_like_the_door_409()
     print("ok")

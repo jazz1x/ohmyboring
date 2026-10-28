@@ -11,8 +11,10 @@ Answer into (exit code, stream, line) (decision). `run_card` is the only one tha
 
 Each cron run is its own process, so the one-at-a-time lock is a non-blocking flock on a file
 per card; it is dropped by the kernel when the process dies, so a crashed run cannot wedge it.
-The card scripts sit at ../slack/ relative to this file — the scripts are mounted read-only in
-the hermes container, so the lock files live in the hermes data dir instead.
+The card scripts sit under <card root>/agents/slack/: the card root is $BORING_CARD_ROOT when set,
+else the repo this file sits in (parents[2]). A root without agents/slack (e.g. this file copied
+into ~/.hermes/scripts) fails the run. The scripts are mounted read-only in the hermes container,
+so the lock files live in the hermes data dir instead.
 """
 
 from __future__ import annotations
@@ -29,14 +31,19 @@ from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+
+def default_card_root() -> Path:
+    return Path(os.environ.get("BORING_CARD_ROOT") or _REPO_ROOT)
+
+
 #: how long one card run may take before it is given up on (the door's DOOR_RUN_CARD_TIMEOUT).
 RUN_CARD_TIMEOUT_S = float(os.environ.get("DOOR_RUN_CARD_TIMEOUT", "900"))
 
 CARD_PROGRAMS = {
-    "morning-card": _REPO_ROOT / "agents" / "slack" / "card.py",
-    "weekly-card": _REPO_ROOT / "agents" / "slack" / "weekly_card.py",
-    "repair-judge": _REPO_ROOT / "agents" / "slack" / "card_repair_judge.py",
-    "advice-write": _REPO_ROOT / "agents" / "slack" / "card_advice_write.py",
+    "morning-card": Path("agents") / "slack" / "card.py",
+    "weekly-card": Path("agents") / "slack" / "weekly_card.py",
+    "repair-judge": Path("agents") / "slack" / "card_repair_judge.py",
+    "advice-write": Path("agents") / "slack" / "card_advice_write.py",
 }
 
 #: the tool prints "[card] posted ts=<slack ts>"; the newest match on stdout is posted_ts.
@@ -91,11 +98,11 @@ def _failed(error: str) -> Answer:
     return Answer(200, {"ok": False, "exit": None, "tail": "", "error": error})
 
 
-def _run_locked(script: Path, timeout_s: float, token: str) -> Answer:
+def _run_locked(script: Path, root: Path, timeout_s: float, token: str) -> Answer:
     try:
         completed = subprocess.run(
             [sys.executable, str(script)],
-            cwd=str(_REPO_ROOT),
+            cwd=str(root),
             env={**os.environ, "SLACK_BOT_TOKEN": token},
             capture_output=True,
             text=True,
@@ -116,11 +123,16 @@ def execute(
     lock_dir: Path | None = None,
     timeout_s: float = RUN_CARD_TIMEOUT_S,
     env_file: Path | None = None,
+    card_root: Path | None = None,
 ) -> Answer:
     """Run one card under its per-card lock. A second concurrent caller gets the door's 409."""
-    script = programs.get(name)
-    if script is None:
+    program = programs.get(name)
+    if program is None:
         return Answer(404, {"error": f"unknown card {name}"})
+    root = card_root if card_root is not None else default_card_root()
+    if not (root / "agents" / "slack").is_dir():
+        return _failed(f"{name}: 카드 뿌리 없음: {root}")
+    script = root / program
     # Read from $HERMES_HOME/.env, not terminal.env_passthrough: that is a hermes-global setting that
     # also reaches the agent's tool subprocesses (shell/code execution), leaking the bot token to every agent-run command.
     token = read_bot_token(env_file if env_file is not None else default_env_file())
@@ -139,7 +151,7 @@ def execute(
             return Answer(409, {"error": f"{name} already running"})
         except OSError as e:
             return _failed(f"lock unavailable: {e}")
-        return _run_locked(script, timeout_s, token)
+        return _run_locked(script, root, timeout_s, token)
 
 
 def fold(label: str, answer: Answer) -> tuple[int, str, str]:

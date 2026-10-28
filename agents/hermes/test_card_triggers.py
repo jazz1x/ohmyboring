@@ -172,20 +172,22 @@ def test_the_entry_scripts_post_their_own_route_and_label():
     weekly = load("run_weekly_card_under_test", ROOT / "run-weekly-card.py")
     seen: list[tuple[str, str]] = []
 
-    def fake_trigger(route: str, label: str) -> int:
-        seen.append((route, label))
+    def fake_run_card(name: str, label: str) -> int:
+        seen.append((name, label))
         return 0
 
-    real_trigger = card_door.trigger
-    card_door.trigger = fake_trigger
+    import card_runner
+
+    real_run_card = card_runner.run_card
+    card_runner.run_card = fake_run_card
     try:
         assert morning.main() == 0
         assert weekly.main() == 0
     finally:
-        card_door.trigger = real_trigger
+        card_runner.run_card = real_run_card
     assert seen == [
-        ("/run/morning-card", "[run-morning-card]"),
-        ("/run/weekly-card", "[run-weekly-card]"),
+        ("morning-card", "[run-morning-card]"),
+        ("weekly-card", "[run-weekly-card]"),
     ]
 
 
