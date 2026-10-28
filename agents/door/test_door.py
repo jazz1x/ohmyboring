@@ -485,7 +485,7 @@ class DoorTest(unittest.TestCase):
             expected.add((method, path))
         actual = {(method, route.path) for route in door.app.routes for method in route.methods}
         self.assertEqual(actual, expected)
-        self.assertEqual(len(contract["http_routes"]), 34)
+        self.assertEqual(len(contract["http_routes"]), 38)
 
     def test_events_get_passes_through_byte_identical(self):
         # E4-α — /events entered the proxy table with the contract re-snapshot; the door
