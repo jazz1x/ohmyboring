@@ -177,10 +177,11 @@ newest() {
 # that already exist (`graph→obsidian: updated 8 wiki relates_to`), so mtime says a note was
 # touched, not that a session was distilled: on 2026-09-15 the newest mtime was wiki-0120, an old
 # note, while the write door had not opened since 09-12. Ids only ever go up, and only a
-# distillation mints one.
+# distillation mints one. Sort on the number after the last "wiki-": a text sort put wiki-9999
+# after wiki-10000.
 newest_minted() {
     # shellcheck disable=SC2086
-    ls $1 2>/dev/null | sort | tail -n 1
+    ls $1 2>/dev/null | awk -F'wiki-' '{ print $NF "\t" $0 }' | sort -n | tail -n 1 | cut -f 2-
 }
 
 days_since() {
