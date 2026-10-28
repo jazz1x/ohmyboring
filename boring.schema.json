@@ -177,7 +177,19 @@
       "additionalProperties": false,
       "description": "Vector index backend of the Rust engine.",
       "properties": {
-        "backend": {"type": "string", "enum": ["pgvector"], "default": "pgvector", "description": "Only pgvector is implemented. Any other value does not stop the engine: it runs on pgvector and config_get / the startup log say so."}
+        "backend": {"type": "string", "enum": ["pgvector", "surreal"], "default": "pgvector", "description": "pgvector or surreal. surreal reads vectors from the SurrealDB in `surreal`, frozen at the last `vector-fill`; recurrences stays on pgvector. Any other value does not stop the engine: it runs on pgvector and config_get / the startup log say so."},
+        "surreal": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "SurrealDB connection, used when backend is surreal and by `vector-fill`. Env BORING_SURREAL_URL takes over `url`.",
+          "properties": {
+            "url": {"type": "string", "default": "http://localhost:8000"},
+            "namespace": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$", "default": "boring"},
+            "database": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$", "default": "boring"},
+            "user": {"type": "string", "default": "root"},
+            "password_env": {"type": "string", "default": "BORING_SURREAL_PASSWORD", "description": "Name of the env variable holding the password; the password itself never goes in this file."}
+          }
+        }
       }
     },
     "collect": {

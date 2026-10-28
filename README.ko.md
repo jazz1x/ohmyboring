@@ -189,7 +189,7 @@ flowchart LR
 | `checkout_roots` | git 체크아웃이 들어 있는 디렉터리 목록(`~` 확장, 깊이 ≤ 3). 야간 위생 점검이 원격 저장소 이름 대신 체크아웃 폴더 이름으로 잡힌 프로젝트를 보고. 미설정 = 점검을 돌리지 않음(0 이 아니라 "스캔 안 함"으로 보고) |
 | `card.note_links` | 아침 카드에서 노트 id 옆에 표시할 링크(순서대로). 키를 빼면 그 링크는 숨김. `obsidian`(`vault`, 선택 `folder`) · `file`(`folder` = 호스트 절대 경로, `~` 불가; `editor` URL 스킴, 기본 `vscode`) |
 | `embed_model` / `embed_dim` (최상위) | 폐기 예정 v1 키(기본 `bge-m3` / `1024`). `llm.embed_model` / `llm.embed_dim` 이 없을 때만 대체값으로 읽음 — `llm.*` 키를 쓰세요 |
-| `vector.backend` | 엔진의 벡터 인덱스 백엔드. 기본값이자 유일하게 받는 값은 `pgvector`. 다른 값을 줘도 엔진은 멈추지 않고 `pgvector` 로 돌며, `config_get` 과 시작 로그가 그 사실을 알림 |
+| `vector.backend` | 엔진의 벡터 인덱스 백엔드. `pgvector`(기본값) 또는 `surreal`. `surreal` 은 `vector.surreal`(`url`, `namespace`, `database`, `user`, `password_env`)의 SurrealDB 에서 벡터를 읽음(`--profile surreal` 로 띄우고 `vector-fill` 명령으로 채움). 복사본은 채운 시점에 고정이고 `recurrences` 는 `pgvector` 에 남으며, `config_get` 과 시작 로그가 둘 다 알림. 다른 값을 줘도 엔진은 멈추지 않고 `pgvector` 로 돌며, `config_get` 과 시작 로그가 그 사실을 알림 |
 
 코드는 `vault/wiki`에 복사하지 않습니다. `boring.example.json`을 참고해 source를 활성화한 뒤 `cargo run --manifest-path drudge/Cargo.toml -- code-sync --repository <id>`로 적재하고, `code-status` 또는 MCP의 `code_search`, `code_symbol`, `code_index_status`로 조회합니다. Tree-sitter는 구문과 파싱 오류만 기록하며, 호출·import·reference의 대상 문자열은 semantic resolver를 붙이기 전까지 미해결 상태로 둡니다.
 

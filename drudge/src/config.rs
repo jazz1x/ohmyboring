@@ -29,7 +29,7 @@ const SCHEDULE_FIELDS: &[&str] = &[
     "ingest_tick_minutes",
     "queue_per_tick",
 ];
-const VECTOR_FIELDS: &[&str] = &["backend"];
+const VECTOR_FIELDS: &[&str] = &["backend", "surreal"];
 const COLLECT_FIELDS: &[&str] = &[
     "window_hours",
     "min_bytes",
@@ -216,12 +216,15 @@ pub struct ScheduleEffective {
     pub brief_hour_error: Option<String>,
 }
 
-/// boring.json `vector.backend`, parsed once at the boundary. Only `pgvector` is implemented; any
-/// other value is kept as `Unsupported` so config_get and the startup log can name it, and the
-/// engine runs on pgvector regardless (an invalid value must not take the engine down).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// boring.json `vector.backend`, parsed once at the boundary. `pgvector` and `surreal` are
+/// implemented; any other value is kept as `Unsupported` so config_get and the startup log can
+/// name it, and the engine runs on pgvector regardless (an invalid value must not take the
+/// engine down).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum VectorBackend {
+    #[default]
     Pgvector,
+    Surreal,
     Unsupported(String),
 }
 
@@ -229,6 +232,7 @@ impl VectorBackend {
     fn parse(raw: &str) -> Self {
         match raw {
             "pgvector" => Self::Pgvector,
+            "surreal" => Self::Surreal,
             other => Self::Unsupported(other.to_owned()),
         }
     }
@@ -236,6 +240,7 @@ impl VectorBackend {
     fn as_str(&self) -> &str {
         match self {
             Self::Pgvector => "pgvector",
+            Self::Surreal => "surreal",
             Self::Unsupported(raw) => raw,
         }
     }
@@ -253,20 +258,126 @@ impl<'de> Deserialize<'de> for VectorBackend {
     }
 }
 
-/// boring.json `vector`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct VectorConfig {
-    pub backend: VectorBackend,
+/// A SurrealQL identifier that is spliced into `DEFINE NAMESPACE/DATABASE` (names cannot be bound
+/// as variables), so it is checked once here and trusted below.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurrealName(String);
+
+impl SurrealName {
+    fn parse(raw: &str) -> Result<Self, String> {
+        let ok = !raw.is_empty()
+            && raw
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if ok {
+            Ok(Self(raw.to_owned()))
+        } else {
+            Err(format!("surreal 이름은 영문·숫자·_·- 만 허용: {raw:?}"))
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-impl Default for VectorConfig {
+impl Serialize for SurrealName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SurrealName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(de::Error::custom)
+    }
+}
+
+const DEFAULT_SURREAL_URL: &str = "http://localhost:8000";
+const DEFAULT_SURREAL_NAME: &str = "boring";
+const DEFAULT_SURREAL_USER: &str = "root";
+const DEFAULT_SURREAL_PASSWORD_ENV: &str = "BORING_SURREAL_PASSWORD";
+const SURREAL_URL_ENV: &str = "BORING_SURREAL_URL";
+
+/// boring.json `vector.surreal`: where the SurrealDB server is. The password is never in the file:
+/// `password_env` names the env variable that holds it (same rule as `llm.api_key_env`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SurrealConfig {
+    pub url: String,
+    pub namespace: SurrealName,
+    pub database: SurrealName,
+    pub user: String,
+    pub password_env: String,
+}
+
+impl Default for SurrealConfig {
     fn default() -> Self {
         Self {
-            backend: VectorBackend::Pgvector,
+            url: DEFAULT_SURREAL_URL.to_owned(),
+            namespace: SurrealName(DEFAULT_SURREAL_NAME.to_owned()),
+            database: SurrealName(DEFAULT_SURREAL_NAME.to_owned()),
+            user: DEFAULT_SURREAL_USER.to_owned(),
+            password_env: DEFAULT_SURREAL_PASSWORD_ENV.to_owned(),
         }
     }
 }
+
+/// `SurrealConfig` with env applied and the password read: what the process connects with.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SurrealSettings {
+    pub url: String,
+    pub namespace: SurrealName,
+    pub database: SurrealName,
+    pub user: String,
+    pub password: String,
+}
+
+/// Hand-written: the password must never reach a log.
+impl std::fmt::Debug for SurrealSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SurrealSettings")
+            .field("url", &self.url)
+            .field("namespace", &self.namespace)
+            .field("database", &self.database)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SurrealConfig {
+    /// Env `BORING_SURREAL_URL` takes over `url`; the password comes from the variable named by
+    /// `password_env`. A missing password is an error, not a default.
+    pub fn settings(&self, env: EnvLookup<'_>) -> Result<SurrealSettings> {
+        let password = env(&self.password_env).with_context(|| {
+            format!(
+                "vector.surreal: 비밀번호 env {} 가 비어 있음",
+                self.password_env
+            )
+        })?;
+        Ok(SurrealSettings {
+            url: env(SURREAL_URL_ENV).unwrap_or_else(|| self.url.clone()),
+            namespace: self.namespace.clone(),
+            database: self.database.clone(),
+            user: self.user.clone(),
+            password,
+        })
+    }
+}
+
+/// boring.json `vector`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct VectorConfig {
+    pub backend: VectorBackend,
+    pub surreal: SurrealConfig,
+}
+
+/// Shown at startup and in `config_get` next to the effective backend when it is surreal: the one
+/// path that stays on pgvector, and the frozen-copy caveat.
+pub const SURREAL_PINNED_NOTES: [&str; 2] =
+    ["recurrences 는 pgvector", "surreal: 한 번 채우기 시점 고정"];
 
 /// `VectorConfig::effective`: the backend the process runs on, and the notice shown when the
 /// file asked for one that is not implemented.
@@ -279,15 +390,19 @@ pub struct VectorEffective {
 impl VectorConfig {
     #[must_use]
     pub fn effective(&self) -> VectorEffective {
-        let backend_error = match &self.backend {
-            VectorBackend::Pgvector => None,
-            VectorBackend::Unsupported(raw) => {
-                Some(format!("vector.backend={raw} 미지원, pgvector 로 돎"))
-            }
-        };
-        VectorEffective {
-            backend: VectorBackend::Pgvector,
-            backend_error,
+        match &self.backend {
+            VectorBackend::Pgvector => VectorEffective {
+                backend: VectorBackend::Pgvector,
+                backend_error: None,
+            },
+            VectorBackend::Surreal => VectorEffective {
+                backend: VectorBackend::Surreal,
+                backend_error: None,
+            },
+            VectorBackend::Unsupported(raw) => VectorEffective {
+                backend: VectorBackend::Pgvector,
+                backend_error: Some(format!("vector.backend={raw} 미지원, pgvector 로 돎")),
+            },
         }
     }
 }
@@ -967,6 +1082,12 @@ impl BoringConfig {
         let mut vector_effective = serde_json::json!({"backend": vector.backend});
         if let Some(reason) = &vector.backend_error {
             vector_effective["backend_error"] = serde_json::Value::from(reason.as_str());
+        }
+        if vector.backend == VectorBackend::Surreal {
+            vector_effective["notes"] = serde_json::json!(SURREAL_PINNED_NOTES);
+            vector_effective["surreal_url"] = serde_json::Value::from(
+                env(SURREAL_URL_ENV).unwrap_or_else(|| self.vector.surreal.url.clone()),
+            );
         }
         view["vector"] = serde_json::json!({
             "file": serde_json::to_value(&self.vector)?,

@@ -28,6 +28,11 @@ use tokio_postgres::{Client, Config as PgConfig, NoTls};
 use crate::frontmatter::{Claim, FrontMatter};
 
 mod vector_pg;
+mod vector_route;
+mod vector_surreal;
+
+pub use vector_route::VectorRoute;
+pub use vector_surreal::{FillTable, KeySet, SurrealClient};
 
 /// Ingest input (one chunk).
 #[derive(Debug)]
@@ -353,6 +358,8 @@ pub struct Store {
     /// upsert via `checked_vector` and mirrored by the `vector(dim)` DDL columns created in `open`.
     dim: usize,
     target: crate::pg_detail::ConnectTarget,
+    /// Which backend ranks vectors (`vector.backend`); pgvector unless `with_vector_route` says otherwise.
+    vector_route: VectorRoute,
 }
 
 /// Hand-written: `pool` holds the parsed DSN (user and password), which must never reach a log.
@@ -1176,7 +1183,19 @@ impl Store {
             ))
             .await
             .context("claim/graph data migrations")?;
-        Ok(Self { pool, dim, target })
+        Ok(Self {
+            pool,
+            dim,
+            target,
+            vector_route: VectorRoute::default(),
+        })
+    }
+
+    /// Start the store on the given vector backend (`vector.backend`).
+    #[must_use]
+    pub fn with_vector_route(mut self, route: VectorRoute) -> Self {
+        self.vector_route = route;
+        self
     }
 
     /// The door wording of a failure that came out of this store (see `pg_detail`).

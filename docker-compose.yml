@@ -38,6 +38,21 @@ services:
     ports:
       - "127.0.0.1:5432:5432"             # for DataGrip / direct connection
 
+  # ─────────────────────────── SurrealDB (vector.backend=surreal) ───────────────
+  # Opt-in: `--profile surreal`. Not part of any default start; the engine only talks to it when
+  # boring.json says vector.backend=surreal. Image = the digest the stage-0 measurement ran on.
+  boring-surreal:
+    profiles: ["surreal"]
+    image: surrealdb/surrealdb:v3.3.4@sha256:649a60a3b9c0177d9923c938e1c2563e48cde2a9d06ac2c0519714be719b02af
+    container_name: boring-surreal
+    restart: unless-stopped
+    user: root
+    command: start --user root --pass ${BORING_SURREAL_PASSWORD:-boring} --log warn rocksdb:/data/db
+    volumes:
+      - ./data/surrealdata:/data
+    ports:
+      - "127.0.0.1:8000:8000"
+
   # ─────────────────────────── ohmyboring (Rust engine) ─────────────────────────
   # Deterministic kernel: embed + ingest, recall (ask/graph), audit, and the remember MCP tool over HTTP + cron.
   boring-drudge:

@@ -189,7 +189,7 @@ flowchart LR
 | `checkout_roots` | git チェックアウトを置くディレクトリの一覧（`~` 展開、深さ ≤ 3）。夜間の衛生チェックが、リモートのリポジトリ名ではなくチェックアウトのフォルダ名で付いたプロジェクトを報告。未設定 = チェックを実行しない（0 ではなく「スキャンなし」と報告） |
 | `card.note_links` | 朝のカードでノート id の横に出すリンク（順番どおり）。キーを省くとそのリンクは非表示。`obsidian`（`vault`、任意で `folder`）· `file`（`folder` = ホストの絶対パス、`~` 不可；`editor` は URL スキーム、既定 `vscode`） |
 | `embed_model` / `embed_dim`（最上位） | 非推奨の v1 キー（既定 `bge-m3` / `1024`）。`llm.embed_model` / `llm.embed_dim` が未設定のときだけ代替として読む — `llm.*` キーを使ってください |
-| `vector.backend` | エンジンのベクトルインデックスのバックエンド。既定かつ唯一受け付ける値は `pgvector`。他の値でもエンジンは止まらず `pgvector` で動き、`config_get` と起動ログがそれを知らせる |
+| `vector.backend` | エンジンのベクトルインデックスのバックエンド。`pgvector`（既定）または `surreal`。`surreal` は `vector.surreal`（`url`、`namespace`、`database`、`user`、`password_env`）の SurrealDB からベクトルを読む（`--profile surreal` で起動、`vector-fill` コマンドで充填）。コピーは充填時点で固定され、`recurrences` は `pgvector` のまま。`config_get` と起動ログが両方を知らせる。他の値でもエンジンは止まらず `pgvector` で動き、`config_get` と起動ログがそれを知らせる |
 
 コードは `vault/wiki` にコピーしません。`boring.example.json` を参考に source を有効化し、`cargo run --manifest-path drudge/Cargo.toml -- code-sync --repository <id>` で取り込み、`code-status` または MCP の `code_search`、`code_symbol`、`code_index_status` で照会します。Tree-sitter は構文とパースエラーだけを記録し、call・import・reference の対象文字列は semantic resolver を追加するまで未解決のまま保持します。
 

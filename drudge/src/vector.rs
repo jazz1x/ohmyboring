@@ -1,5 +1,5 @@
 //! The vector-index boundary: the six queries that rank rows by embedding distance. Every caller
-//! reaches them through this trait; `store::vector_pg` is the only implementation. The signatures are
+//! reaches them through this trait; `Store` routes each one to `store::vector_pg` (pgvector) or `store::vector_surreal` (five of the six; `recurrences` stays on pgvector). The signatures are
 //! the ones the `Store` methods had — filters stay per-function, nothing is grouped into a "shape".
 
 use anyhow::Result;

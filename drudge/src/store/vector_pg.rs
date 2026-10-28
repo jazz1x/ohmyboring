@@ -14,7 +14,18 @@ use super::{
 use crate::frontmatter::Claim;
 use crate::vector::VectorIndex;
 
-impl VectorIndex for Store {
+/// The pgvector side of the route (`vector_route`): derefs to the `Store` so the SQL below reads
+/// as it always did.
+pub(super) struct Pg<'a>(pub(super) &'a Store);
+
+impl std::ops::Deref for Pg<'_> {
+    type Target = Store;
+    fn deref(&self) -> &Store {
+        self.0
+    }
+}
+
+impl VectorIndex for Pg<'_> {
     /// Documents semantically nearest to `source_path` by chunk-embedding cosine — the MEANING-based
     /// complement to `related_docs`. `related_docs` only links docs sharing >=2 EXACT concept/tool slugs,
     /// so it misses notes about the same thing in DIFFERENT words (and older / cross-project notes). For

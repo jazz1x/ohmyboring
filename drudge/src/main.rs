@@ -64,6 +64,9 @@ enum Cmd {
         #[arg(long)]
         repository: Option<String>,
     },
+    /// Copy the vectors from pgvector into SurrealDB (vector.surreal in boring.json), replacing what
+    /// is there, then print per table the row count and key-set hash of both sides
+    VectorFill,
     /// Delete orphan semantic nodes (remove edge-unreferenced legacy remnants)
     Gc,
     /// Show loaded boring.json config (for debugging / migration verification)
@@ -210,7 +213,23 @@ async fn main() -> Result<()> {
     let store: Option<store::Store> = if vector_on {
         let dsn = config::pg_dsn();
         // embed_dim (boring.json) sizes the vector columns — the kernel's only model knob.
-        Some(store::Store::open(&dsn, cfg.embed_dim as usize).await?)
+        let opened = store::Store::open(&dsn, cfg.embed_dim as usize).await?;
+        let route = match cfg.vector.effective().backend {
+            config::VectorBackend::Surreal => {
+                let settings = cfg.vector.surreal.settings(&config::env_set)?;
+                eprintln!(
+                    "[vector] backend=surreal ({}); {}; {}",
+                    settings.url,
+                    config::SURREAL_PINNED_NOTES[0],
+                    config::SURREAL_PINNED_NOTES[1]
+                );
+                store::VectorRoute::Surreal(store::SurrealClient::new(settings)?)
+            }
+            config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => {
+                store::VectorRoute::Pgvector
+            }
+        };
+        Some(opened.with_vector_route(route))
     } else {
         None
     };
@@ -365,6 +384,19 @@ async fn main() -> Result<()> {
             println!(
                 "semantic audit: tool {} · concept {} · uses {} · about {}",
                 ss.tools, ss.concepts, ss.uses, ss.about
+            );
+        }
+        Cmd::VectorFill => {
+            let store = store.as_ref().context(VEC_OFF)?;
+            let settings = cfg.vector.surreal.settings(&config::env_set)?;
+            let client = store::SurrealClient::new(settings)?;
+            let tables = client.fill_from(store).await?;
+            for table in &tables {
+                println!("{}", table.line());
+            }
+            anyhow::ensure!(
+                tables.iter().all(store::FillTable::same),
+                "vector-fill: pg 와 surreal 의 행 수 또는 id 집합 해시가 다름"
             );
         }
         Cmd::CodeSync { .. } | Cmd::CodeStatus { .. } | Cmd::Version => {}
