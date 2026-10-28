@@ -1,9 +1,5 @@
 {
   "door_routes": [
-    "GET /repairs/split-subjects",
-    "GET /repairs/split-subjects/samples",
-    "POST /gap",
-    "POST /repairs/split-subjects",
     "POST /run/advice-write",
     "POST /run/morning-card",
     "POST /run/repair-judge",
@@ -92,6 +88,8 @@
     "GET /query-log",
     "GET /recall-label-stats",
     "GET /recall-labels",
+    "GET /repairs/split-subjects",
+    "GET /repairs/split-subjects/samples",
     "GET /rules",
     "POST /ask",
     "POST /brief",
@@ -100,6 +98,7 @@
     "POST /context",
     "POST /decisions",
     "POST /events",
+    "POST /gap",
     "POST /graph",
     "POST /handover",
     "POST /mcp",
@@ -108,6 +107,7 @@
     "POST /recall-labels",
     "POST /recurrences",
     "POST /remember",
+    "POST /repairs/split-subjects",
     "POST /risks",
     "POST /search",
     "POST /stalled",
@@ -319,6 +319,39 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "gap": {
+      "properties": {
+        "handed": {
+          "description": "source_path of the notes you were handed (required for stale).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "enum": [
+            "missing",
+            "stale",
+            "broken"
+          ],
+          "type": "string"
+        },
+        "query": {
+          "description": "The question memory could not answer.",
+          "type": "string"
+        },
+        "session_id": {
+          "description": "Your session id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "query",
+        "kind"
+      ],
       "type": "object"
     },
     "neighbors": {

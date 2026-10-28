@@ -113,8 +113,6 @@ TOOLS_LIST_BODY = (
 )
 
 #: 문이 tools/list 에 gap 을 덧붙인 뒤의 기대 — 엔진 도구는 앞에 그대로, gap 은 맨 끝.
-TOOLS_LIST_WITH_GAP = json.loads(TOOLS_LIST_BODY)
-TOOLS_LIST_WITH_GAP["result"]["tools"].append(door.gap_parse.TOOL)
 
 #: 엔진 recall 응답의 실측 모양(content-type application/json) — 문이 번호 블록을 앞에
 #: 붙이는 대상. "boom" 이 들어간 query 면 isError 답을 준다(통제군).
@@ -434,14 +432,12 @@ class DoorTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(StubHandler.seen_bodies[-1], payload)
         self.assertEqual(StubHandler.seen_content_types[-1], "application/json")
-        self.assertEqual(json.loads(body), TOOLS_LIST_WITH_GAP)
+        self.assertEqual(json.loads(body), json.loads(TOOLS_LIST_BODY))
         self.assertEqual(content_type, STUB_CONTENT_TYPE)
         names = [t["name"] for t in json.loads(body)["result"]["tools"]]
         self.assertEqual(
-            names, ["alpha", "beta", "gamma", "gap"], "엔진 도구는 순서 그대로 앞에, gap 은 끝에"
+            names, ["alpha", "beta", "gamma"], "스위치 기본 engine — 문은 도구 목록을 안 건드린다"
         )
-        engine_tools = json.loads(TOOLS_LIST_BODY)["result"]["tools"]
-        self.assertEqual(json.loads(body)["result"]["tools"][:3], engine_tools)
 
     def test_tools_list_non_2xx_and_non_list_answers_pass_through_untouched(self):
         payload = json.dumps(
@@ -1299,7 +1295,7 @@ rules:
             self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
         )
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body), TOOLS_LIST_WITH_GAP)
+        self.assertEqual(json.loads(body), json.loads(TOOLS_LIST_BODY))
         time.sleep(0.3)
         self.assertEqual(self._shadow_events(), [], "회상·다른 도구엔 그림자가 따라붙지 않는다")
 
@@ -2196,6 +2192,8 @@ class SplitSubjectsGetRouteTests(unittest.TestCase):
         cls.door_server.should_exit = True
 
     def setUp(self):
+        os.environ["DOOR_LINK_WRITER"] = "python"
+        self.addCleanup(os.environ.pop, "DOOR_LINK_WRITER", None)
         self._saved_dsn = os.environ.get("DOOR_PG_DSN")
         self._rows: list[tuple[str, str]] = []
         self._orig_fetch = door._fetch_split_subject_rows
@@ -2289,6 +2287,8 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
         cls.door_server.should_exit = True
 
     def setUp(self):
+        os.environ["DOOR_LINK_WRITER"] = "python"
+        self.addCleanup(os.environ.pop, "DOOR_LINK_WRITER", None)
         self._saved_dsn = os.environ.get("DOOR_PG_DSN")
         os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
         self.order: list[str] = []
@@ -3674,6 +3674,8 @@ class GapRouteTests(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient
 
+        os.environ["DOOR_LINK_WRITER"] = "python"
+        self.addCleanup(os.environ.pop, "DOOR_LINK_WRITER", None)
         self._saved_dsn = os.environ.get("DOOR_PG_DSN")
         os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:9/none"
         self.client = TestClient(door.app)
@@ -3760,6 +3762,130 @@ class GapRouteTests(unittest.TestCase):
         self.assertEqual(self.http(self.ARGS).status_code, 503)
         self.assertEqual(self.mcp(self.ARGS).json()["error"]["code"], -32603)
         self.assertEqual(self.recorded, [])
+
+
+class LinkWriterSwitchTests(unittest.TestCase):
+    """C-PORT4 — 잇기 쓰기 주인 스위치 (DOOR_LINK_WRITER). 기본·엉뚱한 값이면 gap(HTTP·MCP)과
+    split-subjects 셋은 엔진으로 간다(문 핸들러 호출 0). python 이면 엔진을 안 부른다. 엔진 길의
+    POST split 은 row 400 을 엔진 앞에서, 응답 없음이면 개수 없이 다시 읽기를 잇고 카드 행을 정산한다."""
+
+    ENGINE = b'{"from":"engine"}'
+    GAP = {"session_id": "s-1", "query": "q", "kind": "missing"}
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+
+        self._saved = os.environ.pop("DOOR_LINK_WRITER", None)
+        self.addCleanup(self._restore)
+        self.client = TestClient(door.app)
+        patcher = mock.patch.object(
+            door, "_fetch", return_value=door._pass_through(200, self.ENGINE, "application/json")
+        )
+        self.fetch = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _restore(self):
+        os.environ.pop("DOOR_LINK_WRITER", None)
+        if self._saved is not None:
+            os.environ["DOOR_LINK_WRITER"] = self._saved
+
+    def mcp(self, method, params=None):
+        return self.client.post(
+            "/mcp", json={"jsonrpc": "2.0", "id": 4, "method": method, "params": params or {}}
+        )
+
+    def test_default_and_garbage_values_proxy_all_four_to_the_engine(self):
+        with (
+            mock.patch.object(door, "_gap_record") as record,
+            mock.patch.object(door, "_fetch_split_subject_rows") as rows,
+        ):
+            for value in (None, "engine", "python2", "Python", ""):
+                if value is None:
+                    os.environ.pop("DOOR_LINK_WRITER", None)
+                else:
+                    os.environ["DOOR_LINK_WRITER"] = value
+                self.assertEqual(door._link_writer(), "engine", value)
+                self.fetch.reset_mock()
+                responses = (
+                    self.client.get("/repairs/split-subjects"),
+                    self.client.get("/repairs/split-subjects/samples?variant=a"),
+                    self.client.post("/gap", json=self.GAP),
+                    self.mcp("tools/call", {"name": "gap", "arguments": self.GAP}),
+                )
+                for response in responses:
+                    self.assertEqual(response.content, self.ENGINE, f"{value!r}: 엔진 답 바이트 그대로")
+                self.assertEqual(self.fetch.call_count, 4, f"{value!r}: 네 면 모두 엔진으로")
+        record.assert_not_called()
+        rows.assert_not_called()
+
+    def test_tools_list_gap_appears_once_in_either_owner(self):
+        listing = {"jsonrpc": "2.0", "id": 4, "result": {"tools": [{"name": "recall"}, {"name": "gap"}]}}
+        self.fetch.return_value = door._pass_through(200, json.dumps(listing).encode(), "application/json")
+        for value in (None, "python"):
+            if value is None:
+                os.environ.pop("DOOR_LINK_WRITER", None)
+            else:
+                os.environ["DOOR_LINK_WRITER"] = value
+            names = [t["name"] for t in self.mcp("tools/list").json()["result"]["tools"]]
+            self.assertEqual(names.count("gap"), 1, f"{value!r}: {names}")
+
+    def test_python_answers_gap_without_the_engine(self):
+        os.environ["DOOR_LINK_WRITER"] = "python"
+        report = door.Ok(door.gap_pg.GapReport("gap:abc", "missing", 0, 0))
+        with (
+            mock.patch.object(door, "_gap_record", return_value=report),
+            mock.patch.dict(os.environ, {"DOOR_PG_DSN": "postgresql://x:x@127.0.0.1:9/none"}),
+        ):
+            self.assertEqual(self.client.post("/gap", json=self.GAP).status_code, 200)
+            self.mcp("tools/call", {"name": "gap", "arguments": self.GAP})
+        self.fetch.assert_not_called()
+
+    def split_post(self, body):
+        return self.client.post("/repairs/split-subjects", json=body)
+
+    ROW = {"channel": "C1", "card_ts": "1.2", "idx": 0}
+
+    def test_engine_split_rejects_bad_row_before_the_engine(self):
+        response = self.split_post({"subject": "a", "row": {"channel": "C1"}})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.split_post({}).status_code, 400)
+        self.fetch.assert_not_called()
+
+    def test_engine_split_202_queues_the_reread_with_the_engines_counts(self):
+        answer = {
+            "subject": "a",
+            "deleted_rows": 2,
+            "reread_notes": 1,
+            "remaining_variants": None,
+            "owner_held": ["/o.md"],
+            "sync": "started",
+        }
+        self.fetch.return_value = door._pass_through(202, json.dumps(answer).encode(), "application/json")
+        with mock.patch.object(door, "_reread_in_background") as reread:
+            response = self.split_post({"subject": "a", "row": self.ROW})
+        self.assertEqual((response.status_code, response.json()), (202, answer))
+        merged = reread.call_args.args[0]
+        self.assertEqual((merged.subject, merged.deleted_rows, merged.reread_notes), ("a", 2, 1))
+        self.assertEqual(merged.owner_held, ["/o.md"])
+        self.assertEqual(merged.row, door.card_types.RowRef(**self.ROW))
+
+    def test_engine_split_without_an_answer_still_rereads_and_settles_the_row(self):
+        for failure in (OSError("timed out"), None):
+            if failure is None:
+                self.fetch.side_effect = None
+                self.fetch.return_value = door._pass_through(502, b'{"error":"bad"}', "application/json")
+            else:
+                self.fetch.side_effect = failure
+            with (
+                mock.patch.object(door, "_reread_in_background") as reread,
+                mock.patch.object(door, "_show_row") as show,
+            ):
+                response = self.split_post({"subject": "a", "row": self.ROW})
+            self.assertEqual(response.status_code, 502)
+            merged = reread.call_args.args[0]
+            self.assertEqual((merged.subject, merged.deleted_rows, merged.reread_notes), ("a", None, None))
+            self.assertEqual(show.call_count, 1, "카드 행은 응답 없음으로 한 번 정산")
+            self.assertIsInstance(show.call_args.args[1], door.card_types.Done)
 
 
 class VerdictWriterSwitchTests(unittest.TestCase):

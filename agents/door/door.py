@@ -493,7 +493,8 @@ def _augment_tools_list(body: bytes, response: Response) -> Response:
     tools = result.get("tools") if isinstance(result, dict) else None
     if not isinstance(tools, list):
         return response
-    result["tools"] = [*tools, gap_parse.TOOL]
+    # 엔진도 gap 을 싣는다(C-PORT4) — 스위치 python 이면 문 것으로 바꿔 한 번만 나오게 한다.
+    result["tools"] = [*(t for t in tools if t.get("name") != gap_parse.TOOL["name"]), gap_parse.TOOL]
     return _pass_through(
         response.status_code, json.dumps(response_json, ensure_ascii=False).encode("utf-8"), content_type
     )
@@ -2515,10 +2516,6 @@ for _path, _methods in _load_routes().items():
 # The door's own routes, driven by the snapshot's door_routes key. A snapshot
 # entry without a native handler here is a KeyError at startup, not a proxy hole.
 _DOOR_HANDLERS = {
-    "GET /repairs/split-subjects": _repairs_split_subjects_get,
-    "GET /repairs/split-subjects/samples": _repairs_split_subjects_samples,
-    "POST /gap": _gap,
-    "POST /repairs/split-subjects": _repairs_split_subjects_post,
     "POST /run/advice-write": _run_advice_write,
     "POST /run/morning-card": _run_morning_card,
     "POST /run/repair-judge": _run_repair_judge,

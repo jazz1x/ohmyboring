@@ -129,6 +129,7 @@ services:
       DOOR_VERDICT_WRITER: ${DOOR_VERDICT_WRITER:-engine}
       DOOR_MEMORY_READER: ${DOOR_MEMORY_READER:-python}
       DOOR_SEARCH_READER: ${DOOR_SEARCH_READER:-python}
+      DOOR_LINK_WRITER: ${DOOR_LINK_WRITER:-engine}
       DOOR_EVENTS_OWNER: ${DOOR_EVENTS_OWNER:-engine}
       DOOR_SYNC_OWNER: ${DOOR_SYNC_OWNER:-engine} # python = door thread re-ingests the vault every BORING_SYNC_HOURS (engine sync clock stays on until the engine is stopped)
       BORING_SYNC_HOURS: ${BORING_SYNC_HOURS:-4}
