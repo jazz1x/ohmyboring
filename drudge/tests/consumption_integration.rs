@@ -1491,7 +1491,7 @@ async fn a_richer_redistill_supersedes_the_first_note_over_http() {
 
 /// MCP `recall` answers from the wiki when it has word hits; that set takes the same in-set order
 /// as `/search`. B out-scores A on word overlap in both halves; only the owner-written A goes first.
-/// C is the owner's but holds no query word, so it stays out.
+/// C is the owner's but holds no query word: it can only enter through the vector half, behind B.
 #[tokio::test]
 async fn mcp_recall_puts_the_owner_note_first_in_the_wiki_set() {
     let Some(dsn) = test_dsn() else {
@@ -1565,9 +1565,10 @@ async fn mcp_recall_puts_the_owner_note_first_in_the_wiki_set() {
         owned.starts_with(&format!("- [{}]", a.1)),
         "the owner note leads the wiki set: {owned}"
     );
+    let at = |name: &str| owned.find(name).unwrap_or(usize::MAX);
     assert!(
-        !owned.contains(&c.1),
-        "an owner note with no query word is not pulled in: {owned}"
+        at(&c.1) != usize::MAX && at(&b.1) < at(&c.1),
+        "an owner note with no query word enters only via the vector half, behind B: {owned}"
     );
 
     let (_, control) = recall("cobalt kettle").await;
