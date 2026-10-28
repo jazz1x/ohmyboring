@@ -4601,6 +4601,70 @@ mod tests {
         );
     }
 
+    /// C-VECADAPT2 2b: on `backend=surreal` a remember whose Surreal write fails after pg
+    /// committed answers with the error that says pg has the note, so the caller does not send
+    /// the same note again. Nothing listens on port 1.
+    #[tokio::test]
+    #[ignore = "needs BORING_TEST_DATABASE_URL"]
+    async fn a_remember_whose_surreal_write_fails_says_pg_has_the_note() {
+        let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
+        let dead: crate::config::SurrealConfig = serde_json::from_value(
+            json!({"url": "http://127.0.0.1:1", "namespace": "dead", "database": "dead"}),
+        )
+        .unwrap();
+        let password_only = |name: &str| (name == dead.password_env).then(|| "x".to_owned());
+        let client =
+            crate::store::SurrealClient::new(dead.settings(&password_only).unwrap()).unwrap();
+        let store = std::sync::Arc::new(
+            crate::store::Store::open(&dsn, 1024)
+                .await
+                .unwrap()
+                .with_vector_route(crate::store::VectorRoute::Surreal(client)),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = vault_state(tmp.path());
+        let mut cfg = BoringConfig::default();
+        cfg.llm.base_url = embeddings_stub().await;
+        s.llm = std::sync::Arc::new(crate::llm::Llm::from_config(&cfg));
+        s.cfg = std::sync::Arc::new(cfg);
+        s.store = Some(std::sync::Arc::clone(&store));
+        let token = format!(
+            "vs2brem{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let args = json!({
+            "title": "surreal behind", "body": "an ordinary body",
+            "tools": [token], "concepts": [token], "tags": [token],
+            "claims": [{"subject": token, "predicate": "axis", "value": "a plain value"}],
+            // a correction skips the duplicate check, which would read Surreal and fail first
+            "supersedes": ["/vault/wiki/ghost.md"],
+        });
+
+        let failed = remember_note(&s, Caller::Unverified, Some(&args))
+            .await
+            .expect_err("a dead Surreal must fail the remember, not pass silently");
+
+        assert!(
+            failed.message.contains(crate::store::SURREAL_BEHIND),
+            "{}",
+            failed.message
+        );
+        let files: Vec<_> = std::fs::read_dir(tmp.path().join("wiki"))
+            .unwrap()
+            .map(|e| e.unwrap().path().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files.len(), 1);
+        let [documents, chunks, claims, ..] = note_rows(&store, &files[0], &token).await;
+        assert_eq!(
+            [documents, chunks, claims],
+            [1, 1, 1],
+            "pg committed the note"
+        );
+    }
+
     /// C-PORT3b: Python resolves `supersedes` before it takes a number or writes the file
     /// (`writer.py` `_gate` then `_store_new_note`), so a failing lookup leaves no note file and no
     /// rows. A NUL in the path makes Postgres reject the `get_doc_sha` parameter: the lookup fails

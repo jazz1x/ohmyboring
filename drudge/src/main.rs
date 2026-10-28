@@ -221,10 +221,9 @@ async fn main() -> Result<()> {
             config::VectorBackend::Surreal => {
                 let settings = cfg.vector.surreal.settings(&config::env_set)?;
                 eprintln!(
-                    "[vector] backend=surreal ({}); {}; {}",
+                    "[vector] backend=surreal ({}); {}",
                     settings.url,
-                    config::SURREAL_PINNED_NOTES[0],
-                    config::SURREAL_PINNED_NOTES[1]
+                    config::SURREAL_PINNED_NOTES.join("; ")
                 );
                 store::VectorRoute::Surreal(store::SurrealClient::new(settings)?)
             }
