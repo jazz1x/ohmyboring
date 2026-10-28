@@ -330,11 +330,16 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
     if request.method in ("GET", "POST") and _events_owner() == _WRITER_PYTHON:
         if (answered := await _events_python(request, body)) is not None:
             return answered
-    # 빈자리 도구는 스위치와 무관하게 늘 문 안에서 답한다 — 엔진엔 gap 이 없다.
-    if request.method == "POST" and request.url.path == "/mcp":
-        if (call := _mcp_tools_call(body)) is not None and call[0] == gap_parse.TOOL["name"]:
-            rpc = _http_json_object(body) or {}
-            return await _gap_python(rpc.get("id"), call[1], "mcp")
+    # 잇기 쓰기 주인 스위치(C-PORT4): python 이면 gap(HTTP·MCP)과 split-subjects 셋을 문 안에서 답한다
+    # (예전 그대로 — MCP gap 은 엔진에 안 넘기고 tools/list 에는 문이 gap 을 덧붙인다). engine 이면
+    # 넷 다 엔진이 답하고 문은 프록시한다.
+    if _link_writer() == _WRITER_PYTHON:
+        if (handler := _LINK_PYTHON_HANDLERS.get((request.method, request.url.path))) is not None:
+            return await handler(request)
+        if request.method == "POST" and request.url.path == "/mcp":
+            if (call := _mcp_tools_call(body)) is not None and call[0] == gap_parse.TOOL["name"]:
+                rpc = _http_json_object(body) or {}
+                return await _gap_python(rpc.get("id"), call[1], "mcp")
     # 읽기 주인 스위치(E4-1): python 이면 일곱 레지스터 읽기를 엔진에 넘기지 않고 문 안에서 답한다.
     if request.method == "POST" and _register_reader() == _READER_PYTHON:
         if request.url.path in _REGISTER_HTTP_PATHS:
@@ -349,6 +354,8 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
                     request, rpc.get("id"), call[1], _REGISTER_MCP_TOOLS[call[0]], "mcp"
                 )
     headers = _engine_headers(request)
+    if request.method == "POST" and request.url.path == _SPLIT_PATH:
+        return await _split_merge_via_engine(request, url, headers, background_tasks)
     # 회상 읽기 주인 스위치(E4-2): python 이면 recall 은 엔진에 안 넘기고 문 안에서 답한다.
     if request.method == "POST" and request.url.path == "/mcp" and _recall_reader() == _READER_PYTHON:
         if (call := _mcp_tools_call(body)) is not None and call[0] == "recall":
@@ -365,7 +372,8 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
     if request.method == "POST" and request.url.path == "/mcp":
         engine_response = response
         response = _augment_mcp_recall(body, response)
-        response = _augment_tools_list(body, response)
+        if _link_writer() == _WRITER_PYTHON:
+            response = _augment_tools_list(body, response)
         # 회상 그림자는 번호 블록을 붙이기 전의 엔진 텍스트와 대조한다(E4-2).
         if not isinstance(engine_response, StreamingResponse) and (call := _mcp_tools_call(body)) is not None:
             if call[0] == "recall":
@@ -1955,11 +1963,13 @@ def _call_engine_sync() -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class _Merged:
-    """A committed merge waiting for the engine to reread it; `row` is the card row to settle."""
+    """A merge waiting for the engine to reread it; `row` is the card row to settle. The counts
+    are None for a merge whose engine answer never arrived: it may have committed, so it is
+    reread, but no `subject_merged` event states counts nobody saw."""
 
     subject: str
-    deleted_rows: int
-    reread_notes: int
+    deleted_rows: int | None
+    reread_notes: int | None
     owner_held: list[str]
     row: card_types.RowRef | None
 
@@ -2012,6 +2022,8 @@ def _show_row(row: card_types.RowRef, outcome: card_types.Outcome, lang: str) ->
 
 
 def _record_merged(merged: _Merged, rows: list[tuple[str, str]], lang: str) -> card_types.Outcome:
+    if merged.deleted_rows is None or merged.reread_notes is None:
+        return card_types.Pending()
     remaining = _count_variants(rows, merged.subject)
     _emit_subject_merged_event(
         merged.subject, merged.deleted_rows, merged.reread_notes, remaining, merged.owner_held
@@ -2139,15 +2151,9 @@ def _merge_split_subject(
     finally:
         conn.close()
 
-    _reread_in_background(_Merged(subject, deleted_rows, reread_notes, owner_held, row))
-    return {
-        "subject": subject,
-        "deleted_rows": deleted_rows,
-        "reread_notes": reread_notes,
-        "remaining_variants": None,
-        "owner_held": owner_held,
-        "sync": "started",
-    }
+    merged = _Merged(subject, deleted_rows, reread_notes, owner_held, row)
+    _reread_in_background(merged)
+    return _merged_body(merged)
 
 
 async def _repairs_split_subjects_get(request: Request) -> Response:
@@ -2170,21 +2176,110 @@ async def _repairs_split_subjects_get(request: Request) -> Response:
     return JSONResponse({"groups": groups[:limit], "total_groups": len(groups)})
 
 
-async def _repairs_split_subjects_post(request: Request) -> Response:
+@dataclass(frozen=True)
+class _SplitPost:
+    """A POST /repairs/split-subjects body that passed the door's checks."""
+
+    subject: Any
+    row: card_types.RowRef | None
+
+
+async def _parse_split_post(request: Request) -> Either[_SplitPost, Response]:
+    """The 400s of POST /repairs/split-subjects. The row check lives here, in the door, because
+    the card row is the door's to settle — the engine never sees what a row is."""
     try:
         body = await request.json()
     except json.JSONDecodeError:
-        return JSONResponse({"error": "body must be JSON"}, status_code=400)
+        return Err(JSONResponse({"error": "body must be JSON"}, status_code=400))
     subject = body.get("subject") if isinstance(body, dict) else None
     if not subject:
-        return JSONResponse({"error": "subject is required"}, status_code=400)
+        return Err(JSONResponse({"error": "subject is required"}, status_code=400))
     try:
         raw_row = body.get("row")
         row = None if raw_row is None else card_types.RowRef.model_validate(raw_row)
     except ValidationError as e:
-        return JSONResponse(
-            {"error": "row must be {channel, card_ts, idx}", "detail": str(e)}, status_code=400
+        return Err(
+            JSONResponse({"error": "row must be {channel, card_ts, idx}", "detail": str(e)}, status_code=400)
         )
+    return Ok(_SplitPost(subject, row))
+
+
+def _merged_body(merged: _Merged) -> dict[str, Any]:
+    return {
+        "subject": merged.subject,
+        "deleted_rows": merged.deleted_rows,
+        "reread_notes": merged.reread_notes,
+        "remaining_variants": None,
+        "owner_held": merged.owner_held,
+        "sync": "started",
+    }
+
+
+_SPLIT_PATH = "/repairs/split-subjects"
+
+
+def _settle_unanswered(row: card_types.RowRef, reason: str) -> None:
+    lang = card_advice.resolve_lang(boring_config.note_lang())
+    _show_row(row, card_view.merge_unanswered_outcome(reason, lang=lang), lang)
+
+
+def _engine_merged(response: Response, post: _SplitPost) -> _Merged | None:
+    """The engine's 202 as a committed merge, or None when it is no 202 with the four fields."""
+    if response.status_code != 202:
+        return None
+    try:
+        answer = json.loads(response.body)
+        return _Merged(
+            subject=answer["subject"],
+            deleted_rows=int(answer["deleted_rows"]),
+            reread_notes=int(answer["reread_notes"]),
+            owner_held=list(answer["owner_held"]),
+            row=post.row,
+        )
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+async def _split_merge_via_engine(
+    request: Request, url: str, headers: dict[str, str], background_tasks: BackgroundTasks
+) -> Response:
+    """POST /repairs/split-subjects with the engine as writer (DOOR_LINK_WRITER=engine): the door
+    keeps the row check, the reread and the card row; the engine does the delete in one
+    transaction. When the engine gives no answer (timeout, 502) the merge may still have
+    committed, so the reread is queued all the same — without counts, which are unknown — and
+    the card row says 응답 없음 instead of waiting for a recount that would report a merge
+    nobody saw."""
+    match await _parse_split_post(request):
+        case Err(rejected):
+            return rejected
+        case Ok(post):
+            pass
+    try:
+        response = await asyncio.to_thread(_fetch, url, await request.body(), headers, "POST")
+    except OSError as e:
+        response = JSONResponse({"error": "engine unreachable", "upstream": _upstream()}, status_code=502)
+        reason = f"engine unreachable: {e}"
+    else:
+        reason = f"engine answered {response.status_code}"
+    if response.status_code == 502:
+        _reread_in_background(_Merged(str(post.subject), None, None, [], None))
+        if post.row is not None:
+            background_tasks.add_task(_settle_unanswered, post.row, reason)
+        return response
+    match _engine_merged(response, post):
+        case None:
+            return response
+        case merged:
+            _reread_in_background(merged)
+            return JSONResponse(_merged_body(merged), status_code=202)
+
+
+async def _repairs_split_subjects_post(request: Request) -> Response:
+    match await _parse_split_post(request):
+        case Err(rejected):
+            return rejected
+        case Ok(post):
+            subject, row = post.subject, post.row
     if not os.environ.get("DOOR_PG_DSN"):
         return JSONResponse({"error": "store not configured"}, status_code=503)
     try:
@@ -2289,6 +2384,25 @@ async def _gap(request: Request) -> Response:
     if data is None:
         return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
     return await _gap_python(None, data, "http")
+
+
+#: 잇기 쓰기 주인 스위치(C-PORT4) — python 이면 gap(HTTP·MCP)과 split-subjects 셋을 문 안에서 답한다
+#: (옛 길 그대로), 그 밖의 값·부재는 engine: 엔진이 넷 다 답하고 문은 프록시하되 POST split 의 row 검증·
+#: 다시 읽기·카드 행만 맡는다. 운영 기본은 .env 의 python — 넘김은 오케스트레이터가 한다.
+_LINK_WRITER_ENV = "DOOR_LINK_WRITER"
+
+
+def _link_writer() -> str:
+    """python 만 켬, 그 밖의 값·부재는 전부 engine(실수로 켜지지 않게 — 다른 *_WRITER 와 같다)."""
+    return _WRITER_PYTHON if os.environ.get(_LINK_WRITER_ENV) == _WRITER_PYTHON else "engine"
+
+
+_LINK_PYTHON_HANDLERS = {
+    ("GET", "/repairs/split-subjects"): _repairs_split_subjects_get,
+    ("GET", "/repairs/split-subjects/samples"): _repairs_split_subjects_samples,
+    ("POST", "/repairs/split-subjects"): _repairs_split_subjects_post,
+    ("POST", "/gap"): _gap,
+}
 
 
 def _search_log_query(query: str, hits: list[dict], started: float) -> None:

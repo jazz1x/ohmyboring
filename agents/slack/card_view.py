@@ -932,6 +932,12 @@ def merged_outcome(done: RepairDone, *, lang: str) -> Done:
     return Done(text=text)
 
 
+def merge_unanswered_outcome(reason: str, *, lang: str) -> Done:
+    """The row mark when the engine gave the door no answer to a merge: no counts — the rows may
+    already be gone, so 0 would be a lie (the same mark `RepairUnanswered` shows)."""
+    return Done(text=card_i18n.STRINGS[lang]["repair_verdict_unanswered"].format(reason=reason))
+
+
 def reread_failed_outcome(error: object, *, lang: str) -> Failed:
     return Failed(reason=card_i18n.STRINGS[lang]["reread_failed_reason"].format(error=error))
 
