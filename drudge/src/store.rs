@@ -976,12 +976,6 @@ impl Store {
             .await
             .context("get connection for schema initialization")?;
 
-        let ranked_subject = canon_sql("k.subject");
-        let ranked_predicate = canon_sql("k.predicate");
-        let is_canon_k = is_canon_sql("k");
-        let claim_subject = canon_sql("c.subject");
-        let claim_predicate = canon_sql("c.predicate");
-        let is_canon_c = is_canon_sql("c");
         let slot_subject = canon_sql("subject");
         let slot_predicate = canon_sql("predicate");
 
@@ -1170,50 +1164,6 @@ impl Store {
                         'none', 'nothing', 'n/a', 'na', 'not applicable', 'no', '-', '--',
                         '없음', '없다', '없습니다', '없어요', '해당 없음', '해당없음',
                         '남은 작업 없음', '남은 작업이 없음', 'なし', '無し', '該当なし']);
-                 -- A list-kind claim must not be sealed by a sibling. The seal used to scope to
-                 -- (subject, predicate) for every kind, so the newest incident, next-step,
-                 -- decision or risk in a slot silently evicted every other one — measured on
-                 -- the live store 2026-09-17: decision 1,871 current vs 10,127 sealed, next
-                 -- 516 vs 5,166, risk 192 vs 4,020, blocked 74 vs 299; 555 distinct next-steps
-                 -- and 662 distinct risks held a value different from their slot's survivor.
-                 -- `upsert_claim` now seals non-fact kinds on (subject, predicate, source_path);
-                 -- this backfill unseals the rows the old rule sealed, but only where the
-                 -- writing note has no later row in the slot — a note's own superseded history
-                 -- stays sealed.
-                 --
-                 -- This carries a backup table, not just the UPDATE: it moves ~19k rows back
-                 -- into the population `next_actions`, `risks`, `/claims` and the brief read,
-                 -- and if the rule is wrong the owner needs the old state back. The backup is
-                 -- written first and `CREATE TABLE IF NOT EXISTS ... AS` skips once it exists,
-                 -- so a re-run never clobbers it. Idempotent: after the first run the predicate
-                 -- matches nothing. A retired note is exempt — the edge's seal is a
-                 -- retirement, not a stale-history row, and this batch runs on every
-                 -- `Store::open`.
-                 CREATE TABLE IF NOT EXISTS claim_unseal_backup_20260917 AS
-                   SELECT * FROM claim
-                    WHERE kind <> 'fact' AND superseded_at IS NOT NULL
-                      AND NOT EXISTS (SELECT 1 FROM claim l
-                                       WHERE l.subject = claim.subject AND l.predicate = claim.predicate
-                                         AND l.source_path = claim.source_path AND l.valid_from > claim.valid_from);
-                 -- Slots compare by canon spelling: rows kept under an old spelling were sealed
-                 -- beside their canon-spelled partner in the same note, and by raw spelling each
-                 -- sat alone in its slot and came back. In a canon slot the canon-spelled row
-                 -- ranks first, then `valid_from`; a row is unsealed only when nothing outranks it.
-                 WITH ranked AS (
-                     SELECT {ranked_subject} AS cs, {ranked_predicate} AS cp, k.source_path,
-                            k.valid_from, {is_canon_k} AS is_canon
-                       FROM claim k),
-                 top AS (
-                     SELECT DISTINCT ON (cs, cp, source_path) cs, cp, source_path, is_canon, valid_from
-                       FROM ranked
-                      ORDER BY cs, cp, source_path, is_canon DESC, valid_from DESC)
-                 UPDATE claim c SET superseded_at = NULL
-                   FROM top t
-                  WHERE c.kind <> 'fact' AND c.superseded_at IS NOT NULL
-                    AND {claim_subject} = t.cs AND {claim_predicate} = t.cp
-                    AND c.source_path = t.source_path AND c.valid_from = t.valid_from
-                    AND {is_canon_c} = t.is_canon
-                    AND NOT {RETIRED_NOTE};
                  CREATE TABLE IF NOT EXISTS node_gc_backup_20260917 AS
                    SELECT * FROM node WHERE {STALE_CLAIM_MIRROR_NODES};
                  CREATE TABLE IF NOT EXISTS edge_gc_backup_20260917 AS

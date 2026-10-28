@@ -5944,72 +5944,6 @@ async fn record_supersedes_names_the_paths_it_could_not_link() {
     store.delete_document(&path_b).await.expect("cleanup B");
 }
 
-/// The startup unseal compares slots by the canon spelling. A row stored under an old spelling
-/// (`Foo_Bar`) sits beside its canon-spelled partner (`foo-bar`) in the same note: the partner
-/// outranks it, so the old-spelling row keeps its seal. The canon-spelled row, alone at the top
-/// of its slot with no later row, is the one that comes back.
-#[tokio::test]
-async fn startup_unseal_compares_slots_by_canon_so_an_old_spelling_row_stays_sealed() {
-    let Some(dsn) = test_dsn() else {
-        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
-        return;
-    };
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let scratch = format!("revive1_unseal_{stamp}");
-    let dsn_with_db = |db: &str| {
-        let cut = dsn.rfind('/').expect("dsn carries a dbname segment");
-        format!("{}{db}", &dsn[..=cut])
-    };
-    let admin = connect(&dsn_with_db("postgres")).await;
-    admin
-        .execute(&format!("CREATE DATABASE {scratch};"), &[])
-        .await
-        .expect("create scratch database");
-    let scratch_dsn = dsn_with_db(&scratch);
-    let first = Store::open(&scratch_dsn, 1024).await.expect("open store");
-    drop(first);
-
-    let db = connect(&scratch_dsn).await;
-    db.batch_execute(
-        "INSERT INTO claim (subject, predicate, value, source_path, valid_from, superseded_at, kind) VALUES
-           ('foo-bar', 'next-action', 'canon', '/w/n.md', '2026-10-01T00:00Z', '2026-10-01T00:09Z', 'next'),
-           ('Foo_Bar', 'Next_Action', 'old spelling', '/w/n.md', '2026-10-01T00:01Z', '2026-10-01T00:09Z', 'next');",
-    )
-    .await
-    .expect("seed sealed rows");
-
-    let reopened = Store::open(&scratch_dsn, 1024).await.expect("reopen store");
-    drop(reopened);
-    let rows = db
-        .query(
-            "SELECT value, superseded_at IS NOT NULL FROM claim ORDER BY valid_from;",
-            &[],
-        )
-        .await
-        .expect("read back");
-    let sealed: Vec<(String, bool)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
-    assert_eq!(
-        sealed,
-        vec![
-            ("canon".to_owned(), false),
-            ("old spelling".to_owned(), true)
-        ],
-        "the canon-spelled row unseals; the old-spelling row stays sealed"
-    );
-
-    drop(db);
-    admin
-        .execute(
-            &format!("DROP DATABASE IF EXISTS {scratch} WITH (FORCE);"),
-            &[],
-        )
-        .await
-        .expect("drop scratch database");
-}
-
 /// Handing a retired note's fact slot to the next live row compares slots by the canon spelling.
 /// The retired note wrote `Foo_Bar`; the live note holds `foo-bar` (earlier) and `Foo_Bar`
 /// (later, old spelling). The canon-spelled row is the slot's latest, so it is the one promoted
@@ -6143,4 +6077,55 @@ async fn run_total_drops_the_counters_a_failed_note_raised() {
         (0, 0),
         "its rolled-back counters are not in the total"
     );
+}
+
+/// A hand-sealed non-fact row that tops its slot stays sealed across `Store::open`. The 09-17
+/// backfill used to re-open it on every start (live: 16 of 19 hand-sealed rows came back).
+#[tokio::test]
+async fn a_hand_sealed_top_of_slot_row_stays_sealed_across_open() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let subject = format!("hand-sealed-probe-{nanos}");
+    let predicate = "next-step".to_string();
+    let path = unique_path("hand-sealed");
+    let t1 = UNIX_EPOCH + Duration::from_secs(u64::try_from(nanos / 1_000_000_000).unwrap());
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_claim(
+            &subject, &predicate, "x", &path, t1, &emb, "next", "certain",
+        )
+        .await
+        .expect("ingest the only row of the slot");
+    db.execute(
+        "UPDATE claim SET superseded_at = now() WHERE subject = $1 AND predicate = $2;",
+        &[&subject, &predicate],
+    )
+    .await
+    .expect("hand-seal the row");
+
+    Store::open(&dsn, 1024).await.expect("open store again");
+
+    let sealed: Option<SystemTime> = db
+        .query_one(
+            "SELECT superseded_at FROM claim WHERE subject = $1 AND predicate = $2;",
+            &[&subject, &predicate],
+        )
+        .await
+        .expect("the row")
+        .get(0);
+    assert!(sealed.is_some(), "Store::open re-opened a hand-sealed row");
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
 }
