@@ -327,15 +327,15 @@ impl VectorIndex for SurrealView<'_> {
         Ok(within.into_iter().map(|(p, _)| p).collect())
     }
 
-    async fn recurrences(
+    fn recurrences(
         &self,
         _days: i64,
         _project: Option<&str>,
         _limit: i64,
-    ) -> Result<Vec<Recurrence>> {
-        Err(anyhow!(
+    ) -> impl std::future::Future<Output = Result<Vec<Recurrence>>> {
+        std::future::ready(Err(anyhow!(
             "recurrences 는 surreal 에 구현되지 않음 — Store 가 pgvector 로 보낸다"
-        ))
+        )))
     }
 
     #[allow(clippy::too_many_lines)] // Surreal filter, pg re-check, drift: one linear read path
