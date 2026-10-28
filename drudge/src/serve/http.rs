@@ -1237,6 +1237,30 @@ pub(crate) async fn handle_split_merge(
     }
 }
 
+/// `POST /gap` — same wire as the Python door: 400 for a body that is no JSON object or fails the
+/// gap boundary, 503 without a store, 502 `{error: "gap failed: …"}` when the write fails, else
+/// 200 `{gap, kind, handed, unknown}`.
+pub(crate) async fn handle_gap(State(s): State<AppState>, body: axum::body::Bytes) -> Response {
+    use crate::serve::mcp::{GapFault, record_gap};
+    use axum::response::IntoResponse;
+    let Ok(Value::Object(arguments)) = serde_json::from_slice::<Value>(&body) else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "body must be a JSON object"}),
+        );
+    };
+    match record_gap(&s, &arguments).await {
+        Ok(report) => Json(report).into_response(),
+        Err(GapFault::Rejected(message)) => {
+            json_response(StatusCode::BAD_REQUEST, json!({"error": message}))
+        }
+        Err(GapFault::NoStore) => no_store(),
+        Err(GapFault::Failed(message)) => {
+            json_response(StatusCode::BAD_GATEWAY, json!({"error": message}))
+        }
+    }
+}
+
 fn no_group() -> Response {
     json_response(
         StatusCode::NOT_FOUND,

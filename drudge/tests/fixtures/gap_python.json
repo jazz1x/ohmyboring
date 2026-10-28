@@ -1,0 +1,281 @@
+{
+"cases": [
+[
+"missing",
+"http",
+"{\"session_id\":\"s1\",\"query\":\"q\",\"kind\":\"missing\"}",
+200,
+"{\"gap\":\"gap:d3e3705e24d6f7de\",\"kind\":\"missing\",\"handed\":0,\"unknown\":0}"
+],
+[
+"missing_again",
+"http",
+"{\"session_id\":\"s1\",\"query\":\"q\",\"kind\":\"missing\"}",
+200,
+"{\"gap\":\"gap:d3e3705e24d6f7de\",\"kind\":\"missing\",\"handed\":0,\"unknown\":0}"
+],
+[
+"stale_known",
+"http",
+"{\"session_id\":\"s2\",\"query\":\"q2\",\"kind\":\"stale\",\"handed\":[\"n/b.md\",\"n/zzz.md\",\"n/b.md\"]}",
+200,
+"{\"gap\":\"gap:b7d020634d0d0711\",\"kind\":\"stale\",\"handed\":1,\"unknown\":1}"
+],
+[
+"broken_handed",
+"http",
+"{\"session_id\":\" s3 \",\"query\":\" q3 \",\"kind\":\"broken\",\"handed\":[\"n/c.md\",\"n/a.md\"]}",
+200,
+"{\"gap\":\"gap:2b54c25059f69516\",\"kind\":\"broken\",\"handed\":2,\"unknown\":0}"
+],
+[
+"stale_nohanded",
+"http",
+"{\"session_id\":\"s\",\"query\":\"q\",\"kind\":\"stale\"}",
+400,
+"{\"error\":\"stale gap needs handed notes\"}"
+],
+[
+"stale_emptyhanded",
+"http",
+"{\"session_id\":\"s\",\"query\":\"q\",\"kind\":\"stale\",\"handed\":[]}",
+400,
+"{\"error\":\"stale gap needs handed notes\"}"
+],
+[
+"null_handed",
+"http",
+"{\"session_id\":\"s\",\"query\":\"q\",\"kind\":\"missing\",\"handed\":null}",
+400,
+"{\"error\":\"handed must be a list of strings\"}"
+],
+[
+"handed_nonstr",
+"http",
+"{\"session_id\":\"s\",\"query\":\"q\",\"kind\":\"missing\",\"handed\":[\"a\",1]}",
+400,
+"{\"error\":\"handed must be a list of strings\"}"
+],
+[
+"handed_str",
+"http",
+"{\"session_id\":\"s\",\"query\":\"q\",\"kind\":\"missing\",\"handed\":\"a\"}",
+400,
+"{\"error\":\"handed must be a list of strings\"}"
+],
+[
+"bad_kind",
+"http",
+"{\"session_id\":\"s\",\"query\":\"q\",\"kind\":\"other\"}",
+400,
+"{\"error\":\"kind must be one of missing, stale, broken\"}"
+],
+[
+"no_kind",
+"http",
+"{\"session_id\":\"s\",\"query\":\"q\"}",
+400,
+"{\"error\":\"kind must be one of missing, stale, broken\"}"
+],
+[
+"no_session",
+"http",
+"{\"query\":\"q\",\"kind\":\"missing\"}",
+400,
+"{\"error\":\"session_id is required\"}"
+],
+[
+"blank_query",
+"http",
+"{\"session_id\":\"s\",\"query\":\"\\u001c \",\"kind\":\"missing\"}",
+400,
+"{\"error\":\"query is required\"}"
+],
+[
+"array_body",
+"http",
+"[]",
+400,
+"{\"error\":\"body must be a JSON object\"}"
+],
+[
+"not_json",
+"http",
+"x",
+400,
+"{\"error\":\"body must be a JSON object\"}"
+],
+[
+"nul_query",
+"http",
+"{\"session_id\":\"s\",\"query\":\"a\\u0000b\",\"kind\":\"missing\"}",
+502,
+"{\"error\":\"gap failed: PostgreSQL text fields cannot contain NUL (0x00) bytes\"}"
+],
+[
+"nul_handed",
+"http",
+"{\"session_id\":\"s\",\"query\":\"nulh\",\"kind\":\"missing\",\"handed\":[\"a\\u0000b\"]}",
+502,
+"{\"error\":\"gap failed: PostgreSQL text fields cannot contain NUL (0x00) bytes\"}"
+],
+[
+"mcp_missing",
+"mcp",
+"{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"tools/call\", \"params\": {\"name\": \"gap\", \"arguments\": {\"session_id\": \"m1\", \"query\": \"mq\", \"kind\": \"missing\"}}}",
+200,
+"{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"gap\\\":\\\"gap:ba59c36419069660\\\",\\\"kind\\\":\\\"missing\\\",\\\"handed\\\":0,\\\"unknown\\\":0}\"}],\"structuredContent\":{\"gap\":\"gap:ba59c36419069660\",\"kind\":\"missing\",\"handed\":0,\"unknown\":0},\"isError\":false}}"
+],
+[
+"mcp_stale_known",
+"mcp",
+"{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"tools/call\", \"params\": {\"name\": \"gap\", \"arguments\": {\"session_id\": \"m2\", \"query\": \"mq2\", \"kind\": \"stale\", \"handed\": [\"n/b.md\", \"zzz\"]}}}",
+200,
+"{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"gap\\\":\\\"gap:2edaa60fa12fbaaf\\\",\\\"kind\\\":\\\"stale\\\",\\\"handed\\\":1,\\\"unknown\\\":1}\"}],\"structuredContent\":{\"gap\":\"gap:2edaa60fa12fbaaf\",\"kind\":\"stale\",\"handed\":1,\"unknown\":1},\"isError\":false}}"
+],
+[
+"mcp_stale_nohanded",
+"mcp",
+"{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"tools/call\", \"params\": {\"name\": \"gap\", \"arguments\": {\"session_id\": \"m\", \"query\": \"q\", \"kind\": \"stale\"}}}",
+200,
+"{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32602,\"message\":\"stale gap needs handed notes\"}}"
+],
+[
+"mcp_null_handed",
+"mcp",
+"{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"tools/call\", \"params\": {\"name\": \"gap\", \"arguments\": {\"session_id\": \"m\", \"query\": \"q\", \"kind\": \"missing\", \"handed\": null}}}",
+200,
+"{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32602,\"message\":\"handed must be a list of strings\"}}"
+],
+[
+"mcp_no_args",
+"mcp",
+"{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"tools/call\", \"params\": {\"name\": \"gap\", \"arguments\": {}}}",
+200,
+"{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32602,\"message\":\"session_id is required\"}}"
+],
+[
+"mcp_args_array",
+"mcp",
+"{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"gap\",\"arguments\":[1]}}",
+200,
+"{\"jsonrpc\":\"2.0\",\"id\":8,\"error\":{\"code\":-32602,\"message\":\"session_id is required\"}}"
+],
+[
+"mcp_nul",
+"mcp",
+"{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"tools/call\", \"params\": {\"name\": \"gap\", \"arguments\": {\"session_id\": \"m\", \"query\": \"a\\u0000b\", \"kind\": \"missing\"}}}",
+200,
+"{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32603,\"message\":\"gap failed: PostgreSQL text fields cannot contain NUL (0x00) bytes\"}}"
+]
+],
+"nodes": [
+[
+"gap:2b54c25059f69516",
+"gap",
+"broken",
+"q3"
+],
+[
+"gap:2edaa60fa12fbaaf",
+"gap",
+"stale",
+"mq2"
+],
+[
+"gap:b7d020634d0d0711",
+"gap",
+"stale",
+"q2"
+],
+[
+"gap:ba59c36419069660",
+"gap",
+"missing",
+"mq"
+],
+[
+"gap:d3e3705e24d6f7de",
+"gap",
+"missing",
+"q"
+],
+[
+"session:m1",
+"session",
+null,
+"2026-10-28T01:11:38.918934+00:00"
+],
+[
+"session:m2",
+"session",
+null,
+"2026-10-28T01:11:38.928390+00:00"
+],
+[
+"session:s1",
+"session",
+null,
+"2026-10-28T01:11:38.860387+00:00"
+],
+[
+"session:s2",
+"session",
+null,
+"2026-10-28T01:11:38.869038+00:00"
+],
+[
+"session:s3",
+"session",
+null,
+"2026-10-28T01:11:38.878874+00:00"
+]
+],
+"edges": [
+[
+"gap:2b54c25059f69516",
+"doc:n/a.md",
+"gap_handed"
+],
+[
+"gap:2b54c25059f69516",
+"doc:n/c.md",
+"gap_handed"
+],
+[
+"gap:2edaa60fa12fbaaf",
+"doc:n/b.md",
+"gap_handed"
+],
+[
+"gap:b7d020634d0d0711",
+"doc:n/b.md",
+"gap_handed"
+],
+[
+"session:m1",
+"gap:ba59c36419069660",
+"gap"
+],
+[
+"session:m2",
+"gap:2edaa60fa12fbaaf",
+"gap"
+],
+[
+"session:s1",
+"gap:d3e3705e24d6f7de",
+"gap"
+],
+[
+"session:s2",
+"gap:b7d020634d0d0711",
+"gap"
+],
+[
+"session:s3",
+"gap:2b54c25059f69516",
+"gap"
+]
+]
+}

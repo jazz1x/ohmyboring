@@ -14,6 +14,7 @@ pub mod claim_source;
 pub mod code_index;
 pub mod config;
 pub mod frontmatter;
+pub mod gap;
 pub mod graph;
 pub mod ingest;
 pub mod llm;

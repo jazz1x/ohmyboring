@@ -13,7 +13,7 @@
 //!
 //! ## Advantage over AGE
 //! Every value goes through `tokio-postgres` parameter binding ($1,$2…) → eliminates the cypher string-escaping footgun.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
@@ -3848,6 +3848,45 @@ impl Store {
         let report = Self::record_handover(&tx, session_id, observed_at, paths).await?;
         tx.commit().await.context("commit handover transaction")?;
         Ok(report)
+    }
+
+    /// One gap report, in its own transaction: the `gap:` node (label = the question, outcome =
+    /// kind), the `session:` node (label = `observed_at`, overwritten on every call), the
+    /// session→gap edge, and a `gap_handed` edge to each handed note that has a `document` row.
+    /// Same writes as the Python door's `record_gap`; a repeat adds no edge twice.
+    pub async fn record_gap_in_tx(
+        &self,
+        args: &crate::gap::GapArgs,
+        observed_at: &str,
+    ) -> Result<crate::gap::GapReport> {
+        let gap = crate::gap::gap_node_id(&args.session_id, &args.query);
+        let session_node = format!("session:{}", args.session_id);
+        let mut conn = self.db().await?;
+        let tx = conn.transaction().await.context("begin gap transaction")?;
+        Self::upsert_node_on(&tx, &gap, "gap", &args.query, Some(args.kind.as_str())).await?;
+        Self::upsert_node_on(&tx, &session_node, "session", observed_at, None).await?;
+        Self::upsert_edge_on(&tx, &session_node, &gap, "gap", None).await?;
+        let known: HashSet<String> = tx
+            .query(
+                "SELECT source_path FROM document WHERE source_path = ANY($1);",
+                &[&args.handed],
+            )
+            .await
+            .context("known handed documents")?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let handed: Vec<&String> = args.handed.iter().filter(|p| known.contains(*p)).collect();
+        for path in &handed {
+            Self::upsert_edge_on(&tx, &gap, &doc_node_id(path), "gap_handed", None).await?;
+        }
+        tx.commit().await.context("commit gap transaction")?;
+        Ok(crate::gap::GapReport {
+            gap,
+            kind: args.kind.as_str(),
+            handed: handed.len(),
+            unknown: args.handed.len() - handed.len(),
+        })
     }
 
     /// `record_supersedes` in its own transaction — for a caller whose request is that one call.

@@ -10,6 +10,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 - **엔진 `POST /repairs/split-subjects` (C-PORT4 1단계)** — 주인 판정은 `Caller::from_headers`(토큰 한 곳), 한 트랜잭션에서 그룹 claim 행을 `lock_claim_slots_of` 와 같은 슬롯 순서(canon COLLATE "C" + valid_from)로 `FOR UPDATE` 한 뒤 같은 트랜잭션에서 그룹을 다시 읽고 지운다(문의 읽기·삭제 틈은 엔진에서 닫힘). 잠금 없는 첫 구현에서 ingest 와 맞붙이면 40회 중 14회 교착, 잠금 뒤 0. 중간 실패(document UPDATE 예외) 시 행 0 변경. 응답 몸 `subject·deleted_rows·reread_notes·owner_held`(202).
 
+- **엔진 MCP `gap` 도구와 `POST /gap` (C-PORT4 1단계)** — `src/ohmyboring/gap/{parse,pg}.py` 의 동작을 그대로: 인자 거절 메시지·`handed` null 거절·중복 제거 뒤 unknown 셈·session 노드 label 을 호출마다 observed_at 으로 덮음·NUL 은 쓰기 오류(HTTP 502 / MCP -32603). `tools/list` 에 한 번만. 문이 같은 사본 DB 에서 낸 24건과 노드·간선 대조(빨강 26 differ → 0). 도구 설명을 `CALL THIS when …` 로 고쳤다(엔진의 「언제 부르나」 게이트; 문 목록과 같은 글).
+
 ### Changed
 - **문 `GET /projects?active_days=` 의 문서 수 동률을 project 사전순으로 (C-PORT7 5항)** — 문 SQL 이 `order by 2 desc` 만 걸어 동률 순서가 정해지지 않았다. 엔진과 같게 `order by 2 desc, 1` 로 DB 정렬에 맡긴다(파이썬 정렬은 codepoint 순이라 엔진 본문과 바이트가 다르다). 사본 DB 대조로 본문 바이트 일치 확인.
 - **카드 실행의 잠금·시간 초과·출력 꼴을 hermes 쪽 한 함수(`agents/hermes/card_runner.py`)로 (C-PORT8 2단계)** — 문 `/run/*` 가 하던 카드별 잠금(동시 두 번째는 409 꼴 거부)·시간 초과(`DOOR_RUN_CARD_TIMEOUT`, 900초)·`{ok, exit, posted_ts?, tail}` 를 옮겼다. 크론 실행은 프로세스마다 따로라 잠금은 `$HERMES_HOME/card-locks` 의 파일 잠금이다. `run_card` 는 `card_door.trigger` 와 같은 종료 코드·줄을 낸다(답 7종 대조). 호출부 교체와 문 경로 제거는 5단계.

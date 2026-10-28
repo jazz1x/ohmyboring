@@ -481,13 +481,16 @@ fn mcp_tools_list() -> Value {
                 },
                 "required": ["session_id", "verdict"]
             }
-        }
+        },
+        crate::gap::tool_definition()
     ]})
 }
 
 enum ToolOut {
     Text(String),
     Structured(Value),
+    /// `Structured` whose text keeps the answer's own key order (a `Value` sorts its keys).
+    Ordered(String, Value),
 }
 
 impl ToolOut {
@@ -498,6 +501,9 @@ impl ToolOut {
             }
             Self::Structured(value) => {
                 let text = serde_json::to_string(&value).unwrap_or_default();
+                Self::Ordered(text, value).into_result()
+            }
+            Self::Ordered(text, value) => {
                 json!({
                     "content": [{"type": "text", "text": text}],
                     "structuredContent": value,
@@ -508,7 +514,7 @@ impl ToolOut {
     }
 }
 
-const MCP_TOOL_NAMES: [&str; 24] = [
+const MCP_TOOL_NAMES: [&str; 25] = [
     "ask",
     "brief",
     "claims",
@@ -522,6 +528,7 @@ const MCP_TOOL_NAMES: [&str; 24] = [
     "decisions",
     "events",
     "forget",
+    "gap",
     "neighbors",
     "next_actions",
     "project_status",
@@ -624,7 +631,7 @@ fn tool_query_arg(args: Option<&Value>) -> String {
 
 fn tool_outcome_snippet(out: &Result<ToolOut, ToolCallError>) -> String {
     let raw = match out {
-        Ok(ToolOut::Text(text)) => text.clone(),
+        Ok(ToolOut::Text(text) | ToolOut::Ordered(text, _)) => text.clone(),
         Ok(ToolOut::Structured(value)) => serde_json::to_string(value).unwrap_or_default(),
         Err(ToolCallError::UnknownTool(name)) => format!("unknown tool: {name}"),
         Err(ToolCallError::Failed(code, message) | ToolCallError::Refused(code, message)) => {
@@ -692,6 +699,7 @@ async fn dispatch(
         "stalled" => ToolOut::Structured(mcp_stalled(s, args).await?),
         "recurrences" => ToolOut::Structured(mcp_recurrences(s, args).await?),
         "verdict" => ToolOut::Structured(mcp_verdict(s, args).await?),
+        "gap" => mcp_gap(s, args).await?,
         other => return Err(ToolCallError::UnknownTool(other.to_owned())),
     })
 }
@@ -1068,6 +1076,47 @@ fn refined_text(
 /// `isoformat(timespec="microseconds")` spelling, so either writer leaves the same text.
 fn verdict_label(at: chrono::DateTime<chrono::Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+}
+
+/// Why a gap report was not recorded.
+pub(crate) enum GapFault {
+    /// The arguments failed the boundary: the Python door's 400 / -32602 message.
+    Rejected(String),
+    NoStore,
+    /// The write failed (a NUL in a string, the store gone): the Python door's 502 / -32603.
+    Failed(String),
+}
+
+/// Parse and record one gap report — HTTP `POST /gap` and MCP `gap` share this. The store is
+/// checked first, as the Python door does, so a store-less engine never reads the arguments.
+pub(crate) async fn record_gap(
+    s: &AppState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<crate::gap::GapReport, GapFault> {
+    let Some(store) = s.store.as_ref() else {
+        return Err(GapFault::NoStore);
+    };
+    let parsed = crate::gap::parse(arguments).map_err(GapFault::Rejected)?;
+    store
+        .record_gap_in_tx(&parsed, &verdict_label(chrono::Utc::now()))
+        .await
+        .map_err(|e| GapFault::Failed(format!("gap failed: {e:#}")))
+}
+
+async fn mcp_gap(s: &AppState, args: Option<&Value>) -> Result<ToolOut, (i32, String)> {
+    // A non-object `arguments` reads as no arguments, so it is rejected for its first field.
+    let empty = serde_json::Map::new();
+    let arguments = args.and_then(Value::as_object).unwrap_or(&empty);
+    match record_gap(s, arguments).await {
+        Ok(report) => {
+            let text = serde_json::to_string(&report).map_err(|e| (-32603, format!("gap: {e}")))?;
+            let value = serde_json::to_value(&report).map_err(|e| (-32603, format!("gap: {e}")))?;
+            Ok(ToolOut::Ordered(text, value))
+        }
+        Err(GapFault::Rejected(message)) => Err((-32602, message)),
+        Err(GapFault::NoStore) => Err(vec_off_rpc()),
+        Err(GapFault::Failed(message)) => Err((-32603, message)),
+    }
 }
 
 async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {

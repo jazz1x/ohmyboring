@@ -20,6 +20,8 @@ use crate::pii;
 use crate::store::{LoggedHit, Store};
 use crate::wiki_recall;
 
+#[cfg(test)]
+mod gap_tests;
 mod http;
 mod mcp;
 mod note_index;
@@ -1909,6 +1911,7 @@ pub(crate) fn build_router(state: AppState) -> axum::Router {
         .route("/claim-source", get(http::handle_claim_source))
         .route("/claim-sources", get(http::handle_claim_sources))
         .route("/approved", get(http::handle_approved))
+        .route("/gap", post(http::handle_gap))
         .route(
             "/repairs/split-subjects",
             get(http::handle_split_subjects).post(http::handle_split_merge),

@@ -110,7 +110,7 @@ async fn reads_answer_the_python_bytes() {
 
 const POST_PYTHON: &str = include_str!("../../tests/fixtures/split_subjects_post_python.json");
 
-async fn raw_client(dsn: &str) -> tokio_postgres::Client {
+pub(super) async fn raw_client(dsn: &str) -> tokio_postgres::Client {
     let (client, conn) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
         .await
         .unwrap();
