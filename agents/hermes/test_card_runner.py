@@ -4,6 +4,7 @@ shape, the other completes. A fake card stands in — no real card, no Slack."""
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import threading
@@ -12,6 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import card_runner  # noqa: E402
+
+FAKE_TOKEN = "fake-token-value-not-real"
 
 
 def test_second_concurrent_run_is_rejected_like_the_door_409() -> None:
@@ -22,12 +25,18 @@ def test_second_concurrent_run_is_rejected_like_the_door_409() -> None:
             encoding="utf-8",
         )
         programs = {"fake-card": fake}
+        env_file = Path(tmp) / ".env"
+        env_file.write_text(f"OTHER=1\nSLACK_BOT_TOKEN={FAKE_TOKEN}\n", encoding="utf-8")
         answers: list[card_runner.Answer] = []
 
         def go() -> None:
             answers.append(
                 card_runner.execute(
-                    "fake-card", programs=programs, lock_dir=Path(tmp) / "locks", timeout_s=30.0
+                    "fake-card",
+                    programs=programs,
+                    lock_dir=Path(tmp) / "locks",
+                    timeout_s=30.0,
+                    env_file=env_file,
                 )
             )
 
@@ -54,8 +63,27 @@ def test_second_concurrent_run_is_rejected_like_the_door_409() -> None:
         '[x] FAILED: door answered HTTP 404 {"error":"unknown card nope"}',
     )
     assert card_runner.fold("[x]", done[0]) == (0, "stdout", "[x] ok exit=0 posted_ts=123.456")
+    assert FAKE_TOKEN not in json.dumps(done[0].body)
+
+
+def test_missing_token_fails_before_the_card_starts() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        marker = Path(tmp) / "started"
+        fake = Path(tmp) / "fake_card.py"
+        fake.write_text(f"open({str(marker)!r}, 'w').close()\n", encoding="utf-8")
+        env_file = Path(tmp) / ".env"
+        env_file.write_text("OTHER=1\n", encoding="utf-8")
+        answer = card_runner.execute(
+            "fake-card", programs={"fake-card": fake}, lock_dir=Path(tmp) / "locks", env_file=env_file
+        )
+        started = marker.exists()
+    code, stream, line = card_runner.fold("[x]", answer)
+    assert not started
+    assert (code, stream) == (1, "stderr")
+    assert line == "[x] FAILED: fake-card: SLACK_BOT_TOKEN 없음 tail="
 
 
 if __name__ == "__main__":
+    test_missing_token_fails_before_the_card_starts()
     test_second_concurrent_run_is_rejected_like_the_door_409()
     print("ok")

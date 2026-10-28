@@ -48,6 +48,23 @@ def default_lock_dir() -> Path:
     return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "card-locks"
 
 
+def default_env_file() -> Path:
+    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / ".env"
+
+
+def read_bot_token(env_file: Path) -> str | None:
+    """The SLACK_BOT_TOKEN value from env_file, or None when the file or the name is missing/empty."""
+    try:
+        text = env_file.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        name, sep, value = line.strip().removeprefix("export ").partition("=")
+        if sep and name.strip() == "SLACK_BOT_TOKEN":
+            return value.strip().strip("\"'") or None
+    return None
+
+
 @dataclass(frozen=True)
 class Answer:
     """What the door would have answered: its HTTP status and JSON body."""
@@ -74,11 +91,12 @@ def _failed(error: str) -> Answer:
     return Answer(200, {"ok": False, "exit": None, "tail": "", "error": error})
 
 
-def _run_locked(script: Path, timeout_s: float) -> Answer:
+def _run_locked(script: Path, timeout_s: float, token: str) -> Answer:
     try:
         completed = subprocess.run(
             [sys.executable, str(script)],
             cwd=str(_REPO_ROOT),
+            env={**os.environ, "SLACK_BOT_TOKEN": token},
             capture_output=True,
             text=True,
             timeout=timeout_s,
@@ -87,7 +105,8 @@ def _run_locked(script: Path, timeout_s: float) -> Answer:
         return _failed(f"timeout after {timeout_s:.0f}s")
     except OSError as e:
         return _failed(f"spawn failed: {e}")
-    return Answer(200, _card_run_body(completed))
+    body = _card_run_body(completed)
+    return Answer(200, {**body, "tail": body["tail"].replace(token, "***")})
 
 
 def execute(
@@ -96,11 +115,17 @@ def execute(
     programs: dict[str, Path] = CARD_PROGRAMS,
     lock_dir: Path | None = None,
     timeout_s: float = RUN_CARD_TIMEOUT_S,
+    env_file: Path | None = None,
 ) -> Answer:
     """Run one card under its per-card lock. A second concurrent caller gets the door's 409."""
     script = programs.get(name)
     if script is None:
         return Answer(404, {"error": f"unknown card {name}"})
+    # Read from $HERMES_HOME/.env, not terminal.env_passthrough: that is a hermes-global setting that
+    # also reaches the agent's tool subprocesses (shell/code execution), leaking the bot token to every agent-run command.
+    token = read_bot_token(env_file if env_file is not None else default_env_file())
+    if token is None:
+        return _failed(f"{name}: SLACK_BOT_TOKEN 없음")
     directory = lock_dir if lock_dir is not None else default_lock_dir()
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -114,7 +139,7 @@ def execute(
             return Answer(409, {"error": f"{name} already running"})
         except OSError as e:
             return _failed(f"lock unavailable: {e}")
-        return _run_locked(script, timeout_s)
+        return _run_locked(script, timeout_s, token)
 
 
 def fold(label: str, answer: Answer) -> tuple[int, str, str]:
