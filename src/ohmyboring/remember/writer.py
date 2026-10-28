@@ -806,7 +806,7 @@ def _pii_gate(note: RememberNote, deps: WriterDeps) -> Either[RememberNote, Refu
 def _gate(
     arguments: dict[str, Any], note: RememberNote, deps: WriterDeps, cur: Any, seams: _TimedSeams
 ) -> tuple[Refused | None, RememberNote, list[str]]:
-    """자격 → supersedes 모양·대상 → PII 게이트 — shadow._gate_decision 순서 그대로.
+    """자격 → supersedes 모양·대상 → PII 게이트 순서.
 
     거절이면 (Refused, 노트, []) — 아니면 (None, 게이트를 지난 노트, 대상 목록)."""
     if refusal := _judge_refusal(arguments, note, deps):

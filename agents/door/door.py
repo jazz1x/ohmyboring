@@ -159,7 +159,6 @@ from ohmyboring.recall import shadow as recall_shadow
 from ohmyboring.recall import wiki as recall_wiki
 from ohmyboring.registers import pg as registers_pg
 from ohmyboring.remember import dedup as remember_dedup
-from ohmyboring.remember import graph as remember_graph
 from ohmyboring.remember import index as remember_index
 from ohmyboring.remember import pii as remember_pii
 from ohmyboring.remember import writer as remember_writer
@@ -526,56 +525,7 @@ def _nearest_document(text: str, exclude_path: str | None) -> Either[str | None,
     return Ok(row[0] if row else None)
 
 
-#: 그림자의 그래프 대조(E3b)가 읽는 세 장 — 문이 지난 노트가 실제로 남긴 간선·문서·claim
-#: 행의 끝 상태다. 전부 읽기 전용 세션(임베딩 프로브와 같은 연결 모양).
-_GRAPH_EDGES_SQL = (
-    "SELECT e.src, e.kind, e.dst FROM edge e"
-    " WHERE e.src = ANY(%(docs)s) OR e.dst = ANY(%(docs)s)"
-    "    OR e.src IN (SELECT dst FROM edge WHERE src = ANY(%(docs)s) AND kind = 'claims')"
-)
-_GRAPH_DOCUMENTS_SQL = "SELECT source_path FROM document WHERE source_path = ANY(%(paths)s)"
-_GRAPH_CLAIMS_SQL = (
-    "SELECT source_path, subject, predicate, kind, superseded_at IS NOT NULL"
-    " FROM claim WHERE source_path = ANY(%(paths)s)"
-)
-
-
-def _read_graph(paths: tuple[str, ...]) -> remember_graph.GraphSnapshot | None:
-    """그림자가 정한 문서 경로들의 그래프 끝 상태를 읽는다 — 읽기 전용, 쓰기 없음.
-
-    DSN 부재·pg 고장이면 None — 그림자 사건이 graph-unchecked (다) 로 남긴다. 임베딩
-    프로브와 마찬가지로 응답 뒤 백그라운드라, 실패가 요청에 닿는 일은 없다."""
-    dsn = os.environ.get("DOOR_PG_DSN")
-    if not dsn:
-        return None
-    docs = [f"doc:{path}" for path in paths]
-    try:
-        with (
-            psycopg.connect(dsn, options="-c default_transaction_read_only=on") as conn,
-            conn.cursor() as cur,
-        ):
-            cur.execute(_GRAPH_EDGES_SQL, {"docs": docs})
-            edges = frozenset((row[0], row[1], row[2]) for row in cur.fetchall())
-            cur.execute(_GRAPH_DOCUMENTS_SQL, {"paths": list(paths)})
-            documents = frozenset(row[0] for row in cur.fetchall())
-            cur.execute(_GRAPH_CLAIMS_SQL, {"paths": list(paths)})
-            claims = tuple(
-                remember_graph.ClaimRow(
-                    source_path=row[0],
-                    subject=row[1],
-                    predicate=row[2],
-                    kind=row[3],
-                    sealed=row[4],
-                )
-                for row in cur.fetchall()
-            )
-    except psycopg.Error as e:
-        print(f"[door] remember_shadow graph read failed: {e}", file=sys.stderr, flush=True)
-        return None
-    return remember_graph.GraphSnapshot(edges=edges, documents=documents, claims=claims)
-
-
-#: remember 쓰기 주인 스위치(E3c-1) — engine(기본)이면 프록시+그림자 그대로, python 이면
+#: remember 쓰기 주인 스위치(E3c-1) — engine(기본)이면 프록시 그대로, python 이면
 #: 문 안의 파이썬 쓰기 길(ohmyboring.remember.writer)이 결정·쓰고 답한다. 운영 기본은
 #: engine — 이 조각에서 켜지 않는다(켜기는 오케스트레이터가 검증 뒤에 한다).
 _REMEMBER_WRITER_ENV = "DOOR_REMEMBER_WRITER"
