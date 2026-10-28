@@ -4,8 +4,7 @@
 The product definition for this repository. `GOALS.md` is the "current-slice execution contract" derived from it.
 
 > For the 39 commits before this document, defect discovery dragged the documentation along. This document exists to reverse that direction.
-> Draft → six-seat panel review → two independent advisor rounds; the record of that process is in
-> `docs/reports/2026-08-25-panel-review.md` — read the reasoning there, and read
+> Draft → six-seat panel review → two independent advisor rounds; the process record is not kept in the repository, so read
 > **only the decisions** here.
 
 ## 0. BLUF
@@ -137,7 +136,7 @@ The first-class measurement is M8 (uptake), the diagnostic is M1 (precision). De
 ### R3. Solved experience does not silently vanish
 The gate stays (verifier → one repair → dead-letter), but **the key decision of a session that passed must not drop out of distillation.**
 
-A real violation: a four-PR session was compressed to a fixed four claims and the day's biggest decision (#218, deleting the threshold enforce path) is **in no note at all** (`docs/reports/2026-08-20-rag-usage-probe.md` §4 D2). And this happened while M4 was green — which is why M4 was renamed "pipeline survival". **The rename is an honesty correction of the metric, not a resolution of this requirement.**
+A real violation: a four-PR session was compressed to a fixed four claims and the day's biggest decision (#218, deleting the threshold enforce path) is **in no note at all** (the 2026-08-20 rag-usage probe, §4 D2). And this happened while M4 was green — which is why M4 was renamed "pipeline survival". **The rename is an honesty correction of the metric, not a resolution of this requirement.**
 
 **Derived work (scheduled)**: remove the structural fixed claim count per note, or split distillation per decision. Honest cost **1–2 weeks** — the prompt/verifier change itself is 2–4 days but it cuts across dedup, claim upsert, eval fixtures and mutation verification. And it is **forward-only**: the engine refused re-distillation 3/3 and the original raws are gone, so the compression of existing notes cannot be undone.
 
