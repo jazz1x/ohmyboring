@@ -32,10 +32,15 @@ from ohmyboring.adapters import workflow_contract
 from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
 from ohmyboring.result import Err, Ok
 
-WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
+match boring_config.collect():
+    case Err(_reason):
+        sys.exit(f"[collect] {_reason}")
+    case Ok(_collect):
+        pass
+WINDOW_H = _collect.window_hours
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
-MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")  # skip small sessions (distill would SKIP anyway)
-PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("INGEST_PENDING_TTL") or "1800")
+MIN_KB = _collect.min_bytes / 1024  # skip small sessions (distill would SKIP anyway)
+PENDING_TTL = _collect.pending_ttl_seconds
 # BORING_HOME: repo clone location (default ~/oh-my-boring). Lets a forker clone elsewhere
 # without editing this file.
 BORING_HOME = os.environ.get("BORING_HOME") or os.path.expanduser("~/oh-my-boring")

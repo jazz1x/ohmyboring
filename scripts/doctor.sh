@@ -554,7 +554,22 @@ else
     marker_writable=0
 fi
 
-pending_ttl_raw="${BORING_READINESS_PENDING_TTL:-${INGEST_PENDING_TTL:-1800}}"
+# The marker TTLs come from the Python parser of boring.json `collect` (env INGEST_/COLLECT_*_TTL
+# already folded in); an unreadable boring.json leaves the value empty and the check below goes red.
+collect_ttl() {
+    PYTHONPATH="$BORING_HOME/src${PYTHONPATH:+:$PYTHONPATH}" uv run --locked --project "$BORING_HOME" python - "$1" <<'PY'
+import sys
+from ohmyboring import config
+from ohmyboring.result import Ok
+match config.collect():
+    case Ok(collect):
+        print(int(getattr(collect, sys.argv[1] + "_ttl_seconds")))
+    case err:
+        print(err.error, file=sys.stderr)
+        sys.exit(1)
+PY
+}
+pending_ttl_raw="${BORING_READINESS_PENDING_TTL:-$(collect_ttl pending)}"
 if pending_ttl="$(int_seconds "$pending_ttl_raw")"; then
     :
 else
@@ -562,7 +577,7 @@ else
     bad "invalid pending marker TTL '$pending_ttl_raw' — set BORING_READINESS_PENDING_TTL or INGEST_PENDING_TTL to a positive integer second count"
     failed_marker=1
 fi
-retry_ttl_raw="${BORING_READINESS_RETRY_TTL:-${INGEST_RETRY_TTL:-$pending_ttl_raw}}"
+retry_ttl_raw="${BORING_READINESS_RETRY_TTL:-${BORING_READINESS_PENDING_TTL:-$(collect_ttl retry)}}"
 if retry_ttl="$(int_seconds "$retry_ttl_raw")"; then
     :
 else

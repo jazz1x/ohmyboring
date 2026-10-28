@@ -1,4 +1,4 @@
-"""문 배경 스레드 — DOOR_SYNC_OWNER=python 일 때 기동 1회 + BORING_SYNC_HOURS(기본 4)마다 sync 한 회차.
+"""문 배경 스레드 — DOOR_SYNC_OWNER=python 일 때 기동 1회 + schedule.sync_hours 마다 sync 한 회차.
 
 engine 일 때는 이 스레드를 아예 띄우지 않는다(문이 start 를 부르지 않는다).
 """
@@ -11,10 +11,8 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from typing import Any
 
-from ohmyboring.result import Either, Err, Ok
 from ohmyboring.sync.run import COMPONENT, EVENT, SyncDeps, run_sync
 
-DEFAULT_HOURS = 4.0
 #: sync·compact 가 프로세스를 넘어 한 번에 하나만 돌게 하는 PostgreSQL advisory 잠금 키 — Rust scheduler 의
 #: sync_lock 과 같은 자리. 문 스레드와 `docker exec` 로 뜨는 compact_once 는 별개 프로세스라 DB 가 잠가야 한다.
 RUN_LOCK_KEY = 0x6F6D6272756E  # "ombrun"
@@ -32,19 +30,6 @@ def run_lock(connect: Callable[[], AbstractContextManager[Any]]) -> Iterator[Non
             yield
         finally:
             conn.execute("SELECT pg_advisory_unlock(%s)", (RUN_LOCK_KEY,))
-
-
-def parse_hours(raw: str | None) -> Either[float, str]:
-    """BORING_SYNC_HOURS — 비면 4, 양수만(Rust 는 1 이상 정수; 스레드는 0 이하를 거절)."""
-    if raw is None or not raw.strip():
-        return Ok(DEFAULT_HOURS)
-    try:
-        hours = float(raw)
-    except ValueError:
-        return Err(f"BORING_SYNC_HOURS must be a number, got {raw!r}")
-    if hours <= 0:
-        return Err(f"BORING_SYNC_HOURS must be > 0, got {raw!r}")
-    return Ok(hours)
 
 
 def run_once(deps: SyncDeps) -> None:

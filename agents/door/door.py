@@ -814,12 +814,12 @@ def _start_sync_if_owner() -> None:
             flush=True,
         )
         return
-    match sync_schedule.parse_hours(os.environ.get("BORING_SYNC_HOURS")):
+    match boring_config.schedule():
         case Err(reason):
             print(f"[door] sync thread not started: {reason}", file=sys.stderr, flush=True)
-        case Ok(hours):
-            sync_schedule.start(_sync_deps(), hours)
-            print(f"[door] sync thread started: every {hours}h", file=sys.stderr, flush=True)
+        case Ok(schedule):
+            sync_schedule.start(_sync_deps(), schedule.sync_hours)
+            print(f"[door] sync thread started: every {schedule.sync_hours}h", file=sys.stderr, flush=True)
 
 
 #: 하루 1회 DB 정리 주인 스위치 — engine(기본)이면 스레드 없음, python 이면 문 배경 스레드가
@@ -844,16 +844,18 @@ def _start_compact_if_owner() -> None:
             flush=True,
         )
         return
-    match compact_schedule.parse_hours(os.environ.get("BORING_COMPACT_HOURS")):
+    match boring_config.schedule():
         case Err(reason):
             print(f"[door] compact thread not started: {reason}", file=sys.stderr, flush=True)
-        case Ok(hours):
+        case Ok(schedule):
             deps = compact_run.CompactDeps(
                 connect=lambda: psycopg.connect(dsn, autocommit=True),
                 append_event=_enqueue_writer_event,
             )
-            compact_schedule.start(deps, hours)
-            print(f"[door] compact thread started: every {hours}h", file=sys.stderr, flush=True)
+            compact_schedule.start(deps, schedule.compact_hours)
+            print(
+                f"[door] compact thread started: every {schedule.compact_hours}h", file=sys.stderr, flush=True
+            )
 
 
 #: 일일 브리프 노트 주인 스위치 — engine(기본)이면 스레드 없음, python 이면 문 배경 스레드가
@@ -877,10 +879,12 @@ def _start_brief_if_owner() -> None:
             flush=True,
         )
         return
-    match brief_schedule.parse_hour(os.environ.get("BORING_BRIEF_HOUR")):
+    match boring_config.schedule():
         case Err(reason):
             print(f"[door] brief thread not started: {reason}", file=sys.stderr, flush=True)
-        case Ok(hour):
+        case Ok(boring_config.Schedule(brief_hour=None)):
+            print("[door] brief thread not started: schedule.brief_hour is off", file=sys.stderr, flush=True)
+        case Ok(boring_config.Schedule(brief_hour=hour)):
             deps = brief_daily.BriefDeps(
                 connect=lambda: psycopg.connect(dsn, autocommit=True),
                 generate=brief_generate.llm_generate,

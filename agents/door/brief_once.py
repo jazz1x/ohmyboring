@@ -18,7 +18,6 @@ import psycopg
 from ohmyboring import config as boring_config
 from ohmyboring.adapters import events as event_log
 from ohmyboring.briefing import daily, generate
-from ohmyboring.briefing import schedule as brief_schedule
 from ohmyboring.result import Err, Ok
 
 _VAULT_ENV = "BORING_VAULT_DIR"
@@ -47,11 +46,14 @@ def main(argv: list[str] | None = None) -> int:
         if refusal is not None:
             print(f"[brief] {refusal}", file=sys.stderr)
             return 2
-    match brief_schedule.parse_hour(os.environ.get("BORING_BRIEF_HOUR")):
+    match boring_config.schedule():
         case Err(reason):
             print(f"[brief] {reason}", file=sys.stderr)
             return 2
-        case Ok(hour):
+        case Ok(boring_config.Schedule(brief_hour=None)):
+            print("[brief] schedule.brief_hour is off — no reference hour", file=sys.stderr)
+            return 2
+        case Ok(boring_config.Schedule(brief_hour=hour)):
             pass
     wiki_dir = args.out or os.path.join(os.environ.get(_VAULT_ENV) or _DEFAULT_VAULT_DIR, "wiki")
     deps = daily.BriefDeps(

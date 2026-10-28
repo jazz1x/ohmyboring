@@ -70,10 +70,10 @@ services:
       BORING_CONFIG: /config/boring.json  # policy: note language, repo rules, source dirs
       BORING_VAULT_DIR: /vault                # remember target + sync corpus (/vault/wiki)
       BORING_VECTOR: ${BORING_VECTOR:-off} # off = wiki-first direct read. on = vector+graph (boring-postgres alongside via --profile vector)
-      BORING_SYNC_HOURS: "4"
+      BORING_SYNC_HOURS: ${BORING_SYNC_HOURS:-}  # empty = boring.json schedule.sync_hours
       BORING_SYNC_DISABLED: ${BORING_SYNC_DISABLED:-0}  # 1 = the engine skips the vault sync (startup + periodic); compact and the brief keep running
       BORING_COMPACT_DISABLED: ${BORING_COMPACT_DISABLED:-0}  # 1 = the engine skips the tick-loop compact; sync and the brief keep running
-      BORING_BRIEF_HOUR: ${BORING_ENGINE_BRIEF_HOUR:-8}  # local time (TZ) when the engine writes vault/wiki/daily-brief-YYYY-MM-DD.md; off = the engine brief scheduler is not started (not an hour 0..=23; empty falls back to 8)
+      BORING_BRIEF_HOUR: ${BORING_ENGINE_BRIEF_HOUR:-}  # local time (TZ) when the engine writes vault/wiki/daily-brief-YYYY-MM-DD.md; off = the engine brief scheduler is not started (not an hour 0..=23; empty falls back to boring.json schedule.brief_hour)
       TZ: Asia/Seoul
     volumes:
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: drudge's source_dirs only reads ~/.claude/projects)
@@ -130,11 +130,11 @@ services:
       DOOR_LINK_WRITER: ${DOOR_LINK_WRITER:-engine}
       DOOR_EVENTS_OWNER: ${DOOR_EVENTS_OWNER:-engine}
       DOOR_SYNC_OWNER: ${DOOR_SYNC_OWNER:-engine} # python = door thread re-ingests the vault every BORING_SYNC_HOURS (engine sync clock stays on until the engine is stopped)
-      BORING_SYNC_HOURS: ${BORING_SYNC_HOURS:-4}
+      BORING_SYNC_HOURS: ${BORING_SYNC_HOURS:-}
       DOOR_COMPACT_OWNER: ${DOOR_COMPACT_OWNER:-engine} # python = door thread runs compact every BORING_COMPACT_HOURS (set BORING_COMPACT_DISABLED=1 on the engine first)
-      BORING_COMPACT_HOURS: ${BORING_COMPACT_HOURS:-24}
+      BORING_COMPACT_HOURS: ${BORING_COMPACT_HOURS:-}
       DOOR_BRIEF_OWNER: ${DOOR_BRIEF_OWNER:-engine} # python = door thread writes the daily brief note at BORING_BRIEF_HOUR (set BORING_ENGINE_BRIEF_HOUR=off on the engine first)
-      BORING_BRIEF_HOUR: ${BORING_BRIEF_HOUR:-8}
+      BORING_BRIEF_HOUR: ${BORING_BRIEF_HOUR:-}
     volumes:
       - ./vault:/vault                   # remember writes notes here when DOOR_REMEMBER_WRITER=python
       # The folder, not the file: an editor that saves by rename swaps the inode, and a file

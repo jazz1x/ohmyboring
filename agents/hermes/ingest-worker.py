@@ -109,17 +109,27 @@ if _IN_CONTAINER:
 MARK_DIR = DISTILL_MARK_DIR
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 TRANSCRIPT_FORMAT = boring_config.agent_config("claude-code").get("format") or "claude-json"
-WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
-MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
-STABLE_AGE_S = float(os.environ.get("COLLECT_STABLE_AGE_SECONDS") or "1800")
+match boring_config.collect():
+    case Err(_reason):
+        sys.exit(f"[ingest-worker] {_reason}")
+    case Ok(_collect):
+        pass
+match boring_config.schedule():
+    case Err(_reason):
+        sys.exit(f"[ingest-worker] {_reason}")
+    case Ok(_schedule):
+        pass
+WINDOW_H = _collect.window_hours
+MIN_KB = _collect.min_bytes / 1024
+STABLE_AGE_S = _collect.stable_age_seconds
 CLAMP = int(os.environ.get("INGEST_CLAMP") or "4000")  # 12B digest ceiling — above this the agent derails
 MIN_TEXT = 500  # below this = no real content → skip
 # A pending-marker prevents the same session being re-offered every tick while the agent is still
 # working on it (or just failed). It expires so a crashed tick doesn't pin a session forever.
-PENDING_TTL = float(os.environ.get("INGEST_PENDING_TTL") or "1800")
+PENDING_TTL = _collect.pending_ttl_seconds
 # A retry-marker is a backoff signal, not a terminal state. Once it is stale, Hermes may re-offer it.
-RETRY_TTL = float(os.environ.get("INGEST_RETRY_TTL") or str(PENDING_TTL))
-QUEUE_PER_TICK = int(os.environ.get("BORING_QUEUE_PER_TICK") or "3")
+RETRY_TTL = _collect.retry_ttl_seconds
+QUEUE_PER_TICK = _schedule.queue_per_tick
 
 
 def _repo_slug(cwd):
