@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 
 use crate::llm::Llm;
 use crate::pg_detail::{Staged, stage};
-use crate::store::{Authorship, Hit, RankFacts, Store};
+use crate::store::{Authorship, ConsumptionCounts, Hit, RankFacts, Store};
 use crate::wiki_recall::WikiHit;
 
 const RRF_K: f64 = 60.0; // RRF denominator constant (de facto standard)
@@ -56,23 +56,42 @@ fn apply_net(fused: &mut HashMap<String, f64>, byid: &HashMap<String, Hit>, path
     }
 }
 
+/// What a failed verdict-count read does to a retrieval. The caller picks: the door's `/search`
+/// answers 502 `feedback: …`; every other caller keeps ranking without feedback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackRead {
+    Lenient,
+    Strict,
+}
+
 /// Fold document-level consumption verdicts (`used`/`contested` edges) into the fused RRF
 /// scores: `score += clamp(used − contested, ±FEEDBACK_NET_MAX) × FEEDBACK_STEP`. Runs once per
-/// retrieval, before the single sort, so every caller — `/search`, MCP `recall`, `/ask` + brief,
-/// CLI — ranks with the feedback in. A failed count read is a one-line log and a plain ranking,
-/// never a dead search.
+/// retrieval, before the single sort. A failed count read follows `read`: `Lenient` is a
+/// one-line log and a plain ranking, `Strict` is the failure.
 async fn apply_feedback(
     store: &Store,
     fused: &mut HashMap<String, f64>,
     byid: &HashMap<String, Hit>,
+    read: FeedbackRead,
 ) -> Result<HashMap<String, i64>> {
-    let mut nets: HashMap<String, i64> = HashMap::new();
     let mut paths: Vec<String> = byid.values().map(|h| h.source_path.clone()).collect();
     paths.sort_unstable();
     paths.dedup();
-    let counts = match store.ranking_feedback_counts(&paths).await {
-        Ok(counts) => counts,
-        Err(e) => {
+    let counts = store.ranking_feedback_counts(&paths).await;
+    fold_feedback(counts, read, fused, byid)
+}
+
+fn fold_feedback(
+    counts: Result<HashMap<String, ConsumptionCounts>>,
+    read: FeedbackRead,
+    fused: &mut HashMap<String, f64>,
+    byid: &HashMap<String, Hit>,
+) -> Result<HashMap<String, i64>> {
+    let mut nets: HashMap<String, i64> = HashMap::new();
+    let counts = match (counts, read) {
+        (Ok(counts), _) => counts,
+        (Err(e), FeedbackRead::Strict) => return Err(e),
+        (Err(e), FeedbackRead::Lenient) => {
             eprintln!(
                 "apply_feedback: ranking_feedback_counts failed ({e:#}); ranking without verdict feedback"
             );
@@ -94,9 +113,10 @@ async fn merge_hits(
     vec_hits: Vec<Hit>,
     txt_hits: Vec<Hit>,
     exclude_origins: &[String],
+    read: FeedbackRead,
 ) -> Result<Vec<Scored>> {
     let (mut fused, byid) = fuse_rrf(vec_hits, txt_hits)?;
-    let nets = apply_feedback(store, &mut fused, &byid).await?;
+    let nets = apply_feedback(store, &mut fused, &byid, read).await?;
 
     let mut merged: Vec<Scored> = byid
         .into_values()
@@ -296,7 +316,14 @@ pub async fn retrieve(
     let txt_hits = store
         .text_search_filtered(query, pool, project, since_hours)
         .await?;
-    let merged = merge_hits(store, vec_hits, txt_hits, exclude_origins).await?;
+    let merged = merge_hits(
+        store,
+        vec_hits,
+        txt_hits,
+        exclude_origins,
+        FeedbackRead::Lenient,
+    )
+    .await?;
     top_k_ranked(merged, top_k, |paths| async move {
         store.rank_facts(&paths).await
     })
@@ -328,6 +355,7 @@ pub async fn retrieve_budget(
         exclude_origins,
         project,
         since_hours,
+        FeedbackRead::Lenient,
     )
     .await
     .map_err(|staged| staged.error)
@@ -344,6 +372,7 @@ pub async fn retrieve_budget_staged(
     exclude_origins: &[String],
     project: Option<&str>,
     since_hours: Option<i32>,
+    read: FeedbackRead,
 ) -> Result<Vec<Hit>, Staged> {
     if max_results == 0 || max_chars == 0 {
         return Ok(Vec::new());
@@ -358,7 +387,7 @@ pub async fn retrieve_budget_staged(
         .text_search_filtered(query, pool, project, since_hours)
         .await
         .map_err(stage("text"))?;
-    let merged = merge_hits(store, vec_hits, txt_hits, exclude_origins)
+    let merged = merge_hits(store, vec_hits, txt_hits, exclude_origins, read)
         .await
         .map_err(stage("feedback"))?;
     budget_ranked(merged, max_results, max_chars, |paths| async move {
@@ -390,6 +419,16 @@ mod tests {
             dist: 0.0,
             dist_kind: DistKind::VectorCosine,
         }
+    }
+
+    #[test]
+    fn failed_count_read_follows_the_callers_mode() {
+        let byid = HashMap::new();
+        let down = || Err(anyhow::anyhow!("db down"));
+        let strict = fold_feedback(down(), FeedbackRead::Strict, &mut HashMap::new(), &byid);
+        assert_eq!(strict.unwrap_err().to_string(), "db down");
+        let lenient = fold_feedback(down(), FeedbackRead::Lenient, &mut HashMap::new(), &byid);
+        assert!(lenient.unwrap().is_empty());
     }
 
     #[test]

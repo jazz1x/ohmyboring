@@ -489,6 +489,7 @@ async fn search_hits_inner(
         &[],
         req.project.as_deref(),
         req.since_hours,
+        retrieve::FeedbackRead::Strict,
     )
     .await?
     .into_iter()
