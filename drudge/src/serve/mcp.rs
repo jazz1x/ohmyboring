@@ -1808,10 +1808,15 @@ async fn remember_on(
     )
     .map_err(|m| RpcError::refused((-32602_i32, m)))?;
     let edge_judge = judge.as_ref().unwrap_or(&note.front.author).to_judge();
-    let refused =
+    let mut refused =
         owner::refused_supersedes_logged(s.store.as_deref(), standing, &supersedes, "remember")
             .await
             .map_err(|e| (-32603_i32, format!("owner guard: {e:#}")))?;
+    // An owner note saved while a sync held the lock has no `document` row yet, so the table
+    // read above cannot see it; the waiting list can.
+    let waiting = waiting_owner_notes(s, standing, &supersedes);
+    owner::record_supersede_refusals(s.store.as_deref(), &waiting, "remember").await;
+    refused.extend(waiting);
     owner::none_refused(&refused).map_err(|m| RpcError::refused((-32602_i32, m)))?;
 
     apply_pii_gate(s.pii.as_ref().as_ref(), &mut note).map_err(RpcError::refused)?;
@@ -1841,7 +1846,10 @@ async fn remember_on(
     };
     let gate = dedup_gate(&note, standing, found);
     let telemetry = dedup_decision_event(&note, gate.existing(), gate.outcome());
-    let judge = edge_judge.as_deref();
+    let who = Requester {
+        standing,
+        edge_judge: edge_judge.as_deref(),
+    };
     match gate {
         DedupGate::Skip(existing) => {
             log_dedup_decision(s, &telemetry).await;
@@ -1853,14 +1861,14 @@ async fn remember_on(
                 duplicate: Some(existing.source_path),
                 embedding,
             };
-            Ok(store_new_note(s, &wiki_dir, note, &old, trail, judge, &telemetry).await?)
+            Ok(store_new_note(s, &wiki_dir, note, &old, trail, who, &telemetry).await?)
         }
         DedupGate::Fresh => {
             let trail = DedupTrail {
                 duplicate: None,
                 embedding,
             };
-            Ok(store_new_note(s, &wiki_dir, note, &supersedes, trail, judge, &telemetry).await?)
+            Ok(store_new_note(s, &wiki_dir, note, &supersedes, trail, who, &telemetry).await?)
         }
     }
 }
@@ -1919,6 +1927,14 @@ fn skipped_duplicate(skipped_path: String) -> Remembered {
     }
 }
 
+/// Who is asking, as the write needs it: whether it speaks as the owner, and whose judgement its
+/// `supersedes` edges carry.
+#[derive(Clone, Copy)]
+struct Requester<'a> {
+    standing: owner::Standing,
+    edge_judge: Option<&'a str>,
+}
+
 /// What the duplicate check leaves for the write that follows it.
 #[derive(Default)]
 struct DedupTrail {
@@ -1934,7 +1950,7 @@ async fn store_new_note(
     note: RememberNote,
     supersedes: &[String],
     trail: DedupTrail,
-    edge_judge: Option<&str>,
+    who: Requester<'_>,
     telemetry: &Value,
 ) -> Result<Remembered, (i32, String)> {
     let DedupTrail {
@@ -1963,13 +1979,15 @@ async fn store_new_note(
         label,
         front,
         supersedes: supersedes.to_vec(),
-        edge_judge: edge_judge.map(str::to_owned),
+        edge_judge: who.edge_judge.map(str::to_owned),
+        standing: who.standing,
     };
     let (message, supersedes_report) = match s.store.as_ref() {
         None => finish_without_store(&job.label, &resolved),
         Some(store) => match indexing_turn(s) {
             IndexingTurn::Now(lock) => {
-                finish_remembered_note(s, store, &job, &resolved, &lock).await?
+                let done = finish_remembered_note(s, store, &job, &resolved, &lock).await?;
+                (done.message, done.report)
             }
             IndexingTurn::Later(sync) => {
                 return defer_indexing(s, job, embedding, duplicate, sync).await;
@@ -2079,6 +2097,28 @@ fn supersedes_suffix(supersedes: &[String], report: &SupersedesReport) -> String
     format!("{head} · retired claims: {closed}")
 }
 
+/// The named notes that are owner notes still waiting to be indexed, when the request is not the
+/// owner's. Each is spelled as `resolve_document_path` would try it, as the list keys on the
+/// path the note was written at.
+fn waiting_owner_notes(
+    s: &AppState,
+    standing: owner::Standing,
+    supersedes: &[String],
+) -> Vec<String> {
+    match standing {
+        owner::Standing::Owner => Vec::new(),
+        owner::Standing::NotOwner => supersedes
+            .iter()
+            .filter(|named| {
+                wiki_path_spellings(named)
+                    .iter()
+                    .any(|spelled| s.deferred.is_owner_note(spelled))
+            })
+            .cloned()
+            .collect(),
+    }
+}
+
 /// Vector off (no store): the note is on disk and recallable now; nothing can be indexed or linked.
 fn finish_without_store(label: &str, supersedes: &[String]) -> (String, SupersedesReport) {
     (
@@ -2107,6 +2147,14 @@ fn indexing_turn(s: &AppState) -> IndexingTurn<'_> {
     }
 }
 
+/// What indexing one note produced: the answer text, the `supersedes` edges written, and the
+/// named notes a non-owner request was refused because their author is the owner.
+struct Indexed {
+    message: String,
+    report: SupersedesReport,
+    refused: Vec<String>,
+}
+
 /// Ingest the note just written and link the notes it corrects — one transaction for the whole
 /// request, so a failure anywhere leaves no document, chunk, claim, node or edge row (the note
 /// file stays on disk and the next sync ingests it, as after a failed Python `run_write`).
@@ -2118,33 +2166,13 @@ async fn finish_remembered_note(
     job: &IndexJob,
     supersedes: &[String],
     _lock: &tokio::sync::MutexGuard<'_, ()>,
-) -> Result<(String, SupersedesReport), (i32, String)> {
-    let front = &job.front;
-    let pairs: Vec<[String; 2]> = supersedes
-        .iter()
-        .map(|old| [front.source_path.clone(), old.clone()])
-        .collect();
-    let mut conn = store
-        .conn()
-        .await
-        .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
-    let tx = conn
-        .transaction()
-        .await
-        .map_err(|e| (-32603_i32, format!("begin remember transaction: {e:#}")))?;
-    let (_, stats) = ingest::ingest_file_in_tx(store, &tx, &s.llm, &s.cfg, &front.source_path)
-        .await
-        .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
-    let report = if pairs.is_empty() {
-        SupersedesReport::default()
-    } else {
-        Store::remember_supersedes(&tx, &pairs, job.edge_judge.as_deref())
-            .await
-            .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))?
-    };
-    tx.commit()
-        .await
-        .map_err(|e| (-32603_i32, format!("commit remember transaction: {e:#}")))?;
+) -> Result<Indexed, (i32, String)> {
+    let mut refused = Vec::new();
+    let linked = index_in_tx(s, store, job, supersedes, &mut refused).await;
+    // The transaction handle and its connection are gone: the refusal is recorded for a commit
+    // and a rollback alike.
+    owner::record_supersede_refusals(Some(store), &refused, "remember").await;
+    let (stats, report) = linked?;
     let relates = match vault::project_note(store, &job.path, 6).await {
         Ok(_) => "",
         Err(e) => {
@@ -2156,7 +2184,54 @@ async fn finish_remembered_note(
         "remembered → {} · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
         job.label, stats.chunks, stats.tools, stats.concepts, stats.claims
     );
-    Ok((message, report))
+    Ok(Indexed {
+        message,
+        report,
+        refused,
+    })
+}
+
+/// The transaction of `finish_remembered_note`. The owner check runs on this transaction's handle
+/// right before the edges are written, so it sees every note indexed ahead of this one; a refused
+/// target gets no edge. `refused` is filled before anything that can fail after it.
+async fn index_in_tx(
+    s: &AppState,
+    store: &Store,
+    job: &IndexJob,
+    supersedes: &[String],
+    refused: &mut Vec<String>,
+) -> Result<(ingest::Stats, SupersedesReport), (i32, String)> {
+    let front = &job.front;
+    let mut conn = store
+        .conn()
+        .await
+        .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| (-32603_i32, format!("begin remember transaction: {e:#}")))?;
+    let (_, stats) = ingest::ingest_file_in_tx(store, &tx, &s.llm, &s.cfg, &front.source_path)
+        .await
+        .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
+    *refused = owner::refused_supersedes(&tx, job.standing, supersedes)
+        .await
+        .map_err(|e| (-32603_i32, format!("owner guard: {e:#}")))?;
+    let pairs: Vec<[String; 2]> = supersedes
+        .iter()
+        .filter(|old| !refused.contains(old))
+        .map(|old| [front.source_path.clone(), old.clone()])
+        .collect();
+    let report = if pairs.is_empty() {
+        SupersedesReport::default()
+    } else {
+        Store::remember_supersedes(&tx, &pairs, job.edge_judge.as_deref())
+            .await
+            .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))?
+    };
+    tx.commit()
+        .await
+        .map_err(|e| (-32603_i32, format!("commit remember transaction: {e:#}")))?;
+    Ok((stats, report))
 }
 
 /// The note is saved; its indexing waits in the one queue. Called with `remember_gate` held, so
@@ -2176,8 +2251,11 @@ async fn defer_indexing(
         job.label,
         sync.as_str()
     );
-    s.deferred.add(source_path.clone(), embedding);
-    log_indexing_event(s, "indexing_deferred", "deferred", &source_path, None).await;
+    s.deferred.add(
+        source_path.clone(),
+        job.front.author == Author::Owner,
+        embedding,
+    );
     let queue = s.deferred.queue.get_or_init(|| {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(drain_deferred(s.clone(), rx));
@@ -2190,6 +2268,8 @@ async fn defer_indexing(
             format!("deferred indexing worker is gone — note saved, next sync ingests it: {e}"),
         ));
     }
+    // After the send: a deferral line with no queued job behind it would read as lost work.
+    log_indexing_event(s, "indexing_deferred", "deferred", &source_path, None, &[]).await;
     Ok(Remembered {
         source_path,
         wiki_id,
@@ -2208,26 +2288,28 @@ async fn drain_deferred(s: AppState, mut queue: tokio::sync::mpsc::UnboundedRece
         let outcome = index_deferred(&s, &job).await;
         s.deferred.remove(&source_path);
         match outcome {
-            Ok(()) => {
-                log_indexing_event(&s, "indexing_finished", "finished", &source_path, None).await;
+            Ok(refused) => {
+                let (e, st) = ("indexing_finished", "finished");
+                log_indexing_event(&s, e, st, &source_path, None, &refused).await;
             }
             Err((_, why)) => {
-                log_indexing_event(&s, "indexing_finished", "failed", &source_path, Some(&why))
-                    .await;
+                let (e, st) = ("indexing_finished", "failed");
+                log_indexing_event(&s, e, st, &source_path, Some(&why), &[]).await;
             }
         }
     }
 }
 
-async fn index_deferred(s: &AppState, job: &IndexJob) -> Result<(), (i32, String)> {
+/// Index one deferred note; the answer is the targets a non-owner note was refused.
+async fn index_deferred(s: &AppState, job: &IndexJob) -> Result<Vec<String>, (i32, String)> {
     let Some(store) = s.store.as_ref() else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let lock = s.sync_lock.lock().await;
     let resolved = resolve_supersedes(Some(store), &job.supersedes).await?;
     finish_remembered_note(s, store, job, &resolved, &lock)
         .await
-        .map(|_| ())
+        .map(|done| done.refused)
 }
 
 /// One line per deferral and one per finish; a deferral with no finish is work a restart lost.
@@ -2237,6 +2319,7 @@ async fn log_indexing_event(
     status: &str,
     source_path: &str,
     error: Option<&str>,
+    refused: &[String],
 ) {
     let line = json!({
         "component": "drudge.mcp.remember",
@@ -2244,6 +2327,7 @@ async fn log_indexing_event(
         "status": status,
         "source_path": source_path,
         "error": error,
+        "refused": refused,
     });
     log_dedup_decision(s, &line).await;
 }

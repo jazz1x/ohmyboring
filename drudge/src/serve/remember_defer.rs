@@ -18,10 +18,14 @@ pub(crate) struct IndexJob {
     /// point at may be a deferred one that only has a `document` row by then.
     pub(crate) supersedes: Vec<String>,
     pub(crate) edge_judge: Option<String>,
+    /// Who asked: the worker checks it again against the notes it is about to link, because a
+    /// target that was only waiting at request time may be an owner note by then.
+    pub(crate) standing: super::owner::Standing,
 }
 
 struct Waiting {
     path: String,
+    owner_authored: bool,
     embedding: Option<Vec<f32>>,
 }
 
@@ -46,8 +50,19 @@ impl DeferredNotes {
 
     /// `embedding` is `None` for a correction, which skips the duplicate gate and never
     /// computed one.
-    pub(crate) fn add(&self, path: String, embedding: Option<Vec<f32>>) {
-        self.waiting().push(Waiting { path, embedding });
+    pub(crate) fn add(&self, path: String, owner_authored: bool, embedding: Option<Vec<f32>>) {
+        self.waiting().push(Waiting {
+            path,
+            owner_authored,
+            embedding,
+        });
+    }
+
+    /// Is `path` a waiting note its owner wrote — one a non-owner request may not supersede.
+    pub(crate) fn is_owner_note(&self, path: &str) -> bool {
+        self.waiting()
+            .iter()
+            .any(|w| w.owner_authored && w.path == path)
     }
 
     pub(crate) fn remove(&self, path: &str) {

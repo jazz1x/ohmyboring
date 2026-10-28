@@ -248,3 +248,135 @@ async fn sync_indexing_the_note_first_leaves_one_document_and_no_second_edge() {
             .unwrap();
     assert!(failed.is_empty(), "the finish after sync did not fail");
 }
+
+fn by_owner(mut args: Value) -> Value {
+    args["author"] = json!("owner");
+    args
+}
+
+const EDGES_INTO: &str =
+    "SELECT count(*) FROM edge WHERE kind = 'supersedes' AND dst = 'doc:' || $1";
+
+async fn refusals(s: &AppState) -> Vec<Value> {
+    s.store
+        .as_ref()
+        .unwrap()
+        .recent_events(EventLogFilter {
+            limit: 100,
+            component: Some("drudge.owner"),
+            event_name: Some("owner_supersede_refused"),
+            status: None,
+            run_id: None,
+            workflow: None,
+            since_hours: None,
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.attributes)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_non_owner_cannot_supersede_an_owner_note_that_is_still_waiting() {
+    let Some(fx) = fixture().await else { return };
+    let sync = fx.s.sync_lock.lock().await;
+    let a = remember_note(
+        &fx.s,
+        Caller::Owner,
+        Some(&by_owner(note("mine", "owner body", &[]))),
+    )
+    .await
+    .unwrap();
+
+    let b = tokio::time::timeout(
+        ANSWER_WITHIN,
+        remember_note(
+            &fx.s,
+            Caller::Unverified,
+            Some(&note("theirs", "other body", &[&a.source_path])),
+        ),
+    )
+    .await
+    .expect("answered while sync_lock was held");
+    drop(sync);
+    drained(&fx.s).await;
+
+    assert_eq!(count(&fx.db, EDGES_INTO, &a.source_path).await, 0);
+    assert!(b.is_err(), "the request is refused");
+    assert_eq!(refusals(&fx.s).await.len(), 1);
+}
+
+#[tokio::test]
+async fn the_owner_can_supersede_their_own_note_that_is_still_waiting() {
+    let Some(fx) = fixture().await else { return };
+    let sync = fx.s.sync_lock.lock().await;
+    let a = remember_note(
+        &fx.s,
+        Caller::Owner,
+        Some(&by_owner(note("mine", "owner body", &[]))),
+    )
+    .await
+    .unwrap();
+    remember_note(
+        &fx.s,
+        Caller::Owner,
+        Some(&by_owner(note(
+            "mine again",
+            "newer body",
+            &[&a.source_path],
+        ))),
+    )
+    .await
+    .unwrap();
+    drop(sync);
+    drained(&fx.s).await;
+
+    assert_eq!(count(&fx.db, EDGES_INTO, &a.source_path).await, 1);
+    assert!(refusals(&fx.s).await.is_empty());
+}
+
+/// The worker's own check, with the request-time one out of the way: A is waiting as a plain
+/// note when B names it, and becomes an owner note on disk before the worker ingests it.
+#[tokio::test]
+async fn the_worker_rechecks_owner_authorship_before_writing_the_edge() {
+    let Some(fx) = fixture().await else { return };
+    let sync = fx.s.sync_lock.lock().await;
+    let a = remember(&fx.s, &note("plain", "plain body", &[])).await;
+    remember(&fx.s, &note("theirs", "other body", &[&a.source_path])).await;
+    let text = std::fs::read_to_string(&a.source_path).unwrap();
+    let owned = if text.contains("author: unknown") {
+        text.replace("author: unknown", "author: owner")
+    } else {
+        text.replacen("---\n", "---\nauthor: owner\n", 1)
+    };
+    std::fs::write(&a.source_path, owned).unwrap();
+    drop(sync);
+    drained(&fx.s).await;
+
+    assert_eq!(count(&fx.db, EDGES_INTO, &a.source_path).await, 0);
+    let refused = refusals(&fx.s).await;
+    assert_eq!(refused.len(), 1);
+    assert!(refused[0].to_string().contains(&a.source_path));
+    let finished =
+        fx.s.store
+            .as_ref()
+            .unwrap()
+            .recent_events(EventLogFilter {
+                limit: 100,
+                component: Some("drudge.mcp.remember"),
+                event_name: Some("indexing_finished"),
+                status: None,
+                run_id: None,
+                workflow: None,
+                since_hours: None,
+            })
+            .await
+            .unwrap();
+    assert!(
+        finished
+            .iter()
+            .any(|f| f.attributes["refused"] == json!([a.source_path])),
+        "B's finished line names the refused target"
+    );
+}
