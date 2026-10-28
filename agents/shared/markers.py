@@ -157,6 +157,14 @@ def is_dead(session_id: str) -> bool:
     return os.path.exists(_paths(session_id)[3])
 
 
+def dead_time(session_id: str) -> float | None:
+    """Return the mtime of the dead marker (when the session gave up), or None if absent."""
+    try:
+        return os.path.getmtime(_paths(session_id)[3])
+    except OSError:
+        return None
+
+
 def is_pending(session_id: str, ttl: float | None = None) -> bool:
     """Return True if a pending marker exists and (when ttl is given) is not expired."""
     _, path, _, _ = _paths(session_id)

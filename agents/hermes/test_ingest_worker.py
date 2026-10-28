@@ -376,7 +376,7 @@ class IngestWorkerTest(unittest.TestCase):
             self._drain_with(False)
         self.assertTrue(ingest_worker.markers.is_dead("q-loop"))
         self.assertFalse(ingest_worker.distill_queue.is_queued("q-loop"))
-        runs = [e for e in self._events() if e.get("session_id") == "q-loop"]
+        runs = [e for e in self._events() if e.get("session_id") == "q-loop" and e["event"] == "ingest_queue"]
         self.assertEqual([e["status"] for e in runs], ["failed"] * 4 + ["dead"])
 
     def test_an_already_done_session_is_not_distilled_again(self):
