@@ -6,7 +6,7 @@ and re-read our Slack mrkdwn as markdown, so `*bold*` arrived as italics. This p
 weekly's own process with the bot token — it runs the weekly graph (`ohmyboring.weekly`) in
 blocks mode and posts the Block Kit payload to SLACK_CARD_CHANNEL verbatim. No socket, no
 hermes wrapper; launchd fires it Monday 09:00 (`scripts/schedule-card.sh install weekly`) and,
-since the handover, hermes cron asks the door to fire it (`POST /run/weekly-card`) — one tool,
+since the handover, hermes cron fires it through `agents/hermes/card_runner.py` — one tool,
 two schedulers, and the second one of the ISO week sees the first card's own `weekly_card`
 event and exits 0 with one line instead of posting twice.
 
