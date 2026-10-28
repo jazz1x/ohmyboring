@@ -28,6 +28,9 @@ mod note_index;
 pub(crate) mod owner;
 #[cfg(test)]
 mod pg_failure_tests;
+mod remember_defer;
+#[cfg(test)]
+mod remember_defer_tests;
 mod scheduler;
 mod search_route;
 #[cfg(test)]
@@ -70,6 +73,8 @@ pub struct AppState {
     pub(crate) sync_lock: Arc<Mutex<()>>,
     /// Orders remembers so a duplicate check and the note write it guards are one step.
     pub(crate) remember_gate: Arc<Mutex<()>>,
+    /// Notes saved while a sync held `sync_lock`, waiting to be indexed.
+    pub(crate) deferred: Arc<remember_defer::DeferredNotes>,
     pub(crate) note_index: Arc<note_index::NoteIndex>,
     pub(crate) wiki_index: Arc<std::sync::Mutex<wiki_recall::WikiIndex>>,
     pub(crate) last_compact: Arc<Mutex<Option<std::time::Instant>>>,
@@ -226,6 +231,7 @@ mod tests {
             cfg_path: std::sync::Arc::new(None),
             sync_lock: std::sync::Arc::default(),
             remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
             note_index: std::sync::Arc::default(),
             wiki_index: std::sync::Arc::default(),
             last_compact: std::sync::Arc::default(),
@@ -272,6 +278,7 @@ mod tests {
             cfg_path: std::sync::Arc::new(None),
             sync_lock: std::sync::Arc::default(),
             remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
             note_index: std::sync::Arc::default(),
             wiki_index: std::sync::Arc::default(),
             last_compact: std::sync::Arc::default(),
@@ -305,6 +312,7 @@ mod tests {
             cfg_path: std::sync::Arc::new(None),
             sync_lock: std::sync::Arc::default(),
             remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
             note_index: std::sync::Arc::default(),
             wiki_index: std::sync::Arc::default(),
             last_compact: std::sync::Arc::default(),
@@ -373,6 +381,7 @@ mod tests {
             cfg_path: std::sync::Arc::new(None),
             sync_lock: std::sync::Arc::default(),
             remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
             note_index: std::sync::Arc::default(),
             wiki_index: std::sync::Arc::default(),
             last_compact: std::sync::Arc::default(),
@@ -436,6 +445,7 @@ mod tests {
             cfg_path: std::sync::Arc::new(None),
             sync_lock: std::sync::Arc::default(),
             remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
             note_index: std::sync::Arc::default(),
             wiki_index: std::sync::Arc::default(),
             last_compact: std::sync::Arc::default(),
@@ -501,6 +511,7 @@ mod tests {
             cfg_path: std::sync::Arc::new(None),
             sync_lock: std::sync::Arc::default(),
             remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
             note_index: std::sync::Arc::default(),
             wiki_index: std::sync::Arc::default(),
             last_compact: std::sync::Arc::default(),
@@ -1729,6 +1740,15 @@ pub(crate) enum SyncState {
     Idle,
 }
 
+impl SyncState {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Idle => "idle",
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub(crate) struct HealthResp {
     pub(crate) status: &'static str,
@@ -1830,6 +1850,7 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         cfg_path: Arc::new(cfg_path),
         sync_lock: Arc::new(Mutex::new(())),
         remember_gate: Arc::new(Mutex::new(())),
+        deferred: std::sync::Arc::default(),
         note_index: Arc::default(),
         last_compact: Arc::clone(&last_compact),
         compact_failure: Arc::clone(&compact_failure),

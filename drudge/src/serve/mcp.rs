@@ -18,7 +18,10 @@ use crate::graph;
 use crate::ingest;
 use crate::redact;
 use crate::serve::owner::{self, Caller};
-use crate::serve::{AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, register_limit, vec_off_rpc};
+use crate::serve::remember_defer::{DeferredNotes, IndexJob};
+use crate::serve::{
+    AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, SyncState, register_limit, vec_off_rpc,
+};
 use crate::store::{EventLogFilter, Store, SupersedesReport};
 use crate::vault;
 
@@ -1822,12 +1825,19 @@ async fn remember_on(
     // identical requests both see "no duplicate" and both land. Held to the end of the request
     // (before `sync_lock`, which `finish_remembered_note` takes; nothing takes them the other way).
     let _remember_turn = s.remember_gate.lock().await;
-    let found = if needs_dedup(&supersedes) {
-        check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir, &s.note_index)
-            .await
-            .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
+    let DedupCheck { found, embedding } = if needs_dedup(&supersedes) {
+        check_duplicate(
+            s.store.as_deref(),
+            &s.llm,
+            &note,
+            &wiki_dir,
+            &s.note_index,
+            &s.deferred,
+        )
+        .await
+        .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
     } else {
-        None
+        DedupCheck::default()
     };
     let gate = dedup_gate(&note, standing, found);
     let telemetry = dedup_decision_event(&note, gate.existing(), gate.outcome());
@@ -1839,11 +1849,18 @@ async fn remember_on(
         }
         DedupGate::Supersede(existing) => {
             let old = [existing.source_path.clone()];
-            let duplicate = Some(existing.source_path);
-            Ok(store_new_note(s, &wiki_dir, note, &old, duplicate, judge, &telemetry).await?)
+            let trail = DedupTrail {
+                duplicate: Some(existing.source_path),
+                embedding,
+            };
+            Ok(store_new_note(s, &wiki_dir, note, &old, trail, judge, &telemetry).await?)
         }
         DedupGate::Fresh => {
-            Ok(store_new_note(s, &wiki_dir, note, &supersedes, None, judge, &telemetry).await?)
+            let trail = DedupTrail {
+                duplicate: None,
+                embedding,
+            };
+            Ok(store_new_note(s, &wiki_dir, note, &supersedes, trail, judge, &telemetry).await?)
         }
     }
 }
@@ -1902,16 +1919,28 @@ fn skipped_duplicate(skipped_path: String) -> Remembered {
     }
 }
 
+/// What the duplicate check leaves for the write that follows it.
+#[derive(Default)]
+struct DedupTrail {
+    duplicate: Option<String>,
+    /// The incoming note's embedding, when the check computed one.
+    embedding: Option<Vec<f32>>,
+}
+
 /// The only path that writes a note file, always at a freshly allocated `wiki-NNNN`.
 async fn store_new_note(
     s: &AppState,
     wiki_dir: &std::path::Path,
     note: RememberNote,
     supersedes: &[String],
-    duplicate: Option<String>,
+    trail: DedupTrail,
     edge_judge: Option<&str>,
     telemetry: &Value,
 ) -> Result<Remembered, (i32, String)> {
+    let DedupTrail {
+        duplicate,
+        embedding,
+    } = trail;
     let resolved = resolve_supersedes(s.store.as_deref(), supersedes).await?;
     let db_ids = existing_wiki_ids(s).await?;
     let (wiki_id, path) = vault::allocate_wiki_path(wiki_dir, Some(&db_ids))
@@ -1929,15 +1958,31 @@ async fn store_new_note(
         .map(|old| format!(" (supersedes wiki/{old}.md)"))
         .unwrap_or_default();
     let label = format!("wiki/{wiki_id}.md{dup_suffix}");
-    let (message, supersedes_report) =
-        finish_remembered_note(s, &path, &label, &front, &resolved, edge_judge).await?;
+    let job = IndexJob {
+        path,
+        label,
+        front,
+        supersedes: supersedes.to_vec(),
+        edge_judge: edge_judge.map(str::to_owned),
+    };
+    let (message, supersedes_report) = match s.store.as_ref() {
+        None => finish_without_store(&job.label, &resolved),
+        Some(store) => match indexing_turn(s) {
+            IndexingTurn::Now(lock) => {
+                finish_remembered_note(s, store, &job, &resolved, &lock).await?
+            }
+            IndexingTurn::Later(sync) => {
+                return defer_indexing(s, job, embedding, duplicate, sync).await;
+            }
+        },
+    };
     let message = format!(
         "{}{}",
         message,
         supersedes_suffix(supersedes, &supersedes_report)
     );
     Ok(Remembered {
-        source_path: front.source_path.clone(),
+        source_path: job.front.source_path.clone(),
         wiki_id,
         duplicate,
         supersedes: supersedes_report.supersedes,
@@ -2034,36 +2079,51 @@ fn supersedes_suffix(supersedes: &[String], report: &SupersedesReport) -> String
     format!("{head} · retired claims: {closed}")
 }
 
+/// Vector off (no store): the note is on disk and recallable now; nothing can be indexed or linked.
+fn finish_without_store(label: &str, supersedes: &[String]) -> (String, SupersedesReport) {
+    (
+        format!("remembered → {label} (vector off — wiki is first-class memory; recallable now)"),
+        if supersedes.is_empty() {
+            SupersedesReport::default()
+        } else {
+            supersedes_unwritten(supersedes)
+        },
+    )
+}
+
+/// Who indexes the note just written. `Now` holds `sync_lock`, as the request always did before;
+/// `Later` carries why it could not: a sync holds the lock (`Running`), or older deferred notes
+/// are still waiting and this one must come after them (`Idle`).
+enum IndexingTurn<'a> {
+    Now(tokio::sync::MutexGuard<'a, ()>),
+    Later(SyncState),
+}
+
+fn indexing_turn(s: &AppState) -> IndexingTurn<'_> {
+    match (s.deferred.has_backlog(), s.sync_lock.try_lock()) {
+        (false, Ok(lock)) => IndexingTurn::Now(lock),
+        (true, Ok(_)) => IndexingTurn::Later(SyncState::Idle),
+        (_, Err(_)) => IndexingTurn::Later(SyncState::Running),
+    }
+}
+
 /// Ingest the note just written and link the notes it corrects — one transaction for the whole
 /// request, so a failure anywhere leaves no document, chunk, claim, node or edge row (the note
 /// file stays on disk and the next sync ingests it, as after a failed Python `run_write`).
 /// `relates_to` is projected after the commit: it reads committed rows and rewrites only the file.
+/// `_lock` is the proof that the caller holds `sync_lock`.
 async fn finish_remembered_note(
     s: &AppState,
-    path: &std::path::Path,
-    label: &str,
-    front: &FrontMatter,
+    store: &Store,
+    job: &IndexJob,
     supersedes: &[String],
-    edge_judge: Option<&str>,
+    _lock: &tokio::sync::MutexGuard<'_, ()>,
 ) -> Result<(String, SupersedesReport), (i32, String)> {
-    let Some(store) = s.store.as_ref() else {
-        return Ok((
-            format!(
-                "remembered → {label} (vector off — wiki is first-class memory; recallable now)"
-            ),
-            if supersedes.is_empty() {
-                SupersedesReport::default()
-            } else {
-                supersedes_unwritten(supersedes)
-            },
-        ));
-    };
-
+    let front = &job.front;
     let pairs: Vec<[String; 2]> = supersedes
         .iter()
         .map(|old| [front.source_path.clone(), old.clone()])
         .collect();
-    let _guard = s.sync_lock.lock().await;
     let mut conn = store
         .conn()
         .await
@@ -2078,14 +2138,14 @@ async fn finish_remembered_note(
     let report = if pairs.is_empty() {
         SupersedesReport::default()
     } else {
-        Store::remember_supersedes(&tx, &pairs, edge_judge)
+        Store::remember_supersedes(&tx, &pairs, job.edge_judge.as_deref())
             .await
             .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))?
     };
     tx.commit()
         .await
         .map_err(|e| (-32603_i32, format!("commit remember transaction: {e:#}")))?;
-    let relates = match vault::project_note(store, path, 6).await {
+    let relates = match vault::project_note(store, &job.path, 6).await {
         Ok(_) => "",
         Err(e) => {
             eprintln!("[remember] project_note warning (ignored): {e:#}");
@@ -2093,10 +2153,99 @@ async fn finish_remembered_note(
         }
     };
     let message = format!(
-        "remembered → {label} · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
-        stats.chunks, stats.tools, stats.concepts, stats.claims
+        "remembered → {} · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
+        job.label, stats.chunks, stats.tools, stats.concepts, stats.claims
     );
     Ok((message, report))
+}
+
+/// The note is saved; its indexing waits in the one queue. Called with `remember_gate` held, so
+/// the note is listed as waiting in the same step as its file write, and the next remember's
+/// duplicate check sees it.
+async fn defer_indexing(
+    s: &AppState,
+    job: IndexJob,
+    embedding: Option<Vec<f32>>,
+    duplicate: Option<String>,
+    sync: SyncState,
+) -> Result<Remembered, (i32, String)> {
+    let source_path = job.front.source_path.clone();
+    let wiki_id = vault::wiki_stem(&source_path).unwrap_or_default();
+    let message = format!(
+        "remembered → {} · saved, indexing deferred (sync {}) — recallable after it finishes",
+        job.label,
+        sync.as_str()
+    );
+    s.deferred.add(source_path.clone(), embedding);
+    log_indexing_event(s, "indexing_deferred", "deferred", &source_path, None).await;
+    let queue = s.deferred.queue.get_or_init(|| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(drain_deferred(s.clone(), rx));
+        tx
+    });
+    if let Err(e) = queue.send(job) {
+        s.deferred.remove(&source_path);
+        return Err((
+            -32603_i32,
+            format!("deferred indexing worker is gone — note saved, next sync ingests it: {e}"),
+        ));
+    }
+    Ok(Remembered {
+        source_path,
+        wiki_id,
+        duplicate,
+        supersedes: 0,
+        unknown: 0,
+        message,
+    })
+}
+
+/// The one worker: takes deferred notes in the order they were queued and runs each under
+/// `sync_lock` as the locked path does. One note at a time, so queue order is index order.
+async fn drain_deferred(s: AppState, mut queue: tokio::sync::mpsc::UnboundedReceiver<IndexJob>) {
+    while let Some(job) = queue.recv().await {
+        let source_path = job.front.source_path.clone();
+        let outcome = index_deferred(&s, &job).await;
+        s.deferred.remove(&source_path);
+        match outcome {
+            Ok(()) => {
+                log_indexing_event(&s, "indexing_finished", "finished", &source_path, None).await;
+            }
+            Err((_, why)) => {
+                log_indexing_event(&s, "indexing_finished", "failed", &source_path, Some(&why))
+                    .await;
+            }
+        }
+    }
+}
+
+async fn index_deferred(s: &AppState, job: &IndexJob) -> Result<(), (i32, String)> {
+    let Some(store) = s.store.as_ref() else {
+        return Ok(());
+    };
+    let lock = s.sync_lock.lock().await;
+    let resolved = resolve_supersedes(Some(store), &job.supersedes).await?;
+    finish_remembered_note(s, store, job, &resolved, &lock)
+        .await
+        .map(|_| ())
+}
+
+/// One line per deferral and one per finish; a deferral with no finish is work a restart lost.
+async fn log_indexing_event(
+    s: &AppState,
+    event: &str,
+    status: &str,
+    source_path: &str,
+    error: Option<&str>,
+) {
+    let line = json!({
+        "component": "drudge.mcp.remember",
+        "event": event,
+        "status": status,
+        "source_path": source_path,
+        "error": error,
+    });
+    log_dedup_decision(s, &line).await;
 }
 
 fn apply_pii_gate(
@@ -2206,13 +2355,22 @@ struct NoteQuality {
     evidence_signal: bool,
 }
 
+/// What the duplicate check found, and the incoming note's embedding when it computed one (the
+/// store is on and no file already matched) — kept so a deferred note can be listed with it.
+#[derive(Default)]
+struct DedupCheck {
+    found: Option<DuplicateMatch>,
+    embedding: Option<Vec<f32>>,
+}
+
 async fn check_duplicate(
     store: Option<&crate::store::Store>,
     llm: &crate::llm::Llm,
     note: &RememberNote,
     wiki_dir: &std::path::Path,
     index: &super::note_index::NoteIndex,
-) -> anyhow::Result<Option<DuplicateMatch>> {
+    deferred: &DeferredNotes,
+) -> anyhow::Result<DedupCheck> {
     let indexed = index.with_synced(wiki_dir, |notes| {
         notes
             .filter_map(|(path, n)| file_duplicate(note, path, &n.front, &n.body))
@@ -2223,25 +2381,33 @@ async fn check_duplicate(
         None => scan_duplicates(note, wiki_dir)?,
     };
     if let Some(found) = pick_duplicate(matches) {
-        return Ok(Some(found));
+        return Ok(DedupCheck {
+            found: Some(found),
+            embedding: None,
+        });
     }
 
-    if let Some(store) = store {
-        let title = note.front.title.as_deref().unwrap_or("");
-        let text = format!("{}\n\n{}", title, note.body);
-        let emb = llm.embed(&text).await?;
-        if let Some((source_path, _dist)) = store.nearest_document(&emb, DUPLICATE_MAX_DIST).await?
-        {
-            return Ok(Some(DuplicateMatch {
-                source_path,
-                reason: DuplicateReason::Embedding,
-                front: FrontMatter::default(),
-                body: String::new(),
-            }));
-        }
-    }
-
-    Ok(None)
+    let Some(store) = store else {
+        return Ok(DedupCheck::default());
+    };
+    let title = note.front.title.as_deref().unwrap_or("");
+    let text = format!("{}\n\n{}", title, note.body);
+    let emb = llm.embed(&text).await?;
+    // A note saved while a sync held the lock has no chunk rows yet; the waiting list stands in.
+    let nearest = match store.nearest_document(&emb, DUPLICATE_MAX_DIST).await? {
+        Some((source_path, _dist)) => Some(source_path),
+        None => deferred.nearest(&emb, DUPLICATE_MAX_DIST),
+    };
+    let found = nearest.map(|source_path| DuplicateMatch {
+        source_path,
+        reason: DuplicateReason::Embedding,
+        front: FrontMatter::default(),
+        body: String::new(),
+    });
+    Ok(DedupCheck {
+        found,
+        embedding: Some(emb),
+    })
 }
 
 /// The old way, kept for the moments the index is not ready: read and parse every note.
@@ -2980,6 +3146,7 @@ mod tests {
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
     use crate::serve::owner::{self, Caller};
+    use crate::serve::remember_defer::DeferredNotes;
     use serde_json::{Value, json};
 
     const VECTOR_REQUIRED_TOOLS: [&str; 13] = [
@@ -3142,6 +3309,7 @@ mod tests {
             cfg_path: std::sync::Arc::new(None),
             sync_lock: std::sync::Arc::default(),
             remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
             note_index: std::sync::Arc::default(),
             wiki_index: std::sync::Arc::default(),
             last_compact: std::sync::Arc::default(),
@@ -3767,9 +3935,11 @@ mod tests {
             &note,
             &wiki,
             &crate::serve::note_index::NoteIndex::default(),
+            &DeferredNotes::default(),
         )
         .await
         .unwrap()
+        .found
         .map(|m| m.reason)
     }
 
@@ -3824,18 +3994,22 @@ mod tests {
         Option<(String, DuplicateReason)>,
     ) {
         let llm = crate::llm::Llm::from_config(&BoringConfig::default());
-        let indexed = super::check_duplicate(None, &llm, note, wiki, index)
-            .await
-            .unwrap();
+        let indexed =
+            super::check_duplicate(None, &llm, note, wiki, index, &DeferredNotes::default())
+                .await
+                .unwrap()
+                .found;
         let scanned = super::check_duplicate(
             None,
             &llm,
             note,
             wiki,
             &crate::serve::note_index::NoteIndex::default(),
+            &DeferredNotes::default(),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .found;
         (verdict(indexed), verdict(scanned))
     }
 
@@ -3942,7 +4116,7 @@ mod tests {
         assert_eq!(index.parse_count(), 4);
         let llm = crate::llm::Llm::from_config(&BoringConfig::default());
         let case = incoming("없음", None, None, "없음");
-        super::check_duplicate(None, &llm, &case, &wiki, &index)
+        super::check_duplicate(None, &llm, &case, &wiki, &index, &DeferredNotes::default())
             .await
             .unwrap();
         assert_eq!(index.parse_count(), 4, "unchanged vault: nothing re-read");
@@ -3956,7 +4130,7 @@ mod tests {
             note_text("wiki-0005", "새", None, None, "새 노트"),
         )
         .unwrap();
-        super::check_duplicate(None, &llm, &case, &wiki, &index)
+        super::check_duplicate(None, &llm, &case, &wiki, &index, &DeferredNotes::default())
             .await
             .unwrap();
         assert_eq!(

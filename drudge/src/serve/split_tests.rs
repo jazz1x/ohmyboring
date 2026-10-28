@@ -32,6 +32,7 @@ pub(super) fn state_with(store: Option<Store>, owner_token: Option<&str>) -> App
         cfg_path: Arc::new(None),
         sync_lock: Arc::default(),
         remember_gate: Arc::default(),
+        deferred: std::sync::Arc::default(),
         note_index: Arc::default(),
         wiki_index: Arc::default(),
         last_compact: Arc::default(),

@@ -11,7 +11,7 @@ use tower::ServiceExt;
 use super::{AppState, build_router};
 use crate::store::Store;
 
-async fn admin(dsn: &str) -> tokio_postgres::Client {
+pub(super) async fn admin(dsn: &str) -> tokio_postgres::Client {
     let (client, conn) = tokio_postgres::connect(dsn, NoTls)
         .await
         .expect("admin connect");
@@ -20,7 +20,7 @@ async fn admin(dsn: &str) -> tokio_postgres::Client {
 }
 
 /// A fresh database with the schema opened on it, so nothing a test breaks leaks to the next.
-async fn fresh_store(admin_dsn: &str, name: &str) -> (Store, String) {
+pub(super) async fn fresh_store(admin_dsn: &str, name: &str) -> (Store, String) {
     admin(admin_dsn)
         .await
         .batch_execute(&format!("CREATE DATABASE {name}"))
@@ -32,7 +32,7 @@ async fn fresh_store(admin_dsn: &str, name: &str) -> (Store, String) {
     (store, dsn)
 }
 
-fn unique(prefix: &str) -> String {
+pub(super) fn unique(prefix: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -67,6 +67,7 @@ async fn state(store: Store) -> AppState {
         cfg_path: Arc::new(None),
         sync_lock: Arc::default(),
         remember_gate: Arc::default(),
+        deferred: std::sync::Arc::default(),
         note_index: Arc::default(),
         wiki_index: Arc::default(),
         last_compact: Arc::default(),
