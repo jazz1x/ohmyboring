@@ -195,6 +195,40 @@ async fn search_502_names_the_failed_stage_and_uses_the_door_detail() {
         .ok();
 }
 
+/// /search answers 502 `feedback: …` when only the verdict-count read (the `edge` table) fails;
+/// a lenient read would answer 200 with a plain ranking.
+#[tokio::test]
+async fn search_502_when_only_the_feedback_read_fails() {
+    let Some(admin_dsn) = std::env::var("BORING_TEST_DATABASE_URL").ok() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let name = unique("t5xx_feedback");
+    let (store, dsn) = fresh_store(&admin_dsn, &name).await;
+    let state = state(store).await;
+    admin(&dsn)
+        .await
+        .batch_execute("ALTER TABLE edge RENAME TO edge_gone")
+        .await
+        .expect("hide edge");
+
+    let (status, body) = call(state, "POST", "/search", r#"{"query":"q"}"#).await;
+    let error = serde_json::from_str::<serde_json::Value>(&body).unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(
+        error.starts_with("search failed: feedback: "),
+        "error was {error}"
+    );
+    admin(&admin_dsn)
+        .await
+        .batch_execute(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .await
+        .ok();
+}
+
 /// A refused connection is `store: connection failed: …`, whichever query dialled first.
 #[tokio::test]
 async fn search_502_on_a_refused_connection_is_the_store_stage() {

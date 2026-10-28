@@ -471,9 +471,6 @@ async fn search_hits(
         .map_err(|staged| store.door_staged(&staged))
 }
 
-/// /search is the one caller that fails (502 `feedback: …`) when the verdict-count read fails.
-const SEARCH_FEEDBACK_READ: retrieve::FeedbackRead = retrieve::FeedbackRead::Strict;
-
 async fn search_hits_inner(
     store: &Store,
     s: &AppState,
@@ -492,7 +489,8 @@ async fn search_hits_inner(
         &[],
         req.project.as_deref(),
         req.since_hours,
-        SEARCH_FEEDBACK_READ,
+        // /search is the one caller that fails (502 `feedback: …`) when the verdict-count read fails.
+        retrieve::FeedbackRead::Strict,
     )
     .await?
     .into_iter()
@@ -1442,16 +1440,7 @@ mod tests {
     use axum::response::IntoResponse;
     use serde_json::json;
 
-    use super::{
-        EVENT_INGEST_MAX_BATCH, SEARCH_FEEDBACK_READ, event_batch, validate_event_since_hours,
-    };
-
-    /// DB-free: the route-level 502 test needs BORING_TEST_DATABASE_URL and SKIPs without it, so
-    /// this pins the mode `search_hits_inner` passes to retrieve (it reads this same const).
-    #[test]
-    fn search_reads_feedback_strictly() {
-        assert_eq!(SEARCH_FEEDBACK_READ, crate::retrieve::FeedbackRead::Strict);
-    }
+    use super::{EVENT_INGEST_MAX_BATCH, event_batch, validate_event_since_hours};
 
     #[test]
     fn event_since_hours_rejects_negative_window() {
