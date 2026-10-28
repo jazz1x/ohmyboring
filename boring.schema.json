@@ -160,6 +160,35 @@
       },
       "additionalProperties": false
     },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How often the scheduled work runs. An env variable of the same job (named in each description) takes over from this file.",
+      "properties": {
+        "sync_hours": {"type": "integer", "minimum": 1, "default": 4, "description": "Vault re-index period. Env BORING_SYNC_HOURS."},
+        "compact_hours": {"type": "integer", "minimum": 1, "default": 24, "description": "Database compact period (rides the next sync tick). Env BORING_COMPACT_HOURS."},
+        "brief_hour": {"type": ["integer", "null"], "minimum": 0, "maximum": 23, "default": 8, "description": "Local hour of the daily brief; null = off. Env BORING_BRIEF_HOUR (the engine's compose line BORING_ENGINE_BRIEF_HOUR; `off` = off)."},
+        "ingest_tick_minutes": {"type": "integer", "minimum": 1, "default": 20, "description": "Period of the session-ingest tick (the hermes memory-ingest-worker job and the host codex-ingest job). Applied when `agent_wiring --install` runs."},
+        "queue_per_tick": {"type": "integer", "minimum": 1, "default": 3, "description": "Sessions distilled per ingest tick. Env BORING_QUEUE_PER_TICK."}
+      }
+    },
+    "collect": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Which past sessions the collectors pick up. An env variable of the same value (named in each description) takes over from this file.",
+      "properties": {
+        "window_hours": {"type": "integer", "minimum": 1, "default": 720, "description": "Ignore sessions older than this. Env COLLECT_WINDOW_HOURS."},
+        "min_bytes": {"type": "integer", "minimum": 0, "default": 20480, "description": "Skip sessions smaller than this. Env COLLECT_MIN_KB (in KB)."},
+        "stable_age_seconds": {"type": "integer", "minimum": 0, "default": 1800, "description": "A transcript modified more recently than this is still open and is left alone. Env COLLECT_STABLE_AGE_SECONDS."},
+        "pending_ttl_seconds": {"type": "integer", "minimum": 1, "default": 1800, "description": "How long a pending marker holds a session. Env COLLECT_PENDING_TTL / INGEST_PENDING_TTL."},
+        "retry_ttl_seconds": {"type": "integer", "minimum": 1, "description": "How long a retry marker holds a session. Omitted = same as pending_ttl_seconds. Env COLLECT_RETRY_TTL / INGEST_RETRY_TTL."}
+      }
+    },
+    "checkout_roots": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Directories whose git checkouts the vault hygiene pass compares against project names. ~ is expanded."
+    },
     "hermes_cron_jobs": {
       "type": "object",
       "default": {

@@ -288,21 +288,16 @@ pub(crate) fn spawn_scheduler(
     last_compact: Arc<Mutex<Option<Instant>>>,
     compact_failure: Arc<Mutex<Option<CompactFailure>>>,
 ) {
-    // `.max(1)` — `BORING_SYNC_HOURS=0` would make a zero Duration, and
-    // tokio::time::interval panics on a zero period. Clamp to ≥1h.
-    let sync_hours: u64 = config::env_set("BORING_SYNC_HOURS")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4)
-        .max(1);
+    // boring.json `schedule` with env on top (config.rs: the ≥1h clamp lives there — a zero
+    // Duration panics tokio::time::interval).
+    let schedule = cfg.schedule_effective();
+    let sync_hours = schedule.sync_hours;
     let sync_interval = Duration::from_secs(sync_hours * 3600);
 
     // Explicit sync-off: only the vault sync is skipped; compact and the brief keep running.
     let sync_disabled = config::env_set("BORING_SYNC_DISABLED").as_deref() == Some("1");
 
-    let compact_hours: u64 = config::env_set("BORING_COMPACT_HOURS")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(24)
-        .max(1);
+    let compact_hours = schedule.compact_hours;
     let compact_interval = Duration::from_secs(compact_hours * 3600);
 
     // Explicit compact-off: only the tick loop's compact is skipped; sync and the brief keep running.
@@ -327,13 +322,9 @@ pub(crate) fn spawn_scheduler(
             eprintln!("[scheduler] compact off (BORING_COMPACT_DISABLED=1)");
         }
 
-        // Daily briefing scheduler: runs once at BORING_BRIEF_HOUR local time.
+        // Daily briefing scheduler: runs once at schedule.brief_hour local time (None = off).
         // The generated note is tagged `daily-brief` so future briefs do not ingest themselves.
-        if let Ok(hour) = config::env_set("BORING_BRIEF_HOUR")
-            .unwrap_or_else(|| "8".to_owned())
-            .parse::<u32>()
-            && (0..=23).contains(&hour)
-        {
+        if let Some(hour) = schedule.brief_hour.map(u32::from) {
             let store2 = store.clone();
             let llm2 = Arc::clone(&llm);
             let vault_dir2 = Arc::clone(&vault_dir);

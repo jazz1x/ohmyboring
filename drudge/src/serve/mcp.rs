@@ -777,7 +777,9 @@ async fn dispatch(
         "sync" => ToolOut::Text(mcp_sync(s).await?),
         "classify_repo" => ToolOut::Text(mcp_classify_repo(s, args)?),
         "config_get" => ToolOut::Structured(
-            serde_json::to_value(&*s.cfg).map_err(|e| (-32603_i32, format!("config: {e}")))?,
+            s.cfg
+                .settings_view(&config::env_set)
+                .map_err(|e| (-32603_i32, format!("config: {e}")))?,
         ),
         "neighbors" => ToolOut::Structured(mcp_neighbors(s, args).await?),
         "corpus_status" => ToolOut::Structured(mcp_corpus_status(s).await?),

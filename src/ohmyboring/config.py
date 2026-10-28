@@ -18,12 +18,14 @@ import json
 import os
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import get_args
 from urllib.parse import urlparse
 
 from ohmyboring.i18n.card import Lang
+from ohmyboring.result import Either, Err, Ok
 
 DEFAULT_ORIGIN = "personal"
 DEFAULT_NOTE_LANG: Lang = "auto"
@@ -295,6 +297,218 @@ def hermes_cron_jobs() -> dict:
     if not isinstance(jobs, dict):
         return {}
     return jobs
+
+
+@dataclass(frozen=True)
+class Schedule:
+    """boring.json `schedule` (env overrides applied). The defaults below are the only Python
+    definition; boring.schema.json and drudge/src/config.rs carry the same numbers."""
+
+    sync_hours: float
+    compact_hours: float
+    brief_hour: int | None  # None = the daily brief is off
+    ingest_tick_minutes: int
+    queue_per_tick: int
+
+
+@dataclass(frozen=True)
+class Collect:
+    """boring.json `collect` (env overrides applied)."""
+
+    window_hours: float
+    min_bytes: int
+    stable_age_seconds: float
+    pending_ttl_seconds: float
+    retry_ttl_seconds: float
+
+
+_SCHEDULE_DEFAULTS = {
+    "sync_hours": 4,
+    "compact_hours": 24,
+    "brief_hour": 8,
+    "ingest_tick_minutes": 20,
+    "queue_per_tick": 3,
+}
+_COLLECT_DEFAULTS = {
+    "window_hours": 720,
+    "min_bytes": 20480,
+    "stable_age_seconds": 1800,
+    "pending_ttl_seconds": 1800,
+    "retry_ttl_seconds": None,  # absent = follows pending_ttl_seconds
+}
+# field -> (env names tried in order, multiplier applied to the env number)
+_SCHEDULE_ENV = {
+    "sync_hours": (("BORING_SYNC_HOURS",), 1),
+    "compact_hours": (("BORING_COMPACT_HOURS",), 1),
+    "queue_per_tick": (("BORING_QUEUE_PER_TICK",), 1),
+}
+_COLLECT_ENV = {
+    "window_hours": (("COLLECT_WINDOW_HOURS",), 1),
+    "min_bytes": (("COLLECT_MIN_KB",), 1024),  # the env is in KB
+    "stable_age_seconds": (("COLLECT_STABLE_AGE_SECONDS",), 1),
+    "pending_ttl_seconds": (("COLLECT_PENDING_TTL", "INGEST_PENDING_TTL"), 1),
+    "retry_ttl_seconds": (("COLLECT_RETRY_TTL", "INGEST_RETRY_TTL"), 1),
+}
+_SCHEDULE_KEYS = frozenset(_SCHEDULE_DEFAULTS)
+_COLLECT_KEYS = frozenset(_COLLECT_DEFAULTS)
+# field -> smallest value the file accepts
+_MINIMUM = {
+    "sync_hours": 1,
+    "compact_hours": 1,
+    "ingest_tick_minutes": 1,
+    "queue_per_tick": 1,
+    "window_hours": 1,
+    "min_bytes": 0,
+    "stable_age_seconds": 0,
+    "pending_ttl_seconds": 1,
+    "retry_ttl_seconds": 1,
+}
+
+
+def _file_int(section: str, key: str, value: object) -> Either[int, str]:
+    if isinstance(value, bool) or not isinstance(value, int) or value < _MINIMUM[key]:
+        return Err(f"boring.json {section}.{key} must be an integer >= {_MINIMUM[key]}, got {value!r}")
+    return Ok(value)
+
+
+def _env_number(env: Mapping[str, str], names: tuple[str, ...], factor: int) -> Either[float | None, str]:
+    for name in names:
+        raw = env.get(name)
+        if raw is None or not raw.strip():
+            continue
+        try:
+            number = float(raw)
+        except ValueError:
+            return Err(f"{name} must be a number, got {raw!r}")
+        if number < 0 or (number == 0 and name.endswith("_HOURS")):
+            return Err(f"{name} must be > 0, got {raw!r}")
+        return Ok(number * factor)
+    return Ok(None)
+
+
+def _section(cfg: dict, name: str, keys: frozenset[str]) -> Either[dict, str]:
+    raw = cfg.get(name)
+    if raw is None:
+        return Ok({})
+    if not isinstance(raw, dict):
+        return Err(f"boring.json {name} must be an object, got {raw!r}")
+    unknown = sorted(set(raw) - keys)
+    if unknown:
+        return Err(f"boring.json {name} has unknown field(s): {', '.join(unknown)}")
+    return Ok(raw)
+
+
+def _resolve(
+    section: str, defaults: dict, given: dict, env_table: dict, env: Mapping[str, str]
+) -> Either[dict, str]:
+    out: dict = {}
+    for key, default in defaults.items():
+        if key == "brief_hour":
+            continue
+        file_value = given.get(key, default)
+        if file_value is None:  # retry_ttl_seconds: absent = follows pending_ttl_seconds
+            out[key] = None
+        else:
+            match _file_int(section, key, file_value):
+                case Err(reason):
+                    return Err(reason)
+                case Ok(value):
+                    out[key] = value
+        names, factor = env_table.get(key, ((), 1))
+        match _env_number(env, names, factor):
+            case Err(reason):
+                return Err(reason)
+            case Ok(number):
+                if number is not None:
+                    out[key] = number
+    return Ok(out)
+
+
+def _brief_hour_env(raw: str) -> Either[int | None, str]:
+    if raw.strip() == "off":
+        return Ok(None)
+    try:
+        hour = int(raw)
+    except ValueError:
+        return Err(f"BORING_BRIEF_HOUR must be an integer 0..=23 or off, got {raw!r}")
+    if not 0 <= hour <= 23:
+        return Err(f"BORING_BRIEF_HOUR must be 0..=23, got {raw!r}")
+    return Ok(hour)
+
+
+def _brief_hour_file(hour: object) -> Either[int | None, str]:
+    if hour is None or (isinstance(hour, int) and not isinstance(hour, bool) and 0 <= hour <= 23):
+        return Ok(hour)
+    return Err(f"boring.json schedule.brief_hour must be an integer 0..=23 or null, got {hour!r}")
+
+
+def _brief_hour(given: dict, env: Mapping[str, str]) -> Either[int | None, str]:
+    raw = env.get("BORING_BRIEF_HOUR")
+    if raw is not None and raw.strip():
+        return _brief_hour_env(raw)
+    return _brief_hour_file(given.get("brief_hour", _SCHEDULE_DEFAULTS["brief_hour"]))
+
+
+def parse_schedule(cfg: dict, env: Mapping[str, str]) -> Either[Schedule, str]:
+    """The `schedule` block of a loaded boring.json, env on top. Parsed once at the boundary."""
+    match _section(cfg, "schedule", _SCHEDULE_KEYS):
+        case Err(reason):
+            return Err(reason)
+        case Ok(given):
+            pass
+    match _resolve("schedule", _SCHEDULE_DEFAULTS, given, _SCHEDULE_ENV, env):
+        case Err(reason):
+            return Err(reason)
+        case Ok(v):
+            pass
+    match _brief_hour(given, env):
+        case Err(reason):
+            return Err(reason)
+        case Ok(hour):
+            return Ok(
+                Schedule(
+                    sync_hours=v["sync_hours"],
+                    compact_hours=v["compact_hours"],
+                    brief_hour=hour,
+                    ingest_tick_minutes=v["ingest_tick_minutes"],
+                    queue_per_tick=v["queue_per_tick"],
+                )
+            )
+
+
+def parse_collect(cfg: dict, env: Mapping[str, str]) -> Either[Collect, str]:
+    """The `collect` block of a loaded boring.json, env on top. retry_ttl_seconds, when
+    absent from both, follows pending_ttl_seconds."""
+    match _section(cfg, "collect", _COLLECT_KEYS):
+        case Err(reason):
+            return Err(reason)
+        case Ok(given):
+            pass
+    match _resolve("collect", _COLLECT_DEFAULTS, given, _COLLECT_ENV, env):
+        case Err(reason):
+            return Err(reason)
+        case Ok(v):
+            pass
+    retry = v["retry_ttl_seconds"]
+    if retry is None:
+        retry = v["pending_ttl_seconds"]
+    return Ok(
+        Collect(
+            window_hours=v["window_hours"],
+            min_bytes=int(v["min_bytes"]),
+            stable_age_seconds=v["stable_age_seconds"],
+            pending_ttl_seconds=v["pending_ttl_seconds"],
+            retry_ttl_seconds=retry,
+        )
+    )
+
+
+def schedule() -> Either[Schedule, str]:
+    return parse_schedule(load(), os.environ)
+
+
+def collect() -> Either[Collect, str]:
+    return parse_collect(load(), os.environ)
 
 
 def _matches(cwd: str, remote_url: str | None, matcher: str) -> bool:

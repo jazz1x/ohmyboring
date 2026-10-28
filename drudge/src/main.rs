@@ -390,7 +390,10 @@ async fn main() -> Result<()> {
             );
         }
         Cmd::Config => {
-            println!("{}", serde_json::to_string_pretty(&cfg)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&cfg.settings_view(&config::env_set)?)?
+            );
         }
         Cmd::Serve => {
             let ol = llm::Llm::from_config(&cfg);

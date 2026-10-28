@@ -1,0 +1,33 @@
+[
+  {"name": "defaults", "boring": {}, "env": {},
+   "expect": {"schedule": {"sync_hours": 4, "compact_hours": 24, "brief_hour": 8, "ingest_tick_minutes": 20, "queue_per_tick": 3},
+              "collect": {"window_hours": 720, "min_bytes": 20480, "stable_age_seconds": 1800, "pending_ttl_seconds": 1800, "retry_ttl_seconds": 1800}}},
+
+  {"name": "file sync_hours", "boring": {"schedule": {"sync_hours": 6}}, "env": {}, "expect": {"schedule": {"sync_hours": 6}}},
+  {"name": "file compact_hours", "boring": {"schedule": {"compact_hours": 12}}, "env": {}, "expect": {"schedule": {"compact_hours": 12}}},
+  {"name": "file brief_hour", "boring": {"schedule": {"brief_hour": 5}}, "env": {}, "expect": {"schedule": {"brief_hour": 5}}},
+  {"name": "file brief_hour null = off", "boring": {"schedule": {"brief_hour": null}}, "env": {}, "expect": {"schedule": {"brief_hour": null}}},
+  {"name": "file ingest_tick_minutes", "boring": {"schedule": {"ingest_tick_minutes": 10}}, "env": {}, "expect": {"schedule": {"ingest_tick_minutes": 10}}},
+  {"name": "file queue_per_tick", "boring": {"schedule": {"queue_per_tick": 7}}, "env": {}, "expect": {"schedule": {"queue_per_tick": 7}}},
+  {"name": "file window_hours", "boring": {"collect": {"window_hours": 100}}, "env": {}, "expect": {"collect": {"window_hours": 100}}},
+  {"name": "file min_bytes", "boring": {"collect": {"min_bytes": 40960}}, "env": {}, "expect": {"collect": {"min_bytes": 40960}}},
+  {"name": "file stable_age_seconds", "boring": {"collect": {"stable_age_seconds": 60}}, "env": {}, "expect": {"collect": {"stable_age_seconds": 60}}},
+  {"name": "file pending_ttl_seconds (retry follows)", "boring": {"collect": {"pending_ttl_seconds": 600}}, "env": {},
+   "expect": {"collect": {"pending_ttl_seconds": 600, "retry_ttl_seconds": 600}}},
+  {"name": "file retry_ttl_seconds", "boring": {"collect": {"pending_ttl_seconds": 600, "retry_ttl_seconds": 900}}, "env": {},
+   "expect": {"collect": {"pending_ttl_seconds": 600, "retry_ttl_seconds": 900}}},
+
+  {"name": "env BORING_SYNC_HOURS", "boring": {"schedule": {"sync_hours": 5}}, "env": {"BORING_SYNC_HOURS": "6"}, "expect": {"schedule": {"sync_hours": 6}}},
+  {"name": "env BORING_COMPACT_HOURS", "boring": {"schedule": {"compact_hours": 30}}, "env": {"BORING_COMPACT_HOURS": "12"}, "expect": {"schedule": {"compact_hours": 12}}},
+  {"name": "env BORING_BRIEF_HOUR", "boring": {"schedule": {"brief_hour": 9}}, "env": {"BORING_BRIEF_HOUR": "5"}, "expect": {"schedule": {"brief_hour": 5}}},
+  {"name": "env BORING_BRIEF_HOUR off", "boring": {}, "env": {"BORING_BRIEF_HOUR": "off"}, "expect": {"schedule": {"brief_hour": null}}},
+  {"name": "env BORING_QUEUE_PER_TICK", "boring": {"schedule": {"queue_per_tick": 2}}, "env": {"BORING_QUEUE_PER_TICK": "7"}, "expect": {"schedule": {"queue_per_tick": 7}}},
+  {"name": "env COLLECT_WINDOW_HOURS", "boring": {"collect": {"window_hours": 50}}, "env": {"COLLECT_WINDOW_HOURS": "100"}, "expect": {"collect": {"window_hours": 100}}},
+  {"name": "env COLLECT_MIN_KB", "boring": {"collect": {"min_bytes": 1}}, "env": {"COLLECT_MIN_KB": "40"}, "expect": {"collect": {"min_bytes": 40960}}},
+  {"name": "env COLLECT_STABLE_AGE_SECONDS", "boring": {"collect": {"stable_age_seconds": 5}}, "env": {"COLLECT_STABLE_AGE_SECONDS": "60"}, "expect": {"collect": {"stable_age_seconds": 60}}},
+  {"name": "env COLLECT_PENDING_TTL (retry follows)", "boring": {}, "env": {"COLLECT_PENDING_TTL": "600"},
+   "expect": {"collect": {"pending_ttl_seconds": 600, "retry_ttl_seconds": 600}}},
+  {"name": "env INGEST_PENDING_TTL", "boring": {}, "env": {"INGEST_PENDING_TTL": "601"}, "expect": {"collect": {"pending_ttl_seconds": 601}}},
+  {"name": "env COLLECT_RETRY_TTL", "boring": {"collect": {"retry_ttl_seconds": 5}}, "env": {"COLLECT_RETRY_TTL": "900"}, "expect": {"collect": {"retry_ttl_seconds": 900}}},
+  {"name": "env INGEST_RETRY_TTL", "boring": {}, "env": {"INGEST_RETRY_TTL": "901"}, "expect": {"collect": {"retry_ttl_seconds": 901}}}
+]

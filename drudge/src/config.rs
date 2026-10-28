@@ -15,7 +15,17 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "allow_company_origin",
     "llm",
     "code_index",
+    "schedule",
+    "collect",
+    "hermes_cron_jobs",
+    "checkout_roots",
+    "card",
 ];
+const DEFAULT_HERMES_CRON_JOBS: &str = r#"{
+  "morning-card": {"enabled": true, "schedule": "0 8 * * *", "script": "run-morning-card.py", "deliver": "local"},
+  "weekly-card": {"enabled": true, "schedule": "0 9 * * 1", "script": "run-weekly-card.py", "deliver": "local"},
+  "weekly-briefing": {"enabled": false, "schedule": "0 9 * * 1", "script": "weekly-briefing.py"}
+}"#;
 const DEFAULT_EMBED_MODEL: &str = "bge-m3";
 const DEFAULT_PG_DSN: &str = "postgresql://boring:boring@localhost:5432/boring";
 const DEFAULT_EMBED_DIM: u32 = 1024;
@@ -45,6 +55,10 @@ pub struct BoringConfig {
     pub allow_company_origin: bool,
     pub llm: LlmConfig,
     pub code_index: CodeIndexConfig,
+    pub schedule: ScheduleConfig,
+    pub collect: CollectConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hermes_cron_jobs: Option<serde_json::Value>,
 }
 
 impl Default for BoringConfig {
@@ -59,8 +73,249 @@ impl Default for BoringConfig {
             allow_company_origin: false,
             llm: LlmConfig::default(),
             code_index: CodeIndexConfig::default(),
+            schedule: ScheduleConfig::default(),
+            collect: CollectConfig::default(),
+            hermes_cron_jobs: None,
         }
     }
+}
+
+/// An env variable that took over a boring.json value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvOverride {
+    pub field: &'static str,
+    pub env: &'static str,
+}
+
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// boring.json `schedule`. These defaults are the only Rust definition; boring.schema.json and
+/// src/ohmyboring/config.py carry the same numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScheduleConfig {
+    pub sync_hours: u64,
+    pub compact_hours: u64,
+    /// `None` (JSON null) = the daily brief is off.
+    pub brief_hour: Option<u8>,
+    pub ingest_tick_minutes: u64,
+    pub queue_per_tick: u64,
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            sync_hours: 4,
+            compact_hours: 24,
+            brief_hour: Some(8),
+            ingest_tick_minutes: 20,
+            queue_per_tick: 3,
+        }
+    }
+}
+
+impl ScheduleConfig {
+    fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("sync_hours", self.sync_hours),
+            ("compact_hours", self.compact_hours),
+            ("ingest_tick_minutes", self.ingest_tick_minutes),
+            ("queue_per_tick", self.queue_per_tick),
+        ] {
+            anyhow::ensure!(
+                value >= 1,
+                "boring.json schedule.{name} must be an integer >= 1"
+            );
+        }
+        if let Some(hour) = self.brief_hour {
+            anyhow::ensure!(
+                hour <= 23,
+                "boring.json schedule.brief_hour must be 0..=23 or null"
+            );
+        }
+        Ok(())
+    }
+
+    /// The values the process actually runs on: env on top of the file. The `.max(1)` is the
+    /// tokio interval guard — a zero period panics. An env brief hour outside 0..=23 or not a
+    /// number (`off`) turns the brief off, as it always has.
+    #[must_use]
+    pub fn effective(self, env: EnvLookup<'_>) -> (Self, Vec<EnvOverride>) {
+        let mut out = self;
+        let mut overrides = Vec::new();
+        let number = |name: &str| env(name).and_then(|v| v.parse::<u64>().ok());
+        if let Some(v) = number("BORING_SYNC_HOURS") {
+            out.sync_hours = v.max(1);
+            overrides.push(EnvOverride {
+                field: "sync_hours",
+                env: "BORING_SYNC_HOURS",
+            });
+        }
+        if let Some(v) = number("BORING_COMPACT_HOURS") {
+            out.compact_hours = v.max(1);
+            overrides.push(EnvOverride {
+                field: "compact_hours",
+                env: "BORING_COMPACT_HOURS",
+            });
+        }
+        if let Some(v) = number("BORING_QUEUE_PER_TICK") {
+            out.queue_per_tick = v;
+            overrides.push(EnvOverride {
+                field: "queue_per_tick",
+                env: "BORING_QUEUE_PER_TICK",
+            });
+        }
+        if let Some(raw) = env("BORING_BRIEF_HOUR") {
+            out.brief_hour = raw.parse::<u8>().ok().filter(|h| *h <= 23);
+            overrides.push(EnvOverride {
+                field: "brief_hour",
+                env: "BORING_BRIEF_HOUR",
+            });
+        }
+        (out, overrides)
+    }
+}
+
+/// boring.json `collect` (session collectors; read by the Python side, shown here by config_get).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CollectConfig {
+    pub window_hours: u64,
+    pub min_bytes: u64,
+    pub stable_age_seconds: u64,
+    pub pending_ttl_seconds: u64,
+    /// Absent = follows `pending_ttl_seconds`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_ttl_seconds: Option<u64>,
+}
+
+impl Default for CollectConfig {
+    fn default() -> Self {
+        Self {
+            window_hours: 720,
+            min_bytes: 20480,
+            stable_age_seconds: 1800,
+            pending_ttl_seconds: 1800,
+            retry_ttl_seconds: None,
+        }
+    }
+}
+
+/// An env number scaled by `factor`: a whole number stays an integer (`720`, not `720.0`).
+fn env_number(raw: &str, factor: u64) -> Option<serde_json::Value> {
+    let raw = raw.trim();
+    if let Ok(whole) = raw.parse::<u64>() {
+        return whole.checked_mul(factor).map(serde_json::Value::from);
+    }
+    let fractional = raw.parse::<f64>().ok().filter(|v| v.is_finite())?;
+    let scaled = fractional * f64::from(u32::try_from(factor).ok()?);
+    serde_json::Number::from_f64(scaled).map(serde_json::Value::Number)
+}
+
+impl CollectConfig {
+    fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("window_hours", self.window_hours),
+            ("pending_ttl_seconds", self.pending_ttl_seconds),
+            ("retry_ttl_seconds", self.retry_ttl_seconds.unwrap_or(1)),
+        ] {
+            anyhow::ensure!(
+                value >= 1,
+                "boring.json collect.{name} must be an integer >= 1"
+            );
+        }
+        Ok(())
+    }
+
+    /// File values with env on top, as JSON numbers. The env names are the collectors' own:
+    /// `COLLECT_MIN_KB` is in KB, the pending/retry TTL also read `INGEST_*`.
+    #[must_use]
+    pub fn effective(&self, env: EnvLookup<'_>) -> (serde_json::Value, Vec<EnvOverride>) {
+        let mut overrides = Vec::new();
+        let mut pick = |field: &'static str,
+                        names: &[&'static str],
+                        factor: u64,
+                        file: serde_json::Value|
+         -> serde_json::Value {
+            for name in names {
+                if let Some(v) = env(name).and_then(|raw| env_number(&raw, factor)) {
+                    overrides.push(EnvOverride { field, env: name });
+                    return v;
+                }
+            }
+            file
+        };
+        let window = pick(
+            "window_hours",
+            &["COLLECT_WINDOW_HOURS"],
+            1,
+            self.window_hours.into(),
+        );
+        let min_bytes = pick(
+            "min_bytes",
+            &["COLLECT_MIN_KB"],
+            1024,
+            self.min_bytes.into(),
+        );
+        let stable = pick(
+            "stable_age_seconds",
+            &["COLLECT_STABLE_AGE_SECONDS"],
+            1,
+            self.stable_age_seconds.into(),
+        );
+        let pending = pick(
+            "pending_ttl_seconds",
+            &["COLLECT_PENDING_TTL", "INGEST_PENDING_TTL"],
+            1,
+            self.pending_ttl_seconds.into(),
+        );
+        // An unset retry follows the pending value (after env), like the collectors do.
+        let retry_file = self
+            .retry_ttl_seconds
+            .map_or_else(|| pending.clone(), serde_json::Value::from);
+        let retry = pick(
+            "retry_ttl_seconds",
+            &["COLLECT_RETRY_TTL", "INGEST_RETRY_TTL"],
+            1,
+            retry_file,
+        );
+        (
+            serde_json::json!({
+                "window_hours": window,
+                "min_bytes": min_bytes,
+                "stable_age_seconds": stable,
+                "pending_ttl_seconds": pending,
+                "retry_ttl_seconds": retry,
+            }),
+            overrides,
+        )
+    }
+}
+
+fn overrides_json(overrides: &[EnvOverride]) -> serde_json::Value {
+    overrides
+        .iter()
+        .map(|o| (o.field.to_owned(), serde_json::Value::from(o.env)))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
+/// Jobs that run on this machine but that boring.json does not manage. Listed by name; their
+/// state is not read live (a static list — the live ones are known by name only).
+fn unmanaged_jobs() -> serde_json::Value {
+    serde_json::json!([
+        {"name": "repair-judge", "kind": "hermes cron"},
+        {"name": "advice-write", "kind": "hermes cron"},
+        {"name": "backfill-sessions", "kind": "hermes cron"},
+        {"name": "com.ohmyboring.night-drain", "kind": "launchd"},
+        {
+            "name": "com.olympus.collect",
+            "kind": "launchd",
+            "interval_seconds": 10800,
+            "env": {"COLLECT_WINDOW_HOURS": "720", "COLLECT_MIN_KB": "20", "COLLECT_LIMIT": "1"},
+            "note": "env 로 덮임: com.olympus.collect"
+        }
+    ])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
@@ -538,8 +793,58 @@ impl BoringConfig {
 
         let mut config: BoringConfig =
             serde_json::from_value(value).context("deserialize boring.json")?;
+        config.schedule.validate()?;
+        config.collect.validate()?;
+        anyhow::ensure!(
+            config
+                .hermes_cron_jobs
+                .as_ref()
+                .is_none_or(serde_json::Value::is_object),
+            "boring.json hermes_cron_jobs must be an object"
+        );
         config.resolve_embed();
         Ok(config)
+    }
+
+    /// The `schedule` this process runs on: env over boring.json.
+    #[must_use]
+    pub fn schedule_effective(&self) -> ScheduleConfig {
+        self.schedule.effective(&env_set).0
+    }
+
+    /// What `config_get` returns: the config as parsed plus, for the schedule, collect and
+    /// hermes_cron_jobs blocks, `file` (boring.json) next to `effective` (what runs), and the
+    /// env names that took over a value. Jobs outside boring.json are listed as `unmanaged`.
+    pub fn settings_view(&self, env: EnvLookup<'_>) -> serde_json::Result<serde_json::Value> {
+        let mut view = serde_json::to_value(self)?;
+        let (schedule, schedule_env) = self.schedule.effective(env);
+        let (collect, collect_env) = self.collect.effective(env);
+        let defaults: serde_json::Value = serde_json::from_str(DEFAULT_HERMES_CRON_JOBS)?;
+        let hermes_file = self
+            .hermes_cron_jobs
+            .clone()
+            .unwrap_or(serde_json::Value::Null);
+        let hermes_effective = self.hermes_cron_jobs.clone().unwrap_or(defaults);
+        view["schedule"] = serde_json::json!({
+            "file": serde_json::to_value(self.schedule)?,
+            "effective": serde_json::to_value(schedule)?,
+            "overridden_by_env": overrides_json(&schedule_env),
+        });
+        view["collect"] = serde_json::json!({
+            "file": serde_json::to_value(self.collect)?,
+            "effective": collect,
+            "overridden_by_env": overrides_json(&collect_env),
+            "overridden_by_unmanaged": {
+                "window_hours": "com.olympus.collect",
+                "min_bytes": "com.olympus.collect",
+            },
+        });
+        view["hermes_cron_jobs"] = serde_json::json!({
+            "file": hermes_file,
+            "effective": hermes_effective,
+        });
+        view["unmanaged"] = unmanaged_jobs();
+        Ok(view)
     }
 
     fn resolve_embed(&mut self) {
