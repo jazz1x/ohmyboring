@@ -29,6 +29,8 @@ fn hostile_record(nanos: u128) -> String {
     format!(r#"mimir:sat{nanos}" OR true OR ""#)
 }
 const HOSTILE_INJECTION: &str = r#"a\" ; DELETE chunk; --"#;
+/// Every fixture claim is anchored under this directory (`code:<dir><i>.rs:10`).
+const ANCHOR_DIR: &str = "src/adv/";
 
 fn tilted_vec(tilt_at: usize, cos: f32, salt: usize) -> Vec<f32> {
     let mut v = vec![0.0; DIM];
@@ -108,7 +110,7 @@ async fn fixture(namespace: &str, hostile_project_doc: bool) -> Fixture {
         })
         .await
         .expect("chunk");
-        pg.upsert_claim(
+        pg.upsert_claim_with_anchor(
             &format!("subject-{nanos}-{i}"),
             "observed",
             &format!("a long enough value for claim number {i}"),
@@ -117,6 +119,9 @@ async fn fixture(namespace: &str, hostile_project_doc: bool) -> Fixture {
             &emb,
             "risk",
             "certain",
+            Some(&format!("code:{ANCHOR_DIR}{i}.rs:10")),
+            None,
+            None,
         )
         .await
         .expect("claim");
@@ -309,4 +314,194 @@ async fn hostile_text_in_filters_matches_exactly_and_breaks_nothing() {
             .unwrap()
             .get(0);
     assert!(pg_chunks > 0);
+}
+
+async fn subjects_of(
+    store: &Store,
+    project: &str,
+    kinds: Option<&[String]>,
+    anchor_path: Option<&str>,
+    include_stale: bool,
+) -> Vec<String> {
+    store
+        .current_claims(
+            &query_vec(),
+            50,
+            &["company".to_string()],
+            Some(project),
+            kinds,
+            anchor_path,
+            include_stale,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|a| a.claim.subject)
+        .collect()
+}
+
+/// One claim of a filled fixture stops matching a predicate other than origin/project/window after
+/// the fill. The Surreal-backed answer must drop it exactly as the pgvector-backed one does.
+async fn claim_stops_matching(
+    case: &str,
+    change: impl FnOnce(&Fixture) -> String,
+    kinds: Option<Vec<String>>,
+    anchor_path: Option<&str>,
+    include_stale: bool,
+) -> Fixture {
+    let f = fixture(&format!("adv_{case}"), false).await;
+    let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
+    let oracle = Store::open(&dsn, DIM).await.expect("pg-only store");
+    let kinds = kinds.as_deref();
+    let baseline = subjects_of(&f.store, &f.project, kinds, anchor_path, include_stale).await;
+    assert_eq!(baseline.len(), 4, "{case}: baseline");
+
+    f.db.batch_execute(&change(&f)).await.unwrap();
+
+    let gone = format!("subject-{}-0", f.nanos);
+    let mut from_pg = subjects_of(&oracle, &f.project, kinds, anchor_path, include_stale).await;
+    let mut from_surreal =
+        subjects_of(&f.store, &f.project, kinds, anchor_path, include_stale).await;
+    from_pg.sort();
+    from_surreal.sort();
+    assert!(
+        !from_pg.contains(&gone),
+        "{case}: the oracle itself must drop it"
+    );
+    assert_eq!(
+        from_surreal, from_pg,
+        "{case}: Surreal-backed answer must match pg's"
+    );
+    assert_eq!(from_surreal.len(), 3, "{case}: the other three stay");
+    f
+}
+
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_claim_whose_kind_changed_in_pg_after_the_fill_does_not_come_back() {
+    claim_stops_matching(
+        "kind",
+        |f| {
+            format!(
+                "UPDATE claim SET kind = 'decision' WHERE subject = 'subject-{}-0'",
+                f.nanos
+            )
+        },
+        Some(vec!["risk".to_string()]),
+        None,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_claim_marked_stale_in_pg_after_the_fill_does_not_come_back() {
+    let f = claim_stops_matching(
+        "stale",
+        |f| {
+            format!(
+                "UPDATE claim SET stale_at = now(), stale_reason = 'gone' WHERE subject = 'subject-{}-0'",
+                f.nanos
+            )
+        },
+        None,
+        None,
+        false,
+    )
+    .await;
+    // control: the stale mark is what dropped it — asking for stale claims too brings it back
+    let all = f
+        .store
+        .current_claims(
+            &query_vec(),
+            50,
+            &["company".to_string()],
+            Some(&f.project),
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 4, "include_stale keeps the stale claim");
+}
+
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_claim_re_anchored_in_pg_after_the_fill_does_not_come_back() {
+    claim_stops_matching(
+        "anchor",
+        |f| {
+            format!(
+                "UPDATE claim SET anchor = 'code:elsewhere/0.rs:10' WHERE subject = 'subject-{}-0'",
+                f.nanos
+            )
+        },
+        None,
+        Some(ANCHOR_DIR),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_note_that_became_a_brief_in_pg_after_the_fill_does_not_come_back() {
+    // NOT_USER_MEMORY_RE: eval-/daily-brief-/weekly-brief- notes are never user memory. The
+    // document's primary key moves, so its chunk (FK, no ON UPDATE CASCADE) is removed first.
+    claim_stops_matching(
+        "brief",
+        |f| {
+            let old = &f.paths[0];
+            let new = format!("/vault/wiki/daily-brief-{}.md", f.nanos);
+            format!(
+                "DELETE FROM chunk WHERE source_path = '{old}';
+                 UPDATE document SET source_path = '{new}' WHERE source_path = '{old}';
+                 UPDATE claim SET source_path = '{new}' WHERE source_path = '{old}';"
+            )
+        },
+        None,
+        None,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_key_surreal_returns_that_pg_deleted_after_the_fill_is_an_error_not_a_silent_drop() {
+    let f = fixture("adv_gone", false).await;
+    let q = query_vec();
+    f.db.execute(
+        "DELETE FROM claim WHERE subject = $1",
+        &[&format!("subject-{}-0", f.nanos)],
+    )
+    .await
+    .unwrap();
+    f.db.execute(
+        "DELETE FROM chunk WHERE id = $1",
+        &[&format!("{}#0", f.paths[0])],
+    )
+    .await
+    .unwrap();
+
+    let claims = f
+        .store
+        .current_claims(&q, 50, &[], Some(&f.project), None, None, false)
+        .await
+        .expect_err("a claim Surreal still has and pg lost must not be dropped silently");
+    assert!(
+        claims.to_string().contains("pg 에 없음"),
+        "claim drift error, got: {claims:#}"
+    );
+    let chunks = f
+        .store
+        .vector_search(&q, 50)
+        .await
+        .expect_err("a chunk Surreal still has and pg lost must not be dropped silently");
+    assert!(
+        chunks.to_string().contains("pg 에 없음"),
+        "chunk drift error, got: {chunks:#}"
+    );
 }

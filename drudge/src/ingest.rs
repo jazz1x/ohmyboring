@@ -575,6 +575,13 @@ async fn ingest_in_own_tx<C: Chunker, G: GraphExtractor, E: Embed>(
         .context("begin ingest transaction")?;
     let outcome = ingest_steps::<C, G, E>(store, &tx, llm, cfg, path, stats).await?;
     tx.commit().await.context("commit ingest transaction")?;
+    // Only a note that wrote chunk or claim rows has anything for Surreal to follow.
+    let wrote = matches!(outcome, FileOutcome::New | FileOutcome::Updated);
+    if wrote {
+        store
+            .mirror_surreal(&crate::store::Scope::notes([path.to_owned()]))
+            .await?;
+    }
     Ok(outcome)
 }
 

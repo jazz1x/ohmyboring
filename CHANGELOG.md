@@ -6,6 +6,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **`backend=surreal` 이 pg 쓰기를 따라 쓴다 + doctor 대조 줄 (C-VECADAPT2 2b)** — chunk·claim 을 쓰고 지우는 자리(ingest·remember·verdict 봉인·compact 봉인·split 병합·고정/stale 표시·문서 삭제 CASCADE)가 pg 커밋 뒤 Surreal 에도 pg 의 현재 상태를 써 넣는다. Surreal 쓰기가 실패하면 그 sync·remember 결과에 「pg 에는 기록됨, Surreal 만 빠짐. 같은 요청을 다시 보내지 말고 채우기를 다시 돌릴 것」 오류가 실리고 재시도 장치는 없다(복구는 `vector-fill` 한 번). `drudge vector-check`(읽기 전용)와 doctor 한 줄이 pg 대 Surreal 행 수·id 해시를 대조한다(`backend=surreal` 일 때 다르거나 못 재면 ✗, pgvector 면 「해당 없음」). 기본값 `pgvector` 그대로, 라이브 엔진은 안 켠다.
+
 - **`vector.backend=surreal` (C-VECADAPT2 2a)** — 다섯 벡터 질의(vector_search·vector_search_filtered·nearest_document·semantic_related_docs·current_claims)를 SurrealDB HNSW 에서 읽는다. 채우기는 `drudge vector-fill` 한 번(표마다 행 수·id 해시 대조), 이어 채우기는 아직 없어 라이브에 켜지 않는다. `recurrences` 는 어느 백엔드든 pgvector. 기본값 `pgvector` 그대로. 사본 golden recall@3 은 Surreal 9/22 대 pgvector 21/22(ef 40).
 
 - **위키 verdict 이동 단위를 어휘 점수로 (C-VERDICT-1 3단계)** — `lift_by_nets` 가 순위 한 칸이 아니라 `score + net` 내림차순(동점은 원래 순서)으로 정렬한다. net 1 = 어휘 점수 1점: 1점 차는 뒤집고 2점 차는 못 뒤집는다.

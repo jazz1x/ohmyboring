@@ -4,8 +4,9 @@
 //! SurrealDB holds only what ranking needs: the row's key, its embedding, and the columns the pgvector
 //! SQL filters on. pgvector stays the original — every hit is hydrated from it by key, so the answer
 //! carries the same text, origin and anchor the pgvector path returns. A key Surreal returns that
-//! pgvector no longer has is an error naming the drift (the copy is frozen at fill time), never a
-//! silently shorter answer.
+//! pgvector no longer has is an error naming the drift, never a silently shorter answer. The copy
+//! follows pg's writes (`SurrealClient::mirror`, called after each committed pg write); a drift is
+//! a Surreal write that failed (the error said so) or a pg change made outside the engine.
 //!
 //! Wire: SurrealDB's HTTP JSON-RPC (`POST /rpc`, method `query`) with bind variables, over the
 //! `reqwest` the engine already carries. The server is pinned in compose to
@@ -38,6 +39,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio_postgres::Row;
 
 use super::{AnchoredClaim, DistKind, Hit, NOT_USER_MEMORY_RE, Recurrence, Store};
 use crate::config::SurrealSettings;
@@ -205,10 +207,10 @@ fn report_dropped(what: &str, dropped: usize) {
 }
 
 impl SurrealView<'_> {
-    /// The Surreal copy is frozen at fill time and pgvector is the source, so every key Surreal
-    /// returns is re-checked here against the live pg row with the same predicates the pg path
-    /// applies (the #121 origin boundary: an origin or project changed after the fill must not
-    /// leak through a stale copy). A row that fails is dropped, not replaced — the answer may come
+    /// pgvector is the source and the Surreal copy can lag it (a failed Surreal write, a pg change
+    /// made outside the engine), so every key Surreal returns is re-checked here against the live
+    /// pg row with the same predicates the pg path applies (the #121 origin boundary: an origin or
+    /// project changed after the fill must not leak through a stale copy). A row that fails is dropped, not replaced — the answer may come
     /// back shorter than `k`. A key pg no longer has is drift and an error.
     async fn hydrate_hits(
         &self,
@@ -427,7 +429,7 @@ impl VectorIndex for SurrealView<'_> {
             )
             .await
             .context("hydrate claims")?;
-        // Same re-check as `hydrate_hits`: the copy is frozen, pg is the source.
+        // Same re-check as `hydrate_hits`: the copy can lag, pg is the source.
         let mut by_key: HashMap<(String, String, i64), (bool, AnchoredClaim)> = rows
             .iter()
             .map(|r| {
@@ -596,7 +598,297 @@ fn epoch_us(col: &str) -> String {
     EPOCH_US.replace("{col}", col)
 }
 
+/// Why a Surreal write that follows a committed pg write is an error and not a retry: pg already
+/// holds the change, so repeating the request would duplicate it (a second note, a second
+/// supersede). The one recovery is the fill, which rebuilds Surreal from pg.
+pub const SURREAL_BEHIND: &str =
+    "pg 에는 기록됨, Surreal 만 빠짐. 같은 요청을 다시 보내지 말고 채우기를 다시 돌릴 것";
+
+/// What a committed pg write touched, in the terms Surreal's rows are keyed by: the notes whose
+/// chunks and claims were written, and the `(subject, predicate)` slots whose current row may
+/// have moved.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    paths: Vec<String>,
+    slots: Vec<(String, String)>,
+}
+
+impl Scope {
+    /// Every chunk and claim row of these notes, plus the slots those claims sit in (a fact slot
+    /// is sealed across notes, so another note's row can stop being current).
+    #[must_use]
+    pub fn notes<I: IntoIterator<Item = String>>(paths: I) -> Self {
+        let mut paths: Vec<String> = paths.into_iter().collect();
+        paths.sort_unstable();
+        paths.dedup();
+        Self {
+            paths,
+            slots: Vec::new(),
+        }
+    }
+
+    /// One slot, for a write that names claim rows by key and not by note.
+    #[must_use]
+    pub fn slot(subject: &str, predicate: &str) -> Self {
+        Self {
+            paths: Vec::new(),
+            slots: vec![(subject.to_owned(), predicate.to_owned())],
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.slots.is_empty()
+    }
+}
+
+#[derive(Deserialize)]
+struct Slot {
+    subject: String,
+    predicate: String,
+}
+
+fn first_statement<T>(statements: Vec<Vec<T>>) -> Vec<T> {
+    statements.into_iter().next().unwrap_or_default()
+}
+
+fn chunk_select(tail: &str) -> String {
+    format!(
+        "SELECT c.id, c.source_path, c.project, {updated}, c.embedding {CHUNK_FROM} {tail}",
+        updated = epoch_us("d.updated_at")
+    )
+}
+
+fn claim_select(tail: &str) -> String {
+    format!(
+        "SELECT c.subject, c.predicate, {valid}, c.source_path, d.origin, d.project,
+                c.kind, c.anchor, {stale}, c.embedding {CLAIM_FROM} {tail}",
+        valid = epoch_us("c.valid_from"),
+        stale = epoch_us("c.stale_at")
+    )
+}
+
+/// `(key, SurrealQL record literal)` of one `chunk_select` row.
+fn chunk_literal(r: &Row) -> (String, String) {
+    let cid: String = r.get(0);
+    let embedding: Vector = r.get(4);
+    let literal = format!(
+        "{{cid: {}, source_path: {}, project: {}, doc_updated_us: {}, embedding: {}}}",
+        text(&cid),
+        text(&r.get::<_, String>(1)),
+        text(&r.get::<_, String>(2)),
+        r.get::<_, i64>(3),
+        floats(embedding.as_slice())
+    );
+    (cid, literal)
+}
+
+/// `(key, SurrealQL record literal)` of one `claim_select` row.
+fn claim_literal(r: &Row) -> (String, String) {
+    let subject: String = r.get(0);
+    let predicate: String = r.get(1);
+    let valid_from_us: i64 = r.get(2);
+    let embedding: Vector = r.get(9);
+    let cid = claim_key(&subject, &predicate, valid_from_us);
+    let anchor = r
+        .get::<_, Option<String>>(7)
+        .map_or_else(String::new, |a| format!("anchor: {},", text(&a)));
+    let stale = r
+        .get::<_, Option<i64>>(8)
+        .map_or_else(String::new, |s| format!("stale_us: {s},"));
+    let literal = format!(
+        "{{cid: {}, subject: {}, predicate: {}, valid_from_us: {valid_from_us}, \
+         source_path: {}, origin: {}, project: {}, kind: {}, {anchor} {stale} \
+         embedding: {}}}",
+        text(&cid),
+        text(&subject),
+        text(&predicate),
+        text(&r.get::<_, String>(3)),
+        text(&r.get::<_, String>(4)),
+        text(&r.get::<_, String>(5)),
+        text(&r.get::<_, String>(6)),
+        floats(embedding.as_slice())
+    );
+    (cid, literal)
+}
+
+fn tables(
+    pg_chunks: Vec<String>,
+    pg_claims: Vec<String>,
+    surreal_chunks: Vec<String>,
+    surreal_claims: Vec<String>,
+) -> Vec<FillTable> {
+    vec![
+        FillTable {
+            table: "chunk",
+            pg: KeySet::of(pg_chunks),
+            surreal: KeySet::of(surreal_chunks),
+        },
+        FillTable {
+            table: "claim(open)",
+            pg: KeySet::of(pg_claims),
+            surreal: KeySet::of(surreal_claims),
+        },
+    ]
+}
+
 impl SurrealClient {
+    async fn upsert_rows(&self, table: &str, literals: &[String]) -> Result<()> {
+        for batch in literals.chunks(FILL_BATCH) {
+            self.run(&format!(
+                "FOR $r IN [{}] {{ UPSERT type::record('{table}', $r.cid) CONTENT $r; }};",
+                batch.join(",")
+            ))
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn delete_rows(&self, table: &str, keys: &[String]) -> Result<()> {
+        for batch in keys.chunks(FILL_BATCH) {
+            self.run(&format!(
+                "FOR $k IN {} {{ DELETE type::record('{table}', $k); }};",
+                texts(batch)
+            ))
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Make Surreal's rows in one scope equal pg's: delete the keys pg no longer has, upsert the
+    /// ones it has.
+    async fn reconcile(
+        &self,
+        table: &str,
+        wanted: Vec<(String, String)>,
+        existing: Vec<String>,
+    ) -> Result<()> {
+        let keep: std::collections::HashSet<&str> =
+            wanted.iter().map(|(k, _)| k.as_str()).collect();
+        let stale: Vec<String> = existing
+            .into_iter()
+            .filter(|k| !keep.contains(k.as_str()))
+            .collect();
+        self.delete_rows(table, &stale).await?;
+        let literals: Vec<String> = wanted.into_iter().map(|(_, l)| l).collect();
+        self.upsert_rows(table, &literals).await
+    }
+
+    /// Write-through: after pg committed a change, copy pg's state of everything it touched into
+    /// Surreal. pg is the original, so Surreal is rebuilt from what pg holds now, never from what
+    /// the request carried. Covers an upsert (new rows and changed columns), a supersede or
+    /// unseal (a claim that stopped being open leaves Surreal, one that became open enters), and
+    /// a delete (a key pg lacks leaves Surreal).
+    pub async fn mirror(&self, store: &Store, scope: &Scope) -> Result<()> {
+        if scope.is_empty() {
+            Ok(())
+        } else {
+            self.mirror_chunks(store, &scope.paths).await?;
+            self.mirror_claims(store, scope).await
+        }
+    }
+
+    async fn mirror_chunks(&self, store: &Store, paths: &[String]) -> Result<()> {
+        let rows = store
+            .db()
+            .await?
+            .query(&chunk_select("AND c.source_path = ANY($1)"), &[&paths])
+            .await
+            .context("read the written notes' chunks from pgvector")?;
+        let wanted: Vec<(String, String)> = rows.iter().map(chunk_literal).collect();
+        let existing: Vec<String> = first_statement(
+            self.rows::<String>(&format!(
+                "SELECT VALUE cid FROM chunk WHERE source_path INSIDE {};",
+                texts(paths)
+            ))
+            .await?,
+        );
+        self.reconcile("chunk", wanted, existing).await
+    }
+
+    async fn mirror_claims(&self, store: &Store, scope: &Scope) -> Result<()> {
+        let db = store.db().await?;
+        let pg_slots = db
+            .query(
+                "SELECT DISTINCT subject, predicate FROM claim WHERE source_path = ANY($1);",
+                &[&scope.paths],
+            )
+            .await
+            .context("read the written notes' claim slots from pgvector")?;
+        let surreal_slots: Vec<Slot> = first_statement(
+            self.rows::<Slot>(&format!(
+                "SELECT subject, predicate FROM claim WHERE source_path INSIDE {};",
+                texts(&scope.paths)
+            ))
+            .await?,
+        );
+        let mut slots: Vec<(String, String)> = scope.slots.clone();
+        slots.extend(pg_slots.iter().map(|r| (r.get(0), r.get(1))));
+        slots.extend(surreal_slots.into_iter().map(|s| (s.subject, s.predicate)));
+        slots.sort_unstable();
+        slots.dedup();
+        let subjects: Vec<String> = slots.iter().map(|s| s.0.clone()).collect();
+        let predicates: Vec<String> = slots.iter().map(|s| s.1.clone()).collect();
+        let rows = db
+            .query(
+                &claim_select(
+                    "AND (c.source_path = ANY($1) OR (c.subject, c.predicate) IN
+                          (SELECT s, p FROM unnest($2::text[], $3::text[]) AS k(s, p)))",
+                ),
+                &[&scope.paths, &subjects, &predicates],
+            )
+            .await
+            .context("read the written notes' open claims from pgvector")?;
+        let wanted: Vec<(String, String)> = rows.iter().map(claim_literal).collect();
+        let mut in_scope = vec![format!("source_path INSIDE {}", texts(&scope.paths))];
+        in_scope.extend(
+            slots
+                .iter()
+                .map(|(s, p)| format!("(subject = {} AND predicate = {})", text(s), text(p))),
+        );
+        let existing: Vec<String> = first_statement(
+            self.rows::<String>(&format!(
+                "SELECT VALUE cid FROM claim WHERE {};",
+                in_scope.join(" OR ")
+            ))
+            .await?,
+        );
+        self.reconcile("claim", wanted, existing).await
+    }
+
+    async fn surreal_keys(&self) -> Result<(Vec<String>, Vec<String>)> {
+        let chunks = first_statement(self.rows::<String>("SELECT VALUE cid FROM chunk;").await?);
+        let claims = first_statement(self.rows::<String>("SELECT VALUE cid FROM claim;").await?);
+        Ok((chunks, claims))
+    }
+
+    /// Read-only: row count and key-set hash per table, pg against Surreal, over what is there
+    /// now (the doctor line). Same tables and key shapes as the fill's readback.
+    pub async fn compare(&self, store: &Store) -> Result<Vec<FillTable>> {
+        let db = store.db().await?;
+        let pg_chunks: Vec<String> = db
+            .query(&format!("SELECT c.id {CHUNK_FROM};"), &[])
+            .await
+            .context("read chunk ids from pgvector")?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let pg_claims: Vec<String> = db
+            .query(
+                &format!(
+                    "SELECT c.subject, c.predicate, {valid} {CLAIM_FROM};",
+                    valid = epoch_us("c.valid_from")
+                ),
+                &[],
+            )
+            .await
+            .context("read open claim keys from pgvector")?
+            .iter()
+            .map(|r| claim_key(&r.get::<_, String>(0), &r.get::<_, String>(1), r.get(2)))
+            .collect();
+        let (surreal_chunks, surreal_claims) = self.surreal_keys().await?;
+        Ok(tables(pg_chunks, pg_claims, surreal_chunks, surreal_claims))
+    }
+
     /// Replace Surreal's chunk and open-claim tables with pgvector's, then report row count and
     /// key-set hash per table from both sides. Idempotent: a re-run starts from empty tables.
     #[allow(clippy::too_many_lines)] // schema DDL + two paged copies + the readback: one linear procedure
@@ -644,37 +936,17 @@ impl SurrealClient {
                 .db()
                 .await?
                 .query(
-                    &format!(
-                        "SELECT c.id, c.source_path, c.project, {updated}, c.embedding {CHUNK_FROM}
-                           AND c.id > $1 ORDER BY c.id LIMIT $2;",
-                        updated = epoch_us("d.updated_at")
-                    ),
+                    &chunk_select("AND c.id > $1 ORDER BY c.id LIMIT $2;"),
                     &[&after, &i64::try_from(FILL_BATCH)?],
                 )
                 .await
                 .context("read chunks from pgvector")?;
             let Some(last) = rows.last() else { break };
             after = last.get(0);
-            let literals: Vec<String> = rows
-                .iter()
-                .map(|r| {
-                    let embedding: Vector = r.get(4);
-                    format!(
-                        "{{cid: {}, source_path: {}, project: {}, doc_updated_us: {}, embedding: {}}}",
-                        text(&r.get::<_, String>(0)),
-                        text(&r.get::<_, String>(1)),
-                        text(&r.get::<_, String>(2)),
-                        r.get::<_, i64>(3),
-                        floats(embedding.as_slice())
-                    )
-                })
-                .collect();
-            chunk_keys.extend(rows.iter().map(|r| r.get::<_, String>(0)));
-            self.run(&format!(
-                "FOR $r IN [{}] {{ UPSERT type::record('chunk', $r.cid) CONTENT $r; }};",
-                literals.join(",")
-            ))
-            .await?;
+            let (keys, literals): (Vec<String>, Vec<String>) =
+                rows.iter().map(chunk_literal).unzip();
+            chunk_keys.extend(keys);
+            self.upsert_rows("chunk", &literals).await?;
         }
 
         let mut claim_keys = Vec::new();
@@ -684,12 +956,8 @@ impl SurrealClient {
                 .db()
                 .await?
                 .query(
-                    &format!(
-                        "SELECT c.subject, c.predicate, {valid}, c.source_path, d.origin, d.project,
-                                c.kind, c.anchor, {stale}, c.embedding {CLAIM_FROM}
-                         ORDER BY c.subject, c.predicate, c.valid_from LIMIT $1 OFFSET $2;",
-                        valid = epoch_us("c.valid_from"),
-                        stale = epoch_us("c.stale_at")
+                    &claim_select(
+                        "ORDER BY c.subject, c.predicate, c.valid_from LIMIT $1 OFFSET $2;",
                     ),
                     &[&i64::try_from(FILL_BATCH)?, &offset],
                 )
@@ -699,67 +967,18 @@ impl SurrealClient {
                 break;
             }
             offset += i64::try_from(rows.len())?;
-            let literals: Vec<String> = rows
-                .iter()
-                .map(|r| {
-                    let subject: String = r.get(0);
-                    let predicate: String = r.get(1);
-                    let valid_from_us: i64 = r.get(2);
-                    let embedding: Vector = r.get(9);
-                    let cid = claim_key(&subject, &predicate, valid_from_us);
-                    let anchor = r
-                        .get::<_, Option<String>>(7)
-                        .map_or_else(String::new, |a| format!("anchor: {},", text(&a)));
-                    let stale = r
-                        .get::<_, Option<i64>>(8)
-                        .map_or_else(String::new, |s| format!("stale_us: {s},"));
-                    let literal = format!(
-                        "{{cid: {}, subject: {}, predicate: {}, valid_from_us: {valid_from_us}, \
-                         source_path: {}, origin: {}, project: {}, kind: {}, {anchor} {stale} \
-                         embedding: {}}}",
-                        text(&cid),
-                        text(&subject),
-                        text(&predicate),
-                        text(&r.get::<_, String>(3)),
-                        text(&r.get::<_, String>(4)),
-                        text(&r.get::<_, String>(5)),
-                        text(&r.get::<_, String>(6)),
-                        floats(embedding.as_slice())
-                    );
-                    claim_keys.push(cid);
-                    literal
-                })
-                .collect();
-            self.run(&format!(
-                "FOR $r IN [{}] {{ UPSERT type::record('claim', $r.cid) CONTENT $r; }};",
-                literals.join(",")
-            ))
-            .await?;
+            let (keys, literals): (Vec<String>, Vec<String>) =
+                rows.iter().map(claim_literal).unzip();
+            claim_keys.extend(keys);
+            self.upsert_rows("claim", &literals).await?;
         }
 
-        let surreal_chunks: Vec<String> = self
-            .rows::<String>("SELECT VALUE cid FROM chunk;")
-            .await?
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-        let surreal_claims: Vec<String> = self
-            .rows::<String>("SELECT VALUE cid FROM claim;")
-            .await?
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-        Ok(vec![
-            FillTable {
-                table: "chunk",
-                pg: KeySet::of(chunk_keys),
-                surreal: KeySet::of(surreal_chunks),
-            },
-            FillTable {
-                table: "claim(open)",
-                pg: KeySet::of(claim_keys),
-                surreal: KeySet::of(surreal_claims),
-            },
-        ])
+        let (surreal_chunks, surreal_claims) = self.surreal_keys().await?;
+        Ok(tables(
+            chunk_keys,
+            claim_keys,
+            surreal_chunks,
+            surreal_claims,
+        ))
     }
 }

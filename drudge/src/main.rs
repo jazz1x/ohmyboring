@@ -67,6 +67,9 @@ enum Cmd {
     /// Copy the vectors from pgvector into SurrealDB (vector.surreal in boring.json), replacing what
     /// is there, then print per table the row count and key-set hash of both sides
     VectorFill,
+    /// Read-only (the doctor line): on backend=surreal, compare pgvector and SurrealDB per table
+    /// by row count and key-set hash and fail when they differ; on pgvector say it does not apply
+    VectorCheck,
     /// Delete orphan semantic nodes (remove edge-unreferenced legacy remnants)
     Gc,
     /// Show loaded boring.json config (for debugging / migration verification)
@@ -399,6 +402,24 @@ async fn main() -> Result<()> {
                 "vector-fill: pg 와 surreal 의 행 수 또는 id 집합 해시가 다름"
             );
         }
+        Cmd::VectorCheck => match cfg.vector.effective().backend {
+            config::VectorBackend::Surreal => {
+                let store = store.as_ref().context(VEC_OFF)?;
+                let settings = cfg.vector.surreal.settings(&config::env_set)?;
+                let client = store::SurrealClient::new(settings)?;
+                let tables = client.compare(store).await?;
+                for table in &tables {
+                    println!("{}", table.line());
+                }
+                anyhow::ensure!(
+                    tables.iter().all(store::FillTable::same),
+                    "vector-check: pg 와 surreal 의 행 수 또는 id 집합 해시가 다름 — vector-fill 을 다시 돌릴 것"
+                );
+            }
+            config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => {
+                println!("backend=pgvector — 해당 없음 (대조는 backend=surreal 일 때만)");
+            }
+        },
         Cmd::CodeSync { .. } | Cmd::CodeStatus { .. } | Cmd::Version => {}
         Cmd::Link { vault } => {
             let store = store.as_ref().context(VEC_OFF)?;

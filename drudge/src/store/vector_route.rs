@@ -3,10 +3,10 @@
 //! counterpart — stage 0 measured no radius join there — so it is pinned to pgvector on every
 //! backend, and the startup log and `config_get` say so.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 use super::vector_pg::Pg;
-use super::vector_surreal::{SurrealClient, SurrealView};
+use super::vector_surreal::{SURREAL_BEHIND, Scope, SurrealClient, SurrealView};
 use super::{AnchoredClaim, Hit, Recurrence, Store};
 use crate::vector::VectorIndex;
 
@@ -23,6 +23,21 @@ impl VectorRoute {
         match self {
             Self::Pgvector => RoutedView::Pg(Pg(store)),
             Self::Surreal(client) => RoutedView::Surreal(SurrealView { client, pg: store }),
+        }
+    }
+}
+
+impl Store {
+    /// After pg committed a chunk or claim change: on `backend=surreal`, write the same change
+    /// into Surreal (pg's state of `scope`, see `SurrealClient::mirror`); on pgvector there is
+    /// nothing to write. A Surreal failure is an error that says pg already has the change.
+    pub async fn mirror_surreal(&self, scope: &Scope) -> Result<()> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => Ok(()),
+            VectorRoute::Surreal(client) => client
+                .mirror(self, scope)
+                .await
+                .map_err(|e| anyhow!("{SURREAL_BEHIND} (surreal: {e:#})")),
         }
     }
 }

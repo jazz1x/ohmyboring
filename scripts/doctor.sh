@@ -1164,6 +1164,28 @@ if [ -f "$door_dockerfile" ]; then
     fi
 fi
 
+# (d5e) vector index parity. With `vector.backend=surreal` a failed Surreal write leaves pg ahead
+# of Surreal (the write's error said so), and nothing else would show it later. `drudge
+# vector-check` compares row count and id-set hash of chunk and open claim on both sides and
+# fails when they differ; on pgvector it says "해당 없음". The binary decides the backend (it parses
+# boring.json the way the engine does). No binary: a boring.json that asks for surreal cannot be
+# measured, which is red; otherwise the backend is pgvector and the line does not apply.
+vector_cli="$BORING_HOME/drudge/target/release/drudge"
+if [ -x "$vector_cli" ]; then
+    if vector_out="$("$vector_cli" vector-check 2>&1)"; then
+        ok "vector index parity: $(printf '%s' "$vector_out" | grep -v '^\[' | tr '\n' ' ')"
+    else
+        bad "vector index parity — $(printf '%s' "$vector_out" | grep -v '^\[' | tr '\n' ' ')"
+        failed_engine=1
+    fi
+elif [ -f "$BORING_HOME/boring.json" ] \
+     && grep -Eq '"backend"[[:space:]]*:[[:space:]]*"surreal"' "$BORING_HOME/boring.json"; then
+    bad "cannot measure vector index parity — boring.json asks for backend=surreal but the host CLI $vector_cli is not built"
+    failed_engine=1
+else
+    ok "vector index parity: backend=pgvector — 해당 없음 (boring.json does not ask for surreal)"
+fi
+
 if [ "$FIX" -eq 1 ]; then
     echo
     echo "Applying fixes..."

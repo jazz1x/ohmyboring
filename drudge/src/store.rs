@@ -32,7 +32,7 @@ mod vector_route;
 mod vector_surreal;
 
 pub use vector_route::VectorRoute;
-pub use vector_surreal::{FillTable, KeySet, SurrealClient};
+pub use vector_surreal::{FillTable, KeySet, SURREAL_BEHIND, Scope, SurrealClient};
 
 /// Ingest input (one chunk).
 #[derive(Debug)]
@@ -1705,7 +1705,9 @@ impl Store {
             anchor_hash,
             anchor_symbol,
         )
-        .await
+        .await?;
+        self.mirror_surreal(&Scope::notes([source_path.to_owned()]))
+            .await
     }
 
     /// `upsert_claim_with_anchor` on a caller-held connection or transaction handle.
@@ -2322,7 +2324,8 @@ impl Store {
     /// note has FEWER chunks than before. Used by the upsert-then-prune re-ingest so a reader never
     /// sees an empty/half-deleted chunk set (no delete-first window). `from_idx == new chunk count`.
     pub async fn prune_chunks_from(&self, path: &str, from_idx: usize) -> Result<()> {
-        Self::prune_chunks_from_on(&self.db().await?, path, from_idx).await
+        Self::prune_chunks_from_on(&self.db().await?, path, from_idx).await?;
+        self.mirror_surreal(&Scope::notes([path.to_owned()])).await
     }
 
     /// `prune_chunks_from` on a caller-held connection or transaction handle.
@@ -2362,13 +2365,17 @@ impl Store {
             .await?
             .execute("DELETE FROM claim WHERE source_path = $1;", &[&path])
             .await?;
-        Ok(())
+        // The chunk rows went with the document (CASCADE), so no SQL above names them; Surreal
+        // drops every key of this note that pg no longer holds.
+        self.mirror_surreal(&Scope::notes([path.to_owned()])).await
     }
 
     // ── chunk (embedding) ─────────────────────────────────────────────────────
 
     pub async fn upsert_chunk(&self, d: &Doc) -> Result<()> {
-        self.upsert_chunk_on(&self.db().await?, d).await
+        self.upsert_chunk_on(&self.db().await?, d).await?;
+        self.mirror_surreal(&Scope::notes([d.front.source_path.clone()]))
+            .await
     }
 
     /// `upsert_chunk` on a caller-held connection or transaction handle.
@@ -2794,6 +2801,7 @@ impl Store {
         tx.commit()
             .await
             .context("commit split merge transaction")?;
+        self.mirror_surreal(&Scope::notes(touched)).await?;
         Ok(Some(crate::split_subjects::Merged {
             subject: subject.to_owned(),
             deleted_rows,
@@ -3423,6 +3431,7 @@ impl Store {
             let tx = conn.transaction().await.context("begin seal transaction")?;
             total += Self::seal_superseded_claims(&tx, &newer, &older).await?;
             tx.commit().await.context("commit seal transaction")?;
+            self.mirror_surreal(&Scope::notes([older])).await?;
         }
         Ok(total)
     }
@@ -3591,6 +3600,8 @@ impl Store {
             .context("begin supersedes transaction")?;
         let report = Self::record_supersedes(&tx, pairs, judge).await?;
         tx.commit().await.context("commit supersedes transaction")?;
+        self.mirror_surreal(&Scope::notes(pairs.iter().flatten().cloned()))
+            .await?;
         Ok(report)
     }
 
@@ -3608,6 +3619,8 @@ impl Store {
             .context("begin supersedes transaction")?;
         let report = Self::remember_supersedes(&tx, pairs, judge).await?;
         tx.commit().await.context("commit supersedes transaction")?;
+        self.mirror_surreal(&Scope::notes(pairs.iter().flatten().cloned()))
+            .await?;
         Ok(report)
     }
 
@@ -4223,7 +4236,7 @@ impl Store {
             )
             .await
             .context("repin claim anchor")?;
-        Ok(())
+        self.mirror_surreal(&Scope::slot(subject, predicate)).await
     }
 
     pub async fn mark_claim_stale(
@@ -4242,7 +4255,7 @@ impl Store {
             )
             .await
             .context("mark claim stale")?;
-        Ok(())
+        self.mirror_surreal(&Scope::slot(subject, predicate)).await
     }
 
     /// Remove orphan semantic nodes — entity nodes not referenced by any edge.

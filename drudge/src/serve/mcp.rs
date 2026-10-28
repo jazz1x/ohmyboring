@@ -2234,6 +2234,13 @@ async fn index_in_tx(
     tx.commit()
         .await
         .map_err(|e| (-32603_i32, format!("commit remember transaction: {e:#}")))?;
+    // The new note's rows, and the notes it retired: their open claims just closed.
+    let written =
+        std::iter::once(front.source_path.clone()).chain(pairs.iter().map(|[_, old]| old.clone()));
+    store
+        .mirror_surreal(&crate::store::Scope::notes(written))
+        .await
+        .map_err(|e| (-32603_i32, format!("remember: {e:#}")))?;
     Ok((stats, report))
 }
 

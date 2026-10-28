@@ -375,9 +375,11 @@ pub struct VectorConfig {
 }
 
 /// Shown at startup and in `config_get` next to the effective backend when it is surreal: the one
-/// path that stays on pgvector, and the frozen-copy caveat.
-pub const SURREAL_PINNED_NOTES: [&str; 2] =
-    ["recurrences 는 pgvector", "surreal: 한 번 채우기 시점 고정"];
+/// path that stays on pgvector, and how the Surreal copy is kept.
+pub const SURREAL_PINNED_NOTES: [&str; 2] = [
+    "recurrences 는 pgvector",
+    "surreal: 한 번 채운 뒤 pg 쓰기를 따라 씀 (실패는 오류, 복구는 vector-fill)",
+];
 
 /// `VectorConfig::effective`: the backend the process runs on, and the notice shown when the
 /// file asked for one that is not implemented.
