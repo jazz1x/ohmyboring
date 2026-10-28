@@ -111,7 +111,7 @@
     "allow_company_origin": {
       "type": "boolean",
       "default": false,
-      "description": "When true, origin:company notes (session experience from company work) are accepted corpus and do not flip the audit 'clean' flag. Default false flags them for review. Governs session experience only — company KB originals stay off-policy."
+      "description": "When true, origin:company notes (session experience from company work) are accepted corpus and do not flip the audit 'clean' flag. Default false flags them for review and also leaves them out of the decisions, risks, next_actions and stalled registers. Governs session experience only — company KB originals stay off-policy."
     },
     "repos": {
       "type": "array",

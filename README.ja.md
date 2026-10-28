@@ -427,7 +427,7 @@ Jira チケット PROJ-1234 <!-- pii-allow: internal-ticket --> は公開情報�
 
 **シークレットのマスク（ユーザー設定なし）。** PII ルールとは別に、`remember` はノートのタイトルと本文にある既知の認証情報の形を `‹REDACTED›` に置き換え、クエリログにも同じマスクをかけます。対象は Slack トークン、`sk-` / `sk-ant-` API キー、AWS `AKIA…` キー、GitHub トークン、Google `AIza…` キー、JWT、`-----BEGIN … PRIVATE KEY-----` ヘッダー、値が 12 文字以上の `api_key` / `secret` / `token` / `password` / `bearer` の代入です。このリストは設定ではなくコード内の定数（`drudge/src/redact.rs`）で、オフにしたり拡張したりする設定キーやファイルはありません。マスク範囲を変えるには `redact.rs` を直して再ビルドしてください。独自の形には上の PII ルールを使います。
 
-**会社情報の切り分け。** `allow_company_origin`（gitignore された `boring.json`、既定 `false`）は、監査が `origin:company` ノート（会社業務のセッション経験）をどう扱うかを決めます。`false`: レビュー対象としてフラグされ、監査の "clean" 表示が反転します。`true`: 受け入れ済みコーパスとして扱い、表示は維持されます。変わるのはこの監査表示だけで、書き込みは止めません。どのノートが `company` になるかは、設定表の `repos[]` ルールが決めます。
+**会社情報の切り分け。** `allow_company_origin`（gitignore された `boring.json`、既定 `false`）は、監査が `origin:company` ノート（会社業務のセッション経験）をどう扱うかを決めます。`false`: レビュー対象としてフラグされ、監査の "clean" 表示が反転します。`true`: 受け入れ済みコーパスとして扱い、表示は維持されます。`false`（既定）のときは `decisions`・`risks`・`next_actions`・`stalled` レジスタからも `company` ノートを除きます。書き込みは止めません。どのノートが `company` になるかは、設定表の `repos[]` ルールが決めます。
 
 ### MCP tool 呼び出し例（raw JSON-RPC）
 

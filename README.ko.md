@@ -419,7 +419,7 @@ Jira 티켓 PROJ-1234 <!-- pii-allow: internal-ticket --> 는 공개입니다.
 
 **비밀값 가리기(사용자 설정 없음).** PII 규칙과 별개로 `remember`는 노트 제목·본문의 알려진 자격 증명 모양을 `‹REDACTED›`로 바꾸고, 쿼리 로그도 같은 방식으로 가립니다. 대상은 Slack 토큰, `sk-` / `sk-ant-` API 키, AWS `AKIA…` 키, GitHub 토큰, Google `AIza…` 키, JWT, `-----BEGIN … PRIVATE KEY-----` 헤더, 값이 12자 이상인 `api_key` / `secret` / `token` / `password` / `bearer` 대입입니다. 이 목록은 설정이 아니라 코드의 상수(`drudge/src/redact.rs`)입니다. 끄거나 늘리는 설정 키·파일이 없습니다. 가리는 범위를 바꾸려면 `redact.rs`를 고쳐 다시 빌드해야 하고, 자기만의 모양은 위의 PII 규칙을 쓰세요.
 
-**회사 정보 가르기.** `allow_company_origin`(gitignore 된 `boring.json`, 기본 `false`)은 감사가 `origin:company` 노트(회사 업무의 세션 경험)를 어떻게 다룰지 정합니다. `false`: 검토 대상으로 표시되고 감사 "clean" 표시가 뒤집힙니다. `true`: 받아들인 코퍼스로 보고 표시를 유지합니다. 바뀌는 것은 이 감사 표시뿐이며 쓰기를 막지는 않습니다. 어떤 노트가 `company`인지는 설정 표의 `repos[]` 규칙이 정합니다.
+**회사 정보 가르기.** `allow_company_origin`(gitignore 된 `boring.json`, 기본 `false`)은 감사가 `origin:company` 노트(회사 업무의 세션 경험)를 어떻게 다룰지 정합니다. `false`: 검토 대상으로 표시되고 감사 "clean" 표시가 뒤집힙니다. `true`: 받아들인 코퍼스로 보고 표시를 유지합니다. `false`(기본)이면 `decisions`·`risks`·`next_actions`·`stalled` 레지스터에서도 `company` 노트를 뺍니다. 쓰기를 막지는 않습니다. 어떤 노트가 `company`인지는 설정 표의 `repos[]` 규칙이 정합니다.
 
 ### MCP tool 호출 예시 (raw JSON-RPC)
 
