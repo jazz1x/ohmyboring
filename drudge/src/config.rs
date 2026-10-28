@@ -21,6 +21,20 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "checkout_roots",
     "card",
 ];
+const SCHEDULE_FIELDS: &[&str] = &[
+    "sync_hours",
+    "compact_hours",
+    "brief_hour",
+    "ingest_tick_minutes",
+    "queue_per_tick",
+];
+const COLLECT_FIELDS: &[&str] = &[
+    "window_hours",
+    "min_bytes",
+    "stable_age_seconds",
+    "pending_ttl_seconds",
+    "retry_ttl_seconds",
+];
 const DEFAULT_HERMES_CRON_JOBS: &str = r#"{
   "morning-card": {"enabled": true, "schedule": "0 8 * * *", "script": "run-morning-card.py", "deliver": "local"},
   "weekly-card": {"enabled": true, "schedule": "0 9 * * 1", "script": "run-weekly-card.py", "deliver": "local"},
@@ -92,7 +106,7 @@ type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
 /// boring.json `schedule`. These defaults are the only Rust definition; boring.schema.json and
 /// src/ohmyboring/config.py carry the same numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ScheduleConfig {
     pub sync_hours: u64,
     pub compact_hours: u64,
@@ -137,10 +151,11 @@ impl ScheduleConfig {
     }
 
     /// The values the process actually runs on: env on top of the file. The `.max(1)` is the
-    /// tokio interval guard — a zero period panics. An env brief hour outside 0..=23 or not a
-    /// number (`off`) turns the brief off, as it always has.
+    /// tokio interval guard — a zero period panics. An env brief hour `off` turns the brief
+    /// off; any other value outside 0..=23 turns it off too but is reported in
+    /// `brief_hour_error`, never swallowed.
     #[must_use]
-    pub fn effective(self, env: EnvLookup<'_>) -> (Self, Vec<EnvOverride>) {
+    pub fn effective(self, env: EnvLookup<'_>) -> ScheduleEffective {
         let mut out = self;
         let mut overrides = Vec::new();
         let number = |name: &str| env(name).and_then(|v| v.parse::<u64>().ok());
@@ -165,20 +180,41 @@ impl ScheduleConfig {
                 env: "BORING_QUEUE_PER_TICK",
             });
         }
+        let mut brief_hour_error = None;
         if let Some(raw) = env("BORING_BRIEF_HOUR") {
-            out.brief_hour = raw.parse::<u8>().ok().filter(|h| *h <= 23);
             overrides.push(EnvOverride {
                 field: "brief_hour",
                 env: "BORING_BRIEF_HOUR",
             });
+            let raw = raw.trim();
+            out.brief_hour = None;
+            if raw != "off" {
+                match raw.parse::<u8>().ok().filter(|h| *h <= 23) {
+                    Some(hour) => out.brief_hour = Some(hour),
+                    None => brief_hour_error = Some(format!("brief_hour 잘못된 값: {raw}")),
+                }
+            }
         }
-        (out, overrides)
+        ScheduleEffective {
+            value: out,
+            overrides,
+            brief_hour_error,
+        }
     }
+}
+
+/// `ScheduleConfig::effective`: the running values, the env names that took over, and the
+/// reason the brief is off when its env value is neither `off` nor an hour 0..=23.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleEffective {
+    pub value: ScheduleConfig,
+    pub overrides: Vec<EnvOverride>,
+    pub brief_hour_error: Option<String>,
 }
 
 /// boring.json `collect` (session collectors; read by the Python side, shown here by config_get).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct CollectConfig {
     pub window_hours: u64,
     pub min_bytes: u64,
@@ -791,6 +827,15 @@ impl BoringConfig {
             }
         }
 
+        for (block, fields) in [("schedule", SCHEDULE_FIELDS), ("collect", COLLECT_FIELDS)] {
+            let Some(inner) = value.get(block).and_then(serde_json::Value::as_object) else {
+                continue;
+            };
+            for key in inner.keys().filter(|k| !fields.contains(&k.as_str())) {
+                eprintln!("[config] warning: unknown field '{key}' in boring.json {block}");
+            }
+        }
+
         let mut config: BoringConfig =
             serde_json::from_value(value).context("deserialize boring.json")?;
         config.schedule.validate()?;
@@ -808,8 +853,8 @@ impl BoringConfig {
 
     /// The `schedule` this process runs on: env over boring.json.
     #[must_use]
-    pub fn schedule_effective(&self) -> ScheduleConfig {
-        self.schedule.effective(&env_set).0
+    pub fn schedule_effective(&self) -> ScheduleEffective {
+        self.schedule.effective(&env_set)
     }
 
     /// What `config_get` returns: the config as parsed plus, for the schedule, collect and
@@ -817,7 +862,11 @@ impl BoringConfig {
     /// env names that took over a value. Jobs outside boring.json are listed as `unmanaged`.
     pub fn settings_view(&self, env: EnvLookup<'_>) -> serde_json::Result<serde_json::Value> {
         let mut view = serde_json::to_value(self)?;
-        let (schedule, schedule_env) = self.schedule.effective(env);
+        let schedule = self.schedule.effective(env);
+        let mut schedule_effective = serde_json::to_value(schedule.value)?;
+        if let Some(reason) = &schedule.brief_hour_error {
+            schedule_effective["brief_hour_error"] = serde_json::Value::from(reason.as_str());
+        }
         let (collect, collect_env) = self.collect.effective(env);
         let defaults: serde_json::Value = serde_json::from_str(DEFAULT_HERMES_CRON_JOBS)?;
         let hermes_file = self
@@ -827,8 +876,8 @@ impl BoringConfig {
         let hermes_effective = self.hermes_cron_jobs.clone().unwrap_or(defaults);
         view["schedule"] = serde_json::json!({
             "file": serde_json::to_value(self.schedule)?,
-            "effective": serde_json::to_value(schedule)?,
-            "overridden_by_env": overrides_json(&schedule_env),
+            "effective": schedule_effective,
+            "overridden_by_env": overrides_json(&schedule.overrides),
         });
         view["collect"] = serde_json::json!({
             "file": serde_json::to_value(self.collect)?,

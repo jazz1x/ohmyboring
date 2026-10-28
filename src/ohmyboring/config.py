@@ -309,6 +309,7 @@ class Schedule:
     brief_hour: int | None  # None = the daily brief is off
     ingest_tick_minutes: int
     queue_per_tick: int
+    brief_hour_error: str | None = None  # set when the env hour is neither `off` nor 0..=23
 
 
 @dataclass(frozen=True)
@@ -393,8 +394,8 @@ def _section(cfg: dict, name: str, keys: frozenset[str]) -> Either[dict, str]:
     if not isinstance(raw, dict):
         return Err(f"boring.json {name} must be an object, got {raw!r}")
     unknown = sorted(set(raw) - keys)
-    if unknown:
-        return Err(f"boring.json {name} has unknown field(s): {', '.join(unknown)}")
+    for key in unknown:
+        print(f"[boring_config] warning: unknown field '{key}' in boring.json {name}", file=sys.stderr)
     return Ok(raw)
 
 
@@ -424,28 +425,31 @@ def _resolve(
     return Ok(out)
 
 
-def _brief_hour_env(raw: str) -> Either[int | None, str]:
-    if raw.strip() == "off":
-        return Ok(None)
+def _brief_hour_env(raw: str) -> tuple[int | None, str | None]:
+    """(hour, error). `off` = off; any other value that is not 0..=23 also leaves the brief off
+    but is reported in the error — the rest of the schedule is unaffected."""
+    text = raw.strip()
+    if text == "off":
+        return None, None
     try:
-        hour = int(raw)
+        hour = int(text)
     except ValueError:
-        return Err(f"BORING_BRIEF_HOUR must be an integer 0..=23 or off, got {raw!r}")
+        return None, f"brief_hour 잘못된 값: {text}"
     if not 0 <= hour <= 23:
-        return Err(f"BORING_BRIEF_HOUR must be 0..=23, got {raw!r}")
-    return Ok(hour)
+        return None, f"brief_hour 잘못된 값: {text}"
+    return hour, None
 
 
-def _brief_hour_file(hour: object) -> Either[int | None, str]:
+def _brief_hour_file(hour: object) -> Either[tuple[int | None, str | None], str]:
     if hour is None or (isinstance(hour, int) and not isinstance(hour, bool) and 0 <= hour <= 23):
-        return Ok(hour)
+        return Ok((hour, None))
     return Err(f"boring.json schedule.brief_hour must be an integer 0..=23 or null, got {hour!r}")
 
 
-def _brief_hour(given: dict, env: Mapping[str, str]) -> Either[int | None, str]:
+def _brief_hour(given: dict, env: Mapping[str, str]) -> Either[tuple[int | None, str | None], str]:
     raw = env.get("BORING_BRIEF_HOUR")
     if raw is not None and raw.strip():
-        return _brief_hour_env(raw)
+        return Ok(_brief_hour_env(raw))
     return _brief_hour_file(given.get("brief_hour", _SCHEDULE_DEFAULTS["brief_hour"]))
 
 
@@ -464,7 +468,7 @@ def parse_schedule(cfg: dict, env: Mapping[str, str]) -> Either[Schedule, str]:
     match _brief_hour(given, env):
         case Err(reason):
             return Err(reason)
-        case Ok(hour):
+        case Ok((hour, hour_error)):
             return Ok(
                 Schedule(
                     sync_hours=v["sync_hours"],
@@ -472,6 +476,7 @@ def parse_schedule(cfg: dict, env: Mapping[str, str]) -> Either[Schedule, str]:
                     brief_hour=hour,
                     ingest_tick_minutes=v["ingest_tick_minutes"],
                     queue_per_tick=v["queue_per_tick"],
+                    brief_hour_error=hour_error,
                 )
             )
 

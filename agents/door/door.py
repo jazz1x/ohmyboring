@@ -882,6 +882,8 @@ def _start_brief_if_owner() -> None:
     match boring_config.schedule():
         case Err(reason):
             print(f"[door] brief thread not started: {reason}", file=sys.stderr, flush=True)
+        case Ok(boring_config.Schedule(brief_hour_error=str(reason))):
+            print(f"[door] brief thread not started: {reason}", file=sys.stderr, flush=True)
         case Ok(boring_config.Schedule(brief_hour=None)):
             print("[door] brief thread not started: schedule.brief_hour is off", file=sys.stderr, flush=True)
         case Ok(boring_config.Schedule(brief_hour=hour)):

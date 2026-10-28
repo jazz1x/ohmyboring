@@ -50,6 +50,9 @@ def main(argv: list[str] | None = None) -> int:
         case Err(reason):
             print(f"[brief] {reason}", file=sys.stderr)
             return 2
+        case Ok(boring_config.Schedule(brief_hour_error=str(reason))):
+            print(f"[brief] {reason}", file=sys.stderr)
+            return 2
         case Ok(boring_config.Schedule(brief_hour=None)):
             print("[brief] schedule.brief_hour is off — no reference hour", file=sys.stderr)
             return 2

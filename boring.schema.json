@@ -181,7 +181,7 @@
         "min_bytes": {"type": "integer", "minimum": 0, "default": 20480, "description": "Skip sessions smaller than this. Env COLLECT_MIN_KB (in KB)."},
         "stable_age_seconds": {"type": "integer", "minimum": 0, "default": 1800, "description": "A transcript modified more recently than this is still open and is left alone. Env COLLECT_STABLE_AGE_SECONDS."},
         "pending_ttl_seconds": {"type": "integer", "minimum": 1, "default": 1800, "description": "How long a pending marker holds a session. Env COLLECT_PENDING_TTL / INGEST_PENDING_TTL."},
-        "retry_ttl_seconds": {"type": "integer", "minimum": 1, "description": "How long a retry marker holds a session. Omitted = same as pending_ttl_seconds. Env COLLECT_RETRY_TTL / INGEST_RETRY_TTL."}
+        "retry_ttl_seconds": {"type": "integer", "minimum": 1, "description": "How long a retry marker holds a session. When omitted, it follows pending_ttl_seconds (no default of its own). Env COLLECT_RETRY_TTL / INGEST_RETRY_TTL."}
       }
     },
     "checkout_roots": {

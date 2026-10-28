@@ -384,18 +384,6 @@ def _schedule() -> boring_config.Schedule:
             raise RuntimeError(reason)
 
 
-def _collect() -> boring_config.Collect:
-    match boring_config.collect():
-        case Ok(collect):
-            return collect
-        case Err(reason):
-            raise RuntimeError(reason)
-
-
-def _stable_age_arg() -> int:
-    return int(_collect().stable_age_seconds)
-
-
 def _codex_host_worker_plist(home: str, python: str = sys.executable) -> str:
     collector = _codex_collector_path(home)
     interval_sec = _schedule().ingest_tick_minutes * 60
@@ -413,7 +401,6 @@ def _codex_host_worker_plist(home: str, python: str = sys.executable) -> str:
 	    <string>BORING_HOME={_xml_escape(str(home))}</string>
 	    <string>COLLECT_LIMIT=1</string>
 	    <string>CODEX_INCLUDE_ROLLOUTS=1</string>
-	    <string>COLLECT_STABLE_AGE_SECONDS={_stable_age_arg()}</string>
 	    <string>{_xml_escape(python)}</string>
 	    <string>{_xml_escape(str(collector))}</string>
   </array>
@@ -464,7 +451,6 @@ def _install_codex_host_worker_linux(boring_home: str | None = None) -> dict:
     job = (
         f"*/{_schedule().ingest_tick_minutes} * * * * cd {_sh_quote(str(home))} && "
         f"BORING_HOME={_sh_quote(str(home))} COLLECT_LIMIT=1 CODEX_INCLUDE_ROLLOUTS=1 "
-        f"COLLECT_STABLE_AGE_SECONDS={_stable_age_arg()} "
         f"{_sh_quote(sys.executable)} {_sh_quote(str(collector))} >>{_sh_quote(CODEX_HOST_WORKER_LOG)} 2>&1 "
         f"# {CODEX_HOST_WORKER_LABEL}"
     )

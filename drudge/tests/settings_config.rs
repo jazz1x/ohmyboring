@@ -81,6 +81,34 @@ fn config_get_names_the_env_that_took_over_and_lists_unmanaged_jobs() {
 }
 
 #[test]
+fn unknown_field_inside_a_block_loads_with_one_warning() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("boring.json");
+    std::fs::write(
+        &path,
+        r#"{"schema_version": 2, "schedule": {"sync_hour": 3, "sync_hours": 6}}"#,
+    )
+    .expect("write");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_drudge"))
+        .arg("config")
+        .env_clear()
+        .env("BORING_CONFIG", &path)
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "load failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let warnings: Vec<&str> = stderr.lines().filter(|l| l.contains("unknown")).collect();
+    assert_eq!(warnings.len(), 1, "stderr: {stderr}");
+    assert!(warnings[0].contains("sync_hour"));
+    let view: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(view["schedule"]["effective"]["sync_hours"], 6);
+}
+
+#[test]
 fn schedule_block_with_a_value_out_of_range_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("boring.json");

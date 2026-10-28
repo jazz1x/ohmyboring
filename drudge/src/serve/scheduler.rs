@@ -290,7 +290,11 @@ pub(crate) fn spawn_scheduler(
 ) {
     // boring.json `schedule` with env on top (config.rs: the ≥1h clamp lives there — a zero
     // Duration panics tokio::time::interval).
-    let schedule = cfg.schedule_effective();
+    let effective = cfg.schedule_effective();
+    if let Some(reason) = &effective.brief_hour_error {
+        eprintln!("[scheduler] daily brief not started: {reason}");
+    }
+    let schedule = effective.value;
     let sync_hours = schedule.sync_hours;
     let sync_interval = Duration::from_secs(sync_hours * 3600);
 

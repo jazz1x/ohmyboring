@@ -47,7 +47,7 @@ def read_in_fresh_process(boring: dict, env: dict) -> dict:
             [sys.executable, "-c", _PROBE], env=proc_env, capture_output=True, text=True, check=False
         )
     assert done.returncode == 0, done.stderr
-    return json.loads(done.stdout)
+    return {**json.loads(done.stdout), "_stderr": done.stderr}
 
 
 class SettingsFixtureTest(unittest.TestCase):
@@ -59,9 +59,12 @@ class SettingsFixtureTest(unittest.TestCase):
                     with self.subTest(case=case["name"], field=f"{block}.{field}"):
                         self.assertEqual(got[block][field], want)
 
-    def test_unknown_field_in_a_block_is_refused_not_ignored(self):
-        got = read_in_fresh_process({"schedule": {"sync_hour": 3}}, {})
-        self.assertIn("unknown field", got["schedule"]["error"])
+    def test_unknown_field_in_a_block_loads_with_one_warning(self):
+        got = read_in_fresh_process({"schedule": {"sync_hour": 3, "sync_hours": 6}}, {})
+        self.assertEqual(got["schedule"]["sync_hours"], 6)
+        warnings = [line for line in got["_stderr"].splitlines() if "unknown field" in line]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("sync_hour", warnings[0])
 
     def test_brief_hour_outside_the_day_is_refused(self):
         got = read_in_fresh_process({"schedule": {"brief_hour": 24}}, {})
