@@ -6,6 +6,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Added
+- **`vector.backend=surreal` (C-VECADAPT2 2a)** — 다섯 벡터 질의(vector_search·vector_search_filtered·nearest_document·semantic_related_docs·current_claims)를 SurrealDB HNSW 에서 읽는다. 채우기는 `drudge vector-fill` 한 번(표마다 행 수·id 해시 대조), 이어 채우기는 아직 없어 라이브에 켜지 않는다. `recurrences` 는 어느 백엔드든 pgvector. 기본값 `pgvector` 그대로. 사본 golden recall@3 은 Surreal 9/22 대 pgvector 21/22(ef 40).
+
 - **위키 verdict 이동 단위를 어휘 점수로 (C-VERDICT-1 3단계)** — `lift_by_nets` 가 순위 한 칸이 아니라 `score + net` 내림차순(동점은 원래 순서)으로 정렬한다. net 1 = 어휘 점수 1점: 1점 차는 뒤집고 2점 차는 못 뒤집는다.
 
 - **엔진 `GET /repairs/split-subjects`·`/samples` (C-PORT4 1단계)** — 문과 같은 묶음 규칙(`ingest::canon`, rows 내림 → canon 코드포인트 순)·입력 읽기(limit `" 3 "`·`+3`·`٣`, 반복 `variant`, 공백 variant, NUL)·본문 바이트. 사본 DB 에서 문이 낸 30건과 대조(빨강 30/30 → 0). 문 쪽 스위치(`DOOR_LINK_WRITER`)는 같은 단계의 뒤 커밋.
