@@ -2261,15 +2261,26 @@ async fn defer_indexing(
         tokio::spawn(drain_deferred(s.clone(), rx));
         tx
     });
+    // Before the send: once the job is queued the worker may finish it at once, and its finished
+    // line must not come first.
+    log_indexing_event(s, "indexing_deferred", "deferred", &source_path, None, &[]).await;
     if let Err(e) = queue.send(job) {
         s.deferred.remove(&source_path);
+        let why = "worker gone";
+        log_indexing_event(
+            s,
+            "indexing_finished",
+            "failed",
+            &source_path,
+            Some(why),
+            &[],
+        )
+        .await;
         return Err((
             -32603_i32,
             format!("deferred indexing worker is gone — note saved, next sync ingests it: {e}"),
         ));
     }
-    // After the send: a deferral line with no queued job behind it would read as lost work.
-    log_indexing_event(s, "indexing_deferred", "deferred", &source_path, None, &[]).await;
     Ok(Remembered {
         source_path,
         wiki_id,

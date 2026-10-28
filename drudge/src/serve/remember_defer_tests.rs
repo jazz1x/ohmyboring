@@ -118,6 +118,10 @@ const SUPERSEDES_OF: &str =
     "SELECT count(*) FROM edge WHERE kind = 'supersedes' AND src = 'doc:' || $1";
 
 async fn events(s: &AppState, name: &str) -> usize {
+    event_ids(s, name).await.len()
+}
+
+async fn event_ids(s: &AppState, name: &str) -> Vec<i64> {
     s.store
         .as_ref()
         .unwrap()
@@ -132,7 +136,9 @@ async fn events(s: &AppState, name: &str) -> usize {
         })
         .await
         .unwrap()
-        .len()
+        .into_iter()
+        .map(|r| r.id)
+        .collect()
 }
 
 #[tokio::test]
@@ -206,6 +212,12 @@ async fn deferring_writes_one_deferred_and_one_finished_line() {
 
     assert_eq!(events(&fx.s, "indexing_deferred").await, 1);
     assert_eq!(events(&fx.s, "indexing_finished").await, 1);
+    let deferred = event_ids(&fx.s, "indexing_deferred").await;
+    let finished = event_ids(&fx.s, "indexing_finished").await;
+    assert!(
+        deferred[0] < finished[0],
+        "deferred is logged before finished"
+    );
 }
 
 #[tokio::test]
