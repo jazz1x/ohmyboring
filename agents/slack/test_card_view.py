@@ -1877,6 +1877,44 @@ class ValueCarouselCapTests(unittest.TestCase):
         self.assertEqual(len(left), built.left_out.reviews)
         self.assertEqual(len(_overflows(built.blocks)), 1)
 
+        # The advice lane reserves the review lane's tail at its real size (a carousel row is
+        # four blocks, not three): all two review rows ride, the extra advice rows go to [더보기].
+        proposals = [
+            cc.Proposal(
+                subject=f"주어 {i}",
+                note=f"/vault/wiki/wiki-09{i:02d}.md",
+                register="stalled",
+                bottleneck=f"병목 설명 {i} 열자 이상",
+                advice=f"오늘 할 일 {i} 열자 이상",
+                evidence=[
+                    cc.Evidence(
+                        note="/vault/wiki/wiki-0900.md", quote="근거 인용문 열두자 이상입니다", line=1
+                    )
+                ],
+            )
+            for i in range(5)
+        ]
+        tight = cv.build_card(proposals, reviews=reviews[:2], lang="ko", block_limit=20)
+        self.assertEqual(tight.left_out.reviews, 0)
+        self.assertLessEqual(len(tight.blocks), 20)
+        self.assertGreater(tight.left_out.advice, 0)
+
+        # The 9000-char cap: long values would run past it, so rows go to [더보기] until it holds.
+        long_pair = pair.model_copy(update={"value": "가" * 400})
+        long_rows = [
+            cc.ProposedVerdict(
+                session_id=f"long-{i}",
+                note=f"/vault/wiki/wiki-08{i:02d}.md",
+                kind="used",
+                at="t",
+                pairs=[long_pair],
+            )
+            for i in range(11)
+        ]
+        self.assertGreater(cv.card_chars(cv.build_card([], reviews=long_rows, lang="ko").blocks), 9000)
+        fitted = cv.fit_card([], reviews=long_rows, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted.blocks), 9000)
+
         # Failure branch of the pair/Absent split: Absent is a note with no sealed prior; a prior
         # the engine could not be asked for is its own card, with no drop button on it.
         review = cc.ProposedVerdict(

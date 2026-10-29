@@ -34,9 +34,16 @@ async fn a_sealed_earlier_row_is_a_prior_and_everything_else_is_absent() {
         format!("fresh-{tag}"),
         format!("unsealed-{tag}"),
     );
+    let (oldest, newest_earlier) = (
+        format!("/vault/wiki/prior-{tag}-oldest.md"),
+        format!("/vault/wiki/prior-{tag}-mid.md"),
+    );
     let z = [0.0_f32; 1024];
+    // three earlier rows for one slot: old-a, old-b sealed, old-c (the newest earlier) never sealed
     for (subject, value, path, when) in [
-        (&sealed, "old-sealed", &old, 1_000),
+        (&sealed, "old-a", &oldest, 500),
+        (&sealed, "old-b", &old, 1_000),
+        (&sealed, "old-c", &newest_earlier, 1_500),
         (&unsealed, "old-unsealed", &old, 1_000),
         (&sealed, "new-sealed", &new, 2_000),
         (&fresh, "new-fresh", &new, 2_000),
@@ -58,11 +65,17 @@ async fn a_sealed_earlier_row_is_a_prior_and_everything_else_is_absent() {
     }
     // pin the seal state the test names, whatever the writer did on its own
     db.execute(
-        "UPDATE claim SET superseded_at = to_timestamp(2000) WHERE source_path = $1 AND subject = $2",
-        &[&old, &sealed],
+        "UPDATE claim SET superseded_at = to_timestamp(2000) WHERE subject = $1 AND value IN ('old-a', 'old-b')",
+        &[&sealed],
     )
     .await
     .expect("seal");
+    db.execute(
+        "UPDATE claim SET superseded_at = NULL WHERE subject = $1 AND value = 'old-c'",
+        &[&sealed],
+    )
+    .await
+    .expect("unseal old-c");
     db.execute(
         "UPDATE claim SET superseded_at = NULL WHERE source_path = $1 AND subject = $2",
         &[&old, &unsealed],
@@ -76,7 +89,7 @@ async fn a_sealed_earlier_row_is_a_prior_and_everything_else_is_absent() {
     assert_eq!(
         by(&sealed).prior,
         Prior::Prior(Sealed {
-            value: "old-sealed".to_string(),
+            value: "old-b".to_string(),
             note: old.clone(),
             superseded_at: "1970-01-01T00:33:20Z".to_string(),
         })
