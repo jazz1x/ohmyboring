@@ -1889,7 +1889,8 @@ class ValueCarouselCapTests(unittest.TestCase):
         self.assertNotIn("actions", prior_card)
         self.assertEqual([a["action_id"] for a in new_card["actions"]], ["card:0:do"])
         top = next(b for b in blocks if b["type"] == "actions")
-        self.assertEqual([a["action_id"].split(":")[-1] for a in top["elements"]][:2], ["drop", "delegate"])
+        self.assertEqual([a["action_id"].split(":")[-1] for a in top["elements"]][:2], ["delegate", "defer"])
+        self.assertNotIn("card:0:drop", _blocks_text(blocks))
 
 
 if __name__ == "__main__":

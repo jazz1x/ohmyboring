@@ -175,8 +175,7 @@ def _row_buttons(
 ) -> tuple[dict[str, dict], list[dict]]:
     """(buttons for the carousel cards by side, buttons for the top-level actions block). A row
     that draws no carousel keeps every button in the actions block. When the prior could not be
-    read its card has no button, so the choice that card would carry stays in the actions block
-    under its usual label."""
+    read, its card has no button and that choice (drop) is offered nowhere on the row."""
     if not _draws_carousel(row):
         return {}, [button for _, button in tagged]
     side_of = {
@@ -186,6 +185,8 @@ def _row_buttons(
     rest: list[dict] = []
     for choice, button in tagged:
         side = side_of.get(choice)
+        if row.pairs_unread and choice == "drop":
+            continue
         if side is None:
             rest.append(button)
         else:
