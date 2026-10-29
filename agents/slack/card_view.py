@@ -166,18 +166,22 @@ def _advice_buttons(idx: int, proposal: Proposal, strings: dict[str, str]) -> li
 CAROUSEL_CARD_CHOICES = (("new", "do"), ("prior", "drop"))
 
 
-def _has_prior(pairs: list[ValuePair]) -> bool:
-    return any(p.prior is not None for p in pairs)
+def _draws_carousel(row: Proposal | ProposedVerdict) -> bool:
+    return row.pairs_unread or any(p.prior is not None for p in row.pairs)
 
 
 def _row_buttons(
-    lane: str, tagged: list[tuple[str, dict]], pairs: list[ValuePair], strings: dict[str, str]
+    lane: str, tagged: list[tuple[str, dict]], row: Proposal | ProposedVerdict, strings: dict[str, str]
 ) -> tuple[dict[str, dict], list[dict]]:
     """(buttons for the carousel cards by side, buttons for the top-level actions block). A row
-    without a prior draws no carousel, so every button stays in the actions block."""
-    if not _has_prior(pairs):
+    that draws no carousel keeps every button in the actions block. When the prior could not be
+    read its card has no button, so the choice that card would carry stays in the actions block
+    under its usual label."""
+    if not _draws_carousel(row):
         return {}, [button for _, button in tagged]
-    side_of = {choice: side for side, choice in CAROUSEL_CARD_CHOICES}
+    side_of = {
+        choice: side for side, choice in CAROUSEL_CARD_CHOICES if not (row.pairs_unread and side == "prior")
+    }
     cards: dict[str, dict] = {}
     rest: list[dict] = []
     for choice, button in tagged:
@@ -275,13 +279,26 @@ def _value_card(head: str, value: str, ref: str, button: dict | None) -> dict:
 
 
 def _value_blocks(
-    pairs: list[ValuePair], note: str, strings: dict[str, str], card_buttons: dict[str, dict] | None = None
+    row: Proposal | ProposedVerdict, strings: dict[str, str], card_buttons: dict[str, dict] | None = None
 ) -> list[dict]:
     """The row's value look: new | prior side by side when a pair has a sealed prior (the first
     such pair — the engine lists newest first), else the first pair's new value alone (Absent),
-    else nothing — a note with no claim has no value to show."""
+    else nothing — a note with no claim has no value to show. A prior that could not be read is
+    its own card, never drawn as Absent; the new value is unknown then, so the new card names
+    the note being judged."""
+    note, pairs = row.note, row.pairs
     new_ref = strings["value_new_ref"].format(note=note_label(note))
     buttons = card_buttons or {}
+    if row.pairs_unread:
+        return [
+            {
+                "type": "carousel",
+                "elements": [
+                    _value_card(strings["value_new_head"], note_label(note), new_ref, buttons.get("new")),
+                    _value_card(strings["value_prior_head"], strings["value_unread"], "-", None),
+                ],
+            }
+        ]
     match next((p for p in pairs if p.prior is not None), None), pairs:
         case ValuePair(prior=SealedValue() as prior) as pair, _:
             sealed = _kst(datetime.fromisoformat(prior.superseded_at), "%Y-%m-%d %H:%M")
@@ -321,14 +338,12 @@ def _proposal_row(
     lane's presence); `action_idx` is the shared button-idx space a press reads —
     n_repairs + idx once a repair lane exists, idx alone otherwise."""
     links_text = note_links_text(note_label(proposal.note), note_links, strings)
-    cards, rest = _row_buttons(
-        "advice", _advice_buttons(action_idx, proposal, strings), proposal.pairs, strings
-    )
+    cards, rest = _row_buttons("advice", _advice_buttons(action_idx, proposal, strings), proposal, strings)
     row = [
         {"type": "divider"},
         _tag_block(idx, total, proposal, register_labels, links_text),
         _section_block(proposal),
-        *_value_blocks(proposal.pairs, proposal.note, strings, cards if verdict is None else None),
+        *_value_blocks(proposal, strings, cards if verdict is None else None),
         _quote_block(proposal.evidence, strings),
     ]
     row.append(
@@ -754,10 +769,10 @@ def _review_row(
         _review_tag_block(review, strings, note_links, text_max, show_work=show_work),
     ]
     cards, rest = (
-        ({}, []) if sample else _row_buttons("review", _review_buttons(idx, strings), review.pairs, strings)
+        ({}, []) if sample else _row_buttons("review", _review_buttons(idx, strings), review, strings)
     )
     if not sample:
-        row.extend(_value_blocks(review.pairs, review.note, strings, cards if verdict is None else None))
+        row.extend(_value_blocks(review, strings, cards if verdict is None else None))
     if verdict is not None:
         row.append(_review_verdict_block(review, verdict, strings))
     elif sample:
@@ -988,15 +1003,16 @@ def row_pressed(
     repair_result: RepairDone | RepairFailed | RepairUnanswered | None = None,
     at: datetime,
 ) -> list[dict] | Rejected:
-    """Row `press.idx`'s pressed block alone, in place of the buttons: the repair lane's judged
-    block as mark_pressed renders it, the advice and review lanes' 「✅ 이름 · 선택 · HH:MM(KST)」
-    in the row's status slot."""
+    """Row `press.idx`'s pressed block alone, in place of the buttons: the judged block as
+    mark_pressed renders it, except on a carousel row, which settles into 「✅ 이름 · 선택 ·
+    HH:MM(KST)」 in its status slot, under its card values with their buttons gone."""
     marked = mark_pressed(blocks, press, lang=lang, repair_result=repair_result)
     match marked:
         case Rejected():
             return marked
-    match press:
-        case RepairPress():
+    carousel = next((block for block in blocks if _is_row_carousel(block, press.idx)), None)
+    match carousel:
+        case None:
             at_row = next(i for i, block in enumerate(blocks) if _is_row_actions(block, press.idx))
             return [marked[at_row]]
         case _:
@@ -1007,11 +1023,7 @@ def row_pressed(
             line = card_i18n.STRINGS[lang]["pressed_line"].format(
                 name=f"<@{press.user}>", label=label, time=_kst(at, "%H:%M")
             )
-            carousel = next((block for block in blocks if _is_row_carousel(block, press.idx)), None)
-            return [
-                *([_without_card_buttons(carousel)] if carousel else []),
-                _status_block(press.idx, Done(text=line), lang),
-            ]
+            return [_without_card_buttons(carousel), _status_block(press.idx, Done(text=line), lang)]
 
 
 def replace_row(current: list[dict], idx: int, segment: list[dict]) -> list[dict] | Rejected:
@@ -1252,7 +1264,7 @@ def build_card(
     # silently. A card that filled all 50 blocks with advice rows used to push the
     # review header past the cap. The first sample's blocks are reserved the same way: it
     # never gives way; the second rides only in what is left.
-    review_rows = sum(3 + len(_value_blocks(r.pairs, r.note, strings)) for r in reviews)
+    review_rows = sum(3 + len(_value_blocks(r, strings)) for r in reviews)
     review_tail = ((1 + review_rows) if reviews else 0) + sample_tail
     for _project, indices in _project_groups(proposals):
         for idx in indices:

@@ -477,7 +477,7 @@ def test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card():
     _assert_single_row_marked(BLOCKS, progress[3], 1)
     assert _status_at(progress[3], 1) == "⏳ 진행 중…"
     _assert_single_row_marked(BLOCKS, final[3], 1)
-    assert f"✅ <@{OWNER}> · 채택 · 쓴 것으로 표시 · " in json.dumps(final[3], ensure_ascii=False)
+    assert f"✓ 채택 — <@{OWNER}>" in json.dumps(final[3], ensure_ascii=False)
 
 
 def test_an_owner_review_delegate_press_consumes_with_the_agent_judge():
@@ -523,7 +523,7 @@ def test_an_owner_review_delegate_press_consumes_with_the_agent_judge():
     ]
     progress, final = _updates(calls)
     _assert_single_row_marked(BLOCKS, final[3], 3)
-    assert f"✅ <@{OWNER}> · 맡길게요 · " in json.dumps(final[3], ensure_ascii=False)
+    assert "✓ 맡김 — 에이전트 판정 그대로" in json.dumps(final[3], ensure_ascii=False)
 
 
 def test_a_delegate_press_where_the_model_agrees_keeps_the_proposed_kind():
@@ -699,7 +699,7 @@ def test_an_owner_review_hold_press_leaves_no_edge_and_marks_the_row():
     )
     progress, final = _updates(calls)
     _assert_single_row_marked(BLOCKS, final[3], 3)
-    assert f"✅ <@{OWNER}> · 보류 · 기록만 · " in json.dumps(final[3], ensure_ascii=False)
+    assert "⏸ 보류 — 이레 뒤에 다시 올려요" in json.dumps(final[3], ensure_ascii=False)
 
 
 def test_every_lane_shows_progress_first_and_only_that_row_changes():
@@ -728,11 +728,9 @@ def test_every_lane_shows_progress_first_and_only_that_row_changes():
         _assert_single_row_marked(BLOCKS, progress[3], idx)
         assert _status_at(progress[3], idx) == "⏳ 진행 중…"
         _assert_single_row_marked(BLOCKS, final[3], idx)
-        settled = _status_at(final[3], idx)
-        if value is REPAIR_VALUE:
-            assert settled is None, f"{action_id}: the settled row is a verdict, not the progress line"
-        else:
-            assert settled.startswith(f"✅ <@{OWNER}> · "), f"{action_id}: {settled!r}"
+        assert _status_at(final[3], idx) is None, (
+            f"{action_id}: the settled row is a verdict, not the progress line"
+        )
 
 
 def test_a_rejected_press_runs_no_effect():
@@ -971,7 +969,7 @@ def test_a_row_the_door_settled_mid_press_is_not_rolled_back():
             asyncio.run(handler(ack, _body("card:1:do", ADVICE_VALUE), {}))
     final = _updates(calls)[-1][3]
     assert _status_at(final, 0) == "✓ 완료 — door"
-    assert _status_at(final, 1).startswith("✅ "), "row 1 is judged, not in progress"
+    assert _status_at(final, 1) is None, "row 1 is judged, not in progress"
 
 
 def _press_row_1_with(consumption, times):
@@ -1021,7 +1019,7 @@ def test_a_retry_that_succeeds_leaves_no_old_failure_line():
             raise RuntimeError("engine down")
 
     card = _press_row_1_with(flaky, 2).current
-    assert _status_at(card, 1).startswith("✅ ")
+    assert _status_at(card, 1) is None
     assert len(card) == len(BLOCKS)
     assert not any("✕ 실패" in json.dumps(b, ensure_ascii=False) for b in card)
 

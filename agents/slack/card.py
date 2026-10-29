@@ -216,7 +216,7 @@ class Collaborators(NamedTuple):
     posted_proposals: Callable[[], list[card_types.Proposal]] | None = None
     # note path → its current claims with the sealed value each replaced; defaulting to none
     # draws no value look, so a caller that never heard of it renders the card it always did.
-    pairs: Callable[[str], list[card_types.ValuePair]] = lambda note: []
+    pairs: Callable[[str], list[card_types.ValuePair] | card_types.PairsUnread] = lambda note: []
 
 
 def _live_collaborators() -> Collaborators:
@@ -481,14 +481,22 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
         lang = state["lang"]
         n_repairs = len(state["repairs"])
         notes = {p.note for p in state["proposals"]} | {r.note for r in state["reviews"]}
-        pairs = {note: collabs.pairs(note) for note in sorted(notes) if note}
+        looked_up = {note: collabs.pairs(note) for note in sorted(notes) if note}
+
+        def with_pairs(row):
+            match looked_up.get(row.note, []):
+                case card_types.PairsUnread():
+                    return row.model_copy(update={"pairs_unread": True})
+                case found:
+                    return row.model_copy(update={"pairs": found})
+
         fitted = card_view.fit_card(
-            [p.model_copy(update={"pairs": pairs.get(p.note, [])}) for p in state["proposals"]],
+            [with_pairs(p) for p in state["proposals"]],
             confirmation=state["confirmation"],
             repairs=state["repairs"],
             repairs_total_groups=state["repairs_total_groups"],
             merged_yesterday_rows=state["merged_yesterday_rows"],
-            reviews=[r.model_copy(update={"pairs": pairs.get(r.note, [])}) for r in state["reviews"]],
+            reviews=[with_pairs(r) for r in state["reviews"]],
             lang=lang,
             note_links=boring_config.note_links(),
             score=state["score"],

@@ -172,6 +172,12 @@ class ValuePair(BaseModel):
     prior: SealedValue | None = None
 
 
+class PairsUnread(BaseModel):
+    """The engine's /claim-priors could not be read — the row says so instead of drawing Absent."""
+
+    reason: str
+
+
 class Proposal(BaseModel):
     """One thing the card advises: a bottleneck sentence, a today-do-this sentence, and the
     evidence (past notes, quoted and located) that grounds them. `subject` is the register
@@ -192,6 +198,7 @@ class Proposal(BaseModel):
     advice: str = Field(min_length=MIN_ADVICE_CHARS)
     evidence: list[Evidence] = Field(min_length=1)
     pairs: list[ValuePair] = []
+    pairs_unread: bool = False
 
 
 class ResolvedNote(BaseModel):
@@ -333,6 +340,7 @@ class ProposedVerdict(BaseModel):
     reason: str = ""
     # The note's current claims with what each replaced, newest first; [] = not looked up.
     pairs: list[ValuePair] = []
+    pairs_unread: bool = False
 
 
 class Rejected(BaseModel):
