@@ -203,15 +203,24 @@ class _Graph:
 
 
 class MainTests(unittest.TestCase):
-    def _main(self, graph, door="http://door"):
+    def _main(self, graph, door="http://door", vault=None):
         import contextlib
         import io
         import os
+        import tempfile
         from unittest import mock
 
         import card
 
-        env = {"BORING_DOOR_URL": door} if door else {}
+        if vault is None:
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            (Path(tmp.name) / "wiki").mkdir()
+            (Path(tmp.name) / "wiki" / "wiki-1.md").write_text("n")
+            vault = tmp.name
+        env = {"BORING_VAULT_DIR": vault}
+        if door:
+            env["BORING_DOOR_URL"] = door
         out, err = io.StringIO(), io.StringIO()
         with (
             mock.patch.dict(os.environ, env, clear=True),
@@ -236,6 +245,19 @@ class MainTests(unittest.TestCase):
         rc, _, err = self._main(_Graph({"advice_revisions": []}), door="")
         self.assertEqual(rc, 2)
         self.assertIn("BORING_DOOR_URL", err)
+
+    def test_a_missing_vault_is_exit_4_with_the_path(self):
+        rc, _, err = self._main(_Graph({"advice_revisions": []}), vault="/nonexistent/vault-x")
+        self.assertEqual(rc, 4)
+        self.assertIn("/nonexistent/vault-x", err)
+
+    def test_an_empty_vault_is_exit_4_with_the_path(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as empty:
+            rc, _, err = self._main(_Graph({"advice_revisions": []}), vault=empty)
+        self.assertEqual(rc, 4)
+        self.assertIn(empty, err)
 
 
 if __name__ == "__main__":
