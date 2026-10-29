@@ -417,6 +417,20 @@ def test_register_without_boring_home_registers_nothing():
     assert log.error.called
 
 
+def test_the_plugin_reads_the_card_root_the_cards_were_drawn_from():
+    """Cards are drawn from BORING_CARD_ROOT (trunk); BORING_HOME is the main checkout. A press
+    must be handled by the code that drew the button, so the card root wins."""
+    with tempfile.TemporaryDirectory() as tmp:
+        trunk, main = Path(tmp) / "trunk", Path(tmp) / "main"
+        for root in (trunk, main):
+            for sub in ("agents/slack", "agents/shared", "src"):
+                (root / sub).mkdir(parents=True)
+        env = {"BORING_HOME": str(main), "BORING_CARD_ROOT": str(trunk)}
+        with mock.patch.dict(os.environ, env, clear=True):
+            dirs = PLUGIN._repo_module_dirs()
+    assert dirs == (str(trunk / "agents/slack"), str(trunk / "agents/shared"), str(trunk / "src"))
+
+
 def test_register_hands_one_handler_the_card_action_ids():
     ctx = _FakeCtx()
     with _env():
@@ -1732,6 +1746,7 @@ if __name__ == "__main__":
     test_the_import_path_stays_langchain_free()
     test_register_without_secretary_owner_id_registers_nothing()
     test_register_without_boring_home_registers_nothing()
+    test_the_plugin_reads_the_card_root_the_cards_were_drawn_from()
     test_register_hands_one_handler_the_card_action_ids()
     test_the_handler_acks_before_any_effect()
     test_a_press_on_a_card_older_than_the_answerable_hours_runs_no_effect()
