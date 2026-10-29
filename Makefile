@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now smoke e2e doctor status readiness heal verify-llm door-build door-up maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary card door
+.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now smoke e2e doctor status readiness heal verify-llm door-build door-up engine-up maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary card door
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -73,6 +73,12 @@ door-up: ## Start only the boring-door container (--no-deps; never recreates the
 	test -n "$$gd" || { echo "door-up: cannot find the canonical checkout (git common dir empty)" >&2; exit 1; }; \
 	canon=$$(dirname "$$gd"); \
 	$(COMPOSE) -f docker-compose.yml --project-directory "$$canon" --env-file "$$canon/.env" up -d --no-deps --no-build boring-door
+
+engine-up: ## Start only the engine container (boring-drudge) from a worktree, on the canonical checkout's compose project
+	gd=$$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); \
+	test -n "$$gd" || { echo "engine-up: cannot find the canonical checkout (git common dir empty)" >&2; exit 1; }; \
+	canon=$$(dirname "$$gd"); \
+	$(COMPOSE) -f docker-compose.yml --project-directory "$$canon" --env-file "$$canon/.env" up -d --no-deps --no-build boring-drudge
 
 models: ## Pull Ollama models (DRUDGE_LLM_MODEL + DRUDGE_EMBED_MODEL, defaults gemma4:12b + bge-m3)
 	ollama pull "${DRUDGE_LLM_MODEL:-gemma4:12b}" && ollama pull "${DRUDGE_EMBED_MODEL:-bge-m3}"
