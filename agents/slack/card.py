@@ -214,6 +214,9 @@ class Collaborators(NamedTuple):
     # CARD_RENDER_ONLY: when set, the advice lane is today's already-posted proposals — no
     # search, no model call, no suppression — instead of a fresh advise → resolve.
     posted_proposals: Callable[[], list[card_types.Proposal]] | None = None
+    # note path → its current claims with the sealed value each replaced; defaulting to none
+    # draws no value look, so a caller that never heard of it renders the card it always did.
+    pairs: Callable[[str], list[card_types.ValuePair]] = lambda note: []
 
 
 def _live_collaborators() -> Collaborators:
@@ -237,6 +240,7 @@ def _live_collaborators() -> Collaborators:
         held_repairs=card_live._held_repair_subjects,
         repair_judgments=card_live._live_repair_judgments,
         score=card_live._live_score,
+        pairs=card_live._live_pairs,
     )
 
 
@@ -476,13 +480,15 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
     def post_card(state: CardState) -> dict:
         lang = state["lang"]
         n_repairs = len(state["repairs"])
+        notes = {p.note for p in state["proposals"]} | {r.note for r in state["reviews"]}
+        pairs = {note: collabs.pairs(note) for note in sorted(notes) if note}
         fitted = card_view.fit_card(
-            state["proposals"],
+            [p.model_copy(update={"pairs": pairs.get(p.note, [])}) for p in state["proposals"]],
             confirmation=state["confirmation"],
             repairs=state["repairs"],
             repairs_total_groups=state["repairs_total_groups"],
             merged_yesterday_rows=state["merged_yesterday_rows"],
-            reviews=state["reviews"],
+            reviews=[r.model_copy(update={"pairs": pairs.get(r.note, [])}) for r in state["reviews"]],
             lang=lang,
             note_links=boring_config.note_links(),
             score=state["score"],

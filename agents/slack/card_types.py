@@ -154,6 +154,24 @@ class Advice(BaseModel):
     evidence: list[Evidence] = Field(min_length=1)
 
 
+class SealedValue(BaseModel):
+    """The value a claim replaced: its text, the note it came from, when it was sealed (ISO UTC)."""
+
+    value: str
+    note: str
+    superseded_at: str
+
+
+class ValuePair(BaseModel):
+    """One current claim of a row's note and what it replaced — `prior` is None when the engine
+    found no sealed earlier value (Absent)."""
+
+    subject: str
+    predicate: str
+    value: str
+    prior: SealedValue | None = None
+
+
 class Proposal(BaseModel):
     """One thing the card advises: a bottleneck sentence, a today-do-this sentence, and the
     evidence (past notes, quoted and located) that grounds them. `subject` is the register
@@ -173,6 +191,7 @@ class Proposal(BaseModel):
     bottleneck: str = Field(min_length=MIN_BOTTLENECK_CHARS)
     advice: str = Field(min_length=MIN_ADVICE_CHARS)
     evidence: list[Evidence] = Field(min_length=1)
+    pairs: list[ValuePair] = []
 
 
 class ResolvedNote(BaseModel):
@@ -312,6 +331,8 @@ class ProposedVerdict(BaseModel):
     works: list[str] = []
     # Why the agent judged so — one assistant sentence, verbatim from the transcript.
     reason: str = ""
+    # The note's current claims with what each replaced, newest first; [] = not looked up.
+    pairs: list[ValuePair] = []
 
 
 class Rejected(BaseModel):

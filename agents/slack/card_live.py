@@ -53,7 +53,9 @@ from card_types import (
     Scored,
     ScoreReading,
     ScoreUnreadable,
+    SealedValue,
     Unresolved,
+    ValuePair,
 )
 from pydantic import ValidationError
 
@@ -247,6 +249,27 @@ def _live_resolve(subject: str, register: str) -> ResolvedNote | Unresolved:
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         return Unresolved(subject=subject, register=register, reason=f"claim-source unreachable: {e}")
     return ResolvedNote(subject=subject, note=payload["note"])
+
+
+def _live_pairs(note: str) -> list[ValuePair]:
+    """A note's current claims with what each replaced, from the engine's GET /claim-priors
+    through the door. The value look is extra to the row, so an unreachable door or a body that
+    does not parse is reported on stderr and the row keeps its pre-value shape."""
+    url = f"{_door_url()}/claim-priors?source={urllib.parse.quote(note)}"
+    try:
+        payload = _door_json(url)
+        return [
+            ValuePair(
+                subject=c["subject"],
+                predicate=c["predicate"],
+                value=c["value"],
+                prior=SealedValue(**c["prior"]) if c["state"] == "prior" else None,
+            )
+            for c in payload["claims"]
+        ]
+    except (OSError, KeyError, TypeError, ValueError) as e:
+        print(f"[card] claim-priors for {note!r} unreadable: {e}", file=sys.stderr)
+        return []
 
 
 def _live_approved(since_hours: int) -> list[PastApproved]:

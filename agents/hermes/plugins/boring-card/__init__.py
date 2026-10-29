@@ -732,7 +732,9 @@ def register(ctx: Any) -> None:
                 await _push(
                     press,
                     snapshot,
-                    card_view.row_pressed(snapshot, press, lang=lang, repair_result=repair_result),
+                    card_view.row_pressed(
+                        snapshot, press, lang=lang, repair_result=repair_result, at=datetime.now(UTC)
+                    ),
                 )
 
     ctx.register_slack_action_handler(_ACTION_ID, _handler)

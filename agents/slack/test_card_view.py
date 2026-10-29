@@ -65,7 +65,7 @@ class BuildBlocksTests(unittest.TestCase):
                     },
                 )
             labels = [b["text"]["text"] for b in row["elements"]]
-            self.assertEqual(labels, ["채택", "보류", "거절"])
+            self.assertEqual(labels, ["채택 · 쓴 것으로 표시", "보류 · 기록만", "거절 · 틀린 것으로 표시"])
 
     def test_each_proposal_shows_its_bottleneck_and_evidence_coordinate(self):
         blocks = cv.build_blocks(self.proposals, lang="ko")
@@ -218,7 +218,7 @@ class ProjectGroupingBlocksTests(unittest.TestCase):
         self.assertEqual(tag["elements"][0]["text"], "🧊 *Stalled* · `wiki-0001` · 1/1")
         action_row = next(b for b in blocks if b["type"] == "actions")
         labels = [el["text"]["text"] for el in action_row["elements"]]
-        self.assertEqual(labels, ["Adopt", "Hold", "Reject"])
+        self.assertEqual(labels, ["Adopt · mark used", "Hold · log only", "Reject · mark contested"])
 
 
 #: A run of 3+ ASCII words — a proper noun ("Slack", "JSON") or a symbol never matches this;
@@ -313,11 +313,11 @@ class CardV2ShapeTests(unittest.TestCase):
         proposal = self._proposal()
         action_row = next(b for b in cv.build_blocks([proposal], lang="ko") if b["type"] == "actions")
         by_choice = {el["action_id"].split(":")[-1]: el for el in action_row["elements"]}
-        self.assertEqual(by_choice["do"]["text"]["text"], "채택")
+        self.assertEqual(by_choice["do"]["text"]["text"], "채택 · 쓴 것으로 표시")
         self.assertEqual(by_choice["do"]["style"], "primary")
-        self.assertEqual(by_choice["drop"]["text"]["text"], "거절")
+        self.assertEqual(by_choice["drop"]["text"]["text"], "거절 · 틀린 것으로 표시")
         self.assertEqual(by_choice["drop"]["style"], "danger")
-        self.assertEqual(by_choice["defer"]["text"]["text"], "보류")
+        self.assertEqual(by_choice["defer"]["text"]["text"], "보류 · 기록만")
         self.assertNotIn("style", by_choice["defer"])
 
         verdict = cc.ButtonVerdict(idx=0, choice="drop", user="U1", at="t")
@@ -524,7 +524,14 @@ class CardV2ShapeTests(unittest.TestCase):
             )
         self.assertEqual(
             [el["text"]["text"] for el in action_rows[1]["elements"]],
-            ["맞아요", "아니에요", "맡길게요", "보류", "💬 코멘트", "모르겠음"],
+            [
+                "맞아요 · 기록만",
+                "아니에요 · 판정 뒤집기",
+                "맡길게요",
+                "보류 · 기록만",
+                "💬 코멘트",
+                "모르겠음",
+            ],
         )
         tag = next(b for b in blocks if b["type"] == "section" and "wiki-0700" in _blocks_text([b]))
         self.assertEqual(
@@ -1340,7 +1347,10 @@ class ConfirmSampleRowTests(unittest.TestCase):
             self.assertEqual(
                 [el["action_id"] for el in actions["elements"]], [f"card:{slot}:do", f"card:{slot}:drop"]
             )
-            self.assertEqual([el["text"]["text"] for el in actions["elements"]], ["맞아요", "아니에요"])
+            self.assertEqual(
+                [el["text"]["text"] for el in actions["elements"]],
+                ["맞아요 · 기록만", "아니에요 · 판정 뒤집기"],
+            )
             for el in actions["elements"]:
                 self.assertEqual(json.loads(el["value"])["sample"], "confirm")
         self.assertNotIn("value", review_actions["elements"][0])
@@ -1850,6 +1860,32 @@ class MorePageTests(unittest.TestCase):
         failed = cc.Failed(reason="x")
         self.assertIsInstance(cv.more_progress(sent, "advice", failed, lang="ko"), cc.Rejected)
         self.assertIsInstance(cv.more_progress(capped.blocks, "nope", failed, lang="ko"), cc.Rejected)
+
+
+class ValueCarouselCapTests(unittest.TestCase):
+    def test_carousel_rows_past_the_block_cap_move_to_the_more_button(self):
+        sealed = cc.SealedValue(
+            value="옛 값", note="/vault/wiki/wiki-0001.md", superseded_at="2026-10-28T01:00:00Z"
+        )
+        pair = cc.ValuePair(subject="s", predicate="p", value="새 값", prior=sealed)
+        reviews = [
+            cc.ProposedVerdict(
+                session_id=f"sess-{i}",
+                note=f"/vault/wiki/wiki-07{i:02d}.md",
+                kind="used",
+                at="t",
+                pairs=[pair],
+            )
+            for i in range(6)
+        ]
+        built = cv.build_card([], reviews=reviews, lang="ko", block_limit=14)
+        drawn = [b for b in built.blocks if b["type"] == "carousel"]
+        self.assertGreater(len(drawn), 0)
+        self.assertLessEqual(len(built.blocks), 14)
+        self.assertEqual(built.left_out.reviews, 6 - len(drawn))
+        left = [r for r in built.rows if not r.shown]
+        self.assertEqual(len(left), built.left_out.reviews)
+        self.assertEqual(len(_overflows(built.blocks)), 1)
 
 
 if __name__ == "__main__":
