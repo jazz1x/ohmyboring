@@ -197,11 +197,10 @@ async fn consumption_edges_survive_reingest_and_repeat_calls() {
 }
 
 /// `record_consumption` writes `judge` onto every `used`/`contested` edge it creates, and the
-/// first judge to name an edge stays on it: a repeat call with another judge (or none) hits
-/// ON CONFLICT DO NOTHING, never an overwrite. A call with no judge writes NULL — the edge
+/// judge stays unless a higher-ranked one names the edge (`judge_rank_sql`). A call with no judge writes NULL — the edge
 /// exists but names nobody, the same state every pre-column edge is in.
 #[tokio::test]
-async fn consumption_judge_lands_on_edges_and_the_first_judge_stays() {
+async fn consumption_judge_lands_on_edges() {
     let Some(dsn) = test_dsn() else {
         eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
         return;
@@ -243,7 +242,7 @@ async fn consumption_judge_lands_on_edges_and_the_first_judge_stays() {
         "the contested edge carries the judge"
     );
 
-    // A later call with a different judge must not overwrite the first one.
+    // A later owner judge outranks the agent's: the owner's press lands on the existing edge.
     store
         .record_consumption(
             &session,
@@ -257,8 +256,8 @@ async fn consumption_judge_lands_on_edges_and_the_first_judge_stays() {
         .expect("repeat with another judge");
     assert_eq!(
         edge_judge(&db, &session_node, &doc_a, "used").await,
-        Some("agent:r2-check".to_owned()),
-        "ON CONFLICT DO NOTHING keeps the judge that named the edge first"
+        Some("owner".to_owned()),
+        "owner outranks agent:*, so the later owner press replaces it"
     );
 
     // A judge-less session's edges name nobody — NULL, like every pre-column edge.
@@ -300,6 +299,98 @@ async fn edge_judge(db: &Client, src: &str, dst: &str, kind: &str) -> Option<Str
     .await
     .expect("query edge judge")
     .and_then(|row| row.get::<_, Option<String>>(0))
+}
+
+async fn edge_xmin(db: &Client, src: &str, dst: &str, kind: &str) -> String {
+    db.query_one(
+        "SELECT xmin::text FROM edge WHERE src = $1 AND dst = $2 AND kind = $3;",
+        &[&src, &dst, &kind],
+    )
+    .await
+    .expect("read edge xmin")
+    .get(0)
+}
+
+/// One edge, judges arriving in turn: a judge replaces the stored one only when it ranks higher
+/// (owner > agent:* > inferred > NULL/unknown); an equal or lower judge writes no row at all
+/// (xmin unchanged). Measured before this rule: owner presses reached edges 0/42 because the
+/// edge already carried 'inferred' from distill.
+#[tokio::test]
+async fn a_higher_ranked_judge_replaces_and_never_the_reverse() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let path = unique_path("rank");
+    let session = unique_id("rank-s");
+    store
+        .upsert_document(&dummy_frontmatter(&path), "sha-v1", SystemTime::now())
+        .await
+        .expect("upsert doc");
+    let (src, dst) = (format!("session:{session}"), format!("doc:{path}"));
+    let used = std::slice::from_ref(&path);
+
+    let mut judges = Vec::new();
+    let mut xmins = Vec::new();
+    for judge in ["inferred", "owner", "inferred", "agent:x", "owner", "weird"] {
+        store
+            .record_consumption(
+                &session,
+                "2026-10-30T00:00:00+00:00",
+                used,
+                &[],
+                &[],
+                Some(judge),
+            )
+            .await
+            .expect("record");
+        judges.push(edge_judge(&db, &src, &dst, "used").await.unwrap());
+        xmins.push(edge_xmin(&db, &src, &dst, "used").await);
+    }
+    assert_eq!(
+        judges,
+        ["inferred", "owner", "owner", "owner", "owner", "owner"],
+        "inferred→owner gives owner; inferred, agent:x, unknown never lower it"
+    );
+    assert_ne!(xmins[0], xmins[1], "the raise wrote a row");
+    for i in 2..6 {
+        assert_eq!(
+            xmins[i], xmins[1],
+            "step {i}: lower or equal rank wrote no row"
+        );
+    }
+
+    let s2 = unique_id("rank-s2");
+    for judge in ["inferred", "weird"] {
+        store
+            .record_consumption(
+                &s2,
+                "2026-10-30T00:00:00+00:00",
+                used,
+                &[],
+                &[],
+                Some(judge),
+            )
+            .await
+            .expect("record");
+    }
+    assert_eq!(
+        edge_judge(&db, &format!("session:{s2}"), &dst, "used").await,
+        Some("inferred".to_owned()),
+        "an unknown judge does not overwrite inferred"
+    );
+
+    store.delete_document(&path).await.expect("cleanup doc");
+    for s in [&session, &s2] {
+        db.execute(
+            "DELETE FROM node WHERE id = $1;",
+            &[&format!("session:{s}")],
+        )
+        .await
+        .expect("cleanup session node");
+    }
 }
 
 /// GC only sweeps orphan tool/concept nodes — session nodes are out of scope, even edge-less

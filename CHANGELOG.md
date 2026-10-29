@@ -5,6 +5,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ## [Unreleased]
 
+### Fixed
+- **소유자 판정이 이미 있는 간선의 judge 를 순위로 올린다 (C-OWNEREDGE1)** — 간선이 이미 있으면 먼저 쓴 judge 가 남아(`ON CONFLICT DO NOTHING`) 세션 끝에 distill 이 쓴 `inferred` 위에 소유자 눌림이 닿지 않았다(소유자 동의 눌림이 간선에 닿은 것 0/42). 이제 owner > `agent:*` > inferred > NULL·그 밖 순으로 높은 쪽만 덮고, 같거나 낮으면 행을 쓰지 않는다. 순위는 `judge_rank_sql` 한 곳.
+
 ### Added
 - **`make status` = `doctor.sh --brief` (C-STATUS1)** — 가지 머리·엔진 build_sha·sync·컨테이너 생성 시각·env 이름(값 없이)·켜진 hermes 크론 잡의 최신 출력 파일과 그 안의 ok/FAILED·트렁크 CI 1건을 13줄로. 점검이 돌기 전에 끝나 읽기만 하고(센티넬·doctor 사건 없음), 못 읽은 칸은 이유를 단 「unavailable」. 전체 모드 출력은 그대로.
 - **`backend=surreal` 이 pg 쓰기를 따라 쓴다 + doctor 대조 줄 (C-VECADAPT2 2b)** — chunk·claim 을 쓰고 지우는 자리(ingest·remember·verdict 봉인·compact 봉인·split 병합·고정/stale 표시·문서 삭제 CASCADE)가 pg 커밋 뒤 Surreal 에도 pg 의 현재 상태를 써 넣는다. Surreal 쓰기가 실패하면 그 sync·remember 결과에 「pg 에는 기록됨, Surreal 만 빠짐. 같은 요청을 다시 보내지 말고 채우기를 다시 돌릴 것」 오류가 실리고 재시도 장치는 없다(복구는 `vector-fill` 한 번). `drudge vector-check`(읽기 전용)와 doctor 한 줄이 pg 대 Surreal 행 수·id 해시를 대조한다(`backend=surreal` 일 때 다르거나 못 재면 ✗, pgvector 면 「해당 없음」). 기본값 `pgvector` 그대로, 라이브 엔진은 안 켠다.

@@ -699,6 +699,15 @@ struct SchemaStep {
     ddl: String,
 }
 
+/// The one place the judge ranking lives: owner 3 > `agent:*` 2 > inferred 1 > NULL or any other
+/// value 0. An edge's judge only moves up this order; `col` is the column expression to rank.
+fn judge_rank_sql(col: &str) -> String {
+    format!(
+        "(CASE WHEN {col} = 'owner' THEN 3 WHEN {col} LIKE 'agent:%' THEN 2 \
+         WHEN {col} = 'inferred' THEN 1 ELSE 0 END)"
+    )
+}
+
 fn step(effect: Effect, ddl: &str) -> SchemaStep {
     SchemaStep {
         effect,
@@ -735,7 +744,8 @@ fn schema_steps(slot_subject: &str, slot_predicate: &str) -> Vec<SchemaStep> {
             "CREATE INDEX IF NOT EXISTS edge_dst ON edge(dst)",
         ),
         // Who judged this edge: 'owner', 'inferred', 'agent:<name>'; NULL = written before the
-        // column existed. Stored verbatim, never interpreted.
+        // column existed. Stored verbatim; only `judge_rank_sql` ranks it, when a later write
+        // names the same edge (a higher rank replaces, an equal or lower one writes nothing).
         column(
             "edge",
             "judge",
@@ -3253,10 +3263,14 @@ impl Store {
         kind: &str,
         judge: Option<&str>,
     ) -> Result<()> {
-        c.execute(
-                "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING;",
-                &[&src, &dst, &kind, &judge],
-            )
+        let sql = format!(
+            "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (src, dst, kind) DO UPDATE SET judge = EXCLUDED.judge
+             WHERE {} > {};",
+            judge_rank_sql("EXCLUDED.judge"),
+            judge_rank_sql("edge.judge"),
+        );
+        c.execute(&sql, &[&src, &dst, &kind, &judge])
             .await
             .context("upsert edge")?;
         Ok(())
@@ -3552,9 +3566,9 @@ impl Store {
     /// The scorer's write door: record what one session consumed. Upserts `session:<id>` (label =
     /// `observed_at`) and one `used`/`contested` edge per known path, each carrying `judge` — who
     /// judged ('owner', 'inferred', 'agent:<name>', or NULL when the caller brings no name). An
-    /// edge that already exists keeps the judge it first carried: ON CONFLICT DO NOTHING does not
-    /// overwrite, so the first judgement to name an edge stays on it. Idempotent — a repeat call
-    /// updates the label and adds edges, never deletes. Paths with no `document` row are skipped
+    /// edge that already exists changes judge only upward (`judge_rank_sql`: owner > agent:* >
+    /// inferred > NULL), so an owner press lands on an edge distill inferred and nothing lowers
+    /// it. Idempotent — a repeat call updates the label and adds edges, never deletes. Paths with no `document` row are skipped
     /// and counted in the report, not errored.
     ///
     /// Runs on the request's transaction handle `tx`; the caller opens and commits it, so a
