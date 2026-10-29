@@ -194,6 +194,8 @@ services:
       # The card cron jobs' trigger scripts reach the door by service name (config.door_url
       # reads this; the localhost default is wrong inside the container).
       BORING_DOOR_URL: http://boring-door:7710
+      # The card jobs' model calls (ChatOllama, no base_url) read OLLAMA_HOST; same value as the door.
+      OLLAMA_HOST: http://host.docker.internal:11434
       # Tell host-side adapters they are running inside the hermes container and where the repo is.
       BORING_IN_CONTAINER: "1"
       BORING_HOME: /host/oh-my-boring
