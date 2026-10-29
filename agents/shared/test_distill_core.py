@@ -214,9 +214,9 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
         self.assertEqual(
             [(c.kwargs["note"], c.kwargs["kind"]) for c in proposals],
             [
-                ("/vault/wiki/wiki-0007.md", "used"),
-                ("/vault/wiki/wiki-0003.md", "used"),
-                ("/vault/wiki/wiki-0007.md", "contested"),
+                ("/vault/wiki/wiki-00000000007.md", "used"),
+                ("/vault/wiki/wiki-00000000003.md", "used"),
+                ("/vault/wiki/wiki-00000000007.md", "contested"),
             ],
         )
         for call in proposals:
@@ -227,11 +227,11 @@ class ConsumptionReachesTheGraph(unittest.TestCase):
         # contested 는 표지가 든 문장. 사건에 실리지 않는 변이는 이 단언이 잡는다.
         reasons = {(c.kwargs["note"], c.kwargs["kind"]): c.kwargs["reason"] for c in proposals}
         self.assertEqual(
-            reasons[("/vault/wiki/wiki-0007.md", "used")],
+            reasons[("/vault/wiki/wiki-00000000007.md", "used")],
             "per wiki-0007 instead of wiki-0003",
         )
         self.assertEqual(
-            reasons[("/vault/wiki/wiki-0007.md", "contested")],
+            reasons[("/vault/wiki/wiki-00000000007.md", "contested")],
             "Even so, wiki-0007 is outdated now",
         )
 
@@ -339,6 +339,34 @@ class SessionEndIsRecorded(unittest.TestCase):
         self.assertTrue(event["notes"][0]["used"])
         self.assertFalse(event["notes"][1]["used"])
         self.assertIsInstance(event["notes"][0]["handed_ts"], float)
+
+
+class VerdictProposedNoteIsWrittenInEngineSpelling(unittest.TestCase):
+    """C-NOTEID1: ids were renumbered to 11 digits; the note a card row cites must be one the
+    engine keys, or the review buttons on that row count against `unknown`."""
+
+    def _proposals(self, source_path, name):
+        import uptake_core
+
+        hits = [{"source_path": source_path, "snippet": "the pool died because deadpool recycled " * 3}]
+        records = [uptake_core.injection_record("s1", "why did the pool die", hits, 3)]
+        with (
+            mock.patch.dict(os.environ, {"BORING_EVENT_SINK": "db"}),
+            mock.patch("ohmyboring.adapters.engine.DrudgeClient"),
+            mock.patch.object(distill_core.event_log, "append_event") as append_event,
+        ):
+            distill_core.write_consumption_to_graph("s1", records, f"[assistant] per {name}.\n")
+        return [c for c in append_event.call_args_list if c.args[1] == "verdict_proposed"]
+
+    def test_an_old_width_wiki_id_is_written_as_the_eleven_digit_id(self):
+        proposals = self._proposals("/vault/wiki/wiki-1234.md", "wiki-1234")
+        self.assertEqual([c.kwargs["note"] for c in proposals], ["/vault/wiki/wiki-00000001234.md"])
+        self.assertEqual(proposals[0].kwargs["note_reach"], "reachable")
+
+    def test_a_value_that_is_not_a_wiki_id_is_kept_and_marked_unreachable(self):
+        proposals = self._proposals("/vault/wiki/misc-7.md", "misc-7")
+        self.assertEqual([c.kwargs["note"] for c in proposals], ["/vault/wiki/misc-7.md"])
+        self.assertEqual(proposals[0].kwargs["note_reach"], "unreachable")
 
 
 if __name__ == "__main__":

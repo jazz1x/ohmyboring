@@ -69,6 +69,7 @@ from retriever import BoringRetriever  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import label_core  # noqa: E402
+import note_ref  # noqa: E402
 import uptake_core  # noqa: E402
 import vault_note  # noqa: E402
 
@@ -394,7 +395,7 @@ def _proposed_rows(since_hours: int) -> list[ProposedVerdict]:
         try:
             row = ProposedVerdict(
                 session_id=attrs["session_id"],
-                note=attrs["note"],
+                note=note_ref.note_fields(attrs["note"])["note"],
                 kind=attrs["kind"],
                 at=entry["observed_at"],
                 reason=attrs.get("reason") or "",

@@ -434,3 +434,51 @@ async fn refusal_event_stands_once_while_a_failed_verdict_writes_nothing() {
         "no verdict rows from the failed request"
     );
 }
+
+/// C-NOTEID1: distill still writes `wiki-1234` while the document is keyed `wiki-00000001234`.
+/// A review press on that row must count against the document, and the edge must land on the
+/// document's own node, not on a node for the spelling the row happened to carry.
+#[tokio::test]
+async fn a_press_on_an_old_width_note_id_counts_against_the_document() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let number = 5000 + u64::from(nanos) % 4000;
+    let keyed = format!("/vault/wiki/wiki-{number:011}.md");
+    let old = format!("/vault/wiki/wiki-{number:04}.md");
+    seed_doc(&store, &keyed, "unknown").await;
+
+    let session = unique_id("tx-s");
+    let report = store
+        .record_consumption(
+            &session,
+            "2026-01-01",
+            std::slice::from_ref(&old),
+            std::slice::from_ref(&old),
+            &[],
+            None,
+        )
+        .await
+        .expect("press");
+    eprintln!(
+        "old-width press: used {}, contested {}, unknown {}",
+        report.used, report.contested, report.unknown
+    );
+    assert_eq!((report.used, report.contested, report.unknown), (1, 1, 0));
+    let on_document = db
+        .query_one(
+            "SELECT count(*) FROM edge WHERE src = $1 AND dst = $2;",
+            &[&format!("session:{session}"), &format!("doc:{keyed}")],
+        )
+        .await
+        .expect("count")
+        .get::<_, i64>(0);
+    assert_eq!(on_document, 2, "edges point at the keyed document");
+}

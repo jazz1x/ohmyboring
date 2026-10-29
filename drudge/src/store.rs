@@ -475,6 +475,31 @@ const POOL_TIMEOUTS: Timeouts = Timeouts {
     recycle: Some(Duration::from_secs(POOL_TIMEOUT_SECONDS)),
 };
 
+/// A note is its number; the name's width is notation (4-digit before the renumbering, 11-digit
+/// after). The path as given first, then the other widths of the same number.
+pub fn wiki_path_spellings(path: &str) -> Vec<String> {
+    let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let number = name
+        .strip_prefix("wiki-")
+        .and_then(|s| s.strip_suffix(".md"))
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|digits| digits.parse::<u64>().ok());
+    let mut out = vec![path.to_owned()];
+    if let Some(n) = number {
+        for spelled in [format!("wiki-{n:04}.md"), format!("wiki-{n:011}.md")] {
+            let candidate = if dir.is_empty() {
+                spelled
+            } else {
+                format!("{dir}/{spelled}")
+            };
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+    }
+    out
+}
+
 /// chunk id ("path#idx") → graph document node id ("doc:path").
 fn doc_node_id(chunk_or_path: &str) -> String {
     let path = chunk_or_path
@@ -1257,6 +1282,18 @@ impl Store {
             .query("SELECT sha FROM document WHERE source_path = $1;", &[&path])
             .await?;
         Ok(rows.first().map(|r| r.get::<_, String>(0)))
+    }
+
+    /// The spelling of `path` that has a `document` row (the path as given wins), or None when no
+    /// width of that note exists. Verdict writes key on this, so a row that cites an old-width id
+    /// still lands on the document instead of counting as unknown.
+    pub async fn resolve_doc_path_on(c: &impl GenericClient, path: &str) -> Result<Option<String>> {
+        for candidate in wiki_path_spellings(path) {
+            if Self::get_doc_sha_on(c, &candidate).await?.is_some() {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn all_doc_paths(&self) -> Result<Vec<String>> {
@@ -3536,19 +3573,20 @@ impl Store {
 
         let mut report = ConsumptionReport::default();
         for path in used {
-            if Self::get_doc_sha_on(tx, path).await?.is_none() {
+            let Some(keyed) = Self::resolve_doc_path_on(tx, path).await? else {
                 report.unknown += 1;
                 continue;
-            }
-            Self::upsert_edge_on(tx, &session_node, &doc_node_id(path), "used", judge).await?;
+            };
+            Self::upsert_edge_on(tx, &session_node, &doc_node_id(&keyed), "used", judge).await?;
             report.used += 1;
         }
         for path in contested {
-            if Self::get_doc_sha_on(tx, path).await?.is_none() {
+            let Some(keyed) = Self::resolve_doc_path_on(tx, path).await? else {
                 report.unknown += 1;
                 continue;
-            }
-            Self::upsert_edge_on(tx, &session_node, &doc_node_id(path), "contested", judge).await?;
+            };
+            Self::upsert_edge_on(tx, &session_node, &doc_node_id(&keyed), "contested", judge)
+                .await?;
             report.contested += 1;
         }
         let supersedes_report = Self::record_supersedes(tx, supersedes, judge).await?;
@@ -3576,11 +3614,11 @@ impl Store {
 
         let mut report = HandoverReport::default();
         for path in paths {
-            if Self::get_doc_sha_on(tx, path).await?.is_none() {
+            let Some(keyed) = Self::resolve_doc_path_on(tx, path).await? else {
                 report.unknown += 1;
                 continue;
-            }
-            Self::upsert_edge_on(tx, &session_node, &doc_node_id(path), "handed", None).await?;
+            };
+            Self::upsert_edge_on(tx, &session_node, &doc_node_id(&keyed), "handed", None).await?;
             report.handed += 1;
         }
         Ok(report)

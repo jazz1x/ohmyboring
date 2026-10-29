@@ -22,7 +22,7 @@ use crate::serve::remember_defer::{DeferredNotes, IndexJob};
 use crate::serve::{
     AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, SyncState, register_limit, vec_off_rpc,
 };
-use crate::store::{EventLogFilter, Store, SupersedesReport};
+use crate::store::{EventLogFilter, Store, SupersedesReport, wiki_path_spellings};
 use crate::vault;
 use crate::vector::VectorIndex;
 
@@ -2868,31 +2868,6 @@ fn parse_supersedes(args: Option<&Value>) -> Result<Vec<String>, (i32, String)> 
         }
     }
     Ok(out)
-}
-
-/// A note is its number; the name's width is notation (4-digit before the renumbering, 11-digit
-/// after). The path as given first, then the other widths of the same number.
-fn wiki_path_spellings(path: &str) -> Vec<String> {
-    let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
-    let number = name
-        .strip_prefix("wiki-")
-        .and_then(|s| s.strip_suffix(".md"))
-        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
-        .and_then(|digits| digits.parse::<u64>().ok());
-    let mut out = vec![path.to_owned()];
-    if let Some(n) = number {
-        for spelled in [format!("wiki-{n:04}.md"), format!("wiki-{n:011}.md")] {
-            let candidate = if dir.is_empty() {
-                spelled
-            } else {
-                format!("{dir}/{spelled}")
-            };
-            if !out.contains(&candidate) {
-                out.push(candidate);
-            }
-        }
-    }
-    out
 }
 
 /// The `document` key a `supersedes` entry names: the spelling that exists, else the entry as

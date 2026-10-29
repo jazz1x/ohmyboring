@@ -24,6 +24,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import markers  # noqa: E402
+import note_ref  # noqa: E402
 import repo_table  # noqa: E402
 import transcript  # noqa: E402
 import uptake_core  # noqa: E402
@@ -303,7 +304,7 @@ def write_consumption_to_graph(session_id, records, transcript_text):
                     "verdict_proposed",
                     "ok",
                     session_id=session_id,
-                    note=note,
+                    **note_ref.note_fields(note),
                     kind=kind,
                     judge="inferred",
                     reason=reasons.get((kind, note), ""),
