@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 
@@ -76,8 +77,6 @@ def _fake_urlopen(engine: dict, out_dir: str):
 
 
 def _patch_slack(post: dict, out_dir: str) -> None:
-    import slack_sdk.web
-
     class FakeWebClient:
         def __init__(self, token=None):
             self.token = token
@@ -89,7 +88,12 @@ def _patch_slack(post: dict, out_dir: str) -> None:
                 raise RuntimeError("channel_not_found\n  detail")
             return {"ts": "1234.5678"}
 
-    slack_sdk.web.WebClient = FakeWebClient
+    sdk = types.ModuleType("slack_sdk")
+    web = types.ModuleType("slack_sdk.web")
+    web.WebClient = sdk.WebClient = FakeWebClient
+    sdk.web = web
+    sys.modules["slack_sdk"] = sdk
+    sys.modules["slack_sdk.web"] = web
 
 
 def _patch_events(events: dict, out_dir: str) -> None:
