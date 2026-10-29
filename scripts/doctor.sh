@@ -12,6 +12,9 @@
 # Default mode exits non-zero only when drudge is down; the other lines are advisory so the
 # user sees the WHOLE picture in one run, not just the first failure. Use --strict for the
 # release/briefing readiness gate: every failed dependency/check makes the command fail.
+# --brief prints one short screen of where things are (heads, engine build/sync, container
+# creation times, env names, enabled hermes jobs' newest result, latest trunk CI) and exits
+# before any check runs — read-only, no sentinel, no doctor event (make status).
 # POSIX sh (dash) has no pipefail → every check reports its own result explicitly.
 set -u
 
@@ -56,8 +59,74 @@ for arg in "$@"; do
     case "$arg" in
         --fix) FIX=1 ;;
         --strict) STRICT=1 ;;
+        --brief) BRIEF=1 ;;
     esac
 done
+
+# A probe that cannot answer prints its reason, never an empty or zero value.
+brief_summary() {
+    trunk_ref="refs/heads/${BORING_TRUNK:-feat/migration-python}"
+    heads="$(git -C "$BORING_HOME" ls-remote origin "$trunk_ref" refs/heads/main 2>/dev/null)"
+    trunk="$(printf '%s\n' "$heads" | awk -v r="$trunk_ref" '$2==r {print substr($1,1,8)}')"
+    main="$(printf '%s\n' "$heads" | awk '$2=="refs/heads/main" {print substr($1,1,8)}')"
+    echo "heads   trunk ${trunk:-unavailable (git ls-remote)} · main ${main:-unavailable (git ls-remote)}"
+
+    # Same build_sha read as the (a2b) drift check below.
+    health="$(curl -sf -m5 "$BORING_URL/health" 2>/dev/null)"
+    if [ -z "$health" ]; then
+        echo "engine  unavailable ($BORING_URL/health did not answer)"
+    else
+        field() { printf '%s' "$health" | sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\).*/\1/p"; }
+        echo "engine  build_sha $(field build_sha | cut -c1-8) · sync $(field sync) · corpus $(field corpus_count) · db_healthy $(field db_healthy)"
+    fi
+
+    for c in boring-drudge boring-door boring-agent; do
+        line="$(docker inspect -f '{{.State.Status}} created {{.Created}}' "$c" 2>/dev/null)"
+        printf '%-7s %s\n' "${c#boring-}" "${line:-unavailable (docker inspect $c)}"
+    done
+
+    # Names only — `cut` drops every value before it leaves the container.
+    for c in boring-agent boring-door; do
+        names="$(docker exec "$c" sh -c 'env | cut -d= -f1' 2>/dev/null)"
+        if [ -z "$names" ]; then
+            echo "env     $c unavailable (docker exec)"
+            continue
+        fi
+        have=""; missing=""
+        for n in OLLAMA_HOST BORING_CARD_ROOT BORING_DOOR_URL BORING_URL BORING_OWNER_TOKEN SECRETARY_OWNER_ID; do
+            if printf '%s\n' "$names" | grep -qx "$n"; then have="$have $n"; else missing="$missing $n"; fi
+        done
+        echo "env     $c has:${have:- none} · missing:${missing:- none}"
+    done
+
+    # Enabled jobs only. As in the morning-card check below: the output dir is rotated, so the
+    # newest file by name is the run; the result is the line in it, not the mtime.
+    hermes_home="${BORING_HERMES_HOME:-$HOME/.hermes}"
+    jobs="$(jq -r '(.jobs // .)[] | select(.enabled) | [.id, .name, (.last_status // "none")] | @tsv' \
+        "$hermes_home/cron/jobs.json" 2>/dev/null)"
+    [ -n "$jobs" ] || echo "cron    unavailable ($hermes_home/cron/jobs.json unreadable or jq missing)"
+    printf '%s\n' "$jobs" | while IFS="$(printf '\t')" read -r id name status; do
+        [ -n "$id" ] || continue
+        newest="$(ls "$hermes_home/cron/output/$id" 2>/dev/null | sort | tail -1)"
+        if [ -z "$newest" ]; then
+            result="unavailable (no output file)"
+        else
+            # Card jobs print "ok exit=N" or "FAILED …"; other jobs print neither.
+            result="$(grep -m1 -oE 'ok exit=[0-9]+|FAILED.{0,60}' "$hermes_home/cron/output/$id/$newest" 2>/dev/null)"
+            result="${newest%.md} ${result:-(no ok/FAILED line)}"
+        fi
+        printf 'cron    %-20s %s · %s\n' "$name" "$status" "$result"
+    done
+
+    ci="$(cd "$BORING_HOME" && gh run list --branch "${trunk_ref#refs/heads/}" --limit 1 \
+        --json databaseId,headSha,status,conclusion \
+        -q '.[0] | "\(.databaseId) \(.headSha[0:8]) \(.status) \(.conclusion)"' 2>/dev/null)"
+    echo "ci      ${ci:-unavailable (gh run list)}"
+}
+if [ "${BRIEF:-0}" -eq 1 ]; then
+    brief_summary
+    exit 0
+fi
 # Shared /health readiness judge (db_healthy), so every gate asks the same question.
 DOCTOR_LIB_DIR="$(cd "$(dirname "$0")/lib" && pwd)"
 # shellcheck source=lib/drudge_health_readiness.sh

@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now smoke e2e doctor readiness heal verify-llm door-build door-up maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary card door
+.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now smoke e2e doctor status readiness heal verify-llm door-build door-up maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary card door
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -117,6 +117,9 @@ e2e: ## wiki-mode end-to-end (remember→recall round-trip + vector-off reject);
 
 doctor: ## Diagnose the write-door (stack, hooks, newest note, Codex worker/queue)
 	./scripts/doctor.sh
+
+status: ## One screen of where things are (heads, engine, containers, env names, cron, CI); read-only
+	./scripts/doctor.sh --brief
 
 readiness: ## Strict briefing/readiness gate (fails on any doctor finding)
 	./scripts/doctor.sh --strict
