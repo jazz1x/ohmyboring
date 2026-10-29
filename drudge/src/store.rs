@@ -2734,6 +2734,30 @@ impl Store {
             .collect())
     }
 
+    /// Current claims of one note with the sealed value each replaced, for `GET /claim-priors`.
+    pub async fn claim_priors(&self, source: &str) -> Result<Vec<crate::claim_priors::ClaimPrior>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::claim_priors::SQL, &[&source])
+            .await
+            .context("claim priors")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::claim_priors::ClaimPrior {
+                subject: r.get(0),
+                predicate: r.get(1),
+                value: r.get(2),
+                prior: crate::claim_priors::prior_of(
+                    r.get(3),
+                    r.get(4),
+                    r.get::<_, Option<SystemTime>>(5)
+                        .map(chrono::DateTime::<chrono::Utc>::from),
+                ),
+            })
+            .collect())
+    }
+
     /// Every live claim's `(subject, source_path)` for `GET /repairs/split-subjects`. No ORDER BY:
     /// the grouping sorts, so row order changes nothing.
     pub async fn split_subject_rows(&self) -> Result<Vec<(String, String)>> {

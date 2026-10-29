@@ -73,6 +73,7 @@
   "http_routes": [
     "GET /approved",
     "GET /audit",
+    "GET /claim-priors",
     "GET /claim-source",
     "GET /claim-sources",
     "GET /events",

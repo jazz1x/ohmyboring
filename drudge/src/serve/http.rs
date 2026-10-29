@@ -1125,6 +1125,51 @@ pub(crate) async fn handle_claim_sources(
     }
 }
 
+/// What each current claim of one note replaced: 400 for a blank or NUL-bearing `source`
+/// (checked before the store), 503 without a store, 502 `{error, detail}` when it can't be
+/// reached, 200 even when the note has no claims.
+pub(crate) async fn handle_claim_priors(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use crate::claim_priors::ClaimPriors;
+    use crate::claim_source::{SubjectCheck, check_param};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let source = match check_param(uri.query(), "source") {
+        SubjectCheck::Blank => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "source query param is required"})),
+            )
+                .into_response();
+        }
+        SubjectCheck::Nul => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "source must not contain NUL"})),
+            )
+                .into_response();
+        }
+        SubjectCheck::Valid(source) => source,
+    };
+    let Some(store) = s.store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "store not configured"})),
+        )
+            .into_response();
+    };
+    match store.claim_priors(&source).await {
+        Ok(claims) => Json(ClaimPriors { source, claims }).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(StoreUnreachable::of(store, &e)),
+        )
+            .into_response(),
+    }
+}
+
 fn json_response(status: StatusCode, body: Value) -> Response {
     use axum::response::IntoResponse;
     (status, Json(body)).into_response()
