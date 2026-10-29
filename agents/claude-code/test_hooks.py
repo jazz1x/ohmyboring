@@ -1113,6 +1113,18 @@ class RulesHookTests(unittest.TestCase):
             self.assertEqual(err, "", prompt)
         self.assertEqual(RulesStubHandler.hits, 0)
 
+    def test_cross_session_message_never_reaches_the_door(self):
+        # The hook's prompt starts at the tag; the "Another Claude session…" line exists only
+        # in the transcript (query_log 2026-10-29 01:05:41Z).
+        prompt = (
+            '<cross-session-message from="uds:/tmp/cc-socks/27485.sock" from-name="[omb/judge]" '
+            'from-mode="bypass">\n[omb/judge] hermes remove\n</cross-session-message>'
+        )
+        out, err = self._run({"prompt": prompt, "session_id": "s-peer"})
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+        self.assertEqual(RulesStubHandler.hits, 0)
+
     def test_no_door_url_falls_back_to_the_default_and_fires(self):
         # The installed-hook bug: Claude Code's hook env has no BORING_DOOR_URL and the
         # hook used to return silently. Now an unset env means the engine-style default,

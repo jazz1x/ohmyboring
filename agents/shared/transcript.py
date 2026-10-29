@@ -12,6 +12,8 @@ import re
 import sys
 from datetime import datetime
 
+from harness_prefixes import HARNESS_PREFIXES
+
 
 def _env_int(name: str, default: int) -> int:
     """Read an int constant from env, falling back to `default` when unset/blank."""
@@ -202,14 +204,12 @@ _CODEX_USER_NOISE_MARKERS = (
 
 # Prefix, not substring: the owner quoting a tag mid-sentence is still the owner speaking.
 _CLAUDE_USER_NOISE_MARKERS = (
-    "<task-notification>",
+    *HARNESS_PREFIXES,
     "<command-message>",
     "<command-name>",
     "<local-command-stdout>",
     "<bash-stdout>",
     "<system-reminder>",
-    "Another Claude session sent a message",
-    "<agent-message",
 )
 
 

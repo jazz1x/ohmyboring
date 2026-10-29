@@ -14,13 +14,14 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import recall_core  # noqa: E402
 import repo_table  # noqa: E402
+from harness_prefixes import HARNESS_PREFIXES  # noqa: E402
 
 # A prompt that is nothing but image placeholders carries no words to retrieve on.
 _IMAGE_PLACEHOLDER = re.compile(r"\[Image #\d+\]")
 
 # A subagent's report arrives as a user turn; on 2026-09-27 all four rules firings in
 # one session were these, none the owner.
-_HARNESS_PREFIXES = ("<task-notification>", "Another Claude session sent a message", "<agent-message")
+_HARNESS_PREFIXES = HARNESS_PREFIXES
 
 
 def _is_injection(data: dict) -> bool:
