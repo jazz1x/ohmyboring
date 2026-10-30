@@ -54,6 +54,127 @@ const FILL_BATCH: usize = 40;
 /// Per-request ceiling for the I/O boundary; an HNSW insert batch is the slowest request.
 const REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
 const KEY_SEP: char = '\u{1f}';
+/// Prefix of a per-project chunk table. The global `chunk` table keeps every chunk; a project table
+/// keeps that project's chunks only, so a project-filtered KNN scans the project's graph instead of
+/// filtering inside the global one (measured p95 120-150 ms for the in-KNN filter).
+const PROJECT_TABLE_PREFIX: &str = "chunk_p_";
+
+/// Why a project slug cannot name a table. The name is spliced into SurrealQL (a table name cannot
+/// be bound), so it is parsed once here and never mapped: a slug outside `[a-z0-9_]` has no
+/// project table, and every caller says so.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProjectTableError {
+    #[error("project 가 비어 있어 프로젝트 테이블이 없음")]
+    Empty,
+    #[error("project {slug:?} 의 {bad:?} 는 테이블 이름에 못 씀 (a-z0-9_ 만)")]
+    BadChar { slug: String, bad: char },
+}
+
+/// A project's chunk table, `chunk_p_<slug>`, slug in `[a-z0-9_]+`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProjectTable {
+    slug: String,
+    name: String,
+}
+
+impl ProjectTable {
+    /// # Errors
+    /// `Empty` for an empty slug, `BadChar` naming the first character outside `[a-z0-9_]`.
+    pub fn parse(slug: &str) -> Result<Self, ProjectTableError> {
+        if slug.is_empty() {
+            return Err(ProjectTableError::Empty);
+        }
+        match slug
+            .chars()
+            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_'))
+        {
+            Some(bad) => Err(ProjectTableError::BadChar {
+                slug: slug.to_owned(),
+                bad,
+            }),
+            None => Ok(Self {
+                slug: slug.to_owned(),
+                name: format!("{PROJECT_TABLE_PREFIX}{slug}"),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn slug(&self) -> &str {
+        &self.slug
+    }
+}
+
+/// `chunk` rows grouped by project table, plus the projects that cannot have one (each gets one
+/// `[vector]` line: its chunks live in the global table only).
+struct Placed {
+    by_table: std::collections::BTreeMap<ProjectTable, Vec<(String, String)>>,
+    rejected: std::collections::BTreeMap<String, ProjectTableError>,
+}
+
+impl Placed {
+    /// `(project, key, literal)` rows.
+    fn of(rows: Vec<(String, String, String)>) -> Self {
+        let mut placed = Self {
+            by_table: std::collections::BTreeMap::new(),
+            rejected: std::collections::BTreeMap::new(),
+        };
+        for (project, key, literal) in rows {
+            match ProjectTable::parse(&project) {
+                Ok(table) => placed
+                    .by_table
+                    .entry(table)
+                    .or_default()
+                    .push((key, literal)),
+                Err(e) => {
+                    placed.rejected.insert(project, e);
+                }
+            }
+        }
+        placed
+    }
+
+    fn report(&self) {
+        for e in self.rejected.values() {
+            eprintln!("[vector] surreal: {e} — chunk 는 global 테이블에만 씀");
+        }
+    }
+}
+
+/// Which table a chunk KNN reads: the project's own table when it exists, else the global one.
+enum ChunkSource {
+    Global,
+    Project(ProjectTable),
+}
+
+impl ChunkSource {
+    fn table(&self) -> &str {
+        match self {
+            Self::Global => "chunk",
+            Self::Project(t) => t.name(),
+        }
+    }
+}
+
+/// DDL of one chunk table (global or per project): same fields, same HNSW definition.
+fn chunk_ddl(table: &str, dim: usize) -> String {
+    format!(
+        "DEFINE TABLE {table} SCHEMAFULL;
+         DEFINE FIELD cid ON {table} TYPE string;
+         DEFINE FIELD source_path ON {table} TYPE string;
+         DEFINE FIELD project ON {table} TYPE string;
+         DEFINE FIELD doc_updated_us ON {table} TYPE int;
+         DEFINE FIELD embedding ON {table} TYPE array<float>;
+         DEFINE INDEX {table}_source_path ON {table} FIELDS source_path;
+         DEFINE INDEX {table}_embedding ON {table} FIELDS embedding
+             HNSW DIMENSION {dim} DIST COSINE TYPE F32 EFC 64 M 16;"
+    )
+}
 
 /// Connection to the SurrealDB server.
 #[derive(Debug, Clone)]
@@ -592,7 +713,8 @@ impl VectorIndex for SurrealView<'_> {
     ) -> Result<Vec<Hit>> {
         let ef = self.client.ef();
         let mut conds = vec![format!("embedding <|{},{ef}|> {}", k.max(1), floats(vec))];
-        if let Some(p) = project {
+        let source = self.client.chunk_source(project).await?;
+        if let (ChunkSource::Global, Some(p)) = (&source, project) {
             conds.push(format!("project = {}", text(p)));
         }
         if let Some(hours) = since_hours {
@@ -602,7 +724,8 @@ impl VectorIndex for SurrealView<'_> {
             ));
         }
         let sql = format!(
-            "SELECT cid, vector::distance::knn() AS d FROM chunk WHERE {} ORDER BY d ASC;",
+            "SELECT cid, vector::distance::knn() AS d FROM {} WHERE {} ORDER BY d ASC;",
+            source.table(),
             conds.join(" AND ")
         );
         self.chunk_knn(&sql, k, project, since_hours).await
@@ -841,6 +964,64 @@ fn tables(
 }
 
 impl SurrealClient {
+    /// Names of the per-project chunk tables the database has now (`INFO FOR DB`).
+    async fn project_tables(&self) -> Result<Vec<String>> {
+        let info = "INFO FOR DB;";
+        let statements = self.run(info).await?;
+        let first = statements
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("surreal answered no statement to: {info}"))?;
+        let tables = first
+            .get("tables")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("INFO FOR DB has no tables object: {first}"))?;
+        Ok(tables
+            .keys()
+            .filter(|n| n.starts_with(PROJECT_TABLE_PREFIX))
+            .cloned()
+            .collect())
+    }
+
+    /// The project's table when its slug can name one and the table exists; otherwise the global
+    /// table (a slug outside `[a-z0-9_]` never has a table; a project not yet filled has none).
+    async fn chunk_source(&self, project: Option<&str>) -> Result<ChunkSource> {
+        match project.map(ProjectTable::parse) {
+            Some(Ok(table)) => {
+                let have = self.project_tables().await?;
+                if have.iter().any(|n| n == table.name()) {
+                    Ok(ChunkSource::Project(table))
+                } else {
+                    Ok(ChunkSource::Global)
+                }
+            }
+            Some(Err(_)) | None => Ok(ChunkSource::Global),
+        }
+    }
+
+    /// A project table is only read when it exists, so it must be complete when it appears: define
+    /// it, then copy every chunk pg holds for the project.
+    async fn create_project_table(&self, store: &Store, table: &ProjectTable) -> Result<()> {
+        self.run(&chunk_ddl(table.name(), store.dim)).await?;
+        let mut after = String::new();
+        loop {
+            let rows = store
+                .db()
+                .await?
+                .query(
+                    &chunk_select("AND c.project = $1 AND c.id > $2 ORDER BY c.id LIMIT $3;"),
+                    &[&table.slug(), &after, &i64::try_from(FILL_BATCH)?],
+                )
+                .await
+                .context("read the project's chunks from pgvector")?;
+            let Some(last) = rows.last() else { break };
+            after = last.get(0);
+            let literals: Vec<String> = rows.iter().map(|r| chunk_literal(r).1).collect();
+            self.upsert_rows(table.name(), &literals).await?;
+        }
+        Ok(())
+    }
+
     async fn upsert_rows(&self, table: &str, literals: &[String]) -> Result<()> {
         for batch in literals.chunks(FILL_BATCH) {
             self.run(&format!(
@@ -905,15 +1086,63 @@ impl SurrealClient {
             .await
             .context("read the written notes' chunks from pgvector")?;
         let wanted: Vec<(String, String)> = rows.iter().map(chunk_literal).collect();
+        let placed = Placed::of(
+            rows.iter()
+                .map(|r| {
+                    let (key, literal) = chunk_literal(r);
+                    (r.get::<_, String>(2), key, literal)
+                })
+                .collect(),
+        );
+        self.reconcile_chunk_table("chunk", wanted, paths).await?;
+        self.mirror_project_tables(store, placed, paths).await
+    }
+
+    async fn reconcile_chunk_table(
+        &self,
+        table: &str,
+        wanted: Vec<(String, String)>,
+        paths: &[String],
+    ) -> Result<()> {
         let existing_chunks = format!(
-            "SELECT VALUE cid FROM chunk WHERE source_path INSIDE {};",
+            "SELECT VALUE cid FROM {table} WHERE source_path INSIDE {};",
             texts(paths)
         );
         let existing: Vec<String> = first_statement(
             &existing_chunks,
             self.rows::<String>(&existing_chunks).await?,
         )?;
-        self.reconcile("chunk", wanted, existing).await
+        self.reconcile(table, wanted, existing).await
+    }
+
+    /// Every project table that exists or is needed: a table the scope's rows now belong to is
+    /// created whole (see `create_project_table`) and reconciled; a table they left (the note's
+    /// project changed, the note was deleted) is reconciled to empty for these paths.
+    async fn mirror_project_tables(
+        &self,
+        store: &Store,
+        placed: Placed,
+        paths: &[String],
+    ) -> Result<()> {
+        placed.report();
+        let have = self.project_tables().await?;
+        for table in placed.by_table.keys() {
+            if !have.iter().any(|n| n == table.name()) {
+                self.create_project_table(store, table).await?;
+            }
+        }
+        let mut names: std::collections::BTreeSet<String> = have.into_iter().collect();
+        names.extend(placed.by_table.keys().map(|t| t.name().to_owned()));
+        for name in names {
+            let wanted = placed
+                .by_table
+                .iter()
+                .find(|(t, _)| t.name() == name)
+                .map(|(_, rows)| rows.clone())
+                .unwrap_or_default();
+            self.reconcile_chunk_table(&name, wanted, paths).await?;
+        }
+        Ok(())
     }
 
     async fn mirror_claims(&self, store: &Store, scope: &Scope) -> Result<()> {
@@ -1015,17 +1244,35 @@ impl SurrealClient {
             db = self.settings.database.as_str()
         ))
         .await?;
+        let old_projects: String = self
+            .project_tables()
+            .await?
+            .iter()
+            .map(|t| format!("REMOVE TABLE IF EXISTS {t};"))
+            .collect::<Vec<_>>()
+            .concat();
+        let pg_projects: Vec<(String, String, String)> = store
+            .db()
+            .await?
+            .query(&format!("SELECT DISTINCT c.project {CHUNK_FROM};"), &[])
+            .await
+            .context("read the projects of the chunks from pgvector")?
+            .iter()
+            .map(|r| (r.get::<_, String>(0), String::new(), String::new()))
+            .collect();
+        let project_tables = Placed::of(pg_projects);
+        project_tables.report();
+        let project_ddl: String = project_tables
+            .by_table
+            .keys()
+            .map(|t| chunk_ddl(t.name(), dim))
+            .collect();
+        let global_ddl = chunk_ddl("chunk", dim);
         self.run(&format!(
-            "REMOVE TABLE IF EXISTS chunk;
-             DEFINE TABLE chunk SCHEMAFULL;
-             DEFINE FIELD cid ON chunk TYPE string;
-             DEFINE FIELD source_path ON chunk TYPE string;
-             DEFINE FIELD project ON chunk TYPE string;
-             DEFINE FIELD doc_updated_us ON chunk TYPE int;
-             DEFINE FIELD embedding ON chunk TYPE array<float>;
-             DEFINE INDEX chunk_source_path ON chunk FIELDS source_path;
-             DEFINE INDEX chunk_embedding ON chunk FIELDS embedding
-                 HNSW DIMENSION {dim} DIST COSINE TYPE F32 EFC 64 M 16;
+            "{old_projects}
+             REMOVE TABLE IF EXISTS chunk;
+             {global_ddl}
+             {project_ddl}
              REMOVE TABLE IF EXISTS claim;
              DEFINE TABLE claim SCHEMAFULL;
              DEFINE FIELD cid ON claim TYPE string;
@@ -1062,6 +1309,18 @@ impl SurrealClient {
                 rows.iter().map(chunk_literal).unzip();
             chunk_keys.extend(keys);
             self.upsert_rows("chunk", &literals).await?;
+            let placed = Placed::of(
+                rows.iter()
+                    .map(|r| {
+                        let (key, literal) = chunk_literal(r);
+                        (r.get::<_, String>(2), key, literal)
+                    })
+                    .collect(),
+            );
+            for (table, rows) in placed.by_table {
+                let literals: Vec<String> = rows.into_iter().map(|(_, l)| l).collect();
+                self.upsert_rows(table.name(), &literals).await?;
+            }
         }
 
         let mut claim_keys = Vec::new();

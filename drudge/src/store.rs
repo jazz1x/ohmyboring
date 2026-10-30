@@ -33,7 +33,9 @@ mod vector_route;
 mod vector_surreal;
 
 pub use vector_route::VectorRoute;
-pub use vector_surreal::{FillTable, KeySet, SURREAL_BEHIND, Scope, SurrealClient};
+pub use vector_surreal::{
+    FillTable, KeySet, ProjectTable, ProjectTableError, SURREAL_BEHIND, Scope, SurrealClient,
+};
 
 /// Ingest input (one chunk).
 #[derive(Debug)]
