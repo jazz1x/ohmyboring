@@ -70,6 +70,10 @@ enum Cmd {
     /// Read-only (the doctor line): on backend=surreal, compare pgvector and SurrealDB per table
     /// by row count and key-set hash and fail when they differ; on pgvector say it does not apply
     VectorCheck,
+    /// On backend=surreal: every code_index row (repository, file, symbol, relation) in pg against
+    /// Surreal's copy, value by value; fails when they differ. `code-sync` writes the copy. On
+    /// pgvector it does not apply
+    CodeCheck,
     /// On backend=surreal: one copy pass of the four log tables (event_log, query_log,
     /// recall_label, sync_state) from pg into SurrealDB, then every pg row against Surreal's row
     /// value by value; fails when they differ. The sync loop runs the same pass. On pgvector it
@@ -164,6 +168,13 @@ async fn main() -> Result<()> {
             let dsn = config::pg_dsn();
             let mut code_store = code_index::CodeIndexStore::connect(&dsn)?;
             code_store.initialize().await?;
+            let surreal = match cfg.vector.effective().backend {
+                config::VectorBackend::Surreal => Some(store::SurrealClient::new(
+                    cfg.vector.surreal.settings(&config::env_set)?,
+                )?),
+                config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => None,
+            };
+            let mut behind = Vec::new();
             for source in selected {
                 let report = code_index::sync_repository(&mut code_store, source).await?;
                 println!(
@@ -175,7 +186,48 @@ async fn main() -> Result<()> {
                     report.deleted,
                     report.parse_errors
                 );
+                // Every selected repository is mirrored, changed or not: a pass that failed
+                // after an earlier commit is repaired by the next code-sync.
+                if let Some(client) = &surreal {
+                    match client.copy_code_repo(&code_store, source.id()).await {
+                        Ok(copied) => {
+                            for table in &copied {
+                                println!("code-copy {}: {}", source.id(), table.line());
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("code-copy {}: {e:#}", source.id());
+                            behind.push(source.id().to_owned());
+                        }
+                    }
+                }
             }
+            anyhow::ensure!(
+                behind.is_empty(),
+                "code-sync: pg 에는 기록됨, Surreal 사본만 빠진 repository {behind:?} — 다음 code-sync 가 이어 맞춤"
+            );
+            return Ok(());
+        }
+        Cmd::CodeCheck => {
+            let surreal = match cfg.vector.effective().backend {
+                config::VectorBackend::Surreal => Some(store::SurrealClient::new(
+                    cfg.vector.surreal.settings(&config::env_set)?,
+                )?),
+                config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => None,
+            };
+            let Some(client) = surreal else {
+                println!("backend=pgvector — 해당 없음 (대조는 backend=surreal 일 때만)");
+                return Ok(());
+            };
+            let code_store = code_index::CodeIndexStore::connect(&config::pg_dsn())?;
+            let checks = client.check_code(&code_store).await?;
+            for check in &checks {
+                println!("{}", check.line());
+            }
+            anyhow::ensure!(
+                checks.iter().all(store::CodeCheck::same),
+                "code-check: pg 와 surreal 의 행 수 또는 값이 다름 — code-sync 를 다시 돌릴 것"
+            );
             return Ok(());
         }
         Cmd::CodeStatus { repository } => {
@@ -469,7 +521,7 @@ async fn main() -> Result<()> {
                 println!("backend=pgvector — 해당 없음 (swap 은 backend=surreal 일 때만)");
             }
         },
-        Cmd::CodeSync { .. } | Cmd::CodeStatus { .. } | Cmd::Version => {}
+        Cmd::CodeSync { .. } | Cmd::CodeCheck | Cmd::CodeStatus { .. } | Cmd::Version => {}
         Cmd::Link { vault } => {
             let store = store.as_ref().context(VEC_OFF)?;
             let vault_root = vault

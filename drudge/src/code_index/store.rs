@@ -56,7 +56,7 @@ impl CodeIndexStore {
         Ok(Self { pool })
     }
     /// Acquire a connection from the pool.
-    async fn db(&self) -> Result<deadpool_postgres::Object, CodeIndexError> {
+    pub(crate) async fn db(&self) -> Result<deadpool_postgres::Object, CodeIndexError> {
         self.pool
             .get()
             .await

@@ -199,7 +199,7 @@ impl SurrealClient {
     }
 
     /// Upsert the json rows, several to a request while the request stays under the body limit.
-    async fn upsert_json(&self, table: &str, rows: &[String]) -> Result<()> {
+    pub(super) async fn upsert_json(&self, table: &str, rows: &[String]) -> Result<()> {
         let mut batch: Vec<&str> = Vec::new();
         let mut bytes = 0;
         for row in rows {
@@ -329,7 +329,7 @@ impl SurrealClient {
     }
 
     /// Surreal's rows of `table` whose `key` column is in `wanted` (SurrealQL literals), by key.
-    async fn surreal_rows_by(
+    pub(super) async fn surreal_rows_by(
         &self,
         table: &str,
         key: &str,

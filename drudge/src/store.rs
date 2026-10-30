@@ -28,11 +28,13 @@ use tokio_postgres::{Client, Config as PgConfig, NoTls};
 
 use crate::frontmatter::{Claim, FrontMatter};
 
+mod code_copy_surreal;
 mod log_copy_surreal;
 mod vector_pg;
 mod vector_route;
 mod vector_surreal;
 
+pub use code_copy_surreal::{CodeCheck, CodeCopy};
 pub use log_copy_surreal::{LogCheck, LogCopy};
 pub use vector_route::VectorRoute;
 pub use vector_surreal::{
