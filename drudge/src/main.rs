@@ -471,8 +471,10 @@ async fn main() -> Result<()> {
                 for table in &tables {
                     println!("{}", table.line());
                 }
+                let values = client.claim_row_diff(store).await?;
+                println!("{}", values.line());
                 anyhow::ensure!(
-                    tables.iter().all(store::FillTable::same),
+                    tables.iter().all(store::FillTable::same) && values.same(),
                     "vector-check: pg 와 surreal 의 행 수 또는 id 집합 해시가 다름 — vector-fill 을 다시 돌릴 것"
                 );
             }

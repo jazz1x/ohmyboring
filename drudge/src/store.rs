@@ -38,7 +38,8 @@ pub use code_copy_surreal::{CodeCheck, CodeCopy};
 pub use log_copy_surreal::{LogCheck, LogCopy};
 pub use vector_route::VectorRoute;
 pub use vector_surreal::{
-    FillTable, KeySet, ProjectTable, ProjectTableError, SURREAL_BEHIND, Scope, SurrealClient, Swap,
+    ClaimRowDiff, FillTable, KeySet, ProjectTable, ProjectTableError, RegisterAsk, SURREAL_BEHIND,
+    Scope, SurrealClient, Swap,
 };
 
 /// Ingest input (one chunk).
@@ -1998,6 +1999,43 @@ impl Store {
         kinds: Option<&[String]>,
         exclude_origins: &[String],
     ) -> Result<Vec<Claim>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.recent_claims_pg(k, project, kinds, exclude_origins)
+                    .await
+            }
+            VectorRoute::Surreal(client) => {
+                let answer = client
+                    .register_rows(&RegisterAsk {
+                        k,
+                        project,
+                        kinds,
+                        exclude_origins,
+                    })
+                    .await?;
+                Ok(answer
+                    .rows
+                    .into_iter()
+                    .map(|r| Claim {
+                        subject: r.subject,
+                        predicate: r.predicate,
+                        value: r.value,
+                        kind: r.kind,
+                        confidence: r.confidence,
+                        said_by: None,
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    async fn recent_claims_pg(
+        &self,
+        k: i64,
+        project: Option<&str>,
+        kinds: Option<&[String]>,
+        exclude_origins: &[String],
+    ) -> Result<Vec<Claim>> {
         let rows = self
             .db()
             .await?
@@ -2168,6 +2206,31 @@ impl Store {
     /// cost two, and newest-first decides inside each rank. Nothing is filtered out — a register
     /// whose every row is a label still answers with them, in the order it always had.
     pub async fn recent_register_rows(
+        &self,
+        k: i64,
+        project: Option<&str>,
+        kinds: Option<&[String]>,
+        exclude_origins: &[String],
+    ) -> Result<RegisterRows> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.recent_register_rows_pg(k, project, kinds, exclude_origins)
+                    .await
+            }
+            VectorRoute::Surreal(client) => {
+                client
+                    .register_rows(&RegisterAsk {
+                        k,
+                        project,
+                        kinds,
+                        exclude_origins,
+                    })
+                    .await
+            }
+        }
+    }
+
+    async fn recent_register_rows_pg(
         &self,
         k: i64,
         project: Option<&str>,

@@ -43,7 +43,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tokio_postgres::Row;
 
-use super::{AnchoredClaim, DistKind, Hit, NOT_USER_MEMORY_RE, Recurrence, Store};
+use super::{
+    AnchoredClaim, DistKind, Hit, INFORMATIVE_VALUE_CHARS, NOT_USER_MEMORY_RE, Recurrence,
+    RegisterRow, RegisterRows, Store, TAUTOLOGICAL_PREDICATES,
+};
 use crate::config::SurrealSettings;
 use crate::frontmatter::Claim;
 use crate::vector::VectorIndex;
@@ -893,6 +896,82 @@ impl FillTable {
     }
 }
 
+#[cfg(test)]
+mod claim_row_tests;
+
+/// Rows per page when reading `claim_row` back whole (a row carries the claim's `value`, not 11 KB
+/// of floats, but 20,000 of them at once is the answer size `KEY_PAGE` already ruled out).
+const CLAIM_ROW_PAGE: usize = 2_000;
+
+/// `claim_row` in pg against Surreal, row by row and column by column.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClaimRowDiff {
+    pub pg_rows: usize,
+    pub surreal_rows: usize,
+    /// Keys pg holds and Surreal lacks.
+    pub missing: Vec<String>,
+    /// Keys Surreal holds that pg lacks.
+    pub extra: Vec<String>,
+    /// Keys both hold whose columns differ (a seal or stale mark that moved only on one side).
+    pub different: Vec<String>,
+    /// The record literals to write to bring `missing` and `different` level.
+    pub redo: Vec<String>,
+}
+
+impl ClaimRowDiff {
+    /// Compare pg's rows (by key) with what Surreal read back, keyed by `cid`.
+    #[must_use]
+    pub fn of(pg: &HashMap<String, Value>, surreal: &HashMap<String, Value>) -> Self {
+        let mut diff = Self {
+            pg_rows: pg.len(),
+            surreal_rows: surreal.len(),
+            ..Self::default()
+        };
+        let mut keys: Vec<&String> = pg.keys().collect();
+        keys.sort_unstable();
+        for key in keys {
+            let want = &pg[key];
+            match surreal.get(key) {
+                None => {
+                    diff.missing.push(key.clone());
+                    diff.redo.push(want.to_string());
+                }
+                Some(have) if have != want => {
+                    diff.different.push(key.clone());
+                    diff.redo.push(want.to_string());
+                }
+                Some(_) => {}
+            }
+        }
+        diff.extra = surreal
+            .keys()
+            .filter(|k| !pg.contains_key(*k))
+            .cloned()
+            .collect();
+        diff.extra.sort_unstable();
+        diff
+    }
+
+    #[must_use]
+    pub fn same(&self) -> bool {
+        self.missing.is_empty() && self.extra.is_empty() && self.different.is_empty()
+    }
+
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "claim_row values: pg rows={} | surreal rows={} | missing {} · extra {} · \
+             different {} | {}",
+            self.pg_rows,
+            self.surreal_rows,
+            self.missing.len(),
+            self.extra.len(),
+            self.different.len(),
+            if self.same() { "same" } else { "DIFFERENT" }
+        )
+    }
+}
+
 fn claim_key(subject: &str, predicate: &str, valid_from_us: i64) -> String {
     format!("{subject}{KEY_SEP}{predicate}{KEY_SEP}{valid_from_us}")
 }
@@ -1089,6 +1168,157 @@ fn document_literal(r: &Row) -> (String, String) {
     (path, literal)
 }
 
+/// Every pg `claim` row, sealed ones included, with the origin and project of its note. The
+/// `claim` table above holds only open, embedded claims for the vector search; this one is the
+/// copy the registers read, so it keeps `superseded_at` and drops the embedding. A separate table,
+/// so `swap_if_changed` (a fixed list of HNSW tables) never sees it and its index is untouched.
+/// A claim whose note has no `document` row keeps `origin`/`project` unset: the register join
+/// would drop it, and the register query here requires `origin` to exist.
+fn claim_row_select(tail: &str) -> String {
+    format!(
+        "SELECT c.subject, c.predicate, c.value, c.source_path, {valid}, {sealed}, c.kind,
+                c.confidence, c.anchor, {stale}, c.stale_reason, c.era, c.anchor_hash,
+                c.anchor_symbol, c.said_by, d.origin, d.project
+           FROM claim c LEFT JOIN document d ON d.source_path = c.source_path {tail}",
+        valid = epoch_us("c.valid_from"),
+        sealed = epoch_us("c.superseded_at"),
+        stale = epoch_us("c.stale_at"),
+    )
+}
+
+/// `(key, row)` of one `claim_row_select` row; a NULL column is left out of the object, which is
+/// how Surreal holds `option<..>` NONE. The same object is written (as its JSON text, a valid
+/// SurrealQL object literal) and compared against what Surreal reads back.
+fn claim_row_json(r: &Row) -> (String, Value) {
+    let subject: String = r.get(0);
+    let predicate: String = r.get(1);
+    let valid_from_us: i64 = r.get(4);
+    let key = claim_key(&subject, &predicate, valid_from_us);
+    let mut o = serde_json::Map::new();
+    o.insert("cid".into(), json!(key));
+    o.insert("subject".into(), json!(subject));
+    o.insert("predicate".into(), json!(predicate));
+    o.insert("value".into(), json!(r.get::<_, String>(2)));
+    o.insert("source_path".into(), json!(r.get::<_, String>(3)));
+    o.insert("valid_from_us".into(), json!(valid_from_us));
+    o.insert("kind".into(), json!(r.get::<_, String>(6)));
+    o.insert("confidence".into(), json!(r.get::<_, String>(7)));
+    o.insert("era".into(), json!(r.get::<_, String>(11)));
+    let optional_int = [(5, "superseded_us"), (9, "stale_us")];
+    for (i, name) in optional_int {
+        if let Some(v) = r.get::<_, Option<i64>>(i) {
+            o.insert(name.into(), json!(v));
+        }
+    }
+    let optional_text = [
+        (8, "anchor"),
+        (10, "stale_reason"),
+        (12, "anchor_hash"),
+        (13, "anchor_symbol"),
+        (14, "said_by"),
+        (15, "origin"),
+        (16, "project"),
+    ];
+    for (i, name) in optional_text {
+        if let Some(v) = r.get::<_, Option<String>>(i) {
+            o.insert(name.into(), json!(v));
+        }
+    }
+    (key, Value::Object(o))
+}
+
+const CLAIM_ROW_DDL: &str = "DEFINE TABLE claim_row SCHEMAFULL;
+         DEFINE FIELD cid ON claim_row TYPE string;
+         DEFINE FIELD subject ON claim_row TYPE string;
+         DEFINE FIELD predicate ON claim_row TYPE string;
+         DEFINE FIELD value ON claim_row TYPE string;
+         DEFINE FIELD source_path ON claim_row TYPE string;
+         DEFINE FIELD valid_from_us ON claim_row TYPE int;
+         DEFINE FIELD superseded_us ON claim_row TYPE option<int>;
+         DEFINE FIELD kind ON claim_row TYPE string;
+         DEFINE FIELD confidence ON claim_row TYPE string;
+         DEFINE FIELD anchor ON claim_row TYPE option<string>;
+         DEFINE FIELD stale_us ON claim_row TYPE option<int>;
+         DEFINE FIELD stale_reason ON claim_row TYPE option<string>;
+         DEFINE FIELD era ON claim_row TYPE string;
+         DEFINE FIELD anchor_hash ON claim_row TYPE option<string>;
+         DEFINE FIELD anchor_symbol ON claim_row TYPE option<string>;
+         DEFINE FIELD said_by ON claim_row TYPE option<string>;
+         DEFINE FIELD origin ON claim_row TYPE option<string>;
+         DEFINE FIELD project ON claim_row TYPE option<string>;
+         DEFINE INDEX claim_row_path ON claim_row FIELDS source_path;
+         DEFINE INDEX claim_row_slot ON claim_row FIELDS subject, predicate;";
+
+/// What one register read asks for, in the terms of `Store::recent_register_rows`.
+pub struct RegisterAsk<'a> {
+    pub k: i64,
+    pub project: Option<&'a str>,
+    pub kinds: Option<&'a [String]>,
+    pub exclude_origins: &'a [String],
+}
+
+/// The Surreal text of `Store::recent_register_rows`' WHERE and ORDER BY, condition for condition:
+/// open (`superseded_us` unset), the note exists (`origin` set, as the pg inner join), project,
+/// kinds, `NOT origin = ANY(exclude)`, source_path not a generated note, and the rank (a short
+/// value, a predicate restating its kind, one each) before `valid_from` newest-first. `subject`,
+/// `predicate` close a tie pg leaves to the planner. The regexes are the same constants pg takes;
+/// `(?i)` is pg's `~*`.
+fn register_where(ask: &RegisterAsk<'_>) -> String {
+    let mut conds = vec![
+        "superseded_us = NONE".to_owned(),
+        "origin != NONE".to_owned(),
+        format!("!(origin IN {})", texts(ask.exclude_origins)),
+        format!(
+            "!string::matches(source_path, <regex> {})",
+            text(NOT_USER_MEMORY_RE)
+        ),
+    ];
+    if let Some(p) = ask.project {
+        conds.push(format!("project = {}", text(p)));
+    }
+    if let Some(ks) = ask.kinds {
+        conds.push(format!("kind IN {}", texts(ks)));
+    }
+    conds.join(" AND ")
+}
+
+fn register_select(ask: &RegisterAsk<'_>) -> String {
+    format!(
+        "SELECT subject, predicate, value, kind, confidence, valid_from_us, project ?? '' AS project,
+                (IF string::len(value) < {informative} {{ 1 }} ELSE {{ 0 }})
+                + (IF string::matches(predicate, <regex> {taut}) {{ 1 }} ELSE {{ 0 }}) AS rank
+           FROM claim_row WHERE {conds}
+          ORDER BY rank ASC, valid_from_us DESC, subject ASC, predicate ASC LIMIT {k};",
+        informative = INFORMATIVE_VALUE_CHARS,
+        taut = text(&format!("(?i){TAUTOLOGICAL_PREDICATES}")),
+        conds = register_where(ask),
+        k = ask.k.max(0),
+    )
+}
+
+fn register_count(ask: &RegisterAsk<'_>) -> String {
+    format!(
+        "SELECT count() AS n FROM claim_row WHERE {} GROUP ALL;",
+        register_where(ask)
+    )
+}
+
+#[derive(Deserialize)]
+struct RegisterHit {
+    subject: String,
+    predicate: String,
+    value: String,
+    kind: String,
+    confidence: String,
+    valid_from_us: i64,
+    project: String,
+}
+
+#[derive(Deserialize)]
+struct Count {
+    n: i64,
+}
+
 fn node_select(tail: &str) -> String {
     format!("SELECT n.id, n.kind, n.label, n.outcome FROM node n {tail}")
 }
@@ -1254,6 +1484,7 @@ struct TableKeys {
     edges: Vec<String>,
     chunks: Vec<String>,
     claims: Vec<String>,
+    claim_rows: Vec<String>,
 }
 
 fn tables(pg: TableKeys, surreal: TableKeys) -> Vec<FillTable> {
@@ -1282,6 +1513,11 @@ fn tables(pg: TableKeys, surreal: TableKeys) -> Vec<FillTable> {
             table: "claim(open)",
             pg: KeySet::of(pg.claims),
             surreal: KeySet::of(surreal.claims),
+        },
+        FillTable {
+            table: "claim_row(all)",
+            pg: KeySet::of(pg.claim_rows),
+            surreal: KeySet::of(surreal.claim_rows),
         },
     ]
 }
@@ -1742,9 +1978,20 @@ impl SurrealClient {
         );
         let surreal_slots: Vec<Slot> =
             first_statement(&slots_query, self.rows::<Slot>(&slots_query).await?)?;
+        let row_slots_query = format!(
+            "SELECT subject, predicate FROM claim_row WHERE source_path INSIDE {};",
+            texts(&scope.paths)
+        );
+        let surreal_row_slots: Vec<Slot> =
+            first_statement(&row_slots_query, self.rows::<Slot>(&row_slots_query).await?)?;
         let mut slots: Vec<(String, String)> = scope.slots.clone();
         slots.extend(pg_slots.iter().map(|r| (r.get(0), r.get(1))));
         slots.extend(surreal_slots.into_iter().map(|s| (s.subject, s.predicate)));
+        slots.extend(
+            surreal_row_slots
+                .into_iter()
+                .map(|s| (s.subject, s.predicate)),
+        );
         slots.sort_unstable();
         slots.dedup();
         let subjects: Vec<String> = slots.iter().map(|s| s.0.clone()).collect();
@@ -1776,7 +2023,119 @@ impl SurrealClient {
             &existing_claims,
             self.rows::<String>(&existing_claims).await?,
         )?;
-        self.reconcile("claim", wanted, existing).await
+        self.reconcile("claim", wanted, existing).await?;
+        self.mirror_claim_rows(store, scope, &slots).await
+    }
+
+    /// The same notes and slots as the vector `claim` table, but every row pg holds there, sealed
+    /// ones included: a seal or unseal that moved a row of another note in the slot is in `slots`.
+    /// No dirty count: this table has no HNSW index to swap.
+    async fn mirror_claim_rows(
+        &self,
+        store: &Store,
+        scope: &Scope,
+        slots: &[(String, String)],
+    ) -> Result<()> {
+        let subjects: Vec<String> = slots.iter().map(|s| s.0.clone()).collect();
+        let predicates: Vec<String> = slots.iter().map(|s| s.1.clone()).collect();
+        let rows = store
+            .db()
+            .await?
+            .query(
+                &claim_row_select(
+                    "WHERE c.source_path = ANY($1) OR (c.subject, c.predicate) IN
+                          (SELECT s, p FROM unnest($2::text[], $3::text[]) AS k(s, p))",
+                ),
+                &[&scope.paths, &subjects, &predicates],
+            )
+            .await
+            .context("read the written notes' claim rows from pgvector")?;
+        let wanted: Vec<(String, String)> = rows
+            .iter()
+            .map(|r| {
+                let (key, row) = claim_row_json(r);
+                (key, row.to_string())
+            })
+            .collect();
+        let slot_pairs: Vec<String> = slots
+            .iter()
+            .map(|(s, p)| format!("[{},{}]", text(s), text(p)))
+            .collect();
+        let existing_query = format!(
+            "SELECT VALUE cid FROM claim_row WHERE source_path INSIDE {} \
+             OR [subject, predicate] INSIDE [{}];",
+            texts(&scope.paths),
+            slot_pairs.join(",")
+        );
+        let existing: Vec<String> =
+            first_statement(&existing_query, self.rows::<String>(&existing_query).await?)?;
+        let keep: std::collections::HashSet<&str> =
+            wanted.iter().map(|(k, _)| k.as_str()).collect();
+        let stale: Vec<String> = existing
+            .into_iter()
+            .filter(|k| !keep.contains(k.as_str()))
+            .collect();
+        let literals: Vec<String> = wanted.into_iter().map(|(_, l)| l).collect();
+        self.upsert_rows("claim_row", &literals).await?;
+        self.delete_rows("claim_row", &stale).await
+    }
+
+    /// Every claim row on both sides, compared by key and by value (all columns, `superseded_us`
+    /// included). `catch_up` compares keys only, so a seal the Python door wrote straight to pg
+    /// changes a row whose key both sides hold; this is the pass that sees it.
+    pub async fn claim_row_diff(&self, store: &Store) -> Result<ClaimRowDiff> {
+        let db = store.db().await?;
+        let mut pg: HashMap<String, Value> = HashMap::new();
+        let mut offset = 0_i64;
+        loop {
+            let rows = db
+                .query(
+                    &claim_row_select(
+                        "ORDER BY c.subject, c.predicate, c.valid_from LIMIT $1 OFFSET $2;",
+                    ),
+                    &[&i64::try_from(KEY_PAGE)?, &offset],
+                )
+                .await
+                .context("read every claim row from pgvector")?;
+            if rows.is_empty() {
+                break;
+            }
+            offset += i64::try_from(rows.len())?;
+            pg.extend(rows.iter().map(claim_row_json));
+        }
+        let mut surreal: HashMap<String, Value> = HashMap::new();
+        loop {
+            let query = format!(
+                "SELECT * FROM claim_row LIMIT {CLAIM_ROW_PAGE} START {};",
+                surreal.len()
+            );
+            let page: Vec<Value> = first_statement(&query, self.rows::<Value>(&query).await?)?;
+            let done = page.len() < CLAIM_ROW_PAGE;
+            for mut row in page {
+                if let Some(o) = row.as_object_mut() {
+                    o.remove("id");
+                }
+                let cid = row
+                    .get("cid")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                surreal.insert(cid, row);
+            }
+            if done {
+                break;
+            }
+        }
+        Ok(ClaimRowDiff::of(&pg, &surreal))
+    }
+
+    /// Make Surreal's `claim_row` equal pg's: write the rows it lacks and the rows whose value
+    /// differs, delete the keys pg lacks. Returns `(written, deleted)`.
+    async fn repair_claim_rows(&self, store: &Store) -> Result<(usize, usize)> {
+        let diff = self.claim_row_diff(store).await?;
+        self.upsert_rows("claim_row", &diff.redo).await?;
+        self.delete_rows("claim_row", &diff.extra).await?;
+        Ok((diff.redo.len(), diff.extra.len()))
     }
 
     /// Every `cid` of one table, a page at a time in the table's own key order: one answer
@@ -1804,6 +2163,7 @@ impl SurrealClient {
             edges: self.table_keys("edge").await?,
             chunks: self.table_keys("chunk").await?,
             claims: self.table_keys("claim").await?,
+            claim_rows: self.table_keys("claim_row").await?,
         })
     }
 
@@ -1848,7 +2208,42 @@ impl SurrealClient {
             deleted += keys.len();
             self.delete_rows(table, keys).await?;
         }
-        Ok((written, deleted))
+        // The one table whose rows change value under a key both sides hold (a seal, an unseal, a
+        // stale mark written straight to pg), so it is compared by value, not by key.
+        let (rows_written, rows_deleted) = self.repair_claim_rows(store).await?;
+        Ok((written + rows_written, deleted + rows_deleted))
+    }
+
+    /// `Store::recent_register_rows` / `recent_claims` against the `claim_row` copy: the same
+    /// conditions and order (`register_select`), plus the full match count. Only
+    /// `backend=surreal` calls this; a Surreal failure is an error, never a pg fallback.
+    pub async fn register_rows(&self, ask: &RegisterAsk<'_>) -> Result<RegisterRows> {
+        let select = register_select(ask);
+        let count = register_count(ask);
+        let hits: Vec<RegisterHit> =
+            first_statement(&select, self.rows::<RegisterHit>(&select).await?)?;
+        let counted: Vec<Count> = first_statement(&count, self.rows::<Count>(&count).await?)?;
+        let rows = hits
+            .into_iter()
+            .map(|h| {
+                let micros = u64::try_from(h.valid_from_us).with_context(|| {
+                    format!("claim_row valid_from_us {} is before 1970", h.valid_from_us)
+                })?;
+                Ok(RegisterRow::new(
+                    h.subject,
+                    h.predicate,
+                    h.value,
+                    h.kind,
+                    h.confidence,
+                    std::time::UNIX_EPOCH + Duration::from_micros(micros),
+                    h.project,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(RegisterRows {
+            rows,
+            total_matching: counted.first().map_or(0, |c| c.n),
+        })
     }
 
     /// Read-only: row count and key-set hash per table, pg against Surreal, over what is there
@@ -1876,6 +2271,19 @@ impl SurrealClient {
             .iter()
             .map(|r| claim_key(&r.get::<_, String>(0), &r.get::<_, String>(1), r.get(2)))
             .collect();
+        let pg_claim_rows: Vec<String> = db
+            .query(
+                &format!(
+                    "SELECT subject, predicate, {valid} FROM claim;",
+                    valid = epoch_us("valid_from")
+                ),
+                &[],
+            )
+            .await
+            .context("read claim keys from pgvector")?
+            .iter()
+            .map(|r| claim_key(&r.get::<_, String>(0), &r.get::<_, String>(1), r.get(2)))
+            .collect();
         Ok(tables(
             TableKeys {
                 documents: pg_documents,
@@ -1883,6 +2291,7 @@ impl SurrealClient {
                 edges: pg_edges,
                 chunks: pg_chunks,
                 claims: pg_claims,
+                claim_rows: pg_claim_rows,
             },
             self.surreal_keys().await?,
         ))
@@ -1936,6 +2345,8 @@ impl SurrealClient {
              REMOVE TABLE IF EXISTS chunk;
              {global_ddl}
              {project_ddl}
+             REMOVE TABLE IF EXISTS claim_row;
+             {CLAIM_ROW_DDL}
              REMOVE TABLE IF EXISTS claim;
              DEFINE TABLE claim SCHEMAFULL;
              DEFINE FIELD cid ON claim TYPE string;
@@ -2073,6 +2484,35 @@ impl SurrealClient {
             self.upsert_rows("claim", &literals).await?;
         }
 
+        let mut claim_row_keys = Vec::new();
+        let mut offset = 0_i64;
+        loop {
+            let rows = store
+                .db()
+                .await?
+                .query(
+                    &claim_row_select(
+                        "ORDER BY c.subject, c.predicate, c.valid_from LIMIT $1 OFFSET $2;",
+                    ),
+                    &[&i64::try_from(FILL_BATCH)?, &offset],
+                )
+                .await
+                .context("read every claim row from pgvector")?;
+            if rows.is_empty() {
+                break;
+            }
+            offset += i64::try_from(rows.len())?;
+            let (keys, literals): (Vec<String>, Vec<String>) = rows
+                .iter()
+                .map(|r| {
+                    let (key, row) = claim_row_json(r);
+                    (key, row.to_string())
+                })
+                .unzip();
+            claim_row_keys.extend(keys);
+            self.upsert_rows("claim_row", &literals).await?;
+        }
+
         Ok(tables(
             TableKeys {
                 documents: document_keys,
@@ -2080,6 +2520,7 @@ impl SurrealClient {
                 edges: edge_keys,
                 chunks: chunk_keys,
                 claims: claim_keys,
+                claim_rows: claim_row_keys,
             },
             self.surreal_keys().await?,
         ))
