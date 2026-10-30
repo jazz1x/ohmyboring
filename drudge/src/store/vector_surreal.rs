@@ -13,7 +13,7 @@
 //! `surrealdb/surrealdb:v3.3.5@sha256:3db515b8…` (v3.3.4 lost recall after delete/overwrite churn; v3.3.5 fixes part of it).
 //!
 //! Index and query parameters are stage-0's: HNSW `DIMENSION <embed_dim> DIST COSINE TYPE F32 EFC 64
-//! M 16`; query EF is `vector.surreal.ef` (default 400: at 100 and 200 one golden query pgvector finds is missed, at 400 it is not; stage 0 measured 40 = pgvector's ef_search).
+//! M 16`; query EF is `vector.surreal.ef` (default 2000: over 5 fresh fills it is the only EF whose worst recall run reaches pgvector's 21/22 — EF 400 min 14, EF 800 min 18; stage 0 measured 40 = pgvector's ef_search).
 //!
 //! Filter columns, one Surreal column per pgvector filter:
 //!
