@@ -351,6 +351,58 @@ async fn sync_of_a_note_file_writes_surreal_too() {
 }
 
 #[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_legacy_sha_move_reaches_the_surreal_document() {
+    use drudge::ingest::FileOutcome;
+    use sha2::Digest;
+    let f = fixture("w_sha").await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("w-{}.md", f.nanos));
+    let path_s = path.to_string_lossy().into_owned();
+    // `relates_to` is a derived key, so the content hash differs from the whole-file hash.
+    let text = "---\norigin: personal\nproject: \"\"\nkind: note\nrelates_to:\n  - x\n---\n\nbody for the sha move\n";
+    std::fs::write(&path, text).unwrap();
+    let cfg = BoringConfig::from_env();
+    let ingest = || {
+        ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+            &f.store, &ZeroEmbed, &cfg, &path_s,
+        )
+    };
+    let (first, _) = ingest().await.expect("first ingest");
+    assert_eq!(first, FileOutcome::New);
+
+    // The old stored sha: the whole file's hash. pg and Surreal both hold it before the move.
+    let legacy = hex::encode(sha2::Sha256::digest(text.as_bytes()));
+    f.db.execute(
+        "UPDATE document SET sha = $2 WHERE source_path = $1",
+        &[&path_s, &legacy],
+    )
+    .await
+    .unwrap();
+    f.store
+        .mirror_surreal(&drudge::store::Scope::notes([path_s.clone()]))
+        .await
+        .expect("mirror the legacy sha");
+    f.assert_same("legacy sha in both stores", 1, 0).await;
+
+    let (second, _) = ingest().await.expect("second ingest");
+    assert_eq!(second, FileOutcome::ShaMoved);
+    f.assert_same("after the sha move", 1, 0).await;
+    let moved: String =
+        f.db.query_one(
+            "SELECT sha FROM document WHERE source_path = $1",
+            &[&path_s],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_ne!(
+        moved, legacy,
+        "pg sha must have moved off the whole-file hash"
+    );
+}
+
+#[tokio::test]
 #[ignore = "needs throwaway pg: see the run command in this file's header"]
 async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
     let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
