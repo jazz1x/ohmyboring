@@ -451,7 +451,8 @@ async fn node_and_edge_writes_leave_the_two_stores_with_the_same_rows() {
     f.assert_graph_same("after clear_semantic_edges", 5, 2)
         .await;
 
-    // a non-fact claim: claim node + typed node + is_a + claims + claim_of_project + said edges
+    // a non-fact claim: +3 nodes (claim, typed, owner speaker) and +5 edges (is_a, claims,
+    // claim_of_project, said speaker→doc, said speaker→claim) on top of 5 nodes / 2 edges
     f.claim(&a, &format!("g-{}", f.nanos), "decision", 1).await;
     f.store
         .upsert_claim_node(
