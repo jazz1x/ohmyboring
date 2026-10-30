@@ -76,7 +76,7 @@ impl CodeIndexStore {
     pub async fn initialize(&self) -> Result<(), CodeIndexError> {
         let db = self.db().await?;
         db.batch_execute(SCHEMA).await?;
-        for index in &FILE_ID_INDEXES {
+        for index in &CASCADE_INDEXES {
             ensure_valid_index(&db, index).await?;
         }
         Ok(())
@@ -371,10 +371,12 @@ struct ConcurrentIndex {
     create: &'static str,
 }
 
-/// Deleting a `file` row cascades to `symbol` and `relation` by `file_id`; without these two
-/// indexes each cascade scans the whole table. They cannot live in `SCHEMA`: that is one
-/// `batch_execute`, an implicit transaction, and `CREATE INDEX CONCURRENTLY` refuses one.
-const FILE_ID_INDEXES: [ConcurrentIndex; 2] = [
+/// Deleting a `file` row cascades to `symbol` and `relation` by `file_id`, and each deleted
+/// symbol fires RI triggers on `relation` by `source_symbol_id` / `target_symbol_id`; without
+/// these indexes each of those scans the whole table (4.8M rows: a delete ran 2,506s). They
+/// cannot live in `SCHEMA`: that is one `batch_execute`, an implicit transaction, and
+/// `CREATE INDEX CONCURRENTLY` refuses one.
+const CASCADE_INDEXES: [ConcurrentIndex; 4] = [
     ConcurrentIndex {
         name: "code_index_symbol_file",
         create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS code_index_symbol_file
@@ -384,6 +386,16 @@ const FILE_ID_INDEXES: [ConcurrentIndex; 2] = [
         name: "code_index_relation_file",
         create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS code_index_relation_file
                  ON code_index.relation(file_id)",
+    },
+    ConcurrentIndex {
+        name: "code_index_relation_source_symbol",
+        create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS code_index_relation_source_symbol
+                 ON code_index.relation(source_symbol_id)",
+    },
+    ConcurrentIndex {
+        name: "code_index_relation_target_symbol",
+        create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS code_index_relation_target_symbol
+                 ON code_index.relation(target_symbol_id)",
     },
 ];
 
