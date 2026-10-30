@@ -325,7 +325,7 @@ impl<'de> Deserialize<'de> for SurrealEf {
     }
 }
 
-const DEFAULT_SURREAL_EF: usize = 100;
+const DEFAULT_SURREAL_EF: usize = 400;
 const DEFAULT_SURREAL_URL: &str = "http://localhost:8000";
 const DEFAULT_SURREAL_NAME: &str = "boring";
 const DEFAULT_SURREAL_USER: &str = "root";
