@@ -89,6 +89,20 @@ impl Fixture {
             .collect()
     }
 
+    /// pg relation rows of a repository: all, and those with a NULL target.
+    async fn relation_counts(&self, id: &str) -> (i64, i64) {
+        let r = self
+            .db
+            .query_one(
+                "SELECT count(*), count(*) FILTER (WHERE target_symbol_id IS NULL)
+                   FROM code_index.relation WHERE repository_id = $1",
+                &[&id],
+            )
+            .await
+            .unwrap();
+        (r.get(0), r.get(1))
+    }
+
     async fn assert_same(&self) {
         let checks = self.client.check_code(&self.pg).await.expect("check");
         for c in &checks {
@@ -136,48 +150,33 @@ async fn first_fill_then_one_repository_replace_leaves_the_tables_equal() {
 
 #[tokio::test]
 #[ignore = "needs BORING_TEST_DATABASE_URL and BORING_TEST_SURREAL_URL (throwaway pg + surreal)"]
-async fn a_relation_of_another_repository_that_set_null_rewrote_follows() {
+async fn a_symbol_that_relations_target_vanishing_leaves_the_copy_equal() {
     let mut fx = fixture().await;
-    let a = repo(&[("lib.rs", "fn target() {}\n")]);
-    let b = repo(&[("lib.rs", "fn caller() {}\n")]);
-    let (sa, sb) = (source("a5-xa", a.path()), source("a5-xb", b.path()));
+    let a = repo(&[
+        ("lib.rs", "fn run() { helper(); helper(); }\n"),
+        ("other.rs", "fn helper() {}\n"),
+    ]);
+    let sa = source("a5-v", a.path());
     fx.sync(&sa).await;
-    fx.sync(&sb).await;
-    // The composite FK (repository_id, target_symbol_id) keeps a target inside its own
-    // repository; drop it on the throwaway pg so a cross-repository target exists, which leaves
-    // only the single-column `ON DELETE SET NULL` that this test is about.
-    fx.db
-        .batch_execute(
-            "ALTER TABLE code_index.relation DROP CONSTRAINT relation_repository_target_symbol_fkey;
-             UPDATE code_index.relation SET target_symbol_id =
-                 (SELECT id FROM code_index.symbol WHERE repository_id = 'a5-xa' AND name = 'target'),
-                 target_name = 'target'
-              WHERE id = (SELECT id FROM code_index.relation WHERE repository_id = 'a5-xb' LIMIT 1);",
-        )
-        .await
-        .expect("cross-repository target");
-    fx.copy("a5-xa").await;
-    fx.copy("a5-xb").await;
+    fx.copy("a5-v").await;
     fx.assert_same().await;
-
-    // a's file goes away; pg nulls b's relation, and only a's copy pass runs.
-    fs::remove_file(a.path().join("lib.rs")).unwrap();
-    fx.sync(&sa).await;
-    let nulled: i64 = fx
-        .db
-        .query_one(
-            "SELECT count(*) FROM code_index.relation
-              WHERE repository_id = 'a5-xb' AND target_symbol_id IS NULL AND target_name = 'target'",
-            &[],
-        )
-        .await
-        .unwrap()
-        .get(0);
-    assert_eq!(nulled, 1, "pg did not null b's relation");
-    println!(
-        "after replace a (only a's pass): {:?}",
-        fx.copy("a5-xa").await
+    let (before_total, before_null) = fx.relation_counts("a5-v").await;
+    assert!(
+        before_total > before_null,
+        "no relation targets a symbol: fixture is vacuous"
     );
+
+    // code-sync's own path: the file that holds the target symbol vanishes from source.
+    fs::remove_file(a.path().join("other.rs")).unwrap();
+    fx.sync(&sa).await;
+    let (after_total, after_null) = fx.relation_counts("a5-v").await;
+    println!(
+        "pg relation rows of a5-v: before total={before_total} NULL-target={before_null}; after \
+         total={after_total} NULL-target={after_null}; deleted={} newly-NULL={}",
+        before_total - after_total,
+        after_null - before_null
+    );
+    println!("after vanish: {:?}", fx.copy("a5-v").await);
     fx.assert_same().await;
 }
 

@@ -14,11 +14,10 @@
 //! pass (the next `code-sync`, which mirrors every selected repository whether or not it changed)
 //! converges.
 //!
-//! Cross-repository `SET NULL`: pg nulls `relation.target_symbol_id` (single-column FK, `ON DELETE
-//! SET NULL`) in rows of any repository when the target symbol is deleted or re-inserted, and no
-//! statement of ours names those rows. They are found in Surreal before the pass writes anything:
-//! relations of other repositories whose target is one of this repository's symbols, then
-//! re-fingerprinted against pg.
+//! No cross-repository case: `relation` has the composite FK `(repository_id, target_symbol_id)`
+//! to `symbol(repository_id, id)` besides the single-column `SET NULL` one (baseline.sql), so a
+//! relation never targets another repository's symbol and every row a symbol delete touches is
+//! in the repository being copied.
 
 use std::collections::HashMap;
 
@@ -51,14 +50,6 @@ impl Spec {
         format!(
             "SELECT j->>'cid', j->>'h' FROM {} s",
             self.hashed(&format!("WHERE {}", self.pg_scope))
-        )
-    }
-
-    /// `(cid, h)` of the rows whose cid is in `$1`.
-    fn fingerprints_by_cid_sql(&self) -> String {
-        format!(
-            "SELECT j->>'cid', j->>'h' FROM {} s",
-            self.hashed("WHERE id = ANY($1::text[])")
         )
     }
 
@@ -129,10 +120,7 @@ const SPECS: [Spec; 4] = [
     },
 ];
 
-const RELATION: usize = 3;
-
-/// What one pass did to one table (`relation (cross-repo)` is the other repositories' rows that
-/// pg's `SET NULL` rewrote).
+/// What one pass did to one table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeCopy {
     pub table: &'static str,
@@ -279,20 +267,7 @@ impl SurrealClient {
         })
     }
 
-    /// Surreal's relations of other repositories that point at one of `repository`'s symbols:
-    /// the rows pg's `SET NULL` may have rewritten. Read before the pass writes anything, since
-    /// the pass itself removes the symbols they point at.
-    async fn cross_repo_relations(&self, repository: &str) -> Result<HashMap<String, String>> {
-        let repo = literal(repository)?;
-        self.surreal_fingerprints(&format!(
-            "SELECT cid, h FROM code_relation WHERE repository_id != {repo} AND target_symbol_id \
-             IN (SELECT VALUE cid FROM code_symbol WHERE repository_id = {repo});"
-        ))
-        .await
-    }
-
-    /// One repository: make Surreal's four tables equal pg's rows of `repository`, plus the
-    /// other repositories' relations that pg's `SET NULL` rewrote. Safe to repeat.
+    /// One repository: make Surreal's four tables equal pg's rows of `repository`. Safe to repeat.
     ///
     /// # Errors
     /// A pg read or a Surreal request failed; pg is untouched and the next pass converges.
@@ -302,10 +277,9 @@ impl SurrealClient {
         repository: &str,
     ) -> Result<Vec<CodeCopy>> {
         self.ensure_code_tables().await?;
-        let cross = self.cross_repo_relations(repository).await?;
         let repo = literal(repository)?;
         let repo_arg = repository.to_owned();
-        let mut done = Vec::with_capacity(SPECS.len() + 1);
+        let mut done = Vec::with_capacity(SPECS.len());
         for spec in &SPECS {
             let pg_fp = Self::pg_fingerprints(pg, &spec.fingerprints_sql(), &repo_arg).await?;
             let query = format!(
@@ -316,14 +290,6 @@ impl SurrealClient {
             let surreal_fp = self.surreal_fingerprints(&query).await?;
             done.push(self.apply_diff(pg, spec, &pg_fp, &surreal_fp).await?);
         }
-        let ids: Vec<String> = cross.keys().cloned().collect();
-        let pg_fp =
-            Self::pg_fingerprints(pg, &SPECS[RELATION].fingerprints_by_cid_sql(), &ids).await?;
-        let mut copy = self
-            .apply_diff(pg, &SPECS[RELATION], &pg_fp, &cross)
-            .await?;
-        copy.table = "relation (cross-repo)";
-        done.push(copy);
         Ok(done)
     }
 
