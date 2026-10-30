@@ -466,3 +466,75 @@ async fn initialize_widens_a_pre_existing_rust_only_language_check() {
     .await
     .expect("clean up legacy-check repository");
 }
+
+#[tokio::test]
+async fn python_under_claude_and_venv_directories_is_not_indexed() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("app.py"), "def kept():\n    pass\n").unwrap();
+    for ignored in [".claude/worktrees/agent-x", ".venv/lib"] {
+        let dir = root.path().join(ignored);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("dep.py"), "def skipped():\n    pass\n").unwrap();
+    }
+    let repository_id = unique_id("code-ignored-dirs");
+    let configured = source_with_language(&repository_id, root.path(), CodeLanguage::Python);
+    let mut store = initialized_store(&dsn).await;
+    let report = sync_repository(&mut store, &configured)
+        .await
+        .expect("sync ignored-dir fixture");
+    assert_eq!(report.scanned, 1, "only app.py may be scanned");
+    assert_eq!(
+        store.status(Some(&repository_id)).await.unwrap()[0].files,
+        1
+    );
+
+    let db = connect(&dsn).await;
+    db.execute(
+        "DELETE FROM code_index.repository WHERE id = $1",
+        &[&repository_id],
+    )
+    .await
+    .expect("clean up test repository");
+}
+
+async fn index_state(db: &Client, name: &str) -> Option<(u32, bool)> {
+    db.query_opt(
+        "SELECT c.oid, i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+          WHERE c.relnamespace = 'code_index'::regnamespace AND c.relname = $1",
+        &[&name],
+    )
+    .await
+    .unwrap()
+    .map(|row| (row.get(0), row.get(1)))
+}
+
+#[tokio::test]
+async fn an_invalid_file_id_index_is_dropped_and_recreated_valid() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let db = connect(&dsn).await;
+    let store = initialized_store(&dsn).await;
+    for name in ["code_index_symbol_file", "code_index_relation_file"] {
+        let (before_oid, valid) = index_state(&db, name)
+            .await
+            .expect("index missing after initialize");
+        assert!(valid, "{name} must be valid after a fresh initialize");
+        db.execute(
+            "UPDATE pg_index SET indisvalid = false WHERE indexrelid = $1::oid",
+            &[&before_oid],
+        )
+        .await
+        .expect("mark index invalid");
+
+        store.initialize().await.expect("re-initialize");
+        let (after_oid, valid) = index_state(&db, name).await.expect("recreated");
+        assert!(valid, "{name} still invalid after initialize");
+        assert_ne!(before_oid, after_oid, "{name} was not rebuilt");
+    }
+}

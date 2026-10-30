@@ -1589,6 +1589,7 @@ pub(crate) struct CompactResp {
     pub(crate) gc_concept: usize,
     pub(crate) gc_claim_nodes: usize,
     pub(crate) gc_claim_edges: usize,
+    pub(crate) skipped_lock_timeout: Vec<String>,
     pub(crate) total_ms: u128,
 }
 

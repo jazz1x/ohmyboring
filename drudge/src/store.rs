@@ -22,6 +22,7 @@ use deadpool_postgres::{
 };
 use pgvector::Vector;
 use serde_json::{Value, json};
+use tokio_postgres::error::SqlState;
 use tokio_postgres::types::Json as PgJson;
 use tokio_postgres::{Client, Config as PgConfig, NoTls};
 
@@ -316,6 +317,8 @@ pub struct EventLogFilter<'a> {
     pub since_hours: Option<i32>,
 }
 
+const COMPACT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Result of a maintenance compact pass.
 #[derive(Debug, Default)]
 pub struct CompactReport {
@@ -325,6 +328,8 @@ pub struct CompactReport {
     /// swept silently: a number that climbs every run says reindexing keeps failing, which is
     /// the fault worth seeing — the leftovers themselves are only its residue.
     pub dropped_invalid_indexes: usize,
+    /// Tables whose `REINDEX CONCURRENTLY` could not get its lock within the lock timeout.
+    pub skipped_lock_timeout: Vec<String>,
     pub prune_query_log: usize,
     pub gc_tool: usize,
     pub gc_concept: usize,
@@ -3136,6 +3141,13 @@ impl Store {
     /// statement through its own `batch_execute` call so the simple-query protocol keeps them
     /// in autocommit mode rather than wrapping multiple statements in an implicit transaction.
     pub async fn compact(&self) -> Result<CompactSummary> {
+        self.compact_with_lock_timeout(COMPACT_LOCK_TIMEOUT).await
+    }
+
+    pub async fn compact_with_lock_timeout(
+        &self,
+        lock_timeout: std::time::Duration,
+    ) -> Result<CompactSummary> {
         let mut report = CompactReport::default();
         let started = std::time::Instant::now();
         let db = self.db().await?;
@@ -3156,6 +3168,24 @@ impl Store {
         }
         report.vacuum_ms = t0.elapsed().as_millis();
 
+        // The timeout is session state on a pooled connection: reset it before the connection
+        // goes back, whether or not the reindex phase succeeded.
+        db.batch_execute(&format!("SET lock_timeout = {}", lock_timeout.as_millis()))
+            .await
+            .context("set lock_timeout for reindex")?;
+        let reindexed = Self::reindex_tables(&db, &mut report).await;
+        let reset = db.batch_execute("RESET lock_timeout").await;
+        reindexed?;
+        reset.context("reset lock_timeout after reindex")?;
+
+        self.finish_compact(&db, report, started).await
+    }
+
+    /// `REINDEX TABLE CONCURRENTLY` waits for every older transaction, so under a held
+    /// transaction it never ends. A table that cannot be locked within the session's
+    /// `lock_timeout` is skipped and named in `report.skipped_lock_timeout`; the cancelled
+    /// reindex leaves its `_ccnew` index, which the next run's sweep below drops and counts.
+    async fn reindex_tables(db: &Client, report: &mut CompactReport) -> Result<()> {
         let t0 = std::time::Instant::now();
         for table in [
             "document",
@@ -3205,12 +3235,27 @@ impl Store {
                     .with_context(|| format!("drop invalid index {name}"))?;
                 report.dropped_invalid_indexes += 1;
             }
-            db.batch_execute(&format!("REINDEX TABLE CONCURRENTLY {table};"))
+            match db
+                .batch_execute(&format!("REINDEX TABLE CONCURRENTLY {table};"))
                 .await
-                .with_context(|| format!("reindex table {table}"))?;
+            {
+                Ok(()) => {}
+                Err(e) if e.code() == Some(&SqlState::LOCK_NOT_AVAILABLE) => {
+                    report.skipped_lock_timeout.push(table.to_owned());
+                }
+                Err(e) => return Err(e).with_context(|| format!("reindex table {table}")),
+            }
         }
         report.reindex_ms = t0.elapsed().as_millis();
+        Ok(())
+    }
 
+    async fn finish_compact(
+        &self,
+        db: &Client,
+        mut report: CompactReport,
+        started: std::time::Instant,
+    ) -> Result<CompactSummary> {
         let pruned = db
             .execute(
                 "DELETE FROM query_log WHERE created_at < now() - interval '90 days';",

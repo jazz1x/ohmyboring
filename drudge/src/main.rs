@@ -460,7 +460,7 @@ async fn main() -> Result<()> {
             let store = store.as_ref().context(VEC_OFF)?;
             let summary = store.compact().await?;
             println!(
-                "compact done — vacuum {}ms, reindex {}ms, prune_query_log {}, gc(tool {} concept {} claim nodes {} claim edges {}), total {}ms",
+                "compact done — vacuum {}ms, reindex {}ms, prune_query_log {}, gc(tool {} concept {} claim nodes {} claim edges {}), skipped_lock_timeout {:?}, total {}ms",
                 summary.report.vacuum_ms,
                 summary.report.reindex_ms,
                 summary.report.prune_query_log,
@@ -468,6 +468,7 @@ async fn main() -> Result<()> {
                 summary.report.gc_concept,
                 summary.report.gc_claim_nodes,
                 summary.report.gc_claim_edges,
+                summary.report.skipped_lock_timeout,
                 summary.total_ms,
             );
         }

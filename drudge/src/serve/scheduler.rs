@@ -177,7 +177,7 @@ async fn run_compact(store: Option<&Store>, failure: &Mutex<Option<CompactFailur
     match do_compact(store).await {
         Ok(s) => {
             eprintln!(
-                "[scheduler] compact done — vacuum {}ms reindex {}ms prune_query_log {} gc(tool {} concept {} claim nodes {} claim edges {}) sealed_superseded {} total {}ms",
+                "[scheduler] compact done — vacuum {}ms reindex {}ms prune_query_log {} gc(tool {} concept {} claim nodes {} claim edges {}) sealed_superseded {} skipped_lock_timeout {:?} total {}ms",
                 s.report.vacuum_ms,
                 s.report.reindex_ms,
                 s.report.prune_query_log,
@@ -186,6 +186,7 @@ async fn run_compact(store: Option<&Store>, failure: &Mutex<Option<CompactFailur
                 s.report.gc_claim_nodes,
                 s.report.gc_claim_edges,
                 s.report.sealed_superseded_claims,
+                s.report.skipped_lock_timeout,
                 s.total_ms
             );
             *failure.lock().await = None;
