@@ -65,6 +65,9 @@ const KEY_SEP: char = '\u{1f}';
 const KEY_PAGE: usize = 20_000;
 /// Rows per pg read when `catch_up` fetches the rows Surreal lacks.
 const CATCH_UP_BATCH: usize = 500;
+/// Rows a catch-up deletes from one HNSW table before the index is removed for the delete and
+/// rebuilt after (`without_hnsw`): below it the index keeps up with the deletes.
+const MASS_DELETE: usize = 2_000;
 /// Prefix of a per-project chunk table. The global `chunk` table keeps every chunk; a project table
 /// keeps that project's chunks only, so a project-filtered KNN scans the project's graph instead of
 /// filtering inside the global one (measured p95 120-150 ms for the in-KNN filter).
@@ -1750,6 +1753,105 @@ impl SurrealClient {
         })
     }
 
+    /// Run `work` (a mass delete) with the HNSW index of each table removed, then define a new
+    /// generation of it and wait until it is `ready`. Measured on v3.3.5 with 14k claim deletes
+    /// (r3-mem-s1): every delete the index sees keeps ~85 KB in the server for good (container
+    /// 2.9 -> 4.5 GiB in 6.1k deletes, not given back when idle), whatever the request size; the
+    /// same 3,000 deletes with the index removed moved it by -17 MiB and the rebuild by +28 MiB.
+    /// While the index is gone a KNN read on the table is an error, never a pg fallback, so this
+    /// is for a mass delete only (`MASS_DELETE`). The index is rebuilt whether `work` succeeded or
+    /// not; either failure is returned.
+    async fn without_hnsw<F, Fut>(&self, tables: &[String], work: F) -> Result<()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        let mut removed: Vec<(String, String, String)> = Vec::new();
+        let mut dropped: Result<()> = Ok(());
+        for table in tables {
+            match self.remove_hnsw(table).await {
+                Ok(gone) => removed.push(gone),
+                Err(e) => {
+                    dropped = Err(e);
+                    break;
+                }
+            }
+        }
+        let worked = match dropped {
+            Ok(()) => work().await,
+            Err(e) => Err(e),
+        };
+        let mut rebuilt: Result<()> = Ok(());
+        for (table, old, def) in &removed {
+            // The new index is built from every row `work` wrote, so the swap that follows the
+            // sync has nothing left to rebuild for them (a second build measured +0.67 GiB).
+            let step = match self.dirty(table).await {
+                Ok(changed) => self
+                    .define_next_generation(table, old, def)
+                    .await
+                    .map(|_| changed),
+                Err(e) => Err(e),
+            };
+            let settled = match step {
+                Ok(changed) => self.settle_dirty(table, changed).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = settled {
+                rebuilt = rebuilt.and(Err(e));
+            }
+        }
+        match (worked, rebuilt) {
+            (Ok(()), rebuilt) => rebuilt,
+            (Err(e), Ok(())) => Err(e),
+            (Err(e), Err(r)) => Err(e.context(format!("the HNSW rebuild failed too: {r:#}"))),
+        }
+    }
+
+    /// Take `changed` rows off the table's dirty count, never below zero (rows mirrored while an
+    /// index build ran stay counted for the next swap).
+    async fn settle_dirty(&self, table: &str, changed: u64) -> Result<()> {
+        self.run(&format!(
+            "UPSERT type::record('vector_meta', '{table}') SET dirty = math::max([(dirty ?? 0) - {changed}, 0]);"
+        ))
+        .await
+        .map(|_| ())
+    }
+
+    /// `(table, index name, DEFINE INDEX text)` of the index just removed.
+    async fn remove_hnsw(&self, table: &str) -> Result<(String, String, String)> {
+        let (old, def) = self.hnsw_index(table).await?;
+        self.run(&format!(
+            "REMOVE INDEX {} ON {};",
+            quote_ident(&old),
+            quote_ident(table)
+        ))
+        .await?;
+        Ok((table.to_owned(), old, def))
+    }
+
+    /// Define the next generation of an HNSW index from the old one's definition text and wait
+    /// until it is `ready`; a build that does not get there is removed and is the error.
+    async fn define_next_generation(&self, table: &str, old: &str, def: &str) -> Result<Value> {
+        let new = next_generation(old);
+        let rest = def
+            .strip_prefix("DEFINE INDEX ")
+            .and_then(|d| d.split_once(" ON "))
+            .map(|(_, rest)| rest)
+            .ok_or_else(|| anyhow!("{old} 의 정의를 읽지 못함: {def}"))?;
+        let (q_table, q_new) = (quote_ident(table), quote_ident(&new));
+        self.run(&format!("DEFINE INDEX {q_new} ON {rest} CONCURRENTLY;"))
+            .await
+            .with_context(|| format!("새 인덱스 {new} 정의 실패"))?;
+        match self.await_ready(&q_new, &q_table).await {
+            Ok(building) => Ok(building),
+            Err(e) => {
+                self.run(&format!("REMOVE INDEX {q_new} ON {q_table};"))
+                    .await?;
+                Err(e.context(format!("새 인덱스 {new} 가 ready 가 되지 못함")))
+            }
+        }
+    }
+
     /// A project table is only read when it exists, so it must be complete when it appears: define
     /// it, then copy every chunk pg holds for the project.
     async fn create_project_table(&self, store: &Store, table: &ProjectTable) -> Result<()> {
@@ -2331,8 +2433,18 @@ impl SurrealClient {
             paths.extend(found);
         }
         let paths: Vec<String> = paths.into_iter().collect();
-        for batch in paths.chunks(CATCH_UP_BATCH) {
-            self.mirror_chunks(store, batch).await?;
+        let mirror_chunks = || async {
+            for batch in paths.chunks(CATCH_UP_BATCH) {
+                self.mirror_chunks(store, batch).await?;
+            }
+            Ok(())
+        };
+        if stale.len() > MASS_DELETE {
+            let mut tables = vec!["chunk".to_owned()];
+            tables.extend(self.project_tables().await?);
+            self.without_hnsw(&tables, mirror_chunks).await?;
+        } else {
+            mirror_chunks().await?;
         }
 
         let pg_claims = pg_claim_keys(&db).await?;
@@ -2341,6 +2453,7 @@ impl SurrealClient {
         let want: std::collections::HashSet<&str> = pg_claims.iter().map(String::as_str).collect();
         let stale: Vec<&String> = have.iter().filter(|k| !want.contains(k.as_str())).collect();
         let missing: Vec<&String> = pg_claims.iter().filter(|k| !have.contains(*k)).collect();
+        let stale_claims = stale.len();
         written += missing.len();
         deleted += stale.len();
         let slots: Vec<(String, String)> = missing
@@ -2353,13 +2466,22 @@ impl SurrealClient {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        for batch in slots.chunks(CATCH_UP_BATCH) {
-            let scope = Scope {
-                paths: Vec::new(),
-                slots: batch.to_vec(),
-                nodes: Vec::new(),
-            };
-            self.mirror_claims(store, &scope).await?;
+        let mirror_slots = || async {
+            for batch in slots.chunks(CATCH_UP_BATCH) {
+                let scope = Scope {
+                    paths: Vec::new(),
+                    slots: batch.to_vec(),
+                    nodes: Vec::new(),
+                };
+                self.mirror_claims(store, &scope).await?;
+            }
+            Ok(())
+        };
+        if stale_claims > MASS_DELETE {
+            self.without_hnsw(&["claim".to_owned()], mirror_slots)
+                .await?;
+        } else {
+            mirror_slots().await?;
         }
         Ok((written, deleted))
     }

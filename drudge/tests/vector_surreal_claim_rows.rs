@@ -211,3 +211,95 @@ async fn catch_up_levels_the_vector_claim_and_chunk_tables() {
         assert!(t.same(), "after catch_up: {}", t.line());
     }
 }
+
+/// A catch-up that deletes thousands of vector claims must not feed them to the HNSW index one by
+/// one (v3.3.5 keeps ~85 KB of server memory per index delete, measured 2.9 -> 4.5 GiB for 6.1k):
+/// it removes the index for the delete and defines the next generation after, which is `ready` and
+/// answers again with the rows pg still holds.
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_mass_delete_catch_up_rebuilds_the_claim_index_instead_of_deleting_through_it() {
+    let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
+    let url = std::env::var("BORING_TEST_SURREAL_URL").expect("BORING_TEST_SURREAL_URL");
+    let config: SurrealConfig = serde_json::from_value(
+        json!({"url": url, "namespace": "claim_mass", "database": "claim_mass"}),
+    )
+    .unwrap();
+    let client = SurrealClient::new(config.settings(&|k| std::env::var(k).ok()).unwrap()).unwrap();
+    let store = Store::open(&dsn, DIM).await.expect("open store");
+    let (db, conn) = tokio_postgres::connect(&dsn, NoTls).await.expect("connect");
+    tokio::spawn(conn);
+    db.batch_execute("DELETE FROM chunk; DELETE FROM claim; DELETE FROM document;")
+        .await
+        .unwrap();
+    client.fill_from(&store).await.expect("fill of an empty pg");
+
+    let path = "/vault/wiki/claim-mass.md";
+    store
+        .upsert_document(&front(path), "sha", SystemTime::now())
+        .await
+        .expect("document");
+    let mut emb = vec![0.0; DIM];
+    emb[0] = 1.0;
+    let (kept, total) = (50, 2_100);
+    for i in 0..total {
+        let mut e = emb.clone();
+        e[1 + i % 100] = 0.01 * f32::from(u8::try_from(1 + i / 100).expect("at most 22 steps"));
+        store
+            .upsert_claim(
+                &format!("claim-mass-{i:04}"),
+                "goal",
+                "a long enough value to count as a statement",
+                path,
+                SystemTime::now() - Duration::from_secs(60 + i as u64),
+                &e,
+                "decision",
+                "certain",
+            )
+            .await
+            .expect("claim");
+    }
+    client
+        .mirror(&store, &Scope::notes([path.to_owned()]))
+        .await
+        .expect("mirror");
+    let index_names = |statements: Vec<serde_json::Value>| -> Vec<String> {
+        statements[0]["indexes"]
+            .as_object()
+            .expect("indexes")
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let before = index_names(client.run("INFO FOR TABLE claim;").await.expect("info"));
+
+    // The Python door's kind of write: pg only, past the mass-delete line.
+    db.execute(
+        "DELETE FROM claim WHERE subject > $1",
+        &[&format!("claim-mass-{:04}", kept - 1)],
+    )
+    .await
+    .unwrap();
+    client.catch_up(&store).await.expect("catch_up");
+
+    for t in client.compare(&store).await.expect("compare") {
+        assert!(t.same(), "after the mass delete: {}", t.line());
+    }
+    let after = index_names(client.run("INFO FOR TABLE claim;").await.expect("info"));
+    assert_ne!(
+        before, after,
+        "the index must be a new generation: {after:?}"
+    );
+    assert!(
+        after.iter().any(|n| n.starts_with("claim_embedding_g")),
+        "{after:?}"
+    );
+    let near = client
+        .run(&format!(
+            "SELECT subject FROM claim WHERE embedding <|3,100|> {};",
+            serde_json::to_string(&emb).unwrap()
+        ))
+        .await
+        .expect("knn");
+    assert_eq!(near[0].as_array().expect("rows").len(), 3);
+}
