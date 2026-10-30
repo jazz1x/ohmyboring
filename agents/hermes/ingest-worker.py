@@ -122,7 +122,9 @@ match boring_config.schedule():
 WINDOW_H = _collect.window_hours
 MIN_KB = _collect.min_bytes / 1024
 STABLE_AGE_S = _collect.stable_age_seconds
-CLAMP = int(os.environ.get("INGEST_CLAMP") or "4000")  # 12B digest ceiling — above this the agent derails
+# Measured wiki-00000012707 (gemma4:12b, 10 sessions, 30 calls/clamp): 1st-gate misses 7/30 at 4000,
+# 1/30 at 8000, 0/29 at 12000; timeouts 0/30, 0/30, 1/30 (p95 68s/62s/96s of the 120s limit).
+CLAMP = int(os.environ.get("INGEST_CLAMP") or "8000")
 MIN_TEXT = 500  # below this = no real content → skip
 # A pending-marker prevents the same session being re-offered every tick while the agent is still
 # working on it (or just failed). It expires so a crashed tick doesn't pin a session forever.
