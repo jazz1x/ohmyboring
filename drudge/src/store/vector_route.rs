@@ -58,6 +58,21 @@ impl Store {
 }
 
 impl Store {
+    /// On `backend=surreal`: write the `document`, `node` and `edge` rows pg holds and Surreal
+    /// lacks, delete the ones only Surreal holds (`SurrealClient::catch_up`) — the rows the
+    /// Python door wrote straight to pg. Pgvector: nothing to do. Returns `(written, deleted)`.
+    ///
+    /// # Errors
+    /// A pg or Surreal read or write failed.
+    pub async fn catch_up_surreal(&self) -> Result<(usize, usize)> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => Ok((0, 0)),
+            VectorRoute::Surreal(client) => client.catch_up(self).await,
+        }
+    }
+}
+
+impl Store {
     /// On `backend=surreal`: swap-in rebuild of the HNSW indexes whose rows changed (see
     /// `SurrealClient::swap_if_changed`); on pgvector there is nothing to swap.
     ///

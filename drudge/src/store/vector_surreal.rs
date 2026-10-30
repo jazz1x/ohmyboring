@@ -58,6 +58,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
 const INDEX_BUILD_WAIT: Duration = Duration::from_mins(10);
 const INDEX_BUILD_POLL: Duration = Duration::from_millis(500);
 const KEY_SEP: char = '\u{1f}';
+/// Keys per Surreal answer when a whole table's keys are read (`table_keys`).
+const KEY_PAGE: usize = 20_000;
+/// Rows per pg read when `catch_up` fetches the rows Surreal lacks.
+const CATCH_UP_BATCH: usize = 500;
 /// Prefix of a per-project chunk table. The global `chunk` table keeps every chunk; a project table
 /// keeps that project's chunks only, so a project-filtered KNN scans the project's graph instead of
 /// filtering inside the global one (measured p95 120-150 ms for the in-KNN filter).
@@ -1168,6 +1172,81 @@ const DOCUMENT_DDL: &str = "DEFINE TABLE document SCHEMAFULL;
          DEFINE FIELD updated_us ON document TYPE int;
          DEFINE FIELD author ON document TYPE string;";
 
+/// pg's `(document, node, edge)` keys, in the shapes Surreal keys them by.
+async fn pg_graph_keys(
+    db: &tokio_postgres::Client,
+) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+    let documents = db
+        .query("SELECT source_path FROM document;", &[])
+        .await
+        .context("read document keys from pgvector")?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    let nodes = db
+        .query("SELECT id FROM node;", &[])
+        .await
+        .context("read node ids from pgvector")?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    let edges = db
+        .query("SELECT src, dst, kind FROM edge;", &[])
+        .await
+        .context("read edge keys from pgvector")?
+        .iter()
+        .map(|r| {
+            edge_key(
+                &r.get::<_, String>(0),
+                &r.get::<_, String>(1),
+                &r.get::<_, String>(2),
+            )
+        })
+        .collect();
+    Ok((documents, nodes, edges))
+}
+
+/// The record literals of the pg rows named by `keys` (`document`, `node` or `edge`).
+async fn pg_literals(store: &Store, table: &str, keys: &[String]) -> Result<Vec<String>> {
+    let db = store.db().await?;
+    let rows = match table {
+        "document" => {
+            db.query(&document_select("WHERE d.source_path = ANY($1)"), &[&keys])
+                .await
+        }
+        "node" => {
+            db.query(&node_select("WHERE n.id = ANY($1)"), &[&keys])
+                .await
+        }
+        _ => {
+            let parts: Vec<Vec<&str>> = keys.iter().map(|k| k.split(KEY_SEP).collect()).collect();
+            let column = |i: usize| -> Vec<&str> {
+                parts
+                    .iter()
+                    .map(|p| p.get(i).copied().unwrap_or(""))
+                    .collect()
+            };
+            db.query(
+                &edge_select(
+                    "WHERE (e.src, e.dst, e.kind) IN \
+                     (SELECT * FROM unnest($1::text[], $2::text[], $3::text[]))",
+                ),
+                &[&column(0), &column(1), &column(2)],
+            )
+            .await
+        }
+    }
+    .with_context(|| format!("read the {table} rows Surreal lacks from pgvector"))?;
+    Ok(rows
+        .iter()
+        .map(|r| match table {
+            "document" => document_literal(r).1,
+            "node" => node_literal(r).1,
+            _ => edge_literal(r).1,
+        })
+        .collect())
+}
+
 /// The keys one side holds, per table.
 struct TableKeys {
     documents: Vec<String>,
@@ -1700,58 +1779,83 @@ impl SurrealClient {
         self.reconcile("claim", wanted, existing).await
     }
 
+    /// Every `cid` of one table, a page at a time in the table's own key order: one answer
+    /// carrying the 272k edge keys at once is what a 8GB Surreal VM could not hold.
+    async fn table_keys(&self, table: &str) -> Result<Vec<String>> {
+        let mut keys = Vec::new();
+        loop {
+            let query = format!(
+                "SELECT VALUE cid FROM {table} LIMIT {KEY_PAGE} START {};",
+                keys.len()
+            );
+            let page = first_statement(&query, self.rows::<String>(&query).await?)?;
+            let done = page.len() < KEY_PAGE;
+            keys.extend(page);
+            if done {
+                return Ok(keys);
+            }
+        }
+    }
+
     async fn surreal_keys(&self) -> Result<TableKeys> {
-        let document_query = "SELECT VALUE cid FROM document;";
-        let documents =
-            first_statement(document_query, self.rows::<String>(document_query).await?)?;
-        let node_query = "SELECT VALUE cid FROM node;";
-        let nodes = first_statement(node_query, self.rows::<String>(node_query).await?)?;
-        let edge_query = "SELECT VALUE cid FROM edge;";
-        let edges = first_statement(edge_query, self.rows::<String>(edge_query).await?)?;
-        let chunk_query = "SELECT VALUE cid FROM chunk;";
-        let chunks = first_statement(chunk_query, self.rows::<String>(chunk_query).await?)?;
-        let claim_query = "SELECT VALUE cid FROM claim;";
-        let claims = first_statement(claim_query, self.rows::<String>(claim_query).await?)?;
         Ok(TableKeys {
-            documents,
-            nodes,
-            edges,
-            chunks,
-            claims,
+            documents: self.table_keys("document").await?,
+            nodes: self.table_keys("node").await?,
+            edges: self.table_keys("edge").await?,
+            chunks: self.table_keys("chunk").await?,
+            claims: self.table_keys("claim").await?,
         })
+    }
+
+    /// Bring Surreal's `document`, `node` and `edge` rows level with pg's by key: rows pg has and
+    /// Surreal lacks are written, rows Surreal has and pg lacks are deleted. This is how rows the
+    /// Python door wrote straight to pg (no mirror there) reach Surreal on the next sync. A key
+    /// both sides hold is not re-read, so a changed value of an existing key waits for the next
+    /// fill. Returns `(written, deleted)`.
+    pub async fn catch_up(&self, store: &Store) -> Result<(usize, usize)> {
+        let (pg_documents, pg_nodes, pg_edges) = pg_graph_keys(&*store.db().await?).await?;
+        let mut written = 0;
+        let mut deleted = 0;
+        let mut stale_edges = Vec::new();
+        let mut stale_nodes = Vec::new();
+        let mut stale_documents = Vec::new();
+        for (table, pg_keys, stale) in [
+            ("node", pg_nodes, &mut stale_nodes),
+            ("edge", pg_edges, &mut stale_edges),
+            ("document", pg_documents, &mut stale_documents),
+        ] {
+            let have: std::collections::HashSet<String> =
+                self.table_keys(table).await?.into_iter().collect();
+            let want: std::collections::HashSet<&str> =
+                pg_keys.iter().map(String::as_str).collect();
+            *stale = have
+                .iter()
+                .filter(|k| !want.contains(k.as_str()))
+                .cloned()
+                .collect();
+            let missing: Vec<String> = pg_keys.into_iter().filter(|k| !have.contains(k)).collect();
+            for batch in missing.chunks(CATCH_UP_BATCH) {
+                let literals = pg_literals(store, table, batch).await?;
+                written += literals.len();
+                self.upsert_rows(table, &literals).await?;
+            }
+        }
+        for (table, keys) in [
+            ("edge", &stale_edges),
+            ("node", &stale_nodes),
+            ("document", &stale_documents),
+        ] {
+            deleted += keys.len();
+            self.delete_rows(table, keys).await?;
+        }
+        Ok((written, deleted))
     }
 
     /// Read-only: row count and key-set hash per table, pg against Surreal, over what is there
     /// now (the doctor line). Same tables and key shapes as the fill's readback.
     pub async fn compare(&self, store: &Store) -> Result<Vec<FillTable>> {
         let db = store.db().await?;
-        let pg_documents: Vec<String> = db
-            .query("SELECT source_path FROM document;", &[])
-            .await
-            .context("read document keys from pgvector")?
-            .iter()
-            .map(|r| r.get(0))
-            .collect();
-        let pg_nodes: Vec<String> = db
-            .query("SELECT id FROM node;", &[])
-            .await
-            .context("read node ids from pgvector")?
-            .iter()
-            .map(|r| r.get(0))
-            .collect();
-        let pg_edges: Vec<String> = db
-            .query("SELECT src, dst, kind FROM edge;", &[])
-            .await
-            .context("read edge keys from pgvector")?
-            .iter()
-            .map(|r| {
-                edge_key(
-                    &r.get::<_, String>(0),
-                    &r.get::<_, String>(1),
-                    &r.get::<_, String>(2),
-                )
-            })
-            .collect();
+        let (pg_documents, pg_nodes, pg_edges) = pg_graph_keys(&db).await?;
         let pg_chunks: Vec<String> = db
             .query(&format!("SELECT c.id {CHUNK_FROM};"), &[])
             .await

@@ -35,6 +35,8 @@ mod scheduler;
 mod search_route;
 #[cfg(test)]
 mod split_tests;
+#[cfg(test)]
+mod surreal_graph_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DbHealthState {

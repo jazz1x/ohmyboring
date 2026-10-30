@@ -566,6 +566,47 @@ async fn a_legacy_sha_move_reaches_the_surreal_document() {
     );
 }
 
+/// Rows the Python door writes straight to pg (no mirror there) reach Surreal on the next sync:
+/// the catch-up the sync ends with writes what pg has and Surreal lacks, deletes the reverse.
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn rows_written_straight_to_pg_reach_surreal_on_catch_up() {
+    let f = fixture("w_catchup").await;
+    f.db.batch_execute("DELETE FROM edge; DELETE FROM node;")
+        .await
+        .unwrap();
+    f.client
+        .fill_from(&f.store)
+        .await
+        .expect("fill of an empty graph");
+    let path = format!("/vault/wiki/py-{}.md", f.nanos);
+    f.db.batch_execute(&format!(
+        "INSERT INTO document (source_path, origin, project, kind, title, tags, sha, updated_at, author)
+           VALUES ('{path}', 'personal', 'writes', 'note', 'py', '{{}}', 'sha', now(), 'inferred');
+         INSERT INTO node (id, kind, label, outcome) VALUES ('gap:py-{n}', 'gap', 'q', 'missing'),
+                                                            ('session:py-{n}', 'session', 't', NULL);
+         INSERT INTO edge (src, dst, kind, judge) VALUES ('session:py-{n}', 'gap:py-{n}', 'gap', NULL),
+                                                         ('gap:py-{n}', 'doc:{path}', 'gap_handed', 'owner');",
+        n = f.nanos
+    ))
+    .await
+    .unwrap();
+    let (written, deleted) = f.store.catch_up_surreal().await.expect("catch up");
+    assert_eq!((written, deleted), (5, 0));
+    f.assert_graph_same("after catch-up of python-door rows", 2, 2)
+        .await;
+    let (pg_docs, surreal_docs) = f.document_rows().await;
+    assert_eq!(pg_docs, surreal_docs, "document rows differ");
+
+    // a row only Surreal holds leaves on the next catch-up
+    f.db.batch_execute("DELETE FROM edge; DELETE FROM node;")
+        .await
+        .unwrap();
+    let (written, deleted) = f.store.catch_up_surreal().await.expect("catch up again");
+    assert_eq!((written, deleted), (0, 4));
+    f.assert_graph_same("after pg dropped the rows", 0, 0).await;
+}
+
 #[tokio::test]
 #[ignore = "needs throwaway pg: see the run command in this file's header"]
 async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {

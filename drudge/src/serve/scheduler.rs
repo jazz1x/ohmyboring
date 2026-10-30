@@ -133,6 +133,7 @@ pub(crate) async fn do_sync(
         Err(e) => eprintln!("[scheduler] anchor staleness warning (ignored): {e:#}"),
     }
 
+    surreal_catch_up(store).await?;
     surreal_last_stage(store).await?;
 
     Ok(SyncOutcome {
@@ -166,6 +167,16 @@ async fn surreal_last_stage(store: &Store) -> Result<()> {
         "vector-swap 실패 — 옛 인덱스는 그대로 (drudge vector-swap 으로 다시 확인)"
     );
     log_copy.map(|_| ())
+}
+
+/// Rows the Python door wrote straight to pg never went through a mirror: level Surreal's
+/// document/node/edge with pg's by key (no-op on pgvector). A failure fails the sync.
+async fn surreal_catch_up(store: &Store) -> Result<()> {
+    let (written, deleted) = store.catch_up_surreal().await?;
+    if written + deleted > 0 {
+        eprintln!("[scheduler] surreal catch-up: wrote {written}, deleted {deleted}");
+    }
+    Ok(())
 }
 
 /// One compact cycle. Vector-off is a no-op.
