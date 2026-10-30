@@ -58,7 +58,7 @@ async fn consumption_with_a_dead_surreal_says_pg_has_the_session() {
         "POST",
         "/consumption",
         &[],
-        r#"{"session_id":"s-c","observed_at":"2026-10-30","used":[],"contested":[]}"#,
+        r#"{"session_id":"s-c","observed_at":"2026-10-30T00:00:00Z","used":[],"contested":[]}"#,
     )
     .await;
     let body = String::from_utf8_lossy(&body).into_owned();

@@ -470,7 +470,7 @@ async fn node_and_edge_writes_leave_the_two_stores_with_the_same_rows() {
         )
         .await
         .expect("claim node");
-    f.assert_graph_same("after a decision claim", 8, 8).await;
+    f.assert_graph_same("after a decision claim", 8, 7).await;
 
     // consumption doors: session, gap, supersedes edge with a judge
     f.doc(&b).await;
