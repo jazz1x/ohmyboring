@@ -31,6 +31,7 @@
 //! | current_claims `c.stale_at IS NULL`                  | `claim.stale_us`                     |
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -39,6 +40,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::sync::RwLock;
 use tokio_postgres::Row;
 
 use super::{AnchoredClaim, DistKind, Hit, NOT_USER_MEMORY_RE, Recurrence, Store};
@@ -60,6 +62,31 @@ const KEY_SEP: char = '\u{1f}';
 pub struct SurrealClient {
     http: reqwest::Client,
     settings: SurrealSettings,
+    token: Arc<RwLock<Option<Token>>>,
+}
+
+/// The `/signin` token, shared by every clone. Hand-written `Debug`: it must never reach a log.
+struct Token(String);
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Token(..)")
+    }
+}
+
+/// What one `/rpc` call came back as. The server's token lifetime is its own setting and the root
+/// default is not documented, so a token going stale mid-run is a real state, not a bug to hide.
+enum Sent {
+    Rejected(String),
+    Answered {
+        status: reqwest::StatusCode,
+        text: String,
+    },
+}
+
+#[derive(Deserialize)]
+struct SigninReply {
+    token: String,
 }
 
 #[derive(Deserialize)]
@@ -85,7 +112,88 @@ impl SurrealClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .context("build surreal http client")?;
-        Ok(Self { http, settings })
+        Ok(Self {
+            http,
+            settings,
+            token: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// `POST /signin` as the root user; the token goes into the shared slot. Basic auth on every
+    /// request costs the server a password check each time (~10-13 ms vs ~0.2 ms for a Bearer).
+    async fn sign_in(&self) -> Result<String> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/signin",
+                self.settings.url.trim_end_matches('/')
+            ))
+            .header("Accept", "application/json")
+            .json(&json!({"user": self.settings.user, "pass": self.settings.password}))
+            .send()
+            .await
+            .context("surreal signin request")?;
+        let status = response.status();
+        let text = response.text().await.context("surreal signin body")?;
+        ensure!(
+            status.is_success(),
+            "surreal signin (http {status}): {text}"
+        );
+        let reply: SigninReply = serde_json::from_str(&text)
+            .with_context(|| format!("surreal signin reply (http {status}) has no token"))?;
+        *self.token.write().await = Some(Token(reply.token.clone()));
+        Ok(reply.token)
+    }
+
+    /// Lets a test stand in for a token the server no longer accepts; expiry cannot be waited for.
+    #[doc(hidden)]
+    pub async fn replace_token(&self, token: &str) {
+        *self.token.write().await = Some(Token(token.to_owned()));
+    }
+
+    async fn current_token(&self) -> Result<String> {
+        let held = self.token.read().await.as_ref().map(|t| t.0.clone());
+        match held {
+            Some(t) => Ok(t),
+            None => self.sign_in().await,
+        }
+    }
+
+    async fn send(&self, token: &str, body: &Value) -> Result<Sent> {
+        let response = self
+            .http
+            .post(format!("{}/rpc", self.settings.url.trim_end_matches('/')))
+            .bearer_auth(token)
+            .header("Surreal-NS", self.settings.namespace.as_str())
+            .header("Surreal-DB", self.settings.database.as_str())
+            .header("Accept", "application/json")
+            .json(body)
+            .send()
+            .await
+            .context("surreal request")?;
+        let status = response.status();
+        let text = response.text().await.context("surreal response body")?;
+        match status {
+            reqwest::StatusCode::UNAUTHORIZED => Ok(Sent::Rejected(text)),
+            _ => Ok(Sent::Answered { status, text }),
+        }
+    }
+
+    /// Only an auth rejection signs in again, once, and resends only this call; a second rejection
+    /// fails with the server's message.
+    async fn send_authed(&self, body: &Value) -> Result<(reqwest::StatusCode, String)> {
+        let token = self.current_token().await?;
+        let sent = match self.send(&token, body).await? {
+            Sent::Rejected(_) => {
+                let fresh = self.sign_in().await?;
+                self.send(&fresh, body).await?
+            }
+            answered @ Sent::Answered { .. } => answered,
+        };
+        match sent {
+            Sent::Rejected(message) => Err(anyhow!("surreal: {}", message.trim())),
+            Sent::Answered { status, text } => Ok((status, text)),
+        }
     }
 
     /// Run SurrealQL; one JSON value per statement. Any statement that did not answer `OK` fails
@@ -96,19 +204,7 @@ impl SurrealClient {
     /// anchor), a datetime or a uuid as that type, which broke the first fill on the copy.
     pub async fn run(&self, sql: &str) -> Result<Vec<Value>> {
         let body = json!({"id": 1, "method": "query", "params": [sql]});
-        let response = self
-            .http
-            .post(format!("{}/rpc", self.settings.url.trim_end_matches('/')))
-            .basic_auth(&self.settings.user, Some(&self.settings.password))
-            .header("Surreal-NS", self.settings.namespace.as_str())
-            .header("Surreal-DB", self.settings.database.as_str())
-            .header("Accept", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .context("surreal request")?;
-        let status = response.status();
-        let text = response.text().await.context("surreal response body")?;
+        let (status, text) = self.send_authed(&body).await?;
         let reply: RpcReply = serde_json::from_str(&text)
             .with_context(|| format!("surreal reply (http {status}) is not an rpc reply"))?;
         match (reply.error, reply.result) {
