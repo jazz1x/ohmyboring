@@ -53,6 +53,10 @@ use crate::vector::VectorIndex;
 const FILL_BATCH: usize = 40;
 /// Per-request ceiling for the I/O boundary; an HNSW insert batch is the slowest request.
 const REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
+/// Ceiling and interval for waiting on a `DEFINE INDEX ... CONCURRENTLY` build (27,722 claims
+/// took 4.3s); the wait is a failure past the ceiling, never silent.
+const INDEX_BUILD_WAIT: Duration = Duration::from_mins(10);
+const INDEX_BUILD_POLL: Duration = Duration::from_millis(500);
 const KEY_SEP: char = '\u{1f}';
 /// Prefix of a per-project chunk table. The global `chunk` table keeps every chunk; a project table
 /// keeps that project's chunks only, so a project-filtered KNN scans the project's graph instead of
@@ -1138,6 +1142,31 @@ impl SurrealClient {
         }
     }
 
+    /// Poll `INFO FOR INDEX` until `building.status` is `ready`; `error`/`failed`, a missing
+    /// `building`, or the deadline is an `Err`.
+    async fn await_ready(&self, q_index: &str, q_table: &str) -> Result<Value> {
+        let info = format!("INFO FOR INDEX {q_index} ON {q_table};");
+        let polls = INDEX_BUILD_WAIT.as_millis() / INDEX_BUILD_POLL.as_millis();
+        for _ in 0..polls {
+            let building = self
+                .run(&info)
+                .await?
+                .into_iter()
+                .next()
+                .and_then(|v| v.get("building").cloned())
+                .ok_or_else(|| anyhow!("{info} 에 building 이 없음"))?;
+            match building.get("status").and_then(Value::as_str) {
+                Some("ready") => return Ok(building),
+                Some("error" | "failed") => return Err(anyhow!("인덱스 빌드 실패: {building}")),
+                _ => tokio::time::sleep(INDEX_BUILD_POLL).await,
+            }
+        }
+        Err(anyhow!(
+            "{}s 안에 ready 가 되지 않음",
+            INDEX_BUILD_WAIT.as_secs()
+        ))
+    }
+
     async fn swap_table(&self, table: &str) -> Result<Swap> {
         let changed = self.dirty(table).await?;
         if changed == 0 {
@@ -1156,25 +1185,22 @@ impl SurrealClient {
             .ok_or_else(|| anyhow!("{old} 의 정의를 읽지 못함: {def}"))?;
         let define = format!("DEFINE INDEX {} ON {rest}", quote_ident(&new));
         let (q_table, q_old, q_new) = (quote_ident(table), quote_ident(&old), quote_ident(&new));
-        // DEFINE INDEX answers after the build (stage 0 on v3.3.5: `building.status` is `ready`
-        // on the reply right after it), so there is no wait to poll; anything but `ready` is a
-        // failure and the half-built new index is removed, the old one never touched.
-        self.run(&define)
+        // A plain DEFINE builds inside one transaction; on a populated table (claim, 27,722 rows,
+        // v3.3.5) RocksDB answers TransactionConflict (MemTable newer than the txn) and the old
+        // index stays. CONCURRENTLY builds in the background, so the reply is immediate and the
+        // build is polled until `ready`. Anything else, or no `ready` within INDEX_BUILD_WAIT, is
+        // a failure: the new index is removed, the old one never touched.
+        self.run(&format!("{define} CONCURRENTLY;"))
             .await
             .with_context(|| format!("새 인덱스 {new} 정의 실패"))?;
-        let info = format!("INFO FOR INDEX {q_new} ON {q_table};");
-        let building = self
-            .run(&info)
-            .await?
-            .into_iter()
-            .next()
-            .and_then(|v| v.get("building").cloned())
-            .ok_or_else(|| anyhow!("{info} 에 building 이 없음"))?;
-        if building.get("status").and_then(Value::as_str) != Some("ready") {
-            self.run(&format!("REMOVE INDEX {q_new} ON {q_table};"))
-                .await?;
-            return Err(anyhow!("새 인덱스 {new} 가 ready 가 아님: {building}"));
-        }
+        let building = match self.await_ready(&q_new, &q_table).await {
+            Ok(b) => b,
+            Err(e) => {
+                self.run(&format!("REMOVE INDEX {q_new} ON {q_table};"))
+                    .await?;
+                return Err(e.context(format!("새 인덱스 {new} 가 ready 가 되지 못함")));
+            }
+        };
         self.run(&format!("REMOVE INDEX {q_old} ON {q_table};"))
             .await?;
         // Rows mirrored while the build ran stay counted for the next swap.
