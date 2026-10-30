@@ -146,6 +146,49 @@ impl Placed {
     }
 }
 
+/// What one swap-in rebuild did to one table's HNSW index. Failure is a value here, not a
+/// swallowed error: the old index is still in place and every caller prints the line and fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Swap {
+    /// No row changed since the last swap (or fill): nothing was defined or removed.
+    Skipped { table: String },
+    /// `new` was defined, reported ready (`status` quotes the server's `building` object), and
+    /// only then was `old` removed.
+    Swapped {
+        table: String,
+        old: String,
+        new: String,
+        changed: u64,
+        status: String,
+    },
+    /// The swap stopped; `old` is untouched.
+    Failed { table: String, error: String },
+}
+
+impl Swap {
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
+
+    #[must_use]
+    pub fn line(&self) -> String {
+        match self {
+            Self::Skipped { table } => format!("{table}: skipped (바뀐 행 0)"),
+            Self::Swapped {
+                table,
+                old,
+                new,
+                changed,
+                status,
+            } => format!("{table}: swapped {old} -> {new} (바뀐 행 {changed}, {status})"),
+            Self::Failed { table, error } => {
+                format!("{table}: FAILED — 옛 인덱스 그대로: {error}")
+            }
+        }
+    }
+}
+
 /// Which table a chunk KNN reads: the project's own table when it exists, else the global one.
 enum ChunkSource {
     Global,
@@ -167,6 +210,16 @@ impl ChunkSource {
 /// holds `[a-z0-9_-]` (`ProjectTable::parse`), so nothing can close the quote.
 fn quote_ident(name: &str) -> String {
     format!("`{name}`")
+}
+
+/// `chunk_embedding` -> `chunk_embedding_g1` -> `chunk_embedding_g2`: the next name is derived from
+/// the live index name, so a swap never needs a stored generation number.
+fn next_generation(index: &str) -> String {
+    let (base, generation) = index
+        .rsplit_once("_g")
+        .and_then(|(base, n)| n.parse::<u64>().ok().map(|n| (base, n)))
+        .unwrap_or((index, 0));
+    format!("{base}_g{}", generation + 1)
 }
 
 /// DDL of one chunk table (global or per project): same fields, same HNSW definition.
@@ -1010,6 +1063,134 @@ impl SurrealClient {
         }
     }
 
+    /// Swap-in rebuild of every HNSW index whose table had rows change since the last swap: define
+    /// a new-named index of the same definition, confirm the server reports it built, then remove
+    /// the old one. `REBUILD INDEX` is never used: in place it answers 0 rows silently while it
+    /// builds, and defining the new name first leaves the old index answering until the new one is
+    /// ready. One failed table does not stop the others; each result is a `Swap`.
+    ///
+    /// "Rows changed since the last swap" lives in Surreal itself, as `vector_meta:<table>.dirty`
+    /// (`bump_dirty`, written by `reconcile`): the counter sits in the same store as the index it
+    /// describes, so it survives an engine restart and `fill_from` (which rebuilds the tables)
+    /// resets it. A file or an in-process counter would drift from the index it is about.
+    pub async fn swap_if_changed(&self) -> Result<Vec<Swap>> {
+        let mut tables = vec!["chunk".to_owned(), "claim".to_owned()];
+        tables.extend(self.project_tables().await?);
+        let mut out = Vec::with_capacity(tables.len());
+        for table in tables {
+            out.push(match self.swap_table(&table).await {
+                Ok(swap) => swap,
+                Err(e) => Swap::Failed {
+                    table,
+                    error: format!("{e:#}"),
+                },
+            });
+        }
+        Ok(out)
+    }
+
+    async fn bump_dirty(&self, table: &str, changed: usize) -> Result<()> {
+        if changed == 0 {
+            Ok(())
+        } else {
+            self.run(&format!(
+                "UPSERT type::record('vector_meta', '{table}') SET dirty = (dirty ?? 0) + {changed};"
+            ))
+            .await
+            .map(|_| ())
+        }
+    }
+
+    async fn dirty(&self, table: &str) -> Result<u64> {
+        let query = format!("SELECT VALUE dirty FROM type::record('vector_meta', '{table}');");
+        let rows = first_statement(&query, self.rows::<Option<u64>>(&query).await?)?;
+        Ok(rows.into_iter().flatten().next().unwrap_or(0))
+    }
+
+    /// The table's HNSW index: its name and the server's own `DEFINE INDEX` text for it.
+    async fn hnsw_index(&self, table: &str) -> Result<(String, String)> {
+        let info = format!("INFO FOR TABLE {};", quote_ident(table));
+        let first = self
+            .run(&info)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("surreal answered no statement to: {info}"))?;
+        let indexes = first
+            .get("indexes")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("{info} has no indexes object: {first}"))?;
+        let hnsw: Vec<(String, String)> = indexes
+            .iter()
+            .filter_map(|(name, def)| def.as_str().map(|d| (name.clone(), d.to_owned())))
+            .filter(|(_, def)| def.contains(" HNSW "))
+            .collect();
+        match <[(String, String); 1]>::try_from(hnsw) {
+            Ok([one]) => Ok(one),
+            Err(found) => Err(anyhow!(
+                "{table} 에 HNSW 인덱스가 정확히 하나여야 함: {}",
+                found
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+
+    async fn swap_table(&self, table: &str) -> Result<Swap> {
+        let changed = self.dirty(table).await?;
+        if changed == 0 {
+            return Ok(Swap::Skipped {
+                table: table.to_owned(),
+            });
+        }
+        let (old, def) = self.hnsw_index(table).await?;
+        let new = next_generation(&old);
+        // The server prints the name escaped when it needs it, so the name is cut by position
+        // (`DEFINE INDEX <name> ON <rest>`), not matched by text.
+        let rest = def
+            .strip_prefix("DEFINE INDEX ")
+            .and_then(|d| d.split_once(" ON "))
+            .map(|(_, rest)| rest)
+            .ok_or_else(|| anyhow!("{old} 의 정의를 읽지 못함: {def}"))?;
+        let define = format!("DEFINE INDEX {} ON {rest}", quote_ident(&new));
+        let (q_table, q_old, q_new) = (quote_ident(table), quote_ident(&old), quote_ident(&new));
+        // DEFINE INDEX answers after the build (stage 0 on v3.3.5: `building.status` is `ready`
+        // on the reply right after it), so there is no wait to poll; anything but `ready` is a
+        // failure and the half-built new index is removed, the old one never touched.
+        self.run(&define)
+            .await
+            .with_context(|| format!("새 인덱스 {new} 정의 실패"))?;
+        let info = format!("INFO FOR INDEX {q_new} ON {q_table};");
+        let building = self
+            .run(&info)
+            .await?
+            .into_iter()
+            .next()
+            .and_then(|v| v.get("building").cloned())
+            .ok_or_else(|| anyhow!("{info} 에 building 이 없음"))?;
+        if building.get("status").and_then(Value::as_str) != Some("ready") {
+            self.run(&format!("REMOVE INDEX {q_new} ON {q_table};"))
+                .await?;
+            return Err(anyhow!("새 인덱스 {new} 가 ready 가 아님: {building}"));
+        }
+        self.run(&format!("REMOVE INDEX {q_old} ON {q_table};"))
+            .await?;
+        // Rows mirrored while the build ran stay counted for the next swap.
+        self.run(&format!(
+            "UPSERT type::record('vector_meta', '{table}') SET dirty = math::max([(dirty ?? 0) - {changed}, 0]);"
+        ))
+        .await?;
+        Ok(Swap::Swapped {
+            table: table.to_owned(),
+            old,
+            new,
+            changed,
+            status: building.to_string(),
+        })
+    }
+
     /// A project table is only read when it exists, so it must be complete when it appears: define
     /// it, then copy every chunk pg holds for the project.
     async fn create_project_table(&self, store: &Store, table: &ProjectTable) -> Result<()> {
@@ -1072,7 +1253,8 @@ impl SurrealClient {
             .collect();
         let literals: Vec<String> = wanted.into_iter().map(|(_, l)| l).collect();
         self.upsert_rows(table, &literals).await?;
-        self.delete_rows(table, &stale).await
+        self.delete_rows(table, &stale).await?;
+        self.bump_dirty(table, literals.len() + stale.len()).await
     }
 
     /// Write-through: after pg committed a change, copy pg's state of everything it touched into
@@ -1282,6 +1464,8 @@ impl SurrealClient {
         let global_ddl = chunk_ddl("chunk", dim);
         self.run(&format!(
             "{old_projects}
+             REMOVE TABLE IF EXISTS vector_meta;
+             DEFINE TABLE vector_meta SCHEMALESS;
              REMOVE TABLE IF EXISTS chunk;
              {global_ddl}
              {project_ddl}

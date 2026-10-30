@@ -133,6 +133,20 @@ pub(crate) async fn do_sync(
         Err(e) => eprintln!("[scheduler] anchor staleness warning (ignored): {e:#}"),
     }
 
+    // Last stage: swap in a rebuilt HNSW index when this or an earlier write changed rows (no-op
+    // on pgvector). A failed swap fails the sync — visibly, with the old index still answering.
+    let swaps = store.swap_surreal_if_changed().await?;
+    for swap in swaps
+        .iter()
+        .filter(|s| !matches!(s, crate::store::Swap::Skipped { .. }))
+    {
+        eprintln!("[scheduler] vector-swap: {}", swap.line());
+    }
+    anyhow::ensure!(
+        !swaps.iter().any(crate::store::Swap::failed),
+        "vector-swap 실패 — 옛 인덱스는 그대로 (drudge vector-swap 으로 다시 확인)"
+    );
+
     Ok(SyncOutcome {
         ingest,
         total_chunks,

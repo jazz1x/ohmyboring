@@ -6,7 +6,7 @@
 use anyhow::{Result, anyhow};
 
 use super::vector_pg::Pg;
-use super::vector_surreal::{SURREAL_BEHIND, Scope, SurrealClient, SurrealView};
+use super::vector_surreal::{SURREAL_BEHIND, Scope, SurrealClient, SurrealView, Swap};
 use super::{AnchoredClaim, Hit, Recurrence, Store};
 use crate::vector::VectorIndex;
 
@@ -38,6 +38,20 @@ impl Store {
                 .mirror(self, scope)
                 .await
                 .map_err(|e| anyhow!("{SURREAL_BEHIND} (surreal: {e:#})")),
+        }
+    }
+}
+
+impl Store {
+    /// On `backend=surreal`: swap-in rebuild of the HNSW indexes whose rows changed (see
+    /// `SurrealClient::swap_if_changed`); on pgvector there is nothing to swap.
+    ///
+    /// # Errors
+    /// The listing of tables failed; a table that failed to swap is a `Swap::Failed` in the result.
+    pub async fn swap_surreal_if_changed(&self) -> Result<Vec<Swap>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => Ok(Vec::new()),
+            VectorRoute::Surreal(client) => client.swap_if_changed().await,
         }
     }
 }

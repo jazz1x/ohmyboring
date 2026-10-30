@@ -70,6 +70,10 @@ enum Cmd {
     /// Read-only (the doctor line): on backend=surreal, compare pgvector and SurrealDB per table
     /// by row count and key-set hash and fail when they differ; on pgvector say it does not apply
     VectorCheck,
+    /// On backend=surreal: swap-in rebuild of every HNSW index whose rows changed since the last
+    /// swap (define a new-named index, confirm it built, remove the old one); fails when any table
+    /// failed, the old index staying. On pgvector it does not apply
+    VectorSwap,
     /// Delete orphan semantic nodes (remove edge-unreferenced legacy remnants)
     Gc,
     /// Show loaded boring.json config (for debugging / migration verification)
@@ -417,6 +421,24 @@ async fn main() -> Result<()> {
             }
             config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => {
                 println!("backend=pgvector — 해당 없음 (대조는 backend=surreal 일 때만)");
+            }
+        },
+        Cmd::VectorSwap => match cfg.vector.effective().backend {
+            config::VectorBackend::Surreal => {
+                let settings = cfg.vector.surreal.settings(&config::env_set)?;
+                let swaps = store::SurrealClient::new(settings)?
+                    .swap_if_changed()
+                    .await?;
+                for swap in &swaps {
+                    println!("{}", swap.line());
+                }
+                anyhow::ensure!(
+                    !swaps.iter().any(store::Swap::failed),
+                    "vector-swap: 실패한 테이블이 있음 — 옛 인덱스는 그대로"
+                );
+            }
+            config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => {
+                println!("backend=pgvector — 해당 없음 (swap 은 backend=surreal 일 때만)");
             }
         },
         Cmd::CodeSync { .. } | Cmd::CodeStatus { .. } | Cmd::Version => {}

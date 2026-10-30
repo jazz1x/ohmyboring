@@ -70,6 +70,14 @@ run_maintenance() {
     # and doctor only notices after the fact. Failure must not fail housekeeping either.
     echo "--- code-sync ---"
     ./drudge/target/release/drudge code-sync || echo "(code-sync failed — continuing)"
+    # Surreal's HNSW index loses recall after delete/overwrite churn; rebuild it by swap-in (a new
+    # index is defined and confirmed built before the old one goes) when rows changed. Not
+    # `|| continuing` like the steps above: a failed swap is a ✗ the run must show — it still
+    # runs doctor, then exits non-zero. No-op on pgvector.
+    echo "--- vector-swap ---"
+    swap_rc=0
+    ./drudge/target/release/drudge vector-swap || swap_rc=$?
+    [ "$swap_rc" -eq 0 ] || notify_slack "새벽 점검: vector-swap 실패(rc=${swap_rc}) — 옛 인덱스는 그대로"
     # Close the loop this job used to leave open: twice (2026-09-21 hermes Slack socket failed
     # 267,201 times over ten days; 2026-09-26→27 ~20 h of reconnect loop) doctor could have
     # caught it — but nothing ran doctor at 03:00, so nobody was told. Strict and read-only:
@@ -90,6 +98,7 @@ run_maintenance() {
         fi
     fi
     echo "=== maintenance finished at $(date) ==="
+    [ "$swap_rc" -eq 0 ] || exit 1
 }
 
 escaped_boring_home() {
