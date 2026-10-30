@@ -187,7 +187,8 @@
             "namespace": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$", "default": "boring"},
             "database": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$", "default": "boring"},
             "user": {"type": "string", "default": "root"},
-            "password_env": {"type": "string", "default": "BORING_SURREAL_PASSWORD", "description": "Name of the env variable holding the password; the password itself never goes in this file."}
+            "password_env": {"type": "string", "default": "BORING_SURREAL_PASSWORD", "description": "Name of the env variable holding the password; the password itself never goes in this file."},
+            "ef": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 100, "description": "HNSW query candidate list size (<|k,ef|>)."}
           }
         }
       }

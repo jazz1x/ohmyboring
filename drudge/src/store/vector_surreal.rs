@@ -10,10 +10,10 @@
 //!
 //! Wire: SurrealDB's HTTP JSON-RPC (`POST /rpc`, method `query`) with bind variables, over the
 //! `reqwest` the engine already carries. The server is pinned in compose to
-//! `surrealdb/surrealdb:v3.3.4@sha256:649a60a3…` — the image the stage-0 measurement ran on.
+//! `surrealdb/surrealdb:v3.3.5@sha256:3db515b8…` (v3.3.4 lost recall after delete/overwrite churn; v3.3.5 fixes part of it).
 //!
 //! Index and query parameters are stage-0's: HNSW `DIMENSION <embed_dim> DIST COSINE TYPE F32 EFC 64
-//! M 16`, query `EF 40` (pgvector's m16 / ef_construction 64 / ef_search 40).
+//! M 16`; query EF is `vector.surreal.ef` (default 100; stage 0 measured 40 = pgvector's ef_search).
 //!
 //! Filter columns, one Surreal column per pgvector filter:
 //!
@@ -48,8 +48,6 @@ use crate::config::SurrealSettings;
 use crate::frontmatter::Claim;
 use crate::vector::VectorIndex;
 
-/// Query-time candidate list size (stage 0: EF 40, matching pgvector's `ef_search`).
-const EF: usize = 40;
 /// Rows per fill request: 1024 floats are ~11 KB of JSON, and the server refuses a request body over
 /// 1 MiB (HTTP 413).
 const FILL_BATCH: usize = 40;
@@ -107,6 +105,11 @@ struct RpcError {
 }
 
 impl SurrealClient {
+    /// Query-time HNSW candidate list size, from `vector.surreal.ef`.
+    fn ef(&self) -> usize {
+        self.settings.ef.get()
+    }
+
     pub fn new(settings: SurrealSettings) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -396,12 +399,13 @@ impl VectorIndex for SurrealView<'_> {
         // One nearest-neighbour query per chunk of the source document, each excluding that
         // document; a doc's distance is its closest chunk to any source chunk (pgvector: MIN over
         // the cross product).
+        let ef = self.client.ef();
         let sql: String = sources
             .iter()
             .map(|emb| {
                 format!(
                     "SELECT source_path, vector::distance::knn() AS d FROM chunk \
-                     WHERE embedding <|{EF},{EF}|> {} AND source_path != {};",
+                     WHERE embedding <|{ef},{ef}|> {} AND source_path != {};",
                     floats(emb),
                     text(source_path)
                 )
@@ -448,8 +452,9 @@ impl VectorIndex for SurrealView<'_> {
         include_stale: bool,
     ) -> Result<Vec<AnchoredClaim>> {
         let want = usize::try_from(k).unwrap_or(0);
+        let ef = self.client.ef();
         let mut conds = vec![format!(
-            "embedding <|{},{EF}|> {}",
+            "embedding <|{},{ef}|> {}",
             want.max(1),
             floats(query_emb)
         )];
@@ -568,9 +573,10 @@ impl VectorIndex for SurrealView<'_> {
     }
 
     async fn vector_search(&self, vec: &[f32], k: usize) -> Result<Vec<Hit>> {
+        let ef = self.client.ef();
         let sql = format!(
             "SELECT cid, vector::distance::knn() AS d FROM chunk \
-             WHERE embedding <|{},{EF}|> {} ORDER BY d ASC;",
+             WHERE embedding <|{},{ef}|> {} ORDER BY d ASC;",
             k.max(1),
             floats(vec)
         );
@@ -584,7 +590,8 @@ impl VectorIndex for SurrealView<'_> {
         project: Option<&str>,
         since_hours: Option<i32>,
     ) -> Result<Vec<Hit>> {
-        let mut conds = vec![format!("embedding <|{},{EF}|> {}", k.max(1), floats(vec))];
+        let ef = self.client.ef();
+        let mut conds = vec![format!("embedding <|{},{ef}|> {}", k.max(1), floats(vec))];
         if let Some(p) = project {
             conds.push(format!("project = {}", text(p)));
         }
@@ -602,11 +609,12 @@ impl VectorIndex for SurrealView<'_> {
     }
 
     async fn nearest_document(&self, vec: &[f32], max_dist: f64) -> Result<Option<(String, f64)>> {
+        let ef = self.client.ef();
         let nearest: Vec<NearDoc> = self
             .client
             .rows(&format!(
                 "SELECT source_path, vector::distance::knn() AS d FROM chunk \
-                 WHERE embedding <|1,{EF}|> {};",
+                 WHERE embedding <|1,{ef}|> {};",
                 floats(vec)
             ))
             .await?

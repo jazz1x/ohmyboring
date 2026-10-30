@@ -295,6 +295,37 @@ impl<'de> Deserialize<'de> for SurrealName {
     }
 }
 
+/// Query-time HNSW candidate list size (`<|k,EF|>`), spliced into SurrealQL like `SurrealName`, so it
+/// is checked once here. 0 would make every query empty, so it is rejected, not clamped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurrealEf(usize);
+
+impl SurrealEf {
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl Serialize for SurrealEf {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(self.0 as u64)
+    }
+}
+
+impl<'de> Deserialize<'de> for SurrealEf {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = u64::deserialize(deserializer)?;
+        match usize::try_from(raw) {
+            Ok(n) if (1..=10_000).contains(&n) => Ok(Self(n)),
+            _ => Err(de::Error::custom(format!(
+                "vector.surreal.ef 는 1..=10000 정수: {raw}"
+            ))),
+        }
+    }
+}
+
+const DEFAULT_SURREAL_EF: usize = 100;
 const DEFAULT_SURREAL_URL: &str = "http://localhost:8000";
 const DEFAULT_SURREAL_NAME: &str = "boring";
 const DEFAULT_SURREAL_USER: &str = "root";
@@ -311,6 +342,7 @@ pub struct SurrealConfig {
     pub database: SurrealName,
     pub user: String,
     pub password_env: String,
+    pub ef: SurrealEf,
 }
 
 impl Default for SurrealConfig {
@@ -321,6 +353,7 @@ impl Default for SurrealConfig {
             database: SurrealName(DEFAULT_SURREAL_NAME.to_owned()),
             user: DEFAULT_SURREAL_USER.to_owned(),
             password_env: DEFAULT_SURREAL_PASSWORD_ENV.to_owned(),
+            ef: SurrealEf(DEFAULT_SURREAL_EF),
         }
     }
 }
@@ -333,6 +366,7 @@ pub struct SurrealSettings {
     pub database: SurrealName,
     pub user: String,
     pub password: String,
+    pub ef: SurrealEf,
 }
 
 /// Hand-written: the password must never reach a log.
@@ -362,6 +396,7 @@ impl SurrealConfig {
             database: self.database.clone(),
             user: self.user.clone(),
             password,
+            ef: self.ef,
         })
     }
 }

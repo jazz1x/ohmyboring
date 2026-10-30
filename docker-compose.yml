@@ -43,7 +43,7 @@ services:
   # boring.json says vector.backend=surreal. Image = the digest the stage-0 measurement ran on.
   boring-surreal:
     profiles: ["surreal"]
-    image: surrealdb/surrealdb:v3.3.4@sha256:649a60a3b9c0177d9923c938e1c2563e48cde2a9d06ac2c0519714be719b02af
+    image: surrealdb/surrealdb:v3.3.5@sha256:3db515b88e79737aa828c05fbf1515748004ba57495ff89a013851cc3f1ad4b9
     container_name: boring-surreal
     restart: unless-stopped
     user: root
