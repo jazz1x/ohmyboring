@@ -113,10 +113,10 @@ impl Fixture {
 #[test]
 fn slug_with_a_bad_char_is_rejected_not_mapped() {
     assert_eq!(
-        ProjectTable::parse("my-proj"),
+        ProjectTable::parse("my proj"),
         Err(ProjectTableError::BadChar {
-            slug: "my-proj".into(),
-            bad: '-'
+            slug: "my proj".into(),
+            bad: ' '
         })
     );
     assert!(matches!(
@@ -141,7 +141,7 @@ async fn mirror_keeps_global_and_project_tables_equal() {
     f.note("/v/a1.md", "alpha", 1).await;
     f.note("/v/a2.md", "alpha", 2).await;
     f.note("/v/b1.md", "beta", 3).await;
-    f.note("/v/x1.md", "bad-slug", 4).await;
+    f.note("/v/x1.md", "bad slug", 4).await;
 
     let global = f.cids("SELECT cid FROM chunk;").await;
     let alpha = f.cids("SELECT cid FROM chunk_p_alpha;").await;
@@ -185,6 +185,37 @@ async fn mirror_keeps_global_and_project_tables_equal() {
         f.cids("SELECT cid FROM chunk_p_beta;").await,
         f.pg_cids(Some("beta")).await,
         "a recreated project table holds every chunk of the project, not only the new one"
+    );
+}
+
+/// `-` is a real slug character (`oh-my-boring`); it is never mapped to `_`, so `oh-my-boring` and
+/// `oh_my_boring` are two tables.
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_slug_with_a_hyphen_gets_its_own_table_and_is_read() {
+    let f = fixture("pt_hyphen").await;
+    f.note("/v/h1.md", "oh-my-boring", 1).await;
+    f.note("/v/u1.md", "oh_my_boring", 2).await;
+    assert_eq!(
+        f.cids("SELECT cid FROM `chunk_p_oh-my-boring`;").await,
+        ["/v/h1.md#0"]
+    );
+    assert_eq!(
+        f.cids("SELECT cid FROM chunk_p_oh_my_boring;").await,
+        ["/v/u1.md#0"]
+    );
+    f.client
+        .run("DELETE chunk WHERE cid = \"/v/h1.md#0\";")
+        .await
+        .expect("delete from global only");
+    let hits = f
+        .store
+        .vector_search_filtered(&vec_at(1), 5, Some("oh-my-boring"), None)
+        .await
+        .expect("filtered search");
+    assert!(
+        hits.iter().any(|h| h.id == "/v/h1.md#0"),
+        "the hyphen slug's query must read its own table"
     );
 }
 

@@ -60,17 +60,17 @@ const KEY_SEP: char = '\u{1f}';
 const PROJECT_TABLE_PREFIX: &str = "chunk_p_";
 
 /// Why a project slug cannot name a table. The name is spliced into SurrealQL (a table name cannot
-/// be bound), so it is parsed once here and never mapped: a slug outside `[a-z0-9_]` has no
+/// be bound), so it is parsed once here and never mapped: a slug outside `[a-z0-9_-]` has no
 /// project table, and every caller says so.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProjectTableError {
     #[error("project 가 비어 있어 프로젝트 테이블이 없음")]
     Empty,
-    #[error("project {slug:?} 의 {bad:?} 는 테이블 이름에 못 씀 (a-z0-9_ 만)")]
+    #[error("project {slug:?} 의 {bad:?} 는 테이블 이름에 못 씀 (a-z0-9_- 만)")]
     BadChar { slug: String, bad: char },
 }
 
-/// A project's chunk table, `chunk_p_<slug>`, slug in `[a-z0-9_]+`.
+/// A project's chunk table, `chunk_p_<slug>`, slug in `[a-z0-9_-]+`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProjectTable {
     slug: String,
@@ -79,14 +79,14 @@ pub struct ProjectTable {
 
 impl ProjectTable {
     /// # Errors
-    /// `Empty` for an empty slug, `BadChar` naming the first character outside `[a-z0-9_]`.
+    /// `Empty` for an empty slug, `BadChar` naming the first character outside `[a-z0-9_-]`.
     pub fn parse(slug: &str) -> Result<Self, ProjectTableError> {
         if slug.is_empty() {
             return Err(ProjectTableError::Empty);
         }
         match slug
             .chars()
-            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_'))
+            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(*c, '_' | '-')))
         {
             Some(bad) => Err(ProjectTableError::BadChar {
                 slug: slug.to_owned(),
@@ -153,25 +153,36 @@ enum ChunkSource {
 }
 
 impl ChunkSource {
-    fn table(&self) -> &str {
+    /// The table as a SurrealQL identifier, ready to splice.
+    fn table(&self) -> String {
         match self {
-            Self::Global => "chunk",
-            Self::Project(t) => t.name(),
+            Self::Global => quote_ident("chunk"),
+            Self::Project(t) => quote_ident(t.name()),
         }
     }
 }
 
+/// A table or index name as a backtick-quoted SurrealQL identifier: a `-` in a project slug is not
+/// an identifier character bare (`chunk_p_oh-my-boring` reads as a subtraction). The name only ever
+/// holds `[a-z0-9_-]` (`ProjectTable::parse`), so nothing can close the quote.
+fn quote_ident(name: &str) -> String {
+    format!("`{name}`")
+}
+
 /// DDL of one chunk table (global or per project): same fields, same HNSW definition.
 fn chunk_ddl(table: &str, dim: usize) -> String {
+    let t = quote_ident(table);
+    let src_idx = quote_ident(&format!("{table}_source_path"));
+    let emb_idx = quote_ident(&format!("{table}_embedding"));
     format!(
-        "DEFINE TABLE {table} SCHEMAFULL;
-         DEFINE FIELD cid ON {table} TYPE string;
-         DEFINE FIELD source_path ON {table} TYPE string;
-         DEFINE FIELD project ON {table} TYPE string;
-         DEFINE FIELD doc_updated_us ON {table} TYPE int;
-         DEFINE FIELD embedding ON {table} TYPE array<float>;
-         DEFINE INDEX {table}_source_path ON {table} FIELDS source_path;
-         DEFINE INDEX {table}_embedding ON {table} FIELDS embedding
+        "DEFINE TABLE {t} SCHEMAFULL;
+         DEFINE FIELD cid ON {t} TYPE string;
+         DEFINE FIELD source_path ON {t} TYPE string;
+         DEFINE FIELD project ON {t} TYPE string;
+         DEFINE FIELD doc_updated_us ON {t} TYPE int;
+         DEFINE FIELD embedding ON {t} TYPE array<float>;
+         DEFINE INDEX {src_idx} ON {t} FIELDS source_path;
+         DEFINE INDEX {emb_idx} ON {t} FIELDS embedding
              HNSW DIMENSION {dim} DIST COSINE TYPE F32 EFC 64 M 16;"
     )
 }
@@ -984,7 +995,7 @@ impl SurrealClient {
     }
 
     /// The project's table when its slug can name one and the table exists; otherwise the global
-    /// table (a slug outside `[a-z0-9_]` never has a table; a project not yet filled has none).
+    /// table (a slug outside `[a-z0-9_-]` never has a table; a project not yet filled has none).
     async fn chunk_source(&self, project: Option<&str>) -> Result<ChunkSource> {
         match project.map(ProjectTable::parse) {
             Some(Ok(table)) => {
@@ -1105,7 +1116,8 @@ impl SurrealClient {
         paths: &[String],
     ) -> Result<()> {
         let existing_chunks = format!(
-            "SELECT VALUE cid FROM {table} WHERE source_path INSIDE {};",
+            "SELECT VALUE cid FROM {} WHERE source_path INSIDE {};",
+            quote_ident(table),
             texts(paths)
         );
         let existing: Vec<String> = first_statement(
@@ -1248,7 +1260,7 @@ impl SurrealClient {
             .project_tables()
             .await?
             .iter()
-            .map(|t| format!("REMOVE TABLE IF EXISTS {t};"))
+            .map(|t| format!("REMOVE TABLE IF EXISTS {};", quote_ident(t)))
             .collect::<Vec<_>>()
             .concat();
         let pg_projects: Vec<(String, String, String)> = store
