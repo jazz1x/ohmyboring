@@ -855,8 +855,9 @@ impl SurrealClient {
         Ok(())
     }
 
-    /// Make Surreal's rows in one scope equal pg's: delete the keys pg no longer has, upsert the
-    /// ones it has.
+    /// Make Surreal's rows in one scope equal pg's: upsert the ones pg has, then delete the keys
+    /// pg no longer has. Upsert first so a failure half way leaves Surreal with more rows, never
+    /// fewer; no transaction, because pg is the original and a re-run converges.
     async fn reconcile(
         &self,
         table: &str,
@@ -869,9 +870,9 @@ impl SurrealClient {
             .into_iter()
             .filter(|k| !keep.contains(k.as_str()))
             .collect();
-        self.delete_rows(table, &stale).await?;
         let literals: Vec<String> = wanted.into_iter().map(|(_, l)| l).collect();
-        self.upsert_rows(table, &literals).await
+        self.upsert_rows(table, &literals).await?;
+        self.delete_rows(table, &stale).await
     }
 
     /// Write-through: after pg committed a change, copy pg's state of everything it touched into
@@ -940,15 +941,17 @@ impl SurrealClient {
             .await
             .context("read the written notes' open claims from pgvector")?;
         let wanted: Vec<(String, String)> = rows.iter().map(claim_literal).collect();
-        let mut in_scope = vec![format!("source_path INSIDE {}", texts(&scope.paths))];
-        in_scope.extend(
-            slots
-                .iter()
-                .map(|(s, p)| format!("(subject = {} AND predicate = {})", text(s), text(p))),
-        );
+        // One membership test, not an `OR` chain: Surreal's parser refuses a chain of ~120 terms
+        // ("nests or chains operators too deeply"), and a 1,280-note scope has more slots than that.
+        let slot_pairs: Vec<String> = slots
+            .iter()
+            .map(|(s, p)| format!("[{},{}]", text(s), text(p)))
+            .collect();
         let existing_claims = format!(
-            "SELECT VALUE cid FROM claim WHERE {};",
-            in_scope.join(" OR ")
+            "SELECT VALUE cid FROM claim WHERE source_path INSIDE {} \
+             OR [subject, predicate] INSIDE [{}];",
+            texts(&scope.paths),
+            slot_pairs.join(",")
         );
         let existing: Vec<String> = first_statement(
             &existing_claims,
