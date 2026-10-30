@@ -2049,7 +2049,7 @@ impl Store {
                    AND d.source_path !~ $5
                  ORDER BY (CASE WHEN length(c.value) < $6 THEN 1 ELSE 0 END)
                         + (CASE WHEN c.predicate ~* $7 THEN 1 ELSE 0 END),
-                          c.valid_from DESC
+                          c.valid_from DESC, c.subject COLLATE \"C\", c.predicate COLLATE \"C\"
                  LIMIT $1;",
                 &[
                     &k,
@@ -2252,7 +2252,7 @@ impl Store {
                     AND d.source_path !~ $5
                   ORDER BY (CASE WHEN length(c.value) < $6 THEN 1 ELSE 0 END)
                          + (CASE WHEN c.predicate ~* $7 THEN 1 ELSE 0 END),
-                           c.valid_from DESC
+                           c.valid_from DESC, c.subject COLLATE \"C\", c.predicate COLLATE \"C\"
                   LIMIT $1;",
                 &[
                     &k,

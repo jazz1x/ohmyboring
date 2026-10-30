@@ -39,7 +39,7 @@ fn register_query_carries_the_pg_conditions_and_order() {
         "project = \"omb\"",
         "kind IN [\"decision\"]",
         "eval-|daily-brief-",
-        "ORDER BY rank ASC, valid_from_us DESC",
+        "ORDER BY rank ASC, valid_from_us DESC, subject ASC, predicate ASC",
         "LIMIT 7",
         "string::len(value) < 25",
         "(?i)^(incident|decision",

@@ -6130,3 +6130,62 @@ async fn a_hand_sealed_top_of_slot_row_stays_sealed_across_open() {
         .await
         .expect("cleanup claim");
 }
+
+/// Rows that tie on rank and `valid_from` come out in `(subject, predicate)` byte order, on the
+/// register read and on the card's read alike. Without a final key pg hands ties back in whatever
+/// order the plan produced them, and the Surreal copy (which sorts by the key) cannot match it.
+#[tokio::test]
+async fn register_ties_come_out_in_subject_predicate_order() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let path = unique_path("register-ties");
+    let project = path.rsplit('/').next().unwrap_or("ties-test").to_owned();
+    let mut front = dummy_frontmatter(&path);
+    front.project = project.clone();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let emb = [0.1_f32; 1024];
+    let at = SystemTime::now();
+    // Inserted newest-subject first, so insertion order is the opposite of the expected one.
+    for subject in ["zeta", "Mid", "alpha"] {
+        store
+            .upsert_claim(
+                subject,
+                "chosen-bound",
+                "max 8 connections with a 30s idle timeout, measured against the 502 spike",
+                &path,
+                at,
+                &emb,
+                "risk",
+                "certain",
+            )
+            .await
+            .expect("claim");
+    }
+
+    let kinds = vec!["risk".to_owned()];
+    let register = store
+        .recent_register_rows(3, Some(&project), Some(&kinds), &[])
+        .await
+        .expect("register rows");
+    let subjects: Vec<&str> = register.rows.iter().map(|r| r.subject.as_str()).collect();
+    assert_eq!(
+        subjects,
+        vec!["Mid", "alpha", "zeta"],
+        "byte order: an upper-case subject sorts before a lower-case one"
+    );
+    let card = store
+        .recent_claims(3, Some(&project), Some(&kinds), &[])
+        .await
+        .expect("card claims");
+    let card_subjects: Vec<&str> = card.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(card_subjects, subjects, "the card orders like the register");
+
+    store.delete_document(&path).await.expect("cleanup");
+}

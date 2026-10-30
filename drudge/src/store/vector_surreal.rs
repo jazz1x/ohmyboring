@@ -1261,7 +1261,8 @@ pub struct RegisterAsk<'a> {
 /// open (`superseded_us` unset), the note exists (`origin` set, as the pg inner join), project,
 /// kinds, `NOT origin = ANY(exclude)`, source_path not a generated note, and the rank (a short
 /// value, a predicate restating its kind, one each) before `valid_from` newest-first. `subject`,
-/// `predicate` close a tie pg leaves to the planner. The regexes are the same constants pg takes;
+/// `predicate` close a tie in byte order; pg's two register queries say the same with
+/// `COLLATE "C"`, so equal `valid_from` rows come out in one order on both sides. The regexes are the same constants pg takes;
 /// `(?i)` is pg's `~*`.
 fn register_where(ask: &RegisterAsk<'_>) -> String {
     let mut conds = vec![
@@ -1434,6 +1435,47 @@ async fn pg_graph_keys(
         })
         .collect();
     Ok((documents, nodes, edges))
+}
+
+/// A `claim_row` as Surreal reads it back, without the record id, under its `cid`.
+fn without_id(mut row: Value) -> (String, Value) {
+    if let Some(o) = row.as_object_mut() {
+        o.remove("id");
+    }
+    let cid = row
+        .get("cid")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    (cid, row)
+}
+
+/// pg's vector `chunk` keys (the rows the fill copies: embedded, with a document).
+async fn pg_chunk_keys(db: &tokio_postgres::Client) -> Result<Vec<String>> {
+    Ok(db
+        .query(&format!("SELECT c.id {CHUNK_FROM};"), &[])
+        .await
+        .context("read chunk ids from pgvector")?
+        .iter()
+        .map(|r| r.get(0))
+        .collect())
+}
+
+/// pg's vector `claim` keys (open, embedded, with a document), in the shape Surreal keys them by.
+async fn pg_claim_keys(db: &tokio_postgres::Client) -> Result<Vec<String>> {
+    Ok(db
+        .query(
+            &format!(
+                "SELECT c.subject, c.predicate, {valid} {CLAIM_FROM};",
+                valid = epoch_us("c.valid_from")
+            ),
+            &[],
+        )
+        .await
+        .context("read open claim keys from pgvector")?
+        .iter()
+        .map(|r| claim_key(&r.get::<_, String>(0), &r.get::<_, String>(1), r.get(2)))
+        .collect())
 }
 
 /// The record literals of the pg rows named by `keys` (`document`, `node` or `edge`).
@@ -2083,9 +2125,14 @@ impl SurrealClient {
     /// Every claim row on both sides, compared by key and by value (all columns, `superseded_us`
     /// included). `catch_up` compares keys only, so a seal the Python door wrote straight to pg
     /// changes a row whose key both sides hold; this is the pass that sees it.
+    ///
+    /// Two paged passes, so memory holds one page of rows and not the table (measured on 66.8k
+    /// rows: the two whole-table maps were +300 MB of a 477 MB sync, 130 MB of it the pg side):
+    /// pg's rows a page at a time, each looked up in Surreal by key (missing, different), then
+    /// Surreal's keys a page at a time, each looked up in pg (extra).
     pub async fn claim_row_diff(&self, store: &Store) -> Result<ClaimRowDiff> {
         let db = store.db().await?;
-        let mut pg: HashMap<String, Value> = HashMap::new();
+        let mut diff = ClaimRowDiff::default();
         let mut offset = 0_i64;
         loop {
             let rows = db
@@ -2093,40 +2140,57 @@ impl SurrealClient {
                     &claim_row_select(
                         "ORDER BY c.subject, c.predicate, c.valid_from LIMIT $1 OFFSET $2;",
                     ),
-                    &[&i64::try_from(KEY_PAGE)?, &offset],
+                    &[&i64::try_from(CLAIM_ROW_PAGE)?, &offset],
                 )
                 .await
-                .context("read every claim row from pgvector")?;
+                .context("read a page of claim rows from pgvector")?;
             if rows.is_empty() {
                 break;
             }
             offset += i64::try_from(rows.len())?;
-            pg.extend(rows.iter().map(claim_row_json));
+            let pg: HashMap<String, Value> = rows.iter().map(claim_row_json).collect();
+            let keys: Vec<String> = pg.keys().cloned().collect();
+            let query = format!("SELECT * FROM claim_row WHERE cid INSIDE {};", texts(&keys));
+            let found: Vec<Value> = first_statement(&query, self.rows::<Value>(&query).await?)?;
+            let surreal: HashMap<String, Value> = found.into_iter().map(without_id).collect();
+            let page = ClaimRowDiff::of(&pg, &surreal);
+            diff.pg_rows += pg.len();
+            diff.missing.extend(page.missing);
+            diff.different.extend(page.different);
+            diff.redo.extend(page.redo);
         }
-        let mut surreal: HashMap<String, Value> = HashMap::new();
+        let mut seen = 0_usize;
         loop {
-            let query = format!(
-                "SELECT * FROM claim_row LIMIT {CLAIM_ROW_PAGE} START {};",
-                surreal.len()
-            );
-            let page: Vec<Value> = first_statement(&query, self.rows::<Value>(&query).await?)?;
-            let done = page.len() < CLAIM_ROW_PAGE;
-            for mut row in page {
-                if let Some(o) = row.as_object_mut() {
-                    o.remove("id");
-                }
-                let cid = row
-                    .get("cid")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-                surreal.insert(cid, row);
-            }
-            if done {
+            let query =
+                format!("SELECT VALUE cid FROM claim_row LIMIT {CLAIM_ROW_PAGE} START {seen};");
+            let keys: Vec<String> = first_statement(&query, self.rows::<String>(&query).await?)?;
+            seen += keys.len();
+            let held: std::collections::HashSet<String> = db
+                .query(
+                    &format!(
+                        "SELECT c.subject || chr(31) || c.predicate || chr(31) || {valid} \
+                         FROM claim c WHERE c.subject || chr(31) || c.predicate || chr(31) || \
+                         {valid} = ANY($1);",
+                        valid = epoch_us("c.valid_from")
+                    ),
+                    &[&keys],
+                )
+                .await
+                .context("look up a page of Surreal claim_row keys in pgvector")?
+                .iter()
+                .map(|r| r.get::<_, String>(0))
+                .collect();
+            diff.extra
+                .extend(keys.iter().filter(|k| !held.contains(*k)).cloned());
+            if keys.len() < CLAIM_ROW_PAGE {
                 break;
             }
         }
-        Ok(ClaimRowDiff::of(&pg, &surreal))
+        diff.surreal_rows = seen;
+        diff.missing.sort_unstable();
+        diff.different.sort_unstable();
+        diff.extra.sort_unstable();
+        Ok(diff)
     }
 
     /// Make Surreal's `claim_row` equal pg's: write the rows it lacks and the rows whose value
@@ -2167,11 +2231,11 @@ impl SurrealClient {
         })
     }
 
-    /// Bring Surreal's `document`, `node` and `edge` rows level with pg's by key: rows pg has and
-    /// Surreal lacks are written, rows Surreal has and pg lacks are deleted. This is how rows the
-    /// Python door wrote straight to pg (no mirror there) reach Surreal on the next sync. A key
-    /// both sides hold is not re-read, so a changed value of an existing key waits for the next
-    /// fill. Returns `(written, deleted)`.
+    /// Bring Surreal's `document`, `node`, `edge`, vector `chunk` and vector `claim` rows level
+    /// with pg's by key: rows pg has and Surreal lacks are written, rows Surreal has and pg lacks
+    /// are deleted. This is how rows the Python door wrote straight to pg (no mirror there) reach
+    /// Surreal on the next sync. A key both sides hold is not re-read, except in `claim_row`,
+    /// which is compared by value. Returns `(written, deleted)`.
     pub async fn catch_up(&self, store: &Store) -> Result<(usize, usize)> {
         let (pg_documents, pg_nodes, pg_edges) = pg_graph_keys(&*store.db().await?).await?;
         let mut written = 0;
@@ -2210,8 +2274,94 @@ impl SurrealClient {
         }
         // The one table whose rows change value under a key both sides hold (a seal, an unseal, a
         // stale mark written straight to pg), so it is compared by value, not by key.
+        let (vectors_written, vectors_deleted) = self.catch_up_vectors(store).await?;
         let (rows_written, rows_deleted) = self.repair_claim_rows(store).await?;
-        Ok((written + rows_written, deleted + rows_deleted))
+        Ok((
+            written + vectors_written + rows_written,
+            deleted + vectors_deleted + rows_deleted,
+        ))
+    }
+
+    /// The same key level for the vector `chunk` and `claim` tables, through the write path a
+    /// mirrored write takes (`mirror_chunks`, `mirror_claims`: project tables, claim rows and the
+    /// dirty count that schedules the HNSW swap). A key on one side only names the note (chunk) or
+    /// the `(subject, predicate)` slot (claim) to re-mirror; the mirror reads pg for that scope
+    /// and writes what it holds. Without this a seal or an insert the Python door wrote straight
+    /// to pg leaves the vector tables off by exactly those keys until the next fill. Returns
+    /// `(written, deleted)`: keys pg had and Surreal lacked, keys the other way round.
+    async fn catch_up_vectors(&self, store: &Store) -> Result<(usize, usize)> {
+        let db = store.db().await?;
+        let mut written = 0;
+        let mut deleted = 0;
+
+        let pg_chunks = pg_chunk_keys(&db).await?;
+        let have: std::collections::HashSet<String> =
+            self.table_keys("chunk").await?.into_iter().collect();
+        let want: std::collections::HashSet<&str> = pg_chunks.iter().map(String::as_str).collect();
+        let stale: Vec<String> = have
+            .iter()
+            .filter(|k| !want.contains(k.as_str()))
+            .cloned()
+            .collect();
+        let missing: Vec<String> = pg_chunks
+            .iter()
+            .filter(|k| !have.contains(*k))
+            .cloned()
+            .collect();
+        written += missing.len();
+        deleted += stale.len();
+        let mut paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for batch in missing.chunks(CATCH_UP_BATCH) {
+            let ids = batch.to_vec();
+            let rows = db
+                .query(
+                    "SELECT DISTINCT source_path FROM chunk WHERE id = ANY($1);",
+                    &[&ids],
+                )
+                .await
+                .context("read the notes of the chunks Surreal lacks from pgvector")?;
+            paths.extend(rows.iter().map(|r| r.get::<_, String>(0)));
+        }
+        for batch in stale.chunks(CATCH_UP_BATCH) {
+            let query = format!(
+                "SELECT VALUE source_path FROM chunk WHERE cid INSIDE {};",
+                texts(batch)
+            );
+            let found: Vec<String> = first_statement(&query, self.rows::<String>(&query).await?)?;
+            paths.extend(found);
+        }
+        let paths: Vec<String> = paths.into_iter().collect();
+        for batch in paths.chunks(CATCH_UP_BATCH) {
+            self.mirror_chunks(store, batch).await?;
+        }
+
+        let pg_claims = pg_claim_keys(&db).await?;
+        let have: std::collections::HashSet<String> =
+            self.table_keys("claim").await?.into_iter().collect();
+        let want: std::collections::HashSet<&str> = pg_claims.iter().map(String::as_str).collect();
+        let stale: Vec<&String> = have.iter().filter(|k| !want.contains(k.as_str())).collect();
+        let missing: Vec<&String> = pg_claims.iter().filter(|k| !have.contains(*k)).collect();
+        written += missing.len();
+        deleted += stale.len();
+        let slots: Vec<(String, String)> = missing
+            .iter()
+            .chain(stale.iter())
+            .filter_map(|k| {
+                let mut parts = k.split(KEY_SEP);
+                Some((parts.next()?.to_owned(), parts.next()?.to_owned()))
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for batch in slots.chunks(CATCH_UP_BATCH) {
+            let scope = Scope {
+                paths: Vec::new(),
+                slots: batch.to_vec(),
+                nodes: Vec::new(),
+            };
+            self.mirror_claims(store, &scope).await?;
+        }
+        Ok((written, deleted))
     }
 
     /// `Store::recent_register_rows` / `recent_claims` against the `claim_row` copy: the same
@@ -2251,26 +2401,8 @@ impl SurrealClient {
     pub async fn compare(&self, store: &Store) -> Result<Vec<FillTable>> {
         let db = store.db().await?;
         let (pg_documents, pg_nodes, pg_edges) = pg_graph_keys(&db).await?;
-        let pg_chunks: Vec<String> = db
-            .query(&format!("SELECT c.id {CHUNK_FROM};"), &[])
-            .await
-            .context("read chunk ids from pgvector")?
-            .iter()
-            .map(|r| r.get(0))
-            .collect();
-        let pg_claims: Vec<String> = db
-            .query(
-                &format!(
-                    "SELECT c.subject, c.predicate, {valid} {CLAIM_FROM};",
-                    valid = epoch_us("c.valid_from")
-                ),
-                &[],
-            )
-            .await
-            .context("read open claim keys from pgvector")?
-            .iter()
-            .map(|r| claim_key(&r.get::<_, String>(0), &r.get::<_, String>(1), r.get(2)))
-            .collect();
+        let pg_chunks = pg_chunk_keys(&db).await?;
+        let pg_claims = pg_claim_keys(&db).await?;
         let pg_claim_rows: Vec<String> = db
             .query(
                 &format!(
