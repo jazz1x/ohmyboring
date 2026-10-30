@@ -400,6 +400,8 @@ pub enum FileOutcome {
     New,
     Updated,
     Unchanged,
+    /// Content unchanged, only the stored `document.sha` moved (old whole-file sha → content hash).
+    ShaMoved,
     Skipped,
 }
 
@@ -575,8 +577,11 @@ async fn ingest_in_own_tx<C: Chunker, G: GraphExtractor, E: Embed>(
         .context("begin ingest transaction")?;
     let outcome = ingest_steps::<C, G, E>(store, &tx, llm, cfg, path, stats).await?;
     tx.commit().await.context("commit ingest transaction")?;
-    // Only a note that wrote chunk or claim rows has anything for Surreal to follow.
-    let wrote = matches!(outcome, FileOutcome::New | FileOutcome::Updated);
+    // Only a note that wrote a document, chunk or claim row has anything for Surreal to follow.
+    let wrote = matches!(
+        outcome,
+        FileOutcome::New | FileOutcome::Updated | FileOutcome::ShaMoved
+    );
     if wrote {
         store
             .mirror_surreal(&crate::store::Scope::notes([path.to_owned()]))
@@ -639,7 +644,7 @@ async fn ingest_steps<C: Chunker, G: GraphExtractor, E: Embed>(
         // Move the sha column only — no re-embed, no edge rewrite.
         Store::set_doc_sha_on(tx, path, new_sha).await?;
         stats.unchanged += 1;
-        return Ok(FileOutcome::Unchanged);
+        return Ok(FileOutcome::ShaMoved);
     }
     if verdict == ShaVerdict::Same {
         // Content identical — no `updated_at` write and no `clear_semantic_edges` (it deletes and

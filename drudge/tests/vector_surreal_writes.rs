@@ -185,12 +185,93 @@ impl Fixture {
         [(pg_chunks, chunks), (pg_claims, claims)]
     }
 
+    /// Every document as one line `path|origin|project|kind|title|sha|author`, pg then Surreal.
+    async fn document_rows(&self) -> (Vec<String>, Vec<String>) {
+        let mut pg: Vec<String> = self
+            .db
+            .query(
+                "SELECT source_path || '|' || origin || '|' || project || '|' || kind || '|' ||
+                        coalesce(title, '-') || '|' || sha || '|' || author || '|' ||
+                        array_to_string(tags, ',') FROM document",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        pg.sort();
+        let rows = self.client.run("SELECT * FROM document;").await.unwrap();
+        let rows: Vec<Vec<Value>> = serde_json::from_value(Value::Array(rows)).unwrap();
+        let mut surreal: Vec<String> = rows[0]
+            .iter()
+            .map(|v| {
+                let s = |k: &str| v[k].as_str().unwrap_or("-").to_string();
+                let tags: Vec<&str> = v["tags"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t.as_str().unwrap())
+                    .collect();
+                format!(
+                    "{}|{}|{}|{}|{}|{}|{}|{}",
+                    s("source_path"),
+                    s("origin"),
+                    s("project"),
+                    s("kind"),
+                    s("title"),
+                    s("sha"),
+                    s("author"),
+                    tags.join(",")
+                )
+            })
+            .collect();
+        surreal.sort();
+        (pg, surreal)
+    }
+
+    /// Every chunk as `id|origin|project|content`, pg then Surreal.
+    async fn chunk_text_rows(&self) -> (Vec<String>, Vec<String>) {
+        let mut pg: Vec<String> = self
+            .db
+            .query(
+                "SELECT id || '|' || origin || '|' || project || '|' || content FROM chunk",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        pg.sort();
+        let rows = self.client.run("SELECT * FROM chunk;").await.unwrap();
+        let rows: Vec<Vec<Value>> = serde_json::from_value(Value::Array(rows)).unwrap();
+        let mut surreal: Vec<String> = rows[0]
+            .iter()
+            .map(|v| {
+                format!(
+                    "{}|{}|{}|{}",
+                    v["cid"].as_str().unwrap(),
+                    v["origin"].as_str().unwrap(),
+                    v["project"].as_str().unwrap(),
+                    v["content"].as_str().unwrap()
+                )
+            })
+            .collect();
+        surreal.sort();
+        (pg, surreal)
+    }
+
     async fn assert_same(&self, step: &str, chunks: usize, claims: usize) {
         let [(pg_chunks, s_chunks), (pg_claims, s_claims)] = self.id_sets().await;
         assert_eq!(pg_chunks, s_chunks, "{step}: chunk ids differ");
         assert_eq!(pg_claims, s_claims, "{step}: open claim ids differ");
         assert_eq!(pg_chunks.len(), chunks, "{step}: chunk count {pg_chunks:?}");
         assert_eq!(pg_claims.len(), claims, "{step}: claim count {pg_claims:?}");
+        let (pg_docs, surreal_docs) = self.document_rows().await;
+        assert_eq!(pg_docs, surreal_docs, "{step}: document rows differ");
+        let (pg_text, surreal_text) = self.chunk_text_rows().await;
+        assert_eq!(pg_text, surreal_text, "{step}: chunk content/origin differ");
         let tables = self.client.compare(&self.store).await.unwrap();
         assert!(
             tables.iter().all(drudge::store::FillTable::same),
@@ -214,6 +295,10 @@ async fn upsert_supersede_and_delete_leave_the_two_stores_with_the_same_ids() {
     f.claim(&a, &slot, "fact", 48).await;
     f.claim(&a, &format!("{slot}-risk"), "risk", 48).await;
     f.assert_same("after upsert", 2, 2).await;
+
+    // the sha-only move (legacy sha -> content hash) reaches the Surreal document too
+    f.store.set_doc_sha(&a, "sha-moved").await.expect("sha");
+    f.assert_same("after set_doc_sha", 2, 2).await;
 
     // supersede by a later fact in the same slot, from another note: pg seals a's fact
     f.doc(&b).await;
@@ -285,10 +370,23 @@ async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
         .unwrap()
         .as_nanos();
     let path = format!("/vault/wiki/w-dead-{nanos}.md");
-    store
+    let err = store
         .upsert_document(&front(&path), "sha", SystemTime::now())
         .await
-        .expect("document");
+        .expect_err("a dead Surreal must be an error on the document write too");
+    assert!(
+        err.to_string().contains(BEHIND),
+        "document error must carry the 2b-2 sentence, got: {err:#}"
+    );
+    let doc_in_pg: i64 = db
+        .query_one(
+            "SELECT count(*) FROM document WHERE source_path = $1",
+            &[&path],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(doc_in_pg, 1, "the sentence says pg has the document");
 
     let err = store
         .upsert_chunk(&Doc {

@@ -237,6 +237,8 @@ fn chunk_ddl(table: &str, dim: usize) -> String {
          DEFINE FIELD source_path ON {t} TYPE string;
          DEFINE FIELD project ON {t} TYPE string;
          DEFINE FIELD doc_updated_us ON {t} TYPE int;
+         DEFINE FIELD content ON {t} TYPE string;
+         DEFINE FIELD origin ON {t} TYPE string;
          DEFINE FIELD embedding ON {t} TYPE array<float>;
          DEFINE INDEX {src_idx} ON {t} FIELDS source_path;
          DEFINE INDEX {emb_idx} ON {t} FIELDS embedding
@@ -953,7 +955,8 @@ fn first_statement<T>(query: &str, statements: Vec<Vec<T>>) -> Result<Vec<T>> {
 
 fn chunk_select(tail: &str) -> String {
     format!(
-        "SELECT c.id, c.source_path, c.project, {updated}, c.embedding {CHUNK_FROM} {tail}",
+        "SELECT c.id, c.source_path, c.project, {updated}, c.embedding, c.content, c.origin \
+         {CHUNK_FROM} {tail}",
         updated = epoch_us("d.updated_at")
     )
 }
@@ -972,11 +975,14 @@ fn chunk_literal(r: &Row) -> (String, String) {
     let cid: String = r.get(0);
     let embedding: Vector = r.get(4);
     let literal = format!(
-        "{{cid: {}, source_path: {}, project: {}, doc_updated_us: {}, embedding: {}}}",
+        "{{cid: {}, source_path: {}, project: {}, doc_updated_us: {}, content: {}, origin: {}, \
+         embedding: {}}}",
         text(&cid),
         text(&r.get::<_, String>(1)),
         text(&r.get::<_, String>(2)),
         r.get::<_, i64>(3),
+        text(&r.get::<_, String>(5)),
+        text(&r.get::<_, String>(6)),
         floats(embedding.as_slice())
     );
     (cid, literal)
@@ -1011,13 +1017,64 @@ fn claim_literal(r: &Row) -> (String, String) {
     (cid, literal)
 }
 
+fn document_select(tail: &str) -> String {
+    format!(
+        "SELECT d.source_path, d.origin, d.project, d.kind, d.title, d.tags, d.sha, \
+                d.extracted_sha, {updated}, d.author FROM document d {tail}",
+        updated = epoch_us("d.updated_at")
+    )
+}
+
+/// `(key, SurrealQL record literal)` of one `document_select` row. The key is the `source_path`;
+/// a note without a title leaves the `title` field out (it is `option<string>` on both sides).
+fn document_literal(r: &Row) -> (String, String) {
+    let path: String = r.get(0);
+    let title = r
+        .get::<_, Option<String>>(4)
+        .map_or_else(String::new, |t| format!("title: {},", text(&t)));
+    let literal = format!(
+        "{{cid: {p}, source_path: {p}, origin: {}, project: {}, kind: {}, {title} tags: {}, \
+         sha: {}, extracted_sha: {}, updated_us: {}, author: {}}}",
+        text(&r.get::<_, String>(1)),
+        text(&r.get::<_, String>(2)),
+        text(&r.get::<_, String>(3)),
+        texts(&r.get::<_, Vec<String>>(5)),
+        text(&r.get::<_, String>(6)),
+        text(&r.get::<_, String>(7)),
+        r.get::<_, i64>(8),
+        text(&r.get::<_, String>(9)),
+        p = text(&path),
+    );
+    (path, literal)
+}
+
+const DOCUMENT_DDL: &str = "DEFINE TABLE document SCHEMAFULL;
+         DEFINE FIELD cid ON document TYPE string;
+         DEFINE FIELD source_path ON document TYPE string;
+         DEFINE FIELD origin ON document TYPE string;
+         DEFINE FIELD project ON document TYPE string;
+         DEFINE FIELD kind ON document TYPE string;
+         DEFINE FIELD title ON document TYPE option<string>;
+         DEFINE FIELD tags ON document TYPE array<string>;
+         DEFINE FIELD sha ON document TYPE string;
+         DEFINE FIELD extracted_sha ON document TYPE string;
+         DEFINE FIELD updated_us ON document TYPE int;
+         DEFINE FIELD author ON document TYPE string;";
+
 fn tables(
+    pg_documents: Vec<String>,
+    surreal_documents: Vec<String>,
     pg_chunks: Vec<String>,
     pg_claims: Vec<String>,
     surreal_chunks: Vec<String>,
     surreal_claims: Vec<String>,
 ) -> Vec<FillTable> {
     vec![
+        FillTable {
+            table: "document",
+            pg: KeySet::of(pg_documents),
+            surreal: KeySet::of(surreal_documents),
+        },
         FillTable {
             table: "chunk",
             pg: KeySet::of(pg_chunks),
@@ -1283,6 +1340,33 @@ impl SurrealClient {
         self.bump_dirty(table, literals.len() + stale.len()).await
     }
 
+    /// `reconcile` for a table with no HNSW index (`document`): there is no swap to schedule, so no
+    /// dirty count is kept for it.
+    async fn reconcile_documents(&self, store: &Store, paths: &[String]) -> Result<()> {
+        let rows = store
+            .db()
+            .await?
+            .query(&document_select("WHERE d.source_path = ANY($1)"), &[&paths])
+            .await
+            .context("read the written notes' documents from pgvector")?;
+        let wanted: Vec<(String, String)> = rows.iter().map(document_literal).collect();
+        let existing_query = format!(
+            "SELECT VALUE cid FROM document WHERE source_path INSIDE {};",
+            texts(paths)
+        );
+        let existing: Vec<String> =
+            first_statement(&existing_query, self.rows::<String>(&existing_query).await?)?;
+        let keep: std::collections::HashSet<&str> =
+            wanted.iter().map(|(k, _)| k.as_str()).collect();
+        let stale: Vec<String> = existing
+            .into_iter()
+            .filter(|k| !keep.contains(k.as_str()))
+            .collect();
+        let literals: Vec<String> = wanted.into_iter().map(|(_, l)| l).collect();
+        self.upsert_rows("document", &literals).await?;
+        self.delete_rows("document", &stale).await
+    }
+
     /// Write-through: after pg committed a change, copy pg's state of everything it touched into
     /// Surreal. pg is the original, so Surreal is rebuilt from what pg holds now, never from what
     /// the request carried. Covers an upsert (new rows and changed columns), a supersede or
@@ -1292,6 +1376,7 @@ impl SurrealClient {
         if scope.is_empty() {
             Ok(())
         } else {
+            self.reconcile_documents(store, &scope.paths).await?;
             self.mirror_chunks(store, &scope.paths).await?;
             self.mirror_claims(store, scope).await
         }
@@ -1417,18 +1502,28 @@ impl SurrealClient {
         self.reconcile("claim", wanted, existing).await
     }
 
-    async fn surreal_keys(&self) -> Result<(Vec<String>, Vec<String>)> {
+    async fn surreal_keys(&self) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+        let document_query = "SELECT VALUE cid FROM document;";
+        let documents =
+            first_statement(document_query, self.rows::<String>(document_query).await?)?;
         let chunk_query = "SELECT VALUE cid FROM chunk;";
         let chunks = first_statement(chunk_query, self.rows::<String>(chunk_query).await?)?;
         let claim_query = "SELECT VALUE cid FROM claim;";
         let claims = first_statement(claim_query, self.rows::<String>(claim_query).await?)?;
-        Ok((chunks, claims))
+        Ok((documents, chunks, claims))
     }
 
     /// Read-only: row count and key-set hash per table, pg against Surreal, over what is there
     /// now (the doctor line). Same tables and key shapes as the fill's readback.
     pub async fn compare(&self, store: &Store) -> Result<Vec<FillTable>> {
         let db = store.db().await?;
+        let pg_documents: Vec<String> = db
+            .query("SELECT source_path FROM document;", &[])
+            .await
+            .context("read document keys from pgvector")?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
         let pg_chunks: Vec<String> = db
             .query(&format!("SELECT c.id {CHUNK_FROM};"), &[])
             .await
@@ -1449,8 +1544,15 @@ impl SurrealClient {
             .iter()
             .map(|r| claim_key(&r.get::<_, String>(0), &r.get::<_, String>(1), r.get(2)))
             .collect();
-        let (surreal_chunks, surreal_claims) = self.surreal_keys().await?;
-        Ok(tables(pg_chunks, pg_claims, surreal_chunks, surreal_claims))
+        let (surreal_documents, surreal_chunks, surreal_claims) = self.surreal_keys().await?;
+        Ok(tables(
+            pg_documents,
+            surreal_documents,
+            pg_chunks,
+            pg_claims,
+            surreal_chunks,
+            surreal_claims,
+        ))
     }
 
     /// Replace Surreal's chunk and open-claim tables with pgvector's, then report row count and
@@ -1492,6 +1594,8 @@ impl SurrealClient {
             "{old_projects}
              REMOVE TABLE IF EXISTS vector_meta;
              DEFINE TABLE vector_meta SCHEMALESS;
+             REMOVE TABLE IF EXISTS document;
+             {DOCUMENT_DDL}
              REMOVE TABLE IF EXISTS chunk;
              {global_ddl}
              {project_ddl}
@@ -1512,6 +1616,26 @@ impl SurrealClient {
                  HNSW DIMENSION {dim} DIST COSINE TYPE F32 EFC 64 M 16;"
         ))
         .await?;
+
+        let mut document_keys = Vec::new();
+        let mut after = String::new();
+        loop {
+            let rows = store
+                .db()
+                .await?
+                .query(
+                    &document_select("WHERE d.source_path > $1 ORDER BY d.source_path LIMIT $2;"),
+                    &[&after, &i64::try_from(FILL_BATCH)?],
+                )
+                .await
+                .context("read documents from pgvector")?;
+            let Some(last) = rows.last() else { break };
+            after = last.get(0);
+            let (keys, literals): (Vec<String>, Vec<String>) =
+                rows.iter().map(document_literal).unzip();
+            document_keys.extend(keys);
+            self.upsert_rows("document", &literals).await?;
+        }
 
         let mut chunk_keys = Vec::new();
         let mut after = String::new();
@@ -1569,8 +1693,10 @@ impl SurrealClient {
             self.upsert_rows("claim", &literals).await?;
         }
 
-        let (surreal_chunks, surreal_claims) = self.surreal_keys().await?;
+        let (surreal_documents, surreal_chunks, surreal_claims) = self.surreal_keys().await?;
         Ok(tables(
+            document_keys,
+            surreal_documents,
             chunk_keys,
             claim_keys,
             surreal_chunks,

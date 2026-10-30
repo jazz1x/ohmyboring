@@ -1342,7 +1342,8 @@ impl Store {
 
     /// Move only the stored change-detection sha (old whole-file sha → content hash); nothing else is touched.
     pub async fn set_doc_sha(&self, path: &str, sha: &str) -> Result<()> {
-        Self::set_doc_sha_on(&self.db().await?, path, sha).await
+        Self::set_doc_sha_on(&self.db().await?, path, sha).await?;
+        self.mirror_surreal(&Scope::notes([path.to_owned()])).await
     }
 
     /// `set_doc_sha` on a caller-held connection or transaction handle.
@@ -2343,7 +2344,9 @@ impl Store {
         sha: &str,
         updated_at: SystemTime,
     ) -> Result<()> {
-        Self::upsert_document_on(&self.db().await?, front, sha, updated_at).await
+        Self::upsert_document_on(&self.db().await?, front, sha, updated_at).await?;
+        self.mirror_surreal(&Scope::notes([front.source_path.clone()]))
+            .await
     }
 
     /// `upsert_document` on a caller-held connection or transaction handle.
