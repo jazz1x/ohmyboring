@@ -685,9 +685,10 @@ async fn consume_in_tx(
     };
     tx.commit().await?;
     store
-        .mirror_surreal(&crate::store::Scope::notes(
-            kept_pairs.iter().flatten().cloned(),
-        ))
+        .mirror_surreal(
+            &crate::store::Scope::notes(kept_pairs.iter().flatten().cloned())
+                .with_nodes([format!("session:{}", req.session_id)]),
+        )
         .await?;
     Ok((report, kept_pairs))
 }

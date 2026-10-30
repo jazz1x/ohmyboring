@@ -1288,6 +1288,12 @@ async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
     tx.commit()
         .await
         .map_err(|e| (-32603, format!("verdict: {e}")))?;
+    store
+        .mirror_surreal(&crate::store::Scope::graph([format!(
+            "session:{session_id}"
+        )]))
+        .await
+        .map_err(|e| (-32603, format!("verdict: {e:#}")))?;
     Ok(json!({
         "session": format!("session:{session_id}"),
         "used": report.used,

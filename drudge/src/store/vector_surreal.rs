@@ -916,6 +916,7 @@ pub const SURREAL_BEHIND: &str =
 pub struct Scope {
     paths: Vec<String>,
     slots: Vec<(String, String)>,
+    nodes: Vec<String>,
 }
 
 impl Scope {
@@ -929,7 +930,24 @@ impl Scope {
         Self {
             paths,
             slots: Vec::new(),
+            nodes: Vec::new(),
         }
+    }
+
+    /// Graph nodes written or deleted by id (`session:`, `gap:`, an orphan the GC removed), with
+    /// every edge that has one of them at an end.
+    #[must_use]
+    pub fn graph<I: IntoIterator<Item = String>>(ids: I) -> Self {
+        Self::default().with_nodes(ids)
+    }
+
+    /// Add graph node ids to a scope.
+    #[must_use]
+    pub fn with_nodes<I: IntoIterator<Item = String>>(mut self, ids: I) -> Self {
+        self.nodes.extend(ids);
+        self.nodes.sort_unstable();
+        self.nodes.dedup();
+        self
     }
 
     /// One slot, for a write that names claim rows by key and not by note.
@@ -938,11 +956,22 @@ impl Scope {
         Self {
             paths: Vec::new(),
             slots: vec![(subject.to_owned(), predicate.to_owned())],
+            nodes: Vec::new(),
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.paths.is_empty() && self.slots.is_empty()
+        self.paths.is_empty() && self.slots.is_empty() && self.nodes.is_empty()
+    }
+
+    /// The graph ids this scope names: each note's `doc:<path>` (the graph has edges to a note but
+    /// no node row for it) and the nodes named directly.
+    fn graph_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.paths.iter().map(|p| format!("doc:{p}")).collect();
+        ids.extend(self.nodes.iter().cloned());
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 }
 
@@ -1056,6 +1085,76 @@ fn document_literal(r: &Row) -> (String, String) {
     (path, literal)
 }
 
+fn node_select(tail: &str) -> String {
+    format!("SELECT n.id, n.kind, n.label, n.outcome FROM node n {tail}")
+}
+
+/// `(key, SurrealQL record literal)` of one `node_select` row. The key is the node id; a node
+/// without an `outcome` leaves the field out.
+fn node_literal(r: &Row) -> (String, String) {
+    let id: String = r.get(0);
+    let outcome = r
+        .get::<_, Option<String>>(3)
+        .map_or_else(String::new, |o| format!("outcome: {},", text(&o)));
+    let literal = format!(
+        "{{cid: {}, kind: {}, label: {}, {outcome}}}",
+        text(&id),
+        text(&r.get::<_, String>(1)),
+        text(&r.get::<_, String>(2)),
+    );
+    (id, literal)
+}
+
+fn edge_key(src: &str, dst: &str, kind: &str) -> String {
+    format!("{src}{KEY_SEP}{dst}{KEY_SEP}{kind}")
+}
+
+fn edge_select(tail: &str) -> String {
+    format!(
+        "SELECT e.src, e.dst, e.kind, e.judge, {first_seen} FROM edge e {tail}",
+        first_seen = epoch_us("e.first_seen_at")
+    )
+}
+
+/// `(key, SurrealQL record literal)` of one `edge_select` row; `judge` and `first_seen_us` are
+/// left out when pg holds NULL (rows written before those columns existed).
+fn edge_literal(r: &Row) -> (String, String) {
+    let src: String = r.get(0);
+    let dst: String = r.get(1);
+    let kind: String = r.get(2);
+    let key = edge_key(&src, &dst, &kind);
+    let judge = r
+        .get::<_, Option<String>>(3)
+        .map_or_else(String::new, |j| format!("judge: {},", text(&j)));
+    let first_seen = r
+        .get::<_, Option<i64>>(4)
+        .map_or_else(String::new, |t| format!("first_seen_us: {t},"));
+    let literal = format!(
+        "{{cid: {}, src: {}, dst: {}, kind: {}, {judge} {first_seen}}}",
+        text(&key),
+        text(&src),
+        text(&dst),
+        text(&kind),
+    );
+    (key, literal)
+}
+
+const NODE_DDL: &str = "DEFINE TABLE node SCHEMAFULL;
+         DEFINE FIELD cid ON node TYPE string;
+         DEFINE FIELD kind ON node TYPE string;
+         DEFINE FIELD label ON node TYPE string;
+         DEFINE FIELD outcome ON node TYPE option<string>;";
+
+const EDGE_DDL: &str = "DEFINE TABLE edge SCHEMAFULL;
+         DEFINE FIELD cid ON edge TYPE string;
+         DEFINE FIELD src ON edge TYPE string;
+         DEFINE FIELD dst ON edge TYPE string;
+         DEFINE FIELD kind ON edge TYPE string;
+         DEFINE FIELD judge ON edge TYPE option<string>;
+         DEFINE FIELD first_seen_us ON edge TYPE option<int>;
+         DEFINE INDEX edge_src ON edge FIELDS src;
+         DEFINE INDEX edge_dst ON edge FIELDS dst;";
+
 const DOCUMENT_DDL: &str = "DEFINE TABLE document SCHEMAFULL;
          DEFINE FIELD cid ON document TYPE string;
          DEFINE FIELD source_path ON document TYPE string;
@@ -1069,29 +1168,41 @@ const DOCUMENT_DDL: &str = "DEFINE TABLE document SCHEMAFULL;
          DEFINE FIELD updated_us ON document TYPE int;
          DEFINE FIELD author ON document TYPE string;";
 
-fn tables(
-    pg_documents: Vec<String>,
-    surreal_documents: Vec<String>,
-    pg_chunks: Vec<String>,
-    pg_claims: Vec<String>,
-    surreal_chunks: Vec<String>,
-    surreal_claims: Vec<String>,
-) -> Vec<FillTable> {
+/// The keys one side holds, per table.
+struct TableKeys {
+    documents: Vec<String>,
+    nodes: Vec<String>,
+    edges: Vec<String>,
+    chunks: Vec<String>,
+    claims: Vec<String>,
+}
+
+fn tables(pg: TableKeys, surreal: TableKeys) -> Vec<FillTable> {
     vec![
         FillTable {
             table: "document",
-            pg: KeySet::of(pg_documents),
-            surreal: KeySet::of(surreal_documents),
+            pg: KeySet::of(pg.documents),
+            surreal: KeySet::of(surreal.documents),
+        },
+        FillTable {
+            table: "node",
+            pg: KeySet::of(pg.nodes),
+            surreal: KeySet::of(surreal.nodes),
+        },
+        FillTable {
+            table: "edge",
+            pg: KeySet::of(pg.edges),
+            surreal: KeySet::of(surreal.edges),
         },
         FillTable {
             table: "chunk",
-            pg: KeySet::of(pg_chunks),
-            surreal: KeySet::of(surreal_chunks),
+            pg: KeySet::of(pg.chunks),
+            surreal: KeySet::of(surreal.chunks),
         },
         FillTable {
             table: "claim(open)",
-            pg: KeySet::of(pg_claims),
-            surreal: KeySet::of(surreal_claims),
+            pg: KeySet::of(pg.claims),
+            surreal: KeySet::of(surreal.claims),
         },
     ]
 }
@@ -1351,6 +1462,9 @@ impl SurrealClient {
     /// `reconcile` for a table with no HNSW index (`document`): there is no swap to schedule, so no
     /// dirty count is kept for it.
     async fn reconcile_documents(&self, store: &Store, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
         let rows = store
             .db()
             .await?
@@ -1375,6 +1489,81 @@ impl SurrealClient {
         self.delete_rows("document", &stale).await
     }
 
+    /// The graph around `ids`: every edge with one of them at an end, and the nodes at the ends of
+    /// those edges. A claim node found at an end brings its own edges too (`is_a`,
+    /// `claim_of_project`, `said`), since a claim write puts them beside the `claims` edge.
+    /// Surreal's copy of that neighbourhood is made equal to pg's: nodes and edges pg holds are
+    /// upserted first, then the edges and nodes pg lacks leave, so a failure half way leaves
+    /// Surreal with more rows, never fewer.
+    async fn reconcile_graph(&self, store: &Store, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let db = store.db().await?;
+        let by_ends = edge_select("WHERE e.src = ANY($1) OR e.dst = ANY($1)");
+        let mut edges = db
+            .query(&by_ends, &[&ids])
+            .await
+            .context("read the written graph's edges from pgvector")?;
+        let claim_ends: Vec<String> = edges
+            .iter()
+            .flat_map(|r| [r.get::<_, String>(0), r.get::<_, String>(1)])
+            .filter(|id| id.starts_with("claim:") && !ids.contains(id))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if !claim_ends.is_empty() {
+            let more = db
+                .query(&by_ends, &[&claim_ends])
+                .await
+                .context("read the written claims' edges from pgvector")?;
+            edges.extend(more);
+        }
+        let scope: Vec<String> = ids.iter().chain(claim_ends.iter()).cloned().collect();
+        let wanted_edges: std::collections::BTreeMap<String, String> =
+            edges.iter().map(edge_literal).collect();
+        let ends: Vec<String> = edges
+            .iter()
+            .flat_map(|r| [r.get::<_, String>(0), r.get::<_, String>(1)])
+            .chain(scope.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let node_rows = db
+            .query(&node_select("WHERE n.id = ANY($1)"), &[&ends])
+            .await
+            .context("read the written graph's nodes from pgvector")?;
+        let wanted_nodes: Vec<(String, String)> = node_rows.iter().map(node_literal).collect();
+
+        let edge_query = format!(
+            "SELECT VALUE cid FROM edge WHERE src INSIDE {s} OR dst INSIDE {s};",
+            s = texts(&scope)
+        );
+        let existing_edges = first_statement(&edge_query, self.rows::<String>(&edge_query).await?)?;
+        let node_query = format!(
+            "SELECT VALUE cid FROM node WHERE cid INSIDE {};",
+            texts(&scope)
+        );
+        let existing_nodes = first_statement(&node_query, self.rows::<String>(&node_query).await?)?;
+
+        let node_keep: std::collections::HashSet<&str> =
+            wanted_nodes.iter().map(|(k, _)| k.as_str()).collect();
+        let stale_nodes: Vec<String> = existing_nodes
+            .into_iter()
+            .filter(|k| !node_keep.contains(k.as_str()))
+            .collect();
+        let stale_edges: Vec<String> = existing_edges
+            .into_iter()
+            .filter(|k| !wanted_edges.contains_key(k))
+            .collect();
+        let node_literals: Vec<String> = wanted_nodes.into_iter().map(|(_, l)| l).collect();
+        let edge_literals: Vec<String> = wanted_edges.into_values().collect();
+        self.upsert_rows("node", &node_literals).await?;
+        self.upsert_rows("edge", &edge_literals).await?;
+        self.delete_rows("edge", &stale_edges).await?;
+        self.delete_rows("node", &stale_nodes).await
+    }
+
     /// Write-through: after pg committed a change, copy pg's state of everything it touched into
     /// Surreal. pg is the original, so Surreal is rebuilt from what pg holds now, never from what
     /// the request carried. Covers an upsert (new rows and changed columns), a supersede or
@@ -1385,6 +1574,7 @@ impl SurrealClient {
             Ok(())
         } else {
             self.reconcile_documents(store, &scope.paths).await?;
+            self.reconcile_graph(store, &scope.graph_ids()).await?;
             self.mirror_chunks(store, &scope.paths).await?;
             self.mirror_claims(store, scope).await
         }
@@ -1510,15 +1700,25 @@ impl SurrealClient {
         self.reconcile("claim", wanted, existing).await
     }
 
-    async fn surreal_keys(&self) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+    async fn surreal_keys(&self) -> Result<TableKeys> {
         let document_query = "SELECT VALUE cid FROM document;";
         let documents =
             first_statement(document_query, self.rows::<String>(document_query).await?)?;
+        let node_query = "SELECT VALUE cid FROM node;";
+        let nodes = first_statement(node_query, self.rows::<String>(node_query).await?)?;
+        let edge_query = "SELECT VALUE cid FROM edge;";
+        let edges = first_statement(edge_query, self.rows::<String>(edge_query).await?)?;
         let chunk_query = "SELECT VALUE cid FROM chunk;";
         let chunks = first_statement(chunk_query, self.rows::<String>(chunk_query).await?)?;
         let claim_query = "SELECT VALUE cid FROM claim;";
         let claims = first_statement(claim_query, self.rows::<String>(claim_query).await?)?;
-        Ok((documents, chunks, claims))
+        Ok(TableKeys {
+            documents,
+            nodes,
+            edges,
+            chunks,
+            claims,
+        })
     }
 
     /// Read-only: row count and key-set hash per table, pg against Surreal, over what is there
@@ -1531,6 +1731,26 @@ impl SurrealClient {
             .context("read document keys from pgvector")?
             .iter()
             .map(|r| r.get(0))
+            .collect();
+        let pg_nodes: Vec<String> = db
+            .query("SELECT id FROM node;", &[])
+            .await
+            .context("read node ids from pgvector")?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let pg_edges: Vec<String> = db
+            .query("SELECT src, dst, kind FROM edge;", &[])
+            .await
+            .context("read edge keys from pgvector")?
+            .iter()
+            .map(|r| {
+                edge_key(
+                    &r.get::<_, String>(0),
+                    &r.get::<_, String>(1),
+                    &r.get::<_, String>(2),
+                )
+            })
             .collect();
         let pg_chunks: Vec<String> = db
             .query(&format!("SELECT c.id {CHUNK_FROM};"), &[])
@@ -1552,14 +1772,15 @@ impl SurrealClient {
             .iter()
             .map(|r| claim_key(&r.get::<_, String>(0), &r.get::<_, String>(1), r.get(2)))
             .collect();
-        let (surreal_documents, surreal_chunks, surreal_claims) = self.surreal_keys().await?;
         Ok(tables(
-            pg_documents,
-            surreal_documents,
-            pg_chunks,
-            pg_claims,
-            surreal_chunks,
-            surreal_claims,
+            TableKeys {
+                documents: pg_documents,
+                nodes: pg_nodes,
+                edges: pg_edges,
+                chunks: pg_chunks,
+                claims: pg_claims,
+            },
+            self.surreal_keys().await?,
         ))
     }
 
@@ -1604,6 +1825,10 @@ impl SurrealClient {
              DEFINE TABLE vector_meta SCHEMALESS;
              REMOVE TABLE IF EXISTS document;
              {DOCUMENT_DDL}
+             REMOVE TABLE IF EXISTS node;
+             {NODE_DDL}
+             REMOVE TABLE IF EXISTS edge;
+             {EDGE_DDL}
              REMOVE TABLE IF EXISTS chunk;
              {global_ddl}
              {project_ddl}
@@ -1643,6 +1868,49 @@ impl SurrealClient {
                 rows.iter().map(document_literal).unzip();
             document_keys.extend(keys);
             self.upsert_rows("document", &literals).await?;
+        }
+
+        let mut node_keys = Vec::new();
+        let mut after = String::new();
+        loop {
+            let rows = store
+                .db()
+                .await?
+                .query(
+                    &node_select("WHERE n.id > $1 ORDER BY n.id LIMIT $2;"),
+                    &[&after, &i64::try_from(FILL_BATCH)?],
+                )
+                .await
+                .context("read nodes from pgvector")?;
+            let Some(last) = rows.last() else { break };
+            after = last.get(0);
+            let (keys, literals): (Vec<String>, Vec<String>) =
+                rows.iter().map(node_literal).unzip();
+            node_keys.extend(keys);
+            self.upsert_rows("node", &literals).await?;
+        }
+
+        let mut edge_keys = Vec::new();
+        let mut after = (String::new(), String::new(), String::new());
+        loop {
+            let rows = store
+                .db()
+                .await?
+                .query(
+                    &edge_select(
+                        "WHERE (e.src, e.dst, e.kind) > ($1, $2, $3) \
+                         ORDER BY e.src, e.dst, e.kind LIMIT $4;",
+                    ),
+                    &[&after.0, &after.1, &after.2, &i64::try_from(FILL_BATCH)?],
+                )
+                .await
+                .context("read edges from pgvector")?;
+            let Some(last) = rows.last() else { break };
+            after = (last.get(0), last.get(1), last.get(2));
+            let (keys, literals): (Vec<String>, Vec<String>) =
+                rows.iter().map(edge_literal).unzip();
+            edge_keys.extend(keys);
+            self.upsert_rows("edge", &literals).await?;
         }
 
         let mut chunk_keys = Vec::new();
@@ -1701,14 +1969,15 @@ impl SurrealClient {
             self.upsert_rows("claim", &literals).await?;
         }
 
-        let (surreal_documents, surreal_chunks, surreal_claims) = self.surreal_keys().await?;
         Ok(tables(
-            document_keys,
-            surreal_documents,
-            chunk_keys,
-            claim_keys,
-            surreal_chunks,
-            surreal_claims,
+            TableKeys {
+                documents: document_keys,
+                nodes: node_keys,
+                edges: edge_keys,
+                chunks: chunk_keys,
+                claims: claim_keys,
+            },
+            self.surreal_keys().await?,
         ))
     }
 }

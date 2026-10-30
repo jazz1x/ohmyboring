@@ -1930,8 +1930,12 @@ impl Store {
         predicate: &str,
         claim: &crate::frontmatter::Claim,
     ) -> Result<usize> {
-        Self::upsert_claim_node_on(&self.db().await?, path, project, subject, predicate, claim)
-            .await
+        let written =
+            Self::upsert_claim_node_on(&self.db().await?, path, project, subject, predicate, claim)
+                .await?;
+        self.mirror_surreal(&Scope::notes([path.to_owned()]))
+            .await?;
+        Ok(written)
     }
 
     /// `upsert_claim_node` on a caller-held connection or transaction handle.
@@ -3704,6 +3708,8 @@ impl Store {
             .context("begin handover transaction")?;
         let report = Self::record_handover(&tx, session_id, observed_at, paths).await?;
         tx.commit().await.context("commit handover transaction")?;
+        self.mirror_surreal(&Scope::graph([format!("session:{session_id}")]))
+            .await?;
         Ok(report)
     }
 
@@ -3738,6 +3744,8 @@ impl Store {
             Self::upsert_edge_on(&tx, &gap, &doc_node_id(path), "gap_handed", None).await?;
         }
         tx.commit().await.context("commit gap transaction")?;
+        self.mirror_surreal(&Scope::graph([gap.clone(), session_node]))
+            .await?;
         Ok(crate::gap::GapReport {
             gap,
             kind: args.kind.as_str(),
@@ -4080,13 +4088,17 @@ impl Store {
     // ── semantic nodes ──────────────────────────────────────────────────────────
 
     pub async fn upsert_tool(&self, slug: &str, text: &str) -> Result<()> {
-        Self::upsert_tool_on(&self.db().await?, slug, text).await
+        Self::upsert_tool_on(&self.db().await?, slug, text).await?;
+        self.mirror_surreal(&Scope::graph([format!("tool:{slug}")]))
+            .await
     }
     pub async fn upsert_tool_on(c: &impl GenericClient, slug: &str, text: &str) -> Result<()> {
         Self::upsert_node_on(c, &format!("tool:{slug}"), "tool", text, None).await
     }
     pub async fn upsert_concept(&self, slug: &str, text: &str) -> Result<()> {
-        Self::upsert_concept_on(&self.db().await?, slug, text).await
+        Self::upsert_concept_on(&self.db().await?, slug, text).await?;
+        self.mirror_surreal(&Scope::graph([format!("concept:{slug}")]))
+            .await
     }
     pub async fn upsert_concept_on(c: &impl GenericClient, slug: &str, text: &str) -> Result<()> {
         Self::upsert_node_on(c, &format!("concept:{slug}"), "concept", text, None).await
@@ -4094,7 +4106,9 @@ impl Store {
 
     /// Remove this document's semantic edges (uses/about) — makes the deterministic graph rebuild idempotent.
     pub async fn clear_semantic_edges(&self, doc_path: &str) -> Result<()> {
-        Self::clear_semantic_edges_on(&self.db().await?, doc_path).await
+        Self::clear_semantic_edges_on(&self.db().await?, doc_path).await?;
+        self.mirror_surreal(&Scope::notes([doc_path.to_owned()]))
+            .await
     }
     pub async fn clear_semantic_edges_on(c: &impl GenericClient, doc_path: &str) -> Result<()> {
         let doc_id = doc_node_id(doc_path);
@@ -4110,7 +4124,9 @@ impl Store {
     // ── semantic edges (doc → entity) ───────────────────────────────────────────
 
     pub async fn relate_doc_tool(&self, doc_path: &str, slug: &str) -> Result<()> {
-        Self::relate_doc_tool_on(&self.db().await?, doc_path, slug).await
+        Self::relate_doc_tool_on(&self.db().await?, doc_path, slug).await?;
+        self.mirror_surreal(&Scope::notes([doc_path.to_owned()]))
+            .await
     }
     pub async fn relate_doc_tool_on(
         c: &impl GenericClient,
@@ -4127,7 +4143,9 @@ impl Store {
         .await
     }
     pub async fn relate_doc_concept(&self, doc_path: &str, slug: &str) -> Result<()> {
-        Self::relate_doc_concept_on(&self.db().await?, doc_path, slug).await
+        Self::relate_doc_concept_on(&self.db().await?, doc_path, slug).await?;
+        self.mirror_surreal(&Scope::notes([doc_path.to_owned()]))
+            .await
     }
     pub async fn relate_doc_concept_on(
         c: &impl GenericClient,
@@ -4153,7 +4171,9 @@ impl Store {
         subject: &str,
         predicate: &str,
     ) -> Result<()> {
-        Self::relate_said_on(&self.db().await?, said_by, doc_path, subject, predicate).await
+        Self::relate_said_on(&self.db().await?, said_by, doc_path, subject, predicate).await?;
+        self.mirror_surreal(&Scope::notes([doc_path.to_owned()]))
+            .await
     }
     /// The `person:` node a `said_by` names, upserted; returns its id.
     pub async fn upsert_speaker_on(
@@ -4420,17 +4440,23 @@ impl Store {
     /// Remove orphan semantic nodes — entity nodes not referenced by any edge.
     pub async fn gc_orphans(&self) -> Result<GcStats> {
         let mut gc = GcStats::default();
+        let mut gone: Vec<String> = Vec::new();
         for kind in ["tool", "concept"] {
-            let n = self
+            let removed: Vec<String> = self
                 .db()
                 .await?
-                .execute(
+                .query(
                     "DELETE FROM node WHERE kind = $1
-                       AND id NOT IN (SELECT src FROM edge UNION SELECT dst FROM edge);",
+                       AND id NOT IN (SELECT src FROM edge UNION SELECT dst FROM edge)
+                     RETURNING id;",
                     &[&kind],
                 )
-                .await?;
-            let c = usize::try_from(n).unwrap_or(0);
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            let c = removed.len();
+            gone.extend(removed);
             match kind {
                 "tool" => gc.tool = c,
                 _ => gc.concept = c,
@@ -4457,7 +4483,9 @@ impl Store {
             db.execute("DELETE FROM node WHERE id = ANY($1);", &[&doomed])
                 .await?;
             gc.claim_edges = usize::try_from(edges).unwrap_or(0);
+            gone.extend(doomed);
         }
+        self.mirror_surreal(&Scope::graph(gone)).await?;
         Ok(gc)
     }
 }

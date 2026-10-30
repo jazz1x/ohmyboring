@@ -350,6 +350,170 @@ async fn sync_of_a_note_file_writes_surreal_too() {
     f.assert_same("after sync of one note", 1, 1).await;
 }
 
+impl Fixture {
+    /// Every node as `id|kind|label|outcome` and every edge as `src|dst|kind|judge`, pg then
+    /// Surreal, sorted.
+    async fn graph_rows(&self) -> [(Vec<String>, Vec<String>); 2] {
+        let pg = |sql: &'static str| async move {
+            let mut rows: Vec<String> = self
+                .db
+                .query(sql, &[])
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.get(0))
+                .collect();
+            rows.sort();
+            rows
+        };
+        let surreal = |sql: &'static str, cols: &'static [&'static str]| async move {
+            let rows = self.client.run(sql).await.unwrap();
+            let rows: Vec<Vec<Value>> = serde_json::from_value(Value::Array(rows)).unwrap();
+            let mut out: Vec<String> = rows[0]
+                .iter()
+                .map(|v| {
+                    cols.iter()
+                        .map(|c| v[*c].as_str().unwrap_or("-").to_string())
+                        .collect::<Vec<_>>()
+                        .join("|")
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        [
+            (
+                pg("SELECT id || '|' || kind || '|' || label || '|' || coalesce(outcome, '-') FROM node")
+                    .await,
+                surreal("SELECT * FROM node;", &["cid", "kind", "label", "outcome"]).await,
+            ),
+            (
+                pg("SELECT src || '|' || dst || '|' || kind || '|' || coalesce(judge, '-') FROM edge")
+                    .await,
+                surreal("SELECT * FROM edge;", &["src", "dst", "kind", "judge"]).await,
+            ),
+        ]
+    }
+
+    async fn assert_graph_same(&self, step: &str, nodes: usize, edges: usize) {
+        let [(pg_nodes, s_nodes), (pg_edges, s_edges)] = self.graph_rows().await;
+        assert_eq!(pg_nodes, s_nodes, "{step}: node rows differ");
+        assert_eq!(pg_edges, s_edges, "{step}: edge rows differ");
+        assert_eq!(pg_nodes.len(), nodes, "{step}: node count {pg_nodes:?}");
+        assert_eq!(pg_edges.len(), edges, "{step}: edge count {pg_edges:?}");
+        let tables = self.client.compare(&self.store).await.unwrap();
+        assert!(
+            tables.iter().all(drudge::store::FillTable::same),
+            "{step}: compare says different: {tables:?}"
+        );
+    }
+}
+
+/// C-SURALL2 A2: node and edge follow every pg write that changes them, by value.
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn node_and_edge_writes_leave_the_two_stores_with_the_same_rows() {
+    let f = fixture("w_graph").await;
+    f.db.batch_execute("DELETE FROM edge; DELETE FROM node;")
+        .await
+        .unwrap();
+    f.client
+        .fill_from(&f.store)
+        .await
+        .expect("fill of an empty graph");
+    let a = format!("/vault/wiki/g-{}-a.md", f.nanos);
+    let b = format!("/vault/wiki/g-{}-b.md", f.nanos);
+
+    // document: project node + in_project edge, topic nodes + tagged edges
+    let mut fm = front(&a);
+    fm.tags = vec!["t1".to_string(), "t2".to_string()];
+    f.store
+        .upsert_document(&fm, "sha", SystemTime::now())
+        .await
+        .expect("document with tags");
+    f.assert_graph_same("after a tagged document", 3, 3).await;
+
+    // a re-written document with one tag fewer: the dropped tagged edge leaves Surreal too
+    fm.tags = vec!["t1".to_string()];
+    f.store
+        .upsert_document(&fm, "sha2", SystemTime::now())
+        .await
+        .expect("document with fewer tags");
+    f.assert_graph_same("after a tag was dropped", 3, 2).await;
+
+    // semantic entities
+    f.store.upsert_tool("tl", "Tool").await.unwrap();
+    f.store.upsert_concept("cn", "Concept").await.unwrap();
+    f.store.relate_doc_tool(&a, "tl").await.unwrap();
+    f.store.relate_doc_concept(&a, "cn").await.unwrap();
+    f.assert_graph_same("after uses/about", 5, 4).await;
+    f.store.clear_semantic_edges(&a).await.unwrap();
+    f.assert_graph_same("after clear_semantic_edges", 5, 2)
+        .await;
+
+    // a non-fact claim: claim node + typed node + is_a + claims + claim_of_project + said edges
+    f.claim(&a, &format!("g-{}", f.nanos), "decision", 1).await;
+    f.store
+        .upsert_claim_node(
+            &a,
+            "writes",
+            &format!("g-{}", f.nanos),
+            "observed",
+            &drudge::frontmatter::Claim {
+                subject: format!("g-{}", f.nanos),
+                predicate: "observed".to_string(),
+                value: "a long enough value".to_string(),
+                kind: "decision".to_string(),
+                confidence: "high".to_string(),
+                said_by: Some(drudge::frontmatter::SaidBy::Owner),
+            },
+        )
+        .await
+        .expect("claim node");
+    f.assert_graph_same("after a decision claim", 8, 8).await;
+
+    // consumption doors: session, gap, supersedes edge with a judge
+    f.doc(&b).await;
+    f.store
+        .handover_in_tx(
+            &format!("s-{}", f.nanos),
+            "2026-10-30",
+            std::slice::from_ref(&a),
+        )
+        .await
+        .expect("handover");
+    f.store
+        .record_gap_in_tx(
+            &drudge::gap::GapArgs {
+                session_id: format!("s-{}", f.nanos),
+                query: "what".to_string(),
+                kind: drudge::gap::Kind::Missing,
+                handed: vec![a.clone()],
+            },
+            "2026-10-30",
+        )
+        .await
+        .expect("gap");
+    f.store
+        .supersedes_in_tx(&[[b.clone(), a.clone()]], Some("owner"))
+        .await
+        .expect("supersedes");
+    let [(_, s_nodes), (_, s_edges)] = f.graph_rows().await;
+    assert!(
+        s_edges.iter().any(|e| e.ends_with("|supersedes|owner")),
+        "judge must reach Surreal: {s_edges:?}"
+    );
+    assert!(s_nodes.iter().any(|n| n.starts_with("gap:")), "{s_nodes:?}");
+
+    // delete + GC: the note's edges leave, then the orphans nobody points at leave
+    f.store.delete_document(&a).await.expect("delete a");
+    f.store.delete_document(&b).await.expect("delete b");
+    f.store.gc_orphans().await.expect("gc");
+    let [(pg_nodes, s_nodes), (pg_edges, s_edges)] = f.graph_rows().await;
+    assert_eq!(pg_nodes, s_nodes, "after gc: node rows differ");
+    assert_eq!(pg_edges, s_edges, "after gc: edge rows differ");
+}
+
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
 async fn a_legacy_sha_move_reaches_the_surreal_document() {
@@ -439,6 +603,25 @@ async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
         .unwrap()
         .get(0);
     assert_eq!(doc_in_pg, 1, "the sentence says pg has the document");
+
+    let session = format!("s-dead-{nanos}");
+    let err = store
+        .handover_in_tx(&session, "2026-10-30", std::slice::from_ref(&path))
+        .await
+        .expect_err("a graph-only write must not swallow a dead Surreal either");
+    assert!(
+        err.to_string().contains(BEHIND),
+        "graph error must carry the sentence, got: {err:#}"
+    );
+    let node_in_pg: i64 = db
+        .query_one(
+            "SELECT count(*) FROM node WHERE id = $1",
+            &[&format!("session:{session}")],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(node_in_pg, 1, "the sentence says pg has the session node");
 
     let err = store
         .upsert_chunk(&Doc {
