@@ -28,10 +28,12 @@ use tokio_postgres::{Client, Config as PgConfig, NoTls};
 
 use crate::frontmatter::{Claim, FrontMatter};
 
+mod log_copy_surreal;
 mod vector_pg;
 mod vector_route;
 mod vector_surreal;
 
+pub use log_copy_surreal::{LogCheck, LogCopy};
 pub use vector_route::VectorRoute;
 pub use vector_surreal::{
     FillTable, KeySet, ProjectTable, ProjectTableError, SURREAL_BEHIND, Scope, SurrealClient, Swap,

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::CompactFailure;
 use crate::ask;
@@ -133,8 +133,27 @@ pub(crate) async fn do_sync(
         Err(e) => eprintln!("[scheduler] anchor staleness warning (ignored): {e:#}"),
     }
 
-    // Last stage: swap in a rebuilt HNSW index when this or an earlier write changed rows (no-op
-    // on pgvector). A failed swap fails the sync — visibly, with the old index still answering.
+    surreal_last_stage(store).await?;
+
+    Ok(SyncOutcome {
+        ingest,
+        total_chunks,
+        total_edges,
+    })
+}
+
+/// Last stage, no-ops on pgvector: swap in a rebuilt HNSW index when this or an earlier write
+/// changed rows (a failed swap fails the sync, the old index still answering), and the log
+/// tables' copy pass. The copy runs before the swap's `?` so a swap error cannot starve it; its
+/// own error is raised after the swap's, and the next sync converges either way.
+async fn surreal_last_stage(store: &Store) -> Result<()> {
+    let log_copy = store
+        .copy_logs_surreal()
+        .await
+        .context("surreal 로그 4표 사본 패스 실패 — pg 는 그대로, 다음 패스가 이어 맞춤");
+    for copied in log_copy.iter().flatten() {
+        eprintln!("[scheduler] log-copy: {}", copied.line());
+    }
     let swaps = store.swap_surreal_if_changed().await?;
     for swap in swaps
         .iter()
@@ -146,12 +165,7 @@ pub(crate) async fn do_sync(
         !swaps.iter().any(crate::store::Swap::failed),
         "vector-swap 실패 — 옛 인덱스는 그대로 (drudge vector-swap 으로 다시 확인)"
     );
-
-    Ok(SyncOutcome {
-        ingest,
-        total_chunks,
-        total_edges,
-    })
+    log_copy.map(|_| ())
 }
 
 /// One compact cycle. Vector-off is a no-op.

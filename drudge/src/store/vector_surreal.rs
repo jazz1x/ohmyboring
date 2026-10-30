@@ -296,6 +296,14 @@ struct RpcError {
 }
 
 impl SurrealClient {
+    pub(super) fn namespace(&self) -> &str {
+        self.settings.namespace.as_str()
+    }
+
+    pub(super) fn database(&self) -> &str {
+        self.settings.database.as_str()
+    }
+
     /// Query-time HNSW candidate list size, from `vector.surreal.ef`.
     fn ef(&self) -> usize {
         self.settings.ef.get()
@@ -419,7 +427,7 @@ impl SurrealClient {
         }
     }
 
-    async fn rows<T: DeserializeOwned>(&self, sql: &str) -> Result<Vec<Vec<T>>> {
+    pub(super) async fn rows<T: DeserializeOwned>(&self, sql: &str) -> Result<Vec<Vec<T>>> {
         self.run(sql)
             .await?
             .into_iter()
@@ -444,7 +452,7 @@ fn text(s: &str) -> String {
     out
 }
 
-fn texts(items: &[String]) -> String {
+pub(super) fn texts(items: &[String]) -> String {
     let inner: Vec<String> = items.iter().map(|s| text(s)).collect();
     format!("[{}]", inner.join(","))
 }
@@ -946,7 +954,7 @@ struct Slot {
 
 /// Surreal answers one statement per statement sent; none at all is a broken reply, and reading it
 /// as "no rows" would make `mirror` skip the deletes of stale keys.
-fn first_statement<T>(query: &str, statements: Vec<Vec<T>>) -> Result<Vec<T>> {
+pub(super) fn first_statement<T>(query: &str, statements: Vec<Vec<T>>) -> Result<Vec<T>> {
     statements
         .into_iter()
         .next()
@@ -1308,7 +1316,7 @@ impl SurrealClient {
         Ok(())
     }
 
-    async fn delete_rows(&self, table: &str, keys: &[String]) -> Result<()> {
+    pub(super) async fn delete_rows(&self, table: &str, keys: &[String]) -> Result<()> {
         for batch in keys.chunks(FILL_BATCH) {
             self.run(&format!(
                 "FOR $k IN {} {{ DELETE type::record('{table}', $k); }};",

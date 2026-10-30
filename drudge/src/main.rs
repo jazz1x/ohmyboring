@@ -70,6 +70,11 @@ enum Cmd {
     /// Read-only (the doctor line): on backend=surreal, compare pgvector and SurrealDB per table
     /// by row count and key-set hash and fail when they differ; on pgvector say it does not apply
     VectorCheck,
+    /// On backend=surreal: one copy pass of the four log tables (event_log, query_log,
+    /// recall_label, sync_state) from pg into SurrealDB, then every pg row against Surreal's row
+    /// value by value; fails when they differ. The sync loop runs the same pass. On pgvector it
+    /// does not apply
+    LogCopy,
     /// On backend=surreal: swap-in rebuild of every HNSW index whose rows changed since the last
     /// swap (define a new-named index, confirm it built, remove the old one); fails when any table
     /// failed, the old index staying. On pgvector it does not apply
@@ -421,6 +426,29 @@ async fn main() -> Result<()> {
             }
             config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => {
                 println!("backend=pgvector — 해당 없음 (대조는 backend=surreal 일 때만)");
+            }
+        },
+        Cmd::LogCopy => match cfg.vector.effective().backend {
+            config::VectorBackend::Surreal => {
+                let store = store.as_ref().context(VEC_OFF)?;
+                let settings = cfg.vector.surreal.settings(&config::env_set)?;
+                let client = store::SurrealClient::new(settings)?;
+                let started = std::time::Instant::now();
+                for copied in client.copy_logs(store).await? {
+                    println!("{}", copied.line());
+                }
+                println!("pass {} ms", started.elapsed().as_millis());
+                let checks = client.check_logs(store).await?;
+                for check in &checks {
+                    println!("{}", check.line());
+                }
+                anyhow::ensure!(
+                    checks.iter().all(store::LogCheck::same),
+                    "log-copy: pg 와 surreal 의 행 수 또는 값이 다름"
+                );
+            }
+            config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => {
+                println!("backend=pgvector — 해당 없음 (사본은 backend=surreal 일 때만)");
             }
         },
         Cmd::VectorSwap => match cfg.vector.effective().backend {

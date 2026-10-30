@@ -5,6 +5,7 @@
 
 use anyhow::{Result, anyhow};
 
+use super::LogCopy;
 use super::vector_pg::Pg;
 use super::vector_surreal::{SURREAL_BEHIND, Scope, SurrealClient, SurrealView, Swap};
 use super::{AnchoredClaim, Hit, Recurrence, Store};
@@ -38,6 +39,20 @@ impl Store {
                 .mirror(self, scope)
                 .await
                 .map_err(|e| anyhow!("{SURREAL_BEHIND} (surreal: {e:#})")),
+        }
+    }
+}
+
+impl Store {
+    /// On `backend=surreal`: one copy pass of the four log tables (see `log_copy_surreal`); on
+    /// pgvector there is nothing to copy.
+    ///
+    /// # Errors
+    /// A pg read or a Surreal request failed; the next pass converges.
+    pub async fn copy_logs_surreal(&self) -> Result<Vec<LogCopy>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => Ok(Vec::new()),
+            VectorRoute::Surreal(client) => client.copy_logs(self).await,
         }
     }
 }
